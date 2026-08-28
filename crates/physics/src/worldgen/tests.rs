@@ -5967,3 +5967,58 @@ fn nearest_sibling_gap_m(regions: &[RealmRegion], r: &RealmRegion, parent: Realm
         })
         .fold(f64::INFINITY, f64::min)
 }
+
+/// ★ MEASURING S12's REVERSIBILITY GATE AGAINST THE GENERATOR THAT ACTUALLY EXISTS (2026-08-28).
+///
+/// The plan says this gate is *"red today by construction"* and that changing the count moves every
+/// star. That describes an OLDER generator. **Measured against the one in the tree: it is GREEN.**
+///
+/// The reason is the stream keying. Each system draws from its OWN lineage —
+/// `[UNIVERSE_SEED, GALAXY_SEED, its own seed]` — so its position is `f(universe_seed, itself)` and a
+/// neighbour appearing cannot reach it.
+///
+/// Owner ruling G4: where the seed puts a star, the star stays.
+///
+/// ⚠ **WHAT THIS DOES NOT PROVE, AND MUST NOT BE READ AS.** It proves STABILITY (G4) and nothing else.
+/// The placement is still a SHELL: every system shares one radius, and both angles are drawn UNIFORM
+/// ON THE SPHERE. A uniform sphere is a ball, not a galaxy — as many stars "above" the disc as in it,
+/// and no arms, by construction. G2 and G9 (a believable shape, drawn from the seed) are entirely
+/// absent, and this test would stay green through every one of those defects.
+#[test]
+fn growing_the_system_count_does_not_move_the_systems_already_placed() {
+    let mut small = UniverseConfig::visual_scale();
+    small.galaxy.system_count_lo = 3;
+    small.galaxy.system_count_hi = 3;
+    let mut bigger = small;
+    bigger.galaxy.system_count_lo = 4;
+    bigger.galaxy.system_count_hi = 4;
+
+    for seed in 0..16_u64 {
+        let a = generate_system_forest(seed, &small);
+        let b = generate_system_forest(seed, &bigger);
+        assert!(a.len() < b.len(), "the bigger world really is bigger");
+
+        // Every body the SMALL world produced must appear in the BIGGER one, unmoved and unchanged.
+        // Compared by the realm it names, so a re-ordering cannot pass as a match.
+        for body in &a {
+            let same = b.iter().find(|c| c.realm == body.realm).unwrap_or_else(|| {
+                panic!("seed {seed}: {:?} vanished when the world grew", body.realm)
+            });
+            assert_eq!(
+                same.placement, body.placement,
+                "seed {seed}: {:?} MOVED when the count went from 3 to 4",
+                body.realm
+            );
+            assert_eq!(
+                same.shape, body.shape,
+                "seed {seed}: {:?} changed shape when the world grew",
+                body.realm
+            );
+            assert_eq!(
+                same.photometrics, body.photometrics,
+                "seed {seed}: {:?}'s own star changed when the world grew",
+                body.realm
+            );
+        }
+    }
+}

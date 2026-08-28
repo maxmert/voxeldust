@@ -972,6 +972,38 @@ catalogue per gateway at a thousand sessions) are taken in S12 and S14, where th
 **Serves:** owner Q8 condition 1; Q9 rulings 1, 3 and 4; Q3 condition 1; Q7 consequence 1 (lazy generation
 kept).
 
+### ⚠ THIS SECTION WAS WRITTEN AGAINST AN OLDER GENERATOR — RE-MEASURED 2026-08-28
+
+Four of its claims are stale. Measured against the code in the tree:
+
+| The section says | Measured 2026-08-28 |
+|---|---|
+| placement is `f(index)` | the DIRECTION is `f(seed, system)`, drawn per system |
+| the collinear ring must go | already deleted (owner ruling Q-B, 2026-08-18) |
+| the radius follows the count | `real_placement_r_m()` never reads the count |
+| the count is a stated target | the DRAW is seeded (`galaxy_system_count`); its bounds are pinned EQUAL |
+| the reversibility gate is "red by construction" | **GREEN** — `growing_the_system_count_does_not_move_the_systems_already_placed`, 16 seeds, nothing moves |
+
+Reversibility holds because each system streams from its OWN lineage, so its position is
+`f(universe_seed, itself)` and a neighbour appearing cannot reach it.
+
+★ **BUT THE PLACEMENT IS STILL WRONG, AND MORE WRONG THAN "ONE SHARED RADIUS".** Both angles are drawn
+UNIFORM ON THE SPHERE, and a uniform sphere is a BALL, not a galaxy: as many stars above the disc as in
+it, and no arms, by construction. So all THREE coordinates must come from the shape —
+
+| coordinate | today | needed |
+|---|---|---|
+| polar | uniform on the sphere | concentrated near the disc plane, because a disc is thin |
+| azimuth | uniform | concentrated into arms, because that is what an arm IS |
+| radius | ONE constant for every system | a density profile with a bulge |
+
+What IS reusable is the plumbing: the per-system lineage stream, which is what makes G4 hold.
+
+**THE GATE THAT IS ACTUALLY RED** is the one nobody wrote: the shape. See
+`owner_decisions_2026-08-27_galaxy_shape.md` G2, G8–G13.
+
+---
+
 **Q8 CONDITION 1 IS ANSWERED HERE, AND THE ANSWER TODAY IS NO — MEASURED.** The owner marked it *"unverified;
 worth more than the choice itself."* `system_center_at` (`crates/physics/src/worldgen/generate.rs:215-234`,
 read in full) takes the index `n` and returns `direction × (config.stellar.system_ring_r_m × [n != 0])` —
