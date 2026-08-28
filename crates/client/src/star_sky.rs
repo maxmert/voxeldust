@@ -221,6 +221,56 @@ pub enum SkyBeat {
     Unheld,
 }
 
+/// HOW THE SKY LANE READS, when you ask whether anyone is still speaking for it (S11).
+///
+/// Three states, because "never heard" and "heard, then silence" are different diagnoses and call for
+/// different action. Collapsing them would report a client that has not finished logging in as a
+/// client whose server died.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkyWatch {
+    /// No beat has ever arrived. The client may simply be new.
+    NeverHeard,
+    /// A beat arrived recently enough. Somebody is speaking for this sky.
+    Confirmed,
+    /// A beat arrived once, and then nothing did, for longer than the derived bound.
+    ///
+    /// ★ THE STARS ARE STILL DRAWN. A stale sky is NOT a wrong sky — stars do not move, so every one of
+    /// them is exactly where it was. SL1 clause 6 says a consumer past its bound "degrades and SAYS
+    /// SO", and for a picture that cannot go stale, saying so IS the degradation. Removing the stars
+    /// would invent a seam (SL8 names `sprite-cull` and `flicker` as defects) to honour a law about
+    /// readings that go wrong, which this one does not.
+    Quiet,
+}
+
+/// THE WATCHDOG, as a pure decision (S11).
+///
+/// ★ THE BOUND IS DERIVED, NEVER A LITERAL. Owner law of 2026-08-15, item 3: *retention is forever
+/// derived — at least two cadences plus one, never a free literal.* This is the SAME shape
+/// `window_ttl_ticks` uses for the window lane, for the same reason: a subscriber that misses ONE beat
+/// must not be called dead, and a second spelling of one timeout is how two lanes come to disagree
+/// about what "quiet" means.
+///
+/// ★ WHAT IT CANNOT SEE, stated so nobody records this as a liveness proof. A server that keeps beating
+/// a FROZEN catalogue looks perfectly healthy here — and must, because the gateway folds the sky once at
+/// boot, so an unchanging generation IS the normal case. This instrument detects ABSENCE. It does not
+/// detect a server that is wrong but talking.
+#[must_use]
+pub fn sky_watch(last_beat_tick: Option<u64>, now_tick: u64, beat_cadence_ticks: u64) -> SkyWatch {
+    let Some(last) = last_beat_tick else {
+        return SkyWatch::NeverHeard;
+    };
+    let bound = WATCH_TTL_CADENCE_BEATS * beat_cadence_ticks.max(1) + 1;
+    if now_tick.saturating_sub(last) > bound {
+        SkyWatch::Quiet
+    } else {
+        SkyWatch::Confirmed
+    }
+}
+
+/// Beats of the sky's own cadence before silence is called quiet. TWO, so one lost beat is survivable —
+/// the same number the window lane's retention uses, and for the same reason.
+const WATCH_TTL_CADENCE_BEATS: u64 = 2;
+
 /// The client's assembling star catalogue.
 #[derive(Debug, Default)]
 pub struct StarSky {
@@ -241,6 +291,11 @@ pub struct StarSky {
     pub beats_stale: u64,
     /// Liveness beats that arrived while no whole sky was held.
     pub beats_unheld: u64,
+    /// THE TICK THE LAST BEAT ARRIVED ON (S11) — the watchdog's only input beyond the clock.
+    ///
+    /// `None` until one arrives. Absence is not an event, so nothing can fire on it; a caller holding
+    /// a clock reads it through [`sky_watch`].
+    pub last_beat_tick: Option<u64>,
     /// Cache files refused, by any of the reasons in [`CacheRefusal`]. The owner's condition is that a
     /// damaged cache produces a COUNTED refusal and never a drawn frame, so this is the half that makes
     /// the refusal visible — a player reporting "my stars are gone" is otherwise a report with nowhere
@@ -323,6 +378,11 @@ impl StarSky {
     /// Deliberately does NOT act on `Stale`. Knowing the held sky is wrong is a different job from
     /// replacing it, and replacing it is the receiver-states-its-generation exchange this beat is a
     /// companion to, not a substitute for.
+    pub fn beat_at(&mut self, generation: u64, tick: u64) -> SkyBeat {
+        self.last_beat_tick = Some(tick);
+        self.beat(generation)
+    }
+
     pub fn beat(&mut self, generation: u64) -> SkyBeat {
         // `complete` is what makes a generation HELD — a half-assembled sky of the named generation is
         // not a sky the client can draw, so it answers `Unheld` and not `Current`.
@@ -823,5 +883,78 @@ mod tests {
             decode_cache(&lying, &stamp()),
             Err(CacheRefusal::CountMismatch)
         );
+    }
+
+    /// ★ THE WATCHDOG READS THREE STATES, AND IT RECOVERS (S11).
+    ///
+    /// The beat exists because silence on the sky lane means two opposite things — a galaxy that did
+    /// not change, and an emitter that died. This is the instrument that separates them once the
+    /// beat itself stops.
+    #[test]
+    fn the_sky_watch_separates_never_heard_from_gone_quiet_and_recovers() {
+        const CADENCE: u64 = 10; // ticks between beats
+        // TWO beats plus one, the same shape the window lane's retention uses — so ONE lost beat is
+        // survivable and a second spelling of the timeout cannot drift from the first.
+        let bound = 2 * CADENCE + 1;
+
+        // NEVER HEARD is its own answer. A client still logging in has not lost anything, and
+        // reporting it as a dead server would send somebody hunting a fault that is not there.
+        assert_eq!(sky_watch(None, 1_000, CADENCE), SkyWatch::NeverHeard);
+        assert_eq!(sky_watch(None, 0, CADENCE), SkyWatch::NeverHeard);
+
+        // WITHIN THE BOUND is confirmed — including at exactly the bound, so a subscriber that misses
+        // one beat is not called dead.
+        assert_eq!(sky_watch(Some(100), 100, CADENCE), SkyWatch::Confirmed);
+        assert_eq!(
+            sky_watch(Some(100), 100 + bound, CADENCE),
+            SkyWatch::Confirmed,
+            "at exactly the bound it is still alive — one lost beat is survivable"
+        );
+
+        // ONE TICK PAST is quiet. The edge is asserted on both sides, so the boundary is a decision
+        // rather than an accident.
+        assert_eq!(
+            sky_watch(Some(100), 100 + bound + 1, CADENCE),
+            SkyWatch::Quiet
+        );
+
+        // ★ AND IT RECOVERS. A watchdog that latches is a worse instrument than none: it reports a
+        // fault that has passed, and people learn to ignore it.
+        assert_eq!(
+            sky_watch(Some(500), 505, CADENCE),
+            SkyWatch::Confirmed,
+            "a beat after a silence clears the alarm"
+        );
+
+        // A CLOCK THAT WENT BACKWARDS does not read as quiet. `saturating_sub` floors at zero, so a
+        // re-anchored clock reports Confirmed rather than a spurious alarm.
+        assert_eq!(sky_watch(Some(900), 100, CADENCE), SkyWatch::Confirmed);
+
+        // A ZERO CADENCE cannot divide the world by zero: it floors at ONE tick, so the bound becomes
+        // 2 x 1 + 1 = 3. Asserted on both sides of that edge, with the arithmetic written out — this
+        // expectation was wrong on the first attempt and the test caught it.
+        assert_eq!(sky_watch(Some(0), 3, 0), SkyWatch::Confirmed);
+        assert_eq!(sky_watch(Some(0), 4, 0), SkyWatch::Quiet);
+    }
+
+    /// ★ THE BEAT STAMPS ITS ARRIVAL, AND THE WATCHDOG READS IT (S11).
+    #[test]
+    fn a_beat_stamps_the_tick_the_watchdog_measures_from() {
+        let mut sky = StarSky::default();
+        assert_eq!(sky.last_beat_tick, None, "nothing has spoken yet");
+        assert_eq!(sky_watch(sky.last_beat_tick, 50, 10), SkyWatch::NeverHeard);
+
+        // A beat while no sky is held still stamps: the LANE is alive even though nothing is drawable.
+        assert_eq!(sky.beat_at(7, 40), SkyBeat::Unheld);
+        assert_eq!(sky.last_beat_tick, Some(40));
+        assert_eq!(sky_watch(sky.last_beat_tick, 45, 10), SkyWatch::Confirmed);
+
+        // Silence past the bound.
+        assert_eq!(sky_watch(sky.last_beat_tick, 200, 10), SkyWatch::Quiet);
+
+        // And a later beat moves the stamp forward, clearing it.
+        assert_eq!(sky.beat_at(7, 200), SkyBeat::Unheld);
+        assert_eq!(sky.last_beat_tick, Some(200));
+        assert_eq!(sky_watch(sky.last_beat_tick, 205, 10), SkyWatch::Confirmed);
     }
 }

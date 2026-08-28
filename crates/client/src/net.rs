@@ -113,6 +113,9 @@ pub struct ClientState {
     sky_draw: Option<std::sync::Arc<crate::render_snapshot::SkyDraw>>,
     /// THE GENERATION ALREADY ON DISK (S11), so a caller may ask to save every step and pay once.
     sky_cached: Option<u64>,
+    /// THE SKY BEAT'S OWN CADENCE, in ticks — the watchdog's bound is derived from it, never a
+    /// literal. Stated by the boot from the same tick rate the gateway beats on.
+    sky_beat_cadence_ticks: u64,
     /// THE STATEMENT WAITING TO GO OUT (S11) — the generation this client holds, queued because the
     /// control handler has no transport. Drained on the next send. Latest-wins: only the newest sky is
     /// worth stating, and stating an older one would ask for work nobody needs.
@@ -156,6 +159,10 @@ impl ClientState {
             pending_sky_held: None,
             sky_draw: None,
             sky_cached: None,
+            // Half a second at the client's own step rate, matching the gateway's keep-alive
+            // derivation (`tick_hz / 2`). Never a free literal: it is the beat's cadence, and the
+            // watchdog's bound is two of these plus one.
+            sky_beat_cadence_ticks: ((tuning.tick_hz / 2.0) as u64).max(1),
             origin: None,
             realm_view: RealmView::default(),
         }
@@ -330,7 +337,11 @@ impl ClientState {
                 // A beat that CONFIRMS what we hold is also the moment to re-state it, because a
                 // gateway that lost our statement (a reconnect, a session that moved) would otherwise
                 // go on asking for a sky we already have, for ever.
-                if self.sky.beat(generation) == crate::star_sky::SkyBeat::Current {
+                // STAMPED WITH ITS ARRIVAL (S11): the watchdog's only input beyond the clock. The
+                // universe tick is the one instant that flows through the seam — the client may not
+                // read a wall clock.
+                let at = self.latest_universe_tick.unwrap_or(0);
+                if self.sky.beat_at(generation, at) == crate::star_sky::SkyBeat::Current {
                     self.state_sky_held(generation);
                 }
             }
@@ -783,6 +794,17 @@ impl ClientState {
                 .sky_draw
                 .as_ref()
                 .map(|s| (s.generation, s.rows.len() as u64)),
+            // ★ IS ANYONE STILL SPEAKING FOR THE SKY (S11)? The stars stay on screen either way — a
+            // stale sky is not a wrong sky, because stars do not move. This is the "says so" half of
+            // SL1 clause 6, and it is the ONLY half that applies to a picture which cannot go wrong.
+            sky_watch: format!(
+                "{:?}",
+                crate::star_sky::sky_watch(
+                    self.sky.last_beat_tick,
+                    self.latest_universe_tick.unwrap_or(0),
+                    self.sky_beat_cadence_ticks,
+                )
+            ),
             stale_epoch_rows: self.realm_view.stale_epoch_rows(),
             snapshots_applied: self.snapshots_applied,
             realm_frames_applied: self.realm_view.frames_applied(),

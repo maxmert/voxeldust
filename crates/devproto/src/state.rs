@@ -175,6 +175,18 @@ pub struct DevState {
     /// the client honest about what it RECEIVED; the gate derives what should be DRAWN itself, from
     /// the world seed, rather than trusting a number the client also drew from.
     pub sky: Option<(u64, u64)>,
+    /// IS ANYONE STILL SPEAKING FOR THE SKY (S11)? `NeverHeard`, `Confirmed` or `Quiet`, as
+    /// [`vd_client::star_sky::sky_watch`] reads it.
+    ///
+    /// ★ THE STARS STAY ON SCREEN IN ALL THREE. A stale sky is not a wrong sky — stars do not move, so
+    /// a quiet lane leaves every one of them exactly where it was. SL1 clause 6 requires a consumer
+    /// past its bound to "degrade and SAY SO", and for a picture that cannot go stale, saying so IS the
+    /// degradation. Hiding the stars would invent a seam (SL8 names `sprite-cull` and `flicker`) to
+    /// honour a law about readings that go wrong, which this one does not.
+    ///
+    /// ⚠ IT DETECTS ABSENCE, NOT WRONGNESS. A server beating a frozen catalogue reads `Confirmed`, and
+    /// must — the gateway folds the sky once at boot, so an unchanging generation is the normal case.
+    pub sky_watch: String,
     /// FAULT/diagnosis: composed datagram rows dropped for carrying a PREVIOUS scene epoch
     /// (§2.6.6 `stale_epoch_rows`). Brief at a crossing; steady growth means the feed and the
     /// reliable lane disagree about the current scene.
@@ -261,6 +273,8 @@ pub(crate) mod tests {
             }],
             origin: Some(("System(7)".to_owned(), 1)),
             sky: None,
+            // A fixture has heard no beat (S11).
+            sky_watch: "NeverHeard".to_owned(),
             stale_epoch_rows: 8,
             snapshots_applied: 4,
             realm_frames_applied: 3,

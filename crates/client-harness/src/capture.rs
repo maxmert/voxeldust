@@ -152,6 +152,8 @@ mod tests {
             realm_boxes: Vec::new(),
             origin: None,
             sky: None,
+            // A fixture has heard no beat (S11).
+            sky_watch: "NeverHeard".to_owned(),
             stale_epoch_rows: 0,
             snapshots_applied,
             realm_frames_applied: 0,
