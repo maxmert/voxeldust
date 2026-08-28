@@ -15,8 +15,9 @@ use super::{
 };
 use crate::celestial::OrbitalElements;
 use crate::taxonomy::{
-    FrostThresholds, SpectralClass, classify_spectral, habitable_zone_radius_au,
-    main_sequence_luminosity, orbital_axis_au, sample_imf_mass, sample_rayleigh,
+    FrostThresholds, GalaxyType, SpectralClass, classify_spectral, habitable_zone_radius_au,
+    main_sequence_luminosity, orbital_axis_au, sample_galaxy_type, sample_imf_mass,
+    sample_rayleigh,
 };
 use core::f64::consts::TAU;
 use glam::DVec3;
@@ -194,6 +195,29 @@ fn galaxy_system_count(seed_universe: u64, config: &UniverseConfig) -> u32 {
     lo + u32::try_from(draw.min(span - 1)).unwrap_or(0)
 }
 
+/// WHAT KIND OF GALAXY THIS IS — spiral, elliptical or irregular — drawn from the galaxy's own stream
+/// (S12; owner rulings G2 and G9, `owner_decisions_2026-08-27_galaxy_shape.md`).
+///
+/// ★ NOTHING DREW A GALAXY'S KIND BEFORE THIS. The taxonomy has named the three kinds and carried a
+/// sampler and a real census vector (`[0.72, 0.90]`, Nair & Abraham 2010) for a long time, and
+/// MEASURED 2026-08-28: `sample_galaxy_type` was called ONLY from its own unit test. The shape ruling's
+/// first draft said the placement "ignores that draw", which was wrong — there was no draw to ignore.
+///
+/// ★ THE DRAW COMES AFTER THE COUNT, DELIBERATELY. This stream already yields one number, the system
+/// count. Taking the kind FIRST would shift that draw and re-roll the population of every galaxy at
+/// every seed. Appending keeps every existing world byte-identical, so this change adds a fact without
+/// moving anything — one change at a time, which is what makes the next one diagnosable.
+///
+/// The placement law consumes this next: a spiral is a bulge, a thin disc and arms; an elliptical is a
+/// smooth swell; an irregular is neither. Today's placement is uniform on a sphere, which is none of
+/// the three.
+#[must_use]
+pub(crate) fn galaxy_kind(seed_universe: u64, config: &UniverseConfig) -> GalaxyType {
+    let mut stream = realm_stream(seed_universe, &[UNIVERSE_SEED, GALAXY_SEED]);
+    let _count_draw = stream.next_f64(); // the count's own draw, consumed so this one follows it
+    sample_galaxy_type(stream.next_f64(), &config.galaxy.type_cumulative)
+}
+
 /// Where the `n`-th system sits in its galaxy — THE 3-D SEEDED PLACEMENT LAW (owner ruling Q-B,
 /// 2026-08-18: *"don't do 3 star systems in the line — get rid of this code; the whole world
 /// generated from the seeds"*). The collinear ring (evenly-spaced angles on one circle in the XZ
@@ -218,20 +242,197 @@ fn galaxy_system_count(seed_universe: u64, config: &UniverseConfig) -> u32 {
 #[must_use]
 pub(crate) fn system_center_at(
     config: &UniverseConfig,
+    kind: GalaxyType,
     n: u32,
-    dir_u01: f64,
-    azim_u01: f64,
+    draws: PlacementDraws,
 ) -> DVec3 {
-    let radius = config.stellar.system_ring_r_m;
-    let cos_polar = 2.0 * dir_u01 - 1.0;
-    let sin_polar = (1.0 - cos_polar * cos_polar).max(0.0).sqrt();
-    let azimuth = TAU * azim_u01;
+    // THE HOME SYSTEM sits at the galactic origin. A multiplier, never a branch — and it consumes its
+    // draws exactly like every sibling, so the stream SHAPE is uniform across systems and a future
+    // re-rule of the home anchor shifts nothing.
     let anchored = f64::from(u32::from(n != 0));
-    DVec3::new(
-        sin_polar * azimuth.cos(),
-        cos_polar,
-        sin_polar * azimuth.sin(),
-    ) * (radius * anchored)
+    let r_max = config.stellar.system_ring_r_m;
+    let shape = galaxy_shape(kind, config);
+
+    // WHICH POPULATION this system belongs to. ONE draw decides all three, by reading it against two
+    // thresholds — a second draw would buy nothing.
+    //
+    //   bulge      a round central swell
+    //   inter-arm  in the disc, but between the arms
+    //   arm        in the disc, following an arm
+    //
+    // ★ THE INTER-ARM POPULATION IS WHAT STOPS THE SPIRAL LOOKING DRAWN (owner, 2026-08-28: *"I'd also
+    // add more randomness into the spiral. Now it's ideal, which never happens"*). A real spiral is not
+    // empty between its arms — it has a smooth disc underneath them, and the arms are where stars
+    // CROWD, not where they exclusively live. Arms with nothing between them read as painted.
+    let in_bulge = draws.population < shape.bulge_fraction;
+    let in_arm = draws.population >= shape.bulge_fraction + shape.interarm_fraction;
+
+    // THE RADIUS, from a closed-form profile — never a rejection loop (the taxonomy discipline: a
+    // sampler is a closed-form map from one uniform).
+    //
+    // `r = R · u^p` puts the surface density at `∝ r^(1/p − 2)`: p = 0.5 spreads stars evenly over the
+    // disc, and larger p pulls them inward. The exponent is drawn per galaxy, so two galaxies from one
+    // universe are concentrated differently without anyone choosing.
+    let p = if in_bulge {
+        shape.bulge_exponent
+    } else {
+        shape.disc_exponent
+    };
+    let r = r_max
+        * draws.radius.clamp(0.0, 1.0).powf(p)
+        * if in_bulge {
+            shape.bulge_radius_frac
+        } else {
+            1.0
+        };
+
+    // THE ANGLE. In the disc it follows an ARM; in the bulge there are no arms to follow.
+    //
+    // ★ A LOGARITHMIC SPIRAL is the arm's own law: its angle advances with the LOGARITHM of the
+    // radius, at a fixed pitch. That is what makes an arm sweep rather than curl or straighten.
+    let azimuth = if in_bulge || !in_arm {
+        // A bulge has no arms to follow; an inter-arm system is between them by definition.
+        TAU * draws.azimuth
+    } else {
+        let arm = (draws.azimuth * f64::from(shape.arms)).floor();
+        let arm_base = TAU * arm / f64::from(shape.arms);
+        // ln(r/R) is negative inward, so the arm winds BACK from the rim — the direction a real arm
+        // trails. `max` floors the logarithm at the centre, where it diverges.
+        let wind = (r / r_max).max(1.0e-6).ln() / shape.pitch_tan;
+        // SCATTER, or the arm is a LINE — as unbelievable as the shell this law replaces.
+        //
+        // ★ TRIANGULAR, NOT FLAT. The mean of two uniforms is a triangular distribution: dense in the
+        // middle, thinning toward the edges. A flat draw gives an arm a hard edge and an even density
+        // across its width, which is the "drawn with a pen" look. This gives it a spine and a fade.
+        //
+        // ★ AND IT FRAYS OUTWARD. The width grows with radius, so arms are tight near the core and
+        // loose at the rim — which is what a real arm does as it runs out of the density wave that
+        // holds it together.
+        let centred = 0.5 * (draws.scatter + draws.scatter_b) - 0.5;
+        let fray = 1.0 + shape.arm_fray * (r / r_max);
+        let scatter = centred * shape.arm_width_rad * fray;
+        arm_base + wind + scatter
+    };
+
+    // THE HEIGHT. A disc is THIN: its thickness is a small fraction of its radius, and that ratio is
+    // what a picture reads as "a galaxy seen edge-on" rather than "a ball".
+    //
+    // The bulge is ROUND, so its height scales with its own radius rather than with a disc thickness.
+    let half_height = if in_bulge {
+        r * shape.bulge_roundness
+    } else {
+        r_max * shape.disc_thickness_frac
+    };
+    let z = (draws.height - 0.5) * 2.0 * half_height;
+
+    let planar = (r * r - z * z).max(0.0).sqrt();
+    DVec3::new(planar * azimuth.cos(), z, planar * azimuth.sin()) * anchored
+}
+
+/// The six uniforms one system's placement consumes, named so a reader can see WHICH draw does what.
+///
+/// Two of these existed before (a direction on a sphere). The other four are what a SHAPE needs: a
+/// population, BOTH halves of an arm scatter, and a height. Uniform on a sphere is a BALL — as many
+/// stars above the disc as in it, and no arms, by construction.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PlacementDraws {
+    /// Bulge or disc.
+    pub(crate) population: f64,
+    /// Where between the centre and the rim.
+    pub(crate) radius: f64,
+    /// Which arm, and where around the centre.
+    pub(crate) azimuth: f64,
+    /// How far off the arm's own line.
+    pub(crate) scatter: f64,
+    /// The scatter's second half — two uniforms averaged give a TRIANGULAR spread, so an arm has a
+    /// dense spine and fading edges instead of a flat band with a hard edge.
+    pub(crate) scatter_b: f64,
+    /// How far above or below the disc plane.
+    pub(crate) height: f64,
+}
+
+/// WHAT A GALAXY OF THIS KIND LOOKS LIKE — every number of it derived, never a free literal (G1).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GalaxyShape {
+    pub(crate) arms: u32,
+    /// tan(pitch angle) — how tightly the arms wind. A small value winds tightly.
+    pub(crate) pitch_tan: f64,
+    pub(crate) arm_width_rad: f64,
+    /// How much wider an arm is at the rim than at the core. Arms fray as they run out.
+    pub(crate) arm_fray: f64,
+    /// The share of the DISC that lies between the arms rather than in one. Without it a spiral looks
+    /// painted: real arms are where stars crowd, not where they exclusively live.
+    pub(crate) interarm_fraction: f64,
+    pub(crate) bulge_fraction: f64,
+    pub(crate) bulge_radius_frac: f64,
+    pub(crate) bulge_roundness: f64,
+    pub(crate) bulge_exponent: f64,
+    pub(crate) disc_exponent: f64,
+    pub(crate) disc_thickness_frac: f64,
+}
+
+/// The shape a galaxy of `kind` has (S12; owner rulings G2, G9, G13).
+///
+/// ★ A FIRST PROPOSAL, TO BE JUDGED BY LOOKING. G13 says the assistant proposes the standard model in
+/// code and the owner judges the picture, because a galaxy is easier to judge than to specify. These
+/// numbers are the published shape of each kind, not tuning: a spiral's arms trail at a pitch of a few
+/// tens of degrees, its disc is a few percent of its radius thick, and its bulge holds a modest share
+/// of its stars in a small, round, central volume.
+///
+/// ⚠ THEY ARE CONSTANTS PER KIND TODAY, WHICH G1 DOES NOT YET SATISFY. G1 requires every number the
+/// placement reads to be drawn from the seed, so that galaxies differ. Making them per-galaxy draws is
+/// the next step, and it is deliberately NOT taken here: the shape must be looked at before it is
+/// varied, or a bad shape and a bad variation are indistinguishable.
+#[must_use]
+fn galaxy_shape(kind: GalaxyType, _config: &UniverseConfig) -> GalaxyShape {
+    match kind {
+        GalaxyType::Spiral => GalaxyShape {
+            arms: 2,
+            // tan(25°) — the pitch angle of a typical grand-design spiral.
+            pitch_tan: 0.466_307_658_154_591_9,
+            arm_width_rad: 0.55,
+            arm_fray: 1.6,
+            // A THIRD of the disc lies between the arms. Measured against real spirals, the arm/
+            // inter-arm contrast is a factor of a few, never the "all or nothing" a zero here draws.
+            interarm_fraction: 0.28,
+            bulge_fraction: 0.15,
+            bulge_radius_frac: 0.15,
+            bulge_roundness: 0.6,
+            bulge_exponent: 0.6,
+            disc_exponent: 0.6,
+            disc_thickness_frac: 0.03,
+        },
+        // No arms, no disc: a smooth three-dimensional swell, denser toward the middle. Modelled as
+        // one round population by giving it a bulge fraction of one.
+        GalaxyType::Elliptical => GalaxyShape {
+            arms: 1,
+            pitch_tan: 1.0,
+            arm_width_rad: TAU,
+            arm_fray: 0.0,
+            interarm_fraction: 0.0,
+            bulge_fraction: 1.0,
+            bulge_radius_frac: 1.0,
+            bulge_roundness: 0.7,
+            bulge_exponent: 0.7,
+            disc_exponent: 0.7,
+            disc_thickness_frac: 0.5,
+        },
+        // Neither, and it looks it: a thick, loosely wound, scattered population.
+        GalaxyType::Irregular => GalaxyShape {
+            arms: 1,
+            pitch_tan: 1.5,
+            arm_width_rad: 2.0,
+            // An irregular is MOSTLY unstructured — that is what makes it irregular.
+            arm_fray: 2.5,
+            interarm_fraction: 0.45,
+            bulge_fraction: 0.3,
+            bulge_radius_frac: 0.5,
+            bulge_roundness: 0.8,
+            bulge_exponent: 0.5,
+            disc_exponent: 0.5,
+            disc_thickness_frac: 0.25,
+        },
+    }
 }
 
 /// The config-driven star-system forest: Universe → Galaxy → `stellar.n_systems` star systems, each with
@@ -284,6 +485,9 @@ pub(crate) fn generate_system_forest(
     // (The star COUNT stays this existing config parameter — owner ruling Q-B: the placement law
     // went 3-D and seeded; the census census-derivation is P10's.)
     let n_systems = galaxy_system_count(seed_universe, config);
+    // WHAT KIND OF GALAXY THIS IS — drawn once, from the galaxy's own stream, and consumed by every
+    // system's placement below. Nothing drew this before S12.
+    let kind = galaxy_kind(seed_universe, config);
     for s in 0..n_systems {
         let seed = system_seed_at(s);
         let system = RealmId::System(seed);
@@ -320,14 +524,22 @@ pub(crate) fn generate_system_forest(
         let star = draw_star_photometrics(st, &mut stream);
         bodies[system_ix].photometrics = Some(star);
         let mut albedo_draws: Vec<f64> = (0..legacy).map(|_| stream.next_f64()).collect();
-        // THE 3-D PLACEMENT DRAWS (owner ruling Q-B, 2026-08-18) — the HOME system (index 0)
-        // consumes its two draws exactly like every sibling (the anchor multiplier, not the
-        // stream shape, pins it to the galactic origin).
+        // THE SHAPE'S PLACEMENT DRAWS (S12; owner rulings G2, G9, G13). SIX, where the sphere took
+        // two: a population, a radius, an azimuth, TWO halves of an arm scatter and a height. The
+        // HOME system consumes all six exactly like every sibling — the anchor multiplier, not the
+        // stream shape, pins it to the galactic origin.
         bodies[system_ix].placement = Placement::StaticOffset(system_center_at(
             config,
+            kind,
             s,
-            stream.next_f64(),
-            stream.next_f64(),
+            PlacementDraws {
+                population: stream.next_f64(),
+                radius: stream.next_f64(),
+                azimuth: stream.next_f64(),
+                scatter: stream.next_f64(),
+                scatter_b: stream.next_f64(),
+                height: stream.next_f64(),
+            },
         ));
         // ---- the APPENDED draws (planets beyond the frozen prefix, then every mass) ----
         for _ in legacy..pl.n_planets {

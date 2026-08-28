@@ -41,8 +41,17 @@ are facts ABOUT that galaxy, fixed for as long as the world exists.
 **Owner:** *"Believable, and all should come from the seed, and shape and position of the stars should
 not change."*
 
-The taxonomy already draws a galaxy's KIND from its seed — `GalaxyType::{Spiral, Elliptical, Irregular}`
-(`crates/physics/src/taxonomy.rs:40-44`). The placement law ignores that draw today. It must consume it.
+The taxonomy NAMES three kinds — `GalaxyType::{Spiral, Elliptical, Irregular}`
+(`crates/physics/src/taxonomy.rs:40-44`) — and carries a sampler and a real census vector for them
+(`sample_galaxy_type`, `[0.72, 0.90]`, Nair & Abraham 2010).
+
+⚠ **CORRECTED 2026-08-28, BY MEASUREMENT.** An earlier draft of this file said *"the taxonomy already
+draws a galaxy's kind from its seed; the placement law ignores that draw."* That is wrong. `grep` finds
+`sample_galaxy_type` called **only from its own unit test**. **No galaxy has a type today** — the
+placement does not ignore the draw, there is no draw to ignore.
+
+So the work is one step longer than the earlier text implies: a galaxy must first DRAW its own kind from
+its own stream, and only then can a shape law consume it.
 
 **Believable means the shape reads as the thing it is named after.** A spiral has a bulge, a disc with
 real thickness, and arms. An elliptical is a smooth three-dimensional swell, denser toward the middle. An

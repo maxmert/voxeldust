@@ -41,13 +41,16 @@
 //! label, every parent link and every region centre in this fixture is whatever production would produce
 //! for that config, and the fixture cannot drift away from what a shard actually boots:
 //!
-//! - `stellar.system_ring_r_m` sets the RADIUS at which the galaxy places its non-home systems, and only
-//!   the radius. The DIRECTION is the seed's — a uniform direction on the sphere from the system's own two
-//!   stream draws, since the 3-D seeded placement law (owner ruling Q-B) deleted the collinear ring this
-//!   bullet used to describe. So the neighbour's authored centre is `system_from_galaxy_m` in a seeded
-//!   direction, not `(system_from_galaxy_m, 0, 0)`. Both halves of that are pinned by
-//!   `the_generator_plants_exactly_the_stories_distances` below, which asserts the RADIUS at the story
-//!   distance and then asserts the direction is genuinely three-dimensional (`neighbour.y.abs() > 0.0`).
+//! - `stellar.system_ring_r_m` sets the galaxy's OUTER RADIUS — the rim, not a ring. Since the galaxy
+//!   shape landed (S12; owner_decisions_2026-08-27_galaxy_shape.md) the seed decides where INSIDE that
+//!   rim each system sits: a population, a radius on a density profile, an arm, a scatter and a height.
+//!   The knob used to name the exact distance, because every system sat on one shell; the owner refused
+//!   the shell by name, so it now names the edge and the seed names the place.
+//!
+//!   The neighbour's authored centre is therefore `system_from_galaxy_m × NEIGHBOUR_FRACTION_OF_RIM` in
+//!   a seeded direction. Both halves are pinned by `the_generator_plants_exactly_the_stories_distances`
+//!   below, which asserts the FRACTION against the generator and then asserts the direction is genuinely
+//!   three-dimensional (`neighbour.y.abs() > 0.0`).
 //! - `planet.ecc_sigma == 0` and `planet.incl_sigma == 0` make the story planet's orbit exactly circular
 //!   and exactly in-plane, so its distance from its star is its semi-major axis at every tick. That axis
 //!   is not a config product any more — the in-system true-size re-solve deleted `scale.au_to_render_m`
@@ -88,10 +91,23 @@ use vd_wire::channels::RealmSnap;
 pub const NEAR_OCCUPANT_FROM_PLANET_M: f64 = 3.0;
 /// The planet's distance from its star (m) — the number only the SYSTEM holds.
 pub const NEAR_PLANET_FROM_STAR_M: f64 = 145.0;
-/// The neighbour system's DISTANCE from the galaxy centre (m) — the radius half of the number only the
-/// GALAXY holds. The other half is a DIRECTION the seed chose (the 3-D seeded placement law), which is
-/// why this is a distance and not a coordinate.
+/// The NEAR variant's galaxy OUTER RADIUS (m) — the rim the seed places the neighbour inside. Read the
+/// story's distance as `NEAR_SYSTEM_FROM_GALAXY_M × NEIGHBOUR_FRACTION_OF_RIM`; see that constant.
 pub const NEAR_SYSTEM_FROM_GALAXY_M: f64 = 12031.0;
+/// WHERE INSIDE THE RIM THE SEED PUTS THE NEIGHBOUR — a fraction of the galaxy's outer radius.
+///
+/// ★ MEASURED, NEVER DERIVED (S12, 2026-08-28). Every term of the placement is proportional to the rim
+/// except the angles, which read `r / r_max` and so do not move with it. The consequence is a pure
+/// number, and it was measured rather than argued: the SAME fraction, to the last bit, at both story
+/// magnitudes — 1.2031e4 m and 1e13 m. A shape change, a draw-order change or a re-seed all move it,
+/// and `the_generator_plants_exactly_the_stories_distances` then fails loudly, which is that test's
+/// whole reason to exist.
+///
+/// ⚠ INTERIM — see `docs/design/DEFERRED.md` (D-S12-FIXTURE). This constant exists because the fixture
+/// builds a REDUCED world (two stars, two planets, a circular in-plane orbit) rather than reading THE
+/// world, which SL5 forbids. The proper answer is to delete the fixture: prove the arithmetic as a pure
+/// unit test with hand-written numbers, and prove the conversion end-to-end on THE world at real size.
+pub const NEIGHBOUR_FRACTION_OF_RIM: f64 = 2.711_063_548_671_444e-1;
 /// The occupant re-measured in the STAR's frame after the SYSTEM adds its child's placement.
 /// A LITERAL: `145 + 3`, written out, never computed by the code under test.
 pub const WORKED_UP_1: f64 = 148.0;
@@ -568,10 +584,13 @@ mod tests {
             // rounding bounded well under a micron at these magnitudes) — and that the direction
             // is genuinely three-dimensional (off the retired ring's y = 0 plane).
             let neighbour = centre_of(&fx.world, fx.system);
-            assert!(
-                (neighbour.length() - fx.system_from_galaxy_m).abs() < 1.0e-6,
-                "{}: the galaxy authors the neighbour system at the story distance (got {})",
+            assert_eq!(
+                neighbour.length() / fx.system_from_galaxy_m,
+                NEIGHBOUR_FRACTION_OF_RIM,
+                "{}: the galaxy authors the neighbour system at the story fraction of its rim \
+                 (rim {}, got {})",
                 fx.name,
+                fx.system_from_galaxy_m,
                 neighbour.length(),
             );
             assert!(

@@ -710,8 +710,12 @@ fn slice6_relay_egress_measured_equals_w_times_c_times_blob_times_rate() {
     // RE-BASELINED 1118 → 1142 B at the cell activation (real-scale addendum §A6.4, the ONE
     // measured wire cost): every pose now rides normalized, so the postcard varints carry the
     // integer cells (+24 B here). Schema unchanged, PROTO_MINOR unmoved.
+    // ★ RE-BASELINED 2124 → 2123 B in S12 (2026-08-28). The galaxy shape moved every placement,
+    // so one pose's postcard varint fell to a shorter length. Schema unchanged, PROTO_MINOR unmoved
+    // — a codec or wire change would move this number by far more than one byte, which is what the
+    // pin is here to catch.
     assert_eq!(
-        blob, 2124,
+        blob, 2123,
         "the pinned departure-fixture relay blob (bytes)"
     );
     eprintln!(
@@ -1883,17 +1887,23 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
     }
     // NON-VACUITY, pinned: THE world's parent-authored rows — the galaxy under the universe,
     // three systems under the galaxy, five planets under each system — at BOTH instants.
+    // ★ RE-PINNED IN S12 (2026-08-28), MOONS 6 → 4. The placement became a SHAPE and takes SIX
+    // seed draws where the shell took two, so every draw after them shifted by four. Two planets
+    // drew a lighter mass, and a lighter planet holds no moon, so two moons left THE world. The
+    // other four terms are untouched: 1 galaxy + 3 systems + 27 planets + 3 stars.
     assert_eq!(
         rows_pinned,
-        2 * (1 + 3 + 27 + 3 + 6),
+        2 * (1 + 3 + 27 + 3 + 4),
         "THE world's full child-row set (galaxy + systems + planets + the T2 stars + the \
          T3 census moons)"
     );
     // ...and the movers actually MOVED between the two instants (the pin measured a live
     // world, not a static fixture): every planet is off its zeroed region center at t=50000.
+    // ★ RE-PINNED 33 → 31 IN S12 (2026-08-28) — the SAME two moons the row census above lost,
+    // counted a second way: 27 planets + 4 census moons.
     assert_eq!(
-        moved_since_epoch, 33,
-        "all twenty-seven planets and six census moons author live placements"
+        moved_since_epoch, 31,
+        "all twenty-seven planets and four census moons author live placements"
     );
     // ★ AND THE REFUSAL ARM IS NOT VACUOUS (slice S9). Pinned as a count, because "some hops are out
     // of reach" is worthless without knowing how many: if this silently went to zero the arm above

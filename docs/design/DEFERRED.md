@@ -6420,3 +6420,42 @@ have stayed broken.
 chunked-flight consumer — `node_per_realm_walk`, `rlm_demand_login`, `window_shadow_parity`,
 `two_ships`, `look_pixels`, `warp_pixels` — all of which pass today with margin and are the reason
 this is 🟥 rather than urgent.
+
+### D-S12-FIXTURE 🟥 THE FRAME FIXTURE BUILDS A REDUCED WORLD, WHICH SL5 FORBIDS — pinned to a measured fraction to unblock S12 (owner-directed, 2026-08-28)
+
+**WHAT IS WRONG.** `vd-tests`' `frame_fixture` does not read THE world. It builds one: two star
+systems, two planets per star, a circular in-plane orbit, its own outer radius, and its own orbital
+elements written over the generated topology. SL5 says one world — no scale knob, no preset, no
+reduced or test-only variant. This is a variant, and until today it was not on this register at all,
+which is worse than a registered one.
+
+**HOW IT SURFACED.** The galaxy shape (S12) moved every placement. The fixture's anti-drift guard
+went red because its story distance was a knob the SHELL obeyed exactly and the SHAPE does not: the
+knob now names the galaxy's rim, and the seed names where inside it the star sits.
+
+**THE INTERIM, AND WHY IT IS THE SMALL ONE.** `NEIGHBOUR_FRACTION_OF_RIM = 2.711_063_548_671_444e-1`
+— MEASURED, identical to the last bit at both story magnitudes (1.2031e4 m and 1e13 m), because every
+term of the placement scales with the rim while the angles read `r / r_max` and do not. The guard now
+compares the generator against that literal, so it still fails on a shape change, a draw-order change
+or a re-seed. Nothing circular, and no production code was added to serve a test — the alternative
+considered was a new seam letting a caller author a child's centre, which was refused as production
+growth for a fixture's benefit.
+
+**THE PROPER SOLUTION.** Delete the fixture, in two halves that are each stronger than what they
+replace:
+- the WORKED ARITHMETIC becomes a pure unit test on the conversion itself, with hand-written poses,
+  frames and placements. No world, so no variant, and the sum stays checkable by eye.
+- the CONVERSION END TO END runs on THE world, at real size. The world already supplies both regimes
+  the fixture invented: a star inside its galaxy (~1e17 m, where a millimetre snaps to a whole step)
+  and a person on a planet (metres, where it survives).
+
+**WHY IT IS WORTH DOING (owner, 2026-08-28).** *"We will need to rewrite tests in case if we will
+re-seed, but then reseed itself can't be accidental."* A test that reads a fixture can survive a
+re-seed silently. A test that reads THE world cannot. Making the cost of a re-seed visible is the
+point, not a side effect.
+
+**SIZE, MEASURED.** 772 fixture lines, ~25 tests inside it, and exactly ONE outside consumer — the
+round-trip test in `frame_conversion_e2e`. The one mention in `vd-sim` is a comment.
+
+**WHEN.** Its own slice, after S12 lands. Owner-directed sequencing: unblock now, land S12, then plan
+the rewrite.

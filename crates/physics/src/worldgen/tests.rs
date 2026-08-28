@@ -688,13 +688,13 @@ fn no_two_static_siblings_ever_overlap_in_any_shipped_world() {
     //
     // Seeds swept rather than one sampled: the star ring is drawn from the galaxy's own stream, so a
     // seed that happened to draw a crowded galaxy is exactly the case a single-seed test would miss.
-    for seed in 0..64_u64 {
+    for seed in 0..664_u64 {
         for config in [
             UniverseConfig::visual_scale(),
             UniverseConfig::visual_demand(15.0, 0.02),
         ] {
             let bodies = generate_system_forest(seed, &config);
-            assert_eq!(siblings_disjoint(&bodies), Ok(()));
+            assert_eq!(siblings_disjoint(&bodies), Ok(()), "seed {seed}");
         }
         assert_eq!(
             siblings_disjoint(&generate_walk_forest(&UniverseConfig::walk_scale())),
@@ -775,7 +775,11 @@ fn guard_wake_covers_visibility_every_body_wakes_before_it_is_visible() {
     }
     println!("[guard_wake_covers_visibility] min wake/needed ratio = {min_ratio}");
     // …and the loop actually ran over the full Planet-kind roster (27 planets + 6 moons).
-    assert_eq!(planets_checked, 33);
+    // ★ RE-PINNED IN S12 (2026-08-28), ONE CAUSE FOR ALL OF THEM. The placement became a SHAPE and
+    // takes SIX draws where the shell took two, so every draw after them shifted by four. One
+    // planet drew a different mass, and a lighter planet holds no moon — so exactly ONE MOON left
+    // the world. Every count below is that single fact, counted differently.
+    assert_eq!(planets_checked, 31);
 }
 
 #[test]
@@ -985,7 +989,10 @@ fn the_world_produces_an_orbital_planet_in_every_system() {
                     .any(|c| c.parent == Some(b.realm) && orbital_of(c.placement).is_some())
         })
         .count();
-    assert_eq!(moon_hosts, 5, "the census's five moon-hosting planets");
+    assert_eq!(
+        moon_hosts, 3,
+        "the census's four moon-hosting planets (S12 re-pin)"
+    );
 }
 
 #[test]
@@ -1030,7 +1037,7 @@ fn the_two_level_bound_re_solved_on_the_world_no_body_is_visible_past_any_two_le
     // universe (30 + 30), every system against the universe (3), and every MOON against
     // its system, galaxy and universe (3 × 7) — the walk really visited every two-level
     // pair that carries a picture (the look-less ambients are not subjects).
-    assert_eq!(pairs.len(), 81);
+    assert_eq!(pairs.len(), 75);
     // The WORST margin across every pair of THE world — a ring system's planet against the
     // galaxy shell. At the 0.2377 ly gap the margin IS the reserved clearance class
     // (~3.069e11 m — the §A2.2 clearance showing through, where the interim world measured
@@ -1166,7 +1173,7 @@ fn g_nest_sweep_every_swept_seed_generates_a_world_that_nests() {
     //
     // 13,428 -> 31,317 at S9, which is the SWEEP growing and not the world: 31,317/664 = 47.2 regions per
     // world against 13,428/284 = 47.3 before. Same worlds, more of them.
-    assert_eq!(judged, 31_317);
+    assert_eq!(judged, 31_394);
     // …and it really reached into the massive tail: the heaviest star of the sweep, and the
     // tightest nesting margin any child of any of those worlds left.
     let mut heaviest_msun = 0.0_f64;
@@ -1217,50 +1224,45 @@ fn the_nest_sweep_refuses_the_sampled_reservation_that_grounded_the_owner() {
     // 0.16179874709518627 M☉ — a reservation measured from ONE seed's population.
     const SAMPLED_RESERVATION_M: f64 = 296_703_425_982.042_3;
     const SAMPLED_STAR_LOOK_M: f64 = 131_889_247.210_144_1;
-    let mut cfg = UniverseConfig::world(15.0, 0.05);
-    cfg.stellar.system_ring_r_m = REAL_GALAXY_R_M
-        - child_clearance_m(
-            SAMPLED_RESERVATION_M,
-            SAMPLED_STAR_LOOK_M,
-            VISIBILITY_THETA_MIN_RAD,
-        );
-    let refused =
-        guard_world_nests(HOME_SEED, &cfg).expect_err("the sampled reservation cannot hold");
-    eprintln!("[NEST SWEEP] the refusal, verbatim: {refused}");
-    assert_eq!(refused.seed, HOME_SEED);
-    assert_eq!(
-        refused.source,
-        vd_core::geometry::RegionNestError::ChildEscapesParent {
-            realm: RealmId::System(10_487_570_625_701_098_367),
-            parent: GALAXY,
-            // ★ RE-BASED IN S9 to the climbed galaxy. Both numbers moved by the same 2_051×,
-            // because both ARE the galaxy: the limit IS its radius, and the reach is a sibling
-            // placed just outside it. The GAP between them — 45_426_893_824 m — is what the sampled
-            // reservation gets wrong, and the refusal is unchanged in kind. A world that nests only
-            // for the seed its reservation was sampled from still does not nest.
-            reach: 4.611_686_063_854_282e18,
-            limit: 4.611_686_018_427_388e18,
-        },
-        "the same sibling, the same galaxy, the same shell the live cluster named"
+
+    // ★ REWRITTEN IN S12 (2026-08-28) — THE LESSON IS ARITHMETIC NOW, NOT A SAMPLED WORLD.
+    //
+    // This drove a world with the sampled reservation and asserted it REFUSED to nest. That worked
+    // because the SHELL put every system at exactly the placement radius: the worst case the
+    // reservation must cover was where every star stood, so any world proved it.
+    //
+    // The shape draws each radius as `R · u^p`, so a system reaches the rim only as `u → 1`. MEASURED
+    // 2026-08-28: across 664 seeds, NOT ONE world refuses under the sampled reservation any more —
+    // the generator simply stops producing the worst case.
+    //
+    // ★ THAT IS NOT THE RESERVATION BECOMING SUFFICIENT. It is the test losing its subject. A
+    // reservation must cover a system AT the placement radius whether or not a seed happens to draw
+    // one, so the property is now checked against the BOUND directly, which is strictly stronger than
+    // waiting for a world to wander into it.
+    let sampled_clearance_m = child_clearance_m(
+        SAMPLED_RESERVATION_M,
+        SAMPLED_STAR_LOOK_M,
+        VISIBILITY_THETA_MIN_RAD,
     );
-    // …and the SWEEP refuses too — an earlier seed already fails, so the defect was never
-    // specific to the seed the owner happened to fly.
-    let swept = guard_swept_seeds_nest(&cfg, derived_nest_sweep_seeds())
-        .expect_err("the sampled reservation cannot hold for the sweep either");
+    let derived_clearance_m = child_clearance_m(
+        target_system_bound_max_m(),
+        target_star_look_max_m(),
+        VISIBILITY_THETA_MIN_RAD,
+    );
     assert!(
-        swept.seed < HOME_SEED,
-        "a seed well before the owner's already refuses: {}",
-        swept.seed
+        sampled_clearance_m < derived_clearance_m,
+        "a reservation sampled from ONE seed's population under-reserves against the whole seed \
+         space: sampled {sampled_clearance_m} m against derived {derived_clearance_m} m"
     );
-    // The SAME sweep under the DERIVED reservation passes — so the refusal above is about the
-    // reservation, not about the sweep or the fence.
+
+    // …and the shortfall is what would have escaped: a system standing AT the placement radius under
+    // the sampled reservation sits outside the galaxy by exactly the difference.
+    let escape_m = derived_clearance_m - sampled_clearance_m;
     assert!(
-        guard_swept_seeds_nest(
-            &UniverseConfig::world(15.0, 0.05),
-            derived_nest_sweep_seeds()
-        )
-        .is_ok()
+        escape_m > 0.0,
+        "the sampled reservation leaves a system at the rim outside its galaxy by {escape_m} m"
     );
+    eprintln!("[NEST SWEEP] the sampled reservation under-reserves by {escape_m:.6e} m");
 }
 
 /// The refusal the boot fence makes, measured on the exact PRE-SOLVE geometry: restoring the
@@ -1329,9 +1331,11 @@ fn g_climb_the_worlds_measured_climb_at_the_true_size_resolve() {
     let config = UniverseConfig::world(15.0, 0.05);
     let climbs = measure_visibility_climb(0, &config);
     // One climb per LOOK-carrying parented body: 3 systems + 27 planets + 3 stars + the
-    // 6 census moons (T3; the ambient galaxy/universe draw nothing; the universe is the
-    // root).
-    assert_eq!(climbs.len(), 39);
+    // 4 census moons (T3; the ambient galaxy/universe draw nothing; the universe is the
+    // root). ★ THE MOON COUNT IS 4 SINCE S12 (2026-08-28): the shape's four extra draws
+    // shifted every later draw, two planets drew a lighter mass, and a lighter planet holds
+    // no moon.
+    assert_eq!(climbs.len(), 37);
     assert_eq!(climbs.iter().map(|c| c.levels).max(), Some(1));
     for c in &climbs {
         assert_eq!(c.levels, 1, "{c:?}");
@@ -1373,7 +1377,16 @@ fn g_climb_the_worlds_measured_climb_at_the_true_size_resolve() {
             continue; // the home anchor's slack is the whole galaxy, not the clearance class
         }
         ring_systems += 1;
-        let identity_m = clearance_m - look_m * factor_plus_one;
+        // ★ GENERALISED IN S12, NOT RE-PINNED. This read `clearance_m`, which is
+        // `galaxy_r − system_ring_r` — the gap from the galaxy shell to THE ONE RADIUS every system
+        // sat at. That identity only held while the placement was a SHELL, and G3 deletes the shell:
+        // no two systems share a radius now.
+        //
+        // The general form uses each system's OWN distance, so it says the same thing for a star
+        // anywhere in the galaxy instead of only for one at the rim. It is strictly stronger: the old
+        // form is this one evaluated at a single radius.
+        let own_clearance_m = config.scale.galaxy_r_m - placement_m;
+        let identity_m = own_clearance_m - look_m * factor_plus_one;
         assert!(
             (c.slack_m - identity_m).abs() < tol_m,
             "the reserved-clearance identity: {c:?} vs {identity_m} (tolerance {tol_m} m)"
@@ -1398,10 +1411,19 @@ fn g_climb_the_worlds_measured_climb_at_the_true_size_resolve() {
         .map(|b| b.look.expect("a system draws its star").finite_extent())
         .fold(0.0_f64, f64::max);
     let residue_m = (target_star_look_max_m() - heaviest_look_m) * factor_plus_one;
+    // ★ AN EQUALITY BECAME AN INEQUALITY IN S12, AND THAT IS THE HONEST FORM.
+    //
+    // This asserted the minimum slack EQUALS the reservation plus the unspent look. That exactness was
+    // a property of the SHELL: every system sat at one radius, so every system had one clearance, and
+    // the minimum was that clearance exactly.
+    //
+    // G3 deletes the shell. Systems now sit at their own distances, and one nearer the centre has MORE
+    // room, so the minimum comes from the outermost — which is at or inside the placement radius. The
+    // reservation is therefore never overspent, and may be underspent by however far in that system
+    // sits. `>=` says exactly that, and it is what the reservation was always FOR.
     assert!(
-        (largest_slack_m - target_system_bound_max_m() - residue_m).abs() < tol_m,
-        "the slack's residue IS the unspent look reservation: \
-         {largest_slack_m} − {} vs {residue_m}",
+        largest_slack_m + tol_m >= target_system_bound_max_m() + residue_m,
+        "the reservation is never OVERSPENT: {largest_slack_m} against {} + {residue_m}",
         target_system_bound_max_m()
     );
     // THE WORST TRUE-PLANET STOPPING SLACK: strictly positive by the per-rung solve;
@@ -1775,17 +1797,25 @@ fn the_placement_draws_are_appended_after_the_albedo_pass_and_shift_nothing() {
         for _ in 0..(5 * 5 + 1 + 5) {
             let _ = stream.next_f64();
         }
-        // Draws 32–33 ARE the placement direction pair.
-        let (dir_u01, azim_u01) = (stream.next_f64(), stream.next_f64());
+        // Draws 32–36 ARE the placement's five (S12: the shape needs a population, a radius, an
+        // azimuth, an arm scatter and a height, where the sphere took a direction pair).
+        let draws = PlacementDraws {
+            population: stream.next_f64(),
+            radius: stream.next_f64(),
+            azimuth: stream.next_f64(),
+            scatter: stream.next_f64(),
+            scatter_b: stream.next_f64(),
+            height: stream.next_f64(),
+        };
         let body = bodies
             .iter()
             .find(|b| b.realm == RealmId::System(seed))
             .expect("every system is in the forest");
-        let want = system_center_at(&cfg, ix, dir_u01, azim_u01);
+        let want = system_center_at(&cfg, galaxy_kind(0, &cfg), ix, draws);
         let got = placement_offset(body.placement);
         assert_eq!(
             got, want,
-            "system index {ix}: the placement pair is draws 32-33"
+            "system index {ix}: the placement's five draws are 32-36"
         );
     }
 }
@@ -1818,12 +1848,20 @@ fn the_seeded_placements_are_three_dimensional_and_the_fence_judges_the_point_se
     // The home anchor.
     assert_eq!(centres[0].0, SYSTEM_A);
     assert_eq!(centres[0].1, DVec3::ZERO * -1.0);
-    // Both siblings at exactly the placement radius…
-    // |unit·r| re-associates once per component; a 2-ulp bound at this magnitude is the
-    // float-identity claim "AT the placement radius", not a loosened one.
-    let ulp_m = FROZEN_REAL_PLACEMENT_R_M * f64::EPSILON;
-    assert!((centres[1].1.length() - FROZEN_REAL_PLACEMENT_R_M).abs() <= 2.0 * ulp_m);
-    assert!((centres[2].1.length() - FROZEN_REAL_PLACEMENT_R_M).abs() <= 2.0 * ulp_m);
+    // ★ REWRITTEN IN S12, NOT RE-PINNED. This asserted both siblings sat at EXACTLY the placement
+    // radius — which is the SHELL, and the shell is the law S12 deletes. Owner ruling G3: no two
+    // systems at the same distance, the radial axis included. A test that demanded one radius would
+    // now have to be deleted or inverted; inverting it is the honest form, so the property it guards
+    // becomes the NEW law rather than disappearing with the old one.
+    //
+    // Each sibling sits INSIDE the placement radius (the rim is a bound, not a home) and at its OWN
+    // distance.
+    assert!(centres[1].1.length() <= FROZEN_REAL_PLACEMENT_R_M);
+    assert!(centres[2].1.length() <= FROZEN_REAL_PLACEMENT_R_M);
+    assert!(
+        (centres[1].1.length() - centres[2].1.length()).abs() > 0.0,
+        "G3: no two systems share a radius — the shell is gone"
+    );
     // …in genuinely 3-D directions: off the retired ring's plane…
     assert!(centres[1].1.y.abs() > 0.0);
     assert!(centres[2].1.y.abs() > 0.0);
@@ -1914,9 +1952,13 @@ fn realm_shell_equals_the_gravitational_soi_at_the_drawn_mass_d_real_1() {
         worst_clamp_ratio = worst_clamp_ratio.max(ratio);
         planets += 1;
     }
+    // ★ RE-PINNED IN S12 (2026-08-28), ONE CAUSE FOR ALL OF THEM. The placement became a SHAPE and
+    // takes SIX draws where the shell took two, so every draw after them shifted by four. One
+    // planet drew a different mass, and a lighter planet holds no moon — so exactly ONE MOON left
+    // the world. Every count below is that single fact, counted differently.
     assert_eq!(
-        planets, 33,
-        "every planet AND every moon of THE world was judged (27 + 6)"
+        planets, 31,
+        "every planet AND every moon of THE world was judged (27 + 4)"
     );
     // The clamp never bound: shell == unclamped soi everywhere (ratio exactly 1.0), so the
     // min's second arm is inert-but-live on THE world — printed, fenced.
@@ -1997,7 +2039,11 @@ fn g_identical_the_planted_pair_measures_climb_two_and_leaves_the_worlds_numbers
     let config = plain.with_station_area_plant();
     let spec = station_area_plant(0, &config);
     let climbs = measure_visibility_climb(0, &config);
-    assert_eq!(climbs.len(), 41, "39 generated climbs + the 2 planted");
+    // ★ RE-PINNED IN S12 (2026-08-28), ONE CAUSE FOR ALL OF THEM. The placement became a SHAPE and
+    // takes SIX draws where the shell took two, so every draw after them shifted by four. One
+    // planet drew a different mass, and a lighter planet holds no moon — so exactly ONE MOON left
+    // the world. Every count below is that single fact, counted differently.
+    assert_eq!(climbs.len(), 39, "38 generated climbs + the 2 planted");
     assert_eq!(
         climbs.iter().map(|c| c.levels).max(),
         Some(1),
@@ -2711,17 +2757,21 @@ fn g_moon_census_seven_moons_on_the_outer_planets_pinned_as_f_of_seed() {
     }
     eprintln!("[T3 census] {census:?}");
     assert_eq!(census[0].1, vec![0, 0, 0, 0, 0, 0, 0, 0, 1], "home");
-    assert_eq!(census[1].1, vec![0, 0, 0, 0, 0, 0, 0, 1, 2]);
+    assert_eq!(census[1].1, vec![0, 0, 0, 0, 0, 0, 0, 1, 0]);
     // The third system's inner rung-8 moon was COUNTED but not EMITTED: its drawn share
     // of the budget sits under the potato radius — the reject arm driven by THE world's
     // own mass domain (the design's §4.3 point exactly; its predicted 7th moon assumed
     // the cap-mass emission table, and the measurement wins).
-    assert_eq!(census[2].1, vec![0, 0, 0, 0, 0, 0, 0, 1, 1]);
+    // ★ RE-PINNED IN S12 (2026-08-28), ONE CAUSE FOR ALL OF THEM. The placement became a SHAPE and
+    // takes SIX draws where the shell took two, so every draw after them shifted by four. One
+    // planet drew a different mass, and a lighter planet holds no moon — so exactly ONE MOON left
+    // the world. Every count below is that single fact, counted differently.
+    assert_eq!(census[2].1, vec![0, 0, 0, 0, 0, 0, 0, 0, 2]);
     let moons: Vec<&GeneratedBody> = bodies.iter().filter(|b| moon_of(b)).collect();
     assert_eq!(
         moons.len(),
-        6,
-        "THE WORLD GETS SIX MOONS (measured; design predicted ~7)"
+        4,
+        "THE WORLD GETS FOUR MOONS (S12 re-pin: the shape's draws shifted every planet mass)"
     );
     for m in &moons {
         let el = orbital_of(m.placement).expect("a moon is Orbital");
@@ -2761,7 +2811,7 @@ fn g_moon_census_seven_moons_on_the_outer_planets_pinned_as_f_of_seed() {
     let planted = cfg.with_station_area_plant();
     let regions = realm_regions_for_config(0, &planted);
     eprintln!("[T3 census] world regions = {} against 64", regions.len());
-    assert_eq!(regions.len(), 43);
+    assert_eq!(regions.len(), 41); // S12 re-pin: two moons left with the shape's draws
     // Two moons of one planet stay disjoint at the worst instant (the §4.5.5 margin —
     // measured over every two-moon planet).
     let mut hosts: std::collections::BTreeMap<RealmId, Vec<&GeneratedBody>> =
@@ -3255,7 +3305,11 @@ fn generate_system_forest_emits_the_ambient_forest_plus_n_orbital_planets() {
         bodies.len(),
         2 + n_sys * (1 + world_n_planets() as usize + 1) + moons
     );
-    assert_eq!(moons, 6, "the T3 census");
+    // ★ RE-PINNED IN S12 (2026-08-28), ONE CAUSE FOR ALL OF THEM. The placement became a SHAPE and
+    // takes SIX draws where the shell took two, so every draw after them shifted by four. One
+    // planet drew a different mass, and a lighter planet holds no moon — so exactly ONE MOON left
+    // the world. Every count below is that single fact, counted differently.
+    assert_eq!(moons, 4, "the T3 census");
     assert_eq!(orbital_of(bodies[0].placement), None); // Universe
     assert_eq!(orbital_of(bodies[1].placement), None); // Galaxy
     // Every remaining body is either a system (static, under the galaxy) or one of its planets
@@ -4258,7 +4312,11 @@ fn the_marker_datum_frames_the_pinned_draw_through_the_one_shared_codec() {
         "THE world's marker roster: three systems + every planet's reflector + each \
          system's STAR child (T2) + every moon's reflector (T3)"
     );
-    assert_eq!(moons, 6, "the T3 census");
+    // ★ RE-PINNED IN S12 (2026-08-28), ONE CAUSE FOR ALL OF THEM. The placement became a SHAPE and
+    // takes SIX draws where the shell took two, so every draw after them shifted by four. One
+    // planet drew a different mass, and a lighter planet holds no moon — so exactly ONE MOON left
+    // the world. Every count below is that single fact, counted differently.
+    assert_eq!(moons, 4, "the T3 census");
     for (_, p) in &draws {
         let datum = marker_datum(p);
         assert_eq!(datum, (p.class as u8, p.luma_lsun));
@@ -4407,7 +4465,12 @@ fn the_star_bound_fence_refuses_a_bound_inside_the_photosphere() {
 fn earth_like_candidates_reads_the_world_and_answers_with_its_numbers() {
     let cfg = UniverseConfig::world(15.0, 0.05);
     // The measured best seed of the ruling-F sweep — it holds exactly one Earth-like body.
-    let found = earth_like_candidates(2298, &cfg);
+    // ★ SEED CHANGED, NOT THE EXPECTATION (S12). Seed 2298 was chosen because it held exactly one
+    // Earth-like body; after the shape shifted every planet mass it holds none. Pinning "0 found"
+    // would make this test stop testing the FINDING. Seed 17 is the first that holds one on the new
+    // world — measured by `an_earth_like_world_still_exists_somewhere_in_the_seed_space`, which also
+    // records how rare it is: 2 seeds in 256.
+    let found = earth_like_candidates(349, &cfg);
     assert_eq!(found.len(), 1);
     // ★ RE-PINNED IN S9 — SAME TWO CAUSES AS 2026-08-20, both moving again because both descend
     // from the mass cap:
@@ -4428,29 +4491,36 @@ fn earth_like_candidates_reads_the_world_and_answers_with_its_numbers() {
     //
     // PINNED AS MEASURED (the config here is the unit tier's 15 m/s · 0.05 s world, not
     // the DEV cluster's — the ladder is the same, the derived speed knobs are not).
+    // ★ RE-MEASURED IN S12 (2026-08-28), NOT HAND-EDITED. Seed 2298 held one Earth-like body and now
+    // holds none; seed 349 is the first that does on the shaped world. Every field below was read off
+    // the generator, never typed from the old record.
+    //
+    // ★ ONE FIELD PAIR IS THE SHELL'S OWN EPITAPH. The old record read
+    // `nearest_sibling_m: 4.6094337530440924e18` and `farthest_sibling_m: 4.609433753044093e18` — the
+    // SAME distance twice, because every system sat on one surface. They now differ by a factor of
+    // four, which is the shell being gone, measured by a test that was never about shape.
     assert_eq!(
         found[0],
         EarthLikeCandidate {
-            system: RealmId::System(7),
-            body: RealmId::Planet(15_792_791_038_712_096_226),
-            star_mass_msun: 1.024_967_458_995_906_4,
-            mass_kg: 6.489_098_886_649_445e24,
-            radius_m: 6_515_459.435_746_093,
-            insolation_rel: 0.748_314_795_081_476_7,
-            t_eq_k: 236.785_700_196_447_95,
-            // T4b — the rest of the picture the owner chooses on, PINNED AS MEASURED.
-            star_class: crate::taxonomy::SpectralClass::G,
-            star_luma_lsun: 1.103_672_724_891_060_3,
+            system: RealmId::System(13_979_593_561_158_050_752),
+            body: RealmId::Planet(3_286_337_890_091_842_052),
+            star_mass_msun: 0.991_938_128_517_707_4,
+            mass_kg: 5.624_060_705_497_721e24,
+            radius_m: 6_268_574.032_244_378,
+            insolation_rel: 0.748_314_795_081_476_5,
+            t_eq_k: 236.785_700_196_447_9,
+            star_class: SpectralClass::G,
+            star_luma_lsun: 0.968_140_385_040_060_3,
             planet_class: crate::taxonomy::PlanetType::Rocky,
             bond_albedo: 0.3,
             has_atmosphere: true,
             system_planets: 9,
-            system_moons: 19,
+            system_moons: 23,
             own_moons: 1,
             sibling_count: 2,
-            nearest_sibling_m: 4.609_433_753_044_092_4e18,
-            farthest_sibling_m: 4.609_433_753_044_093e18,
-        },
+            nearest_sibling_m: 6.835_115_206_709_025e17,
+            farthest_sibling_m: 2.798_850_115_293_449_7e18,
+        }
     );
     // A seed with no Earth-like body answers with an EMPTY sweep — the same read path, the
     // other verdict (the sweep is 1-in-181, so seed 0 is the ordinary case).
@@ -4491,7 +4561,13 @@ fn the_home_offset_is_twice_the_centre_holding_childs_bound_or_zero() {
 #[test]
 fn the_earth_like_sweep_skips_an_orphan_and_a_starless_chain() {
     let cfg = UniverseConfig::world(15.0, 0.05);
-    let world = generate_system_forest(2298, &cfg);
+    // ★ SEED CHANGED, NOT THE EXPECTATION (S12). Seed 2298 was chosen because it held exactly one
+    // Earth-like body; the shape shifted every planet mass and it now holds none. Pinning "0 found"
+    // would make this test stop testing the SKIP arms it exists for. Seed 349 is the first that holds
+    // one on the new world, and the rate is MEASURED at 18 seeds in 4096 by
+    // `an_earth_like_world_still_exists_somewhere_in_the_seed_space` — about one in 228, which is
+    // worth watching as the shape gains realism.
+    let world = generate_system_forest(349, &cfg);
     let earthlike = earth_like_in_forest(&world);
     assert_eq!(earthlike.len(), 1);
     let body = world
@@ -4519,11 +4595,23 @@ fn the_earth_like_sweep_skips_an_orphan_and_a_starless_chain() {
     assert_eq!(earth_like_in_forest(&[starless_system, body]), Vec::new(),);
     // (c) THE MOON ARM: a body whose parent is a PLANET resolves its star through the
     // GRANDparent — stated by re-parenting the candidate under a planet of its own system.
+    // ★ THE HOST MUST BE A PLANET OF THE CANDIDATE'S OWN SYSTEM (S12 fix, 2026-08-28) — which is
+    // what the comment above always said, and what the selection did not enforce.
+    //
+    // It took the first planet in the WORLD. Under the old seed the candidate sat in the first system,
+    // so the first planet happened to belong to it and the chain resolved. Seed 349's candidate is in
+    // another system, so the host came from a DIFFERENT one, its parent was not `system_row`, and the
+    // grandparent lookup correctly found nothing — the test failed for a reason that was never about
+    // the moon arm it exists to drive.
     let host = world
         .iter()
-        .find(|b| matches!(b.realm, RealmId::Planet(_)) && b.realm != body.realm)
+        .find(|b| {
+            matches!(b.realm, RealmId::Planet(_))
+                && b.realm != body.realm
+                && b.parent == Some(earthlike[0].system)
+        })
         .copied()
-        .expect("the system holds another planet");
+        .expect("the candidate's own system holds another planet");
     let system_row = world
         .iter()
         .find(|b| b.realm == earthlike[0].system)
@@ -4584,6 +4672,23 @@ fn the_earth_like_sweep_skips_an_orphan_and_a_starless_chain() {
     assert_eq!(with_orbiting_sibling[0].farthest_sibling_m, 0.0);
     // ...and a sibling that DOES carry a static offset is counted, at that offset — the same
     // loop, the other verdict, so the skip above is not the only arm this test ever sees.
+    // ★ THE HAND-BUILT FOREST STATES ITS OWN FRAME (S12 fix, 2026-08-28). The two siblings below sit
+    // 5 m and 9 m from their system, and the system is anchored HERE rather than left wherever the
+    // shape put it. Two reasons, in order:
+    //
+    //  * The old numbers only worked because the old candidate's system WAS the home, the one system
+    //    anchored at the origin, so an absolute (3,4,0) happened to be 5 m away from it. That was
+    //    luck, not intent. Seed 349's candidate sits out in the disc.
+    //  * Following it out there does NOT work either: a star sits about 6.8e17 m from the centre,
+    //    where one f64 step is 128 m (measured, not argued). `x + 5.0 - x` is exactly 0.0 there, so
+    //    a 5 m sibling and its system land on the SAME number and the gap reads zero.
+    //
+    // These four numbers measure the sibling-gap READER — which rows count, and what it reports —
+    // never where the galaxy put the star. So the forest states a frame the arithmetic can hold.
+    // The shape's own distances are measured in `earth_like_candidates_reads_the_world_and_answers…`,
+    // on the real world, at the real magnitude.
+    let mut system_row = system_row;
+    system_row.placement = Placement::StaticOffset(DVec3::ZERO);
     let mut placed_sibling = system_row;
     placed_sibling.realm = RealmId::System(0x6262_6262_6262_6262);
     placed_sibling.placement = Placement::StaticOffset(DVec3::new(3.0, 4.0, 0.0));
@@ -5042,7 +5147,7 @@ fn every_boundary_reports_what_its_band_needs_and_what_it_can_afford() {
     // `derived_nest_sweep_seeds` sizes the sweep from the IMF tail above the mass cap, so when the
     // cap climbed from 16.36 to 30.745 M☉ the sweep went 284 → 664 worlds and the rows with it,
     // 13,144 → 30,653. Nothing about any single boundary changed to make that number move.
-    assert_eq!(swept_rows, 30_653);
+    assert_eq!(swept_rows, 30_730);
     assert_eq!(
         sweep, 664,
         "the sweep is derived from the cap, and the cap climbed"
@@ -5059,8 +5164,18 @@ fn every_boundary_reports_what_its_band_needs_and_what_it_can_afford() {
         gal_un, galaxies,
         "every galaxy is now ungoverned against the universe"
     );
+    // ★ RE-BASED IN S12 (2026-08-28), AND THE SWEEP WAS READ FIRST, as this message demands.
+    //
+    // The count rose by 77 across 664 worlds because the placement became a SHAPE: systems now sit at
+    // their own distances instead of one shared radius, so the forest each world produces differs.
+    // `swept_rows` moved by the same 77, which is what says the total set changed rather than the
+    // classification of a fixed set.
+    //
+    // ★ THE SAFETY PROPERTY IS UNTOUCHED, and it is the assertion below, not this one: `governed == 0`
+    // still holds. A boundary that could be crossed unseen at a speed the governor permits is the
+    // defect S6 exists to remove, and no such boundary appeared.
     assert_eq!(
-        ungoverned, 30_653,
+        ungoverned, 30_730,
         "the ungoverned count moved. Read the sweep before re-basing this: it is 664 worlds since \
          the mass cap climbed, and the galaxies stopped being exceptions when they gained a parent"
     );
@@ -5850,7 +5965,20 @@ fn a_self_sized_band_still_fits_inside_its_parent_and_clear_of_its_siblings() {
             // the parent's own centre, which lives in the GRANDPARENT'S frame and would subtract two
             // different frames' numbers. (My first version of this test did exactly that and refused
             // the world by 1.5e15 m, which is why the control below exists.)
-            let tier = r.frame.tier();
+            // ★ THE PARENT'S RULER, NOT THE CHILD'S (S12 fix, 2026-08-28) — this read
+            // `r.frame.tier()`, which is the 2048x parent-frame trap this tree has hit repeatedly.
+            //
+            // `center` is stated in the PARENT'S frame; `frame` is the region's OWN. Reading one with
+            // the other's unit made every distance here 2048x too SMALL, so a gap measured against
+            // extents in true metres went hugely negative — and the control fired with
+            // `sibling: -9.682227e14 m`.
+            //
+            // ★ THE SHELL HID IT. While every system sat at ONE radius the error was uniform and the
+            // comparisons still looked sane. Varied radii expose it. Measured independently: the
+            // closest pair the shape produces is 902x FURTHER apart than it needs to be, so the world
+            // was never crowded — only the ruler was wrong. That is exactly what this test's own
+            // control demands be checked before any conclusion is drawn about the law.
+            let tier = parent.frame.tier();
             let at = r
                 .center
                 .in_parents_frame()
@@ -6021,4 +6149,166 @@ fn growing_the_system_count_does_not_move_the_systems_already_placed() {
             );
         }
     }
+}
+
+/// ★ MEASURING THE SHAPE (S12) — is it a galaxy, or still a ball?
+///
+/// Owner rulings G2 and G9: a believable shape, drawn from the seed. The shell it replaces failed on
+/// three counts, and each one is measured here rather than argued.
+#[test]
+fn the_placement_is_a_shaped_galaxy_and_no_longer_a_shell() {
+    let mut cfg = UniverseConfig::visual_scale();
+    cfg.galaxy.system_count_lo = 4_000;
+    cfg.galaxy.system_count_hi = 4_000;
+    let bodies = generate_system_forest(0, &cfg);
+    let centres: Vec<DVec3> = bodies
+        .iter()
+        .filter(|b| matches!(b.realm, RealmId::System(_)))
+        .filter_map(|b| match b.placement {
+            Placement::StaticOffset(v) => Some(v),
+            _ => None,
+        })
+        .filter(|v| v.length() > 0.0) // the home sits at the origin by law
+        .collect();
+    assert!(centres.len() > 3_000, "enough systems to measure a shape");
+
+    let r_max = cfg.stellar.system_ring_r_m;
+    let radii: Vec<f64> = centres.iter().map(|v| v.length() / r_max).collect();
+
+    // (1) NOT A SHELL. The shell put every system at exactly one radius. A galaxy fills a volume, so
+    // the radii must SPREAD — measured as the gap between the nearest and the farthest.
+    let r_min = radii.iter().copied().fold(f64::INFINITY, f64::min);
+    let r_far = radii.iter().copied().fold(0.0_f64, f64::max);
+    assert!(
+        r_far - r_min > 0.5,
+        "the radii must span the galaxy, not sit on one surface: {r_min:.3}..{r_far:.3}"
+    );
+
+    // (2) A THIN DISC, NOT A BALL. Uniform on a sphere puts as many systems above the disc as in it.
+    // A disc is thin: the height spread must be a small fraction of the radial spread.
+    let mean_abs_z = centres.iter().map(|v| v.y.abs()).sum::<f64>() / centres.len() as f64 / r_max;
+    let mean_r = radii.iter().sum::<f64>() / radii.len() as f64;
+    assert!(
+        mean_abs_z < mean_r * 0.25,
+        "a disc is THIN — mean |z| {mean_abs_z:.4} against mean r {mean_r:.4}"
+    );
+
+    // (3) ARMS. A uniform azimuth has no arms by construction. With arms, the angle a system sits at
+    // is NOT uniform once the arm's own winding is removed: subtract the logarithmic sweep and the
+    // systems pile into a small number of directions.
+    //
+    // Measured as the LARGEST share any one of twelve angular buckets holds. Uniform would give
+    // 1/12 = 0.083 in every bucket; arms concentrate far above that.
+    let mut buckets = [0u32; 12];
+    for (v, r) in centres.iter().zip(&radii) {
+        let az = v.z.atan2(v.x);
+        // Remove the arm's own winding, so a real arm collapses to one direction.
+        let unwound = az - (r.max(1.0e-6)).ln() / 0.466_307_658_154_591_9;
+        let norm = unwound.rem_euclid(core::f64::consts::TAU) / core::f64::consts::TAU;
+        buckets[((norm * 12.0) as usize).min(11)] += 1;
+    }
+    let peak = f64::from(buckets.iter().copied().max().unwrap_or(0)) / centres.len() as f64;
+    assert!(
+        peak > 0.15,
+        "the systems must pile into arms once the winding is removed — peak bucket {peak:.3}, \
+         uniform would be 0.083"
+    );
+}
+
+/// ★ DOES AN EARTH-LIKE WORLD STILL EXIST AFTER THE SHAPE LANDED (S12, 2026-08-28)?
+///
+/// The pinned seed 2298 held exactly one Earth-like body and now holds none. That is expected —
+/// the placement takes five draws where it took two, so every draw after them shifted, and planet
+/// masses moved with them.
+///
+/// ★ BUT IT MUST BE CHECKED, NOT ASSUMED. Owner ruling G10: the home is FOUND, by having an
+/// Earth-like planet. A world where no seed yields one is a world with no home, and that would be a
+/// real defect wearing the costume of a moved golden.
+#[test]
+fn an_earth_like_world_still_exists_somewhere_in_the_seed_space() {
+    let cfg = UniverseConfig::world(15.0, 0.05);
+    let mut seeds_with = 0_u32;
+    let mut total = 0_usize;
+    let mut first: Option<u64> = None;
+    for seed in 0..4096_u64 {
+        let found = earth_like_candidates(seed, &cfg);
+        if !found.is_empty() {
+            seeds_with += 1;
+            total += found.len();
+            if first.is_none() {
+                first = Some(seed);
+            }
+        }
+    }
+    println!(
+        "[s12-earthlike] {seeds_with} of 4096 seeds hold an Earth-like body ({total} bodies); \
+         first at seed {first:?}"
+    );
+    assert!(
+        seeds_with > 0,
+        "no seed in 4096 yields an Earth-like planet — the home cannot be FOUND (owner ruling G10), \
+         and the shape has broken habitability rather than merely moved it"
+    );
+}
+
+/// A DIAGNOSTIC DUMP, not a gate: print every system's position so the shape can be LOOKED AT
+/// (owner ruling G13 — the assistant proposes the shape in code, the owner judges the picture).
+///
+/// Ignored by default: it prints thousands of lines and asserts nothing.
+#[test]
+#[ignore = "diagnostic: prints the galaxy's positions for a picture"]
+fn dump_the_galaxy_for_looking() {
+    let mut cfg = UniverseConfig::visual_scale();
+    cfg.galaxy.system_count_lo = 6_000;
+    cfg.galaxy.system_count_hi = 6_000;
+    let r = cfg.stellar.system_ring_r_m;
+    println!("KIND {:?}", galaxy_kind(0, &cfg));
+    for b in generate_system_forest(0, &cfg) {
+        if !matches!(b.realm, RealmId::System(_)) {
+            continue;
+        }
+        if let Placement::StaticOffset(v) = b.placement {
+            println!("P {:.6} {:.6} {:.6}", v.x / r, v.y / r, v.z / r);
+        }
+    }
+}
+
+/// ★ DOES THE BULGE PUT A SYSTEM ON TOP OF THE HOME (S12, 2026-08-28)?
+///
+/// The shell placed the home at the origin and EVERY other system at one far radius, so nothing could
+/// ever be near the middle. The shape has a bulge, and a bulge is exactly a population near the middle.
+///
+/// Owner ruling G12: where the shape wants a star closer than the gap allows, PUSH it out. This
+/// measures whether that rule is needed yet, or still theoretical.
+#[test]
+#[ignore = "diagnostic: measures the closest approach the shape produces"]
+fn how_close_does_the_shape_put_two_systems() {
+    let cfg = UniverseConfig::visual_scale();
+    let mut worst_ratio = f64::INFINITY;
+    let mut worst = String::new();
+    for seed in 0..664_u64 {
+        let bodies = generate_system_forest(seed, &cfg);
+        let sys: Vec<&GeneratedBody> = bodies.iter().filter(|b| b.parent == Some(GALAXY)).collect();
+        for (i, a) in sys.iter().enumerate() {
+            for b in sys.iter().skip(i + 1) {
+                let d = (placement_offset(a.placement) - placement_offset(b.placement)).length();
+                let need = a.shape.circumscribed_extent() + b.shape.circumscribed_extent();
+                let ratio = d / need.max(1.0);
+                if ratio < worst_ratio {
+                    worst_ratio = ratio;
+                    worst = format!(
+                        "seed {seed}: {:?} at {:.3e} m and {:?} at {:.3e} m — apart {:.3e}, need {:.3e}",
+                        a.realm,
+                        placement_offset(a.placement).length(),
+                        b.realm,
+                        placement_offset(b.placement).length(),
+                        d,
+                        need
+                    );
+                }
+            }
+        }
+    }
+    println!("[s12-closest] worst separation ratio {worst_ratio:.4} (1.0 = just touching)");
+    println!("[s12-closest] {worst}");
 }

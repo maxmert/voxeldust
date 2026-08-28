@@ -392,8 +392,13 @@ fn g_governed_bands_bracket_every_ambient_boundary_on_the_world() {
     //     the other sibling holds none. (The derived mass cap did NOT move the total: seed 0 still
     //     holds 6 census moons under it, as
     //     `g_climb_the_worlds_measured_climb_at_the_true_size_resolve` measures.)
+    //     ★ RE-PINNED 56 → 51 IN S12 (2026-08-28), and MEASURED off this gate's own roster print,
+    //     never inferred: 1 Galaxy + 3 System + 3 Star + 27 planets + 17 moons = 51. Only the moons
+    //     moved (22 → 17). The placement became a SHAPE and takes SIX seed draws where the shell
+    //     took two, so every draw after them shifted by four; five planets drew a lighter mass, and
+    //     a lighter planet holds no moon.
     assert_eq!(
-        governed_rows, 56,
+        governed_rows, 51,
         "THE world's governed-boundary roster changed — restate this gate against the new world",
     );
 }
