@@ -183,12 +183,149 @@ seed ruling's line is drawn before anything valuable is written.
 
 ---
 
-## STILL OPEN
+---
 
-- **How faithful is the spiral?** A bulge, a disc thickness and an arm pitch angle are real modelling
-  numbers. They must be seed-derived (G1), but their FORM — the law they are drawn from — is not decided
-  here.
-- **Does the count follow from density and size, or is it still stated?** G1 says every number the
-  placement reads is seed-derived, which points at the count being an OUTCOME. The plan still carries
-  `census 150,000` as a target. These must be reconciled in S12, and the gate re-stated in terms of what
-  is actually measured.
+## G8. THE COUNT IS A RESULT, AND EVERY GALAXY HAS ITS OWN (owner, 2026-08-28)
+
+**Owner:** *"Count is a result - I agree with that. 150K is the target number, not exact amount all
+galaxies should have. The amount also should come from the seed."*
+
+So `150,000` is a SCALE, not a census. It says roughly how big a galaxy of this world is. It is not a
+number any galaxy must hit, and it is not a number a person sets.
+
+Each galaxy draws its own size and its own density. Its population FOLLOWS:
+
+```text
+   seed -> shape, size, density
+        -> the count is whatever that volume at that density holds
+```
+
+**THE GATE CHANGES WITH IT.** *"The world holds 150,000 systems"* is no longer the property to assert —
+it names a number nobody chose. What must be asserted is that the population MATCHES the density the
+seed drew, and that the mean nearest neighbour is what that density implies. The believability is the
+measurement; the count is an outcome of it.
+
+⚠ **`WORLD_SYSTEM_COUNT: u32 = 3` (`generate.rs:51`) is a stated count and must go.** So must any later
+constant that names a population.
+
+---
+
+## G9. THE SHAPE IS AS FAITHFUL AS WE CAN MAKE IT (owner, 2026-08-28)
+
+**Owner, asked how faithful the spiral should be:** *"Ideally very faihful!"*
+
+A bulge, a disc with real thickness, arms with a pitch angle, and a density that falls with radius. Not
+a gesture at a spiral — the thing itself, to the extent the seed and the arithmetic allow.
+
+---
+
+## G10. THE HOME IS FOUND, NOT PLACED — AND THE START BECOMES DYNAMIC (owner, 2026-08-28)
+
+**Owner:** *"In the new galaxy we need to find a new home, with the earth-like planet. In the future all
+players will start in one city, which will be the economy and communication hub, meaning we will need to
+build cities and stations by hand on the planets of that system. So the starting position in the future
+should be dynamic and should be decided by the algorithm (similar to star citizen, players can start
+inside their apartments, and we will need to make sure that they do not overlap, but now as we want to
+test the ship realm mechanics and warp, we can start in that home system)."*
+
+**THE END STATE:**
+
+1. The home system is **found** — searched for by the property that matters, an Earth-like planet. It is
+   not a position the placement law hands out, and it is certainly not "the centre".
+2. **Every player starts in ONE city**, which is the economy and communication hub. That city is BUILT,
+   by hand, on a planet of that system.
+3. The starting POSITION is then **dynamic, decided by an algorithm** — players begin inside their own
+   apartments, and no two may overlap.
+
+**FOR NOW, DELIBERATELY:** keep starting in the existing home system. The immediate goal is to fly a
+ship realm and test warp, and moving the start would change the thing under test.
+
+⚠ **THIS RETIRES "THE HOME SITS AT THE CENTRE".** Today the home is anchored at the galaxy's middle. In
+a faithful spiral that is the BULGE — the densest, brightest, most crowded region, and the hardest place
+to make believable. The home must be found by its own property, wherever the seed put it.
+
+---
+
+## G11. RAISE THE COUNT GRADUALLY — BUT NEVER WITH A SECOND WORLD (owner, 2026-08-28)
+
+**Owner:** *"It's ok to raise the count gradually, but we should not build separate arms or configs, or
+worlds for that - use the same seed and generation mechanisms and see how world reacts, so in the end we
+have the ~150K of stars in the production ready world."*
+
+This is SL5 reaching the placement, and it refuses the obvious shortcut. There may be:
+
+- no small-world preset,
+- no test-only census,
+- no config knob for the star count,
+- no second generator and no second code path.
+
+**HOW TO LOOK AT A SMALL GALAXY WITHOUT BUILDING ONE.** G8 already provides it: galaxies DIFFER in size
+and density, both drawn from their seeds, so some galaxies simply ARE small. Looking at a small galaxy is
+looking at THE world through a different seed — the same generator, the same law, no variant anywhere.
+
+**The end state is one production world holding roughly 150,000 systems**, reached by watching the real
+mechanism react, never by a scale that gets removed later.
+
+---
+
+## G12. WHEN THE SHAPE AND THE GAP DISAGREE, PUSH — NEVER DROP (owner, 2026-08-28)
+
+A faithful bulge asks for density. The per-pair gap sets a minimum separation. Where they meet, one must
+yield.
+
+**RULED: push the star out. Do not drop it.**
+
+```text
+   DROP  ->  thins the bulge exactly where the shape is trying to be densest
+             a galaxy with a suspiciously hollow middle — the shape defeated by its own rule
+   PUSH  ->  the star survives, moved, deterministically
+```
+
+**The push must itself be seed-derived**, or G4 breaks: a position that depends on the ORDER stars were
+considered in is a position that moves when the count changes. Same input, same answer, every time.
+
+### ★ THE HEADROOM, MEASURED 2026-08-28 — this is not a common case
+
+| | |
+|---|---|
+| galaxy radius | 487.5 ly (`root_radius_at(Tier::Galaxy)`) |
+| 150,000 systems spread evenly | **8.19 ly** mean nearest neighbour |
+| the gap floor | 1.00 ly |
+| headroom | **8.2x** |
+
+The floor binds only where the bulge exceeds **~550x** the mean density. A realistic bulge is around
+**60x**, which lands at 2.09 ly — comfortably clear.
+
+⚠ **BUT THE CONTRAST IS ITSELF SEED-DERIVED (G1), so a galaxy MAY draw one above 550x.** The push rule
+cannot assume a safe value; it must hold whatever the seed picks.
+
+⚠ **AND THIS IS THE UNIFORM FIGURE.** Arms concentrate stars further, so spacing inside an arm is
+tighter than 8.19 ly even outside the bulge. That is a SECOND measurement and it needs the arm model,
+which does not exist yet.
+
+---
+
+## G13. THE ARM LAW — PROPOSED IN CODE, JUDGED BY LOOKING (owner-agreed, 2026-08-28)
+
+*"Very faithful"* is a direction, not a formula. The assistant proposes the standard model and the owner
+judges the picture, because a galaxy is easier to judge than to specify:
+
+- a **logarithmic spiral** — arms winding outward at a fixed pitch angle;
+- stars **scattered around** an arm, never sitting on it (a line is as unbelievable as a shell);
+- a **bulge** whose density falls with radius;
+- a **disc with real thickness**.
+
+Every number of it drawn from the seed (G1): arm count, pitch angle, bulge fraction, disc thickness.
+
+---
+
+## G14. THE HOME SEARCH COMES AFTER S12 (owner, 2026-08-28)
+
+G10 says the home is FOUND — by having an Earth-like planet — not placed at the centre. **That work
+lands after S12.**
+
+S12 replaces the placement law. Finding a home is a search built ON that law. Doing both at once means a
+bad search and a bad shape look identical, and neither gets diagnosed.
+
+Until then the existing home system stays, deliberately: the immediate goal is to fly a ship realm and
+test warp, and moving the start would change the thing under test.
