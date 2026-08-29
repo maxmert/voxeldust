@@ -89,10 +89,18 @@ const STAMP_KEY: &[u8] = &[0u8];
 /// A staged fsync window: `Some` = put, `None` = delete (last-write-wins per key).
 type Batch = BTreeMap<Vec<u8>, Option<Bytes>>;
 
-/// Operational tuning for the redb writer (ONE config struct — no inline magic numbers). `Copy` in release;
-/// under `store-test-hooks` it carries owned test-pause fields (so `Copy` is gated off — release stays `Copy`).
+/// Operational tuning for the redb writer (ONE config struct — no inline magic numbers).
+///
+/// ★ CLONE ONLY, IN EVERY BUILD (2026-08-28). This used to derive `Copy` when `store-test-hooks` was
+/// off and not when it was on, because the feature adds owned fields. A trait that appears and vanishes
+/// with a feature makes one build compile and another not, and the one that broke was the one no gate
+/// linted: the orchestrator binary passed this by value into an `Fn` closure, which needs `Copy`. That
+/// stopped compiling at commit 7a0506e and stayed broken for four commits, which took the SIGKILL
+/// durability gate (`just orch-crash`) dark with it — the gate could not build its own binary.
+///
+/// One trait surface in every build is what stops that recurring. The type is small and is cloned once
+/// at boot, so nothing pays for it.
 #[derive(Clone, Debug)]
-#[cfg_attr(not(feature = "store-test-hooks"), derive(Copy))]
 pub struct StoreTuning {
     /// Bounded depth of the staged-batch hand-off channel. The EFFECTIVE in-flight depth is ONE
     /// (commit-blocks-on-prior); this is a small slack so a `send` never blocks the sim thread even

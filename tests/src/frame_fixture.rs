@@ -41,7 +41,7 @@
 //! label, every parent link and every region centre in this fixture is whatever production would produce
 //! for that config, and the fixture cannot drift away from what a shard actually boots:
 //!
-//! - `stellar.system_ring_r_m` sets the galaxy's OUTER RADIUS — the rim, not a ring. Since the galaxy
+//! - `stellar.galaxy_rim_r_m` sets the galaxy's OUTER RADIUS — the rim, not a ring. Since the galaxy
 //!   shape landed (S12; owner_decisions_2026-08-27_galaxy_shape.md) the seed decides where INSIDE that
 //!   rim each system sits: a population, a radius on a density profile, an arm, a scatter and a height.
 //!   The knob used to name the exact distance, because every system sat on one shell; the owner refused
@@ -470,13 +470,19 @@ impl WorkedExample {
 /// inside a shell that no longer contains what it should.
 fn story_config(system_from_galaxy_m: f64, planet_from_star_m: f64) -> UniverseConfig {
     let mut config = UniverseConfig::walk_scale();
-    // Exactly two stars: index 0 anchors at the galactic origin and index 1 is the story's neighbour, so
-    // there is exactly one hop to talk about and exactly one sibling to refuse. The placement radius below
-    // is the story's distance; the DIRECTION is the seed's since the 3-D seeded placement law (owner
-    // ruling Q-B) retired the collinear ring — this used to claim the neighbour sat on `+x` exactly.
-    config.galaxy.system_count_lo = 2;
-    config.galaxy.system_count_hi = 2;
-    config.stellar.system_ring_r_m = system_from_galaxy_m;
+    // ⚠ THIS FIXTURE ASKED FOR EXACTLY TWO STARS, AND THERE IS NO LONGER A WAY TO ASK (S12/G8,
+    // 2026-08-28). A population is a RESULT now — the volume a galaxy encloses at the density it
+    // drew — so `system_count_lo`/`system_count_hi` are deleted. A galaxy this small (the story's
+    // 12 031 m) holds ONE system, and the story needs two: one at the origin and one to hop to.
+    //
+    // This is the same fixture already on the register as an unlawful variant world (DEFERRED.md
+    // D-S12-FIXTURE, SL5). The count ruling has now made its rewrite FORCED rather than owed: it
+    // cannot express itself through the generator at all.
+    //
+    // The lawful shape is in reach and is what the register already describes: the hand-placed walk
+    // world holds EXACTLY TWO systems by construction, at a distance its own config states
+    // (`system_b_offset_m`), with no density in the chain. That is the rewrite, and it is a slice.
+    config.stellar.galaxy_rim_r_m = system_from_galaxy_m;
     // Two planets per star: the second one is the SIBLING the negative gate demands a refusal for.
     config.planet.n_planets = 2;
     // A circular, in-plane orbit: the planet's distance from its star is its semi-major axis at EVERY

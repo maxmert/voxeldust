@@ -221,9 +221,24 @@ pub enum InboxDrop {
     /// An unreliable (Snapshot/Input) message was evicted to bound the queue —
     /// correct by design (latest-wins): a newer frame supersedes it.
     Unreliable,
-    /// A RELIABLE message was dropped because the inbox was full of reliable traffic
-    /// — genuine overload, an ALERT. The sender's at-least-once redelivery (fabric)
-    /// or QUIC stream flow-control (mesh) is the recovery path.
+    /// A RELIABLE message was dropped because the inbox was full of reliable traffic.
+    ///
+    /// ★ THE CLAIM THAT USED TO BE HERE WAS FALSE, AND IT COST A DAY (corrected 2026-08-29). It read
+    /// "the sender's at-least-once redelivery (fabric) or QUIC stream flow-control (mesh) is the
+    /// recovery path". On the MESH there is NO recovery path, and the code says so two files away:
+    /// `MeshTransport`'s sender replays a lane only when `owes_redelivery()` is true, and that reads
+    /// `self.stream.is_none() && !self.retry.is_empty()`. An inbox drop leaves the stream perfectly
+    /// HEALTHY, so nothing is owed, the retransmit timer disarms, and the frame is never sent again.
+    ///
+    /// MEASURED on a live cluster: ONE reliable drop during the gateway's boot, then a contiguity-gap
+    /// warning about four hundred times every eight seconds, forever. The receiver correctly refuses
+    /// to advance its watermark past a frame it never got, so the two nodes talk past a hole for the
+    /// rest of the process's life and a player can never enter the world.
+    ///
+    /// So on the mesh this variant is UNRECOVERABLE, which is exactly why the mesh must never produce
+    /// it: its reliable reader waits for room instead of discarding (QUIC flow control then slows the
+    /// sender, and the frame stays safe inside the transport). The fabric tier keeps its own
+    /// at-least-once redelivery and may still produce this.
     Reliable,
 }
 

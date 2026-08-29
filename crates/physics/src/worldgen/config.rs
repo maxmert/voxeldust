@@ -17,8 +17,7 @@ use super::{
     AREA_HALF_M, AREA_OFFSET_M, CONTAINMENT_INSET_M, CONTAINMENT_OUTSET_M, FixturePlant,
     GALAXY_R_M, PLANET_A_OFFSET_M, REAL_GALAXY_R_M, REAL_UNIVERSE_R_M, STATION_A_OFFSET_M,
     STATION_HALF_M, SYSTEM_B_OFFSET_M, SYSTEM_SOI_R_M, UNIVERSE_R_M, VISIBILITY_THETA_MIN_RAD,
-    WORLD_SYSTEM_COUNT, aoi_v_rel_mps, derived_world_planet_count, imf_mass_hi_msun, planet_config,
-    real_placement_r_m,
+    aoi_v_rel_mps, derived_world_planet_count, imf_mass_hi_msun, planet_config, real_placement_r_m,
 };
 use crate::taxonomy::{FrostThresholds, GalaxyType, SpectralClass};
 use serde::{Deserialize, Serialize};
@@ -83,8 +82,8 @@ const AREA_OCCURRENCE_PROB: f64 = 0.3;
 // `CANONICAL_STAR_MASS_KG` and the taxonomy's `CANONICAL_*` census/threshold data survive — they are
 // physical constants THE world reads, not preset geometry.)
 
-/// The walk forest is exactly two systems (A + its disjoint sibling B).
-const WALK_SYSTEM_COUNT: u32 = 2;
+// (`WALK_SYSTEM_COUNT` IS DELETED WITH THE COUNT KNOBS, S12/G8 2026-08-28 — it named a
+// population for the hand-placed walk world, which the ruling forbids as much as any other.)
 
 /// Ambient-root + galaxy + client-render scale.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -101,8 +100,18 @@ pub struct ScaleConfig {
 pub struct GalaxyConfig {
     /// Cumulative galaxy-type thresholds for `taxonomy::sample_galaxy_type`.
     pub type_cumulative: [f64; 2],
-    pub system_count_lo: u32,
-    pub system_count_hi: u32,
+    // (`system_count_lo` and `system_count_hi` ARE DELETED, S12/G8 2026-08-28. They named a
+    // population, and the owner's ruling forbids that: *"Count is a result… The amount also should
+    // come from the seed."* A galaxy's population is the volume its shape encloses at the density it
+    // drew — `galaxy_population` — and nothing states it.
+    //
+    // They were left dead for a few minutes during the change, which was worse than either keeping
+    // or removing them: `growing_the_system_count_does_not_move_the_systems_already_placed` still
+    // set them and still expected two different worlds, and got one world twice. A knob that is read
+    // by nothing fails silently at every call site that still trusts it.
+    //
+    // TO LOOK AT A SMALL GALAXY, ASK FOR A SMALL GALAXY — a smaller rim, the same law, the count
+    // following as it always does. The tests' `galaxy_holding` helper solves the radius exactly.)
 }
 
 /// Star physics: SOI scale + the IMF + the mass-luminosity fit.
@@ -120,8 +129,27 @@ pub struct StellarConfig {
     // `OrbitalElements::central_mass` is its OWN star's drawn mass in kg,
     // `mass_msun · taxonomy::M_SUN_KG`; the synthetic Kepler-tuned mass died with the
     // compression.)
-    /// The radius of the ring the non-origin systems are spaced around (system 0 sits at the galactic
-    /// origin). Must leave every system's boundary disjoint from every other's AND inside the galaxy —
+    /// THE GALAXY'S OUTER RADIUS — its RIM. Every star system is placed somewhere INSIDE it, at a
+    /// distance the seed draws, and none is placed ON it.
+    ///
+    /// ★ RENAMED FROM `galaxy_rim_r_m` AT S12 (2026-08-28), BECAUSE THE MEANING CHANGED AND THE OLD
+    /// NAME KEPT LYING. It used to be "the radius of the ring the non-origin systems are spaced
+    /// around", and under the shell that was also the exact distance to any sibling — so callers
+    /// read it as "how far away the next star is" and were right. The owner refused the shell
+    /// (owner_decisions_2026-08-27_galaxy_shape.md): a shell puts every star at the SAME distance,
+    /// which no galaxy does. The placement now draws each system's own radius, so this number is an
+    /// upper bound and nothing else.
+    ///
+    /// TWO GATES FAILED ON THE OLD NAME THE DAY THE SHAPE LANDED, both by reading it as a distance:
+    /// the frame fixture's story distance, and the warp flight's park (which computed "stop when
+    /// within rim − park of the destination" for a destination sitting at 91 % of the rim, so the
+    /// ship's stop condition was already true and it never moved). The rename makes every reader a
+    /// compiler error once, which is the only reliable way to make each one be looked at.
+    ///
+    /// ★ TO ASK HOW FAR APART TWO SYSTEMS ARE, MEASURE THEM. Read both placements off THE world and
+    /// subtract; never read this.
+    ///
+    /// Must leave every system's boundary disjoint from every other's AND inside the galaxy —
     /// overlapping systems would make "which realm contains this position" ambiguous, which is the one
     /// question the whole authority model rests on.
     ///
@@ -129,7 +157,7 @@ pub struct StellarConfig {
     /// ([`GalaxyConfig::system_count_lo`]..=[`GalaxyConfig::system_count_hi`]) against the galaxy's seed,
     /// so two galaxies from one universe differ. A second count field here would be a second source of
     /// truth for the same fact.
-    pub system_ring_r_m: f64,
+    pub galaxy_rim_r_m: f64,
 }
 
 /// Planet physics: SOI scale, orbital spacing, eccentricity/inclination, and the frost/mass
@@ -397,8 +425,6 @@ impl UniverseConfig {
             },
             galaxy: GalaxyConfig {
                 type_cumulative: GalaxyType::CANONICAL_CUMULATIVE,
-                system_count_lo: WALK_SYSTEM_COUNT,
-                system_count_hi: WALK_SYSTEM_COUNT,
             },
             stellar: StellarConfig {
                 system_soi_r_m: SYSTEM_SOI_R_M,
@@ -409,7 +435,7 @@ impl UniverseConfig {
                 // Where the walk roster's second star already sat. It is no longer inert: with ONE
                 // world, this preset drives the same generator as everything else, and a zero ring
                 // would stack both stars on the origin — two authorities over one point.
-                system_ring_r_m: SYSTEM_B_OFFSET_M,
+                galaxy_rim_r_m: SYSTEM_B_OFFSET_M,
             },
             // `0` planets: the walk fixture forest is ambient-only (no `Orbital` body) — the
             // world derives N below.
@@ -463,8 +489,6 @@ impl UniverseConfig {
         // one clearance law at the mass cap. The planet COUNT is derived and scale-free: the
         // disc edge over the ladder ratio — 9 for every star at every seed.
         cfg.planet.n_planets = derived_world_planet_count(&cfg.planet);
-        cfg.galaxy.system_count_lo = WORLD_SYSTEM_COUNT;
-        cfg.galaxy.system_count_hi = WORLD_SYSTEM_COUNT;
         // ▲ THE OUTER GEOMETRY (real-scale addendum §A2 — the four changed numbers, derivations
         // at their consts): the universe from the storage fence (2⁵¹ m), the galaxy from the
         // τ-free outset (`R_uni − outset`), the placement radius from the reserved clearance
@@ -472,7 +496,7 @@ impl UniverseConfig {
         // census consts.
         cfg.scale.universe_r_m = REAL_UNIVERSE_R_M;
         cfg.scale.galaxy_r_m = REAL_GALAXY_R_M;
-        cfg.stellar.system_ring_r_m = real_placement_r_m();
+        cfg.stellar.galaxy_rim_r_m = real_placement_r_m();
         cfg
     }
 

@@ -225,9 +225,12 @@ pub struct GatewayStats {
     /// resolve lineage ancestors the session never subscribed to (the EXISTING directory pair —
     /// no new wire arm). THROUGHPUT.
     pub window_head_reads_sent: u64,
-    /// Slice B — composed rows produced across all folds. THROUGHPUT; with
-    /// `parity_rows_matched` it bounds the (explained) composed-surplus: the composer carries
-    /// the FULL direct-child roster of every chain level, dormant children included.
+    /// Slice B — composed rows produced across all folds. THROUGHPUT.
+    ///
+    /// (This used to be read against `parity_rows_matched` to bound the explained composed-surplus.
+    /// The flag day deleted that counter with the courier lanes, so there is no second picture left
+    /// to differ from. The surplus itself is unchanged and still real: the composer carries the FULL
+    /// direct-child roster of every chain level, dormant children included.)
     pub window_composed_rows: u64,
     /// §2.6.5 step 4 (Q2 = PARENT RELAY, Slice C1): relayed live-child interior rows composed
     /// into folds — the sibling-interior carrier's rows actually reaching drawn scenes.

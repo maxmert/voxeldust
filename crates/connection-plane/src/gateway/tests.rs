@@ -1463,10 +1463,29 @@ fn a_window_row_before_its_engine_is_dropped_fail_closed_and_counted_apart() {
     assert_eq!(rig.stats().window_body_stale, 1, "the older look refused");
     assert_eq!(rig.stats().window_sender_mismatch, 1, "the forgery dropped");
     assert_eq!(rig.stats().window_unknown_row, 1, "the stranger id dropped");
+    // ★ 2 → 1 WHEN THE PARK GATE LEARNED THE RIGHT QUESTION (2026-08-28). The two plants are a
+    // LOOK about a non-author and a MARKER about a non-child. The look still drops. The marker
+    // now PARKS, because the gate can no longer tell "this is not a child" from "the door that
+    // names this child has not opened yet" — and telling those apart wrongly is what made the
+    // home star vanish from the drawn scene.
     assert_eq!(
         rig.stats().window_misauthored_body,
-        2,
-        "both misauthorships dropped"
+        1,
+        "the mis-authored LOOK drops — a look may only be about the author"
+    );
+    // FAIL-CLOSED IS UNCHANGED, AND STATED RATHER THAN ASSUMED: the mis-authored marker composes
+    // NOTHING. It sits in one park slot, holds no statement, and never reaches a scene. Parking is
+    // a delay in judging, never an admission.
+    let parked = &rig.world.resource::<GatewaySessions>().windows[&WindowId(1)];
+    assert_eq!(
+        parked.parked_bodies.keys().copied().collect::<Vec<_>>(),
+        vec![RealmId::System(7)],
+        "the mis-authored marker parks in exactly one slot"
+    );
+    assert_eq!(
+        parked.ingest.marker_of(RealmId::System(7)),
+        None,
+        "and nothing about it is held: a parked statement is not an admitted one"
     );
     assert_eq!(rig.stats().undecodable, 0, "a window row is NOT garbage");
     // The composer CONSUMED the admitted level: the session's one-hop chain folded at the
@@ -3566,6 +3585,7 @@ fn freshest_session_confirmed_maxes_over_active_and_selffenced() {
     fn sess(phase: SessionPhase, confirmed: u64) -> Session {
         Session {
             sky_held: None,
+            sky_parts_sent: 0,
             client: CLIENT,
             account: AccountId(5),
             fence: Fence(1),
@@ -3650,6 +3670,7 @@ fn one_active_session() -> (GatewaySessions, SessionId, OutboundBox) {
         sid,
         Session {
             sky_held: None,
+            sky_parts_sent: 0,
             client: CLIENT,
             account: AccountId(5),
             fence: Fence(1),
@@ -3905,6 +3926,7 @@ fn sweep_keeps_a_shared_reverse_index_entry_with_a_surviving_subscriber() {
         sid_b,
         Session {
             sky_held: None,
+            sky_parts_sent: 0,
             client: NodeId(101),
             account: AccountId(6),
             fence: Fence(1),
@@ -4984,6 +5006,7 @@ use vd_wire::seams::transfer_control::SpatialReject;
 fn active_session() -> Session {
     Session {
         sky_held: None,
+        sky_parts_sent: 0,
         client: CLIENT,
         account: AccountId(5),
         fence: Fence(1),
@@ -5966,6 +5989,107 @@ fn the_interior_forward_admits_only_the_authors_own_picture_and_counts_apart() {
         rig.stats().window_relay_interior_unvouched,
         1,
         "still exactly the one violation — the lawful flights added none"
+    );
+}
+
+/// ★ THE STATIC CHILD'S MARKER, ARRIVING BETWEEN THE TWO DOORS (regression, 2026-08-28).
+///
+/// A realm's children reach a gateway by TWO doors, because they are two kinds of thing: a MOVER
+/// rides the per-tick level, a STATIC child rides the reliable roster. The shard states them in one
+/// order every tick — level, then markers, then the static roster — so a static child's marker
+/// ALWAYS arrives in the gap between them.
+///
+/// The park gate used to ask `confirmed()`, which is true as soon as EITHER door has spoken. The
+/// level had landed, so the gate said "I have a roster" and judged the marker against a roster that
+/// structurally could not contain a static child. It dropped it as mis-authored — and the roster
+/// lane never says the same thing twice, so the realm was never drawn again.
+///
+/// WHAT IT COST: the home star vanished from the drawn scene while all nine sibling planets drew,
+/// which `render_boxes_smoke` caught as a drawn-set-against-the-world mismatch. The star is the home
+/// system's ONLY static child, which is why it and nothing else disappeared.
+///
+/// This drives that exact order and holds the gate to the right question: not "has any roster
+/// arrived" but "does the roster name THIS one".
+#[test]
+fn a_static_childs_marker_between_the_two_doors_is_parked_and_then_drawn() {
+    let star = RealmId::Star(1_505_330_803_008_586_659);
+    let mut held = GatewayWindow {
+        shard: SHARD,
+        scope: WindowScope::Occupants,
+        author_realm: RealmId::System(7),
+        ingest: window::WindowIngest::default(),
+        parked_bodies: BTreeMap::new(),
+        parked_relays: BTreeMap::new(),
+    };
+    let row = |realm: RealmId, x: f64| vd_wire::channels::RealmSnap {
+        realm,
+        frame: FrameRef::SystemSpace { system_seed: 7 },
+        pose: vd_core::pose::StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 7 },
+            DVec3::new(x, 0.0, 0.0),
+            vd_core::UniverseTick(10),
+        ),
+    };
+    // DOOR ONE — the level lands, carrying the MOVERS only. A static child cannot be on it.
+    assert_eq!(
+        held.ingest.ingest_frame(
+            window::WindowLevel {
+                at: vd_core::UniverseTick(10),
+                hop: None,
+                rows: vec![row(RealmId::Planet(7), 30.0)],
+            },
+            &window_tuning(&config()),
+        ),
+        window::Ingested::Applied,
+    );
+    // THE TWO QUESTIONS DISAGREE HERE, which is the whole defect in one statement.
+    assert!(
+        held.ingest.confirmed(),
+        "a level alone makes the window confirmed — this is the question that was wrong",
+    );
+    assert!(
+        !held.ingest.rosters(star),
+        "…while the roster does not yet name the static child — the question that is right",
+    );
+    let mut sessions = GatewaySessions::default();
+    sessions.windows.insert(WindowId(1), held);
+    let mut stats = GatewayStats::default();
+    // THE MARKER, in the gap.
+    on_window_row(
+        SHARD,
+        WindowId(1),
+        WindowRow::Body {
+            subject: star,
+            stmt: BodyStmt::Marker { luma: vec![9] },
+            authored_at: vd_core::UniverseTick(10),
+        },
+        &config(),
+        &mut sessions,
+        &mut stats,
+    );
+    assert_eq!(
+        stats.window_misauthored_body, 0,
+        "the static child's marker is NOT judged forged (it read 1 before this fix)",
+    );
+    assert_eq!(stats.window_body_preroster, 1, "it parks instead");
+    // DOOR TWO — the static roster lands, and the drain admits what it now names.
+    on_window_row(
+        SHARD,
+        WindowId(1),
+        WindowRow::StaticRows(vec![row(star, 0.0)]),
+        &config(),
+        &mut sessions,
+        &mut stats,
+    );
+    let held = &sessions.windows[&WindowId(1)];
+    assert_eq!(
+        held.ingest.marker_of(star),
+        Some(&[9u8][..]),
+        "the marker is held once the roster names it (it read None before this fix)",
+    );
+    assert!(
+        held.parked_bodies.is_empty(),
+        "and the park slot cleared — parking is a delay, never a leak",
     );
 }
 
@@ -9784,6 +9908,7 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
         let sid = SessionId(0xB000 + i as u128);
         let mut session = Session {
             sky_held: None,
+            sky_parts_sent: 0,
             client: CLIENT,
             account: AccountId(i as u128),
             fence: Fence(1),
@@ -9959,19 +10084,27 @@ fn window_shadow_soak_state_stays_bounded_and_zeroes_at_the_end() {
                 MsgClass::RealmSnapshot,
                 &leaf_frame(WindowId(1), at),
             )),
+            // ★ THIS ARM CARRIES ROWS (repaired 2026-08-28). It used to send the same content down
+            // the OLD COURIER LANE, so the shadow comparator had a second picture to check against.
+            // The flag day deleted that lane and its comparator; the arm's real job here is to keep
+            // the churn varied — arms 1, 3 and 4 all send EMPTY frames, so without a rows-carrying
+            // one the soak would never grow the structures it exists to prove bounded.
             2 => inbox.push(wire(
                 SHARD,
                 MsgClass::RealmSnapshot,
-                &old_lane_frame(
-                    vec![snap(
+                &ShardToGateway::WindowFrame {
+                    realm_fence: Fence(1),
+                    window: WindowId(1),
+                    at: UniverseTick(at),
+                    hop: None,
+                    rows: vec![snap(
                         RealmId::Planet(9),
                         FrameRef::PlanetCentered { planet_seed: 9 },
                         SYS7,
                         1.0,
                         at,
                     )],
-                    at,
-                ),
+                },
             )),
             3 => inbox.push(wire(
                 DEST,
@@ -10029,10 +10162,8 @@ fn window_shadow_soak_state_stays_bounded_and_zeroes_at_the_end() {
                 session.shadow.ring.len() as u64 <= tuning.ring_span_ticks + 1,
                 "the fold ring holds one derived span, never more"
             );
-            assert!(
-                session.shadow.pending.len() <= tuning.pending_cap,
-                "the comparator queue is capped"
-            );
+            // (The comparator queue's cap was asserted here until 2026-08-28. The flag day deleted
+            // the queue with the courier lanes, so there is no longer a second picture to queue.)
             assert!(
                 sessions.realm_heads.len() <= 2,
                 "realm-heads ≤ the named set"
@@ -10041,7 +10172,8 @@ fn window_shadow_soak_state_stays_bounded_and_zeroes_at_the_end() {
             // Counters are MONOTONE (a decreasing counter is state corruption).
             assert!(now.window_rows_ingested >= prev.window_rows_ingested);
             assert!(now.window_folds >= prev.window_folds);
-            assert!(now.parity_rows_matched >= prev.parity_rows_matched);
+            // (`parity_rows_matched` was asserted monotone here until 2026-08-28 — deleted with the
+            // shadow comparison it counted.)
             assert!(now.window_sender_mismatch >= prev.window_sender_mismatch);
             prev = now;
         }
@@ -10055,6 +10187,19 @@ fn window_shadow_soak_state_stays_bounded_and_zeroes_at_the_end() {
         "the unknown arm really ran"
     );
     assert!(rig.stats().window_folds > 0, "the composer really folded");
+    // ★ AND THE ROWS-CARRYING ARM REALLY RAN (added 2026-08-28 with the repair above). The three
+    // statements before this one each name an arm; the arm that carries ROWS had none, so the
+    // repair that rebuilt it was unproven — it could have sent an empty frame and this test would
+    // still have passed.
+    //
+    // MEASURED BOTH WAYS, and the control failed: with the row, 20 825 frames ingested and 2 206
+    // rows composed; with the arm emptied, 20 825 frames ingested and 0 rows composed. So the FRAME
+    // counter is blind to this — it counts arrivals, not content — and `window_composed_rows` is the
+    // one that can tell the difference.
+    assert!(
+        rig.stats().window_composed_rows > 0,
+        "the rows-carrying arm really ran"
+    );
     // The exit: zero sessions ⇒ zero composer state, after 30k ticks of churn.
     let _ = rig.tick(vec![wire(
         CLIENT,

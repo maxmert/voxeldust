@@ -1096,13 +1096,18 @@ impl Story {
     /// (galaxy, salt, index), so writing one down would be copying a hash into a test.
     fn new() -> Story {
         let mut config = vd_physics::worldgen::UniverseConfig::walk_scale();
-        // Exactly two stars; the second is the SIBLING the negative gates demand refusals for.
-        config.galaxy.system_count_lo = 2;
-        config.galaxy.system_count_hi = 2;
+        // ⚠ THIS ASKED FOR EXACTLY TWO STARS, AND THERE IS NO LONGER A WAY TO ASK (S12/G8,
+        // 2026-08-28). A population is a RESULT — the volume a galaxy encloses at the density it
+        // drew — so the count knobs are deleted. The story below needs a SIBLING to refuse, and how
+        // many stars this world holds is now whatever its size and density produce.
+        //
+        // Same shape as `vd-tests`' frame fixture (DEFERRED.md D-S12-FIXTURE): a test world built by
+        // asking the generator for a size nobody could ask for. The lawful answer is the same one —
+        // the hand-placed walk world holds exactly two systems by construction.
         // The in-system true-size re-solve SOLVES each system's shell (no config radius
         // exists), so the placement radius and the ambient shells derive from the solve's
         // own reserved bound — disjoint siblings, nesting ambients, no tuned number.
-        config.stellar.system_ring_r_m =
+        config.stellar.galaxy_rim_r_m =
             STORY_SHELL_HEADROOM * vd_physics::worldgen::target_system_bound_max_m();
         config.planet.n_planets = 2;
         // Circular and in-plane, so the planet's distance from its star is its semi-major
@@ -1110,7 +1115,7 @@ impl Story {
         // itself is the √L-anchored ladder's rung 0, READ from the generated elements below.
         config.planet.ecc_sigma = 0.0;
         config.planet.incl_sigma = 0.0;
-        config.scale.galaxy_r_m = (config.stellar.system_ring_r_m
+        config.scale.galaxy_r_m = (config.stellar.galaxy_rim_r_m
             + vd_physics::worldgen::target_system_bound_max_m())
             * STORY_SHELL_HEADROOM;
         config.scale.universe_r_m = config.scale.galaxy_r_m * STORY_SHELL_HEADROOM;

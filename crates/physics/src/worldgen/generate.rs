@@ -8,6 +8,8 @@
 //! appended, never inserted — which is why the stream prefix width is a named constant rather than a
 //! consequence of how the loop happens to be written.
 
+use std::collections::BTreeMap;
+
 use super::{
     ECC_CAP_SIGMAS, ECC_SIGMA, GeneratedBody, INCL_SIGMA, ORBITAL_A0_AU, ORBITAL_RATIO,
     PLANET_SOI_R_M, Placement, PlanetConfig, StarPhotometrics, StellarConfig, UniverseConfig,
@@ -47,9 +49,52 @@ const MOON_MASS_MULTIPLIER_BOUNDS: (f64, f64) = (0.5, 2.0);
 /// for stars, exactly as [`PLANET_SALT`] is for planets. A system's identity is `f(galaxy, index)`, so two
 /// galaxies never mint the same system id and a system's planets never collide with another system's.
 const SYSTEM_SALT: u64 = 0x5359_5354_454d; // "SYSTEM"
-/// How many star systems THE world's galaxy holds — the existing census parameter (owner ruling
-/// Q-B: the placement law went 3-D and seeded; the census DERIVATION is P10's, this count is not).
-pub(crate) const WORLD_SYSTEM_COUNT: u32 = 3;
+/// `child_seed` salt for the PUSH draw (G12) — its own lineage, so asking a star how far to move
+/// consumes nothing from the streams that decide what it IS. The Stream Law's standing doctrine: a
+/// new question gets a new stream, never a draw appended to someone else's.
+const PUSH_SALT: u64 = 0x0000_5055_5348; // "PUSH"
+// (`WORLD_SYSTEM_COUNT: u32 = 3` IS DELETED, S12/G8 2026-08-28. It stated a population, and the
+// owner's ruling names it: *"Count is a result — I agree with that. 150K is the target number, not
+// exact amount all galaxies should have. The amount also should come from the seed."* A galaxy's
+// population now FOLLOWS from the volume its disc encloses and the density it drew — see
+// `DISC_DENSITY_LO_PER_PC3`.)
+
+/// THE DISC'S SCALE LENGTH, as a fraction of the storage rim — the radius at which its density has
+/// fallen to `1/e` of the centre's.
+///
+/// ★ THE GALAXY MUST NOT END AT A LINE (owner, 2026-08-29). A quarter is chosen so the exponential
+/// profile puts the great majority of stars well inside the rim and thins smoothly outward, with the
+/// storage clamp reached by a small tail that is already almost empty. The Milky Way's own disc scale
+/// length is about 2.6 kpc against a visible radius near 15 kpc — close to a sixth — so a quarter is
+/// a slightly more compact disc than ours, which is the safer direction for a bounded lattice.
+const DISC_SCALE_LENGTH_FRAC: f64 = 0.25;
+
+/// How far the vertical exponential reaches, as a multiple of the drawn half-thickness. The drawn
+/// thickness stays the disc's CHARACTERISTIC height; this turns a hard slab edge into a fade, so a
+/// few stars sit well above the plane exactly as they do in a real disc.
+const DISC_HEIGHT_SCALE_FRAC: f64 = 0.5;
+
+/// The star systems per cubic parsec a galaxy's disc holds, at its sparsest — and the densest below.
+///
+/// ★ WHY THESE ARE ABOVE THE SOLAR NEIGHBOURHOOD, WHICH IS 0.1 (RECONS ten-parsec census, already
+/// cited by [`super::scale::real_compression_chi`]). The Sun sits in a SPARSE OUTER REGION of its
+/// own galaxy. A disc's density falls off outward, so the disc AVERAGE — which is what a count over
+/// the whole disc reads — is several times the value measured where we happen to live. A few tenths
+/// per cubic parsec is an ordinary galactic disc, not a crowded one.
+///
+/// ★ AND THE WORLD IS CURRENTLY FAR EMPTIER THAN REAL SPACE, which is the fact that makes this a
+/// CORRECTION rather than a crowding. MEASURED 2026-08-28: the placement radius is 4.6094e18 m =
+/// 487.2 light years, and three systems sit in it. Real space at the solar density would hold about
+/// thirty thousand there. The compression note beside `real_compression_chi` still says the world is
+/// packed 24.568x TIGHTER than real; that was true before the S9 climb moved the placement radius by
+/// 3 075x, and the world is now about 125x SPARSER. Raising the count removes an emptiness that was
+/// never intended.
+const DISC_DENSITY_LO_PER_PC3: f64 = 0.25;
+/// The star systems per cubic parsec a galaxy's disc holds, at its densest.
+const DISC_DENSITY_HI_PER_PC3: f64 = 0.75;
+/// A parsec in metres — the unit the density above is measured in, because that is the unit the
+/// surveys publish.
+const PARSEC_IN_M: f64 = 3.085_677_581_491_367_3e16;
 
 /// THE FROZEN STREAM PREFIX WIDTH (the Stream Law, celestial_taxonomy_design §3.0/§7.1): the
 /// per-system draw stream shipped with FIVE planets' element draws before the star/albedo/
@@ -177,45 +222,244 @@ pub(crate) fn system_seed_at(n: u32) -> u64 {
     }
 }
 
-/// How many star systems a galaxy holds — its CENSUS, drawn from the galaxy's own stream inside
-/// `[system_count_lo, system_count_hi]`. Pure `f(universe_seed)` against the galaxy lineage, so every
-/// shard agrees on the population without exchanging a byte, and two galaxies from one universe differ
-/// without anyone authoring either. `lo == hi` pins the count exactly (the walk roster's shape).
+/// ★ ONE GALAXY'S WHOLE PROFILE — its census, its kind and its shape, all drawn from ITS OWN stream
+/// (S12, owner ruling G1: *"Density also should come from seed, otherwise any tiny change might
+/// change positions."*).
 ///
-/// One draw, no rejection loop — the taxonomy discipline: a sampler is a closed-form map from one uniform.
-#[must_use]
-fn galaxy_system_count(seed_universe: u64, config: &UniverseConfig) -> u32 {
-    let lo = config.galaxy.system_count_lo;
-    let hi = config.galaxy.system_count_hi.max(lo);
-    let span = u64::from(hi - lo) + 1;
-    let mut stream = realm_stream(seed_universe, &[UNIVERSE_SEED, GALAXY_SEED]);
-    // `next_f64` is [0,1); scaling by the inclusive span and truncating lands in [lo, hi] with the last
-    // bucket reachable only at exactly 1.0, which the generator never produces — hence the `min`.
-    let draw = (stream.next_f64() * span as f64) as u64;
-    lo + u32::try_from(draw.min(span - 1)).unwrap_or(0)
+/// ★ WHY ONE FUNCTION AND NOT THREE. The census and the kind used to be two functions, each rebuilding
+/// this stream from scratch and then SKIPPING the draws it did not want — the kind's body read
+/// `let _count_draw = stream.next_f64();` before taking its own. That works and it is fragile in a
+/// silent way: a third reader must remember to skip two, a fourth to skip three, and forgetting does
+/// not fail, it returns the WRONG NUMBER. Reading the stream once, in one place, in order, makes the
+/// order a fact of the code rather than a rule to remember.
+///
+/// ★ THE STREAM IS APPENDED, NEVER INSERTED (the Stream Law). The first two draws are exactly what
+/// they were, so every galaxy's count and kind are byte-identical across this change. The shape draws
+/// follow them.
+///
+/// ★ AND NO SYSTEM'S OWN DRAW MOVES — verified in the code, not assumed. A system reads from
+/// `realm_stream(seed, &[UNIVERSE_SEED, GALAXY_SEED, system_seed])`, a DIFFERENT stream keyed by its own
+/// seed. Appending here cannot reach it. What moves the stars is the shape VALUES changing from chosen
+/// literals to drawn numbers, which is the whole point of the ruling.
+pub(crate) struct GalaxyProfile {
+    /// How many star systems this galaxy holds.
+    pub(crate) count: u32,
+    /// Spiral, elliptical or irregular.
+    pub(crate) kind: GalaxyType,
+    /// What it looks like — every number of it drawn.
+    pub(crate) shape: GalaxyShape,
+    /// The disc density this galaxy drew, in star systems per cubic parsec. The count above is this
+    /// times the volume its disc encloses, and nothing else.
+    pub(crate) density_per_pc3: f64,
 }
 
-/// WHAT KIND OF GALAXY THIS IS — spiral, elliptical or irregular — drawn from the galaxy's own stream
-/// (S12; owner rulings G2 and G9, `owner_decisions_2026-08-27_galaxy_shape.md`).
+/// HOW MANY STAR SYSTEMS A GALAXY OF THIS SHAPE AT THIS DENSITY HOLDS (owner ruling G8).
 ///
-/// ★ NOTHING DREW A GALAXY'S KIND BEFORE THIS. The taxonomy has named the three kinds and carried a
-/// sampler and a real census vector (`[0.72, 0.90]`, Nair & Abraham 2010) for a long time, and
-/// MEASURED 2026-08-28: `sample_galaxy_type` was called ONLY from its own unit test. The shape ruling's
-/// first draft said the placement "ignores that draw", which was wrong — there was no draw to ignore.
+/// The count is the volume the galaxy encloses at the density it drew, and it is a RESULT: nobody
+/// states it, and it moves when the shape or the density moves, which is what the ruling asks for.
 ///
-/// ★ THE DRAW COMES AFTER THE COUNT, DELIBERATELY. This stream already yields one number, the system
-/// count. Taking the kind FIRST would shift that draw and re-roll the population of every galaxy at
-/// every seed. Appending keeps every existing world byte-identical, so this change adds a fact without
-/// moving anything — one change at a time, which is what makes the next one diagnosable.
+/// ★ THE VOLUME IS THE SHAPE'S OWN, NOT ALWAYS A DISC (corrected 2026-08-28, by measuring). A disc
+/// of radius `R` and full thickness `t·R` encloses `π·R²·(t·R)`, and that is right for a spiral. It
+/// is NOT right for an ELLIPTICAL, which is a round swell rather than a plate: its `t` is 0.5 by
+/// construction, and putting that through the disc formula treats it as a plate half as thick as it
+/// is wide. MEASURED across 64 seeds with the disc formula everywhere, the population ran 48 291 to
+/// 3 891 262 — and the top of that range was ellipticals being counted as impossibly fat discs, not
+/// galaxies genuinely differing.
 ///
-/// The placement law consumes this next: a spiral is a bulge, a thin disc and arms; an elliptical is a
-/// smooth swell; an irregular is neither. Today's placement is uniform on a sphere, which is none of
-/// the three.
+/// So an elliptical is measured as the spheroid it is: `(4/3)·π·R³` flattened by its own roundness.
+///
+/// The bulge is not added on top of either. Its stars are drawn from the same population —
+/// `bulge_fraction` is the SHARE of the galaxy that sits in the middle, not an extra crowd beside it.
+fn galaxy_population(
+    config: &UniverseConfig,
+    kind: GalaxyType,
+    shape: &GalaxyShape,
+    density_per_pc3: f64,
+) -> u32 {
+    let r_m = config.stellar.galaxy_rim_r_m;
+    let disc_m3 = core::f64::consts::PI * r_m * r_m * (shape.disc_thickness_frac * r_m);
+    let spheroid_m3 = 4.0 / 3.0 * core::f64::consts::PI * r_m * r_m * r_m * shape.bulge_roundness;
+    let volume_m3 = match kind {
+        GalaxyType::Spiral | GalaxyType::Irregular => disc_m3,
+        GalaxyType::Elliptical => spheroid_m3,
+    };
+    let volume_pc3 = volume_m3 / (PARSEC_IN_M * PARSEC_IN_M * PARSEC_IN_M);
+    // At least one: a galaxy with no star at all is not a galaxy, and the home system is index 0.
+    let n = (density_per_pc3 * volume_pc3).max(1.0);
+    // Saturating rather than wrapping — a count that wrapped to nothing would be silent.
+    if n >= f64::from(u32::MAX) {
+        u32::MAX
+    } else {
+        n as u32
+    }
+}
+
+/// Read a galaxy's whole profile off its own stream, in order.
 #[must_use]
-pub(crate) fn galaxy_kind(seed_universe: u64, config: &UniverseConfig) -> GalaxyType {
+pub(crate) fn galaxy_profile(seed_universe: u64, config: &UniverseConfig) -> GalaxyProfile {
     let mut stream = realm_stream(seed_universe, &[UNIVERSE_SEED, GALAXY_SEED]);
-    let _count_draw = stream.next_f64(); // the count's own draw, consumed so this one follows it
-    sample_galaxy_type(stream.next_f64(), &config.galaxy.type_cumulative)
+    // ---- draw 1: THE DISC DENSITY ----
+    //
+    // ★ THIS DRAW USED TO BE THE COUNT ITSELF, read against a pair of config knobs a person set. The
+    // owner's ruling G8 retired that: a population is a RESULT, never a number anyone states. The
+    // draw keeps its POSITION so the kind and the shape below stay byte-identical — the Stream Law
+    // is about where a draw sits, not what it means.
+    let density_per_pc3 = spread(
+        stream.next_f64(),
+        DISC_DENSITY_LO_PER_PC3,
+        DISC_DENSITY_HI_PER_PC3,
+    );
+    // ---- draw 2: THE KIND (unchanged since it landed earlier in S12) ----
+    let kind = sample_galaxy_type(stream.next_f64(), &config.galaxy.type_cumulative);
+    // ---- draws 3+: THE SHAPE ----
+    let shape = draw_galaxy_shape(kind, &mut stream);
+    // ---- AND THE COUNT FOLLOWS (G8) ----
+    let count = galaxy_population(config, kind, &shape, density_per_pc3);
+    GalaxyProfile {
+        count,
+        kind,
+        shape,
+        density_per_pc3,
+    }
+}
+
+/// ★ THE SYSTEM LAYER — the galaxy's stars, and nothing inside them (owner ruling 2026-08-29).
+///
+/// The ambient Universe and Galaxy, then one body per star system: its place, its shell, its look and
+/// its star's light. No planets, no moons, no star children.
+///
+/// ★ WHY IT EXISTS. The sky is a list of STAR SYSTEMS. The boot fold used to build the whole forest
+/// and keep the systems out of it — MEASURED on THE world, 3 500 479 objects to state 233 220 rows.
+/// The owner ruled that a boot builds what its consumer needs.
+///
+/// ★ AND IT IS NOT A SECOND WORLD. Every system here is placed by [`seed_one_system`], the same
+/// function the full forest uses, reading the same stream in the same order — and pushed by the same
+/// [`push_crowded_systems`]. A system's identity, place, shell and star are therefore identical in
+/// both, which the byte-identity gate beside this proves rather than assumes. What differs is only
+/// what is NOT built.
+#[must_use]
+pub(crate) fn generate_system_layer(
+    seed_universe: u64,
+    config: &UniverseConfig,
+) -> Vec<GeneratedBody> {
+    let sc = &config.scale;
+    let shell = |r: f64| Boundary::Shell { r };
+    let profile = galaxy_profile(seed_universe, config);
+    let origin = Placement::StaticOffset(DVec3::ZERO);
+    let mut bodies = vec![
+        GeneratedBody {
+            realm: UNIVERSE,
+            parent: None,
+            shape: shell(sc.universe_r_m),
+            placement: origin,
+            photometrics: None,
+            taxon: None,
+            look: None,
+        },
+        GeneratedBody {
+            realm: GALAXY,
+            parent: Some(UNIVERSE),
+            shape: shell(sc.galaxy_r_m),
+            placement: origin,
+            photometrics: None,
+            taxon: None,
+            look: None,
+        },
+    ];
+    for s in 0..profile.count {
+        let seed = system_seed_at(s);
+        let system_ix = bodies.len();
+        bodies.push(GeneratedBody {
+            realm: RealmId::System(seed),
+            parent: Some(GALAXY),
+            shape: shell(0.0),
+            placement: origin,
+            photometrics: None,
+            taxon: None,
+            look: None,
+        });
+        let seeded = seed_one_system(
+            seed_universe,
+            config,
+            &profile.shape,
+            s,
+            seed,
+            &mut bodies[system_ix],
+        );
+        // The system's own shell and look are solved from its star — the same two derivations the
+        // full forest makes, so a system is the same size in both.
+        bodies[system_ix].shape = shell(system_shell_r_m(&config.planet, &seeded.star));
+        bodies[system_ix].look = Some(shell(crate::taxonomy::star_radius_m(seeded.star.mass_msun)));
+    }
+    push_crowded_systems(&mut bodies, config);
+    bodies
+}
+
+/// What [`seed_one_system`] hands back: the system is fully defined, and these are the draws its
+/// CHILDREN need — carried, never re-derived, so the two callers cannot read the stream differently.
+struct SeededSystem {
+    stream: vd_core::rng::SplitMix64,
+    star: StarPhotometrics,
+    element_draws: Vec<PlanetElementDraws>,
+    albedo_draws: Vec<f64>,
+}
+
+/// ★ ONE SYSTEM, DEFINED — its star, its shell, its look and its place, and nothing inside it.
+///
+/// ★ WHY THIS IS ITS OWN FUNCTION (2026-08-29). The sky needs STAR SYSTEMS. It does not need their
+/// planets, their moons or their moons' moons. But the boot fold built the whole forest and then
+/// kept the systems: MEASURED on THE world, 3 500 479 objects produced to state 233 220 star rows —
+/// fifteen out of every sixteen built and thrown away.
+///
+/// The owner's rule (2026-08-29) is that a boot builds what its consumer needs, and that no path
+/// gets a second spelling of a shared law. So the system-defining stage lives HERE and BOTH callers
+/// use it: the sky's system-layer fold, and the full forest. There is exactly one place that reads a
+/// system's stream, so the two can never disagree about where a star is or what colour it is.
+///
+/// The draws the CHILDREN need ride back in [`SeededSystem`] rather than being taken again, because
+/// re-deriving them is precisely how a fast path and a slow path stop agreeing.
+fn seed_one_system(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    shape: &GalaxyShape,
+    s: u32,
+    seed: u64,
+    body: &mut GeneratedBody,
+) -> SeededSystem {
+    let pl = &config.planet;
+    let st = &config.stellar;
+    let mut stream = realm_stream(seed_universe, &[UNIVERSE_SEED, GALAXY_SEED, seed]);
+    let legacy = pl.n_planets.min(LEGACY_STREAM_PLANETS);
+    let element_draws: Vec<PlanetElementDraws> = (0..legacy)
+        .map(|_| planet_element_draws(config, &mut stream))
+        .collect();
+    let star = draw_star_photometrics(st, &mut stream);
+    body.photometrics = Some(star);
+    let albedo_draws: Vec<f64> = (0..legacy).map(|_| stream.next_f64()).collect();
+    // THE SHAPE'S PLACEMENT DRAWS (S12; owner rulings G2, G9, G13). SIX, where the sphere took
+    // two: a population, a radius, an azimuth, TWO halves of an arm scatter and a height. The
+    // HOME system consumes all six exactly like every sibling — the anchor multiplier, not the
+    // stream shape, pins it to the galactic origin.
+    body.placement = Placement::StaticOffset(system_center_at(
+        config,
+        shape,
+        s,
+        PlacementDraws {
+            population: stream.next_f64(),
+            radius: stream.next_f64(),
+            radius_b: stream.next_f64(),
+            azimuth: stream.next_f64(),
+            scatter: stream.next_f64(),
+            scatter_b: stream.next_f64(),
+            height: stream.next_f64(),
+        },
+    ));
+    SeededSystem {
+        stream,
+        star,
+        element_draws,
+        albedo_draws,
+    }
 }
 
 /// Where the `n`-th system sits in its galaxy — THE 3-D SEEDED PLACEMENT LAW (owner ruling Q-B,
@@ -242,7 +486,7 @@ pub(crate) fn galaxy_kind(seed_universe: u64, config: &UniverseConfig) -> Galaxy
 #[must_use]
 pub(crate) fn system_center_at(
     config: &UniverseConfig,
-    kind: GalaxyType,
+    shape: &GalaxyShape,
     n: u32,
     draws: PlacementDraws,
 ) -> DVec3 {
@@ -250,8 +494,7 @@ pub(crate) fn system_center_at(
     // draws exactly like every sibling, so the stream SHAPE is uniform across systems and a future
     // re-rule of the home anchor shifts nothing.
     let anchored = f64::from(u32::from(n != 0));
-    let r_max = config.stellar.system_ring_r_m;
-    let shape = galaxy_shape(kind, config);
+    let r_max = config.stellar.galaxy_rim_r_m;
 
     // WHICH POPULATION this system belongs to. ONE draw decides all three, by reading it against two
     // thresholds — a second draw would buy nothing.
@@ -278,13 +521,55 @@ pub(crate) fn system_center_at(
     } else {
         shape.disc_exponent
     };
-    let r = r_max
-        * draws.radius.clamp(0.0, 1.0).powf(p)
+    // ★ A DISC HAS NO LAST STAR (owner, 2026-08-29: "in reality there is no crisp line where galaxy
+    // ends"). `r = R · u^p` cannot place a star past R, so the galaxy ended at a WALL — visible as a
+    // hard straight edge across the sky, which is what the owner saw and no galaxy does.
+    //
+    // A real disc's surface density falls off EXPONENTIALLY with radius (Freeman 1970, the exponential
+    // disc — the standard model for every spiral). Drawing from that profile has no edge at all: the
+    // density simply becomes small, and the few far stars thin out instead of stopping.
+    //
+    // `r = -h · ln(1-u)` draws exactly that profile from one uniform, in closed form, with no
+    // rejection loop. `h` is the scale length: the radius at which the density has fallen by `1/e`.
+    // The old exponent still shapes the draw, so a galaxy that drew a concentrated profile stays
+    // concentrated — it simply no longer ends abruptly.
+    // THE RADIUS, from the exponential-disc profile — the standard model for every spiral (Freeman
+    // 1970). Two uniforms give `r · exp(-r/h)` in closed form, with no rejection loop: few stars at
+    // the very centre, a peak near the scale length, and a smooth fade outward with NO EDGE.
+    //
+    // The drawn exponent still shapes the profile, so a galaxy that drew a concentrated disc stays
+    // concentrated — it simply has neither a wall nor a knot.
+    // ★ THE BULGE GETS ITS OWN SCALE, IT DOES NOT SHRINK THE DISC'S DRAW (corrected 2026-08-29).
+    // The bulge used to MULTIPLY an already-drawn radius by its fraction, which compounded into a
+    // pinpoint knot with a hard edge — visible from the galactic pole as a tight blob, which is what
+    // the owner saw. A bulge is the same kind of profile with a SHORTER scale length: a round central
+    // concentration, not a squeezed copy of the disc.
+    //
+    // The concentration exponent modulates the SCALE rather than the drawn value, so a concentrated
+    // galaxy has a tighter disc instead of a smaller one.
+    let u1 = draws.radius.clamp(1.0e-12, 1.0);
+    let u2 = draws.radius_b.clamp(1.0e-12, 1.0);
+    let scale_length = r_max
         * if in_bulge {
-            shape.bulge_radius_frac
+            DISC_SCALE_LENGTH_FRAC * shape.bulge_radius_frac
         } else {
-            1.0
-        };
+            DISC_SCALE_LENGTH_FRAC
+        }
+        * (2.0 * p);
+    let r_soft = -scale_length * (u1.ln() + u2.ln());
+    // ★ SQUEEZED TO THE RIM, NEVER CUT AT IT (corrected 2026-08-29, by measurement).
+    //
+    // The first attempt wrote `r_soft.min(r_max)`. That is a CLIFF wearing a different hat: it maps a
+    // whole RANGE of draws onto ONE radius, so every star in the tail lands at exactly the rim. I
+    // claimed it would catch "well under a percent" and did not measure it. MEASURED: 6 352 of
+    // 233 220 systems — 2.7% — landed at an IDENTICAL distance, which is a shell at the rim, and
+    // ruling G3 forbids two systems sharing a distance by name.
+    //
+    // `tanh` bounds without cutting. It is MONOTONE, so two different draws always give two different
+    // radii and nothing can pile up; it is the identity to within a rounding error well inside the
+    // rim, so the disc a viewer actually sees is untouched; and it approaches the rim without ever
+    // reaching it, so the storage bound holds by construction rather than by a clamp.
+    let r = r_max * (r_soft / r_max).tanh();
 
     // THE ANGLE. In the disc it follows an ARM; in the bulge there are no arms to follow.
     //
@@ -323,13 +608,26 @@ pub(crate) fn system_center_at(
     } else {
         r_max * shape.disc_thickness_frac
     };
-    let z = (draws.height - 0.5) * 2.0 * half_height;
+    // ★ AND A DISC HAS NO TOP OR BOTTOM EITHER (2026-08-29). This was a UNIFORM SLAB: full density
+    // out to ±h, then nothing. Seen edge-on that is a bar with two straight edges.
+    //
+    // A real disc's vertical profile falls off exponentially from the mid-plane, so most stars are
+    // near it and a few are far above. Same closed form as the radius, mirrored about zero: the sign
+    // comes from which half of the draw we are in, and the magnitude from the exponential.
+    let h_u = draws.height.clamp(0.0, 1.0 - 1.0e-12);
+    let side = if h_u < 0.5 { -1.0 } else { 1.0 };
+    // Fold the draw into [0,1) so both halves get the full profile rather than half of it.
+    let folded = (h_u * 2.0 - if h_u < 0.5 { 0.0 } else { 1.0 }).clamp(0.0, 1.0 - 1.0e-12);
+    let z_soft = -half_height * (1.0 - folded).ln() * DISC_HEIGHT_SCALE_FRAC;
+    // Squeezed the same way, and bounded by the star's OWN radius rather than the disc's thickness:
+    // an unbounded height would drive `planar` below zero and collapse the star onto the axis.
+    let z = side * r * (z_soft / r.max(1.0)).tanh();
 
     let planar = (r * r - z * z).max(0.0).sqrt();
     DVec3::new(planar * azimuth.cos(), z, planar * azimuth.sin()) * anchored
 }
 
-/// The six uniforms one system's placement consumes, named so a reader can see WHICH draw does what.
+/// The seven uniforms one system's placement consumes, named so a reader can see WHICH draw does what.
 ///
 /// Two of these existed before (a direction on a sphere). The other four are what a SHAPE needs: a
 /// population, BOTH halves of an arm scatter, and a height. Uniform on a sphere is a BALL — as many
@@ -340,6 +638,19 @@ pub(crate) struct PlacementDraws {
     pub(crate) population: f64,
     /// Where between the centre and the rim.
     pub(crate) radius: f64,
+    /// The radius draw's SECOND half.
+    ///
+    /// ★ A DISC NEEDS TWO (2026-08-29, and the first attempt got this wrong). A real disc's surface
+    /// density falls off exponentially, so the number of stars in a ring at radius `r` goes as
+    /// `r · exp(-r/h)` — few at the very centre, where a ring has almost no area, rising to a peak
+    /// and then fading. That is a Gamma(2) distribution, and it is drawn in closed form from TWO
+    /// uniforms: `r = -h·(ln u1 + ln u2)`.
+    ///
+    /// Drawing from ONE gave `exp(-r/h)`, which is the density of a LINE, not a disc — its maximum is
+    /// at the centre. MEASURED over 20 000 draws, that put 7 844 stars in the innermost eighth where a
+    /// real disc puts 1 776, and it showed up as a pinpoint knot at the galactic centre with a sharp
+    /// edge, which the owner spotted immediately.
+    pub(crate) radius_b: f64,
     /// Which arm, and where around the centre.
     pub(crate) azimuth: f64,
     /// How far off the arm's own line.
@@ -351,12 +662,193 @@ pub(crate) struct PlacementDraws {
     pub(crate) height: f64,
 }
 
-/// WHAT A GALAXY OF THIS KIND LOOKS LIKE — every number of it derived, never a free literal (G1).
+// ---- THE FAMILY, AND THE NUMBERS IT SPANS (S12/G1; owner-chosen 2026-08-28) --------------------
+//
+// ★ A GALAXY'S NUMBERS ARE NOT INDEPENDENT, AND DRAWING THEM AS IF THEY WERE MAKES MONSTERS.
+// Real galaxies sit on a ONE-DIMENSIONAL family, known since Hubble 1926 and measured many times
+// since. Run along it and the arms loosen while the central bulge shrinks, together:
+//
+//     EARLY  tight arms (~10°)   big bulge (~40% of the light)
+//       │
+//       │   a galaxy sits SOMEWHERE on this line — the stage draw says where
+//       ▼
+//     LATE   loose arms (~35°)   small bulge (~5%)
+//
+// Drawing the pitch and the bulge separately would eventually seed a galaxy with tightly wound arms
+// and no bulge at all. No such galaxy is in the sky, and the owner asked for "ideally very faithful".
+// So ONE draw places the galaxy on the family and the correlated numbers are DERIVED from it; each
+// then takes its own small wobble, so two galaxies at the same stage are still not twins.
+//
+// Every endpoint below is a published measurement, cited, not a number anyone liked the look of.
+
+/// The arms' pitch angle at the EARLY end of the family, in radians (~10°) — a tightly wound Sa.
+/// Kennicutt 1981 (AJ 86:1847) measures pitch against Hubble stage over 113 spirals; the early end
+/// sits near 10° and the late end near 35°, which is the span these two constants state.
+const PITCH_EARLY_RAD: f64 = 0.174_532_925_199_432_96; // 10°
+/// The arms' pitch angle at the LATE end of the family (~35°) — a loosely wound Sc/Sd.
+const PITCH_LATE_RAD: f64 = 0.610_865_238_198_015_1; // 35°
+/// The share of a galaxy's stars in its central bulge at the EARLY end. Graham & Worley 2008
+/// (MNRAS 388:1708) and Weinzirl et al. 2009 measure bulge-to-total light falling from ~0.4 at Sa
+/// to a few percent by Sd; these two constants state that span.
+const BULGE_SHARE_EARLY: f64 = 0.40;
+/// The share of a galaxy's stars in its central bulge at the LATE end.
+const BULGE_SHARE_LATE: f64 = 0.05;
+/// How far each derived number may wobble off the family line, as a fraction of its own span. Real
+/// galaxies scatter about the sequence rather than sitting exactly on it — without this every galaxy
+/// at one stage would be identical, which is its own kind of unbelievable.
+const FAMILY_SCATTER: f64 = 0.18;
+
+/// A disc's thickness as a fraction of its radius, at its thinnest and thickest. The Milky Way's
+/// thin disc is ~300 pc of scale height against a ~15 kpc radius — about 0.02 — and the span here
+/// brackets that with room for the thicker discs late types show.
+const DISC_THICKNESS_FRAC_LO: f64 = 0.010;
+/// A disc's thickness as a fraction of its radius, at its thickest.
+const DISC_THICKNESS_FRAC_HI: f64 = 0.060;
+/// The bulge's own radius as a fraction of the galaxy's, at its smallest and largest.
+const BULGE_RADIUS_FRAC_LO: f64 = 0.10;
+/// The bulge's own radius as a fraction of the galaxy's, at its largest.
+const BULGE_RADIUS_FRAC_HI: f64 = 0.25;
+/// How much of the SPACE BETWEEN ARMS one arm fills at the rim, at its narrowest and widest.
+///
+/// ★ A FRACTION OF THE SPACING, NEVER AN ABSOLUTE ANGLE — and this was FOUND BY LOOKING, which is
+/// exactly what ruling G13 exists for. The width was a plain angle, and the space between arms is not:
+/// two arms sit 180° apart, four sit 90° apart. At the wide end of the range an arm reached 137° and
+/// so filled 152% of a four-armed galaxy's gap — every arm overlapping its neighbours into one smooth
+/// disc. The census said "5.36× more stars in arms than between them" and was TRUE; the picture had no
+/// arms at all, because a population can be assigned to an arm that is too wide to see.
+///
+/// Stated as a duty cycle, an arm covers the same share of its own gap however many arms there are.
+const ARM_DUTY_LO: f64 = 0.14;
+/// How much of the space between arms one arm fills at the rim, at its widest.
+const ARM_DUTY_HI: f64 = 0.34;
+/// The fewest arms a spiral is drawn with, and the most. Two is the grand-design case and by far
+/// the most common; four is the upper end before a galaxy reads as flocculent rather than armed.
+const ARMS_LO: u32 = 2;
+/// The most arms a spiral is drawn with.
+const ARMS_HI: u32 = 4;
+
+/// Read one uniform and place it in `[lo, hi]`.
+fn spread(u01: f64, lo: f64, hi: f64) -> f64 {
+    lo + (hi - lo) * u01
+}
+
+/// Take a number DERIVED from the family and let it wobble off the line, staying inside the span.
+///
+/// The wobble is a fraction of the span, centred, and the result is clamped back into `[lo, hi]` so
+/// a galaxy at an end of the family cannot be pushed off it.
+fn wobble(value: f64, u01: f64, lo: f64, hi: f64) -> f64 {
+    let span = hi - lo;
+    let off = (u01 - 0.5) * 2.0 * FAMILY_SCATTER * span;
+    (value + off).clamp(lo.min(hi), hi.max(lo))
+}
+
+/// DRAW a galaxy's shape — every number of it, from the galaxy's own stream (G1).
+///
+/// The draws are taken in a FIXED ORDER and every one is consumed for every kind, so the stream's
+/// shape does not depend on what kind was drawn. A kind that ignores a number still costs its draw.
+/// This is the same discipline the home system's placement follows: consume identically, branch on
+/// the value, never on the stream.
+fn draw_galaxy_shape(kind: GalaxyType, stream: &mut vd_core::rng::SplitMix64) -> GalaxyShape {
+    // ---- THE STAGE: where on the family this galaxy sits. 0 is early, 1 is late. ----
+    let stage = stream.next_f64();
+    let u_pitch = stream.next_f64();
+    let u_bulge_share = stream.next_f64();
+    let u_bulge_radius = stream.next_f64();
+    let u_thickness = stream.next_f64();
+    let u_arms = stream.next_f64();
+    let u_arm_width = stream.next_f64();
+    let u_arm_fray = stream.next_f64();
+    let u_interarm = stream.next_f64();
+    let u_falloff = stream.next_f64();
+
+    // THE TWO CORRELATED NUMBERS, derived from the stage and then wobbled off the line.
+    let pitch_rad = wobble(
+        spread(stage, PITCH_EARLY_RAD, PITCH_LATE_RAD),
+        u_pitch,
+        PITCH_EARLY_RAD,
+        PITCH_LATE_RAD,
+    );
+    // The bulge share runs the OTHER WAY along the family: an early galaxy has the big bulge.
+    let bulge_share = wobble(
+        spread(stage, BULGE_SHARE_EARLY, BULGE_SHARE_LATE),
+        u_bulge_share,
+        BULGE_SHARE_LATE,
+        BULGE_SHARE_EARLY,
+    );
+    // The rest are drawn on their own: they scatter across the sequence rather than tracking it.
+    let bulge_radius_frac = spread(u_bulge_radius, BULGE_RADIUS_FRAC_LO, BULGE_RADIUS_FRAC_HI);
+    let disc_thickness_frac = spread(u_thickness, DISC_THICKNESS_FRAC_LO, DISC_THICKNESS_FRAC_HI);
+    let arms =
+        ARMS_LO + ((u_arms * f64::from(ARMS_HI - ARMS_LO + 1)) as u32).min(ARMS_HI - ARMS_LO);
+    let arm_fray = spread(u_arm_fray, 1.0, 2.2);
+    // THE WIDTH IS A SHARE OF THE GAP (see `ARM_DUTY_LO`). The placement widens an arm by
+    // `1 + fray·(r/R)`, reaching `1 + fray` at the rim, so dividing by that here makes the duty
+    // cycle true where the arms are widest — and tighter than it everywhere inside.
+    let spacing_rad = TAU / f64::from(arms);
+    let arm_width_rad =
+        spread(u_arm_width, ARM_DUTY_LO, ARM_DUTY_HI) * spacing_rad / (1.0 + arm_fray);
+    let interarm_fraction = spread(u_interarm, 0.20, 0.38);
+    let disc_exponent = spread(u_falloff, 0.50, 0.75);
+
+    let spiral = GalaxyShape {
+        arms,
+        pitch_tan: pitch_rad.tan(),
+        arm_width_rad,
+        arm_fray,
+        interarm_fraction,
+        bulge_fraction: bulge_share,
+        bulge_radius_frac,
+        bulge_roundness: 0.6,
+        bulge_exponent: 0.6,
+        disc_exponent,
+        disc_thickness_frac,
+    };
+    // AN ELLIPTICAL is one round population: no arms, no disc, denser toward the middle. Its own
+    // stage draw sets how FLATTENED it is — Hubble's E0 (round) through E7 (lens-shaped).
+    let elliptical = GalaxyShape {
+        arms: 1,
+        pitch_tan: 1.0,
+        arm_width_rad: TAU,
+        arm_fray: 0.0,
+        interarm_fraction: 0.0,
+        bulge_fraction: 1.0,
+        bulge_radius_frac: 1.0,
+        bulge_roundness: spread(stage, 0.30, 0.95),
+        bulge_exponent: disc_exponent,
+        disc_exponent,
+        disc_thickness_frac: 0.5,
+    };
+    // AN IRREGULAR is neither: thick, loosely wound, mostly unstructured. That is what makes it
+    // irregular, so it takes the loose end of every span rather than the family's line.
+    let irregular = GalaxyShape {
+        arms: 1,
+        pitch_tan: spread(stage, 1.0, 2.0),
+        arm_width_rad: arm_width_rad + 1.5,
+        arm_fray: arm_fray + 1.0,
+        interarm_fraction: interarm_fraction + 0.15,
+        bulge_fraction: bulge_share,
+        bulge_radius_frac: bulge_radius_frac * 2.0,
+        bulge_roundness: 0.8,
+        bulge_exponent: 0.5,
+        disc_exponent,
+        disc_thickness_frac: disc_thickness_frac * 5.0,
+    };
+    match kind {
+        GalaxyType::Spiral => spiral,
+        GalaxyType::Elliptical => elliptical,
+        GalaxyType::Irregular => irregular,
+    }
+}
+
+/// WHAT A GALAXY LOOKS LIKE — every number of it DRAWN FROM THE SEED, never a free literal (G1).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GalaxyShape {
     pub(crate) arms: u32,
     /// tan(pitch angle) — how tightly the arms wind. A small value winds tightly.
     pub(crate) pitch_tan: f64,
+    /// How far off its own line an arm scatters, in radians, at the CORE. The placement widens this
+    /// outward by the fray. Derived from a duty cycle so it stays a share of the gap between arms —
+    /// see `ARM_DUTY_LO` for what an absolute angle cost.
     pub(crate) arm_width_rad: f64,
     /// How much wider an arm is at the rim than at the core. Arms fray as they run out.
     pub(crate) arm_fray: f64,
@@ -371,69 +863,11 @@ pub(crate) struct GalaxyShape {
     pub(crate) disc_thickness_frac: f64,
 }
 
-/// The shape a galaxy of `kind` has (S12; owner rulings G2, G9, G13).
-///
-/// ★ A FIRST PROPOSAL, TO BE JUDGED BY LOOKING. G13 says the assistant proposes the standard model in
-/// code and the owner judges the picture, because a galaxy is easier to judge than to specify. These
-/// numbers are the published shape of each kind, not tuning: a spiral's arms trail at a pitch of a few
-/// tens of degrees, its disc is a few percent of its radius thick, and its bulge holds a modest share
-/// of its stars in a small, round, central volume.
-///
-/// ⚠ THEY ARE CONSTANTS PER KIND TODAY, WHICH G1 DOES NOT YET SATISFY. G1 requires every number the
-/// placement reads to be drawn from the seed, so that galaxies differ. Making them per-galaxy draws is
-/// the next step, and it is deliberately NOT taken here: the shape must be looked at before it is
-/// varied, or a bad shape and a bad variation are indistinguishable.
-#[must_use]
-fn galaxy_shape(kind: GalaxyType, _config: &UniverseConfig) -> GalaxyShape {
-    match kind {
-        GalaxyType::Spiral => GalaxyShape {
-            arms: 2,
-            // tan(25°) — the pitch angle of a typical grand-design spiral.
-            pitch_tan: 0.466_307_658_154_591_9,
-            arm_width_rad: 0.55,
-            arm_fray: 1.6,
-            // A THIRD of the disc lies between the arms. Measured against real spirals, the arm/
-            // inter-arm contrast is a factor of a few, never the "all or nothing" a zero here draws.
-            interarm_fraction: 0.28,
-            bulge_fraction: 0.15,
-            bulge_radius_frac: 0.15,
-            bulge_roundness: 0.6,
-            bulge_exponent: 0.6,
-            disc_exponent: 0.6,
-            disc_thickness_frac: 0.03,
-        },
-        // No arms, no disc: a smooth three-dimensional swell, denser toward the middle. Modelled as
-        // one round population by giving it a bulge fraction of one.
-        GalaxyType::Elliptical => GalaxyShape {
-            arms: 1,
-            pitch_tan: 1.0,
-            arm_width_rad: TAU,
-            arm_fray: 0.0,
-            interarm_fraction: 0.0,
-            bulge_fraction: 1.0,
-            bulge_radius_frac: 1.0,
-            bulge_roundness: 0.7,
-            bulge_exponent: 0.7,
-            disc_exponent: 0.7,
-            disc_thickness_frac: 0.5,
-        },
-        // Neither, and it looks it: a thick, loosely wound, scattered population.
-        GalaxyType::Irregular => GalaxyShape {
-            arms: 1,
-            pitch_tan: 1.5,
-            arm_width_rad: 2.0,
-            // An irregular is MOSTLY unstructured — that is what makes it irregular.
-            arm_fray: 2.5,
-            interarm_fraction: 0.45,
-            bulge_fraction: 0.3,
-            bulge_radius_frac: 0.5,
-            bulge_roundness: 0.8,
-            bulge_exponent: 0.5,
-            disc_exponent: 0.5,
-            disc_thickness_frac: 0.25,
-        },
-    }
-}
+// (THE CHOSEN TABLE IS DELETED, S12/G1 2026-08-28. `galaxy_shape` returned eleven fixed numbers per
+// kind — a spiral was always two arms at 25° with a 15% bulge, whoever's galaxy it was. Ruling G1 says
+// every number the placement reads must come from the seed, so the table became a SECOND SOURCE OF
+// TRUTH for a fact the stream now states. `draw_galaxy_shape` is the only source. The owner judged the
+// drawn shapes against the picture before this went, per ruling G13.)
 
 /// The config-driven star-system forest: Universe → Galaxy → `stellar.n_systems` star systems, each with
 /// `planet.n_planets` `Orbital` planets (D-45(a) FA-5). A System shell IS its star's frame — the planets
@@ -452,9 +886,9 @@ pub(crate) fn generate_system_forest(
     seed_universe: u64,
     config: &UniverseConfig,
 ) -> Vec<GeneratedBody> {
+    // (`st` and `pl` moved into `seed_one_system` and `append_system_contents` with the stages that
+    // read them — the extraction left this loop reading neither.)
     let sc = &config.scale;
-    let st = &config.stellar;
-    let pl = &config.planet;
     let shell = |r: f64| Boundary::Shell { r };
     let origin = Placement::StaticOffset(DVec3::ZERO);
     let mut bodies = vec![
@@ -484,10 +918,17 @@ pub(crate) fn generate_system_forest(
     // galaxies in one universe differ without anyone choosing. `lo == hi` pins it exactly.
     // (The star COUNT stays this existing config parameter — owner ruling Q-B: the placement law
     // went 3-D and seeded; the census census-derivation is P10's.)
-    let n_systems = galaxy_system_count(seed_universe, config);
-    // WHAT KIND OF GALAXY THIS IS — drawn once, from the galaxy's own stream, and consumed by every
-    // system's placement below. Nothing drew this before S12.
-    let kind = galaxy_kind(seed_universe, config);
+    // ★ THE GALAXY STATES ITSELF — its census, its kind AND its shape, read ONCE from its own stream
+    // (S12, owner ruling G1: *"Density also should come from seed, otherwise any tiny change might
+    // change positions."*). This was three separate reads, each rebuilding the same stream; a shape
+    // that a person had chosen is now a shape the seed draws, and the owner judged the picture before
+    // the world adopted it (ruling G13, approved 2026-08-28).
+    let GalaxyProfile {
+        count: n_systems,
+        kind: _kind,
+        shape,
+        density_per_pc3: _density,
+    } = galaxy_profile(seed_universe, config);
     for s in 0..n_systems {
         let seed = system_seed_at(s);
         let system = RealmId::System(seed);
@@ -516,173 +957,435 @@ pub(crate) fn generate_system_forest(
         //   draws 58–66  one log-uniform mass per planet (ALL planets, index order)
         // Every `sma` and every `central_mass` is a DERIVATION (zero draws), so anchoring the
         // ladder to the star's √L consumes nothing and moves nothing.
-        let mut stream = realm_stream(seed_universe, &[UNIVERSE_SEED, GALAXY_SEED, seed]);
-        let legacy = pl.n_planets.min(LEGACY_STREAM_PLANETS);
-        let mut element_draws: Vec<PlanetElementDraws> = (0..legacy)
-            .map(|_| planet_element_draws(config, &mut stream))
-            .collect();
-        let star = draw_star_photometrics(st, &mut stream);
-        bodies[system_ix].photometrics = Some(star);
-        let mut albedo_draws: Vec<f64> = (0..legacy).map(|_| stream.next_f64()).collect();
-        // THE SHAPE'S PLACEMENT DRAWS (S12; owner rulings G2, G9, G13). SIX, where the sphere took
-        // two: a population, a radius, an azimuth, TWO halves of an arm scatter and a height. The
-        // HOME system consumes all six exactly like every sibling — the anchor multiplier, not the
-        // stream shape, pins it to the galactic origin.
-        bodies[system_ix].placement = Placement::StaticOffset(system_center_at(
+        let SeededSystem {
+            mut stream,
+            star,
+            mut element_draws,
+            mut albedo_draws,
+        } = seed_one_system(
+            seed_universe,
             config,
-            kind,
+            &shape,
             s,
-            PlacementDraws {
-                population: stream.next_f64(),
-                radius: stream.next_f64(),
-                azimuth: stream.next_f64(),
-                scatter: stream.next_f64(),
-                scatter_b: stream.next_f64(),
-                height: stream.next_f64(),
-            },
-        ));
-        // ---- the APPENDED draws (planets beyond the frozen prefix, then every mass) ----
-        for _ in legacy..pl.n_planets {
-            element_draws.push(planet_element_draws(config, &mut stream));
-        }
-        for _ in legacy..pl.n_planets {
-            albedo_draws.push(stream.next_f64());
-        }
-        let mass_hi_mearth = planet_mass_hi_mearth(pl, &star);
-        let masses_mearth: Vec<f64> = (0..pl.n_planets)
-            .map(|_| {
-                sample_imf_mass(
-                    stream.next_f64(),
-                    PLANET_MASS_SLOPE,
-                    pl.mass_lo_mearth,
-                    mass_hi_mearth,
-                )
-            })
-            .collect();
-        // ============ THE DERIVATIONS (consume nothing; true-size in-system space) ============
-        let star_look_r_m = crate::taxonomy::star_radius_m(star.mass_msun);
-        let frost_line_au =
-            crate::taxonomy::frost_line_radius_au(star.luma_lsun, pl.frost_coeff_au);
-        let th = pl.frost_thresholds();
-        let mut planet_bodies = Vec::with_capacity(element_draws.len());
-        let mut moon_inputs: Vec<(RealmId, u64, f64, f64, f64)> = Vec::new();
-        for (n, (draws, mass_mearth)) in element_draws.iter().zip(&masses_mearth).enumerate() {
-            let planet_seed = child_seed(seed, PLANET_SALT, n as u64);
-            let elements = planet_orbital_elements(config, *draws, n as u32, &star);
-            // THE PER-PLANET STREAM (T1 — a brand-new lineage nobody else reads; the Stream
-            // Law's standing doctrine): P.1 = `f_env`, log-uniform over `F_ENV_BOUNDS` through
-            // the existing sample_imf_mass log-uniform limit. Drawn UNCONDITIONALLY (the Stream
-            // Law corollary: a draw is never conditional on a derived value); whether the
-            // classifier READS it is downstream.
-            let mut planet_stream = realm_stream(
-                seed_universe,
-                &[UNIVERSE_SEED, GALAXY_SEED, seed, planet_seed],
-            );
-            let f_env = sample_imf_mass(
-                planet_stream.next_f64(),
-                PLANET_MASS_SLOPE,
-                crate::taxonomy::F_ENV_BOUNDS.0,
-                crate::taxonomy::F_ENV_BOUNDS.1,
-            );
-            // THE ONE DERIVATION PATH (par 4.4): identical code for a planet under a star and
-            // (T3) a moon under a planet.
-            let taxon = crate::taxonomy::body_params(
-                mass_mearth * crate::taxonomy::M_EARTH_KG,
-                star.luma_lsun,
-                star.class,
-                elements.sma,
-                frost_line_au,
-                th,
-                f_env,
-            );
-            let soi_m = planet_bound_m(pl, &star, n as u32, *mass_mearth);
-            moon_inputs.push((
-                RealmId::Planet(planet_seed),
-                planet_seed,
-                elements.sma,
-                taxon.mass_kg,
-                albedo_draws[n],
-            ));
-            planet_bodies.push(GeneratedBody {
-                realm: RealmId::Planet(planet_seed),
-                parent: Some(system),
-                // D-REAL-1 (owner ruling 2026-08-18): the realm shell IS the gravitational
-                // sphere of influence at the DRAWN mass (clamped by half the worst-instant
-                // inter-orbit gap — an inert-but-live arm, fenced).
-                shape: shell(soi_m),
-                placement: Placement::Orbital(elements),
-                // A planet's marker is REFLECTED LIGHT: the star's luma diluted over its orbit,
-                // intercepted by its own DERIVED cross-section (its composition radius — its
-                // LOOK, not its authority bound).
-                photometrics: Some(reflected_photometrics(
-                    &star,
-                    albedo_draws[n],
-                    taxon.radius_m,
-                    elements.sma,
-                )),
-                taxon: Some(taxon),
-                // SL3: the planet draws ITSELF at its own derived radius.
-                look: Some(shell(taxon.radius_m)),
-            });
-        }
-        // THE SYSTEM SHELL — the one clearance solve (real-scale design §3.2), bounded at the
-        // MASS CAP (the worst lawful draw), so the shell is `f(star)` alone and no mass draw
-        // can move it: every lawful planet fits by construction.
-        bodies[system_ix].shape = shell(system_shell_r_m(&config.planet, &star));
-        // THE SYSTEM'S LOOK IS ITS STAR: `star_radius_m` of the drawn mass — ONE function, TWO
-        // call sites (celestial_taxonomy_design §5.2): the system's marker-side look here and
-        // the Star realm's own look below carry the SAME value, so the marker→body handover is
-        // the same radius at every depth. No double-draw: "a realm containing the eye is not a
-        // subject" makes the two mutually exclusive.
-        bodies[system_ix].look = Some(shell(star_look_r_m));
-        bodies.extend(planet_bodies);
-        // ★ THE STAR REALM (taxonomy arc T2, owner ruling 2026-08-19): the star becomes a
-        // BODY-BEARING CHILD of its system — a separate authority volume whose crossing turns
-        // on near-star physics. ZERO draws (its photometrics ARE the system's pinned draw);
-        // pushed AFTER the system's planets (the §7.1 append-only forest order). Its BOUND is
-        // the dust-sublimation radius (ruling E: the honest "solid matter is destroyed by heat
-        // here" surface — `flux_radius_m` at 1500 K, the same equilibrium law as every planet
-        // temperature, inverted); its LOOK is its own photosphere. The owner's Dyson-standoff
-        // sub-item did NOT close honestly and is STOPPED per the ruling's own instruction —
-        // see DEFERRED.md D-TAX-3 for the measured option set.
-        bodies.push(GeneratedBody {
-            realm: RealmId::Star(child_seed(seed, STAR_SALT, 0)),
-            parent: Some(system),
-            shape: shell(star_bound_m(&star)),
-            placement: Placement::StaticOffset(DVec3::ZERO),
-            // The star's marker IS its photometrics — the same kind-blind row the system
-            // carries (a star's point of light is its own).
-            photometrics: Some(star),
-            taxon: None,
-            look: Some(shell(star_look_r_m)),
-        });
-        // ★ THE MOON PASS (taxonomy arc T3, owner ruling: "for moons — it's the same as
-        // Planet — just another realm"): moons are `RealmId::Planet` bodies whose parent is a
-        // planet — zero new realm kinds, zero wire, the identical crossing/demand/draw code.
-        // Pushed AFTER the star, planet order then rung order (the §7.1 append-only forest
-        // order); every moon draws from its OWN per-moon lineage (the Stream Law one level
-        // down: a count correction adds or removes moons without shifting a sibling's draws).
-        for (planet_realm, planet_seed, planet_sma_m, planet_mass_kg, planet_albedo_u01) in
-            moon_inputs
-        {
-            append_moons(
-                &mut bodies,
-                config,
-                seed_universe,
-                seed,
-                &star,
-                planet_realm,
-                planet_seed,
-                planet_sma_m,
-                planet_mass_kg,
-                planet_albedo_u01,
-            );
-        }
+            seed,
+            &mut bodies[system_ix],
+        );
+        append_system_contents(
+            &mut bodies,
+            config,
+            seed_universe,
+            seed,
+            system,
+            system_ix,
+            &mut stream,
+            &star,
+            &mut element_draws,
+            &mut albedo_draws,
+        );
     }
+    // ★ THE PUSH (owner ruling G12) — where the shape and the gap disagree, the star moves OUT.
+    // Runs INSIDE the generator, so no caller can hold an un-pushed galaxy: two processes with
+    // different star positions is the very ambiguity the separation fence exists to prevent.
+    push_crowded_systems(&mut bodies, config);
     // The fixture plant (look_horizon slice 5 — G-IDENTICAL), appended LAST: with `None` (every
     // shipped constructor) this is a no-op and the forest is byte-identical to the pre-plant world.
     append_fixture_plant(&mut bodies, config);
     bodies
+}
+
+/// How far one attempt moves a crowded star, as a share of its own distance from the centre. Small,
+/// because the shortfalls are small: THE world's worst pair sits at 4.7% of the separation it needs,
+/// which one step of this size clears with room to spare.
+const PUSH_STEP_FRAC: f64 = 0.02;
+/// How many times one star may step outward before the generator gives up and says so. A star that
+/// cannot be placed in this many tries is a world that has gone wrong somewhere else, and a silent
+/// infinite loop is the worst way to learn that.
+const PUSH_MAX_ATTEMPTS: u32 = 64;
+
+/// ★ ONE SYSTEM'S CONTENTS — its planets, its star child and its moons (owner ruling 2026-08-29).
+///
+/// ★ WHY IT IS ITS OWN FUNCTION. A shard runs ONE realm and needs the children it authors. It used
+/// to get them by building the WHOLE forest and filtering: MEASURED on THE world, 3 500 479 regions
+/// built to keep 13, which is the login timeout a player actually hits.
+///
+/// A realm AUTHORS its own children — that is the parent's job, and this realm is their parent — so
+/// asking the seed "what is inside me" involves no other realm and crosses no boundary. What a realm
+/// may NOT do is author its own PLACEMENT; that stays with the galaxy, and this function never
+/// touches it.
+///
+/// ★ AND IT IS NOT A SECOND GENERATOR. This is the full forest's own loop body, lifted verbatim, and
+/// the full forest calls it. There is exactly one piece of code that decides what a star system
+/// contains, so a shard and the gateway cannot disagree about how many planets exist. The identity
+/// gate beside it measures that rather than assuming it.
+///
+/// The system must ALREADY be seeded — [`seed_one_system`] read its stream and left it positioned at
+/// the first appended draw, and that stream is handed in rather than re-made.
+#[allow(clippy::too_many_arguments)] // one private stage; every argument is the system's own datum
+fn append_system_contents(
+    bodies: &mut Vec<GeneratedBody>,
+    config: &UniverseConfig,
+    seed_universe: u64,
+    seed: u64,
+    system: RealmId,
+    system_ix: usize,
+    stream: &mut vd_core::rng::SplitMix64,
+    star: &StarPhotometrics,
+    element_draws: &mut Vec<PlanetElementDraws>,
+    albedo_draws: &mut Vec<f64>,
+) {
+    let pl = &config.planet;
+    let star = *star;
+    let shell = |r: f64| Boundary::Shell { r };
+
+    let legacy = pl.n_planets.min(LEGACY_STREAM_PLANETS);
+    // ---- the APPENDED draws (planets beyond the frozen prefix, then every mass) ----
+    for _ in legacy..pl.n_planets {
+        element_draws.push(planet_element_draws(config, stream));
+    }
+    for _ in legacy..pl.n_planets {
+        albedo_draws.push(stream.next_f64());
+    }
+    let mass_hi_mearth = planet_mass_hi_mearth(pl, &star);
+    let masses_mearth: Vec<f64> = (0..pl.n_planets)
+        .map(|_| {
+            sample_imf_mass(
+                stream.next_f64(),
+                PLANET_MASS_SLOPE,
+                pl.mass_lo_mearth,
+                mass_hi_mearth,
+            )
+        })
+        .collect();
+    // ============ THE DERIVATIONS (consume nothing; true-size in-system space) ============
+    let star_look_r_m = crate::taxonomy::star_radius_m(star.mass_msun);
+    let frost_line_au = crate::taxonomy::frost_line_radius_au(star.luma_lsun, pl.frost_coeff_au);
+    let th = pl.frost_thresholds();
+    let mut planet_bodies = Vec::with_capacity(element_draws.len());
+    let mut moon_inputs: Vec<(RealmId, u64, f64, f64, f64, f64)> = Vec::new();
+    for (n, (draws, mass_mearth)) in element_draws.iter().zip(&masses_mearth).enumerate() {
+        let planet_seed = child_seed(seed, PLANET_SALT, n as u64);
+        let elements = planet_orbital_elements(config, *draws, n as u32, &star);
+        // THE PER-PLANET STREAM (T1 — a brand-new lineage nobody else reads; the Stream
+        // Law's standing doctrine): P.1 = `f_env`, log-uniform over `F_ENV_BOUNDS` through
+        // the existing sample_imf_mass log-uniform limit. Drawn UNCONDITIONALLY (the Stream
+        // Law corollary: a draw is never conditional on a derived value); whether the
+        // classifier READS it is downstream.
+        let mut planet_stream = realm_stream(
+            seed_universe,
+            &[UNIVERSE_SEED, GALAXY_SEED, seed, planet_seed],
+        );
+        let f_env = sample_imf_mass(
+            planet_stream.next_f64(),
+            PLANET_MASS_SLOPE,
+            crate::taxonomy::F_ENV_BOUNDS.0,
+            crate::taxonomy::F_ENV_BOUNDS.1,
+        );
+        // THE ONE DERIVATION PATH (par 4.4): identical code for a planet under a star and
+        // (T3) a moon under a planet.
+        let taxon = crate::taxonomy::body_params(
+            mass_mearth * crate::taxonomy::M_EARTH_KG,
+            star.luma_lsun,
+            star.class,
+            elements.sma,
+            frost_line_au,
+            th,
+            f_env,
+        );
+        let soi_m = planet_bound_m(pl, &star, n as u32, *mass_mearth);
+        moon_inputs.push((
+            RealmId::Planet(planet_seed),
+            planet_seed,
+            elements.sma,
+            taxon.mass_kg,
+            albedo_draws[n],
+            // ★ THE PLANET'S OWN SHELL, CARRIED (perf fix 2026-08-28). The moon pass used to
+            // SEARCH the whole accumulated body list for this planet to read exactly this
+            // number back off it. See `append_moons`.
+            soi_m,
+        ));
+        planet_bodies.push(GeneratedBody {
+            realm: RealmId::Planet(planet_seed),
+            parent: Some(system),
+            // D-REAL-1 (owner ruling 2026-08-18): the realm shell IS the gravitational
+            // sphere of influence at the DRAWN mass (clamped by half the worst-instant
+            // inter-orbit gap — an inert-but-live arm, fenced).
+            shape: shell(soi_m),
+            placement: Placement::Orbital(elements),
+            // A planet's marker is REFLECTED LIGHT: the star's luma diluted over its orbit,
+            // intercepted by its own DERIVED cross-section (its composition radius — its
+            // LOOK, not its authority bound).
+            photometrics: Some(reflected_photometrics(
+                &star,
+                albedo_draws[n],
+                taxon.radius_m,
+                elements.sma,
+            )),
+            taxon: Some(taxon),
+            // SL3: the planet draws ITSELF at its own derived radius.
+            look: Some(shell(taxon.radius_m)),
+        });
+    }
+    // THE SYSTEM SHELL — the one clearance solve (real-scale design §3.2), bounded at the
+    // MASS CAP (the worst lawful draw), so the shell is `f(star)` alone and no mass draw
+    // can move it: every lawful planet fits by construction.
+    bodies[system_ix].shape = shell(system_shell_r_m(&config.planet, &star));
+    // THE SYSTEM'S LOOK IS ITS STAR: `star_radius_m` of the drawn mass — ONE function, TWO
+    // call sites (celestial_taxonomy_design §5.2): the system's marker-side look here and
+    // the Star realm's own look below carry the SAME value, so the marker→body handover is
+    // the same radius at every depth. No double-draw: "a realm containing the eye is not a
+    // subject" makes the two mutually exclusive.
+    bodies[system_ix].look = Some(shell(star_look_r_m));
+    bodies.extend(planet_bodies);
+    // ★ THE STAR REALM (taxonomy arc T2, owner ruling 2026-08-19): the star becomes a
+    // BODY-BEARING CHILD of its system — a separate authority volume whose crossing turns
+    // on near-star physics. ZERO draws (its photometrics ARE the system's pinned draw);
+    // pushed AFTER the system's planets (the §7.1 append-only forest order). Its BOUND is
+    // the dust-sublimation radius (ruling E: the honest "solid matter is destroyed by heat
+    // here" surface — `flux_radius_m` at 1500 K, the same equilibrium law as every planet
+    // temperature, inverted); its LOOK is its own photosphere. The owner's Dyson-standoff
+    // sub-item did NOT close honestly and is STOPPED per the ruling's own instruction —
+    // see DEFERRED.md D-TAX-3 for the measured option set.
+    bodies.push(GeneratedBody {
+        realm: RealmId::Star(child_seed(seed, STAR_SALT, 0)),
+        parent: Some(system),
+        shape: shell(star_bound_m(&star)),
+        placement: Placement::StaticOffset(DVec3::ZERO),
+        // The star's marker IS its photometrics — the same kind-blind row the system
+        // carries (a star's point of light is its own).
+        photometrics: Some(star),
+        taxon: None,
+        look: Some(shell(star_look_r_m)),
+    });
+    // ★ THE MOON PASS (taxonomy arc T3, owner ruling: "for moons — it's the same as
+    // Planet — just another realm"): moons are `RealmId::Planet` bodies whose parent is a
+    // planet — zero new realm kinds, zero wire, the identical crossing/demand/draw code.
+    // Pushed AFTER the star, planet order then rung order (the §7.1 append-only forest
+    // order); every moon draws from its OWN per-moon lineage (the Stream Law one level
+    // down: a count correction adds or removes moons without shifting a sibling's draws).
+    for (
+        planet_realm,
+        planet_seed,
+        planet_sma_m,
+        planet_mass_kg,
+        planet_albedo_u01,
+        planet_soi_m,
+    ) in moon_inputs
+    {
+        append_moons(
+            bodies,
+            config,
+            seed_universe,
+            seed,
+            &star,
+            planet_realm,
+            planet_seed,
+            planet_sma_m,
+            planet_mass_kg,
+            planet_albedo_u01,
+            planet_soi_m,
+        );
+    }
+}
+
+/// ★ ONE REALM'S OWN SUBTREE — its chain, itself, and the children it authors (owner ruling
+/// 2026-08-29). Nothing else in the galaxy is built.
+///
+/// A shard runs ONE realm. It used to get its 13 rows by building the whole forest and filtering:
+/// MEASURED on THE world, 3 500 479 bodies to keep 13, which is the login timeout a player hits.
+///
+/// ★ WHAT COMES FROM WHERE, AND WHY IT BREAKS NO LAW.
+/// - the CHAIN and this realm's own PLACEMENT come from the galaxy's own system layer. A realm never
+///   authors its own place; its parent does, and the layer IS the parent's answer, crowding push
+///   included.
+/// - the CONTENTS come from [`append_system_contents`], the full forest's own stage, called for this
+///   system alone. A parent authors its children, and this realm is their parent, so nothing crosses
+///   a boundary and no message is needed where the seed already answers.
+///
+/// ★ ONE GENERATOR, NOT TWO. Both stages are the exact functions the full forest calls, reading the
+/// same streams in the same order. The identity gate beside this measures that a subtree matches the
+/// full build row for row, rather than assuming it.
+/// Is this body a DIRECT child of a realm the shard holds? Monomorphic and named, so its two arms are
+/// counted once (HR5 (a)) instead of inside a closure in a generic iterator chain.
+fn child_of_held(b: &GeneratedBody, held: &std::collections::BTreeSet<RealmId>) -> bool {
+    match b.parent {
+        Some(parent) => held.contains(&parent),
+        None => false,
+    }
+}
+
+#[must_use]
+pub(crate) fn realm_subtree(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    held: &std::collections::BTreeSet<RealmId>,
+) -> Vec<GeneratedBody> {
+    let layer = generate_system_layer(seed_universe, config);
+    // The chain: the ambient root, the galaxy, and every held realm — placed by their parent.
+    //
+    // ★ AND THE DIRECT CHILDREN OF EVERY HELD REALM, which is not an extra: SL1 makes a parent the
+    // ONLY writer of its children's placements, so a shard that cannot see its own children cannot do
+    // the one job its realm has. The clause is stated as PARENTHOOD and tests no realm kind (SL4/HR3)
+    // — for a held star system the layer holds no children at all (they arrive from the contents stage
+    // below), so this adds exactly nothing there and the system shard's rows stay byte-identical.
+    //
+    // MEASURED DEFECT IT CURES (2026-08-29): with only the three clauses above, a GALAXY-hosting shard
+    // booted with zero systems. `world_roster` panicked on THE world — "the galaxy authors the home
+    // system's placement" — because the galaxy's own child list was empty. Live, that same shard would
+    // author no placement, state no marker and hold no area of interest for any star.
+    let mut bodies: Vec<GeneratedBody> = layer
+        .iter()
+        .filter(|b| {
+            b.parent.is_none()
+                || b.realm == GALAXY
+                || held.contains(&b.realm)
+                || child_of_held(b, held)
+        })
+        .copied()
+        .collect();
+    // The contents: for each held star system, its own children, through the shared stage.
+    for hosted in held {
+        let RealmId::System(seed) = *hosted else {
+            continue; // only a star system has seed-generated contents today
+        };
+        let Some(system_ix) = bodies.iter().position(|b| b.realm == *hosted) else {
+            continue; // a held realm the layer does not name is not ours to populate
+        };
+        let Some(s) = (0..layer.len() as u32).find(|n| system_seed_at(*n) == seed) else {
+            continue;
+        };
+        // Re-read this system's own stream to the point the contents begin — the SAME function the
+        // full forest uses, so the draws are identical.
+        let mut scratch = bodies[system_ix];
+        let SeededSystem {
+            mut stream,
+            star,
+            mut element_draws,
+            mut albedo_draws,
+        } = seed_one_system(
+            seed_universe,
+            config,
+            &galaxy_profile(seed_universe, config).shape,
+            s,
+            seed,
+            &mut scratch,
+        );
+        append_system_contents(
+            &mut bodies,
+            config,
+            seed_universe,
+            seed,
+            *hosted,
+            system_ix,
+            &mut stream,
+            &star,
+            &mut element_draws,
+            &mut albedo_draws,
+        );
+    }
+    bodies
+}
+
+/// ★ WHERE THE SHAPE AND THE GAP DISAGREE, PUSH — NEVER DROP (owner ruling G12, 2026-08-29).
+///
+/// A faithful bulge asks for density; the per-pair separation fence sets a floor. Where they meet,
+/// one star must yield. The owner ruled which way: *"push the star out. Do not drop it."* Dropping
+/// thins the bulge exactly where the shape is trying to be densest — a galaxy with a suspiciously
+/// hollow middle, the shape defeated by its own rule.
+///
+/// ★ MEASURED ON THE WORLD BEFORE THIS EXISTED (2026-08-29). Seed 2298 — the HOME seed, the world the
+/// dev cluster boots — holds 233 220 systems and SEVEN overlapping pairs, the worst at 4.7% of the
+/// separation it needs, 3.3% of the way out from the centre. All of them in the bulge. Seed 0 has
+/// none. The ruling predicted exactly this: its own warning says the density contrast is seed-derived
+/// so "a galaxy MAY draw one above 550x", and that arms concentrate stars further still.
+///
+/// ★ THE LATER STAR YIELDS, AND THAT IS WHAT KEEPS RULING G4. A star's final place depends only on
+/// stars placed BEFORE it, so growing a galaxy adds later stars that can never disturb earlier ones.
+/// Nothing already placed moves, ever — which is the property the whole placement law exists to have.
+///
+/// ★ THE DISTANCE COMES FROM THE STAR'S OWN STREAM, so the push is seed-derived like everything else
+/// (G1): same input, same answer, forever, on every process, with nothing exchanged. It also means no
+/// two pushed stars land at the same distance — pushing each one to "just barely clear" would rebuild
+/// the shell this slice deleted, and ruling G3 forbids equal distances by name.
+///
+/// The star keeps its DIRECTION and only its radius grows, because that is what preserves the shape:
+/// a bulge pushed outward is still a bulge, very slightly less dense at its centre. A star nudged
+/// sideways would still be in the crowd.
+fn push_crowded_systems(bodies: &mut [GeneratedBody], _config: &UniverseConfig) {
+    let ix: Vec<usize> = bodies
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.parent == Some(GALAXY) && matches!(b.realm, RealmId::System(_)))
+        .map(|(i, _)| i)
+        .collect();
+    // ★ A GRID, NOT A SCAN — AND I WROTE THE SCAN FIRST (2026-08-29). The first version of this loop
+    // checked every already-placed star for every star. MEASURED: it turned a 0.82 s galaxy into a
+    // 22.11 s one, 27x slower, for seven pushes. That is the FIFTH loop of this exact shape found in
+    // one day, and the only one I authored rather than inherited — which says the shape is easy to
+    // write, not that the earlier authors were careless.
+    //
+    // Two stars can only be too close if they are within twice the largest reach, so a cell of that
+    // width puts every possible partner in the caller's own cell or one of the twenty-six touching
+    // it. The same argument the separation fence uses.
+    let cell = 2.0
+        * ix.iter()
+            .map(|&i| bodies[i].shape.circumscribed_extent())
+            .fold(0.0_f64, f64::max);
+    let key = |v: DVec3| {
+        (
+            (v.x / cell).floor() as i64,
+            (v.y / cell).floor() as i64,
+            (v.z / cell).floor() as i64,
+        )
+    };
+    // Placed so far, as (centre, reach) — a star is judged only against stars before it.
+    let mut placed: Vec<(DVec3, f64)> = Vec::with_capacity(ix.len());
+    let mut grid: BTreeMap<(i64, i64, i64), Vec<usize>> = BTreeMap::new();
+    let crowded = |at: DVec3,
+                   reach: f64,
+                   grid: &BTreeMap<(i64, i64, i64), Vec<usize>>,
+                   placed: &[(DVec3, f64)]| {
+        let (cx, cy, cz) = key(at);
+        for dx in -1..=1_i64 {
+            for dy in -1..=1_i64 {
+                for dz in -1..=1_i64 {
+                    if let Some(bucket) = grid.get(&(cx + dx, cy + dy, cz + dz)) {
+                        for &j in bucket {
+                            let (p, r) = placed[j];
+                            if (p - at).length() < r + reach {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    };
+    for (n, &i) in ix.iter().enumerate() {
+        let reach = bodies[i].shape.circumscribed_extent();
+        let mut at = super::placement_offset(bodies[i].placement);
+        // The star's own push draw: one number, from its own stream, so the distance it moves is
+        // this star's and no other's.
+        let mut stream = realm_stream(
+            0,
+            &[
+                UNIVERSE_SEED,
+                GALAXY_SEED,
+                system_seed_at(n as u32),
+                PUSH_SALT,
+            ],
+        );
+        let jitter = stream.next_f64();
+        let mut attempt = 0_u32;
+        while attempt < PUSH_MAX_ATTEMPTS && crowded(at, reach, &grid, &placed) {
+            attempt += 1;
+            let grow = 1.0 + PUSH_STEP_FRAC * (f64::from(attempt) + jitter);
+            at = super::placement_offset(bodies[i].placement) * grow;
+        }
+        grid.entry(key(at)).or_default().push(placed.len());
+        placed.push((at, reach));
+        bodies[i].placement = Placement::StaticOffset(at);
+    }
 }
 
 /// THE PLANET LAWS, in one place, `n_planets` apart — the ladder, the eccentricity cap, the frost
@@ -810,6 +1513,9 @@ pub(crate) fn append_moons(
     planet_sma_m: f64,
     planet_mass_kg: f64,
     planet_albedo_u01: f64,
+    // The planet's own solved shell — its caller has it (`shape: shell(soi_m)`) and passes it,
+    // where this used to search the whole body list for it. See the note at the first use.
+    planet_soi_m: f64,
 ) -> u32 {
     use crate::taxonomy::{
         MOON_ECC_SIGMA, MOON_INCL_SIGMA, MOON_MIN_RADIUS_M, RHO_ICE_KGM3, RHO_ROCK_KGM3,
@@ -832,12 +1538,20 @@ pub(crate) fn append_moons(
         hill_radius_m(planet_sma_m, planet_mass_kg, star_mass_kg),
         SATELLITE_DISC_HILL_FRACTION,
     );
-    let planet_soi_m = bodies
-        .iter()
-        .find(|b| b.realm == planet_realm)
-        .expect("the moon pass runs after its planet is pushed")
-        .shape
-        .finite_extent();
+    // ★ THE PLANET'S SHELL IS PASSED IN, NOT SEARCHED FOR (perf fix 2026-08-28). This read
+    //
+    //     bodies.iter().find(|b| b.realm == planet_realm).shape.finite_extent()
+    //
+    // — a scan of EVERY body generated so far, run once per planet, to recover a number the caller
+    // had already computed and pushed one line earlier (`shape: shell(soi_m)`).
+    //
+    // THAT MADE GENERATION QUADRATIC, and at three systems nobody could see it. MEASURED at
+    // 1k/2k/4k/8k systems: 39.5 ms, 161.9 ms, 696.5 ms, 3654.2 ms — n^2.04, n^2.11, n^2.39. At 8000
+    // systems the list holds 119 749 bodies and the scan runs 72 000 times, about 4.3 billion
+    // comparisons. Extrapolated to the world's ~150 000 target it is hours, not seconds.
+    //
+    // Found while measuring what ruling G8 would cost, which is the only reason it surfaced: a
+    // three-system world never pays a quadratic.
     // THE COUNT: ladder rungs inside the disc edge — and inside the climb-1 clearance clamp
     // (the §4.5.1 third `child_clearance_m` arm: a rung whose worst instant + clearance would
     // breach the planet's SOI is not minted; measured 25×-slack inert on THE world, fenced by

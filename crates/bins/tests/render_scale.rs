@@ -4,7 +4,7 @@
 //! Two numbers decide whether a picture spanning an avatar's own marker out to THE world's derived
 //! star gap can be drawn at all, and both are measured here against the world's own geometry rather
 //! than argued. (The span used to be quoted as `1e6` m to `2e15` m; the far end is
-//! `cfg.stellar.system_ring_r_m`, which the derived mass cap moved on 2026-08-20 — which is exactly
+//! `cfg.stellar.galaxy_rim_r_m`, which the derived mass cap moved on 2026-08-20 — which is exactly
 //! why the range ladder below is read and never written down.)
 //!
 //! 1. **THE DEPTH BUDGET.** Bevy builds a reverse-Z INFINITE perspective for a

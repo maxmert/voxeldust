@@ -129,6 +129,7 @@ pub(crate) fn on_client_control(
                 Session {
                     // A fresh session holds no sky until it says otherwise (S11).
                     sky_held: None,
+                    sky_parts_sent: 0,
                     client,
                     account: login.account,
                     fence,

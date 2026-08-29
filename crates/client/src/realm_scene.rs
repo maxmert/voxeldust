@@ -527,6 +527,141 @@ pub fn shape_extent_m(shape: BoxShape) -> f64 {
 /// gates' rectangle (via `vd_client_harness::camera::marker_world_radius`), so the drawn
 /// footprint and the asserted rectangle cannot disagree. A luma-less marker (a non-glowing
 /// subject — the presence floor) sizes by its extent alone; an extent-less marker (an old
+/// ★ HOW BRIGHT AND HOW BIG ONE STAR IS DRAWN — the point-source law (2026-08-29).
+///
+/// ★ WHY THE OLD ANSWER WAS "ALL OF THEM, THE SAME". Every star was clamped to the shared 3-pixel
+/// presence floor, and the fragment stage returned a flat disc. MEASURED: at a typical neighbour
+/// distance the floor is worth 4.1e14 m of drawn radius against a sun-like star's 0.5 m — the floor
+/// wins by 8e14, for every star, always. So luminosity was computed, carried across the wire, and
+/// then thrown away at the last step. 233 220 identical dots.
+///
+/// ★ WHAT A STAR ACTUALLY IS. A point. What you SEE is your own eye's blur, and that blur has the
+/// same shape and width for every star — measured in PIXELS, not metres. Only its AMPLITUDE differs.
+/// A bright star looks bigger because its faint outer wings stay above the visibility floor further
+/// out, NOT because its core is wider. That single inversion is the whole fix.
+///
+/// So the sprite is a CROP of one fixed profile, cut where that profile fades below what a screen can
+/// show. The idea is `godot-starlight`'s (Tiffany Bennett, MIT) — crop, never scale. Its own trick of
+/// moving bright stars further away to tame them is deliberately NOT taken: that is a lie about where
+/// a star is, and SL1 forbids it. Exposure is the honest knob.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StarDraw {
+    /// The sprite's half-size in PIXELS — where the profile fades below `cull_level`.
+    pub crop_px: f64,
+    /// The profile's peak, before the core clips. Above 1.0 the centre saturates to white and the
+    /// colour survives only in the wings, which is what a bright star looks like.
+    pub amplitude: f64,
+    /// The star's FLUX before the response curve — exactly `L/d²` up to the exposure. Kept separate
+    /// so the physics can be asserted on its own: the flux obeys the inverse-square law exactly, and
+    /// the amplitude is a deliberately compressed VIEW of it.
+    pub flux: f64,
+}
+
+/// The numbers the star law reads. ONE struct, no inline literals, so a look change is one place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StarTuning {
+    /// THE EXPOSURE. Scales flux before the response curve below. A LOOK decision, not a constant.
+    pub flux_gain: f64,
+    /// ★ HOW HARD THE BRIGHTNESS IS COMPRESSED — the exponent of the response curve.
+    ///
+    /// Flux across a galaxy spans about a MILLION to one. Drawn linearly, a near star's whole sprite
+    /// overflows to white: MEASURED at amplitude 2 900, the core stayed fully saturated out to 3.6 px
+    /// and the halo to 9.6 px — a solid white ball 19 px across, which is exactly what the owner saw.
+    ///
+    /// Eyes, film and star charts are all LOGARITHMIC — that is what stellar magnitude IS. A power
+    /// law with a small exponent is the same compression in closed form: at 0.3, a million-to-one
+    /// flux range becomes about sixty to one in drawn brightness. Bright stars stay bright and stop
+    /// being discs.
+    pub response_exponent: f64,
+    /// The width of the faint wings, in pixels — the eye's own blur.
+    pub halo_sigma_px: f64,
+    /// How much of the amplitude the wings carry.
+    pub halo_weight: f64,
+    /// The width of the bright core, in pixels.
+    pub core_sigma_px: f64,
+    /// The smallest sprite, in pixels. A star FADES below this rather than shrinking to nothing:
+    /// a quad smaller than a pixel misses the pixel centre and BLINKS as the camera moves, which
+    /// Stellarium and Celestia both name as the thing to avoid.
+    pub min_crop_px: f64,
+    /// Below this amplitude a star is not drawn. Set above one 8-bit step so a culled star was
+    /// genuinely invisible, never merely dim.
+    pub cull_level: f64,
+}
+
+impl Default for StarTuning {
+    fn default() -> Self {
+        Self {
+            // ★ THE EXPOSURE — a LOOK decision, calibrated from the world's own distances and to be
+            // judged by looking (owner-agreed 2026-08-29).
+            //
+            // MEASURED against the galaxy this world actually has: `base_radius_m` is 0.5·√L, so a
+            // sun-like star gives `s = 0.5/d`, and the gain that puts amplitude at 1 is `1/s²`:
+            //   nearest neighbour, ~0.24 ly   2.0e31
+            //   typical spacing               5.8e34   ← chosen
+            //   right across the galaxy       8.5e37
+            //
+            // The typical spacing is the right anchor: an ordinary star reads as an ordinary star.
+            // A near neighbour then lands near 2 900, which CLIPS its core to white — correct, that
+            // is what a bright near star looks like. Stars across the galaxy fall far below one
+            // display step individually, which is also correct: no single one is visible from there.
+            // They are not wasted, because the blending ADDS — a crowd of them is the milky band,
+            // which is what a galaxy's glow actually is.
+            flux_gain: 5.8e34,
+            // A million-to-one flux range becomes about sixty to one drawn — bright stars are bright,
+            // and none of them is a disc.
+            response_exponent: 0.3,
+            // TIGHT. The core is about a pixel and the halo a few — a star is a POINT seen through a
+            // small blur, not a glowing sphere. A wide halo is what made the bright ones read as balls.
+            halo_sigma_px: 1.6,
+            halo_weight: 0.03,
+            core_sigma_px: 0.6,
+            min_crop_px: 1.0,
+            // ★ LOW, BECAUSE FAINT STARS ARE NOT WASTE — THEY ARE THE BAND. A single star at 0.003 is
+            // below one 8-bit step and invisible alone. A thousand of them along one line of sight
+            // SUM to 3.0 under additive blending, and that sum is the milky glow of a galaxy seen
+            // edge-on. Culling at a level where one star is invisible would delete the band with it.
+            //
+            // The floor still exists so a star that contributes nothing at all costs no overdraw.
+            cull_level: 0.003,
+        }
+    }
+}
+
+/// The point-source draw law: what one star's flux comes to, and how large a sprite carries it.
+///
+/// `base_radius_m` is `POINT_SOURCE_BASE_RADIUS_M · √L`, so `(base/d)²` IS `L/d²` up to a constant —
+/// the inverse-square law, from data the vertex already carries. No new attribute, no wire change.
+#[must_use]
+pub fn star_draw(base_radius_m: f64, dist_m: f64, t: &StarTuning) -> StarDraw {
+    let s = base_radius_m / dist_m.max(1.0);
+    let flux = s * s * t.flux_gain;
+    // ★ COMPRESSED, BECAUSE SIGHT IS. See `response_exponent`: linear flux made near stars into
+    // saturated white balls, because a galaxy's flux range is a million to one and a screen's is 255.
+    let amplitude = flux.powf(t.response_exponent);
+    if amplitude <= t.cull_level {
+        // CULLED ON BRIGHTNESS, NEVER ON SIZE. A star disappears because it faded, not because it
+        // became small — which is the difference between a sky that thins and one that pops.
+        return StarDraw {
+            crop_px: 0.0,
+            amplitude: 0.0,
+            flux,
+        };
+    }
+    // WHERE THE WINGS FADE BELOW VISIBILITY, in closed form from the Gaussian:
+    //   A·w·exp(-r²/2σ²) = cull   ⇒   r = σ·√(2·ln(A·w/cull))
+    let ratio = amplitude * t.halo_weight / t.cull_level;
+    let crop = if ratio > 1.0 {
+        t.halo_sigma_px * (2.0 * ratio.ln()).sqrt()
+    } else {
+        0.0
+    };
+    StarDraw {
+        crop_px: crop.max(t.min_crop_px),
+        amplitude,
+        flux,
+    }
+}
+
 /// luma-only bag) by its √L radius alone, the floor carrying the rest.
 #[must_use]
 pub fn marker_base_radius_m(luma: Option<(u8, f64)>, extent_m: f64) -> f64 {
@@ -778,6 +913,137 @@ fn unit_sphere_vertices() -> Vec<Vertex> {
 fn push_tri(verts: &mut Vec<Vertex>, a: [f32; 3], b: [f32; 3], c: [f32; 3]) {
     for pos in [a, b, c] {
         verts.push(Vertex { pos, normal: pos });
+    }
+}
+
+#[cfg(test)]
+mod star_law_tests {
+    use super::*;
+
+    const SUN_BASE_M: f64 = POINT_SOURCE_BASE_RADIUS_M; // sqrt(1 L_sun) = 1
+
+    /// ★ THE DEFECT THIS LAW EXISTS TO FIX: every star drew at the same size, so luminosity was
+    /// computed, shipped and discarded. A brighter star must draw BIGGER and BRIGHTER than a dim one
+    /// at the same distance — the property the old presence floor destroyed.
+    #[test]
+    fn a_brighter_star_draws_bigger_and_brighter_at_the_same_distance() {
+        let t = StarTuning::default();
+        let d = 1.0e17;
+        let dim = star_draw(SUN_BASE_M * (0.01_f64).sqrt(), d, &t);
+        let bright = star_draw(SUN_BASE_M * (100.0_f64).sqrt(), d, &t);
+        assert!(
+            bright.amplitude > dim.amplitude,
+            "a brighter star must be brighter: {bright:?} vs {dim:?}"
+        );
+        assert!(
+            bright.crop_px > dim.crop_px,
+            "a brighter star's wings reach further, so its sprite is larger: {bright:?} vs {dim:?}"
+        );
+    }
+
+    /// ★ THE PHYSICS IS EXACT AND THE PICTURE IS COMPRESSED — two different statements, both true.
+    ///
+    /// The FLUX obeys the inverse-square law to the last bit: twice as far is a quarter as much light.
+    /// The DRAWN brightness deliberately does not, because a galaxy's flux range is a million to one
+    /// and a screen's is 255. Drawing it linearly turned near stars into saturated white balls 19 px
+    /// across. Eyes, film and star charts are all logarithmic — stellar MAGNITUDE is this compression.
+    #[test]
+    fn the_flux_is_exactly_inverse_square_and_the_drawn_brightness_is_compressed() {
+        let t = StarTuning::default();
+        let near = star_draw(SUN_BASE_M, 1.0e17, &t);
+        let far = star_draw(SUN_BASE_M, 2.0e17, &t);
+        let flux_ratio = near.flux / far.flux;
+        assert!(
+            (flux_ratio - 4.0).abs() < 1.0e-9,
+            "the PHYSICS must be exact inverse square: expected 4x, got {flux_ratio}"
+        );
+        let drawn_ratio = near.amplitude / far.amplitude;
+        assert!(
+            drawn_ratio > 1.0 && drawn_ratio < flux_ratio,
+            "the PICTURE must be compressed — brighter, but by less than four: got {drawn_ratio}"
+        );
+    }
+
+    /// ★ AND THE COMPRESSION MUST ACTUALLY TAME THE RANGE. A near star may clip its centre to white;
+    /// it may NOT be a white disc. Pinned as the measurement that caught it: at linear flux the core
+    /// stayed saturated to 3.6 px and the halo to 9.6 px — a ball 19 px across.
+    #[test]
+    fn a_near_bright_star_is_not_a_white_ball() {
+        let t = StarTuning::default();
+        let near = star_draw(SUN_BASE_M * 5.0, 3.0e16, &t);
+        assert!(near.amplitude > 1.0, "a near star still clips its centre");
+        // Where the CORE stops being fully white: A·exp(-r²/2σ²) = 1 ⇒ r = σ·√(2·ln A).
+        let white_px = t.core_sigma_px * (2.0 * near.amplitude.ln()).sqrt();
+        assert!(
+            white_px < 3.0,
+            "a star's saturated core must stay small — got {white_px} px, which reads as a ball"
+        );
+    }
+
+    /// ★ A STAR FADES OUT; IT NEVER BLINKS OUT. The sprite has a floor, so it can never shrink below
+    /// a pixel and start missing pixel centres as the camera turns — the failure Stellarium and
+    /// Celestia both name. What falls to zero is the BRIGHTNESS, which is continuous.
+    #[test]
+    fn a_fading_star_keeps_its_minimum_sprite_until_it_is_culled_on_brightness() {
+        let t = StarTuning::default();
+        let mut d = 1.0e17;
+        let mut drew = 0;
+        for _ in 0..200 {
+            let s = star_draw(SUN_BASE_M, d, &t);
+            if s.amplitude == 0.0 {
+                assert_eq!(s.crop_px, 0.0, "a culled star draws nothing at all");
+                break;
+            }
+            assert!(
+                s.crop_px >= t.min_crop_px,
+                "a visible star is never smaller than the anti-blink floor: {s:?}"
+            );
+            drew += 1;
+            d *= 1.15;
+        }
+        assert!(drew > 10, "the walk must actually cross the visible range");
+    }
+
+    /// ★ THE CULL SITS BELOW ONE DISPLAY STEP, AND THE INEQUALITY RUNS THAT WAY ON PURPOSE.
+    ///
+    /// I first wrote this the other way round — cull ABOVE one 8-bit step, reasoning that a star
+    /// removed should have been invisible anyway. That is right for a star ALONE and wrong for a
+    /// galaxy, and the difference is the whole milky band: the blending ADDS, so a thousand stars at
+    /// a third of a display step each sum to a bright glow. Culling where one star is invisible would
+    /// have deleted the band along with them.
+    ///
+    /// So the cull is a bound on OVERDRAW, not a visibility test: it removes a star only once it is
+    /// below what a screen could show even alone, so nothing visible is ever taken away.
+    #[test]
+    fn the_cull_sits_below_one_display_step_so_a_crowd_still_glows() {
+        let t = StarTuning::default();
+        assert!(
+            t.cull_level < 1.0 / 255.0,
+            "a star must never be culled while it could still be seen alone"
+        );
+        // AND THE CROWD IS THE POINT: stars this faint are individually invisible and collectively
+        // bright, which is what the glow of a galaxy seen edge-on actually is.
+        let crowd = 1_000.0 * t.cull_level;
+        assert!(
+            crowd > 1.0,
+            "a thousand just-visible stars must sum to a bright band, got {crowd}"
+        );
+        let gone = star_draw(SUN_BASE_M, 1.0e30, &t);
+        assert_eq!(gone.amplitude, 0.0);
+        assert_eq!(gone.crop_px, 0.0);
+    }
+
+    /// A star bright enough to clip is what gives the white core: the wings keep the hue while the
+    /// centre saturates. This pins that such stars EXIST at a realistic distance rather than being
+    /// a theoretical arm of the law.
+    #[test]
+    fn a_near_bright_star_saturates_its_core() {
+        let t = StarTuning::default();
+        let s = star_draw(SUN_BASE_M * (25.0_f64).sqrt(), 3.0e16, &t);
+        assert!(
+            s.amplitude > 1.0,
+            "a bright near star must clip to white at its centre: {s:?}"
+        );
     }
 }
 

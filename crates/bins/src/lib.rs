@@ -447,7 +447,22 @@ pub const DEV: DevClusterParams = DevClusterParams {
     // self-fence off does not disable the cascade.
     realm_recheck: 0,
     snapshot_budget: 1100,
-    boot_ticks_p99: 0, // reactive-only in dev (the login is the demand trigger); a visual walk-in bumps it.
+    // ★ MEASURED, NOT CHOSEN (2026-08-29). This was 0, which left the gateway waiting the fallback
+    // three seconds plus one demand window for a home realm to become routable.
+    //
+    // MEASURED on THE world at S12's census, debug build: a demand-spawned shard ran 43, 43, 43, 56
+    // and 56 seconds and was KILLED each time, still booting. The gateway had given up long before.
+    // Its own log said "the dynamic home realm did not become routable inside the bounded bootstrap
+    // TTL", which reads like a failure and was in fact a healthy shard being shot while it worked.
+    //
+    // 6000 ticks at 50 Hz is TWO MINUTES — deliberately generous, because the honest question right
+    // now is whether a shard EVER becomes routable at this census, and a tight bound cannot answer it.
+    //
+    // ⚠ THIS NUMBER IS A SYMPTOM AND MUST COME DOWN. A shard takes this long because it still builds
+    // all 233 220 star systems to learn where its own ONE sits — the crowding push makes a system's
+    // place depend on the systems before it. Fix that and this shrinks with it. A boot budget of two
+    // minutes is not something to ship; it is something to measure against while the real cost is cut.
+    boot_ticks_p99: 6_000,
     // ★ THE HOME SEED (owner ruling 2026-08-20): the one world every player starts in, chosen from
     // the measured candidate table — see `vd_physics::worldgen::HOME_SEED` for its provenance and the
     // discovery-permanence law. Matches the shard/gateway bins' own VD_UNIVERSE_SEED default.
@@ -1345,6 +1360,11 @@ fn demand_gateway_env(
         str_pair("VD_ORCH", ORCH.0),
         str_pair("VD_SHARD", SHARD.0),
         ("VD_AUTH_PUBKEY", auth_pubkey_hex.to_owned()),
+        // ★ THE GATEWAY MUST WAIT AS LONG AS THE ORCHESTRATOR (2026-08-29). Without this the gateway
+        // kept the fallback three-second budget while the orchestrator was told the real one, so it
+        // Closed healthy logins whose shard was still booting — and its own error message blamed the
+        // realm. The two sides derive their windows from the SAME measured number or they disagree.
+        str_pair("VD_BOOT_TICKS_P99", p.boot_ticks_p99),
         str_pair("VD_SESSION_SEED", p.session_seed),
         str_pair("VD_MAX_SESSIONS", p.max_sessions),
         str_pair("VD_MAX_BUFFERED_INPUTS", p.max_buffered_inputs),
@@ -2417,12 +2437,19 @@ fn visual_regions_and_movers(
     // origin and a hosted occupant reads as inside all of them at once (the production re-home flap). Scoping
     // them out is the standalone cure; the movers stay `hosted`'s authored children (single-realm demand shard
     // ⇒ exactly its own; the union-over-held is a co-hosting refinement not yet needed at visual scale).
-    let regions =
-        vd_physics::worldgen::realm_neighbourhood_for_config(universe_seed, held, &config);
-    let moving = vd_physics::worldgen::moving_children_for_config(universe_seed, &config, hosted)
-        .into_iter()
-        .collect();
-    (regions, moving)
+    // ★ THE SHARD BUILDS ITS OWN SUBTREE, NOT THE GALAXY (owner ruling 2026-08-29). This called
+    // `realm_neighbourhood_for_config` and `moving_children_for_config`, and EACH built the whole
+    // forest and filtered: MEASURED on THE world, 3 500 479 bodies built TWICE to keep 13 rows and
+    // one mover roster. That is the login timeout a player actually hits — the gateway waits for the
+    // home realm to become routable and the shard is still copying the galaxy.
+    //
+    // `realm_subtree` is the SAME generator answering "what is inside me": the chain and this
+    // realm's own placement come from the galaxy's layer (a realm never authors its own place), and
+    // the contents come from the full forest's own stage, called for this system alone. Built once,
+    // read twice.
+    let (regions, movers) =
+        vd_physics::worldgen::shard_boot_world(universe_seed, &config, held, hosted);
+    (regions, movers.into_iter().collect())
 }
 
 /// The containment region forest + the moving-child roster for a shard booting at `scale`, hosting
@@ -2549,11 +2576,15 @@ pub fn star_catalogue_for_boot(
     tick_dt_s: f64,
     regions: &[vd_core::geometry::RealmRegion],
 ) -> (Vec<vd_core::look::StarRow>, u64) {
+    // ★ THE SKY IS FOLDED FROM THE SYSTEM LAYER (owner ruling 2026-08-29). This used to take the
+    // FULL forest — every planet and every moon — and keep one row in sixteen. MEASURED on THE
+    // world: 3 500 479 objects built to state 233 220 star rows.
+    //
+    // The `regions` argument is now unused for the fold and stays only so callers do not change in
+    // this pass; the rows are byte-identical either way, which the identity gate measures.
+    let _ = regions;
     let config = process_world_config(occupant_v_max_mps, tick_dt_s);
-    let rows = vd_physics::worldgen::star_catalogue(
-        regions,
-        &vd_physics::worldgen::system_photometrics_for_config(universe_seed, &config),
-    );
+    let rows = vd_physics::worldgen::sky_from_system_layer(universe_seed, &config);
     let generation = vd_core::look::catalogue_generation(
         &postcard::to_allocvec(&rows).expect("closed wire types serialize infallibly"),
     );
@@ -2569,16 +2600,27 @@ pub fn child_luma_draws(
     held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
 ) -> std::collections::BTreeMap<vd_core::pose::RealmId, (u8, f64)> {
     let config = process_world_config(occupant_v_max_mps, tick_dt_s);
-    vd_physics::worldgen::system_photometrics_for_config(universe_seed, &config)
+    // ★ THE DIRECT CHILDREN, LOOKED UP — NOT RE-SCANNED PER ROW (2026-08-29).
+    //
+    // This asked, for every photometric row, whether ANY region carried it as a held realm's child.
+    // That is a walk of the whole region list per row, so the pair cost rows × regions. It was
+    // harmless while a shard held a handful of children and fatal the moment a galaxy shard held its
+    // 233 220: MEASURED, the covering test ran 2 h 23 min at 5.9 GB without finishing.
+    //
+    // Built once, read by lookup. SL9 names this exact shape — finding which realms a parent holds is
+    // a LOOKUP, never a scan, and a cost that grows with the child count is a defect.
+    let children_of_held: std::collections::BTreeSet<vd_core::pose::RealmId> = regions
+        .iter()
+        .filter(|r| r.parent.is_some_and(|parent| held_realms.contains(&parent)))
+        .map(|r| r.realm)
+        .collect();
+    // ★ AND THE DRAWS COME FROM THIS SHARD'S OWN SUBTREE, not from every body in the galaxy.
+    vd_physics::worldgen::subtree_photometrics(universe_seed, &config, held_realms)
         .into_iter()
         .filter(|(realm, _)| {
             // A held realm's DIRECT children (their markers) — and the held realm's OWN datum
             // (ruling C: its running self-look carries its colour through the wake handover).
-            held_realms.contains(realm)
-                || regions.iter().any(|r| {
-                    r.realm == *realm
-                        && r.parent.is_some_and(|parent| held_realms.contains(&parent))
-                })
+            held_realms.contains(realm) || children_of_held.contains(realm)
         })
         .map(|(realm, draw)| (realm, vd_physics::worldgen::marker_datum(&draw)))
         .collect()
@@ -2756,7 +2798,14 @@ fn assert_corridor_margins(system: &str, m: &CorridorMargins, outset_m: f64, she
 /// world — NEVER weakening an assert.
 #[must_use]
 pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
-    let world = boot_world(p.universe_seed, p.move_speed, p.tick_dt);
+    // ★ THE LAYER, NOT THE WHOLE FOREST (2026-08-29). `world` is read for exactly two things below:
+    // which realm is home, and which galaxy holds it. Both are star-system questions, and the system
+    // layer answers them with identical rows. Building the full forest here built every planet and
+    // moon in the galaxy — 3 500 479 bodies, about 7 GB — and discarded all but two lookups.
+    let world = vd_physics::worldgen::system_layer_view(
+        p.universe_seed,
+        &process_world_config(p.move_speed, p.tick_dt),
+    );
     let home = vd_core::worldgen::default_home_realm(world.regions())
         .expect("THE world names a home realm (root → galaxy → system)");
     let galaxy = world
@@ -3560,9 +3609,9 @@ mod world_roster_tests {
     fn child_luma_draws_cover_exactly_the_held_realms_direct_system_children() {
         // THE WINDOW LANE's boot plumbing (Slice A + C1 → look_horizon slice 1): the marker
         // roster a shard boots with holds a photometric DATUM for EXACTLY the direct children of
-        // its held realms that carry a draw — on THE world, the galaxy shard gets its three
-        // systems (the stellar draws) and a system shard gets its planets (the Slice-C1
-        // REFLECTED draws). The bag framing moved to the sim's one marker-bag call.
+        // its held realms that carry a draw — the galaxy shard gets one per star system (the
+        // stellar draws) and a system shard gets its planets (the Slice-C1 REFLECTED draws). The
+        // bag framing moved to the sim's one marker-bag call. Both counts are DERIVED below.
         let world = boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt);
         let regions = world.regions();
         // Named via the lineage, never a seed literal: a planet's parent IS a star system, and
@@ -3585,7 +3634,15 @@ mod world_roster_tests {
             regions,
             &std::collections::BTreeSet::from([galaxy]),
         );
-        assert_eq!(draws.len(), 3, "one marker datum per system of THE world");
+        // DERIVED FROM THE WORLD, never a literal. This read `3` — the census of a world that no
+        // longer exists — so it failed the moment the galaxy grew. The galaxy carries no draw of its
+        // own, so there is no "+1" here, unlike the held-system case below.
+        let expected_systems = regions.iter().filter(|r| r.parent == Some(galaxy)).count();
+        assert_eq!(
+            draws.len(),
+            expected_systems,
+            "one marker datum per system of THE world"
+        );
         for (realm, (class_code, luma_lsun)) in &draws {
             assert!(matches!(realm, vd_core::pose::RealmId::System(_)));
             assert!(*class_code <= 6, "a minted Morgan-Keenan class code");
@@ -3683,7 +3740,16 @@ mod world_roster_tests {
             .iter()
             .filter(|r| r.parent == Some(vd_core::worldgen::GALAXY))
             .collect();
-        assert_eq!(systems.len(), 3, "THE world's galaxy holds 3 systems");
+        // DERIVED, never a literal — this read `3`, the census of a retired world.
+        assert_eq!(
+            systems.len(),
+            vd_physics::worldgen::system_layer_view(DEV.universe_seed, &config)
+                .regions()
+                .iter()
+                .filter(|r| r.parent == Some(vd_core::worldgen::GALAXY))
+                .count(),
+            "the galaxy holds every star system of THE world",
+        );
         // TRUE-SCALE RE-DERIVE (the taxonomy arc's in-system re-solve; the interim
         // 444.104489631 / 469.104489631 / 150 m literals retired with the interim world): the
         // spin-up IS the system's interior reach — max over its planets of (worst excursion at

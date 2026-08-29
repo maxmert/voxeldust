@@ -12,7 +12,6 @@ use super::{
     worst_hop_excursion_capped_m,
 };
 use vd_core::geometry::AoiConfig;
-use vd_core::pose::RealmId;
 
 /// A body's INTERIOR REACH (look_horizon.md §3.4.4): the largest distance from its centre at
 /// which something INSIDE it is still visible — the max over its DIRECT children of (that
@@ -21,24 +20,27 @@ use vd_core::pose::RealmId;
 /// worst-case convention). `0.0` for a childless leaf — nothing inside, nothing to reach.
 /// (THE world's star-system reach used to be quoted here as `142.045826247 + 302.058663384 =
 /// 444.104489631` m. That was the retired compressed geometry; since the true-size in-system
-/// re-solve — and again since the derived mass cap re-drew every star — it is orders larger and
-/// per-seed. The gates that need it read it; a doc is the wrong place to pin an `f(seed)` number.)
-pub(crate) fn interior_reach_m(bodies: &[GeneratedBody], parent: RealmId, ecc_cap: f64) -> f64 {
-    bodies
-        .iter()
-        .filter(|c| c.parent == Some(parent))
-        .map(|c| {
-            // The visibility term reads the child's LOOK (the picture that can be seen), not
-            // its bound (real-scale design §3.0); a look-less child contributes no reach.
-            worst_hop_excursion_capped_m(&c.placement, ecc_cap)
-                + c.look.map_or(0.0, |look| {
-                    vd_core::geometry::visibility_reach_m(
-                        look.finite_extent(),
-                        VISIBILITY_THETA_MIN_RAD,
-                    )
-                })
+// (`interior_reach_m` IS DELETED, 2026-08-29. It filtered the WHOLE body list by parent and was
+// called once per body from the lowering — a quadratic that made every boot 1.8e13 comparisons at
+// THE world's census. `to_regions` solves every parent's reach in ONE pass and both paths read the
+// same `child_reach_term_m`, so this slower spelling had no caller left. A dead slow version of a
+// live fast one is a trap: the next author reaches for whichever they find first.)
+
+/// ONE CHILD'S CONTRIBUTION to its parent's interior reach — the term
+/// [`interior_reach_m`] takes the maximum of.
+///
+/// ★ LIFTED OUT SO THE TWO CALLERS CANNOT DRIFT (perf fix 2026-08-29). The lowering solves every
+/// parent's reach in ONE pass instead of re-scanning the body list per body (see `to_regions` for
+/// the measurement that forced it), and this is the term both paths read. Two spellings of one
+/// formula is how a fast path and a slow path stop agreeing.
+///
+/// The visibility term reads the child's LOOK (the picture that can be seen), not its bound
+/// (real-scale design §3.0); a look-less child contributes no reach.
+pub(crate) fn child_reach_term_m(child: &GeneratedBody, ecc_cap: f64) -> f64 {
+    worst_hop_excursion_capped_m(&child.placement, ecc_cap)
+        + child.look.map_or(0.0, |look| {
+            vd_core::geometry::visibility_reach_m(look.finite_extent(), VISIBILITY_THETA_MIN_RAD)
         })
-        .fold(0.0, f64::max)
 }
 
 /// The interior band for one child region (look_horizon.md §3.4.4, monomorphic — both arms

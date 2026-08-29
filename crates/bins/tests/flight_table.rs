@@ -211,7 +211,7 @@ fn g_flight_table_the_governed_legs_match_the_closed_form_and_are_printed_verbat
         // departing at the home system's ceiling, arriving onto the largest system's ceiling.
         Leg {
             name: "warp, star to star (the 3-D placement gap)",
-            distance_m: cfg.stellar.system_ring_r_m,
+            distance_m: cfg.stellar.galaxy_rim_r_m,
             v_cap: cap_galaxy,
             v_start: cap_home,
             v_end: cap_max,

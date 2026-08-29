@@ -223,7 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let allow_genesis = vd_bins::parse_bool_env(&env, "VD_STORE_ALLOW_GENESIS")?;
     let (store, durability) =
         vd_io_prod::store::open_allowing_genesis(&store_path, allow_genesis, |p| {
-            RedbStore::open(p, store_tuning, store_stamp)
+            RedbStore::open(p, store_tuning.clone(), store_stamp)
         })?;
     // The Store is now durable. REMAINING transport production precondition (DEFERRED.md D-6): the
     // redelivering mesh transport is at-least-once for a source that STAYS UP (R-1..R-5 + M3 durable
@@ -287,7 +287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (launch_store, _launch_durability) = match vd_io_prod::store::open_allowing_genesis(
         &launch_store_path,
         allow_genesis,
-        |p| RedbStore::open(p, launch_tuning, launch_stamp),
+        |p| RedbStore::open(p, launch_tuning.clone(), launch_stamp),
     ) {
         Ok(v) => v,
         Err(e) => {

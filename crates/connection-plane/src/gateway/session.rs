@@ -304,6 +304,16 @@ pub(crate) struct Session {
     /// NEW client nothing at all. One row per session has neither failure, because a session is exactly
     /// one holder of exactly one sky.
     pub(crate) sky_held: Option<u64>,
+    /// ★ HOW FAR THROUGH THE CATALOGUE THIS SESSION HAS BEEN SERVED (2026-08-29). The sky is sent a
+    /// bounded number of parts per beat, so a beat must know where the last one stopped.
+    ///
+    /// It exists because the unpaced version re-sent the WHOLE sky on every beat until the client
+    /// confirmed: MEASURED at S12's census, 10.72 MB in 1 309 parts, per beat, per client. The client
+    /// could not ingest that, so it never confirmed, so it was sent again — and the flood starved the
+    /// login handshake sharing the same reliable link. A client sat at "authenticating" forever.
+    ///
+    /// Reset to zero when the sky's generation changes, because a new sky is a new transfer.
+    pub(crate) sky_parts_sent: u32,
     /// RLM 5f-3d — the STANDING home-realm identity of a dynamic session: set once at the committed lease
     /// and NEVER cleared, so it outlives the `AwaitingHomeRealm` phase payload. Two live readers: the
     /// bounded-TTL Close diagnostic (which can fire in `AwaitingAttach`, where the phase payload is gone —
@@ -385,6 +395,21 @@ pub(crate) struct Session {
 pub struct GatewaySessions {
     pub(crate) by_session: BTreeMap<SessionId, Session>,
     pub(crate) by_client: BTreeMap<NodeId, SessionId>,
+    /// ★ THE SKY, CUT INTO WIRE PARTS ONCE (2026-08-29) — the generation it was cut for, and the cut.
+    ///
+    /// Cutting the catalogue encodes EVERY star to measure it, one heap allocation each, then copies
+    /// every row again into the parts. On THE world that is 233 220 stars per cut. The keep-alive beat
+    /// did it afresh every time, forever, for a galaxy that cannot change: the sky is folded once at
+    /// boot and `GatewayConfig` is immutable thereafter.
+    ///
+    /// ★ WHY IT SHOWED UP AS THE PLAYER'S POSITION STUTTERING. The cut runs on the gateway's tick, in
+    /// front of the pose lane. A tick that spends its time cutting the sky delivers poses late, and a
+    /// late pose is a position that jumps. The owner reported exactly that, and reported that it began
+    /// when the star count grew — which is the signature of a cost that scales with the census.
+    ///
+    /// Keyed by generation rather than merely "built once", so a gateway whose sky is ever replaced
+    /// re-cuts instead of serving the old galaxy — the failure a bare `Option` would hide.
+    pub(crate) sky_cut: Option<(u64, Vec<Vec<vd_core::look::StarRow>>)>,
     /// The per-session fan-out reverse index `shard -> {sessions subscribing to it}` (FORK 5
     /// / H2), cold-maintained by `open_sub`/`close_sub`/the drain-sweep alongside the hot
     /// `SubTable`. It makes `on_shard_frame` iterate ONLY subscribers-of-`from`, not all

@@ -420,6 +420,18 @@ impl ClientState {
     /// does not have would be denied one, which is why this is called only where a whole sky is proven.
     fn state_sky_held(&mut self, generation: u64) {
         self.pending_sky_held = Some(generation);
+        // ★ THE SKY THE RENDERER ALREADY HOLDS IS NOT REBUILT (2026-08-29). A confirming beat arrives
+        // 20 times a second and says the SAME generation; rebuilding then copies every star in the
+        // galaxy to produce a drawable identical to the one on screen. MEASURED on THE world: 233 220
+        // rows, 11.2 MB per copy, 20 times a second. The player sees it as the position readout
+        // breaking up — and only once the catalogue is large, which is why a small sky never showed it.
+        if self
+            .sky_draw
+            .as_ref()
+            .is_some_and(|held| held.generation == generation)
+        {
+            return;
+        }
         // THE ONE PLACE THE DRAWABLE SKY IS BUILT. This runs exactly where a whole sky is proven — on
         // the last part, on a confirming beat, and on a cache adoption — so the renderer's copy and the
         // statement to the server can never disagree about which sky is held.

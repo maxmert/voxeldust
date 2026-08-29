@@ -3,45 +3,53 @@
 # outer: universe_r_m=75557863725914320000000 galaxy_r_m=4611686018427388000 placement_r_m=4609433753044093000 (3-D seeded placements, Q-B)
 # cap: imf_mass_hi_msun=30.745283003771995 system_bound_max_m=2251799813685248 (DERIVED — the galaxy reserves its largest possible child)
 # Regenerate ONLY with a stated world-numbers change (VD_UPDATE_GOLDEN=1); the slice says so.
-# ★ WHY THESE BITS LAST MOVED — regenerated 2026-08-28 (slice S12, THE GALAXY'S SHAPE).
-#   ONE change, and it moved EVERY row. The previous record (2026-08-26, slice S9, THE CLIMB)
-#   is superseded.
+# ★ WHY THESE BITS LAST MOVED — regenerated 2026-08-28 (slice S12, ruling G1: THE SHAPE
+#   COMES FROM THE SEED). The previous record — the same day's shape flag day — is superseded.
 #
-#   THE CAUSE — THE PLACEMENT BECAME A SHAPE. A star system used to sit on a SHELL: one fixed
-#     radius for every sibling, and a direction drawn uniformly on a sphere. The owner refused
-#     that by name (owner_decisions_2026-08-27_galaxy_shape.md): a shell puts every star at the
-#     SAME distance, and no galaxy looks like that. The placement now draws a population, a
-#     radius on a density profile, an azimuth that follows a logarithmic arm, both halves of a
-#     triangular arm scatter, and a height above the disc.
+#   THE CAUSE. The galaxy's shape was ELEVEN NUMBERS A PERSON CHOSE: two arms, a 25 degree
+#     pitch, a disc three percent thick, a bulge holding fifteen percent of the stars, the same
+#     for every galaxy at every seed. Ruling G1 forbids that — *"Density also should come from
+#     seed, otherwise any tiny change might change positions"* — so a galaxy now DRAWS its own
+#     shape from its own stream, and the chosen table is deleted rather than left as a second
+#     source of truth.
 #
-#   WHY EVERY ROW MOVED, IN TWO STEPS.
-#     1. THE SYSTEM ROWS moved because the law that places them changed. The home system still
-#        sits at the galactic origin and its row is unmoved; every sibling is somewhere new.
-#     2. THE PLANET AND MOON ROWS moved because the placement now takes SIX draws from the
-#        seed stream where the shell took two. Every draw after them shifted by four, so each
-#        star drew a different mass, and every orbit, shell and SOI is solved from that mass.
+#   THE DRAW IS APPENDED, so the galaxy's CENSUS and its KIND are byte-identical across this
+#     change: they are draws one and two and the shape follows them. What moved is every star's
+#     position, because the law that places them now reads drawn numbers.
 #
-#   ★ AND THE CENSUS MOVED WITH IT — the visible consequence, stated so a reader does not
-#     have to count the lines. A lighter planet holds no moon. On seed 0 the moon count falls
-#     6 -> 4; on the dev cluster's home seed it falls 22 -> 17. The planet count (27) and the
-#     star count (3) are unchanged: nothing about HOW MANY children a parent has moved, only
-#     what they drew.
+#   ★ EXACTLY SIX DATA ROWS MOVED, AND COUNTING THEM CORRECTED A WRONG CLAIM. The two
+#     NON-HOME SYSTEMS, at three sampled ticks each. Nothing else. The home system sits at the
+#     galactic origin by law and its row is unchanged zeros; NO planet row moved at all.
 #
-#   ★ WHAT IS *NOT* A CAUSE, STATED BECAUSE SILENCE WOULD BE READ AS ONE. No wire type,
-#     no codec, no lattice tier and no frame changed in this slice. The outer radii in the
-#     `outer:` line above are byte-identical to the S9 record, and so is the derived mass cap.
+#     TWO REASONS, and the second is easy to state backwards. First, a planet draws from ITS OWN
+#     SYSTEM'S stream, keyed by that system's seed, which the galaxy's stream cannot reach — so
+#     no planet's mass, radius, orbit or temperature changed. Second, and this is the half worth
+#     writing down: THIS FILE RECORDS EACH ROW IN ITS PARENT'S FRAME. A planet's row is where it
+#     sits in ITS OWN STAR'S frame, and moving the star does not move the planet within it. A
+#     first draft of this block said the planet rows "moved by riding" their systems. They did
+#     not, and the diff says so: zero planet rows changed.
+#
+#   THE SHAPES WERE JUDGED BEFORE THE WORLD TOOK THEM (ruling G13 — the assistant proposes in
+#     code, the owner judges the picture). Eight drawn galaxies were rendered and approved. The
+#     rendering earned its keep: it showed that an arm stated as an ABSOLUTE ANGLE reached 137
+#     degrees and so filled 152 percent of a four-armed galaxy's gap, overlapping its neighbours
+#     into one smooth disc. The census said five times more stars in arms than between them and
+#     was TRUE; the picture had no arms. An arm is a share of the gap now.
+#
+#   ★ WHAT IS *NOT* A CAUSE. No wire type, no codec, no lattice tier and no frame changed.
+#     The outer radii and the derived mass cap in the lines above are byte-identical.
 Universe Galaxy(1) tick=0 pos=0000000000000000,0000000000000000,0000000000000000 vel=0000000000000000,0000000000000000,0000000000000000
 Universe Galaxy(1) tick=1000 pos=0000000000000000,0000000000000000,0000000000000000 vel=0000000000000000,0000000000000000,0000000000000000
 Universe Galaxy(1) tick=50000 pos=0000000000000000,0000000000000000,0000000000000000 vel=0000000000000000,0000000000000000,0000000000000000
 Galaxy(1) System(7) tick=0 pos=0000000000000000,0000000000000000,0000000000000000 vel=0000000000000000,0000000000000000,0000000000000000
-Galaxy(1) System(10487570625701098367) tick=0 pos=c3aa731f36be8866,43575dd323994746,c3ae8192e7075f70 vel=0000000000000000,0000000000000000,0000000000000000
-Galaxy(1) System(13979593561158050752) tick=0 pos=c3c57132b5f6b066,c36697db5c6fb5e7,43bca855a97c73d3 vel=0000000000000000,0000000000000000,0000000000000000
+Galaxy(1) System(10487570625701098367) tick=0 pos=c3b2240ed657e61f,435ecc9db3132726,c3a77a3096a3323d vel=0000000000000000,0000000000000000,0000000000000000
+Galaxy(1) System(13979593561158050752) tick=0 pos=c3c7127ab6d5c7dd,c36dc7acea264d73,c3b879f3ca6d445b vel=0000000000000000,0000000000000000,0000000000000000
 Galaxy(1) System(7) tick=1000 pos=0000000000000000,0000000000000000,0000000000000000 vel=0000000000000000,0000000000000000,0000000000000000
-Galaxy(1) System(10487570625701098367) tick=1000 pos=c3aa731f36be8866,43575dd323994746,c3ae8192e7075f70 vel=0000000000000000,0000000000000000,0000000000000000
-Galaxy(1) System(13979593561158050752) tick=1000 pos=c3c57132b5f6b066,c36697db5c6fb5e7,43bca855a97c73d3 vel=0000000000000000,0000000000000000,0000000000000000
+Galaxy(1) System(10487570625701098367) tick=1000 pos=c3b2240ed657e61f,435ecc9db3132726,c3a77a3096a3323d vel=0000000000000000,0000000000000000,0000000000000000
+Galaxy(1) System(13979593561158050752) tick=1000 pos=c3c7127ab6d5c7dd,c36dc7acea264d73,c3b879f3ca6d445b vel=0000000000000000,0000000000000000,0000000000000000
 Galaxy(1) System(7) tick=50000 pos=0000000000000000,0000000000000000,0000000000000000 vel=0000000000000000,0000000000000000,0000000000000000
-Galaxy(1) System(10487570625701098367) tick=50000 pos=c3aa731f36be8866,43575dd323994746,c3ae8192e7075f70 vel=0000000000000000,0000000000000000,0000000000000000
-Galaxy(1) System(13979593561158050752) tick=50000 pos=c3c57132b5f6b066,c36697db5c6fb5e7,43bca855a97c73d3 vel=0000000000000000,0000000000000000,0000000000000000
+Galaxy(1) System(10487570625701098367) tick=50000 pos=c3b2240ed657e61f,435ecc9db3132726,c3a77a3096a3323d vel=0000000000000000,0000000000000000,0000000000000000
+Galaxy(1) System(13979593561158050752) tick=50000 pos=c3c7127ab6d5c7dd,c36dc7acea264d73,c3b879f3ca6d445b vel=0000000000000000,0000000000000000,0000000000000000
 System(7) Planet(7701581858760374086) tick=0 pos=41992113ecc41fa4,41dd4f1bdbc74a51,415f699979d9d6ec vel=c0f2b71a916e054d,40b5311d32d660d0,40a28176409d1542
 System(7) Planet(1164718096683563219) tick=0 pos=c1d7cb6bc9735ae2,41e66a5e29e0f881,c18806e74e8bf9aa vel=c0e8b80cc1839473,c0db68f4595d4e4a,c0936c8ce5f39249
 System(7) Planet(15792791038712096226) tick=0 pos=41e65a1eb2ea27f3,41eed45121a6be0a,c160125ce6b9d721 vel=c0e3c2b8846a85e8,40dd4d322664e763,407fd44c88c85d11

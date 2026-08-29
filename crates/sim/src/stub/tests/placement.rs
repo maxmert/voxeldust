@@ -1282,7 +1282,7 @@ fn a_pose_labelled_with_an_ancestors_frame_warns_and_ships_verbatim() {
     // Labelled with the GALAXY's frame — rostered here (the ambient chain) but never authored.
     let held = story.pose_in(
         story.frame(story.galaxy),
-        story.config.stellar.system_ring_r_m + story.up_1_m(),
+        story.config.stellar.galaxy_rim_r_m + story.up_1_m(),
     );
     assert_eq!(
         flush_pose_for_dest(

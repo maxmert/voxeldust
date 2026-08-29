@@ -386,7 +386,7 @@ impl StarSky {
     pub fn beat(&mut self, generation: u64) -> SkyBeat {
         // `complete` is what makes a generation HELD — a half-assembled sky of the named generation is
         // not a sky the client can draw, so it answers `Unheld` and not `Current`.
-        if self.complete().is_none() {
+        if !self.is_whole() {
             self.beats_unheld += 1;
             return SkyBeat::Unheld;
         }
@@ -446,10 +446,25 @@ impl StarSky {
     /// in exactly the order the catalogue stated them — which is what the generation was folded over.
     #[must_use]
     pub fn complete(&self) -> Option<Vec<StarRow>> {
-        if self.generation.is_none() || self.held.len() as u32 != self.parts_expected {
+        if !self.is_whole() {
             return None;
         }
         Some(self.held.values().flatten().copied().collect())
+    }
+
+    /// IS a whole sky in hand — asked WITHOUT building one.
+    ///
+    /// ★ WHY THIS EXISTS, MEASURED (2026-08-29). [`Self::complete`] COPIES every star into a fresh
+    /// vector. On THE world that is 233 220 rows of 48 bytes — 11.2 MB — and the liveness beat called
+    /// it 20 times a second purely to ask whether the answer was `None`, then threw the copy away.
+    /// A second copy followed it on the same beat to rebuild a drawable the renderer already held.
+    /// Together: about 448 MB a second allocated, copied and dropped, for a galaxy that never changed.
+    ///
+    /// The cost scales with the STAR COUNT, which is why it appeared only once the catalogue grew —
+    /// with a handful of stars the same two copies are free and nothing is visible.
+    #[must_use]
+    pub fn is_whole(&self) -> bool {
+        self.generation.is_some() && self.held.len() as u32 == self.parts_expected
     }
 
     /// Which sky is in hand, whole or partial.

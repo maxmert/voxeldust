@@ -29,6 +29,17 @@ struct StarSkyUniform {
     // WHERE THE SKY SITS IN DEPTH, in metres — just inside the camera's far plane. See the vertex
     // stage: the star's true DIRECTION is kept, and only its depth slot is fixed.
     sky_radius_m: f32,
+    // ★ THE POINT-SOURCE LAW'S OWN NUMBERS (2026-08-29), every one read from Tier-A's `StarTuning` at
+    // bind time. Nothing here is typed as a literal: the law lives in `vd_client::realm_scene`, is
+    // unit-tested there, and this stage is its transliteration — the same discipline
+    // `one_pixel_world_m` already follows.
+    flux_gain: f32,
+    response_exponent: f32,
+    halo_sigma_px: f32,
+    halo_weight: f32,
+    core_sigma_px: f32,
+    min_crop_px: f32,
+    cull_level: f32,
 };
 
 // ★ THE MATERIAL BIND GROUP, BY BEVY'S OWN SUBSTITUTION — never a literal index.
@@ -49,8 +60,14 @@ struct VertexIn {
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec4<f32>,
-    // The corner sign, carried through so the fragment stage can round the quad into a disc.
+    // The corner sign, carried through so the fragment stage can shape the profile.
     @location(1) corner: vec2<f32>,
+    // The profile's peak. Above 1.0 the core clips to white and the colour survives in the wings —
+    // which is what a bright star looks like, arrived at by the physics rather than added on.
+    @location(2) amplitude: f32,
+    // The sprite's half-size in PIXELS, so the fragment stage can measure the profile in the same
+    // unit its widths are stated in.
+    @location(3) crop_px: f32,
 };
 
 // THE WORLD SIZE OF ONE PIXEL at a view distance — a transliteration of Tier-A's `one_pixel_world_m`.
@@ -90,18 +107,47 @@ fn vertex(in: VertexIn) -> VertexOut {
     let dir = normalize(view_pos.xyz);
     let placed = dir * star.sky_radius_m;
 
-    // THE APPARENT-SIZE FLOOR — Tier-A's `marker_world_radius`, evaluated per star on the GPU. On the
-    // CPU this would be one distance computation per star per frame, which is exactly the per-frame
-    // cost this whole design removes.
-    let radius_m = max(
-        in.base_radius_m,
-        star.min_apparent_radius_px * one_pixel_world_m(dist_m)
-    );
+    // ★ THE FLUX, FROM WHAT THE VERTEX ALREADY CARRIES (2026-08-29). `base_radius_m` is
+    // `POINT_SOURCE_BASE_RADIUS_M · sqrt(L)`, so `(base/d)^2` IS `L/d^2` — the inverse-square law,
+    // with no new attribute and no wire change.
+    //
+    // This REPLACES the shared 3-pixel apparent-size floor, which clamped every star to the same
+    // size. MEASURED: at a typical neighbour distance that floor was worth 4.1e14 m against a
+    // sun-like star's 0.5 m — it won by 8e14, for every star, always. Luminosity was drawn from the
+    // seed, carried across the wire, and then discarded at the last step.
+    let s = in.base_radius_m / max(dist_m, 1.0);
+    let flux = s * s * star.flux_gain;
+    // ★ COMPRESSED, BECAUSE SIGHT IS. Linear flux made near stars into saturated white balls 19 px
+    // across — a galaxy's flux range is a million to one and a screen's is 255. Eyes, film and star
+    // charts are all logarithmic; stellar MAGNITUDE is exactly this compression, and a small power
+    // is the same curve in closed form.
+    let amplitude = pow(flux, star.response_exponent);
 
-    // THE SPRITE'S SIZE AT ITS PLACED DEPTH. The radius above is a world size at the star's TRUE
-    // distance; drawn at the sky radius it must be scaled by the same ratio, or a distant star would
-    // balloon to the size it would have had if it really were that close.
-    let placed_radius_m = radius_m * star.sky_radius_m / max(dist_m, 1.0);
+    // ★ CROP, NEVER SCALE — the idea from `godot-starlight` (Tiffany Bennett, MIT). One fixed profile
+    // for every star, cut where its wings fade below what a screen can show:
+    //     A·w·exp(-r^2 / 2σ^2) = cull   ⇒   r = σ·sqrt(2·ln(A·w/cull))
+    // A bright star's quad is large because its faint outskirts stay visible further out, not because
+    // its core is wider. That is what a star IS, and it is also why this costs less than today: the
+    // faint majority draw SMALLER than the 3 pixels they all take now.
+    let ratio = amplitude * star.halo_weight / star.cull_level;
+    var crop_px = 0.0;
+    if (ratio > 1.0) {
+        crop_px = star.halo_sigma_px * sqrt(2.0 * log(ratio));
+    }
+    // NEVER SMALLER THAN THIS. A quad under a pixel misses the pixel centre and BLINKS as the camera
+    // turns — the failure Stellarium and Celestia both name. A star fades out; it never flickers out.
+    crop_px = max(crop_px, star.min_crop_px);
+
+    // CULLED ON BRIGHTNESS, NEVER ON SIZE: collapse the quad so it rasterises nothing. A star leaves
+    // the sky because it faded, which is continuous, and not because it got small, which pops.
+    if (amplitude <= star.cull_level) {
+        crop_px = 0.0;
+    }
+
+    // THE SPRITE AT ITS PLACED DEPTH. `crop_px` is a size in PIXELS, so it converts through one
+    // pixel's world size AT THE DEPTH THE SPRITE IS DRAWN — not at the star's true distance, which
+    // would balloon a far star to the size it would have had if it were close.
+    let placed_radius_m = crop_px * one_pixel_world_m(star.sky_radius_m);
 
     // BILLBOARD IN VIEW SPACE. Offsetting after the view transform makes the quad face the camera by
     // construction — there is no orientation to get wrong, and no branch.
@@ -109,20 +155,44 @@ fn vertex(in: VertexIn) -> VertexOut {
     out.clip = view.clip_from_view * vec4<f32>(placed + offset, 1.0);
     out.color = in.color;
     out.corner = in.corner;
+    out.amplitude = amplitude;
+    out.crop_px = crop_px;
     return out;
 }
 
 @fragment
 fn fragment(in: VertexOut) -> @location(0) vec4<f32> {
-    // ROUND THE QUAD INTO A DISC, with a soft edge. A hard-edged square reads as a square the moment a
-    // star is more than a pixel or two across, and aliases badly while the camera moves.
-    let r = length(in.corner);
-    // `fwidth` gives one pixel's worth of the radius here, so the falloff is one pixel wide whatever
-    // the sprite's size on screen.
-    let edge = fwidth(r);
-    let alpha = 1.0 - smoothstep(1.0 - edge, 1.0, r);
-    if (alpha <= 0.0) {
+    // ★ A STAR IS A PEAK WITH WINGS, NOT A FILLED DISC (2026-08-29).
+    //
+    // This stage used to return `alpha = 1.0` across the whole interior with a one-pixel soft rim —
+    // a flat plate of uniform colour, which is the definition of a dot. Together with the size floor
+    // that clamped every star to 3 pixels, that is exactly what the owner saw: 233 220 identical
+    // pieces of confetti.
+    //
+    // What you actually see when you look at a star is your own eye's blur — a bright narrow CORE
+    // inside a wide faint HALO. Both widths are properties of the eye, so they are the same for every
+    // star; only the amplitude differs. Two Gaussians are the standard model and are enough.
+    //
+    // `in.corner` runs -1..1 across the quad, and the quad was cropped to `crop_px` — so the radius in
+    // PIXELS is the corner times that crop, which is what the profile's sigmas are measured in.
+    let r_px = length(in.corner) * (in.crop_px);
+    let core = exp(-0.5 * (r_px * r_px) / (star.core_sigma_px * star.core_sigma_px));
+    let halo = exp(-0.5 * (r_px * r_px) / (star.halo_sigma_px * star.halo_sigma_px));
+    let profile = core + star.halo_weight * halo;
+
+    let intensity = in.amplitude * profile;
+    if (intensity <= star.cull_level) {
+        // Below one visible step. Discarding here rather than drawing near-black keeps the overdraw
+        // down, which matters at a quarter of a million sprites.
         discard;
     }
-    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+
+    // ★ PREMULTIPLIED, ALPHA ZERO — TRUE ADDITION. Bevy maps `AlphaMode::Add` to premultiplied-alpha
+    // blending, whose colour term is `src + dst·(1 - src.a)`. With alpha 0 that is exactly `src + dst`,
+    // so overlapping stars SUM instead of the nearer one replacing the further.
+    //
+    // ★ AND THE WHITE CORE ARRIVES FREE. A peak brighter than 1.0 clips all three channels at the
+    // centre while the wings keep the hue — which is what a bright star looks like. It is a
+    // consequence of the physics here, not an effect added on top.
+    return vec4<f32>(in.color.rgb * intensity, 0.0);
 }

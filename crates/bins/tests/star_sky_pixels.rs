@@ -34,7 +34,6 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use vd_bins::scene_camera::live_scene_camera;
 use vd_bins::{
     DEV, DevClusterDown, boot_regions_and_movers, dev_auth_signing_key_hex, dev_roundtrip,
     devcluster, loopback, record_extra_pid, slot_trust_dir, slot_workdir, star_catalogue_for_boot,

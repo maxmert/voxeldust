@@ -163,7 +163,7 @@ fn main() {
          a seed drawing a heavier star than seed 0 did could not start its galaxy at all.\n\n",
         vd_physics::worldgen::imf_mass_hi_msun(),
         vd_physics::worldgen::target_system_bound_max_m(),
-        config.stellar.system_ring_r_m,
+        config.stellar.galaxy_rim_r_m,
     ));
     md.push_str(
         "| # | rank | seed | boots | star class | M★ (M☉) | L★ (L☉) | planet | M (M⊕) | \

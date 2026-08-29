@@ -24,7 +24,7 @@
 //!   E  galaxy → sibling      waypoint sibling_centre−(0,0,2×the sibling's solved shell), then a
 //!                            held-throttle CREEP up the pole — THE GOVERNED WARP LEG (S3): the
 //!                            star gap is the galaxy's own authored ring radius
-//!                            (`stellar.system_ring_r_m`, read through `roster.sibling_centre`
+//!                            (`stellar.galaxy_rim_r_m`, read through `roster.sibling_centre`
 //!                            and printed every run) and the walk rides the galaxy's own ceiling
 //!                            (2·R_gal/T_TRAVERSE) with the approach governor decelerating onto
 //!                            the sibling, so the leg is minutes of wall clock; its budget is

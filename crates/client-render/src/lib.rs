@@ -271,12 +271,23 @@ struct StarSkyMaterial {
 
 #[derive(ShaderType, Debug, Clone)]
 struct StarSkyParams {
+    /// (Kept for the uniform's shape; the STAR path no longer reads it — a star is sized by its own
+    /// flux now, not by the shared presence floor. The floor still governs realm markers.)
     min_apparent_radius_px: f32,
     tan_half_fov: f32,
     viewport_h_px: f32,
     /// Where the sky sits in depth (m) — just inside the camera's own far plane. The star's true
     /// direction is kept; only this depth slot is fixed. See `star_sky.wgsl`.
     sky_radius_m: f32,
+    /// ★ THE POINT-SOURCE LAW'S NUMBERS, from Tier-A's `StarTuning` — never typed here. The law lives
+    /// in `vd_client::realm_scene::star_draw`, where it is unit-tested; the shader transliterates it.
+    flux_gain: f32,
+    response_exponent: f32,
+    halo_sigma_px: f32,
+    halo_weight: f32,
+    core_sigma_px: f32,
+    min_crop_px: f32,
+    cull_level: f32,
 }
 
 impl Material for StarSkyMaterial {
@@ -286,10 +297,16 @@ impl Material for StarSkyMaterial {
     fn fragment_shader() -> ShaderRef {
         "embedded://vd_client_render/star_sky.wgsl".into()
     }
-    /// BLENDED, because the sprite's edge fades over one pixel. An opaque pass would leave the disc's
-    /// antialiasing as a hard square.
+    /// ★ ADDITIVE, BECAUSE LIGHT ADDS (2026-08-29). This was `Blend`, where a nearer sprite REPLACES
+    /// what is behind it — so two stars along one line of sight showed only the nearer, and a dense
+    /// arm looked no brighter than a sparse one.
+    ///
+    /// Bevy maps `Add` to premultiplied-alpha blending, whose colour term is `src + dst·(1 - src.a)`.
+    /// The fragment stage emits premultiplied colour with alpha ZERO, so that reduces exactly to
+    /// `src + dst` — true addition. The Milky Way's glow is the sum of stars too faint to separate,
+    /// and this is the mechanism that produces it rather than painting it.
     fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Blend
+        AlphaMode::Add
     }
     fn specialize(
         _pipeline: &MaterialPipeline,
@@ -503,12 +520,30 @@ fn setup_scene(
     // ORIGIN (S5's camera-relative flatten). Its near/far are rewritten every frame by
     // `derive_camera_planes` from what is actually drawn; the spawned pair is only the first
     // frame's placeholder, never a declared reach.
-    commands.spawn((
+    let mut cam = commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection::default()),
         Transform::from_translation(Vec3::ZERO).looking_at(Vec3::NEG_Z, Vec3::Y),
         FollowCam,
     ));
+    // ★ BLOOM IS OFF, AND ONE ENV VAR AWAY (owner, 2026-08-29: "skip bloom, but keep the possibility
+    // to quickly enable for a test").
+    //
+    // The glow belongs in the SPRITE, not in a post-process: the two most astronomy-accurate
+    // renderers ship without bloom, and a star's halo is a property of the eye rather than of the
+    // camera. Bloom also spreads light from everything else in frame, which at a quarter of a million
+    // point sources is a picture-wide wash rather than a per-star glow.
+    //
+    // But it is a LOOK decision, and a look decision is judged by looking. `VD_STAR_BLOOM=1` turns it
+    // on for a run, alongside the HDR pass it needs — no rebuild, no code change, and off again by
+    // unsetting it.
+    if std::env::var("VD_STAR_BLOOM").is_ok_and(|v| v == "1") {
+        cam.insert((
+            bevy::post_process::bloom::Bloom::NATURAL,
+            bevy::render::view::Hdr,
+        ));
+        tracing::info!("VD_STAR_BLOOM=1 — bloom and HDR enabled for this run");
+    }
     setup_world(&mut commands, &mut meshes, &mut materials);
 }
 
@@ -1001,11 +1036,21 @@ fn sync_star_sky(
         Projection::Perspective(p) => f64::from(p.far),
         _ => f64::from(DEFAULT_SKY_FAR_M),
     };
+    let tuning = vd_client::realm_scene::StarTuning::default();
     let params = StarSkyParams {
         min_apparent_radius_px: vd_client_harness::camera::DOT_MIN_APPARENT_RADIUS_PX as f32,
         tan_half_fov: (fov_y * 0.5).tan() as f32,
         viewport_h_px: viewport_h_px as f32,
         sky_radius_m: (far_m * SKY_DEPTH_MARGIN) as f32,
+        // THE LAW'S NUMBERS, read from Tier-A. `StarTuning::default()` is the starting point the
+        // owner judges by looking; nothing here is a literal.
+        flux_gain: tuning.flux_gain as f32,
+        response_exponent: tuning.response_exponent as f32,
+        halo_sigma_px: tuning.halo_sigma_px as f32,
+        halo_weight: tuning.halo_weight as f32,
+        core_sigma_px: tuning.core_sigma_px as f32,
+        min_crop_px: tuning.min_crop_px as f32,
+        cull_level: tuning.cull_level as f32,
     };
     if let Some(material) = drawn
         .material

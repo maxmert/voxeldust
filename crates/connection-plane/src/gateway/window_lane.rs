@@ -132,9 +132,22 @@ fn emit_sky(
     if config.sky.is_empty() {
         return; // a gateway booted without a world states no sky, rather than a wrong one
     }
-    let parts = vd_wire::channels::partition_stars(&config.sky, SKY_PART_BUDGET_BYTES);
+    // CUT ONCE, PER GENERATION — see `GatewaySessions::sky_cut` for what this cost every beat.
+    if sessions.sky_cut.as_ref().map(|(g, _)| *g) != Some(config.sky_generation) {
+        sessions.sky_cut = Some((
+            config.sky_generation,
+            vd_wire::channels::partition_stars(&config.sky, SKY_PART_BUDGET_BYTES),
+        ));
+    }
+    // Split the borrow by FIELD so the cut can be read while the session table is walked mutably.
+    let GatewaySessions {
+        by_session,
+        sky_cut,
+        ..
+    } = sessions;
+    let parts = &sky_cut.as_ref().expect("the cut was just made").1;
     let total = parts.len() as u32;
-    for session in sessions.by_session.values() {
+    for session in by_session.values_mut() {
         // THE BEAT goes to everyone, held sky or not: it is the statement that nothing changed.
         push_control(
             outbox,
@@ -148,7 +161,43 @@ fn emit_sky(
             stats.sky_parts_skipped += total as u64;
             continue; // this client holds this sky — the whole point of the exchange
         }
-        for (i, rows) in parts.iter().enumerate() {
+        // ★ PACED, NOT FIRE-HOSED (2026-08-29). This sent EVERY part on EVERY beat until the client
+        // confirmed. MEASURED at S12's census: 233 220 rows = 10.72 MB in 1 309 parts, re-sent whole
+        // on each beat, per client. A client cannot ingest that in one beat, so it never confirms, so
+        // it is sent again — and the flood drowns the login handshake on the same reliable link. The
+        // symptom is a client stuck at "authenticating" with the gateway logging a MUST-BE-0
+        // contiguity alert thousands of times.
+        //
+        // The register predicted exactly this: "at 14.2 MB the one-time transfer needs parts,
+        // acknowledgement and resumption, and none of that can be exercised until the census rises at
+        // S12." The census has risen.
+        //
+        // So a beat carries a BOUNDED number of parts, and the client's own held-mark decides when to
+        // stop. A part the client already holds costs nothing to skip; a part it lacks arrives on a
+        // later beat. The transfer still completes — it simply does not shout the whole sky at a
+        // socket that cannot drink it.
+        let first = session.sky_parts_sent.min(total);
+        let last = (first + SKY_PARTS_PER_BEAT).min(total);
+        // ★ EACH PART IS SENT ONCE. NO WRAP (2026-08-29).
+        //
+        // This used to restart at part 0 after a full pass, as insurance against a lost part. That
+        // insurance is now both unnecessary and harmful:
+        //
+        //  * UNNECESSARY — the reliable inbound path no longer discards anything. It waits for room
+        //    and lets QUIC's flow control slow the sender, so a part put on the wire arrives.
+        //  * HARMFUL — a client that has not finished assembling gets the whole catalogue again, and
+        //    again, forever. That is 256 KB decoded on its main thread every beat with nothing to
+        //    show for it, which is exactly the movement stutter the owner reported.
+        //
+        // A client that holds the sky says so and is skipped by the check above. A client that does
+        // not is still receiving its first pass. Either way there is no reason to say it twice.
+        session.sky_parts_sent = last;
+        for (i, rows) in parts
+            .iter()
+            .enumerate()
+            .skip(first as usize)
+            .take((last - first) as usize)
+        {
             push_control(
                 outbox,
                 session.client,
@@ -166,6 +215,13 @@ fn emit_sky(
 
 /// How large one part of the catalogue may be. Stated once, here, so a test can reason about it.
 const SKY_PART_BUDGET_BYTES: usize = 8 * 1024;
+
+/// How many catalogue parts one beat may carry to one client.
+///
+/// ★ A PACE, NOT A CAP — the whole sky still arrives, over as many beats as it takes. At 8 KB a part
+/// this is 256 KB per beat per client, which a reliable link carries without starving the login
+/// handshake that shares it. The unpaced version sent 10.72 MB per beat and starved exactly that.
+const SKY_PARTS_PER_BEAT: u32 = 32;
 
 pub(crate) fn drive_windows(
     config: Res<GatewayConfig>,
@@ -902,11 +958,37 @@ pub(crate) fn on_window_row(
             stmt,
             authored_at,
         } => {
-            if matches!(stmt, BodyStmt::Marker { .. }) && !held.ingest.confirmed() {
+            if matches!(stmt, BodyStmt::Marker { .. }) && !held.ingest.rosters(subject) {
                 // PARKED, not dropped (Slice C1): the send-on-change lane sends a body ONCE, so
                 // a marker racing the author's first roster would otherwise stay invisible
                 // forever. Counted as before; re-admitted through the SAME predicate the moment
-                // a level lands (fail-closed meanwhile — nothing composes it while parked).
+                // either door lands (fail-closed meanwhile — nothing composes it while parked).
+                //
+                // ★ THE QUESTION IS "DOES THE ROSTER NAME THIS ONE", NOT "HAS ANY ROSTER ARRIVED"
+                // (fixed 2026-08-28). This read `!held.ingest.confirmed()`, and `confirmed()` is
+                // true as soon as EITHER door has spoken. A realm's children reach us by two:
+                // movers ride the per-tick level, statics ride the reliable roster. The shard
+                // sends them level -> markers -> static roster, so a STATIC child's marker always
+                // arrives in the gap. The level had landed, so the gate said "I have a roster" and
+                // judged the marker against a roster that structurally could not contain it. The
+                // marker was dropped as mis-authored, and the roster lane never says the same
+                // thing twice, so the realm was never drawn again.
+                //
+                // MEASURED, driving that exact order: after the level, `confirmed()` = true while
+                // `rosters(star)` = false; the marker counted `window_misauthored_body = 1` with
+                // zero parked; and after the static roster landed the held marker was still None.
+                // The home star vanished from the drawn scene while all nine sibling planets drew
+                // — `render_boxes_smoke` red on the drawn-vs-world set.
+                //
+                // `rosters` is the predicate this always wanted: it reads BOTH doors, and its own
+                // comment warned that consulting the level alone "would refuse every static
+                // child's marker as unvouched — silently, and only at real scale." It was written
+                // for the admission and never wired to the park gate.
+                //
+                // THE TRADE, STATED: a marker whose subject is genuinely NOT a child now parks in
+                // one slot instead of being dropped and counted. The park map is bounded at one
+                // slot per subject, which is the same bound the pre-roster case has always had,
+                // and nothing composes a parked statement.
                 stats.window_body_preroster += 1;
                 held.parked_bodies.insert(subject, (stmt, authored_at));
                 return;

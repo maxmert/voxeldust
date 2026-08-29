@@ -39,7 +39,11 @@ use vd_devproto::{CLIENT_NODE_BASE, DevPortScheme, SlotPorts};
 use vd_io_prod::trust::ClusterTrust;
 use vd_wire::admin::AdminSnapshot;
 
-const READY_TIMEOUT: Duration = Duration::from_secs(20);
+// ★ RAISED FROM 20 s (2026-08-29). A GALAXY-hosting shard now builds its own children, and THE world
+// gives it 233 220 star systems to place. That is real work the shard must finish before it can answer
+// for any of them, and 20 s was written when a galaxy shard held none. The owner's instruction stands:
+// wait for the shard, and optimise once it works.
+const READY_TIMEOUT: Duration = Duration::from_secs(240);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Grace between SIGTERM and the SIGKILL escalation in `down`.
 const TERM_GRACE: Duration = Duration::from_secs(3);

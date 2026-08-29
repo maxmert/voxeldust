@@ -90,6 +90,89 @@ pub fn moving_children_for(
 /// disagree). The Slice-A marker emit reads THIS; Slice 0 lands it consumer-less (nothing moves),
 /// pinned by the THE-world goldens below. The closure is a branchless shim (HR5): the
 /// `Some`/`None` split lives in `Option::map`'s monomorphic body over `photometrics`.
+/// ★ THE SKY, FROM THE SYSTEM LAYER ALONE (owner ruling 2026-08-29) — the star rows a gateway states
+/// once at boot, and the generation stamp that names them.
+///
+/// The sky is a list of STAR SYSTEMS. It has never contained a planet or a moon. This builds only
+/// those, through [`generate_system_layer`], instead of folding the whole forest and keeping one row
+/// in sixteen: MEASURED on THE world, 3 500 479 objects built to state 233 220 rows.
+///
+/// The rows are byte-identical to the ones the full fold produced — the layer places every system
+/// with the same function, from the same stream, and pushes it with the same rule, which the identity
+/// gate beside this measures rather than assumes.
+/// ★ WHAT ONE SHARD BOOTS WITH — its neighbourhood and its mover roster, from its OWN SUBTREE
+/// (owner ruling 2026-08-29).
+///
+/// A shard runs ONE realm. It used to call two functions that EACH built the whole forest and
+/// filtered: MEASURED on THE world, 3 500 479 bodies built twice to keep 13 rows and one roster.
+/// That is the login timeout a player hits — the gateway waits for the home realm and the shard is
+/// still copying the galaxy.
+///
+/// Built ONCE here, read twice, and the generator's own body type never leaves the crate.
+#[must_use]
+pub fn shard_boot_world(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    held: &std::collections::BTreeSet<RealmId>,
+    hosted: RealmId,
+) -> (Vec<RealmRegion>, Vec<(RealmId, OrbitalElements)>) {
+    let subtree = super::realm_subtree(seed_universe, config, held);
+    let regions = neighbourhood_scope(&to_regions(&subtree, config), held);
+    let movers = moving_children(&subtree, hosted);
+    (regions, movers)
+}
+
+#[must_use]
+pub fn sky_from_system_layer(
+    seed_universe: u64,
+    config: &UniverseConfig,
+) -> Vec<vd_core::look::StarRow> {
+    let layer = super::generate_system_layer(seed_universe, config);
+    let photometrics: Vec<(RealmId, StarPhotometrics)> = layer
+        .iter()
+        .filter_map(|b| b.photometrics.map(|p| (b.realm, p)))
+        .collect();
+    star_catalogue(&to_regions(&layer, config), &photometrics)
+}
+
+/// ★ THE MARKER DRAWS ONE SHARD NEEDS — from its OWN SUBTREE, never the whole galaxy (2026-08-29).
+///
+/// A shard states a point of light for its held realms and their DIRECT children, and for nothing
+/// else. [`system_photometrics_for_config`] answers the same question by building EVERY body in the
+/// galaxy — on THE world, 3.5 million of them — and discarding all but a handful.
+///
+/// ★ MEASURED (2026-08-29). This ran at every shard boot. Once a galaxy shard held its 233 220
+/// children, the caller's own per-row scan over the region list turned the pair QUADRATIC: a test on
+/// THE world ran for 2 hours 23 minutes at 5.9 GB and had not finished. In the live cluster it is the
+/// bulk of a 101-second bring-up.
+///
+/// `realm_subtree` is the SAME generator reading the SAME streams in the same order, asked only for
+/// this shard's own part of the world — so the rows are the rows the full build would have produced.
+/// ★ THE WORLD AS ITS STAR SYSTEMS — the layer, lowered, with no planet or moon built (2026-08-29).
+///
+/// Answers "which star systems exist, and where" without building what is INSIDE them. On THE world
+/// that is 233 222 bodies instead of 3 500 479, and the rows for the systems are identical either way
+/// — the layer places every system with the same function, from the same stream.
+///
+/// For a caller that only needs to NAME a system (which realm is home, which galaxy holds it), the
+/// full forest is 15× the bodies and about 7 GB of memory for an answer the layer already carries.
+#[must_use]
+pub fn system_layer_view(seed_universe: u64, config: &UniverseConfig) -> WorldView {
+    WorldView::of(super::generate_system_layer(seed_universe, config), config)
+}
+
+#[must_use]
+pub fn subtree_photometrics(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    held: &std::collections::BTreeSet<RealmId>,
+) -> Vec<(RealmId, StarPhotometrics)> {
+    super::realm_subtree(seed_universe, config, held)
+        .iter()
+        .filter_map(|b| b.photometrics.map(|p| (b.realm, p)))
+        .collect()
+}
+
 #[must_use]
 pub fn system_photometrics_for_config(
     seed_universe: u64,
@@ -136,6 +219,16 @@ pub fn star_catalogue(
         .iter()
         .find(|r| matches!(r.realm, RealmId::Galaxy(_)))
         .map(|r| r.realm);
+    // ★ THE DRAWS ARE INDEXED ONCE (perf fix 2026-08-29). This searched the WHOLE photometrics list
+    // for every system's own star. At three systems that was nine comparisons; THE world holds
+    // 279 380, so it became 78 BILLION — and this is the function that builds the sky a client
+    // receives, not a corner of a test.
+    //
+    // Fourth of its kind found today, all the same shape: a loop given ONE thing that looks through
+    // EVERYTHING to find what the caller already had. The others were the generator's moon pass, a
+    // test's body walk, and the boot's interior reach.
+    let by_realm: std::collections::BTreeMap<RealmId, &StarPhotometrics> =
+        photometrics.iter().map(|(realm, p)| (*realm, p)).collect();
     let mut rows: Vec<vd_core::look::StarRow> = regions
         .iter()
         .filter(|r| matches!(r.realm, RealmId::System(_)) && r.parent == galaxy)
@@ -143,10 +236,8 @@ pub fn star_catalogue(
             // A star with no photometric draw still belongs in the sky — it is a place you can fly to.
             // It glows NOT, which the presence floor already says elsewhere: absence of a datum is
             // absence of data, never a default.
-            let (class_code, luma_lsun) = photometrics
-                .iter()
-                .find(|(realm, _)| *realm == r.realm)
-                .map_or((0, 0.0), |(_, p)| marker_datum(p));
+            let (class_code, luma_lsun) =
+                by_realm.get(&r.realm).map_or((0, 0.0), |p| marker_datum(p));
             vd_core::look::StarRow {
                 realm: r.realm,
                 cell: r.center.in_parents_frame().cell(),

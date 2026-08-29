@@ -30,7 +30,15 @@ use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use vd_core::{MsgId, NodeId};
 use vd_sim::io::{
-    BoundedInbox, Bytes, Inbound, InboxDrop, MsgClass, Reliability, SendError, ShedReason,
+    // (`InboxDrop` is gone from this file: the mesh can no longer produce one. The unreliable lane
+    // pushes through `BoundedInbox` and only counts, and the reliable lane cannot drop at all.)
+    BoundedInbox,
+    Bytes,
+    Inbound,
+    MsgClass,
+    Reliability,
+    SendError,
+    ShedReason,
     Transport,
 };
 
@@ -350,9 +358,63 @@ impl MeshConfig {
     }
 }
 
-/// The shared bounded inbox: reader/writer tasks push, the sim thread drains. The
-/// Mutex is only ever held for a queue push/drain — never across an await.
-type SharedInbox = Arc<Mutex<BoundedInbox>>;
+/// ★ THREE QUEUES, SPLIT BY WHO IS ALLOWED TO LOSE WHAT (2026-08-29).
+///
+/// There was ONE bounded queue and it discarded a RELIABLE frame when full. That drop is
+/// unrecoverable on this transport — the sender replays a lane only when its stream is GONE
+/// (`owes_redelivery`), and an inbox drop leaves the stream healthy — so the receiver's watermark
+/// stops advancing and the two nodes talk past a hole forever.
+///
+/// MEASURED on a live cluster: ONE drop during the gateway's boot, then a contiguity-gap warning
+/// roughly four hundred times every eight seconds until the process died. A player could never enter
+/// the world.
+///
+/// ★ AND THE QUEUE WAS NOT SLOW — IT WAS UNATTENDED. The accept loop starts before the gateway folds
+/// the galaxy's sky, and the ONLY drain is the first tick, some fifty seconds later. Two thousand
+/// slots fill long before anyone reads.
+///
+/// The lanes are separated because their correct overflow policies are OPPOSITE, and one queue cannot
+/// hold both:
+///
+/// - RELIABLE — the reader WAITS for room. Nothing is ever lost. Not reading is precisely how QUIC's
+///   flow control is applied: the frame stays inside the transport, which is the standard place for
+///   it, and the sender is slowed without anyone asking.
+/// - UNRELIABLE — unchanged. Latest-wins dropping is CORRECT here; next tick's position beats a
+///   resend of last tick's, and a reader that waited would stall a carrier whose whole contract is
+///   that loss is fine.
+/// - LOCAL NOTICES — this node telling itself something (a peer is unreachable, a send was shed).
+///   Neither waits nor drops: waiting would stall this node's own sender against itself, and dropping
+///   would strand a saga. They get their own room so a bounce storm cannot starve a login, which it
+///   can today.
+pub(crate) struct InboundQueues {
+    /// Reliable wire frames. Producers reserve a slot and wait when it is full.
+    reliable_tx: tokio::sync::mpsc::Sender<Inbound>,
+    reliable_rx: Mutex<tokio::sync::mpsc::Receiver<Inbound>>,
+    /// Unreliable datagrams — the existing bounded queue, with the existing latest-wins policy.
+    unreliable: Mutex<BoundedInbox>,
+    /// This node's own notices to itself.
+    notices_tx: tokio::sync::mpsc::Sender<Inbound>,
+    notices_rx: Mutex<tokio::sync::mpsc::Receiver<Inbound>>,
+}
+
+impl InboundQueues {
+    fn new(capacity: usize) -> Self {
+        let (reliable_tx, reliable_rx) = tokio::sync::mpsc::channel(capacity.max(1));
+        // A node's own notices are bounded by its peer count and its own backoff, so a small room is
+        // ample — and a FULL one is a defect worth shouting about, not a runtime condition.
+        let (notices_tx, notices_rx) = tokio::sync::mpsc::channel(capacity.max(1));
+        Self {
+            reliable_tx,
+            reliable_rx: Mutex::new(reliable_rx),
+            unreliable: Mutex::new(BoundedInbox::new(capacity)),
+            notices_tx,
+            notices_rx: Mutex::new(notices_rx),
+        }
+    }
+}
+
+/// The shared inbound path: reader tasks push, the sim thread drains.
+type SharedInbox = Arc<InboundQueues>;
 
 /// Transport honesty counters — every dropped datagram is COUNTED, never silent
 /// (audit GW-1: the design's never-silent rule). Surfaced via [`MeshControl::stats`].
@@ -440,37 +502,42 @@ pub struct MeshStatsSnapshot {
     pub learned_peers_rejected: u64,
 }
 
-/// THE inbound-push chokepoint: applies the BoundedInbox overflow policy AND surfaces
-/// the result (audit ROB-2 — the drop return exists to be surfaced, never discarded).
-/// A RELIABLE drop is the design's explicit overload ALERT: warned + counted. An
-/// unreliable drop is by-design latest-wins back-pressure: counted only.
-pub(crate) fn push_inbox(
-    inbox: &SharedInbox,
-    stats: &MeshStats,
-    event: Inbound,
-) -> Option<InboxDrop> {
+/// ★ THE UNRELIABLE PUSH — unchanged policy, and the only place that still drops (2026-08-29).
+///
+/// Latest-wins is CORRECT on this lane: next tick's position beats a resend of last tick's, and a
+/// reader that waited here would stall a carrier whose whole contract is that loss is fine. Counted,
+/// never silent.
+pub(crate) fn push_unreliable(inbox: &SharedInbox, stats: &MeshStats, event: Inbound) {
     let dropped = inbox
+        .unreliable
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push(event);
-    match dropped {
-        Some(InboxDrop::Reliable) => {
-            stats
-                .inbound_dropped_reliable
-                .fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                "BoundedInbox FULL of reliable events: a RELIABLE inbound was dropped \
-                 (genuine overload — raise the inbound capacity or shed load upstream)"
-            );
-        }
-        Some(InboxDrop::Unreliable) => {
-            stats
-                .inbound_dropped_unreliable
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        None => {}
+    if dropped.is_some() {
+        stats
+            .inbound_dropped_unreliable
+            .fetch_add(1, Ordering::Relaxed);
     }
-    dropped
+}
+
+/// ★ THIS NODE'S OWN NOTICE TO ITSELF — neither waits nor drops (2026-08-29).
+///
+/// A node cannot apply back-pressure to itself: waiting here would stall the very sender the notice
+/// is about. And dropping would strand a saga waiting to hear that a peer is gone. So the notices get
+/// their OWN room, and a full one is a DEFECT rather than a runtime condition — the rate is bounded
+/// by the peer count and the writer's own backoff.
+///
+/// They used to share the wire's queue, where a bounce storm could starve a login.
+pub(crate) fn push_notice(inbox: &SharedInbox, stats: &MeshStats, event: Inbound) {
+    if inbox.notices_tx.try_send(event).is_err() {
+        stats
+            .inbound_dropped_reliable
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::error!(
+            "the local-notice queue is FULL — this node could not tell itself something. The rate is \
+             bounded by the peer count and the writer backoff, so this is a defect, not overload."
+        );
+    }
 }
 
 /// The receiver dedup state for ONE `(peer, class)` — pure, `Copy`, the unit-testable core of the R-3'
@@ -1083,7 +1150,7 @@ pub fn spawn_mesh(
         endpoint
     };
 
-    let inbox: SharedInbox = Arc::new(Mutex::new(BoundedInbox::new(cfg.inbound_capacity)));
+    let inbox: SharedInbox = Arc::new(InboundQueues::new(cfg.inbound_capacity));
     let stats = Arc::new(MeshStats {
         // COMPUTED ONCE, here, from what this node actually offers — so the line a failed dial prints is
         // the tag that was really on the wire and not a second spelling of it.
@@ -1289,7 +1356,7 @@ async fn serve_connection(
 async fn read_datagrams(conn: &quinn::Connection, inbox: &SharedInbox, stats: &Arc<MeshStats>) {
     while let Ok(datagram) = conn.read_datagram().await {
         if let Ok(frame) = postcard::from_bytes::<DatagramFrame>(&datagram) {
-            push_inbox(
+            push_unreliable(
                 inbox,
                 stats,
                 Inbound::Wire {
@@ -1359,7 +1426,20 @@ async fn serve_data_stream_body(
 ) {
     let mut recorded = false;
     while let Some(frame) = read_one_reliable_frame(&mut recv).await {
-        classify_and_deliver(&inbox, &stats, &ledger, &frame);
+        // ★ WAIT FOR ROOM — THIS IS THE BACK-PRESSURE (2026-08-29). While this task is parked it does
+        // not read the stream, so QUIC's own flow control stalls the sender once its stream window
+        // fills. The frame waits inside the transport, which is the standard place for it: the
+        // application never takes custody of something it cannot hold.
+        //
+        // Awaited OUTSIDE every lock (the crate lints `await_holding_lock`), and the reservation is
+        // per `(peer, class)` stream because one reader task serves one stream — so a slow consumer
+        // slows exactly its own lane and no other.
+        //
+        // `Err` means the receiver is gone, which happens only as the node shuts down: stop reading.
+        let Ok(permit) = inbox.reliable_tx.reserve().await else {
+            return;
+        };
+        classify_and_deliver(permit, &stats, &ledger, &frame);
         // CA-1 record site (accept path only): learn an UNBOOKED dial-in peer's return connection ONCE, on the
         // first authenticated frame. A SEPARATE `learned.lock()` inside `learn_dial_in_peer` — NEVER nested in
         // the ledger's inner Mutex (classify_and_deliver above obeys outer-read→inner→inbox and has fully
@@ -1449,8 +1529,13 @@ async fn drain_ack_stream(mut recv: quinn::RecvStream, ack_out: watch::Sender<Op
 /// advancing `hw` without delivering would Dedup every redelivery = permanent silent loss. Contiguity (the
 /// Gap arm), not the epoch check, is the anti-burying guard, so this rollback cannot re-open the reverted-R-1
 /// CRITICAL; a later redelivery re-drives the transition cleanly.
+/// ★ THE SLOT IS RESERVED BEFORE THIS IS CALLED (2026-08-29), so delivery here cannot fail and cannot
+/// wait. The caller awaits room OUTSIDE every lock; this function stays synchronous and keeps the
+/// ledger's lock exactly where it was. `clippy::await_holding_lock` is a crate lint, and honouring it
+/// is what forces the reservation to the caller — which is also where it belongs, because that is the
+/// only place that can yield the task and let QUIC's flow control slow the sender.
 fn classify_and_deliver(
-    inbox: &SharedInbox,
+    permit: tokio::sync::mpsc::Permit<'_, Inbound>,
     stats: &MeshStats,
     ledger: &RecvLedger,
     frame: &ReliableFrame,
@@ -1489,22 +1574,21 @@ fn classify_and_deliver(
         hw: 0,
         primed: false,
     });
-    let before = *st;
     match classify_reliable(st, frame.incarnation, frame.epoch, frame.seq) {
         Verdict::Accept | Verdict::Reset => {
-            let dropped = push_inbox(
-                inbox,
-                stats,
-                Inbound::Wire {
-                    from: frame.from,
-                    class: frame.class,
-                    bytes: vd_sim::io::bytes(frame.bytes.clone()),
-                },
-            );
-            if matches!(dropped, Some(InboxDrop::Reliable)) {
-                // Not delivered ⇒ hw must NOT advance (push_inbox already counted+warned the reliable drop).
-                *st = before;
-            }
+            // ★ INFALLIBLE. The room was reserved before this function was entered, so there is no drop
+            // to surface and no watermark to roll back.
+            //
+            // The rollback that used to live here — "not delivered, so `hw` must NOT advance" — was
+            // CORRECT and is now unreachable. It was the honest half of an unrecoverable situation: the
+            // receiver refused to pretend it had a frame it discarded, and then nothing ever re-sent it,
+            // because this transport replays a lane only when its STREAM is gone. One drop, and the two
+            // nodes talked past a hole for the life of the process.
+            permit.send(Inbound::Wire {
+                from: frame.from,
+                class: frame.class,
+                bytes: vd_sim::io::bytes(frame.bytes.clone()),
+            });
         }
         Verdict::StaleIncarnation => {
             stats.stale_incarnation_drop.fetch_add(1, Ordering::Relaxed);
@@ -1737,7 +1821,7 @@ async fn peer_writer(mut w: PeerWriter) {
                             if !lane.retry.is_empty()
                                 && let Some(msg_id) = lane.last_msg_id
                             {
-                                push_inbox(
+                                push_notice(
                                     &w.inbox,
                                     &w.stats,
                                     Inbound::NodeUnreachable { to: w.dest, class, undelivered: msg_id },
@@ -1803,7 +1887,7 @@ async fn peer_writer(mut w: PeerWriter) {
                             "a SendShed ({reason:?}) can only arise on a reliable lane"
                         );
                         if frame.class.reliability() == Reliability::Reliable {
-                            push_inbox(
+                            push_notice(
                                 &w.inbox,
                                 &w.stats,
                                 Inbound::SendShed {
@@ -1946,7 +2030,7 @@ fn confirm_and_maybe_bounce(
     if lane.consecutive_failures >= reliability.confirm_unreachable_after_retries
         && let Some(msg_id) = lane.last_msg_id
     {
-        push_inbox(
+        push_notice(
             inbox,
             stats,
             Inbound::NodeUnreachable {
@@ -2593,10 +2677,36 @@ impl Transport for MeshTransport {
     }
 
     fn drain_inbound(&mut self) -> Vec<Inbound> {
-        self.inbox
+        // ORDER: this node's own notices, then reliable wire, then unreliable. Notices first because a
+        // "peer unreachable" changes how the tick reads everything after it; unreliable last because it
+        // is the only lane whose contents may be superseded by the next tick anyway.
+        let mut out = Vec::new();
+        let mut notices = self
+            .inbox
+            .notices_rx
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while let Ok(ev) = notices.try_recv() {
+            out.push(ev);
+        }
+        drop(notices);
+        let mut reliable = self
+            .inbox
+            .reliable_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while let Ok(ev) = reliable.try_recv() {
+            out.push(ev);
+        }
+        drop(reliable);
+        out.extend(
+            self.inbox
+                .unreliable
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .drain(),
+        );
+        out
     }
 
     fn local_id(&self) -> NodeId {

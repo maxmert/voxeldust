@@ -3,7 +3,7 @@
 //!
 //! One demand cluster (orchestrator + gateway, NO shard pre-booked), one real headless client with
 //! a GPU, and one flight down THE world's own star gap: out of the home system, across the 3-D
-//! placement gap the galaxy's own solver produced (`stellar.system_ring_r_m`, printed in full by
+//! placement gap the galaxy's own solver produced (`stellar.galaxy_rim_r_m`, printed in full by
 //! the companion below) at the GOVERNED ceiling (the S3 speed law: ramp + galaxy ceiling +
 //! approach governor), into the ring sibling.
 //!
@@ -182,9 +182,38 @@ fn dest_wake_r_m() -> f64 {
     realm_band(dest_realm()).spin_up_r_m()
 }
 
-/// The star ring's radius — the distance between the home system and its ring sibling.
-fn ring_r_m() -> f64 {
-    world().stellar.system_ring_r_m
+/// THE STAR GAP — how far the home system actually is from the destination, MEASURED off THE
+/// world's own two placements.
+///
+/// ★ THIS USED TO READ A CONFIG KNOB, AND THE KNOB STOPPED MEANING THIS (S12, 2026-08-28). It was
+/// `world().stellar.system_ring_r_m`, documented as "the distance between the home system and its
+/// ring sibling", and under the SHELL that was true: every system sat at exactly that radius, so
+/// the rim and the gap were one number. The owner refused the shell — a shell puts every star at
+/// the same distance, which no galaxy does — and the placement now draws each system's own radius
+/// inside the rim. The knob is now `galaxy_rim_r_m` and is an upper bound, nothing else.
+///
+/// WHAT IT COST, MEASURED: the departure leg computed "walk until within rim − park of the
+/// destination". THE world's destination sits at 91 % of the rim, so that stop condition was
+/// ALREADY TRUE before the ship moved. It never walked: 0.0 m travelled, no crossing, no handover,
+/// and the leg died on its own deadline having proved nothing.
+///
+/// ★ THE ANSWER IS TO MEASURE, NEVER TO ASK A KNOB. Both systems are direct children of the galaxy,
+/// so both centres are stated in the galaxy's frame and subtract directly. Read at the GALAXY's
+/// step, which is the frame the numbers are in — the parent-frame trap: a child's own step is out
+/// by 2048× here, silently.
+fn star_gap_m() -> f64 {
+    let cfg = world();
+    let regions = vd_physics::worldgen::realm_regions_for_config(DEV.universe_seed, &cfg);
+    let roster = world_roster(&DEV);
+    let find = |realm: vd_core::pose::RealmId| {
+        regions
+            .iter()
+            .find(|r| r.realm == realm)
+            .unwrap_or_else(|| panic!("THE world rosters {realm:?}"))
+    };
+    let galaxy = find(roster.galaxy);
+    (find(roster.sibling).center.metres_in(galaxy) - find(roster.home).center.metres_in(galaxy))
+        .length()
 }
 
 /// The occupant's travel per tick at the shipped speed — the ONE tick↔metre conversion, and the
@@ -350,8 +379,14 @@ fn governed_approach_s() -> f64 {
         arrival_standoff_m() - dest_extent_m(),
         t.tau_s,
     );
-    leg_time_s(ring_r_m(), galaxy_cap_mps(), DEV.move_speed, v_end, t.tau_s)
-        .expect("the warp approach holds a cruise")
+    leg_time_s(
+        star_gap_m(),
+        galaxy_cap_mps(),
+        DEV.move_speed,
+        v_end,
+        t.tau_s,
+    )
+    .expect("the warp approach holds a cruise")
 }
 
 /// The GOVERNED dwell inside the destination's wake band — the seconds the approach governor
@@ -410,7 +445,7 @@ const ALL_STOP: [f32; 3] = [0.0, 0.0, 0.0];
 /// more than this much of the journey, whatever the world's ring/wake ratio turns out to be. A
 /// POLICY share of the measurement, stated once here; the park itself is derived against it and
 /// its margin over the wake band is asserted, never assumed.
-const PRE_WAKE_PARK_SHARE_OF_RING: f64 = 0.4;
+const PRE_WAKE_PARK_SHARE_OF_GAP: f64 = 0.4;
 /// How many settle polls the aim's converge loop takes before it measures the residual — bounded,
 /// and it exits early the moment two consecutive polls report the identical facing.
 const AIM_SETTLE_POLLS: u32 = 40;
@@ -733,7 +768,7 @@ const AIM_BRAKE_RESIDUAL_RAD: f64 = 0.0353;
 /// the re-aim (whose trigger carries the same tolerance at range), so the warp is a pursuit that
 /// tightens as the range closes — the aim never has to be better than the instrument steering it.
 fn aim_tolerance_rad() -> f64 {
-    ((system_extent_m() / ring_r_m()).atan() * 0.5)
+    ((system_extent_m() / star_gap_m()).atan() * 0.5)
         .max(AIM_BRAKE_RESIDUAL_RAD / f64::from(1u32 << (AIM_TRIES - 1)))
 }
 /// How many turns the converge loop may take before the aim is declared un-gettable.
@@ -801,10 +836,10 @@ fn look_at(devctl: u16, target: DVec3) {
         if error <= tol {
             eprintln!(
                 "[warp] AIM: settled {error:.5} rad off {target:?} after {} turn(s) \
-                 (tolerance {tol:.5} rad = a {:.1} m miss over the {:.0} m ring)",
+                 (tolerance {tol:.5} rad = a {:.1} m miss over the {:.0} m star gap)",
                 attempt + 1,
-                ring_r_m() * tol.tan(),
-                ring_r_m(),
+                star_gap_m() * tol.tan(),
+                star_gap_m(),
             );
             return;
         }
@@ -1227,10 +1262,10 @@ fn g_handover_the_symmetric_budgets_are_derived_and_fit_the_worlds_own_geometry(
     // the DEPARTURE half on the home system's own band (the line the hand-back is timed from), the
     // WAKE half on the destination's own band (the line the hand-over is timed from). Collapsing
     // them onto one `system_extent_m()` is what made the wake measurement read 30× its budget.
-    let (ring, extent) = (ring_r_m(), system_extent_m());
+    let (gap, extent) = (star_gap_m(), system_extent_m());
     let (home_wake, tear) = (spin_up_r_m(), tear_down_r_m());
     let (dest_extent, wake) = (dest_extent_m(), dest_wake_r_m());
-    let margin = ring - wake;
+    let margin = gap - wake;
     let band = tear - home_wake;
     eprintln!(
         "[handover] DERIVED on THE world (seed {}, {:.0} m/s, {:.3} s/tick, {:.1} m/tick):\n  \
@@ -1239,7 +1274,7 @@ fn g_handover_the_symmetric_budgets_are_derived_and_fit_the_worlds_own_geometry(
          {tear:.6} m\n  \
          DESTINATION (the ring sibling) extent {dest_extent:.3} m · its OWN wake radius \
          {wake:.6} m\n  \
-         star ring {ring:.6} m · asleep-at-departure margin {margin:.6} m · tear-down band {band:.3} m\n  \
+         the measured star gap {gap:.6} m · asleep-at-departure margin {margin:.6} m · tear-down band {band:.3} m\n  \
          cadences (ticks): AoI {} · grace-hold {} · reconcile {RECONCILE_TICKS} · relay {RELAY_FORWARD_TICKS} \
          · membership hop {MEMBERSHIP_HOP_TICKS} · compose {COMPOSE_TICKS} · draw {DRAW_TICKS} · \
          roster-loss window {}\n  \
@@ -1272,7 +1307,7 @@ fn g_handover_the_symmetric_budgets_are_derived_and_fit_the_worlds_own_geometry(
     // when you leave, because the world's own solver left more ring than wake radius.
     assert!(
         margin > 0.0,
-        "THE world no longer leaves a system asleep at departure (ring {ring:.3} m ≤ wake {wake:.3} m)",
+        "THE world no longer leaves a system asleep at departure (gap {gap:.3} m ≤ wake {wake:.3} m)",
     );
     // SYMMETRY, at GOVERNED speeds (the S3 re-derivation — the pre-law form multiplied the budget
     // by a flat 10 m/tick, a 20× under-statement of the governed approach): the wake must complete
@@ -1326,7 +1361,7 @@ fn g_handover_the_symmetric_budgets_are_derived_and_fit_the_worlds_own_geometry(
     eprintln!(
         "[handover] DEPARTURE REACH: park {:.4e} m + {} ticks at the GOVERNED ceiling {v_behind:.4e} \
          m/s (the galaxy's {:.4e} m/s clamps the governor's {:.4e} m/s arm) = {departure_reach:.4e} \
-         m against the {ring:.4e} m ring",
+         m against the {gap:.4e} m star gap",
         behind_park_m(),
         departure_budget_full_ticks(),
         galaxy_cap_mps(),
@@ -1337,9 +1372,9 @@ fn g_handover_the_symmetric_budgets_are_derived_and_fit_the_worlds_own_geometry(
         ),
     );
     assert!(
-        departure_reach < ring,
+        departure_reach < gap,
         "the behind park plus the full departure footprint at the governed ceiling \
-         ({departure_reach:.1} m) must fit inside the ring {ring:.1} m",
+         ({departure_reach:.1} m) must fit inside the star gap {gap:.1} m",
     );
     // The hysteresis story, restated where each half is meaningful: in the law-inert (foot-speed)
     // regime the tear-down band still exceeds one tick of foot travel — the geometric dead-zone
@@ -1442,13 +1477,13 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
     // stars, two solved shells; one `system_extent_m()` standing for both is what made the wake
     // measurement read 1813 ticks against a 61-tick budget (see `dest_wake_r_m`).
     let (wake, extent) = (dest_wake_r_m(), dest_extent_m());
-    let (tear, ring) = (tear_down_r_m(), ring_r_m());
+    let (tear, gap) = (tear_down_r_m(), star_gap_m());
     eprintln!(
-        "[warp] THE world: ring {ring:.3} m · HOME extent {:.3} m / tear-down {tear:.3} m · \
+        "[warp] THE world: ring {gap:.3} m · HOME extent {:.3} m / tear-down {tear:.3} m · \
          DESTINATION extent {extent:.3} m / wake {wake:.3} m · asleep-at-departure margin \
          {:.3} m · {:.1} m per tick",
         system_extent_m(),
-        ring - wake,
+        gap - wake,
         metres_per_tick(),
     );
 
@@ -1618,7 +1653,7 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
         Drive::Walk {
             toward: 0,
             chunk_ticks: WATCHED_CHUNK_TICKS,
-            stop_within: ring - park,
+            stop_within: gap - park,
         },
         watched_walk_budget(tear_down_r_m(), galaxy_cap_mps()),
         |_, flips| flips[1].is_some(),
@@ -1765,7 +1800,7 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
     let governed_leg_s = governed_approach_s();
     // The cruise's own DERIVED budget (the 300 s literal died with the true-scale gap): the whole
     // star gap at the galaxy's ceiling, through the one budget law every other leg uses.
-    let cruise_budget = vd_bins::flight::governed_leg_budget(&DEV, ring, galaxy_cap_mps());
+    let cruise_budget = vd_bins::flight::governed_leg_budget(&DEV, gap, galaxy_cap_mps());
     assert!(
         1.5 * governed_leg_s < cruise_budget.as_secs_f64(),
         "the governed approach closed form ({governed_leg_s:.1} s) no longer fits its derived \
@@ -1794,14 +1829,14 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
     // the clamp can never quietly park the ship inside the band it must begin outside of.
     let steering_reach_m =
         (vd_bins::flight::pose_lag_s(DEV.tick_dt) + SAMPLE_POLL.as_secs_f64()) * galaxy_cap_mps();
-    let park2 = (3.0 * wake).min(PRE_WAKE_PARK_SHARE_OF_RING * ring);
+    let park2 = (3.0 * wake).min(PRE_WAKE_PARK_SHARE_OF_GAP * gap);
     eprintln!(
-        "[warp] PRE-WAKE PARK: {park2:.4e} m — wake {wake:.4e} m ({:.1}% of the {ring:.4e} m \
+        "[warp] PRE-WAKE PARK: {park2:.4e} m — wake {wake:.4e} m ({:.1}% of the {gap:.4e} m \
          ring), margin over the band {:.4e} m against a {steering_reach_m:.4e} m steering reach \
          at the cruise ceiling; the held-throttle cruise still flies {:.1}% of the gap",
-        100.0 * wake / ring,
+        100.0 * wake / gap,
         park2 - wake,
-        100.0 * (ring - park2) / ring,
+        100.0 * (gap - park2) / gap,
     );
     assert!(
         park2 > wake + steering_reach_m,
@@ -1813,7 +1848,7 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
     );
     // 2a — the cruise, down to where a facing-steered pursuit still provably converges: the aim
     // tolerance's lateral over the whole gap.
-    let handoff = aim_tolerance_rad() * ring;
+    let handoff = aim_tolerance_rad() * gap;
     let cruise = fly_recording(
         devctl,
         &watch,
