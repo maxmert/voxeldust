@@ -2418,40 +2418,6 @@ type BootWorld = (
     std::collections::BTreeMap<vd_core::pose::RealmId, vd_physics::celestial::OrbitalElements>,
 );
 
-/// Build the containment forest + moving-child roster for a `Visual`/`VisualDemand` config.
-/// THE ORBIT-SPEED KNOB IS GONE (Stage-C, SL5): `VD_VISUAL_ORBIT_SLOWDOWN` divided the star mass so
-/// a pilot could catch a slowed planet — a scale knob on THE world, read by the SHARD alone (the
-/// gateway's twin boot built the undivided world, so one env var could split the cluster across two
-/// worlds). The crossing gates now fly the shared rendezvous at full orbit speed instead; nothing
-/// reads a scale from the environment, so nothing can select a different world. Shared by BOTH
-/// visual arms (DRY) so the static-render (`Visual`) and live-demand (`VisualDemand`) modes stay
-/// ONE geometry expression.
-fn visual_regions_and_movers(
-    config: vd_physics::worldgen::UniverseConfig,
-    universe_seed: u64,
-    held: &std::collections::BTreeSet<vd_core::pose::RealmId>,
-    hosted: vd_core::pose::RealmId,
-) -> BootWorld {
-    // The NEIGHBOURHOOD (own realm + ancestor chain + the children this shard authors) — NEVER its sibling
-    // planets. A shard cannot place a realm it does not author, so folding siblings collapses them to the
-    // origin and a hosted occupant reads as inside all of them at once (the production re-home flap). Scoping
-    // them out is the standalone cure; the movers stay `hosted`'s authored children (single-realm demand shard
-    // ⇒ exactly its own; the union-over-held is a co-hosting refinement not yet needed at visual scale).
-    // ★ THE SHARD BUILDS ITS OWN SUBTREE, NOT THE GALAXY (owner ruling 2026-08-29). This called
-    // `realm_neighbourhood_for_config` and `moving_children_for_config`, and EACH built the whole
-    // forest and filtered: MEASURED on THE world, 3 500 479 bodies built TWICE to keep 13 rows and
-    // one mover roster. That is the login timeout a player actually hits — the gateway waits for the
-    // home realm to become routable and the shard is still copying the galaxy.
-    //
-    // `realm_subtree` is the SAME generator answering "what is inside me": the chain and this
-    // realm's own placement come from the galaxy's layer (a realm never authors its own place), and
-    // the contents come from the full forest's own stage, called for this system alone. Built once,
-    // read twice.
-    let (regions, movers) =
-        vd_physics::worldgen::shard_boot_world(universe_seed, &config, held, hosted);
-    (regions, movers.into_iter().collect())
-}
-
 /// The containment region forest + the moving-child roster for a shard booting at `scale`, hosting
 /// `held_realms` (own realm `hosted`). `Walk` ⇒ the seed NEIGHBOURHOOD + an EMPTY roster — BYTE-IDENTICAL
 /// to the pre-FA-5 boot (the exact `realm_neighbourhood_for_held`, and `RealmRegions::with_moving_children`
@@ -2508,17 +2474,79 @@ pub fn boot_regions_and_movers(
     occupant_v_max_mps: f64,
     tick_dt_s: f64,
 ) -> BootWorld {
-    // NO CHOICE, BY CONSTRUCTION. This used to `match` a scale read from the environment, and a live
-    // cluster was MEASURED running two of them at once — the orchestrator on one world, its own gateway
-    // on another, from a single launch of a single script. Logins were placed by one universe's rules and
-    // simulated by another's. Deleting the parameter is the fix: two processes cannot disagree about a
-    // value that does not exist.
-    visual_regions_and_movers(
-        process_world_config(occupant_v_max_mps, tick_dt_s),
+    boot_regions_and_movers_in_lineage(
         universe_seed,
         held_realms,
         hosted,
+        occupant_v_max_mps,
+        tick_dt_s,
+        &std::collections::BTreeSet::new(),
     )
+}
+
+/// ★ THE BOOT WORLD FOR A SHARD THAT KNOWS ITS OWN LINEAGE (owner ruling 2026-08-30) — the ONE
+/// implementation; [`boot_regions_and_movers`] is this with an empty lineage.
+///
+/// A shard BELOW a star system cannot find itself from its own name. A planet's identifier is a
+/// one-way hash of its system's, and a player's apartment is not in the seed at all — the generator
+/// emits no station and no area, so no search can ever produce one.
+///
+/// It does not have to. THE PARENT ALREADY TOLD IT: a spawn demand carries a `RealmCoord`, which
+/// names every ancestor by kind and seed, and the orchestrator mints the whole chain in one sweep.
+/// The lineage here is that coordinate, read back.
+///
+/// A realm's parent never changes while it runs — a planet does not change star system, a city does
+/// not move to another planet — so this is a fact stated ONCE, at boot, and never maintained.
+#[must_use]
+pub fn boot_regions_and_movers_in_lineage(
+    universe_seed: u64,
+    held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    hosted: vd_core::pose::RealmId,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+    lineage: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+) -> BootWorld {
+    let (regions, movers, _) = boot_world_lit(
+        universe_seed,
+        held_realms,
+        hosted,
+        occupant_v_max_mps,
+        tick_dt_s,
+        lineage,
+    );
+    (regions, movers)
+}
+
+/// ★ EVERYTHING A SHARD BOOT NEEDS, FROM ONE SUBTREE BUILD (2026-08-30): its regions, its mover
+/// roster, and the marker draws for the children it may state a point of light about.
+///
+/// The boot used to fold its subtree TWICE — once for the regions, once for the draws — and each
+/// fold builds the star-system layer, 233 222 bodies on THE world. A shard's boot is what a player
+/// waits through at login, so paying for it twice is paid by them.
+#[must_use]
+pub fn boot_world_lit(
+    universe_seed: u64,
+    held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    hosted: vd_core::pose::RealmId,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+    lineage: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+) -> (
+    Vec<vd_core::geometry::RealmRegion>,
+    std::collections::BTreeMap<vd_core::pose::RealmId, vd_physics::celestial::OrbitalElements>,
+    Vec<(
+        vd_core::pose::RealmId,
+        vd_physics::worldgen::StarPhotometrics,
+    )>,
+) {
+    let (regions, movers, lit) = vd_physics::worldgen::shard_boot_world_lit(
+        universe_seed,
+        &process_world_config(occupant_v_max_mps, tick_dt_s),
+        held_realms,
+        hosted,
+        lineage,
+    );
+    (regions, movers.into_iter().collect(), lit)
 }
 
 /// The WORLD a node boots into, for the SAME `scale` [`boot_regions_and_movers`] selects its regions from.
@@ -2598,8 +2626,31 @@ pub fn child_luma_draws(
     tick_dt_s: f64,
     regions: &[vd_core::geometry::RealmRegion],
     held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    lineage: &std::collections::BTreeSet<vd_core::pose::RealmId>,
 ) -> std::collections::BTreeMap<vd_core::pose::RealmId, (u8, f64)> {
     let config = process_world_config(occupant_v_max_mps, tick_dt_s);
+    child_luma_from_draws(
+        regions,
+        held_realms,
+        &vd_physics::worldgen::subtree_photometrics(universe_seed, &config, held_realms, lineage),
+    )
+}
+
+/// ★ THE MARKER ROSTER FROM DRAWS ALREADY IN HAND (2026-08-30) — the ONE filter;
+/// [`child_luma_draws`] is this with the draws folded for you.
+///
+/// A shard boot already builds its own subtree to get its regions and movers. Folding the draws
+/// there too costs nothing, and it saves a SECOND fold of the star-system layer — 233 222 bodies on
+/// THE world — at every shard boot.
+#[must_use]
+pub fn child_luma_from_draws(
+    regions: &[vd_core::geometry::RealmRegion],
+    held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    draws: &[(
+        vd_core::pose::RealmId,
+        vd_physics::worldgen::StarPhotometrics,
+    )],
+) -> std::collections::BTreeMap<vd_core::pose::RealmId, (u8, f64)> {
     // ★ THE DIRECT CHILDREN, LOOKED UP — NOT RE-SCANNED PER ROW (2026-08-29).
     //
     // This asked, for every photometric row, whether ANY region carried it as a held realm's child.
@@ -2614,15 +2665,14 @@ pub fn child_luma_draws(
         .filter(|r| r.parent.is_some_and(|parent| held_realms.contains(&parent)))
         .map(|r| r.realm)
         .collect();
-    // ★ AND THE DRAWS COME FROM THIS SHARD'S OWN SUBTREE, not from every body in the galaxy.
-    vd_physics::worldgen::subtree_photometrics(universe_seed, &config, held_realms)
-        .into_iter()
+    draws
+        .iter()
         .filter(|(realm, _)| {
             // A held realm's DIRECT children (their markers) — and the held realm's OWN datum
             // (ruling C: its running self-look carries its colour through the wake handover).
             held_realms.contains(realm) || children_of_held.contains(realm)
         })
-        .map(|(realm, draw)| (realm, vd_physics::worldgen::marker_datum(&draw)))
+        .map(|(realm, draw)| (*realm, vd_physics::worldgen::marker_datum(draw)))
         .collect()
 }
 
@@ -3633,6 +3683,7 @@ mod world_roster_tests {
             DEV.tick_dt,
             regions,
             &std::collections::BTreeSet::from([galaxy]),
+            &std::collections::BTreeSet::new(),
         );
         // DERIVED FROM THE WORLD, never a literal. This read `3` — the census of a world that no
         // longer exists — so it failed the moment the galaxy grew. The galaxy carries no draw of its
@@ -3657,6 +3708,7 @@ mod world_roster_tests {
             DEV.tick_dt,
             regions,
             &std::collections::BTreeSet::from([a_system]),
+            &std::collections::BTreeSet::new(),
         );
         let expected_children = regions
             .iter()
@@ -3720,87 +3772,62 @@ mod world_roster_tests {
         );
     }
 
-    /// G-INTEREST-BAND (look_horizon.md §6 slice 4; Q1 APPROVED, owner 2026-08-17): on THE
-    /// world, at the SHIPPED cluster dynamics (500 m/s occupant ceiling, 50 Hz), a star
-    /// system's derived interest spin-up radius equals `444.104489631` m (its interior reach:
-    /// planet worst excursion at the ecc cap + planet visibility reach) and its tear-down
-    /// radius `469.104489631` m (the same derived velocity lead every AoI band carries:
-    /// 500 · 0.02 · (K_SAFETY 2 + 0.5) = 25 m) — and BOTH bracket the 150 m system shell, so
-    /// a vacated system's interiors are awake strictly BEFORE any crossing: the latency race
-    /// is a geometric impossibility, not a tuning. Asserted with the numbers, derived from the
-    /// shipped constants — never a literal restated from the design.
+    /// ★ G-WAKE-RADIUS, ON THE WORLD (owner ruling 2026-08-29, replacing G-INTEREST-BAND).
+    ///
+    /// A galaxy shard holds every star system of THE world, and each one carries a LIVE wake radius
+    /// derived from its own size. This is the shipped-cluster half of the law the physics crate
+    /// pins: a radius never reads a realm's contents, so a shard that builds only its own subtree
+    /// derives the same number the whole world does.
+    ///
+    /// ★ WHAT THIS REPLACED, AND WHY. The old test pinned a SECOND band taken as the maximum over a
+    /// system's planets. That band could not survive a shard building only its own subtree — the
+    /// planets are one level too deep — and on THE world every one of the 233 220 systems carried a
+    /// reach of ZERO, measured. The old test also recomputed the mover roster INSIDE a loop over
+    /// every system, which is the quadratic shape this arc has now removed seven times.
     #[test]
-    fn g_interest_band_the_derived_radii_bracket_the_system_shell() {
+    fn g_wake_radius_every_system_the_galaxy_shard_holds_carries_one() {
         let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
-        let world = vd_physics::worldgen::WorldView::generated(DEV.universe_seed, &config);
-        let galaxy_scope = world.neighbourhood(&std::collections::BTreeSet::from([
+        let held = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+        let (rows, _) = vd_physics::worldgen::shard_boot_world(
+            DEV.universe_seed,
+            &config,
+            &held,
             vd_core::worldgen::GALAXY,
-        ]));
-        let systems: Vec<_> = galaxy_scope
+            &std::collections::BTreeSet::new(),
+        );
+        let systems: Vec<_> = rows
             .iter()
             .filter(|r| r.parent == Some(vd_core::worldgen::GALAXY))
             .collect();
-        // DERIVED, never a literal — this read `3`, the census of a retired world.
+        // DERIVED, never a literal — the old spelling read `3`, the census of a retired world.
+        let expected = vd_physics::worldgen::system_layer_view(DEV.universe_seed, &config)
+            .regions()
+            .iter()
+            .filter(|r| r.parent == Some(vd_core::worldgen::GALAXY))
+            .count();
         assert_eq!(
             systems.len(),
-            vd_physics::worldgen::system_layer_view(DEV.universe_seed, &config)
-                .regions()
-                .iter()
-                .filter(|r| r.parent == Some(vd_core::worldgen::GALAXY))
-                .count(),
-            "the galaxy holds every star system of THE world",
+            expected,
+            "the galaxy shard holds every star system of THE world",
         );
-        // TRUE-SCALE RE-DERIVE (the taxonomy arc's in-system re-solve; the interim
-        // 444.104489631 / 469.104489631 / 150 m literals retired with the interim world): the
-        // spin-up IS the system's interior reach — max over its planets of (worst excursion at
-        // the ecc cap + the LOOK's visibility reach) — and the tear-down adds the derived
-        // velocity lead. At true scale the reach sits INSIDE the shell (the lawful inversion:
-        // an occupant crosses in long before the interior is visible, so the realm itself wakes
-        // its children by the direct-child AoI rule and the interest cascade stays inert —
-        // G-NO-CASCADE; celestial_taxonomy_design §4.5.2).
-        let bodies_cfg = config;
-        for row in systems {
-            let spin_up = row.interior_band.spin_up_r_m();
-            let tear_down = row.interior_band.tear_down_r_m();
-            // Recomputed from the FULL forest (the interior band is stamped before scoping —
-            // that is the §3.4.4 no-message-crossing point; the galaxy scope itself holds no
-            // grandchild rows).
-            let expected: f64 = world
-                .regions()
-                .iter()
-                .filter(|r| r.parent == Some(row.realm))
-                .map(|r| {
-                    let excursion = vd_physics::worldgen::moving_children_for_config(
-                        DEV.universe_seed,
-                        &bodies_cfg,
-                        row.realm,
-                    )
-                    .iter()
-                    .find(|(realm, _)| *realm == r.realm)
-                    .map(|(_, e)| e.sma * (1.0 + bodies_cfg.planet.ecc_cap))
-                    .unwrap_or(0.0);
-                    // reach = look · cot(θ/2) — and the shipped spin_up_factor IS that same
-                    // cot(θ/2) (the ONE visibility factor), so no second θ literal exists here.
-                    excursion
-                        + r.look.map_or(0.0, |look| {
-                            look.finite_extent() * bodies_cfg.interest.spin_up_factor
-                        })
-                })
-                .fold(0.0, f64::max);
-            assert!(
-                (spin_up - expected).abs() < 1.0e-3,
-                "G-INTEREST-BAND spin-up: measured {spin_up} vs derived {expected}"
-            );
-            assert!(
-                tear_down > spin_up,
-                "the tear-down adds the derived velocity lead: {tear_down} vs {spin_up}"
-            );
-            let shell = row.shape.circumscribed_extent();
-            assert!(
-                spin_up < shell,
-                "true scale: the interior reach sits inside the shell ({spin_up} < {shell})"
-            );
-        }
+        let without_a_radius = systems
+            .iter()
+            .filter(|r| r.aoi.spin_up_r_m() <= 0.0)
+            .count();
+        assert_eq!(
+            without_a_radius, 0,
+            "no star system is left without a radius — that is the pop this ruling removed",
+        );
+        // The band is a real band: released strictly further out than it is claimed, so an occupant
+        // loitering on the edge cannot make a system flap.
+        let unordered = systems
+            .iter()
+            .filter(|r| r.aoi.tear_down_r_m() <= r.aoi.spin_up_r_m())
+            .count();
+        assert_eq!(
+            unordered, 0,
+            "every system's release radius sits outside its claim radius"
+        );
     }
 
     #[test]

@@ -8,8 +8,7 @@
 //! lowering treats both as the same kind of fact — where the body is. Nothing downstream may ask
 //! which arm produced it (SL4).
 
-use super::aoi::child_reach_term_m;
-use super::{UniverseConfig, interior_band};
+use super::UniverseConfig;
 use crate::celestial::{OrbitalElements, orbital_state};
 use crate::motion::Motion;
 use crate::taxonomy::SpectralClass;
@@ -205,29 +204,6 @@ fn band_for(config: &UniverseConfig, body: &GeneratedBody) -> vd_core::geometry:
 /// keeping the input-side containment seam and the output-side `transfer_frame` conversions in
 /// agreement.
 pub(crate) fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> Vec<RealmRegion> {
-    // ★ EVERY PARENT'S INTERIOR REACH, SOLVED ONCE (perf fix 2026-08-29). The interior band below
-    // used to call `interior_reach_m(bodies, ..)` PER BODY, and that function filters the WHOLE body
-    // list by parent. One scan of everything, for every one of them.
-    //
-    // THAT MADE EVERY BOOT QUADRATIC. At three star systems it was 45 bodies squared and nobody
-    // could see it. THE world now holds 4.2 million bodies, so it became 1.8e13 comparisons — a test
-    // that lowers a world ran for forty minutes at 100% of one core and had produced nothing.
-    //
-    // A child contributes its reach to ITS OWN PARENT and to no one else, so one pass over the
-    // bodies computes every parent's reach at once. The answer is identical — the same maximum over
-    // the same terms — and the cost is linear.
-    //
-    // Third of its kind found today: the moon pass searched the body list for a planet it was handed,
-    // and a test scanned every body for every body. The pattern is always the same — a function given
-    // ONE thing that looks through EVERYTHING to find what its caller already knew.
-    let mut reach_by_parent: std::collections::BTreeMap<RealmId, f64> =
-        std::collections::BTreeMap::new();
-    for c in bodies {
-        let Some(parent) = c.parent else { continue };
-        let reach = child_reach_term_m(c, config.planet.ecc_cap);
-        let slot = reach_by_parent.entry(parent).or_insert(0.0);
-        *slot = slot.max(reach);
-    }
     bodies
         .iter()
         .map(|b| {
@@ -275,16 +251,6 @@ pub(crate) fn to_regions(bodies: &[GeneratedBody], config: &UniverseConfig) -> V
                 aoi,
                 look: b.look,
                 parent: b.parent,
-                // Look horizon slice 4 (§3.4.4): the interior band is stamped HERE, from the
-                // FULL forest this map runs over — before any scope filter drops the
-                // grandchildren it is derived from. That is what settles the §3.4.4 CLAIM: a
-                // galaxy shard's boot roster row for a star system carries the reach with no
-                // message ever crossing a boundary (Ask D stays deferred).
-                interior_band: interior_band(
-                    reach_by_parent.get(&b.realm).copied().unwrap_or(0.0),
-                    &config.interest,
-                    v_child,
-                ),
             }
         })
         .collect()

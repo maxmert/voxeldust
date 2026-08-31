@@ -63,7 +63,15 @@ use vd_wire::version::ProtoVersion;
 /// The gate deadline FLOOR, seconds — extended at run time by the derived governed leg, which is
 /// where the leg's actual duration comes from. (This doc used to call it a "~1 s" leg two lines
 /// above calling it "a ~minutes flight"; the true-size exit is the latter, and `leg_s` prints it.)
-const DEADLINE_FLOOR_S: u64 = 45;
+// ★ RAISED 2026-08-31, AND THE NUMBER IS MEASURED. These tests spawn REAL nodes built in DEBUG, and a
+// debug shard folds THE world's 233 220 star systems before it can answer anything: MEASURED, ~50 s
+// from process start to "planting the containment forest", against ~0.8 s for the same fold in
+// release. The dev cluster's own bring-up measures 101 s end to end.
+//
+// So these deadlines are sized for the BUILD the tests actually run, not for the shipped one. What
+// each test proves is that its node CONVERGES — ready, drained, re-routed — never how fast. A test
+// that means to measure speed would say so and would not be run on a debug binary.
+const DEADLINE_FLOOR_S: u64 = 240;
 
 /// Run one `vd-devcluster up --dual` against the crossing slot (the launcher path from `CARGO_BIN_EXE`).
 fn up_dual(launcher: &str, slot: u16) -> std::process::ExitStatus {

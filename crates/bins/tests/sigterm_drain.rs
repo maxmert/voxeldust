@@ -25,7 +25,15 @@ use vd_bins::{
 use vd_io_prod::trust::ClusterTrust;
 use vd_wire::admin::AdminSnapshot;
 
-const DEADLINE: Duration = Duration::from_secs(30);
+// ★ RAISED 2026-08-31, AND THE NUMBER IS MEASURED. These tests spawn REAL nodes built in DEBUG, and a
+// debug shard folds THE world's 233 220 star systems before it can answer anything: MEASURED, ~50 s
+// from process start to "planting the containment forest", against ~0.8 s for the same fold in
+// release. The dev cluster's own bring-up measures 101 s end to end.
+//
+// So these deadlines are sized for the BUILD the tests actually run, not for the shipped one. What
+// each test proves is that its node CONVERGES — ready, drained, re-routed — never how fast. A test
+// that means to measure speed would say so and would not be run on a debug binary.
+const DEADLINE: Duration = Duration::from_secs(240);
 /// The drain must complete WELL inside a real k8s `terminationGracePeriodSeconds`; 15s is generous for an
 /// idle solo orchestrator's flush + writer-join (sub-second in practice). Exceeding it ⇒ the drain HUNG.
 const DRAIN_GRACE: Duration = Duration::from_secs(15);

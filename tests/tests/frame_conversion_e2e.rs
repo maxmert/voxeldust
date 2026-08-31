@@ -709,7 +709,6 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
             look: Some(root_shell),
             band,
             aoi: AoiConfig::inert(),
-            interior_band: AoiConfig::inert(),
             parent: None,
         },
         RealmRegion {
@@ -724,7 +723,6 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
             }),
             band,
             aoi: AoiConfig::inert(),
-            interior_band: AoiConfig::inert(),
             parent: Some(root),
         },
         RealmRegion {
@@ -740,7 +738,6 @@ fn demand_forest() -> Vec<vd_core::geometry::RealmRegion> {
             }),
             band,
             aoi: AoiConfig::inert(),
-            interior_band: AoiConfig::inert(),
             parent: Some(SYSTEM),
         },
     ]
@@ -1697,7 +1694,6 @@ fn chain_sibling_region(
         parent: Some(parent),
         // A planted single region states no children here — no interior, no interest (the
         // seed-forest rows get theirs stamped by `to_regions` from the full forest).
-        interior_band: vd_core::geometry::AoiConfig::inert(),
     }
 }
 

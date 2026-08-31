@@ -15,7 +15,7 @@ use bevy_ecs::prelude::Resource;
 use std::collections::{BTreeMap, BTreeSet};
 use vd_core::UniverseTick;
 use vd_core::child_index::{ChildIndex, IndexedChild};
-use vd_core::geometry::{DepthKey, RealmRegion, region_depth};
+use vd_core::geometry::{DepthKey, RealmRegion};
 use vd_core::kinematics::secs_since_epoch;
 use vd_core::placement::{MotionFn, PlacementBook};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
@@ -63,6 +63,19 @@ pub struct RealmRegions {
     /// motion crate, which this crate carries no edge to (SL4, `crate_isolation` law) — the same seam
     /// discipline as `sim::io`. EMPTY at walk/static scale, so the writer is byte-identical to FA-1.
     moving: BTreeMap<RealmId, MotionFn>,
+    /// ★ EVERY PARENT'S DIRECT CHILDREN, BY REGION INDEX (2026-08-30) — the inverse of `parent`.
+    ///
+    /// [`Self::direct_children`] used to FILTER the whole region list. That is a scan of everything to
+    /// answer a question about one realm, and SL9 names it exactly: finding which realms a parent
+    /// holds is a LOOKUP, never a scan, and a cost that grows with the child count is a defect.
+    ///
+    /// MEASURED (2026-08-30): a window-lane pin walks every anchor of THE world and asks each for its
+    /// children. At 233 221 anchors over 233 220 regions the filter is of the order of 5e10 passes —
+    /// the sim's test binary sat at 100% of a core and 12.8 GB without finishing.
+    ///
+    /// Built in index order, so an iteration over a parent's children yields exactly the order the
+    /// filter yielded.
+    pub(crate) children_of: BTreeMap<RealmId, Vec<usize>>,
     /// Region index of each realm — the inverse of `regions`, so a realm resolves to its bit without a scan.
     pub(crate) ix_of: BTreeMap<RealmId, usize>,
     /// SELF ∪ ANCESTORS as a SET OF REALMS, per region index (task #177). Computed ONCE at boot by the same
@@ -111,18 +124,61 @@ fn ancestry_chain(
     let mut chain = BTreeSet::new();
     let mut cur = realm;
     for _ in 0..regions.len() {
-        if ix_of.contains_key(&cur) {
-            chain.insert(cur);
-        }
-        let Some(region) = regions.iter().find(|r| r.realm == cur) else {
+        // ★ A LOOKUP, NOT A SCAN (2026-08-29). This walked the WHOLE region list on every hop, to
+        // find a realm whose index `ix_of` was already holding — the index is this function's own
+        // argument, one line above the scan. SL9 names the shape: finding which realm a point or a
+        // name belongs to is a LOOKUP, never a scan, and a cost that grows with the child count is a
+        // defect. MEASURED: with a galaxy shard's 233 220 children the sim's own test binary ran
+        // twenty minutes at 199% of two cores and had not finished.
+        let Some(&ix) = ix_of.get(&cur) else {
             return chain; // dangling parent — stop where region_depth stops
         };
-        let Some(parent) = region.parent else {
+        chain.insert(cur);
+        let Some(parent) = regions[ix].parent else {
             return chain; // reached the ambient root
         };
         cur = parent;
     }
     chain // hop cap hit — a cycle (boot-guard-rejected); a safe stop, never a hang
+}
+
+/// EVERY REGION'S DEPTH — [`region_depth`]'s exact walk, with a LOOKUP where it had a scan.
+///
+/// ★ WHY IT IS A PLAIN WALK AND NOT A MEMOISED ONE (2026-08-30). The first version of this shared
+/// work between regions by remembering solved depths. It was WRONG in two branches — it credited a
+/// remembered ancestor's depth to that ancestor's child, and it lost a hop on a dangling parent —
+/// and depth drives the containment argmax, so every re-home in the suite silently went to zero.
+///
+/// A chain is about six realms deep and that is a property of nesting, not of census. So the walk
+/// costs the forest's DEPTH per region and nothing more, and it is worth no cleverness at all. The
+/// defect this replaces was the scan inside it, never the walk around it.
+fn region_depths(
+    regions: &[RealmRegion],
+    ix_of: &BTreeMap<RealmId, usize>,
+) -> Vec<(u32, RealmId, usize)> {
+    regions
+        .iter()
+        .enumerate()
+        .map(|(ix, r)| (depth_of(regions, ix_of, r.realm), r.realm, ix))
+        .collect()
+}
+
+/// ONE realm's depth — the hop count `region_depth` returns, monomorphic so both stops are covered
+/// once (HR5): a realm the forest does not name, and the ambient root's absent parent.
+fn depth_of(regions: &[RealmRegion], ix_of: &BTreeMap<RealmId, usize>, realm: RealmId) -> u32 {
+    let mut depth = 0u32;
+    let mut cur = realm;
+    for _ in 0..regions.len() {
+        let Some(&ix) = ix_of.get(&cur) else {
+            return depth; // dangling parent — exactly where `region_depth` stops
+        };
+        let Some(parent) = regions[ix].parent else {
+            return depth; // the ambient root
+        };
+        depth += 1;
+        cur = parent;
+    }
+    depth // hop cap hit — a cycle the boot guard rejects; a safe stop, never a hang
 }
 
 impl RealmRegions {
@@ -144,17 +200,26 @@ impl RealmRegions {
     // both its documentation and its `#[must_use]` to a setter that wants neither.)
     #[must_use]
     pub fn new(regions: Vec<RealmRegion>) -> RealmRegions {
-        let depths = regions
-            .iter()
-            .enumerate()
-            .map(|(ix, r)| (region_depth(&regions, r.realm), r.realm, ix))
-            .collect();
-        let root_realm = regions.iter().find(|r| r.parent.is_none()).map(|r| r.realm);
         let ix_of: BTreeMap<RealmId, usize> = regions
             .iter()
             .enumerate()
             .map(|(ix, r)| (r.realm, ix))
             .collect();
+        // ★ EVERY DEPTH IN ONE PASS (2026-08-29). This called `region_depth` per region, and that
+        // function walks the parent chain by SCANNING the whole region list at every hop. Two nested
+        // walks over the same list: at a galaxy shard's 233 220 regions it is of the order of 5e10
+        // comparisons before a shard answers anything.
+        //
+        // A parent's depth is its child's depth minus one, so the answers share their work. This
+        // memoises the chain it is already walking and touches each region a bounded number of times.
+        let mut children_of: BTreeMap<RealmId, Vec<usize>> = BTreeMap::new();
+        for (ix, r) in regions.iter().enumerate() {
+            if let Some(parent) = r.parent {
+                children_of.entry(parent).or_default().push(ix);
+            }
+        }
+        let depths = region_depths(&regions, &ix_of);
+        let root_realm = regions.iter().find(|r| r.parent.is_none()).map(|r| r.realm);
         let ancestor_chain = regions
             .iter()
             .map(|r| ancestry_chain(&regions, &ix_of, r.realm))
@@ -164,6 +229,7 @@ impl RealmRegions {
             // raises it, through `set_cruise_overdrive`.
             cruise_overdrive: 1.0,
             regions,
+            children_of,
             depths,
             root_realm,
             moving: BTreeMap::new(),
@@ -263,7 +329,9 @@ impl RealmRegions {
     /// whole Universe→…→dest chain) so it cannot be reaped mid-crossing. A branchless delegate to the pure
     /// vd-core fold; `None` only for a ship (entity-backed, never a crossing dest).
     pub(crate) fn coord_of(&self, realm: RealmId) -> Option<RealmCoord> {
-        vd_core::worldgen::coord_of_realm(&self.regions, realm)
+        // THE INDEX THIS STRUCT ALREADY HOLDS — the wake loop asks this once per direct child,
+        // every tick, and the un-indexed spelling scans the whole forest on every hop.
+        vd_core::worldgen::coord_of_realm_indexed(&self.regions, &self.ix_of, realm)
     }
 
     /// The forest's ambient-root frame: the `parent.is_none()` region's frame, defaulting to `GalaxySpace`
@@ -293,10 +361,19 @@ impl RealmRegions {
     /// the fold started answering from the wrong space, and a shard asking where its own ancestor sits got
     /// the typed refusal it should get — leaving every distant traveller unplaceable. Keeping it one
     /// function is what stops that pair drifting apart again.
+    /// ★ THE REGION FOR A REALM, BY LOOKUP (2026-08-30). Four accessors below asked this question by
+    /// SCANNING the region list. `ix_of` has held the answer since the constructor.
+    ///
+    /// MEASURED: a whole-world pin calls `own_frame` once per anchor. At 233 221 anchors over 233 220
+    /// regions that alone is of the order of 5e10 passes — the sim's test binary sat at 100% of a core
+    /// and 10.5 GB without finishing. SL9 states the rule this restores: finding which realm a name
+    /// belongs to is a LOOKUP, never a scan.
+    fn region_of(&self, realm: RealmId) -> Option<&RealmRegion> {
+        self.ix_of.get(&realm).map(|&ix| &self.regions[ix])
+    }
+
     pub(crate) fn own_frame(&self, own_realm: RealmId) -> FrameRef {
-        self.regions
-            .iter()
-            .find(|r| r.realm == own_realm)
+        self.region_of(own_realm)
             .map_or(self.root_frame(), |r| r.frame)
     }
 
@@ -316,25 +393,19 @@ impl RealmRegions {
     /// degenerate [`own_frame`](Self::own_frame) covers, and the honest answer is to state no outline rather
     /// than invent a boundary.
     pub(crate) fn own_shape(&self, own_realm: RealmId) -> Option<RealmShape> {
-        self.regions
-            .iter()
-            .find(|r| r.realm == own_realm)
-            .map(|r| RealmShape {
-                realm: r.realm,
-                frame: r.frame,
-                shape: r.shape,
-                parent: r.parent,
-            })
+        self.region_of(own_realm).map(|r| RealmShape {
+            realm: r.realm,
+            frame: r.frame,
+            shape: r.shape,
+            parent: r.parent,
+        })
     }
 
     /// This shard's own realm's LOOK (real-scale design §3.0 — the outline it DRAWS), read off
     /// the roster. `None` when the realm is absent OR when it is a look-less ambient: either
     /// way the realm states no picture. Off-wire (the region row is boot-derived, never sent).
     pub(crate) fn own_look(&self, own_realm: RealmId) -> Option<vd_core::geometry::Boundary> {
-        self.regions
-            .iter()
-            .find(|r| r.realm == own_realm)
-            .and_then(|r| r.look)
+        self.region_of(own_realm).and_then(|r| r.look)
     }
 
     /// The frame of ANY realm this shard holds a region for — the label read straight off the roster.
@@ -349,10 +420,7 @@ impl RealmRegions {
     /// region already holds the exact answer.
     #[must_use]
     pub fn hosted_frame(&self, realm: RealmId) -> Option<FrameRef> {
-        self.regions
-            .iter()
-            .find(|r| r.realm == realm)
-            .map(|r| r.frame)
+        self.region_of(realm).map(|r| r.frame)
     }
 
     /// The realm whose OWN frame is `frame`, if this shard carries a region for it — the inverse of
@@ -482,22 +550,27 @@ impl RealmRegions {
             .collect()
     }
 
+    /// Every realm in this forest that has at least one direct child — the parent index's own keys.
+    ///
+    /// Exists so a caller cannot spell the question as a scan again: the answer is a map lookup, and
+    /// the map is built once. See `children_of` for the measurement that forced it.
+    pub(crate) fn parents_with_children(&self) -> impl Iterator<Item = RealmId> + '_ {
+        self.children_of.keys().copied()
+    }
+
     /// This shard's DIRECT child regions — the ROSTER half of [`RealmRegions::child_placements`], asked
     /// without placing anybody. Split out so a question that is only about WHICH children exist (is any of
     /// them active?) does not pay for every mover's orbit solve; `child_placements` is defined on top of it,
     /// so the two can never come to disagree about what a direct child is.
     pub(crate) fn direct_children(&self, own_realm: RealmId) -> impl Iterator<Item = &RealmRegion> {
-        self.regions
-            .iter()
-            .filter(move |r| is_direct_child(r.parent, own_realm))
+        // A LOOKUP, NOT A SCAN — see `children_of` for the measurement that forced it. A realm with no
+        // children is absent from the map and yields nothing, which is what the filter did.
+        self.children_of
+            .get(&own_realm)
+            .into_iter()
+            .flatten()
+            .map(move |&ix| &self.regions[ix])
     }
-}
-
-/// A region is a DIRECT child iff its parent IS the shard's own realm. A branchless equality (HR5): the
-/// `==` is covered true (a child) and false (the root's `None`, an ancestor, a sibling) by any nested
-/// forest.
-fn is_direct_child(region_parent: Option<RealmId>, own_realm: RealmId) -> bool {
-    region_parent == Some(own_realm)
 }
 
 /// The `RealmId → RealmLevel` for a hosted child region — sourced un-lossily from the seed via

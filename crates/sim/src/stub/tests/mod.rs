@@ -876,7 +876,6 @@ fn region(realm: RealmId, parent: Option<RealmId>, center: DVec3, r: f64) -> Rea
         band: band(),
         aoi: vd_core::geometry::AoiConfig::inert(),
         parent,
-        interior_band: vd_core::geometry::AoiConfig::inert(),
     }
 }
 
@@ -894,7 +893,6 @@ fn region_box(realm: RealmId, parent: Option<RealmId>, center: DVec3, half: DVec
         band: band(),
         aoi: vd_core::geometry::AoiConfig::inert(),
         parent,
-        interior_band: vd_core::geometry::AoiConfig::inert(),
     }
 }
 
@@ -1090,6 +1088,15 @@ struct Story {
     elements: OrbitalElements,
 }
 
+/// How much bigger the story galaxy gets on each attempt while it grows to hold what the story
+/// needs. A ratio, not a size — the size itself is whatever the generator's density law turns it
+/// into (owner ruling 2026-08-30: hand-size the galaxy, derive what falls out).
+const STORY_GROWTH_STEP: f64 = 2.0;
+
+/// How many growths the story may make before it gives up and fails LOUD. A bound, so a generator
+/// change that stops producing siblings ends as a named refusal rather than a hang.
+const MAX_STORY_GROWTHS: i32 = 40;
+
 impl Story {
     /// Generate the story world through the production generator, then read the parts out of the
     /// forest rather than naming their seeds — a system's seed is a `child_seed` avalanche of
@@ -1107,38 +1114,51 @@ impl Story {
         // The in-system true-size re-solve SOLVES each system's shell (no config radius
         // exists), so the placement radius and the ambient shells derive from the solve's
         // own reserved bound — disjoint siblings, nesting ambients, no tuned number.
-        config.stellar.galaxy_rim_r_m =
-            STORY_SHELL_HEADROOM * vd_physics::worldgen::target_system_bound_max_m();
         config.planet.n_planets = 2;
         // Circular and in-plane, so the planet's distance from its star is its semi-major
         // axis at EVERY tick — a fact about the orbit, not about one instant. The axis
         // itself is the √L-anchored ladder's rung 0, READ from the generated elements below.
         config.planet.ecc_sigma = 0.0;
         config.planet.incl_sigma = 0.0;
-        config.scale.galaxy_r_m = (config.stellar.galaxy_rim_r_m
-            + vd_physics::worldgen::target_system_bound_max_m())
-            * STORY_SHELL_HEADROOM;
-        config.scale.universe_r_m = config.scale.galaxy_r_m * STORY_SHELL_HEADROOM;
 
-        let world = vd_physics::worldgen::WorldView::generated(0, &config);
-        let universe = world
-            .regions()
-            .iter()
-            .find(|r| r.parent.is_none())
-            .expect("a generated world has one ambient root")
-            .realm;
-        let galaxy = Story::children(&world, universe)[0];
-        let systems = Story::children(&world, galaxy);
-        // The story's system is the one that is actually SOMEWHERE: a hop of zero would prove nothing
-        // about a parent adding its child's placement.
-        let system = *systems
-            .iter()
-            .find(|r| Story::centre(&world, **r) != DVec3::ZERO)
-            .expect("a two-star galaxy puts one system off its own centre");
-        let sibling_system = *systems
-            .iter()
-            .find(|r| **r != system)
-            .expect("a two-star galaxy has a second system");
+        // ★ HAND-SIZE THE GALAXY, THEN DERIVE WHAT FALLS OUT (owner ruling 2026-08-30).
+        //
+        // A fixture MAY choose how big its galaxy is. It may NOT say how many stars that produces:
+        // since S12 a population is a RESULT — the volume a galaxy encloses, at the density it drew
+        // (G8) — and the count knobs are deleted. This used to set one radius and then assert "a
+        // two-star galaxy", which was a count written down. It is why 24 tests failed at once.
+        //
+        // The story STATES WHAT IT NEEDS — a system that is somewhere, and a sibling to refuse — and
+        // GROWS the galaxy until the generator supplies it. So the size is derived from the story's
+        // own requirement, deterministically, and no census is ever typed.
+        let base_rim = vd_physics::worldgen::target_system_bound_max_m();
+        let (world, universe, galaxy, system, sibling_system) = (0..MAX_STORY_GROWTHS)
+            .find_map(|step| {
+                config.stellar.galaxy_rim_r_m =
+                    STORY_SHELL_HEADROOM * base_rim * STORY_GROWTH_STEP.powi(step);
+                config.scale.galaxy_r_m =
+                    (config.stellar.galaxy_rim_r_m + base_rim) * STORY_SHELL_HEADROOM;
+                config.scale.universe_r_m = config.scale.galaxy_r_m * STORY_SHELL_HEADROOM;
+                let world = vd_physics::worldgen::WorldView::generated(0, &config);
+                let universe = world
+                    .regions()
+                    .iter()
+                    .find(|r| r.parent.is_none())
+                    .expect("a generated world has one ambient root")
+                    .realm;
+                let galaxy = Story::children(&world, universe)[0];
+                let systems = Story::children(&world, galaxy);
+                // The story's system is the one that is actually SOMEWHERE: a hop of zero would
+                // prove nothing about a parent adding its child's placement.
+                let system = *systems
+                    .iter()
+                    .find(|r| Story::centre(&world, **r) != DVec3::ZERO)?;
+                let sibling_system = *systems.iter().find(|r| **r != system)?;
+                Some((world, universe, galaxy, system, sibling_system))
+            })
+            .expect(
+                "growing the story galaxy reaches a size holding a placed system and a sibling",
+            );
         let planets = Story::children(&world, system);
         // The story planet's elements: the config's semi-major axis, eccentricity, inclination and
         // central mass, with the three PHASE angles pinned to zero. That chooses WHERE ON ITS CIRCLE
@@ -1630,7 +1650,6 @@ fn region_framed(
         band: band(),
         aoi: vd_core::geometry::AoiConfig::inert(),
         parent,
-        interior_band: vd_core::geometry::AoiConfig::inert(),
     }
 }
 

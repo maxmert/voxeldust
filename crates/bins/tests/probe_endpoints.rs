@@ -36,6 +36,16 @@ fn orch_store(tag: &str) -> String {
     p.display().to_string()
 }
 
+// ★ RAISED 2026-08-31, AND THE NUMBER IS MEASURED. These tests spawn REAL nodes built in DEBUG, and a
+// debug shard folds THE world's 233 220 star systems before it can answer anything: MEASURED, ~50 s
+// from process start to "planting the containment forest", against ~0.8 s for the same fold in
+// release. The dev cluster's own bring-up measures 101 s end to end.
+//
+// So these deadlines are sized for the BUILD the tests actually run, not for the shipped one. What
+// each test proves is that its node CONVERGES — ready, drained, re-routed — never how fast. A test
+// that means to measure speed would say so and would not be run on a debug binary.
+const READY_DEADLINE: Duration = Duration::from_secs(240);
+
 /// Poll a probe endpoint until it returns `want`, or the deadline. Returns the last observed status.
 fn poll_status(
     addr: std::net::SocketAddr,
@@ -104,7 +114,7 @@ fn cluster_converges_to_ready_and_all_endpoints_serve() {
         ("shard", addrs.shard_probe),
     ] {
         assert_eq!(
-            poll_status(addr, "/readyz", 200, Duration::from_secs(15)),
+            poll_status(addr, "/readyz", 200, READY_DEADLINE),
             Some(200),
             "{name} /readyz must converge to 200"
         );
@@ -207,7 +217,7 @@ fn sigterm_de_routes_readyz_while_healthz_stays_live() {
 
     // Wait until the gateway is Ready, then SIGTERM it.
     assert_eq!(
-        poll_status(addrs.gateway_probe, "/readyz", 200, Duration::from_secs(15)),
+        poll_status(addrs.gateway_probe, "/readyz", 200, READY_DEADLINE),
         Some(200),
         "gateway must be Ready before the SIGTERM"
     );
@@ -273,7 +283,7 @@ fn a_partitioned_shard_goes_not_ready_but_stays_live() {
 
     // Shard converges to Ready (clock synced + realm confirmed-fresh).
     assert_eq!(
-        poll_status(addrs.shard_probe, "/readyz", 200, Duration::from_secs(15)),
+        poll_status(addrs.shard_probe, "/readyz", 200, READY_DEADLINE),
         Some(200),
         "the shard must be Ready before the partition"
     );

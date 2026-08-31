@@ -714,8 +714,15 @@ fn slice6_relay_egress_measured_equals_w_times_c_times_blob_times_rate() {
     // so one pose's postcard varint fell to a shorter length. Schema unchanged, PROTO_MINOR unmoved
     // — a codec or wire change would move this number by far more than one byte, which is what the
     // pin is here to catch.
+    // ★ RE-BASELINED 2123 → 2124 B on 2026-08-31. A pushed star now SNAPS to the galaxy's own
+    // cell grid: a galaxy counts in whole cells and a catalogue row carries no sub-cell part, so an
+    // off-cell star was drawn up to half a cell from where the world placed it. The snap moved one
+    // pose's integer cell by one, and a postcard varint carrying a larger cell is one byte longer.
+    //
+    // A ONE-BYTE MOVE IS THE PIN WORKING. A codec or schema change moves it by far more, which is
+    // what this pin exists to catch. Schema unchanged, PROTO_MINOR unmoved.
     assert_eq!(
-        blob, 2123,
+        blob, 2124,
         "the pinned departure-fixture relay blob (bytes)"
     );
     eprintln!(
@@ -761,7 +768,13 @@ fn slice6_the_union_over_draw_is_measured_at_interim_scale() {
         .filter(|r| r.parent == Some(galaxy))
         .map(|r| (r.realm, centre_of(r)))
         .collect();
-    assert_eq!(systems.len(), 3, "THE galaxy holds 3 systems");
+    // DERIVED: the literal 3 was a retired census. What this test needs is that the galaxy
+    // holds MORE THAN ONE system, so a sibling exists to measure the home against.
+    assert!(
+        systems.len() >= 2,
+        "the galaxy holds a home system and at least one sibling: {}",
+        systems.len()
+    );
     let (sib, sib_centre) = *systems
         .iter()
         .find(|(s, _)| *s != home)
@@ -783,12 +796,22 @@ fn slice6_the_union_over_draw_is_measured_at_interim_scale() {
     };
     let set_a = in_band_of(pos_a);
     let set_b = in_band_of(pos_b);
-    assert_eq!(
-        set_a,
-        BTreeSet::from([home]),
-        "A sees exactly the home star"
+    // ★ THE ORACLE IS "THE SETS DIFFER", NOT "THEY ARE SINGLETONS" (2026-08-31). These asserted one
+    // star each, which was true while a galaxy held three and its stars were far apart. A galaxy now
+    // holds a real census, so a position 300 m from one star has several others in band — that is the
+    // world being dense, not the fold being wrong.
+    //
+    // What the assertion below actually needs is that the two observers see DIFFERENT things, so the
+    // union has something to unite and `verdict == union` is not a trivial identity.
+    assert!(
+        set_a.contains(&home),
+        "A stands at the home star: {set_a:?}"
     );
-    assert_eq!(set_b, BTreeSet::from([sib]), "B sees exactly its sibling");
+    assert!(set_b.contains(&sib), "B stands at its sibling: {set_b:?}");
+    assert_ne!(
+        set_a, set_b,
+        "the two observers must see different sets, or the union proves nothing"
+    );
     // THE REAL FOLD, both observers held: the galaxy shard's own AoI tick publishes the
     // SHARED verdict.
     let cfg = StubConfig {
@@ -842,14 +865,39 @@ fn slice6_the_union_over_draw_is_measured_at_interim_scale() {
     // THE OVER-DRAW, recorded (D-LOOK-2's interim-scale measurement): each observer's fold
     // carries the OTHER observer's child — its own look plus its interior's 5 planets = 6
     // drawn realm rows per fold that this observer's own position never asked for.
-    let interior_rows_of =
-        |s: RealmId| 1 + vd_physics::worldgen::moving_children_for_config(0, &cfg_w, s).len();
+    // ONE build of the movers, grouped by parent. `moving_children_for_config` builds the WHOLE
+    // forest per call, and this closure is called once per over-drawn system.
+    let movers_by_parent = {
+        let mut m: std::collections::BTreeMap<RealmId, usize> = std::collections::BTreeMap::new();
+        // A LOOKUP, NOT A SCAN. The first spelling of this did `scope.iter().find(..)` per mover —
+        // a walk of the region list for every mover in the world. I wrote that quadratic while
+        // removing another one three lines up; it ran fifteen minutes before the watchdog caught it.
+        let parent_of: std::collections::BTreeMap<RealmId, RealmId> = scope
+            .iter()
+            .filter_map(|r| r.parent.map(|p| (r.realm, p)))
+            .collect();
+        for (realm, _) in vd_physics::worldgen::all_movers_for_config(0, &cfg_w) {
+            if let Some(p) = parent_of.get(&realm) {
+                *m.entry(*p).or_insert(0) += 1;
+            }
+        }
+        m
+    };
+    let interior_rows_of = |s: RealmId| 1 + movers_by_parent.get(&s).copied().unwrap_or(0);
     let overdraw_a: usize = union.difference(&set_a).map(|s| interior_rows_of(*s)).sum();
     let overdraw_b: usize = union.difference(&set_b).map(|s| interior_rows_of(*s)).sum();
-    assert_eq!(
-        (overdraw_a, overdraw_b),
-        (10, 10),
-        "each observer over-draws exactly the other's 1-look + 9-planet subtree"
+    // ★ THE OVER-DRAW IS RECORDED, NOT PINNED (2026-08-31). This is D-LOOK-2's MEASUREMENT of what a
+    // shared fold costs an observer — the literal (10, 10) was that cost when a galaxy held three
+    // stars and each observer over-drew exactly one other system. With a real census each observer
+    // over-draws however many systems the other can see, so a fixed pair of numbers records a world
+    // that no longer exists.
+    //
+    // What must stay true is that the cost is REAL — if it were zero there would be nothing to
+    // record, and the ledger entry this test feeds would be measuring nothing. The numbers
+    // themselves are printed below, which is what the entry reads.
+    assert!(
+        overdraw_a > 0 && overdraw_b > 0,
+        "a shared fold costs each observer rows it never asked for: ({overdraw_a}, {overdraw_b})"
     );
     eprintln!(
         "[slice6] UNION OVER-DRAW at interim scale (D-LOOK-2): union verdict {} children \
@@ -1774,13 +1822,23 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
         vd_physics::worldgen::AOI_TICK_DT_S,
     );
     let forest = vd_physics::worldgen::realm_regions_for_config(0, &cfg);
+    // One row per parent-child edge, taken while the forest is still in hand (it is moved into the
+    // region table below). This is the non-vacuity count the pinned sum used to spell out.
+    let edges = forest.iter().filter(|r| r.parent.is_some()).count();
+    // The galaxy's own direct children — how many system rows the two-instant walk visits.
+    let systems_in_scope = forest
+        .iter()
+        .filter(|r| {
+            matches!(r.realm, RealmId::System(_)) && r.parent == Some(vd_core::worldgen::GALAXY)
+        })
+        .count();
     let anchors: BTreeSet<RealmId> = forest.iter().filter_map(|r| r.parent).collect();
-    let mut movers: BTreeMap<RealmId, vd_physics::celestial::OrbitalElements> = BTreeMap::new();
-    for &anchor in &anchors {
-        movers.extend(vd_physics::worldgen::moving_children_for_config(
-            0, &cfg, anchor,
-        ));
-    }
+    // ★ ONE BUILD, NOT ONE PER PARENT (2026-08-29). This walked every distinct parent in the
+    // forest and asked for that parent's movers — and each ask rebuilt the WHOLE galaxy. On THE
+    // world that is 233 221 rebuilds of 3 500 479 bodies. The pins below are unchanged; only the
+    // way the same movers are gathered is.
+    let movers: BTreeMap<RealmId, vd_physics::celestial::OrbitalElements> =
+        vd_physics::worldgen::all_movers_for_config(0, &cfg);
     let regions = RealmRegions::new(forest).with_moving_children(kepler_motion_fns(movers));
     let tick_hz = 1.0 / vd_physics::worldgen::AOI_TICK_DT_S;
     let mut rows_pinned = 0usize;
@@ -1891,19 +1949,24 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
     // seed draws where the shell took two, so every draw after them shifted by four. Two planets
     // drew a lighter mass, and a lighter planet holds no moon, so two moons left THE world. The
     // other four terms are untouched: 1 galaxy + 3 systems + 27 planets + 3 stars.
+    // DERIVED from the forest: one row per parent-child edge, at each of the two instants.
+    // The old spelling wrote the edges out as a sum of censuses — 1 galaxy + 3 systems +
+    // 27 planets + 3 stars + 4 moons — and every term of it is a retired number.
     assert_eq!(
         rows_pinned,
-        2 * (1 + 3 + 27 + 3 + 4),
+        2 * edges,
         "THE world's full child-row set (galaxy + systems + planets + the T2 stars + the \
          T3 census moons)"
     );
     // ...and the movers actually MOVED between the two instants (the pin measured a live
     // world, not a static fixture): every planet is off its zeroed region center at t=50000.
-    // ★ RE-PINNED 33 → 31 IN S12 (2026-08-28) — the SAME two moons the row census above lost,
-    // counted a second way: 27 planets + 4 census moons.
+    // DERIVED: every ORBITAL child of the world authors a live placement, so the count is the
+    // number of movers the world holds. The literal was "27 planets + 4 census moons" — a sum of
+    // censuses from a galaxy that held three star systems.
+    let movers = vd_physics::worldgen::all_movers_for_config(0, &cfg).len();
     assert_eq!(
-        moved_since_epoch, 31,
-        "all twenty-seven planets and four census moons author live placements"
+        moved_since_epoch, movers,
+        "every orbital child of THE world authors a live placement"
     );
     // ★ AND THE REFUSAL ARM IS NOT VACUOUS (slice S9). Pinned as a count, because "some hops are out
     // of reach" is worthless without knowing how many: if this silently went to zero the arm above
@@ -1919,9 +1982,23 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
     //
     // Every other row in THE world — planets, stars, moons under their own parents, and the galaxy
     // under the universe — either shares its parent's unit or sits close enough to count.
-    assert_eq!(
-        cross_rung_hops, 4,
-        "the two RING systems, at both instants, cannot count their galaxy's centre in millimetres"
+    // ★ THE EXCEPTION, NOT THE COUNT (2026-08-31). The literal 4 was "two ring systems at two
+    // instants" — the whole census of a galaxy that held three. With a real census the count is
+    // hundreds of thousands, and it says nothing a reader can check.
+    //
+    // The comment above already names what is worth asserting: the HOME system is the exception,
+    // because it sits at the galaxy's own origin and zero has a count in every unit. That is the
+    // fact — the galaxy's origin is the only place in it a millimetre-counting realm can name its
+    // parent from — and it is scale-free.
+    let system_rows = 2 * systems_in_scope;
+    assert!(
+        cross_rung_hops > 0,
+        "ring systems really are too far to count their galaxy's centre in millimetres"
+    );
+    assert!(
+        cross_rung_hops < system_rows,
+        "the home system at the galactic origin is the exception: {cross_rung_hops} of {system_rows} \
+         system rows could not count, so at least one could"
     );
 }
 

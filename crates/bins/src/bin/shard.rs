@@ -116,13 +116,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // resolve: this shard and its gateway build the same universe because there is only one, and the
     // interest band is measured against the speed this cluster actually flies at and the tick it
     // actually runs.
-    let (seed_regions, moving) = vd_bins::boot_regions_and_movers(
+    // ★ THE LINEAGE THIS SHARD'S PARENT SENT IT (owner ruling 2026-08-30). A spawn demand carries a
+    // `RealmCoord`, which names every ancestor by kind and seed, and the launcher hands it on as
+    // `VD_OWN_COORD`. Without it a shard below a star system cannot build the world it is the centre
+    // of: a planet's identifier is a one-way hash of its system's, and a player-built apartment is
+    // not in the seed at all — the generator emits no station and no area.
+    //
+    // Empty when nothing was declared, which is the shape a galaxy or star-system shard boots with:
+    // the layer already names those, so the lineage adds nothing and the rows are unchanged.
+    let boot_lineage: std::collections::BTreeSet<vd_core::pose::RealmId> = declared_coord
+        .as_ref()
+        .map(|c| c.lineage_realms().into_iter().collect())
+        .unwrap_or_default();
+    // ★ ONE SUBTREE BUILD FOR ALL THREE ANSWERS (2026-08-30). The regions, the mover roster and the
+    // marker draws all come from the same fold. This boot used to fold its subtree TWICE — once here
+    // and once for the draws further down — and each fold builds the star-system layer, 233 222
+    // bodies on THE world. A shard's boot is what a player waits through at login.
+    let (seed_regions, moving, boot_lit) = vd_bins::boot_world_lit(
         universe_seed,
         &held_realms,
         own_realm,
         move_speed * time_multiplier,
         tick_dt,
+        &boot_lineage,
     );
+    // ★ A SHARD MUST BE ABLE TO PLACE ITSELF, AND IT MUST SAY SO CLEARLY WHEN IT CANNOT
+    // (owner ruling 2026-08-30). A realm the star-system LAYER names — the universe, the galaxy, a
+    // star system — builds its own world from the seed alone. A realm BELOW one cannot: a planet's
+    // identifier is a one-way hash of its system's, and a player-built station or area is not in the
+    // seed at all, so no search will ever produce it. Its parent must name it, which a spawn demand
+    // already does — it carries a full `RealmCoord`, handed on as `VD_OWN_COORD`.
+    //
+    // Without that, the next guard down refuses with "the forest has 0 ambient roots", which is true
+    // and explains nothing. This says what is actually missing and how to supply it.
+    if !seed_regions.iter().any(|r| r.realm == own_realm) {
+        return Err(format!(
+            "a shard hosting {own_realm:?} built no world containing it. A realm below a star \
+             system cannot place itself — its parent must name it. Set VD_OWN_COORD to the \
+             realm's full lineage (the spawn path does this automatically); a hand-launched \
+             deep shard must supply it. Declared lineage: {}",
+            if boot_lineage.is_empty() {
+                "none".to_owned()
+            } else {
+                format!("{boot_lineage:?}")
+            }
+        )
+        .into());
+    }
     // The shard's LOCAL authority frame = its realm's canonical frame from the seed forest (NODE-PER-REALM:
     // a Planet shard is `PlanetCentered`, a Station `StationLocal`, an Area `AreaLocal{planet,area}` — an Area
     // REQUIRES its Planet parent, which the forest region carries). Looked up from `seed_regions` — the
@@ -385,13 +425,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // BEFORE the forest is moved into the resource below. Empty wherever no direct child carries
     // a draw — such a child still states an extent-only point of light (look_horizon.md slice 1,
     // the presence floor), built by the sim through the one marker-bag codec.
-    let child_luma = vd_bins::child_luma_draws(
-        universe_seed,
-        move_speed * time_multiplier,
-        tick_dt,
-        &regions,
-        &held_realms,
-    );
+    let child_luma = vd_bins::child_luma_from_draws(&regions, &held_realms, &boot_lit);
     *node.world_mut().resource_mut::<vd_sim::stub::ChildLuma>() =
         vd_sim::stub::ChildLuma(child_luma);
     // THE SHARD FOLDS NO SKY (S11, owner ruling 2026-08-27 — "we're passing the Galaxy just once over

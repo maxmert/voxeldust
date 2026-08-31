@@ -610,7 +610,6 @@ mod parent_centre_tests {
             band: test_band(),
             aoi: AoiConfig::inert(),
             parent: None,
-            interior_band: AoiConfig::inert(),
         };
         assert_eq!(parent.frame.tier(), Tier::Galaxy);
         let centre = ParentCentre::authored(LatticePos::from_metres(
@@ -645,7 +644,6 @@ mod parent_centre_tests {
             band: test_band(),
             aoi: AoiConfig::inert(),
             parent: None,
-            interior_band: AoiConfig::inert(),
         };
         let system = RealmRegion {
             realm: RealmId::System(7),
@@ -1281,7 +1279,7 @@ pub struct RealmRegion {
     /// impossible to violate rather than merely avoided). At interim/walk scale bound and look
     /// coincide; at real scale the ratio is ~200:1 and one number cannot be both.
     /// `#[serde(default)]`: a legacy `regions.json` decodes to `None` — draws nothing, the
-    /// conservative side, mirroring the `aoi`/`interior_band` append discipline.
+    /// conservative side, mirroring the `aoi` append discipline.
     #[serde(default)]
     pub look: Option<Boundary>,
     /// The signed-distance hysteresis band around the surface (anti-flap on the containment edge).
@@ -1296,20 +1294,6 @@ pub struct RealmRegion {
     /// The enclosing realm you fall to on LEAVING this region. `None` ONLY for the single ambient root
     /// (the Universe), whose volume contains all reachable space — so an entity is ALWAYS in ≥1 realm.
     pub parent: Option<RealmId>,
-    /// THE INTERIOR BAND (look horizon slice 4; Q1 APPROVED, owner-approved 2026-08-17 —
-    /// docs/design/look_horizon.md §3.4.4): the hysteresis band the PARENT judges the interest
-    /// bit on for THIS child. Spin-up at the child's own INTERIOR REACH — the largest distance
-    /// from the child's centre at which something INSIDE it is still visible (the max over its
-    /// own direct children of worst excursion + visibility reach), derived AT BOOT from the
-    /// forest the generator already holds before scoping, so nothing ever crosses a realm
-    /// boundary for it — tear-down widened by the same derived velocity lead every AoI band
-    /// carries. Interiors are awake before any crossing. (This used to quote a star system's band as
-    /// `444.104489631` / `469.104489631` m bracketing a `150 m` shell — the retired compressed
-    /// geometry; on THE world both are orders larger and per-seed, so the gates read them.) Inert
-    /// (`spin_up == 0`) for a childless leaf — no interior, no interest. Populated by
-    /// `vd-physics worldgen::to_regions`; APPENDED last + `#[serde(default)]`, mirroring `aoi`.
-    #[serde(default = "AoiConfig::inert")]
-    pub interior_band: AoiConfig,
 }
 
 /// The containment depth-argmax order: depth DESC (the innermost realm wins), then `RealmId` ASC, then
@@ -2043,10 +2027,16 @@ pub fn guard_regions_nest(
     reaches: &std::collections::BTreeMap<RealmId, ChildReach>,
 ) -> Result<(), RegionNestError> {
     guard_single_root(regions)?;
-    guard_unique_realms(regions)?;
-    guard_parents_resolve(regions)?;
-    guard_chains_reach_root(regions)?;
-    guard_children_fit_parents(regions, reaches)?;
+    // ★ ONE INDEX, BUILT ONCE, FOR EVERY CLAUSE BELOW (2026-08-31). Each of the next three used to
+    // find a parent row by SCANNING the whole forest, so the fence was quadratic four times over.
+    // MEASURED on THE world's galaxy: 233 222 regions, and the fence had not finished after ELEVEN
+    // MINUTES — a galaxy shard could not boot at all, and the test that forks one leaked the process
+    // it gave up on. Building the index also decides uniqueness, so the separate duplicate scan is
+    // gone with it (SL9: finding which row holds a realm is a LOOKUP, never a walk).
+    let by_realm = index_realms(regions)?;
+    guard_parents_resolve(regions, &by_realm)?;
+    guard_chains_reach_root(regions, &by_realm)?;
+    guard_children_fit_parents(regions, &by_realm, reaches)?;
     guard_bands_clear_the_quantum(regions)?;
     Ok(())
 }
@@ -2076,6 +2066,7 @@ fn guard_bands_clear_the_quantum(regions: &[RealmRegion]) -> Result<(), RegionNe
 /// zero (the same discipline as "decode-to-Default is banned for Durable kinds").
 fn guard_children_fit_parents(
     regions: &[RealmRegion],
+    by_realm: &std::collections::BTreeMap<RealmId, usize>,
     reaches: &std::collections::BTreeMap<RealmId, ChildReach>,
 ) -> Result<(), RegionNestError> {
     for child in regions {
@@ -2088,9 +2079,9 @@ fn guard_children_fit_parents(
         // defensiveness but was in fact an arm no input could take — permanently uncovered, and quietly
         // asserting that the guard above might not have run. Stating the invariant is honest about which
         // it is, and fails loudly if that ordering is ever broken.
-        let parent = regions
-            .iter()
-            .find(|r| r.realm == parent_id)
+        let parent = by_realm
+            .get(&parent_id)
+            .map(|ix| &regions[*ix])
             .expect("guard_parents_resolve already refused every unresolvable parent");
         let Some(reach) = reaches.get(&child.realm) else {
             return Err(RegionNestError::NoReachForChild { realm: child.realm });
@@ -2115,20 +2106,34 @@ fn guard_single_root(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
     Ok(())
 }
 
-fn guard_unique_realms(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
-    // O(N²) over a bounded N (≤ `max` ≤ 64): no alloc, no hasher.
-    for (i, a) in regions.iter().enumerate() {
-        if regions[..i].iter().any(|b| b.realm == a.realm) {
-            return Err(RegionNestError::DuplicateRealm { realm: a.realm });
+/// Each realm's ROW, by realm — the one lookup table the rest of the fence reads, and the duplicate
+/// check itself: a realm that is already in the table is a realm stated twice.
+///
+/// This replaced a prefix scan per row whose comment read "O(N²) over a bounded N (≤ `max` ≤ 64)".
+/// That was honest while a forest held at most 64 regions. SL9 deleted the cap — a galaxy states a
+/// hundred and fifty thousand star systems — and the scan never caught up with it.
+///
+/// # Errors
+/// [`RegionNestError::DuplicateRealm`] naming the first realm stated twice, in forest order.
+fn index_realms(
+    regions: &[RealmRegion],
+) -> Result<std::collections::BTreeMap<RealmId, usize>, RegionNestError> {
+    let mut by_realm = std::collections::BTreeMap::new();
+    for (ix, r) in regions.iter().enumerate() {
+        if by_realm.insert(r.realm, ix).is_some() {
+            return Err(RegionNestError::DuplicateRealm { realm: r.realm });
         }
     }
-    Ok(())
+    Ok(by_realm)
 }
 
-fn guard_parents_resolve(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
+fn guard_parents_resolve(
+    regions: &[RealmRegion],
+    by_realm: &std::collections::BTreeMap<RealmId, usize>,
+) -> Result<(), RegionNestError> {
     for r in regions {
         if let Some(p) = r.parent
-            && !regions.iter().any(|x| x.realm == p)
+            && !by_realm.contains_key(&p)
         {
             return Err(RegionNestError::DanglingParent {
                 realm: r.realm,
@@ -2139,31 +2144,57 @@ fn guard_parents_resolve(regions: &[RealmRegion]) -> Result<(), RegionNestError>
     Ok(())
 }
 
-/// Every region's parent chain must reach the single root within `regions.len()` hops (a longer walk
-/// must cycle — parents resolve + one root ⇒ acyclic reaches the root). Runs AFTER the single-root /
-/// unique / resolve guards, so the `.parent` lookups are total. Bounded ⇒ never hangs on a cycle.
-fn guard_chains_reach_root(regions: &[RealmRegion]) -> Result<(), RegionNestError> {
+/// Every region's parent chain must reach the single root. Runs AFTER the single-root / index /
+/// resolve guards, so the `.parent` lookups are total. Never hangs on a cycle.
+///
+/// ★ EACH REALM IS PROVEN ONCE (2026-08-31). Every region used to re-walk its whole chain from
+/// scratch, and each hop of that walk SCANNED the forest for the next row. On a galaxy every one of
+/// 233 220 star systems repeated the same two-hop climb to the root. The realms already proven carry
+/// forward instead, so a chain stops at the first realm whose answer is known.
+fn guard_chains_reach_root(
+    regions: &[RealmRegion],
+    by_realm: &std::collections::BTreeMap<RealmId, usize>,
+) -> Result<(), RegionNestError> {
+    let mut proven: std::collections::BTreeSet<RealmId> = std::collections::BTreeSet::new();
     for r in regions {
-        if !chain_reaches_root(regions, r.realm) {
+        if !chain_reaches_root(regions, by_realm, r.realm, &mut proven) {
             return Err(RegionNestError::CycleOrOrphan { realm: r.realm });
         }
     }
     Ok(())
 }
 
-fn chain_reaches_root(regions: &[RealmRegion], start: RealmId) -> bool {
+/// One realm's climb. Every realm on a successful climb is proven with it — they share its tail.
+///
+/// The hop budget is gone: standing on a realm the climb has ALREADY passed through is what a cycle
+/// is, and saying so directly reads as the thing it detects. The old form counted hops against the
+/// forest size, which was the same verdict written as arithmetic — and it re-derived that verdict for
+/// every region.
+fn chain_reaches_root(
+    regions: &[RealmRegion],
+    by_realm: &std::collections::BTreeMap<RealmId, usize>,
+    start: RealmId,
+    proven: &mut std::collections::BTreeSet<RealmId>,
+) -> bool {
+    let mut climbed: Vec<RealmId> = Vec::new();
     let mut cur = start;
-    for _ in 0..regions.len() {
-        match regions
-            .iter()
-            .find(|x| x.realm == cur)
-            .and_then(|x| x.parent)
-        {
-            None => return true, // reached the ambient root (`parent: None`)
+    loop {
+        if proven.contains(&cur) {
+            proven.extend(climbed); // this chain joins one already known to reach the root
+            return true;
+        }
+        if climbed.contains(&cur) {
+            return false; // back where this climb already stood ⇒ a cycle
+        }
+        climbed.push(cur);
+        match by_realm.get(&cur).and_then(|ix| regions[*ix].parent) {
+            None => {
+                proven.extend(climbed); // reached the ambient root (`parent: None`)
+                return true;
+            }
             Some(p) => cur = p,
         }
     }
-    false // exceeded `len` hops without reaching the root ⇒ a cycle
 }
 
 #[cfg(test)]
@@ -3159,7 +3190,6 @@ mod tests {
                 .expect("valid test band"),
             aoi: AoiConfig::inert(),
             parent,
-            interior_band: AoiConfig::inert(),
         }
     }
 

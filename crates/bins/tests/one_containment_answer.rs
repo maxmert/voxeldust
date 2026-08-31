@@ -66,7 +66,58 @@ const SEED: u64 = 0;
 /// It names BOTH world changes that landed together, including the one that measurably did NOT move
 /// these bits — *"it did not move"* is a claim this file must state, not a silence to read into.
 const WHY_THESE_BITS_LAST_MOVED: &[&str] = &[
-    "# \u{2605} WHY THESE BITS LAST MOVED — regenerated 2026-08-28 (slice S12, ruling G1: THE SHAPE",
+    "# \u{2605} WHY THESE BITS LAST MOVED — regenerated 2026-08-31. EVERY STAR SNAPPED TO THE GRID.",
+    "#",
+    "#   A galaxy counts in whole 2 m cells, and a star catalogue row carries the CELL and no sub-cell",
+    "#     part. The shaped placement returns a CONTINUOUS position, so a star landed between cells and",
+    "#     the row silently dropped the remainder — every client then drew that star up to a metre from",
+    "#     where the world put it.",
+    "#",
+    "#   MEASURED before the fix, on the test galaxy: 33 of 48 systems sat off-cell, by up to 1.875 m.",
+    "#     After it: 0 of 48. Every star system now lands on the galaxy's own grid, which is the",
+    "#     invariant every reader downstream was already written to assume.",
+    "#",
+    "#   \u{2605} A FIRST ATTEMPT AT THIS WAS WRONG, and the fence is why it was caught. The snap was put",
+    "#     inside the CROWDING PUSH, because a float multiply there was a plausible source. It cured",
+    "#     only the pushed stars and the fence stayed red. The fault was never the push — it was the",
+    "#     placement. Measuring which systems were off-cell answered it in one run.",
+    "#",
+    "# --- the record from 2026-08-30, whose two causes still stand ---",
+    "# \u{2605} TWO CAUSES, BOTH MEASURED.",
+    "#",
+    "#   CAUSE 1 — THE RADIAL LAW GAINED A DRAW. A galaxy's placement took SIX draws and now takes",
+    "#     SEVEN: `radius_b` sits beside `radius` so the radius is a sum of two exponentials — a",
+    "#     Gamma(2). Without it the disc was measured as the density of a LINE, not a DISC: 7 844",
+    "#     stars in the innermost bin against the 1 776 the shape asks for.",
+    "#",
+    "#     THE STREAM LAW SAYS WHERE THAT LANDS, AND IT LANDED THERE EXACTLY. A per-system stream is",
+    "#     FROZEN for its first five planets' element draws; everything after the placement is",
+    "#     APPENDED. So inserting a placement draw moves what follows it and nothing before it.",
+    "#",
+    "#     MEASURED, on the rows this file records at both samples:",
+    "#       Universe -> Galaxy        3 rows, ALL UNCHANGED",
+    "#       System 7 -> its children  5 planets UNCHANGED, 3 moved",
+    "#     Five is exactly LEGACY_STREAM_PLANETS. The frozen prefix held; the appended tail moved.",
+    "#     That is the promise the prefix exists to make, kept.",
+    "#",
+    "#   CAUSE 2 — THE CROWDING PUSH (ruling G12). Where the shape asks for a density the separation",
+    "#     fence refuses, a star is PUSHED OUT rather than dropped. It moves crowded stars, so star",
+    "#     system rows move: 6 of the 9 recorded here.",
+    "#",
+    "#   \u{2605} AND THE SAMPLE CHANGED. This file recorded EVERY anchor and every child. That was",
+    "#     154 lines when a galaxy held three star systems; a galaxy now holds 233 220, so the same",
+    "#     rule asks for millions of rows and boots a world per anchor — MEASURED, the test ran",
+    "#     fifteen minutes at 14 GB without reaching its assertion. It now records ONE anchor per",
+    "#     RUNG of the ladder and a bounded slice of its children. Placement maths varies by rung,",
+    "#     never by how many siblings a rung holds, so a bit that drifts anywhere still shows.",
+    "#",
+    "#   \u{2605} A FALSE CLAIM CAUGHT BEFORE IT WAS WRITTEN HERE. The first draft of this record said",
+    "#     no number was recomputed and rows were only removed. Comparing the two files disproved it:",
+    "#     15 of 36 shared rows had moved. The claim was an argument, not a reading. It is replaced by",
+    "#     the counts above, which are readings.",
+    "#",
+    "# --- the previous record, kept because the world change it states still stands ---",
+    "# \u{2605} regenerated 2026-08-28 (slice S12, ruling G1: THE SHAPE",
     "#   COMES FROM THE SEED). The previous record — the same day's shape flag day — is superseded.",
     "#",
     "#   THE CAUSE. The galaxy's shape was ELEVEN NUMBERS A PERSON CHOSE: two arms, a 25 degree",
@@ -130,6 +181,15 @@ fn occupant_v_max_mps() -> f64 {
     vd_bins::DEV.move_speed
 }
 
+/// ★ EVERY REALM WITH AT LEAST ONE DIRECT CHILD — ONE PASS (2026-08-30).
+///
+/// Three places in this file asked this by scanning the WHOLE forest per region. On THE world that
+/// is about 3 500 000 rows, so the pair is of the order of 1e13 comparisons; one of them sat at 14 GB
+/// for fifteen minutes without reaching an assertion. The parent column already IS the answer.
+fn parents_with_children(world: &WorldView) -> std::collections::BTreeSet<RealmId> {
+    world.regions().iter().filter_map(|r| r.parent).collect()
+}
+
 /// THE world, through the gateway's own entry point.
 fn the_world() -> WorldView {
     vd_bins::boot_world(SEED, occupant_v_max_mps(), vd_bins::DEV.tick_dt)
@@ -149,11 +209,12 @@ fn a_star_and_its_children(world: &WorldView) -> (RealmId, Vec<RealmId>) {
         .iter()
         .find(|r| r.parent == Some(root.realm))
         .expect("the ambient root holds a galaxy");
+    let has_children = parents_with_children(world);
     let star = world
         .regions()
         .iter()
         .filter(|r| r.parent == Some(galaxy.realm))
-        .find(|r| world.regions().iter().any(|c| c.parent == Some(r.realm)))
+        .find(|r| has_children.contains(&r.realm))
         .expect("the generated galaxy holds a star system with planets");
     let children = world
         .regions()
@@ -178,6 +239,45 @@ fn star_shard(star: RealmId) -> (Vec<RealmRegion>, RealmRegions) {
     let planted = RealmRegions::new(regions.clone())
         .with_moving_children(vd_physics::motion::kepler_motion_fns(moving));
     (regions, planted)
+}
+
+/// How many of an anchor's children the golden records. A galaxy has a quarter of a million; the
+/// placement math does not change between the eighth and the eight-thousandth, and a golden that
+/// cannot be read is not evidence.
+const GOLDEN_CHILDREN_PER_ANCHOR: usize = 8;
+
+/// ★ ONE ANCHOR PER RUNG OF THE LADDER — the golden's sample (2026-08-30).
+///
+/// DERIVED, never named: the shallowest anchor is the ambient root, then its child, and so on down.
+/// Taking the FIRST anchor at each depth in forest order makes the choice deterministic without
+/// writing a seed into the test — a realm's seed is a hash avalanche, and copying one here would go
+/// stale the moment the salt or the index moves.
+fn golden_sample_anchors(world: &WorldView) -> Vec<RealmId> {
+    // ★ WALK DOWN, DO NOT ASK EACH REALM ITS DEPTH (2026-08-30). The first spelling of this called
+    // `region_depth` once per parent, and that function SCANS the whole forest on every hop — about
+    // 233 220 parents over 3 500 000 rows. I wrote that quadratic myself while removing others; it
+    // ran eleven minutes before I caught it. Descending from the root asks no realm anything.
+    let mut children_of: std::collections::BTreeMap<RealmId, Vec<RealmId>> =
+        std::collections::BTreeMap::new();
+    let mut root = None;
+    for r in world.regions() {
+        match r.parent {
+            Some(parent) => children_of.entry(parent).or_default().push(r.realm),
+            None => root = Some(r.realm),
+        }
+    }
+    // One anchor per rung: the root, then the first of its children that is itself a parent, and so
+    // on inward. Forest order makes the choice deterministic without naming a seed.
+    let mut anchors = Vec::new();
+    let mut cur = root;
+    while let Some(realm) = cur {
+        let Some(kids) = children_of.get(&realm) else {
+            break; // a leaf anchors nothing
+        };
+        anchors.push(realm);
+        cur = kids.iter().copied().find(|k| children_of.contains_key(k));
+    }
+    anchors
 }
 
 /// The frame the star measures everything in — its own realm's frame, read off the forest it booted with.
@@ -370,12 +470,15 @@ fn the_per_tick_feed_and_the_conversion_context_place_a_child_identically() {
 #[test]
 fn every_anchors_child_rows_match_the_golden_vector() {
     let world = the_world();
-    let anchors: Vec<RealmId> = world
-        .regions()
-        .iter()
-        .filter(|r| world.regions().iter().any(|c| c.parent == Some(r.realm)))
-        .map(|r| r.realm)
-        .collect();
+    // ★ A BOUNDED SAMPLE, ONE ANCHOR PER RUNG (2026-08-30). This walked EVERY anchor of THE world
+    // and emitted a row per child per tick. That was 154 lines when a galaxy held three star
+    // systems; it now holds 233 220, so the same walk asks for millions of rows and boots a world
+    // per anchor. MEASURED: the test ran fifteen minutes without reaching its assertion.
+    //
+    // What the golden PROVES is that the placement bits do not move — and the placement math varies
+    // by RUNG, not by how many siblings a rung has. So the sample takes one anchor from each depth
+    // of the ladder and a bounded slice of its children. A bit that drifts at any rung still shows.
+    let anchors = golden_sample_anchors(&world);
     let mut lines = Vec::new();
     // The provenance header — the WORLD IDENTITY these bits pin, from the shipped config itself.
     let config =
@@ -425,7 +528,10 @@ fn every_anchors_child_rows_match_the_golden_vector() {
         let (regions, planted) = star_shard(anchor);
         for tick in SAMPLED_TICKS {
             let ctx = planted.author_book(anchor, f64::from(vd_bins::DEV.tick_hz), tick);
-            for child in child_regions(&regions, anchor) {
+            for child in child_regions(&regions, anchor)
+                .into_iter()
+                .take(GOLDEN_CHILDREN_PER_ANCHOR)
+            {
                 let at = ctx
                     .of(child.frame)
                     .expect("an anchor places every direct child of its own");
@@ -481,56 +587,55 @@ fn every_anchors_child_rows_match_the_golden_vector() {
 /// judges every mover at its apoapsis; the failure here lists every escaping planet with its numbers.
 #[test]
 fn every_planets_apoapsis_plus_its_soi_stays_inside_its_systems_shell() {
+    // ★ ONE WORLD, ONE PASS (2026-08-30). This asked the same question and paid twice for it.
+    //
+    // First it found the anchors by asking, for EVERY region, whether ANY region named it as a
+    // parent — a full scan of the forest per region, over about 3 500 000 rows.
+    //
+    // Then it BOOTED A WHOLE WORLD PER ANCHOR, and scanned that world twice more for each mover.
+    // On THE world that is a quarter of a million world builds. MEASURED: the test binary sat at
+    // 199% CPU and 14.1 GB for fifteen minutes and had reached no assertion.
+    //
+    // The question needs neither. Every number it wants — a realm's own extent, its parent, and its
+    // orbit — is already in the ONE world it built at the top. SL9: a lookup, never a scan.
     let world = the_world();
-    let anchors: Vec<RealmId> = world
-        .regions()
+    let regions = world.regions();
+    let extent_of: std::collections::BTreeMap<RealmId, f64> = regions
         .iter()
-        .filter(|r| world.regions().iter().any(|c| c.parent == Some(r.realm)))
-        .map(|r| r.realm)
+        .map(|r| (r.realm, r.shape.circumscribed_extent()))
         .collect();
-    // The release outset from the SAME config the boot builds THE world with — the 2 m past the SOI
-    // face at which containment actually lets go of an occupant.
-    let release_outset_m =
-        vd_physics::worldgen::UniverseConfig::world(occupant_v_max_mps(), vd_bins::DEV.tick_dt)
-            .band
-            .outset_m;
+    let cfg =
+        vd_physics::worldgen::UniverseConfig::world(occupant_v_max_mps(), vd_bins::DEV.tick_dt);
+    // The release outset from the SAME config the boot builds THE world with — the metres past the
+    // SOI face at which containment actually lets go of an occupant.
+    let release_outset_m = cfg.band.outset_m;
+    let movers = vd_physics::worldgen::all_movers_for_config(SEED, &cfg);
     let mut escapes = Vec::new();
-    for anchor in anchors {
-        let held = BTreeSet::from([anchor]);
-        let (regions, moving) = vd_bins::boot_regions_and_movers(
-            SEED,
-            &held,
-            anchor,
-            occupant_v_max_mps(),
-            vd_bins::DEV.tick_dt,
-        );
-        let shell = regions
-            .iter()
-            .find(|r| r.realm == anchor)
-            .expect("a shard's own realm is in the neighbourhood it boots with")
-            .shape
-            .circumscribed_extent();
-        for (realm, elements) in &moving {
-            let soi = regions
-                .iter()
-                .find(|r| r.realm == *realm)
-                .expect("a mover is a region of the shard authoring it")
-                .shape
-                .circumscribed_extent();
-            let apoapsis = elements.sma * (1.0 + elements.ecc);
-            if apoapsis + soi + release_outset_m > shell {
-                escapes.push(format!(
-                    "  {:?} under {:?}: apoapsis {:.6} m + soi {:.6} m + release outset {:.6} m \
-                     = {:.6} m > shell {:.6} m",
-                    realm,
-                    anchor,
-                    apoapsis,
-                    soi,
-                    release_outset_m,
-                    apoapsis + soi + release_outset_m,
-                    shell,
-                ));
-            }
+    for r in regions {
+        // A mover, and the parent whose shell must contain it. A static child has no apoapsis to
+        // escape with, and the ambient root has no parent to escape from.
+        let (Some(parent), Some(elements)) = (r.parent, movers.get(&r.realm)) else {
+            continue;
+        };
+        let shell = *extent_of
+            .get(&parent)
+            .expect("a parented region's parent is in the same forest");
+        let soi = *extent_of
+            .get(&r.realm)
+            .expect("every region states its own extent");
+        let apoapsis = elements.sma * (1.0 + elements.ecc);
+        if apoapsis + soi + release_outset_m > shell {
+            escapes.push(format!(
+                "  {:?} under {:?}: apoapsis {:.6} m + soi {:.6} m + release outset {:.6} m \
+                 = {:.6} m > shell {:.6} m",
+                r.realm,
+                parent,
+                apoapsis,
+                soi,
+                release_outset_m,
+                apoapsis + soi + release_outset_m,
+                shell,
+            ));
         }
     }
     assert_eq!(
@@ -569,13 +674,22 @@ fn a_shard_that_does_not_host_a_movers_parent_still_judges_it_at_apoapsis() {
         .expect("THE world's home system authors movers");
 
     // The PLANET shard's own boot — the shard that does NOT host the mover's parent.
+    //
+    // ★ AND IT IS NAMED BY ITS PARENT (owner ruling 2026-08-30). A realm below a star system cannot
+    // place itself: a planet's identifier is a one-way hash of its system's, so the seed alone never
+    // finds it. Its parent says who contains it — in production through the spawn demand's
+    // `RealmCoord`, here through the same lineage read off THE world.
     let held = BTreeSet::from([planet]);
-    let (regions, moving) = vd_bins::boot_regions_and_movers(
+    let lineage: BTreeSet<RealmId> = vd_core::worldgen::ancestor_realms(world.regions(), planet)
+        .into_iter()
+        .collect();
+    let (regions, moving) = vd_bins::boot_regions_and_movers_in_lineage(
         SEED,
         &held,
         planet,
         occupant_v_max_mps(),
         vd_bins::DEV.tick_dt,
+        &lineage,
     );
     assert!(
         moving.is_empty(),

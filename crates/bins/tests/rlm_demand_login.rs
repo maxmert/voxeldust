@@ -1311,28 +1311,29 @@ fn exiting_the_system_reaps_its_interior_and_the_stream_stays_live() {
 }
 
 /// THE SLICE-4 WAKE GATE, RESTATED AT TRUE SCALE (look_horizon.md §6 slice 4; taxonomy arc).
-/// The interim gate parked a galaxy-standing observer outside the home system's 150 m shell but
-/// inside its 444.104489631 m interior band, and measured the interest byte holding the vacated
-/// planets awake. On the TRUE-SIZE world that park DOES NOT EXIST: the interior band is derived
-/// from the system's LOOK reach and the solved shell is orders wider than that look (the run
-/// prints both, and step (1) below ASSERTS the ordering), so the whole band sits INSIDE the shell
-/// (the lawful inversion G-INTEREST-BAND pins in `vd_bins` — the
-/// interest-byte machinery is structurally inert for any exterior observer on THE world; it
-/// re-arms the day a body's look reach exceeds its bound again, e.g. a hand-built beacon).
+///
+/// ★ THE BAND-INVERSION STEP IS GONE (2026-08-31), because the thing it measured is gone. This gate
+/// used to open by asserting that a system's INTERIOR BAND sat inside its solved shell, which proved
+/// no exterior observer could park in the band and hold the interior awake. There is no interior
+/// band any more: a realm now states ONE wake radius, derived from its own size and speed, and the
+/// same verdict decides both "wake this child" and "tell this child a looker is near". A realm with
+/// no band cannot have one inverted, so the assertion had nothing left to read — it was deleted with
+/// the mechanism rather than rewritten to agree with whatever replaced it.
+///
+/// What this gate measures is unchanged in substance and is the half that was always about the
+/// DEMAND LOOP: which realms a settled login leaves running, and what a departure reaps.
 ///
 /// What this gate now measures, all DERIVED, never a literal:
-/// 1. THE INVERSION ITSELF, off the same galaxy-scope row the galaxy shard boots from:
-///    spin-up < tear-down < shell — so no exterior park can hold the byte.
-/// 2. THE DERIVED LOGIN SET (G-NO-CASCADE's process half): at a settled login the running
+/// 1. THE DERIVED LOGIN SET (G-NO-CASCADE's process half): at a settled login the running
 ///    realms are EXACTLY the home chain + the direct children of home whose authored placement
 ///    sits inside their own AoI spin-up radius as seen from the spawn standoff — computed
 ///    per child WITH THE NUMBERS, with a flap margin asserted so the set cannot drift mid-test.
-/// 3. THE VACATE CONSEQUENCE: parked past the shell (+Z, radially outward — a −Z exit from the
+/// 2. THE VACATE CONSEQUENCE: parked past the shell (+Z, radially outward — a −Z exit from the
 ///    +Z spawn would fly through the Star realm at the centre), the byte holds nothing: the
 ///    vacated interior reaps by EXACTLY its own count (the in-AoI children, then home itself),
 ///    the running set collapses to EXACTLY the ancestor chain, and a held park spins up none.
 #[test]
-fn g_look_wake_the_interior_band_sits_inside_the_shell_and_a_vacated_system_reaps() {
+fn g_look_wake_the_derived_login_set_holds_and_a_vacated_system_reaps() {
     let _tier = vd_bins::cluster_tier();
     let f = fixture("lookwake");
     let gw_admin = reserve_tcp_addr();
@@ -1342,11 +1343,12 @@ fn g_look_wake_the_interior_band_sits_inside_the_shell_and_a_vacated_system_reap
     let devctl_port = reserve_tcp_addr().port();
     let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
 
-    // (1) THE INVERSION, derived off THE world's own boot roster — the same row the galaxy
-    // shard reads.
     let config = vd_physics::worldgen::UniverseConfig::world(p.move_speed, p.tick_dt);
     let world = vd_physics::worldgen::WorldView::generated(p.universe_seed, &config);
     let home = vd_core::worldgen::default_home_realm(world.regions()).expect("THE world's home");
+    // The home system's own row off the galaxy scope — the same row the galaxy shard boots from.
+    // The SHELL it carries is what part (2) parks beyond; the interior band it used to carry is
+    // gone with the mechanism (see the note above).
     let galaxy_scope = world.neighbourhood(&std::collections::BTreeSet::from([
         vd_core::worldgen::GALAXY,
     ]));
@@ -1354,19 +1356,7 @@ fn g_look_wake_the_interior_band_sits_inside_the_shell_and_a_vacated_system_reap
         .iter()
         .find(|r| r.realm == home)
         .expect("the galaxy scope rosters the home system");
-    let spin_up = home_row.interior_band.spin_up_r_m();
-    let tear_down = home_row.interior_band.tear_down_r_m();
     let shell = home_row.shape.circumscribed_extent();
-    assert!(
-        (spin_up < tear_down) & (tear_down < shell),
-        "G-INTEREST-BAND's true-scale inversion: the interior band must sit inside the solved \
-         shell (spin {spin_up} < tear {tear_down} < shell {shell}) — if this ever un-inverts, \
-         an exterior interest park exists again and the held-wake gate must be restored"
-    );
-    eprintln!(
-        "[look-wake] interior band INSIDE the shell: spin {spin_up:.6e} < tear {tear_down:.6e} \
-         < shell {shell:.6e} — no exterior park exists; the byte is structurally inert here"
-    );
 
     // (2) THE DERIVED LOGIN SET: the home chain + the direct children of home inside their own
     // AoI spin-up as seen from the spawn standoff, each stated with its numbers.

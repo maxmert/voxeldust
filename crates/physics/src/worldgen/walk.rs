@@ -11,7 +11,9 @@
 use super::{GeneratedBody, Placement, UniverseConfig, to_regions};
 use glam::DVec3;
 use vd_core::geometry::{Boundary, RealmRegion};
-use vd_core::worldgen::{AREA_A, GALAXY, PLANET_A, STATION_A, SYSTEM_A, SYSTEM_B, UNIVERSE};
+use vd_core::worldgen::{
+    AREA_A, GALAXY, PLANET_A, PLANET_B, PLANET_C, STATION_A, SYSTEM_A, SYSTEM_B, UNIVERSE,
+};
 #[cfg(test)]
 use vd_core::worldgen::{GALAXY_SEED, SYSTEM_A_SEED, UNIVERSE_SEED};
 
@@ -157,6 +159,34 @@ pub(crate) fn generate_walk_forest(config: &UniverseConfig) -> Vec<GeneratedBody
             photometrics: None,
             taxon: None,
             look: Some(boxed(sa.area_half_m)),
+        },
+        // ★ SYSTEM B'S OWN TWO PLANETS (2026-08-31), APPENDED LAST — never inserted. Every existing
+        // body keeps its index, so a golden that lists the forest in order still matches on the rows
+        // it already had. That is the same append-never-insert discipline the per-system draw stream
+        // keeps, and for the same reason: an insertion moves everything after it.
+        //
+        // System B is the only hand-placed system that is
+        // actually SOMEWHERE — A sits at the galaxy's origin — so it is the one a worked example can
+        // use to prove that a parent ADDS its child's placement. It held nothing, so that example had
+        // to reach for the generator, which since ruling G8 cannot be asked for a two-star galaxy.
+        // Two planets, because the story needs a sibling to refuse as well as a subject to place.
+        GeneratedBody {
+            realm: PLANET_B,
+            parent: Some(SYSTEM_B),
+            shape: shell(pl.planet_soi_r_m),
+            placement: at_x(sa.planet_offset_m),
+            photometrics: None,
+            taxon: None,
+            look: Some(shell(pl.planet_soi_r_m)),
+        },
+        GeneratedBody {
+            realm: PLANET_C,
+            parent: Some(SYSTEM_B),
+            shape: shell(pl.planet_soi_r_m),
+            placement: at_x(-sa.planet_offset_m),
+            photometrics: None,
+            taxon: None,
+            look: Some(shell(pl.planet_soi_r_m)),
         },
     ]
 }

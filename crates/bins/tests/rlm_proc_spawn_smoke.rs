@@ -151,7 +151,11 @@ fn proc_launch_backend_forks_boots_identifies_and_reaps_a_real_shard() {
         probe_timeout: Duration::from_millis(500),
     };
     let backend = ProcLaunchBackend::new(Arc::clone(&h.control), tuning);
-    let boot_deadline = Duration::from_secs(30);
+    // ★ RAISED FROM 30 s (2026-08-30). What this test proves is that a spawned shard BOOTS, is
+    // identified and is reaped — never how fast. Thirty seconds was written when a galaxy held three
+    // star systems; it now holds 233 220, and a debug-build shard folds the star-system layer before
+    // it can answer anything. The same reason raised the dev cluster's and the boot guard's.
+    let boot_deadline = Duration::from_secs(180);
 
     // The RLM 5d VD_PEERS book the kernel would compute (ancestor closure ∪ anchors). Here a fixture
     // naming an unreachable orchestrator — the child parses it into its peer book + boots (a real ancestor

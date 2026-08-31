@@ -1008,7 +1008,6 @@ fn a_distant_looker_wakes_nothing_and_a_near_one_still_wakes_the_interior() {
         let mut rig = Rig::new();
         rig.grant_realm();
         let child = RealmRegion {
-            interior_band: aoi_band(0),
             ..aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0)
         };
         plant_aoi(&mut rig, vec![root_region(), own_region(), child]);
@@ -1061,22 +1060,28 @@ fn a_distant_looker_wakes_nothing_and_a_near_one_still_wakes_the_interior() {
     );
 }
 
-/// THE DOWN-PROXY + THE STRUCTURAL CASCADE CAP (look horizon slice 4, §3.4.3; the G-NO-CASCADE
-/// structural half): a VACATED realm holding a live interest byte inserts ONE synthetic
-/// observer at its own centre and its existing fold demands its in-band interior — while the
-/// OCCUPANCY truths stay exactly what they were: it still self-reports Empty, ships NO
-/// `ChildLive` bit, and — with a live interior band on its child, a resolved route, and the
-/// synthetic observer standing in band, so the origin flag is the ONLY thing left to stop it
-/// — emits NO interest of its own downward. The byte then DECAYS on the derived TTL and the
-/// wake ends: "nobody is watching".
+/// THE DOWN-PROXY, AND THE LOOK PASSES ON (owner ruling 2026-08-29 — the cascade cap is DELETED).
+///
+/// A vacated realm holding a live interest byte inserts ONE synthetic observer at its own centre,
+/// and its existing fold demands its in-band interior. The OCCUPANCY truths are unchanged: it still
+/// self-reports Empty and ships NO `ChildLive` bit. A byte from outside never manufactures an
+/// occupancy bit, and that is what this test guards hardest.
+///
+/// ★ WHAT CHANGED, AND WHY. This test used to assert the opposite of its last line: a realm woken by
+/// a message could not pass the message on. That cap was a HOP COUNT, and SL7 says in plain words
+/// "no depth or hop count anywhere". It also fixed the reach at two levels, so a city could wake its
+/// districts and a district could wake nothing — no matter how deeply a world nests.
+///
+/// Depth now limits ITSELF: every level tests the child's OWN radius, and radii shrink inward. What
+/// still cannot happen is a realm flagging its own occupied child, and
+/// [`a_childs_own_proxy_never_flags_it_interested_but_still_warms_its_sibling`] holds that line.
 #[test]
-fn a_live_interest_byte_wakes_the_interior_reports_empty_and_never_cascades() {
+fn a_live_interest_byte_wakes_the_interior_reports_empty_and_passes_the_look_on() {
     let mut rig = Rig::new();
     rig.grant_realm();
     // The child carries a LIVE interior band + a resolved head route: everything an unlawful
     // cascade would need is present, on purpose.
     let child = RealmRegion {
-        interior_band: aoi_band(0),
         ..aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0)
     };
     plant_aoi(&mut rig, vec![root_region(), own_region(), child]);
@@ -1125,10 +1130,15 @@ fn a_live_interest_byte_wakes_the_interior_reports_empty_and_never_cascades() {
         bits, 0,
         "a byte from outside must never manufacture an occupancy bit"
     );
+    let onward = interests(&sent);
+    assert_eq!(
+        onward.len(),
+        1,
+        "the look passes on: route + live radius + in-band synthetic observer {onward:?}"
+    );
     assert!(
-        interests(&sent).is_empty(),
-        "THE CAP, structurally: route + live band + in-band synthetic observer, and still \
-         no interest goes down — only occupancy-derived observers produce interest"
+        onward[0].1.look_inside_from_m.is_some(),
+        "and it carries a distance, so the next realm can judge its own children: {onward:?}"
     );
     assert!(
         rig.world
@@ -1191,7 +1201,7 @@ fn the_interest_emission_rises_on_entry_beats_and_falls_to_zero_at_the_band() {
     let band = vd_core::geometry::AoiConfig::for_velocity_safe(400.0, 1.0, 1.0, 2.0, 0.05, 0, 0.5)
         .expect("a live interior band");
     let child = RealmRegion {
-        interior_band: band,
+        aoi: band,
         ..aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0)
     };
     plant_aoi(&mut rig, vec![root_region(), own_region(), child]);
@@ -1307,12 +1317,12 @@ fn a_childs_own_proxy_never_flags_it_interested_but_still_warms_its_sibling() {
     let band = vd_core::geometry::AoiConfig::for_velocity_safe(400.0, 1.0, 1.0, 2.0, 0.05, 0, 0.5)
         .expect("a live interior band");
     let child = RealmRegion {
-        interior_band: band,
+        aoi: band,
         ..aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0)
     };
     let sibling = RealmId::Planet(43);
     let sibling_region = RealmRegion {
-        interior_band: band,
+        aoi: band,
         ..region(sibling, Some(OWN_REALM), DVec3::new(200.0, 0.0, 0.0), 100.0)
     };
     plant_aoi(
@@ -2255,5 +2265,92 @@ fn the_bit_beats_on_the_cadence_plus_the_occupancy_edge() {
         child_live_bits(&rig.tick(vec![])).len(),
         1,
         "re-occupied ⇒ the edge fires again, off-cadence"
+    );
+}
+
+/// ★ DIAGNOSTIC (2026-08-30): HOW MANY INTEREST MESSAGES DOES THE GALAXY SEND, PER BEAT, DURING WARP?
+///
+/// This is the number the cascade-cap removal owed. The galaxy is the widest realm in the world —
+/// 233 220 direct children — and warp is when a looker moves through it fastest, so this is the
+/// worst case the mechanism will ever meet.
+///
+/// EVERY star system is given a resolved route, which is the WORST case by construction: in a live
+/// cluster a route resolves only for a child the shard is already demanding, so the real rate is at
+/// most this one.
+#[test]
+#[ignore]
+fn diag_the_galaxys_interest_message_rate_during_warp() {
+    let cfg_world = vd_physics::worldgen::UniverseConfig::world(
+        vd_physics::worldgen::VISUAL_OCCUPANT_V_MAX_MPS,
+        vd_physics::worldgen::AOI_TICK_DT_S,
+    );
+    let galaxy = vd_core::worldgen::GALAXY;
+    let held = std::collections::BTreeSet::from([galaxy]);
+    let (regions, _) = vd_physics::worldgen::shard_boot_world(
+        0,
+        &cfg_world,
+        &held,
+        galaxy,
+        &std::collections::BTreeSet::new(),
+    );
+    let systems: Vec<RealmId> = regions
+        .iter()
+        .filter(|r| r.parent == Some(galaxy))
+        .map(|r| r.realm)
+        .collect();
+    println!("galaxy holds {} direct children", systems.len());
+
+    let mut stub = config();
+    stub.realm = galaxy;
+    stub.held_realms = StubConfig::single_realm(galaxy);
+    stub.frame = regions
+        .iter()
+        .find(|r| r.realm == galaxy)
+        .expect("the galaxy is in its own boot")
+        .frame;
+    stub.own_coord = StubConfig::root_coord(galaxy);
+    let stub_frame_tier = stub.frame.tier();
+    let mut rig = Rig::with_config(stub);
+    grant_realm_for(&mut rig, galaxy);
+    plant_aoi(&mut rig, regions.clone());
+    {
+        let mut nodes = rig.world.resource_mut::<ChildRealmNodes>();
+        for (i, s) in systems.iter().enumerate() {
+            nodes.0.insert(*s, NodeId(1000 + (i as u64 % 64)));
+        }
+    }
+    // A looker flying through the disc. The step is a warp-scale hop per beat.
+    // The galaxy's own step, not the finest one: a warp-scale hop counted in fine units overflows an
+    // i64 long before it crosses a galaxy.
+    let tier = stub_frame_tier;
+    let step_m = 3.0e15;
+    insert_owned_dot(&mut rig, SESSION, player(7), DVec3::ZERO);
+    let mut peak_interests = 0usize;
+    let mut peak_demands = 0usize;
+    let mut total_interests = 0usize;
+    let beats: u32 = 6;
+    for beat in 0..beats {
+        rig.world
+            .resource_mut::<Dots>()
+            .0
+            .get_mut(&SESSION)
+            .expect("the dot is planted")
+            .pose
+            .pos = LatticePos::from_metres(DVec3::new(step_m * f64::from(beat), 0.0, 0.0), tier);
+        rig.set_local_tick(10 * u64::from(beat + 1));
+        let sent = rig.tick(vec![]);
+        let ints = interests(&sent).len();
+        let dems = demands(&sent).len();
+        total_interests += ints;
+        peak_interests = peak_interests.max(ints);
+        peak_demands = peak_demands.max(dems);
+        println!("  beat {beat}: interests={ints} demands={dems}");
+    }
+    println!("PEAK interests per beat: {peak_interests}");
+    println!("PEAK demands   per beat: {peak_demands}");
+    println!("TOTAL interests over {beats} beats: {total_interests}");
+    println!(
+        "as a share of the galaxy's children: {:.4}%",
+        100.0 * peak_interests as f64 / systems.len() as f64
     );
 }

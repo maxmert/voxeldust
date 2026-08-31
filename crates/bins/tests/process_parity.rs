@@ -29,7 +29,15 @@ use vd_wire::channels::{
 };
 use vd_wire::version::ProtoVersion;
 
-const DEADLINE: Duration = Duration::from_secs(30);
+// ★ RAISED 2026-08-31, AND THE NUMBER IS MEASURED. These tests spawn REAL nodes built in DEBUG, and a
+// debug shard folds THE world's 233 220 star systems before it can answer anything: MEASURED, ~50 s
+// from process start to "planting the containment forest", against ~0.8 s for the same fold in
+// release. The dev cluster's own bring-up measures 101 s end to end.
+//
+// So these deadlines are sized for the BUILD the tests actually run, not for the shipped one. What
+// each test proves is that its node CONVERGES — ready, drained, re-routed — never how fast. A test
+// that means to measure speed would say so and would not be run on a debug binary.
+const DEADLINE: Duration = Duration::from_secs(240);
 /// How many times the gateway may restate the whole sky before the client's confirmation stops it.
 ///
 /// NOT a tolerance to be widened. The gateway holds no memory of what it sent — that memory could not
@@ -487,7 +495,17 @@ fn p1_parity_real_binaries_over_quic() {
         // full-suite load — a flake, and this project's own rule is that a gate going red for the
         // wrong reason gets weakened until it protects nothing. Waiting for it makes arrival a
         // PRECONDITION, with the existing deadline as the honest failure.
-        let done = walker.sky_parts > 0
+        // ★ WAIT FOR THE WHOLE SKY, NOT ONE PART (2026-08-31). This said `sky_parts > 0`, which WAS the
+        // whole sky when a galaxy held three stars and the catalogue fitted in one message. THE world
+        // now needs 1 309 parts, and the gateway paces them — deliberately, because shouting 10.7 MB
+        // per beat is what drowned the login handshake.
+        //
+        // So the loop declared victory on the FIRST part and the assertion below then demanded every
+        // star: MEASURED, 114 911 of 233 220 had arrived. The comment above already names the cure —
+        // make arrival a PRECONDITION, with the deadline as the honest failure — so this now waits for
+        // exactly what it asserts.
+        let done = walker.sky_stars.len() as u64 == world_census
+            && idle.sky_stars.len() as u64 == world_census
             // ...and so is the BEAT, for the same reason: asserting it after the loop happened to
             // break is the flake this comment describes, one lane over.
             && walker.sky_beats > 0

@@ -1857,7 +1857,6 @@ fn an_outward_crossing_emits_no_demand_and_counts_the_refusal() {
         band: band(),
         aoi: aoi_band(1),
         parent,
-        interior_band: vd_core::geometry::AoiConfig::inert(),
     };
     *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
         armed(ROOT_REALM, None, 1.0e9),

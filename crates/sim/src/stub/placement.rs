@@ -57,12 +57,16 @@ pub(crate) fn author_placements(
 
 /// The anchors the writer authors for. Deterministic (forest order, then the held set), deduped.
 pub(crate) fn placement_anchors(regions: &RealmRegions, config: &StubConfig) -> Vec<RealmId> {
-    let mut anchors: Vec<RealmId> = regions
-        .regions
-        .iter()
-        .filter(|r| regions.regions.iter().any(|c| c.parent == Some(r.realm)))
-        .map(|r| r.realm)
-        .collect();
+    // ★ A SCAN INSIDE A SCAN, EVERY TICK (fixed 2026-08-30). This asked, for EVERY region, whether
+    // ANY region named it as a parent — a full pass over the forest per region.
+    //
+    // MEASURED on THE world: a galaxy shard holds 279 380 direct children, so this is about
+    // 78 000 000 000 comparisons PER TICK. A six-beat measurement did not finish its FIRST beat in
+    // twelve minutes, and this was the whole of it.
+    //
+    // "Which realms have children" is precisely what the region table's parent index holds, and its
+    // KEYS are the answer. SL9: a lookup, never a scan.
+    let mut anchors: Vec<RealmId> = regions.parents_with_children().collect();
     for &held in &config.held_realms {
         anchors.push(held);
     }

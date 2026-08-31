@@ -115,11 +115,41 @@ pub fn shard_boot_world(
     config: &UniverseConfig,
     held: &std::collections::BTreeSet<RealmId>,
     hosted: RealmId,
+    lineage: &std::collections::BTreeSet<RealmId>,
 ) -> (Vec<RealmRegion>, Vec<(RealmId, OrbitalElements)>) {
-    let subtree = super::realm_subtree(seed_universe, config, held);
+    let (regions, movers, _) = shard_boot_world_lit(seed_universe, config, held, hosted, lineage);
+    (regions, movers)
+}
+
+/// ★ THE SHARD BOOT'S WHOLE ANSWER, FROM ONE SUBTREE BUILD (2026-08-30).
+///
+/// A shard boot needs three things from its own subtree: the region forest, the mover roster, and
+/// the marker draw for each child it may state a point of light about. It used to build the subtree
+/// TWICE — once here, once in [`subtree_photometrics`] — and on THE world a subtree build folds the
+/// star-system layer, 233 222 bodies, each time.
+///
+/// The doc above `visual_regions_and_movers` already claimed "built once, read twice". This makes it
+/// true.
+#[must_use]
+pub fn shard_boot_world_lit(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    held: &std::collections::BTreeSet<RealmId>,
+    hosted: RealmId,
+    lineage: &std::collections::BTreeSet<RealmId>,
+) -> (
+    Vec<RealmRegion>,
+    Vec<(RealmId, OrbitalElements)>,
+    Vec<(RealmId, StarPhotometrics)>,
+) {
+    let subtree = super::realm_subtree(seed_universe, config, held, lineage);
     let regions = neighbourhood_scope(&to_regions(&subtree, config), held);
     let movers = moving_children(&subtree, hosted);
-    (regions, movers)
+    let lit = subtree
+        .iter()
+        .filter_map(|b| b.photometrics.map(|p| (b.realm, p)))
+        .collect();
+    (regions, movers, lit)
 }
 
 #[must_use]
@@ -166,8 +196,9 @@ pub fn subtree_photometrics(
     seed_universe: u64,
     config: &UniverseConfig,
     held: &std::collections::BTreeSet<RealmId>,
+    lineage: &std::collections::BTreeSet<RealmId>,
 ) -> Vec<(RealmId, StarPhotometrics)> {
-    super::realm_subtree(seed_universe, config, held)
+    super::realm_subtree(seed_universe, config, held, lineage)
         .iter()
         .filter_map(|b| b.photometrics.map(|p| (b.realm, p)))
         .collect()
@@ -255,6 +286,27 @@ pub fn star_catalogue(
 #[must_use]
 pub fn realm_regions_for_config(seed_universe: u64, config: &UniverseConfig) -> Vec<RealmRegion> {
     to_regions(&generate_system_forest(seed_universe, config), config)
+}
+
+/// ★ EVERY MOVING BODY OF THE WORLD, FROM ONE BUILD (2026-08-29).
+///
+/// [`moving_children_for_config`] answers for ONE parent and builds the whole forest to do it. A
+/// caller that wants the movers under EVERY parent therefore rebuilds the galaxy once per parent.
+///
+/// MEASURED: a window-lane test did exactly that. On THE world it is 233 221 parents, each
+/// triggering a 3 500 479-body build — the sim's test binary ran for over eleven minutes inside the
+/// system placement and had not reached its first assertion.
+///
+/// The forest already carries every mover. This reads it once.
+#[must_use]
+pub fn all_movers_for_config(
+    seed_universe: u64,
+    config: &UniverseConfig,
+) -> std::collections::BTreeMap<RealmId, OrbitalElements> {
+    generate_system_forest(seed_universe, config)
+        .iter()
+        .filter_map(|b| super::orbital_of(b.placement).map(|e| (b.realm, e)))
+        .collect()
 }
 
 /// [`moving_children`] over the config-driven system forest — the config twin of [`moving_children_for`].

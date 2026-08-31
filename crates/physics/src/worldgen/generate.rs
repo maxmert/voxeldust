@@ -440,7 +440,19 @@ fn seed_one_system(
     // two: a population, a radius, an azimuth, TWO halves of an arm scatter and a height. The
     // HOME system consumes all six exactly like every sibling — the anchor multiplier, not the
     // stream shape, pins it to the galactic origin.
-    body.placement = Placement::StaticOffset(system_center_at(
+    // ★ EVERY STAR SYSTEM LANDS ON THE GALAXY'S OWN GRID (2026-08-31), not only the pushed ones.
+    //
+    // A galaxy counts in whole cells and a star catalogue row carries the CELL and no sub-cell part.
+    // The shaped placement returns a continuous position, so a system landed between cells and the
+    // row silently dropped the remainder — every client then drew that star up to half a cell from
+    // where the world put it.
+    //
+    // MEASURED on the test galaxy: 33 of 48 systems sat off-cell, by up to 1.875 m on a 2 m grid. The
+    // snap I first added inside the crowding push cured only the pushed ones, which is why the fence
+    // stayed red — the fault was never the push, it was the placement.
+    //
+    // The cost is at most half a cell — one metre against inter-star distances of 1e16 m.
+    body.placement = Placement::StaticOffset(on_galaxy_cell(system_center_at(
         config,
         shape,
         s,
@@ -453,7 +465,7 @@ fn seed_one_system(
             scatter_b: stream.next_f64(),
             height: stream.next_f64(),
         },
-    ));
+    )));
     SeededSystem {
         stream,
         star,
@@ -1218,7 +1230,22 @@ pub(crate) fn realm_subtree(
     seed_universe: u64,
     config: &UniverseConfig,
     held: &std::collections::BTreeSet<RealmId>,
+    lineage: &std::collections::BTreeSet<RealmId>,
 ) -> Vec<GeneratedBody> {
+    // ★ THE LINEAGE IS WHAT LETS A DEEP SHARD EXIST AT ALL (owner ruling 2026-08-30).
+    //
+    // A shard below a star system cannot find itself from its own name. A planet's identifier is a
+    // one-way hash of its system's, and a player's apartment is not in the seed at all — the
+    // generator emits NO station and NO area, so no amount of generating will ever produce one.
+    //
+    // The parent already tells it: a spawn demand carries a `RealmCoord`, which names every ancestor
+    // by kind and seed, and the orchestrator mints the whole chain in one sweep. This reads what was
+    // already sent, so the star system that holds a held planet gets its contents built and the
+    // planet appears in the world it is the centre of.
+    //
+    // MEASURED DEFECT IT CURES: a planet-hosting shard booted with an EMPTY forest and refused —
+    // "the forest has 0 ambient roots" — because a subtree stops one level below a star system.
+    let named = || held.iter().chain(lineage.iter()).copied();
     let layer = generate_system_layer(seed_universe, config);
     // The chain: the ambient root, the galaxy, and every held realm — placed by their parent.
     //
@@ -1238,16 +1265,19 @@ pub(crate) fn realm_subtree(
             b.parent.is_none()
                 || b.realm == GALAXY
                 || held.contains(&b.realm)
+                || lineage.contains(&b.realm)
                 || child_of_held(b, held)
         })
         .copied()
         .collect();
-    // The contents: for each held star system, its own children, through the shared stage.
-    for hosted in held {
-        let RealmId::System(seed) = *hosted else {
+    // The contents: for each star system this shard HOLDS or its lineage NAMES, that system's own
+    // children, through the shared stage. Naming a system in the lineage is what puts a held planet
+    // (and a held city, once players build them) into the forest at all.
+    for hosted in named().collect::<std::collections::BTreeSet<_>>() {
+        let RealmId::System(seed) = hosted else {
             continue; // only a star system has seed-generated contents today
         };
-        let Some(system_ix) = bodies.iter().position(|b| b.realm == *hosted) else {
+        let Some(system_ix) = bodies.iter().position(|b| b.realm == hosted) else {
             continue; // a held realm the layer does not name is not ours to populate
         };
         let Some(s) = (0..layer.len() as u32).find(|n| system_seed_at(*n) == seed) else {
@@ -1274,7 +1304,7 @@ pub(crate) fn realm_subtree(
             config,
             seed_universe,
             seed,
-            *hosted,
+            hosted,
             system_ix,
             &mut stream,
             &star,
@@ -1380,12 +1410,35 @@ fn push_crowded_systems(bodies: &mut [GeneratedBody], _config: &UniverseConfig) 
         while attempt < PUSH_MAX_ATTEMPTS && crowded(at, reach, &grid, &placed) {
             attempt += 1;
             let grow = 1.0 + PUSH_STEP_FRAC * (f64::from(attempt) + jitter);
-            at = super::placement_offset(bodies[i].placement) * grow;
+            at = on_galaxy_cell(super::placement_offset(bodies[i].placement) * grow);
         }
         grid.entry(key(at)).or_default().push(placed.len());
         placed.push((at, reach));
         bodies[i].placement = Placement::StaticOffset(at);
     }
+}
+
+/// ★ A PUSHED STAR LANDS ON THE GALAXY'S OWN GRID (2026-08-31).
+///
+/// The push scales a star's offset by a float, and a float multiply does not land on a cell edge.
+/// A galaxy counts in whole cells, and a star catalogue row carries the CELL and no sub-cell part —
+/// so an off-cell star is drawn up to half a cell from where the world placed it, silently, on every
+/// client.
+///
+/// MEASURED, by the test that exists to catch exactly this: a pushed system sat 1.0 m off-cell, and
+/// the row would have dropped it. Its own words: *"If a future generator starts placing a system
+/// off-cell, THIS goes red rather than the position silently losing its residual on the way to every
+/// client."* It went red. The defect was mine, introduced with the push.
+///
+/// Rounding is HALF-AWAY-FROM-ZERO and per component, so the snap is symmetric about the galactic
+/// centre and cannot bias a whole galaxy one way.
+pub(crate) fn on_galaxy_cell(v: DVec3) -> DVec3 {
+    let edge = vd_core::pose::Tier::Galaxy.cell_edge_m();
+    DVec3::new(
+        (v.x / edge).round() * edge,
+        (v.y / edge).round() * edge,
+        (v.z / edge).round() * edge,
+    )
 }
 
 /// THE PLANET LAWS, in one place, `n_planets` apart — the ladder, the eccentricity cap, the frost

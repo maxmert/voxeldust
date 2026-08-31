@@ -1,70 +1,26 @@
-//! A REGION'S INTEREST BAND: how far out something inside a realm can still be seen from.
+//! A REGION'S INTEREST BAND: how far out a realm itself can still be seen from.
 //!
-//! Owns: the interior reach (the largest distance from a realm's centre at which something INSIDE it
-//! still matters), the band that reach becomes, and the velocity floor that keeps the band honest
-//! for a realm moving at its own traverse speed.
+//! Owns: the velocity floor that keeps a realm's band honest while the realm moves at its own
+//! traverse speed.
 //!
-//! Does NOT own: any realm kind. The band is a uniform factor of a realm's own finite extent — a
-//! bigger realm gets a bigger band by arithmetic, never by a match on what it is (HR3).
+//! Does NOT own: any realm kind, and — since 2026-08-29 — anything about a realm's CHILDREN. The
+//! band is a uniform factor of a realm's OWN finite extent. A bigger realm gets a bigger band by
+//! arithmetic, never by a match on what it is (HR3), and never by looking inside it.
+//!
+//! ★ WHAT WAS DELETED HERE, AND WHY (owner ruling 2026-08-29). This module used to own a second
+//! band: a realm's INTERIOR REACH, taken as the maximum over its DIRECT CHILDREN of their
+//! excursion plus their visibility. A parent judged "is this child's inside worth waking" from it.
+//!
+//! It was the ONE place in the system where a parent read its child's contents, and it could not
+//! survive the rule that a shard builds only its own subtree — a subtree stops one level down, so
+//! the children the reach needs are absent. MEASURED on THE world: all 233 220 star systems on a
+//! galaxy shard carried a reach of ZERO, so the galaxy told no system to warm anything, ever.
+//!
+//! The cure is that a realm carries ONE radius, derived from its own size, and a parent uses that
+//! same radius for both jobs: whether to WAKE a child, and whether to TELL that child a looker is
+//! near. One radius, one test, every realm kind, any depth.
 
-use super::{
-    GeneratedBody, InterestConfig, T_TRAVERSE_S, VISIBILITY_THETA_MIN_RAD,
-    worst_hop_excursion_capped_m,
-};
-use vd_core::geometry::AoiConfig;
-
-/// A body's INTERIOR REACH (look_horizon.md §3.4.4): the largest distance from its centre at
-/// which something INSIDE it is still visible — the max over its DIRECT children of (that
-/// child's worst-instant excursion at the eccentricity cap + that child's visibility reach),
-/// the same two terms the climb measurement walks with (§3.3.2's identity: one formula, one
-/// worst-case convention). `0.0` for a childless leaf — nothing inside, nothing to reach.
-/// (THE world's star-system reach used to be quoted here as `142.045826247 + 302.058663384 =
-/// 444.104489631` m. That was the retired compressed geometry; since the true-size in-system
-// (`interior_reach_m` IS DELETED, 2026-08-29. It filtered the WHOLE body list by parent and was
-// called once per body from the lowering — a quadratic that made every boot 1.8e13 comparisons at
-// THE world's census. `to_regions` solves every parent's reach in ONE pass and both paths read the
-// same `child_reach_term_m`, so this slower spelling had no caller left. A dead slow version of a
-// live fast one is a trap: the next author reaches for whichever they find first.)
-
-/// ONE CHILD'S CONTRIBUTION to its parent's interior reach — the term
-/// [`interior_reach_m`] takes the maximum of.
-///
-/// ★ LIFTED OUT SO THE TWO CALLERS CANNOT DRIFT (perf fix 2026-08-29). The lowering solves every
-/// parent's reach in ONE pass instead of re-scanning the body list per body (see `to_regions` for
-/// the measurement that forced it), and this is the term both paths read. Two spellings of one
-/// formula is how a fast path and a slow path stop agreeing.
-///
-/// The visibility term reads the child's LOOK (the picture that can be seen), not its bound
-/// (real-scale design §3.0); a look-less child contributes no reach.
-pub(crate) fn child_reach_term_m(child: &GeneratedBody, ecc_cap: f64) -> f64 {
-    worst_hop_excursion_capped_m(&child.placement, ecc_cap)
-        + child.look.map_or(0.0, |look| {
-            vd_core::geometry::visibility_reach_m(look.finite_extent(), VISIBILITY_THETA_MIN_RAD)
-        })
-}
-
-/// The interior band for one child region (look_horizon.md §3.4.4, monomorphic — both arms
-/// driven by named tests): spin-up AT the interior reach, tear-down widened by the SAME derived
-/// velocity lead every AoI band carries (`|v_rel|·dt·(K_SAFETY + extra)` — no new number
-/// anywhere). Inert for a leaf (zero reach) and wherever the whole AoI machinery is inert
-/// (walk/canonical byte-identity: the live ctor's reject arm is never touched there, the same
-/// discipline as [`InterestConfig::build`]).
-pub(crate) fn interior_band(reach_m: f64, interest: &InterestConfig, v_child: f64) -> AoiConfig {
-    if (reach_m <= 0.0) | !interest.is_live() {
-        AoiConfig::inert()
-    } else {
-        AoiConfig::for_velocity_safe(
-            reach_m,
-            1.0,
-            1.0,
-            aoi_v_rel_mps(reach_m, interest.occupant_v_max_mps + v_child),
-            interest.tick_dt_s,
-            interest.grace_ticks,
-            interest.k_safety_extra,
-        )
-        .expect("a positive reach with a positive closing speed builds a valid band")
-    }
-}
+use super::T_TRAVERSE_S;
 
 /// The AoI dead-zone's velocity input, FLOORED at the realm's own traverse speed
 /// `2·extent / T_TRAVERSE_S` — the §4.2(a) speed-cap expression used here as the derived scale

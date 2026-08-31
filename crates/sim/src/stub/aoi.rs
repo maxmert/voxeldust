@@ -594,6 +594,11 @@ fn aoi_decide(
         // rejected. Occupants, transients and OTHER children's proxies still produce interest
         // (SL7's sibling-warming stays). Bitwise `&` (both operands pure, HR5).
         let mut interest_min_dist = f64::INFINITY;
+        // ★ ONE RADIUS, TWO JOBS (owner ruling 2026-08-29). Did ANY looker put this child inside the
+        // child's OWN band? That single verdict now decides BOTH whether to wake the child and
+        // whether to tell it a looker is near. There is no second band to derive and no second
+        // threshold to keep in step.
+        let mut any_in_band = false;
         for o in &observers {
             let key = (o.id, region.realm);
             live_keys.insert(key);
@@ -609,7 +614,22 @@ fn aoi_decide(
                 Some(d_out) => (d_out - raw).max(0.0),
                 None => (raw - o.reach).max(0.0),
             };
-            if (o.origin == ObserverOrigin::Occupancy) & (o.id != ObserverId::Child(region.realm)) {
+            // ★ NO DEPTH CAP (owner ruling 2026-08-29; SL7 — "no depth or hop count anywhere").
+            // This also required `origin == Occupancy`, which stopped the distance after ONE hop: a
+            // realm woken by a message could never pass the message on. A city could wake its
+            // districts and a district could then wake nothing, so the reach was a fixed two levels
+            // — a hop count, written as a predicate.
+            //
+            // Depth now limits ITSELF, because each level tests the child's own radius and radii
+            // shrink inward. A player in orbit reaches a city; the room inside a building is out of
+            // range on its own merits, not because something counted hops.
+            //
+            // THE ONE EXCLUSION THAT STAYS is the child's OWN occupied-child proxy. That one was
+            // MEASURED (the warp gate's red, 2026-08-17): without it the universe flags its occupied
+            // galaxy, the galaxy's own proxy reaches its full extent, and EVERY star system wakes.
+            // A child's own proxy stands for occupants who are INSIDE it — it already wakes itself
+            // for them, and the message exists to say "something OUTSIDE may be looking in".
+            if o.id != ObserverId::Child(region.realm) {
                 interest_min_dist = interest_min_dist.min(dist);
             }
             let state = membership.get(&key).copied().unwrap_or_default();
@@ -633,6 +653,7 @@ fn aoi_decide(
             // verdict — the up-relay's interior forward gate.
             if next_in {
                 fold_verdict.insert(region.realm);
+                any_in_band = true;
             }
             if render_routes.contains_key(&o.id) & next_in {
                 in_band.entry(o.id).or_default().insert(region.realm);
@@ -693,7 +714,7 @@ fn aoi_decide(
         // and the child's boot-derived interior band? One byte, to the child's attested head,
         // on the AoI beat (plus the rising edge), an explicit 0 on the falling edge.
         emit_realm_interest(
-            &region.interior_band,
+            any_in_band,
             region.realm,
             &child_coord,
             child_nodes.0.get(&region.realm),

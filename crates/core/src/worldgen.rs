@@ -35,6 +35,13 @@ pub const GALAXY: RealmId = RealmId::Galaxy(GALAXY_SEED);
 pub const SYSTEM_A: RealmId = RealmId::System(SYSTEM_A_SEED);
 pub const SYSTEM_B: RealmId = RealmId::System(8);
 pub const PLANET_A: RealmId = RealmId::Planet(7);
+/// ★ THE TWO PLANETS OF SYSTEM B (2026-08-31). The hand-placed world's OFF-CENTRE system held
+/// nothing, so a worked example that needs a system which is somewhere AND has planets could not
+/// stand on it — a system at the galaxy's origin makes the parent-adds-its-child hop a zero, which
+/// proves nothing. Two, because the story also needs a SIBLING planet to refuse.
+pub const PLANET_B: RealmId = RealmId::Planet(8);
+/// The sibling of [`PLANET_B`] under the same star — the negative case a placement test refuses.
+pub const PLANET_C: RealmId = RealmId::Planet(9);
 /// Station A — a first-class Station realm nested directly under System A (task #133).
 pub const STATION_A: RealmId = RealmId::Station(7);
 /// Area A — a first-class sub-planet Area realm nested under Planet A (task #133).
@@ -92,7 +99,19 @@ pub fn level_of(realm: RealmId) -> Option<RealmLevel> {
 /// fold produced from these SAME regions (`stub::RealmRegions::coord_of` is the sole caller).
 #[must_use]
 pub fn coord_of_realm(regions: &[RealmRegion], realm: RealmId) -> Option<RealmCoord> {
-    let chain = ancestor_realms(regions, realm); // leaf → root
+    coord_of_realm_indexed(regions, &realm_index(regions), realm)
+}
+
+/// ★ [`coord_of_realm`] WITH THE LOOKUP HANDED IN — the ONE implementation. See
+/// [`ancestor_realms_indexed`] for the measurement that forced it; this is the caller the wake loop
+/// reaches once per direct child per tick.
+#[must_use]
+pub fn coord_of_realm_indexed(
+    regions: &[RealmRegion],
+    ix_of: &std::collections::BTreeMap<RealmId, usize>,
+    realm: RealmId,
+) -> Option<RealmCoord> {
+    let chain = ancestor_realms_indexed(regions, ix_of, realm); // leaf → root
     let mut levels = Vec::with_capacity(chain.len());
     for r in chain.iter().rev() {
         // root → leaf
@@ -133,8 +152,10 @@ pub fn neighbourhood_scope(
     held: &std::collections::BTreeSet<RealmId>,
 ) -> Vec<RealmRegion> {
     let mut scope: std::collections::BTreeSet<RealmId> = std::collections::BTreeSet::new();
+    // ONE index for the whole loop — `ancestor_realms` would otherwise build one per held realm.
+    let ix_of = realm_index(all);
     for &hosted in held {
-        for a in ancestor_realms(all, hosted) {
+        for a in ancestor_realms_indexed(all, &ix_of, hosted) {
             scope.insert(a);
         }
         for r in all.iter().filter(|r| r.parent == Some(hosted)) {
@@ -152,10 +173,41 @@ pub fn neighbourhood_scope(
 /// forest the chain is just `[hosted_realm]` (a shard hosting an unknown realm gets no ancestry → an empty
 /// neighbourhood → the detector is inert; a safe degrade).
 pub fn ancestor_realms(all: &[RealmRegion], hosted_realm: RealmId) -> Vec<RealmId> {
+    ancestor_realms_indexed(all, &realm_index(all), hosted_realm)
+}
+
+/// The realm → region-index map [`ancestor_realms_indexed`] walks. Built once by a caller that asks
+/// many times; built here for a caller that asks once.
+#[must_use]
+pub fn realm_index(all: &[RealmRegion]) -> std::collections::BTreeMap<RealmId, usize> {
+    all.iter()
+        .enumerate()
+        .map(|(ix, r)| (r.realm, ix))
+        .collect()
+}
+
+/// ★ [`ancestor_realms`] WITH THE LOOKUP HANDED IN — the ONE implementation (2026-08-30).
+///
+/// The walk used to find each hop's region by SCANNING the whole forest. That is a pass over every
+/// realm in the world, per hop, per call.
+///
+/// ★ MEASURED, AND IT WAS ON THE LIVE PER-TICK PATH. The wake loop asks for a child's lineage once
+/// per direct child, every tick. On THE world a galaxy shard holds 233 220 of them, and each ask
+/// walked about three hops over 233 220 regions — of the order of 1.6e11 comparisons per tick. A
+/// six-beat measurement ran twenty minutes and produced nothing.
+///
+/// SL9 names the rule this restores: finding which realm a name belongs to is a LOOKUP, never a
+/// scan, and a cost that grows with the child count is a defect.
+#[must_use]
+pub fn ancestor_realms_indexed(
+    all: &[RealmRegion],
+    ix_of: &std::collections::BTreeMap<RealmId, usize>,
+    hosted_realm: RealmId,
+) -> Vec<RealmId> {
     let mut chain = vec![hosted_realm];
     let mut cur = hosted_realm;
     for _ in 0..all.len() {
-        match all.iter().find(|r| r.realm == cur).and_then(|r| r.parent) {
+        match ix_of.get(&cur).and_then(|&ix| all[ix].parent) {
             None => break, // reached the root (or an unknown `cur`) — the chain is complete
             Some(p) => {
                 chain.push(p);
@@ -405,7 +457,6 @@ mod tests {
                 .expect("valid test band"),
             aoi: AoiConfig::inert(),
             parent,
-            interior_band: AoiConfig::inert(),
         };
         let forest = vec![
             region(UNIVERSE, None),

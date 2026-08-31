@@ -316,14 +316,19 @@ fn g_governed_bands_bracket_every_ambient_boundary_on_the_world() {
     let regions = world_view.regions();
     let n_entry = f64::from(BoundaryTuning::DEFAULT.n_entry);
     let mut governed_rows = 0u32;
+    // ★ A LOOKUP, NOT A SCAN (2026-08-30). This walked the WHOLE forest to find each row's parent,
+    // inside a loop over that same forest. On THE world the forest is about 3 500 000 rows, so the
+    // pair never finishes: MEASURED, this test ran fifteen minutes at 100% CPU and 4.8 GB and had
+    // reached no assertion. SL9: finding which realm a name belongs to is a lookup, never a scan.
+    let extent_of: std::collections::BTreeMap<_, _> = regions
+        .iter()
+        .map(|p| (p.realm, p.shape.finite_extent()))
+        .collect();
     for r in regions {
         let Some(parent) = r.parent else { continue };
-        let parent_extent = regions
-            .iter()
-            .find(|p| p.realm == parent)
-            .expect("every parented region's parent is in the forest")
-            .shape
-            .finite_extent();
+        let parent_extent = *extent_of
+            .get(&parent)
+            .expect("every parented region's parent is in the forest");
         let parent_cap = realm_speed_cap_mps(parent_extent, DEV.move_speed, TRAVERSE_S);
         if parent_cap <= DEV.move_speed {
             // An in-system boundary: the containing ceiling IS the foot speed — the law is inert

@@ -28,7 +28,15 @@ use vd_core::pose::RealmId;
 use vd_io_prod::trust::ClusterTrust;
 use vd_wire::admin::AdminSnapshot;
 
-const DEADLINE: Duration = Duration::from_secs(30);
+// ★ RAISED 2026-08-31, AND THE NUMBER IS MEASURED. These tests spawn REAL nodes built in DEBUG, and a
+// debug shard folds THE world's 233 220 star systems before it can answer anything: MEASURED, ~50 s
+// from process start to "planting the containment forest", against ~0.8 s for the same fold in
+// release. The dev cluster's own bring-up measures 101 s end to end.
+//
+// So these deadlines are sized for the BUILD the tests actually run, not for the shipped one. What
+// each test proves is that its node CONVERGES — ready, drained, re-routed — never how fast. A test
+// that means to measure speed would say so and would not be run on a debug binary.
+const DEADLINE: Duration = Duration::from_secs(240);
 
 /// RAII removal of a run's on-disk temp artifacts on exit (the run also clears them at START, which is
 /// pid-stable — this stops distinct `cargo test` pids from accumulating `$TMPDIR` cruft).
@@ -176,12 +184,24 @@ fn crashloop_drop_delta(use_boot_counter: bool) -> (u64, u64) {
     // (the orchestrator's persisted ledger holds a higher incarnation-equal watermark); GREEN accepts it.
     // Poll: RED's dedup climbs within the deadline; GREEN's never does. A generous settle for GREEN ensures
     // the re-grant WAS sent (RED, with identical shard behavior, proves it reaches the orchestrator).
-    // 12s budget: RED breaks early the instant a drop climbs (the reconnect + re-grant is ~1-3s); GREEN
-    // never breaks and waits the full budget, so a 0 result is over a window in which RED (identical shard
-    // behavior) has demonstrably re-sent + been dropped — not a too-short settle.
+    // ★ 12 s → 180 s ON 2026-08-31, AND THE OLD NUMBER IS THE LESSON. The reasoning above still holds
+    // exactly; only one of its inputs moved. It says "the reconnect + re-grant is ~1-3 s", which was
+    // true when a shard booted instantly.
+    //
+    // A restarted shard must now FOLD ITS WORLD before it can reconnect at all: THE world holds
+    // 233 220 star systems and a DEBUG build takes ~50 s over them (MEASURED — ~0.8 s in release).
+    // So within 12 s the re-grant had not been sent yet, no drop could climb, and the RED arm read
+    // "the hazard did not happen" when what actually happened was "we stopped watching too early".
+    //
+    // MEASURED FAILURE BEFORE THIS: "dedup+0 stale_incarnation+0" — the RED arm reporting a cure it
+    // has not got. That is the dangerous direction for this test to fail in, because RED passing
+    // vacuously would make the GREEN arm's zero meaningless too.
+    //
+    // RED still breaks the instant a drop climbs, so the cost falls only on GREEN, where a longer
+    // window is strictly better evidence.
     let settle = Instant::now();
     let mut last = (dedup_before, stale_before);
-    while settle.elapsed() < Duration::from_secs(12) {
+    while settle.elapsed() < Duration::from_secs(180) {
         if let Some(c) = drop_counters(admin_addr) {
             last = c;
             if c.0 > dedup_before || c.1 > stale_before {

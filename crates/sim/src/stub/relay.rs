@@ -375,7 +375,7 @@ pub(crate) fn build_relay_interior(
 /// retries (fail-closed, never through the orchestrator).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_realm_interest(
-    band: &vd_core::geometry::AoiConfig,
+    in_band: bool,
     realm: RealmId,
     child_coord: &RealmCoord,
     route: Option<&NodeId>,
@@ -387,11 +387,16 @@ pub(crate) fn emit_realm_interest(
     outbox: &mut OutboundBox,
     stats: &mut StubStats,
 ) {
-    if band.spin_up_r_m() <= 0.0 {
-        return; // a leaf (or an inert world): no interior, no interest — the byte never exists
-    }
+    // ★ THE CHILD'S OWN RADIUS ALREADY DECIDED THIS (owner ruling 2026-08-29). `in_band` is the
+    // SAME verdict that woke the child, taken from the child's own band. There is no second band
+    // here any more, and therefore no second threshold that can disagree with the first (HR3).
+    //
+    // The old guard `band.spin_up_r_m() <= 0.0` is GONE with the band it read. It meant "a childless
+    // leaf has no interior, so say nothing" — but a parent cannot know a child is a leaf without
+    // looking inside it, which is exactly what this change removes. A leaf that is told simply wakes
+    // nothing, which costs one message and no work.
     let was = latch.contains(&realm);
-    let now = band.in_range(was, min_dist);
+    let now = in_band & min_dist.is_finite();
     let Some(&node) = route else {
         return; // head not resolved yet — the eager cadence read lands it; the next beat sends
     };

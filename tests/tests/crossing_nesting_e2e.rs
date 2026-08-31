@@ -119,7 +119,6 @@ fn dest_region(realm: RealmId, parent: Option<RealmId>, r: f64) -> RealmRegion {
         look: Some(Boundary::Shell { r }),
         band,
         aoi: vd_core::geometry::AoiConfig::inert(),
-        interior_band: vd_core::geometry::AoiConfig::inert(),
         parent,
     }
 }

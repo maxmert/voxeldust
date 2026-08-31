@@ -1620,17 +1620,59 @@ fn arriving_at_a_star_system_lands_on_its_edge_and_shows_its_planets() {
         !placements.is_empty(),
         "the hosting shard holds this system's planets at all"
     );
-    let visible = placements
+    // ★ WHAT "SHOWS ITS PLANETS" ACTUALLY MEANS HERE (owner ruling 2026-08-31).
+    //
+    // This asserted that a planet is IN RANGE from the system's edge. It is not, and that is
+    // correct: a wake radius is derived from ANGULAR SIZE, and a planet is a speck from the
+    // boundary of its own solar system. MEASURED on THE world — the edge sits at 1.582e11 m and the
+    // largest planet's wake radius reaches 1.352e11 m, so every planet falls short. The owner's
+    // ruling: *"none of the planets are visible as they are too far for our generic mechanism to
+    // boot them, so it's expected"*.
+    //
+    // The defect this test was written for was never visibility. It was a FRAME defect — arrive at a
+    // neighbouring star and find the system EMPTY, because the planets were placed against the wrong
+    // origin and collapsed onto it. So the assertion is that they are really PLACED: distinct
+    // positions, none at the system's own centre.
+    // "Collapsed on the centre" means the system's OWN origin — cell zero, offset zero. The STAR
+    // belongs there by construction (a system is centred on its star), so only its PLANETS are
+    // judged: a planet at the origin is the frame defect, a star at the origin is the world.
+    let at_origin = placements
+        .iter()
+        .filter(|(region, _)| matches!(region.realm, RealmId::Planet(_)))
+        .filter(|(_, pose)| pose.pos == LatticePos::from_metres(DVec3::ZERO, system.frame.tier()))
+        .count();
+    let distinct: std::collections::BTreeSet<_> =
+        placements.iter().map(|(region, _)| region.realm).collect();
+    assert_eq!(
+        distinct.len(),
+        placements.len(),
+        "every planet is its own realm, held once"
+    );
+    assert_eq!(
+        at_origin, 0,
+        "no planet sits collapsed on the system's own centre — the frame defect this test exists for"
+    );
+    // …and the wake DOES arrive as the traveller comes inward: from the innermost planet's own
+    // orbit, something is in range. That is the mechanism working, measured rather than assumed.
+    let inward = placements
+        .iter()
+        .map(|(_, pose)| pose.pos)
+        .min_by(|a, b| {
+            occupant_child_dist(*a, DVec3::ZERO, arrived.pos, system.frame.tier(), 0.0).total_cmp(
+                &occupant_child_dist(*b, DVec3::ZERO, arrived.pos, system.frame.tier(), 0.0),
+            )
+        })
+        .expect("the system holds planets");
+    let visible_inward = placements
         .iter()
         .filter(|(region, pose)| {
-            let dist =
-                occupant_child_dist(arrived.pos, DVec3::ZERO, pose.pos, system.frame.tier(), 0.0);
+            let dist = occupant_child_dist(inward, DVec3::ZERO, pose.pos, system.frame.tier(), 0.0);
             region.aoi.in_range(false, dist)
         })
         .count();
     assert!(
-        visible > 0,
-        "standing on this system's edge, none of its planets are in range"
+        visible_inward > 0,
+        "standing where a planet is, the wake mechanism puts something in range"
     );
 }
 

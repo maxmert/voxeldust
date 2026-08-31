@@ -26,20 +26,27 @@ use vd_io_prod::trust::ClusterTrust;
 /// key. So the test picked a planet out of ONE world and asserted a fence in ANOTHER: the same
 /// two-worlds-in-one-launch class the paragraph above was written about, re-opened by a default
 /// moving underneath it. `DEV.universe_seed` IS that default, so the two ends cannot disagree again.
-fn a_planet_of_the_world() -> u64 {
-    let world = vd_bins::boot_world(
+fn a_system_of_the_world() -> u64 {
+    // ★ A STAR SYSTEM, NOT A PLANET (owner ruling 2026-08-30). These fences are about a realm that
+    // HAS A PARENT, and a star system has one — the galaxy. A planet no longer serves as the subject:
+    // a realm BELOW a star system cannot place itself from the seed, so its parent must name it, and
+    // a planet launched by hand now refuses EARLIER with that message. The fences below would then
+    // never be reached, and the tests would pass or fail for a reason none of them is about.
+    //
+    // Read from the star-system LAYER, which is what the fences read too — not from the full forest,
+    // which builds every planet and moon in the galaxy to answer a question about a system.
+    let world = vd_physics::worldgen::system_layer_view(
         vd_bins::DEV.universe_seed,
-        vd_bins::DEV.move_speed,
-        vd_bins::DEV.tick_dt,
+        &vd_physics::worldgen::UniverseConfig::world(vd_bins::DEV.move_speed, vd_bins::DEV.tick_dt),
     );
     world
         .regions()
         .iter()
         .find_map(|r| match r.realm {
-            vd_core::pose::RealmId::Planet(seed) => Some(seed),
+            vd_core::pose::RealmId::System(seed) => Some(seed),
             _ => None,
         })
-        .expect("the generated world holds planets")
+        .expect("the generated world holds star systems")
 }
 
 fn addrs() -> ClusterAddrs {
@@ -185,18 +192,18 @@ fn a_shard_claiming_to_be_a_root_while_the_world_gives_it_a_parent_refuses_to_bo
         .write_der_dir(&trust_dir)
         .expect("trust dir");
     let common = common_env(&trust_dir.display().to_string(), &DEV);
-    // A PLANET shard, told its lineage is [Planet 7] — no parent. The seed forest says Planet 7 sits
-    // inside System 7, so the two disagree and the fence must fire.
+    // A STAR-SYSTEM shard, told its lineage names no parent. The seed world says a star system sits
+    // inside the galaxy, so the two disagree and the fence must fire.
     let node_env = shard_boot_env(
         &addrs,
         &[
-            ("VD_REALM_KIND", "planet".to_owned()),
-            ("VD_REALM_SEED", a_planet_of_the_world().to_string()),
+            ("VD_REALM_KIND", "system".to_owned()),
+            ("VD_REALM_SEED", a_system_of_the_world().to_string()),
             (
                 "VD_OWN_COORD",
                 root_shaped_coord(
-                    vd_core::realm_path::RealmKindTag::Planet,
-                    a_planet_of_the_world(),
+                    vd_core::realm_path::RealmKindTag::System,
+                    a_system_of_the_world(),
                 ),
             ),
         ],
@@ -227,11 +234,11 @@ fn a_shard_claiming_to_be_a_root_while_the_world_gives_it_a_parent_refuses_to_bo
     // Rigor: prove it was the LINEAGE fence and not an earlier trust/bind/config failure, and that it
     // named BOTH sides — the realm booted and the parent the world gives it.
     assert!(
-        err.contains(&format!("Planet({})", a_planet_of_the_world())),
+        err.contains(&format!("System({})", a_system_of_the_world())),
         "the refusal must name the realm booted; stderr: {err}"
     );
     assert!(
-        err.contains("whose parent is System("),
+        err.contains("whose parent is Galaxy("),
         "the refusal must name the parent the lineage omitted; stderr: {err}"
     );
     let _ = std::fs::remove_dir_all(&trust_dir);
@@ -256,8 +263,8 @@ fn the_same_shard_with_no_declared_lineage_derives_one_and_boots_past_the_fence(
     let node_env = shard_boot_env(
         &addrs,
         &[
-            ("VD_REALM_KIND", "planet".to_owned()),
-            ("VD_REALM_SEED", a_planet_of_the_world().to_string()),
+            ("VD_REALM_KIND", "system".to_owned()),
+            ("VD_REALM_SEED", a_system_of_the_world().to_string()),
         ],
     );
     let mut cluster = Cluster::new();
@@ -268,7 +275,12 @@ fn the_same_shard_with_no_declared_lineage_derives_one_and_boots_past_the_fence(
     let _guard = cluster;
     let started = Instant::now();
     let mut live = false;
-    while started.elapsed() < Duration::from_secs(15) {
+    // ★ RAISED FROM 15 s (2026-08-30). The property under test is that a shard with a DERIVED
+    // lineage boots PAST the fence — not how fast it does so. Fifteen seconds was written when a
+    // galaxy held three star systems; it now holds a quarter of a million, and a debug-build shard
+    // folds the star-system layer before it can answer anything. The same reason raised the dev
+    // cluster's own bring-up deadline.
+    while started.elapsed() < Duration::from_secs(180) {
         if vd_bins::http_get_status(probe, "/healthz", Some(Duration::from_secs(1))) == Some(200) {
             live = true;
             break;
@@ -303,8 +315,8 @@ fn an_aoi_armed_shard_without_the_handoff_hold_budget_refuses_to_boot() {
     let node_env = shard_boot_env(
         &addrs,
         &[
-            ("VD_REALM_KIND", "planet".to_owned()),
-            ("VD_REALM_SEED", a_planet_of_the_world().to_string()),
+            ("VD_REALM_KIND", "system".to_owned()),
+            ("VD_REALM_SEED", a_system_of_the_world().to_string()),
         ],
     );
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vd-shard"));
@@ -331,4 +343,82 @@ fn an_aoi_armed_shard_without_the_handoff_hold_budget_refuses_to_boot() {
         "the hold fence must refuse the boot out loud; stderr: {err}"
     );
     let _ = std::fs::remove_dir_all(&trust_dir);
+}
+
+/// ★ THE NEW CONTRACT (owner ruling 2026-08-30): A REALM BELOW A STAR SYSTEM IS NAMED BY ITS PARENT.
+///
+/// A shard whose realm the star-system layer does NOT name cannot place itself. A planet's identifier
+/// is a one-way hash of its system's, and a player-built station or area is not in the seed at all —
+/// the generator emits neither — so no search will ever produce one.
+///
+/// It does not have to. A spawn demand carries a `RealmCoord`, which names every ancestor by kind and
+/// seed, and the launcher hands it on as `VD_OWN_COORD`. This test is the case where nobody did:
+/// a deep shard started by hand, with no lineage.
+///
+/// It must refuse, and the refusal must say WHAT is missing and HOW to supply it — not "the forest
+/// has 0 ambient roots", which is true and useless.
+#[test]
+fn a_realm_below_a_star_system_launched_with_no_lineage_refuses_and_names_the_cure() {
+    let _tier = vd_bins::cluster_tier();
+    let addrs = addrs();
+    let trust_dir = std::env::temp_dir().join(format!("vd-deep-nolineage-{}", std::process::id()));
+    ClusterTrust::generate("vd-deep-nolineage")
+        .expect("trust")
+        .write_der_dir(&trust_dir)
+        .expect("trust dir");
+    let common = common_env(&trust_dir.display().to_string(), &DEV);
+    // A PLANET of THE world, and deliberately NO `VD_OWN_COORD` — nothing tells it who contains it.
+    let planet_seed = a_planet_of_the_world();
+    let node_env = shard_boot_env(
+        &addrs,
+        &[
+            ("VD_REALM_KIND", "planet".to_owned()),
+            ("VD_REALM_SEED", planet_seed.to_string()),
+        ],
+    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vd-shard"));
+    for (k, v) in common.iter().chain(node_env.iter()) {
+        cmd.env(k, v);
+    }
+    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+    let output = cmd
+        .spawn()
+        .expect("spawn shard")
+        .wait_with_output()
+        .expect("wait shard");
+    assert!(
+        !output.status.success(),
+        "a deep shard with no lineage MUST exit non-zero"
+    );
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains(&format!("Planet({planet_seed})")),
+        "the refusal must name the realm it could not place; stderr: {err}"
+    );
+    assert!(
+        err.contains("its parent must name it"),
+        "the refusal must say WHOSE job it is to name the realm; stderr: {err}"
+    );
+    assert!(
+        err.contains("VD_OWN_COORD"),
+        "the refusal must name the cure; stderr: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&trust_dir);
+}
+
+/// The planet the test above cannot place. Read from the full world deliberately: this is the ONE
+/// place a test needs a realm the star-system layer does not name.
+fn a_planet_of_the_world() -> u64 {
+    vd_bins::boot_world(
+        vd_bins::DEV.universe_seed,
+        vd_bins::DEV.move_speed,
+        vd_bins::DEV.tick_dt,
+    )
+    .regions()
+    .iter()
+    .find_map(|r| match r.realm {
+        vd_core::pose::RealmId::Planet(seed) => Some(seed),
+        _ => None,
+    })
+    .expect("the generated world holds planets")
 }

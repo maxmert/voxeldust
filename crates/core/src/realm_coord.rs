@@ -64,6 +64,21 @@ impl RealmCoord {
         profile_kind_of(self.level.kind)
     }
 
+    /// ★ EVERY REALM ON THIS LINEAGE, root → leaf (2026-08-30).
+    ///
+    /// A coordinate carries each ancestor's KIND and SEED, so it names its ancestors exactly. This is
+    /// what lets a shard build a world for a realm the seed alone can never place: a planet's
+    /// identifier is a one-way hash of its system's, and a player-built city is not in the seed at
+    /// all — the generator emits no station and no area.
+    ///
+    /// THE PARENT IS THE SOURCE, and it always was: a spawn demand carries a `RealmCoord`, not a
+    /// name, so the realm that demanded a child into existence has already told that child who
+    /// contains it. This reads what was already sent.
+    #[must_use]
+    pub fn lineage_realms(&self) -> Vec<RealmId> {
+        self.path.levels().iter().map(|l| l.to_realm_id()).collect()
+    }
+
     /// The parent coord (path truncated by one leaf), or `None` at the root (path length ≤ 1).
     #[must_use]
     pub fn parent(&self) -> Option<RealmCoord> {

@@ -103,11 +103,18 @@ pub const NEAR_SYSTEM_FROM_GALAXY_M: f64 = 12031.0;
 /// and `the_generator_plants_exactly_the_stories_distances` then fails loudly, which is that test's
 /// whole reason to exist.
 ///
-/// ⚠ INTERIM — see `docs/design/DEFERRED.md` (D-S12-FIXTURE). This constant exists because the fixture
-/// builds a REDUCED world (two stars, two planets, a circular in-plane orbit) rather than reading THE
-/// world, which SL5 forbids. The proper answer is to delete the fixture: prove the arithmetic as a pure
-/// unit test with hand-written numbers, and prove the conversion end-to-end on THE world at real size.
-pub const NEIGHBOUR_FRACTION_OF_RIM: f64 = 2.711_063_548_671_444e-1;
+/// ★ NOW EXACTLY ONE (2026-08-31), and the change is the point. This was 0.271… — the fraction of the
+/// rim at which the SEED happened to place the neighbour. A seeded placement cannot be asked for a
+/// distance: you state a rim and the draw chooses somewhere inside it, so the story's own number was
+/// never the distance, only a bound on it.
+///
+/// The fixture now stands on the HAND-PLACED world, which places by construction from its own config.
+/// So the neighbour sits at the story's distance exactly, and the fraction is one. A worked example
+/// whose stated number IS the measured number is the whole point of a worked example.
+///
+/// The constant is kept rather than deleted so the ratio stays asserted: if a future change ever puts
+/// the neighbour somewhere other than where the story says, this goes red instead of passing quietly.
+pub const NEIGHBOUR_FRACTION_OF_RIM: f64 = 1.0;
 /// The occupant re-measured in the STAR's frame after the SYSTEM adds its child's placement.
 /// A LITERAL: `145 + 3`, written out, never computed by the code under test.
 pub const WORKED_UP_1: f64 = 148.0;
@@ -315,7 +322,16 @@ impl WorkedExample {
     ) -> WorkedExample {
         let seed = 0;
         let config = story_config(system_from_galaxy_m, planet_from_star_m);
-        let world = WorldView::generated(seed, &config);
+        // ★ THE HAND-PLACED WORLD (D-S12-FIXTURE, closed 2026-08-31). This asked the GENERATOR for a
+        // galaxy holding exactly two stars at a distance it named. Since ruling G8 a population is a
+        // RESULT — the volume a galaxy encloses at the density it drew — so neither the count nor the
+        // distance can be asked for, and this fixture could not express itself at all.
+        //
+        // A worked example needs STATED distances: its whole point is that 12 031 m and 145 m appear
+        // in the arithmetic and can be checked by eye. The hand-placed world places by construction
+        // from its own config, which is exactly that — and the code that lowers, bands and converts
+        // it is the same code the generated path uses, so nothing here is a second implementation.
+        let world = WorldView::hand_placed(&config);
 
         // Read the story's realms OUT of the generated forest rather than naming their seeds: the seeds
         // are `child_seed` avalanches of (galaxy, salt, index), so writing them down would be copying a
@@ -339,15 +355,21 @@ impl WorkedExample {
         let sibling_planet = planets[1];
 
         // The story planet's elements: the config's, with the phase pinned. See the module docs.
-        let generated = vd_physics::worldgen::moving_children_for_config(seed, &config, system);
-        let mut elements = generated
-            .iter()
-            .find(|(r, _)| *r == planet)
-            .map(|(_, e)| *e)
-            .expect("the story planet is an orbital child of its star");
-        elements.raan = 0.0;
-        elements.arg_periapsis = 0.0;
-        elements.mean_anomaly_epoch = 0.0;
+        // ★ BUILT OUTRIGHT, NOT READ AND OVERWRITTEN (2026-08-31). This read the generated orbit and
+        // then replaced its phase, its semi-major axis and its central mass — every field the story
+        // depends on. What survived was the eccentricity and inclination, which `story_config` pins
+        // to zero anyway. So the read bought nothing and tied the fixture to a generated planet.
+        let mut elements = vd_physics::celestial::OrbitalElements {
+            sma: planet_from_star_m,
+            // Circular and in-plane: the planet's distance from its star is its semi-major axis at
+            // EVERY tick, so the story's number is true of the moving variant too.
+            ecc: 0.0,
+            inclination: 0.0,
+            raan: 0.0,
+            arg_periapsis: 0.0,
+            mean_anomaly_epoch: 0.0,
+            central_mass: 0.0,
+        };
         // THE WORKED-DISTANCE OVERRIDE (see `story_config`): the fixture's registered elements
         // carry ITS exact semi-major axis and the Kepler-tuned central mass for the story
         // period — fixture DATA over generated topology, exactly like the phase pinning above.
@@ -398,16 +420,21 @@ impl WorkedExample {
     /// generator's verbatim).
     #[must_use]
     pub fn moving_for(&self, held: RealmId) -> BTreeMap<RealmId, OrbitalElements> {
-        vd_physics::worldgen::moving_children_for_config(self.seed, &self.config, held)
-            .into_iter()
-            .map(|(realm, e)| {
-                if realm == self.planet {
-                    (realm, self.elements)
-                } else {
-                    (realm, e)
-                }
-            })
-            .collect()
+        // ★ THE STORY STATES ITS OWN ORBIT (2026-08-31), as it states its own distances.
+        //
+        // This read the GENERATED forest's movers and then substituted the story planet's elements
+        // over the top. The fixture stands on the HAND-PLACED world now, whose bodies are placed
+        // statically — so that read returned nothing, the substitution had nothing to substitute
+        // into, and the moving variants silently stopped moving. The far-moving test caught it: its
+        // placement was still exactly on the grid a thousand ticks in, which is the one thing that
+        // variant exists to disprove.
+        //
+        // A worked example that states a distance should state its orbit the same way.
+        if held == self.system {
+            [(self.planet, self.elements)].into_iter().collect()
+        } else {
+            BTreeMap::new()
+        }
     }
 
     /// The `RealmRegions` resource the shard hosting `held` boots with, built through the same two
@@ -470,18 +497,20 @@ impl WorkedExample {
 /// inside a shell that no longer contains what it should.
 fn story_config(system_from_galaxy_m: f64, planet_from_star_m: f64) -> UniverseConfig {
     let mut config = UniverseConfig::walk_scale();
-    // ⚠ THIS FIXTURE ASKED FOR EXACTLY TWO STARS, AND THERE IS NO LONGER A WAY TO ASK (S12/G8,
-    // 2026-08-28). A population is a RESULT now — the volume a galaxy encloses at the density it
-    // drew — so `system_count_lo`/`system_count_hi` are deleted. A galaxy this small (the story's
-    // 12 031 m) holds ONE system, and the story needs two: one at the origin and one to hop to.
+    // ★ D-S12-FIXTURE, CLOSED 2026-08-31. This asked the generator for a galaxy holding exactly two
+    // stars, one at the origin and one to hop to. Ruling G8 removed the way to ask: a population is a
+    // RESULT — the volume a galaxy encloses at the density it drew — so the count knobs are gone, and
+    // a galaxy the size of the story's 12 031 m holds ONE system.
     //
-    // This is the same fixture already on the register as an unlawful variant world (DEFERRED.md
-    // D-S12-FIXTURE, SL5). The count ruling has now made its rewrite FORCED rather than owed: it
-    // cannot express itself through the generator at all.
+    // The register already named the cure and this is it: the HAND-PLACED world holds exactly two
+    // systems BY CONSTRUCTION, at a distance its own config states. A worked example needs stated
+    // distances — its whole point is that 12 031 m and 145 m appear in the arithmetic and can be
+    // checked by eye — and a seeded position can never be asked for.
     //
-    // The lawful shape is in reach and is what the register already describes: the hand-placed walk
-    // world holds EXACTLY TWO systems by construction, at a distance its own config states
-    // (`system_b_offset_m`), with no density in the chain. That is the rewrite, and it is a slice.
+    // Everything below the placement is the SAME code the generated path runs: one lowering, one band
+    // solve, one conversion. Nothing here is a second implementation of anything.
+    config.satellite.system_b_offset_m = system_from_galaxy_m;
+    config.satellite.planet_offset_m = planet_from_star_m;
     config.stellar.galaxy_rim_r_m = system_from_galaxy_m;
     // Two planets per star: the second one is the SIBLING the negative gate demands a refusal for.
     config.planet.n_planets = 2;
@@ -599,11 +628,13 @@ mod tests {
                 fx.system_from_galaxy_m,
                 neighbour.length(),
             );
-            assert!(
-                neighbour.y.abs() > 0.0,
-                "{}: the seeded placement is 3-D, not the retired collinear ring",
-                fx.name,
-            );
+            // ★ THE 3-D CHECK MOVED OUT (2026-08-31). This asserted that the neighbour sits off the
+            // y = 0 plane — a fact about the SEEDED placement law, which this fixture no longer uses.
+            // It hand-places now, along one axis on purpose, so the story's distances are numbers a
+            // reader can check by eye.
+            //
+            // The law itself is not lost: `the_seeded_placements_are_three_dimensional_and_the_fence_
+            // judges_the_point_set` in the physics crate owns it, against the generator that has it.
             assert_eq!(
                 centre_of(&fx.world, fx.sibling_system),
                 DVec3::ZERO,
