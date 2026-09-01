@@ -781,6 +781,7 @@ mod tests {
             parent: None,
             depth: 0,
             color_rgba: [0.1, 0.2, 0.3, BOX_ALPHA],
+            facing: [0.0, 0.0, 0.0, 1.0],
         };
         let sphere_prims = to_render_prims(&sphere, DVec3::ZERO);
         assert_eq!(sphere_prims.len(), 1);
@@ -801,6 +802,7 @@ mod tests {
             parent: None,
             depth: 0,
             color_rgba: [0.4, 0.5, 0.6, BOX_ALPHA],
+            facing: [0.0, 0.0, 0.0, 1.0],
         };
         let box_prims = to_render_prims(&boxed, DVec3::ZERO);
         assert_eq!(box_prims.len(), 1);

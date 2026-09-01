@@ -216,6 +216,15 @@ struct CameraState {
     throttle_tier: u8,
     /// THROWAWAY: the eased commanded magnitude the wire actually carries (see `THROTTLE_EASE_TAU_S`).
     throttle_now: f32,
+    /// ★ HOW FAR BEHIND THE EYE SITS, in metres (D-MOVE-2). `0.0` is first person, which is the
+    /// default and leaves every existing view and pixel gate untouched.
+    ///
+    /// It must clear the hull it follows, or the camera sits inside the box and sees its inner faces.
+    /// Set from the drawn extent of the realm the player is inside, never from a stated number — a
+    /// literal here would put the eye inside the first hull anybody built bigger than it.
+    chase_m: f64,
+    /// How far the eye lifts above what it follows, in metres. Pairs with `chase_m`.
+    chase_lift_m: f64,
 }
 
 /// The map from a delivered entity to its spawned Bevy dot entity.
@@ -446,6 +455,9 @@ fn run_windowed(handles: RenderHandles) {
             last_movement: MovementKeys::default(),
             throttle_tier: input_map::THROTTLE_TIERS,
             throttle_now: 0.0,
+            // First person until a pilot boards a hull. See `CameraState::chase_m`.
+            chase_m: 0.0,
+            chase_lift_m: 0.0,
         })
         // A window is always the human's own first-person view; the pilot-view switch exists only
         // for the HEADLESS capture path (there is no scene-fitting framing here to decline).
@@ -859,7 +871,14 @@ fn place_camera(
         );
         (cam.eye, cam.target - cam.eye, cam.up)
     } else {
-        let e = camera.cam.eye(own_world);
+        // ★ THIRD PERSON WHEN A CHASE DISTANCE IS SET (D-MOVE-2). Zero — the default — returns
+        // exactly the first-person eye, so the walking view and every pixel gate on it are unchanged.
+        //
+        // A pilot needs this and a walker does not: from inside a hull you cannot see the hull, and a
+        // pilot must see which way the nose points to fly at all.
+        let e = camera
+            .cam
+            .chase_eye(own_world, camera.chase_m, camera.chase_lift_m);
         (e, camera.cam.forward(), camera.cam.up)
     };
     eye.eye = eye_pos;
@@ -1570,6 +1589,9 @@ fn run_capture(handles: RenderHandles) {
             last_movement: MovementKeys::default(),
             throttle_tier: input_map::THROTTLE_TIERS,
             throttle_now: 0.0,
+            // First person until a pilot boards a hull. See `CameraState::chase_m`.
+            chase_m: 0.0,
+            chase_lift_m: 0.0,
         })
         .insert_resource(CaptureView {
             pilot: handles.pilot_view,

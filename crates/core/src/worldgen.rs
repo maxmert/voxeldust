@@ -57,10 +57,19 @@ pub const AREA_A: RealmId = RealmId::Area(7);
 // The cell activation made that premise false; its future consumer (the P6/D-9 spatial index) is
 // built on `Separation`, not on a bare offset subtraction.)
 
-/// A SEED-LINEAGE `RealmId` → its `RealmLevel` (kind + seed), un-lossily: every kind now carries its own
-/// identity, so this reads a level rather than recognising a borrowed seed. `None` for [`RealmId::Ship`] — a ship is ENTITY-backed (P8, an `EntityId`
-/// payload), NOT a seed-lineage realm, so it has no seed `RealmLevel` (and never appears in a seed
-/// forest / P3 region). Monomorphic (HR5: the kind match covered once here).
+/// A `RealmId` → its `RealmLevel` (kind + identity), un-lossily: every kind carries its own identity,
+/// so this reads a level rather than recognising a borrowed seed. Monomorphic (HR5: the kind match
+/// covered once here).
+///
+/// ★ **A SHIP HAS A LEVEL NOW, AND UNTIL 2026-09-01 IT DID NOT.** This returned `None` for a ship, and
+/// said so for a reason that was true when written: *"a ship is ENTITY-backed, NOT a seed-lineage
+/// realm, so it has no seed RealmLevel (and never appears in a seed forest)"*.
+///
+/// Both halves have since stopped being true. A ship is APPENDED to the built world by the fixture
+/// plant, so it does appear in a forest; and a lineage level now holds 128 bits, so a minted identity
+/// fits in one. The `None` was not a policy — it was the honest answer while a ship could not be named
+/// at all, and keeping it would have meant **no shard could ever boot for a ship**, because the
+/// orchestrator resolves a realm to its lineage before it can spawn anything for it.
 ///
 /// ★ IT NO LONGER ALIASES. It used to recover the universe and the galaxy from `System(0)` and
 /// `System(1)`, and said so: "a real system with seed 0/1 would alias, but the walk/visual forest uses
@@ -82,7 +91,8 @@ pub fn level_of(realm: RealmId) -> Option<RealmLevel> {
         RealmId::Station(s) => Some(RealmLevel::new(RealmKindTag::Station, s)),
         RealmId::Area(s) => Some(RealmLevel::new(RealmKindTag::Area, s)),
         RealmId::Star(s) => Some(RealmLevel::new(RealmKindTag::Star, s)),
-        RealmId::Ship(_) => None,
+        // A BUILT realm: its identity is minted, not seeded, which is exactly why the level widened.
+        RealmId::Ship(id) => Some(RealmLevel::for_ship(id)),
     }
 }
 
@@ -90,8 +100,9 @@ pub fn level_of(realm: RealmId) -> Option<RealmLevel> {
 /// un-lossy `RealmId`→`RealmCoord` the RLM demand ledger keys on (NOT a `lowered()` single level). This is
 /// what lets a source shard, holding only a crossing DEST's `RealmId`, address a `KeepAlive` demand at that
 /// dest's WHOLE ancestor chain (`ancestor_close` truncates the coord's parents) so the dest cannot be
-/// reaped out from under a player crossing INTO it. `None` only for a [`RealmId::Ship`] (entity-backed, no
-/// seed [`RealmLevel`] — a crossing dest is never a ship). Monomorphic (HR5): the ONE realm-KIND decision
+/// reaped out from under a player crossing INTO it. ★ A SHIP RESOLVES LIKE ANY OTHER REALM since
+/// 2026-09-01 — it used to be the one `None`, and a crossing dest could therefore never be a ship,
+/// which would have made it impossible to fly INTO one. Monomorphic (HR5): the ONE realm-KIND decision
 /// is [`level_of`]'s already-covered match; this just walks parent pointers root-ward.
 ///
 /// CONTRACT: `realm` MUST be present in `regions` — an unknown realm yields a bogus 1-level coord
@@ -430,14 +441,25 @@ mod tests {
             level_of(RealmId::Area(7)),
             Some(RealmLevel::new(RealmKindTag::Area, 7))
         );
-        // A ship is entity-backed (P8), not seed-lineage ⇒ None (the filter_map-dropped case).
-        let ship = RealmId::Ship(crate::EntityId::pack(
-            crate::entity_kind::EntityKind::Player,
-            1,
-            1,
-            1,
-        ));
-        assert_eq!(level_of(ship), None);
+        // ★ A SHIP RESOLVES TOO, and its WHOLE 128-bit identity survives the trip (2026-09-01). This
+        // asserted `None` while a lineage level held 64 bits and no ship tag existed. Both changed, so
+        // the honest answer changed with them — and it had to: the orchestrator resolves a realm to
+        // its lineage before spawning anything, so a `None` here meant no shard could ever boot for a
+        // ship, and no player could ever fly into one.
+        //
+        // The identity is checked WHOLE rather than by its kind alone: a 64-bit level would have
+        // silently dropped this value's high bits, and two ships from different minting shards would
+        // then share one name — two PLACES with one name, which is the collision the widening exists
+        // to prevent.
+        let id = crate::EntityId::pack(crate::entity_kind::EntityKind::Ship, 1, 1, 1);
+        let level = level_of(RealmId::Ship(id)).expect("a ship has a lineage level");
+        assert_eq!(level.kind, RealmKindTag::Ship);
+        assert_eq!(level.seed, id.0, "the whole minted identity, not its low half");
+        assert_eq!(
+            level.to_realm_id(),
+            RealmId::Ship(id),
+            "and it round-trips back to the same ship"
+        );
     }
 
     #[test]

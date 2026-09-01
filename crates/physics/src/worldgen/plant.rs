@@ -248,10 +248,18 @@ pub(crate) fn append_fixture_plant(bodies: &mut Vec<GeneratedBody>, config: &Uni
                 shape: Boundary::Shell { r: SHIP_EXTENT_M },
                 // ★ WHERE IT STARTS, AND ONLY WHERE IT STARTS. A ship is a DRIVEN child: from its
                 // first tick its parent authors its placement from the pushes it states, so this
-                // offset is the hull's starting berth and nothing more. It is placed beside the
-                // station, which is where a built ship would be.
+                // offset is the hull's starting berth and nothing more.
+                //
+                // ★ BERTHED WHERE A PLAYER ACTUALLY ARRIVES, AND THAT WAS MEASURED (2026-09-01). The
+                // first version put it beside the STATION, because that is where a built ship would
+                // sit. MEASURED: the station hangs elsewhere in the system, so the walk from the spawn
+                // was 1.08e10 m — about 250 DAYS of continuous flying. A berth nobody can reach is a
+                // ship nobody can fly.
+                //
+                // The berth is derived from the SAME clearing the spawn is derived from, so the two
+                // cannot drift apart: move the spawn and the berth follows it.
                 placement: Placement::StaticOffset(
-                    plant.station_offset_m + DVec3::new(SHIP_BERTH_OFFSET_M, 0.0, 0.0),
+                    spawn_clearing(bodies) + DVec3::new(SHIP_BERTH_OFFSET_M, 0.0, 0.0),
                 ),
                 // A built hull has no seed stream and no photometric draw, exactly like the station.
                 photometrics: None,
@@ -266,9 +274,37 @@ pub(crate) fn append_fixture_plant(bodies: &mut Vec<GeneratedBody>, config: &Uni
 /// multi-crew vessel, and it sits well inside the station's own extent so the berth is lawful.
 const SHIP_EXTENT_M: f64 = 20.0;
 
-/// How far the berth sits from the station's centre — clear of the station's own shell, so the two
-/// hulls do not overlap and the sibling-disjointness fence stays green.
-const SHIP_BERTH_OFFSET_M: f64 = 5_000.0;
+/// How far the berth sits to one side of where a player arrives: far enough that a hull is not sitting
+/// on top of them, near enough to fly to in seconds. At 500 m/s this is a two-second hop.
+const SHIP_BERTH_OFFSET_M: f64 = 1_000.0;
+
+/// WHERE A PLAYER ARRIVES in the home system, derived exactly as `WorldView::default_home_offset_m`
+/// derives it — twice the largest statically-placed body's own bound, along +Z.
+///
+/// **THE SAME DERIVATION, not a copy of the number.** A berth stated as a literal would silently stop
+/// matching the spawn the day the home system's contents changed, and the ship would drift out of
+/// reach again with nothing going red.
+fn spawn_clearing(bodies: &[GeneratedBody]) -> DVec3 {
+    let Some(home) = bodies
+        .iter()
+        .find(|b| b.parent == Some(GALAXY))
+        .map(|b| b.realm)
+    else {
+        return DVec3::ZERO;
+    };
+    let clearing_z = bodies
+        .iter()
+        .filter(|b| b.parent == Some(home))
+        .filter_map(|b| match b.placement {
+            Placement::StaticOffset(at) => {
+                let bound = b.shape.finite_extent();
+                (at.length() < bound).then_some(2.0 * bound)
+            }
+            Placement::Orbital(_) => None,
+        })
+        .fold(0.0, f64::max);
+    DVec3::new(0.0, 0.0, clearing_z)
+}
 
 // ===== T4 — THE EARTH-LIKE PREDICATE + THE SEED SEARCH (celestial_taxonomy_design §8) =======
 
@@ -331,5 +367,98 @@ mod ship_plant_tests {
     fn the_plain_world_still_plants_nothing() {
         let plain = UniverseConfig::world(500.0, 0.02);
         assert_eq!(plain.fixture_plant, FixturePlant::None);
+    }
+}
+
+#[cfg(test)]
+mod ship_wake_tests {
+    use super::built_ship_realm;
+    use crate::worldgen::{UniverseConfig, realm_regions_for_config};
+
+    /// ★ DOES A BUILT SHIP WAKE LIKE EVERYTHING ELSE? The wake rule is generic — a realm states ONE
+    /// radius, derived from its own size and its own speed, and the same verdict decides both "wake
+    /// this child" and "tell this child a looker is near". A ship must need no special path.
+    #[test]
+    fn a_built_ship_states_a_wake_radius_like_every_other_realm() {
+        let config = UniverseConfig::world(500.0, 0.02).with_station_area_ship_plant();
+        let regions = realm_regions_for_config(crate::worldgen::HOME_SEED, &config);
+        let ship = regions
+            .iter()
+            .find(|r| r.realm == built_ship_realm())
+            .expect("the plant put a ship in the world");
+        assert!(
+            ship.aoi.spin_up_r_m() > 0.0,
+            "a ship wakes by the same rule as a planet: {}",
+            ship.aoi.spin_up_r_m()
+        );
+        assert!(
+            ship.aoi.tear_down_r_m() > ship.aoi.spin_up_r_m(),
+            "and it sleeps further out than it wakes, so it cannot flap"
+        );
+    }
+
+    /// A hull is small, so its wake radius is small — you must be near it to see it, exactly as the
+    /// owner expects for a body this size. Stated as a RELATION to the station beside it rather than
+    /// as a number, so the assertion survives every re-solve of the wake law.
+    #[test]
+    fn a_ships_wake_reach_is_smaller_than_the_station_it_is_berthed_beside() {
+        let config = UniverseConfig::world(500.0, 0.02).with_station_area_ship_plant();
+        let regions = realm_regions_for_config(crate::worldgen::HOME_SEED, &config);
+        let ship = regions
+            .iter()
+            .find(|r| r.realm == built_ship_realm())
+            .expect("the ship is in the world");
+        let station = regions
+            .iter()
+            .find(|r| matches!(r.realm, vd_core::pose::RealmId::Station(_)))
+            .expect("the station is in the world");
+        assert!(
+            ship.aoi.spin_up_r_m() < station.aoi.spin_up_r_m(),
+            "a 20 m hull is seen from closer than a station: ship {} vs station {}",
+            ship.aoi.spin_up_r_m(),
+            station.aoi.spin_up_r_m()
+        );
+    }
+}
+
+#[cfg(test)]
+mod ship_reach_tests {
+    use super::built_ship_realm;
+    use crate::worldgen::{UniverseConfig, WorldView};
+
+    /// ★ CAN A PLAYER ACTUALLY REACH THE SHIP? Measured rather than assumed, before anything is built
+    /// on top of it: a berth nobody can fly to is a ship nobody can test.
+    #[test]
+    fn the_berth_is_within_reach_of_where_a_player_starts() {
+        let config = UniverseConfig::world(500.0, 0.02).with_station_area_ship_plant();
+        let world = WorldView::generated(crate::worldgen::HOME_SEED, &config);
+        let ship = world
+            .regions()
+            .iter()
+            .find(|r| r.realm == built_ship_realm())
+            .expect("the plant put a ship in the world");
+        let spawn = world.default_home_offset_m();
+        // ★ THE WHOLE POSITION, cell anchor included. Reading only the leftover offset is the
+        // parent-frame unit trap: at star-system scale the CELL carries nearly all the magnitude, so
+        // an offset-only read reports a berth near the origin however far out the hull really is.
+        let berth_pos = ship.center.in_parents_frame();
+        let berth = berth_pos.offset()
+            + berth_pos.cell().as_dvec3() * ship.frame.tier().cell_edge_m();
+        println!(
+            "[ship-reach] berth cell {:?} offset {:?}",
+            berth_pos.cell(),
+            berth_pos.offset()
+        );
+        println!("[ship-reach] spawn {spawn:?}");
+        let gap_m = (berth - spawn).length();
+        let minutes_at_walk = gap_m / 500.0 / 60.0;
+        println!(
+            "[ship-reach] spawn to berth: {gap_m:.3e} m = {minutes_at_walk:.1} minutes at 500 m/s"
+        );
+        assert!(
+            minutes_at_walk < 5.0,
+            "a player must be able to reach the ship in minutes, not hours: \
+             {gap_m:.3e} m is {minutes_at_walk:.1} minutes at 500 m/s"
+        );
     }
 }

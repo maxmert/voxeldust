@@ -59,6 +59,23 @@ impl FollowCamera {
     pub fn eye(&self, own_pos: DVec3) -> DVec3 {
         own_pos + self.up.normalize() * self.eye_offset
     }
+
+    /// ★ THE THIRD-PERSON EYE — behind and above what it follows (D-MOVE-2, owner 2026-08-31: *"3d
+    /// person view of the ship, view a bit from the back-top … so we know where its nose is"*).
+    ///
+    /// **WHY A SHIP NEEDS THIS AND A WALKING PLAYER DOES NOT.** From inside a hull you cannot see the
+    /// hull. A pilot must see which way the nose points to fly at all, and the nose is only visible
+    /// from outside — so the eye steps back along the facing and lifts along `up`.
+    ///
+    /// The step back must clear the hull it follows, or the camera sits inside the box and sees its
+    /// inner faces. The caller states that distance, because only the caller knows how big the hull is.
+    ///
+    /// First person is `chase_m == 0.0`, which returns exactly [`FollowCamera::eye`]'s answer — so the
+    /// existing view and every pixel gate built on it are untouched.
+    #[must_use]
+    pub fn chase_eye(&self, own_pos: DVec3, chase_m: f64, lift_m: f64) -> DVec3 {
+        self.eye(own_pos) - self.forward() * chase_m + self.up.normalize() * lift_m
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,5 +1144,44 @@ mod eye_relative_on_the_lattice {
                 eye.delta_m(LatticePos::ORIGIN, tier)
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod chase_tests {
+    use super::{DVec3, FollowCamera};
+
+    #[test]
+    fn a_chase_of_zero_is_exactly_the_first_person_eye() {
+        // The existing view and every pixel gate built on it must be untouched by this addition.
+        let cam = FollowCamera::new(DVec3::Y);
+        let at = DVec3::new(10.0, 20.0, 30.0);
+        assert_eq!(cam.chase_eye(at, 0.0, 0.0), cam.eye(at));
+    }
+
+    #[test]
+    fn the_eye_steps_back_along_the_facing_and_lifts() {
+        let cam = FollowCamera::new(DVec3::Y);
+        let at = DVec3::ZERO;
+        let eye = cam.chase_eye(at, 60.0, 25.0);
+        // At rest the facing is −Z, so stepping BACK is +Z: the hull is in front of the eye.
+        assert!(eye.z > 0.0, "the eye sits behind what it follows: {eye:?}");
+        assert!(eye.y > 0.0, "and above it: {eye:?}");
+    }
+
+    #[test]
+    fn turning_the_view_carries_the_eye_around_with_it() {
+        // A chase camera that did not follow the turn would swing the hull across the screen every
+        // time the pilot looked sideways.
+        let mut cam = FollowCamera::new(DVec3::Y);
+        let straight = cam.chase_eye(DVec3::ZERO, 60.0, 0.0);
+        cam.apply_look(std::f64::consts::FRAC_PI_2, 0.0);
+        let turned = cam.chase_eye(DVec3::ZERO, 60.0, 0.0);
+        assert!(
+            (straight - turned).length() > 1.0,
+            "the eye moved with the view: {straight:?} vs {turned:?}"
+        );
+        // Both stay the same distance out, so a turn never dollies the camera in or out.
+        assert!((straight.length() - turned.length()).abs() < 1e-9);
     }
 }
