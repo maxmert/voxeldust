@@ -391,6 +391,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spawn_poses: std::collections::BTreeMap::new(),
         },
     );
+
+    // ★ WHAT THIS REALM IS (D-MOVE-2). A built hull states its own mass, its own area, its own drag and
+    // its own engine rating — read from its own file, never from a constant in the source. A realm the
+    // seed made holds nothing here and states nothing, which is right: a planet moves on rails its
+    // parent already computes, and has nothing to declare.
+    if let Some(body) = stored_body {
+        *world.resource_mut::<vd_sim::stub::drive::OwnBody>() =
+            vd_sim::stub::drive::OwnBody(Some(body));
+        tracing::info!(
+            mass_g = body.facts.mass_g,
+            owner = %body.owner,
+            "this realm is a built hull, and it knows what it is made of",
+        );
+    }
     // RLM 5f RG-2: a DEMAND-spawned shard (it carries the spawner's VD_INCARNATION_COOKIE) greets its booked
     // peers so they learn its return connection — its spawn-minted NodeId is reachable without any pre-booked
     // address (the cloud-portable property). A STATIC shard carries no cookie ⇒ None ⇒ no greeting ⇒

@@ -224,6 +224,18 @@ fn off_grid(units: i64, units_per: f64) -> f64 {
 /// before anybody could see it drift.
 pub const DRIVE_STALE_AFTER_TICKS: u64 = 5;
 
+/// ★ WHAT THIS REALM IS — read from its own file at boot (D-MOVE-2; owner rulings 2026-09-01).
+///
+/// `None` for every realm the seed made: a planet's mass is the generator's business, and a planet
+/// states nothing to its parent because it moves on rails the parent already computes. This is what a
+/// BUILT realm holds — a hull somebody made, whose facts no seed can produce.
+///
+/// **IT IS WHERE THE SHARED ENGINE CONSTANT DIES.** Until now one number in the source stated how hard
+/// every ship in the world pushes, which is the magic number this project's own rule forbids: two hulls
+/// could never differ. The rating is per-hull data on the row, and this is the realm reading its own.
+#[derive(Debug, Default, bevy_ecs::prelude::Resource)]
+pub struct OwnBody(pub Option<vd_core::built::BuiltBody>);
+
 /// EVERY DRIVEN CHILD THIS REALM HOLDS — the parent's own book, and the only place a driven child's
 /// velocity and facing exist (SL1: only a parent writes those).
 ///
@@ -522,6 +534,8 @@ pub(crate) fn emit_own_drive(
     authority: bevy_ecs::prelude::Res<super::RealmAuthority>,
     parent_node: bevy_ecs::prelude::Res<super::ParentRealmNode>,
     dots: bevy_ecs::prelude::Res<super::Dots>,
+    own_body: bevy_ecs::prelude::Res<OwnBody>,
+    mut stated: bevy_ecs::prelude::ResMut<StatedFacts>,
     mut stats: bevy_ecs::prelude::ResMut<super::StubStats>,
     mut outbox: bevy_ecs::prelude::ResMut<crate::runtime::OutboundBox>,
 ) {
@@ -532,29 +546,112 @@ pub(crate) fn emit_own_drive(
     // THE PILOT AT THE CONTROLS. Today: any pilot this realm holds, which is the interim seam the
     // ruling describes. Later a SEAT names one, and only this line changes.
     let stick = dots.0.values().find_map(|d| d.last_stick);
+    // ★ THIS HULL'S OWN RATING, from its own row. A realm that has no body states no drive: a hull
+    // whose facts nobody wrote is a hull nobody knows the mass of, and guessing one flies it wrong for
+    // ever with nothing to say so. Silence is the honest answer, and it is the same silence a realm
+    // with no engines gives.
+    let Some(body) = own_body.0.as_ref() else {
+        return;
+    };
+    let rating = rating_of(&body.facts);
     emit_child_drive(
         self_driven,
         &config.own_coord,
         authority.0,
         clock.universe_tick,
         parent_node.0,
-        &FIXTURE_ENGINE_RATING,
+        &rating,
         stick,
+        &mut outbox,
+        &mut stats,
+    );
+    // ★ WHAT I AM, on the reliable lane, only when it CHANGES. A parent needs this for the forces IT
+    // applies — drag today, impacts later — and a change stated once and then lost would leave a parent
+    // computing drag from a mass that is wrong for ever.
+    emit_child_facts(
+        self_driven,
+        &config.own_coord,
+        authority.0,
+        clock.universe_tick,
+        parent_node.0,
+        body,
+        &mut stated,
         &mut outbox,
         &mut stats,
     );
 }
 
-/// The interim rating for the fixture hull — ten gravities of push and a gentle turn.
+/// A stored hull's whole-number facts, read back as the rates the stick is scaled by.
 ///
-/// ⚠ **A STATED NUMBER, and the ledger carries it as interim.** A real hull derives its rating from the
-/// thrusters built into it, which needs blocks (P6) and signals (P9). Ten gravities is the owner's own
-/// order of magnitude from the warp ruling's arithmetic, so a fixture ship flies like something a
-/// person built rather than like a placeholder.
-const FIXTURE_ENGINE_RATING: EngineRating = EngineRating {
-    max_push_mps2: 98.1,
-    max_turn_radps2: 0.8,
-};
+/// The row stores whole units for the same reason the wire does — two processes must read one number
+/// the same way — and this is the one place they become the rates a push is computed from.
+fn rating_of(facts: &vd_core::built::BuiltFacts) -> EngineRating {
+    EngineRating {
+        max_push_mps2: off_grid(facts.max_push_micro_mps2, DRIVE_UNITS_PER_MPS2),
+        max_turn_radps2: off_grid(facts.max_turn_micro_radps2, TURN_UNITS_PER_RADPS2),
+    }
+}
+
+/// ★ WHAT THIS REALM LAST TOLD ITS PARENT IT IS (D-MOVE-2).
+///
+/// The facts lane is ON CHANGE ONLY, so something must remember what was said. Without this a realm
+/// either repeats itself every tick — on the RELIABLE lane, which is the flood this design exists to
+/// avoid — or says it once and never again, which loses it to a single dropped connection.
+#[derive(Debug, Default, bevy_ecs::prelude::Resource)]
+pub struct StatedFacts(pub(crate) Option<vd_core::built::BuiltFacts>);
+
+/// ★ WHAT I AM — stated when it changes, and once per connection (D-MOVE-2).
+///
+/// **ONCE PER CONNECTION IS NOT BELT AND BRACES.** The carrier is at-least-once across a blip, but the
+/// receiver's memory of what it has seen is RAM-only: a parent that restarts has forgotten everything.
+/// So a child restates on a new parent route — redundancy applied exactly where it is needed, and
+/// nowhere else.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_child_facts(
+    self_driven: bool,
+    own_coord: &vd_core::realm_coord::RealmCoord,
+    realm_fence: Option<vd_core::fence::Fence>,
+    at: vd_core::ids::UniverseTick,
+    parent_node: Option<vd_core::ids::NodeId>,
+    body: &vd_core::built::BuiltBody,
+    stated: &mut StatedFacts,
+    outbox: &mut crate::runtime::OutboundBox,
+    stats: &mut super::StubStats,
+) {
+    if !self_driven {
+        return;
+    }
+    let (Some(parent), Some(fence)) = (parent_node, realm_fence) else {
+        return;
+    };
+    if stated.0 == Some(body.facts) {
+        return; // unchanged — a declared property says nothing twice
+    }
+    // ★ RETAINED, AND THE GUARD CAUGHT ME FORGETTING IT. This arm is producer-less-reliable: it is
+    // stated ONCE on a change and no timer re-drives it, so the carrier must keep it across a source
+    // crash or the one-shot is silently lost — and a parent would compute drag from a mass that is
+    // wrong for ever. The obligation was written into the wire when the arm was classified, and the
+    // push site's own debug guard fired the first time this producer existed.
+    outbox.push_flow_durable(
+        parent,
+        // The RELIABLE carrier: a change stated once and then lost would leave a parent computing drag
+        // from a mass that is wrong for ever, with nothing to correct it.
+        crate::io::MsgClass::Saga,
+        &vd_wire::intershard::InterShardFlow::ChildFacts(vd_wire::intershard::ChildFacts {
+            child: own_coord.clone(),
+            child_fence: fence,
+            at,
+            mass_g: body.facts.mass_g,
+            cross_section_mm2: body.facts.cross_section_mm2,
+            drag_micro: body.facts.drag_micro,
+            declared: vd_wire::intershard::DeclaredStates::default(),
+        }),
+        crate::io::Durability::Retained,
+    );
+    stated.0 = Some(body.facts);
+    stats.child_facts_sent += 1;
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1027,5 +1124,80 @@ mod tests {
             !held.moves(vd_core::pose::RealmId::Planet(4242)),
             "a realm this book does not hold does not move by this rule"
         );
+    }
+
+    #[test]
+    fn a_hull_states_what_it_is_once_and_then_stays_quiet() {
+        // ★ THE FACTS LANE HAD NO PRODUCER AT ALL until this. It is ON CHANGE ONLY, so something must
+        // remember what was said — otherwise a realm either repeats itself every tick on the RELIABLE
+        // lane, which is the flood this whole design avoids, or says it once and loses it to a dropped
+        // connection.
+        let mut outbox = crate::runtime::OutboundBox::default();
+        let mut stats = StubStats::default();
+        let mut stated = super::StatedFacts::default();
+        let body = a_built_body();
+        let coord = ship_coord();
+        let parent = Some(vd_core::ids::NodeId(9));
+
+        super::emit_child_facts(true, &coord, Some(Fence(1)), UniverseTick(1), parent,
+            &body, &mut stated, &mut outbox, &mut stats);
+        assert_eq!(stats.child_facts_sent, 1, "it stated what it is");
+
+        // Nothing changed, so nothing is said. A declared property says nothing twice.
+        super::emit_child_facts(true, &coord, Some(Fence(1)), UniverseTick(2), parent,
+            &body, &mut stated, &mut outbox, &mut stats);
+        assert_eq!(stats.child_facts_sent, 1, "and it did not repeat itself");
+
+        // The hull drops cargo. That IS a change, and it must travel.
+        let mut lighter = body;
+        lighter.facts.mass_g = 30_000_000;
+        super::emit_child_facts(true, &coord, Some(Fence(1)), UniverseTick(3), parent,
+            &lighter, &mut stated, &mut outbox, &mut stats);
+        assert_eq!(stats.child_facts_sent, 2, "a change is stated");
+    }
+
+    #[test]
+    fn a_realm_that_pushes_nothing_states_nothing() {
+        // A star system holds hulls and does not steer. It has no facts to declare and must never
+        // speak on this lane — the same silence a realm with no parent gives.
+        let mut outbox = crate::runtime::OutboundBox::default();
+        let mut stats = StubStats::default();
+        let mut stated = super::StatedFacts::default();
+        super::emit_child_facts(false, &ship_coord(), Some(Fence(1)), UniverseTick(1),
+            Some(vd_core::ids::NodeId(9)), &a_built_body(), &mut stated, &mut outbox, &mut stats);
+        assert_eq!(stats.child_facts_sent, 0);
+    }
+
+    #[test]
+    fn a_hulls_own_row_decides_how_hard_it_pushes_and_not_a_shared_number() {
+        // ★ THE SHARED CONSTANT IS GONE. One number in the source stated how hard EVERY ship in the
+        // world pushes, which is the magic number this project's own rule forbids: two hulls could
+        // never differ, however they were built.
+        let heavy = a_built_body();
+        let mut nimble = heavy;
+        nimble.facts.max_push_micro_mps2 = 200_000_000;
+        let a = super::rating_of(&heavy.facts);
+        let b = super::rating_of(&nimble.facts);
+        assert!(b.max_push_mps2 > a.max_push_mps2, "two hulls fly differently: {a:?} vs {b:?}");
+        // And the stored whole numbers read back as the rates the stick is scaled by.
+        assert!((a.max_push_mps2 - 98.1).abs() < 1e-9, "ten gravities: {}", a.max_push_mps2);
+    }
+
+    fn a_built_body() -> vd_core::built::BuiltBody {
+        vd_core::built::BuiltBody {
+            realm: ship_coord().lowered(),
+            owner: vd_core::ids::AccountId(1000),
+            blueprint: vd_core::built::BlueprintId(0),
+            bound: vd_core::geometry::Boundary::Shell { r: 20.0 },
+            look: vd_core::geometry::Boundary::Shell { r: 20.0 },
+            facts: vd_core::built::BuiltFacts {
+                mass_g: 50_000_000,
+                cross_section_mm2: 12_000_000,
+                drag_micro: 820_000,
+                max_push_micro_mps2: 98_100_000,
+                max_turn_micro_radps2: 800_000,
+            },
+            fence: Fence::GENESIS,
+        }
     }
 }

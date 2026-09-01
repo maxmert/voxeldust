@@ -124,6 +124,10 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // D-MOVE-2 — every driven child this realm holds: where each is, how it is moving, and the
     // freshest push it stated. Empty on a realm that holds none, which is most of them.
     world.insert_resource(crate::stub::drive::DrivenChildren::default());
+    // D-MOVE-2 — what this realm IS, read from its own file at boot, and what it last told its parent.
+    // Both empty on a realm the seed made, which is most of them.
+    world.insert_resource(crate::stub::drive::OwnBody::default());
+    world.insert_resource(crate::stub::drive::StatedFacts::default());
     world.insert_resource(InterestEmitLatch::default());
     world.insert_resource(ChildLuma::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the

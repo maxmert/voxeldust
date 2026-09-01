@@ -467,6 +467,8 @@ pub struct StubStats {
     pub realm_interest_sent: u64,
     /// Look horizon slice 4 — interest bytes lawfully ADMITTED (either value; the down-proxy
     /// reads the held entry, never this counter).
+    /// D-MOVE-2: a statement of what this realm IS, sent to its parent on a change.
+    pub child_facts_sent: u64,
     /// D-MOVE-2: a per-tick drive this realm SENT to its parent.
     pub child_drive_sent: u64,
     /// D-MOVE-2: a child's per-tick drive, admitted and held.
