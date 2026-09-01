@@ -9997,7 +9997,7 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
             let decoded: ShardToGateway =
                 postcard::from_bytes(bytes).expect("the load gate authored these bytes");
             let (wid, level) =
-                window_level_of(decoded);
+                window_level_of(decoded).expect("the load gate authored window frames");
             on_window_row(
                 SHARD,
                 wid,

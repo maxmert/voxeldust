@@ -7,7 +7,7 @@
 //! Does NOT own: a search-only world. Every number here is derived from THE one generator read at a
 //! seed (SL5); the sweep chooses a SEED, never a different universe.
 
-use super::{GeneratedBody, Placement, StarPhotometrics, UniverseConfig, generate_system_forest, system_forest_cached};
+use super::{GeneratedBody, Placement, StarPhotometrics, UniverseConfig, system_forest_cached};
 use crate::taxonomy::SpectralClass;
 use vd_core::pose::RealmId;
 

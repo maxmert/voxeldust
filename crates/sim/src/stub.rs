@@ -34,6 +34,7 @@ mod containment;
 mod conversion;
 mod crossing_receive;
 mod dot;
+pub mod built_store;
 pub mod drive;
 mod frames;
 mod ghost;

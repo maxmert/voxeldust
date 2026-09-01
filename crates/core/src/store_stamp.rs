@@ -60,15 +60,28 @@ pub enum StoreRole {
     /// A client's on-disk cache of the star catalogue (owner Q4 condition 4). Named here rather than
     /// later because the whole reason this type lives in the pure crate is that the client shares it.
     ClientCatalogue = 3,
+    /// ★ A REALM'S OWN STORE — what people built, here (D-MOVE-2; owner rulings 2026-09-01). APPENDED
+    /// at 4, never inserted: the number is written into every file this role ever labels.
+    ///
+    /// It holds two families and nothing else: the berths this realm authored for its built children,
+    /// and this realm's own body. Both are things no seed can produce, which is the whole reason a
+    /// realm needs a file at all — everything the seed makes is computed, identically, in every
+    /// process, and stored nowhere.
+    ///
+    /// **ITS LABEL IS LOAD-BEARING.** The rows are positional and carry no field names, so a file from
+    /// a world measured differently decodes without complaint and puts a hangar in the wrong place. The
+    /// label is read before any row is, and a mismatch refuses to open rather than misplacing anything.
+    RealmStore = 4,
 }
 
 impl StoreRole {
     /// Every role — the totality list a test walks so a new role cannot be added without being driven.
-    pub const ALL: [StoreRole; 4] = [
+    pub const ALL: [StoreRole; 5] = [
         StoreRole::Directory,
         StoreRole::Outbox,
         StoreRole::LaunchLedger,
         StoreRole::ClientCatalogue,
+        StoreRole::RealmStore,
     ];
 
     /// The role's name for a refusal message an operator has to act on at three in the morning.
@@ -79,6 +92,9 @@ impl StoreRole {
             StoreRole::Outbox => "outbox",
             StoreRole::LaunchLedger => "launch-ledger",
             StoreRole::ClientCatalogue => "client-catalogue",
+            // The name an operator reads at three in the morning: it must say WHOSE file this is, not
+            // what it contains, because the refusal they are staring at is "this file is not mine".
+            StoreRole::RealmStore => "realm-store",
         }
     }
 }

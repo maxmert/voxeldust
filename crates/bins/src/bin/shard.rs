@@ -55,6 +55,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         None => None,
     };
+    // ★ WHAT THIS REALM REMEMBERS (D-MOVE-2). Opened BEFORE the world is built, because what a player
+    // built is part of what this shard must hold — and because a file whose label names a different
+    // world must refuse the boot before anything reads a row from it.
+    //
+    // ABSENT ⇒ no store, which is exactly what every shard has had until now.
+    let realm_store = vd_bins::open_realm_store(&env)?;
+    let (stored_berths, stored_body) = match &realm_store {
+        Some(store) => vd_bins::read_realm_store(store)?,
+        None => (Vec::new(), None),
+    };
+    if realm_store.is_some() {
+        tracing::info!(
+            berths = stored_berths.len(),
+            has_body = stored_body.is_some(),
+            "this realm remembered what people built here",
+        );
+    }
+
     // ★ THE LINEAGE DECIDES WHICH REALM THIS IS, WHEN THERE IS ONE (2026-09-01).
     //
     // This used to read a KIND WORD and a 64-BIT SEED, and only afterwards look at the full lineage

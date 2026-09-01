@@ -4560,6 +4560,36 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   system into a planet and **sends the identical six numbers to its new parent**. It does not know it moved
   house. One mechanism; any realm can be the parent.
 
+### D-MOVE-5 🟥 A SIZE IS A PLAIN DECIMAL WHILE A POSITION IS ON A RULER — raised 2026-09-01 by the owner
+
+- **THE OBSERVATION (owner, 2026-09-01).** Reviewing why a built-realm record cannot promise total
+  equality, the owner asked whether a box's `20.0` depends on the ruler's smallest step. **It does not,
+  and that is the finding.** The two halves of the same geometry are measured differently:
+  - a POSITION is `LatticePos { cell: I64Vec3, offset: DVec3 }` — a whole-number cell on a TIERED ruler
+    (millimetres inside a star system, ~2 m across a galaxy, kilometres at the root) plus a leftover;
+  - a SIZE is `Boundary::Shell { r: f64 }` / `Aabb { half: DVec3 }` — a plain decimal on no ruler at all.
+
+- **WHAT IT COSTS TODAY.** A size can hold `NaN`, so it cannot promise to equal itself, so no type
+  containing one may claim total equality (`Eq`) — which is why `BuiltBody` and `RealmInterest` both
+  carry only `PartialEq`. It also means two sizes that should be identical can differ in their last
+  bits, and no comparison of boundaries is ever exact.
+
+- **THE CURE, and why it is not small.** A size on the SAME ruler as a position would be an exact whole
+  number: a 20 m hull is exactly 20 000 millimetre steps, equal to itself for ever, with no `NaN`
+  reachable. But it needs the TIER for the same reason a position does — one ruler cannot span a 20 m
+  hull and a galaxy at once: at millimetre steps a galaxy needs ~9.2e21, and the whole-number type
+  stops at ~9.2e18. So a size would have to state which ruler it is on, exactly as a position does.
+
+- **THIS IS AN OWED CHANGE TO THE ONE WORLD, NOT A VARIANT (SL5).** The law names "true astronomical
+  scale + generated stations/areas + the galaxy cell lattice" as owed changes to this world; this is
+  the same species. Numbers change on THE world.
+
+- **BLAST RADIUS:** every boundary in the world — the containment fence, the interest radius, the
+  drawing, the nest fence, and every stored extent. It is a design, not an edit.
+
+- **WHEN:** after the first ship flies (owner, 2026-09-01: *"add it to the ledger to chase after the
+  test flight is done"*).
+
 ### D-MOVE-4 🟥 A PLANET HAS NO DAY, AND THE SECOND FRAME THAT ANSWERS IT — raised 2026-09-01
 
 - **MEASURED, and it is the fact the whole question turns on:** nothing in the tree spins. `FrameRef`

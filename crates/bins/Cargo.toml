@@ -18,6 +18,11 @@ path = "src/bin/gateway.rs"
 name = "vd-shard"
 path = "src/bin/shard.rs"
 
+# The shipyard's stand-in: writes the first built realm's two rows. Offline, single-writer.
+[[bin]]
+name = "vd-build-ship"
+path = "src/bin/build-ship.rs"
+
 # The dev-cluster port helper (HR6): resolves the DevPortScheme to shell-eval-able
 # env so scripts never hand-compute a port. Trivial; depends only on vd-devproto.
 [[bin]]

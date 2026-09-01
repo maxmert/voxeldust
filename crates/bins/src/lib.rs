@@ -2146,6 +2146,93 @@ pub fn spawn_anchor_keys() -> &'static [&'static str] {
     ]
 }
 
+/// This process's own environment, as a shard reads it — so a gate can drive [`open_realm_store`] the
+/// way the shipped boot does, rather than by building a config a shard never builds.
+#[must_use]
+pub fn process_env() -> EnvConfig {
+    EnvConfig::from_process_env()
+}
+
+/// ★ WHAT THIS REALM REMEMBERS — its own store, opened at boot (D-MOVE-2; owner rulings 2026-09-01).
+///
+/// **A SHARD HAS NEVER OPENED A FILE BEFORE THIS.** The orchestrator has one and the outbox has one; a
+/// realm has had none, and the shard binary's own note calls it later work. Everything the seed makes
+/// is computed — the same number gives the same stars in every process — so nothing needed storing.
+/// What a PLAYER made cannot be computed, and stops existing when the process stops unless it is
+/// written down.
+///
+/// **ABSENT MEANS NO STORE, WHICH IS EXACTLY TODAY'S BEHAVIOUR.** Every existing cluster and every
+/// existing test sets no path, gets no file, and boots byte-identically. Only a realm that must
+/// remember something is given one.
+///
+/// **THE FILE'S LABEL IS CHECKED BEFORE ANY ROW.** The rows carry no field names, so a file from a
+/// world measured differently decodes without complaint and puts a hangar in the wrong place. A
+/// mismatch refuses to open and names the escape, exactly as the orchestrator's does.
+///
+/// # Errors
+/// The path is stated but the file cannot be opened, or its label names a different world.
+pub fn open_realm_store(
+    env: &EnvConfig,
+) -> Result<Option<vd_io_prod::store::RedbStore>, Box<dyn std::error::Error>> {
+    let Ok(path) = env.string("VD_REALM_STORE") else {
+        return Ok(None);
+    };
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let path = std::path::PathBuf::from(path);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stamp = durable_stamp(
+        env,
+        vd_core::store_stamp::StoreRole::RealmStore,
+        vd_core::EpochId(0),
+    )?;
+    let allow_genesis = parse_bool_env(env, "VD_STORE_ALLOW_GENESIS")?;
+    let (store, _durability) =
+        vd_io_prod::store::open_allowing_genesis(&path, allow_genesis, |p| {
+            vd_io_prod::store::RedbStore::open(p, vd_io_prod::store::StoreTuning::default(), stamp)
+        })?;
+    Ok(Some(store))
+}
+
+/// Everything this realm remembered, read in ONE scan per family.
+///
+/// **ONE SCAN, NEVER A LOOKUP PER CHILD (SL9).** A parent's built children are unbounded, so the
+/// berths share one prefix and are read whole. A cost that grows with the number of children is a
+/// defect here as everywhere.
+///
+/// **A ROW THAT DOES NOT DECODE STOPS THE BOOT.** Skipping it would start a realm that has quietly
+/// forgotten a hull somebody built — and a hangar that reports a ship missing is worse than one that
+/// refuses to open and says why.
+///
+/// # Errors
+/// A stored row does not decode.
+pub fn read_realm_store(
+    store: &vd_io_prod::store::RedbStore,
+) -> Result<
+    (
+        Vec<vd_core::built::Berth>,
+        Option<vd_core::built::BuiltBody>,
+    ),
+    String,
+> {
+    use vd_sim::io::Store as _;
+    let berths = store
+        .scan(&vd_sim::stub::built_store::berth_prefix())
+        .into_iter()
+        .map(|(_, v)| vd_sim::stub::built_store::decode_berth(&v))
+        .collect::<Result<Vec<_>, String>>()?;
+    let body = store
+        .scan(&vd_sim::stub::built_store::body_key())
+        .into_iter()
+        .next()
+        .map(|(_, v)| vd_sim::stub::built_store::decode_body(&v))
+        .transpose()?;
+    Ok((berths, body))
+}
+
 /// THE world config as THIS PROCESS boots it: [`UniverseConfig::world`] plus the fixture plant
 /// named by `VD_FIXTURE_PLANT` (look_horizon.md slice 5 `G-IDENTICAL` — the SL5 fixture-forest
 /// doctrine's process-tier path). ABSENT or empty ⇒ THE world exactly, byte-identical to the

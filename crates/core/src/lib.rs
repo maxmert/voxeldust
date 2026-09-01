@@ -18,6 +18,7 @@
 //!
 //! Coverage: Tier-A — 100% region + branch (HR5).
 
+pub mod built;
 pub mod child_index;
 pub mod collections;
 pub mod digest;
