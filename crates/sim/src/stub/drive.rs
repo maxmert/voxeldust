@@ -394,6 +394,18 @@ impl DrivenChildren {
         }
     }
 
+    /// ★ DOES THIS CHILD MOVE? The question the window lane's two-lane split asks, answered from the
+    /// driven book (D-MOVE-2).
+    ///
+    /// A driven child moves the moment it is HELD, not only when its push is non-zero: a ship coasting
+    /// at speed still changes place every tick, and a ship that stops pushing keeps its velocity. A
+    /// zero-push test here would file a coasting hull as static and flood the reliable lane exactly as
+    /// the missing test did.
+    #[must_use]
+    pub fn moves(&self, child: vd_core::pose::RealmId) -> bool {
+        self.0.contains_key(&child)
+    }
+
     /// Where this realm has authored a driven child to be, if it holds one. The placement path reads
     /// this through ONE lookup, exactly as it reads the opaque motion book beside it — it never asks
     /// what KIND of thing the child is, which SL4 forbids by name.
@@ -992,5 +1004,28 @@ mod tests {
         held.advance_all(UniverseTick(48), 5, &vacuum(), 1.0);
         let v = held.state_of(ship_coord().lowered()).expect("held").vel_mps.x;
         assert!((v - 4.0).abs() < 1e-9, "a push from just ahead is fresh: {v}");
+    }
+
+    #[test]
+    fn a_held_driven_child_counts_as_moving_even_with_no_push() {
+        // ★ THE LANE-SPLIT GUARD (2026-09-01). The window lane asks this to decide which of two lanes a
+        // child rides. A driven child must answer YES the moment it is HELD, not only while it pushes.
+        //
+        // WHY IT MUST NOT TEST THE PUSH: a ship that stops thrusting KEEPS ITS SPEED — that is the
+        // owner's own rule — so a coasting hull still changes place every tick. Filing it as static
+        // sends it down the reliable lane, which sends on CHANGE and fingerprints the WHOLE static set.
+        // One coasting ship would then re-send every planet, star and structure in the realm, to every
+        // window, at tick rate. The lane's own comment measures that at 285 MB/s per subscriber.
+        let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
+        on_child_facts(some_facts(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        // Facts only — no push has ever arrived, and no drive is stated.
+        assert!(
+            held.moves(ship_coord().lowered()),
+            "a held driven child MOVES, push or no push"
+        );
+        assert!(
+            !held.moves(vd_core::pose::RealmId::Planet(4242)),
+            "a realm this book does not hold does not move by this rule"
+        );
     }
 }

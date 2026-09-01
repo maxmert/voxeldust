@@ -465,15 +465,6 @@ impl UniverseConfig {
     /// stays exactly this config's; only player-built content is added. The process boots opt in
     /// through `VD_FIXTURE_PLANT` (vd-bins), so a cluster is planted whole or not at all.
     #[must_use]
-    /// This config with the station/area pair AND one built ship planted (D-MOVE-2) — the world a
-    /// ship is flown in. The pair is byte-identical to [`UniverseConfig::with_station_area_plant`]'s;
-    /// the ship is appended after it.
-    #[must_use]
-    pub fn with_station_area_ship_plant(mut self) -> UniverseConfig {
-        self.fixture_plant = FixturePlant::StationAreaShip;
-        self
-    }
-
     pub fn with_station_area_plant(mut self) -> UniverseConfig {
         self.fixture_plant = FixturePlant::StationArea;
         self

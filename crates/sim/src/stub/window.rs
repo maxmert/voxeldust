@@ -12,7 +12,7 @@
 use super::{
     InBandVerdict, ObserverId, ParentRealmNode, Placements, RealmAuthority, RealmRegions,
     RelayHeld, RelayShip, StubConfig, StubStats, aoi_recheck_cadence, build_relay_interior,
-    emit_window_relays, push_session_reply, region_level, ttl_alive, window_ttl_ticks,
+    emit_window_relays, push_session_reply, ttl_alive, window_ttl_ticks,
 };
 use crate::io::{Durability, MsgClass};
 use crate::runtime::{ClockSample, OutboundBox};
@@ -273,12 +273,10 @@ fn emit_window_frames(
                     );
                     continue;
                 };
-                // A Ship child has no lineage coord to serve a window by until P8 (D-SHIP-1):
-                // excluded, counted, never a panic — see `region_level`.
-                if region_level(region).is_none() {
-                    stats.ship_child_regions_excluded += 1;
-                    continue;
-                }
+                // ★ A SHIP IS NO LONGER REFUSED A WINDOW (2026-09-01). This lane excluded a ship and
+                // counted it, because a ship had no lineage to serve a window by. It has one now, so a
+                // subscriber may watch a ship exactly as it watches a planet — which is what has to be
+                // true before a pilot can see their own hull.
                 match invert_hop_placement(own_frame, region.frame, head) {
                     Ok(inv) => Some(Box::new(vd_wire::session_flow::HopRow { child, inv })),
                     // The frame core's refusal (rotated frame across integer cells — owed with
@@ -493,7 +491,7 @@ pub(crate) fn emit_realm_frames(
     // arity fix). Destructured below.
     window_lane: WindowLaneStores,
 ) {
-    let (mut windows, child_luma, mut relay_ship, mut relay_held, verdict) = window_lane;
+    let (mut windows, child_luma, mut relay_ship, mut relay_held, verdict, driven) = window_lane;
     let Some(realm_fence) = authority.0 else {
         return;
     };
@@ -518,10 +516,24 @@ pub(crate) fn emit_realm_frames(
     //
     // `realms` (the whole roster) is kept for the PARENT-ward relay below, which is a different lane to
     // a different consumer and is not split here.
+    // ★ A DRIVEN CHILD MOVES TOO, AND THIS ASKED ONLY THE ORBIT BOOK (fixed 2026-09-01).
+    //
+    // A ship under thrust is not in the orbital roster — driven children live in their own book — so
+    // it was filed as STANDING STILL. The static lane sends on CHANGE, and it compares a fingerprint
+    // of the WHOLE static set. A moving ship changes that fingerprint every tick.
+    //
+    // So the entire static roster — every planet, every star, every built structure in this realm —
+    // was re-serialized and re-sent on the RELIABLE session lane, to every open window, at tick rate,
+    // for as long as one ship held its throttle. The comment above states what that lane costs when it
+    // repeats: 285 MB/s per subscriber at the target census, and one roster of 14.2 MB that does not
+    // fit a datagram at all.
+    //
+    // The question was never "is this child on rails?" — it is "does this child move?". Both books
+    // answer it, and asking both is one call.
     let (movers, statics): (Vec<RealmSnap>, Vec<RealmSnap>) = realms
         .iter()
         .cloned()
-        .partition(|r| regions.child_moves(r.realm));
+        .partition(|r| regions.child_moves(r.realm) | driven.moves(r.realm));
 
     // ===== THE WINDOW LANE (docs/design/window_lane.md §2.9): per tick, per open window, ONE
     // code path for every realm kind (HR3/HR4; ships excluded + counted per the D-SHIP-1
@@ -648,6 +660,9 @@ type WindowLaneStores<'w> = (
     ResMut<'w, RelayShip>,
     ResMut<'w, RelayHeld>,
     Res<'w, InBandVerdict>,
+    // D-MOVE-2 — the driven children this realm holds. The lane split below must ask it, or a ship
+    // under thrust is filed as STANDING STILL. See the split for what that costs.
+    Res<'w, crate::stub::drive::DrivenChildren>,
 );
 
 /// One window's SL7 membership VERDICT (`docs/design/window_lane.md` §2.2/§2.9): for an

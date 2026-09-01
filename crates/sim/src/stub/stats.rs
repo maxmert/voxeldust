@@ -169,15 +169,6 @@ pub struct StubStats {
     /// lawful hand-off — the source flushes through `flush_pose_for_dest`, so the pose arrives in
     /// the dest realm's own frame or a direct child's.
     pub transient_arrivals_unplaceable: u64,
-    /// A hosted DIRECT-child region whose realm the seed-lineage coordinate cannot name — an
-    /// entity-backed `Ship` realm (`level_of` = `None`; `RealmKindTag` has six seed-keyed tags and
-    /// no Ship arm until P8, DEFERRED D-SHIP-1). The two remaining coord-needing lanes — the
-    /// AoI/demand fold and a `Child`-scope window's hop row — each EXCLUDE such a region: a
-    /// graceful typed exclusion, counted per lane pass, NEVER a panic (audit :713: the old
-    /// `expect` aborted the whole shard). (It was FOUR lanes until window lane Slice C2 deleted
-    /// the cascade targeting, the interior fan and the scene reflect.) Always 0 through P3 — no producer plants a Ship region; the P8 ship-realm
-    /// work gives ships a lineage coordinate and retires this counter.
-    pub ship_child_regions_excluded: u64,
     /// DEST: `TransientBatch` REDELIVERIES (already-journaled `(transfer, TRANSIENT_BATCH_STEP)`) — a
     /// counted re-ack-only no-op (at-least-once). 0 in a healthy single-delivery run.
     pub transients_adopt_redelivered: u64,

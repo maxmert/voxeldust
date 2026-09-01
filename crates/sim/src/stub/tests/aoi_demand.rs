@@ -144,7 +144,7 @@ fn region_level_recovers_seed_lineage_kinds() {
             DVec3::ZERO,
             1.0
         )),
-        Some(RealmLevel::new(RealmKindTag::Planet, 42))
+        RealmLevel::new(RealmKindTag::Planet, 42)
     );
     assert_eq!(
         region_level(&region(
@@ -153,23 +153,29 @@ fn region_level_recovers_seed_lineage_kinds() {
             DVec3::ZERO,
             1.0
         )),
-        Some(RealmLevel::new(RealmKindTag::System, 7))
+        RealmLevel::new(RealmKindTag::System, 7)
     );
-    // An entity-backed Ship realm has no lineage tag until P8 (D-SHIP-1): `None`, the typed
-    // graceful exclusion — never a panic (audit :713).
-    assert_eq!(
-        region_level(&region(
-            RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, 7, 3)),
-            Some(OWN_REALM),
-            DVec3::ZERO,
-            1.0
-        )),
-        None
-    );
+    // ★ A SHIP RESOLVES TOO, AND ITS WHOLE MINTED IDENTITY SURVIVES (2026-09-01). This asserted
+    // `None` — the typed graceful exclusion, honest while a lineage had no ship tag and held only 64
+    // bits. Both changed, so the answer changed with them.
+    //
+    // The identity is checked WHOLE rather than by its kind alone: a 64-bit level would drop the high
+    // bits silently, and two ships minted on different machines would then share one name — two PLACES
+    // with one name, which is the collision the widening exists to prevent.
+    let id = EntityId::pack(EntityKind::Ship, 1, 7, 3);
+    let level = region_level(&region(
+        RealmId::Ship(id),
+        Some(OWN_REALM),
+        DVec3::ZERO,
+        1.0,
+    ));
+    assert_eq!(level.kind, RealmKindTag::Ship);
+    assert_eq!(level.seed, id.0, "the whole minted identity, not its low half");
+    assert_eq!(level.to_realm_id(), RealmId::Ship(id), "and it round-trips");
 }
 
 #[test]
-fn a_ship_child_region_is_excluded_from_every_coord_lane_counted_never_a_panic() {
+fn a_ship_child_takes_part_in_every_coord_lane_exactly_like_a_planet() {
     // Audit :713 — `region_level` used to `expect` on an entity-backed Ship realm, so the FIRST
     // hosted ship region would abort the whole shard the moment any lane touched it. Until P8
     // gives ships a lineage coordinate (D-SHIP-1), every coord-needing lane must EXCLUDE it:
@@ -219,21 +225,18 @@ fn a_ship_child_region_is_excluded_from_every_coord_lane_counted_never_a_panic()
         static_held: None,
     };
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
-    assert_eq!(
-        rig.world
-            .resource::<StubStats>()
-            .ship_child_regions_excluded,
-        2,
-        "each coord-needing lane skipped the ship exactly once, counted"
-    );
-    // Nothing was addressed TO the unaddressable child, and the ship-scoped window got no frame.
+    // ★ A SHIP TAKES PART NOW, AND THIS TEST ASSERTED THE OPPOSITE (2026-09-01).
+    //
+    // It used to prove that every lane needing a lineage SKIPPED this child and counted the skip, and
+    // that a window scoped to it was served nothing. That was correct while a ship had no lineage: the
+    // graceful skip replaced an `expect` that aborted the whole shard on one unrepresentable region.
+    //
+    // A ship has a lineage now, so the skip is gone and so is its counter. What must be true instead is
+    // the thing the skip made impossible: a ship is served a window like any other child. Without that,
+    // a pilot could never see their own hull.
     assert!(
-        sent.iter().all(|(to, _, _)| *to != SHIP_HOME),
-        "no lane targeted the ship's home"
-    );
-    assert!(
-        window_frames(&sent).is_empty(),
-        "a window scoped to a coord-less ship is served no frame, never a guessed hop"
+        !window_frames(&sent).is_empty(),
+        "a window scoped to a ship is SERVED — this is what the old exclusion made impossible"
     );
 }
 
@@ -822,7 +825,7 @@ fn the_interest_byte_admits_fail_closed_and_holds_the_latest_lawful_value() {
     // MIS-ROUTE: a coord lowering to somebody else (the system's own planet) drops counted.
     let planet_coord = cfg
         .own_coord
-        .child(level_of(story.planet).expect("planet level"));
+        .child(level_of(story.planet));
     on_realm_interest(
         ri(planet_coord, 5, 1, 1),
         NodeId(40),

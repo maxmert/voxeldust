@@ -35,8 +35,8 @@ fn on_window_relay_holds_the_sealed_batch_verbatim_and_admits_fail_closed() {
         },
     ]);
     let child_coord = vd_core::realm_coord::RealmCoord::from_path(RealmPath::from_levels(vec![
-        level_of(story.system).expect("system level"),
-        level_of(story.planet).expect("planet level"),
+        level_of(story.system),
+        level_of(story.planet),
     ]))
     .expect("two-level path");
     let attested = ChildRealmNodes(BTreeMap::from([(story.planet, NodeId(70))]));
@@ -321,7 +321,7 @@ fn g_verbatim_a_grandchilds_sealed_bytes_survive_both_hops_byte_identical() {
     let cfg_s = story_config(&story, story.system);
     let p_coord = cfg_s
         .own_coord
-        .child(level_of(story.planet).expect("planet level"));
+        .child(level_of(story.planet));
     let mut s_held = RelayHeld::default();
     let mut stats = StubStats::default();
     on_window_relay(
@@ -363,7 +363,7 @@ fn g_verbatim_a_grandchilds_sealed_bytes_survive_both_hops_byte_identical() {
     let cfg_g = story_config(&story, story.galaxy);
     let s_coord = cfg_g
         .own_coord
-        .child(level_of(story.system).expect("system level"));
+        .child(level_of(story.system));
     let mut g_held = RelayHeld::default();
     let g_attested = ChildRealmNodes(BTreeMap::from([(story.system, NodeId(71))]));
     on_window_relay(
@@ -2137,10 +2137,14 @@ fn the_live_siblings_interior_is_one_level_out_and_never_deeper_q1() {
 }
 
 #[test]
-fn a_child_window_guards_unrostered_ship_and_rotated_hops_counted() {
-    // The Child-scope guards, each dropped + counted, never a guess and never a panic:
-    // a stranger realm (`window_child_unrostered`), a Ship child (D-SHIP-1 — no lineage
-    // coord until P8, the SAME counter every coord lane uses), and a ROTATED placement BEYOND
+fn a_child_window_serves_a_ship_and_still_guards_a_stranger_and_a_rotated_hop() {
+    // ★ THE SHIP IS NO LONGER A GUARD (2026-09-01) — it is now one of the SERVED windows, and that is
+    // the point of the change. This test guarded THREE things; a ship was one of them, withheld
+    // because it had no lineage coordinate to serve a window by. It has one, so its window is served
+    // like any other child's. Without that a pilot could never see their own hull.
+    //
+    // The other two guards are untouched and still fire, for reasons of their own:
+    // a stranger realm (`window_child_unrostered`), and a ROTATED placement BEYOND
     // THE EXACT ROTATION REACH (the frame core's own restated refusal — real-scale addendum
     // §A4.6: an in-reach rotated hop now FOLDS exactly, so the guard fires only past
     // 2⁴² m ≈ 29.4 AU — `window_hop_refused`, R2's P10 trigger). The Occupants window beside
@@ -2178,7 +2182,7 @@ fn a_child_window_guards_unrostered_ship_and_rotated_hops_counted() {
     let opens: Vec<Inbound> = [
         (WindowId(1), WindowScope::Occupants),
         (WindowId(2), WindowScope::Child(RealmId::Planet(555))), // rostered NOWHERE
-        (WindowId(3), WindowScope::Child(ship_realm)),           // D-SHIP-1
+        (WindowId(3), WindowScope::Child(ship_realm)),           // SERVED since 2026-09-01
         (WindowId(4), WindowScope::Child(rotated)),              // the P10-owed refusal
     ]
     .into_iter()
@@ -2198,14 +2202,15 @@ fn a_child_window_guards_unrostered_ship_and_rotated_hops_counted() {
     let frames = window_frames(&sent);
     assert_eq!(
         frames.iter().map(|f| f.1).collect::<Vec<_>>(),
-        vec![WindowId(1)],
-        "only the Occupants window serves — every guarded Child window is withheld"
+        vec![WindowId(1), WindowId(3)],
+        "the Occupants window AND the ship's window serve; only the two real guards withhold"
     );
     let stats = rig.world.resource::<StubStats>();
     assert_eq!(stats.window_child_unrostered, 1);
-    // The ship exclusion counts once in the AoI/demand fold and once on the window lane —
-    // the SAME per-lane-pass counting the other D-SHIP-1 guards use.
-    assert_eq!(stats.ship_child_regions_excluded, 2);
+    // ★ THE SHIP EXCLUSION IS GONE (2026-09-01), and with it the counter this line read. A ship has a
+    // lineage now, so it is not withheld from any lane — the withheld windows below are withheld for
+    // their OWN reasons (an unrostered child, a refused rotated hop), which is what this test is
+    // actually about. A ship being served is proved in `aoi_demand`.
     assert_eq!(stats.window_hop_refused, 1);
     assert_eq!(
         stats.windows_open, 4,

@@ -216,16 +216,99 @@ struct CameraState {
     throttle_tier: u8,
     /// THROWAWAY: the eased commanded magnitude the wire actually carries (see `THROTTLE_EASE_TAU_S`).
     throttle_now: f32,
-    /// ★ HOW FAR BEHIND THE EYE SITS, in metres (D-MOVE-2). `0.0` is first person, which is the
-    /// default and leaves every existing view and pixel gate untouched.
-    ///
-    /// It must clear the hull it follows, or the camera sits inside the box and sees its inner faces.
-    /// Set from the drawn extent of the realm the player is inside, never from a stated number — a
-    /// literal here would put the eye inside the first hull anybody built bigger than it.
-    chase_m: f64,
-    /// How far the eye lifts above what it follows, in metres. Pairs with `chase_m`.
-    chase_lift_m: f64,
+    /// ★ WHICH VIEW THE PLAYER IS IN (D-MOVE-2; owner 2026-09-01). See [`CameraMode`].
+    mode: CameraMode,
 }
+
+/// ★ THE TWO VIEWS, AND WHY THIS IS A MODE RATHER THAN A DISTANCE (owner ruling 2026-09-01).
+///
+/// A distance alone cannot express what changes between them, because more than the eye moves:
+///
+/// | | first person | third person |
+/// |---|---|---|
+/// | the eye | in the chair | behind and above the hull |
+/// | the pilot | you ARE them | not drawn — you see the hull instead |
+/// | the instruments | a cockpit panel | drawn AROUND the ship, as a strategy game draws them |
+///
+/// The owner's words: *"if we are flying the ship now and we switch to the third-person view, we
+/// don't see the pilot in the chair, but we see the ship from outside, and if we distance far enough
+/// we would see the HUD around the ship."* None of that is a number.
+///
+/// **AND THE WHEEL IS NOT FREE.** In the game the wheel belongs to some other mechanic, and camera
+/// distance is one MODIFIED use of it. So the mode must not depend on the wheel existing — the wheel
+/// adjusts a distance the mode already has.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CameraMode {
+    /// The eye sits at the avatar. The view every existing pixel gate was written against.
+    FirstPerson,
+    /// The eye sits behind and above what it follows, so the hull and its facing are visible.
+    ///
+    /// It carries its own distance because the distance means nothing in the other mode — a mode that
+    /// stores a field it never reads is the shape somebody later reads by mistake.
+    ThirdPerson {
+        /// How far back the eye sits, in metres. It must clear the hull, or the camera sits inside the
+        /// box and sees its inner faces.
+        distance_m: f64,
+    },
+}
+
+impl CameraMode {
+    /// How far back and how far up this mode puts the eye. First person is `(0, 0)`, which returns
+    /// EXACTLY the first-person eye — so the walking view and every gate on it stay untouched.
+    fn chase(self) -> (f64, f64) {
+        match self {
+            CameraMode::FirstPerson => (0.0, 0.0),
+            // The lift is a share of the distance, so the tilt stays consistent however far out the
+            // eye goes. Pulling back without lifting would put the hull's own tail between the eye and
+            // everything ahead of it.
+            CameraMode::ThirdPerson { distance_m } => (distance_m, distance_m * CHASE_LIFT_SHARE),
+        }
+    }
+}
+
+/// How much the eye lifts, as a share of how far back it sits — the "back-top" view the owner asked
+/// for. A quarter is a gentle downward tilt that keeps the hull and what is ahead of it both in frame.
+const CHASE_LIFT_SHARE: f64 = 0.25;
+
+#[cfg(test)]
+mod camera_mode_tests {
+    use super::{CHASE_LIFT_SHARE, CHASE_START_M, CameraMode};
+
+    #[test]
+    fn first_person_puts_the_eye_exactly_where_it_always_was() {
+        // The walking view and every pixel gate written against it must be untouched by the addition
+        // of a second mode.
+        assert_eq!(CameraMode::FirstPerson.chase(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn third_person_steps_back_and_lifts_a_share_of_the_step() {
+        let (back, lift) = CameraMode::ThirdPerson { distance_m: 60.0 }.chase();
+        assert!((back - 60.0).abs() < 1e-12);
+        assert!((lift - 60.0 * CHASE_LIFT_SHARE).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_tilt_stays_the_same_however_far_out_the_eye_goes() {
+        // The lift is a SHARE, not a fixed height. A fixed height would flatten the view to nothing at
+        // long range, and the hull's own tail would sit between the eye and everything ahead of it.
+        let near = CameraMode::ThirdPerson { distance_m: 20.0 }.chase();
+        let far = CameraMode::ThirdPerson { distance_m: 400.0 }.chase();
+        assert!(((near.1 / near.0) - (far.1 / far.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn stepping_out_starts_clear_of_a_small_hull() {
+        // The starting distance must put the eye OUTSIDE a hull, or switching the view shows the
+        // inside faces of a box and reads as a rendering fault.
+        let (back, _) = CameraMode::ThirdPerson { distance_m: CHASE_START_M }.chase();
+        assert!(back > 20.0, "clear of a twenty-metre ship: {back}");
+    }
+}
+
+/// Where the eye starts when a player first steps out to third person: clear of a small hull, near
+/// enough to read its facing at a glance.
+const CHASE_START_M: f64 = 60.0;
 
 /// The map from a delivered entity to its spawned Bevy dot entity.
 #[derive(Resource, Default)]
@@ -455,9 +538,8 @@ fn run_windowed(handles: RenderHandles) {
             last_movement: MovementKeys::default(),
             throttle_tier: input_map::THROTTLE_TIERS,
             throttle_now: 0.0,
-            // First person until a pilot boards a hull. See `CameraState::chase_m`.
-            chase_m: 0.0,
-            chase_lift_m: 0.0,
+            // A player starts in the chair; the mode key steps them out. See `CameraMode`.
+            mode: CameraMode::FirstPerson,
         })
         // A window is always the human's own first-person view; the pilot-view switch exists only
         // for the HEADLESS capture path (there is no scene-fitting framing here to decline).
@@ -741,6 +823,24 @@ fn input_system(
     net: Res<Net>,
     mut camera: ResMut<CameraState>,
 ) {
+    // ★ THE VIEW KEY SWITCHES THE MODE (D-MOVE-2, owner 2026-09-01). It is a MODE and not a distance
+    // because more than the eye changes between them: in the chair you see a cockpit and you ARE the
+    // pilot; outside you see the hull, the pilot is not drawn, and the instruments belong around the
+    // ship rather than in front of your face.
+    //
+    // **THE PLAYER CHOOSES, so nothing here asks what kind of realm holds them.** Switching
+    // automatically when the player's frame was a ship's would be a KIND TEST — wrong here for the
+    // same reason it is wrong everywhere else: a station with engines, or anything else somebody
+    // builds later, would need adding to a list. A key needs no list.
+    if keys.just_pressed(KeyCode::KeyV) {
+        camera.mode = match camera.mode {
+            CameraMode::FirstPerson => CameraMode::ThirdPerson {
+                distance_m: CHASE_START_M,
+            },
+            CameraMode::ThirdPerson { .. } => CameraMode::FirstPerson,
+        };
+        tracing::info!(mode = ?camera.mode, "view switched");
+    }
     // THROWAWAY (test instrument): `]` raises the throttle tier, `[` lowers it. The tier is announced
     // in the log because there is no HUD yet to show it.
     let raised = u8::from(keys.just_pressed(KeyCode::BracketRight));
@@ -876,9 +976,8 @@ fn place_camera(
         //
         // A pilot needs this and a walker does not: from inside a hull you cannot see the hull, and a
         // pilot must see which way the nose points to fly at all.
-        let e = camera
-            .cam
-            .chase_eye(own_world, camera.chase_m, camera.chase_lift_m);
+        let (back_m, lift_m) = camera.mode.chase();
+        let e = camera.cam.chase_eye(own_world, back_m, lift_m);
         (e, camera.cam.forward(), camera.cam.up)
     };
     eye.eye = eye_pos;
@@ -1589,9 +1688,8 @@ fn run_capture(handles: RenderHandles) {
             last_movement: MovementKeys::default(),
             throttle_tier: input_map::THROTTLE_TIERS,
             throttle_now: 0.0,
-            // First person until a pilot boards a hull. See `CameraState::chase_m`.
-            chase_m: 0.0,
-            chase_lift_m: 0.0,
+            // A player starts in the chair; the mode key steps them out. See `CameraMode`.
+            mode: CameraMode::FirstPerson,
         })
         .insert_resource(CaptureView {
             pilot: handles.pilot_view,

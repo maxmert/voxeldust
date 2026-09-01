@@ -561,12 +561,11 @@ fn aoi_decide(
     // Look horizon slice 4 — the children seen this pass (the interest latch's evict set).
     let mut live_realms = BTreeSet::<RealmId>::new();
     for (region, pose) in &placements {
-        // A Ship child has no lineage coord to demand/draw by until P8 (D-SHIP-1): excluded from
-        // the AoI/demand/render fold, counted, never a panic — see `region_level`.
-        let Some(level) = region_level(region) else {
-            stats.ship_child_regions_excluded += 1;
-            continue;
-        };
+        // ★ A SHIP IS NO LONGER SKIPPED HERE (2026-09-01). This lane excluded a ship child and counted
+        // it, because a ship had no lineage to demand or draw by. It has one now, so the skip became
+        // unreachable and is deleted — a ship takes part in the interest fold exactly like a planet,
+        // which is what has to be true before anybody can see one.
+        let level = region_level(region);
         let child_coord = own_coord.child(level);
         live_realms.insert(region.realm);
         let child_pos = pose.pos; // own frame (== the placements' frame), carried WHOLE

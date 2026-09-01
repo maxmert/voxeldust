@@ -828,7 +828,7 @@ fn with_child_coord(rig: &mut Rig, child: RealmId) -> RealmCoord {
         .expect("the fixture registered that child");
     config
         .own_coord
-        .child(region_level(region).expect("a seed-lineage child region"))
+        .child(region_level(region))
 }
 
 // ---- Slice 3d/3e/4b + C-3 (the CONTAINMENT re-home trigger) --------------------------------
@@ -1698,7 +1698,7 @@ fn demands(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<RealmDemand> {
 
 /// The child coord the loop names for `own_realm`'s child `child_realm` — `own_coord.child(level)`.
 fn child_coord_of(own_realm: RealmId, child_realm: RealmId) -> RealmCoord {
-    StubConfig::root_coord(own_realm).child(level_of(child_realm).expect("seed-lineage child"))
+    StubConfig::root_coord(own_realm).child(level_of(child_realm))
 }
 
 fn player(tag: u32) -> EntityId {

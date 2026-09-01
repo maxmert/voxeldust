@@ -13,7 +13,7 @@
 use super::Placement;
 use super::{
     GeneratedBody, IMF_MASS_LO_MSUN, IMF_SLOPE, K_SPAN, UniverseConfig, WorldView,
-    generate_system_forest, imf_mass_hi_msun, moving_children_for_config, placement_offset,
+    system_forest_cached, imf_mass_hi_msun, moving_children_for_config, placement_offset,
 };
 use crate::celestial::OrbitalElements;
 use crate::motion::Motion;
@@ -150,7 +150,7 @@ pub fn guard_seeded_systems_disjoint(
     seed_universe: u64,
     config: &UniverseConfig,
 ) -> Result<(), SiblingsOverlap> {
-    let centres: Vec<(RealmId, DVec3, f64)> = generate_system_forest(seed_universe, config)
+    let centres: Vec<(RealmId, DVec3, f64)> = system_forest_cached(seed_universe, config)
         .iter()
         .filter(|b| b.parent == Some(GALAXY))
         .map(|b| {
@@ -506,7 +506,7 @@ pub fn guard_star_bound_exceeds_photosphere(
     seed_universe: u64,
     config: &UniverseConfig,
 ) -> Result<(), StarBoundInsidePhotosphere> {
-    guard_star_bounds(&generate_system_forest(seed_universe, config))
+    guard_star_bounds(&system_forest_cached(seed_universe, config))
 }
 
 /// The fence's ARITHMETIC over a forest already in hand — split from the generate-and-check shell

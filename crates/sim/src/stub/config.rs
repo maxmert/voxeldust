@@ -215,14 +215,16 @@ pub struct StubConfig {
 
 impl StubConfig {
     /// The default single-realm ROOT coord for `realm` — a one-level lineage (the inert-AoI default; a
-    /// live-AoI shard's boot replaces it with the full seed lineage). `realm` is always a seed-lineage
-    /// realm here (never an entity-backed ship), so `level_of` resolves.
+    /// live-AoI shard's boot replaces it with the full seed lineage).
+    ///
+    /// ★ THE "NEVER A SHIP" CAVEAT IS GONE (2026-09-01). This used to carry an `expect` reading "a
+    /// shard realm is a seed-lineage realm" — honest while a ship had no level, and a promise that
+    /// would have aborted a whole shard the day one did. Every kind resolves now, so there is nothing
+    /// left to expect.
     #[must_use]
     pub fn root_coord(realm: RealmId) -> RealmCoord {
-        RealmCoord::from_path(RealmPath::from_levels(vec![
-            level_of(realm).expect("a shard realm is a seed-lineage realm"),
-        ]))
-        .expect("a one-level path has a leaf")
+        RealmCoord::from_path(RealmPath::from_levels(vec![level_of(realm)]))
+            .expect("a one-level path has a leaf")
     }
 
     /// The `held_realms` for a SINGLE-realm shard: exactly `{realm}`. The default co-hosting set —

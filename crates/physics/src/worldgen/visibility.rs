@@ -10,7 +10,7 @@
 //! rule, applied at two moments.
 
 use super::{
-    GeneratedBody, Placement, UniverseConfig, VISIBILITY_THETA_MIN_RAD, generate_system_forest,
+    GeneratedBody, Placement, UniverseConfig, VISIBILITY_THETA_MIN_RAD, generate_system_forest, system_forest_cached,
 };
 #[cfg(test)]
 use crate::motion::Motion;
@@ -224,7 +224,7 @@ pub fn measure_visibility_climb(
     config: &UniverseConfig,
 ) -> Vec<VisibilityClimb> {
     visibility_climbs(
-        &generate_system_forest(seed_universe, config),
+        &system_forest_cached(seed_universe, config),
         VISIBILITY_THETA_MIN_RAD,
         config.planet.ecc_cap,
     )

@@ -61,22 +61,15 @@ pub const AREA_A: RealmId = RealmId::Area(7);
 /// so this reads a level rather than recognising a borrowed seed. Monomorphic (HR5: the kind match
 /// covered once here).
 ///
-/// ★ **A SHIP HAS A LEVEL NOW, AND UNTIL 2026-09-01 IT DID NOT.** This returned `None` for a ship, and
-/// said so for a reason that was true when written: *"a ship is ENTITY-backed, NOT a seed-lineage
-/// realm, so it has no seed RealmLevel (and never appears in a seed forest)"*.
+/// ★ **TOTAL SINCE 2026-09-01 — IT USED TO RETURN `None` FOR A SHIP.** That refusal was honest while a
+/// lineage held 64 bits and there was no ship tag: a ship simply could not be named. Both facts changed
+/// (the tag was appended, the level widened to 128 bits), so every kind now has a level and there is
+/// nothing left to refuse.
 ///
-/// Both halves have since stopped being true. A ship is APPENDED to the built world by the fixture
-/// plant, so it does appear in a forest; and a lineage level now holds 128 bits, so a minted identity
-/// fits in one. The `None` was not a policy — it was the honest answer while a ship could not be named
-/// at all, and keeping it would have meant **no shard could ever boot for a ship**, because the
-/// orchestrator resolves a realm to its lineage before it can spawn anything for it.
-///
-/// ★ IT NO LONGER ALIASES. It used to recover the universe and the galaxy from `System(0)` and
-/// `System(1)`, and said so: "a real system with seed 0/1 would alias, but the walk/visual forest uses
-/// 7/8." That was a naming convention standing in for a type, and it held only while no seeded world drew
-/// a 0 or a 1.
-#[must_use]
-pub fn level_of(realm: RealmId) -> Option<RealmLevel> {
+/// The `Option` went with it deliberately. Every caller had a branch for an empty answer, and once no
+/// input can produce one those branches are unreachable — which the coverage rule forbids, and which is
+/// worse than useless: an unreachable guard reads like a live protection and protects nothing.
+pub fn level_of(realm: RealmId) -> RealmLevel {
     match realm {
         // ★ EXACT SINCE S9, WHERE IT USED TO ALIAS. The universe and the galaxy have their own
         // identities now, so recovering their level is reading it rather than recognising a borrowed
@@ -84,15 +77,15 @@ pub fn level_of(realm: RealmId) -> Option<RealmLevel> {
         // admitted the hole in as many words: "a real system with seed 0/1 would alias, but the
         // walk/visual forest uses 7/8." It aliased on a naming convention, and the convention held only
         // because no seeded world had yet drawn a 0 or a 1.
-        RealmId::Universe => Some(RealmLevel::new(RealmKindTag::Universe, UNIVERSE_SEED)),
-        RealmId::Galaxy(s) => Some(RealmLevel::new(RealmKindTag::Galaxy, s)),
-        RealmId::System(s) => Some(RealmLevel::new(RealmKindTag::System, s)),
-        RealmId::Planet(s) => Some(RealmLevel::new(RealmKindTag::Planet, s)),
-        RealmId::Station(s) => Some(RealmLevel::new(RealmKindTag::Station, s)),
-        RealmId::Area(s) => Some(RealmLevel::new(RealmKindTag::Area, s)),
-        RealmId::Star(s) => Some(RealmLevel::new(RealmKindTag::Star, s)),
+        RealmId::Universe => RealmLevel::new(RealmKindTag::Universe, UNIVERSE_SEED),
+        RealmId::Galaxy(s) => RealmLevel::new(RealmKindTag::Galaxy, s),
+        RealmId::System(s) => RealmLevel::new(RealmKindTag::System, s),
+        RealmId::Planet(s) => RealmLevel::new(RealmKindTag::Planet, s),
+        RealmId::Station(s) => RealmLevel::new(RealmKindTag::Station, s),
+        RealmId::Area(s) => RealmLevel::new(RealmKindTag::Area, s),
+        RealmId::Star(s) => RealmLevel::new(RealmKindTag::Star, s),
         // A BUILT realm: its identity is minted, not seeded, which is exactly why the level widened.
-        RealmId::Ship(id) => Some(RealmLevel::for_ship(id)),
+        RealmId::Ship(id) => RealmLevel::for_ship(id),
     }
 }
 
@@ -122,11 +115,24 @@ pub fn coord_of_realm_indexed(
     ix_of: &std::collections::BTreeMap<RealmId, usize>,
     realm: RealmId,
 ) -> Option<RealmCoord> {
+    // ★ A REALM THIS FOREST DOES NOT HOLD HAS NO LINEAGE (2026-09-01), and that is about the FOREST,
+    // never about the KIND of thing asked for.
+    //
+    // The ancestor walk starts at the realm itself and climbs by parent pointers, so a realm it has
+    // never heard of yields a chain of exactly ONE — a leaf with no ancestors, which is not a lineage.
+    // It then built a one-level coord out of it and returned it as an answer.
+    //
+    // Nothing caught this because a ship was the only realm that ever reached here, and `level_of`
+    // refused a ship for a different reason, which hid the hole. The day a ship gained a level the
+    // hole became reachable — so the guard belongs on the real condition, which is membership.
+    if !ix_of.contains_key(&realm) {
+        return None;
+    }
     let chain = ancestor_realms_indexed(regions, ix_of, realm); // leaf → root
     let mut levels = Vec::with_capacity(chain.len());
     for r in chain.iter().rev() {
         // root → leaf
-        levels.push(level_of(*r)?); // `?` → None only on a ship (never a crossing dest)
+        levels.push(level_of(*r));
     }
     RealmCoord::from_path(RealmPath::from_levels(levels))
 }
@@ -410,36 +416,36 @@ mod tests {
         // A star system whose seed is 0 is now a star system whose seed is 0. Nothing else.
         assert_eq!(
             level_of(RealmId::System(0)),
-            Some(RealmLevel::new(RealmKindTag::System, 0))
+            RealmLevel::new(RealmKindTag::System, 0)
         );
         assert_eq!(
             level_of(RealmId::System(1)),
-            Some(RealmLevel::new(RealmKindTag::System, 1))
+            RealmLevel::new(RealmKindTag::System, 1)
         );
         // …and the two that DO mean the universe and a galaxy say so themselves.
         assert_eq!(
             level_of(RealmId::Universe),
-            Some(RealmLevel::new(RealmKindTag::Universe, UNIVERSE_SEED))
+            RealmLevel::new(RealmKindTag::Universe, UNIVERSE_SEED)
         );
         assert_eq!(
             level_of(RealmId::Galaxy(4)),
-            Some(RealmLevel::new(RealmKindTag::Galaxy, 4))
+            RealmLevel::new(RealmKindTag::Galaxy, 4)
         );
         assert_eq!(
             level_of(RealmId::System(7)),
-            Some(RealmLevel::new(RealmKindTag::System, 7))
+            RealmLevel::new(RealmKindTag::System, 7)
         );
         assert_eq!(
             level_of(RealmId::Planet(7)),
-            Some(RealmLevel::new(RealmKindTag::Planet, 7))
+            RealmLevel::new(RealmKindTag::Planet, 7)
         );
         assert_eq!(
             level_of(RealmId::Station(7)),
-            Some(RealmLevel::new(RealmKindTag::Station, 7))
+            RealmLevel::new(RealmKindTag::Station, 7)
         );
         assert_eq!(
             level_of(RealmId::Area(7)),
-            Some(RealmLevel::new(RealmKindTag::Area, 7))
+            RealmLevel::new(RealmKindTag::Area, 7)
         );
         // ★ A SHIP RESOLVES TOO, and its WHOLE 128-bit identity survives the trip (2026-09-01). This
         // asserted `None` while a lineage level held 64 bits and no ship tag existed. Both changed, so
@@ -452,7 +458,7 @@ mod tests {
         // then share one name — two PLACES with one name, which is the collision the widening exists
         // to prevent.
         let id = crate::EntityId::pack(crate::entity_kind::EntityKind::Ship, 1, 1, 1);
-        let level = level_of(RealmId::Ship(id)).expect("a ship has a lineage level");
+        let level = level_of(RealmId::Ship(id));
         assert_eq!(level.kind, RealmKindTag::Ship);
         assert_eq!(level.seed, id.0, "the whole minted identity, not its low half");
         assert_eq!(

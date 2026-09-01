@@ -595,12 +595,18 @@ impl RealmRegions {
 /// [`level_of`] (the `System(0)`/`System(1)` stand-ins recover to Universe/Galaxy; keyed kinds pass
 /// through). Monomorphic (HR5: the kind match is covered once inside `level_of`).
 ///
-/// `None` for an entity-backed `Ship` realm: the lineage coordinate cannot name one — `RealmKindTag`
-/// carries six seed-keyed tags and no Ship arm until the P8 ship-realm work (DEFERRED D-SHIP-1). Every
-/// lane that needs a child COORD (demand/AoI, cascade, scene reflect, interior fan) EXCLUDES such a
-/// region gracefully — counted (`StubStats::ship_child_regions_excluded`), NEVER a panic: this used to
-/// be an `expect` that aborted the whole shard on one unrepresentable region (audit :713), structurally
-/// excluding a first-class realm kind by crashing instead of by a typed, visible skip.
-pub(crate) fn region_level(region: &RealmRegion) -> Option<RealmLevel> {
+/// ★ TOTAL SINCE 2026-09-01 — IT USED TO REFUSE A SHIP. The old doc read: *"`None` for an
+/// entity-backed `Ship` realm: the lineage coordinate cannot name one… every lane that needs a child
+/// coord EXCLUDES such a region gracefully — counted, never a panic."*
+///
+/// That was true and is not any more. A ship has a lineage level, so no region can fail to produce
+/// one, and every lane's exclusion branch became unreachable. Those branches are deleted rather than
+/// left: an unreachable guard reads like a live protection, protects nothing, and cannot be covered.
+///
+/// The history is worth keeping, because the exclusion replaced something worse — an `expect` that
+/// aborted a whole shard on one unrepresentable region, which excluded a first-class realm kind by
+/// crashing rather than by a visible skip. The skip was the right cure then; the cure now is that
+/// nothing is unrepresentable.
+pub(crate) fn region_level(region: &RealmRegion) -> RealmLevel {
     level_of(region.realm)
 }

@@ -46,9 +46,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `profile_kind`, never a feature/reconciler branch). The `StubShard → Shard(profile)` swap is
     // CAPABILITY-INERT at P1–P3 (no system reads the profile caps yet) — proven byte-identical for every
     // `ProfileKind` by the vd-node 5a inertness gate.
-    let realm_seed: u64 = env.parse("VD_REALM_SEED")?;
-    let realm_kind = env.string("VD_REALM_KIND").unwrap_or_default();
-    let own_realm = vd_bins::realm_from_kind_seed(&realm_kind, realm_seed)?;
     let declared_coord = match env.string("VD_OWN_COORD").ok().filter(|s| !s.is_empty()) {
         Some(s) => Some(
             vd_core::realm_coord::RealmCoord::from_path(
@@ -57,6 +54,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("VD_OWN_COORD is an empty lineage — refusing to boot")?,
         ),
         None => None,
+    };
+    // ★ THE LINEAGE DECIDES WHICH REALM THIS IS, WHEN THERE IS ONE (2026-09-01).
+    //
+    // This used to read a KIND WORD and a 64-BIT SEED, and only afterwards look at the full lineage
+    // travelling beside them. Two things were wrong with that order:
+    //
+    //   - the word list REFUSED "ship" by name, so a shard could never boot for one, and the refusal
+    //     said so: "Ship realms key on an entity id and are never booted as a realm-shard";
+    //   - a ship's name is 128 bits and that seed is 64, so a ship's identity could not have survived
+    //     the trip even if the word had been allowed.
+    //
+    // The lineage carries the whole name losslessly and already arrives first. Reading it first REMOVES
+    // a test of realm kind from the boot path rather than adding one (HR3), and it is why a built realm
+    // needs no new boot code at all.
+    //
+    // The pair remains the FALLBACK, for a hand-launched shard that states no lineage. Every existing
+    // rig sets exactly one of the two, so no cluster changes shape.
+    let own_realm = match &declared_coord {
+        Some(coord) => coord.lowered(),
+        None => {
+            let realm_seed: u64 = env.parse("VD_REALM_SEED")?;
+            let realm_kind = env.string("VD_REALM_KIND").unwrap_or_default();
+            vd_bins::realm_from_kind_seed(&realm_kind, realm_seed)?
+        }
     };
     // The profile depends only on the LEAF level's kind, which is the same whether the lineage was declared
     // or is about to be derived below (both end at `own_realm`), so it can be settled here — before the

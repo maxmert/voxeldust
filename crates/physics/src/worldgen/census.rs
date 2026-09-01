@@ -7,7 +7,7 @@
 //! Does NOT own: a search-only world. Every number here is derived from THE one generator read at a
 //! seed (SL5); the sweep chooses a SEED, never a different universe.
 
-use super::{GeneratedBody, Placement, StarPhotometrics, UniverseConfig, generate_system_forest};
+use super::{GeneratedBody, Placement, StarPhotometrics, UniverseConfig, generate_system_forest, system_forest_cached};
 use crate::taxonomy::SpectralClass;
 use vd_core::pose::RealmId;
 
@@ -127,7 +127,7 @@ pub fn earth_like_candidates(
     seed_universe: u64,
     config: &UniverseConfig,
 ) -> Vec<EarthLikeCandidate> {
-    earth_like_in_forest(&generate_system_forest(seed_universe, config))
+    earth_like_in_forest(&system_forest_cached(seed_universe, config))
 }
 
 /// The sweep's ARITHMETIC over a forest already in hand — split from the generate-and-score shell

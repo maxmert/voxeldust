@@ -10,7 +10,7 @@
 //! that still works when a galaxy is full.
 
 use super::{
-    GeneratedBody, Placement, StarPhotometrics, UniverseConfig, generate_system_forest,
+    GeneratedBody, Placement, StarPhotometrics, UniverseConfig, generate_system_forest, system_forest_cached,
     generate_walk_forest, orbital_of, realm_regions_for, to_regions,
 };
 use crate::celestial::OrbitalElements;
@@ -51,10 +51,13 @@ pub fn direct_child_levels(
     config: &UniverseConfig,
     hosted: RealmId,
 ) -> Vec<RealmLevel> {
-    generate_system_forest(seed_universe, config)
+    system_forest_cached(seed_universe, config)
         .iter()
         .filter(|b| b.parent == Some(hosted))
-        .filter_map(|b| level_of(b.realm))
+        // Every kind has a level since 2026-09-01, so this maps rather than filters. It used to be a
+        // `filter_map` that silently DROPPED any child without one — which meant a ship child vanished
+        // from this roster instead of being refused, and nothing counted it.
+        .map(|b| level_of(b.realm))
         .collect()
 }
 
@@ -285,7 +288,7 @@ pub fn star_catalogue(
 /// [`realm_regions_for`] (S2 wraps it with [`UniverseConfig::visual_scale`]). Reuses `to_regions` verbatim.
 #[must_use]
 pub fn realm_regions_for_config(seed_universe: u64, config: &UniverseConfig) -> Vec<RealmRegion> {
-    to_regions(&generate_system_forest(seed_universe, config), config)
+    to_regions(&system_forest_cached(seed_universe, config), config)
 }
 
 /// ★ EVERY MOVING BODY OF THE WORLD, FROM ONE BUILD (2026-08-29).
@@ -318,7 +321,7 @@ pub fn moving_children_for_config(
     config: &UniverseConfig,
     hosted: RealmId,
 ) -> Vec<(RealmId, OrbitalElements)> {
-    moving_children(&generate_system_forest(seed_universe, config), hosted)
+    moving_children(&system_forest_cached(seed_universe, config), hosted)
 }
 
 // ===== THE FIXTURE PLANT (look_horizon.md slice 5 — G-IDENTICAL / SL5 fixture-forest doctrine) ==

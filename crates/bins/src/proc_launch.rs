@@ -129,8 +129,16 @@ impl ProcLaunchBackend {
 
     /// The per-realm env the child shard reads at boot, merged OVER [`ProcSpawnTuning::anchors`]. The
     /// profile is DERIVED by the child from `VD_OWN_COORD` (HR3 — 5a's `profile_for(own_coord.profile_kind)`);
-    /// `VD_REALM_KIND`/`VD_REALM_SEED` give the child its `own_realm` `RealmId` (the lowered leaf), and
     /// `VD_INCARNATION_COOKIE`/`VD_PROBE_ADDR` arm the `/whoami` identity echo.
+    ///
+    /// ★ `VD_REALM_KIND`/`VD_REALM_SEED` ARE A LOSSY COPY OF THE LEAF, and since 2026-09-01 the child
+    /// reads the LEAF instead. Both are still sent, for a child that predates the change and for a
+    /// hand-launched shard that states no lineage.
+    ///
+    /// They cannot disagree with the coord, because they are MADE from it — one line below. But the
+    /// copy is narrower than the original: a realm name is up to 128 bits and that seed is 64, so a
+    /// built realm's identity did not survive the round trip. The word list refused "ship" outright,
+    /// which hid the narrowing behind a louder refusal.
     fn child_env(&self, spec: &LaunchSpec) -> Vec<(&'static str, String)> {
         let realm = spec.coord.lowered();
         vec![

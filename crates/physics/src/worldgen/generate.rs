@@ -894,6 +894,46 @@ pub(crate) struct GalaxyShape {
 /// its own lineage, in a fixed order — so a shard hosting system 4 generates byte-identical planets to
 /// every other shard's view of system 4, without any shared state (HR1). `n_planets == 0` emits no
 /// planet; `n_systems == 0` emits the ambient forest alone.
+/// ★ THE LAST WORLD THIS PROCESS BUILT, kept so it is not built again (2026-09-01).
+///
+/// **MEASURED, and this is why it exists.** A shard's boot ran 46.6 seconds in a debug build, and
+/// about 30 of those seconds were THE SAME FOREST built four more times: the world build, the reach
+/// roster, and three world fences each walked all 233,220 star systems from scratch. Every realm is a
+/// process, so every ship a player spins up paid it — a hull that appears beside you after a
+/// 46-second wait is a seam, and a seam is a defect.
+///
+/// **IT IS A PURE FUNCTION, so remembering its answer changes nothing.** The same seed and the same
+/// config give the same forest, in every process and at every boot; that is the property the whole
+/// world rests on. A cache of a pure function is not state — it is the same answer, not recomputed.
+///
+/// ONE entry, not a map. A process boots ONE world and asks about it repeatedly, so a single slot hits
+/// every time after the first. A map would hold every world a test ever built and never free one.
+static LAST_FOREST: std::sync::Mutex<Option<(u64, UniverseConfig, std::sync::Arc<Vec<GeneratedBody>>)>> =
+    std::sync::Mutex::new(None);
+
+/// The forest for this world, built once per process.
+///
+/// The lock is held only to look and to store — never across the build — so two threads asking at once
+/// both build rather than one blocking the other. Building twice is wasteful; holding a lock across a
+/// 4-second build is worse, because it turns a slow boot into a stalled one.
+pub(crate) fn system_forest_cached(
+    seed_universe: u64,
+    config: &UniverseConfig,
+) -> std::sync::Arc<Vec<GeneratedBody>> {
+    if let Ok(slot) = LAST_FOREST.lock()
+        && let Some((seed, cfg, forest)) = slot.as_ref()
+        && *seed == seed_universe
+        && cfg == config
+    {
+        return std::sync::Arc::clone(forest);
+    }
+    let built = std::sync::Arc::new(generate_system_forest(seed_universe, config));
+    if let Ok(mut slot) = LAST_FOREST.lock() {
+        *slot = Some((seed_universe, *config, std::sync::Arc::clone(&built)));
+    }
+    built
+}
+
 pub(crate) fn generate_system_forest(
     seed_universe: u64,
     config: &UniverseConfig,

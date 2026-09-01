@@ -225,16 +225,19 @@ fn coord_of_realm_resolves_the_full_root_rooted_lineage_and_is_none_for_a_ship()
     // Planet one level deeper; a ship (entity-backed, no seed level) resolves to None.
     let regions = realm_regions_for(0);
     let want_sys = RealmCoord::from_path(RealmPath::from_levels(vec![
-        level_of(UNIVERSE).expect("Universe is a seed realm"),
-        level_of(GALAXY).expect("Galaxy is a seed realm"),
-        level_of(SYSTEM_A).expect("System A is a seed realm"),
+        level_of(UNIVERSE),
+        level_of(GALAXY),
+        level_of(SYSTEM_A),
     ]))
     .expect("a 3-level path has a leaf");
-    let want_planet = want_sys.child(level_of(PLANET_A).expect("Planet A is a seed realm"));
+    let want_planet = want_sys.child(level_of(PLANET_A));
     assert_eq!(coord_of_realm(&regions, SYSTEM_A), Some(want_sys));
     assert_eq!(want_planet.path().levels().len(), 4); // full lineage, never lowered()
     assert_eq!(coord_of_realm(&regions, PLANET_A), Some(want_planet));
-    // A ship is entity-backed (no seed RealmLevel) ⇒ None — the `?` early-return arm.
+    // ★ A REALM THIS FOREST DOES NOT HOLD HAS NO LINEAGE — and the reason changed on 2026-09-01.
+    // This used to pass because `level_of` refused a SHIP. It now passes because the forest does not
+    // CONTAIN this realm, which is the honest condition and true of every kind. A ship that really is
+    // in a forest — a built one, live state — resolves like anything else.
     let ship = RealmId::Ship(vd_core::ids::EntityId::pack(
         vd_core::entity_kind::EntityKind::Ship,
         1,
@@ -2965,7 +2968,6 @@ fn a_moon_is_a_planet_at_depth_four_scope_coord_and_frame() {
     );
     assert_eq!(
         vd_core::worldgen::level_of(moon.realm)
-            .expect("seed-keyed")
             .kind,
         vd_core::realm_path::RealmKindTag::Planet,
         "a moon IS a planet — no Moon kind exists to be told apart"
