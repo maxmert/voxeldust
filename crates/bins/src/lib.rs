@@ -2166,9 +2166,13 @@ pub fn process_world_config(
     match std::env::var("VD_FIXTURE_PLANT").as_deref() {
         Err(_) | Ok("") => base,
         Ok("station-area") => base.with_station_area_plant(),
+        // D-MOVE-2 — the same built pair PLUS one ship, which is the world a ship is flown in. The
+        // pair is byte-identical either way; the ship is appended after it.
+        Ok("station-area-ship") => base.with_station_area_ship_plant(),
         Ok(other) => panic!(
-            "VD_FIXTURE_PLANT={other:?} names no fixture plant (the one lawful value is \
-             \"station-area\") — refusing to boot onto an unstateable world",
+            "VD_FIXTURE_PLANT={other:?} names no fixture plant (the lawful values are \
+             \"station-area\" and \"station-area-ship\") — refusing to boot onto an unstateable \
+             world",
         ),
     }
 }

@@ -1181,6 +1181,10 @@ fn sync_realm_boxes(
                 {
                     transform.translation = Vec3::from_array(prim.transform.translation);
                     transform.scale = Vec3::from_array(prim.transform.scale);
+                    // ★ THE FACING ITS PARENT AUTHORED (D-MOVE-2). Without this a hull that turns
+                    // shows the same face for ever, and a pilot has no way to see which way the nose
+                    // points — which is the whole reason a ship is drawn as a box rather than a dot.
+                    transform.rotation = Quat::from_array(prim.transform.rotation);
                 }
             }
             // THE HANDOVER, both ways (window lane §2.8): the author changed — a sleeping child
@@ -1260,6 +1264,10 @@ fn marker_prims(rbox: &RealmBox, draw_center: DVec3, view: Option<(f64, f64)>) -
                 draw_center.z as f32,
             ],
             scale: [r, r, r],
+            // A POINT SPRITE always faces the camera, so a facing means nothing to it. Stated
+            // as identity rather than left out, so the field cannot be forgotten the day a
+            // sprite grows a shape.
+            rotation: [0.0, 0.0, 0.0, 1.0],
         },
     }]
 }

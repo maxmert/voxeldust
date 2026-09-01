@@ -545,6 +545,7 @@ fn re_home_apply(
         dots.0.insert(
             session,
             Dot {
+            last_stick: None,
                 entity,
                 account: AccountId(0), // orphan: no client account until the session re-homes (D-37/D-36)
                 session_fence: Fence::GENESIS,

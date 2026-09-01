@@ -105,6 +105,14 @@ pub struct RealmBox {
     pub depth: u8,
     /// The TRANSLUCENT render color (identity-derived hue; alpha ~0.25 so nested boxes show through).
     pub color_rgba: [f32; 4],
+    /// ★ WHICH WAY THIS REALM FACES (D-MOVE-2), as its parent authored it.
+    ///
+    /// It was always on the wire — a realm's pose has carried a facing since the pose type existed —
+    /// and the drawn row simply dropped it, because nothing a realm did could be seen from outside.
+    /// A ship changes that: a hull that turns and shows the same face is not a ship, it is a marker.
+    ///
+    /// Identity for everything that does not turn, so every existing body draws exactly as before.
+    pub facing: [f32; 4],
 }
 
 impl RealmBox {
@@ -346,6 +354,14 @@ fn row_box(r: &SceneRow, depth: u8) -> Option<RealmBox> {
         parent: r.parent,
         depth,
         color_rgba: color_for_realm(r.realm),
+        // Straight off the authored pose, in the order the renderer wants it. The PARENT wrote this —
+        // a realm never states its own facing any more than its own position (SL1).
+        facing: [
+            r.pose.orient.x as f32,
+            r.pose.orient.y as f32,
+            r.pose.orient.z as f32,
+            r.pose.orient.w as f32,
+        ],
     })
 }
 
@@ -763,6 +779,9 @@ pub struct Vertex {
 pub struct PrimTransform {
     pub translation: [f32; 3],
     pub scale: [f32; 3],
+    /// ★ HOW THE PRIMITIVE IS TURNED, as `[x, y, z, w]` (D-MOVE-2). Identity for everything that does
+    /// not turn, so every drawn body is byte-identical to before this field existed.
+    pub rotation: [f32; 4],
 }
 
 /// A renderer-agnostic mesh primitive: a vertex buffer + a translucent color + a place transform.
@@ -810,6 +829,9 @@ pub fn to_render_prims(rbox: &RealmBox, draw_center: DVec3) -> Vec<MeshPrim> {
                 transform: PrimTransform {
                     translation,
                     scale: [half.x as f32, half.y as f32, half.z as f32],
+                    // The facing its parent authored. A box is the shape whose turning can be SEEN,
+                    // which is exactly why a ship is drawn as one.
+                    rotation: rbox.facing,
                 },
             }]
         }
@@ -821,6 +843,10 @@ pub fn to_render_prims(rbox: &RealmBox, draw_center: DVec3) -> Vec<MeshPrim> {
                 transform: PrimTransform {
                     translation,
                     scale: [r32, r32, r32],
+                    // A sphere looks the same whichever way it is turned, so this changes no pixel
+                    // today. Carried anyway: the day a body gets a surface the facing must already
+                    // be right, and a field that appears later is a field somebody forgets to fill.
+                    rotation: rbox.facing,
                 },
             }]
         }
@@ -1783,6 +1809,7 @@ mod tests {
             parent: None,
             depth: 0,
             color_rgba: [0.0, 0.0, 0.0, BOX_ALPHA],
+            facing: [0.0, 0.0, 0.0, 1.0],
         };
         let edge = Tier::Fine.cell_edge_m();
         assert_eq!(rbox.draw_center(), DVec3::new(3.0 * edge + 0.25, 0.0, 0.0));
@@ -1809,6 +1836,7 @@ mod tests {
             parent: None,
             depth: 0,
             color_rgba: [0.0, 0.0, 0.0, BOX_ALPHA],
+            facing: [0.0, 0.0, 0.0, 1.0],
         };
         assert_eq!(
             at(Tier::Fine).draw_center(),
@@ -1839,6 +1867,7 @@ mod tests {
             parent: None,
             depth: 0,
             color_rgba: [0.1, 0.2, 0.3, BOX_ALPHA],
+            facing: [0.0, 0.0, 0.0, 1.0],
         };
         // The centre is flattened ONCE, by the caller, through the one chokepoint; the prim lands
         // exactly there (slice 5: ONE term, no composition in here).
@@ -1875,6 +1904,7 @@ mod tests {
             parent: None,
             depth: 0,
             color_rgba: [0.4, 0.5, 0.6, BOX_ALPHA],
+            facing: [0.0, 0.0, 0.0, 1.0],
         };
         let prims = to_render_prims(&rbox, DVec3::new(0.0, 7.0, 0.0));
         assert_eq!(prims.len(), 1);
@@ -2004,6 +2034,11 @@ mod tests {
         // CONTAINING box around the systems, so an entity in the between-space is visibly still inside
         // a realm (never orphaned). Only the ~unbounded Universe (r=1e9) is SKIPPED (ambient: felt,
         // not framed).
+        //
+        // ★ SEVEN LEAVES, NOT FIVE (2026-09-01). Two more planets joined the walk world when the
+        // second star system gained children. This test counts what the ONE world holds, so it moved
+        // with the world — which is the test doing its job. It went red the moment the world changed
+        // and stayed red until somebody looked, which is exactly what a census gate is for.
         let scene =
             RealmScene::from_scene_rows(&one_world_level()).expect("the one world projects");
         assert!(scene.get(RealmId::System(7)).is_some(), "System 7 renders");
@@ -2025,10 +2060,12 @@ mod tests {
             None,
             "the Universe ambient root is NOT rendered"
         );
+        assert!(scene.get(vd_core::worldgen::PLANET_B).is_some(), "Planet B renders");
+        assert!(scene.get(vd_core::worldgen::PLANET_C).is_some(), "Planet C renders");
         assert_eq!(
             scene.len(),
-            6,
-            "the 5 finite leaf realms + the Galaxy containing box"
+            8,
+            "the 7 finite leaf realms + the Galaxy containing box"
         );
         // A rendered System keeps its TRUE nesting depth (Universe 0 ⊃ Galaxy 1 ⊃ System 2), even
         // though its Universe ancestor is skipped from the drawn set — depth is over the FULL level.

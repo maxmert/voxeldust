@@ -27,6 +27,17 @@ use vd_wire::channels::InputDatagram;
 /// One connected avatar.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Dot {
+    /// ★ THE STICK THIS PILOT LAST HELD (D-MOVE-2, the temporary control seam) — kept on the PILOT
+    /// rather than on the realm, because that is whose it is.
+    ///
+    /// A player's keys already travel to whichever shard holds that player, and the route swaps on
+    /// every crossing. So a pilot who steps aboard a ship has their keys arrive at the ship's own
+    /// shard with NO routing change: the seam is only that the ship reads them.
+    ///
+    /// Later a SEAT decides which pilot is at the controls; today a self-driven realm reads the one it
+    /// holds. `None` until a first input arrives, which is why a realm holding a silent pilot pushes
+    /// nothing rather than pushing zero.
+    pub last_stick: Option<([f32; 3], [f32; 3])>,
     pub entity: EntityId,
     pub account: AccountId,
     /// The Session-key fence the owning gateway holds; stale input is dropped.
@@ -272,6 +283,10 @@ pub(crate) fn apply_input(
         return;
     }
     dot.last_applied_seq = Some(input.seq);
+    // The pilot's own frame stick, kept for the realm's drive producer. The turn is built here rather
+    // than in the producer so the two consumers of `look` cannot drift: pitch turns about the right
+    // axis, yaw about the up axis, and roll has no key yet.
+    dot.last_stick = Some((input.movement, [input.look[1], input.look[0], 0.0]));
     integrate(dot, &input, config, clock, regions, placements);
     log.record_applied(session, input.seq);
 }

@@ -159,6 +159,7 @@ pub(crate) fn on_gateway_msg(
                 let pose =
                     resolve_spawn_pose(ctx.config, account, spawn, ctx.clock.universe_tick, stats);
                 Dot {
+            last_stick: None,
                     entity,
                     account,
                     session_fence: fence,
@@ -371,6 +372,7 @@ fn adopt_input_slot(
         return;
     };
     let dot = dots.0.entry(session).or_insert_with(|| Dot {
+            last_stick: None,
         entity: subject_entity, // 1c.8 ADOPT: the transferred subject id, not a fresh mint
         account,
         session_fence: fence,

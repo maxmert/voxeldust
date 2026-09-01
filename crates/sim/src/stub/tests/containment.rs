@@ -1311,6 +1311,7 @@ fn slice4a_nonzero_cell_is_carried_unchanged_and_the_offset_crossing_still_fires
     rig.world.resource_mut::<Dots>().0.insert(
         TRIG_SESSION,
         Dot {
+        last_stick: None,
             entity,
             account: AccountId(1),
             session_fence: Fence(1),

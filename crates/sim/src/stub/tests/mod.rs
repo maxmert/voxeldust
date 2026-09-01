@@ -574,6 +574,7 @@ fn ledger_at(regions: &RealmRegions, tick_hz: f64, tick: UniverseTick) -> Placem
 /// One emitting dot at local (1,2,3) stamped at tick 100 — the shared fixture.
 fn slice6_dot(entity: EntityId, frame: FrameRef, authority: Authority) -> Dot {
     Dot {
+        last_stick: None,
         entity,
         account: AccountId(1),
         session_fence: Fence(1),
@@ -939,6 +940,7 @@ fn insert_owned_dot(rig: &mut Rig, session: SessionId, entity: EntityId, offset:
     rig.world.resource_mut::<Dots>().0.insert(
         session,
         Dot {
+        last_stick: None,
             entity,
             account: AccountId(1),
             session_fence: Fence(1),
@@ -1401,6 +1403,7 @@ fn insert_owned_dot_framed(
     rig.world.resource_mut::<Dots>().0.insert(
         session,
         Dot {
+        last_stick: None,
             entity,
             account: AccountId(1),
             session_fence: Fence(1),

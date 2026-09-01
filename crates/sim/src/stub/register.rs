@@ -164,6 +164,11 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
             author_placements.run_if(has_synced),
             request_pending_grants,
             process_inbound,
+            // D-MOVE-2 — a self-driven realm states its push AFTER this tick's inbound, so a stick that
+            // arrived this tick is the one that travels. Placed here rather than at the head for that
+            // reason: at the head it would always send yesterday's stick, adding a tick of lag to every
+            // control input for no gain.
+            crate::stub::drive::emit_own_drive.run_if(has_synced),
             // RLM 5f RG-1: the reactive greeting — UNGATED (fires pre-sync/pre-lease, reachability precedes
             // authority) and after `process_inbound` so THIS tick's inbound counts as contact. No-op unless a
             // demand boot inserted `PresenceAnnounce`, so group order is byte-identical for static rigs.

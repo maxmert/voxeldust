@@ -433,6 +433,117 @@ fn fresh_drive(
     }
 }
 
+/// ★ THE PUSH LEAVES THIS REALM — the producer the two lanes were built for (D-MOVE-2).
+///
+/// Runs on every shard, every tick, and does nothing on almost all of them: a realm that cannot push
+/// itself has no stick to read and never speaks. That is the capability deciding what an installed
+/// system DOES, rather than which systems exist (HR3).
+///
+/// **WHAT IT SENDS AND WHAT IT CANNOT.** Six whole numbers in this realm's OWN frame, its own name and
+/// fence, and the tick they belong to. There is no field for a speed or a position, so this cannot
+/// state half a placement however wrong the rest of it went (SL1 clause 3).
+///
+/// **IT SENDS EVERY TICK WHILE A STICK IS HELD, and stops the moment one is not.** The lane says what
+/// this realm is doing THIS TICK, so silence is the honest way to say "nothing" — a pilot who leaves
+/// the chair stops the acceleration and keeps the speed (owner, 2026-08-31).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_child_drive(
+    self_driven: bool,
+    own_coord: &vd_core::realm_coord::RealmCoord,
+    realm_fence: Option<vd_core::fence::Fence>,
+    at: vd_core::ids::UniverseTick,
+    parent_node: Option<vd_core::ids::NodeId>,
+    rating: &EngineRating,
+    stick: Option<([f32; 3], [f32; 3])>,
+    outbox: &mut crate::runtime::OutboundBox,
+    stats: &mut super::StubStats,
+) {
+    // A realm with no engines, no parent to speak to, or nobody at the controls says nothing at all.
+    // Three separate silences, and none of them is an error worth counting: most realms are all three.
+    if !self_driven {
+        return;
+    }
+    // Four silences, and none of them is an error worth counting: most realms are all four.
+    //   - no engines, so nothing to state;
+    //   - no parent resolved yet, so nobody to state it to;
+    //   - nobody at the controls;
+    //   - no realm fence yet, which means the directory has not granted this realm — a shard that
+    //     cannot prove which incarnation it is must not speak for the realm, or a deposed one would.
+    let (Some(parent), Some((movement, turn_stick)), Some(fence)) =
+        (parent_node, stick, realm_fence)
+    else {
+        return;
+    };
+    let (push, turn) = drive_from_stick(movement, turn_stick, rating);
+    outbox.push_flow(
+        parent,
+        // The UNRELIABLE carrier, deliberately: the next tick restates the whole intent, so a lost
+        // datagram is corrected before anybody could read the gap. Reliability here would put a
+        // retransmit of stale news in front of fresh news.
+        crate::io::MsgClass::SignalDelta,
+        &vd_wire::intershard::InterShardFlow::ChildDrive(vd_wire::intershard::ChildDrive {
+            child: own_coord.clone(),
+            child_fence: fence,
+            at,
+            push,
+            turn,
+        }),
+    );
+    stats.child_drive_sent += 1;
+}
+
+/// ★ THE PER-TICK SYSTEM that speaks for a self-driven realm (D-MOVE-2).
+///
+/// Installed on every shard and silent on almost all of them: a realm that cannot push itself has no
+/// engines to state, so it returns before touching anything. That is the profile deciding what an
+/// installed system DOES rather than which systems exist (HR3).
+///
+/// ⚠ **THE ENGINE RATING IS AN INTERIM CONSTANT, and it is the one number here that is not yet real.**
+/// The owner's ruling lets a ship state its rated acceleration as a fact about itself, and a real hull
+/// will derive it from the thrusters actually built into it (P6/P9). Until blocks exist there is
+/// nothing to derive it FROM, so this is a stated rating for one fixture ship — recorded in the ledger
+/// as interim, never a shipped default for every hull in the world.
+pub(crate) fn emit_own_drive(
+    config: bevy_ecs::prelude::Res<super::StubConfig>,
+    identity: bevy_ecs::prelude::Res<crate::runtime::NodeIdentity>,
+    clock: bevy_ecs::prelude::Res<crate::runtime::ClockSample>,
+    authority: bevy_ecs::prelude::Res<super::RealmAuthority>,
+    parent_node: bevy_ecs::prelude::Res<super::ParentRealmNode>,
+    dots: bevy_ecs::prelude::Res<super::Dots>,
+    mut stats: bevy_ecs::prelude::ResMut<super::StubStats>,
+    mut outbox: bevy_ecs::prelude::ResMut<crate::runtime::OutboundBox>,
+) {
+    let self_driven = match identity.kind {
+        crate::capability::NodeKind::Shard(profile) => profile.self_driven(),
+        _ => false,
+    };
+    // THE PILOT AT THE CONTROLS. Today: any pilot this realm holds, which is the interim seam the
+    // ruling describes. Later a SEAT names one, and only this line changes.
+    let stick = dots.0.values().find_map(|d| d.last_stick);
+    emit_child_drive(
+        self_driven,
+        &config.own_coord,
+        authority.0,
+        clock.universe_tick,
+        parent_node.0,
+        &FIXTURE_ENGINE_RATING,
+        stick,
+        &mut outbox,
+        &mut stats,
+    );
+}
+
+/// The interim rating for the fixture hull — ten gravities of push and a gentle turn.
+///
+/// ⚠ **A STATED NUMBER, and the ledger carries it as interim.** A real hull derives its rating from the
+/// thrusters built into it, which needs blocks (P6) and signals (P9). Ten gravities is the owner's own
+/// order of magnitude from the warp ruling's arithmetic, so a fixture ship flies like something a
+/// person built rather than like a placeholder.
+const FIXTURE_ENGINE_RATING: EngineRating = EngineRating {
+    max_push_mps2: 98.1,
+    max_turn_radps2: 0.8,
+};
+
 #[cfg(test)]
 mod tests {
     use super::{
