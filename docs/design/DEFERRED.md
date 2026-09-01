@@ -4482,6 +4482,149 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
      closing speed you arrive at a dark realm, which is a seam (SL8). Either the top speed is the stricter
      of the two, or the interest radius grows with the observer's measured closing speed.
 
+### D-MOVE-2 🟥 THE TEMPORARY CONTROL SEAM — approved 2026-08-31, and it is INTERIM BY CONSTRUCTION
+
+- **THE RULING** (`owner_decisions_2026-08-27_movement_answers.md` M-C, and the owner's approval of the
+  vector-only shape on 2026-08-31). There is no character to control, no signal bus and no functional
+  blocks, and we still want the whole movement path testable NOW. So the controls attach to the SHIP
+  REALM directly: the controls make forces in the ship's own shard, and those forces ride the lane the
+  movement contract (D-MOVE-1) already defines. Nothing here is a special case for a ship.
+
+- **★ THE LANE NAMES NO MOVEMENT TYPE, and that is the whole point.** The owner approved the vector-only
+  shape by name: *"Agree with vector only, it's way better approach."* Forward, reverse, strafe, climb and
+  dive are DIRECTIONS of one push vector; roll, pitch and yaw are directions of one turn vector. There is
+  never a new arm for a new manoeuvre, and the hot path stays six numbers however many thrusters a hull
+  grows. **DRAG NEVER TRAVELS UPWARD** — the realm holds its own medium and does the arithmetic from what
+  the child declared it IS. The rejected alternative (the parent states its medium downward, the child
+  computes its own drag) is recorded under D-MOVE-1: the child would use a velocity one tick old, and
+  lagged velocity under strong drag oscillates.
+
+- **THE TWO OPENINGS, approved 2026-08-31 under SL6** (default NO; this is the grant):
+  - **A — the per-tick lane.** Push (three numbers, m/s²) and turn (three numbers, rad/s²), both in the
+    CHILD'S OWN frame, plus whose and which tick. Fire-and-forget: it is effect-free, carries no transfer
+    trigger and no authority-gating discrete state.
+  - **B — the on-change lane.** Mass, cross-section, drag coefficient, and the CLOSED set of declared
+    states (warp). *What I AM*, like extent — never per tick.
+  - ★ **B RIDES THE RELIABLE LANE — RESOLVED 2026-08-31, and NO NEW DATA CROSSES.** The worry was real:
+    "on change only" plus a lost message leaves the parent holding a stale mass forever, and a stale mass
+    is a wrong drag and a wrong impact. A version tag on the per-tick lane was proposed and WITHDRAWN —
+    the transport already answers it, and the answer is a CLASS CHOICE, not a new field.
+    - `MsgClass::reliability()` already states each class's guarantee, and `Durability` already states
+      whether a send survives a restart. The reliable mesh lane is at-least-once across a blip (per-lane
+      sequence + retry-buffer replay + a receiver contiguity ledger).
+    - **The project already uses this exact split one level over**: the composed scene's membership and
+      body changes ride the RELIABLE lane, and the per-tick positions ride unreliable datagrams
+      (`crates/wire/src/channels.rs`). The movement lanes are the same problem, one boundary up.
+    - **The industry answer agrees.** Unreal replicates changed properties and re-sends until the far side
+      confirms, while telling you NOT to send reliable messages every tick. The networked-physics
+      literature says the same from the other side: on the hot lane send STATE redundantly rather than
+      EVENTS, because a repeated statement heals its own loss and an event sent once does not.
+    - ⚠ **THE ONE REAL GAP, and it is a restart, not a loss.** The receiver's dedup ledger is RAM-only, so
+      a parent that restarts has forgotten everything. **A child therefore restates its facts ONCE per
+      connection**, never periodically. That is redundancy applied where it is needed.
+
+- **WHAT REPLACES IT, and when.** The signal system and functional blocks (P9). A thruster block will then
+  publish the force and the seam disappears. **The per-tick lane itself does NOT disappear** — only the
+  direct attachment of controls to the ship realm does. What is interim here is the SOURCE of the numbers,
+  never their shape.
+
+- **THE ORDER THIS MUST LAND IN, and the reason it is not negotiable.** Today the realm HANDS OUT a speed:
+  the stick is a fraction of the realm's own number and velocity is read back out of the step just taken,
+  so it never accumulates. Deleting that path with nothing in its place drops every occupant to walking
+  pace, and crossing the galaxy at walking pace takes longer than the universe has existed (D-MOVE-1's own
+  measurement). **The new lane and the deletion must land in ONE change.**
+
+- ★ **WHO MAY SPEAK ON THIS LANE — settled 2026-08-31 by the owner's question about player realms.**
+  The lane carries a child REALM speaking to its parent, and nothing else. **A PLAYER IS AN OCCUPANT,
+  NOT A REALM** (SL2: *"CONTACTS ARE REALMS, PEOPLE ARE SEEN"*; `EntityKind::Player` is the first entry
+  of the transfer registry). An occupant's push never crosses a boundary — the realm holding it applies
+  the push in its own process — so a space walk and a parachute jump need NO new machinery: they are an
+  occupant crossing a realm boundary, which the transfer arc already proves under kill-9.
+  - **The rule that decides realm-hood: you are a realm when something can be INSIDE you.** A ship is a
+    realm to its crew and an occupant of its star system at the same time; that dual role is what makes
+    nesting work. A person contains nothing. The day a mech suit carries a passenger, the SUIT is a
+    realm and its pilot is the occupant.
+  - **The plain cost, beside the law:** a realm is a shard. The port band holds roughly five hundred, so
+    a realm per player would consume the world at five hundred players.
+
+- ⚠ **A WEAK ARGUMENT, CORRECTED BEFORE IT SET (2026-08-31).** The first draft justified the generic lane
+  with *"a ship speaks upward and listens to its crew, so the lane must serve both directions"*. The
+  listening half happens IN THE SAME PROCESS and never touches the wire, so it proved nothing about the
+  wire lane. **The real proof is HR4's own gate**: the identical fixture must pass on TWO REALM KINDS —
+  a ship inside a star system and a ship inside a planet — and a ship-specific lane cannot pass it,
+  because the second parent would need ship-specific code and the ship WOULD know it moved house.
+  Recorded because the same shape caused today's galaxy defect: a justification that stayed in the file
+  after the ground under it moved.
+
+- **THE ACCEPTANCE TEST** is the owner's own last line in the worked example: a ship crosses from a star
+  system into a planet and **sends the identical six numbers to its new parent**. It does not know it moved
+  house. One mechanism; any realm can be the parent.
+
+### D-MOVE-4 🟥 A PLANET HAS NO DAY, AND THE SECOND FRAME THAT ANSWERS IT — raised 2026-09-01
+
+- **MEASURED, and it is the fact the whole question turns on:** nothing in the tree spins. `FrameRef`
+  has no rotating arm, the generator draws no rotation rate, and `celestial.rs` names no sidereal day.
+  So a planet does not turn, and "fixed above a point on the surface" works today only because the
+  surface does not move either.
+
+- **THE OWNER'S QUESTION (2026-09-01).** A player builds a station inside a planet's sphere of
+  influence — static, or on rails? And if a space elevator reaches it, what does the planet's spin do
+  to it, and how hard is docking?
+
+- **THE ANALYSIS, recorded so it is not re-derived.**
+  - A frame that SPINS with its planet makes building trivial and every orbit inside it wrong (a
+    rotating frame invents forces that are not there).
+  - A frame that stays STILL keeps orbits correct and makes a "static" station hang over a moving
+    surface — which is what would tear a space elevator off.
+  - ⇒ **RAILS FOR ANYTHING IN SPACE.** A space elevator's station is not motionless: it goes round
+    once a day, exactly as the ground does. Same mechanism as a low station, different number.
+  - ⇒ **A SECOND, TURNING FRAME FOR ANYTHING ON THE GROUND** — a city, a pad, a mine. Real spaceflight
+    uses exactly these two frames and no more.
+  - ⇒ **A STATION IN A STAR SYSTEM IS ALSO ON RAILS.** One that does not orbit falls into the star the
+    moment the system applies its pull.
+
+- ★ **DOCKING IS EASY *BECAUSE* OF THE NESTING, which is the strongest argument for rails.** The hard
+  part — matching a speed — exists only while you are OUTSIDE. Cross into the station's own realm and
+  the station reads as still; what is left is the metres per second you actually have relative to it.
+  A 7 km/s rendezvous becomes a 2 m/s drift, and the boundary crossing does the sum. That machinery
+  exists and is proven under kill-9.
+
+- **WHAT IS OWED:** a rotation rate per body (seed-derived, like every other property), a turning
+  frame beside `PlanetCentered`, and the day/night lighting that is the owner's stated reason for
+  wanting it. **WHEN:** after the ship flies (owner, 2026-09-01: *"let's discuss that after your
+  planned work with the ship is done"*).
+
+### D-MOVE-3 🟥 THE BAND RE-SOLVE — approved 2026-08-31 as THREE PIECES OF WORK, none of them a number
+
+- **THE RULING** (`owner_decisions_2026-08-27_movement_answers.md` M-D, approved 2026-08-31). The bands
+  were never the defect. **The band protected a SNAPSHOT, not a player** — sizing it by speed was a
+  workaround for looking too rarely, which is why deleting the governor broke every band at once: the two
+  were one mechanism wearing two names.
+
+- **MEASURED, and it changes the job completely.** Containment is ALREADY swept — slice S5 built it, and
+  `region_verdict` reads the LINE from the previous pose to this one on exact integer arithmetic. So a fast
+  ship is still SEEN. The real constraint is TIME: a hand-over is a saga needing `k_dwell = 5` ticks, and
+  the thinnest governed crossing in the world measures **5.59 ticks**. The machinery sees you; it cannot
+  hand you over in time.
+
+- **THE THREE PIECES:**
+  1. **CLOSE THE SHAPE HOLE.** `Boundary::Obb` is the one shape that still tests an instant
+     (`geometry.rs:1521-1523`), falling back to the point verdict. No shipped realm uses it today, so this
+     is a hole rather than a live defect — but it is the one arm where the swept law is not true.
+  2. **START THE HAND-OVER EARLY.** The parent authors velocity and the test already reads the travelled
+     line, so a system can SEE a crossing coming and begin the saga BEFORE the edge is reached. Same shape
+     as the wake rule: warm ahead, never slow down.
+  3. **THEN THE BANDS SHRINK ON THEIR OWN.** With an early start a band keeps only two jobs — stay wider
+     than the coordinate step, and give hysteresis. **Neither job scales with speed.**
+
+- **⚠ THE THREE RED TESTS MEASURE THE GOVERNOR, WHICH THE RULING DELETES.** `g_flight_table_the_governed_legs…`,
+  `g_governed_bands_bracket_every_ambient_boundary…` and the dual-shard cruise leg all read
+  `realm_speed_cap_mps` / `leg_time_s` — the closed form of the ceiling that M-D removes from the flight
+  path completely. They are tests of a mechanism being deleted, not failures to repair. **The owner has not
+  yet said whether they retire with it or stay red until the replacement lands.**
+
+- **WHEN:** with D-MOVE-2, and piece 2 is what makes high speed survivable at all.
+
 ### D-SL1-2 🟥 SL1 REWRITTEN — a realm MAY be told where it is (owner reversal 2026-08-24), and the three fences that make it safe are UNBUILT
 
 - **WHAT CHANGED, and it is a law change, not a feature.** SL1 read "ONLY THE PARENT KNOWS POSITIONS —

@@ -51,12 +51,21 @@ pub enum RealmKindTag {
     /// `Planet` for lineage aesthetics would RENUMBER the wire and is forbidden (the frozen
     /// APPEND-only order).
     Star = 6,
+    /// ★ A SHIP — the first BUILT realm kind (owner ruling 2026-08-31: *"Ship is a separate Realm,
+    /// but player built manually (or built on the station's or planet's ship yard) … we can't and
+    /// should not generate the ship from the seed"*). APPENDED at 7, for the same reason `Star` was.
+    ///
+    /// **IT BREAKS AN ASSUMPTION EVERY KIND ABOVE IT SHARES**, and that is why the seed below widened.
+    /// Every other kind is GENERATED: its number comes from the world generator, so 64 bits are ample
+    /// and the same seed always names the same place. A ship is MINTED by whichever shard builds it,
+    /// with no central agreement, so its identity is 128 bits wide by construction.
+    Ship = 7,
 }
 
 impl RealmKindTag {
     /// Every kind in declaration order = the frozen postcard discriminant order (APPEND-only).
     /// Mirrors [`crate::taxonomy::ProfileKind::ALL`]; the drift tripwire test loops it.
-    pub const ALL: [RealmKindTag; 7] = [
+    pub const ALL: [RealmKindTag; 8] = [
         RealmKindTag::Universe,
         RealmKindTag::Galaxy,
         RealmKindTag::System,
@@ -64,6 +73,7 @@ impl RealmKindTag {
         RealmKindTag::Station,
         RealmKindTag::Area,
         RealmKindTag::Star,
+        RealmKindTag::Ship,
     ];
 }
 
@@ -74,13 +84,46 @@ impl RealmKindTag {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RealmLevel {
     pub kind: RealmKindTag,
-    pub seed: u64,
+    /// ★ WIDENED TO 128 BITS FOR BUILT REALMS (owner-approved 2026-08-31, option 1 of three).
+    ///
+    /// A GENERATED realm's number comes from the world generator and fits in 64 bits, which is all
+    /// this ever held. A BUILT realm's does not: a ship is minted by whichever shard builds it, with
+    /// no central agreement, and its identity packs `kind:8 | mint_shard:32 | seq:64 | rand:24` — 128
+    /// bits, none of them spare.
+    ///
+    /// **THE THREE OPTIONS, and why this one.** Giving a built realm a second 64-bit name was cheaper
+    /// today but leaves every built realm carrying TWO names for ever, with something obliged to keep
+    /// them together. Packing a ship's lineage name out of part of its identity was cheapest and
+    /// UNSAFE: sequence numbers repeat across minting shards, so two ships would eventually share one
+    /// name — and a collision here means two PLACES with one name.
+    ///
+    /// **MEASURED, so the cost is not an argument.** The codec writes integers as varints, so the byte
+    /// count follows the VALUE and not the declared width: a seed of 7 costs one byte either way, and a
+    /// full 64-bit seed costs ten either way. Nothing that exists today changes size at all. Only a
+    /// ship pays, and only 18 bytes instead of 10, because a ship's name really is that wide.
+    pub seed: u128,
 }
 
 impl RealmLevel {
+    /// A GENERATED realm's level — the constructor every existing call site uses, unchanged.
+    ///
+    /// It still takes 64 bits, deliberately: the generated kinds cannot exceed them, and keeping the
+    /// signature means [`RealmLevel::to_realm_id`] can narrow back with no branch and no loss. The one
+    /// way to store more is [`RealmLevel::for_ship`], which pairs its width with the `Ship` tag.
     #[must_use]
     pub fn new(kind: RealmKindTag, seed: u64) -> RealmLevel {
-        RealmLevel { kind, seed }
+        RealmLevel { kind, seed: u128::from(seed) }
+    }
+
+    /// ★ A BUILT SHIP'S LEVEL — the only way a level carries more than 64 bits, and it always carries
+    /// the `Ship` tag with them.
+    ///
+    /// Pairing the width with the tag is what makes the narrowing below safe by CONSTRUCTION rather
+    /// than by care: a generated kind cannot hold an over-wide number, because no constructor will put
+    /// one there.
+    #[must_use]
+    pub fn for_ship(id: crate::ids::EntityId) -> RealmLevel {
+        RealmLevel { kind: RealmKindTag::Ship, seed: id.0 }
     }
 
     /// The `RealmId` this level resolves to. Total over the 7 kinds, and — since S9 — LOSSLESS:
@@ -90,13 +133,24 @@ impl RealmLevel {
     pub fn to_realm_id(self) -> RealmId {
         match self.kind {
             RealmKindTag::Universe => RealmId::Universe,
-            RealmKindTag::Galaxy => RealmId::Galaxy(self.seed),
-            RealmKindTag::System => RealmId::System(self.seed),
-            RealmKindTag::Planet => RealmId::Planet(self.seed),
-            RealmKindTag::Station => RealmId::Station(self.seed),
-            RealmKindTag::Area => RealmId::Area(self.seed),
-            RealmKindTag::Star => RealmId::Star(self.seed),
+            RealmKindTag::Galaxy => RealmId::Galaxy(self.narrowed()),
+            RealmKindTag::System => RealmId::System(self.narrowed()),
+            RealmKindTag::Planet => RealmId::Planet(self.narrowed()),
+            RealmKindTag::Station => RealmId::Station(self.narrowed()),
+            RealmKindTag::Area => RealmId::Area(self.narrowed()),
+            RealmKindTag::Star => RealmId::Star(self.narrowed()),
+            RealmKindTag::Ship => RealmId::Ship(crate::ids::EntityId(self.seed)),
         }
+    }
+
+    /// This level's seed as the 64 bits a GENERATED realm's name is made of.
+    ///
+    /// **LOSSLESS BY CONSTRUCTION, not by checking.** Only [`RealmLevel::for_ship`] can store more
+    /// than 64 bits, and it always tags the level `Ship`, which never reaches this. So there is no
+    /// arm here to test and none to forget — the type system did the work that a runtime guard would
+    /// otherwise have to, and a guard would have been an arm no input could ever take.
+    fn narrowed(self) -> u64 {
+        self.seed as u64
     }
 }
 
@@ -139,7 +193,13 @@ impl RealmPath {
     /// deterministic stream (bit-reproducible across shards by construction, HR1).
     #[must_use]
     pub fn lineage_seeds(&self) -> Vec<u64> {
-        self.0.iter().map(|level| level.seed).collect()
+        // The deterministic stream is keyed on 64 bits. A ship's wider identity folds into them by
+        // exclusive-or of its halves rather than by truncation, so two ships differing ONLY in their
+        // high bits still draw different streams — a plain cast would have given them one stream.
+        self.0
+            .iter()
+            .map(|level| (level.seed as u64) ^ ((level.seed >> 64) as u64))
+            .collect()
     }
 
     /// Encode this lineage as a compact env-var string — the `VD_OWN_COORD` transport the real realm
@@ -465,7 +525,8 @@ mod tests {
 
     #[test]
     fn realm_kind_tag_all_is_exhaustive() {
-        // Drift tripwire: an 8th kind must be added to ALL (this match then fails to compile).
+        // Drift tripwire: a 9th kind must be added to ALL (this match then fails to compile). It
+        // caught the 8th — `Ship`, 2026-08-31 — exactly as written.
         for k in RealmKindTag::ALL {
             match k {
                 RealmKindTag::Universe
@@ -474,10 +535,11 @@ mod tests {
                 | RealmKindTag::Planet
                 | RealmKindTag::Station
                 | RealmKindTag::Area
-                | RealmKindTag::Star => {}
+                | RealmKindTag::Star
+                | RealmKindTag::Ship => {}
             }
         }
-        assert_eq!(RealmKindTag::ALL.len(), 7);
+        assert_eq!(RealmKindTag::ALL.len(), 8);
     }
 
     #[test]

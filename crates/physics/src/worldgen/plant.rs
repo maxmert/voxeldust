@@ -42,6 +42,15 @@ pub enum FixturePlant {
     /// star system and one player-built AREA on that system's inner planet — see
     /// [`station_area_plant`] for every derived number.
     StationArea,
+    /// ★ THE STATION/AREA PAIR **PLUS ONE BUILT SHIP** under the home star system (D-MOVE-2, owner
+    /// ruling 2026-08-31: *"Ship is a separate Realm, but player built manually … we can't and should
+    /// not generate the ship from the seed"*).
+    ///
+    /// A ship joins the plant rather than the generator for exactly the reason a station did: the seed
+    /// does not make it, a player does. What the plant stands in for is PERSISTENCE — the built world
+    /// nobody stores yet — and it is listed here so that when persistence lands, this arm is what it
+    /// replaces.
+    StationAreaShip,
 }
 
 /// The G-IDENTICAL plant's derived spec — public so the pixel gate's ORACLE derives its parks and
@@ -165,6 +174,24 @@ pub(crate) fn plant_seed_of(realm: RealmId) -> Option<u64> {
     }
 }
 
+/// ★ THE BUILT SHIP'S SPEC — derived from the world it is built in, never stated (D-MOVE-2).
+///
+/// **ITS IDENTITY IS MINTED, NOT SEEDED, and that is the whole point of the kind.** Every generated
+/// realm's name comes from the world generator; a ship's comes from whichever shard built it, packed
+/// `kind | mint_shard | seq | rand`. The fixture packs a FIXED one so the plant stays deterministic —
+/// a built ship in the real game gets a live mint, and nothing else about it differs.
+#[must_use]
+pub fn built_ship_realm() -> RealmId {
+    RealmId::Ship(vd_core::ids::EntityId::pack(
+        vd_core::entity_kind::EntityKind::Ship,
+        // A fixture's mint shard and sequence: fixed, so the plant is the same world every boot. The
+        // 24 entropy bits are zero for the same reason — a fixture has nothing to guard against.
+        1,
+        1,
+        0,
+    ))
+}
+
 /// Append the named plant's bodies to a generated forest — called at the END of
 /// [`generate_system_forest`], AFTER every generated body and every stream draw, so the additive
 /// discipline holds: with a plant present every generated body, id, orbit and photometric draw is
@@ -204,7 +231,105 @@ pub(crate) fn append_fixture_plant(bodies: &mut Vec<GeneratedBody>, config: &Uni
                 }),
             });
         }
+        FixturePlant::StationAreaShip => {
+            // The pair first, byte-for-byte as `StationArea` plants it — a ship is APPENDED to the
+            // built world, never a different one. Recursing keeps ONE derivation of the pair, so the
+            // two arms can never drift apart.
+            let mut pair = config.clone();
+            pair.fixture_plant = FixturePlant::StationArea;
+            append_fixture_plant(bodies, &pair);
+            let plant = station_area_plant_spec(bodies);
+            bodies.push(GeneratedBody {
+                realm: built_ship_realm(),
+                // Under the home STAR SYSTEM, which is the parent the movement ruling's own worked
+                // example uses: it adds the star's pull to the ship's push and authors where the ship
+                // then is.
+                parent: Some(plant.station_parent),
+                shape: Boundary::Shell { r: SHIP_EXTENT_M },
+                // ★ WHERE IT STARTS, AND ONLY WHERE IT STARTS. A ship is a DRIVEN child: from its
+                // first tick its parent authors its placement from the pushes it states, so this
+                // offset is the hull's starting berth and nothing more. It is placed beside the
+                // station, which is where a built ship would be.
+                placement: Placement::StaticOffset(
+                    plant.station_offset_m + DVec3::new(SHIP_BERTH_OFFSET_M, 0.0, 0.0),
+                ),
+                // A built hull has no seed stream and no photometric draw, exactly like the station.
+                photometrics: None,
+                taxon: None,
+                look: Some(Boundary::Shell { r: SHIP_EXTENT_M }),
+            });
+        }
     }
 }
 
+/// How big the fixture's hull is, across. A 40 m ship is the owner's own build case for a small
+/// multi-crew vessel, and it sits well inside the station's own extent so the berth is lawful.
+const SHIP_EXTENT_M: f64 = 20.0;
+
+/// How far the berth sits from the station's centre — clear of the station's own shell, so the two
+/// hulls do not overlap and the sibling-disjointness fence stays green.
+const SHIP_BERTH_OFFSET_M: f64 = 5_000.0;
+
 // ===== T4 — THE EARTH-LIKE PREDICATE + THE SEED SEARCH (celestial_taxonomy_design §8) =======
+
+#[cfg(test)]
+mod ship_plant_tests {
+    use super::{FixturePlant, built_ship_realm};
+    use crate::worldgen::{UniverseConfig, generate_system_forest};
+
+    fn worlds() -> (Vec<crate::worldgen::GeneratedBody>, Vec<crate::worldgen::GeneratedBody>) {
+        let base = UniverseConfig::world(500.0, 0.02);
+        let with_ship = base.clone().with_station_area_ship_plant();
+        let pair_only = base.with_station_area_plant();
+        (
+            generate_system_forest(vd_physics_seed(), &pair_only),
+            generate_system_forest(vd_physics_seed(), &with_ship),
+        )
+    }
+    fn vd_physics_seed() -> u64 {
+        crate::worldgen::HOME_SEED
+    }
+
+    #[test]
+    fn the_ship_is_appended_and_the_built_world_under_it_is_untouched() {
+        let (pair, with_ship) = worlds();
+        // ★ ADDITIVE, exactly as the station and area are. Adding a ship must not move, renumber or
+        // re-draw a single body that was already there — the discipline the plant exists to keep.
+        assert_eq!(with_ship.len(), pair.len() + 1, "exactly one body appended");
+        assert_eq!(
+            with_ship[..pair.len()],
+            pair[..],
+            "every body before the ship is byte-identical"
+        );
+    }
+
+    #[test]
+    fn the_ship_hangs_under_the_home_star_system_which_does_the_physics() {
+        let (_, with_ship) = worlds();
+        let ship = with_ship.last().expect("the ship is last");
+        assert_eq!(ship.realm, built_ship_realm());
+        // Its parent is the system that integrates it — the parent in the movement ruling's own
+        // worked example.
+        let station = with_ship
+            .iter()
+            .find(|b| matches!(b.realm, vd_core::pose::RealmId::Station(_)))
+            .expect("the pair plants a station");
+        assert_eq!(ship.parent, station.parent, "berthed in the same realm as the station");
+    }
+
+    #[test]
+    fn a_built_ship_has_no_seed_draw_because_no_seed_made_it() {
+        let (_, with_ship) = worlds();
+        let ship = with_ship.last().expect("the ship is last");
+        // A generated body draws its light and its taxon from the seed stream. A built hull has
+        // neither, which is what "the seed did not make this" means in the data.
+        assert!(ship.photometrics.is_none());
+        assert!(ship.taxon.is_none());
+    }
+
+    #[test]
+    fn the_plain_world_still_plants_nothing() {
+        let plain = UniverseConfig::world(500.0, 0.02);
+        assert_eq!(plain.fixture_plant, FixturePlant::None);
+    }
+}

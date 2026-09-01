@@ -456,12 +456,30 @@ impl RealmRegions {
     /// the identity and answer confidently from the wrong numbers.
     #[must_use]
     pub fn author_book(&self, anchor: RealmId, tick_hz: f64, at: UniverseTick) -> PlacementBook {
+        self.author_book_driven(anchor, tick_hz, at, &crate::stub::drive::DrivenChildren::default())
+    }
+
+    /// ★ THE SAME BOOK FOR A REALM THAT HOLDS DRIVEN CHILDREN (D-MOVE-2) — THE one implementation;
+    /// [`RealmRegions::author_book`] is this with an empty driven book, which is what a realm that
+    /// integrates nothing has.
+    ///
+    /// The pair exists so the thirty call sites that hold no driven child stay as they were, and so
+    /// there is still only ONE place a row is filled. A second copy of the row logic is exactly the
+    /// fork these rules exist to prevent.
+    #[must_use]
+    pub fn author_book_driven(
+        &self,
+        anchor: RealmId,
+        tick_hz: f64,
+        at: UniverseTick,
+        driven: &crate::stub::drive::DrivenChildren,
+    ) -> PlacementBook {
         let secs = secs_since_epoch(at.0, tick_hz);
         PlacementBook::new(
             self.own_frame(anchor),
             at,
             self.direct_children(anchor)
-                .map(|r| (r.frame, placement_row(&self.moving, r, secs)))
+                .map(|r| (r.frame, placement_row(&self.moving, driven, r, secs)))
                 .collect(),
         )
     }

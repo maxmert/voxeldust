@@ -25,6 +25,12 @@
 //!   (orch→source: the resolved dest, its four fields mirror `TransientStatus::Crossing`), `CrossingAborted`
 //!   (orch→source: the resolve saga aborted pre-CAS — clear the source's `RequestInFlight` latch).
 //!
+//! - D-MOVE-2 (the temporary control seam, owner-approved 2026-08-31): `ChildDrive` (a child's per-tick
+//!   push and turn, in its OWN frame — unreliable, latest-wins, restated every tick) and `ChildFacts`
+//!   (its mass, cross-section, drag coefficient and declared states — reliable, retained, sent only on
+//!   a change and once per connection). ONE lane for every realm kind; WHETHER a realm speaks or
+//!   listens is a capability (`self_driven` / `integrates_children`), never a kind test.
+//!
 //! RESERVED (variant lands with its consumer): `BlockEdit` (P6), `Coupling` `EffectFree` ports (P8),
 //! `Signal` (P9 cross-shard functional-block signals).
 //!
@@ -493,6 +499,43 @@ pub enum InterShardFlow {
     /// `ReDriven` (re-asserted from live state every beat), on the reliable Saga carrier.
     /// APPENDED (discriminant 35).
     RealmInterest(RealmInterest),
+    /// ★ WHAT I AM DOING — a child's per-tick drive, in the CHILD'S OWN frame (D-MOVE-2; owner
+    /// approval 2026-08-31, *"Agree with vector only"*). Producer: any child that can push itself —
+    /// a ship, a person, a rock with a motor. Consumer: its parent, which rotates the vector into
+    /// its own frame, adds its own ambient, integrates, and authors the placement.
+    ///
+    /// **THIS ARM NAMES NO MANOEUVRE, AND THAT IS THE WHOLE POINT.** Forward, reverse, strafe, climb
+    /// and dive are DIRECTIONS of one push; roll, pitch and yaw are directions of one turn. There is
+    /// never a new arm for a new way to move, and the hot path stays the same size however many
+    /// thrusters a hull grows. **DRAG NEVER RIDES HERE** — the realm holds its own medium and works
+    /// drag out from what the child declared it IS ([`InterShardFlow::ChildFacts`]).
+    ///
+    /// **NO VELOCITY, BY CONSTRUCTION OF THE TYPE.** A velocity is half a placement and only a parent
+    /// writes placements (SL1 clause 3). There is no field one could ride in.
+    ///
+    /// Classification: `FireAndForget` (effect-free, latest-wins) + `Unreliable` — a lost tick is
+    /// harmless because the next tick restates the whole intent, which is the standing lesson for a
+    /// hot lane: repeat state, never send an event once.
+    /// APPENDED (discriminant 36).
+    ChildDrive(ChildDrive),
+    /// ★ WHAT I AM — a child's declared physical facts, sent ONLY when they change (D-MOVE-2).
+    /// Producer: the child, on a change and once per connection. Consumer: its parent, for the forces
+    /// IT applies — drag today, impacts later.
+    ///
+    /// **WHY MASS CROSSES AT ALL, when gravity does not need it.** A child's mass cancels out of
+    /// gravity, so a heavy ship and a light drone fall identically. It does NOT cancel out of drag,
+    /// which is an outside push: identical hulls at identical speed slow at very different rates for a
+    /// ten-to-one mass difference. The parent already holds every child's size and shape — that is how
+    /// it decides who contains what — so mass is no more private than extent and sealing it bought
+    /// nothing (D-MOVE-1).
+    ///
+    /// Classification: `FireAndForget` (effect-free — it states a property, it commands nothing) +
+    /// `ProducerLessReliable`. **The reliable class is the whole answer to staleness**: a change stated
+    /// once and then lost would leave a parent computing drag from a mass that is wrong forever, and
+    /// nothing would correct it. A version tag on the hot lane was proposed and WITHDRAWN — the carrier
+    /// already answers it, so no new data crosses (D-MOVE-2).
+    /// APPENDED (discriminant 37).
+    ChildFacts(ChildFacts),
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -733,6 +776,12 @@ impl InterShardFlow {
             // The interest bit (minor 21, Q1) carries authority for NOTHING — one latest-wins
             // byte, the parent fence gating zombie senders at the receiver ⇒ FireAndForget.
             InterShardFlow::RealmInterest(_) => EffectClass::FireAndForget,
+            // Both movement lanes are effect-free: one states what a child is DOING and the other what
+            // it IS. Neither commands anything, neither gates authority, and neither can trigger a
+            // transfer — so neither may carry an idempotency key (the G-SEALED invariant).
+            InterShardFlow::ChildDrive(_) | InterShardFlow::ChildFacts(_) => {
+                EffectClass::FireAndForget
+            }
         }
     }
 
@@ -857,6 +906,18 @@ impl InterShardFlow {
             // holds (and expires to 0 by TTL on silence) — the producer re-drives it, so the RAM
             // retry suffices; never producer-less.
             InterShardFlow::RealmInterest(_) => FlowDurabilityClass::ReDriven,
+            // THE HOT LANE IS UNRELIABLE ON PURPOSE. Every tick restates the whole intent, so a lost
+            // datagram is corrected by the next one before anybody could read the gap. Making it
+            // reliable would put a retransmit in front of fresher data — the classic mistake of sending
+            // per-tick state on a reliable channel.
+            InterShardFlow::ChildDrive(_) => FlowDurabilityClass::Unreliable,
+            // THE SLOW LANE IS A PRODUCER-LESS ONE-SHOT, which is exactly what this class is for. A
+            // child states its mass on a change and then says nothing more, so no timer re-drives it:
+            // the carrier must retain it and replay it. ⚠ This is the FOURTH producer-less arm (the
+            // set already held Ghost::Despawn, Ghost::SpawnV2 and the transient batch); the closed
+            // test's golden pin moved from three to four with this reason, and the pin's obligation
+            // comes with it — the push site MUST send this `Retained`.
+            InterShardFlow::ChildFacts(_) => FlowDurabilityClass::ProducerLessReliable,
         }
     }
 }
@@ -1079,6 +1140,99 @@ pub struct RealmInterest {
     /// **Lawful values:** `None`, or `Some(d)` with `d` finite and non-negative. Anything else is
     /// refused and counted at the receiver, exactly as the byte's `> 1` was.
     pub look_inside_from_m: Option<f64>,
+}
+
+/// ★ THE DRIVE GRID — how many whole units make one metre per second squared.
+///
+/// **DERIVED, NOT CHOSEN.** The determinism law puts every physics-to-control boundary on an integer
+/// grid, which is why this file carries almost no floats: two shards must read one statement the same
+/// way, and a grid is the only way to promise that.
+///
+/// The size comes from the world's own finest ruler. The fine tier counts MILLIMETRES, so a millimetre
+/// is the smallest length the world can represent at all. One unit here, applied for a whole second,
+/// changes a speed by one MICROMETRE per second — a thousand times finer than that millimetre, and
+/// therefore below anything the world can express however long a ship burns. An `i64` of these units
+/// reaches about 9.2e12 m/s², which is far beyond any engine: the range is not the binding side.
+pub const DRIVE_UNITS_PER_MPS2: f64 = 1.0e6;
+
+/// ★ THE TURN GRID — how many whole units make one radian per second squared. Same derivation as
+/// [`DRIVE_UNITS_PER_MPS2`]: one unit held for a second turns a hull by one microradian per second,
+/// which at a kilometre of arm is a micrometre of travel — again below the millimetre floor.
+pub const TURN_UNITS_PER_RADPS2: f64 = 1.0e6;
+
+/// ★ WHAT A CHILD IS DOING — see [`InterShardFlow::ChildDrive`] (mesh minor 22; D-MOVE-2, owner
+/// approval 2026-08-31).
+///
+/// **THE TYPE ITSELF IS THE LAW.** There is no field a velocity, a position or a destination could
+/// ride in, so a child physically cannot state half a placement (SL1 clause 3). And there is no field
+/// naming a manoeuvre: forward, reverse, strafe, climb and dive are all DIRECTIONS of `push`, and
+/// roll, pitch and yaw are directions of `turn`. A new way to fly adds no field and no arm.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildDrive {
+    /// The sending child's full lineage coord — the routing key and the misroute guard, exactly as
+    /// every other up-lane carries (the receiver checks it lowers to one of its OWN children).
+    pub child: RealmCoord,
+    /// The child's own realm fence — the zombie guard. A deposed incarnation's push is refused by
+    /// fence ordering rather than applied.
+    pub child_fence: Fence,
+    /// The universe tick this intent belongs to. A parent applies the freshest and drops the rest:
+    /// this lane is latest-wins, and an out-of-order datagram is stale, never a correction.
+    pub at: UniverseTick,
+    /// **HOW HARD I PUSH, ALONG MY OWN BODY** — whole units of [`DRIVE_UNITS_PER_MPS2`], in the
+    /// CHILD'S OWN frame. The child divides by its own mass before it speaks, because it knows its
+    /// own mass best; what crosses is an acceleration, never a force in newtons.
+    ///
+    /// The child does not know where its nose points in its parent. The parent does, because the
+    /// parent authored its facing — so the parent rotates this, and the child never needs to know.
+    pub push: [i64; 3],
+    /// **HOW HARD I TURN** — whole units of [`TURN_UNITS_PER_RADPS2`], in the child's own frame,
+    /// about its own axes.
+    pub turn: [i64; 3],
+}
+
+/// ★ WHAT A CHILD IS — see [`InterShardFlow::ChildFacts`] (mesh minor 22; D-MOVE-2).
+///
+/// A declared property, like extent. It travels when it CHANGES and once per connection, never per
+/// tick. The parent uses it only for the forces IT applies: drag today, impacts later.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildFacts {
+    /// The sending child's full lineage coord — routing key and misroute guard.
+    pub child: RealmCoord,
+    /// The child's own realm fence — the zombie guard.
+    pub child_fence: Fence,
+    /// The universe tick this statement was made at (freshness ordering beside the fence).
+    pub at: UniverseTick,
+    /// The child's mass in WHOLE GRAMS. Integer for the same reason as the drive grid, and a gram is
+    /// far below anything that changes a drag figure on a hull.
+    ///
+    /// **WHY MASS CROSSES, when gravity does not need it.** A child's mass cancels out of gravity, so
+    /// a heavy ship and a light drone fall identically. It does not cancel out of drag, which is an
+    /// outside push. The parent already holds every child's size and shape, so mass is no more private
+    /// than extent (D-MOVE-1).
+    pub mass_g: u64,
+    /// The child's cross-section in WHOLE SQUARE MILLIMETRES — the area the medium pushes against.
+    pub cross_section_mm2: u64,
+    /// The child's drag coefficient, in MILLIONTHS. A plain ratio with no unit, so the grid is the
+    /// same one the drive lane uses.
+    pub drag_micro: u32,
+    /// The child's DECLARED STATES — a CLOSED set, reviewed exactly like a wire arm (M6).
+    pub declared: DeclaredStates,
+}
+
+/// ★ THE CLOSED SET OF DECLARED STATES (M6, `owner_decisions_2026-08-26_movement.md`).
+///
+/// A declared state says what a ship IS, never what it wants. The set is closed and every addition is
+/// reviewed like an arm, behind the owner's five-test gate — whose two sharp edges are that a state
+/// must survive an EMPTY SHIP (which kills autopilot destinations) and must NOT MOVE YOU BY ITSELF
+/// (which kills a velocity in disguise).
+///
+/// A struct of named flags rather than a bag: a caller cannot invent a state that nobody reviewed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredStates {
+    /// Warp. Reaching a galaxy-crossing speed by pushing takes over a million years at ten gravities,
+    /// so warp cannot be an engine: it changes the MEDIUM'S relationship to the ship, and therefore
+    /// rides this slow lane beside mass rather than the per-tick one.
+    pub warp: bool,
 }
 
 /// ONE forwarded grandchild batch riding [`WindowRelay::interior`] /

@@ -121,6 +121,10 @@ fn profile_kind_of(kind: RealmKindTag) -> ProfileKind {
         RealmKindTag::Station => ProfileKind::Station,
         RealmKindTag::Area => ProfileKind::Area,
         RealmKindTag::Star => ProfileKind::Planet,
+        // The capability side was ready before the lineage side existed: `ProfileKind::Ship` has been
+        // here all along, and a ship shard has had a profile to boot with. What was missing was any
+        // way to NAME a ship in a lineage, which is what the `Ship` tag adds.
+        RealmKindTag::Ship => ProfileKind::Ship,
     }
 }
 

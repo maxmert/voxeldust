@@ -121,6 +121,9 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // down-proxy's power source) and the PARENT-side per-child emission latch. Both default
     // empty ⇒ byte-identical until the lane fires.
     world.insert_resource(InterestHeld::default());
+    // D-MOVE-2 — every driven child this realm holds: where each is, how it is moving, and the
+    // freshest push it stated. Empty on a realm that holds none, which is most of them.
+    world.insert_resource(crate::stub::drive::DrivenChildren::default());
     world.insert_resource(InterestEmitLatch::default());
     world.insert_resource(ChildLuma::default());
     // `feed_source_ghosts` runs AFTER `process_inbound` (this tick's promote has registered the
@@ -233,9 +236,54 @@ type VuAoiInbound<'w> = (
     ResMut<'w, RelayHeld>,
     // Look horizon slice 4 — the CHILD-side interest holder the `RealmInterest` receive writes.
     ResMut<'w, InterestHeld>,
+    ResMut<'w, crate::stub::drive::DrivenChildren>,
 );
 
 /// Drain and dispatch everything delivered this tick.
+/// Was this reliable-carrier message a child's declared facts? If so it is consumed here and the
+/// caller does nothing more with it (D-MOVE-2).
+///
+/// Decoded ONCE. Peeking and then decoding again would repeat the work on every directory reply in
+/// the world, and the "cannot happen" branch that shape needs is an arm no input can reach —
+/// permanently uncovered, which is exactly what the coverage discipline exists to prevent.
+#[allow(clippy::too_many_arguments)]
+fn took_child_facts(
+    bytes: &[u8],
+    from: vd_core::ids::NodeId,
+    own_realm: vd_core::pose::RealmId,
+    integrates: bool,
+    child_nodes: &std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::ids::NodeId>,
+    driven: &mut crate::stub::drive::DrivenChildren,
+    stats: &mut StubStats,
+) -> bool {
+    match postcard::from_bytes::<InterShardFlow>(bytes) {
+        Ok(InterShardFlow::ChildFacts(cf)) => {
+            crate::stub::drive::on_child_facts(
+                cf, from, own_realm, integrates, child_nodes, driven, stats,
+            );
+            true
+        }
+        // Everything else on this carrier is the directory's business, INCLUDING a message that does
+        // not decode: reporting that is the reply path's job, not this one's.
+        _ => false,
+    }
+}
+
+/// Does THIS shard do the physics for what is inside it (D-MOVE-2)?
+///
+/// Read from the node's own identity, which already carries its profile — so the capability decides
+/// what an installed system DOES, never which systems exist. The same systems are installed on every
+/// shard (HR3), and a realm that does no physics refuses a drive and counts the refusal rather than
+/// silently having no arm for it.
+fn integrates_children(identity: &NodeIdentity) -> bool {
+    match identity.kind {
+        crate::capability::NodeKind::Shard(profile) => profile.integrates_children(),
+        // Every other node kind — a gateway, an orchestrator, the relay, the test stub — holds no
+        // realm and therefore integrates nothing. A drive reaching one is a misroute by definition.
+        _ => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_inbound(
     config: Res<StubConfig>,
@@ -288,6 +336,7 @@ fn process_inbound(
         mut child_liveness,
         mut relay_held,
         mut interest_held,
+        mut driven,
     ) = vu_aoi;
     let (mut in_flight, mut progress, mut holds) = crossing;
     let (mut pending, mut pending_slots, mut open_windows) = pending;
@@ -327,6 +376,27 @@ fn process_inbound(
                     &mut outbox,
                 );
             }
+            // D-MOVE-2 — what a child IS: its mass, cross-section, drag coefficient and declared
+            // states. On the RELIABLE carrier, because a change stated once and then lost would leave
+            // this realm computing drag from a mass that is wrong for ever, with nothing to correct it.
+            //
+            // Decoded ONCE and matched, rather than peeked at and decoded again: a second decode of
+            // the same bytes is wasted work on every directory reply in the world, and the `else`
+            // branch it needs is an arm no input can reach — permanently uncovered, which the coverage
+            // rule forbids for exactly this reason.
+            // D-MOVE-2 — the reliable carrier now serves TWO arms, so it decodes once and asks which.
+            // What a child IS (its mass, cross-section, drag coefficient and declared states) must
+            // arrive reliably: a change stated once and then lost would leave this realm computing
+            // drag from a mass that is wrong for ever, with nothing to correct it.
+            MsgClass::Saga if took_child_facts(
+                bytes,
+                *from,
+                config.realm,
+                integrates_children(&identity),
+                &child_nodes.0,
+                &mut driven,
+                &mut stats,
+            ) => {}
             MsgClass::Saga => on_directory_reply(
                 bytes,
                 *from,
@@ -378,6 +448,20 @@ fn process_inbound(
             MsgClass::SignalDelta => match postcard::from_bytes::<InterShardFlow>(bytes) {
                 // Step 5 slice A — a direct child's SL7 occupancy bit. Presence-is-the-bit; last-wins
                 // by (fence, at); the sender NodeId is the return address for the down-lanes.
+                // D-MOVE-2 — a child realm's per-tick push and turn, in its OWN frame. The carrier is
+                // the unreliable up-lane because the next tick restates the whole intent: a lost
+                // datagram is corrected before anybody could read the gap.
+                Ok(InterShardFlow::ChildDrive(cd)) => {
+                    crate::stub::drive::on_child_drive(
+                        cd,
+                        *from,
+                        config.realm,
+                        integrates_children(&identity),
+                        &child_nodes.0,
+                        &mut driven,
+                        &mut stats,
+                    );
+                }
                 Ok(InterShardFlow::ChildLive(cl)) => {
                     retain_child_live(
                         &mut child_liveness,

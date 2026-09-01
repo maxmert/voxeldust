@@ -476,6 +476,31 @@ pub struct StubStats {
     pub realm_interest_sent: u64,
     /// Look horizon slice 4 — interest bytes lawfully ADMITTED (either value; the down-proxy
     /// reads the held entry, never this counter).
+    /// D-MOVE-2: a child's per-tick drive, admitted and held.
+    pub child_drive_received: u64,
+    /// A drive whose sender is not one of MY children — the misroute guard every up-lane carries.
+    pub child_drive_misrouted: u64,
+    /// A drive from a node the directory does not place at that child — the zombie guard.
+    pub child_drive_unattested: u64,
+    /// A drive older than the one already held. This lane is latest-wins, so an out-of-order datagram
+    /// is stale news, never a correction.
+    pub child_drive_stale: u64,
+    /// A drive arriving at a realm that does not do physics for what is inside it. The capability is
+    /// checked at RUNTIME rather than by installing different systems, because the same systems are
+    /// installed everywhere and the profile decides what they DO (HR3).
+    pub child_drive_uncapable: u64,
+    /// D-MOVE-2: a child's declared facts, admitted and held.
+    pub child_facts_received: u64,
+    /// Facts whose sender is not one of MY children.
+    pub child_facts_misrouted: u64,
+    /// Facts from a node the directory does not place at that child.
+    pub child_facts_unattested: u64,
+    /// Facts older than those already held.
+    pub child_facts_stale: u64,
+    /// Facts that cannot describe a body — a mass of zero would divide by zero in the drag term, and a
+    /// negative area is not an area. Refused whole rather than clamped: a made-up hull flies wrong
+    /// forever and silently.
+    pub child_facts_unlawful: u64,
     pub realm_interest_received: u64,
     /// Look horizon slice 4 — an interest byte whose routing coord does not lower to THIS realm:
     /// dropped + counted (fail-closed, the mirror of every up-lane's mis-route guard). 0 in a

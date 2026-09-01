@@ -47,11 +47,40 @@ pub(crate) fn author_placements(
     clock: Res<ClockSample>,
     regions: Res<RealmRegions>,
     mut placements: ResMut<Placements>,
+    mut driven: ResMut<crate::stub::drive::DrivenChildren>,
 ) {
+    // ★ THE PHYSICS PASS RUNS FIRST, AND ONLY THEN IS THE ROW WRITTEN (D-MOVE-2). The order is the
+    // movement ruling's own: take what each child stated it is DOING, add this realm's own ambient,
+    // advance one tick, and write down where each child now is. Authoring from a book computed BEFORE
+    // the pass would publish last tick's positions for ever.
+    driven.advance_all(
+        clock.universe_tick,
+        crate::stub::drive::DRIVE_STALE_AFTER_TICKS,
+        &ambient_of(&config),
+        config.tick_dt_s * config.time_multiplier,
+    );
     let tick_hz = 1.0 / config.tick_dt_s;
     for anchor in placement_anchors(&regions, &config) {
-        let book = regions.author_book(anchor, tick_hz, clock.universe_tick);
+        let book = regions.author_book_driven(anchor, tick_hz, clock.universe_tick, &driven);
         placements.0.publish(anchor, book);
+    }
+}
+
+/// WHAT THIS REALM IS MADE OF, for the children flying inside it (D-MOVE-1 M2a: *"the realm holds its
+/// own medium; nothing about the medium crosses in either direction"*).
+///
+/// ⚠ **BOTH NUMBERS ARE ZERO TODAY, AND THAT IS AN HONEST STUB RATHER THAN A CHOICE.** A realm's pull
+/// belongs to the physics phase, which is not built: the generator states masses for closed-form orbit
+/// sums and nothing turns one into a pull on an arbitrary child. Its medium is owed too — no realm
+/// states a density anywhere (D-MOVE-1's own "what this defers" list).
+///
+/// Zero pull and zero density mean a driven child flies on its own engines alone, in a vacuum. That is
+/// exactly right for a ship in open space and exactly wrong near a planet, which is why this is
+/// ledgered rather than left to be discovered.
+fn ambient_of(_config: &StubConfig) -> crate::stub::drive::Ambient {
+    crate::stub::drive::Ambient {
+        pull_mps2: DVec3::ZERO,
+        density_kgpm3: 0.0,
     }
 }
 
@@ -88,11 +117,38 @@ pub(crate) fn placement_anchors(regions: &RealmRegions, config: &StubConfig) -> 
 /// only the f64 remainder and silently threw the anchor away — invisible while every region is
 /// authored at cell ZERO, and it would have stayed invisible until the first child placed a
 /// cell-block out drew at the wrong place.
+/// ★ A THIRD WAY TO FILL A ROW (D-MOVE-2). A parent had two: ask an orbit, or repeat the spot a child
+/// was authored at. A DRIVEN child is neither — it has no orbit to ask, and its authored spot goes
+/// stale the moment a pilot touches the controls, because the physics pass has already moved it.
+///
+/// **THE DRIVEN BOOK IS ASKED FIRST, AND IT IS A LOOKUP RATHER THAN A KIND TEST.** SL4 forbids the
+/// placement path from asking WHAT KIND of thing a child is — "a `does this child have orbital
+/// elements?` test inside a placement lookup is STILL a specific and is forbidden". Asking "do I hold
+/// a driven state for this realm?" is membership in an opaque set, exactly like the motion book beside
+/// it. The difference is not cosmetic: with a lookup, a station that grows engines starts moving the
+/// day it appears in the book, with no code change anywhere; with a kind test, somebody has to
+/// remember to add stations to a list, and the day they forget, a station with engines sits still and
+/// nobody can see why.
 pub(crate) fn placement_row(
     moving: &BTreeMap<RealmId, MotionFn>,
+    driven: &crate::stub::drive::DrivenChildren,
     r: &RealmRegion,
     secs: f64,
 ) -> FramePlacement {
+    if let Some(state) = driven.state_of(r.realm) {
+        return FramePlacement {
+            // Where the physics pass just put it. The cell anchor is the child's authored one: a
+            // driven child's motion is measured from its berth, and the offset carries the travel.
+            origin_cell: r.center.in_parents_frame().cell(),
+            origin: r.center.in_parents_frame().offset() + state.pos_m,
+            // ★ THE VELOCITY THE PARENT WROTE, travelling DOWNWARD where it belongs. A child never
+            // states this — it is half a placement (SL1 clause 3) — but the parent authored it, and
+            // the parent's own rows are exactly where an authored velocity is allowed to appear.
+            velocity: state.vel_mps,
+            orientation: state.orient,
+            angular_velocity: state.spin_radps,
+        };
+    }
     match moving.get(&r.realm) {
         Some(motion) => (motion.0)(secs),
         None => FramePlacement {

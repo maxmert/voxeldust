@@ -25,7 +25,18 @@ use vd_devproto::{
     WaitOp, WaitPredicate,
 };
 
-const DEADLINE: Duration = Duration::from_secs(40);
+// ★ RAISED FROM 40 s (2026-08-31). What these gates prove is that concurrent logins each converge
+// and stay independent — never how fast a shard boots. Forty seconds was written when a home shard
+// held three star systems. MEASURED on THE world, debug build: the pre-probe boot path alone runs
+// 46.6 s (the fold, the reach roster, the nest fence and three world guards), so a 40 s login wait
+// could not be met however healthy the cluster was: every client sat in `AwaitingWelcome` with
+// `sky_watch: NeverHeard` and nothing received at all.
+//
+// The same reason raised the dev cluster's, the boot guard's, the spawn smoke's and the parity
+// gates' deadlines. The cost that makes this necessary is tracked as the boot budget: five separate
+// boot steps each walk all 233 220 star systems, and about 30 s of the 46.6 s is the SAME forest
+// rebuilt four times.
+const DEADLINE: Duration = Duration::from_secs(240);
 /// Floors a healthy client clears in a second or two of 20 Hz — below them is a
 /// stall/collapse, not a slow boot.
 const SNAPSHOT_FLOOR: u64 = 5;

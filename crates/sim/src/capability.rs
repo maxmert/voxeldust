@@ -54,6 +54,40 @@ pub struct CapRequest {
     pub signal_relay: bool,
     /// May host ship-exterior hull bodies (system/planet/station shards).
     pub hull_host: bool,
+    /// ★ CAN PUSH ITSELF — the realm has engines or a motor, so it may state a drive to its parent
+    /// (D-MOVE-2; owner 2026-08-31, *"this is the specific of this concrete realm behavior, same as
+    /// physics inside each realm"*). A ship has this; a station with thrusters has this; a star system
+    /// does not steer and a map marker has no body.
+    ///
+    /// ⚠ **A PERSON IS NOT LISTED HERE, AND THAT IS DELIBERATE.** A person is an OCCUPANT, never a
+    /// realm — SL2's own line is *"CONTACTS ARE REALMS, PEOPLE ARE SEEN"*, and `EntityKind::Player` is
+    /// the first entry of the transfer registry. An occupant's push never crosses a boundary at all:
+    /// the realm holding it applies the push in its own process. This switch governs the WIRE lane,
+    /// which only ever carries a child REALM speaking to its parent.
+    ///
+    /// **THIS IS A SWITCH, NEVER A KIND TEST.** Written as "is this a ship?" a station with thrusters
+    /// could not move and a person could not walk, and each new mover would need adding to a list.
+    /// Written as a switch, a station turns it on and flies with the code that already exists (HR3:
+    /// never match on a shard kind in a feature).
+    pub self_driven: bool,
+    /// ★ DOES THE PHYSICS FOR THE THINGS INSIDE IT — the realm takes the drives of what it holds, adds
+    /// its own ambient, integrates, and AUTHORS the resulting placements (D-MOVE-2). A star system has
+    /// this; a planet has it; a ship has it for its own crew and for anything docked inside it.
+    ///
+    /// **A SHIP CARRIES BOTH SWITCHES AT ONCE.** It states a drive UPWARD to the system holding it, and
+    /// it integrates what is inside it. That pair is why the two switches are separate rather than one.
+    ///
+    /// ★ **THE CORRECTED PROOF THAT THE LANE MUST BE GENERIC (2026-08-31).** An earlier draft argued it
+    /// from "a ship speaks upward and listens to its crew". That argument is WEAK, and the owner's
+    /// question about player realms exposed it: a crew member is an occupant in the SAME process, so
+    /// its push never touches the wire. The listening half proved nothing about the wire lane.
+    ///
+    /// The real proof is HR4's own gate — the identical fixture must pass on TWO REALM KINDS. A ship
+    /// inside a star system and a ship inside a planet send the SAME message to two different kinds of
+    /// parent, and the ruling's acceptance test is that the ship *"does not know it moved house"*. A
+    /// ship-specific lane cannot pass that gate, because the second parent would need ship-specific
+    /// code to receive it — and then the ship WOULD know.
+    pub integrates_children: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
@@ -78,6 +112,8 @@ pub struct ShardProfile {
     seats: bool,
     signal_relay: bool,
     hull_host: bool,
+    self_driven: bool,
+    integrates_children: bool,
 }
 
 impl ShardProfile {
@@ -107,6 +143,8 @@ impl ShardProfile {
             seats: req.seats,
             signal_relay: req.signal_relay,
             hull_host: req.hull_host,
+            self_driven: req.self_driven,
+            integrates_children: req.integrates_children,
         })
     }
 
@@ -142,6 +180,17 @@ impl ShardProfile {
     pub fn hull_host(&self) -> bool {
         self.hull_host
     }
+    /// May this realm state a drive to its parent? See [`CapRequest::self_driven`].
+    #[must_use]
+    pub fn self_driven(&self) -> bool {
+        self.self_driven
+    }
+    /// Does this realm integrate its children's drives and author their placements? See
+    /// [`CapRequest::integrates_children`].
+    #[must_use]
+    pub fn integrates_children(&self) -> bool {
+        self.integrates_children
+    }
 
     /// Does this profile provide EVERY capability a re-home subject REQUIRES (D-37 target selection)? The
     /// target must match the required voxel GEOMETRY exactly (a ship's Cartesian realm can never re-home
@@ -175,6 +224,9 @@ pub mod profiles {
     pub fn galaxy() -> Result<ShardProfile, ProfileError> {
         ShardProfile::build(CapRequest {
             signal_relay: true,
+            // A galaxy holds the ships crossing between its systems, so it integrates their drives
+            // (D-MOVE-2). It does not steer itself.
+            integrates_children: true,
             ..CapRequest::default()
         })
     }
@@ -182,6 +234,9 @@ pub mod profiles {
     pub fn system() -> Result<ShardProfile, ProfileError> {
         ShardProfile::build(CapRequest {
             hull_host: true,
+            // The parent in the movement ruling's own worked example: it adds the star's pull to a
+            // ship's push and authors where the ship now is (D-MOVE-2).
+            integrates_children: true,
             ..CapRequest::default()
         })
     }
@@ -194,6 +249,10 @@ pub mod profiles {
             surfaces: true,
             seats: true,
             hull_host: true,
+            // The SECOND realm kind the HR4 gate needs: the identical fixture must pass with a ship
+            // inside a planet as well as inside a star system, and the ship must not know the
+            // difference (D-MOVE-2).
+            integrates_children: true,
             ..CapRequest::default()
         })
     }
@@ -205,6 +264,11 @@ pub mod profiles {
             block_edit: true,
             surfaces: true,
             seats: true,
+            // ★ BOTH SWITCHES, and a ship is the realm that shows why they are two. It PUSHES ITSELF
+            // against the realm holding it, and it INTEGRATES what is inside it — its crew, and
+            // anything docked in its hangar (D-MOVE-2).
+            self_driven: true,
+            integrates_children: true,
             ..CapRequest::default()
         })
     }
@@ -230,6 +294,10 @@ pub mod profiles {
             seats: true,
             signal_relay: true,
             hull_host: true,
+            // A station holds ships in its bays, so it integrates their drives. It does NOT push
+            // itself: station-keeping is a later question, and the switch exists so that answer is
+            // DATA rather than a code change (D-MOVE-2).
+            integrates_children: true,
             ..CapRequest::default()
         })
     }

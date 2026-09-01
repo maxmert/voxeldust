@@ -531,6 +531,25 @@ fn every_arm() -> Vec<InterShardFlow> {
             at: UniverseTick(16),
             look_inside_from_m: Some(400.1),
         }),
+        // D-MOVE-2: a child's per-tick drive. Push and turn on every axis, so no axis can be dropped
+        // by a serialisation slip without the round-trip noticing.
+        InterShardFlow::ChildDrive(vd_wire::intershard::ChildDrive {
+            child: demand_child_coord(),
+            child_fence: Fence(9),
+            at: UniverseTick(17),
+            push: [1_500_000, -250_000, 40],
+            turn: [-7, 8, 9],
+        }),
+        // D-MOVE-2: what a child IS. A declared state is set here so the closed set round-trips too.
+        InterShardFlow::ChildFacts(vd_wire::intershard::ChildFacts {
+            child: demand_child_coord(),
+            child_fence: Fence(10),
+            at: UniverseTick(18),
+            mass_g: 50_000_000,
+            cross_section_mm2: 12_000_000,
+            drag_micro: 820_000,
+            declared: vd_wire::intershard::DeclaredStates { warp: true },
+        }),
     ]
 }
 
@@ -598,7 +617,9 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::RealmShapeObservation(_)
         | InterShardFlow::ChildSceneSet(_)
         | InterShardFlow::WindowRelay(_)
-        | InterShardFlow::RealmInterest(_) => {}
+        | InterShardFlow::RealmInterest(_)
+        | InterShardFlow::ChildDrive(_)
+        | InterShardFlow::ChildFacts(_) => {}
     }
 }
 
@@ -770,6 +791,9 @@ fn every_arm_encodes_its_declared_discriminant_index() {
             // The Q2 relay leg (mesh minor 17) holds 34 forever.
             InterShardFlow::WindowRelay(_) => 34,
             InterShardFlow::RealmInterest(_) => 35,
+            // D-MOVE-2, the two movement lanes (mesh minor 22).
+            InterShardFlow::ChildDrive(_) => 36,
+            InterShardFlow::ChildFacts(_) => 37,
         }
     }
     // Every fixture's real leading byte matches its declared index (all indices < 128, so the
@@ -782,9 +806,9 @@ fn every_arm_encodes_its_declared_discriminant_index() {
     }
     // …and the fixture set spans the WHOLE contiguous index space, so a missing fixture (or a
     // gap postcard would assign past a deleted arm) cannot pass vacuously.
-    assert_eq!(seen.len(), 36);
+    assert_eq!(seen.len(), 38);
     assert_eq!(seen.first().copied(), Some(0));
-    assert_eq!(seen.last().copied(), Some(35));
+    assert_eq!(seen.last().copied(), Some(37));
 }
 
 /// THE TOMBSTONE GOLDEN SET — the discriminants no producer may ever fill again, stated as data.
@@ -819,7 +843,9 @@ fn the_tombstoned_discriminants_are_exactly_this_golden_set() {
             // Everything else is LIVING: the transfer/saga/directory machinery, the roster, the
             // SL7 occupancy bit, the demand verbs, the reactive greeting, and the window lane's
             // own Q2 relay leg.
-            InterShardFlow::Ghost(_)
+            InterShardFlow::ChildDrive(_)
+            | InterShardFlow::ChildFacts(_)
+            | InterShardFlow::Ghost(_)
             | InterShardFlow::Transfer(_)
             | InterShardFlow::Directory(_)
             | InterShardFlow::Saga(_)
@@ -1118,6 +1144,16 @@ fn durability_class_pins_the_producer_less_reliable_set() {
             {
                 FlowDurabilityClass::ProducerLessReliable
             }
+            // D-MOVE-2: the hot lane restates the WHOLE intent every tick, so a lost datagram is
+            // corrected by the next one before anybody could read the gap — Unreliable, and NOT
+            // producer-less.
+            InterShardFlow::ChildDrive(_) => FlowDurabilityClass::Unreliable,
+            // D-MOVE-2: a child states its mass on a CHANGE and then says nothing more, so no timer
+            // re-drives it and the carrier must retain and replay it. ★ THIS GROWS THE PRODUCER-LESS
+            // SET FROM THREE TO FOUR, deliberately — and with it the obligation the pin exists to
+            // enforce: the push site MUST carry `Durability::Retained`, or a source crash loses the
+            // one-shot and leaves a parent computing drag from a mass that is wrong forever.
+            InterShardFlow::ChildFacts(_) => FlowDurabilityClass::ProducerLessReliable,
             _ => FlowDurabilityClass::ReDriven,
         };
         assert_eq!(
@@ -1131,9 +1167,9 @@ fn durability_class_pins_the_producer_less_reliable_set() {
     }
     assert_eq!(
         producer_less.len(),
-        3,
-        "exactly three producer-less-reliable arms today (Ghost::Despawn + Ghost::SpawnV2 + \
-         TransientBatch): {producer_less:?}"
+        4,
+        "exactly four producer-less-reliable arms today (Ghost::Despawn + Ghost::SpawnV2 + \
+         TransientBatch + ChildFacts): {producer_less:?}"
     );
 }
 
