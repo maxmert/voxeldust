@@ -2626,12 +2626,47 @@ pub fn boot_world_lit(
         vd_physics::worldgen::StarPhotometrics,
     )>,
 ) {
-    let (regions, movers, lit) = vd_physics::worldgen::shard_boot_world_lit(
+    boot_world_built(
+        universe_seed,
+        held_realms,
+        hosted,
+        occupant_v_max_mps,
+        tick_dt_s,
+        lineage,
+        &[],
+    )
+}
+
+/// ★ THE SAME WORLD, PLUS WHAT PEOPLE BUILT HERE (D-MOVE-2) — THE one implementation;
+/// [`boot_world_lit`] is this with no berths, which is what a realm holding no built children has.
+///
+/// The berths are lowered by the SAME code every generated body goes through, and appended last, so a
+/// realm with nothing built gets a byte-identical world (SL5 — the physics crate's own gate asserts it).
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn boot_world_built(
+    universe_seed: u64,
+    held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    hosted: vd_core::pose::RealmId,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+    lineage: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    berths: &[(vd_core::pose::RealmId, vd_core::built::Berth)],
+) -> (
+    Vec<vd_core::geometry::RealmRegion>,
+    std::collections::BTreeMap<vd_core::pose::RealmId, vd_physics::celestial::OrbitalElements>,
+    Vec<(
+        vd_core::pose::RealmId,
+        vd_physics::worldgen::StarPhotometrics,
+    )>,
+) {
+    let (regions, movers, lit) = vd_physics::worldgen::shard_boot_world_built(
         universe_seed,
         &process_world_config(occupant_v_max_mps, tick_dt_s),
         held_realms,
         hosted,
         lineage,
+        berths,
     );
     (regions, movers.into_iter().collect(), lit)
 }

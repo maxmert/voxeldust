@@ -171,13 +171,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // marker draws all come from the same fold. This boot used to fold its subtree TWICE — once here
     // and once for the draws further down — and each fold builds the star-system layer, 233 222
     // bodies on THE world. A shard's boot is what a player waits through at login.
-    let (seed_regions, moving, boot_lit) = vd_bins::boot_world_lit(
+    // ★ THE WORLD, PLUS WHAT PEOPLE BUILT HERE (D-MOVE-2). The berths this realm authored are lowered
+    // by the SAME code every generated body goes through, and appended last — so a realm with nothing
+    // built gets a byte-identical world, which the physics crate's own gate asserts (SL5).
+    //
+    // Every berth in this realm's own file was authored BY this realm, so its parent is this realm.
+    // That is what makes the parent the only writer (SL1): a berth is a parent's own past authorship,
+    // kept between runs, and it can name no other parent because no other parent could have written it.
+    let boot_berths: Vec<_> = stored_berths
+        .iter()
+        .map(|b| (own_realm, *b))
+        .collect();
+    let (seed_regions, moving, boot_lit) = vd_bins::boot_world_built(
         universe_seed,
         &held_realms,
         own_realm,
         move_speed * time_multiplier,
         tick_dt,
         &boot_lineage,
+        &boot_berths,
     );
     // ★ A SHARD MUST BE ABLE TO PLACE ITSELF, AND IT MUST SAY SO CLEARLY WHEN IT CANNOT
     // (owner ruling 2026-08-30). A realm the star-system LAYER names — the universe, the galaxy, a

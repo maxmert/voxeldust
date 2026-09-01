@@ -145,7 +145,55 @@ pub fn shard_boot_world_lit(
     Vec<(RealmId, OrbitalElements)>,
     Vec<(RealmId, StarPhotometrics)>,
 ) {
-    let subtree = super::realm_subtree(seed_universe, config, held, lineage);
+    shard_boot_world_built(seed_universe, config, held, hosted, lineage, &[])
+}
+
+/// ★ THE SAME WORLD, PLUS WHAT PEOPLE BUILT HERE (D-MOVE-2; owner rulings 2026-09-01) — THE one
+/// implementation; [`shard_boot_world_lit`] is this with no berths, which is what a realm holding no
+/// built children has.
+///
+/// **THE BERTHS GO THROUGH THE SAME LOWERING EVERY GENERATED BODY GOES THROUGH.** They are appended to
+/// the subtree as bodies and lowered by `to_regions` with the rest, so a built child gets its band, its
+/// interest radius and its frame from exactly the code a planet gets them from. There is no second
+/// lowering and no second generator (SL5).
+///
+/// **APPENDED LAST, so every generated body is byte-identical.** With no berths the forest must be the
+/// forest that was there before this existed, to the byte — which is what the gate below asserts.
+///
+/// ⚠ **THIS IS NOT THE VARIANT THAT WAS BACKED OUT.** That was a setting on the world config, read
+/// independently by each process, so two processes held different worlds. These are ROWS a realm read
+/// from its own file: the generator is untouched, nothing selects anything, and an empty list is this
+/// world exactly.
+#[must_use]
+pub fn shard_boot_world_built(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    held: &std::collections::BTreeSet<RealmId>,
+    hosted: RealmId,
+    lineage: &std::collections::BTreeSet<RealmId>,
+    berths: &[(RealmId, vd_core::built::Berth)],
+) -> (
+    Vec<RealmRegion>,
+    Vec<(RealmId, OrbitalElements)>,
+    Vec<(RealmId, StarPhotometrics)>,
+) {
+    let mut subtree = super::realm_subtree(seed_universe, config, held, lineage);
+    for (parent, berth) in berths {
+        subtree.push(GeneratedBody {
+            realm: berth.child,
+            parent: Some(*parent),
+            shape: berth.bound,
+            // A STATIC OFFSET, and only a starting one: from its first tick the parent authors this
+            // child's placement from the pushes it states. The berth is where the hull sits before
+            // anybody touches the controls.
+            placement: Placement::StaticOffset(berth.offset_m),
+            // A built hull has no seed stream, so it draws no light and belongs to no taxon. That
+            // absence IS what "the seed did not make this" looks like in the data.
+            photometrics: None,
+            taxon: None,
+            look: Some(berth.look),
+        });
+    }
     let regions = neighbourhood_scope(&to_regions(&subtree, config), held);
     let movers = moving_children(&subtree, hosted);
     let lit = subtree
@@ -522,4 +570,100 @@ pub fn realm_neighbourhood_for_config(
     config: &UniverseConfig,
 ) -> Vec<RealmRegion> {
     neighbourhood_scope(&realm_regions_for_config(seed_universe, config), held)
+}
+
+#[cfg(test)]
+mod built_boot_tests {
+    use super::{shard_boot_world_built, shard_boot_world_lit};
+    use crate::worldgen::{HOME_SEED, UniverseConfig};
+    use vd_core::built::Berth;
+    use vd_core::entity_kind::EntityKind;
+    use vd_core::fence::Fence;
+    use vd_core::geometry::Boundary;
+    use vd_core::glam::DVec3;
+    use vd_core::ids::EntityId;
+    use vd_core::pose::RealmId;
+
+    fn world() -> UniverseConfig {
+        UniverseConfig::world(500.0, 0.02)
+    }
+    fn held(realm: RealmId) -> std::collections::BTreeSet<RealmId> {
+        std::iter::once(realm).collect()
+    }
+    fn a_ship() -> RealmId {
+        RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, 1, 0))
+    }
+
+    #[test]
+    fn with_no_berths_the_world_is_byte_identical_to_the_world_before_this_existed() {
+        // ★ THE GATE THAT KEEPS SL5. A realm holding no built children must get exactly the forest it
+        // got before a built realm was expressible — not "equivalent", not "close": the same rows.
+        //
+        // A world variant was added and backed out on 2026-08-31 precisely because two processes could
+        // hold different worlds. This assertion is what makes that impossible here: with nothing built,
+        // there is nothing to differ about.
+        let cfg = world();
+        let h = held(RealmId::System(7));
+        let plain = shard_boot_world_lit(HOME_SEED, &cfg, &h, RealmId::System(7), &h);
+        let built = shard_boot_world_built(HOME_SEED, &cfg, &h, RealmId::System(7), &h, &[]);
+        assert_eq!(plain.0, built.0, "the regions are identical");
+        assert_eq!(plain.1, built.1, "the movers are identical");
+        assert_eq!(plain.2.len(), built.2.len(), "the lit bodies are identical");
+    }
+
+    #[test]
+    fn a_berth_becomes_a_realm_with_the_same_band_a_planet_gets() {
+        // ★ ONE LOWERING. A built child must get its band, its interest radius and its frame from the
+        // code a generated body gets them from — never from a second path that could drift.
+        let cfg = world();
+        let parent = RealmId::System(7);
+        let h = held(parent);
+        let berth = Berth {
+            child: a_ship(),
+            offset_m: DVec3::new(1000.0, 0.0, 0.0),
+            bound: Boundary::Shell { r: 20.0 },
+            look: Boundary::Shell { r: 20.0 },
+            fence: Fence::GENESIS,
+        };
+        let (regions, _m, _l) =
+            shard_boot_world_built(HOME_SEED, &cfg, &h, parent, &h, &[(parent, berth)]);
+        let ship = regions
+            .iter()
+            .find(|r| r.realm == a_ship())
+            .expect("the berth became a realm in this world");
+        assert_eq!(ship.parent, Some(parent), "berthed in the realm that authored it");
+        assert!(
+            ship.aoi.spin_up_r_m() > 0.0,
+            "it wakes by the same rule as everything else: {}",
+            ship.aoi.spin_up_r_m()
+        );
+        assert!(
+            ship.aoi.tear_down_r_m() > ship.aoi.spin_up_r_m(),
+            "and it sleeps further out than it wakes, so it cannot flap"
+        );
+    }
+
+    #[test]
+    fn a_built_child_is_appended_so_nothing_generated_moves() {
+        // Adding a hull must not move, renumber or re-draw a single body that was already there. That
+        // is the additive discipline the whole record rests on.
+        let cfg = world();
+        let parent = RealmId::System(7);
+        let h = held(parent);
+        let (plain, _, _) = shard_boot_world_lit(HOME_SEED, &cfg, &h, parent, &h);
+        let berth = Berth {
+            child: a_ship(),
+            offset_m: DVec3::new(1000.0, 0.0, 0.0),
+            bound: Boundary::Shell { r: 20.0 },
+            look: Boundary::Shell { r: 20.0 },
+            fence: Fence::GENESIS,
+        };
+        let (with_ship, _, _) =
+            shard_boot_world_built(HOME_SEED, &cfg, &h, parent, &h, &[(parent, berth)]);
+        assert_eq!(with_ship.len(), plain.len() + 1, "exactly one region appended");
+        let generated: Vec<_> = with_ship.iter().filter(|r| r.realm != a_ship()).collect();
+        for (before, after) in plain.iter().zip(generated) {
+            assert_eq!(before, after, "every generated body is untouched");
+        }
+    }
 }

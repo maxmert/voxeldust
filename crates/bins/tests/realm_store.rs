@@ -201,3 +201,54 @@ fn the_shipyards_stand_in_writes_rows_the_shard_reads() {
         "the hull states its own push, not a shared constant"
     );
 }
+
+#[test]
+fn a_hull_written_by_the_tool_is_a_realm_in_the_world_the_shard_boots() {
+    // ★ THE WHOLE OF STEP 4 AND 5, END TO END. The tool writes a berth. The shipped reader reads it.
+    // The shipped world build lowers it. The hull is a realm in this world, with a band and an
+    // interest radius it got from the code a planet gets them from.
+    //
+    // Nothing here reaches inside anything: the tool is a process, the reader and the world build are
+    // the ones the shard calls at boot.
+    let dir = std::env::temp_dir().join(format!("vd-built-world-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temp dir");
+    let parent_store = dir.join("system.redb");
+    let ship_store = dir.join("ship.redb");
+    let _ = std::fs::remove_file(&parent_store);
+    let _ = std::fs::remove_file(&ship_store);
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_vd-build-ship"))
+        .args([
+            "--parent-store", &parent_store.display().to_string(),
+            "--ship-store", &ship_store.display().to_string(),
+            "--owner", "1000",
+            "--berth-x-m", "1000",
+        ])
+        .output()
+        .expect("the tool runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // What the shard does at boot: read the berths, then build the world with them.
+    let (berths, _body) = vd_bins::read_realm_store(&open(&parent_store)).expect("the berths");
+    assert_eq!(berths.len(), 1, "the tool wrote one berth");
+    let parent = RealmId::System(7);
+    let held: std::collections::BTreeSet<RealmId> = std::iter::once(parent).collect();
+    let with: Vec<_> = berths.iter().map(|b| (parent, *b)).collect();
+
+    let dev = vd_bins::DEV;
+    let (regions, _m, _l) = vd_bins::boot_world_built(
+        dev.universe_seed, &held, parent, dev.move_speed, dev.tick_dt, &held, &with,
+    );
+    let hull = regions
+        .iter()
+        .find(|r| r.realm == berths[0].child)
+        .expect("the hull the tool built is a realm in this world");
+    assert_eq!(hull.parent, Some(parent), "berthed in the realm that authored it");
+    assert!(hull.aoi.spin_up_r_m() > 0.0, "and it wakes by the generic rule");
+
+    // And with NO berths the same call gives the world that was there before any of this existed.
+    let (plain, _m, _l) = vd_bins::boot_world_built(
+        dev.universe_seed, &held, parent, dev.move_speed, dev.tick_dt, &held, &[],
+    );
+    assert_eq!(regions.len(), plain.len() + 1, "exactly one realm added, nothing else moved");
+}
