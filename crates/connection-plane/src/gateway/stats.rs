@@ -187,6 +187,20 @@ pub struct GatewayStats {
     pub window_full_chain_folds: u64,
     /// Slice B — GAUGE: sessions holding a non-empty derived chain this tick.
     pub window_chains_held: u64,
+    /// ★ GAUGE (owner ruling 2026-09-02 R1): sessions whose newest fold reached the sky's frame
+    /// and so carry a sky anchor this tick. `window_chains_held` minus this is the number of
+    /// players whose chain stops short of the galaxy — a black sky, counted.
+    pub window_sky_anchored: u64,
+    /// ★ GAUGE (2026-09-02): over every held chain and every hop above the origin, the widest gap
+    /// in ticks between the origin level's newest stamp and that hop level's newest stamp
+    /// (`u64::MAX` for a hop whose ring is empty). A gap wider than the ring span means the two
+    /// shards never share a tick, so the fold can never cover that hop — the sky stays black
+    /// while every counter that could name a refusal reads zero.
+    pub window_chain_stamp_gap_max: u64,
+    /// A STATIC attach onto a realm the gateway's seeded forest does not name (a built realm): the
+    /// session keeps a one-realm chain, so no window opens above it and no sky anchor is lifted.
+    /// Counted, never silent (2026-09-02).
+    pub attach_lineage_unresolved: u64,
     /// Slice B — a stratum HELD at its last composed poses this tick (per stratum per tick —
     /// §2.6.4 `compose_hold_ticks`): the sky above a lagging hop holds while the local world
     /// keeps moving.

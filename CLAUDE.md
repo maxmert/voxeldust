@@ -14,6 +14,21 @@ the old code lives on `main`/`ecs-system` as reference/spec ONLY.
 - `docs/design/owner_decisions_*.md` — ★ THE BINDING RULINGS, and **the NEWEST FILE WINS**. Read the
   newest one BEFORE relaying any plan or design content: these are later than every design doc, and a plan
   agreeing with itself proves nothing. Newest first:
+  - `owner_decisions_2026-09-02_reach.md` — ★ REACH: one radius per realm, TESTED BY ITS PARENT. Makes the
+    2026-09-01 ruling concrete. The galaxy is ALWAYS visible and NEVER re-anchored (the star field is the
+    galaxy's own look, shipped once; the client places ONE cloud at the galaxy's composed placement; parallax
+    is the camera). A parent POSITIONS its children and NEVER draws them (the per-child marker is deleted,
+    LAST). A realm's reach is BIGGER than its bound and usually bigger than its parent's bound; it covers
+    its whole subtree by definition (`reach = max(own look radius, max over children(distance + reach))`),
+    and it comes from the realm's LOOK (size AND brightness). The decision is tree-independent; the
+    consequence (every ancestor runs, to author placements) walks the tree. ★ NEW DATA APPROVED (SL6): a
+    child states its REACH to its parent, on change. Windows ship children IN RANGE only. Binding order of
+    work in R9; five measurements owed in R8.
+  - `owner_decisions_2026-09-01_visibility_radius.md` — ★ VISIBILITY IS A RADIUS, NOT A TREE WALK. Every
+    realm states one radius; inside it the realm boots and draws itself; a dormant realm is never drawn by
+    anybody; a realm in somebody's area of interest is not killed; ONE machinery for every realm (a
+    player-built ship is not a special case); the occupancy bit keeps liveness only and no longer decides
+    what anybody can see. MEASURED cause: 96 000 drawings parked behind an empty vouch list.
   - `owner_decisions_2026-08-27_galaxy_shape.md` — ★ THE GALAXY'S SHAPE, ITS DENSITY, AND HOW GALAXIES
     DIFFER. Written before S12 starts. **EVERY number the placement reads is SEED-DERIVED** — a density
     knob is not a tuning parameter, it is a lever that moves every star a player has ever seen (owner:

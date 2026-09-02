@@ -556,22 +556,31 @@ pub enum WindowScope {
     Child(RealmId),
 }
 
-/// ONE hop of the observer chain (`docs/design/window_lane.md` §2.2, R1): the AUTHOR's own frame
-/// expressed in `child`'s frame at the enclosing [`ShardToGateway::WindowFrame::at`] — a full
-/// rigid transform, PRE-INVERTED by the author, who authors that child's placement (SL1's
-/// "conversion in the parent" held hop-by-hop; the one inversion happens at the author, nowhere
-/// downstream). INV-BODY-AT-ORIGIN (named invariant, pinned in Slice A): a realm's own body sits
-/// at its own frame origin, so `inv`'s origin IS "the author's body in the child's frame". This
-/// type exists ONLY on the shard→gateway leg — no `InterShardFlow` arm carries it, so the type
-/// system keeps a reversed placement out of every realm (a realm can never hear where it is).
+/// ONE hop of the observer chain (`docs/design/window_lane.md` §2.2, R1): the placement the AUTHOR
+/// authored for `child`, in the AUTHOR's own frame and the author's own step, at the enclosing
+/// [`ShardToGateway::WindowFrame::at`] — exactly the datum SL1 clause 1 makes the parent the only
+/// writer of, and exactly the row the author already rosters for that child. The gateway folds
+/// the chain from it (its arithmetic runs at the author's step, `vd_core::frame::transfer_frame`),
+/// and lifts the observer's own zero UP through it to place the sky.
+///
+/// ★ IT USED TO BE PRE-INVERTED — "the author's frame expressed in the child's frame" — and that
+/// inversion is what kept the galaxy out of every chain (owner ruling 2026-09-02, R1). A galaxy's
+/// frame expressed in a star system's millimetre step is a number no lattice can hold, so the
+/// galaxy shard refused its own hop on every tick and no picture ever reached the galaxy level:
+/// no galaxy row, no sky anchor, and a re-anchor on the observer's own star system standing in for
+/// both. Stated the other way round — the child in the parent — every hop in the world is
+/// representable, because a parent contains its child by construction. The one inversion still
+/// happens once, at the gateway, in the same routine that already maps every roster row.
+///
+/// This type exists ONLY on the shard→gateway leg — no `InterShardFlow` arm carries it, and it
+/// carries nothing a realm does not already hold about its own child.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HopRow {
-    /// The direct child whose frame `inv` is expressed in.
+    /// The direct child this hop climbs from.
     pub child: RealmId,
-    /// "My frame expressed in the child's frame at `at`" — pre-inverted by the author. A rotated
-    /// cross-cell inversion inherits `transfer_frame`'s refusal semantics (dropped + counted;
-    /// owed with P10 cell math — the measurement pin lands with Slice A, never argued).
-    pub inv: FramePlacement,
+    /// The child's placement in the author's frame at `at`: position (cell + residual, in the
+    /// AUTHOR's step), velocity, facing and spin — as the author's own placement book states it.
+    pub placement: FramePlacement,
 }
 
 /// A body statement's two STRUCTURALLY EXCLUSIVE kinds (`docs/design/window_lane.md` §2.2 — the
@@ -1152,7 +1161,7 @@ mod tests {
     fn hop_row() -> HopRow {
         HopRow {
             child: RealmId::Planet(7),
-            inv: FramePlacement {
+            placement: FramePlacement {
                 origin_cell: vd_core::glam::I64Vec3::new(1, -2, 3),
                 origin: DVec3::new(-20.0, 3.0, -5.0),
                 velocity: DVec3::new(0.25, -0.5, 1.0),

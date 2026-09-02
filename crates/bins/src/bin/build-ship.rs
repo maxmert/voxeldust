@@ -43,7 +43,15 @@ fn main() -> ExitCode {
 fn run() -> Result<RealmId, String> {
     let args = Args::parse(std::env::args().skip(1))?;
     let realm = mint_ship(args.mint_shard, args.seq);
-    let bound = Boundary::Shell { r: args.extent_m };
+    // ★ A BOX, NOT A BALL — and the reason is a measurement, not a taste. The drawing code turns a
+    // shell into a sphere, and a sphere looks identical however it is turned: a hull drawn as one shows
+    // NOTHING when it flies. A box is drawn as a cuboid, so its length states its heading on screen.
+    //
+    // The long axis is Z, and forward is NEGATIVE Z — that is the stick's own mapping, not a choice
+    // made here. So the -Z end is the nose.
+    let bound = Boundary::Aabb {
+        half: DVec3::new(args.half_x_m, args.half_y_m, args.half_z_m),
+    };
 
     let body = BuiltBody {
         realm,
@@ -63,6 +71,14 @@ fn run() -> Result<RealmId, String> {
         // GENESIS: nothing has moved this row yet.
         fence: Fence::GENESIS,
     };
+    // Said out loud, because the rating never crosses to a screen: the pilot's panel shows the
+    // fraction the throttle commands, and this line is where the whole number is read.
+    println!(
+        "rating: push {} m/s^2, turn {} rad/s^2, mass {} kg",
+        args.max_push_micro_mps2 as f64 / 1.0e6,
+        args.max_turn_micro_radps2 as f64 / 1.0e6,
+        args.mass_g as f64 / 1.0e3
+    );
     let berth = Berth {
         child: realm,
         // ★ WHERE IT STARTS, AND ONLY WHERE IT STARTS. From its first tick the parent authors this
@@ -100,12 +116,9 @@ fn write_one(path: &std::path::Path, key: &[u8], value: &[u8]) -> Result<(), Str
         vd_core::EpochId(0),
     )
     .map_err(|e| format!("the store's label: {e}"))?;
-    let (mut store, _durability) = vd_io_prod::store::RedbStore::open(
-        path,
-        vd_io_prod::store::StoreTuning::default(),
-        stamp,
-    )
-    .map_err(|e| format!("{}: {e}", path.display()))?;
+    let (mut store, _durability) =
+        vd_io_prod::store::RedbStore::open(path, vd_io_prod::store::StoreTuning::default(), stamp)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
     store.put(key, &value.to_vec().into());
     store.commit();
     store.flush();
@@ -124,7 +137,9 @@ struct Args {
     owner: u128,
     mint_shard: u32,
     seq: u64,
-    extent_m: f64,
+    half_x_m: f64,
+    half_y_m: f64,
+    half_z_m: f64,
     mass_g: u64,
     cross_section_mm2: u64,
     drag_micro: u32,
@@ -143,8 +158,12 @@ impl Args {
             owner: 0,
             mint_shard: 1,
             seq: 1,
-            // A 20 m hull: the owner's own case for a small multi-crew vessel.
-            extent_m: 20.0,
+            // A 12 x 6 x 40 m hull: the owner's own case for a small multi-crew vessel, shaped so a
+            // human eye reads its heading. ★ PER-HULL DATA, never a world default — a blueprint states
+            // these three numbers, and until blueprints exist the operator does.
+            half_x_m: 6.0,
+            half_y_m: 3.0,
+            half_z_m: 20.0,
             mass_g: 50_000_000,
             cross_section_mm2: 12_000_000,
             drag_micro: 820_000,
@@ -153,6 +172,12 @@ impl Args {
             // stated here, on ONE hull's row — never a default every ship in the world shares.
             max_push_micro_mps2: 98_100_000,
             max_turn_micro_radps2: 800_000,
+            // ★ A BERTH IS MEASURED FROM THE PARENT'S CENTRE, not from where a player arrives — and a
+            // star system's centre is its STAR. A hull berthed at a small offset sits inside the star,
+            // and a player who spawns in the system's clearing is 1.08e10 metres away from it.
+            //
+            // The caller states all three axes for that reason. The shipyard will work them out from
+            // where the hull was ordered; today the operator says where.
             berth_x_m: 1_000.0,
             berth_y_m: 0.0,
             berth_z_m: 0.0,
@@ -166,9 +191,15 @@ impl Args {
                 "--owner" => a.owner = num(&value()?, &flag)?,
                 "--mint-shard" => a.mint_shard = num(&value()?, &flag)?,
                 "--seq" => a.seq = num(&value()?, &flag)?,
-                "--extent-m" => a.extent_m = num(&value()?, &flag)?,
+                "--half-x-m" => a.half_x_m = num(&value()?, &flag)?,
+                "--half-y-m" => a.half_y_m = num(&value()?, &flag)?,
+                "--half-z-m" => a.half_z_m = num(&value()?, &flag)?,
                 "--mass-g" => a.mass_g = num(&value()?, &flag)?,
+                "--max-push-micro-mps2" => a.max_push_micro_mps2 = num(&value()?, &flag)?,
+                "--max-turn-micro-radps2" => a.max_turn_micro_radps2 = num(&value()?, &flag)?,
                 "--berth-x-m" => a.berth_x_m = num(&value()?, &flag)?,
+                "--berth-y-m" => a.berth_y_m = num(&value()?, &flag)?,
+                "--berth-z-m" => a.berth_z_m = num(&value()?, &flag)?,
                 other => return Err(format!("{other} is not a flag this tool knows")),
             }
         }
@@ -184,5 +215,6 @@ impl Args {
 
 /// One number, or a refusal naming the flag — monomorphic error path (HR5).
 fn num<T: std::str::FromStr>(s: &str, flag: &str) -> Result<T, String> {
-    s.parse().map_err(|_| format!("{flag}: {s:?} is not a number"))
+    s.parse()
+        .map_err(|_| format!("{flag}: {s:?} is not a number"))
 }

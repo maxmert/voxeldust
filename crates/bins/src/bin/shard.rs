@@ -55,24 +55,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         None => None,
     };
-    // ★ WHAT THIS REALM REMEMBERS (D-MOVE-2). Opened BEFORE the world is built, because what a player
-    // built is part of what this shard must hold — and because a file whose label names a different
-    // world must refuse the boot before anything reads a row from it.
-    //
-    // ABSENT ⇒ no store, which is exactly what every shard has had until now.
-    let realm_store = vd_bins::open_realm_store(&env)?;
-    let (stored_berths, stored_body) = match &realm_store {
-        Some(store) => vd_bins::read_realm_store(store)?,
-        None => (Vec::new(), None),
-    };
-    if realm_store.is_some() {
-        tracing::info!(
-            berths = stored_berths.len(),
-            has_body = stored_body.is_some(),
-            "this realm remembered what people built here",
-        );
-    }
-
     // ★ THE LINEAGE DECIDES WHICH REALM THIS IS, WHEN THERE IS ONE (2026-09-01).
     //
     // This used to read a KIND WORD and a 64-BIT SEED, and only afterwards look at the full lineage
@@ -97,6 +79,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vd_bins::realm_from_kind_seed(&realm_kind, realm_seed)?
         }
     };
+    // ★ WHAT THIS REALM REMEMBERS (D-MOVE-2). Opened once the realm is KNOWN, because a realm names
+    // its own file — and before the world is built, because what people built here is part of the world
+    // this shard must hold.
+    //
+    // A file whose label names a different world refuses the boot here, before anything reads a row
+    // from it: the rows carry no field names, so a wrong file decodes without complaint.
+    //
+    // ABSENT ⇒ no store, which is exactly what every shard has had until now.
+    let realm_store = vd_bins::open_realm_store(&env, own_realm)?;
+    let (stored_berths, stored_body) = match &realm_store {
+        Some(store) => vd_bins::read_realm_store(store)?,
+        None => (Vec::new(), None),
+    };
+    if realm_store.is_some() {
+        tracing::info!(
+            berths = stored_berths.len(),
+            has_body = stored_body.is_some(),
+            "this realm remembered what people built here",
+        );
+    }
+
     // The profile depends only on the LEAF level's kind, which is the same whether the lineage was declared
     // or is about to be derived below (both end at `own_realm`), so it can be settled here — before the
     // forest exists — without prejudging the chain above it.
@@ -178,10 +181,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Every berth in this realm's own file was authored BY this realm, so its parent is this realm.
     // That is what makes the parent the only writer (SL1): a berth is a parent's own past authorship,
     // kept between runs, and it can name no other parent because no other parent could have written it.
-    let boot_berths: Vec<_> = stored_berths
-        .iter()
-        .map(|b| (own_realm, *b))
-        .collect();
+    let boot_berths: Vec<_> = stored_berths.iter().map(|b| (own_realm, *b)).collect();
+    // ★ MY OWN ROW, WHEN THE SEED DID NOT MAKE ME (owner ruling 2026-09-01). A built realm's berth
+    // lives in its PARENT's file, which a sealed shard may not read (HR1), so nothing plants a row for
+    // it and the guard below refuses — MEASURED live: a ship shard read its own body, found no row for
+    // itself, and stopped. Its own body row carries the two things the row needs (its bound and its
+    // look); the parent's NAME comes off the lineage the spawn already sent. The third field — where it
+    // sits inside its parent — is deliberately not supplied and never learnt (SL1 clauses 3-5).
+    //
+    // `None` when this realm has no body of its own, which is every seed realm: the generator already
+    // placed it, so this adds nothing and its world stays byte-identical.
+    let own_row = stored_body.as_ref().and_then(|body| {
+        declared_coord
+            .as_ref()
+            .and_then(vd_core::realm_coord::RealmCoord::parent)
+            .map(|p| (p.lowered(), body.bound, body.look))
+    });
     let (seed_regions, moving, boot_lit) = vd_bins::boot_world_built(
         universe_seed,
         &held_realms,
@@ -190,6 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tick_dt,
         &boot_lineage,
         &boot_berths,
+        own_row,
     );
     // ★ A SHARD MUST BE ABLE TO PLACE ITSELF, AND IT MUST SAY SO CLEARLY WHEN IT CANNOT
     // (owner ruling 2026-08-30). A realm the star-system LAYER names — the universe, the galaxy, a
@@ -554,8 +570,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::sync::Arc::clone(&control),
         std::sync::Arc::clone(&shutdown),
     )?;
+    // ★ THE TICK PACE, SAID ALOUD (2026-09-02). A shard that takes longer than its tick stamps its
+    // statements sparsely, and a gateway ring that never sees a tick in common with its neighbours
+    // folds nothing — with every refusal counter at zero. The galaxy shard walks 233,220 children
+    // per tick today, and nothing reported how long that took. One line per pace window, the
+    // slowest tick in it; a pace under one tick says nothing.
+    let pace_window_ticks: u64 = (1.0 / tick_dt).round().max(1.0) as u64 * 5;
+    let tick_budget = std::time::Duration::from_secs_f64(tick_dt);
+    let mut slowest = std::time::Duration::ZERO;
+    let mut pace_total = std::time::Duration::ZERO;
+    let mut pace_ticks: u64 = 0;
+    let pace_window_wall = tick_budget * u32::try_from(pace_window_ticks).unwrap_or(u32::MAX);
+    let mut pace_started = std::time::Instant::now();
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+        let started = std::time::Instant::now();
         let _ = node.step_tick();
+        let took = started.elapsed();
+        slowest = slowest.max(took);
+        pace_total += took;
+        pace_ticks += 1;
+        // Report on the tick count OR on wall time: a shard so slow it never reaches the count
+        // is exactly the shard this line exists for (the galaxy, 2026-09-02: silent for a minute).
+        if pace_ticks >= pace_window_ticks || pace_started.elapsed() >= pace_window_wall {
+            {
+                let world = node.world_mut();
+                let clock = world.resource::<vd_sim::runtime::ClockSample>();
+                tracing::info!(
+                    local_tick = clock.local_tick.0,
+                    universe_tick = clock.universe_tick.0,
+                    synced = clock.synced,
+                    slowest_ms = slowest.as_secs_f64() * 1e3,
+                    ticks = pace_ticks,
+                    "tick pace"
+                );
+            }
+            if slowest > tick_budget {
+                tracing::warn!(
+                    slowest_ms = slowest.as_secs_f64() * 1e3,
+                    mean_ms = pace_total.as_secs_f64() * 1e3 / pace_ticks as f64,
+                    budget_ms = tick_budget.as_secs_f64() * 1e3,
+                    "tick pace OVER BUDGET — this realm's statements are stamped sparsely"
+                );
+            }
+            slowest = std::time::Duration::ZERO;
+            pace_total = std::time::Duration::ZERO;
+            pace_ticks = 0;
+            pace_started = std::time::Instant::now();
+        }
         // Readiness = clock-synced AND realm-authority-ready (confirmed-fresh under active D-3 so a
         // partitioned shard self-de-routes via the frozen `RealmConfirmedAt`; authority-held when inert).
         // Read on the sim thread; the probe HTTP task reads the published cell lock-free (HR1: own World only).

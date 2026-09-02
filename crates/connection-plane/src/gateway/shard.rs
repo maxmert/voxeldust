@@ -119,7 +119,22 @@ pub(crate) fn on_shard_control(
                 // A frame always names its realm since S9, so the only condition left is whether the
                 // lineage is empty — the `Some` arm this used to also test could not fail.
                 if session.lineage.is_empty() {
-                    session.lineage = vec![frame.realm()];
+                    // ★ THE CHAIN REACHES THE ROOT ON A STATIC ATTACH TOO (owner ruling 2026-09-02
+                    // R9 step 2). A one-realm chain opens no window on the parent and lifts no sky
+                    // anchor — MEASURED on the dual cluster: the star-sky gate held 233,220 stars and
+                    // drew none. The gateway holds the seeded forest, so for a seeded realm it derives
+                    // the chain exactly as the login descent does; a realm the forest does not name
+                    // (a built one, attached to statically) keeps the one-realm chain, counted.
+                    session.lineage = match vd_core::worldgen::coord_of_realm(
+                        config.seed_injector.world.regions(),
+                        frame.realm(),
+                    ) {
+                        Some(coord) => super::home::coord_lineage(&coord),
+                        None => {
+                            stats.attach_lineage_unresolved += 1;
+                            vec![frame.realm()]
+                        }
+                    };
                 }
                 // RLM 5f-3d: the pre-Active bootstrap window CLOSES here — the session is LIVE, so the
                 // bounded TTL no longer applies to it. Already `None` for a static session (byte-identical).

@@ -210,6 +210,15 @@ pub struct GatewayView {
     pub window_full_chain_folds: u64,
     /// Slice B — GAUGE: sessions holding a non-empty derived chain this tick.
     pub window_chains_held: u64,
+    /// GAUGE (2026-09-02): sessions whose newest fold carries a sky anchor this tick — the chain
+    /// reached the galaxy's frame, so the star cloud can be placed.
+    pub window_sky_anchored: u64,
+    /// GAUGE (2026-09-02): the widest stamp gap, in ticks, between the origin level and any hop
+    /// level of a held chain (`u64::MAX` for an empty hop ring). Wider than the ring span ⇒ no
+    /// common tick ⇒ the fold never covers that hop.
+    pub window_chain_stamp_gap_max: u64,
+    /// A static attach onto a realm the seeded forest does not name: a one-realm chain, counted.
+    pub attach_lineage_unresolved: u64,
     /// Slice B — strata held at last composed poses (per stratum per tick — §2.6.4).
     pub window_compose_hold_ticks: u64,
     /// Slice B — held strata removed by the dead-hop exit (§2.6.4).
@@ -733,6 +742,9 @@ mod tests {
                 window_fold_divergence: 43,
                 window_full_chain_folds: 44,
                 window_chains_held: 45,
+                window_sky_anchored: 145,
+                window_chain_stamp_gap_max: 245,
+                attach_lineage_unresolved: 345,
                 window_compose_hold_ticks: 46,
                 window_hop_dead: 47,
                 window_t_monotone_stalled: 48,

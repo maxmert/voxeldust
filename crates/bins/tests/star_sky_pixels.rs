@@ -179,7 +179,7 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
         DEV.move_speed,
         DEV.tick_dt,
     );
-    let (rows, _) = star_catalogue_for_boot(
+    let (rows, _, _) = star_catalogue_for_boot(
         DEV.universe_seed,
         DEV.move_speed,
         DEV.tick_dt,
@@ -280,14 +280,21 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
 
     // WHERE EACH STAR MUST LAND — the same exact integer subtraction the client makes, recomputed
     // here rather than read back from it.
-    let anchor =
-        rows.iter().find(|r| r.realm == own).map(|r| r.cell).expect(
-            "the observer's own system is IN the catalogue — that is what makes it the anchor",
-        );
+    // ★ THE ORACLE PLACES THE SKY THE WAY THE CLIENT DOES (owner ruling 2026-09-02 R1): every star
+    // as metres from the SKY ANCHOR — the observer's origin realm in the galaxy's frame, which at
+    // login is the home system's own cell (a generated system is exactly cell-aligned) — minus the
+    // eye's own offset inside that realm, the spawn clearing. The observer's own star is IN the
+    // drawn set: a point of light at its true place, not an exclusion.
+    let anchor = rows
+        .iter()
+        .find(|r| r.realm == own)
+        .map(|r| r.cell)
+        .expect("the observer's own system is IN the catalogue");
+    let spawn_m =
+        vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt).default_home_offset_m();
     let edge_m = vd_core::pose::Tier::Galaxy.cell_edge_m();
     let drawn: Vec<(vd_core::pose::RealmId, DVec3)> = rows
         .iter()
-        .filter(|r| r.realm != own)
         .map(|r| {
             (
                 r.realm,
@@ -295,19 +302,54 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
                     (i128::from(r.cell.x) - i128::from(anchor.x)) as f64 * edge_m,
                     (i128::from(r.cell.y) - i128::from(anchor.y)) as f64 * edge_m,
                     (i128::from(r.cell.z) - i128::from(anchor.z)) as f64 * edge_m,
-                ),
+                ) - spawn_m,
             )
         })
         .collect();
     assert_eq!(
         drawn.len(),
-        rows.len() - 1,
-        "the observer's own system is never drawn — you are inside it"
+        rows.len(),
+        "every star of the catalogue is drawn"
+    );
+    // The client says so too: the drawn count is the whole census, and the anchor it was placed by
+    // is the home system's cell — measured against the world, not the client's own arithmetic.
+    let state = {
+        let started = Instant::now();
+        loop {
+            let st = vd_bins::pixel::poll(devctl);
+            if st.stars_drawn > 0 {
+                break st;
+            }
+            assert!(
+                started.elapsed() < SKY_TIMEOUT,
+                "the sky was held ({held_stars} stars) and never drawn — the anchor never arrived \
+                 (sky_anchor = {:?}) or the renderer never placed it",
+                st.sky_anchor
+            );
+            std::thread::sleep(SKY_POLL);
+        }
+    };
+    assert_eq!(
+        state.stars_drawn as usize,
+        rows.len(),
+        "the whole catalogue is on screen"
+    );
+    assert_eq!(
+        state.sky_anchor.map(|a| a.map(f64::round)),
+        Some([
+            (anchor.x as f64 * edge_m).round(),
+            (anchor.y as f64 * edge_m).round(),
+            (anchor.z as f64 * edge_m).round(),
+        ]),
+        "the anchor the client holds is the home system's own galaxy cell, in metres"
     );
 
-    // ★ AIM AT A STAR, THEN CAPTURE. Without this the gate photographs whatever the avatar happened to
-    // be facing, and "no star in view" says nothing about whether stars draw.
-    let (target_realm, target_pos) = *drawn.first().expect("at least one drawable star");
+    // Aim at a star that is NOT the one we stand in — a point of light at zero distance cannot be
+    // looked at.
+    let (target_realm, target_pos) = *drawn
+        .iter()
+        .find(|(realm, _)| *realm != own)
+        .expect("at least one other star");
     let aim = round_trip(
         devctl,
         &DevRequest::LookAt {
@@ -338,6 +380,16 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
     };
 
     let png = cwd.join(&rel_path);
+    // KEEP THE EVIDENCE: the cluster's shutdown reaps the slot directory, capture included, so a
+    // red verdict used to leave nothing to look at. The capture is copied beside the run's own log
+    // before any pixel is judged; the path is printed so a reader can open it.
+    if let Ok(keep) = std::env::var("VD_KEEP_CAPTURE") {
+        let kept = std::path::Path::new(&keep).join("star_sky_capture.png");
+        match std::fs::copy(&png, &kept) {
+            Ok(_) => println!("capture kept at {}", kept.display()),
+            Err(e) => println!("capture NOT kept ({e}) — {}", kept.display()),
+        }
+    }
     let img = image::open(&png)
         .unwrap_or_else(|e| panic!("open captured PNG {}: {e}", png.display()))
         .to_rgba8();

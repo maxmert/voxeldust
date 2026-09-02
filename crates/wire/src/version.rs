@@ -256,7 +256,23 @@ pub const PROTO_MAJOR: u16 = 1;
 /// The value is DERIVED, never typed, so it moves on exactly the change it exists for and
 /// cannot be forgotten. The same fold stamps every durable file (slice S1), so a store and a
 /// peer can never disagree about which world they are in.
-pub const PROTO_MINOR: u16 = 23;
+/// **24** — THE HOP IS THE AUTHORED PLACEMENT (owner-approved 2026-09-02 —
+/// `docs/design/owner_decisions_2026-09-02_reach.md` R1/R4, "implement this design"). `HopRow` on
+/// `ShardToGateway::WindowFrame` carries the CHILD'S PLACEMENT IN THE AUTHOR'S FRAME, at the
+/// author's own step, instead of the author's frame pre-inverted into the child's step. Same
+/// type, same bytes, opposite meaning — so it is a FLAG DAY on the mesh, not an append.
+/// WHY. The pre-inverted form could not be stated at galaxy scale: a galaxy's origin in a star
+/// system's millimetre step has no lattice count, so the galaxy shard refused its own hop every
+/// tick and the observer chain never reached the galaxy level. The authored form is representable
+/// on every hop in the world, because a parent contains its child. The gateway now inverts once,
+/// inside the one routine that already maps every roster row, and lifts the observer's own zero up
+/// the chain to place the sky in the galaxy's frame — stated as ONE new field,
+/// `RealmSnapshotDatagram.sky_anchor` (an `Option<StampedPose>` in the catalogue's frame, before
+/// `realms`), by which the client places its one star cloud and never rebuilds it. A struct field
+/// is positional in postcard, so that half is a client-facing flag day too. THE FLOOR RISES WITH IT
+/// (23 → 24): a peer on either side of this line composes a wrong picture with no error, and one
+/// cluster build is the only deployment that exists (the 2026-08-19 ruling D posture, unchanged).
+pub const PROTO_MINOR: u16 = 24;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -281,7 +297,7 @@ pub const PROTO_MINOR: u16 = 23;
 /// reads the bytes after it as though it were there, so the peer cannot be served at all. The
 /// owner's standing posture on this class (ruling D, 2026-08-19) is the loud refusal rather
 /// than a filter: there are no deployed clients to protect.
-pub const PROTO_MINOR_FLOOR: u16 = 23;
+pub const PROTO_MINOR_FLOOR: u16 = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
@@ -437,7 +453,7 @@ mod tests {
         // hunting a version generation mismatch when the real answer is "your client is stale".
         assert_eq!(
             ours.refusal_reason(below),
-            "protocol minor below the floor (23): the scene is server-composed from v1.23"
+            "protocol minor below the floor (24): the scene is server-composed from v1.24"
         );
         assert_eq!(
             ours.refusal_reason(ProtoVersion::speaking(PROTO_MAJOR + 1, PROTO_MINOR)),
@@ -514,8 +530,15 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 23,
-            "minor 23 is THE COORDINATE UNIT IN THE HANDSHAKE (slice S3; owner-approved 2026-08-24, \
+            PROTO_MINOR, 24,
+            "minor 24 is THE HOP AS THE AUTHORED PLACEMENT (owner ruling 2026-09-02 R1/R4): HopRow \
+             carries the child's placement in the author's frame at the author's step, not the \
+             author's frame pre-inverted into the child's step — the inverted form has no lattice \
+             count at galaxy scale, so the galaxy shard refused its own hop and no chain ever \
+             reached the galaxy; the gateway inverts once where it already maps every row, and lifts \
+             the observer's zero up the chain to place the sky. Same bytes, opposite meaning: a mesh \
+             flag day, and the floor rises to 24 with it; \
+             minor 23 is THE COORDINATE UNIT IN THE HANDSHAKE (slice S3; owner-approved 2026-08-24, \
              Q1 condition 2): ProtoVersion gains coordinate_generation, folded at COMPILE TIME over \
              the coordinate tier table — the same fold that stamps every durable file (slice S1), so \
              a store and a peer can never disagree about which world they are in. A FLAG DAY, not an \
@@ -581,20 +604,21 @@ mod tests {
              minor 2 OwnEntity, minor 1 UniverseRate"
         );
         assert_eq!(
-            PROTO_MINOR_FLOOR, 23,
-            "the floor tracks the last CLIENT-VISIBLE break, and minor 23 IS one (owner-approved \
-             2026-08-24, Q1 condition 2): the coordinate unit moved INSIDE Hello, and postcard is \
-             positional — a pre-23 peer's Hello carries no such field, so every byte after it is \
-             read as though it did. There is no serving such a peer at all, and the standing \
-             posture on this class is the loud refusal rather than a filter: zero deployed \
-             clients, no shims, no checks. Do not raise this again except alongside a change of \
-             the same kind, named in the ledger."
+            PROTO_MINOR_FLOOR, 24,
+            "the floor tracks the last break a peer cannot be served across, and minor 24 IS one \
+             (owner-approved 2026-09-02, R1/R4): HopRow keeps its bytes and reverses its meaning — \
+             the child's placement in the author's frame where the author's frame in the child's \
+             used to be — so a peer on either side of the line composes a WRONG picture with no \
+             error at all. There is no serving such a peer, and the standing posture on this \
+             class is the loud refusal rather than a filter: one cluster build, no shims, no \
+             checks (the 2026-08-19 ruling D posture). Do not raise this again except alongside a \
+             change of the same kind, named in the ledger."
         );
         assert_eq!(
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.23");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.24");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is

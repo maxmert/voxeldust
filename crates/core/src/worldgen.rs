@@ -460,7 +460,10 @@ mod tests {
         let id = crate::EntityId::pack(crate::entity_kind::EntityKind::Ship, 1, 1, 1);
         let level = level_of(RealmId::Ship(id));
         assert_eq!(level.kind, RealmKindTag::Ship);
-        assert_eq!(level.seed, id.0, "the whole minted identity, not its low half");
+        assert_eq!(
+            level.seed, id.0,
+            "the whole minted identity, not its low half"
+        );
         assert_eq!(
             level.to_realm_id(),
             RealmId::Ship(id),

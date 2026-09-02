@@ -319,9 +319,7 @@ fn g_verbatim_a_grandchilds_sealed_bytes_survive_both_hops_byte_identical() {
     ]);
     // HOP 1 — the SYSTEM holds the planet's batch sealed.
     let cfg_s = story_config(&story, story.system);
-    let p_coord = cfg_s
-        .own_coord
-        .child(level_of(story.planet));
+    let p_coord = cfg_s.own_coord.child(level_of(story.planet));
     let mut s_held = RelayHeld::default();
     let mut stats = StubStats::default();
     on_window_relay(
@@ -361,9 +359,7 @@ fn g_verbatim_a_grandchilds_sealed_bytes_survive_both_hops_byte_identical() {
         },
     ]);
     let cfg_g = story_config(&story, story.galaxy);
-    let s_coord = cfg_g
-        .own_coord
-        .child(level_of(story.system));
+    let s_coord = cfg_g.own_coord.child(level_of(story.system));
     let mut g_held = RelayHeld::default();
     let g_attested = ChildRealmNodes(BTreeMap::from([(story.system, NodeId(71))]));
     on_window_relay(
@@ -1016,13 +1012,13 @@ fn the_relay_ship_sends_sealed_statements_on_resolve_change_and_cadence() {
         vec![OTHER_REALM],
         "the authored interior — one row per direct child, nothing deeper"
     );
+    // ★ NOBODY LOOKS, SO THE CHILD SLEEPS, AND A SLEEPING CHILD RIDES NO RELAY (owner decision 3,
+    // 2026-09-02 — R10). The level carries no row and no marker for it: the relay states the
+    // children in range, exactly as a window does. The realm's own look still goes up.
     assert_eq!(
         opened,
         vec![
-            vd_wire::session_flow::RelayedStatement::Level {
-                at,
-                rows: expected_rows,
-            },
+            vd_wire::session_flow::RelayedStatement::Level { at, rows: vec![] },
             vd_wire::session_flow::RelayedStatement::Body {
                 subject: OWN_REALM,
                 stmt: vd_wire::session_flow::BodyStmt::SelfLook {
@@ -1030,21 +1026,44 @@ fn the_relay_ship_sends_sealed_statements_on_resolve_change_and_cadence() {
                 },
                 authored_at: at,
             },
-            vd_wire::session_flow::RelayedStatement::Body {
-                subject: OTHER_REALM,
-                stmt: vd_wire::session_flow::BodyStmt::Marker {
-                    // The presence floor (look_horizon.md slice 1): the non-glowing child's
-                    // point of light — one radius, nothing else.
-                    luma: vd_core::look::marker_bag(None, 100.0),
-                },
-                authored_at: at,
-            },
         ],
-        "verbatim: the level leads, the self-look follows, one marker per direct child, \
-         nothing deeper rides"
+        "verbatim: the level leads (empty — its one child sleeps), the self-look follows"
+    );
+    // A LOOKER ARRIVES: the child comes into range on this tick's fold, and the next ship — the
+    // relay reads the verdict one tick behind the fold — carries its row AND its marker.
+    insert_owned_dot(&mut rig, SESSION, player(7), DVec3::new(500.0, 0.0, 0.0));
+    rig.set_local_tick(33);
+    let _ = rig.tick(vec![]);
+    rig.set_local_tick(34);
+    let ships = window_relays(&rig.tick(vec![]));
+    assert_eq!(
+        ships.len(),
+        1,
+        "the interior changed, so the relay ships off-cadence"
+    );
+    let opened = vd_wire::session_flow::open_relay_statements(&ships[0].1.own)
+        .expect("the child's own seal opens");
+    assert_eq!(
+        opened[0],
+        vd_wire::session_flow::RelayedStatement::Level {
+            at,
+            rows: expected_rows,
+        },
+        "the child in range rides the level"
+    );
+    assert_eq!(
+        opened[2],
+        vd_wire::session_flow::RelayedStatement::Body {
+            subject: OTHER_REALM,
+            stmt: vd_wire::session_flow::BodyStmt::Marker {
+                luma: vd_core::look::marker_bag(None, 100.0),
+            },
+            authored_at: at,
+        },
+        "and its marker follows the self-look"
     );
     // Unchanged + off-cadence: send-on-change holds its tongue.
-    rig.set_local_tick(32);
+    rig.set_local_tick(35);
     assert!(
         window_relays(&rig.tick(vec![])).is_empty(),
         "nothing changed, no beat — no ship"
@@ -1358,17 +1377,23 @@ fn an_occupants_window_ships_rows_bodies_and_membership_send_on_change() {
     let statics = window_static_rows(&sent);
     assert_eq!(statics.len(), 1, "one static roster per open window");
     let rows = &statics[0].2;
-    assert_eq!(rows.len(), 2);
+    // ★ THE CHILDREN IN RANGE (owner decision 3, 2026-09-02 — R10): the dot at 500 m puts the
+    // armed child in its band; the quiet child 40 km out has an inert band and sleeps. A sleeping
+    // child rides no roster and states no marker — the star field, not the window, shows a star
+    // nobody is near.
+    assert_eq!(
+        rows.len(),
+        1,
+        "the sleeping child rides no roster: {rows:?}"
+    );
     assert_eq!(rows[0].realm, OTHER_REALM);
     assert_eq!(rows[0].frame, frame_of(OTHER_REALM));
     assert_eq!(rows[0].pose.frame, frame_of(OWN_REALM));
     assert_eq!(fm(rows[0].pose.pos), WINDOW_CHILD_CENTER);
-    assert_eq!(rows[1].realm, RealmId::Planet(43));
-    // The bodies: the realm's OWN look (its boot extent, SL3) + one point-of-light marker
-    // per direct child, GLOWING OR NOT (look_horizon.md slice 1's presence floor): the armed
-    // child's datum + extent, the quiet child's extent ALONE (the one-radius law).
+    // The bodies: the realm's OWN look (its boot extent, SL3) + one point-of-light marker for
+    // the child IN RANGE — its datum and its extent in one bag.
     let bodies = window_bodies(&sent);
-    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies.len(), 2);
     assert_eq!(bodies[0].2, OWN_REALM);
     assert_eq!(
         bodies[0].3,
@@ -1387,18 +1412,6 @@ fn an_occupants_window_ships_rows_bodies_and_membership_send_on_change() {
                 luma: vd_core::look::marker_bag(Some((6, 0.25)), 100.0)
             }
         )
-    );
-    assert_eq!(
-        bodies[2],
-        (
-            GATEWAY,
-            WindowId(1),
-            RealmId::Planet(43),
-            BodyStmt::Marker {
-                luma: vd_core::look::marker_bag(None, 100.0)
-            }
-        ),
-        "the non-glowing child still states a correctly-sized point of light"
     );
     // The verdict: the armed child is in the dot's band; the quiet child (inert band) is not.
     assert_eq!(
@@ -1423,7 +1436,10 @@ fn an_occupants_window_ships_rows_bodies_and_membership_send_on_change() {
     // ★ RE-BASED IN S10, 4 → 0: both children are static, so no row rides the per-tick frame at all.
     // This counter is now the MOVING row count, which is what the lossy lane should ever carry.
     assert_eq!(stats.window_frame_rows_sent, 0);
-    assert_eq!(stats.window_bodies_sent, 3);
+    assert_eq!(
+        stats.window_bodies_sent, 2,
+        "the own look + the one child in range"
+    );
     assert_eq!(stats.window_memberships_sent, 1);
     // …and the static roster was stated ONCE across BOTH ticks — not twice.
     assert_eq!(stats.window_static_rows_sent, 1);
@@ -1437,7 +1453,12 @@ fn an_occupants_window_ships_rows_bodies_and_membership_send_on_change() {
 /// non-glowing child (a station, a city, a ship) had NO lawful bag content at all, so the
 /// moment its own picture lapsed it VANISHED instead of degrading to a correctly-sized point.
 #[test]
-fn every_direct_child_states_a_point_of_light_marker_glowing_or_not() {
+fn a_child_in_range_states_a_point_of_light_marker_and_a_sleeping_child_states_none() {
+    // ★ THE PRESENCE FLOOR IS GONE FOR A SLEEPER (owner decision 3, 2026-09-02 — R10). This test
+    // used to assert one marker per direct child, glowing or not. A child out of every looker's
+    // range sleeps, and nobody draws a sleeping realm: the star field shows a sleeping star, and
+    // a sleeping station shows nothing until reach gives it a bright point. The child in range
+    // still states its marker, datum and extent in one bag.
     let mut rig = window_rig();
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
@@ -1448,9 +1469,8 @@ fn every_direct_child_states_a_point_of_light_marker_glowing_or_not() {
     let bodies = window_bodies(&sent);
     assert_eq!(
         bodies.len(),
-        3,
-        "the realm's own look + a marker for BOTH direct children (the quiet, non-glowing \
-         child included — the presence floor): {bodies:?}",
+        2,
+        "the realm's own look + a marker for the ONE child in range: {bodies:?}",
     );
     let marker_of = |realm: RealmId| {
         bodies
@@ -1467,14 +1487,13 @@ fn every_direct_child_states_a_point_of_light_marker_glowing_or_not() {
             luma: vd_core::look::marker_bag(Some((6, 0.25)), 100.0)
         },
     );
-    // The quiet (non-glowing) child: the extent ALONE — one radius, nothing else (the
-    // one-radius law: a bound is a promise about space; a look is a statement about
-    // appearance).
-    assert_eq!(
-        marker_of(RealmId::Planet(43)),
-        BodyStmt::Marker {
-            luma: vd_core::look::marker_bag(None, 100.0)
-        },
+    // The quiet child 40 km out, with an inert band: in nobody's range, so it sleeps, and it
+    // states no marker at all — not a dim one, none.
+    assert!(
+        !bodies
+            .iter()
+            .any(|(_, _, subject, _)| *subject == RealmId::Planet(43)),
+        "a sleeping child states no marker: {bodies:?}"
     );
 }
 
@@ -1495,7 +1514,11 @@ fn the_keep_alive_re_assert_re_serves_the_whole_set_so_silence_means_a_dead_real
     let sent = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     let first_bodies = window_bodies(&sent);
     let first_membership = window_memberships(&sent);
-    assert_eq!(first_bodies.len(), 3, "the full set on open");
+    assert_eq!(
+        first_bodies.len(),
+        2,
+        "the full set on open: the own look + the child in range"
+    );
     assert_eq!(first_membership.len(), 1);
     // A quiet tick is still quiet — the re-assert is the BEAT, not every tick.
     rig.set_local_tick(2);
@@ -1509,7 +1532,7 @@ fn the_keep_alive_re_assert_re_serves_the_whole_set_so_silence_means_a_dead_real
     let stats = rig.world.resource::<StubStats>();
     assert_eq!(stats.window_reasserted, 1);
     assert_eq!(stats.windows_opened, 1, "a keep-alive is not a new window");
-    assert_eq!(stats.window_bodies_sent, 6, "three served twice");
+    assert_eq!(stats.window_bodies_sent, 4, "two served twice");
     assert_eq!(stats.window_memberships_sent, 2);
 }
 
@@ -1534,24 +1557,28 @@ fn a_child_window_ships_the_hop_row_pre_inverted_at_the_author() {
     assert!(rows.is_empty(), "no mover rides this fixture's frame");
     let statics = window_static_rows(&sent);
     assert_eq!(statics.len(), 1);
+    // The roster is the children in range plus the hop child (owner decision 3, R10): the armed
+    // child is both, the quiet child is neither, so one row rides — the same rule for every scope.
     assert_eq!(
-        statics[0].2.len(),
-        2,
-        "the same authored roster rides every scope"
+        statics[0].2.iter().map(|r| r.realm).collect::<Vec<_>>(),
+        vec![OTHER_REALM],
+        "the children in range, plus the hop child"
     );
     let hop = hop.as_ref().expect("a Child window carries the hop row");
     assert_eq!(hop.child, OTHER_REALM);
     // The inverted row is NORMALIZED (transfer_frame's output invariant since the cell
     // activation): the negated placement's value rides the integer anchor.
-    assert_eq!(fm(hop.inv.anchor()), -WINDOW_CHILD_CENTER);
-    assert_eq!(hop.inv.origin, DVec3::ZERO, "sub-cell residual only");
-    assert_eq!(hop.inv.velocity, DVec3::ZERO);
-    assert_eq!(hop.inv.orientation, DQuat::IDENTITY);
-    assert_eq!(hop.inv.angular_velocity, DVec3::ZERO);
+    // THE AUTHORED PLACEMENT, not an inversion (owner ruling 2026-09-02 R1): where the child sits
+    // in THIS realm's frame, at this realm's step — the roster row, stated beside the level.
+    assert_eq!(fm(hop.placement.anchor()), WINDOW_CHILD_CENTER);
+    assert_eq!(hop.placement.origin, DVec3::ZERO, "sub-cell residual only");
+    assert_eq!(hop.placement.velocity, DVec3::ZERO);
+    assert_eq!(hop.placement.orientation, DQuat::IDENTITY);
+    assert_eq!(hop.placement.angular_velocity, DVec3::ZERO);
 }
 
 #[test]
-fn the_hop_inversion_carries_velocity_and_spin_through_the_frame_core() {
+fn the_hop_carries_the_movers_velocity_and_spin_as_authored() {
     // A MOVING, SPINNING child (identity orientation, cell zero — invertible today): the hop
     // row's velocity is the frame core's own answer (the parent origin as seen from the
     // rotating child: q⁻¹(ω×o − v)) and the angular term is the child's spin reversed and
@@ -1586,10 +1613,10 @@ fn the_hop_inversion_carries_velocity_and_spin_through_the_frame_core() {
     let frames = window_frames(&sent);
     assert_eq!(frames.len(), 1);
     let hop = frames[0].3.as_ref().expect("hop row");
-    assert_eq!(fm(hop.inv.anchor()), DVec3::new(-7.0, 0.0, 0.0));
-    // ω×o − v = (0,0,0.5)×(7,0,0) − (0,1,0) = (0,3.5,0) − (0,1,0) = (0,2.5,0).
-    assert_eq!(hop.inv.velocity, DVec3::new(0.0, 2.5, 0.0));
-    assert_eq!(hop.inv.angular_velocity, DVec3::new(0.0, 0.0, -0.5));
+    // Verbatim from the book this realm authored: no inversion, no Coriolis fold, no sign flip.
+    assert_eq!(fm(hop.placement.anchor()), DVec3::new(7.0, 0.0, 0.0));
+    assert_eq!(hop.placement.velocity, DVec3::new(0.0, 1.0, 0.0));
+    assert_eq!(hop.placement.angular_velocity, DVec3::new(0.0, 0.0, 0.5));
 }
 
 #[test]
@@ -1674,9 +1701,9 @@ fn assert_window_emission_feature_anywhere() {
         // uncoverable divergence arm): both absent on the Occupants frame, both the SAME
         // pre-inverted numbers on the Child frame — the shape and the values in one compare.
         assert_eq!(
-            ahop.as_ref().map(|h| h.inv),
-            bhop.as_ref().map(|h| h.inv),
-            "the hop inversion is shape- and value-identical across kinds"
+            ahop.as_ref().map(|h| h.placement),
+            bhop.as_ref().map(|h| h.placement),
+            "the hop placement is shape- and value-identical across kinds"
         );
         if let Some(h) = ahop {
             assert_eq!(h.child, OTHER_REALM);
@@ -1722,14 +1749,21 @@ fn assert_window_emission_feature_anywhere() {
     };
     assert_eq!(a_bodies, expected(OWN_REALM, OTHER_REALM));
     assert_eq!(b_bodies, expected(RealmId::Planet(42), RealmId::Area(99)));
-    // The verdicts: the Occupants window ships the dot's in-band child; the Child window's
-    // occupied-child proxy verdict is EMPTY here (no live bit) ⇒ exactly ONE message per run.
-    assert_eq!(a_members.len(), 1);
-    assert_eq!(b_members.len(), 1);
+    // The verdicts, ONE PER WINDOW — and the second one is what the 2026-09-01 ruling changed. This
+    // used to assert exactly ONE message per run, because the `Child` window's proxy verdict was gated
+    // on a live occupancy bit and no bit is planted here. An OPEN WINDOW is now itself the demand
+    // (V1/V5): the gateway does not open a `Child(c)` window unless somebody is looking from inside c,
+    // so the fold builds c's stand-in observer from the window and answers by geometry.
+    assert_eq!(a_members.len(), 2);
+    assert_eq!(b_members.len(), 2);
     assert_eq!(a_members[0].1, WindowId(1));
     assert_eq!(b_members[0].1, WindowId(1));
     assert_eq!(a_members[0].2, vec![OTHER_REALM]);
     assert_eq!(b_members[0].2, vec![RealmId::Area(99)]);
+    assert_eq!(a_members[1].1, WindowId(2));
+    assert_eq!(b_members[1].1, WindowId(2));
+    assert_eq!(a_members[1].2, vec![OTHER_REALM]);
+    assert_eq!(b_members[1].2, vec![RealmId::Area(99)]);
 }
 
 #[test]
@@ -1812,11 +1846,10 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
     // shipped posture the boot fences enforce):
     // 1. INV-BODY-AT-ORIGIN — a realm's own body sits at its own frame origin, so the origin
     //    of ITS frame, re-expressed through its parent's authored book, IS the parent's
-    //    placement row, exactly; and the pre-inverted hop row round-trips back to the origin
-    //    exactly.
-    // 2. ROTATED-CROSS-CELL INERTNESS — the hop inversion cannot be refused on THE world
-    //    today (a MEASUREMENT that fails the day the world grows a spinning realm a
-    //    cell-block out before the P10 cell math lands — never an argument).
+    //    placement row, exactly.
+    // 2. THE HOP IS THE AUTHORED PLACEMENT (owner ruling 2026-09-02 R1) — for every child of
+    //    THE world, across every change of unit, the hop row states exactly the row the parent
+    //    authored. It used to be an inversion with a measured reach limit; see (2) below.
     let cfg = vd_physics::worldgen::UniverseConfig::world(
         vd_physics::worldgen::VISUAL_OCCUPANT_V_MAX_MPS,
         vd_physics::worldgen::AOI_TICK_DT_S,
@@ -1864,64 +1897,32 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
                     region.realm
                 );
                 assert_eq!(body.vel, pose.vel);
-                // (2) THE INVERSION, AND THE LIMIT IT HAS NOW REACHED (slice S9).
+                // (2) THE HOP IS THE AUTHORED PLACEMENT (owner ruling 2026-09-02 R1), and it
+                // exists for EVERY child of THE world — including the ones the old inversion could
+                // not count.
                 //
-                // ★ THIS PIN WAS BUILT TO FAIL ONE DAY, AND THAT DAY IS TODAY — which is the test
-                // working, not breaking. It asserted the hop inversion is NEVER refused on THE world.
-                // The inversion states the PARENT's body in the CHILD's frame, so it must count the
-                // parent's origin in the child's unit. A star system counts in millimetres and its
-                // galaxy's centre is now 0.7 LIGHT YEARS away, against a millimetre lattice that
-                // reaches a quarter of one. There is no such count, and there never will be: this is
-                // not a bug to fix but a fact about units, and the honest thing is to state it.
-                //
-                // So the pin splits by whether the two frames count in the SAME unit, and both arms
-                // are asserted — the working one exactly, the refused one by name and with its
-                // numbers, so it stays a measurement rather than becoming a silence.
-                let inv = match invert_hop_placement(own, region.frame, &book) {
-                    Ok(inv) => inv,
-                    Err(refused) => {
-                        // ★ THE LIMIT, NAMED. It is about REACH and not about the units differing:
-                        // a galaxy sitting at the universe's origin inverts perfectly well across two
-                        // rungs, because zero has a count in every unit. What has no count is a
-                        // DISTANCE too large for the finer one. Asserted, so a rotation failure or an
-                        // unknown frame arriving here would not be quietly absorbed as "expected".
-                        assert!(
-                            matches!(
-                                refused,
-                                vd_core::frame::FrameError::CrossTierCrossing(
-                                    vd_core::pose::TierConversionError::BeyondReach { .. }
-                                )
-                            ),
-                            "{anchor} -> {}: the only lawful refusal here is reach: {refused:?}",
-                            region.realm
-                        );
-                        // …and it is only ever the coarse-to-fine direction that can run out.
-                        assert!(
-                            own.tier().step_exponent() > region.frame.tier().step_exponent(),
-                            "a hop into a COARSER unit can always be counted"
-                        );
-                        cross_rung_hops += 1;
-                        continue;
-                    }
-                };
-                // (1b) ...and it round-trips: the parent's body, as the hop states it in the
-                // child's frame, maps back to the parent's own origin EXACTLY (identity
-                // orientations everywhere today ⇒ bit-exact, no epsilon).
-                let back = transfer_frame(
-                    &StampedPose {
-                        frame: region.frame,
-                        pos: LatticePos::at(inv.origin_cell, inv.origin),
-                        vel: inv.velocity,
-                        orient: inv.orientation,
-                        universe_tick: t,
-                    },
-                    own,
-                    &book,
-                )
-                .expect("the inverse rides the same book");
-                assert_eq!(back.pos.cell(), vd_core::glam::I64Vec3::ZERO);
-                assert_eq!(fm_at(back.pos, own.tier()), DVec3::ZERO);
-                assert_eq!(back.vel, DVec3::ZERO);
+                // ★ THIS PIN USED TO MEASURE A LIMIT. The hop was the PARENT's body stated in the
+                // CHILD's frame, so it had to count the parent's origin in the child's unit: a star
+                // system counts in millimetres, its galaxy's centre sits light years away, and a
+                // millimetre lattice reaches a quarter of one. Every ring system's hop was refused
+                // by reach, and the pin asserted the refusal by name. That refusal is why no chain
+                // ever reached the galaxy and why the sky had to be re-anchored on the observer's
+                // own star system. The hop is now the CHILD's placement in the PARENT's frame, at
+                // the parent's step — a number a parent always holds, because it contains its
+                // child — so there is nothing left to refuse and the pin flips to the opposite
+                // claim: every hop in THE world is stated, and it IS the authored row, exactly.
+                let placement = hop_placement(region.frame, &book)
+                    .expect("a rostered child always has a row in the book its parent authored");
+                assert_eq!(
+                    LatticePos::at(placement.origin_cell, placement.origin),
+                    pose.pos,
+                    "{anchor} -> {}: the hop IS the authored placement",
+                    region.realm
+                );
+                assert_eq!(placement.velocity, pose.vel);
+                if own.tier() != region.frame.tier() {
+                    cross_rung_hops += 1;
+                }
                 // ★ THE SIXTEENTH SITE, AND THE MOST INSTRUCTIVE (slice S9). Both sides of this
                 // comparison were read at the CHILD's step, when both quantities are stated in the
                 // ANCHOR's: the authored pose comes out of the anchor's own book, and the centre is
@@ -1968,37 +1969,16 @@ fn inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world() {
         moved_since_epoch, movers,
         "every orbital child of THE world authors a live placement"
     );
-    // ★ AND THE REFUSAL ARM IS NOT VACUOUS (slice S9). Pinned as a count, because "some hops are out
-    // of reach" is worthless without knowing how many: if this silently went to zero the arm above
-    // would stop being exercised and the pin would quietly narrow to the easy cases.
-    //
-    // FOUR: the two RING star systems, at both instants. Not six — the HOME system is anchored at
-    // the galaxy's own origin, and zero has a count in every unit, so its hop inverts perfectly well
-    // across the two rungs. The ring siblings sit roughly 0.7 light years out, and a system counts in
-    // millimetres, which reach a quarter of a light year.
-    //
-    // That the home system is the exception is worth more than the number: it means the galaxy's
-    // ORIGIN is the only place in it a millimetre-counting realm can name its parent from.
-    //
-    // Every other row in THE world — planets, stars, moons under their own parents, and the galaxy
-    // under the universe — either shares its parent's unit or sits close enough to count.
-    // ★ THE EXCEPTION, NOT THE COUNT (2026-08-31). The literal 4 was "two ring systems at two
-    // instants" — the whole census of a galaxy that held three. With a real census the count is
-    // hundreds of thousands, and it says nothing a reader can check.
-    //
-    // The comment above already names what is worth asserting: the HOME system is the exception,
-    // because it sits at the galaxy's own origin and zero has a count in every unit. That is the
-    // fact — the galaxy's origin is the only place in it a millimetre-counting realm can name its
-    // parent from — and it is scale-free.
-    let system_rows = 2 * systems_in_scope;
-    assert!(
-        cross_rung_hops > 0,
-        "ring systems really are too far to count their galaxy's centre in millimetres"
-    );
-    assert!(
-        cross_rung_hops < system_rows,
-        "the home system at the galactic origin is the exception: {cross_rung_hops} of {system_rows} \
-         system rows could not count, so at least one could"
+    // ★ AND THE CROSS-RUNG HOPS ARE NOT VACUOUS — they are ALL of them. Every star system under the
+    // galaxy and the galaxy under the universe changes unit at its hop, at both instants; each one
+    // used to be a refusal (except the home system at the galactic origin, whose zero has a count in
+    // every unit), and each one is now a stated placement. Pinned as an EQUALITY, so the day a
+    // cross-rung hop is withheld again this count drops and the pin says so.
+    assert_eq!(
+        cross_rung_hops,
+        2 * (systems_in_scope + 1),
+        "every cross-rung hop in THE world — each star system under the galaxy, and the galaxy \
+         under the universe — is stated at both instants"
     );
 }
 
@@ -2183,7 +2163,7 @@ fn a_child_window_serves_a_ship_and_still_guards_a_stranger_and_a_rotated_hop() 
         (WindowId(1), WindowScope::Occupants),
         (WindowId(2), WindowScope::Child(RealmId::Planet(555))), // rostered NOWHERE
         (WindowId(3), WindowScope::Child(ship_realm)),           // SERVED since 2026-09-01
-        (WindowId(4), WindowScope::Child(rotated)),              // the P10-owed refusal
+        (WindowId(4), WindowScope::Child(rotated)),              // SERVED: nothing is inverted
     ]
     .into_iter()
     .map(|(window, scope)| {
@@ -2200,24 +2180,24 @@ fn a_child_window_serves_a_ship_and_still_guards_a_stranger_and_a_rotated_hop() 
     .collect();
     let sent = rig.tick(opens);
     let frames = window_frames(&sent);
+    // ★ THE ROTATED CROSS-CELL CHILD IS SERVED TOO (owner ruling 2026-09-02 R1). Its window used
+    // to be withheld because the hop was INVERTED into the child's frame, and a rotated inversion
+    // across integer cells is a refusal in the frame core. The hop is the authored placement now —
+    // a row read off the book, never folded — so there is nothing left to refuse. The ONE guard
+    // that remains is the unrostered stranger.
     assert_eq!(
         frames.iter().map(|f| f.1).collect::<Vec<_>>(),
-        vec![WindowId(1), WindowId(3)],
-        "the Occupants window AND the ship's window serve; only the two real guards withhold"
+        vec![WindowId(1), WindowId(3), WindowId(4)],
+        "every rostered child is served; only the stranger is withheld"
     );
     let stats = rig.world.resource::<StubStats>();
     assert_eq!(stats.window_child_unrostered, 1);
-    // ★ THE SHIP EXCLUSION IS GONE (2026-09-01), and with it the counter this line read. A ship has a
-    // lineage now, so it is not withheld from any lane — the withheld windows below are withheld for
-    // their OWN reasons (an unrostered child, a refused rotated hop), which is what this test is
-    // actually about. A ship being served is proved in `aoi_demand`.
-    assert_eq!(stats.window_hop_refused, 1);
     assert_eq!(
         stats.windows_open, 4,
-        "guarded windows stay open — only their frames are withheld"
+        "guarded windows stay open — only the stranger's frame is withheld"
     );
-    // The refusal is the frame core's own (one rule, inherited): asserted directly, plus the
-    // unknown-frame arm the emitter can never reach (the roster resolves first).
+    // The hop is the book's own row — the rotated child's placement VERBATIM, spin and all — and
+    // the unknown-frame arm the emitter can never reach (the roster resolves first) is `None`.
     let book = rig
         .world
         .resource::<Placements>()
@@ -2225,17 +2205,10 @@ fn a_child_window_serves_a_ship_and_still_guards_a_stranger_and_a_rotated_hop() 
         .head(OWN_REALM)
         .expect("authored")
         .clone();
+    assert_eq!(hop_placement(frame_of(rotated), &book), Some(placed));
     assert_eq!(
-        invert_hop_placement(frame_of(OWN_REALM), frame_of(rotated), &book),
-        Err(FrameError::RotationBeyondExactReach)
-    );
-    assert_eq!(
-        invert_hop_placement(
-            frame_of(OWN_REALM),
-            FrameRef::PlanetCentered { planet_seed: 777 },
-            &book
-        ),
-        Err(FrameError::UnknownDestFrame)
+        hop_placement(FrameRef::PlanetCentered { planet_seed: 777 }, &book),
+        None
     );
 }
 
@@ -2299,19 +2272,28 @@ fn window_membership_rides_the_one_fold_and_clears_with_the_last_observer() {
             (GATEWAY, WindowId(2), both.clone(), vec![]),
         ]
     );
-    // The LAST observer leaves (the dot detaches, the child bit expires): the emptiness pass
-    // ships the removals — every window's verdict returns to the empty set, exactly once.
+    // The dot detaches and the child's bit expires. The Occupants window has no observer left, so
+    // its verdict empties. THE CHILD WINDOW DOES NOT: it is still open, and an open window IS the
+    // demand (ruling 2026-09-01 V1/V5) — a looker who is still looking still gets a picture. This
+    // block used to assert BOTH windows emptied, which was the bit deciding what could be seen.
     rig.world.resource_mut::<Dots>().0.clear();
     rig.world.resource_mut::<ChildLiveness>().0.clear();
     rig.set_local_tick(2);
     let sent = rig.tick(vec![]);
     assert_eq!(
         window_memberships(&sent),
-        vec![
-            (GATEWAY, WindowId(1), vec![], both.clone()),
-            (GATEWAY, WindowId(2), vec![], both),
-        ]
+        vec![(GATEWAY, WindowId(1), vec![], both.clone())]
     );
+    // CLOSE the child window and the last observer is gone for real: its verdict empties too, once.
+    rig.set_local_tick(3);
+    let sent = rig.tick(vec![wire_msg(
+        GATEWAY,
+        MsgClass::Control,
+        &GatewayToShard::WindowClose {
+            window: WindowId(2),
+        },
+    )]);
+    assert_eq!(window_memberships(&sent), vec![]);
     assert_eq!(
         rig.world.resource::<StubStats>().window_close_unknown,
         1,
@@ -2441,5 +2423,200 @@ fn a_gateway_that_still_asks_for_the_sky_is_counted_and_gets_nothing() {
             })
         }),
         "a shard must state no sky at all"
+    );
+}
+
+/// ★ THE GALAXY'S TICK, MEASURED (owner ruling 2026-09-02 R8 item 1; SL9). A rig hosting THE galaxy
+/// with its real census of direct children and ONE occupant, timing a full tick and the three
+/// walks that grow with the child count. Ignored: it builds the galaxy (seconds) and prints
+/// numbers; it asserts nothing until the index lands and the bound is chosen from this print.
+#[test]
+#[ignore = "a measurement of the galaxy shard's tick, run by hand: --ignored --nocapture"]
+// A hand-run measurement of WALL time, which is the thing it measures; the sim's own clock is what
+// this lint protects, and no sim logic reads the wall here.
+#[allow(clippy::disallowed_methods)]
+fn measure_the_galaxy_shards_tick_against_its_census() {
+    use std::time::Instant;
+    let cfg_w = vd_physics::worldgen::UniverseConfig::world(
+        vd_physics::worldgen::VISUAL_OCCUPANT_V_MAX_MPS,
+        vd_physics::worldgen::AOI_TICK_DT_S,
+    );
+    let galaxy = vd_core::worldgen::GALAXY;
+    let held = BTreeSet::from([galaxy]);
+    let lineage = BTreeSet::from([RealmId::Universe, galaxy]);
+    let built = Instant::now();
+    let (forest, movers) =
+        vd_physics::worldgen::shard_boot_world(0, &cfg_w, &held, galaxy, &lineage);
+    let census = forest.iter().filter(|r| r.parent == Some(galaxy)).count();
+    eprintln!(
+        "galaxy boot: {census} direct children, {} movers, built in {:?}",
+        movers.len(),
+        built.elapsed()
+    );
+
+    let cfg = StubConfig {
+        realm: galaxy,
+        held_realms: StubConfig::single_realm(galaxy),
+        frame: FrameRef::GalaxySpace { galaxy_seed: 1 },
+        own_coord: StubConfig::root_coord(galaxy),
+        tick_dt_s: vd_physics::worldgen::AOI_TICK_DT_S,
+        ..config()
+    };
+    let mut rig = Rig::with_config(cfg);
+    grant_realm_for(&mut rig, galaxy);
+    let regions = RealmRegions::new(forest)
+        .with_moving_children(kepler_motion_fns(movers.into_iter().collect()))
+        .with_own_realm(galaxy);
+    *rig.world.resource_mut::<RealmRegions>() = regions;
+    // One occupant at the galaxy's centre, in the galaxy's own frame.
+    rig.world.resource_mut::<Dots>().0.insert(
+        SESSION,
+        Dot {
+            last_stick: None,
+            entity: player(7),
+            account: AccountId(1),
+            session_fence: Fence(1),
+            gateway: GATEWAY,
+            granted: true,
+            input_active: false,
+            adopting: false,
+            authority: Authority::Owned { fence: Fence(1) },
+            departing: false,
+            entity_fence: Fence(1),
+            pose: StampedPose::at_rest(
+                FrameRef::GalaxySpace { galaxy_seed: 1 },
+                DVec3::ZERO,
+                UniverseTick(100),
+            ),
+            yaw: 0.0,
+            pitch: 0.0,
+            last_applied_seq: None,
+            prev_offset: LatticePos::default(),
+        },
+    );
+    let open = GatewayToShard::WindowOpen {
+        window: WindowId(1),
+        scope: WindowScope::Occupants,
+        static_held: None,
+    };
+    let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+    for t in 2..=4 {
+        rig.set_local_tick(t);
+        let started = Instant::now();
+        let _ = rig.tick(vec![]);
+        eprintln!(
+            "tick {t}: {:?}, candidates visited {}",
+            started.elapsed(),
+            rig.world.resource::<StubStats>().aoi_candidates_visited
+        );
+    }
+    // The index's shape: its cell edge, how many cell entries the census spans, and how many
+    // children the CENTRE cell holds — the number the one occupant above had to visit.
+    {
+        let regions = rig.world.resource::<RealmRegions>();
+        let ix = regions.aoi_index();
+        let tier = FrameRef::GalaxySpace { galaxy_seed: 1 }.tier();
+        let widest = regions
+            .direct_children(galaxy)
+            .fold((0.0_f64, 0.0_f64), |(e, b), r| {
+                (
+                    e.max(r.shape.circumscribed_extent()),
+                    b.max(r.aoi.tear_down_r_m()),
+                )
+            });
+        eprintln!(
+            "aoi index: edge {:e} m, {} cell entries over {} children, centre cell holds {}, \
+             widest extent {:e} m, widest tear-down {:e} m",
+            ix.edge_m(),
+            ix.cell_entries(),
+            ix.indexed_len(),
+            ix.candidates(LatticePos::ORIGIN, tier).len(),
+            widest.0,
+            widest.1,
+        );
+    }
+    // A tick with NO occupant and NO window: the schedule's own floor on this census.
+    rig.world.resource_mut::<Dots>().0.clear();
+    let _ = rig.tick(vec![wire_msg(
+        GATEWAY,
+        MsgClass::Control,
+        &GatewayToShard::WindowClose {
+            window: WindowId(1),
+        },
+    )]);
+    for t in 6..=7 {
+        rig.set_local_tick(t);
+        let started = Instant::now();
+        let _ = rig.tick(vec![]);
+        eprintln!(
+            "empty tick {t}: {:?}, candidates visited {}",
+            started.elapsed(),
+            rig.world.resource::<StubStats>().aoi_candidates_visited
+        );
+    }
+    // The pieces, timed alone on the same state.
+    let regions = rig.world.resource::<RealmRegions>();
+    let tick_hz = 1.0 / vd_physics::worldgen::AOI_TICK_DT_S;
+    let started = Instant::now();
+    let book = regions.author_book(galaxy, tick_hz, UniverseTick(100));
+    eprintln!("author_book over the census: {:?}", started.elapsed());
+    let started = Instant::now();
+    let snaps = regions.authored_realm_snaps(galaxy, &book);
+    eprintln!(
+        "authored_realm_snaps ({} rows): {:?}",
+        snaps.len(),
+        started.elapsed()
+    );
+    let started = Instant::now();
+    let rows = regions.child_rows(galaxy, &book);
+    eprintln!("child_rows ({} rows): {:?}", rows.len(), started.elapsed());
+}
+
+/// ★ HOW BIG IS A STAR SYSTEM'S WINDOW FRAME (2026-09-02)? A datagram has a size cap, and a frame
+/// over it is dropped by the transport. Ignored: a print, run by hand.
+#[test]
+#[ignore = "a measurement of THE home system's window frame, run by hand: --ignored --nocapture"]
+fn measure_the_home_systems_window_frame_size() {
+    let cfg_w = vd_physics::worldgen::UniverseConfig::world(500.0, 0.02);
+    let home = vd_core::worldgen::default_home_realm(
+        vd_physics::worldgen::system_layer_view(vd_physics::worldgen::HOME_SEED, &cfg_w).regions(),
+    )
+    .expect("a home");
+    let held = BTreeSet::from([home]);
+    let lineage = BTreeSet::from([RealmId::Universe, vd_core::worldgen::GALAXY, home]);
+    let (forest, movers) = vd_physics::worldgen::shard_boot_world(
+        vd_physics::worldgen::HOME_SEED,
+        &cfg_w,
+        &held,
+        home,
+        &lineage,
+    );
+    let regions = RealmRegions::new(forest)
+        .with_moving_children(kepler_motion_fns(movers.into_iter().collect()))
+        .with_own_realm(home);
+    let book = regions.author_book(home, 50.0, UniverseTick(100));
+    let driven = crate::stub::drive::DrivenChildren::default();
+    let movers = regions.moving_children_of(home, &driven);
+    let rows = regions.snaps_for(home, &book, movers.iter().copied());
+    let hop = regions
+        .direct_children(home)
+        .next()
+        .map(|r| vd_wire::session_flow::HopRow {
+            child: r.realm,
+            placement: book.of(r.frame).expect("row"),
+        });
+    let frame = ShardToGateway::WindowFrame {
+        realm_fence: Fence(1),
+        window: WindowId(5),
+        at: UniverseTick(100),
+        hop: hop.map(Box::new),
+        rows: rows.clone(),
+    };
+    let bytes = postcard::to_allocvec(&frame).expect("encode");
+    eprintln!(
+        "home system window frame: {} mover rows, {} bytes with the hop (budget {})",
+        rows.len(),
+        bytes.len(),
+        vd_wire::channels::CONSERVATIVE_DATAGRAM_BUDGET
     );
 }

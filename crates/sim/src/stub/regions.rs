@@ -15,10 +15,12 @@ use bevy_ecs::prelude::Resource;
 use std::collections::{BTreeMap, BTreeSet};
 use vd_core::UniverseTick;
 use vd_core::child_index::{ChildIndex, IndexedChild};
+use vd_core::frame::FramePlacement;
 use vd_core::geometry::{DepthKey, RealmRegion};
+use vd_core::glam::{DQuat, DVec3};
 use vd_core::kinematics::secs_since_epoch;
 use vd_core::placement::{MotionFn, PlacementBook};
-use vd_core::pose::{FrameRef, RealmId, StampedPose};
+use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose};
 use vd_core::realm_coord::RealmCoord;
 use vd_core::realm_path::RealmLevel;
 use vd_core::worldgen::level_of;
@@ -102,6 +104,25 @@ pub struct RealmRegions {
     /// nothing, so nothing is skipped and the fold behaves exactly as it did before this existed. That
     /// is the SAFE default on purpose: forgetting to build it costs speed, never correctness.
     pub(crate) child_index: ChildIndex,
+    /// ★ THE STATIC ROWS, AUTHORED ONCE PER ANCHOR (owner ruling 2026-09-02 R8 item 1; SL9): each
+    /// parent's non-moving children as placement rows, built when the forest is, shared by every
+    /// tick's book through the `Arc`. A tick authors only the movers and the driven.
+    static_rows: BTreeMap<RealmId, std::sync::Arc<Vec<(FrameRef, FramePlacement)>>>,
+    /// Each parent's MOVING children (indices), so a tick's overlay walks the movers and not the
+    /// roster.
+    movers_of: BTreeMap<RealmId, Vec<usize>>,
+    /// ★ THE RANGE INDEX (owner ruling 2026-09-02 R8 item 1): this realm's static direct children
+    /// with a live band, spanned by their tear-down radius plus the widest child extent (a child
+    /// proxy reaches out to its own surface). A looker finds the children whose band can hold it
+    /// by walking its lead through this grid — one lookup per cell of length, never a walk of the
+    /// roster. EMPTY until `with_own_realm`, like `child_index`.
+    aoi_index: ChildIndex,
+    /// The same children sorted by distance from this realm's centre, in metres of its own frame,
+    /// for the OUTSIDE looker: a looker `d` metres out can only reach children at least
+    /// `d − widest band` from the centre, which is a suffix of this list.
+    radial: Vec<(f64, RealmId)>,
+    /// The widest tear-down band among the indexed children, in metres.
+    widest_band_m: f64,
     /// The realm this shard hosts, once stated. `None` on a rig that never named one.
     own_realm: Option<RealmId>,
 }
@@ -224,7 +245,7 @@ impl RealmRegions {
             .iter()
             .map(|r| ancestry_chain(&regions, &ix_of, r.realm))
             .collect();
-        RealmRegions {
+        let mut built = RealmRegions {
             // ★THROWAWAY: the lawful 1.0 on every rig — only a bin that read `VD_TEST_OVERDRIVE`
             // raises it, through `set_cruise_overdrive`.
             cruise_overdrive: 1.0,
@@ -236,8 +257,17 @@ impl RealmRegions {
             ix_of,
             ancestor_chain,
             child_index: ChildIndex::default(),
+            static_rows: BTreeMap::new(),
+            movers_of: BTreeMap::new(),
+            aoi_index: ChildIndex::default(),
+            radial: Vec::new(),
+            widest_band_m: 0.0,
             own_realm: None,
-        }
+        };
+        // The static rows exist from construction: a store with no movers named and no realm named
+        // still authors every child's row (the fixtures build exactly that store).
+        built.rebuild_static_rows();
+        built
     }
 
     /// SELF ∪ ANCESTORS as a set of realms, for the realm a subject is authoritatively in — the DERIVED
@@ -283,9 +313,11 @@ impl RealmRegions {
     /// gets the same index as one that does it the other way round, which is the kind of ordering trap
     /// that is invisible until a mover is wrongly indexed.
     fn rebuild_child_index(&mut self) {
+        self.rebuild_static_rows();
         let Some(own) = self.own_realm else {
             return; // no realm named ⇒ nothing is known to be a child ⇒ index nothing
         };
+        self.rebuild_aoi_index(own);
         let tier = self.own_frame(own).tier();
         let children: Vec<IndexedChild> = self
             .regions
@@ -310,6 +342,174 @@ impl RealmRegions {
     #[must_use]
     pub fn child_index(&self) -> &ChildIndex {
         &self.child_index
+    }
+
+    /// The static rows of every parent, authored once (see the field). A mover's row is never
+    /// here; a child that is neither moving nor driven is here at its authored centre.
+    fn rebuild_static_rows(&mut self) {
+        self.static_rows.clear();
+        self.movers_of.clear();
+        for (parent, ixs) in &self.children_of {
+            let anchor = self.own_frame(*parent);
+            let mut rows: Vec<(FrameRef, FramePlacement)> = Vec::new();
+            let mut movers: Vec<usize> = Vec::new();
+            for &ix in ixs {
+                let r = &self.regions[ix];
+                if self.moving.contains_key(&r.realm) {
+                    movers.push(ix);
+                    continue;
+                }
+                rows.push((
+                    r.frame,
+                    FramePlacement {
+                        origin_cell: r.center.in_parents_frame().cell(),
+                        origin: r.center.in_parents_frame().offset(),
+                        velocity: DVec3::ZERO,
+                        orientation: DQuat::IDENTITY,
+                        angular_velocity: DVec3::ZERO,
+                    },
+                ));
+            }
+            self.static_rows
+                .insert(*parent, PlacementBook::static_rows(anchor, rows));
+            if !movers.is_empty() {
+                self.movers_of.insert(*parent, movers);
+            }
+        }
+    }
+
+    /// The range index and the radial list over this realm's static, live-band direct children.
+    fn rebuild_aoi_index(&mut self, own: RealmId) {
+        let tier = self.own_frame(own).tier();
+        let children: Vec<RealmRegion> = self
+            .direct_children(own)
+            .filter(|r| !self.moving.contains_key(&r.realm) && r.aoi.spin_up_r_m() > 0.0)
+            .copied()
+            .collect();
+        let widest_extent = children
+            .iter()
+            .fold(0.0_f64, |acc, r| acc.max(r.shape.circumscribed_extent()));
+        self.widest_band_m = children
+            .iter()
+            .fold(0.0_f64, |acc, r| acc.max(r.aoi.tear_down_r_m()));
+        let indexed: Vec<IndexedChild> = children
+            .iter()
+            .map(|r| IndexedChild {
+                realm: r.realm,
+                centre: r.center.in_parents_frame(),
+                radius_m: r.aoi.tear_down_r_m() + widest_extent,
+            })
+            .collect();
+        self.aoi_index = ChildIndex::build(&indexed, tier);
+        let mut radial: Vec<(f64, RealmId)> = children
+            .iter()
+            .map(|r| {
+                (
+                    r.center
+                        .in_parents_frame()
+                        .delta_m(LatticePos::ORIGIN, tier)
+                        .length(),
+                    r.realm,
+                )
+            })
+            .collect();
+        radial.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        self.radial = radial;
+    }
+
+    /// The range index over this realm's static children (see the field).
+    #[must_use]
+    pub(crate) fn aoi_index(&self) -> &ChildIndex {
+        &self.aoi_index
+    }
+
+    /// Is the range index built for `realm` — did `with_own_realm` name it? A store that never
+    /// named its realm has no index, and a fold over it must say so rather than visit nobody.
+    #[must_use]
+    pub(crate) fn indexes_children_of(&self, realm: RealmId) -> bool {
+        self.own_realm == Some(realm)
+    }
+
+    /// The static children an OUTSIDE looker `d_out_m` from this realm's centre could reach: every
+    /// child at least `d_out_m − widest band` from the centre — a suffix of the radial list, found
+    /// by one partition search.
+    pub(crate) fn children_reachable_from_outside(
+        &self,
+        d_out_m: f64,
+    ) -> impl Iterator<Item = RealmId> + '_ {
+        let floor = d_out_m - self.widest_band_m;
+        let start = self.radial.partition_point(|(d, _)| *d < floor);
+        self.radial[start..].iter().map(|(_, r)| *r)
+    }
+
+    /// This realm's direct children that MOVE this tick — the orbiting and the driven — as a set.
+    pub(crate) fn moving_children_of(
+        &self,
+        own: RealmId,
+        driven: &crate::stub::drive::DrivenChildren,
+    ) -> BTreeSet<RealmId> {
+        let mut set: BTreeSet<RealmId> = self
+            .movers_of
+            .get(&own)
+            .map(|ixs| ixs.iter().map(|&ix| self.regions[ix].realm).collect())
+            .unwrap_or_default();
+        set.extend(
+            driven
+                .0
+                .keys()
+                .copied()
+                .filter(|c| self.parent_of(*c) == Some(own)),
+        );
+        set
+    }
+
+    /// ONE direct child of `own` by name — a lookup, never a scan.
+    pub(crate) fn direct_child(&self, own: RealmId, realm: RealmId) -> Option<&RealmRegion> {
+        let r = &self.regions[*self.ix_of.get(&realm)?];
+        (r.parent == Some(own)).then_some(r)
+    }
+
+    /// The parent of a rostered realm, if the roster names it.
+    pub(crate) fn parent_of(&self, realm: RealmId) -> Option<RealmId> {
+        self.ix_of
+            .get(&realm)
+            .and_then(|ix| self.regions[*ix].parent)
+    }
+
+    /// ★ THE ROWS OF A NAMED SET (owner ruling 2026-09-02 R8 item 1): the placements of the given
+    /// direct children of `own`, each one lookup — never a walk of the roster. A realm that is not
+    /// a direct child of `own`, or not rostered, is skipped.
+    pub(crate) fn child_rows_for<'a>(
+        &'a self,
+        own: RealmId,
+        book: &PlacementBook,
+        realms: impl IntoIterator<Item = RealmId>,
+    ) -> Vec<(&'a RealmRegion, StampedPose)> {
+        realms
+            .into_iter()
+            .filter_map(|realm| {
+                let r = &self.regions[*self.ix_of.get(&realm)?];
+                (r.parent == Some(own)).then_some(r)
+            })
+            .filter_map(|r| book.of(r.frame).map(|at| (r, pose_of_row(book, at))))
+            .collect()
+    }
+
+    /// [`RealmRegions::child_rows_for`], as wire rows.
+    pub(crate) fn snaps_for(
+        &self,
+        own: RealmId,
+        book: &PlacementBook,
+        realms: impl IntoIterator<Item = RealmId>,
+    ) -> Vec<RealmSnap> {
+        self.child_rows_for(own, book, realms)
+            .into_iter()
+            .map(|(r, pose)| RealmSnap {
+                realm: r.realm,
+                frame: r.frame,
+                pose,
+            })
+            .collect()
     }
 
     /// The detector short-circuits (inert) when no regions are planted — production through C-3.
@@ -456,7 +656,12 @@ impl RealmRegions {
     /// the identity and answer confidently from the wrong numbers.
     #[must_use]
     pub fn author_book(&self, anchor: RealmId, tick_hz: f64, at: UniverseTick) -> PlacementBook {
-        self.author_book_driven(anchor, tick_hz, at, &crate::stub::drive::DrivenChildren::default())
+        self.author_book_driven(
+            anchor,
+            tick_hz,
+            at,
+            &crate::stub::drive::DrivenChildren::default(),
+        )
     }
 
     /// ★ THE SAME BOOK FOR A REALM THAT HOLDS DRIVEN CHILDREN (D-MOVE-2) — THE one implementation;
@@ -475,13 +680,36 @@ impl RealmRegions {
         driven: &crate::stub::drive::DrivenChildren,
     ) -> PlacementBook {
         let secs = secs_since_epoch(at.0, tick_hz);
-        PlacementBook::new(
-            self.own_frame(anchor),
-            at,
-            self.direct_children(anchor)
-                .map(|r| (r.frame, placement_row(&self.moving, driven, r, secs)))
-                .collect(),
-        )
+        // ★ STATICS ONCE, MOVERS PER TICK (owner ruling 2026-09-02 R8 item 1; SL9): the overlay
+        // walks the children that move — orbiting, or driven by a pilot — and the static layer is
+        // shared. A driven child that was static at boot is in both; the overlay wins.
+        let own_frame = self.own_frame(anchor);
+        let statics = self
+            .static_rows
+            .get(&anchor)
+            .cloned()
+            .unwrap_or_else(|| std::sync::Arc::new(Vec::new()));
+        let mut overlay: Vec<(FrameRef, FramePlacement)> = self
+            .movers_of
+            .get(&anchor)
+            .map(|ixs| {
+                ixs.iter()
+                    .map(|&ix| {
+                        let r = &self.regions[ix];
+                        (r.frame, placement_row(&self.moving, driven, r, secs))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for child in driven.0.keys() {
+            if let Some(ix) = self.ix_of.get(child) {
+                let r = &self.regions[*ix];
+                if r.parent == Some(anchor) && !self.moving.contains_key(child) {
+                    overlay.push((r.frame, placement_row(&self.moving, driven, r, secs)));
+                }
+            }
+        }
+        PlacementBook::layered(own_frame, at, statics, overlay)
     }
 
     /// The shard's authored placements for EVERY direct child as [`RealmSnap`] observer rows — the

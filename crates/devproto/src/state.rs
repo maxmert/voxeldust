@@ -169,12 +169,27 @@ pub struct DevState {
     /// THE SKY THE CLIENT HOLDS (S11): `(generation, stars)` of the whole catalogue it has assembled
     /// and proved, or `None` while it holds no whole sky.
     ///
-    /// ★ THE COUNT IS THE CATALOGUE'S, NOT THE DRAWN CLOUD'S, and the difference matters to a gate:
-    /// the observer's OWN system is in the catalogue but is never drawn (you are inside it), so a
-    /// gate expecting pixels must expect `stars - 1` points of light. Reporting the held number keeps
-    /// the client honest about what it RECEIVED; the gate derives what should be DRAWN itself, from
-    /// the world seed, rather than trusting a number the client also drew from.
+    /// ★ THE COUNT IS THE CATALOGUE'S, NOT THE DRAWN CLOUD'S. Reporting the held number keeps the
+    /// client honest about what it RECEIVED. What it DREW is [`DevState::stars_drawn`], and the two
+    /// disagree exactly when the sky is broken — which is the reason the second field exists.
     pub sky: Option<(u64, u64)>,
+    /// ★ THE STARS ON SCREEN (owner ruling 2026-09-02 R9 step 1): how many points of light the
+    /// renderer's star cloud holds RIGHT NOW. Zero while nothing is drawn.
+    ///
+    /// MEASURED 2026-09-01: a player stood inside a hull under a black sky while `sky` reported the
+    /// whole census, because `sky` counts what the client HOLDS and the cloud had been despawned by a
+    /// crossing and never rebuilt. An instrument that reports the held count certifies its own
+    /// silence. This field is what a gate must read to say "the sky is drawn".
+    ///
+    /// Written by the render thread, read by the core thread — one shared counter, like
+    /// `dev_commands_dropped`. A client with no renderer reports 0, truthfully.
+    pub stars_drawn: u64,
+    /// ★ WHERE THE GALAXY IS (owner ruling 2026-09-02 R1): the origin realm's centre in the galaxy's
+    /// frame, in metres, as the gateway last stated it on the realm lane — the anchor the star cloud
+    /// is placed by. `None` until the observer chain reaches the galaxy, which is exactly the case
+    /// in which no sky is drawn; a gate reads this to tell "the chain never reached the galaxy"
+    /// from "the renderer never drew".
+    pub sky_anchor: Option<[f64; 3]>,
     /// IS ANYONE STILL SPEAKING FOR THE SKY (S11)? `NeverHeard`, `Confirmed` or `Quiet`, as
     /// [`vd_client::star_sky::sky_watch`] reads it.
     ///
@@ -273,6 +288,8 @@ pub(crate) mod tests {
             }],
             origin: Some(("System(7)".to_owned(), 1)),
             sky: None,
+            stars_drawn: 0,
+            sky_anchor: None,
             // A fixture has heard no beat (S11).
             sky_watch: "NeverHeard".to_owned(),
             stale_epoch_rows: 8,

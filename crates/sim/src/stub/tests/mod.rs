@@ -826,9 +826,7 @@ fn with_child_coord(rig: &mut Rig, child: RealmId) -> RealmCoord {
         .direct_children(config.realm)
         .find(|r| r.realm == child)
         .expect("the fixture registered that child");
-    config
-        .own_coord
-        .child(region_level(region))
+    config.own_coord.child(region_level(region))
 }
 
 // ---- Slice 3d/3e/4b + C-3 (the CONTAINMENT re-home trigger) --------------------------------
@@ -940,7 +938,7 @@ fn insert_owned_dot(rig: &mut Rig, session: SessionId, entity: EntityId, offset:
     rig.world.resource_mut::<Dots>().0.insert(
         session,
         Dot {
-        last_stick: None,
+            last_stick: None,
             entity,
             account: AccountId(1),
             session_fence: Fence(1),
@@ -1403,7 +1401,7 @@ fn insert_owned_dot_framed(
     rig.world.resource_mut::<Dots>().0.insert(
         session,
         Dot {
-        last_stick: None,
+            last_stick: None,
             entity,
             account: AccountId(1),
             session_fence: Fence(1),

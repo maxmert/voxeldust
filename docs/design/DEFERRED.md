@@ -4560,6 +4560,93 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   system into a planet and **sends the identical six numbers to its new parent**. It does not know it moved
   house. One mechanism; any realm can be the parent.
 
+- **STATUS 2026-09-02 — THE KEYS BECAME THE STICK, after the owner flew the hull.** The owner flew the
+  first hull in the window and reported three things: the mouse turned the hull about the wrong axes,
+  the camera flew around the hull while forces were applied, and the push was too weak to travel inside
+  the star system. What changed, all of it INTERIM and all of it deleted with this entry:
+  - **The mouse turns nothing on a hull** (`stick_from_input`, `sim/stub/dot.rs`). The look rode the
+    movement-shaped turn stick in the wrong slots, so the mouse's yaw pitched the hull and its pitch
+    rolled it; and the same look also turned the local camera, so one motion made two turns. Now the
+    look is the camera's alone. `A`/`D` are the TURN of the nose (the strafe axis, read as a yaw about
+    the hull's up axis; `D` is a negative rotation), `E`/`Q` raise and lower the nose (two action bits
+    named in `vd_core::controls`, bound in the shard, never on the client), `W`/`S` and `Space`/`Ctrl`
+    push. Example: `D` and `E` together make the turn `[0, +1, -1]` — nose up and to the right.
+  - **The strafe axis is not throttled** (`input_map::MovementKeys::axes`): a turn runs at the rated
+    rate while the key is held and stops when it is released. An eased throttle would have kept the
+    hull turning for seconds after the key was up.
+  - **The throttle ladder is geometric** (`input_map::throttle_magnitude`, floor `1e-13`): tier 1 is the
+    floor times the rating, tier 10 is the rating, each tier is about twenty-eight times the one below.
+    One ladder must serve a docking nudge and a run between stars.
+  - **The test hull's rating is on its row, stated by the berth tool** (`vd-build-ship
+    --max-push-micro-mps2`, `examples/berth_hull.rs`): ten million million metres per second per second,
+    three radians per second per second. FLOWN FIRST at a hundred million (owner, 2026-09-02): the hull
+    gained a thousand million metres per second every ten seconds, exactly its rating; the crossing out
+    of the star system went through at speed; the planets and the star left the picture and their
+    shards went to sleep behind it; and the star field did not move, because the nearest stars sit
+    thirty thousand million million metres away. The rating rose five orders of magnitude for the
+    between-stars run, and the ladder's floor followed it so tier 1 stays one metre per second per
+    second. MEASURED against the world before choosing it: the home
+    system is a shell 5.2e12 m in radius, the spawn sits 1.08e10 m from its star, the planets' shells
+    are 1.5e8 to 4.7e10 m in radius. Ten seconds at the top tier reaches 1e9 m/s. The number is one
+    hull's fact, printed by the tool at berth time; no default shares it.
+  - **The pilot's panel** (`draw_pilot_panel`, windowed only): the realm's placement in the galaxy and
+    its speed come from the sky anchor the gateway already ships for the star cloud (its velocity is
+    the same fold); the stick and the throttle are what the window last sent. NOTHING new crosses the
+    wire. The hull's rated push does not reach a screen, so the panel shows the fraction commanded.
+  - **The camera lock** (`L`): the eye holds the realm's own axes, in first or third person.
+  - **What "test the warp" means today.** Warp is a DECLARED STATE with a five-test gate (D-MOVE-1;
+    the movement ruling) and it is not built. What the same machinery gives now is an extreme push at
+    the top tiers, which the parent integrates without a ceiling (owner ruling: the ceiling leaves the
+    flight path). Containment is SWEPT (slice S5, `candidates_segment`), so a hull that crosses a
+    planet's shell inside one tick is caught. UNMEASURED at 1e9 m/s: whether a planet's shard boots
+    before the hull arrives — the interest lead is `vel × boot_ticks_p99 × tick`, and the wake-up
+    constant is the ruling's own open item.
+
+- **★ MEASURED 2026-09-02, second owner flight, at ~2e14 m/s: A HULL NEVER LEAVES ITS PARENT.** The
+  hull left the home system's shell (5.2e12 m) within seconds and no crossing followed: the star
+  system went on authoring its placement at 1e16 m from its star, two thousand shells out, and the
+  directory still listed the hull under the star system. The containment scan re-homes OCCUPANTS; a
+  driven child REALM has no exit crossing. The ledger owes it under D-37 ("Realm/Ship re-home owed"),
+  and it is this entry's own acceptance test — *a ship crosses and sends the identical six numbers to
+  its new parent* — so it is recorded here too. CONSEQUENCE for the between-stars run: without the
+  crossing a second star system never wakes for a hull (a parent demands only its OWN children), and
+  the hull flies through it as a ghost. The sky stays right meanwhile: the anchor lifts the hull's
+  placement through the star system into the galaxy's frame, and that fold is exact whoever the
+  parent is — which is why the parallax test could run before the crossing exists.
+  - **NEXT:** the child-realm exit and entry crossing — out of a star system into the galaxy, and
+    down from the galaxy into the next star system — on the SAME transfer machinery (HR2/HR3: a ship,
+    a station, a moon and a rock cross by identical code). The hull's own shard keeps running through
+    it; what changes hands is the AUTHORSHIP of its placement (SL1) and the lane its drive rides up.
+  - **PLANNED 2026-09-02:** `docs/design/realm_crossing_plan_2026-09-02.md` — the exterior rides the
+    `Ship(id)` key the design reserved for it (transfer_protocol §8), the parent's swept verdict over
+    its DRIVEN CHILDREN is the trigger, the old parent converts at the destination's rung, the new
+    parent adopts in one tick, the hull is TOLD its lineage once (the one new datum, SL6 ask), six
+    slices with gates. Awaiting the owner's answers to the plan's §7 asks before slice 0.
+
+- **STATUS 2026-09-02, third owner flight — THE FACING CROSSES WITH THE BODY, AND THE VIEW FOLLOWS
+  IT.** The owner boarded looking along x and the hull left at ninety degrees to the view: the push
+  rode the NOSE, the mouse turned nothing, and looking and moving never met again (*"the direction of
+  the movement suddenly changes after rehome, and obviously the controls are pointing in wrong
+  directions all the time"*). Owner-approved rule, generic for every realm kind, no new wire data:
+  - **The look turns the body whoever holds the stick** (`dot::face`, split out of the old
+    integrator; a walker runs `face` then `walk` in the old order and is byte-identical). A pilot
+    turns without walking.
+  - **The push follows the pilot's facing** (`stick_from_input(input, facing)`): `W`/`S` along where
+    the pilot looks, `Space`/`Ctrl` along the facing's up, in the hull's own frame; `A`/`D`/`E`/`Q`
+    turn the hull, and the pilot — whose facing lives in the hull's frame — swings with it. The nose
+    no longer states the flight direction: point the mouse at the nose to fly along it. Example: the
+    pilot looks along x and holds `W`; the push is `facing × (0, 0, -1)` = x.
+  - **A scene swap re-expresses the view** (`place_camera`, `CameraState::last_origin`): the local
+    yaw and pitch are numbers in the frame the picture is drawn in; at a swap the camera takes the
+    DELIVERED facing — the server's answer in the new frame — and the mouse continues from there.
+    This closes a latent seam the owner did not see only because the hull sat at its berth: boarding
+    a hull that has turned made the view jump by the hull's rotation.
+  - **`L` = face the nose:** sends the one look that turns the delivered facing onto the realm's own
+    forward, holds the eye there, and sends no mouse look while locked, so the facing and the eye stay
+    together.
+  - The server side already converted a facing at a crossing and derived yaw/pitch from it on
+    arrival (`saga_arms.rs`, the walker's earlier fix); this round reused it, changed nothing there.
+
 ### D-MOVE-5 🟥 A SIZE IS A PLAIN DECIMAL WHILE A POSITION IS ON A RULER — raised 2026-09-01 by the owner
 
 - **THE OBSERVATION (owner, 2026-09-01).** Reviewing why a built-realm record cannot promise total
@@ -4654,6 +4741,25 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   yet said whether they retire with it or stay red until the replacement lands.**
 
 - **WHEN:** with D-MOVE-2, and piece 2 is what makes high speed survivable at all.
+
+### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
+- **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:
+  - **The instrument** — `DevState::stars_drawn` (the drawn count beside the held count) and `DevState::sky_anchor`; the gate `world-from-inside` in the pre-merge list. Before it, every gate read the HELD count and certified a black sky.
+  - **R9 step 2, the chain reaches the root** — the hop is the authored placement (D-WINDOW-4 resolved above; wire minor 24, a mesh flag day).
+  - **R9 step 3, the galaxy is always in the picture** — decision 2: the gateway lifts the observer's origin up the chain into the galaxy's frame and states it as `RealmSnapshotDatagram.sky_anchor` (~130 B/tick, on every chunk; a tick with an anchor and no row still ships one datagram); the client builds ONE star cloud from the catalogue (`SkyDraw::points_from`, every star, nobody left out) and places it per frame (`sky_cloud_transform`, f64 folded and narrowed once; the shader applies the model transform it used to ignore); the re-anchor and its `anchor_of`/`points_around` are DELETED; a rebase bound is derived (`sky_rebase_bound_m` ≈ 7.9e18 m, wider than the galaxy).
+  - **Decision 3, a window ships only the children in range** — `emit_window_rosters` runs AFTER the range fold and ships, per window, the children in that window's range plus the hop child (movers always; everything with no live band); the relay ships the same set. MEASURED before: the galaxy shipped 233,220 rows + 233,220 markers per keep-alive (22 MB) and shed for minutes.
+  - **A datagram over the budget is split** — the window frame is partitioned exactly as the entity snapshot is, the hop on every chunk, and the gateway MERGES chunks of one stamp. MEASURED: the home system's hull-window frame was 1,420 B against 1,200 and EVERY one was dropped by the transport (counted where no gate reads).
+  - **R8 item 1, the first half** — the placement book is LAYERED (statics authored once and shared by `Arc`, movers per tick); the fold visits CANDIDATES by lookup (`ChildIndex::candidates_along` the looker's lead, `children_reachable_from_outside` for the interest proxy) plus the latched; `aoi_candidates_visited` and `aoi_full_walks` are gauges. MEASURED on the galaxy (debug, seed 0 world, one occupant at the centre): 1.9 s → 250 ms per tick; on the cluster (seed 2298): 61 ms mean, still OVER the 20 ms budget.
+- **OWED:**
+  - **R9 step 4, REACH itself** — no realm states a reach yet; the band is still the wake band (bound × cot(θ/2)) and the angle is still 1.5°; the child→parent reach datum (approved, R6) is not on the wire. The dot angle re-solve and its cost measurement are owed with it.
+  - **R9 step 5** — the parent's marker still exists for children IN RANGE; the occupancy bit still builds the proxy observer (lawful under R5, but the bit still influences sight through it).
+  - **R9 step 6 / R8 item 1, the second half** — the galaxy's tick is 61 ms mean against 20 ms. The per-candidate cost (~22 µs each: a `RealmCoord::child` allocation, three `BTreeMap` inserts, the interest emitter) and the 11,275 candidates one centre occupant collects on the seed-0 world (index cell 61 ly, because a system's wake band is its gravitational bound × 76 — the widest is 18 ly) are the two levers. Neither is a number to argue: the probe `measure_the_galaxy_shards_tick_against_its_census` (ignored, hand-run) prints both.
+  - **The band re-solve (D-MOVE-3)** is what makes the index cell small; it is the owner's open item and is NOT touched here.
+  - **The second subject of the gate** — the planet subject is `#[ignore]`d with its measurement (a walking occupant at 1.0e3 m/s cannot reach a planet 6.1e10 m away; the governor is deleted). It runs when a hull flies there (M-C) or the spawn moves (G10). The look/acceptance gates that fly the same leg are in the same state and were NOT re-run in this pass — UNMEASURED.
+  - **A static attach onto a BUILT realm** still gets a one-realm chain, counted (`attach_lineage_unresolved`). A static attach onto a SEEDED realm now derives the whole chain from the gateway's own forest (2026-09-02, found by the star-sky gate on the dual cluster: 233,220 stars held, none drawn, `sky_anchor = None`); the flown path (login + crossing) never needed it.
+- **PRE-EXISTING REDS, measured on the previous commit (41b0ba0), NOT introduced here:** `flight_table` (two tests: a leg that holds no cruise under the deleted governor, and a boundary count pinned at 51 on a three-system world that now counts 3,500,645 bodies), `dual_cluster_crossing_smoke` (the same no-cruise leg), `ship_flight_e2e::a_ship_states_a_push...` (the test never plants the hull's `OwnBody`, which the last commit made a gate), and `frame_conversion_e2e::no_level_of_the_chain_can_place_itself...` (the test plants a second planet under the star system on that very shard and expects the system not to place it — identical left/right on the previous commit, built and run in a scratch checkout 2026-09-02). Also: `frame_conversion_e2e::the_linear_carry_chord_error_sizes_the_placement_skew_cap` regenerates the whole 3.5M-body forest inside its own body and ran 18+ minutes at full CPU without finishing — skipped in this pass, the quadratic shape this arc has removed elsewhere.
+- **`star_sky_pixels` RE-RUN, and its red is PRE-EXISTING (measured 2026-09-02).** On this tree the gate reaches its pixel probe (the anchor arrives, the stars are drawn) and fails on ONE star of 77 in view: `System(35151578967932295)`, a faint red dwarf (5.3e-3 L_sun, drawable under the shipped law at crop 1.4 px) at the frame's bottom edge, with no lit pixel within 12 px. The SAME star fails the SAME probe on the previous commit (built and run in a scratch checkout). The kept capture, analysed: 65,120 lit pixels; over all 77 expected positions the nearest lit pixel is at median 2.2 px, p90 6.9 px, with no radial trend (inner third 2.3 px, outer 3.6) — the one cloud is placed and turned exactly where the seed puts the sky, and this one star's absence is an OPEN item of its own (why a drawable near star paints nothing there is unexplained by reading). The gate now keeps its capture when `VD_KEEP_CAPTURE=<dir>` is set.
+- **Process gates NOT re-run after this pass (UNMEASURED):** `two_ships`, `render_crossing_smoke`, `look_pixels`, `rlm_demand_login`, `window_parity`. The deterministic `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` are green.
 
 ### D-SL1-2 🟥 SL1 REWRITTEN — a realm MAY be told where it is (owner reversal 2026-08-24), and the three fences that make it safe are UNBUILT
 
@@ -5868,7 +5974,13 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   `reflected_photometrics`), `docs/design/window_lane.md` §2.8/§2.10;
   `docs/design/look_horizon.md` §5.1-5.2 (the interior term's today-numbers).
 
-### D-WINDOW-4 🟥 Rotated cross-cell hop composition is REFUSED, counted, and owed with P10's cell math (window lane, re-registered at Slice D)
+### D-WINDOW-4 🟩 RESOLVED (2026-09-02) — the hop is the AUTHORED placement, and nothing is inverted at the shard any more (owner ruling 2026-09-02 R1/R4; wire minor 24)
+
+- **HOW IT RESOLVED.** The hop row used to carry the author's frame pre-inverted into the CHILD's frame, so a rotated cross-cell inversion was refused in the frame core and a galaxy-scale one had no lattice count at all — the galaxy shard refused its own hop every tick and the observer chain never reached the galaxy. The hop now carries the child's placement in the author's frame, at the author's step; the gateway inverts once in the same routine that maps every roster row, at the author's step, where the count exists. The rotated cross-cell child is SERVED (`a_child_window_serves_a_ship_and_still_guards_a_stranger_and_a_rotated_hop`), the world pin flipped from "measured refusals" to "every cross-rung hop in THE world is stated" (`inv_body_at_origin_and_the_rotated_hop_inertness_are_pinned_on_the_world`), and `window_hop_refused` is retired.
+
+<details><summary>The original entry (history)</summary>
+
+#### D-WINDOW-4 (as registered) Rotated cross-cell hop composition is REFUSED, counted, and owed with P10's cell math (window lane, re-registered at Slice D)
 - **WHAT is deferred:** folding a hop whose frame is ROTATED across integer lattice cells. Today every
   placement of THE world carries the identity orientation at cell zero, so the composition is exact; a
   rotated cross-cell inversion is refused by the frame core itself and counted
@@ -5878,6 +5990,8 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
 - **WHEN:** P10, with `convert_tier` and the cell math the galaxy lattice needs.
 - **Where:** `crates/core/src/frame.rs`, `crates/connection-plane/src/window.rs` (`count_refusal`),
   `crates/sim/src/stub.rs` (`emit_realm_frames`'s hop inversion).
+
+</details>
 
 ### D-WINDOW-5 🟥 The LOD tier seam is DESIGNED and unbuilt — detail tiers are more tags in the same look bag (window lane §2.14, registered at Slice D for P4+)
 - **WHAT is deferred:** the ladder's middle rungs. The model already carries its top and bottom: tier 0 is

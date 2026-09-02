@@ -253,6 +253,9 @@ pub struct GatewayConfig {
     pub sky: Vec<vd_core::look::StarRow>,
     /// The generation [`Self::sky`] folds to — the identity the client compares against what it holds.
     pub sky_generation: u64,
+    /// The frame the sky is stated in — the galaxy's — so the composer can lift each observer's
+    /// origin into it and place the star cloud (owner ruling 2026-09-02 R1). `None` with no sky.
+    pub sky_frame: Option<vd_core::pose::FrameRef>,
     /// P1: the single stub shard every session lands on (the login shard).
     pub shard: NodeId,
     /// The STABLE set of routable shard `NodeId`s (node-class dispatch — FORK 5). Seeded

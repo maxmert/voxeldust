@@ -111,6 +111,10 @@ pub struct ClientState {
     /// calling it per step would rebuild 7.0 MB twenty times a second for a galaxy that never moves.
     /// Built at the one moment the sky changes instead, and shared by `Arc` from then on.
     sky_draw: Option<std::sync::Arc<crate::render_snapshot::SkyDraw>>,
+    /// THE SKY ANCHOR (owner ruling 2026-09-02 R1): the origin realm in the galaxy's frame, as the
+    /// gateway last stated it on the per-tick realm lane. Latest-wins; cleared on a scene swap (the
+    /// origin changed, so the old anchor names a realm the picture no longer stands in).
+    sky_anchor: Option<vd_core::pose::StampedPose>,
     /// THE GENERATION ALREADY ON DISK (S11), so a caller may ask to save every step and pay once.
     sky_cached: Option<u64>,
     /// THE SKY BEAT'S OWN CADENCE, in ticks — the watchdog's bound is derived from it, never a
@@ -158,6 +162,7 @@ impl ClientState {
             sky: crate::star_sky::StarSky::default(),
             pending_sky_held: None,
             sky_draw: None,
+            sky_anchor: None,
             sky_cached: None,
             // Half a second at the client's own step rate, matching the gateway's keep-alive
             // derivation (`tick_hz / 2`). Never a free literal: it is the beat's cadence, and the
@@ -276,7 +281,14 @@ impl ClientState {
                 Ok(scene) => {
                     self.scene = Arc::new(scene);
                     self.origin = Some(origin);
+                    // A new origin: the old anchor placed a realm this picture no longer stands
+                    // in. The next datagram at this epoch states the new one.
+                    self.sky_anchor = None;
                     if let Some(held) = self.realm_view.swap_epoch(origin_epoch) {
+                        // The held early datagram is at THIS epoch: its anchor is current too.
+                        if let Some(anchor) = held.sky_anchor {
+                            self.sky_anchor = Some(anchor);
+                        }
                         let standing_in = self.view.own_location_frame();
                         let _ = self.realm_view.on_realm_snapshot(standing_in, held);
                     }
@@ -401,6 +413,17 @@ impl ClientState {
             return;
         };
         let tick = snap.universe_tick;
+        // ★ THE SKY ANCHOR APPLIES ON THE EPOCH ALONE (owner decision 2, 2026-09-02). The rows'
+        // verdict asks whether a row folded; a datagram carrying an anchor and NO applicable row —
+        // a pilot alone in a hull, nothing else in range — would be dropped with its anchor, and
+        // the sky would never place. So the anchor is taken from every datagram at the CURRENT
+        // epoch (a stale epoch names a realm the picture no longer stands in; a newer one is held
+        // and replayed by the scene swap below). Latest-wins by presence: none leaves the last.
+        if snap.origin_epoch == self.realm_view.epoch()
+            && let Some(anchor) = snap.sky_anchor
+        {
+            self.sky_anchor = Some(anchor);
+        }
         // THE ONE-SPACE RULE (crossing-render slice): rows fold only when stated in the space the
         // avatar stands in — the old home's still-draining feed is skipped, never mixed in.
         let standing_in = self.view.own_location_frame();
@@ -697,22 +720,23 @@ impl ClientState {
         )
         // A pointer bump, whatever the census (S11).
         .with_sky(self.sky_draw.clone())
-        // The standing realm, so the renderer can find the observer's anchor in the catalogue.
         .with_origin(self.origin)
+        // Where the galaxy is, as last stated — the one thing that places the sky (2026-09-02).
+        .with_sky_anchor(self.sky_anchor)
     }
 
     /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
-    /// at wall-time `now_s` — wire truth, never internal hope. `dev_commands_applied`/
-    /// `dropped` are the bin's mailbox counters (the lib does not own that mailbox), so
-    /// the bin passes them in. Every emitted float is sanitized finite, so the
-    /// `encode_response` codec is infallible.
+    /// at wall-time `now_s` — wire truth, never internal hope. `counters` are the bin's
+    /// own numbers (the mailbox the lib does not own, and the render thread's star cloud
+    /// the lib never sees), so the bin passes them in. Every emitted float is sanitized
+    /// finite, so the `encode_response` codec is infallible.
     #[must_use]
-    pub fn devstate(
-        &self,
-        now_s: f64,
-        dev_commands_applied: u64,
-        dev_commands_dropped: u64,
-    ) -> DevState {
+    pub fn devstate(&self, now_s: f64, counters: DevCounters) -> DevState {
+        let DevCounters {
+            dev_commands_applied,
+            dev_commands_dropped,
+            stars_drawn,
+        } = counters;
         let render_cursor = self.cursor(now_s).map(sanitize_f64);
         // Entities are sampled at the cursor only once it is anchored (a snapshot has
         // applied); before that there is nothing to render.
@@ -806,6 +830,13 @@ impl ClientState {
                 .sky_draw
                 .as_ref()
                 .map(|s| (s.generation, s.rows.len() as u64)),
+            // The origin realm in the galaxy's frame, in metres — where the sky is placed from.
+            sky_anchor: self.sky_anchor.map(|a| {
+                sanitize_vec3(
+                    a.pos
+                        .delta_m(vd_core::pose::LatticePos::ORIGIN, a.frame.tier()),
+                )
+            }),
             // ★ IS ANYONE STILL SPEAKING FOR THE SKY (S11)? The stars stay on screen either way — a
             // stale sky is not a wrong sky, because stars do not move. This is the "says so" half of
             // SL1 clause 6, and it is the ONLY half that applies to a picture which cannot go wrong.
@@ -840,9 +871,24 @@ impl ClientState {
             echo_rows_dropped: self.view.echo_rows_dropped(),
             dev_commands_applied,
             dev_commands_dropped,
+            stars_drawn,
             transfer: DevTransferView::None,
         }
     }
+}
+
+/// THE BIN'S OWN NUMBERS for the diagnosis surface — counters the lib cannot see because it does
+/// not own the thing counted: the dev-control mailbox (applied / shed) and the render thread's star
+/// cloud (drawn). One struct, so a new counter is one field and not one more positional argument at
+/// every call site.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DevCounters {
+    /// Dev actions drained and applied this session.
+    pub dev_commands_applied: u64,
+    /// Dev actions shed by the bounded mailbox (back-pressure is never silent).
+    pub dev_commands_dropped: u64,
+    /// Points of light in the renderer's star cloud right now; 0 with no renderer.
+    pub stars_drawn: u64,
 }
 
 /// One drawn box's extent in metres — a sphere's radius, a box's half-diagonal length, and 0
@@ -1097,6 +1143,7 @@ mod tests {
             source_tick: TickId(1),
             universe_tick: UniverseTick(tick),
             origin_epoch,
+            sky_anchor: None,
             realms: vec![RealmSnap {
                 realm,
                 // The edge HEAD (proto_minor 8): the CHILD realm's own frame, beside the TAIL
@@ -1624,6 +1671,103 @@ mod tests {
         );
     }
 
+    /// ★ THE SKY ANCHOR RIDES THE REALM LANE AND DIES WITH THE ORIGIN (owner ruling 2026-09-02 R1).
+    #[test]
+    fn the_sky_anchor_is_held_from_an_applied_datagram_and_cleared_by_a_scene_swap() {
+        use vd_core::pose::RealmId;
+        use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram};
+        let mut c = core();
+        activate(&mut c);
+        let anchor = StampedPose::at_rest(
+            FrameRef::GalaxySpace { galaxy_seed: 1 },
+            DVec3::new(6.0, 0.0, -8.0),
+            UniverseTick(10),
+        );
+        let with_anchor = |frame_id: u64, tick: u64, anchor: Option<StampedPose>| {
+            postcard::to_allocvec(&RealmSnapshotDatagram {
+                sub: SubId(0),
+                frame_id,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(tick),
+                origin_epoch: 0,
+                sky_anchor: anchor,
+                realms: vec![RealmSnap {
+                    realm: RealmId::Planet(7),
+                    frame: vd_core::pose::frame_for_realm(RealmId::Planet(7), None)
+                        .expect("a seeded realm resolves"),
+                    pose: StampedPose::at_rest(
+                        FrameRef::SystemSpace { system_seed: 7 },
+                        DVec3::new(1.0e9, 0.0, 0.0),
+                        UniverseTick(tick),
+                    ),
+                }],
+            })
+            .expect("test fixture")
+        };
+        assert!(
+            c.state().render_snapshot().sky_anchor().is_none(),
+            "nothing stated yet"
+        );
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            with_anchor(1, 10, Some(anchor)),
+        );
+        c.step(0.0);
+        assert_eq!(c.state().render_snapshot().sky_anchor(), Some(anchor));
+        // The diagnosis surface says where the galaxy is, in metres of the galaxy's own frame.
+        assert_eq!(
+            c.state().devstate(0.0, DevCounters::default()).sky_anchor,
+            Some([6.0, 0.0, -8.0])
+        );
+        // A later datagram WITHOUT an anchor leaves the last one standing (latest-wins by presence).
+        c.transport
+            .deliver(GATEWAY, MsgClass::RealmSnapshot, with_anchor(2, 11, None));
+        c.step(0.0);
+        assert_eq!(c.state().render_snapshot().sky_anchor(), Some(anchor));
+        // A datagram with an anchor and NO row — a pilot alone in a hull — still delivers it: the
+        // anchor applies on the epoch, never on the rows' verdict.
+        let alone = StampedPose::at_rest(
+            FrameRef::GalaxySpace { galaxy_seed: 1 },
+            DVec3::new(9.0, 9.0, 9.0),
+            UniverseTick(12),
+        );
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            postcard::to_allocvec(&RealmSnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 3,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(12),
+                origin_epoch: 0,
+                sky_anchor: Some(alone),
+                realms: Vec::new(),
+            })
+            .expect("test fixture"),
+        );
+        c.step(0.0);
+        assert_eq!(c.state().render_snapshot().sky_anchor(), Some(alone));
+        // A scene swap — a new origin — drops it: the old anchor placed a realm the picture no
+        // longer stands in.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            postcard::to_allocvec(&ServerControlMsg::RealmRegistry {
+                origin: RealmId::System(7),
+                origin_epoch: 1,
+                rows: Vec::new(),
+            })
+            .expect("encode"),
+        );
+        c.step(0.0);
+        assert!(c.state().render_snapshot().sky_anchor().is_none());
+        assert_eq!(
+            c.state().devstate(0.0, DevCounters::default()).sky_anchor,
+            None
+        );
+    }
+
     #[test]
     fn a_realm_snapshot_routes_streams_anchors_the_cursor_and_is_not_counted_ignored() {
         use vd_core::pose::RealmId;
@@ -1670,6 +1814,7 @@ mod tests {
             source_tick: TickId(1),
             universe_tick: UniverseTick(tick),
             origin_epoch: 0,
+            sky_anchor: None,
             realms: vec![RealmSnap {
                 realm,
                 frame: vd_core::pose::frame_for_realm(realm, None)
@@ -1696,6 +1841,7 @@ mod tests {
             source_tick: TickId(1),
             universe_tick: UniverseTick(tick),
             origin_epoch,
+            sky_anchor: None,
             realms: vec![RealmSnap {
                 realm,
                 frame: vd_core::pose::frame_for_realm(realm, None)
@@ -1794,7 +1940,7 @@ mod tests {
             "the held one-beat datagram replayed the moment its level landed"
         );
         assert_eq!(
-            c.state().devstate(0.0, 0, 0).origin,
+            c.state().devstate(0.0, DevCounters::default()).origin,
             Some((format!("{planet:?}"), 1)),
             "the origin marker + epoch ride the diagnosis surface"
         );
@@ -1893,7 +2039,7 @@ mod tests {
         );
         c.step(0.0);
 
-        let st = c.state().devstate(0.0, 0, 0);
+        let st = c.state().devstate(0.0, DevCounters::default());
         assert_eq!(st.entity_feed_newest_tick, Some(40));
         assert_eq!(st.realm_feed_newest_tick, Some(37));
     }
@@ -1904,7 +2050,7 @@ mod tests {
         // tick 0 — a reader must be able to tell a silent feed from one sitting at the epoch.
         let mut c = core();
         activate(&mut c);
-        let st = c.state().devstate(0.0, 0, 0);
+        let st = c.state().devstate(0.0, DevCounters::default());
         assert_eq!(st.entity_feed_newest_tick, None);
         assert_eq!(st.realm_feed_newest_tick, None);
     }
@@ -1933,7 +2079,7 @@ mod tests {
         );
         c.step(0.0);
 
-        let dev = c.state().devstate(0.0, 0, 0);
+        let dev = c.state().devstate(0.0, DevCounters::default());
         let level_box = dev
             .realm_boxes
             .iter()
@@ -1973,7 +2119,7 @@ mod tests {
             realm_snapshot(1, 10, RealmId::Planet(7), 1.0),
         );
         c.step(0.0);
-        let st = c.state().devstate(0.0, 0, 0);
+        let st = c.state().devstate(0.0, DevCounters::default());
         // The entity view contributes 0 here; both realm-feed faults reach the surface (SUMMED).
         assert_eq!(
             st.nonfinite_poses, 1,
@@ -2404,7 +2550,7 @@ mod tests {
     #[test]
     fn devstate_before_welcome_is_honest_about_nothing_delivered() {
         let c = core();
-        let s = c.state().devstate(0.0, 0, 0);
+        let s = c.state().devstate(0.0, DevCounters::default());
         assert_eq!(s.phase, DevPhase::Connecting);
         assert_eq!(s.session, None);
         assert_eq!(s.own_entity, None);
@@ -2427,7 +2573,14 @@ mod tests {
             .deliver(GATEWAY, MsgClass::Snapshot, snapshot(1, 100, 0.0));
         c.step(10.0);
         // dev-command counters are the bin's mailbox totals, passed through verbatim.
-        let s = c.state().devstate(10.0, 3, 1);
+        let s = c.state().devstate(
+            10.0,
+            DevCounters {
+                dev_commands_applied: 3,
+                dev_commands_dropped: 1,
+                stars_drawn: 7,
+            },
+        );
         assert_eq!(s.phase, DevPhase::Active);
         assert_eq!(s.session, Some(SessionId(9).to_string()));
         assert_eq!(s.own_entity, Some(ent().to_string()));
@@ -2452,6 +2605,8 @@ mod tests {
         assert_eq!(c.state().snapshots_applied(), 1);
         assert_eq!(s.dev_commands_applied, 3);
         assert_eq!(s.dev_commands_dropped, 1);
+        // The bin's star count rides the same struct: the render thread's number, passed through.
+        assert_eq!(s.stars_drawn, 7);
         // The honesty contract end-to-end: the built state JSON-encodes (finite floats).
         let line =
             vd_devproto::encode_response(&vd_devproto::DevResponse::State { state: s.clone() });
@@ -2555,7 +2710,7 @@ mod tests {
             ),
         );
         c.step(0.0);
-        let dev = c.state().devstate(0.0, 0, 0);
+        let dev = c.state().devstate(0.0, DevCounters::default());
         assert_eq!(dev.realm_boxes.len(), 3);
         let station = dev
             .realm_boxes

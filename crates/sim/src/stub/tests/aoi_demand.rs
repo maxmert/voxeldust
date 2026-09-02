@@ -170,7 +170,10 @@ fn region_level_recovers_seed_lineage_kinds() {
         1.0,
     ));
     assert_eq!(level.kind, RealmKindTag::Ship);
-    assert_eq!(level.seed, id.0, "the whole minted identity, not its low half");
+    assert_eq!(
+        level.seed, id.0,
+        "the whole minted identity, not its low half"
+    );
     assert_eq!(level.to_realm_id(), RealmId::Ship(id), "and it round-trips");
 }
 
@@ -823,9 +826,7 @@ fn the_interest_byte_admits_fail_closed_and_holds_the_latest_lawful_value() {
             look_inside_from_m: (look == 1).then_some(0.0),
         };
     // MIS-ROUTE: a coord lowering to somebody else (the system's own planet) drops counted.
-    let planet_coord = cfg
-        .own_coord
-        .child(level_of(story.planet));
+    let planet_coord = cfg.own_coord.child(level_of(story.planet));
     on_realm_interest(
         ri(planet_coord, 5, 1, 1),
         NodeId(40),
@@ -1451,6 +1452,57 @@ fn an_occupied_child_bit_warms_the_sibling_before_the_empty_gate() {
     assert!(
         !far_verbs.contains_key(&RealmId::Planet(43)),
         "a sibling beyond the band + reach is not warmed: {far_verbs:?}"
+    );
+}
+
+/// ★ AN OPEN WINDOW WAKES THE NEIGHBOURHOOD, AND NEVER CLAIMS THIS REALM IS OCCUPIED
+/// (owner ruling 2026-09-01, V1 + V5).
+///
+/// A `Child(c)` window is the gateway saying "somebody is looking from inside your child c". It is a
+/// DIRECT statement of demand from the one party that holds the sessions, where the occupancy bit is
+/// a weaker rumour of the same fact by another road — and on 2026-09-01 that road failed live: a
+/// player inside a player-built hull saw a black sky while 96 000 drawings parked at the gateway.
+///
+/// So the window builds c's stand-in observer and the fold answers by geometry. But it is a byte from
+/// OUTSIDE, so it must never manufacture an occupancy fact: this realm keeps self-reporting Empty,
+/// and the SL7 bit keeps meaning occupancy and nothing else. Both halves are asserted here, because
+/// either one alone would pass while the law was broken.
+#[test]
+fn an_open_child_window_drives_demand_but_never_manufactures_occupancy() {
+    let sibling = DVec3::new(500.0, 0.0, 0.0);
+    let mut rig = parent_with_two_planet_children(sibling);
+    // NO dots and NO bit — only a window naming a child. Under the retired rule this fold built no
+    // observer at all, so the looker got an empty verdict and saw nothing.
+    let sent = rig.tick(vec![wire_msg(
+        GATEWAY,
+        MsgClass::Control,
+        &GatewayToShard::WindowOpen {
+            window: WindowId(1),
+            scope: WindowScope::Child(RealmId::Planet(42)),
+            static_held: None,
+        },
+    )]);
+    // (a) THE LOOKER IS SERVED: the sibling is demanded live, off the window alone.
+    let verbs: BTreeMap<RealmId, DemandVerb> = demands(&sent)
+        .iter()
+        .map(|d| (d.child.lowered(), d.verb))
+        .collect();
+    assert_eq!(
+        verbs.get(&RealmId::Planet(43)),
+        Some(&DemandVerb::SpinUp),
+        "an open window on a child wakes what that child can see"
+    );
+    // (b) AND THIS REALM IS STILL EMPTY: no dot, no live child, so the self-report stands.
+    assert!(
+        demands(&sent)
+            .iter()
+            .any(|d| (d.child.lowered() == OWN_REALM) & (d.verb == DemandVerb::Empty)),
+        "a window is a byte from outside — it may not make this realm claim it holds anybody"
+    );
+    // …and the bit's own table is untouched, so nothing downstream can mistake one for the other.
+    assert!(
+        rig.world.resource::<ChildLiveness>().0.is_empty(),
+        "no occupancy bit was invented"
     );
 }
 
@@ -2355,5 +2407,44 @@ fn diag_the_galaxys_interest_message_rate_during_warp() {
     println!(
         "as a share of the galaxy's children: {:.4}%",
         100.0 * peak_interests as f64 / systems.len() as f64
+    );
+}
+
+/// ★ A BERTHED HULL IS DEMANDED LIKE ANY OTHER CHILD (owner ruling 2026-09-02, R4/R5).
+///
+/// MEASURED 2026-09-02 on the process gate `world_from_inside`: a hull berthed forty metres from
+/// the spawn, with a wake radius of 1.5 km, was never launched — the orchestrator's launch ledger
+/// held the planets and the star and no ship. This is the fold alone: one dot, one static box child
+/// forty metres away, one tick. Either the demand leaves this realm or it does not.
+#[test]
+fn a_berthed_hull_forty_metres_from_a_dot_is_demanded() {
+    let hull = RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, 1, 0));
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    plant_aoi(
+        &mut rig,
+        vec![
+            root_region(),
+            own_region(),
+            RealmRegion {
+                aoi: aoi_band(3),
+                ..region_box(
+                    hull,
+                    Some(OWN_REALM),
+                    DVec3::new(40.0, 0.0, 0.0),
+                    DVec3::new(6.0, 3.0, 20.0),
+                )
+            },
+        ],
+    );
+    insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::ZERO);
+    let verbs: BTreeMap<RealmId, DemandVerb> = demands(&rig.tick(vec![]))
+        .iter()
+        .map(|d| (d.child.lowered(), d.verb))
+        .collect();
+    assert_eq!(
+        verbs.get(&hull),
+        Some(&DemandVerb::SpinUp),
+        "a dot forty metres from a berthed hull wakes it: {verbs:?}"
     );
 }

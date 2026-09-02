@@ -57,7 +57,17 @@ pub struct PlacementBook {
     /// (each realm has exactly one frame). NO row for `anchor`: [`PlacementBook::new`] removes one —
     /// the anchor's own placement is the identity by definition and is never stored (SL1: a field's
     /// PRESENCE is the leak).
-    rows: Vec<(FrameRef, FramePlacement)>,
+    ///
+    /// ★ TWO LAYERS, ONE BOOK (owner ruling 2026-09-02 R8 item 1; SL9). A parent's static children
+    /// sit where they sat at boot, so their rows are authored ONCE and shared by every tick's book
+    /// through an `Arc`; only the children that MOVE — orbiting, or driven by a pilot — are
+    /// authored per tick, in the overlay, which wins on a lookup. MEASURED before this existed: the
+    /// galaxy re-authored 279,380 rows every tick, 200 ms of a 20 ms budget, for stars that never
+    /// move.
+    statics: std::sync::Arc<Vec<(FrameRef, FramePlacement)>>,
+    /// This tick's rows for the children that move, sorted by frame; a frame here shadows the same
+    /// frame in `statics`.
+    overlay: Vec<(FrameRef, FramePlacement)>,
 }
 
 impl PlacementBook {
@@ -67,11 +77,45 @@ impl PlacementBook {
     pub fn new(
         anchor: FrameRef,
         at: UniverseTick,
-        mut rows: Vec<(FrameRef, FramePlacement)>,
+        rows: Vec<(FrameRef, FramePlacement)>,
     ) -> PlacementBook {
+        PlacementBook {
+            anchor,
+            at,
+            statics: PlacementBook::static_rows(anchor, rows),
+            overlay: Vec::new(),
+        }
+    }
+
+    /// A book over rows authored once (`statics`, from [`PlacementBook::static_rows`]) plus this
+    /// tick's rows for the children that move. Sharing the static layer is a pointer bump.
+    #[must_use]
+    pub fn layered(
+        anchor: FrameRef,
+        at: UniverseTick,
+        statics: std::sync::Arc<Vec<(FrameRef, FramePlacement)>>,
+        mut overlay: Vec<(FrameRef, FramePlacement)>,
+    ) -> PlacementBook {
+        overlay.retain(|(f, _)| *f != anchor);
+        overlay.sort_by_key(|(f, _)| *f);
+        PlacementBook {
+            anchor,
+            at,
+            statics,
+            overlay,
+        }
+    }
+
+    /// The static layer: sorted by frame, the anchor removed — authored once, shared by every
+    /// tick's book through [`PlacementBook::layered`].
+    #[must_use]
+    pub fn static_rows(
+        anchor: FrameRef,
+        mut rows: Vec<(FrameRef, FramePlacement)>,
+    ) -> std::sync::Arc<Vec<(FrameRef, FramePlacement)>> {
         rows.retain(|(f, _)| *f != anchor);
         rows.sort_by_key(|(f, _)| *f);
-        PlacementBook { anchor, at, rows }
+        std::sync::Arc::new(rows)
     }
 
     /// The one instant this book speaks at.
@@ -104,15 +148,32 @@ impl PlacementBook {
         if self.anchor == frame {
             return Some(FramePlacement::identity());
         }
-        self.rows
+        if let Ok(i) = self.overlay.binary_search_by_key(&frame, |(f, _)| *f) {
+            return Some(self.overlay[i].1);
+        }
+        self.statics
             .binary_search_by_key(&frame, |(f, _)| *f)
             .ok()
-            .map(|i| self.rows[i].1)
+            .map(|i| self.statics[i].1)
     }
 
-    /// The stored child rows, in frame order. The anchor never appears (its identity is computed).
+    /// The stored child rows, in frame order: the static layer with every frame the overlay
+    /// shadows replaced by the overlay's row, then the overlay's rows the static layer lacks. The
+    /// anchor never appears (its identity is computed).
     pub fn rows(&self) -> impl Iterator<Item = (FrameRef, FramePlacement)> + '_ {
-        self.rows.iter().copied()
+        self.statics
+            .iter()
+            .map(|(f, p)| {
+                self.overlay
+                    .binary_search_by_key(f, |(g, _)| *g)
+                    .map_or((*f, *p), |i| self.overlay[i])
+            })
+            .chain(
+                self.overlay
+                    .iter()
+                    .filter(|(f, _)| self.statics.binary_search_by_key(f, |(g, _)| *g).is_err())
+                    .copied(),
+            )
     }
 }
 

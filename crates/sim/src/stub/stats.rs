@@ -434,12 +434,18 @@ pub struct StubStats {
     /// emission pass, like the ship exclusion): the subscriber's routing state and this roster
     /// disagree — nothing is emitted for it, never guessed at. FAULT if it persists.
     pub window_child_unrostered: u64,
-    /// A `Child(c)` hop-row inversion REFUSED by the frame core (rotated frame across integer
-    /// cells — `transfer_frame`'s own refusal, owed P10 cell math): the frame is dropped +
-    /// counted, never shipped with folded-precision numbers. Pinned unreachable on THE world
-    /// today (the inversion-inertness measurement); non-zero means the world grew a spinning
-    /// realm a cell-block out before P10 landed.
-    pub window_hop_refused: u64,
+    /// ★ GAUGE (owner ruling 2026-09-02 R8 item 1; SL9): the direct children the range fold VISITED
+    /// this tick — the candidates the lookups returned plus the latched — against the roster it
+    /// used to walk. On the galaxy with one occupant this must read a handful, not 279,380.
+    pub aoi_candidates_visited: u64,
+    /// A `Child(c)` window whose hop child had NO row in the book this tick authored — the frame
+    /// is withheld, counted and said. Pinned zero on every fixture: a rostered direct child always
+    /// has a row (2026-09-02).
+    pub window_hop_missing: u64,
+    /// A fold that walked the WHOLE roster because the store holds no range index for this realm
+    /// (`with_own_realm` never named it). Zero on every booted shard; the fixtures that build a
+    /// store without naming a realm take this arm, counted.
+    pub aoi_full_walks: u64,
     /// THE Q2 RELAY (Slice C1, mesh minor 17; owner-approved 2026-08-16 —
     /// docs/design/owner_decisions_2026-08-15.md addendum + window_lane.md §5 RULINGS) — EGRESS UP:
     /// sealed statement batches this realm shipped one hop up (send-on-change on the look/marker

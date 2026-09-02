@@ -10,7 +10,8 @@
 //! rule, applied at two moments.
 
 use super::{
-    GeneratedBody, Placement, UniverseConfig, VISIBILITY_THETA_MIN_RAD, generate_system_forest, system_forest_cached,
+    GeneratedBody, Placement, UniverseConfig, VISIBILITY_THETA_MIN_RAD, generate_system_forest,
+    system_forest_cached,
 };
 #[cfg(test)]
 use crate::motion::Motion;

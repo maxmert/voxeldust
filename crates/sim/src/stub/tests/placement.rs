@@ -1471,7 +1471,11 @@ fn a_driven_child(push: [i64; 3]) -> crate::stub::drive::DrivenChildren {
         ]),
     )
     .expect("2-level path has a leaf");
-    assert_eq!(coord.lowered(), OTHER_REALM, "the driven child IS the forest's child");
+    assert_eq!(
+        coord.lowered(),
+        OTHER_REALM,
+        "the driven child IS the forest's child"
+    );
     assert_eq!(
         coord.parent().expect("has a parent").lowered(),
         OWN_REALM,
@@ -1527,17 +1531,33 @@ fn a_driven_childs_published_row_moves_and_a_still_ones_does_not() {
     // The same forest, authored twice: once with the child pushing, once with it still.
     let mut flying = a_driven_child([4_000_000, 0, 0]);
     let mut still = a_driven_child([0, 0, 0]);
-    let ambient = crate::stub::drive::Ambient { pull_mps2: DVec3::ZERO, density_kgpm3: 0.0 };
+    let ambient = crate::stub::drive::Ambient {
+        pull_mps2: DVec3::ZERO,
+        density_kgpm3: 0.0,
+    };
     for _ in 0..50 {
-        flying.advance_all(tick, crate::stub::drive::DRIVE_STALE_AFTER_TICKS, &ambient, 0.02);
-        still.advance_all(tick, crate::stub::drive::DRIVE_STALE_AFTER_TICKS, &ambient, 0.02);
+        flying.advance_all(
+            tick,
+            crate::stub::drive::DRIVE_STALE_AFTER_TICKS,
+            &ambient,
+            0.02,
+        );
+        still.advance_all(
+            tick,
+            crate::stub::drive::DRIVE_STALE_AFTER_TICKS,
+            &ambient,
+            0.02,
+        );
     }
     let flown = regions.author_book_driven(OWN_REALM, tick_hz, tick, &flying);
     let stayed = regions.author_book_driven(OWN_REALM, tick_hz, tick, &still);
     let berth = regions.author_book(OWN_REALM, tick_hz, tick);
 
     let row_of = |book: &vd_core::placement::PlacementBook| {
-        book.rows().next().expect("the parent authors its one child").1
+        book.rows()
+            .next()
+            .expect("the parent authors its one child")
+            .1
     };
     // One second of four metres per second, per second.
     //
@@ -1551,8 +1571,14 @@ fn a_driven_childs_published_row_moves_and_a_still_ones_does_not() {
     // quietly gain energy under a strong pull — which is the classic way an orbit slowly climbs out of
     // its own system.
     let moved = row_of(&flown).origin.x - row_of(&berth).origin.x;
-    assert!((moved - 2.04).abs() < 1e-9, "the pushing child moved 2.04 metres: {moved}");
-    assert!((row_of(&flown).velocity.x - 4.0).abs() < 1e-6, "and carries its speed downward");
+    assert!(
+        (moved - 2.04).abs() < 1e-9,
+        "the pushing child moved 2.04 metres: {moved}"
+    );
+    assert!(
+        (row_of(&flown).velocity.x - 4.0).abs() < 1e-6,
+        "and carries its speed downward"
+    );
 
     // ★ NO KIND TEST ANYWHERE. The still child is the same KIND of realm, in the same forest, at the
     // same tick. It does not move because it stated no push — never because anybody asked what it was.
@@ -1570,11 +1596,22 @@ fn the_velocity_a_parent_writes_travels_down_and_never_up() {
     // in the row its PARENT authored — which is the one place an authored velocity belongs.
     let regions = RealmRegions::new(vec![root_region(), own_region(), child_region()]);
     let mut driven = a_driven_child([4_000_000, 0, 0]);
-    let ambient = crate::stub::drive::Ambient { pull_mps2: DVec3::ZERO, density_kgpm3: 0.0 };
-    driven.advance_all(UniverseTick(1), crate::stub::drive::DRIVE_STALE_AFTER_TICKS, &ambient, 0.02);
+    let ambient = crate::stub::drive::Ambient {
+        pull_mps2: DVec3::ZERO,
+        density_kgpm3: 0.0,
+    };
+    driven.advance_all(
+        UniverseTick(1),
+        crate::stub::drive::DRIVE_STALE_AFTER_TICKS,
+        &ambient,
+        0.02,
+    );
     let book = regions.author_book_driven(OWN_REALM, 50.0, UniverseTick(1), &driven);
     let row = book.rows().next().expect("one child").1;
-    assert!(row.velocity.x > 0.0, "the parent's row carries the velocity it computed");
+    assert!(
+        row.velocity.x > 0.0,
+        "the parent's row carries the velocity it computed"
+    );
     // And the type the CHILD sends has nowhere to put one — the structural half of the same law.
     let stated = vd_wire::intershard::ChildDrive {
         child: vd_core::realm_coord::RealmCoord::from_path(

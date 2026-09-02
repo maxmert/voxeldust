@@ -9,7 +9,6 @@
 //! WHAT IT DELIBERATELY DOES NOT DO. It does not spawn processes. The wire, the codec, the dispatch,
 //! the guards, the physics and the authored row are all the shipped ones; only the transport is the
 //! in-memory fabric. A process-tier flight is a separate, slower gate.
-use std::collections::BTreeMap;
 use vd_core::fence::Fence;
 use vd_core::ids::{NodeId, UniverseTick};
 use vd_core::pose::{FrameRef, RealmId};
@@ -83,7 +82,8 @@ fn a_ship_states_a_push_and_its_parent_authors_where_it_went() {
         let mut clock = world.resource_mut::<vd_sim::runtime::ClockSample>();
         clock.synced = true;
     }
-    world_of(&mut topo, SHIP_NODE).insert_resource(vd_sim::stub::ParentRealmNode(Some(SYSTEM_NODE)));
+    world_of(&mut topo, SHIP_NODE)
+        .insert_resource(vd_sim::stub::ParentRealmNode(Some(SYSTEM_NODE)));
     world_of(&mut topo, SHIP_NODE).insert_resource(vd_sim::stub::RealmAuthority(Some(Fence(3))));
     // THE PILOT AT THE CONTROLS, holding the stick full forward. A pilot's keys already arrive at
     // whichever shard holds them, so this is simply a pilot who is aboard.
@@ -123,10 +123,7 @@ fn a_ship_states_a_push_and_its_parent_authors_where_it_went() {
     let sent = world_of(&mut topo, SHIP_NODE)
         .resource::<vd_sim::stub::StubStats>()
         .child_drive_sent;
-    assert!(
-        sent > 0,
-        "the ship stated its push: sent {sent}"
-    );
+    assert!(sent > 0, "the ship stated its push: sent {sent}");
     assert!(
         sys_received > 0,
         "the star system admitted it: received {sys_received}, misrouted {sys_misrouted}, \
@@ -147,7 +144,8 @@ fn world_of(topo: &mut Topology, node: NodeId) -> &mut bevy_ecs::world::World {
 
 /// A pilot aboard — the minimum a dot needs to exist and hold a stick.
 fn pilot() -> vd_sim::stub::Dot {
-    let pos = vd_core::pose::LatticePos::at(vd_core::glam::I64Vec3::ZERO, vd_core::glam::DVec3::ZERO);
+    let pos =
+        vd_core::pose::LatticePos::at(vd_core::glam::I64Vec3::ZERO, vd_core::glam::DVec3::ZERO);
     vd_sim::stub::Dot {
         last_stick: None,
         entity: vd_core::ids::EntityId::pack(vd_core::entity_kind::EntityKind::Player, 1, 1, 0),

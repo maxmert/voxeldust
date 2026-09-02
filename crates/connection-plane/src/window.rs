@@ -171,7 +171,8 @@ pub struct WindowIngest {
 }
 
 impl WindowIngest {
-    /// Ingest one attested `WindowFrame` level. Latest-wins per tick (a re-delivered stamp
+    /// Ingest one attested `WindowFrame` level, or one CHUNK of one (a frame over the datagram
+    /// budget arrives as several at one stamp, merged here). Latest-wins per row (a re-delivered stamp
     /// replaces); an out-of-order tick still inside the ring is inserted in stamp order (the
     /// common-tick fold wants it); a tick behind the ring is refused.
     pub fn ingest_frame(&mut self, mut level: WindowLevel, tuning: &WindowTuning) -> Ingested {
@@ -187,7 +188,23 @@ impl WindowIngest {
             return Ingested::BehindRing;
         }
         match self.levels.binary_search_by_key(&level.at, |l| l.at) {
-            Ok(i) => self.levels[i] = level,
+            // ★ ONE STAMP, MANY CHUNKS (2026-09-02): a frame over the datagram budget arrives as
+            // several, each carrying the hop and a slice of the rows. A row already held at this
+            // stamp is replaced by its newer statement (latest-wins per realm — the re-delivery
+            // rule, now per row), a row not yet held is added, and the hop is taken from whichever
+            // chunk carries it.
+            Ok(i) => {
+                let held = &mut self.levels[i];
+                if level.hop.is_some() {
+                    held.hop = level.hop;
+                }
+                for row in level.rows {
+                    match held.rows.iter_mut().find(|r| r.realm == row.realm) {
+                        Some(slot) => *slot = row,
+                        None => held.rows.push(row),
+                    }
+                }
+            }
             Err(i) => self.levels.insert(i, level),
         }
         let new_head = self.levels.back().expect("a level was just stored").at.0;
@@ -470,7 +487,7 @@ impl WindowIngest {
     }
 
     /// Every tick the ring currently retains, ascending (the common-tick fold's raw material).
-    fn ticks(&self) -> impl Iterator<Item = UniverseTick> + '_ {
+    pub fn ticks(&self) -> impl Iterator<Item = UniverseTick> + '_ {
         self.levels.iter().map(|l| l.at)
     }
 }
@@ -668,6 +685,15 @@ pub struct Composed {
     /// author (2 = a relayed child's own interior — the carrier's whole arity; anything greater
     /// is an implementation climb bug, §3.3.4's world-independent tripwire).
     pub relay_depth_max: u64,
+    /// The fresh chain's frames, `[0]` the origin's, one per folded hop (owner ruling 2026-09-02
+    /// R1): what [`place_sky_anchor`] lifts the origin's zero through.
+    pub chain_frames: Vec<FrameRef>,
+    /// The fresh chain's per-hop books, `[k]` anchored at `chain_frames[k + 1]` and stating where
+    /// `chain_frames[k]` sits in it — the authored placements, as the hops carried them.
+    pub chain_books: Vec<PlacementBook>,
+    /// ★ THE SKY ANCHOR: the origin's own zero lifted into the sky's frame (the galaxy's), or
+    /// `None` while the fresh chain does not reach that frame. Set by [`place_sky_anchor`].
+    pub sky_anchor: Option<StampedPose>,
 }
 
 /// The position gap between two composed poses, in integer CELLS (per-axis Chebyshev max),
@@ -725,7 +751,17 @@ pub fn compose(
                 out.hop_invalid += 1;
                 break;
             }
-            books.push(PlacementBook::new(frames[k - 1], t, vec![(frame, hop.inv)]));
+            // THE BOOK IS ANCHORED AT THE AUTHOR (owner ruling 2026-09-02 R1): it states where the
+            // chain child sits in the author's frame, at the author's own step — the placement the
+            // author authored (SL1 clause 1). Mapping DOWN through it is the one inversion, and it
+            // happens in `transfer_frame` at the author's step, where a galaxy-scale distance still
+            // has a lattice count. The pre-inverted book this replaced was anchored at the CHILD,
+            // and a galaxy's origin in a star system's millimetre step has none.
+            books.push(PlacementBook::new(
+                frame,
+                t,
+                vec![(frames[k - 1], hop.placement)],
+            ));
             frames.push(frame);
         }
         // The ancestor's own body rides the SAME mapping path as the child rows (one code path,
@@ -782,6 +818,8 @@ pub fn compose(
         }
         out.fresh_levels = k + 1;
     }
+    out.chain_frames = frames;
+    out.chain_books = books;
     // §2.6.5 STEP 4 (Q1 = YES-generic, Q2 = PARENT RELAY — §5 RULINGS, owner 2026-08-16): each
     // fresh stratum's RELAYED live-child interiors join the fold. A relayed row is the child's
     // OWN authored statement in its OWN frame (verbatim, sealed — the parent never re-stated
@@ -910,6 +948,32 @@ pub fn compose(
 /// stamp): the identical walk [`compose`]'s main loop runs at T, refusing (`None`) when any
 /// ring no longer retains `at` or a hop is invalid there — the caller counts one
 /// `relay_unplaceable` and the child's next relay self-heals.
+/// ★ PLACE THE SKY (owner ruling 2026-09-02 R1): lift the origin's own zero UP the fresh chain,
+/// hop by hop through the authored books, until the frame the star catalogue is stated in — the
+/// galaxy's — and record the result on the fold as [`Composed::sky_anchor`]. The client places its
+/// ONE star cloud by it and never rebuilds the cloud; parallax is the anchor moving.
+///
+/// Going up never runs out of lattice: each hop converts INTO the author's coarser step, and a
+/// coarser step always has room. The lift is therefore infallible on the books the fold itself
+/// built — every book speaks at the fold's tick, every frame in it is one the chain named, and the
+/// origin's zero has no separation to rotate — so the frame core's refusal arms cannot fire here,
+/// and an `expect` states that rather than a counter nobody could ever read.
+///
+/// `None` when the chain does not reach `sky_frame` (a hop unconfirmed, or the sky stated in a
+/// frame this chain never climbs to): nothing is drawn rather than a wrong sky.
+pub fn place_sky_anchor(out: &mut Composed, origin_frame: FrameRef, sky_frame: FrameRef) {
+    let mut up = StampedPose::at_rest(origin_frame, vd_core::glam::DVec3::ZERO, out.at);
+    out.sky_anchor = None;
+    for (book, frame) in out.chain_books.iter().zip(out.chain_frames.iter().skip(1)) {
+        up = transfer_frame(&up, *frame, book)
+            .expect("a lift through the fold's own books, at the fold's own tick, only coarsens");
+        if *frame == sky_frame {
+            out.sky_anchor = Some(up);
+            return;
+        }
+    }
+}
+
 fn descent_at(
     origin_frame: FrameRef,
     authors: &[RealmId],
@@ -927,9 +991,9 @@ fn descent_at(
         }
         let frame = level.rows.first().map(|r| r.pose.frame)?;
         books.push(PlacementBook::new(
-            frames[j - 1],
+            frame,
             at,
-            vec![(frame, hop.inv)],
+            vec![(frames[j - 1], hop.placement)],
         ));
         frames.push(frame);
     }
@@ -1203,6 +1267,13 @@ impl ShadowScene {
     }
 
     /// The fresh fold at exactly `t`, if the ring retains it.
+    /// The newest fold's sky anchor (the origin in the sky's frame at that fold's tick), if the
+    /// chain reached the sky's frame — what the per-tick datagram states to the client.
+    #[must_use]
+    pub fn sky_anchor(&self) -> Option<StampedPose> {
+        self.ring.back().and_then(|c| c.sky_anchor)
+    }
+
     #[must_use]
     pub fn fold_at(&self, t: UniverseTick) -> Option<&Composed> {
         self.ring
@@ -1393,13 +1464,68 @@ mod tests {
         );
     }
 
-    /// The identity-orientation pre-inverted hop for a child sitting at `child_pos` in the
-    /// author's frame, moving at `child_vel`: the author's frame in the child's = the negation.
+    /// The hop for a child sitting at `child_pos` in the author's frame, moving at `child_vel`:
+    /// the authored placement itself (owner ruling 2026-09-02 R1 — nothing is pre-inverted).
     fn hop(child: RealmId, child_pos: DVec3, child_vel: DVec3) -> HopRow {
         HopRow {
             child,
-            inv: vd_core::frame::FramePlacement::moving(-child_pos, -child_vel),
+            placement: vd_core::frame::FramePlacement::moving(child_pos, child_vel),
         }
+    }
+
+    /// ★ THE SKY ANCHOR IS THE ORIGIN LIFTED INTO THE GALAXY'S FRAME (owner decision 2, 2026-09-02).
+    /// A star system a trillion galaxy cells from the galaxy's centre, at the real galaxy step: the
+    /// lift places the origin's zero exactly at the hop's cell, a descent that would overflow the
+    /// millimetre lattice is counted and does not stop the fold, and a chain that stops short of
+    /// the galaxy states no anchor.
+    #[test]
+    fn the_sky_anchor_is_the_origin_lifted_to_the_galaxys_frame() {
+        let galaxy_frame = FrameRef::GalaxySpace { galaxy_seed: 1 };
+        let system_at = vd_core::frame::FramePlacement {
+            origin_cell: vd_core::glam::I64Vec3::new(1_000_000_000_000, -7, 3),
+            origin: DVec3::new(0.5, 0.0, 0.0),
+            velocity: DVec3::ZERO,
+            orientation: DQuat::IDENTITY,
+            angular_velocity: DVec3::ZERO,
+        };
+        let parent_level = level(
+            T,
+            Some(HopRow {
+                child: RealmId::System(7),
+                placement: system_at,
+            }),
+            vec![row(RealmId::System(7), sys(), galaxy_frame, DVec3::ZERO, T)],
+        );
+        let fresh_leaf = level(T, None, vec![]);
+        let mut out = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &[RealmId::System(7), GALAXY],
+            &[&fresh_leaf, &parent_level],
+            2,
+            &[],
+        );
+        assert_eq!(out.fresh_levels, 2, "both levels folded");
+        assert_eq!(out.chain_frames, vec![sys(), galaxy_frame]);
+        assert_eq!(out.chain_books.len(), 1);
+        place_sky_anchor(&mut out, sys(), galaxy_frame);
+        let anchor = out.sky_anchor.expect("the chain reaches the galaxy");
+        assert_eq!(anchor.frame, galaxy_frame);
+        assert_eq!(
+            anchor.pos.cell(),
+            system_at.origin_cell,
+            "the origin's zero IS the hop's cell"
+        );
+        assert_eq!(
+            anchor.pos.offset(),
+            system_at.origin,
+            "residual carried exactly"
+        );
+        assert_eq!(anchor.universe_tick, T);
+        // The sky stated in a frame this chain never climbs to: no anchor, nothing drawn.
+        place_sky_anchor(&mut out, sys(), FrameRef::UniverseSpace);
+        assert_eq!(out.sky_anchor, None);
     }
 
     #[test]
@@ -2225,30 +2351,34 @@ mod tests {
     }
 
     #[test]
-    fn a_rotated_cross_cell_hop_still_folds_because_the_down_maps_dest_is_the_identity_anchor() {
-        // MEASURED, not assumed (the never-assume law): the gateway's down-map can NEVER hit
-        // the rotation refusal itself — every step book's DESTINATION is its anchor (the
-        // child frame at the identity), and the refusal fires only for a ROTATED DESTINATION
-        // across cells. The rotated-inversion refusal therefore lives AT THE AUTHOR
-        // (`vd-sim`'s hop inversion, `window_hop_refused`, per §2.2), and a hop that the author
-        // DID ship folds here with its integer cell anchor surviving exactly.
+    fn a_rotated_cross_rung_hop_folds_the_sibling_through_the_authors_own_step() {
+        // THE GALAXY LEVEL, as the galaxy shard states it since the hop became the authored
+        // placement (owner ruling 2026-09-02 R1): System(7) sits a trillion galaxy cells out along
+        // +x and is turned half a circle; a sibling system sits one metre from the galaxy's centre.
+        // The book is anchored at the GALAXY, so the whole descent counts in the galaxy's two-metre
+        // step, where a trillion-cell lever has an exact integer count and an exact half-turn
+        // (the quaternion (0,0,1,0), bit-exact) rotates it without a rounding term. The old form
+        // of this test anchored the book at the CHILD and could only fold because the identity
+        // anchor happened to be on the destination side; this one folds the way every real hop
+        // in the world now folds.
         let spun = vd_core::frame::FramePlacement {
             origin_cell: vd_core::glam::I64Vec3::new(1_000_000_000_000, 0, 0),
             origin: DVec3::ZERO,
             velocity: DVec3::ZERO,
-            orientation: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+            orientation: DQuat::from_xyzw(0.0, 0.0, 1.0, 0.0),
             angular_velocity: DVec3::ZERO,
         };
         let parent_level = level(
             T,
             Some(HopRow {
                 child: RealmId::System(7),
-                inv: spun,
+                placement: spun,
             }),
             vec![row(
                 RealmId::System(9),
                 FrameRef::SystemSpace { system_seed: 9 },
-                galaxy(),
+                // THE REAL GALAXY STEP, deliberately — this is the one cross-rung fold in the file.
+                FrameRef::GalaxySpace { galaxy_seed: 1 },
                 DVec3::X,
                 T,
             )],
@@ -2265,6 +2395,10 @@ mod tests {
         );
         assert_eq!(out.rotated_refused, 0);
         assert_eq!(
+            out.cross_tier_refused, 0,
+            "a two-trillion-metre lever still has a fine count"
+        );
+        assert_eq!(
             out.rows.len(),
             2,
             "the galaxy body + the sibling row both folded"
@@ -2274,17 +2408,18 @@ mod tests {
             .iter()
             .find(|r| r.realm == RealmId::System(9))
             .expect("sibling row");
-        // The hop's integer anchor rides through the fold in the INTEGER half, and the rotated
-        // 1 m lever folds exactly into it (1024 fine cells on +y) — the normalized output form.
+        // In System(7)'s frame: the sibling is (1 − 2e12) m along the galaxy's +x, and a half-turn
+        // maps that to +(2e12 − 1) m along System(7)'s own +x. Refined into millimetre cells
+        // (2048 per galaxy cell) with the one-metre residual folded into the integer half: exact.
         assert_eq!(
             sibling.pose.pos.cell(),
-            vd_core::glam::I64Vec3::new(1_000_000_000_000, 1024, 0),
-            "the hop's integer anchor rides through the fold, lever folded exactly"
+            vd_core::glam::I64Vec3::new(2_047_999_999_998_976, 0, 0),
+            "the hop's integer anchor rides through the fold in the integer half, exactly"
         );
         assert_eq!(
             pm(&sibling.pose),
-            DVec3::new(976_562_500.0, 1.0, 0.0),
-            "anchor block + the rotated X→Y lever, exact"
+            DVec3::new(2_000_000_000_000.0 - 1.0, 0.0, 0.0),
+            "the half-turned lever, exact"
         );
 
         // The gateway-side counter arms stay real code with a pinned contract regardless:

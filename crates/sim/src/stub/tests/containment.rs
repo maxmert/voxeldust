@@ -22,7 +22,7 @@ fn a_look_less_realm_states_no_body_and_its_look_less_children_get_no_marker() {
     own.look = None;
     let regions = RealmRegions::new(vec![root_region(), own, lit, dark]);
     let luma = BTreeMap::new();
-    let stated: Vec<RealmId> = current_bodies(&config(), &regions, &luma)
+    let stated: Vec<RealmId> = current_bodies(&config(), &regions, &luma, None)
         .into_iter()
         .map(|(realm, _)| realm)
         .collect();
@@ -1311,7 +1311,7 @@ fn slice4a_nonzero_cell_is_carried_unchanged_and_the_offset_crossing_still_fires
     rig.world.resource_mut::<Dots>().0.insert(
         TRIG_SESSION,
         Dot {
-        last_stick: None,
+            last_stick: None,
             entity,
             account: AccountId(1),
             session_fence: Fence(1),

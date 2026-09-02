@@ -37,7 +37,7 @@ pub struct Dot {
     /// Later a SEAT decides which pilot is at the controls; today a self-driven realm reads the one it
     /// holds. `None` until a first input arrives, which is why a realm holding a silent pilot pushes
     /// nothing rather than pushing zero.
-    pub last_stick: Option<([f32; 3], [f32; 3])>,
+    pub last_stick: Option<(glam::DVec3, [f32; 3])>,
     pub entity: EntityId,
     pub account: AccountId,
     /// The Session-key fence the owning gateway holds; stale input is dropped.
@@ -234,6 +234,7 @@ pub(crate) fn apply_input(
     clock: &ClockSample,
     regions: &RealmRegions,
     placements: &PlacementLedger,
+    flies_on_a_stick: bool,
     dots: &mut Dots,
     log: &mut InputLog,
     session: SessionId,
@@ -283,11 +284,29 @@ pub(crate) fn apply_input(
         return;
     }
     dot.last_applied_seq = Some(input.seq);
-    // The pilot's own frame stick, kept for the realm's drive producer. The turn is built here rather
-    // than in the producer so the two consumers of `look` cannot drift: pitch turns about the right
-    // axis, yaw about the up axis, and roll has no key yet.
-    dot.last_stick = Some((input.movement, [input.look[1], input.look[0], 0.0]));
-    integrate(dot, &input, config, clock, regions, placements);
+    // ★ THE LOOK TURNS THE BODY, WHOEVER HOLDS THE STICK (owner, 2026-09-02). A pilot's facing is
+    // the direction the hull pushes (see `stick_from_input`), so the look must reach it; on foot it
+    // is the heading the feet follow, exactly as before (`face` then `walk` is the old integrator's
+    // own order, so a walker is byte-identical).
+    face(dot, &input);
+    // The pilot's own frame stick, kept for the realm's drive producer. Built here, once, AFTER the
+    // facing moved, so the push follows where the pilot looks this very tick.
+    dot.last_stick = Some(stick_from_input(&input, dot.pose.orient));
+    // ★ A PILOT AT THE CONTROLS DOES NOT ALSO WALK (owner ruling 2026-09-01). The stick above is
+    // kept either way — it is what the realm flies on. What is withheld is the occupant's OWN
+    // movement: in a realm that flies on a stick, the hands move the hull, not the feet.
+    //
+    // MEASURED, and it is why this exists: with both live, one key walked the body 568 m in 3 s
+    // while the same key burned the hull 96 km the other way. The body left the 40 m hull in a
+    // fifth of a second and the containment scan correctly handed it back to the star system.
+    // Nothing was broken — the player simply walked out of their own ship.
+    //
+    // A SEAT replaces this: sitting names ONE pilot and parks ONE body, and a passenger keeps their
+    // legs. A seat needs blocks. Until then every occupant of a flying hull is at the controls,
+    // which is the same interim rule the drive producer already uses to pick the stick.
+    if !flies_on_a_stick {
+        walk(dot, &input, config, clock, regions, placements);
+    }
     log.record_applied(session, input.seq);
 }
 
@@ -396,7 +415,7 @@ pub(crate) fn governed_ceiling_in_book(
 /// `the_speed_law_is_bit_inert_wherever_the_ceiling_clamps` measures it). Deceleration is
 /// deliberately instant (P3 "stopped means stopped"); the gradual arrival slow-down is the
 /// governor's falling ceiling, not a ramp state.
-fn integrate(
+fn walk(
     dot: &mut Dot,
     input: &InputDatagram,
     config: &StubConfig,
@@ -404,12 +423,6 @@ fn integrate(
     regions: &RealmRegions,
     placements: &PlacementLedger,
 ) {
-    dot.yaw += f64::from(input.look[0]);
-    // Pitch is CLAMPED to the valid look range (WB-1): unbounded accumulation would wrap
-    // past the ±π/2 gimbal pole and silently corrupt authoritative orientation. Yaw wraps
-    // freely (no pole). ONE shared bound (`vd_core::kinematics::PITCH_LIMIT`).
-    dot.pitch = kinematics::clamp_pitch(dot.pitch + f64::from(input.look[1]));
-    dot.orient_from_angles();
     // The movement-axis map is the ONE shared input convention (vd_core::kinematics) —
     // the client's nav/camera invert the SAME definition (no hand-re-encoded drift).
     let axes = kinematics::local_axes_from_movement(input.movement);
@@ -450,8 +463,125 @@ fn integrate(
     dot.pose.universe_tick = clock.universe_tick;
 }
 
+/// The look turns the body: the facing half of the old integrator, split out so a pilot — who does
+/// not walk — still turns (owner, 2026-09-02: *"when we turn the camera around, we turn the observer"*).
+fn face(dot: &mut Dot, input: &InputDatagram) {
+    dot.yaw += f64::from(input.look[0]);
+    // Pitch is CLAMPED to the valid look range (WB-1): unbounded accumulation would wrap
+    // past the ±π/2 gimbal pole and silently corrupt authoritative orientation. Yaw wraps
+    // freely (no pole). ONE shared bound (`vd_core::kinematics::PITCH_LIMIT`).
+    dot.pitch = kinematics::clamp_pitch(dot.pitch + f64::from(input.look[1]));
+    dot.orient_from_angles();
+}
+
 impl Dot {
     fn orient_from_angles(&mut self) {
         self.pose.orient = kinematics::orient_from_yaw_pitch(self.yaw, self.pitch);
+    }
+}
+
+/// ★ THE KEYS BECOME THE STICK, AND THE PUSH FOLLOWS THE PILOT'S FACING (owner, 2026-09-02).
+///
+/// `W`/`S` push along where the pilot LOOKS, `Space`/`Ctrl` along the facing's up; `A`/`D` TURN the
+/// hull's nose, `E`/`Q` raise and lower it. The pilot's facing lives in the hull's own frame, so
+/// when the keys swing the nose the pilot and the view swing with it, and looking and moving never
+/// come apart — the same rule the feet obey on foot. Before this the push rode the NOSE whatever the
+/// pilot looked at: a pilot who walked in looking along x left at ninety degrees to their view
+/// (owner: *"the direction of the movement suddenly changes after rehome, and obviously the
+/// controls are pointing in wrong directions all the time"*). The nose no longer states the flight
+/// direction; a hull with real thrusters and a seat replaces all of this.
+///
+/// The turn is MOVEMENT-SHAPED, because [`drive_from_stick`](super::drive::drive_from_stick) reads
+/// it through the same map as a push: `[a, b, c]` becomes the own-frame vector `(b, c, -a)`. So
+/// `[0, pitch, yaw]` is a turn about the hull's right axis (pitch, nose up positive) and about its up
+/// axis (yaw, nose left positive), and roll — the first slot — has no key yet. `D` is a turn to the
+/// RIGHT, which is a NEGATIVE rotation about up, hence the minus on the strafe axis. The strafe axis
+/// arrives at full magnitude (the window scales only the push axes by the throttle), so a turn runs
+/// at the rated rate for exactly as long as the key is held.
+///
+/// Example: the pilot looks along the hull's x and holds `W`. The push is `facing × (0, 0, -1)`,
+/// which is x: the hull flies where they look. They hold `D` too: turn `[0, 0, -1]`, the nose and
+/// the pilot swing right together, and the push swings with the facing.
+pub(crate) fn stick_from_input(
+    input: &InputDatagram,
+    facing: glam::DQuat,
+) -> (glam::DVec3, [f32; 3]) {
+    use vd_core::controls::{PILOT_PITCH_DOWN_INDEX, PILOT_PITCH_UP_INDEX, mask_of};
+    let held = |index: u32| f32::from(input.action_bits & mask_of(index) != 0);
+    let pitch = held(PILOT_PITCH_UP_INDEX) - held(PILOT_PITCH_DOWN_INDEX);
+    let yaw = -input.movement[1];
+    let push =
+        facing * kinematics::local_axes_from_movement([input.movement[0], 0.0, input.movement[2]]);
+    (push, [0.0, pitch, yaw])
+}
+
+#[cfg(test)]
+mod stick_tests {
+    use super::stick_from_input;
+    use vd_core::controls::{PILOT_PITCH_DOWN_INDEX, PILOT_PITCH_UP_INDEX, mask_of};
+    use vd_core::glam::{DQuat, DVec3};
+    use vd_wire::channels::InputDatagram;
+
+    fn input(movement: [f32; 3], look: [f32; 2], action_bits: u32) -> InputDatagram {
+        InputDatagram {
+            seq: 1,
+            is_cut_marker: false,
+            client_tick: vd_core::ids::TickId(1),
+            movement,
+            look,
+            action_bits,
+        }
+    }
+
+    fn close(a: DVec3, b: DVec3) -> bool {
+        (a - b).length() < 1.0e-9
+    }
+
+    #[test]
+    fn the_push_axes_follow_the_facing_and_the_strafe_axis_becomes_a_turn() {
+        // Facing straight ahead: forward is -z, up is +y; right (D) is a negative yaw.
+        let (push, turn) =
+            stick_from_input(&input([0.5, 1.0, 0.25], [0.0, 0.0], 0), DQuat::IDENTITY);
+        assert!(close(push, DVec3::new(0.0, 0.25, -0.5)), "{push:?}");
+        assert_eq!(turn, [0.0, 0.0, -1.0]);
+        // A (left) is a positive yaw.
+        let (_, turn) = stick_from_input(&input([0.0, -1.0, 0.0], [0.0, 0.0], 0), DQuat::IDENTITY);
+        assert_eq!(turn, [0.0, 0.0, 1.0]);
+        // Facing a quarter turn left about up: forward is now -x, and the push goes there.
+        let left = DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2);
+        let (push, _) = stick_from_input(&input([1.0, 0.0, 0.0], [0.0, 0.0], 0), left);
+        assert!(close(push, DVec3::new(-1.0, 0.0, 0.0)), "{push:?}");
+    }
+
+    #[test]
+    fn the_pitch_keys_raise_and_lower_the_nose_and_cancel_together() {
+        let up = mask_of(PILOT_PITCH_UP_INDEX);
+        let down = mask_of(PILOT_PITCH_DOWN_INDEX);
+        let id = DQuat::IDENTITY;
+        assert_eq!(
+            stick_from_input(&input([0.0; 3], [0.0; 2], up), id).1,
+            [0.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            stick_from_input(&input([0.0; 3], [0.0; 2], down), id).1,
+            [0.0, -1.0, 0.0]
+        );
+        assert_eq!(
+            stick_from_input(&input([0.0; 3], [0.0; 2], up | down), id).1,
+            [0.0; 3]
+        );
+        // A bit the pilot does not use is nobody's turn.
+        assert_eq!(
+            stick_from_input(&input([0.0; 3], [0.0; 2], 1 << 7), id).1,
+            [0.0; 3]
+        );
+    }
+
+    #[test]
+    fn the_mouse_turns_no_hull_by_itself() {
+        // The look reaches the stick only through the facing, which `face` moves; the stick reads none of it.
+        let (push, turn) = stick_from_input(&input([0.0; 3], [0.7, -0.3], 0), DQuat::IDENTITY);
+        assert_eq!(push, DVec3::ZERO);
+        assert_eq!(turn, [0.0; 3]);
     }
 }

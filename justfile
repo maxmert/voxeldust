@@ -291,6 +291,15 @@ warp-pixels:
 two-ships:
     cargo test -p vd-bins --features dev-control,render --test two_ships -- --nocapture --test-threads=1
 
+# THE WORLD IS SEEN FROM INSIDE ANY REALM (owner ruling 2026-09-02 R9 step 1): one DEMAND cluster per
+# subject, one real headless GPU client, the SAME body on a player-built hull (written by the shipyard's
+# stand-in, entered by a forty-metre walk) and on the home system's innermost planet (entered by the
+# governed rendezvous). From inside each: the stars are DRAWN (`stars_drawn`, the new instrument — not
+# the held count), the picture names a realm the subject does not parent, and the stars do not vanish
+# across the crossing. RED on 2026-09-02 by design: it is the measurement the reach slices turn green.
+world-from-inside:
+    cargo test -p vd-bins --features dev-control,render --test world_from_inside -- --nocapture --test-threads=1
+
 # THE TRUE-SCALE LOOK GATE (celestial_taxonomy_design §9 T2/T3, carrying look_horizon.md §6 slice
 # 5's G-NOTHING-OWED + G-IDENTICAL forward): one DEMAND cluster booted onto THE world PLUS the
 # planted player-built station/area pair (VD_FIXTURE_PLANT=station-area — the SL5 fixture-forest
@@ -389,7 +398,7 @@ acceptance-flight:
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke warp-pixels look-pixels two-ships node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity render-scale acceptance-flight coverage
+gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke warp-pixels look-pixels two-ships world-from-inside node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity render-scale acceptance-flight coverage
 
 # One-time setup helper.
 coverage-setup:

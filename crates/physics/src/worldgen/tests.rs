@@ -2967,8 +2967,7 @@ fn a_moon_is_a_planet_at_depth_four_scope_coord_and_frame() {
         vd_core::pose::frame_for_realm(moon.realm, moon.parent).expect("total"),
     );
     assert_eq!(
-        vd_core::worldgen::level_of(moon.realm)
-            .kind,
+        vd_core::worldgen::level_of(moon.realm).kind,
         vd_core::realm_path::RealmKindTag::Planet,
         "a moon IS a planet — no Moon kind exists to be told apart"
     );
@@ -6354,7 +6353,7 @@ fn growing_the_system_count_does_not_move_the_systems_already_placed() {
         let shape = galaxy_profile(seed, &cfg).shape;
         const SMALL: u32 = 3;
         const BIGGER: u32 = 4;
-        assert!(SMALL < BIGGER, "the bigger world really is bigger");
+        const { assert!(SMALL < BIGGER, "the bigger world really is bigger") };
         let small: Vec<DVec3> = (0..SMALL)
             .map(|n| system_center_at(&cfg, &shape, n, draws_for(seed, n)))
             .collect();

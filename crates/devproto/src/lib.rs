@@ -59,7 +59,7 @@ pub use state::{DevEntityRow, DevPhase, DevRealmBox, DevState, DevTransferView, 
 /// listeners, the Track R / 1d.2 DEST shard's QUIC + probe, the S5b GALAXY
 /// between-space shard's QUIC + probe, + the NODE-PER-REALM Planet/Station/Area 7
 /// realm-shards' QUIC + probe) ahead of the per-client port bands.
-const RESERVED_NODE_PORTS: u16 = 17;
+const RESERVED_NODE_PORTS: u16 = 18;
 
 const ORCHESTRATOR_OFFSET: u16 = 0;
 const GATEWAY_OFFSET: u16 = 1;
@@ -91,6 +91,12 @@ const STATION_OFFSET: u16 = 13;
 const PROBE_STATION_OFFSET: u16 = 14;
 const AREA_OFFSET: u16 = 15;
 const PROBE_AREA_OFFSET: u16 = 16;
+/// The GATEWAY's own admin/metrics listener. The orchestrator has had one since RG-4; the gateway
+/// never did, so its counters — how many windows it opened, how many rows it refused — could not be
+/// read from a running dev cluster at all. MEASURED NEED (2026-09-01): a player standing inside a
+/// ship saw one realm, and telling "the parent was never asked" from "the parent answered and the
+/// answer was discarded" needs exactly those two counters.
+const ADMIN_GATEWAY_OFFSET: u16 = 17;
 
 /// The base `NodeId` for dev-control clients: client `agent` is `NodeId(BASE +
 /// agent)`. ONE source of truth for the launcher (which seeds these into the
@@ -200,6 +206,8 @@ pub struct SlotPorts {
     pub probe_station: u16,
     pub area: u16,
     pub probe_area: u16,
+    /// The gateway's own admin/metrics bind (see [`ADMIN_GATEWAY_OFFSET`]).
+    pub admin_gateway: u16,
     /// RLM 5f-4g: this slot's DEMAND-SPAWN port band `[spawn_base, spawn_port_end)` — `2·max_lifetime`
     /// ports wide, based at [`SPAWN_REGION_BASE`] + `slot·2·max_lifetime` so each slot's band is DISJOINT.
     /// The launcher passes these as `VD_RLM_FIRST_PORT` / `VD_RLM_PORT_LIMIT`, so a demand cluster's
@@ -300,6 +308,7 @@ impl DevPortScheme {
             probe_station: base + PROBE_STATION_OFFSET,
             area: base + AREA_OFFSET,
             probe_area: base + PROBE_AREA_OFFSET,
+            admin_gateway: base + ADMIN_GATEWAY_OFFSET,
             spawn_base: spawn_base_u32 as u16,
             spawn_port_end: spawn_end_u32 as u16,
             dev_control_base: base + RESERVED_NODE_PORTS,
@@ -383,12 +392,14 @@ mod tests {
         assert_eq!(p.probe_station, 7014);
         assert_eq!(p.area, 7015);
         assert_eq!(p.probe_area, 7016);
-        // The dev-control band follows the 17 node ports…
-        assert_eq!(p.dev_control(0), Ok(7017));
-        assert_eq!(p.dev_control(3), Ok(7020));
+        // The gateway's own admin listener — the last node port.
+        assert_eq!(p.admin_gateway, 7017);
+        // The dev-control band follows the 18 node ports…
+        assert_eq!(p.dev_control(0), Ok(7018));
+        assert_eq!(p.dev_control(3), Ok(7021));
         // …then the client-QUIC band follows the K dev-control ports.
-        assert_eq!(p.client_quic(0), Ok(7021));
-        assert_eq!(p.client_quic(3), Ok(7024));
+        assert_eq!(p.client_quic(0), Ok(7022));
+        assert_eq!(p.client_quic(3), Ok(7025));
     }
 
     #[test]
@@ -397,7 +408,7 @@ mod tests {
         let s1 = DevPortScheme::DEFAULT.slot_ports(1).expect("s1");
         assert_eq!(s1.orchestrator, 7032, "slot 1 starts one block (32) later");
         // The highest port slot 0 hands out is below slot 1's first node port.
-        assert_eq!(s0.client_quic(3), Ok(7024));
+        assert_eq!(s0.client_quic(3), Ok(7025));
         assert!(s0.client_quic(3).expect("s0 last") < s1.orchestrator);
     }
 
@@ -405,8 +416,8 @@ mod tests {
     fn agent_at_or_above_k_is_a_typed_error_in_both_bands() {
         let p = DevPortScheme::DEFAULT.slot_ports(2).expect("valid");
         // Valid agents in both bands.
-        assert_eq!(p.dev_control(0), Ok(7081)); // 7000 + 2*32 + 17
-        assert_eq!(p.client_quic(0), Ok(7085)); // …+ K
+        assert_eq!(p.dev_control(0), Ok(7082)); // 7000 + 2*32 + 18
+        assert_eq!(p.client_quic(0), Ok(7086)); // …+ K
         // Out of range in EACH band (covers checked_agent via both callers).
         assert_eq!(
             p.dev_control(4),
@@ -420,17 +431,17 @@ mod tests {
 
     #[test]
     fn a_block_too_small_for_both_bands_is_rejected() {
-        // 17 node ports + 2*4 client ports needs >= 25; block_size 17 fails.
+        // 18 node ports + 2*4 client ports needs >= 26; block_size 18 fails.
         let scheme = DevPortScheme {
             base: 7000,
-            block_size: 17,
+            block_size: 18,
             max_clients_per_worktree: 4,
             max_lifetime_spawns_per_slot: DEFAULT_MAX_LIFETIME_SPAWNS_PER_SLOT,
         };
         assert_eq!(
             scheme.validate(),
             Err(PortSchemeError::BlockTooSmall {
-                block_size: 17,
+                block_size: 18,
                 k: 4
             })
         );
@@ -438,26 +449,26 @@ mod tests {
         assert_eq!(
             scheme.slot_ports(0),
             Err(PortSchemeError::BlockTooSmall {
-                block_size: 17,
+                block_size: 18,
                 k: 4
             })
         );
-        // The exact-fit boundary (block_size == 17 + 2K = 25) is valid; one below (24) fails.
+        // The exact-fit boundary (block_size == 18 + 2K = 26) is valid; one below (25) fails.
         let exact = DevPortScheme {
             base: 7000,
-            block_size: 25,
+            block_size: 26,
             max_clients_per_worktree: 4,
             max_lifetime_spawns_per_slot: DEFAULT_MAX_LIFETIME_SPAWNS_PER_SLOT,
         };
         assert_eq!(exact.validate(), Ok(()));
         assert_eq!(
             DevPortScheme {
-                block_size: 24,
+                block_size: 25,
                 ..exact
             }
             .validate(),
             Err(PortSchemeError::BlockTooSmall {
-                block_size: 24,
+                block_size: 25,
                 k: 4
             })
         );

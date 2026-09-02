@@ -437,6 +437,8 @@ pub(crate) fn compose_scenes_pass(
     // share — so the instrument costs at most ONE extra fold per (origin, tick), never O(sessions).
     let mut memo: BTreeMap<(RealmId, u64), (window::Composed, bool)> = BTreeMap::new();
     let mut chains_held = 0u64;
+    let mut sky_anchored = 0u64;
+    let mut stamp_gap_max = 0u64;
     for session in by_session.values_mut() {
         if !matches!(session.phase, SessionPhase::Active { .. }) {
             continue;
@@ -467,7 +469,45 @@ pub(crate) fn compose_scenes_pass(
             .iter()
             .map(|h| &windows[&h.window].ingest)
             .collect();
+        // THE STAMP GAP, measured: how far each hop's newest level sits from the origin's.
+        if let Some(origin_newest) = ingests.first().and_then(|i| i.newest()) {
+            for hop in &ingests[1..] {
+                let gap = hop
+                    .newest()
+                    .map_or(u64::MAX, |h| origin_newest.0.abs_diff(h.0));
+                stamp_gap_max = stamp_gap_max.max(gap);
+            }
+        }
         let (prefix, t) = window::fresh_prefix(&ingests);
+        // ★ SAY WHERE THE CHAIN STOPS (2026-09-02), once per keep-alive beat: a chain whose fresh
+        // prefix is shorter than its length folds no sky, and every refusal counter reads zero.
+        if prefix < ingests.len()
+            && clock
+                .local_tick
+                .0
+                .is_multiple_of(window_keepalive_cadence(config))
+        {
+            let stamps: Vec<(RealmId, Option<u64>, Option<u64>, usize)> = chain
+                .hops
+                .iter()
+                .zip(ingests.iter())
+                .map(|(h, i)| {
+                    let ticks: Vec<u64> = i.ticks().map(|t| t.0).collect();
+                    (
+                        h.author,
+                        ticks.first().copied(),
+                        ticks.last().copied(),
+                        ticks.len(),
+                    )
+                })
+                .collect();
+            tracing::warn!(
+                prefix,
+                hops = ingests.len(),
+                ?stamps,
+                "the chain's fresh prefix stops short — per hop: (author, oldest, newest, count)"
+            );
+        }
         // §2.7's same-T swap: a CROSSING's first level in the new origin is composed at the SAME
         // universe tick as the last old-epoch emission whenever the new chain's rings still
         // retain that stamp (they hold a derived span, so at the realm-lane cadence they do) —
@@ -500,14 +540,29 @@ pub(crate) fn compose_scenes_pass(
                     if !*verified {
                         // §2.14's exactness proof, MEASURED once per shared fold: it must equal
                         // a per-session recompute bit-for-bit (asserted 0 by the parity gate).
-                        let per_session =
-                            compose_fresh(origin, origin_frame, t, &authors, &ingests, prefix);
+                        let per_session = compose_fresh(
+                            origin,
+                            origin_frame,
+                            t,
+                            &authors,
+                            &ingests,
+                            prefix,
+                            config.sky_frame,
+                        );
                         stats.window_fold_divergence += fold_divergence(shared, &per_session);
                         *verified = true;
                     }
                     shared.clone()
                 } else {
-                    let fold = compose_fresh(origin, origin_frame, t, &authors, &ingests, prefix);
+                    let fold = compose_fresh(
+                        origin,
+                        origin_frame,
+                        t,
+                        &authors,
+                        &ingests,
+                        prefix,
+                        config.sky_frame,
+                    );
                     stats.window_folds += 1;
                     stats.window_composed_rows += fold.rows.len() as u64;
                     stats.window_relay_rows_composed += fold.relay_rows;
@@ -627,16 +682,27 @@ pub(crate) fn compose_scenes_pass(
                         pose: r.pose,
                     })
                     .collect();
-                if !realms.is_empty() {
+                // ★ THE SKY ANCHOR RIDES EVERY CHUNK OF THE TICK (owner ruling 2026-09-02 R1), and
+                // a tick with an anchor and NO drawn row still ships one datagram: a pilot alone in
+                // a hull with nothing else in range must still be told where the galaxy is.
+                let sky_anchor = session.shadow.sky_anchor();
+                sky_anchored += u64::from(sky_anchor.is_some());
+                let chunks = if realms.is_empty() {
+                    sky_anchor.map(|_| Vec::new()).into_iter().collect()
+                } else {
+                    partition_realms(&realms, CONSERVATIVE_DATAGRAM_BUDGET)
+                };
+                if !chunks.is_empty() {
                     session.realm_feed_frame_id += 1;
                     let frame_id = session.realm_feed_frame_id;
-                    for chunk in partition_realms(&realms, CONSERVATIVE_DATAGRAM_BUDGET) {
+                    for chunk in chunks {
                         let datagram = RealmSnapshotDatagram {
                             sub: SubId(0),
                             frame_id,
                             source_tick: clock.local_tick,
                             universe_tick: t_now,
                             origin_epoch: epoch,
+                            sky_anchor,
                             realms: chunk,
                         };
                         let bytes = postcard::to_allocvec(&datagram)
@@ -656,6 +722,8 @@ pub(crate) fn compose_scenes_pass(
             !session.lineage.is_empty() & (chain.hops.len() == session.lineage.len());
     }
     stats.window_chains_held = chains_held;
+    stats.window_sky_anchored = sky_anchored;
+    stats.window_chain_stamp_gap_max = stamp_gap_max;
 }
 
 /// The §2.14 divergence verdict, split out so BOTH arms are unit-drivable (HR5): 1 when a
@@ -675,6 +743,7 @@ fn compose_fresh(
     authors: &[RealmId],
     ingests: &[&window::WindowIngest],
     prefix: usize,
+    sky_frame: Option<FrameRef>,
 ) -> window::Composed {
     let levels: Vec<&window::WindowLevel> = ingests[..prefix]
         .iter()
@@ -683,7 +752,11 @@ fn compose_fresh(
                 .expect("fresh_prefix only names ticks every prefix level retains")
         })
         .collect();
-    window::compose(origin, origin_frame, t, authors, &levels, prefix, ingests)
+    let mut fold = window::compose(origin, origin_frame, t, authors, &levels, prefix, ingests);
+    if let Some(sky) = sky_frame {
+        window::place_sky_anchor(&mut fold, origin_frame, sky);
+    }
+    fold
 }
 
 /// THE Q2 RELAY's receiving admission (Slice C1, mesh minor 17; owner-approved 2026-08-16 —

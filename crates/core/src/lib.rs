@@ -21,6 +21,7 @@
 pub mod built;
 pub mod child_index;
 pub mod collections;
+pub mod controls;
 pub mod digest;
 pub mod entity_kind;
 pub mod fence;

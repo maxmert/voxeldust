@@ -161,6 +161,11 @@ pub struct RenderHandles {
     /// bumps it on a dropped input, so BOTH producers feed one observable back-pressure
     /// metric (the "back-pressure is never silent" rule).
     pub dropped: Arc<AtomicU64>,
+    /// THE STARS ON SCREEN (`DevState::stars_drawn`, owner ruling 2026-09-02 R9 step 1): the
+    /// window writes how many points of light its star cloud holds, the core thread reads it
+    /// into the diagnosis surface. Zero while no cloud is drawn. The one instrument that can
+    /// say "the sky is black" while the catalogue is held in full.
+    pub stars_drawn: Arc<AtomicU64>,
     /// Liveness flag the core thread flips false when its loop EXITS (gateway Close /
     /// panic). The window emits `AppExit` when it sees false — bidirectional shutdown.
     pub core_alive: Arc<AtomicBool>,
@@ -199,6 +204,7 @@ struct Net {
     snapshot: Arc<ArcSwap<RenderSnapshot>>,
     input: SyncSender<InputAction>,
     dropped: Arc<AtomicU64>,
+    stars_drawn: Arc<AtomicU64>,
     core_alive: Arc<AtomicBool>,
     started_at: Instant,
 }
@@ -216,8 +222,25 @@ struct CameraState {
     throttle_tier: u8,
     /// THROWAWAY: the eased commanded magnitude the wire actually carries (see `THROTTLE_EASE_TAU_S`).
     throttle_now: f32,
+    /// THROWAWAY: which end of the rating the ten tiers cover (owner, 2026-09-02). `X` swaps it.
+    /// See [`input_map::ThrottleMode`].
+    throttle_mode: input_map::ThrottleMode,
+    /// ★ THE REALM THE PICTURE LAST STOOD IN (owner, 2026-09-02: the facing crosses with the body and
+    /// the view follows it). When it changes — a scene swap — the camera takes its yaw and pitch from
+    /// the DELIVERED facing instead of keeping a local number that now lives in another realm's frame.
+    /// Without this a hull that has turned makes the view jump by the hull's rotation at boarding.
+    /// `None` until the first avatar is delivered, which is also a swap: the server's facing is the truth.
+    last_origin: Option<RealmId>,
     /// ★ WHICH VIEW THE PLAYER IS IN (D-MOVE-2; owner 2026-09-01). See [`CameraMode`].
     mode: CameraMode,
+    /// ★ THE CAMERA LOCKED TO THE REALM'S OWN AXES (owner, 2026-09-02, at the controls of a hull):
+    /// `L` toggles it. Locked, the eye looks along the realm's own forward (its −Z) and the mouse
+    /// turns the REALM alone — a pilot's look is already the stick's turn on the wire, so applying
+    /// it to the camera as well turned the eye twice for one motion and the camera flew around the
+    /// hull. Unlocked, the mouse turns the camera as it always did (a walker looks around). THE
+    /// PLAYER CHOOSES, with a key: nothing here asks what kind of realm holds them, and when a
+    /// SEAT exists the seat will say who is at the controls.
+    locked: bool,
 }
 
 /// ★ THE TWO VIEWS, AND WHY THIS IS A MODE RATHER THAN A DISTANCE (owner ruling 2026-09-01).
@@ -301,7 +324,10 @@ mod camera_mode_tests {
     fn stepping_out_starts_clear_of_a_small_hull() {
         // The starting distance must put the eye OUTSIDE a hull, or switching the view shows the
         // inside faces of a box and reads as a rendering fault.
-        let (back, _) = CameraMode::ThirdPerson { distance_m: CHASE_START_M }.chase();
+        let (back, _) = CameraMode::ThirdPerson {
+            distance_m: CHASE_START_M,
+        }
+        .chase();
         assert!(back > 20.0, "clear of a twenty-metre ship: {back}");
     }
 }
@@ -417,17 +443,24 @@ impl Material for StarSkyMaterial {
     }
 }
 
-/// THE DRAWN SKY's identity (S11) — which catalogue, around which observer, is on screen.
+/// THE STAR CLOUD ON SCREEN — built ONCE per catalogue and never rebuilt (owner ruling 2026-09-02
+/// R1: *"Galaxy is always visible, we just don't repopulate it, as it doesn't move"*).
 ///
-/// ★ THIS IS WHY THE SKY IS NOT REBUILT EVERY FRAME. Stars do not move. The only things that change
-/// where they are drawn are the catalogue itself (almost never) and the realm the observer stands in
-/// (a crossing). So the point cloud is spawned when this pair changes, and left alone otherwise —
-/// which at the target census is the difference between 150,000 spawns per frame and none.
+/// Its vertices are metres from ONE reference cell of the galaxy's lattice, chosen when the cloud is
+/// first built. Where the observer stands enters only as the cloud entity's TRANSFORM, recomputed
+/// every frame from the SKY ANCHOR the gateway states on the realm lane — the origin realm placed
+/// in the galaxy's frame — and the eye's own offset inside that realm. Parallax is that transform
+/// moving. A crossing changes nothing here: the anchor names the new origin, the transform follows.
+///
+/// ★ WHAT THIS REPLACED. The cloud used to be keyed on the observer's OWN STAR SYSTEM, deleted on
+/// every crossing and rebuilt by searching the catalogue for the realm the observer stood in. The
+/// catalogue names star systems only, so a hull, a planet, a station, an area and the galaxy itself
+/// all failed the search, and the sky went black for good — MEASURED 2026-09-01 inside a hull.
 #[derive(Resource, Default)]
 struct DrawnSky {
-    /// `(generation, origin realm)` currently on screen, or `None` while nothing is drawn.
-    shown: Option<(u64, vd_core::pose::RealmId)>,
-    /// THE one cloud entity, held so a re-anchor can replace it.
+    /// `(generation, reference cell)` of the cloud on screen, or `None` while nothing is drawn.
+    shown: Option<(u64, vd_core::glam::I64Vec3)>,
+    /// THE one cloud entity, held so a new catalogue (or a rebase) can replace it.
     cloud: Option<Entity>,
     /// The material handle, held so the per-frame camera uniforms can be refreshed without touching
     /// the star data.
@@ -530,6 +563,7 @@ fn run_windowed(handles: RenderHandles) {
             snapshot: handles.snapshot,
             input: handles.input,
             dropped: handles.dropped,
+            stars_drawn: handles.stars_drawn,
             core_alive: handles.core_alive,
             started_at: handles.started_at,
         })
@@ -538,8 +572,11 @@ fn run_windowed(handles: RenderHandles) {
             last_movement: MovementKeys::default(),
             throttle_tier: input_map::THROTTLE_TIERS,
             throttle_now: 0.0,
+            throttle_mode: input_map::ThrottleMode::default(),
+            last_origin: None,
             // A player starts in the chair; the mode key steps them out. See `CameraMode`.
             mode: CameraMode::FirstPerson,
+            locked: false,
         })
         // A window is always the human's own first-person view; the pilot-view switch exists only
         // for the HEADLESS capture path (there is no scene-fitting framing here to decline).
@@ -841,6 +878,44 @@ fn input_system(
         };
         tracing::info!(mode = ?camera.mode, "view switched");
     }
+    // THROWAWAY: `X` swaps the throttle between its two ladders — normal for a star system, warp for
+    // the run between stars (owner, 2026-09-02). The tier is kept; only what it means changes.
+    if keys.just_pressed(KeyCode::KeyX) {
+        camera.throttle_mode = camera.throttle_mode.toggled();
+        tracing::info!(mode = ?camera.throttle_mode, tier = camera.throttle_tier, "throttle mode");
+    }
+    if keys.just_pressed(KeyCode::KeyL) {
+        camera.locked = !camera.locked;
+        if camera.locked {
+            // ★ LOCK = FACE THE NOSE (owner, 2026-09-02). The push follows the pilot's facing, so a
+            // locked view along the nose must be a FACING along the nose, or the hull would fly where
+            // the pilot last looked rather than where the locked eye looks. The one look that turns
+            // the delivered facing onto the realm's own forward is sent — input, like any look — and
+            // the local camera goes there at once. While locked the mouse sends nothing, so the
+            // facing and the eye stay together.
+            let snap = net.snapshot.load();
+            let own = snap.own_entity();
+            let facing = snap
+                .rendered(net.started_at.elapsed().as_secs_f64())
+                .into_iter()
+                .find(|(id, _, _)| Some(*id) == own)
+                .map(|(_, _, pose)| pose.orient);
+            if let Some(facing) = facing {
+                let (yaw, pitch) = vd_core::kinematics::yaw_pitch_from_orient(facing);
+                #[allow(clippy::cast_possible_truncation)] // a look delta is f32 on the wire
+                let to_nose = InputAction::Look([-yaw as f32, -pitch as f32]);
+                if net.input.try_send(to_nose).is_err() {
+                    net.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            camera.cam.yaw = 0.0;
+            camera.cam.pitch = 0.0;
+        }
+        tracing::info!(
+            locked = camera.locked,
+            "camera lock: locked = the pilot faces the nose and the eye holds the realm's own axes"
+        );
+    }
     // THROWAWAY (test instrument): `]` raises the throttle tier, `[` lowers it. The tier is announced
     // in the log because there is no HUD yet to show it.
     let raised = u8::from(keys.just_pressed(KeyCode::BracketRight));
@@ -873,7 +948,7 @@ fn input_system(
         || movement.up
         || movement.down;
     let target =
-        f32::from(held) * f32::from(camera.throttle_tier) / f32::from(input_map::THROTTLE_TIERS);
+        f32::from(held) * input_map::throttle_magnitude(camera.throttle_mode, camera.throttle_tier);
     let alpha = 1.0 - (-time.delta_secs() / input_map::THROTTLE_EASE_TAU_S).exp();
     camera.throttle_now += (target - camera.throttle_now) * alpha;
     // Snap the last sliver so a release reaches a true standstill rather than creeping forever.
@@ -889,11 +964,40 @@ fn input_system(
         camera.last_movement = movement;
     }
 
+    // THROWAWAY (the temporary control seam, owner 2026-09-02): `E` raises the nose of a realm that
+    // flies on a stick and `Q` lowers it. They ride the wire as two action bits; the shard binds the
+    // bits (see `vd_core::controls`). A release is sent after a press so a key that went down and up
+    // inside one frame ends CLEAR — a bit left set would hold the nose up until the next press.
+    for (key, index) in [
+        (KeyCode::KeyQ, vd_core::controls::PILOT_PITCH_DOWN_INDEX),
+        (KeyCode::KeyE, vd_core::controls::PILOT_PITCH_UP_INDEX),
+    ] {
+        for pressed in [true, false] {
+            let edge = if pressed {
+                keys.just_pressed(key)
+            } else {
+                keys.just_released(key)
+            };
+            if edge
+                && let Some(action) = input_map::action(index, pressed)
+                && net.input.try_send(action).is_err()
+            {
+                net.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     let delta = mouse.delta;
     if delta != Vec2::ZERO {
         // The ONE shared mapping (pixels → look delta); the camera and the server apply
-        // the SAME values, so the local view and the delivered orient agree.
-        if let InputAction::Look(look) = mouse_look(delta.x, delta.y) {
+        // the SAME values, so the local view and the delivered orient agree. On a hull the shard
+        // reads NO turn from the look (owner, 2026-09-02): the mouse is the pilot's own eyes.
+        // Locked: the mouse sends NOTHING and turns nothing — the facing stays on the nose and the
+        // eye with it (see the `L` key above). Unlocked: the look turns the body on the server and
+        // the local camera at once, the same values, so the view and the delivered facing agree.
+        if !camera.locked
+            && let InputAction::Look(look) = mouse_look(delta.x, delta.y)
+        {
             camera
                 .cam
                 .apply_look(f64::from(look[0]), f64::from(look[1]));
@@ -940,7 +1044,7 @@ fn cursor_grab(
 ///    scale skew is gone with the ordering, not absorbed by a tolerance).
 fn place_camera(
     net: Res<Net>,
-    camera: Res<CameraState>,
+    mut camera: ResMut<CameraState>,
     view: Res<CaptureView>,
     mut eye: ResMut<RenderEye>,
     mut cam: Query<(&mut Transform, &Camera, &Projection), With<FollowCam>>,
@@ -958,6 +1062,24 @@ fn place_camera(
         return; // no delivered avatar yet — nothing to stand at
     };
     let own_world = snap.world_pos(own_pose);
+    // ★ A SCENE SWAP RE-EXPRESSES THE VIEW (owner, 2026-09-02). The local yaw and pitch are numbers
+    // in the frame the picture is drawn in; when that frame changes they mean another direction. The
+    // delivered facing is the server's own answer in the NEW frame, so the camera takes it — once,
+    // at the swap — and the mouse continues from there. A walker who steps into a hull that has
+    // turned keeps looking where they looked.
+    let origin = snap.origin();
+    if origin != camera.last_origin {
+        let (yaw, pitch) = vd_core::kinematics::yaw_pitch_from_orient(own_pose.orient);
+        camera.cam.yaw = yaw;
+        camera.cam.pitch = pitch;
+        camera.last_origin = origin;
+        tracing::info!(
+            ?origin,
+            yaw,
+            pitch,
+            "scene swap: the view takes the delivered facing"
+        );
+    }
     // PILOT VIEW (the headless acceptance): the avatar's eye along its SERVER-DELIVERED facing,
     // through the ONE Tier-A expression the pixel gates reconstruct the camera from — so an
     // injected `LookAt` turns the avatar and the agent's eyes together. Otherwise: the LOCAL
@@ -970,6 +1092,17 @@ fn place_camera(
             CAPTURE_H as usize,
         );
         (cam.eye, cam.target - cam.eye, cam.up)
+    } else if camera.locked {
+        // ★ LOCKED TO THE REALM (owner, 2026-09-02): the picture is drawn in the origin realm's own
+        // frame, so its forward is a constant −Z and its up +Y here. First person: the eye at the
+        // avatar, looking along the nose. Third person: the eye behind the tail and lifted, looking
+        // the same way, so the hull sits ahead of the eye and the sky turns around both.
+        let (back_m, lift_m) = camera.mode.chase();
+        (
+            own_world + DVec3::new(0.0, lift_m, back_m),
+            DVec3::NEG_Z,
+            DVec3::Y,
+        )
     } else {
         // ★ THIRD PERSON WHEN A CHASE DISTANCE IS SET (D-MOVE-2). Zero — the default — returns
         // exactly the first-person eye, so the walking view and every pixel gate on it are unchanged.
@@ -1108,36 +1241,23 @@ fn sync_world(
     });
 }
 
-/// Sync the translucent realm-box meshes to the boot-loaded [`RenderSnapshot`] scene (Visual
-/// Crossing Playground V3) — the SIBLING path to `sync_world`'s dots. For each [`RealmBox`] the
-/// scene carries, place it at the world position of its realm frame's ORIGIN composed through the
-/// ONE `DeliveredView::world_pos` chokepoint (so a nested/hull-borne box lands correctly, without a
-/// second composition path), lower it to [`MeshPrim`] VERTICES (H4: the renderer consumes vertices,
-/// NEVER a shape variant), and spawn a translucent [`StandardMaterial`] volume. Straight-line glue:
-/// every geometry/color/placement decision is a Tier-A call (`to_render_prims`, `world_pos`); this
-/// only builds Bevy `Mesh`/`Transform`/material handles and spawns/despawns to match the scene.
-/// DRAW THE GALAXY (S11): one point of light per star the client holds, placed around the observer's
-/// own star system.
+/// ★ THE STAR SKY (S11; owner ruling 2026-09-02 R1): ONE point cloud for the whole catalogue,
+/// uploaded once and PLACED every frame by the sky anchor — never rebuilt for a crossing.
 ///
-/// ★ ONE INSTANCED DRAW, NOT AN ENTITY'S WORTH OF WORK PER STAR. Every point shares ONE mesh and one
-/// material per spectral class ([`MarkerAssets`]), which is what the plan means by "one instanced
-/// point cloud rather than an entity per star": Bevy batches entities that share a mesh and material
-/// into a single draw call, so the draw cost is a handful of calls whatever the census.
-///
-/// ★ AND IT RUNS ON A CROSSING, NOT ON A FRAME. The positions change only when the catalogue changes
-/// or the observer's own system changes. Rebuilding per frame would cost 150,000 spawns sixty times a
-/// second to produce an identical picture.
-///
-/// The observer's own system is not drawn — you are inside it, and a point of light at zero distance
-/// would sit on the camera. An observer whose system is not in the catalogue draws NOTHING rather than
-/// an unanchored sky, because an unanchored sky puts every star at the wrong distance and looks
-/// entirely plausible while doing it.
+/// Per frame, in order: the material's camera uniforms are refreshed (the size floor is in pixels
+/// and the camera can change); with no whole sky held or no anchor stated yet, nothing is drawn and
+/// the drawn count says zero; otherwise the cloud is built if the catalogue changed (or, once per
+/// galaxy-to-galaxy journey, if the placement has drifted past the single-precision bound — see
+/// `sky_rebase_due`), and its transform is set from the anchor and the eye.
+#[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources/queries
 fn sync_star_sky(
     net: Res<Net>,
+    eye: Res<RenderEye>,
     mut drawn: ResMut<DrawnSky>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StarSkyMaterial>>,
     camera: Single<(&Camera, &Projection)>,
+    mut clouds: Query<&mut Transform, With<StarPointMarker>>,
     mut commands: Commands,
 ) {
     // THE UNIFORMS ARE REFRESHED EVERY FRAME, because the size floor is measured in PIXELS and the
@@ -1148,8 +1268,7 @@ fn sync_star_sky(
     // ★ THE SKY'S DEPTH COMES FROM THE CAMERA'S OWN FAR PLANE, never a constant. `derive_camera_planes`
     // sets that plane from the LOCAL scene every frame, so a literal here would be beyond it on one
     // scene and inside it on another — and a star beyond the far plane is silently clipped, which is
-    // exactly the defect this placement fixes. Backed off by a margin so a star never lands ON the
-    // plane, where it would flicker as the scene's own extent moves.
+    // the black sky nobody can explain. The margin keeps the cloud strictly inside.
     let far_m = match projection {
         Projection::Perspective(p) => f64::from(p.far),
         _ => f64::from(DEFAULT_SKY_FAR_M),
@@ -1179,61 +1298,93 @@ fn sync_star_sky(
     }
 
     let snap = net.snapshot.load();
-    let wanted = snap
-        .sky()
-        .and_then(|sky| snap.origin().map(|origin| (sky.generation, origin)));
-    if wanted == drawn.shown {
-        return; // the same sky, around the same system — the cloud already on screen is correct
-    }
-    // A RE-ANCHOR REPLACES THE CLOUD. Leaving the old one would draw two galaxies at once, one of them
-    // measured from a system the player has left.
-    if let Some(entity) = drawn.cloud.take() {
-        commands.entity(entity).despawn();
-    }
-    drawn.shown = wanted;
-    let Some((_, origin)) = wanted else {
-        return; // no sky held, or no standing realm stated yet
-    };
-    let Some(points) = snap.sky().and_then(|sky| sky.points_around(origin)) else {
-        return; // the catalogue does not describe where we stand — draw nothing, never a wrong sky
-    };
-    let cloud = vd_client::render_snapshot::StarCloud::build(&points);
-    if cloud.is_empty() {
+    let Some((sky, anchor)) = snap.sky().zip(snap.sky_anchor()) else {
+        // No whole sky held, or the observer chain has not reached the galaxy yet: nothing is
+        // drawn — never a wrong sky — and the instrument says so.
+        if let Some(entity) = drawn.cloud.take() {
+            commands.entity(entity).despawn();
+        }
+        drawn.shown = None;
+        net.stars_drawn.store(0, Ordering::Relaxed);
         return;
+    };
+    // The reference the cloud on screen was built from, if it is still the right cloud: the same
+    // catalogue, and a placement still inside the single-precision bound.
+    let kept = drawn.shown.filter(|(generation, reference)| {
+        let (translation, _) =
+            vd_client::render_snapshot::sky_cloud_transform(*reference, &anchor, eye.eye);
+        (*generation == sky.generation) && !vd_client::render_snapshot::sky_rebase_due(translation)
+    });
+    let reference = match kept {
+        Some((_, reference)) => reference,
+        None => {
+            // A NEW CATALOGUE (or a rebase): replace the cloud. Leaving the old one would draw two
+            // galaxies at once.
+            if let Some(entity) = drawn.cloud.take() {
+                commands.entity(entity).despawn();
+            }
+            drawn.shown = None;
+            net.stars_drawn.store(0, Ordering::Relaxed);
+            let reference = anchor.pos.cell();
+            let points = sky.points_from(reference);
+            let cloud = vd_client::render_snapshot::StarCloud::build(&points);
+            if cloud.is_empty() {
+                return;
+            }
+            // ★ ONE MESH, ONE ENTITY, WHATEVER THE CENSUS. At 150,000 stars this is 14.4 MB of
+            // vertices plus 3.6 MB of U32 indices, uploaded ONCE — against 150,000 `MeshUniform`
+            // records rebuilt every frame if each star were its own entity. `U32` is forced:
+            // 600,000 vertices overflow a `u16`.
+            let mut mesh = Mesh::new(
+                bevy::mesh::PrimitiveTopology::TriangleList,
+                bevy::asset::RenderAssetUsages::default(),
+            );
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, cloud.positions.clone());
+            mesh.insert_attribute(ATTRIBUTE_STAR_CORNER, cloud.corners.clone());
+            mesh.insert_attribute(ATTRIBUTE_STAR_COLOR, cloud.colors.clone());
+            mesh.insert_attribute(ATTRIBUTE_STAR_BASE_R, cloud.base_radius_m.clone());
+            mesh.insert_indices(bevy::mesh::Indices::U32(cloud.indices.clone()));
+            let material = materials.add(StarSkyMaterial { params });
+            let (translation, rotation) =
+                vd_client::render_snapshot::sky_cloud_transform(reference, &anchor, eye.eye);
+            drawn.cloud = Some(
+                commands
+                    .spawn((
+                        Mesh3d(meshes.add(mesh)),
+                        MeshMaterial3d(material.clone()),
+                        // THE PLACEMENT: the anchor and the eye, folded in f64 and narrowed once.
+                        // The shader applies this model transform; nothing else moves the sky.
+                        Transform {
+                            translation: translation.as_vec3(),
+                            rotation: rotation.as_quat(),
+                            scale: Vec3::ONE,
+                        },
+                        // ★ NO FRUSTUM CULLING (S11). The cloud's bounding box spans the whole
+                        // galaxy — half-extents of about 4.6e18 m — and Bevy's visibility test
+                        // against a box that large, in f32, is not a test worth trusting. The camera
+                        // stands INSIDE it always, so culling could only ever remove the sky by
+                        // mistake, never save work.
+                        bevy::camera::visibility::NoFrustumCulling,
+                        StarPointMarker,
+                    ))
+                    .id(),
+            );
+            drawn.material = Some(material);
+            drawn.shown = Some((sky.generation, reference));
+            net.stars_drawn
+                .store(points.len() as u64, Ordering::Relaxed);
+            return;
+        }
+    };
+    // THE PLACEMENT, EVERY FRAME: the anchor moved (the origin realm flew), or the eye moved inside
+    // the origin. Either way the one cloud slides; near stars slide more than far ones, which is the
+    // parallax — nothing draws it on purpose.
+    let (translation, rotation) =
+        vd_client::render_snapshot::sky_cloud_transform(reference, &anchor, eye.eye);
+    for mut transform in &mut clouds {
+        transform.translation = translation.as_vec3();
+        transform.rotation = rotation.as_quat();
     }
-    // ★ ONE MESH, ONE ENTITY, WHATEVER THE CENSUS. At 150,000 stars this is 14.4 MB of vertices plus
-    // 3.6 MB of U32 indices, uploaded ONCE — against 150,000 `MeshUniform` records rebuilt every frame
-    // if each star were its own entity. `U32` is forced: 600,000 vertices overflow a `u16`.
-    let mut mesh = Mesh::new(
-        bevy::mesh::PrimitiveTopology::TriangleList,
-        bevy::asset::RenderAssetUsages::default(),
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, cloud.positions.clone());
-    mesh.insert_attribute(ATTRIBUTE_STAR_CORNER, cloud.corners.clone());
-    mesh.insert_attribute(ATTRIBUTE_STAR_COLOR, cloud.colors.clone());
-    mesh.insert_attribute(ATTRIBUTE_STAR_BASE_R, cloud.base_radius_m.clone());
-    mesh.insert_indices(bevy::mesh::Indices::U32(cloud.indices.clone()));
-
-    let material = materials.add(StarSkyMaterial { params });
-    drawn.cloud = Some(
-        commands
-            .spawn((
-                Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(material.clone()),
-                // IDENTITY TRANSFORM, deliberately: the vertex positions are already metres from the
-                // observer's own star system, which is where the camera stands. A model transform here
-                // would be a second place the sky could be moved from.
-                Transform::IDENTITY,
-                // ★ NO FRUSTUM CULLING (S11). The cloud's bounding box spans the whole galaxy —
-                // half-extents of about 4.6e18 m — and Bevy's visibility test against a box that large,
-                // in f32, is not a test worth trusting. The camera stands INSIDE it always, so culling
-                // could only ever remove the sky by mistake, never save work.
-                bevy::camera::visibility::NoFrustumCulling,
-                StarPointMarker,
-            ))
-            .id(),
-    );
-    drawn.material = Some(material);
 }
 
 #[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources/queries
@@ -1567,9 +1718,112 @@ fn mesh_from_vertices(vertices: &[Vertex]) -> Mesh {
 /// The windowed HUD: draw into the PRIMARY egui context (the 0.39 multipass idiom —
 /// registered in `EguiPrimaryContextPass`, context via `EguiContexts::ctx_mut()` which
 /// returns a `Result`, so this system returns `Result`).
-fn hud_primary(mut contexts: EguiContexts, net: Res<Net>) -> Result {
-    draw_hud(contexts.ctx_mut()?, &net);
+fn hud_primary(
+    mut contexts: EguiContexts,
+    net: Res<Net>,
+    camera: Res<CameraState>,
+    keys: Res<ButtonInput<KeyCode>>,
+) -> Result {
+    let ctx = contexts.ctx_mut()?;
+    draw_hud(ctx, &net);
+    draw_pilot_panel(ctx, &net, &camera, &keys);
     Ok(())
+}
+
+/// THROWAWAY — THE PILOT'S READOUT (owner, 2026-09-02): what the client already holds about the realm
+/// the player stands in, on the right of the window. It reads NOTHING new off the wire: the realm's
+/// placement in the galaxy is the sky anchor the gateway ships for the star cloud (its velocity is
+/// the same fold, so the speed is the star system's own number for the hull), and the stick is what
+/// this window last sent. The hull's RATED push is the hull's own row and never crosses to a screen,
+/// so the panel shows the fraction of it the throttle commands; the berth tool prints the rating.
+///
+/// Windowed only. The capture HUD stays byte-for-byte what the pixel gates were measured against.
+///
+/// Example: the pilot holds `W` at tier 10. The panel reads the speed climbing tick by tick, the
+/// throttle at the whole rating, and "yaw —" until they touch `A` or `D`.
+fn draw_pilot_panel(
+    ctx: &egui::Context,
+    net: &Net,
+    camera: &CameraState,
+    keys: &ButtonInput<KeyCode>,
+) {
+    let now_s = net.started_at.elapsed().as_secs_f64();
+    let snap = net.snapshot.load();
+    let own = snap.own_entity();
+    let in_realm = snap
+        .rendered(now_s)
+        .into_iter()
+        .find(|(id, _, _)| Some(*id) == own)
+        .map(|(_, _, pose)| snap.world_pos(&pose));
+    let location = snap.location().unwrap_or_else(|| "—".to_owned());
+    let axes = camera.last_movement.axes();
+    let sign = |x: f32| match x.partial_cmp(&0.0) {
+        Some(std::cmp::Ordering::Greater) => "+",
+        Some(std::cmp::Ordering::Less) => "−",
+        _ => "—",
+    };
+    let pitch = f32::from(keys.pressed(KeyCode::KeyE)) - f32::from(keys.pressed(KeyCode::KeyQ));
+    egui::Area::new(egui::Id::new("vd_pilot"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
+        .show(ctx, |ui| {
+            ui.label("PILOT — temporary controls");
+            ui.label(format!("realm:             {location}"));
+            ui.label(match in_realm {
+                Some(p) => format!("in realm (m):      {:.1}, {:.1}, {:.1}", p.x, p.y, p.z),
+                None => "in realm (m):      —".to_owned(),
+            });
+            match snap.sky_anchor() {
+                Some(a) => {
+                    let p = a
+                        .pos
+                        .delta_m(vd_core::pose::LatticePos::ORIGIN, a.frame.tier());
+                    ui.label(format!(
+                        "realm in galaxy:   {:.4e}, {:.4e}, {:.4e} m",
+                        p.x, p.y, p.z
+                    ));
+                    let speed = a.vel.length();
+                    ui.label(format!(
+                        "speed:             {speed:.1} m/s  ({:.3e} km/s)",
+                        speed / 1000.0
+                    ));
+                    ui.label(format!(
+                        "velocity (m/s):    {:.3e}, {:.3e}, {:.3e}",
+                        a.vel.x, a.vel.y, a.vel.z
+                    ));
+                }
+                None => {
+                    ui.label("realm in galaxy:   — (no placement stated yet)");
+                }
+            }
+            ui.label(format!(
+                "throttle:          {:?} (X swaps)  tier {}/{}  →  {:.2e} of the rated push",
+                camera.throttle_mode,
+                camera.throttle_tier,
+                input_map::THROTTLE_TIERS,
+                camera.throttle_now
+            ));
+            ui.label(format!(
+                "stick:             push fwd {} {:.2e}  up {} {:.2e}  |  yaw {}  pitch {}",
+                sign(axes[0]),
+                axes[0].abs(),
+                sign(axes[2]),
+                axes[2].abs(),
+                sign(-axes[1]),
+                sign(pitch)
+            ));
+            ui.label(format!(
+                "camera:            {}  ({:?})",
+                if camera.locked {
+                    "facing the nose, eye locked (L frees)"
+                } else {
+                    "free look, you fly where you look (L faces the nose)"
+                },
+                camera.mode
+            ));
+            ui.label(
+                "keys: W/S push  A/D yaw  E/Q nose up/down  Space/Ctrl up/down  ]/[ tier  X warp  V view",
+            );
+        });
 }
 
 /// Draw the player-stats HUD from the delivered snapshot (wire truth) into an egui
@@ -1680,6 +1934,7 @@ fn run_capture(handles: RenderHandles) {
             snapshot: handles.snapshot,
             input: handles.input,
             dropped: handles.dropped,
+            stars_drawn: handles.stars_drawn,
             core_alive: handles.core_alive,
             started_at: handles.started_at,
         })
@@ -1688,8 +1943,11 @@ fn run_capture(handles: RenderHandles) {
             last_movement: MovementKeys::default(),
             throttle_tier: input_map::THROTTLE_TIERS,
             throttle_now: 0.0,
+            throttle_mode: input_map::ThrottleMode::default(),
+            last_origin: None,
             // A player starts in the chair; the mode key steps them out. See `CameraMode`.
             mode: CameraMode::FirstPerson,
+            locked: false,
         })
         .insert_resource(CaptureView {
             pilot: handles.pilot_view,

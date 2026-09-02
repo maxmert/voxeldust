@@ -1139,6 +1139,7 @@ mod tests {
             source_tick: TickId(1),
             universe_tick: UniverseTick(10),
             origin_epoch: 0,
+            sky_anchor: None,
             realms: vec![vd_wire::channels::RealmSnap {
                 realm: vd_core::pose::RealmId::Planet(7),
                 frame: FrameRef::PlanetCentered { planet_seed: 7 },
@@ -1169,6 +1170,7 @@ mod tests {
             source_tick: TickId(2),
             universe_tick: UniverseTick(11),
             origin_epoch: 1,
+            sky_anchor: None,
             realms: vec![vd_wire::channels::RealmSnap {
                 realm: vd_core::pose::RealmId::Station(9),
                 frame: FrameRef::StationLocal { station_seed: 9 },
@@ -1250,6 +1252,7 @@ mod tests {
             source_tick: TickId(1),
             universe_tick: UniverseTick(10),
             origin_epoch: 0,
+            sky_anchor: None,
             realms: vec![vd_wire::channels::RealmSnap {
                 realm,
                 frame: FrameRef::PlanetCentered { planet_seed: 7 },
@@ -1321,6 +1324,7 @@ mod tests {
             source_tick: TickId(1),
             universe_tick: UniverseTick(10),
             origin_epoch: 0,
+            sky_anchor: None,
             realms: vec![
                 row(fine, FrameRef::SystemSpace { system_seed: 7 }),
                 row(coarse, FrameRef::GalaxySpace { galaxy_seed: 0 }),

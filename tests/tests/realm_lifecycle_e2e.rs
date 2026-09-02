@@ -594,6 +594,7 @@ impl Gw {
                 // No world booted in a fixture, so the gateway states no sky (S11).
                 sky: Vec::new(),
                 sky_generation: 0,
+                sky_frame: None,
                 shard: LOGIN_SHARD,
                 known_shards: std::collections::BTreeSet::from([LOGIN_SHARD]),
                 auth_verifying_key: auth_verifying_key(),

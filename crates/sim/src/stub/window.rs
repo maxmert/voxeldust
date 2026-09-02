@@ -18,10 +18,9 @@ use crate::io::{Durability, MsgClass};
 use crate::runtime::{ClockSample, OutboundBox};
 use bevy_ecs::prelude::{Res, ResMut, Resource};
 use std::collections::{BTreeMap, BTreeSet};
-use vd_core::frame::{FrameError, FramePlacement, transfer_frame};
-use vd_core::glam::DVec3;
+use vd_core::frame::FramePlacement;
 use vd_core::placement::PlacementBook;
-use vd_core::pose::{FrameRef, RealmId, StampedPose};
+use vd_core::pose::{FrameRef, RealmId};
 use vd_core::{AccountId, Fence, NodeId, TickId};
 use vd_wire::channels::RealmSnap;
 use vd_wire::intershard::InterShardFlow;
@@ -170,11 +169,39 @@ pub(crate) fn on_window_open(
             *held.get_mut() = OpenWindow::opened(scope, now);
             held.get_mut().sent_static = static_held;
             stats.windows_opened += 1;
+            trace_window_opened(from, window, scope);
         }
         std::collections::btree_map::Entry::Vacant(fresh) => {
             fresh.insert(OpenWindow::opened(scope, now));
             stats.windows_opened += 1;
+            trace_window_opened(from, window, scope);
         }
+    }
+}
+
+/// ★ SAY WHO IS WATCHING, AND WHAT THEY ASKED FOR (2026-09-01).
+///
+/// Nothing anywhere recorded a window's SCOPE. A counter says four windows are open; it cannot say
+/// whether one of them names your ship, and that is the whole difference between "the parent was
+/// never asked" and "the parent answered and the answer was dropped". A live diagnosis stalled on
+/// exactly that gap, twice in one evening.
+///
+/// ON THE OPEN ONLY, never on the keep-alive: a window is opened once and re-asserted twice a second
+/// for as long as somebody looks, so logging the re-assert would drown the file it is meant to
+/// explain.
+fn trace_window_opened(from: NodeId, window: WindowId, scope: WindowScope) {
+    match scope {
+        WindowScope::Occupants => tracing::info!(
+            gateway = from.0,
+            window = window.0,
+            "a window opened on THIS realm — somebody is standing inside me"
+        ),
+        WindowScope::Child(child) => tracing::info!(
+            gateway = from.0,
+            window = window.0,
+            %child,
+            "a window opened on a CHILD of mine — somebody is looking out from inside it"
+        ),
     }
 }
 
@@ -207,40 +234,19 @@ fn prune_expired_windows(
     stats.window_ttl_expired += (before - windows.0.len()) as u64;
 }
 
-/// THE HOP-ROW INVERSION AT THE AUTHOR (`docs/design/window_lane.md` §2.2, R1): "my frame
-/// expressed in the child's frame at the book's instant" — computed THROUGH [`transfer_frame`]
-/// itself, by re-expressing the author's own frame ORIGIN (its own body's seat,
-/// INV-BODY-AT-ORIGIN) into the child's frame. One arithmetic, the frame core's own: the f64
-/// path, the integer cell subtraction and the rotated-cross-cell REFUSAL are all inherited, never
-/// a second implementation (the refusal is exactly the design's "inherits `transfer_frame`'s
-/// refusal semantics"). The one field the pose transform does not carry is the angular term: the
-/// parent's spin seen from the child is the child's own spin, reversed and re-axed into the
-/// child's axes — `-(q⁻¹·ω)`, where `q⁻¹` IS the transferred orientation (the origin pose rides
-/// in with the identity, so what comes back is exactly the child orientation's inverse).
-pub(crate) fn invert_hop_placement(
-    own: FrameRef,
-    child: FrameRef,
-    book: &PlacementBook,
-) -> Result<FramePlacement, FrameError> {
-    let child_at = book.of(child).ok_or(FrameError::UnknownDestFrame)?;
-    let origin = StampedPose::at_rest(own, DVec3::ZERO, book.at());
-    let inv = transfer_frame(&origin, child, book)?;
-    Ok(FramePlacement {
-        origin_cell: inv.pos.cell(),
-        origin: inv.pos.offset(),
-        velocity: inv.vel,
-        orientation: inv.orient,
-        angular_velocity: -(inv.orient * child_at.angular_velocity),
-    })
+/// THE HOP ROW's placement: the child's placement in THIS realm's frame, read off the head book
+/// this realm authored — the same row the roster already carries for that child, stated once more
+/// beside the level so the gateway's chain fold needs no roster search (owner ruling 2026-09-02 R1).
+///
+/// ★ NO INVERSION ANY MORE. This used to re-express THIS realm's origin in the child's frame, at the
+/// child's step, and that number does not exist at galaxy scale: a galaxy's origin counted in a star
+/// system's millimetre cells overflows every lattice, so a galaxy shard refused its own hop on every
+/// tick and the observer chain stopped one level short of the sky. The parent's own number about
+/// its child is always representable, because a parent contains its child.
+pub(crate) fn hop_placement(child: FrameRef, book: &PlacementBook) -> Option<FramePlacement> {
+    book.of(child)
 }
 
-/// THE WINDOW LANE's per-tick placement statements (`docs/design/window_lane.md` §2.9 steps 1–3):
-/// the authored rows were built ONCE this tick (the caller's `realms` — the same Vec every old
-/// lane reads); per open window they ship as ONE [`ShardToGateway::WindowFrame`] stamped at the
-/// one universe tick, `hop: None` on an [`WindowScope::Occupants`] window, the pre-inverted
-/// [`HopRow`] on a [`WindowScope::Child`] window. FireAndForget/Unreliable — the realm-lane
-/// datagram class, full-state latest-wins (owner law 3(b)); a lost frame self-heals next tick.
-/// Kind-BLIND: no realm-kind test anywhere on this path (HR3/HR4).
 #[allow(clippy::too_many_arguments)]
 fn emit_window_frames(
     config: &StubConfig,
@@ -253,7 +259,6 @@ fn emit_window_frames(
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
-    let own_frame = regions.own_frame(config.realm);
     for ((gateway, window), held) in &windows.0 {
         let hop = match held.scope {
             // The observer's-own-level window: an occupant already stands in this frame — no hop.
@@ -277,40 +282,68 @@ fn emit_window_frames(
                 // counted it, because a ship had no lineage to serve a window by. It has one now, so a
                 // subscriber may watch a ship exactly as it watches a planet — which is what has to be
                 // true before a pilot can see their own hull.
-                match invert_hop_placement(own_frame, region.frame, head) {
-                    Ok(inv) => Some(Box::new(vd_wire::session_flow::HopRow { child, inv })),
-                    // The frame core's refusal (rotated frame across integer cells — owed with
-                    // P10 cell math): dropped + counted, never shipped with folded numbers.
-                    Err(refusal) => {
-                        stats.window_hop_refused += 1;
-                        tracing::warn!(
-                            %child,
-                            realm = %config.realm,
-                            ?refusal,
-                            "hop-row inversion refused — the window frame is withheld this tick"
-                        );
+                // The book was authored over this same child roster one expression above, so a
+                // rostered child always has a row: the `None` arm IS the unrostered case, refused
+                // and counted just above.
+                match hop_placement(region.frame, head) {
+                    Some(placement) => {
+                        Some(Box::new(vd_wire::session_flow::HopRow { child, placement }))
+                    }
+                    None => {
+                        // A rostered child with no row in the book this same tick authored: a
+                        // defect in the authoring, never a quiet tick. Counted and said, once
+                        // per keep-alive beat.
+                        stats.window_hop_missing += 1;
+                        if clock
+                            .local_tick
+                            .0
+                            .is_multiple_of(aoi_recheck_cadence(config))
+                        {
+                            tracing::warn!(
+                                %child,
+                                realm = %config.realm,
+                                frame = ?region.frame,
+                                book_rows = head.rows().count(),
+                                "the hop child has NO row in this tick's book — the frame is withheld"
+                            );
+                        }
                         continue;
                     }
                 }
             }
         };
-        let frame = ShardToGateway::WindowFrame {
-            realm_fence,
-            window: *window,
-            at: clock.universe_tick,
-            hop,
-            rows: realms.to_vec(),
-        };
-        let bytes = crate::io::bytes(
-            postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
-        );
-        outbox.0.push((
-            *gateway,
-            MsgClass::RealmSnapshot,
-            bytes,
-            Durability::Ephemeral,
-        ));
-        stats.window_frames_sent += 1;
+        // ★ UNDER THE DATAGRAM BUDGET, IN CHUNKS (2026-09-02). This frame rides the unreliable lane,
+        // and a datagram over the path's budget is dropped by the transport — counted where no gate
+        // reads, and said in a log nobody was reading. MEASURED on the home system: nine mover rows
+        // plus the hop came to 1,420 bytes against 1,200, so EVERY frame of the hull's window was
+        // dropped and the observer chain never had a stamp for the star system. The rows are split
+        // exactly as the entity snapshots are; the hop rides EVERY chunk (one datagram may arrive
+        // without the others) and the gateway merges the chunks of one stamp. A tick with no rows
+        // still sends one frame: the stamp itself is what the composer aligns chains on.
+        let mut chunks =
+            vd_wire::channels::partition_realms(realms, config.snapshot_datagram_budget);
+        if chunks.is_empty() {
+            chunks.push(Vec::new());
+        }
+        for rows in chunks {
+            let frame = ShardToGateway::WindowFrame {
+                realm_fence,
+                window: *window,
+                at: clock.universe_tick,
+                hop: hop.clone(),
+                rows,
+            };
+            let bytes = crate::io::bytes(
+                postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
+            );
+            outbox.0.push((
+                *gateway,
+                MsgClass::RealmSnapshot,
+                bytes,
+                Durability::Ephemeral,
+            ));
+            stats.window_frames_sent += 1;
+        }
         stats.window_frame_rows_sent += realms.len() as u64;
     }
 }
@@ -320,91 +353,115 @@ fn emit_window_frames(
 // realms IT booted, so the sky a player received depended on which shard they were subscribed to.
 // The GATEWAY holds the galaxy now: see `gateway::window_lane::emit_sky`.
 
-/// THE WINDOW LANE's STATIC ROSTER (slice S10; owner-approved 2026-08-27): the author's direct
-/// children that DO NOT MOVE, shipped on the RELIABLE session lane, send-on-change — which for a realm
-/// whose children are static means exactly ONCE, plus the keep-alive re-assert as the repair.
+/// ★ THE CHILDREN ONE WINDOW CARRIES (owner decision 3, 2026-09-02 — R10): the children in the
+/// window's range as the fold last stated them, every mover (a planet keeps its dot until reach gives
+/// it a brightness radius), and the hop child (the chain climbs through it). `None` — everything —
+/// when this realm has no live band: without a band nothing is out of range, which keeps the
+/// walk-scale fixtures byte-identical.
 ///
-/// ★ WHY THIS IS NOT ON THE PER-TICK FRAME. The frame is latest-wins and UNRELIABLE, and that is right
-/// for a mover: a dropped row heals next tick and a resend of a stale position would be worse than the
-/// loss. It is exactly wrong for a star, which never moves — repeating it costs 285 MB/s per subscriber
-/// at the target census (150,000 rows × 95 bytes × 20 Hz) for bytes that are identical every time, and
-/// the 14.2 MB message does not fit a datagram at all.
-///
-/// Send-on-change was REFUSED on the frame for a good reason — over an unreliable lane a dropped row
-/// loses a star forever and a late joiner is never served. **Reliability is what makes send-on-change
-/// lawful here**, which is why this lane and this cadence had to arrive together.
-///
-/// The baseline is a DIGEST of the whole set, so an unchanged roster costs one hash and no bytes; see
-/// [`crate::stub::relay::statement_digest`] for the collision argument (a miss defers one re-send to the
-/// keep-alive beat, never a wrong byte).
-fn emit_window_static_rows(
-    clock: &ClockSample,
-    realm_fence: Fence,
-    statics: &[RealmSnap],
-    windows: &mut OpenWindows,
-    stats: &mut StubStats,
-    outbox: &mut OutboundBox,
+/// A child in range runs and draws itself, so the gateway needs its placement. A child out of range
+/// sleeps and needs no row; if it is a star, the star field already shows it. MEASURED before this
+/// existed: the galaxy shipped 233,220 rows and 233,220 markers on every keep-alive, 22 MB, forever,
+/// and the hop the sky needed was shed with the rest.
+fn window_admitted(
+    regions: &RealmRegions,
+    held: &OpenWindow,
+    movers: &BTreeSet<RealmId>,
+) -> Option<BTreeSet<RealmId>> {
+    if !regions.aoi_live() {
+        return None;
+    }
+    let mut set = held.membership_sent.clone();
+    set.extend(movers.iter().copied());
+    if let WindowScope::Child(child) = held.scope {
+        set.insert(child);
+    }
+    Some(set)
+}
+
+/// THE BODIES AND THE STATIC ROSTERS, per window (Slice A + C1; owner decision 3, 2026-09-02 — R10):
+/// runs AFTER the range fold of the tick, so a freshly opened window is served the children in its
+/// range on the tick it opened. Each window gets its own body set and its own roster, send-on-change
+/// on both (a digest per subject; a digest over the whole roster).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_window_rosters(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    authority: Res<RealmAuthority>,
+    regions: Res<RealmRegions>,
+    placements: Res<Placements>,
+    mut stats: ResMut<StubStats>,
+    mut outbox: ResMut<OutboundBox>,
+    lane: RosterLane,
 ) {
-    let encoded = postcard::to_allocvec(statics).expect("closed wire enums serialize infallibly");
-    let digest = crate::stub::relay::statement_digest(&encoded);
+    let (mut windows, child_luma, driven) = lane;
+    let Some(realm_fence) = authority.0 else {
+        return;
+    };
+    if windows.0.is_empty() {
+        return;
+    }
+    let head = placements
+        .0
+        .head(config.realm)
+        .expect("the writer authors every held anchor before the feed runs");
+    let movers: BTreeSet<RealmId> = regions.moving_children_of(config.realm, &driven);
     for ((gateway, window), held) in &mut windows.0 {
+        let admitted = window_admitted(&regions, held, &movers);
+        for (subject, stmt) in current_bodies(&config, &regions, &child_luma.0, admitted.as_ref()) {
+            let bag = match &stmt {
+                BodyStmt::SelfLook { bag } => bag,
+                BodyStmt::Marker { luma } => luma,
+            };
+            let digest = crate::stub::relay::statement_digest(bag);
+            if held.sent_bodies.get(&subject) == Some(&digest) {
+                continue; // unchanged — send-on-change holds its tongue
+            }
+            push_session_reply(
+                outbox.as_mut(),
+                *gateway,
+                &ShardToGateway::WindowBody {
+                    realm_fence,
+                    window: *window,
+                    subject,
+                    stmt,
+                    authored_at: clock.universe_tick,
+                },
+            );
+            held.sent_bodies.insert(subject, digest);
+            stats.window_bodies_sent += 1;
+        }
+        // The static roster of this window: the admitted set less the movers (each one lookup),
+        // or — with no live band — every static child, as before.
+        let rows: Vec<RealmSnap> = match &admitted {
+            Some(set) => regions.snaps_for(
+                config.realm,
+                head,
+                set.iter().copied().filter(|r| !movers.contains(r)),
+            ),
+            None => regions
+                .authored_realm_snaps(config.realm, head)
+                .into_iter()
+                .filter(|r| !movers.contains(&r.realm))
+                .collect(),
+        };
+        let encoded = postcard::to_allocvec(&rows).expect("closed wire enums serialize infallibly");
+        let digest = crate::stub::relay::statement_digest(&encoded);
         if held.sent_static == Some(digest) {
             continue; // unchanged — a static roster says nothing twice
         }
         push_session_reply(
-            outbox,
+            outbox.as_mut(),
             *gateway,
             &ShardToGateway::WindowStaticRows {
                 realm_fence,
                 window: *window,
                 authored_at: clock.universe_tick,
-                rows: statics.to_vec(),
+                rows,
             },
         );
         held.sent_static = Some(digest);
         stats.window_static_rows_sent += 1;
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_window_bodies(
-    config: &StubConfig,
-    clock: &ClockSample,
-    realm_fence: Fence,
-    regions: &RealmRegions,
-    child_luma: &BTreeMap<RealmId, (u8, f64)>,
-    windows: &mut OpenWindows,
-    stats: &mut StubStats,
-    outbox: &mut OutboundBox,
-) {
-    // The current body set, built once per tick (subjects are disjoint by construction: a realm
-    // is never its own direct child) — the ONE authoring expression the direct lane and the Q2
-    // relay ship share.
-    let bodies = current_bodies(config, regions, child_luma);
-    for ((gateway, window), held) in &mut windows.0 {
-        for (subject, stmt) in &bodies {
-            let bag = match stmt {
-                BodyStmt::SelfLook { bag } => bag,
-                BodyStmt::Marker { luma } => luma,
-            };
-            let digest = crate::stub::relay::statement_digest(bag);
-            if held.sent_bodies.get(subject) == Some(&digest) {
-                continue; // unchanged — send-on-change holds its tongue
-            }
-            push_session_reply(
-                outbox,
-                *gateway,
-                &ShardToGateway::WindowBody {
-                    realm_fence,
-                    window: *window,
-                    subject: *subject,
-                    stmt: stmt.clone(),
-                    authored_at: clock.universe_tick,
-                },
-            );
-            held.sent_bodies.insert(*subject, digest);
-            stats.window_bodies_sent += 1;
-        }
     }
 }
 
@@ -422,6 +479,7 @@ pub(crate) fn current_bodies(
     config: &StubConfig,
     regions: &RealmRegions,
     child_luma: &BTreeMap<RealmId, (u8, f64)>,
+    admitted: Option<&BTreeSet<RealmId>>,
 ) -> Vec<(RealmId, BodyStmt)> {
     let mut bodies: Vec<(RealmId, BodyStmt)> = Vec::new();
     // THE BOUND/LOOK SPLIT (real-scale design §3.0): what a realm STATES about its appearance
@@ -439,10 +497,10 @@ pub(crate) fn current_bodies(
             },
         ));
     }
-    for region in regions.direct_children(config.realm) {
-        // The marker radius the parent authors is the child's LOOK extent — the size the child
-        // would draw at, never its authority bound (at true scale the two differ by orders).
-        let Some(look) = region.look else { continue };
+    // The markers: over the admitted set when there is one (each a lookup), else every direct
+    // child — the roster walk only when nothing is out of range.
+    let mut marker = |region: &vd_core::geometry::RealmRegion| {
+        let Some(look) = region.look else { return };
         bodies.push((
             region.realm,
             BodyStmt::Marker {
@@ -452,6 +510,20 @@ pub(crate) fn current_bodies(
                 ),
             },
         ));
+    };
+    match admitted {
+        Some(set) => {
+            for realm in set {
+                if let Some(region) = regions.direct_child(config.realm, *realm) {
+                    marker(region);
+                }
+            }
+        }
+        None => {
+            for region in regions.direct_children(config.realm) {
+                marker(region);
+            }
+        }
     }
     bodies
 }
@@ -507,40 +579,11 @@ pub(crate) fn emit_realm_frames(
         .0
         .head(config.realm)
         .expect("the writer authors every held anchor before the feed runs");
-    let realms = regions.authored_realm_snaps(config.realm, head);
-    // ★ THE TWO LANES, SPLIT BY WHETHER THE CHILD MOVES (slice S10; owner ruling 2026-08-27).
-    // A mover's row belongs on the per-tick frame, where repetition IS the loss story and a resend of
-    // last tick's value would be worse than useless. A STATIC child's row belongs on the reliable lane
-    // exactly once — MEASURED, repeating it costs 285 MB/s per subscriber at the target census for data
-    // that never changes, and 14.2 MB does not fit a datagram at all.
-    //
-    // `realms` (the whole roster) is kept for the PARENT-ward relay below, which is a different lane to
-    // a different consumer and is not split here.
-    // ★ A DRIVEN CHILD MOVES TOO, AND THIS ASKED ONLY THE ORBIT BOOK (fixed 2026-09-01).
-    //
-    // A ship under thrust is not in the orbital roster — driven children live in their own book — so
-    // it was filed as STANDING STILL. The static lane sends on CHANGE, and it compares a fingerprint
-    // of the WHOLE static set. A moving ship changes that fingerprint every tick.
-    //
-    // So the entire static roster — every planet, every star, every built structure in this realm —
-    // was re-serialized and re-sent on the RELIABLE session lane, to every open window, at tick rate,
-    // for as long as one ship held its throttle. The comment above states what that lane costs when it
-    // repeats: 285 MB/s per subscriber at the target census, and one roster of 14.2 MB that does not
-    // fit a datagram at all.
-    //
-    // The question was never "is this child on rails?" — it is "does this child move?". Both books
-    // answer it, and asking both is one call.
-    let (movers, statics): (Vec<RealmSnap>, Vec<RealmSnap>) = realms
-        .iter()
-        .cloned()
-        .partition(|r| regions.child_moves(r.realm) | driven.moves(r.realm));
+    // ★ THE MOVERS, BY LOOKUP (owner ruling 2026-09-02 R8 item 1; SL9): the orbiting and the driven
+    // are a named set, and their rows are each one lookup — the roster is never walked here.
+    let movers: BTreeSet<RealmId> = regions.moving_children_of(config.realm, &driven);
+    let mover_rows: Vec<RealmSnap> = regions.snaps_for(config.realm, head, movers.iter().copied());
 
-    // ===== THE WINDOW LANE (docs/design/window_lane.md §2.9): per tick, per open window, ONE
-    // code path for every realm kind (HR3/HR4; ships excluded + counted per the D-SHIP-1
-    // pattern). There is NO authored-empty return: a childless LEAF realm authors no rows, yet
-    // its own-level window still owes its per-tick stamp (`at` is what the composer aligns chains
-    // on) and its self-look. Since Slice C2 this is the WHOLE of the shard's picture egress —
-    // the old lanes it used to run beside are deleted.
     prune_expired_windows(&mut windows, &config, clock.local_tick, &mut stats);
     stats.windows_open = windows.0.len() as u64;
     if !windows.0.is_empty() {
@@ -550,29 +593,14 @@ pub(crate) fn emit_realm_frames(
             realm_fence,
             &regions,
             head,
-            &movers,
+            &mover_rows,
             &windows,
             &mut stats,
             &mut outbox,
         );
-        emit_window_bodies(
-            &config,
-            &clock,
-            realm_fence,
-            &regions,
-            &child_luma.0,
-            &mut windows,
-            &mut stats,
-            &mut outbox,
-        );
-        emit_window_static_rows(
-            &clock,
-            realm_fence,
-            &statics,
-            &mut windows,
-            &mut stats,
-            &mut outbox,
-        );
+        // The bodies and the static rosters ship from `emit_window_rosters`, which runs AFTER the
+        // range fold of this same tick, so a window opened this tick is served the children in
+        // its range on this tick (owner decision 3, 2026-09-02 — R10).
     }
     // ★ NO SKY IS STATED HERE ANY MORE (S11, owner ruling 2026-08-27 — "we're passing the Galaxy just
     // once over reliable lane"). A shard folded its sky from the realms IT booted, so the sky a player
@@ -607,7 +635,20 @@ pub(crate) fn emit_realm_frames(
     let relay_due =
         crate::directory::due_this_tick(aoi_recheck_cadence(&config), clock.local_tick.0);
     if let Some(parent) = parent_node.0 {
-        let bodies = current_bodies(&config, &regions, &child_luma.0);
+        // ★ THE RELAY CARRIES THE CHILDREN IN RANGE (owner decision 3, 2026-09-02 — R10): the fold
+        // verdict of this realm (the union over every looker), plus every mover, exactly as a window
+        // does — a galaxy relaying 233,220 sleeping systems to the universe is the same flood by
+        // another road. With no live band nothing is out of range, as today.
+        let relay_admitted: Option<BTreeSet<RealmId>> = regions.aoi_live().then(|| {
+            let mut set = verdict.0.clone();
+            set.extend(movers.iter().copied());
+            set
+        });
+        let realms: Vec<RealmSnap> = match &relay_admitted {
+            Some(set) => regions.snaps_for(config.realm, head, set.iter().copied()),
+            None => regions.authored_realm_snaps(config.realm, head),
+        };
+        let bodies = current_bodies(&config, &regions, &child_luma.0, relay_admitted.as_ref());
         if !bodies.is_empty() {
             // THE SEALED INTERIOR FORWARD (look horizon slice 3, owner-approved 2026-08-17 —
             // look_horizon.md RULINGS + §2 ASK A): each held child batch's OWN half, verbatim,
@@ -654,6 +695,13 @@ pub(crate) fn emit_realm_frames(
 /// registry, the boot-planted marker roster, the Q2 relay's two stores (the child-side ship
 /// memo + the parent-side holder), and (look horizon slice 3) the read-only shared in-band
 /// verdict the interior forward gates on (§3.4.5 — written by the AoI fold, read here).
+/// The roster emitter's stores, bundled as ONE tuple `SystemParam` (bevy's 16-param ceiling).
+type RosterLane<'w> = (
+    ResMut<'w, OpenWindows>,
+    Res<'w, ChildLuma>,
+    Res<'w, crate::stub::drive::DrivenChildren>,
+);
+
 type WindowLaneStores<'w> = (
     ResMut<'w, OpenWindows>,
     Res<'w, ChildLuma>,

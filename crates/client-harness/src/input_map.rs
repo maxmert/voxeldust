@@ -36,6 +36,80 @@ pub const THROTTLE_TIERS: u8 = 10;
 /// the server's own ramp still bounds the acceleration underneath it.
 pub const THROTTLE_EASE_TAU_S: f32 = 1.2;
 
+/// THROWAWAY (same instrument; owner 2026-09-02): the throttle has TWO MODES, and a key swaps them.
+///
+/// One hull's rating now spans a docking nudge and a run between stars — thirteen orders of
+/// magnitude — and ten tiers over that whole span put a star-system cruise at tier 6 and made the
+/// low tiers useless for anything but leaving a berth (owner: *"the lower tier of the throttle is
+/// way too high"*). So the span is cut in two ladders that meet end to end:
+/// - **Normal** covers the bottom, from [`THROTTLE_FLOOR`] up to [`NORMAL_TOP`] — a docking nudge to
+///   a run across a star system. It is the mode a pilot starts in.
+/// - **Warp** covers the top, from [`NORMAL_TOP`] up to the whole rating — the run between stars.
+///
+/// Both are input shaping in the input device: the wire still carries one magnitude in `[0, 1]`, and
+/// the hull still scales it by its own rating (SL6: nothing new crosses). The mode is a name for
+/// which end of the ladder the ten tiers cover, and a real ship replaces it with a functional block.
+///
+/// Example, on a hull rated at nine million million metres per second per second: normal tier 1
+/// pushes one metre per second per second and normal tier 10 pushes ninety million; warp tier 1 is
+/// that same ninety million and warp tier 10 is the whole nine million million.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThrottleMode {
+    #[default]
+    Normal,
+    Warp,
+}
+
+impl ThrottleMode {
+    /// The other mode — what the swap key does.
+    #[must_use]
+    pub fn toggled(self) -> ThrottleMode {
+        match self {
+            ThrottleMode::Normal => ThrottleMode::Warp,
+            ThrottleMode::Warp => ThrottleMode::Normal,
+        }
+    }
+
+    /// The magnitude the LOWEST tier commands in this mode.
+    #[must_use]
+    pub fn floor(self) -> f32 {
+        match self {
+            ThrottleMode::Normal => THROTTLE_FLOOR,
+            ThrottleMode::Warp => NORMAL_TOP,
+        }
+    }
+
+    /// The magnitude the TOP tier commands in this mode.
+    #[must_use]
+    pub fn top(self) -> f32 {
+        match self {
+            ThrottleMode::Normal => NORMAL_TOP,
+            ThrottleMode::Warp => 1.0,
+        }
+    }
+}
+
+/// The magnitude normal tier 1 commands, as a fraction of the rating. MEASURED (owner flights,
+/// 2026-09-02): a hull rated at nine million million metres per second per second wants about one
+/// metre per second per second to leave a berth.
+pub const THROTTLE_FLOOR: f32 = 1.0e-13;
+
+/// Where normal ends and warp begins, as a fraction of the rating. MEASURED: a hundred million
+/// metres per second per second crossed the home star system in minutes and could not move the
+/// star field; on the same hull that is about 1e-5 of the rating.
+pub const NORMAL_TOP: f32 = 1.0e-5;
+
+/// The commanded magnitude for a throttle tier in a mode: `0` at tier 0, the mode's floor at tier 1,
+/// the mode's top at [`THROTTLE_TIERS`], geometric in between. A tier past the top is the top.
+#[must_use]
+pub fn throttle_magnitude(mode: ThrottleMode, tier: u8) -> f32 {
+    let tier = tier.min(THROTTLE_TIERS);
+    let steps_below_top = f32::from(THROTTLE_TIERS - tier);
+    let ladder = f32::from(THROTTLE_TIERS - 1);
+    // `tier == 0` is a true standstill, never the floor: the multiplication by the sign is the branch.
+    f32::from(tier > 0) * mode.top() * (mode.floor() / mode.top()).powf(steps_below_top / ladder)
+}
+
 /// The set of held movement keys this frame (idempotent — latest-wins on the wire).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MovementKeys {
@@ -55,6 +129,12 @@ pub struct MovementKeys {
 impl MovementKeys {
     /// The `[forward, strafe, vertical]` axes in `[-1, 1]` — per-axis (no diagonal
     /// normalization; matches the server's per-axis clamp).
+    ///
+    /// ★ THE STRAFE AXIS IS NOT THROTTLED (owner, 2026-09-02). In a realm that flies on a stick the
+    /// shard reads this axis as the TURN — `A`/`D` swing the nose — and a turn must run at the full
+    /// rated rate while the key is held and stop when it is released. The eased throttle would make
+    /// it start late and, worse, keep turning for seconds after the key is up. On foot the axis is a
+    /// full-pace sidestep, which the top tier already commanded.
     #[must_use]
     pub fn axes(self) -> [f32; 3] {
         // The eased tier IS the magnitude the geometric throttle reads. Clamped here, once, so a
@@ -62,7 +142,7 @@ impl MovementKeys {
         let scale = self.throttle.clamp(0.0, 1.0);
         [
             axis(self.forward, self.back) * scale,
-            axis(self.right, self.left) * scale,
+            axis(self.right, self.left),
             axis(self.up, self.down) * scale,
         ]
     }
@@ -146,13 +226,14 @@ mod tests {
             }
             .axes()
         };
+        // The strafe axis is the TURN on a hull and rides at full magnitude whatever the tier.
         assert_eq!(all(1.0), [1.0, 1.0, 1.0]);
-        assert_eq!(all(0.5), [0.5, 0.5, 0.5]);
-        assert_eq!(all(0.0), [0.0, 0.0, 0.0]);
+        assert_eq!(all(0.5), [0.5, 1.0, 0.5]);
+        assert_eq!(all(0.0), [0.0, 1.0, 0.0]);
         // Out of range is CLAMPED here, once, so a render-glue slip can never command more than the
         // realm allows — nor invert a direction with a negative.
         assert_eq!(all(4.0), [1.0, 1.0, 1.0]);
-        assert_eq!(all(-1.0), [0.0, 0.0, 0.0]);
+        assert_eq!(all(-1.0), [0.0, 1.0, 0.0]);
         // …and stationary is stationary at any tier — the throttle scales movement, never invents it.
         assert_eq!(
             MovementKeys {
@@ -171,12 +252,13 @@ mod tests {
             right: true,
             ..Default::default()
         };
-        // A half tier is half the magnitude; the axes carry the throttle as their magnitude.
+        // A half tier is half the magnitude on the push axes; the strafe axis (the hull's TURN)
+        // rides whole at any tier.
         let half = MovementKeys {
             throttle: 0.5,
             ..keys
         };
-        assert_eq!(half.move_action(), InputAction::Move([0.5, 0.5, 0.0]));
+        assert_eq!(half.move_action(), InputAction::Move([0.5, 1.0, 0.0]));
         let fast = MovementKeys {
             throttle: 1.0,
             ..keys
@@ -210,5 +292,64 @@ mod tests {
         );
         // Out of the u32 action channel → None (same bound vdctl enforces).
         assert_eq!(action(vd_devproto::MAX_ACTION_INDEX + 1, true), None);
+    }
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::{NORMAL_TOP, THROTTLE_FLOOR, THROTTLE_TIERS, ThrottleMode, throttle_magnitude};
+
+    #[test]
+    fn each_ladder_runs_from_a_standstill_through_its_floor_to_its_top() {
+        for mode in [ThrottleMode::Normal, ThrottleMode::Warp] {
+            assert_eq!(throttle_magnitude(mode, 0), 0.0, "{mode:?}");
+            assert_eq!(throttle_magnitude(mode, 1), mode.floor(), "{mode:?}");
+            assert_eq!(
+                throttle_magnitude(mode, THROTTLE_TIERS),
+                mode.top(),
+                "{mode:?}"
+            );
+            // Past the top is the top.
+            assert_eq!(
+                throttle_magnitude(mode, THROTTLE_TIERS + 5),
+                mode.top(),
+                "{mode:?}"
+            );
+        }
+        assert_eq!(ThrottleMode::Normal.floor(), THROTTLE_FLOOR);
+        assert_eq!(ThrottleMode::Warp.top(), 1.0);
+    }
+
+    #[test]
+    fn the_two_ladders_meet_end_to_end() {
+        // Normal's top IS warp's floor, so the whole span has no gap and no overlap.
+        assert_eq!(ThrottleMode::Normal.top(), NORMAL_TOP);
+        assert_eq!(ThrottleMode::Warp.floor(), NORMAL_TOP);
+        assert_eq!(
+            throttle_magnitude(ThrottleMode::Normal, THROTTLE_TIERS),
+            throttle_magnitude(ThrottleMode::Warp, 1)
+        );
+    }
+
+    #[test]
+    fn every_step_multiplies_by_the_same_ratio_within_a_mode() {
+        for mode in [ThrottleMode::Normal, ThrottleMode::Warp] {
+            let ratio = throttle_magnitude(mode, 2) / throttle_magnitude(mode, 1);
+            for tier in 2..=THROTTLE_TIERS {
+                let step = throttle_magnitude(mode, tier) / throttle_magnitude(mode, tier - 1);
+                assert!(
+                    (step - ratio).abs() < 1.0e-3 * ratio,
+                    "{mode:?} tier {tier}: {step} vs {ratio}"
+                );
+            }
+            assert!(ratio > 1.0, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn the_swap_key_toggles_and_a_pilot_starts_in_normal() {
+        assert_eq!(ThrottleMode::default(), ThrottleMode::Normal);
+        assert_eq!(ThrottleMode::Normal.toggled(), ThrottleMode::Warp);
+        assert_eq!(ThrottleMode::Warp.toggled(), ThrottleMode::Normal);
     }
 }

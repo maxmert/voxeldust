@@ -536,6 +536,7 @@ fn build_cluster(
             // No world booted in a fixture, so the gateway states no sky (S11).
             sky: Vec::new(),
             sky_generation: 0,
+            sky_frame: None,
             shard: SHARD,
             known_shards,
             auth_verifying_key: auth_verifying_key(),

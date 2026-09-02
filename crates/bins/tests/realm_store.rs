@@ -55,12 +55,9 @@ fn open(path: &std::path::Path) -> vd_io_prod::store::RedbStore {
         vd_core::EpochId(0),
     )
     .expect("the realm store's label");
-    let (store, _d) = vd_io_prod::store::RedbStore::open(
-        path,
-        vd_io_prod::store::StoreTuning::default(),
-        stamp,
-    )
-    .unwrap_or_else(|e| panic!("a realm store opens at {}: {e}", path.display()));
+    let (store, _d) =
+        vd_io_prod::store::RedbStore::open(path, vd_io_prod::store::StoreTuning::default(), stamp)
+            .unwrap_or_else(|e| panic!("a realm store opens at {}: {e}", path.display()));
     store
 }
 
@@ -74,7 +71,10 @@ fn a_realm_reads_back_exactly_what_it_wrote() {
         let mut store = open(&path);
         store.put(&bs::body_key(), &bs::encode_body(&a_body(ship(1))).into());
         for (seq, x) in [(1_u64, 1000.0_f64), (2, 2000.0), (3, 3000.0)] {
-            store.put(&bs::berth_key(ship(seq)), &bs::encode_berth(&a_berth(ship(seq), x)).into());
+            store.put(
+                &bs::berth_key(ship(seq)),
+                &bs::encode_berth(&a_berth(ship(seq), x)).into(),
+            );
         }
         // `put` only STAGES. `commit` is the durability barrier, and `flush` blocks until that commit
         // is actually on disk — `commit` alone returns before its own write is fsync'd.
@@ -94,7 +94,11 @@ fn a_realm_reads_back_exactly_what_it_wrote() {
     let store = open(&path);
     let (berths, body) = vd_bins::read_realm_store(&store).expect("the rows read back");
     let body = body.expect("the body was stored");
-    assert_eq!(body.realm, ship(1), "the whole minted name survived the disk");
+    assert_eq!(
+        body.realm,
+        ship(1),
+        "the whole minted name survived the disk"
+    );
     assert_eq!(body.owner, AccountId(1000));
     assert_eq!(body.facts.mass_g, 50_000_000);
     assert_eq!(berths.len(), 3, "every berth came back in ONE scan");
@@ -146,7 +150,9 @@ fn a_realm_with_no_store_boots_exactly_as_it_always_did() {
     // byte-identically — an absent store is not an empty one, it is the world before this existed.
     // SAFETY: this test process states no realm store, which is what every existing cluster does.
     unsafe { std::env::remove_var("VD_REALM_STORE") };
-    let store = vd_bins::open_realm_store(&vd_bins::process_env())
+    // SAFETY (again): no directory either, so a realm cannot work out a filename.
+    unsafe { std::env::remove_var("VD_REALM_STORE_DIR") };
+    let store = vd_bins::open_realm_store(&vd_bins::process_env(), RealmId::System(7))
         .expect("no path is not an error");
     assert!(store.is_none(), "no path means no store, and no change");
 }
@@ -185,17 +191,27 @@ fn the_shipyards_stand_in_writes_rows_the_shard_reads() {
     );
 
     // The PARENT's file holds one berth, and nothing else.
-    let (berths, no_body) = vd_bins::read_realm_store(&open(&parent_store)).expect("the parent's rows");
+    let (berths, no_body) =
+        vd_bins::read_realm_store(&open(&parent_store)).expect("the parent's rows");
     assert_eq!(berths.len(), 1, "the parent authored exactly one berth");
-    assert!((berths[0].offset_m.x - 1500.0).abs() < 1e-9, "at the berth the tool was given");
+    assert!(
+        (berths[0].offset_m.x - 1500.0).abs() < 1e-9,
+        "at the berth the tool was given"
+    );
     assert!(no_body.is_none(), "a parent holds no body of its own here");
 
     // The SHIP's file holds the body, and no berths — it has authored none.
     let (no_berths, body) = vd_bins::read_realm_store(&open(&ship_store)).expect("the ship's rows");
     let body = body.expect("the hull has a body");
-    assert!(no_berths.is_empty(), "a hull with no built children authored no berths");
+    assert!(
+        no_berths.is_empty(),
+        "a hull with no built children authored no berths"
+    );
     assert_eq!(body.owner, AccountId(1000), "and it belongs to somebody");
-    assert_eq!(body.realm, berths[0].child, "the two rows name the SAME hull");
+    assert_eq!(
+        body.realm, berths[0].child,
+        "the two rows name the SAME hull"
+    );
     assert!(
         body.facts.max_push_micro_mps2 > 0,
         "the hull states its own push, not a shared constant"
@@ -219,14 +235,22 @@ fn a_hull_written_by_the_tool_is_a_realm_in_the_world_the_shard_boots() {
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_vd-build-ship"))
         .args([
-            "--parent-store", &parent_store.display().to_string(),
-            "--ship-store", &ship_store.display().to_string(),
-            "--owner", "1000",
-            "--berth-x-m", "1000",
+            "--parent-store",
+            &parent_store.display().to_string(),
+            "--ship-store",
+            &ship_store.display().to_string(),
+            "--owner",
+            "1000",
+            "--berth-x-m",
+            "1000",
         ])
         .output()
         .expect("the tool runs");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // What the shard does at boot: read the berths, then build the world with them.
     let (berths, _body) = vd_bins::read_realm_store(&open(&parent_store)).expect("the berths");
@@ -237,18 +261,43 @@ fn a_hull_written_by_the_tool_is_a_realm_in_the_world_the_shard_boots() {
 
     let dev = vd_bins::DEV;
     let (regions, _m, _l) = vd_bins::boot_world_built(
-        dev.universe_seed, &held, parent, dev.move_speed, dev.tick_dt, &held, &with,
+        dev.universe_seed,
+        &held,
+        parent,
+        dev.move_speed,
+        dev.tick_dt,
+        &held,
+        &with,
+        None,
     );
     let hull = regions
         .iter()
         .find(|r| r.realm == berths[0].child)
         .expect("the hull the tool built is a realm in this world");
-    assert_eq!(hull.parent, Some(parent), "berthed in the realm that authored it");
-    assert!(hull.aoi.spin_up_r_m() > 0.0, "and it wakes by the generic rule");
+    assert_eq!(
+        hull.parent,
+        Some(parent),
+        "berthed in the realm that authored it"
+    );
+    assert!(
+        hull.aoi.spin_up_r_m() > 0.0,
+        "and it wakes by the generic rule"
+    );
 
     // And with NO berths the same call gives the world that was there before any of this existed.
     let (plain, _m, _l) = vd_bins::boot_world_built(
-        dev.universe_seed, &held, parent, dev.move_speed, dev.tick_dt, &held, &[],
+        dev.universe_seed,
+        &held,
+        parent,
+        dev.move_speed,
+        dev.tick_dt,
+        &held,
+        &[],
+        None,
     );
-    assert_eq!(regions.len(), plain.len() + 1, "exactly one realm added, nothing else moved");
+    assert_eq!(
+        regions.len(),
+        plain.len() + 1,
+        "exactly one realm added, nothing else moved"
+    );
 }

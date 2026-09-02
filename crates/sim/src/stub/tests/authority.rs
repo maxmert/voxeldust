@@ -222,7 +222,7 @@ fn a_cohosting_shard_renews_its_child_realm_lease_on_cadence() {
     rig.world.resource_mut::<Dots>().0.insert(
         SessionId(1),
         Dot {
-        last_stick: None,
+            last_stick: None,
             entity: EntityId::pack(EntityKind::Player, 7, 1, 1),
             account: AccountId(1),
             session_fence: Fence(1),

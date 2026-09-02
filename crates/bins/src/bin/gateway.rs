@@ -153,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Folded over the WHOLE world, not one realm's forest: this is the galaxy, and every player gets
     // the same one. SL4 holds — the gateway library receives finished ROWS and can name no body.
-    let (sky, sky_generation) = vd_bins::star_catalogue_for_boot(
+    let (sky, sky_generation, sky_frame) = vd_bins::star_catalogue_for_boot(
         universe_seed,
         move_speed * time_multiplier,
         tick_dt,
@@ -188,6 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // THE GALAXY, folded above from the whole world (S11).
             sky,
             sky_generation,
+            sky_frame,
             // Track R / 1d.2: the STABLE routable-shard roster — the login shard PLUS every shard in
             // VD_KNOWN_SHARDS (parsed by the EXISTING `EnvConfig::node_list`), so a (render-ready) DEST's
             // frames are node-class dispatchable (`is_known_shard` ⇒ they reach `on_shard_frame` instead

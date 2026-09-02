@@ -217,6 +217,8 @@ pub(crate) fn evaluate_realm_aoi(
     // writes). The byte goes direct to the child's head on the route the parent already
     // resolves — never further, never sideways, never through the orchestrator (§2 ASK B).
     child_nodes: Res<ChildRealmNodes>,
+    // The driven children: their rows change every tick, so they are always visited (R8 item 1).
+    driven: Res<crate::stub::drive::DrivenChildren>,
     // The chain's emit-side observability: read nowhere in the sim — a counter, never a control input.
     mut stats: ResMut<StubStats>,
 ) {
@@ -259,6 +261,7 @@ pub(crate) fn evaluate_realm_aoi(
         &mut interest_held,
         &mut interest_latch.0,
         &child_nodes,
+        &driven,
         &mut stats,
     );
 }
@@ -307,6 +310,7 @@ fn aoi_decide(
     interest: &mut InterestHeld,
     interest_latch: &mut BTreeSet<RealmId>,
     child_nodes: &ChildRealmNodes,
+    driven: &crate::stub::drive::DrivenChildren,
     stats: &mut StubStats,
 ) {
     let own_coord = &config.own_coord;
@@ -372,7 +376,26 @@ fn aoi_decide(
     // The UNIFIED direct-child placements — the HEAD book's rows joined back onto the child regions,
     // stable seed-derived Vec order — the SAME authored table the observer feed reads (H-1/H-2, no
     // reorder). Resolved BEFORE the observer fold: the SL7 child observers below stand AT these rows.
-    let placements = regions.child_rows(config.realm, book);
+    // ★ THE PROXIES' OWN ROWS FIRST (owner ruling 2026-09-02 R8 item 1; SL9): the occupied and the
+    // watched children are a small named set, and their placements are each one lookup. The full
+    // candidate set is decided BELOW, from the observers this builds — the roster is never walked.
+    let watched: std::collections::BTreeSet<RealmId> = windows
+        .0
+        .values()
+        .filter_map(|held| match held.scope {
+            vd_wire::session_flow::WindowScope::Child(child) => Some(child),
+            vd_wire::session_flow::WindowScope::Occupants => None,
+        })
+        .collect();
+
+    let proxy_rows = regions.child_rows_for(
+        config.realm,
+        book,
+        child_liveness
+            .keys()
+            .copied()
+            .chain(watched.iter().copied()),
+    );
 
     // Step 5 slice B — THE SL7 OCCUPIED-CHILD PROXY, verbatim: for each of MY direct children with a
     // FRESH occupancy bit, one synthetic observer at the placement AND velocity I already author for
@@ -380,17 +403,47 @@ fn aoi_decide(
     // extent are mine, the bit already arrived. The child stands in for whoever is inside it; the
     // error is bounded by the child's size, which is the resolution my decision is meaningful at.
     // EMPTY at walk/static (no bit ever arrives) ⇒ byte-identical.
-    let child_observers = placements
-        .iter()
-        .filter(|(region, _)| child_liveness.contains_key(&region.realm))
-        .map(|(region, pose)| AoiObserver {
+    // ★ AN OPEN WINDOW IS ITSELF THE DEMAND (owner ruling 2026-09-01, V1/V5). A `Child(c)` window
+    // says, in the gateway's own words, "serve your picture for whoever is inside your child c".
+    // Nobody opens one unless somebody is looking from inside c, and the gateway is the party that
+    // actually knows — it holds the sessions. So the window is a DIRECT statement of demand, where
+    // the occupancy bit is a weaker rumour of the same fact travelling by another road.
+    //
+    // MEASURED, and it is why this exists (2026-09-01): a player stood inside a player-built hull and
+    // saw a black sky. The star system held the window, held the hull's placement, and could have
+    // answered the question by geometry alone — but it never asked, because the hull's bit had not
+    // arrived. 96 000 drawings reached the gateway and parked behind the empty verdict.
+    //
+    // BOUNDED BY OPEN WINDOWS, never by the child count (SL9): a realm with six hundred children and
+    // one window builds one stand-in observer.
+
+    // Step 5 slice B — THE SL7 OCCUPIED-CHILD PROXY: for each of MY direct children that is either
+    // KNOWN OCCUPIED (a fresh bit) or WATCHED (an open window names it), one synthetic observer at the
+    // placement AND velocity I already author for it, reaching as far as the child's own extent. Zero
+    // new data crosses: the placement and the extent are mine, and both the bit and the window already
+    // arrive. The child stands in for whoever is inside it; the error is bounded by the child's own
+    // size, which is the resolution my decision is meaningful at.
+    //
+    // ★ THE ORIGIN SPLITS ON WHICH SIGNAL IT WAS, and that is a law, not a convenience. A byte from
+    // OUTSIDE must never manufacture an occupancy fact (the bit means occupancy and nothing else), so a
+    // window-derived observer is `Interest`: it drives demand and the render verdict — which is exactly
+    // what a looker needs — and it never reaches the Empty self-report or the bit. A bit-derived
+    // observer stays `Occupancy`, so SL7's "a live child keeps its parent alive" is untouched.
+    // ONE observer per child either way: a child that is both occupied and watched is not counted twice.
+    //
+    // EMPTY at walk/static (no bit ever arrives, no window is ever opened) ⇒ byte-identical.
+    let child_observers = proxy_rows.iter().filter_map(|(region, pose)| {
+        let occupied_child = child_liveness.contains_key(&region.realm);
+        let watched_child = watched.contains(&region.realm);
+        (occupied_child | watched_child).then(|| AoiObserver {
             id: ObserverId::Child(region.realm),
             pos: pose.pos,
             vel: pose.vel,
             reach: region.shape.circumscribed_extent(),
             outside_from_m: None,
-            origin: ObserverOrigin::Occupancy,
-        });
+            origin: child_observer_origin(occupied_child),
+        })
+    });
 
     // Observers = durable dots this shard SPEAKS FOR — owned, or mid-hand-off — ∪ held transients (mirror
     // `evaluate_realm_boundaries`) ∪ the OCCUPIED direct children (SL7, slice B), each TAGGED with its
@@ -551,6 +604,55 @@ fn aoi_decide(
     // on its own window (SL3). The two OUTLINE accumulators that used to sit here — the per-dot
     // `RealmSceneDelta` push and the per-live-child `ChildSceneSet` reflect — are deleted with
     // their lanes; a parent has no business authoring what its children look like.
+    // ★ THE CANDIDATES, BY LOOKUP (owner ruling 2026-09-02 R8 item 1; SL9): the children this fold
+    // visits are the ones that could be in range of SOME looker, plus the ones already latched —
+    // never the roster. For a looker inside, the range index is walked along the looker's lead
+    // (its live position to its predicted one), dilated by the looker's own reach; for the outside
+    // looker known only by distance, the radial list answers with the shell it can reach. The
+    // movers and the driven are always visited (their rows change every tick); a child with a live
+    // latch, a live bit, an open window or an interest latch is always visited so it can release.
+    // MEASURED before this existed: the galaxy visited 279,380 children per tick, 1.9 s of a 20 ms
+    // budget, for one occupant who could reach one of them.
+    let mut candidates: BTreeSet<RealmId> = regions.moving_children_of(config.realm, driven);
+    candidates.extend(membership.keys().map(|(_, child)| *child));
+    candidates.extend(child_liveness.keys().copied());
+    candidates.extend(watched.iter().copied());
+    candidates.extend(interest_latch.iter().copied());
+    let mut found: Vec<RealmId> = Vec::new();
+    for o in &observers {
+        match o.outside_from_m {
+            Some(d_out) => candidates.extend(regions.children_reachable_from_outside(d_out)),
+            None => {
+                // The lead the distance rule reads: live position to the predicted one, and the
+                // looker's own reach on both ends (a proxy stands for occupants out to its surface).
+                let lead = o.vel * horizon_s;
+                let reach = if lead.length() > 0.0 {
+                    lead.normalize() * o.reach
+                } else {
+                    DVec3::ZERO
+                };
+                found.clear();
+                regions.aoi_index().candidates_along(
+                    o.pos.translated(-reach, own_tier),
+                    o.pos.translated(lead + reach, own_tier),
+                    own_tier,
+                    &mut found,
+                );
+                candidates.extend(found.iter().copied());
+            }
+        }
+    }
+    // A store that never named this realm has no index (a fixture, or a boot that forgot): the
+    // fold walks the roster as it always did, and COUNTS it, so a full walk in production is a
+    // number on the diagnosis surface and never a silence.
+    let placements = if regions.indexes_children_of(config.realm) {
+        regions.child_rows_for(config.realm, book, candidates.iter().copied())
+    } else {
+        stats.aoi_full_walks += 1;
+        regions.child_rows(config.realm, book)
+    };
+    stats.aoi_candidates_visited = placements.len() as u64;
+
     let mut in_band: BTreeMap<ObserverId, BTreeSet<RealmId>> = BTreeMap::new();
     // Look horizon slice 3 (§3.4.5) — the SHARED verdict accumulator: the union over EVERY
     // observer (a dot, a held transient, an occupied child) of its in-band children this tick.
@@ -768,6 +870,21 @@ fn aoi_decide(
 /// used to arrive here as bare metre triples, which silently discarded each one's whole-number part: from
 /// a player's first input the integrator folds their position into that part, so every occupant measured
 /// as standing at their realm's origin and the entire demand loop stopped depending on where anyone was.
+/// Which signal built this child's stand-in observer, and therefore what it is allowed to state.
+///
+/// A FRESH OCCUPANCY BIT is a fact the child itself reported about its own people, so it counts as
+/// occupancy: it keeps this realm alive and it feeds the Empty self-report. AN OPEN WINDOW is a byte
+/// from outside asking to look in — it drives demand and the render verdict, and it must NEVER make
+/// this realm claim somebody is inside it (owner ruling 2026-09-01 V5; the same reason the interest
+/// down-proxy has never counted).
+fn child_observer_origin(occupied_child: bool) -> ObserverOrigin {
+    if occupied_child {
+        ObserverOrigin::Occupancy
+    } else {
+        ObserverOrigin::Interest
+    }
+}
+
 pub(crate) fn occupant_child_dist(
     occ_pos: LatticePos,
     occ_vel: DVec3,
@@ -876,6 +993,14 @@ pub(crate) fn push_demand(
             "demand refused: a shard demands only itself or a direct child (SL7)",
         );
         return;
+    }
+    // ★ SAY WHO IS WOKEN (2026-09-02). A spin-up is the rare edge of the fold — once per child per
+    // acquisition, never per tick — and it is the one line that separates "the parent never asked
+    // for this child" from "the orchestrator never launched it". A hull forty metres from a player
+    // was not launched on the first run of the world-from-inside gate, and nothing on either side
+    // said which of the two it was. The keep-alive stays silent: it beats twice a second per child.
+    if verb == DemandVerb::SpinUp {
+        tracing::info!(child = %child.lowered(), "demanding a child into existence — SpinUp");
     }
     outbox.push_flow(
         orch,

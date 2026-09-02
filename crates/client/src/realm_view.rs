@@ -302,6 +302,7 @@ mod tests {
             source_tick: TickId(1),
             universe_tick: UniverseTick(tick),
             origin_epoch,
+            sky_anchor: None,
             realms: rows
                 .into_iter()
                 .map(|(realm, pose)| RealmSnap {

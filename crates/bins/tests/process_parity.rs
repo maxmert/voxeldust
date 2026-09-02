@@ -451,7 +451,7 @@ fn p1_parity_real_binaries_over_quic() {
     // than the fixture: a shard folded its sky from the realms IT booted, so a single-shard cluster
     // stated ONE star — its own — and a player never draws their own star. MEASURED at the time: 1
     // held against 3 in the world, and 0 drawable. The sky now has one author and one census.
-    let (census_rows, _) = vd_bins::star_catalogue_for_boot(
+    let (census_rows, _, _) = vd_bins::star_catalogue_for_boot(
         DEV.universe_seed,
         DEV.move_speed,
         DEV.tick_dt,

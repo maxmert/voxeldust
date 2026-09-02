@@ -62,6 +62,10 @@ pub struct RenderSnapshot {
     /// data: the gateway already states it on `ServerControlMsg::RealmRegistry.origin`, and the client
     /// already stores it. It was simply private, with no way to reach the render path.
     origin: Option<vd_core::pose::RealmId>,
+    /// THE SKY ANCHOR (owner ruling 2026-09-02 R1): the origin realm placed in the galaxy's frame,
+    /// as the gateway last stated it on the per-tick lane; `None` until the chain reaches the
+    /// galaxy. The renderer places its one star cloud by it — nothing else moves the sky.
+    sky_anchor: Option<vd_core::pose::StampedPose>,
 }
 
 /// The sky, as the renderer receives it (S11): the rows, and the generation that identifies them.
@@ -89,66 +93,99 @@ pub struct StarPoint {
 }
 
 impl SkyDraw {
-    /// THE OBSERVER'S OWN ANCHOR: the galaxy-frame cell of the star system named by `own`.
+    /// THE CLOUD'S VERTICES, BUILT ONCE (owner ruling 2026-09-02 R1): every star of the catalogue as
+    /// metres from `reference`, a galaxy cell the renderer picks when it first builds the cloud and
+    /// keeps for the cloud's life. Nothing here depends on where the observer stands — that is the
+    /// whole point. The observer's position enters ONLY as the cloud's transform, per frame, from
+    /// the sky anchor ([`sky_cloud_transform`]); the vertex buffer is uploaded once per catalogue.
     ///
-    /// ★ NO WIRE DATA IS NEEDED FOR THIS. The catalogue applies no observer filter — every star system
-    /// whose parent is the galaxy is in it, INCLUDING the one the observer is standing in. So the
-    /// number to subtract is already in a row the client received and proved.
-    #[must_use]
-    pub fn anchor_of(&self, own: vd_core::pose::RealmId) -> Option<vd_core::glam::I64Vec3> {
-        self.rows.iter().find(|r| r.realm == own).map(|r| r.cell)
-    }
-
-    /// THE DRAWABLE SKY, relative to the observer's own star system.
+    /// ★ NO STAR IS LEFT OUT. This used to drop the observer's own star system ("you are inside it")
+    /// and to re-anchor on it, which is what turned the sky black in any realm the catalogue does not
+    /// name — a hull, a planet, a station. The observer's own star is a point of light at its true
+    /// place; when the star realm runs it draws its own body over that point at the same brightness.
     ///
     /// ★ THE SUBTRACTION IS EXACT, AND THAT IS WHY THE CLIENT MAY DO IT. Both values are whole cells
-    /// at ONE tier — the galaxy's two-metre step — and the generator holds every system exactly
-    /// cell-aligned. There is no float, no re-derivation and no moving target, so the drift that made
-    /// client-side composition a defect for ENTITIES cannot occur here. Stars do not move.
-    ///
-    /// It is also why this runs ONCE PER CROSSING and not once per frame: the answer changes only when
-    /// the observer's own system changes.
-    ///
-    /// `None` when the catalogue holds no row for `own` — an observer standing somewhere the sky does
-    /// not describe. Drawing an unanchored sky would place every star at the wrong distance, which
-    /// looks plausible and is wrong, so nothing is drawn instead.
+    /// at ONE tier — the galaxy's two-metre step — and every generated system is exactly
+    /// cell-aligned. `i128` for the difference: two cells near opposite edges of the galaxy would
+    /// overflow an `i64` subtraction, and an overflow here is a star drawn behind you.
     #[must_use]
-    pub fn points_around(&self, own: vd_core::pose::RealmId) -> Option<Vec<StarPoint>> {
-        let anchor = self.anchor_of(own)?;
+    pub fn points_from(&self, reference: vd_core::glam::I64Vec3) -> Vec<StarPoint> {
         let edge_m = vd_core::pose::Tier::Galaxy.cell_edge_m();
-        Some(
-            self.rows
-                .iter()
-                .filter(|r| r.realm != own)
-                .map(|r| StarPoint {
-                    // i128 for the difference: two cells near opposite edges of the galaxy would
-                    // overflow an i64 subtraction, and an overflow here is a star drawn behind you.
-                    pos_m: vd_core::glam::DVec3::new(
-                        (i128::from(r.cell.x) - i128::from(anchor.x)) as f64 * edge_m,
-                        (i128::from(r.cell.y) - i128::from(anchor.y)) as f64 * edge_m,
-                        (i128::from(r.cell.z) - i128::from(anchor.z)) as f64 * edge_m,
-                    ),
-                    class_code: r.class_code,
-                    luma_lsun: r.luma_lsun,
-                })
-                .collect(),
-        )
+        self.rows
+            .iter()
+            .map(|r| StarPoint {
+                pos_m: vd_core::glam::DVec3::new(
+                    (i128::from(r.cell.x) - i128::from(reference.x)) as f64 * edge_m,
+                    (i128::from(r.cell.y) - i128::from(reference.y)) as f64 * edge_m,
+                    (i128::from(r.cell.z) - i128::from(reference.z)) as f64 * edge_m,
+                ),
+                class_code: r.class_code,
+                luma_lsun: r.luma_lsun,
+            })
+            .collect()
     }
 }
 
-/// THE STAR CLOUD's vertex data, ready for one mesh upload (S11).
+/// THE CLOUD'S PLACEMENT, PER FRAME (owner ruling 2026-09-02 R1): the rigid transform that carries
+/// a cloud built from `reference` ([`SkyDraw::points_from`]) into the render space — the origin
+/// realm's axes, centred on the eye. The `anchor` is the gateway's statement of the origin realm in
+/// the galaxy's frame; `eye_m` is the eye in the origin realm's frame, in metres.
 ///
-/// ★ ONE ENTITY, NOT ONE PER STAR. Four vertices per star, all four carrying the same centre; the
-/// vertex shader expands them into a camera-facing sprite. At the target census that is 14.4 MB of
-/// vertices plus 3.6 MB of indices — 18.0 MB, written ONCE PER CROSSING.
+/// A star at galaxy position `g` (metres) sits in the origin's frame at `qᐨ¹·(g − a)` where `a` is
+/// the anchor's position and `q` the origin frame's orientation in the galaxy; relative to the eye
+/// it is that minus `eye_m`. With vertices `v = g − R·edge` this is `qᐨ¹·v + [qᐨ¹·(R·edge − a) − eye_m]`,
+/// so the entity's rotation is `qᐨ¹` and its translation the bracket. Computed in f64, narrowed once.
 ///
-/// The alternative, an entity per star, makes Bevy maintain 150,000 `MeshUniform` records of 176
-/// bytes EVERY FRAME — about 26 MB per frame to draw a picture that never changes. This makes it one.
-///
-/// `U32` indices are mandatory, not a choice: 600,000 vertices overflow a `u16`.
+/// ★ PARALLAX IS THIS TRANSLATION MOVING. Nothing draws it on purpose: when the origin realm warps
+/// across the galaxy, the anchor walks, the bracket walks with it, and the near stars slide past the
+/// far ones because they sit at different depths in one cloud.
+#[must_use]
+pub fn sky_cloud_transform(
+    reference: vd_core::glam::I64Vec3,
+    anchor: &vd_core::pose::StampedPose,
+    eye_m: vd_core::glam::DVec3,
+) -> (vd_core::glam::DVec3, vd_core::glam::DQuat) {
+    let edge_m = vd_core::pose::Tier::Galaxy.cell_edge_m();
+    let cell = anchor.pos.cell();
+    let reference_from_anchor_m = vd_core::glam::DVec3::new(
+        (i128::from(reference.x) - i128::from(cell.x)) as f64 * edge_m,
+        (i128::from(reference.y) - i128::from(cell.y)) as f64 * edge_m,
+        (i128::from(reference.z) - i128::from(cell.z)) as f64 * edge_m,
+    ) - anchor.pos.offset();
+    let rotation = anchor.orient.inverse();
+    (rotation * reference_from_anchor_m - eye_m, rotation)
+}
+
+/// THE ONE LIGHT YEAR NO TWO STAR SYSTEMS COME CLOSER THAN (owner ruling 2026-08-24, Q3): the
+/// nearest any star can be to an observer standing in another system, and so the depth against
+/// which the cloud's single-precision placement error is judged.
+const SKY_NEAREST_STAR_FLOOR_M: f64 = vd_core::units::LIGHT_YEAR_M;
+
+/// The largest angular error the cloud's placement may commit: a tenth of a pixel at the capture
+/// frame's field of view — invisible by construction, and a fixed fraction of the smallest thing a
+/// frame can show.
+const SKY_DIRECTION_TOLERANCE_RAD: f64 = 1.0e-4;
+
+/// ★ WHEN THE CLOUD MUST BE REBASED. The cloud's translation is narrowed to `f32` for the GPU, and an
+/// `f32` of magnitude `T` carries an error of about `T · ε`. A star at the nearest lawful distance
+/// then moves on screen by `T · ε / floor` radians, so the translation may grow to
+/// `floor · tolerance / ε` before that error reaches the tolerance — about 8 × 10¹⁸ m, which is
+/// wider than the galaxy. Inside one galaxy a cloud is therefore built ONCE and never again; the
+/// rebase exists so that a galaxy-to-galaxy journey, when it comes, cannot quietly smear the sky.
+#[must_use]
+pub fn sky_rebase_bound_m() -> f64 {
+    SKY_NEAREST_STAR_FLOOR_M * SKY_DIRECTION_TOLERANCE_RAD / f64::from(f32::EPSILON)
+}
+
+/// Does this translation exceed the rebase bound? See [`sky_rebase_bound_m`].
+#[must_use]
+pub fn sky_rebase_due(translation_m: vd_core::glam::DVec3) -> bool {
+    translation_m.length() > sky_rebase_bound_m()
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StarCloud {
-    /// The star centre, repeated for each of its four corners. Metres from the observer's own system.
+    /// The star centre, repeated for each of its four corners. Metres from the cloud's reference cell (see `SkyDraw::points_from`).
     pub positions: Vec<[f32; 3]>,
     /// Which corner of the sprite this vertex is: (-1,-1), (1,-1), (1,1), (-1,1).
     pub corners: Vec<[f32; 2]>,
@@ -251,6 +288,7 @@ impl RenderSnapshot {
             realm_view,
             sky: None,
             origin: None,
+            sky_anchor: None,
         }
     }
 
@@ -281,6 +319,18 @@ impl RenderSnapshot {
     #[must_use]
     pub fn with_origin(mut self, origin: Option<vd_core::pose::RealmId>) -> RenderSnapshot {
         self.origin = origin;
+        self
+    }
+
+    /// The sky anchor the gateway last stated (see [`RenderSnapshot::sky_anchor`]).
+    #[must_use]
+    pub fn sky_anchor(&self) -> Option<vd_core::pose::StampedPose> {
+        self.sky_anchor
+    }
+
+    #[must_use]
+    pub fn with_sky_anchor(mut self, anchor: Option<vd_core::pose::StampedPose>) -> RenderSnapshot {
+        self.sky_anchor = anchor;
         self
     }
 
@@ -644,6 +694,7 @@ mod slice6_tests {
                     source_tick: vd_core::TickId(t),
                     universe_tick: UniverseTick(t),
                     origin_epoch: 0,
+                    sky_anchor: None,
                     realms: vec![RealmSnap {
                         realm: REALM,
                         // The edge HEAD (proto_minor 8): REALM's own frame; `pose.frame` is the TAIL.
@@ -731,22 +782,19 @@ mod slice6_tests {
             generation: 1,
         };
 
-        let anchor = sky
-            .anchor_of(RealmId::System(2))
-            .expect("own system is IN the catalogue");
-        assert_eq!(
-            anchor,
-            I64Vec3::new(400, -50, 7),
-            "the anchor is a row the client already holds — no wire data buys it"
-        );
-
-        let pts = sky.points_around(RealmId::System(2)).expect("anchored");
-        // THE OBSERVER'S OWN SYSTEM IS NOT DRAWN. You are inside it; a point of light at zero distance
-        // would sit on the camera.
-        assert_eq!(pts.len(), 2, "two other systems, and not oneself");
+        // THE CLOUD IS BUILT FROM A REFERENCE CELL, and every star is in it — the reference's own
+        // star included, at zero. Take System(2)'s cell as the reference.
+        let pts = sky.points_from(I64Vec3::new(400, -50, 7));
+        assert_eq!(pts.len(), 3, "every star of the catalogue, nobody left out");
 
         let edge = vd_core::pose::Tier::Galaxy.cell_edge_m();
-        // System(3) sits exactly 100 cells along +z from the observer.
+        // System(2) sits AT the reference.
+        let here = pts
+            .iter()
+            .find(|p| p.pos_m == DVec3::ZERO)
+            .expect("the reference's own star");
+        assert_eq!(here.class_code, 6);
+        // System(3) sits exactly 100 cells along +z from the reference.
         let up = pts.iter().find(|p| p.pos_m.z > 0.0).expect("the +z one");
         assert_eq!(up.pos_m, DVec3::new(0.0, 0.0, 100.0 * edge));
         // System(1) is 300 cells back in x, 50 up in y, 7 down in z.
@@ -760,17 +808,63 @@ mod slice6_tests {
         // passing test can reach, and an unreachable region is an uncoverable one (HR5).
         assert_eq!(
             pts.iter().map(|p| p.class_code).collect::<Vec<_>>(),
-            vec![6, 6]
+            vec![6, 6, 6]
         );
         assert_eq!(
             pts.iter().map(|p| p.luma_lsun).collect::<Vec<_>>(),
-            vec![0.25, 0.25]
+            vec![0.25, 0.25, 0.25]
         );
 
-        // ★ STANDING SOMEWHERE THE SKY DOES NOT DESCRIBE DRAWS NOTHING. An unanchored sky would put
-        // every star at the wrong distance — plausible, and wrong.
-        assert!(sky.points_around(RealmId::System(99)).is_none());
-        assert!(sky.anchor_of(RealmId::System(99)).is_none());
+        // ★ THE OBSERVER ENTERS ONLY THROUGH THE TRANSFORM (owner ruling 2026-09-02 R1). An anchor
+        // stating the origin realm AT the reference cell, unrotated, with the eye at the origin's
+        // centre, carries the cloud by nothing at all...
+        let at_reference = vd_core::pose::StampedPose::at_rest(
+            vd_core::pose::FrameRef::GalaxySpace { galaxy_seed: 1 },
+            DVec3::ZERO,
+            vd_core::ids::UniverseTick(0),
+        );
+        let at_reference = vd_core::pose::StampedPose {
+            pos: vd_core::pose::LatticePos::at(I64Vec3::new(400, -50, 7), DVec3::ZERO),
+            ..at_reference
+        };
+        let (t, q) = sky_cloud_transform(I64Vec3::new(400, -50, 7), &at_reference, DVec3::ZERO);
+        assert_eq!(t, DVec3::ZERO);
+        assert_eq!(q, vd_core::glam::DQuat::IDENTITY);
+        // ...an origin ten cells further along +x, with a half-metre residual and an eye standing
+        // 3 m from the origin's centre, carries it back by exactly that much...
+        let moved = vd_core::pose::StampedPose {
+            pos: vd_core::pose::LatticePos::at(
+                I64Vec3::new(410, -50, 7),
+                DVec3::new(0.5, 0.0, 0.0),
+            ),
+            ..at_reference
+        };
+        let (t, _) =
+            sky_cloud_transform(I64Vec3::new(400, -50, 7), &moved, DVec3::new(3.0, 0.0, 0.0));
+        assert_eq!(t, DVec3::new(-10.0 * edge - 0.5 - 3.0, 0.0, 0.0));
+        // ...and an origin frame turned half a circle about z turns the cloud the other way, so a
+        // star ahead in the galaxy is behind the observer.
+        let turned = vd_core::pose::StampedPose {
+            orient: vd_core::glam::DQuat::from_xyzw(0.0, 0.0, 1.0, 0.0),
+            ..moved
+        };
+        let (t, q) = sky_cloud_transform(I64Vec3::new(400, -50, 7), &turned, DVec3::ZERO);
+        assert_eq!(q, vd_core::glam::DQuat::from_xyzw(0.0, 0.0, -1.0, 0.0));
+        assert_eq!(t, DVec3::new(10.0 * edge + 0.5, 0.0, 0.0));
+    }
+
+    /// ★ THE REBASE BOUND IS DERIVED, AND IT IS WIDER THAN THE GALAXY (owner ruling 2026-09-02 R8/5).
+    #[test]
+    fn the_cloud_is_rebased_only_beyond_a_derived_bound_wider_than_the_galaxy() {
+        use vd_core::glam::DVec3;
+        let bound = sky_rebase_bound_m();
+        // One light year, a tenth of a pixel, single precision: about 7.9 × 10¹⁸ m.
+        assert!(
+            bound > 5.0e18,
+            "the bound clears the galaxy's own radius by construction: {bound:e}"
+        );
+        assert!(!sky_rebase_due(DVec3::new(bound * 0.5, 0.0, 0.0)));
+        assert!(sky_rebase_due(DVec3::new(bound * 1.5, 0.0, 0.0)));
     }
 
     /// ★ THE CLOUD IS FOUR VERTICES AND TWO TRIANGLES PER STAR, AND ITS SIZE IS A NUMBER (S11).
@@ -858,11 +952,13 @@ mod slice6_tests {
             rows: vec![row(1, -far), row(2, far)],
             generation: 2,
         };
-        let pts = sky.points_around(RealmId::System(2)).expect("anchored");
-        assert_eq!(pts.len(), 1);
+        // Referenced on System(2)'s own cell: System(1) is two `far`s back, exact in i128.
+        let pts = sky.points_from(I64Vec3::new(far, 0, 0));
+        assert_eq!(pts.len(), 2);
         let expect = -(2.0 * far as f64) * vd_core::pose::Tier::Galaxy.cell_edge_m();
-        assert_eq!(pts[0].pos_m.x, expect);
-        assert!(pts[0].pos_m.x < 0.0, "behind us, not in front");
+        let behind = pts.iter().find(|p| p.pos_m.x != 0.0).expect("the far one");
+        assert_eq!(behind.pos_m.x, expect);
+        assert!(behind.pos_m.x < 0.0, "behind us, not in front");
     }
 
     /// ★ THE SKY RIDES THE RENDER SEAM BY POINTER, AND ONLY WHEN IT IS WHOLE (S11).

@@ -189,9 +189,9 @@ mod tests {
     use vd_core::entity_kind::EntityKind;
     use vd_core::fence::Fence;
     use vd_core::geometry::Boundary;
+    use vd_core::glam::DVec3;
     use vd_core::ids::{AccountId, EntityId};
     use vd_core::pose::RealmId;
-    use vd_core::glam::DVec3;
 
     fn ship(seq: u64) -> RealmId {
         RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, seq, 0))
@@ -235,7 +235,10 @@ mod tests {
     fn a_body_round_trips_with_its_whole_minted_name() {
         let body = a_body();
         let read = decode_body(&encode_body(&body)).expect("a written body reads back");
-        assert_eq!(read.realm, body.realm, "the whole 128-bit name survives the store");
+        assert_eq!(
+            read.realm, body.realm,
+            "the whole 128-bit name survives the store"
+        );
         assert_eq!(read.owner, body.owner);
     }
 
@@ -276,7 +279,10 @@ mod tests {
         // have reported a problem. The project bans decoding a durable record to a default, and this
         // is exactly the case the ban exists for.
         let refusal = decode_berth(&[0xFF, 0xFF, 0xFF]).expect_err("garbage is refused");
-        assert!(refusal.contains("does not decode"), "and it says so: {refusal}");
+        assert!(
+            refusal.contains("does not decode"),
+            "and it says so: {refusal}"
+        );
         assert!(decode_body(&[0xFF, 0xFF, 0xFF]).is_err());
     }
 
@@ -341,11 +347,19 @@ mod tests {
         // MEASURED, so the trade stated in the module note is a number rather than an argument.
         let body = encode_body(&a_body());
         let berth = encode_berth(&a_berth(ship(1)));
-        println!("[framing] a body is {} bytes, a berth is {} bytes", body.len(), berth.len());
+        println!(
+            "[framing] a body is {} bytes, a berth is {} bytes",
+            body.len(),
+            berth.len()
+        );
         // A body is written a handful of times per ship, ever, and read once at boot. A hundred bytes
         // there is free. The same hundred bytes on the per-tick movement lane would be fifty times a
         // second, per ship — which is why that lane is NOT framed.
         assert!(body.len() < 200, "a body stays small: {} bytes", body.len());
-        assert!(berth.len() < 200, "a berth stays small: {} bytes", berth.len());
+        assert!(
+            berth.len() < 200,
+            "a berth stays small: {} bytes",
+            berth.len()
+        );
     }
 }

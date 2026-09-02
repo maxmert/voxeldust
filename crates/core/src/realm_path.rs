@@ -112,7 +112,10 @@ impl RealmLevel {
     /// way to store more is [`RealmLevel::for_ship`], which pairs its width with the `Ship` tag.
     #[must_use]
     pub fn new(kind: RealmKindTag, seed: u64) -> RealmLevel {
-        RealmLevel { kind, seed: u128::from(seed) }
+        RealmLevel {
+            kind,
+            seed: u128::from(seed),
+        }
     }
 
     /// ★ A BUILT SHIP'S LEVEL — the only way a level carries more than 64 bits, and it always carries
@@ -123,7 +126,10 @@ impl RealmLevel {
     /// one there.
     #[must_use]
     pub fn for_ship(id: crate::ids::EntityId) -> RealmLevel {
-        RealmLevel { kind: RealmKindTag::Ship, seed: id.0 }
+        RealmLevel {
+            kind: RealmKindTag::Ship,
+            seed: id.0,
+        }
     }
 
     /// The `RealmId` this level resolves to. Total over the 7 kinds, and — since S9 — LOSSLESS:

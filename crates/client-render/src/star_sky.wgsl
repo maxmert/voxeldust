@@ -51,6 +51,7 @@ struct StarSkyUniform {
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> star: StarSkyUniform;
 
 struct VertexIn {
+    @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
     @location(1) corner: vec2<f32>,
     @location(2) color: vec4<f32>,
@@ -82,7 +83,13 @@ fn vertex(in: VertexIn) -> VertexOut {
 
     // The star's centre in view space. The sky rides an identity model transform: the positions are
     // already metres from the observer's own star system, which is where the camera stands.
-    let view_pos = view.view_from_world * vec4<f32>(in.position, 1.0);
+    // THE MODEL TRANSFORM IS THE SKY'S PLACEMENT (2026-09-02): the cloud's vertices are metres from
+    // its reference cell, and the entity's transform carries them to the eye — the anchor the
+    // gateway stated plus the eye's own offset, folded on the CPU in f64. This used to read the
+    // vertex position as already eye-relative and ignored the transform entirely.
+    let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+    let world_pos = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(in.position, 1.0));
+    let view_pos = view.view_from_world * world_pos;
     let dist_m = length(view_pos.xyz);
 
     // ★ THE TRUE DIRECTION, AT A FIXED DEPTH — the sky's placement law.

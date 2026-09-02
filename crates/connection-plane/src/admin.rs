@@ -69,6 +69,9 @@ pub fn gateway_view(
         window_fold_divergence,
         window_full_chain_folds,
         window_chains_held,
+        window_sky_anchored,
+        window_chain_stamp_gap_max,
+        attach_lineage_unresolved,
         window_compose_hold_ticks,
         window_hop_dead,
         window_t_monotone_stalled,
@@ -145,6 +148,9 @@ pub fn gateway_view(
         window_fold_divergence,
         window_full_chain_folds,
         window_chains_held,
+        window_sky_anchored,
+        window_chain_stamp_gap_max,
+        attach_lineage_unresolved,
         window_compose_hold_ticks,
         window_hop_dead,
         window_t_monotone_stalled,
@@ -276,6 +282,9 @@ mod tests {
             window_fold_divergence: 43,
             window_full_chain_folds: 44,
             window_chains_held: 45,
+            window_sky_anchored: 145,
+            window_chain_stamp_gap_max: 245,
+            attach_lineage_unresolved: 345,
             window_compose_hold_ticks: 46,
             window_hop_dead: 47,
             window_t_monotone_stalled: 48,
@@ -366,6 +375,9 @@ mod tests {
         assert_eq!(view.window_fold_divergence, 43);
         assert_eq!(view.window_full_chain_folds, 44);
         assert_eq!(view.window_chains_held, 45);
+        assert_eq!(view.window_sky_anchored, 145);
+        assert_eq!(view.window_chain_stamp_gap_max, 245);
+        assert_eq!(view.attach_lineage_unresolved, 345);
         assert_eq!(view.window_compose_hold_ticks, 46);
         assert_eq!(view.window_hop_dead, 47);
         assert_eq!(view.window_t_monotone_stalled, 48);

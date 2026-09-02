@@ -31,7 +31,7 @@ use vd_bins::GATEWAY;
 // `--bind` addr), which is itself feature-gated — so the import is too, else the default build sees it unused.
 #[cfg(feature = "dev-control")]
 use vd_bins::loopback;
-use vd_client::net::{ClientCore, ClientPhase};
+use vd_client::net::{ClientCore, ClientPhase, DevCounters};
 use vd_client::render_snapshot::RenderSnapshot;
 use vd_client::tuning::ClientInterpTuning;
 use vd_connection_plane::tickets::mint_login;
@@ -116,9 +116,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The lock-free step ↔ listener bridge: ArcSwap publishes the decoded delivered
     // DevState; the bounded mailbox carries injected InputActions; the atomics carry
     // the step clock (wait-until termination) and the shed-command running total.
-    let published = Arc::new(ArcSwap::from_pointee(core.state().devstate(0.0, 0, 0)));
+    let published = Arc::new(ArcSwap::from_pointee(
+        core.state().devstate(0.0, DevCounters::default()),
+    ));
     let step_seq = Arc::new(AtomicU64::new(0));
     let dropped = Arc::new(AtomicU64::new(0));
+    // The stars on screen, written by the render thread (0 forever in a headless client).
+    let stars_drawn = Arc::new(AtomicU64::new(0));
     let (command_tx, command_rx) = sync_channel::<InputAction>(COMMAND_MAILBOX_CAP);
     // The capture seam (Capture mode): the dev-control screenshot handler → the Bevy
     // render thread. Created in any dev-control+render build; only WIRED into the
@@ -206,6 +210,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             render_published,
             step_seq,
             dropped,
+            stars_drawn,
             started_at,
             args.step_hz,
             vd_client_render::RenderMode::Windowed,
@@ -240,6 +245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             render_published,
             step_seq,
             dropped,
+            stars_drawn,
             started_at,
             args.step_hz,
             vd_client_render::RenderMode::Capture,
@@ -260,6 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         published,
         step_seq,
         dropped,
+        stars_drawn,
         None, // no render sink
         None, // no external stop signal (exits on vdctl/gateway Close)
         started_at,
@@ -284,6 +291,7 @@ fn run_render(
     render_published: Arc<ArcSwap<RenderSnapshot>>,
     step_seq: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
+    stars_drawn: Arc<AtomicU64>,
     started_at: Instant,
     step_hz: u32,
     mode: vd_client_render::RenderMode,
@@ -306,6 +314,7 @@ fn run_render(
     let worker_stop = stop.clone();
     let worker_alive = core_alive.clone();
     let worker_dropped = dropped.clone();
+    let worker_stars = stars_drawn.clone();
     let core_thread = std::thread::spawn(move || {
         // Flip `core_alive` false on EXIT or PANIC so the window always learns.
         struct AliveGuard(Arc<AtomicBool>);
@@ -321,6 +330,7 @@ fn run_render(
             published,
             step_seq,
             worker_dropped,
+            worker_stars,
             Some(render_sink),
             Some(worker_stop),
             started_at,
@@ -333,6 +343,7 @@ fn run_render(
         snapshot: render_published,
         input: command_tx.clone(),
         dropped,
+        stars_drawn,
         core_alive,
         started_at,
         mode,
@@ -403,6 +414,7 @@ fn run_client_loop(
     published: Arc<ArcSwap<DevState>>,
     step_seq: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
+    stars_drawn: Arc<AtomicU64>,
     render_sink: Option<Arc<ArcSwap<RenderSnapshot>>>,
     stop: Option<Arc<AtomicBool>>,
     started_at: Instant,
@@ -437,11 +449,14 @@ fn run_client_loop(
         #[cfg(feature = "dev-control")]
         published.store(Arc::new(core.state().devstate(
             now_s,
-            applied,
-            dropped.load(Ordering::Relaxed),
+            DevCounters {
+                dev_commands_applied: applied,
+                dev_commands_dropped: dropped.load(Ordering::Relaxed),
+                stars_drawn: stars_drawn.load(Ordering::Relaxed),
+            },
         )));
         #[cfg(not(feature = "dev-control"))]
-        let _ = (&published, applied, &dropped);
+        let _ = (&published, applied, &dropped, &stars_drawn);
         if let Some(sink) = &render_sink {
             sink.store(Arc::new(core.state().render_snapshot()));
         }

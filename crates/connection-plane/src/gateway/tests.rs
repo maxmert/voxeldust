@@ -81,6 +81,7 @@ fn config() -> GatewayConfig {
         // No world booted in a fixture, so the gateway states no sky (S11).
         sky: Vec::new(),
         sky_generation: 0,
+        sky_frame: None,
         shard: SHARD,
         // The STABLE routable-shard roster (FORK 5): the login shard AND the transfer
         // dest, so a render-ready dest's frames are node-class-dispatchable (1d.2c). DEST
@@ -262,7 +263,7 @@ fn a_peer_below_the_protocol_floor_is_closed_with_the_floor_named() {
     assert_eq!(
         decode_controls(&sent, CLIENT),
         vec![ServerControlMsg::Close {
-            reason: "protocol minor below the floor (23): the scene is server-composed from v1.23"
+            reason: "protocol minor below the floor (24): the scene is server-composed from v1.24"
                 .to_owned()
         }]
     );
@@ -1546,13 +1547,22 @@ fn windows_derive_open_keepalive_and_close_with_the_sessions() {
     );
     set_tick(&mut rig, 25);
     let beat = rig.tick(vec![]);
+    // ★ THE BEAT CARRIES THE KEEP-ALIVE AND ONE HEAD READ PER UNRESOLVED ANCESTOR (owner ruling
+    // 2026-09-02 R9 step 2): the static attach now remembers the whole chain, so the gateway asks
+    // the directory where the galaxy and the universe are served — the windows above the origin
+    // open the tick those answers land. Two ancestors in this world, so two reads beside the one
+    // keep-alive.
     assert_eq!(
         beat.len(),
-        1,
-        "the cadence beat carries the keep-alive alone"
+        3,
+        "the cadence beat carries the keep-alive and a head read per unresolved ancestor"
     );
+    let keepalive = beat
+        .iter()
+        .find(|(_, class, _)| *class == MsgClass::Control)
+        .expect("the keep-alive rides the control class");
     assert_eq!(
-        postcard::from_bytes::<GatewayToShard>(&beat[0].2).expect("decode"),
+        postcard::from_bytes::<GatewayToShard>(&keepalive.2).expect("decode"),
         GatewayToShard::WindowOpen {
             window: WindowId(1),
             scope: WindowScope::Occupants,
@@ -4120,6 +4130,7 @@ fn realm_frame_payload(realm: RealmId) -> Vec<u8> {
         source_tick: TickId(5),
         universe_tick: UniverseTick(50),
         origin_epoch: 0,
+        sky_anchor: None,
         realms: vec![RealmSnap {
             realm,
             // The edge HEAD (proto_minor 8): the CHILD's own frame. The gateway IGNORES it in this
@@ -6443,8 +6454,8 @@ fn a_crossing_swap_falls_back_when_the_new_chain_is_not_fully_fresh() {
                 at: UniverseTick(50),
                 hop: Some(vd_wire::session_flow::HopRow {
                     child: RealmId::Planet(7),
-                    inv: vd_core::frame::FramePlacement::moving(
-                        DVec3::new(-30.0, 0.0, 0.0),
+                    placement: vd_core::frame::FramePlacement::moving(
+                        DVec3::new(30.0, 0.0, 0.0),
                         DVec3::ZERO,
                     ),
                 }),
@@ -9320,7 +9331,10 @@ fn parent_frame(
         at: UniverseTick(at),
         hop: Some(Box::new(vd_wire::session_flow::HopRow {
             child: RealmId::Planet(7),
-            inv: vd_core::frame::FramePlacement::moving(DVec3::new(-leaf_x, 0.0, 0.0), DVec3::ZERO),
+            placement: vd_core::frame::FramePlacement::moving(
+                DVec3::new(leaf_x, 0.0, 0.0),
+                DVec3::ZERO,
+            ),
         })),
         rows,
     }
@@ -9359,9 +9373,17 @@ fn the_composer_folds_the_crossing_chain_at_one_tick_and_tears_down_to_nothing()
     {
         let sessions = rig.world.resource::<GatewaySessions>();
         let session = &sessions.by_session[&sid];
+        // ★ THE STATIC ATTACH DERIVES THE WHOLE CHAIN (owner ruling 2026-09-02 R9 step 2): the
+        // gateway holds the seeded forest, so an attach onto System(7) remembers universe → galaxy →
+        // system, exactly as a login descent would — and the crossing APPENDS below that leaf.
         assert_eq!(
             session.lineage,
-            vec![RealmId::System(7), RealmId::Planet(7)],
+            vec![
+                RealmId::Universe,
+                vd_core::worldgen::GALAXY,
+                RealmId::System(7),
+                RealmId::Planet(7)
+            ],
             "the crossing APPENDED below the previous leaf (§2.6.2)"
         );
         assert_eq!(
@@ -9576,7 +9598,7 @@ fn an_unresolved_lineage_ancestor_resolves_via_the_directory_head_poll() {
         at: UniverseTick(5),
         hop: Some(Box::new(vd_wire::session_flow::HopRow {
             child: RealmId::System(7),
-            inv: vd_core::frame::FramePlacement::identity(),
+            placement: vd_core::frame::FramePlacement::identity(),
         })),
         rows: vec![snap(
             RealmId::System(7),
@@ -9975,8 +9997,8 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
                     WindowScope::Occupants => None,
                     WindowScope::Child(child) => Some(Box::new(vd_wire::session_flow::HopRow {
                         child: *child,
-                        inv: vd_core::frame::FramePlacement::moving(
-                            DVec3::new(-(t as f64), 0.0, 0.0),
+                        placement: vd_core::frame::FramePlacement::moving(
+                            DVec3::new(t as f64, 0.0, 0.0),
                             DVec3::ZERO,
                         ),
                     })),

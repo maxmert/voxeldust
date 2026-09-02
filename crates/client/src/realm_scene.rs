@@ -1190,6 +1190,7 @@ mod tests {
                 source_tick: TickId(1),
                 universe_tick: UniverseTick(10),
                 origin_epoch: 0,
+                sky_anchor: None,
                 realms: vec![RealmSnap {
                     realm: RealmId::Planet(1),
                     // The edge HEAD: Planet 1's OWN frame; `pose.frame` below is the TAIL, the frame
@@ -2060,8 +2061,14 @@ mod tests {
             None,
             "the Universe ambient root is NOT rendered"
         );
-        assert!(scene.get(vd_core::worldgen::PLANET_B).is_some(), "Planet B renders");
-        assert!(scene.get(vd_core::worldgen::PLANET_C).is_some(), "Planet C renders");
+        assert!(
+            scene.get(vd_core::worldgen::PLANET_B).is_some(),
+            "Planet B renders"
+        );
+        assert!(
+            scene.get(vd_core::worldgen::PLANET_C).is_some(),
+            "Planet C renders"
+        );
         assert_eq!(
             scene.len(),
             8,

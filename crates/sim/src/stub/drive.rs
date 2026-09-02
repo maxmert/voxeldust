@@ -44,12 +44,13 @@ pub struct EngineRating {
 /// clamped to one and the DIRECTION is kept.
 #[must_use]
 pub fn drive_from_stick(
-    movement: [f32; 3],
+    push: glam::DVec3,
     turn_stick: [f32; 3],
     rating: &EngineRating,
 ) -> ([i64; 3], [i64; 3]) {
-    let push = clamp_to_unit(kinematics::local_axes_from_movement(movement)) * rating.max_push_mps2;
-    let turn = clamp_to_unit(kinematics::local_axes_from_movement(turn_stick)) * rating.max_turn_radps2;
+    let push = clamp_to_unit(push) * rating.max_push_mps2;
+    let turn =
+        clamp_to_unit(kinematics::local_axes_from_movement(turn_stick)) * rating.max_turn_radps2;
     (
         [
             on_grid(push.x, DRIVE_UNITS_PER_MPS2),
@@ -152,7 +153,8 @@ pub fn advance_driven(
     );
     let pushed = state.orient * own_push;
     // 2. MY OWN AMBIENT: the pull everything here feels, plus the medium's drag on THIS hull.
-    let accel = pushed + ambient.pull_mps2 + drag_accel(state.vel_mps, facts, ambient.density_kgpm3);
+    let accel =
+        pushed + ambient.pull_mps2 + drag_accel(state.vel_mps, facts, ambient.density_kgpm3);
     // 3. ADVANCE. Velocity first, then position from the NEW velocity (semi-implicit): it is stable
     //    under a strong pull where the naive order quietly gains energy every tick.
     let vel = state.vel_mps + accel * dt_s;
@@ -192,9 +194,8 @@ pub struct BodyFacts {
 /// coasts is recoverable, and a `NaN` position is not.
 fn drag_accel(vel: glam::DVec3, facts: &BodyFacts, density: f64) -> glam::DVec3 {
     let speed = vel.length();
-    let magnitude =
-        0.5 * density * speed * speed * facts.drag_coefficient * facts.cross_section_m2
-            / facts.mass_kg;
+    let magnitude = 0.5 * density * speed * speed * facts.drag_coefficient * facts.cross_section_m2
+        / facts.mass_kg;
     let a = -vel.normalize_or_zero() * magnitude;
     if a.is_finite() { a } else { glam::DVec3::ZERO }
 }
@@ -242,7 +243,9 @@ pub struct OwnBody(pub Option<vd_core::built::BuiltBody>);
 /// **UNBOUNDED, like every other child set (SL9).** A realm may hold six ships or six hundred; nothing
 /// here is a fixed width and nothing walks the whole set to find one.
 #[derive(Debug, Default, bevy_ecs::prelude::Resource)]
-pub struct DrivenChildren(pub(crate) std::collections::BTreeMap<vd_core::pose::RealmId, DrivenChild>);
+pub struct DrivenChildren(
+    pub(crate) std::collections::BTreeMap<vd_core::pose::RealmId, DrivenChild>,
+);
 
 /// One driven child, as its parent holds it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -308,9 +311,15 @@ pub(crate) fn on_child_drive(
             spin_radps: glam::DVec3::ZERO,
         },
         drive: ([0; 3], [0; 3]),
-        drive_at: (vd_core::fence::Fence::GENESIS, vd_core::ids::UniverseTick(0)),
+        drive_at: (
+            vd_core::fence::Fence::GENESIS,
+            vd_core::ids::UniverseTick(0),
+        ),
         facts: None,
-        facts_at: (vd_core::fence::Fence::GENESIS, vd_core::ids::UniverseTick(0)),
+        facts_at: (
+            vd_core::fence::Fence::GENESIS,
+            vd_core::ids::UniverseTick(0),
+        ),
     });
     if (cd.child_fence, cd.at) < entry.drive_at {
         stats.child_drive_stale += 1;
@@ -362,9 +371,15 @@ pub(crate) fn on_child_facts(
             spin_radps: glam::DVec3::ZERO,
         },
         drive: ([0; 3], [0; 3]),
-        drive_at: (vd_core::fence::Fence::GENESIS, vd_core::ids::UniverseTick(0)),
+        drive_at: (
+            vd_core::fence::Fence::GENESIS,
+            vd_core::ids::UniverseTick(0),
+        ),
         facts: None,
-        facts_at: (vd_core::fence::Fence::GENESIS, vd_core::ids::UniverseTick(0)),
+        facts_at: (
+            vd_core::fence::Fence::GENESIS,
+            vd_core::ids::UniverseTick(0),
+        ),
     });
     if (cf.child_fence, cf.at) < entry.facts_at {
         stats.child_facts_stale += 1;
@@ -478,7 +493,7 @@ pub(crate) fn emit_child_drive(
     at: vd_core::ids::UniverseTick,
     parent_node: Option<vd_core::ids::NodeId>,
     rating: &EngineRating,
-    stick: Option<([f32; 3], [f32; 3])>,
+    stick: Option<(glam::DVec3, [f32; 3])>,
     outbox: &mut crate::runtime::OutboundBox,
     stats: &mut super::StubStats,
 ) {
@@ -493,12 +508,11 @@ pub(crate) fn emit_child_drive(
     //   - nobody at the controls;
     //   - no realm fence yet, which means the directory has not granted this realm — a shard that
     //     cannot prove which incarnation it is must not speak for the realm, or a deposed one would.
-    let (Some(parent), Some((movement, turn_stick)), Some(fence)) =
-        (parent_node, stick, realm_fence)
+    let (Some(parent), Some((push, turn_stick)), Some(fence)) = (parent_node, stick, realm_fence)
     else {
         return;
     };
-    let (push, turn) = drive_from_stick(movement, turn_stick, rating);
+    let (push, turn) = drive_from_stick(push, turn_stick, rating);
     outbox.push_flow(
         parent,
         // The UNRELIABLE carrier, deliberately: the next tick restates the whole intent, so a lost
@@ -527,6 +541,7 @@ pub(crate) fn emit_child_drive(
 /// will derive it from the thrusters actually built into it (P6/P9). Until blocks exist there is
 /// nothing to derive it FROM, so this is a stated rating for one fixture ship — recorded in the ledger
 /// as interim, never a shipped default for every hull in the world.
+#[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources/queries
 pub(crate) fn emit_own_drive(
     config: bevy_ecs::prelude::Res<super::StubConfig>,
     identity: bevy_ecs::prelude::Res<crate::runtime::NodeIdentity>,
@@ -652,7 +667,6 @@ pub(crate) fn emit_child_facts(
     stats.child_facts_sent += 1;
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -671,10 +685,17 @@ mod tests {
         }
     }
     fn hull() -> BodyFacts {
-        BodyFacts { mass_kg: 50_000.0, cross_section_m2: 12.0, drag_coefficient: 0.82 }
+        BodyFacts {
+            mass_kg: 50_000.0,
+            cross_section_m2: 12.0,
+            drag_coefficient: 0.82,
+        }
     }
     fn vacuum() -> Ambient {
-        Ambient { pull_mps2: DVec3::ZERO, density_kgpm3: 0.0 }
+        Ambient {
+            pull_mps2: DVec3::ZERO,
+            density_kgpm3: 0.0,
+        }
     }
 
     fn rating() -> EngineRating {
@@ -684,9 +705,14 @@ mod tests {
         }
     }
 
+    /// A push straight along the nose (facing identity), as the stick states it.
+    fn fwd_push(fwd: f32) -> glam::DVec3 {
+        vd_core::kinematics::local_axes_from_movement([fwd, 0.0, 0.0])
+    }
+
     #[test]
     fn full_forward_pushes_the_whole_rating_along_the_nose() {
-        let (push, turn) = drive_from_stick([1.0, 0.0, 0.0], [0.0; 3], &rating());
+        let (push, turn) = drive_from_stick(fwd_push(1.0), [0.0; 3], &rating());
         // The shared axis map sends "forward" to −Z, so a full forward stick is the rating on −Z and
         // nothing anywhere else. This pins the CONVENTION, not just the arithmetic: were the map to
         // drift, a ship would fly sideways and every test above this would still pass.
@@ -696,15 +722,15 @@ mod tests {
 
     #[test]
     fn a_still_stick_pushes_nothing() {
-        let (push, turn) = drive_from_stick([0.0; 3], [0.0; 3], &rating());
+        let (push, turn) = drive_from_stick(glam::DVec3::ZERO, [0.0; 3], &rating());
         assert_eq!(push, [0, 0, 0]);
         assert_eq!(turn, [0, 0, 0]);
     }
 
     #[test]
     fn reverse_is_the_same_push_pointing_the_other_way() {
-        let (fwd, _) = drive_from_stick([1.0, 0.0, 0.0], [0.0; 3], &rating());
-        let (back, _) = drive_from_stick([-1.0, 0.0, 0.0], [0.0; 3], &rating());
+        let (fwd, _) = drive_from_stick(fwd_push(1.0), [0.0; 3], &rating());
+        let (back, _) = drive_from_stick(fwd_push(-1.0), [0.0; 3], &rating());
         // ★ THE LANE NAMES NO MANOEUVRE. Reverse is not a mode, a flag or a second arm — it is the
         // same three numbers with their sign flipped, which is the whole reason the contract can carry
         // every future way to fly without growing.
@@ -713,17 +739,24 @@ mod tests {
 
     #[test]
     fn a_diagonal_stick_is_not_stronger_than_a_straight_one() {
-        let (straight, _) = drive_from_stick([1.0, 0.0, 0.0], [0.0; 3], &rating());
-        let (corner, _) = drive_from_stick([1.0, 1.0, 1.0], [0.0; 3], &rating());
+        let (straight, _) = drive_from_stick(fwd_push(1.0), [0.0; 3], &rating());
+        let (corner, _) = drive_from_stick(
+            vd_core::kinematics::local_axes_from_movement([1.0, 1.0, 1.0]),
+            [0.0; 3],
+            &rating(),
+        );
         let mag = |v: [i64; 3]| ((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) as f64).sqrt();
         // Without the clamp a corner would push about 1.73 times harder than straight ahead, so a
         // hull's strongest direction would be a diagonal — and every pilot would fly at an angle.
-        assert!((mag(corner) - mag(straight)).abs() < 2.0, "corner {corner:?} vs straight {straight:?}");
+        assert!(
+            (mag(corner) - mag(straight)).abs() < 2.0,
+            "corner {corner:?} vs straight {straight:?}"
+        );
     }
 
     #[test]
     fn the_turn_stick_drives_the_turn_and_leaves_the_push_alone() {
-        let (push, turn) = drive_from_stick([0.0; 3], [1.0, 0.0, 0.0], &rating());
+        let (push, turn) = drive_from_stick(glam::DVec3::ZERO, [1.0, 0.0, 0.0], &rating());
         assert_eq!(push, [0, 0, 0]);
         assert_eq!(turn, [0, 0, -500_000]);
     }
@@ -759,15 +792,21 @@ mod tests {
         // takes its crew with it.
         assert_eq!(on_grid(f64::NAN, DRIVE_UNITS_PER_MPS2), 0);
         assert_eq!(on_grid(f64::INFINITY, DRIVE_UNITS_PER_MPS2), 0);
-        let broken = EngineRating { max_push_mps2: f64::NAN, max_turn_radps2: 0.5 };
-        let (push, _) = drive_from_stick([1.0, 0.0, 0.0], [0.0; 3], &broken);
+        let broken = EngineRating {
+            max_push_mps2: f64::NAN,
+            max_turn_radps2: 0.5,
+        };
+        let (push, _) = drive_from_stick(fwd_push(1.0), [0.0; 3], &broken);
         assert_eq!(push, [0, 0, 0]);
     }
 
     #[test]
     fn an_absurd_rating_saturates_rather_than_flipping_direction() {
-        let huge = EngineRating { max_push_mps2: 1.0e30, max_turn_radps2: 0.5 };
-        let (push, _) = drive_from_stick([1.0, 0.0, 0.0], [0.0; 3], &huge);
+        let huge = EngineRating {
+            max_push_mps2: 1.0e30,
+            max_turn_radps2: 0.5,
+        };
+        let (push, _) = drive_from_stick(fwd_push(1.0), [0.0; 3], &huge);
         // Saturating, never wrapping: the strongest lawful push beats a push that reverses.
         assert_eq!(push[2], i64::MIN);
     }
@@ -775,10 +814,25 @@ mod tests {
     #[test]
     fn a_push_becomes_speed_and_speed_becomes_distance() {
         // Four metres per second, per second, for one tick of a fiftieth of a second.
-        let after = advance_driven(&at_rest(), [4_000_000, 0, 0], [0; 3], &hull(), &vacuum(), 0.02);
-        assert!((after.vel_mps.x - 0.08).abs() < 1e-12, "vel {:?}", after.vel_mps);
+        let after = advance_driven(
+            &at_rest(),
+            [4_000_000, 0, 0],
+            [0; 3],
+            &hull(),
+            &vacuum(),
+            0.02,
+        );
+        assert!(
+            (after.vel_mps.x - 0.08).abs() < 1e-12,
+            "vel {:?}",
+            after.vel_mps
+        );
         // Position comes from the NEW velocity (semi-implicit), which is stable under a strong pull.
-        assert!((after.pos_m.x - 0.0016).abs() < 1e-12, "pos {:?}", after.pos_m);
+        assert!(
+            (after.pos_m.x - 0.0016).abs() < 1e-12,
+            "pos {:?}",
+            after.pos_m
+        );
     }
 
     #[test]
@@ -786,16 +840,30 @@ mod tests {
         // The child says "push me along MY x". It is facing a quarter turn about Z, so in the
         // PARENT's frame that is +y. The child never knows this — it cannot, because knowing where its
         // nose points in the parent IS knowing where it is (SL1).
-        let facing = DrivenState { orient: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2), ..at_rest() };
+        let facing = DrivenState {
+            orient: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+            ..at_rest()
+        };
         let after = advance_driven(&facing, [1_000_000, 0, 0], [0; 3], &hull(), &vacuum(), 1.0);
-        assert!(after.vel_mps.x.abs() < 1e-9, "x should be ~0: {:?}", after.vel_mps);
-        assert!((after.vel_mps.y - 1.0).abs() < 1e-9, "y should be 1: {:?}", after.vel_mps);
+        assert!(
+            after.vel_mps.x.abs() < 1e-9,
+            "x should be ~0: {:?}",
+            after.vel_mps
+        );
+        assert!(
+            (after.vel_mps.y - 1.0).abs() < 1e-9,
+            "y should be 1: {:?}",
+            after.vel_mps
+        );
     }
 
     #[test]
     fn a_realms_pull_applies_with_no_push_at_all() {
         // Gravity needs no engine and no mass: an empty ship falls exactly like a full one.
-        let pulled = Ambient { pull_mps2: DVec3::new(0.0, -9.81, 0.0), density_kgpm3: 0.0 };
+        let pulled = Ambient {
+            pull_mps2: DVec3::new(0.0, -9.81, 0.0),
+            density_kgpm3: 0.0,
+        };
         let after = advance_driven(&at_rest(), [0; 3], [0; 3], &hull(), &pulled, 1.0);
         assert!((after.vel_mps.y + 9.81).abs() < 1e-12);
     }
@@ -803,45 +871,83 @@ mod tests {
     #[test]
     fn a_heavy_hull_and_a_light_one_fall_identically_but_drag_differently() {
         // ★ THE WHOLE REASON MASS CROSSES. It cancels out of gravity and does NOT cancel out of drag.
-        let pulled = Ambient { pull_mps2: DVec3::new(0.0, -9.81, 0.0), density_kgpm3: 0.0 };
-        let light = BodyFacts { mass_kg: 5_000.0, ..hull() };
+        let pulled = Ambient {
+            pull_mps2: DVec3::new(0.0, -9.81, 0.0),
+            density_kgpm3: 0.0,
+        };
+        let light = BodyFacts {
+            mass_kg: 5_000.0,
+            ..hull()
+        };
         let a = advance_driven(&at_rest(), [0; 3], [0; 3], &hull(), &pulled, 1.0);
         let b = advance_driven(&at_rest(), [0; 3], [0; 3], &light, &pulled, 1.0);
         assert_eq!(a.vel_mps, b.vel_mps, "gravity must not care about mass");
 
-        let air = Ambient { pull_mps2: DVec3::ZERO, density_kgpm3: 1.225 };
-        let moving = DrivenState { vel_mps: DVec3::new(100.0, 0.0, 0.0), ..at_rest() };
+        let air = Ambient {
+            pull_mps2: DVec3::ZERO,
+            density_kgpm3: 1.225,
+        };
+        let moving = DrivenState {
+            vel_mps: DVec3::new(100.0, 0.0, 0.0),
+            ..at_rest()
+        };
         let heavy_slow = advance_driven(&moving, [0; 3], [0; 3], &hull(), &air, 1.0);
         let light_slow = advance_driven(&moving, [0; 3], [0; 3], &light, &air, 1.0);
         assert!(
             light_slow.vel_mps.x < heavy_slow.vel_mps.x,
             "the lighter hull must slow MORE: light {} vs heavy {}",
-            light_slow.vel_mps.x, heavy_slow.vel_mps.x
+            light_slow.vel_mps.x,
+            heavy_slow.vel_mps.x
         );
     }
 
     #[test]
     fn space_has_no_drag_and_needs_no_special_case() {
-        let moving = DrivenState { vel_mps: DVec3::new(100.0, 0.0, 0.0), ..at_rest() };
+        let moving = DrivenState {
+            vel_mps: DVec3::new(100.0, 0.0, 0.0),
+            ..at_rest()
+        };
         let after = advance_driven(&moving, [0; 3], [0; 3], &hull(), &vacuum(), 1.0);
-        assert_eq!(after.vel_mps, moving.vel_mps, "a coasting ship in vacuum keeps its speed exactly");
+        assert_eq!(
+            after.vel_mps, moving.vel_mps,
+            "a coasting ship in vacuum keeps its speed exactly"
+        );
     }
 
     #[test]
     fn drag_opposes_travel_and_never_reverses_it() {
-        let air = Ambient { pull_mps2: DVec3::ZERO, density_kgpm3: 1.225 };
-        let moving = DrivenState { vel_mps: DVec3::new(10.0, 0.0, 0.0), ..at_rest() };
+        let air = Ambient {
+            pull_mps2: DVec3::ZERO,
+            density_kgpm3: 1.225,
+        };
+        let moving = DrivenState {
+            vel_mps: DVec3::new(10.0, 0.0, 0.0),
+            ..at_rest()
+        };
         let after = advance_driven(&moving, [0; 3], [0; 3], &hull(), &air, 0.02);
-        assert!(after.vel_mps.x < 10.0 && after.vel_mps.x > 0.0, "slowed, not reversed: {:?}", after.vel_mps);
+        assert!(
+            after.vel_mps.x < 10.0 && after.vel_mps.x > 0.0,
+            "slowed, not reversed: {:?}",
+            after.vel_mps
+        );
     }
 
     #[test]
     fn a_massless_hull_coasts_rather_than_producing_a_broken_position() {
         // The false arm of the finite guard: dividing by a zero mass must not put a NaN into a
         // position, because a NaN position is unrecoverable and a coast is not.
-        let air = Ambient { pull_mps2: DVec3::ZERO, density_kgpm3: 1.225 };
-        let broken = BodyFacts { mass_kg: 0.0, ..hull() };
-        let moving = DrivenState { vel_mps: DVec3::new(10.0, 0.0, 0.0), ..at_rest() };
+        let air = Ambient {
+            pull_mps2: DVec3::ZERO,
+            density_kgpm3: 1.225,
+        };
+        let broken = BodyFacts {
+            mass_kg: 0.0,
+            ..hull()
+        };
+        let moving = DrivenState {
+            vel_mps: DVec3::new(10.0, 0.0, 0.0),
+            ..at_rest()
+        };
         let after = advance_driven(&moving, [0; 3], [0; 3], &broken, &air, 0.02);
         assert!(after.pos_m.is_finite() && after.vel_mps.is_finite());
         assert_eq!(after.vel_mps, moving.vel_mps);
@@ -851,7 +957,10 @@ mod tests {
     fn a_turn_spins_the_hull_and_a_still_stick_leaves_it_facing_the_same_way() {
         let after = advance_driven(&at_rest(), [0; 3], [500_000, 0, 0], &hull(), &vacuum(), 1.0);
         assert!((after.spin_radps.x - 0.5).abs() < 1e-12);
-        assert!(after.orient.angle_between(DQuat::IDENTITY) > 0.4, "it must have turned");
+        assert!(
+            after.orient.angle_between(DQuat::IDENTITY) > 0.4,
+            "it must have turned"
+        );
         // The false arm: no spin returns the facing untouched rather than rotating about an
         // undefined axis.
         let still = advance_driven(&at_rest(), [0; 3], [0; 3], &hull(), &vacuum(), 1.0);
@@ -866,7 +975,11 @@ mod tests {
         for _ in 0..10_000 {
             s = advance_driven(&s, [4_000_000, 0, 0], [0; 3], &hull(), &vacuum(), 0.02);
         }
-        assert!((s.vel_mps.x - 800.0).abs() < 1e-6, "no clamp anywhere: {:?}", s.vel_mps);
+        assert!(
+            (s.vel_mps.x - 800.0).abs() < 1e-6,
+            "no clamp anywhere: {:?}",
+            s.vel_mps
+        );
     }
 
     use super::{DrivenChildren, on_child_drive, on_child_facts};
@@ -900,7 +1013,10 @@ mod tests {
         .expect("4-level path has a leaf")
     }
     fn parent_realm() -> vd_core::pose::RealmId {
-        ship_coord().parent().expect("a ship has a parent").lowered()
+        ship_coord()
+            .parent()
+            .expect("a ship has a parent")
+            .lowered()
     }
     fn nodes() -> std::collections::BTreeMap<vd_core::pose::RealmId, NodeId> {
         std::collections::BTreeMap::from([(ship_coord().lowered(), SHIP_NODE)])
@@ -929,7 +1045,15 @@ mod tests {
     #[test]
     fn a_childs_drive_is_admitted_and_held() {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
-        on_child_drive(a_drive(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_drive(
+            a_drive(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_drive_received, 1);
         assert_eq!(held.0[&ship_coord().lowered()].drive.0, [4_000_000, 0, 0]);
     }
@@ -939,7 +1063,15 @@ mod tests {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
         // A realm integrates what IT holds and nothing else — the misroute guard every up-lane carries.
         let stranger = vd_core::pose::RealmId::Planet(4242);
-        on_child_drive(a_drive(9), SHIP_NODE, stranger, true, &nodes(), &mut held, &mut stats);
+        on_child_drive(
+            a_drive(9),
+            SHIP_NODE,
+            stranger,
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_drive_misrouted, 1);
         assert_eq!(stats.child_drive_received, 0);
         assert!(held.0.is_empty());
@@ -949,7 +1081,15 @@ mod tests {
     fn a_drive_from_the_wrong_node_is_refused() {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
         // A deposed incarnation's push is not this child's push.
-        on_child_drive(a_drive(9), NodeId(999), parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_drive(
+            a_drive(9),
+            NodeId(999),
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_drive_unattested, 1);
         assert!(held.0.is_empty());
     }
@@ -959,7 +1099,15 @@ mod tests {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
         // The capability is checked HERE at runtime, not by installing different systems: the same
         // systems are installed everywhere and the profile decides what they DO (HR3).
-        on_child_drive(a_drive(9), SHIP_NODE, parent_realm(), false, &nodes(), &mut held, &mut stats);
+        on_child_drive(
+            a_drive(9),
+            SHIP_NODE,
+            parent_realm(),
+            false,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_drive_uncapable, 1);
         assert!(held.0.is_empty());
     }
@@ -967,18 +1115,46 @@ mod tests {
     #[test]
     fn an_out_of_order_drive_is_stale_news_and_never_a_correction() {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
-        on_child_drive(a_drive(20), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_drive(
+            a_drive(20),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         let mut older = a_drive(9);
         older.push = [1, 1, 1];
-        on_child_drive(older, SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_drive(
+            older,
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_drive_stale, 1);
-        assert_eq!(held.0[&ship_coord().lowered()].drive.0, [4_000_000, 0, 0], "the fresher push stands");
+        assert_eq!(
+            held.0[&ship_coord().lowered()].drive.0,
+            [4_000_000, 0, 0],
+            "the fresher push stands"
+        );
     }
 
     #[test]
     fn facts_are_admitted_and_converted_out_of_their_whole_units() {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
-        on_child_facts(some_facts(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         let f = held.0[&ship_coord().lowered()].facts.expect("held");
         assert!((f.mass_kg - 50_000.0).abs() < 1e-9);
         assert!((f.cross_section_m2 - 12.0).abs() < 1e-9);
@@ -992,11 +1168,27 @@ mod tests {
         // given a made-up mass flies wrong forever and nobody finds out.
         let mut massless = some_facts(9);
         massless.mass_g = 0;
-        on_child_facts(massless, SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            massless,
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_facts_unlawful, 1);
         let mut flat = some_facts(9);
         flat.cross_section_mm2 = 0;
-        on_child_facts(flat, SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            flat,
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_facts_unlawful, 2);
         assert_eq!(stats.child_facts_received, 0);
     }
@@ -1005,35 +1197,106 @@ mod tests {
     fn facts_carry_the_same_four_guards_as_the_drive() {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
         let stranger = vd_core::pose::RealmId::Planet(4242);
-        on_child_facts(some_facts(9), SHIP_NODE, stranger, true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            stranger,
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_facts_misrouted, 1);
-        on_child_facts(some_facts(9), NodeId(999), parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(9),
+            NodeId(999),
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_facts_unattested, 1);
-        on_child_facts(some_facts(9), SHIP_NODE, parent_realm(), false, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            false,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_drive_uncapable, 1);
-        on_child_facts(some_facts(20), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
-        on_child_facts(some_facts(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(20),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         assert_eq!(stats.child_facts_stale, 1);
     }
 
     #[test]
     fn a_child_that_never_stated_its_facts_is_not_moved_at_all() {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
-        on_child_drive(a_drive(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_drive(
+            a_drive(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         held.advance_all(UniverseTick(9), 5, &vacuum(), 1.0);
         // Its mass decides its drag and later its impacts. Guessing one flies it wrong forever and
         // silently; leaving it still is visible the moment anybody looks.
-        assert_eq!(held.state_of(ship_coord().lowered()).expect("held").pos_m, DVec3::ZERO);
+        assert_eq!(
+            held.state_of(ship_coord().lowered()).expect("held").pos_m,
+            DVec3::ZERO
+        );
     }
 
     #[test]
     fn a_child_with_facts_and_a_push_actually_moves() {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
-        on_child_facts(some_facts(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
-        on_child_drive(a_drive(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
+        on_child_drive(
+            a_drive(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         held.advance_all(UniverseTick(9), 5, &vacuum(), 1.0);
         let s = held.state_of(ship_coord().lowered()).expect("held");
-        assert!((s.vel_mps.x - 4.0).abs() < 1e-9, "four metres per second after one second: {:?}", s.vel_mps);
+        assert!(
+            (s.vel_mps.x - 4.0).abs() < 1e-9,
+            "four metres per second after one second: {:?}",
+            s.vel_mps
+        );
     }
 
     #[test]
@@ -1049,19 +1312,49 @@ mod tests {
         // requests, so my forces will not come to the parent any more, so the parent stops applying
         // them — so acceleration stops, but speed is kept."
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
-        on_child_facts(some_facts(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
-        on_child_drive(a_drive(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
+        on_child_drive(
+            a_drive(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         // Two ticks with the pilot at the controls: the push is fresh, so it applies.
         held.advance_all(UniverseTick(9), 5, &vacuum(), 1.0);
         held.advance_all(UniverseTick(10), 5, &vacuum(), 1.0);
-        let flying = held.state_of(ship_coord().lowered()).expect("held").vel_mps.x;
-        assert!((flying - 8.0).abs() < 1e-9, "two seconds of four m/s²: {flying}");
+        let flying = held
+            .state_of(ship_coord().lowered())
+            .expect("held")
+            .vel_mps
+            .x;
+        assert!(
+            (flying - 8.0).abs() < 1e-9,
+            "two seconds of four m/s²: {flying}"
+        );
 
         // The pilot leaves. Nothing new arrives. Past the window the push decays to nothing.
         held.advance_all(UniverseTick(99), 5, &vacuum(), 1.0);
         held.advance_all(UniverseTick(100), 5, &vacuum(), 1.0);
-        let coasting = held.state_of(ship_coord().lowered()).expect("held").vel_mps.x;
-        assert!((coasting - flying).abs() < 1e-9, "speed must be KEPT, not lost: {coasting} vs {flying}");
+        let coasting = held
+            .state_of(ship_coord().lowered())
+            .expect("held")
+            .vel_mps
+            .x;
+        assert!(
+            (coasting - flying).abs() < 1e-9,
+            "speed must be KEPT, not lost: {coasting} vs {flying}"
+        );
     }
 
     #[test]
@@ -1069,12 +1362,32 @@ mod tests {
         // The safety half of the same rule. A held push that never expired would have run a dead
         // ship's engines until the heat death of the world.
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
-        on_child_facts(some_facts(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
-        on_child_drive(a_drive(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
+        on_child_drive(
+            a_drive(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         for tick in 0..1_000 {
             held.advance_all(UniverseTick(9 + tick), 5, &vacuum(), 0.02);
         }
-        let v = held.state_of(ship_coord().lowered()).expect("held").vel_mps.x;
+        let v = held
+            .state_of(ship_coord().lowered())
+            .expect("held")
+            .vel_mps
+            .x;
         // Six ticks of thrust at most (the window), never a thousand.
         assert!(v < 1.0, "a silent ship must stop thrusting: {v}");
     }
@@ -1084,11 +1397,34 @@ mod tests {
         // The window's other job: two shards do not tick in lockstep, and an unreliable lane drops a
         // datagram now and then. A push stated a couple of ticks ago is still this pilot's intent.
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
-        on_child_facts(some_facts(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
-        on_child_drive(a_drive(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
+        on_child_drive(
+            a_drive(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         held.advance_all(UniverseTick(12), 5, &vacuum(), 1.0);
-        let v = held.state_of(ship_coord().lowered()).expect("held").vel_mps.x;
-        assert!((v - 4.0).abs() < 1e-9, "a three-tick-old push still flies the ship: {v}");
+        let v = held
+            .state_of(ship_coord().lowered())
+            .expect("held")
+            .vel_mps
+            .x;
+        assert!(
+            (v - 4.0).abs() < 1e-9,
+            "a three-tick-old push still flies the ship: {v}"
+        );
     }
 
     #[test]
@@ -1096,11 +1432,34 @@ mod tests {
         // A child running slightly ahead of its parent's clock must not have its push read as
         // enormously old — which is what an unsaturated subtraction would do.
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
-        on_child_facts(some_facts(50), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
-        on_child_drive(a_drive(50), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(50),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
+        on_child_drive(
+            a_drive(50),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         held.advance_all(UniverseTick(48), 5, &vacuum(), 1.0);
-        let v = held.state_of(ship_coord().lowered()).expect("held").vel_mps.x;
-        assert!((v - 4.0).abs() < 1e-9, "a push from just ahead is fresh: {v}");
+        let v = held
+            .state_of(ship_coord().lowered())
+            .expect("held")
+            .vel_mps
+            .x;
+        assert!(
+            (v - 4.0).abs() < 1e-9,
+            "a push from just ahead is fresh: {v}"
+        );
     }
 
     #[test]
@@ -1114,7 +1473,15 @@ mod tests {
         // One coasting ship would then re-send every planet, star and structure in the realm, to every
         // window, at tick rate. The lane's own comment measures that at 285 MB/s per subscriber.
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
-        on_child_facts(some_facts(9), SHIP_NODE, parent_realm(), true, &nodes(), &mut held, &mut stats);
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
         // Facts only — no push has ever arrived, and no drive is stated.
         assert!(
             held.moves(ship_coord().lowered()),
@@ -1139,20 +1506,47 @@ mod tests {
         let coord = ship_coord();
         let parent = Some(vd_core::ids::NodeId(9));
 
-        super::emit_child_facts(true, &coord, Some(Fence(1)), UniverseTick(1), parent,
-            &body, &mut stated, &mut outbox, &mut stats);
+        super::emit_child_facts(
+            true,
+            &coord,
+            Some(Fence(1)),
+            UniverseTick(1),
+            parent,
+            &body,
+            &mut stated,
+            &mut outbox,
+            &mut stats,
+        );
         assert_eq!(stats.child_facts_sent, 1, "it stated what it is");
 
         // Nothing changed, so nothing is said. A declared property says nothing twice.
-        super::emit_child_facts(true, &coord, Some(Fence(1)), UniverseTick(2), parent,
-            &body, &mut stated, &mut outbox, &mut stats);
+        super::emit_child_facts(
+            true,
+            &coord,
+            Some(Fence(1)),
+            UniverseTick(2),
+            parent,
+            &body,
+            &mut stated,
+            &mut outbox,
+            &mut stats,
+        );
         assert_eq!(stats.child_facts_sent, 1, "and it did not repeat itself");
 
         // The hull drops cargo. That IS a change, and it must travel.
         let mut lighter = body;
         lighter.facts.mass_g = 30_000_000;
-        super::emit_child_facts(true, &coord, Some(Fence(1)), UniverseTick(3), parent,
-            &lighter, &mut stated, &mut outbox, &mut stats);
+        super::emit_child_facts(
+            true,
+            &coord,
+            Some(Fence(1)),
+            UniverseTick(3),
+            parent,
+            &lighter,
+            &mut stated,
+            &mut outbox,
+            &mut stats,
+        );
         assert_eq!(stats.child_facts_sent, 2, "a change is stated");
     }
 
@@ -1163,8 +1557,17 @@ mod tests {
         let mut outbox = crate::runtime::OutboundBox::default();
         let mut stats = StubStats::default();
         let mut stated = super::StatedFacts::default();
-        super::emit_child_facts(false, &ship_coord(), Some(Fence(1)), UniverseTick(1),
-            Some(vd_core::ids::NodeId(9)), &a_built_body(), &mut stated, &mut outbox, &mut stats);
+        super::emit_child_facts(
+            false,
+            &ship_coord(),
+            Some(Fence(1)),
+            UniverseTick(1),
+            Some(vd_core::ids::NodeId(9)),
+            &a_built_body(),
+            &mut stated,
+            &mut outbox,
+            &mut stats,
+        );
         assert_eq!(stats.child_facts_sent, 0);
     }
 
@@ -1178,9 +1581,16 @@ mod tests {
         nimble.facts.max_push_micro_mps2 = 200_000_000;
         let a = super::rating_of(&heavy.facts);
         let b = super::rating_of(&nimble.facts);
-        assert!(b.max_push_mps2 > a.max_push_mps2, "two hulls fly differently: {a:?} vs {b:?}");
+        assert!(
+            b.max_push_mps2 > a.max_push_mps2,
+            "two hulls fly differently: {a:?} vs {b:?}"
+        );
         // And the stored whole numbers read back as the rates the stick is scaled by.
-        assert!((a.max_push_mps2 - 98.1).abs() < 1e-9, "ten gravities: {}", a.max_push_mps2);
+        assert!(
+            (a.max_push_mps2 - 98.1).abs() < 1e-9,
+            "ten gravities: {}",
+            a.max_push_mps2
+        );
     }
 
     fn a_built_body() -> vd_core::built::BuiltBody {
@@ -1199,5 +1609,232 @@ mod tests {
             },
             fence: Fence::GENESIS,
         }
+    }
+
+    // ===== ★ THE FLIGHT (D-MOVE-2; owner rulings 2026-08-31 and 2026-09-01) ====================
+    //
+    // A built hull states what it IS and what it is DOING; its parent admits both through the shipped
+    // guards, adds its own ambient, and authors where the hull ends up. Nothing on that path asks what
+    // KIND of thing it is looking at — which is what the two runs below prove.
+
+    /// The hull's lineage under whichever parent holds it. ★ THE SAME LEAF BOTH TIMES: a hull's name
+    /// does not change when its parent does.
+    fn hull_under(parent: vd_core::pose::RealmId) -> RealmCoord {
+        use vd_core::realm_path::RealmLevel;
+        let id = vd_core::ids::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 1, 1, 0);
+        RealmCoord::from_path(RealmPath::from_levels(vec![
+            vd_core::worldgen::level_of(parent),
+            RealmLevel::for_ship(id),
+        ]))
+        .expect("a two-level path has a leaf")
+    }
+
+    /// Fly one hull under one parent for a second, through the REAL admission path, and report how far
+    /// it went and how fast it ended up going.
+    fn fly_under(parent: vd_core::pose::RealmId) -> (f64, f64) {
+        let body = a_built_body();
+        let coord = hull_under(parent);
+        let child = coord.lowered();
+        let node = NodeId(77);
+        let nodes = std::collections::BTreeMap::from([(child, node)]);
+        let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
+
+        // WHAT I AM — on the reliable lane, from the hull's own row.
+        on_child_facts(
+            vd_wire::intershard::ChildFacts {
+                child: coord.clone(),
+                child_fence: Fence(1),
+                at: UniverseTick(1),
+                mass_g: body.facts.mass_g,
+                cross_section_mm2: body.facts.cross_section_mm2,
+                drag_micro: body.facts.drag_micro,
+                declared: vd_wire::intershard::DeclaredStates::default(),
+            },
+            node,
+            parent,
+            true,
+            &nodes,
+            &mut held,
+            &mut stats,
+        );
+        // WHAT I AM DOING — the stick full forward, scaled by THIS hull's own rating.
+        let (push, turn) = drive_from_stick(
+            vd_core::kinematics::local_axes_from_movement([1.0, 0.0, 0.0]),
+            [0.0; 3],
+            &super::rating_of(&body.facts),
+        );
+        on_child_drive(
+            vd_wire::intershard::ChildDrive {
+                child: coord,
+                child_fence: Fence(1),
+                at: UniverseTick(1),
+                push,
+                turn,
+            },
+            node,
+            parent,
+            true,
+            &nodes,
+            &mut held,
+            &mut stats,
+        );
+        assert_eq!(
+            stats.child_facts_received, 1,
+            "the parent admitted what the hull IS"
+        );
+        assert_eq!(stats.child_drive_received, 1, "and what it is DOING");
+
+        // ★ THE PILOT HOLDS THE STICK, which means the drive arrives EVERY TICK. The first version of
+        // this test stated the push once and advanced fifty ticks, and measured 11.772 m/s instead of
+        // 98.1 — exactly six ticks of thrust, which is the freshness window.
+        //
+        // That was the rule working, not a defect: silence means no force, so a hull whose pilot stops
+        // asking stops accelerating and keeps its speed. The test had let go of the stick and then
+        // complained the ship coasted.
+        //
+        // Open space: no pull, no medium. A realm's own ambient is owed with the physics phase, and
+        // the stub says so rather than inventing a number.
+        for tick in 0..50 {
+            let at = UniverseTick(1 + tick);
+            on_child_drive(
+                vd_wire::intershard::ChildDrive {
+                    child: hull_under(parent),
+                    child_fence: Fence(1),
+                    at,
+                    push,
+                    turn,
+                },
+                node,
+                parent,
+                true,
+                &nodes,
+                &mut held,
+                &mut stats,
+            );
+            held.advance_all(at, super::DRIVE_STALE_AFTER_TICKS, &vacuum(), 0.02);
+        }
+        let s = held.state_of(child).expect("the parent holds the hull");
+        (s.pos_m.length(), s.vel_mps.length())
+    }
+
+    #[test]
+    fn a_built_hull_flies_and_does_not_know_which_parent_holds_it() {
+        // ★ THE RULING'S OWN ACCEPTANCE LINE: "From the next tick the ship sends the identical six
+        // numbers to the planet… It does not know it moved house."
+        //
+        // Same record, same stick, same six numbers, two different KINDS of parent. The hull must
+        // travel identically, because nothing about the parent reaches the child. This is also HR4's
+        // gate: the identical fixture on two realm kinds, or the feature does not land.
+        let in_system = fly_under(vd_core::pose::RealmId::System(7));
+        let on_planet = fly_under(vd_core::pose::RealmId::Planet(7));
+
+        assert!(
+            in_system.0 > 0.0,
+            "the hull moved in a star system: {in_system:?}"
+        );
+        assert!(on_planet.0 > 0.0, "and under a planet: {on_planet:?}");
+        assert!(
+            (in_system.0 - on_planet.0).abs() < 1e-9,
+            "IT DOES NOT KNOW IT MOVED HOUSE — same distance: {in_system:?} vs {on_planet:?}",
+        );
+        assert!(
+            (in_system.1 - on_planet.1).abs() < 1e-9,
+            "and the same speed: {in_system:?} vs {on_planet:?}",
+        );
+        // One second of this hull's OWN rated push — ten gravities, from its own row, not a constant.
+        assert!(
+            (in_system.1 - 98.1).abs() < 1e-6,
+            "one second of its own rated push: {} m/s",
+            in_system.1,
+        );
+    }
+
+    #[test]
+    fn a_heavier_hull_flies_the_same_in_vacuum_and_differently_in_air() {
+        // ★ WHY MASS CROSSES AT ALL, proven on the flight rather than in the arithmetic. Mass cancels
+        // out of a realm's pull and does NOT cancel out of its medium — so two hulls coast alike in
+        // space and part company the moment there is air.
+        let parent = vd_core::pose::RealmId::System(7);
+        let coord = hull_under(parent);
+        let child = coord.lowered();
+        let node = NodeId(77);
+        let nodes = std::collections::BTreeMap::from([(child, node)]);
+
+        let fly = |mass_g: u64, density: f64| -> f64 {
+            let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
+            let mut facts = a_built_body().facts;
+            facts.mass_g = mass_g;
+            on_child_facts(
+                vd_wire::intershard::ChildFacts {
+                    child: coord.clone(),
+                    child_fence: Fence(1),
+                    at: UniverseTick(1),
+                    mass_g: facts.mass_g,
+                    cross_section_mm2: facts.cross_section_mm2,
+                    drag_micro: facts.drag_micro,
+                    declared: vd_wire::intershard::DeclaredStates::default(),
+                },
+                node,
+                parent,
+                true,
+                &nodes,
+                &mut held,
+                &mut stats,
+            );
+            let (push, turn) = drive_from_stick(
+                vd_core::kinematics::local_axes_from_movement([1.0, 0.0, 0.0]),
+                [0.0; 3],
+                &super::rating_of(&facts),
+            );
+            on_child_drive(
+                vd_wire::intershard::ChildDrive {
+                    child: coord.clone(),
+                    child_fence: Fence(1),
+                    at: UniverseTick(1),
+                    push,
+                    turn,
+                },
+                node,
+                parent,
+                true,
+                &nodes,
+                &mut held,
+                &mut stats,
+            );
+            let air = Ambient {
+                pull_mps2: DVec3::ZERO,
+                density_kgpm3: density,
+            };
+            for tick in 0..50 {
+                let at = UniverseTick(1 + tick);
+                on_child_drive(
+                    vd_wire::intershard::ChildDrive {
+                        child: coord.clone(),
+                        child_fence: Fence(1),
+                        at,
+                        push,
+                        turn,
+                    },
+                    node,
+                    parent,
+                    true,
+                    &nodes,
+                    &mut held,
+                    &mut stats,
+                );
+                held.advance_all(at, super::DRIVE_STALE_AFTER_TICKS, &air, 0.02);
+            }
+            held.state_of(child).expect("held").vel_mps.length()
+        };
+
+        let (heavy, light) = (50_000_000, 5_000_000);
+        assert!(
+            (fly(heavy, 0.0) - fly(light, 0.0)).abs() < 1e-9,
+            "in vacuum the hulls fly alike — a push is an acceleration",
+        );
+        assert!(
+            fly(light, 1.225) < fly(heavy, 1.225),
+            "in air the LIGHTER hull is slowed more — which is the whole reason mass crosses",
+        );
     }
 }

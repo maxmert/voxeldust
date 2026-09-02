@@ -726,7 +726,7 @@ fn a_large_world_partitions_into_multiple_under_budget_frames() {
             dots.0.insert(
                 SessionId(u128::from(n) + 1),
                 Dot {
-        last_stick: None,
+                    last_stick: None,
                     entity: EntityId::pack(EntityKind::Player, 10, n, n as u32),
                     account: AccountId(n as u128),
                     session_fence: Fence(1),

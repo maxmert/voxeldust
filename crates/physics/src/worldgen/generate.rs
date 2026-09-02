@@ -94,7 +94,7 @@ const DISC_DENSITY_LO_PER_PC3: f64 = 0.25;
 const DISC_DENSITY_HI_PER_PC3: f64 = 0.75;
 /// A parsec in metres — the unit the density above is measured in, because that is the unit the
 /// surveys publish.
-const PARSEC_IN_M: f64 = 3.085_677_581_491_367_3e16;
+const PARSEC_IN_M: f64 = 3.085_677_581_491_367e16;
 
 /// THE FROZEN STREAM PREFIX WIDTH (the Stream Law, celestial_taxonomy_design §3.0/§7.1): the
 /// per-system draw stream shipped with FIVE planets' element draws before the star/albedo/
@@ -908,8 +908,9 @@ pub(crate) struct GalaxyShape {
 ///
 /// ONE entry, not a map. A process boots ONE world and asks about it repeatedly, so a single slot hits
 /// every time after the first. A map would hold every world a test ever built and never free one.
-static LAST_FOREST: std::sync::Mutex<Option<(u64, UniverseConfig, std::sync::Arc<Vec<GeneratedBody>>)>> =
-    std::sync::Mutex::new(None);
+/// One remembered forest: the seed and config it was built from, and the bodies.
+type RememberedForest = Option<(u64, UniverseConfig, std::sync::Arc<Vec<GeneratedBody>>)>;
+static LAST_FOREST: std::sync::Mutex<RememberedForest> = std::sync::Mutex::new(None);
 
 /// The forest for this world, built once per process.
 ///

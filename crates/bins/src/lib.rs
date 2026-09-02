@@ -714,7 +714,13 @@ impl ClusterAddrs {
             gateway: loopback(ports.gateway),
             shard: loopback(ports.shard),
             admin: loopback(ports.admin),
-            gateway_admin: None,
+            // ★ THE GATEWAY'S OWN COUNTERS, READABLE FROM A RUNNING CLUSTER (2026-09-01). The
+            // orchestrator has had an admin listener since RG-4; the gateway never did, so how many
+            // windows it opened and how many rows it discarded could not be read at all. That gap
+            // stopped a live diagnosis dead: a player inside a ship saw one realm, and telling "the
+            // parent was never asked" from "the parent answered and the answer was dropped" needs
+            // exactly those two numbers. The slot books the port either way; this hands it over.
+            gateway_admin: Some(loopback(ports.admin_gateway)),
             orchestrator_probe: loopback(ports.probe_orchestrator),
             gateway_probe: loopback(ports.probe_gateway),
             shard_probe: loopback(ports.probe_shard),
@@ -1143,8 +1149,21 @@ pub fn spawn_peer_resolver_if_configured(
 /// The env every node shares (trust bundle + transport knobs + the per-launch process incarnation).
 #[must_use]
 pub fn common_env(trust_dir: &str, p: &DevClusterParams) -> Vec<(&'static str, String)> {
+    // ★ WHERE A REALM'S OWN FILE GOES (D-MOVE-2). The slot's work directory, which is the trust
+    // directory's parent — so a realm's store is reaped by `down` with everything else, exactly as the
+    // orchestrator's is.
+    //
+    // The DIRECTORY is common to every node; the FILENAME is the realm's own, built by the shard from
+    // its own name. That split is deliberate: one place decides where files live, and one place decides
+    // what a realm's file is called, so a writer and a reader cannot disagree about either.
+    let realm_store_dir = std::path::Path::new(trust_dir)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .display()
+        .to_string();
     let mut env = vec![
         ("VD_TRUST_DIR", trust_dir.to_owned()),
+        ("VD_REALM_STORE_DIR", realm_store_dir),
         str_pair("VD_OUTBOUND_CAP", p.outbound_cap),
         str_pair("VD_TICK_HZ", p.tick_hz),
         str_pair("VD_PROCESS_INCARNATION", launch_incarnation()),
@@ -2146,6 +2165,36 @@ pub fn spawn_anchor_keys() -> &'static [&'static str] {
     ]
 }
 
+/// ★ WHERE ONE REALM'S FILE LIVES (D-MOVE-2) — the ONE place the name is built, so a tool that writes
+/// a row and a shard that reads it can never disagree about which file they mean.
+///
+/// Named by the realm, in the slot's own work directory, so `down` reaps it with everything else.
+#[must_use]
+pub fn realm_store_path(dir: &std::path::Path, realm: vd_core::pose::RealmId) -> String {
+    dir.join(format!("realm-{}.redb", realm_file_token(realm)))
+        .display()
+        .to_string()
+}
+
+/// A realm's name as a filename: its kind and its number, with nothing a file system dislikes.
+///
+/// A built realm's number is up to 128 bits, so it is written in full — a truncated name would give
+/// two hulls one file, and the second would silently overwrite the first.
+#[must_use]
+pub fn realm_file_token(realm: vd_core::pose::RealmId) -> String {
+    use vd_core::pose::RealmId;
+    match realm {
+        RealmId::Universe => "universe".to_owned(),
+        RealmId::Galaxy(s) => format!("galaxy-{s}"),
+        RealmId::System(s) => format!("system-{s}"),
+        RealmId::Planet(s) => format!("planet-{s}"),
+        RealmId::Station(s) => format!("station-{s}"),
+        RealmId::Area(s) => format!("area-{s}"),
+        RealmId::Star(s) => format!("star-{s}"),
+        RealmId::Ship(id) => format!("ship-{}", id.0),
+    }
+}
+
 /// This process's own environment, as a shard reads it — so a gate can drive [`open_realm_store`] the
 /// way the shipped boot does, rather than by building a config a shard never builds.
 #[must_use]
@@ -2173,14 +2222,24 @@ pub fn process_env() -> EnvConfig {
 /// The path is stated but the file cannot be opened, or its label names a different world.
 pub fn open_realm_store(
     env: &EnvConfig,
+    own_realm: vd_core::pose::RealmId,
 ) -> Result<Option<vd_io_prod::store::RedbStore>, Box<dyn std::error::Error>> {
-    let Ok(path) = env.string("VD_REALM_STORE") else {
-        return Ok(None);
+    // A realm is told the DIRECTORY and works out its own filename, so a writer and a reader cannot
+    // disagree about which file a realm means. An explicit path still wins, for a tool pointed at one
+    // file. Neither stated ⇒ no store, which is exactly what every shard had before this existed.
+    let path = match env.string("VD_REALM_STORE").ok().filter(|s| !s.is_empty()) {
+        Some(explicit) => std::path::PathBuf::from(explicit),
+        None => match env
+            .string("VD_REALM_STORE_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
+            Some(dir) => {
+                std::path::PathBuf::from(realm_store_path(std::path::Path::new(&dir), own_realm))
+            }
+            None => return Ok(None),
+        },
     };
-    if path.is_empty() {
-        return Ok(None);
-    }
-    let path = std::path::PathBuf::from(path);
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
@@ -2604,6 +2663,17 @@ pub fn boot_regions_and_movers_in_lineage(
     (regions, movers)
 }
 
+/// A shard's boot world with its light: the regions it holds, its movers' orbits by realm, and
+/// the photometric draw of every lit body.
+pub type LitBootWorld = (
+    Vec<vd_core::geometry::RealmRegion>,
+    std::collections::BTreeMap<vd_core::pose::RealmId, vd_physics::celestial::OrbitalElements>,
+    Vec<(
+        vd_core::pose::RealmId,
+        vd_physics::worldgen::StarPhotometrics,
+    )>,
+);
+
 /// ★ EVERYTHING A SHARD BOOT NEEDS, FROM ONE SUBTREE BUILD (2026-08-30): its regions, its mover
 /// roster, and the marker draws for the children it may state a point of light about.
 ///
@@ -2618,14 +2688,7 @@ pub fn boot_world_lit(
     occupant_v_max_mps: f64,
     tick_dt_s: f64,
     lineage: &std::collections::BTreeSet<vd_core::pose::RealmId>,
-) -> (
-    Vec<vd_core::geometry::RealmRegion>,
-    std::collections::BTreeMap<vd_core::pose::RealmId, vd_physics::celestial::OrbitalElements>,
-    Vec<(
-        vd_core::pose::RealmId,
-        vd_physics::worldgen::StarPhotometrics,
-    )>,
-) {
+) -> LitBootWorld {
     boot_world_built(
         universe_seed,
         held_realms,
@@ -2634,6 +2697,7 @@ pub fn boot_world_lit(
         tick_dt_s,
         lineage,
         &[],
+        None,
     )
 }
 
@@ -2652,14 +2716,12 @@ pub fn boot_world_built(
     tick_dt_s: f64,
     lineage: &std::collections::BTreeSet<vd_core::pose::RealmId>,
     berths: &[(vd_core::pose::RealmId, vd_core::built::Berth)],
-) -> (
-    Vec<vd_core::geometry::RealmRegion>,
-    std::collections::BTreeMap<vd_core::pose::RealmId, vd_physics::celestial::OrbitalElements>,
-    Vec<(
+    own_row: Option<(
         vd_core::pose::RealmId,
-        vd_physics::worldgen::StarPhotometrics,
+        vd_core::geometry::Boundary,
+        vd_core::geometry::Boundary,
     )>,
-) {
+) -> LitBootWorld {
     let (regions, movers, lit) = vd_physics::worldgen::shard_boot_world_built(
         universe_seed,
         &process_world_config(occupant_v_max_mps, tick_dt_s),
@@ -2667,6 +2729,7 @@ pub fn boot_world_built(
         hosted,
         lineage,
         berths,
+        own_row,
     );
     (regions, movers.into_iter().collect(), lit)
 }
@@ -2725,7 +2788,11 @@ pub fn star_catalogue_for_boot(
     occupant_v_max_mps: f64,
     tick_dt_s: f64,
     regions: &[vd_core::geometry::RealmRegion],
-) -> (Vec<vd_core::look::StarRow>, u64) {
+) -> (
+    Vec<vd_core::look::StarRow>,
+    u64,
+    Option<vd_core::pose::FrameRef>,
+) {
     // ★ THE SKY IS FOLDED FROM THE SYSTEM LAYER (owner ruling 2026-08-29). This used to take the
     // FULL forest — every planet and every moon — and keep one row in sixteen. MEASURED on THE
     // world: 3 500 479 objects built to state 233 220 star rows.
@@ -2738,7 +2805,16 @@ pub fn star_catalogue_for_boot(
     let generation = vd_core::look::catalogue_generation(
         &postcard::to_allocvec(&rows).expect("closed wire types serialize infallibly"),
     );
-    (rows, generation)
+    // ★ THE FRAME THE SKY IS STATED IN (owner ruling 2026-09-02 R1): the parent of the stars —
+    // the galaxy — read off the same layer the rows came from, never a kind test. The composer
+    // lifts every observer's origin into it to place the star cloud. A world with no star states
+    // no sky and no frame.
+    let layer = vd_physics::worldgen::system_layer_view(universe_seed, &config);
+    let sky_frame = rows.first().and_then(|first| {
+        let star = layer.regions().iter().find(|r| r.realm == first.realm)?;
+        vd_core::pose::frame_for_realm(star.parent?, None)
+    });
+    (rows, generation, sky_frame)
 }
 
 #[must_use]

@@ -2524,8 +2524,7 @@ fn no_message_into_a_realm_names_that_realm_or_carries_a_placement() {
 
     /// A lineage coord for the chain's PLANET — the routing key a relay from the planet carries.
     fn planet_coord() -> vd_core::realm_coord::RealmCoord {
-        vd_sim::stub::StubConfig::root_coord(SYSTEM)
-            .child(vd_core::worldgen::level_of(PLANET))
+        vd_sim::stub::StubConfig::root_coord(SYSTEM).child(vd_core::worldgen::level_of(PLANET))
     }
 
     // ★ THE POSITIVE CONTROL, before the sweep: a relay whose statements DO name the receiver is

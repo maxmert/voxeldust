@@ -208,7 +208,3 @@ pub(crate) fn append_fixture_plant(bodies: &mut Vec<GeneratedBody>, config: &Uni
 }
 
 // ===== T4 — THE EARTH-LIKE PREDICATE + THE SEED SEARCH (celestial_taxonomy_design §8) =======
-
-
-
-

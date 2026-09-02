@@ -481,13 +481,23 @@ pub struct RealmSnapshotDatagram {
     /// lanes (dead in Slice C2 with their lanes) this field is stamped 0 — those bytes reach
     /// no client any more; only the composed feed carries a live epoch.
     pub origin_epoch: u64,
+    /// ★ THE SKY ANCHOR (owner ruling 2026-09-02 R1): the observer's ORIGIN realm — the realm the
+    /// picture is composed in — placed in the frame the star catalogue is stated in (the galaxy's),
+    /// at this tick, in that frame's own step. The gateway lifts the origin's own zero up the
+    /// observer chain to state it; the client places its ONE star cloud by it and never rebuilds
+    /// the cloud. `None` while the chain does not reach the sky's frame (nothing is drawn rather
+    /// than a wrong sky). Latest-wins with the rest of the datagram, and repeated on every chunk of
+    /// one tick so no chunk order can lose it.
+    pub sky_anchor: Option<StampedPose>,
     pub realms: Vec<RealmSnap>,
 }
 
-/// The fixed per-datagram overhead (sub + frame_id + source_tick + universe_tick +
-/// the entities-vec length prefix) — a generous postcard upper bound. Subtracted from
-/// the budget so a packed chunk's ENCODED size stays under the datagram MTU.
-const SNAPSHOT_HEADER_BUDGET: usize = 40;
+/// The fixed per-datagram overhead (sub + frame_id + source_tick + universe_tick + origin_epoch +
+/// the sky anchor + the rows-vec length prefix) — a postcard upper bound, pinned by
+/// `the_realm_datagram_header_fits_its_budget_at_every_maximum`. Subtracted from the budget so a
+/// packed chunk's ENCODED size stays under the datagram MTU. The sky anchor (2026-09-02) is the
+/// largest item in it: a full stamped pose whose cells may sit anywhere in the galaxy.
+const SNAPSHOT_HEADER_BUDGET: usize = 184;
 
 /// The conservative datagram budget every shard's snapshot partitioning must stay at
 /// or below: derived from the IPv6 minimum-MTU QUIC datagram floor minus headroom for
@@ -833,6 +843,46 @@ mod tests {
     }
 
     #[test]
+    fn the_realm_datagram_header_fits_its_budget_at_every_maximum() {
+        // THE HEADER BUDGET IS A MEASUREMENT: every header field at its widest postcard encoding —
+        // maximal varints, a sky anchor whose cells sit at the far corner of the lattice — with no
+        // rows, must encode within the constant the partitioner subtracts. Pinned both ways: the
+        // budget holds, and the pre-anchor budget (40) no longer does, so the number is load-bearing
+        // rather than generous.
+        let widest = RealmSnapshotDatagram {
+            sub: SubId(u32::MAX),
+            frame_id: u64::MAX,
+            source_tick: TickId(u64::MAX),
+            universe_tick: UniverseTick(u64::MAX),
+            origin_epoch: u64::MAX,
+            sky_anchor: Some(StampedPose {
+                frame: FrameRef::GalaxySpace {
+                    galaxy_seed: u64::MAX,
+                },
+                pos: vd_core::pose::LatticePos::at(
+                    vd_core::glam::I64Vec3::splat(i64::MIN + 1),
+                    DVec3::splat(-1.999_999),
+                ),
+                vel: DVec3::splat(-1.0e300),
+                orient: vd_core::glam::DQuat::from_xyzw(-0.5, -0.5, -0.5, -0.5),
+                universe_tick: UniverseTick(u64::MAX),
+            }),
+            realms: Vec::new(),
+        };
+        let bytes = postcard::to_allocvec(&widest).expect("encode");
+        assert!(
+            bytes.len() <= SNAPSHOT_HEADER_BUDGET,
+            "the widest header is {} bytes against a budget of {SNAPSHOT_HEADER_BUDGET}",
+            bytes.len()
+        );
+        assert!(
+            bytes.len() > 40,
+            "the pre-anchor budget of 40 would not hold it ({} bytes) — the constant moved for a reason",
+            bytes.len()
+        );
+    }
+
+    #[test]
     fn the_composed_level_roundtrips_with_its_origin_marker_and_empty_is_render_neutral() {
         // The proto_minor-18 flag day (window_lane.md §2.4, owner item 9: reshape IN PLACE — no
         // shims, no dual-decode; the floor moved so no pre-flag-day peer is ever served): the
@@ -1007,6 +1057,7 @@ mod tests {
             source_tick: TickId(9),
             universe_tick: UniverseTick(3000),
             origin_epoch: 2,
+            sky_anchor: None,
             realms: vec![
                 RealmSnap {
                     realm: RealmId::Planet(7),
@@ -1060,6 +1111,7 @@ mod tests {
             source_tick: TickId(10),
             universe_tick: UniverseTick(3001),
             origin_epoch: 2,
+            sky_anchor: None,
             realms: Vec::new(),
         };
         let bytes = postcard::to_allocvec(&empty).expect("encode");
@@ -1262,6 +1314,7 @@ mod tests {
                 source_tick: TickId(1),
                 universe_tick: UniverseTick(10),
                 origin_epoch: 0,
+                sky_anchor: None,
                 realms: chunk.clone(),
             };
             let encoded = postcard::to_allocvec(&datagram).expect("encode").len();

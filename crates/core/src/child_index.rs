@@ -199,6 +199,46 @@ impl ChildIndex {
     /// holds an entry for, absent from a query's answer, is positively NOT near the point. A realm the
     /// index never indexed (an ancestor, the realm itself, anything that moves) is simply unknown here,
     /// and a caller must evaluate it. Without this, an empty answer would look the same in both cases.
+    /// ★ THE CANDIDATES ALONG A LEAD (owner ruling 2026-09-02 R8 item 1): every child whose dilated
+    /// cell span the segment `p0 → p1` passes through, found by STEPPING the segment one cell edge at
+    /// a time. A looker's predictive lead at warp is thousands of cells long and almost never
+    /// axis-aligned, so the bounding-box form (`candidates_segment`) refuses it; the step form
+    /// costs one lookup per cell of LENGTH, never per cell of volume. Children are indexed over
+    /// their whole radius, so a point that lands in a child's span is inside that child's reach
+    /// and no neighbour scan is needed.
+    pub fn candidates_along(
+        &self,
+        p0: LatticePos,
+        p1: LatticePos,
+        tier: Tier,
+        out: &mut Vec<RealmId>,
+    ) {
+        if self.edge_m <= 0.0 {
+            return;
+        }
+        let span = p1.separation(p0, tier).metres();
+        let len_m = span.length();
+        let steps = (len_m / self.edge_m).ceil().max(0.0) as u64;
+        let mut last: Option<[i64; 3]> = None;
+        for i in 0..=steps {
+            let along = if steps == 0 {
+                crate::glam::DVec3::ZERO
+            } else {
+                span * (i as f64 / steps as f64)
+            };
+            let key = cell_key(p0.translated(along, tier), 0.0, self.edge_m, tier);
+            if last == Some(key) {
+                continue;
+            }
+            last = Some(key);
+            if let Some(realms) = self.cells.get(&key) {
+                out.extend_from_slice(realms);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+
     #[must_use]
     pub fn answers_for(&self, realm: RealmId) -> bool {
         self.indexed.contains(&realm)

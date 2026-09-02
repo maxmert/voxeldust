@@ -15,11 +15,11 @@ use super::{
     InterestHeld, OpenWindows, OwnedTransients, ParentRealmNode, PendingCrossings,
     PendingInputSlots, Placements, RealmAuthority, RealmConfirmedAt, RealmRegions, RelayHeld,
     RelayShip, RequestInFlight, StubConfig, StubStats, WasOccupied, announce_presence,
-    author_placements, emit_frames, emit_realm_frames, emit_transient_batch, evaluate_realm_aoi,
-    evaluate_realm_boundaries, feed_source_ghosts, is_retained_ghost, on_directory_reply,
-    on_gateway_msg, on_ghost_flow, placement_window_ticks, prune_holds, push_entity_removed,
-    readvance_dots, readvance_transients, redrive_pending_adoptions, redrive_stranded_crossings,
-    request_pending_grants, retain_child_live, self_fence_lapsed_realm,
+    author_placements, emit_frames, emit_realm_frames, emit_transient_batch, emit_window_rosters,
+    evaluate_realm_aoi, evaluate_realm_boundaries, feed_source_ghosts, is_retained_ghost,
+    on_directory_reply, on_gateway_msg, on_ghost_flow, placement_window_ticks, prune_holds,
+    push_entity_removed, readvance_dots, readvance_transients, redrive_pending_adoptions,
+    redrive_stranded_crossings, request_pending_grants, retain_child_live, self_fence_lapsed_realm,
 };
 use crate::io::{Inbound, MsgClass};
 use crate::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
@@ -216,8 +216,10 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // Bevy's 8-`.chain()` arity limit). Runs strictly AFTER `emit_realm_frames` (the author tail — the AoI
     // decision reads the SAME per-tick child placements the observer feed just shipped, H-1) and
     // `.run_if(has_synced)` (a fresh shard demands nothing pre-sync — determinism).
+    // ★ THE WINDOW ROSTERS AND BODIES RUN AFTER THE FOLD (owner decision 3, 2026-09-02 — R10): they
+    // ship the children in each window's range, and the range is what the fold just decided.
     schedule.add_systems(
-        (evaluate_realm_aoi,)
+        (evaluate_realm_aoi, emit_window_rosters)
             .chain()
             .after(emit_realm_frames)
             .run_if(has_synced),
@@ -246,6 +248,10 @@ type VuAoiInbound<'w> = (
     // Look horizon slice 4 — the CHILD-side interest holder the `RealmInterest` receive writes.
     ResMut<'w, InterestHeld>,
     ResMut<'w, crate::stub::drive::DrivenChildren>,
+    // ★ AT THE CONTROLS (owner ruling 2026-09-01). The input path needs ONE fact it did not hold:
+    // does this realm fly on an occupant's stick? A realm with engines and a body does; every other
+    // realm does not. Read-only here — the boot plants it, nothing else writes it.
+    Res<'w, crate::stub::drive::OwnBody>,
 );
 
 /// Drain and dispatch everything delivered this tick.
@@ -268,7 +274,13 @@ fn took_child_facts(
     match postcard::from_bytes::<InterShardFlow>(bytes) {
         Ok(InterShardFlow::ChildFacts(cf)) => {
             crate::stub::drive::on_child_facts(
-                cf, from, own_realm, integrates, child_nodes, driven, stats,
+                cf,
+                from,
+                own_realm,
+                integrates,
+                child_nodes,
+                driven,
+                stats,
             );
             true
         }
@@ -346,7 +358,23 @@ fn process_inbound(
         mut relay_held,
         mut interest_held,
         mut driven,
+        own_body,
     ) = vu_aoi;
+    // ★ WHY A PILOT'S BODY STOPS WALKING (owner ruling 2026-09-01). ONE key made TWO things move:
+    // it walked the player AND it pushed the ship, so the player left a 40 m hull in a fifth of a
+    // second and the ship flew off without them. MEASURED live: the body moved 568 m in 3 s while
+    // the hull burned 96 km the other way.
+    //
+    // A pilot at the controls does not also walk. Properly a SEAT says who is flying; a seat needs
+    // blocks, which do not exist yet. So the interim rule is the one the drive producer already
+    // uses — a realm that flies on an occupant's stick parks that occupant's body — and it is stated
+    // as a CAPABILITY plus a stored body, never as a test of what kind of realm this is (HR3/SL4).
+    let flies_on_a_stick = match identity.kind {
+        crate::capability::NodeKind::Shard(profile) => {
+            profile.self_driven() && own_body.0.is_some()
+        }
+        _ => false,
+    };
     let (mut in_flight, mut progress, mut holds) = crossing;
     let (mut pending, mut pending_slots, mut open_windows) = pending;
     let (mut authority, mut confirmed, mut cohosted) = realm_auth;
@@ -371,6 +399,7 @@ fn process_inbound(
                     realm_fence: authority.0,
                     regions: &regions,
                     placements: &placements.0,
+                    flies_on_a_stick,
                 };
                 on_gateway_msg(
                     bytes,
@@ -397,15 +426,16 @@ fn process_inbound(
             // What a child IS (its mass, cross-section, drag coefficient and declared states) must
             // arrive reliably: a change stated once and then lost would leave this realm computing
             // drag from a mass that is wrong for ever, with nothing to correct it.
-            MsgClass::Saga if took_child_facts(
-                bytes,
-                *from,
-                config.realm,
-                integrates_children(&identity),
-                &child_nodes.0,
-                &mut driven,
-                &mut stats,
-            ) => {}
+            MsgClass::Saga
+                if took_child_facts(
+                    bytes,
+                    *from,
+                    config.realm,
+                    integrates_children(&identity),
+                    &child_nodes.0,
+                    &mut driven,
+                    &mut stats,
+                ) => {}
             MsgClass::Saga => on_directory_reply(
                 bytes,
                 *from,

@@ -13,7 +13,7 @@
 use super::Placement;
 use super::{
     GeneratedBody, IMF_MASS_LO_MSUN, IMF_SLOPE, K_SPAN, UniverseConfig, WorldView,
-    system_forest_cached, imf_mass_hi_msun, moving_children_for_config, placement_offset,
+    imf_mass_hi_msun, moving_children_for_config, placement_offset, system_forest_cached,
 };
 use crate::celestial::OrbitalElements;
 use crate::motion::Motion;

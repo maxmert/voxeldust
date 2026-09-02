@@ -10,8 +10,8 @@
 //! that still works when a galaxy is full.
 
 use super::{
-    GeneratedBody, Placement, StarPhotometrics, UniverseConfig, generate_system_forest, system_forest_cached,
-    generate_walk_forest, orbital_of, realm_regions_for, to_regions,
+    GeneratedBody, Placement, StarPhotometrics, UniverseConfig, generate_system_forest,
+    generate_walk_forest, orbital_of, realm_regions_for, system_forest_cached, to_regions,
 };
 use crate::celestial::OrbitalElements;
 use glam::DVec3;
@@ -124,6 +124,14 @@ pub fn shard_boot_world(
     (regions, movers)
 }
 
+/// A shard's boot world with its light: the regions it holds, its movers' orbits, and the
+/// photometric draw of every lit body.
+pub type LitBootWorld = (
+    Vec<RealmRegion>,
+    Vec<(RealmId, OrbitalElements)>,
+    Vec<(RealmId, StarPhotometrics)>,
+);
+
 /// ★ THE SHARD BOOT'S WHOLE ANSWER, FROM ONE SUBTREE BUILD (2026-08-30).
 ///
 /// A shard boot needs three things from its own subtree: the region forest, the mover roster, and
@@ -140,12 +148,8 @@ pub fn shard_boot_world_lit(
     held: &std::collections::BTreeSet<RealmId>,
     hosted: RealmId,
     lineage: &std::collections::BTreeSet<RealmId>,
-) -> (
-    Vec<RealmRegion>,
-    Vec<(RealmId, OrbitalElements)>,
-    Vec<(RealmId, StarPhotometrics)>,
-) {
-    shard_boot_world_built(seed_universe, config, held, hosted, lineage, &[])
+) -> LitBootWorld {
+    shard_boot_world_built(seed_universe, config, held, hosted, lineage, &[], None)
 }
 
 /// ★ THE SAME WORLD, PLUS WHAT PEOPLE BUILT HERE (D-MOVE-2; owner rulings 2026-09-01) — THE one
@@ -172,27 +176,49 @@ pub fn shard_boot_world_built(
     hosted: RealmId,
     lineage: &std::collections::BTreeSet<RealmId>,
     berths: &[(RealmId, vd_core::built::Berth)],
-) -> (
-    Vec<RealmRegion>,
-    Vec<(RealmId, OrbitalElements)>,
-    Vec<(RealmId, StarPhotometrics)>,
-) {
+    own_row: Option<(
+        RealmId,
+        vd_core::geometry::Boundary,
+        vd_core::geometry::Boundary,
+    )>,
+) -> LitBootWorld {
     let mut subtree = super::realm_subtree(seed_universe, config, held, lineage);
     for (parent, berth) in berths {
-        subtree.push(GeneratedBody {
-            realm: berth.child,
-            parent: Some(*parent),
-            shape: berth.bound,
-            // A STATIC OFFSET, and only a starting one: from its first tick the parent authors this
-            // child's placement from the pushes it states. The berth is where the hull sits before
-            // anybody touches the controls.
-            placement: Placement::StaticOffset(berth.offset_m),
-            // A built hull has no seed stream, so it draws no light and belongs to no taxon. That
-            // absence IS what "the seed did not make this" looks like in the data.
-            photometrics: None,
-            taxon: None,
-            look: Some(berth.look),
-        });
+        // A STATIC OFFSET, and only a starting one: from its first tick the parent authors this
+        // child's placement from the pushes it states. The berth is where the hull sits before
+        // anybody touches the controls.
+        subtree.push(built_row(
+            berth.child,
+            *parent,
+            berth.bound,
+            berth.look,
+            berth.offset_m,
+        ));
+    }
+    // ★ THE SHARD'S OWN ROW, WHEN THE SEED DID NOT MAKE IT (owner ruling 2026-09-01). The realm
+    // states WHAT IT IS — its walls and its outline. It states no position and is told none here.
+    //
+    // Every shard holds a row for ITSELF — `neighbourhood_scope` keeps the hosted realm, its ancestors
+    // and its direct children, and the boot refuses a world it cannot find itself in. A seed body gets
+    // that row from the generator. A BUILT realm cannot: its berth lives in its PARENT's file, and a
+    // sealed shard may not read another realm's file (HR1). So it writes the row from the one record it
+    // legitimately holds — its own body — and the caller supplies its parent's name off the lineage the
+    // spawn already sent it.
+    //
+    // ★ AT ZERO, AND THAT IS THE POINT (SL1 clauses 3-5). This field means "where I sit inside my
+    // parent", which is the PARENT's number about me and never mine. MEASURED before this was written:
+    // no code anywhere reads the HOSTED realm's own centre — every read of it is a parent reading a
+    // child (`rebuild_child_index` filters `parent == Some(own)`; `author_book_driven` walks
+    // `direct_children`) or a parent reading a sibling it authored. So the zero is never opened, and a
+    // realm that never HOLDS its own position cannot state one. That is the law made structural rather
+    // than remembered.
+    //
+    // Guarded on ABSENCE, not on kind (SL4/HR3): a realm the seed already placed keeps the seed's row,
+    // so this adds nothing for a planet and the same code serves a station, an area and a ship.
+    if let Some((parent, bound, look)) = own_row
+        && !subtree.iter().any(|b| b.realm == hosted)
+    {
+        subtree.push(built_row(hosted, parent, bound, look, DVec3::ZERO));
     }
     let regions = neighbourhood_scope(&to_regions(&subtree, config), held);
     let movers = moving_children(&subtree, hosted);
@@ -201,6 +227,27 @@ pub fn shard_boot_world_built(
         .filter_map(|b| b.photometrics.map(|p| (b.realm, p)))
         .collect();
     (regions, movers, lit)
+}
+
+/// ONE row for one built thing (HR3) — a berth its parent authored, or a shard's own hull. A built
+/// body has no seed stream, so it draws no light and belongs to no taxon: that absence IS what "the
+/// seed did not make this" looks like in the data.
+fn built_row(
+    realm: RealmId,
+    parent: RealmId,
+    bound: vd_core::geometry::Boundary,
+    look: vd_core::geometry::Boundary,
+    offset_m: DVec3,
+) -> GeneratedBody {
+    GeneratedBody {
+        realm,
+        parent: Some(parent),
+        shape: bound,
+        placement: Placement::StaticOffset(offset_m),
+        photometrics: None,
+        taxon: None,
+        look: Some(look),
+    }
 }
 
 #[must_use]
@@ -583,6 +630,7 @@ mod built_boot_tests {
     use vd_core::glam::DVec3;
     use vd_core::ids::EntityId;
     use vd_core::pose::RealmId;
+    use vd_core::worldgen::GALAXY;
 
     fn world() -> UniverseConfig {
         UniverseConfig::world(500.0, 0.02)
@@ -605,7 +653,7 @@ mod built_boot_tests {
         let cfg = world();
         let h = held(RealmId::System(7));
         let plain = shard_boot_world_lit(HOME_SEED, &cfg, &h, RealmId::System(7), &h);
-        let built = shard_boot_world_built(HOME_SEED, &cfg, &h, RealmId::System(7), &h, &[]);
+        let built = shard_boot_world_built(HOME_SEED, &cfg, &h, RealmId::System(7), &h, &[], None);
         assert_eq!(plain.0, built.0, "the regions are identical");
         assert_eq!(plain.1, built.1, "the movers are identical");
         assert_eq!(plain.2.len(), built.2.len(), "the lit bodies are identical");
@@ -626,12 +674,16 @@ mod built_boot_tests {
             fence: Fence::GENESIS,
         };
         let (regions, _m, _l) =
-            shard_boot_world_built(HOME_SEED, &cfg, &h, parent, &h, &[(parent, berth)]);
+            shard_boot_world_built(HOME_SEED, &cfg, &h, parent, &h, &[(parent, berth)], None);
         let ship = regions
             .iter()
             .find(|r| r.realm == a_ship())
             .expect("the berth became a realm in this world");
-        assert_eq!(ship.parent, Some(parent), "berthed in the realm that authored it");
+        assert_eq!(
+            ship.parent,
+            Some(parent),
+            "berthed in the realm that authored it"
+        );
         assert!(
             ship.aoi.spin_up_r_m() > 0.0,
             "it wakes by the same rule as everything else: {}",
@@ -659,11 +711,112 @@ mod built_boot_tests {
             fence: Fence::GENESIS,
         };
         let (with_ship, _, _) =
-            shard_boot_world_built(HOME_SEED, &cfg, &h, parent, &h, &[(parent, berth)]);
-        assert_eq!(with_ship.len(), plain.len() + 1, "exactly one region appended");
+            shard_boot_world_built(HOME_SEED, &cfg, &h, parent, &h, &[(parent, berth)], None);
+        assert_eq!(
+            with_ship.len(),
+            plain.len() + 1,
+            "exactly one region appended"
+        );
         let generated: Vec<_> = with_ship.iter().filter(|r| r.realm != a_ship()).collect();
         for (before, after) in plain.iter().zip(generated) {
             assert_eq!(before, after, "every generated body is untouched");
         }
+    }
+    #[test]
+    fn a_built_realm_states_what_it_is_and_gets_the_row_every_realm_has() {
+        // ★ THE MEASURED DEFECT (live, 2026-09-01): a ship shard spawned, read its own body, built its
+        // world, found NO row for itself and refused — because its berth lives in its PARENT's file and
+        // a sealed shard may not read one. Every other realm has this row from the seed. This is the
+        // ship getting the same row, from the one record it legitimately holds.
+        let cfg = world();
+        let ship = a_ship();
+        let parent = RealmId::System(7);
+        let lineage = std::collections::BTreeSet::from([RealmId::Universe, GALAXY, parent, ship]);
+        let held_ship = held(ship);
+        let bound = Boundary::Aabb {
+            half: DVec3::new(6.0, 3.0, 20.0),
+        };
+
+        // Without its own body row the hull is absent — the exact state that refused.
+        let (without, _, _) =
+            shard_boot_world_built(HOME_SEED, &cfg, &held_ship, ship, &lineage, &[], None);
+        assert!(
+            !without.iter().any(|r| r.realm == ship),
+            "the seed cannot place a realm it did not make"
+        );
+
+        // With it, the hull is on its own map, parented where the lineage says.
+        let (with, _, _) = shard_boot_world_built(
+            HOME_SEED,
+            &cfg,
+            &held_ship,
+            ship,
+            &lineage,
+            &[],
+            Some((parent, bound, bound)),
+        );
+        let own = with
+            .iter()
+            .find(|r| r.realm == ship)
+            .expect("a built realm is on its own map");
+        assert_eq!(
+            own.parent,
+            Some(parent),
+            "parented by the lineage it was sent"
+        );
+        assert_eq!(own.shape, bound, "its walls are its own body's walls");
+        assert_eq!(own.look, Some(bound), "and it draws its own body's outline");
+    }
+
+    #[test]
+    fn a_built_realms_own_row_states_no_position_in_its_parent() {
+        // ★ SL1 CLAUSES 3-5, AS A MEASUREMENT. "Where I sit inside my parent" is the parent's number
+        // about me. A child that never HOLDS it cannot state it, which is the law made structural. The
+        // parent authors the real placement from tick one; this row carries a zero nobody reads.
+        let cfg = world();
+        let ship = a_ship();
+        let parent = RealmId::System(7);
+        let lineage = std::collections::BTreeSet::from([RealmId::Universe, GALAXY, parent, ship]);
+        let bound = Boundary::Shell { r: 20.0 };
+        let (with, _, _) = shard_boot_world_built(
+            HOME_SEED,
+            &cfg,
+            &held(ship),
+            ship,
+            &lineage,
+            &[],
+            Some((parent, bound, bound)),
+        );
+        let own = with
+            .iter()
+            .find(|r| r.realm == ship)
+            .expect("a built realm is on its own map");
+        assert_eq!(
+            own.center.in_parents_frame(),
+            vd_core::pose::LatticePos::ORIGIN,
+            "a child states no position of its own"
+        );
+    }
+
+    #[test]
+    fn a_seed_realm_keeps_the_seeds_row_even_when_a_body_is_offered() {
+        // ★ GUARDED ON ABSENCE, NOT ON KIND (SL4/HR3). Offer a body to a realm the generator already
+        // placed and nothing changes: the test is "am I missing?", never "what kind am I?". So a planet
+        // is untouched and the same code serves a station, an area and a ship.
+        let cfg = world();
+        let system = RealmId::System(7);
+        let h = held(system);
+        let bound = Boundary::Shell { r: 20.0 };
+        let (plain, _, _) = shard_boot_world_lit(HOME_SEED, &cfg, &h, system, &h);
+        let (offered, _, _) = shard_boot_world_built(
+            HOME_SEED,
+            &cfg,
+            &h,
+            system,
+            &h,
+            &[],
+            Some((GALAXY, bound, bound)),
+        );
+        assert_eq!(plain, offered, "the seed's own row wins, byte for byte");
     }
 }
