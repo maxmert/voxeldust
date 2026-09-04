@@ -1155,6 +1155,62 @@ pub fn scene_bag(realm: RealmId, authors: &[RealmId], ingests: &[&WindowIngest])
     Vec::new()
 }
 
+/// THE LOOK SHELF (2026-09-04, the seventeenth flight — the star blinked at every hand-over).
+///
+/// A look is a statement about a realm with an instant; it is NOT a property of the window that
+/// carried it. Yet the ingests are per window, and a hand-over closes the departed hop's window
+/// and opens the new hop's — so at the splice every look the old window held is gone and the
+/// new windows hold none until the shards re-serve their bodies. `scene_bag` then answers EMPTY
+/// for a row that is still drawn (the held strata keep it), the delta ships the empty bag, and
+/// the client stops drawing the star for the ticks the churn lasts: a blink, measured as one
+/// sample at 21:17:38 (boxes 12 → 1 → 12).
+///
+/// The shelf keeps, per session, the last look emitted for each realm together with the level
+/// tick it was live at. A drawn row whose chain windows state no look reads its shelved look
+/// while the shelf entry is younger than the hold TTL — the SAME 2-beats-+-1 window the held
+/// strata live on, because it is the same phenomenon: the picture survives the churn exactly as
+/// long as the poses do. A row that left the drawn set is not filled (it is not in `rows`), and
+/// a shelved look older than the TTL is pruned, so a realm that truly stopped stating its look
+/// goes dark on the shard's own clock, one hold later, never sooner.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LookShelf {
+    held: BTreeMap<RealmId, (Vec<u8>, UniverseTick)>,
+}
+
+impl LookShelf {
+    /// Refresh the shelf from every row that carries a live look at `t`, fill the empty bag of
+    /// every other row from a shelved look no older than `ttl` ticks, and prune the rest.
+    /// Returns how many rows were filled from the shelf.
+    pub fn carry(&mut self, rows: &mut [SceneRow], t: UniverseTick, ttl: u64) -> u64 {
+        let cutoff = t.0.saturating_sub(ttl);
+        self.held.retain(|_, (_, seen)| seen.0 >= cutoff);
+        let mut carried = 0u64;
+        for row in rows.iter_mut() {
+            if row.bag.is_empty() {
+                if let Some((bag, _)) = self.held.get(&row.realm) {
+                    row.bag.clone_from(bag);
+                    carried += 1;
+                }
+            } else {
+                self.held.insert(row.realm, (row.bag.clone(), t));
+            }
+        }
+        carried
+    }
+
+    /// How many looks the shelf holds (the admin's gauge material).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.held.len()
+    }
+
+    /// Whether the shelf is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+}
+
 /// THE COMPOSED LEVEL'S ROWS (§2.4/§2.6.5 step 8, LIVE since Slice C1): the ORIGIN's own row
 /// first — pose ZERO in its own frame at `t`, its self-look attached (the observer stands inside
 /// it and sees its shell around them; "it draws from its look at the origin marker") — then every
@@ -1386,12 +1442,21 @@ impl ShadowScene {
     /// THE DRAWN SET (LIVE since Slice C1): the newest fresh fold's rows plus every held
     /// stratum's rows — exactly what the composed level and the per-tick datagram carry (held
     /// rows keep their OLD stamps explicitly, §2.6.4: stale-by-declaration, never silently mixed).
+    ///
+    /// ★ EACH REALM ONCE (2026-09-04, the sixteenth flight: the owner's picture froze at warp). A
+    /// departed author's held stratum carries that author's OWN body row, and the new hop's level
+    /// rosters the same realm as a child row; a level naming one realm twice is malformed, the
+    /// client refuses it and keeps its old epoch, and every later datagram is held — the picture
+    /// stops. So the fresh fold's rows come first and a held row of a realm already listed is
+    /// skipped: fresh beats held, a chain author's hold beats a departed author's.
     pub fn drawn_rows(&self) -> impl Iterator<Item = &ComposedRow> + '_ {
+        let mut seen: BTreeSet<RealmId> = BTreeSet::new();
         self.ring
             .back()
             .into_iter()
             .flat_map(|c| c.rows.iter())
             .chain(self.held.iter().flat_map(|h| h.rows.iter()))
+            .filter(move |r| seen.insert(r.realm))
     }
 
     /// The fresh fold at exactly `t`, if the ring retains it.
@@ -3381,6 +3446,53 @@ mod tests {
             vec![1],
             "interior-admitted: the subject's own picture draws"
         );
+    }
+
+    /// THE LOOK SHELF (2026-09-04): a look emitted at T is carried into a later level whose
+    /// windows state none (the hand-over churn), for exactly the hold TTL; a row that left the
+    /// drawn set is never filled; a live look refreshes the shelf; past the TTL the look is gone.
+    #[test]
+    fn the_look_shelf_carries_a_look_through_a_window_churn_for_one_hold() {
+        let star = RealmId::Star(7);
+        let planet = RealmId::Planet(7);
+        let row = |realm: RealmId, bag: Vec<u8>, t: UniverseTick| SceneRow {
+            realm,
+            parent: None,
+            pose: StampedPose::at_rest(sys(), DVec3::ZERO, t),
+            bag,
+        };
+        let mut shelf = LookShelf::default();
+        assert!(shelf.is_empty());
+        // Live looks at T: nothing to carry, both shelved.
+        let mut rows = vec![row(star, vec![1], T), row(planet, vec![2], T)];
+        assert_eq!(shelf.carry(&mut rows, T, 21), 0);
+        assert_eq!(shelf.len(), 2);
+        // The churn at T+5: the star's windows state no look — the shelf fills it; the planet
+        // still speaks (a NEW look), which refreshes its shelf entry.
+        let t5 = UniverseTick(T.0 + 5);
+        let mut rows = vec![row(star, Vec::new(), t5), row(planet, vec![3], t5)];
+        assert_eq!(shelf.carry(&mut rows, t5, 21), 1);
+        assert_eq!(rows[0].bag, vec![1], "the star keeps its last look through the churn");
+        assert_eq!(rows[1].bag, vec![3]);
+        // A row that left the drawn set is not in `rows`: never filled, only aged.
+        let mut rows = vec![row(planet, Vec::new(), t5)];
+        assert_eq!(shelf.carry(&mut rows, t5, 21), 1);
+        assert_eq!(rows[0].bag, vec![3]);
+        // At T+21 the star's look (seen at T) is exactly at the cutoff: still carried…
+        let t21 = UniverseTick(T.0 + 21);
+        let mut rows = vec![row(star, Vec::new(), t21)];
+        assert_eq!(shelf.carry(&mut rows, t21, 21), 1);
+        // …at T+22 it is pruned: the star goes dark on the shard's own clock, one hold later.
+        let t22 = UniverseTick(T.0 + 22);
+        let mut rows = vec![row(star, Vec::new(), t22)];
+        assert_eq!(shelf.carry(&mut rows, t22, 21), 0);
+        assert_eq!(rows[0].bag, Vec::<u8>::new());
+        assert_eq!(shelf.len(), 1, "the planet's look (seen at T+5) survives, the star's is gone");
+        // A shelf near tick zero never underflows the cutoff.
+        let mut shelf0 = LookShelf::default();
+        let mut rows = vec![row(star, vec![9], UniverseTick(1))];
+        assert_eq!(shelf0.carry(&mut rows, UniverseTick(1), 21), 0);
+        assert_eq!(shelf0.len(), 1);
     }
 
     /// Look horizon slice 3 — the interior-admitted set's lifecycle: newest stamp wins (an older

@@ -145,6 +145,7 @@ pub(crate) fn on_client_control(
                     // the first level; the counter and the baseline fill with it.
                     realm_feed_frame_id: 0,
                     scene_sent: BTreeMap::new(),
+                    look_shelf: crate::window::LookShelf::default(),
                     // No home resolved yet ⇒ nowhere to measure a spawn from. Filled in the same place
                     // (and by the same descent) as the home lineage, strictly after the committed lease.
                     spawn: None,

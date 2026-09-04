@@ -5037,7 +5037,41 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   a node must never lazily dial ITSELF (its own id sits in the topology) — refused before the dial.
   Known: `frame_conversion_e2e`'s `shipped_movers` regenerates the world per region per seed with two
   configs alternating on a one-slot forest cache — hours in debug; unchanged since Step 7, not run
-  to completion here. Owed next: the commit.
+  to completion here. Committed as 9f2b426 (Step 9).
+  ★ THE SIXTEENTH FLIGHT (2026-09-04, after the commit): *"when I'm flying close to the star, game
+  freeze for 3-4 seconds, star disappears, then all unfroze and star appear like we passed it some
+  time ago … after warp speed is frozen and all is frozen in general."* MEASURED at the client
+  (10 Hz poll of its own state): the client ran at 32 % CPU with no sampling gap, `decode_errors`
+  2, its scene origin at epoch 9 while the gateway had moved on, `realm_feed_newest_tick` 9 067
+  against universe tick 14 529, `stale_epoch_rows` 105, the sky anchor a constant — the server
+  showed no slow tick and no warning. ROOT CAUSE: the hand-over hold (this evening) keeps a departed
+  author's rows, INCLUDING that author's own body row, while the new hop's level rosters the same
+  realm as a child row — one level named System 7 twice, the client refused it as malformed
+  (`SceneError::DuplicateRealm`), kept its old epoch, and held every later datagram: the picture
+  froze, then jumped when a later level got through. FIXED: `ShadowScene::drawn_rows` lists each
+  realm ONCE — the fresh fold's rows first, a chain author's hold next, a departed author's last —
+  pinned by the hand-over fixture with the universe hop unconfirmed and the galaxy rostering
+  System 7. OWED (hardening): a refused level leaves the client behind until the next epoch bump;
+  the gateway should restate the level on the keep-alive beat so one refusal cannot freeze a session.
+  ★ THE SEVENTEENTH FLIGHT (2026-09-04, on the deduplicated gateway): the freeze is gone (owner:
+  *"Good, fixed"*); *"the sun still blinks (is it when we are passed from System to Sun Realm)"*.
+  MEASURED at the client (10 Hz): the drawn boxes went 12 → 1 → 12 across one sample at 21:17:38,
+  the exact second of the orchestrator's hand-over into the star realm; again at 21:18:38 on the
+  next hand-over. Every drawn realm but the hull blanked, not only the star — the star is the one
+  the eye keeps. ROOT CAUSE: a look lives in the INGEST of the window that carried it, and a
+  hand-over closes the departed hop's window and opens the new hop's; at the splice the old
+  window's looks are dropped and the new windows hold none until the shards re-serve their bodies.
+  The rows survived (the hand-over hold keeps the poses) but `scene_bag` answered empty for each,
+  the delta shipped the empty bags, and the client stopped drawing them for the ticks the churn
+  lasted. FIXED: `window::LookShelf` — per session, the last look emitted for each realm with the
+  level tick it was live at; a drawn row whose chain windows state no look reads its shelved look
+  while the entry is younger than `hold_ttl_ticks` (the SAME 2-beats-+-1 window the held strata
+  live on: the picture survives the churn exactly as long as the poses do). A row that left the
+  drawn set is never filled; a look older than the TTL is pruned, so a realm that truly stops
+  stating its look goes dark one hold later, never sooner. Counter `window_looks_carried`; unit
+  fixture `the_look_shelf_carries_a_look_through_a_window_churn_for_one_hold`. Gateway local, no
+  new data crosses a realm boundary. VERIFY IN FLIGHT: the star's box count must stay 1 across
+  the hand-over second and `window_looks_carried` must be non-zero after it.
 
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:

@@ -331,6 +331,9 @@ pub(crate) struct Session {
     /// diffed per tick into `RealmSceneDelta`s at a stable epoch. Poses deliberately absent —
     /// position changes ride the unreliable per-tick datagram, never the reliable lane.
     pub(crate) scene_sent: BTreeMap<RealmId, Vec<u8>>,
+    /// THE LOOK SHELF (2026-09-04): the last look emitted per realm, carried through a window
+    /// churn for one hold so a hand-over never blanks a drawn realm (`window::LookShelf`).
+    pub(crate) look_shelf: window::LookShelf,
     /// WHERE THIS LOGIN'S AVATAR GOES, measured from its home realm's own centre and stamped with that
     /// realm's frame. Resolved ONCE, in the same descent that resolves the home lineage, and then repeated
     /// verbatim on every `AttachSession` (including the retries) so a re-attach cannot land the player

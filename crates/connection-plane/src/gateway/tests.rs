@@ -3606,6 +3606,7 @@ fn freshest_session_confirmed_maxes_over_active_and_selffenced() {
             home_rid: None,
             realm_feed_frame_id: 0,
             scene_sent: BTreeMap::new(),
+            look_shelf: crate::window::LookShelf::default(),
             // A bare test session: no home descended, so no spawn pose — the static shape.
             spawn: None,
             bootstrap_deadline: None,
@@ -3693,6 +3694,7 @@ fn one_active_session() -> (GatewaySessions, SessionId, OutboundBox) {
             home_rid: None,
             realm_feed_frame_id: 0,
             scene_sent: BTreeMap::new(),
+            look_shelf: crate::window::LookShelf::default(),
             // A bare test session: no home descended, so no spawn pose — the static shape.
             spawn: None,
             bootstrap_deadline: None,
@@ -3949,6 +3951,7 @@ fn sweep_keeps_a_shared_reverse_index_entry_with_a_surviving_subscriber() {
             home_rid: None,
             realm_feed_frame_id: 0,
             scene_sent: BTreeMap::new(),
+            look_shelf: crate::window::LookShelf::default(),
             // A bare test session: no home descended, so no spawn pose — the static shape.
             spawn: None,
             bootstrap_deadline: None,
@@ -5030,6 +5033,7 @@ fn active_session() -> Session {
         home_rid: None,
         realm_feed_frame_id: 0,
         scene_sent: BTreeMap::new(),
+        look_shelf: crate::window::LookShelf::default(),
         // A bare test session: no home descended, so no spawn pose — the static shape.
         spawn: None,
         bootstrap_deadline: None,
@@ -10208,6 +10212,7 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
             home_rid: None,
             realm_feed_frame_id: 0,
             scene_sent: BTreeMap::new(),
+            look_shelf: crate::window::LookShelf::default(),
             spawn: None,
             bootstrap_deadline: None,
             confirmed_at: TickId(0),
@@ -10750,13 +10755,19 @@ fn a_hand_over_holds_the_departed_strata_until_the_new_hops_first_level_lands() 
 
     // THE HAND-OVER: the orchestrator says the planet now lives under the galaxy, on node 1001.
     let galaxy_node = NodeId(1_001);
+    // The galaxy's coord names the universe above it: the universe's head is never learned here,
+    // so its window never opens and the chain never covers the lineage — the departed stratum
+    // stays held through the whole fixture, which is the case the sixteenth flight froze on.
     let galaxy_coord = vd_core::realm_coord::RealmCoord::from_path(
-        vd_core::realm_path::RealmPath::from_levels(vec![vd_core::realm_path::RealmLevel::new(
-            vd_core::realm_path::RealmKindTag::Galaxy,
-            vd_core::worldgen::GALAXY_SEED,
-        )]),
+        vd_core::realm_path::RealmPath::from_levels(vec![
+            vd_core::realm_path::RealmLevel::new(vd_core::realm_path::RealmKindTag::Universe, 0),
+            vd_core::realm_path::RealmLevel::new(
+                vd_core::realm_path::RealmKindTag::Galaxy,
+                vd_core::worldgen::GALAXY_SEED,
+            ),
+        ]),
     )
-    .expect("one-level path has a leaf");
+    .expect("a two-level path has a leaf");
     let level = vd_core::worldgen::level_of(RealmId::Planet(7));
     let _ = rig.tick(vec![
         wire(
@@ -10813,7 +10824,12 @@ fn a_hand_over_holds_the_departed_strata_until_the_new_hops_first_level_lands() 
                 DVec3::ZERO,
             ),
         })),
-        rows: vec![snap(RealmId::Planet(7), PLANET7, galaxy_frame, 30.0, 1006)],
+        // The galaxy rosters System 7 as its child — the SAME realm the departed stratum holds
+        // as its own body row. One level, one realm, once.
+        rows: vec![
+            snap(RealmId::Planet(7), PLANET7, galaxy_frame, 30.0, 1006),
+            snap(RealmId::System(7), SYS7, galaxy_frame, 90.0, 1006),
+        ],
     };
     let _ = rig.tick(vec![
         wire(galaxy_node, MsgClass::RealmSnapshot, &first),
@@ -10822,16 +10838,26 @@ fn a_hand_over_holds_the_departed_strata_until_the_new_hops_first_level_lands() 
     assert_eq!(
         rig.stats().window_full_chain_folds,
         3,
-        "the chain is whole again"
+        "the confirmed hops fold whole; the universe's hop stays unconfirmed"
     );
-    assert_eq!(rig.stats().window_compose_hold_ticks - holds_before, 0);
     let drawn: Vec<RealmId> = rig.world.resource::<GatewaySessions>().by_session[&sid]
         .shadow
         .drawn_rows()
         .map(|r| r.realm)
         .collect();
+    let unique: std::collections::BTreeSet<RealmId> = drawn.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        drawn.len(),
+        "each realm once — a level naming a realm twice is refused by the client: {drawn:?}"
+    );
+    assert_eq!(
+        drawn.iter().filter(|r| **r == RealmId::System(7)).count(),
+        1,
+        "the galaxy's fresh row for System 7 wins over its departed held body"
+    );
     assert!(
-        !drawn.contains(&RealmId::Planet(9)),
-        "the departed stratum leaves the tick the chain is whole: {drawn:?}"
+        drawn.contains(&RealmId::Planet(9)),
+        "the departed stratum still holds while the chain is not whole: {drawn:?}"
     );
 }

@@ -227,6 +227,9 @@ pub struct GatewayStats {
     pub window_rotated_refused: u64,
     /// Far rows: refused for rotation, authored in the sky's frame, shipped in that frame (2026-09-04).
     pub window_far_rows: u64,
+    /// Looks carried from the session's shelf into a level whose windows stated none yet — the
+    /// hand-over churn (2026-09-04, the seventeenth flight).
+    pub window_looks_carried: u64,
     /// Slice B — rows dropped because their stated tail frame was not their level's own frame
     /// (or an unknown-frame refusal from the fold): alien, dropped, counted (§2.6.6).
     pub window_alien_rows: u64,

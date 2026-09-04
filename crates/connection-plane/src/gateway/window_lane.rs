@@ -615,7 +615,7 @@ pub(crate) fn compose_scenes_pass(
                 // signal the client replaces its scene on. Ordered AFTER any AuthorityChanged the
                 // inbound pass pushed this tick, on the same reliable control stream (§2.7).
                 let t_level = session.shadow.last_t.unwrap_or(vd_core::UniverseTick(0));
-                let rows = window::scene_level_rows(
+                let mut rows = window::scene_level_rows(
                     origin,
                     origin_frame,
                     t_level,
@@ -623,6 +623,10 @@ pub(crate) fn compose_scenes_pass(
                     &ingests,
                     &session.shadow,
                 );
+                stats.window_looks_carried +=
+                    session
+                        .look_shelf
+                        .carry(&mut rows, t_level, tuning.hold_ttl_ticks);
                 session.scene_sent = rows.iter().map(|r| (r.realm, r.bag.clone())).collect();
                 push_control(
                     outbox,
@@ -638,7 +642,7 @@ pub(crate) fn compose_scenes_pass(
                 // The reliable DELTA on membership/body change at a stable epoch (§2.6.5 step 8):
                 // diff the drawn (realm → bag) content against the send-on-change baseline. Pose
                 // motion never rides here — it is the datagram's cargo below.
-                let rows = window::scene_level_rows(
+                let mut rows = window::scene_level_rows(
                     origin,
                     origin_frame,
                     t_now,
@@ -646,6 +650,12 @@ pub(crate) fn compose_scenes_pass(
                     &ingests,
                     &session.shadow,
                 );
+                // THE LOOK SHELF (2026-09-04): a drawn row whose chain windows state no look yet
+                // (the hand-over churn) keeps the last look this session emitted, for one hold.
+                stats.window_looks_carried +=
+                    session
+                        .look_shelf
+                        .carry(&mut rows, t_now, tuning.hold_ttl_ticks);
                 let current: BTreeMap<RealmId, Vec<u8>> =
                     rows.iter().map(|r| (r.realm, r.bag.clone())).collect();
                 if current != session.scene_sent {
