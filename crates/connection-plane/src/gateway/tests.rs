@@ -9686,6 +9686,154 @@ fn an_attach_never_overwrites_a_lineage_the_descent_already_recorded() {
 }
 
 #[test]
+fn an_exterior_move_splices_the_chains_aboard_and_refuses_a_stale_statement() {
+    // The ruler switch, slice 5, end to end at the gateway: the orchestrator says the hull left
+    // System 7 for Galaxy 0; the pilot aboard keeps standing in the hull under the galaxy; an older
+    // statement is refused; a session not aboard is untouched.
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login();
+    let hull = RealmId::Ship(vd_core::EntityId::pack(
+        vd_core::entity_kind::EntityKind::Ship,
+        1,
+        1,
+        0,
+    ));
+    let level = vd_core::worldgen::level_of(hull);
+    let coord = |tag: vd_core::realm_path::RealmKindTag, seed: u64| {
+        vd_core::realm_coord::RealmCoord::from_path(vd_core::realm_path::RealmPath::from_levels(
+            vec![vd_core::realm_path::RealmLevel::new(tag, seed)],
+        ))
+        .expect("one-level path has a leaf")
+    };
+    let galaxy = coord(vd_core::realm_path::RealmKindTag::Galaxy, 0);
+    let system7 = coord(vd_core::realm_path::RealmKindTag::System, 7);
+    rig.world
+        .resource_mut::<GatewaySessions>()
+        .by_session
+        .get_mut(&sid)
+        .expect("session present")
+        .lineage = vec![RealmId::Galaxy(0), RealmId::System(7), hull];
+    let _ = rig.tick(vec![wire(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::ExteriorMoved(vd_wire::intershard::ExteriorMoved {
+            child: galaxy.child(level),
+            parent_node: NodeId(1_001),
+            at: UniverseTick(40),
+        }),
+    )]);
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().by_session[&sid].lineage,
+        vec![RealmId::Galaxy(0), hull],
+        "the ancestry above the hull is the galaxy's; the hull stays"
+    );
+    assert_eq!(rig.stats().exterior_moves_applied, 1);
+    assert_eq!(rig.stats().exterior_moves_sessions_spliced, 1);
+    assert_eq!(
+        rig.world
+            .resource::<GatewaySessions>()
+            .realm_heads
+            .get(&RealmId::Galaxy(0)),
+        Some(&NodeId(1_001)),
+        "the new parent's node is known at once — no head poll before the window"
+    );
+    // An older statement (the hull back under System 7, at an earlier tick) is refused.
+    let _ = rig.tick(vec![wire(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::ExteriorMoved(vd_wire::intershard::ExteriorMoved {
+            child: system7.child(level),
+            parent_node: NodeId(1_002),
+            at: UniverseTick(39),
+        }),
+    )]);
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().by_session[&sid].lineage,
+        vec![RealmId::Galaxy(0), hull]
+    );
+    assert_eq!(rig.stats().exterior_moves_stale, 1);
+    assert_eq!(rig.stats().exterior_moves_applied, 1);
+    // A newer statement about a hull this session is not aboard applies and splices nothing.
+    rig.world
+        .resource_mut::<GatewaySessions>()
+        .by_session
+        .get_mut(&sid)
+        .expect("session present")
+        .lineage = vec![RealmId::Galaxy(0), RealmId::System(8)];
+    let _ = rig.tick(vec![wire(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::ExteriorMoved(vd_wire::intershard::ExteriorMoved {
+            child: system7.child(level),
+            parent_node: NodeId(1_002),
+            at: UniverseTick(41),
+        }),
+    )]);
+    assert_eq!(rig.stats().exterior_moves_applied, 2);
+    assert_eq!(rig.stats().exterior_moves_sessions_spliced, 1);
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().by_session[&sid].lineage,
+        vec![RealmId::Galaxy(0), RealmId::System(8)]
+    );
+}
+
+#[test]
+fn a_realm_that_moved_house_keeps_its_own_descent_and_takes_the_new_ancestry_above_it() {
+    // The ruler switch, slice 5: the hull left System 7 for the galaxy; the pilot stays in the hull.
+    let hull = RealmId::Ship(vd_core::EntityId::pack(
+        vd_core::entity_kind::EntityKind::Ship,
+        1,
+        1,
+        0,
+    ));
+    let mut lineage = vec![
+        RealmId::Universe,
+        RealmId::Galaxy(1),
+        RealmId::System(7),
+        hull,
+        RealmId::Area(3),
+    ];
+    assert!(super::home::lineage_splice(
+        &mut lineage,
+        hull,
+        &[RealmId::Universe, RealmId::Galaxy(1)]
+    ));
+    assert_eq!(
+        lineage,
+        vec![
+            RealmId::Universe,
+            RealmId::Galaxy(1),
+            hull,
+            RealmId::Area(3)
+        ]
+    );
+    // Into a sibling system: the same splice, deeper ancestry.
+    assert!(super::home::lineage_splice(
+        &mut lineage,
+        hull,
+        &[RealmId::Universe, RealmId::Galaxy(1), RealmId::System(8)]
+    ));
+    assert_eq!(
+        lineage,
+        vec![
+            RealmId::Universe,
+            RealmId::Galaxy(1),
+            RealmId::System(8),
+            hull,
+            RealmId::Area(3)
+        ]
+    );
+    // A session not on that chain is untouched.
+    let mut other = vec![RealmId::Universe, RealmId::Galaxy(1), RealmId::System(9)];
+    assert!(!super::home::lineage_splice(
+        &mut other,
+        hull,
+        &[RealmId::Universe]
+    ));
+    assert_eq!(other.len(), 3);
+}
+
+#[test]
 fn the_lineage_rule_truncates_on_reentry_and_appends_on_descent() {
     // §2.6.2's crossing rule, both arms: an inward cross APPENDS below the previous leaf;
     // an outward cross TRUNCATES back to the re-entered realm KEEPING its ancestors.

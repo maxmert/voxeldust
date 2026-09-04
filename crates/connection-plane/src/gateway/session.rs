@@ -465,6 +465,9 @@ pub struct GatewaySessions {
     /// superseded one. Starts at zero: before any roster arrives this router has been told nothing, and
     /// every level is newer than nothing.
     pub(crate) roster_at: UniverseTick,
+    /// ★ The newest `ExteriorMoved` applied per moved child (the ruler switch, slice 5), so a redelivered
+    /// or reordered statement about the same hull never rolls the chains aboard it back.
+    pub(crate) exterior_moved_at: BTreeMap<RealmId, UniverseTick>,
     /// RLM 5f-3d — the per-REALM home-BOOTSTRAP index: `home realm -> the ONE wait every session booting
     /// into that realm shares`. Two independent things make it per-REALM rather than per-session, both
     /// load-bearing at 100K scale:

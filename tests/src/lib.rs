@@ -485,6 +485,113 @@ fn build_cluster(
     orch_store: MemStore,
     directory: DirectoryTuning,
 ) -> Topology {
+    build_cluster_kinds(
+        fabric,
+        max_sessions,
+        clock_peers,
+        shards
+            .into_iter()
+            .map(|(id, cfg)| (id, NodeKind::StubShard, cfg))
+            .collect(),
+        stagger,
+        orch_store,
+        directory,
+    )
+}
+
+/// The hull's own shard in the ruler-switch cluster ([`hull_crossing_cluster`]).
+pub const HULL_NODE: NodeId = NodeId(9);
+
+/// ★ THE RULER-SWITCH CLUSTER: an orchestrator, a gateway, System 7 and System 8 under one galaxy, and a
+/// hull's own shard — every shard with its REAL capability profile, because the movement lanes and the
+/// exterior scan are gated on what a shard IS (a star system integrates its children; a hull pushes
+/// itself). The regions, the berth and the pilot are planted by the scenario.
+#[must_use]
+pub fn hull_crossing_cluster(fabric: &FaultFabric, max_sessions: usize) -> Topology {
+    let system = |seed: u64, mint: u64| StubConfig {
+        realm: RealmId::System(seed),
+        own_coord: galaxy_coord().child(vd_core::realm_path::RealmLevel::new(
+            vd_core::realm_path::RealmKindTag::System,
+            seed,
+        )),
+        held_realms: StubConfig::single_realm(RealmId::System(seed)),
+        frame: FrameRef::SystemSpace { system_seed: seed },
+        mint_seed: mint,
+        ..stub_config()
+    };
+    let hull = hull_realm();
+    let hull_cfg = StubConfig {
+        realm: hull,
+        own_coord: system(7, 0)
+            .own_coord
+            .child(vd_core::worldgen::level_of(hull)),
+        held_realms: StubConfig::single_realm(hull),
+        frame: FrameRef::ShipLocal {
+            ship: hull_entity(),
+        },
+        mint_seed: 29,
+        ..stub_config()
+    };
+    build_cluster_kinds(
+        fabric,
+        max_sessions,
+        vec![GATEWAY, SHARD, GALAXY, DEST, HULL_NODE],
+        vec![
+            (
+                SHARD,
+                NodeKind::Shard(vd_sim::capability::profiles::system().expect("a system profile")),
+                system(7, 11),
+            ),
+            (
+                GALAXY,
+                NodeKind::Shard(vd_sim::capability::profiles::galaxy().expect("a galaxy profile")),
+                galaxy_stub_config(),
+            ),
+            (
+                DEST,
+                NodeKind::Shard(vd_sim::capability::profiles::system().expect("a system profile")),
+                system(8, 17),
+            ),
+            (
+                HULL_NODE,
+                NodeKind::Shard(vd_sim::capability::profiles::ship().expect("a ship profile")),
+                hull_cfg,
+            ),
+        ],
+        StaggerPlan::lockstep(),
+        MemStore::new(),
+        default_directory_tuning(),
+    )
+}
+
+/// The galaxy's own coord in the ruler-switch cluster (one level: `Galaxy(GALAXY_SEED)`).
+#[must_use]
+pub fn galaxy_coord() -> vd_core::realm_coord::RealmCoord {
+    StubConfig::root_coord(RealmId::Galaxy(GALAXY_SEED))
+}
+
+/// The one hull of the ruler-switch cluster.
+#[must_use]
+pub fn hull_entity() -> EntityId {
+    EntityId::pack(EntityKind::Ship, 1, 1, 0)
+}
+
+/// The hull as a realm.
+#[must_use]
+pub fn hull_realm() -> RealmId {
+    RealmId::Ship(hull_entity())
+}
+
+/// [`build_cluster`] with each shard's node KIND stated: the ruler-switch cluster needs real profiles.
+fn build_cluster_kinds(
+    fabric: &FaultFabric,
+    max_sessions: usize,
+    clock_peers: Vec<NodeId>,
+    shards: Vec<(NodeId, NodeKind, StubConfig)>,
+    stagger: StaggerPlan,
+    orch_store: MemStore,
+    directory: DirectoryTuning,
+) -> Topology {
     let mut topo = Topology::new(fabric.clone(), stagger);
 
     let mut orch = build_app(
@@ -498,7 +605,7 @@ fn build_cluster(
     // D-6: the orchestrator is built against a durable Store. Normal clusters pass a fresh (genesis)
     // `MemStore` (transparent); the D-6 orchestrator-kill driver passes a RETAINED handle so a rebuilt
     // orchestrator re-hydrates the SAME committed WAL.
-    let roster = stub_roster(shards.iter().map(|(id, _)| *id));
+    let roster = stub_roster(shards.iter().map(|(id, _, _)| *id));
     // D-37 Slice 3b: override the directory tuning (reaper/lease) — most clusters pass the inert default;
     // the standing-re-home cell passes the reaping tuning.
     let mut oc = orch_config(clock_peers, roster);
@@ -525,7 +632,7 @@ fn build_cluster(
     // (render-ready) dest's frames are node-class-dispatchable. The login shard `SHARD` is
     // always a member.
     let known_shards: std::collections::BTreeSet<NodeId> =
-        shards.iter().map(|(id, _)| *id).collect();
+        shards.iter().map(|(id, _, _)| *id).collect();
     let (world, schedule) = gateway.parts_mut();
     register_clock_follower(world, schedule);
     register_gateway(
@@ -576,14 +683,8 @@ fn build_cluster(
     );
     topo.add_node(Box::new(gateway));
 
-    for (id, cfg) in shards {
-        let mut shard = build_app(
-            NodeConfig {
-                node_id: id,
-                kind: NodeKind::StubShard,
-            },
-            fabric.register(id),
-        );
+    for (id, kind, cfg) in shards {
+        let mut shard = build_app(NodeConfig { node_id: id, kind }, fabric.register(id));
         let (world, schedule) = shard.parts_mut();
         register_clock_follower(world, schedule);
         register_stub_shard(world, schedule, cfg);
@@ -1735,6 +1836,7 @@ pub fn run_fault_scenario(seed: u64, sc: Scenario) -> (Topology, EntityId, BTree
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: TransferId(1),
             session,
             subject: DirectoryKey::Entity(entity),
@@ -1963,6 +2065,7 @@ pub fn run_transient_fault_scenario(
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: batch,
             session: SessionId(0),
             subject: DirectoryKey::Realm(RealmId::System(8)),
@@ -2134,6 +2237,7 @@ pub fn run_transient_dest_flap(seed: u64) -> (Topology, EntityId) {
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: batch,
             session: SessionId(0),
             subject: DirectoryKey::Realm(RealmId::System(8)),
@@ -2253,6 +2357,7 @@ pub fn run_orch_kill_transient(seed: u64, durable: bool) -> OrchKillOutcome {
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: batch,
             session: SessionId(0),
             subject: DirectoryKey::Realm(RealmId::System(8)),
@@ -2393,6 +2498,7 @@ pub fn run_orch_kill_durable(seed: u64, at_phase: &str, durable_store: bool) -> 
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: TransferId(1),
             session,
             subject: DirectoryKey::Entity(entity),

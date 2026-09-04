@@ -5440,13 +5440,15 @@ fn every_boundary_reports_what_its_band_needs_and_what_it_can_afford() {
 
 /// ★ THE INDEX-QUALITY GATE, INSIDE THIS SLICE RATHER THAN FIVE SLICES LATER.
 ///
-/// The child lookup's grid edge follows the WIDEST child's radius, and that radius is the child's own
-/// reach PLUS its release edge. So sizing bands from bodies inflates every radius, and an inflated
-/// radius can coarsen the grid — which would degrade the O(1)-ish lookup back toward the scan it was
-/// built to replace. That is an unbounded-child-count defect introduced by a lawful band change, which
-/// is exactly the kind of thing that is invisible until a realm has many children.
+/// A child's indexed radius is its own reach PLUS its release edge. So sizing bands from bodies
+/// inflates every radius, and an inflated radius makes more children's spheres overlap — which would
+/// degrade the O(log n) lookup back toward the scan it was built to replace. That is an
+/// unbounded-child-count defect introduced by a lawful band change, which is exactly the kind of thing
+/// that is invisible until a realm has many children.
 ///
-/// So the cost is measured here, against the same forest with the band it used to have.
+/// So the cost is measured here, against the same forest with the band it used to have. (The lookup
+/// was a uniform grid until 2026-09-04; this gate then also pinned that the grid's edge grew by
+/// exactly one octave. An R*-tree has no edge, so that half of the gate is gone with the grid.)
 #[test]
 fn sizing_the_bands_does_not_coarsen_the_child_lookup() {
     use std::collections::BTreeSet;
@@ -5457,7 +5459,6 @@ fn sizing_the_bands_does_not_coarsen_the_child_lookup() {
     let sweep = derived_nest_sweep_seeds(galaxy_profile(0, &cfg).count);
 
     let mut parents_judged = 0usize;
-    let mut worst_octaves = 0.0_f64;
     let mut worst_candidates = 0usize;
     let mut total_candidates = 0usize;
     let mut worst_before = 0usize;
@@ -5494,13 +5495,7 @@ fn sizing_the_bands_does_not_coarsen_the_child_lookup() {
             };
             let now = build(&|r: &RealmRegion| r.band.outset());
             let before = build(&|_: &RealmRegion| old_band.outset());
-            // HOW MUCH COARSER, in octaves. The edge is a power of two, so the honest unit is doublings
-            // rather than a percentage: an edge that grew by 1 % and an edge that grew by 99 % both cost
-            // nothing until one of them crosses a power of two.
-            if before.edge_m() > 0.0 && now.edge_m() > 0.0 {
-                worst_octaves = worst_octaves.max((now.edge_m() / before.edge_m()).log2());
-            }
-            // AND WHAT THE LOOKUP ACTUALLY ANSWERS, which is the number that matters: a coarser grid is
+            // WHAT THE LOOKUP ACTUALLY ANSWERS, which is the number that matters: a wider radius is
             // only a problem if it starts naming more children per query.
             for k in &kids {
                 let named = now.candidates(k.center.in_parents_frame(), ptier).len();
@@ -5520,8 +5515,7 @@ fn sizing_the_bands_does_not_coarsen_the_child_lookup() {
     let mean = total_candidates as f64 / queries as f64;
     let mean_before = total_before as f64 / queries as f64;
     eprintln!(
-        "[s6-index] {parents_judged} parents over {sweep} seeds, {queries} queries | grid edge grew by \
-         at most {worst_octaves:.4} octaves\n\
+        "[s6-index] {parents_judged} parents over {sweep} seeds, {queries} queries\n\
          [s6-index]   candidates per query BEFORE: max {worst_before}, mean {mean_before:.4}\n\
          [s6-index]   candidates per query AFTER:  max {worst_candidates}, mean {mean:.4}"
     );
@@ -5531,27 +5525,14 @@ fn sizing_the_bands_does_not_coarsen_the_child_lookup() {
     //
     // What this slice could break is the lookup, and the way it would break it is by naming MORE
     // children per query than before. It does not name one more. That is the assertion, and it could
-    // have come out otherwise — the grid genuinely did coarsen (below), so "the answer is unchanged" is
-    // a result, not a restatement of the change being small.
+    // have come out otherwise — every radius genuinely grew, so "the answer is unchanged" is a result,
+    // not a restatement of the change being small.
     assert_eq!(
         (worst_candidates, total_candidates),
         (worst_before, total_before),
         "sizing the bands changed what the child lookup answers: max {worst_before} -> \
          {worst_candidates}, total {total_before} -> {total_candidates}. That is the unbounded-child \
          defect this gate exists to catch"
-    );
-
-    // THE GRID DID COARSEN, BY EXACTLY ONE DOUBLING, AND IT COST NOTHING MEASURABLE. The edge follows
-    // the widest child's radius, which now carries a release edge; a fraction of a percent was enough to
-    // cross a power of two. It changed no answer because the children that share a cell were already
-    // sharing it — a star system's planets sit close to their star relative to the system's own size,
-    // which is this index's own documented degradation and not a new one.
-    //
-    // Pinned, because a SECOND octave would not be free.
-    assert!(
-        (worst_octaves - 1.0).abs() < 1e-9,
-        "the grid edge grew by {worst_octaves} octaves rather than exactly one — a further doubling \
-         puts more children in each cell, and this is where that is decided"
     );
 
     // AND THE ABSOLUTE NUMBER, PINNED WITH ITS CAUSE STATED so nobody reads it as this slice's doing.

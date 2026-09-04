@@ -18,13 +18,14 @@
 //! COVERAGE NOTE: `ShardNode<T>` is generic; per the branchless-shim discipline all
 //! branching lives in monomorphic helpers over `&mut dyn Transport`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use bevy_ecs::prelude::{Schedule, World};
+use bevy_ecs::prelude::{Resource, Schedule, World};
 use bevy_ecs::schedule::ExecutorKind;
 use vd_core::{NodeId, TickId};
 use vd_sim::capability::NodeKind;
 use vd_sim::io::{Bytes, Durability, Inbound, MsgClass, Reliability, SendError, Transport};
+use vd_wire::intershard::InterShardFlow;
 // The per-tick runtime resources live in vd-sim (shared with feature systems and
 // the connection plane); re-exported here so node-level callers keep one path.
 pub use vd_sim::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox, OutboundStagingCap};
@@ -42,6 +43,9 @@ pub struct NodeConfig {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TickReport {
     pub tick: TickId,
+    /// Sends refused this tick because the destination has no lane and no address (the peer book's
+    /// trigger); the frames wait and the orchestrator is asked.
+    pub unknown_peers: usize,
     /// Inbound messages drained at tick start.
     pub drained: usize,
     /// Outbound messages accepted by the transport.
@@ -88,6 +92,7 @@ pub fn build_app<T: Transport>(cfg: NodeConfig, transport: T) -> ShardNode<T> {
     let mut world = World::new();
     world.insert_resource(InboundBox::default());
     world.insert_resource(OutboundBox::default());
+    world.insert_resource(PeerBook::default());
     world.insert_resource(OutboundStagingCap::default());
     world.insert_resource(ClockSample::default());
     world.insert_resource(NodeIdentity {
@@ -142,10 +147,11 @@ impl<T: Transport> ShardNode<T> {
     /// [`TickReport`]. Takes the [`TickPrologue`] from [`run_schedule`](Self::run_schedule). Split so a
     /// durability-aware bin can wait for the prior tick's batch to be durable BEFORE this send.
     pub fn flush_outbox(&mut self, prologue: TickPrologue) -> TickReport {
-        let (sent, backpressured, staging_shed, reliable_shed) =
+        let (sent, backpressured, staging_shed, reliable_shed, unknown_peers) =
             flush_phase(&mut self.transport, &mut self.world);
         TickReport {
             tick: prologue.tick,
+            unknown_peers,
             drained: prologue.drained,
             sent,
             backpressured,
@@ -198,12 +204,70 @@ fn set_local_tick(world: &mut World, tick: TickId) {
     world.resource_mut::<ClockSample>().local_tick = tick;
 }
 
+/// ★ THE PEER BOOK (D-RLM-6 mechanism C, built 2026-09-03 for the ruler switch's inward leg): the
+/// node runtime's half. A send the transport refuses as `UnknownPeer` keeps its frame in the staging
+/// and asks the clock's source — the orchestrator — where that node listens, once per tick while a
+/// frame waits (a small Membership-class ask; unknown peers are rare and short-lived). The answer,
+/// `PeerLocated`, is consumed HERE, below the schedule, and booked through the transport seam; the
+/// sim never sees an address. Nothing in the sim changes: the up-lane's send to a new parent's node is
+/// what misses, and the parent's statement toward the hull's node misses the same way from its side.
+#[derive(Resource, Debug, Default)]
+pub struct PeerBook {
+    /// `PeerLocate` asks sent.
+    pub locates_sent: u64,
+    /// `PeerLocated` answers booked through the transport.
+    pub located: u64,
+    /// Asks withheld because no `ClockSync` has named the orchestrator yet.
+    pub no_source: u64,
+    /// ★ THE ASK RATE (owner 2026-09-04, item 6 of the flight plan): a peer that stays unknown is
+    /// asked about on its first missed tick, then on the 2nd, 4th, 8th, … — a doubling backoff
+    /// with no constant in it, so a peer nobody can locate costs `log₂(ticks)` asks instead of one
+    /// per tick, and a peer located on the first answer costs exactly one. Per peer: the ticks it
+    /// has missed so far, and the miss count the next ask goes out at. Cleared when the answer
+    /// books the peer. Example: the hull's shard sends its first facts up to the galaxy's node,
+    /// which it has never met; it asks the orchestrator at miss 1, the answer lands by miss 2, and
+    /// the book never asks again for that node.
+    pub pending: BTreeMap<NodeId, (u64, u64)>,
+    /// Asks withheld by the backoff (the frame still waits; nothing is lost).
+    pub asks_withheld: u64,
+    /// Peers this process has warned about once (the warning is per peer, never per tick).
+    pub warned: BTreeSet<NodeId>,
+}
+
 /// Monomorphic drain: pull everything delivered since last tick into the world. Counts the two
 /// async delivery-failure notices SEPARATELY (R-4d M3): `unreachable` (peer down) vs `shed` (a
 /// local send refused — orthogonal to peer liveness). The full inbound vec (both included) still
 /// goes to the `InboundBox` for the schedule's consumers.
 fn drain_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usize, usize) {
-    let inbound = transport.drain_inbound();
+    let mut inbound = transport.drain_inbound();
+    // The peer book's answers are consumed here and never reach the schedule (an address is the node
+    // runtime's business, not the sim's). Only Membership-class frames are decoded — the cold lane.
+    let mut located = 0u64;
+    let mut booked: Vec<NodeId> = Vec::new();
+    inbound.retain(|m| {
+        let Inbound::Wire { class, bytes, .. } = m else {
+            return true;
+        };
+        if *class != MsgClass::Membership {
+            return true;
+        }
+        let Ok(InterShardFlow::PeerLocated(answer)) = postcard::from_bytes::<InterShardFlow>(bytes)
+        else {
+            return true;
+        };
+        transport.book_peer(answer.node, answer.ip, answer.port);
+        located += 1;
+        booked.push(answer.node);
+        false
+    });
+    let mut book = world.resource_mut::<PeerBook>();
+    book.located += located;
+    for node in booked {
+        // The answer closes the ask: a later miss toward this node starts a fresh backoff and a
+        // fresh warning, because it is then a new event (the peer moved again).
+        book.pending.remove(&node);
+        book.warned.remove(&node);
+    }
     let drained = inbound.len();
     let unreachable = inbound
         .iter()
@@ -234,12 +298,17 @@ fn drain_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usiz
 /// Returns `(sent, backpressured, staging_shed, reliable_shed)` — `reliable_shed` is the
 /// reliable subset of `staging_shed`, surfaced distinctly so the loss of a transfer/control
 /// frame is machine-observable, never lumped with benign latest-wins snapshot shedding.
-fn flush_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usize, usize, usize) {
+fn flush_phase(
+    transport: &mut dyn Transport,
+    world: &mut World,
+) -> (usize, usize, usize, usize, usize) {
     let pending = std::mem::take(&mut world.resource_mut::<OutboundBox>().0);
     let cap = world.resource::<OutboundStagingCap>().0;
     let mut sent = 0usize;
     // Peers that back-pressured THIS tick; their remaining frames requeue untried.
     let mut blocked: BTreeSet<NodeId> = BTreeSet::new();
+    // Peers this process has no lane and no address for: their frames wait, and the book is asked.
+    let mut unknown: BTreeSet<NodeId> = BTreeSet::new();
     let mut requeued: Vec<(NodeId, MsgClass, Bytes, Durability)> = Vec::new();
     for (to, class, bytes, durability) in pending {
         if blocked.contains(&to) {
@@ -252,12 +321,64 @@ fn flush_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usiz
                 blocked.insert(to);
                 requeued.push((to, class, returned, durability));
             }
+            Err(SendError::UnknownPeer(returned)) => {
+                blocked.insert(to);
+                unknown.insert(to);
+                requeued.push((to, class, returned, durability));
+            }
         }
     }
     let (staging_shed, reliable_shed) = shed_over_cap(&mut requeued, cap);
     let backpressured = requeued.len();
     world.resource_mut::<OutboundBox>().0 = requeued;
-    (sent, backpressured, staging_shed, reliable_shed)
+    let unknown_peers = unknown.len();
+    ask_peer_book(transport, world, &unknown);
+    (
+        sent,
+        backpressured,
+        staging_shed,
+        reliable_shed,
+        unknown_peers,
+    )
+}
+
+/// Ask the clock's source where each unknown peer listens — one small Membership-class frame per
+/// unknown peer on its first missed tick, then with a doubling backoff ([`PeerBook::pending`])
+/// while its frames wait. Withheld, counted, until a `ClockSync` has named the orchestrator; a node
+/// nobody has synced has nobody to ask. The first miss toward a peer is warned ONCE.
+fn ask_peer_book(transport: &mut dyn Transport, world: &mut World, unknown: &BTreeSet<NodeId>) {
+    if unknown.is_empty() {
+        return;
+    }
+    let source = world
+        .get_resource::<crate::follower::FollowerState>()
+        .and_then(|f| f.source);
+    let at = world.resource::<ClockSample>().universe_tick;
+    let mut book = world.resource_mut::<PeerBook>();
+    let Some(source) = source else {
+        book.no_source += unknown.len() as u64;
+        return;
+    };
+    for &node in unknown {
+        if book.warned.insert(node) {
+            tracing::warn!(
+                peer = node.0,
+                "no lane and no address for a peer — its frames wait while the orchestrator is asked"
+            );
+        }
+        let (misses, next_ask) = book.pending.entry(node).or_insert((0, 1));
+        *misses += 1;
+        if *misses != *next_ask {
+            book.asks_withheld += 1;
+            continue;
+        }
+        *next_ask = next_ask.saturating_mul(2);
+        let flow = InterShardFlow::PeerLocate(vd_wire::intershard::PeerLocate { node, at });
+        let bytes = postcard::to_allocvec(&flow).expect("closed wire enums serialize infallibly");
+        // A refused ask is covered by the next backoff step; nothing is owed on a miss here.
+        let _ = transport.send(source, MsgClass::Membership, vd_sim::io::bytes(bytes));
+        book.locates_sent += 1;
+    }
 }
 
 /// Bound the carried-over staging to `cap`, shedding OLDEST-first but UNRELIABLE-FIRST
@@ -442,6 +563,170 @@ mod tests {
         hub.pump();
         let r2 = a.step_tick();
         assert_eq!((r2.drained, r2.unreachable), (1, 1));
+    }
+
+    // ---- THE PEER BOOK (D-RLM-6 mechanism C) ----------------------------------------------------
+
+    /// A transport with no lane to `unknown` until an address is booked; records every booking.
+    struct BookedLanes {
+        local: NodeId,
+        unknown: BTreeSet<NodeId>,
+        booked: Vec<(NodeId, [u8; 16], u16)>,
+        sent: Vec<(NodeId, MsgClass, Vec<u8>)>,
+        inbound: Vec<Inbound>,
+    }
+
+    impl Transport for BookedLanes {
+        fn send_durable(
+            &mut self,
+            to: NodeId,
+            class: MsgClass,
+            bytes: Bytes,
+            _durability: vd_sim::io::Durability,
+        ) -> Result<MsgId, SendError> {
+            if self.unknown.contains(&to) {
+                return Err(SendError::UnknownPeer(bytes));
+            }
+            self.sent.push((to, class, bytes.to_vec()));
+            Ok(MsgId(self.sent.len() as u64))
+        }
+        fn drain_inbound(&mut self) -> Vec<Inbound> {
+            std::mem::take(&mut self.inbound)
+        }
+        fn local_id(&self) -> NodeId {
+            self.local
+        }
+        fn book_peer(&mut self, node: NodeId, ip: [u8; 16], port: u16) {
+            self.booked.push((node, ip, port));
+            self.unknown.remove(&node);
+        }
+    }
+
+    const ORCH: NodeId = NodeId(1);
+    const STRANGER: NodeId = NodeId(1_007);
+
+    fn located(node: NodeId) -> Inbound {
+        Inbound::Wire {
+            from: ORCH,
+            class: MsgClass::Membership,
+            bytes: postcard::to_allocvec(&InterShardFlow::PeerLocated(
+                vd_wire::intershard::PeerLocated {
+                    node,
+                    ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1],
+                    port: 7_562,
+                    at: vd_core::UniverseTick(9),
+                },
+            ))
+            .expect("encode")
+            .into(),
+        }
+    }
+
+    #[test]
+    fn a_send_to_an_unknown_peer_waits_and_asks_the_clocks_source_then_the_answer_books_it() {
+        let transport = BookedLanes {
+            local: A,
+            unknown: BTreeSet::from([STRANGER]),
+            booked: Vec::new(),
+            sent: Vec::new(),
+            inbound: Vec::new(),
+        };
+        let mut node = build_app(stub_cfg(A), transport);
+        // Nobody has synced this node: the ask is withheld and counted, the frame still waits.
+        node.world_mut().resource_mut::<OutboundBox>().0.push((
+            STRANGER,
+            MsgClass::Control,
+            vec![7].into(),
+            vd_sim::io::Durability::Ephemeral,
+        ));
+        let report = node.step_tick();
+        assert_eq!(
+            (report.sent, report.backpressured, report.unknown_peers),
+            (0, 1, 1)
+        );
+        assert_eq!(node.world_mut().resource::<PeerBook>().no_source, 1);
+        assert!(node.transport.sent.is_empty(), "nobody to ask yet");
+        // The clock's source is known: the ask goes out on the first miss while the frame waits.
+        node.world_mut()
+            .insert_resource(crate::follower::FollowerState {
+                source: Some(ORCH),
+                ..Default::default()
+            });
+        let report = node.step_tick();
+        assert_eq!((report.backpressured, report.unknown_peers), (1, 1));
+        let book = node.world_mut().resource::<PeerBook>();
+        assert_eq!((book.locates_sent, book.located), (1, 0));
+        let ask = node.transport.sent.last().expect("the ask was sent");
+        assert_eq!((ask.0, ask.1), (ORCH, MsgClass::Membership));
+        assert_eq!(
+            postcard::from_bytes::<InterShardFlow>(&ask.2),
+            Ok(InterShardFlow::PeerLocate(
+                vd_wire::intershard::PeerLocate {
+                    node: STRANGER,
+                    at: node.world_mut().resource::<ClockSample>().universe_tick,
+                }
+            ))
+        );
+        // The answer is consumed below the schedule, booked through the seam, and never reaches the
+        // inbox; the waiting frame goes out on the same tick.
+        node.transport.inbound.push(located(STRANGER));
+        let report = node.step_tick();
+        assert_eq!(
+            (report.drained, report.sent, report.backpressured),
+            (0, 1, 0)
+        );
+        assert_eq!(
+            node.transport.booked,
+            vec![(
+                STRANGER,
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1],
+                7_562
+            )]
+        );
+        assert_eq!(node.world_mut().resource::<PeerBook>().located, 1);
+        assert_eq!(node.transport.sent.last().map(|s| s.0), Some(STRANGER));
+    }
+
+    /// ★ THE ASK RATE (owner 2026-09-04): a peer that stays unknown is asked about at its 1st, 2nd,
+    /// 4th, 8th missed tick — never every tick — and warned about once; the answer clears the
+    /// backoff so a later move of the same peer is a fresh event.
+    #[test]
+    fn a_peer_that_stays_unknown_is_asked_with_a_doubling_backoff_and_warned_once() {
+        let transport = BookedLanes {
+            local: A,
+            unknown: BTreeSet::from([STRANGER]),
+            booked: Vec::new(),
+            sent: Vec::new(),
+            inbound: Vec::new(),
+        };
+        let mut node = build_app(stub_cfg(A), transport);
+        node.world_mut()
+            .insert_resource(crate::follower::FollowerState {
+                source: Some(ORCH),
+                ..Default::default()
+            });
+        node.world_mut().resource_mut::<OutboundBox>().0.push((
+            STRANGER,
+            MsgClass::Control,
+            vec![7].into(),
+            vd_sim::io::Durability::Ephemeral,
+        ));
+        for _ in 0..9 {
+            let report = node.step_tick();
+            assert_eq!((report.backpressured, report.unknown_peers), (1, 1));
+        }
+        let book = node.world_mut().resource::<PeerBook>();
+        // Misses 1, 2, 4 and 8 asked; misses 3, 5, 6, 7 and 9 were withheld.
+        assert_eq!((book.locates_sent, book.asks_withheld), (4, 5));
+        assert_eq!(book.pending.get(&STRANGER), Some(&(9, 16)));
+        assert_eq!(book.warned.len(), 1, "one warning per peer, not per tick");
+        assert_eq!(node.transport.sent.len(), 4);
+        // The answer books the peer and closes the ask; the frame goes out.
+        node.transport.inbound.push(located(STRANGER));
+        let report = node.step_tick();
+        assert_eq!((report.sent, report.backpressured), (1, 0));
+        let book = node.world_mut().resource::<PeerBook>();
+        assert!(book.pending.is_empty() & book.warned.is_empty());
     }
 
     #[test]

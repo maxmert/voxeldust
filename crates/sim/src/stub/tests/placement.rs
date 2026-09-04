@@ -811,6 +811,7 @@ fn a_flush_into_my_own_child_subtracts_that_childs_placement() {
         &story.ledger(story.system),
         UniverseTick(0),
         &mut stats,
+        true,
     )
     .expect("a star can place its own planet");
     assert_eq!(shipped.frame, story.frame(story.planet));
@@ -846,6 +847,7 @@ fn a_flush_up_to_my_parent_ships_the_pose_verbatim() {
             &story.ledger(story.planet),
             UniverseTick(0),
             &mut stats,
+            true,
         )
         .expect("shipping upward never fails — there is nothing to compute"),
         held,
@@ -883,6 +885,7 @@ fn every_ledger_miss_arm_refuses_loudly() {
             &PlacementLedger::new(8),
             t0,
             &mut stats,
+            true,
         ),
         None,
     );
@@ -944,6 +947,7 @@ fn every_ledger_miss_arm_refuses_loudly() {
             &ledger_with(&[story.galaxy]),
             t0,
             &mut stats,
+            true,
         ),
         None,
     );
@@ -962,6 +966,7 @@ fn every_ledger_miss_arm_refuses_loudly() {
             &ledger_with(&[story.galaxy, story.system]),
             t0,
             &mut stats,
+            true,
         ),
         None,
     );
@@ -1202,6 +1207,7 @@ fn a_departure_that_is_no_longer_true_is_refused_at_the_flush() {
             &story.ledger(story.planet),
             UniverseTick(0),
             &mut stats,
+            true,
         ),
         None,
         "an occupant still inside its own realm must not be handed to the parent",
@@ -1232,6 +1238,7 @@ fn an_entry_that_is_no_longer_true_is_refused_at_the_flush() {
             &story.ledger(story.system),
             UniverseTick(0),
             &mut stats,
+            true,
         ),
         None,
         "a pose the destination would not hold must not be shipped into it",
@@ -1260,6 +1267,7 @@ fn a_self_crossing_flush_skips_the_departure_check_and_ships_verbatim() {
             &story.ledger(story.planet),
             UniverseTick(0),
             &mut stats,
+            true,
         ),
         Some(held),
         "a self-crossing ships what it holds — the launder path stays open",
@@ -1293,6 +1301,7 @@ fn a_pose_labelled_with_an_ancestors_frame_warns_and_ships_verbatim() {
             &story.ledger(story.system),
             UniverseTick(0),
             &mut stats,
+            true,
         ),
         Some(held),
         "an ancestor-labelled pose ships un-converted — the arithmetic is not this shard's",
@@ -1323,6 +1332,7 @@ fn a_descent_from_an_unregistered_frame_is_refused_and_counted() {
             &story.ledger(story.system),
             UniverseTick(0),
             &mut stats,
+            true,
         ),
         None,
         "a pose nobody here can measure is refused, never shipped under a guess",
@@ -1364,7 +1374,8 @@ fn a_departure_check_without_an_own_region_ships_verbatim() {
             &roster,
             &obs_ledger(&roster, &cfg, &clock0),
             UniverseTick(0),
-            &mut stats
+            &mut stats,
+            true,
         ),
         Some(held),
         "with no own region to measure against, the flush ships as it always did",
@@ -1396,6 +1407,7 @@ fn a_flush_into_my_child_that_cannot_be_computed_is_refused_and_counted() {
             &story.ledger(story.system),
             UniverseTick(0),
             &mut stats,
+            true,
         ),
         None,
         "a pose this shard cannot measure is not shipped",

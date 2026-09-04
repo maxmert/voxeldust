@@ -243,9 +243,7 @@ pub struct OwnBody(pub Option<vd_core::built::BuiltBody>);
 /// **UNBOUNDED, like every other child set (SL9).** A realm may hold six ships or six hundred; nothing
 /// here is a fixed width and nothing walks the whole set to find one.
 #[derive(Debug, Default, bevy_ecs::prelude::Resource)]
-pub struct DrivenChildren(
-    pub(crate) std::collections::BTreeMap<vd_core::pose::RealmId, DrivenChild>,
-);
+pub struct DrivenChildren(pub std::collections::BTreeMap<vd_core::pose::RealmId, DrivenChild>);
 
 /// One driven child, as its parent holds it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -261,6 +259,10 @@ pub struct DrivenChild {
     pub facts: Option<BodyFacts>,
     /// The fence and instant of the freshest facts held.
     pub facts_at: (vd_core::fence::Fence, vd_core::ids::UniverseTick),
+    /// ★ FROZEN FOR A HAND-OVER (the ruler switch, slice 2): the exterior was flushed to a new parent
+    /// and the drive is no longer applied — the child coasts at the flushed velocity, exactly as the
+    /// destination re-advances it, until the demote removes it or an abort thaws it.
+    pub frozen: bool,
 }
 
 /// ★ A CHILD'S DRIVE ARRIVES — admitted, or refused and counted (D-MOVE-2).
@@ -320,6 +322,7 @@ pub(crate) fn on_child_drive(
             vd_core::fence::Fence::GENESIS,
             vd_core::ids::UniverseTick(0),
         ),
+        frozen: false,
     });
     if (cd.child_fence, cd.at) < entry.drive_at {
         stats.child_drive_stale += 1;
@@ -380,6 +383,7 @@ pub(crate) fn on_child_facts(
             vd_core::fence::Fence::GENESIS,
             vd_core::ids::UniverseTick(0),
         ),
+        frozen: false,
     });
     if (cf.child_fence, cf.at) < entry.facts_at {
         stats.child_facts_stale += 1;
@@ -416,7 +420,12 @@ impl DrivenChildren {
             let Some(facts) = child.facts else {
                 continue;
             };
-            let (push, turn) = fresh_drive(child, now, stale_after_ticks);
+            // A frozen child coasts: its drive is withheld, never its motion (the ruler switch, slice 2).
+            let (push, turn) = if child.frozen {
+                ([0; 3], [0; 3])
+            } else {
+                fresh_drive(child, now, stale_after_ticks)
+            };
             child.state = advance_driven(&child.state, push, turn, &facts, ambient, dt_s);
         }
     }
@@ -1266,6 +1275,55 @@ mod tests {
         assert_eq!(
             held.state_of(ship_coord().lowered()).expect("held").pos_m,
             DVec3::ZERO
+        );
+    }
+
+    #[test]
+    fn a_frozen_child_coasts_and_its_push_is_withheld_until_it_thaws() {
+        // The ruler switch, slice 2: a child whose exterior was flushed to a new parent keeps the
+        // velocity it had and gains none — both sides of the hand-over coast at the same speed.
+        let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
+        on_child_drive(
+            a_drive(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
+        let child = ship_coord().lowered();
+        held.0.get_mut(&child).expect("held").state.vel_mps = DVec3::new(1.0, 0.0, 0.0);
+        held.0.get_mut(&child).expect("held").frozen = true;
+        held.advance_all(UniverseTick(9), 5, &vacuum(), 1.0);
+        let s = held.state_of(child).expect("held");
+        assert!(
+            (s.vel_mps.x - 1.0).abs() < 1e-9,
+            "coasting: {:?}",
+            s.vel_mps
+        );
+        assert!(
+            (s.pos_m.x - 1.0).abs() < 1e-9,
+            "one metre of coast: {:?}",
+            s.pos_m
+        );
+        // Thawed (an aborted hand-over): the same held drive applies again.
+        held.0.get_mut(&child).expect("held").frozen = false;
+        held.advance_all(UniverseTick(9), 5, &vacuum(), 1.0);
+        let s = held.state_of(child).expect("held");
+        assert!(
+            (s.vel_mps.x - 5.0).abs() < 1e-9,
+            "the push is back: {:?}",
+            s.vel_mps
         );
     }
 

@@ -246,6 +246,7 @@ fn every_arm() -> Vec<InterShardFlow> {
             step_id: FLUSH_SOURCE_STEP,
             pose: pose(),
             drained_seq: 5,
+            state: vec![],
         }),
         // ALL three TransferAck inner arms ride the per-release surface gate (so a new inner variant
         // is forced through the InterShardFlow postcard roundtrip + effect-class classification, not
@@ -550,6 +551,37 @@ fn every_arm() -> Vec<InterShardFlow> {
             drag_micro: 820_000,
             declared: vd_wire::intershard::DeclaredStates { warp: true },
         }),
+        // The ruler switch, slice 1: a parent's request to move its hull's exterior.
+        InterShardFlow::ExteriorCrossingRequest(vd_wire::intershard::ExteriorCrossingRequest {
+            subject: DirectoryKey::Ship(eid(EntityKind::Ship)),
+            from_realm: RealmId::System(7),
+            to_realm: RealmId::Galaxy(1),
+            subject_fence: Fence(3),
+            attempt: 1,
+        }),
+        // The ruler switch, slice 3: the one new datum — a child's lineage, stated by its new parent.
+        InterShardFlow::LineageStated(vd_wire::intershard::LineageStated {
+            child: demand_child_coord(),
+            parent_fence: Fence(4),
+            at: UniverseTick(19),
+        }),
+        // The ruler switch, slice 5: the orchestrator tells every gateway a moved child's new coord.
+        InterShardFlow::ExteriorMoved(vd_wire::intershard::ExteriorMoved {
+            child: demand_child_coord(),
+            parent_node: NodeId(1_004),
+            at: UniverseTick(21),
+        }),
+        // The peer book: a node asks where an unbooked node listens; the orchestrator answers.
+        InterShardFlow::PeerLocate(vd_wire::intershard::PeerLocate {
+            node: NodeId(1_007),
+            at: UniverseTick(22),
+        }),
+        InterShardFlow::PeerLocated(vd_wire::intershard::PeerLocated {
+            node: NodeId(1_007),
+            ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1],
+            port: 7_562,
+            at: UniverseTick(23),
+        }),
     ]
 }
 
@@ -619,7 +651,12 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::WindowRelay(_)
         | InterShardFlow::RealmInterest(_)
         | InterShardFlow::ChildDrive(_)
-        | InterShardFlow::ChildFacts(_) => {}
+        | InterShardFlow::ChildFacts(_)
+        | InterShardFlow::ExteriorCrossingRequest(_)
+        | InterShardFlow::LineageStated(_)
+        | InterShardFlow::ExteriorMoved(_)
+        | InterShardFlow::PeerLocate(_)
+        | InterShardFlow::PeerLocated(_) => {}
     }
 }
 
@@ -794,6 +831,11 @@ fn every_arm_encodes_its_declared_discriminant_index() {
             // D-MOVE-2, the two movement lanes (mesh minor 22).
             InterShardFlow::ChildDrive(_) => 36,
             InterShardFlow::ChildFacts(_) => 37,
+            InterShardFlow::ExteriorCrossingRequest(_) => 38,
+            InterShardFlow::LineageStated(_) => 39,
+            InterShardFlow::ExteriorMoved(_) => 40,
+            InterShardFlow::PeerLocate(_) => 41,
+            InterShardFlow::PeerLocated(_) => 42,
         }
     }
     // Every fixture's real leading byte matches its declared index (all indices < 128, so the
@@ -806,9 +848,9 @@ fn every_arm_encodes_its_declared_discriminant_index() {
     }
     // …and the fixture set spans the WHOLE contiguous index space, so a missing fixture (or a
     // gap postcard would assign past a deleted arm) cannot pass vacuously.
-    assert_eq!(seen.len(), 38);
+    assert_eq!(seen.len(), 43);
     assert_eq!(seen.first().copied(), Some(0));
-    assert_eq!(seen.last().copied(), Some(37));
+    assert_eq!(seen.last().copied(), Some(42));
 }
 
 /// THE TOMBSTONE GOLDEN SET — the discriminants no producer may ever fill again, stated as data.
@@ -844,6 +886,11 @@ fn the_tombstoned_discriminants_are_exactly_this_golden_set() {
             // SL7 occupancy bit, the demand verbs, the reactive greeting, and the window lane's
             // own Q2 relay leg.
             InterShardFlow::ChildDrive(_)
+            | InterShardFlow::ExteriorCrossingRequest(_)
+            | InterShardFlow::LineageStated(_)
+            | InterShardFlow::ExteriorMoved(_)
+            | InterShardFlow::PeerLocate(_)
+            | InterShardFlow::PeerLocated(_)
             | InterShardFlow::ChildFacts(_)
             | InterShardFlow::Ghost(_)
             | InterShardFlow::Transfer(_)
@@ -1154,6 +1201,10 @@ fn durability_class_pins_the_producer_less_reliable_set() {
             // enforce: the push site MUST carry `Durability::Retained`, or a source crash loses the
             // one-shot and leaves a parent computing drag from a mass that is wrong forever.
             InterShardFlow::ChildFacts(_) => FlowDurabilityClass::ProducerLessReliable,
+            // The ruler switch, slice 5: the orchestrator states a moved child's coord ONCE, at the
+            // exterior CAS, and nothing re-drives it — the reparent note is consumed. ★ THE FIFTH
+            // producer-less arm: its push site carries `Durability::Retained`.
+            InterShardFlow::ExteriorMoved(_) => FlowDurabilityClass::ProducerLessReliable,
             _ => FlowDurabilityClass::ReDriven,
         };
         assert_eq!(
@@ -1167,9 +1218,9 @@ fn durability_class_pins_the_producer_less_reliable_set() {
     }
     assert_eq!(
         producer_less.len(),
-        4,
-        "exactly four producer-less-reliable arms today (Ghost::Despawn + Ghost::SpawnV2 + \
-         TransientBatch + ChildFacts): {producer_less:?}"
+        5,
+        "exactly five producer-less-reliable arms today (Ghost::Despawn + Ghost::SpawnV2 + \
+         TransientBatch + ChildFacts + ExteriorMoved): {producer_less:?}"
     );
 }
 

@@ -1,0 +1,523 @@
+COVERAGE GATE (option 3, owner 2026-08-15): tool-missed rows 569 (regions 281, functions 28, lines 210, branches 50) | ARTIFACT ROWS DROPPED (no source-line miss in the merged report): 328 | real misses: 241
+  dropped (never-executed micro-span, line covered): crates/client/src/net.rs:300:37-300:43
+  dropped (never-executed micro-span, line covered): crates/client/src/net.rs:300:63-302:26
+  dropped (never-executed micro-span, line covered): crates/client/src/net.rs:848:27-848:39
+  dropped (never-executed micro-span, line covered): crates/client/src/net.rs:848:41-848:60
+  dropped (never-executed micro-span, line covered): crates/client/src/net.rs:955:40-955:41
+  dropped (never-executed micro-span, line covered): crates/client/src/net.rs:956:39-956:40
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/gateway/home.rs:136:5-136:6
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/gateway/window_lane.rs:691:40-691:48
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/gateway/window_lane.rs:756:17-756:20
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/gateway/window_lane.rs:756:34-758:6
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/gateway/window_lane.rs:757:9-757:33
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/gateway/window_lane.rs:757:34-757:43
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/window.rs:198:40-200:18
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/window.rs:235:68-235:69
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/window.rs:1191:34-1191:41
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/window.rs:1191:42-1191:50
+  dropped (never-executed micro-span, line covered): crates/connection-plane/src/window.rs:1191:51-1191:60
+  dropped (never-executed micro-span, line covered): crates/core/src/built.rs:210:13-210:20
+  dropped (never-executed micro-span, line covered): crates/core/src/built.rs:210:21-210:24
+  dropped (never-executed micro-span, line covered): crates/core/src/frame.rs:242:35-242:36
+  dropped (never-executed micro-span, line covered): crates/core/src/home.rs:69:68-69:69
+  dropped (never-executed micro-span, line covered): crates/core/src/placement.rs:174:38-174:50
+  dropped (never-executed micro-span, line covered): crates/core/src/placement.rs:174:51-174:71
+  dropped (never-executed micro-span, line covered): crates/core/src/placement.rs:174:72-174:73
+  dropped (never-executed micro-span, line covered): crates/core/src/placement.rs:174:88-174:94
+  dropped (never-executed micro-span, line covered): crates/core/src/realm_coord.rs:78:5-78:49
+  dropped (never-executed micro-span, line covered): crates/core/src/realm_coord.rs:79:9-79:27
+  dropped (never-executed micro-span, line covered): crates/core/src/realm_coord.rs:79:28-79:32
+  dropped (never-executed micro-span, line covered): crates/core/src/realm_coord.rs:79:35-79:38
+  dropped (never-executed micro-span, line covered): crates/core/src/realm_coord.rs:79:43-79:44
+  dropped (never-executed micro-span, line covered): crates/core/src/realm_coord.rs:79:45-79:56
+  dropped (never-executed micro-span, line covered): crates/core/src/realm_coord.rs:79:60-79:67
+  dropped (never-executed micro-span, line covered): crates/core/src/realm_coord.rs:80:5-80:6
+  dropped (never-executed micro-span, line covered): crates/core/src/worldgen.rs:159:73-159:74
+  dropped (never-executed micro-span, line covered): crates/node/src/app.rs:596:9-596:37
+  dropped (never-executed micro-span, line covered): crates/node/src/app.rs:597:13-597:23
+  dropped (never-executed micro-span, line covered): crates/node/src/app.rs:598:9-598:10
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:370:13-370:21
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:554:9-558:52
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:559:13-561:15
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:562:9-562:10
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:563:9-563:82
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:564:13-564:19
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:565:9-565:10
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:566:9-566:67
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:567:13-567:45
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:567:46-567:54
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:568:9-568:10
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:632:26-632:30
+  dropped (never-executed micro-span, line covered): crates/node/src/orchestrator.rs:634:22-634:26
+  dropped (never-executed micro-span, line covered): crates/node/src/rlm_runtime.rs:268:20-268:21
+  dropped (never-executed micro-span, line covered): crates/node/src/rlm_runtime.rs:269:13-269:27
+  dropped (never-executed micro-span, line covered): crates/node/src/rlm_spawn.rs:580:38-580:40
+  dropped (never-executed micro-span, line covered): crates/node/src/rlm_spawn.rs:580:45-580:47
+  dropped (never-executed micro-span, line covered): crates/node/src/rlm_spawn.rs:580:48-580:54
+  dropped (never-executed micro-span, line covered): crates/node/src/rlm_spawn.rs:599:20-601:15
+  dropped (never-executed micro-span, line covered): crates/node/src/saga_runtime/deadlines.rs:124:26-124:37
+  dropped (never-executed micro-span, line covered): crates/node/src/saga_runtime/deadlines.rs:124:38-124:42
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:254:1-257:33
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:258:9-258:14
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:258:17-258:45
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:258:46-258:59
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:258:61-258:67
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:259:9-259:21
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:259:23-259:55
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:259:58-260:16
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:261:10-261:20
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:261:25-261:39
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:261:40-261:43
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:261:49-261:56
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:261:58-261:59
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:262:10-262:17
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:263:5-263:19
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:263:20-263:47
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:263:21-263:31
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:263:49-263:62
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:264:1-264:2
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:288:1-288:83
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:289:5-289:18
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:289:19-289:47
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:289:48-289:61
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:289:63-289:69
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:289:72-289:78
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:290:1-290:2
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:293:1-298:38
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:299:5-299:25
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:299:5-300:16
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:299:26-299:39
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:299:41-299:47
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:301:10-301:20
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:301:25-301:39
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:301:40-301:43
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:301:49-301:56
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:301:58-301:59
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:302:10-302:17
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:303:1-303:2
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:690:13-690:21
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:690:22-690:33
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:744:37-744:44
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/forest_query.rs:744:48-744:52
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/generate.rs:291:9-291:17
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/generate.rs:934:5-934:6
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/generate.rs:1265:17-1265:22
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/generate.rs:1322:13-1322:21
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/generate.rs:1325:13-1325:21
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/generate.rs:1388:54-1388:62
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/guards.rs:89:84-89:85
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/guards.rs:255:79-255:80
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/guards.rs:256:9-260:10
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/guards.rs:257:19-257:32
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/guards.rs:261:5-261:6
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/guards.rs:261:7-261:8
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/guards.rs:283:50-283:51
+  dropped (never-executed micro-span, line covered): crates/physics/src/worldgen/guards.rs:351:16-351:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/io/mod.rs:428:5-428:67
+  dropped (never-executed micro-span, line covered): crates/sim/src/io/mod.rs:429:17-429:33
+  dropped (never-executed micro-span, line covered): crates/sim/src/io/mod.rs:429:18-429:22
+  dropped (never-executed micro-span, line covered): crates/sim/src/io/mod.rs:430:5-430:6
+  dropped (never-executed micro-span, line covered): crates/sim/src/io/mod.rs:524:5-524:63
+  dropped (never-executed micro-span, line covered): crates/sim/src/io/mod.rs:525:17-525:21
+  dropped (never-executed micro-span, line covered): crates/sim/src/io/mod.rs:526:9-526:13
+  dropped (never-executed micro-span, line covered): crates/sim/src/io/mod.rs:527:5-527:6
+  dropped (never-executed micro-span, line covered): crates/sim/src/rlm.rs:341:9-341:10
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:172:9-172:10
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:173:13-173:18
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:173:21-173:32
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:173:21-173:63
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:174:9-174:28
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:174:29-174:32
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:174:37-174:38
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:175:17-175:18
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:175:21-175:22
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:175:21-175:46
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:175:23-175:26
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:176:14-176:23
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:176:25-176:33
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:176:34-176:36
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:176:41-176:63
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:176:41-176:81
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:176:42-176:44
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/aoi.rs:177:9-177:10
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:146:47-146:48
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:147:52-147:53
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:148:47-148:48
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:149:44-149:45
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:150:47-150:48
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:162:22-162:29
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:173:58-173:59
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:174:60-174:61
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:175:74-175:75
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:176:59-176:60
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:177:56-177:57
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:178:61-178:62
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:179:56-179:57
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:330:17-330:22
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:330:23-330:26
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:358:67-358:71
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:358:72-358:75
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:362:13-362:18
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/built_store.rs:362:19-362:22
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/containment.rs:227:13-227:14
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/containment.rs:420:13-420:21
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/containment.rs:427:13-427:21
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/containment.rs:434:13-434:43
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/containment.rs:435:13-435:21
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/containment.rs:873:13-873:21
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/containment.rs:1110:35-1112:14
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/containment.rs:1308:25-1308:62
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/conversion.rs:526:31-526:32
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/conversion.rs:530:64-530:65
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/dot.rs:309:5-309:6
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:498:1-508:2
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:511:8-511:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:512:9-512:15
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:513:5-513:6
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:520:15-520:21
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:520:30-520:34
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:520:36-520:46
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:520:55-520:60
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:520:66-520:77
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:520:79-520:84
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:520:86-520:97
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:522:9-522:15
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:524:10-524:14
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:524:16-524:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:524:24-524:40
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:524:24-524:66
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:524:41-524:45
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:525:5-525:11
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:525:12-525:21
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:526:9-526:15
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:530:9-530:41
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:531:9-537:11
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:532:20-532:29
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:532:30-532:35
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:533:26-533:31
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:534:13-534:15
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:539:5-539:32
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:540:1-540:2
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:577:14-577:18
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:580:9-580:15
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:580:18-580:27
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:580:28-580:39
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:581:5-581:21
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:582:9-582:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:583:9-583:26
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:584:9-584:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:585:9-585:28
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:586:9-586:22
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:587:9-587:16
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:588:9-588:14
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:589:9-589:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:590:9-590:19
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:595:5-595:21
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:596:9-596:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:597:9-597:26
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:598:9-598:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:599:9-599:28
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:600:9-600:22
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:601:9-601:13
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:602:9-602:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:603:9-603:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:604:9-604:19
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/drive.rs:649:9-649:15
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:50:5-50:71
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:51:9-51:10
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:51:9-51:36
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:51:9-52:38
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:52:14-52:19
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:53:14-53:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:54:5-54:6
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:130:9-130:46
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:131:9-131:15
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:138:5-138:6
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/exterior.rs:254:9-254:10
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/lineage.rs:128:5-128:6
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/lineage.rs:187:5-187:6
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/placement.rs:154:17-162:10
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/placement.rs:157:26-157:34
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/placement.rs:157:35-157:51
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/placement.rs:157:54-157:58
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/placement.rs:158:21-158:29
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:562:42-562:44
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:563:13-563:52
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:564:17-564:19
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:565:17-565:21
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:566:17-566:23
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:567:17-567:24
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:568:17-568:28
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:569:17-569:31
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:570:17-570:37
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:571:17-571:32
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:572:17-572:22
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:573:17-573:23
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/realm_head.rs:575:13-575:19
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/regions.rs:381:13-381:19
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/regions.rs:536:35-538:22
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/regions.rs:694:36-694:48
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/regions.rs:694:49-694:55
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/regions.rs:987:5-987:54
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/regions.rs:988:9-988:20
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/regions.rs:988:21-988:33
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/regions.rs:988:34-988:40
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/regions.rs:989:5-989:6
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/register.rs:547:47-547:49
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/register.rs:547:55-557:18
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/register.rs:548:21-548:55
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/register.rs:549:25-549:27
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/register.rs:550:25-550:30
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/register.rs:551:25-551:37
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/register.rs:552:25-552:44
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/register.rs:552:45-552:54
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/register.rs:553:25-553:39
+  dropped (never-executed micro-span, line covered): crates/sim/src/stub/window.rs:518:17-518:18
+  dropped (never-executed micro-span, line covered): crates/wire/src/channels.rs:876:13-876:18
+  dropped (never-executed micro-span, line covered): crates/wire/src/channels.rs:876:19-876:22
+  dropped (never-executed micro-span, line covered): crates/wire/src/channels.rs:881:13-881:18
+  dropped (never-executed micro-span, line covered): crates/wire/src/channels.rs:881:19-881:22
+REAL MISSED LINES (192):
+  crates/client/src/net.rs:301
+  crates/connection-plane/src/gateway/window_lane.rs:757
+  crates/connection-plane/src/window.rs:199
+  crates/core/src/built.rs:210
+  crates/core/src/realm_coord.rs:78
+  crates/core/src/realm_coord.rs:79
+  crates/core/src/realm_coord.rs:80
+  crates/node/src/app.rs:596
+  crates/node/src/app.rs:597
+  crates/node/src/app.rs:598
+  crates/node/src/orchestrator.rs:370
+  crates/node/src/orchestrator.rs:554
+  crates/node/src/orchestrator.rs:555
+  crates/node/src/orchestrator.rs:556
+  crates/node/src/orchestrator.rs:557
+  crates/node/src/orchestrator.rs:558
+  crates/node/src/orchestrator.rs:559
+  crates/node/src/orchestrator.rs:560
+  crates/node/src/orchestrator.rs:561
+  crates/node/src/orchestrator.rs:562
+  crates/node/src/orchestrator.rs:563
+  crates/node/src/orchestrator.rs:564
+  crates/node/src/orchestrator.rs:565
+  crates/node/src/orchestrator.rs:566
+  crates/node/src/orchestrator.rs:567
+  crates/node/src/orchestrator.rs:568
+  crates/node/src/orchestrator.rs:632
+  crates/node/src/orchestrator.rs:634
+  crates/node/src/rlm_runtime.rs:269
+  crates/node/src/rlm_spawn.rs:580
+  crates/node/src/rlm_spawn.rs:599
+  crates/node/src/rlm_spawn.rs:600
+  crates/node/src/rlm_spawn.rs:601
+  crates/physics/src/worldgen/forest_query.rs:254
+  crates/physics/src/worldgen/forest_query.rs:255
+  crates/physics/src/worldgen/forest_query.rs:256
+  crates/physics/src/worldgen/forest_query.rs:257
+  crates/physics/src/worldgen/forest_query.rs:258
+  crates/physics/src/worldgen/forest_query.rs:259
+  crates/physics/src/worldgen/forest_query.rs:260
+  crates/physics/src/worldgen/forest_query.rs:261
+  crates/physics/src/worldgen/forest_query.rs:262
+  crates/physics/src/worldgen/forest_query.rs:263
+  crates/physics/src/worldgen/forest_query.rs:264
+  crates/physics/src/worldgen/forest_query.rs:288
+  crates/physics/src/worldgen/forest_query.rs:289
+  crates/physics/src/worldgen/forest_query.rs:290
+  crates/physics/src/worldgen/forest_query.rs:293
+  crates/physics/src/worldgen/forest_query.rs:294
+  crates/physics/src/worldgen/forest_query.rs:295
+  crates/physics/src/worldgen/forest_query.rs:296
+  crates/physics/src/worldgen/forest_query.rs:297
+  crates/physics/src/worldgen/forest_query.rs:298
+  crates/physics/src/worldgen/forest_query.rs:299
+  crates/physics/src/worldgen/forest_query.rs:300
+  crates/physics/src/worldgen/forest_query.rs:301
+  crates/physics/src/worldgen/forest_query.rs:302
+  crates/physics/src/worldgen/forest_query.rs:303
+  crates/physics/src/worldgen/forest_query.rs:690
+  crates/physics/src/worldgen/generate.rs:291
+  crates/physics/src/worldgen/generate.rs:1265
+  crates/physics/src/worldgen/generate.rs:1322
+  crates/physics/src/worldgen/generate.rs:1325
+  crates/physics/src/worldgen/guards.rs:256
+  crates/physics/src/worldgen/guards.rs:257
+  crates/physics/src/worldgen/guards.rs:258
+  crates/physics/src/worldgen/guards.rs:259
+  crates/physics/src/worldgen/guards.rs:260
+  crates/physics/src/worldgen/guards.rs:261
+  crates/physics/src/worldgen/guards.rs:351
+  crates/sim/src/io/mod.rs:428
+  crates/sim/src/io/mod.rs:429
+  crates/sim/src/io/mod.rs:430
+  crates/sim/src/io/mod.rs:524
+  crates/sim/src/io/mod.rs:525
+  crates/sim/src/io/mod.rs:526
+  crates/sim/src/io/mod.rs:527
+  crates/sim/src/stub/aoi.rs:172
+  crates/sim/src/stub/aoi.rs:173
+  crates/sim/src/stub/aoi.rs:174
+  crates/sim/src/stub/aoi.rs:175
+  crates/sim/src/stub/aoi.rs:176
+  crates/sim/src/stub/aoi.rs:177
+  crates/sim/src/stub/built_store.rs:330
+  crates/sim/src/stub/built_store.rs:362
+  crates/sim/src/stub/containment.rs:420
+  crates/sim/src/stub/containment.rs:427
+  crates/sim/src/stub/containment.rs:434
+  crates/sim/src/stub/containment.rs:435
+  crates/sim/src/stub/containment.rs:873
+  crates/sim/src/stub/containment.rs:1110
+  crates/sim/src/stub/containment.rs:1111
+  crates/sim/src/stub/containment.rs:1112
+  crates/sim/src/stub/containment.rs:1308
+  crates/sim/src/stub/drive.rs:498
+  crates/sim/src/stub/drive.rs:499
+  crates/sim/src/stub/drive.rs:500
+  crates/sim/src/stub/drive.rs:501
+  crates/sim/src/stub/drive.rs:502
+  crates/sim/src/stub/drive.rs:503
+  crates/sim/src/stub/drive.rs:504
+  crates/sim/src/stub/drive.rs:505
+  crates/sim/src/stub/drive.rs:506
+  crates/sim/src/stub/drive.rs:507
+  crates/sim/src/stub/drive.rs:508
+  crates/sim/src/stub/drive.rs:511
+  crates/sim/src/stub/drive.rs:512
+  crates/sim/src/stub/drive.rs:513
+  crates/sim/src/stub/drive.rs:520
+  crates/sim/src/stub/drive.rs:522
+  crates/sim/src/stub/drive.rs:524
+  crates/sim/src/stub/drive.rs:525
+  crates/sim/src/stub/drive.rs:526
+  crates/sim/src/stub/drive.rs:530
+  crates/sim/src/stub/drive.rs:531
+  crates/sim/src/stub/drive.rs:532
+  crates/sim/src/stub/drive.rs:533
+  crates/sim/src/stub/drive.rs:534
+  crates/sim/src/stub/drive.rs:535
+  crates/sim/src/stub/drive.rs:536
+  crates/sim/src/stub/drive.rs:537
+  crates/sim/src/stub/drive.rs:539
+  crates/sim/src/stub/drive.rs:540
+  crates/sim/src/stub/drive.rs:580
+  crates/sim/src/stub/drive.rs:581
+  crates/sim/src/stub/drive.rs:582
+  crates/sim/src/stub/drive.rs:583
+  crates/sim/src/stub/drive.rs:584
+  crates/sim/src/stub/drive.rs:585
+  crates/sim/src/stub/drive.rs:586
+  crates/sim/src/stub/drive.rs:587
+  crates/sim/src/stub/drive.rs:588
+  crates/sim/src/stub/drive.rs:589
+  crates/sim/src/stub/drive.rs:590
+  crates/sim/src/stub/drive.rs:595
+  crates/sim/src/stub/drive.rs:596
+  crates/sim/src/stub/drive.rs:597
+  crates/sim/src/stub/drive.rs:598
+  crates/sim/src/stub/drive.rs:599
+  crates/sim/src/stub/drive.rs:600
+  crates/sim/src/stub/drive.rs:601
+  crates/sim/src/stub/drive.rs:602
+  crates/sim/src/stub/drive.rs:603
+  crates/sim/src/stub/drive.rs:604
+  crates/sim/src/stub/drive.rs:649
+  crates/sim/src/stub/exterior.rs:50
+  crates/sim/src/stub/exterior.rs:51
+  crates/sim/src/stub/exterior.rs:52
+  crates/sim/src/stub/exterior.rs:53
+  crates/sim/src/stub/exterior.rs:54
+  crates/sim/src/stub/exterior.rs:130
+  crates/sim/src/stub/exterior.rs:131
+  crates/sim/src/stub/placement.rs:154
+  crates/sim/src/stub/placement.rs:155
+  crates/sim/src/stub/placement.rs:156
+  crates/sim/src/stub/placement.rs:157
+  crates/sim/src/stub/placement.rs:158
+  crates/sim/src/stub/placement.rs:159
+  crates/sim/src/stub/placement.rs:160
+  crates/sim/src/stub/placement.rs:161
+  crates/sim/src/stub/placement.rs:162
+  crates/sim/src/stub/realm_head.rs:562
+  crates/sim/src/stub/realm_head.rs:563
+  crates/sim/src/stub/realm_head.rs:564
+  crates/sim/src/stub/realm_head.rs:565
+  crates/sim/src/stub/realm_head.rs:566
+  crates/sim/src/stub/realm_head.rs:567
+  crates/sim/src/stub/realm_head.rs:568
+  crates/sim/src/stub/realm_head.rs:569
+  crates/sim/src/stub/realm_head.rs:570
+  crates/sim/src/stub/realm_head.rs:571
+  crates/sim/src/stub/realm_head.rs:572
+  crates/sim/src/stub/realm_head.rs:573
+  crates/sim/src/stub/realm_head.rs:575
+  crates/sim/src/stub/regions.rs:381
+  crates/sim/src/stub/regions.rs:537
+  crates/sim/src/stub/regions.rs:987
+  crates/sim/src/stub/regions.rs:988
+  crates/sim/src/stub/regions.rs:989
+  crates/sim/src/stub/register.rs:547
+  crates/sim/src/stub/register.rs:548
+  crates/sim/src/stub/register.rs:549
+  crates/sim/src/stub/register.rs:550
+  crates/sim/src/stub/register.rs:551
+  crates/sim/src/stub/register.rs:552
+  crates/sim/src/stub/register.rs:553
+  crates/sim/src/stub/register.rs:554
+  crates/sim/src/stub/register.rs:555
+  crates/sim/src/stub/register.rs:556
+  crates/sim/src/stub/register.rs:557
+  crates/wire/src/channels.rs:876
+  crates/wire/src/channels.rs:881
+REAL MISSED BRANCHES (49):
+  crates/client/src/net.rs:300 (block 0, branch 0)
+  crates/client/src/realm_scene.rs:988 (block 0, branch 1)
+  crates/client/src/realm_scene.rs:988 (block 1, branch 3)
+  crates/connection-plane/src/gateway/home.rs:134 (block 0, branch 1)
+  crates/connection-plane/src/gateway/window_lane.rs:756 (block 0, branch 0)
+  crates/connection-plane/src/window.rs:198 (block 0, branch 0)
+  crates/node/src/orchestrator.rs:368 (block 0, branch 1)
+  crates/node/src/rlm_runtime.rs:268 (block 0, branch 0)
+  crates/node/src/rlm_spawn.rs:598 (block 0, branch 1)
+  crates/node/src/saga_runtime/crossing.rs:41 (block 0, branch 1)
+  crates/node/src/saga_runtime/execute.rs:368 (block 1, branch 3)
+  crates/physics/src/worldgen/generate.rs:290 (block 0, branch 0)
+  crates/physics/src/worldgen/generate.rs:924 (block 0, branch 1)
+  crates/physics/src/worldgen/generate.rs:932 (block 0, branch 1)
+  crates/physics/src/worldgen/generate.rs:1321 (block 0, branch 1)
+  crates/physics/src/worldgen/generate.rs:1324 (block 0, branch 1)
+  crates/physics/src/worldgen/generate.rs:1451 (block 0, branch 1)
+  crates/physics/src/worldgen/guards.rs:350 (block 0, branch 0)
+  crates/sim/src/rlm.rs:338 (block 0, branch 1)
+  crates/sim/src/stub/aoi.rs:170 (block 0, branch 1)
+  crates/sim/src/stub/aoi.rs:176 (block 0, branch 0)
+  crates/sim/src/stub/aoi.rs:176 (block 0, branch 1)
+  crates/sim/src/stub/containment.rs:225 (block 0, branch 1)
+  crates/sim/src/stub/containment.rs:419 (block 0, branch 1)
+  crates/sim/src/stub/containment.rs:426 (block 0, branch 1)
+  crates/sim/src/stub/containment.rs:433 (block 0, branch 1)
+  crates/sim/src/stub/containment.rs:869 (block 0, branch 0)
+  crates/sim/src/stub/dot.rs:307 (block 0, branch 1)
+  crates/sim/src/stub/drive.rs:511 (block 0, branch 0)
+  crates/sim/src/stub/drive.rs:511 (block 0, branch 1)
+  crates/sim/src/stub/drive.rs:520 (block 0, branch 0)
+  crates/sim/src/stub/drive.rs:520 (block 0, branch 1)
+  crates/sim/src/stub/drive.rs:577 (block 0, branch 0)
+  crates/sim/src/stub/drive.rs:648 (block 0, branch 1)
+  crates/sim/src/stub/drive.rs:938 (block 0, branch 1)
+  crates/sim/src/stub/drive.rs:938 (block 1, branch 3)
+  crates/sim/src/stub/drive.rs:961 (block 0, branch 1)
+  crates/sim/src/stub/drive.rs:961 (block 1, branch 3)
+  crates/sim/src/stub/exterior.rs:127 (block 0, branch 1)
+  crates/sim/src/stub/exterior.rs:136 (block 0, branch 1)
+  crates/sim/src/stub/exterior.rs:241 (block 0, branch 1)
+  crates/sim/src/stub/lineage.rs:122 (block 0, branch 1)
+  crates/sim/src/stub/lineage.rs:185 (block 0, branch 1)
+  crates/sim/src/stub/regions.rs:380 (block 0, branch 1)
+  crates/sim/src/stub/regions.rs:466 (block 0, branch 1)
+  crates/sim/src/stub/regions.rs:493 (block 0, branch 1)
+  crates/sim/src/stub/regions.rs:526 (block 0, branch 1)
+  crates/sim/src/stub/regions.rs:536 (block 0, branch 0)
+  crates/sim/src/stub/window.rs:516 (block 0, branch 1)
+COVERAGE GATE: FAIL — real misses remain (see above)

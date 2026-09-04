@@ -145,6 +145,12 @@ impl MsgClass {
 pub enum SendError {
     #[error("outbound queue full (back-pressure); payload returned")]
     QueueFull(Bytes),
+    /// ★ THE PEER BOOK'S TRIGGER (D-RLM-6 mechanism C): this process holds NO lane and NO address for
+    /// `to` — not a full lane, an absent one. The node runtime keeps the frame and asks the orchestrator
+    /// where the peer listens; the answer books it and the next send dials. Only the mesh produces
+    /// this; the in-memory fabrics route by id and never do.
+    #[error("no lane and no address for the destination; payload returned")]
+    UnknownPeer(Bytes),
 }
 
 /// Everything a node can observe from the outside world on a tick.
@@ -414,6 +420,14 @@ pub trait Transport {
 
     /// This node's identity.
     fn local_id(&self) -> NodeId;
+
+    /// ★ THE PEER BOOK (D-RLM-6 mechanism C): record where `node` listens, so a later send can dial it.
+    /// Sixteen octets (IPv4 rides IPv4-mapped) and a port, so this seam names no platform type. The
+    /// default is a no-op: every in-memory fabric routes by id and books nothing; the mesh updates its
+    /// address book and dials lazily on the next send.
+    fn book_peer(&mut self, node: NodeId, ip: [u8; 16], port: u16) {
+        let _ = (node, ip, port);
+    }
 }
 
 /// The persistence half of `ShardIo` (D-6): durable state that survives a process kill-9 — the
@@ -499,6 +513,23 @@ pub trait RealmSpawner {
     /// rebuilt orchestrator recognizes its pre-crash pods through it. The mem twin returns its in-process
     /// set; the real k8s launcher lists pods by label (Step 5).
     fn live_nodes(&self) -> std::collections::BTreeSet<NodeId>;
+
+    /// ★ A LIVE REALM MOVED HOUSE (the ruler switch, slice 4): its coordinate is now `coord`, and the
+    /// launch record that would re-adopt it under its OLD parent on a restart must say so. The
+    /// default is a no-op for a spawner that keeps no launch record (the memory spawner of every
+    /// test rig); the process launcher rewrites its persisted intent and its path index.
+    /// ★ THE PEER BOOK'S SOURCE OF TRUTH: where a node this spawner launched listens, as sixteen octets
+    /// and a port. `None` for a node it never launched, and always `None` for a spawner that keeps no
+    /// addresses (the memory spawner of every test rig).
+    fn addr_of(&self, node: NodeId) -> Option<([u8; 16], u16)> {
+        let _ = node;
+        None
+    }
+
+    fn reparent_realm(&self, node: NodeId, coord: &RealmCoord) -> Result<(), SpawnError> {
+        let _ = (node, coord);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

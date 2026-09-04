@@ -177,6 +177,7 @@ fn run_cut_transfer(
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: TransferId(1),
             session,
             subject: DirectoryKey::Entity(entity),

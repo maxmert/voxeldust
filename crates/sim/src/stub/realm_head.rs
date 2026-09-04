@@ -26,7 +26,6 @@ use bevy_ecs::prelude::{Res, ResMut, Resource};
 use std::collections::BTreeMap;
 use vd_core::placement::PlacementLedger;
 use vd_core::pose::RealmId;
-use vd_core::realm_coord::RealmCoord;
 use vd_core::{Fence, NodeId, SessionId, TickId};
 use vd_wire::intershard::InterShardFlow;
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp, DirectoryReply};
@@ -47,6 +46,21 @@ pub struct RealmAuthority(pub Option<Fence>);
 /// single-realm rig is byte-identical (the map is only touched when `cohosted_realms()` is non-empty).
 #[derive(Resource, Debug, Default)]
 pub struct CoHostedAuthority(pub BTreeMap<RealmId, Fence>);
+
+/// ★ THE EXTERIOR LEASES THIS REALM HOLDS FOR ITS CHILDREN (the ruler switch, slice 0; owner-approved
+/// 2026-09-02). For every direct child that has an exterior key (`DirectoryKey::exterior_of`), the
+/// parent leases that key: it is the directory's record that THIS realm authors that child's placement.
+/// Requested until affirmed, renewed with the realm's own heartbeat, dropped the moment the directory
+/// names another node — which is what a later saga does when the child moves house.
+///
+/// Default EMPTY: a realm with no built children never touches it, so every seeded-only rig is
+/// byte-identical (the loops over it never body).
+///
+/// Example: System 7 boots with the hull's berth in its store. Its forest holds the hull as a direct
+/// child, so it requests `Ship(hull)` at genesis, and from the reply on it renews it beside
+/// `Realm(System 7)`. The hull, meanwhile, reads `Ship(hull)` to learn who its parent is.
+#[derive(Resource, Debug, Default)]
+pub struct ExteriorAuthority(pub BTreeMap<RealmId, Fence>);
 
 /// D-3 Slice 5 — the `local_tick` of the last realm-head ROUND-TRIP confirmation (the reply at which
 /// the directory affirmed this shard still owns its realm). The partition detector for the proactive
@@ -84,15 +98,32 @@ pub struct ChildRealmNodes(pub BTreeMap<RealmId, NodeId>);
 /// Until the directory has granted this shard its realm — and every provisional
 /// dot its entity — keep requesting (grants are idempotent by fence; a lost
 /// reply costs one tick).
+#[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources
 pub(crate) fn request_pending_grants(
     config: Res<StubConfig>,
     identity: Res<NodeIdentity>,
     clock: Res<ClockSample>,
     authority: Res<RealmAuthority>,
     cohosted: Res<CoHostedAuthority>,
+    exterior: Res<ExteriorAuthority>,
+    regions: Res<RealmRegions>,
     dots: Res<Dots>,
     mut outbox: ResMut<OutboundBox>,
 ) {
+    // ★ THE EXTERIOR KEYS OF MY BUILT CHILDREN (the ruler switch, slice 0): request each until it is
+    // affirmed, exactly like a co-hosted child's realm key. INERT for a realm with no built children —
+    // `exterior_keys_wanted` yields nothing — so every seeded-only rig is byte-identical.
+    for (_child, key) in exterior_keys_wanted(&config, &regions, &exterior) {
+        outbox.push_flow(
+            config.orchestrator,
+            MsgClass::Saga,
+            &InterShardFlow::Directory(DirectoryOp::LeaseGrant {
+                key,
+                owner: AuthorityRef::Shard(identity.node_id),
+                fence: Fence::GENESIS.next(),
+            }),
+        );
+    }
     // Co-hosting (the un-hosted-child cure): keep requesting the head of every co-hosted CHILD realm not
     // yet affirmed (the un-affirmed child self-grants at `GENESIS.next`, exactly like the primary realm's
     // `None` arm; a re-request of an already-held child is idempotent by fence). INERT for a single-realm
@@ -161,7 +192,12 @@ pub(crate) fn request_pending_grants(
                             .values()
                             .filter(|d| d.granted && !d.departing)
                             .map(|d| (DirectoryKey::Entity(d.entity), d.entity_fence)),
-                    );
+                    )
+                    // The exterior leases of my built children ride the same heartbeat: a lapsed
+                    // exterior would let the reaper forget who authors the hull's placement.
+                    .chain(exterior.0.iter().filter_map(|(child, fence)| {
+                        DirectoryKey::exterior_of(*child).map(|key| (key, *fence))
+                    }));
                 outbox.push_renewals(renewals, config.orchestrator);
             }
         }
@@ -317,7 +353,10 @@ pub(crate) fn update_parent_node(
     config: &StubConfig,
     parent_node: &mut ParentRealmNode,
 ) {
-    if Some(realm) == config.own_coord.parent().map(|p| p.lowered()) {
+    // A realm with an EXTERIOR key learns its parent from that key alone (`resolve_exterior_head`);
+    // a realm-head reply for its lineage parent must not fight it. Bitwise `&`: both sides pure.
+    let from_lineage = DirectoryKey::exterior_of(config.realm).is_none();
+    if from_lineage & (Some(realm) == config.own_coord.parent().map(|p| p.lowered())) {
         parent_node.0 = match record.map(|r| r.authority) {
             Some(AuthorityRef::Shard(n)) => Some(n),
             _ => None,
@@ -327,6 +366,86 @@ pub(crate) fn update_parent_node(
             node = ?parent_node.0,
             realm = %config.realm,
             "PARENT RESOLVED: the up-observation relay target",
+        );
+    }
+}
+
+/// The exterior keys this realm should be leasing but is not yet: every direct child that has one and
+/// is absent from [`ExteriorAuthority`]. Monomorphic; a realm with no built children yields nothing.
+pub(crate) fn exterior_keys_wanted(
+    config: &StubConfig,
+    regions: &RealmRegions,
+    exterior: &ExteriorAuthority,
+) -> Vec<(RealmId, DirectoryKey)> {
+    // Only the BUILT children can want a lease, and the roster keeps them as a short list (SL9: the
+    // galaxy has 233 220 children and one hull; asking each child whether it is a hull, every tick,
+    // was measured at a fifth of its tick).
+    regions
+        .built_children()
+        .iter()
+        .filter(|c| regions.parent_of(**c) == Some(config.realm))
+        .filter(|c| !exterior.0.contains_key(c))
+        .filter_map(|c| DirectoryKey::exterior_of(*c).map(|key| (*c, key)))
+        .collect()
+}
+
+/// The directory key this realm reads to learn its PARENT's node: its own exterior key when it has
+/// one (whoever authors my placement is my parent), else its lineage parent's realm key. `None` at
+/// the root.
+pub(crate) fn parent_head_key(config: &StubConfig) -> Option<DirectoryKey> {
+    DirectoryKey::exterior_of(config.realm).or_else(|| {
+        config
+            .own_coord
+            .parent()
+            .map(|p| DirectoryKey::Realm(p.lowered()))
+    })
+}
+
+/// ★ A `Ship` HEAD REPLY — the exterior key's two readers, one arm (the ruler switch, slice 0):
+/// - **the child:** if the key is MY exterior, its authority is my parent's node — overwrite
+///   `ParentRealmNode` (a re-home's new author replaces the old; an absent or non-shard record clears
+///   it, so nothing is ever sent to a node the directory no longer names);
+/// - **the parent:** if the key names one of my DIRECT CHILDREN, affirm the lease when the directory
+///   names ME, else drop it (the child is somebody else's now, or nobody's yet).
+///
+/// Monomorphic: all branching here (HR5). A `Ship` head for a realm that is neither is ignored.
+pub(crate) fn resolve_exterior_head(
+    entity: vd_core::EntityId,
+    record: Option<&vd_wire::seams::directory::OwnerRecord>,
+    self_node: NodeId,
+    config: &StubConfig,
+    regions: &RealmRegions,
+    parent_node: &mut ParentRealmNode,
+    exterior: &mut ExteriorAuthority,
+) {
+    let key = DirectoryKey::Ship(entity);
+    let child = RealmId::Ship(entity);
+    if DirectoryKey::exterior_of(config.realm) == Some(key) {
+        parent_node.0 = match record.map(|r| r.authority) {
+            Some(AuthorityRef::Shard(n)) => Some(n),
+            _ => None,
+        };
+        tracing::debug!(
+            node = ?parent_node.0,
+            realm = %config.realm,
+            "PARENT RESOLVED from my exterior key: whoever authors my placement",
+        );
+        return;
+    }
+    if regions.parent_of(child) == Some(config.realm) {
+        match record {
+            Some(r) if r.authority == AuthorityRef::Shard(self_node) => {
+                exterior.0.insert(child, r.fence);
+            }
+            _ => {
+                exterior.0.remove(&child);
+            }
+        }
+        tracing::debug!(
+            child = %child,
+            held = exterior.0.contains_key(&child),
+            realm = %config.realm,
+            "EXTERIOR LEASE: do I author this child's placement",
         );
     }
 }
@@ -347,10 +466,8 @@ pub(crate) fn update_child_node(
     regions: &RealmRegions,
     child_nodes: &mut ChildRealmNodes,
 ) {
-    if regions
-        .direct_children(config.realm)
-        .any(|c| c.realm == realm)
-    {
+    // A LOOKUP, never a scan of the children (SL9, measured 2026-09-04 on the galaxy).
+    if regions.parent_of(realm) == Some(config.realm) {
         match record.map(|r| r.authority) {
             Some(AuthorityRef::Shard(n)) => {
                 child_nodes.0.insert(realm, n);
@@ -376,9 +493,9 @@ pub(crate) fn on_directory_reply(
     // Q2 relay), passed through exactly like the Control arm's (stub dispatch, findings 0/43).
     from: NodeId,
     identity: &NodeIdentity,
-    config: &StubConfig,
+    config: &mut StubConfig,
     clock: &ClockSample,
-    regions: &RealmRegions,
+    regions: &mut RealmRegions,
     placements: &PlacementLedger,
     authority: &mut RealmAuthority,
     confirmed: &mut RealmConfirmedAt,
@@ -397,6 +514,17 @@ pub(crate) fn on_directory_reply(
     // Lane cure (findings 0/43, up half) — the directory-derived ADMISSION map for this shard's direct
     // children, written by the same realm-Head arm that writes `parent_node`.
     child_nodes: &mut ChildRealmNodes,
+    // The ruler switch, slice 0 — the exterior leases this realm holds for its built children.
+    exterior: &mut ExteriorAuthority,
+    // The ruler switch, slice 2 — the driven set, the liveness table and the store the exterior arms
+    // write (a flush freezes a child; an adoption seeds one and writes its berth; a release drops it).
+    driven: &mut crate::stub::drive::DrivenChildren,
+    child_liveness: &mut crate::stub::aoi::ChildLiveness,
+    store: &mut crate::stub::exterior::RealmStore,
+    // The ruler switch, slice 3 — the lineage stores on both sides of a statement.
+    lineage: crate::stub::lineage::LineageSide<'_>,
+    // The per-child tables a release must clear (the hull's rows in each).
+    tables: crate::stub::exterior::ChildTables<'_>,
     // Slice C1 — the Q2 relay holder the `WindowRelay` receive writes (held sealed, unopened).
     relay_held: &mut RelayHeld,
     // Look horizon slice 4 — the interest byte's holder the `RealmInterest` receive writes.
@@ -430,6 +558,22 @@ pub(crate) fn on_directory_reply(
         // 2026-08-17 — look_horizon.md §2 ASK B): the parent's one-byte "somebody may look
         // inside you", on the same reliable peer carrier the relay rides, admitted fail-closed
         // against the resolved PARENT head.
+        // The ruler switch, slice 3 — my parent tells me where I now stand in the tree.
+        Ok(InterShardFlow::LineageStated(ls)) => {
+            crate::stub::lineage::on_lineage_stated(
+                ls,
+                from,
+                config,
+                regions,
+                parent_node,
+                lineage.stated,
+                lineage.was_occupied,
+                lineage.pending,
+                stats,
+                outbox,
+            );
+            return;
+        }
         Ok(InterShardFlow::RealmInterest(ri)) => {
             on_realm_interest(
                 ri,
@@ -452,6 +596,8 @@ pub(crate) fn on_directory_reply(
                 placements,
                 clock.universe_tick,
                 dots,
+                driven,
+                exterior,
                 stats,
                 outbox,
             );
@@ -470,6 +616,13 @@ pub(crate) fn on_directory_reply(
                 applied,
                 pending,
                 owned_transients,
+                crate::stub::exterior::AdoptSide {
+                    driven,
+                    exterior,
+                    store,
+                    owed: lineage.owed,
+                },
+                clock.universe_tick,
                 stats,
                 outbox,
             );
@@ -509,7 +662,27 @@ pub(crate) fn on_directory_reply(
         // `RequestInFlight` crossing latch (a triggered durable crossing has committed — the entity is
         // free to trigger again from its new home).
         Ok(InterShardFlow::Demote(cmd)) => {
-            on_saga_demote(cmd, config, clock, dots, in_flight, holds, stats, outbox);
+            on_saga_demote(
+                cmd,
+                config,
+                clock,
+                dots,
+                in_flight,
+                holds,
+                crate::stub::exterior::ReleaseSide {
+                    regions,
+                    driven,
+                    exterior,
+                    child_nodes,
+                    child_liveness,
+                    relay_held,
+                    store,
+                    tables,
+                    owed: lineage.owed,
+                },
+                stats,
+                outbox,
+            );
             return;
         }
         // SOURCE (Slice 3e): the orchestrator GRANTED a resolved dest for a `TransientCrossingRequest`
@@ -530,6 +703,7 @@ pub(crate) fn on_directory_reply(
                 in_flight,
                 progress,
                 holds,
+                driven,
                 stats,
                 outbox,
                 config.orchestrator,
@@ -649,6 +823,43 @@ pub(crate) fn on_directory_reply(
             // Lane cure (findings 0/43, up half) — and IFF it is one of this shard's DIRECT CHILDREN,
             // cache its node as the up-lanes' admission authority (same reply arm, same cadence, HR3).
             update_child_node(realm, record.as_ref(), config, regions, child_nodes);
+            // The ruler switch, slice 3 — an adopted child's node is known: state its lineage to it
+            // (again on every read, until its facts arrive).
+            crate::stub::lineage::state_lineage_if_owed(
+                realm,
+                child_nodes.0.get(&realm).copied(),
+                config,
+                authority.0,
+                clock.universe_tick,
+                lineage.owed,
+                outbox,
+                stats,
+            );
+        }
+        DirectoryReply::Head {
+            key: DirectoryKey::Ship(entity),
+            record,
+        } => {
+            resolve_exterior_head(
+                entity,
+                record.as_ref(),
+                identity.node_id,
+                config,
+                regions,
+                parent_node,
+                exterior,
+            );
+            // The ruler switch, slice 3 — my exterior's holder is known: a held lineage statement from
+            // that node is applied, one from any other node discarded.
+            crate::stub::lineage::apply_pending_lineage(
+                config,
+                regions,
+                parent_node,
+                lineage.stated,
+                lineage.was_occupied,
+                lineage.pending,
+                stats,
+            );
         }
         DirectoryReply::Head {
             key: DirectoryKey::Entity(entity),
@@ -752,9 +963,9 @@ pub(crate) fn parent_headread_due(
     config: &StubConfig,
     regions: &RealmRegions,
     clock: &ClockSample,
-) -> Option<RealmCoord> {
-    let parent = config.own_coord.parent()?;
-    head_reads_due(config, regions, clock).then_some(parent)
+) -> Option<DirectoryKey> {
+    let key = parent_head_key(config)?;
+    head_reads_due(config, regions, clock).then_some(key)
 }
 
 /// THE ONE FOLD for "are directory head-reads due this tick" (lane cure, findings 0/43 — HR3: the parent

@@ -18,6 +18,7 @@ use super::{
 use crate::authority::{Authority, AuthorityCmd};
 use crate::io::{Durability, MsgClass};
 use crate::runtime::{ClockSample, OutboundBox};
+use crate::stub::StepOutcome;
 use std::collections::BTreeMap;
 use vd_core::kinematics::{self};
 use vd_core::placement::PlacementLedger;
@@ -27,6 +28,7 @@ use vd_wire::intershard::{
     DemoteCmd, FlushSource, GhostFlow, InterShardFlow, PROMOTE_STEP, PromoteCmd, RE_HOME_STEP,
     ReHomeCmd, ReHomeState, STUB_CROSSING_STEP, TransferAck,
 };
+use vd_wire::seams::directory::DirectoryKey;
 use vd_wire::seams::transfer_control::TransferControlAck;
 use vd_wire::session_flow::ShardToGateway;
 
@@ -108,9 +110,25 @@ pub(crate) fn on_saga_demote(
     dots: &mut Dots,
     in_flight: &mut RequestInFlight,
     holds: &mut HandoffHolds,
+    release: crate::stub::exterior::ReleaseSide<'_>,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
+    // The ruler switch, slice 2: a `Ship` subject is a driven child's EXTERIOR — released, latch cleared.
+    if let DirectoryKey::Ship(entity) = cmd.subject {
+        crate::stub::exterior::release_exterior(entity, config, release, stats);
+        if in_flight.0.remove(&entity).is_some() {
+            stats.crossing_latches_cleared += 1;
+        }
+        outbox.push_flow(
+            config.orchestrator,
+            MsgClass::Saga,
+            &InterShardFlow::SagaAck(TransferControlAck::DemoteAck {
+                transfer: cmd.transfer,
+            }),
+        );
+        return;
+    }
     match cmd.subject.transfer_subject_entity() {
         Some(entity) => {
             self_fence_foreign_entity(
@@ -183,7 +201,12 @@ pub(crate) fn on_saga_promote(
     // keeps the promote RE-DRIVABLE: the next timeout window re-runs `promote_apply` and completes the flip once
     // the fresh-adopt is granted and its buffered crossing has drained. A redelivery AFTER a real flip is the
     // no-op `AlreadyApplied` (protects the strict no-re-flip-on-redelivery invariant).
-    if applied.is_applied(cmd.transfer, PROMOTE_STEP) {
+    // The ruler switch, slice 2: an exterior was adopted at its envelope; the promote is its ack.
+    if let DirectoryKey::Ship(_) = cmd.subject {
+        if applied.journal_step(cmd.transfer, PROMOTE_STEP) == StepOutcome::FirstApply {
+            stats.exterior_promotes += 1;
+        }
+    } else if applied.is_applied(cmd.transfer, PROMOTE_STEP) {
         stats.promotes_redelivered += 1;
     } else if promote_apply(
         cmd,
@@ -622,9 +645,29 @@ pub(crate) fn on_flush_source(
     placements: &PlacementLedger,
     tick: UniverseTick,
     dots: &Dots,
+    driven: &mut crate::stub::drive::DrivenChildren,
+    exterior: &crate::stub::realm_head::ExteriorAuthority,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
+    // The ruler switch, slice 2: a `Ship` subject is a driven child's EXTERIOR, flushed by its parent.
+    if let DirectoryKey::Ship(entity) = flush.subject {
+        crate::stub::exterior::flush_exterior(
+            flush.transfer,
+            flush.step_id,
+            entity,
+            flush.to_realm,
+            config,
+            regions,
+            placements,
+            tick,
+            driven,
+            exterior,
+            stats,
+            outbox,
+        );
+        return;
+    }
     let Some(entity) = flush.subject.transfer_subject_entity() else {
         return; // a non-Entity subject is not a per-entity pose flush
     };
@@ -640,6 +683,7 @@ pub(crate) fn on_flush_source(
         placements,
         tick,
         stats,
+        true,
     ) else {
         // A REAL fault, already counted + logged inside the helper. Ship NO `SourceFlushed`: the saga
         // then times out and aborts, and the source keeps authority — the entity stays somewhere real
@@ -663,6 +707,7 @@ pub(crate) fn on_flush_source(
             // The source's own input drain watermark (observability; the saga's CAS watermark is
             // the GATEWAY's SourceFrozen seq, not this).
             drained_seq: dot.last_applied_seq.unwrap_or(0),
+            state: vec![],
         }),
     );
 }

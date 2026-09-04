@@ -412,6 +412,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // its own engine rating — read from its own file, never from a constant in the source. A realm the
     // seed made holds nothing here and states nothing, which is right: a planet moves on rails its
     // parent already computes, and has nothing to declare.
+    // ★ THE STORE STAYS OPEN (the ruler switch, slice 2). Until now the handle was dropped after the
+    // boot read; an adopted hull's berth row is the first runtime write, and without it a restart
+    // re-plants the hull under its OLD parent.
+    if let Some(store) = realm_store {
+        *world.resource_mut::<vd_sim::stub::exterior::RealmStore>() =
+            vd_sim::stub::exterior::RealmStore(Some(Box::new(store)));
+    }
     if let Some(body) = stored_body {
         *world.resource_mut::<vd_sim::stub::drive::OwnBody>() =
             vd_sim::stub::drive::OwnBody(Some(body));
@@ -595,12 +602,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 let world = node.world_mut();
                 let clock = world.resource::<vd_sim::runtime::ClockSample>();
+                let st = world.resource::<vd_sim::stub::StubStats>();
                 tracing::info!(
                     local_tick = clock.local_tick.0,
                     universe_tick = clock.universe_tick.0,
                     synced = clock.synced,
                     slowest_ms = slowest.as_secs_f64() * 1e3,
+                    mean_ms = pace_total.as_secs_f64() * 1e3 / pace_ticks.max(1) as f64,
                     ticks = pace_ticks,
+                    // THE FOLD'S OWN NUMBERS, so a slow tick names its walk instead of being argued.
+                    aoi_candidates = st.aoi_candidates_visited,
+                    aoi_membership = st.aoi_membership_rows,
+                    aoi_liveness = st.aoi_liveness_rows,
+                    aoi_latch = st.aoi_latch_rows,
+                    windows = st.aoi_windows_open,
+                    observers = st.aoi_observers,
+                    queries_run = st.aoi_queries_run,
+                    queries_reused = st.aoi_queries_reused,
+                    window_frames = st.window_frames_sent,
                     "tick pace"
                 );
             }

@@ -137,6 +137,47 @@ pub(crate) struct AoiObserver {
 /// (D-MOVE-1 / M8): "which children does THIS observer hold a latch for" becomes a range read.
 pub struct AoiMembership(pub BTreeMap<(ObserverId, RealmId), AoiState>);
 
+/// ★ THE FOLD'S MEMORY (owner, 2026-09-03: *"why do we need to look into all systems every tick?"*).
+/// What the index answered for an observer, with the question it answered: where the observer stood,
+/// how far its lead and its reach went, and which roster it was asked about. The answer stands until
+/// the observer moved farther than the lead the question already looked ahead, its reach changed, or
+/// the roster changed. A star system that never moves in the galaxy asks once and never again; a hull
+/// at warp re-asks when it has flown its own lead. Deterministic: no clock, only positions.
+#[derive(Resource, Debug, Default)]
+pub struct AoiQueryMemo(pub(crate) BTreeMap<ObserverId, QueryMemo>);
+
+/// One remembered index answer (see [`AoiQueryMemo`]): the LINE that was asked (its start and its
+/// direction and length, in metres of the parent's frame) and what the index answered along it. The
+/// line asked is longer than the line needed — twice the lead ahead — so an accelerating hull re-uses
+/// the answer while the line it needs stays inside the line it asked.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct QueryMemo {
+    pub(crate) from: LatticePos,
+    pub(crate) span_m: DVec3,
+    pub(crate) reach_m: f64,
+    pub(crate) generation: u64,
+    pub(crate) found: Vec<RealmId>,
+}
+
+impl QueryMemo {
+    /// Does the asked line still cover the line needed now (`from` to `from + span`)? Both ends of the
+    /// needed line must lie ON the asked line, within its length: no lateral drift beyond
+    /// floating-point noise (a turn is a new question) and no end past the asked end.
+    fn covers(&self, from: LatticePos, span_m: DVec3, tier: Tier) -> bool {
+        let len2 = self.span_m.length_squared();
+        let start = from.delta_m(self.from, tier);
+        let end = start + span_m;
+        if len2 <= 0.0 {
+            return start.length() == 0.0 && span_m.length() == 0.0;
+        }
+        let noise = self.span_m.length() * f64::EPSILON.sqrt();
+        [start, end].iter().all(|p| {
+            let t = p.dot(self.span_m) / len2;
+            (0.0..=1.0).contains(&t) && (*p - self.span_m * t).length() <= noise
+        })
+    }
+}
+
 /// One direct child's AoI state: `was_in` (acquired — for the hysteresis) + `grace_remaining` (ticks a
 /// would-be release is held after the last in-range observation).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -172,6 +213,8 @@ type Sl7Stores<'w> = (
     // PARENT-side per-child emission latch (the interior-band hysteresis).
     ResMut<'w, InterestHeld>,
     ResMut<'w, InterestEmitLatch>,
+    // The fold's memory of its index answers (owner, 2026-09-03).
+    ResMut<'w, AoiQueryMemo>,
 );
 
 /// RLM Step 2 — the demand-driven realm-lifecycle detector (the SIBLING of [`evaluate_realm_boundaries`]):
@@ -222,8 +265,14 @@ pub(crate) fn evaluate_realm_aoi(
     // The chain's emit-side observability: read nowhere in the sim — a counter, never a control input.
     mut stats: ResMut<StubStats>,
 ) {
-    let (mut child_liveness, mut open_windows, mut verdict, mut interest_held, mut interest_latch) =
-        sl7;
+    let (
+        mut child_liveness,
+        mut open_windows,
+        mut verdict,
+        mut interest_held,
+        mut interest_latch,
+        mut query_memo,
+    ) = sl7;
     // Authority gate (verbatim `evaluate_realm_boundaries`): a shard without its realm lease demands
     // nothing — the `realm_fence` is the emitter's authority proof carried on every demand.
     let Some(realm_fence) = authority.0 else {
@@ -262,6 +311,7 @@ pub(crate) fn evaluate_realm_aoi(
         &mut interest_latch.0,
         &child_nodes,
         &driven,
+        &mut query_memo,
         &mut stats,
     );
 }
@@ -311,6 +361,7 @@ fn aoi_decide(
     interest_latch: &mut BTreeSet<RealmId>,
     child_nodes: &ChildRealmNodes,
     driven: &crate::stub::drive::DrivenChildren,
+    query_memo: &mut AoiQueryMemo,
     stats: &mut StubStats,
 ) {
     let own_coord = &config.own_coord;
@@ -363,13 +414,13 @@ fn aoi_decide(
     // its whole up-observation lane stayed mute: flown 2026-08-13 as "approaching another star
     // system, its planets were not loading" — the exited system kept working only because its parent
     // node had been resolved WHILE it was occupied and stayed cached.
-    if let Some(parent_coord) = parent_headread_due(config, regions, clock) {
+    // The ruler switch, slice 0: a realm with an exterior key reads THAT key (whoever authors my
+    // placement is my parent); every other realm reads its lineage parent's realm key, as before.
+    if let Some(key) = parent_headread_due(config, regions, clock) {
         outbox.push_flow(
             config.orchestrator,
             MsgClass::Saga,
-            &InterShardFlow::Directory(DirectoryOp::HeadRead {
-                key: DirectoryKey::Realm(parent_coord.lowered()),
-            }),
+            &InterShardFlow::Directory(DirectoryOp::HeadRead { key }),
         );
     }
 
@@ -619,6 +670,10 @@ fn aoi_decide(
     candidates.extend(watched.iter().copied());
     candidates.extend(interest_latch.iter().copied());
     let mut found: Vec<RealmId> = Vec::new();
+    let generation = regions.roster_generation();
+    query_memo
+        .0
+        .retain(|id, _| observers.iter().any(|o| o.id == *id));
     for o in &observers {
         match o.outside_from_m {
             Some(d_out) => candidates.extend(regions.children_reachable_from_outside(d_out)),
@@ -626,19 +681,49 @@ fn aoi_decide(
                 // The lead the distance rule reads: live position to the predicted one, and the
                 // looker's own reach on both ends (a proxy stands for occupants out to its surface).
                 let lead = o.vel * horizon_s;
-                let reach = if lead.length() > 0.0 {
+                let lead_m = lead.length();
+                let reach = if lead_m > 0.0 {
                     lead.normalize() * o.reach
                 } else {
                     DVec3::ZERO
                 };
+                // The line NEEDED now: the looker's own reach behind, the lead and the reach ahead.
+                let need_from = o.pos.translated(-reach, own_tier);
+                let need_span = lead + reach * 2.0;
+                // THE MEMORY: the last answer stands while the line it asked still covers the line
+                // needed, with the same reach, on the same roster.
+                let remembered = query_memo.0.get(&o.id).filter(|m| {
+                    (m.generation == generation)
+                        & (m.reach_m == o.reach)
+                        & m.covers(need_from, need_span, own_tier)
+                });
+                if let Some(m) = remembered {
+                    stats.aoi_queries_reused += 1;
+                    candidates.extend(m.found.iter().copied());
+                    continue;
+                }
+                // Ask for TWICE the lead ahead, so the answer outlives the acceleration: the hull
+                // re-asks once it has flown its lead, or when it turns.
+                let ask_span = lead * 2.0 + reach * 2.0;
                 found.clear();
-                regions.aoi_index().candidates_along(
-                    o.pos.translated(-reach, own_tier),
-                    o.pos.translated(lead + reach, own_tier),
+                regions.aoi_index().candidates_segment(
+                    need_from,
+                    need_from.translated(ask_span, own_tier),
                     own_tier,
                     &mut found,
                 );
+                stats.aoi_queries_run += 1;
                 candidates.extend(found.iter().copied());
+                query_memo.0.insert(
+                    o.id,
+                    QueryMemo {
+                        from: need_from,
+                        span_m: ask_span,
+                        reach_m: o.reach,
+                        generation,
+                        found: found.clone(),
+                    },
+                );
             }
         }
     }
@@ -652,6 +737,11 @@ fn aoi_decide(
         regions.child_rows(config.realm, book)
     };
     stats.aoi_candidates_visited = placements.len() as u64;
+    stats.aoi_membership_rows = membership.len() as u64;
+    stats.aoi_liveness_rows = child_liveness.len() as u64;
+    stats.aoi_latch_rows = interest_latch.len() as u64;
+    stats.aoi_windows_open = windows.0.len() as u64;
+    stats.aoi_observers = observers.len() as u64;
 
     let mut in_band: BTreeMap<ObserverId, BTreeSet<RealmId>> = BTreeMap::new();
     // Look horizon slice 3 (§3.4.5) — the SHARED verdict accumulator: the union over EVERY

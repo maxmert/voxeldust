@@ -272,7 +272,36 @@ pub const PROTO_MAJOR: u16 = 1;
 /// is positional in postcard, so that half is a client-facing flag day too. THE FLOOR RISES WITH IT
 /// (23 → 24): a peer on either side of this line composes a wrong picture with no error, and one
 /// cluster build is the only deployment that exists (the 2026-08-19 ruling D posture, unchanged).
-pub const PROTO_MINOR: u16 = 24;
+/// **25** — THE EXTERIOR CROSSING REQUEST (the ruler switch, slice 1; owner-approved 2026-09-03 —
+/// `docs/design/realm_crossing_plan_2026-09-02.md`). ONE new arm, `InterShardFlow::ExteriorCrossingRequest`
+/// (disc 38, APPENDED): a parent asks the orchestrator to move a driven child's EXTERIOR — the
+/// authorship of the child's placement, keyed by its `Ship` key — to its own parent or to one of its
+/// direct children, after its swept verdict decided the child left it. The third request arm beside
+/// the durable and the transient one; it carries no session because an exterior has no client input
+/// to cut. MEASURED cause: a hull flown to the end of a star system's millimetre ruler, twice,
+/// because a driven child was never a subject of the containment scan. Mesh-only (one cluster build,
+/// ledger-visible): no client-facing message changed, so the floor does not move.
+/// The same minor carries the rest of the ruler switch's mesh: `TransferAck::SourceFlushed` APPENDS
+/// `state: Vec<u8>` (the exterior blob, a mesh flag day for a positional struct — one cluster build)
+/// and `InterShardFlow::LineageStated` (disc 39, APPENDED): the one new datum the owner approved, a
+/// parent stating an adopted child's lineage to it.
+/// **26** — THE SKY FOLLOWS THE HULL (the ruler switch, slice 5; owner-approved 2026-09-03 —
+/// `docs/design/realm_crossing_plan_2026-09-02.md` §3.9). ONE new arm, `InterShardFlow::ExteriorMoved`
+/// (disc 40, APPENDED): at the exterior CAS the orchestrator tells every session gateway a moved
+/// child's new coord, so a session aboard the hull re-derives its chain, its windows move with the
+/// hull and its origin epoch bumps. Mesh-only (one cluster build): no client-facing message changed,
+/// so the floor does not move.
+/// **27** — THE PEER BOOK (D-RLM-6 mechanism C, owner-approved 2026-07-25 by the judge panel decision and
+/// again on 2026-09-03 under "implement all"; built 2026-09-03 for the ruler
+/// switch's inward leg — `docs/design/realm_crossing_plan_2026-09-02.md` slice 7). TWO new arms on the
+/// Membership class: `InterShardFlow::PeerLocate` (disc 41, a node asks its clock's source where a node it
+/// has no lane for listens) and `InterShardFlow::PeerLocated` (disc 42, the orchestrator answers from its
+/// launch ledger; sixteen octets and a port). Mesh-only: no client-facing message changed, so the floor
+/// does not move.
+/// **28** — THE HAND-OVER NAMES ITS NODE (owner-approved 2026-09-04, item 4 of the flight plan):
+/// `ExteriorMoved` APPENDS `parent_node`, the commit's destination node, so a gateway opens the new
+/// parent's window at once. Mesh-only, one cluster build; the floor does not move.
+pub const PROTO_MINOR: u16 = 28;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -530,8 +559,19 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 24,
-            "minor 24 is THE HOP AS THE AUTHORED PLACEMENT (owner ruling 2026-09-02 R1/R4): HopRow \
+            PROTO_MINOR, 28,
+            "minor 28 is THE HAND-OVER NAMES ITS NODE (owner-approved 2026-09-04): ExteriorMoved carries \
+             the new parent's node, so a gateway opens the window at once; \
+             minor 27 is THE PEER BOOK (D-RLM-6 mechanism C, built 2026-09-03): PeerLocate (disc 41) and \
+             PeerLocated (disc 42), a node asking where an unbooked node listens and the orchestrator's \
+             answer; \
+             minor 26 is THE SKY FOLLOWS THE HULL (the ruler switch, slice 5; owner-approved 2026-09-03): the \
+             ExteriorMoved arm (disc 40) — the orchestrator tells every session gateway a moved child's new \
+             coord at the exterior CAS; \
+             minor 25 is THE RULER SWITCH's mesh (owner-approved 2026-09-03): the ExteriorCrossingRequest \
+             arm (disc 38), the exterior blob appended to SourceFlushed, and the LineageStated arm \
+             (disc 39) — a parent tells an adopted child its lineage; \
+             minor 24 is THE HOP AS THE AUTHORED PLACEMENT (owner ruling 2026-09-02 R1/R4): HopRow \
              carries the child's placement in the author's frame at the author's step, not the \
              author's frame pre-inverted into the child's step — the inverted form has no lattice \
              count at galaxy scale, so the galaxy shard refused its own hop and no chain ever \
@@ -618,7 +658,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.24");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.28");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is

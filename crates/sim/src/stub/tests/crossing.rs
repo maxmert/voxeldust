@@ -345,6 +345,7 @@ fn flush_source_ships_the_held_dots_pose() {
             step_id: FLUSH_SOURCE_STEP,
             pose: dot0.pose,
             drained_seq: 0,
+            state: vec![],
         })],
         "ships the held dot's pose; an unset watermark defaults to 0"
     );
@@ -361,6 +362,7 @@ fn flush_source_ships_the_held_dots_pose() {
             step_id: FLUSH_SOURCE_STEP,
             pose: dot1.pose,
             drained_seq: 1,
+            state: vec![],
         })],
         "ships the moved pose + the real drain watermark"
     );

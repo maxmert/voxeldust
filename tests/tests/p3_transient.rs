@@ -43,6 +43,7 @@ const CLIENT: NodeId = NodeId(100);
 /// the G-TIER burst tests (DRY).
 fn transient_batch_ctx(batch: TransferId, dst_fence: vd_core::Fence) -> SagaCtx {
     SagaCtx {
+        exterior: false,
         transfer: batch,
         session: SessionId(0),
         subject: DirectoryKey::Realm(DST_REALM),
@@ -136,6 +137,7 @@ fn p3_transient_debris_batch_crosses_adopt_before_drop() {
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: batch,
             session: SessionId(0), // a transient batch is session-less; the short path never reads it
             subject: DirectoryKey::Realm(DST_REALM), // inert provenance — never enters the directory
@@ -286,6 +288,7 @@ fn p3_transient_crosses_without_double_holding_under_stagger() {
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: batch,
             session: SessionId(0),
             subject: DirectoryKey::Realm(DST_REALM),
@@ -347,6 +350,7 @@ fn p3_moving_debris_re_advances_continuously_across_the_cut() {
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: batch,
             session: SessionId(0),
             subject: DirectoryKey::Realm(DST_REALM),
@@ -393,6 +397,7 @@ fn p3_fast_debris_re_advances_continuously_under_stagger() {
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: batch,
             session: SessionId(0),
             subject: DirectoryKey::Realm(DST_REALM),
@@ -614,6 +619,7 @@ fn run_durable_to_settle(
     trigger_transfer(
         &mut topo,
         SagaCtx {
+            exterior: false,
             transfer: TransferId(1),
             session,
             subject: DirectoryKey::Entity(entity),

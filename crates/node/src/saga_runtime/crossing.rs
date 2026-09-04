@@ -17,8 +17,9 @@ use vd_sim::io::MsgClass;
 use vd_sim::runtime::OutboundBox;
 use vd_sim::saga::SagaCtx;
 use vd_wire::intershard::{
-    CrossingRequest, InterShardFlow, STUB_CROSSING_STEP, TRANSFER_SCHEMA_VERSION, TransferEnvelope,
-    TransientCrossingGrant, TransientCrossingRequest, TransitionPayload, crossing_transfer_id,
+    CrossingRequest, ExteriorCrossingRequest, InterShardFlow, STUB_CROSSING_STEP,
+    TRANSFER_SCHEMA_VERSION, TransferEnvelope, TransientCrossingGrant, TransientCrossingRequest,
+    TransitionPayload, crossing_transfer_id,
 };
 use vd_wire::seams::directory::DirectoryKey;
 
@@ -31,9 +32,15 @@ fn build_crossing(
     ctx: &SagaCtx,
     fence: Fence,
     flush_pose: Option<StampedPose>,
+    flush_state: &[u8],
     epoch: EpochId,
 ) -> Option<InterShardFlow> {
-    let entity = ctx.subject.transfer_subject_entity()?;
+    // An exterior's envelope names the child by the entity its `Ship` key is named by; every other
+    // subject keeps the per-entity extraction (a hull can never be mis-adopted by an occupant path).
+    let entity = match ctx.subject {
+        DirectoryKey::Ship(entity) if ctx.exterior => entity,
+        other => other.transfer_subject_entity()?,
+    };
     // THE POSE TRAVELS VERBATIM, carrying the SOURCE's own frame tag. The saga is a courier: it holds no
     // ephemeris and knows where no realm sits, so there is nothing here it could correctly convert.
     //
@@ -56,7 +63,8 @@ fn build_crossing(
             from_realm: ctx.from_realm,
             to_realm: ctx.to_realm,
             pose,
-            state: vec![],
+            // The exterior blob the source flushed, verbatim; empty for an occupant (D-31 owes theirs).
+            state: flush_state.to_vec(),
         },
     }))
 }
@@ -64,9 +72,15 @@ fn build_crossing(
 /// Stash the source's flushed pose onto its live saga, BEFORE the `SourceFlushed` event is
 /// stepped — so an `EmitCrossing` reachable on the same tick reads it. A flush for an unknown /
 /// GC'd saga is a stale reply: dropped (the event deliver is also a no-op).
-pub(crate) fn stash_flush(runtime: &mut SagaRuntimeRes, transfer: TransferId, pose: StampedPose) {
+pub(crate) fn stash_flush(
+    runtime: &mut SagaRuntimeRes,
+    transfer: TransferId,
+    pose: StampedPose,
+    state: Vec<u8>,
+) {
     if let Some(live) = runtime.sagas.get_mut(&transfer) {
         live.flushed_pose = Some(pose);
+        live.flushed_state = state;
     }
 }
 
@@ -78,10 +92,11 @@ pub(crate) fn emit_crossing(
     ctx: &SagaCtx,
     fence: Fence,
     flush_pose: Option<StampedPose>,
+    flush_state: &[u8],
     epoch: EpochId,
     outbox: &mut OutboundBox,
 ) {
-    match build_crossing(ctx, fence, flush_pose, epoch) {
+    match build_crossing(ctx, fence, flush_pose, flush_state, epoch) {
         Some(crossing) => outbox.push_flow(ctx.dest, MsgClass::Saga, &crossing),
         None => tracing::warn!(
             transfer = ctx.transfer.0,
@@ -142,6 +157,7 @@ pub(crate) fn handle_crossing_request(
                 // (its consumer `rebind_pose_to_dest` is deleted, D-PLACE-1; the dest forms an Area
                 // frame from its own roster at adopt). Flag-day removal ledgered D-WIRE-1.
                 to_parent: req.to_parent,
+                exterior: false,
             };
             let gateway = sess_rec.authority.node();
             // Stage A (rehome_one_mechanism §4u): the request→saga binding line. The FLUSH runs on
@@ -262,6 +278,7 @@ pub(crate) fn handle_transient_crossing_request(
                     // Crossing.to_parent` (carried on the GRANT below), never this ctx (the transient saga is
                     // the orchestrator-side `BatchHandoff` choreography, which builds no crossing envelope).
                     to_parent: None,
+                    exterior: false,
                 };
                 // The `gateway` arg is INERT for a Transient (never read, never rendered by `views`) —
                 // pass the in-scope `from` rather than fabricate a sentinel NodeId.
@@ -271,5 +288,77 @@ pub(crate) fn handle_transient_crossing_request(
         // Unresolved dest realm: emit nothing (the source re-requests; the grant is idempotent, so a
         // later-resolving realm still grants). Counted only.
         None => runtime.transient_dest_unresolved += 1,
+    }
+}
+
+/// ★ THE EXTERIOR CROSSING REQUEST (the ruler switch, slice 1; owner-approved 2026-09-03): a parent's
+/// swept verdict moved its hull out of its bound or into a sibling, and it asks for the hull's
+/// EXTERIOR — the `Ship` key that says who authors its placement — to move to the destination's shard.
+/// Two heads, not three: the subject's (it must be held by the SENDER, or the request is unattested
+/// and counted) and the destination realm's. No session: an exterior has no client input to cut.
+/// A destination that is not running yet answers no head, and the source's ttl re-drive owns the
+/// retry — the hull keeps flying in its old parent until the destination boots.
+pub(crate) fn handle_exterior_crossing_request(
+    runtime: &mut SagaRuntimeRes,
+    dir: &DirectoryCore,
+    req: ExteriorCrossingRequest,
+    from: NodeId,
+) {
+    let transfer = crossing_transfer_id(req.subject, req.subject_fence, req.attempt);
+    match (
+        dir.head(req.subject),
+        dir.head(DirectoryKey::Realm(req.to_realm)),
+    ) {
+        (Some(_), Some(_)) if runtime.sagas.contains_key(&transfer) => {}
+        (Some(subj), _) if subj.authority.node() != from => {
+            runtime.exterior_request_unattested += 1;
+            tracing::warn!(
+                transfer = ?transfer,
+                subject = ?req.subject,
+                holder = ?subj.authority.node(),
+                sender = ?from,
+                "EXTERIOR CROSSING UNATTESTED: the sender does not hold the exterior — dropped",
+            );
+        }
+        (Some(subj), Some(dest_rec)) => {
+            let ctx = SagaCtx {
+                transfer,
+                session: SessionId::NONE,
+                subject: req.subject,
+                expected_fence: subj.fence,
+                source: subj.authority.node(),
+                dest: dest_rec.authority.node(),
+                class: vd_core::entity_kind::DurabilityClass::Durable,
+                exterior: true,
+                needs_provision: false,
+                from_realm: req.from_realm,
+                to_realm: req.to_realm,
+                to_parent: None,
+            };
+            tracing::info!(
+                transfer = ?ctx.transfer,
+                subject = ?req.subject,
+                from_realm = ?req.from_realm,
+                to_realm = ?req.to_realm,
+                attempt = req.attempt,
+                source_node = ?ctx.source,
+                dest_node = ?ctx.dest,
+                expected_fence = ?ctx.expected_fence,
+                "EXTERIOR CROSSING SAGA STARTED",
+            );
+            // No gateway takes part; the walk sends nothing there. The source node stands in the slot.
+            runtime.start_transfer(ctx, from);
+            runtime.exterior_crossings_started += 1;
+        }
+        (Some(_), None) => {
+            runtime.crossing_unresolved += 1;
+            tracing::warn!(
+                transfer = ?transfer,
+                subject = ?req.subject,
+                to_realm = ?req.to_realm,
+                "EXTERIOR CROSSING UNRESOLVED: the destination has no head yet — the source re-drives",
+            );
+        }
+        (None, _) => runtime.crossing_subject_gone += 1,
     }
 }

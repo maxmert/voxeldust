@@ -46,6 +46,12 @@ pub struct SagaCtx {
     /// orchestrator fsync per batch, not per item). Carried here so the persisted
     /// checkpoint and the FSM proptests are class-aware from the first transfer.
     pub class: DurabilityClass,
+    /// ★ THE EXTERIOR WALK (the ruler switch; owner-approved 2026-09-03). The subject is a driven child's
+    /// EXTERIOR — the authorship of its placement — moving from one parent's shard to another's. The
+    /// same FSM, minus every gateway step: no session to prepare, cut, freeze at the gateway, swap the
+    /// route of, or release. `start` opens at the source flush, the CAS win goes straight to the demote,
+    /// and the promote ack ends it. `false` for every occupant crossing, which is byte-identical.
+    pub exterior: bool,
     /// Warp-class transfers must await destination provisioning first.
     pub needs_provision: bool,
     /// The realms the subject crosses BETWEEN (1d.1): stamped onto the `StubCrossing` envelope the
@@ -758,6 +764,19 @@ fn commit_action(ctx: &SagaCtx) -> SagaAction {
 /// PATH straight to the commit point; a `Durable` subject takes the full per-entity walk.
 #[must_use]
 pub fn start(ctx: &SagaCtx) -> (SagaState, Vec<SagaAction>) {
+    // THE EXTERIOR WALK opens at the flush: nothing at a gateway to prepare or cut. The freeze state
+    // is entered with the gateway half already satisfied (`frozen_drained: Some(0)` — no input stream
+    // exists), so the source's flushed pose alone advances it to the CAS.
+    if ctx.exterior {
+        return (
+            SagaState::Freezing {
+                marker_seq: 0,
+                frozen_drained: Some(0),
+                flushed: false,
+            },
+            vec![SagaAction::FlushSource],
+        );
+    }
     match ctx.class {
         // TRANSIENT (D-7): the SHORT FSM PATH. A session-less debris batch CANNOT traverse the
         // durable session walk (no client `CUT_MARKER`, no per-subject pose flush, no ordered
@@ -891,6 +910,22 @@ pub fn step(ctx: &SagaCtx, state: SagaState, event: SagaEvent) -> (SagaState, Ve
         (S::Freezing { .. }, E::Cancel) => abort_with_thaw(ctx, AbortReason::Cancelled),
 
         // ---- the commit point --------------------------------------------------------
+        // THE EXTERIOR WALK: no route to swap, so the CAS win goes straight to the demote, with the
+        // envelope to the destination beside it. `dest_delivered` is taken as true: an exterior has
+        // no observer sub to wait on (the ghost row across the band is the owed seamlessness gate).
+        (S::CommittingCas { .. }, E::CasWon { new_fence }) if ctx.exterior => (
+            S::Demoting {
+                new_fence,
+                dest_delivered: true,
+            },
+            vec![
+                A::PersistCheckpoint,
+                A::EmitCrossing { fence: new_fence },
+                A::Demote {
+                    new_owner_fence: new_fence,
+                },
+            ],
+        ),
         (S::CommittingCas { .. }, E::CasWon { new_fence }) => (
             S::Swapping { new_fence },
             vec![
@@ -1362,6 +1397,10 @@ fn promoting_advance(
     rehome_target: Option<NodeId>,
 ) -> (SagaState, Vec<SagaAction>) {
     match (promote_acked, dest_delivered) {
+        // THE EXTERIOR WALK ends at the promote ack: there is no source subscription to release.
+        (true, true) if ctx.exterior => {
+            (SagaState::Done { new_fence }, vec![SagaAction::Tombstone])
+        }
         (true, true) => (
             SagaState::Releasing { new_fence },
             vec![SagaAction::Send(TransferControl::ReleaseSubscribe {
@@ -1386,6 +1425,9 @@ fn promoting_advance(
 
 /// Abort before any freeze happened: tear down the dest; the source never stopped.
 fn abort_from_pre_freeze(ctx: &SagaCtx, reason: AbortReason) -> (SagaState, Vec<SagaAction>) {
+    if ctx.exterior {
+        return abort_exterior(reason);
+    }
     (
         SagaState::Aborting {
             reason,
@@ -1403,7 +1445,24 @@ fn abort_from_pre_freeze(ctx: &SagaCtx, reason: AbortReason) -> (SagaState, Vec<
 }
 
 /// Abort after FreezeSource was issued: the compensator chain MUST thaw the source.
+/// THE EXTERIOR WALK's abort: nothing at a gateway to thaw or to ack, so the saga is terminal at once.
+/// The source learns through the rejection's `CrossingAborted`, which clears its latch and thaws the
+/// child it froze — the same reply an occupant's source gets.
+fn abort_exterior(reason: AbortReason) -> (SagaState, Vec<SagaAction>) {
+    (
+        SagaState::Aborted { reason },
+        vec![
+            SagaAction::NotifyRejected(reason),
+            SagaAction::ClearTransferLock,
+            SagaAction::Tombstone,
+        ],
+    )
+}
+
 fn abort_with_thaw(ctx: &SagaCtx, reason: AbortReason) -> (SagaState, Vec<SagaAction>) {
+    if ctx.exterior {
+        return abort_exterior(reason);
+    }
     (
         SagaState::Aborting {
             reason,
@@ -1511,6 +1570,7 @@ mod tests {
             to_realm: RealmId::System(4),
             // A System dest needs no parent (the frame is a one-field lift) — the FSM tests never rebind.
             to_parent: None,
+            exterior: false,
         }
     }
 
@@ -3220,5 +3280,147 @@ mod tests {
             ));
             prop_assert!(!unwound, "post-commit compensation is forbidden");
         }
+    }
+}
+
+#[cfg(test)]
+mod exterior_walk_tests {
+    use super::*;
+    use vd_core::pose::RealmId;
+
+    fn exterior_ctx() -> SagaCtx {
+        SagaCtx {
+            transfer: TransferId(9),
+            session: SessionId::NONE,
+            subject: DirectoryKey::Ship(vd_core::EntityId::pack(
+                vd_core::entity_kind::EntityKind::Ship,
+                1,
+                1,
+                0,
+            )),
+            expected_fence: Fence(1),
+            source: NodeId(2),
+            dest: NodeId(3),
+            class: DurabilityClass::Durable,
+            exterior: true,
+            needs_provision: false,
+            from_realm: RealmId::System(7),
+            to_realm: RealmId::Galaxy(1),
+            to_parent: None,
+        }
+    }
+
+    #[test]
+    fn the_exterior_walk_opens_at_the_flush_and_never_speaks_to_a_gateway() {
+        let ctx = exterior_ctx();
+        let (state, actions) = start(&ctx);
+        assert_eq!(
+            state,
+            SagaState::Freezing {
+                marker_seq: 0,
+                frozen_drained: Some(0),
+                flushed: false
+            }
+        );
+        assert_eq!(actions, vec![SagaAction::FlushSource]);
+        // The flushed pose alone reaches the CAS: the gateway half was satisfied at the start.
+        let (state, actions) = step(&ctx, state, SagaEvent::SourceFlushed { drained_seq: 0 });
+        assert_eq!(
+            state,
+            SagaState::CommittingCas {
+                marker_seq: 0,
+                drained_seq: 0
+            }
+        );
+        assert_eq!(
+            actions,
+            vec![SagaAction::IssueCommitCas { expected: Fence(1) }]
+        );
+        // The CAS win skips the route swap: the envelope and the demote go out together.
+        let (state, actions) = step(
+            &ctx,
+            state,
+            SagaEvent::CasWon {
+                new_fence: Fence(2),
+            },
+        );
+        assert_eq!(
+            state,
+            SagaState::Demoting {
+                new_fence: Fence(2),
+                dest_delivered: true
+            }
+        );
+        assert_eq!(
+            actions,
+            vec![
+                SagaAction::PersistCheckpoint,
+                SagaAction::EmitCrossing { fence: Fence(2) },
+                SagaAction::Demote {
+                    new_owner_fence: Fence(2)
+                },
+            ]
+        );
+        let (state, actions) = step(&ctx, state, SagaEvent::DemoteAcked);
+        assert_eq!(
+            actions,
+            vec![SagaAction::Promote {
+                new_fence: Fence(2)
+            }]
+        );
+        // The promote ack ends it: nothing to release at a gateway.
+        let (state, actions) = step(&ctx, state, SagaEvent::PromoteAcked);
+        assert_eq!(
+            state,
+            SagaState::Done {
+                new_fence: Fence(2)
+            }
+        );
+        assert_eq!(actions, vec![SagaAction::Tombstone]);
+    }
+
+    #[test]
+    fn the_exterior_walk_aborts_terminally_with_no_thaw_to_await() {
+        let ctx = exterior_ctx();
+        let (state, _) = start(&ctx);
+        let (state, actions) = step(&ctx, state, SagaEvent::Timeout);
+        assert_eq!(
+            state,
+            SagaState::Aborted {
+                reason: AbortReason::FreezeTimeout
+            }
+        );
+        assert_eq!(
+            actions,
+            vec![
+                SagaAction::NotifyRejected(AbortReason::FreezeTimeout),
+                SagaAction::ClearTransferLock,
+                SagaAction::Tombstone,
+            ]
+        );
+        // The pre-freeze arm is the same terminal shape.
+        let (state, actions) = abort_from_pre_freeze(&ctx, AbortReason::Cancelled);
+        assert_eq!(
+            state,
+            SagaState::Aborted {
+                reason: AbortReason::Cancelled
+            }
+        );
+        assert_eq!(actions.len(), 3);
+    }
+
+    #[test]
+    fn an_occupant_walk_is_untouched_by_the_exterior_flag() {
+        let ctx = SagaCtx {
+            exterior: false,
+            ..exterior_ctx()
+        };
+        let (state, actions) = start(&ctx);
+        assert_eq!(state, SagaState::Preparing);
+        assert_eq!(
+            actions.len(),
+            1,
+            "the durable walk still prepares at the gateway"
+        );
     }
 }

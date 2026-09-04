@@ -41,6 +41,9 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc", "use-std"] }
 thiserror = "2"
 glam = { version = "0.30", features = ["serde"] }
+# The child index (SL9): an R*-tree over each realm's direct children — owner-approved 2026-09-04
+# ("agree that we need to implement rstar"), replacing the derived uniform grid.
+rstar = "0.13"
 bevy_ecs = "0.18"
 # Full Bevy (the windowed client renderer, Tier-B vd-client-render only — lands at
 # Slice-3 T4; the readback recipe was validated in docs/design/spikes/bevy-readback/).

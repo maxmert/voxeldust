@@ -330,6 +330,36 @@ impl DemandLedger {
             .spawn_watermark = tick;
     }
 
+    /// ★ A CELL MOVES HOUSE (the ruler switch, slice 4): the realm at `old` is now at `coord`. The
+    /// cell keeps every watermark; only its key and its coord change. A stale cell left under the old
+    /// path would be desired for ever (its head stays live) and never empty-confirmed (its `Empty`
+    /// reports arrive under the new path). No-op when there is no cell at `old`.
+    pub fn rekey(&mut self, old: &RealmPath, coord: &RealmCoord) {
+        if let Some(mut cell) = self.cells.remove(old) {
+            cell.coord = coord.clone();
+            self.cells.insert(coord.path().clone(), cell);
+        }
+    }
+
+    /// The path of the cell whose realm lowers to `realm`, if one exists — a LOOKUP over the live
+    /// cells (a few hundred at most), never over the world.
+    #[must_use]
+    pub fn path_of_realm(&self, realm: vd_core::pose::RealmId) -> Option<RealmPath> {
+        self.cells
+            .iter()
+            .find(|(_, c)| c.coord.lowered() == realm)
+            .map(|(p, _)| p.clone())
+    }
+
+    /// The coord of the cell whose realm lowers to `realm`, if one exists.
+    #[must_use]
+    pub fn coord_of_realm(&self, realm: vd_core::pose::RealmId) -> Option<RealmCoord> {
+        self.cells
+            .values()
+            .find(|c| c.coord.lowered() == realm)
+            .map(|c| c.coord.clone())
+    }
+
     /// Stamp a realm's `teardown_watermark` on a Kill (slice 3d). No-op if the cell is gone.
     pub fn mark_reaped(&mut self, path: &RealmPath, tick: UniverseTick) {
         if let Some(cell) = self.cells.get_mut(path) {

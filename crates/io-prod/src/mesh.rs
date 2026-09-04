@@ -484,6 +484,10 @@ pub struct MeshStats {
     /// `learned_peers_max` (a churn/flood guard on the static-roster tier). Must stay ~0 on a fixed roster; a
     /// nonzero value is a cap-too-low or peer-churn ALERT. Also warned loudly at the reject site.
     pub learned_peers_rejected: AtomicU64,
+    /// The peer book: lanes DIALED LAZILY on a send toward a booked peer that had no lane yet.
+    pub lazy_dials: AtomicU64,
+    /// The peer book: addresses booked through `Transport::book_peer` (the node runtime's half).
+    pub peers_booked: AtomicU64,
 }
 
 /// A snapshot of the mesh counters (loads the atomics).
@@ -500,6 +504,8 @@ pub struct MeshStatsSnapshot {
     pub reliable_shed: u64,
     pub reliable_acked: u64,
     pub learned_peers_rejected: u64,
+    pub lazy_dials: u64,
+    pub peers_booked: u64,
 }
 
 /// ★ THE UNRELIABLE PUSH — unchanged policy, and the only place that still drops (2026-08-29).
@@ -998,6 +1004,12 @@ pub struct MeshTransport {
     backoff_min: Duration,
     backoff_max: Duration,
     outbound_capacity: usize,
+    /// ★ THE PEER BOOK on the sending side (D-RLM-6 mechanism C): the same address book the boot lanes
+    /// dial from and `MeshControl::update_peer_addr` rewrites. `Transport::book_peer` writes it, and a
+    /// send toward a booked peer that has no lane yet DIALS one — lazily, on that send — instead of
+    /// refusing. A peer in neither the book nor the learned set is refused as `UnknownPeer`, which is
+    /// what makes the node runtime ask.
+    topology: PeerTopology,
 }
 
 /// Lifecycle handle: owns the endpoint (dropping closes it).
@@ -1095,6 +1107,8 @@ impl MeshControl {
             reliable_shed: self.stats.reliable_shed.load(Ordering::Relaxed),
             reliable_acked: self.stats.reliable_acked.load(Ordering::Relaxed),
             learned_peers_rejected: self.stats.learned_peers_rejected.load(Ordering::Relaxed),
+            lazy_dials: self.stats.lazy_dials.load(Ordering::Relaxed),
+            peers_booked: self.stats.peers_booked.load(Ordering::Relaxed),
         }
     }
 }
@@ -1270,6 +1284,7 @@ pub fn spawn_mesh(
             backoff_min: cfg.redial_backoff_min,
             backoff_max: cfg.redial_backoff_max,
             outbound_capacity: cfg.outbound_capacity,
+            topology: Arc::clone(&topology),
         },
         MeshControl {
             endpoint,
@@ -2625,21 +2640,35 @@ impl Transport for MeshTransport {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&to)
                 .cloned();
-            let Some(lc) = learned_conn else {
-                return Err(SendError::QueueFull(bytes));
+            // Three ways to a lane, in order: a learned return connection (reply-on-connection), a
+            // BOOKED address with no lane yet (the peer book — dial it now), or neither (UnknownPeer:
+            // the node runtime asks the orchestrator and re-sends once the answer is booked).
+            let (source, ack_rx_override) = match learned_conn {
+                Some(lc) => {
+                    // The learned connection may have died since it was recorded (its entry is evicted
+                    // only on the peer's re-dial). Do NOT spawn a lane over a dead connection — it would
+                    // immediately terminate and drop this frame. Loud back-pressure instead; a re-dial
+                    // refreshes the entry + a re-send respawns.
+                    if lc.conn.close_reason().is_some() {
+                        return Err(SendError::QueueFull(bytes));
+                    }
+                    (
+                        ConnSource::Learned(Arc::clone(&self.learned)),
+                        Some(lc.ack_rx),
+                    )
+                }
+                None if self.topology.load().contains_key(&to) => {
+                    self.stats.lazy_dials.fetch_add(1, Ordering::Relaxed);
+                    (ConnSource::Dial(Arc::clone(&self.topology)), None)
+                }
+                None => return Err(SendError::UnknownPeer(bytes)),
             };
-            // The learned connection may have died since it was recorded (its entry is evicted only on the
-            // peer's re-dial). Do NOT spawn a lane over a dead connection — it would immediately terminate and
-            // drop this frame. Loud back-pressure instead; a re-dial refreshes the entry + a re-send respawns.
-            if lc.conn.close_reason().is_some() {
-                return Err(SendError::QueueFull(bytes));
-            }
             let (tx, rx) = tokio::sync::mpsc::channel::<OutFrame>(self.outbound_capacity);
             self.handle.spawn(peer_writer(PeerWriter {
                 endpoint: self.endpoint.clone(),
                 local: self.local,
                 dest: to,
-                source: ConnSource::Learned(Arc::clone(&self.learned)),
+                source,
                 rx,
                 inbox: Arc::clone(&self.inbox),
                 stats: Arc::clone(&self.stats),
@@ -2650,7 +2679,7 @@ impl Transport for MeshTransport {
                 connections: Arc::clone(&self.connections),
                 reliability: self.reliability,
                 outbox: self.outbox.clone(),
-                ack_rx_override: Some(lc.ack_rx),
+                ack_rx_override,
             }));
             self.lanes.insert(to, PeerLane { tx });
         }
@@ -2674,6 +2703,30 @@ impl Transport for MeshTransport {
                 | tokio::sync::mpsc::error::TrySendError::Closed(frame),
             ) => Err(SendError::QueueFull(frame.bytes)),
         }
+    }
+
+    fn book_peer(&mut self, node: NodeId, ip: [u8; 16], port: u16) {
+        // The same write `MeshControl::update_peer_addr` does, from the node runtime's side of the seam:
+        // the book takes the address, a stale dialed connection is closed so the next dial goes to the
+        // new one, and the lane itself is created lazily by the next send (see `send_durable`).
+        let v6 = std::net::Ipv6Addr::from(ip);
+        let addr = match v6.to_ipv4_mapped() {
+            Some(v4) => SocketAddr::new(std::net::IpAddr::V4(v4), port),
+            None => SocketAddr::new(std::net::IpAddr::V6(v6), port),
+        };
+        self.topology.rcu(|cur| {
+            let mut next = (**cur).clone();
+            next.insert(node, addr);
+            next
+        });
+        let mut reg = self
+            .connections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(conn) = reg.remove(&node) {
+            conn.close(quinn::VarInt::from_u32(3), b"peer addr booked");
+        }
+        self.stats.peers_booked.fetch_add(1, Ordering::Relaxed);
     }
 
     fn drain_inbound(&mut self) -> Vec<Inbound> {
@@ -3655,6 +3708,60 @@ mod tests {
         (transports, controls)
     }
 
+    #[test]
+    fn a_booked_peer_with_no_lane_is_dialed_on_the_first_send_and_an_unbooked_one_is_refused() {
+        // THE PEER BOOK, the mesh half (D-RLM-6 mechanism C): A knows nobody. A send to B is refused as
+        // UnknownPeer — the trigger the node runtime asks on. Once A books B's address through the
+        // seam, the SAME send dials a lane lazily and B receives the frame.
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let a = NodeId(1);
+        let b = NodeId(2);
+        let sock_a = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve a");
+        let sock_b = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve b");
+        let addr_a = sock_a.local_addr().expect("addr a");
+        let addr_b = sock_b.local_addr().expect("addr b");
+        drop(sock_a);
+        drop(sock_b);
+        let (mut ta, ctl_a) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0, 0),
+            None,
+        )
+        .expect("spawn A");
+        let (mut tb, _ctl_b) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b, BTreeMap::new(), 64, 0, 0),
+            None,
+        )
+        .expect("spawn B");
+        assert_eq!(
+            ta.send(b, MsgClass::Control, vec![0xA].into()),
+            Err(SendError::UnknownPeer(vec![0xA].into())),
+            "no lane, no address: refused by name"
+        );
+        let ip = match addr_b.ip() {
+            std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+            std::net::IpAddr::V6(v6) => v6.octets(),
+        };
+        ta.book_peer(b, ip, addr_b.port());
+        ta.send(b, MsgClass::Control, vec![0xA].into())
+            .expect("booked: the send dials the lane itself");
+        let got_b = wait_for(&mut tb, |g| {
+            g.iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == a && bytes[0] == 0xA),
+            )
+        });
+        assert!(
+            !got_b.is_empty(),
+            "B received A's frame over the lazily dialed lane"
+        );
+        let stats = ctl_a.stats();
+        assert_eq!((stats.peers_booked, stats.lazy_dials), (1, 1));
+    }
+
     fn wait_for(
         t: &mut MeshTransport,
         mut predicate: impl FnMut(&[Inbound]) -> bool,
@@ -3786,6 +3893,7 @@ mod tests {
                     refused = Some((n, bytes));
                     break;
                 }
+                Err(SendError::UnknownPeer(_)) => panic!("a booked peer is never unknown"),
             }
         }
         let (n, bytes) = refused.expect("the bounded lane eventually refuses");
@@ -4158,6 +4266,9 @@ mod tests {
                                 payload = returned;
                                 std::thread::sleep(Duration::from_micros(200));
                             }
+                            Err(SendError::UnknownPeer(_)) => {
+                                panic!("a booked peer is never unknown")
+                            }
                         }
                     }
                 }
@@ -4234,6 +4345,9 @@ mod tests {
                             Err(SendError::QueueFull(returned)) => {
                                 payload = returned;
                                 std::thread::sleep(Duration::from_micros(200));
+                            }
+                            Err(SendError::UnknownPeer(_)) => {
+                                panic!("a booked peer is never unknown")
                             }
                         }
                     }

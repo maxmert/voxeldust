@@ -85,13 +85,33 @@ fn a_ship_states_a_push_and_its_parent_authors_where_it_went() {
     world_of(&mut topo, SHIP_NODE)
         .insert_resource(vd_sim::stub::ParentRealmNode(Some(SYSTEM_NODE)));
     world_of(&mut topo, SHIP_NODE).insert_resource(vd_sim::stub::RealmAuthority(Some(Fence(3))));
+    // THE SHIP'S OWN BODY (owner ruling 2026-09-01, "at the controls"): a hull whose facts nobody wrote
+    // states no drive, so the rating the stick is scaled by comes from its own row.
+    world_of(&mut topo, SHIP_NODE).insert_resource(vd_sim::stub::drive::OwnBody(Some(
+        vd_core::built::BuiltBody {
+            realm: ship_coord().lowered(),
+            owner: vd_core::ids::AccountId(1),
+            blueprint: vd_core::built::BlueprintId(1),
+            bound: vd_core::geometry::Boundary::Shell { r: 20.0 },
+            look: vd_core::geometry::Boundary::Shell { r: 20.0 },
+            facts: vd_core::built::BuiltFacts {
+                mass_g: 1_000_000_000,
+                cross_section_mm2: 400_000_000,
+                drag_micro: 0,
+                max_push_micro_mps2: 100_000_000,
+                max_turn_micro_radps2: 1_000_000,
+            },
+            fence: Fence(1),
+        },
+    )));
     // THE PILOT AT THE CONTROLS, holding the stick full forward. A pilot's keys already arrive at
     // whichever shard holds them, so this is simply a pilot who is aboard.
     {
         let world = world_of(&mut topo, SHIP_NODE);
         let mut dots = world.resource_mut::<vd_sim::stub::Dots>();
         let mut dot = pilot();
-        dot.last_stick = Some(([1.0, 0.0, 0.0], [0.0, 0.0, 0.0]));
+        // A push straight along the nose, as the stick states it (the facing is identity here).
+        dot.last_stick = Some((vd_core::glam::DVec3::new(0.0, 0.0, -1.0), [0.0, 0.0, 0.0]));
         dots.0.insert(vd_core::ids::SessionId(1), dot);
     }
     // The parent must know which node speaks for that child — the attestation every up-lane checks.

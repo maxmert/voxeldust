@@ -332,6 +332,7 @@ pub(crate) fn emit_transient_batch(
                 &placements.0,
                 clock.universe_tick,
                 &mut stats,
+                true,
             ) else {
                 // Counted + logged inside the helper. KEEP IT: the item goes back to plain `Held`, so
                 // this shard is still its authority and it is still somewhere real. Shipping it anyway

@@ -10,8 +10,8 @@
 use super::{
     DirSnapshot, LiveSaga, PendingStart, SagaRuntimeRes, StoreKey, StoreRes, ack_to_event,
     commit_result, deliver, drop_applied_event, encode, handle_crossing_request,
-    handle_transient_crossing_request, process_rehome_starts, reap_lapsed_leases,
-    run_to_quiescence, scan_deadlines, stash_flush,
+    handle_exterior_crossing_request, handle_transient_crossing_request, process_rehome_starts,
+    reap_lapsed_leases, run_to_quiescence, scan_deadlines, stash_flush,
 };
 use crate::orchestrator::{DirectoryRes, UniverseClockRes};
 use bevy_ecs::prelude::{Res, ResMut};
@@ -60,6 +60,7 @@ fn process_starts(
                 gateway,
                 since: now,
                 flushed_pose: None, // filled when the source flushes (after Freezing)
+                flushed_state: Vec::new(),
                 dead_observed_since: None,
                 dest_adopted: false,
                 opened: now,
@@ -67,8 +68,18 @@ fn process_starts(
         );
         // Durable start = PrepareSubscribe (no EmitCrossing yet); transient start = the go-token
         // (collected by run_to_quiescence). `None` flush_pose is correct for both at start.
-        let (final_state, tombstone, rejected, batch_gos) =
-            run_to_quiescence(&ctx, gateway, state, actions, dir, outbox, epoch, now, None);
+        let (final_state, tombstone, rejected, batch_gos, _won_inside) = run_to_quiescence(
+            &ctx,
+            gateway,
+            state,
+            actions,
+            dir,
+            outbox,
+            epoch,
+            now,
+            None,
+            &[],
+        );
         commit_result(
             runtime,
             ctx.transfer,
@@ -196,11 +207,12 @@ pub fn drive_sagas_core(
                 transfer_id,
                 drained_seq,
                 pose,
+                state,
                 ..
             })) => {
                 // STASH the pose BEFORE stepping the event, so an EmitCrossing reachable on this
                 // same tick (once both freeze + flush have landed) reads it.
-                stash_flush(&mut runtime, transfer_id, pose);
+                stash_flush(&mut runtime, transfer_id, pose, state);
                 deliver(
                     &mut runtime,
                     &mut dir.0,
@@ -259,6 +271,10 @@ pub fn drive_sagas_core(
             // the transport-origin `from` (a transient has no directory owner to look up).
             Ok(InterShardFlow::TransientCrossingRequest(req)) => {
                 handle_transient_crossing_request(&dir.0, &mut outbox, &mut runtime, req, from);
+            }
+            // The ruler switch, slice 1: a parent asks to move its hull's EXTERIOR.
+            Ok(InterShardFlow::ExteriorCrossingRequest(req)) => {
+                handle_exterior_crossing_request(&mut runtime, &dir.0, req, from);
             }
             // Slice 3f-D (Mechanism Y): the SOURCE acked a crossing-abort reply — drop the pending entry +
             // stage its persist-DELETE (both ride this tick's group-commit barrier, so a kill after the ack

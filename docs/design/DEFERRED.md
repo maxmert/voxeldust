@@ -1061,7 +1061,7 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     double-crash wedge fix above removes the compounding orch-side loop). This is a COUPLED cloud prerequisite, not a
     free-standing nice-to-have: the `grace > 0` boot assertion must land WITH the split-brain lease-timing coherence
     (`lease_ttl < grace <= lease_ttl + max`) on the deploy config validation — NOT a half-measure now.
-    **[Cloud-ready k3d Slice 2 — CLOSED for the cloud profile]** `VD_PROFILE=cloud` now makes `resolve_d3`
+    **[Cloud-ready k3d Slice 2 — CLOSED for the cloud profile]** `VD_BUILD=cloud` now makes `resolve_d3`
     (`io-prod/src/boot.rs`) DERIVE an ACTIVE D-3 set (`DirectoryTuning::cloud` + `LivenessTuning::cloud`) AND REJECT
     re-zeroing it, so the "shipped default is 0 / boots green with no split-brain protection" hole is gone whenever
     the profile is cloud. **The split-brain reassign TIMING was ALSO fixed here** (an adversarial post-impl review +
@@ -1096,8 +1096,8 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     test if a deployment ever tightens `max` toward `THETA_MAX*grace`. Also (F2, LOW): `VD_LEASE_TTL` moved from
     required→defaulted in the shared `resolve_d3` (a shard/gateway never set it + cloud derives it) — inert in DevTest,
     every rig sets it explicitly. **The RESIDUAL is FAIL-OPEN, not fail-safe:** a k8s manifest
-    that OMITS `VD_PROFILE=cloud` boots DevTest (inert D-3, NO split-brain protection) silently — so the **Slice-4
-    manifest DoD** is that EVERY server pod sets `VD_PROFILE=cloud` + BOTH durable roots (each footgun-arm is proven
+    that OMITS `VD_BUILD=cloud` boots DevTest (inert D-3, NO split-brain protection) silently — so the **Slice-4
+    manifest DoD** is that EVERY server pod sets `VD_BUILD=cloud` + BOTH durable roots (each footgun-arm is proven
     fail-loud in a real binary by `crates/bins/tests/cloud_preflight_process.rs`, incl. the green-boot positive
     control). DevTest stays intentionally inert (in-process rigs + the loopback process tier have no split-brain to
     protect against); (3) the real-cloud
@@ -1158,7 +1158,7 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     volumeClaimTemplates for the M3 boot-counter + the cloud-required store root — a Deployment/emptyDir would wipe
     the monotone counter = the R-6a dedup-loss landmine), 3 headless Services ALL with `publishNotReadyAddresses:
     true` (the cold-start cure — each pod's entrypoint resolves the OTHER two at its own boot, so a NotReady peer's
-    A-record must still publish). Cloud env in ONE ConfigMap (VD_PROFILE=cloud, **VD_TICK_HZ=50** + VD_TICK_DT=0.02
+    A-record must still publish). Cloud env in ONE ConfigMap (VD_BUILD=cloud, **VD_TICK_HZ=50** + VD_TICK_DT=0.02
     together, the durable roots; NO forbidden knob); the mTLS + real auth Secrets minted IMPERATIVELY by
     `just k3d-secrets` (never in git). Probe stanzas satisfy the 3 inequalities at 50Hz (liveness 5×6=30s >>
     stall_deadline 400ms; grace orch 30 / gw+shard 15 >= drain; readiness de-routes on the SIGTERM edge).
@@ -3362,6 +3362,19 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **CORRECT ONLY (5d's standing precondition):** under parent-first spawn ordering within a sweep (the reconciler's `BTreeMap` path-prefix ordering spins ancestors before descendants) AND no ancestor churn under a live descendant. 5d is inert (reconciler unarmed), so this never fires in 5d.
 - **RESOLVED (user decision 2026-07-25, RLM 5e vet `wf_71fd3e40` D-RLM-6 judge panel A=47/B=80/C=80): mechanism = C, LAZY RESOLVE-ON-MISS.** A live descendant keeps its boot-time peer book UNTIL a miss (an upward send fails / a downward parent-authored frame goes stale) proves the lane dead; only THEN does it re-resolve the ancestor's CURRENT `(NodeId, addr)` from an authority and re-plumb its own dial lane. PULL, not push: cost is paid only by descendants actually crossing a broken hop during the rare outage; dormant leaves + deep chains pay nothing; the orchestrator holds ZERO new per-ancestor subscriber state (the anti-cornering win at 100K). Chosen over B (eager push — needs a reverse `ancestor→{descendants}` index to hold/shard/crash-recover + an O(subtree) push storm on a high-ancestor restart) and A (re-spawn subtree — DISQUALIFIED: bouncing live realms is loading/teleport-class disruption, violates the seamless hard rule). Honest correction from the vet: C's "zero new wire" holds ONLY in k8s (per-realm Service DNS re-lookup); at the process/dev tier (no DNS) BOTH B and C need ONE new address-bearing arm (a `PeerLocate{node}→PeerLocated{node,addr}`, NOT a repurpose of `RealmDemand`/`ReSolicitBatch`) — so the decision rests on scale/robustness/anti-cornering (where C wins), not wire count.
 - **WHAT 5e does (pick + ledger ONLY):** records C here; builds the substrate C leans on (adopt/cookie/`/whoami`/F2-fence — the fence gates the head flip so a resolve can never plumb a RETIRED incarnation). **5f implements** the miss-trigger (`NodeUnreachable`/stale-watermark), the re-resolve + tick-jittered backoff, and the `PeerLocate` addr arm — with a **HARD gate**: ancestor crash+respawn while a descendant stays live → the descendant re-reaches the new ancestor within bounded ticks. **The addr-delivery arm MUST be validated in the process-tier gate (no DNS there) — the single point that cannot be hand-waved.** Related **D4** (first-contact `Unreliable` Input dropped before the freshly-spawned dest is learned by the gateway) is also a 5f HARD gate (real re-home onto a fresh dest → zero input-drop across the commit; gate/buffer at the gateway or eager dest→gateway dial at boot).
+- **★ BUILT 2026-09-03 (mechanism C, the ruler switch's slice 7; owner: *"implement all"*):** the two
+  address arms `InterShardFlow::PeerLocate` / `PeerLocated` (discs 41/42, minor 27, Membership class);
+  the MISS as the trigger (`SendError::UnknownPeer` — the mesh's answer for a peer in neither the book nor
+  the learned set; the node runtime keeps the frame and asks the node that drives its clock, once per tick
+  while a frame waits, `PeerBook` counters); the answer is consumed below the schedule and booked through
+  the new seam method `Transport::book_peer` (a no-op on every in-memory fabric); the mesh dials a
+  booked-but-laneless peer lazily on the next send (`MeshStats::lazy_dials`, `peers_booked`); the
+  orchestrator answers from `RealmSpawner::addr_of` (the launcher's live slot, IPv4 as mapped octets) and
+  counts a stranger. Nothing in the sim changed. Unit-level gates: mesh on localhost, node, orchestrator,
+  spawner, follower. **The ancestor-churn re-reach gate and the process-tier proof are still owed** — the
+  first process-tier use is the ruler switch's inward leg (a hull entering a sibling star system), i.e. the
+  flight. The re-resolve-on-stale-watermark trigger (a DOWNWARD miss) is not built: only an UPWARD send
+  misses today, and the new parent's first downward statement misses from its own side the same way.
 - **Pin:** `closure_peers`' doc-comment LIMITATION names this entry. Flips 🟩 when 5f's ancestor-churn re-reach gate is green.
 
 ### D-RLM-8 🟥 Demand ingest is SOURCE-BLIND — `record_realm_demands` accepts a `RealmDemand` from ANY cluster-bundle holder (RLM 5f-3e security vet `wf_a7008b28`, 2026-07-26)
@@ -3373,9 +3386,9 @@ RLM 5d's `VD_PEERS` ancestor closure (`closure_peers`, `crates/node/src/rlm_spaw
 - **SCOPE NOTE (2026-08-14, Step-5 lane cure):** the shard-side lane attestation that landed ([[D-LANE-1]] — receive arms compare the sender against the directory head) does NOT meet this row's objection and does not flip it: NodeId stays self-asserted, so those compares are a correctness bound (the zombie window), never authentication. What DID change the ground under this row: every demand a shard emits now names ITSELF or a DIRECT CHILD (`push_demand`'s structural gate, finding 37), so once P7 lands connection-bound NodeIds the orchestrator can enforce the mirror from the fenced record it already holds locally — the same head the fence CAS trusts, resolved locally, NOT the spoofable allow-list this row rejected. Whether to pre-land that orchestrator-side check on the current trust model is an open owner question (OD-6 of the Step-5 lane audit).
 
 ### D-RLM-7 🟧 The 5f-3e cloud demand-arming veto — an interim STUB disabling the demand-driven RLM in cloud until client trust exists (RLM 5f-3e, committed with 5f-3e)
-`enforce_cloud_preflight` (`crates/io-prod/src/boot.rs`) fails LOUD if `VD_PROFILE=cloud` AND `VD_DEMAND` is set, for ANY node role — because the demand ingest is source-blind ([[D-RLM-8]]) and every cluster-bundle holder is a mesh peer. This DISABLES the demand-driven realm lifecycle (the warp mechanism) in a real cloud deploy; it stays fully live at the process/DevTest tier (the 5f-4 gates).
+`enforce_cloud_preflight` (`crates/io-prod/src/boot.rs`) fails LOUD if `VD_BUILD=cloud` AND `VD_DEMAND` is set, for ANY node role — because the demand ingest is source-blind ([[D-RLM-8]]) and every cluster-bundle holder is a mesh peer. This DISABLES the demand-driven realm lifecycle (the warp mechanism) in a real cloud deploy; it stays fully live at the process/DevTest tier (the 5f-4 gates).
 - **WHAT is deferred:** actually running the demand-driven RLM in cloud with real clients.
-- **WHERE it lands / WHEN:** P7 (`identity_persistence`) delivers per-node client-facing trust; that slice closes [[D-RLM-8]] and then RELAXES this veto (from "refuse `VD_DEMAND` in cloud" to "refuse unless client-facing trust is configured"). The enabling condition (`VD_PROFILE=cloud` in the shipped ConfigMap) is pinned by `shipped_cloud_manifests_pin_the_cloud_profile` (`crates/bins/tests/cloud_preflight_process.rs`) so a manifest edit cannot silently disarm it.
+- **WHERE it lands / WHEN:** P7 (`identity_persistence`) delivers per-node client-facing trust; that slice closes [[D-RLM-8]] and then RELAXES this veto (from "refuse `VD_DEMAND` in cloud" to "refuse unless client-facing trust is configured"). The enabling condition (`VD_BUILD=cloud` in the shipped ConfigMap) is pinned by `shipped_cloud_manifests_pin_the_cloud_profile` (`crates/bins/tests/cloud_preflight_process.rs`) so a manifest edit cannot silently disarm it.
 - **Pin:** the veto's comment (`boot.rs`) + the gateway bin comment name this entry; `CloudProfileError::DemandWithoutClientTrust`. Flips 🟩 when P7 lands and the veto is relaxed to gate on client-facing trust.
 
 ### D-RLM-9 🟥 The demand-login bootstrap-TTL fail-safe leg is unproven at the process tier; a never-syncing gateway holds a login open indefinitely (RLM RG-4c, empirical spike 2026-07-27)
@@ -4622,6 +4635,113 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
     its DRIVEN CHILDREN is the trigger, the old parent converts at the destination's rung, the new
     parent adopts in one tick, the hull is TOLD its lineage once (the one new datum, SL6 ask), six
     slices with gates. Awaiting the owner's answers to the plan's §7 asks before slice 0.
+  - **BUILT 2026-09-03, slices 0 and 1** (owner: *"Yes, add the arm and continue"*): the exterior key
+    (`DirectoryKey::exterior_of`, `ExteriorAuthority`, `resolve_exterior_head`; MEASURED live: the
+    directory holds `ship-of-…` at System 7's node); the driven-child lane in the scan
+    (`SubjectLane::Exterior`, the early lead over the request ttl, the self-exclusion); the third
+    request arm `ExteriorCrossingRequest` (minor 25); the exterior saga walk (`SagaCtx::exterior`:
+    flush → CAS → demote + envelope → promote → done, no gateway). **OWED (slice 2):** the source's
+    exterior flush (`on_flush_source` still no-ops on a `Ship` subject), the destination's adoption
+    (region insert, driven state seed, berth row), the source's release, the runtime region mutator,
+    the store handle in the sim; and the exterior blob (spin) on `SourceFlushed.state` — spin is zero
+    across the hand-over until it lands, which is a seam only for a hull turning at the crossing.
+  - **BUILT 2026-09-03, slice 2 (unit level):** `stub/exterior.rs` — the source's `flush_exterior`
+    (pose + `ExteriorState` blob on `SourceFlushed.state`, drive frozen ⇒ both sides coast), the
+    destination's `adopt_exterior` (`RealmRegions::adopt_child` with an incremental `ChildIndex::insert`,
+    driven state seeded, exterior lease at the crossing's fence, berth row into the realm's own store —
+    `RealmStore`, kept open by the shard bin from now on — and a head read for the hull's node), the
+    source's `release_exterior` at the demote, the promote ack, the abort thaw. **STILL OWED:** slice 3
+    (the hull is told its lineage, so its drive and facts reach the NEW parent — until then an adopted
+    hull sits still, its facts unknown to its new parent), slice 4 (the launch ledger), slice 5 (the
+    gateway's chains), the G-IDENTICAL process-level fixture, and the galaxy-scale insert measurement.
+  - **BUILT 2026-09-03, slice 3 (unit level):** `stub/lineage.rs` and `InterShardFlow::LineageStated`
+    (disc 39, minor 25) — the parent owes an adopted child its lineage from the adoption, states it
+    once the child's node is known and again on every head read until the child's facts arrive; the
+    child applies it only from the node the directory names as its exterior's holder (held and the
+    head re-read otherwise), replacing its coord, re-pointing its up-lanes and its own row, forgetting
+    its stated facts so they reach the new parent. STILL OWED: slices 4 and 5, the process-level
+    acceptance test.
+  - **BUILT 2026-09-03, slice 4 (unit level):** the exterior CAS win notes `(child, to_realm)` on the
+    saga runtime; the lifecycle reconciler re-keys the child's demand cell (`DemandLedger::rekey`) and
+    the process launcher rewrites the persisted launch intent (`RealmSpawner::reparent_realm`), so a
+    restart rehydrates the hull under its true parent. OWED: the child's PEER BOOK (a hull can reach a
+    new parent only if it was booked with it — the galaxy is on every hull's ancestor closure, a
+    sibling star system is not), slice 5, the process-level acceptance test.
+  - **BUILT 2026-09-03, slice 5 (owner: *"implement all"*, the arm asked under SL6 and approved):**
+    `InterShardFlow::ExteriorMoved` (disc 40, minor 26; orchestrator → every session gateway; a
+    producer-less one-shot pushed `Retained`, the FIFTH such arm). The reconciler states the moved child's
+    new coord when it re-keys the cell; `gateway/home.rs::lineage_splice` replaces the ancestry above the
+    child on every chain that holds it and keeps the session's own descent; the composer bumps the origin
+    epoch on the changed authors and the window derivation moves the child's window. Per-child tick guard
+    against a redelivered older statement; three counters on the admin views.
+  - **BUILT 2026-09-03, the release cleanup:** `release_exterior` also drops the hull's rows from the
+    area-of-interest ledger (watched or watching), the interest latch, the in-band verdict, the luma and
+    the lineage owed (`exterior::ChildTables`, threaded through the reply arm's `ReleaseSide`).
+  - **★ THE ACCEPTANCE FIXTURE IS GREEN, 2026-09-03** — `tests/tests/hull_crossing_e2e.rs`: six shards on
+    the fabric (orchestrator, gateway, System 7, the galaxy, System 8, the hull's own shard, each with
+    its REAL profile via `vd_tests::hull_crossing_cluster`). The hull leaves System 7 for the galaxy and
+    enters System 8; System 7, the galaxy and System 8 hold the SAME six drive integers in turn
+    (G-IDENTICAL: a galaxy and a star system adopt alike); no tick leaves the hull unheld by any parent
+    (the ghost-row concern, plan §7 ask 7, measured at the authors); the hull's own coord follows it
+    twice (berth 7 steps, out 56, told 2, down 528, told again 2). **Two defects it found and fixed:**
+    the descending flush re-validated the destination as an occupant's would and refused the
+    early-started exterior as a stale entry (`flush_stale_entry` — the galaxy's hand-down aborted
+    silently); and `ship_flight_e2e` had been red since the "at the controls" ruling (a hull with no body
+    states no drive) — it now carries a body. Two plant traps recorded in memory (a planted driven child's
+    `pos_m` is travel, not the berth; inert interest bands stop the parent head read).
+  - **★ SL9 MEASURED AND FIXED, 2026-09-03** (`tests/tests/galaxy_adopt_measure.rs`, in the gate): one
+    adopt-and-release of a hull on THE world's galaxy (233 220 systems) cost 23 291 µs against 7.7 µs on
+    ten children — 3 028×, a cost that grew with the children. The child index removed a child by
+    sweeping every cell; the parent's children list was searched linearly at the release and at the
+    swap fix-up; the adoption folded over every child for the widest extent. Now: the index keeps each
+    child's span, `children_of` is a set, the radial list is an ordered map keyed by the distance's bit
+    pattern, the widest extent is a kept number — 18.6 µs against 5.4 µs, 3.4×, asserted ≤ 25×.
+  - **★ THE FIFTH FLIGHT, 2026-09-03 (the owner in the window, two runs) — two defects found on the real
+    cluster and fixed:** (1) the reparent note was taken only from the saga step's OWN event, and the
+    in-process directory CAS feeds its win back INSIDE the quiescence run — so on the shipped path no note
+    was taken, the reconciler never re-keyed the hull, no `ExteriorMoved` went out, the pilot's window on
+    the old parent closed at the release and none opened on the new one (the planet vanished, the drawn
+    hull froze). `run_to_quiescence` now reports the inside win; the walk test asserts the reconciler's
+    count. (2) `ChildIndex::candidates_along` stepped the observer's LEAD LINE one grid cell at a time —
+    a hull at warp leads by ~3e11 m, ~7e7 steps per observer per tick — the star's shard ran nine seconds
+    per tick, its window went stale, the chain's fresh prefix stopped at the hull and the sky went black.
+    A lead longer than the index's occupied cells now asks the occupied cells against the line (slab
+    test), the same answer at the index's cost. Also observed: the hand-DOWN into the star's realm (the
+    home system's star is a realm the hull can enter) ran end to end on real sockets, the peer book
+    included — the star's shard was launched after the hull and was never booked with it. And a login
+    placed before the gateway's clock sync takes the static route and retries an absent shard per tick;
+    with the peer book that is one `PeerLocate` per tick and one orchestrator warn per ask — a rate limit
+    on the ask and a once-per-peer warn are OWED.
+  - **★ THE GALAXY'S TICK, MEASURED AND CUT (2026-09-03, owner: *"why do we need to look into all
+    systems every tick?"*, hierarchy refused, two ideas approved):** the galaxy's own pace line now
+    prints the fold's counters. Nobody under it: 0.13 ms, 1 candidate. One pilot in System 7: 60 ms,
+    **9640 candidates per tick** — the interest index is one grid whose cell is sized by the widest
+    child, and one cell holds ~9640 star systems; every query returned the whole cell and the fold
+    built a row for each. (1) `ChildIndex` keeps each child's bounding sphere and every query
+    (`candidates`, `candidates_segment`, `candidates_along`) keeps only the children whose sphere
+    meets the asked point or line — a subtraction and a compare per child, no row built. (2) The
+    fold remembers each observer's index answer (`AoiQueryMemo`: where it stood, its lead, its reach,
+    the roster generation) and re-asks only when the observer moved farther than the lead the answer
+    already looked ahead, its reach changed, or the roster changed (`RealmRegions::roster_generation`,
+    one process-wide counter). A star system standing in the galaxy asks once; a hull at warp re-asks
+    when it has flown its own lead. Counters `aoi_queries_run/reused` on the pace line. Also on the
+    pace line now: `mean_ms`, `aoi_candidates`, the ledger sizes, windows, observers.
+  - **★ THE FOLD'S MEMORY UNDER ACCELERATION, AND THREE MORE SCANS (2026-09-04):** the memo re-asked
+    every tick for a hull at warp because its lead changes every tick; it now remembers the LINE it
+    asked (twice the lead ahead) and re-uses the answer while the line needed lies on it — a hull re-asks
+    once it has flown its lead, or when it turns. MEASURED with a probe pilot whose home sits late in the
+    galaxy's child list: `emit_window_frames` found a window's child row by a linear `find` over the
+    galaxy's 233 220 children, once per window per tick — 90 % of a 26 ms tick; the two directory reply
+    arms asked "is this my child" the same way. All three are lookups now (`direct_child`, `parent_of`).
+    What the client receives, from the code: the star catalogue ONCE at login (then a small "sky alive"
+    beat), one composed picture per tick (the chain's rows only), a window's bodies and static roster on
+    change. The galaxy never sends its systems; it only searched them, and no longer does.
+  - **OWED, in order:** the PEER BOOK (plan slice 7 — D-RLM-6 mechanism C with its two address arms, the
+    MISS as the trigger, `Transport::book_peer`, the mesh's lazy dial of a booked-but-laneless peer);
+    THEN the flight on the cluster (plan slice 6: out of the home system AND into the next); the
+    no-flicker gate on a pilot aboard across the swap tick; the wake-up constant re-measured from the
+    orchestrator's `rlm.boot_ticks_observed_max` on that flight (the 6000-tick value is the S12 census
+    measurement, deliberately generous, and shrinks with the boot cost).
 
 - **STATUS 2026-09-02, third owner flight — THE FACING CROSSES WITH THE BODY, AND THE VIEW FOLLOWS
   IT.** The owner boarded looking along x and the hull left at ninety degrees to the view: the push
@@ -4742,6 +4862,98 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
 
 - **WHEN:** with D-MOVE-2, and piece 2 is what makes high speed survivable at all.
 
+- **STATUS 2026-09-04 — THE HAND-OVER NAMES ITS NODE, THE INDEX IS A TREE, A FLIGHT RUNS RELEASE.**
+  Three items the owner approved on 2026-09-04 (*"Yes, I agree we need to have 4, and 5 … Also agree
+  that we need to implement rstar"*):
+  - **Item 4, the hand-over names its node** (wire minor 28, a mesh flag day). `ExteriorMoved` now
+    carries `parent_node`, the commit's destination node. The reconciler fills it from the saga
+    context; the gateway's lineage splice writes it into the realm-head map for the new parent, so the
+    window derivation opens the new parent's window ON THE SPLICE TICK instead of after the next
+    half-second head poll. Example: the hull leaves System 7 for the galaxy at tick 500; the galaxy's
+    window used to open at tick 512, now it opens at tick 502. Unit-pinned in the gateway
+    (`the head is known at once`). The blink on the cluster is OWED a measurement on the release
+    flight below.
+  - **The child index is an R*-tree** (`rstar` 0.13, `crates/core/src/child_index.rs`). WHY: the grid's
+    cell was sized by the widest child, so the galaxy's cell held 9 640 systems and every hull's query
+    filtered them all (10 ms per hull, a ceiling of about two flying hulls). The tree stores every
+    child under its own padded f64 box and descends only the boxes a point or a line meets; the exact
+    sphere test on the lattice decides, so the answer is the grid's answer. There is NO abstain any
+    more: a step of any width is answered, so the containment fold's "the index abstained, ask
+    everything" arm is deleted (`worth_asking` has four arms). The grid-edge octave pin in the physics
+    index gate is gone with the grid. ★ SL9 MEASURED on this build (`galaxy_adopt_measure`, the ratio
+    ≤ 25 gate): an adopt-and-release round on the galaxy's 233 220 children costs 45.8 µs, on a
+    ten-child realm 47.7 µs — ratio 1.0 (the grid measured 3.1–3.4 on 2026-09-03). The physics index
+    gate answers the same before and after the band sizing (max 13, mean 7.52 candidates per query
+    over 123 990 queries). The per-hull cost on a galaxy with a pilot flying is still to be read off
+    the release flight's pace line.
+  - **Item 5, release builds for the window** — `VD_BUILD=release scripts/dev-cluster.sh up …` and
+    `VD_BUILD=release scripts/client.sh …` build and launch from `target/release`; the default stays
+    debug. The berth example follows the profile it is run with (`cargo run --release --example
+    berth_hull`).
+  - **The markers the owner saw (2026-09-04, *"parents should not draw children"*)** are the R9 step 5
+    deletion, which the ruling binds to run LAST, after step 4 (reach) is green — see D-REACH-1. Today
+    `current_bodies` still ships one marker per child in range and the client draws it while the child
+    is silent. Not forgotten; sequenced.
+
+- **STATUS 2026-09-04, the sixth owner flight (release build) — "still blinks and stops for a second
+  on transitions".** Owner: *"Let's do all planned optimisations first."* MEASURED from the gateway's
+  own admin counters (slot port `admin_gateway`, 7561 on slot 17) and the shard logs:
+  - every shard's tick mean is under 0.12 ms on release, the galaxy asks the tree for 3 candidates —
+    the server is not the slowness;
+  - three hand-overs (System 7 → the star realm → System 7 → the galaxy), each with the same shape:
+    ~120 ms from the crossing decision to the new parent's window (item 4 opened it 20 ms after the
+    adopt), `window_compose_hold_ticks` 11 over the three (≈ 4 ticks, 80 ms each), and on the
+    CLIENT a full refill of the 120 ms interpolation buffer, because the scene swap forgot every
+    track although the origin (the hull) had not changed. The hull itself never stopped on the
+    server: it coasted at its flushed velocity;
+  - `window_misauthored_body` 2: the new parent's relay named the hull's body one tick before its
+    level rostered it (the row waits for the book; the body did not) — dropped, counted;
+  - ★ `window_rotated_refused` 510 904 — twelve rows per fold, every fold, for the whole flight.
+    `FrameError::RotationBeyondExactReach` ("unreachable in production today (every placement in the
+    tree is identity-oriented)") is REACHED: the hull's placement carries the pilot's turn, so every
+    row beyond the FINE rotation reach (2^42 m ≈ 29 AU) mapped down through the hull's hop is refused.
+    Today those are the galaxy's in-range systems, which the star cloud draws anyway, so the picture
+    does not show it. It is the named P10 trigger firing on every tick, not a bug in the refusal;
+    OWED a ruling (compose far rows at the AUTHOR's step, or state them coarse) before a far realm's
+    own look must be drawn from inside a turned hull.
+  BUILT on this status (unit-green, flight OWED):
+  1. **The same-origin swap keeps its motion** (`RealmView::swap_epoch(_, keep_tracks)`,
+     `retain_placements`; `net.rs`'s level arm): the epoch bumps for a chain change under the same
+     origin, and the client keeps every track, the feed counter and the sky anchor, dropping only the
+     tracks the new level does not draw. A NEW origin still forgets everything. No wire change.
+  2. **A relayed body rides only beside its row** (`window.rs` relay emitter): bodies are filtered to
+     the relay's own level rows, so the gateway's roster vouch never sees a subject the rows lack.
+  3. **The picture rule at a hand-over** — the hold is 4 ticks per hand-over, measured; it is the
+     fresh-prefix rule doing what it says while the new parent's first level arrives. Left as is: a
+     row composed from two instants is refused by law, and 80 ms is inside the interpolation buffer
+     once item 1 no longer empties it. Re-measured on the next flight; revisited only if it shows.
+  4. **The peer book's ask rate** (`PeerBook::pending`, doubling backoff, one warning per peer): a
+     peer that stays unknown is asked at its 1st, 2nd, 4th, 8th … missed tick; the answer clears it.
+  5. **The wake-up constant** (`DEV.boot_ticks_p99` 6 000 → 500): `rlm.boot_ticks_observed_max` read
+     216 ticks on the release flight; doubled and rounded to ten seconds. The AoI's F7 horizon (the
+     wake-ahead lead) shrinks with it from two minutes of travel to ten seconds.
+  ★ THE SEVENTH FLIGHT (2026-09-04, release, items 1–5 aboard) — owner: *"All works … the rest were
+  quite seamless."* Gateway counters over the same three hand-overs: hold ticks 11 → 0, mis-authored
+  bodies 2 → 0, no standing realm 5 → 8 (all eight at boarding, none at a hand-over). Two things
+  left: (a) *"only star blinked when I passed by"* — the hull entered the star's own realm and left
+  it again; the swap level is composed from a partial chain while the new hop's first level is in
+  flight, and the client pruned the star's track against that level (built in item 1, now
+  corrected: a track is forgotten only when a DELTA removes its realm, never at a swap level);
+  (b) *"in the Galaxy couple of times I saw moving stars froze"* — the star cloud is placed by the
+  sky anchor, which rides the composed datagram; UNMEASURED which beat it missed. Next flight: poll
+  the client's own state at the tick rate and log every tick the anchor did not advance.
+  ★ THE COVERAGE GATE ON THE ARC (2026-09-04, `just coverage-fast` on a clean debug tree): the R-tree
+  index (`vd_core::child_index`) has NO miss. The gate is RED on the arc as a whole: 241 real misses
+  (192 lines, 49 branches) in 31 files — `drive.rs` 61, `forest_query.rs` 26, `orchestrator.rs` 19,
+  `containment.rs` 14, `realm_head.rs` 13, `register.rs` 11, `regions.rs` 10, `exterior.rs` 10,
+  `generate.rs` 10, `placement.rs` 9, `aoi.rs` 9, `guards.rs` 8, the rest ≤ 7 each. This is the debt
+  of everything uncommitted since 9639c73 (the movement contract, the ruler switch, the reach slice),
+  not of one change; 47 of it was paid today (a roster edge suite, two window-lane arms, the
+  source-side demote, the promote redelivery, the inbox facts arm). The full list is kept beside this
+  ledger (`docs/audit/coverage_gate_2026-09-04.txt`). HR5 says the phase is not done until it reads
+  zero; it is a dedicated pass, scheduled before the commit.
+  Owed next: the anchor measurement, R9 steps 4 and 5, then the coverage pass before the commit.
+
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:
   - **The instrument** — `DevState::stars_drawn` (the drawn count beside the held count) and `DevState::sky_anchor`; the gate `world-from-inside` in the pre-merge list. Before it, every gate read the HELD count and certified a black sky.
@@ -4751,9 +4963,24 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   - **A datagram over the budget is split** — the window frame is partitioned exactly as the entity snapshot is, the hop on every chunk, and the gateway MERGES chunks of one stamp. MEASURED: the home system's hull-window frame was 1,420 B against 1,200 and EVERY one was dropped by the transport (counted where no gate reads).
   - **R8 item 1, the first half** — the placement book is LAYERED (statics authored once and shared by `Arc`, movers per tick); the fold visits CANDIDATES by lookup (`ChildIndex::candidates_along` the looker's lead, `children_reachable_from_outside` for the interest proxy) plus the latched; `aoi_candidates_visited` and `aoi_full_walks` are gauges. MEASURED on the galaxy (debug, seed 0 world, one occupant at the centre): 1.9 s → 250 ms per tick; on the cluster (seed 2298): 61 ms mean, still OVER the 20 ms budget.
 - **OWED:**
-  - **R9 step 4, REACH itself** — no realm states a reach yet; the band is still the wake band (bound × cot(θ/2)) and the angle is still 1.5°; the child→parent reach datum (approved, R6) is not on the wire. The dot angle re-solve and its cost measurement are owed with it.
+  - **R9 step 4, REACH itself — PLAN 2026-09-04 (shown to the owner, one decision pending):** ONE new
+    arm `ReachStated { child, child_fence, at, reach_m }` (every realm, on change, producer-less
+    reliable beside `ChildFacts`; a planet has no drive facts to ride with, so the reach gets its own
+    arm — R6's "beside mass" read as the same lane class); the parent keeps `reach_of: child → m`,
+    rebuilds that child's band with `AoiConfig::with_spin_up(reach)` (the tear-down keeps the wider of
+    its old ratio and its old gap, so a velocity-safe band stays safe) and re-inserts the child's leaf
+    in the tree — no rebuild, no walk; a realm's own reach = max(own look reach, running max over
+    children of distance + stated reach), kept as a sorted multiset so a child's statement costs
+    O(log n) on the galaxy; the own look reach = max(size: `visibility_reach_m(extent, θ = 1.5°)`,
+    brightness: the distance at which luma_lsun reaches the naked-eye limit, magnitude 6.5 — a new
+    perception constant beside θ, cited). THE DECISION ASKED: a star's brightness would wake every
+    system within ~70 ly (thousands per pilot); proposed rule — brightness counts toward a realm's
+    reach only when no ancestor already draws that light, and the galaxy's star field draws every
+    star's, so a star system's reach is its disc plus its planets' reaches. Measurements owed with it
+    (R8): the galaxy with one looker; shards awake per pilot.
+  - **R9 step 4, REACH itself (status before the plan)** — no realm states a reach yet; the band is still the wake band (bound × cot(θ/2)) and the angle is still 1.5°; the child→parent reach datum (approved, R6) is not on the wire. The dot angle re-solve and its cost measurement are owed with it.
   - **R9 step 5** — the parent's marker still exists for children IN RANGE; the occupancy bit still builds the proxy observer (lawful under R5, but the bit still influences sight through it).
-  - **R9 step 6 / R8 item 1, the second half** — the galaxy's tick is 61 ms mean against 20 ms. The per-candidate cost (~22 µs each: a `RealmCoord::child` allocation, three `BTreeMap` inserts, the interest emitter) and the 11,275 candidates one centre occupant collects on the seed-0 world (index cell 61 ly, because a system's wake band is its gravitational bound × 76 — the widest is 18 ly) are the two levers. Neither is a number to argue: the probe `measure_the_galaxy_shards_tick_against_its_census` (ignored, hand-run) prints both.
+  - **R9 step 6 / R8 item 1, the second half** — the galaxy's tick was 61 ms mean against 20 ms; the lookup fold, the sphere filter, the query memo and (2026-09-04) the R*-tree index each took a lever — see D-MOVE-2's 2026-09-04 status for the tree. The per-candidate cost (~22 µs each: a `RealmCoord::child` allocation, three `BTreeMap` inserts, the interest emitter) and the 11,275 candidates one centre occupant collects on the seed-0 world (index cell 61 ly, because a system's wake band is its gravitational bound × 76 — the widest is 18 ly) are the two levers. Neither is a number to argue: the probe `measure_the_galaxy_shards_tick_against_its_census` (ignored, hand-run) prints both.
   - **The band re-solve (D-MOVE-3)** is what makes the index cell small; it is the owner's open item and is NOT touched here.
   - **The second subject of the gate** — the planet subject is `#[ignore]`d with its measurement (a walking occupant at 1.0e3 m/s cannot reach a planet 6.1e10 m away; the governor is deleted). It runs when a hull flies there (M-C) or the spawn moves (G10). The look/acceptance gates that fly the same leg are in the same state and were NOT re-run in this pass — UNMEASURED.
   - **A static attach onto a BUILT realm** still gets a one-realm chain, counted (`attach_lineage_unresolved`). A static attach onto a SEEDED realm now derives the whole chain from the gateway's own forest (2026-09-02, found by the star-sky gate on the dual cluster: 233,220 stars held, none drawn, `sky_anchor = None`); the flown path (login + crossing) never needed it.

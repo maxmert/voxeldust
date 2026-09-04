@@ -138,6 +138,7 @@ fn ctx(class: vd_core::entity_kind::DurabilityClass, expected_fence: Fence) -> S
         to_realm: TO_REALM,
         // `TO_REALM` is `System(8)` — a one-field frame, no parent needed.
         to_parent: None,
+        exterior: false,
     }
 }
 
@@ -148,6 +149,7 @@ fn ctx(class: vd_core::entity_kind::DurabilityClass, expected_fence: Fence) -> S
 /// `handle_transient_crossing_request` (D-43 #9). The transient short-path never reads it.
 fn transient_ctx(expected_fence: Fence) -> SagaCtx {
     SagaCtx {
+        exterior: false,
         subject: DirectoryKey::Realm(TO_REALM),
         session: SessionId::NONE,
         ..ctx(DurabilityClass::Transient, expected_fence)
@@ -404,6 +406,7 @@ impl Rig {
                             step_id: FLUSH_SOURCE_STEP,
                             pose: flushed_pose(),
                             drained_seq: 0,
+                            state: vec![],
                         },
                     ))
                     .expect("encode"),
@@ -525,6 +528,29 @@ impl Rig {
 
     /// Slice 3f-C: a source shard ships a transient `TransientCrossingRequest`. The reply GRANT routes
     /// back to the transport origin (`SOURCE`), so a test drains it via [`drain_source`](Self::drain_source).
+    /// The ruler switch, slice 1: a parent's request to move its hull's exterior, from `peer`.
+    fn exterior_request(
+        &mut self,
+        req: vd_wire::intershard::ExteriorCrossingRequest,
+        from_dest: bool,
+    ) {
+        let peer = if from_dest {
+            &mut self.dest
+        } else {
+            &mut self.source
+        };
+        peer.send(
+            ORCH,
+            MsgClass::Saga,
+            vd_sim::io::bytes(
+                postcard::to_allocvec(&InterShardFlow::ExteriorCrossingRequest(req))
+                    .expect("encode"),
+            ),
+        )
+        .expect("sent");
+        self.settle();
+    }
+
     fn transient_crossing_request(&mut self, req: TransientCrossingRequest) {
         self.source
             .send(
@@ -772,6 +798,7 @@ fn early_delivery_in_demoting_is_carried_into_promoting_and_never_lost() {
                 gateway: GATEWAY,
                 since: UniverseTick(0),
                 flushed_pose: None,
+                flushed_state: Vec::new(),
                 dead_observed_since: None,
                 dest_adopted: false,
                 opened: UniverseTick(0),
@@ -2159,6 +2186,7 @@ fn active_transfers_reports_the_live_triple_and_is_empty_when_idle() {
             gateway: GATEWAY,
             since: UniverseTick(0),
             flushed_pose: None,
+            flushed_state: Vec::new(),
             dead_observed_since: None,
             dest_adopted: false,
             opened: UniverseTick(0),
@@ -2182,6 +2210,7 @@ fn live_in(state: SagaState, class: vd_core::entity_kind::DurabilityClass) -> Li
         gateway: GATEWAY,
         since: UniverseTick(0),
         flushed_pose: None,
+        flushed_state: Vec::new(),
         dead_observed_since: None,
         dest_adopted: false,
         opened: UniverseTick(0),
@@ -2291,6 +2320,7 @@ fn arriving_dest_realms_excludes_a_parked_rehome_saga() {
             gateway: SOURCE,
             since: UniverseTick(0),
             flushed_pose: None,
+            flushed_state: Vec::new(),
             dead_observed_since: None,
             dest_adopted: false,
             opened: UniverseTick(0),
@@ -2441,6 +2471,7 @@ fn inject_saga(runtime: &mut SagaRuntimeRes, state: SagaState, since: UniverseTi
             gateway: GATEWAY,
             since,
             flushed_pose: None,
+            flushed_state: Vec::new(),
             dead_observed_since: None,
             dest_adopted: false,
             opened: UniverseTick(0),
@@ -2863,7 +2894,7 @@ fn deliver_rehome_to_commits_to_the_target_and_emits_the_dedicated_adopt() {
         },
         UniverseTick(0),
     );
-    stash_flush(&mut runtime, XFER, flushed_pose()); // the adopt payload
+    stash_flush(&mut runtime, XFER, flushed_pose(), Vec::new()); // the adopt payload
     let target = NodeId(9);
     let mut outbox = OutboundBox::default();
     deliver(
@@ -2940,7 +2971,7 @@ fn a_rehomed_promoting_redrives_the_adopt_to_the_live_target_via_scan_deadlines(
         },
         UniverseTick(0),
     );
-    stash_flush(&mut runtime, XFER, flushed_pose()); // the adopt payload, re-read on every re-drive
+    stash_flush(&mut runtime, XFER, flushed_pose(), Vec::new()); // the adopt payload, re-read on every re-drive
     // The producer drives the DUE saga (now=8 >= redrive 8); a LIVE owner ⇒ Timeout (not ReHomeTo).
     let mut outbox = OutboundBox::default();
     scan_deadlines(
@@ -2986,6 +3017,7 @@ fn rehome_adopt_is_a_loud_no_op_for_a_non_entity_subject_or_missing_pose() {
     // crossing) so the executor ReHomeAdopt arm stays branchless (HR5). A Realm subject (no
     // transfer_subject_entity) ⇒ None; an Entity subject with NO pose ⇒ None; both ⇒ Some.
     let realm_ctx = SagaCtx {
+        exterior: false,
         subject: DirectoryKey::Realm(RealmId::System(9)),
         ..ctx(DurabilityClass::Durable, Fence(1))
     };
@@ -3051,7 +3083,7 @@ fn deliver_rehome_to_aborts_cleanly_when_the_cas_is_lost() {
         },
         UniverseTick(0),
     );
-    stash_flush(&mut runtime, XFER, flushed_pose());
+    stash_flush(&mut runtime, XFER, flushed_pose(), Vec::new());
     let mut outbox = OutboundBox::default();
     deliver(
         &mut runtime,
@@ -3953,7 +3985,14 @@ fn emit_crossing_builds_for_an_entity_subject_and_skips_otherwise() {
     // Entity subject + a flushed pose → the crossing is pushed to the DEST, stamped with the
     // given fence, STUB_CROSSING_STEP, and an empty (1d.1) state blob.
     let mut outbox = OutboundBox::default();
-    emit_crossing(&c, Fence(2), Some(flushed_pose()), EpochId(1), &mut outbox);
+    emit_crossing(
+        &c,
+        Fence(2),
+        Some(flushed_pose()),
+        &[],
+        EpochId(1),
+        &mut outbox,
+    );
     assert_eq!(
         outbox.0.len(),
         1,
@@ -3984,11 +4023,12 @@ fn emit_crossing_builds_for_an_entity_subject_and_skips_otherwise() {
     // No stashed pose → no-op (the gate makes this unreachable for an Entity subject, but the
     // helper is total — this covers the missing-pose None arm).
     let mut no_pose = OutboundBox::default();
-    emit_crossing(&c, Fence(2), None, EpochId(1), &mut no_pose);
+    emit_crossing(&c, Fence(2), None, &[], EpochId(1), &mut no_pose);
     assert!(no_pose.0.is_empty(), "no pose → no crossing");
 
     // Non-Entity subject (the Realm-subject FSM proptests) → no-op.
     let realm_ctx = SagaCtx {
+        exterior: false,
         subject: DirectoryKey::Realm(RealmId::System(9)),
         ..c
     };
@@ -3997,6 +4037,7 @@ fn emit_crossing_builds_for_an_entity_subject_and_skips_otherwise() {
         &realm_ctx,
         Fence(2),
         Some(flushed_pose()),
+        &[],
         EpochId(1),
         &mut realm_out,
     );
@@ -4010,7 +4051,7 @@ fn emit_crossing_builds_for_an_entity_subject_and_skips_otherwise() {
 fn a_flush_for_an_unknown_saga_is_a_noop() {
     // stash_flush's None arm: a SourceFlushed for an unknown / GC'd transfer mutates nothing.
     let mut runtime = SagaRuntimeRes::default();
-    stash_flush(&mut runtime, TransferId(999), flushed_pose());
+    stash_flush(&mut runtime, TransferId(999), flushed_pose(), Vec::new());
     assert_eq!(runtime.live(), 0, "a stray flush creates/mutates no saga");
 }
 
@@ -4359,6 +4400,7 @@ fn inject_saga_id(
             gateway: GATEWAY,
             since: UniverseTick(0),
             flushed_pose: None,
+            flushed_state: Vec::new(),
             dead_observed_since: None,
             dest_adopted: false,
             opened: UniverseTick(0),
@@ -4856,4 +4898,221 @@ fn rehydrate_restores_a_persisted_abort_reply_and_reemits_on_first_scan() {
         )],
         "the restored obligation re-emits on the first post-restart scan (crash-leg proof)"
     );
+}
+
+// ===================== the ruler switch, slice 1: the exterior crossing saga =====================
+
+fn hull_key() -> DirectoryKey {
+    DirectoryKey::Ship(EntityId::pack(EntityKind::Ship, 1, 1, 0))
+}
+
+fn exterior_req(fence: Fence) -> vd_wire::intershard::ExteriorCrossingRequest {
+    vd_wire::intershard::ExteriorCrossingRequest {
+        subject: hull_key(),
+        from_realm: FROM_REALM,
+        to_realm: TO_REALM,
+        subject_fence: fence,
+        attempt: 0,
+    }
+}
+
+fn decoded(inbound: &[Inbound]) -> Vec<InterShardFlow> {
+    inbound
+        .iter()
+        .filter_map(|i| match i {
+            Inbound::Wire { bytes, .. } => postcard::from_bytes(bytes).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_exterior_request_starts_a_session_less_saga_that_walks_to_done_without_a_gateway() {
+    let mut rig = Rig::new();
+    // The hull's exterior is held by the SOURCE parent; the destination realm runs on DEST.
+    rig.grant_key(hull_key(), AuthorityRef::Shard(SOURCE), Fence(1));
+    rig.grant_key(
+        DirectoryKey::Realm(TO_REALM),
+        AuthorityRef::Shard(DEST),
+        Fence(5),
+    );
+    let _ = (rig.drain_source(), rig.drain_dest(), rig.drain_gateway());
+    rig.exterior_request(exterior_req(Fence(1)), false);
+    rig.settle();
+    let latched = crossing_transfer_id(hull_key(), Fence(1), 0);
+    let ctx = rig.saga_ctx(latched);
+    assert!(ctx.exterior);
+    assert_eq!(ctx.session, SessionId::NONE);
+    assert_eq!(ctx.source, SOURCE);
+    assert_eq!(ctx.dest, DEST);
+    assert_eq!(ctx.expected_fence, Fence(1));
+    assert_eq!(ctx.from_realm, FROM_REALM);
+    assert_eq!(ctx.to_realm, TO_REALM);
+    assert_eq!(rig.live(), 1);
+    assert_eq!(rig.count(SagaRuntimeRes::exterior_crossings_started), 1);
+    assert_eq!(rig.count(SagaRuntimeRes::crossings_started), 0);
+    // The walk opens at the flush: the source is asked for the exterior, the gateway for nothing.
+    assert!(
+        decoded(&rig.drain_source()).contains(&InterShardFlow::FlushSource(
+            vd_wire::intershard::FlushSource {
+                transfer: latched,
+                subject: hull_key(),
+                step_id: FLUSH_SOURCE_STEP,
+                to_realm: TO_REALM,
+                to_parent: None,
+            }
+        )),
+        "the source is asked to flush the exterior"
+    );
+    assert!(rig.drain_gateway().is_empty(), "no gateway takes part");
+    // The source ships the pose: the CAS moves the exterior to DEST at the next fence.
+    rig.source
+        .send(
+            ORCH,
+            MsgClass::Saga,
+            vd_sim::io::bytes(
+                postcard::to_allocvec(&InterShardFlow::TransferAck(TransferAck::SourceFlushed {
+                    transfer_id: latched,
+                    step_id: FLUSH_SOURCE_STEP,
+                    pose: flushed_pose(),
+                    drained_seq: 0,
+                    state: vec![],
+                }))
+                .expect("encode"),
+            ),
+        )
+        .expect("sent");
+    rig.settle();
+    let head = rig
+        .orch
+        .world_mut()
+        .resource::<DirectoryRes>()
+        .0
+        .head(hull_key())
+        .expect("the exterior is recorded");
+    assert_eq!(head.authority, AuthorityRef::Shard(DEST));
+    let new_fence = head.fence;
+    assert!(new_fence > Fence(1));
+    // The envelope reaches the destination, naming the hull by its entity; the demote reaches the source.
+    let to_dest = decoded(&rig.drain_dest());
+    let envelope = to_dest.iter().find_map(|f| match f {
+        InterShardFlow::Transfer(env) => Some(env.clone()),
+        _ => None,
+    });
+    let envelope = envelope.expect("the destination receives the exterior's envelope");
+    assert_eq!(envelope.fence, new_fence);
+    match envelope.payload {
+        vd_wire::intershard::TransitionPayload::StubCrossing {
+            entity,
+            from_realm,
+            to_realm,
+            ..
+        } => {
+            assert_eq!(DirectoryKey::Ship(entity), hull_key());
+            assert_eq!(from_realm, FROM_REALM);
+            assert_eq!(to_realm, TO_REALM);
+        }
+        other => panic!("not a crossing payload: {other:?}"),
+    }
+    assert!(
+        decoded(&rig.drain_source()).contains(&InterShardFlow::Demote(
+            vd_wire::intershard::DemoteCmd {
+                transfer: latched,
+                subject: hull_key(),
+                new_owner_fence: new_fence,
+                step_id: vd_wire::intershard::DEMOTE_STEP,
+            }
+        )),
+        "the source is demoted at the new fence"
+    );
+    assert!(rig.drain_gateway().is_empty(), "still no gateway");
+    // The demote ack brings the promote; the promote ack ends the walk with no release.
+    rig.ack(TransferControlAck::DemoteAck { transfer: latched });
+    assert!(
+        decoded(&rig.drain_dest()).contains(&InterShardFlow::Promote(
+            vd_wire::intershard::PromoteCmd {
+                transfer: latched,
+                subject: hull_key(),
+                new_fence,
+                step_id: vd_wire::intershard::PROMOTE_STEP,
+                source: SOURCE,
+            }
+        )),
+        "the destination is promoted"
+    );
+    rig.ack(TransferControlAck::PromoteAck { transfer: latched });
+    assert_eq!(rig.live(), 0, "done at the promote ack");
+    assert!(rig.drain_gateway().is_empty(), "no release at a gateway");
+    // ★ THE REPARENT NOTE IS TAKEN FROM THE IN-PROCESS COMMIT — the shipped path. MEASURED on the
+    // fifth flight (2026-09-03): the note used to read only the caller's own event, the hull's
+    // hand-down committed inside the quiescence run, no note was taken, the reconciler never
+    // re-keyed the hull and the gateway was never told.
+    let hull_realm = vd_core::pose::RealmId::Ship(match hull_key() {
+        DirectoryKey::Ship(entity) => entity,
+        other => panic!("the hull's exterior key is a Ship key: {other:?}"),
+    });
+    // The reconciler drains the note on the same schedule step it is taken, so the note itself is
+    // gone by now; what remains is the reconciler's own account of it — this rig has no demand cell
+    // for the hull, so the move is counted unresolved, once.
+    assert!(
+        rig.orch
+            .world_mut()
+            .resource::<SagaRuntimeRes>()
+            .pending_reparents
+            .is_empty(),
+        "drained by the reconciler"
+    );
+    let rlm = rig.orch.world_mut();
+    let rlm = rlm.resource::<crate::rlm_runtime::RlmReconcilerRes>();
+    assert_eq!(
+        (rlm.reparents_applied, rlm.reparents_unresolved),
+        (0, 1),
+        "the reconciler was told the hull ({hull_realm:?}) moved house to {TO_REALM:?}"
+    );
+}
+
+#[test]
+fn an_exterior_request_from_a_node_that_does_not_hold_the_exterior_is_dropped() {
+    let mut rig = Rig::new();
+    rig.grant_key(hull_key(), AuthorityRef::Shard(SOURCE), Fence(1));
+    rig.grant_key(
+        DirectoryKey::Realm(TO_REALM),
+        AuthorityRef::Shard(DEST),
+        Fence(5),
+    );
+    // Sent by DEST, which does not hold the exterior.
+    rig.exterior_request(exterior_req(Fence(1)), true);
+    rig.settle();
+    assert_eq!(rig.live(), 0);
+    assert_eq!(rig.count(SagaRuntimeRes::exterior_request_unattested), 1);
+    assert_eq!(rig.count(SagaRuntimeRes::exterior_crossings_started), 0);
+}
+
+#[test]
+fn an_exterior_request_with_no_destination_head_or_no_subject_is_counted() {
+    let mut rig = Rig::new();
+    rig.grant_key(hull_key(), AuthorityRef::Shard(SOURCE), Fence(1));
+    rig.exterior_request(exterior_req(Fence(1)), false);
+    rig.settle();
+    assert_eq!(rig.live(), 0);
+    assert_eq!(rig.count(SagaRuntimeRes::crossing_unresolved), 1);
+    // A subject nobody recorded.
+    let mut rig = Rig::new();
+    rig.exterior_request(exterior_req(Fence(1)), false);
+    rig.settle();
+    assert_eq!(rig.count(SagaRuntimeRes::crossing_subject_gone), 1);
+    // A redelivered request for a live saga is one saga.
+    let mut rig = Rig::new();
+    rig.grant_key(hull_key(), AuthorityRef::Shard(SOURCE), Fence(1));
+    rig.grant_key(
+        DirectoryKey::Realm(TO_REALM),
+        AuthorityRef::Shard(DEST),
+        Fence(5),
+    );
+    rig.exterior_request(exterior_req(Fence(1)), false);
+    rig.settle();
+    rig.exterior_request(exterior_req(Fence(1)), false);
+    rig.settle();
+    assert_eq!(rig.live(), 1);
+    assert_eq!(rig.count(SagaRuntimeRes::exterior_crossings_started), 1);
 }

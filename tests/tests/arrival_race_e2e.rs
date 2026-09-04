@@ -83,6 +83,7 @@ fn subject() -> DirectoryKey {
 /// The crossing context a source shard's boundary detector produces for this lineage.
 fn crossing_ctx() -> SagaCtx {
     SagaCtx {
+        exterior: false,
         transfer: XFER,
         session: SESSION,
         subject: subject(),
@@ -244,6 +245,7 @@ fn source_flush() -> Inbound {
                 UniverseTick(5),
             ),
             drained_seq: 42,
+            state: vec![],
         }),
     )
 }

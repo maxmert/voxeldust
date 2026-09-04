@@ -110,12 +110,14 @@ pub(crate) fn on_transfer_envelope(
     env: TransferEnvelope,
     current_epoch: EpochId,
     config: &StubConfig,
-    regions: &RealmRegions,
+    regions: &mut RealmRegions,
     placements: &PlacementLedger,
     dots: &mut Dots,
     applied: &mut AppliedSteps,
     pending: &mut PendingCrossings,
     owned: &mut OwnedTransients,
+    adopt: crate::stub::exterior::AdoptSide<'_>,
+    tick: vd_core::ids::UniverseTick,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
@@ -132,7 +134,7 @@ pub(crate) fn on_transfer_envelope(
         stats.crossings_epoch_mismatch += 1;
         return;
     }
-    let (entity, to_realm, pose) = match env.payload {
+    let (entity, to_realm, pose, state) = match env.payload {
         // `to_realm` is READ, not assumed to be this shard's own realm: a co-hosting shard is the
         // destination for every link of the chain it holds, and the arrival has to be measured from the
         // centre of the realm the crossing NAMED. Assuming `config.realm` here is what re-converted an
@@ -141,8 +143,9 @@ pub(crate) fn on_transfer_envelope(
             entity,
             to_realm,
             pose,
+            state,
             ..
-        } => (entity, to_realm, pose),
+        } => (entity, to_realm, pose, state),
         // D-7: the DEST adopts a transient batch into its uncounted `Arriving` tier + acks
         // `BatchAdopted` (the gate that lets the orchestrator emit the adopt-before-drop
         // `TransientDrop`). Handled fully here — never the durable StubCrossing dot machinery.
@@ -201,6 +204,30 @@ pub(crate) fn on_transfer_envelope(
             return;
         }
     };
+    // The ruler switch, slice 2: a SHIP entity is a driven child's EXTERIOR (the transfer registry's
+    // own policy for the kind: `transfer_protocol` §8, "what transfers is the ship's exterior") —
+    // adopted here, at the envelope, onto this realm's roster.
+    if vd_core::entity_kind::EntityKind::from_tag(entity.kind_tag()).ok()
+        == Some(vd_core::entity_kind::EntityKind::Ship)
+    {
+        crate::stub::exterior::adopt_exterior(
+            env.transfer_id,
+            env.step_id,
+            env.fence,
+            entity,
+            to_realm,
+            pose,
+            &state,
+            config,
+            regions,
+            adopt,
+            applied,
+            tick,
+            stats,
+            outbox,
+        );
+        return;
+    }
     match dots
         .0
         .iter()

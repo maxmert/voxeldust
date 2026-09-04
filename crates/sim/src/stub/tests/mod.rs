@@ -38,6 +38,7 @@ mod movement;
 mod placement;
 /// The placement-carry derivation (how far a shard may extrapolate a moving placement) and the pose-stamp invariant, plus the RLM 5f RG-1 reactive greeting: a shard announces itself to every booked peer after a silence interval, suppressed per-peer by inbound contact, identical across shard kinds.
 mod presence;
+mod regions_roster;
 /// The whole D-7 transient/debris batched-crossing machinery: status tiers, re-advance of held items, emit/adopt/release/promote/complete, discard/abandon poisoning, re-drive and re-solicit, and the inbound dispatch arms.
 mod transients;
 /// The Q2 window-relay lane and THE WINDOW LANE Slice A (banner 15096): sealed batches held verbatim with fail-closed admission, forwarded send-on-change and TTL-pruned, byte-identical across two hops, egress and union over-draw measured, the structural proof that production never opens a seal; the ship half (a shard sealing its own self-authored statements up to its resolved parent on resolve/change/cadence) and the read-only accessors; what a realm states about itself on a window (SL3 self-look) and the membership verdict's anti-flicker grace hold; then one frame per tick per open window, the pre-inverted hop row, self-look and point-of-light marker bodies, the send-on-change beat, the derived TTL, the Child-scope guards, the Q1 one-level fence and the membership verdict fold.

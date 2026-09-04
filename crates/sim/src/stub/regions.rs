@@ -77,7 +77,10 @@ pub struct RealmRegions {
     ///
     /// Built in index order, so an iteration over a parent's children yields exactly the order the
     /// filter yielded.
-    pub(crate) children_of: BTreeMap<RealmId, Vec<usize>>,
+    /// ★ A SET, NOT A LIST (SL9, measured 2026-09-03): a release removed its index by a linear `retain`
+    /// over the galaxy's 233 220 systems, twice; a set removes one entry in O(log n) and iterates in
+    /// the same index order the list did.
+    pub(crate) children_of: BTreeMap<RealmId, BTreeSet<usize>>,
     /// Region index of each realm — the inverse of `regions`, so a realm resolves to its bit without a scan.
     pub(crate) ix_of: BTreeMap<RealmId, usize>,
     /// SELF ∪ ANCESTORS as a SET OF REALMS, per region index (task #177). Computed ONCE at boot by the same
@@ -120,9 +123,33 @@ pub struct RealmRegions {
     /// The same children sorted by distance from this realm's centre, in metres of its own frame,
     /// for the OUTSIDE looker: a looker `d` metres out can only reach children at least
     /// `d − widest band` from the centre, which is a suffix of this list.
-    radial: Vec<(f64, RealmId)>,
+    /// Keyed by the distance's bit pattern — monotone for a non-negative float — so an insert, a
+    /// removal and the suffix are each one ordered-map operation, never a shift of every entry after
+    /// it (SL9, measured 2026-09-03).
+    radial: BTreeMap<u64, Vec<RealmId>>,
     /// The widest tear-down band among the indexed children, in metres.
     widest_band_m: f64,
+    /// The widest circumscribed extent among the indexed children, in metres — the pad every
+    /// interest-index entry carries. Kept as a number so an adoption never folds over every child to
+    /// learn it (SL9, measured: that fold was one of the three walks). It only grows: a released
+    /// child leaves the pad conservative, which changes no verdict.
+    widest_child_extent_m: f64,
+    /// The rows the child index does NOT answer for — the ancestors, this realm, the movers — the
+    /// only rows a subject evaluation must always ask. ★ SL9, MEASURED on the fifth flight
+    /// (2026-09-03): the evaluation asked every row and asked the index whether it answered for each,
+    /// 233 220 times per subject per tick on the galaxy — 325 ms a tick, the window went stale, the
+    /// pilot's picture froze. Kept as a list so the evaluation never walks the children.
+    unindexed: Vec<RealmId>,
+    /// The BUILT rows of this forest — the ones with an exterior key (a hull), whose lease their
+    /// parent requests and renews; the reader filters by parent with one lookup each. ★ SL9, MEASURED on the fifth flight (2026-09-03): the lease loop
+    /// filtered ALL 233 220 of the galaxy's children every tick to find the one hull — a fifth of a
+    /// 172 ms tick. A hull is rare among children, so the list is short and the walk is gone.
+    built_children: Vec<RealmId>,
+    /// Bumped on every change to the child roster (an adoption, a release, a re-parenting, the
+    /// movers named), so a reader that remembers an answer about the children knows when it is stale.
+    /// Drawn from ONE process-wide counter, so a table built later never repeats an earlier table's
+    /// number — a memo taken against a forest that was then replanted is stale too.
+    roster_generation: u64,
     /// The realm this shard hosts, once stated. `None` on a rig that never named one.
     own_realm: Option<RealmId>,
 }
@@ -186,6 +213,13 @@ fn region_depths(
 
 /// ONE realm's depth — the hop count `region_depth` returns, monomorphic so both stops are covered
 /// once (HR5): a realm the forest does not name, and the ambient root's absent parent.
+/// The process-wide roster change counter (see `RealmRegions::roster_generation`): every table's
+/// every change draws the next number, so no two rosters ever share one. A counter, never a clock.
+fn next_roster_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn depth_of(regions: &[RealmRegion], ix_of: &BTreeMap<RealmId, usize>, realm: RealmId) -> u32 {
     let mut depth = 0u32;
     let mut cur = realm;
@@ -233,10 +267,10 @@ impl RealmRegions {
         //
         // A parent's depth is its child's depth minus one, so the answers share their work. This
         // memoises the chain it is already walking and touches each region a bounded number of times.
-        let mut children_of: BTreeMap<RealmId, Vec<usize>> = BTreeMap::new();
+        let mut children_of: BTreeMap<RealmId, BTreeSet<usize>> = BTreeMap::new();
         for (ix, r) in regions.iter().enumerate() {
             if let Some(parent) = r.parent {
-                children_of.entry(parent).or_default().push(ix);
+                children_of.entry(parent).or_default().insert(ix);
             }
         }
         let depths = region_depths(&regions, &ix_of);
@@ -244,6 +278,12 @@ impl RealmRegions {
         let ancestor_chain = regions
             .iter()
             .map(|r| ancestry_chain(&regions, &ix_of, r.realm))
+            .collect();
+        let unindexed_at_start: Vec<RealmId> = regions.iter().map(|r| r.realm).collect();
+        let built_at_start: Vec<RealmId> = regions
+            .iter()
+            .filter(|r| matches!(r.realm, RealmId::Ship(_)))
+            .map(|r| r.realm)
             .collect();
         let mut built = RealmRegions {
             // ★THROWAWAY: the lawful 1.0 on every rig — only a bin that read `VD_TEST_OVERDRIVE`
@@ -260,8 +300,14 @@ impl RealmRegions {
             static_rows: BTreeMap::new(),
             movers_of: BTreeMap::new(),
             aoi_index: ChildIndex::default(),
-            radial: Vec::new(),
+            radial: BTreeMap::new(),
             widest_band_m: 0.0,
+            widest_child_extent_m: 0.0,
+            // Nothing is indexed until a realm is named, so EVERY row is asked (the fixtures that
+            // plant a forest without naming a realm are exactly the pre-index behaviour).
+            unindexed: unindexed_at_start,
+            built_children: built_at_start,
+            roster_generation: next_roster_generation(),
             own_realm: None,
         };
         // The static rows exist from construction: a store with no movers named and no realm named
@@ -288,8 +334,15 @@ impl RealmRegions {
     /// `new` arg) so the many `RealmRegions::new` call sites stay unchanged and byte-identical (the
     /// walk roster passes an empty map). Only registered realms' rows author live; every other region
     /// stays static.
+    /// The roster's change counter (see the field).
+    #[must_use]
+    pub(crate) fn roster_generation(&self) -> u64 {
+        self.roster_generation
+    }
+
     #[must_use]
     pub fn with_moving_children(mut self, moving: BTreeMap<RealmId, MotionFn>) -> RealmRegions {
+        self.roster_generation = next_roster_generation();
         self.moving = moving;
         self.rebuild_child_index();
         self
@@ -312,6 +365,184 @@ impl RealmRegions {
     /// builders so their ORDER cannot matter — a caller that names the realm first and the movers second
     /// gets the same index as one that does it the other way round, which is the kind of ordering trap
     /// that is invisible until a mover is wrongly indexed.
+    /// ★ A CHILD ARRIVES AT RUNTIME (the ruler switch, slice 2; owner-approved 2026-09-03): a hull the
+    /// crossing just handed to this realm becomes a direct child of `own_realm` WITHOUT a rebuild of
+    /// anything that grows with the child count (SL9). The region row is appended; its index, its
+    /// depth and its ancestor chain are one entry each; the containment and area-of-interest grids
+    /// take one insert; the radial list takes one sorted insert. The static rows are NOT touched: a
+    /// driven child's row is the per-tick overlay `author_book_driven` writes, and it never needed a
+    /// static row to be placed. A realm already on the roster is replaced in place (a re-driven adopt).
+    ///
+    /// Example: the galaxy adopts a hull that left System 7. Its forest grows by one row among
+    /// 233,220, the hull's berth lands in one grid cell, and the galaxy's next tick authors the hull's
+    /// placement from its driven state.
+    pub fn adopt_child(&mut self, region: RealmRegion) {
+        let Some(own) = self.own_realm else {
+            return; // no realm named ⇒ this shard authors nobody: refuse silently, like the index
+        };
+        if region.parent != Some(own) {
+            return; // only MY direct children are mine to adopt
+        }
+        if self.ix_of.contains_key(&region.realm) {
+            self.release_child(region.realm);
+        }
+        self.roster_generation = next_roster_generation();
+        let ix = self.regions.len();
+        let realm = region.realm;
+        self.regions.push(region);
+        self.ix_of.insert(realm, ix);
+        self.children_of.entry(own).or_default().insert(ix);
+        let depth = depth_of(&self.regions, &self.ix_of, realm);
+        self.depths.push((depth, realm, ix));
+        self.ancestor_chain
+            .push(ancestry_chain(&self.regions, &self.ix_of, realm));
+        let tier = self.own_frame(own).tier();
+        let r = &self.regions[ix];
+        if self.moving.contains_key(&realm) {
+            self.unindexed.push(realm); // a mover is never indexed: always asked
+            // The mover list the book's overlay and the moving set read — `release_child` already
+            // keeps it across a swap-remove, so an adopted mover belongs in it too.
+            self.movers_of.entry(own).or_default().push(ix);
+        }
+        if matches!(realm, RealmId::Ship(_)) {
+            self.built_children.push(realm);
+        }
+        if !self.moving.contains_key(&realm) {
+            self.child_index.insert(
+                &IndexedChild {
+                    realm,
+                    centre: r.center.in_parents_frame(),
+                    radius_m: r.shape.circumscribed_extent() + r.band.outset(),
+                },
+                tier,
+            );
+            if r.aoi.spin_up_r_m() > 0.0 {
+                // The aoi grid's radius carries the widest extent among the live children, as the
+                // boot folded it; a newcomer wider than that widest grows the number, and no fold
+                // over the children happens here (SL9, measured 2026-09-03).
+                self.widest_child_extent_m = self
+                    .widest_child_extent_m
+                    .max(r.shape.circumscribed_extent());
+                let widest = self.widest_child_extent_m;
+                self.aoi_index.insert(
+                    &IndexedChild {
+                        realm,
+                        centre: r.center.in_parents_frame(),
+                        radius_m: r.aoi.tear_down_r_m() + widest,
+                    },
+                    tier,
+                );
+                self.widest_band_m = self.widest_band_m.max(r.aoi.tear_down_r_m());
+                let d = r
+                    .center
+                    .in_parents_frame()
+                    .delta_m(LatticePos::ORIGIN, tier)
+                    .length();
+                let names = self.radial.entry(d.to_bits()).or_default();
+                names.push(realm);
+                names.sort_unstable();
+            }
+        }
+    }
+
+    /// ★ THIS REALM MOVED HOUSE (the ruler switch, slice 3): its parent told it a new lineage. The own
+    /// row's parent is re-pointed and every derived per-row table recomputed (a hull's forest is a few
+    /// rows: itself, its ancestors as it booted, its children). The old ancestors' rows STAY: they are
+    /// the ambient root the container fold seeds from, and a stale ancestor can only ever refuse to
+    /// claim a point it cannot measure (a cross-unit refusal is a non-member). Nothing here says
+    /// where this realm IS — only whose it is.
+    pub(crate) fn reparent_own(&mut self, new_parent: RealmId) {
+        let Some(own) = self.own_realm else {
+            return;
+        };
+        let Some(&ix) = self.ix_of.get(&own) else {
+            return;
+        };
+        let old_parent = self.regions[ix].parent;
+        if old_parent == Some(new_parent) {
+            return;
+        }
+        if let Some(op) = old_parent
+            && let Some(list) = self.children_of.get_mut(&op)
+        {
+            list.remove(&ix);
+        }
+        self.roster_generation = next_roster_generation();
+        self.regions[ix].parent = Some(new_parent);
+        self.children_of.entry(new_parent).or_default().insert(ix);
+        self.depths = region_depths(&self.regions, &self.ix_of);
+        self.ancestor_chain = self
+            .regions
+            .iter()
+            .map(|r| ancestry_chain(&self.regions, &self.ix_of, r.realm))
+            .collect();
+    }
+
+    /// ★ A CHILD LEAVES AT RUNTIME (the ruler switch, slice 2): the mirror of [`Self::adopt_child`].
+    /// The row is swap-removed and the row that took its slot is re-indexed; every per-row table
+    /// follows the same swap. A realm not on the roster is a no-op, so a release can be re-driven.
+    pub fn release_child(&mut self, realm: RealmId) {
+        let Some(&ix) = self.ix_of.get(&realm) else {
+            return;
+        };
+        self.roster_generation = next_roster_generation();
+        let last = self.regions.len() - 1;
+        let parent = self.regions[ix].parent;
+        // Drop the leaving row from its parent's child list, the grids and the radial list.
+        if let Some(p) = parent
+            && let Some(list) = self.children_of.get_mut(&p)
+        {
+            list.remove(&ix);
+        }
+        self.child_index.remove(realm);
+        self.aoi_index.remove(realm);
+        self.unindexed.retain(|r| *r != realm);
+        self.built_children.retain(|r| *r != realm);
+        // The leaving row's own radial entry, by its own distance — never a walk of the list (SL9).
+        let tier = parent
+            .map_or(self.root_frame(), |p| self.own_frame(p))
+            .tier();
+        let d = self.regions[ix]
+            .center
+            .in_parents_frame()
+            .delta_m(LatticePos::ORIGIN, tier)
+            .length();
+        if let Some(names) = self.radial.get_mut(&d.to_bits()) {
+            names.retain(|r| *r != realm);
+            if names.is_empty() {
+                self.radial.remove(&d.to_bits());
+            }
+        }
+        self.ix_of.remove(&realm);
+        // Swap-remove, then point every index-keyed table at the moved row's new slot.
+        self.regions.swap_remove(ix);
+        self.depths.swap_remove(ix);
+        self.ancestor_chain.swap_remove(ix);
+        if ix != last {
+            let moved = self.regions[ix].realm;
+            self.ix_of.insert(moved, ix);
+            self.depths[ix].2 = ix;
+            if let Some(mp) = self.regions[ix].parent
+                && let Some(list) = self.children_of.get_mut(&mp)
+            {
+                list.remove(&last);
+                list.insert(ix);
+            }
+            if let Some(movers) = parent.and_then(|p| self.movers_of.get_mut(&p)) {
+                movers.retain(|i| *i != ix);
+            }
+            for movers in self.movers_of.values_mut() {
+                for i in movers.iter_mut() {
+                    if *i == last {
+                        *i = ix;
+                    }
+                }
+            }
+        } else if let Some(movers) = parent.and_then(|p| self.movers_of.get_mut(&p)) {
+            movers.retain(|i| *i != ix);
+        }
+    }
+
     fn rebuild_child_index(&mut self) {
         self.rebuild_static_rows();
         let Some(own) = self.own_realm else {
@@ -336,6 +567,24 @@ impl RealmRegions {
             })
             .collect();
         self.child_index = ChildIndex::build(&children, tier);
+        self.unindexed = self
+            .regions
+            .iter()
+            .filter(|r| !self.child_index.answers_for(r.realm))
+            .map(|r| r.realm)
+            .collect();
+    }
+
+    /// The rows the child index does not answer for (see the field) — always asked, never walked.
+    #[must_use]
+    pub(crate) fn unindexed_rows(&self) -> &[RealmId] {
+        &self.unindexed
+    }
+
+    /// This realm's built direct children (see the field) — the hulls whose exterior it leases.
+    #[must_use]
+    pub(crate) fn built_children(&self) -> &[RealmId] {
+        &self.built_children
     }
 
     /// The child index this shard queries — see the field.
@@ -389,6 +638,7 @@ impl RealmRegions {
         let widest_extent = children
             .iter()
             .fold(0.0_f64, |acc, r| acc.max(r.shape.circumscribed_extent()));
+        self.widest_child_extent_m = widest_extent;
         self.widest_band_m = children
             .iter()
             .fold(0.0_f64, |acc, r| acc.max(r.aoi.tear_down_r_m()));
@@ -401,19 +651,18 @@ impl RealmRegions {
             })
             .collect();
         self.aoi_index = ChildIndex::build(&indexed, tier);
-        let mut radial: Vec<(f64, RealmId)> = children
-            .iter()
-            .map(|r| {
-                (
-                    r.center
-                        .in_parents_frame()
-                        .delta_m(LatticePos::ORIGIN, tier)
-                        .length(),
-                    r.realm,
-                )
-            })
-            .collect();
-        radial.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut radial: BTreeMap<u64, Vec<RealmId>> = BTreeMap::new();
+        for r in &children {
+            let d = r
+                .center
+                .in_parents_frame()
+                .delta_m(LatticePos::ORIGIN, tier)
+                .length();
+            radial.entry(d.to_bits()).or_default().push(r.realm);
+        }
+        for names in radial.values_mut() {
+            names.sort_unstable();
+        }
         self.radial = radial;
     }
 
@@ -437,9 +686,12 @@ impl RealmRegions {
         &self,
         d_out_m: f64,
     ) -> impl Iterator<Item = RealmId> + '_ {
-        let floor = d_out_m - self.widest_band_m;
-        let start = self.radial.partition_point(|(d, _)| *d < floor);
-        self.radial[start..].iter().map(|(_, r)| *r)
+        // A distance is never negative, so its bit pattern orders like the number; a floor below
+        // zero starts at zero (every child is reachable), exactly as the old partition did.
+        let floor = (d_out_m - self.widest_band_m).max(0.0);
+        self.radial
+            .range(floor.to_bits()..)
+            .flat_map(|(_, names)| names.iter().copied())
     }
 
     /// This realm's direct children that MOVE this tick — the orbiting and the driven — as a set.
@@ -464,7 +716,7 @@ impl RealmRegions {
     }
 
     /// ONE direct child of `own` by name — a lookup, never a scan.
-    pub(crate) fn direct_child(&self, own: RealmId, realm: RealmId) -> Option<&RealmRegion> {
+    pub fn direct_child(&self, own: RealmId, realm: RealmId) -> Option<&RealmRegion> {
         let r = &self.regions[*self.ix_of.get(&realm)?];
         (r.parent == Some(own)).then_some(r)
     }
@@ -808,7 +1060,7 @@ impl RealmRegions {
     /// without placing anybody. Split out so a question that is only about WHICH children exist (is any of
     /// them active?) does not pay for every mover's orbit solve; `child_placements` is defined on top of it,
     /// so the two can never come to disagree about what a direct child is.
-    pub(crate) fn direct_children(&self, own_realm: RealmId) -> impl Iterator<Item = &RealmRegion> {
+    pub fn direct_children(&self, own_realm: RealmId) -> impl Iterator<Item = &RealmRegion> {
         // A LOOKUP, NOT A SCAN — see `children_of` for the measurement that forced it. A realm with no
         // children is absent from the map and yields nothing, which is what the filter did.
         self.children_of

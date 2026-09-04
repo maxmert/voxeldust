@@ -149,6 +149,12 @@ pub struct GatewayView {
     pub shard_rosters_applied: u64,
     /// Rosters refused as older than the one held (a redelivery on a re-driven lane is expected).
     pub shard_roster_stale: u64,
+    /// `ExteriorMoved` statements applied (the ruler switch, slice 5): a realm on some chain moved house.
+    pub exterior_moves_applied: u64,
+    /// `ExteriorMoved` statements refused as older than the one held for that child.
+    pub exterior_moves_stale: u64,
+    /// Session chains spliced by an applied statement — the sessions aboard the moved realm.
+    pub exterior_moves_sessions_spliced: u64,
     pub frame_sub_desync: u64,
     pub transfer_unroutable: u64,
     pub transfer_control_parked: u64,
@@ -709,6 +715,9 @@ mod tests {
                 refused_unknown_sender: 26,
                 shard_rosters_applied: 27,
                 shard_roster_stale: 28,
+                exterior_moves_applied: 401,
+                exterior_moves_stale: 402,
+                exterior_moves_sessions_spliced: 403,
                 frame_sub_desync: 11,
                 transfer_unroutable: 12,
                 transfer_control_parked: 13,

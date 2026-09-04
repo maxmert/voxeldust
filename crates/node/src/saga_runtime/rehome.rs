@@ -289,6 +289,7 @@ pub(crate) fn rehome_ctx(
         // standing reaper ALWAYS parks with `flushed_pose: None` (a pre-flush death has no recoverable
         // pose — see the `to_realm` CAVEAT above), so nothing downstream could even reach a pose here.
         to_parent: None,
+        exterior: false,
     }
 }
 
@@ -340,6 +341,7 @@ pub(crate) fn process_rehome_starts(
                 gateway: dead_owner,
                 since: now,
                 flushed_pose: None, // HR1: the dead owner's store is sealed; the adopt pose is owed Slice 4
+                flushed_state: Vec::new(),
                 dead_observed_since: None,
                 dest_adopted: false,
                 opened: now,
@@ -347,8 +349,17 @@ pub(crate) fn process_rehome_starts(
         );
         // Parks immediately (start_rehome emits no actions); run_to_quiescence + commit_result PERSIST the
         // ReHoming snapshot so the armed re-home survives an orchestrator kill-9 (rehydrates parked).
-        let (final_state, tombstone, rejected, batch_gos) = run_to_quiescence(
-            &ctx, dead_owner, state, actions, dir, outbox, epoch, now, None,
+        let (final_state, tombstone, rejected, batch_gos, _won_inside) = run_to_quiescence(
+            &ctx,
+            dead_owner,
+            state,
+            actions,
+            dir,
+            outbox,
+            epoch,
+            now,
+            None,
+            &[],
         );
         commit_result(
             runtime,

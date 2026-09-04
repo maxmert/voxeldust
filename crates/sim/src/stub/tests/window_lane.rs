@@ -1536,6 +1536,94 @@ fn the_keep_alive_re_assert_re_serves_the_whole_set_so_silence_means_a_dead_real
     assert_eq!(stats.window_memberships_sent, 2);
 }
 
+/// [`window_rig`] with the shard's own realm NAMED, so the roster can adopt a child at runtime (the
+/// production boot names it; the plain rig's forest does not).
+fn window_rig_owned() -> Rig {
+    let mut rig = window_rig();
+    let forest = vec![
+        root_region(),
+        own_region(),
+        RealmRegion {
+            aoi: aoi_band(3),
+            ..region(OTHER_REALM, Some(OWN_REALM), WINDOW_CHILD_CENTER, 100.0)
+        },
+        region(
+            RealmId::Planet(43),
+            Some(OWN_REALM),
+            DVec3::new(-40_000.0, 0.0, 0.0),
+            100.0,
+        ),
+    ];
+    *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(forest).with_own_realm(OWN_REALM);
+    rig
+}
+
+/// A Child window on a child adopted AFTER the boot's static rows were folded has no hop row in the
+/// book that tick: counted as a missing hop, said once per keep-alive beat (both arms of the beat).
+#[test]
+fn a_child_window_whose_hop_row_is_missing_is_counted_and_said_once_per_beat() {
+    let mut rig = window_rig_owned();
+    let late = RealmId::Planet(77);
+    rig.world.resource_mut::<RealmRegions>().adopt_child(region(
+        late,
+        Some(OWN_REALM),
+        DVec3::new(-30_000.0, 0.0, 0.0),
+        100.0,
+    ));
+    let open = GatewayToShard::WindowOpen {
+        window: WindowId(5),
+        scope: WindowScope::Child(late),
+        static_held: None,
+    };
+    rig.set_local_tick(10); // ON the keep-alive beat (cadence 10 at 20 Hz)
+    rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+    rig.set_local_tick(11); // off the beat
+    rig.tick(vec![]);
+    assert_eq!(rig.world.resource::<StubStats>().window_hop_missing, 2);
+}
+
+/// The admitted set of a window may name a realm that left the roster since (a stale verdict) and a
+/// direct child with no look: neither gets a marker, and the emitter never panics on either.
+#[test]
+fn a_stale_admitted_realm_and_a_look_less_child_get_no_marker() {
+    let mut rig = window_rig_owned();
+    let blind = RealmId::Planet(78);
+    rig.world
+        .resource_mut::<RealmRegions>()
+        .adopt_child(RealmRegion {
+            look: None,
+            ..region(
+                blind,
+                Some(OWN_REALM),
+                DVec3::new(-35_000.0, 0.0, 0.0),
+                100.0,
+            )
+        });
+    let open = GatewayToShard::WindowOpen {
+        window: WindowId(6),
+        scope: WindowScope::Child(OTHER_REALM),
+        static_held: None,
+    };
+    rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+    {
+        let mut windows = rig.world.resource_mut::<OpenWindows>();
+        let held = windows
+            .0
+            .get_mut(&(GATEWAY, WindowId(6)))
+            .expect("the window is open");
+        held.membership_sent.insert(RealmId::Planet(99)); // never on this roster
+        held.membership_sent.insert(blind);
+    }
+    let sent = rig.tick(vec![]);
+    let bodies = window_bodies(&sent);
+    assert!(
+        bodies
+            .iter()
+            .all(|(_, _, subject, _)| *subject != RealmId::Planet(99) && *subject != blind),
+        "{bodies:?}"
+    );
+}
+
 #[test]
 fn a_child_window_ships_the_hop_row_pre_inverted_at_the_author() {
     // §2.2 R1: the hop row is the author's own frame expressed in the child's frame, the ONE
@@ -2525,10 +2613,9 @@ fn measure_the_galaxy_shards_tick_against_its_census() {
                 )
             });
         eprintln!(
-            "aoi index: edge {:e} m, {} cell entries over {} children, centre cell holds {}, \
+            "aoi index: {} leaves over {} children, the origin meets {}, \
              widest extent {:e} m, widest tear-down {:e} m",
-            ix.edge_m(),
-            ix.cell_entries(),
+            ix.stored_len(),
             ix.indexed_len(),
             ix.candidates(LatticePos::ORIGIN, tier).len(),
             widest.0,

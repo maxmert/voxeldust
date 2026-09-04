@@ -124,6 +124,11 @@ fn process_gateway_inbound(
                     Ok(InterShardFlow::ShardRoster(roster)) => {
                         on_shard_roster(roster, &mut sessions, &mut stats);
                     }
+                    // ★ THE SKY FOLLOWS THE HULL (the ruler switch, slice 5): a realm on some session's
+                    // chain moved house; the chains aboard it take the new ancestry.
+                    Ok(InterShardFlow::ExteriorMoved(moved)) => {
+                        super::home::on_exterior_moved(moved, &mut sessions, &mut stats);
+                    }
                     Ok(_) | Err(_) => stats.undecodable += 1,
                 },
                 // Membership (clock sync) is consumed by the follower system.

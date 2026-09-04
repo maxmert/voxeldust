@@ -14,7 +14,7 @@ use vd_core::collections::DetHashMap;
 use vd_core::entity_kind::EntityKind;
 
 /// Counters for conditions that are tolerated but must never be silent.
-#[derive(Resource, Debug, Default, PartialEq, Eq)]
+#[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct StubStats {
     /// Attach requests that arrived before the realm lease was granted; the
     /// gateway retries attach until it sees `SessionAttached` (at-least-once).
@@ -438,6 +438,19 @@ pub struct StubStats {
     /// this tick — the candidates the lookups returned plus the latched — against the roster it
     /// used to walk. On the galaxy with one occupant this must read a handful, not 279,380.
     pub aoi_candidates_visited: u64,
+    /// GAUGES for the pace line (measured, never argued — the fifth flight's galaxy at 61 ms): the
+    /// fold's own table sizes this tick — the membership ledger rows, the liveness rows, the interest
+    /// latch, the open windows and the observers folded.
+    pub aoi_membership_rows: u64,
+    pub aoi_liveness_rows: u64,
+    pub aoi_latch_rows: u64,
+    pub aoi_windows_open: u64,
+    pub aoi_observers: u64,
+    /// Index queries RUN for an observer this tick (the observer moved past its lead, its reach or the
+    /// roster changed, or it is new) and queries REUSED from the observer's memo — the second idea of
+    /// 2026-09-03: a star system that never moves in the galaxy asks once.
+    pub aoi_queries_run: u64,
+    pub aoi_queries_reused: u64,
     /// A `Child(c)` window whose hop child had NO row in the book this tick authored — the frame
     /// is withheld, counted and said. Pinned zero on every fixture: a rostered direct child always
     /// has a row (2026-09-02).
@@ -517,4 +530,42 @@ pub struct StubStats {
     /// Look horizon slice 4 — a byte that is neither `0` nor `1` ("nothing else is lawful" —
     /// §2 ASK B): refused + counted. 0 always; nonzero is a hostile or corrupted sender.
     pub realm_interest_unlawful: u64,
+    /// The ruler switch, slice 1 — the parent's swept verdict decided that one of its DRIVEN CHILDREN
+    /// (a hull) left it or entered a sibling: the exterior crossing. Counted per decision; the request
+    /// arm follows the owner's word.
+    pub exterior_crossings_decided: u64,
+    /// The ruler switch, slice 1 — a driven child was scanned while its exterior lease is not affirmed
+    /// for this realm: skipped (no verdict from a parent that does not author the placement).
+    pub exterior_scan_unleased: u64,
+    /// The ruler switch, slice 1 — an `ExteriorCrossingRequest` left this realm (latched, once per
+    /// crossing; the re-drive counts under `crossings_redriven` like every latch).
+    pub exterior_crossings_requested: u64,
+    /// The ruler switch, slice 1 — a latched crossing's destination is not a realm this shard's forest
+    /// can name (a built realm it does not host), so the keep-alive demand is skipped and counted
+    /// rather than assumed (was an `expect`).
+    pub crossing_keepalive_unnamed: u64,
+    /// The ruler switch, slice 2 — exteriors this realm flushed to a new parent (and froze).
+    pub exterior_flushed: u64,
+    /// The ruler switch, slice 2 — a `FlushSource` for an exterior this realm does not author: no pose.
+    pub exterior_flush_unheld: u64,
+    /// The ruler switch, slice 2 — an exterior's destination this realm could not place: no pose.
+    pub exterior_flush_unplaceable: u64,
+    /// The ruler switch, slice 2 — exteriors this realm adopted (now on its roster, authored by it).
+    pub exterior_adopted: u64,
+    /// The ruler switch, slice 2 — an arriving exterior refused: not this realm, or an unreadable blob.
+    pub exterior_arrival_refused: u64,
+    /// The ruler switch, slice 2 — exteriors this realm released at the demote.
+    pub exterior_released: u64,
+    /// The ruler switch, slice 2 — promotes acked for an exterior (adopted at its envelope).
+    pub exterior_promotes: u64,
+    /// The ruler switch, slice 3 — lineage statements this parent sent to adopted children.
+    pub lineage_stated: u64,
+    /// The ruler switch, slice 3 — lineage statements this child applied (it moved house).
+    pub lineage_applied: u64,
+    /// The ruler switch, slice 3 — a statement about a realm that is not this one: refused.
+    pub lineage_misrouted: u64,
+    /// The ruler switch, slice 3 — a statement held because its sender is not (yet) the exterior holder.
+    pub lineage_held_unattested: u64,
+    /// The ruler switch, slice 3 — a held statement discarded: the directory named another node.
+    pub lineage_discarded: u64,
 }

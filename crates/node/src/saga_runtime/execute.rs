@@ -24,7 +24,7 @@ use vd_wire::intershard::{
     PromoteCmd, RE_SOLICIT_STEP, TRANSIENT_ABANDON_STEP, TRANSIENT_DISCARD_STEP,
     TRANSIENT_DROP_STEP, TRANSIENT_RELEASE_STEP, TransientHandoff,
 };
-use vd_wire::seams::directory::{AuthorityRef, CasOutcome};
+use vd_wire::seams::directory::{AuthorityRef, CasOutcome, DirectoryKey};
 use vd_wire::seams::transfer_control::TransferControlAck;
 
 /// Map a gateway→saga ack to the FSM event it drives. `CasWon`/`CasLost` are NOT here — they
@@ -76,16 +76,24 @@ pub(crate) fn run_to_quiescence(
     epoch: EpochId,
     now: UniverseTick,
     flush_pose: Option<StampedPose>,
+    flush_state: &[u8],
 ) -> (
     SagaState,
     bool,
     Vec<(TransferId, AbortReason)>,
     Vec<BatchGo>,
+    bool,
 ) {
     let mut events: VecDeque<SagaEvent> = VecDeque::new();
     let mut tombstone = false;
     let mut rejected = Vec::new();
     let mut batch_gos = Vec::new();
+    // ★ WHETHER THE DIRECTORY COMMIT WON INSIDE THIS STEP. The win is fed back as an event right
+    // here, never through the caller, so a caller that wants to act on it (the exterior's reparent
+    // note) must be told. MEASURED on the fifth flight (2026-09-03): the note was taken only from the
+    // caller's own event, the hull's hand-down to its star committed without one, the reconciler
+    // never re-keyed it, the gateway was never told, and the pilot's picture froze.
+    let mut cas_won = false;
     loop {
         for action in actions {
             match action {
@@ -113,7 +121,7 @@ pub(crate) fn run_to_quiescence(
                 // Some/None branch lives in `emit_crossing` (a monomorphic helper, unit-tested both
                 // ways), so this arm stays a branchless dispatch (HR5).
                 SagaAction::EmitCrossing { fence } => {
-                    emit_crossing(ctx, fence, flush_pose, epoch, outbox);
+                    emit_crossing(ctx, fence, flush_pose, flush_state, epoch, outbox);
                 }
                 // Push the ORDERED Demote to the SOURCE shard (1d.5b.1, D-2) — the fence-enforced
                 // Owned→Frozen→Ghost that REPLACES the 1c.8 poll. Pure egress to ctx.source (its
@@ -158,7 +166,10 @@ pub(crate) fn run_to_quiescence(
                     let outcome =
                         dir.commit_cas(ctx.subject, expected, AuthorityRef::Shard(ctx.dest), now);
                     events.push_back(match outcome {
-                        CasOutcome::Won { new_fence } => SagaEvent::CasWon { new_fence },
+                        CasOutcome::Won { new_fence } => {
+                            cas_won = true;
+                            SagaEvent::CasWon { new_fence }
+                        }
                         CasOutcome::Lost { current } => SagaEvent::CasLost { current },
                     });
                 }
@@ -171,7 +182,10 @@ pub(crate) fn run_to_quiescence(
                     let outcome =
                         dir.commit_cas(ctx.subject, expected, AuthorityRef::Shard(target), now);
                     events.push_back(match outcome {
-                        CasOutcome::Won { new_fence } => SagaEvent::CasWon { new_fence },
+                        CasOutcome::Won { new_fence } => {
+                            cas_won = true;
+                            SagaEvent::CasWon { new_fence }
+                        }
                         CasOutcome::Lost { current } => SagaEvent::CasLost { current },
                     });
                 }
@@ -311,7 +325,7 @@ pub(crate) fn run_to_quiescence(
             None => break,
         }
     }
-    (state, tombstone, rejected, batch_gos)
+    (state, tombstone, rejected, batch_gos, cas_won)
 }
 
 /// Apply one event to an existing saga, then run it to quiescence + persist the result. A
@@ -331,10 +345,33 @@ pub(crate) fn deliver(
     let ctx = live.ctx;
     let gateway = live.gateway;
     let flush_pose = live.flushed_pose; // Copy; the EmitCrossing executor reads it
+    let flush_state = live.flushed_state.clone();
+    // The ruler switch, slice 4: an EXTERIOR's CAS win is the moment the child moved house — the
+    // reconciler re-keys its cell and its launch record from this note. The win arrives either as
+    // this step's own event (a wire CAS) or from inside the quiescence run (the in-process CAS —
+    // the shipped path, missed until the fifth flight measured it).
+    let won_outside = matches!(event, SagaEvent::CasWon { .. });
     let (state, actions) = saga::step(&ctx, live.state, event);
-    let (final_state, tombstone, rejected, batch_gos) = run_to_quiescence(
-        &ctx, gateway, state, actions, dir, outbox, epoch, now, flush_pose,
+    let (final_state, tombstone, rejected, batch_gos, won_inside) = run_to_quiescence(
+        &ctx,
+        gateway,
+        state,
+        actions,
+        dir,
+        outbox,
+        epoch,
+        now,
+        flush_pose,
+        &flush_state,
     );
+    let exterior_committed = ctx.exterior & (won_outside | won_inside);
+    if exterior_committed && let DirectoryKey::Ship(entity) = ctx.subject {
+        runtime.pending_reparents.push((
+            vd_core::pose::RealmId::Ship(entity),
+            ctx.to_realm,
+            ctx.dest,
+        ));
+    }
     commit_result(
         runtime,
         transfer,
@@ -481,6 +518,7 @@ pub(crate) fn commit_result(
             gateway: live.gateway,
             since: live.since,
             flushed_pose: live.flushed_pose,
+            flushed_state: live.flushed_state.clone(),
         };
         runtime
             .pending_writes

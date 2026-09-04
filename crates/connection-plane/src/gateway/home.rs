@@ -17,7 +17,7 @@ use vd_core::realm_coord::RealmCoord;
 use vd_core::{AccountId, Fence, SessionId};
 use vd_sim::io::MsgClass;
 use vd_sim::runtime::OutboundBox;
-use vd_wire::intershard::{DemandVerb, RealmDemand};
+use vd_wire::intershard::{DemandVerb, ExteriorMoved, RealmDemand};
 use vd_wire::seams::directory::OwnerRecord;
 use vd_wire::session_flow::GatewayToShard;
 
@@ -78,6 +78,68 @@ pub(crate) fn lineage_apply(lineage: &mut Vec<RealmId>, realm: RealmId) {
     } else {
         lineage.push(realm);
     }
+}
+
+/// ★ A REALM ON THIS SESSION'S CHAIN MOVED HOUSE (the ruler switch, slice 5): `realm` is now the
+/// child of the last entry of `new_ancestry` (root→parent). Everything ABOVE `realm` is replaced by
+/// `new_ancestry`; `realm` and everything below it (the session's own descent inside it) are kept.
+/// A pilot inside a hull that left its star system keeps standing in the hull; only the sky above
+/// the hull changes. `false` when `realm` is not on this chain (nothing to do), so a broadcast to
+/// every gateway costs a session not on the chain one lookup.
+///
+/// Example: the chain was `Universe / Galaxy 1 / System 7 / Ship hull`; the hull left System 7 for
+/// the galaxy; the new ancestry is `Universe / Galaxy 1`; the chain becomes
+/// `Universe / Galaxy 1 / Ship hull`. The window lane then closes the hull's window on System 7 and
+/// opens it on the galaxy, and the shadow scene bumps the origin epoch because the authors changed.
+pub(crate) fn lineage_splice(
+    lineage: &mut Vec<RealmId>,
+    realm: RealmId,
+    new_ancestry: &[RealmId],
+) -> bool {
+    let Some(pos) = lineage.iter().position(|r| *r == realm) else {
+        return false;
+    };
+    let tail: Vec<RealmId> = lineage[pos..].to_vec();
+    lineage.clear();
+    lineage.extend_from_slice(new_ancestry);
+    lineage.extend(tail);
+    true
+}
+
+/// ★ THE SKY FOLLOWS THE HULL (slice 5): the orchestrator's `ExteriorMoved` — splice every session chain
+/// that holds the moved child. A per-child tick guard refuses an older statement (a redelivery on the
+/// durable lane is expected; a rollback is not). Nothing else is touched here: the composer's next pass
+/// sees the changed authors and bumps the origin epoch itself (`ShadowScene::advance`), and the window
+/// derivation reads the new pairs and moves the child's window from the old parent to the new one. The
+/// sessions' routes stay, because the hull's own node did not change, so no fence rides this.
+pub(crate) fn on_exterior_moved(
+    moved: ExteriorMoved,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+) {
+    let child = moved.child.lowered();
+    if sessions
+        .exterior_moved_at
+        .get(&child)
+        .is_some_and(|held| moved.at < *held)
+    {
+        stats.exterior_moves_stale += 1;
+        return;
+    }
+    sessions.exterior_moved_at.insert(child, moved.at);
+    let chain = coord_lineage(&moved.child);
+    let ancestry = &chain[..chain.len() - 1];
+    // ★ THE NEW PARENT'S NODE, AT ONCE (item 4): the window derivation reads the parent's head from
+    // this map; without it the new window waited for the half-second head poll — the blink.
+    if let Some(parent) = ancestry.last() {
+        sessions.realm_heads.insert(*parent, moved.parent_node);
+    }
+    for session in sessions.by_session.values_mut() {
+        if lineage_splice(&mut session.lineage, child, ancestry) {
+            stats.exterior_moves_sessions_spliced += 1;
+        }
+    }
+    stats.exterior_moves_applied += 1;
 }
 
 /// A [`RealmCoord`]'s realm chain, root→leaf — THE session lineage the window derivation reads

@@ -455,14 +455,18 @@ pub const DEV: DevClusterParams = DevClusterParams {
     // Its own log said "the dynamic home realm did not become routable inside the bounded bootstrap
     // TTL", which reads like a failure and was in fact a healthy shard being shot while it worked.
     //
-    // 6000 ticks at 50 Hz is TWO MINUTES — deliberately generous, because the honest question right
-    // now is whether a shard EVER becomes routable at this census, and a tight bound cannot answer it.
+    // 6000 ticks at 50 Hz was TWO MINUTES — deliberately generous while the honest question was
+    // whether a shard EVER becomes routable at this census.
     //
-    // ⚠ THIS NUMBER IS A SYMPTOM AND MUST COME DOWN. A shard takes this long because it still builds
-    // all 233 220 star systems to learn where its own ONE sits — the crowding push makes a system's
-    // place depend on the systems before it. Fix that and this shrinks with it. A boot budget of two
-    // minutes is not something to ship; it is something to measure against while the real cost is cut.
-    boot_ticks_p99: 6_000,
+    // ★ RE-MEASURED 2026-09-04 on the RELEASE build (the owner's rule for window flights): the
+    // orchestrator's `rlm.boot_ticks_observed_max` read 216 ticks (4.3 s) over seventeen demand
+    // spawns on the sixth flight — a star system, a star, seven planets and the hull. The value here
+    // is that measurement, doubled and rounded to a whole ten seconds, so a spawn twice as slow is
+    // still not shot while it works. It is also the AoI's predictive horizon (F7): a pilot's wake-ahead
+    // lead is `speed × 10 s`, no longer `speed × 2 min`, so the galaxy wakes what the pilot can reach
+    // and not two minutes of everything. A DEBUG shard boots in 43–56 s at this census and WILL be
+    // re-spun under this bound — debug is for debugging, not for flights.
+    boot_ticks_p99: 500,
     // ★ THE HOME SEED (owner ruling 2026-08-20): the one world every player starts in, chosen from
     // the measured candidate table — see `vd_physics::worldgen::HOME_SEED` for its provenance and the
     // discovery-permanence law. Matches the shard/gateway bins' own VD_UNIVERSE_SEED default.

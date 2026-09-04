@@ -255,8 +255,10 @@ impl ScriptedClient {
             // track the scene EPOCH — the composed realm datagrams carry it, and a client that
             // ignored the level would hold every post-swap datagram forever (§2.7). Adopt the
             // level's epoch (the same swap the shipped net.rs runs) and replay the one-beat hold.
+            // This client holds no box scene to keep across a same-origin swap, so it forgets its
+            // realm tracks on every swap (the shipped client keeps them when the origin holds).
             ServerControlMsg::RealmRegistry { origin_epoch, .. } => {
-                if let Some(held) = self.realm_view.swap_epoch(origin_epoch) {
+                if let Some(held) = self.realm_view.swap_epoch(origin_epoch, false) {
                     let standing = self.delivered_view.own_location_frame();
                     let _ = self.realm_view.on_realm_snapshot(standing, held);
                 }
@@ -444,6 +446,7 @@ impl SteppableNode for ScriptedClient {
             drained,
             sent,
             backpressured: 0,
+            unknown_peers: 0,
             staging_shed: 0,
             reliable_shed: 0,
             unreachable,

@@ -137,6 +137,9 @@ pub(crate) struct SagaSnapshot {
     pub(crate) gateway: NodeId,
     pub(crate) since: UniverseTick,
     pub(crate) flushed_pose: Option<StampedPose>,
+    /// The ruler switch, slice 2 — the exterior blob beside the pose (empty for an occupant), so a
+    /// restart between the flush and the envelope re-emits the whole exterior, never a poseless one.
+    pub(crate) flushed_state: Vec<u8>,
 }
 
 /// The persisted go-token (D-6) — self-describing (carries its own `BatchId`) so rehydrate restores
@@ -244,6 +247,7 @@ pub(crate) fn rehydrate(
                 // re-drive on the first post-restart `scan_deadlines` tick (deterministic, never wedged).
                 since: UniverseTick(0),
                 flushed_pose: snapshot.flushed_pose,
+                flushed_state: snapshot.flushed_state.clone(),
                 // D-3: NOT persisted — a rehydrated saga re-accrues its abort budget from scratch (so a
                 // restart never fires an immediate irreversible abandon; the RAM tracker is also empty).
                 dead_observed_since: None,

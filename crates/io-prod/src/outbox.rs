@@ -512,6 +512,9 @@ fn send_durable_with_retry(
     for _ in 0..limits.max_send_retries {
         match transport.send_durable(peer, class, pay, Durability::Retained) {
             Ok(_) => return Ok(()),
+            // The peer book: a replay toward a node this process has no lane and no address for cannot
+            // drain by waiting — it is the dead-lane case, said by its own name.
+            Err(SendError::UnknownPeer(_)) => return Err(ReplayError::LaneDead { peer }),
             Err(SendError::QueueFull(returned)) => {
                 // RC-2b: distinguish a DEAD lane (the peer_writer task exited ⇒ the mpsc is closed) from a
                 // transiently-full one. A dead lane can NEVER drain ⇒ fail FAST (LaneDead) rather than spin

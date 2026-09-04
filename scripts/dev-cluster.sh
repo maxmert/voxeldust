@@ -15,10 +15,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# THE BUILD PROFILE — `VD_BUILD`, not `VD_PROFILE`, which is the orchestrator's own config profile (owner 2026-09-04: "we do real game window tests with release builds; if
+# issues, we can run dev build for debug"). `VD_BUILD=release` launches and builds the release
+# binaries; the default stays debug. client.sh reads the same variable, so one flight is one profile.
+PROFILE="${VD_BUILD:-debug}"
+case "$PROFILE" in
+    debug) PROFILE_FLAG="" ;;
+    release) PROFILE_FLAG="--release" ;;
+    *) echo "dev-cluster.sh: VD_BUILD must be 'debug' or 'release', got '$PROFILE'" >&2; exit 2 ;;
+esac
+
 # Resolve the real target dir (honours CARGO_TARGET_DIR / .cargo config), not a
-# hardcoded target/debug.
+# hardcoded target/<profile>.
 TARGET="$(cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT/Cargo.toml" \
-    | python3 -c 'import sys, json; print(json.load(sys.stdin)["target_directory"])')/debug"
+    | python3 -c 'import sys, json; print(json.load(sys.stdin)["target_directory"])')/$PROFILE"
 
 # The launcher spawns its sibling node binaries, so all of them must exist.
 need_build=0
@@ -33,7 +43,8 @@ if [[ "$need_build" == 1 ]]; then
     # ("Blocking waiting for file lock on build directory"). That turned a queued build
     # into a silent 30-minute stall indistinguishable from compiling. Measured 2026-08-11:
     # a 33m52s client build that wrote ZERO artifacts because it was queued the whole time.
-    cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins
+    # shellcheck disable=SC2086 — an empty flag must vanish, not become an empty argument.
+    cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins $PROFILE_FLAG
 fi
 
 # Default the slot to this worktree's stable value unless the caller set --slot.

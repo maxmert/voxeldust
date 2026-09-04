@@ -45,6 +45,12 @@ pub struct GatewayStats {
     /// lane is expected — but a rising count next to a router that is missing shards means pushes are
     /// arriving out of order and the tick guard is the only thing holding the line.
     pub shard_roster_stale: u64,
+    /// `ExteriorMoved` statements applied (the ruler switch, slice 5): a realm on some chain moved house.
+    pub exterior_moves_applied: u64,
+    /// `ExteriorMoved` statements refused as older than the one held for that child.
+    pub exterior_moves_stale: u64,
+    /// Session chains spliced by an applied statement — the sessions aboard the moved realm.
+    pub exterior_moves_sessions_spliced: u64,
     /// A session in the `subscribed_shards` reverse index for `from` had NO matching
     /// `SubEntry` in its hot `SubTable` (an index/table desync — an invariant breach the
     /// `publish_subs` co-republish makes impossible by construction). Counted, never a silent

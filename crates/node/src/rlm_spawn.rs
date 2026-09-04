@@ -568,6 +568,54 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
         }
     }
 
+    /// ★ A LIVE REALM MOVED HOUSE (the ruler switch, slice 4): its persisted launch intent is
+    /// rewritten with the new coord — `rehydrate` reads exactly that record, so a restart re-adopts
+    /// the realm under its TRUE parent — and the live slot and the path index follow. The node, its
+    /// ports and its cookie stay: the process did not move, only its place in the tree.
+    fn addr_of(&self, node: NodeId) -> Option<([u8; 16], u16)> {
+        let g = self.lock();
+        g.live.get(&node).map(|slot| {
+            let ip = match slot.addr.ip() {
+                std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+                std::net::IpAddr::V6(v6) => v6.octets(),
+            };
+            (ip, slot.addr.port())
+        })
+    }
+
+    fn reparent_realm(&self, node: NodeId, coord: &RealmCoord) -> Result<(), SpawnError> {
+        let mut g = self.lock();
+        if !g.live.contains_key(&node) {
+            return Err(SpawnError::UnknownNode(node));
+        }
+        let key = rlm_launch_store_key(node);
+        let recorded = g
+            .store
+            .scan(&key)
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| postcard::from_bytes::<LaunchIntent>(&v));
+        let Some(Ok(intent)) = recorded else {
+            return Err(SpawnError::LaunchFailed {
+                reason: "no readable launch intent to rewrite".into(),
+            });
+        };
+        g.store.put(
+            &key,
+            &encode(&LaunchIntent {
+                coord: coord.clone(),
+                ..intent
+            }),
+        );
+        g.store.commit();
+        g.store.flush();
+        let mut slot = g.live.remove(&node).expect("checked live above");
+        g.path_index.remove(slot.coord.path());
+        slot.coord = coord.clone();
+        g.insert_live(node, slot);
+        Ok(())
+    }
+
     fn live_nodes(&self) -> BTreeSet<NodeId> {
         let mut g = self.lock();
         // Reconcile the believed-live set against backend ground truth: any child the backend reports dead
@@ -860,6 +908,22 @@ mod tests {
     }
 
     #[test]
+    fn a_launched_nodes_address_is_answered_as_mapped_octets_and_a_strangers_is_not() {
+        // THE PEER BOOK reads the live slot: IPv4 rides IPv4-mapped in sixteen octets.
+        let fake = FakeBackend::default();
+        let sc = core(fake.clone(), tuning(1_000, 42_000));
+        let a = sc.spawn_realm(&system(1, 1), T).expect("spawn a");
+        let (ip, port) = sc.addr_of(a).expect("launched here");
+        assert_eq!(port, 42_000);
+        assert_eq!(&ip[..12], &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff]);
+        assert_eq!(
+            std::net::Ipv4Addr::from([ip[12], ip[13], ip[14], ip[15]]),
+            addr(42_000).ip()
+        );
+        assert_eq!(sc.addr_of(NodeId(9_999)), None, "a stranger has no slot");
+    }
+
+    #[test]
     fn spawn_mints_monotone_ids_and_books_each_peer_once() {
         let fake = FakeBackend::default();
         let sc = core(fake.clone(), tuning(1_000, 42_000));
@@ -952,6 +1016,42 @@ mod tests {
         assert_eq!(sc.live_nodes(), BTreeSet::from([b]));
         assert_eq!(sc.orphan_count(), 1);
         assert_eq!(fake.probes(), probes_after_reap + 1);
+    }
+
+    #[test]
+    fn a_reparented_realm_rehydrates_under_its_new_coord() {
+        // The ruler switch, slice 4: the launch intent is the one durable record of a realm's parent
+        // on the orchestrator's side. Rewritten at the crossing's commit, a restart reads the truth.
+        let store = MemStore::new();
+        let retained = store.clone();
+        let live_fake = FakeBackend::default();
+        let node = {
+            let sc = SpawnCore::new(
+                Box::new(store),
+                live_fake.clone(),
+                tuning(1_000, 42_000),
+                Vec::new(),
+            );
+            let node = sc.spawn_realm(&system(1, 1), T).expect("spawn");
+            sc.reparent_realm(node, &system(1, 2)).expect("reparent");
+            assert_eq!(sc.live_slots()[&node].coord(), &system(1, 2));
+            assert_eq!(
+                sc.reparent_realm(NodeId(9_999), &system(1, 2)),
+                Err(SpawnError::UnknownNode(NodeId(9_999)))
+            );
+            node
+        };
+        let sc = SpawnCore::rehydrate(
+            Box::new(retained),
+            FakeBackend::default(),
+            tuning(1_000, 42_000),
+            Vec::new(),
+        );
+        assert_eq!(
+            sc.live_slots().get(&node).map(LiveSlot::coord),
+            Some(&system(1, 2)),
+            "the restart re-adopts the realm under its new parent"
+        );
     }
 
     #[test]

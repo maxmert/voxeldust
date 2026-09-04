@@ -279,12 +279,23 @@ impl ClientState {
                 rows,
             } => match RealmScene::from_scene_rows(&rows) {
                 Ok(scene) => {
+                    // ★ THE SAME ORIGIN KEEPS ITS MOTION (owner 2026-09-04): the epoch bumps for
+                    // a chain change too — the pilot's hull handed from its star system to the
+                    // galaxy — and then every track and the sky anchor are still positions in the
+                    // origin's frame. Only a NEW origin (the pilot stepped into another realm)
+                    // forgets them; the next datagram at this epoch states the new anchor.
+                    // A track is forgotten only when a DELTA says its realm left the drawn set
+                    // (below), never at the swap level: the swap level can be composed from a
+                    // partial chain — the new hop's first level is still in flight — and a realm
+                    // missing from it is coming back next tick. The owner saw that as the star
+                    // blinking on the seventh flight (2026-09-04).
+                    let same_origin = self.origin == Some(origin);
                     self.scene = Arc::new(scene);
                     self.origin = Some(origin);
-                    // A new origin: the old anchor placed a realm this picture no longer stands
-                    // in. The next datagram at this epoch states the new one.
-                    self.sky_anchor = None;
-                    if let Some(held) = self.realm_view.swap_epoch(origin_epoch) {
+                    if !same_origin {
+                        self.sky_anchor = None;
+                    }
+                    if let Some(held) = self.realm_view.swap_epoch(origin_epoch, same_origin) {
                         // The held early datagram is at THIS epoch: its anchor is current too.
                         if let Some(anchor) = held.sky_anchor {
                             self.sky_anchor = Some(anchor);
@@ -311,7 +322,12 @@ impl ClientState {
                     return;
                 }
                 match self.scene.with_delta(&added, &removed) {
-                    Ok(scene) => self.scene = Arc::new(scene),
+                    Ok(scene) => {
+                        self.scene = Arc::new(scene);
+                        // The realms that LEFT the drawn set take their tracks with them (the
+                        // same-origin swap keeps every track, so this is the only place one ends).
+                        self.realm_view.forget(&removed);
+                    }
                     Err(_) => self.decode_errors += 1,
                 }
             }
@@ -1874,6 +1890,131 @@ mod tests {
     /// stragglers counted, holds an early NEXT-epoch datagram one beat, and replays it the moment
     /// its level lands — no gap, no double-draw. The one-space row filter stays alive through C1
     /// (§4.5 Topic 4) and keeps old-SPACE rows out even at the current epoch.
+    /// ★ THE SAME-ORIGIN SWAP (owner 2026-09-04, *"still blinks and stops for a second on
+    /// transitions"*): the hull the pilot stands in is handed from System 7 to the galaxy. The
+    /// origin is still the hull, so the epoch bumps but every track and the sky anchor are still
+    /// positions in the hull's frame: they are KEPT, and only a realm the new level no longer draws
+    /// loses its track. A level with a NEW origin still forgets everything.
+    #[test]
+    fn a_same_origin_epoch_bump_keeps_the_tracks_and_the_sky_anchor() {
+        use vd_core::pose::RealmId;
+        use vd_wire::channels::RealmSnapshotDatagram;
+        let hull = RealmId::Ship(EntityId::pack(
+            vd_core::entity_kind::EntityKind::Ship,
+            1,
+            1,
+            0,
+        ));
+        let planet = RealmId::Planet(9);
+        let star = RealmId::Star(5);
+        let mut c = core();
+        activate(&mut c);
+        // The first level: the origin is the hull, the planet and the star are drawn.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(
+                hull,
+                1,
+                vec![
+                    scene_row(planet, Some(hull), 5.0),
+                    scene_row(star, Some(hull), 9.0),
+                ],
+            ),
+        );
+        c.step(0.0);
+        let anchor = StampedPose::at_rest(
+            FrameRef::GalaxySpace { galaxy_seed: 1 },
+            DVec3::new(6.0, 0.0, -8.0),
+            UniverseTick(12),
+        );
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            postcard::to_allocvec(&RealmSnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 7,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(12),
+                origin_epoch: 1,
+                sky_anchor: Some(anchor),
+                realms: [(planet, -3.0), (star, 4.0)]
+                    .into_iter()
+                    .map(|(realm, x)| vd_wire::channels::RealmSnap {
+                        realm,
+                        frame: vd_core::pose::frame_for_realm(realm, None)
+                            .expect("a seeded realm resolves"),
+                        pose: StampedPose::at_rest(
+                            FrameRef::SystemSpace { system_seed: 7 },
+                            DVec3::new(x, 0.0, 0.0),
+                            UniverseTick(12),
+                        ),
+                    })
+                    .collect(),
+            })
+            .expect("test fixture"),
+        );
+        c.step(0.0);
+        assert_eq!(c.state().render_snapshot().sky_anchor(), Some(anchor));
+        assert!(c.state().realm_view.realm_pose(planet, 12.0).is_some());
+
+        // THE HAND-OVER: the chain changed, the epoch bumped, the origin is STILL the hull. The
+        // swap level names only the planet — the new hop's first level is still in flight — and
+        // the star's track is KEPT: a realm missing from a swap level is not gone.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(hull, 2, vec![scene_row(planet, Some(hull), 5.0)]),
+        );
+        c.step(0.0);
+        assert_eq!(c.state().realm_view.epoch(), 2);
+        assert_eq!(
+            c.state()
+                .realm_view
+                .realm_pose(planet, 12.0)
+                .map(|p| rpw(&p).x),
+            Some(-3.0),
+            "the planet's track survives a same-origin swap — no refill, no stop"
+        );
+        assert!(
+            c.state().realm_view.realm_pose(star, 12.0).is_some(),
+            "a realm missing from the swap level keeps its track — it is coming back"
+        );
+        // A DELTA says the star left the drawn set: its track goes with it.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            postcard::to_allocvec(&ServerControlMsg::RealmSceneDelta {
+                origin: hull,
+                origin_epoch: 2,
+                added: Vec::new(),
+                removed: vec![star],
+            })
+            .expect("test fixture"),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state().realm_view.realm_pose(star, 12.0),
+            None,
+            "a realm a delta removed loses its track"
+        );
+        assert_eq!(
+            c.state().render_snapshot().sky_anchor(),
+            Some(anchor),
+            "the sky anchor is still the hull's own place in the galaxy"
+        );
+
+        // A NEW ORIGIN (the pilot stepped out onto the planet): everything is forgotten.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(planet, 3, vec![scene_row(hull, Some(planet), 1.0)]),
+        );
+        c.step(0.0);
+        assert_eq!(c.state().realm_view.realm_pose(planet, 12.0), None);
+        assert!(c.state().render_snapshot().sky_anchor().is_none());
+    }
+
     #[test]
     fn a_new_epoch_level_swaps_the_scene_and_the_old_epochs_placements_are_forgotten() {
         use vd_core::pose::RealmId;

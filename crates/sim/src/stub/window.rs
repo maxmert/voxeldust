@@ -56,7 +56,7 @@ pub(crate) struct OpenWindow {
     /// and for the collision argument, which the relay baseline below already relies on.
     sent_bodies: BTreeMap<RealmId, u64>,
     /// Send-on-change: the last SL7 membership verdict shipped (ids only).
-    membership_sent: BTreeSet<RealmId>,
+    pub(crate) membership_sent: BTreeSet<RealmId>,
     /// Send-on-change: the (child fence, sealed bytes) last FORWARDED per live child on the Q2
     /// relay leg (`ShardToGateway::WindowRelayed`). Resets with the window — a re-opened window
     /// is re-served everything currently held, exactly what a fresh subscriber needs.
@@ -266,10 +266,9 @@ fn emit_window_frames(
             WindowScope::Child(child) => {
                 // The hop row exists only for a DIRECT child this shard actually authors: a
                 // subscriber naming a stranger gets nothing, counted, never a guess.
-                let Some(region) = regions
-                    .direct_children(config.realm)
-                    .find(|r| r.realm == child)
-                else {
+                // A LOOKUP, never a scan (SL9, MEASURED 2026-09-04): this `find` over the galaxy's
+                // 233 220 children ran once per window per tick — 90 % of a 26 ms tick for one pilot.
+                let Some(region) = regions.direct_child(config.realm, child) else {
                     stats.window_child_unrostered += 1;
                     tracing::warn!(
                         %child,
@@ -648,7 +647,14 @@ pub(crate) fn emit_realm_frames(
             Some(set) => regions.snaps_for(config.realm, head, set.iter().copied()),
             None => regions.authored_realm_snaps(config.realm, head),
         };
-        let bodies = current_bodies(&config, &regions, &child_luma.0, relay_admitted.as_ref());
+        let mut bodies = current_bodies(&config, &regions, &child_luma.0, relay_admitted.as_ref());
+        // ★ A BODY RIDES ONLY BESIDE ITS ROW (2026-09-04, the sixth flight): the gateway vouches a
+        // relayed body against THIS relay's own level, so a child the rows do not carry yet — a
+        // hull adopted this tick, whose placement the book states next tick — must not be named by
+        // a body either, or the gateway drops it as mis-authored and counts a fault. The two sets
+        // are drawn from the same regions, one tick apart; this makes them one statement.
+        let rostered: BTreeSet<RealmId> = realms.iter().map(|r| r.realm).collect();
+        bodies.retain(|(subject, _)| (*subject == config.realm) | rostered.contains(subject));
         if !bodies.is_empty() {
             // THE SEALED INTERIOR FORWARD (look horizon slice 3, owner-approved 2026-08-17 —
             // look_horizon.md RULINGS + §2 ASK A): each held child batch's OWN half, verbatim,

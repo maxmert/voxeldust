@@ -178,6 +178,7 @@ fn arrival_frame(
 /// a pose wearing a frame this shard carries no region for is a realm it was never told the position of,
 /// and it must fall back to the primary realm so the conversion below FAILS LOUDLY instead of quietly
 /// treating a stranger's frame as an anchor it could measure from.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn flush_pose_for_dest(
     pose: StampedPose,
     to_realm: RealmId,
@@ -186,6 +187,11 @@ pub(crate) fn flush_pose_for_dest(
     placements: &PlacementLedger,
     tick: UniverseTick,
     stats: &mut StubStats,
+    // Re-validate that the subject really left this realm and really reached the destination (an
+    // occupant's flush) — or neither (an exterior's, whose early start ships while the hull is still
+    // inside this realm and still short of the destination's shell, by design). Bitwise `&` with the
+    // direction test below, so both arms are one region each (HR5).
+    stale_exit_check: bool,
 ) -> Option<StampedPose> {
     // THE FLUSH READS THE WORLD OF NOW (the placement arc S2 — the B-1 fix). The decision to leave was
     // made ticks ago and a latched dot's stamp FROZE there, while every moving placement swept on: at
@@ -261,7 +267,9 @@ pub(crate) fn flush_pose_for_dest(
         // true: refuse the flush. No `SourceFlushed` ⇒ the saga aborts PRE-commit within the abort budget
         // and thaws ⇒ this shard keeps authority and the scan re-decides. A self-crossing
         // (`to_realm == from_realm`) skips the check: "still inside myself" is not a stale departure.
-        if to_realm != from_realm {
+        // An EXTERIOR's flush skips it by its caller's word: the early start ships while the hull is
+        // still inside, by design (the ruler switch, slice 2).
+        if stale_exit_check & (to_realm != from_realm) {
             // The head book IS the departure book: `from_realm` is this shard's own realm, and the
             // pose was just re-stamped to the head's own instant.
             let book = head;
@@ -396,7 +404,10 @@ pub(crate) fn flush_pose_for_dest(
             let (held, sd) = verdict
                 .map(|v| (v.member, v.signed_distance_m))
                 .unwrap_or((false, f64::MAX));
-            if !held {
+            // ★ THE EARLY START (the ruler switch, slice 1): an exterior's flush ships while the hull
+            // is still on its way to the destination's shell — the verdict was made on the LED point,
+            // by design — so this re-validation is the occupant's alone, like the exit one above.
+            if !held & stale_exit_check {
                 stats.flush_stale_entry += 1;
                 tracing::warn!(
                     to = ?to_realm,

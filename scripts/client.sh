@@ -19,8 +19,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# THE BUILD PROFILE — the same `VD_BUILD` dev-cluster.sh reads (owner 2026-09-04: window tests run
+# release builds; a debug build is for debugging). Default debug.
+PROFILE="${VD_BUILD:-debug}"
+case "$PROFILE" in
+    debug) PROFILE_FLAG="" ;;
+    release) PROFILE_FLAG="--release" ;;
+    *) echo "client.sh: VD_BUILD must be 'debug' or 'release', got '$PROFILE'" >&2; exit 2 ;;
+esac
+
 TARGET="$(cargo metadata --no-deps --format-version 1 --manifest-path "$ROOT/Cargo.toml" \
-    | python3 -c 'import sys, json; print(json.load(sys.stdin)["target_directory"])')/debug"
+    | python3 -c 'import sys, json; print(json.load(sys.stdin)["target_directory"])')/$PROFILE"
 
 SLOT=""
 AGENT=0
@@ -46,8 +55,9 @@ done
 # dev-cluster.sh: `-q` hides "Blocking waiting for file lock on build directory", which is
 # what a build queued behind another cargo prints, and without it a queued build looks
 # exactly like a compiling one for as long as the queue lasts.
+# shellcheck disable=SC2086 — an empty flag must vanish, not become an empty argument.
 [[ -x "$TARGET/vd-slot" && -x "$TARGET/vd-devcluster" ]] \
-    || cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins
+    || cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins $PROFILE_FLAG
 
 # Default the slot to this worktree's stable value (same derivation dev-cluster.sh used).
 if [[ -z "$SLOT" ]]; then
@@ -91,7 +101,8 @@ if [[ "$FAST" == "1" ]]; then
     FEATURES="dev-control,render-dylib"
 fi
 
-cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --features "$FEATURES"
+# shellcheck disable=SC2086
+cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins --bin client --features "$FEATURES" $PROFILE_FLAG
 
 # The agent drives this client over the dev-control listener: input injection at
 # the same seam the keyboard uses, `state`/`wait-until` reads of the decoded

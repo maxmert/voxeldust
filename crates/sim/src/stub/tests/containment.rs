@@ -278,9 +278,10 @@ fn a_subject_this_shard_cannot_place_in_its_own_frame_still_gets_the_full_scan()
 
 #[test]
 fn worth_asking_evaluates_everything_the_lookup_cannot_speak_for() {
-    // THE FOUR ARMS OF THE SKIP DECISION, each on its own (HR5), because this is the one function that
+    // THE ARMS OF THE SKIP DECISION, each on its own (HR5), because this is the one function that
     // can silently lose a crossing: every arm that returns TRUE is a region the fold still evaluates,
-    // and the single FALSE at the end is the only place work is ever dropped.
+    // and the single FALSE at the end is the only place work is ever dropped. (The abstain arm went
+    // with the grid: the tree answers every span.)
     use super::worth_asking;
     use vd_core::child_index::{ChildIndex, IndexedChild};
 
@@ -297,33 +298,12 @@ fn worth_asking_evaluates_everything_the_lookup_cannot_speak_for() {
     let empty_chain = BTreeSet::new();
     let no_memory = RegionMembership::default();
 
-    // ARM 0 — THE LOOKUP ABSTAINED (slice S5). A segment wider than the index can enumerate answers
-    // nothing at all, and that is IGNORANCE, not a miss. Evaluate everything, which is conservative
-    // and therefore always correct. Without this term the swept verdict would silently stop being
-    // asked for exactly the fast subjects it exists for.
-    assert!(worth_asking(
-        false,
-        &ix,
-        &[],
-        &no_memory,
-        &empty_chain,
-        indexed
-    ));
-
     // ARM 1 — NOT INDEXED. An ancestor, this realm itself, or anything that moves. The index has no
     // opinion, so the fold must ask. This is the arm that keeps the whole thing conservative.
-    assert!(worth_asking(
-        true,
-        &ix,
-        &[],
-        &no_memory,
-        &empty_chain,
-        unindexed
-    ));
+    assert!(worth_asking(&ix, &[], &no_memory, &empty_chain, unindexed));
 
     // ARM 2 — THE LOOKUP NAMED IT.
     assert!(worth_asking(
-        true,
         &ix,
         &[indexed],
         &no_memory,
@@ -335,28 +315,14 @@ fn worth_asking_evaluates_everything_the_lookup_cannot_speak_for() {
     // decide RELEASE, however far the lookup now thinks it is. Skipping here would strand it inside.
     let mut remembered = RegionMembership::default();
     remembered.set(indexed, true);
-    assert!(worth_asking(
-        true,
-        &ix,
-        &[],
-        &remembered,
-        &empty_chain,
-        indexed
-    ));
+    assert!(worth_asking(&ix, &[], &remembered, &empty_chain, indexed));
 
     // ARM 4 — ON THE DERIVED CHAIN. Same reason, for the membership nobody stored.
     let chain = BTreeSet::from([indexed]);
-    assert!(worth_asking(true, &ix, &[], &no_memory, &chain, indexed));
+    assert!(worth_asking(&ix, &[], &no_memory, &chain, indexed));
 
     // THE ONLY SKIP: indexed, not named, not remembered, not on the chain.
-    assert!(!worth_asking(
-        true,
-        &ix,
-        &[],
-        &no_memory,
-        &empty_chain,
-        indexed
-    ));
+    assert!(!worth_asking(&ix, &[], &no_memory, &empty_chain, indexed));
 }
 
 #[test]
@@ -2244,4 +2210,1186 @@ fn a_zero_dwell_boundary_tuning_fails_loud_at_boot() {
     // The fail-loud validation in `register_stub_shard` (mirrors the tick-pair guard). `k_dwell` is the
     // post-commit cooldown `should_rehome` still reads (§2.7); zero fails `BoundaryTuning::validate`.
     let _ = Rig::with_config(bad);
+}
+
+// ===================== the ruler switch, slice 1: a driven child is a subject =====================
+
+/// The escape forest with a HULL berthed inside the own-shell: root ⊃ parent ⊃ own (r = 1000) ⊃ hull
+/// (a 20 m shell at x = 500). The hull is a DRIVEN child the shard authors.
+fn plant_escape_regions_with_hull(rig: &mut Rig, hull: RealmId) {
+    let parent = region(PARENT_REALM, Some(ROOT_REALM), DVec3::ZERO, 100_000.0);
+    let own_small = region(OWN_REALM, Some(PARENT_REALM), DVec3::ZERO, 1000.0);
+    let berth = region(hull, Some(OWN_REALM), DVec3::new(500.0, 0.0, 0.0), 20.0);
+    *rig.world.resource_mut::<RealmRegions>() =
+        RealmRegions::new(vec![root_region(), parent, own_small, berth]);
+}
+
+fn hull_child() -> (RealmId, EntityId) {
+    let entity = EntityId::pack(EntityKind::Ship, 1, 1, 0);
+    (RealmId::Ship(entity), entity)
+}
+
+fn drive_hull(rig: &mut Rig, hull: RealmId, pos_m: DVec3, vel_mps: DVec3) {
+    rig.world
+        .resource_mut::<crate::stub::drive::DrivenChildren>()
+        .0
+        .insert(
+            hull,
+            crate::stub::drive::DrivenChild {
+                state: crate::stub::drive::DrivenState {
+                    pos_m,
+                    vel_mps,
+                    orient: DQuat::IDENTITY,
+                    spin_radps: DVec3::ZERO,
+                },
+                drive: ([0; 3], [0; 3]),
+                drive_at: (Fence::GENESIS, UniverseTick(0)),
+                facts: None,
+                facts_at: (Fence::GENESIS, UniverseTick(0)),
+                frozen: false,
+            },
+        );
+}
+
+fn exterior_decided(rig: &Rig) -> u64 {
+    rig.world.resource::<StubStats>().exterior_crossings_decided
+}
+
+#[test]
+fn a_driven_child_at_rest_in_its_berth_is_no_crossing_even_inside_its_own_bound() {
+    // The hull's own region holds the hull's centre by construction. Without the exclusion the fold
+    // would name the hull as its own deepest container and decide a crossing into itself.
+    let (hull, _) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    plant_escape_regions_with_hull(&mut rig, hull);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(1));
+    drive_hull(&mut rig, hull, DVec3::ZERO, DVec3::ZERO);
+    for t in 2..6 {
+        rig.set_local_tick(t);
+        let _ = rig.tick(vec![]);
+    }
+    assert_eq!(exterior_decided(&rig), 0);
+    assert_eq!(rig.world.resource::<StubStats>().exterior_scan_unleased, 0);
+}
+
+#[test]
+fn a_driven_child_leaving_the_parents_shell_is_decided_once_per_dwell() {
+    let (hull, _) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    plant_escape_regions_with_hull(&mut rig, hull);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(1));
+    // Inside first (one in-band tick primes membership), then 4500 m of travel from the berth: the
+    // centre sits at x = 5000, outside the own-shell (r = 1000), inside the parent (r = 100 000).
+    drive_hull(&mut rig, hull, DVec3::ZERO, DVec3::ZERO);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    drive_hull(&mut rig, hull, DVec3::new(4500.0, 0.0, 0.0), DVec3::ZERO);
+    rig.set_local_tick(3);
+    let _ = rig.tick(vec![]);
+    assert_eq!(exterior_decided(&rig), 1, "the exit is decided");
+    // The cooldown holds: the next tick decides nothing new while the hull dwells outside.
+    rig.set_local_tick(4);
+    let _ = rig.tick(vec![]);
+    assert_eq!(
+        exterior_decided(&rig),
+        1,
+        "decided once per dwell, not once per tick"
+    );
+    // No dot request rode the wire: the exterior arm is its own, and it is pending the owner's word.
+    assert_eq!(rig.world.resource::<StubStats>().crossings_requested, 0);
+}
+
+#[test]
+fn a_driven_child_is_led_by_its_own_velocity_over_the_request_ttl() {
+    // The early start: the hull's TRUE point is inside (x = 500), but led by its velocity over the
+    // request ttl (20 ticks × 0.05 s = 1 s at 3000 m/s ⇒ x = 3500) it is outside ⇒ decided now.
+    let (hull, _) = hull_child();
+    let mut rig = Rig::new();
+    rig.world.resource_mut::<StubConfig>().request_ttl_ticks = 20;
+    rig.grant_realm();
+    plant_escape_regions_with_hull(&mut rig, hull);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(1));
+    drive_hull(&mut rig, hull, DVec3::ZERO, DVec3::ZERO);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    drive_hull(&mut rig, hull, DVec3::ZERO, DVec3::new(3000.0, 0.0, 0.0));
+    rig.set_local_tick(3);
+    let _ = rig.tick(vec![]);
+    assert_eq!(
+        exterior_decided(&rig),
+        1,
+        "the led point leaves before the hull does"
+    );
+}
+
+#[test]
+fn a_driven_child_whose_exterior_this_realm_does_not_hold_is_skipped_and_counted() {
+    let (hull, _) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    plant_escape_regions_with_hull(&mut rig, hull);
+    // No exterior lease: this realm does not author the placement, so it may not decide.
+    drive_hull(&mut rig, hull, DVec3::new(4500.0, 0.0, 0.0), DVec3::ZERO);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    assert_eq!(exterior_decided(&rig), 0);
+    assert_eq!(rig.world.resource::<StubStats>().exterior_scan_unleased, 1);
+}
+
+/// The `ExteriorCrossingRequest`s that rode the wire to the orchestrator.
+fn exterior_requests(
+    sent: &[(NodeId, MsgClass, Vec<u8>)],
+) -> Vec<vd_wire::intershard::ExteriorCrossingRequest> {
+    sent.iter()
+        .filter_map(
+            |(_, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                Ok(InterShardFlow::ExteriorCrossingRequest(r)) => Some(r),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+#[test]
+fn a_driven_child_entering_a_direct_childs_shell_is_handed_down_to_that_child() {
+    // The ruler switch, the INWARD leg: the galaxy carries a hull into System 8's shell and must ask
+    // the orchestrator to move the hull's exterior DOWN to System 8. Here: OWN holds the hull and a
+    // child Planet(9) 5 km out; the hull is driven into the planet's shell in one swept step.
+    let (hull, entity) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let parent = region(PARENT_REALM, Some(ROOT_REALM), DVec3::ZERO, 1.0e9);
+    let own = region(OWN_REALM, Some(PARENT_REALM), DVec3::ZERO, 100_000.0);
+    let berth = region(hull, Some(OWN_REALM), DVec3::new(500.0, 0.0, 0.0), 20.0);
+    let planet = region(
+        RealmId::Planet(9),
+        Some(OWN_REALM),
+        DVec3::new(5000.0, 0.0, 0.0),
+        500.0,
+    );
+    *rig.world.resource_mut::<RealmRegions>() =
+        RealmRegions::new(vec![root_region(), parent, own, berth, planet])
+            .with_own_realm(OWN_REALM);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(5));
+    drive_hull(&mut rig, hull, DVec3::ZERO, DVec3::ZERO);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    // 4500 m of travel from the berth: the centre sits at x = 5000, inside the planet's shell.
+    drive_hull(&mut rig, hull, DVec3::new(4500.0, 0.0, 0.0), DVec3::ZERO);
+    rig.set_local_tick(3);
+    let sent = rig.tick(vec![]);
+    assert_eq!(exterior_decided(&rig), 1, "the entry is decided");
+    let reqs = exterior_requests(&sent);
+    assert_eq!(reqs.len(), 1, "one request, down to the child: {reqs:?}");
+    assert_eq!(reqs[0].subject, DirectoryKey::Ship(entity));
+    assert_eq!(reqs[0].from_realm, OWN_REALM);
+    assert_eq!(reqs[0].to_realm, RealmId::Planet(9));
+}
+
+#[test]
+fn a_hull_crossing_a_star_systems_shell_at_speed_on_the_galaxys_ruler_is_handed_down() {
+    // The ruler switch, the INWARD leg at the GALAXY's own rung (2 m cells): the galaxy carries a hull
+    // at 135 m per tick through System 8's 1 km shell — fifteen ticks inside — and must decide the
+    // entry on the swept line, with the request naming System 8. This is the fixture's geometry in
+    // the unit rig, so a refusal has a counter to name.
+    let galaxy = RealmId::Galaxy(1);
+    let system_8 = RealmId::System(8);
+    let (hull, entity) = hull_child();
+    let cfg = StubConfig {
+        realm: galaxy,
+        own_coord: StubConfig::root_coord(galaxy),
+        held_realms: StubConfig::single_realm(galaxy),
+        frame: FrameRef::GalaxySpace { galaxy_seed: 1 },
+        request_ttl_ticks: 40,
+        ..config()
+    };
+    let mut rig = Rig::with_config(cfg);
+    grant_realm_for(&mut rig, galaxy);
+    let at = |centre: DVec3, tier: Tier| {
+        vd_core::geometry::ParentCentre::authored(LatticePos::from_metres(centre, tier))
+    };
+    let mk =
+        |realm: RealmId, parent: Option<RealmId>, centre: DVec3, tier: Tier, r: f64| RealmRegion {
+            realm,
+            center: at(centre, tier),
+            frame: match realm {
+                RealmId::Ship(ship) => FrameRef::ShipLocal { ship },
+                RealmId::Galaxy(g) => FrameRef::GalaxySpace { galaxy_seed: g },
+                other => frame_of(other),
+            },
+            shape: Boundary::Shell { r },
+            look: Some(Boundary::Shell { r }),
+            band: band(),
+            aoi: vd_core::geometry::AoiConfig::inert(),
+            parent,
+        };
+    let regions = vec![
+        mk(galaxy, None, DVec3::ZERO, Tier::Galaxy, 1.0e12),
+        mk(
+            system_8,
+            Some(galaxy),
+            DVec3::new(0.0, 0.0, -50_000.0),
+            Tier::Galaxy,
+            1_000.0,
+        ),
+        mk(
+            hull,
+            Some(galaxy),
+            DVec3::new(0.0, 0.0, -1_000.0),
+            Tier::Galaxy,
+            20.0,
+        ),
+    ];
+    *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(regions).with_own_realm(galaxy);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(5));
+    // The hull is driven by hand along -z at 135 m per tick, its velocity stated so the lead is real.
+    let vel = DVec3::new(0.0, 0.0, -2_700.0);
+    let mut decided_at = None;
+    let mut reqs = Vec::new();
+    for i in 0..600u64 {
+        let z = -(i as f64) * 135.0;
+        drive_hull(&mut rig, hull, DVec3::new(0.0, 0.0, z), vel);
+        rig.set_local_tick(2 + i);
+        let sent = rig.tick(vec![]);
+        reqs.extend(exterior_requests(&sent));
+        if decided_at.is_none() && exterior_decided(&rig) > 0 {
+            decided_at = Some(i);
+        }
+        if !reqs.is_empty() {
+            break; // the request is out and latched: the demote below answers it
+        }
+    }
+    let stats = rig.world.resource::<StubStats>();
+    assert!(
+        decided_at.is_some(),
+        "the entry was never decided: cross_tier_refused {} prior_unhosted {} book_miss {} unleased {}",
+        stats.cross_tier_refused,
+        stats.containment_prior_unhosted,
+        stats.placement_book_miss,
+        stats.exterior_scan_unleased
+    );
+    assert_eq!(reqs[0].subject, DirectoryKey::Ship(entity));
+    assert_eq!(reqs[0].to_realm, system_8, "handed DOWN to System 8");
+    // THE SOURCE SIDE OF THE HAND-DOWN: the demote of a Ship subject releases the exterior AND clears
+    // the crossing latch the request armed (the ruler switch, slice 2).
+    assert!(
+        rig.world
+            .resource::<RequestInFlight>()
+            .0
+            .contains_key(&entity)
+    );
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::Demote(vd_wire::intershard::DemoteCmd {
+            transfer: TransferId(900),
+            subject: DirectoryKey::Ship(entity),
+            new_owner_fence: Fence(9),
+            step_id: vd_wire::intershard::DEMOTE_STEP,
+        }),
+    )]);
+    assert!(
+        !rig.world
+            .resource::<RequestInFlight>()
+            .0
+            .contains_key(&entity)
+    );
+    assert_eq!(
+        rig.world.resource::<StubStats>().crossing_latches_cleared,
+        1
+    );
+    assert!(!sent.is_empty(), "the demote is acked");
+    // THE RELIABLE CARRIER'S OTHER ARM through the inbox: a child's facts from a node the directory
+    // does not place at that child are refused and counted, never applied.
+    let coord = rig
+        .world
+        .resource::<RealmRegions>()
+        .coord_of(hull)
+        .or_else(|| Some(StubConfig::root_coord(galaxy).child(vd_core::worldgen::level_of(hull))))
+        .expect("a coord");
+    rig.tick(vec![wire_msg(
+        NodeId(4_040),
+        MsgClass::Saga,
+        &InterShardFlow::ChildFacts(vd_wire::intershard::ChildFacts {
+            child: coord,
+            child_fence: Fence(1),
+            at: UniverseTick(1),
+            mass_g: 1,
+            cross_section_mm2: 1,
+            drag_micro: 1,
+            declared: vd_wire::intershard::DeclaredStates::default(),
+        }),
+    )]);
+    let stats = rig.world.resource::<StubStats>();
+    assert_eq!(
+        stats.child_facts_received, 0,
+        "facts from an unattested node are never held"
+    );
+    assert_eq!(
+        stats.child_facts_misrouted + stats.child_facts_unattested,
+        1
+    );
+    // A Membership-class frame (the clock's business) is ignored by the stub's dispatch.
+    rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Membership,
+        &InterShardFlow::PeerLocate(vd_wire::intershard::PeerLocate {
+            node: NodeId(1),
+            at: UniverseTick(1),
+        }),
+    )]);
+}
+
+#[test]
+fn a_driven_childs_exit_rides_the_exterior_request_arm_once_and_is_re_driven_on_the_ttl() {
+    let (hull, entity) = hull_child();
+    let mut rig = Rig::new();
+    rig.world.resource_mut::<StubConfig>().request_ttl_ticks = 3;
+    rig.world
+        .resource_mut::<StubConfig>()
+        .crossing_redrive_budget = 1;
+    rig.grant_realm();
+    plant_escape_regions_with_hull(&mut rig, hull);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(5));
+    drive_hull(&mut rig, hull, DVec3::ZERO, DVec3::ZERO);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    drive_hull(&mut rig, hull, DVec3::new(4500.0, 0.0, 0.0), DVec3::ZERO);
+    rig.set_local_tick(3);
+    let sent = rig.tick(vec![]);
+    let reqs = exterior_requests(&sent);
+    assert_eq!(reqs.len(), 1, "one request per crossing: {reqs:?}");
+    assert_eq!(
+        reqs[0],
+        vd_wire::intershard::ExteriorCrossingRequest {
+            subject: DirectoryKey::Ship(entity),
+            from_realm: OWN_REALM,
+            to_realm: PARENT_REALM,
+            subject_fence: Fence(5),
+            attempt: 0,
+        }
+    );
+    assert!(
+        crossing_requests(&sent).is_empty(),
+        "an exterior never rides the session-bearing arm"
+    );
+    assert_eq!(
+        rig.world
+            .resource::<StubStats>()
+            .exterior_crossings_requested,
+        1
+    );
+    // Latched: the next tick emits nothing new while the hull dwells outside.
+    rig.set_local_tick(4);
+    let sent = rig.tick(vec![]);
+    assert!(exterior_requests(&sent).is_empty());
+    // The ttl passes with no terminal: the SAME request is re-driven, on the SAME arm.
+    rig.set_local_tick(6);
+    let sent = rig.tick(vec![]);
+    let again = exterior_requests(&sent);
+    assert_eq!(again.len(), 1, "re-driven once on the ttl: {again:?}");
+    assert_eq!(
+        again[0], reqs[0],
+        "the re-drive re-mints the byte-identical request"
+    );
+    assert_eq!(rig.world.resource::<StubStats>().crossings_redriven, 1);
+    // The keep-alive for the destination is skipped and counted: this forest can name the parent,
+    // so the count stays zero here — the unnamed arm is pinned by the hull-into-hull case below.
+    assert_eq!(
+        rig.world.resource::<StubStats>().crossing_keepalive_unnamed,
+        0
+    );
+}
+
+// ===================== the ruler switch, slice 2: a child arrives and leaves at runtime =====================
+
+#[test]
+fn a_parent_adopts_a_child_region_at_runtime_and_releases_it_with_every_table_in_step() {
+    let (hull, _) = hull_child();
+    let far = RealmId::Planet(77);
+    // own(r=1000) holds a seeded planet; the hull arrives, then leaves; the planet was the LAST row
+    // before the hull, so the release swaps it back into the hull's slot and must re-index it.
+    let mut regions = RealmRegions::new(vec![
+        root_region(),
+        region(OWN_REALM, Some(ROOT_REALM), DVec3::ZERO, 1000.0),
+        aoi_child(far, OWN_REALM, 50.0, 0),
+    ])
+    .with_own_realm(OWN_REALM);
+    let berth = region(hull, Some(OWN_REALM), DVec3::new(500.0, 0.0, 0.0), 20.0);
+    // Somebody else's child is refused: only MY direct children are mine to adopt.
+    regions.adopt_child(region(
+        RealmId::Planet(5),
+        Some(ROOT_REALM),
+        DVec3::ZERO,
+        1.0,
+    ));
+    assert!(
+        regions
+            .direct_child(ROOT_REALM, RealmId::Planet(5))
+            .is_none()
+    );
+    regions.adopt_child(berth);
+    assert!(
+        regions.direct_child(OWN_REALM, hull).is_some(),
+        "on the roster"
+    );
+    assert!(
+        regions.child_index().answers_for(hull),
+        "in the containment grid"
+    );
+    assert_eq!(
+        regions.coord_of(hull).map(|c| c.lowered()),
+        Some(hull),
+        "its lineage resolves through the forest"
+    );
+    let ix = regions.ix_of[&hull];
+    assert_eq!(regions.depths[ix].1, hull);
+    assert_eq!(regions.depths[ix].0, 2, "root → own → hull");
+    assert!(regions.ancestor_chain[ix].contains(&OWN_REALM));
+    assert_eq!(regions.direct_children(OWN_REALM).count(), 2);
+    // A re-driven adopt replaces in place: still one row for the hull.
+    regions.adopt_child(berth);
+    assert_eq!(regions.direct_children(OWN_REALM).count(), 2);
+    assert_eq!(
+        regions.regions.iter().filter(|r| r.realm == hull).count(),
+        1
+    );
+    // Release: the hull is gone and every table still names the planet at its new slot.
+    regions.release_child(hull);
+    assert!(regions.direct_child(OWN_REALM, hull).is_none());
+    assert!(!regions.child_index().answers_for(hull));
+    assert!(regions.coord_of(hull).is_none());
+    assert_eq!(regions.direct_children(OWN_REALM).count(), 1);
+    let planet_ix = regions.ix_of[&far];
+    assert_eq!(regions.regions[planet_ix].realm, far);
+    assert_eq!(regions.depths[planet_ix].1, far);
+    assert_eq!(regions.depths[planet_ix].2, planet_ix);
+    assert!(regions.direct_child(OWN_REALM, far).is_some());
+    assert!(regions.child_index().answers_for(far));
+    assert!(regions.aoi_index().answers_for(far));
+    // Releasing a realm not on the roster is a no-op (a re-driven release).
+    regions.release_child(hull);
+    assert_eq!(regions.regions.len(), 3);
+}
+
+// ===================== the ruler switch, slice 2: the flush, the adoption, the release =====================
+
+fn exterior_acks(sent: &[(NodeId, MsgClass, Vec<u8>)]) -> Vec<TransferAck> {
+    to_orch(sent)
+        .into_iter()
+        .filter_map(|f| match f {
+            InterShardFlow::TransferAck(a) => Some(a),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_parent_flushes_a_hull_down_into_its_child_before_the_hull_reaches_the_childs_shell() {
+    // The ruler switch, the INWARD flush with the EARLY START: the verdict was made on the led point,
+    // so at the flush the hull is still short of the child's shell. The flush must SUBTRACT the
+    // child's placement and ship — never refuse the hand-off as a stale entry (that re-validation is
+    // the occupant's, whose flush happens after the fact). MEASURED on the six-shard fixture: the
+    // galaxy's flush toward System 8 came back unplaceable, the saga aborted, and the hull flew on.
+    let (hull, entity) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let parent = region(PARENT_REALM, Some(ROOT_REALM), DVec3::ZERO, 1.0e9);
+    let own = region(OWN_REALM, Some(PARENT_REALM), DVec3::ZERO, 100_000.0);
+    let berth = region(hull, Some(OWN_REALM), DVec3::new(500.0, 0.0, 0.0), 20.0);
+    let planet = region(
+        RealmId::Planet(9),
+        Some(OWN_REALM),
+        DVec3::new(5000.0, 0.0, 0.0),
+        500.0,
+    );
+    *rig.world.resource_mut::<RealmRegions>() =
+        RealmRegions::new(vec![root_region(), parent, own, berth, planet])
+            .with_own_realm(OWN_REALM);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(5));
+    // Berth 500 + travel 3500 = 4000: a kilometre short of the planet's centre, outside its shell.
+    drive_hull(
+        &mut rig,
+        hull,
+        DVec3::new(3500.0, 0.0, 0.0),
+        DVec3::new(200.0, 0.0, 0.0),
+    );
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::FlushSource(vd_wire::intershard::FlushSource {
+            transfer: TransferId(44),
+            subject: DirectoryKey::Ship(entity),
+            step_id: FLUSH_SOURCE_STEP,
+            to_realm: RealmId::Planet(9),
+            to_parent: Some(OWN_REALM),
+        }),
+    )]);
+    let stats = rig.world.resource::<StubStats>();
+    assert_eq!(
+        (
+            stats.exterior_flushed,
+            stats.exterior_flush_unplaceable,
+            stats.flush_stale_entry
+        ),
+        (1, 0, 0),
+        "shipped, not refused as a stale entry"
+    );
+    let acks = exterior_acks(&sent);
+    let Some(TransferAck::SourceFlushed { pose, .. }) = acks.first() else {
+        panic!("no SourceFlushed: {acks:?}");
+    };
+    assert_eq!(
+        pose.frame,
+        frame_of(RealmId::Planet(9)),
+        "in the child's frame"
+    );
+    let at = pose.pos.delta_m(LatticePos::ORIGIN, pose.frame.tier());
+    assert!(
+        (at.x + 1000.0).abs() < 1e-6,
+        "the planet's placement subtracted: a kilometre short of its centre: {at:?}"
+    );
+    assert_eq!(pose.vel, DVec3::new(200.0, 0.0, 0.0));
+}
+
+#[test]
+fn a_parent_flushes_its_hulls_exterior_verbatim_in_its_own_frame_and_freezes_its_drive() {
+    let (hull, entity) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    plant_escape_regions_with_hull(&mut rig, hull);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(5));
+    drive_hull(
+        &mut rig,
+        hull,
+        DVec3::new(4500.0, 0.0, 0.0),
+        DVec3::new(30.0, 0.0, 0.0),
+    );
+    rig.world
+        .resource_mut::<crate::stub::drive::DrivenChildren>()
+        .0
+        .get_mut(&hull)
+        .expect("held")
+        .state
+        .spin_radps = DVec3::new(0.0, 0.5, 0.0);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    // OUT: the destination is my parent, whose placement I never name — the pose ships in MY frame.
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::FlushSource(vd_wire::intershard::FlushSource {
+            transfer: TransferId(41),
+            subject: DirectoryKey::Ship(entity),
+            step_id: FLUSH_SOURCE_STEP,
+            to_realm: PARENT_REALM,
+            to_parent: None,
+        }),
+    )]);
+    let acks = exterior_acks(&sent);
+    let Some(TransferAck::SourceFlushed {
+        transfer_id,
+        pose,
+        state,
+        ..
+    }) = acks.first()
+    else {
+        panic!("no SourceFlushed: {acks:?}");
+    };
+    assert_eq!(*transfer_id, TransferId(41));
+    assert_eq!(pose.frame, config().frame, "verbatim, in my own frame");
+    let at = pose.pos.delta_m(LatticePos::ORIGIN, pose.frame.tier());
+    assert!((at.x - 5000.0).abs() < 1e-6, "berth + travel: {at:?}");
+    assert_eq!(pose.vel, DVec3::new(30.0, 0.0, 0.0));
+    let blob = vd_wire::intershard::ExteriorState::decode(state).expect("the blob decodes");
+    assert_eq!(blob.spin, DVec3::new(0.0, 0.5, 0.0));
+    assert_eq!(blob.region.realm, hull);
+    assert_eq!(blob.region.parent, None, "no parent named across the wire");
+    assert_eq!(
+        blob.region.center,
+        vd_core::geometry::ParentCentre::ORIGIN,
+        "the child's placement in my frame is not the destination's to read"
+    );
+    assert!(
+        rig.world.resource::<crate::stub::drive::DrivenChildren>().0[&hull].frozen,
+        "frozen for the hand-over"
+    );
+    assert_eq!(rig.world.resource::<StubStats>().exterior_flushed, 1);
+    // An aborted hand-over thaws it and acks the abort.
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::CrossingAborted(vd_wire::intershard::CrossingAborted {
+            subject: DirectoryKey::Ship(entity),
+            transfer: TransferId(41),
+        }),
+    )]);
+    assert!(!rig.world.resource::<crate::stub::drive::DrivenChildren>().0[&hull].frozen);
+    assert!(
+        to_orch(&sent)
+            .iter()
+            .any(|f| matches!(f, InterShardFlow::CrossingAbortedAck(_)))
+    );
+    // A flush for an exterior this realm does not hold ships nothing and is counted.
+    let stranger = EntityId::pack(EntityKind::Ship, 2, 9, 0);
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::FlushSource(vd_wire::intershard::FlushSource {
+            transfer: TransferId(42),
+            subject: DirectoryKey::Ship(stranger),
+            step_id: FLUSH_SOURCE_STEP,
+            to_realm: PARENT_REALM,
+            to_parent: None,
+        }),
+    )]);
+    assert!(exterior_acks(&sent).is_empty());
+    assert_eq!(rig.world.resource::<StubStats>().exterior_flush_unheld, 1);
+}
+
+#[test]
+fn a_realm_adopts_an_arriving_exterior_acks_its_promote_and_releases_it_at_the_demote() {
+    let (hull, entity) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    // My own forest, with a store to keep the berth in.
+    *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
+        root_region(),
+        region(OWN_REALM, Some(ROOT_REALM), DVec3::ZERO, 1000.0),
+    ])
+    .with_own_realm(OWN_REALM);
+    *rig.world
+        .resource_mut::<crate::stub::exterior::RealmStore>() =
+        crate::stub::exterior::RealmStore(Some(Box::new(crate::io::mem::MemStore::new())));
+    // The arriving exterior: the pose is in MY frame (my parent expressed it for me, a hand-DOWN),
+    // stamped two ticks ago at 100 m/s along x, and the blob carries the hull's region row and spin.
+    let own_frame = config().frame;
+    let row = region(hull, None, DVec3::ZERO, 20.0);
+    let blob = vd_wire::intershard::ExteriorState {
+        region: row,
+        spin: DVec3::new(0.0, 0.25, 0.0),
+    };
+    let pose = StampedPose {
+        frame: own_frame,
+        pos: LatticePos::from_metres(DVec3::new(300.0, 0.0, 0.0), own_frame.tier()),
+        vel: DVec3::new(100.0, 0.0, 0.0),
+        orient: DQuat::IDENTITY,
+        universe_tick: UniverseTick(98),
+    };
+    let envelope = |transfer: u128| {
+        InterShardFlow::Transfer(TransferEnvelope {
+            transfer_id: TransferId(transfer),
+            universe_epoch: vd_core::EpochId(1),
+            schema_version: vd_wire::intershard::TRANSFER_SCHEMA_VERSION,
+            fence: Fence(7),
+            step_id: STUB_CROSSING_STEP,
+            class: vd_core::entity_kind::DurabilityClass::Durable,
+            payload: TransitionPayload::StubCrossing {
+                entity,
+                from_realm: PARENT_REALM,
+                to_realm: OWN_REALM,
+                pose,
+                state: blob.encode(),
+            },
+        })
+    };
+    let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &envelope(51))]);
+    // Adopted: on my roster, driven at the re-advanced pose, leased at the crossing's fence.
+    let regions = rig.world.resource::<RealmRegions>();
+    let adopted = regions
+        .direct_child(OWN_REALM, hull)
+        .expect("on the roster");
+    let centre = adopted
+        .center
+        .in_parents_frame()
+        .delta_m(LatticePos::ORIGIN, own_frame.tier());
+    assert!(
+        (centre.x - 310.0).abs() < 1e-6,
+        "re-advanced two ticks at 100 m/s (0.05 s each): {centre:?}"
+    );
+    assert_eq!(adopted.shape, row.shape);
+    let driven = rig.world.resource::<crate::stub::drive::DrivenChildren>();
+    let held = driven.0.get(&hull).expect("driven");
+    assert_eq!(held.state.vel_mps, DVec3::new(100.0, 0.0, 0.0));
+    assert_eq!(held.state.spin_radps, DVec3::new(0.0, 0.25, 0.0));
+    assert_eq!(held.facts, None, "the hull restates what it is");
+    assert_eq!(
+        rig.world.resource::<ExteriorAuthority>().0.get(&hull),
+        Some(&Fence(7))
+    );
+    // The berth row is in my store, and the directory is asked who runs the hull.
+    let berths = rig
+        .world
+        .resource::<crate::stub::exterior::RealmStore>()
+        .0
+        .as_ref()
+        .expect("store")
+        .scan(&crate::stub::built_store::berth_prefix());
+    assert_eq!(berths.len(), 1);
+    let berth = crate::stub::built_store::decode_berth(&berths[0].1).expect("decodes");
+    assert_eq!(berth.child, hull);
+    assert!((berth.offset_m.x - 310.0).abs() < 1e-6);
+    assert_eq!(berth.fence, Fence(7));
+    let flows = to_orch(&sent);
+    assert!(
+        flows.contains(&InterShardFlow::Directory(DirectoryOp::HeadRead {
+            key: DirectoryKey::Realm(hull),
+        }))
+    );
+    assert!(
+        exterior_acks(&sent).contains(&TransferAck::Accepted {
+            transfer_id: TransferId(51),
+            step_id: STUB_CROSSING_STEP,
+        }),
+        "the envelope is acked"
+    );
+    assert_eq!(rig.world.resource::<StubStats>().exterior_adopted, 1);
+    // A re-emitted envelope adopts nothing new and acks again.
+    let sent = rig.tick(vec![wire_msg(ORCH, MsgClass::Saga, &envelope(51))]);
+    assert_eq!(rig.world.resource::<StubStats>().exterior_adopted, 1);
+    assert_eq!(exterior_acks(&sent).len(), 1);
+    // The promote is acked and counted; the dot path is not touched.
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::Promote(vd_wire::intershard::PromoteCmd {
+            transfer: TransferId(51),
+            subject: DirectoryKey::Ship(entity),
+            new_fence: Fence(7),
+            step_id: vd_wire::intershard::PROMOTE_STEP,
+            source: NodeId(77),
+        }),
+    )]);
+    assert!(
+        to_orch(&sent).contains(&InterShardFlow::SagaAck(TransferControlAck::PromoteAck {
+            transfer: TransferId(51)
+        }))
+    );
+    assert_eq!(rig.world.resource::<StubStats>().exterior_promotes, 1);
+    assert_eq!(rig.world.resource::<StubStats>().promote_no_dot, 0);
+    // A RE-DELIVERED exterior promote is the journal's `AlreadyApplied`: acked again, counted once.
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::Promote(vd_wire::intershard::PromoteCmd {
+            transfer: TransferId(51),
+            subject: DirectoryKey::Ship(entity),
+            new_fence: Fence(7),
+            step_id: vd_wire::intershard::PROMOTE_STEP,
+            source: NodeId(77),
+        }),
+    )]);
+    assert!(
+        to_orch(&sent).contains(&InterShardFlow::SagaAck(TransferControlAck::PromoteAck {
+            transfer: TransferId(51)
+        }))
+    );
+    assert_eq!(rig.world.resource::<StubStats>().exterior_promotes, 1);
+    // Rows this parent keeps per child, planted for the hull AND for another child that must survive.
+    let other = RealmId::Planet(9);
+    {
+        let observer = crate::stub::aoi::ObserverId::Dot(SessionId(1));
+        let mut aoi = rig.world.resource_mut::<crate::stub::aoi::AoiMembership>();
+        aoi.0
+            .insert((observer, hull), crate::stub::aoi::AoiState::default());
+        aoi.0.insert(
+            (crate::stub::aoi::ObserverId::Child(hull), other),
+            crate::stub::aoi::AoiState::default(),
+        );
+        aoi.0
+            .insert((observer, other), crate::stub::aoi::AoiState::default());
+        let mut latch = rig
+            .world
+            .resource_mut::<crate::stub::relay::InterestEmitLatch>();
+        latch.0.insert(hull);
+        latch.0.insert(other);
+        let mut band = rig
+            .world
+            .resource_mut::<crate::stub::relay::InBandVerdict>();
+        band.0.insert(hull);
+        band.0.insert(other);
+        let mut luma = rig.world.resource_mut::<crate::stub::window::ChildLuma>();
+        luma.0.insert(hull, (3, 0.5));
+        luma.0.insert(other, (4, 0.25));
+        let mut owed = rig
+            .world
+            .resource_mut::<crate::stub::lineage::LineageOwed>();
+        owed.0.insert(hull);
+        owed.0.insert(other);
+    }
+    // Later the hull leaves ME: the demote releases it — roster, driven set, lease, berth, every
+    // per-child row — and acks.
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::Demote(vd_wire::intershard::DemoteCmd {
+            transfer: TransferId(52),
+            subject: DirectoryKey::Ship(entity),
+            new_owner_fence: Fence(8),
+            step_id: vd_wire::intershard::DEMOTE_STEP,
+        }),
+    )]);
+    assert!(
+        rig.world
+            .resource::<RealmRegions>()
+            .direct_child(OWN_REALM, hull)
+            .is_none()
+    );
+    assert!(
+        !rig.world
+            .resource::<crate::stub::drive::DrivenChildren>()
+            .0
+            .contains_key(&hull)
+    );
+    assert!(
+        !rig.world
+            .resource::<ExteriorAuthority>()
+            .0
+            .contains_key(&hull)
+    );
+    assert!(
+        rig.world
+            .resource::<crate::stub::exterior::RealmStore>()
+            .0
+            .as_ref()
+            .expect("store")
+            .scan(&crate::stub::built_store::berth_prefix())
+            .is_empty()
+    );
+    assert!(
+        to_orch(&sent).contains(&InterShardFlow::SagaAck(TransferControlAck::DemoteAck {
+            transfer: TransferId(52)
+        }))
+    );
+    assert_eq!(rig.world.resource::<StubStats>().exterior_released, 1);
+    // The hull's rows are gone from every per-child table; the other child's rows survive.
+    {
+        let aoi = rig.world.resource::<crate::stub::aoi::AoiMembership>();
+        let watched_or_watching_hull = aoi
+            .0
+            .keys()
+            .filter(|(o, r)| (*r == hull) | (*o == crate::stub::aoi::ObserverId::Child(hull)))
+            .count();
+        assert_eq!(
+            watched_or_watching_hull, 0,
+            "no area-of-interest row names the hull"
+        );
+        assert_eq!(aoi.0.len(), 1, "the other child's row survives");
+        // The latch and the verdict are re-derived from the live roster every pass, so the planted
+        // `other` row (no rostered child) is pruned by the fold itself; only the hull's absence is theirs.
+        let latch = rig
+            .world
+            .resource::<crate::stub::relay::InterestEmitLatch>();
+        assert!(!latch.0.contains(&hull));
+        let band = rig.world.resource::<crate::stub::relay::InBandVerdict>();
+        assert!(!band.0.contains(&hull));
+        let luma = rig.world.resource::<crate::stub::window::ChildLuma>();
+        assert_eq!(luma.0.keys().copied().collect::<Vec<_>>(), vec![other]);
+        let owed = rig.world.resource::<crate::stub::lineage::LineageOwed>();
+        assert_eq!(owed.0.iter().copied().collect::<Vec<_>>(), vec![other]);
+    }
+    // An exterior for a realm that is not mine, or with an unreadable blob, is refused and counted.
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::Transfer(TransferEnvelope {
+            transfer_id: TransferId(53),
+            universe_epoch: vd_core::EpochId(1),
+            schema_version: vd_wire::intershard::TRANSFER_SCHEMA_VERSION,
+            fence: Fence(9),
+            step_id: STUB_CROSSING_STEP,
+            class: vd_core::entity_kind::DurabilityClass::Durable,
+            payload: TransitionPayload::StubCrossing {
+                entity,
+                from_realm: PARENT_REALM,
+                to_realm: OWN_REALM,
+                pose,
+                state: vec![1, 2, 3],
+            },
+        }),
+    )]);
+    assert_eq!(
+        rig.world.resource::<StubStats>().exterior_arrival_refused,
+        1
+    );
+    assert!(
+        exterior_acks(&sent).is_empty(),
+        "a refused exterior is not acked"
+    );
+}
+
+// ===================== the ruler switch, slice 3: the hull is told =====================
+
+fn lineage_statements(
+    sent: &[(NodeId, MsgClass, Vec<u8>)],
+) -> Vec<(NodeId, vd_wire::intershard::LineageStated)> {
+    sent.iter()
+        .filter_map(
+            |(to, _, b)| match postcard::from_bytes::<InterShardFlow>(b) {
+                Ok(InterShardFlow::LineageStated(ls)) => Some((*to, ls)),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+#[test]
+fn a_parent_states_an_adopted_childs_lineage_on_every_head_read_until_its_facts_arrive() {
+    let (hull, _) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    plant_escape_regions_with_hull(&mut rig, hull);
+    // The debt begins at an adoption.
+    crate::stub::lineage::lineage_owed(
+        hull,
+        &mut rig
+            .world
+            .resource_mut::<crate::stub::lineage::LineageOwed>(),
+    );
+    let head = |node: u64| {
+        wire_msg(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::DirectoryReply(DirectoryReply::Head {
+                key: DirectoryKey::Realm(hull),
+                record: Some(vd_wire::seams::directory::OwnerRecord {
+                    authority: AuthorityRef::Shard(NodeId(node)),
+                    fence: Fence(2),
+                    lease_expires: UniverseTick(1_000),
+                    in_transfer: None,
+                }),
+            }),
+        )
+    };
+    let sent = rig.tick(vec![head(77)]);
+    let stated = lineage_statements(&sent);
+    assert_eq!(stated.len(), 1, "stated once the node is known: {stated:?}");
+    let (to, ls) = &stated[0];
+    assert_eq!(*to, NodeId(77));
+    assert_eq!(
+        ls.child,
+        config().own_coord.child(vd_core::worldgen::level_of(hull)),
+        "my own coord plus the child's level"
+    );
+    assert_eq!(
+        ls.parent_fence,
+        Fence(1),
+        "the realm fence the grant recorded"
+    );
+    assert_eq!(rig.world.resource::<StubStats>().lineage_stated, 1);
+    // Re-stated on the next read, while the debt stands.
+    let sent = rig.tick(vec![head(77)]);
+    assert_eq!(lineage_statements(&sent).len(), 1);
+    // The child's facts arrive: the debt is paid and the next read states nothing.
+    crate::stub::lineage::lineage_heard(
+        hull,
+        &mut rig
+            .world
+            .resource_mut::<crate::stub::lineage::LineageOwed>(),
+    );
+    let sent = rig.tick(vec![head(77)]);
+    assert!(lineage_statements(&sent).is_empty());
+    assert_eq!(rig.world.resource::<StubStats>().lineage_stated, 2);
+}
+
+#[test]
+fn a_hull_applies_a_lineage_only_from_the_node_the_directory_names_as_its_exterior_holder() {
+    use crate::stub::lineage::{PendingLineage, apply_pending_lineage, on_lineage_stated};
+    let (hull, entity) = hull_child();
+    let mut cfg = StubConfig {
+        realm: hull,
+        own_coord: child_coord_of(OWN_REALM, hull),
+        ..config()
+    };
+    let mut regions = RealmRegions::new(vec![
+        root_region(),
+        region(OWN_REALM, Some(ROOT_REALM), DVec3::ZERO, 1000.0),
+        region(hull, Some(OWN_REALM), DVec3::new(500.0, 0.0, 0.0), 20.0),
+    ])
+    .with_own_realm(hull);
+    let mut parent_node = ParentRealmNode::default();
+    let mut stated = crate::stub::drive::StatedFacts(Some(vd_core::built::BuiltFacts {
+        mass_g: 1,
+        cross_section_mm2: 1,
+        drag_micro: 1,
+        max_push_micro_mps2: 1,
+        max_turn_micro_radps2: 1,
+    }));
+    let mut was_occupied = crate::stub::aoi::WasOccupied(true);
+    let mut pending = PendingLineage::default();
+    let mut exterior = ExteriorAuthority::default();
+    let mut stats = StubStats::default();
+    let mut outbox = OutboundBox::default();
+    let new_coord = StubConfig::root_coord(PARENT_REALM).child(vd_core::worldgen::level_of(hull));
+    let statement = |coord: RealmCoord| vd_wire::intershard::LineageStated {
+        child: coord,
+        parent_fence: Fence(3),
+        at: UniverseTick(50),
+    };
+    let record = |node: u64| vd_wire::seams::directory::OwnerRecord {
+        authority: AuthorityRef::Shard(NodeId(node)),
+        fence: Fence(3),
+        lease_expires: UniverseTick(1_000),
+        in_transfer: None,
+    };
+    // Unattested (nobody resolved yet): held, and my exterior head is re-read.
+    on_lineage_stated(
+        statement(new_coord.clone()),
+        NodeId(70),
+        &mut cfg,
+        &mut regions,
+        &mut parent_node,
+        &mut stated,
+        &mut was_occupied,
+        &mut pending,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(stats.lineage_held_unattested, 1);
+    assert_eq!(stats.lineage_applied, 0);
+    assert!(pending.0.is_some());
+    let asked: Vec<InterShardFlow> = outbox
+        .0
+        .iter()
+        .filter_map(|(_, _, b, _)| postcard::from_bytes(b).ok())
+        .collect();
+    assert!(
+        asked.contains(&InterShardFlow::Directory(DirectoryOp::HeadRead {
+            key: DirectoryKey::Ship(entity),
+        }))
+    );
+    // The directory names node 70: the held statement is applied — I moved house.
+    resolve_exterior_head(
+        entity,
+        Some(&record(70)),
+        NodeId(1),
+        &cfg,
+        &regions,
+        &mut parent_node,
+        &mut exterior,
+    );
+    apply_pending_lineage(
+        &mut cfg,
+        &mut regions,
+        &mut parent_node,
+        &mut stated,
+        &mut was_occupied,
+        &mut pending,
+        &mut stats,
+    );
+    assert_eq!(stats.lineage_applied, 1);
+    assert_eq!(cfg.own_coord, new_coord);
+    assert_eq!(parent_node.0, Some(NodeId(70)));
+    assert_eq!(stated.0, None, "the facts go out again, to the new parent");
+    assert!(!was_occupied.0);
+    assert_eq!(
+        regions.parent_of(hull),
+        Some(PARENT_REALM),
+        "my own row now names my new parent"
+    );
+    // From the attested node, a statement applies at once.
+    let newer = StubConfig::root_coord(OTHER_REALM).child(vd_core::worldgen::level_of(hull));
+    on_lineage_stated(
+        statement(newer.clone()),
+        NodeId(70),
+        &mut cfg,
+        &mut regions,
+        &mut parent_node,
+        &mut stated,
+        &mut was_occupied,
+        &mut pending,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(stats.lineage_applied, 2);
+    assert_eq!(cfg.own_coord, newer);
+    // A statement about somebody else is refused; one held from a stranger is discarded when the
+    // directory names another node.
+    on_lineage_stated(
+        statement(
+            StubConfig::root_coord(PARENT_REALM).child(vd_core::worldgen::level_of(OTHER_REALM)),
+        ),
+        NodeId(70),
+        &mut cfg,
+        &mut regions,
+        &mut parent_node,
+        &mut stated,
+        &mut was_occupied,
+        &mut pending,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(stats.lineage_misrouted, 1);
+    on_lineage_stated(
+        statement(new_coord.clone()),
+        NodeId(71),
+        &mut cfg,
+        &mut regions,
+        &mut parent_node,
+        &mut stated,
+        &mut was_occupied,
+        &mut pending,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(stats.lineage_held_unattested, 2);
+    resolve_exterior_head(
+        entity,
+        Some(&record(70)),
+        NodeId(1),
+        &cfg,
+        &regions,
+        &mut parent_node,
+        &mut exterior,
+    );
+    apply_pending_lineage(
+        &mut cfg,
+        &mut regions,
+        &mut parent_node,
+        &mut stated,
+        &mut was_occupied,
+        &mut pending,
+        &mut stats,
+    );
+    assert_eq!(stats.lineage_discarded, 1);
+    assert_eq!(stats.lineage_applied, 2);
+    // Nothing pending: the reply arm is a no-op.
+    apply_pending_lineage(
+        &mut cfg,
+        &mut regions,
+        &mut parent_node,
+        &mut stated,
+        &mut was_occupied,
+        &mut pending,
+        &mut stats,
+    );
+    assert_eq!(stats.lineage_discarded, 1);
 }

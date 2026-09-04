@@ -82,6 +82,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(Dots::default());
     world.insert_resource(RealmAuthority::default());
     world.insert_resource(CoHostedAuthority::default());
+    world.insert_resource(crate::stub::realm_head::ExteriorAuthority::default());
     world.insert_resource(RealmConfirmedAt::default());
     world.insert_resource(EntityMint {
         seq: 0,
@@ -102,11 +103,16 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(ContainmentProgress::default());
     world.insert_resource(RequestInFlight::default());
     world.insert_resource(HandoffHolds::default());
+    world.insert_resource(crate::stub::containment::ExteriorScan::default());
+    world.insert_resource(crate::stub::exterior::RealmStore::default());
+    world.insert_resource(crate::stub::lineage::LineageOwed::default());
+    world.insert_resource(crate::stub::lineage::PendingLineage::default());
     world.insert_resource(RealmRegions::default());
     // RLM Step 2 — the per-CHILD AoI hysteresis ledger. Defaults EMPTY; `evaluate_realm_aoi` is inert
     // (early-returns) until regions are planted AND the shard is clock-synced, so this is byte-identical
     // through walk/canonical scale (inert AoI ⇒ no demand ⇒ never touched).
     world.insert_resource(AoiMembership::default());
+    world.insert_resource(crate::stub::aoi::AoiQueryMemo::default());
     world.insert_resource(ParentRealmNode::default());
     world.insert_resource(ChildRealmNodes::default());
     world.insert_resource(WasOccupied::default());
@@ -233,7 +239,9 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
 /// them is a mechanical arity fix, not a coupling change, and it is destructured straight back into the
 /// individual borrows at the top of the system.
 type VuAoiInbound<'w> = (
-    Res<'w, RealmRegions>,
+    // MUTABLE since the ruler switch, slice 2: an adopted exterior joins the roster at its envelope
+    // and a released one leaves it at the demote (`adopt_child` / `release_child`).
+    ResMut<'w, RealmRegions>,
     // The placement ledger — READ-ONLY here (the one writer is `author_placements`): the arrival and
     // flush ingress arms select their books from it.
     Res<'w, Placements>,
@@ -252,6 +260,24 @@ type VuAoiInbound<'w> = (
     // does this realm fly on an occupant's stick? A realm with engines and a body does; every other
     // realm does not. Read-only here — the boot plants it, nothing else writes it.
     Res<'w, crate::stub::drive::OwnBody>,
+    // The ruler switch, slice 0 — the exterior leases this realm holds for its built children,
+    // written by the `Ship` head reply arm.
+    ResMut<'w, crate::stub::realm_head::ExteriorAuthority>,
+    // The ruler switch, slice 2 — this realm's own store, for the adopted hull's berth row.
+    ResMut<'w, crate::stub::exterior::RealmStore>,
+    // The ruler switch, slice 3 — the lineage stores: what facts I stated, my occupancy edge, the
+    // children I owe a statement, the statement I hold.
+    ResMut<'w, crate::stub::drive::StatedFacts>,
+    ResMut<'w, crate::stub::aoi::WasOccupied>,
+    ResMut<'w, crate::stub::lineage::LineageOwed>,
+    ResMut<'w, crate::stub::lineage::PendingLineage>,
+    // The per-child tables a release clears (nested: the outer tuple is at bevy's arity limit).
+    (
+        ResMut<'w, AoiMembership>,
+        ResMut<'w, InterestEmitLatch>,
+        ResMut<'w, crate::stub::relay::InBandVerdict>,
+        ResMut<'w, ChildLuma>,
+    ),
 );
 
 /// Drain and dispatch everything delivered this tick.
@@ -269,10 +295,14 @@ fn took_child_facts(
     integrates: bool,
     child_nodes: &std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::ids::NodeId>,
     driven: &mut crate::stub::drive::DrivenChildren,
+    owed: &mut crate::stub::lineage::LineageOwed,
     stats: &mut StubStats,
 ) -> bool {
     match postcard::from_bytes::<InterShardFlow>(bytes) {
         Ok(InterShardFlow::ChildFacts(cf)) => {
+            // The ruler switch, slice 3: a child that states its facts has heard its lineage.
+            let child = cf.child.lowered();
+            crate::stub::lineage::lineage_heard(child, owed);
             crate::stub::drive::on_child_facts(
                 cf,
                 from,
@@ -307,7 +337,7 @@ fn integrates_children(identity: &NodeIdentity) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn process_inbound(
-    config: Res<StubConfig>,
+    mut config: ResMut<StubConfig>,
     identity: Res<NodeIdentity>,
     clock: Res<ClockSample>,
     inbox: Res<InboundBox>,
@@ -350,7 +380,7 @@ fn process_inbound(
     vu_aoi: VuAoiInbound,
 ) {
     let (
-        regions,
+        mut regions,
         placements,
         mut parent_node,
         mut child_nodes,
@@ -359,6 +389,13 @@ fn process_inbound(
         mut interest_held,
         mut driven,
         own_body,
+        mut exterior,
+        mut store,
+        mut stated,
+        mut was_occupied,
+        mut owed,
+        mut pending_lineage,
+        (mut aoi_rows, mut interest_latch, mut in_band, mut luma),
     ) = vu_aoi;
     // ★ WHY A PILOT'S BODY STOPS WALKING (owner ruling 2026-09-01). ONE key made TWO things move:
     // it walked the player AND it pushed the ship, so the player left a 40 m hull in a fifth of a
@@ -434,15 +471,16 @@ fn process_inbound(
                     integrates_children(&identity),
                     &child_nodes.0,
                     &mut driven,
+                    &mut owed,
                     &mut stats,
                 ) => {}
             MsgClass::Saga => on_directory_reply(
                 bytes,
                 *from,
                 &identity,
-                &config,
+                &mut config,
                 &clock,
-                &regions,
+                &mut regions,
                 &placements.0,
                 &mut authority,
                 &mut confirmed,
@@ -459,6 +497,22 @@ fn process_inbound(
                 &mut outbox,
                 &mut parent_node,
                 &mut child_nodes,
+                &mut exterior,
+                &mut driven,
+                &mut child_liveness,
+                &mut store,
+                crate::stub::lineage::LineageSide {
+                    stated: &mut stated,
+                    was_occupied: &mut was_occupied,
+                    owed: &mut owed,
+                    pending: &mut pending_lineage,
+                },
+                crate::stub::exterior::ChildTables {
+                    aoi: &mut aoi_rows,
+                    interest_latch: &mut interest_latch,
+                    in_band: &mut in_band,
+                    luma: &mut luma,
+                },
                 &mut relay_held,
                 &mut interest_held,
                 &mut holds,

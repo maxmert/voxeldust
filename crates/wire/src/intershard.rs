@@ -536,6 +536,158 @@ pub enum InterShardFlow {
     /// already answers it, so no new data crosses (D-MOVE-2).
     /// APPENDED (discriminant 37).
     ChildFacts(ChildFacts),
+    /// ★ THE EXTERIOR CROSSING REQUEST (the ruler switch, slice 1; owner-approved 2026-09-03 —
+    /// `docs/design/realm_crossing_plan_2026-09-02.md`). A PARENT's swept verdict decided that one of
+    /// its DRIVEN CHILDREN — a hull — left its bound or entered a sibling, and asks the orchestrator to
+    /// move the child's EXTERIOR: the authorship of its placement, keyed by the child's `Ship` key. The
+    /// third request arm beside the durable and the transient one (HR2: one machinery, policy fan-out):
+    /// an occupant's request carries a session because its saga cuts the client's input at the gateway;
+    /// an exterior has no session and no cut, so this arm carries none, and the orchestrator resolves
+    /// only the subject and the destination heads. Fenced by the exterior LEASE fence, so a redelivery
+    /// is a no-op, never a second saga. Source → orchestrator, on the Saga lane.
+    /// APPENDED (discriminant 38).
+    ExteriorCrossingRequest(ExteriorCrossingRequest),
+    /// ★ THE LINEAGE STATED (the ruler switch, slice 3; owner-approved 2026-09-03 — the plan's ask 2,
+    /// THE ONE NEW DATUM): a PARENT tells a child it just adopted where the child now stands in the
+    /// tree — the child's full [`RealmCoord`], the parent's own coord plus one level. A sealed child
+    /// cannot compute this: a lineage is its ancestors' identities, which it never holds (HR1), and
+    /// without it every up-lane message the child sends names its OLD parent and is refused as
+    /// misrouted for ever. Not a placement (SL1 clause 4 does not bind it): a lineage already flows
+    /// down the tree at every spawn as the launch coordinate; this moves that statement from launch
+    /// time to adoption time. Parent → ONE direct child, on the route the parent already resolves;
+    /// re-stated on every head read of the child until the child's facts arrive, which they do only
+    /// after it has learned its lineage. The receiver applies it only from the node the directory
+    /// names as its exterior's holder. APPENDED (discriminant 39).
+    LineageStated(LineageStated),
+    /// ★ THE SKY FOLLOWS THE HULL (the ruler switch, slice 5; owner-approved 2026-09-03 —
+    /// `docs/design/realm_crossing_plan_2026-09-02.md` §3.9). The orchestrator tells EVERY session
+    /// gateway that a realm moved house: at the exterior saga's CAS win the child's cell was re-keyed,
+    /// and this states the child's NEW full coord. A gateway splices every session chain that holds
+    /// the child (the ancestry above the child is replaced, the session's own descent below it is
+    /// kept) and the composer bumps that session's origin epoch because the chain's authors changed.
+    /// Why the gateway cannot compute it: a chain is the ancestors' identities, learned at the login
+    /// descent; the hull's node knows only its own realm, and no gateway sees the ownership commit.
+    /// Why the orchestrator says it: the commit happens there, and the record names the gateways.
+    /// Example: a pilot's chain is `Universe / Galaxy 1 / System 7 / Ship hull`; the hull leaves
+    /// System 7; the orchestrator states `Universe / Galaxy 1 / Ship hull`; the pilot's window on
+    /// System 7 closes, the one on Galaxy 1 opens, and the star field keeps sliding. A gateway with
+    /// nobody aboard does one lookup per session and applies nothing. A producer-less one-shot,
+    /// pushed `Retained`. APPENDED (discriminant 40).
+    ExteriorMoved(ExteriorMoved),
+    /// ★ THE PEER BOOK, THE ASK (D-RLM-6 mechanism C, the owner's 2026-07-25 decision; built for the
+    /// ruler switch, plan slice 7). A node that must speak to a node it has no lane for asks the party
+    /// that launched every node — the orchestrator, which is also its clock's source — where that node
+    /// lives. The trigger is a MISS: the transport refuses the send as `UnknownPeer`, the node keeps the
+    /// frame and asks once per tick while the frame waits. Example: a hull the galaxy handed down to
+    /// System 8 reads its exterior head, learns System 8's node id, states its push to it, and the
+    /// send misses — this arm goes up, the answer comes back, the lane is dialed, the push flows.
+    /// Membership class (cold, re-derivable: the next tick re-asks). APPENDED (discriminant 41).
+    PeerLocate(PeerLocate),
+    /// ★ THE PEER BOOK, THE ANSWER: the orchestrator states where `node` listens, from its launch
+    /// ledger's live slot. A node it never launched gets no answer and the ask is counted. The node
+    /// books the address through the transport seam (`Transport::book_peer`) and its next send dials.
+    /// The only address-bearing arm on the mesh; nothing in the sim reads it (the node runtime
+    /// consumes it below the schedule). APPENDED (discriminant 42).
+    PeerLocated(PeerLocated),
+}
+
+/// The payload of [`InterShardFlow::LineageStated`]. Example: the galaxy adopts a hull that left
+/// System 7 and states `child: Universe / Galaxy 1 / Ship hull`; the hull's next drive datagram
+/// names that coord, and the galaxy's misroute guard admits it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineageStated {
+    /// The child's NEW full coord: the stating parent's own coord plus the child's level.
+    pub child: RealmCoord,
+    /// The parent's realm fence — a deposed parent incarnation's statement is refused.
+    pub parent_fence: Fence,
+    /// The instant it was stated.
+    pub at: UniverseTick,
+}
+
+/// The payload of [`InterShardFlow::PeerLocate`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLocate {
+    /// The node the asker has a frame for and no lane to.
+    pub node: NodeId,
+    /// The asker's universe tick — a stale ask is still answerable; the tick is for the log.
+    pub at: UniverseTick,
+}
+
+/// The payload of [`InterShardFlow::PeerLocated`]. The address is carried as sixteen octets plus a
+/// port — an IPv4 address rides IPv4-mapped — so the wire names no platform type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerLocated {
+    pub node: NodeId,
+    pub ip: [u8; 16],
+    pub port: u16,
+    /// The orchestrator's universe tick when it answered.
+    pub at: UniverseTick,
+}
+
+/// The payload of [`InterShardFlow::ExteriorMoved`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExteriorMoved {
+    /// The moved child's NEW full coord: the new parent's own coord plus the child's level. Its
+    /// `lowered()` is the child; the coords above it are the chain a session aboard takes.
+    pub child: RealmCoord,
+    /// ★ THE NEW PARENT'S NODE (owner-approved 2026-09-04, item 4 of the flight plan): the node the
+    /// commit named as the child's new author, so a gateway opens the new parent's window AT ONCE
+    /// instead of asking the directory on its half-second beat — the hand-over blink measured on the
+    /// fifth and sixth flights was that wait. The orchestrator knows it: it is the commit's destination.
+    pub parent_node: NodeId,
+    /// The instant the ownership record committed the move. An older statement about the same child
+    /// never overrides a newer one at a gateway.
+    pub at: UniverseTick,
+}
+
+/// ★ WHAT AN EXTERIOR IS, BEYOND ITS POSE (the ruler switch, slice 2): the old parent's own authorship
+/// about a driven child that the `StampedPose` does not carry — the region row it kept for the child
+/// (its shape, its look, its containment band, its area-of-interest band, its own frame) and the
+/// spin it authored. Rides `TransferAck::SourceFlushed.state` to the orchestrator and
+/// `StubCrossing.state` to the destination, postcard encoded, opened by nobody in between.
+///
+/// The region's `center` is ZEROED before shipping: it is the child's placement in the OLD parent's
+/// frame, and the new parent must not read it — it places the child from the arriving pose, which is
+/// the placement the crossing converted (SL1). Nothing the CHILD stated about itself rides here:
+/// mass, cross-section, drag and the reach are the child's to restate to its new parent.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExteriorState {
+    /// The child's region row as the old parent held it, centre zeroed.
+    pub region: vd_core::geometry::RealmRegion,
+    /// The angular velocity the old parent authored (rad/s), in the old parent's frame.
+    pub spin: vd_core::glam::DVec3,
+}
+
+impl ExteriorState {
+    /// The blob as it rides the ack and the envelope.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("an exterior state encodes infallibly")
+    }
+
+    /// The blob opened at the destination; `None` for bytes that are not one (an occupant's empty
+    /// blob, or a corrupt one) — the destination refuses rather than guesses.
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<ExteriorState> {
+        postcard::from_bytes(bytes).ok()
+    }
+}
+
+/// The payload of [`InterShardFlow::ExteriorCrossingRequest`] — what a parent states when its hull
+/// leaves it. Example: System 7 states `subject: Ship(hull), from_realm: System 7, to_realm: Galaxy 1,
+/// subject_fence: the fence of its exterior lease`, and the galaxy's shard becomes the destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExteriorCrossingRequest {
+    /// The child's exterior key (`DirectoryKey::exterior_of` the child realm).
+    pub subject: DirectoryKey,
+    /// The realm the child leaves — the requesting parent.
+    pub from_realm: RealmId,
+    /// The realm the child enters — the parent's own parent (out) or one of its direct children (in).
+    pub to_realm: RealmId,
+    /// The exterior lease fence the requester holds — the saga's CAS expectation and the idempotency key.
+    pub subject_fence: Fence,
+    /// The requester's attempt counter, so a re-latched request mints a fresh transfer id.
+    pub attempt: u32,
 }
 
 /// How an arm participates in side effects: the machine-checkable half of HR1.
@@ -696,6 +848,12 @@ impl InterShardFlow {
                     fence: r.src_realm_fence,
                 },
             },
+            // The exterior request is fenced by the exterior lease, exactly like the durable one.
+            InterShardFlow::ExteriorCrossingRequest(r) => EffectClass::SideEffecting {
+                idempotency: IdempotencyKey::FencedKey {
+                    fence: r.subject_fence,
+                },
+            },
             InterShardFlow::TransientCrossingGrant(g) => EffectClass::SideEffecting {
                 idempotency: IdempotencyKey::TransferStep {
                     transfer: g.batch,
@@ -776,6 +934,13 @@ impl InterShardFlow {
             // The interest bit (minor 21, Q1) carries authority for NOTHING — one latest-wins
             // byte, the parent fence gating zombie senders at the receiver ⇒ FireAndForget.
             InterShardFlow::RealmInterest(_) => EffectClass::FireAndForget,
+            // The lineage statement (the ruler switch, slice 3) carries authority for nothing: the
+            // receiver attests the sender against the directory before it believes a word.
+            InterShardFlow::LineageStated(_) => EffectClass::FireAndForget,
+            InterShardFlow::ExteriorMoved(_) => EffectClass::FireAndForget,
+            InterShardFlow::PeerLocate(_) | InterShardFlow::PeerLocated(_) => {
+                EffectClass::FireAndForget
+            }
             // Both movement lanes are effect-free: one states what a child is DOING and the other what
             // it IS. Neither commands anything, neither gates authority, and neither can trigger a
             // transfer — so neither may carry an idempotency key (the G-SEALED invariant).
@@ -847,6 +1012,7 @@ impl InterShardFlow {
             // so it is `ReDriven`, never producer-less.
             | InterShardFlow::CrossingRequest(_)
             | InterShardFlow::TransientCrossingRequest(_)
+            | InterShardFlow::ExteriorCrossingRequest(_)
             | InterShardFlow::TransientCrossingGrant(_)
             | InterShardFlow::CrossingAborted(_)
             | InterShardFlow::CrossingAbortedAck(_)
@@ -906,6 +1072,15 @@ impl InterShardFlow {
             // holds (and expires to 0 by TTL on silence) — the producer re-drives it, so the RAM
             // retry suffices; never producer-less.
             InterShardFlow::RealmInterest(_) => FlowDurabilityClass::ReDriven,
+            // Re-stated on every head read of the child until its facts arrive.
+            InterShardFlow::LineageStated(_) => FlowDurabilityClass::ReDriven,
+            // A one-shot nobody re-drives: the reparent note is consumed at the CAS. Pushed `Retained`.
+            InterShardFlow::ExteriorMoved(_) => FlowDurabilityClass::ProducerLessReliable,
+            // The asker re-asks every tick while its frame waits; the answer is re-answered on the
+            // next ask. Loss is corrected by the next tick.
+            InterShardFlow::PeerLocate(_) | InterShardFlow::PeerLocated(_) => {
+                FlowDurabilityClass::ReDriven
+            }
             // THE HOT LANE IS UNRELIABLE ON PURPOSE. Every tick restates the whole intent, so a lost
             // datagram is corrected by the next one before anybody could read the gap. Making it
             // reliable would put a retransmit in front of fresher data — the classic mistake of sending
@@ -1678,7 +1853,7 @@ pub struct TransientItem {
 /// this long-RESERVED type its first consumer — DEFERRED.md D-21). NOT the gateway↔saga route-swap
 /// vocabulary: that is `seams::transfer_control::TransferControlAck`. Every arm is keyed by
 /// `(transfer_id, step_id)` for idempotent journaling. The direction (shard→orch) is permanent.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TransferAck {
     /// SOURCE → orch (phase [`FLUSH_SOURCE_STEP`]): the reply to [`FlushSource`], carrying the
     /// subject's authoritative pose + the source's input drain watermark so the saga can stamp the
@@ -1689,6 +1864,12 @@ pub enum TransferAck {
         step_id: u32,
         pose: StampedPose,
         drained_seq: u64,
+        /// ★ THE EXTERIOR BLOB (the ruler switch, slice 2; owner-approved 2026-09-03, ask 3): what the
+        /// old parent authored about a driven child beyond its pose — an [`ExteriorState`], postcard
+        /// encoded — carried through the saga verbatim onto `StubCrossing.state`. EMPTY for an
+        /// occupant's flush (the per-entity blob is still owed under D-31). APPENDED (a mesh flag day,
+        /// minor 25).
+        state: Vec<u8>,
     },
     /// DEST → orch (phase [`STUB_CROSSING_STEP`]): accepted and journaled the `StubCrossing` step.
     Accepted {
@@ -2090,6 +2271,7 @@ mod tests {
             step_id: FLUSH_SOURCE_STEP,
             pose: pose(),
             drained_seq: 17,
+            state: vec![],
         });
         assert_eq!(
             flushed.effect_class(),
@@ -2499,6 +2681,7 @@ mod tests {
                 step_id: FLUSH_SOURCE_STEP,
                 pose: pose(),
                 drained_seq: 42,
+                state: vec![],
             },
             TransferAck::Accepted {
                 transfer_id: TransferId(1),
@@ -2548,6 +2731,7 @@ mod tests {
                 step_id: FLUSH_SOURCE_STEP,
                 pose: pose(),
                 drained_seq: 42,
+                state: vec![],
             }),
             // D-7a/b: the transient batch ack + the DropApplied ack + the three structural handoff
             // command arms roundtrip distinctly (the dispatch split depends on the tag).

@@ -95,6 +95,12 @@ pub struct RlmReconcilerRes {
     /// `liveness_quiesced_until`).
     rlm_quiesced_until: UniverseTick,
 
+    /// The ruler switch, slice 4 — exterior crossings whose cell and launch record moved house.
+    pub reparents_applied: u64,
+    /// The ruler switch, slice 4 — reparents this reconciler could not resolve (counted, not assumed).
+    pub reparents_unresolved: u64,
+    /// `ExteriorMoved` statements pushed to session gateways (one per gateway per applied reparent).
+    pub exterior_moves_told: u64,
     // ---- honesty counters (0 on a quiescent run; surfaced in the admin snapshot) ----
     /// `SpinUp` intents executed.
     pub spins_requested: u64,
@@ -171,6 +177,9 @@ impl RlmReconcilerRes {
             tuning,
             spawner,
             rlm_quiesced_until: UniverseTick(0),
+            reparents_applied: 0,
+            reparents_unresolved: 0,
+            exterior_moves_told: 0,
             spins_requested: 0,
             spins_failed: 0,
             teardowns_reaped: 0,
@@ -227,6 +236,57 @@ impl RlmReconcilerRes {
             expired.iter().map(|e| e.transfer).collect();
         self.arrivals_shield_expired_seen
             .retain(|t| still.contains(t));
+    }
+
+    /// ★ A CHILD MOVED HOUSE (the ruler switch, slice 4): an exterior crossing committed, `child` is
+    /// now `to_realm`'s child. Its demand cell is re-keyed under its new path (the coord the new
+    /// parent's own cell gives, plus the child's level) and its launch record rewritten, so a restart
+    /// rehydrates it under its true parent and the old cell is not desired for ever. Counted rather
+    /// than assumed when the new parent has no cell here or the child has no live node.
+    pub fn reparent(
+        &mut self,
+        child: RealmId,
+        to_realm: RealmId,
+        dir: &DirectoryCore,
+    ) -> Option<RealmCoord> {
+        let old = self.ledger.path_of_realm(child);
+        let parent = self.ledger.coord_of_realm(to_realm);
+        let node = dir
+            .head(DirectoryKey::Realm(child))
+            .map(|r| r.authority.node());
+        let (Some(old), Some(parent), Some(node)) = (old, parent, node) else {
+            self.reparents_unresolved += 1;
+            tracing::warn!(
+                ?child,
+                ?to_realm,
+                "REPARENT UNRESOLVED: no cell for the child, no cell for the new parent, or no live node",
+            );
+            return None;
+        };
+        let coord = parent.child(vd_core::worldgen::level_of(child));
+        self.ledger.rekey(&old, &coord);
+        if let Err(e) = self.spawner.reparent_realm(node, &coord) {
+            tracing::warn!(
+                ?child,
+                ?node,
+                ?e,
+                "REPARENT: the launch record could not be rewritten"
+            );
+        }
+        self.reparents_applied += 1;
+        tracing::info!(
+            ?child,
+            ?to_realm,
+            ?node,
+            "REPARENTED: the child's cell and launch record moved house"
+        );
+        Some(coord)
+    }
+
+    /// ★ THE PEER BOOK: where a node this reconciler's spawner launched listens (`None` for a stranger).
+    #[must_use]
+    pub fn addr_of(&self, node: NodeId) -> Option<([u8; 16], u16)> {
+        self.spawner.addr_of(node)
     }
 
     /// This reconciler's timing budget.
@@ -563,10 +623,36 @@ pub fn record_realm_demands(
 pub fn reconcile_realm_lifecycle(
     clock: Res<vd_sim::runtime::ClockSample>,
     mut dir: ResMut<crate::orchestrator::DirectoryRes>,
-    runtime: Res<crate::saga_runtime::SagaRuntimeRes>,
+    mut runtime: ResMut<crate::saga_runtime::SagaRuntimeRes>,
     mut rlm: ResMut<RlmReconcilerRes>,
     mut dynamic_peers: ResMut<crate::orchestrator::DynamicClockPeers>,
+    mut outbox: ResMut<vd_sim::runtime::OutboundBox>,
 ) {
+    // The ruler switch, slice 4: committed exterior crossings move house every tick, ahead of the
+    // sweep cadence, so a cell is never swept under a stale path.
+    for (child, to_realm, parent_node) in std::mem::take(&mut runtime.pending_reparents) {
+        let Some(coord) = rlm.reparent(child, to_realm, &dir.0) else {
+            continue; // unresolved: counted inside, and nothing to tell
+        };
+        // ★ THE SKY FOLLOWS THE HULL (slice 5): every session gateway hears the child's new coord, so
+        // a session aboard re-derives its chain. Addressed from the record (the gateways holding
+        // sessions, like the shard roster); a producer-less one-shot, so `Retained` — the durable
+        // outbox replays it across a crash of this process.
+        let flow = InterShardFlow::ExteriorMoved(vd_wire::intershard::ExteriorMoved {
+            child: coord,
+            parent_node,
+            at: clock.universe_tick,
+        });
+        for gateway in dir.0.session_gateways() {
+            outbox.push_flow_durable(
+                gateway,
+                MsgClass::Saga,
+                &flow,
+                vd_sim::io::Durability::Retained,
+            );
+            rlm.exterior_moves_told += 1;
+        }
+    }
     let interval = rlm.tuning().reconcile_interval_ticks;
     if interval == 0 {
         return; // INERT: the byte-identical default (no reconciler wired) — DynamicClockPeers stays empty.
@@ -618,6 +704,44 @@ mod tests {
             state: "Promoting".to_owned(),
             age_ticks: 999,
         }
+    }
+
+    #[test]
+    fn a_committed_exterior_crossing_rekeys_the_childs_cell_under_its_new_parent() {
+        // The ruler switch, slice 4: the hull's cell moves from under System 41 to under System 42;
+        // its watermarks ride along; an unresolvable reparent is counted, never assumed.
+        let mut rlm = RlmReconcilerRes::new(RlmTuning::default(), spawner());
+        let mut dir = DirectoryCore::new(DirectoryTuning::default());
+        let hull_entity = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 1, 1, 0);
+        let hull = RealmId::Ship(hull_entity);
+        let old = sys(41).child(vd_core::worldgen::level_of(hull));
+        rlm.ledger
+            .record_demand(&sys(41), DemandVerb::SpinUp, UniverseTick(1), Fence(1));
+        rlm.ledger
+            .record_demand(&sys(42), DemandVerb::SpinUp, UniverseTick(1), Fence(1));
+        rlm.ledger
+            .record_demand(&old, DemandVerb::SpinUp, UniverseTick(5), Fence(1));
+        let _ = dir.grant(
+            DirectoryKey::Realm(hull),
+            vd_wire::seams::directory::AuthorityRef::Shard(NodeId(1_007)),
+            Fence(1),
+            UniverseTick(1),
+        );
+        rlm.reparent(hull, sys(42).lowered(), &dir);
+        let new = sys(42).child(vd_core::worldgen::level_of(hull));
+        assert!(rlm.ledger.get(old.path()).is_none(), "the old cell is gone");
+        let cell = rlm.ledger.get(new.path()).expect("the cell moved");
+        assert_eq!(cell.coord, new);
+        assert_eq!(
+            cell.last_demand_tick,
+            UniverseTick(5),
+            "its watermarks rode along"
+        );
+        assert_eq!(rlm.reparents_applied, 1);
+        // No cell for the new parent: unresolved, counted, nothing moved.
+        rlm.reparent(hull, sys(43).lowered(), &dir);
+        assert_eq!(rlm.reparents_unresolved, 1);
+        assert!(rlm.ledger.get(new.path()).is_some());
     }
 
     #[test]
@@ -1475,8 +1599,76 @@ mod tests {
             vd_sim::saga::SagaTuning::default(),
         ));
         world.insert_resource(crate::orchestrator::DynamicClockPeers::default());
+        world.insert_resource(vd_sim::runtime::OutboundBox::default());
         world.insert_resource(rlm);
         world
+    }
+
+    #[test]
+    fn a_committed_move_is_told_to_every_session_gateway_and_an_unresolved_one_is_not() {
+        // The ruler switch, slice 5: the hull's cell moves under System 42 and every gateway holding a
+        // session hears the hull's new coord; a move the ledger cannot resolve tells nobody.
+        let mut rlm = RlmReconcilerRes::new(RlmTuning::default(), spawner());
+        let hull_entity = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 1, 1, 0);
+        let hull = RealmId::Ship(hull_entity);
+        let old = sys(41).child(vd_core::worldgen::level_of(hull));
+        rlm.ledger
+            .record_demand(&sys(41), DemandVerb::SpinUp, UniverseTick(1), Fence(1));
+        rlm.ledger
+            .record_demand(&sys(42), DemandVerb::SpinUp, UniverseTick(1), Fence(1));
+        rlm.ledger
+            .record_demand(&old, DemandVerb::SpinUp, UniverseTick(5), Fence(1));
+        let mut world = lifecycle_world(rlm, 9);
+        {
+            let dir = &mut world.resource_mut::<crate::orchestrator::DirectoryRes>().0;
+            let _ = dir.grant(
+                DirectoryKey::Realm(hull),
+                vd_wire::seams::directory::AuthorityRef::Shard(NodeId(1_007)),
+                Fence(1),
+                UniverseTick(1),
+            );
+            let _ = dir.grant(
+                DirectoryKey::Session(vd_core::SessionId(1)),
+                vd_wire::seams::directory::AuthorityRef::Gateway(NodeId(5)),
+                Fence(1),
+                UniverseTick(1),
+            );
+        }
+        world
+            .resource_mut::<crate::saga_runtime::SagaRuntimeRes>()
+            .pending_reparents
+            .extend([
+                (hull, sys(42).lowered(), NodeId(1_042)),
+                (hull, sys(43).lowered(), NodeId(1_043)),
+            ]);
+        let _ = run_lifecycle(&mut world);
+        let out = &world.resource::<vd_sim::runtime::OutboundBox>().0;
+        assert_eq!(
+            out.len(),
+            1,
+            "one statement, to the one gateway holding a session"
+        );
+        let (to, class, bytes, durability) = &out[0];
+        assert_eq!(*to, NodeId(5));
+        assert_eq!(*class, MsgClass::Saga);
+        assert_eq!(*durability, vd_sim::io::Durability::Retained);
+        assert_eq!(
+            postcard::from_bytes::<InterShardFlow>(bytes),
+            Ok(InterShardFlow::ExteriorMoved(
+                vd_wire::intershard::ExteriorMoved {
+                    child: sys(42).child(vd_core::worldgen::level_of(hull)),
+                    parent_node: NodeId(1_042),
+                    at: UniverseTick(9),
+                }
+            ))
+        );
+        let rlm = world.resource::<RlmReconcilerRes>();
+        assert_eq!(rlm.exterior_moves_told, 1);
+        assert_eq!(rlm.reparents_applied, 1);
+        assert_eq!(
+            rlm.reparents_unresolved, 1,
+            "System 43 has no cell: nothing told"
+        );
     }
 
     fn run_lifecycle(world: &mut World) -> u64 {

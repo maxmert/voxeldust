@@ -4,6 +4,7 @@
 //! applied (`docs/design/identity_persistence.md` §clock; R7).
 
 use bevy_ecs::prelude::{Res, ResMut, Resource, Schedule, World};
+use vd_core::NodeId;
 use vd_sim::io::{Inbound, MsgClass};
 use vd_sim::runtime::{ClockSample, InboundBox};
 use vd_wire::intershard::InterShardFlow;
@@ -16,6 +17,9 @@ use crate::universe_clock::{FollowerClock, SyncOutcome};
 #[derive(Resource, Debug, Default)]
 pub struct FollowerState {
     pub clock: Option<FollowerClock>,
+    /// ★ WHO DRIVES MY CLOCK — the orchestrator, learned from the first `ClockSync`'s sender. The peer
+    /// book asks it where an unbooked node listens; nothing else names the orchestrator to a node.
+    pub source: Option<NodeId>,
     /// Backward-slew observations rejected by the clamp.
     pub rejected_backward: u64,
     /// Syncs carrying a different epoch than the one first observed (a wiped or
@@ -40,7 +44,7 @@ fn observe_clock_syncs(
     mut sample: ResMut<ClockSample>,
 ) {
     for msg in &inbox.0 {
-        let Inbound::Wire { class, bytes, .. } = msg else {
+        let Inbound::Wire { from, class, bytes } = msg else {
             continue;
         };
         if *class != MsgClass::Membership {
@@ -55,6 +59,7 @@ fn observe_clock_syncs(
             tracing::error!("undecodable membership-class message");
             continue;
         };
+        state.source = Some(*from);
         match &mut state.clock {
             None => {
                 state.clock = Some(FollowerClock::new(epoch, universe_tick));
@@ -116,6 +121,19 @@ mod tests {
             class,
             bytes: bytes.into(),
         }
+    }
+
+    #[test]
+    fn the_clock_source_is_remembered_from_the_sync_that_drove_it() {
+        // The peer book asks the node that drives the clock; nothing else names the orchestrator.
+        let (mut world, mut schedule) = rig();
+        assert_eq!(world.resource::<FollowerState>().source, None);
+        observe(
+            &mut world,
+            &mut schedule,
+            vec![wire(MsgClass::Membership, sync_bytes(10, 7))],
+        );
+        assert_eq!(world.resource::<FollowerState>().source, Some(NodeId(1)));
     }
 
     #[test]

@@ -40,6 +40,39 @@ impl DirectoryKey {
             DirectoryKey::Session(_) | DirectoryKey::Realm(_) | DirectoryKey::Ship(_) => None,
         }
     }
+
+    /// ★ THE EXTERIOR KEY of a realm (the ruler switch, slice 0; owner-approved 2026-09-02): the key
+    /// whose authority AUTHORS the realm's placement — its parent — as distinct from `Realm(_)`,
+    /// whose authority RUNS it. The transfer design reserved `Ship` for exactly this (*"what transfers
+    /// is the ship's EXTERIOR authority … the interior world is owned by the ship-shard throughout"*),
+    /// and the ruler switch is a saga on this key from the old parent's node to the new parent's.
+    ///
+    /// `Some` only for a built hull today: it is the one realm kind whose parent can change while it
+    /// runs. A seeded realm rides rails its seed parent computes, so its parent is its lineage and it
+    /// has no exterior key. This is a fact of the KEY SPACE, not a feature branch: the directory has
+    /// no other key that can name a hull's parent.
+    ///
+    /// Example: the hull `Ship(h)` is berthed in System 7. `Realm(Ship(h))` is held by the hull's own
+    /// shard; `Ship(h)` is held by System 7's shard. When the hull leaves the shell, `Ship(h)` moves to
+    /// the galaxy's shard and `Realm(Ship(h))` stays where it is.
+    #[must_use]
+    pub fn exterior_of(realm: RealmId) -> Option<DirectoryKey> {
+        match realm {
+            RealmId::Ship(entity) => Some(DirectoryKey::Ship(entity)),
+            _ => None,
+        }
+    }
+
+    /// The ENTITY a realm's exterior is keyed by — the per-subject ledger key the containment scan
+    /// uses for a driven child, the same `EntityId` that names its `Ship` key. `None` for a realm
+    /// with no exterior (its parent never changes, so it is never a crossing subject).
+    #[must_use]
+    pub fn exterior_entity(realm: RealmId) -> Option<EntityId> {
+        match realm {
+            RealmId::Ship(entity) => Some(entity),
+            _ => None,
+        }
+    }
 }
 
 /// Who holds authority for a key.
@@ -358,5 +391,27 @@ mod tests {
                 reply
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod exterior_key_tests {
+    use super::DirectoryKey;
+    use vd_core::pose::RealmId;
+
+    #[test]
+    fn a_hull_has_an_exterior_key_and_a_seeded_realm_has_none() {
+        let hull = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 1, 1, 0);
+        assert_eq!(
+            DirectoryKey::exterior_of(RealmId::Ship(hull)),
+            Some(DirectoryKey::Ship(hull))
+        );
+        assert_eq!(DirectoryKey::exterior_of(RealmId::System(7)), None);
+        assert_eq!(DirectoryKey::exterior_of(RealmId::Universe), None);
+        assert_eq!(
+            DirectoryKey::exterior_entity(RealmId::Ship(hull)),
+            Some(hull)
+        );
+        assert_eq!(DirectoryKey::exterior_entity(RealmId::Planet(3)), None);
     }
 }

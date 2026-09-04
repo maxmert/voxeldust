@@ -161,12 +161,24 @@ impl RealmView {
     /// the replay lands). A level RE-SENT at the current epoch swaps nothing — the scene it
     /// describes is the scene the tracks already animate.
     #[must_use]
-    pub fn swap_epoch(&mut self, epoch: u64) -> Option<RealmSnapshotDatagram> {
+    ///
+    /// ★ `keep_tracks` (owner 2026-09-04, *"still blinks and stops for a second on transitions"*):
+    /// the epoch also bumps when the CHAIN changes under the SAME origin — a hull handed from its
+    /// star system to the galaxy while the pilot stands inside it. Every stored position is then
+    /// still a position in the origin's frame (the gateway keeps its own ring for the same reason),
+    /// so forgetting them cost the picture a 120 ms refill of the interpolation buffer at every
+    /// hand-over: the stop the owner saw. With `keep_tracks` the tracks and the feed counter stay;
+    /// the level's row set decides which tracks still matter ([`RealmView::retain_placements`]).
+    /// Example: the hull crosses into the galaxy at tick 500. The planets' tracks hold ticks 494 to
+    /// 500 in the hull's frame. The galaxy's rows at tick 501 continue them; nothing refills.
+    pub fn swap_epoch(&mut self, epoch: u64, keep_tracks: bool) -> Option<RealmSnapshotDatagram> {
         if epoch == self.epoch {
             return None;
         }
-        self.placements.clear();
-        self.high_water = None;
+        if !keep_tracks {
+            self.placements.clear();
+            self.high_water = None;
+        }
         self.epoch = epoch;
         match self.held.take() {
             Some(h) if h.origin_epoch == epoch => Some(h),
@@ -176,6 +188,17 @@ impl RealmView {
                 None
             }
             _ => None,
+        }
+    }
+
+    /// Forget the tracks of realms a scene DELTA removed from the drawn set (the same-origin
+    /// swap's second half): a realm that left would otherwise keep a track nobody reads, and after
+    /// many hand-overs the view would hold every realm the pilot ever passed. Never called for a
+    /// swap level — that level can be composed from a partial chain and a realm missing from it
+    /// is coming back next tick.
+    pub fn forget(&mut self, removed: &[RealmId]) {
+        for realm in removed {
+            self.placements.remove(realm);
         }
     }
 
@@ -352,6 +375,48 @@ mod tests {
         );
     }
 
+    /// ★ THE SAME-ORIGIN SWAP KEEPS THE MOTION (owner 2026-09-04): the epoch bumps for a chain
+    /// change under the same origin, and every stored position is still in that origin's frame.
+    /// The tracks and the feed counter stay; only the tracks of realms the new level no longer
+    /// draws are dropped. Example: the pilot's hull is handed from System 7 to the galaxy; the
+    /// planets' tracks continue and the picture never refills its buffer.
+    #[test]
+    fn a_same_origin_epoch_swap_keeps_the_tracks_and_the_counter_and_drops_the_undrawn() {
+        let mut v = RealmView::default();
+        v.on_realm_snapshot(
+            None,
+            frame(
+                9,
+                10,
+                vec![
+                    (RealmId::Planet(1), pose(DVec3::X, 10)),
+                    (RealmId::Planet(2), pose(DVec3::Y, 10)),
+                ],
+            ),
+        );
+        assert_eq!(v.swap_epoch(1, true), None);
+        assert_eq!(v.epoch(), 1);
+        assert!(
+            v.realm_pose(RealmId::Planet(1), 10.0).is_some(),
+            "the track survives the swap"
+        );
+        // The feed counter survives too: a frame OLDER than the kept high-water is still stale.
+        assert_eq!(
+            v.on_realm_snapshot(
+                None,
+                frame_at_epoch(1, 8, 11, vec![(RealmId::Planet(1), pose(DVec3::Z, 11))]),
+            ),
+            RealmVerdict::DropStale,
+            "the kept counter still gates the same feed"
+        );
+        // A delta removes the second planet: its track goes.
+        v.forget(&[RealmId::Planet(2)]);
+        assert!(v.realm_pose(RealmId::Planet(1), 10.0).is_some());
+        assert_eq!(v.realm_pose(RealmId::Planet(2), 10.0), None);
+        // A same-epoch call is still a no-op either way.
+        assert_eq!(v.swap_epoch(1, true), None);
+    }
+
     /// THE EPOCH SWAP forgets EVERYTHING (placements + the feed counter): every stored value is a
     /// position in the old origin's frame. The new scene then refills from zero — a fresh feed's
     /// LOWER frame_id must be admitted, which is why the counter clears with the tracks. A level
@@ -367,7 +432,7 @@ mod tests {
         );
         assert!(!v.is_empty());
         // A level RE-SENT at the current epoch swaps nothing (the tracks already animate it).
-        assert_eq!(v.swap_epoch(0), None);
+        assert_eq!(v.swap_epoch(0, false), None);
         assert!(!v.is_empty(), "a same-epoch level forgets nothing");
         // An EARLY epoch-1 datagram races its level: HELD, not applied, not dropped.
         assert_eq!(
@@ -395,7 +460,7 @@ mod tests {
         );
         assert_eq!(v.realm_pose(RealmId::Planet(2), f64::INFINITY), None);
         // THE SWAP: tracks + counter forgotten; the held epoch-1 datagram is handed back.
-        let held = v.swap_epoch(1).expect("the held datagram replays");
+        let held = v.swap_epoch(1, false).expect("the held datagram replays");
         assert_eq!(
             held.frame_id, 2,
             "the NEWEST early datagram was the one held"
@@ -436,9 +501,9 @@ mod tests {
             RealmVerdict::HeldNextEpoch,
         );
         // Swapping to epoch 1 keeps it held (its scene has not arrived yet)...
-        assert_eq!(v.swap_epoch(1), None);
+        assert_eq!(v.swap_epoch(1, false), None);
         // ...and swapping to epoch 2 hands it back.
-        assert!(v.swap_epoch(2).is_some());
+        assert!(v.swap_epoch(2, false).is_some());
         // A held datagram for an epoch the view has swapped PAST is dead: hold one for 3, then
         // swap straight to 4 — nothing replays.
         assert_eq!(
@@ -448,7 +513,11 @@ mod tests {
             ),
             RealmVerdict::HeldNextEpoch,
         );
-        assert_eq!(v.swap_epoch(4), None, "a dead-epoch hold never replays");
+        assert_eq!(
+            v.swap_epoch(4, false),
+            None,
+            "a dead-epoch hold never replays"
+        );
     }
 
     #[test]

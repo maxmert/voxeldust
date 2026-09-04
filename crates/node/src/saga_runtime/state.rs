@@ -51,6 +51,9 @@ pub(crate) struct LiveSaga {
     /// it is `Some` before the CAS for an Entity subject, so `EmitCrossing` never ships a None pose.
     /// (The TLV state blob joins this at 1d.6; pose-only now.)
     pub(crate) flushed_pose: Option<StampedPose>,
+    /// The ruler switch, slice 2 — the exterior blob the source flushed beside the pose (empty for an
+    /// occupant), carried verbatim onto the envelope.
+    pub(crate) flushed_state: Vec<u8>,
     /// D-3 — WHICH participant was first observed CONFIRMED-DEAD and WHEN, while this saga awaits a
     /// destructive resolution (`None` otherwise). A DESTRUCTIVE resolution (dest-abandon, source
     /// discard/self-promote, dest re-home) waits the LARGE `abort_deadline_ticks` measured FROM the tick
@@ -187,6 +190,10 @@ pub struct SagaRuntimeRes {
     /// no WAL family is needed (the locked record + armed saga are the durable artifacts; the reaper
     /// re-detects on reboot). Always empty BETWEEN ticks (drained at the end of every barrier).
     pub(crate) pending_rehome: Vec<PendingReHome>,
+    /// ★ THE RULER SWITCH, slice 4 — exterior crossings that COMMITTED this tick: `(child, to_realm)`.
+    /// The lifecycle reconciler drains them and re-keys the child's demand cell and launch record,
+    /// so a restart rehydrates the child under its true parent.
+    pub(crate) pending_reparents: Vec<(vd_core::pose::RealmId, vd_core::pose::RealmId, NodeId)>,
     /// Typed client-facing rejections awaiting the surfacing system. BOUNDED ring
     /// (`REJECTION_LEDGER_CAP`): the PROPER consumer — the typed rejection→client channel —
     /// lands at Slice 1c.9 (CPO-4) and drains via `std::mem::take` (lifetime ONE cycle,
@@ -284,6 +291,10 @@ pub struct SagaRuntimeRes {
     /// does NOT re-increment (the count reflects distinct started sagas, not requests seen). 0 until the
     /// first durable boundary crossing lands.
     pub(crate) crossings_started: u64,
+    /// The ruler switch, slice 1 — exterior sagas started (a hull's placement authorship moving).
+    pub(crate) exterior_crossings_started: u64,
+    /// The ruler switch, slice 1 — exterior requests whose sender does not hold the exterior: dropped.
+    pub(crate) exterior_request_unattested: u64,
     /// Slice 3f-B: durable `CrossingRequest`s whose SUBJECT owner was found but whose dest-`Realm` OR
     /// `Session` head was UNRESOLVED, so no saga could start this tick. Counted-only for now — the
     /// abort-reply egress that clears the source latch is a LATER sub-slice (3f-D); until then a lost
@@ -539,6 +550,18 @@ impl SagaRuntimeRes {
     /// Slice 3f-B — durable crossing sagas STARTED from a resolved `CrossingRequest` (subject, dest-realm,
     /// and session all in the directory). Monotonic; a redelivered request for a live crossing does not
     /// re-count (the `contains_key`/`lock_transfer` guard absorbs it).
+    /// The ruler switch, slice 1 — exterior sagas started.
+    #[must_use]
+    pub fn exterior_crossings_started(&self) -> u64 {
+        self.exterior_crossings_started
+    }
+
+    /// The ruler switch, slice 1 — exterior requests dropped because the sender does not hold the key.
+    #[must_use]
+    pub fn exterior_request_unattested(&self) -> u64 {
+        self.exterior_request_unattested
+    }
+
     #[must_use]
     pub fn crossings_started(&self) -> u64 {
         self.crossings_started

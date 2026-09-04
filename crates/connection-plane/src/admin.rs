@@ -35,6 +35,9 @@ pub fn gateway_view(
         refused_unknown_sender,
         shard_rosters_applied,
         shard_roster_stale,
+        exterior_moves_applied,
+        exterior_moves_stale,
+        exterior_moves_sessions_spliced,
         frame_sub_desync,
         transfer_unroutable,
         transfer_control_parked,
@@ -120,6 +123,9 @@ pub fn gateway_view(
         refused_unknown_sender,
         shard_rosters_applied,
         shard_roster_stale,
+        exterior_moves_applied,
+        exterior_moves_stale,
+        exterior_moves_sessions_spliced,
         frame_sub_desync,
         transfer_unroutable,
         transfer_control_parked,
@@ -249,6 +255,9 @@ mod tests {
             refused_unknown_sender: 26,
             shard_rosters_applied: 27,
             shard_roster_stale: 28,
+            exterior_moves_applied: 401,
+            exterior_moves_stale: 402,
+            exterior_moves_sessions_spliced: 403,
             frame_sub_desync: 11,
             transfer_unroutable: 12,
             transfer_control_parked: 13,
@@ -347,6 +356,9 @@ mod tests {
         assert_eq!(view.refused_unknown_sender, 26);
         assert_eq!(view.shard_rosters_applied, 27);
         assert_eq!(view.shard_roster_stale, 28);
+        assert_eq!(view.exterior_moves_applied, 401);
+        assert_eq!(view.exterior_moves_stale, 402);
+        assert_eq!(view.exterior_moves_sessions_spliced, 403);
         assert_eq!(view.frame_sub_desync, 11);
         assert_eq!(view.transfer_unroutable, 12);
         assert_eq!(view.transfer_control_parked, 13);

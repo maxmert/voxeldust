@@ -26,8 +26,8 @@ use vd_core::placement::PlacementBook;
 use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose};
 use vd_core::{EntityId, Fence, NodeId, SessionId, TickId, TransferId, UniverseTick};
 use vd_wire::intershard::{
-    CrossingAborted, CrossingRequest, DemandVerb, InterShardFlow, TransientCrossingRequest,
-    crossing_transfer_id,
+    CrossingAborted, CrossingRequest, DemandVerb, ExteriorCrossingRequest, InterShardFlow,
+    TransientCrossingRequest, crossing_transfer_id,
 };
 use vd_wire::seams::directory::DirectoryKey;
 
@@ -45,8 +45,11 @@ pub struct LatchedCrossing {
     /// component of the deterministic [`crossing_transfer_id`], so the re-drive re-mints the SAME id).
     pub subject_fence: Fence,
     /// The subject's session (the durable crossing carries it so the orchestrator's saga can
-    /// `PrepareSubscribe` to the client's gateway).
+    /// `PrepareSubscribe` to the client's gateway). `SessionId::NONE` for an exterior.
     pub session: SessionId,
+    /// The ruler switch, slice 1 — the latch is a driven child's EXTERIOR, so the re-drive re-mints an
+    /// `ExteriorCrossingRequest`, never a session-bearing one.
+    pub exterior: bool,
     /// The dest realm's PARENT provenance (the container region's `parent`) — re-emitted VERBATIM so the
     /// stranded-latch re-drive re-mints the byte-identical `CrossingRequest` (an Area dest's frame still
     /// forms on the re-drive). `None` for a non-Area dest.
@@ -113,6 +116,11 @@ pub struct RegionMembership {
 }
 
 impl RegionMembership {
+    /// The realms this subject was a member of at the last evaluation — re-asked to decide release.
+    fn members(&self) -> impl Iterator<Item = RealmId> + '_ {
+        self.realms.iter().copied()
+    }
+
     /// Is the entity a hysteretic member of `realm`?
     fn get(&self, realm: RealmId) -> bool {
         self.realms.contains(&realm)
@@ -192,11 +200,13 @@ fn abort_crossing_latch(
 /// relocate the strand). On the id-match clear it also RE-ARMS: reset ONLY the dwell (so a still-in-band
 /// entity re-requests without physically re-crossing — audit-L1) + BUMP the attempt (so the re-latch mints a
 /// FRESH id — H2). Monomorphic.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn on_crossing_aborted(
     abort: CrossingAborted,
     in_flight: &mut RequestInFlight,
     progress: &mut CrossingProgress,
     holds: &mut HandoffHolds,
+    driven: &mut crate::stub::drive::DrivenChildren,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
     orchestrator: NodeId,
@@ -208,9 +218,22 @@ pub(crate) fn on_crossing_aborted(
         MsgClass::Saga,
         &InterShardFlow::CrossingAbortedAck(abort),
     );
-    let Some(entity) = abort.subject.transfer_subject_entity() else {
-        stats.crossing_abort_no_entity += 1;
-        return;
+    // The ruler switch, slice 2: an aborted EXTERIOR crossing thaws the child the flush froze — it is
+    // this realm's to drive again — and clears its latch like any subject's.
+    let entity = match abort.subject {
+        DirectoryKey::Ship(entity) => {
+            if let Some(d) = driven.0.get_mut(&RealmId::Ship(entity)) {
+                d.frozen = false;
+            }
+            entity
+        }
+        other => {
+            let Some(entity) = other.transfer_subject_entity() else {
+                stats.crossing_abort_no_entity += 1;
+                return;
+            };
+            entity
+        }
     };
     // Clear ONLY on an exact id match (`== Some(&abort.transfer)`) — equality over the value so the
     // false arm is a covered no-op, not an uncoverable `matches!` region (HR5(d)). The clear itself
@@ -248,6 +271,10 @@ pub(crate) fn evaluate_realm_boundaries(
     mut in_flight: ResMut<RequestInFlight>,
     mut stats: ResMut<StubStats>,
     mut outbox: ResMut<OutboundBox>,
+    // The ruler switch, slice 1 — the DRIVEN CHILDREN this realm authors are subjects too.
+    driven: Res<crate::stub::drive::DrivenChildren>,
+    exterior: Res<crate::stub::realm_head::ExteriorAuthority>,
+    mut exterior_scan: ResMut<ExteriorScan>,
 ) {
     // Authority gate (mirrors `emit_transient_batch`): a shard without its realm lease triggers no
     // re-home — the `realm_fence` is the durable `subject_fence` and the transient `src_realm_fence`.
@@ -265,10 +292,17 @@ pub(crate) fn evaluate_realm_boundaries(
         .values()
         .map(|d| d.entity)
         .chain(owned_transients.0.keys().copied())
+        .chain(
+            driven
+                .0
+                .keys()
+                .filter_map(|r| DirectoryKey::exterior_entity(*r)),
+        )
         .collect();
     retain_live(&mut progress.0, &live);
     retain_live(&mut membership.0, &live);
     retain_live(&mut in_flight.0, &live);
+    retain_live(&mut exterior_scan.0, &live);
 
     let ctx = CrossingCtx {
         config: &config,
@@ -279,6 +313,7 @@ pub(crate) fn evaluate_realm_boundaries(
         child_index: regions.child_index(),
         own_frame: regions.own_frame(config.realm),
         ix_of: &regions.ix_of,
+        unindexed: regions.unindexed_rows(),
         root_realm: regions.root_realm,
         realm_fence,
     };
@@ -312,7 +347,8 @@ pub(crate) fn evaluate_realm_boundaries(
             &pose,
             dot.prev_offset,
             dot.authority.fence(),
-            Some(*session),
+            SubjectLane::ByKind(Some(*session)),
+            None,
             &mut progress.0,
             &mut membership.0,
             &mut in_flight.0,
@@ -351,6 +387,7 @@ pub(crate) fn evaluate_realm_boundaries(
             realm_fence,
             // A transient carries no session (its batch handoff emits no session-bearing command); it
             // dispatches to the Transient arm, which never reads this. Slice 3f.
+            SubjectLane::ByKind(None),
             None,
             &mut progress.0,
             &mut membership.0,
@@ -360,6 +397,106 @@ pub(crate) fn evaluate_realm_boundaries(
         );
         t.prev_offset = eval.prev_offset;
     }
+    // ★ THE THIRD LANE — MY DRIVEN CHILDREN (the ruler switch, slice 1; owner 2026-09-02). A hull is a
+    // realm the parent authors, and until now it was only an OBJECT the scan measured against, never a
+    // SUBJECT it measured: a hull left its star system's shell and nobody noticed (MEASURED: two
+    // flights to the end of the millimetre ruler). Now each driven child is asked the same question
+    // as a dot, on the same swept lookup and the same container fold: which of my children holds it,
+    // or has it left me altogether. Its ledger key is the entity its exterior is named by, so the
+    // latch, the membership and the cooldown are the ones every subject has.
+    //
+    // THE EARLY START (M-D; D-MOVE-3 piece 2): a saga needs ticks and a shell is crossed inside one
+    // at the speeds the owner flies, so the point asked about is the position LED by the velocity the
+    // parent itself authored, over the request ttl — the saga's own expected duration, derived, never
+    // a literal. The pose the source ships at the flush is the truth at the flush tick, so an early
+    // request never plants the hull where it is not.
+    //
+    // Nothing here names the child's motion, drive or kind (SL4): the state read is the placement
+    // the physics pass produced, and the lane is the one every subject takes.
+    let own_frame = regions.own_frame(config.realm);
+    let lead_s = f64::from(config.request_ttl_ticks) * config.tick_dt_s;
+    for (child, held) in driven.0.iter() {
+        let Some(entity) = DirectoryKey::exterior_entity(*child) else {
+            continue; // a driven child with no exterior key has no author to move: never a subject
+        };
+        let Some(exterior_fence) = exterior.0.get(child).copied() else {
+            stats.exterior_scan_unleased += 1;
+            continue;
+        };
+        let Some(region) = regions.direct_child(config.realm, *child) else {
+            continue; // authored but not on my roster this tick: nothing to measure against
+        };
+        let pose = exterior_pose(region, &held.state, own_frame, clock.universe_tick);
+        let led = led_pose(&pose, lead_s);
+        let prev = exterior_scan.0.get(&entity).copied().unwrap_or(led.pos);
+        let anchor = book_anchor(&regions.ix_of, config.realm, config.realm);
+        let Some(book) = placements.0.head(anchor) else {
+            stats.placement_book_miss += 1;
+            continue;
+        };
+        let eval = evaluate_one_subject(
+            &ctx,
+            book,
+            entity,
+            &led,
+            prev,
+            exterior_fence,
+            SubjectLane::Exterior,
+            // A child is always inside its own bound; the question is which OTHER region holds it.
+            Some(*child),
+            &mut progress.0,
+            &mut membership.0,
+            &mut in_flight.0,
+            &mut stats,
+            &mut outbox,
+        );
+        exterior_scan.0.insert(entity, eval.prev_offset);
+    }
+}
+
+/// The ruler switch, slice 1 — where each driven child's LED point was at the previous scan, keyed by
+/// the entity its exterior is named by (the swept prior every subject carries; a dot keeps its own on
+/// the `Dot`). Evicted with the live set like every per-subject ledger.
+#[derive(Resource, Debug, Default)]
+pub struct ExteriorScan(pub BTreeMap<EntityId, LatticePos>);
+
+/// A driven child's authored placement as a stamped pose in the PARENT's own frame — the same row
+/// `placement_row` writes, read as the point the scan measures: the berth cell plus the travel the
+/// physics pass produced, the velocity the parent wrote, the facing it wrote.
+pub(crate) fn exterior_pose(
+    region: &vd_core::geometry::RealmRegion,
+    state: &crate::stub::drive::DrivenState,
+    frame: FrameRef,
+    at: vd_core::ids::UniverseTick,
+) -> StampedPose {
+    StampedPose {
+        frame,
+        pos: region
+            .center
+            .in_parents_frame()
+            .translated(state.pos_m, frame.tier()),
+        vel: state.vel_mps,
+        orient: state.orient,
+        universe_tick: at,
+    }
+}
+
+/// The pose LED by its own velocity over `lead_s` seconds — the early-start point (M-D). A zero
+/// velocity or a zero lead is the pose itself, bit for bit.
+fn led_pose(pose: &StampedPose, lead_s: f64) -> StampedPose {
+    StampedPose {
+        pos: pose.pos.translated(pose.vel * lead_s, pose.frame.tier()),
+        ..*pose
+    }
+}
+
+/// Which arm of the fan-out a subject takes — chosen by the LANE that scanned it, never by a kind
+/// test alone: a dot and a transient dispatch on their entity's durability class as before; a driven
+/// child's exterior is its own policy (HR2: policy fan-out on one machinery).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SubjectLane {
+    ByKind(Option<SessionId>),
+    Exterior,
 }
 
 /// Read-only per-tick context shared by every subject evaluation (task #135).
@@ -385,6 +522,8 @@ struct CrossingCtx<'a> {
     /// parent's breadth (SL9).
     ancestor_chain: &'a [BTreeSet<RealmId>],
     ix_of: &'a BTreeMap<RealmId, usize>,
+    /// The rows the child index does not answer for (`RealmRegions::unindexed_rows`).
+    unindexed: &'a [RealmId],
     /// THE CHILD INDEX (SL9): which of this shard's static direct children could hold a given point, so
     /// the fold below asks a handful instead of the whole forest. EMPTY on a rig that never named its
     /// own realm, in which case nothing is indexed, nothing is skipped, and the fold is the full scan it
@@ -397,26 +536,22 @@ struct CrossingCtx<'a> {
 
 /// Is this region worth evaluating for a subject whose candidate set is `candidates`?
 ///
-/// YES unless ALL of these hold: the lookup produced an answer at all, the index actually answers for
-/// this realm (so a miss is INFORMATION,
+/// YES unless ALL of these hold: the index actually answers for this realm (so a miss is INFORMATION,
 /// not ignorance), the lookup did not name it, the subject is not already a remembered member of it, and
 /// it is not on the subject's own derived chain. The last two matter because membership is HYSTERETIC —
 /// a region the subject is inside must be re-asked every tick to decide RELEASE, however far the
-/// geometry says it now is.
+/// geometry says it now is. (The index ABSTAINED on a wide step while it was a grid; the tree answers
+/// every span, so that arm is gone.)
 ///
-/// Monomorphic and written as five named terms rather than one chained `&&`, so every arm is coverable
+/// Monomorphic and written as four named terms rather than one chained `&&`, so every arm is coverable
 /// on its own (HR5) and so the reason a region survived the filter can be read off the code.
 pub(crate) fn worth_asking(
-    answered: bool,
     index: &ChildIndex,
     candidates: &[RealmId],
     remembered: &RegionMembership,
     chain: &BTreeSet<RealmId>,
     realm: RealmId,
 ) -> bool {
-    if !answered {
-        return true; // the index ABSTAINED for this subject-tick — ignorance, so evaluate everything
-    }
     if !index.answers_for(realm) {
         return true; // not indexed (an ancestor, this realm itself, a mover) — always evaluated
     }
@@ -600,10 +735,13 @@ fn evaluate_one_subject(
     // spawn, an adopt or an arrival carries; the verdict then collapses to the point answer exactly.
     prev_pos: LatticePos,
     subject_fence: Fence,
-    // The subject's session — `Some` for a durable dot (the durable `CrossingRequest` carries it so the
-    // orchestrator's saga can `PrepareSubscribe` to the client's gateway), `None` for a transient (whose
-    // batch path emits no session-bearing command and never reaches the durable arm). Slice 3f.
-    subject_session: Option<SessionId>,
+    // The lane that scanned this subject: a dot carries its session (the durable `CrossingRequest`
+    // carries it so the orchestrator's saga can `PrepareSubscribe` to the client's gateway), a
+    // transient none, and a driven child's exterior is its own arm. Slice 3f; the ruler switch, slice 1.
+    lane: SubjectLane,
+    // A region the fold must NOT ask about: a driven child's OWN region, which always holds its own
+    // centre and would otherwise be its own deepest container. `None` for a dot.
+    exclude: Option<RealmId>,
     progress: &mut BTreeMap<EntityId, CrossingState>,
     membership: &mut BTreeMap<EntityId, RegionMembership>,
     in_flight: &mut BTreeMap<EntityId, TransferId>,
@@ -671,29 +809,24 @@ fn evaluate_one_subject(
     // the caller would then SKIP the one child that actually holds the point.
     // ★ THE LOOKUP ASKS ABOUT THE SEGMENT, NOT THE POINT (slice S5). A child the subject travels
     // THROUGH within one tick holds neither endpoint, so a point lookup would skip it before the swept
-    // verdict could ever be asked — the arithmetic would be correct and unreachable. When the subject
-    // has not moved out of its grid cell the segment answer IS the point answer, so a stationary
-    // subject pays exactly today's lookup.
-    //
-    // `answered == false` means the index ABSTAINED — enumerating the span would have cost more than
-    // handing the whole field back. That is ignorance, not a miss, so every region must be evaluated;
-    // `worth_asking` reads the flag first, before it consults the answer at all.
+    // verdict could ever be asked — the arithmetic would be correct and unreachable. A segment of zero
+    // length IS the point answer, so a stationary subject pays exactly today's lookup. The tree answers
+    // every span (the grid it replaced abstained on a wide one), so the answer is always information.
     let own_point = vd_core::frame::transfer_frame(&measured, ctx.own_frame, book).map(|p| p.pos);
     let own_prev = prior_in_own_frame(&measured, prev_pos, ctx.own_frame, book);
     let mut seg_candidates: Vec<RealmId> = Vec::new();
-    let mut answered = true;
     let candidates: &[RealmId] = match (&own_point, &own_prev) {
         (Ok(p), Some(q)) => {
-            answered = ctx.child_index.candidates_segment(
-                *q,
-                *p,
-                ctx.own_frame.tier(),
-                &mut seg_candidates,
-            );
+            ctx.child_index
+                .candidates_segment(*q, *p, ctx.own_frame.tier(), &mut seg_candidates);
             &seg_candidates
         }
         // No usable prior: the point lookup, unchanged.
-        (Ok(p), None) => ctx.child_index.candidates(*p, ctx.own_frame.tier()),
+        (Ok(p), None) => {
+            ctx.child_index
+                .candidates_into(*p, ctx.own_frame.tier(), &mut seg_candidates);
+            &seg_candidates
+        }
         // A subject this shard cannot place in its own frame: no candidates, and every indexed child
         // therefore falls through to the unconditional evaluation below.
         // A cross-unit refusal lands here too, and it is COUNTED rather than swallowed: the answer
@@ -708,15 +841,32 @@ fn evaluate_one_subject(
         }
     };
     let mut members: Vec<DepthKey> = Vec::new();
-    for (region, &depth_key) in ctx.regions.iter().zip(ctx.depths.iter()) {
-        if !worth_asking(
-            answered,
-            ctx.child_index,
-            candidates,
-            bits,
-            owned_chain,
-            region.realm,
-        ) {
+    // ★ ASK ONLY THE ROWS THAT CAN ANSWER (SL9, MEASURED on the fifth flight, 2026-09-03): the rows
+    // the index does not answer for (the ancestors, this realm, the movers), the index's candidates
+    // for this subject, the rows it was a member of, and its prior's chain. Every other row is an
+    // indexed child the lookup already ruled out — `worth_asking` said no to each of them, one at a
+    // time, 233 220 times per subject per tick on the galaxy: 325 ms a tick, a stale window, a frozen
+    // picture.
+    let remembered: Vec<RealmId> = bits.members().collect();
+    let mut ask: Vec<usize> =
+        Vec::with_capacity(ctx.unindexed.len() + candidates.len() + remembered.len());
+    ask.extend(
+        ctx.unindexed
+            .iter()
+            .filter_map(|r| ctx.ix_of.get(r).copied()),
+    );
+    ask.extend(candidates.iter().filter_map(|r| ctx.ix_of.get(r).copied()));
+    ask.extend(remembered.iter().filter_map(|r| ctx.ix_of.get(r).copied()));
+    ask.extend(owned_chain.iter().filter_map(|r| ctx.ix_of.get(r).copied()));
+    ask.sort_unstable();
+    ask.dedup();
+    for ix in ask {
+        let region = &ctx.regions[ix];
+        let depth_key = ctx.depths[ix];
+        if Some(region.realm) == exclude {
+            continue; // the subject's own region: it holds its own centre by construction
+        }
+        if !worth_asking(ctx.child_index, candidates, bits, owned_chain, region.realm) {
             // NOT a member, and not remembered as one, so there is nothing to advance: `set(realm, false)`
             // on an absent realm is a no-op and `members` gains nothing. Skipping is therefore identical
             // to evaluating, which is what `the_index_decides_exactly_what_the_full_scan_decides` proves.
@@ -867,7 +1017,7 @@ fn evaluate_one_subject(
             ctx,
             entity,
             subject_fence,
-            subject_session,
+            lane,
             dest,
             to_parent,
             state,
@@ -891,7 +1041,7 @@ fn fan_out_crossing(
     ctx: &CrossingCtx<'_>,
     entity: EntityId,
     subject_fence: Fence,
-    subject_session: Option<SessionId>,
+    lane: SubjectLane,
     to_realm: RealmId,
     // ★DEAD wire field, threaded for shape only: the consumer it was appended for
     // (`rebind_pose_to_dest`) is DELETED (D-PLACE-1) — the dest forms its frame from its own ROSTER
@@ -903,6 +1053,66 @@ fn fan_out_crossing(
     outbox: &mut OutboundBox,
 ) {
     let from_realm = ctx.config.realm;
+    // ★ THE EXTERIOR ARM (the ruler switch, slice 1). The verdict stands and is counted; the request
+    // that carries it to the orchestrator is the third request arm on the wire (beside the durable
+    // and the transient one), which under SL6 waits for the owner's word. The cooldown is armed so
+    // a hull dwelling on a shell is decided once per dwell, not once per tick.
+    let SubjectLane::ByKind(subject_session) = lane else {
+        stats.exterior_crossings_decided += 1;
+        tracing::info!(
+            entity = entity.0,
+            from_realm = ?from_realm,
+            to_realm = ?to_realm,
+            subject_fence = ?subject_fence,
+            "EXTERIOR CROSSING DECIDED: a driven child left this realm or entered a sibling",
+        );
+        // Latched exactly like a durable subject: one request per crossing, re-driven on the ttl,
+        // suppressed while in flight. The subject is the child's EXTERIOR key, and the fence is the
+        // exterior lease this realm holds — the saga's CAS expectation.
+        use std::collections::btree_map::Entry;
+        match in_flight.entry(entity) {
+            Entry::Vacant(slot) => {
+                let subject = DirectoryKey::Ship(entity);
+                let attempt = state.crossing_attempt;
+                let transfer = crossing_transfer_id(subject, subject_fence, attempt);
+                slot.insert(transfer);
+                outbox.push_flow(
+                    ctx.config.orchestrator,
+                    MsgClass::Saga,
+                    &InterShardFlow::ExteriorCrossingRequest(ExteriorCrossingRequest {
+                        subject,
+                        from_realm,
+                        to_realm,
+                        subject_fence,
+                        attempt,
+                    }),
+                );
+                state.last_commit_tick = Some(ctx.clock.local_tick);
+                state.latched_crossing = Some(LatchedCrossing {
+                    to_realm,
+                    subject_fence,
+                    session: SessionId::NONE,
+                    to_parent,
+                    exterior: true,
+                });
+                state.redrives_spent = 0;
+                stats.exterior_crossings_requested += 1;
+                tracing::info!(
+                    entity = entity.0,
+                    transfer = ?transfer,
+                    from_realm = ?from_realm,
+                    to_realm = ?to_realm,
+                    attempt,
+                    subject_fence = ?subject_fence,
+                    "EXTERIOR CROSSING REQUEST EMITTED and latched",
+                );
+            }
+            Entry::Occupied(_) => {
+                stats.crossings_suppressed_in_flight += 1;
+            }
+        }
+        return;
+    };
     match durability_of(entity) {
         DurabilityClass::Durable => {
             // A durable crossing subject is normally a session-owned dot (only the dot loop passes
@@ -950,6 +1160,7 @@ fn fan_out_crossing(
                         subject_fence,
                         session,
                         to_parent,
+                        exterior: false,
                     });
                     // D-WORLD-2: a fresh latch starts a fresh re-drive budget.
                     state.redrives_spent = 0;
@@ -1079,23 +1290,23 @@ pub(crate) fn redrive_stranded_crossings(
             .latched_crossing
             .expect("a held durable latch carries its re-emit payload");
         if armed {
-            // The full lineage coord of the dest — always resolvable: a crossing dest is a seed-lineage
-            // region in this shard's neighbourhood, never an entity-backed ship (no producer plants a
-            // Ship region through P3, and the hosted-child lanes EXCLUDE one — `region_level`, D-SHIP-1;
-            // the P8 ship-realm work re-visits this expect with the lineage arm it adds).
-            let coord = regions
-                .coord_of(lc.to_realm)
-                .expect("a crossing dest is a seed-lineage realm (never an entity-backed ship)");
-            push_demand(
-                &mut outbox,
-                config.orchestrator,
-                &config.own_coord,
-                coord,
-                realm_fence,
-                DemandVerb::KeepAlive,
-                clock.universe_tick,
-                &mut stats,
-            );
+            // The full lineage coord of the dest, when this shard's forest can name it. A destination it
+            // cannot name — a built realm it does not host, the case the old `expect` here named as the
+            // P8 ship-realm work — gets no keep-alive from here and is COUNTED, never assumed (the ruler
+            // switch, slice 1).
+            match regions.coord_of(lc.to_realm) {
+                Some(coord) => push_demand(
+                    &mut outbox,
+                    config.orchestrator,
+                    &config.own_coord,
+                    coord,
+                    realm_fence,
+                    DemandVerb::KeepAlive,
+                    clock.universe_tick,
+                    &mut stats,
+                ),
+                None => stats.crossing_keepalive_unnamed += 1,
+            }
         }
         if ttl != 0 {
             let last = state
@@ -1108,24 +1319,28 @@ pub(crate) fn redrive_stranded_crossings(
                 .min(u32::MAX as u64) as u32;
             if elapsed >= ttl {
                 if state.redrives_spent < config.crossing_redrive_budget {
-                    let subject = DirectoryKey::Entity(*entity);
-                    outbox.push_flow(
-                        config.orchestrator,
-                        MsgClass::Saga,
-                        &InterShardFlow::CrossingRequest(CrossingRequest {
-                            subject,
+                    // The byte-identical request again, on the arm the latch was minted for: the SAME
+                    // attempt (it bumps only on a post-abort re-latch) and the SAME parent provenance.
+                    let flow = if lc.exterior {
+                        InterShardFlow::ExteriorCrossingRequest(ExteriorCrossingRequest {
+                            subject: DirectoryKey::Ship(*entity),
+                            from_realm: config.realm,
+                            to_realm: lc.to_realm,
+                            subject_fence: lc.subject_fence,
+                            attempt: state.crossing_attempt,
+                        })
+                    } else {
+                        InterShardFlow::CrossingRequest(CrossingRequest {
+                            subject: DirectoryKey::Entity(*entity),
                             from_realm: config.realm,
                             to_realm: lc.to_realm,
                             subject_fence: lc.subject_fence,
                             session: lc.session,
-                            // The SAME attempt (unchanged since the latch — the attempt bumps only on a
-                            // post-abort re-latch), so the re-emitted id is byte-identical to the standing latch.
                             attempt: state.crossing_attempt,
-                            // The SAME parent provenance the latch captured — so the re-drive re-mints the
-                            // identical request (an Area dest's frame still forms on the re-drive).
                             to_parent: lc.to_parent,
-                        }),
-                    );
+                        })
+                    };
+                    outbox.push_flow(config.orchestrator, MsgClass::Saga, &flow);
                     // Re-arm the ttl timer so the next re-drive is another `ttl` ticks out, and spend
                     // one unit of the D-WORLD-2 budget.
                     state.last_commit_tick = Some(clock.local_tick);

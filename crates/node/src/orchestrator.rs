@@ -77,6 +77,10 @@ pub struct OrchestratorStats {
     /// regression is observable rather than log-only (ROB-E2E-1; mirrors the gateway
     /// and stub `undecodable`). 0 in any healthy run.
     pub undecodable: u64,
+    /// `PeerLocate` asks answered from the launch ledger (the peer book).
+    pub peer_locates_answered: u64,
+    /// `PeerLocate` asks about a node this orchestrator never launched — unanswered, counted.
+    pub peer_locates_unknown: u64,
 }
 
 /// Install the orchestrator systems. Genesis-reserves the clock ceiling and
@@ -201,6 +205,7 @@ pub fn register_orchestrator_with_store(
             advance_and_broadcast_clock,
             record_realm_demands,
             serve_directory,
+            serve_peer_locates,
             crate::saga_runtime::drive_sagas_core,
             reconcile_realm_lifecycle,
             publish_shard_roster,
@@ -341,6 +346,52 @@ fn serve_directory(
 
 /// One directory operation → at most one reply. Fire-and-forget ops (renewals)
 /// reply nothing; reads and side-effecting ops return the resulting head/outcome.
+/// ★ THE PEER BOOK'S ANSWER (D-RLM-6 mechanism C): a node with a frame for a node it has no lane to
+/// asks on the Membership class; the answer is the launch ledger's live slot, sent back to the asker
+/// on the same class. A node this orchestrator never launched (an anchor, a static shard, a stranger)
+/// gets no answer and the ask is counted — a wrong address is worse than none, and a static peer was
+/// booked at boot by the same hand that wrote its config.
+fn serve_peer_locates(
+    inbox: Res<InboundBox>,
+    clock: Res<ClockSample>,
+    rlm: Res<crate::rlm_runtime::RlmReconcilerRes>,
+    mut stats: ResMut<OrchestratorStats>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    for msg in &inbox.0 {
+        let Inbound::Wire { from, class, bytes } = msg else {
+            continue;
+        };
+        if *class != MsgClass::Membership {
+            continue;
+        }
+        let Ok(InterShardFlow::PeerLocate(ask)) = postcard::from_bytes::<InterShardFlow>(bytes)
+        else {
+            continue; // the Membership class also carries ClockSync echoes and nothing this serves
+        };
+        let Some((ip, port)) = rlm.addr_of(ask.node) else {
+            stats.peer_locates_unknown += 1;
+            tracing::warn!(
+                asker = ?from,
+                node = ?ask.node,
+                "PEER LOCATE UNANSWERED: no launch record names that node",
+            );
+            continue;
+        };
+        stats.peer_locates_answered += 1;
+        outbox.push_flow(
+            *from,
+            MsgClass::Membership,
+            &InterShardFlow::PeerLocated(vd_wire::intershard::PeerLocated {
+                node: ask.node,
+                ip,
+                port,
+                at: clock.universe_tick,
+            }),
+        );
+    }
+}
+
 fn apply_directory_op(
     dir: &mut DirectoryCore,
     op: DirectoryOp,
@@ -495,6 +546,103 @@ mod tests {
 
     fn flow_bytes(op: DirectoryOp) -> vd_sim::io::Bytes {
         vd_sim::io::bytes(postcard::to_allocvec(&InterShardFlow::Directory(op)).expect("encode"))
+    }
+
+    /// A spawner that launched exactly one node, at one address (the peer book's source of truth).
+    struct OneLaunched(NodeId);
+    impl RealmSpawner for OneLaunched {
+        fn spawn_realm(
+            &self,
+            _coord: &vd_core::realm_coord::RealmCoord,
+            _at: UniverseTick,
+        ) -> Result<NodeId, vd_sim::io::SpawnError> {
+            Err(vd_sim::io::SpawnError::LaunchFailed {
+                reason: "a fixture spawner launches nothing".into(),
+            })
+        }
+        fn kill_realm(&self, _node: NodeId) -> Result<(), vd_sim::io::SpawnError> {
+            Ok(())
+        }
+        fn live_nodes(&self) -> std::collections::BTreeSet<NodeId> {
+            std::collections::BTreeSet::from([self.0])
+        }
+        fn addr_of(&self, node: NodeId) -> Option<([u8; 16], u16)> {
+            (node == self.0).then_some((
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 5],
+                7_600,
+            ))
+        }
+    }
+
+    #[test]
+    fn a_peer_locate_is_answered_from_the_launch_ledger_and_a_stranger_gets_no_answer() {
+        // THE PEER BOOK: a shard with a frame for node 1007 and no lane asks; the orchestrator answers
+        // from its live slot. A node it never launched is unanswered and counted.
+        let hub = MemHub::new();
+        let mut orch = build_app(
+            NodeConfig {
+                node_id: ORCH,
+                kind: NodeKind::Orchestrator,
+            },
+            hub.register(ORCH, 64),
+        );
+        let (world, schedule) = orch.parts_mut();
+        register_orchestrator_with_store(
+            world,
+            schedule,
+            &OrchestratorConfig {
+                clock_peers: vec![],
+                ..cfg()
+            },
+            Box::new(MemStore::new()),
+            Box::new(OneLaunched(NodeId(1_007))),
+            crate::rlm_runtime::LaunchSeed::new(),
+        );
+        let mut asker = hub.register(SHARD, 64);
+        let ask = |node: NodeId| {
+            vd_sim::io::bytes(
+                postcard::to_allocvec(&InterShardFlow::PeerLocate(
+                    vd_wire::intershard::PeerLocate {
+                        node,
+                        at: UniverseTick(3),
+                    },
+                ))
+                .expect("encode"),
+            )
+        };
+        asker
+            .send(ORCH, MsgClass::Membership, ask(NodeId(1_007)))
+            .expect("sent");
+        asker
+            .send(ORCH, MsgClass::Membership, ask(NodeId(2_222)))
+            .expect("sent");
+        hub.pump();
+        let _ = orch.step_tick();
+        hub.pump();
+        let answers: Vec<vd_wire::intershard::PeerLocated> = asker
+            .drain_inbound()
+            .into_iter()
+            .filter_map(|m| match m {
+                Inbound::Wire {
+                    class: MsgClass::Membership,
+                    bytes,
+                    ..
+                } => match postcard::from_bytes::<InterShardFlow>(&bytes) {
+                    Ok(InterShardFlow::PeerLocated(a)) => Some(a),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers.len(), 1, "one answer, for the launched node only");
+        assert_eq!(answers[0].node, NodeId(1_007));
+        assert_eq!(answers[0].ip[12..], [10, 0, 0, 5]);
+        assert_eq!(answers[0].port, 7_600);
+        let stats = orch.world_mut().resource::<OrchestratorStats>();
+        assert_eq!(
+            (stats.peer_locates_answered, stats.peer_locates_unknown),
+            (1, 1)
+        );
     }
 
     #[test]

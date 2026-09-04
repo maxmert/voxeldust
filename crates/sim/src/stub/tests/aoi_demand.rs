@@ -1315,6 +1315,63 @@ fn the_interest_emission_rises_on_entry_beats_and_falls_to_zero_at_the_band() {
 /// rejected alternative, measured live. The SL7 sibling-warming STAYS: the same proxy
 /// still produces interest to a SIBLING inside its band.
 #[test]
+fn a_standing_observer_asks_the_index_once_and_a_replanted_forest_asks_again() {
+    // THE FOLD'S MEMORY (owner, 2026-09-03): an occupied child that never moves in its parent asks
+    // the index once; every later tick re-uses the answer. A replanted roster is a new question.
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let band = vd_core::geometry::AoiConfig::for_velocity_safe(400.0, 1.0, 1.0, 2.0, 0.05, 0, 0.5)
+        .expect("a live interior band");
+    let plant = |rig: &mut Rig| {
+        let child = RealmRegion {
+            aoi: band,
+            ..aoi_child(OTHER_REALM, OWN_REALM, 100.0, 0)
+        };
+        let sibling = RealmRegion {
+            aoi: band,
+            ..region(
+                RealmId::Planet(43),
+                Some(OWN_REALM),
+                DVec3::new(200.0, 0.0, 0.0),
+                100.0,
+            )
+        };
+        plant_aoi(rig, vec![root_region(), own_region(), child, sibling]);
+    };
+    plant(&mut rig);
+    rig.world.resource_mut::<ChildLiveness>().0.insert(
+        OTHER_REALM,
+        ChildLiveEntry {
+            home: NodeId(70),
+            fence: Fence(1),
+            at: UniverseTick(1),
+            last_seen: vd_core::TickId(9),
+        },
+    );
+    let counts = |rig: &Rig| {
+        let s = rig.world.resource::<StubStats>();
+        (s.aoi_queries_run, s.aoi_queries_reused)
+    };
+    rig.set_local_tick(10);
+    let _ = rig.tick(vec![]);
+    assert_eq!(counts(&rig), (1, 0), "the first tick asks");
+    rig.set_local_tick(11);
+    let _ = rig.tick(vec![]);
+    rig.set_local_tick(12);
+    let _ = rig.tick(vec![]);
+    assert_eq!(
+        counts(&rig),
+        (1, 2),
+        "a standing observer re-uses its answer"
+    );
+    // A replanted forest is a different roster: the memo is stale and the index is asked again.
+    plant(&mut rig);
+    rig.set_local_tick(13);
+    let _ = rig.tick(vec![]);
+    assert_eq!(counts(&rig), (2, 2), "a new roster is asked");
+}
+
+#[test]
 fn a_childs_own_proxy_never_flags_it_interested_but_still_warms_its_sibling() {
     let mut rig = Rig::new();
     rig.grant_realm();
@@ -1855,10 +1912,12 @@ fn parent_headread_due_resolves_only_when_parented_armed_and_on_cadence() {
         realm_recheck_interval: 2,
         ..config()
     };
-    // parented + armed + on cadence (4 % 2 == 0) ⇒ resolve the parent.
+    // parented + armed + on cadence (4 % 2 == 0) ⇒ resolve the parent, by its realm key.
     assert_eq!(
         parent_headread_due(&parented(), &armed, &clock),
-        Some(StubConfig::root_coord(OWN_REALM)),
+        Some(DirectoryKey::Realm(
+            StubConfig::root_coord(OWN_REALM).lowered()
+        )),
     );
     // parented + INERT bands ⇒ `aoi_live()` false ⇒ nothing (the walk/static byte-identity guard).
     assert_eq!(parent_headread_due(&parented(), &inert, &clock), None);
@@ -2446,5 +2505,272 @@ fn a_berthed_hull_forty_metres_from_a_dot_is_demanded() {
         verbs.get(&hull),
         Some(&DemandVerb::SpinUp),
         "a dot forty metres from a berthed hull wakes it: {verbs:?}"
+    );
+}
+
+// ===================== the ruler switch, slice 0: the exterior key =====================
+
+/// A built hull, as a `RealmId` and as the entity its exterior key is named by.
+fn hull_realm() -> (RealmId, vd_core::EntityId) {
+    let entity = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 1, 1, 0);
+    (RealmId::Ship(entity), entity)
+}
+
+fn exterior_record(auth: AuthorityRef, fence: u64) -> vd_wire::seams::directory::OwnerRecord {
+    vd_wire::seams::directory::OwnerRecord {
+        authority: auth,
+        fence: Fence(fence),
+        lease_expires: UniverseTick(1_000),
+        in_transfer: None,
+    }
+}
+
+#[test]
+fn a_hull_reads_its_exterior_key_for_its_parent_and_a_planet_reads_its_lineage_parent() {
+    let (hull, entity) = hull_realm();
+    // The hull: whoever authors my placement is my parent, so I read MY exterior key.
+    let hull_cfg = StubConfig {
+        realm: hull,
+        own_coord: child_coord_of(OWN_REALM, hull),
+        ..config()
+    };
+    assert_eq!(parent_head_key(&hull_cfg), Some(DirectoryKey::Ship(entity)));
+    // A planet rides rails its seed parent computes: it reads its lineage parent's realm key.
+    let planet_cfg = StubConfig {
+        realm: OTHER_REALM,
+        own_coord: child_coord_of(OWN_REALM, OTHER_REALM),
+        ..config()
+    };
+    assert_eq!(
+        parent_head_key(&planet_cfg),
+        Some(DirectoryKey::Realm(OWN_REALM))
+    );
+    // The root has no parent and reads nothing.
+    let root_cfg = StubConfig {
+        own_coord: StubConfig::root_coord(OWN_REALM),
+        ..config()
+    };
+    assert_eq!(parent_head_key(&root_cfg), None);
+}
+
+#[test]
+fn a_ship_head_reply_sets_the_hulls_parent_node_and_a_realm_head_cannot_override_it() {
+    let (hull, entity) = hull_realm();
+    let cfg = StubConfig {
+        realm: hull,
+        own_coord: child_coord_of(OWN_REALM, hull),
+        ..config()
+    };
+    let regions = RealmRegions::default();
+    let mut parent_node = ParentRealmNode::default();
+    let mut exterior = ExteriorAuthority::default();
+    // The exterior is held by System 7's node: that node is my parent.
+    resolve_exterior_head(
+        entity,
+        Some(&exterior_record(AuthorityRef::Shard(NodeId(7)), 1)),
+        NodeId(1),
+        &cfg,
+        &regions,
+        &mut parent_node,
+        &mut exterior,
+    );
+    assert_eq!(parent_node.0, Some(NodeId(7)));
+    assert!(
+        exterior.0.is_empty(),
+        "a hull leases no exterior of its own"
+    );
+    // A lineage-parent REALM head names another node: it may not override the exterior's answer.
+    update_parent_node(
+        OWN_REALM,
+        Some(&exterior_record(AuthorityRef::Shard(NodeId(99)), 1)),
+        &cfg,
+        &mut parent_node,
+    );
+    assert_eq!(parent_node.0, Some(NodeId(7)));
+    // The exterior moves house (a later saga): the new author replaces the old.
+    resolve_exterior_head(
+        entity,
+        Some(&exterior_record(AuthorityRef::Shard(NodeId(70)), 2)),
+        NodeId(1),
+        &cfg,
+        &regions,
+        &mut parent_node,
+        &mut exterior,
+    );
+    assert_eq!(parent_node.0, Some(NodeId(70)));
+    // A gateway record, then no record: cleared both times — nothing is sent to a node the
+    // directory does not name.
+    resolve_exterior_head(
+        entity,
+        Some(&exterior_record(AuthorityRef::Gateway(NodeId(5)), 2)),
+        NodeId(1),
+        &cfg,
+        &regions,
+        &mut parent_node,
+        &mut exterior,
+    );
+    assert_eq!(parent_node.0, None);
+    parent_node.0 = Some(NodeId(70));
+    resolve_exterior_head(
+        entity,
+        None,
+        NodeId(1),
+        &cfg,
+        &regions,
+        &mut parent_node,
+        &mut exterior,
+    );
+    assert_eq!(parent_node.0, None);
+}
+
+#[test]
+fn a_parent_wants_leases_and_affirms_or_drops_the_exterior_of_its_berthed_hull() {
+    let (hull, entity) = hull_realm();
+    let me = NodeId(7);
+    let cfg = config(); // System 7, the parent
+    // The forest: the hull berthed forty metres out, and a seeded planet beside it.
+    let regions = RealmRegions::new(vec![
+        region(hull, Some(OWN_REALM), DVec3::new(40.0, 0.0, 0.0), 20.0),
+        region(
+            OTHER_REALM,
+            Some(OWN_REALM),
+            DVec3::new(1.0e6, 0.0, 0.0),
+            1000.0,
+        ),
+    ]);
+    let mut exterior = ExteriorAuthority::default();
+    let mut parent_node = ParentRealmNode::default();
+    // Wanted: the hull's key, and only the hull's — the planet has no exterior.
+    assert_eq!(
+        exterior_keys_wanted(&cfg, &regions, &exterior),
+        vec![(hull, DirectoryKey::Ship(entity))]
+    );
+    // The directory names ME: the lease is affirmed at the record's fence, and nothing is wanted.
+    resolve_exterior_head(
+        entity,
+        Some(&exterior_record(AuthorityRef::Shard(me), 3)),
+        me,
+        &cfg,
+        &regions,
+        &mut parent_node,
+        &mut exterior,
+    );
+    assert_eq!(exterior.0.get(&hull), Some(&Fence(3)));
+    assert!(exterior_keys_wanted(&cfg, &regions, &exterior).is_empty());
+    assert_eq!(
+        parent_node.0, None,
+        "a parent's own child head never names its parent"
+    );
+    // The directory names ANOTHER node: the hull is somebody else's now — dropped.
+    resolve_exterior_head(
+        entity,
+        Some(&exterior_record(AuthorityRef::Shard(NodeId(70)), 4)),
+        me,
+        &cfg,
+        &regions,
+        &mut parent_node,
+        &mut exterior,
+    );
+    assert!(exterior.0.is_empty());
+    // No record at all: nothing held, and the key is wanted again.
+    exterior.0.insert(hull, Fence(3));
+    resolve_exterior_head(
+        entity,
+        None,
+        me,
+        &cfg,
+        &regions,
+        &mut parent_node,
+        &mut exterior,
+    );
+    assert!(exterior.0.is_empty());
+    assert_eq!(exterior_keys_wanted(&cfg, &regions, &exterior).len(), 1);
+    // A `Ship` head for a hull that is NOT my child and NOT me: ignored on both sides.
+    let stranger = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 2, 9, 0);
+    resolve_exterior_head(
+        stranger,
+        Some(&exterior_record(AuthorityRef::Shard(me), 1)),
+        me,
+        &cfg,
+        &regions,
+        &mut parent_node,
+        &mut exterior,
+    );
+    assert!(exterior.0.is_empty());
+    assert_eq!(parent_node.0, None);
+}
+
+#[test]
+fn a_seeded_only_realm_wants_no_exterior_lease() {
+    let cfg = config();
+    let regions = RealmRegions::new(vec![aoi_child(OTHER_REALM, OWN_REALM, 1000.0, 0)]);
+    assert!(exterior_keys_wanted(&cfg, &regions, &ExteriorAuthority::default()).is_empty());
+}
+
+#[test]
+fn a_parent_leases_its_hulls_exterior_at_genesis_and_renews_it_with_its_own_heartbeat() {
+    let (hull, entity) = hull_realm();
+    let mut rig = Rig::new();
+    rig.world
+        .resource_mut::<StubConfig>()
+        .lease_renew_interval_ticks = 1;
+    rig.world.insert_resource(RealmRegions::new(vec![region(
+        hull,
+        Some(OWN_REALM),
+        DVec3::new(40.0, 0.0, 0.0),
+        20.0,
+    )]));
+    rig.grant_realm();
+    let to_orch = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<InterShardFlow> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == ORCH)
+            .map(|(_, _, bytes)| postcard::from_bytes(bytes).expect("flow decodes"))
+            .collect()
+    };
+    // Unaffirmed: the parent asks for the hull's exterior at genesis, every tick, beside its own
+    // realm's heartbeat — and renews nothing for it yet.
+    let sent = to_orch(&rig.tick(vec![]));
+    let grant = InterShardFlow::Directory(DirectoryOp::LeaseGrant {
+        key: DirectoryKey::Ship(entity),
+        owner: AuthorityRef::Shard(SHARD),
+        fence: Fence::GENESIS.next(),
+    });
+    assert!(sent.contains(&grant), "the exterior is requested: {sent:?}");
+    assert!(
+        !sent.contains(&InterShardFlow::Directory(DirectoryOp::LeaseRenew {
+            key: DirectoryKey::Ship(entity),
+            fence: Fence(1),
+        })),
+        "nothing is renewed before it is held: {sent:?}"
+    );
+    // The directory affirms it at fence 1.
+    let reply = DirectoryReply::Head {
+        key: DirectoryKey::Ship(entity),
+        record: Some(exterior_record(AuthorityRef::Shard(SHARD), 1)),
+    };
+    let bytes = crate::io::bytes(
+        postcard::to_allocvec(&InterShardFlow::DirectoryReply(reply)).expect("encode"),
+    );
+    let _ = rig.tick(vec![Inbound::Wire {
+        from: ORCH,
+        class: MsgClass::Saga,
+        bytes,
+    }]);
+    assert_eq!(
+        rig.world.resource::<ExteriorAuthority>().0.get(&hull),
+        Some(&Fence(1))
+    );
+    // Affirmed: renewed with the heartbeat, and not requested again.
+    let sent = to_orch(&rig.tick(vec![]));
+    assert!(
+        sent.contains(&InterShardFlow::Directory(DirectoryOp::LeaseRenew {
+            key: DirectoryKey::Ship(entity),
+            fence: Fence(1),
+        })),
+        "the held exterior rides the heartbeat: {sent:?}"
+    );
+    assert!(
+        !sent.contains(&grant),
+        "a held exterior is not requested again: {sent:?}"
     );
 }
