@@ -5072,6 +5072,14 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   fixture `the_look_shelf_carries_a_look_through_a_window_churn_for_one_hold`. Gateway local, no
   new data crosses a realm boundary. VERIFY IN FLIGHT: the star's box count must stay 1 across
   the hand-over second and `window_looks_carried` must be non-zero after it.
+  ★ THE EIGHTEENTH FLIGHT (2026-09-04, owner: *"Works"*), committed as 460c150 (Step 10). MEASURED:
+  three hand-overs, no freeze, the star's box stayed drawn across each hand-over, 41 looks carried,
+  no decode error. RESIDUAL, not a hand-over: one 0.17 s sample with only the hull drawn at 21:37:41,
+  the second the pilot WALKED ABOARD the hull — `window_unresolved_standing` rose 0 → 5 there, so
+  the composed feed was withheld for five ticks while the session's standing realm switched from
+  System 7 to the hull (the login-race arm, §2.6.6). OWED: a standing switch between two realms the
+  session already holds should keep the last composed level, not withhold — same family as the
+  keep-alive restatement above.
 
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:
