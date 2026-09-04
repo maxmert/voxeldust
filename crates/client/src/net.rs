@@ -115,6 +115,12 @@ pub struct ClientState {
     /// gateway last stated it on the per-tick realm lane. Latest-wins; cleared on a scene swap (the
     /// origin changed, so the old anchor names a realm the picture no longer stands in).
     sky_anchor: Option<vd_core::pose::StampedPose>,
+    /// ★ THE ANCHOR'S TRACK (owner 2026-09-04, *"galaxy, sun and all other objects are not moving
+    /// together"*): the sky anchor used to place the star cloud the instant it arrived while every
+    /// body is drawn from its track 120 ms behind — so when the hull turned, the sky turned ahead of
+    /// the bodies. The anchor is a stamped pose like any realm's: it rides a track and is sampled at
+    /// the same render cursor as the scene, so the sky and the bodies turn together.
+    sky_anchor_track: Option<crate::interp::EntityTrack>,
     /// THE GENERATION ALREADY ON DISK (S11), so a caller may ask to save every step and pay once.
     sky_cached: Option<u64>,
     /// THE SKY BEAT'S OWN CADENCE, in ticks — the watchdog's bound is derived from it, never a
@@ -163,6 +169,7 @@ impl ClientState {
             pending_sky_held: None,
             sky_draw: None,
             sky_anchor: None,
+            sky_anchor_track: None,
             sky_cached: None,
             // Half a second at the client's own step rate, matching the gateway's keep-alive
             // derivation (`tick_hz / 2`). Never a free literal: it is the beat's cadence, and the
@@ -294,11 +301,12 @@ impl ClientState {
                     self.origin = Some(origin);
                     if !same_origin {
                         self.sky_anchor = None;
+                        self.sky_anchor_track = None;
                     }
                     if let Some(held) = self.realm_view.swap_epoch(origin_epoch, same_origin) {
                         // The held early datagram is at THIS epoch: its anchor is current too.
                         if let Some(anchor) = held.sky_anchor {
-                            self.sky_anchor = Some(anchor);
+                            self.note_sky_anchor(anchor);
                         }
                         let standing_in = self.view.own_location_frame();
                         let _ = self.realm_view.on_realm_snapshot(standing_in, held);
@@ -438,7 +446,7 @@ impl ClientState {
         if snap.origin_epoch == self.realm_view.epoch()
             && let Some(anchor) = snap.sky_anchor
         {
-            self.sky_anchor = Some(anchor);
+            self.note_sky_anchor(anchor);
         }
         // THE ONE-SPACE RULE (crossing-render slice): rows fold only when stated in the space the
         // avatar stands in — the old home's still-draining feed is skipped, never mixed in.
@@ -620,6 +628,16 @@ impl ClientState {
     /// Learn the cluster's universe-tick rate from the wire (R1) — applied to the
     /// render cursor ONCE (the first `UniverseRate`), clamped to >= 1 Hz so a bad/zero
     /// rate cannot freeze the cursor. A duplicate is idempotent (no cursor reset).
+    /// Hold the newest sky anchor and fold it into the anchor's track (one track, latest-wins per
+    /// tick — the same primitive every realm's placement rides).
+    fn note_sky_anchor(&mut self, anchor: vd_core::pose::StampedPose) {
+        self.sky_anchor = Some(anchor);
+        match &mut self.sky_anchor_track {
+            Some(track) => track.observe(anchor),
+            None => self.sky_anchor_track = Some(crate::interp::EntityTrack::new(anchor)),
+        }
+    }
+
     fn set_tick_hz_from_wire(&mut self, tick_hz: u32) {
         if self.tick_hz_learned {
             return;
@@ -739,6 +757,7 @@ impl ClientState {
         .with_origin(self.origin)
         // Where the galaxy is, as last stated — the one thing that places the sky (2026-09-02).
         .with_sky_anchor(self.sky_anchor)
+        .with_sky_anchor_track(self.sky_anchor_track)
     }
 
     /// Build the [`DevState`] diagnosis surface (HR6) from the DECODED DELIVERED view
@@ -1784,6 +1803,96 @@ mod tests {
         );
     }
 
+    /// ★ THE EARLY DATAGRAM BRINGS ITS SKY WITH IT. A realm datagram of the NEXT scene can beat the
+    /// level that opens that scene. The client holds it for one beat and replays it when the level
+    /// lands. Its sky anchor must ride that replay: it belongs to the scene just adopted, so the
+    /// star cloud places at once instead of waiting for the next beat.
+    ///
+    /// The pilot's hull is handed from its star system to the galaxy. The hull's first datagram at
+    /// the new epoch arrives first, and it carries where the galaxy is. The level follows.
+    #[test]
+    fn a_held_early_datagrams_sky_anchor_is_taken_when_its_level_lands() {
+        use vd_core::pose::RealmId;
+        use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram};
+        let mut c = core();
+        activate(&mut c);
+        // The scene the client stands in now: origin System(7), epoch 0.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            postcard::to_allocvec(&ServerControlMsg::RealmRegistry {
+                origin: RealmId::System(7),
+                origin_epoch: 0,
+                rows: Vec::new(),
+            })
+            .expect("encode"),
+        );
+        c.step(0.0);
+
+        // A datagram of the NEXT epoch, carrying the anchor. It is held, not applied.
+        let anchor = StampedPose::at_rest(
+            FrameRef::GalaxySpace { galaxy_seed: 1 },
+            DVec3::new(3.0, -4.0, 5.0),
+            UniverseTick(20),
+        );
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            postcard::to_allocvec(&RealmSnapshotDatagram {
+                sub: SubId(0),
+                frame_id: 9,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(20),
+                origin_epoch: 1,
+                sky_anchor: Some(anchor),
+                realms: vec![RealmSnap {
+                    realm: RealmId::Planet(7),
+                    frame: vd_core::pose::frame_for_realm(RealmId::Planet(7), None)
+                        .expect("a seeded realm resolves"),
+                    pose: StampedPose::at_rest(
+                        FrameRef::SystemSpace { system_seed: 7 },
+                        DVec3::new(2.0e9, 0.0, 0.0),
+                        UniverseTick(20),
+                    ),
+                }],
+            })
+            .expect("test fixture"),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state().render_snapshot().sky_anchor(),
+            None,
+            "a datagram of a scene the client does not hold yet states nothing"
+        );
+
+        // The level of that epoch lands, under the SAME origin: the held datagram replays and its
+        // anchor is taken.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            postcard::to_allocvec(&ServerControlMsg::RealmRegistry {
+                origin: RealmId::System(7),
+                origin_epoch: 1,
+                rows: Vec::new(),
+            })
+            .expect("encode"),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state().render_snapshot().sky_anchor(),
+            Some(anchor),
+            "the replayed datagram placed the sky on the beat the level landed"
+        );
+        assert_eq!(
+            c.state()
+                .realm_view
+                .realm_pose(RealmId::Planet(7), f64::INFINITY)
+                .map(|p| rpw(&p)),
+            Some(DVec3::new(2.0e9, 0.0, 0.0)),
+            "and its row replayed too"
+        );
+    }
+
     #[test]
     fn a_realm_snapshot_routes_streams_anchors_the_cursor_and_is_not_counted_ignored() {
         use vd_core::pose::RealmId;
@@ -1895,6 +2004,75 @@ mod tests {
     /// origin is still the hull, so the epoch bumps but every track and the sky anchor are still
     /// positions in the hull's frame: they are KEPT, and only a realm the new level no longer draws
     /// loses its track. A level with a NEW origin still forgets everything.
+    /// ★ THE ANCHOR RIDES A TRACK (owner 2026-09-04, "galaxy, sun and all other objects are not
+    /// moving together"): two anchors stated at ticks 10 and 12 give, at cursor 11, the pose halfway
+    /// between them — the same interpolation every body gets, at the same cursor.
+    #[test]
+    fn the_sky_anchor_is_sampled_on_a_track_at_the_render_cursor() {
+        use vd_core::pose::RealmId;
+        use vd_wire::channels::{RealmSnap, RealmSnapshotDatagram};
+        let mut c = core();
+        activate(&mut c);
+        let anchor_at = |tick: u64, x: f64| {
+            StampedPose::at_rest(
+                FrameRef::GalaxySpace { galaxy_seed: 1 },
+                DVec3::new(x, 0.0, 0.0),
+                UniverseTick(tick),
+            )
+        };
+        let datagram = |frame_id: u64, tick: u64, x: f64| {
+            postcard::to_allocvec(&RealmSnapshotDatagram {
+                sub: SubId(0),
+                frame_id,
+                source_tick: TickId(1),
+                universe_tick: UniverseTick(tick),
+                origin_epoch: 0,
+                sky_anchor: Some(anchor_at(tick, x)),
+                realms: vec![RealmSnap {
+                    realm: RealmId::Planet(7),
+                    frame: vd_core::pose::frame_for_realm(RealmId::Planet(7), None)
+                        .expect("a seeded realm resolves"),
+                    pose: StampedPose::at_rest(
+                        FrameRef::SystemSpace { system_seed: 7 },
+                        DVec3::new(1.0e9, 0.0, 0.0),
+                        UniverseTick(tick),
+                    ),
+                }],
+            })
+            .expect("test fixture")
+        };
+        c.transport
+            .deliver(GATEWAY, MsgClass::RealmSnapshot, datagram(1, 10, 6.0));
+        c.step(0.0);
+        c.transport
+            .deliver(GATEWAY, MsgClass::RealmSnapshot, datagram(2, 12, 10.0));
+        c.step(0.0);
+        let snap = c.state().render_snapshot();
+        assert_eq!(
+            snap.sky_anchor(),
+            Some(anchor_at(12, 10.0)),
+            "the newest, as stated"
+        );
+        let mid = snap
+            .sky_anchor_at_cursor(11.0)
+            .expect("an anchor on a track");
+        let x = mid
+            .pos
+            .delta_m(
+                vd_core::pose::LatticePos::ORIGIN,
+                FrameRef::GalaxySpace { galaxy_seed: 1 }.tier(),
+            )
+            .x;
+        assert!(
+            (x - 8.0).abs() < 1e-6,
+            "halfway between the two statements: {x}"
+        );
+        assert_eq!(mid.frame, FrameRef::GalaxySpace { galaxy_seed: 1 });
+        // At or past the newest: frozen at the newest, never coasted.
+        let late = snap.sky_anchor_at_cursor(20.0).expect("an anchor");
+        assert_eq!(late.pos, anchor_at(12, 10.0).pos);
+    }
+
     #[test]
     fn a_same_origin_epoch_bump_keeps_the_tracks_and_the_sky_anchor() {
         use vd_core::pose::RealmId;

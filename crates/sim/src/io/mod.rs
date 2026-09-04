@@ -714,4 +714,39 @@ mod tests {
             Some(InboxDrop::Reliable)
         );
     }
+
+    /// A carrier that routes by node id takes a peer's address and does nothing with it.
+    ///
+    /// Example: the orchestrator tells a star system's shard where a freshly launched hull listens.
+    /// The in-memory fabric of every test rig already reaches every node by its id, so it keeps no
+    /// address book: it accepts the sixteen octets and the port and books nothing. Only the real mesh
+    /// dials on them. This pins the default body as a no-op, so a carrier that never overrides it
+    /// stays silent instead of failing.
+    #[test]
+    fn a_carrier_that_routes_by_id_accepts_a_peer_address_and_books_nothing() {
+        let hub = mem::MemHub::new();
+        let mut carrier = hub.register(NodeId(1), 8);
+        carrier.book_peer(NodeId(2), [0; 16], 4242);
+        // Nothing was queued, nothing was delivered, and the next send still routes by id.
+        assert!(carrier.drain_inbound().is_empty());
+        let mut peer = hub.register(NodeId(2), 8);
+        carrier
+            .send(NodeId(2), MsgClass::Control, vec![7].into())
+            .expect("accepted");
+        hub.pump();
+        assert_eq!(peer.drain_inbound().len(), 1);
+    }
+
+    /// A launcher that keeps no addresses answers "I do not know" for every node.
+    ///
+    /// Example: the orchestrator asks its in-process launcher where a star system's shard listens, so
+    /// it can pass the address on to a hull that must reach it. The memory launcher of every test rig
+    /// plants nodes in a shared fabric and records no address at all, so the honest answer is nothing.
+    /// The real process launcher overrides this and answers from its own launch record.
+    #[test]
+    fn a_launcher_that_keeps_no_addresses_answers_nothing_for_every_node() {
+        let spawner = mem::MemSpawner::new(mem::MemHub::new(), NodeId(900), 8);
+        assert_eq!(spawner.addr_of(NodeId(900)), None);
+        assert_eq!(spawner.addr_of(NodeId(1)), None);
+    }
 }

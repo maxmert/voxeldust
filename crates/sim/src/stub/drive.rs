@@ -934,9 +934,12 @@ mod tests {
             ..at_rest()
         };
         let after = advance_driven(&moving, [0; 3], [0; 3], &hull(), &air, 0.02);
+        // HR5: two facts, two asserts. `a && b` short-circuits, so the false arm of the first
+        // test is a region no input can reach.
+        assert!(after.vel_mps.x < 10.0, "air slowed it: {:?}", after.vel_mps);
         assert!(
-            after.vel_mps.x < 10.0 && after.vel_mps.x > 0.0,
-            "slowed, not reversed: {:?}",
+            after.vel_mps.x > 0.0,
+            "and never pushed it backwards: {:?}",
             after.vel_mps
         );
     }
@@ -958,7 +961,17 @@ mod tests {
             ..at_rest()
         };
         let after = advance_driven(&moving, [0; 3], [0; 3], &broken, &air, 0.02);
-        assert!(after.pos_m.is_finite() && after.vel_mps.is_finite());
+        // HR5: two facts, two asserts — `&&` short-circuits and hides the first test's false arm.
+        assert!(
+            after.pos_m.is_finite(),
+            "the place stays a number: {:?}",
+            after.pos_m
+        );
+        assert!(
+            after.vel_mps.is_finite(),
+            "and so does the speed: {:?}",
+            after.vel_mps
+        );
         assert_eq!(after.vel_mps, moving.vel_mps);
     }
 
@@ -1627,6 +1640,163 @@ mod tests {
             &mut stats,
         );
         assert_eq!(stats.child_facts_sent, 0);
+    }
+
+    /// A hull with no parent, and a hull with no fence, both say nothing about what they ARE.
+    ///
+    /// The facts lane is RELIABLE and RETAINED, so a statement sent to nobody is not lost — it is
+    /// KEPT, and it is delivered to whichever node the carrier books next. A hull that speaks before
+    /// the directory grants it would therefore state a deposed incarnation's mass to its parent, and
+    /// the parent would compute drag from it for ever. Silence is the only safe answer.
+    #[test]
+    fn a_hull_states_no_facts_before_it_has_a_parent_or_a_fence() {
+        let mut outbox = crate::runtime::OutboundBox::default();
+        let mut stats = StubStats::default();
+        let mut stated = super::StatedFacts::default();
+        // No parent resolved yet: the head read has not come back.
+        super::emit_child_facts(
+            true,
+            &ship_coord(),
+            Some(Fence(1)),
+            UniverseTick(1),
+            None,
+            &a_built_body(),
+            &mut stated,
+            &mut outbox,
+            &mut stats,
+        );
+        // A parent, but the directory has not granted this realm yet.
+        super::emit_child_facts(
+            true,
+            &ship_coord(),
+            None,
+            UniverseTick(1),
+            Some(vd_core::ids::NodeId(9)),
+            &a_built_body(),
+            &mut stated,
+            &mut outbox,
+            &mut stats,
+        );
+        assert_eq!(stats.child_facts_sent, 0, "neither hull spoke");
+        assert_eq!(outbox.0.len(), 0, "and nothing left the shard");
+        assert_eq!(stated.0, None, "and it remembers having said nothing");
+    }
+
+    /// ★ THE PUSH LEAVES THE HULL. A pilot holds the stick full forward, so the hull states six whole
+    /// numbers in its OWN frame to the node that holds its parent realm — and nothing else.
+    ///
+    /// The message carries no speed and no place: a hull may say what it is DOING, never where it IS
+    /// (SL1 clause 3). It rides the UNRELIABLE lane on purpose, because the next tick restates the
+    /// whole intent.
+    #[test]
+    fn a_hull_at_full_stick_states_its_push_to_its_parents_node() {
+        let mut outbox = crate::runtime::OutboundBox::default();
+        let mut stats = StubStats::default();
+        let parent = vd_core::ids::NodeId(9);
+        super::emit_child_drive(
+            true,
+            &ship_coord(),
+            Some(Fence(7)),
+            UniverseTick(11),
+            Some(parent),
+            &rating(),
+            Some((fwd_push(1.0), [0.0; 3])),
+            &mut outbox,
+            &mut stats,
+        );
+        assert_eq!(stats.child_drive_sent, 1, "the hull spoke once");
+        assert_eq!(outbox.0.len(), 1, "and sent exactly one frame");
+        let (to, class, bytes, _) = outbox.0.remove(0);
+        assert_eq!(to, parent, "it went to the node holding the parent realm");
+        assert_eq!(
+            class,
+            crate::io::MsgClass::SignalDelta,
+            "the unreliable lane: next tick restates the whole intent"
+        );
+        assert_eq!(
+            postcard::from_bytes::<vd_wire::intershard::InterShardFlow>(&bytes).expect("decode"),
+            vd_wire::intershard::InterShardFlow::ChildDrive(vd_wire::intershard::ChildDrive {
+                child: ship_coord(),
+                child_fence: Fence(7),
+                at: UniverseTick(11),
+                // The shared axis map sends "forward" to −Z, at the whole rating.
+                push: [0, 0, -4_000_000],
+                turn: [0; 3],
+            }),
+            "six whole numbers in the hull's own frame, and no place among them"
+        );
+    }
+
+    /// A realm with no engines never states a push, whatever the pilot inside it does.
+    ///
+    /// A star system holds ships and does not steer. The switch decides, never a test of what KIND of
+    /// realm this is — written as "is this a ship?", a station with thrusters could not fly (HR3).
+    #[test]
+    fn a_realm_with_no_engines_states_no_push_even_with_a_stick_held() {
+        let mut outbox = crate::runtime::OutboundBox::default();
+        let mut stats = StubStats::default();
+        super::emit_child_drive(
+            false,
+            &ship_coord(),
+            Some(Fence(7)),
+            UniverseTick(11),
+            Some(vd_core::ids::NodeId(9)),
+            &rating(),
+            Some((fwd_push(1.0), [0.0; 3])),
+            &mut outbox,
+            &mut stats,
+        );
+        assert_eq!(stats.child_drive_sent, 0);
+        assert_eq!(outbox.0.len(), 0);
+    }
+
+    /// THE THREE SILENCES of the drive lane: no parent, nobody at the controls, no fence.
+    ///
+    /// None of them is an error worth counting. A hull that just booted is all three at once: it has
+    /// not resolved its parent, nobody has sat down, and the directory has not granted it yet.
+    #[test]
+    fn a_hull_states_no_push_without_a_parent_a_pilot_and_a_fence() {
+        let mut outbox = crate::runtime::OutboundBox::default();
+        let mut stats = StubStats::default();
+        let held = Some((fwd_push(1.0), [0.0; 3]));
+        // No parent resolved yet.
+        super::emit_child_drive(
+            true,
+            &ship_coord(),
+            Some(Fence(7)),
+            UniverseTick(11),
+            None,
+            &rating(),
+            held,
+            &mut outbox,
+            &mut stats,
+        );
+        // Nobody at the controls: the pilot left the chair, so the push stops and the speed stays.
+        super::emit_child_drive(
+            true,
+            &ship_coord(),
+            Some(Fence(7)),
+            UniverseTick(11),
+            Some(vd_core::ids::NodeId(9)),
+            &rating(),
+            None,
+            &mut outbox,
+            &mut stats,
+        );
+        // Granted by nobody: a shard that cannot prove its incarnation must not speak for the realm.
+        super::emit_child_drive(
+            true,
+            &ship_coord(),
+            None,
+            UniverseTick(11),
+            Some(vd_core::ids::NodeId(9)),
+            &rating(),
+            held,
+            &mut outbox,
+            &mut stats,
+        );
+        assert_eq!(stats.child_drive_sent, 0, "three silences, no message");
+        assert_eq!(outbox.0.len(), 0);
     }
 
     #[test]

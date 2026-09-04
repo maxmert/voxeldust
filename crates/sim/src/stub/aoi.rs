@@ -1160,3 +1160,79 @@ pub(crate) fn retain_child_live(
         },
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::QueryMemo;
+    use vd_core::glam::DVec3;
+    use vd_core::pose::{LatticePos, Tier};
+
+    /// The remembered question, asked from the origin, one hundred metres along X.
+    fn memo(span_m: DVec3) -> QueryMemo {
+        QueryMemo {
+            from: LatticePos::ORIGIN,
+            span_m,
+            reach_m: 0.0,
+            generation: 0,
+            found: Vec::new(),
+        }
+    }
+
+    /// A hull flying straight ahead re-uses the answer while the line it needs stays inside the line
+    /// it asked about.
+    ///
+    /// Example: the star system asked its index which children lie along the hull's next hundred
+    /// metres. One tick later the hull needs only the next fifty, from the same spot and in the same
+    /// direction. That line lies on the asked line and stops short of its end, so the memory stands
+    /// and the index is not asked again.
+    #[test]
+    fn a_shorter_line_along_the_asked_line_is_still_covered() {
+        let m = memo(DVec3::new(100.0, 0.0, 0.0));
+        assert!(m.covers(LatticePos::ORIGIN, DVec3::new(50.0, 0.0, 0.0), Tier::Fine));
+        // Starting part way along the asked line, and ending exactly at its end, is covered too.
+        assert!(m.covers(
+            LatticePos::from_metres(DVec3::new(25.0, 0.0, 0.0), Tier::Fine),
+            DVec3::new(75.0, 0.0, 0.0),
+            Tier::Fine,
+        ));
+    }
+
+    /// A hull that has flown past the end of the asked line must ask again.
+    ///
+    /// Example: the star system asked about the next hundred metres. The hull now needs two hundred,
+    /// so its far end lies beyond the asked end and the index has never been asked about that stretch.
+    /// The memory is refused and the question is put again.
+    #[test]
+    fn a_line_reaching_past_the_asked_end_is_not_covered() {
+        let m = memo(DVec3::new(100.0, 0.0, 0.0));
+        assert!(!m.covers(LatticePos::ORIGIN, DVec3::new(200.0, 0.0, 0.0), Tier::Fine));
+    }
+
+    /// A hull that turned must ask again, even when the new line is short.
+    ///
+    /// Example: the star system asked along X. The pilot turns and the hull now needs a line along Y.
+    /// Every point of that line is off the asked line, so nothing about it was ever answered and the
+    /// memory is refused. A turn is a new question.
+    #[test]
+    fn a_line_that_drifts_sideways_off_the_asked_line_is_not_covered() {
+        let m = memo(DVec3::new(100.0, 0.0, 0.0));
+        assert!(!m.covers(LatticePos::ORIGIN, DVec3::new(0.0, 50.0, 0.0), Tier::Fine));
+    }
+
+    /// A standing observer asked about a point, and stays covered only while it does not move.
+    ///
+    /// Example: a star system that never moves in the galaxy asks once, with no lead and no reach, and
+    /// never asks again. The moment it needs any span at all, or stands anywhere else, the memory
+    /// stops covering the question.
+    #[test]
+    fn a_question_with_no_length_covers_only_the_very_same_point() {
+        let m = memo(DVec3::ZERO);
+        assert!(m.covers(LatticePos::ORIGIN, DVec3::ZERO, Tier::Fine));
+        assert!(!m.covers(LatticePos::ORIGIN, DVec3::new(1.0, 0.0, 0.0), Tier::Fine));
+        assert!(!m.covers(
+            LatticePos::from_metres(DVec3::new(1.0, 0.0, 0.0), Tier::Fine),
+            DVec3::ZERO,
+            Tier::Fine,
+        ));
+    }
+}

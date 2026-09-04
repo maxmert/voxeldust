@@ -582,6 +582,14 @@ fn every_arm() -> Vec<InterShardFlow> {
             port: 7_562,
             at: UniverseTick(23),
         }),
+        // The reach: a child states how far it is seen, by size and by light.
+        InterShardFlow::ReachStated(vd_wire::intershard::ReachStated {
+            child: demand_child_coord(),
+            child_fence: Fence(2),
+            at: UniverseTick(24),
+            size_reach_m: 10_000_000,
+            light_reach_m: 7_700_000_000_000,
+        }),
     ]
 }
 
@@ -656,7 +664,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::LineageStated(_)
         | InterShardFlow::ExteriorMoved(_)
         | InterShardFlow::PeerLocate(_)
-        | InterShardFlow::PeerLocated(_) => {}
+        | InterShardFlow::PeerLocated(_)
+        | InterShardFlow::ReachStated(_) => {}
     }
 }
 
@@ -836,6 +845,7 @@ fn every_arm_encodes_its_declared_discriminant_index() {
             InterShardFlow::ExteriorMoved(_) => 40,
             InterShardFlow::PeerLocate(_) => 41,
             InterShardFlow::PeerLocated(_) => 42,
+            InterShardFlow::ReachStated(_) => 43,
         }
     }
     // Every fixture's real leading byte matches its declared index (all indices < 128, so the
@@ -848,9 +858,9 @@ fn every_arm_encodes_its_declared_discriminant_index() {
     }
     // …and the fixture set spans the WHOLE contiguous index space, so a missing fixture (or a
     // gap postcard would assign past a deleted arm) cannot pass vacuously.
-    assert_eq!(seen.len(), 43);
+    assert_eq!(seen.len(), 44);
     assert_eq!(seen.first().copied(), Some(0));
-    assert_eq!(seen.last().copied(), Some(42));
+    assert_eq!(seen.last().copied(), Some(43));
 }
 
 /// THE TOMBSTONE GOLDEN SET — the discriminants no producer may ever fill again, stated as data.
@@ -891,6 +901,7 @@ fn the_tombstoned_discriminants_are_exactly_this_golden_set() {
             | InterShardFlow::ExteriorMoved(_)
             | InterShardFlow::PeerLocate(_)
             | InterShardFlow::PeerLocated(_)
+            | InterShardFlow::ReachStated(_)
             | InterShardFlow::ChildFacts(_)
             | InterShardFlow::Ghost(_)
             | InterShardFlow::Transfer(_)
@@ -1205,6 +1216,9 @@ fn durability_class_pins_the_producer_less_reliable_set() {
             // exterior CAS, and nothing re-drives it — the reparent note is consumed. ★ THE FIFTH
             // producer-less arm: its push site carries `Durability::Retained`.
             InterShardFlow::ExteriorMoved(_) => FlowDurabilityClass::ProducerLessReliable,
+            // The reach (2026-09-04): stated once on a change; the SIXTH producer-less arm, its
+            // push site carries `Durability::Retained`.
+            InterShardFlow::ReachStated(_) => FlowDurabilityClass::ProducerLessReliable,
             _ => FlowDurabilityClass::ReDriven,
         };
         assert_eq!(
@@ -1218,7 +1232,7 @@ fn durability_class_pins_the_producer_less_reliable_set() {
     }
     assert_eq!(
         producer_less.len(),
-        5,
+        6,
         "exactly five producer-less-reliable arms today (Ghost::Despawn + Ghost::SpawnV2 + \
          TransientBatch + ChildFacts + ExteriorMoved): {producer_less:?}"
     );

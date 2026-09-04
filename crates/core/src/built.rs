@@ -204,10 +204,10 @@ mod tests {
         // widened — does not fail a test about placements.
         let body = a_body();
         let encoded = postcard::to_allocvec(&body).expect("a body encodes");
+        let width = encoded.len();
         assert!(
-            encoded.len() < 96,
-            "a body holds no placement — three more numbers would not fit in {} bytes",
-            encoded.len()
+            width < 96,
+            "a body holds no placement — three more numbers would not fit in {width} bytes"
         );
     }
 

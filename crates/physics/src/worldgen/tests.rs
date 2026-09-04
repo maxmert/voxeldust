@@ -7127,3 +7127,154 @@ fn diag_can_a_planet_be_seen_from_its_systems_edge() {
     }
     println!("largest planet wake radius = {reach_max:.3e} m against a shell of {shell:.3e} m");
 }
+
+/// Two siblings that draw no shape at all can never reach each other, so the fence passes them
+/// without looking at a single pair.
+///
+/// A realm's reach is the extent of its own boundary. Where the widest child of a family reaches
+/// nothing — a berth marked out before anything is built in it, say — no two of them can overlap,
+/// because an overlap is "closer than the sum of two reaches" and that sum is zero. The lookup that
+/// answers this says so at once instead of dividing by a cell width of zero.
+#[test]
+fn a_family_whose_children_reach_nothing_can_hold_no_overlapping_pair() {
+    let nothing = Boundary::Shell { r: 0.0 };
+    let at = |x: f64| Placement::StaticOffset(DVec3::new(x, 0.0, 0.0));
+    let body = |realm, placement| GeneratedBody {
+        realm,
+        parent: Some(GALAXY),
+        shape: nothing,
+        taxon: None,
+        look: None,
+        placement,
+        photometrics: None,
+    };
+    // Two of them at the SAME point: with any reach at all this would be the worst overlap there is.
+    assert_eq!(
+        siblings_disjoint(&[
+            body(RealmId::System(1), at(0.0)),
+            body(RealmId::System(2), at(0.0)),
+        ]),
+        Ok(())
+    );
+}
+
+/// The boot fence says NO to a world whose galaxy is drawn in around its home system.
+///
+/// The nest fence is what refused the owner's galaxy shard: a star system that pokes out of the
+/// galaxy holding it makes "which realm contains this point" unanswerable. Shrink the galaxy's own
+/// shell to one system's bound and the home system no longer fits inside it, so the fence must
+/// refuse and must name the seed it judged.
+#[test]
+fn the_boot_nest_fence_refuses_a_galaxy_drawn_in_around_its_home_system() {
+    let mut config = test_world();
+    config.scale.galaxy_r_m = TARGET_SYSTEM_BOUND_HOME_M;
+    let refused = guard_world_nests(0, &config)
+        .expect_err("a galaxy the size of one system cannot hold that system");
+    assert_eq!(refused.seed, 0, "the refusal names the seed it judged");
+    assert_eq!(
+        refused.reservation_m,
+        config.scale.galaxy_r_m - config.stellar.galaxy_rim_r_m,
+        "and the room the galaxy kept for a system to stand at its rim"
+    );
+    eprintln!("[nest fence] the refusal, verbatim: {refused}");
+    // …and THE world's own galaxy passes the identical fence, so the refusal above is a fence
+    // saying no rather than a fence that always says no.
+    let judged = guard_world_nests(0, &test_world()).expect("THE world nests");
+    assert_eq!(judged, realm_regions_for_config(0, &test_world()).len());
+}
+
+/// A shard told it holds a star system this galaxy never drew populates nothing, and still boots
+/// with the chain above it.
+///
+/// A spawn demand names a realm. If that name is not a system this galaxy holds, there is no stream
+/// to read and no contents to build — the subtree must simply skip it rather than guess. What is
+/// left is the chain every shard carries: the ambient root and the galaxy.
+#[test]
+fn a_held_star_system_this_galaxy_never_drew_adds_no_contents_to_the_subtree() {
+    let cfg = test_world();
+    let stranger = RealmId::System(0xDEAD_BEEF_DEAD_BEEF);
+    let held = std::collections::BTreeSet::from([stranger]);
+    let subtree = realm_subtree(0, &cfg, &held, &std::collections::BTreeSet::new());
+    let realms: Vec<RealmId> = subtree.iter().map(|b| b.realm).collect();
+    assert_eq!(
+        realms,
+        vec![UNIVERSE, GALAXY],
+        "the chain, and nothing this galaxy does not hold"
+    );
+}
+
+/// The sky folded off the system layer names one star for every star system the galaxy drew.
+///
+/// A client is handed the sky as a list of points of light, one per star system. The layer places
+/// every system and builds nothing inside one, so the catalogue it folds must hold exactly the
+/// galaxy's own population — no planet, no moon, and no system missing.
+#[test]
+fn the_sky_off_the_system_layer_holds_one_row_for_every_star_system_the_galaxy_drew() {
+    let cfg = test_world();
+    let rows = sky_from_system_layer(0, &cfg);
+    assert_eq!(
+        rows.len(),
+        systems_in(&cfg),
+        "one point of light per star system"
+    );
+    // Every row carries the star's own draw: the layer keeps the photometrics, so no system is
+    // shipped dark by an accident of which stage built it.
+    assert_eq!(
+        rows.iter().filter(|r| r.luma_lsun > 0.0).count(),
+        rows.len(),
+        "every star in the catalogue glows"
+    );
+}
+
+/// The system-layer view holds the galaxy and its star systems, and not one planet.
+///
+/// A caller that only needs to NAME a system — which realm is home, which galaxy holds it — must not
+/// pay for every planet and moon in the world. The layer answers that question: the ambient root, the
+/// galaxy, and one region per star system.
+#[test]
+fn the_system_layer_view_holds_the_galaxy_and_its_systems_and_builds_no_planet() {
+    let cfg = test_world();
+    let view = system_layer_view(0, &cfg);
+    let regions = view.regions();
+    assert_eq!(
+        regions.len(),
+        systems_in(&cfg) + 2,
+        "the ambient root, the galaxy, and every star system"
+    );
+    assert_eq!(
+        regions
+            .iter()
+            .filter(|r| matches!(r.realm, RealmId::Planet(_)))
+            .count(),
+        0,
+        "no planet is built to name a star system"
+    );
+    // The home system is in it, placed under the galaxy — which is what makes this a usable answer.
+    let home = regions
+        .iter()
+        .find(|r| r.realm == SYSTEM_A)
+        .expect("the home system");
+    assert_eq!(home.parent, Some(GALAXY));
+}
+
+/// A shard states a point of light for the star system it holds, and states none for a system it
+/// does not hold.
+///
+/// A shard's markers come from its OWN subtree. Holding the home system, it must carry that system's
+/// own light; a neighbouring system belongs to another shard, and reading a light for it would be
+/// this shard looking into a realm it does not hold.
+#[test]
+fn a_shard_states_the_light_of_the_star_system_it_holds_and_of_no_other() {
+    let cfg = test_world();
+    let held = std::collections::BTreeSet::from([SYSTEM_A]);
+    let lit = subtree_photometrics(0, &cfg, &held, &std::collections::BTreeSet::new());
+    let realms: Vec<RealmId> = lit.iter().map(|(realm, _)| *realm).collect();
+    assert!(
+        realms.contains(&SYSTEM_A),
+        "the shard states its own system's light: {realms:?}"
+    );
+    assert!(
+        !realms.contains(&SYSTEM_B),
+        "and states nothing for a system another shard holds: {realms:?}"
+    );
+}

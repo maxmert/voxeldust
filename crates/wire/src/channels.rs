@@ -870,15 +870,14 @@ mod tests {
             realms: Vec::new(),
         };
         let bytes = postcard::to_allocvec(&widest).expect("encode");
+        let width = bytes.len();
         assert!(
-            bytes.len() <= SNAPSHOT_HEADER_BUDGET,
-            "the widest header is {} bytes against a budget of {SNAPSHOT_HEADER_BUDGET}",
-            bytes.len()
+            width <= SNAPSHOT_HEADER_BUDGET,
+            "the widest header is {width} bytes against a budget of {SNAPSHOT_HEADER_BUDGET}"
         );
         assert!(
-            bytes.len() > 40,
-            "the pre-anchor budget of 40 would not hold it ({} bytes) — the constant moved for a reason",
-            bytes.len()
+            width > 40,
+            "the pre-anchor budget of 40 would not hold it ({width} bytes) — the constant moved for a reason"
         );
     }
 

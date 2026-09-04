@@ -47,6 +47,30 @@ pub const TAG_LUMA: u16 = 2;
 /// ship — the non-glowing subjects that had no lawful bag content at all before this tag).
 pub const TAG_EXTENT: u16 = 3;
 
+/// ★ THE LIMITING MAGNITUDE (the reach, owner ruling 2026-09-02 R3, built 2026-09-04): the faintest
+/// apparent visual magnitude a dark-adapted eye still sees under a dark sky, 6.5 — the perception
+/// constant beside the dot angle ([`crate::geometry::VISIBILITY_THETA_MIN_RAD`]). A body whose light
+/// is fainter than this at the observer is not seen, whatever its size makes of it.
+pub const LIMITING_MAGNITUDE: f64 = 6.5;
+/// The Sun's absolute visual magnitude, the zero of the luminosity scale the world's `luma_lsun`
+/// datum is stated in.
+pub const SUN_ABSOLUTE_MAGNITUDE: f64 = 4.83;
+/// One parsec in metres — the unit the magnitude–distance relation is written in.
+pub const PARSEC_M: f64 = 3.085_677_581_491_367e16;
+
+/// ★ THE REACH BY LIGHT: how far a body of luminosity `luma_lsun` (Suns; a planet's is its REFLECTED
+/// light, as the world states it) is still visible at `limiting_magnitude`. The magnitude–distance
+/// relation: `M = M_sun − 2.5·log10(L)`, `d = 10 pc · 10^((m_lim − M)/5)`. Zero for no light. Example:
+/// a Sun-like star reaches about 70 light-years; an Earth-like planet about 50 astronomical units.
+#[must_use]
+pub fn light_reach_m(luma_lsun: f64, limiting_magnitude: f64) -> f64 {
+    if luma_lsun <= 0.0 {
+        return 0.0;
+    }
+    let absolute = SUN_ABSOLUTE_MAGNITUDE - 2.5 * luma_lsun.log10();
+    10.0 * 10.0_f64.powf((limiting_magnitude - absolute) / 5.0) * PARSEC_M
+}
+
 /// Encode a realm's OWN outline as a `TAG_LOOK` bag. The outline is the realm's one geometric
 /// fact about itself (its boot-config extent) — never its position, which no field here can hold.
 #[must_use]
@@ -138,6 +162,27 @@ pub fn luma_of(bag: &[u8]) -> Result<(u8, f64), TlvError> {
 mod tests {
     use super::*;
     use glam::DVec3;
+
+    #[test]
+    fn the_reach_by_light_is_seventy_light_years_for_a_sun_and_fifty_au_for_an_earth() {
+        const LIGHT_YEAR_M: f64 = 9.460_730_472_580_8e15;
+        const AU_M: f64 = 1.495_978_707e11;
+        let sun = light_reach_m(1.0, LIMITING_MAGNITUDE) / LIGHT_YEAR_M;
+        assert!((sun - 70.5).abs() < 1.0, "a Sun-like star: {sun} ly");
+        // An Earth-like planet as the world states it: albedo 0.3, radius 6.4e6 m, at 1 AU.
+        let earth_luma = 0.3 * 6.4e6_f64.powi(2) / (4.0 * AU_M * AU_M);
+        let earth = light_reach_m(earth_luma, LIMITING_MAGNITUDE) / AU_M;
+        assert!(
+            (earth - 51.0).abs() < 3.0,
+            "an Earth-like planet: {earth} AU"
+        );
+        assert_eq!(
+            light_reach_m(0.0, LIMITING_MAGNITUDE),
+            0.0,
+            "no light, no reach"
+        );
+        assert_eq!(light_reach_m(-1.0, LIMITING_MAGNITUDE), 0.0);
+    }
 
     #[test]
     fn a_look_bag_roundtrips_its_outline_and_nothing_else() {

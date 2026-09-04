@@ -13,7 +13,7 @@ use super::*;
 /// stated, the look-less one is not, and the realm's own look-less arm states nothing
 /// either.
 #[test]
-fn a_look_less_realm_states_no_body_and_its_look_less_children_get_no_marker() {
+fn a_look_less_realm_states_no_body_and_states_nothing_about_its_children() {
     let mut lit = region(OTHER_REALM, Some(OWN_REALM), DVec3::ZERO, 1000.0);
     lit.look = Some(Boundary::Shell { r: 250.0 });
     let mut dark = region(RealmId::Station(99), Some(OWN_REALM), DVec3::ZERO, 1000.0);
@@ -22,11 +22,13 @@ fn a_look_less_realm_states_no_body_and_its_look_less_children_get_no_marker() {
     own.look = None;
     let regions = RealmRegions::new(vec![root_region(), own, lit, dark]);
     let luma = BTreeMap::new();
-    let stated: Vec<RealmId> = current_bodies(&config(), &regions, &luma, None)
+    let stated: Vec<RealmId> = current_bodies(&config(), &regions, &luma)
         .into_iter()
         .map(|(realm, _)| realm)
         .collect();
-    assert_eq!(stated, vec![OTHER_REALM]);
+    // No own look ⇒ no own body; and a parent states nothing about its children, lit or dark
+    // (step 5, 2026-09-04): the lit child draws itself when it runs.
+    assert_eq!(stated, Vec::<RealmId>::new());
 }
 
 #[test]
@@ -135,7 +137,7 @@ fn the_child_index_decides_exactly_what_the_full_scan_decides() {
     // requires the emitted crossing destinations to match position for position.
     //
     // Anti-vacuity: the scan half is not a re-run of the same code. An EMPTY index answers for nothing,
-    // so `worth_asking` returns true for every region and every child is evaluated — which is exactly
+    // so the ask list returns true for every region and every child is evaluated — which is exactly
     // the pre-slice behaviour, reached through the shipped code.
     let forest = || {
         let sibling = region(
@@ -274,55 +276,6 @@ fn a_subject_this_shard_cannot_place_in_its_own_frame_still_gets_the_full_scan()
         run(false),
         "an unplaceable subject must be decided exactly as the full scan decides it"
     );
-}
-
-#[test]
-fn worth_asking_evaluates_everything_the_lookup_cannot_speak_for() {
-    // THE ARMS OF THE SKIP DECISION, each on its own (HR5), because this is the one function that
-    // can silently lose a crossing: every arm that returns TRUE is a region the fold still evaluates,
-    // and the single FALSE at the end is the only place work is ever dropped. (The abstain arm went
-    // with the grid: the tree answers every span.)
-    use super::worth_asking;
-    use vd_core::child_index::{ChildIndex, IndexedChild};
-
-    let indexed = RealmId::Planet(1);
-    let unindexed = RealmId::Planet(2);
-    let ix = ChildIndex::build(
-        &[IndexedChild {
-            realm: indexed,
-            centre: LatticePos::from_metres(DVec3::ZERO, vd_core::pose::Tier::Fine),
-            radius_m: 10.0,
-        }],
-        vd_core::pose::Tier::Fine,
-    );
-    let empty_chain = BTreeSet::new();
-    let no_memory = RegionMembership::default();
-
-    // ARM 1 — NOT INDEXED. An ancestor, this realm itself, or anything that moves. The index has no
-    // opinion, so the fold must ask. This is the arm that keeps the whole thing conservative.
-    assert!(worth_asking(&ix, &[], &no_memory, &empty_chain, unindexed));
-
-    // ARM 2 — THE LOOKUP NAMED IT.
-    assert!(worth_asking(
-        &ix,
-        &[indexed],
-        &no_memory,
-        &empty_chain,
-        indexed
-    ));
-
-    // ARM 3 — ALREADY A MEMBER. Hysteresis: a subject inside a region must be re-asked every tick to
-    // decide RELEASE, however far the lookup now thinks it is. Skipping here would strand it inside.
-    let mut remembered = RegionMembership::default();
-    remembered.set(indexed, true);
-    assert!(worth_asking(&ix, &[], &remembered, &empty_chain, indexed));
-
-    // ARM 4 — ON THE DERIVED CHAIN. Same reason, for the membership nobody stored.
-    let chain = BTreeSet::from([indexed]);
-    assert!(worth_asking(&ix, &[], &no_memory, &chain, indexed));
-
-    // THE ONLY SKIP: indexed, not named, not remembered, not on the chain.
-    assert!(!worth_asking(&ix, &[], &no_memory, &empty_chain, indexed));
 }
 
 #[test]
@@ -3392,4 +3345,339 @@ fn a_hull_applies_a_lineage_only_from_the_node_the_directory_names_as_its_exteri
         &mut stats,
     );
     assert_eq!(stats.lineage_discarded, 1);
+}
+
+// ===================== the ruler switch: the exterior lane's own refusals =====================
+
+#[test]
+fn the_exterior_scan_passes_over_a_child_with_no_exterior_key_and_over_one_it_does_not_roster() {
+    // Two driven children the scan must leave alone. A PLANET this realm authors has no exterior
+    // key — nobody can hand a planet over — so it is never a subject, and it is not even counted as
+    // a hull without a lease. A HULL this realm drives but does not roster has no berth to measure
+    // against, so the scan says nothing about it until the adopt lands.
+    let (hull, _) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    plant_escape_regions_with_hull(&mut rig, hull);
+    let stranger = RealmId::Ship(EntityId::pack(EntityKind::Ship, 2, 2, 0));
+    drive_hull(
+        &mut rig,
+        OTHER_REALM,
+        DVec3::new(4500.0, 0.0, 0.0),
+        DVec3::ZERO,
+    );
+    drive_hull(
+        &mut rig,
+        stranger,
+        DVec3::new(4500.0, 0.0, 0.0),
+        DVec3::ZERO,
+    );
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(stranger, Fence(1));
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    assert_eq!(exterior_decided(&rig), 0, "neither child is a subject");
+    assert_eq!(
+        rig.world.resource::<StubStats>().exterior_scan_unleased,
+        0,
+        "a planet is not a hull that lacks a lease"
+    );
+}
+
+#[test]
+fn an_abort_for_a_hull_this_realm_never_drove_is_acked_and_thaws_nothing() {
+    // The ack is unconditional — the orchestrator must be told the abort landed even when the
+    // subject means nothing here. A hull this realm never drove has no drive to thaw, and the
+    // key still names its entity, so nothing is counted as a keyless abort.
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let stranger = EntityId::pack(EntityKind::Ship, 3, 3, 0);
+    let abort = vd_wire::intershard::CrossingAborted {
+        subject: DirectoryKey::Ship(stranger),
+        transfer: TransferId(91),
+    };
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::CrossingAborted(abort),
+    )]);
+    assert!(to_orch(&sent).contains(&InterShardFlow::CrossingAbortedAck(abort)));
+    assert_eq!(
+        rig.world.resource::<StubStats>().crossing_abort_no_entity,
+        0,
+        "a hull key names its entity"
+    );
+}
+
+#[test]
+fn a_hull_still_outside_after_the_dwell_is_decided_again_and_its_request_is_suppressed() {
+    // The dwell passes with the hull still outside, so the verdict is made a second time. The
+    // request it would carry is suppressed, because the first one is still in flight: one request
+    // per crossing, whatever the scan keeps deciding.
+    let (hull, _) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    plant_escape_regions_with_hull(&mut rig, hull);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(5));
+    drive_hull(&mut rig, hull, DVec3::ZERO, DVec3::ZERO);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    drive_hull(&mut rig, hull, DVec3::new(4500.0, 0.0, 0.0), DVec3::ZERO);
+    rig.set_local_tick(3);
+    let sent = rig.tick(vec![]);
+    assert_eq!(exterior_requests(&sent).len(), 1);
+    // k_dwell is five ticks: at tick nine the verdict stands again, and the request does not.
+    rig.set_local_tick(9);
+    let sent = rig.tick(vec![]);
+    assert!(exterior_requests(&sent).is_empty(), "no second request");
+    assert_eq!(exterior_decided(&rig), 2, "the verdict is made twice");
+    assert_eq!(
+        rig.world
+            .resource::<StubStats>()
+            .crossings_suppressed_in_flight,
+        1
+    );
+}
+
+#[test]
+fn a_crossing_toward_a_realm_this_forest_cannot_name_gets_no_keep_alive_and_is_counted() {
+    // The hull leaves a realm whose own parent this shard does not roster, so the destination is a
+    // NAME and not a place. The keep-alive that would hold the destination awake is skipped and
+    // counted — never assumed, and never an expect that takes the shard down.
+    let (hull, _) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let own_live = RealmRegion {
+        aoi: aoi_band(2),
+        ..region(OWN_REALM, Some(PARENT_REALM), DVec3::ZERO, 1000.0)
+    };
+    let berth = region(hull, Some(OWN_REALM), DVec3::new(500.0, 0.0, 0.0), 20.0);
+    // The ambient root of this forest is a SMALL shell that holds nothing out where the hull goes,
+    // so the fold names no container and the answer is the realm's own parent — which is a name
+    // this shard cannot place.
+    let small_root = region(ROOT_REALM, None, DVec3::ZERO, 1000.0);
+    *rig.world.resource_mut::<RealmRegions>() =
+        RealmRegions::new(vec![small_root, own_live, berth]);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(1));
+    drive_hull(&mut rig, hull, DVec3::ZERO, DVec3::ZERO);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    drive_hull(&mut rig, hull, DVec3::new(4500.0, 0.0, 0.0), DVec3::ZERO);
+    rig.set_local_tick(3);
+    let _ = rig.tick(vec![]);
+    assert_eq!(exterior_decided(&rig), 1, "the exit is decided");
+    rig.set_local_tick(4);
+    let _ = rig.tick(vec![]);
+    assert_ne!(
+        rig.world.resource::<StubStats>().crossing_keepalive_unnamed,
+        0,
+        "the unnamed destination is counted, not assumed"
+    );
+}
+
+// The one hand-written publish, standing in for a middle link whose author has not written its row
+// at this instant — the state the counter exists for. Test twin of the ONE writer.
+#[allow(clippy::disallowed_methods)]
+#[test]
+fn a_flush_the_ephemeris_cannot_place_ships_nothing_and_is_counted() {
+    // A hand-off DOWN two links — into an area inside a planet this shard co-hosts — adds each
+    // link's placement through the book of the realm that authored it. When a link's book holds no
+    // row at the instant the pose is stamped, there is no arithmetic to do: nothing is shipped, and
+    // the refusal is counted rather than guessed.
+    let (hull, entity) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let planet = region(
+        RealmId::Planet(9),
+        Some(OWN_REALM),
+        DVec3::new(5000.0, 0.0, 0.0),
+        500.0,
+    );
+    let area = region_framed(
+        RealmId::Area(99),
+        Some(RealmId::Planet(9)),
+        DVec3::ZERO,
+        100.0,
+        FrameRef::AreaLocal {
+            planet_seed: 9,
+            area_seed: 99,
+        },
+    );
+    let berth = region(hull, Some(OWN_REALM), DVec3::new(500.0, 0.0, 0.0), 20.0);
+    *rig.world.resource_mut::<RealmRegions>() =
+        RealmRegions::new(vec![root_region(), own_region(), planet, area, berth])
+            .with_own_realm(OWN_REALM);
+    rig.world
+        .resource_mut::<ExteriorAuthority>()
+        .0
+        .insert(hull, Fence(5));
+    drive_hull(&mut rig, hull, DVec3::ZERO, DVec3::ZERO);
+    rig.set_local_tick(2);
+    let _ = rig.tick(vec![]);
+    // This realm's own ephemeris runs one tick ahead of the planet's: the pose ships stamped at the
+    // instant its own book holds, and the middle link has no row at that instant.
+    let ahead = UniverseTick(rig.world.resource::<ClockSample>().universe_tick.0 + 1);
+    let book = rig
+        .world
+        .resource::<RealmRegions>()
+        .author_book(OWN_REALM, 20.0, ahead);
+    rig.world
+        .resource_mut::<Placements>()
+        .0
+        .publish(OWN_REALM, book);
+    rig.set_local_tick(3);
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::FlushSource(vd_wire::intershard::FlushSource {
+            transfer: TransferId(61),
+            subject: DirectoryKey::Ship(entity),
+            step_id: FLUSH_SOURCE_STEP,
+            to_realm: RealmId::Area(99),
+            to_parent: Some(RealmId::Planet(9)),
+        }),
+    )]);
+    assert!(exterior_acks(&sent).is_empty(), "no pose leaves");
+    assert_eq!(
+        rig.world.resource::<StubStats>().exterior_flush_unplaceable,
+        1
+    );
+}
+
+#[test]
+fn a_realm_with_no_store_still_adopts_the_hull_and_simply_keeps_no_berth_row() {
+    // Every test rig and every seeded-only shard runs without a store. The adoption must land all
+    // the same — on the roster, driven, leased — and the durable berth row is the one thing that
+    // does not happen.
+    let (hull, entity) = hull_child();
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
+        root_region(),
+        region(OWN_REALM, Some(ROOT_REALM), DVec3::ZERO, 1000.0),
+    ])
+    .with_own_realm(OWN_REALM);
+    let own_frame = config().frame;
+    let blob = vd_wire::intershard::ExteriorState {
+        region: region(hull, None, DVec3::ZERO, 20.0),
+        spin: DVec3::ZERO,
+    };
+    let pose = StampedPose {
+        frame: own_frame,
+        pos: LatticePos::from_metres(DVec3::new(300.0, 0.0, 0.0), own_frame.tier()),
+        vel: DVec3::ZERO,
+        orient: DQuat::IDENTITY,
+        universe_tick: UniverseTick(100),
+    };
+    let _ = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::Transfer(TransferEnvelope {
+            transfer_id: TransferId(71),
+            universe_epoch: vd_core::EpochId(1),
+            schema_version: vd_wire::intershard::TRANSFER_SCHEMA_VERSION,
+            fence: Fence(7),
+            step_id: STUB_CROSSING_STEP,
+            class: vd_core::entity_kind::DurabilityClass::Durable,
+            payload: TransitionPayload::StubCrossing {
+                entity,
+                from_realm: PARENT_REALM,
+                to_realm: OWN_REALM,
+                pose,
+                state: blob.encode(),
+            },
+        }),
+    )]);
+    assert_eq!(rig.world.resource::<StubStats>().exterior_adopted, 1);
+    assert!(
+        rig.world
+            .resource::<RealmRegions>()
+            .direct_child(OWN_REALM, hull)
+            .is_some()
+    );
+    assert!(
+        rig.world
+            .resource::<crate::stub::exterior::RealmStore>()
+            .0
+            .is_none()
+    );
+}
+
+#[test]
+fn the_realm_store_says_only_whether_this_shard_holds_one() {
+    // The store is a file handle: it cannot be printed, and a debug line that tried would leak the
+    // whole realm. The one fact worth printing is whether the shard has a store at all.
+    let empty = crate::stub::exterior::RealmStore(None);
+    assert_eq!(format!("{empty:?}"), "RealmStore(false)");
+    let held = crate::stub::exterior::RealmStore(Some(Box::new(crate::io::mem::MemStore::new())));
+    assert_eq!(format!("{held:?}"), "RealmStore(true)");
+}
+
+#[test]
+fn a_realm_that_is_not_a_hull_holds_an_unattested_lineage_and_a_rootward_move_re_points_nothing() {
+    // A star system can be told its lineage too, and it has no exterior head to read: only a hull is
+    // named in the directory by a `Ship` key. So the statement is held and NOTHING is asked. And a
+    // coord with no parent — the realm now sits at the root of its own forest — is applied without
+    // re-pointing the roster: there is no new parent to name.
+    use crate::stub::lineage::{PendingLineage, on_lineage_stated};
+    let mut cfg = config();
+    let mut regions =
+        RealmRegions::new(vec![root_region(), own_region()]).with_own_realm(OWN_REALM);
+    let mut parent_node = ParentRealmNode::default();
+    let mut stated = crate::stub::drive::StatedFacts(None);
+    let mut was_occupied = crate::stub::aoi::WasOccupied(true);
+    let mut pending = PendingLineage::default();
+    let mut stats = StubStats::default();
+    let mut outbox = OutboundBox::default();
+    let rootward = || vd_wire::intershard::LineageStated {
+        child: StubConfig::root_coord(OWN_REALM),
+        parent_fence: Fence(3),
+        at: UniverseTick(50),
+    };
+    on_lineage_stated(
+        rootward(),
+        NodeId(70),
+        &mut cfg,
+        &mut regions,
+        &mut parent_node,
+        &mut stated,
+        &mut was_occupied,
+        &mut pending,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(stats.lineage_held_unattested, 1);
+    assert!(
+        outbox.0.is_empty(),
+        "only a hull has an exterior head to read"
+    );
+    // Attested now: the statement applies, and the parentless coord re-points no row.
+    parent_node.0 = Some(NodeId(70));
+    on_lineage_stated(
+        rootward(),
+        NodeId(70),
+        &mut cfg,
+        &mut regions,
+        &mut parent_node,
+        &mut stated,
+        &mut was_occupied,
+        &mut pending,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(stats.lineage_applied, 1);
+    assert_eq!(cfg.own_coord, StubConfig::root_coord(OWN_REALM));
+    assert_eq!(
+        regions.parent_of(OWN_REALM),
+        Some(ROOT_REALM),
+        "no new parent is named, so the roster stands"
+    );
 }

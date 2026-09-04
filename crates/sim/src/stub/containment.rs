@@ -413,8 +413,18 @@ pub(crate) fn evaluate_realm_boundaries(
     //
     // Nothing here names the child's motion, drive or kind (SL4): the state read is the placement
     // the physics pass produced, and the lane is the one every subject takes.
+    if driven.0.is_empty() {
+        return; // no child of mine flies: this lane has no subjects at all
+    }
     let own_frame = regions.own_frame(config.realm);
     let lead_s = f64::from(config.request_ttl_ticks) * config.tick_dt_s;
+    // ONE book for the whole lane, read once: the anchor is this realm itself for every child, and
+    // the writer authors every held anchor before this scan runs (the same invariant, and the same
+    // wording, the window lane's feed states). Read per child it was a lookup per hull for one value.
+    let own_book = placements
+        .0
+        .head(book_anchor(&regions.ix_of, config.realm, config.realm))
+        .expect("the writer authors every held anchor before the scan runs");
     for (child, held) in driven.0.iter() {
         let Some(entity) = DirectoryKey::exterior_entity(*child) else {
             continue; // a driven child with no exterior key has no author to move: never a subject
@@ -429,14 +439,9 @@ pub(crate) fn evaluate_realm_boundaries(
         let pose = exterior_pose(region, &held.state, own_frame, clock.universe_tick);
         let led = led_pose(&pose, lead_s);
         let prev = exterior_scan.0.get(&entity).copied().unwrap_or(led.pos);
-        let anchor = book_anchor(&regions.ix_of, config.realm, config.realm);
-        let Some(book) = placements.0.head(anchor) else {
-            stats.placement_book_miss += 1;
-            continue;
-        };
         let eval = evaluate_one_subject(
             &ctx,
-            book,
+            own_book,
             entity,
             &led,
             prev,
@@ -532,36 +537,6 @@ struct CrossingCtx<'a> {
     /// THIS SHARD'S OWN frame — the one the child index is built in, so a subject is expressed there
     /// once per tick instead of once per child.
     own_frame: FrameRef,
-}
-
-/// Is this region worth evaluating for a subject whose candidate set is `candidates`?
-///
-/// YES unless ALL of these hold: the index actually answers for this realm (so a miss is INFORMATION,
-/// not ignorance), the lookup did not name it, the subject is not already a remembered member of it, and
-/// it is not on the subject's own derived chain. The last two matter because membership is HYSTERETIC —
-/// a region the subject is inside must be re-asked every tick to decide RELEASE, however far the
-/// geometry says it now is. (The index ABSTAINED on a wide step while it was a grid; the tree answers
-/// every span, so that arm is gone.)
-///
-/// Monomorphic and written as four named terms rather than one chained `&&`, so every arm is coverable
-/// on its own (HR5) and so the reason a region survived the filter can be read off the code.
-pub(crate) fn worth_asking(
-    index: &ChildIndex,
-    candidates: &[RealmId],
-    remembered: &RegionMembership,
-    chain: &BTreeSet<RealmId>,
-    realm: RealmId,
-) -> bool {
-    if !index.answers_for(realm) {
-        return true; // not indexed (an ancestor, this realm itself, a mover) — always evaluated
-    }
-    if candidates.contains(&realm) {
-        return true; // the lookup named it
-    }
-    if remembered.get(realm) {
-        return true; // already a member — must be re-asked to decide release
-    }
-    chain.contains(&realm) // on the derived prior's chain — likewise
 }
 
 /// The prior endpoint expressed in THIS SHARD'S OWN frame, for the candidate lookup. `None` for "no
@@ -799,7 +774,7 @@ fn evaluate_one_subject(
     let bits = membership.entry(entity).or_default();
     // THE CANDIDATE LOOKUP (SL9), ONCE per subject rather than once per child. The index is built in
     // this shard's OWN frame, so the subject is expressed there once and asked once. A subject this
-    // shard cannot place in its own frame yields NO candidates — and because `worth_asking` only ever
+    // shard cannot place in its own frame yields NO candidates — and because `the ask list` only ever
     // skips a realm the index positively answers for, an empty answer for an indexed child is a real
     // "not here", while an unbuildable point simply leaves every child unindexed-and-evaluated below.
     // ★ THE POSITION STAYS ON THE LATTICE (slice S4). It used to be flattened from the frame origin
@@ -844,7 +819,7 @@ fn evaluate_one_subject(
     // ★ ASK ONLY THE ROWS THAT CAN ANSWER (SL9, MEASURED on the fifth flight, 2026-09-03): the rows
     // the index does not answer for (the ancestors, this realm, the movers), the index's candidates
     // for this subject, the rows it was a member of, and its prior's chain. Every other row is an
-    // indexed child the lookup already ruled out — `worth_asking` said no to each of them, one at a
+    // indexed child the lookup already ruled out — `the ask list` said no to each of them, one at a
     // time, 233 220 times per subject per tick on the galaxy: 325 ms a tick, a stale window, a frozen
     // picture.
     let remembered: Vec<RealmId> = bits.members().collect();
@@ -865,12 +840,6 @@ fn evaluate_one_subject(
         let depth_key = ctx.depths[ix];
         if Some(region.realm) == exclude {
             continue; // the subject's own region: it holds its own centre by construction
-        }
-        if !worth_asking(ctx.child_index, candidates, bits, owned_chain, region.realm) {
-            // NOT a member, and not remembered as one, so there is nothing to advance: `set(realm, false)`
-            // on an absent realm is a no-op and `members` gains nothing. Skipping is therefore identical
-            // to evaluating, which is what `the_index_decides_exactly_what_the_full_scan_decides` proves.
-            continue;
         }
         // The prior is STORED-OR-DERIVED (see `owned_mask` above): the remembered bit, OR the fact
         // that this region is the subject's owning realm or an ancestor of it. Hoisted above the

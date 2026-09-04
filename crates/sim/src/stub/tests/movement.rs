@@ -843,3 +843,117 @@ fn input_log_is_a_bounded_window_with_exact_totals() {
     tiny.record_applied(SessionId(9), 2);
     assert_eq!(tiny.applied(), vec![(SessionId(9), 2)]);
 }
+
+// ===== ★ THE HULL SPEAKS FOR ITSELF (D-MOVE-2; owner rulings 2026-08-31 / 2026-09-01) =========
+
+/// The stored row a built hull is: what it weighs, how wide it is to the air, and how hard it pushes.
+fn a_built_hull() -> vd_core::built::BuiltBody {
+    vd_core::built::BuiltBody {
+        realm: config().realm,
+        owner: AccountId(1000),
+        blueprint: vd_core::built::BlueprintId(0),
+        bound: vd_core::geometry::Boundary::Shell { r: 20.0 },
+        look: vd_core::geometry::Boundary::Shell { r: 20.0 },
+        facts: vd_core::built::BuiltFacts {
+            mass_g: 50_000_000,
+            cross_section_mm2: 12_000_000,
+            drag_micro: 820_000,
+            max_push_micro_mps2: 98_100_000,
+            max_turn_micro_radps2: 800_000,
+        },
+        fence: Fence::GENESIS,
+    }
+}
+
+/// Every `ChildDrive` a tick sent, with the node it went to — what this realm is DOING.
+fn child_drives(
+    sent: &[(NodeId, MsgClass, Vec<u8>)],
+) -> Vec<(NodeId, vd_wire::intershard::ChildDrive)> {
+    sent.iter()
+        .filter_map(
+            |(to, _, bytes)| match postcard::from_bytes::<InterShardFlow>(bytes) {
+                Ok(InterShardFlow::ChildDrive(d)) => Some((*to, d)),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// Every `ChildFacts` a tick sent, with the node it went to — what this realm IS.
+fn child_facts(
+    sent: &[(NodeId, MsgClass, Vec<u8>)],
+) -> Vec<(NodeId, vd_wire::intershard::ChildFacts)> {
+    sent.iter()
+        .filter_map(
+            |(to, _, bytes)| match postcard::from_bytes::<InterShardFlow>(bytes) {
+                Ok(InterShardFlow::ChildFacts(f)) => Some((*to, f)),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// ★ A HULL WITH NO STORED ROW SAYS NOTHING, AND THE SAME HULL WITH ONE FLIES (owner, 2026-09-01).
+///
+/// A hull whose facts nobody wrote is a hull nobody knows the mass of. Guessing one flies it wrong
+/// for ever with nothing to say so, so silence is the honest answer — the same silence a realm with
+/// no engines gives. The moment the row lands, the same pilot's stick reaches the parent.
+///
+/// ★ AND THE SWITCH DECIDES, NOT THE KIND. This rig's realm is unchanged; only the shard's carried
+/// profile and its stored body differ. Written as "is this a ship?", a station with thrusters could
+/// never fly (HR3: never match on a shard kind in a feature).
+#[test]
+fn a_hull_states_nothing_until_a_body_says_what_it_is_and_then_it_states_its_push() {
+    let profile = crate::capability::profiles::ship().expect("a hull that pushes itself");
+    let mut rig = Rig::with_config_and_kind(config(), NodeKind::Shard(profile));
+    rig.grant_realm();
+    rig.world.resource_mut::<ParentRealmNode>().0 = Some(ANCESTOR);
+    let _ = rig.attach();
+
+    // A pilot holds the stick full forward. No stored row yet, so the hull states nothing at all.
+    let quiet = rig.tick(vec![input_msg(1, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
+    let (drives, facts) = (child_drives(&quiet), child_facts(&quiet));
+    assert_eq!(
+        drives,
+        vec![],
+        "a hull nobody knows the mass of says nothing"
+    );
+    assert_eq!(facts, vec![], "and it declares nothing either");
+
+    // The row lands. Now the same stick reaches the parent.
+    *rig.world.resource_mut::<crate::stub::drive::OwnBody>() =
+        crate::stub::drive::OwnBody(Some(a_built_hull()));
+    let sent = rig.tick(vec![input_msg(2, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
+    let (drives, facts) = (child_drives(&sent), child_facts(&sent));
+
+    assert_eq!(drives.len(), 1, "one hull, one drive: {drives:?}");
+    let (to, drive) = &drives[0];
+    assert_eq!(
+        *to, ANCESTOR,
+        "it went to the node holding the parent realm"
+    );
+    assert_eq!(drive.child, config().own_coord, "and it named itself");
+    assert_eq!(
+        drive.child_fence,
+        Fence(1),
+        "carrying the granted incarnation"
+    );
+    assert_eq!(
+        drive.push,
+        [0, 0, -98_100_000],
+        "the hull's OWN rated push, straight along its nose"
+    );
+
+    assert_eq!(facts.len(), 1, "and it stated what it IS, once: {facts:?}");
+    let (to, what_i_am) = &facts[0];
+    assert_eq!(*to, ANCESTOR);
+    assert_eq!(what_i_am.mass_g, 50_000_000);
+    assert_eq!(what_i_am.cross_section_mm2, 12_000_000);
+    assert_eq!(what_i_am.drag_micro, 820_000);
+
+    // The next tick restates the push and NOT the facts: a declared property says nothing twice.
+    let again = rig.tick(vec![input_msg(3, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
+    let (drives, facts) = (child_drives(&again), child_facts(&again));
+    assert_eq!(drives.len(), 1, "the push is per tick");
+    assert_eq!(facts.len(), 0, "the facts are on change only");
+}

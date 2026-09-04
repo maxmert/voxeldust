@@ -40,7 +40,7 @@ use vd_core::pose::CELL_DOMAIN_MAX;
 /// nature — it cannot be widened for planets alone without branching on kind, which is forbidden. Note the
 /// inter-system ring is DERIVED from this same factor ([`UniverseConfig::visual_geometry`]), so a system
 /// still sleeps until you approach it no matter what this is set to — that behaviour is invariant here.
-pub(crate) const VISIBILITY_THETA_MIN_RAD: f64 = 0.026_180;
+pub(crate) const VISIBILITY_THETA_MIN_RAD: f64 = vd_core::geometry::VISIBILITY_THETA_MIN_RAD;
 
 // ===== THE OUTER GEOMETRY (real-scale addendum §A2 — owner ruling 2026-08-18, OPTION C) =========
 // The four changed numbers, each with its derivation. The chain runs DOWNWARD from the storage

@@ -1064,6 +1064,31 @@ mod tests {
         assert!(l.get(sys(8).path()).is_none());
     }
 
+    /// A hull that never had a cell cannot move house, and asking the ledger to move it changes
+    /// nothing at all.
+    ///
+    /// Example: the orchestrator learns that a ship left one star system for another and tells the
+    /// ledger to re-key it. The ship was dormant, so no cell was ever opened for its old path. The
+    /// ledger must not open one under the new path either — an invented cell would be desired for
+    /// ever, because nothing running would ever report it empty. This is the arm the tracked cell's
+    /// re-key never reaches.
+    #[test]
+    fn rekeying_a_realm_the_ledger_never_tracked_creates_nothing() {
+        let mut l = DemandLedger::default();
+        l.record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(10), Fence(1));
+        l.rekey(sys(8).path(), &sys(9));
+        assert_eq!(l.len(), 1, "no cell was created for the untracked realm");
+        assert!(
+            l.get(sys(9).path()).is_none(),
+            "nothing moved to the new key"
+        );
+        assert!(l.get(sys(8).path()).is_none(), "the old key stays empty");
+        assert!(
+            l.get(sys(7).path()).is_some(),
+            "the tracked cell is untouched"
+        );
+    }
+
     #[test]
     fn apply_delta_sets_draining_and_ignores_absent_cells() {
         let mut l = DemandLedger::default();

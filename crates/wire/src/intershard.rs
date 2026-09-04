@@ -589,6 +589,33 @@ pub enum InterShardFlow {
     /// The only address-bearing arm on the mesh; nothing in the sim reads it (the node runtime
     /// consumes it below the schedule). APPENDED (discriminant 42).
     PeerLocated(PeerLocated),
+    /// ★ THE REACH (owner ruling 2026-09-02 R6 — the SL6 ask answered; built 2026-09-04 under the
+    /// owner's rule *"brightness counts only when no ancestor already draws that light"*): a child
+    /// states how far it is visible, to its parent, ON CHANGE, on the slow lane beside its facts.
+    /// TWO whole-metre numbers, not one: its reach BY SIZE (its disc still makes a dot) and its reach
+    /// BY LIGHT (its glow is still visible), each folded over its own children. A parent tests a
+    /// child with the larger of the two — unless the parent itself draws that child's light (the
+    /// galaxy's star field draws every star), in which case size alone. Example: System 8 states
+    /// size 3 light-hours, light 70 light-years; the galaxy draws its star, so the galaxy wakes
+    /// System 8 for its disc and its planets, never for the glow the sky already shows. Every realm
+    /// sends it — a planet has no drive facts to ride with, so the reach has its own arm. Producer-
+    /// less reliable: stated once on a change, carried `Retained`. APPENDED (discriminant 43).
+    ReachStated(ReachStated),
+}
+
+/// The payload of [`InterShardFlow::ReachStated`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReachStated {
+    /// The sending child's full lineage coord — routing key and misroute guard.
+    pub child: RealmCoord,
+    /// The child's own realm fence — the zombie guard.
+    pub child_fence: Fence,
+    /// The universe tick this statement was made at (freshness ordering beside the fence).
+    pub at: UniverseTick,
+    /// How far the child's SIZE keeps it visible, folded over its children, in WHOLE METRES.
+    pub size_reach_m: u64,
+    /// How far the child's LIGHT keeps it visible, folded over its children, in WHOLE METRES.
+    pub light_reach_m: u64,
 }
 
 /// The payload of [`InterShardFlow::LineageStated`]. Example: the galaxy adopts a hull that left
@@ -947,6 +974,8 @@ impl InterShardFlow {
             InterShardFlow::ChildDrive(_) | InterShardFlow::ChildFacts(_) => {
                 EffectClass::FireAndForget
             }
+            // The reach states what a child IS (how far it is seen); it commands nothing.
+            InterShardFlow::ReachStated(_) => EffectClass::FireAndForget,
         }
     }
 
@@ -1093,6 +1122,8 @@ impl InterShardFlow {
             // test's golden pin moved from three to four with this reason, and the pin's obligation
             // comes with it — the push site MUST send this `Retained`.
             InterShardFlow::ChildFacts(_) => FlowDurabilityClass::ProducerLessReliable,
+            // Stated once on a change and never re-driven: the push site carries `Retained`.
+            InterShardFlow::ReachStated(_) => FlowDurabilityClass::ProducerLessReliable,
         }
     }
 }

@@ -917,21 +917,33 @@ static LAST_FOREST: std::sync::Mutex<RememberedForest> = std::sync::Mutex::new(N
 /// The lock is held only to look and to store — never across the build — so two threads asking at once
 /// both build rather than one blocking the other. Building twice is wasteful; holding a lock across a
 /// 4-second build is worse, because it turns a slow boot into a stalled one.
+///
+/// ★ A POISONED SLOT IS TAKEN, NOT REFUSED. This read `if let Ok(slot) = LAST_FOREST.lock()`, and the
+/// `Err` arm was dead: the only two places that hold this guard are the two lines below, and neither
+/// can panic while it is held, so nothing in the world can poison it. A dead arm cannot be tested and
+/// HR5 counts it, so the arm is gone. Taking the inner slot is also the right answer if the
+/// impossible ever happens: the slot remembers a PURE function's answer, so a poisoned one holds a
+/// correct forest, and refusing it would only build the same forest again.
 pub(crate) fn system_forest_cached(
     seed_universe: u64,
     config: &UniverseConfig,
 ) -> std::sync::Arc<Vec<GeneratedBody>> {
-    if let Ok(slot) = LAST_FOREST.lock()
-        && let Some((seed, cfg, forest)) = slot.as_ref()
+    let slot = LAST_FOREST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((seed, cfg, forest)) = slot.as_ref()
         && *seed == seed_universe
         && cfg == config
     {
         return std::sync::Arc::clone(forest);
     }
+    // Let go BEFORE the build: the lock covers the look and the store, never the work between them.
+    drop(slot);
     let built = std::sync::Arc::new(generate_system_forest(seed_universe, config));
-    if let Ok(mut slot) = LAST_FOREST.lock() {
-        *slot = Some((seed_universe, *config, std::sync::Arc::clone(&built)));
-    }
+    *LAST_FOREST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((seed_universe, *config, std::sync::Arc::clone(&built)));
     built
 }
 
@@ -1321,9 +1333,15 @@ pub(crate) fn realm_subtree(
         let Some(system_ix) = bodies.iter().position(|b| b.realm == hosted) else {
             continue; // a held realm the layer does not name is not ours to populate
         };
-        let Some(s) = (0..layer.len() as u32).find(|n| system_seed_at(*n) == seed) else {
-            continue;
-        };
+        // ★ THE DRAW INDEX ALWAYS EXISTS, so there is no arm here. The layer mints system `n` under
+        // `system_seed_at(n)` for every `n` below the galaxy's population, and `bodies` is that same
+        // layer filtered — so a system found above came from the layer and its own index answers
+        // this. The `else { continue }` that used to stand here was dead by construction, and HR5
+        // counts a dead arm. It is a loud `expect` instead: if the layer ever stops naming its own
+        // systems, the boot says so rather than quietly populating nothing.
+        let s = (0..layer.len() as u32)
+            .find(|n| system_seed_at(*n) == seed)
+            .expect("a star system in the layer carries the seed its own draw index mints");
         // Re-read this system's own stream to the point the contents begin — the SAME function the
         // full forest uses, so the draws are identical.
         let mut scratch = bodies[system_ix];
@@ -1826,4 +1844,88 @@ fn worst_rung_look_m(pl: &PlanetConfig, insolation_rel: f64, cap_mearth: f64) ->
         retained(cap_mearth),
     ];
     R_EARTH_M * candidates.iter().fold(0.0_f64, |a, &b| a.max(b))
+}
+
+/// THE DRAW LANE'S OWN UNITS — the three answers only this file can be asked for, because the
+/// functions that give them are private to the generator (`worldgen::tests` reads the module's
+/// re-exported surface and cannot see them).
+#[cfg(test)]
+mod generation_lane_tests {
+    use super::{
+        GALAXY, GalaxyType, GeneratedBody, PUSH_MAX_ATTEMPTS, Placement, RealmId, UNIVERSE,
+        UniverseConfig, child_of_held, galaxy_population, galaxy_profile, push_crowded_systems,
+    };
+    use glam::DVec3;
+    use vd_core::geometry::Boundary;
+
+    /// A galaxy so dense that its population overflows the count reports the largest count there is,
+    /// never a wrapped one.
+    ///
+    /// The population is the volume the galaxy encloses times the density it drew. Both come from the
+    /// seed, so no shipped world reaches this — but a count that wrapped would report a galaxy with
+    /// almost no stars in it, silently, and a player would fly into an empty sky. Saturating says
+    /// "more than can be counted" instead.
+    #[test]
+    fn a_galaxy_too_dense_to_count_saturates_rather_than_wrapping_to_an_empty_sky() {
+        let cfg = UniverseConfig::world(15.0, 0.05);
+        let shape = galaxy_profile(0, &cfg).shape;
+        assert_eq!(
+            galaxy_population(&cfg, GalaxyType::Spiral, &shape, f64::MAX),
+            u32::MAX,
+            "an uncountable galaxy states the largest count, not a wrapped one"
+        );
+    }
+
+    /// The ambient root is nobody's child, so a shard that holds the galaxy does not call the
+    /// universe one of its own children.
+    ///
+    /// The subtree filter asks this question of every body in the layer. The universe has no parent
+    /// at all — it is the one body in the world that is inside nothing — and the answer must be a
+    /// plain no rather than a lookup on a name that does not exist.
+    #[test]
+    fn the_ambient_root_is_the_child_of_no_realm_a_shard_can_hold() {
+        let root = GeneratedBody {
+            realm: UNIVERSE,
+            parent: None,
+            shape: Boundary::Shell { r: 1.0 },
+            placement: Placement::StaticOffset(DVec3::ZERO),
+            photometrics: None,
+            taxon: None,
+            look: None,
+        };
+        let held = std::collections::BTreeSet::from([GALAXY]);
+        assert!(
+            !child_of_held(&root, &held),
+            "the universe is inside nothing, so it is nobody's direct child"
+        );
+    }
+
+    /// A star the push can never free gives up after its stated number of tries, and still lands.
+    ///
+    /// The push moves a crowded star OUTWARD along its own direction, so a star drawn exactly at the
+    /// galactic centre has no direction to grow along: every attempt returns it to the same place. The
+    /// attempt cap is what stops that star from spinning the galaxy's build forever. It keeps its
+    /// place — a star is pushed, never dropped (ruling G12).
+    #[test]
+    fn a_star_the_push_can_never_free_stops_after_its_stated_number_of_tries() {
+        let cfg = UniverseConfig::world(15.0, 0.05);
+        let star = |seed: u64| GeneratedBody {
+            realm: RealmId::System(seed),
+            parent: Some(GALAXY),
+            // Two stars at the galactic centre: each one's own reach covers the other, and the push
+            // scales a zero offset, which is still zero.
+            shape: Boundary::Shell { r: 1.0e12 },
+            placement: Placement::StaticOffset(DVec3::ZERO),
+            photometrics: None,
+            taxon: None,
+            look: None,
+        };
+        let mut bodies = [star(11), star(22)];
+        push_crowded_systems(&mut bodies, &cfg);
+        assert_eq!(
+            bodies[1].placement,
+            Placement::StaticOffset(DVec3::ZERO),
+            "the star it could not free keeps its place after {PUSH_MAX_ATTEMPTS} tries"
+        );
+    }
 }

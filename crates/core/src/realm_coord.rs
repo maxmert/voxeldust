@@ -243,6 +243,23 @@ mod tests {
         assert_eq!(c.path().levels().len(), 3);
     }
 
+    /// ★ A COORD NAMES ITS WHOLE LINEAGE, root → leaf. A system inside a galaxy states the
+    /// universe, the galaxy and itself, in that order. A shard that spawns a realm reads this list
+    /// to learn which realms contain it, without asking anybody.
+    #[test]
+    fn lineage_realms_names_every_ancestor_root_to_leaf() {
+        let sys = system_in_galaxy(2, 7);
+        assert_eq!(
+            sys.lineage_realms(),
+            vec![RealmId::Universe, RealmId::Galaxy(2), RealmId::System(7)]
+        );
+        // A root-only coord names one realm: itself.
+        assert_eq!(
+            coord1(RealmKindTag::Galaxy, 5).lineage_realms(),
+            vec![RealmId::Galaxy(5)]
+        );
+    }
+
     #[test]
     fn realm_coord_postcard_roundtrips() {
         let c = system_in_galaxy(2, 7);

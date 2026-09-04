@@ -96,11 +96,33 @@ pub struct WindowLevel {
 }
 
 /// Fold the static roster into a level's rows. A realm the level already states WINS: a live row from
-/// the per-tick lane must never be shadowed by a stale static one.
-fn merge_static(rows: &mut Vec<RealmSnap>, statics: &[RealmSnap]) {
+/// the per-tick lane must never be shadowed by a stale static one. ★ A static row of a realm the
+/// shipped membership no longer names is NOT folded (2026-09-04, the eighth flight): the roster is
+/// send-on-change and lags the verdict by a beat, so a child that just left the range kept riding
+/// every level with its old stamp, and the composer refused it for its instant ~12 times a second.
+/// With no verdict shipped yet, every static row folds as before.
+///
+/// ★ A STATIC PLACEMENT IS TIME-INVARIANT (2026-09-04, the ninth flight, pinned by
+/// `a_static_row_composes_through_a_hop_at_a_later_tick`): the row is re-stamped at the LEVEL's
+/// tick. It used to keep the tick its roster was sent at, and a hop at any later tick refused it
+/// for its instant — so from inside a hull, a parent's static children (the star, a station) were
+/// composed only on the roster's own tick and the star was a point with no body over it.
+fn merge_static(
+    rows: &mut Vec<RealmSnap>,
+    statics: &[RealmSnap],
+    members: &BTreeSet<RealmId>,
+    at: UniverseTick,
+) {
     for s in statics {
-        if !rows.iter().any(|r| r.realm == s.realm) {
-            rows.push(*s);
+        let named = members.is_empty() | members.contains(&s.realm);
+        if named && !rows.iter().any(|r| r.realm == s.realm) {
+            rows.push(RealmSnap {
+                pose: StampedPose {
+                    universe_tick: at,
+                    ..s.pose
+                },
+                ..*s
+            });
         }
     }
 }
@@ -178,7 +200,7 @@ impl WindowIngest {
     pub fn ingest_frame(&mut self, mut level: WindowLevel, tuning: &WindowTuning) -> Ingested {
         // S10: re-unite the two lanes. A realm the frame already states WINS — a mover's live row must
         // never be shadowed by a stale static one, which is the only way the two sets can overlap.
-        merge_static(&mut level.rows, &self.static_rows);
+        merge_static(&mut level.rows, &self.static_rows, &self.members, level.at);
         let head = self.levels.back().map(|l| l.at);
         let Some(head) = head else {
             self.levels.push_back(level);
@@ -239,7 +261,8 @@ impl WindowIngest {
     pub fn ingest_static_rows(&mut self, rows: Vec<RealmSnap>) {
         self.static_rows = rows;
         for level in &mut self.levels {
-            merge_static(&mut level.rows, &self.static_rows);
+            let at = level.at;
+            merge_static(&mut level.rows, &self.static_rows, &self.members, at);
         }
     }
 
@@ -595,7 +618,6 @@ pub fn fresh_prefix(levels: &[&WindowIngest]) -> (usize, Option<UniverseTick>) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BodyTag {
     Look,
-    Marker,
     Placement,
 }
 
@@ -631,6 +653,11 @@ pub struct Composed {
     /// Rows refused by `FrameError::RotationBeyondExactReach` (a rotated frame past the
     /// millimetre rotation reach — R2, the P10 trigger; real-scale addendum §A4.6).
     pub rotated_refused: u64,
+    /// ★ FAR ROWS (owner 2026-09-04, "proceed with all"): rows the descent could not turn exactly
+    /// into the origin's frame ([`FrameError::RotationBeyondExactReach`]) and whose author's frame
+    /// is the SKY's — shipped in that frame instead, to be placed by the client from the sky anchor
+    /// exactly as the star cloud is. Counted here, never refused.
+    pub far_rows: u64,
     /// Rows refused by `FrameError::CrossTierCrossing` — a fold that could not re-state a distance in
     /// the unit it had to move to.
     ///
@@ -728,6 +755,32 @@ pub fn compose(
     prefix: usize,
     ingests: &[&WindowIngest],
 ) -> Composed {
+    compose_in(
+        origin,
+        origin_frame,
+        t,
+        authors,
+        levels,
+        prefix,
+        ingests,
+        None,
+    )
+}
+
+/// [`compose`] with the SKY's frame named: a row the descent cannot turn exactly, authored in that
+/// frame, rides as a FAR ROW in that frame ([`Composed::far_rows`]) instead of being refused.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn compose_in(
+    origin: RealmId,
+    origin_frame: FrameRef,
+    t: UniverseTick,
+    authors: &[RealmId],
+    levels: &[&WindowLevel],
+    prefix: usize,
+    ingests: &[&WindowIngest],
+    sky_frame: Option<FrameRef>,
+) -> Composed {
     let mut out = Composed {
         at: t,
         ..Composed::default()
@@ -779,6 +832,15 @@ pub fn compose(
             }
             let pose = match map_down(&row.pose, &frames, &books, k) {
                 Ok(pose) => pose,
+                // ★ THE FAR ROW: too far to turn exactly, and stated in the sky's own frame — it
+                // rides as stated, and the client places it from the sky anchor like a star.
+                // Example: a neighbouring star system two light-years out, seen from a hull
+                // turned thirty degrees off; its dot is exact in the galaxy's step, and the turn
+                // happens where the star field's already does.
+                Err(FrameError::RotationBeyondExactReach) if Some(frames[k]) == sky_frame => {
+                    out.far_rows += 1;
+                    row.pose
+                }
                 Err(e) => {
                     count_refusal(&mut out, e);
                     continue;
@@ -906,10 +968,23 @@ pub fn compose(
                 // descent through `and_then`, so a refusal at either stage lands on the same
                 // counted arm (the descent stage alone cannot fail until P10's rotated hops —
                 // its books are anchored identities at the fold's tick).
-                let mapped = transfer_frame(&pose_in, rframes[k], &hop_book)
-                    .and_then(|p| map_down(&p, &rframes, &rbooks, k));
-                let pose = match mapped {
+                // The hop transfer lifts the relayed row into the relaying author's frame (exact
+                // at the author's step); the chain descent then turns it down to the origin. A
+                // descent refused for rotation from the SKY's frame rides as a far row in that
+                // frame, like a direct row (2026-09-04).
+                let lifted = match transfer_frame(&pose_in, rframes[k], &hop_book) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        count_refusal(&mut out, e);
+                        continue;
+                    }
+                };
+                let pose = match map_down(&lifted, &rframes, &rbooks, k) {
                     Ok(pose) => pose,
+                    Err(FrameError::RotationBeyondExactReach) if Some(rframes[k]) == sky_frame => {
+                        out.far_rows += 1;
+                        lifted
+                    }
                     Err(e) => {
                         count_refusal(&mut out, e);
                         continue;
@@ -1046,13 +1121,12 @@ fn measure_agreement(out: &mut Composed, a: &StampedPose, b: &StampedPose) {
 }
 
 /// The presence gate (§2.6.5 step 6): a self-look from ANY chain window (only the realm itself
-/// can have shipped one — admission), else a parent's marker, else the bare placement.
+/// can have shipped one — admission), else the bare placement. ★ The parent's marker is no longer
+/// read (owner ruling 2026-09-02 R2, step 5, 2026-09-04): a realm nobody's look describes is
+/// tracked and not drawn.
 fn body_tag(realm: RealmId, ingests: &[&WindowIngest]) -> BodyTag {
     if ingests.iter().any(|i| i.look_of(realm).is_some()) {
         return BodyTag::Look;
-    }
-    if ingests.iter().any(|i| i.marker_of(realm).is_some()) {
-        return BodyTag::Marker;
     }
     BodyTag::Placement
 }
@@ -1075,9 +1149,9 @@ pub fn scene_bag(realm: RealmId, authors: &[RealmId], ingests: &[&WindowIngest])
     if member && let Some(look) = ingests.iter().find_map(|i| i.look_of(realm)) {
         return look.to_vec();
     }
-    if let Some(luma) = ingests.iter().find_map(|i| i.marker_of(realm)) {
-        return luma.to_vec();
-    }
+    // ★ No marker fallback (step 5, 2026-09-04): a realm that states no look is not drawn. A
+    // marker a shard still stated is stored, admitted and never read — the store is a tombstone
+    // that leaves with the wire arm's reservation.
     Vec::new()
 }
 
@@ -1169,6 +1243,27 @@ impl ShadowScene {
         fold: Option<Composed>,
         tuning: &WindowTuning,
     ) -> AdvanceReport {
+        self.advance_covering(origin, authors, fold, tuning, true)
+    }
+
+    /// [`advance`](Self::advance) told whether the chain COVERS the session's lineage. ★ THE
+    /// HAND-OVER'S GAP (2026-09-04, pinned by the gateway's
+    /// `a_hand_over_holds_the_departed_strata_until_the_new_hops_first_level_lands`): at a splice
+    /// the new hop's window is unconfirmed, so the chain shrinks to the hops below it and every
+    /// stratum the departed author drew was DROPPED — the planets vanished for the new window's
+    /// round trip. While the chain does not cover the lineage, a departed author's stratum stays
+    /// HELD at its last composed poses (the hold TTL still bounds it); the tick the chain is whole
+    /// again it leaves. Example: the hull is handed from System 7 to the galaxy; System 7's planets
+    /// keep drawing where they were until the galaxy's first level lands, then the galaxy's relay
+    /// of System 7's interior takes over.
+    pub fn advance_covering(
+        &mut self,
+        origin: RealmId,
+        authors: &[RealmId],
+        fold: Option<Composed>,
+        tuning: &WindowTuning,
+        covers_lineage: bool,
+    ) -> AdvanceReport {
         let mut report = AdvanceReport::default();
         if self.origin != Some(origin) {
             // A CROSSING: the picture's frame changed, so nothing previously composed is
@@ -1186,9 +1281,36 @@ impl ShadowScene {
             // the epoch still bumps (§2.7 — the composed level's shape changed), but every
             // already-composed row is still expressed in the SAME origin frame, so the ring
             // stays; only strata of departed authors leave the hold.
+            // A departed author's stratum leaves only when the chain is whole (see above); while
+            // it is not, the departed author's rows from the last fold become a held stratum.
+            if covers_lineage {
+                self.held.retain(|h| authors.contains(&h.author));
+            } else if let Some(prev) = self.ring.back() {
+                let departed: Vec<HeldStratum> = self
+                    .chain_authors
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, old)| {
+                        !authors.contains(old) && !self.held.iter().any(|h| h.author == **old)
+                    })
+                    .map(|(i, old)| HeldStratum {
+                        author: *old,
+                        rows: prev
+                            .rows
+                            .iter()
+                            .filter(|r| {
+                                (r.stratum == i)
+                                    & (r.parent.is_none_or(|p| p == *old) | (r.realm == *old))
+                            })
+                            .cloned()
+                            .collect(),
+                        held_since: prev.at,
+                    })
+                    .collect();
+                self.held.extend(departed);
+            }
             self.chain_authors = authors.to_vec();
             self.origin_epoch += 1;
-            self.held.retain(|h| authors.contains(&h.author));
             report.epoch_bumped = true;
         }
         let Some(fold) = fold else {
@@ -1217,17 +1339,23 @@ impl ShadowScene {
             authors
                 .iter()
                 .position(|a| *a == h.author)
-                .is_some_and(|i| i >= fresh)
+                .map_or(!covers_lineage, |i| i >= fresh)
         });
         if let Some(prev) = self.ring.back() {
             for (i, author) in authors.iter().enumerate().skip(fresh) {
                 if self.held.iter().any(|h| h.author == *author) {
                     continue;
                 }
+                // The author's OWN rows from the last fold: its children (their parent is the
+                // author) and its own body (the row named after it). Never another author's rows
+                // that happened to sit at this stratum before a splice re-numbered the chain.
                 let rows: Vec<ComposedRow> = prev
                     .rows
                     .iter()
-                    .filter(|r| r.stratum == i)
+                    .filter(|r| {
+                        (r.stratum == i)
+                            & (r.parent.is_none_or(|p| p == *author) | (r.realm == *author))
+                    })
                     .cloned()
                     .collect();
                 self.held.push(HeldStratum {
@@ -1464,6 +1592,73 @@ mod tests {
         );
     }
 
+    /// ★ ONE STAMP, MANY CHUNKS (2026-09-02). A window frame too wide for one datagram is sent as
+    /// several chunks at the SAME tick. The ring must fold them into one level: a realm a later
+    /// chunk re-states replaces the earlier statement, a realm only the later chunk names is added,
+    /// and the hop is taken from whichever chunk carries it.
+    ///
+    /// The pilot's hull holds two hundred stations. The parent ships them as three chunks at tick
+    /// 12, and only the last one carries where the hull sits in its parent. Lose that hop and the
+    /// whole level refuses to fold, so the pilot sees nothing.
+    #[test]
+    fn many_chunks_at_one_stamp_fold_into_one_level_and_the_hop_is_taken_from_whichever_carries_it()
+    {
+        let mut ingest = WindowIngest::default();
+        let t = tuning();
+        // Chunk one: no hop, one station.
+        assert_eq!(
+            ingest.ingest_frame(
+                level(
+                    T,
+                    None,
+                    vec![row(RealmId::Planet(7), planet(), sys(), DVec3::X, T)]
+                ),
+                &t
+            ),
+            Ingested::Applied
+        );
+        assert!(
+            ingest.level_at(T).expect("the level is held").hop.is_none(),
+            "the first chunk carried no hop"
+        );
+        // Chunk two: the hop, a newer statement of the same realm, and a realm not yet held.
+        let carried = hop(RealmId::System(7), DVec3::new(4.0, 0.0, 0.0), DVec3::ZERO);
+        assert_eq!(
+            ingest.ingest_frame(
+                level(
+                    T,
+                    Some(carried),
+                    vec![
+                        row(RealmId::Planet(7), planet(), sys(), DVec3::Y, T),
+                        row(RealmId::Planet(9), planet(), sys(), DVec3::Z, T),
+                    ]
+                ),
+                &t
+            ),
+            Ingested::Applied
+        );
+        let held = ingest.level_at(T).expect("the level is held");
+        assert_eq!(
+            held.hop.as_ref().map(|h| h.child),
+            Some(RealmId::System(7)),
+            "the hop is taken from the chunk that carried it"
+        );
+        assert_eq!(held.rows.len(), 2, "one replaced, one added");
+        assert_eq!(
+            held.rows
+                .iter()
+                .find(|r| r.realm == RealmId::Planet(7))
+                .expect("the re-stated realm")
+                .pose,
+            row(RealmId::Planet(7), planet(), sys(), DVec3::Y, T).pose,
+            "the later chunk's statement wins for a realm both name"
+        );
+        assert!(
+            held.rows.iter().any(|r| r.realm == RealmId::Planet(9)),
+            "and a realm only the later chunk names is added"
+        );
+    }
+
     /// The hop for a child sitting at `child_pos` in the author's frame, moving at `child_vel`:
     /// the authored placement itself (owner ruling 2026-09-02 R1 — nothing is pre-inverted).
     fn hop(child: RealmId, child_pos: DVec3, child_vel: DVec3) -> HopRow {
@@ -1581,8 +1776,8 @@ mod tests {
         assert_eq!(ingest.look_of(subject), None);
         assert_eq!(ingest.relayed_children().count(), 0);
         assert_eq!(ingest.marker_of(subject), Some(&[9u8][..]));
-        // And the presence gate now answers MARKER for the same realm it answered LOOK for.
-        assert_eq!(scene_bag(subject, &[subject], &[&ingest]), vec![9u8]);
+        // The stored marker is never read (step 5, 2026-09-04): the realm is tracked, not drawn.
+        assert_eq!(scene_bag(subject, &[subject], &[&ingest]), Vec::<u8>::new());
     }
 
     #[test]
@@ -2350,6 +2545,210 @@ mod tests {
         );
     }
 
+    /// ★ THE FAR ROW (2026-09-04): a sibling system beyond the FINE rotation reach, seen through a
+    /// turned hop, is REFUSED by the exact descent — and rides in the sky's frame when that frame
+    /// is named, as stated, counted as a far row, never refused.
+    #[test]
+    fn a_row_beyond_the_rotation_reach_rides_in_the_skys_frame_when_it_is_named() {
+        let galaxy_frame = FrameRef::GalaxySpace { galaxy_seed: 1 };
+        let spun = vd_core::frame::FramePlacement {
+            origin_cell: vd_core::glam::I64Vec3::new(1_000_000_000_000, 0, 0),
+            origin: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            orientation: DQuat::from_xyzw(0.0, 0.0, 1.0, 0.0),
+            angular_velocity: DVec3::ZERO,
+        };
+        // The sibling sits 5e15 galaxy cells (1e16 m) out: a lever no millimetre step can turn.
+        let far_row = RealmSnap {
+            realm: RealmId::System(9),
+            frame: FrameRef::SystemSpace { system_seed: 9 },
+            pose: StampedPose {
+                frame: galaxy_frame,
+                pos: vd_core::pose::LatticePos::at(
+                    vd_core::glam::I64Vec3::new(5_000_000_000_000_000, 0, 0),
+                    DVec3::ZERO,
+                ),
+                vel: DVec3::ZERO,
+                orient: DQuat::IDENTITY,
+                universe_tick: T,
+            },
+        };
+        let parent_level = level(
+            T,
+            Some(HopRow {
+                child: RealmId::System(7),
+                placement: spun,
+            }),
+            vec![far_row],
+        );
+        let fresh_leaf = level(T, None, vec![]);
+        let exact = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &[RealmId::System(7), GALAXY],
+            &[&fresh_leaf, &parent_level],
+            2,
+            &[],
+        );
+        assert_eq!((exact.rotated_refused, exact.far_rows), (1, 0));
+        assert!(exact.rows.iter().all(|r| r.realm != RealmId::System(9)));
+        let with_sky = compose_in(
+            RealmId::System(7),
+            sys(),
+            T,
+            &[RealmId::System(7), GALAXY],
+            &[&fresh_leaf, &parent_level],
+            2,
+            &[],
+            Some(galaxy_frame),
+        );
+        assert_eq!((with_sky.rotated_refused, with_sky.far_rows), (0, 1));
+        let far = with_sky
+            .rows
+            .iter()
+            .find(|r| r.realm == RealmId::System(9))
+            .expect("the far row rides");
+        assert_eq!(far.pose.frame, galaxy_frame, "stated in the sky's frame");
+        assert_eq!(far.pose.pos, far_row.pose.pos, "as the galaxy stated it");
+        // A different sky frame does not admit it: the row's author is not the sky.
+        let other_sky = compose_in(
+            RealmId::System(7),
+            sys(),
+            T,
+            &[RealmId::System(7), GALAXY],
+            &[&fresh_leaf, &parent_level],
+            2,
+            &[],
+            Some(FrameRef::GalaxySpace { galaxy_seed: 2 }),
+        );
+        assert_eq!((other_sky.rotated_refused, other_sky.far_rows), (1, 0));
+    }
+
+    /// ★ THE SAME FAR-ROW LAW ON THE RELAY LANE (2026-09-04). A neighbour system's own interior
+    /// reaches the gateway as a relayed statement. Lifted into the galaxy's frame it sits far past
+    /// the reach of an exact turn, so the descent into the hull's frame refuses.
+    ///
+    /// Three answers, one per arm. With no sky named the row is refused and counted rotated. With
+    /// the GALAXY named as the sky, the row rides in the galaxy's frame as a far row — the client
+    /// places it from the sky anchor, like a star. With ANOTHER galaxy named as the sky the guard
+    /// does not hold, and the row is refused again.
+    #[test]
+    fn a_relayed_row_beyond_the_rotation_reach_rides_in_the_skys_frame_when_it_is_named() {
+        let galaxy_frame = FrameRef::GalaxySpace { galaxy_seed: 1 };
+        let sibling = RealmId::System(9);
+        let sibling_frame = FrameRef::SystemSpace { system_seed: 9 };
+        let t = WindowTuning::derive(2);
+        let authors = vec![RealmId::System(7), GALAXY];
+        // The hull's own realm is turned half a circle a trillion galaxy cells out: a lever no
+        // millimetre step can turn exactly.
+        let spun = vd_core::frame::FramePlacement {
+            origin_cell: vd_core::glam::I64Vec3::new(1_000_000_000_000, 0, 0),
+            origin: DVec3::ZERO,
+            velocity: DVec3::ZERO,
+            orientation: DQuat::from_xyzw(0.0, 0.0, 1.0, 0.0),
+            angular_velocity: DVec3::ZERO,
+        };
+        // The neighbour system sits 5e15 galaxy cells out, as the galaxy authored it.
+        let sibling_row = RealmSnap {
+            realm: sibling,
+            frame: sibling_frame,
+            pose: StampedPose {
+                frame: galaxy_frame,
+                pos: vd_core::pose::LatticePos::at(
+                    vd_core::glam::I64Vec3::new(5_000_000_000_000_000, 0, 0),
+                    DVec3::ZERO,
+                ),
+                vel: DVec3::ZERO,
+                orient: DQuat::IDENTITY,
+                universe_tick: T,
+            },
+        };
+        let parent_level = level(
+            T,
+            Some(HopRow {
+                child: RealmId::System(7),
+                placement: spun,
+            }),
+            vec![sibling_row],
+        );
+        let leaf_level = level(T, None, vec![]);
+        // The neighbour's OWN interior, relayed verbatim in the neighbour's own frame.
+        let interior = vec![row(
+            RealmId::Planet(9),
+            FrameRef::PlanetCentered { planet_seed: 9 },
+            sibling_frame,
+            DVec3::new(40.0, 0.0, 0.0),
+            T,
+        )];
+        let mut leaf = WindowIngest::default();
+        assert_eq!(leaf.ingest_frame(leaf_level.clone(), &t), Ingested::Applied);
+        let mut parent = WindowIngest::default();
+        assert_eq!(
+            parent.ingest_frame(parent_level.clone(), &t),
+            Ingested::Applied
+        );
+        parent.ingest_membership(&[sibling], &[]);
+        assert!(parent.ingest_relay_level(sibling, T, interior, &t));
+        let ingests: Vec<&WindowIngest> = vec![&leaf, &parent];
+        let fold = |sky: Option<FrameRef>| {
+            compose_in(
+                RealmId::System(7),
+                sys(),
+                T,
+                &authors,
+                &[&leaf_level, &parent_level],
+                2,
+                &ingests,
+                sky,
+            )
+        };
+
+        // (a) No sky named: the relayed row is refused, and nothing of the neighbour is drawn.
+        let exact = fold(None);
+        assert_eq!(exact.relay_rows, 0, "the refused relay never composed");
+        assert!(
+            exact.rows.iter().all(|r| r.realm != RealmId::Planet(9)),
+            "and its realm is absent from the picture"
+        );
+
+        // (b) The galaxy IS the sky: the relayed row rides in the galaxy's frame, counted far.
+        let with_sky = fold(Some(galaxy_frame));
+        assert_eq!(with_sky.relay_rows, 1, "the far relayed row rides");
+        let far = with_sky
+            .rows
+            .iter()
+            .find(|r| r.realm == RealmId::Planet(9))
+            .expect("the far relayed row rides");
+        assert_eq!(far.pose.frame, galaxy_frame, "stated in the sky's frame");
+        assert_eq!(
+            far.parent,
+            Some(sibling),
+            "its parent is the relaying child"
+        );
+        // Two rows refuse without a sky — the neighbour's own placement and its relayed interior;
+        // both ride as far rows once the galaxy is named.
+        assert_eq!(
+            (exact.rotated_refused, exact.far_rows),
+            (2, 0),
+            "no sky: both refuse"
+        );
+        assert_eq!(
+            (with_sky.rotated_refused, with_sky.far_rows),
+            (0, 2),
+            "the galaxy named: both ride"
+        );
+
+        // (c) ANOTHER galaxy named as the sky: the guard does not hold, so the row is refused.
+        let other_sky = fold(Some(FrameRef::GalaxySpace { galaxy_seed: 2 }));
+        assert_eq!(other_sky.relay_rows, 0, "a foreign sky admits nothing");
+        assert_eq!(
+            (other_sky.rotated_refused, other_sky.far_rows),
+            (2, 0),
+            "it refuses exactly what the plain fold refuses"
+        );
+    }
+
     #[test]
     fn a_rotated_cross_rung_hop_folds_the_sibling_through_the_authors_own_step() {
         // THE GALAXY LEVEL, as the galaxy shard states it since the hop became the authored
@@ -2620,6 +3019,111 @@ mod tests {
         assert!(WindowIngest::default().roster_set().is_empty());
     }
 
+    /// ★ A STATIC ROW LEAVES WITH ITS CHILD (2026-09-04, the eighth flight): once a membership
+    /// verdict is held, a static roster row of a realm it does not name is not folded into a level.
+    /// Does a STATIC roster row, stamped at the tick its roster was sent, compose through a hop at a
+    /// LATER tick — or is it refused for its instant? (The ninth flight's `window_instant_mismatch`
+    /// rose ~10/s from the first hand-over; this pins which side the static rows are on.)
+    #[test]
+    fn a_static_row_composes_through_a_hop_at_a_later_tick() {
+        let t = tuning();
+        let mut parent = WindowIngest::default();
+        let t0 = UniverseTick(90);
+        parent.ingest_static_rows(vec![row(
+            RealmId::Planet(43),
+            planet(),
+            sys(),
+            DVec3::new(9.0, 0.0, 0.0),
+            t0,
+        )]);
+        let hop = HopRow {
+            child: RealmId::System(7),
+            placement: vd_core::frame::FramePlacement::moving(
+                DVec3::new(1.0, 0.0, 0.0),
+                DVec3::ZERO,
+            ),
+        };
+        assert_eq!(
+            parent.ingest_frame(level(T, Some(hop), vec![]), &t),
+            Ingested::Applied
+        );
+        let leaf = WindowIngest::default();
+        let mut leaf_ring = leaf;
+        assert_eq!(
+            leaf_ring.ingest_frame(level(T, None, vec![]), &t),
+            Ingested::Applied
+        );
+        let levels = [
+            leaf_ring.level_at(T).expect("leaf"),
+            parent.level_at(T).expect("parent"),
+        ];
+        let out = compose(
+            RealmId::System(7),
+            planet(),
+            T,
+            &[RealmId::System(7), RealmId::System(0)],
+            &levels,
+            2,
+            &[],
+        );
+        assert_eq!(
+            (
+                out.instant_refused,
+                out.rows
+                    .iter()
+                    .filter(|r| r.realm == RealmId::Planet(43))
+                    .count()
+            ),
+            (0, 1),
+            "a static row is time-invariant: it composes at every later tick, never refused"
+        );
+    }
+
+    #[test]
+    fn a_static_row_of_a_realm_the_membership_does_not_name_is_not_folded() {
+        let t = tuning();
+        let mut ing = WindowIngest::default();
+        let named = row(
+            RealmId::Planet(43),
+            planet(),
+            sys(),
+            DVec3::new(9.0, 0.0, 0.0),
+            T,
+        );
+        let gone = row(
+            RealmId::Planet(44),
+            planet(),
+            sys(),
+            DVec3::new(7.0, 0.0, 0.0),
+            T,
+        );
+        ing.ingest_static_rows(vec![named, gone]);
+        // No verdict yet: both fold.
+        assert_eq!(
+            ing.ingest_frame(level(T, None, vec![]), &t),
+            Ingested::Applied
+        );
+        assert_eq!(ing.level_at(T).expect("held").rows.len(), 2);
+        // The verdict names only the first: a later level carries only that one, and re-ingesting
+        // the roster re-folds the held level the same way.
+        ing.ingest_membership(&[RealmId::Planet(43)], &[]);
+        let later = UniverseTick(T.0 + 1);
+        assert_eq!(
+            ing.ingest_frame(level(later, None, vec![]), &t),
+            Ingested::Applied
+        );
+        let rows: Vec<RealmId> = ing
+            .level_at(later)
+            .expect("held")
+            .rows
+            .iter()
+            .map(|r| r.realm)
+            .collect();
+        assert_eq!(rows, vec![RealmId::Planet(43)]);
+        ing.ingest_static_rows(vec![named, gone]);
+        assert_eq!(ing.level_at(later).expect("held").rows.len(), 1);
+    }
+
     #[test]
     fn the_body_tag_is_a_presence_gate_never_a_flag() {
         let mut own = WindowIngest::default();
@@ -2627,7 +3131,8 @@ mod tests {
         assert!(own.ingest_body(RealmId::Planet(7), &BodyStmt::Marker { luma: vec![2] }, T));
         let ingests: Vec<&WindowIngest> = vec![&own];
         assert_eq!(body_tag(RealmId::System(7), &ingests), BodyTag::Look);
-        assert_eq!(body_tag(RealmId::Planet(7), &ingests), BodyTag::Marker);
+        // A marker is stored and never read (step 5): the child is a bare placement.
+        assert_eq!(body_tag(RealmId::Planet(7), &ingests), BodyTag::Placement);
         assert_eq!(body_tag(RealmId::Planet(9), &ingests), BodyTag::Placement);
     }
 
@@ -2849,13 +3354,13 @@ mod tests {
         let mut ingest = WindowIngest::default();
         // Neither statement: empty — the realm is tracked, never drawn.
         assert_eq!(scene_bag(realm, &[], &[&ingest]), Vec::<u8>::new());
-        // A marker alone ships regardless of membership (never filtered).
+        // A marker alone is stored and never read (step 5, 2026-09-04): still empty.
         assert!(ingest.ingest_body(realm, &BodyStmt::Marker { luma: vec![2] }, T));
-        assert_eq!(scene_bag(realm, &[], &[&ingest]), vec![2]);
-        // A look exists but the realm is NO member and NO chain author: the look is withheld —
-        // the marker still serves (§2.6.5 step 5: membership gates BODIES).
+        assert_eq!(scene_bag(realm, &[], &[&ingest]), Vec::<u8>::new());
+        // A look exists but the realm is NO member and NO chain author: the look is withheld and
+        // nothing serves in its place (§2.6.5 step 5: membership gates BODIES).
         assert!(ingest.ingest_body(realm, &BodyStmt::SelfLook { bag: vec![1] }, T));
-        assert_eq!(scene_bag(realm, &[], &[&ingest]), vec![2]);
+        assert_eq!(scene_bag(realm, &[], &[&ingest]), Vec::<u8>::new());
         // Membership admits the look…
         ingest.ingest_membership(&[realm], &[]);
         assert_eq!(scene_bag(realm, &[], &[&ingest]), vec![1]);
@@ -2867,8 +3372,8 @@ mod tests {
         // forward, so no verdict ever needed to cross.
         assert_eq!(
             scene_bag(realm, &[], &[&ingest]),
-            vec![2],
-            "no member, no author, no interior admission: the marker"
+            Vec::<u8>::new(),
+            "no member, no author, no interior admission: nothing (step 5: no marker floor)"
         );
         ingest.admit_interior(realm, T);
         assert_eq!(

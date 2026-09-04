@@ -514,6 +514,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a draw — such a child still states an extent-only point of light (look_horizon.md slice 1,
     // the presence floor), built by the sim through the one marker-bag codec.
     let child_luma = vd_bins::child_luma_from_draws(&regions, &held_realms, &boot_lit);
+    let child_light = child_luma.clone();
     *node.world_mut().resource_mut::<vd_sim::stub::ChildLuma>() =
         vd_sim::stub::ChildLuma(child_luma);
     // THE SHARD FOLDS NO SKY (S11, owner ruling 2026-08-27 — "we're passing the Galaxy just once over
@@ -532,6 +533,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // the containment fold stops walking every child for every occupant on every tick. Without this
         // line the index is empty and the fold is the full scan — correct, and O(occupants × children),
         // which a galaxy naming a hundred and fifty thousand star systems cannot pay.
+        // ★ THE REACH (2026-09-04): the children's light widens their bands and folds into this
+        // realm's own reach — unless this realm draws that light itself: the galaxy, whose star
+        // field the gateway ships once, lights every star system it holds. Stated BEFORE the own
+        // realm is named, so the reach refreshes once (naming the realm is the refresh).
+        .with_child_light(&child_light)
+        .with_lights_children(own_realm == vd_core::worldgen::GALAXY)
         .with_own_realm(own_realm);
     // ★THROWAWAY (test instrument, owner-ordered 2026-08-20): `VD_TEST_OVERDRIVE` multiplies the
     // CRUISE ceiling only, so a tester crosses the world quickly. It touches neither the world, the

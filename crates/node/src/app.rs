@@ -632,6 +632,11 @@ mod tests {
             inbound: Vec::new(),
         };
         let mut node = build_app(stub_cfg(A), transport);
+        assert_eq!(
+            node.transport.local_id(),
+            A,
+            "the transport serves THIS node: every ask below names the peer it misses, never itself"
+        );
         // Nobody has synced this node: the ask is withheld and counted, the frame still waits.
         node.world_mut().resource_mut::<OutboundBox>().0.push((
             STRANGER,

@@ -2626,6 +2626,12 @@ impl Transport for MeshTransport {
         // terminated learned lane, Stage 3) is a MISS — drop it + re-consult LearnedPeers so a re-learned peer
         // re-spawns instead of hitting the corpse. A booked lane never closes (its writer runs while this
         // MeshTransport holds the sender).
+        // A node never dials itself: its own id sits in the topology like any peer's, and the lazy
+        // dial below would otherwise open a lane to the local endpoint. Refused as a full queue —
+        // there is no lane to fill and no peer to ask about (the old answer, kept).
+        if to == self.local {
+            return Err(SendError::QueueFull(bytes));
+        }
         let live = self.lanes.get(&to).is_some_and(|l| !l.tx.is_closed());
         if !live {
             self.lanes.remove(&to);
@@ -3944,7 +3950,10 @@ mod tests {
         let err = nodes[0]
             .send(NodeId(99), MsgClass::Control, vec![7].into())
             .expect_err("not in the address book");
-        assert_eq!(err, SendError::QueueFull(vec![7].into()));
+        // Since the peer book (D-RLM-6 mechanism C, 2026-09-03) a destination with no lane and no
+        // address is refused as UNKNOWN — the frame is handed back so the node keeps it and asks
+        // the orchestrator where the peer listens — never as a full queue.
+        assert_eq!(err, SendError::UnknownPeer(vec![7].into()));
     }
 
     /// CA-1 reply-on-connection (Stage 1+2) — the headline gate. A does NOT book B; B books+dials A. Once B
@@ -4236,6 +4245,7 @@ mod tests {
         let err = nodes[0]
             .send(me, MsgClass::Control, vec![1].into())
             .expect_err("a node never dials itself");
+        // A node never dials itself, whatever the topology says about its own address.
         assert_eq!(err, SendError::QueueFull(vec![1].into()));
     }
 

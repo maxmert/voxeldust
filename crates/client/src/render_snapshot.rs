@@ -66,6 +66,8 @@ pub struct RenderSnapshot {
     /// as the gateway last stated it on the per-tick lane; `None` until the chain reaches the
     /// galaxy. The renderer places its one star cloud by it — nothing else moves the sky.
     sky_anchor: Option<vd_core::pose::StampedPose>,
+    /// The anchor's track, sampled at the render cursor (see `sky_anchor_at`).
+    sky_anchor_track: Option<crate::interp::EntityTrack>,
 }
 
 /// The sky, as the renderer receives it (S11): the rows, and the generation that identifies them.
@@ -289,6 +291,7 @@ impl RenderSnapshot {
             sky: None,
             origin: None,
             sky_anchor: None,
+            sky_anchor_track: None,
         }
     }
 
@@ -332,6 +335,44 @@ impl RenderSnapshot {
     pub fn with_sky_anchor(mut self, anchor: Option<vd_core::pose::StampedPose>) -> RenderSnapshot {
         self.sky_anchor = anchor;
         self
+    }
+
+    #[must_use]
+    pub fn with_sky_anchor_track(
+        mut self,
+        track: Option<crate::interp::EntityTrack>,
+    ) -> RenderSnapshot {
+        self.sky_anchor_track = track;
+        self
+    }
+
+    /// ★ THE ANCHOR AT THE RENDER CURSOR (owner 2026-09-04): the sky anchor sampled on its track at
+    /// `cursor` — the same instant `scene_at` draws the bodies from — so the star cloud and the
+    /// bodies turn together when the hull turns. With no track yet, the newest stated anchor.
+    #[must_use]
+    pub fn sky_anchor_at_cursor(&self, cursor: f64) -> Option<vd_core::pose::StampedPose> {
+        let newest = self.sky_anchor?;
+        let Some(track) = &self.sky_anchor_track else {
+            return Some(newest);
+        };
+        let sampled = track.sample(cursor);
+        Some(vd_core::pose::StampedPose {
+            frame: newest.frame,
+            pos: vd_core::pose::LatticePos::at(sampled.cell, sampled.pos),
+            vel: newest.vel,
+            orient: sampled.orient,
+            universe_tick: newest.universe_tick,
+        })
+    }
+
+    /// [`sky_anchor_at_cursor`](Self::sky_anchor_at_cursor) at the display cursor for `now_s` —
+    /// the twin of [`scene_now`](Self::scene_now). Before the clock has a cursor: the newest anchor.
+    #[must_use]
+    pub fn sky_anchor_now(&self, now_s: f64) -> Option<vd_core::pose::StampedPose> {
+        match self.cursor(now_s) {
+            Some(cursor) => self.sky_anchor_at_cursor(cursor),
+            None => self.sky_anchor,
+        }
     }
 
     /// The scene to DRAW at `cursor`: the boot geometry with every streamed realm's placement
@@ -1020,6 +1061,86 @@ mod slice6_tests {
         assert!(
             placed.with_origin(None).origin().is_none(),
             "and it can be cleared — a session between realms states none"
+        );
+    }
+
+    /// ★ THE SKY ANCHOR BEFORE THE HULL HAS TURNED TWICE. The gateway states the anchor with every
+    /// level, but the client builds a track only after the SECOND statement. Between the two, the
+    /// star cloud must still draw: the one stated anchor is the answer at every cursor.
+    ///
+    /// A session that just walked into a ship holds one anchor and no track. The sky must not
+    /// vanish for that one tick.
+    #[test]
+    fn the_newest_sky_anchor_answers_at_any_cursor_while_no_track_exists_yet() {
+        let bare = RenderSnapshot::new(
+            DeliveredView::default(),
+            RenderClock::new(ClientInterpTuning::DEFAULT),
+            ClientPhase::Active,
+        );
+        assert_eq!(bare.sky_anchor_at_cursor(3.0), None, "no anchor stated yet");
+
+        let anchor = StampedPose::at_rest(
+            FrameRef::GalaxySpace { galaxy_seed: 1 },
+            DVec3::new(5.0, 0.0, 0.0),
+            UniverseTick(10),
+        );
+        let stated = bare.with_sky_anchor(Some(anchor));
+        assert_eq!(stated.sky_anchor(), Some(anchor));
+        assert_eq!(
+            stated.sky_anchor_at_cursor(3.0),
+            Some(anchor),
+            "one statement, no track: the stated anchor, whatever the cursor"
+        );
+    }
+
+    /// ★ THE SKY AND THE BODIES READ ONE INSTANT. `sky_anchor_now` is the twin of `scene_now`: it
+    /// turns wall-time into the display cursor and samples the anchor there. Before the first level
+    /// anchors the clock there is no cursor, and the newest stated anchor is the answer.
+    ///
+    /// The renderer calls this every drawn frame. A hull that turns must turn its star cloud with
+    /// it, so the anchor must be read at the same instant the ship's own box is read at.
+    #[test]
+    fn the_sky_anchor_at_wall_time_uses_the_display_cursor_and_falls_back_before_one_exists() {
+        let anchor = StampedPose::at_rest(
+            FrameRef::GalaxySpace { galaxy_seed: 1 },
+            DVec3::new(5.0, 0.0, 0.0),
+            UniverseTick(10),
+        );
+        // No clock anchor yet ⇒ no cursor ⇒ the newest statement, unsampled.
+        let unanchored = RenderSnapshot::new(
+            DeliveredView::default(),
+            RenderClock::new(ClientInterpTuning::DEFAULT),
+            ClientPhase::Active,
+        )
+        .with_sky_anchor(Some(anchor));
+        assert_eq!(unanchored.cursor(0.0), None, "the clock is not anchored");
+        assert_eq!(unanchored.sky_anchor_now(0.0), Some(anchor));
+
+        // A clock anchored on tick 10, plus a track over two statements: the cursor decides.
+        let mut clock = RenderClock::new(ClientInterpTuning::DEFAULT);
+        clock.observe(UniverseTick(10), 0.0);
+        let mut track = crate::interp::EntityTrack::new(anchor);
+        let later = StampedPose::at_rest(
+            FrameRef::GalaxySpace { galaxy_seed: 1 },
+            DVec3::new(9.0, 0.0, 0.0),
+            UniverseTick(12),
+        );
+        track.observe(later);
+        let running = RenderSnapshot::new(DeliveredView::default(), clock, ClientPhase::Active)
+            .with_sky_anchor(Some(later))
+            .with_sky_anchor_track(Some(track));
+        let cursor = running.cursor(0.0).expect("the clock is anchored");
+        assert_eq!(
+            running.sky_anchor_now(0.0),
+            running.sky_anchor_at_cursor(cursor),
+            "wall-time and the cursor it maps to name the same anchor"
+        );
+        let drawn = running.sky_anchor_now(0.0).expect("an anchor");
+        assert_eq!(drawn.frame, FrameRef::GalaxySpace { galaxy_seed: 1 });
+        assert_eq!(
+            drawn.universe_tick,
+            UniverseTick(12),
+            "the stamp stays the newest statement's"
         );
     }
 }

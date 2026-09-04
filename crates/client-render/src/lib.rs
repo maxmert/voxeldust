@@ -1298,7 +1298,10 @@ fn sync_star_sky(
     }
 
     let snap = net.snapshot.load();
-    let Some((sky, anchor)) = snap.sky().zip(snap.sky_anchor()) else {
+    // ★ The anchor at the SAME render cursor the bodies are drawn from (owner 2026-09-04): the sky
+    // and the bodies turn together when the hull turns.
+    let now_s = net.started_at.elapsed().as_secs_f64();
+    let Some((sky, anchor)) = snap.sky().zip(snap.sky_anchor_now(now_s)) else {
         // No whole sky held, or the observer chain has not reached the galaxy yet: nothing is
         // drawn — never a wrong sky — and the instrument says so.
         if let Some(entity) = drawn.cloud.take() {
@@ -1426,11 +1429,26 @@ fn sync_realm_boxes(
         // ★ SLICE S4 — the box reduces against the eye ON THE LATTICE too, for the same reason: a
         // realm's drawn centre and the eye are both distances from the frame origin, and flattening
         // each before subtracting rounds them independently.
-        let draw_center = match render_eye.eye_lattice {
-            Some((eye, tier)) => {
+        // ★ A FAR ROW (2026-09-04): a box stated in a frame other than the one this session stands
+        // in is a far realm the composer could not turn exactly — it rides in the sky's frame, and
+        // it is placed from the sky anchor exactly as the star cloud is (one transform, f64,
+        // narrowed once). Without an anchor it cannot be placed and is left where it was.
+        let far = |anchor: &vd_core::pose::StampedPose| {
+            let (translation, rotation) = vd_client::render_snapshot::sky_cloud_transform(
+                rbox.center.cell(),
+                anchor,
+                render_eye.eye,
+            );
+            translation + rotation * rbox.center.offset()
+        };
+        let draw_center = match (render_eye.eye_lattice, snap.sky_anchor_now(now_s)) {
+            (Some((_, tier)), Some(anchor)) if rbox.tier != tier => far(&anchor),
+            (Some((eye, tier)), _) => {
                 vd_client_harness::camera::eye_relative_lattice(rbox.center, eye, tier)
             }
-            None => vd_client_harness::camera::eye_relative(rbox.draw_center(), render_eye.eye),
+            (None, _) => {
+                vd_client_harness::camera::eye_relative(rbox.draw_center(), render_eye.eye)
+            }
         };
         // Lower to render primitives (VERTICES) at that drawn centre — no shape branch here. THE
         // DRAW LAW's two arms are the two lawful AUTHORS, decided by the row's bag upstream in
@@ -1556,7 +1574,7 @@ fn spawn_body(
     boxes: &mut RealmBoxEntities,
 ) {
     let spawned = match rbox.body {
-        BodyKind::Look => spawn_realm_box(prims, meshes, materials, commands),
+        BodyKind::Look => spawn_realm_box(prims, rbox.luma.is_some(), meshes, materials, commands),
         BodyKind::Marker => spawn_marker(prims, rbox, markers, commands),
     };
     if let Some(entity) = spawned {
@@ -1666,8 +1684,17 @@ fn frame_scene_camera(
 /// through the near wall (honest translucency) plus every child box beyond it. An
 /// earlier build back-face-culled these so a container you entered vanished from inside; that culling
 /// was the bug the user hit, not a feature. Returns `None` if the box lowered to no prim (defensive).
+///
+/// ★ A BODY THAT STATES ITS OWN LIGHT IS OPAQUE (2026-09-04, the tenth flight: the owner saw the
+/// star field's point through the star's own body). A container is a translucent volume because
+/// you stand inside it and must see out; a glowing body has no interior to see through, and its
+/// depth must hide the point of light the sky draws for it (owner ruling 2026-09-02 R1: the body
+/// draws on top of its own point). Decided by data presence — the self-look carries `TAG_LUMA` —
+/// never by kind. Example: the star of System 7 draws as a solid disc and its sky point is behind
+/// it; System 7's own shell around the pilot stays translucent.
 fn spawn_realm_box(
     prims: &[MeshPrim],
+    lit: bool,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     commands: &mut Commands,
@@ -1675,9 +1702,14 @@ fn spawn_realm_box(
     let prim = prims.first()?;
     let mesh = meshes.add(mesh_from_prim(prim));
     let [r, g, b, a] = prim.color_rgba;
+    let (alpha, alpha_mode) = if lit {
+        (1.0, AlphaMode::Opaque)
+    } else {
+        (a, AlphaMode::Blend)
+    };
     let material = materials.add(StandardMaterial {
-        base_color: Color::srgba(r, g, b, a),
-        alpha_mode: AlphaMode::Blend,
+        base_color: Color::srgba(r, g, b, alpha),
+        alpha_mode,
         cull_mode: None,
         unlit: true,
         ..default()

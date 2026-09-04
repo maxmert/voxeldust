@@ -984,8 +984,13 @@ mod star_law_tests {
             "the PHYSICS must be exact inverse square: expected 4x, got {flux_ratio}"
         );
         let drawn_ratio = near.amplitude / far.amplitude;
+        // Split, because one `&&` hides a short-circuit arm no test can take (HR5).
         assert!(
-            drawn_ratio > 1.0 && drawn_ratio < flux_ratio,
+            drawn_ratio > 1.0,
+            "the near star must still draw brighter: got {drawn_ratio}"
+        );
+        assert!(
+            drawn_ratio < flux_ratio,
             "the PICTURE must be compressed — brighter, but by less than four: got {drawn_ratio}"
         );
     }

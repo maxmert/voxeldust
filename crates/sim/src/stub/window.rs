@@ -407,11 +407,11 @@ pub(crate) fn emit_window_rosters(
     let movers: BTreeSet<RealmId> = regions.moving_children_of(config.realm, &driven);
     for ((gateway, window), held) in &mut windows.0 {
         let admitted = window_admitted(&regions, held, &movers);
-        for (subject, stmt) in current_bodies(&config, &regions, &child_luma.0, admitted.as_ref()) {
-            let bag = match &stmt {
-                BodyStmt::SelfLook { bag } => bag,
-                BodyStmt::Marker { luma } => luma,
-            };
+        for (subject, stmt) in current_bodies(&config, &regions, &child_luma.0) {
+            // One bag either way: a realm's own look or a parent-authored marker. The marker arm is
+            // no longer built here (`current_bodies` states looks alone since the marker's deletion,
+            // 2026-09-04); the pattern keeps the lane honest if the wire ever carries one again.
+            let (BodyStmt::SelfLook { bag } | BodyStmt::Marker { luma: bag }) = &stmt;
             let digest = crate::stub::relay::statement_digest(bag);
             if held.sent_bodies.get(&subject) == Some(&digest) {
                 continue; // unchanged — send-on-change holds its tongue
@@ -478,7 +478,6 @@ pub(crate) fn current_bodies(
     config: &StubConfig,
     regions: &RealmRegions,
     child_luma: &BTreeMap<RealmId, (u8, f64)>,
-    admitted: Option<&BTreeSet<RealmId>>,
 ) -> Vec<(RealmId, BodyStmt)> {
     let mut bodies: Vec<(RealmId, BodyStmt)> = Vec::new();
     // THE BOUND/LOOK SPLIT (real-scale design §3.0): what a realm STATES about its appearance
@@ -496,34 +495,12 @@ pub(crate) fn current_bodies(
             },
         ));
     }
-    // The markers: over the admitted set when there is one (each a lookup), else every direct
-    // child — the roster walk only when nothing is out of range.
-    let mut marker = |region: &vd_core::geometry::RealmRegion| {
-        let Some(look) = region.look else { return };
-        bodies.push((
-            region.realm,
-            BodyStmt::Marker {
-                luma: vd_core::look::marker_bag(
-                    child_luma.get(&region.realm).copied(),
-                    look.circumscribed_extent(),
-                ),
-            },
-        ));
-    };
-    match admitted {
-        Some(set) => {
-            for realm in set {
-                if let Some(region) = regions.direct_child(config.realm, *realm) {
-                    marker(region);
-                }
-            }
-        }
-        None => {
-            for region in regions.direct_children(config.realm) {
-                marker(region);
-            }
-        }
-    }
+    // ★ A PARENT POSITIONS ITS CHILDREN AND NEVER DRAWS THEM (owner ruling 2026-09-02 R2, step 5,
+    // deleted 2026-09-04 after step 4 — the reach — landed): the one point-of-light marker per
+    // direct child this loop used to state is gone. A child in reach runs and draws itself; a child
+    // out of reach is drawn by nobody. The galaxy's star field is the one exception and it is the
+    // galaxy's OWN look, shipped once by the gateway. Example: System 7 states its own shell here
+    // and nothing about its planets; a planet the pilot can see is awake and states its own.
     bodies
 }
 
@@ -647,7 +624,7 @@ pub(crate) fn emit_realm_frames(
             Some(set) => regions.snaps_for(config.realm, head, set.iter().copied()),
             None => regions.authored_realm_snaps(config.realm, head),
         };
-        let mut bodies = current_bodies(&config, &regions, &child_luma.0, relay_admitted.as_ref());
+        let mut bodies = current_bodies(&config, &regions, &child_luma.0);
         // ★ A BODY RIDES ONLY BESIDE ITS ROW (2026-09-04, the sixth flight): the gateway vouches a
         // relayed body against THIS relay's own level, so a child the rows do not carry yet — a
         // hull adopted this tick, whose placement the book states next tick — must not be named by

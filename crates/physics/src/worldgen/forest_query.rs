@@ -686,8 +686,7 @@ mod built_boot_tests {
         );
         assert!(
             ship.aoi.spin_up_r_m() > 0.0,
-            "it wakes by the same rule as everything else: {}",
-            ship.aoi.spin_up_r_m()
+            "it wakes by the same rule as everything else"
         );
         assert!(
             ship.aoi.tear_down_r_m() > ship.aoi.spin_up_r_m(),

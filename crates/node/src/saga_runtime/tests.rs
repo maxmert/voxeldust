@@ -5116,3 +5116,85 @@ fn an_exterior_request_with_no_destination_head_or_no_subject_is_counted() {
     assert_eq!(rig.live(), 1);
     assert_eq!(rig.count(SagaRuntimeRes::exterior_crossings_started), 1);
 }
+
+/// Drive an already-started durable saga from its `PrepareSubscribe` to the in-process commit: the
+/// gateway prepares, cuts and freezes, then the source flushes its pose and the CAS wins.
+fn walk_to_commit(rig: &mut Rig) {
+    rig.settle();
+    rig.ack(TransferControlAck::Prepared {
+        transfer: XFER,
+        result: PrepareResult::Ready,
+    });
+    rig.ack(TransferControlAck::CutConfirmed {
+        transfer: XFER,
+        marker_seq: 42,
+    });
+    rig.ack(TransferControlAck::SourceFrozen {
+        transfer: XFER,
+        drained_seq: 42,
+    });
+    rig.flush();
+}
+
+#[test]
+fn a_hulls_exterior_key_on_an_ordinary_crossing_ships_the_destination_no_envelope() {
+    // A hull's exterior key names WHO AUTHORS THE HULL'S PLACEMENT — its parent. It never names an
+    // occupant a destination shard could adopt. Only an exterior saga may name the hull by that key,
+    // and the envelope builder says so: it takes the entity out of a `Ship` key for an EXTERIOR saga
+    // and for nothing else.
+    //
+    // Example: System 7 hands the hull's exterior over on an ORDINARY occupant crossing. The
+    // authority still moves to System 8's shard, because that is what the CAS does. But no crossing
+    // envelope goes down the lane, because there is no occupant on the other end to receive it.
+    let mut rig = Rig::new();
+    rig.grant_key(hull_key(), AuthorityRef::Shard(SOURCE), Fence(1));
+    rig.trigger(SagaCtx {
+        subject: hull_key(),
+        ..ctx(DurabilityClass::Durable, Fence(1))
+    });
+    let _ = rig.drain_dest();
+    walk_to_commit(&mut rig);
+    let head = rig
+        .orch
+        .world_mut()
+        .resource::<DirectoryRes>()
+        .0
+        .head(hull_key())
+        .expect("the exterior is recorded");
+    assert_eq!(head.authority, AuthorityRef::Shard(DEST));
+    assert_eq!(head.fence, Fence(1).next());
+    assert_eq!(
+        rig.drain_dest(),
+        vec![],
+        "no envelope: the exterior key names no occupant the destination could adopt"
+    );
+}
+
+#[test]
+fn a_committed_exterior_saga_over_an_occupant_key_leaves_the_reconciler_no_note() {
+    // The reparent note is taken for the ONE key that can name a hull's parent, and for no other. An
+    // exterior saga whose subject is an OCCUPANT commits like any other hand-over, but no realm moved
+    // house, so the reconciler is told nothing and re-keys no cell.
+    //
+    // Example: a player's key rides the exterior lane from System 7 to System 8. The player arrives.
+    // No hull changed parent, so the reconciler's account of moves stays at zero.
+    let mut rig = Rig::new();
+    rig.grant_subject(Fence(1));
+    rig.trigger(SagaCtx {
+        exterior: true,
+        ..ctx(DurabilityClass::Durable, Fence(1))
+    });
+    walk_to_commit(&mut rig);
+    assert_eq!(rig.subject_head().authority, AuthorityRef::Shard(DEST));
+    assert!(
+        rig.orch
+            .world_mut()
+            .resource::<SagaRuntimeRes>()
+            .pending_reparents
+            .is_empty(),
+        "an occupant is not a realm: no note is taken"
+    );
+    let rlm = rig.orch.world_mut();
+    let rlm = rlm.resource::<crate::rlm_runtime::RlmReconcilerRes>();
+    assert_eq!((rlm.reparents_applied, rlm.reparents_unresolved), (0, 0));
+}

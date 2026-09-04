@@ -574,13 +574,12 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
     /// ports and its cookie stay: the process did not move, only its place in the tree.
     fn addr_of(&self, node: NodeId) -> Option<([u8; 16], u16)> {
         let g = self.lock();
-        g.live.get(&node).map(|slot| {
-            let ip = match slot.addr.ip() {
-                std::net::IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
-                std::net::IpAddr::V6(v6) => v6.octets(),
-            };
-            (ip, slot.addr.port())
-        })
+        // Every live slot hangs off the ONE configured bind host, and that host is an `Ipv4Addr` by
+        // TYPE (`SpawnTuning::bind_host`): the spawn, the rehydrate and the reparent all build a
+        // slot's address from it. So the sixteen octets are always the IPv4-mapped form, and a match
+        // on the slot's address family would leave an arm no input can reach (HR5).
+        let ip = g.bind_host.to_ipv6_mapped().octets();
+        g.live.get(&node).map(|slot| (ip, slot.addr.port()))
     }
 
     fn reparent_realm(&self, node: NodeId, coord: &RealmCoord) -> Result<(), SpawnError> {
@@ -1051,6 +1050,40 @@ mod tests {
             sc.live_slots().get(&node).map(LiveSlot::coord),
             Some(&system(1, 2)),
             "the restart re-adopts the realm under its new parent"
+        );
+    }
+
+    #[test]
+    fn a_reparent_with_no_readable_launch_record_is_refused_and_the_slot_stays_put() {
+        // The launch intent is the ONE record that tells a restarted orchestrator which parent to
+        // re-adopt a realm under. The kernel rewrites that record as part of the move, so if the
+        // record is gone the move is refused: a live slot that says one parent and a launch record
+        // that says another is exactly the split the ruler switch exists to prevent.
+        //
+        // Example: the hull's shard runs at node 1000 under System 1, its launch record was reaped,
+        // and System 1 asks for the hull to move to System 2. The kernel says the record cannot be
+        // rewritten, and the slot still names System 1.
+        let store = MemStore::new();
+        let mut retained = store.clone();
+        let sc = SpawnCore::new(
+            Box::new(store),
+            FakeBackend::default(),
+            tuning(1_000, 42_000),
+            Vec::new(),
+        );
+        let node = sc.spawn_realm(&system(1, 1), T).expect("spawn");
+        retained.delete(&rlm_launch_store_key(node));
+        retained.commit();
+        assert_eq!(
+            sc.reparent_realm(node, &system(1, 2)),
+            Err(SpawnError::LaunchFailed {
+                reason: "no readable launch intent to rewrite".into()
+            })
+        );
+        assert_eq!(
+            sc.live_slots()[&node].coord(),
+            &system(1, 1),
+            "the live slot still names the old parent"
         );
     }
 

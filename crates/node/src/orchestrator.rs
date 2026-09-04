@@ -610,39 +610,81 @@ mod tests {
                 .expect("encode"),
             )
         };
+        // A fixture guard. This spawner LAUNCHES nothing and KILLS nothing, so the address below can
+        // only have come from its launch ledger — never from a realm started during this tick.
+        let ledger = OneLaunched(NodeId(1_007));
+        assert_eq!(
+            ledger.live_nodes(),
+            std::collections::BTreeSet::from([NodeId(1_007)])
+        );
+        assert_eq!(ledger.kill_realm(NodeId(1_007)), Ok(()));
+        assert_eq!(
+            ledger.spawn_realm(&one_system(), UniverseTick(3)),
+            Err(vd_sim::io::SpawnError::LaunchFailed {
+                reason: "a fixture spawner launches nothing".into()
+            })
+        );
         asker
             .send(ORCH, MsgClass::Membership, ask(NodeId(1_007)))
             .expect("sent");
         asker
             .send(ORCH, MsgClass::Membership, ask(NodeId(2_222)))
             .expect("sent");
+        // The Membership class carries more than the peer book's asks. A clock sync riding the same
+        // class is skipped in silence — it is not a question this serves.
+        asker
+            .send(
+                ORCH,
+                MsgClass::Membership,
+                vd_sim::io::bytes(
+                    postcard::to_allocvec(&InterShardFlow::Directory(DirectoryOp::ClockSync {
+                        universe_tick: UniverseTick(3),
+                        epoch: EpochId(7),
+                    }))
+                    .expect("encode"),
+                ),
+            )
+            .expect("sent");
         hub.pump();
         let _ = orch.step_tick();
         hub.pump();
-        let answers: Vec<vd_wire::intershard::PeerLocated> = asker
-            .drain_inbound()
-            .into_iter()
-            .filter_map(|m| match m {
-                Inbound::Wire {
-                    class: MsgClass::Membership,
-                    bytes,
-                    ..
-                } => match postcard::from_bytes::<InterShardFlow>(&bytes) {
-                    Ok(InterShardFlow::PeerLocated(a)) => Some(a),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect();
-        assert_eq!(answers.len(), 1, "one answer, for the launched node only");
-        assert_eq!(answers[0].node, NodeId(1_007));
-        assert_eq!(answers[0].ip[12..], [10, 0, 0, 5]);
-        assert_eq!(answers[0].port, 7_600);
+        let at = orch.world_mut().resource::<ClockSample>().universe_tick;
+        // Full-value equality, no destructuring (the codebase convention): ONE answer reaches the
+        // asker, for the launched node only — nothing for the stranger, nothing for the clock sync.
+        assert_eq!(
+            asker.drain_inbound(),
+            vec![Inbound::Wire {
+                from: ORCH,
+                class: MsgClass::Membership,
+                bytes: vd_sim::io::bytes(
+                    postcard::to_allocvec(&InterShardFlow::PeerLocated(
+                        vd_wire::intershard::PeerLocated {
+                            node: NodeId(1_007),
+                            ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 5],
+                            port: 7_600,
+                            at,
+                        }
+                    ))
+                    .expect("encode"),
+                ),
+            }]
+        );
         let stats = orch.world_mut().resource::<OrchestratorStats>();
         assert_eq!(
             (stats.peer_locates_answered, stats.peer_locates_unknown),
             (1, 1)
         );
+    }
+
+    /// A one-level lineage — the shape a spawner is asked to launch.
+    fn one_system() -> vd_core::realm_coord::RealmCoord {
+        vd_core::realm_coord::RealmCoord::from_path(vd_core::realm_path::RealmPath::from_levels(
+            vec![vd_core::realm_path::RealmLevel::new(
+                vd_core::realm_path::RealmKindTag::System,
+                7,
+            )],
+        ))
+        .expect("a one-level lineage has a leaf")
     }
 
     #[test]

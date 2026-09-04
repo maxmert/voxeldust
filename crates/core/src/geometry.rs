@@ -1137,6 +1137,14 @@ pub fn visibility_factor(theta_rad: f64) -> f64 {
     1.0 / (theta_rad / 2.0).tan()
 }
 
+/// ★ THE DOT ANGLE — the minimum angular size at which a body of finite extent is still a dot worth
+/// waking for: 1.5 degrees, in radians. It lived in `vd-physics`' scale module while the world solve
+/// was its only reader; the reach (owner ruling 2026-09-02 R3, built 2026-09-04) makes every realm a
+/// reader — a realm states its own reach by size as `extent · cot(θ/2)` with THIS θ, and the world
+/// solve sizes its shells with the same one, so the two can never disagree. A single knob, and its
+/// cost is stated where it was: every wake radius scales with it.
+pub const VISIBILITY_THETA_MIN_RAD: f64 = 0.026_180;
+
 /// The visibility REACH of a body of extent `extent_m` under minimum angle `theta_rad`: the
 /// distance out to which it is still visible — `extent · cot(θ/2)`, the same formula's other
 /// spelling ([`visibility_factor`]).
@@ -1206,6 +1214,26 @@ impl AoiConfig {
             spin_up_r_m: 0.0,
             tear_down_r_m: 0.0,
             grace_ticks: 0,
+        }
+    }
+
+    /// ★ THE SAME BAND AT A NEW INNER RADIUS (the reach, 2026-09-04): a child that states its reach
+    /// re-bands at that reach without a rebuild. The tear-down keeps the WIDER of its old ratio to the
+    /// spin-up and its old gap above it, so a band that was velocity-safe stays velocity-safe. An inert
+    /// band stays inert (walk scale never wakes anything), and a non-positive reach changes nothing.
+    /// Example: a planet's boot band was 2 million km in, 4 million km out; it states a reach of
+    /// 5 million km; its band is now 5 million km in, 10 million km out.
+    #[must_use]
+    pub fn with_spin_up(self, spin_up_r_m: f64) -> AoiConfig {
+        if (self.spin_up_r_m <= 0.0) | (spin_up_r_m <= 0.0) {
+            return self;
+        }
+        let ratio = self.tear_down_r_m / self.spin_up_r_m;
+        let gap = self.tear_down_r_m - self.spin_up_r_m;
+        AoiConfig {
+            spin_up_r_m,
+            tear_down_r_m: f64::max(spin_up_r_m * ratio, spin_up_r_m + gap),
+            grace_ticks: self.grace_ticks,
         }
     }
 
@@ -2922,6 +2950,32 @@ mod tests {
     }
 
     // ----- THE ONE visibility formula (look_horizon.md §3.3.2, slice 2) -----
+
+    #[test]
+    fn a_band_re_banded_at_a_stated_reach_keeps_its_ratio_or_its_gap_and_an_inert_band_stays_inert()
+    {
+        // Boot band: 2 000 in, 4 000 out (ratio 2, gap 2 000).
+        let boot =
+            AoiConfig::for_velocity_safe(1_000.0, 2.0, 4.0, 0.0, 0.05, 3, 0.0).expect("live");
+        // A wider reach: the ratio wins (10 000 → 20 000 out; the gap alone would give 12 000).
+        let wide = boot.with_spin_up(10_000.0);
+        assert_eq!(
+            (wide.spin_up_r_m(), wide.tear_down_r_m()),
+            (10_000.0, 20_000.0)
+        );
+        assert_eq!(wide.grace_ticks(), 3);
+        // A narrower reach: the gap wins (500 → 2 500 out; the ratio alone would give 1 000).
+        let narrow = boot.with_spin_up(500.0);
+        assert_eq!(
+            (narrow.spin_up_r_m(), narrow.tear_down_r_m()),
+            (500.0, 2_500.0)
+        );
+        // A non-positive reach changes nothing; an inert band stays inert.
+        assert_eq!(boot.with_spin_up(0.0), boot);
+        assert_eq!(AoiConfig::inert().with_spin_up(5_000.0), AoiConfig::inert());
+        // The dot angle is the one the world solve and the reach share.
+        assert!((VISIBILITY_THETA_MIN_RAD - 1.5_f64.to_radians()).abs() < 1e-5);
+    }
 
     #[test]
     fn the_visibility_formula_is_cot_half_theta_and_the_reach_is_its_other_spelling() {

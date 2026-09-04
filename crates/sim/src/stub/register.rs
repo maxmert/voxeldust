@@ -113,6 +113,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // through walk/canonical scale (inert AoI ⇒ no demand ⇒ never touched).
     world.insert_resource(AoiMembership::default());
     world.insert_resource(crate::stub::aoi::AoiQueryMemo::default());
+    world.insert_resource(crate::stub::reach::StatedReach::default());
     world.insert_resource(ParentRealmNode::default());
     world.insert_resource(ChildRealmNodes::default());
     world.insert_resource(WasOccupied::default());
@@ -179,6 +180,8 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
             // reason: at the head it would always send yesterday's stick, adding a tick of lag to every
             // control input for no gain.
             crate::stub::drive::emit_own_drive.run_if(has_synced),
+            // ★ THE REACH (2026-09-04): this realm's own reach, upward, when it changed.
+            crate::stub::reach::emit_own_reach.run_if(has_synced),
             // RLM 5f RG-1: the reactive greeting — UNGATED (fires pre-sync/pre-lease, reachability precedes
             // authority) and after `process_inbound` so THIS tick's inbound counts as contact. No-op unless a
             // demand boot inserted `PresenceAnnounce`, so group order is byte-identical for static rigs.
@@ -296,6 +299,7 @@ fn took_child_facts(
     child_nodes: &std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::ids::NodeId>,
     driven: &mut crate::stub::drive::DrivenChildren,
     owed: &mut crate::stub::lineage::LineageOwed,
+    regions: &mut crate::stub::regions::RealmRegions,
     stats: &mut StubStats,
 ) -> bool {
     match postcard::from_bytes::<InterShardFlow>(bytes) {
@@ -312,6 +316,13 @@ fn took_child_facts(
                 driven,
                 stats,
             );
+            true
+        }
+        // ★ THE REACH (2026-09-04): a child states how far it is seen; the table re-bands it.
+        Ok(InterShardFlow::ReachStated(rs)) => {
+            let child = rs.child.lowered();
+            crate::stub::lineage::lineage_heard(child, owed);
+            crate::stub::reach::on_reach_stated(rs, from, own_realm, child_nodes, regions, stats);
             true
         }
         // Everything else on this carrier is the directory's business, INCLUDING a message that does
@@ -472,6 +483,7 @@ fn process_inbound(
                     &child_nodes.0,
                     &mut driven,
                     &mut owed,
+                    &mut regions,
                     &mut stats,
                 ) => {}
             MsgClass::Saga => on_directory_reply(

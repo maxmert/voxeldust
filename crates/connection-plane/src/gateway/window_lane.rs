@@ -576,6 +576,7 @@ pub(crate) fn compose_scenes_pass(
                         stats.window_relay_depth_max.max(fold.relay_depth_max);
                     stats.window_instant_mismatch += fold.instant_refused;
                     stats.window_rotated_refused += fold.rotated_refused;
+                    stats.window_far_rows += fold.far_rows;
                     stats.window_alien_rows += fold.alien_rows;
                     stats.window_hop_invalid += fold.hop_invalid;
                     stats.window_dedup_disagree += fold.dedup_disagree;
@@ -589,7 +590,12 @@ pub(crate) fn compose_scenes_pass(
                 }
             });
             let prev_t = session.shadow.last_t;
-            let report = session.shadow.advance(origin, &authors, fold, &tuning);
+            let covers_lineage =
+                !session.lineage.is_empty() & (chain.hops.len() == session.lineage.len());
+            let report =
+                session
+                    .shadow
+                    .advance_covering(origin, &authors, fold, &tuning, covers_lineage);
             stats.window_compose_hold_ticks += report.holds;
             stats.window_hop_dead += report.dead_hops;
             stats.window_t_monotone_stalled += u64::from(report.stalled);
@@ -752,7 +758,16 @@ fn compose_fresh(
                 .expect("fresh_prefix only names ticks every prefix level retains")
         })
         .collect();
-    let mut fold = window::compose(origin, origin_frame, t, authors, &levels, prefix, ingests);
+    let mut fold = window::compose_in(
+        origin,
+        origin_frame,
+        t,
+        authors,
+        &levels,
+        prefix,
+        ingests,
+        sky_frame,
+    );
     if let Some(sky) = sky_frame {
         window::place_sky_anchor(&mut fold, origin_frame, sky);
     }

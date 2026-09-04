@@ -238,6 +238,8 @@ pub struct GatewayView {
     /// Slice B — fold rows refused by `RotationBeyondExactReach` (a rotated frame past the
     /// millimetre rotation reach — R2, the P10 trigger).
     pub window_rotated_refused: u64,
+    /// Far rows shipped in the sky's frame (2026-09-04).
+    pub window_far_rows: u64,
     /// Slice B — rows whose stated frame was not their level's own: alien, dropped.
     pub window_alien_rows: u64,
     /// Slice B — chain levels whose hop was absent/mismatched/rosterless: prefix capped there.
@@ -760,6 +762,7 @@ mod tests {
                 window_chain_cycle: 49,
                 window_instant_mismatch: 50,
                 window_rotated_refused: 51,
+                window_far_rows: 52,
                 window_alien_rows: 52,
                 window_hop_invalid: 53,
                 window_unresolved_standing: 54,

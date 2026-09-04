@@ -1640,3 +1640,95 @@ fn the_velocity_a_parent_writes_travels_down_and_never_up() {
     // Six numbers, and not one of them is a position or a speed.
     assert_eq!(stated.push.len() + stated.turn.len(), 6);
 }
+
+/// A child that neither orbits nor is driven still gets a row, and the row is the WHOLE berth its
+/// parent authored — the integer cell anchor with it, not only the remainder.
+///
+/// Example: a station the star system placed a kilometre out, that nobody has ever flown. It has no
+/// orbit to ask and no pilot pushing it, so the parent repeats the berth it authored. An earlier form
+/// read only the fractional remainder and threw the cell anchor away. Every fixture berth sat at cell
+/// zero, so the loss was invisible; the first station placed a real distance out would have drawn in
+/// the wrong place.
+#[test]
+fn a_child_that_neither_orbits_nor_is_driven_keeps_the_whole_berth_its_parent_authored() {
+    let berth = DVec3::new(1_200.5, -37.25, 8.125);
+    let r = region(OTHER_REALM, Some(OWN_REALM), berth, 1_000.0);
+    let row = placement_row(
+        &BTreeMap::new(),
+        &crate::stub::drive::DrivenChildren::default(),
+        &r,
+        12.0,
+    );
+    assert_eq!(row.origin_cell, r.center.in_parents_frame().cell());
+    assert_eq!(row.origin, r.center.in_parents_frame().offset());
+    assert_ne!(
+        row.origin_cell,
+        I64Vec3::ZERO,
+        "the cell anchor rides along — the row is the whole berth, not the remainder"
+    );
+    assert_eq!(row.velocity, DVec3::ZERO);
+    assert_eq!(row.orientation, DQuat::IDENTITY);
+    assert_eq!(row.angular_velocity, DVec3::ZERO);
+}
+
+/// A push that arrives on the wire reaches the drive lane, and the lane's two admission guards refuse
+/// it there.
+///
+/// Example: a hull tells its parent star system what it is DOING this tick — a push and a turn, in
+/// its own frame. The frame rides the unreliable up-lane. Two things must be true before the parent
+/// applies it: the hull must be MY child, and the frame must come from the node the directory named
+/// as that hull's shard. A push about a hull in another star system is a misroute; a push about my own
+/// hull from a node I never resolved is unattested. Both are counted, never applied, never a panic.
+#[test]
+fn a_push_arriving_on_the_wire_reaches_the_drive_lane_and_is_refused_there() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let elsewhere = StubConfig::root_coord(RealmId::System(99)).child(level_of(OTHER_REALM));
+    let mine = StubConfig::root_coord(OWN_REALM).child(level_of(OTHER_REALM));
+    let drive = |child: RealmCoord| {
+        InterShardFlow::ChildDrive(vd_wire::intershard::ChildDrive {
+            child,
+            child_fence: Fence(1),
+            at: UniverseTick(101),
+            push: [4_000_000, 0, 0],
+            turn: [0; 3],
+        })
+    };
+    let _ = rig.tick(vec![wire_msg(
+        NodeId(77),
+        MsgClass::SignalDelta,
+        &drive(elsewhere),
+    )]);
+    assert_eq!(rig.world.resource::<StubStats>().child_drive_misrouted, 1);
+    assert_eq!(rig.world.resource::<StubStats>().child_drive_received, 0);
+
+    let _ = rig.tick(vec![wire_msg(
+        NodeId(77),
+        MsgClass::SignalDelta,
+        &drive(mine),
+    )]);
+    assert_eq!(rig.world.resource::<StubStats>().child_drive_unattested, 1);
+    assert_eq!(rig.world.resource::<StubStats>().child_drive_received, 0);
+}
+
+/// A lineage statement that arrives on the wire reaches the lineage lane, and a statement about
+/// somebody else is refused there.
+///
+/// Example: a parent tells a realm where it now stands in the tree — "you are the hull under this
+/// star system". The statement rides the reliable peer carrier. A frame that names a DIFFERENT realm
+/// is not about me: I refuse it and count it, because a realm may never take a statement about
+/// another realm as a statement about itself.
+#[test]
+fn a_lineage_statement_about_another_realm_is_refused_on_the_wire_path() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let stated = InterShardFlow::LineageStated(vd_wire::intershard::LineageStated {
+        child: StubConfig::root_coord(RealmId::System(999)),
+        parent_fence: Fence(3),
+        at: UniverseTick(101),
+    });
+    let _ = rig.tick(vec![wire_msg(NodeId(78), MsgClass::Saga, &stated)]);
+    assert_eq!(rig.world.resource::<StubStats>().lineage_misrouted, 1);
+    assert_eq!(rig.world.resource::<StubStats>().lineage_applied, 0);
+    assert_eq!(rig.world.resource::<StubStats>().lineage_held_unattested, 0);
+}

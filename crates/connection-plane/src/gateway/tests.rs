@@ -5476,8 +5476,9 @@ fn the_composer_emits_the_login_level_the_datagrams_and_the_body_delta() {
         "the TAIL is the origin frame"
     );
 
-    // A BODY arrives for the child (its marker) at the SAME epoch: the next fresh fold ships
-    // a reliable DELTA carrying the row with its new bag — never a whole new level.
+    // A MARKER arrives for the child at the SAME epoch. Since step 5 (2026-09-04) a parent draws
+    // no child: the marker is admitted, stored and never read, so the next fresh fold ships NO
+    // delta (no bag changed) and no new level — only the datagram.
     let luma = vd_core::look::luma_bag(2, 1.5);
     let sent = rig.tick(vec![
         wire(
@@ -5522,17 +5523,10 @@ fn the_composer_emits_the_login_level_the_datagrams_and_the_body_delta() {
         scene_levels(&ob).is_empty(),
         "still no new level at a stable epoch"
     );
-    let deltas = scene_deltas(&ob);
-    assert_eq!(deltas.len(), 1, "the body change ships one reliable delta");
-    let (epoch, added, removed) = &deltas[0];
-    assert_eq!(*epoch, 1, "at the CURRENT epoch");
-    assert_eq!(added.len(), 1);
-    assert_eq!(added[0].realm, RealmId::Planet(9));
-    assert_eq!(
-        added[0].bag, luma,
-        "the marker datum rides the delta row's bag"
+    assert!(
+        scene_deltas(&ob).is_empty(),
+        "a parent's marker changes no bag: no delta (step 5)"
     );
-    assert!(removed.is_empty());
     // The second fresh fold advanced the feed counter — sibling chunks would share it.
     let datagrams = composed_datagrams(&sent, CLIENT);
     assert_eq!(datagrams.len(), 1);
@@ -9350,6 +9344,74 @@ fn leaf_frame(window: WindowId, at: u64) -> ShardToGateway {
     }
 }
 
+/// A gateway that KNOWS which frame the star field is stated in (S11's `sky_frame`).
+fn sky_config() -> GatewayConfig {
+    GatewayConfig {
+        sky_frame: Some(SYS7),
+        ..config()
+    }
+}
+
+/// ★ THE GATEWAY PLACES THE SKY FOR THE SESSION IT COMPOSES FOR (owner decision 2, 2026-09-02).
+///
+/// The pilot stands on Planet(7), which sits inside System(7). The star field is stated in the
+/// system's frame. Every folded level therefore carries ONE extra statement: where the system's
+/// centre sits, in the planet's own frame. The client places one star cloud from it.
+///
+/// Without a sky frame named, the gateway states no anchor and the pilot's sky has nowhere to go.
+#[test]
+fn the_fold_carries_the_sky_anchor_to_the_client_when_the_gateway_names_the_skys_frame() {
+    let mut rig = Rig::new();
+    rig.world.insert_resource(sky_config());
+    let (sid, _) = rig.login();
+    let _ = cross_to(&mut rig, sid, XFER, DEST);
+    let _ = rig.tick(vec![wire(
+        DEST,
+        MsgClass::Control,
+        &ShardToGateway::SubscriptionReady {
+            session: sid,
+            entity: EntityId(77),
+            frame: PLANET7,
+            realm_fence: Fence(2),
+        },
+    )]);
+    let (leaf_w, parent_w) = (WindowId(2), WindowId(3));
+    // The whole chain speaks at ONE tick: the planet's own level and its system's child level.
+    let sent = rig.tick(vec![
+        wire(DEST, MsgClass::RealmSnapshot, &leaf_frame(leaf_w, 1001)),
+        wire(
+            SHARD,
+            MsgClass::RealmSnapshot,
+            &parent_frame(parent_w, 1001, 30.0, vec![]),
+        ),
+    ]);
+    assert_eq!(
+        rig.stats().window_full_chain_folds,
+        1,
+        "the two-level chain folded at one tick"
+    );
+    assert_eq!(
+        rig.stats().window_sky_anchored,
+        1,
+        "and the fold placed the sky in the pilot's own frame"
+    );
+    let datagram: RealmSnapshotDatagram = sent
+        .iter()
+        .filter(|(to, class, _)| *to == CLIENT && *class == MsgClass::RealmSnapshot)
+        .find_map(|(_, _, bytes)| postcard::from_bytes(bytes).ok())
+        .expect("the session was served a realm datagram");
+    let anchor = datagram.sky_anchor.expect("it carries the sky anchor");
+    assert_eq!(
+        anchor.frame, SYS7,
+        "the anchor states where the SYSTEM's centre is"
+    );
+    assert_eq!(
+        anchor.universe_tick,
+        UniverseTick(1001),
+        "stamped at the fold's own tick"
+    );
+}
+
 #[test]
 fn the_composer_folds_the_crossing_chain_at_one_tick_and_tears_down_to_nothing() {
     // THE UNIT-TIER TWIN of the process self-consistency gate (§2.12): a real login, a real
@@ -9774,6 +9836,62 @@ fn an_exterior_move_splices_the_chains_aboard_and_refuses_a_stale_statement() {
     assert_eq!(
         rig.world.resource::<GatewaySessions>().by_session[&sid].lineage,
         vec![RealmId::Galaxy(0), RealmId::System(8)]
+    );
+}
+
+/// ★ A MOVE STATEMENT ABOUT A REALM WITH NOTHING ABOVE IT NAMES NO NEW PARENT.
+///
+/// The gateway learns the new parent's node from the coord's ancestry, so it can open the new
+/// window without waiting for the head poll. A coord of one level — a galaxy, which no realm
+/// contains — has no ancestry, so there is no head to record. The move still applies and the tick
+/// guard still remembers it; the gateway simply learns no node from it.
+#[test]
+fn an_exterior_move_of_a_root_realm_records_no_parent_head() {
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login();
+    let galaxy = vd_core::realm_coord::RealmCoord::from_path(
+        vd_core::realm_path::RealmPath::from_levels(vec![vd_core::realm_path::RealmLevel::new(
+            vd_core::realm_path::RealmKindTag::Galaxy,
+            0,
+        )]),
+    )
+    .expect("one-level path has a leaf");
+    rig.world
+        .resource_mut::<GatewaySessions>()
+        .by_session
+        .get_mut(&sid)
+        .expect("session present")
+        .lineage = vec![RealmId::System(8)];
+    let _ = rig.tick(vec![wire(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::ExteriorMoved(vd_wire::intershard::ExteriorMoved {
+            child: galaxy,
+            parent_node: NodeId(1_009),
+            at: UniverseTick(40),
+        }),
+    )]);
+    assert_eq!(rig.stats().exterior_moves_applied, 1, "the move applied");
+    assert_eq!(
+        rig.stats().exterior_moves_sessions_spliced,
+        0,
+        "no session stands under it"
+    );
+    assert_eq!(
+        rig.world
+            .resource::<GatewaySessions>()
+            .realm_heads
+            .get(&RealmId::Galaxy(0)),
+        None,
+        "nothing above a galaxy, so no parent's node was learned"
+    );
+    assert!(
+        !rig.world
+            .resource::<GatewaySessions>()
+            .realm_heads
+            .values()
+            .any(|node| *node == NodeId(1_009)),
+        "and the stated node was recorded nowhere"
     );
 }
 
@@ -10591,5 +10709,129 @@ fn a_sky_from_a_shard_that_has_not_caught_up_is_refused_and_counted() {
             ServerControlMsg::StarCatalogue { .. } | ServerControlMsg::SkyAlive { .. }
         )),
         "a stale shard's sky must not reach a client: {sent:?}"
+    );
+}
+
+/// ★ THE HAND-OVER'S HOLD, MEASURED (2026-09-04; flights 8 to 10 read 5 to 9 hold ticks at the
+/// first hand-over). A session stands in Planet 7 under System 7. The planet is handed to the galaxy:
+/// the splice keeps the leaf window, closes System 7's child window and opens the galaxy's — whose
+/// ring is EMPTY until the galaxy's first level lands. Until then every fold is one level deep, the
+/// stratum above HOLDS (one hold per tick, counted), and the held rows — System 7's roster at its
+/// last composed poses — keep drawing, so nothing vanishes. The hold's length IS the new hop's
+/// window round trip; it ends the tick the galaxy's first level lands.
+#[test]
+fn a_hand_over_holds_the_departed_strata_until_the_new_hops_first_level_lands() {
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login();
+    let _ = cross_to(&mut rig, sid, XFER, DEST);
+    let _ = rig.tick(vec![wire(
+        DEST,
+        MsgClass::Control,
+        &ShardToGateway::SubscriptionReady {
+            session: sid,
+            entity: EntityId(77),
+            frame: PLANET7,
+            realm_fence: Fence(2),
+        },
+    )]);
+    let (leaf_w, parent_w) = (WindowId(2), WindowId(3));
+    for at in [1000, 1001] {
+        let _ = rig.tick(vec![
+            wire(DEST, MsgClass::RealmSnapshot, &leaf_frame(leaf_w, at)),
+            wire(
+                SHARD,
+                MsgClass::RealmSnapshot,
+                &parent_frame(parent_w, at, 30.0, vec![]),
+            ),
+        ]);
+    }
+    assert_eq!(rig.stats().window_full_chain_folds, 2);
+    let holds_before = rig.stats().window_compose_hold_ticks;
+
+    // THE HAND-OVER: the orchestrator says the planet now lives under the galaxy, on node 1001.
+    let galaxy_node = NodeId(1_001);
+    let galaxy_coord = vd_core::realm_coord::RealmCoord::from_path(
+        vd_core::realm_path::RealmPath::from_levels(vec![vd_core::realm_path::RealmLevel::new(
+            vd_core::realm_path::RealmKindTag::Galaxy,
+            vd_core::worldgen::GALAXY_SEED,
+        )]),
+    )
+    .expect("one-level path has a leaf");
+    let level = vd_core::worldgen::level_of(RealmId::Planet(7));
+    let _ = rig.tick(vec![
+        wire(
+            ORCH,
+            MsgClass::Saga,
+            &InterShardFlow::ExteriorMoved(vd_wire::intershard::ExteriorMoved {
+                child: galaxy_coord.child(level),
+                parent_node: galaxy_node,
+                at: UniverseTick(1002),
+            }),
+        ),
+        wire(DEST, MsgClass::RealmSnapshot, &leaf_frame(leaf_w, 1002)),
+    ]);
+    let new_w = rig
+        .world
+        .resource::<GatewaySessions>()
+        .windows
+        .iter()
+        .find(|(_, w)| w.shard == galaxy_node && w.scope == WindowScope::Child(RealmId::Planet(7)))
+        .map(|(id, _)| *id)
+        .expect("the galaxy's child window opened at the splice");
+    for at in 1003..=1005 {
+        let _ = rig.tick(vec![wire(
+            DEST,
+            MsgClass::RealmSnapshot,
+            &leaf_frame(leaf_w, at),
+        )]);
+    }
+    // Four one-level folds (1002 to 1005): the chain is the leaf alone (the galaxy's window is
+    // unconfirmed), so nothing above it is counted as held — but the DEPARTED parent's rows,
+    // System 7's roster at its last composed poses, are still in the picture.
+    assert_eq!(rig.stats().window_compose_hold_ticks - holds_before, 0);
+    let drawn: Vec<RealmId> = rig.world.resource::<GatewaySessions>().by_session[&sid]
+        .shadow
+        .drawn_rows()
+        .map(|r| r.realm)
+        .collect();
+    assert!(
+        drawn.contains(&RealmId::Planet(9)),
+        "the departed parent's rows hold, they do not vanish: {drawn:?}"
+    );
+    // The galaxy's first level lands: a full-chain fold again, and the hold ends.
+    let galaxy_frame = FrameRef::GalaxySpace {
+        galaxy_seed: vd_core::worldgen::GALAXY_SEED,
+    };
+    let first = ShardToGateway::WindowFrame {
+        realm_fence: Fence(1),
+        window: new_w,
+        at: UniverseTick(1006),
+        hop: Some(Box::new(vd_wire::session_flow::HopRow {
+            child: RealmId::Planet(7),
+            placement: vd_core::frame::FramePlacement::moving(
+                DVec3::new(30.0, 0.0, 0.0),
+                DVec3::ZERO,
+            ),
+        })),
+        rows: vec![snap(RealmId::Planet(7), PLANET7, galaxy_frame, 30.0, 1006)],
+    };
+    let _ = rig.tick(vec![
+        wire(galaxy_node, MsgClass::RealmSnapshot, &first),
+        wire(DEST, MsgClass::RealmSnapshot, &leaf_frame(leaf_w, 1006)),
+    ]);
+    assert_eq!(
+        rig.stats().window_full_chain_folds,
+        3,
+        "the chain is whole again"
+    );
+    assert_eq!(rig.stats().window_compose_hold_ticks - holds_before, 0);
+    let drawn: Vec<RealmId> = rig.world.resource::<GatewaySessions>().by_session[&sid]
+        .shadow
+        .drawn_rows()
+        .map(|r| r.realm)
+        .collect();
+    assert!(
+        !drawn.contains(&RealmId::Planet(9)),
+        "the departed stratum leaves the tick the chain is whole: {drawn:?}"
     );
 }

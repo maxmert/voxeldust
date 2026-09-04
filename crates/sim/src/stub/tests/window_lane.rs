@@ -1052,15 +1052,9 @@ fn the_relay_ship_sends_sealed_statements_on_resolve_change_and_cadence() {
         "the child in range rides the level"
     );
     assert_eq!(
-        opened[2],
-        vd_wire::session_flow::RelayedStatement::Body {
-            subject: OTHER_REALM,
-            stmt: vd_wire::session_flow::BodyStmt::Marker {
-                luma: vd_core::look::marker_bag(None, 100.0),
-            },
-            authored_at: at,
-        },
-        "and its marker follows the self-look"
+        opened.len(),
+        2,
+        "the level and the self-look, and no marker: a parent draws no child (step 5)"
     );
     // Unchanged + off-cadence: send-on-change holds its tongue.
     rig.set_local_tick(35);
@@ -1332,15 +1326,17 @@ fn a_changed_body_re_ships_past_the_digest_baseline() {
         "unchanged — nothing re-ships"
     );
 
-    // NOW CHANGE THE CHILD'S OWN DATUM. Its marker bag genuinely differs, so the baseline must notice.
+    // NOW CHANGE THE REALM'S OWN DATUM (the light its self-look carries — since step 5 a parent
+    // states no child body, so the own look is the one bag that can change). It genuinely differs,
+    // so the baseline must notice.
     rig.world
         .resource_mut::<ChildLuma>()
         .0
-        .insert(OTHER_REALM, (6, 0.75));
+        .insert(OWN_REALM, (6, 0.75));
     rig.set_local_tick(3);
     let after = window_bodies(&rig.tick(vec![]));
     assert!(
-        after.iter().any(|b| b.2 == OTHER_REALM),
+        after.iter().any(|b| b.2 == OWN_REALM),
         "a changed body must re-ship: a digest that stopped noticing would leave the subscriber \
          drawing a stale marker forever, and only this assertion would see it. Got {after:?}"
     );
@@ -1390,10 +1386,10 @@ fn an_occupants_window_ships_rows_bodies_and_membership_send_on_change() {
     assert_eq!(rows[0].frame, frame_of(OTHER_REALM));
     assert_eq!(rows[0].pose.frame, frame_of(OWN_REALM));
     assert_eq!(fm(rows[0].pose.pos), WINDOW_CHILD_CENTER);
-    // The bodies: the realm's OWN look (its boot extent, SL3) + one point-of-light marker for
-    // the child IN RANGE — its datum and its extent in one bag.
+    // The bodies: the realm's OWN look (its boot extent, SL3) and nothing about its children —
+    // a parent positions them and never draws them (step 5, 2026-09-04).
     let bodies = window_bodies(&sent);
-    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies.len(), 1, "{bodies:?}");
     assert_eq!(bodies[0].2, OWN_REALM);
     assert_eq!(
         bodies[0].3,
@@ -1401,17 +1397,6 @@ fn an_occupants_window_ships_rows_bodies_and_membership_send_on_change() {
             bag: vd_core::look::look_bag(&Boundary::Shell { r: 100_000.0 })
         },
         "the look IS the realm's own boot extent, framed by the one shared codec"
-    );
-    assert_eq!(
-        bodies[1],
-        (
-            GATEWAY,
-            WindowId(1),
-            OTHER_REALM,
-            BodyStmt::Marker {
-                luma: vd_core::look::marker_bag(Some((6, 0.25)), 100.0)
-            }
-        )
     );
     // The verdict: the armed child is in the dot's band; the quiet child (inert band) is not.
     assert_eq!(
@@ -1437,8 +1422,8 @@ fn an_occupants_window_ships_rows_bodies_and_membership_send_on_change() {
     // This counter is now the MOVING row count, which is what the lossy lane should ever carry.
     assert_eq!(stats.window_frame_rows_sent, 0);
     assert_eq!(
-        stats.window_bodies_sent, 2,
-        "the own look + the one child in range"
+        stats.window_bodies_sent, 1,
+        "the own look alone — a parent draws no child (step 5)"
     );
     assert_eq!(stats.window_memberships_sent, 1);
     // …and the static roster was stated ONCE across BOTH ticks — not twice.
@@ -1469,31 +1454,16 @@ fn a_child_in_range_states_a_point_of_light_marker_and_a_sleeping_child_states_n
     let bodies = window_bodies(&sent);
     assert_eq!(
         bodies.len(),
-        2,
-        "the realm's own look + a marker for the ONE child in range: {bodies:?}",
+        1,
+        "the realm's own look and nothing about its children (step 5): {bodies:?}",
     );
-    let marker_of = |realm: RealmId| {
-        bodies
-            .iter()
-            .find(|(_, _, subject, _)| *subject == realm)
-            .map(|(_, _, _, stmt)| stmt.clone())
-            .unwrap_or_else(|| panic!("{realm:?} states no marker — the presence floor hole"))
-    };
-    // The armed (glowing) child: its photometric datum AND its circumscribed extent, in the
-    // ONE marker bag.
-    assert_eq!(
-        marker_of(OTHER_REALM),
-        BodyStmt::Marker {
-            luma: vd_core::look::marker_bag(Some((6, 0.25)), 100.0)
-        },
-    );
-    // The quiet child 40 km out, with an inert band: in nobody's range, so it sleeps, and it
-    // states no marker at all — not a dim one, none.
+    // Neither the child in range nor the sleeping one 40 km out gets a marker: a child in reach
+    // runs and draws itself, a child out of reach is drawn by nobody.
     assert!(
         !bodies
             .iter()
-            .any(|(_, _, subject, _)| *subject == RealmId::Planet(43)),
-        "a sleeping child states no marker: {bodies:?}"
+            .any(|(_, _, subject, _)| *subject == OTHER_REALM || *subject == RealmId::Planet(43)),
+        "a parent states no marker: {bodies:?}"
     );
 }
 
@@ -1516,8 +1486,8 @@ fn the_keep_alive_re_assert_re_serves_the_whole_set_so_silence_means_a_dead_real
     let first_membership = window_memberships(&sent);
     assert_eq!(
         first_bodies.len(),
-        2,
-        "the full set on open: the own look + the child in range"
+        1,
+        "the full set on open: the own look alone (step 5)"
     );
     assert_eq!(first_membership.len(), 1);
     // A quiet tick is still quiet — the re-assert is the BEAT, not every tick.
@@ -1532,7 +1502,10 @@ fn the_keep_alive_re_assert_re_serves_the_whole_set_so_silence_means_a_dead_real
     let stats = rig.world.resource::<StubStats>();
     assert_eq!(stats.window_reasserted, 1);
     assert_eq!(stats.windows_opened, 1, "a keep-alive is not a new window");
-    assert_eq!(stats.window_bodies_sent, 4, "two served twice");
+    assert_eq!(
+        stats.window_bodies_sent, 2,
+        "the one own look, served twice"
+    );
     assert_eq!(stats.window_memberships_sent, 2);
 }
 
@@ -1800,14 +1773,11 @@ fn assert_window_emission_feature_anywhere() {
             assert_eq!(h.child, RealmId::Area(99));
         }
     }
-    // The bodies, as WHOLE expected sets (HR5: plain equality, never matches!): the look and
-    // marker BAGS are the same byte strings in both runs — the same boot extent through the
-    // one codec, the same planted datum — and only the subject ids differ per run.
+    // The bodies, as WHOLE expected sets (HR5: plain equality, never matches!): the look BAG is
+    // the same byte string in both runs — the same boot extent through the one codec — and only
+    // the subject id differs per run. No marker: a parent draws no child (step 5, 2026-09-04).
     let look = vd_core::look::look_bag(&Boundary::Shell { r: 100_000.0 });
-    // The presence floor (look_horizon.md slice 1): the planted datum + the child's
-    // circumscribed extent, one bag through the one codec, identical bytes on every profile.
-    let luma = vd_core::look::marker_bag(Some((6, 0.25)), 100.0);
-    let expected = |own: RealmId, child: RealmId| {
+    let expected = |own: RealmId| {
         vec![
             (
                 GATEWAY,
@@ -1817,26 +1787,14 @@ fn assert_window_emission_feature_anywhere() {
             ),
             (
                 GATEWAY,
-                WindowId(1),
-                child,
-                BodyStmt::Marker { luma: luma.clone() },
-            ),
-            (
-                GATEWAY,
                 WindowId(2),
                 own,
                 BodyStmt::SelfLook { bag: look.clone() },
             ),
-            (
-                GATEWAY,
-                WindowId(2),
-                child,
-                BodyStmt::Marker { luma: luma.clone() },
-            ),
         ]
     };
-    assert_eq!(a_bodies, expected(OWN_REALM, OTHER_REALM));
-    assert_eq!(b_bodies, expected(RealmId::Planet(42), RealmId::Area(99)));
+    assert_eq!(a_bodies, expected(OWN_REALM));
+    assert_eq!(b_bodies, expected(RealmId::Planet(42)));
     // The verdicts, ONE PER WINDOW — and the second one is what the 2026-09-01 ruling changed. This
     // used to assert exactly ONE message per run, because the `Child` window's proxy verdict was gated
     // on a live occupancy bit and no bit is planted here. An OPEN WINDOW is now itself the demand

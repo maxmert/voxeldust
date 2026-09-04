@@ -4914,8 +4914,17 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
     row beyond the FINE rotation reach (2^42 m ≈ 29 AU) mapped down through the hull's hop is refused.
     Today those are the galaxy's in-range systems, which the star cloud draws anyway, so the picture
     does not show it. It is the named P10 trigger firing on every tick, not a bug in the refusal;
-    OWED a ruling (compose far rows at the AUTHOR's step, or state them coarse) before a far realm's
-    own look must be drawn from inside a turned hull.
+    ★ BUILT 2026-09-04 (owner: "proceed with all the changes"): THE FAR ROW. A row the exact descent
+    refuses for rotation, whose author's frame is the SKY's (`compose_in(.., sky_frame)`), rides in
+    that frame as stated (`Composed::far_rows`, never refused); the client's realm view admits a row
+    in the sky anchor's frame as the one lawful foreign frame, and the renderer places such a box
+    from the sky anchor with the star cloud's own transform (`sky_cloud_transform`: one f64 turn,
+    narrowed once — the precedent the owner approved for the stars, R1). No wire change: the row's
+    `pose.frame` already says which frame it is stated in. Example: a neighbouring system two
+    light-years out, seen from a hull turned thirty degrees, is exact in the galaxy's step and turned
+    where the star field already is. Pinned: gateway (refused without a sky frame, a far row with it,
+    not admitted for another sky), client (the anchor's frame folds, another foreign frame is still
+    skipped). Flight OWED: `window_rotated_refused` should read zero under the galaxy.
   BUILT on this status (unit-green, flight OWED):
   1. **The same-origin swap keeps its motion** (`RealmView::swap_epoch(_, keep_tracks)`,
      `retain_placements`; `net.rs`'s level arm): the epoch bumps for a chain change under the same
@@ -4952,7 +4961,83 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   source-side demote, the promote redelivery, the inbox facts arm). The full list is kept beside this
   ledger (`docs/audit/coverage_gate_2026-09-04.txt`). HR5 says the phase is not done until it reads
   zero; it is a dedicated pass, scheduled before the commit.
-  Owed next: the anchor measurement, R9 steps 4 and 5, then the coverage pass before the commit.
+  ★ THE EIGHTH FLIGHT (2026-09-04, after the wake-up constant 6 000 → 500): the same three hand-overs
+  read 9 hold ticks (all at the first, into the star realm; the star's shard had booted 48 s before, so
+  a late boot is NOT the cause — UNMEASURED which hop's ring lacked the tick), `scene_deltas_sent`
+  370 against 18 on the seventh, and `window_instant_mismatch` 4 955 against 0, rising ~12 a second
+  from the first hand-over on. READ FROM THE CODE: the ten-second horizon makes the in-range set
+  churn as the pilot flies (each change is a delta), and `merge_static` folds the static roster's
+  rows — stamped at the tick they were sent — into every later level for a child the level no longer
+  carries (one that just left the range); `transfer_frame` refuses that row for its instant, counted,
+  never drawn. So the counter is a stale-roster refusal, not a lost picture; the churn is the
+  horizon's nature at warp. OWED: drop a static row the moment its child leaves the admitted set
+  (then the counter reads zero again), and the hold's hop on a fixture.
+  ★ THE NINTH FLIGHT (2026-09-04, steps 4 + 5 + the far row aboard): owner *"Feel better … I still
+  see the dots (at least on the star)."* Counters: holds 7 (the first hand-over again), rotation
+  refusals 7.6 k and rising (the far-row arm sat on the direct path only — the refusals come through
+  the RELAY path; now on both, and `window_far_rows` is a stats row), instant mismatches 2.5 k and
+  rising, star-cloud stalls 0, the galaxy shard's boot 38 s (was 4 s: the reach re-banded 233 220
+  children one leaf insert each, three times — now re-banded in place with ONE bulk rebuild, and the
+  own realm is named last). ★ THE MISMATCH, PINNED (`a_static_row_composes_through_a_hop_at_a_later_
+  tick`): a static roster row kept the tick its roster was sent at, and a hop at any later tick
+  refused it for its instant — so from inside a hull a parent's STATIC children (the star, a station)
+  were composed only on the roster's own tick. The dot the owner saw on the star was the star field's
+  point with no body over it. FIXED: `merge_static` re-stamps a static row at the level's tick (a
+  static placement is time-invariant). Owed: the tenth flight.
+  ★ THE TENTH FLIGHT (2026-09-04, the three fixes aboard): mismatches 0 (was 10 280), scene deltas
+  14 (was 714), far rows 797 ridden, rotation refusals 1 601 (was 65 932; the rest are the universe's
+  rows about the galaxy — not sky-authored, not drawable), holds 5, the galaxy's boot 217 ticks again.
+  The star: its BODY now composes at every tick, and the owner's screenshot shows the star field's
+  point through it — the realm box is a translucent volume (`AlphaMode::Blend`, the honest-translucency
+  rule for containers seen from inside) and the cloud adds over it. FIX: a body that states its own
+  LIGHT (its self-look carries `TAG_LUMA`) is drawn OPAQUE — a glowing body has no interior to see
+  through — so its depth hides the point behind it; decided by data presence, never by kind. The
+  anchor logger cannot tell "stationary" from "frozen"; it reads with the pilot's speed next.
+  ★ THE ELEVENTH FLIGHT (2026-09-04, the opaque lit body): the star is a solid disc, no point over
+  it. Owner: *"galaxy, sun and all other objects are not moving together at the same time — that
+  creates that bouncing effect"* (when the hull turns; steady when stopped). READ FROM THE CODE and
+  MEASURED at the client (the star's body and System 7's coincident body never disagreed by more than
+  half a metre over 1 079 samples, so it is not two bodies): the SKY ANCHOR placed the star cloud the
+  instant each datagram arrived, while every body is drawn from its track 120 ms behind — so a turn
+  reached the sky a buffer ahead of the bodies. FIXED: the anchor rides an `EntityTrack` like any
+  realm's placement and is sampled at the same render cursor as the scene (`sky_anchor_now`), in
+  both readers (the cloud and the far rows); pinned: two anchors at ticks 10 and 12 give the halfway
+  pose at cursor 11, and the newest past it.
+  ★ THE BRIGHT-BODY COUNT (R8 item 4, MEASURED 2026-09-04 on the eleventh flight, read from the
+  slot's realm stores after the pilot logged out): one pilot in System 7 ran 17 shards — the
+  universe, the galaxy, System 7, its star, TWELVE planets and moons, and the hull; every planet and
+  moon woke by its light (their light reach, ~50 AU for an Earth, covers the whole system). On the
+  size-only reach (the seventh flight) it was seven planets and moons, plus five far systems that
+  the two-minute horizon woke and the ten-second one does not. So the price of R2 today: +5 shards
+  per occupied system, −5 far systems per warp. Both counts are what the rulings ask for; nothing to
+  tune. Owner (the twelfth flight): *"Now all waaay smoother."*
+  ★ THE HAND-OVER'S GAP, MEASURED AND CLOSED (2026-09-04, the gateway fixture
+  `a_hand_over_holds_the_departed_strata_until_the_new_hops_first_level_lands`): at a splice the new
+  hop's window is UNCONFIRMED until its first level lands, so the chain shrinks to the hops below it
+  and every stratum the departed author drew was DROPPED — System 7's planets vanished for the new
+  window's round trip (the fixture read: chain = the leaf alone, hold ticks 0, drawn rows empty). The
+  flights' 5–9 hold ticks were the ticks after confirmation while the new hop's ring and the leaf's
+  found a common stamp. FIXED: while the chain does not cover the lineage, a departed author's rows
+  from the last fold become a HELD stratum (drawn at their last composed poses, bounded by the hold
+  TTL) and leave the tick the chain is whole again; a promoted stratum takes only its own author's
+  rows, never another author's that sat at that index before the splice re-numbered the chain. The
+  stall logger now reads the pilot's own motion beside the anchor (a stationary pilot is not a stall).
+  ★ THE TWELFTH AND THIRTEENTH FLIGHTS (2026-09-04, everything above aboard): owner *"Now all waaay
+  smoother"*, then *"All works"*. Counters on the last: hold ticks 4 (post-confirmation stamp
+  alignment only), instant mismatches 0, far rows ridden, rotation refusals 9 200 (the universe's rows
+  about the galaxy), anchor stalls with the pilot moving 0. The flight list of the owner's
+  2026-09-04 "proceed with all the changes" is CLOSED.
+  ★ THE COVERAGE PASS (2026-09-04, evening): the gate read 269 real misses in 33 files over the arc.
+  Six agents closed them in parallel, each on disjoint files, with tests only — a few provably dead
+  arms removed and said so (the containment fold's `worth_asking` guard, made redundant by the ask
+  list; an IPv6 slot arm dead by type; a poisoned-mutex arm nobody can reach; a static-row arm no
+  production caller reaches, kept and pinned). `just coverage-fast` now reads **0 real misses —
+  PASS** on the whole Tier-A set. Also found on the way: two mesh pins still expected "queue full"
+  for an unknown destination (the peer book refuses it as unknown since 2026-09-03) — re-pinned; and
+  a node must never lazily dial ITSELF (its own id sits in the topology) — refused before the dial.
+  Known: `frame_conversion_e2e`'s `shipped_movers` regenerates the world per region per seed with two
+  configs alternating on a one-slot forest cache — hours in debug; unchanged since Step 7, not run
+  to completion here. Owed next: the commit.
 
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:
@@ -4963,6 +5048,26 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   - **A datagram over the budget is split** — the window frame is partitioned exactly as the entity snapshot is, the hop on every chunk, and the gateway MERGES chunks of one stamp. MEASURED: the home system's hull-window frame was 1,420 B against 1,200 and EVERY one was dropped by the transport (counted where no gate reads).
   - **R8 item 1, the first half** — the placement book is LAYERED (statics authored once and shared by `Arc`, movers per tick); the fold visits CANDIDATES by lookup (`ChildIndex::candidates_along` the looker's lead, `children_reachable_from_outside` for the interest proxy) plus the latched; `aoi_candidates_visited` and `aoi_full_walks` are gauges. MEASURED on the galaxy (debug, seed 0 world, one occupant at the centre): 1.9 s → 250 ms per tick; on the cluster (seed 2298): 61 ms mean, still OVER the 20 ms budget.
 - **OWED:**
+  - **R9 step 4, REACH itself — BUILT 2026-09-04 (owner: "1. agree" to the brightness rule; unit-green,
+    flight OWED).** What landed, against the plan below: the arm is `ReachStated { child, child_fence,
+    at, size_reach_m, light_reach_m }` (mesh minor 29, discriminant 43, producer-less reliable) — TWO
+    whole-metre numbers, not one, because the owner's rule needs the parent to drop a child's LIGHT
+    while keeping its SIZE, and a folded single number cannot be un-folded; the parent
+    (`RealmRegions`) keeps `reach_stated`, re-bands a stating child with `AoiConfig::with_spin_up`
+    and re-inserts its leaf (`set_child_reach`, O(log n)); a child that never states (a dormant
+    planet) is banded by its planted light (`with_child_light`, the same datum the marker roster
+    carries) — so a bright planet wakes at ~50 AU, not at 76 radii; a realm that draws its
+    children's light (`with_lights_children`, the galaxy — its star field is shipped once by the
+    gateway) tests and folds SIZE only; a realm's own reach is `max(own look reach, max over
+    children of distance + reach)` per kind, kept as two sorted multisets so a statement costs
+    O(log n) on the galaxy (`own_reach`); the emitter (`reach::emit_own_reach`) states upward once
+    per change, `Retained`; the consumer (`reach::on_reach_stated`) carries the three up-lane guards
+    and counts (`reach_*`). Constants: the dot angle moved to `vd_core::geometry::
+    VISIBILITY_THETA_MIN_RAD` (1.5°, the world solve now reads the same one); the limiting
+    magnitude `vd_core::look::LIMITING_MAGNITUDE` = 6.5 beside the Sun's absolute magnitude and the
+    parsec; `light_reach_m` pins a Sun at ~70 ly and an Earth at ~50 AU. OWED (R8): the galaxy with
+    one looker on this build, and the bright-body count — how many shards wake per pilot now that a
+    planet reaches by its light.
   - **R9 step 4, REACH itself — PLAN 2026-09-04 (shown to the owner, one decision pending):** ONE new
     arm `ReachStated { child, child_fence, at, reach_m }` (every realm, on change, producer-less
     reliable beside `ChildFacts`; a planet has no drive facts to ride with, so the reach gets its own
@@ -4979,7 +5084,17 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
     star's, so a star system's reach is its disc plus its planets' reaches. Measurements owed with it
     (R8): the galaxy with one looker; shards awake per pilot.
   - **R9 step 4, REACH itself (status before the plan)** — no realm states a reach yet; the band is still the wake band (bound × cot(θ/2)) and the angle is still 1.5°; the child→parent reach datum (approved, R6) is not on the wire. The dot angle re-solve and its cost measurement are owed with it.
-  - **R9 step 5** — the parent's marker still exists for children IN RANGE; the occupancy bit still builds the proxy observer (lawful under R5, but the bit still influences sight through it).
+  - **R9 step 5 — BUILT 2026-09-04 (owner: "7. approved"; after step 4 landed, as the ruling binds):** the
+    parent's marker is DELETED at its source — `current_bodies` states the realm's own look and nothing
+    about its children (direct windows and the relay alike) — and at its two reads in the gateway:
+    `body_tag` no longer answers `Marker` (the variant is gone) and `scene_bag` no longer falls back to
+    a parent's luma bag. A realm that states no look is tracked and not drawn. The wire arm
+    `BodyStmt::Marker` stays reserved and a marker a shard still stated is admitted, stored and never
+    read (the store is a tombstone that leaves with the arm's reservation); the client's marker body
+    kind stays as dead decode. The occupancy bit still builds the proxy observer (lawful under R5).
+    Also from the eighth flight: `merge_static` no longer folds a static row of a realm the shipped
+    membership does not name, so a child that left the range stops riding every later level with its
+    stale stamp (the ~12/s `window_instant_mismatch`). Flight OWED: the ninth.
   - **R9 step 6 / R8 item 1, the second half** — the galaxy's tick was 61 ms mean against 20 ms; the lookup fold, the sphere filter, the query memo and (2026-09-04) the R*-tree index each took a lever — see D-MOVE-2's 2026-09-04 status for the tree. The per-candidate cost (~22 µs each: a `RealmCoord::child` allocation, three `BTreeMap` inserts, the interest emitter) and the 11,275 candidates one centre occupant collects on the seed-0 world (index cell 61 ly, because a system's wake band is its gravitational bound × 76 — the widest is 18 ly) are the two levers. Neither is a number to argue: the probe `measure_the_galaxy_shards_tick_against_its_census` (ignored, hand-run) prints both.
   - **The band re-solve (D-MOVE-3)** is what makes the index cell small; it is the owner's open item and is NOT touched here.
   - **The second subject of the gate** — the planet subject is `#[ignore]`d with its measurement (a walking occupant at 1.0e3 m/s cannot reach a planet 6.1e10 m away; the governor is deleted). It runs when a hull flies there (M-C) or the spawn moves (G10). The look/acceptance gates that fly the same leg are in the same state and were NOT re-run in this pass — UNMEASURED.

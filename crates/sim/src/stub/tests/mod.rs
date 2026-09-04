@@ -35,6 +35,7 @@ mod handoff;
 /// Occupant input integration and THE SPEED LAW (banner 2831) plus the client-session lane: walk/yaw/pitch-clamp, per-axis clamp and diagonal normalization, the governed ceiling and its ramp, the ceiling applied to a transient, the realm time multiplier; then input-discard reasons, the finite gate, action_bits inertness, session-fence upgrade and stale-fence detach, per-tick snapshot frames and budget partitioning, entity minting and the bounded InputLog.
 mod movement;
 /// The ONE WRITER: a parent authoring its direct children's placements and every SL1 conversion built on it.
+mod pilot;
 mod placement;
 /// The placement-carry derivation (how far a shard may extrapolate a moving placement) and the pose-stamp invariant, plus the RLM 5f RG-1 reactive greeting: a shard announces itself to every booked peer after a silence interval, suppressed per-peer by inbound contact, identical across shard kinds.
 mod presence;

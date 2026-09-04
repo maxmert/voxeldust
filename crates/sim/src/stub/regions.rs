@@ -120,6 +120,26 @@ pub struct RealmRegions {
     /// by walking its lead through this grid — one lookup per cell of length, never a walk of the
     /// roster. EMPTY until `with_own_realm`, like `child_index`.
     aoi_index: ChildIndex,
+    // ★ THE REACH (owner ruling 2026-09-02 R3/R6; built 2026-09-04 under the owner's rule *"brightness
+    // counts only when no ancestor already draws that light"*).
+    /// Each direct child's STATED reach — (by size, by light), whole metres — the datum the child
+    /// sends up on change. Absent until the child states; a dormant child never states, so the
+    /// parent's default (its look and its planted light) serves.
+    reach_stated: BTreeMap<RealmId, (u64, u64)>,
+    /// The (fence, tick) of each child's newest reach statement — the staleness order.
+    reach_at: BTreeMap<RealmId, (vd_core::fence::Fence, vd_core::ids::UniverseTick)>,
+    /// Each direct child's light, in Suns, as the boot planted it — the parent's own default for a
+    /// child that has not stated, and the light the child's band is widened by.
+    child_light: BTreeMap<RealmId, f64>,
+    /// Does THIS realm draw its children's light itself (the galaxy's star field)? Then a child's
+    /// light never widens its band and never folds into this realm's own reach by light.
+    lights_children: bool,
+    /// The terms this realm's OWN reach folds over its direct children — `distance + reach`, by
+    /// size and by light — as sorted multisets (value bits → count) plus each child's own pair, so
+    /// a statement costs O(log n) on the galaxy and never a walk (SL9).
+    reach_size_terms: BTreeMap<u64, u32>,
+    reach_light_terms: BTreeMap<u64, u32>,
+    reach_terms_of: BTreeMap<RealmId, (u64, u64)>,
     /// The same children sorted by distance from this realm's centre, in metres of its own frame,
     /// for the OUTSIDE looker: a looker `d` metres out can only reach children at least
     /// `d − widest band` from the centre, which is a suffix of this list.
@@ -236,6 +256,17 @@ fn depth_of(regions: &[RealmRegion], ix_of: &BTreeMap<RealmId, usize>, realm: Re
     depth // hop cap hit — a cycle the boot guard rejects; a safe stop, never a hang
 }
 
+/// What a child's reach statement did to this realm's table (the reach, 2026-09-04).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReachOutcome {
+    /// Not one of this realm's direct children — the caller's misroute guard should have said so.
+    NotMine,
+    /// Older than the statement already held.
+    Stale,
+    /// Held and re-banded; `own_changed` says this realm's own reach moved and is owed upward.
+    Applied { own_changed: bool },
+}
+
 impl RealmRegions {
     /// ★THROWAWAY (test instrument): plant the cruise-only overdrive read from `VD_TEST_OVERDRIVE`.
     /// Values below the lawful `1.0` are refused back to it — the instrument may only ever go faster,
@@ -300,6 +331,13 @@ impl RealmRegions {
             static_rows: BTreeMap::new(),
             movers_of: BTreeMap::new(),
             aoi_index: ChildIndex::default(),
+            reach_stated: BTreeMap::new(),
+            reach_at: BTreeMap::new(),
+            child_light: BTreeMap::new(),
+            lights_children: false,
+            reach_size_terms: BTreeMap::new(),
+            reach_light_terms: BTreeMap::new(),
+            reach_terms_of: BTreeMap::new(),
             radial: BTreeMap::new(),
             widest_band_m: 0.0,
             widest_child_extent_m: 0.0,
@@ -358,7 +396,251 @@ impl RealmRegions {
     pub fn with_own_realm(mut self, own_realm: RealmId) -> RealmRegions {
         self.own_realm = Some(own_realm);
         self.rebuild_child_index();
+        self.refresh_reach();
         self
+    }
+
+    /// ★ THE CHILDREN'S LIGHT (the reach): the per-child luminosity the boot planted — the same
+    /// datum the marker roster carries. A parent widens a child's wake band by its light and folds
+    /// it into its own reach by light, unless the parent draws that light itself.
+    #[must_use]
+    pub fn with_child_light(mut self, luma: &BTreeMap<RealmId, (u8, f64)>) -> RealmRegions {
+        self.child_light = luma.iter().map(|(r, (_, l))| (*r, *l)).collect();
+        self.refresh_reach();
+        self
+    }
+
+    /// ★ THIS REALM DRAWS ITS CHILDREN'S LIGHT (the reach): the galaxy, whose star field is every
+    /// star's point of light, shipped once. Its children's light then widens no band and folds into
+    /// no reach — a star system wakes for its disc or its planets, never for the glow the sky shows.
+    #[must_use]
+    pub fn with_lights_children(mut self, lights: bool) -> RealmRegions {
+        self.lights_children = lights;
+        self.refresh_reach();
+        self
+    }
+
+    /// Re-band every live direct child by its default reach and rebuild the reach terms. Called by
+    /// the builders so their order cannot matter. A child's band is re-inserted in the range index
+    /// only when it changed — for the galaxy (which lights its children) nothing changes and nothing
+    /// is touched.
+    fn refresh_reach(&mut self) {
+        let Some(own) = self.own_realm else {
+            return;
+        };
+        let ixs: Vec<usize> = self
+            .children_of
+            .get(&own)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default();
+        // Re-band in place (the band alone), then rebuild the range index ONCE in bulk: on the
+        // galaxy this is 233 220 children, and a leaf insert per child took the boot from four
+        // seconds to thirty-eight (MEASURED on the ninth flight, 2026-09-04).
+        for &ix in &ixs {
+            let realm = self.regions[ix].realm;
+            let radius = self.test_radius_of(realm);
+            let next = self.regions[ix].aoi.with_spin_up(radius);
+            self.regions[ix].aoi = next;
+        }
+        self.rebuild_aoi_index(own);
+        self.reach_size_terms.clear();
+        self.reach_light_terms.clear();
+        self.reach_terms_of.clear();
+        for ix in ixs {
+            self.insert_reach_terms(own, ix);
+        }
+    }
+
+    /// A child's reach by size: stated, else the dot-angle reach of its own look.
+    fn size_reach_of(&self, realm: RealmId) -> f64 {
+        match self.reach_stated.get(&realm) {
+            Some((size, _)) => *size as f64,
+            None => self
+                .region_of(realm)
+                .and_then(|r| r.look)
+                .map_or(0.0, |look| {
+                    vd_core::geometry::visibility_reach_m(
+                        look.circumscribed_extent(),
+                        vd_core::geometry::VISIBILITY_THETA_MIN_RAD,
+                    )
+                }),
+        }
+    }
+
+    /// A child's reach by light: stated, else the limiting-magnitude reach of its planted light.
+    fn light_reach_of(&self, realm: RealmId) -> f64 {
+        match self.reach_stated.get(&realm) {
+            Some((_, light)) => *light as f64,
+            None => vd_core::look::light_reach_m(
+                self.child_light.get(&realm).copied().unwrap_or(0.0),
+                vd_core::look::LIMITING_MAGNITUDE,
+            ),
+        }
+    }
+
+    /// The radius this realm TESTS a child at: the larger of its two reaches — size alone when this
+    /// realm draws the child's light itself.
+    fn test_radius_of(&self, realm: RealmId) -> f64 {
+        let light = if self.lights_children {
+            0.0
+        } else {
+            self.light_reach_of(realm)
+        };
+        self.size_reach_of(realm).max(light)
+    }
+
+    /// Re-band one child at `radius` and, when the band changed, re-insert its leaf in the range
+    /// index. A mover or an inert child keeps its band as it is.
+    fn reband(&mut self, own: RealmId, ix: usize, radius: f64) {
+        let realm = self.regions[ix].realm;
+        let next = self.regions[ix].aoi.with_spin_up(radius);
+        if next == self.regions[ix].aoi {
+            return;
+        }
+        self.regions[ix].aoi = next;
+        if self.moving.contains_key(&realm) {
+            return;
+        }
+        let tier = self.own_frame(own).tier();
+        let centre = self.regions[ix].center.in_parents_frame();
+        self.widest_band_m = self.widest_band_m.max(next.tear_down_r_m());
+        self.aoi_index.insert(
+            &IndexedChild {
+                realm,
+                centre,
+                radius_m: next.tear_down_r_m() + self.widest_child_extent_m,
+            },
+            tier,
+        );
+    }
+
+    /// The child's `distance + reach` pair, from its placement in this realm's frame. `own` is this
+    /// realm and `ix` one of its direct children's rows — every caller holds both already, so nothing
+    /// here re-tests whose child this is.
+    fn reach_terms_for(&self, own: RealmId, ix: usize) -> (u64, u64) {
+        let r = &self.regions[ix];
+        let realm = r.realm;
+        let tier = self.own_frame(own).tier();
+        let d = r
+            .center
+            .in_parents_frame()
+            .delta_m(LatticePos::ORIGIN, tier)
+            .length();
+        let light = if self.lights_children {
+            0.0
+        } else {
+            self.light_reach_of(realm)
+        };
+        let size = self.size_reach_of(realm);
+        // A child with no reach of a kind contributes nothing of that kind: a dark moon does not
+        // make its planet visible by light from the moon's distance.
+        let term = |reach: f64| {
+            if reach > 0.0 {
+                (d + reach).round() as u64
+            } else {
+                0
+            }
+        };
+        (term(size), term(light))
+    }
+
+    fn insert_reach_terms(&mut self, own: RealmId, ix: usize) {
+        let realm = self.regions[ix].realm;
+        let (size, light) = self.reach_terms_for(own, ix);
+        *self.reach_size_terms.entry(size).or_insert(0) += 1;
+        *self.reach_light_terms.entry(light).or_insert(0) += 1;
+        self.reach_terms_of.insert(realm, (size, light));
+    }
+
+    fn remove_reach_terms(&mut self, realm: RealmId) {
+        let Some((size, light)) = self.reach_terms_of.remove(&realm) else {
+            return;
+        };
+        for (terms, key) in [
+            (&mut self.reach_size_terms, size),
+            (&mut self.reach_light_terms, light),
+        ] {
+            // The count is there by construction: `insert_reach_terms` writes the name and both
+            // counts in one go, and only this function takes them out again. A last one leaves.
+            let left = terms.get(&key).copied().unwrap_or(0).saturating_sub(1);
+            if left == 0 {
+                terms.remove(&key);
+            } else {
+                terms.insert(key, left);
+            }
+        }
+    }
+
+    /// The top of both multisets — what this realm's own reach folds from its children.
+    fn children_reach(&self) -> (u64, u64) {
+        (
+            self.reach_size_terms
+                .last_key_value()
+                .map_or(0, |(k, _)| *k),
+            self.reach_light_terms
+                .last_key_value()
+                .map_or(0, |(k, _)| *k),
+        )
+    }
+
+    /// ★ THIS REALM'S OWN REACH — (by size, by light), whole metres: the larger of its own look's
+    /// reach and the farthest `distance + reach` over its direct children. `own_luma` is this realm's
+    /// own light, as its parent planted it. Example: a planet 6 400 km across with a station 40 000 km
+    /// out that reaches 200 000 km states size 490 000 km (its own disc) and light 50 AU (its own
+    /// reflected sunlight).
+    #[must_use]
+    pub fn own_reach(&self, own: RealmId, own_luma: Option<f64>) -> (u64, u64) {
+        let (kids_size, kids_light) = self.children_reach();
+        let size = self
+            .own_look(own)
+            .map_or(0.0, |look| {
+                vd_core::geometry::visibility_reach_m(
+                    look.circumscribed_extent(),
+                    vd_core::geometry::VISIBILITY_THETA_MIN_RAD,
+                )
+            })
+            .round() as u64;
+        let light = vd_core::look::light_reach_m(
+            own_luma.unwrap_or(0.0),
+            vd_core::look::LIMITING_MAGNITUDE,
+        )
+        .round() as u64;
+        (size.max(kids_size), light.max(kids_light))
+    }
+
+    /// ★ A CHILD STATES ITS REACH: re-band it, re-insert its leaf, refold this realm's own terms.
+    /// Returns the outcome; `Applied { own_changed }` says whether this realm's own reach moved and
+    /// must be restated upward.
+    pub fn set_child_reach(
+        &mut self,
+        child: RealmId,
+        at: (vd_core::fence::Fence, vd_core::ids::UniverseTick),
+        size_reach_m: u64,
+        light_reach_m: u64,
+    ) -> ReachOutcome {
+        let Some(own) = self.own_realm else {
+            return ReachOutcome::NotMine;
+        };
+        let Some(&ix) = self.ix_of.get(&child) else {
+            return ReachOutcome::NotMine;
+        };
+        if self.regions[ix].parent != Some(own) {
+            return ReachOutcome::NotMine;
+        }
+        if self.reach_at.get(&child).is_some_and(|held| at < *held) {
+            return ReachOutcome::Stale;
+        }
+        let before = self.children_reach();
+        self.remove_reach_terms(child);
+        self.reach_stated
+            .insert(child, (size_reach_m, light_reach_m));
+        self.reach_at.insert(child, at);
+        let radius = self.test_radius_of(child);
+        self.reband(own, ix, radius);
+        self.insert_reach_terms(own, ix);
+        ReachOutcome::Applied {
+            own_changed: self.children_reach() != before,
+        }
     }
 
     /// Rebuild the child index from the current own-realm and moving-child statements. Called by both
@@ -443,6 +725,8 @@ impl RealmRegions {
                 names.sort_unstable();
             }
         }
+        // The reach (2026-09-04): the newcomer's `distance + reach` joins this realm's own fold.
+        self.insert_reach_terms(own, ix);
     }
 
     /// ★ THIS REALM MOVED HOUSE (the ruler switch, slice 3): its parent told it a new lineage. The own
@@ -462,9 +746,7 @@ impl RealmRegions {
         if old_parent == Some(new_parent) {
             return;
         }
-        if let Some(op) = old_parent
-            && let Some(list) = self.children_of.get_mut(&op)
-        {
+        if let Some(list) = old_parent.and_then(|op| self.children_of.get_mut(&op)) {
             list.remove(&ix);
         }
         self.roster_generation = next_roster_generation();
@@ -489,13 +771,14 @@ impl RealmRegions {
         let last = self.regions.len() - 1;
         let parent = self.regions[ix].parent;
         // Drop the leaving row from its parent's child list, the grids and the radial list.
-        if let Some(p) = parent
-            && let Some(list) = self.children_of.get_mut(&p)
-        {
+        if let Some(list) = parent.and_then(|p| self.children_of.get_mut(&p)) {
             list.remove(&ix);
         }
         self.child_index.remove(realm);
         self.aoi_index.remove(realm);
+        self.remove_reach_terms(realm);
+        self.reach_stated.remove(&realm);
+        self.reach_at.remove(&realm);
         self.unindexed.retain(|r| *r != realm);
         self.built_children.retain(|r| *r != realm);
         // The leaving row's own radial entry, by its own distance — never a walk of the list (SL9).
@@ -522,9 +805,8 @@ impl RealmRegions {
             let moved = self.regions[ix].realm;
             self.ix_of.insert(moved, ix);
             self.depths[ix].2 = ix;
-            if let Some(mp) = self.regions[ix].parent
-                && let Some(list) = self.children_of.get_mut(&mp)
-            {
+            let moved_parent = self.regions[ix].parent;
+            if let Some(list) = moved_parent.and_then(|mp| self.children_of.get_mut(&mp)) {
                 list.remove(&last);
                 list.insert(ix);
             }

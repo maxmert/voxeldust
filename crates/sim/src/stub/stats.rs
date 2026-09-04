@@ -503,6 +503,16 @@ pub struct StubStats {
     /// checked at RUNTIME rather than by installing different systems, because the same systems are
     /// installed everywhere and the profile decides what they DO (HR3).
     pub child_drive_uncapable: u64,
+    /// The reach (2026-09-04): this realm stated its reach to its parent, on a change.
+    pub reach_sent: u64,
+    /// A child's reach, admitted and re-banded.
+    pub reach_received: u64,
+    /// A reach whose sender is not one of MY children.
+    pub reach_misrouted: u64,
+    /// A reach from a node the directory does not place at that child.
+    pub reach_unattested: u64,
+    /// A reach older than the one already held.
+    pub reach_stale: u64,
     /// D-MOVE-2: a child's declared facts, admitted and held.
     pub child_facts_received: u64,
     /// Facts whose sender is not one of MY children.

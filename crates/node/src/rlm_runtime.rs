@@ -745,6 +745,44 @@ mod tests {
     }
 
     #[test]
+    fn a_reparent_the_spawner_refuses_to_record_still_moves_the_childs_cell() {
+        // TWO records say who a hull's parent is: the reconciler's own cell, which the running world
+        // reads every tick, and the launch record, which only a restart reads. The move applies to the
+        // cell at once. A spawner that cannot rewrite the launch record is WARNED about, never allowed
+        // to hold the move back — the live world must agree with the directory the same tick the
+        // hand-over commits.
+        //
+        // Example: the hull's exterior crosses from System 41 to System 42. The reconciler re-keys the
+        // hull's cell under System 42 and counts the move applied, even though the launcher refused to
+        // rewrite the hull's launch record.
+        let mut rlm = RlmReconcilerRes::new(RlmTuning::default(), Box::new(FailingSpawner));
+        let mut dir = DirectoryCore::new(DirectoryTuning::default());
+        let hull_entity = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 1, 1, 0);
+        let hull = RealmId::Ship(hull_entity);
+        let old = sys(41).child(vd_core::worldgen::level_of(hull));
+        rlm.ledger
+            .record_demand(&sys(42), DemandVerb::SpinUp, UniverseTick(1), Fence(1));
+        rlm.ledger
+            .record_demand(&old, DemandVerb::SpinUp, UniverseTick(5), Fence(1));
+        let _ = dir.grant(
+            DirectoryKey::Realm(hull),
+            vd_wire::seams::directory::AuthorityRef::Shard(NodeId(1_007)),
+            Fence(1),
+            UniverseTick(1),
+        );
+        let new = rlm
+            .reparent(hull, sys(42).lowered(), &dir)
+            .expect("the cell moves house");
+        assert_eq!(new, sys(42).child(vd_core::worldgen::level_of(hull)));
+        assert_eq!((rlm.reparents_applied, rlm.reparents_unresolved), (1, 0));
+        assert!(rlm.ledger.get(old.path()).is_none(), "the old cell is gone");
+        assert!(
+            rlm.ledger.get(new.path()).is_some(),
+            "the new cell is there"
+        );
+    }
+
+    #[test]
     fn a_child_that_starts_and_dies_without_registering_is_counted_as_a_failed_launch() {
         // THE RESPAWN LOOP, CLOSED (owner ruling 2026-08-24, slice S1).
         //
@@ -1177,7 +1215,8 @@ mod tests {
         dir.head(DirectoryKey::Realm(rid)).is_some()
     }
 
-    /// A spawner that always refuses — for the launch-failure backoff test.
+    /// A spawner that always refuses — for the launch-failure backoff test and for the reparent whose
+    /// launch record cannot be rewritten.
     struct FailingSpawner;
     impl RealmSpawner for FailingSpawner {
         fn spawn_realm(&self, _c: &RealmCoord, _t: UniverseTick) -> Result<NodeId, SpawnError> {
@@ -1188,6 +1227,11 @@ mod tests {
         }
         fn live_nodes(&self) -> std::collections::BTreeSet<NodeId> {
             std::collections::BTreeSet::new()
+        }
+        fn reparent_realm(&self, _n: NodeId, _c: &RealmCoord) -> Result<(), SpawnError> {
+            Err(SpawnError::LaunchFailed {
+                reason: "a refusing spawner keeps no launch record".into(),
+            })
         }
     }
 

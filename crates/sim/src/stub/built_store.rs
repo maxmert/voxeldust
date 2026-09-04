@@ -323,12 +323,10 @@ mod tests {
         // row — a property a test in this codebase found the hard way. A hull whose mass simply
         // vanished would fly wrong for ever and nothing would say so.
         let whole = encode_body(&a_body());
-        for cut in [4, whole.len() / 3, whole.len() / 2, whole.len() - 1] {
-            assert!(
-                decode_body(&whole[..cut]).is_err(),
-                "a row cut at {cut} of {} bytes must be refused",
-                whole.len()
-            );
+        let bytes = whole.len();
+        for cut in [4, bytes / 3, bytes / 2, bytes - 1] {
+            let refused = decode_body(&whole[..cut]).is_err();
+            assert!(refused, "a row cut at {cut} of {bytes} bytes is refused");
         }
     }
 
@@ -355,11 +353,8 @@ mod tests {
         // A body is written a handful of times per ship, ever, and read once at boot. A hundred bytes
         // there is free. The same hundred bytes on the per-tick movement lane would be fifty times a
         // second, per ship — which is why that lane is NOT framed.
-        assert!(body.len() < 200, "a body stays small: {} bytes", body.len());
-        assert!(
-            berth.len() < 200,
-            "a berth stays small: {} bytes",
-            berth.len()
-        );
+        let (body_b, berth_b) = (body.len(), berth.len());
+        assert!(body_b < 200, "a body stays small: {body_b} bytes");
+        assert!(berth_b < 200, "a berth stays small: {berth_b} bytes");
     }
 }

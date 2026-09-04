@@ -133,9 +133,7 @@ pub(crate) fn flush_exterior(
     // FROZEN: the drive is no longer applied, so the pose shipped stays the truth the destination
     // re-advances from — both sides coast at the same velocity until the hand-over commits, and a
     // thrust the pilot pushes in those ticks is lost rather than doubled.
-    if let Some(d) = driven.0.get_mut(&child) {
-        d.frozen = true;
-    }
+    driven.0.entry(child).and_modify(|d| d.frozen = true);
     let mut row = region;
     row.center = ParentCentre::ORIGIN; // the child's placement in MY frame is not the destination's to read
     row.parent = None;

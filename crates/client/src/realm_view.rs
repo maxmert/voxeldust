@@ -124,8 +124,14 @@ impl RealmView {
             return RealmVerdict::DropStale;
         }
         let mut any_applied = false;
+        // ★ A FAR ROW RIDES IN THE SKY'S FRAME (owner 2026-09-04, "proceed with all": the far-row
+        // placement): a realm too far to be turned exactly into the origin's frame is stated in
+        // the frame the star field is stated in — the sky anchor's — and is placed from the anchor
+        // the way the star cloud is. It is the one foreign frame that is not a stale feed.
+        let sky_frame = snap.sky_anchor.map(|a| a.frame);
         for row in snap.realms {
-            if standing_in.is_some_and(|own| row.pose.frame != own) {
+            let foreign = standing_in.is_some_and(|own| row.pose.frame != own);
+            if foreign && (Some(row.pose.frame) != sky_frame) {
                 self.foreign_space_rows += 1;
                 continue;
             }
@@ -415,6 +421,40 @@ mod tests {
         assert_eq!(v.realm_pose(RealmId::Planet(2), 10.0), None);
         // A same-epoch call is still a no-op either way.
         assert_eq!(v.swap_epoch(1, true), None);
+    }
+
+    /// ★ A FAR ROW in the sky anchor's frame is not a foreign-space row (2026-09-04): it folds
+    /// into its track; a row in any other frame the client does not stand in is still skipped.
+    #[test]
+    fn a_row_in_the_sky_anchors_frame_folds_while_another_foreign_frame_is_skipped() {
+        let mut v = RealmView::default();
+        let standing = FrameRef::SystemSpace { system_seed: 7 };
+        let sky = FrameRef::GalaxySpace { galaxy_seed: 1 };
+        let mut snap = frame(
+            1,
+            10,
+            vec![
+                (RealmId::System(9), pose(DVec3::X, 10)),
+                (RealmId::Planet(3), pose(DVec3::Y, 10)),
+            ],
+        );
+        snap.realms[0].pose.frame = sky;
+        snap.realms[1].pose.frame = FrameRef::SystemSpace { system_seed: 8 };
+        snap.sky_anchor = Some(StampedPose::at_rest(sky, DVec3::ZERO, UniverseTick(10)));
+        assert_eq!(
+            v.on_realm_snapshot(Some(standing), snap),
+            RealmVerdict::Apply
+        );
+        assert!(
+            v.realm_pose(RealmId::System(9), 10.0).is_some(),
+            "the far row folds"
+        );
+        assert_eq!(v.realm_pose(RealmId::Planet(3), 10.0), None);
+        assert_eq!(
+            v.foreign_space_rows(),
+            1,
+            "the other frame is still foreign"
+        );
     }
 
     /// THE EPOCH SWAP forgets EVERYTHING (placements + the feed counter): every stored value is a

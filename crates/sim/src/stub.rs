@@ -43,6 +43,7 @@ mod greeting;
 mod handoff;
 pub mod lineage;
 mod placement;
+pub mod reach;
 mod realm_head;
 mod regions;
 mod register;

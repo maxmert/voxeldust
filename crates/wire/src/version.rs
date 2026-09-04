@@ -301,7 +301,9 @@ pub const PROTO_MAJOR: u16 = 1;
 /// **28** — THE HAND-OVER NAMES ITS NODE (owner-approved 2026-09-04, item 4 of the flight plan):
 /// `ExteriorMoved` APPENDS `parent_node`, the commit's destination node, so a gateway opens the new
 /// parent's window at once. Mesh-only, one cluster build; the floor does not move.
-pub const PROTO_MINOR: u16 = 28;
+/// **29** — THE REACH (owner-approved: ruling 2026-09-02 R6, the rule of 2026-09-04): `ReachStated` (discriminant
+/// 43), a child's visibility reach by size and by light, to its parent, on change. Mesh-only.
+pub const PROTO_MINOR: u16 = 29;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -559,8 +561,10 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 28,
-            "minor 28 is THE HAND-OVER NAMES ITS NODE (owner-approved 2026-09-04): ExteriorMoved carries \
+            PROTO_MINOR, 29,
+            "minor 29 is THE REACH (owner ruling 2026-09-02 R6, built 2026-09-04): ReachStated (disc 43), \
+             a child's reach by size and by light to its parent, on change; \
+             minor 28 is THE HAND-OVER NAMES ITS NODE (owner-approved 2026-09-04): ExteriorMoved carries \
              the new parent's node, so a gateway opens the window at once; \
              minor 27 is THE PEER BOOK (D-RLM-6 mechanism C, built 2026-09-03): PeerLocate (disc 41) and \
              PeerLocated (disc 42), a node asking where an unbooked node listens and the orchestrator's \
@@ -658,7 +662,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.28");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.29");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is
