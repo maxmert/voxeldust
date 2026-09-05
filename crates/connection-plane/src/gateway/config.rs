@@ -365,5 +365,5 @@ pub(crate) fn window_keepalive_cadence(config: &GatewayConfig) -> u64 {
 /// windows on ([`window_keepalive_cadence`]) — subscriber, holder TTL and composer retention all
 /// breathe on one rhythm (`docs/design/window_lane.md` §2.6.7; owner law 3(a)).
 pub(crate) fn window_tuning(config: &GatewayConfig) -> window::WindowTuning {
-    window::WindowTuning::derive(window_keepalive_cadence(config))
+    window::WindowTuning::derive(window_keepalive_cadence(config), config.tick_hz)
 }

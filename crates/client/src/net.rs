@@ -1893,6 +1893,58 @@ mod tests {
         );
     }
 
+    /// ★ A SAME-EPOCH LEVEL RESTATES THE SCENE IN PLACE (2026-09-04): the gateway restates the
+    /// level on its keep-alive beat so a client that refused one can catch up. A client already
+    /// current replaces its scene with the restated rows and keeps every track — a same-epoch
+    /// level is a restatement, never a swap.
+    #[test]
+    fn a_same_epoch_level_restates_the_scene_and_keeps_the_tracks() {
+        use vd_core::pose::RealmId;
+        let mut c = core();
+        activate(&mut c);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(RealmId::System(7), 0, Vec::new()),
+        );
+        c.step(0.0);
+        assert!(c.state().render_snapshot().scene().is_empty());
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::RealmSnapshot,
+            realm_snapshot(1, 10, RealmId::Planet(7), 1.0e9),
+        );
+        c.step(0.0);
+        assert!(
+            c.state()
+                .realm_view
+                .realm_pose(RealmId::Planet(7), f64::INFINITY)
+                .is_some(),
+            "the track is held"
+        );
+        // The restated level at the SAME epoch, now naming the planet's row.
+        let row = scene_row(RealmId::Planet(7), Some(RealmId::System(7)), 10.0);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(RealmId::System(7), 0, vec![row]),
+        );
+        c.step(0.0);
+        assert_eq!(
+            c.state().render_snapshot().scene().len(),
+            1,
+            "the scene is the restated level"
+        );
+        assert!(
+            c.state()
+                .realm_view
+                .realm_pose(RealmId::Planet(7), f64::INFINITY)
+                .is_some(),
+            "and the track survived the restatement"
+        );
+        assert_eq!(c.state().decode_errors, 0);
+    }
+
     #[test]
     fn a_realm_snapshot_routes_streams_anchors_the_cursor_and_is_not_counted_ignored() {
         use vd_core::pose::RealmId;

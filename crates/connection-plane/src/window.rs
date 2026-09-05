@@ -65,18 +65,22 @@ pub struct WindowTuning {
     /// is the parent's own datum about a sleeping child, and expiring it would blank a star rather
     /// than shrink a system to a dot.
     pub look_ttl_ticks: u64,
+    /// The universe tick rate — seconds per tick for the closed-form advance of a HELD row
+    /// (2026-09-05): time is seconds, the rate is a knob passed in, never a global constant.
+    pub tick_hz: u32,
 }
 
 impl WindowTuning {
     /// Derive every bound from the one keep-alive beat (ticks). `beat` is already itself derived
     /// (`session_recheck_interval`, else tick-rate/2) — this only applies the 2-beats-+-1 law.
     #[must_use]
-    pub fn derive(beat_ticks: u64) -> WindowTuning {
+    pub fn derive(beat_ticks: u64, tick_hz: u32) -> WindowTuning {
         let two_beats_one = 2 * beat_ticks + 1;
         WindowTuning {
             ring_span_ticks: two_beats_one,
             hold_ttl_ticks: two_beats_one,
             look_ttl_ticks: two_beats_one,
+            tick_hz,
         }
     }
 }
@@ -730,6 +734,10 @@ pub struct Composed {
     /// at-or-before fallback's declared skew — 0 when every relay resolves at T exactly).
     /// G-RELAY-STAMP bounds it by one beat.
     pub relay_stamp_skew_ticks: u64,
+    /// The widest at-or-before skew a MOVING relayed row (velocity ≠ 0) was advanced over
+    /// (2026-09-05): the measurement behind the ballistic advance — a static row's skew costs
+    /// nothing, a mover's costs velocity × skew unless advanced.
+    pub relay_moving_skew_ticks: u64,
     /// C5 GAUGE (max): the deepest relayed subject composed, in levels below the forwarding
     /// author (2 = a relayed child's own interior — the carrier's whole arity; anything greater
     /// is an implementation climb bug, §3.3.4's world-independent tripwire).
@@ -767,6 +775,7 @@ fn pos_dev_cells(a: &StampedPose, b: &StampedPose) -> u64 {
 ///
 /// `levels[k]` must be the level stamped `t` of chain hop `k`; `prefix` bounds how far up the
 /// walk goes (the caller's fresh prefix — everything above holds, §2.6.4).
+#[cfg(test)]
 #[must_use]
 pub fn compose(
     origin: RealmId,
@@ -786,6 +795,7 @@ pub fn compose(
         prefix,
         ingests,
         None,
+        tests::TEST_TICK_HZ,
     )
 }
 
@@ -802,6 +812,7 @@ pub fn compose_in(
     prefix: usize,
     ingests: &[&WindowIngest],
     sky_frame: Option<FrameRef>,
+    tick_hz: u32,
 ) -> Composed {
     let mut out = Composed {
         at: t,
@@ -978,11 +989,20 @@ pub fn compose_in(
                 // The at-or-before identity: a row stamped AT its level's own stamp is the same
                 // row the child would state at `t` (fingerprint law, §3.7) and folds at `t`; a
                 // row stamped OFF its level keeps its stamp and refuses below (anti-vacuity).
+                // ★ A MOVING ROW IS ADVANCED OVER THE SKEW (2026-09-05, item 3): the fingerprint
+                // identity holds for a row at rest, but a moon in orbit relayed one tick behind
+                // the fold would draw velocity × skew behind its true place if it were only
+                // re-stamped. The closed-form ballistic advance (Category A — the one lawful
+                // cross-host re-advance) moves it by its own stated velocity over the skew; for a
+                // row at rest, or a zero skew, it is the re-stamp exactly. The widest skew any
+                // mover was advanced over is measured on `relay_moving_skew_ticks`.
+                if row.pose.vel != vd_core::glam::DVec3::ZERO {
+                    out.relay_moving_skew_ticks = out.relay_moving_skew_ticks.max(t.0 - r_at.0);
+                }
                 let pose_in = if row.pose.universe_tick == r_at {
-                    StampedPose {
-                        universe_tick: t,
-                        ..row.pose
-                    }
+                    let dt_s = (t.0 - r_at.0) as f64 / f64::from(tick_hz);
+                    row.pose
+                        .advanced_ballistic(vd_core::glam::DVec3::ZERO, dt_s, t)
                 } else {
                     row.pose
                 };
@@ -1327,6 +1347,35 @@ pub struct ShadowScene {
     pub swap_deferred_ticks: u64,
 }
 
+/// ★ A DEPARTED AUTHOR'S WHOLE SUBTREE (2026-09-04, the nineteenth flight: 12 → 9 → 12 boxes
+/// inside one second at a hand-over). The rows an author drew at its stratum are its own body,
+/// its direct children (their parent is the author), and — through a relayed interior — the
+/// grandchildren whose parent is one of those children. The hold used to keep the first two and
+/// drop the third, so a moon relayed through its planet blinked while the planets stayed. This
+/// admits rows whose parent chain, inside the stratum, leads to the author (or that state no
+/// parent — the root's own body), to a fixpoint bounded by the relay depth. Example: the hull
+/// leaves System 7 for the galaxy; the system's stratum holds the star, the planets AND the moons.
+#[must_use]
+pub fn author_subtree(rows: &[ComposedRow], stratum: usize, author: RealmId) -> Vec<ComposedRow> {
+    let mut admitted: BTreeSet<RealmId> = BTreeSet::from([author]);
+    loop {
+        let mut grew = false;
+        for r in rows.iter().filter(|r| r.stratum == stratum) {
+            let parent_admitted = r.parent.is_none_or(|p| admitted.contains(&p));
+            if parent_admitted && admitted.insert(r.realm) {
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    rows.iter()
+        .filter(|r| (r.stratum == stratum) & admitted.contains(&r.realm))
+        .cloned()
+        .collect()
+}
+
 impl ShadowScene {
     /// Advance the scene by one gateway tick: bump the epoch on a chain/origin change, apply the
     /// monotone-T guard, roll holds/dead-hops, and push the fresh fold (if any) onto the ring.
@@ -1416,15 +1465,7 @@ impl ShadowScene {
                     })
                     .map(|(i, old)| HeldStratum {
                         author: *old,
-                        rows: prev
-                            .rows
-                            .iter()
-                            .filter(|r| {
-                                (r.stratum == i)
-                                    & (r.parent.is_none_or(|p| p == *old) | (r.realm == *old))
-                            })
-                            .cloned()
-                            .collect(),
+                        rows: author_subtree(&prev.rows, i, *old),
                         held_since: prev.at,
                     })
                     .collect();
@@ -1467,18 +1508,10 @@ impl ShadowScene {
                 if self.held.iter().any(|h| h.author == *author) {
                     continue;
                 }
-                // The author's OWN rows from the last fold: its children (their parent is the
-                // author) and its own body (the row named after it). Never another author's rows
-                // that happened to sit at this stratum before a splice re-numbered the chain.
-                let rows: Vec<ComposedRow> = prev
-                    .rows
-                    .iter()
-                    .filter(|r| {
-                        (r.stratum == i)
-                            & (r.parent.is_none_or(|p| p == *author) | (r.realm == *author))
-                    })
-                    .cloned()
-                    .collect();
+                // The author's OWN rows from the last fold: its body, its children and, through
+                // a relay, their children (`author_subtree`). Never another author's rows that
+                // happened to sit at this stratum before a splice re-numbered the chain.
+                let rows: Vec<ComposedRow> = author_subtree(&prev.rows, i, *author);
                 self.held.push(HeldStratum {
                     author: *author,
                     rows,
@@ -1492,6 +1525,26 @@ impl ShadowScene {
         let before = self.held.len();
         self.held.retain(|h| fold.at.0 - h.held_since.0 <= ttl);
         report.dead_hops += (before - self.held.len()) as u64;
+        // ★ A HELD ROW KEEPS MOVING (2026-09-05, the twenty-first flight: *"when I approached the
+        // Star, and then flew away a bit from it, it jumped to another position for a sec and
+        // then turned back"*). A held row is a pose RELATIVE TO THE ORIGIN, and the origin — the
+        // pilot's hull — keeps flying through the hold; a row frozen at its old relative pose rides
+        // WITH the hull, and the client freezes a track at its newest sample (never coasts), so the
+        // star moved with the ship for the hop's round trip and snapped back when the fresh row
+        // landed. The composed row carries its relative velocity (the hop composed it), so the
+        // hold advances every held row by that velocity to the fold's tick — the closed-form
+        // ballistic advance, zero acceleration: Category A, the one lawful re-advance. A row at
+        // rest relative to the origin is unchanged but for its stamp. The error is bounded by the
+        // relative acceleration over the hold (a turn, a thrust change), never by the speed.
+        for h in &mut self.held {
+            for r in &mut h.rows {
+                let dt_s =
+                    fold.at.0.saturating_sub(r.pose.universe_tick.0) as f64 / f64::from(tuning.tick_hz);
+                r.pose = r
+                    .pose
+                    .advanced_ballistic(vd_core::glam::DVec3::ZERO, dt_s, fold.at);
+            }
+        }
         self.ring.push_back(fold);
         let newest = self.ring.back().expect("a fold was just pushed").at.0;
         while self
@@ -1574,7 +1627,7 @@ mod tests {
         FrameRef::SystemSpace { system_seed: 0 }
     }
     fn tuning() -> WindowTuning {
-        WindowTuning::derive(2) // beats of 2 ticks ⇒ span/ttl 5, cap 5×64
+        WindowTuning::derive(2, TEST_TICK_HZ) // beats of 2 ticks ⇒ span/ttl 5, cap 5×64
     }
 
     fn row(
@@ -1855,7 +1908,7 @@ mod tests {
 
     #[test]
     fn the_tuning_is_the_two_beats_plus_one_law() {
-        let t = WindowTuning::derive(10);
+        let t = WindowTuning::derive(10, TEST_TICK_HZ);
         assert_eq!(t.ring_span_ticks, 21);
         assert_eq!(t.hold_ttl_ticks, 21);
         assert_eq!(t.look_ttl_ticks, 21);
@@ -2191,7 +2244,7 @@ mod tests {
     #[test]
     fn a_relayed_sibling_interior_composes_through_the_parents_placement_at_its_own_stamp() {
         let (authors, leaf_level, parent_level) = two_level_fixture();
-        let t = WindowTuning::derive(2);
+        let t = WindowTuning::derive(2, TEST_TICK_HZ);
         // Stratum 0 (the origin's own window): no relays.
         let mut leaf = WindowIngest::default();
         assert_eq!(leaf.ingest_frame(leaf_level.clone(), &t), Ingested::Applied);
@@ -2265,7 +2318,7 @@ mod tests {
     #[test]
     fn the_relay_folds_edge_arms_each_refuse_their_own_class() {
         let (authors, leaf_level, parent_level) = two_level_fixture();
-        let t = WindowTuning::derive(2);
+        let t = WindowTuning::derive(2, TEST_TICK_HZ);
         let mut leaf = WindowIngest::default();
         assert_eq!(leaf.ingest_frame(leaf_level.clone(), &t), Ingested::Applied);
         let sibling = RealmId::System(9);
@@ -2367,7 +2420,7 @@ mod tests {
     #[test]
     fn the_relayed_descent_refuses_missing_levels_hops_and_frames() {
         let (authors, _leaf_level, parent_level) = two_level_fixture();
-        let t = WindowTuning::derive(2);
+        let t = WindowTuning::derive(2, TEST_TICK_HZ);
         let sysf = sys();
         // (a) ingests shorter than the walk: refused.
         assert!(descent_at(sysf, &authors, &[], 1, T).is_none());
@@ -2428,19 +2481,30 @@ mod tests {
     #[test]
     fn a_relayed_interior_is_membership_gated_and_each_refusal_class_counts_apart() {
         let (authors, leaf_level, parent_level) = two_level_fixture();
-        let t = WindowTuning::derive(2);
+        let t = WindowTuning::derive(2, TEST_TICK_HZ);
         let mut leaf = WindowIngest::default();
         assert_eq!(leaf.ingest_frame(leaf_level.clone(), &t), Ingested::Applied);
         let sibling = RealmId::System(9);
         let sibling_frame = FrameRef::SystemSpace { system_seed: 9 };
         let interior_at = |at: UniverseTick| {
-            vec![row(
-                RealmId::Planet(9),
-                FrameRef::PlanetCentered { planet_seed: 9 },
-                sibling_frame,
-                DVec3::new(40.0, 0.0, 0.0),
-                at,
-            )]
+            vec![
+                row(
+                    RealmId::Planet(9),
+                    FrameRef::PlanetCentered { planet_seed: 9 },
+                    sibling_frame,
+                    DVec3::new(40.0, 0.0, 0.0),
+                    at,
+                ),
+                // A MOVING sibling planet (2026-09-05): 10 m/s along +x.
+                RealmSnap {
+                    realm: RealmId::Planet(11),
+                    frame: FrameRef::PlanetCentered { planet_seed: 11 },
+                    pose: StampedPose {
+                        vel: DVec3::new(10.0, 0.0, 0.0),
+                        ..StampedPose::at_rest(sibling_frame, DVec3::new(50.0, 0.0, 0.0), at)
+                    },
+                },
+            ]
         };
         // (a) NOT a member: the interior is skipped entirely — no row, no refusal count.
         let mut parent = WindowIngest::default();
@@ -2512,9 +2576,20 @@ mod tests {
             2,
             &ingests3,
         );
-        assert_eq!(out3.relay_rows, 1, "the fallback composes, never refuses");
+        assert_eq!(out3.relay_rows, 2, "the fallback composes, never refuses");
         assert_eq!(out3.relay_stamp_missing, 0);
         assert_eq!(out3.relay_stamp_skew_ticks, 1, "one stamp of DECLARED skew");
+        // ★ THE MOVER IS ADVANCED OVER THE SKEW (2026-09-05): one tick at TEST_TICK_HZ (20 Hz)
+        // is 0.05 s; 10 m/s along +x moves it 0.5 m past its relayed place — and the gauge
+        // records the skew it was advanced over.
+        assert_eq!(out3.relay_moving_skew_ticks, 1);
+        let planet11 = out3
+            .rows
+            .iter()
+            .find(|r| r.realm == RealmId::Planet(11))
+            .expect("the moving interior row composes");
+        assert_eq!(pm(&planet11.pose), DVec3::new(350.5, 0.0, 0.0));
+        assert_eq!(planet11.pose.universe_tick, T);
         let planet9 = out3
             .rows
             .iter()
@@ -2574,7 +2649,7 @@ mod tests {
     #[test]
     fn g_relay_stamp_the_descent_refusal_arm_counts_apart_at_chain_index_one() {
         let (authors, leaf_level, parent_level) = two_level_fixture();
-        let t = WindowTuning::derive(2);
+        let t = WindowTuning::derive(2, TEST_TICK_HZ);
         let mut leaf = WindowIngest::default();
         assert_eq!(leaf.ingest_frame(leaf_level.clone(), &t), Ingested::Applied);
         let sibling = RealmId::System(9);
@@ -2732,6 +2807,7 @@ mod tests {
             2,
             &[],
             Some(galaxy_frame),
+            TEST_TICK_HZ,
         );
         assert_eq!((with_sky.rotated_refused, with_sky.far_rows), (0, 1));
         let far = with_sky
@@ -2751,6 +2827,7 @@ mod tests {
             2,
             &[],
             Some(FrameRef::GalaxySpace { galaxy_seed: 2 }),
+            TEST_TICK_HZ,
         );
         assert_eq!((other_sky.rotated_refused, other_sky.far_rows), (1, 0));
     }
@@ -2768,7 +2845,7 @@ mod tests {
         let galaxy_frame = FrameRef::GalaxySpace { galaxy_seed: 1 };
         let sibling = RealmId::System(9);
         let sibling_frame = FrameRef::SystemSpace { system_seed: 9 };
-        let t = WindowTuning::derive(2);
+        let t = WindowTuning::derive(2, TEST_TICK_HZ);
         let authors = vec![RealmId::System(7), GALAXY];
         // The hull's own realm is turned half a circle a trillion galaxy cells out: a lever no
         // millimetre step can turn exactly.
@@ -2831,6 +2908,7 @@ mod tests {
                 2,
                 &ingests,
                 sky,
+                TEST_TICK_HZ,
             )
         };
 
@@ -3275,6 +3353,9 @@ mod tests {
         }
     }
 
+    /// The fixtures' tick rate (a fixture value: seconds per tick for the relay advance).
+    pub(super) const TEST_TICK_HZ: u32 = 20;
+
     fn one_row(realm: RealmId, stratum: usize, t: UniverseTick) -> ComposedRow {
         ComposedRow {
             parent: None,
@@ -3363,7 +3444,9 @@ mod tests {
         );
         let _ = scene.advance(RealmId::System(7), &authors, Some(full), &t);
         assert!(scene.held.is_empty());
-        // Tick 101: the galaxy hop lags — stratum 1 HOLDS at its last composed rows (old stamp).
+        // Tick 101: the galaxy hop lags — stratum 1 HOLDS at its last composed rows, advanced to
+        // the fold's tick by their relative velocity (at rest here: the pose stands, the stamp
+        // moves — 2026-09-05).
         let partial = folded(
             UniverseTick(101),
             1,
@@ -3373,7 +3456,10 @@ mod tests {
         assert_eq!(r.holds, 1);
         assert_eq!(scene.held.len(), 1);
         assert_eq!(scene.held[0].author, GALAXY);
-        assert_eq!(scene.held[0].rows, vec![one_row(RealmId::System(9), 1, T)]);
+        assert_eq!(
+            scene.held[0].rows,
+            vec![one_row(RealmId::System(9), 1, UniverseTick(101))]
+        );
         assert_eq!(scene.held[0].held_since, UniverseTick(101));
         // Still held two ticks later (inside the TTL) — held_since anchored, not re-stamped.
         let partial = folded(
@@ -3628,6 +3714,84 @@ mod tests {
         assert!(!hop_pending(&lineage, 4, &[row(top, false)]));
     }
 
+    /// ★ A DEPARTED AUTHOR'S SUBTREE (2026-09-04): the hold admits the author's body, its direct
+    /// children, a relayed grandchild (parent = a child) and a parentless row of the stratum; it
+    /// refuses a row with a foreign parent and every row of another stratum.
+    #[test]
+    fn a_held_stratum_keeps_the_authors_whole_subtree_and_nothing_foreign() {
+        let author = RealmId::System(7);
+        let with_parent = |realm: RealmId, parent: Option<RealmId>, stratum: usize| ComposedRow {
+            parent,
+            ..one_row(realm, stratum, T)
+        };
+        let rows = vec![
+            with_parent(author, Some(GALAXY), 1),                       // the author's own body
+            with_parent(RealmId::Planet(7), Some(author), 1),           // a direct child
+            with_parent(RealmId::Station(7), Some(RealmId::Planet(7)), 1), // a relayed grandchild (a station in the planet's orbit)
+            with_parent(RealmId::Universe, None, 1),                    // parentless: the root
+            with_parent(RealmId::Planet(9), Some(RealmId::System(9)), 1), // a foreign parent
+            with_parent(RealmId::Planet(8), Some(author), 0),           // another stratum
+        ];
+        let held: Vec<RealmId> = author_subtree(&rows, 1, author)
+            .into_iter()
+            .map(|r| r.realm)
+            .collect();
+        assert_eq!(
+            held,
+            vec![author, RealmId::Planet(7), RealmId::Station(7), RealmId::Universe],
+            "body, child, grandchild and the root; never a foreign parent's row or another stratum"
+        );
+        assert!(author_subtree(&rows, 2, author).is_empty(), "an empty stratum holds nothing");
+    }
+
+    /// ★ A HELD ROW KEEPS MOVING (2026-09-05): a departed stratum's row with a relative velocity is
+    /// advanced by that velocity to every later fold's tick while it is held — the star does not
+    /// ride with the hull through the hop's round trip. At TEST_TICK_HZ (20 Hz) a row at 100 m/s
+    /// moves 5 m per tick; over three held ticks, 15 m.
+    #[test]
+    fn a_held_row_advances_by_its_relative_velocity_while_it_is_held() {
+        let tuning = tuning();
+        let mut scene = ShadowScene::default();
+        let authors = vec![RealmId::System(7), GALAXY];
+        let moving = ComposedRow {
+            parent: Some(GALAXY),
+            pose: StampedPose {
+                vel: DVec3::new(100.0, 0.0, 0.0),
+                ..StampedPose::at_rest(sys(), DVec3::new(1000.0, 0.0, 0.0), T)
+            },
+            ..one_row(RealmId::System(9), 1, T)
+        };
+        let fold = Composed {
+            at: T,
+            rows: vec![one_row(RealmId::Planet(7), 0, T), moving],
+            ..Composed::default()
+        };
+        let r = scene.advance(RealmId::System(7), &authors, Some(fold), &tuning);
+        assert!(r.epoch_bumped);
+        // The galaxy's stratum stops being fresh: fold only the leaf for three ticks.
+        for i in 1..=3u64 {
+            let t = UniverseTick(T.0 + i);
+            let leaf_only = Composed {
+                at: t,
+                rows: vec![one_row(RealmId::Planet(7), 0, t)],
+                fresh_levels: 1,
+                ..Composed::default()
+            };
+            let _ = scene.advance(RealmId::System(7), &authors, Some(leaf_only), &tuning);
+            let held = scene
+                .drawn_rows()
+                .find(|r| r.realm == RealmId::System(9))
+                .expect("the sibling system is held");
+            assert_eq!(held.pose.universe_tick, t, "the held row is stamped at the fold's tick");
+            assert_eq!(
+                pm(&held.pose),
+                DVec3::new(1000.0 + 5.0 * i as f64, 0.0, 0.0),
+                "…and advanced by its relative velocity"
+            );
+            assert_eq!(held.pose.vel, DVec3::new(100.0, 0.0, 0.0));
+        }
+    }
+
     /// THE LOOK SHELF (2026-09-04): a look emitted at T is carried into a later level whose
     /// windows state none (the hand-over churn), for exactly the hold TTL; a row that left the
     /// drawn set is never filled; a live look refreshes the shelf; past the TTL the look is gone.
@@ -3793,8 +3957,9 @@ mod tests {
             .collect();
         assert_eq!(
             held,
-            vec![(GALAXY, T), (RealmId::System(9), T)],
-            "the held stratum's rows keep their OLD stamp, declared per row (§2.6.4)"
+            vec![(GALAXY, UniverseTick(101)), (RealmId::System(9), UniverseTick(101))],
+            "the held stratum's rows ADVANCE to the fold's tick by their own relative velocity \
+             (2026-09-05; at rest here, so only the stamp moves)"
         );
     }
 

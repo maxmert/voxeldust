@@ -246,6 +246,8 @@ pub struct GatewayView {
     pub window_origin_swap_deferred: u64,
     /// Origin swaps forced after one hold of deferral (2026-09-04).
     pub window_origin_swap_forced: u64,
+    /// Full levels restated on the keep-alive beat (2026-09-04).
+    pub scene_levels_restated: u64,
     /// Slice B — rows whose stated frame was not their level's own: alien, dropped.
     pub window_alien_rows: u64,
     /// Slice B — chain levels whose hop was absent/mismatched/rosterless: prefix capped there.
@@ -295,6 +297,8 @@ pub struct GatewayView {
     pub window_relay_unrostered: u64,
     /// C5 GAUGE (max) — the at-or-before fallback's declared skew, ticks (bounded by one beat).
     pub window_relay_stamp_skew_ticks: u64,
+    /// The widest skew a moving relayed row was advanced over (2026-09-05).
+    pub window_relay_moving_skew_ticks: u64,
     /// C5 GAUGE (max) — deepest relayed subject, levels below its forwarding author (2 = the
     /// carrier's whole arity; more is an implementation climb bug).
     pub window_relay_depth_max: u64,
@@ -772,6 +776,7 @@ mod tests {
                 window_looks_carried: 54,
                 window_origin_swap_deferred: 55,
                 window_origin_swap_forced: 56,
+                scene_levels_restated: 57,
                 window_alien_rows: 52,
                 window_hop_invalid: 53,
                 window_unresolved_standing: 54,
@@ -793,6 +798,7 @@ mod tests {
                 window_relay_stamp_missing: 83,
                 window_relay_unrostered: 84,
                 window_relay_stamp_skew_ticks: 85,
+                window_relay_moving_skew_ticks: 58,
                 window_relay_depth_max: 86,
                 window_looks_pruned: 80,
                 window_relay_levels_pruned: 81,

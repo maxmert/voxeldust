@@ -439,6 +439,8 @@ pub(crate) fn compose_scenes_pass(
     let mut chains_held = 0u64;
     let mut sky_anchored = 0u64;
     let mut stamp_gap_max = 0u64;
+    let restate_due =
+        vd_sim::directory::due_this_tick(window_keepalive_cadence(config), clock.local_tick.0);
     for session in by_session.values_mut() {
         if !matches!(session.phase, SessionPhase::Active { .. }) {
             continue;
@@ -533,6 +535,7 @@ pub(crate) fn compose_scenes_pass(
             & (session.shadow.origin == Some(origin))
             & (session.shadow.chain_authors == authors)
             & t.is_some();
+        let mut level_shipped = false;
         if !already_current {
             let fold = t.map(|t| {
                 if let Some((shared, verified)) = memo.get_mut(&(origin, t.0)) {
@@ -548,6 +551,7 @@ pub(crate) fn compose_scenes_pass(
                             &ingests,
                             prefix,
                             config.sky_frame,
+                            config.tick_hz,
                         );
                         stats.window_fold_divergence += fold_divergence(shared, &per_session);
                         *verified = true;
@@ -562,6 +566,7 @@ pub(crate) fn compose_scenes_pass(
                         &ingests,
                         prefix,
                         config.sky_frame,
+                        config.tick_hz,
                     );
                     stats.window_folds += 1;
                     stats.window_composed_rows += fold.rows.len() as u64;
@@ -572,6 +577,9 @@ pub(crate) fn compose_scenes_pass(
                     stats.window_relay_stamp_skew_ticks = stats
                         .window_relay_stamp_skew_ticks
                         .max(fold.relay_stamp_skew_ticks);
+                    stats.window_relay_moving_skew_ticks = stats
+                        .window_relay_moving_skew_ticks
+                        .max(fold.relay_moving_skew_ticks);
                     stats.window_relay_depth_max =
                         stats.window_relay_depth_max.max(fold.relay_depth_max);
                     stats.window_instant_mismatch += fold.instant_refused;
@@ -645,6 +653,7 @@ pub(crate) fn compose_scenes_pass(
                     },
                 );
                 stats.scene_levels_sent += 1;
+                level_shipped = true;
             } else if let Some(t_now) = t_advanced {
                 // The reliable DELTA on membership/body change at a stable epoch (§2.6.5 step 8):
                 // diff the drawn (realm → bag) content against the send-on-change baseline. Pose
@@ -741,6 +750,42 @@ pub(crate) fn compose_scenes_pass(
                 }
             }
         }
+        if restate_due && !level_shipped && session.shadow.last_t.is_some() {
+            // ★ THE LEVEL IS RESTATED ON THE KEEP-ALIVE BEAT (2026-09-04, the sixteenth
+            // flight's lesson): a client that refused one level (it was malformed, or its
+            // decode failed) stays at its old epoch and holds every later datagram until the
+            // next epoch bump — a freeze nobody on the server can see. The beat re-states the
+            // whole level at the CURRENT epoch, so a client behind catches up within two
+            // beats, and a client already current replaces its scene in place (same epoch:
+            // tracks kept, nothing forgotten). The baseline resets with it, so the next delta
+            // diffs against what was actually stated. Example: the client refuses one level
+            // at the hand-over into the star realm; half a second later the beat restates it,
+            // and the pilot sees at most a short hold, never a frozen sky.
+            let t_level = session.shadow.last_t.unwrap_or(vd_core::UniverseTick(0));
+            let mut rows = window::scene_level_rows(
+                origin,
+                origin_frame,
+                t_level,
+                &authors,
+                &ingests,
+                &session.shadow,
+            );
+            stats.window_looks_carried +=
+                session
+                    .look_shelf
+                    .carry(&mut rows, t_level, tuning.hold_ttl_ticks);
+            session.scene_sent = rows.iter().map(|r| (r.realm, r.bag.clone())).collect();
+            push_control(
+                outbox,
+                session.client,
+                &ServerControlMsg::RealmRegistry {
+                    origin,
+                    origin_epoch: session.shadow.origin_epoch,
+                    rows,
+                },
+            );
+            stats.scene_levels_restated += 1;
+        }
         session.shadow.chain_covers_lineage =
             !session.lineage.is_empty() & (chain.hops.len() == session.lineage.len());
     }
@@ -759,6 +804,7 @@ pub(crate) fn fold_divergence(shared: &window::Composed, per_session: &window::C
 
 /// One fresh fold: resolve each fresh chain level's stamped-`t` window level and run the
 /// composer. Monomorphic straight-line (HR5) — the branching lives in `window::compose`.
+#[allow(clippy::too_many_arguments)]
 fn compose_fresh(
     origin: RealmId,
     origin_frame: FrameRef,
@@ -767,6 +813,7 @@ fn compose_fresh(
     ingests: &[&window::WindowIngest],
     prefix: usize,
     sky_frame: Option<FrameRef>,
+    tick_hz: u32,
 ) -> window::Composed {
     let levels: Vec<&window::WindowLevel> = ingests[..prefix]
         .iter()
@@ -784,6 +831,7 @@ fn compose_fresh(
         prefix,
         ingests,
         sky_frame,
+        tick_hz,
     );
     if let Some(sky) = sky_frame {
         window::place_sky_anchor(&mut fold, origin_frame, sky);

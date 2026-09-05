@@ -85,6 +85,7 @@ pub fn gateway_view(
         window_looks_carried,
         window_origin_swap_deferred,
         window_origin_swap_forced,
+        scene_levels_restated,
         window_alien_rows,
         window_hop_invalid,
         window_unresolved_standing,
@@ -106,6 +107,7 @@ pub fn gateway_view(
         window_relay_stamp_missing,
         window_relay_unrostered,
         window_relay_stamp_skew_ticks,
+        window_relay_moving_skew_ticks,
         window_relay_depth_max,
         window_looks_pruned,
         window_relay_levels_pruned,
@@ -171,6 +173,7 @@ pub fn gateway_view(
         window_looks_carried,
         window_origin_swap_deferred,
         window_origin_swap_forced,
+        scene_levels_restated,
         window_alien_rows,
         window_hop_invalid,
         window_unresolved_standing,
@@ -192,6 +195,7 @@ pub fn gateway_view(
         window_relay_stamp_missing,
         window_relay_unrostered,
         window_relay_stamp_skew_ticks,
+        window_relay_moving_skew_ticks,
         window_relay_depth_max,
         window_looks_pruned,
         window_relay_levels_pruned,
@@ -312,6 +316,7 @@ mod tests {
             window_looks_carried: 54,
             window_origin_swap_deferred: 55,
             window_origin_swap_forced: 56,
+            scene_levels_restated: 57,
             window_alien_rows: 52,
             window_hop_invalid: 53,
             window_unresolved_standing: 54,
@@ -337,6 +342,7 @@ mod tests {
             window_relay_stamp_missing: 83,
             window_relay_unrostered: 84,
             window_relay_stamp_skew_ticks: 85,
+            window_relay_moving_skew_ticks: 58,
             window_relay_depth_max: 86,
             window_looks_pruned: 80,
             window_relay_levels_pruned: 81,
@@ -412,6 +418,7 @@ mod tests {
         assert_eq!(view.window_looks_carried, 54);
         assert_eq!(view.window_origin_swap_deferred, 55);
         assert_eq!(view.window_origin_swap_forced, 56);
+        assert_eq!(view.scene_levels_restated, 57);
         assert_eq!(view.window_alien_rows, 52);
         assert_eq!(view.window_hop_invalid, 53);
         assert_eq!(view.window_unresolved_standing, 54);
@@ -433,6 +440,7 @@ mod tests {
         assert_eq!(view.window_relay_stamp_missing, 83);
         assert_eq!(view.window_relay_unrostered, 84);
         assert_eq!(view.window_relay_stamp_skew_ticks, 85);
+        assert_eq!(view.window_relay_moving_skew_ticks, 58);
         assert_eq!(view.window_relay_depth_max, 86);
         assert_eq!(view.window_looks_pruned, 80);
         assert_eq!(view.window_relay_levels_pruned, 81);

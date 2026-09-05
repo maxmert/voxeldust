@@ -6136,7 +6136,7 @@ fn a_drained_parked_body_older_than_the_held_statement_counts_stale() {
         (BodyStmt::Marker { luma: vec![1] }, vd_core::UniverseTick(4)),
     );
     let mut stats = GatewayStats::default();
-    drain_parked(&mut held, &window::WindowTuning::derive(2), &mut stats);
+    drain_parked(&mut held, &window::WindowTuning::derive(2, config().tick_hz), &mut stats);
     assert_eq!(
         stats.window_body_stale, 1,
         "the drained straggler refuses — newest wins"
@@ -9407,6 +9407,60 @@ fn the_fold_carries_the_sky_anchor_to_the_client_when_the_gateway_names_the_skys
         UniverseTick(1001),
         "stamped at the fold's own tick"
     );
+}
+
+#[test]
+fn the_level_is_restated_on_the_keep_alive_beat_at_the_current_epoch() {
+    // ★ 2026-09-04 (the sixteenth flight's lesson): a client that refused one level stayed at its
+    // old epoch and held every later datagram until the next epoch bump. The beat restates the
+    // whole level at the CURRENT epoch, so a client behind catches up within two beats, and a
+    // client already current replaces its scene in place.
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login(); // lineage [Universe, Galaxy, System(7)]; Occupants window 1 on SHARD
+    let levels = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<u64> {
+        decode_controls(sent, CLIENT)
+            .into_iter()
+            .filter_map(|m| match m {
+                ServerControlMsg::RealmRegistry { origin_epoch, .. } => Some(origin_epoch),
+                _ => None,
+            })
+            .collect()
+    };
+    // The login shipped its swap level (epoch 1); a first fold off the beat (local tick 1)
+    // ships no new level and restates nothing.
+    let levels_at_login = rig.stats().scene_levels_sent;
+    let sent = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::RealmSnapshot,
+        &leaf_frame(WindowId(1), 1000),
+    )]);
+    assert_eq!(levels(&sent), Vec::<u64>::new(), "no epoch bump: no level");
+    assert_eq!(rig.stats().scene_levels_restated, 0);
+    assert_eq!(rig.stats().scene_levels_sent, levels_at_login);
+    let epoch = rig.world.resource::<GatewaySessions>().by_session[&sid]
+        .shadow
+        .origin_epoch;
+    let sent = rig.tick(vec![]);
+    assert_eq!(levels(&sent), Vec::<u64>::new());
+    // THE BEAT: the local tick is a multiple of the keep-alive cadence — the level is restated
+    // at the SAME epoch, counted, with no epoch bump.
+    let cadence = super::window_keepalive_cadence(&config());
+    rig.world.resource_mut::<ClockSample>().local_tick = TickId(cadence);
+    let sent = rig.tick(vec![]);
+    assert_eq!(levels(&sent), vec![epoch], "the beat restates the level at the current epoch");
+    assert_eq!(rig.stats().scene_levels_restated, 1);
+    assert_eq!(rig.stats().scene_levels_sent, levels_at_login, "a restate is not a new level");
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().by_session[&sid]
+            .shadow
+            .origin_epoch,
+        epoch
+    );
+    // Off the beat again: quiet.
+    rig.world.resource_mut::<ClockSample>().local_tick = TickId(cadence + 1);
+    let sent = rig.tick(vec![]);
+    assert_eq!(levels(&sent), Vec::<u64>::new());
+    assert_eq!(rig.stats().scene_levels_restated, 1);
 }
 
 #[test]

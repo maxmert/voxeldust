@@ -235,6 +235,9 @@ pub struct GatewayStats {
     pub window_origin_swap_deferred: u64,
     /// Origin swaps forced after a whole hold of deferral (a hop that never confirmed).
     pub window_origin_swap_forced: u64,
+    /// Full levels restated on the keep-alive beat at the current epoch (2026-09-04): the
+    /// recovery a client that refused a level needs, and the baseline reset for the next delta.
+    pub scene_levels_restated: u64,
     /// Slice B — rows dropped because their stated tail frame was not their level's own frame
     /// (or an unknown-frame refusal from the fold): alien, dropped, counted (§2.6.6).
     pub window_alien_rows: u64,
@@ -278,6 +281,8 @@ pub struct GatewayStats {
     /// C5 GAUGE (max): the at-or-before fallback's declared skew, in ticks (G-RELAY-STAMP
     /// bounds it by one keep-alive beat).
     pub window_relay_stamp_skew_ticks: u64,
+    /// The widest skew a MOVING relayed row was advanced over (2026-09-05, item 3).
+    pub window_relay_moving_skew_ticks: u64,
     /// C5 GAUGE (max): the deepest relayed subject composed, in levels below its forwarding
     /// author — 2 is the carrier's whole arity; more is an implementation climb bug (§3.3.4).
     pub window_relay_depth_max: u64,

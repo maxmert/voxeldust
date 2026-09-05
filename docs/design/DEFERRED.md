@@ -5100,8 +5100,63 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   deferred` 1, `window_origin_swap_forced` 0, `window_looks_carried` 24, three hand-overs, the star
   drawn across each. RESIDUAL (sub-sample): at the 21:58:48 hand-over the box count dipped 12 → 9 → 12
   inside one second — three rows whose parent is not the departed author (a relayed interior's
-  grandchildren) are not held by the departed stratum's filter. Owed: hold a departed author's
-  whole subtree (rows whose parent chain leads to the author), not only its direct rows.
+  grandchildren) are not held by the departed stratum's filter. BUILT (2026-09-05, Step 12):
+  `window::author_subtree` — a held stratum admits the author's body, its children and, to a
+  fixpoint bounded by the relay depth, the rows whose parent chain inside the stratum leads to the
+  author (or that state no parent, the root); a foreign parent's row and another stratum's rows are
+  refused. Used at both hold sites (the departed author and the fresh boundary). Pinned by
+  `a_held_stratum_keeps_the_authors_whole_subtree_and_nothing_foreign`.
+  ★ THE LEVEL IS RESTATED ON THE KEEP-ALIVE BEAT (2026-09-05, Step 12; the sixteenth flight's owed
+  hardening). On each beat (`window_keepalive_cadence`, off the cost-discipline block so a quiet tick
+  restates too), a session with a composed scene gets its whole level again at the CURRENT epoch,
+  through the look shelf, and the delta baseline resets with it; a tick that shipped a swap level
+  does not restate. A client behind (it refused one level) catches up within two beats; a client
+  current replaces its scene in place and keeps every track (a same-epoch level is a restatement,
+  never a swap — `swap_epoch` returns None at the same epoch). Counter `scene_levels_restated`.
+  Cost: one level per session per beat, ~12 rows today. Pinned by the gateway's
+  `the_level_is_restated_on_the_keep_alive_beat_at_the_current_epoch` and the client's
+  `a_same_epoch_level_restates_the_scene_and_keeps_the_tracks`. VERIFY IN FLIGHT: no 12 → 9 → 12 dip
+  at a hand-over; `scene_levels_restated` ≈ two per second per session; no decode error.
+  ★ THE TWENTIETH FLIGHT (2026-09-05, owner: *"feels better"*). MEASURED at the client (10 Hz): the
+  two hand-overs at 08:52:03 and 08:52:12 show NO box transition at all (12 boxes held through both;
+  the 12 → 9 → 12 dip is gone); `scene_levels_restated` 464 over ~3.5 min ≈ 2.2/s; deferred 1,
+  forced 0, looks carried 45; no decode error.
+  ★ ITEM 3 — A MOVING RELAYED ROW IS ADVANCED OVER ITS SKEW (2026-09-05, Step 12). The relay fold
+  resolves a relayed level at-or-before the fold's tick and re-stamps its rows to that tick under the
+  fingerprint identity (a stale stamp ⇒ byte-identical rows). That identity holds for a row at rest;
+  a mover relayed one tick behind would draw velocity × skew behind its true place. Now the row is
+  advanced by its own stated velocity over the skew with the closed-form ballistic advance
+  (`StampedPose::advanced_ballistic`, zero acceleration — Category A, the one lawful cross-host
+  re-advance); for a row at rest or a zero skew it is the re-stamp exactly. The gateway's tick rate
+  reaches the composer as a parameter (`compose_in(.., tick_hz)`; the tests' wrapper `compose` is
+  `#[cfg(test)]` with a fixture rate). Gauge `relay_moving_skew_ticks` / `window_relay_moving_skew_
+  ticks`: the widest skew a mover was advanced over. Pinned in
+  `a_relayed_interior_is_membership_gated_and_each_refusal_class_counts_apart` (a 10 m/s sibling
+  planet one tick behind lands 0.5 m ahead at 20 Hz). MEASURE ON THE CLUSTER: the mover gauge with a
+  pilot standing in System 7 (the static gauge reads 25 = one beat; the mover gauge must read the
+  relay's real lag, 0–2 ticks). MEASURED (2026-09-05, a headless pilot standing in System 7 for
+  90 s): `window_relay_stamp_skew_ticks` 26 (one beat — the static rows), `window_relay_moving_
+  skew_ticks` 2 (the movers relay near per-tick; the advance covers the two ticks), 17,530 relay
+  rows composed, `window_instant_mismatch` 0. Item 3 CLOSED.
+  ★ THE TWENTY-FIRST FLIGHT (2026-09-05, owner: *"way smoother, but when I approached the Star, and
+  then flew away a bit from it, it jumped to another position for a sec and then turned back"*).
+  ROOT CAUSE, from the code (the poll recorded no star position — it does now, `star_center`): the
+  hand-over back into System 7 makes the star a DEPARTED author; its stratum is held at its last
+  composed pose, which is a pose RELATIVE TO THE ORIGIN — the pilot's hull, which keeps flying at
+  warp through the hop's round trip. A held row frozen at its old relative pose rides WITH the hull,
+  and the client freezes a track at its newest sample (it never coasts), so the star moved with the
+  ship for the hold and snapped back when the fresh row landed. Near the star the hull's displacement
+  over the hold is comparable to the distance, which is why it was a jump here and invisible at the
+  galaxy hand-over. FIXED: a held row is advanced to every later fold's tick by its own composed
+  relative velocity (the hop composed it: `transfer_frame` carries velocity) with the closed-form
+  ballistic advance, zero acceleration — Category A, the one lawful re-advance; `WindowTuning.tick_hz`
+  carries the rate. A row at rest relative to the origin only moves its stamp. The held rows' stamp is
+  now the fold's tick, not the old one (§2.6.4's "old stamps declared" clause is superseded by the
+  advance). Pinned by `a_held_row_advances_by_its_relative_velocity_while_it_is_held` (100 m/s, 5 m
+  per tick at 20 Hz over three held ticks); the two fixtures that pinned the old stamp re-pinned.
+  Error bound: the relative ACCELERATION over the hold (a turn, a thrust change), never the speed.
+  VERIFY IN FLIGHT: approach the star, fly away; `star_center` in the poll must move continuously
+  through the hand-over second.
 
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:
@@ -5161,6 +5216,20 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
     stale stamp (the ~12/s `window_instant_mismatch`). Flight OWED: the ninth.
   - **R9 step 6 / R8 item 1, the second half** — the galaxy's tick was 61 ms mean against 20 ms; the lookup fold, the sphere filter, the query memo and (2026-09-04) the R*-tree index each took a lever — see D-MOVE-2's 2026-09-04 status for the tree. The per-candidate cost (~22 µs each: a `RealmCoord::child` allocation, three `BTreeMap` inserts, the interest emitter) and the 11,275 candidates one centre occupant collects on the seed-0 world (index cell 61 ly, because a system's wake band is its gravitational bound × 76 — the widest is 18 ly) are the two levers. Neither is a number to argue: the probe `measure_the_galaxy_shards_tick_against_its_census` (ignored, hand-run) prints both.
   - **The band re-solve (D-MOVE-3)** is what makes the index cell small; it is the owner's open item and is NOT touched here.
+  - ★ **RE-MEASURED 2026-09-05 (item 5 of the owner's list) — the 61 ms / 11,275 figures above are STALE.** They
+    predate the lookup fold, the sphere filter, the query memo, the R*-tree index and the reach re-band (the
+    galaxy excludes its children's LIGHT reach — it draws every star itself — so a system's band is its disc
+    plus its planets' reaches, not 76 × its gravitational bound). The probe
+    `measure_the_galaxy_shards_tick_against_its_census` on this tree, release: the galaxy boots 279,380 direct
+    children in 1.0 s; a tick with one occupant at the origin is 20 µs and visits 5 candidates; the widest
+    child extent is 2.24e15 m (0.24 ly); an empty tick is 2 µs. LIVE, the dev cluster: the galaxy shard's
+    pace line reads mean 0.10–0.15 ms with 2 candidates (a headless pilot standing in System 7, 90 s), and the
+    sixth owner flight's status (2026-09-04, warp through the galaxy) read every shard under 0.12 ms mean with
+    the galaxy asking the tree for 3 candidates. Budget 20 ms. Item 5 is CLOSED as measured; the two levers
+    named above stay valid as levers but nothing binds today. UNMEASURED today: a warp leg's pace line on this
+    exact tree (the agent flight script did not board the hull — its `walk_to` returned a state dump instead
+    of walking, script drift, not a server fault); the owner's next flight supplies it (read the galaxy's
+    `tick pace` lines in `realm-logs/realm-<galaxy node>.log`, `OVER BUDGET` must stay 0).
   - **The second subject of the gate** — the planet subject is `#[ignore]`d with its measurement (a walking occupant at 1.0e3 m/s cannot reach a planet 6.1e10 m away; the governor is deleted). It runs when a hull flies there (M-C) or the spawn moves (G10). The look/acceptance gates that fly the same leg are in the same state and were NOT re-run in this pass — UNMEASURED.
   - **A static attach onto a BUILT realm** still gets a one-realm chain, counted (`attach_lineage_unresolved`). A static attach onto a SEEDED realm now derives the whole chain from the gateway's own forest (2026-09-02, found by the star-sky gate on the dual cluster: 233,220 stars held, none drawn, `sky_anchor = None`); the flown path (login + crossing) never needed it.
 - **PRE-EXISTING REDS, measured on the previous commit (41b0ba0), NOT introduced here:** `flight_table` (two tests: a leg that holds no cruise under the deleted governor, and a boundary count pinned at 51 on a three-system world that now counts 3,500,645 bodies), `dual_cluster_crossing_smoke` (the same no-cruise leg), `ship_flight_e2e::a_ship_states_a_push...` (the test never plants the hull's `OwnBody`, which the last commit made a gate), and `frame_conversion_e2e::no_level_of_the_chain_can_place_itself...` (the test plants a second planet under the star system on that very shard and expects the system not to place it — identical left/right on the previous commit, built and run in a scratch checkout 2026-09-02). Also: `frame_conversion_e2e::the_linear_carry_chord_error_sizes_the_placement_skew_cap` regenerates the whole 3.5M-body forest inside its own body and ran 18+ minutes at full CPU without finishing — skipped in this pass, the quadratic shape this arc has removed elsewhere.
