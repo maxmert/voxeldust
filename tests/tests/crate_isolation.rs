@@ -159,6 +159,73 @@ fn sl4_the_crossing_path_cannot_name_a_motion() {
     }
 }
 
+/// ★ SL1 CLAUSE 5 — THE DEPENDENCY FENCE (owner reversal 2026-08-24; built 2026-09-05, `D-SL1-2`
+/// fence 2). The PLACEMENT, CONTAINMENT and CROSSING machinery may not NAME a realm's own
+/// position. The datum a realm is told about itself does not exist yet; its vocabulary does
+/// (`vd_core::pose::SL1_TOLD_PLACEMENT_VOCABULARY`), so the fence stands BEFORE the reading, as
+/// the ledger demands ("do not build the reading before the fences"). Enforced as a source scan
+/// of the machinery's modules, the same discipline as the wire vocabulary pin — and with an
+/// OBSERVED-FAILING CONTROL built in: the scanner is run over a planted offending line and must
+/// catch it, so a scanner that goes blind fails this test rather than passing it vacuously.
+/// Example: the containment detector may read where a CHILD is (the parent authored that row);
+/// it may never read where THIS realm is — a re-home decided from a self-position is the exact
+/// defect of 2026-08-05.
+const SL1_FENCED_MODULES: &[&str] = &[
+    "crates/core/src/frame.rs",
+    "crates/core/src/placement.rs",
+    "crates/sim/src/stub/containment.rs",
+    "crates/sim/src/stub/placement.rs",
+    "crates/sim/src/stub/conversion.rs",
+    "crates/sim/src/stub/crossing_receive.rs",
+    "crates/sim/src/stub/exterior.rs",
+    "crates/sim/src/stub/saga_arms.rs",
+    "crates/sim/src/stub/transient.rs",
+];
+
+fn sl1_offending_lines(source: &str) -> Vec<(usize, String)> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            vd_core::pose::SL1_TOLD_PLACEMENT_VOCABULARY
+                .iter()
+                .any(|word| line.contains(word))
+        })
+        .map(|(i, line)| (i + 1, line.trim().to_owned()))
+        .collect()
+}
+
+#[test]
+fn sl1_the_placement_containment_and_crossing_machinery_cannot_name_a_realms_own_position() {
+    // The control first: the scanner must catch a planted offence, or nothing below means anything.
+    let planted = "fn decide(own: &ToldPlacement) {}\n";
+    assert_eq!(
+        sl1_offending_lines(planted),
+        vec![(1, planted.trim().to_owned())],
+        "the SL1 scanner is blind to its own vocabulary"
+    );
+    assert!(
+        sl1_offending_lines("fn decide(child: &FramePlacement) {}\n").is_empty(),
+        "a child's authored placement is lawful to read"
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the tests crate sits in the workspace root");
+    for module in SL1_FENCED_MODULES {
+        let source = std::fs::read_to_string(root.join(module))
+            .unwrap_or_else(|e| panic!("SL1 fence names {module}, which is unreadable: {e}"));
+        let offending = sl1_offending_lines(&source);
+        assert_eq!(
+            offending,
+            Vec::new(),
+            "SL1 VIOLATION in {module}: the placement/containment/crossing machinery names a \
+             realm's OWN position. A realm is told where it is and holds it as an instrument; the \
+             machinery that places, contains and hands over reads the rows the PARENT authored \
+             about its children, never where this realm itself is."
+        );
+    }
+}
+
 #[test]
 fn the_window_composer_cannot_name_a_motion_or_generate_a_world() {
     // THE WINDOW LANE's structural guard 1 (docs/design/window_lane.md §2.6.1, the T1

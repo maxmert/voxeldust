@@ -109,7 +109,10 @@ fn a_released_static_child_leaves_its_parents_book_and_an_adopted_one_joins_it()
     let same = frame_of(&regions, STATIC_SAME);
     regions.release_child(STATIC_FAR);
     let book = regions.author_book(OWN_REALM, 50.0, at);
-    assert!(book.of(far).is_none(), "released: gone from the book the same tick");
+    assert!(
+        book.of(far).is_none(),
+        "released: gone from the book the same tick"
+    );
     assert!(book.of(same).is_some(), "…and its sibling stays");
     regions.release_child(STATIC_SAME);
     assert!(regions.author_book(OWN_REALM, 50.0, at).of(same).is_none());
@@ -136,14 +139,19 @@ fn a_ships_adoption_or_release_never_copies_the_parents_static_layer() {
     let rostered = regions.direct_child(OWN_REALM, hull).expect("rostered");
     let (frame, centre) = (rostered.frame, rostered.center.in_parents_frame());
     let book = regions.author_book(OWN_REALM, 50.0, at);
-    let row = book.of(frame).expect("the hull is in the book from the tick it arrives");
+    let row = book
+        .of(frame)
+        .expect("the hull is in the book from the tick it arrives");
     assert_eq!(
         LatticePos::at(row.origin_cell, row.origin),
         centre,
         "at its authored centre"
     );
     assert!(
-        std::sync::Arc::ptr_eq(&layer_before, regions.static_rows_of(OWN_REALM).expect("layer")),
+        std::sync::Arc::ptr_eq(
+            &layer_before,
+            regions.static_rows_of(OWN_REALM).expect("layer")
+        ),
         "the static layer was not copied by a ship's adoption"
     );
     assert!(
@@ -155,13 +163,19 @@ fn a_ships_adoption_or_release_never_copies_the_parents_static_layer() {
     regions.release_child(hull);
     assert!(regions.author_book(OWN_REALM, 50.0, at).of(frame).is_none());
     assert!(
-        std::sync::Arc::ptr_eq(&layer_before, regions.static_rows_of(OWN_REALM).expect("layer")),
+        std::sync::Arc::ptr_eq(
+            &layer_before,
+            regions.static_rows_of(OWN_REALM).expect("layer")
+        ),
         "…nor by its release"
     );
     // A planet's adoption DOES rebuild the layer (it is a static row).
     regions.adopt_child(live(STATIC_SAME, DVec3::new(0.0, 30_000.0, 0.0), 100.0));
     assert!(
-        !std::sync::Arc::ptr_eq(&layer_before, regions.static_rows_of(OWN_REALM).expect("layer")),
+        !std::sync::Arc::ptr_eq(
+            &layer_before,
+            regions.static_rows_of(OWN_REALM).expect("layer")
+        ),
         "a static child's adoption rebuilds its parent's layer"
     );
 }
@@ -415,18 +429,30 @@ fn a_reach_is_never_smaller_than_the_shell() {
     .with_own_realm(OWN_REALM);
     let factor = vd_core::geometry::visibility_factor(vd_core::geometry::VISIBILITY_THETA_MIN_RAD);
     assert_eq!(
-        regions.direct_child(OWN_REALM, STATIC_FAR).expect("system").aoi.spin_up_r_m(),
+        regions
+            .direct_child(OWN_REALM, STATIC_FAR)
+            .expect("system")
+            .aoi
+            .spin_up_r_m(),
         1.0e9,
         "the system's band is its shell, not its 76 000 m look reach"
     );
     assert_eq!(
-        regions.direct_child(OWN_REALM, STATIC_SAME).expect("planet").aoi.spin_up_r_m(),
+        regions
+            .direct_child(OWN_REALM, STATIC_SAME)
+            .expect("planet")
+            .aoi
+            .spin_up_r_m(),
         6.4e6 * factor,
         "the planet's look reach already passes its shell"
     );
     // The own reach folds the children with their shells: the system at 3.0e10 + 1.0e9.
     let (size, _) = regions.own_reach(OWN_REALM, None);
-    assert_eq!(size, (5.0e10 + 6.4e6 * factor).round() as u64, "the farther planet still wins");
+    assert_eq!(
+        size,
+        (5.0e10 + 6.4e6 * factor).round() as u64,
+        "the farther planet still wins"
+    );
     // A realm with a shell wider than its own look states its shell.
     let wide = RealmRegions::new(vec![
         root_region(),
@@ -437,7 +463,10 @@ fn a_reach_is_never_smaller_than_the_shell() {
     ])
     .with_own_realm(OWN_REALM);
     let (own_size, _) = wide.own_reach(OWN_REALM, None);
-    assert_eq!(own_size, own_region().shape.circumscribed_extent().round() as u64);
+    assert_eq!(
+        own_size,
+        own_region().shape.circumscribed_extent().round() as u64
+    );
 }
 
 #[test]

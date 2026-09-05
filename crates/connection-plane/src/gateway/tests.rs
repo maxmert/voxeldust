@@ -6137,7 +6137,11 @@ fn a_drained_parked_body_older_than_the_held_statement_counts_stale() {
         (BodyStmt::Marker { luma: vec![1] }, vd_core::UniverseTick(4)),
     );
     let mut stats = GatewayStats::default();
-    drain_parked(&mut held, &window::WindowTuning::derive(2, config().tick_hz), &mut stats);
+    drain_parked(
+        &mut held,
+        &window::WindowTuning::derive(2, config().tick_hz),
+        &mut stats,
+    );
     assert_eq!(
         stats.window_body_stale, 1,
         "the drained straggler refuses — newest wins"
@@ -9477,7 +9481,10 @@ fn the_per_tick_trace_logs_the_drawn_rows_of_one_kind_and_nothing_else() {
     );
     // The word parser: every kind by its own name, an unknown word is nothing.
     assert_eq!(super::config::parse_realm_kind("Star"), Some(K::Star));
-    assert_eq!(super::config::parse_realm_kind("Universe"), Some(K::Universe));
+    assert_eq!(
+        super::config::parse_realm_kind("Universe"),
+        Some(K::Universe)
+    );
     assert_eq!(super::config::parse_realm_kind("Galaxy"), Some(K::Galaxy));
     assert_eq!(super::config::parse_realm_kind("System"), Some(K::System));
     assert_eq!(super::config::parse_realm_kind("Planet"), Some(K::Planet));
@@ -9524,9 +9531,17 @@ fn the_level_is_restated_on_the_keep_alive_beat_at_the_current_epoch() {
     let cadence = super::window_keepalive_cadence(&config());
     rig.world.resource_mut::<ClockSample>().local_tick = TickId(cadence);
     let sent = rig.tick(vec![]);
-    assert_eq!(levels(&sent), vec![epoch], "the beat restates the level at the current epoch");
+    assert_eq!(
+        levels(&sent),
+        vec![epoch],
+        "the beat restates the level at the current epoch"
+    );
     assert_eq!(rig.stats().scene_levels_restated, 1);
-    assert_eq!(rig.stats().scene_levels_sent, levels_at_login, "a restate is not a new level");
+    assert_eq!(
+        rig.stats().scene_levels_sent,
+        levels_at_login,
+        "a restate is not a new level"
+    );
     assert_eq!(
         rig.world.resource::<GatewaySessions>().by_session[&sid]
             .shadow

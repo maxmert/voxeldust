@@ -209,7 +209,13 @@ impl ChildIndex {
     /// visited. Example: a walker in the galaxy at 3e8 m/s with a two-second horizon asks for
     /// the star systems within 6e8 m — a handful, never all 279,380. Sorted, deduplicated,
     /// appended to `out`.
-    pub fn candidates_within(&self, point: LatticePos, radius_m: f64, tier: Tier, out: &mut Vec<RealmId>) {
+    pub fn candidates_within(
+        &self,
+        point: LatticePos,
+        radius_m: f64,
+        tier: Tier,
+        out: &mut Vec<RealmId>,
+    ) {
         let p = origin_m(point, tier);
         let pad = slack(p.abs().max_element() + radius_m, tier);
         let within = Within {
@@ -327,7 +333,11 @@ impl SelectionFunction<Leaf> for Within {
     }
 
     fn should_unpack_leaf(&self, leaf: &Leaf) -> bool {
-        let d = leaf.centre.separation(self.point, self.tier).metres().length();
+        let d = leaf
+            .centre
+            .separation(self.point, self.tier)
+            .metres()
+            .length();
         d <= self.radius_m + leaf.radius_m
     }
 }

@@ -187,7 +187,14 @@ fn the_governed_ceiling_resolve_answers_none_off_the_law() {
         let regions = rig.world.resource::<RealmRegions>();
         let placements = rig.world.resource::<Placements>();
         assert_eq!(
-            governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t, f64::INFINITY),
+            governed_ceiling_for_frame(
+                regions,
+                &placements.0,
+                config().frame,
+                pos,
+                &t,
+                f64::INFINITY
+            ),
             None,
         );
     }
@@ -198,7 +205,14 @@ fn the_governed_ceiling_resolve_answers_none_off_the_law() {
         let regions = rig.world.resource::<RealmRegions>();
         let placements = rig.world.resource::<Placements>();
         assert_eq!(
-            governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t, f64::INFINITY),
+            governed_ceiling_for_frame(
+                regions,
+                &placements.0,
+                config().frame,
+                pos,
+                &t,
+                f64::INFINITY
+            ),
             None,
         );
     }
@@ -208,7 +222,14 @@ fn the_governed_ceiling_resolve_answers_none_off_the_law() {
     let regions = rig.world.resource::<RealmRegions>();
     let placements = rig.world.resource::<Placements>();
     assert_eq!(
-        governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t, f64::INFINITY),
+        governed_ceiling_for_frame(
+            regions,
+            &placements.0,
+            config().frame,
+            pos,
+            &t,
+            f64::INFINITY
+        ),
         Some(2.0),
     );
 }

@@ -976,6 +976,12 @@ fn no_living_inter_shard_payload_carries_a_realm_placement_or_a_centre() {
     /// Field NAMES that smuggle the same thing past the type check — the opaque
     /// already-serialized datagram the two deleted relay lanes carried, and any centre.
     const PLACEMENT_NAMES: &[&str] = &["center", "centre", "placement", "realm_snapshot_bytes"];
+    // ★ SL1 CLAUSE 3 (owner reversal 2026-08-24; re-pointed 2026-09-05): a parent MAY state a
+    // placement DOWN one hop; a child NEVER states its own. So a living arm may carry a placement
+    // only if it is the downward statement named in core's vocabulary — none exists yet, so the
+    // set is empty and every placement-carrying living arm is an offender. When `PlacementTold`
+    // lands it joins this set (and ONLY it), and the scan keeps refusing every other arm.
+    const DOWNWARD_STATEMENTS: &[&str] = &[];
     /// The payload structs whose lane is DELETED. They still declare placement fields — that is
     /// the point of a tombstone (the shape stays pinned) — and they are also this test's proof
     /// that the scan below can fail.
@@ -1074,9 +1080,18 @@ fn no_living_inter_shard_payload_carries_a_realm_placement_or_a_centre() {
     );
 
     // THE PIN: no LIVING payload states where a realm is.
+    // The downward allowlist may only name spellings from core's ONE vocabulary constant.
+    for arm in DOWNWARD_STATEMENTS {
+        assert!(
+            vd_core::pose::SL1_TOLD_PLACEMENT_VOCABULARY.contains(arm),
+            "DOWNWARD_STATEMENTS names {arm}, which is not in core's SL1 vocabulary — add the \
+             spelling to `SL1_TOLD_PLACEMENT_VOCABULARY` first, so the module fence sees it too"
+        );
+    }
     let offenders: Vec<(String, String, String)> = structs
         .iter()
         .filter(|(name, _)| !TOMBSTONED.contains(&name.as_str()))
+        .filter(|(name, _)| !DOWNWARD_STATEMENTS.contains(&name.as_str()))
         .flat_map(|(name, fields)| {
             fields
                 .iter()
@@ -1087,10 +1102,10 @@ fn no_living_inter_shard_payload_carries_a_realm_placement_or_a_centre() {
     assert_eq!(
         offenders,
         Vec::new(),
-        "a LIVING inter-shard message now carries a realm's placement. That is the hazard the \
-         SL1 self-placement filter used to catch on one lane; the filter was retired by the \
-         owner's Q3 amendment BECAUSE this could no longer happen. Find the local formulation, \
-         or take the SL6 ask to the owner (default NO)."
+        "a LIVING inter-shard message now carries a realm's placement, and it is not the one \
+         DOWNWARD statement SL1 clause 3 allows (a parent telling a child where it is, one hop). \
+         A child never states its own placement, on any lane. Find the local formulation, or \
+         take the SL6 ask to the owner (default NO)."
     );
 }
 

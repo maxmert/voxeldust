@@ -880,7 +880,14 @@ mod tests {
             orient: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
             ..at_rest()
         };
-        let after = advance_driven(&facing, [1_000_000, 0, 0], [0; 3], Some(&hull()), &vacuum(), 1.0);
+        let after = advance_driven(
+            &facing,
+            [1_000_000, 0, 0],
+            [0; 3],
+            Some(&hull()),
+            &vacuum(),
+            1.0,
+        );
         assert!(
             after.vel_mps.x.abs() < 1e-9,
             "x should be ~0: {:?}",
@@ -1004,7 +1011,14 @@ mod tests {
 
     #[test]
     fn a_turn_spins_the_hull_and_a_still_stick_leaves_it_facing_the_same_way() {
-        let after = advance_driven(&at_rest(), [0; 3], [500_000, 0, 0], Some(&hull()), &vacuum(), 1.0);
+        let after = advance_driven(
+            &at_rest(),
+            [0; 3],
+            [500_000, 0, 0],
+            Some(&hull()),
+            &vacuum(),
+            1.0,
+        );
         assert!((after.spin_radps.x - 0.5).abs() < 1e-12);
         assert!(
             after.orient.angle_between(DQuat::IDENTITY) > 0.4,
@@ -1022,7 +1036,14 @@ mod tests {
         // never chooses a speed. Ten thousand ticks of full push must keep adding speed.
         let mut s = at_rest();
         for _ in 0..10_000 {
-            s = advance_driven(&s, [4_000_000, 0, 0], [0; 3], Some(&hull()), &vacuum(), 0.02);
+            s = advance_driven(
+                &s,
+                [4_000_000, 0, 0],
+                [0; 3],
+                Some(&hull()),
+                &vacuum(),
+                0.02,
+            );
         }
         assert!(
             (s.vel_mps.x - 800.0).abs() < 1e-6,
@@ -1326,7 +1347,11 @@ mod tests {
             "one metre per second of coast plus four of push, no drag: {:?}",
             s.vel_mps
         );
-        assert!((s.pos_m.x - 5.0).abs() < 1e-9, "…and it moved: {:?}", s.pos_m);
+        assert!(
+            (s.pos_m.x - 5.0).abs() < 1e-9,
+            "…and it moved: {:?}",
+            s.pos_m
+        );
         // The tick its facts land, drag applies (air, a hull's cross-section): slower than 9.
         on_child_facts(
             some_facts(10),
@@ -1340,7 +1365,11 @@ mod tests {
         held.advance_all(UniverseTick(10), 5, &air, 1.0);
         let s = held.state_of(child).expect("held");
         assert!(s.vel_mps.x < 9.0, "drag now bites: {:?}", s.vel_mps);
-        assert!(s.vel_mps.x > 5.0, "…but the push still wins: {:?}", s.vel_mps);
+        assert!(
+            s.vel_mps.x > 5.0,
+            "…but the push still wins: {:?}",
+            s.vel_mps
+        );
     }
 
     /// ★ 2026-09-05: the step count follows the UNIVERSE tick, not the number of calls — a

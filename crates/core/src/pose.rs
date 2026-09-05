@@ -17,6 +17,18 @@ use serde::{Deserialize, Serialize};
 use crate::frame::FrameError;
 use crate::ids::{EntityId, UniverseTick};
 
+/// ★ SL1 — THE VOCABULARY OF THE READING A REALM IS TOLD ABOUT ITSELF (owner reversal
+/// 2026-08-24; fences built 2026-09-05, `D-SL1-2`). When the datum lands it will use exactly
+/// these names: the type a parent states and a child holds as a stamped, read-only reading, the
+/// wire arm that carries it DOWN one hop, and the field/method spelling. Two fences read this
+/// list today, before any consumer exists: the wire pin (no arm a child sends may carry a
+/// placement; only a DOWNWARD arm named here may) and the module fence (the placement,
+/// containment and crossing machinery may not name a realm's own position — `tests/tests/
+/// crate_isolation.rs`). A new spelling for the same datum must be added HERE first, or both
+/// fences are blind to it — which is why the list is one constant and not two.
+pub const SL1_TOLD_PLACEMENT_VOCABULARY: &[&str] =
+    &["ToldPlacement", "PlacementTold", "told_placement"];
+
 /// A persistence/ownership realm: the unit of single-writer durable state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RealmId {

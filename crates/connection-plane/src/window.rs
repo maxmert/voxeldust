@@ -1538,8 +1538,8 @@ impl ShadowScene {
         // relative acceleration over the hold (a turn, a thrust change), never by the speed.
         for h in &mut self.held {
             for r in &mut h.rows {
-                let dt_s =
-                    fold.at.0.saturating_sub(r.pose.universe_tick.0) as f64 / f64::from(tuning.tick_hz);
+                let dt_s = fold.at.0.saturating_sub(r.pose.universe_tick.0) as f64
+                    / f64::from(tuning.tick_hz);
                 r.pose = r
                     .pose
                     .advanced_ballistic(vd_core::glam::DVec3::ZERO, dt_s, fold.at);
@@ -3618,11 +3618,22 @@ mod tests {
         );
         // The login: no old picture, a partial chain with its hop in flight — swaps at once.
         let mut scene = ShadowScene::default();
-        let report = scene.advance_covering(RealmId::System(7), &authors, Some(fold), &tuning, false, true);
+        let report = scene.advance_covering(
+            RealmId::System(7),
+            &authors,
+            Some(fold),
+            &tuning,
+            false,
+            true,
+        );
         assert!(report.epoch_bumped & !report.swap_deferred & !report.swap_forced);
         let epoch = scene.origin_epoch;
         let drawn: Vec<RealmId> = scene.drawn_rows().map(|r| r.realm).collect();
-        assert_eq!(drawn.len(), 3, "the old picture: the planet, the galaxy, the sibling");
+        assert_eq!(
+            drawn.len(),
+            3,
+            "the old picture: the planet, the galaxy, the sibling"
+        );
         // The pilot lands on Planet 7: the planet's own window is fresh, its hop is not — DEFER.
         let landing = RealmId::Planet(7);
         let planet_fold = |t: UniverseTick| {
@@ -3631,10 +3642,20 @@ mod tests {
         };
         for i in 1..=tuning.hold_ttl_ticks {
             let t = UniverseTick(T.0 + i);
-            let report =
-                scene.advance_covering(landing, &[landing], Some(planet_fold(t)), &tuning, false, true);
+            let report = scene.advance_covering(
+                landing,
+                &[landing],
+                Some(planet_fold(t)),
+                &tuning,
+                false,
+                true,
+            );
             assert!(report.swap_deferred & !report.epoch_bumped & !report.swap_forced);
-            assert_eq!(scene.origin, Some(RealmId::System(7)), "the old origin stays");
+            assert_eq!(
+                scene.origin,
+                Some(RealmId::System(7)),
+                "the old origin stays"
+            );
             assert_eq!(scene.origin_epoch, epoch);
             assert_eq!(scene.swap_deferred_ticks, i);
             assert_eq!(
@@ -3645,7 +3666,14 @@ mod tests {
         }
         // The chain covers the lineage: the swap lands, the deferral resets.
         let t = UniverseTick(T.0 + tuning.hold_ttl_ticks + 1);
-        let report = scene.advance_covering(landing, &[landing], Some(planet_fold(t)), &tuning, true, false);
+        let report = scene.advance_covering(
+            landing,
+            &[landing],
+            Some(planet_fold(t)),
+            &tuning,
+            true,
+            false,
+        );
         assert!(report.epoch_bumped & !report.swap_deferred & !report.swap_forced);
         assert_eq!(scene.origin, Some(landing));
         assert_eq!(scene.origin_epoch, epoch + 1);
@@ -3656,7 +3684,15 @@ mod tests {
         for i in 1..=(tuning.hold_ttl_ticks + 1) {
             let t = UniverseTick(t.0 + i);
             let own = level(t, None, Vec::new());
-            let fold = compose(RealmId::System(7), sys(), t, &[RealmId::System(7)], &[&own], 1, &[]);
+            let fold = compose(
+                RealmId::System(7),
+                sys(),
+                t,
+                &[RealmId::System(7)],
+                &[&own],
+                1,
+                &[],
+            );
             let report = scene.advance_covering(
                 RealmId::System(7),
                 &[RealmId::System(7)],
@@ -3672,13 +3708,24 @@ mod tests {
             }
             assert!(report.swap_deferred & !report.epoch_bumped);
         }
-        assert_eq!(forced, Some(tuning.hold_ttl_ticks + 1), "forced after exactly one hold");
+        assert_eq!(
+            forced,
+            Some(tuning.hold_ttl_ticks + 1),
+            "forced after exactly one hold"
+        );
         assert_eq!(scene.origin, Some(RealmId::System(7)));
         assert_eq!(scene.origin_epoch, epoch + 2);
         assert_eq!(scene.swap_deferred_ticks, 0);
         // No hop in flight (nothing is coming): a partial chain swaps at once, as before.
         let t = UniverseTick(t.0 + 40);
-        let report = scene.advance_covering(landing, &[landing], Some(planet_fold(t)), &tuning, false, false);
+        let report = scene.advance_covering(
+            landing,
+            &[landing],
+            Some(planet_fold(t)),
+            &tuning,
+            false,
+            false,
+        );
         assert!(report.epoch_bumped & !report.swap_deferred & !report.swap_forced);
         assert_eq!(scene.origin, Some(landing));
     }
@@ -3698,10 +3745,20 @@ mod tests {
         // authored by System 7.
         let up = WindowScope::Child(RealmId::Planet(7));
         assert!(hop_pending(&lineage, 1, &[row(up, false)]));
-        assert!(!hop_pending(&lineage, 1, &[row(up, true)]), "confirmed: the chain grows now");
-        assert!(!hop_pending(&lineage, 1, &[]), "no window: nothing is coming");
         assert!(
-            !hop_pending(&lineage, 1, &[row(WindowScope::Child(RealmId::System(7)), false)]),
+            !hop_pending(&lineage, 1, &[row(up, true)]),
+            "confirmed: the chain grows now"
+        );
+        assert!(
+            !hop_pending(&lineage, 1, &[]),
+            "no window: nothing is coming"
+        );
+        assert!(
+            !hop_pending(
+                &lineage,
+                1,
+                &[row(WindowScope::Child(RealmId::System(7)), false)]
+            ),
             "the hop above the next one is not this hop"
         );
         // Two hops covered (planet + system): the next window up is Child(System 7) on the galaxy.
@@ -3725,12 +3782,12 @@ mod tests {
             ..one_row(realm, stratum, T)
         };
         let rows = vec![
-            with_parent(author, Some(GALAXY), 1),                       // the author's own body
-            with_parent(RealmId::Planet(7), Some(author), 1),           // a direct child
+            with_parent(author, Some(GALAXY), 1), // the author's own body
+            with_parent(RealmId::Planet(7), Some(author), 1), // a direct child
             with_parent(RealmId::Station(7), Some(RealmId::Planet(7)), 1), // a relayed grandchild (a station in the planet's orbit)
-            with_parent(RealmId::Universe, None, 1),                    // parentless: the root
-            with_parent(RealmId::Planet(9), Some(RealmId::System(9)), 1), // a foreign parent
-            with_parent(RealmId::Planet(8), Some(author), 0),           // another stratum
+            with_parent(RealmId::Universe, None, 1),                       // parentless: the root
+            with_parent(RealmId::Planet(9), Some(RealmId::System(9)), 1),  // a foreign parent
+            with_parent(RealmId::Planet(8), Some(author), 0),              // another stratum
         ];
         let held: Vec<RealmId> = author_subtree(&rows, 1, author)
             .into_iter()
@@ -3738,10 +3795,18 @@ mod tests {
             .collect();
         assert_eq!(
             held,
-            vec![author, RealmId::Planet(7), RealmId::Station(7), RealmId::Universe],
+            vec![
+                author,
+                RealmId::Planet(7),
+                RealmId::Station(7),
+                RealmId::Universe
+            ],
             "body, child, grandchild and the root; never a foreign parent's row or another stratum"
         );
-        assert!(author_subtree(&rows, 2, author).is_empty(), "an empty stratum holds nothing");
+        assert!(
+            author_subtree(&rows, 2, author).is_empty(),
+            "an empty stratum holds nothing"
+        );
     }
 
     /// ★ A HELD ROW KEEPS MOVING (2026-09-05): a departed stratum's row with a relative velocity is
@@ -3782,7 +3847,10 @@ mod tests {
                 .drawn_rows()
                 .find(|r| r.realm == RealmId::System(9))
                 .expect("the sibling system is held");
-            assert_eq!(held.pose.universe_tick, t, "the held row is stamped at the fold's tick");
+            assert_eq!(
+                held.pose.universe_tick, t,
+                "the held row is stamped at the fold's tick"
+            );
             assert_eq!(
                 pm(&held.pose),
                 DVec3::new(1000.0 + 5.0 * i as f64, 0.0, 0.0),
@@ -3818,7 +3886,10 @@ mod tests {
             false,
         );
         assert!(grown.epoch_bumped, "the chain's shape changed");
-        assert!(scene.held.is_empty(), "no fold ever composed: nothing to hold");
+        assert!(
+            scene.held.is_empty(),
+            "no fold ever composed: nothing to hold"
+        );
         assert_eq!(grown.holds, 0, "a pre-first-fold tick is not a stall");
         assert_eq!(scene.chain_authors, vec![RealmId::System(7), GALAXY]);
     }
@@ -3847,7 +3918,11 @@ mod tests {
         let t5 = UniverseTick(T.0 + 5);
         let mut rows = vec![row(star, Vec::new(), t5), row(planet, vec![3], t5)];
         assert_eq!(shelf.carry(&mut rows, t5, 21), 1);
-        assert_eq!(rows[0].bag, vec![1], "the star keeps its last look through the churn");
+        assert_eq!(
+            rows[0].bag,
+            vec![1],
+            "the star keeps its last look through the churn"
+        );
         assert_eq!(rows[1].bag, vec![3]);
         // A row that left the drawn set is not in `rows`: never filled, only aged.
         let mut rows = vec![row(planet, Vec::new(), t5)];
@@ -3862,7 +3937,11 @@ mod tests {
         let mut rows = vec![row(star, Vec::new(), t22)];
         assert_eq!(shelf.carry(&mut rows, t22, 21), 0);
         assert_eq!(rows[0].bag, Vec::<u8>::new());
-        assert_eq!(shelf.len(), 1, "the planet's look (seen at T+5) survives, the star's is gone");
+        assert_eq!(
+            shelf.len(),
+            1,
+            "the planet's look (seen at T+5) survives, the star's is gone"
+        );
         // A shelf near tick zero never underflows the cutoff.
         let mut shelf0 = LookShelf::default();
         let mut rows = vec![row(star, vec![9], UniverseTick(1))];
@@ -3988,7 +4067,10 @@ mod tests {
             .collect();
         assert_eq!(
             held,
-            vec![(GALAXY, UniverseTick(101)), (RealmId::System(9), UniverseTick(101))],
+            vec![
+                (GALAXY, UniverseTick(101)),
+                (RealmId::System(9), UniverseTick(101))
+            ],
             "the held stratum's rows ADVANCE to the fold's tick by their own relative velocity \
              (2026-09-05; at rest here, so only the stamp moves)"
         );

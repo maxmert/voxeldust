@@ -11,8 +11,7 @@
 
 use super::{
     AppliedSteps, Dots, Placements, RealmAuthority, RealmRegions, RequestInFlight, StepOutcome,
-    StubConfig, StubStats, flush_pose_for_dest,
-    place_arriving_pose,
+    StubConfig, StubStats, flush_pose_for_dest, place_arriving_pose,
 };
 use crate::io::{Durability, MsgClass};
 use crate::runtime::{ClockSample, OutboundBox};

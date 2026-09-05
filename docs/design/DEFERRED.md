@@ -5326,6 +5326,15 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   and the G-IDENTICAL swept-crossing proof pins it on two shard kinds. The band re-solve is
   therefore CLOSED by the shell floor; what stays red is the WALK tool's governed approach (the
   flight helpers), not containment.
+  ★ THE MOTION REDS, ROOT-CAUSED (2026-09-05): the walk law's ramp time constant is the WAKE
+  HORIZON (`FlightTuning::derive`: two beats + `boot_ticks_p99` + the pipeline, in ticks — ~12 s in
+  release, 72 s in debug), and the approach ceiling near a shell uses the same constant: a player
+  in a spacesuit may not accelerate faster than a shard can boot — the cap the 2026-08-27 ruling
+  struck out. Measured on the release chase: 0 → 1.1 km/s → 6.8 km/s over 5,000 ticks; 280 s to
+  cross 6e10 m against a 150 s deadline. RULED (`owner_decisions_2026-09-05_suit.md`): a character
+  WEARS a suit that states its rating like a hull; without a suit no movement in space; the suit
+  comes AFTER the character, which comes AFTER blocks and terrain. DEFERRED BY THE OWNER: the walk
+  keeps the boot-time ramp as a placeholder until the suit. NOT deferred: the gates fly HULLS (S4).
   ★ THE TWENTY-NINTH FLIGHT (2026-09-05, owner: *"all good, no regression"*; *"during rehome in
   3rd-person view I think for a second I saw first person view, but I might be mistaken"*).
   UNVERIFIED: no instrument records the camera mode; if it recurs, add `camera_mode` to the
@@ -5424,7 +5433,23 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   by RECIPIENT KIND. Worse, the composed-per-observer form costs contacts × observers, and the sky arc
   measured that product fatal (150,000 rows per player per tick, an un-split datagram the gateway simply
   never receives). Being told where you are turns the product into a SUM for every consumer.
-- **WHAT IS OWED — three fences, ALL UNBUILT. The law is a promise until they exist:**
+- **STATUS 2026-09-05 — fences 1 and 2 BUILT, before the datum, as the ledger demands; fence 3 waits
+  for the datum's first consumer.** The vocabulary the datum will use is ONE constant,
+  `vd_core::pose::SL1_TOLD_PLACEMENT_VOCABULARY` (`ToldPlacement`, `PlacementTold`, `told_placement`);
+  both fences read it, so a new spelling must be added there first or both go blind together.
+  (1) The wire pin `no_living_inter_shard_payload_carries_a_realm_placement_or_a_centre` is
+  RE-POINTED at clause 3: a living arm may carry a placement only if it is a DOWNWARD statement
+  named in the vocabulary (`DOWNWARD_STATEMENTS`, empty until `PlacementTold` lands); its
+  observed-failing control is the five tombstoned lanes the scanner must still catch. (2) The
+  module fence `sl1_the_placement_containment_and_crossing_machinery_cannot_name_a_realms_own_
+  position` (`tests/tests/crate_isolation.rs`) scans nine modules — core's `frame.rs` and
+  `placement.rs`; sim's `containment.rs`, `placement.rs`, `conversion.rs`, `crossing_receive.rs`,
+  `exterior.rs`, `saga_arms.rs`, `transient.rs` — for the vocabulary, with a built-in control (a
+  planted line the scanner must catch, and a child's `FramePlacement` it must not) AND an observed
+  real failure: a `ToldPlacement` line planted at the end of `containment.rs` failed the fence with
+  the message "SL1 VIOLATION in crates/sim/src/stub/containment.rs" (2026-09-05), and passed again
+  once removed. (3) The staleness rule needs the reading and its consumer; it lands in that slice.
+- **WHAT WAS OWED — three fences (the original text, kept):**
   1. **The outbound vocabulary fence.** Nothing a realm sends may carry its own placement. A wire-vocabulary
      pin of exactly this shape already exists (the Slice-C2 deletion planted one to replace the retired SL1
      self-placement filter); it must be re-pointed at the new clause 3 and given an observed-failing control.

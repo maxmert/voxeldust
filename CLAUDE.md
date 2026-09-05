@@ -14,6 +14,11 @@ the old code lives on `main`/`ecs-system` as reference/spec ONLY.
 - `docs/design/owner_decisions_*.md` — ★ THE BINDING RULINGS, and **the NEWEST FILE WINS**. Read the
   newest one BEFORE relaying any plan or design content: these are later than every design doc, and a plan
   agreeing with itself proves nothing. Newest first:
+  - `owner_decisions_2026-09-05_suit.md` — ★ THE SUIT: a character WEARS its way to move in space; there
+    are different suits; WITHOUT A SUIT a character cannot move in space; a suit is SIMILAR TO THE HULL —
+    it states its rating (acceleration, cruise) as facts about what it IS, per entity, never a constant
+    tied to the server. Deletes the wake horizon as the walk's time constant and the approach ceiling on
+    the player's stick. The gates fly the shipped path (board a hull / wear a suit), never a walking dot.
   - `owner_decisions_2026-09-02_reach.md` — ★ REACH: one radius per realm, TESTED BY ITS PARENT. Makes the
     2026-09-01 ruling concrete. The galaxy is ALWAYS visible and NEVER re-anchored (the star field is the
     galaxy's own look, shipped once; the client places ONE cloud at the galaxy's composed placement; parallax
