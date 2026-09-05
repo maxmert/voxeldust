@@ -392,6 +392,54 @@ fn a_childs_planted_light_widens_its_band_to_its_light_reach_unless_the_parent_l
     );
 }
 
+/// ★ THE REACH INCLUDES THE SHELL (owner 2026-09-05): a child whose shell is wider than its
+/// reach by look gets its shell as its reach — a realm you can enter is awake — while a child whose
+/// look already reaches past its shell keeps the look reach; and a realm's OWN stated reach is
+/// floored by its own shell the same way.
+#[test]
+fn a_reach_is_never_smaller_than_the_shell() {
+    // A "star system": a tiny look (its star's disc, 1 000 m ⇒ 76 000 m by look) inside a wide
+    // shell (1.0e9 m) — the shell wins. A "planet": look == shell (6.4e6 m ⇒ 4.9e8 m by look) — the
+    // look wins, unchanged.
+    let system = RealmRegion {
+        look: Some(Boundary::Shell { r: 1_000.0 }),
+        shape: Boundary::Shell { r: 1.0e9 },
+        ..planet(STATIC_FAR, 3.0e10)
+    };
+    let regions = RealmRegions::new(vec![
+        root_region(),
+        own_region(),
+        system,
+        planet(STATIC_SAME, -5.0e10),
+    ])
+    .with_own_realm(OWN_REALM);
+    let factor = vd_core::geometry::visibility_factor(vd_core::geometry::VISIBILITY_THETA_MIN_RAD);
+    assert_eq!(
+        regions.direct_child(OWN_REALM, STATIC_FAR).expect("system").aoi.spin_up_r_m(),
+        1.0e9,
+        "the system's band is its shell, not its 76 000 m look reach"
+    );
+    assert_eq!(
+        regions.direct_child(OWN_REALM, STATIC_SAME).expect("planet").aoi.spin_up_r_m(),
+        6.4e6 * factor,
+        "the planet's look reach already passes its shell"
+    );
+    // The own reach folds the children with their shells: the system at 3.0e10 + 1.0e9.
+    let (size, _) = regions.own_reach(OWN_REALM, None);
+    assert_eq!(size, (5.0e10 + 6.4e6 * factor).round() as u64, "the farther planet still wins");
+    // A realm with a shell wider than its own look states its shell.
+    let wide = RealmRegions::new(vec![
+        root_region(),
+        RealmRegion {
+            look: Some(Boundary::Shell { r: 10.0 }),
+            ..own_region()
+        },
+    ])
+    .with_own_realm(OWN_REALM);
+    let (own_size, _) = wide.own_reach(OWN_REALM, None);
+    assert_eq!(own_size, own_region().shape.circumscribed_extent().round() as u64);
+}
+
 #[test]
 fn a_realms_own_reach_folds_its_look_and_its_childrens_distance_plus_reach() {
     let regions = RealmRegions::new(vec![

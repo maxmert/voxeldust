@@ -453,7 +453,7 @@ impl RealmRegions {
 
     /// A child's reach by size: stated, else the dot-angle reach of its own look.
     fn size_reach_of(&self, realm: RealmId) -> f64 {
-        match self.reach_stated.get(&realm) {
+        let by_look = match self.reach_stated.get(&realm) {
             Some((size, _)) => *size as f64,
             None => self
                 .region_of(realm)
@@ -464,7 +464,17 @@ impl RealmRegions {
                         vd_core::geometry::VISIBILITY_THETA_MIN_RAD,
                     )
                 }),
-        }
+        };
+        // ★ THE REACH INCLUDES THE SHELL (owner 2026-09-05, "sounds good"): a realm you can enter must
+        // be awake, so its reach is never smaller than its bound. For a planet the light reach (50 AU)
+        // already dwarfs its sphere of influence; for a star system the galaxy draws its star, so its
+        // reach by look (80 AU) fell 190× short of its 0.24 ly shell and a hull crossed in asleep.
+        // One radius, one datum, the same index — the shell is the floor. Example: a hull at warp
+        // closes on a star system; at its shell plus the closing lead the galaxy wakes it.
+        let shell = self
+            .region_of(realm)
+            .map_or(0.0, |r| r.shape.circumscribed_extent());
+        by_look.max(shell)
     }
 
     /// A child's reach by light: stated, else the limiting-magnitude reach of its planted light.
@@ -591,6 +601,10 @@ impl RealmRegions {
     #[must_use]
     pub fn own_reach(&self, own: RealmId, own_luma: Option<f64>) -> (u64, u64) {
         let (kids_size, kids_light) = self.children_reach();
+        // The own reach by look, floored by the own shell (the reach includes the shell, 2026-09-05).
+        let own_shell = self
+            .region_of(own)
+            .map_or(0.0, |r| r.shape.circumscribed_extent());
         let size = self
             .own_look(own)
             .map_or(0.0, |look| {
@@ -599,6 +613,7 @@ impl RealmRegions {
                     vd_core::geometry::VISIBILITY_THETA_MIN_RAD,
                 )
             })
+            .max(own_shell)
             .round() as u64;
         let light = vd_core::look::light_reach_m(
             own_luma.unwrap_or(0.0),

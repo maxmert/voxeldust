@@ -5306,6 +5306,30 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   leg is the ledgered NO-CRUISE class (the governor is deleted; the band re-solve is the owner's
   open item — the same red as `flight_table`'s legs and the inner-planet chase), NOT the wedge.
   The bare-dot crossing INTO the galaxy — the generic re-home the owner asked for — works.
+  ★ THE REACH INCLUDES THE SHELL (owner 2026-09-05, *"Sounds good"* — the band re-solve's first
+  half). The owner's question: the visibility radius wakes a realm and the re-home shell is way
+  smaller, so why a second mechanism? True for a planet (light reach 50 AU against a 1e6 km
+  sphere of influence); false for a star system, whose star the galaxy draws itself, so its reach by
+  look (its outermost planet, ~80 AU) fell 190× short of its 0.24 ly shell and a hull at warp
+  crossed into it asleep. Ruled: ONE radius, and it includes the shell — a realm's reach is never
+  smaller than its bound (`size_reach_of` and `own_reach` floor by `shape.circumscribed_extent()`).
+  No second mechanism; the index query is unchanged. Pinned by
+  `a_reach_is_never_smaller_than_the_shell` (a system whose look reaches 76 km inside a 1e9 m
+  shell bands at the shell; a planet keeps its look reach; a realm states its own shell as its
+  reach when its look is smaller). MEASURE: the galaxy probe with systems banded at their shells
+  (the candidate count for one occupant at the origin), and a flight. The second half of the
+  re-solve — the SWEPT containment test (the line from the last tick to this tick against the
+  shells) — is still owed. CORRECTION (the same evening, from the code): the swept containment
+  test IS built — `evaluate_realm_boundaries` reads the line from the swept prior to the current
+  position (`candidates_segment(prev, cur)`, containment.rs: *"THROUGH within one tick holds
+  neither endpoint, so a point lookup would skip it before the swept verdict could ever be asked"*)
+  and the G-IDENTICAL swept-crossing proof pins it on two shard kinds. The band re-solve is
+  therefore CLOSED by the shell floor; what stays red is the WALK tool's governed approach (the
+  flight helpers), not containment.
+  ★ THE TWENTY-NINTH FLIGHT (2026-09-05, owner: *"all good, no regression"*; *"during rehome in
+  3rd-person view I think for a second I saw first person view, but I might be mistaken"*).
+  UNVERIFIED: no instrument records the camera mode; if it recurs, add `camera_mode` to the
+  client's dev state and poll it through a hand-over.
 
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:
