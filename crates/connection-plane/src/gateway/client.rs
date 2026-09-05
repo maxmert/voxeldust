@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use vd_core::{EntityId, Fence, NodeId, SessionId, TickId};
 use vd_sim::io::MsgClass;
+use vd_sim::io::PeerResetCause;
 use vd_sim::runtime::{NodeIdentity, OutboundBox};
 use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId};
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp};
@@ -104,6 +105,20 @@ pub(crate) fn on_client_control(
                 );
                 return;
             }
+            // A `Hello` from a node that already holds a session (2026-09-05, the vanished-client
+            // wedge). A client sends `Hello` exactly once, while it has never been welcomed; a
+            // second one from the same node id is therefore a NEW PROCESS — the pilot's client was
+            // killed and started again — never a duplicate. The old session is ended the way a
+            // `Bye` ends it, its staged frames are forgotten, and the login proceeds as a fresh one.
+            // Before this rule the second `Hello` was ignored as "a duplicate on a live connection",
+            // the dead session stayed, and the new client waited for a `Welcome` that never came.
+            // Ordered BEFORE the capacity check: a re-login must not be refused because its own
+            // dead session still holds a slot.
+            if sessions.by_client.contains_key(&client) {
+                stats.sessions_replaced_by_relogin += 1;
+                end_session_of(client, config, sessions, outbox);
+                outbox.forget_peer(client);
+            }
             if sessions.by_session.len() >= config.tuning.max_sessions {
                 stats.sessions_refused_capacity += 1;
                 push_control(
@@ -113,11 +128,6 @@ pub(crate) fn on_client_control(
                         reason: "gateway at session capacity".to_owned(),
                     },
                 );
-                return;
-            }
-            if sessions.by_client.contains_key(&client) {
-                // A duplicate Hello on a live connection: idempotent no-op (the
-                // pending/active session keeps progressing).
                 return;
             }
             // Propose a session id; the DIRECTORY INSERT is the authoritative mint.
@@ -194,60 +204,7 @@ pub(crate) fn on_client_control(
             );
         }
         ClientControlMsg::Bye => {
-            let Some(session_id) = sessions.by_client.remove(&client) else {
-                return;
-            };
-            let session = sessions
-                .by_session
-                .remove(&session_id)
-                .expect("session maps are kept in sync");
-            // WEDGE-1 (pinned to Slice 2 — DEFERRED D-23): a Bye mid-transfer drops the
-            // session + its journal; subsequent saga commands for it then count as
-            // `transfer_unroutable` with NO producer to unstick the pinned saga. The real
-            // backstop is the Slice-2 saga timeout/abort producer; pin loud here so the
-            // dropped in-flight transfer is never silent.
-            if let Some(tp) = session.transfer.as_ref() {
-                tracing::warn!(
-                    session = %session_id,
-                    transfer = tp.transfer.0,
-                    "client Bye dropped a session with an in-flight transfer — the saga will \
-                     pin until the Slice-2 timeout producer lands (D-23)"
-                );
-            }
-            // RLM 5f-3d: drop this session from BOTH runtime indexes before anything else — every exit from
-            // the dynamic-home machinery runs through the ONE `end_home_wait` / `release_session_claims`
-            // pair, so a `Bye` mid-boot can never leave a waiting-index entry or a roster refcount behind.
-            // A STATIC session takes the `None` arm of both (no-op ⇒ byte-identical). RLM 5f-4/5f-4e: the
-            // release covers ALL THREE roles (home shard, an in-flight transfer's crossing dest, and the
-            // DEMOTING SOURCE home a committed crossing stashed), so a `Bye` anywhere in the demote tail —
-            // where the dest is claimed twice and the source still holds one — drops every node to zero.
-            sessions.end_home_wait(session_id, session.home_rid);
-            sessions.release_session_claims(&session);
-            // 5f-3d: the detach goes to the session's ROUTING TARGET — its dynamically resolved home shard
-            // when it has one, else the static `config.shard` (the ONE `session_target` path, HR3).
-            // RLM 5f-4 closes D-34's A1 (authority-following detach) HERE: `CommitAuthority` now re-points
-            // `home_shard` to the transfer dest, so after a crossing this target IS the current authority and
-            // the detach reaches the shard that actually holds the `SessionTable` entry (it used to go to the
-            // source and leak the dest's). The COMPOSITED-SUBS clause remains owed — this detaches only the
-            // CURRENT authority, while the source retains its own sub/ghost until `ReleaseSubscribe`.
-            // Still NOT a `session.subs.keys()` scan — `subs` is empty at login (would regress login→Bye).
-            push_to_shard(
-                outbox,
-                session_target(&session, config),
-                MsgClass::Control,
-                &GatewayToShard::DetachSession {
-                    session: session_id,
-                    fence: session.fence,
-                },
-            );
-            push_directory(
-                outbox,
-                config.orchestrator,
-                DirectoryOp::LeaseRevoke {
-                    key: DirectoryKey::Session(session_id),
-                    fence: session.fence,
-                },
-            );
+            end_session_of(client, config, sessions, outbox);
         }
         // No transfers in P1: a cut confirmation has nothing to bind to.
         // Pongs are liveness echoes; the P1 gateway sends no pings.
@@ -269,6 +226,100 @@ pub(crate) fn on_client_control(
         }
         ClientControlMsg::CutEmitted { .. } | ClientControlMsg::Pong { .. } => {}
     }
+}
+
+/// The transport says a peer is gone: its dialed-in connection died, a new process now speaks for
+/// its node id, or a reliable frame toward it could not be delivered. If that peer holds a session,
+/// the session ends exactly as a `Bye` ends it, and the frames staged toward the peer are forgotten.
+/// A peer without a session (a shard, an unknown node) is not a session fact and is left alone.
+///
+/// Example: the pilot closes the window client with a kill. Twenty seconds later the transport
+/// reports the connection lost; the gateway detaches the pilot's session at the home shard,
+/// revokes its lease, and drops the levels it had queued for a process that no longer exists.
+pub(crate) fn on_peer_gone(
+    node: NodeId,
+    cause: PeerResetCause,
+    config: &GatewayConfig,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    if !sessions.by_client.contains_key(&node) {
+        return;
+    }
+    match cause {
+        PeerResetCause::ConnectionLost => stats.sessions_closed_peer_lost += 1,
+        PeerResetCause::Reincarnated => stats.sessions_closed_peer_reincarnated += 1,
+    }
+    end_session_of(node, config, sessions, outbox);
+    outbox.forget_peer(node);
+}
+
+/// End the session `client` holds: drop it from both maps and both runtime indexes, release its
+/// claims, detach it at its routing target, and revoke its lease. The ONE exit for a session that
+/// leaves by its client's word (`Bye`), by its client's death (`on_peer_gone`), or by its client's
+/// return as a new process (a second `Hello`). Returns whether a session existed.
+pub(crate) fn end_session_of(
+    client: NodeId,
+    config: &GatewayConfig,
+    sessions: &mut GatewaySessions,
+    outbox: &mut OutboundBox,
+) -> bool {
+    let Some(session_id) = sessions.by_client.remove(&client) else {
+        return false;
+    };
+    let session = sessions
+        .by_session
+        .remove(&session_id)
+        .expect("session maps are kept in sync");
+    // WEDGE-1 (pinned to Slice 2 — DEFERRED D-23): a Bye mid-transfer drops the
+    // session + its journal; subsequent saga commands for it then count as
+    // `transfer_unroutable` with NO producer to unstick the pinned saga. The real
+    // backstop is the Slice-2 saga timeout/abort producer; pin loud here so the
+    // dropped in-flight transfer is never silent.
+    if let Some(tp) = session.transfer.as_ref() {
+        tracing::warn!(
+            session = %session_id,
+            transfer = tp.transfer.0,
+            "client Bye dropped a session with an in-flight transfer — the saga will \
+             pin until the Slice-2 timeout producer lands (D-23)"
+        );
+    }
+    // RLM 5f-3d: drop this session from BOTH runtime indexes before anything else — every exit from
+    // the dynamic-home machinery runs through the ONE `end_home_wait` / `release_session_claims`
+    // pair, so a `Bye` mid-boot can never leave a waiting-index entry or a roster refcount behind.
+    // A STATIC session takes the `None` arm of both (no-op ⇒ byte-identical). RLM 5f-4/5f-4e: the
+    // release covers ALL THREE roles (home shard, an in-flight transfer's crossing dest, and the
+    // DEMOTING SOURCE home a committed crossing stashed), so a `Bye` anywhere in the demote tail —
+    // where the dest is claimed twice and the source still holds one — drops every node to zero.
+    sessions.end_home_wait(session_id, session.home_rid);
+    sessions.release_session_claims(&session);
+    // 5f-3d: the detach goes to the session's ROUTING TARGET — its dynamically resolved home shard
+    // when it has one, else the static `config.shard` (the ONE `session_target` path, HR3).
+    // RLM 5f-4 closes D-34's A1 (authority-following detach) HERE: `CommitAuthority` now re-points
+    // `home_shard` to the transfer dest, so after a crossing this target IS the current authority and
+    // the detach reaches the shard that actually holds the `SessionTable` entry (it used to go to the
+    // source and leak the dest's). The COMPOSITED-SUBS clause remains owed — this detaches only the
+    // CURRENT authority, while the source retains its own sub/ghost until `ReleaseSubscribe`.
+    // Still NOT a `session.subs.keys()` scan — `subs` is empty at login (would regress login→Bye).
+    push_to_shard(
+        outbox,
+        session_target(&session, config),
+        MsgClass::Control,
+        &GatewayToShard::DetachSession {
+            session: session_id,
+            fence: session.fence,
+        },
+    );
+    push_directory(
+        outbox,
+        config.orchestrator,
+        DirectoryOp::LeaseRevoke {
+            key: DirectoryKey::Session(session_id),
+            fence: session.fence,
+        },
+    );
+    true
 }
 
 /// Route one client input datagram (HOT decision + bookkeeping), then COLD-observe the

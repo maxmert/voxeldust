@@ -1367,20 +1367,19 @@ pub fn orchestrator_env(
     env
 }
 
-/// RLM RG-4 — the DEMAND gateway's env. Books ONLY the orchestrator + its dev-control clients — NO shard,
-/// because the home shard is demand-spawned at runtime and the gateway learns its return connection via the
-/// reactive greeting (RG-0..3), never a pre-booked address. `VD_DEMAND=1` arms the gateway's dynamic-home
-/// login route (a login emits a `RealmDemand`, waits for the just-spawned home head, and routes to the
-/// dynamically-minted node). `VD_SHARD` stays [`SHARD`] as the login-home DEFAULT id — the dynamic-home
-/// resolve supersedes it per-login, but the bin still parses the key.
+/// RLM RG-4 — the DEMAND gateway's env. Books ONLY the orchestrator — NO shard, because the home shard is
+/// demand-spawned at runtime and the gateway learns its return connection via the reactive greeting
+/// (RG-0..3), never a pre-booked address. NO CLIENT either: a client is a LEARNED peer, never a booked one
+/// (see [`gateway_env`]). `VD_DEMAND=1` arms the gateway's dynamic-home login route (a login emits a
+/// `RealmDemand`, waits for the just-spawned home head, and routes to the dynamically-minted node).
+/// `VD_SHARD` stays [`SHARD`] as the login-home DEFAULT id — the dynamic-home resolve supersedes it
+/// per-login, but the bin still parses the key.
 fn demand_gateway_env(
     a: &ClusterAddrs,
-    clients: &[(NodeId, SocketAddr)],
     auth_pubkey_hex: &str,
     p: &DevClusterParams,
 ) -> Vec<(&'static str, String)> {
-    let mut peers = vec![(ORCH, a.orchestrator)]; // NO shard booked — the reactive greeting learns it.
-    peers.extend_from_slice(clients);
+    let peers = vec![(ORCH, a.orchestrator)]; // NO shard booked — the reactive greeting learns it.
     let mut env = vec![
         str_pair("VD_NODE_ID", GATEWAY.0),
         str_pair("VD_BIND", a.gateway),
@@ -1406,9 +1405,6 @@ fn demand_gateway_env(
     env
 }
 
-/// The gateway's node-specific env. `clients` are seeded into the gateway's peer
-/// book so it can route snapshots BACK to each dev-control client (the mesh dials
-/// by address book; a missing client entry = the gateway can never reach it).
 /// The inputs a node needs to BUILD THE WORLD — required by any node that answers a spatial question.
 ///
 /// A shard has carried these forever (it integrates motion with them). The gateway needs them too and did
@@ -1427,17 +1423,22 @@ fn world_env(p: &DevClusterParams) -> [(&'static str, String); 2] {
     ]
 }
 
+/// The gateway's node-specific env. NO CLIENT IS EVER BOOKED HERE. A client is a LEARNED peer: CA-1
+/// reply-on-connection means the gateway takes a client's return path from the connection that client
+/// dialed IN on. A booked (dialed) lane re-dials a restarted client at the same address and REPLAYS the
+/// dead process's retained frames — an old Welcome and old subscriptions — into the new process, which is
+/// half of the vanished-client wedge. The client still binds its own QUIC port, because it needs an
+/// endpoint to dial FROM; nobody dials it.
 #[must_use]
 pub fn gateway_env(
     a: &ClusterAddrs,
-    clients: &[(NodeId, SocketAddr)],
     auth_pubkey_hex: &str,
     p: &DevClusterParams,
     shape: ClusterShape,
 ) -> Vec<(&'static str, String)> {
     // RLM RG-4: the demand gateway books no static shard — a wholly different roster from the static fan-out.
     if shape.is_demand() {
-        return demand_gateway_env(a, clients, auth_pubkey_hex, p);
+        return demand_gateway_env(a, auth_pubkey_hex, p);
     }
     // ONE data fan-out (HR3): in a MULTI-shard cluster the gateway must BOOK every extra realm-shard
     // (to route a transferred client's inputs / cut-drains onto it — the durable session-route swap at
@@ -1454,7 +1455,6 @@ pub fn gateway_env(
         .collect();
     let mut peers = vec![(ORCH, a.orchestrator), (SHARD, a.shard)];
     peers.extend_from_slice(&extra_shards);
-    peers.extend_from_slice(clients);
     let mut env = vec![
         str_pair("VD_NODE_ID", GATEWAY.0),
         str_pair("VD_BIND", a.gateway),
@@ -4793,8 +4793,7 @@ mod incarnation_tests {
     #[test]
     fn demand_gateway_env_arms_dynamic_home_and_books_no_shard() {
         let a = dual_addrs();
-        let clients = [(NodeId(30), loopback(9100))];
-        let g = gateway_env(&a, &clients, "pub", &DEV, ClusterShape::Demand);
+        let g = gateway_env(&a, "pub", &DEV, ClusterShape::Demand);
         assert_eq!(env_value(&g, "VD_DEMAND"), Some("1"));
         // VD_SHARD stays the login-home DEFAULT id, but SHARD is NOT booked in VD_PEERS.
         assert_eq!(
@@ -4810,10 +4809,9 @@ mod incarnation_tests {
             peers.contains(&format!("{}={}", ORCH.0, a.orchestrator)),
             "the orchestrator is booked: {peers}"
         );
-        assert!(
-            peers.contains(&format!("{}={}", 30, loopback(9100))),
-            "the dev-control client is booked: {peers}"
-        );
+        // A CLIENT IS NEVER BOOKED: the gateway learns it from the connection it dialed in on.
+        // The book holds exactly the orchestrator.
+        assert_eq!(peers, format!("{}={}", ORCH.0, a.orchestrator));
         // No static-shard roster key (there are no static shards).
         assert_eq!(env_value(&g, "VD_KNOWN_SHARDS"), None);
     }
@@ -4823,7 +4821,7 @@ mod incarnation_tests {
         let mut a = dual_addrs();
         assert_eq!(
             env_value(
-                &gateway_env(&a, &[], "pub", &DEV, ClusterShape::Demand),
+                &gateway_env(&a, "pub", &DEV, ClusterShape::Demand),
                 "VD_ADMIN_ADDR"
             ),
             None
@@ -4831,7 +4829,7 @@ mod incarnation_tests {
         a.gateway_admin = Some(loopback(9099));
         assert_eq!(
             env_value(
-                &gateway_env(&a, &[], "pub", &DEV, ClusterShape::Demand),
+                &gateway_env(&a, "pub", &DEV, ClusterShape::Demand),
                 "VD_ADMIN_ADDR"
             ),
             Some(loopback(9099).to_string()).as_deref()
@@ -4908,8 +4906,8 @@ mod incarnation_tests {
     #[test]
     fn gateway_env_dual_books_the_galaxy_and_emits_known_shards_inert_when_single() {
         let a = dual_addrs();
-        let single = gateway_env(&a, &[], "pub", &DEV, ClusterShape::Single);
-        let dual = gateway_env(&a, &[], "pub", &DEV, ClusterShape::Dual);
+        let single = gateway_env(&a, "pub", &DEV, ClusterShape::Single);
+        let dual = gateway_env(&a, "pub", &DEV, ClusterShape::Dual);
 
         // VD_KNOWN_SHARDS: absent single, =GALAXY dual (so a galaxy frame is node-class dispatchable).
         assert_eq!(env_value(&single, "VD_KNOWN_SHARDS"), None);
@@ -4946,7 +4944,7 @@ mod incarnation_tests {
         // successive source across the multi-hop walk) and class each as known (so each shard→gateway
         // frame is node-class dispatchable), while VD_SHARD (the login shard) stays SHARD.
         let a = dual_addrs();
-        let chain = gateway_env(&a, &[], "pub", &DEV, ClusterShape::Chain);
+        let chain = gateway_env(&a, "pub", &DEV, ClusterShape::Chain);
 
         assert_eq!(
             env_value(&chain, "VD_KNOWN_SHARDS"),
@@ -5026,7 +5024,7 @@ mod incarnation_tests {
             ]
         );
 
-        let gw = gateway_env(&a, &[], "pub", &DEV, ClusterShape::Single);
+        let gw = gateway_env(&a, "pub", &DEV, ClusterShape::Single);
         assert_eq!(
             gw,
             vec![

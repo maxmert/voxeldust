@@ -28,4 +28,20 @@ pub mod saga_runtime;
 pub mod tracer;
 pub mod universe_clock;
 
+/// HR5 — a TRACE sink so every tracing macro's lazy field closure evaluates on the paths the
+/// tests drive; without a subscriber those closures are dead regions coverage cannot reach. ONE
+/// for the crate (a global subscriber is set once per test process).
+#[cfg(test)]
+pub(crate) fn init_test_tracing() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::level_filters::LevelFilter::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+}
+
 pub use app::{NodeConfig, ShardNode, TickReport, build_app};

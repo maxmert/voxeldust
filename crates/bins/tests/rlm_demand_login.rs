@@ -30,13 +30,12 @@ use vd_bins::{
     dev_auth_pubkey_hex, dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows,
     orchestrator_env, reap_forked, reserve_tcp_addr, reserve_udp_addr, world_roster,
 };
-use vd_core::NodeId;
 use vd_core::flight::{
     FlightTuning, TRAVERSE_S, approach_ceiling_mps, leg_time_s, realm_speed_cap_mps,
 };
 use vd_core::glam::DVec3;
 use vd_core::pose::frame_for_realm;
-use vd_devproto::{CLIENT_NODE_BASE, DevEntityRow, DevPhase, DevRequest, DevResponse, DevState};
+use vd_devproto::{DevEntityRow, DevPhase, DevRequest, DevResponse, DevState};
 use vd_io_prod::trust::ClusterTrust;
 use vd_wire::admin::{AdminSnapshot, GatewayView, RlmView};
 
@@ -172,25 +171,13 @@ fn await_active(devctl_port: u16, gateway_admin: SocketAddr, deadline: Duration)
 }
 
 /// Push a fresh demand gateway onto `cluster` — the SAME env each time, so a restart re-binds the SAME addrs.
-fn push_demand_gateway(
-    cluster: &mut Cluster,
-    f: &Fixture,
-    a: &ClusterAddrs,
-    p: &DevClusterParams,
-    client_book: &[(NodeId, SocketAddr)],
-) {
+fn push_demand_gateway(cluster: &mut Cluster, f: &Fixture, a: &ClusterAddrs, p: &DevClusterParams) {
     cluster.push(
         "vd-gateway",
         vd_bins::spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
             &f.common,
-            &gateway_env(
-                a,
-                client_book,
-                &dev_auth_pubkey_hex(),
-                p,
-                ClusterShape::Demand,
-            ),
+            &gateway_env(a, &dev_auth_pubkey_hex(), p, ClusterShape::Demand),
         )
         .expect("spawn gateway"),
     );
@@ -202,7 +189,6 @@ fn boot_demand_login(
     f: &Fixture,
     a: &ClusterAddrs,
     p: &DevClusterParams,
-    client_book: &[(NodeId, SocketAddr)],
     client_quic: SocketAddr,
     devctl_port: u16,
 ) -> Cluster {
@@ -216,7 +202,7 @@ fn boot_demand_login(
         )
         .expect("spawn orchestrator"),
     );
-    push_demand_gateway(&mut cluster, f, a, p, client_book);
+    push_demand_gateway(&mut cluster, f, a, p);
     cluster.push(
         "client",
         spawn_client(f, a.gateway, client_quic.port(), devctl_port),
@@ -234,11 +220,10 @@ fn a_demand_login_spins_up_a_fresh_home_and_lands_with_no_prebooked_shard() {
     let a = demand_addrs(gw_admin);
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
 
     // The forked-shard reaper drops LAST (declared first) — after the Cluster has reaped the orchestrator.
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &DEV, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &DEV, client_quic, devctl_port);
 
     // ---- THE proof: the login went Active, and it did so by spawning + reaching a fresh home shard. ----
     let state = await_active(devctl_port, gw_admin, DEADLINE);
@@ -297,10 +282,9 @@ fn a_gateway_restart_re_learns_the_running_demand_shard_via_the_reactive_greetin
     let a = demand_addrs(gw_admin);
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let mut cluster = boot_demand_login(&f, &a, &DEV, &client_book, client_quic, devctl_port);
+    let mut cluster = boot_demand_login(&f, &a, &DEV, client_quic, devctl_port);
 
     // The login spawned a home shard + the gateway learned it via the reactive greeting.
     await_active(devctl_port, gw_admin, DEADLINE);
@@ -315,7 +299,7 @@ fn a_gateway_restart_re_learns_the_running_demand_shard_via_the_reactive_greetin
     // group, so the Cluster's per-child kill never touched it. D-34: we restart the GATEWAY (the learner), not
     // the shard.
     cluster.kill_and_reap("vd-gateway");
-    push_demand_gateway(&mut cluster, &f, &a, &DEV, &client_book);
+    push_demand_gateway(&mut cluster, &f, &a, &DEV);
     let _cluster = cluster;
 
     // THE re-heal proof: the fresh gateway RE-LEARNS the still-running shard via the greeting ALONE. The shard
@@ -354,10 +338,9 @@ fn a_demand_login_applies_live_realm_frames_so_the_planets_are_not_frozen() {
     let a = demand_addrs(gw_admin);
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &DEV, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &DEV, client_quic, devctl_port);
 
     let state = await_active(devctl_port, gw_admin, DEADLINE);
     assert_eq!(
@@ -431,10 +414,9 @@ fn a_demand_login_draws_moving_planets_not_a_frozen_scene() {
     let a = demand_addrs(gw_admin);
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &DEV, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &DEV, client_quic, devctl_port);
 
     let state = await_active(devctl_port, gw_admin, DEADLINE);
     assert_eq!(
@@ -522,10 +504,9 @@ fn a_parked_ship_keeps_the_planets_orbiting_at_full_speed() {
     let a = demand_addrs(gw_admin);
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &DEV, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &DEV, client_quic, devctl_port);
     // Bound ONCE: the home realm's own label, derived from THE world (see `home_label`) — the poll
     // loop below compares against this binding rather than re-deriving per poll.
     let home = home_label(&DEV);
@@ -645,11 +626,10 @@ fn a_flying_occupant_re_homes_into_an_inner_planet_no_boundary_flap() {
     let p = DEV;
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let deadline = Duration::from_secs(150);
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &p, client_quic, devctl_port);
 
     let landed = await_active(devctl_port, gw_admin, deadline);
     assert_eq!(
@@ -763,11 +743,10 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
     let p = DEV;
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let deadline = Duration::from_secs(150);
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &p, client_quic, devctl_port);
 
     // Bound ONCE (the return loops below compare against this binding, never re-derive per poll).
     let home = home_label(&p);
@@ -998,11 +977,10 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
     let p = DEV;
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let deadline = Duration::from_secs(240);
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &p, client_quic, devctl_port);
 
     // Bound ONCE: the home realm's own label (see `home_label`), used by every cycle's fly-out.
     let home = home_label(&p);
@@ -1222,10 +1200,9 @@ fn exiting_the_system_reaps_its_interior_and_the_stream_stays_live() {
     let p = DEV;
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &p, client_quic, devctl_port);
     let start = await_active(devctl_port, gw_admin, Duration::from_secs(150));
     assert_eq!(
         start.location.as_deref(),
@@ -1341,7 +1318,6 @@ fn g_look_wake_the_derived_login_set_holds_and_a_vacated_system_reaps() {
     let p = DEV;
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
 
     let config = vd_physics::worldgen::UniverseConfig::world(p.move_speed, p.tick_dt);
     let world = vd_physics::worldgen::WorldView::generated(p.universe_seed, &config);
@@ -1476,7 +1452,7 @@ fn g_look_wake_the_derived_login_set_holds_and_a_vacated_system_reaps() {
     );
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &p, client_quic, devctl_port);
     let landed = await_active(devctl_port, gw_admin, Duration::from_secs(150));
     assert_eq!(
         landed.location.as_deref(),
@@ -1714,14 +1690,13 @@ fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_
     let p = DEV;
     let client_quic = reserve_udp_addr();
     let devctl_port = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     // Spawn + exit + the drain/quiesce teardown windows ⇒ a materially longer budget than a
     // login. The FLIGHT legs carry their own governed budgets (derived below); this bounds the
     // non-flight waits (spawn-ahead, teardown) exactly as before.
     let deadline = Duration::from_secs(120);
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_login(&f, &a, &p, &client_book, client_quic, devctl_port);
+    let _cluster = boot_demand_login(&f, &a, &p, client_quic, devctl_port);
 
     // The login lands the occupant at the home star; everything already in view spins up and settles
     // — the baseline the approach must climb above for a NON-VACUOUS spin-up-ahead.

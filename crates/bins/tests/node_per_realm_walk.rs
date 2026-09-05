@@ -56,13 +56,12 @@ use vd_bins::{
     dev_auth_pubkey_hex, dev_auth_signing_key_hex, dev_roundtrip, gateway_env, orchestrator_env,
     realm_shard_env, realm_shards, reserve_tcp_addr, reserve_udp_addr, shard_env, world_roster,
 };
-use vd_core::NodeId;
 use vd_core::flight::{
     FlightTuning, TRAVERSE_S, approach_ceiling_mps, leg_time_s, realm_speed_cap_mps,
 };
 use vd_core::glam::DVec3;
 use vd_core::pose::frame_for_realm;
-use vd_devproto::{CLIENT_NODE_BASE, DevEntityRow, DevPhase, DevRequest, DevResponse, DevState};
+use vd_devproto::{DevEntityRow, DevPhase, DevRequest, DevResponse, DevState};
 
 /// The BRING-UP budget: 6 real processes + the login grant-flip. Flight legs carry their own
 /// DERIVED budgets — each one `vd_bins::flight::governed_leg_budget` over that leg's own solved
@@ -300,7 +299,6 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
         ..ClusterAddrs::reserve()
     };
     let shape = ClusterShape::Chain;
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let common = common_env(&trust_dir.display().to_string(), &DEV);
     let spawn_node = |bin: &str, node_env: Vec<(&'static str, String)>| -> Child {
         vd_bins::spawn_node(bin, &common, &node_env).expect("spawn node")
@@ -318,7 +316,7 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
         "vd-gateway",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
-            gateway_env(&addrs, &client_book, &dev_auth_pubkey_hex(), &DEV, shape),
+            gateway_env(&addrs, &dev_auth_pubkey_hex(), &DEV, shape),
         ),
     );
     // The HOME login shard (single-realm — no shape carries VD_HELD_REALMS).

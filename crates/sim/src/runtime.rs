@@ -7,6 +7,7 @@
 //! (dependency law: bins → node → sim → wire → core).
 
 use bevy_ecs::prelude::Resource;
+use std::collections::BTreeSet;
 use vd_core::{EpochId, NodeId, TickId, UniverseTick};
 
 use crate::capability::NodeKind;
@@ -24,8 +25,17 @@ pub struct InboundBox(pub Vec<Inbound>);
 /// the node's flush sheds the oldest staged frames past the cap with a loud counted
 /// drop. The transport's own per-peer capacity bounds what it *accepts*, not what
 /// this staging buffer *holds* — those are distinct ceilings.
+///
+/// The second field is THE FORGET LIST (2026-09-05, the vanished-client wedge): the peers whose
+/// staged frames must be dropped at the next flush, because the consumer that produced them has
+/// ended its relationship with that peer (a gateway closing a dead client's session). Without it a
+/// dead peer's backlog sat in this box until the cap shed it, and the shed took every other peer's
+/// reliable frames with it. Written through [`OutboundBox::forget_peer`], taken by the flush.
 #[derive(Resource, Debug, Default)]
-pub struct OutboundBox(pub Vec<(NodeId, MsgClass, Bytes, crate::io::Durability)>);
+pub struct OutboundBox(
+    pub Vec<(NodeId, MsgClass, Bytes, crate::io::Durability)>,
+    pub BTreeSet<NodeId>,
+);
 
 /// Hard ceiling on the [`OutboundBox`] backlog a node carries across ticks under
 /// sustained per-peer back-pressure. Beyond it the flush sheds OLDEST-first but
@@ -54,6 +64,13 @@ impl Default for OutboundStagingCap {
 }
 
 impl OutboundBox {
+    /// Forget every frame staged toward `node` at the next flush. Example: the gateway learns that
+    /// the pilot's client process died; the levels and beats it queued for that process are for
+    /// nobody, so it forgets the peer and the flush drops them instead of the cap shedding them.
+    pub fn forget_peer(&mut self, node: NodeId) {
+        self.1.insert(node);
+    }
+
     /// Encode one `InterShardFlow` and enqueue it to `to` on `class` — the ONE
     /// encode-and-push for every shard-bound flow (DRY-1: was hand-rolled at four sites —
     /// the saga runtime, the stub, and two orchestrator inlines). `class` is a PARAMETER,

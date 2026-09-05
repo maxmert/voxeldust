@@ -407,7 +407,9 @@ impl SteppableNode for ScriptedClient {
                 // arise here. Folded with NodeUnreachable (one arm — a new Inbound variant still
                 // forces reconsideration) as a delivery-failure notice; `shed` on the report it builds
                 // stays structurally 0. The REAL client (vd-client `net.rs`) ignores both via let-else.
-                Inbound::NodeUnreachable { .. } | Inbound::SendShed { .. } => unreachable += 1,
+                Inbound::NodeUnreachable { .. }
+                | Inbound::SendShed { .. }
+                | Inbound::PeerReset { .. } => unreachable += 1,
             }
         }
 
@@ -449,6 +451,7 @@ impl SteppableNode for ScriptedClient {
             unknown_peers: 0,
             staging_shed: 0,
             reliable_shed: 0,
+            forgotten: 0,
             unreachable,
             // A ScriptedClient's FabricTransport never sheds (R-4d M3) — structurally 0.
             shed: 0,

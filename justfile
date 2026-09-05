@@ -97,6 +97,13 @@ client-load:
     cargo test --release -p vd-bins --features dev-control --test client_load
     cargo test --release -p vd-bins --features dev-control --test dev_control_nav
 
+# THE VANISHED CLIENT (2026-09-05): a logged-in client is killed with SIGKILL (no Bye) and the same
+# node id logs in again on the same port. It must be Active within the derived bound, with no
+# cluster restart. Before this gate a dead client's session stayed open forever and the re-login
+# waited behind it ("awaiting_welcome" until an operator restarted the cluster).
+login-after-kill:
+    cargo test --release -p vd-bins --features dev-control --test login_after_kill
+
 # D-6 D-delta: the orchestrator durability crash gates. `orchestrator_crash` is the SIGKILL-mid-fsync proof
 # (a real kill-9 while a directory grant sits submitted-but-pre-fsync loses <=1 batch + recovers
 # consistently); it builds the orchestrator binary WITH the writer-pause hook (`store-test-hooks`).

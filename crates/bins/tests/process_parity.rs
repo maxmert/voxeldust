@@ -71,6 +71,9 @@ struct ProcessClient {
     /// Composed scene LEVELs received (minor 18). Asserted `== 1` at the end: login bumps the
     /// origin epoch exactly once here, and nothing else may (no crossing in this scenario).
     scene_levels: u64,
+    /// Levels that arrived at a DIFFERENT epoch than the one before: a re-origin. Zero in a
+    /// single-shard scenario, whatever the number of levels.
+    scene_reorigins: u64,
     /// Parts of the star catalogue this client received (S11).
     sky_parts: u64,
     /// THE DISTINCT STARS HELD (S11) — a SET, not a running total.
@@ -112,6 +115,7 @@ impl ProcessClient {
             realm_rows: 0,
             evictions: 0,
             scene_levels: 0,
+            scene_reorigins: 0,
             sky_parts: 0,
             sky_stars: std::collections::BTreeSet::new(),
             sky_generation: None,
@@ -122,7 +126,12 @@ impl ProcessClient {
         }
     }
 
-    fn send_hello(&mut self, account: AccountId) {
+    /// Send `Hello` the way the real client does: ONCE, the first time the transport accepts it.
+    /// Returns whether the transport accepted the send (a refusal means the lane is not up yet, and
+    /// the caller tries again next beat). A second ACCEPTED `Hello` from the same node is, by the
+    /// gateway's rule since 2026-09-05, a NEW PROCESS: it ends the pending session and starts over —
+    /// so a client that keeps re-sending an accepted `Hello` never settles (it keeps re-logging in).
+    fn send_hello(&mut self, account: AccountId) -> bool {
         let hello = ClientControlMsg::Hello {
             version: ProtoVersion::CURRENT,
             login: vd_connection_plane::tickets::mint_login(
@@ -133,9 +142,9 @@ impl ProcessClient {
             ),
         };
         let bytes = postcard::to_allocvec(&hello).expect("encode");
-        let _ = self
-            .transport
-            .send(GATEWAY, MsgClass::Control, bytes.into());
+        self.transport
+            .send(GATEWAY, MsgClass::Control, bytes.into())
+            .is_ok()
     }
 
     /// One client tick: drain, decode (asserting the single-peer invariant),
@@ -174,6 +183,9 @@ impl ProcessClient {
                 Inbound::SendShed { .. } => {
                     // A local send-shed (R-4d M3): this test client's sends are tiny + its buffer
                     // ample, so this never fires — present for Inbound exhaustiveness.
+                }
+                Inbound::PeerReset { .. } => {
+                    // The gateway never restarts in this test; present for Inbound exhaustiveness.
                 }
             }
         }
@@ -221,10 +233,13 @@ impl ProcessClient {
                 self.evictions += 1;
             }
             // THE COMPOSED SCENE LANE (minor 18, the C1 flag day): the gateway ships every session
-            // one full level at each origin-epoch bump (login = 1) and bag-diff deltas between
-            // bumps. Measured, never swallowed: a level must LEAD with the session's own origin
-            // (the origin-marker law, window_lane.md §2.7), and the end gate pins the epoch to
-            // exactly 1 — this single-shard scenario never crosses, so any re-origin is a defect.
+            // one full level at each origin-epoch bump (login = 1), bag-diff deltas between bumps,
+            // and — since Step 12 (2026-09-04) — the full level AGAIN on every keep-alive beat at the
+            // CURRENT epoch, so a client that missed a delta is healed by the next beat. Measured,
+            // never swallowed: a level must LEAD with the session's own origin (the origin-marker
+            // law, window_lane.md §2.7), and the end gate pins the epoch to exactly 1 with ZERO
+            // re-origins — this single-shard scenario never crosses, so a level at a NEW epoch is a
+            // defect, while many levels at the SAME epoch are the beat doing its job.
             ServerControlMsg::RealmRegistry {
                 origin,
                 origin_epoch,
@@ -236,6 +251,9 @@ impl ProcessClient {
                     "the origin marker leads every composed level"
                 );
                 self.scene_levels += 1;
+                if self.scene_epoch.is_some_and(|epoch| epoch != origin_epoch) {
+                    self.scene_reorigins += 1;
+                }
                 self.scene_epoch = Some(origin_epoch);
             }
             // A delta may only refine the CURRENT epoch's scene — an off-epoch delta on the
@@ -348,10 +366,6 @@ fn p1_parity_real_binaries_over_quic() {
         gateway_admin: Some(gw_admin),
         ..ClusterAddrs::reserve()
     };
-    let clients = [
-        (NodeId(CLIENT_NODE_BASE), client_a_addr),
-        (NodeId(CLIENT_NODE_BASE + 1), client_b_addr),
-    ];
     let auth_pubkey_hex = dev_auth_pubkey_hex();
     let common = common_env(&trust_dir.display().to_string(), &DEV);
 
@@ -375,7 +389,6 @@ fn p1_parity_real_binaries_over_quic() {
             env!("CARGO_BIN_EXE_vd-gateway"),
             gateway_env(
                 &addrs,
-                &clients,
                 &auth_pubkey_hex,
                 &DEV,
                 vd_bins::ClusterShape::Single,
@@ -469,19 +482,21 @@ fn p1_parity_real_binaries_over_quic() {
     let started = Instant::now();
     let mut pacer = TickPacer::new(DEV.tick_hz);
     let mut hello_retry = Instant::now();
-    walker.send_hello(AccountId(1000));
-    idle.send_hello(AccountId(1001));
+    let mut walker_hello_sent = walker.send_hello(AccountId(1000));
+    let mut idle_hello_sent = idle.send_hello(AccountId(1001));
     loop {
         walker.step(true);
         idle.step(false);
-        // Children may still be booting: retry Hello until welcomed (idempotent).
+        // Children may still be booting, so the gateway's lane may refuse the first sends: retry
+        // `Hello` until the transport ACCEPTS it once. From then on the reliable lane delivers it,
+        // and a second accepted `Hello` would be read as a new process (a re-login), not a retry.
         if hello_retry.elapsed() > Duration::from_millis(500) {
             hello_retry = Instant::now();
-            if walker.session.is_none() {
-                walker.send_hello(AccountId(1000));
+            if !walker_hello_sent {
+                walker_hello_sent = walker.send_hello(AccountId(1000));
             }
-            if idle.session.is_none() {
-                idle.send_hello(AccountId(1001));
+            if !idle_hello_sent {
+                idle_hello_sent = idle.send_hello(AccountId(1001));
             }
         }
         // THE LOGIN HAS SETTLED when the dot that never moves is standing where THE world says it
@@ -635,9 +650,13 @@ fn p1_parity_real_binaries_over_quic() {
             client.sky_beat_generation, client.sky_generation,
             "{name}: the beat names the sky that arrived"
         );
+        assert!(
+            client.scene_levels >= 1,
+            "{name}: the login level arrived (the beat restates it at the same epoch after that)"
+        );
         assert_eq!(
-            client.scene_levels, 1,
-            "{name}: one login level, no re-origin in a single-shard scenario"
+            client.scene_reorigins, 0,
+            "{name}: no re-origin in a single-shard scenario"
         );
         assert_eq!(
             client.scene_epoch,

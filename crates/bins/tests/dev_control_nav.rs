@@ -18,9 +18,8 @@ use vd_bins::{
     Cluster, ClusterAddrs, DEV, common_env, dev_auth_pubkey_hex, dev_auth_signing_key_hex,
     dev_roundtrip, gateway_env, orchestrator_env, reserve_tcp_addr, reserve_udp_addr, shard_env,
 };
-use vd_core::NodeId;
 use vd_core::glam::{DQuat, DVec3};
-use vd_devproto::{CLIENT_NODE_BASE, DevEntityRow, DevPhase, DevRequest, DevResponse, DevState};
+use vd_devproto::{DevEntityRow, DevPhase, DevRequest, DevResponse, DevState};
 
 const DEADLINE: Duration = Duration::from_secs(40);
 
@@ -81,7 +80,6 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
         admin: admin_addr,
         ..ClusterAddrs::reserve()
     };
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let common = common_env(&trust_dir.display().to_string(), &DEV);
     let spawn_node = |bin: &str, node_env: Vec<(&'static str, String)>| -> Child {
         vd_bins::spawn_node(bin, &common, &node_env).expect("spawn node")
@@ -100,7 +98,6 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
             env!("CARGO_BIN_EXE_vd-gateway"),
             gateway_env(
                 &addrs,
-                &client_book,
                 &dev_auth_pubkey_hex(),
                 &DEV,
                 vd_bins::ClusterShape::Single,

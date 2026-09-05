@@ -68,6 +68,11 @@ pub struct TickReport {
     /// `reliable_shed == 0` on any healthy run — a reliable post-commit shed must never
     /// be indistinguishable from a dropped snapshot. MUST be 0 in zero-fault operation.
     pub reliable_shed: usize,
+    /// Staged frames DROPPED because their peer was forgotten this tick ([`OutboundBox::forget_peer`]):
+    /// a consumer ended its relationship with that peer (a gateway closed a dead client's session),
+    /// so the frames were for nobody. Deliberate and counted; distinct from `staging_shed`, which is
+    /// an overload alert.
+    pub forgotten: usize,
     /// `NodeUnreachable` notices observed among the drained inbound.
     pub unreachable: usize,
     /// `SendShed` notices observed among the drained inbound (R-4d M3): a LOCAL send the
@@ -147,16 +152,16 @@ impl<T: Transport> ShardNode<T> {
     /// [`TickReport`]. Takes the [`TickPrologue`] from [`run_schedule`](Self::run_schedule). Split so a
     /// durability-aware bin can wait for the prior tick's batch to be durable BEFORE this send.
     pub fn flush_outbox(&mut self, prologue: TickPrologue) -> TickReport {
-        let (sent, backpressured, staging_shed, reliable_shed, unknown_peers) =
-            flush_phase(&mut self.transport, &mut self.world);
+        let flushed = flush_phase(&mut self.transport, &mut self.world);
         TickReport {
             tick: prologue.tick,
-            unknown_peers,
+            unknown_peers: flushed.unknown_peers,
             drained: prologue.drained,
-            sent,
-            backpressured,
-            staging_shed,
-            reliable_shed,
+            sent: flushed.sent,
+            backpressured: flushed.backpressured,
+            staging_shed: flushed.staging_shed,
+            reliable_shed: flushed.reliable_shed,
+            forgotten: flushed.forgotten,
             unreachable: prologue.unreachable,
             shed: prologue.shed,
         }
@@ -291,18 +296,25 @@ fn drain_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usiz
 /// of ITS frames untried — preserving that peer's FIFO (a later frame can never
 /// jump ahead of an earlier refused one) — and keep flushing every other peer.
 ///
-/// The carried-over staging is bounded by [`OutboundStagingCap`] (SCALE-F4): past
-/// the cap the OLDEST staged frames are shed with a loud counted drop, so sustained
-/// congestion toward an unreachable peer can never grow the buffer without limit.
+/// The carried-over staging is bounded PER PEER by [`OutboundStagingCap`] (SCALE-F4, made
+/// per-peer 2026-09-05): past the cap a peer's OLDEST staged frames are shed with a loud counted
+/// drop, so sustained congestion toward an unreachable peer can never grow the buffer without
+/// limit — and can never spend another peer's share. The cap used to be ONE number for the whole
+/// box: a dead client's backlog filled it, and the shed then took every LIVE client's reliable
+/// frames (the measured wedge — "a RELIABLE frame was SHED" on a gateway with one dead peer).
 ///
-/// Returns `(sent, backpressured, staging_shed, reliable_shed)` — `reliable_shed` is the
-/// reliable subset of `staging_shed`, surfaced distinctly so the loss of a transfer/control
-/// frame is machine-observable, never lumped with benign latest-wins snapshot shedding.
-fn flush_phase(
-    transport: &mut dyn Transport,
-    world: &mut World,
-) -> (usize, usize, usize, usize, usize) {
-    let pending = std::mem::take(&mut world.resource_mut::<OutboundBox>().0);
+/// Before anything is sent, the frames toward every FORGOTTEN peer ([`OutboundBox::forget_peer`])
+/// are dropped and counted: a consumer said those frames are for nobody.
+///
+/// Returns a [`Flushed`] — `reliable_shed` is the reliable subset of `staging_shed`, surfaced
+/// distinctly so the loss of a transfer/control frame is machine-observable, never lumped with
+/// benign latest-wins snapshot shedding.
+fn flush_phase(transport: &mut dyn Transport, world: &mut World) -> Flushed {
+    let (mut pending, forget) = {
+        let mut outbox = world.resource_mut::<OutboundBox>();
+        (std::mem::take(&mut outbox.0), std::mem::take(&mut outbox.1))
+    };
+    let forgotten = forget_peers(&mut pending, &forget);
     let cap = world.resource::<OutboundStagingCap>().0;
     let mut sent = 0usize;
     // Peers that back-pressured THIS tick; their remaining frames requeue untried.
@@ -333,13 +345,44 @@ fn flush_phase(
     world.resource_mut::<OutboundBox>().0 = requeued;
     let unknown_peers = unknown.len();
     ask_peer_book(transport, world, &unknown);
-    (
+    Flushed {
         sent,
         backpressured,
         staging_shed,
         reliable_shed,
         unknown_peers,
-    )
+        forgotten,
+    }
+}
+
+/// What one flush did (the flush half of a [`TickReport`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Flushed {
+    sent: usize,
+    backpressured: usize,
+    staging_shed: usize,
+    reliable_shed: usize,
+    unknown_peers: usize,
+    forgotten: usize,
+}
+
+/// Drop every staged frame toward a forgotten peer; return how many were dropped. Monomorphic.
+fn forget_peers(
+    pending: &mut Vec<(NodeId, MsgClass, Bytes, Durability)>,
+    forget: &BTreeSet<NodeId>,
+) -> usize {
+    if forget.is_empty() {
+        return 0;
+    }
+    let before = pending.len();
+    pending.retain(|(to, _, _, _)| !forget.contains(to));
+    let dropped = before - pending.len();
+    tracing::info!(
+        peers = forget.len(),
+        dropped,
+        "forgot the staged frames toward peers whose sessions ended"
+    );
+    dropped
 }
 
 /// Ask the clock's source where each unknown peer listens — one small Membership-class frame per
@@ -381,41 +424,61 @@ fn ask_peer_book(transport: &mut dyn Transport, world: &mut World, unknown: &BTr
     }
 }
 
-/// Bound the carried-over staging to `cap`, shedding OLDEST-first but UNRELIABLE-FIRST
+/// Bound the carried-over staging to `cap` PER PEER, shedding OLDEST-first but UNRELIABLE-FIRST
 /// (the ROB-2 reliability-aware discipline, matching `BoundedInbox`): latest-wins
 /// Snapshot/Input frames are the disposable casualties; a RELIABLE Saga/Control/
 /// Membership frame is sacrificed ONLY when shedding every droppable unreliable frame
-/// still leaves the backlog over cap — and that reliable loss is its own distinct
+/// of THAT peer still leaves its backlog over cap — and that reliable loss is its own distinct
 /// `error!`-level ALERT, never quietly lumped with snapshots. Survivors keep FIFO order.
+/// Per peer, because one peer's congestion must never spend another peer's share: a dead
+/// client's backlog used to shed a live client's reliable frames under the one shared cap.
 /// Returns `(total_shed, reliable_shed)`. Monomorphic (the generic flush stays a shim).
 fn shed_over_cap(
     requeued: &mut Vec<(NodeId, MsgClass, Bytes, Durability)>,
     cap: usize,
 ) -> (usize, usize) {
-    let over = requeued.len().saturating_sub(cap);
-    if over == 0 {
+    // Per peer: how many frames it holds, and how many of those are unreliable.
+    let mut held: BTreeMap<NodeId, (usize, usize)> = BTreeMap::new();
+    for (to, class, _, _) in requeued.iter() {
+        let e = held.entry(*to).or_insert((0, 0));
+        e.0 += 1;
+        e.1 += usize::from(class.reliability() == Reliability::Unreliable);
+    }
+    // Per peer: how many unreliable and how many reliable frames to drop (oldest first).
+    let mut budgets: BTreeMap<NodeId, (usize, usize)> = BTreeMap::new();
+    let mut unreliable_shed = 0usize;
+    let mut reliable_shed = 0usize;
+    for (to, (total, unreliable_total)) in held {
+        let over = total.saturating_sub(cap);
+        if over == 0 {
+            continue;
+        }
+        let ud = over.min(unreliable_total);
+        let rd = over - ud;
+        unreliable_shed += ud;
+        reliable_shed += rd;
+        budgets.insert(to, (ud, rd));
+    }
+    if budgets.is_empty() {
         return (0, 0);
     }
-    let unreliable_total = requeued
-        .iter()
-        .filter(|(_, class, _, _)| class.reliability() == Reliability::Unreliable)
-        .count();
-    let unreliable_shed = over.min(unreliable_total);
-    let reliable_shed = over - unreliable_shed;
-    // Drop the oldest `unreliable_shed` unreliable + oldest `reliable_shed` reliable
-    // frames (front-to-back walk = oldest-first); retain keeps the rest in FIFO order.
-    let mut ud = unreliable_shed;
-    let mut rd = reliable_shed;
-    requeued.retain(|(_, class, _, _)| match class.reliability() {
-        Reliability::Unreliable if ud > 0 => {
-            ud -= 1;
-            false
+    // Drop each peer's oldest `ud` unreliable + oldest `rd` reliable frames (front-to-back walk =
+    // oldest-first); retain keeps the rest in FIFO order.
+    requeued.retain(|(to, class, _, _)| {
+        let Some((ud, rd)) = budgets.get_mut(to) else {
+            return true;
+        };
+        match class.reliability() {
+            Reliability::Unreliable if *ud > 0 => {
+                *ud -= 1;
+                false
+            }
+            Reliability::Reliable if *rd > 0 => {
+                *rd -= 1;
+                false
+            }
+            _ => true,
         }
-        Reliability::Reliable if rd > 0 => {
-            rd -= 1;
-            false
-        }
-        _ => true,
     });
     if unreliable_shed > 0 {
         tracing::warn!(
@@ -429,9 +492,10 @@ fn shed_over_cap(
         tracing::error!(
             shed = reliable_shed,
             cap,
-            "OutboundBox staging over cap: a RELIABLE frame was SHED (overload ALERT — the \
+            "OutboundBox staging over cap: a RELIABLE frame was SHED (overload ALERT — that peer's \
              unreliable backlog was exhausted; the peer is effectively unreachable and \
-             lease/self-fence will reassign its authority; this is never silent)"
+             lease/self-fence will reassign its authority; no other peer's share was spent; \
+             this is never silent)"
         );
     }
     (unreliable_shed + reliable_shed, reliable_shed)
@@ -980,6 +1044,116 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn the_staging_cap_is_per_peer_so_a_dead_peer_never_spends_a_live_peers_share() {
+        // The measured wedge: ONE shared cap, a dead client's backlog filled it, and the shed
+        // took a LIVE client's reliable frames. Per peer: the dead peer sheds its own oldest
+        // frames; the live peer's backlog, under cap, is untouched — even when the SUM of the
+        // two is far over cap.
+        const DEAD: NodeId = NodeId(10);
+        const LIVE: NodeId = NodeId(11);
+        let (transport, _state) = PerPeerLanes::with_caps(A, &[(DEAD, 0), (LIVE, 0)]);
+        let mut node = build_app(stub_cfg(A), transport);
+        node.world_mut().insert_resource(OutboundStagingCap(4));
+        {
+            let mut outbox = node.world_mut().resource_mut::<OutboundBox>();
+            for n in 0..6u8 {
+                outbox.0.push((
+                    DEAD,
+                    MsgClass::Input,
+                    vec![n].into(),
+                    vd_sim::io::Durability::Ephemeral,
+                ));
+            }
+            for n in 0..3u8 {
+                outbox.0.push((
+                    LIVE,
+                    MsgClass::Control,
+                    vec![100 + n].into(),
+                    vd_sim::io::Durability::Ephemeral,
+                ));
+            }
+        }
+        let report = node.step_tick();
+        // 9 staged under a cap of 4: a shared cap would shed 5, and 2 of those would be LIVE's
+        // reliable frames. Per peer: DEAD sheds 6 - 4 = 2, LIVE sheds nothing.
+        assert_eq!(report.staging_shed, 2);
+        assert_eq!(report.reliable_shed, 0);
+        assert_eq!(report.backpressured, 7);
+        let kept: Vec<(NodeId, Vec<u8>)> = node
+            .world_mut()
+            .resource::<OutboundBox>()
+            .0
+            .iter()
+            .map(|(to, _, b, _)| (*to, b.to_vec()))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                (DEAD, vec![2]),
+                (DEAD, vec![3]),
+                (DEAD, vec![4]),
+                (DEAD, vec![5]),
+                (LIVE, vec![100]),
+                (LIVE, vec![101]),
+                (LIVE, vec![102]),
+            ],
+            "DEAD lost its two oldest; LIVE kept all three, FIFO order preserved"
+        );
+    }
+
+    #[test]
+    fn a_forgotten_peers_staged_frames_are_dropped_before_the_flush_and_counted() {
+        // A gateway closed a dead client's session and forgot the peer: the levels and beats it
+        // had staged for that process are for nobody. They are dropped at the flush (never sent,
+        // never shed by the cap) and the other peer's frames go out untouched.
+        const GONE: NodeId = NodeId(10);
+        const LIVE: NodeId = NodeId(11);
+        crate::init_test_tracing(); // the forget line's lazy fields must evaluate (HR5)
+        let (transport, state) = PerPeerLanes::with_caps(A, &[(GONE, 0), (LIVE, 8)]);
+        let mut node = build_app(stub_cfg(A), transport);
+        {
+            let mut outbox = node.world_mut().resource_mut::<OutboundBox>();
+            for n in 0..3u8 {
+                outbox.0.push((
+                    GONE,
+                    MsgClass::Control,
+                    vec![n].into(),
+                    vd_sim::io::Durability::Ephemeral,
+                ));
+            }
+            outbox.0.push((
+                LIVE,
+                MsgClass::Control,
+                vec![7].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
+            outbox.forget_peer(GONE);
+        }
+        let report = node.step_tick();
+        assert_eq!(
+            report.forgotten, 3,
+            "the three frames toward the forgotten peer"
+        );
+        assert_eq!(report.sent, 1, "the live peer's frame went out");
+        assert_eq!(report.staging_shed, 0);
+        assert_eq!(
+            report.backpressured, 0,
+            "nothing toward GONE was carried over"
+        );
+        assert_eq!(
+            state.borrow().delivered.get(&LIVE).map(|v| v.len()),
+            Some(1)
+        );
+        assert!(
+            node.world_mut().resource::<OutboundBox>().1.is_empty(),
+            "the forget list is taken by the flush; a later frame toward GONE is not dropped"
+        );
+        // A second tick with nothing forgotten reports zero (the empty-list arm).
+        let report = node.step_tick();
+        assert_eq!(report.forgotten, 0);
     }
 
     #[test]

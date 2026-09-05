@@ -76,7 +76,9 @@ fn relay_node(fabric: &FaultFabric, id: NodeId, peer: NodeId) -> Box<dyn Steppab
                 // observed and dropped, never forwarded around the ring. One arm: the fabric never
                 // sheds, so a distinct SendShed arm would be uncoverable, and a new Inbound variant
                 // still forces this to be reconsidered.
-                Inbound::NodeUnreachable { .. } | Inbound::SendShed { .. } => None,
+                Inbound::NodeUnreachable { .. }
+                | Inbound::SendShed { .. }
+                | Inbound::PeerReset { .. } => None,
             });
             if let Some((class, bytes)) = first_wire {
                 outbox

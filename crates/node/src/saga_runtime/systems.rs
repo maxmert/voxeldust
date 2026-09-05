@@ -183,6 +183,13 @@ pub fn drive_sagas_core(
                 runtime.sends_shed += 1;
                 continue;
             }
+            // A peer reset is a SESSION fact. The saga runtime binds durable flows to a NODE: a
+            // restarted shard is the same node and its at-least-once flows replay to it by design,
+            // so nothing here changes. Counted, never fed to the liveness tracker.
+            Inbound::PeerReset { .. } => {
+                runtime.peer_resets += 1;
+                continue;
+            }
         };
         if *class != MsgClass::Saga {
             continue;

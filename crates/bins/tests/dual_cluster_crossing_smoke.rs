@@ -112,7 +112,10 @@ impl LoginClient {
         }
     }
 
-    fn send_hello(&mut self, account: AccountId) {
+    /// Send `Hello` the way the real client does: ONCE, the first time the transport accepts it.
+    /// Returns whether the send was accepted. A second ACCEPTED `Hello` from the same node is, by
+    /// the gateway's rule since 2026-09-05, a NEW PROCESS (a re-login), never a retry.
+    fn send_hello(&mut self, account: AccountId) -> bool {
         let hello = ClientControlMsg::Hello {
             version: ProtoVersion::CURRENT,
             login: vd_connection_plane::tickets::mint_login(
@@ -123,9 +126,9 @@ impl LoginClient {
             ),
         };
         let bytes = postcard::to_allocvec(&hello).expect("encode hello");
-        let _ = self
-            .transport
-            .send(GATEWAY, MsgClass::Control, bytes.into());
+        self.transport
+            .send(GATEWAY, MsgClass::Control, bytes.into())
+            .is_ok()
     }
 
     /// Drain inbound (noting the welcome + the first subscription), then FLY: once subscribed, send a
@@ -385,7 +388,7 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
     let started = Instant::now();
     let mut pacer = TickPacer::new(DEV.tick_hz);
     let mut hello_retry = Instant::now();
-    client.send_hello(AccountId(1000));
+    let mut hello_sent = client.send_hello(AccountId(1000));
 
     // ---- SOURCE SIDE ESTABLISHED (batch review): the HOME shard owns the freshly admitted dot's
     // Entity row BEFORE the crossing can commit — measured off the ONE directory, so the headline
@@ -394,10 +397,11 @@ fn a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier() {
     // ~`exit_ticks` more ticks and the saga longer still, so this poll always wins the race.
     let subject_key = loop {
         client.step();
-        // Children may still be settling the QUIC handshake; re-send Hello until welcomed (idempotent).
-        if !client.session && hello_retry.elapsed() > Duration::from_millis(500) {
+        // Children may still be settling the QUIC handshake, so the lane may refuse the first
+        // sends: retry until the transport ACCEPTS the `Hello` once; the reliable lane delivers it.
+        if !hello_sent && hello_retry.elapsed() > Duration::from_millis(500) {
             hello_retry = Instant::now();
-            client.send_hello(AccountId(1000));
+            hello_sent = client.send_hello(AccountId(1000));
         }
         if let Some(key) = owns_an_entity(&directory_rows(admin), &home_authority) {
             break key;

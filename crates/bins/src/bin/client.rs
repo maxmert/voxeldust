@@ -98,10 +98,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::net::SocketAddr::new(args.bind_ip, args.client_quic),
             peers,
             CLIENT_OUTBOUND_CAP,
-            // R-2b: a fresh process per client launch; 0 is correct here. NOTE: once R-3' dedup is
-            // live, a crashed client reconnecting at incarnation 0 collides with its prior session's
-            // buffered frames at the gateway — R-6's durable boot-counter / R-3' session reset close it.
-            0,
+            // R-2b: a fresh process per client launch. The launch stamp (wall-clock ms) is STRICTLY
+            // HIGHER on every restart, so the transport reads a restarted client as a new process
+            // (`Inbound::PeerReset { cause: Reincarnated }`) and drops the dead process's buffered
+            // frames instead of replaying them into the new one.
+            vd_bins::launch_incarnation(),
             vd_bins::world_generation(),
         ),
         None, // R-6d3a: the client has no producer-less durable flows — no outbox needed.

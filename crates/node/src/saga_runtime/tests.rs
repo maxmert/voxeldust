@@ -1572,6 +1572,37 @@ fn rehydrate_keeps_the_configured_liveness_margin() {
 }
 
 #[test]
+fn a_peer_reset_is_counted_and_never_confirms_a_peer_dead() {
+    // A peer reset (a dialed-in peer's connection died, or a peer restarted) is a SESSION fact. The
+    // saga runtime binds durable flows to a NODE, and a restarted shard is the same node: its
+    // at-least-once flows replay to it by design. So the notice is counted and NEVER routed to
+    // `record_unreachable` — otherwise every shard restart would confirm that shard dead.
+    let mut rig = Rig::new();
+    {
+        let mut inbox = rig.orch.world_mut().resource_mut::<InboundBox>();
+        inbox.0 = vec![
+            Inbound::PeerReset {
+                node: DEST,
+                cause: vd_sim::io::PeerResetCause::Reincarnated,
+            },
+            Inbound::PeerReset {
+                node: DEST,
+                cause: vd_sim::io::PeerResetCause::ConnectionLost,
+            },
+        ];
+    }
+    let (world, schedule) = rig.orch.parts_mut();
+    schedule.run(world);
+    let runtime = rig.orch.world_mut().resource::<SagaRuntimeRes>();
+    assert_eq!(runtime.peer_resets(), 2, "every reset is counted");
+    assert_eq!(
+        runtime.liveness_notices(),
+        0,
+        "no reset ever reached record_unreachable"
+    );
+}
+
+#[test]
 fn a_send_shed_is_counted_and_never_confirms_a_live_peer_dead() {
     // R-4d M3 regression (the false-confirm cure): a LOCAL send-shed toward a LIVE peer is a
     // transport backpressure/oversize refusal — it says NOTHING about that peer's liveness. It

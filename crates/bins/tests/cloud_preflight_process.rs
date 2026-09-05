@@ -175,7 +175,6 @@ fn gateway_cloud_vetoes_the_built_in_dev_auth_key() {
     let mut envs = common_env(&trust.display().to_string(), &DEV);
     envs.extend(gateway_env(
         &addrs,
-        &[],
         &dev_auth_pubkey_hex(),
         &DEV,
         vd_bins::ClusterShape::Single,

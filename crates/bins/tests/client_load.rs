@@ -19,10 +19,8 @@ use vd_bins::{
     dev_auth_signing_key_hex, dev_roundtrip, gateway_env, orchestrator_env, reserve_tcp_addr,
     reserve_udp_addr, shard_env,
 };
-use vd_core::NodeId;
 use vd_devproto::{
-    CLIENT_NODE_BASE, DevPhase, DevPortScheme, DevRequest, DevResponse, DevState, WaitField,
-    WaitOp, WaitPredicate,
+    DevPhase, DevPortScheme, DevRequest, DevResponse, DevState, WaitField, WaitOp, WaitPredicate,
 };
 
 // ★ RAISED FROM 40 s (2026-08-31). What these gates prove is that concurrent logins each converge
@@ -88,10 +86,6 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
         admin: admin_addr,
         ..ClusterAddrs::reserve()
     };
-    let client_book: Vec<(NodeId, SocketAddr)> = clients
-        .iter()
-        .map(|(i, quic, _)| (NodeId(CLIENT_NODE_BASE + u64::from(*i)), *quic))
-        .collect();
     let common = common_env(&trust_dir.display().to_string(), &DEV);
 
     // ---- spawn the cluster ---------------------------------------------------
@@ -112,7 +106,6 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
             env!("CARGO_BIN_EXE_vd-gateway"),
             gateway_env(
                 &addrs,
-                &client_book,
                 &dev_auth_pubkey_hex(),
                 &DEV,
                 vd_bins::ClusterShape::Single,
@@ -279,7 +272,6 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
         admin: admin_addr,
         ..ClusterAddrs::reserve()
     };
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
     let common = common_env(&trust_dir.display().to_string(), &DEV);
     let spawn_node = |bin: &str, node_env: Vec<(&'static str, String)>| -> Child {
         vd_bins::spawn_node(bin, &common, &node_env).expect("spawn node")
@@ -298,7 +290,6 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
             env!("CARGO_BIN_EXE_vd-gateway"),
             gateway_env(
                 &addrs,
-                &client_book,
                 &dev_auth_pubkey_hex(),
                 &DEV,
                 vd_bins::ClusterShape::Single,

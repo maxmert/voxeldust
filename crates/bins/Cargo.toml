@@ -118,3 +118,7 @@ libc = { workspace = true }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "hull_flight_probe"
+required-features = ["dev-control"]

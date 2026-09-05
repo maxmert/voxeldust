@@ -213,12 +213,7 @@ fn spawn_capture_client(
     cmd.spawn().expect("spawn capture client")
 }
 
-fn boot_demand_cluster(
-    f: &Fixture,
-    a: &ClusterAddrs,
-    p: &DevClusterParams,
-    client_book: &[(NodeId, SocketAddr)],
-) -> Cluster {
+fn boot_demand_cluster(f: &Fixture, a: &ClusterAddrs, p: &DevClusterParams) -> Cluster {
     let mut cluster = Cluster::new();
     cluster.push(
         "vd-orchestrator",
@@ -234,13 +229,7 @@ fn boot_demand_cluster(
         vd_bins::spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
             &f.common,
-            &gateway_env(
-                a,
-                client_book,
-                &dev_auth_pubkey_hex(),
-                p,
-                ClusterShape::Demand,
-            ),
+            &gateway_env(a, &dev_auth_pubkey_hex(), p, ClusterShape::Demand),
         )
         .expect("spawn gateway"),
     );
@@ -480,15 +469,9 @@ fn g_two_ships_two_hulls_two_depths_mutual_visibility_and_one_watched_crossing()
     let quic_y = reserve_udp_addr();
     let devctl_x = reserve_tcp_addr().port();
     let devctl_y = reserve_tcp_addr().port();
-    // BOTH client windows in the gateway's address book — the launcher seeds every agent index, so
-    // two sessions need no launcher change, only their own indices.
-    let client_book = [
-        (NodeId(CLIENT_NODE_BASE), quic_x),
-        (NodeId(CLIENT_NODE_BASE + 1), quic_y),
-    ];
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_cluster(&f, &a, &DEV, &client_book);
+    let _cluster = boot_demand_cluster(&f, &a, &DEV);
     let mut ship_x = ChildGuard(spawn_capture_client(
         &f,
         a.gateway,

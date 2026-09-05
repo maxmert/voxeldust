@@ -954,20 +954,6 @@ mod tests {
         }
     }
 
-    /// HR5 — a TRACE sink so every tracing macro's lazy field closure evaluates on the paths the
-    /// tests drive (the provenance warn); without a subscriber those closures are dead regions.
-    fn init_test_tracing() {
-        use std::sync::Once;
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            let subscriber = tracing_subscriber::fmt()
-                .with_max_level(tracing::level_filters::LevelFilter::TRACE)
-                .with_writer(std::io::sink)
-                .finish();
-            let _ = tracing::subscriber::set_global_default(subscriber);
-        });
-    }
-
     fn run(inbound: Vec<Inbound>) -> RlmReconcilerRes {
         // No directory heads: every sender is UNRESOLVABLE — measured, never gating (the demand
         // still folds; the provenance tests below pin all four sender classes explicitly).
@@ -976,7 +962,7 @@ mod tests {
 
     /// [`run`] with caller-built directory heads — the provenance tests grant who holds what.
     fn run_with_dir(dir: DirectoryCore, inbound: Vec<Inbound>) -> RlmReconcilerRes {
-        init_test_tracing();
+        crate::init_test_tracing();
         let mut world = World::new();
         world.insert_resource(InboundBox(inbound));
         world.insert_resource(crate::orchestrator::DirectoryRes(dir));
@@ -990,7 +976,7 @@ mod tests {
     /// Ingest `inbound` into an EXISTING reconciler through the UNCHANGED `record_realm_demands` system
     /// (mirrors [`run`] but folds into a res that already carries state), returning it for the next drive.
     fn ingest_into(rlm: RlmReconcilerRes, inbound: Vec<Inbound>) -> RlmReconcilerRes {
-        init_test_tracing();
+        crate::init_test_tracing();
         let mut world = World::new();
         world.insert_resource(InboundBox(inbound));
         world.insert_resource(crate::orchestrator::DirectoryRes(DirectoryCore::new(

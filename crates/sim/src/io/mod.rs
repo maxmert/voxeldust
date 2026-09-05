@@ -188,6 +188,26 @@ pub enum Inbound {
         /// transient dead-ack-path backpressure without peeking at opaque payloads.
         reason: ShedReason,
     },
+    /// THE TRANSPORT'S RELATIONSHIP WITH A PEER ENDED (2026-09-05, the vanished-client wedge). Two
+    /// causes, one meaning for a consumer that binds a SESSION to a peer: whatever it held for that
+    /// peer's process is over. A consumer that binds durable flows to a NODE (the saga runtime) ignores
+    /// it — a restarted shard is the same node, and its at-least-once flows replay to it by design.
+    ///
+    /// Only the io-prod mesh produces this. The in-memory fabrics route by id, never restart a peer's
+    /// process, and never emit it; consumers are proven on a synthesised notice.
+    PeerReset { node: NodeId, cause: PeerResetCause },
+}
+
+/// Why the transport's relationship with a peer ended (the [`Inbound::PeerReset`] cause). A CLOSED
+/// taxonomy, kept in `sim::io` like [`ShedReason`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerResetCause {
+    /// The peer dialed in, its accepted connection died, and it cannot be re-dialed (it has no
+    /// booked address). Nothing more will ever reach that process.
+    ConnectionLost,
+    /// The peer's frames now carry a STRICTLY HIGHER process incarnation: a new process speaks for
+    /// the same node id. Everything held for the previous process belongs to nobody.
+    Reincarnated,
 }
 
 /// Why the transport shed a local send (the [`Inbound::SendShed`] cause). A CLOSED taxonomy.
@@ -217,6 +237,9 @@ impl Inbound {
             // A shed notice is reliable feedback for the same reason (losing it strands the
             // sender's accounting), independent of `ShedReason`.
             Inbound::SendShed { .. } => Reliability::Reliable,
+            // A peer reset is the fact a session consumer closes on; dropping it would leave a
+            // dead session open until the cluster restarts (the measured wedge).
+            Inbound::PeerReset { .. } => Reliability::Reliable,
         }
     }
 }
@@ -628,6 +651,24 @@ mod tests {
                 class: MsgClass::Saga,
                 undelivered: MsgId(0),
                 reason: ShedReason::RetryBufferFull,
+            }
+            .reliability(),
+            Reliability::Reliable
+        );
+        // A peer reset is reliable for BOTH causes (constructs each variant of the closed
+        // PeerResetCause enum + the reliability() arm).
+        assert_eq!(
+            Inbound::PeerReset {
+                node: NodeId(2),
+                cause: PeerResetCause::ConnectionLost,
+            }
+            .reliability(),
+            Reliability::Reliable
+        );
+        assert_eq!(
+            Inbound::PeerReset {
+                node: NodeId(2),
+                cause: PeerResetCause::Reincarnated,
             }
             .reliability(),
             Reliability::Reliable

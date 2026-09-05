@@ -240,6 +240,19 @@ pub struct GatewayStats {
     pub scene_levels_restated: u64,
     /// Rows logged by the per-tick trace (`VD_TRACE_REALM`, 2026-09-05).
     pub window_trace_rows: u64,
+    /// THE VANISHED CLIENT (2026-09-05). A client's session was closed because the transport said its
+    /// dialed-in connection died (`PeerReset::ConnectionLost`) or a reliable frame toward it could not
+    /// be delivered (`NodeUnreachable`). Before this, nothing closed a session whose peer died: the
+    /// gateway shed reliable frames toward it forever, and a re-login waited behind it until the
+    /// cluster was restarted.
+    pub sessions_closed_peer_lost: u64,
+    /// A client's session was closed because a NEW process now speaks for its node id (the transport
+    /// saw a strictly higher incarnation — `PeerReset::Reincarnated`).
+    pub sessions_closed_peer_reincarnated: u64,
+    /// A `Hello` arrived from a node that already held a session: the old session was ended and the
+    /// login proceeded as a fresh one. A `Hello` is only ever sent by a process that was never
+    /// welcomed, so a second one is a new process, never a duplicate.
+    pub sessions_replaced_by_relogin: u64,
     /// Slice B — rows dropped because their stated tail frame was not their level's own frame
     /// (or an unknown-frame refusal from the fold): alien, dropped, counted (§2.6.6).
     pub window_alien_rows: u64,

@@ -459,6 +459,31 @@ fn set_tick(rig: &mut Rig, tick: u64) {
     rig.world.resource_mut::<ClockSample>().local_tick = TickId(tick);
 }
 
+/// Did this tick's sends carry the `DetachSession` for `sid` to the home shard?
+fn detach_sent(sent: &[(NodeId, MsgClass, Vec<u8>)], sid: SessionId) -> bool {
+    sent.iter().any(|(to, class, b)| {
+        (*to == SHARD)
+            & (*class == MsgClass::Control)
+            & (postcard::from_bytes::<GatewayToShard>(b).ok()
+                == Some(GatewayToShard::DetachSession {
+                    session: sid,
+                    fence: Fence(1),
+                }))
+    })
+}
+
+/// Did this tick's sends carry the `LeaseRevoke` for `sid` to the orchestrator?
+fn revoke_sent(sent: &[(NodeId, MsgClass, Vec<u8>)], sid: SessionId) -> bool {
+    sent.iter().any(|(to, _, b)| {
+        (*to == ORCH)
+            & (postcard::from_bytes::<InterShardFlow>(b).ok()
+                == Some(InterShardFlow::Directory(DirectoryOp::LeaseRevoke {
+                    key: DirectoryKey::Session(sid),
+                    fence: Fence(1),
+                })))
+    })
+}
+
 fn session_active(rig: &Rig, sid: SessionId) -> bool {
     rig.world
         .resource::<GatewaySessions>()
@@ -1164,19 +1189,32 @@ fn input_for_a_desynced_session_map_is_dropped_and_counted_never_panics() {
 }
 
 #[test]
-fn duplicate_hello_below_capacity_is_an_idempotent_noop() {
+fn a_second_hello_while_the_first_login_is_pending_replaces_the_pending_session() {
+    // A client sends `Hello` once and never again from the same process, so a second `Hello` is a
+    // new process even while the first login is still waiting for its directory grant (the pilot
+    // killed the client and started it again before the `Welcome` came). The pending session ends
+    // (its lease is revoked; no detach, it never attached) and a fresh one is minted.
     let mut rig = Rig::new();
     let _ = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
-    assert_eq!(rig.world.resource::<GatewaySessions>().len(), 1);
+    let pending = rig
+        .world
+        .resource::<GatewaySessions>()
+        .sessions()
+        .next()
+        .expect("pending");
     let sent = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
-    assert_eq!(
-        rig.world.resource::<GatewaySessions>().len(),
-        1,
-        "no second session"
+    let sessions = rig.world.resource::<GatewaySessions>();
+    assert_eq!(sessions.len(), 1, "one session: the fresh one");
+    let fresh = sessions.sessions().next().expect("fresh");
+    assert_ne!(fresh, pending);
+    assert!(revoke_sent(&sent, pending), "the pending lease was revoked");
+    // The exit is the `Bye` exit, so the detach goes to the static route as it would for a `Bye`
+    // on a pending session (idempotent at the shard). Nothing goes to the client: no Close.
+    assert!(
+        sent.iter().all(|(to, _, _)| (*to == ORCH) | (*to == SHARD)),
+        "no Close to the client"
     );
-    // Only the pending-grant retry went out — no Close, no new mint.
-    assert!(sent.iter().all(|(to, _, _)| *to == ORCH));
-    assert_eq!(rig.stats(), GatewayStats::default());
+    assert_eq!(rig.stats().sessions_replaced_by_relogin, 1);
 }
 
 #[test]
@@ -1733,6 +1771,135 @@ fn frames_skip_sessions_that_are_not_active_yet() {
 }
 
 #[test]
+fn a_second_hello_from_the_same_node_replaces_its_session() {
+    // THE VANISHED-CLIENT WEDGE (2026-09-05). The pilot's client is killed and started again: the
+    // new process sends `Hello` from the SAME node id. It used to be ignored as a duplicate, the
+    // dead session stayed, and the new client waited for a `Welcome` forever. Now the old session
+    // ends the way a `Bye` ends it (detach + revoke), its staged frames are forgotten, and the
+    // login proceeds as a fresh one with a NEW session id.
+    let mut rig = Rig::new();
+    let (old, _) = rig.login();
+    assert!(session_active(&rig, old));
+    let sent = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
+    let sessions = rig.world.resource::<GatewaySessions>();
+    let ids: Vec<SessionId> = sessions.sessions().collect();
+    assert_eq!(ids.len(), 1, "exactly one session: the fresh one");
+    assert_ne!(ids[0], old, "the fresh login minted a new session id");
+    assert_eq!(
+        sessions.by_client.get(&CLIENT),
+        Some(&ids[0]),
+        "the node now maps to the fresh session"
+    );
+    assert!(
+        detach_sent(&sent, old),
+        "the old session was detached at the home shard"
+    );
+    assert!(revoke_sent(&sent, old), "the old lease was revoked");
+    assert!(
+        rig.world.resource::<OutboundBox>().1.contains(&CLIENT),
+        "the frames staged toward the dead process are forgotten at the next flush"
+    );
+    assert_eq!(rig.stats().sessions_replaced_by_relogin, 1);
+    assert_eq!(rig.stats().sessions_closed_peer_lost, 0);
+    assert_eq!(rig.stats().sessions_closed_peer_reincarnated, 0);
+}
+
+#[test]
+fn a_peer_reset_ends_that_nodes_session_and_a_reset_about_a_stranger_changes_nothing() {
+    // The transport's word: the client's dialed-in connection died (nothing more will reach that
+    // process), or a new process speaks for its node id. Either way the session ends as a `Bye`
+    // would end it, and the staged frames toward the node are forgotten. A reset about a node with
+    // no session — a shard, a stranger — is not a session fact.
+    let mut rig = Rig::new();
+    let (first, _) = rig.login();
+    assert!(session_active(&rig, first));
+    let sent = rig.tick(vec![Inbound::PeerReset {
+        node: CLIENT,
+        cause: vd_sim::io::PeerResetCause::ConnectionLost,
+    }]);
+    assert!(rig.world.resource::<GatewaySessions>().is_empty());
+    assert!(detach_sent(&sent, first), "detached at the home shard");
+    assert!(revoke_sent(&sent, first), "the lease was revoked");
+    assert!(rig.world.resource::<OutboundBox>().1.contains(&CLIENT));
+    assert_eq!(rig.stats().sessions_closed_peer_lost, 1);
+    // The forget list is the flush's to take; the rig has no flush, so clear it by hand here to
+    // observe the next arm on its own.
+    rig.world.resource_mut::<OutboundBox>().1.clear();
+
+    // The node comes back as a NEW process and logs in; then the transport reports the
+    // reincarnation for a LATER restart.
+    let (second, _) = rig.login();
+    assert!(session_active(&rig, second));
+    let _ = rig.tick(vec![Inbound::PeerReset {
+        node: CLIENT,
+        cause: vd_sim::io::PeerResetCause::Reincarnated,
+    }]);
+    assert!(rig.world.resource::<GatewaySessions>().is_empty());
+    assert_eq!(rig.stats().sessions_closed_peer_reincarnated, 1);
+    assert_eq!(rig.stats().sessions_closed_peer_lost, 1);
+
+    // A reset about a stranger, with a live session held by somebody else: nothing changes.
+    let (third, _) = rig.login();
+    rig.world.resource_mut::<OutboundBox>().1.clear();
+    let sent = rig.tick(vec![Inbound::PeerReset {
+        node: NodeId(177),
+        cause: vd_sim::io::PeerResetCause::ConnectionLost,
+    }]);
+    assert!(session_active(&rig, third));
+    assert!(sent.is_empty(), "no detach, no revoke");
+    assert!(rig.world.resource::<OutboundBox>().1.is_empty());
+    assert_eq!(rig.stats().sessions_closed_peer_lost, 1);
+    assert_eq!(rig.stats().sessions_replaced_by_relogin, 0);
+}
+
+#[test]
+fn a_node_unreachable_toward_a_client_ends_its_session_but_toward_a_shard_does_not() {
+    // A reliable frame toward the CLIENT could not be delivered: the client is gone. The same
+    // notice toward a SHARD is the saga runtime's liveness business and leaves every session alone.
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login();
+    let sent = rig.tick(vec![Inbound::NodeUnreachable {
+        to: SHARD,
+        class: MsgClass::Control,
+        undelivered: vd_core::MsgId(3),
+    }]);
+    assert!(
+        session_active(&rig, sid),
+        "a shard notice is not a session fact"
+    );
+    assert!(sent.is_empty());
+    assert_eq!(rig.stats().sessions_closed_peer_lost, 0);
+    let sent = rig.tick(vec![Inbound::NodeUnreachable {
+        to: CLIENT,
+        class: MsgClass::Control,
+        undelivered: vd_core::MsgId(4),
+    }]);
+    assert!(rig.world.resource::<GatewaySessions>().is_empty());
+    assert!(detach_sent(&sent, sid));
+    assert!(revoke_sent(&sent, sid));
+    assert_eq!(rig.stats().sessions_closed_peer_lost, 1);
+}
+
+#[test]
+fn a_local_send_shed_is_not_a_session_fact() {
+    // A shed says the gateway's OWN transport refused a send (a lane's retry buffer is full). It
+    // says nothing about the peer's liveness (R-4d M3), so it neither ends a session nor counts
+    // against one.
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login();
+    let before = rig.stats();
+    let sent = rig.tick(vec![Inbound::SendShed {
+        to: CLIENT,
+        class: MsgClass::Control,
+        undelivered: vd_core::MsgId(9),
+        reason: vd_sim::io::ShedReason::RetryBufferFull,
+    }]);
+    assert!(session_active(&rig, sid));
+    assert!(sent.is_empty());
+    assert_eq!(rig.stats(), before);
+}
+
+#[test]
 fn bye_detaches_revokes_and_clears() {
     let mut rig = Rig::new();
     let (session_id, _) = rig.login();
@@ -1910,7 +2077,8 @@ fn garbage_wrong_classes_and_notices_are_counted_or_skipped() {
             class: MsgClass::Membership,
             bytes: vec![1].into(),
         },
-        // Transport notices are skipped by the dispatcher.
+        // A transport notice about a SHARD is not a session fact: skipped here (a notice about a
+        // CLIENT ends that client's session — its own test below).
         Inbound::NodeUnreachable {
             to: SHARD,
             class: MsgClass::Input,

@@ -5347,6 +5347,44 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   never answers. OWED (foundation): the session's lease must end when the peer's lane is dead for
   a derived bound, and a fresh login for the same identity must replace the dead session, not wait
   behind it. Example: a pilot's window crashes; they start the client again and are in within the
+  ★ ROOT-CAUSED AND BUILT (2026-09-05, foundation slice 1). FOUR facts, read from the code, made the
+  wedge: (1) the gateway consumed only `Inbound::Wire`; a transport notice about a dead client was
+  skipped, so nothing ever closed the session; (2) a second `Hello` from the same node id was ignored
+  as "a duplicate on a live connection" — but a client sends `Hello` exactly once, so a second one is
+  always a NEW PROCESS, and the new client waited for a `Welcome` that could never come; (3) the
+  node's outbound staging had ONE cap for all peers, so the dead client's backlog filled it and the
+  shed took every LIVE client's reliable frames ("a RELIABLE frame was SHED"); (4) the dev cluster and
+  the process gates BOOKED the client at the gateway, so a restarted client at the same address was
+  re-dialed and the dead process's retained frames (its Welcome, its subscriptions) REPLAYED into the
+  new process; and the client stamped incarnation 0 on every launch, so the transport could not tell
+  a restart from a replay. THE CURE, one piece per fact: (a) a new seam notice
+  `Inbound::PeerReset { node, cause: ConnectionLost | Reincarnated }` — produced only by the mesh
+  (a dialed-in peer's accepted connection died; or a peer's frames carry a strictly higher process
+  incarnation, once per restart, pushed BEFORE the first frame of the new process); the gateway ends
+  the session of any node it names, exactly as a `Bye` ends it (`end_session_of`, the ONE exit), and
+  a `NodeUnreachable` toward a client does the same; a notice about a shard is not a session fact
+  and the saga runtime counts it and never feeds it to liveness; (b) a `Hello` from a node that holds
+  a session ENDS that session and proceeds as a fresh login (`sessions_replaced_by_relogin`), ordered
+  before the capacity check so a re-login is never refused because its own dead session holds a slot;
+  (c) the staging cap is PER PEER (`shed_over_cap`), and `OutboundBox::forget_peer` drops a closed
+  session's staged frames at the next flush (`TickReport::forgotten`) instead of the cap shedding
+  them; (d) a client is a LEARNED peer only — the client book is deleted from the env builders, the
+  dev cluster and every gate — and the mesh's learned table is incarnation-aware: a newer process of
+  the same node id supersedes a live older connection (the old one is closed, `learned_peers_superseded`),
+  and a learned lane spawned for a superseded incarnation is a miss; the client stamps
+  `launch_incarnation()`. Counters: `sessions_closed_peer_lost`, `sessions_closed_peer_reincarnated`,
+  `sessions_replaced_by_relogin` (admin 60–62). Gate: `crates/bins/tests/login_after_kill.rs` kills a
+  logged-in client with SIGKILL and logs the same node in again; it must be Active within the derived
+  bound with no cluster restart. NOT a hold, NOT a resume: a killed client's session is OVER; a
+  resume ticket (P3) is a different promise and is still owed.
+  TWO STAND-IN CLIENTS CORRECTED BY THE RULE (measured on the workspace suite): `process_parity`
+  and `dual_cluster_crossing_smoke` re-sent `Hello` every 500 ms "until welcomed (idempotent)" —
+  the real client never does that (it sends once the transport accepts), and under the re-login
+  rule every re-sent Hello ended the pending session and started over (parity: 43 levels in 60 s,
+  and it never settled). Both doubles now send once, as `net.rs` does. And `process_parity`'s
+  "exactly one level per login" pin predated Step 12's keep-alive restatement (a full level at the
+  SAME epoch every beat, by design); it now pins ZERO re-origins (a level at a NEW epoch) and at
+  least one level. Nobody had run the workspace suite since Step 12, which is how it hid.
   usual login time, not after an operator restart.
   ★ FOUNDATION ITEMS 2 AND 3 (2026-09-05, owner: *"do 1 to 4"*). (2) `look_pixels`: sampled with
   symbols — every sample sat in its own `oracle()`, which took EVERY parent in the forest (233,220

@@ -853,7 +853,8 @@ mod tests {
                     // The FaultFabric has no retry buffer, so it never sheds (R-4d M3) — a SendShed
                     // cannot arise. Folded with the delivered-normally arm (the B->A message): neither
                     // is a flap-notice, and a new Inbound variant still forces reconsideration.
-                    Inbound::Wire { .. } | Inbound::SendShed { .. } => {}
+                    Inbound::Wire { .. } | Inbound::SendShed { .. } | Inbound::PeerReset { .. } => {
+                    }
                 }
             }
             assert!(

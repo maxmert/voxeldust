@@ -91,7 +91,7 @@ fn cluster_converges_to_ready_and_all_endpoints_serve() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
             &common,
-            &gateway_env(&addrs, &[], &auth, &DEV, vd_bins::ClusterShape::Single),
+            &gateway_env(&addrs, &auth, &DEV, vd_bins::ClusterShape::Single),
         )
         .expect("spawn gateway"),
     );
@@ -208,7 +208,7 @@ fn sigterm_de_routes_readyz_while_healthz_stays_live() {
     // every later run and making the next failure likelier.
     // A drain LINGER holds it in Terminating for 1.5 s after de-routing, so the 503 window is observable
     // (without the linger a store-less gateway exits within ~1 tick, faster than a probe poll).
-    let mut gw_env = gateway_env(&addrs, &[], &auth, &DEV, vd_bins::ClusterShape::Single);
+    let mut gw_env = gateway_env(&addrs, &auth, &DEV, vd_bins::ClusterShape::Single);
     gw_env.push(("VD_SHUTDOWN_LINGER_MS", "1500".to_owned()));
     cluster.push(
         "vd-gateway",

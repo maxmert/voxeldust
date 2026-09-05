@@ -470,12 +470,7 @@ fn spawn_capture_client(
     cmd.spawn().expect("spawn capture client")
 }
 
-fn boot_demand_cluster(
-    f: &Fixture,
-    a: &ClusterAddrs,
-    p: &DevClusterParams,
-    client_book: &[(NodeId, SocketAddr)],
-) -> Cluster {
+fn boot_demand_cluster(f: &Fixture, a: &ClusterAddrs, p: &DevClusterParams) -> Cluster {
     let mut cluster = Cluster::new();
     cluster.push(
         "vd-orchestrator",
@@ -491,13 +486,7 @@ fn boot_demand_cluster(
         vd_bins::spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
             &f.common,
-            &gateway_env(
-                a,
-                client_book,
-                &dev_auth_pubkey_hex(),
-                p,
-                ClusterShape::Demand,
-            ),
+            &gateway_env(a, &dev_auth_pubkey_hex(), p, ClusterShape::Demand),
         )
         .expect("spawn gateway"),
     );
@@ -1475,10 +1464,9 @@ fn g_true_scale_star_body_and_depth_four_moon_draw_themselves() {
     let a = demand_addrs(gw_admin);
     let client_quic = reserve_udp_addr();
     let devctl = reserve_tcp_addr().port();
-    let client_book = [(NodeId(CLIENT_NODE_BASE), client_quic)];
 
     let _reaper = ForkedReaper(f.launch_path.clone());
-    let _cluster = boot_demand_cluster(&f, &a, &DEV, &client_book);
+    let _cluster = boot_demand_cluster(&f, &a, &DEV);
     let mut client = ChildGuard(spawn_capture_client(
         &f,
         a.gateway,

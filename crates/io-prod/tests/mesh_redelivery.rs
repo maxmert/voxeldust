@@ -498,7 +498,9 @@ fn a_full_retry_buffer_sheds_send_shed_retry_buffer_full_never_confirming_the_pe
                         shed_seen = true;
                     }
                     Inbound::NodeUnreachable { .. } => unreachable_seen = true,
-                    Inbound::Wire { .. } => {}
+                    // B is alive and booked throughout, so no peer reset arises here; the arm is
+                    // present for Inbound exhaustiveness.
+                    Inbound::Wire { .. } | Inbound::PeerReset { .. } => {}
                 }
             }
             shed_seen

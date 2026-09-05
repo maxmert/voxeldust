@@ -98,13 +98,16 @@ impl<T: Transport> TracerNode<T> {
                     Ok(TracerMsg::Pong(n)) => self.trace.push(TraceEvent::PongReceived(n)),
                     Err(_) => self.trace.push(TraceEvent::DecodeError),
                 },
-                // A tracer is a bare connectivity probe: a peer-unreachable and a local send-shed
-                // (R-4d M3) BOTH mean "the ping did not get through", so it records them identically
-                // (one arm — a new Inbound variant still forces this to be reconsidered). The mem
-                // transport this Tier-A tracer runs on never sheds, so a distinct SendShed event
-                // would be an uncoverable region; the real-mesh tracer's shed path is proven in
-                // io-prod (Tier-B).
-                Inbound::NodeUnreachable { .. } | Inbound::SendShed { .. } => {
+                // A tracer is a bare connectivity probe: a peer-unreachable, a local send-shed
+                // (R-4d M3) and a peer reset (the peer's connection died, or a new process took its
+                // id) ALL mean "the ping did not get through", so it records them identically (one
+                // arm — a new Inbound variant still forces this to be reconsidered). The mem
+                // transport this Tier-A tracer runs on never sheds and never resets, so distinct
+                // events would be uncoverable regions; the real-mesh paths are proven in io-prod
+                // (Tier-B).
+                Inbound::NodeUnreachable { .. }
+                | Inbound::SendShed { .. }
+                | Inbound::PeerReset { .. } => {
                     self.trace.push(TraceEvent::PeerUnreachable);
                 }
             }

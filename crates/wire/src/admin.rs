@@ -250,6 +250,13 @@ pub struct GatewayView {
     pub scene_levels_restated: u64,
     /// Rows logged by the per-tick trace (2026-09-05).
     pub window_trace_rows: u64,
+    /// Sessions closed because the client's connection died or a frame toward it was undeliverable
+    /// (2026-09-05, the vanished-client wedge).
+    pub sessions_closed_peer_lost: u64,
+    /// Sessions closed because a new process now speaks for the client's node id (2026-09-05).
+    pub sessions_closed_peer_reincarnated: u64,
+    /// Sessions ended by a fresh `Hello` from the same node (2026-09-05).
+    pub sessions_replaced_by_relogin: u64,
     /// Slice B — rows whose stated frame was not their level's own: alien, dropped.
     pub window_alien_rows: u64,
     /// Slice B — chain levels whose hop was absent/mismatched/rosterless: prefix capped there.
@@ -780,6 +787,9 @@ mod tests {
                 window_origin_swap_forced: 56,
                 scene_levels_restated: 57,
                 window_trace_rows: 59,
+                sessions_closed_peer_lost: 60,
+                sessions_closed_peer_reincarnated: 61,
+                sessions_replaced_by_relogin: 62,
                 window_alien_rows: 52,
                 window_hop_invalid: 53,
                 window_unresolved_standing: 54,

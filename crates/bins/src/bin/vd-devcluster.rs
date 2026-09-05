@@ -34,8 +34,7 @@ use vd_bins::{
     TRUST_DIR_NAME, admin_get_body, common_env, dev_auth_pubkey_hex, gateway_env, loopback,
     orchestrator_env, realm_shards, roster_realms, sh_quote, shard_env, slot_workdir,
 };
-use vd_core::NodeId;
-use vd_devproto::{CLIENT_NODE_BASE, DevPortScheme, SlotPorts};
+use vd_devproto::{DevPortScheme, SlotPorts};
 use vd_io_prod::trust::ClusterTrust;
 use vd_wire::admin::AdminSnapshot;
 
@@ -259,15 +258,10 @@ fn up_inner(
     // read the same slot. Extra realm-shard addrs are bound only when the shape spawns them; the
     // station/area slots stay RESERVED-unbound.
     let addrs = ClusterAddrs::for_slot(ports);
-    // CA-1 CRUTCH (fenced; deferred to M3): seed every dev-control client's QUIC
-    // addr into the gateway book so the gateway can route snapshots back (the mesh
-    // dials by static address book — `unknown_destinations_are_loud_backpressure`).
-    // The cloud-correct design is reply-on-connection: the gateway learns a client's
-    // return address from its INBOUND QUIC connection, so clients need no fixed addr
-    // and no pre-seeding. Tracked by the ignored red guard
-    // `ca1_reply_on_connection_reaches_a_peer_not_in_the_book`. Remove this seeding
-    // when CA-1 lands.
-    let clients = client_book(ports)?;
+    // NO CLIENT IS BOOKED. CA-1 reply-on-connection has landed: the gateway learns a client's return
+    // path from the connection the client dialed IN on. Booking one made the gateway DIAL it, and a
+    // dialed lane re-dials a restarted client at the same address and replays the dead process's
+    // retained frames into the new one.
     let common = common_env(&trust_str, &DEV);
     // D-6: the orchestrator's durable Store lives IN the slot work dir (so `down` reaps it with the slot).
     // Under $TMPDIR ⇒ ephemeral; `orchestrator_env` sets VD_STORE_EPHEMERAL_OK so the bin's HR1 guard
@@ -290,7 +284,7 @@ fn up_inner(
         (
             "vd-gateway",
             "vd-gateway",
-            gateway_env(&addrs, &clients, &auth_pubkey, &DEV, shape),
+            gateway_env(&addrs, &auth_pubkey, &DEV, shape),
         ),
     ];
     // The static login shard: present for every STATIC shape, ABSENT for Demand — the home shard is spawned on
@@ -538,18 +532,6 @@ fn spawn_node(
         File::create(work.join(format!("{label}.log"))).map_err(|e| format!("log file: {e}"))?;
     vd_bins::spawn_node_grouped(&exe, common, &node_env, log)
         .map_err(|e| format!("spawn {label}: {e}"))
-}
-
-/// The dev-control client address book seeded into the gateway: one
-/// `(CLIENT_NODE_BASE + agent → 127.0.0.1:client_quic)` per slot client window.
-/// This is the CA-1 crutch (see the call site) — superseded by reply-on-connection.
-fn client_book(ports: SlotPorts) -> Result<Vec<(NodeId, SocketAddr)>, String> {
-    (0..DevPortScheme::DEFAULT.max_clients_per_worktree)
-        .map(|agent| {
-            let port = ports.client_quic(agent).map_err(|e| e.to_string())?;
-            Ok((NodeId(CLIENT_NODE_BASE + u64::from(agent)), loopback(port)))
-        })
-        .collect()
 }
 
 // ---- runfile / env contract --------------------------------------------------

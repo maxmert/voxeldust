@@ -10,8 +10,8 @@
 use super::{
     GatewayConfig, GatewaySessions, GatewayStats, SessionMint, compose_scenes,
     drive_pending_sessions, drive_windows, expire_home_bootstrap, is_routable_shard,
-    on_client_control, on_client_input, on_directory_reply, on_shard_control, on_shard_frame,
-    on_shard_presence, on_shard_realm_frame, on_shard_roster, on_transfer_control,
+    on_client_control, on_client_input, on_directory_reply, on_peer_gone, on_shard_control,
+    on_shard_frame, on_shard_presence, on_shard_realm_frame, on_shard_roster, on_transfer_control,
     recompute_delivery_watermarks, refuse_unknown_sender, renew_and_recheck_sessions,
     self_fence_lapsed_sessions,
 };
@@ -80,10 +80,38 @@ fn process_gateway_inbound(
     // at the START of the next tick — the one-tick grace (C2 / X1).
     sessions.sweep_draining();
     for msg in &inbox.0 {
-        let Inbound::Wire { from, class, bytes } = msg else {
-            continue;
+        let (from, class, bytes) = match msg {
+            Inbound::Wire { from, class, bytes } => (*from, class, bytes),
+            // THE TRANSPORT'S WORD ON A PEER (2026-09-05, the vanished-client wedge). A dialed-in
+            // connection died, or a new process speaks for a node id: if that node holds a session,
+            // the session ends. A notice about a shard is not a session fact and changes nothing here.
+            Inbound::PeerReset { node, cause } => {
+                on_peer_gone(
+                    *node,
+                    *cause,
+                    &config,
+                    &mut sessions,
+                    &mut stats,
+                    &mut outbox,
+                );
+                continue;
+            }
+            // A reliable frame toward a CLIENT could not be delivered: that client is gone. Toward a
+            // shard it is the saga runtime's business (liveness), not a session's.
+            Inbound::NodeUnreachable { to, .. } => {
+                on_peer_gone(
+                    *to,
+                    vd_sim::io::PeerResetCause::ConnectionLost,
+                    &config,
+                    &mut sessions,
+                    &mut stats,
+                    &mut outbox,
+                );
+                continue;
+            }
+            // A local shed says nothing about anybody's liveness.
+            Inbound::SendShed { .. } => continue,
         };
-        let from = *from;
         // Node-class dispatch (FORK 5): orchestrator → routable-shard → client-fallthrough. The orderING
         // (orchestrator first) keeps a shard NodeId from ever colliding with the orchestrator role; node
         // roles are disjoint by construction. The shard test is the STABLE `config.known_shards` UNION the

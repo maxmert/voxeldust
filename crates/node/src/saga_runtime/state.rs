@@ -271,6 +271,11 @@ pub struct SagaRuntimeRes {
     /// (the false-confirm cure). 0 on a healthy run; `> 0` cross-references the mesh `reliable_shed`
     /// counter (an ALERT: a saturated retry buffer / a mis-sized frame).
     pub(crate) sends_shed: u64,
+    /// The peer-reset notices seen (a dialed-in peer's connection died, or a peer restarted). A
+    /// session fact, not a node fact: counted here so the mesh's notice is never silent, and NEVER
+    /// fed to the liveness tracker — a restarted shard is the same node and its durable flows
+    /// replay to it by design.
+    pub(crate) peer_resets: u64,
     /// D-3 Slice 4: the universe tick the expiry REAPER last swept, re-armed on fire so the O(directory)
     /// sweep runs at most once per `reaper_interval_ticks` (never per tick — like `scan_deadlines`' `since`).
     pub(crate) last_reap_tick: UniverseTick,
@@ -545,6 +550,12 @@ impl SagaRuntimeRes {
     #[must_use]
     pub fn sends_shed(&self) -> u64 {
         self.sends_shed
+    }
+
+    /// The peer-reset notices seen (see the field). 0 on a run where no peer restarts.
+    #[must_use]
+    pub fn peer_resets(&self) -> u64 {
+        self.peer_resets
     }
 
     /// Slice 3f-B — durable crossing sagas STARTED from a resolved `CrossingRequest` (subject, dest-realm,

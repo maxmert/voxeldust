@@ -36,6 +36,7 @@ use vd_sim::io::{
     Bytes,
     Inbound,
     MsgClass,
+    PeerResetCause,
     Reliability,
     SendError,
     ShedReason,
@@ -97,6 +98,11 @@ type LearnedPeers = Arc<Mutex<BTreeMap<NodeId, LearnedConn>>>;
 struct LearnedConn {
     conn: quinn::Connection,
     ack_rx: watch::Receiver<Option<AckFrame>>,
+    /// The sender incarnation of the frame that learned this connection. A STRICTLY HIGHER incarnation
+    /// means a NEW process speaks for the same node id, so its connection REPLACES this one even while
+    /// this one still looks alive (the vanished-client wedge: a killed client re-logs in as a new
+    /// process, and the reply must reach the new process, never the corpse).
+    incarnation: u64,
 }
 
 /// CA-1 S2 — the shared, UPDATABLE peer-address book: `NodeId → SocketAddr`, seeded from `cfg.peers` at
@@ -484,6 +490,11 @@ pub struct MeshStats {
     /// `learned_peers_max` (a churn/flood guard on the static-roster tier). Must stay ~0 on a fixed roster; a
     /// nonzero value is a cap-too-low or peer-churn ALERT. Also warned loudly at the reject site.
     pub learned_peers_rejected: AtomicU64,
+    /// RECEIVER (CA-1): a LIVE learned return connection was REPLACED because a strictly HIGHER process
+    /// incarnation dialed in for the same node id — a restarted client whose old connection nobody reads
+    /// any more. The old connection is closed at the same moment, so the count also says how many stale
+    /// reply paths this node retired. A steady climb means peer churn, not a defect.
+    pub learned_peers_superseded: AtomicU64,
     /// The peer book: lanes DIALED LAZILY on a send toward a booked peer that had no lane yet.
     pub lazy_dials: AtomicU64,
     /// The peer book: addresses booked through `Transport::book_peer` (the node runtime's half).
@@ -504,6 +515,7 @@ pub struct MeshStatsSnapshot {
     pub reliable_shed: u64,
     pub reliable_acked: u64,
     pub learned_peers_rejected: u64,
+    pub learned_peers_superseded: u64,
     pub lazy_dials: u64,
     pub peers_booked: u64,
 }
@@ -581,7 +593,21 @@ struct RecvState {
 /// `acked_keys` is always acquired-then-released ABOVE (never inside) an inner-`Mutex` hold. RESIDUAL: after
 /// this re-key the node-wide `SharedInbox` `Mutex` is the NEXT RX serialization point (a future per-peer-inbox
 /// / lock-free-drain scaling slice — DEFERRED.md); the ledger re-key alone does NOT deliver full RX isolation.
-type RecvLedger = Arc<RwLock<BTreeMap<NodeId, Arc<Mutex<BTreeMap<MsgClass, RecvState>>>>>>;
+type RecvLedger = Arc<RwLock<BTreeMap<NodeId, Arc<Mutex<PeerRecv>>>>>;
+
+/// Everything the receiver remembers about ONE peer, under that peer's inner lock: the per-class dedup
+/// states AND the highest process incarnation any class has seen from it.
+///
+/// The incarnation lives HERE, beside the classes rather than inside each of them, because a peer restarts
+/// ONCE — not once per class. A restarted client sends login on Control and input on Input; both frames
+/// carry the new incarnation, and the consumer must be told the session is over exactly once.
+struct PeerRecv {
+    /// The highest sender incarnation seen from this peer on ANY class. `None` until the first frame ever,
+    /// so a first contact is never mistaken for a restart.
+    incarnation: Option<u64>,
+    /// The per-class dedup states (the pre-existing inner map, unchanged in meaning).
+    classes: BTreeMap<MsgClass, RecvState>,
+}
 
 /// The contiguity verdict for one reliable frame. Distinct arms (not a bool) so each is equality-asserted
 /// in unit tests (HR5(d)) and counted on its own never-silent [`MeshStats`] counter.
@@ -674,6 +700,27 @@ fn prime_or_contiguous(st: &mut RecvState, seq: u64, fresh_incarnation: bool) ->
         return Verdict::Dedup;
     }
     Verdict::Gap
+}
+
+/// Did this peer RESTART? Pure, monomorphic, unit-testable (HR5(a)) — the peer-level twin of the per-class
+/// incarnation arm in [`classify_reliable`].
+///
+/// Records `incoming` as the peer's high-water incarnation and answers whether it is a RESTART. A first
+/// contact (`None`) is recorded and is NOT a restart: nobody held a session for a peer never heard from.
+/// An equal incarnation is the same process still talking; a lower one is a straggler from a process this
+/// node has already replaced.
+fn peer_restarted(seen: &mut Option<u64>, incoming: u64) -> bool {
+    match *seen {
+        None => {
+            *seen = Some(incoming);
+            false
+        }
+        Some(prev) if incoming > prev => {
+            *seen = Some(incoming);
+            true
+        }
+        Some(_) => false,
+    }
 }
 
 /// R-6d4-A: expose the REAL receiver dedup ladder to the outbox both-ends-restart replay proptest via an
@@ -981,6 +1028,11 @@ impl ReliableLaneSender {
 
 struct PeerLane {
     tx: tokio::sync::mpsc::Sender<OutFrame>,
+    /// The learned-table incarnation this lane was spawned over. `None` for a BOOKED lane: it DIALS the
+    /// peer's current address, so no learned entry governs it. `Some(n)` for a LEARNED lane: when the table
+    /// later holds a HIGHER incarnation for the same peer, this lane writes into the previous process's
+    /// connection and must be dropped, never used.
+    learned_incarnation: Option<u64>,
 }
 
 /// The sim-thread side: implements [`Transport`] over per-peer bounded queues.
@@ -1107,6 +1159,7 @@ impl MeshControl {
             reliable_shed: self.stats.reliable_shed.load(Ordering::Relaxed),
             reliable_acked: self.stats.reliable_acked.load(Ordering::Relaxed),
             learned_peers_rejected: self.stats.learned_peers_rejected.load(Ordering::Relaxed),
+            learned_peers_superseded: self.stats.learned_peers_superseded.load(Ordering::Relaxed),
             lazy_dials: self.stats.lazy_dials.load(Ordering::Relaxed),
             peers_booked: self.stats.peers_booked.load(Ordering::Relaxed),
         }
@@ -1263,7 +1316,13 @@ pub fn spawn_mesh(
             outbox: outbox.clone(),
             ack_rx_override: None, // booked: uses its own dialed-connection ack watch
         }));
-        lanes.insert(peer, PeerLane { tx });
+        lanes.insert(
+            peer,
+            PeerLane {
+                tx,
+                learned_incarnation: None, // booked at boot: this lane dials, it never adopts
+            },
+        );
     }
 
     Ok((
@@ -1454,14 +1513,14 @@ async fn serve_data_stream_body(
         let Ok(permit) = inbox.reliable_tx.reserve().await else {
             return;
         };
-        classify_and_deliver(permit, &stats, &ledger, &frame);
+        classify_and_deliver(permit, &inbox, &stats, &ledger, &frame);
         // CA-1 record site (accept path only): learn an UNBOOKED dial-in peer's return connection ONCE, on the
         // first authenticated frame. A SEPARATE `learned.lock()` inside `learn_dial_in_peer` — NEVER nested in
         // the ledger's inner Mutex (classify_and_deliver above obeys outer-read→inner→inbox and has fully
         // returned here), preserving the global lock order.
         if !recorded && let Some(ctx) = &learn {
             recorded = true;
-            learn_dial_in_peer(ctx, frame.from);
+            learn_dial_in_peer(ctx, frame.from, frame.incarnation);
         }
         acked_keys
             .lock()
@@ -1473,9 +1532,18 @@ async fn serve_data_stream_body(
 
 /// CA-1 record site helper — record an UNBOOKED dial-in peer's return connection in `LearnedPeers`. AUTHORITY
 /// SPLIT: a BOOKED NodeId (or `local`) is NEVER learned, so a learned lane can never shadow a booked one nor be
-/// spoofed into existence for a booked id. Refresh iff the entry is ABSENT or its cached connection is DEAD
-/// (dead-conn eviction only). Past the cap: reject + count (loud), never silent.
-fn learn_dial_in_peer(ctx: &LearnCtx, from: NodeId) {
+/// spoofed into existence for a booked id. Past the cap: reject + count (loud), never silent.
+///
+/// REPLACEMENT RULE (two reasons, one site):
+/// 1. the held connection is DEAD — the old rule, unchanged;
+/// 2. `incarnation` is STRICTLY HIGHER than the held entry's — a NEW PROCESS speaks for the same node id.
+///    The old process is gone even though its connection may still look open (a killed client leaves one
+///    behind until the idle timeout). The new connection WINS, and the old one is CLOSED at once so its
+///    learned writer terminates now instead of writing into a socket nobody reads.
+///
+/// An EQUAL or LOWER incarnation on a LIVE entry changes nothing: the old process re-dialing after its
+/// connection was closed must never take the reply path back from the new process.
+fn learn_dial_in_peer(ctx: &LearnCtx, from: NodeId, incarnation: u64) {
     if from == ctx.local || ctx.booked.contains(&from) {
         return; // authority split: never learn a booked/self id
     }
@@ -1492,16 +1560,37 @@ fn learn_dial_in_peer(ctx: &LearnCtx, from: NodeId) {
         .learned
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match t.get(&from) {
-        Some(existing) if existing.conn.close_reason().is_none() => {} // live entry: keep (evict only on death)
-        Some(_) => {
+    // What the table holds for this id right now: is it alive, and which process authored it?
+    let held: Option<(bool, u64, quinn::Connection)> = t.get(&from).map(|e| {
+        (
+            e.conn.close_reason().is_none(),
+            e.incarnation,
+            e.conn.clone(),
+        )
+    });
+    match held {
+        // A live entry from the SAME (or a newer) process: keep it. Nothing to do.
+        Some((true, held_inc, _)) if incarnation <= held_inc => {}
+        Some((live, _, old_conn)) => {
             t.insert(
                 from,
                 LearnedConn {
                     conn: ctx.conn.clone(),
                     ack_rx: ctx.ack_rx.clone(),
+                    incarnation,
                 },
             );
+            // A LIVE entry was superseded by a newer process. Close the old connection so its learned
+            // writer stops NOW, and count it — a silent swap would hide peer churn.
+            if live {
+                old_conn.close(
+                    quinn::VarInt::from_u32(4),
+                    b"superseded by a newer incarnation",
+                );
+                ctx.stats
+                    .learned_peers_superseded
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
         None if t.len() < ctx.cap => {
             t.insert(
@@ -1509,6 +1598,7 @@ fn learn_dial_in_peer(ctx: &LearnCtx, from: NodeId) {
                 LearnedConn {
                     conn: ctx.conn.clone(),
                     ack_rx: ctx.ack_rx.clone(),
+                    incarnation,
                 },
             );
         }
@@ -1551,6 +1641,7 @@ async fn drain_ack_stream(mut recv: quinn::RecvStream, ack_out: watch::Sender<Op
 /// only place that can yield the task and let QUIC's flow control slow the sender.
 fn classify_and_deliver(
     permit: tokio::sync::mpsc::Permit<'_, Inbound>,
+    inbox: &SharedInbox,
     stats: &MeshStats,
     ledger: &RecvLedger,
     frame: &ReliableFrame,
@@ -1570,20 +1661,35 @@ fn classify_and_deliver(
             let mut outer = ledger
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            Arc::clone(
-                outer
-                    .entry(frame.from)
-                    .or_insert_with(|| Arc::new(Mutex::new(BTreeMap::new()))),
-            )
+            Arc::clone(outer.entry(frame.from).or_insert_with(|| {
+                Arc::new(Mutex::new(PeerRecv {
+                    incarnation: None,
+                    classes: BTreeMap::new(),
+                }))
+            }))
         }
     };
     // The inner per-peer lock: serializes only same-peer frames, and is HELD across classify + push_inbox +
     // the rollback (the atomicity invariant — see the RecvLedger doc). The inner seed is byte-identical to
     // the pre-re-key node-wide entry (only the OUTER insert above is new).
-    let mut classes = peer_lock
+    let mut peer = peer_lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let st = classes.entry(frame.class).or_insert(RecvState {
+    // ★ THE PEER RESTARTED (2026-09-05, the vanished-client wedge). A strictly higher incarnation says a NEW
+    // process now speaks for this node id. Tell this node ONCE, at the peer level, BEFORE the first frame of
+    // the new process reaches the reliable channel: the notice queue is drained first, so a consumer that
+    // binds a session to a peer tears the old session down before it reads the new process's login.
+    if peer_restarted(&mut peer.incarnation, frame.incarnation) {
+        push_notice(
+            inbox,
+            stats,
+            Inbound::PeerReset {
+                node: frame.from,
+                cause: PeerResetCause::Reincarnated,
+            },
+        );
+    }
+    let st = peer.classes.entry(frame.class).or_insert(RecvState {
         incarnation: frame.incarnation,
         epoch: frame.epoch,
         hw: 0,
@@ -1673,10 +1779,10 @@ async fn ack_egress(
             let mut entries = Vec::new();
             for (peer, class) in keys {
                 if let Some(peer_lock) = outer.get(&peer) {
-                    let classes = peer_lock
+                    let recv = peer_lock
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let Some(st) = classes.get(&class) {
+                    if let Some(st) = recv.classes.get(&class) {
                         // Stamp THIS class's incarnation per-entry (R-6c/L4) so the sender's on_ack matches
                         // it against that lane's own incarnation — correct even if the connection ever
                         // carries two classes at different incarnations (no last-class-wins scalar).
@@ -1843,6 +1949,20 @@ async fn peer_writer(mut w: PeerWriter) {
                                 );
                             }
                         }
+                        // ★ THE DIAL-IN PEER IS GONE (2026-09-05, the vanished-client wedge). A learned peer
+                        // has no booked address, so this node can NEVER reach that process again. Say so
+                        // ALWAYS — with an empty window too. A quiet client that vanishes owes nothing, and
+                        // the old code therefore said NOTHING, which is exactly how a dead client's session
+                        // survived it and wedged the next login. A BOOKED lane never says this: a booked peer
+                        // is re-dialed, and its confirmed death is the NodeUnreachable bounce after N replays.
+                        push_notice(
+                            &w.inbox,
+                            &w.stats,
+                            Inbound::PeerReset {
+                                node: w.dest,
+                                cause: PeerResetCause::ConnectionLost,
+                            },
+                        );
                         break;
                     }
                     Err(_) => {} // booked: unreachable while the writer holds ack_tx — keep draining sends
@@ -2614,6 +2734,43 @@ async fn write_frame(
     }
 }
 
+impl MeshTransport {
+    /// Is the lane this node already holds toward `to` still the RIGHT lane to write into?
+    ///
+    /// Three ways it is not:
+    /// - there is no lane at all;
+    /// - the lane's writer task exited, which closes the queue (a corpse);
+    /// - the lane is LEARNED and the learned table now holds a STRICTLY HIGHER incarnation — a new process
+    ///   dialed in for the same node id, and this lane still points at the old process's connection.
+    ///
+    /// The third case is the vanished-client cure on the send side: a killed client re-logs in as a new
+    /// process, and the reply must ride the NEW connection. The caller drops a stale lane and respawns one
+    /// over the current learned connection.
+    fn lane_is_current(&self, to: NodeId) -> bool {
+        let Some(lane) = self.lanes.get(&to) else {
+            return false;
+        };
+        if lane.tx.is_closed() {
+            return false;
+        }
+        let Some(spawned_for) = lane.learned_incarnation else {
+            return true; // a booked lane dials; no learned entry governs it
+        };
+        let current = self
+            .learned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&to)
+            .map(|lc| lc.incarnation);
+        match current {
+            Some(now) => now <= spawned_for,
+            // The entry is gone (evicted): nothing says this lane is stale, and its own death arm will
+            // terminate it if its connection is dead.
+            None => true,
+        }
+    }
+}
+
 impl Transport for MeshTransport {
     fn send_durable(
         &mut self,
@@ -2632,7 +2789,7 @@ impl Transport for MeshTransport {
         if to == self.local {
             return Err(SendError::QueueFull(bytes));
         }
-        let live = self.lanes.get(&to).is_some_and(|l| !l.tx.is_closed());
+        let live = self.lane_is_current(to);
         if !live {
             self.lanes.remove(&to);
             // Reply-on-connection: if `to` is an UNBOOKED peer that dialed IN (learned its return connection),
@@ -2649,7 +2806,7 @@ impl Transport for MeshTransport {
             // Three ways to a lane, in order: a learned return connection (reply-on-connection), a
             // BOOKED address with no lane yet (the peer book — dial it now), or neither (UnknownPeer:
             // the node runtime asks the orchestrator and re-sends once the answer is booked).
-            let (source, ack_rx_override) = match learned_conn {
+            let (source, ack_rx_override, learned_incarnation) = match learned_conn {
                 Some(lc) => {
                     // The learned connection may have died since it was recorded (its entry is evicted
                     // only on the peer's re-dial). Do NOT spawn a lane over a dead connection — it would
@@ -2661,11 +2818,12 @@ impl Transport for MeshTransport {
                     (
                         ConnSource::Learned(Arc::clone(&self.learned)),
                         Some(lc.ack_rx),
+                        Some(lc.incarnation),
                     )
                 }
                 None if self.topology.load().contains_key(&to) => {
                     self.stats.lazy_dials.fetch_add(1, Ordering::Relaxed);
-                    (ConnSource::Dial(Arc::clone(&self.topology)), None)
+                    (ConnSource::Dial(Arc::clone(&self.topology)), None, None)
                 }
                 None => return Err(SendError::UnknownPeer(bytes)),
             };
@@ -2687,7 +2845,13 @@ impl Transport for MeshTransport {
                 outbox: self.outbox.clone(),
                 ack_rx_override,
             }));
-            self.lanes.insert(to, PeerLane { tx });
+            self.lanes.insert(
+                to,
+                PeerLane {
+                    tx,
+                    learned_incarnation,
+                },
+            );
         }
         let lane = self.lanes.get(&to).expect(
             "a live booked or freshly-spawned learned lane is present after the CA-1 ensure",
@@ -3852,8 +4016,9 @@ mod tests {
             .filter_map(|m| match m {
                 Inbound::NodeUnreachable { to, .. } => Some(*to),
                 // This dead-peer test drives no oversize/buffer-full sends, so no SendShed arises;
-                // present for Inbound exhaustiveness (R-4d M3).
-                Inbound::Wire { .. } | Inbound::SendShed { .. } => None,
+                // and every peer here is BOOKED, so no PeerReset arises either. Both arms are present
+                // for Inbound exhaustiveness (R-4d M3).
+                Inbound::Wire { .. } | Inbound::SendShed { .. } | Inbound::PeerReset { .. } => None,
             })
             .collect();
         assert!(unreachable_to.iter().all(|to| *to == dead));
@@ -4234,6 +4399,320 @@ mod tests {
                 "learned_peers_rejected never incremented despite a 2nd distinct learned peer at cap=1"
             );
         }
+    }
+
+    /// Reserve N ephemeral loopback ports (bind + drop, as `cluster()` does) so quinn can bind them.
+    /// The asymmetric CA-1 tests build their nodes by hand, and every one of them needs this.
+    fn reserve_addrs<const N: usize>() -> [SocketAddr; N] {
+        // Hold EVERY socket while the addresses are read, and drop them only afterwards. Binding and
+        // dropping one at a time lets the OS hand the SAME port back for the next one, and two nodes on
+        // one port is an AddrInUse at spawn.
+        let socks: [std::net::UdpSocket; N] = std::array::from_fn(|_| {
+            std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve a loopback port")
+        });
+        let addrs = std::array::from_fn(|i| socks[i].local_addr().expect("the reserved address"));
+        drop(socks);
+        addrs
+    }
+
+    /// ★ THE VANISHED CLIENT, HALF ONE (2026-09-05): a dial-in peer that dies owing NOTHING is still a
+    /// PEER RESET.
+    ///
+    /// The gate: an UNBOOKED peer dials in, this node replies once, and the reply is ACKED — so the lane's
+    /// retry window is EMPTY. Then the peer is killed. The old code walked the empty window, bounced nothing
+    /// and went quiet, so the gateway kept a session for a process that no longer existed and the next login
+    /// for that node id wedged. Now the death itself is the news: `PeerReset { ConnectionLost }`, and NO
+    /// `NodeUnreachable` (nothing was owed, so nothing was lost).
+    #[test]
+    fn a_dialed_in_peers_death_is_a_peer_reset_even_with_nothing_owed() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let a = NodeId(1);
+        let b = NodeId(2);
+        let [addr_a, addr_b] = reserve_addrs();
+        // A: EMPTY book (it never learns B's address, so it can never re-dial B). B: books A and dials it.
+        let (mut ta, ctl_a) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0, 0),
+            None,
+        )
+        .expect("spawn A");
+        let book_b: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
+        let (mut tb, ctl_b) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b, book_b, 64, 0, 0),
+            None,
+        )
+        .expect("spawn B");
+
+        tb.send(a, MsgClass::Control, vec![0xB].into())
+            .expect("B->A booked send");
+        wait_for(&mut ta, |g| {
+            g.iter()
+                .any(|m| matches!(m, Inbound::Wire { from, .. } if *from == b))
+        });
+        // A replies once over the learned connection, and WAITS for the ack — that is what empties the
+        // window, which is the whole point of this test.
+        ta.send(b, MsgClass::Control, vec![0xA].into())
+            .expect("A->B learned");
+        let started = Instant::now();
+        while ctl_a.stats().reliable_acked == 0 {
+            std::thread::sleep(Duration::from_millis(5));
+            assert!(
+                started.elapsed() < DEADLINE,
+                "A's learned lane never retired its only frame, so the window is not empty"
+            );
+        }
+
+        ctl_b.kill();
+        let got = wait_for(&mut ta, |g| {
+            g.iter().any(|m| matches!(m, Inbound::PeerReset { .. }))
+        });
+        let resets: Vec<Inbound> = got
+            .iter()
+            .filter(|m| matches!(m, Inbound::PeerReset { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            resets,
+            vec![Inbound::PeerReset {
+                node: b,
+                cause: PeerResetCause::ConnectionLost,
+            }],
+            "a dead dial-in peer names itself and says its connection is gone"
+        );
+        let bounces: Vec<Inbound> = got
+            .iter()
+            .filter(|m| matches!(m, Inbound::NodeUnreachable { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            bounces,
+            Vec::new(),
+            "nothing was owed to B, so nothing may be reported undelivered"
+        );
+    }
+
+    /// ★ THE VANISHED CLIENT, HALF TWO (2026-09-05): a RESTARTED dial-in peer is a REINCARNATION, and its
+    /// NEW connection wins.
+    ///
+    /// Two processes speak for node id 2: the first at incarnation 0, the second at incarnation 1, both
+    /// dialing in to A while the first is still alive. A must (i) say `PeerReset { Reincarnated }` exactly
+    /// ONCE — a restart happens once, not once per class — (ii) count the live entry it replaced, and
+    /// (iii) send its next reply to the NEW process, never to the corpse.
+    #[test]
+    fn a_restarted_dial_in_peer_is_a_reincarnation_and_its_new_connection_wins() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let a = NodeId(1);
+        let b = NodeId(2);
+        let [addr_a, addr_b1, addr_b2] = reserve_addrs();
+        let (mut ta, ctl_a) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0, 0),
+            None,
+        )
+        .expect("spawn A");
+        let book: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
+        // The FIRST process for node id 2, at incarnation 0.
+        let (mut tb1, _ctl_b1) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b1, book.clone(), 64, 0, 0),
+            None,
+        )
+        .expect("spawn B (first process)");
+        // The SECOND process for the SAME node id, at incarnation 1. It is NOT a restart of the first in
+        // the test's process table — it is a second live process, which is the harder case: the first one's
+        // connection is still open and would otherwise keep the reply path.
+        let (mut tb2, _ctl_b2) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b2, book, 64, 1, 0),
+            None,
+        )
+        .expect("spawn B (second process)");
+
+        let mut a_events: Vec<Inbound> = Vec::new();
+        tb1.send(a, MsgClass::Control, vec![0xB1].into())
+            .expect("B1->A booked send");
+        a_events.extend(wait_for(&mut ta, |g| {
+            g.iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == b && bytes[0] == 0xB1),
+            )
+        }));
+
+        tb2.send(a, MsgClass::Control, vec![0xB2].into())
+            .expect("B2->A booked send");
+        a_events.extend(wait_for(&mut ta, |g| {
+            g.iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == b && bytes[0] == 0xB2),
+            )
+        }));
+
+        // (ii) the live entry was replaced, and counted.
+        let started = Instant::now();
+        while ctl_a.stats().learned_peers_superseded == 0 {
+            std::thread::sleep(Duration::from_millis(5));
+            assert!(
+                started.elapsed() < DEADLINE,
+                "A never superseded the first process's learned connection"
+            );
+        }
+        assert_eq!(
+            ctl_a.stats().learned_peers_superseded,
+            1,
+            "one live learned connection was replaced, so the count is one"
+        );
+
+        // (iii) A's reply rides the NEW connection.
+        ta.send(b, MsgClass::Control, vec![0xA].into())
+            .expect("A->B learned");
+        let mut b1_events: Vec<Inbound> = Vec::new();
+        let started = Instant::now();
+        let mut b2_got = false;
+        while !b2_got {
+            b1_events.extend(tb1.drain_inbound());
+            b2_got = tb2.drain_inbound().into_iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if from == a && bytes[0] == 0xA),
+            );
+            std::thread::sleep(Duration::from_millis(5));
+            assert!(
+                started.elapsed() < DEADLINE,
+                "the new process never received A's reply; it went to the corpse"
+            );
+        }
+        b1_events.extend(tb1.drain_inbound());
+        let b1_replies: Vec<Inbound> = b1_events
+            .iter()
+            .filter(|m| matches!(m, Inbound::Wire { bytes, .. } if bytes[0] == 0xA))
+            .cloned()
+            .collect();
+        assert_eq!(
+            b1_replies,
+            Vec::new(),
+            "the replaced process must never receive the reply"
+        );
+
+        // (i) exactly ONE reincarnation notice, and it names the peer.
+        a_events.extend(ta.drain_inbound());
+        let resets: Vec<Inbound> = a_events
+            .iter()
+            .filter(|m| matches!(m, Inbound::PeerReset { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            resets,
+            vec![Inbound::PeerReset {
+                node: b,
+                cause: PeerResetCause::Reincarnated,
+            }],
+            "a peer restarts ONCE — one notice, whatever the class count"
+        );
+    }
+
+    /// The other side of the replacement rule: an EQUAL incarnation is the SAME process, so it never takes
+    /// the reply path away from the connection already held. Without this the old process re-dialing after
+    /// any blip would steal the lane back from itself and the supersede count would drift.
+    #[test]
+    fn a_dial_in_at_an_equal_incarnation_keeps_the_first_connection() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let a = NodeId(1);
+        let b = NodeId(2);
+        let [addr_a, addr_b1, addr_b2] = reserve_addrs();
+        let (mut ta, ctl_a) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0, 0),
+            None,
+        )
+        .expect("spawn A");
+        let book: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
+        let (mut tb1, _ctl_b1) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b1, book.clone(), 64, 0, 0),
+            None,
+        )
+        .expect("spawn B (first connection)");
+        // The SAME node id at the SAME incarnation, on a second endpoint.
+        let (mut tb2, _ctl_b2) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b2, book, 64, 0, 0),
+            None,
+        )
+        .expect("spawn B (second connection, same incarnation)");
+
+        tb1.send(a, MsgClass::Control, vec![0xB1].into())
+            .expect("B1->A");
+        wait_for(&mut ta, |g| {
+            g.iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == b && bytes[0] == 0xB1),
+            )
+        });
+        // A DIFFERENT class, so the receiver's per-class dedup does not swallow this frame — its arrival
+        // is what proves the second connection reached the learn site at all.
+        tb2.send(a, MsgClass::Input, vec![0xB2].into())
+            .expect("B2->A");
+        wait_for(&mut ta, |g| {
+            g.iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == b && bytes[0] == 0xB2),
+            )
+        });
+        // The learn runs just after the frame is delivered; settle so the decision has certainly been made.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            ctl_a.stats().learned_peers_superseded,
+            0,
+            "an equal incarnation is the same process — it supersedes nothing"
+        );
+
+        ta.send(b, MsgClass::Control, vec![0xA].into())
+            .expect("A->B learned");
+        wait_for(&mut tb1, |g| {
+            g.iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == a && bytes[0] == 0xA),
+            )
+        });
+        let resets: Vec<Inbound> = ta
+            .drain_inbound()
+            .into_iter()
+            .filter(|m| matches!(m, Inbound::PeerReset { .. }))
+            .collect();
+        assert_eq!(
+            resets,
+            Vec::new(),
+            "no process was replaced, so nothing was reset"
+        );
+    }
+
+    /// The pure peer-level restart decision (HR5(a): every arm equality-asserted off the sockets).
+    #[test]
+    fn peer_restarted_answers_first_contact_restart_and_straggler() {
+        let mut seen = None;
+        assert!(
+            !peer_restarted(&mut seen, 4),
+            "a first contact is not a restart"
+        );
+        assert_eq!(seen, Some(4));
+        assert!(!peer_restarted(&mut seen, 4), "the same process is quiet");
+        assert_eq!(seen, Some(4));
+        assert!(
+            !peer_restarted(&mut seen, 3),
+            "a straggler from an older process is not news"
+        );
+        assert_eq!(seen, Some(4), "and it never lowers the high-water mark");
+        assert!(
+            peer_restarted(&mut seen, 5),
+            "a higher incarnation restarts"
+        );
+        assert_eq!(seen, Some(5));
+        assert!(!peer_restarted(&mut seen, 5), "and it says so only once");
     }
 
     #[test]

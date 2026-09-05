@@ -44,8 +44,7 @@ use vd_bins::{
     dev_auth_pubkey_hex, dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows,
     orchestrator_env, reap_forked, reserve_tcp_addr, reserve_udp_addr, world_roster,
 };
-use vd_core::NodeId;
-use vd_devproto::{CLIENT_NODE_BASE, DevPhase, DevRequest, DevResponse, DevState};
+use vd_devproto::{DevPhase, DevRequest, DevResponse, DevState};
 use vd_io_prod::trust::ClusterTrust;
 use vd_wire::admin::{AdminSnapshot, GatewayView};
 
@@ -272,10 +271,6 @@ fn the_composed_picture_folds_one_chain_at_one_tick_with_the_dead_lanes_silent()
     let quic_b = reserve_udp_addr();
     let devctl_a = reserve_tcp_addr().port();
     let devctl_b = reserve_tcp_addr().port();
-    let client_book = [
-        (NodeId(CLIENT_NODE_BASE), quic_a),
-        (NodeId(CLIENT_NODE_BASE + 1), quic_b),
-    ];
 
     let _reaper = ForkedReaper(f.launch_path.clone());
     let mut cluster = Cluster::new();
@@ -293,13 +288,7 @@ fn the_composed_picture_folds_one_chain_at_one_tick_with_the_dead_lanes_silent()
         vd_bins::spawn_node(
             env!("CARGO_BIN_EXE_vd-gateway"),
             &f.common,
-            &gateway_env(
-                &a,
-                &client_book,
-                &dev_auth_pubkey_hex(),
-                &p,
-                ClusterShape::Demand,
-            ),
+            &gateway_env(&a, &dev_auth_pubkey_hex(), &p, ClusterShape::Demand),
         )
         .expect("spawn gateway"),
     );
