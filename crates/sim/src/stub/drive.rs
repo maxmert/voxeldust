@@ -140,7 +140,7 @@ pub fn advance_driven(
     state: &DrivenState,
     push_units: [i64; 3],
     turn_units: [i64; 3],
-    facts: &BodyFacts,
+    facts: Option<&BodyFacts>,
     ambient: &Ambient,
     dt_s: f64,
 ) -> DrivenState {
@@ -153,8 +153,15 @@ pub fn advance_driven(
     );
     let pushed = state.orient * own_push;
     // 2. MY OWN AMBIENT: the pull everything here feels, plus the medium's drag on THIS hull.
-    let accel =
-        pushed + ambient.pull_mps2 + drag_accel(state.vel_mps, facts, ambient.density_kgpm3);
+    // ★ A CHILD WITHOUT ITS FACTS STILL MOVES (2026-09-05, the twenty-third flight's trace: the hull
+    // stood still for 22 ticks after every hand-over, until its body facts reached the new parent
+    // through a peer lookup). The push is an acceleration and the pull cancels mass (the movement
+    // ruling: gravity never needed a child's mass); only DRAG needs what the child IS. So a child
+    // whose facts are not here yet coasts and is pushed, and feels drag the tick its facts land.
+    let drag = facts.map_or(glam::DVec3::ZERO, |f| {
+        drag_accel(state.vel_mps, f, ambient.density_kgpm3)
+    });
+    let accel = pushed + ambient.pull_mps2 + drag;
     // 3. ADVANCE. Velocity first, then position from the NEW velocity (semi-implicit): it is stable
     //    under a strong pull where the naive order quietly gains energy every tick.
     let vel = state.vel_mps + accel * dt_s;
@@ -242,8 +249,18 @@ pub struct OwnBody(pub Option<vd_core::built::BuiltBody>);
 ///
 /// **UNBOUNDED, like every other child set (SL9).** A realm may hold six ships or six hundred; nothing
 /// here is a fixed width and nothing walks the whole set to find one.
+/// The driven children this realm authors placements for, and the universe tick they were last
+/// advanced to. ★ THE STEP FOLLOWS THE UNIVERSE TICK (2026-09-05, the twenty-third flight's trace:
+/// a one-tick stutter every ~70 ticks — the hull's placement lagged a tick, then caught up two).
+/// A follower's universe tick moves only when the orchestrator's sync lands, so one local tick
+/// can see the universe tick stand (+0) or jump (+2). Integrating once per LOCAL tick made the
+/// authored motion uneven per universe stamp. `advance_all` now integrates exactly as many steps
+/// as universe ticks elapsed since the last advance: none when the tick stood, two when it jumped.
 #[derive(Debug, Default, bevy_ecs::prelude::Resource)]
-pub struct DrivenChildren(pub std::collections::BTreeMap<vd_core::pose::RealmId, DrivenChild>);
+pub struct DrivenChildren(
+    pub std::collections::BTreeMap<vd_core::pose::RealmId, DrivenChild>,
+    pub Option<vd_core::ids::UniverseTick>,
+);
 
 /// One driven child, as its parent holds it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -416,17 +433,27 @@ impl DrivenChildren {
         ambient: &Ambient,
         dt_s: f64,
     ) {
-        for child in self.0.values_mut() {
-            let Some(facts) = child.facts else {
-                continue;
-            };
-            // A frozen child coasts: its drive is withheld, never its motion (the ruler switch, slice 2).
-            let (push, turn) = if child.frozen {
-                ([0; 3], [0; 3])
-            } else {
-                fresh_drive(child, now, stale_after_ticks)
-            };
-            child.state = advance_driven(&child.state, push, turn, &facts, ambient, dt_s);
+        // The first advance ever is one step; after that, one step per universe tick elapsed.
+        let steps = self.1.map_or(1, |last| now.0.saturating_sub(last.0));
+        self.1 = Some(now);
+        for _ in 0..steps {
+            for child in self.0.values_mut() {
+                // A frozen child coasts: its drive is withheld, never its motion (the ruler switch,
+                // slice 2). A child without its facts coasts and is pushed, without drag.
+                let (push, turn) = if child.frozen {
+                    ([0; 3], [0; 3])
+                } else {
+                    fresh_drive(child, now, stale_after_ticks)
+                };
+                child.state = advance_driven(
+                    &child.state,
+                    push,
+                    turn,
+                    child.facts.as_ref(),
+                    ambient,
+                    dt_s,
+                );
+            }
         }
     }
 
@@ -827,7 +854,7 @@ mod tests {
             &at_rest(),
             [4_000_000, 0, 0],
             [0; 3],
-            &hull(),
+            Some(&hull()),
             &vacuum(),
             0.02,
         );
@@ -853,7 +880,7 @@ mod tests {
             orient: DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
             ..at_rest()
         };
-        let after = advance_driven(&facing, [1_000_000, 0, 0], [0; 3], &hull(), &vacuum(), 1.0);
+        let after = advance_driven(&facing, [1_000_000, 0, 0], [0; 3], Some(&hull()), &vacuum(), 1.0);
         assert!(
             after.vel_mps.x.abs() < 1e-9,
             "x should be ~0: {:?}",
@@ -873,7 +900,7 @@ mod tests {
             pull_mps2: DVec3::new(0.0, -9.81, 0.0),
             density_kgpm3: 0.0,
         };
-        let after = advance_driven(&at_rest(), [0; 3], [0; 3], &hull(), &pulled, 1.0);
+        let after = advance_driven(&at_rest(), [0; 3], [0; 3], Some(&hull()), &pulled, 1.0);
         assert!((after.vel_mps.y + 9.81).abs() < 1e-12);
     }
 
@@ -888,8 +915,8 @@ mod tests {
             mass_kg: 5_000.0,
             ..hull()
         };
-        let a = advance_driven(&at_rest(), [0; 3], [0; 3], &hull(), &pulled, 1.0);
-        let b = advance_driven(&at_rest(), [0; 3], [0; 3], &light, &pulled, 1.0);
+        let a = advance_driven(&at_rest(), [0; 3], [0; 3], Some(&hull()), &pulled, 1.0);
+        let b = advance_driven(&at_rest(), [0; 3], [0; 3], Some(&light), &pulled, 1.0);
         assert_eq!(a.vel_mps, b.vel_mps, "gravity must not care about mass");
 
         let air = Ambient {
@@ -900,8 +927,8 @@ mod tests {
             vel_mps: DVec3::new(100.0, 0.0, 0.0),
             ..at_rest()
         };
-        let heavy_slow = advance_driven(&moving, [0; 3], [0; 3], &hull(), &air, 1.0);
-        let light_slow = advance_driven(&moving, [0; 3], [0; 3], &light, &air, 1.0);
+        let heavy_slow = advance_driven(&moving, [0; 3], [0; 3], Some(&hull()), &air, 1.0);
+        let light_slow = advance_driven(&moving, [0; 3], [0; 3], Some(&light), &air, 1.0);
         assert!(
             light_slow.vel_mps.x < heavy_slow.vel_mps.x,
             "the lighter hull must slow MORE: light {} vs heavy {}",
@@ -916,7 +943,7 @@ mod tests {
             vel_mps: DVec3::new(100.0, 0.0, 0.0),
             ..at_rest()
         };
-        let after = advance_driven(&moving, [0; 3], [0; 3], &hull(), &vacuum(), 1.0);
+        let after = advance_driven(&moving, [0; 3], [0; 3], Some(&hull()), &vacuum(), 1.0);
         assert_eq!(
             after.vel_mps, moving.vel_mps,
             "a coasting ship in vacuum keeps its speed exactly"
@@ -933,7 +960,7 @@ mod tests {
             vel_mps: DVec3::new(10.0, 0.0, 0.0),
             ..at_rest()
         };
-        let after = advance_driven(&moving, [0; 3], [0; 3], &hull(), &air, 0.02);
+        let after = advance_driven(&moving, [0; 3], [0; 3], Some(&hull()), &air, 0.02);
         // HR5: two facts, two asserts. `a && b` short-circuits, so the false arm of the first
         // test is a region no input can reach.
         assert!(after.vel_mps.x < 10.0, "air slowed it: {:?}", after.vel_mps);
@@ -960,7 +987,7 @@ mod tests {
             vel_mps: DVec3::new(10.0, 0.0, 0.0),
             ..at_rest()
         };
-        let after = advance_driven(&moving, [0; 3], [0; 3], &broken, &air, 0.02);
+        let after = advance_driven(&moving, [0; 3], [0; 3], Some(&broken), &air, 0.02);
         // HR5: two facts, two asserts — `&&` short-circuits and hides the first test's false arm.
         assert!(
             after.pos_m.is_finite(),
@@ -977,7 +1004,7 @@ mod tests {
 
     #[test]
     fn a_turn_spins_the_hull_and_a_still_stick_leaves_it_facing_the_same_way() {
-        let after = advance_driven(&at_rest(), [0; 3], [500_000, 0, 0], &hull(), &vacuum(), 1.0);
+        let after = advance_driven(&at_rest(), [0; 3], [500_000, 0, 0], Some(&hull()), &vacuum(), 1.0);
         assert!((after.spin_radps.x - 0.5).abs() < 1e-12);
         assert!(
             after.orient.angle_between(DQuat::IDENTITY) > 0.4,
@@ -985,7 +1012,7 @@ mod tests {
         );
         // The false arm: no spin returns the facing untouched rather than rotating about an
         // undefined axis.
-        let still = advance_driven(&at_rest(), [0; 3], [0; 3], &hull(), &vacuum(), 1.0);
+        let still = advance_driven(&at_rest(), [0; 3], [0; 3], Some(&hull()), &vacuum(), 1.0);
         assert_eq!(still.orient, DQuat::IDENTITY);
     }
 
@@ -995,7 +1022,7 @@ mod tests {
         // never chooses a speed. Ten thousand ticks of full push must keep adding speed.
         let mut s = at_rest();
         for _ in 0..10_000 {
-            s = advance_driven(&s, [4_000_000, 0, 0], [0; 3], &hull(), &vacuum(), 0.02);
+            s = advance_driven(&s, [4_000_000, 0, 0], [0; 3], Some(&hull()), &vacuum(), 0.02);
         }
         assert!(
             (s.vel_mps.x - 800.0).abs() < 1e-6,
@@ -1270,8 +1297,12 @@ mod tests {
         assert_eq!(stats.child_facts_stale, 1);
     }
 
+    /// ★ 2026-09-05: a child whose facts have not reached this parent yet COASTS AND IS PUSHED —
+    /// the push is an acceleration and the pull cancels mass; only drag waits for the facts (a
+    /// guessed mass would fly it wrong; no drag until the facts land flies it exactly, in vacuum).
+    /// Before, the hull stood still for 22 ticks after every hand-over.
     #[test]
-    fn a_child_that_never_stated_its_facts_is_not_moved_at_all() {
+    fn a_child_that_never_stated_its_facts_coasts_and_is_pushed_without_drag() {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
         on_child_drive(
             a_drive(9),
@@ -1282,13 +1313,67 @@ mod tests {
             &mut held,
             &mut stats,
         );
-        held.advance_all(UniverseTick(9), 5, &vacuum(), 1.0);
-        // Its mass decides its drag and later its impacts. Guessing one flies it wrong forever and
-        // silently; leaving it still is visible the moment anybody looks.
-        assert_eq!(
-            held.state_of(ship_coord().lowered()).expect("held").pos_m,
-            DVec3::ZERO
+        let child = ship_coord().lowered();
+        held.0.get_mut(&child).expect("held").state.vel_mps = DVec3::new(1.0, 0.0, 0.0);
+        let air = Ambient {
+            pull_mps2: DVec3::ZERO,
+            density_kgpm3: 1.2,
+        };
+        held.advance_all(UniverseTick(9), 5, &air, 1.0);
+        let s = held.state_of(child).expect("held");
+        assert!(
+            (s.vel_mps.x - 5.0).abs() < 1e-9,
+            "one metre per second of coast plus four of push, no drag: {:?}",
+            s.vel_mps
         );
+        assert!((s.pos_m.x - 5.0).abs() < 1e-9, "…and it moved: {:?}", s.pos_m);
+        // The tick its facts land, drag applies (air, a hull's cross-section): slower than 9.
+        on_child_facts(
+            some_facts(10),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
+        held.advance_all(UniverseTick(10), 5, &air, 1.0);
+        let s = held.state_of(child).expect("held");
+        assert!(s.vel_mps.x < 9.0, "drag now bites: {:?}", s.vel_mps);
+        assert!(s.vel_mps.x > 5.0, "…but the push still wins: {:?}", s.vel_mps);
+    }
+
+    /// ★ 2026-09-05: the step count follows the UNIVERSE tick, not the number of calls — a
+    /// follower's tick can stand for a local tick (+0: no step) or jump (+2: two steps).
+    #[test]
+    fn the_step_count_follows_the_universe_tick_not_the_call_count() {
+        let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            &mut held,
+            &mut stats,
+        );
+        let child = ship_coord().lowered();
+        held.0.get_mut(&child).expect("held").state.vel_mps = DVec3::new(1.0, 0.0, 0.0);
+        held.advance_all(UniverseTick(9), 5, &vacuum(), 1.0);
+        assert!((held.state_of(child).expect("held").pos_m.x - 1.0).abs() < 1e-9);
+        // The universe tick stood: no step.
+        held.advance_all(UniverseTick(9), 5, &vacuum(), 1.0);
+        assert!(
+            (held.state_of(child).expect("held").pos_m.x - 1.0).abs() < 1e-9,
+            "+0: no step"
+        );
+        // The universe tick jumped by two: two steps.
+        held.advance_all(UniverseTick(11), 5, &vacuum(), 1.0);
+        assert!(
+            (held.state_of(child).expect("held").pos_m.x - 3.0).abs() < 1e-9,
+            "+2: two steps"
+        );
+        assert_eq!(held.1, Some(UniverseTick(11)));
     }
 
     #[test]
@@ -1331,7 +1416,7 @@ mod tests {
         );
         // Thawed (an aborted hand-over): the same held drive applies again.
         held.0.get_mut(&child).expect("held").frozen = false;
-        held.advance_all(UniverseTick(9), 5, &vacuum(), 1.0);
+        held.advance_all(UniverseTick(10), 5, &vacuum(), 1.0);
         let s = held.state_of(child).expect("held");
         assert!(
             (s.vel_mps.x - 5.0).abs() < 1e-9,

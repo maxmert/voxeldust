@@ -614,6 +614,15 @@ pub(crate) fn compose_scenes_pass(
             stats.window_t_monotone_stalled += u64::from(report.stalled);
             stats.window_origin_swap_deferred += u64::from(report.swap_deferred);
             stats.window_origin_swap_forced += u64::from(report.swap_forced);
+            stats.window_trace_rows += trace_drawn_rows(
+                config.trace_realm_kind,
+                session.client,
+                &session.shadow,
+                authors.len(),
+                prefix,
+                covers_lineage,
+                hop_pending,
+            );
             // ---- THE LIVE EMISSIONS (Slice C1 — §2.4/§2.7) ----------------------------------
             let epoch = session.shadow.origin_epoch;
             // Did THIS pass advance the fold tick? ONE option, computed once (HR5: the two
@@ -792,6 +801,61 @@ pub(crate) fn compose_scenes_pass(
     stats.window_chains_held = chains_held;
     stats.window_sky_anchored = sky_anchored;
     stats.window_chain_stamp_gap_max = stamp_gap_max;
+}
+
+/// ★ THE PER-TICK TRACE (2026-09-05): one log line per drawn row of `kind` for this session, at
+/// this fold — the composed pose in the origin's frame (metres), its relative velocity, its
+/// distance, whether it is FRESH (in the newest fold) or HELD (a departed or lagging stratum,
+/// advanced by its velocity), and the chain's state. `target: "vd_trace"`, read off the gateway's
+/// log by a script into a per-tick table. Returns how many rows were logged. `None` logs nothing.
+/// Example: `VD_TRACE_REALM=Star` and a pilot flying past the star: every tick one line says where
+/// the star is relative to the hull and whether that pose is fresh or held.
+pub(crate) fn trace_drawn_rows(
+    kind: Option<vd_core::realm_path::RealmKindTag>,
+    client: NodeId,
+    scene: &window::ShadowScene,
+    hops: usize,
+    prefix: usize,
+    covers_lineage: bool,
+    hop_pending: bool,
+) -> u64 {
+    let Some(kind) = kind else {
+        return 0;
+    };
+    let t = scene.last_t.map_or(0, |t| t.0);
+    let mut logged = 0u64;
+    for row in scene.drawn_rows() {
+        if vd_core::worldgen::level_of(row.realm).kind != kind {
+            continue;
+        }
+        let fresh = scene
+            .ring
+            .back()
+            .is_some_and(|c| c.rows.iter().any(|r| r.realm == row.realm));
+        let source = if fresh { "fresh" } else { "held" };
+        let pos = row
+            .pose
+            .pos
+            .separation(vd_core::pose::LatticePos::ORIGIN, row.pose.frame.tier())
+            .metres();
+        let vel = row.pose.vel;
+        tracing::info!(
+            target: "vd_trace",
+            t,
+            stamp = row.pose.universe_tick.0,
+            client = ?client,
+            realm = ?row.realm,
+            source,
+            stratum = row.stratum,
+            x = pos.x, y = pos.y, z = pos.z,
+            vx = vel.x, vy = vel.y, vz = vel.z,
+            dist = pos.length(),
+            hops, prefix, covers_lineage, hop_pending,
+            "trace row"
+        );
+        logged += 1;
+    }
+    logged
 }
 
 /// The §2.14 divergence verdict, split out so BOTH arms are unit-drivable (HR5): 1 when a

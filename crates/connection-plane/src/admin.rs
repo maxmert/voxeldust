@@ -86,6 +86,7 @@ pub fn gateway_view(
         window_origin_swap_deferred,
         window_origin_swap_forced,
         scene_levels_restated,
+        window_trace_rows,
         window_alien_rows,
         window_hop_invalid,
         window_unresolved_standing,
@@ -174,6 +175,7 @@ pub fn gateway_view(
         window_origin_swap_deferred,
         window_origin_swap_forced,
         scene_levels_restated,
+        window_trace_rows,
         window_alien_rows,
         window_hop_invalid,
         window_unresolved_standing,
@@ -317,6 +319,7 @@ mod tests {
             window_origin_swap_deferred: 55,
             window_origin_swap_forced: 56,
             scene_levels_restated: 57,
+            window_trace_rows: 59,
             window_alien_rows: 52,
             window_hop_invalid: 53,
             window_unresolved_standing: 54,
@@ -419,6 +422,7 @@ mod tests {
         assert_eq!(view.window_origin_swap_deferred, 55);
         assert_eq!(view.window_origin_swap_forced, 56);
         assert_eq!(view.scene_levels_restated, 57);
+        assert_eq!(view.window_trace_rows, 59);
         assert_eq!(view.window_alien_rows, 52);
         assert_eq!(view.window_hop_invalid, 53);
         assert_eq!(view.window_unresolved_standing, 54);

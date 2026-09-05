@@ -91,6 +91,7 @@ fn config() -> GatewayConfig {
         auth_verifying_key: verifying_key(),
         session_seed: 7,
         tick_hz: 50,
+        trace_realm_kind: None,
         lease_renew_interval_ticks: 0,
         session_recheck_interval: 0,
         self_fence_grace_ticks: 0,
@@ -9407,6 +9408,82 @@ fn the_fold_carries_the_sky_anchor_to_the_client_when_the_gateway_names_the_skys
         UniverseTick(1001),
         "stamped at the fold's own tick"
     );
+}
+
+#[test]
+fn the_per_tick_trace_logs_the_drawn_rows_of_one_kind_and_nothing_else() {
+    // 2026-09-05: the measurement instrument. A scene with a planet row and a galaxy row; tracing
+    // Planet logs one row, tracing Star logs none, no kind logs none. The word parser is total.
+    use vd_core::realm_path::RealmKindTag as K;
+    let mut scene = window::ShadowScene::default();
+    let authors = vec![RealmId::System(7), vd_core::worldgen::GALAXY];
+    let fold = window::Composed {
+        at: UniverseTick(100),
+        rows: vec![
+            window::ComposedRow {
+                realm: RealmId::Planet(7),
+                frame: FrameRef::PlanetCentered { planet_seed: 7 },
+                pose: vd_core::pose::StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 7 },
+                    DVec3::new(3.0, 4.0, 0.0),
+                    UniverseTick(100),
+                ),
+                stratum: 0,
+                parent: Some(RealmId::System(7)),
+                body: window::BodyTag::Placement,
+            },
+            window::ComposedRow {
+                realm: vd_core::worldgen::GALAXY,
+                frame: FrameRef::GalaxySpace { galaxy_seed: 1 },
+                pose: vd_core::pose::StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 7 },
+                    DVec3::ZERO,
+                    UniverseTick(100),
+                ),
+                stratum: 1,
+                parent: None,
+                body: window::BodyTag::Placement,
+            },
+        ],
+        fresh_levels: 2,
+        ..window::Composed::default()
+    };
+    let tuning = window::WindowTuning::derive(2, config().tick_hz);
+    let _ = scene.advance(RealmId::System(7), &authors, Some(fold), &tuning);
+    assert_eq!(
+        super::window_lane::trace_drawn_rows(Some(K::Planet), CLIENT, &scene, 2, 2, true, false),
+        1
+    );
+    assert_eq!(
+        super::window_lane::trace_drawn_rows(Some(K::Star), CLIENT, &scene, 2, 2, true, false),
+        0
+    );
+    assert_eq!(
+        super::window_lane::trace_drawn_rows(None, CLIENT, &scene, 2, 2, true, false),
+        0
+    );
+    // A held row traces as "held": drop the galaxy stratum from the fresh prefix.
+    let leaf_only = window::Composed {
+        at: UniverseTick(101),
+        rows: vec![],
+        fresh_levels: 1,
+        ..window::Composed::default()
+    };
+    let _ = scene.advance(RealmId::System(7), &authors, Some(leaf_only), &tuning);
+    assert_eq!(
+        super::window_lane::trace_drawn_rows(Some(K::Galaxy), CLIENT, &scene, 2, 1, false, true),
+        1,
+        "the held galaxy row is traced with its source named"
+    );
+    // The word parser: every kind by its own name, an unknown word is nothing.
+    assert_eq!(super::config::parse_realm_kind("Star"), Some(K::Star));
+    assert_eq!(super::config::parse_realm_kind("Universe"), Some(K::Universe));
+    assert_eq!(super::config::parse_realm_kind("Galaxy"), Some(K::Galaxy));
+    assert_eq!(super::config::parse_realm_kind("System"), Some(K::System));
+    assert_eq!(super::config::parse_realm_kind("Planet"), Some(K::Planet));
+    assert_eq!(super::config::parse_realm_kind("Station"), Some(K::Station));
+    assert_eq!(super::config::parse_realm_kind("Area"), Some(K::Area));
+    assert_eq!(super::config::parse_realm_kind("star"), None);
 }
 
 #[test]

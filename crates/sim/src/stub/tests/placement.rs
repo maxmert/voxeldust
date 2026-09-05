@@ -1547,15 +1547,23 @@ fn a_driven_childs_published_row_moves_and_a_still_ones_does_not() {
         pull_mps2: DVec3::ZERO,
         density_kgpm3: 0.0,
     };
-    for _ in 0..50 {
+    // Fifty universe ticks, one step each (2026-09-05: the step follows the universe tick, so a
+    // tick that stands is no step — the fixture advances the tick as the clock would).
+    for i in 0..50u64 {
+        let at = UniverseTick(tick.0 + i);
+        // A real child restates its drive every tick; a statement older than the stale bound is
+        // a released stick, so the fixture restates it too.
+        for c in flying.0.values_mut().chain(still.0.values_mut()) {
+            c.drive_at.1 = at;
+        }
         flying.advance_all(
-            tick,
+            at,
             crate::stub::drive::DRIVE_STALE_AFTER_TICKS,
             &ambient,
             0.02,
         );
         still.advance_all(
-            tick,
+            at,
             crate::stub::drive::DRIVE_STALE_AFTER_TICKS,
             &ambient,
             0.02,

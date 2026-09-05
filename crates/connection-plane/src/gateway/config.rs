@@ -279,6 +279,11 @@ pub struct GatewayConfig {
     /// `ServerControlMsg::UniverseRate` so they drive the render cursor at the
     /// server's rate. The SAME value the node feeds its `TickPacer` (VD_TICK_HZ).
     pub tick_hz: u32,
+    /// ★ THE PER-TICK TRACE (2026-09-05, owner: *"lets measure and understand better how all
+    /// works"*): when `Some(kind)`, every drawn row of that realm kind is logged once per fold per
+    /// session (`target: "vd_trace"`) with its composed pose, velocity, distance, source (fresh or
+    /// held) and the chain's state. `None` (the default; `VD_TRACE_REALM` unset) logs nothing.
+    pub trace_realm_kind: Option<vd_core::realm_path::RealmKindTag>,
     /// D-3 lease-liveness heartbeat cadence (the gateway's LOCAL ticks): how often it re-sends
     /// `LeaseRenew` for every Active session's `Session` key, keeping the session lease alive against
     /// the orchestrator's reaper. `0` = INERT (no heartbeat — the pre-D-3 default). The gateway's local
@@ -308,6 +313,23 @@ pub struct GatewayConfig {
     /// gateway.
     pub seed_injector: SeedInjectorConfig,
     pub tuning: TransportTuning,
+}
+
+/// `VD_TRACE_REALM`'s value → the realm kind to trace; an unknown word is `None` (nothing traced,
+/// never a guess). Case-sensitive, the kind's own name.
+#[must_use]
+pub fn parse_realm_kind(word: &str) -> Option<vd_core::realm_path::RealmKindTag> {
+    use vd_core::realm_path::RealmKindTag as K;
+    match word {
+        "Universe" => Some(K::Universe),
+        "Galaxy" => Some(K::Galaxy),
+        "System" => Some(K::System),
+        "Planet" => Some(K::Planet),
+        "Station" => Some(K::Station),
+        "Area" => Some(K::Area),
+        "Star" => Some(K::Star),
+        _ => None,
+    }
 }
 
 impl GatewayConfig {

@@ -238,6 +238,8 @@ pub struct GatewayStats {
     /// Full levels restated on the keep-alive beat at the current epoch (2026-09-04): the
     /// recovery a client that refused a level needs, and the baseline reset for the next delta.
     pub scene_levels_restated: u64,
+    /// Rows logged by the per-tick trace (`VD_TRACE_REALM`, 2026-09-05).
+    pub window_trace_rows: u64,
     /// Slice B — rows dropped because their stated tail frame was not their level's own frame
     /// (or an unknown-frame refusal from the fold): alien, dropped, counted (§2.6.6).
     pub window_alien_rows: u64,

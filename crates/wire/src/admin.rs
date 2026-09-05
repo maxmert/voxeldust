@@ -248,6 +248,8 @@ pub struct GatewayView {
     pub window_origin_swap_forced: u64,
     /// Full levels restated on the keep-alive beat (2026-09-04).
     pub scene_levels_restated: u64,
+    /// Rows logged by the per-tick trace (2026-09-05).
+    pub window_trace_rows: u64,
     /// Slice B — rows whose stated frame was not their level's own: alien, dropped.
     pub window_alien_rows: u64,
     /// Slice B — chain levels whose hop was absent/mismatched/rosterless: prefix capped there.
@@ -777,6 +779,7 @@ mod tests {
                 window_origin_swap_deferred: 55,
                 window_origin_swap_forced: 56,
                 scene_levels_restated: 57,
+                window_trace_rows: 59,
                 window_alien_rows: 52,
                 window_hop_invalid: 53,
                 window_unresolved_standing: 54,

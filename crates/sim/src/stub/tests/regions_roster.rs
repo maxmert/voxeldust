@@ -84,6 +84,37 @@ fn a_live_band_child_adopted_at_runtime_joins_the_range_index_and_the_radial_lis
     assert_eq!(regions.direct_children(OWN_REALM).count(), 0);
 }
 
+/// ★ 2026-09-05 (the twenty-fourth flight): a static child that is RELEASED leaves its parent's
+/// placement book the same tick, and one that is ADOPTED is in it — the static layer is rebuilt
+/// for that parent. Before, a released hull's berth row stayed in its old parent's book, and the
+/// first level after re-adoption placed the hull at the berth: the star jumped for one tick.
+#[test]
+fn a_released_static_child_leaves_its_parents_book_and_an_adopted_one_joins_it() {
+    let mut regions =
+        RealmRegions::new(vec![root_region(), own_region()]).with_own_realm(OWN_REALM);
+    let at = UniverseTick(7);
+    let frame_of = |regions: &RealmRegions, realm: RealmId| {
+        regions
+            .direct_child(OWN_REALM, realm)
+            .expect("rostered")
+            .frame
+    };
+    regions.adopt_child(live(STATIC_FAR, DVec3::new(30_000.0, 0.0, 0.0), 100.0));
+    let far = frame_of(&regions, STATIC_FAR);
+    assert!(
+        regions.author_book(OWN_REALM, 50.0, at).of(far).is_some(),
+        "adopted: in the book the same tick"
+    );
+    regions.adopt_child(live(STATIC_SAME, DVec3::new(0.0, 30_000.0, 0.0), 100.0));
+    let same = frame_of(&regions, STATIC_SAME);
+    regions.release_child(STATIC_FAR);
+    let book = regions.author_book(OWN_REALM, 50.0, at);
+    assert!(book.of(far).is_none(), "released: gone from the book the same tick");
+    assert!(book.of(same).is_some(), "…and its sibling stays");
+    regions.release_child(STATIC_SAME);
+    assert!(regions.author_book(OWN_REALM, 50.0, at).of(same).is_none());
+}
+
 #[test]
 fn releasing_a_row_that_is_not_the_last_re_points_the_moved_row_and_its_movers() {
     // Three direct children: a static, a MOVER, a static. Releasing the first moves the last into

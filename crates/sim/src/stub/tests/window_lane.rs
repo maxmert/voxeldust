@@ -1552,7 +1552,46 @@ fn a_child_window_whose_hop_row_is_missing_is_counted_and_said_once_per_beat() {
     rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
     rig.set_local_tick(11); // off the beat
     rig.tick(vec![]);
-    assert_eq!(rig.world.resource::<StubStats>().window_hop_missing, 2);
+    // ★ 2026-09-05: a child adopted BEFORE the tick is in this tick's book (the static layer is
+    // rebuilt on adoption), so its hop is never missing on the schedule's own path.
+    assert_eq!(rig.world.resource::<StubStats>().window_hop_missing, 0);
+    // The arm that stays reachable: a child adopted AFTER this tick's book was authored (the
+    // adoption lands in the same tick's inbound, after `author_placements`) — the book has no row
+    // for it, the frame is withheld and counted, said once per beat. Driven with a book that
+    // lacks the child, on the beat and off it.
+    let at = rig.world.resource::<ClockSample>().universe_tick;
+    let anchor = rig
+        .world
+        .resource::<RealmRegions>()
+        .author_book(OWN_REALM, 20.0, at)
+        .anchor();
+    let empty = vd_core::placement::PlacementBook::layered(
+        anchor,
+        at,
+        std::sync::Arc::new(Vec::new()),
+        Vec::new(),
+    );
+    let mut stats = StubStats::default();
+    let mut outbox = crate::runtime::OutboundBox::default();
+    for local in [10u64, 11] {
+        rig.set_local_tick(local);
+        let config = rig.world.resource::<StubConfig>();
+        let clock = rig.world.resource::<ClockSample>();
+        let regions = rig.world.resource::<RealmRegions>();
+        let windows = rig.world.resource::<OpenWindows>();
+        crate::stub::window::emit_window_frames(
+            config,
+            clock,
+            Fence(1),
+            regions,
+            &empty,
+            &[],
+            windows,
+            &mut stats,
+            &mut outbox,
+        );
+    }
+    assert_eq!(stats.window_hop_missing, 2, "counted every tick");
 }
 
 /// The admitted set of a window may name a realm that left the roster since (a stale verdict) and a

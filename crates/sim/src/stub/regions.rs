@@ -727,6 +727,8 @@ impl RealmRegions {
         }
         // The reach (2026-09-04): the newcomer's `distance + reach` joins this realm's own fold.
         self.insert_reach_terms(own, ix);
+        // The newcomer joins its parent's static layer the same tick (2026-09-05).
+        self.rebuild_static_rows_for(own);
     }
 
     /// ★ THIS REALM MOVED HOUSE (the ruler switch, slice 3): its parent told it a new lineage. The own
@@ -822,6 +824,47 @@ impl RealmRegions {
             }
         } else if let Some(movers) = parent.and_then(|p| self.movers_of.get_mut(&p)) {
             movers.retain(|i| *i != ix);
+        }
+        // The released child leaves its parent's static layer the same tick (2026-09-05).
+        if let Some(p) = parent {
+            self.rebuild_static_rows_for(p);
+        }
+    }
+
+    /// ★ ONE PARENT'S STATIC LAYER, REBUILT (2026-09-05, the twenty-fourth flight: the star jumped
+    /// to the hull's OLD BERTH for one tick at re-adoption). The static rows are authored once and
+    /// shared by `Arc`, and a release or an adoption never touched them — so a released hull's berth
+    /// row stayed in its old parent's book, and the first level after re-adoption (authored before
+    /// the adoption landed that tick) placed the hull at the berth. This rebuilds ONLY the named
+    /// parent's rows and movers (O(that parent's children), once per event — never per tick), so
+    /// a static child that leaves is gone from the book the same tick, and one that arrives is in it.
+    fn rebuild_static_rows_for(&mut self, parent: RealmId) {
+        let anchor = self.own_frame(parent);
+        let mut rows: Vec<(FrameRef, FramePlacement)> = Vec::new();
+        let mut movers: Vec<usize> = Vec::new();
+        for &ix in self.children_of.get(&parent).into_iter().flatten() {
+            let r = &self.regions[ix];
+            if self.moving.contains_key(&r.realm) {
+                movers.push(ix);
+                continue;
+            }
+            rows.push((
+                r.frame,
+                FramePlacement {
+                    origin_cell: r.center.in_parents_frame().cell(),
+                    origin: r.center.in_parents_frame().offset(),
+                    velocity: DVec3::ZERO,
+                    orientation: DQuat::IDENTITY,
+                    angular_velocity: DVec3::ZERO,
+                },
+            ));
+        }
+        self.static_rows
+            .insert(parent, PlacementBook::static_rows(anchor, rows));
+        if movers.is_empty() {
+            self.movers_of.remove(&parent);
+        } else {
+            self.movers_of.insert(parent, movers);
         }
     }
 

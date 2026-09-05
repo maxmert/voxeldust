@@ -205,6 +205,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The SAME VD_TICK_HZ that paces this node — relayed to clients via
             // UniverseRate so the render cursor tracks the cluster's rate (R1).
             tick_hz,
+            // ★ THE PER-TICK TRACE (2026-09-05): `VD_TRACE_REALM=Star` logs every drawn star row per
+            // fold per session on target `vd_trace`; unset or an unknown word logs nothing.
+            trace_realm_kind: env
+                .string("VD_TRACE_REALM")
+                .ok()
+                .and_then(|w| vd_connection_plane::gateway::parse_realm_kind(&w)),
             // D-3 session-lease heartbeat cadence (the gateway's local copy). INERT (0) until D-3 is on.
             lease_renew_interval_ticks: env.parse_or("VD_LEASE_RENEW_INTERVAL", 0)?,
             // D-3 Slice 5b: session-head recheck cadence (the round-trip confirmation channel) + the

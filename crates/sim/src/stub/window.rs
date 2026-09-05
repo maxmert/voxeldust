@@ -248,7 +248,7 @@ pub(crate) fn hop_placement(child: FrameRef, book: &PlacementBook) -> Option<Fra
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit_window_frames(
+pub(crate) fn emit_window_frames(
     config: &StubConfig,
     clock: &ClockSample,
     realm_fence: Fence,

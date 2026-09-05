@@ -5157,6 +5157,45 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   Error bound: the relative ACCELERATION over the hold (a turn, a thrust change), never the speed.
   VERIFY IN FLIGHT: approach the star, fly away; `star_center` in the poll must move continuously
   through the hand-over second.
+  ★ THE TWENTY-SECOND AND TWENTY-THIRD FLIGHTS (2026-09-05). The star did not jump (owner). *"seems
+  like the movement of the star was not that smooth anymore"* — the owner asked to measure. THE
+  PER-TICK TRACE (`VD_TRACE_REALM=Star` on the gateway, `trace_drawn_rows`, counter `window_trace_
+  rows`; reader `trace_star.py`) logged 5,088 ticks of the star's composed row. FINDINGS, exact:
+  (1) THE ARRIVAL STALL: after each hand-over the star's distance did not change for 22 ticks (in,
+  6790–6811) and 6 ticks (out, 7507–7512) while the row's velocity read 5.7e8 m/s — the new
+  parent authored a STILL hull. ROOT CAUSE (code): the parent seeds an adopted child with `facts:
+  None` ("the hull restates what it IS to its new parent") and `advance_all` skipped a child
+  without facts entirely; the facts arrived only after the peer lookup (*"no lane and no address
+  for a peer — its frames wait while the orchestrator is asked"*, 0.3 s). The hull STOPPED for
+  0.44 s at warp on every hand-over — the movement ruling says a transfer never changes a speed.
+  FIXED: `advance_driven` takes the facts as an option; a child without them coasts and is pushed
+  (the push is an acceleration, the pull cancels mass) and feels drag the tick its facts land.
+  (2) THE PERIODIC STUTTER: every ~70 ticks the hull's placement lagged one tick then caught up two
+  (t=7072/7073, with the gateway folding no 7071). ROOT CAUSE (code): a follower's universe tick
+  moves only when the orchestrator's sync lands (`FollowerClock::now` is the last observed sync),
+  so a local tick sees +0 or +2 now and then; `advance_all` integrated once per LOCAL tick, so the
+  motion per universe stamp was uneven. FIXED: `DrivenChildren` remembers the tick it advanced to
+  and integrates exactly the universe ticks elapsed (none on +0, two on +2). Pinned by
+  `a_child_that_never_stated_its_facts_coasts_and_is_pushed_without_drag` and
+  `the_step_count_follows_the_universe_tick_not_the_call_count`. (3) The gateway folded no row on
+  152 of 5,244 ticks (a 2-tick gap; one 6-tick gap): the same clock jitter seen from the gateway —
+  benign under the client's six-tick buffer, noted. VERIFY IN FLIGHT: the trace's held runs stay
+  one tick, no zero-rate run after a hand-over, no lag-then-catch-up pairs.
+  ★ THE TWENTY-FOURTH FLIGHT (2026-09-05, owner: *"Sun jumped again on rehome"*). THE TRACE, exact:
+  the hand-over IN is clean now (held 2 ticks, then fresh, no zero-rate run — the arrival stall is
+  gone); at the hand-over OUT the star's row at t=15040 read (−40, 0, −1.0822e10) for ONE tick —
+  the negative of the hull's ORIGINAL BERTH — then the true 4.7e9 at 15042. ROOT CAUSE (code):
+  `release_child` never rebuilt the parent's STATIC placement layer (an `Arc<Vec>` built once at
+  boot), so after the hull left System 7 its berth row stayed in System 7's book for the whole star
+  leg; at re-adoption the tick's book was authored BEFORE the adoption landed (the schedule's order)
+  and still carried the berth row, the window's first level took its hop from it, and the star
+  drew at minus the berth. `adopt_child` never rebuilt it either. FIXED: `rebuild_static_rows_for
+  (parent)` — that parent's rows and movers only, O(its children), once per release or adoption,
+  never per tick — called from both. Pinned by `a_released_static_child_leaves_its_parents_book_
+  and_an_adopted_one_joins_it`. COST NOTE: on the galaxy (279,380 children) one release or adoption
+  copies its whole static row vector once (milliseconds, once per hand-over through the galaxy);
+  a per-row edit of the shared vector is the cheaper shape if that ever measures. VERIFY IN FLIGHT:
+  no row at the berth's negative after the hand-over out.
 
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:
