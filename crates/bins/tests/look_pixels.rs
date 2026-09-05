@@ -77,7 +77,24 @@ use vd_devproto::{CLIENT_NODE_BASE, DevPhase, DevRequest, DevResponse, DevState}
 use vd_io_prod::trust::ClusterTrust;
 use vd_physics::celestial::OrbitalElements;
 use vd_physics::motion::Motion;
-use vd_physics::worldgen::{StationAreaPlant, UniverseConfig, WorldView, station_area_plant};
+use vd_physics::worldgen::{StationAreaPlant, UniverseConfig, station_area_plant};
+
+/// ★ THE PLANTED NEIGHBOURHOOD, NOT THE GENERATED WORLD (2026-09-05): this fixture used to call
+/// `WorldView::generated`, which generates THE whole world (3.5 M bodies) inside the test — hours in
+/// both build profiles, so the gate was never measurable. The budgets it derives are facts about the
+/// HOME system and its children, which the shard's own planted forest holds: `realm_regions_for_config`
+/// is what the shard boots with, and what the flight helpers already read.
+struct Neighbourhood(Vec<vd_core::geometry::RealmRegion>);
+
+impl Neighbourhood {
+    fn planted(seed: u64, config: &UniverseConfig) -> Neighbourhood {
+        Neighbourhood(vd_physics::worldgen::realm_regions_for_config(seed, config))
+    }
+
+    fn regions(&self) -> &[vd_core::geometry::RealmRegion] {
+        &self.0
+    }
+}
 use vd_wire::admin::{AdminSnapshot, GatewayView, RlmView};
 
 // ---------------------------------------------------------------------------------------------
@@ -229,8 +246,30 @@ struct Oracle {
 
 fn oracle() -> Oracle {
     let config = planted_config();
-    let world = WorldView::generated(DEV.universe_seed, &config);
-    let regions = world.regions().to_vec();
+    let world = Neighbourhood::planted(DEV.universe_seed, &config);
+    // ★ THE HOME SUBTREE ONLY (2026-09-05): this oracle used to take EVERY parent in the forest —
+    // 233,220 star systems — and generate the world once per parent for its movers: hours, in
+    // both build profiles. The gate looks at the home system and what it holds; the oracle
+    // rosters exactly that subtree.
+    let home = station_area_plant(DEV.universe_seed, &config).station_parent;
+    let mut subtree: std::collections::BTreeSet<RealmId> = std::collections::BTreeSet::from([home]);
+    loop {
+        let before = subtree.len();
+        for r in world.regions() {
+            if r.parent.is_some_and(|p| subtree.contains(&p)) {
+                subtree.insert(r.realm);
+            }
+        }
+        if subtree.len() == before {
+            break;
+        }
+    }
+    let regions: Vec<vd_core::geometry::RealmRegion> = world
+        .regions()
+        .iter()
+        .filter(|r| subtree.contains(&r.realm))
+        .cloned()
+        .collect();
     let parents: std::collections::BTreeSet<RealmId> =
         regions.iter().filter_map(|r| r.parent).collect();
     let movers = parents
@@ -727,7 +766,7 @@ impl ParentLaw {
     /// the cluster boots, read OUT-OF-BAND. Never from the drawn scene: a law read back out of the
     /// picture it judges asserts nothing.
     fn derive(d: &Derived) -> ParentLaw {
-        let world = WorldView::generated(DEV.universe_seed, &planted_config());
+        let world = Neighbourhood::planted(DEV.universe_seed, &planted_config());
         let is_planet = |r: RealmId| matches!(r, RealmId::Planet(_));
         let home_planets: BTreeSet<String> = world
             .regions()
@@ -1209,7 +1248,7 @@ struct Derived {
 fn derived() -> Derived {
     let config = planted_config();
     let plant = station_area_plant(DEV.universe_seed, &config);
-    let world = WorldView::generated(DEV.universe_seed, &config);
+    let world = Neighbourhood::planted(DEV.universe_seed, &config);
     let home = plant.station_parent;
     let home_row = world
         .regions()
@@ -1265,7 +1304,9 @@ fn derived() -> Derived {
         .expect("a planet draws itself")
         .circumscribed_extent();
     Derived {
-        spawn_z: world.default_home_offset_m().z,
+        spawn_z: vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt)
+            .default_home_offset_m()
+            .z,
         star: star_row.realm,
         star_bound,
         star_look,

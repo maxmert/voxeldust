@@ -753,3 +753,316 @@ pub fn creep_axes_plus_z() -> [f32; 3] {
 pub fn governed_axes_plus_z() -> [f32; 3] {
     [-1.0, 0.0, 0.0]
 }
+
+// ---------------------------------------------------------------------------------------------
+// ★ THE HULL FLIGHT (owner ruling 2026-09-05, `owner_decisions_2026-09-05_suit.md` S4): the gates
+// fly the SHIPPED PATH — a pilot boards a berthed hull and pushes, the way the owner flies — never
+// a walking dot at warp. Guidance is BODY-FRAME: the client draws every realm as a box whose centre
+// is expressed in the hull's own frame (the composed row), so "where is the planet from my nose"
+// is `realm_boxes[planet].center`, with no world coordinates, no seed table and no second source.
+// The nose is −Z (`look_at`'s forward); the stick's first axis pushes along it (`stick_from_input`
+// → `local_axes_from_movement`), the second axis yaws (`yaw = −movement[1]`), and pitch rides the
+// two pilot action bits. The hull turns and pushes at its own rating; the controller reads the
+// error and the measured closing speed and commands bang-bang thrust with a stopping-distance
+// brake and a damped turn. Every number here is a control gain or a fraction of the target's own
+// shell, never a speed.
+// ---------------------------------------------------------------------------------------------
+
+/// Berth one test hull forty metres from the spawn of the roster's home system, BEFORE the shards
+/// boot (the home system reads its berths at boot). The same tool the dev cluster uses
+/// (`vd-build-ship`), pointed at the fixture's realm stores. Returns the hull's realm.
+pub fn berth_test_hull(
+    base_dir: &std::path::Path,
+    p: &crate::DevClusterParams,
+    owner_account: u64,
+    push_mps2: f64,
+    turn_radps2: f64,
+) -> vd_core::pose::RealmId {
+    let roster = crate::world_roster(p);
+    let spawn = crate::boot_world(p.universe_seed, p.move_speed, p.tick_dt).default_home_offset_m();
+    let hull = vd_core::pose::RealmId::Ship(vd_core::ids::EntityId::pack(
+        vd_core::entity_kind::EntityKind::Ship,
+        1,
+        1,
+        0,
+    ));
+    let parent_store = crate::realm_store_path(base_dir, roster.home);
+    let ship_store = crate::realm_store_path(base_dir, hull);
+    let micro = |v: f64| ((v * 1.0e6).round() as i64).to_string();
+    let tool = std::env::var("CARGO_BIN_EXE_vd-build-ship").map_or_else(
+        |_| {
+            std::env::current_exe()
+                .expect("own path")
+                .parent()
+                .and_then(|d| d.parent())
+                .expect("the target profile dir")
+                .join("vd-build-ship")
+        },
+        std::path::PathBuf::from,
+    );
+    let out = std::process::Command::new(&tool)
+        .args([
+            "--parent-store",
+            &parent_store,
+            "--ship-store",
+            &ship_store,
+            "--owner",
+            &owner_account.to_string(),
+            "--berth-x-m",
+            &(spawn.x + BERTH_OFFSET_M).to_string(),
+            "--berth-y-m",
+            &spawn.y.to_string(),
+            "--berth-z-m",
+            &spawn.z.to_string(),
+            "--max-push-micro-mps2",
+            &micro(push_mps2),
+            "--max-turn-micro-radps2",
+            &micro(turn_radps2),
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("vd-build-ship at {}: {e}", tool.display()));
+    assert!(
+        out.status.success(),
+        "vd-build-ship: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    hull
+}
+
+/// Where the test hull is berthed, measured from the spawn: forty metres along +x (the dev
+/// cluster's `berth_hull` example uses the same offset, so a walk aboard is the same walk).
+pub const BERTH_OFFSET_M: f64 = 40.0;
+
+/// Walk the pilot aboard the berthed hull: from the spawn, forty metres along +x, until the
+/// client's location names a Ship. Returns the state aboard. The walk is BRAKED at the foot step
+/// (`max_step_m`): an unbraked walk-to under the walk ramp overshoots the berth, reverses with its
+/// speed kept, and runs away — measured at 115 km from the spawn on the first probe (2026-09-05).
+pub fn board_hull(devctl_port: u16, p: &crate::DevClusterParams, deadline: Duration) -> DevState {
+    // A LOW THROTTLE, NOT A WALK-TO (2026-09-05, measured): the dev cluster's foot speed is 1 km/s
+    // — 20 m per tick — and a hull is smaller than one step, so a full-speed walk passes THROUGH
+    // the hull inside one tick (no endpoint lands inside: no re-home) and a closed-loop walk-to
+    // under the walk ramp overshoots and runs away (115 km, then 9.6 km with a brake). At 2 %
+    // throttle the step is 0.4 m: the endpoint lands inside the hull and the hand-over fires.
+    const BOARD_THROTTLE: f32 = 0.02;
+    let started = Instant::now();
+    let st = loop {
+        if let Some(s) = poll_state(devctl_port)
+            && own_pos(&s).is_some()
+        {
+            break s;
+        }
+        assert!(started.elapsed() < deadline, "board: no delivered own pose");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let me = own_pos(&st).expect("delivered");
+    let berth = me + DVec3::new(BERTH_OFFSET_M, 0.0, 0.0);
+    // Face the berth (the client's closed-loop look), then creep.
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::LookAt {
+            target: berth.to_array(),
+            align_epsilon: 0.02,
+            max_ticks: 200,
+        },
+    );
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::Move {
+            axes: [BOARD_THROTTLE, 0.0, 0.0],
+        },
+    );
+    let _ = p; // the foot speed is the shard's; the throttle is a fraction of it
+    loop {
+        if let Some(s) = poll_state(devctl_port)
+            && s.location.as_deref().is_some_and(|l| l.starts_with("Ship"))
+        {
+            let _ = devctl(
+                devctl_port,
+                &DevRequest::Move {
+                    axes: [0.0, 0.0, 0.0],
+                },
+            );
+            return s;
+        }
+        assert!(
+            started.elapsed() < deadline,
+            "board: the pilot never re-homed into the hull"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The drawn box whose realm label starts with `prefix`, as (centre in the hull's frame, extent).
+fn box_of(st: &DevState, prefix: &str) -> Option<(DVec3, f64)> {
+    st.realm_boxes
+        .iter()
+        .find(|b| b.realm.starts_with(prefix))
+        .map(|b| (DVec3::from_array(b.center), b.extent_m))
+}
+
+/// One tick of the hull's stick: forward push (+1 / 0 / −1 along the nose), yaw stick, pitch bits.
+fn hull_stick(devctl_port: u16, forward: f32, yaw: f32, pitch: f32) {
+    use vd_core::controls::{PILOT_PITCH_DOWN_INDEX, PILOT_PITCH_UP_INDEX};
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::Move {
+            axes: [forward, yaw, 0.0],
+        },
+    );
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::Action {
+            bit: PILOT_PITCH_UP_INDEX,
+            pressed: pitch > 0.0,
+        },
+    );
+    let _ = devctl(
+        devctl_port,
+        &DevRequest::Action {
+            bit: PILOT_PITCH_DOWN_INDEX,
+            pressed: pitch < 0.0,
+        },
+    );
+}
+
+/// ★ FLY THE HULL INTO A DRAWN REALM: aim the nose at the box, push, brake on the stopping
+/// distance, and hold until the client's location names the target realm (the hand-over landed).
+/// `arrive_frac` is how deep inside the target's shell the hull settles, as a fraction of its
+/// extent; `turn_radps2` is the hull's turn rating (the test berthed it, so the test knows it).
+/// The turn is a DOUBLE INTEGRATOR (a stick makes an angular acceleration), so the aim commands
+/// on the stopping angle: `err + rate·|rate| / (2·a)` — the angle the hull will still turn
+/// through if it brakes now — with the rate measured over a half-second window, never one poll.
+/// Returns the state at arrival. Panics past `deadline` with the last measured error.
+pub fn fly_hull_to(
+    devctl_port: u16,
+    target_prefix: &str,
+    arrive_frac: f64,
+    turn_radps2: f64,
+    deadline: Duration,
+) -> DevState {
+    const CONTROL_PERIOD: Duration = Duration::from_millis(100);
+    const RATE_WINDOW: usize = 5;
+    // The hull's spin is never damped by physics (no angular drag in space), so this controller
+    // IS the damper: full stick authority, and the stopping angle reads the full turn rating.
+    const STICK_LIMIT: f64 = 1.0;
+    const STICK_PROPORTIONAL_RAD: f64 = 0.10;
+    const AIM_TOLERANCE_RAD: f64 = 0.03;
+    const BRAKE_MARGIN: f64 = 1.5;
+    let started = Instant::now();
+    let mut history: std::collections::VecDeque<(Instant, f64, f64, f64)> =
+        std::collections::VecDeque::new(); // (when, dist, yaw_err, pitch_err)
+    let mut last = String::new();
+    let mut accel_est: f64 = 0.0;
+    let mut prev_closing: Option<(Instant, f64)> = None;
+    let mut last_forward: f32 = 0.0;
+    let mut periods: u64 = 0;
+    // The stopping-angle command for one axis: how far the hull still turns if it brakes now.
+    let stopping = |err: f64, rate: f64| err + rate * rate.abs() / (2.0 * turn_radps2.max(1e-9));
+    loop {
+        let Some(st) = poll_state(devctl_port) else {
+            std::thread::sleep(CONTROL_PERIOD);
+            assert!(
+                started.elapsed() < deadline,
+                "fly: dev-control unreachable ({last})"
+            );
+            continue;
+        };
+        if st
+            .location
+            .as_deref()
+            .is_some_and(|l| l.starts_with(target_prefix))
+        {
+            hull_stick(devctl_port, 0.0, 0.0, 0.0);
+            return st;
+        }
+        let Some((d, extent)) = box_of(&st, target_prefix) else {
+            std::thread::sleep(CONTROL_PERIOD);
+            assert!(
+                started.elapsed() < deadline,
+                "fly: the target is not drawn ({last})"
+            );
+            continue;
+        };
+        let dist = d.length();
+        let dir = d / dist;
+        // Aim error in the hull's own frame: the nose is −Z.
+        let yaw_err = (-dir.x).atan2(-dir.z);
+        let pitch_err = dir.y.clamp(-1.0, 1.0).asin();
+        let now = Instant::now();
+        history.push_back((now, dist, yaw_err, pitch_err));
+        while history.len() > RATE_WINDOW {
+            history.pop_front();
+        }
+        let (closing, yaw_rate, pitch_rate) = match (history.front(), history.len() > 1) {
+            (Some(&(t0, d0, y0, p0)), true) => {
+                let dt = (now - t0).as_secs_f64().max(1e-3);
+                (
+                    (d0 - dist) / dt,
+                    wrap_pi(yaw_err - y0) / dt,
+                    (pitch_err - p0) / dt,
+                )
+            }
+            _ => (0.0, 0.0, 0.0),
+        };
+        let yaw_u = stopping(yaw_err, yaw_rate);
+        let pitch_u = stopping(pitch_err, pitch_rate);
+        // Yaw: `yaw = −movement[1]`, so a positive stopping angle wants a negative stick.
+        let yaw_cmd = (-(yaw_u / STICK_PROPORTIONAL_RAD).clamp(-1.0, 1.0) * STICK_LIMIT) as f32;
+        // Pitch rides two bits: press the side that shrinks the stopping angle, release inside
+        // the tolerance.
+        let pitch_cmd: f32 = if pitch_u.abs() > AIM_TOLERANCE_RAD {
+            pitch_u.signum() as f32
+        } else {
+            0.0
+        };
+        let aimed = yaw_err.abs() < AIM_TOLERANCE_RAD && pitch_err.abs() < AIM_TOLERANCE_RAD;
+        let remaining = (dist - arrive_frac * extent).max(0.0);
+        if let Some((t0, c0)) = prev_closing
+            && last_forward != 0.0
+        {
+            let dt = (now - t0).as_secs_f64().max(1e-3);
+            accel_est = accel_est.max(((closing - c0) / dt).abs());
+        }
+        prev_closing = Some((now, closing));
+        let stop_dist = if accel_est > 0.0 {
+            closing.abs() * closing.abs() / (2.0 * accel_est)
+        } else {
+            0.0
+        };
+        let forward: f32 = if !aimed {
+            0.0
+        } else if closing < 0.0 || stop_dist * BRAKE_MARGIN < remaining {
+            1.0
+        } else if closing > 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        hull_stick(devctl_port, forward, yaw_cmd, pitch_cmd);
+        last_forward = forward;
+        periods += 1;
+        if periods.is_multiple_of(50) {
+            eprintln!(
+                "[hull] t={:.0}s dist {dist:.3e} m closing {closing:.3e} m/s accel {accel_est:.2e} yaw {yaw_err:+.3} ({yaw_rate:+.3}/s) pitch {pitch_err:+.3} ({pitch_rate:+.3}/s) fwd {forward:+.0} loc {:?}",
+                started.elapsed().as_secs_f64(),
+                st.location
+            );
+        }
+        last = format!(
+            "dist {dist:.3e} m (extent {extent:.3e}), closing {closing:.3e} m/s, accel {accel_est:.3e}, yaw {yaw_err:.3} rad, pitch {pitch_err:.3} rad, loc {:?}",
+            st.location
+        );
+        assert!(started.elapsed() < deadline, "fly: never arrived — {last}");
+        std::thread::sleep(CONTROL_PERIOD);
+    }
+}
+
+/// Wrap an angle difference into (−π, π].
+fn wrap_pi(a: f64) -> f64 {
+    let two_pi = std::f64::consts::TAU;
+    let mut x = (a + std::f64::consts::PI) % two_pi;
+    if x < 0.0 {
+        x += two_pi;
+    }
+    x - std::f64::consts::PI
+}

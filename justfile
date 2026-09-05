@@ -94,8 +94,8 @@ lint-combos:
 # workspace run compiles it to NOTHING — and until now no recipe named it either, meaning
 # the WalkTo/LookAt closed loops were never executed by any gate at all.
 client-load:
-    cargo test -p vd-bins --features dev-control --test client_load
-    cargo test -p vd-bins --features dev-control --test dev_control_nav
+    cargo test --release -p vd-bins --features dev-control --test client_load
+    cargo test --release -p vd-bins --features dev-control --test dev_control_nav
 
 # D-6 D-delta: the orchestrator durability crash gates. `orchestrator_crash` is the SIGKILL-mid-fsync proof
 # (a real kill-9 while a directory grant sits submitted-but-pre-fsync loses <=1 batch + recovers
@@ -215,7 +215,7 @@ window-compose-load:
 # live (instant_mismatch == 0). It also asserts the four deleted scenery lanes stay SILENT in a real
 # cluster. Same port band + serialization posture as rlm-demand-login.
 window-parity:
-    cargo test -p vd-bins --features dev-control --test window_shadow_parity -- --test-threads=1 --nocapture
+    cargo test --release -p vd-bins --features dev-control --test window_shadow_parity -- --test-threads=1 --nocapture
 
 fmt:
     cargo fmt --all
@@ -231,7 +231,7 @@ fmt-check:
 # Bevy). REQUIRES A WORKING GPU ADAPTER (the dev Metal GPU) — it is a LOCAL gate (no CI yet,
 # no software fallback). Steer the adapter with WGPU_BACKENDS / WGPU_POWER_PREF if needed.
 render-smoke:
-    cargo test -p vd-bins --features dev-control,render --test render_smoke -- --nocapture
+    cargo test --release -p vd-bins --features dev-control,render --test render_smoke -- --nocapture
 
 # G-RENDER-BOXES-SMOKE (THE world's realm-box pixel proof, re-based Slice C1 §2.11): bring up the
 # cluster, launch a HEADLESS `client --capture` drawing ONLY the COMPOSED STREAM (no --realm-boxes
@@ -242,7 +242,7 @@ render-smoke:
 # magenta. Same GPU-required, LOCAL-gate preconditions as render-smoke (no CI, no software
 # fallback; steer with WGPU_BACKENDS).
 render-boxes-smoke:
-    cargo test -p vd-bins --features dev-control,render --test render_boxes_smoke -- --nocapture
+    cargo test --release -p vd-bins --features dev-control,render --test render_boxes_smoke -- --nocapture
 
 # G-RENDER-CROSSING-SMOKE (the crossing pixel proof on THE world, re-based Slice C1 §2.11): bring
 # up the DUAL cluster, launch a HEADLESS `client --capture` drawing ONLY the COMPOSED STREAM, fly
@@ -257,7 +257,7 @@ render-boxes-smoke:
 # the client's own reported drawn boxes + STREAMED extents. Zero magenta on all three. Same
 # GPU-required, LOCAL-gate preconditions as render-smoke.
 render-crossing-smoke:
-    cargo test -p vd-bins --features dev-control,render --test render_crossing_smoke -- --nocapture
+    cargo test --release -p vd-bins --features dev-control,render --test render_crossing_smoke -- --nocapture
 
 # G-WARP-PIXELS + G-HANDOVER (window_lane.md §2.8/§4 Slice D — THE WARP ACCEPTANCE): one DEMAND
 # cluster (no shard pre-booked), one headless capture client in the PILOT VIEW (`--capture-pilot`),
@@ -275,7 +275,7 @@ render-crossing-smoke:
 # derivation before any process runs, so a world-numbers change fails in milliseconds.
 # Same GPU-required, LOCAL-gate preconditions as render-smoke.
 warp-pixels:
-    cargo test -p vd-bins --features dev-control,render --test warp_pixels -- --nocapture --test-threads=1
+    cargo test --release -p vd-bins --features dev-control,render --test warp_pixels -- --nocapture --test-threads=1
 
 # G-TWO-SHIPS (owner-ordered 2026-08-16, window_lane.md §5 RULINGS): TWO real capture clients on one
 # demand cluster, standing in two realms of DIFFERENT DEPTH (the star System and one of its
@@ -289,7 +289,7 @@ warp-pixels:
 # through the commit with every body inside its own motion allowance; (e) occupant figures through
 # WINDOWS are absent, and nobody standing inside a realm is shown to an observer outside it.
 two-ships:
-    cargo test -p vd-bins --features dev-control,render --test two_ships -- --nocapture --test-threads=1
+    cargo test --release -p vd-bins --features dev-control,render --test two_ships -- --nocapture --test-threads=1
 
 # THE WORLD IS SEEN FROM INSIDE ANY REALM (owner ruling 2026-09-02 R9 step 1): one DEMAND cluster per
 # subject, one real headless GPU client, the SAME body on a player-built hull (written by the shipyard's
@@ -298,7 +298,7 @@ two-ships:
 # the held count), the picture names a realm the subject does not parent, and the stars do not vanish
 # across the crossing. RED on 2026-09-02 by design: it is the measurement the reach slices turn green.
 world-from-inside:
-    cargo test -p vd-bins --features dev-control,render --test world_from_inside -- --nocapture --test-threads=1
+    cargo test --release -p vd-bins --features dev-control,render --test world_from_inside -- --nocapture --test-threads=1
 
 # THE TRUE-SCALE LOOK GATE (celestial_taxonomy_design §9 T2/T3, carrying look_horizon.md §6 slice
 # 5's G-NOTHING-OWED + G-IDENTICAL forward): one DEMAND cluster booted onto THE world PLUS the
@@ -323,7 +323,7 @@ world-from-inside:
 # and budget derivation before any process runs.
 # Same GPU-required, LOCAL-gate preconditions as render-smoke.
 look-pixels:
-    cargo test -p vd-bins --features dev-control,render --test look_pixels -- --nocapture --test-threads=1
+    cargo test --release -p vd-bins --features dev-control,render --test look_pixels -- --nocapture --test-threads=1
 
 # NODE-PER-REALM WALK GATE (task #149) — the HEADLESS process-tier chain proof on THE world. Brings up
 # the CHAIN cluster (orchestrator + gateway + FOUR realm-shards derived through world_roster: the home
@@ -336,7 +336,7 @@ look-pixels:
 # unmeasured for this chain until a green history accumulates). In-test deadline 300 s (real flight
 # distances; was 120 s for the retired inert walk). No GPU: this is the CI walk gate.
 node-per-realm-walk:
-    cargo test -p vd-bins --features dev-control --test node_per_realm_walk -- --test-threads=1 --nocapture
+    cargo test --release -p vd-bins --features dev-control --test node_per_realm_walk -- --test-threads=1 --nocapture
 
 # RLM 5c-2b: the real-process ProcLaunchBackend gate — forks a real vd-shard (Planet 7 + Galaxy), asserts
 # it boots + echoes its incarnation cookie on /whoami + teardown reaps it (pid gone, no zombie). Tier-B
@@ -363,7 +363,7 @@ rlm-kill9:
 # `--features dev-control`. `--test-threads=1` + a dedicated RLM port band (45000+) keep the demand-spawned
 # shards' deterministic ports off rlm_kill9's band.
 rlm-demand-login:
-    cargo test -p vd-bins --features dev-control --test rlm_demand_login -- --test-threads=1 --nocapture
+    cargo test --release -p vd-bins --features dev-control --test rlm_demand_login -- --test-threads=1 --nocapture
 
 # (Stage-C: the orbit-slowdown knob is DELETED — SL5. The whole demand suite now flies at full
 # orbit speed through the ONE shared rendezvous, so the separate flight-speed recipe is retired:
@@ -379,7 +379,7 @@ rlm-demand-login:
 # at (the defect stays real, so the gate is never vacuous), beside the render frame's own residual
 # in pixels. Seconds to run; it would have caught the parked gates' failure without a flight.
 render-scale:
-    cargo test -p vd-bins --features dev-control,render --test render_scale -- --nocapture
+    cargo test --release -p vd-bins --features dev-control,render --test render_scale -- --nocapture
 
 # ★ G-ACCEPTANCE-FLIGHT (the S7 slice): THE FLIGHT THAT PROVES THE WHOLE ARC. One demand cluster,
 # one headless GPU client, five legs on THE world — stand off the home system's innermost world at
@@ -393,7 +393,7 @@ render-scale:
 # re-derives. Measured leg times are printed against the flight table's closed form.
 # Same GPU-required, LOCAL-gate preconditions as render-smoke.
 acceptance-flight:
-    cargo test -p vd-bins --features dev-control,render --test acceptance_flight -- --nocapture --test-threads=1
+    cargo test --release -p vd-bins --features dev-control,render --test acceptance_flight -- --nocapture --test-threads=1
 
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to

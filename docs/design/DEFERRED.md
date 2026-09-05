@@ -5339,6 +5339,48 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   3rd-person view I think for a second I saw first person view, but I might be mistaken"*).
   UNVERIFIED: no instrument records the camera mode; if it recurs, add `camera_mode` to the
   client's dev state and poll it through a hand-over.
+  ★ A VANISHED CLIENT BLOCKS THE NEXT LOGIN (2026-09-05, seen three times today): after a client is
+  killed without a Close, the gateway keeps its session, sheds reliable frames to the unreachable
+  peer (*"OutboundBox staging over cap: a RELIABLE frame was SHED"*) and a new login for the same
+  node/account sits in `awaiting_welcome` / "authenticating" until the cluster is restarted. The
+  bounded bootstrap TTL closes a client whose HOME never comes; nothing closes a client whose PEER
+  never answers. OWED (foundation): the session's lease must end when the peer's lane is dead for
+  a derived bound, and a fresh login for the same identity must replace the dead session, not wait
+  behind it. Example: a pilot's window crashes; they start the client again and are in within the
+  usual login time, not after an operator restart.
+  ★ FOUNDATION ITEMS 2 AND 3 (2026-09-05, owner: *"do 1 to 4"*). (2) `look_pixels`: sampled with
+  symbols — every sample sat in its own `oracle()`, which took EVERY parent in the forest (233,220
+  star systems) and generated the world once per parent for its movers. The fixture now reads the
+  planted neighbourhood (`realm_regions_for_config`, what the shard boots with) and the oracle
+  rosters the HOME SUBTREE only. MEASURED: the derived-budget test went from unmeasurable (stopped
+  at 31 min debug / 20 min release) to 8.4 s in release, PASS. (3) Every `just` process gate that
+  spawns a cluster now runs `cargo test --release` (14 targets): the profile the owner ruled flights
+  run in, and the one whose boots fit the gates' own deadlines.
+  ★ ITEM 1, THE GATES FLY HULLS — IN PROGRESS. `flight::berth_test_hull` (the same `vd-build-ship`
+  tool the dev cluster uses, at a rating the test chooses), `board_hull` (a 2 % creep: at the dev
+  cluster's 1 km/s foot speed a full-speed walk passes THROUGH a hull inside one tick and a
+  closed-loop walk-to overshoots and runs away under the walk ramp — measured 115 km, then 9.6 km
+  braked), and `fly_hull_to` (body-frame guidance off the drawn box's centre: aim by a
+  stopping-angle controller on the hull's turn rating, push, brake on the measured acceleration).
+  Probed on the dev cluster through `examples/hull_flight_probe`. FOUND ON THE WAY: a hull rated at
+  9e12 m/s² takes 2 % of stick as 1.8e11 m/s² — the boarding creep's residual stick shot it to
+  warp before the stop arrived; the test hull is berthed at 1e8 m/s² / 0.3 rad/s².
+  MEASURED ON THE PROBE (six flights, 2026-09-05 evening): boarding by creep is reliable; the
+  fly controller is NOT. (a) The hull's SPIN NEVER DAMPS — there is no angular drag in space and
+  no attitude hold, so every turn command ever given accumulates; the berthed hull was measured
+  turning ~1 rad/s at rest after a probe, and a 10 Hz test-process loop with 100–300 ms of pose lag
+  cannot stabilise a double integrator at that rate (the aim oscillated between ±1 and ±2.5 rad
+  for minutes on every gain set tried). A human pilot in the window damps it by eye. (b) The drawn
+  boxes' centres in the hull's frame ROTATE with that spin (the same fact seen from the client),
+  so a body-frame bearing is exact but useless at that rate. (c) The pilot's own row inside the
+  hull did not move on a strafe or a push in the manual test while the hull did turn — UNRESOLVED
+  (the dev state's own row may be the stale entity feed; not chased). DECISION: the closed loop
+  belongs on the CLIENT at tick rate, next to `walk_to`/`look_at` (`client-harness::nav`): a
+  `FlyTo` dev-control request that reads the render snapshot's own orientation and the target
+  box at 50 Hz with no round trip — the shape every other nav helper already has. OWED with item 1.
+  ALSO A GAME QUESTION, for the owner: a hull's attitude hold. The 2026-08-27 ruling names *"a
+  ship's own safety block slows it (and a player may switch that off)"* — the same block should
+  null the spin when the stick is released; today a released stick leaves the hull turning forever.
 
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:
