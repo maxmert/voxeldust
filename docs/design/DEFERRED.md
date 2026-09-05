@@ -5196,6 +5196,19 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   copies its whole static row vector once (milliseconds, once per hand-over through the galaxy);
   a per-row edit of the shared vector is the cheaper shape if that ever measures. VERIFY IN FLIGHT:
   no row at the berth's negative after the hand-over out.
+  ★ THE TWENTY-FIFTH FLIGHT (2026-09-05, owner: *"It's smooth now"*, committed 60c179a): both
+  hand-overs held two ticks with the row moving at the true rate; no standstill, no berth row, no
+  stutter. MEASURED WITH IT: the galaxy shard's slowest tick was 60.0 ms (mean 0.32 ms) in the pace
+  window right after the hull's hand-over INTO the galaxy — the static-layer copy of 279,380 rows at
+  adoption, as the cost note above predicted (likely, not proven: unmeasured before the rebuild).
+  FIXED (item 1 of the owner's list): A SHIP IS NEVER A STATIC ROW — a `Ship` child is a mover for
+  the placement layer whether or not it moves yet; its row is the overlay's (`placement_row`: the
+  driven state, else the authored centre), so adopting or releasing a hull touches `movers_of` only
+  and copies nothing. A planet's adoption still rebuilds its parent's layer. Pinned by
+  `a_ships_adoption_or_release_never_copies_the_parents_static_layer` (the layer's `Arc` identity
+  unchanged across a ship's adopt + release; changed by a planet's). VERIFY: the galaxy's pace window
+  after a hand-over reads no tick over 20 ms. Item 2: the flight instruments moved into the repo —
+  `scripts/flight/{trace_star.py,star_poll.sh,flight_counters.sh}`.
 
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:

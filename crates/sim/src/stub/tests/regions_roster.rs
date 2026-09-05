@@ -115,6 +115,57 @@ fn a_released_static_child_leaves_its_parents_book_and_an_adopted_one_joins_it()
     assert!(regions.author_book(OWN_REALM, 50.0, at).of(same).is_none());
 }
 
+/// ★ 2026-09-05: A SHIP IS NEVER A STATIC ROW. Adopting or releasing a hull leaves the parent's
+/// shared static vector untouched (the galaxy's 279,380 rows were copied once per hand-over — a
+/// 60 ms tick), yet the hull is in the book through the overlay from the tick it arrives, at its
+/// authored centre, and gone the tick it leaves. A planet's adoption still rebuilds the layer.
+#[test]
+fn a_ships_adoption_or_release_never_copies_the_parents_static_layer() {
+    let mut regions =
+        RealmRegions::new(vec![root_region(), own_region()]).with_own_realm(OWN_REALM);
+    regions.adopt_child(live(STATIC_FAR, DVec3::new(30_000.0, 0.0, 0.0), 100.0));
+    let at = UniverseTick(7);
+    let layer_before = regions.static_rows_of(OWN_REALM).expect("a layer").clone();
+    let hull = RealmId::Ship(vd_core::EntityId::pack(
+        vd_core::entity_kind::EntityKind::Ship,
+        1,
+        1,
+        0,
+    ));
+    regions.adopt_child(live(hull, DVec3::new(0.0, 500.0, 0.0), 100.0));
+    let rostered = regions.direct_child(OWN_REALM, hull).expect("rostered");
+    let (frame, centre) = (rostered.frame, rostered.center.in_parents_frame());
+    let book = regions.author_book(OWN_REALM, 50.0, at);
+    let row = book.of(frame).expect("the hull is in the book from the tick it arrives");
+    assert_eq!(
+        LatticePos::at(row.origin_cell, row.origin),
+        centre,
+        "at its authored centre"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&layer_before, regions.static_rows_of(OWN_REALM).expect("layer")),
+        "the static layer was not copied by a ship's adoption"
+    );
+    assert!(
+        regions
+            .moving_children_of(OWN_REALM, &DrivenChildren::default())
+            .contains(&hull),
+        "a ship is a mover for the placement layer"
+    );
+    regions.release_child(hull);
+    assert!(regions.author_book(OWN_REALM, 50.0, at).of(frame).is_none());
+    assert!(
+        std::sync::Arc::ptr_eq(&layer_before, regions.static_rows_of(OWN_REALM).expect("layer")),
+        "…nor by its release"
+    );
+    // A planet's adoption DOES rebuild the layer (it is a static row).
+    regions.adopt_child(live(STATIC_SAME, DVec3::new(0.0, 30_000.0, 0.0), 100.0));
+    assert!(
+        !std::sync::Arc::ptr_eq(&layer_before, regions.static_rows_of(OWN_REALM).expect("layer")),
+        "a static child's adoption rebuilds its parent's layer"
+    );
+}
+
 #[test]
 fn releasing_a_row_that_is_not_the_last_re_points_the_moved_row_and_its_movers() {
     // Three direct children: a static, a MOVER, a static. Releasing the first moves the last into

@@ -682,8 +682,12 @@ impl RealmRegions {
         let r = &self.regions[ix];
         if self.moving.contains_key(&realm) {
             self.unindexed.push(realm); // a mover is never indexed: always asked
-            // The mover list the book's overlay and the moving set read — `release_child` already
-            // keeps it across a swap-remove, so an adopted mover belongs in it too.
+        }
+        // The mover list the book's overlay and the moving set read — `release_child` already
+        // keeps it across a swap-remove, so an adopted mover belongs in it too. A SHIP is a mover
+        // for the placement layer whether or not it moves yet (2026-09-05): its row is the
+        // overlay's, never a static row, so adopting or releasing it copies nothing.
+        if self.moving.contains_key(&realm) | matches!(realm, RealmId::Ship(_)) {
             self.movers_of.entry(own).or_default().push(ix);
         }
         if matches!(realm, RealmId::Ship(_)) {
@@ -727,8 +731,11 @@ impl RealmRegions {
         }
         // The reach (2026-09-04): the newcomer's `distance + reach` joins this realm's own fold.
         self.insert_reach_terms(own, ix);
-        // The newcomer joins its parent's static layer the same tick (2026-09-05).
-        self.rebuild_static_rows_for(own);
+        // The newcomer joins its parent's static layer the same tick (2026-09-05) — unless it is
+        // a ship, whose row is the overlay's: nothing to copy.
+        if !matches!(realm, RealmId::Ship(_)) {
+            self.rebuild_static_rows_for(own);
+        }
     }
 
     /// ★ THIS REALM MOVED HOUSE (the ruler switch, slice 3): its parent told it a new lineage. The own
@@ -825,10 +832,23 @@ impl RealmRegions {
         } else if let Some(movers) = parent.and_then(|p| self.movers_of.get_mut(&p)) {
             movers.retain(|i| *i != ix);
         }
-        // The released child leaves its parent's static layer the same tick (2026-09-05).
-        if let Some(p) = parent {
+        // The released child leaves its parent's static layer the same tick (2026-09-05) — a ship
+        // was never in it (its row is the overlay's), so its release copies nothing.
+        if let Some(p) = parent
+            && !matches!(realm, RealmId::Ship(_))
+        {
             self.rebuild_static_rows_for(p);
         }
+    }
+
+    /// The shared static layer of one parent, as the book holds it (a test reads its identity to
+    /// prove a ship's adoption or release copies nothing).
+    #[cfg(test)]
+    pub(crate) fn static_rows_of(
+        &self,
+        parent: RealmId,
+    ) -> Option<&std::sync::Arc<Vec<(FrameRef, FramePlacement)>>> {
+        self.static_rows.get(&parent)
     }
 
     /// ★ ONE PARENT'S STATIC LAYER, REBUILT (2026-09-05, the twenty-fourth flight: the star jumped
@@ -844,7 +864,7 @@ impl RealmRegions {
         let mut movers: Vec<usize> = Vec::new();
         for &ix in self.children_of.get(&parent).into_iter().flatten() {
             let r = &self.regions[ix];
-            if self.moving.contains_key(&r.realm) {
+            if self.moving.contains_key(&r.realm) | matches!(r.realm, RealmId::Ship(_)) {
                 movers.push(ix);
                 continue;
             }
@@ -929,7 +949,10 @@ impl RealmRegions {
             let mut movers: Vec<usize> = Vec::new();
             for &ix in ixs {
                 let r = &self.regions[ix];
-                if self.moving.contains_key(&r.realm) {
+                // ★ A SHIP IS NEVER A STATIC ROW (2026-09-05): it is driven by nature, so its row
+                // is the overlay's, and its adoption or release never copies the static vector —
+                // the galaxy's 279,380 rows were copied once per hand-over (a 60 ms tick).
+                if self.moving.contains_key(&r.realm) | matches!(r.realm, RealmId::Ship(_)) {
                     movers.push(ix);
                     continue;
                 }
