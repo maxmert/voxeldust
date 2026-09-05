@@ -592,13 +592,20 @@ pub(crate) fn compose_scenes_pass(
             let prev_t = session.shadow.last_t;
             let covers_lineage =
                 !session.lineage.is_empty() & (chain.hops.len() == session.lineage.len());
-            let report =
-                session
-                    .shadow
-                    .advance_covering(origin, &authors, fold, &tuning, covers_lineage);
+            let hop_pending = window::hop_pending(&session.lineage, chain.hops.len(), &catalog);
+            let report = session.shadow.advance_covering(
+                origin,
+                &authors,
+                fold,
+                &tuning,
+                covers_lineage,
+                hop_pending,
+            );
             stats.window_compose_hold_ticks += report.holds;
             stats.window_hop_dead += report.dead_hops;
             stats.window_t_monotone_stalled += u64::from(report.stalled);
+            stats.window_origin_swap_deferred += u64::from(report.swap_deferred);
+            stats.window_origin_swap_forced += u64::from(report.swap_forced);
             // ---- THE LIVE EMISSIONS (Slice C1 — §2.4/§2.7) ----------------------------------
             let epoch = session.shadow.origin_epoch;
             // Did THIS pass advance the fold tick? ONE option, computed once (HR5: the two

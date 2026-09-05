@@ -535,6 +535,28 @@ pub struct ChainHop {
     pub author: RealmId,
 }
 
+/// ★ THE WALK-ABOARD BLANK's guard (2026-09-04): is the FIRST lineage hop the chain does not
+/// cover an OPEN, UNCONFIRMED window? The lineage runs root→leaf, the chain's hops leaf→root, so
+/// `chain_hops` hops cover the lineage's last `chain_hops` realms; the next realm up is the
+/// child whose `Child(child)` window must confirm before the chain can grow. `true` means that
+/// window is in the catalog and not confirmed yet — the round trip is in flight and the swap is
+/// worth deferring. `false` when the chain covers the lineage, when no such window exists (no
+/// head resolved, a refused window) or when it is already confirmed (the chain grows this tick).
+#[must_use]
+pub fn hop_pending(lineage: &[RealmId], chain_hops: usize, catalog: &[CatalogRow]) -> bool {
+    // Zero hops: the origin's OWN window is unconfirmed — the lane withholds before any swap, so
+    // there is no hop to wait for here. Hops ≥ the lineage: covered (or longer) — nothing above.
+    if (chain_hops == 0) | (chain_hops >= lineage.len()) {
+        return false;
+    }
+    // `chain_hops` hops cover the lineage's last `chain_hops` realms; the highest covered realm
+    // is the child whose `Child` window (authored by the realm above it) must confirm next.
+    let next_child = lineage[lineage.len() - chain_hops];
+    catalog
+        .iter()
+        .any(|c| (c.scope == WindowScope::Child(next_child)) & !c.confirmed)
+}
+
 /// A session's derived chain (§2.6.2): leaf→root, cycle-safe.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Chain {
@@ -1192,7 +1214,14 @@ impl LookShelf {
                     carried += 1;
                 }
             } else {
-                self.held.insert(row.realm, (row.bag.clone(), t));
+                // Refresh the stamp; copy the bytes only when the look CHANGED (per tick, per
+                // row — the one per-tick cost this shelf has, kept to a compare).
+                match self.held.get_mut(&row.realm) {
+                    Some((bag, seen)) if *bag == row.bag => *seen = t,
+                    _ => {
+                        self.held.insert(row.realm, (row.bag.clone(), t));
+                    }
+                }
             }
         }
         carried
@@ -1264,6 +1293,11 @@ pub struct AdvanceReport {
     pub dead_hops: u64,
     /// A would-be T rewind froze emission (`window_t_monotone_stalled`).
     pub stalled: bool,
+    /// An origin swap DEFERRED this tick because the new chain does not cover the lineage yet
+    /// (`window_origin_swap_deferred`) — the old picture stays.
+    pub swap_deferred: bool,
+    /// An origin swap FORCED after a whole hold of deferral (`window_origin_swap_forced`).
+    pub swap_forced: bool,
 }
 
 /// Per-session shadow scene: the chain identity, the origin marker (§2.7's epoch mechanics —
@@ -1287,6 +1321,10 @@ pub struct ShadowScene {
     /// Did the chain cover the session's whole lineage when last derived? (Diagnostic: a chain
     /// that does not yet reach the root is composing a partial sky, and the composer says so.)
     pub chain_covers_lineage: bool,
+    /// ★ THE WALK-ABOARD BLANK (2026-09-04, the eighteenth flight): how many ticks an origin swap
+    /// has been deferred because the new chain does not cover the lineage yet. Bounded by the hold
+    /// TTL, then the swap is forced; reset at every swap.
+    pub swap_deferred_ticks: u64,
 }
 
 impl ShadowScene {
@@ -1299,7 +1337,7 @@ impl ShadowScene {
         fold: Option<Composed>,
         tuning: &WindowTuning,
     ) -> AdvanceReport {
-        self.advance_covering(origin, authors, fold, tuning, true)
+        self.advance_covering(origin, authors, fold, tuning, true, false)
     }
 
     /// [`advance`](Self::advance) told whether the chain COVERS the session's lineage. ★ THE
@@ -1319,9 +1357,36 @@ impl ShadowScene {
         fold: Option<Composed>,
         tuning: &WindowTuning,
         covers_lineage: bool,
+        hop_pending: bool,
     ) -> AdvanceReport {
         let mut report = AdvanceReport::default();
         if self.origin != Some(origin) {
+            // ★ THE WALK-ABOARD BLANK (2026-09-04, the eighteenth flight, measured at the client:
+            // 12 boxes → 1 → 12 across one 0.17 s sample the second the pilot stepped aboard the
+            // hull). A player's crossing changes the ORIGIN, and the new chain's windows open only
+            // now; the origin's own window lands first and the parent hop a few ticks later. A
+            // swap onto that partial chain ships a level with the hull alone, the client forgets
+            // every track of the old origin (they are positions in another frame), and the star,
+            // the planets and the galaxy blank until the hop lands. So while an OLD picture exists
+            // and the new chain does not cover the lineage, the swap is DEFERRED: the old scene
+            // stays on the screen at its last composed poses, exactly as a held stratum does, for
+            // at most one hold (the same 2-beats-+-1 window); then the swap is forced, counted.
+            // The login has no old picture and swaps at once. Example: the pilot stands in
+            // System 7 and walks through the hull's door; the star stays drawn while the hull's
+            // window on System 7 confirms; the tick the chain is whole the picture swaps to the
+            // hull's frame at the same universe tick (§2.7's same-T swap), and nothing blinks.
+            // Only while the missing hop's window is OPEN AND UNCONFIRMED (`hop_pending`): a
+            // lineage the windows can never cover (no head resolved, a refused window) swaps at
+            // once, as before — nothing is coming that would be worth a wait.
+            if self.origin.is_some() && !covers_lineage && hop_pending {
+                if self.swap_deferred_ticks < tuning.hold_ttl_ticks {
+                    self.swap_deferred_ticks += 1;
+                    report.swap_deferred = true;
+                    return report;
+                }
+                report.swap_forced = true;
+            }
+            self.swap_deferred_ticks = 0;
             // A CROSSING: the picture's frame changed, so nothing previously composed is
             // expressible any more — reset whole (§2.7: the epoch bump is the client's
             // atomic-swap signal).
@@ -3446,6 +3511,121 @@ mod tests {
             vec![1],
             "interior-admitted: the subject's own picture draws"
         );
+    }
+
+    /// ★ THE WALK-ABOARD BLANK (2026-09-04): an origin change whose new chain does not cover the
+    /// lineage keeps the OLD picture (no epoch bump, ring and held intact, counted deferred) for
+    /// at most one hold, then swaps forced; the tick the chain covers the lineage it swaps at
+    /// once; the login (no old picture) never waits.
+    #[test]
+    fn an_origin_swap_waits_for_the_chain_to_cover_the_lineage_for_at_most_one_hold() {
+        let tuning = tuning(); // hold TTL 21
+        let (authors, leaf_level, parent_level) = two_level_fixture();
+        let fold = compose(
+            RealmId::System(7),
+            sys(),
+            T,
+            &authors,
+            &[&leaf_level, &parent_level],
+            2,
+            &[],
+        );
+        // The login: no old picture, a partial chain with its hop in flight — swaps at once.
+        let mut scene = ShadowScene::default();
+        let report = scene.advance_covering(RealmId::System(7), &authors, Some(fold), &tuning, false, true);
+        assert!(report.epoch_bumped & !report.swap_deferred & !report.swap_forced);
+        let epoch = scene.origin_epoch;
+        let drawn: Vec<RealmId> = scene.drawn_rows().map(|r| r.realm).collect();
+        assert_eq!(drawn.len(), 3, "the old picture: the planet, the galaxy, the sibling");
+        // The pilot lands on Planet 7: the planet's own window is fresh, its hop is not — DEFER.
+        let landing = RealmId::Planet(7);
+        let planet_fold = |t: UniverseTick| {
+            let own = level(t, None, Vec::new());
+            compose(landing, planet(), t, &[landing], &[&own], 1, &[])
+        };
+        for i in 1..=tuning.hold_ttl_ticks {
+            let t = UniverseTick(T.0 + i);
+            let report =
+                scene.advance_covering(landing, &[landing], Some(planet_fold(t)), &tuning, false, true);
+            assert!(report.swap_deferred & !report.epoch_bumped & !report.swap_forced);
+            assert_eq!(scene.origin, Some(RealmId::System(7)), "the old origin stays");
+            assert_eq!(scene.origin_epoch, epoch);
+            assert_eq!(scene.swap_deferred_ticks, i);
+            assert_eq!(
+                scene.drawn_rows().map(|r| r.realm).collect::<Vec<_>>(),
+                drawn,
+                "the old picture stays drawn at its last poses"
+            );
+        }
+        // The chain covers the lineage: the swap lands, the deferral resets.
+        let t = UniverseTick(T.0 + tuning.hold_ttl_ticks + 1);
+        let report = scene.advance_covering(landing, &[landing], Some(planet_fold(t)), &tuning, true, false);
+        assert!(report.epoch_bumped & !report.swap_deferred & !report.swap_forced);
+        assert_eq!(scene.origin, Some(landing));
+        assert_eq!(scene.origin_epoch, epoch + 1);
+        assert_eq!(scene.swap_deferred_ticks, 0);
+        // The forced path: back to System 7 with a chain that never covers — one hold of
+        // deferral, then the swap is FORCED and counted.
+        let mut forced = None;
+        for i in 1..=(tuning.hold_ttl_ticks + 1) {
+            let t = UniverseTick(t.0 + i);
+            let own = level(t, None, Vec::new());
+            let fold = compose(RealmId::System(7), sys(), t, &[RealmId::System(7)], &[&own], 1, &[]);
+            let report = scene.advance_covering(
+                RealmId::System(7),
+                &[RealmId::System(7)],
+                Some(fold),
+                &tuning,
+                false,
+                true,
+            );
+            if report.swap_forced {
+                forced = Some(i);
+                assert!(report.epoch_bumped & !report.swap_deferred);
+                break;
+            }
+            assert!(report.swap_deferred & !report.epoch_bumped);
+        }
+        assert_eq!(forced, Some(tuning.hold_ttl_ticks + 1), "forced after exactly one hold");
+        assert_eq!(scene.origin, Some(RealmId::System(7)));
+        assert_eq!(scene.origin_epoch, epoch + 2);
+        assert_eq!(scene.swap_deferred_ticks, 0);
+        // No hop in flight (nothing is coming): a partial chain swaps at once, as before.
+        let t = UniverseTick(t.0 + 40);
+        let report = scene.advance_covering(landing, &[landing], Some(planet_fold(t)), &tuning, false, false);
+        assert!(report.epoch_bumped & !report.swap_deferred & !report.swap_forced);
+        assert_eq!(scene.origin, Some(landing));
+    }
+
+    /// The guard's arithmetic: the lineage root→leaf, the chain leaf→root; the first uncovered
+    /// realm's `Child` window decides, and only an open UNCONFIRMED one is pending.
+    #[test]
+    fn hop_pending_reads_the_first_uncovered_lineage_hops_window() {
+        let lineage = [GALAXY, RealmId::System(7), RealmId::Planet(7)];
+        let row = |scope: WindowScope, confirmed: bool| CatalogRow {
+            window: WindowId(1),
+            scope,
+            author: GALAXY,
+            confirmed,
+        };
+        // One hop covered (the planet's own window): the next window up is Child(Planet 7),
+        // authored by System 7.
+        let up = WindowScope::Child(RealmId::Planet(7));
+        assert!(hop_pending(&lineage, 1, &[row(up, false)]));
+        assert!(!hop_pending(&lineage, 1, &[row(up, true)]), "confirmed: the chain grows now");
+        assert!(!hop_pending(&lineage, 1, &[]), "no window: nothing is coming");
+        assert!(
+            !hop_pending(&lineage, 1, &[row(WindowScope::Child(RealmId::System(7)), false)]),
+            "the hop above the next one is not this hop"
+        );
+        // Two hops covered (planet + system): the next window up is Child(System 7) on the galaxy.
+        let top = WindowScope::Child(RealmId::System(7));
+        assert!(hop_pending(&lineage, 2, &[row(top, false)]));
+        // Zero hops: the origin's own window is what is missing — never a hop wait.
+        assert!(!hop_pending(&lineage, 0, &[row(up, false)]));
+        // The chain covers the lineage (or is longer): never pending.
+        assert!(!hop_pending(&lineage, 3, &[row(top, false)]));
+        assert!(!hop_pending(&lineage, 4, &[row(top, false)]));
     }
 
     /// THE LOOK SHELF (2026-09-04): a look emitted at T is carried into a later level whose

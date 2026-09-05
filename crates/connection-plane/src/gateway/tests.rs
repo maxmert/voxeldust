@@ -4832,29 +4832,22 @@ fn capstone_two_sub_overlap_routes_both_frames_and_repoints_the_avatar_to_the_de
             ServerControlMsg::OwnEntity {
                 entity: EntityId(77),
             },
-            // THE CROSSING SWAP LEVEL (§2.7), ordered AFTER AuthorityChanged on this same
-            // reliable stream: the composer saw the standing realm flip System(7)→System(8)
-            // and bumped the epoch EXACTLY once (login was 1, this crossing makes 2). No
-            // window frames were fed in this rig, so the level carries only the new origin's
-            // bagless row at the boot stamp — the swap SIGNAL, which is what is under test.
-            ServerControlMsg::RealmRegistry {
-                origin: RealmId::System(8),
-                origin_epoch: 2,
-                rows: vec![SceneRow {
-                    realm: RealmId::System(8),
-                    parent: None,
-                    pose: vd_core::pose::StampedPose::at_rest(
-                        FrameRef::SystemSpace { system_seed: 8 },
-                        DVec3::ZERO,
-                        UniverseTick(0),
-                    ),
-                    bag: Vec::new(),
-                }],
-            },
+            // ★ NO CROSSING SWAP LEVEL ON THIS TICK (2026-09-04, the walk-aboard blank): the
+            // composer saw the standing realm flip System(7)→System(8), but the lineage's next
+            // hop — the `Child(System 8)` window this tick opened on the old head — is in
+            // flight, so the origin swap is DEFERRED and the client keeps its old picture.
+            // Before, a swap level with the new origin's bagless row alone shipped here, and a
+            // real client blanked every track of the old origin for the hop's round trip.
         ],
-        "the dest sub opens (X1), authority re-points to SubId(1) (FORK 0a / A1), and the \
-         swap level follows the AuthorityChanged on the same reliable stream (§2.7)"
+        "the dest sub opens (X1), authority re-points to SubId(1) (FORK 0a / A1), and no swap \
+         level ships while the hop's window is in flight (the walk-aboard rule)"
     );
+    assert_eq!(
+        rig.stats().window_origin_swap_deferred,
+        1,
+        "the swap waited one tick for the hop's window, counted"
+    );
+    assert_eq!(rig.stats().window_origin_swap_forced, 0);
     // 1d.5a: the dest sub is OPEN but NO dest frame is delivered yet → the standing delivery
     // predicate is NOT satisfied → no premature DeliveredToObservers to the saga (anti-vacuous).
     assert!(
@@ -9474,6 +9467,18 @@ fn the_composer_folds_the_crossing_chain_at_one_tick_and_tears_down_to_nothing()
         1,
         "the one-level chain folded at 1000"
     );
+    // ★ THE WALK-ABOARD RULE (2026-09-04): the fold happened, but the origin swap WAITED — the
+    // parent's `Child(Planet 7)` window is open and unconfirmed, so a swap now would ship the
+    // planet alone and blank the old picture. The old origin stays, counted once on the ready
+    // tick (the planet's own window confirmed at once) and once here.
+    assert_eq!(rig.stats().window_origin_swap_deferred, 2);
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().by_session[&sid]
+            .shadow
+            .origin,
+        Some(RealmId::System(7)),
+        "the old picture stays on the screen while the hop is in flight"
+    );
 
     // ---- Tick B (T=1001): the FULL chain folds at ONE tick — the exact-cadence law — and
     // the two lawful sources for the same realm agree to the bit (§2.12's dedup bound).
@@ -9541,15 +9546,19 @@ fn the_composer_folds_the_crossing_chain_at_one_tick_and_tears_down_to_nothing()
     assert_eq!(stats.window_fold_divergence, 0);
     assert_eq!(stats.window_t_monotone_stalled, 0);
     assert_eq!(stats.window_chain_cycle, 0);
-    // The origin marker's epoch walked its three chain identities: [System(7)] at login,
-    // [Planet(7)] the tick the origin flipped, [Planet(7), System(7)] when the hop
-    // confirmed (§2.7's epoch mechanics — the client swap is Slice C1).
+    // The origin marker's epoch walked TWO chain identities: [System(7)] at login, then
+    // [Planet(7), System(7)] the tick the hop confirmed — the one-level [Planet(7)] identity
+    // never became an epoch, because the swap waited for the hop (the walk-aboard rule,
+    // 2026-09-04) and landed whole at ONE tick (§2.7's same-T mechanics — the client swap is
+    // Slice C1). Nothing was forced: the hop came within the hold.
     assert_eq!(
         rig.world.resource::<GatewaySessions>().by_session[&sid]
             .shadow
             .origin_epoch,
-        3
+        2
     );
+    assert_eq!(stats.window_origin_swap_deferred, 2);
+    assert_eq!(stats.window_origin_swap_forced, 0);
 
     // ---- A quiet tick: the scene is already AT the common tick with an unchanged chain —
     // nothing re-folds (the §2.14 cost discipline).

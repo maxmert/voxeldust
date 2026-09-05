@@ -83,6 +83,8 @@ pub fn gateway_view(
         window_rotated_refused,
         window_far_rows,
         window_looks_carried,
+        window_origin_swap_deferred,
+        window_origin_swap_forced,
         window_alien_rows,
         window_hop_invalid,
         window_unresolved_standing,
@@ -167,6 +169,8 @@ pub fn gateway_view(
         window_rotated_refused,
         window_far_rows,
         window_looks_carried,
+        window_origin_swap_deferred,
+        window_origin_swap_forced,
         window_alien_rows,
         window_hop_invalid,
         window_unresolved_standing,
@@ -306,6 +310,8 @@ mod tests {
             window_rotated_refused: 51,
             window_far_rows: 52,
             window_looks_carried: 54,
+            window_origin_swap_deferred: 55,
+            window_origin_swap_forced: 56,
             window_alien_rows: 52,
             window_hop_invalid: 53,
             window_unresolved_standing: 54,
@@ -404,6 +410,8 @@ mod tests {
         assert_eq!(view.window_rotated_refused, 51);
         assert_eq!(view.window_far_rows, 52);
         assert_eq!(view.window_looks_carried, 54);
+        assert_eq!(view.window_origin_swap_deferred, 55);
+        assert_eq!(view.window_origin_swap_forced, 56);
         assert_eq!(view.window_alien_rows, 52);
         assert_eq!(view.window_hop_invalid, 53);
         assert_eq!(view.window_unresolved_standing, 54);

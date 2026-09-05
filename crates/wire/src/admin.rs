@@ -242,6 +242,10 @@ pub struct GatewayView {
     pub window_far_rows: u64,
     /// Looks carried from the session's shelf through a window churn (2026-09-04).
     pub window_looks_carried: u64,
+    /// Origin swaps deferred until the new chain covers the lineage (2026-09-04).
+    pub window_origin_swap_deferred: u64,
+    /// Origin swaps forced after one hold of deferral (2026-09-04).
+    pub window_origin_swap_forced: u64,
     /// Slice B — rows whose stated frame was not their level's own: alien, dropped.
     pub window_alien_rows: u64,
     /// Slice B — chain levels whose hop was absent/mismatched/rosterless: prefix capped there.
@@ -766,6 +770,8 @@ mod tests {
                 window_rotated_refused: 51,
                 window_far_rows: 52,
                 window_looks_carried: 54,
+                window_origin_swap_deferred: 55,
+                window_origin_swap_forced: 56,
                 window_alien_rows: 52,
                 window_hop_invalid: 53,
                 window_unresolved_standing: 54,

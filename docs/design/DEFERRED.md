@@ -5077,9 +5077,31 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   no decode error. RESIDUAL, not a hand-over: one 0.17 s sample with only the hull drawn at 21:37:41,
   the second the pilot WALKED ABOARD the hull — `window_unresolved_standing` rose 0 → 5 there, so
   the composed feed was withheld for five ticks while the session's standing realm switched from
-  System 7 to the hull (the login-race arm, §2.6.6). OWED: a standing switch between two realms the
-  session already holds should keep the last composed level, not withhold — same family as the
-  keep-alive restatement above.
+  System 7 to the hull (the login-race arm, §2.6.6). RE-READ (the same evening): the withheld ticks
+  were NOT the blank — the client keeps drawing through them. The blank was the SWAP: the new
+  origin's own window landed before the parent hop's window, the gateway swapped onto that partial
+  chain, the swap level named the hull alone, and the client forgot every track of the old origin
+  (positions in another frame) until the hop's first level came. BUILT: while an old picture
+  exists, the new chain does not cover the lineage, AND the first uncovered hop's window is open
+  and unconfirmed (`window::hop_pending`), the origin swap is DEFERRED — the old scene stays at
+  its last composed poses, exactly as a held stratum does, for at most `hold_ttl_ticks`; then it
+  is forced, counted (`window_origin_swap_deferred` per tick, `window_origin_swap_forced`). A
+  lineage no window can cover (no head, a refused window) swaps at once, as before, which is what
+  keeps the seven crossing fixtures green. Unit fixtures
+  `an_origin_swap_waits_for_the_chain_to_cover_the_lineage_for_at_most_one_hold` and
+  `hop_pending_reads_the_first_uncovered_lineage_hops_window`. The look shelf now copies a look
+  only when it changed. VERIFY IN FLIGHT: no one-box sample at the walk-aboard second, the
+  deferred counter non-zero, the forced counter zero. The lane proof is the two crossing fixtures
+  that had pinned the old behaviour: `the_composer_folds_the_crossing_chain_at_one_tick_and_tears_
+  down_to_nothing` (the swap waits two ticks for `Child(Planet 7)`, then lands whole at one tick:
+  two epochs, not three) and `capstone_two_sub_overlap_...` (no swap level on the ready tick).
+  ★ THE NINETEENTH FLIGHT (2026-09-04, owner: *"Works great"*). MEASURED at the client (10 Hz):
+  boarding at 21:58:20–25 ramped 5 → 9 → 12 boxes with NO one-box sample; `window_origin_swap_
+  deferred` 1, `window_origin_swap_forced` 0, `window_looks_carried` 24, three hand-overs, the star
+  drawn across each. RESIDUAL (sub-sample): at the 21:58:48 hand-over the box count dipped 12 → 9 → 12
+  inside one second — three rows whose parent is not the departed author (a relayed interior's
+  grandchildren) are not held by the departed stratum's filter. Owed: hold a departed author's
+  whole subtree (rows whose parent chain leads to the author), not only its direct rows.
 
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:

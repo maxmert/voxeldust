@@ -230,6 +230,11 @@ pub struct GatewayStats {
     /// Looks carried from the session's shelf into a level whose windows stated none yet — the
     /// hand-over churn (2026-09-04, the seventeenth flight).
     pub window_looks_carried: u64,
+    /// Origin swaps deferred because the new chain did not cover the lineage yet — the
+    /// walk-aboard blank (2026-09-04); one count per deferred tick.
+    pub window_origin_swap_deferred: u64,
+    /// Origin swaps forced after a whole hold of deferral (a hop that never confirmed).
+    pub window_origin_swap_forced: u64,
     /// Slice B — rows dropped because their stated tail frame was not their level's own frame
     /// (or an unknown-frame refusal from the fold): alien, dropped, counted (§2.6.6).
     pub window_alien_rows: u64,
