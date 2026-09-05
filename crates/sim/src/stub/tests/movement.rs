@@ -138,12 +138,12 @@ fn the_governed_ceiling_is_the_realm_cap_lowered_by_the_child_arm() {
     // Far from the child (149 000 m out): the child arm is way above the own cap — the own
     // cap binds.
     assert_eq!(
-        governed_ceiling_in_book(&regions, OWN_REALM, &book, at(149_000.0), &t),
+        governed_ceiling_in_book(&regions, OWN_REALM, &book, at(149_000.0), &t, f64::INFINITY),
         Some(own_cap),
     );
     // Nearing the child, the arm binds: child_cap + (dist − extent)/τ.
     assert_eq!(
-        governed_ceiling_in_book(&regions, OWN_REALM, &book, at(600.0), &t),
+        governed_ceiling_in_book(&regions, OWN_REALM, &book, at(600.0), &t, f64::INFINITY),
         Some(flight::approach_ceiling_mps(
             child_cap,
             600.0 - 100.0,
@@ -153,23 +153,23 @@ fn the_governed_ceiling_is_the_realm_cap_lowered_by_the_child_arm() {
     // AT (and inside) the child's bound: exactly the child's own ceiling — you arrive at ITS
     // speed, never through it.
     assert_eq!(
-        governed_ceiling_in_book(&regions, OWN_REALM, &book, at(100.0), &t),
+        governed_ceiling_in_book(&regions, OWN_REALM, &book, at(100.0), &t, f64::INFINITY),
         Some(child_cap),
     );
     assert_eq!(
-        governed_ceiling_in_book(&regions, OWN_REALM, &book, at(50.0), &t),
+        governed_ceiling_in_book(&regions, OWN_REALM, &book, at(50.0), &t, f64::INFINITY),
         Some(child_cap),
     );
     // A childless forest: the own cap alone (the loop's empty arm).
     let bare = RealmRegions::new(vec![root_region(), own]);
     let bare_book = bare.author_book(OWN_REALM, 20.0, UniverseTick(10));
     assert_eq!(
-        governed_ceiling_in_book(&bare, OWN_REALM, &bare_book, at(0.0), &t),
+        governed_ceiling_in_book(&bare, OWN_REALM, &bare_book, at(0.0), &t, f64::INFINITY),
         Some(own_cap),
     );
     // A realm absent from the forest: None — no region, no law.
     assert_eq!(
-        governed_ceiling_in_book(&bare, OTHER_REALM, &bare_book, at(0.0), &t),
+        governed_ceiling_in_book(&bare, OTHER_REALM, &bare_book, at(0.0), &t, f64::INFINITY),
         None,
     );
 }
@@ -187,7 +187,7 @@ fn the_governed_ceiling_resolve_answers_none_off_the_law() {
         let regions = rig.world.resource::<RealmRegions>();
         let placements = rig.world.resource::<Placements>();
         assert_eq!(
-            governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t),
+            governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t, f64::INFINITY),
             None,
         );
     }
@@ -198,7 +198,7 @@ fn the_governed_ceiling_resolve_answers_none_off_the_law() {
         let regions = rig.world.resource::<RealmRegions>();
         let placements = rig.world.resource::<Placements>();
         assert_eq!(
-            governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t),
+            governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t, f64::INFINITY),
             None,
         );
     }
@@ -208,7 +208,7 @@ fn the_governed_ceiling_resolve_answers_none_off_the_law() {
     let regions = rig.world.resource::<RealmRegions>();
     let placements = rig.world.resource::<Placements>();
     assert_eq!(
-        governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t),
+        governed_ceiling_for_frame(regions, &placements.0, config().frame, pos, &t, f64::INFINITY),
         Some(2.0),
     );
 }
@@ -277,7 +277,7 @@ fn full_throttle_rides_the_proportional_ramp_up_to_the_realm_ceiling() {
 }
 
 #[test]
-fn a_transient_faster_than_the_governed_ceiling_is_clamped_on_the_crossing_path() {
+fn a_transient_keeps_the_speed_it_arrived_with_and_is_never_re_clamped() {
     // ★OQ-2 (owner-ruled): the realm's ceiling governs everything it contains, piloted or
     // not. On a clamped-scale forest (ceiling = foot = 2 m/s) a 10 m/s debris is cut to the
     // ceiling before its advance; a slower one is untouched BIT-FOR-BIT. (The forestless
@@ -310,16 +310,17 @@ fn a_transient_faster_than_the_governed_ceiling_is_clamped_on_the_crossing_path(
     }
     let _ = rig.tick(vec![]);
     let owned = rig.world.resource::<OwnedTransients>();
+    // ★ 2026-09-05 (owner ruling 2026-08-27): a transfer never changes a speed — the 10 m/s debris
+    // arrives at 10 m/s and keeps it; the per-tick re-clamp to the governed ceiling is deleted.
     assert_eq!(
         owned.0[&fast].pose.vel,
-        DVec3::new(2.0, 0.0, 0.0),
-        "the 10 m/s debris is governed down to the realm ceiling (OQ-2: no subject kind is \
-         exempt)",
+        DVec3::new(10.0, 0.0, 0.0),
+        "a fast transient keeps the speed it arrived with — never re-clamped",
     );
     assert_eq!(
         owned.0[&fast].pose.universe_tick,
         UniverseTick(100),
-        "clamped AND advanced — the governor never freezes a subject",
+        "…and it is advanced",
     );
     assert_eq!(
         owned.0[&slow].pose.vel,

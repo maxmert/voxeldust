@@ -5209,6 +5209,103 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   unchanged across a ship's adopt + release; changed by a planet's). VERIFY: the galaxy's pace window
   after a hand-over reads no tick over 20 ms. Item 2: the flight instruments moved into the repo —
   `scripts/flight/{trace_star.py,star_poll.sh,flight_counters.sh}`.
+  ★ THE TWENTY-SIXTH FLIGHT (2026-09-05, owner: *"Works"*, committed 7ac5e9c, Step 14): three
+  hand-overs; the galaxy shard's slowest tick 4.5 ms (was 60 ms), mean 0.1 ms, nothing over budget;
+  the trace's held runs one to two ticks each.
+  ★ THE COVERAGE GATE AFTER STEPS 12–14 (2026-09-05): first run FAIL with 2 real misses, both one
+  arm — a chain change under the same origin BEFORE any fold (an empty ring: nothing to hold);
+  pinned by `a_chain_change_before_the_first_fold_holds_nothing_and_still_bumps_the_epoch`. Second
+  run PASS: 100 % of merged source lines and branch sides (69 tool-missed rows, all artifact rows).
+  ★ THE PROCESS GATES (2026-09-05, the five unmeasured since the arc started + the pre-existing
+  reds), first run on the debug binaries as committed: `two_ships` RED at login — the gateway closed
+  both clients at +14 s (*"the dynamic home realm did not become routable inside the bounded
+  bootstrap TTL"*) while the debug shards were still planting (the last announced at +58 s): the
+  500-tick `boot_ticks_p99` was measured on RELEASE (216) and the process gates spawn DEBUG
+  binaries (43–56 s boots, as its own comment said). FIXED: the bound covers the binary that runs —
+  `if cfg!(debug_assertions) { 3_500 } else { 500 }` (70 s at 50 Hz; a fact about the binary's
+  speed, not a second world). `render_crossing_smoke`: 1 ignored (PARKED on D-LOOK-4, not a red).
+  `look_pixels`: its derived-budget test plants THE world in debug — stopped after 31 min at 100 %
+  CPU and 5 GB; UNMEASURED in debug (the hours class, like `frame_conversion_e2e`); run it in
+  release or park it by name. `rlm_demand_login` on the old bound: the inner-planet chase never
+  crossed within 150 s (the ledgered no-cruise leg), the rest waited on logins the old bound closed;
+  stopped at 30 min and re-run below on the rebuilt binaries.
+  SECOND RUN (debug, the widened bound): `two_ships` got PAST the login (the bound fix holds) and
+  then sat in its fly-in at 2.5–4.4 km/s against a planet 6.1e10 m away at 4.9e4 m/s — 230 chunks of
+  TIMEOUT in 21 min: the ledgered no-cruise leg (the governor is deleted; the band re-solve is the
+  owner's open item), stopped by hand. `rlm_demand_login`: three of four tests failed inside their
+  OWN 60 s deadline — in debug the gateway folds the sky at +35 s and the shards announce at +85 s
+  (`DEADLINE = 60 s` in the test) — and the fourth reached the same no-cruise leg. So in DEBUG the
+  gates' own deadlines are shorter than the boot they wait for. THIRD RUN, in RELEASE (`cargo test
+  --release`, the profile the owner ruled flights run in, 2026-09-04): results below.
+  THIRD RUN, RELEASE: `two_ships` PASS in 1 311 s (both hulls fly in properly — the debug fly-in
+  never accelerated past 4 km/s, the release one reached 9.8e8 m/s and crossed; mutual visibility,
+  the same separation from two chains of different depth to the metre, 610,752 relay statements, 0
+  undecodable). `render_crossing_smoke` 1 ignored (parked). `look_pixels` STOPPED again at 20 min,
+  100 % CPU, 4.8 GB: its `derived()` fixture calls `WorldView::generated(seed)` — it generates THE
+  WHOLE WORLD (3.5 M bodies) inside the test, in release as in debug: the hours class. UNMEASURED;
+  owed: derive the budgets from the planted neighbourhood (the shard's own forest), never the
+  generated world. The remaining gates: below.
+  `rlm_demand_login` (release): the three login tests ran; the inner-planet chase is the ledgered
+  no-cruise red; the fourth flight (a bare dot into the between-space) WEDGED THE GALAXY SHARD — its
+  ticks doubled, 45 s → 91 s → 183 s, at 100 % CPU, after the dot's crossing into the galaxy whose
+  adopt never established (*"Promote found NO granted crossing-target dot … the saga re-drives"*
+  every 0.5 s; *"ARRIVAL SHIELD EXPIRED … wedged"*). NEW RED, cause unnamed: the release binary
+  is stripped (`strip = true`), so a stack sample names no frame. Owed: reproduce with
+  `CARGO_PROFILE_RELEASE_STRIP=false` and sample the shard; the doubling means the tick's work grows
+  with the queue that piles up during the tick. `window_shadow_parity`: INVALID this run — my own
+  kill of the wedged cluster removed its cluster mid-flight; re-run below. `flight_table`: the two
+  ledgered reds (the governed legs vs the deleted governor; the boundary roster 3,500,645 vs the
+  pinned 51). `dual_cluster_crossing_smoke`: PASS in release (its debug red was the no-cruise leg).
+  `star_sky_pixels`: RED on one star, `System(26526667488941648)`, "IN VIEW" at x = −10.5 px — off
+  the frame's left edge, so no pixel can paint within 12 px: the same class as the ledgered
+  edge-of-frame red, a different star. `ship_flight_e2e`: did not BUILD — `vd-tests` holds two
+  `GatewayConfig` literals that Step 13's `trace_realm_kind` field broke (`cargo test --workspace`
+  was not re-run after Step 13; the crate-level suites were): FIXED, both literals.
+  RE-RUNS (release): `ship_flight_e2e` PASS (the ledgered "plants no OwnBody" red is gone);
+  `window_shadow_parity` PASS in 675 s — 393,139 rows composed across 19,693 folds, 19,691 full-chain
+  folds, dedup max deviation 0, fold divergence 0, shear mismatches 0. TALLY of the five owed gates
+  in release: two_ships PASS, window_parity PASS, rlm_demand_login RED (one ledgered no-cruise leg +
+  the NEW galaxy wedge), render_crossing parked, look_pixels unmeasured (the hours class). The
+  pre-existing reds: dual_cluster now PASS, ship_flight_e2e now PASS, flight_table's two stay,
+  star_sky_pixels one edge-of-frame star stays. OWED: the `just` gate targets must run release for
+  the process flights (they spawn debug binaries today), and the bare-dot galaxy wedge.
+  ★ THE GALAXY WEDGE, NAMED (2026-09-05). Rebuilt release without stripping, re-flew the exact
+  between-space test, sampled the galaxy shard at a 5.8 s tick: 3,779 of 3,779 samples on
+  `on_gateway_msg → dot::apply_input → dot::walk → dot::governed_ceiling_for_frame`, 3,272 of
+  them in `Vec::from_iter` and 633 in `PlacementBook::of` — the governed ceiling walked EVERY
+  child of the realm (`regions.child_rows`) on every walk input, 279,380 on the galaxy, and the
+  same walk ran for every held transient every tick (`readvance_transients`). SL9 by name ("never
+  a per-tick walk of all of them"), and the ruling's "the ceiling leaves the flight path
+  completely". Inputs queued during the long tick made the next tick longer: the doubling.
+  FIXED: (1) `ChildIndex::candidates_within(point, radius)` — the R*-tree answers the children
+  whose padded sphere comes within a radius of a point; `governed_ceiling_in_book` asks it with
+  the approach horizon `v × tau` (a child farther than that cannot lower the ceiling: `child_cap +
+  dist/tau < v ⇒ dist < v·tau`) plus the movers, then tests exactly — O(nearby), never the roster.
+  (2) the per-tick re-clamp of held transients is DELETED (owner ruling 2026-08-27: a transfer
+  never changes a speed; a re-clamp is a jump) — a piece of debris keeps the speed it arrived
+  with; `readvance_transients` no longer reads the regions or the placements at all. Pinned by
+  `candidates_within_returns_the_children_the_radius_can_reach_and_no_others` (core) and
+  `a_transient_keeps_the_speed_it_arrived_with_and_is_never_re_clamped`; the ceiling's own fixture
+  stands unchanged (the 100 m child at 600 m still binds through the index). The walk's fence stays:
+  a walk states a speed (a tool), which the ruling allows to be fenced. RE-FLOWN (unstripped
+  release, the galaxy watched for 31 min): no doubling, slowest tick 97 ms, mean ~25 ms at 45 % CPU
+  with the dot inside, and NO "Promote found NO granted crossing-target dot" — the adoption
+  established: it had only been queued behind the 45-second ticks. (3) The horizon is capped by
+  the WALKER's own ramp (`cap_mps`): the galaxy's own ceiling is ~170 million c, so `v × tau` would
+  name every child again; `governed_ceiling_in_book(.., cap)` takes the ceiling no higher than
+  the caller can use this tick, which bounds the query to `ramp × tau` — a walker at 3e8 m/s asks
+  for the star systems within a few light-seconds. Exact: the walk used `min(ceiling, ramp)`
+  already. The re-fly's own verdict was INVALID (my sampler killed the cluster at its 30-minute
+  loop end: *"fly approach: no walk response"*); re-flown plainly below.
+  RE-FLOWN PLAINLY (unstripped release, 55 min, no kill): the dot's crossing INTO the galaxy
+  established at once (*"label flipped to Galaxy 1"*, no promote re-drive), the galaxy shard held
+  1–2 % CPU with the dot inside and a worst tick of 20.0 ms (the budget), against 183 s before.
+  THE WEDGE IS CLOSED. The test itself did not finish: its GOVERNED APPROACH leg — a 2.4e18 m ring
+  gap it derives to fly at the galaxy's ceiling (5.1e16 m/s) — moved the walker at 8e13–1.2e14 m/s
+  (measured twice, 20 s apart: not ramping), an eight-hour leg; stopped by hand at 55 min. That
+  leg is the ledgered NO-CRUISE class (the governor is deleted; the band re-solve is the owner's
+  open item — the same red as `flight_table`'s legs and the inner-planet chase), NOT the wedge.
+  The bare-dot crossing INTO the galaxy — the generic re-home the owner asked for — works.
 
 ### D-REACH-1 🟧 REACH: one radius per realm, tested by its parent — steps 1–3 LANDED, 4–6 OWED (owner ruling 2026-09-02, `owner_decisions_2026-09-02_reach.md`)
 - **LANDED 2026-09-02 (measured green on the cluster: `world_from_inside`, the hull subject).** A player crosses into a player-built hull forty metres from the spawn and sees the stars and the star system's own children. What landed, each pinned:

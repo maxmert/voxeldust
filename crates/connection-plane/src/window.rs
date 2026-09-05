@@ -3792,6 +3792,37 @@ mod tests {
         }
     }
 
+    /// A chain change under the same origin BEFORE ANY FOLD (the login's chain grows as hops
+    /// confirm, ahead of the first common tick): nothing composed means nothing to hold — the
+    /// epoch still bumps, the held set stays empty (the coverage gate's last uncovered arm,
+    /// 2026-09-05).
+    #[test]
+    fn a_chain_change_before_the_first_fold_holds_nothing_and_still_bumps_the_epoch() {
+        let tuning = tuning();
+        let mut scene = ShadowScene::default();
+        let first = scene.advance_covering(
+            RealmId::System(7),
+            &[RealmId::System(7)],
+            None,
+            &tuning,
+            false,
+            false,
+        );
+        assert!(first.epoch_bumped & scene.ring.is_empty());
+        let grown = scene.advance_covering(
+            RealmId::System(7),
+            &[RealmId::System(7), GALAXY],
+            None,
+            &tuning,
+            false,
+            false,
+        );
+        assert!(grown.epoch_bumped, "the chain's shape changed");
+        assert!(scene.held.is_empty(), "no fold ever composed: nothing to hold");
+        assert_eq!(grown.holds, 0, "a pre-first-fold tick is not a stall");
+        assert_eq!(scene.chain_authors, vec![RealmId::System(7), GALAXY]);
+    }
+
     /// THE LOOK SHELF (2026-09-04): a look emitted at T is carried into a later level whose
     /// windows state none (the hand-over churn), for exactly the hold TTL; a row that left the
     /// drawn set is never filled; a live look refreshes the shelf; past the TTL the look is gone.

@@ -202,6 +202,32 @@ impl ChildIndex {
     /// holds an entry for, absent from a query's answer, is positively NOT near the point. A realm the
     /// index never indexed (an ancestor, the realm itself, anything that moves) is simply unknown here,
     /// and a caller must evaluate it. Without this, an empty answer would look the same in both cases.
+    /// ★ THE CHILDREN WITHIN `radius_m` OF `point` (2026-09-05, the galaxy wedge): every indexed
+    /// child whose padded sphere comes within `radius_m` of the point — a superset the caller
+    /// tests exactly, never a scan of the roster. The governed ceiling asks this with the approach
+    /// horizon (`v × tau`): a child farther than that cannot lower the ceiling, so it is never
+    /// visited. Example: a walker in the galaxy at 3e8 m/s with a two-second horizon asks for
+    /// the star systems within 6e8 m — a handful, never all 279,380. Sorted, deduplicated,
+    /// appended to `out`.
+    pub fn candidates_within(&self, point: LatticePos, radius_m: f64, tier: Tier, out: &mut Vec<RealmId>) {
+        let p = origin_m(point, tier);
+        let pad = slack(p.abs().max_element() + radius_m, tier);
+        let within = Within {
+            p: p.to_array(),
+            radius_m,
+            pad,
+            point,
+            tier,
+        };
+        out.extend(
+            self.tree
+                .locate_with_selection_function(within)
+                .map(|leaf| leaf.realm),
+        );
+        out.sort_unstable();
+        out.dedup();
+    }
+
     #[must_use]
     pub fn answers_for(&self, realm: RealmId) -> bool {
         self.indexed.contains(&realm)
@@ -278,6 +304,34 @@ impl SelectionFunction<Leaf> for Sweep {
 /// A child's leaf: its exact sphere, and its box padded by the f64 rounding at its own magnitude.
 /// `None` for a child with no extent — a zero radius covers no point, so there is nothing a query
 /// could meet, and the built index's posture for it is "counted, never answered".
+/// The radius query's selection: a box is opened when the point is within `radius + pad` of it,
+/// a leaf is taken when the point is within `radius + the leaf's own radius` of its centre (the
+/// centre's offset taken on the lattice — exact at every magnitude).
+struct Within {
+    p: [f64; 3],
+    radius_m: f64,
+    pad: f64,
+    point: LatticePos,
+    tier: Tier,
+}
+
+impl SelectionFunction<Leaf> for Within {
+    fn should_unpack_parent(&self, envelope: &AABB<[f64; 3]>) -> bool {
+        let (lo, hi) = (envelope.lower(), envelope.upper());
+        let mut d2 = 0.0;
+        for i in 0..3 {
+            let gap = (lo[i] - self.p[i]).max(self.p[i] - hi[i]).max(0.0);
+            d2 += gap * gap;
+        }
+        d2 <= (self.radius_m + self.pad) * (self.radius_m + self.pad)
+    }
+
+    fn should_unpack_leaf(&self, leaf: &Leaf) -> bool {
+        let d = leaf.centre.separation(self.point, self.tier).metres().length();
+        d <= self.radius_m + leaf.radius_m
+    }
+}
+
 fn leaf_of(child: &IndexedChild, tier: Tier) -> Option<Leaf> {
     if child.radius_m <= 0.0 {
         return None;
@@ -372,6 +426,41 @@ mod tests {
     }
 
     // ---------------- THE SEGMENT QUERY (slice S5) ----------------
+
+    /// ★ 2026-09-05: the radius query returns the children whose padded sphere comes within the
+    /// radius of the point — near ones in, far ones out, a child whose sphere overlaps the edge in
+    /// — and never a child the index does not hold.
+    #[test]
+    fn candidates_within_returns_the_children_the_radius_can_reach_and_no_others() {
+        let tier = Tier::Fine;
+        let at = |x: f64| LatticePos::from_metres(DVec3::new(x, 0.0, 0.0), tier);
+        let child = |id: u64, x: f64, r: f64| IndexedChild {
+            realm: RealmId::Planet(id),
+            centre: at(x),
+            radius_m: r,
+        };
+        let ix = ChildIndex::build(
+            &[
+                child(1, 100.0, 10.0),   // 90 m away: in
+                child(2, 1_000.0, 10.0), // 990 m away: out at 500, in at 1 000
+                child(3, 540.0, 50.0),   // its sphere's near edge at 490 m: in at 500
+                child(4, -5_000.0, 1.0), // far behind: out
+            ],
+            tier,
+        );
+        let mut out = Vec::new();
+        ix.candidates_within(at(0.0), 500.0, tier, &mut out);
+        assert_eq!(out, vec![RealmId::Planet(1), RealmId::Planet(3)]);
+        out.clear();
+        ix.candidates_within(at(0.0), 1_000.0, tier, &mut out);
+        assert_eq!(
+            out,
+            vec![RealmId::Planet(1), RealmId::Planet(2), RealmId::Planet(3)]
+        );
+        out.clear();
+        ix.candidates_within(at(0.0), 1.0, tier, &mut out);
+        assert!(out.is_empty(), "nothing within a metre");
+    }
 
     #[test]
     fn a_child_the_subject_travels_straight_through_is_named_by_the_segment_and_missed_by_the_point()

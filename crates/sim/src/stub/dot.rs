@@ -336,22 +336,29 @@ pub(crate) fn governed_ceiling_for_frame(
     frame: FrameRef,
     pos: LatticePos,
     tuning: &FlightTuning,
+    cap_mps: f64,
 ) -> Option<f64> {
     let realm = regions.realm_of_frame(frame)?;
     let book = placements.head(realm)?;
-    governed_ceiling_in_book(regions, realm, book, pos, tuning)
+    governed_ceiling_in_book(regions, realm, book, pos, tuning, cap_mps)
 }
 
 /// The ceiling arithmetic over ONE authored book — split from the frame/ledger resolve so the unit
 /// tier measures it against `author_book`-built books directly (the crate's `publish` ban stands:
 /// no test mints a rival ledger history). `None` when `realm` has no region here — the same
 /// no-law answer as the outer resolve.
+/// `cap_mps` is the fastest speed the CALLER can use this tick (a walker's ramp cap): the ceiling
+/// is taken no higher than it, which also bounds the horizon the child query covers — on the
+/// galaxy the realm's own ceiling is ~170 million c, and a horizon of `that × tau` would name
+/// every child again; a walker's ramp names the few within reach. `f64::INFINITY` asks for the
+/// realm's whole ceiling (the fixture's posture).
 pub(crate) fn governed_ceiling_in_book(
     regions: &RealmRegions,
     realm: RealmId,
     book: &PlacementBook,
     pos: LatticePos,
     tuning: &FlightTuning,
+    cap_mps: f64,
 ) -> Option<f64> {
     let own = regions.regions.iter().find(|r| r.realm == realm)?;
     let tier = own.frame.tier();
@@ -361,7 +368,7 @@ pub(crate) fn governed_ceiling_in_book(
         tuning.v_foot_mps,
         tuning.traverse_s,
     );
-    let mut v = lawful * regions.cruise_overdrive;
+    let mut v = (lawful * regions.cruise_overdrive).min(cap_mps);
     // ★THE OUTWARD ARM (test-instrument safety, measured 2026-08-20 from a flight that left the world).
     //
     // The child arms below slow you INWARD. Nothing slowed you toward your OWN realm's exit, because
@@ -386,7 +393,18 @@ pub(crate) fn governed_ceiling_in_book(
         dist_to_own_shell,
         tuning.tau_s,
     ));
-    for (child, placed) in regions.child_rows(realm, book) {
+    // ★ ONLY THE CHILDREN THE HORIZON CAN REACH (2026-09-05, the galaxy wedge: this walked all
+    // 279,380 children of the galaxy on every walk input, and the tick doubled until the shard
+    // wedged — SL9). A child lowers the ceiling only when `child_cap + dist/tau < v`, so only a
+    // child within `v × tau` of the walker (to its bound) can bind: ask the index for those, and
+    // the movers, which are always asked. Example: a pilot in a spacesuit drifting through the
+    // galaxy asks for the star systems within a few light-seconds — a handful, never the roster.
+    let horizon_m = v * tuning.tau_s;
+    let mut near: Vec<RealmId> = regions.unindexed_rows().to_vec();
+    regions
+        .child_index()
+        .candidates_within(pos, horizon_m, tier, &mut near);
+    for (child, placed) in regions.child_rows_for(realm, book, near) {
         let child_cap = flight::realm_speed_cap_mps(
             child.shape.finite_extent(),
             tuning.v_foot_mps,
@@ -430,15 +448,23 @@ fn walk(
     // `None` (no stated ceiling) maps to the foot speed HERE: the throttle's pre-law commanded
     // speed never exceeded it, and `min(v_foot, ramp) == v_foot` exactly (the ramp floor sits
     // strictly above the foot), so the scale below is `1.0` bit-for-bit on a forestless rig.
-    let v_allowed =
-        governed_ceiling_for_frame(regions, placements, dot.pose.frame, dot.pose.pos, &tuning)
-            .unwrap_or(tuning.v_foot_mps);
     let ramp = flight::ramp_cap_mps(
         dot.pose.vel.length(),
         tuning.v_foot_mps,
         tuning.tick_dt_s,
         tuning.tau_s,
     );
+    // The ramp is the fastest this walker can go this tick, so it caps the ceiling's horizon
+    // too (2026-09-05): the children within `ramp × tau` are the only ones that can bind.
+    let v_allowed = governed_ceiling_for_frame(
+        regions,
+        placements,
+        dot.pose.frame,
+        dot.pose.pos,
+        &tuning,
+        ramp,
+    )
+    .unwrap_or(tuning.v_foot_mps);
     let scale = flight::throttle_axes_scale(axes.length(), tuning.v_foot_mps, v_allowed.min(ramp));
     // OCCUPANT movement runs in the realm's SUBJECTIVE time: `move_speed · dt · time_multiplier`. At the
     // default `1.0` this is byte-identical; a slow-time realm (`< 1.0`) moves its occupants slower.

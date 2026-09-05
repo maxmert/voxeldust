@@ -11,7 +11,7 @@
 
 use super::{
     AppliedSteps, Dots, Placements, RealmAuthority, RealmRegions, RequestInFlight, StepOutcome,
-    StubConfig, StubStats, flight_tuning, flush_pose_for_dest, governed_ceiling_for_frame,
+    StubConfig, StubStats, flush_pose_for_dest,
     place_arriving_pose,
 };
 use crate::io::{Durability, MsgClass};
@@ -224,39 +224,17 @@ pub(crate) fn readvance_dots(
 pub(crate) fn readvance_transients(
     config: Res<StubConfig>,
     clock: Res<ClockSample>,
-    regions: Res<RealmRegions>,
-    placements: Res<Placements>,
     mut owned: ResMut<OwnedTransients>,
 ) {
     let now = clock.universe_tick;
-    let tuning = flight_tuning(&config);
     for (entity, t) in owned.0.iter_mut() {
         if t.status.is_held() {
-            // ★OQ-2 (owner-ruled, verbatim: "the realm's ceiling governs everything the realm
-            // contains, piloted or not"): a ballistic transient is never throttle-commanded, so the
-            // governor binds HERE — its speed is clamped to the realm's governed ceiling at its own
-            // position before this tick's advance. One law for every subject kind (HR2: debris, a
-            // projectile and a piloted ship cross a band by identical arithmetic), which is what
-            // makes the crossing path safe at governed magnitudes — an ungoverned transient at the
-            // galaxy ceiling would cross a star system's whole band in under one tick (addendum
-            // §A3.5's measured hole, closed by this ruling). Deterministic and composable: the
-            // clamped velocity IS the pose that crosses hosts, and each tick's clamp is a pure
-            // function of that pose. Inert wherever the ceiling clamps to the foot speed and the
-            // transient is no faster — every clamped-scale fixture, measured by the sim suite.
-            // `None` (no stated ceiling — a forestless rig) means NO clamp: the pre-law posture
-            // for a seeded velocity, byte-identical to the old advance.
-            if let Some(v_allowed) = governed_ceiling_for_frame(
-                &regions,
-                &placements.0,
-                t.pose.frame,
-                t.pose.pos,
-                &tuning,
-            ) {
-                let speed = t.pose.vel.length();
-                if speed > v_allowed {
-                    t.pose.vel *= v_allowed / speed;
-                }
-            }
+            // ★ NO RE-CLAMP ON THE FLIGHT PATH (owner ruling 2026-08-27, the ungoverned rock: *"a
+            // transfer NEVER changes that speed — a destination realm's ceiling limits what it may
+            // ADD, never what a thing arrives with (a re-clamp is a jump, and a jump is a seam)"*).
+            // This scaled every held transient's velocity down to the governed ceiling each tick —
+            // and walked the whole roster to find it (the galaxy wedge, 2026-09-05). A piece of
+            // debris arrives at its own speed and keeps it. Deleted 2026-09-05.
             // The SINGLE tick_dt_s chokepoint (no inline literal); `saturating_sub` enforces
             // monotonic-forward-only — a backward target yields dt=0 (no motion), never negative time.
             // accel = ZERO: a stub is empty space with no gravity field (P5's SphericalSpace introduces

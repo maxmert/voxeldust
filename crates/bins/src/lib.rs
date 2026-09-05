@@ -464,9 +464,14 @@ pub const DEV: DevClusterParams = DevClusterParams {
     // is that measurement, doubled and rounded to a whole ten seconds, so a spawn twice as slow is
     // still not shot while it works. It is also the AoI's predictive horizon (F7): a pilot's wake-ahead
     // lead is `speed × 10 s`, no longer `speed × 2 min`, so the galaxy wakes what the pilot can reach
-    // and not two minutes of everything. A DEBUG shard boots in 43–56 s at this census and WILL be
-    // re-spun under this bound — debug is for debugging, not for flights.
-    boot_ticks_p99: 500,
+    // and not two minutes of everything. A DEBUG shard boots in 43–56 s at this census — and the
+    // process gates run debug binaries (`cargo test` spawns `target/debug`): under 500 ticks the
+    // gateway closed both of the two-ships gate's clients at login while the galaxy shard was still
+    // planting (2026-09-05: closed at +14 s, the last shard announced at +58 s). The bound must
+    // cover the boot of the binary that runs: a debug build gets the measured debug boot, doubled
+    // and rounded up (3 500 ticks, 70 s at 50 Hz); a release build keeps the measured 500. This is a
+    // fact about the binary's speed, not a second world — the same census boots under both.
+    boot_ticks_p99: if cfg!(debug_assertions) { 3_500 } else { 500 },
     // ★ THE HOME SEED (owner ruling 2026-08-20): the one world every player starts in, chosen from
     // the measured candidate table — see `vd_physics::worldgen::HOME_SEED` for its provenance and the
     // discovery-permanence law. Matches the shard/gateway bins' own VD_UNIVERSE_SEED default.

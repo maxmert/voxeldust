@@ -600,6 +600,7 @@ impl Gw {
                 auth_verifying_key: auth_verifying_key(),
                 session_seed: 23,
                 tick_hz: TICK_HZ,
+                trace_realm_kind: None,
                 // MF2: the lease-liveness heartbeat is LIVE (a derived cadence, not a literal) — a login held
                 // across a whole pod boot must keep its committed lease renewed.
                 lease_renew_interval_ticks: rlm.demand_ttl_ticks

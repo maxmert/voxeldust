@@ -656,6 +656,7 @@ fn build_cluster_kinds(
             // scenery lanes ran beside the window lane; a frozen picture once they were deleted
             // (window lane Slice C2). One cluster, one clock.
             tick_hz: 20,
+            trace_realm_kind: None,
             // D-3 INERT: the cluster scenarios do not exercise the session heartbeat (the D-3 cells do).
             lease_renew_interval_ticks: 0,
             // D-3 Slice 5b INERT here (grace 0 vetoes the proactive self-fence; the self-fence cells set
