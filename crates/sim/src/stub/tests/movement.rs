@@ -763,6 +763,7 @@ fn a_large_world_partitions_into_multiple_under_budget_frames() {
                     yaw: 0.0,
                     pitch: 0.0,
                     last_applied_seq: None,
+                    look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
                     prev_offset: LatticePos::ORIGIN,
                 },
             );

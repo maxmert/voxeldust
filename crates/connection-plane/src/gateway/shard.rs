@@ -9,8 +9,8 @@
 
 use super::{
     GatewayConfig, GatewaySessions, GatewayStats, SessionPhase, WindowRow, announce_own_entity,
-    fan_entity_removed, lineage_apply, on_window_relayed, on_window_row, session_target,
-    store_route,
+    fan_entity_removed, fan_out_of_interest, lineage_apply, on_window_relayed, on_window_row,
+    session_target, store_route,
 };
 use crate::window;
 use vd_core::NodeId;
@@ -245,7 +245,28 @@ pub(crate) fn on_shard_control(
         } => {
             fan_entity_removed(from, realm_fence, entity, at, sessions, stats, outbox);
         }
-        ShardToGateway::Frame { .. } | ShardToGateway::RealmFrame { .. } => {
+        // THE INTEREST (D-9, slice 2): one occupant left ONE observer's interest. Delivered to that
+        // session alone as the existing remove message — the client wire is unchanged.
+        ShardToGateway::EntityOutOfInterest {
+            realm_fence,
+            session,
+            entity,
+            at,
+        } => {
+            fan_out_of_interest(
+                from,
+                realm_fence,
+                session,
+                entity,
+                at,
+                sessions,
+                stats,
+                outbox,
+            );
+        }
+        ShardToGateway::Frame { .. }
+        | ShardToGateway::FrameFor { .. }
+        | ShardToGateway::RealmFrame { .. } => {
             // Entity/realm frames ride the Snapshot / RealmSnapshot datagram classes; one on the
             // reliable Control stream is a peer bug (FA-2c: a RealmFrame is forwarded by
             // `on_shard_realm_frame`, dispatched from `MsgClass::RealmSnapshot`, never here).

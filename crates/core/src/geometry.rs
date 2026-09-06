@@ -1153,6 +1153,25 @@ pub fn visibility_reach_m(extent_m: f64, theta_rad: f64) -> f64 {
     extent_m * visibility_factor(theta_rad)
 }
 
+/// ★ THE REFERENCE VIEW (owner 2026-09-06, "use the drawable floor"): the vertical field of view and
+/// the row count every "how big is one pixel" question is answered at — the capture camera's 45° over
+/// 720 rows. ONE home: the renderer's capture height and the harness's fitted field of view read
+/// these, and so does a shard deciding whether an occupant can still be drawn by an observer.
+pub const REFERENCE_VIEW_FOV_Y_RAD: f64 = std::f64::consts::FRAC_PI_4;
+/// See [`REFERENCE_VIEW_FOV_Y_RAD`].
+pub const REFERENCE_VIEW_ROWS_PX: f64 = 720.0;
+
+/// ★ THE DRAWABLE ANGLE: what ONE pixel subtends at the reference view — `2·tan(fov/2) / rows`.
+/// Below it a body cannot be drawn at all, whatever its brightness. It is the floor for SHIPPING an
+/// occupant to an observer (cheap), where the dot angle [`VISIBILITY_THETA_MIN_RAD`] is the bar for
+/// WAKING a realm (expensive): a person is worth a row long before a planet is worth a shard.
+/// Example: a two-metre character (circumscribed extent one metre) is one pixel at about 1.7 km and
+/// is shipped inside that; a one-metre figure (extent half a metre) at about 870 m.
+#[must_use]
+pub fn drawable_theta_min_rad() -> f64 {
+    2.0 * (REFERENCE_VIEW_FOV_Y_RAD * 0.5).tan() / REFERENCE_VIEW_ROWS_PX
+}
+
 /// A per-realm Area-of-Interest hysteresis band (METRES) for demand-driven realm lifecycle (RLM
 /// Step 2). DISTINCT from [`OverlapBand`]/[`ContainmentBand`]: it drives a child SHARD's spin-up/down,
 /// not entity membership. `spin_up_r_m` (a child within this range of an occupant is DEMANDED live)
@@ -2975,6 +2994,30 @@ mod tests {
         assert_eq!(AoiConfig::inert().with_spin_up(5_000.0), AoiConfig::inert());
         // The dot angle is the one the world solve and the reach share.
         assert!((VISIBILITY_THETA_MIN_RAD - 1.5_f64.to_radians()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_drawable_angle_is_one_pixel_at_the_reference_view() {
+        let theta = drawable_theta_min_rad();
+        assert!(
+            (theta - 1.1506e-3).abs() < 1e-6,
+            "2·tan(22.5°)/720 = {theta}"
+        );
+        // `extent` is the circumscribed extent — the radius: a figure one metre ACROSS is 0.5.
+        let one_metre = visibility_reach_m(0.5, theta);
+        assert!(
+            (one_metre - 869.1).abs() < 1.0,
+            "a one-metre figure: {one_metre} m"
+        );
+        let two_metres = visibility_reach_m(1.0, theta);
+        assert!(
+            (two_metres - 1738.3).abs() < 2.0,
+            "a two-metre character: {two_metres} m"
+        );
+        assert!(
+            theta < VISIBILITY_THETA_MIN_RAD,
+            "a row is cheaper than a shard"
+        );
     }
 
     #[test]

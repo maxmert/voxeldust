@@ -106,7 +106,9 @@ const LANDMARK_COLORS: [Color; 8] = [
 /// (`render_boxes_smoke`) can reconstruct the exact `fit_camera_to_scene` camera the offscreen
 /// render used, and project a box's screen AABB against the very pixels it produced.
 pub const CAPTURE_W: u32 = 1284;
-pub const CAPTURE_H: u32 = 720;
+/// THE reference view's row count (`vd_core::geometry::REFERENCE_VIEW_ROWS_PX`): the same number a
+/// shard's drawable floor reads, so "one pixel" means the same thing on both sides.
+pub const CAPTURE_H: u32 = vd_core::geometry::REFERENCE_VIEW_ROWS_PX as u32;
 /// Frames to render before the first capture can serve (let the render world warm up +
 /// the egui pass + the readback pipeline fill — the spike used 8).
 const CAPTURE_PRE_ROLL: u32 = 8;

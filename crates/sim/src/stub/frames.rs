@@ -8,6 +8,9 @@
 //! speculative, because a frame is a claim about a realm and a shard that has lost its lease has no
 //! standing to make one. Nor does it own any pose it emits — it restates, it never computes.
 
+use super::interest::{
+    CellKey, InterestHeld, Observer, PlacedRow, cell_of, interest_rule, plan_interest,
+};
 use super::{
     Dot, Dots, FrameCounter, HandoffHolds, HoldRole, Placements, RealmAuthority, RealmRegions,
     StubConfig, StubStats, is_retained_ghost,
@@ -15,10 +18,10 @@ use super::{
 use crate::io::{Durability, MsgClass};
 use crate::runtime::{ClockSample, OutboundBox};
 use bevy_ecs::prelude::{Res, ResMut};
-use vd_core::NodeId;
 use vd_core::frame::transfer_frame;
 use vd_core::placement::{PlacementBook, PlacementLedger};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
+use vd_core::{NodeId, SessionId};
 use vd_wire::channels::{EntitySnap, SnapshotDatagram, SubId, partition_entities};
 use vd_wire::session_flow::ShardToGateway;
 
@@ -33,6 +36,16 @@ use vd_wire::session_flow::ShardToGateway;
 pub(crate) fn emits(holds: &HandoffHolds, d: &Dot) -> bool {
     d.authority.simulates()
         | (is_retained_ghost(d) & holds.0.contains_key(&(d.entity, HoldRole::Source)))
+}
+
+/// One emitted row: the wire snap, whether it was PLACED in this shard's own frame (a row that
+/// could not be restated ships verbatim under its own label and is not placeable in a cube), and
+/// its speed in this frame (the interest lead's other half).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct EmittedRow {
+    pub(crate) snap: EntitySnap,
+    pub(crate) placed: bool,
+    pub(crate) speed_mps: f64,
 }
 
 /// Build the wire entity list from the EMITTING dots (`emits`), every row RESTATED into the one space this
@@ -63,7 +76,7 @@ pub(crate) fn emitted_entities(
     placements: &PlacementLedger,
     own_realm: RealmId,
     stats: &mut StubStats,
-) -> Vec<EntitySnap> {
+) -> Vec<EmittedRow> {
     // Each row reads the ledger book AT ITS OWN STAMP (usually the head — every re-stamped dot is at
     // NOW; a latched dot or a retained ghost carries an older stamp, inside the window by the window's
     // own derivation). A miss is counted and the row ships VERBATIM under its own label — the same
@@ -72,16 +85,22 @@ pub(crate) fn emitted_entities(
         .values()
         .filter(|d| emits(holds, d))
         .map(|d| {
-            let pose = match placements.at(own_realm, d.pose.universe_tick) {
+            // A row already in this frame is PLACED whatever the book says (a same-frame transfer
+            // is the identity); a row in another frame is placed only by a successful restatement.
+            let (pose, placed) = match placements.at(own_realm, d.pose.universe_tick) {
                 Ok(book) => restate_for_own_clients(d.pose, own_frame, book, stats),
                 Err(_) => {
                     stats.placement_book_miss += 1;
-                    d.pose
+                    (d.pose, d.pose.frame == own_frame)
                 }
             };
-            EntitySnap {
-                entity: d.entity,
-                pose,
+            EmittedRow {
+                snap: EntitySnap {
+                    entity: d.entity,
+                    pose,
+                },
+                placed,
+                speed_mps: pose.vel.length(),
             }
         })
         .collect()
@@ -90,25 +109,26 @@ pub(crate) fn emitted_entities(
 /// One row's restatement into `own_frame`, with the degrade counted rather than hidden. Monomorphic —
 /// both arms covered once here (HR5). A pose already in `own_frame` returns BIT-IDENTICAL —
 /// `transfer_frame` short-circuits a same-frame transfer — which is what makes this a no-op for every
-/// occupant standing in the shard's own realm.
+/// occupant standing in the shard's own realm. The flag says whether the row is PLACED in this frame.
 #[must_use]
 fn restate_for_own_clients(
     pose: StampedPose,
     own_frame: FrameRef,
     book: &PlacementBook,
     stats: &mut StubStats,
-) -> StampedPose {
+) -> (StampedPose, bool) {
     match transfer_frame(&pose, own_frame, book) {
-        Ok(restated) => restated,
+        Ok(restated) => (restated, true),
         Err(_) => {
             stats.entity_rows_foreign_labelled += 1;
-            pose
+            (pose, false)
         }
     }
 }
 
-/// Emit one fence-stamped frame per tick to every gateway with an attached session.
-/// No realm authority ⇒ no frames (an unowned shard is silent, never speculative).
+/// Emit this tick's snapshot bodies — one per cube of occupants, to the observers that hold that
+/// cube — plus the out-of-interest notices. No realm authority ⇒ no frames (an unowned shard is
+/// silent, never speculative).
 ///
 /// WHAT LEAVES HERE IS THIS SHARD'S OWN OCCUPANTS AND NOTHING ELSE (Step 5 slice E: the entity relay
 /// lane that used to merge neighbouring levels' rows into this feed — and ship this feed up and down
@@ -118,9 +138,17 @@ fn restate_for_own_clients(
 /// own-avatar row is exempt from the client's one-space filter and the cut flips cleanly); a
 /// BYSTANDER in the source realm gets the retained ghost's frozen fill until its band-exit Despawn,
 /// and then THE REMOVE MESSAGE (D-4(a), minor 14): the teardown emits `EntityRemoved` and the
-/// bystander's client EVICTS the figure — it vanishes instead of freezing. Slice F retimes that
-/// emit to hold closure when the retained-ghost fill itself dies. An empty gateway list is a plain
-/// early return again: a shard with no attached session has nobody to draw for.
+/// bystander's client EVICTS the figure — it vanishes instead of freezing.
+///
+/// ★ THE INTEREST (D-9, foundation slice 2, owner-approved 2026-09-05). It used to be ONE body of
+/// every occupant to every gateway: three hundred people at a station, and the pilot at the far dock
+/// received three hundred rows a tick. Now the rows are sorted into cubes of one reach in this
+/// shard's own frame (`interest`), every observer — every dot this shard holds, whatever its
+/// authority, at the pose it stands at — holds the cubes around it, and each cube ships as ONE body
+/// to the observers holding it: `FrameFor` names them; a cube every observer holds rides the older
+/// whole-realm `Frame`. A row that could not be placed in this frame ships to everybody, counted. An
+/// occupant that left an observer's hold is told to that observer once (`EntityOutOfInterest`,
+/// reliable), because a client evicts a figure only on a sound signal, never on silence.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_frames(
     config: Res<StubConfig>,
@@ -132,6 +160,7 @@ pub(crate) fn emit_frames(
     // Slice F: the emit gate consults the hand-off HOLD (a retained ghost fills exactly the
     // demote→take-over window; the leaver vanishes at hold closure).
     holds: Res<HandoffHolds>,
+    mut held: ResMut<InterestHeld>,
     mut counter: ResMut<FrameCounter>,
     mut stats: ResMut<StubStats>,
     mut outbox: ResMut<OutboundBox>,
@@ -139,28 +168,12 @@ pub(crate) fn emit_frames(
     let Some(realm_fence) = authority.0 else {
         return;
     };
-    // EMIT-eligibility is the DERIVED `simulates() | (is_retained_ghost & Source-hold-open)` (slice
-    // F — see `emits`): an Owned dot (the authority truth) emits; a retained source ghost emits its
-    // last-Owned pose ONLY while its hand-off hold is open, filling exactly the demote→take-over
-    // window — the leaver VANISHES at hold closure (the SpawnV2 proof + the remove message). The
-    // fed-ghost lane is DELETED (slice F). A Frozen or pre-grant-provisional Ghost emits NOTHING.
-    let mut gateways: Vec<NodeId> = dots
-        .0
-        .values()
-        .filter(|d| emits(&holds, d))
-        .map(|d| d.gateway)
-        .collect();
-    gateways.sort_unstable();
-    gateways.dedup();
-    if gateways.is_empty() {
+    if dots.0.is_empty() {
         return;
     }
-    // The emitted rows, every one of them measured from THIS shard's own centre — the single space every
-    // feed leaving here is in. The shard still knows nothing about where IT sits. A row whose pose label
-    // cannot be restated into this frame is counted (`entity_rows_foreign_labelled` — the ghost feed's
-    // foreign write, the §4u corruption slice F deletes) rather than hidden.
     let own_frame = regions.own_frame(config.realm);
-    let entities = emitted_entities(
+    // The rows: the emitting dots, measured from THIS shard's own centre.
+    let rows = emitted_entities(
         &dots,
         &holds,
         own_frame,
@@ -168,43 +181,166 @@ pub(crate) fn emit_frames(
         config.realm,
         &mut stats,
     );
-    // Partition BY CONTENT so no datagram exceeds the MTU budget (audit GW-1): a
-    // full-world snapshot ships as several independent self-contained frames. Per
-    // connection_plane.md §6.3 EVERY chunk of one tick carries the SAME frame_id +
-    // celestial_tick (each chunk self-contained, latest-wins) — the client merges
-    // them and treats only a STRICTLY older frame_id as stale, so a reordered
-    // sibling chunk of the same tick is never dropped. The counter advances once per
-    // tick. The shared partitioner is the ONE place every shard type does this.
+    // The rule: one reach of the largest figure any occupant here draws as, at the dot angle.
+    let max_look = dots
+        .0
+        .values()
+        .map(|d| d.look_extent_m)
+        .fold(0.0_f64, f64::max);
+    let rule = interest_rule(max_look, config.tick_dt_s);
+    if held.side_m != rule.side_m {
+        *held = InterestHeld {
+            side_m: rule.side_m,
+            ..InterestHeld::default()
+        };
+        stats.interest_rule_reset += 1;
+    }
+    // The observers: every dot this shard holds, at the cube its pose falls in. A dot whose pose
+    // cannot be placed in this frame observes from wherever it last was placed by the book miss
+    // degrade: its own label's value, read as if in this frame (the same counted degrade as its row).
+    let tier = own_frame.tier();
+    let observers: Vec<Observer> = dots
+        .0
+        .iter()
+        .map(|(session, d)| {
+            let pos = match placements.0.at(config.realm, d.pose.universe_tick) {
+                Ok(book) => {
+                    transfer_frame(&d.pose, own_frame, book)
+                        .unwrap_or(d.pose)
+                        .pos
+                }
+                Err(_) => d.pose.pos,
+            };
+            Observer {
+                session: *session,
+                gateway: d.gateway,
+                cell: cell_of(
+                    pos.delta_m(vd_core::pose::LatticePos::ORIGIN, tier),
+                    rule.side_m,
+                ),
+                speed_mps: d.pose.vel.length(),
+            }
+        })
+        .collect();
+    let placed: Vec<PlacedRow> = rows
+        .iter()
+        .filter(|r| r.placed)
+        .map(|r| PlacedRow {
+            entity: r.snap.entity,
+            cell: cell_of(
+                r.snap
+                    .pose
+                    .pos
+                    .delta_m(vd_core::pose::LatticePos::ORIGIN, tier),
+                rule.side_m,
+            ),
+            speed_mps: r.speed_mps,
+        })
+        .collect();
+    let plan = plan_interest(rule, &observers, &placed, &mut held);
+    // The rows of each cube, in the deterministic row order.
+    let mut by_cell: std::collections::BTreeMap<CellKey, Vec<EntitySnap>> =
+        std::collections::BTreeMap::new();
+    for (row, cell) in rows
+        .iter()
+        .filter(|r| r.placed)
+        .zip(placed.iter().map(|p| p.cell))
+    {
+        by_cell.entry(cell).or_default().push(row.snap);
+    }
+    let unplaced: Vec<EntitySnap> = rows.iter().filter(|r| !r.placed).map(|r| r.snap).collect();
+    let gateway_of: std::collections::BTreeMap<SessionId, NodeId> =
+        observers.iter().map(|o| (o.session, o.gateway)).collect();
+    let mut all_gateways: Vec<NodeId> = observers.iter().map(|o| o.gateway).collect();
+    all_gateways.sort_unstable();
+    all_gateways.dedup();
+    // Every body of one tick shares one frame_id (the sibling-chunk rule: the client merges them and
+    // treats only a STRICTLY older frame_id as stale). The counter advances once per tick.
     let frame_id = counter.0;
     counter.0 += 1;
-    for chunk in partition_entities(&entities, config.snapshot_datagram_budget) {
-        let snapshot = SnapshotDatagram {
-            // The shard always stamps sub 0; the gateway re-tags per session.
-            sub: SubId(0),
-            frame_id,
-            source_tick: clock.local_tick,
-            universe_tick: clock.universe_tick,
-            entities: chunk,
-        };
-        let snapshot_bytes =
-            postcard::to_allocvec(&snapshot).expect("closed wire enums serialize infallibly");
-        let frame = ShardToGateway::Frame {
-            realm_fence,
-            source_tick: clock.local_tick,
-            snapshot_bytes,
-        };
-        // ONE shared body per chunk, cloned (refcount bump) to every subscribing
-        // gateway — never an O(entities) copy per gateway (SCALE-1).
-        let bytes = crate::io::bytes(
-            postcard::to_allocvec(&frame).expect("closed wire enums serialize infallibly"),
-        );
-        for &gateway in &gateways {
-            outbox.0.push((
-                gateway,
-                MsgClass::Snapshot,
-                bytes.clone(),
-                Durability::Ephemeral,
-            ));
+    for (cell, recipients) in &plan.recipients {
+        let cell_rows = &by_cell[cell];
+        let to_everyone = recipients.len() == observers.len();
+        let mut gateways: Vec<NodeId> = recipients.iter().map(|s| gateway_of[s]).collect();
+        gateways.sort_unstable();
+        gateways.dedup();
+        stats.interest_rows_shipped += (cell_rows.len() * recipients.len()) as u64;
+        for chunk in partition_entities(cell_rows, config.snapshot_datagram_budget) {
+            let snapshot_bytes = snapshot_body(frame_id, &clock, chunk);
+            let frame = if to_everyone {
+                ShardToGateway::Frame {
+                    realm_fence,
+                    source_tick: clock.local_tick,
+                    snapshot_bytes,
+                }
+            } else {
+                ShardToGateway::FrameFor {
+                    realm_fence,
+                    source_tick: clock.local_tick,
+                    recipients: recipients.clone(),
+                    snapshot_bytes,
+                }
+            };
+            stats.interest_bodies += 1;
+            push_snapshot(&mut outbox, &frame, &gateways);
         }
+    }
+    // The degrade: a row this shard could not place ships to everybody, as it always did.
+    if !unplaced.is_empty() {
+        stats.interest_rows_unplaced += unplaced.len() as u64;
+        for chunk in partition_entities(&unplaced, config.snapshot_datagram_budget) {
+            let frame = ShardToGateway::Frame {
+                realm_fence,
+                source_tick: clock.local_tick,
+                snapshot_bytes: snapshot_body(frame_id, &clock, chunk),
+            };
+            stats.interest_bodies += 1;
+            push_snapshot(&mut outbox, &frame, &all_gateways);
+        }
+    }
+    // The notices: RETAINED, like the remove message — a lost one is a figure frozen on a screen.
+    for (session, entity) in &plan.removals {
+        let bytes = postcard::to_allocvec(&ShardToGateway::EntityOutOfInterest {
+            realm_fence,
+            session: *session,
+            entity: *entity,
+            at: clock.universe_tick,
+        })
+        .expect("closed wire enums serialize infallibly");
+        outbox.0.push((
+            gateway_of[session],
+            MsgClass::Control,
+            crate::io::bytes(bytes),
+            Durability::Retained,
+        ));
+        stats.interest_removals += 1;
+    }
+}
+
+/// One snapshot body: the shard always stamps sub 0; the gateway re-tags per session.
+fn snapshot_body(frame_id: u64, clock: &ClockSample, entities: Vec<EntitySnap>) -> Vec<u8> {
+    let snapshot = SnapshotDatagram {
+        sub: SubId(0),
+        frame_id,
+        source_tick: clock.local_tick,
+        universe_tick: clock.universe_tick,
+        entities,
+    };
+    postcard::to_allocvec(&snapshot).expect("closed wire enums serialize infallibly")
+}
+
+/// ONE shared body per chunk, cloned (refcount bump) to every gateway that serves a recipient —
+/// never an O(entities) copy per gateway (SCALE-1).
+fn push_snapshot(outbox: &mut OutboundBox, frame: &ShardToGateway, gateways: &[NodeId]) {
+    let bytes = crate::io::bytes(
+        postcard::to_allocvec(frame).expect("closed wire enums serialize infallibly"),
+    );
+    for &gateway in gateways {
+        outbox.0.push((
+            gateway,
+            MsgClass::Snapshot,
+            bytes.clone(),
+            Durability::Ephemeral,
+        ));
     }
 }

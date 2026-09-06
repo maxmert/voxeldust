@@ -145,6 +145,7 @@ fn a_granted_shard_renews_its_realm_and_granted_entities_on_cadence() {
         yaw: 0.0,
         pitch: 0.0,
         last_applied_seq: None,
+        look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
         prev_offset: LatticePos::ORIGIN,
     };
     let granted_e = EntityId::pack(EntityKind::Player, 10, 1, 1);
@@ -237,6 +238,7 @@ fn a_cohosting_shard_renews_its_child_realm_lease_on_cadence() {
             yaw: 0.0,
             pitch: 0.0,
             last_applied_seq: None,
+            look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
             prev_offset: LatticePos::ORIGIN,
         },
     );

@@ -58,6 +58,16 @@ pub const SUN_ABSOLUTE_MAGNITUDE: f64 = 4.83;
 /// One parsec in metres — the unit the magnitude–distance relation is written in.
 pub const PARSEC_M: f64 = 3.085_677_581_491_367e16;
 
+/// ★ THE OCCUPANT'S FIGURE (foundation slice 2, 2026-09-05): the CIRCUMSCRIBED extent — the radius,
+/// as every look's extent in this crate is — of the one figure every occupant draws as today: a point
+/// of light one metre across. ONE home for the two readers: the renderer's point radius IS it, and a
+/// shard's interest reach reads it through the same formula a realm's reach uses (`visibility_reach_m`,
+/// at the drawable angle). A character with a body of its own will state its extent per entity, as a
+/// hull states its rating; until then every dot is born with this one. Example: at this extent and the
+/// drawable angle (one pixel at the reference view), a lone occupant is shipped to an observer inside
+/// about 870 m, plus the lead for the closing speed.
+pub const OCCUPANT_FIGURE_EXTENT_M: f64 = 0.5;
+
 /// ★ THE REACH BY LIGHT: how far a body of luminosity `luma_lsun` (Suns; a planet's is its REFLECTED
 /// light, as the world states it) is still visible at `limiting_magnitude`. The magnitude–distance
 /// relation: `M = M_sun − 2.5·log10(L)`, `d = 10 pc · 10^((m_lim − M)/5)`. Zero for no light. Example:

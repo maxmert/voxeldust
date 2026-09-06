@@ -578,4 +578,18 @@ pub struct StubStats {
     pub lineage_held_unattested: u64,
     /// The ruler switch, slice 3 — a held statement discarded: the directory named another node.
     pub lineage_discarded: u64,
+    /// THE INTEREST (D-9, slice 2) — snapshot bodies shipped this run: one per cube with rows, per
+    /// MTU chunk (a body for every observer rides the whole-realm arm and counts here too).
+    pub interest_bodies: u64,
+    /// THE INTEREST — rows shipped, summed over recipients: the bytes proxy the gate reads. Grows
+    /// with each observer's neighbours, never with the realm's population.
+    pub interest_rows_shipped: u64,
+    /// THE INTEREST — (observer, occupant) pairs told "out of your interest" this run.
+    pub interest_removals: u64,
+    /// THE INTEREST — rows that could not be placed in this shard's own frame and shipped to every
+    /// observer instead (the same counted degrade as `entity_rows_foreign_labelled`).
+    pub interest_rows_unplaced: u64,
+    /// THE INTEREST — the cube side changed (an occupant with a bigger look arrived), so every
+    /// observer's hold was re-keyed from empty.
+    pub interest_rule_reset: u64,
 }

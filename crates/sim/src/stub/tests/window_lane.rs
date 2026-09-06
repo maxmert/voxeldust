@@ -2576,6 +2576,7 @@ fn measure_the_galaxy_shards_tick_against_its_census() {
             yaw: 0.0,
             pitch: 0.0,
             last_applied_seq: None,
+            look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
             prev_offset: LatticePos::default(),
         },
     );

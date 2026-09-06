@@ -90,6 +90,8 @@ pub fn gateway_view(
         sessions_closed_peer_lost,
         sessions_closed_peer_reincarnated,
         sessions_replaced_by_relogin,
+        interest_recipient_unsubscribed,
+        interest_removals_fanned,
         window_alien_rows,
         window_hop_invalid,
         window_unresolved_standing,
@@ -182,6 +184,8 @@ pub fn gateway_view(
         sessions_closed_peer_lost,
         sessions_closed_peer_reincarnated,
         sessions_replaced_by_relogin,
+        interest_recipient_unsubscribed,
+        interest_removals_fanned,
         window_alien_rows,
         window_hop_invalid,
         window_unresolved_standing,
@@ -329,6 +333,8 @@ mod tests {
             sessions_closed_peer_lost: 60,
             sessions_closed_peer_reincarnated: 61,
             sessions_replaced_by_relogin: 62,
+            interest_recipient_unsubscribed: 63,
+            interest_removals_fanned: 64,
             window_alien_rows: 52,
             window_hop_invalid: 53,
             window_unresolved_standing: 54,
@@ -435,6 +441,8 @@ mod tests {
         assert_eq!(view.sessions_closed_peer_lost, 60);
         assert_eq!(view.sessions_closed_peer_reincarnated, 61);
         assert_eq!(view.sessions_replaced_by_relogin, 62);
+        assert_eq!(view.interest_recipient_unsubscribed, 63);
+        assert_eq!(view.interest_removals_fanned, 64);
         assert_eq!(view.window_alien_rows, 52);
         assert_eq!(view.window_hop_invalid, 53);
         assert_eq!(view.window_unresolved_standing, 54);

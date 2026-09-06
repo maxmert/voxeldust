@@ -32,6 +32,7 @@ mod containment;
 mod crossing;
 /// The ownership hand-off machinery end to end (banner 3581): the dest-side OpenInputSlot adopt, the applied-steps idempotency journal, the ordered saga Demote/Promote/ReHome consumers including source==dest re-own and the retained-ghost collision, the source-ghost lifecycle (take-over proof, hold closure, band-exit Despawn), then the remaining saga-Promote no-op/defer arms, the deferred promote re-driven after the crossing lands, post-marker input at the resume watermark, the idle re-stamp and the slot's fence/watermark guards.
 mod handoff;
+mod interest;
 /// Occupant input integration and THE SPEED LAW (banner 2831) plus the client-session lane: walk/yaw/pitch-clamp, per-axis clamp and diagonal normalization, the governed ceiling and its ramp, the ceiling applied to a transient, the realm time multiplier; then input-discard reasons, the finite gate, action_bits inertness, session-fence upgrade and stale-fence detach, per-tick snapshot frames and budget partitioning, entity minting and the bounded InputLog.
 mod movement;
 /// The ONE WRITER: a parent authoring its direct children's placements and every SL1 conversion built on it.
@@ -591,6 +592,7 @@ fn slice6_dot(entity: EntityId, frame: FrameRef, authority: Authority) -> Dot {
         yaw: 0.0,
         pitch: 0.0,
         last_applied_seq: None,
+        look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
         prev_offset: LatticePos::ORIGIN,
     }
 }
@@ -958,6 +960,7 @@ fn insert_owned_dot(rig: &mut Rig, session: SessionId, entity: EntityId, offset:
             yaw: 0.0,
             pitch: 0.0,
             last_applied_seq: None,
+            look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
             prev_offset: LatticePos::from_metres(offset, vd_core::pose::Tier::Fine),
         },
     );
@@ -1418,6 +1421,7 @@ fn insert_owned_dot_framed(
             yaw: 0.0,
             pitch: 0.0,
             last_applied_seq: None,
+            look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
             prev_offset: LatticePos::from_metres(offset, vd_core::pose::Tier::Fine),
         },
     );

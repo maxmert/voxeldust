@@ -303,7 +303,11 @@ pub const PROTO_MAJOR: u16 = 1;
 /// parent's window at once. Mesh-only, one cluster build; the floor does not move.
 /// **29** — THE REACH (owner-approved: ruling 2026-09-02 R6, the rule of 2026-09-04): `ReachStated` (discriminant
 /// 43), a child's visibility reach by size and by light, to its parent, on change. Mesh-only.
-pub const PROTO_MINOR: u16 = 29;
+/// **30** — THE INTEREST BODY (D-9, owner-approved 2026-09-05, foundation slice 2): two appended arms on
+/// `ShardToGateway` — `FrameFor` (one snapshot body for the sessions it names) and `EntityOutOfInterest`
+/// (one occupant left one observer's interest). Mesh-only: the client-facing `SnapshotDatagram` and
+/// `EventMsg::EntityRemoved` are unchanged, so the floor does not move.
+pub const PROTO_MINOR: u16 = 30;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -561,8 +565,11 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 29,
-            "minor 29 is THE REACH (owner ruling 2026-09-02 R6, built 2026-09-04): ReachStated (disc 43), \
+            PROTO_MINOR, 30,
+            "minor 30 is THE INTEREST BODY (D-9, owner-approved 2026-09-05): FrameFor (disc 14) and \
+             EntityOutOfInterest (disc 15) on ShardToGateway — a snapshot body for the sessions it \
+             names, and one occupant leaving one observer's interest; \
+             minor 29 is THE REACH (owner ruling 2026-09-02 R6, built 2026-09-04): ReachStated (disc 43), \
              a child's reach by size and by light to its parent, on change; \
              minor 28 is THE HAND-OVER NAMES ITS NODE (owner-approved 2026-09-04): ExteriorMoved carries \
              the new parent's node, so a gateway opens the window at once; \
@@ -662,7 +669,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.29");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.30");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is

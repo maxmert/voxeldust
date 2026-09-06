@@ -472,6 +472,35 @@ pub enum ShardToGateway {
         /// The generation this shard's catalogue currently folds to.
         generation: u64,
     },
+    /// ★ THE INTEREST BODY (D-9, owner-approved 2026-09-05, foundation slice 2). One snapshot body —
+    /// an opaque postcard [`crate::channels::SnapshotDatagram`], exactly as [`ShardToGateway::Frame`]
+    /// carries — for the sessions NAMED in `recipients` and nobody else. The shard sorts its occupants
+    /// into cells of one reach plus one lead and ships one body per cell to the observers that hold
+    /// that cell, so a client's bytes grow with its neighbours, never with the realm's population.
+    /// The gateway re-tags per recipient's subscription and forwards, never decoding the body; a
+    /// recipient that does not subscribe to the sender is skipped and counted. A body whose
+    /// recipients are every observer rides the older whole-realm `Frame`. Snapshot class,
+    /// unreliable, latest-wins; sibling bodies of one tick share one `frame_id`. Appended arm.
+    ///
+    /// Example: three hundred people at a station; the pilot at the far dock receives the twelve
+    /// near the dock, in one body shared with the eleven others who stand there.
+    FrameFor {
+        realm_fence: Fence,
+        source_tick: TickId,
+        recipients: Vec<SessionId>,
+        snapshot_bytes: Vec<u8>,
+    },
+    /// ★ OUT OF INTEREST (D-9, foundation slice 2): `entity` left `session`'s interest — it is still
+    /// alive on this shard, it is simply no longer shipped to that one observer. The gateway delivers
+    /// it to that session alone as the existing `EventMsg::EntityRemoved` (the client evicts a figure
+    /// only on a sound signal, never on silence, and a later row re-creates it), so the client wire is
+    /// unchanged. Control class, retained. Appended arm.
+    EntityOutOfInterest {
+        realm_fence: Fence,
+        session: SessionId,
+        entity: EntityId,
+        at: UniverseTick,
+    },
 }
 
 impl ShardToGateway {
@@ -480,7 +509,8 @@ impl ShardToGateway {
     #[must_use]
     pub fn into_snapshot_bytes(self) -> Option<Vec<u8>> {
         match self {
-            ShardToGateway::Frame { snapshot_bytes, .. } => Some(snapshot_bytes),
+            ShardToGateway::Frame { snapshot_bytes, .. }
+            | ShardToGateway::FrameFor { snapshot_bytes, .. } => Some(snapshot_bytes),
             ShardToGateway::SessionAttached { .. }
             | ShardToGateway::SessionDetached { .. }
             | ShardToGateway::SubscriptionReady { .. }
@@ -493,7 +523,8 @@ impl ShardToGateway {
             | ShardToGateway::WindowRelayed { .. }
             | ShardToGateway::WindowStaticRows { .. }
             | ShardToGateway::StarCatalogue { .. }
-            | ShardToGateway::StarSkyAlive { .. } => None,
+            | ShardToGateway::StarSkyAlive { .. }
+            | ShardToGateway::EntityOutOfInterest { .. } => None,
         }
     }
 
@@ -520,7 +551,9 @@ impl ShardToGateway {
             | ShardToGateway::WindowRelayed { .. }
             | ShardToGateway::WindowStaticRows { .. }
             | ShardToGateway::StarCatalogue { .. }
-            | ShardToGateway::StarSkyAlive { .. } => None,
+            | ShardToGateway::StarSkyAlive { .. }
+            | ShardToGateway::FrameFor { .. }
+            | ShardToGateway::EntityOutOfInterest { .. } => None,
         }
     }
 }
@@ -1281,6 +1314,18 @@ mod tests {
             ShardToGateway::StarSkyAlive {
                 generation: 0xcbf2_9ce4_8422_2325,
             },
+            ShardToGateway::FrameFor {
+                realm_fence: Fence(2),
+                source_tick: TickId(3),
+                recipients: vec![SessionId(1), SessionId(4)],
+                snapshot_bytes: vec![9, 8],
+            },
+            ShardToGateway::EntityOutOfInterest {
+                realm_fence: Fence(2),
+                session: SessionId(1),
+                entity: EntityId(7),
+                at: UniverseTick(11),
+            },
         ]
     }
 
@@ -1351,6 +1396,9 @@ mod tests {
                 ShardToGateway::StarCatalogue { .. } => 12,
                 // The sky's liveness beat holds 13 (S11) forever.
                 ShardToGateway::StarSkyAlive { .. } => 13,
+                // The interest body and the out-of-interest notice hold 14/15 (mesh minor 30) forever.
+                ShardToGateway::FrameFor { .. } => 14,
+                ShardToGateway::EntityOutOfInterest { .. } => 15,
             }
         }
         fn g2s_index(msg: &GatewayToShard) -> u8 {
@@ -1372,9 +1420,9 @@ mod tests {
             assert_eq!(bytes[0], s2g_index(&msg));
             seen.insert(bytes[0]);
         }
-        assert_eq!(seen.len(), 14);
+        assert_eq!(seen.len(), 16);
         assert_eq!(seen.first().copied(), Some(0));
-        assert_eq!(seen.last().copied(), Some(13));
+        assert_eq!(seen.last().copied(), Some(15));
         let mut seen = std::collections::BTreeSet::new();
         for msg in every_gateway_to_shard_arm() {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
@@ -1517,9 +1565,14 @@ mod tests {
             prior_g2s
         );
         // The extractor sugar declines every window arm (they are typed rows, never opaque
-        // frames) — the exhaustive matches stay honest.
+        // frames) — the exhaustive matches stay honest. The interest body (disc 14) IS an opaque
+        // snapshot frame, so it yields its bytes like `Frame`; the out-of-interest notice does not.
         for msg in every_shard_to_gateway_arm().into_iter().skip(7) {
-            assert_eq!(msg.clone().into_snapshot_bytes(), None);
+            let is_interest_body = matches!(msg, ShardToGateway::FrameFor { .. });
+            assert_eq!(
+                msg.clone().into_snapshot_bytes(),
+                is_interest_body.then(|| vec![9, 8])
+            );
             assert_eq!(msg.into_realm_snapshot_bytes(), None);
         }
     }

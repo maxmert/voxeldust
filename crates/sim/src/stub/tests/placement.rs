@@ -137,11 +137,11 @@ fn an_occupant_standing_in_a_child_realm_is_emitted_from_this_shards_own_centre(
     );
     assert_eq!(entities.len(), 1);
     assert_eq!(
-        entities[0].pose.frame, own_frame,
+        entities[0].snap.pose.frame, own_frame,
         "the row leaves in the ONE frame this shard speaks in",
     );
     assert_eq!(
-        fm(entities[0].pose.pos),
+        fm(entities[0].snap.pose.pos),
         DVec3::new(child_at + inside_child, 0.0, 0.0),
         "this shard added where it put its own child: {child_at} + {inside_child}",
     );
@@ -189,7 +189,7 @@ fn a_fed_ghost_ships_with_the_neighbours_frame_label_and_is_never_re_measured_he
     );
     assert_eq!(entities.len(), 1);
     assert_eq!(
-        entities[0].pose, ghost_pose,
+        entities[0].snap.pose, ghost_pose,
         "the neighbour's pose ships BIT-IDENTICAL — same value, same neighbour frame label"
     );
     assert_eq!(
@@ -197,7 +197,7 @@ fn a_fed_ghost_ships_with_the_neighbours_frame_label_and_is_never_re_measured_he
         "and the degrade is COUNTED, not silent",
     );
     assert_eq!(
-        entities[0].pose.frame, ghost_frame,
+        entities[0].snap.pose.frame, ghost_frame,
         "the label stays the NEIGHBOUR's; restamping it local would claim the number is measured \
          from here, which is exactly the lie the fold shipped"
     );
@@ -300,7 +300,7 @@ fn emitted_entities_ships_the_emitting_union_bit_identical_and_drops_the_silent(
         stats.entity_rows_foreign_labelled, 0,
         "an occupant in this shard's own realm is never a degrade",
     );
-    let mut got: Vec<EntityId> = entities.iter().map(|e| e.entity).collect();
+    let mut got: Vec<EntityId> = entities.iter().map(|e| e.snap.entity).collect();
     got.sort_unstable();
     let mut want = vec![owned, retained];
     want.sort_unstable();
@@ -313,10 +313,10 @@ fn emitted_entities_ships_the_emitting_union_bit_identical_and_drops_the_silent(
         let dot = dots
             .0
             .values()
-            .find(|d| d.entity == snap.entity)
+            .find(|d| d.entity == snap.snap.entity)
             .expect("every emitted row came from a dot");
         assert_eq!(
-            snap.pose, dot.pose,
+            snap.snap.pose, dot.pose,
             "the emitted pose is BIT-IDENTICAL to the held one — frame label included"
         );
     }
@@ -992,7 +992,7 @@ fn every_ledger_miss_arm_refuses_loudly() {
     );
     assert_eq!(rows.len(), 1, "the row still ships");
     assert_eq!(
-        rows[0].pose,
+        rows[0].snap.pose,
         dots.0[&SessionId(77)].pose,
         "verbatim, never re-spaced"
     );

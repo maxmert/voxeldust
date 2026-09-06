@@ -257,6 +257,10 @@ pub struct GatewayView {
     pub sessions_closed_peer_reincarnated: u64,
     /// Sessions ended by a fresh `Hello` from the same node (2026-09-05).
     pub sessions_replaced_by_relogin: u64,
+    /// Interest bodies naming a session that does not subscribe to the sender (2026-09-05).
+    pub interest_recipient_unsubscribed: u64,
+    /// Out-of-interest notices delivered to one session (2026-09-05).
+    pub interest_removals_fanned: u64,
     /// Slice B — rows whose stated frame was not their level's own: alien, dropped.
     pub window_alien_rows: u64,
     /// Slice B — chain levels whose hop was absent/mismatched/rosterless: prefix capped there.
@@ -790,6 +794,8 @@ mod tests {
                 sessions_closed_peer_lost: 60,
                 sessions_closed_peer_reincarnated: 61,
                 sessions_replaced_by_relogin: 62,
+                interest_recipient_unsubscribed: 63,
+                interest_removals_fanned: 64,
                 window_alien_rows: 52,
                 window_hop_invalid: 53,
                 window_unresolved_standing: 54,

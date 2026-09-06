@@ -335,8 +335,9 @@ pub fn depth_planes(subjects: &[(f64, f64)], fov_y: f64, viewport_h_px: f64) -> 
 use vd_client::realm_scene::{BoxShape, RealmScene};
 
 /// The default capture vertical FOV (radians, 45°) — the framing distance is derived from this,
-/// so a box scene fits the same frustum the render camera uses. A named const (no magic number).
-pub const FIT_FOV_Y: f64 = std::f64::consts::FRAC_PI_4;
+/// so a box scene fits the same frustum the render camera uses. THE reference view's field of view
+/// (`vd_core::geometry::REFERENCE_VIEW_FOV_Y_RAD`): the same number a shard's drawable floor reads.
+pub const FIT_FOV_Y: f64 = vd_core::geometry::REFERENCE_VIEW_FOV_Y_RAD;
 
 /// Headroom multiplier on the fitted distance so no box edge kisses the frame border (a small,
 /// deterministic margin — 15% padding around the union bounds).

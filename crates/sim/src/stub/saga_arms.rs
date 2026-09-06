@@ -598,6 +598,7 @@ fn re_home_apply(
                 pitch: kinematics::yaw_pitch_from_orient(pose.orient).1,
                 last_applied_seq: None,
                 // Seed to the re-homed pose offset: this tick's swept segment is degenerate.
+                look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
                 prev_offset: pose.pos,
             },
         );

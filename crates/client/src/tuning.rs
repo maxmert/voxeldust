@@ -19,7 +19,8 @@ pub struct ClientInterpTuning {
 impl ClientInterpTuning {
     /// The P1.5 default: a 120 ms buffer at a 20 Hz universe tick.
     pub const DEFAULT: ClientInterpTuning = ClientInterpTuning {
-        interp_buffer_ms: 120.0,
+        // The contract constant: the shard's interest lead reads the same number.
+        interp_buffer_ms: vd_wire::channels::INTERP_BUFFER_MS,
         tick_hz: 20.0,
     };
 

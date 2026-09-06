@@ -319,6 +319,14 @@ pub enum EventMsg {
     },
 }
 
+/// ★ THE INTERPOLATION BUFFER, in milliseconds — a CONTRACT between the two ends of the snapshot lane
+/// (foundation slice 2, 2026-09-05). The client draws this far behind the freshest delivered snapshot
+/// (`ClientInterpTuning::DEFAULT` reads it), so a shard must ship an occupant this far AHEAD of the
+/// moment it comes within reach: the interest lead is the closing speed times this buffer plus one
+/// tick. One number, two readers, so the lead and the delay cannot drift apart. 100–150 ms absorbs
+/// 20 Hz jitter and datagram reorder (connection_plane.md latency budget); never extrapolation.
+pub const INTERP_BUFFER_MS: f64 = 120.0;
+
 /// One entity's state inside a snapshot frame.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntitySnap {

@@ -90,6 +90,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     });
     world.insert_resource(InputLog::new(input_log_capacity));
     world.insert_resource(FrameCounter::default());
+    world.insert_resource(crate::stub::interest::InterestHeld::default());
     world.insert_resource(StubStats::default());
     world.insert_resource(AppliedSteps::default());
     world.insert_resource(PendingCrossings::default());

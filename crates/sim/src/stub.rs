@@ -41,6 +41,7 @@ mod frames;
 mod ghost;
 mod greeting;
 mod handoff;
+pub mod interest;
 pub mod lineage;
 mod placement;
 pub mod reach;

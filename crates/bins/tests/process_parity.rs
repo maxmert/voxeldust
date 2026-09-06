@@ -484,9 +484,23 @@ fn p1_parity_real_binaries_over_quic() {
     let mut hello_retry = Instant::now();
     let mut walker_hello_sent = walker.send_hello(AccountId(1000));
     let mut idle_hello_sent = idle.send_hello(AccountId(1001));
+    // THE WALK IS ONE LEG, NOT A MARCH (the interest, 2026-09-06). The walker used to hold its key
+    // down for the whole login: at the dev foot speed of a kilometre a second it was sixty
+    // kilometres away by the time the sky had arrived, and a shard ships an occupant only to the
+    // observers that can still draw it — so the idle dot was told the walker had left its
+    // interest, evicted it, and this loop waited for a second pose that could never come. Now the
+    // walker steps until it has measurably moved and then stands, inside the idle dot's reach, and
+    // the parity claim is made about two dots that can see each other.
+    let mut walker_moved = false;
     loop {
-        walker.step(true);
+        walker.step(!walker_moved);
         idle.step(false);
+        walker_moved = walker.own_entity.is_some_and(|own| {
+            walker
+                .poses
+                .get(&own)
+                .is_some_and(|p| p.pos.delta_m(spawn_pos, vd_core::pose::Tier::Fine).length() > 0.5)
+        });
         // Children may still be booting, so the gateway's lane may refuse the first sends: retry
         // `Hello` until the transport ACCEPTS it once. From then on the reliable lane delivers it,
         // and a second accepted `Hello` would be read as a new process (a re-login), not a retry.

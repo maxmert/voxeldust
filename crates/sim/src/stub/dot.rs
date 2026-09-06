@@ -104,6 +104,12 @@ pub struct Dot {
     /// (`region_signed_distance` at `cur`), not a swept segment, so `prev_offset` is written-but-unread —
     /// RESERVED for the deferred additive swept tunnel-guard (DEFERRED D-45). Seeded to the spawn offset
     /// at every construction site.
+    /// ★ THE FIGURE THIS OCCUPANT DRAWS AS (foundation slice 2): its extent in metres, a fact about
+    /// what it IS, per entity — as a hull states its rating. A shard's interest reach reads it
+    /// through the same rule a realm's reach uses (`visibility_reach_m` at the dot angle). Today every
+    /// dot is born with the one figure the renderer draws ([`vd_core::look::OCCUPANT_FIGURE_EXTENT_M`]);
+    /// a character with a body states its own.
+    pub look_extent_m: f64,
     pub prev_offset: LatticePos,
 }
 

@@ -443,8 +443,56 @@ pub(crate) fn fan_entity_removed(
     }
 }
 
+/// THE INTEREST's remove (D-9, slice 2): `entity` left `session`'s interest on shard `from`. Told to
+/// that ONE session as the existing `EntityRemoved` — the same fence and minor checks as the fan,
+/// and never for the session's own avatar (the shard never names it, but the guard is structural).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fan_out_of_interest(
+    from: NodeId,
+    realm_fence: Fence,
+    session_id: SessionId,
+    entity: EntityId,
+    at: vd_core::UniverseTick,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    let Some(session) = sessions.by_session.get(&session_id) else {
+        stats.interest_recipient_unsubscribed += 1;
+        return;
+    };
+    let SessionPhase::Active { entity: own } = &session.phase else {
+        stats.interest_recipient_unsubscribed += 1;
+        return;
+    };
+    if *own == entity {
+        return;
+    }
+    let table = session.hot.subs.load();
+    let Some(entry) = table.lookup(from) else {
+        stats.interest_recipient_unsubscribed += 1;
+        return;
+    };
+    let accepted = entry.accepted;
+    drop(table);
+    if realm_fence.is_stale_against(accepted) {
+        stats.stale_removals_dropped += 1;
+        return;
+    }
+    if session.negotiated_minor < 14 {
+        return;
+    }
+    push_control(
+        outbox,
+        session.client,
+        &ServerControlMsg::Event(vd_wire::channels::EventMsg::EntityRemoved { entity, at }),
+    );
+    stats.interest_removals_fanned += 1;
+}
+
 /// Fan one shard frame (from shard `from`) out to that shard's subscribers, each at ITS sub
-/// id and ITS per-shard accepted fence. The READ-plane heart (1d.2a): iterate ONLY
+/// id and ITS per-shard accepted fence. THE INTEREST (D-9, slice 2): a `FrameFor` names its
+/// recipients, and only those are served; a `Frame` is for every subscriber. The READ-plane heart (1d.2a): iterate ONLY
 /// subscribers-of-`from` (H2 reverse index, O(subscribers) not O(all sessions)) and resolve
 /// each session's `SubEntry` for `from` off the wait-free hot `SubTable`.
 pub(crate) fn on_shard_frame(
@@ -454,15 +502,25 @@ pub(crate) fn on_shard_frame(
     stats: &mut GatewayStats,
     outbox: &mut OutboundBox,
 ) {
-    let Ok(ShardToGateway::Frame {
-        realm_fence,
-        source_tick: _,
-        snapshot_bytes,
-    }) = postcard::from_bytes::<ShardToGateway>(bytes)
-    else {
-        stats.undecodable += 1;
-        return;
-    };
+    let (realm_fence, snapshot_bytes, recipients) =
+        match postcard::from_bytes::<ShardToGateway>(bytes) {
+            Ok(ShardToGateway::Frame {
+                realm_fence,
+                source_tick: _,
+                snapshot_bytes,
+            }) => (realm_fence, snapshot_bytes, None),
+            Ok(ShardToGateway::FrameFor {
+                realm_fence,
+                source_tick: _,
+                recipients,
+                snapshot_bytes,
+            }) => (realm_fence, snapshot_bytes, Some(recipients)),
+            Ok(_) | Err(_) => {
+                stats.undecodable += 1;
+                return;
+            }
+        };
+    let named = recipients.is_some();
     // 1d.5a: peek the `frame_id` ONCE off the wire (the per-observer delivery watermark advances
     // by it). A malformed body fails HERE and the whole frame is abandoned (counted once) — and
     // because the peek validates the leading `sub` varint, the per-session `retag_snapshot_sub`
@@ -482,17 +540,28 @@ pub(crate) fn on_shard_frame(
     // pin on the one hop that must stay sub-millisecond. The re-tag below is a leading-varint splice with
     // no decode at all.
     let mut retagged: BTreeMap<SubId, vd_sim::io::Bytes> = BTreeMap::new();
-    for session_id in sessions.subscribers_of(from) {
+    let targets = recipients.unwrap_or_else(|| sessions.subscribers_of(from));
+    for session_id in targets {
         let Some(session) = sessions.by_session.get_mut(&session_id) else {
-            // The reverse index and `by_session` are kept in sync by `open_sub`/the
-            // drain-sweep; a missing session is an index/table desync (counted, never silent).
-            stats.frame_sub_desync += 1;
+            // For a whole-realm frame the reverse index and `by_session` are kept in sync by
+            // `open_sub`/the drain-sweep, so a missing session is an index/table desync (counted,
+            // never silent). For a named recipient it is a session the shard still holds a dot for
+            // and the gateway has already closed (a Bye racing the body): counted apart.
+            if named {
+                stats.interest_recipient_unsubscribed += 1;
+            } else {
+                stats.frame_sub_desync += 1;
+            }
             continue;
         };
         // D-3 Slice 5b: a SELF-FENCED session no longer acts as authority — it is served NO frames (its
         // subs linger inert in the reverse index until the connection ends or a ResumeTicket adoption
         // re-homes it). A still-attaching session has no subs and is never in this index. Active only.
+        // A NAMED recipient that is not Active is the attach racing the first body: counted.
         if !matches!(session.phase, SessionPhase::Active { .. }) {
+            if named {
+                stats.interest_recipient_unsubscribed += 1;
+            }
             continue;
         }
         // Resolve THIS session's sub + per-shard accepted fence off the wait-free hot `SubTable`,
@@ -501,7 +570,11 @@ pub(crate) fn on_shard_frame(
         // a `None` is an invariant breach, counted (C2 honesty floor), never silent.
         let table = session.hot.subs.load();
         let Some(entry) = table.lookup(from) else {
-            stats.frame_sub_desync += 1;
+            if named {
+                stats.interest_recipient_unsubscribed += 1;
+            } else {
+                stats.frame_sub_desync += 1;
+            }
             continue;
         };
         let sub = entry.sub;

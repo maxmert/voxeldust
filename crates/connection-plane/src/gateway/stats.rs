@@ -253,6 +253,13 @@ pub struct GatewayStats {
     /// login proceeded as a fresh one. A `Hello` is only ever sent by a process that was never
     /// welcomed, so a second one is a new process, never a duplicate.
     pub sessions_replaced_by_relogin: u64,
+    /// THE INTEREST (D-9, slice 2) — a `FrameFor` named a session that does not subscribe to the
+    /// sending shard: skipped. A shard names only the sessions whose dots it holds, and a dot's
+    /// session subscribes to its shard, so a nonzero count is a race between an attach and the
+    /// first body, never silent.
+    pub interest_recipient_unsubscribed: u64,
+    /// THE INTEREST — out-of-interest notices delivered to one session as `EntityRemoved`.
+    pub interest_removals_fanned: u64,
     /// Slice B — rows dropped because their stated tail frame was not their level's own frame
     /// (or an unknown-frame refusal from the fold): alien, dropped, counted (§2.6.6).
     pub window_alien_rows: u64,

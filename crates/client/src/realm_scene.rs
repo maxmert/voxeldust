@@ -464,7 +464,7 @@ pub fn color_for_realm(realm: RealmId) -> [f32; 4] {
 /// A rendering convention, not a world number: nothing on the wire and nothing in the sim reads
 /// it. The physically-exposed successor (an HDR apparent-magnitude exposure model) is one of the
 /// owner-pending rendering decisions and is registered in DEFERRED, not guessed at here.
-pub const POINT_SOURCE_BASE_RADIUS_M: f64 = 0.5;
+pub const POINT_SOURCE_BASE_RADIUS_M: f64 = vd_core::look::OCCUPANT_FIGURE_EXTENT_M;
 
 /// The drawn sRGB of each Morgan-Keenan spectral class, indexed by the `TAG_LUMA` bag's
 /// `class_code` (`vd_physics::taxonomy::SpectralClass`: `O=0, B=1, A=2, F=3, G=4, K=5, M=6`).

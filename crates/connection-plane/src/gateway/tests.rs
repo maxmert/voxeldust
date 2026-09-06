@@ -1267,6 +1267,243 @@ fn frames_fan_out_retagged_and_stale_fences_drop() {
     assert_eq!(rig.stats().stale_frames_dropped, 1);
 }
 
+/// One interest body naming `recipients`, carrying one row at `frame_id`.
+fn frame_for_msg(fence: Fence, frame_id: u64, recipients: Vec<SessionId>) -> ShardToGateway {
+    let snapshot = SnapshotDatagram {
+        sub: SubId(0),
+        frame_id,
+        source_tick: TickId(1),
+        universe_tick: UniverseTick(50),
+        entities: vec![EntitySnap {
+            entity: EntityId(5),
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 7 },
+                DVec3::ZERO,
+                UniverseTick(50),
+            ),
+        }],
+    };
+    ShardToGateway::FrameFor {
+        realm_fence: fence,
+        source_tick: TickId(1),
+        recipients,
+        snapshot_bytes: postcard::to_allocvec(&snapshot).expect("encode"),
+    }
+}
+
+/// A second client (`node`) logged in fully — a distinct session on the same shard sub.
+fn second_login(rig: &mut Rig, node: NodeId) -> SessionId {
+    let before: std::collections::BTreeSet<SessionId> =
+        rig.world.resource::<GatewaySessions>().sessions().collect();
+    let _ = rig.tick(vec![Inbound::Wire {
+        from: node,
+        class: MsgClass::Control,
+        bytes: postcard::to_allocvec(&hello_msg()).expect("encode").into(),
+    }]);
+    let session = rig
+        .world
+        .resource::<GatewaySessions>()
+        .sessions()
+        .find(|s| !before.contains(s))
+        .expect("second session pending");
+    let _ = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(session))]);
+    let _ = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::Control,
+        &ShardToGateway::SessionAttached {
+            session,
+            entity: EntityId(78),
+            frame: FrameRef::SystemSpace { system_seed: 7 },
+            realm_fence: Fence(1),
+        },
+    )]);
+    session
+}
+
+#[test]
+fn an_interest_body_reaches_only_the_sessions_it_names() {
+    // THE INTEREST (D-9, slice 2): two clients on one shard. A body naming the first alone is
+    // re-tagged and forwarded to the first client only; the second receives nothing, and the
+    // stale-fence guard still applies per recipient.
+    let mut rig = Rig::new();
+    let (first, _) = rig.login();
+    let second_node = NodeId(101);
+    let second = second_login(&mut rig, second_node);
+    let sent = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::Snapshot,
+        &frame_for_msg(Fence(1), 9, vec![first]),
+    )]);
+    let to: Vec<NodeId> = sent
+        .iter()
+        .filter(|(_, class, _)| *class == MsgClass::Snapshot)
+        .map(|(to, _, _)| *to)
+        .collect();
+    assert_eq!(
+        to,
+        vec![CLIENT],
+        "the named session's client, and nobody else"
+    );
+    let snap: SnapshotDatagram = postcard::from_bytes(&sent[0].2).expect("decode");
+    assert_eq!(snap.frame_id, 9);
+    // Naming both reaches both, one shared re-tagged body (SCALE-1 survives).
+    let sent = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::Snapshot,
+        &frame_for_msg(Fence(1), 10, vec![first, second]),
+    )]);
+    let mut to: Vec<NodeId> = sent.iter().map(|(to, _, _)| *to).collect();
+    to.sort();
+    assert_eq!(to, vec![CLIENT, second_node]);
+    // A stale fence is dropped per recipient and counted as before.
+    let sent = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::Snapshot,
+        &frame_for_msg(Fence::GENESIS, 11, vec![first]),
+    )]);
+    assert!(sent.is_empty());
+    assert_eq!(rig.stats().stale_frames_dropped, 1);
+    assert_eq!(rig.stats().interest_recipient_unsubscribed, 0);
+}
+
+#[test]
+fn an_interest_body_naming_a_stranger_or_a_closed_session_is_counted_apart() {
+    let mut rig = Rig::new();
+    let (first, _) = rig.login();
+    // A session id the gateway never minted (a Bye raced the body): counted, not a desync.
+    let sent = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::Snapshot,
+        &frame_for_msg(Fence(1), 9, vec![SessionId(424_242), first]),
+    )]);
+    assert_eq!(sent.len(), 1, "the live recipient is still served");
+    assert_eq!(rig.stats().interest_recipient_unsubscribed, 1);
+    assert_eq!(rig.stats().frame_sub_desync, 0);
+    // A recipient with a session that has not attached yet (no subscription to the sender):
+    // counted the same way, served nothing.
+    let _ = rig.tick(vec![Inbound::Wire {
+        from: NodeId(101),
+        class: MsgClass::Control,
+        bytes: postcard::to_allocvec(&hello_msg()).expect("encode").into(),
+    }]);
+    let pending = rig
+        .world
+        .resource::<GatewaySessions>()
+        .sessions()
+        .find(|s| *s != first)
+        .expect("pending");
+    let sent = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::Snapshot,
+        &frame_for_msg(Fence(1), 10, vec![pending]),
+    )]);
+    assert!(
+        sent.iter()
+            .all(|(_, class, _)| *class != MsgClass::Snapshot)
+    );
+    assert_eq!(rig.stats().interest_recipient_unsubscribed, 2);
+    // An ACTIVE session named by a routable shard it does not subscribe to: counted the same way.
+    let sent = rig.tick(vec![wire(
+        DEST,
+        MsgClass::Snapshot,
+        &frame_for_msg(Fence(1), 11, vec![first]),
+    )]);
+    assert!(
+        sent.iter()
+            .all(|(_, class, _)| *class != MsgClass::Snapshot)
+    );
+    assert_eq!(rig.stats().interest_recipient_unsubscribed, 3);
+    assert_eq!(rig.stats().frame_sub_desync, 0);
+}
+
+#[test]
+fn an_out_of_interest_notice_evicts_the_figure_for_one_session_only() {
+    let mut rig = Rig::new();
+    let (first, _) = rig.login();
+    let second_node = NodeId(101);
+    let second = second_login(&mut rig, second_node);
+    let notice = |session: SessionId, entity: EntityId, fence: Fence| {
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::EntityOutOfInterest {
+                realm_fence: fence,
+                session,
+                entity,
+                at: UniverseTick(60),
+            },
+        )
+    };
+    // Told to the second session: one EntityRemoved to its client, nothing to the first.
+    let sent = rig.tick(vec![notice(second, EntityId(5), Fence(1))]);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, second_node);
+    let msg: ServerControlMsg = postcard::from_bytes(&sent[0].2).expect("decode");
+    assert_eq!(
+        msg,
+        ServerControlMsg::Event(vd_wire::channels::EventMsg::EntityRemoved {
+            entity: EntityId(5),
+            at: UniverseTick(60),
+        })
+    );
+    assert_eq!(rig.stats().interest_removals_fanned, 1);
+    // Never for the session's own avatar (77 is the first session's own entity).
+    let sent = rig.tick(vec![notice(first, EntityId(77), Fence(1))]);
+    assert!(sent.is_empty());
+    // A stale fence is dropped and counted with the other stale removals.
+    let sent = rig.tick(vec![notice(first, EntityId(5), Fence::GENESIS)]);
+    assert!(sent.is_empty());
+    assert_eq!(rig.stats().stale_removals_dropped, 1);
+    // A session the gateway does not hold: counted apart, never a panic.
+    let sent = rig.tick(vec![notice(SessionId(424_242), EntityId(5), Fence(1))]);
+    assert!(sent.is_empty());
+    assert_eq!(rig.stats().interest_recipient_unsubscribed, 1);
+    // A session that has not attached yet: counted the same way, told nothing.
+    let _ = rig.tick(vec![Inbound::Wire {
+        from: NodeId(102),
+        class: MsgClass::Control,
+        bytes: postcard::to_allocvec(&hello_msg()).expect("encode").into(),
+    }]);
+    let pending = rig
+        .world
+        .resource::<GatewaySessions>()
+        .sessions()
+        .find(|s| (*s != first) & (*s != second))
+        .expect("pending");
+    let sent = rig.tick(vec![notice(pending, EntityId(5), Fence(1))]);
+    assert!(
+        sent.iter().all(|(to, _, _)| *to == ORCH),
+        "only the pending grant retry"
+    );
+    assert_eq!(rig.stats().interest_recipient_unsubscribed, 2);
+    // An active session told by a routable shard it does not subscribe to: counted, told nothing.
+    let sent = rig.tick(vec![wire(
+        DEST,
+        MsgClass::Control,
+        &ShardToGateway::EntityOutOfInterest {
+            realm_fence: Fence(1),
+            session: first,
+            entity: EntityId(5),
+            at: UniverseTick(60),
+        },
+    )]);
+    assert!(sent.iter().all(|(to, _, _)| *to == ORCH));
+    assert_eq!(rig.stats().interest_recipient_unsubscribed, 3);
+    // A peer that negotiated below minor 14 is withheld the removal (the sender-gates rule).
+    rig.world
+        .resource_mut::<GatewaySessions>()
+        .by_session
+        .get_mut(&second)
+        .expect("second")
+        .negotiated_minor = 13;
+    let sent = rig.tick(vec![notice(second, EntityId(6), Fence(1))]);
+    assert!(
+        sent.iter().all(|(to, _, _)| *to == ORCH),
+        "nothing to any client; only the pending session's grant retry"
+    );
+    assert_eq!(rig.stats().interest_removals_fanned, 1);
+}
+
 #[test]
 fn two_active_sessions_share_one_retagged_body() {
     // SCALE-1: a second session with the SAME sub re-uses the ONE retagged body

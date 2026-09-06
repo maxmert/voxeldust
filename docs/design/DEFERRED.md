@@ -2738,7 +2738,41 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   `on_client_input` Buffer arm, `apply_commit` drain, `TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS`).
 - **Source:** 1c design `wf_f3eae69e` + Slice 1c.5 (the cap-with-fill resolution) + the 1c.5 audit `wf_e3397eb2`.
 
-### D-9 🟥 Snapshot emit is whole-realm broadcast + double-encoded — NO within-realm per-entity AoI (the load-bearing hundreds-in-one-location seam; see [[D-41]])
+### D-9 🟩 THE INTEREST — one body per cube of occupants, to the observers that hold it (BUILT 2026-09-05, foundation slice 2, owner-approved "yes to all")
+- **✅ BUILT (2026-09-05; the angle re-ruled 2026-09-06).** The rule: an occupant is shipped to an observer
+  inside the occupant's REACH — its look (`Dot::look_extent_m`, born as `vd_core::look::OCCUPANT_FIGURE_EXTENT_M`
+  = 1 m until the character states a body) at THE DRAWABLE ANGLE, one pixel at the reference view (45° over
+  720 rows, `vd_core::geometry::drawable_theta_min_rad`, ~869 m for a 1 m figure, ~1.7 km for a 2 m
+  character). ★ OWNER 2026-09-06: the first build used the realm WAKE angle (1.5°, ~76 m) and the owner
+  refused it — *"players should be seen from far enough"* — so a person is shipped while it can still be
+  DRAWN (cheap), where a realm is woken when it is a dot worth WAKING (expensive). The reference view is
+  ONE home in core; the renderer's capture height and the harness's fitted field of view read it — plus a
+  lead that grows with the closing speed over the interpolation buffer plus one tick
+  (`vd_wire::channels::INTERP_BUFFER_MS`, now the ONE home the client's tuning reads too). The shard sorts
+  its rows into cubes of one reach in its OWN frame (`crates/sim/src/stub/interest.rs`); every dot it holds
+  observes from its cube; an observer TAKES the cubes within its step count and KEEPS a cube one step
+  further out while it holds a figure the observer was shown (no flapping at a boundary). One body per cube
+  ships on the appended `ShardToGateway::FrameFor { recipients }` (mesh minor 30, disc 14) to the observers
+  holding it; a cube every observer holds rides the older whole-realm `Frame`, and a row that cannot be
+  placed in this frame ships to everybody, counted. An occupant that left an observer's hold is told to
+  that observer ONCE on `ShardToGateway::EntityOutOfInterest` (disc 15, Control, Retained), which the
+  gateway delivers as the EXISTING `EventMsg::EntityRemoved` — the client evicts a figure only on a sound
+  signal, never on silence, and a later row re-creates it; the client wire is unchanged. The gateway fans a
+  named body only to its recipients (`on_shard_frame`), counted apart when a name is stale
+  (`interest_recipient_unsubscribed`, admin 63) and per removal delivered (`interest_removals_fanned`, 64).
+  The double encode died with it (each cube's rows are encoded once per chunk).
+- **MEASURED (the owed gate, `crates/sim/src/stub/tests/interest.rs`):** four groups of 32 occupants a
+  ten kilometres apart in one realm — every observer receives its own 32 rows, 128 × 32 rows shipped where
+  whole-realm emission shipped 128 × 128; the dense case (128 in one place) keeps everyone seeing everyone.
+  Two neighbours share one whole-realm body; two strangers each get a body naming them alone; an occupant
+  walking out of reach is told once, silence after, and its return is silent.
+- **STILL A NUMBER TO WATCH:** with today's one-metre figure a lone person is shipped inside ~870 m plus the
+  lead; the character's real body roughly doubles it, and the suit's light adds the reach by light on top
+  (the limiting-magnitude rule realms use), which needs a light datum per occupant. A hull with people
+  aboard is a realm and follows its own reach.
+- **STILL OWED:** the realm-lane twin (`RealmFrame`/window fan-out O(observers×movers), D-RLM-18 item iii) is
+  a different lane and stays where it is ledgered.
+- *(the original entry, kept for the record)* Snapshot emit was whole-realm broadcast + double-encoded — NO within-realm per-entity AoI (the load-bearing hundreds-in-one-location seam; see [[D-41]])
 - **Missing:** `emit_frames` builds ONE `Vec<EntitySnap>` from EVERY emitting dot in the realm (filtered only by
   the authority-state `emits()` + the MTU budget, NEVER by observer) and the gateway `on_shard_frame` re-tags ONE
   shared `Arc` body per `SubId` and refcount-fans IDENTICAL bytes to every subscriber (the SCALE-1 optimization).

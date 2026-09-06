@@ -191,6 +191,7 @@ pub(crate) fn on_gateway_msg(
                     last_applied_seq: None,
                     // Seed to the spawn offset: tick-1's swept segment is degenerate. Origin when no stored
                     // pose (byte-identical to the old `DVec3::ZERO`); the stored offset otherwise.
+                    look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
                     prev_offset: pose.pos,
                 }
             });
@@ -401,6 +402,7 @@ fn adopt_input_slot(
         pitch: 0.0,
         last_applied_seq: None,
         // Seed to the spawn offset (origin): tick-1's swept segment is degenerate.
+        look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
         prev_offset: LatticePos::ORIGIN,
     });
     // STALE-GATEWAY-DROP (the binding day-one rule, `wire::session_flow`): a slot whose
