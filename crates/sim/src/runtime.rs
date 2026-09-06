@@ -7,7 +7,6 @@
 //! (dependency law: bins → node → sim → wire → core).
 
 use bevy_ecs::prelude::Resource;
-use std::collections::BTreeSet;
 use vd_core::{EpochId, NodeId, TickId, UniverseTick};
 
 use crate::capability::NodeKind;
@@ -26,15 +25,16 @@ pub struct InboundBox(pub Vec<Inbound>);
 /// drop. The transport's own per-peer capacity bounds what it *accepts*, not what
 /// this staging buffer *holds* — those are distinct ceilings.
 ///
-/// The second field is THE FORGET LIST (2026-09-05, the vanished-client wedge): the peers whose
-/// staged frames must be dropped at the next flush, because the consumer that produced them has
-/// ended its relationship with that peer (a gateway closing a dead client's session). Without it a
-/// dead peer's backlog sat in this box until the cap shed it, and the shed took every other peer's
-/// reliable frames with it. Written through [`OutboundBox::forget_peer`], taken by the flush.
+/// The second field counts THE FORGOTTEN FRAMES (2026-09-05, the vanished-client wedge; made
+/// immediate 2026-09-06): frames dropped from this box because the consumer that produced them has
+/// ended its relationship with their peer (a gateway closing a dead client's session). Without the
+/// forget a dead peer's backlog sat in this box until the cap shed it, and the shed took every other
+/// peer's reliable frames with it. Written through [`OutboundBox::forget_peer`], taken by the flush
+/// for its report.
 #[derive(Resource, Debug, Default)]
 pub struct OutboundBox(
     pub Vec<(NodeId, MsgClass, Bytes, crate::io::Durability)>,
-    pub BTreeSet<NodeId>,
+    pub usize,
 );
 
 /// Hard ceiling on the [`OutboundBox`] backlog a node carries across ticks under
@@ -64,11 +64,19 @@ impl Default for OutboundStagingCap {
 }
 
 impl OutboundBox {
-    /// Forget every frame staged toward `node` at the next flush. Example: the gateway learns that
-    /// the pilot's client process died; the levels and beats it queued for that process are for
-    /// nobody, so it forgets the peer and the flush drops them instead of the cap shedding them.
+    /// Forget every frame staged toward `node` — NOW, not at the flush. Example: the gateway learns
+    /// that the pilot's client process died; the levels and beats it queued for that process are
+    /// for nobody, so it forgets the peer and they are dropped instead of the cap shedding them.
+    ///
+    /// ★ IMMEDIATE, never deferred (2026-09-06, measured in k3d): a `Hello` from a client's NEW
+    /// process replaces its live session — the old session's frames are forgotten and the new
+    /// `Welcome` is staged, in the SAME tick. A forget applied at the flush dropped that `Welcome`
+    /// with the corpse's frames, and the new client waited for it forever. What is staged at the
+    /// moment of the forget is the ended relationship's; what comes after is the next one's.
     pub fn forget_peer(&mut self, node: NodeId) {
-        self.1.insert(node);
+        let before = self.0.len();
+        self.0.retain(|(to, _, _, _)| *to != node);
+        self.1 += before - self.0.len();
     }
 
     /// Encode one `InterShardFlow` and enqueue it to `to` on `class` — the ONE
@@ -262,6 +270,34 @@ mod tests {
     /// interplay-01, the FireAndForget side: a ghost flow (re-derivable, loss-tolerant) is NOT subject to the
     /// carrier-reliability guard — it stages cleanly on any carrier. Covers the guard's `matches!`-false branch
     /// (pushed Retained so the durability sibling above also holds, isolating THIS guard's arm).
+    #[test]
+    fn forget_peer_drops_what_is_staged_now_and_keeps_what_comes_after() {
+        let mut outbox = OutboundBox::default();
+        let gone = NodeId(100);
+        let live = NodeId(7);
+        let stage = |b: &mut OutboundBox, to: NodeId, byte: u8| {
+            b.0.push((
+                to,
+                MsgClass::Control,
+                vec![byte].into(),
+                crate::io::Durability::Ephemeral,
+            ));
+        };
+        stage(&mut outbox, gone, 1);
+        stage(&mut outbox, live, 2);
+        stage(&mut outbox, gone, 3);
+        outbox.forget_peer(gone);
+        // The dead process's two frames are gone; the live peer's stays; the count says two.
+        assert_eq!(outbox.1, 2);
+        assert_eq!(outbox.0.len(), 1);
+        assert_eq!(outbox.0[0].0, live);
+        // The relogin's `Welcome`, staged AFTER the forget in the same tick, is kept.
+        stage(&mut outbox, gone, 4);
+        assert_eq!(outbox.0.len(), 2);
+        assert_eq!(outbox.0[1].0, gone);
+        assert_eq!(outbox.1, 2, "a later frame is never counted as forgotten");
+    }
+
     #[test]
     fn push_flow_stages_a_fire_and_forget_flow_unguarded() {
         use vd_wire::intershard::{GhostFlow, InterShardFlow};

@@ -912,6 +912,48 @@ pub(crate) struct GalaxyShape {
 type RememberedForest = Option<(u64, UniverseConfig, std::sync::Arc<Vec<GeneratedBody>>)>;
 static LAST_FOREST: std::sync::Mutex<RememberedForest> = std::sync::Mutex::new(None);
 
+/// ★ THE SYSTEM LAYER, BUILT ONCE PER PROCESS (foundation slice 5, 2026-09-06). A boot reads the
+/// layer several times — the sky, the planted subtree, the disjointness fence, the home — and each
+/// read used to generate its 233 222 rows again (0.6 s and 200 MB, four times over). One slot, the
+/// same shape as the forest's: the last `(seed, config)` layer, shared by reference.
+static LAST_LAYER: std::sync::Mutex<RememberedForest> = std::sync::Mutex::new(None);
+
+/// ★ RELEASE THE BOOT CACHES (foundation slice 5, 2026-09-06). The layer and the forest slots exist so
+/// one boot reads each once; after boot a serving process needs neither — the sky rows, the planted
+/// regions and the movers are already its own. Dropping them returns the memory: a gateway that kept
+/// the layer resident held 346 MB for the 22 MB it uses. Called once, at the end of boot.
+pub fn release_boot_caches() {
+    *LAST_LAYER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *LAST_FOREST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// The system layer for this world, built once per process (see [`LAST_LAYER`]).
+pub(crate) fn system_layer_cached(
+    seed_universe: u64,
+    config: &UniverseConfig,
+) -> std::sync::Arc<Vec<GeneratedBody>> {
+    let slot = LAST_LAYER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((seed, cfg, layer)) = slot.as_ref()
+        && *seed == seed_universe
+        && cfg == config
+    {
+        return std::sync::Arc::clone(layer);
+    }
+    drop(slot);
+    let built = std::sync::Arc::new(generate_system_layer(seed_universe, config));
+    *LAST_LAYER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((seed_universe, *config, std::sync::Arc::clone(&built)));
+    built
+}
+
 /// The forest for this world, built once per process.
 ///
 /// The lock is held only to look and to store — never across the build — so two threads asking at once
@@ -1299,7 +1341,7 @@ pub(crate) fn realm_subtree(
     // MEASURED DEFECT IT CURES: a planet-hosting shard booted with an EMPTY forest and refused —
     // "the forest has 0 ambient roots" — because a subtree stops one level below a star system.
     let named = || held.iter().chain(lineage.iter()).copied();
-    let layer = generate_system_layer(seed_universe, config);
+    let layer = system_layer_cached(seed_universe, config);
     // The chain: the ambient root, the galaxy, and every held realm — placed by their parent.
     //
     // ★ AND THE DIRECT CHILDREN OF EVERY HELD REALM, which is not an extra: SL1 makes a parent the

@@ -450,6 +450,8 @@ pub struct MemSpawner {
 #[derive(Debug)]
 struct SpawnerInner {
     hub: MemHub,
+    /// The first id of the mint band: a node below it was never minted here (an anchor, a static peer).
+    first_node: u64,
     next_node: u64,
     live: BTreeMap<NodeId, (ProfileKind, UniverseTick)>,
     killed: BTreeSet<NodeId>,
@@ -465,6 +467,7 @@ impl MemSpawner {
         MemSpawner {
             inner: Arc::new(Mutex::new(SpawnerInner {
                 hub,
+                first_node: first_node.0,
                 next_node: first_node.0,
                 live: BTreeMap::new(),
                 killed: BTreeSet::new(),
@@ -483,6 +486,17 @@ impl MemSpawner {
     #[must_use]
     pub fn live(&self) -> BTreeMap<NodeId, (ProfileKind, UniverseTick)> {
         self.lock().live.clone()
+    }
+
+    /// The crash model of the real launcher's orphan prune: the node's PROCESS is gone (it died with
+    /// its launcher's pod, or on its own) — it leaves the live set with no `kill_realm`, no marker and
+    /// no wire notice, exactly as `SpawnCore::live_nodes` drops a child the backend reports dead. Its
+    /// transport stays registered but dead in the hub, so a frame toward it still surfaces as
+    /// unreachable to whoever sends one — and nobody does, which is the point. A no-op on an unknown id.
+    pub fn crash(&self, node: NodeId) {
+        let mut g = self.lock();
+        g.live.remove(&node);
+        g.hub.kill(node);
     }
 }
 
@@ -517,6 +531,13 @@ impl RealmSpawner for MemSpawner {
     fn live_nodes(&self) -> BTreeSet<NodeId> {
         self.lock().live.keys().copied().collect()
     }
+
+    /// Minted here (inside the band already handed out) and not live — bitwise so every operand is a
+    /// covered region (HR5).
+    fn retired(&self, node: NodeId) -> bool {
+        let g = self.lock();
+        (node.0 >= g.first_node) & (node.0 < g.next_node) & !g.live.contains_key(&node)
+    }
 }
 
 #[cfg(test)]
@@ -525,6 +546,31 @@ mod tests {
 
     const A: NodeId = NodeId(1);
     const B: NodeId = NodeId(2);
+
+    #[test]
+    fn a_minted_node_no_longer_live_is_retired_and_a_booked_anchor_never_is() {
+        let sp = MemSpawner::new(MemHub::new(), NodeId(1000), 8);
+        let a = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::System, 7), UniverseTick(1))
+            .expect("spawn a");
+        let b = sp
+            .spawn_realm(&spawn_coord(RealmKindTag::Planet, 7), UniverseTick(1))
+            .expect("spawn b");
+        // Live: not retired. Below the band (the gateway): never. Not minted yet: not either.
+        assert!(!sp.retired(a));
+        assert!(!sp.retired(b));
+        assert!(!sp.retired(NodeId(2)));
+        assert!(!sp.retired(NodeId(1002)));
+        // Torn down on purpose ⇒ retired.
+        sp.kill_realm(a).expect("kill a");
+        assert!(sp.retired(a));
+        // Died with its launcher's pod: no kill, no marker ⇒ retired all the same; the hub knows.
+        sp.crash(b);
+        assert!(sp.retired(b));
+        assert_eq!(sp.live_nodes(), BTreeSet::new());
+        sp.crash(NodeId(77)); // unknown: a no-op
+        assert!(!sp.retired(NodeId(77)));
+    }
 
     #[test]
     fn send_is_enqueue_only_until_pump() {

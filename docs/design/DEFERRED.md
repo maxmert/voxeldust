@@ -1202,6 +1202,72 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
     session-independent gateway↔orch directory heartbeat (the shard has `RealmConfirmedAt` even with 0 players; the
     gateway lacks a standing key to recheck). Deferred past S4.
   - **[Cloud-ready k3d Slice 4b — the k3d manifests | AUTHORED + static-validated + review folded]** `deploy/k3d/`
+  ★ SLICE 5 (2026-09-06, foundation; owner: "do the fixes first and then deploy"). THE RE-PROOF FOUND
+  THREE BREAKS AND ONE FOUNDATION DEFECT. (1) The cold-start probe asked `rollout status` of StatefulSets
+  that update OnDelete (the no-rolling-updates ruling) — kubectl has none; the probe waits on the pods.
+  (2) The static shard REFUSES TO BOOT: the world is at demand scale and a shard at that scale must carry
+  the hand-off hold budget its launcher derives; a shard started from a manifest has no launcher. The
+  static shape is gone; the game's shape is the demand loop, and the k3d deploy now runs it: the
+  orchestrator pod forks realm shards as child processes that bind the POD'S OWN address
+  (`VD_RLM_BIND_HOST` from the downward API → `SpawnTuning::bind_host`) on the spawn band
+  (45000–45999, admitted by the network policy by range), keep their outbox and store on the durable
+  volume beside the orchestrator's, mint their incarnation from their OWN boot counter
+  (`child_boot_state_dir`: `<boot state dir>/realm-<node>`), and the gateway learns each one's address
+  from the orchestrator's answer to a login; the entrypoint books orch↔gateway only; the shard
+  StatefulSet is deleted; the DoD is 2/2 Ready + /metrics and the AGENT's login is the bootstrap; the
+  reschedule proof kills vd-orch-0 (the pod that hosts every forked shard) and the agent logs in again.
+  ONE POD HOSTING MANY SHARD PROCESSES IS THE INTERIM SHAPE — one pod per realm needs a Kubernetes
+  launch backend (`LaunchBackend` exists; a k8s impl does not) and stays OWED. (3) The gateway pod died
+  OOM at 384 Mi in one second: ★ THE BOOT PLANT. MEASURED (release, the dev cluster): every process
+  generated the WHOLE forest at boot — 3,500,646 regions, 2.4 GB in-process, a 5.3 GB peak on the
+  gateway (which also cloned it) and 1.4–2.5 GB per spawned shard — to keep 13–24 regions; the boot
+  guards (`guard_visibility_climb_bounded`, `guard_star_bound_exceeds_photosphere`,
+  `guard_seeded_systems_disjoint`) and the reach roster (`child_reaches_for_config` → a forest build per
+  parent) all read `system_forest_cached`. CURED: a process guards WHAT IT PLANTS
+  (`guard_planted_subtree` over `realm_subtree`), the disjointness fence reads the system LAYER, the reach
+  roster reads the planted subtree (`child_reaches_planted`), the gateway plants the HOME's subtree
+  (`boot_world_for_home` / `WorldView::planted`) instead of the forest, the layer is built once per
+  process (`system_layer_cached`) and every boot cache is released after boot; the whole-forest fences
+  are proven ONCE by the world's own test at its seed
+  (`the_worlds_whole_forest_passes_the_star_bound_and_climb_fences_once`). AFTER: gateway boot peak 347 MB
+  (was 5,300), a planet shard 150 MB (was 1,400), the galaxy shard 960 MB (its own 233,222 children);
+  `cargo run --release -p vd-bins --example world_size <full|layer|subtree|guard|gateway>` prints each
+  shape's regions, time and peak RSS. Pods are sized to the measurements (orch pod 4 GiB for a dozen
+  forks, gateway 1 GiB). ★ DEPLOY OUTCOME (2026-09-06, k3d, release image): the chain LANDS — DoD 2/2
+  Ready + /metrics; the agent's login forks universe → galaxy → system → the system's in-range
+  children (10 shards; slowest fork→head 130–182 ticks at 50 Hz against the 500-tick budget) and the
+  avatar crosses the boundary AT THE FIRST ATTEMPT; the reschedule kills vd-orch-0 (and so every forked
+  shard), the rebuilt orchestrator reaps the 4 heads its dead shards still held, the agent logs in again
+  AT THE FIRST ATTEMPT (13 forks; the launch water resumes 1012 → 1023, never a reused id); the gateway
+  re-plumbs the orchestrator's new address. MEASURED in the pod: orchestrator pod 1,135 Mi / 1.46 CPU
+  with the ten shards up, 8–10 Mi once the player leaves and they shut down (~30 s); gateway 67 Mi.
+  ★ FIVE DEFECTS THE POD SHAPE EXPOSED AND THE DEV CLUSTER NEVER COULD (each measured in the pod's logs,
+  each cured with a red-then-green test): (a) forked shards refused `Missing("VD_SNAPSHOT_BUDGET")` —
+  the shard's must-parse params lived on the deleted static manifest and a child inherits its anchors
+  from the ORCHESTRATOR's environment (now in the configmap); (b) children dialed the launcher at
+  `0.0.0.0:9000` — it booked itself at `VD_BIND`; `vd_bins::reachable_at(bind, fork_host)` books an
+  unspecified bind at the fork host (the pod IP); (c) after a pod restart the durable directory still
+  named heads held by shards that died WITH the pod, and the liveness latch needs undeliverable frames —
+  nothing is ever sent to a node with no address — so the head stayed "running" and every login waited
+  on a `PeerLocate` no launch record could answer: `RealmSpawner::retired` (minted here ∧ not live; ids
+  are monotone) now joins the latch in the reconcile's `dead`, and `reap_retired_heads` force-revokes
+  every such head each sweep, demanded or not (counter `retired_heads_reaped` in the admin view);
+  (d) a re-login from a fresh client pod: the new connection superseded the old, and the OLD learned
+  writer lane's closed ack watch emitted `PeerReset{ConnectionLost}` AFTER the new `Hello`, ending the
+  session the new process had just opened — the lane now asks the learned table (`peer_superseded`)
+  and retires quietly (`learned_lanes_superseded`); (e) a `Hello` that replaces a live session forgot
+  the peer's staged frames AT THE FLUSH, which dropped the new `Welcome` staged in the same tick — the
+  client waited forever and the gateway's lane filled 4 MB unacknowledged; `OutboundBox::forget_peer`
+  now drops what is staged at that moment and nothing after. On one host every one of these hid behind
+  a shared environment, a loopback bind, children that outlive their launcher, or a close observed
+  before the next frame; `login-after-kill` stays green (2.8 s) with the cures. The gateway pod now
+  exposes its read-only admin port (9100) so a cloud diagnosis can read lane counters. STILL OWED here:
+  the `boot_ticks_observed_max` gauge is inflated after a restart (3,533 ticks) because the re-seeded
+  minted set carries pre-crash mint ticks — a measurement artefact to fix before the launch TTL is ever
+  tuned from it; an expired realm lease with no latch evidence is not reaped by the lease reaper (the
+  same "no evidence" class as (c), covered today only because the retired sweep runs first); the
+  `PEER LOCATE UNANSWERED` storm from a child asking for a retired ancestor (a negative answer would be
+  a new wire arm — SL6, ask first); one pod per realm (the k8s `LaunchBackend`).
     (00-namespace, 10-configmap, 20-networkpolicy, 30-orch, 40-gateway, 50-shard): 3 StatefulSets (per-pod
     volumeClaimTemplates for the M3 boot-counter + the cloud-required store root — a Deployment/emptyDir would wipe
     the monotone counter = the R-6a dedup-loss landmine), 3 headless Services ALL with `publishNotReadyAddresses:

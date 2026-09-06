@@ -7278,3 +7278,152 @@ fn a_shard_states_the_light_of_the_star_system_it_holds_and_of_no_other() {
         "and states nothing for a system another shard holds: {realms:?}"
     );
 }
+
+// ---- foundation slice 5 (2026-09-06): a process guards what it plants -------------------------
+
+/// The planted-subtree guard's two REFUSAL arms, each on the hostile forest its own fence already
+/// refuses — the star bound first, then the climb — and the green arm on THE world's home.
+#[test]
+fn the_planted_guard_names_the_fence_that_refused() {
+    let cfg = test_world();
+    // Arm 1: a star whose bound sits inside its photosphere.
+    let mut bodies = generate_system_forest(0, &cfg);
+    let star = bodies
+        .iter_mut()
+        .find(|b| matches!(b.realm, RealmId::Star(_)))
+        .expect("THE world names a star");
+    let photosphere = crate::taxonomy::star_radius_m(
+        star.photometrics
+            .expect("a star carries photometrics")
+            .mass_msun,
+    );
+    star.shape = Boundary::Shell {
+        r: 0.5 * photosphere,
+    };
+    let refused = guard_planted_bodies(&bodies, &cfg, 2).expect_err("the star bound refuses");
+    assert_eq!(
+        refused,
+        PlantGuardRefused::StarBound(StarBoundInsidePhotosphere {
+            system: bodies
+                .iter()
+                .find(|b| matches!(b.realm, RealmId::Star(_)))
+                .and_then(|b| b.parent)
+                .expect("a star nests in its system"),
+            bound_m: 0.5 * photosphere,
+            photosphere_m: photosphere,
+        })
+    );
+    assert!(refused.to_string().contains("star bound fence"));
+    // Arm 2: the guilty grandchild forest, at the landed arity — and the arity that carries it.
+    let root = RealmId::System(900);
+    let child = RealmId::Planet(901);
+    let grand = RealmId::Station(902);
+    let guilty = vec![
+        GeneratedBody {
+            realm: root,
+            parent: None,
+            shape: Boundary::Shell { r: 1000.0 },
+            taxon: None,
+            look: Some(Boundary::Shell { r: 1000.0 }),
+            placement: Placement::StaticOffset(DVec3::ZERO),
+            photometrics: None,
+        },
+        GeneratedBody {
+            realm: child,
+            parent: Some(root),
+            shape: Boundary::Shell { r: 200.0 },
+            taxon: None,
+            look: Some(Boundary::Shell { r: 200.0 }),
+            placement: Placement::StaticOffset(DVec3::new(100.0, 0.0, 0.0)),
+            photometrics: None,
+        },
+        GeneratedBody {
+            realm: grand,
+            parent: Some(child),
+            shape: Boundary::Shell { r: 20.0 },
+            taxon: None,
+            look: Some(Boundary::Shell { r: 20.0 }),
+            placement: Placement::StaticOffset(DVec3::new(0.0, 0.0, 50.0)),
+            photometrics: None,
+        },
+    ];
+    let refused = guard_planted_bodies(&guilty, &cfg, 2).expect_err("the climb refuses");
+    assert!(matches!(refused, PlantGuardRefused::Climb(c) if c.body == grand && c.arity == 2));
+    assert!(refused.to_string().contains("visibility climb"));
+    assert_eq!(guard_planted_bodies(&guilty, &cfg, 3), Ok(()));
+    // The green arm, on the seed: THE world's home system, planted the way the gateway plants it.
+    let world = UniverseConfig::world(500.0, 0.02);
+    let layer = system_layer_view(HOME_SEED, &world);
+    let home = vd_core::worldgen::default_home_realm(layer.regions()).expect("a home");
+    let held = std::iter::once(home).collect();
+    let lineage = [vd_core::worldgen::UNIVERSE, vd_core::worldgen::GALAXY, home]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        guard_planted_subtree(HOME_SEED, &world, &held, &lineage, 2),
+        Ok(())
+    );
+}
+
+/// ★ THE WORLD'S FENCES, RUN ONCE OVER THE WHOLE FOREST — here, by the world's own test, at its
+/// seed. Every booting process used to re-prove these over 3.5 million bodies; now it proves its
+/// planted subtree and this test proves the rest. If the seed or the generator ever changes so
+/// that some far system fails a fence, THIS goes red, not a shard nobody was watching.
+#[test]
+fn the_worlds_whole_forest_passes_the_star_bound_and_climb_fences_once() {
+    let world = UniverseConfig::world(500.0, 0.02);
+    assert_eq!(
+        guard_star_bound_exceeds_photosphere(HOME_SEED, &world),
+        Ok(())
+    );
+    assert_eq!(guard_visibility_climb_bounded(HOME_SEED, &world, 2), Ok(()));
+}
+
+/// The system layer is built once per process and handed out by reference; a different config is a
+/// different layer, and THE planted view of the home is row-for-row the full forest's neighbourhood.
+#[test]
+fn the_layer_is_cached_once_and_the_planted_home_matches_the_forests_neighbourhood() {
+    let world = UniverseConfig::world(500.0, 0.02);
+    let a = system_layer_cached(HOME_SEED, &world);
+    let b = system_layer_cached(HOME_SEED, &world);
+    assert!(
+        std::sync::Arc::ptr_eq(&a, &b),
+        "the second read is the same layer"
+    );
+    let other = system_layer_cached(HOME_SEED, &test_world());
+    assert!(
+        !std::sync::Arc::ptr_eq(&a, &other),
+        "another config is another layer"
+    );
+    let home =
+        vd_core::worldgen::default_home_realm(system_layer_view(HOME_SEED, &world).regions())
+            .expect("a home");
+    let held: std::collections::BTreeSet<RealmId> = std::iter::once(home).collect();
+    let lineage = [vd_core::worldgen::UNIVERSE, vd_core::worldgen::GALAXY, home]
+        .into_iter()
+        .collect();
+    let planted = WorldView::planted(HOME_SEED, &world, &held, &lineage);
+    let full = WorldView::generated(HOME_SEED, &world);
+    assert_eq!(planted.neighbourhood(&held), full.neighbourhood(&held));
+    assert_eq!(
+        planted.default_home_offset_m(),
+        full.default_home_offset_m()
+    );
+    // The planted subtree's reach roster is the forest's own verdict for the same regions: a
+    // planet's shard reads its moons' orbits from what it plants, and nothing else changes the answer.
+    let by_planted =
+        super::child_reaches_planted(HOME_SEED, &world, &held, &lineage, planted.regions());
+    let by_forest = super::child_reaches_for_config(HOME_SEED, planted.regions(), &world);
+    assert_eq!(by_planted, by_forest);
+    assert!(
+        !by_planted.is_empty(),
+        "the home's parent has children in reach"
+    );
+    // After the boot caches are released, the next read builds the layer again.
+    super::release_boot_caches();
+    let c = system_layer_cached(HOME_SEED, &world);
+    assert!(
+        !std::sync::Arc::ptr_eq(&a, &c),
+        "the released layer is rebuilt on the next read"
+    );
+}

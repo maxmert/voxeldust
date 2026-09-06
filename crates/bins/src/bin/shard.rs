@@ -448,6 +448,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // every shard).
         &vd_bins::child_reaches(
             universe_seed,
+            &held_realms,
+            &boot_lineage,
             &regions,
             move_speed * time_multiplier,
             tick_dt,
@@ -467,24 +469,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // refuse a world whose climb exceeds what the look carrier can carry. A refusal is a
     // measurement; a wrong pixel is not (the owner's Q3 ruling: the arity stays 2 until the
     // near-real-scale re-solve measures otherwise).
-    vd_physics::worldgen::guard_visibility_climb_bounded(
+    // ★ THE FENCES RUN OVER WHAT THIS SHARD PLANTS (foundation slice 5, 2026-09-06): the visibility
+    // climb and the star bound over its own subtree — the ancestors, the held realms, their direct
+    // children — never over the whole forest (3.5 million bodies, a 1.3 GB boot peak per shard, to
+    // re-prove a property of the seed the world's own tests prove once).
+    vd_physics::worldgen::guard_planted_subtree(
         universe_seed,
         &vd_bins::process_world_config(move_speed * time_multiplier, tick_dt),
+        &held_realms,
+        &boot_lineage,
         vd_wire::session_flow::LOOK_CARRIER_ARITY,
     )
-    .map_err(|e| {
-        format!(
-            "THE world's measured visibility climb exceeds the look carrier: {e} — refusing to boot"
-        )
-    })?;
-    // THE T2 STAR FENCE (celestial taxonomy arc, owner ruling E): every generated star's
-    // dust-sublimation bound strictly exceeds its own photosphere — a Star realm drawn wider
-    // than its authority is a world no process may serve.
-    vd_physics::worldgen::guard_star_bound_exceeds_photosphere(
-        universe_seed,
-        &vd_bins::process_world_config(move_speed * time_multiplier, tick_dt),
-    )
-    .map_err(|e| format!("THE world's star bound fence refused: {e} — refusing to boot"))?;
+    .map_err(|e| format!("THE world's planted subtree refused a fence: {e} — refusing to boot"))?;
     // THE STORAGE FENCE (real-scale addendum §A2.1 F1 / R3): the root must fit the FINE lattice's
     // sanitized domain with its headroom octave — the refusal is THE NAMED P10 TRIGGER (the day
     // the world outgrows the millimetre tier, the galaxy cell lattice is the cure). Prints the
@@ -514,6 +510,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a draw — such a child still states an extent-only point of light (look_horizon.md slice 1,
     // the presence floor), built by the sim through the one marker-bag codec.
     let child_luma = vd_bins::child_luma_from_draws(&regions, &held_realms, &boot_lit);
+    // The world is planted; the boot caches have done their one job (slice 5).
+    vd_physics::worldgen::release_boot_caches();
     let child_light = child_luma.clone();
     *node.world_mut().resource_mut::<vd_sim::stub::ChildLuma>() =
         vd_sim::stub::ChildLuma(child_luma);

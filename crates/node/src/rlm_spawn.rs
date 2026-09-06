@@ -218,6 +218,9 @@ impl LiveSlot {
 /// The mutable, lock-guarded interior — allocator cursors, the live/killed/dead sets, and the durable
 /// store. All ordered collections (`BTreeMap`/`BTreeSet`): deterministic iteration, no default-hasher ban.
 struct SpawnInner {
+    /// The first id of the mint band ([`SpawnTuning::first_node`]): a node below it was never minted
+    /// here — an anchor or a static peer — so `retired` never judges it.
+    first_node: u64,
     /// F2 node cursor — only ever advances (persisted in [`WaterMark`]).
     next_node: u64,
     /// F2 dev port cursor (`u32` so the last `u16` port is usable) — only ever advances; exhaustion at
@@ -350,6 +353,7 @@ impl<B: LaunchBackend> SpawnCore<B> {
         }
         SpawnCore {
             inner: Arc::new(Mutex::new(SpawnInner {
+                first_node: tuning.first_node,
                 next_node: water.next_node,
                 next_port: water.next_port,
                 port_limit: tuning.port_limit,
@@ -388,6 +392,7 @@ impl<B: LaunchBackend> SpawnCore<B> {
         });
         SpawnCore {
             inner: Arc::new(Mutex::new(SpawnInner {
+                first_node: tuning.first_node,
                 next_node: water.next_node,
                 next_port: water.next_port,
                 port_limit: tuning.port_limit,
@@ -615,6 +620,14 @@ impl<B: LaunchBackend> RealmSpawner for SpawnCore<B> {
         Ok(())
     }
 
+    /// Minted by this launcher's monotone allocator and not live: killed, crashed, or died with the
+    /// launcher itself (a rehydrate drops it from `live` the moment the backend says so). The band is
+    /// `[first_node, next_node)` — the water is durable, so a restart still knows what it once minted.
+    fn retired(&self, node: NodeId) -> bool {
+        let g = self.lock();
+        (node.0 >= g.first_node) & (node.0 < g.next_node) & !g.live.contains_key(&node)
+    }
+
     fn live_nodes(&self) -> BTreeSet<NodeId> {
         let mut g = self.lock();
         // Reconcile the believed-live set against backend ground truth: any child the backend reports dead
@@ -716,6 +729,13 @@ fn read_water(store: &dyn Store) -> Option<WaterMark> {
 ///
 /// Static assert messages (HR5: no format args → no uncoverable region); each false arm is pinned by a
 /// `#[should_panic]` test, each true arm by every normal construction.
+/// The durable F2 high-water as `(next_node, next_port)` — a diagnosis door for the ledger probes
+/// (`launch_dump`): `None` on a virgin ledger. Reads exactly what [`SpawnCore::rehydrate`] resumes from.
+#[must_use]
+pub fn launch_water(store: &dyn Store) -> Option<(u64, u32)> {
+    read_water(store).map(|w| (w.next_node, w.next_port))
+}
+
 fn resume_water(store: &dyn Store, tuning: &SpawnTuning) -> WaterMark {
     assert!(
         tuning.port_limit <= u16::MAX as u32 + 1,
@@ -991,6 +1011,37 @@ mod tests {
         assert_eq!(
             sc.kill_realm(NodeId(9_999)),
             Err(SpawnError::UnknownNode(NodeId(9_999)))
+        );
+    }
+
+    #[test]
+    fn a_child_that_died_with_its_launcher_is_retired_once_the_ledger_sees_it() {
+        let fake = FakeBackend::default();
+        let sc = core(fake.clone(), tuning(1_000, 42_000));
+        let a = sc.spawn_realm(&system(1, 1), T).expect("spawn a");
+        let b = sc.spawn_realm(&system(1, 2), T).expect("spawn b");
+        assert!(!sc.retired(a));
+        assert!(!sc.retired(b));
+        assert!(
+            !sc.retired(NodeId(2)),
+            "an anchor below the band is never retired here"
+        );
+        assert!(!sc.retired(NodeId(1_002)), "not minted yet");
+        // Torn down ⇒ retired.
+        sc.kill_realm(a).expect("kill a");
+        assert!(sc.retired(a));
+        // Crashed out of band ⇒ retired once the reconcile read has pruned it.
+        fake.crash(b);
+        assert_eq!(sc.live_nodes(), BTreeSet::new());
+        assert!(sc.retired(b));
+    }
+
+    #[test]
+    fn the_launch_water_reader_says_none_on_a_virgin_ledger_and_the_cursor_after() {
+        assert_eq!(launch_water(&MemStore::new()), None);
+        assert_eq!(
+            launch_water(&store_with_water(1_005, 42_010)),
+            Some((1_005, 42_010))
         );
     }
 

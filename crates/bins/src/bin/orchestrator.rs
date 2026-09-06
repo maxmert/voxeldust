@@ -348,8 +348,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_anchors.extend(vd_bins::crossing_redrive_env(&saga));
     // The child's VD_PEERS anchors: this orchestrator (self) + the gateway (if booked). The per-realm
     // ANCESTOR closure is computed per-spawn by SpawnCore; only these static anchors are held here.
-    let mut anchor_peers: Vec<(vd_core::NodeId, std::net::SocketAddr)> =
-        vec![(local, env.parse("VD_BIND")?)];
+    // ★ Booked at the address a child can DIAL: in a pod this orchestrator binds every interface, so
+    // its children dial the fork host (the pod's IP, the same `VD_RLM_BIND_HOST` the shards bind).
+    let fork_host: std::net::Ipv4Addr = env.parse_or(
+        "VD_RLM_BIND_HOST",
+        vd_node::rlm_spawn::SpawnTuning::dev().bind_host,
+    )?;
+    let mut anchor_peers: Vec<(vd_core::NodeId, std::net::SocketAddr)> = vec![(
+        local,
+        vd_bins::reachable_at(env.parse("VD_BIND")?, fork_host),
+    )];
     if let Some(gw) = env.peer_book("VD_PEERS")?.get(&vd_bins::GATEWAY).copied() {
         anchor_peers.push((vd_bins::GATEWAY, gw));
     }
@@ -385,7 +393,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         first_node: env.parse_or("VD_RLM_FIRST_NODE", dev_tuning.first_node)?,
         first_port: env.parse_or("VD_RLM_FIRST_PORT", dev_tuning.first_port)?,
         port_limit: env.parse_or("VD_RLM_PORT_LIMIT", dev_tuning.port_limit)?,
-        bind_host: dev_tuning.bind_host,
+        // ★ THE ADDRESS FORKED SHARDS BIND (foundation slice 5, 2026-09-06): loopback on one host; in
+        // a pod, the pod's own IP (`VD_RLM_BIND_HOST` from the downward API), so the gateway pod
+        // reaches a forked shard at `<pod ip>:<band port>`. Not a shard-kind fork: every
+        // orchestrator reads the same key (HR3).
+        bind_host: fork_host,
     };
     // `SpawnCore::new` == rehydrate (recover + adopt the launch.redb survivors). RLM 5e-5 D6 CONTROL
     // (store-test-hooks): `VD_RLM_TEST_REHYDRATE_DISABLE` rebuilds via `water_only` — cursors only, NO adopt —

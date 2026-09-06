@@ -696,8 +696,14 @@ fn a_shard_that_does_not_host_a_movers_parent_still_judges_it_at_apoapsis() {
         "the hole's precondition: a planet of THE world authors no movers of its own, so a reach \
          map keyed on ITS roster would know nothing of the planet's orbit"
     );
-    let reaches =
-        vd_bins::child_reaches(SEED, &regions, occupant_v_max_mps(), vd_bins::DEV.tick_dt);
+    let reaches = vd_bins::child_reaches(
+        SEED,
+        &held,
+        &lineage,
+        &regions,
+        occupant_v_max_mps(),
+        vd_bins::DEV.tick_dt,
+    );
     assert_eq!(
         reaches[&planet],
         vd_core::geometry::ChildReach::Excursion(elements.sma * (1.0 + elements.ecc)),

@@ -522,7 +522,7 @@ k3d-validate:
     # workload that keeps durable state must replace stop-first, so this fails the deploy rather than
     # letting the manifests drift back to the default.
     missing=""
-    for f in deploy/k3d/30-orch.yaml deploy/k3d/40-gateway.yaml deploy/k3d/50-shard.yaml; do
+    for f in deploy/k3d/30-orch.yaml deploy/k3d/40-gateway.yaml; do
         grep -Eq '^[[:space:]]*updateStrategy:[[:space:]]*\{[[:space:]]*type:[[:space:]]*OnDelete[[:space:]]*\}' "$f" || missing="$missing $f"
     done
     if [ -n "$missing" ]; then
@@ -580,83 +580,74 @@ k3d-apply: k3d-secrets
 k3d-down:
     k3d cluster delete {{k3d_cluster}} || true
 
-# DoD: 3/3 Ready, /metrics served, cluster_bootstrapped=true (a shard holds a realm).
+# DoD (the demand shape, foundation slice 5, 2026-09-06): 2/2 Ready, /metrics served. No shard holds a realm
+# until somebody logs in — the orchestrator forks one on demand — so "bootstrapped" is the AGENT's login
+# (`k3d-agent`), not a static realm. This gate proves the two long-lived pods boot and serve.
 k3d-dod:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Cold-start budget: a fresh cluster must schedule 3 pods, run the entrypoint DNS-resolve loop for each,
-    # boot the mesh, and grant a realm — empirically >120s on Docker-Desktop k3d. 300s absorbs it. `-l app=vd`
-    # now matches only the 3 server pods (the agent Job lives under deploy/k3d/agent/, not applied here).
-    for s in vd-orch vd-gateway vd-shard; do {{k}} rollout status statefulset/$s --timeout=300s; done
+    # Cold-start budget: a fresh cluster schedules 2 pods, runs the entrypoint DNS-resolve loop for each and
+    # boots the mesh — empirically >120s on Docker-Desktop k3d. 300s absorbs it. `-l app=vd` matches only the
+    # 2 server pods (the agent Job lives under deploy/k3d/agent/, not applied here).
+    # No `rollout status`: every StatefulSet here updates OnDelete (the no-rolling-updates ruling,
+    # 2026-08-24), and kubectl has no rollout status for that strategy. The readiness wait below IS the
+    # cold-start gate; this loop only waits for each set to have MINTED its pod so the wait has a subject.
+    for i in $(seq 1 60); do
+        n=$({{k}} get pods -l app=vd -o name 2>/dev/null | wc -l | tr -d ' ')
+        [ "$n" -ge 2 ] && break
+        sleep 5
+    done
     {{k}} wait --for=condition=Ready pod -l app=vd --timeout=300s
     {{k}} port-forward svc/vd-orch 9100:9100 >/dev/null 2>&1 & pf=$!; trap 'kill $pf 2>/dev/null || true' EXIT
     sleep 2
     curl -sf http://127.0.0.1:9100/metrics >/dev/null || { echo "FAIL: /metrics unreachable"; exit 1; }
-    # "Bootstrapped" = a SHARD holds a realm (admin::AdminSnapshot::cluster_bootstrapped is a Rust method, NOT a
-    # serialized field — the snapshot JSON exposes `directory`/`leases`/`sagas`, so read the directory: a
-    # `"authority":"shard:..."` entry IS the bootstrap signal).
-    for i in $(seq 1 30); do
-        snap=$(curl -s http://127.0.0.1:9100/admin/snapshot)
-        if command -v jq >/dev/null 2>&1; then
-            bs=$(printf '%s' "$snap" | jq -r '[.directory[]? | select(.authority | startswith("shard:"))] | length > 0')
-        elif printf '%s' "$snap" | grep -q '"authority":[[:space:]]*"shard:'; then bs=true; else bs=false; fi
-        [ "$bs" = "true" ] && { echo "DoD OK: 3/3 Ready, /metrics served, a shard holds a realm (bootstrapped)"; exit 0; }
-        echo "no shard-held realm yet, retry $i"; sleep 2
-    done
-    echo "DoD FAIL: not bootstrapped (no shard holds a realm)"; {{k}} get pods; {{k}} exec vd-shard-0 -- true 2>/dev/null; exit 1
+    echo "DoD OK: 2/2 Ready, /metrics served (the demand shape: a shard is forked at the first login — see k3d-agent)"
 
 # The full LIVE bring-up (deferred; run explicitly). Secrets are minted self-contained by k3d-secrets.
 k3d-all: k3d-up k3d-load k3d-apply k3d-dod
 
-# S6: prove the peer-addr AUTO-PUSHER survives a real pod RESCHEDULE (new pod IP, same DNS name). Kill
-# vd-shard-0; the StatefulSet reschedules it with a FRESH pod IP + the same durable PVC (M3 boot-counter +1,
-# redb survives). ASSERT the IP actually changed (a same-IP restart is a vacuous pass), then that the cluster
-# RE-BOOTSTRAPS (a shard re-holds a realm) — which requires the orch+gateway's INITIATED reliable traffic to
-# resume at the shard's NEW IP (the auto-pusher's job; reply-on-connection only covers replies). Asserts ONLY
-# the RELIABLE control plane (D-18: unreliable snapshots don't flow on the Docker-Desktop k3d overlay). Reuses
-# k3d-all (baseline bootstrap) + k3d-dod (recovery probe).
-k3d-reschedule-e2e: k3d-all
+# S6 (the demand shape): prove the peer-addr AUTO-PUSHER survives a real pod RESCHEDULE (new pod IP, same DNS
+# name). Kill vd-orch-0 — the pod that holds the directory AND hosts every forked shard, so its death takes
+# the whole realm tree with it; the StatefulSet reschedules it with a FRESH pod IP + the same durable PVCs
+# (M3 boot-counter +1, redb store + the shards' outboxes survive). ASSERT the IP actually changed (a same-IP
+# restart is a vacuous pass), then that the cluster RE-BOOTSTRAPS: the agent logs in again, the rescheduled
+# orchestrator forks the home shard at its new address, the agent walks — which requires the gateway's
+# INITIATED reliable traffic to resume at the orchestrator's NEW IP (the auto-pusher's job;
+# reply-on-connection only covers replies). Reuses k3d-agent-e2e (baseline) + k3d-reschedule-verify.
+k3d-reschedule-e2e: k3d-agent-e2e
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "S6: baseline bootstrapped (k3d-all passed via the dep chain)."
-    old_ip="$({{k}} get pod vd-shard-0 -o jsonpath='{.status.podIP}')"
-    echo "S6: vd-shard-0 OLD podIP=$old_ip — deleting the pod (StatefulSet reschedules: same DNS, NEW IP)."
-    {{k}} delete pod vd-shard-0 --wait=true
-    {{k}} rollout status statefulset/vd-shard --timeout=180s
-    {{k}} wait --for=condition=Ready pod/vd-shard-0 --timeout=180s
-    new_ip="$({{k}} get pod vd-shard-0 -o jsonpath='{.status.podIP}')"
-    echo "S6: vd-shard-0 NEW podIP=$new_ip"
+    echo "S6: baseline: the agent logged in and walked (k3d-agent-e2e passed via the dep chain)."
+    old_ip="$({{k}} get pod vd-orch-0 -o jsonpath='{.status.podIP}')"
+    old_uid="$({{k}} get pod vd-orch-0 -o jsonpath='{.metadata.uid}')"
+    echo "S6: vd-orch-0 OLD podIP=$old_ip — deleting the pod (StatefulSet reschedules: same DNS, NEW IP)."
+    # `--wait=false`: a StatefulSet re-creates the SAME pod name within seconds, and `kubectl delete`'s wait
+    # then watches the NEW object under the old name and never returns (measured 2026-09-06: six minutes
+    # hung). The replacement is recognised by its UID instead.
+    {{k}} delete pod vd-orch-0 --wait=false
+    for i in $(seq 1 120); do
+        uid="$({{k}} get pod vd-orch-0 -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+        [ -n "$uid" ] && [ "$uid" != "$old_uid" ] && break
+        sleep 2
+    done
+    {{k}} wait --for=condition=Ready pod/vd-orch-0 --timeout=300s
+    new_ip="$({{k}} get pod vd-orch-0 -o jsonpath='{.status.podIP}')"
+    echo "S6: vd-orch-0 NEW podIP=$new_ip"
     [ "$new_ip" != "$old_ip" ] || { echo "S6 VACUOUS: podIP unchanged ($old_ip) — the reschedule did not move the pod; re-run"; exit 1; }
-    # RE-BOOTSTRAP after the reschedule — a shard must re-hold a realm, requiring initiated traffic to resume at
-    # the new IP (the auto-pusher re-plumb). Reuse the exact k3d-dod probe.
     just k3d-reschedule-verify
-    # Direct evidence the auto-resolver PUSHED (not just reply-on-connection recovery): the re-plumb log on a
-    # survivor. Non-fatal (recovery is the hard gate; the push log is confirming evidence).
-    if {{k}} logs vd-orch-0 | grep -qi "re-plumbed a peer"; then
-        echo "S6: CONFIRMED — the orch auto-resolver logged a re-plumb to the shard's new address."
-    elif {{k}} logs vd-gateway-0 | grep -qi "re-plumbed a peer"; then
-        echo "S6: CONFIRMED — the gateway auto-resolver logged a re-plumb to the shard's new address."
+    if {{k}} logs vd-gateway-0 | grep -qi "re-plumbed a peer"; then
+        echo "S6: CONFIRMED — the gateway auto-resolver logged a re-plumb to the orchestrator's new address."
     else
-        echo "S6: NOTE — no explicit re-plumb log (the grant round-trip may have ridden reply-on-connection); recovery still proven by re-bootstrap."
+        echo "S6: NOTE — no explicit re-plumb log (the round-trip may have ridden reply-on-connection); recovery still proven by the re-login."
     fi
-    echo "S6 OK: survived a pod reschedule (podIP $old_ip -> $new_ip) and RE-BOOTSTRAPPED."
+    echo "S6 OK: survived a pod reschedule (podIP $old_ip -> $new_ip) and RE-BOOTSTRAPPED (the agent logged in again)."
 
-# The k3d-dod recovery probe re-used by S6 (a shard re-holds a realm after the reschedule). Split out so
-# k3d-reschedule-e2e re-runs the identical bootstrap assertion post-kill without duplicating the probe.
+# The S6 recovery probe: the agent logs in again after the reschedule and walks. Split out so
+# k3d-reschedule-e2e re-runs the identical proof post-kill without duplicating it.
 k3d-reschedule-verify:
     #!/usr/bin/env bash
     set -euo pipefail
-    {{k}} port-forward svc/vd-orch 9100:9100 >/dev/null 2>&1 & pf=$!; trap 'kill $pf 2>/dev/null || true' EXIT
-    sleep 2
-    for i in $(seq 1 45); do
-        snap=$(curl -s http://127.0.0.1:9100/admin/snapshot)
-        if command -v jq >/dev/null 2>&1; then
-            bs=$(printf '%s' "$snap" | jq -r '[.directory[]? | select(.authority | startswith("shard:"))] | length > 0')
-        elif printf '%s' "$snap" | grep -q '"authority":[[:space:]]*"shard:'; then bs=true; else bs=false; fi
-        [ "$bs" = "true" ] && { echo "S6: RE-BOOTSTRAPPED — a shard re-holds a realm after the reschedule."; exit 0; }
-        echo "S6: no shard-held realm yet post-reschedule, retry $i"; sleep 2
-    done
-    echo "S6 FAIL: the cluster did NOT re-bootstrap after the reschedule (initiated traffic never resumed at the new shard IP)"; {{k}} get pods; exit 1
+    just k3d-agent
 
 # ---- S5a: in-cluster agent-HR6 continuous testing --------------------------------------------
 # The agent image = client + vdctl, --features dev-control (Bevy-FREE), SEPARATE from the server image so the

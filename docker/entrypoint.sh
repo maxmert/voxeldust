@@ -3,8 +3,8 @@
 # id=IP:port, never a DNS name), so this DNS-resolves the three headless-Service pod names to literal IPv4
 # addresses, builds the id=IP:port book for THIS role, then `exec`s the bin (so it becomes PID 1 and receives
 # SIGTERM directly — the graceful-drain path; a non-exec shell would eat SIGTERM and force a SIGKILL past the
-# grace, corrupting the orchestrator's un-fsynced redb). NodeIds: orch=1, gateway=2, shard=3 (vd_bins::ORCH/
-# GATEWAY/SHARD). Usage: entrypoint.sh <vd-orchestrator|vd-gateway|vd-shard>
+# grace, corrupting the orchestrator's un-fsynced redb). NodeIds: orch=1, gateway=2 (vd_bins::ORCH/
+# GATEWAY). Usage: entrypoint.sh <vd-orchestrator|vd-gateway>
 set -eu
 
 NS="${VD_K8S_NAMESPACE:-voxeldust}"
@@ -37,23 +37,21 @@ ROLE="${1:-}"
 # traffic (reply-on-connection only covers replies).
 ORCH_FQDN="vd-orch-0.vd-orch.$NS.$DOM"
 GW_FQDN="vd-gateway-0.vd-gateway.$NS.$DOM"
-SH_FQDN="vd-shard-0.vd-shard.$NS.$DOM"
 ORCH="$(resolve "$ORCH_FQDN")"
 GW="$(resolve "$GW_FQDN")"
-SH="$(resolve "$SH_FQDN")"
 
 # VD_PEERS = id=IP:port (dialed now); VD_PEER_HOSTS = the SAME roster + NodeIds as id=fqdn:port (re-resolved).
 case "$ROLE" in
+  # THE DEMAND SHAPE (foundation slice 5, 2026-09-06): no static shard. The orchestrator forks realm
+  # shards as its own child processes with an env it derives itself; only the two long-lived roles
+  # book each other here.
   vd-orchestrator)
-    VD_PEERS="2=$GW:$MESH_PORT,3=$SH:$MESH_PORT"
-    VD_PEER_HOSTS="2=$GW_FQDN:$MESH_PORT,3=$SH_FQDN:$MESH_PORT" ;;
+    VD_PEERS="2=$GW:$MESH_PORT"
+    VD_PEER_HOSTS="2=$GW_FQDN:$MESH_PORT" ;;
   vd-gateway)
-    VD_PEERS="1=$ORCH:$MESH_PORT,3=$SH:$MESH_PORT"
-    VD_PEER_HOSTS="1=$ORCH_FQDN:$MESH_PORT,3=$SH_FQDN:$MESH_PORT" ;;
-  vd-shard)
-    VD_PEERS="1=$ORCH:$MESH_PORT,2=$GW:$MESH_PORT"
-    VD_PEER_HOSTS="1=$ORCH_FQDN:$MESH_PORT,2=$GW_FQDN:$MESH_PORT" ;;
-  *) echo "entrypoint: FATAL unknown role '$ROLE' (expected vd-orchestrator|vd-gateway|vd-shard)" >&2; exit 1 ;;
+    VD_PEERS="1=$ORCH:$MESH_PORT"
+    VD_PEER_HOSTS="1=$ORCH_FQDN:$MESH_PORT" ;;
+  *) echo "entrypoint: FATAL unknown role '$ROLE' (expected vd-orchestrator|vd-gateway)" >&2; exit 1 ;;
 esac
 
 # GUARD: a present-but-empty/mis-shaped VD_PEERS silently parses to a SOLO node (peer_book drops empty entries),

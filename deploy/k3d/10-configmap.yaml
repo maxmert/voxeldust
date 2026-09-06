@@ -11,7 +11,17 @@ metadata:
   labels:
     app: vd
 data:
-  VD_PROFILE: "cloud"
+  # ★ THE PROFILE IS DEV, BY MEASUREMENT (foundation slice 5, 2026-09-06). This cluster runs the game's
+  # real shape — the demand loop, forked realm shards, durable roots, no escapes — but the CLOUD profile
+  # refuses VD_DEMAND on every role, and it is right to: a realm demand is folded by the node id its
+  # frame claims, and the mesh trust is ONE shared bundle every member holds, so any bundle holder could
+  # dial the orchestrator and spawn realms at will. The cure is per-node identity (P7,
+  # identity_persistence), not a manifest. Until then this k3d cluster is a DEV cluster in the cloud's
+  # shape: every other cloud rule below still holds (durable roots, boot counters, no escapes), and the
+  # cloud preflight test keeps refusing an armed demand route under `cloud`. Measured on the dev cluster:
+  # twelve login demands per session from the gateway, which the directory check names as "holds neither
+  # the realm nor its parent" — the lawful-sender rule must admit a gateway holding a session lease.
+  VD_PROFILE: "dev"
   VD_TICK_HZ: "50"
   VD_TICK_DT: "0.02" # == 1/50; kept beside VD_TICK_HZ so they retune together
   # The occupant's max speed. HERE, not on the shard pod, because BOTH the shard and the gateway build the
@@ -24,4 +34,13 @@ data:
   VD_BOOT_DURABLE_ROOT: "/var/lib/vd-boot"
   VD_BOOT_STATE_DIR: "/var/lib/vd-boot/state" # BootCounter create_dir_all's this under the boot PVC
   VD_SHUTDOWN_LINGER_MS: "2000" # preStop drain linger; well below every terminationGracePeriodSeconds
-  VD_CLOCK_PEERS: "2,3" # IP-free NodeIds (gateway,shard); orch broadcasts ClockSync to these; gw/shard ignore it
+  VD_CLOCK_PEERS: "2" # IP-free NodeId: the gateway, the one booked follower. A demand-spawned shard is clocked by its launcher's book, not by this list.
+  # THE WORLD'S SEED, stated (foundation slice 5, 2026-09-06): every node builds the same world from it —
+  # the gateway plants the home system, a spawned shard plants its own subtree, the sky folds the layer.
+  VD_UNIVERSE_SEED: "2298"
+  # THE FORKED SHARDS' MUST-PARSE PARAMETERS (foundation slice 5). They lived on the static shard's
+  # manifest; a demand-spawned shard inherits them from the ORCHESTRATOR's environment (the spawn
+  # anchors), so they live cluster-wide here. Measured: a child refused with Missing("VD_SNAPSHOT_BUDGET").
+  VD_SNAPSHOT_BUDGET: "1100" # <= CONSERVATIVE_DATAGRAM_BUDGET (asserted at boot)
+  VD_MINT_SEED: "11"
+  VD_INPUT_LOG_CAP: "4096"

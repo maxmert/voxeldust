@@ -13,7 +13,8 @@
 use super::Placement;
 use super::{
     GeneratedBody, IMF_MASS_LO_MSUN, IMF_SLOPE, K_SPAN, UniverseConfig, WorldView,
-    imf_mass_hi_msun, moving_children_for_config, placement_offset, system_forest_cached,
+    imf_mass_hi_msun, moving_children_for_config, placement_offset, realm_subtree,
+    system_forest_cached, system_layer_cached,
 };
 use crate::celestial::OrbitalElements;
 use crate::motion::Motion;
@@ -150,7 +151,10 @@ pub fn guard_seeded_systems_disjoint(
     seed_universe: u64,
     config: &UniverseConfig,
 ) -> Result<(), SiblingsOverlap> {
-    let centres: Vec<(RealmId, DVec3, f64)> = system_forest_cached(seed_universe, config)
+    // ★ OVER THE SYSTEM LAYER, NOT THE FOREST (foundation slice 5, 2026-09-06). The systems' centres
+    // and shells are decided by the layer; expanding every system's planets and moons to read them
+    // built 3.5 million bodies (2.4 GB) in every process at boot. The layer is 233 222 rows.
+    let centres: Vec<(RealmId, DVec3, f64)> = system_layer_cached(seed_universe, config)
         .iter()
         .filter(|b| b.parent == Some(GALAXY))
         .map(|b| {
@@ -173,6 +177,8 @@ pub fn guard_seeded_systems_disjoint(
 /// may never ask HOW anything moves, SL4); anything else states the `Fixed` offset it was authored
 /// at. A missing row is unrepresentable rather than defaulted: the regions and this roster derive
 /// from the SAME `(seed, config)` forest.
+/// Over the WHOLE forest — for tools and tests. A booting process reads the movers of its planted
+/// subtree instead ([`child_reaches_planted`]): this built 3.5 million bodies per shard boot.
 #[must_use]
 pub fn child_reaches_for_config(
     seed_universe: u64,
@@ -185,7 +191,37 @@ pub fn child_reaches_for_config(
         .iter()
         .flat_map(|p| moving_children_for_config(seed_universe, config, *p))
         .collect();
-    // The parent ROW for every realm that is one, looked up once instead of re-scanned per child.
+    child_reaches_with_movers(regions, &movers)
+}
+
+/// ★ THE REACH ROSTER OF A PLANTED SUBTREE (foundation slice 5, 2026-09-06): the same verdict as
+/// [`child_reaches_for_config`], with the movers read from the subtree this process plants — the
+/// ancestors, the held realms, their direct children — which is exactly the set `regions` names.
+/// Example: a planet's shard needs its moons' orbits and its own orbit around the star; both are in
+/// its subtree, and no other system's planets are.
+#[must_use]
+pub fn child_reaches_planted(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    held: &std::collections::BTreeSet<RealmId>,
+    lineage: &std::collections::BTreeSet<RealmId>,
+    regions: &[RealmRegion],
+) -> std::collections::BTreeMap<RealmId, vd_core::geometry::ChildReach> {
+    let subtree = realm_subtree(seed_universe, config, held, lineage);
+    let parents: std::collections::BTreeSet<RealmId> =
+        regions.iter().filter_map(|r| r.parent).collect();
+    let movers: std::collections::BTreeMap<RealmId, OrbitalElements> = parents
+        .iter()
+        .flat_map(|p| super::moving_children(&subtree, *p))
+        .collect();
+    child_reaches_with_movers(regions, &movers)
+}
+
+/// The reach arithmetic over regions and movers already in hand (the shared body of both readers).
+fn child_reaches_with_movers(
+    regions: &[RealmRegion],
+    movers: &std::collections::BTreeMap<RealmId, OrbitalElements>,
+) -> std::collections::BTreeMap<RealmId, vd_core::geometry::ChildReach> {
     let by_realm: std::collections::BTreeMap<RealmId, &RealmRegion> =
         regions.iter().map(|r| (r.realm, r)).collect();
     regions
@@ -497,8 +533,65 @@ pub struct StarBoundInsidePhotosphere {
     pub photosphere_m: f64,
 }
 
+/// ★ THE PLANTED-SUBTREE GUARDS (foundation slice 5, 2026-09-06): what a process boots with is what
+/// it guards. A shard or a gateway plants the subtree of the realms it holds — the ancestors to the
+/// root, the held realms, their direct children — and runs the star-bound fence and the visibility
+/// climb over THAT, never over the whole forest. The whole world's fences are proven once, by the
+/// world's own tests at its seed, not re-proven by every process at boot: the full forest is 3.5
+/// million bodies and cost every shard 1.3 GB and every gateway 5.3 GB at boot, for a property that
+/// cannot change between two boots of the same seed.
+///
+/// Example: the shard for one planet plants thirteen regions and guards thirteen; the galaxy shard
+/// plants the layer and guards it. Both refuse to boot on a violation in what they will serve.
+///
+/// # Errors
+/// [`PlantGuardRefused`] naming the fence that refused and the body it named.
+pub fn guard_planted_subtree(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    held: &std::collections::BTreeSet<RealmId>,
+    lineage: &std::collections::BTreeSet<RealmId>,
+    arity: usize,
+) -> Result<(), PlantGuardRefused> {
+    guard_planted_bodies(
+        &realm_subtree(seed_universe, config, held, lineage),
+        config,
+        arity,
+    )
+}
+
+/// The two fences over bodies already in hand — split from the seed shell so both REFUSAL arms are
+/// reachable from a unit test with a hostile subtree (HR5); THE world only ever produces the green
+/// arm. Order: the star bound first, then the climb, each named by its own error.
+pub(crate) fn guard_planted_bodies(
+    bodies: &[GeneratedBody],
+    config: &UniverseConfig,
+    arity: usize,
+) -> Result<(), PlantGuardRefused> {
+    guard_star_bounds(bodies).map_err(PlantGuardRefused::StarBound)?;
+    super::first_climb_over(
+        &super::visibility_climbs(
+            bodies,
+            super::VISIBILITY_THETA_MIN_RAD,
+            config.planet.ecc_cap,
+        ),
+        arity,
+    )
+    .map_err(PlantGuardRefused::Climb)
+}
+
+/// Why [`guard_planted_subtree`] refused: one of its two fences, with that fence's own naming.
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+pub enum PlantGuardRefused {
+    #[error("the star bound fence refused: {0}")]
+    StarBound(StarBoundInsidePhotosphere),
+    #[error("the visibility climb exceeds the look carrier: {0}")]
+    Climb(super::VisibilityClimbExceeded),
+}
+
 /// THE T2 BOOT FENCE (`guard_star_bound_exceeds_photosphere`): every generated star's bound
-/// strictly exceeds its photosphere. Wired beside the climb fence in every world-deriving boot.
+/// strictly exceeds its photosphere. Over the WHOLE forest — the world's own proof, run by the
+/// world's tests; a booting process guards its planted subtree instead ([`guard_planted_subtree`]).
 ///
 /// # Errors
 /// [`StarBoundInsidePhotosphere`] naming the first offending system with both radii.

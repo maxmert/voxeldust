@@ -501,6 +501,7 @@ pub fn admin_snapshot(
             spins_failed: rlm.spins_failed,
             teardowns_reaped: rlm.teardowns_reaped,
             force_reaps: rlm.force_reaps,
+            retired_heads_reaped: rlm.retired_heads_reaped,
             undecodable_demands: rlm.undecodable_demands,
             demand_sender_mismatch: rlm.demand_sender_mismatch,
             desired_gauge: rlm.desired_gauge,

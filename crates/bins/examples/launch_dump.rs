@@ -6,7 +6,12 @@ fn main() {
         // SAFETY: single-threaded probe, before anything reads the environment.
         unsafe { std::env::set_var(k, v) };
     }
-    let rows = vd_bins::launch_rows(std::path::Path::new(&format!("{dir}/launch.redb")));
+    let path = format!("{dir}/launch.redb");
+    println!(
+        "water={:?}",
+        vd_bins::launch_water(std::path::Path::new(&path))
+    );
+    let rows = vd_bins::launch_rows(std::path::Path::new(&path));
     for (node, coord, pid) in rows {
         println!("node={} coord={coord:?} pid={pid:?}", node.0);
     }

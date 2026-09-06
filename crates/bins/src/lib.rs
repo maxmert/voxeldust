@@ -790,6 +790,22 @@ pub fn book(pairs: &[(NodeId, SocketAddr)]) -> String {
         .join(",")
 }
 
+/// THE ADDRESS A LAUNCHER IS REACHED AT BY THE SHARDS IT FORKS (foundation slice 5, 2026-09-06).
+/// On one host the orchestrator binds a loopback address, and that address is dialable as it is.
+/// In a pod it binds every interface (`0.0.0.0:9000`), and a child that dials the unspecified
+/// address fails with "invalid remote address" — MEASURED in k3d: every forked shard booted, ticked
+/// and synced, and none could renew its lease, so the gateway closed every login on the bootstrap
+/// TTL. The reachable address is the host the launcher forks its shards on (`VD_RLM_BIND_HOST`, the
+/// pod's own IP) at the bind's port. Not a shard-kind fork: every launcher reads the same rule (HR3).
+#[must_use]
+pub fn reachable_at(bind: SocketAddr, fork_host: std::net::Ipv4Addr) -> SocketAddr {
+    if bind.ip().is_unspecified() {
+        SocketAddr::from((fork_host, bind.port()))
+    } else {
+        bind
+    }
+}
+
 fn str_pair(key: &'static str, value: impl ToString) -> (&'static str, String) {
     (key, value.to_string())
 }
@@ -1805,6 +1821,30 @@ pub fn node_outbox_path(dir: &std::path::Path, node: NodeId) -> String {
         .to_string()
 }
 
+/// ★ A FORKED SHARD'S OWN BOOT-STATE DIR (foundation slice 5, 2026-09-06): the launcher's dir with one
+/// sub-directory per node, so a dozen children under one orchestrator pod never share one boot counter
+/// file. `None` when the launcher has no boot-state dir (the dev cluster mints incarnations from the
+/// wall clock instead). Example: the orchestrator pod's `/var/lib/vd-boot/state` gives the system
+/// shard `/var/lib/vd-boot/state/realm-1000`.
+#[must_use]
+pub fn child_boot_state_dir(
+    anchors: &[(&'static str, String)],
+    node: NodeId,
+) -> Option<(&'static str, String)> {
+    anchors
+        .iter()
+        .find(|(k, v)| (*k == "VD_BOOT_STATE_DIR") & !v.trim().is_empty())
+        .map(|(_, dir)| {
+            (
+                "VD_BOOT_STATE_DIR",
+                std::path::Path::new(dir)
+                    .join(format!("realm-{}", node.0))
+                    .display()
+                    .to_string(),
+            )
+        })
+}
+
 /// The two keys that turn a shard's durable outbox ON, for a node in a dev/test slot work dir.
 ///
 /// `VD_OUTBOX_EPHEMERAL_OK` rides along because every dev cluster and every process gate keeps its
@@ -2072,6 +2112,27 @@ pub fn launch_rows(
         .collect();
     drop(store);
     rows
+}
+
+/// The launch ledger's durable high-water `(next_node, next_port)` — `None` on a virgin ledger. A
+/// diagnosis probe (with [`launch_rows`]): a restart that mints an id below this water reuses an id,
+/// which the F2 rule forbids.
+#[must_use]
+pub fn launch_water(path: &std::path::Path) -> Option<(u64, u32)> {
+    let store = vd_io_prod::store::RedbStore::open(
+        path,
+        vd_io_prod::store::StoreTuning::default(),
+        durable_stamp(
+            &EnvConfig::from_process_env(),
+            vd_core::store_stamp::StoreRole::LaunchLedger,
+            vd_core::EpochId(0),
+        )
+        .expect("the launch ledger's label"),
+    )
+    .expect("reopen launch.redb");
+    let water = vd_node::rlm_spawn::launch_water(&store.0);
+    drop(store);
+    water
 }
 
 /// SIGKILL + poll-until-gone every forked shard named by a durable launch row's confirmed pid (a row with no
@@ -2671,20 +2732,23 @@ type BootWorld = (
 /// shard that plants it, and the `None` arm below is reachable only by a genuinely static child.
 /// Boot-time-only knowledge, discarded after the guard: the sim's runtime roster stays the hosted
 /// realm's own authored children (SL1 — a realm is never handed its own placement to run with).
+/// The reach roster of the subtree this process plants (slice 5: read from the planted subtree, never
+/// from the whole forest — that built 3.5 million bodies per shard boot).
 #[must_use]
 pub fn child_reaches(
     universe_seed: u64,
+    held: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    lineage: &std::collections::BTreeSet<vd_core::pose::RealmId>,
     regions: &[vd_core::geometry::RealmRegion],
     occupant_v_max_mps: f64,
     tick_dt_s: f64,
 ) -> std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::geometry::ChildReach> {
-    // THE ONE IMPLEMENTATION lives in the motion crate beside the generator whose forest it reads
-    // (HR3/SL4 — the reach law must consult the same `(seed, config)` world the regions came from,
-    // and only that crate may name HOW anything moves). This is the process's config threaded in.
-    vd_physics::worldgen::child_reaches_for_config(
+    vd_physics::worldgen::child_reaches_planted(
         universe_seed,
-        regions,
         &process_world_config(occupant_v_max_mps, tick_dt_s),
+        held,
+        lineage,
+        regions,
     )
 }
 
@@ -2821,6 +2885,38 @@ pub fn boot_world_built(
 /// `Walk` is the HAND-PLACED world (its station and area are fixtures, not generated content); the visual
 /// arms are seed-generated. `occupant_v_max_mps`/`tick_dt_s` feed the live AoI band exactly as they do for
 /// the regions, so the world a gateway holds carries the same bands the shard evaluates.
+/// ★ THE WORLD A GATEWAY BOOTS WITH (foundation slice 5, 2026-09-06): the system layer plus the HOME
+/// system's own subtree, where every login lands. Returns the view and the home's lineage set. The
+/// full forest ([`boot_world`]) stays for tools and oracles; a serving process never builds it.
+///
+/// Example: the gateway needs the home system's bound to place a spawn, the home's chain to the root
+/// to derive a login's lineage, and the sky. All three are in this view; the other 233 219 systems'
+/// planets are not, and the gateway never asks for them.
+#[must_use]
+pub fn boot_world_for_home(
+    universe_seed: u64,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+) -> (
+    vd_physics::worldgen::WorldView,
+    std::collections::BTreeSet<vd_core::pose::RealmId>,
+) {
+    use vd_physics::worldgen::WorldView;
+    let config = process_world_config(occupant_v_max_mps, tick_dt_s);
+    let layer = vd_physics::worldgen::system_layer_view(universe_seed, &config);
+    let home = vd_core::worldgen::default_home_realm(layer.regions())
+        .expect("THE world's system layer names a home system (the first system under the galaxy)");
+    let held: std::collections::BTreeSet<vd_core::pose::RealmId> = std::iter::once(home).collect();
+    let lineage: std::collections::BTreeSet<vd_core::pose::RealmId> =
+        [vd_core::worldgen::UNIVERSE, vd_core::worldgen::GALAXY, home]
+            .into_iter()
+            .collect();
+    (
+        WorldView::planted(universe_seed, &config, &held, &lineage),
+        lineage,
+    )
+}
+
 #[must_use]
 pub fn boot_world(
     universe_seed: u64,
@@ -4419,6 +4515,45 @@ mod incarnation_tests {
     }
 
     #[test]
+    fn a_launcher_bound_everywhere_is_reached_at_its_fork_host() {
+        use std::net::Ipv4Addr;
+        // A pod: bound to every interface ⇒ the children dial the pod's own IP at the bind's port.
+        assert_eq!(
+            reachable_at(
+                "0.0.0.0:9000".parse().expect("addr"),
+                Ipv4Addr::new(10, 42, 0, 12)
+            ),
+            "10.42.0.12:9000".parse::<SocketAddr>().expect("addr")
+        );
+        // One host: a loopback bind is dialable as it is, whatever the fork host says.
+        assert_eq!(
+            reachable_at(
+                "127.0.0.1:9000".parse().expect("addr"),
+                Ipv4Addr::new(10, 42, 0, 12)
+            ),
+            "127.0.0.1:9000".parse::<SocketAddr>().expect("addr")
+        );
+    }
+
+    #[test]
+    fn a_forked_shard_gets_its_own_boot_state_dir_under_the_launchers() {
+        let anchors = vec![("VD_BOOT_STATE_DIR", "/var/lib/vd-boot/state".to_owned())];
+        assert_eq!(
+            child_boot_state_dir(&anchors, NodeId(1000)),
+            Some((
+                "VD_BOOT_STATE_DIR",
+                "/var/lib/vd-boot/state/realm-1000".to_owned()
+            ))
+        );
+        // No dir at the launcher (the dev cluster) ⇒ nothing derived; a blank one counts as absent.
+        assert_eq!(child_boot_state_dir(&[], NodeId(1000)), None);
+        assert_eq!(
+            child_boot_state_dir(&[("VD_BOOT_STATE_DIR", "  ".to_owned())], NodeId(7)),
+            None
+        );
+    }
+
+    #[test]
     fn open_node_outbox_absent_or_blank_path_is_none() {
         assert!(open_node_outbox(&env(&[])).expect("absent ok").is_none());
         assert!(
@@ -5094,9 +5229,9 @@ mod incarnation_tests {
                 ("VD_PROBE_ADDR", a.orchestrator_probe.to_string()),
                 ("VD_STORE_PATH", "store".to_owned()),
                 ("VD_STORE_EPHEMERAL_OK", "1".to_owned()),
-                // The shards this orchestrator spawns keep their outbox beside its store (slice 4); under a
-                // dev slot that is `$TMPDIR`, so the outbox escape rides the spawn anchors to every child.
-                ("VD_OUTBOX_EPHEMERAL_OK", "1".to_owned()),
+                // (No outbox key: the orchestrator keeps no outbox by design, and a forked child derives
+                // its own outbox escape from THIS store escape — `child_env`, slice 5 — so nothing stray
+                // rides the anchors for the cloud preflight to refuse.)
                 // RLM 5f-1: the static-boot marker (every harness shape pre-spawns its shards, so an armed
                 // `VD_DEMAND` reconciler must be refused). INERT while `VD_DEMAND` is unset ⇒ boot behaviour
                 // stays byte-identical; only the env LIST grew by this one marker.

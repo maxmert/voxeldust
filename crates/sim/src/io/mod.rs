@@ -553,6 +553,22 @@ pub trait RealmSpawner {
         let _ = (node, coord);
         Ok(())
     }
+
+    /// ★ A NODE THIS LAUNCHER MINTED THAT IS NO LONGER LIVE — RETIRED FOR GOOD (foundation slice 5,
+    /// 2026-09-06). Ids are monotone and never reused, so a minted node that is not in the live set
+    /// has been torn down, has crashed, or died with the launcher itself; it can never come back.
+    ///
+    /// This is the launcher's OWN truth about a shard, and the reconcile reads it beside the wire
+    /// liveness latch. MEASURED in k3d: a pod restart takes the orchestrator and every shard it
+    /// forked down together. The rebuilt orchestrator's durable directory still shows each realm's
+    /// head at a shard that no longer exists; nothing is ever sent to a node with no address, so the
+    /// latch never confirms it dead, the head stays "running", and every login waits on a peer
+    /// locate that no launch record can answer — forever. A node an anchor or a static config
+    /// booked (below the mint band) is never retired here; the latch alone judges those.
+    fn retired(&self, node: NodeId) -> bool {
+        let _ = node;
+        false
+    }
 }
 
 #[cfg(test)]
@@ -565,6 +581,44 @@ mod tests {
             class,
             bytes: vec![0].into(),
         }
+    }
+
+    /// A launcher that never says which nodes it minted (a static topology's, say) retires nobody:
+    /// the wire liveness latch alone judges its peers.
+    struct SilentLauncher;
+    impl RealmSpawner for SilentLauncher {
+        fn spawn_realm(
+            &self,
+            _coord: &RealmCoord,
+            _at: UniverseTick,
+        ) -> Result<NodeId, SpawnError> {
+            Err(SpawnError::LaunchFailed {
+                reason: "static".into(),
+            })
+        }
+        fn kill_realm(&self, _node: NodeId) -> Result<(), SpawnError> {
+            Ok(())
+        }
+        fn live_nodes(&self) -> std::collections::BTreeSet<NodeId> {
+            std::collections::BTreeSet::new()
+        }
+    }
+
+    #[test]
+    fn a_launcher_with_no_mint_band_retires_nobody() {
+        use vd_core::realm_path::{RealmKindTag, RealmLevel, RealmPath};
+        assert!(!SilentLauncher.retired(NodeId(1)));
+        assert!(!SilentLauncher.retired(NodeId(1_000)));
+        // The stub's own arms, so the launcher shape it stands for is whole: it launches nothing,
+        // kills without complaint, and lists nobody.
+        let coord = RealmCoord::from_path(RealmPath::from_levels(vec![RealmLevel::new(
+            RealmKindTag::System,
+            7,
+        )]))
+        .expect("a one-level path has a leaf");
+        assert!(SilentLauncher.spawn_realm(&coord, UniverseTick(1)).is_err());
+        assert!(SilentLauncher.kill_realm(NodeId(1)).is_ok());
+        assert!(SilentLauncher.live_nodes().is_empty());
     }
 
     #[test]

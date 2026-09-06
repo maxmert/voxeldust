@@ -255,7 +255,7 @@ pub fn sky_from_system_layer(
     seed_universe: u64,
     config: &UniverseConfig,
 ) -> Vec<vd_core::look::StarRow> {
-    let layer = super::generate_system_layer(seed_universe, config);
+    let layer = super::system_layer_cached(seed_universe, config);
     let photometrics: Vec<(RealmId, StarPhotometrics)> = layer
         .iter()
         .filter_map(|b| b.photometrics.map(|p| (b.realm, p)))
@@ -286,7 +286,10 @@ pub fn sky_from_system_layer(
 /// full forest is 15× the bodies and about 7 GB of memory for an answer the layer already carries.
 #[must_use]
 pub fn system_layer_view(seed_universe: u64, config: &UniverseConfig) -> WorldView {
-    WorldView::of(super::generate_system_layer(seed_universe, config), config)
+    WorldView::of(
+        (*super::system_layer_cached(seed_universe, config)).clone(),
+        config,
+    )
 }
 
 #[must_use]
@@ -478,6 +481,24 @@ impl WorldView {
     #[must_use]
     pub fn hand_placed(config: &UniverseConfig) -> WorldView {
         WorldView::of(generate_walk_forest(config), config)
+    }
+
+    /// ★ THE VIEW A PROCESS PLANTS (foundation slice 5, 2026-09-06): the system layer, the realms it
+    /// holds expanded into their bodies, and nothing else — the ancestors to the root, the held
+    /// realms, their direct children. The gateway boots on this for the home system where logins
+    /// land, where it used to build the whole forest (3.5 million bodies, 5.3 GB) to keep thirteen
+    /// regions. Same seed, same bodies: what is expanded here is what the forest would hold.
+    #[must_use]
+    pub fn planted(
+        seed_universe: u64,
+        config: &UniverseConfig,
+        held: &std::collections::BTreeSet<RealmId>,
+        lineage: &std::collections::BTreeSet<RealmId>,
+    ) -> WorldView {
+        WorldView::of(
+            super::realm_subtree(seed_universe, config, held, lineage),
+            config,
+        )
     }
 
     /// Lower a body list to its regions once, and keep both — the regions answer containment questions, the

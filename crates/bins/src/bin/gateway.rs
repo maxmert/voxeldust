@@ -102,28 +102,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // cluster placed its logins by the geometry of a different universe than the one it then simulated.
     // THE SAME world the shards build — not "the same function with whatever value each was handed",
     // which is what this was and what a live cluster was measured doing wrong.
-    // THE LOOK HORIZON's boot fence (look_horizon.md §3.3.4 — "in EVERY process's fence, today
-    // only the shard's"): the gateway derives THE world too (the login placement below), so it
-    // runs the SAME measured-climb refusal the shard runs. A world whose pictures cannot be
-    // carried refuses to serve logins rather than serving wrong pixels.
-    vd_physics::worldgen::guard_visibility_climb_bounded(
-        universe_seed,
-        &vd_bins::process_world_config(move_speed * time_multiplier, tick_dt),
-        vd_wire::session_flow::LOOK_CARRIER_ARITY,
-    )
-    .map_err(|e| {
-        format!(
-            "THE world's measured visibility climb exceeds the look carrier: {e} — refusing to boot"
-        )
-    })?;
-    // THE T2 STAR FENCE (celestial taxonomy arc, owner ruling E): every generated star's
-    // dust-sublimation bound strictly exceeds its own photosphere — a Star realm drawn wider
-    // than its authority is a world no process may serve.
-    vd_physics::worldgen::guard_star_bound_exceeds_photosphere(
-        universe_seed,
-        &vd_bins::process_world_config(move_speed * time_multiplier, tick_dt),
-    )
-    .map_err(|e| format!("THE world's star bound fence refused: {e} — refusing to boot"))?;
+    // THE LOOK HORIZON's boot fence and THE T2 STAR FENCE run over the subtree this gateway
+    // PLANTS — the home system — right after it is planted below (foundation slice 5, 2026-09-06).
+    // They used to run over the whole forest: 3.5 million bodies, a 5.3 GB boot peak, to re-prove a
+    // property of the seed that the world's own tests prove once.
     // THE STORAGE FENCE (real-scale addendum §A2.1 F1 / R3 — the same fence the shard boot runs):
     // the refusal is THE NAMED P10 TRIGGER.
     let budget = vd_physics::worldgen::guard_root_representable(&vd_bins::process_world_config(
@@ -143,7 +125,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &vd_bins::process_world_config(move_speed * time_multiplier, tick_dt),
     )
     .map_err(|e| format!("two seeded systems overlap: {e:?} — refusing to boot"))?;
-    let universe = vd_bins::boot_world(universe_seed, move_speed * time_multiplier, tick_dt);
+    // ★ THE GATEWAY PLANTS THE HOME, NOT THE GALAXY (foundation slice 5, 2026-09-06): the system
+    // layer plus the home system's subtree, where every login lands — thirteen regions kept, where
+    // the whole forest was built to keep them.
+    let (universe, home_lineage) =
+        vd_bins::boot_world_for_home(universe_seed, move_speed * time_multiplier, tick_dt);
+    {
+        let home = vd_core::worldgen::default_home_realm(universe.regions())
+            .ok_or("the planted home view names no home system — refusing to boot")?;
+        vd_physics::worldgen::guard_planted_subtree(
+            universe_seed,
+            &vd_bins::process_world_config(move_speed * time_multiplier, tick_dt),
+            &std::iter::once(home).collect(),
+            &home_lineage,
+            vd_wire::session_flow::LOOK_CARRIER_ARITY,
+        )
+        .map_err(|e| format!("THE world's planted home refused a fence: {e} — refusing to boot"))?;
+    }
     // WHERE ACCOUNTS APPEAR, resolved against that same world: a realm NAME plus a pose already measured
     // from that realm's own centre. Nothing here descends anything.
     let homes = vd_bins::resolve_homes(&env, &universe)?;
@@ -164,6 +162,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generation = format!("{sky_generation:#x}"),
         "the gateway folded the galaxy's sky"
     );
+    // The home is planted and the sky is folded; the boot caches have done their one job (slice 5).
+    vd_physics::worldgen::release_boot_caches();
     let seed_injector = SeedInjectorConfig {
         armed: demand_armed,
         // LOWERED (SL4): the gateway library receives the region forest alone — the bodies (and

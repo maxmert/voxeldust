@@ -40,12 +40,17 @@ spec:
             matchLabels: { app: vd }
       ports:
         - { port: 9000, protocol: UDP }
+        # THE SPAWN PORT BAND (foundation slice 5, 2026-09-06): the orchestrator pod forks realm
+        # shards that bind its own address on VD_RLM_FIRST_PORT..VD_RLM_PORT_LIMIT; the gateway and
+        # the agent reach them there. Same UDP mesh, same peers, more ports.
+        - { port: 45000, endPort: 45999, protocol: UDP }
   egress:
     - to:
         - podSelector:
             matchLabels: { app: vd }
       ports:
         - { port: 9000, protocol: UDP }
+        - { port: 45000, endPort: 45999, protocol: UDP }
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

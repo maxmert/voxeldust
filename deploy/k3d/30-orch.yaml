@@ -66,17 +66,35 @@ spec:
             - { name: VD_EPOCH, value: "1" }
             - { name: VD_RESERVE_CHUNK, value: "4096" }
             - { name: VD_STORE_PATH, value: "/var/lib/vd/orchestrator.redb" }
+            # ★ THE DEMAND SHAPE (foundation slice 5, 2026-09-06): no shard exists until a player needs
+            # it. The orchestrator forks realm shards as child processes of THIS pod; they bind the
+            # pod's own address on the spawn port band, keep their outbox and store beside this pod's
+            # store on the durable volume, and the gateway learns each one's address from the
+            # orchestrator's answer to a login. One pod hosting many shard processes is the interim
+            # shape; one pod per realm needs a Kubernetes launch backend and stays owed.
+            - { name: VD_DEMAND, value: "1" }
+            - { name: VD_BOOT_TICKS_P99, value: "500" } # the release boot budget the dev cluster derives
+            - { name: VD_RLM_FIRST_PORT, value: "45000" }
+            - { name: VD_RLM_PORT_LIMIT, value: "46000" }
+            - name: VD_RLM_BIND_HOST # the address forked shards bind and are booked at: this pod's IP
+              valueFrom:
+                fieldRef: { fieldPath: status.podIP }
           ports:
             - { name: mesh, containerPort: 9000, protocol: UDP }
             - { name: admin, containerPort: 9100, protocol: TCP }
             - { name: probe, containerPort: 9002, protocol: TCP }
+            # The spawn port band (VD_RLM_FIRST_PORT..VD_RLM_PORT_LIMIT) is not listed per port: a pod
+            # accepts on any port it binds; the network policy admits the band by range.
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true # all writes go to the PVCs / the /tmp emptyDir; entrypoint only exports+exec
             capabilities: { drop: [ALL] }
           resources: # GUARANTEED QoS (requests==limits): the ONLY node holding un-fsynced durable state
-            requests: { cpu: "500m", memory: "512Mi" }
-            limits: { cpu: "500m", memory: "512Mi" }
+            # MEASURED 2026-09-06 (release, the dev cluster): the orchestrator keeps 12–15 MB; each
+            # forked shard peaks ~300 MB while it plants (the system layer, built once per process)
+            # and keeps ~11 MB after; one login forks about a dozen. 4 GiB holds a dozen boots at once.
+            requests: { cpu: "2", memory: "4Gi" }
+            limits: { cpu: "2", memory: "4Gi" }
           livenessProbe:
             httpGet: { path: /healthz, port: probe }
             initialDelaySeconds: 5

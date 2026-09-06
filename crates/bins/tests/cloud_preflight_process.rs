@@ -297,10 +297,16 @@ fn orchestrator_cloud_refuses_an_armed_demand_route() {
 /// RLM 5f-3e enabling-condition pin (a STATIC assertion over the shipped manifests, not a process spawn). The
 /// whole cloud footgun preflight — the 5f-3e demand veto, the dev-key veto, the ephemeral-store escapes —
 /// fires ONLY under `Profile::Cloud`, which `resolve_profile` derives from `VD_PROFILE`; absent ⇒ DevTest, a
-/// deliberate fail-OPEN. The only thing that flips the shipped cluster into cloud is the `vd-cluster-env`
-/// ConfigMap setting `VD_PROFILE: "cloud"` AND every server manifest importing it via `envFrom`. Pin both, so
-/// a manifest edit that drops either — silently disarming EVERY cloud security control while `just gate`
-/// stays green — fails HERE instead.
+/// deliberate fail-OPEN.
+///
+/// ★ THE SHIPPED CLUSTER RUNS THE DEMAND LOOP (foundation slice 5, 2026-09-06): the game's shape is a
+/// gateway whose logins fork realm shards on demand, and the cloud profile REFUSES `VD_DEMAND` until a
+/// node can prove who it is (`DemandWithoutClientTrust` → P7 per-node identity). So the `vd-cluster-env`
+/// ConfigMap pins `VD_PROFILE: "dev"` DELIBERATELY, says why in place, and arms `VD_DEMAND` on both server
+/// manifests, which import it via `envFrom`. This test pins exactly that, so (1) a manifest edit that
+/// drops the import silently boots a node with no profile at all, and (2) the day P7 lands and the
+/// ConfigMap flips back to `cloud`, THIS assertion goes red and the cloud vetoes are re-pinned on purpose —
+/// never a silent drift either way. The static shard manifest is gone (the demand shape forks shards).
 #[test]
 fn shipped_cloud_manifests_pin_the_cloud_profile() {
     let deploy = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/k3d");
@@ -309,20 +315,33 @@ fn shipped_cloud_manifests_pin_the_cloud_profile() {
     };
     let configmap = read("10-configmap.yaml");
     assert!(
-        configmap.contains("VD_PROFILE: \"cloud\""),
-        "the vd-cluster-env ConfigMap MUST set VD_PROFILE=cloud — without it every cloud footgun veto (the \
-         5f-3e demand veto, the dev-key veto, the ephemeral escapes) is silently disarmed into DevTest"
+        configmap.contains("VD_PROFILE: \"dev\""),
+        "the vd-cluster-env ConfigMap pins VD_PROFILE=dev on purpose (the demand loop; the cloud profile \
+         refuses VD_DEMAND until P7) — a different value is a deliberate re-pin, not a drift"
     );
-    for node in ["30-orch.yaml", "40-gateway.yaml", "50-shard.yaml"] {
+    assert!(
+        configmap.contains("P7"),
+        "the ConfigMap must say WHY it runs the dev profile in the cloud's shape (P7 per-node identity)"
+    );
+    assert!(
+        !deploy.join("50-shard.yaml").exists(),
+        "the static shard manifest is gone: the demand shape forks every realm shard"
+    );
+    for node in ["30-orch.yaml", "40-gateway.yaml"] {
         let manifest = read(node);
         assert!(
             manifest.contains("vd-cluster-env"),
-            "{node} MUST import the vd-cluster-env ConfigMap (envFrom) or the node boots WITHOUT \
-             VD_PROFILE=cloud — fail-open into DevTest with every cloud veto disarmed"
+            "{node} MUST import the vd-cluster-env ConfigMap (envFrom) or the node boots WITHOUT a \
+             profile at all"
+        );
+        assert!(
+            manifest.contains("VD_DEMAND"),
+            "{node} MUST arm VD_DEMAND: the shipped cluster's logins fork their realm shards"
         );
     }
     // THE WORLD INPUTS, shared. Both the gateway and the shard build the world from these: the gateway
-    // decides which realm a login lands in, the shard simulates what is around them once there. If the two
+    // decides which realm a login lands in, the shard simulates what is around them once there — and a
+    // forked shard inherits them from the ORCHESTRATOR's environment (its spawn anchors). If the two
     // are handed different numbers they describe different universes from the same seed — a login placed by
     // one geometry and then simulated by another. Pinned in the SHARED object so a retune cannot move one
     // and not the other, and asserted absent from the per-pod manifests so nothing can locally override it.
@@ -335,7 +354,7 @@ fn shipped_cloud_manifests_pin_the_cloud_profile() {
         // Matched as an ENV ENTRY (`name: VD_…`), not as any mention — the manifests DOCUMENT these keys in
         // comments, and a substring search would read its own documentation as a violation.
         let entry = format!("name: {key}");
-        for node in ["40-gateway.yaml", "50-shard.yaml"] {
+        for node in ["30-orch.yaml", "40-gateway.yaml"] {
             assert!(
                 !read(node).contains(&entry),
                 "{node} must NOT set {key} itself — a per-pod value silently overrides the shared one and \

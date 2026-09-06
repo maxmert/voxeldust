@@ -496,6 +496,9 @@ pub struct MeshStats {
     /// any more. The old connection is closed at the same moment, so the count also says how many stale
     /// reply paths this node retired. A steady climb means peer churn, not a defect.
     pub learned_peers_superseded: AtomicU64,
+    /// Writer lanes that retired quietly because their peer's NEWER connection had superseded the one
+    /// they were bound to (never a `ConnectionLost` for a peer that is still there).
+    pub learned_lanes_superseded: AtomicU64,
     /// RECEIVER (M6): receive ledgers EVICTED — a learned dial-in peer whose connection died and that has
     /// NO booked address, so this node can never be reached by that process again and its dedup state is
     /// dead weight. A booked peer (a shard, the orchestrator) is NEVER counted here: it is re-dialed and its
@@ -531,6 +534,7 @@ pub struct MeshStatsSnapshot {
     pub reliable_acked: u64,
     pub learned_peers_rejected: u64,
     pub learned_peers_superseded: u64,
+    pub learned_lanes_superseded: u64,
     pub recv_ledgers_evicted: u64,
     pub outbox_rows_retained: u64,
     pub outbox_batches: u64,
@@ -1189,6 +1193,7 @@ impl MeshControl {
             reliable_acked: self.stats.reliable_acked.load(Ordering::Relaxed),
             learned_peers_rejected: self.stats.learned_peers_rejected.load(Ordering::Relaxed),
             learned_peers_superseded: self.stats.learned_peers_superseded.load(Ordering::Relaxed),
+            learned_lanes_superseded: self.stats.learned_lanes_superseded.load(Ordering::Relaxed),
             recv_ledgers_evicted: self.stats.recv_ledgers_evicted.load(Ordering::Relaxed),
             outbox_rows_retained: self.stats.outbox_rows_retained.load(Ordering::Relaxed),
             outbox_batches: self.stats.outbox_batches.load(Ordering::Relaxed),
@@ -1927,6 +1932,26 @@ struct PeerWriter {
 /// (TRANSPORT-3). Reliable frames ride a persistent uni stream and bounce
 /// `NodeUnreachable` on hard failure; unreliable frames ride datagrams (latest-wins:
 /// loss is correct, no bounce).
+/// ★ A CLOSED LEARNED CONNECTION IS A LOSS ONLY IF THE PEER IS GONE (foundation slice 5, 2026-09-06).
+/// When a dial-in peer restarts, its NEW connection supersedes the old one, and this mesh CLOSES the
+/// old one itself. The writer lane bound to that old connection then sees its ack watch close — the
+/// same signal a dead peer gives. It must ask the learned table before it speaks: a LIVE connection
+/// held for the peer now is the newer incarnation, so the peer was superseded, never lost. MEASURED in
+/// k3d: a re-login from a fresh client pod raced its own `Hello` — the gateway created the new session,
+/// then the old lane's `ConnectionLost` ended it, and the client hung with no session and no `Close`.
+/// On one host the loss notice always landed first, which is why the login-after-kill gate stayed
+/// green. A dialed (booked) lane is never superseded this way: it re-dials, so it answers `false`.
+fn peer_superseded(source: &ConnSource, dest: NodeId) -> bool {
+    match source {
+        ConnSource::Learned(table) => table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&dest)
+            .is_some_and(|held| held.conn.close_reason().is_none()),
+        ConnSource::Dial(_) => false,
+    }
+}
+
 async fn peer_writer(mut w: PeerWriter) {
     // ONE peer-level connection (shared across classes) + ONE FSM lane per reliable class. A reliable
     // OutFrame routes to its class lane; unreliable rides datagrams on the shared connection.
@@ -1998,6 +2023,15 @@ async fn peer_writer(mut w: PeerWriter) {
                         // the old code therefore said NOTHING, which is exactly how a dead client's session
                         // survived it and wedged the next login. A BOOKED lane never says this: a booked peer
                         // is re-dialed, and its confirmed death is the NodeUnreachable bounce after N replays.
+                        // Superseded by the peer's newer incarnation: it already announced itself
+                        // (`Reincarnated`, on its first frame), so this lane just retires — a loss
+                        // notice here would end the session that new incarnation is opening.
+                        if peer_superseded(&w.source, w.dest) {
+                            w.stats
+                                .learned_lanes_superseded
+                                .fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
                         push_notice(
                             &w.inbox,
                             &w.stats,
@@ -5107,6 +5141,16 @@ mod tests {
             )
         }));
 
+        // A answers the FIRST process, so a learned writer lane toward node 2 is bound to that first
+        // connection — the lane the gateway streams a player over. When the second process supersedes
+        // it, that lane's connection closes under it; it must retire quietly, never as a loss.
+        ta.send(b, MsgClass::Control, vec![0xA1].into())
+            .expect("A->B1 learned");
+        let _ = wait_for(&mut tb1, |g| {
+            g.iter().any(
+                |m| matches!(m, Inbound::Wire { from, bytes, .. } if *from == a && bytes[0] == 0xA1),
+            )
+        });
         tb2.send(a, MsgClass::Control, vec![0xB2].into())
             .expect("B2->A booked send");
         a_events.extend(wait_for(&mut ta, |g| {
@@ -5174,6 +5218,16 @@ mod tests {
             }],
             "a peer restarts ONCE — one notice, whatever the class count"
         );
+        // (iv) the old lane retired as superseded, counted by name.
+        let started = Instant::now();
+        while ctl_a.stats().learned_lanes_superseded == 0 {
+            std::thread::sleep(Duration::from_millis(5));
+            assert!(
+                started.elapsed() < DEADLINE,
+                "A's old learned lane never retired as superseded"
+            );
+        }
+        assert_eq!(ctl_a.stats().learned_lanes_superseded, 1);
     }
 
     /// The other side of the replacement rule: an EQUAL incarnation is the SAME process, so it never takes

@@ -62,8 +62,11 @@ spec:
             - { name: VD_NODE_ID, value: "2" }
             - { name: VD_BIND, value: "0.0.0.0:9000" }
             - { name: VD_PROBE_ADDR, value: "0.0.0.0:9002" }
+            - { name: VD_ADMIN_ADDR, value: "0.0.0.0:9100" } # read-only /admin/snapshot + /metrics (the lane counters a cloud diagnosis needs)
             - { name: VD_ORCH, value: "1" }
-            - { name: VD_SHARD, value: "3" }
+            - { name: VD_SHARD, value: "3" } # the login-home DEFAULT id the bin still parses; the demand resolve supersedes it per login
+            - { name: VD_DEMAND, value: "1" } # the dynamic-home login route: a login demands its home realm
+            - { name: VD_BOOT_TICKS_P99, value: "500" } # must equal the orchestrator's, or the two sides disagree
             - { name: VD_SESSION_SEED, value: "23" }
             - { name: VD_MAX_SESSIONS, value: "8" }
             - { name: VD_MAX_BUFFERED_INPUTS, value: "256" } # == TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS (the DEV/parity value); required (no code default)
@@ -73,13 +76,16 @@ spec:
           ports:
             - { name: mesh, containerPort: 9000, protocol: UDP }
             - { name: probe, containerPort: 9002, protocol: TCP }
+            - { name: admin, containerPort: 9100, protocol: TCP }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
           resources: # Burstable (no un-fsynced durable state)
-            requests: { cpu: "250m", memory: "256Mi" }
-            limits: { cpu: "500m", memory: "384Mi" }
+            # MEASURED 2026-09-06 (release): the gateway peaks 306 MB while it plants the home system
+            # and folds the sky, and keeps ~22 MB after. It was 5.3 GB before the plant fix.
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
           livenessProbe:
             httpGet: { path: /healthz, port: probe }
             initialDelaySeconds: 5

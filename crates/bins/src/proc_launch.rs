@@ -171,6 +171,8 @@ impl ProcLaunchBackend {
         if dev_escape {
             env.push(("VD_OUTBOX_EPHEMERAL_OK", "1".to_owned()));
         }
+        // Its own boot counter, under the launcher's boot volume (the cloud shape; see the anchor keys).
+        env.extend(crate::child_boot_state_dir(&self.tuning.anchors, spec.node));
         env
     }
 }

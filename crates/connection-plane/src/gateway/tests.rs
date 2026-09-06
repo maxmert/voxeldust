@@ -2017,6 +2017,13 @@ fn a_second_hello_from_the_same_node_replaces_its_session() {
     let mut rig = Rig::new();
     let (old, _) = rig.login();
     assert!(session_active(&rig, old));
+    // A frame the dead process's session had staged toward its node id — the corpse's.
+    rig.world.resource_mut::<OutboundBox>().0.push((
+        CLIENT,
+        MsgClass::Control,
+        vec![0xEE].into(),
+        vd_sim::io::Durability::Ephemeral,
+    ));
     let sent = rig.tick(vec![wire(CLIENT, MsgClass::Control, &hello_msg())]);
     let sessions = rig.world.resource::<GatewaySessions>();
     let ids: Vec<SessionId> = sessions.sessions().collect();
@@ -2033,8 +2040,20 @@ fn a_second_hello_from_the_same_node_replaces_its_session() {
     );
     assert!(revoke_sent(&sent, old), "the old lease was revoked");
     assert!(
-        rig.world.resource::<OutboundBox>().1.contains(&CLIENT),
-        "the frames staged toward the dead process are forgotten at the next flush"
+        !sent.iter().any(|(to, _, b)| *to == CLIENT && b == &[0xEE]),
+        "the frame staged toward the dead process was forgotten"
+    );
+    assert_eq!(rig.world.resource::<OutboundBox>().1, 1);
+    // ★ And the fresh login goes on to its `Welcome` — the grant reply's tick stages it toward the
+    // SAME node id the forget named, and it goes out (measured in k3d 2026-09-06: a flush-time
+    // forget dropped it with the corpse's frames, and the new client waited forever).
+    let fresh = ids[0];
+    let granted = rig.tick(vec![wire(ORCH, MsgClass::Saga, &granted_head(fresh))]);
+    assert!(
+        granted
+            .iter()
+            .any(|(to, class, _)| *to == CLIENT && *class == MsgClass::Control),
+        "the fresh login's Welcome reached the new process"
     );
     assert_eq!(rig.stats().sessions_replaced_by_relogin, 1);
     assert_eq!(rig.stats().sessions_closed_peer_lost, 0);
@@ -2050,6 +2069,12 @@ fn a_peer_reset_ends_that_nodes_session_and_a_reset_about_a_stranger_changes_not
     let mut rig = Rig::new();
     let (first, _) = rig.login();
     assert!(session_active(&rig, first));
+    rig.world.resource_mut::<OutboundBox>().0.push((
+        CLIENT,
+        MsgClass::Control,
+        vec![0xEE].into(),
+        vd_sim::io::Durability::Ephemeral,
+    ));
     let sent = rig.tick(vec![Inbound::PeerReset {
         node: CLIENT,
         cause: vd_sim::io::PeerResetCause::ConnectionLost,
@@ -2057,11 +2082,15 @@ fn a_peer_reset_ends_that_nodes_session_and_a_reset_about_a_stranger_changes_not
     assert!(rig.world.resource::<GatewaySessions>().is_empty());
     assert!(detach_sent(&sent, first), "detached at the home shard");
     assert!(revoke_sent(&sent, first), "the lease was revoked");
-    assert!(rig.world.resource::<OutboundBox>().1.contains(&CLIENT));
+    assert!(
+        !sent.iter().any(|(to, _, b)| *to == CLIENT && b == &[0xEE]),
+        "the frame staged toward the dead process was forgotten"
+    );
+    assert_eq!(rig.world.resource::<OutboundBox>().1, 1);
     assert_eq!(rig.stats().sessions_closed_peer_lost, 1);
-    // The forget list is the flush's to take; the rig has no flush, so clear it by hand here to
-    // observe the next arm on its own.
-    rig.world.resource_mut::<OutboundBox>().1.clear();
+    // The count is the flush's to take; the rig has no flush, so clear it by hand here to observe
+    // the next arm on its own.
+    rig.world.resource_mut::<OutboundBox>().1 = 0;
 
     // The node comes back as a NEW process and logs in; then the transport reports the
     // reincarnation for a LATER restart.
@@ -2077,14 +2106,14 @@ fn a_peer_reset_ends_that_nodes_session_and_a_reset_about_a_stranger_changes_not
 
     // A reset about a stranger, with a live session held by somebody else: nothing changes.
     let (third, _) = rig.login();
-    rig.world.resource_mut::<OutboundBox>().1.clear();
+    rig.world.resource_mut::<OutboundBox>().1 = 0;
     let sent = rig.tick(vec![Inbound::PeerReset {
         node: NodeId(177),
         cause: vd_sim::io::PeerResetCause::ConnectionLost,
     }]);
     assert!(session_active(&rig, third));
     assert!(sent.is_empty(), "no detach, no revoke");
-    assert!(rig.world.resource::<OutboundBox>().1.is_empty());
+    assert_eq!(rig.world.resource::<OutboundBox>().1, 0);
     assert_eq!(rig.stats().sessions_closed_peer_lost, 1);
     assert_eq!(rig.stats().sessions_replaced_by_relogin, 0);
 }

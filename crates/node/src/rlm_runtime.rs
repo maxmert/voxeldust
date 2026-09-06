@@ -110,6 +110,9 @@ pub struct RlmReconcilerRes {
     pub teardowns_reaped: u64,
     /// `ForceReap`s executed (a zombie cleaned — BUG-A).
     pub force_reaps: u64,
+    /// Realm heads force-revoked because their holder is RETIRED by the launcher (a shard that died
+    /// with the launcher's pod), demanded or not — foundation slice 5.
+    pub retired_heads_reaped: u64,
     /// Saga-class frames that did not decode to a `RealmDemand` payload (ROB honesty; 0 in a healthy run).
     pub undecodable_demands: u64,
     /// Demands whose SENDER the directory head does not show holding the demanded realm's PARENT or the
@@ -184,6 +187,7 @@ impl RlmReconcilerRes {
             spins_failed: 0,
             teardowns_reaped: 0,
             force_reaps: 0,
+            retired_heads_reaped: 0,
             undecodable_demands: 0,
             demand_sender_mismatch: 0,
             desired_gauge: 0,
@@ -329,10 +333,17 @@ impl RlmReconcilerRes {
         now: UniverseTick,
         arriving: &BTreeSet<RealmId>,
     ) {
+        self.reap_retired_heads(dir);
+        // ★ DEAD IS THE LATCH **OR** THE LAUNCHER'S OWN LEDGER (foundation slice 5, 2026-09-06). The
+        // latch needs frames to fail; a shard that died with this orchestrator's pod has no address,
+        // gets no frames, and would hold its head "running" forever. `RealmSpawner::retired` is the
+        // launcher's truth about a node it minted. Bitwise `|`: both operands covered (HR5).
+        let spawner = &*self.spawner;
+        let dead = |node: NodeId| liveness_dead(node) | spawner.retired(node);
         let (actions, delta) = reconcile(
             &self.ledger,
             dir,
-            liveness_dead,
+            &dead,
             self.launches.live(),
             &self.tuning,
             now,
@@ -443,6 +454,36 @@ impl RlmReconcilerRes {
         }
     }
 
+    /// ★ REAP EVERY REALM HEAD A RETIRED SHARD STILL HOLDS, DEMANDED OR NOT (foundation slice 5,
+    /// 2026-09-06). The kernel judges only the realms in its demand ledger, and a rebuilt
+    /// orchestrator's ledger is empty. MEASURED in k3d: after a pod restart the durable directory
+    /// still named the dead universe and galaxy shards; a login re-spawned only the home it demanded,
+    /// the fresh home asked for a galaxy no launch record could name, and the first login always
+    /// died on the bootstrap TTL. A head whose holder this launcher minted and no longer runs is a
+    /// zombie by the launcher's own truth, whoever wants the realm. One pass over the directory's
+    /// realm rows per sweep — the running realms, the same order as the ledger walk the sweep already
+    /// makes, never a realm's children. A refused revoke (a transfer lock) stands until the next sweep.
+    fn reap_retired_heads(&mut self, dir: &mut DirectoryCore) {
+        let retired: Vec<(RealmId, Fence)> = dir
+            .entries()
+            .filter_map(|(key, record)| match key {
+                DirectoryKey::Realm(rid) if self.spawner.retired(record.authority.node()) => {
+                    Some((*rid, record.fence))
+                }
+                _ => None,
+            })
+            .collect();
+        for (rid, fence) in retired {
+            let revoked = dir.revoke(DirectoryKey::Realm(rid), fence) == RevokeOutcome::Revoked;
+            self.retired_heads_reaped += u64::from(revoked);
+            // The launch that put this head up is over: drop its minted entry (as a `ForceReap`
+            // does), or the pending-launch guard would hold the re-spawn for a whole launch TTL.
+            self.launches
+                .minted
+                .retain(|path, _| path.realm_id() != Some(rid));
+        }
+    }
+
     /// Execute a `ForceReap` (BUG-A zombie) — kill the corpse (idempotent) + force-revoke the stale head so
     /// it stops reading "running". The ledger cell is kept: if still demanded the next sweep re-spawns a
     /// FRESH incarnation (monotone ids never resurrect the dead one); else it retires.
@@ -522,9 +563,11 @@ impl RlmReconcilerRes {
     ) {
         let mut desired = 0u64;
         let mut running = 0u64;
+        let spawner = &*self.spawner;
+        let dead = |node: NodeId| liveness_dead(node) | spawner.retired(node);
         for (_path, cell) in self.ledger.iter() {
             let head = dir.head(DirectoryKey::Realm(cell.coord.lowered()));
-            let rl = running_live(head, liveness_dead);
+            let rl = running_live(head, &dead);
             running += u64::from(rl);
             // The same three arms the decision uses — a gauge that disagreed with the decision would
             // be worse than no gauge.
@@ -1431,6 +1474,145 @@ mod tests {
         // Post-kill gauges: nothing desired, nothing running.
         assert_eq!(rlm.desired_gauge, 0);
         assert_eq!(rlm.running_gauge, 0);
+    }
+
+    #[test]
+    fn drive_reaps_a_head_whose_shard_died_with_its_launcher_without_any_wire_evidence() {
+        // THE POD SHAPE (measured in k3d): the orchestrator and every shard it forked die together.
+        // The rebuilt orchestrator's durable directory still names the dead shard as the realm's
+        // head; no frame ever goes to a node with no address, so the latch NEVER fires. Here the
+        // latch is silent throughout (`|_| false`); the launcher's own ledger must carry the reap.
+        let t = RlmTuning::cloud(20);
+        let cd = t.spinup_cooldown_ticks;
+        let sp = MemSpawner::new(MemHub::new(), NodeId(1000), 8);
+        let mut rlm = RlmReconcilerRes::new(t, Box::new(sp.clone()));
+        let mut d = dir();
+        rlm.ledger
+            .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100), &BTreeSet::new());
+        assert_eq!(rlm.spins_requested, 1);
+        assert_eq!(sp.live_nodes(), BTreeSet::from([NodeId(1000)]));
+        // The shard registered (its head is up), then the pod died: the process is simply gone.
+        grant(&mut d, RealmId::System(7), 1000, 3);
+        sp.crash(NodeId(1000));
+        // Still demanded (the login re-asserts it); the latch stays silent ⇒ the ledger says dead ⇒
+        // ForceReap: the stale head is force-revoked this sweep and nothing spawns in the same sweep.
+        rlm.ledger.record_demand(
+            &sys(7),
+            DemandVerb::SpinUp,
+            UniverseTick(100 + cd),
+            Fence(2),
+        );
+        rlm.reconcile_and_drive(
+            &mut d,
+            &|_n| false,
+            UniverseTick(100 + cd),
+            &BTreeSet::new(),
+        );
+        assert_eq!(
+            rlm.retired_heads_reaped, 1,
+            "reaped by the launcher's truth, before the kernel"
+        );
+        assert_eq!(
+            rlm.force_reaps, 0,
+            "nothing left for the kernel's zombie arm"
+        );
+        assert!(
+            !head_present(&d, RealmId::System(7)),
+            "the dead shard's head is gone"
+        );
+        assert_eq!(rlm.running_gauge, 0, "the gauge agrees with the decision");
+        // Next sweep, past the cooldown: head gone, still demanded ⇒ a FRESH shard (a new id, never
+        // the dead one), so the login's peer locate is answered by a launch record that exists.
+        rlm.reconcile_and_drive(
+            &mut d,
+            &|_n| false,
+            UniverseTick(100 + 2 * cd),
+            &BTreeSet::new(),
+        );
+        assert_eq!(rlm.spins_requested, 2);
+        assert_eq!(sp.live_nodes(), BTreeSet::from([NodeId(1001)]));
+    }
+
+    #[test]
+    fn a_rebuilt_orchestrator_reaps_every_head_its_dead_shards_hold_demanded_or_not() {
+        // The restart shape: the directory came back from disk naming shards this launcher minted
+        // before the pod died. Nobody demands the galaxy yet (the ledger is empty); its head must go
+        // all the same, or the fresh home asks for a parent no launch record can name.
+        let sp = MemSpawner::new(MemHub::new(), NodeId(1000), 8);
+        let mut rlm = RlmReconcilerRes::new(RlmTuning::cloud(20), Box::new(sp.clone()));
+        let mut d = dir();
+        // Two shards this launcher minted: the home (demanded below) and the galaxy (never demanded).
+        let home = sp.spawn_realm(&sys(7), UniverseTick(1)).expect("home");
+        let galaxy = sp.spawn_realm(&sys(8), UniverseTick(1)).expect("galaxy");
+        grant(&mut d, RealmId::System(7), home.0, 3);
+        grant(&mut d, RealmId::System(8), galaxy.0, 4);
+        // A head an ANCHOR holds (a static shard the operator booked, below the mint band) and a
+        // session row: neither is the launcher's to judge.
+        grant(&mut d, RealmId::System(9), 2, 5);
+        d.grant(
+            DirectoryKey::Session(vd_core::SessionId(77)),
+            AuthorityRef::Gateway(NodeId(2)),
+            Fence(6),
+            UniverseTick(0),
+        );
+        // A third minted shard whose head is transfer-locked when it dies: the revoke is refused and
+        // the head stands for this sweep.
+        let locked = sp.spawn_realm(&sys(10), UniverseTick(1)).expect("locked");
+        grant(&mut d, RealmId::System(10), locked.0, 7);
+        assert!(d.lock_transfer(
+            DirectoryKey::Realm(RealmId::System(10)),
+            vd_core::TransferId(1)
+        ));
+        // The pod dies: every minted shard is gone, with no wire evidence.
+        sp.crash(home);
+        sp.crash(galaxy);
+        sp.crash(locked);
+        // The launch bookkeeping a crash-recovery seed leaves behind: a minted entry for the home
+        // (reaped below ⇒ dropped) and one for the anchor's realm (kept: its head is not ours).
+        rlm.launches
+            .minted
+            .entry(sys(7).path().clone())
+            .or_default()
+            .insert(home, UniverseTick(1));
+        rlm.launches
+            .minted
+            .entry(sys(9).path().clone())
+            .or_default()
+            .insert(NodeId(2), UniverseTick(1));
+        rlm.ledger
+            .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100), &BTreeSet::new());
+        assert_eq!(rlm.retired_heads_reaped, 2);
+        // The reaped realm's OLD pending launch went with its head; the entry now names only the
+        // fresh shard this sweep spun up for the demand. The anchor's realm kept its entry.
+        let home_minted = rlm.launches.minted.get(sys(7).path()).expect("re-spawned");
+        assert!(!home_minted.contains_key(&home), "the dead launch is gone");
+        assert_eq!(home_minted.len(), 1, "one fresh launch pending");
+        // The anchor realm's entry survived the reap (its head is not ours) and was then drained by
+        // the launch bookkeeping the normal way: its head is up.
+        assert!(!rlm.launches.minted.contains_key(sys(9).path()));
+        assert!(!head_present(&d, RealmId::System(7)));
+        assert!(
+            !head_present(&d, RealmId::System(8)),
+            "undemanded, reaped all the same"
+        );
+        assert!(
+            head_present(&d, RealmId::System(9)),
+            "the anchor's head is not ours to judge"
+        );
+        assert!(
+            d.head(DirectoryKey::Session(vd_core::SessionId(77)))
+                .is_some(),
+            "a session row is never a realm head"
+        );
+        assert!(
+            head_present(&d, RealmId::System(10)),
+            "transfer-locked: refused, stands"
+        );
+        // The demanded home is re-spawned FRESH (a new id, never the dead one).
+        assert_eq!(rlm.spins_requested, 1);
+        assert_eq!(sp.live_nodes(), BTreeSet::from([NodeId(1003)]));
     }
 
     #[test]

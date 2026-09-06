@@ -94,6 +94,9 @@ pub struct RlmView {
     pub teardowns_reaped: u64,
     /// `ForceReap`s executed (a zombie head cleaned).
     pub force_reaps: u64,
+    /// Realm heads force-revoked because the launcher retired their holder (a shard that died with
+    /// the orchestrator's pod), demanded or not — foundation slice 5.
+    pub retired_heads_reaped: u64,
     /// Saga frames that did not decode to a `RealmDemand` (honesty; 0 in a healthy run).
     pub undecodable_demands: u64,
     /// Demands whose sender the directory head shows holding neither the demanded realm's parent nor
@@ -713,6 +716,7 @@ mod tests {
                 spins_failed: 1,
                 teardowns_reaped: 2,
                 force_reaps: 1,
+                retired_heads_reaped: 8,
                 undecodable_demands: 0,
                 demand_sender_mismatch: 7,
                 desired_gauge: 3,

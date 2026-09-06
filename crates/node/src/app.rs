@@ -310,11 +310,11 @@ fn drain_phase(transport: &mut dyn Transport, world: &mut World) -> (usize, usiz
 /// distinctly so the loss of a transfer/control frame is machine-observable, never lumped with
 /// benign latest-wins snapshot shedding.
 fn flush_phase(transport: &mut dyn Transport, world: &mut World) -> Flushed {
-    let (mut pending, forget) = {
+    let (pending, forgotten) = {
         let mut outbox = world.resource_mut::<OutboundBox>();
         (std::mem::take(&mut outbox.0), std::mem::take(&mut outbox.1))
     };
-    let forgotten = forget_peers(&mut pending, &forget);
+    report_forgotten(forgotten);
     let cap = world.resource::<OutboundStagingCap>().0;
     let mut sent = 0usize;
     // Peers that back-pressured THIS tick; their remaining frames requeue untried.
@@ -366,23 +366,16 @@ struct Flushed {
     forgotten: usize,
 }
 
-/// Drop every staged frame toward a forgotten peer; return how many were dropped. Monomorphic.
-fn forget_peers(
-    pending: &mut Vec<(NodeId, MsgClass, Bytes, Durability)>,
-    forget: &BTreeSet<NodeId>,
-) -> usize {
-    if forget.is_empty() {
-        return 0;
+/// Say how many staged frames the tick forgot (`OutboundBox::forget_peer` dropped them the moment
+/// their peer's session ended; this is the report). Monomorphic; silent when nothing was forgotten.
+fn report_forgotten(forgotten: usize) {
+    if forgotten == 0 {
+        return;
     }
-    let before = pending.len();
-    pending.retain(|(to, _, _, _)| !forget.contains(to));
-    let dropped = before - pending.len();
     tracing::info!(
-        peers = forget.len(),
-        dropped,
+        forgotten,
         "forgot the staged frames toward peers whose sessions ended"
     );
-    dropped
 }
 
 /// Ask the clock's source where each unknown peer listens — one small Membership-class frame per
@@ -1131,6 +1124,14 @@ mod tests {
                 vd_sim::io::Durability::Ephemeral,
             ));
             outbox.forget_peer(GONE);
+            // The relogin's `Welcome`: staged toward the SAME node id after the forget, in the
+            // same tick — the next process's frame, never the corpse's.
+            outbox.0.push((
+                GONE,
+                MsgClass::Control,
+                vec![9].into(),
+                vd_sim::io::Durability::Ephemeral,
+            ));
         }
         let report = node.step_tick();
         assert_eq!(
@@ -1139,16 +1140,18 @@ mod tests {
         );
         assert_eq!(report.sent, 1, "the live peer's frame went out");
         assert_eq!(report.staging_shed, 0);
+        // GONE's lane has no capacity in this rig, so the frame staged AFTER the forget is not
+        // sent — but it SURVIVED the forget: it is carried over, never dropped with the corpse's.
         assert_eq!(
-            report.backpressured, 0,
-            "nothing toward GONE was carried over"
+            report.backpressured, 1,
+            "the frame staged after the forget waits for its lane; it was not forgotten"
         );
         assert_eq!(
             state.borrow().delivered.get(&LIVE).map(|v| v.len()),
             Some(1)
         );
         assert!(
-            node.world_mut().resource::<OutboundBox>().1.is_empty(),
+            node.world_mut().resource::<OutboundBox>().1 == 0,
             "the forget list is taken by the flush; a later frame toward GONE is not dropped"
         );
         // A second tick with nothing forgotten reports zero (the empty-list arm).
