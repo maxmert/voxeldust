@@ -500,6 +500,13 @@ image-drain-smoke: image-build
 # author+static-validate path (NO live cluster); `k3d-all` is the full LIVE bring-up (deferred behind an
 # explicit run per the "confirm it works" rule).
 k3d_cluster := env_var_or_default("VD_K3D_CLUSTER", "voxeldust")
+# THE DOOR (2026-09-06): the host port a player's client dials to reach the cluster's gateway (mapped onto
+# the gateway's NodePort at cluster create), the client's own UDP port and dev-control port on the host,
+# and the folder the cluster's trust is exported to for that client. Away from the dev cluster's slots.
+k3d_door_port := env_var_or_default("VD_K3D_DOOR_PORT", "19000")
+k3d_client_quic := env_var_or_default("VD_K3D_CLIENT_QUIC", "19001")
+k3d_devctl_port := env_var_or_default("VD_K3D_DEVCTL_PORT", "17777")
+k3d_trust_dir := env_var_or_default("VD_K3D_TRUST_DIR", env_var_or_default("TMPDIR", "/tmp") + "/vd-k3d-trust")
 kctx        := "k3d-" + k3d_cluster
 kns         := "voxeldust"
 k           := "kubectl --context " + kctx + " -n " + kns
@@ -535,7 +542,8 @@ k3d-up:
     #!/usr/bin/env bash
     set -euo pipefail
     k3d cluster list {{k3d_cluster}} >/dev/null 2>&1 && k3d cluster delete {{k3d_cluster}} || true
-    k3d cluster create {{k3d_cluster}} --wait --timeout 120s
+    # The door: host {{k3d_door_port}}/udp → the server node's 30900 (the gateway's NodePort, 40-gateway.yaml).
+    k3d cluster create {{k3d_cluster}} --wait --timeout 120s -p "{{k3d_door_port}}:30900/udp@server:0"
     kubectl --context {{kctx}} apply -f deploy/k3d/00-namespace.yaml
 
 # Build the server image (reuses image-build) + import it into the k3d node (never a registry pull).
@@ -579,6 +587,46 @@ k3d-apply: k3d-secrets
 
 k3d-down:
     k3d cluster delete {{k3d_cluster}} || true
+
+# ★ EXPORT THE CLUSTER'S TRUST FOR A CLIENT ON THIS MACHINE (2026-09-06): the mesh certificates the
+# agent pod mounts (vd-mtls: ca/node/key) into a local trust folder, and the login signing key (the only
+# process-env var the client reads) into `auth.env` beside them, 0600. The same material the agent pod
+# gets — never a second trust.
+k3d-trust-export:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    T="{{k3d_trust_dir}}"; mkdir -p "$T"; chmod 700 "$T"
+    {{k}} get secret vd-mtls -o json | python3 -c '
+    import base64, json, sys
+    d = json.load(sys.stdin)["data"]
+    for f in ("ca.der", "node.der", "key.der"):
+        open(sys.argv[1] + "/" + f, "wb").write(base64.b64decode(d[f]))
+    ' "$T"
+    printf 'VD_AUTH_SIGNING_KEY=%s\n' "$({{k}} get secret vd-auth-signing -o jsonpath='{.data.AUTH_SIGNING_KEY}' | base64 -d)" > "$T/auth.env"
+    chmod 600 "$T"/*
+    ls -la "$T"
+    echo "k3d-trust-export: the cluster's trust is at $T (gateway door 127.0.0.1:{{k3d_door_port}})"
+
+# ★ THE SHIPPED LOGIN FROM THIS MACHINE (2026-09-06): the agent's own boundary scenario — the exact script
+# the agent pod runs — driving a RELEASE client on the host through the door. Proves a client outside the
+# cluster logs in, walks and crosses the boundary before anyone opens a window. Needs k3d-trust-export.
+k3d-agent-host:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release -p vd-bins --features dev-control --bin client --bin vdctl
+    set -a; . "{{k3d_trust_dir}}/auth.env"; set +a
+    export PATH="$(pwd)/target/release:$PATH"
+    export VD_GATEWAY_ADDR="127.0.0.1:{{k3d_door_port}}" VD_CLIENT_QUIC="{{k3d_client_quic}}"
+    export VD_DEVCTL_PORT="{{k3d_devctl_port}}" VD_TRUST_DIR="{{k3d_trust_dir}}"
+    bash docker/scenario-boundary.sh
+    echo "k3d-agent-host OK: a client on this machine logged in through the door and crossed the boundary"
+
+# ★ FLY IN A WINDOW AGAINST THE CLUSTER (2026-09-06): the release window client through the door. Same
+# launcher as the dev cluster's window (scripts/client.sh), in its k3d mode. Needs k3d-trust-export.
+k3d-fly:
+    VD_BUILD=release VD_K3D_DOOR_PORT="{{k3d_door_port}}" VD_K3D_CLIENT_QUIC="{{k3d_client_quic}}" \
+    VD_K3D_DEVCTL_PORT="{{k3d_devctl_port}}" VD_K3D_TRUST_DIR="{{k3d_trust_dir}}" \
+    scripts/client.sh --k3d --window
 
 # DoD (the demand shape, foundation slice 5, 2026-09-06): 2/2 Ready, /metrics served. No shard holds a realm
 # until somebody logs in — the orchestrator forks one on demand — so "bootstrapped" is the AGENT's login

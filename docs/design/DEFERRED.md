@@ -1268,6 +1268,15 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   same "no evidence" class as (c), covered today only because the retired sweep runs first); the
   `PEER LOCATE UNANSWERED` storm from a child asking for a retired ancestor (a negative answer would be
   a new wire arm — SL6, ask first); one pod per realm (the k8s `LaunchBackend`).
+  ★ THE DOOR (2026-09-06): a player's client on the developer's machine reaches the cluster's gateway.
+  `just k3d-up` maps host UDP 19000 (`VD_K3D_DOOR_PORT`) onto the gateway's NodePort (30900,
+  `vd-gateway-door`, admitted from anywhere by `vd-allow-door`); `just k3d-trust-export` copies the
+  cluster's mesh certificates and login signing key into a local folder (the agent pod's own material,
+  never a second trust); `just k3d-agent-host` runs the agent's boundary scenario with a release client
+  on the host through the door (PASSED: logged in, walked, crossed the boundary); `just k3d-fly` opens
+  the release window through the door (`scripts/client.sh --k3d --window`). MEASURED: a capture client
+  through the door reached Active in System 7 with 233,220 stars drawn, 11 realm boxes, 3,587 snapshots
+  applied, 0 decode errors, 0 stale frames; the screenshot shows the star field and the system's star.
     (00-namespace, 10-configmap, 20-networkpolicy, 30-orch, 40-gateway, 50-shard): 3 StatefulSets (per-pod
     volumeClaimTemplates for the M3 boot-counter + the cloud-required store root — a Deployment/emptyDir would wipe
     the monotone counter = the R-6a dedup-loss landmine), 3 headless Services ALL with `publishNotReadyAddresses:

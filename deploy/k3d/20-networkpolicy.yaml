@@ -52,6 +52,24 @@ spec:
         - { port: 9000, protocol: UDP }
         - { port: 45000, endPort: 45999, protocol: UDP }
 ---
+# ★ THE DOOR (2026-09-06): a player's client dials the gateway from OUTSIDE the pod network (the node
+# port the host's door maps onto; the source is the node's own address after the service's translation),
+# so the gateway alone admits UDP 9000 from anywhere. Every other pod keeps the mesh-only rule above.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vd-allow-door
+  namespace: voxeldust
+spec:
+  podSelector:
+    matchLabels: { app: vd, role: gateway }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock: { cidr: 0.0.0.0/0 }
+      ports:
+        - { port: 9000, protocol: UDP }
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

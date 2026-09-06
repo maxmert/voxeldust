@@ -37,9 +37,11 @@ NAME="client"
 WINDOW=0
 CAPTURE=0
 FAST=0
+K3D=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --slot) SLOT="${2:?--slot needs a value}"; shift 2 ;;
+        --k3d) K3D=1; shift ;;
         --agent-index) AGENT="${2:?--agent-index needs a value}"; shift 2 ;;
         --name) NAME="${2:?--name needs a value}"; shift 2 ;;
         --window) WINDOW=1; shift ;;
@@ -59,8 +61,24 @@ done
 [[ -x "$TARGET/vd-slot" && -x "$TARGET/vd-devcluster" ]] \
     || cargo build --manifest-path "$ROOT/Cargo.toml" -p vd-bins $PROFILE_FLAG
 
+# ★ THE CLUSTER THROUGH THE DOOR (2026-09-06): no slot, no dev cluster — the gateway is the k3d
+# cluster's, reached at the host's door port; the trust and the signing key are the cluster's own,
+# exported by `just k3d-trust-export`. Everything else about the client is the same.
+if [[ "$K3D" == "1" ]]; then
+    K3D_TRUST="${VD_K3D_TRUST_DIR:-${TMPDIR:-/tmp}/vd-k3d-trust}"
+    [[ -f "$K3D_TRUST/auth.env" && -f "$K3D_TRUST/ca.der" ]] \
+        || { echo "client.sh: no exported cluster trust at $K3D_TRUST — run 'just k3d-trust-export'" >&2; exit 3; }
+    set -a
+    . "$K3D_TRUST/auth.env"
+    VD_GW_ADDR="127.0.0.1:${VD_K3D_DOOR_PORT:-19000}"
+    VD_CLIENT_QUIC_PORT="${VD_K3D_CLIENT_QUIC:-19001}"
+    VD_DEVCTL_PORT="${VD_K3D_DEVCTL_PORT:-17777}"
+    VD_TRUST_DIR="$K3D_TRUST"
+    set +a
+fi
+
 # Default the slot to this worktree's stable value (same derivation dev-cluster.sh used).
-if [[ -z "$SLOT" ]]; then
+if [[ "$K3D" == "0" && -z "$SLOT" ]]; then
     eval "$("$TARGET/vd-slot" --worktree "$ROOT")" # sets VD_SLOT
     SLOT="$VD_SLOT"
 fi
@@ -71,10 +89,12 @@ fi
 # process ENV (a secret belongs in env, not argv where `ps` would expose it), so the
 # contract vars must be EXPORTED to cross the `exec` boundary into the client — a
 # plain eval leaves them shell-local and the client dies at boot with a missing key.
-set -a
-eval "$("$TARGET/vd-devcluster" env --slot "$SLOT")"
-eval "$("$TARGET/vd-slot" --slot "$SLOT" --agent "$AGENT")"
-set +a
+if [[ "$K3D" == "0" ]]; then
+    set -a
+    eval "$("$TARGET/vd-devcluster" env --slot "$SLOT")"
+    eval "$("$TARGET/vd-slot" --slot "$SLOT" --agent "$AGENT")"
+    set +a
+fi
 
 CLIENT_BIN="$TARGET/client"
 # `dev-control` is NON-default (a release build links no listener at all). `--window`

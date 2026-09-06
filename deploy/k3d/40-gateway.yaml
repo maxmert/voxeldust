@@ -16,6 +16,23 @@ spec:
     - { name: mesh, port: 9000, protocol: UDP, targetPort: mesh }
     - { name: probe, port: 9002, protocol: TCP, targetPort: probe }
 ---
+# ★ THE DOOR (2026-09-06): the one port a player's client OUTSIDE the cluster dials. A NodePort on the
+# gateway's mesh UDP port; `just k3d-up` maps the host's door port (VD_K3D_DOOR_PORT, 19000) onto this
+# node port, so a window on the developer's machine logs in at 127.0.0.1:19000 exactly as the agent
+# pod logs in at the pod address. QUIC is client-initiated and symmetric, so the gateway needs no
+# address of its own to answer — it learns the client as it learns any dial-in peer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vd-gateway-door
+  namespace: voxeldust
+  labels: { app: vd, role: gateway }
+spec:
+  type: NodePort
+  selector: { app: vd, role: gateway }
+  ports:
+    - { name: mesh, port: 9000, protocol: UDP, targetPort: mesh, nodePort: 30900 }
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
