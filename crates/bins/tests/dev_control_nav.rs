@@ -67,6 +67,8 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
     let devctl_port = reserve_tcp_addr().port();
 
     let trust_dir = std::env::temp_dir().join(format!("vd-nav-{}", std::process::id()));
+    // The slot work dir this cluster keeps its node files in — the shard's durable outbox today.
+    let work_dir = vd_bins::fresh_work_dir("vd-nav");
     let trust = vd_io_prod::trust::ClusterTrust::generate("vd-nav").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
     let orch_store = std::env::temp_dir().join(format!("vd-nav-{}-orch.redb", std::process::id()));
@@ -108,7 +110,7 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
         "vd-shard",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
-            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
+            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single, &work_dir),
         ),
     );
     let _nodes = nodes; // RAII: reaps the cluster on test end or panic
@@ -256,5 +258,6 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
     }
 
     let _ = std::fs::remove_dir_all(&trust_dir);
+    let _ = std::fs::remove_dir_all(&work_dir);
     let _ = std::fs::remove_file(&orch_store);
 }

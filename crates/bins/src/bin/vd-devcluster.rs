@@ -291,7 +291,7 @@ fn up_inner(
     // the fly by the armed reconciler at login (that IS the demand cluster). The realm-shard fan-out below is
     // empty for Demand too (byte-identical to a Single roster minus the one static shard).
     if !shape.is_demand() {
-        nodes.push(("vd-shard", "vd-shard", shard_env(&addrs, &DEV, shape)));
+        nodes.push(("vd-shard", "vd-shard", shard_env(&addrs, &DEV, shape, work)));
     }
     // NODE-PER-REALM: every extra realm-shard of the shape (galaxy / inner planet / sibling star) on
     // its OWN node so every re-home is a uniform CROSS-NODE saga (no `VD_HELD_REALMS` co-hosting). The
@@ -310,7 +310,7 @@ fn up_inner(
         nodes.push((
             "vd-shard",
             label,
-            vd_bins::realm_shard_env(&addrs, &DEV, shape, shard),
+            vd_bins::realm_shard_env(&addrs, &DEV, shape, shard, work),
         ));
     }
     let mut cluster = Cluster::new();

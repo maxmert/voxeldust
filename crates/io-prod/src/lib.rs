@@ -142,7 +142,7 @@ pub(crate) struct OutFrame {
     pub(crate) class: MsgClass,
     pub(crate) bytes: Bytes,
     pub(crate) msg_id: MsgId,
-    /// R-6d producer-intent: the mesh writer (`write_frame`) lowers `Retained` to the reliable lane's durable
+    /// R-6d producer-intent: the mesh writer (`stage_reliable_batch`) lowers `Retained` to the reliable lane's durable
     /// write-through; the loopback bridge (ProdTransport) carries it for struct-completeness but ignores it.
     pub(crate) durability: vd_sim::io::Durability,
 }

@@ -346,6 +346,7 @@ fn p1_parity_real_binaries_over_quic() {
     let gw_admin = reserve_tcp_addr();
 
     let trust_dir = std::env::temp_dir().join(format!("vd-parity-{}", std::process::id()));
+    let work_dir = vd_bins::fresh_work_dir("vd-parity");
     let trust = ClusterTrust::generate("vd-parity").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
     // D-6: the orchestrator's durable Store (temp scratch ⇒ VD_STORE_EPHEMERAL_OK via orchestrator_env).
@@ -399,7 +400,7 @@ fn p1_parity_real_binaries_over_quic() {
         "vd-shard",
         spawn(
             env!("CARGO_BIN_EXE_vd-shard"),
-            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
+            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single, &work_dir),
         ),
     );
     let _guard = cluster; // RAII: kill the children on test end or panic

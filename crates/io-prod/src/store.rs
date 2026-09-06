@@ -249,7 +249,7 @@ impl DurabilityHandle {
     }
 
     /// R-6d3b F2: the ASYNC durable-before-send gate — awaits until every batch through `seq` is durable
-    /// WITHOUT parking a thread. The mesh `write_frame` block B `.await`s this on a tokio worker, which is
+    /// WITHOUT parking a thread. The mesh `write_batch` phase 3 `.await`s this ONCE PER BATCH on a tokio worker, which is
     /// RELEASED at each `.await` — so N concurrent producer-less durable sends yield N workers rather than
     /// parking N (the `worker_threads(2)` starvation the sync [`wait_durable_through`] would cause on the mesh
     /// I/O pool). ADDITIVE: the sync variant stays THE persist-before-effect gate for the orchestrator's

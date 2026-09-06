@@ -285,6 +285,8 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
     let devctl_port = reserve_tcp_addr().port();
 
     let trust_dir = std::env::temp_dir().join(format!("vd-chain-{}", std::process::id()));
+    // One work dir for the whole shape — every shard names its own outbox file inside it.
+    let work_dir = vd_bins::fresh_work_dir("vd-chain");
     let trust = vd_io_prod::trust::ClusterTrust::generate("vd-chain").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
     let orch_store =
@@ -324,7 +326,7 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
         "vd-shard",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
-            shard_env(&addrs, &DEV, shape),
+            shard_env(&addrs, &DEV, shape, &work_dir),
         ),
     );
     // The three extra realm-shards (galaxy / inner planet / sibling star) — each hosting EXACTLY its
@@ -340,7 +342,7 @@ fn a_durable_player_flies_the_chain_node_per_realm_without_freezing_or_fence_thr
             label,
             spawn_node(
                 env!("CARGO_BIN_EXE_vd-shard"),
-                realm_shard_env(&addrs, &DEV, shape, shard),
+                realm_shard_env(&addrs, &DEV, shape, shard, &work_dir),
             ),
         );
     }

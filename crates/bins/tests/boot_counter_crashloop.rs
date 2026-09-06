@@ -98,6 +98,9 @@ fn crashloop_drop_delta(use_boot_counter: bool) -> (u64, u64) {
     let trust_dir = std::env::temp_dir().join(format!("vd-crashloop-{tag}-{pid}"));
     let store = std::env::temp_dir().join(format!("vd-crashloop-{tag}-{pid}.redb"));
     let boot_dir = std::env::temp_dir().join(format!("vd-crashloop-boot-{tag}-{pid}"));
+    // The shard's work dir: its durable outbox lives here and SURVIVES the restart, exactly as
+    // the boot-counter dir does.
+    let work_dir = vd_bins::fresh_work_dir(&format!("vd-crashloop-{tag}"));
     // Clear at start (pid-stable) AND remove on exit (a distinct `cargo test` pid must not accumulate cruft).
     let _clean = TempPaths {
         store: store.clone(),
@@ -150,7 +153,7 @@ fn crashloop_drop_delta(use_boot_counter: bool) -> (u64, u64) {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
             &shard_common,
-            &shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
+            &shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single, &work_dir),
         )
         .expect("spawn shard")
     };

@@ -108,6 +108,8 @@ fn a_killed_client_relogs_in_on_the_same_node_id_and_port() {
     let devctl_b = reserve_tcp_addr().port();
 
     let trust_dir = std::env::temp_dir().join(format!("vd-relogin-{}", std::process::id()));
+    // The slot work dir this cluster keeps its node files in — the shard's durable outbox today.
+    let work_dir = vd_bins::fresh_work_dir("vd-relogin");
     let trust = vd_io_prod::trust::ClusterTrust::generate("vd-relogin").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
     let orch_store =
@@ -143,7 +145,7 @@ fn a_killed_client_relogs_in_on_the_same_node_id_and_port() {
         "vd-shard",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
-            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
+            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single, &work_dir),
         ),
     );
     let _nodes = nodes; // RAII: reaps the cluster on test end or panic

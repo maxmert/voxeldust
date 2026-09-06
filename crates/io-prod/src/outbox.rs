@@ -561,6 +561,16 @@ fn send_durable_with_retry(
 /// by `scan_all`) is RETAINED (the D-6 #1 no-loss invariant; a durable row is never swept because it could not
 /// be re-driven). The fence counts the RE-DRIVEN rows only, not `rows.len()` — a quarantined row never submits.
 ///
+/// ★ WHAT HAPPENS TO A ROW WHOSE PEER NEVER COMES BACK: it is QUARANTINED, and it is KEPT — forever, boot
+/// after boot, until an operator corrects the roster; this node never throws away a message it promised to
+/// deliver just because it cannot deliver it today. Example: the gateway dies and is replaced under a NEW node
+/// id. Every retained row still addressed to the OLD gateway id misses the route book at boot, so each one is
+/// counted on [`ReplayCounts::quarantined`], logged loud by name, and left on disk. The reason the policy is
+/// KEEP and not sweep: a realm shard spawned on demand is booked LAZILY, so "not in the book at boot" is the
+/// ordinary state of a peer that is about to exist, and sweeping there would lose a live hull's own messages.
+/// The cost is honest and visible — a quarantined count that does not fall is an operator's job, not the
+/// node's — and the caller (`vd_bins`) logs `quarantined` on every boot that has any.
+///
 /// # Errors
 /// [`ReplayError::LaneStuck`] (a live lane wedged full past the retry cap), [`ReplayError::LaneDead`] (a peer's
 /// writer task died while still in the roster), or [`ReplayError::FenceTimeout`] (a peer-writer never submitted
@@ -610,6 +620,9 @@ fn replay_outbox_with_limits(
     // re-driven keys are collected for `gc_replayed` — a quarantined/skipped row is NEVER in that set.
     let mut counts = ReplayCounts::default();
     let mut replayed_keys: Vec<OutboxKey> = Vec::new();
+    // The fence anchor, read BEFORE the first send: how many retained rows this transport had already
+    // mirrored. At boot that is zero, but reading it keeps the fence honest if replay is ever re-run.
+    let base_rows = transport.durable_rows_retained();
     for (key, framed) in &rows {
         if !peers.contains_key(&key.peer) {
             tracing::warn!(
@@ -645,28 +658,33 @@ fn replay_outbox_with_limits(
         return Ok(counts);
     }
 
-    // (3) NO LOCK: the COUNT-anchored fence over the RE-DRIVEN rows ONLY (a quarantined row never submits, so
-    // fencing on `rows.len()` would `FenceTimeout` on any boot that quarantined a row). Wait until all
-    // `replayed` fresh rows have SUBMITTED (each send = one +1 to last_submitted; at boot pre-`build_app` the
-    // replay sends are the ONLY submits), bounded fail-loud so a stuck peer-writer refuses rather than hangs;
-    // THEN wait for durability through that seq (the writer's own death backstop panics loud if it dies).
-    // `checked_add`: a REAL `NodeOutbox` base grows from real submits (never near u64::MAX); a test/mock sink
-    // whose `durability()` is `already_durable()` returns `base = u64::MAX` — refuse LOUD rather than wrap.
-    let target = base.checked_add(counts.replayed as u64).expect(
-        "replay_outbox: durability watermark saturated (already_durable / not a real NodeOutbox) — base + N \
-         overflow; replay must run against a real store",
+    // (3) NO LOCK: the ROW-anchored fence over the RE-DRIVEN rows ONLY (a quarantined row is never
+    // re-mirrored, so fencing on `rows.len()` would time out on any boot that quarantined a row).
+    //
+    // ★ IT COUNTS ROWS, NOT SUBMITS (2026-09-06). The old fence counted disk barriers on the rule "one send,
+    // one submit". The group commit ended that rule: a peer writer drains its whole queue into ONE batch and
+    // asks the disk ONCE, so two replayed rows toward one shard produce ONE barrier and a barrier-counting
+    // fence would wait for a second that never comes. Rows are exact however the writer grouped them, and a
+    // row is counted only AFTER the submit that carries it — so once the count arrives, the disk already has
+    // them. `checked_add`: a real transport's row count grows from real retains (never near u64::MAX); a
+    // mock that reports a saturated count is not a real store — refuse LOUD rather than wrap.
+    let target_rows = base_rows.checked_add(counts.replayed as u64).expect(
+        "replay_outbox: retained-row counter saturated (not a real transport) — base + N overflow; replay \
+         must run against a real store",
     );
     let start = Instant::now();
-    while durability.last_submitted() < target {
+    while transport.durable_rows_retained() < target_rows {
         if start.elapsed() >= limits.fence_deadline {
             return Err(ReplayError::FenceTimeout {
-                submitted: durability.last_submitted(),
-                expected: target,
+                submitted: transport.durable_rows_retained(),
+                expected: target_rows,
             });
         }
         std::thread::sleep(limits.poll_backoff);
     }
-    durability.wait_durable_through(target);
+    // Every re-driven row is now submitted; the watermark read HERE covers all of them (durability is
+    // monotone — the writer drains in seq order), so waiting on it waits for every one.
+    durability.wait_durable_through(durability.last_submitted().max(base));
 
     // (4) ONE brief lock (atomic): sweep ONLY the re-driven keys + fsync — STRICTLY after every fresh row is
     // durable (HIGH-3). A quarantined/skipped row is NOT in `replayed_keys` ⇒ RETAINED (F1 no-loss). Kept in
@@ -997,6 +1015,10 @@ mod tests {
         fails_left: u32,
         lane_alive: bool,
         sent: Vec<(NodeId, MsgClass, Vec<u8>)>,
+        /// The retained-row count this transport reports — the replay fence's anchor. It NEVER grows: this
+        /// mock records a send but does not re-mirror it, which is exactly what the fence-timeout arm needs.
+        /// C1 starts it at `u64::MAX` instead, to drive the saturation guard.
+        rows: u64,
     }
     impl FlakyTransport {
         fn new(fails_left: u32) -> Self {
@@ -1004,6 +1026,7 @@ mod tests {
                 fails_left,
                 lane_alive: true, // the common case: a live lane that is momentarily full
                 sent: Vec::new(),
+                rows: 0,
             }
         }
     }
@@ -1032,6 +1055,9 @@ mod tests {
     impl ReplayTransport for FlakyTransport {
         fn lane_alive(&self, _peer: NodeId) -> bool {
             self.lane_alive
+        }
+        fn durable_rows_retained(&self) -> u64 {
+            self.rows
         }
     }
 
@@ -1314,17 +1340,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "saturated")]
     fn replay_outbox_overflow_base_plus_n_panics_loud() {
-        // The count-fence `base.checked_add(counts.replayed).expect(...)` (outbox.rs) refuses LOUD rather than
-        // wrap when `base == u64::MAX` — only reachable against a mock/`already_durable` sink, never a real
-        // store. One routable+decodable row is re-driven (replayed = 1) ⇒ `u64::MAX + 1` overflows ⇒ panic.
+        // The row-fence `base_rows.checked_add(counts.replayed).expect(...)` (outbox.rs) refuses LOUD rather
+        // than wrap when the transport reports a saturated retained-row count — only reachable against a
+        // mock, never a real store. One routable+decodable row is re-driven (replayed = 1) ⇒ `u64::MAX + 1`
+        // overflows ⇒ panic.
         let mock = MockOutboxSink {
             rows: vec![(key(2, MsgClass::Saga, 1, 0), framed_row(b"x"))],
-            durability: DurabilityHandle::already_durable(), // last_submitted() == u64::MAX
+            durability: DurabilityHandle::already_durable(),
         };
         let shared: SharedOutbox =
             Arc::new(Mutex::new(Box::new(mock) as Box<dyn OutboxSink + Send>));
         let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
-        let mut t = FlakyTransport::new(0); // sends OK ⇒ replayed = 1 ⇒ the fence computes base + 1
+        let mut t = FlakyTransport::new(0); // sends OK ⇒ replayed = 1 ⇒ the fence computes base_rows + 1
+        t.rows = u64::MAX; // a transport that claims a saturated row count is not a real store
         let _ = replay_outbox(&shared, &mut t, &peers); // panics inside the expect (caught by should_panic)
     }
 
@@ -1396,10 +1424,11 @@ mod tests {
 
     #[test]
     fn replay_outbox_fence_timeout_refuses_boot_without_gc() {
-        // The row SENDS (the mock transport records it) but never SUBMITS back to the store (a real
-        // MeshTransport would re-mirror; FlakyTransport does not), so `last_submitted` never reaches base + 1
-        // ⇒ FenceTimeout past the short deadline (refuse-to-boot, loud). The `?` bails before gc ⇒ the row
-        // SURVIVES. This is the count-fence deadline arm no other test reaches (the real-QUIC test passes it).
+        // The row SENDS (the mock transport records it) but is never RE-MIRRORED (a real MeshTransport
+        // stages it into the outbox; FlakyTransport does not), so the transport's retained-row count never
+        // reaches base + 1 ⇒ FenceTimeout past the short deadline (refuse-to-boot, loud). The `?` bails
+        // before gc ⇒ the row SURVIVES. This is the row-fence deadline arm no other test reaches (the
+        // real-QUIC test passes it).
         let path = temp_path("fencetimeout");
         let _g = TempOutbox { path: path.clone() };
         let mut ob = NodeOutbox::open(&path, StoreTuning::default(), test_stamp()).expect("open");
@@ -1412,15 +1441,15 @@ mod tests {
             let shared: SharedOutbox =
                 Arc::new(Mutex::new(Box::new(g) as Box<dyn OutboxSink + Send>));
             let peers: BTreeMap<NodeId, SocketAddr> = [(NodeId(2), dummy_addr())].into();
-            let mut t = FlakyTransport::new(0); // sends OK (records) but never re-mirrors ⇒ no new submit
+            let mut t = FlakyTransport::new(0); // sends OK (records) but never re-mirrors ⇒ no new row
             let err = replay_outbox_with_limits(&shared, &mut t, &peers, fast_limits());
             assert_eq!(
                 err,
                 Err(ReplayError::FenceTimeout {
-                    submitted: b,
-                    expected: b + 1,
+                    submitted: 0,
+                    expected: 1,
                 }),
-                "one row re-driven but never re-submitted ⇒ the fence times out at base + 1"
+                "one row re-driven but never re-mirrored ⇒ the fence times out at base_rows + 1"
             );
             assert_eq!(
                 shared
@@ -1532,6 +1561,9 @@ mod tests {
         impl ReplayTransport for RemirrorTransport {
             fn lane_alive(&self, _peer: NodeId) -> bool {
                 true
+            }
+            fn durable_rows_retained(&self) -> u64 {
+                self.submitted.load(Ordering::Acquire) // one row per re-mirrored send
             }
         }
 
@@ -1753,6 +1785,9 @@ mod tests {
         impl ReplayTransport for CaptureTransport {
             fn lane_alive(&self, _peer: NodeId) -> bool {
                 self.lane_alive
+            }
+            fn durable_rows_retained(&self) -> u64 {
+                self.submitted.load(Ordering::Acquire) // one row per re-mirrored send
             }
         }
 

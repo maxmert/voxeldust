@@ -177,13 +177,14 @@ pub struct MeshConfig {
     /// CA-1 — the cap on the LEARNED-peer table (reply-on-connection): how many distinct UNBOOKED dial-in peers
     /// this node will remember return-connections for. Bounds a churn/flood memory vector on the trusted
     /// static-roster tier (a new learned peer past the cap is rejected + counted via
-    /// [`MeshStats::learned_peers_rejected`], never silently). NOT deployable to a churny/untrusted peer tier
-    /// until M6 (RecvLedger eviction) lands — see DEFERRED.md. Default [`DEFAULT_LEARNED_PEERS_MAX`].
+    /// [`MeshStats::learned_peers_rejected`], never silently). M6 evicts a vanished unbooked peer's RECEIVE
+    /// LEDGER ([`evict_recv_ledger`]); this TABLE is still only replaced-in-place, never emptied, so a churny
+    /// tier still fills it to the cap. Default [`DEFAULT_LEARNED_PEERS_MAX`].
     pub learned_peers_max: usize,
 }
 
 /// Default learned-peer table cap (CA-1). Generously above the static-roster tier; raise (or add per-peer
-/// stores) only with a real churn need + M6 eviction — never speculatively.
+/// stores) only with a real churn need — never speculatively.
 pub const DEFAULT_LEARNED_PEERS_MAX: usize = 4096;
 
 /// Default per-lane unacked-retry-buffer ceiling (R-4' shed point; counted in R-2b). 4 MiB.
@@ -495,6 +496,20 @@ pub struct MeshStats {
     /// any more. The old connection is closed at the same moment, so the count also says how many stale
     /// reply paths this node retired. A steady climb means peer churn, not a defect.
     pub learned_peers_superseded: AtomicU64,
+    /// RECEIVER (M6): receive ledgers EVICTED — a learned dial-in peer whose connection died and that has
+    /// NO booked address, so this node can never be reached by that process again and its dedup state is
+    /// dead weight. A booked peer (a shard, the orchestrator) is NEVER counted here: it is re-dialed and its
+    /// flows resume against the SAME watermarks. A steady climb means client churn, which is the healthy
+    /// shape; a value stuck at 0 while clients come and go is the leak this counter exists to show.
+    pub recv_ledgers_evicted: AtomicU64,
+    /// SENDER (the 2026-09-06 group commit): retained rows MIRRORED to the durable outbox. With
+    /// [`MeshStats::outbox_batches`] it says how well the batching works — rows ÷ batches is the average
+    /// number of frames that shared one disk sync. A ratio stuck at 1.0 under a burst means the drain is
+    /// not grouping and every frame is paying its own barrier again.
+    pub outbox_rows_retained: AtomicU64,
+    /// SENDER: durability BARRIERS submitted — one per drained batch that staged anything durable, never
+    /// one per frame. This is the count of disk syncs the retained lane asked for.
+    pub outbox_batches: AtomicU64,
     /// The peer book: lanes DIALED LAZILY on a send toward a booked peer that had no lane yet.
     pub lazy_dials: AtomicU64,
     /// The peer book: addresses booked through `Transport::book_peer` (the node runtime's half).
@@ -516,6 +531,9 @@ pub struct MeshStatsSnapshot {
     pub reliable_acked: u64,
     pub learned_peers_rejected: u64,
     pub learned_peers_superseded: u64,
+    pub recv_ledgers_evicted: u64,
+    pub outbox_rows_retained: u64,
+    pub outbox_batches: u64,
     pub lazy_dials: u64,
     pub peers_booked: u64,
 }
@@ -593,6 +611,17 @@ struct RecvState {
 /// `acked_keys` is always acquired-then-released ABOVE (never inside) an inner-`Mutex` hold. RESIDUAL: after
 /// this re-key the node-wide `SharedInbox` `Mutex` is the NEXT RX serialization point (a future per-peer-inbox
 /// / lock-free-drain scaling slice — DEFERRED.md); the ledger re-key alone does NOT deliver full RX isolation.
+///
+/// ★ REMOVAL (M6). The OUTER write lock is taken for exactly two reasons and no others: INSERT a never-seen
+/// peer's inner map ([`classify_and_deliver`]), and REMOVE a vanished unbooked peer's whole entry
+/// ([`evict_recv_ledger`]). Never nested inside an inner peer `Mutex`, in either direction. A booked peer (a
+/// shard, the orchestrator) is never removed — it is re-dialed and its flows resume against the same
+/// watermarks. A client that dialed in and died IS removed, because nothing can reach that process again.
+///
+/// KNOWN RESIDUAL: eviction rides the learned lane's death, so it fires only for a peer this node actually
+/// REPLIED to (which is what creates the lane). A dial-in peer that only ever SENDS — it talks, it is never
+/// answered, it vanishes — leaves its entry behind. The gateway answers every client it holds a session for,
+/// so this is not the live shape; a send-only peer tier would need the accept side to evict as well.
 type RecvLedger = Arc<RwLock<BTreeMap<NodeId, Arc<Mutex<PeerRecv>>>>>;
 
 /// Everything the receiver remembers about ONE peer, under that peer's inner lock: the per-class dedup
@@ -759,7 +788,7 @@ pub(crate) mod recv_test_hooks {
 /// One reliable send LANE — the per-(peer,class) at-least-once sender FSM (R-2b). Lazily created on
 /// the first reliable frame for a class to a peer. ALL FSM logic (seq assign, retain, replay framing,
 /// ack-retire) is SYNCHRONOUS + unit-testable WITHOUT tokio/quinn; only the stream open/write (in
-/// `write_frame`) is async. One stream per class so a stalled class never head-of-line-blocks another.
+/// `write_staged_batch`) is async. One stream per class so a stalled class never head-of-line-blocks another.
 /// R-4b: a retained frame + its FROZEN worst-case-epoch framed length. The on-wire varint for `epoch` grows
 /// from 1 byte (epoch 0) to 5 bytes (>= 2^28) as `replay_batch` re-stamps on each redial, so the framed
 /// length of a retained frame CHANGES over its life. `framed_len` is the length at `epoch=u32::MAX` (the same
@@ -1160,6 +1189,9 @@ impl MeshControl {
             reliable_acked: self.stats.reliable_acked.load(Ordering::Relaxed),
             learned_peers_rejected: self.stats.learned_peers_rejected.load(Ordering::Relaxed),
             learned_peers_superseded: self.stats.learned_peers_superseded.load(Ordering::Relaxed),
+            recv_ledgers_evicted: self.stats.recv_ledgers_evicted.load(Ordering::Relaxed),
+            outbox_rows_retained: self.stats.outbox_rows_retained.load(Ordering::Relaxed),
+            outbox_batches: self.stats.outbox_batches.load(Ordering::Relaxed),
             lazy_dials: self.stats.lazy_dials.load(Ordering::Relaxed),
             peers_booked: self.stats.peers_booked.load(Ordering::Relaxed),
         }
@@ -1308,6 +1340,7 @@ pub fn spawn_mesh(
             inbox: Arc::clone(&inbox),
             stats: Arc::clone(&stats),
             ledger: Arc::clone(&ledger),
+            book: Arc::clone(&topology),
             backoff_min: cfg.redial_backoff_min,
             backoff_max: cfg.redial_backoff_max,
             incarnation: cfg.process_incarnation,
@@ -1609,10 +1642,43 @@ fn learn_dial_in_peer(ctx: &LearnCtx, from: NodeId, incarnation: u64) {
             tracing::warn!(
                 from = from.0,
                 cap = ctx.cap,
-                "learned-peer table FULL — rejecting a new dial-in peer (raise learned_peers_max; NOT \
-                 deployable to a churny tier until M6 RecvLedger eviction)"
+                "learned-peer table FULL — rejecting a new dial-in peer (raise learned_peers_max; the \
+                 receive ledger is evicted on a vanished peer, this table is not)"
             );
         }
+    }
+}
+
+/// ★ M6 — THE VANISHED CLIENT'S RECEIVE LEDGER. The inverse of [`learn_dial_in_peer`]: a learned peer that
+/// dialed in, was learned, and whose connection then DIED gives its [`RecvLedger`] entry back.
+///
+/// THE RULE, in one line: a peer this node CANNOT re-dial loses its dedup state; a peer it CAN re-dial keeps it.
+///
+/// - A CLIENT dials the gateway, plays, and is killed. It has no booked address, so this node can never reach
+///   that process again; the next login is a NEW process at a NEW incarnation, which resets the ladder anyway.
+///   Holding its `(peer, class)` watermarks buys nothing and the map grows for the life of the process.
+/// - A SHARD or the ORCHESTRATOR is booked. Its lane is re-dialed and its flows resume against the SAME
+///   watermarks, so dropping them here would re-open the cross-stream hole the node-wide ledger exists to
+///   close. It keeps its entry, always.
+///
+/// LOCK ORDER (unchanged, see [`RecvLedger`]): this takes the OUTER write lock and NOTHING else — no inner
+/// peer `Mutex`, no inbox. It runs on the writer task, off the receive hot path.
+///
+/// SUPERSEDE needs nothing here: when [`learn_dial_in_peer`] replaces an entry for a HIGHER incarnation, the
+/// ledger is left alone ON PURPOSE — the new process's first frame carries the higher incarnation, and
+/// `classify_and_deliver` resets that peer's `RecvState` through the ladder (and says `PeerReset`
+/// `Reincarnated` once). Evicting there would be a second, racing mechanism for one job.
+fn evict_recv_ledger(ledger: &RecvLedger, book: &PeerTopology, peer: NodeId, stats: &MeshStats) {
+    if book.load().contains_key(&peer) {
+        return; // booked: it is re-dialed, and its flows resume with the dedup ladder intact
+    }
+    let removed = ledger
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&peer)
+        .is_some();
+    if removed {
+        stats.recv_ledgers_evicted.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1825,8 +1891,15 @@ struct PeerWriter {
     stats: Arc<MeshStats>,
     /// The node-wide receiver ledger (CA-1 S1): the DIALED connection now also runs the unified dispatcher, so
     /// its inbound DATA classifies into the SAME shared ledger the accept path uses (the StaleEpoch cross-stream
-    /// cure requires ONE ledger Arc across both directions).
+    /// cure requires ONE ledger Arc across both directions). M6: this lane's death also EVICTS `dest`'s ledger
+    /// entry when `dest` has no booked address — see [`evict_recv_ledger`].
     ledger: RecvLedger,
+    /// M6 — the LIVE peer address book, read at this lane's death to answer ONE question: can this node still
+    /// reach `dest`? A booked peer (a shard, the orchestrator) is re-dialed and keeps its receive ledger; an
+    /// unbooked dial-in peer (a client) can never be reached again, so its ledger is evicted. The same `Arc`
+    /// `Transport::book_peer` and `MeshControl::update_peer_addr` write, so a peer booked AFTER its lane was
+    /// learned is read as booked here — the answer is the CURRENT one, never a spawn-time copy.
+    book: PeerTopology,
     backoff_min: Duration,
     backoff_max: Duration,
     /// This process's incarnation, stamped on every reliable frame this lane sends (R-2b).
@@ -1838,7 +1911,8 @@ struct PeerWriter {
     reliability: MeshReliabilityTuning,
     /// R-6d3a: the ONE shared durable outbox sink (cloned `Arc`), or `None` when no outbox is wired (bins pass
     /// `None` until R-6d3b — byte-identical to pre-R-6d3a). The SAME handle reaches both the send path
-    /// (`write_frame` retain + durable-before-send gate) and the ack path (`on_ack` release), so a retained
+    /// (`stage_reliable_batch` retain + the batch durable-before-send gate) and the ack path (`on_ack`
+    /// release), so a retained
     /// durable row is released on the same store — no leak (LOW-4).
     outbox: Option<SharedOutbox>,
     /// CA-1: a LEARNED lane consumes acks from the accepted connection's per-connection watch (fed by that
@@ -1889,38 +1963,7 @@ async fn peer_writer(mut w: PeerWriter) {
             changed = ack_rx.changed() => {
                 match changed {
                     Ok(()) => if let Some(ack) = ack_rx.borrow_and_update().clone() {
-                    // R-6d3a: lock the shared durable sink ONCE for the whole ack fan-out (LOW-4 — the SAME
-                    // `Arc` `write_frame` retained on releases here). Release-through is STAGED only, no fsync
-                    // in the ack path (a tombstone rides the next retain's submit / a future flush-tick; a
-                    // crash before it is durable harmlessly re-delivers an already-acked frame, receiver
-                    // dedups). The lock spans only the pure-RAM `store.delete` staging — no wait under it.
-                    let mut guard = w
-                        .outbox
-                        .as_ref()
-                        .map(|o| o.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
-                    let mut sink: Option<&mut dyn OutboxSink> =
-                        guard.as_deref_mut().map(|b| &mut **b as &mut dyn OutboxSink);
-                    for e in &ack.entries {
-                        if let Some(lane) = lanes.get_mut(&e.class) {
-                            // R-6c/L4: retire against THIS entry's own class incarnation (per-entry), not a
-                            // single frame-level scalar. R-6d3a: `sink.as_deref_mut()` re-borrows the shared
-                            // sink per class so each lane's retired-durable rows are released (staged).
-                            // Explicit per-iteration reborrow (`as_mut().map(|s| &mut **s)`) so each `on_ack`
-                            // gets a FRESH short-lived `&mut dyn` — `as_deref_mut` here ties the reborrow to
-                            // the outer `guard` borrow and the loop rejects it (E0499).
-                            let retired = lane.on_ack(
-                                e.incarnation,
-                                e.epoch,
-                                e.ack_through,
-                                sink.as_mut().map(|s| &mut **s as &mut dyn OutboxSink),
-                            );
-                            if retired > 0 {
-                                w.stats
-                                    .reliable_acked
-                                    .fetch_add(retired as u64, Ordering::Relaxed);
-                            }
-                        }
-                    }
+                        apply_ack(&ack, &mut lanes, w.outbox.as_ref(), &w.stats);
                     }
                     // CA-1 HIGH fix (learned-lane connection-death lifecycle): a closed ack watch on a LEARNED
                     // lane means its accepted connection died (the dispatcher that solely owned our watch sender
@@ -1963,14 +2006,27 @@ async fn peer_writer(mut w: PeerWriter) {
                                 cause: PeerResetCause::ConnectionLost,
                             },
                         );
+                        // ★ AND THE LEDGER GOES WITH IT (M6). The dedup watermarks this node kept for that
+                        // client are now dead weight — nobody will ever send under that node id from that
+                        // address again. A booked peer keeps its ledger (see `evict_recv_ledger`).
+                        evict_recv_ledger(&w.ledger, &w.book, w.dest, &w.stats);
                         break;
                     }
                     Err(_) => {} // booked: unreachable while the writer holds ack_tx — keep draining sends
                 }
             }
             maybe = w.rx.recv() => {
-                let Some(frame) = maybe else { break };
-                let sent = write_frame(
+                let Some(first) = maybe else { break };
+                // ★ ONE BATCH, ONE DISK SYNC (2026-09-06). Take what the await handed over, then sweep
+                // whatever else is ALREADY queued for this peer — no waiting, just what is there. A burst of
+                // a hundred band-exit despawns toward one shard then costs ONE disk barrier instead of a
+                // hundred, and the snapshots caught up in that burst go out BEFORE the barrier rather than
+                // behind it. The drain is bounded by the lane's own channel capacity.
+                let mut batch = vec![first];
+                while let Ok(more) = w.rx.try_recv() {
+                    batch.push(more);
+                }
+                let outcome = write_batch(
                     &w.endpoint,
                     w.dest,
                     &w.source,
@@ -1982,7 +2038,9 @@ async fn peer_writer(mut w: PeerWriter) {
                     w.local,
                     w.incarnation,
                     w.reliability.retry_buffer_max_bytes,
-                    &frame,
+                    &mut w.rx,
+                    &mut ack_rx,
+                    batch,
                     &w.stats,
                     w.outbox.as_ref(),
                     &w.inbox,
@@ -1990,50 +2048,23 @@ async fn peer_writer(mut w: PeerWriter) {
                     w.reliability.ack_idle_flush_interval,
                 )
                 .await;
-                match sent {
-                    Ok(()) => {
-                        backoff = w.backoff_min;
-                        // This lane's own write succeeded ⇒ reset ONLY its failure counter (per-lane, H2).
-                        if let Some(l) = lanes.get_mut(&frame.class) {
-                            l.on_replay_ok();
-                        }
+                // A lane's OWN write succeeded ⇒ reset ONLY its failure counter (per-lane, H2).
+                for class in &outcome.ok_classes {
+                    if let Some(l) = lanes.get_mut(class) {
+                        l.on_replay_ok();
                     }
-                    Err(WriteFail::Down) => {
-                        // The connection/write died: tear it down + arm the retransmit timer. The bounce is
-                        // NOT here — it is threshold-gated on the timer replay (a blip that recovers before
-                        // `confirm_unreachable_after_retries` ⇒ ZERO bounce). The inline backoff `sleep`
-                        // R-3' had is REMOVED (it blocked the whole select — acks/sends couldn't drain during
-                        // backoff); the timer IS the non-blocking backoff clock now.
-                        handle_connection_drop(&mut connection, &mut serve_tasks, &mut lanes);
-                        retransmit.as_mut().reset(tokio::time::Instant::now() + backoff);
-                        counting = true;
-                        backoff = (backoff * 2).min(w.backoff_max);
-                    }
-                    Err(WriteFail::Shed(reason)) => {
-                        // The frame was REJECTED (oversize, or the retry buffer is full; nothing retained;
-                        // the connection may be fine). Bounce once as `SendShed` (R-4d M3: NOT
-                        // NodeUnreachable — a shed says nothing about peer liveness) so the caller learns
-                        // it did not deliver. No timer arm, no connection drop. Both shed reasons arise
-                        // ONLY on the reliable path (`assign_and_retain` is reliable-only), so the gate is
-                        // load-bearing for neither today — the debug_assert makes that invariant executable
-                        // (a future unreliable shed would trip it here, not silently mis-route).
-                        debug_assert!(
-                            frame.class.reliability() == Reliability::Reliable,
-                            "a SendShed ({reason:?}) can only arise on a reliable lane"
-                        );
-                        if frame.class.reliability() == Reliability::Reliable {
-                            push_notice(
-                                &w.inbox,
-                                &w.stats,
-                                Inbound::SendShed {
-                                    to: frame.to,
-                                    class: frame.class,
-                                    undelivered: frame.msg_id,
-                                    reason,
-                                },
-                            );
-                        }
-                    }
+                }
+                if outcome.down {
+                    // The connection/write died: tear it down + arm the retransmit timer, ONCE for the whole
+                    // batch. The bounce is NOT here — it is threshold-gated on the timer replay (a blip that
+                    // recovers before `confirm_unreachable_after_retries` ⇒ ZERO bounce). The timer IS the
+                    // non-blocking backoff clock.
+                    handle_connection_drop(&mut connection, &mut serve_tasks, &mut lanes);
+                    retransmit.as_mut().reset(tokio::time::Instant::now() + backoff);
+                    counting = true;
+                    backoff = (backoff * 2).min(w.backoff_max);
+                } else if outcome.wrote {
+                    backoff = w.backoff_min;
                 }
             }
             () = &mut retransmit, if any_lane_owes(&lanes) => {
@@ -2082,16 +2113,6 @@ async fn peer_writer(mut w: PeerWriter) {
     for h in serve_tasks.drain(..) {
         h.abort();
     }
-}
-
-/// How a `write_frame` attempt failed (R-4a). `Down` = the connection/write died ⇒ drop the connection +
-/// arm the retransmit timer; `Shed(reason)` = the frame was REJECTED (oversize, or the retry buffer is
-/// full) ⇒ nothing retained, the connection may be fine, bounce once as `Inbound::SendShed{reason}` but do
-/// NOT arm the timer or drop the connection. The `reason` (R-4d M3) rides through to the bounce so a
-/// consumer can tell a permanent oversize reject from transient dead-ack-path backpressure.
-enum WriteFail {
-    Down,
-    Shed(ShedReason),
 }
 
 /// The result of one retransmit-timer replay pass (R-4a).
@@ -2216,7 +2237,7 @@ fn report_dial_failure(stats: &Arc<MeshStats>, dest: NodeId, addr: SocketAddr, r
     );
 }
 
-/// R-4a: dial the peer on demand (the ONE dial home, shared by `write_frame` + `replay_lanes` so the
+/// R-4a: dial the peer on demand (the ONE dial home, shared by the batch write path + `replay_lanes` so the
 /// ack-reader teardown/respawn + the lane-stream reset can never drift). On a fresh dial: register the
 /// connection (drop_connections), abort any prior ack-reader + spawn a new one on THIS connection, reset
 /// every lane's stream (the old streams died with the old connection). `Ok` iff the connection is up
@@ -2342,7 +2363,7 @@ async fn ensure_connection(
 }
 
 /// R-4a: (re)open ONE owing lane's uni stream and write its full `replay_batch()` (re-stamped at the current
-/// epoch) — the redelivery of the unacked window, NO new assign. Mirrors `write_frame`'s reopen block minus
+/// epoch) — the redelivery of the unacked window, NO new assign. Mirrors `write_staged_batch`'s reopen block minus
 /// the assign; the buffer-first + receiver-dedup guarantees make a replay idempotent.
 async fn replay_one_lane(
     conn: &quinn::Connection,
@@ -2448,14 +2469,486 @@ async fn replay_lanes(
     }
 }
 
-/// Ensure a connection (dial on demand) and write one frame on the carrier its class mandates. The
-/// reliable arm is the R-2b lane FSM; the unreliable arm is the unchanged bare-datagram hot path.
+/// R-6d3c — WHAT ONE DRAINED BATCH STAGED, per class: the seqs this batch assigned, ascending, with the
+/// classes in the order they first appeared. A list, not a map, because the write phase walks the classes in
+/// batch order exactly once and never looks one up.
+type StagedByClass = Vec<(MsgClass, Vec<u64>)>;
+
+/// The staging result for ONE drained batch — what to write, and the ONE durability barrier that covers
+/// every retained row the batch staged (the group commit).
+struct StagedBatch {
+    by_class: StagedByClass,
+    /// The ONE `(store batch seq, handle)` barrier for the WHOLE batch. `None` when the batch retained
+    /// nothing durable (no sink wired, or every frame Ephemeral) ⇒ there is no wait at all.
+    gate: Option<(u64, DurabilityHandle)>,
+    /// A durable row was staged into a LIVE sink and yet no barrier came back — the store is mid-Drop.
+    /// The batch's reliable frames must NOT reach the wire; they stay retained and the retransmit re-drives.
+    gate_missing: bool,
+}
+
+/// The outcome of ONE drained batch, read by the writer loop.
+struct BatchOutcome {
+    /// A write failed on a dead connection ⇒ drop it and arm the retransmit timer, ONCE for the batch (not
+    /// once per frame — one connection death deserves one reaction, and one backoff step).
+    down: bool,
+    /// At least one frame reached the wire, or was dropped as a healthy latest-wins datagram. This is the
+    /// same meaning the per-frame `Ok(())` carried before, and it is what resets the redial backoff.
+    wrote: bool,
+    /// The classes whose reliable write completed ⇒ their own failure counters reset (per-lane, H2).
+    ok_classes: Vec<MsgClass>,
+}
+
+/// ★ THE GROUP COMMIT, HALF ONE (2026-09-06) — stage EVERY reliable frame of one drained batch under ONE
+/// sink lock, then ask for ONE durability barrier for all of them.
 ///
-/// ⚠️ CANCEL-SAFETY: NEVER wrap this in `tokio::time::timeout`/`select!` — a cancelled `write_all`
-/// would leave a half-written frame on a `Some` stream. A send deadline must be internal + an explicit
-/// `on_write_error`. The only cancel point in the writer is the `w.rx.recv()` await above.
+/// This is what used to be `write_frame`'s block A, run once per frame. A shard that emits a hundred
+/// band-exit despawns toward one neighbour paid a hundred disk syncs for them; it now pays one.
+///
+/// SYNCHRONOUS ON PURPOSE, and called BEFORE the batch's first `.await`: every frame the writer took out of
+/// its queue is retained in its lane before anything can yield, so a dropped task can never lose one. That
+/// is the buffer-first invariant, widened from one frame to a batch.
+///
+/// Under the lock there is ONLY a pure-RAM stage (`assign_and_retain`'s `retain`) and a NON-BLOCKING
+/// `submit_barrier` — nothing that waits on the disk (MF-1), so a durable send never serializes other peers.
+/// A rejected frame (un-framable, or a full retry buffer) is shed LOUD here, exactly as before: counted,
+/// warned, and bounced as `SendShed` with its reason. Only reliable frames are seen at all, so the "a shed
+/// can only arise on a reliable lane" rule is now structural instead of asserted.
 #[allow(clippy::too_many_arguments)] // writer state threaded explicitly
-async fn write_frame(
+fn stage_reliable_batch(
+    lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
+    local: NodeId,
+    dest: NodeId,
+    incarnation: u64,
+    retry_cap: usize,
+    batch: &[OutFrame],
+    stats: &MeshStats,
+    outbox: Option<&SharedOutbox>,
+    inbox: &SharedInbox,
+) -> StagedBatch {
+    let mut by_class: StagedByClass = Vec::new();
+    let mut durable_rows: u64 = 0;
+    // Lock the shared sink ONCE, and only when this batch actually carries something durable.
+    let wants_sink = batch.iter().any(|f| {
+        f.class.reliability() == Reliability::Reliable
+            && matches!(f.durability, vd_sim::io::Durability::Retained)
+    });
+    let mut guard = if wants_sink {
+        outbox.map(|o| o.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    } else {
+        None
+    };
+    for f in batch {
+        if f.class.reliability() != Reliability::Reliable {
+            continue; // the datagrams are written by their own phase, never staged
+        }
+        let durable = matches!(f.durability, vd_sim::io::Durability::Retained);
+        let lane = lanes
+            .entry(f.class)
+            .or_insert_with(|| ReliableLaneSender::new(dest, incarnation, retry_cap));
+        let sink: Option<&mut dyn OutboxSink> = if durable {
+            guard
+                .as_deref_mut()
+                .map(|b| &mut **b as &mut dyn OutboxSink)
+        } else {
+            None
+        };
+        let mirrored = durable && sink.is_some();
+        match lane.assign_and_retain(local, f.class, &f.bytes, durable, sink) {
+            Ok(seq) => {
+                // R-4a: remember the id ONLY of a RETAINED frame, so the threshold-gated confirm bounce
+                // (which has no OutFrame) can never carry the id of a rejected/never-retained frame.
+                lane.last_msg_id = Some(f.msg_id);
+                if mirrored {
+                    durable_rows += 1;
+                }
+                match by_class.iter_mut().find(|(c, _)| *c == f.class) {
+                    Some((_, seqs)) => seqs.push(seq),
+                    None => by_class.push((f.class, vec![seq])),
+                }
+            }
+            Err(reject) => {
+                // R-4b: BOTH rejects are shed-loud (counted + bounced), nothing retained ⇒ neither can
+                // poison the lane, neither arms the timer or drops the (healthy) connection.
+                stats.reliable_shed.fetch_add(1, Ordering::Relaxed);
+                let reason = match reject {
+                    AssignReject::Unframable => {
+                        tracing::warn!(
+                            "reliable frame (payload {}) would exceed MAX_STREAM_FRAME_BYTES framed; \
+                             rejected (counted, not retained)",
+                            f.bytes.len()
+                        );
+                        ShedReason::Unframable
+                    }
+                    AssignReject::BufferFull => {
+                        tracing::warn!(
+                            "reliable retry buffer FULL ({} bytes) — the ack drain is not keeping up \
+                             (check reliable_acked progress; a stuck-at-0 value = a dead ack path); \
+                             shedding a new {}-byte send (producer backpressure, NO retained frame dropped)",
+                            lane.retry_bytes,
+                            f.bytes.len()
+                        );
+                        ShedReason::RetryBufferFull
+                    }
+                };
+                push_notice(
+                    inbox,
+                    stats,
+                    Inbound::SendShed {
+                        to: f.to,
+                        class: f.class,
+                        undelivered: f.msg_id,
+                        reason,
+                    },
+                );
+            }
+        }
+    }
+    // ONE submit for the WHOLE batch — the barrier the write phase awaits exactly once.
+    let gate = if durable_rows > 0 {
+        guard.as_deref_mut().and_then(|b| b.submit_barrier())
+    } else {
+        None
+    };
+    drop(guard); // the sink lock is released BEFORE any durability wait (MF-1)
+    if durable_rows > 0 {
+        stats
+            .outbox_rows_retained
+            .fetch_add(durable_rows, Ordering::Relaxed);
+    }
+    if gate.is_some() {
+        stats.outbox_batches.fetch_add(1, Ordering::Relaxed);
+    }
+    let gate_missing = durable_rows > 0 && gate.is_none();
+    StagedBatch {
+        by_class,
+        gate,
+        gate_missing,
+    }
+}
+
+/// ★ THE GROUP COMMIT, HALF TWO — write the batch's already-staged reliable frames, AFTER the one barrier.
+///
+/// PER CLASS, never per frame, because the double-write cure is a per-class property: a lane whose stream is
+/// closed writes its WHOLE replay batch on re-open (which by construction already contains every frame this
+/// batch staged for that class), so writing those frames again individually would send each twice. A lane
+/// whose stream is open writes only this batch's new seqs, ascending — the send order, preserved.
+///
+/// STRUCTURAL if/else, NO fall-through (the CRITICAL double-write cure), unchanged in meaning.
+#[allow(clippy::too_many_arguments)] // writer state threaded explicitly
+async fn write_staged_batch(
+    endpoint: &quinn::Endpoint,
+    dest: NodeId,
+    source: &ConnSource,
+    connection: &mut Option<quinn::Connection>,
+    lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
+    serve_tasks: &mut Vec<JoinHandle<()>>,
+    ack_tx: &watch::Sender<Option<AckFrame>>,
+    connections: &ConnRegistry,
+    inbox: &SharedInbox,
+    stats: &Arc<MeshStats>,
+    ledger: &RecvLedger,
+    ack_flush: Duration,
+    staged: &StagedByClass,
+    ok_classes: &mut Vec<MsgClass>,
+) -> Result<(), ()> {
+    // Dial on demand through the ONE dial home, ONCE for the batch. A dial failure ⇒ Down; every frame is
+    // already retained above ⇒ the timer re-drives them.
+    ensure_connection(
+        endpoint,
+        dest,
+        source,
+        connection,
+        lanes,
+        serve_tasks,
+        ack_tx,
+        connections,
+        inbox,
+        stats,
+        ledger,
+        ack_flush,
+    )
+    .await?;
+    let conn = connection.as_ref().ok_or(())?;
+    for (class, seqs) in staged {
+        let lane = lanes.get_mut(class).ok_or(())?;
+        if lane.stream.is_none() {
+            // (re)opened stream: write EXACTLY replay_batch(), which by construction ends with this batch's
+            // highest staged seq ⇒ every new frame of this class is written exactly once, inside the batch.
+            let mut send = conn.open_uni().await.map_err(|_| ())?;
+            // Tag the DATA stream ONCE, before any frame — consumed by the reader's read_exact(1) BEFORE
+            // the framing loop.
+            send.write_all(&[STREAM_KIND_DATA]).await.map_err(|_| ())?;
+            lane.stream = Some(send);
+            let replay = lane.replay_batch();
+            debug_assert_eq!(
+                replay.last().map(|f| f.seq),
+                seqs.last().copied(),
+                "buffer-first invariant: this batch's last staged frame is the highest replay entry"
+            );
+            let send = lane.stream.as_mut().ok_or(())?;
+            for f in &replay {
+                write_reliable_frame(
+                    send,
+                    f.from,
+                    f.class,
+                    f.incarnation,
+                    f.epoch,
+                    f.seq,
+                    &f.bytes,
+                )
+                .await
+                .map_err(|_| ())?;
+            }
+        } else {
+            // steady state: stream open ⇒ write ONLY this batch's new frames (NEVER the backlog). Read them
+            // out of `retry` first, copying the fields, so the immutable borrow ends before `stream`'s.
+            let mut pending = Vec::with_capacity(seqs.len());
+            for &seq in seqs {
+                let nf = &lane.retry.get(&seq).ok_or(())?.frame;
+                pending.push((
+                    nf.from,
+                    nf.class,
+                    nf.incarnation,
+                    nf.epoch,
+                    seq,
+                    nf.bytes.clone(),
+                ));
+            }
+            let send = lane.stream.as_mut().ok_or(())?;
+            for (from, cls, inc, epoch, seq, bytes) in &pending {
+                write_reliable_frame(send, *from, *cls, *inc, *epoch, *seq, bytes)
+                    .await
+                    .map_err(|_| ())?;
+            }
+        }
+        ok_classes.push(*class);
+    }
+    Ok(())
+}
+
+/// Write ONE unreliable frame as a datagram on the shared connection. Unchanged policy: no retain, no
+/// bounce, latest-wins loss, every drop counted. `Err(())` means the connection died.
+#[allow(clippy::too_many_arguments)] // writer state threaded explicitly
+async fn write_unreliable(
+    endpoint: &quinn::Endpoint,
+    dest: NodeId,
+    source: &ConnSource,
+    connection: &mut Option<quinn::Connection>,
+    lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
+    serve_tasks: &mut Vec<JoinHandle<()>>,
+    ack_tx: &watch::Sender<Option<AckFrame>>,
+    connections: &ConnRegistry,
+    local: NodeId,
+    frame: &OutFrame,
+    stats: &Arc<MeshStats>,
+    inbox: &SharedInbox,
+    ledger: &RecvLedger,
+    ack_flush: Duration,
+) -> Result<(), ()> {
+    ensure_connection(
+        endpoint,
+        dest,
+        source,
+        connection,
+        lanes,
+        serve_tasks,
+        ack_tx,
+        connections,
+        inbox,
+        stats,
+        ledger,
+        ack_flush,
+    )
+    .await?;
+    let conn = connection.as_ref().ok_or(())?;
+    // Datagrams are message-bounded (QUIC-delimited, NO stream framing — codec_flags is a stream concept)
+    // and carry the BARE DatagramFrame (R1' hot/cold split — no reliability metadata on the 20Hz path).
+    let payload = postcard::to_allocvec(&DatagramFrame {
+        from: local,
+        class: frame.class,
+        bytes: frame.bytes.to_vec(),
+    })
+    .map_err(|_| ())?;
+    if conn
+        .max_datagram_size()
+        .is_none_or(|max| payload.len() > max)
+    {
+        // COUNTED, never silent (GW-1): snapshots are content-partitioned upstream, so a too-large
+        // datagram here is a budget misconfiguration.
+        stats
+            .datagrams_dropped_too_large
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(
+            "datagram payload {} exceeds the path MTU budget; dropped (counted)",
+            payload.len()
+        );
+        return Ok(()); // dropped, but the connection is healthy
+    }
+    // A full send queue drops the datagram (latest-wins); only a dead connection is an Err.
+    match conn.send_datagram(payload.into()) {
+        Ok(()) => Ok(()),
+        Err(quinn::SendDatagramError::ConnectionLost(_)) => Err(()),
+        Err(_) => {
+            // Unsupported/too-large/queue-full: drop (latest-wins), stay up.
+            stats.datagrams_dropped_send.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+}
+
+/// Retire what an incoming cumulative ack covers, on every class it names. ONE home, called from the
+/// writer's own ack arm AND from inside a durability wait — a burst must not stop the window draining just
+/// because the disk is busy.
+///
+/// R-6d3a: the shared durable sink is locked ONCE for the whole fan-out (LOW-4 — the SAME `Arc` the staging
+/// retained on releases here). Release-through is STAGED only, no fsync in the ack path (a tombstone rides
+/// the next retain's submit; a crash before it is durable harmlessly re-delivers an already-acked frame,
+/// which the receiver dedups). The lock spans only the pure-RAM `store.delete` staging — no wait under it.
+fn apply_ack(
+    ack: &AckFrame,
+    lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
+    outbox: Option<&SharedOutbox>,
+    stats: &MeshStats,
+) {
+    let mut guard = outbox.map(|o| o.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    let mut sink: Option<&mut dyn OutboxSink> = guard
+        .as_deref_mut()
+        .map(|b| &mut **b as &mut dyn OutboxSink);
+    for e in &ack.entries {
+        if let Some(lane) = lanes.get_mut(&e.class) {
+            // R-6c/L4: retire against THIS entry's own class incarnation (per-entry), not a single
+            // frame-level scalar. Each `on_ack` gets a FRESH short-lived `&mut dyn` reborrow so each lane's
+            // retired-durable rows are released (staged).
+            let retired = lane.on_ack(
+                e.incarnation,
+                e.epoch,
+                e.ack_through,
+                sink.as_mut().map(|s| &mut **s as &mut dyn OutboxSink),
+            );
+            if retired > 0 {
+                stats
+                    .reliable_acked
+                    .fetch_add(retired as u64, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// How many times ONE batch may keep servicing its peer's queue through a durability barrier before it must
+/// finish. A round happens ONLY when new reliable frames arrived DURING a disk sync, so a producer that
+/// pauses at all never reaches the second one; it is a TERMINATION GUARANTEE against a producer that never
+/// pauses, not a tuning knob.
+///
+/// It is set HIGH on purpose. The last round has to await its barrier plainly — there is no round left to
+/// write what it would hold — and that one wait is a stop-the-world for the peer's datagrams. MEASURED: with
+/// the cap at 8, that rare plain wait alone put ~4 ms back on the snapshot lane's p99 under an overloaded
+/// retained lane; at this cap the same measurement reads ~0. Nothing is starved by the high value, because
+/// the wait services the peer's DATAGRAMS and applies its ACKS ([`apply_ack`]) the whole time it is waiting.
+const MAX_BATCH_ROUNDS: usize = 512;
+
+/// ★ THE DISK MUST NOT STOP THE SNAPSHOTS (2026-09-06). Await this batch's ONE durability barrier while the
+/// writer KEEPS SERVICING its queue.
+///
+/// An UNRELIABLE frame that arrives during the wait goes STRAIGHT OUT on the wire: a player's view of a hull
+/// must never freeze because a despawn is being written to disk. A RELIABLE frame is HELD and returned, so
+/// the caller stages it into the NEXT round — it is never sent ahead of its own barrier, which is what keeps
+/// crash-table row 4 true.
+///
+/// Without this the wait was a stop-the-world for the whole peer, and it MEASURED as one: with the retained
+/// lane pushed past what the disk can take, the snapshot lane's p99 rose by 8.4 ms — the length of a sync.
+///
+/// CANCEL-SAFETY: `Receiver::recv` is cancel-safe and the barrier future is pinned and re-polled, so the
+/// select holds no state that a cancel could tear. A task dropped here loses only frames already moved into
+/// `held` — the same exposure the outer `recv` has always had, and this writer task is never aborted.
+#[allow(clippy::too_many_arguments)] // writer state threaded explicitly
+async fn await_barrier_serving_datagrams(
+    gate: (u64, DurabilityHandle),
+    rx: &mut tokio::sync::mpsc::Receiver<OutFrame>,
+    ack_rx: &mut watch::Receiver<Option<AckFrame>>,
+    outbox: Option<&SharedOutbox>,
+    endpoint: &quinn::Endpoint,
+    dest: NodeId,
+    source: &ConnSource,
+    connection: &mut Option<quinn::Connection>,
+    lanes: &mut BTreeMap<MsgClass, ReliableLaneSender>,
+    serve_tasks: &mut Vec<JoinHandle<()>>,
+    ack_tx: &watch::Sender<Option<AckFrame>>,
+    connections: &ConnRegistry,
+    local: NodeId,
+    stats: &Arc<MeshStats>,
+    inbox: &SharedInbox,
+    ledger: &RecvLedger,
+    ack_flush: Duration,
+    out: &mut BatchOutcome,
+) -> Vec<OutFrame> {
+    let (batch_seq, durability) = gate;
+    let wait = durability.wait_durable_through_async(batch_seq);
+    tokio::pin!(wait);
+    let mut held: Vec<OutFrame> = Vec::new();
+    // Once the producer (or the ack sender) is gone its branch is ready forever; the guards stop those
+    // branches so the barrier is awaited instead of spun on. A dead ack watch on a LEARNED lane is the
+    // peer's death, and the OUTER select owns that news — here it is only a branch to stop polling.
+    let mut producer_gone = false;
+    let mut acks_gone = false;
+    loop {
+        tokio::select! {
+            biased; // the barrier first: the moment the disk is done, the reliable writes go
+            () = &mut wait => return held,
+            maybe = rx.recv(), if !producer_gone => match maybe {
+                None => producer_gone = true,
+                Some(f) if f.class.reliability() == Reliability::Reliable => held.push(f),
+                Some(f) => {
+                    match write_unreliable(
+                        endpoint, dest, source, connection, lanes, serve_tasks, ack_tx, connections,
+                        local, &f, stats, inbox, ledger, ack_flush,
+                    )
+                    .await
+                    {
+                        Ok(()) => out.wrote = true,
+                        Err(()) => out.down = true,
+                    }
+                }
+            },
+            changed = ack_rx.changed(), if !acks_gone => match changed {
+                Ok(()) => {
+                    let ack = ack_rx.borrow_and_update().clone();
+                    if let Some(ack) = ack {
+                        apply_ack(&ack, lanes, outbox, stats);
+                    }
+                }
+                Err(_) => acks_gone = true,
+            },
+        }
+    }
+}
+
+/// ★ ONE BATCH, ONE DISK SYNC, AND THE DATAGRAMS GO FIRST (2026-09-06).
+///
+/// The four phases of ONE ROUND, in this order and for these reasons:
+///
+/// 1. STAGE every reliable frame, synchronously, before anything can yield. Retention comes first so a
+///    dropped task loses nothing, and the ONE submit starts the disk working immediately.
+/// 2. WRITE THE DATAGRAMS, before the durability wait. A player's snapshot must never wait for a hull's
+///    despawn to reach the disk; measurement said it did, by ~5 ms per retained frame ahead of it, because
+///    everything toward one peer rides one writer task.
+/// 3. AWAIT THE ONE BARRIER for the whole batch — the group commit the design intended — and keep sending
+///    this peer's datagrams while the disk works ([`await_barrier_serving_datagrams`]). Reliable frames that
+///    arrive during the wait are HELD; they open the next round.
+/// 4. WRITE THE RELIABLE FRAMES, in batch order, per class.
+///
+/// A ROUND ONLY REPEATS while reliable frames kept arriving through a sync, and at most
+/// [`MAX_BATCH_ROUNDS`] times, so a producer that never pauses cannot hold the writer here forever.
+///
+/// CRASH TABLE ROW 4 IS UNCHANGED: a retained frame is durable-or-becoming-durable BEFORE its wire send,
+/// never sent before durable. Phase 3 stands between the staging and every reliable write, exactly where the
+/// per-frame gate used to stand.
+///
+/// ⚠️ CANCEL-SAFETY: this is `.await`ed as the plain body of the `w.rx.recv()` select arm, never wrapped in
+/// a `timeout`/`select!`, so the sole cancel point in the writer is still that `recv`. A task dropped inside
+/// this function drops it AFTER phase 1, so every frame of the batch is retained and re-driven — the frames
+/// are durable-or-becoming-durable but NOT sent, which is crash-table row 4.
+#[allow(clippy::too_many_arguments)] // writer state threaded explicitly
+async fn write_batch(
     endpoint: &quinn::Endpoint,
     dest: NodeId,
     source: &ConnSource,
@@ -2467,218 +2960,116 @@ async fn write_frame(
     local: NodeId,
     incarnation: u64,
     retry_cap: usize,
-    frame: &OutFrame,
+    rx: &mut tokio::sync::mpsc::Receiver<OutFrame>,
+    ack_rx: &mut watch::Receiver<Option<AckFrame>>,
+    batch: Vec<OutFrame>,
     stats: &Arc<MeshStats>,
     outbox: Option<&SharedOutbox>,
     inbox: &SharedInbox,
     ledger: &RecvLedger,
     ack_flush: Duration,
-) -> Result<(), WriteFail> {
-    match frame.class.reliability() {
-        Reliability::Reliable => {
-            // R-6d2b: the reliable lane is the SOLE consumer of the per-send `Durability` marker — lower it
-            // to a bool here. R-6d2c wired the FSM write-through/delete-through; R-6d3a (below) now injects the
-            // real shared `OutboxSink` + the durable-before-send gate. `durable && outbox.is_some()` selects
-            // the gate; `None` (bins until R-6d3b) or Ephemeral keeps the byte-identical fast path.
-            let durable = matches!(frame.durability, vd_sim::io::Durability::Retained);
-            // BUFFER-FIRST, BEFORE any connection work: create the lane, capture the id, assign + retain. A
-            // first-dial failure to a dead peer then leaves the frame RETAINED (the retransmit timer re-drives
-            // it) and the confirm bounce has an id — a failed dial NEVER silently drops the frame. A failed
-            // write below NEVER rolls back the seq (no burned seq, no gap); the ONE frame object lives in
-            // `lane.retry`. `assign_and_retain` also performs the OVERSIZE REJECT on the FRAMED size (the
-            // envelope + codec byte can push a near-cap payload over `MAX_STREAM_FRAME_BYTES`): an un-framable
-            // frame can NEVER be sent, so retaining it would poison the lane forever; it returns `Err` WITHOUT
-            // retaining ⇒ shed-count + Shed (peer_writer bounces), nothing in `retry`.
-            //
-            // R-6d3a BLOCK A — the sink is locked for THIS span ONLY: a pure-RAM stage (`assign_and_retain`'s
-            // `retain`) + a NON-BLOCKING `submit_barrier` (channel hand-off, no fsync). NOTHING that blocks on
-            // the fsync runs under the lock (MF-1); the guard drops at the block's end, before BLOCK B's wait.
-            // `gate` carries the durable outbox STORE batch seq (distinct from the lane `seq`) + a cloned
-            // durability handle. Ephemeral / no-sink ⇒ no lock, `gate = None`, byte-identical fast path.
-            let (seq, gate): (u64, Option<(u64, DurabilityHandle)>) = {
-                let mut guard = if durable {
-                    outbox.map(|o| o.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
-                } else {
-                    None
-                };
-                let lane = lanes
-                    .entry(frame.class)
-                    .or_insert_with(|| ReliableLaneSender::new(dest, incarnation, retry_cap));
-                let seq = match lane.assign_and_retain(
-                    local,
-                    frame.class,
-                    &frame.bytes,
-                    durable,
-                    guard
-                        .as_deref_mut()
-                        .map(|b| &mut **b as &mut dyn OutboxSink),
-                ) {
-                    Ok(seq) => {
-                        // R-4a: remember the id ONLY of a RETAINED frame, so the threshold-gated confirm
-                        // bounce (which has no OutFrame) can never carry the id of a rejected/never-retained
-                        // frame — that frame already got its own immediate Shed bounce (post-impl review
-                        // wf_b1d0610c).
-                        lane.last_msg_id = Some(frame.msg_id);
-                        seq
-                    }
-                    Err(reject) => {
-                        // R-4b: BOTH rejects are shed-loud (counted + a bounce via the Shed arm), nothing
-                        // retained ⇒ neither can poison the lane, neither arms the timer or drops the
-                        // (healthy) connection. Unframable = a permanent oversize reject; BufferFull = producer
-                        // backpressure (a full buffer means the ack path is dead — reliable_acked stuck).
-                        stats.reliable_shed.fetch_add(1, Ordering::Relaxed);
-                        // Map the mesh-private `AssignReject` onto the seam's closed `ShedReason` (R-4d
-                        // M3) — `AssignReject` never crosses the crate boundary; the bounce carries the
-                        // reason so a consumer distinguishes a permanent oversize reject from transient
-                        // dead-ack backpressure.
-                        let reason = match reject {
-                            AssignReject::Unframable => {
-                                tracing::warn!(
-                                    "reliable frame (payload {}) would exceed MAX_STREAM_FRAME_BYTES \
-                                     framed; rejected (counted, not retained)",
-                                    frame.bytes.len()
-                                );
-                                ShedReason::Unframable
-                            }
-                            AssignReject::BufferFull => {
-                                tracing::warn!(
-                                    "reliable retry buffer FULL ({} bytes) — the ack drain is not keeping \
-                                     up (check reliable_acked progress; a stuck-at-0 value = a dead ack \
-                                     path); shedding a new {}-byte send (producer backpressure, NO \
-                                     retained frame dropped)",
-                                    lane.retry_bytes,
-                                    frame.bytes.len()
-                                );
-                                ShedReason::RetryBufferFull
-                            }
-                        };
-                        return Err(WriteFail::Shed(reason));
-                    }
-                };
-                // R-6d3a: submit the just-staged retain NON-BLOCKING and capture the durability barrier — only
-                // for a durable frame with a live sink (else inert). The barrier is `(outbox STORE batch seq, a
-                // cloned handle)` — the store seq is distinct from the lane `seq` and is what block B awaits. A
-                // durable retain ALWAYS stages a row (MF-2), so `submit_barrier` is `Some` here EXCEPT the
-                // narrow store-mid-Drop race (`submit_tx` gone ⇒ `None`); that violation is caught fail-loud
-                // AFTER the guard drops (below), not by a debug-only assert (which is compiled out of release).
-                let gate = if durable {
-                    guard.as_deref_mut().and_then(|b| b.submit_barrier())
-                } else {
-                    None
-                };
-                (seq, gate)
-                // `guard` drops HERE ⇒ the shared sink lock is released BEFORE block B's wait (MF-1: the fsync
-                // wait never happens under the lock, so a durable send never serializes the other peers).
-            };
+) -> BatchOutcome {
+    let mut out = BatchOutcome {
+        down: false,
+        wrote: false,
+        ok_classes: Vec::new(),
+    };
+    let mut batch = batch;
+    for round in 0..MAX_BATCH_ROUNDS {
+        // (0) SWEEP whatever queued while the previous round was writing. Without this a snapshot that
+        // arrived during the reliable writes would sit in the queue until the NEXT barrier's servicing
+        // picked it up — one whole disk sync late, which is exactly what the tail measured.
+        while let Ok(more) = rx.try_recv() {
+            batch.push(more);
+        }
+        // (1) STAGE — synchronous, before the first await of this round.
+        let staged = stage_reliable_batch(
+            lanes,
+            local,
+            dest,
+            incarnation,
+            retry_cap,
+            &batch,
+            stats,
+            outbox,
+            inbox,
+        );
 
-            // R-6d3a F4 (post-impl review): a durable frame with a LIVE sink MUST have produced a barrier (its
-            // retain staged a row). A `None` means the store was mid-Drop (`submit_tx` gone) — proceeding to
-            // block C would send the frame WITHOUT its row durable (a silent durable-before-send violation in a
-            // RELEASE build, where the MF-2 debug assert is absent). Fail LOUD: the frame stays retained in the
-            // lane (Down arms the retransmit ⇒ it re-drives), never sent un-durable. `outbox` is `Copy`
-            // (`Option<&_>`), so this re-read does not disturb the move above.
-            if durable && outbox.is_some() && gate.is_none() {
-                tracing::error!(
-                    "durable reliable send produced no outbox barrier (store mid-Drop?) — refusing to send \
-                     the frame before its row is durable (it stays retained; the retransmit re-drives it)"
-                );
-                return Err(WriteFail::Down);
+        // (2) THE DATAGRAMS, BEFORE THE DISK.
+        for f in &batch {
+            if f.class.reliability() == Reliability::Reliable {
+                continue;
             }
+            match write_unreliable(
+                endpoint,
+                dest,
+                source,
+                connection,
+                lanes,
+                serve_tasks,
+                ack_tx,
+                connections,
+                local,
+                f,
+                stats,
+                inbox,
+                ledger,
+                ack_flush,
+            )
+            .await
+            {
+                Ok(()) => out.wrote = true,
+                Err(()) => {
+                    out.down = true;
+                    break; // the connection is gone; the rest are latest-wins loss
+                }
+            }
+        }
 
-            // R-6d3a BLOCK B — the durable-before-send BARRIER, OUTSIDE the lock, on the cloned handle: wait
-            // until this batch's outbox row is fsynced, so the row is on disk BEFORE the wire send (block C).
-            // A single wait on the store batch seq suffices — durability is monotone (the writer drains in seq
-            // order), MF-3. No-op for an Ephemeral / no-sink frame (`gate == None`) ⇒ byte-identical fast path.
-            //
-            // R-6d3b F2: the wait is ASYNC (`wait_durable_through_async`, not the sync park) so a stalled
-            // durable send YIELDS its tokio worker instead of occupying it — N concurrent durable sends cost 0
-            // parked workers, never starving the mesh recv/ack/accept I/O pool (worker_threads(2)). CANCEL-
-            // SAFETY: this adds an `.await` to `write_frame`, but `write_frame` is `.await`ed as the plain body
-            // of the `w.rx.recv()` select arm (never wrapped in timeout/select), so a task drop here cancels
-            // BEFORE the wire send with the frame retained + its row durable-or-becoming-durable but NOT sent —
-            // exactly crash-table row 4 (durable-not-sent ⇒ the retransmit / boot replay re-drives). No
-            // half-sent state; the cancel-safety invariant (sole cancel point = `w.rx.recv()`) is preserved.
-            if let Some((batch_seq, durability)) = gate {
+        // (3) THE ONE BARRIER for every retained row this round staged. The LAST allowed round awaits it
+        // plainly: it may hold nothing over, because there is no round left to write what it would hold.
+        let mut held: Vec<OutFrame> = Vec::new();
+        if let Some(gate) = staged.gate {
+            if round + 1 < MAX_BATCH_ROUNDS {
+                held = await_barrier_serving_datagrams(
+                    gate,
+                    rx,
+                    ack_rx,
+                    outbox,
+                    endpoint,
+                    dest,
+                    source,
+                    connection,
+                    lanes,
+                    serve_tasks,
+                    ack_tx,
+                    connections,
+                    local,
+                    stats,
+                    inbox,
+                    ledger,
+                    ack_flush,
+                    &mut out,
+                )
+                .await;
+            } else {
+                let (batch_seq, durability) = gate;
                 durability.wait_durable_through_async(batch_seq).await;
             }
-
-            // Dial on demand through the ONE dial home (shared with the retransmit path's replay_lanes). A
-            // dial failure ⇒ Down; the frame is already retained above ⇒ the timer re-drives it.
-            ensure_connection(
-                endpoint,
-                dest,
-                source,
-                connection,
-                lanes,
-                serve_tasks,
-                ack_tx,
-                connections,
-                inbox,
-                stats,
-                ledger,
-                ack_flush,
-            )
-            .await
-            .map_err(|()| WriteFail::Down)?;
-            let conn = connection.as_ref().ok_or(WriteFail::Down)?;
-            // Re-fetch the lane: a fresh dial in ensure_connection reset every lane's `stream` to None.
-            let lane = lanes.get_mut(&frame.class).ok_or(WriteFail::Down)?;
-
-            // STRUCTURAL if/else — NO fall-through (the CRITICAL double-write cure):
-            if lane.stream.is_none() {
-                // (re)opened stream: write EXACTLY replay_batch(), which by construction includes the
-                // just-assigned frame as its HIGHEST entry ⇒ the new frame is written exactly once,
-                // inside the batch. Never falls through to the steady-state write below.
-                let mut send = conn.open_uni().await.map_err(|_| WriteFail::Down)?;
-                // Tag the DATA stream ONCE, before any frame — consumed by serve_data_stream's read_exact(1)
-                // BEFORE the framing loop, never inside frame_payload (read_one_reliable_frame stays byte-
-                // identical, so the loopback bridge that shares it is unaffected).
-                send.write_all(&[STREAM_KIND_DATA])
-                    .await
-                    .map_err(|_| WriteFail::Down)?;
-                lane.stream = Some(send);
-                let batch = lane.replay_batch();
-                debug_assert_eq!(
-                    batch.last().map(|f| f.seq),
-                    Some(seq),
-                    "buffer-first invariant: the just-assigned frame is the highest replay entry"
-                );
-                let send = lane.stream.as_mut().ok_or(WriteFail::Down)?;
-                for f in &batch {
-                    write_reliable_frame(
-                        send,
-                        f.from,
-                        f.class,
-                        f.incarnation,
-                        f.epoch,
-                        f.seq,
-                        &f.bytes,
-                    )
-                    .await
-                    .map_err(|_| WriteFail::Down)?;
-                }
-                Ok(())
-            } else {
-                // steady state: stream open ⇒ write ONLY the new frame (NEVER the backlog). Read the
-                // single frame object back out of `retry`, copying its fields so the immutable borrow of
-                // `retry` ends before the mutable borrow of `stream`.
-                let nf = &lane.retry.get(&seq).ok_or(WriteFail::Down)?.frame;
-                let (f_from, f_class, f_inc, f_epoch, f_bytes) = (
-                    nf.from,
-                    nf.class,
-                    nf.incarnation,
-                    nf.epoch,
-                    nf.bytes.clone(),
-                );
-                let send = lane.stream.as_mut().ok_or(WriteFail::Down)?;
-                write_reliable_frame(send, f_from, f_class, f_inc, f_epoch, seq, &f_bytes)
-                    .await
-                    .map_err(|_| WriteFail::Down)
-            }
         }
-        Reliability::Unreliable => {
-            // Dial on demand (the ONE dial home). No retain, no bounce — datagram loss is latest-wins.
-            ensure_connection(
+
+        // (4) THE RELIABLE WRITES. A durable stage with a live sink that produced NO barrier means the store
+        // was mid-Drop: refuse to write, LOUD — sending here would put a frame on the wire before its row is
+        // durable (a silent durable-before-send violation in a release build). The frames stay retained; the
+        // retransmit re-drives them.
+        if staged.gate_missing {
+            tracing::error!(
+                "durable reliable send produced no outbox barrier (store mid-Drop?) — refusing to send the \
+                 batch before its rows are durable (they stay retained; the retransmit re-drives them)"
+            );
+            out.down = true;
+        } else if !staged.by_class.is_empty() {
+            match write_staged_batch(
                 endpoint,
                 dest,
                 source,
@@ -2691,47 +3082,22 @@ async fn write_frame(
                 stats,
                 ledger,
                 ack_flush,
+                &staged.by_class,
+                &mut out.ok_classes,
             )
             .await
-            .map_err(|()| WriteFail::Down)?;
-            let conn = connection.as_ref().ok_or(WriteFail::Down)?;
-            // Datagrams are message-bounded (QUIC-delimited, NO stream framing — codec_flags is a
-            // stream concept) and carry the BARE DatagramFrame (R1' hot/cold split — no reliability
-            // metadata on the 20Hz path). TooLarge is a loud failure of the caller's framing.
-            let payload = postcard::to_allocvec(&DatagramFrame {
-                from: local,
-                class: frame.class,
-                bytes: frame.bytes.to_vec(),
-            })
-            .map_err(|_| WriteFail::Down)?;
-            if conn
-                .max_datagram_size()
-                .is_none_or(|max| payload.len() > max)
             {
-                // COUNTED, never silent (GW-1): snapshots are content-partitioned
-                // upstream, so a too-large datagram here is a budget misconfiguration.
-                stats
-                    .datagrams_dropped_too_large
-                    .fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    "datagram payload {} exceeds the path MTU budget; dropped (counted)",
-                    payload.len()
-                );
-                return Ok(()); // dropped, but the connection is healthy
-            }
-            // A full send queue drops the datagram (latest-wins); only a dead
-            // connection is an Err that triggers re-dial.
-            match conn.send_datagram(payload.into()) {
-                Ok(()) => Ok(()),
-                Err(quinn::SendDatagramError::ConnectionLost(_)) => Err(WriteFail::Down),
-                Err(_) => {
-                    // Unsupported/too-large/queue-full: drop (latest-wins), stay up.
-                    stats.datagrams_dropped_send.fetch_add(1, Ordering::Relaxed);
-                    Ok(())
-                }
+                Ok(()) => out.wrote = true,
+                Err(()) => out.down = true,
             }
         }
+
+        if held.is_empty() {
+            break; // nothing arrived through the sync ⇒ this batch is finished
+        }
+        batch = held;
     }
+    out
 }
 
 impl MeshTransport {
@@ -2837,6 +3203,7 @@ impl Transport for MeshTransport {
                 inbox: Arc::clone(&self.inbox),
                 stats: Arc::clone(&self.stats),
                 ledger: Arc::clone(&self.ledger),
+                book: Arc::clone(&self.topology),
                 backoff_min: self.backoff_min,
                 backoff_max: self.backoff_max,
                 incarnation: self.incarnation,
@@ -2948,11 +3315,24 @@ pub trait ReplayTransport: Transport {
     /// receiver (the writer exited) closes the sender ⇒ `is_closed()`. O(1). A peer with NO lane (a roster
     /// miss) also reports `false` — but `replay_outbox`'s pre-send membership check catches that first.
     fn lane_alive(&self, peer: NodeId) -> bool;
+
+    /// ★ HOW MANY RETAINED ROWS THIS TRANSPORT HAS MIRRORED, ever — the boot replay's fence anchor.
+    ///
+    /// The fence used to count SUBMITS, on the rule "one send, one submit". The group commit (2026-09-06)
+    /// ended that rule: a peer writer drains its whole queue into ONE batch and asks the disk ONCE, so two
+    /// replayed rows toward one shard now produce ONE submit and a submit-counting fence waits forever.
+    /// ROWS are exact however they were grouped. Counted AFTER the submit that carries them, so a reading of
+    /// N means those N rows have been handed to the disk.
+    fn durable_rows_retained(&self) -> u64;
 }
 
 impl ReplayTransport for MeshTransport {
     fn lane_alive(&self, peer: NodeId) -> bool {
         self.lanes.get(&peer).is_some_and(|l| !l.tx.is_closed())
+    }
+
+    fn durable_rows_retained(&self) -> u64 {
+        self.stats.outbox_rows_retained.load(Ordering::Relaxed)
     }
 }
 
@@ -4492,6 +4872,188 @@ mod tests {
             bounces,
             Vec::new(),
             "nothing was owed to B, so nothing may be reported undelivered"
+        );
+    }
+
+    /// M6 unit half — the eviction RULE on its own, all three answers, no sockets.
+    ///
+    /// A client (unbooked) that is present LOSES its ledger and is counted once. A shard (booked) KEEPS its
+    /// ledger and is never counted — it is re-dialed, and its flows resume against the same watermarks. A peer
+    /// with no entry at all (this node never received a frame from it) is a no-op that counts nothing.
+    #[test]
+    fn evicting_a_receive_ledger_spares_a_booked_peer_and_counts_only_a_real_removal() {
+        let client = NodeId(7);
+        let shard = NodeId(8);
+        let stranger = NodeId(9);
+        let ledger: RecvLedger = Arc::new(RwLock::new(BTreeMap::new()));
+        let seed = |peer: NodeId| {
+            ledger.write().expect("ledger").insert(
+                peer,
+                Arc::new(Mutex::new(PeerRecv {
+                    incarnation: Some(1),
+                    classes: BTreeMap::new(),
+                })),
+            );
+        };
+        seed(client);
+        seed(shard);
+        // Only the shard has a booked address: the client dialed in, so this node cannot reach it.
+        let book: PeerTopology = Arc::new(ArcSwap::from_pointee(
+            [(shard, "127.0.0.1:1".parse::<SocketAddr>().expect("addr"))]
+                .into_iter()
+                .collect::<BTreeMap<NodeId, SocketAddr>>(),
+        ));
+        let stats = Arc::new(MeshStats::default());
+
+        evict_recv_ledger(&ledger, &book, shard, &stats);
+        assert!(
+            ledger.read().expect("ledger").contains_key(&shard),
+            "a booked peer keeps its ledger: it is re-dialed and its flows resume"
+        );
+        assert_eq!(stats.recv_ledgers_evicted.load(Ordering::Relaxed), 0);
+
+        evict_recv_ledger(&ledger, &book, client, &stats);
+        assert!(
+            !ledger.read().expect("ledger").contains_key(&client),
+            "a vanished unbooked peer gives its ledger back"
+        );
+        assert_eq!(stats.recv_ledgers_evicted.load(Ordering::Relaxed), 1);
+
+        evict_recv_ledger(&ledger, &book, stranger, &stats);
+        assert_eq!(
+            stats.recv_ledgers_evicted.load(Ordering::Relaxed),
+            1,
+            "a peer that never sent anything has no entry, so nothing is removed and nothing is counted"
+        );
+    }
+
+    /// ★ M6 — THE VANISHED CLIENT'S LEDGER GOES WITH IT. The residual half one left behind: the death was
+    /// SAID (`PeerReset { ConnectionLost }`) but the dedup watermarks stayed forever, so a node that served
+    /// a thousand clients over a day held a thousand dead entries.
+    ///
+    /// The gate: an UNBOOKED peer dials in, this node replies (which is what spawns the learned lane), the
+    /// peer is killed — and after the reset is drained, the acceptor's ledger no longer names it.
+    #[test]
+    fn a_vanished_dial_in_peers_receive_ledger_is_evicted() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let a = NodeId(1);
+        let b = NodeId(2);
+        let [addr_a, addr_b] = reserve_addrs();
+        // A: EMPTY book — it can never re-dial B, which is exactly what makes B's ledger dead weight.
+        let (mut ta, ctl_a) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(a, addr_a, BTreeMap::new(), 64, 0, 0),
+            None,
+        )
+        .expect("spawn A");
+        let book_b: BTreeMap<NodeId, SocketAddr> = [(a, addr_a)].into_iter().collect();
+        let (mut tb, ctl_b) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b, book_b, 64, 0, 0),
+            None,
+        )
+        .expect("spawn B");
+
+        tb.send(a, MsgClass::Control, vec![0xB].into())
+            .expect("B->A booked send");
+        wait_for(&mut ta, |g| {
+            g.iter()
+                .any(|m| matches!(m, Inbound::Wire { from, .. } if *from == b))
+        });
+        assert!(
+            ta.ledger.read().expect("ledger").contains_key(&b),
+            "A holds B's dedup state the moment B's first frame lands"
+        );
+        // A replies, which spawns the LEARNED lane whose death carries the eviction.
+        ta.send(b, MsgClass::Control, vec![0xA].into())
+            .expect("A->B learned");
+        let started = Instant::now();
+        while ctl_a.stats().reliable_acked == 0 {
+            std::thread::sleep(Duration::from_millis(5));
+            assert!(
+                started.elapsed() < DEADLINE,
+                "A's learned lane never retired its only frame"
+            );
+        }
+
+        ctl_b.kill();
+        wait_for(&mut ta, |g| {
+            g.iter().any(|m| matches!(m, Inbound::PeerReset { .. }))
+        });
+        assert_eq!(
+            ctl_a.stats().recv_ledgers_evicted,
+            1,
+            "the vanished client's ledger is given back, exactly once"
+        );
+        assert!(
+            !ta.ledger.read().expect("ledger").contains_key(&b),
+            "and A no longer names B in its receive ledger"
+        );
+    }
+
+    /// ★ M6, THE OTHER HALF: a BOOKED peer that dies KEEPS its ledger. A shard is re-dialed, and its flows
+    /// resume against the SAME watermarks — dropping them would re-open the cross-stream hole the node-wide
+    /// ledger exists to close. The synchronisation point is the booked peer's own confirmed death, the
+    /// `NodeUnreachable` bounce after the replay threshold.
+    #[test]
+    fn a_booked_peers_death_keeps_its_receive_ledger() {
+        let rt = runtime();
+        let trust = ClusterTrust::generate("vd-mesh-test").expect("trust");
+        let a = NodeId(1);
+        let b = NodeId(2);
+        let [addr_a, addr_b] = reserve_addrs();
+        let book: BTreeMap<NodeId, SocketAddr> = [(a, addr_a), (b, addr_b)].into_iter().collect();
+        let (mut ta, ctl_a) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(a, addr_a, book.clone(), 64, 0, 0),
+            None,
+        )
+        .expect("spawn A");
+        let (mut tb, ctl_b) = spawn_mesh(
+            rt.handle(),
+            &trust,
+            &MeshConfig::new(b, addr_b, book, 64, 0, 0),
+            None,
+        )
+        .expect("spawn B");
+
+        tb.send(a, MsgClass::Control, vec![0xB].into())
+            .expect("B->A booked send");
+        wait_for(&mut ta, |g| {
+            g.iter()
+                .any(|m| matches!(m, Inbound::Wire { from, .. } if *from == b))
+        });
+        ctl_b.kill();
+        // ONE frame toward the corpse. It is retained, the retransmit clock re-drives it off A's own timer,
+        // and the lane bounces once it passes the confirmed-unreachable threshold.
+        ta.send(b, MsgClass::Control, vec![0xC].into())
+            .expect("A->B booked send toward a killed peer");
+        let got = wait_for(&mut ta, |g| {
+            g.iter()
+                .any(|m| matches!(m, Inbound::NodeUnreachable { .. }))
+        });
+        assert!(
+            got.iter().all(|m| !matches!(
+                m,
+                Inbound::PeerReset {
+                    cause: PeerResetCause::ConnectionLost,
+                    ..
+                }
+            )),
+            "a booked peer's death is a bounce, never the dial-in peer's connection-lost reset"
+        );
+        assert_eq!(
+            ctl_a.stats().recv_ledgers_evicted,
+            0,
+            "a booked peer is re-dialed, so nothing about it is forgotten"
+        );
+        assert!(
+            ta.ledger.read().expect("ledger").contains_key(&b),
+            "B's dedup watermarks wait for B to come back"
         );
     }
 

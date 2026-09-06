@@ -129,6 +129,9 @@ fn anchors(trust_dir: &std::path::Path) -> Vec<(&'static str, String)> {
         ("VD_ORCH", "1".to_string()),
         ("VD_MINT_SEED", DEV.mint_seed.to_string()),
         ("VD_INPUT_LOG_CAP", DEV.input_log_cap.to_string()),
+        // The dev store escape: this fixture's work dir is under `$TMPDIR`, and the launcher turns the
+        // orchestrator's store escape into each child's outbox escape (slice 4).
+        ("VD_STORE_EPHEMERAL_OK", "1".to_string()),
         // NOTE: VD_PEERS is NO LONGER an anchor — RLM 5d makes ProcLaunchBackend::child_env emit it from
         // the kernel-computed LaunchSpec.peers (the ancestor closure). The specs below fill it.
     ]);

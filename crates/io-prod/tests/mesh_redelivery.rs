@@ -591,9 +591,9 @@ fn mesh_metrics_source_reflects_the_live_mesh_counters() {
 }
 
 /// R-6d2c T9 — a `Durability::Retained` reliable send drives the `matches!(frame.durability, Retained)`
-/// TRUE arm in `write_frame` (mesh.rs) — the ONLY io-prod site that lowers the per-send `Durability` marker
+/// TRUE arm in `stage_reliable_batch` (mesh.rs) — the ONLY io-prod site that lowers the per-send `Durability` marker
 /// to the lane's `durable` bool. The FSM unit tests (mesh.rs T1-T8) call `assign_and_retain` directly and so
-/// never touch `write_frame`; without this end-to-end Retained send that TRUE region is uncovered (HR5 Tier-B
+/// never touch it; without this end-to-end Retained send that TRUE region is uncovered (HR5 Tier-B
 /// region floor). In production the outbox `sink` is `None` until R-6d3, so a Retained send behaves BYTE-
 /// IDENTICALLY to an Ephemeral one (no outbox row) — this test asserts exactly that: delivery is unchanged.
 #[test]

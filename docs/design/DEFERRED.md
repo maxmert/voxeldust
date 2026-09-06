@@ -914,6 +914,42 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
 - **Source:** the P2 vertical-slice plan + Slice 1c.2 design `wf_726a51bc` + Slice 1c.3 design `wf_a46c0d9b`.
 
 ### D-6 🟧 Durable saga WAL: S0–S5 + the redb backend (Slice P3-PERSIST-1: C1/C2 + Slice D α/β/γ/δ) LANDED — orchestrator crash-durable & SIGKILL-mid-fsync-proven; the redelivering transport is 🟩 (R-3'→R-4e, R-5 capstone proves producer-less at-least-once for a source-that-stays-up); only the deploy preconditions (#1 AwaitAdopt SOURCE-CRASH egress = M3+L5, #3 WAL version+Tombstone, durable-outbox, durable-root allow-list) remain OWED
+- **✅ SLICE 4 (2026-09-06, foundation; owner: "add durability, make sure performance does not degrade").**
+  READ FROM THE CODE: the durable outbox (R-6d) was landed as a store AND opened by the shard/gateway boot
+  sequence iff `VD_OUTBOX_PATH` is set — and NOTHING set it: not the dev cluster's env builders, not a single
+  process gate, not the k3d shard manifest, not the container entrypoint. Every shard in every deployment ran
+  without it; a shard that died between sending a retained flow (a despawn, a hand-over, a child's facts,
+  an entity removal, an out-of-interest notice) and its ack lost that flow. NOW: (1) every SHARD boots with an
+  outbox — the dev cluster and every gate set a per-shard path under the slot dir (ephemeral escape, like the
+  orchestrator's store), the k3d shard manifest sets `/var/lib/vd/outbox.redb` under the durable root, and a
+  DEMAND-SPAWNED shard gets `<realm workdir>/outbox-<node>.redb` from the launcher with the durable root and
+  the dev escape riding the spawn anchors (the realm workdir sits beside the orchestrator's store, so under
+  k3d it is on the durable volume); (2) the
+  GATEWAY gets NO store and the ORCHESTRATOR keeps only its directory store — decided with the owner: a
+  gateway holds derived state only (leases live in the directory, scenes rebuild from the next frames), and
+  that is what lets gateways scale sideways; the orchestrator's flows re-drive from state; the stale "until
+  R-6d lands" boot warning is rewritten; (3) the receive ledger of a vanished DIAL-IN peer (a client with no
+  booked address) is evicted by the same event that ends its session — a booked peer keeps its ledger because
+  it is re-dialed; (4) retained rows toward a peer that is not in the route book at boot stay QUARANTINED,
+  never dropped (a demand-spawned parent is booked lazily and must not lose its rows), counted and logged.
+  PROOFS: `crates/bins/tests/shard_outbox_replay.rs` — the REAL shard binary boots on a seeded outbox and
+  re-drives the row to the gateway (observed on the gateway's admin counter), with an empty-outbox twin;
+  `crates/bins/tests/outbox_tick_pace.rs` — the shard's own pace lines with the outbox off and on under K
+  standing clients; a Tier-B mesh measurement of the retained lane's latency off vs on and the outbox
+  returning to empty after the acks. ★ MEASURED, AND A DEFECT FOUND AND CURED ON THE WAY: the per-peer
+  writer awaited the disk INLINE per retained frame, so (i) a burst of N retained frames cost N syncs and
+  (ii) every unreliable datagram queued behind one waited for the disk — the snapshot lane paid +11 ms p99
+  at a sustainable cadence and +414 ms when the retained lane saturated. CURED (`peer_writer` is a batch
+  step: drain the queue, write every datagram BEFORE the barrier, stage every retained frame under ONE
+  lock and await ONE barrier, then write the reliable frames per class in order; the barrier wait keeps
+  serving datagrams and acks). AFTER: snapshot lane +0.016 ms p99 (sustainable) / −0.36 ms (saturating);
+  retained lane p50 +5.6 ms = one sync, p99 +11 ms (one sync's own tail); a burst of 200 retained frames
+  rides 2 syncs (was 200); the outbox is EMPTY after the acks. Shard tick pace with 8 standing clients:
+  mean 0.157 → 0.247 ms, slowest 0.52 → 1.77 ms against a 20 ms budget. Boot replay on the real shard:
+  `replayed=1 quarantined=0`, seen on the gateway's counter; the empty-outbox twin stays 0. A booted
+  dev cluster's demand-spawned shards open `outbox-<node>.redb` each (checked in the slot's realm logs).
+  OWED, NOT THIS SLICE: a gateway rollover needs the P3 resume ticket (a client keeps its lease on another
+  gateway); a way for a client to pick a gateway (a balancer or a directory answer).
 - **▶ Slice P3-PERSIST-1 — the redb backend (design `wf_83d5a428`, judge-panel of 4; user-decided: Store A redb
   now + single-file/split-ready-seam):** ONE generic `RedbStore` behind the frozen `sim::io::Store` seam in
   `crates/io-prod/src/store.rs`, TARGETING the ORCHESTRATOR (Store A: directory + saga WAL + clock ceiling — the

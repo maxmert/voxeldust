@@ -60,6 +60,7 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
     let shard = reserve_udp_addr();
     let admin1 = reserve_tcp_addr();
     let trust_dir = std::env::temp_dir().join(format!("vd-orchcrash-{}", std::process::id()));
+    let work_dir = vd_bins::fresh_work_dir("vd-orchcrash");
     let trust = ClusterTrust::generate("vd-orchcrash").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
     // The DURABLE store survives the kill-9 + restart (NOT removed between boots — it IS the crash subject).
@@ -89,7 +90,7 @@ fn sigkill_mid_fsync_loses_at_most_one_batch_and_recovers_consistently() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
             &common,
-            &shard_env(&addrs1, &DEV, vd_bins::ClusterShape::Single),
+            &shard_env(&addrs1, &DEV, vd_bins::ClusterShape::Single, &work_dir),
         )
         .expect("spawn shard"),
     );

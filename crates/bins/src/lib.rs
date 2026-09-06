@@ -1493,11 +1493,19 @@ pub fn gateway_env(
 /// (each shard books the others). In Single mode the peer book is byte-identical to the base `up`.
 /// The home shard boots THE world's seed neighbourhood — its own 150 m shell IS the crossing
 /// boundary; nothing is injected.
+///
+/// ★ THE SHARD CARRIES ITS DURABLE OUTBOX (foundation slice 4). `work_dir` is the slot's work
+/// directory; the shard's outbox file is [`node_outbox_path`] inside it, one file per node id. A
+/// shard says things nobody re-says for it — "this occupant left your interest" is sent once — so a
+/// crash between the send and the acknowledgement used to lose the message and freeze a figure on a
+/// player's screen. With the file open, the frame is on disk before it leaves and the next boot
+/// re-drives it. The gateway is given none by decision: it holds only what it derived from others.
 #[must_use]
 pub fn shard_env(
     a: &ClusterAddrs,
     p: &DevClusterParams,
     shape: ClusterShape,
+    work_dir: &std::path::Path,
 ) -> Vec<(&'static str, String)> {
     // The home shard books every OTHER realm-shard so the cross-shard mesh can carry transfer traffic
     // (each shard books the others). The list GROWS with the shape (ONE data fan-out, no per-kind
@@ -1505,7 +1513,7 @@ pub fn shard_env(
     // book is byte-identical to the pre-Track-R env.
     let mut peers = vec![(ORCH, a.orchestrator), (GATEWAY, a.gateway)];
     peers.extend(realm_shards(shape, a, p).iter().map(|s| (s.node, s.quic)));
-    let env = vec![
+    let mut env = vec![
         str_pair("VD_NODE_ID", SHARD.0),
         str_pair("VD_BIND", a.shard),
         ("VD_PEERS", book(&peers)),
@@ -1526,6 +1534,7 @@ pub fn shard_env(
     // NO `VD_HELD_REALMS` in ANY shape: co-hosting retired with the --triple shape (NODE-PER-REALM —
     // every realm its own shard, every re-home a uniform CROSS-NODE saga). The shard bin keeps the
     // parse (a shape with no consumer is exactly what rotted into the CRITICAL — ledgered D-WORLD-6).
+    env.extend(shard_outbox_env(work_dir, SHARD));
     env
 }
 
@@ -1588,13 +1597,15 @@ pub fn realm_from_kind_seed(kind: &str, seed: u64) -> Result<vd_core::pose::Real
 /// `VD_REALM_SEED` so the shard bin boots the right realm KIND. A DISTINCT mint per node (derived
 /// from the home mint) so no two shards alias entity ids. NO boundary-file injection — the SEED
 /// neighbourhood boots (`realm_neighbourhood_for(own)` = own + ancestors + DIRECT children), which is
-/// how the containment detector fires each cross-node re-home.
+/// how the containment detector fires each cross-node re-home. `work_dir` means what it means in
+/// [`shard_env`]: the slot directory this shard's own durable outbox file lives in.
 #[must_use]
 pub fn realm_shard_env(
     a: &ClusterAddrs,
     p: &DevClusterParams,
     shape: ClusterShape,
     shard: RealmShard,
+    work_dir: &std::path::Path,
 ) -> Vec<(&'static str, String)> {
     let mut peers = vec![
         (ORCH, a.orchestrator),
@@ -1622,7 +1633,7 @@ pub fn realm_shard_env(
             .wrapping_add(REALM_SHARD_MINT_BASE)
             .wrapping_add(other.0),
     };
-    vec![
+    let mut env = vec![
         str_pair("VD_NODE_ID", shard.node.0),
         str_pair("VD_BIND", shard.quic),
         ("VD_PEERS", book(&peers)),
@@ -1636,7 +1647,11 @@ pub fn realm_shard_env(
         str_pair("VD_REALM_RECHECK", p.realm_recheck),
         str_pair("VD_SNAPSHOT_BUDGET", p.snapshot_budget),
         str_pair("VD_PROBE_ADDR", shard.probe),
-    ]
+    ];
+    // Its OWN outbox file, named by its node id in the same work dir (see `shard_env`) — a galaxy
+    // shard and a planet shard in one slot never open one file.
+    env.extend(shard_outbox_env(work_dir, shard.node));
+    env
 }
 
 /// The seed a seed-keyed realm hosts (`VD_REALM_SEED`). A `Ship` realm has no seed (it keys on an entity id);
@@ -1773,6 +1788,49 @@ pub const ORCH_STORE_NAME: &str = "orchestrator.redb";
 /// before-fork durability barrier and decouples launch fsyncs from the per-tick universe-clock barrier
 /// (zero edits to the depth-1 D-6 writer core).
 pub const LAUNCH_STORE_NAME: &str = "launch.redb";
+
+/// ★ WHERE ONE NODE'S UNDELIVERED FRAMES GO (R-6d) — the ONE place the outbox filename is built.
+///
+/// Named by the NODE, in the slot's own work directory, so `down` reaps it with everything else and
+/// two shards in one slot never open one file. A node's outbox holds what it has said and nobody has
+/// acknowledged yet — a departing occupant's out-of-interest notice, say — so the file belongs to the
+/// node that owes the message, not to the realm the node hosts.
+///
+/// The twin of [`realm_store_path`]: one place decides WHERE files live, one place decides WHAT a
+/// file is called, so a writer and a reader cannot disagree about either.
+#[must_use]
+pub fn node_outbox_path(dir: &std::path::Path, node: NodeId) -> String {
+    dir.join(format!("outbox-{}.redb", node.0))
+        .display()
+        .to_string()
+}
+
+/// The two keys that turn a shard's durable outbox ON, for a node in a dev/test slot work dir.
+///
+/// `VD_OUTBOX_EPHEMERAL_OK` rides along because every dev cluster and every process gate keeps its
+/// slot under `$TMPDIR`, which the durability guard denies by default. A cloud shard sets neither key
+/// here — its manifest names a path on the mounted volume and takes no escape.
+fn shard_outbox_env(work_dir: &std::path::Path, node: NodeId) -> [(&'static str, String); 2] {
+    [
+        ("VD_OUTBOX_PATH", node_outbox_path(work_dir, node)),
+        ("VD_OUTBOX_EPHEMERAL_OK", "1".to_owned()),
+    ]
+}
+
+/// A process-tier test's own work directory (`$TMPDIR/<tag>-<pid>-work`), CLEARED and created here —
+/// the twin of a dev-cluster slot's work dir. Every node file the test's cluster writes goes in it,
+/// so two suites never open one shard's outbox, and a stale file from an earlier run can never be
+/// replayed into this one.
+///
+/// # Panics
+/// The directory cannot be created (a test with nowhere to write is a test that must fail loud).
+#[must_use]
+pub fn fresh_work_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("{tag}-{}-work", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("test work dir");
+    dir
+}
 
 /// A slot's working directory (`$TMPDIR/vd-devcluster/slot-N`) — the SINGLE definition of
 /// the launcher's on-disk layout (was re-derived inline by the launcher AND each process
@@ -2167,6 +2225,15 @@ pub fn spawn_anchor_keys() -> &'static [&'static str] {
         // login, and hands the shard a pose already measured in the shard's own frame.
         "VD_BOOT_TICKS_P99",
         "VD_LEASE_RENEW_INTERVAL",
+        // THE DURABLE OUTBOX (foundation slice 4, 2026-09-06): a demand-spawned shard opens one at
+        // `<realm workdir>/outbox-<node>.redb` (`ProcLaunchBackend::child_env` derives the path per
+        // child), and the guard that admits that path needs the SAME fact the orchestrator's own store
+        // has: the durable root (k3d: `/var/lib/vd`, which the realm workdir sits under), or the
+        // orchestrator's dev store escape (a slot under `$TMPDIR`), which `child_env` turns into the
+        // child's outbox escape. The cloud profile forbids every escape, and the orchestrator's own
+        // preflight refuses a stray one, so the escape never reaches a cloud child by this road.
+        "VD_STORE_DURABLE_ROOT",
+        "VD_STORE_EPHEMERAL_OK",
         // look_horizon.md slice 5 (G-IDENTICAL): the fixture plant must reach every DEMAND-SPAWNED
         // shard too, or the cluster splits across two worlds — the exact defect the no-choice boot
         // deleted. Absent ⇒ byte-identical child env ⇒ THE plain world.
@@ -4705,6 +4772,12 @@ mod incarnation_tests {
 
     // ---- Track R / 1d.2: the dual-shard env builders + boundaries helper --------------------------
 
+    /// The slot work dir these env-shape tests state. Nothing is written here — the builders only
+    /// name a file inside it — so a fixed path keeps the expected strings readable.
+    fn test_work_dir() -> &'static std::path::Path {
+        std::path::Path::new("/tmp/vd-slot")
+    }
+
     /// Loopback addrs distinct per role so a mis-booked peer is visible in an assert. Every field is a
     /// unique port, so a `book(...)` mismatch shows up as a wrong port string.
     fn dual_addrs() -> ClusterAddrs {
@@ -4963,8 +5036,8 @@ mod incarnation_tests {
     #[test]
     fn shard_env_dual_books_the_galaxy_inert_when_single_and_injects_no_boundaries() {
         let a = dual_addrs();
-        let single = shard_env(&a, &DEV, ClusterShape::Single);
-        let dual = shard_env(&a, &DEV, ClusterShape::Dual);
+        let single = shard_env(&a, &DEV, ClusterShape::Single, test_work_dir());
+        let dual = shard_env(&a, &DEV, ClusterShape::Dual, test_work_dir());
         let galaxy_book = format!("{}={}", GALAXY.0, a.galaxy);
         // Each shard books the other ONLY in dual (the cross-shard mesh); single is byte-identical.
         assert!(
@@ -4983,7 +5056,11 @@ mod incarnation_tests {
             env_value(&dual, "VD_REALM_SEED"),
             Some(DEV.realm_seed.to_string()).as_deref()
         );
-        for env in [&single, &dual, &shard_env(&a, &DEV, ClusterShape::Chain)] {
+        for env in [
+            &single,
+            &dual,
+            &shard_env(&a, &DEV, ClusterShape::Chain, test_work_dir()),
+        ] {
             // The SL5 guard, key-shape not key-name: NO shape's env carries ANY boundary-file key
             // (the deleted injection knobs must stay deleted, whatever a revival would call itself).
             assert_eq!(
@@ -5017,6 +5094,9 @@ mod incarnation_tests {
                 ("VD_PROBE_ADDR", a.orchestrator_probe.to_string()),
                 ("VD_STORE_PATH", "store".to_owned()),
                 ("VD_STORE_EPHEMERAL_OK", "1".to_owned()),
+                // The shards this orchestrator spawns keep their outbox beside its store (slice 4); under a
+                // dev slot that is `$TMPDIR`, so the outbox escape rides the spawn anchors to every child.
+                ("VD_OUTBOX_EPHEMERAL_OK", "1".to_owned()),
                 // RLM 5f-1: the static-boot marker (every harness shape pre-spawns its shards, so an armed
                 // `VD_DEMAND` reconciler must be refused). INERT while `VD_DEMAND` is unset ⇒ boot behaviour
                 // stays byte-identical; only the env LIST grew by this one marker.
@@ -5052,7 +5132,7 @@ mod incarnation_tests {
             ]
         );
 
-        let shard = shard_env(&a, &DEV, ClusterShape::Single);
+        let shard = shard_env(&a, &DEV, ClusterShape::Single, test_work_dir());
         assert_eq!(
             shard,
             vec![
@@ -5071,6 +5151,11 @@ mod incarnation_tests {
                 ("VD_REALM_RECHECK", DEV.realm_recheck.to_string()),
                 ("VD_SNAPSHOT_BUDGET", DEV.snapshot_budget.to_string()),
                 ("VD_PROBE_ADDR", a.shard_probe.to_string()),
+                // Foundation slice 4: the shard's own durable outbox, named by its node id in the
+                // slot work dir, plus the escape the $TMPDIR slot needs. The two keys are the ONLY
+                // growth in this env — every other value is what it was.
+                ("VD_OUTBOX_PATH", node_outbox_path(test_work_dir(), SHARD)),
+                ("VD_OUTBOX_EPHEMERAL_OK", "1".to_owned()),
             ]
         );
     }
@@ -5185,15 +5270,18 @@ mod incarnation_tests {
             // MINTS pairwise distinct across the home shard + every realm-shard (an aliased mint
             // lets two shards mint the same entity id).
             let mut mints = vec![
-                env_value(&shard_env(&a, &DEV, shape), "VD_MINT_SEED")
+                env_value(&shard_env(&a, &DEV, shape, test_work_dir()), "VD_MINT_SEED")
                     .expect("home mint emitted")
                     .to_owned(),
             ];
             for shard in &shards {
                 mints.push(
-                    env_value(&realm_shard_env(&a, &DEV, shape, *shard), "VD_MINT_SEED")
-                        .expect("realm-shard mint emitted")
-                        .to_owned(),
+                    env_value(
+                        &realm_shard_env(&a, &DEV, shape, *shard, test_work_dir()),
+                        "VD_MINT_SEED",
+                    )
+                    .expect("realm-shard mint emitted")
+                    .to_owned(),
                 );
             }
             let mint_set: std::collections::BTreeSet<&String> = mints.iter().collect();
@@ -5206,7 +5294,7 @@ mod incarnation_tests {
         // The Chain home shard books EVERY other realm-shard (the cross-shard mesh) and, crucially,
         // sets NO `VD_HELD_REALMS` — each realm is its own node, so the source==dest co-hosting is gone.
         let a = dual_addrs();
-        let env = shard_env(&a, &DEV, ClusterShape::Chain);
+        let env = shard_env(&a, &DEV, ClusterShape::Chain, test_work_dir());
         let peers = env_value(&env, "VD_PEERS").expect("VD_PEERS is always emitted");
         for shard in realm_shards(ClusterShape::Chain, &a, &DEV) {
             assert!(
@@ -5240,7 +5328,7 @@ mod incarnation_tests {
             .into_iter()
             .find(|s| s.realm == roster.inner)
             .expect("the inner-planet realm-shard is in the Chain set");
-        let env = realm_shard_env(&a, &DEV, ClusterShape::Chain, planet);
+        let env = realm_shard_env(&a, &DEV, ClusterShape::Chain, planet, test_work_dir());
         assert_eq!(
             env_value(&env, "VD_NODE_ID"),
             Some(planet.node.0.to_string()).as_deref()
@@ -5287,7 +5375,7 @@ mod incarnation_tests {
             .expect("the galaxy realm-shard is in the Chain set");
         assert_eq!(
             env_value(
-                &realm_shard_env(&a, &DEV, ClusterShape::Chain, galaxy),
+                &realm_shard_env(&a, &DEV, ClusterShape::Chain, galaxy, test_work_dir()),
                 "VD_MINT_SEED"
             ),
             Some(DEV.mint_seed.wrapping_add(12).to_string()).as_deref()

@@ -68,6 +68,14 @@ spec:
             - { name: VD_MINT_SEED, value: "11" }
             - { name: VD_INPUT_LOG_CAP, value: "4096" }
             - { name: VD_SNAPSHOT_BUDGET, value: "1100" } # <= CONSERVATIVE_DATAGRAM_BUDGET (asserted at boot)
+            # THE SHARD'S DURABLE OUTBOX (R-6d). A shard says things nobody re-says for it — "this
+            # occupant left your interest" is sent once — so a crash between the send and the
+            # acknowledgement lost the message and froze a figure on a player's screen. The file sits on
+            # the `data` PVC mounted at /var/lib/vd, which IS VD_STORE_DURABLE_ROOT (10-configmap.yaml),
+            # so the durability allow-list admits it and NO ephemeral escape is taken here. The gateway
+            # gets none by decision (it holds only what it derived from others) and the orchestrator gets
+            # none by design (its flows are re-driven from its own directory state).
+            - { name: VD_OUTBOX_PATH, value: "/var/lib/vd/outbox.redb" }
           ports:
             - { name: mesh, containerPort: 9000, protocol: UDP }
             - { name: probe, containerPort: 9002, protocol: TCP }

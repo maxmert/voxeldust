@@ -225,15 +225,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vd_io_prod::store::open_allowing_genesis(&store_path, allow_genesis, |p| {
             RedbStore::open(p, store_tuning.clone(), store_stamp)
         })?;
-    // The Store is now durable. REMAINING transport production precondition (DEFERRED.md D-6): the
-    // redelivering mesh transport is at-least-once for a source that STAYS UP (R-1..R-5 + M3 durable
-    // incarnation, both proven), but a SOURCE that CRASHES inside the producer-less `AwaitAdopt` recovery
-    // phase still loses its un-acked batch until R-6d's durable outbox lands. Owed before a rolling deploy.
-    tracing::warn!(
-        "orchestrator durable store at {} (redb, off-tick fsync). REMAINING production precondition \
-         (DEFERRED.md D-6): the redelivering mesh transport is at-least-once for a source that stays up \
-         (R-1..R-5 + M3), but a SOURCE crash inside the producer-less AwaitAdopt phase still loses its \
-         un-acked batch until R-6d's durable outbox lands.",
+    // The Store is now durable. THE DURABLE OUTBOX HAS LANDED, so this line states what is true now,
+    // not what was owed: the transport is at-least-once for a source that stays up (R-1..R-5 + M3), and a
+    // shard's producer-less flows now survive the shard's own crash through its durable outbox (R-6d —
+    // the frame is on disk before it leaves and the next boot re-drives it). The orchestrator keeps its
+    // directory store and NO outbox on purpose: every flow it starts is re-driven from that state.
+    tracing::info!(
+        "orchestrator durable store at {} (redb, off-tick fsync), and NO outbox by design — the \
+         orchestrator re-drives its own flows from the directory state it just opened. The mesh \
+         transport is at-least-once for a source that stays up (R-1..R-5 + M3), and a shard's \
+         producer-less flows survive a shard crash through that shard's durable outbox (R-6d, \
+         VD_OUTBOX_PATH).",
         store_path.display()
     );
     // RLM Step 5e: the REAL demand-driven realm spawner, wired LIVE but INERT (`RlmTuning::default()` below

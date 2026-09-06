@@ -225,7 +225,7 @@ fn shared_outbox(tag: &str) -> (SharedOutbox, std::path::PathBuf) {
 
 /// T-DBS-1: a `Durability::Retained` producer-less one-shot (a band-exit `Despawn` rides `GhostReliable`)
 /// wired through a REAL `NodeOutbox` on the sender. This EXERCISES the new R-6d3a regions end-to-end over real
-/// QUIC — `write_frame` block A (lock + retain + `submit_barrier`), block B (the durable wait), and the
+/// QUIC — `stage_reliable_batch` (lock + retain + one `submit_barrier`), `write_batch` phase 3 (the durable wait), and the
 /// peer_writer `on_ack` release-through — and proves the durable write-through reaches real redb + is released
 /// on ack through the SAME shared `Arc` (LOW-4). It does NOT deterministically pin the durable-BEFORE-wire
 /// ORDERING: the off-tick writer fsyncs concurrently, so `scan_all()` usually observes the row via the writer

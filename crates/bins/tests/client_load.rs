@@ -72,6 +72,7 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
         .collect();
 
     let trust_dir = std::env::temp_dir().join(format!("vd-load-{}", std::process::id()));
+    let work_dir = vd_bins::fresh_work_dir("vd-load");
     let trust = vd_io_prod::trust::ClusterTrust::generate("vd-load").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
     // D-6: the orchestrator's durable Store (temp scratch ⇒ VD_STORE_EPHEMERAL_OK via orchestrator_env).
@@ -116,7 +117,7 @@ fn k_clients_log_in_concurrently_each_live_receiving_and_independent() {
         "vd-shard",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
-            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
+            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single, &work_dir),
         ),
     );
 
@@ -258,6 +259,7 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
     let devctl_port = reserve_tcp_addr().port();
 
     let trust_dir = std::env::temp_dir().join(format!("vd-wait-{}", std::process::id()));
+    let work_dir = vd_bins::fresh_work_dir("vd-wait");
     let trust = vd_io_prod::trust::ClusterTrust::generate("vd-wait").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
     // D-6: the orchestrator's durable Store (temp scratch ⇒ VD_STORE_EPHEMERAL_OK via orchestrator_env).
@@ -300,7 +302,7 @@ fn wait_until_fires_times_out_bounded_and_close_terminates_the_process() {
         "vd-shard",
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
-            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
+            shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single, &work_dir),
         ),
     );
     let _nodes = nodes; // RAII: reaps the cluster on test end or panic

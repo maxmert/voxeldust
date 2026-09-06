@@ -141,7 +141,15 @@ impl ProcLaunchBackend {
     /// which hid the narrowing behind a louder refusal.
     fn child_env(&self, spec: &LaunchSpec) -> Vec<(&'static str, String)> {
         let realm = spec.coord.lowered();
-        vec![
+        // The child's outbox lives beside its log in the realm workdir; under a dev slot that is
+        // `$TMPDIR`, which the outbox guard refuses unless the ORCHESTRATOR itself runs on the dev
+        // store escape — the one fact that says "this cluster is a throwaway".
+        let dev_escape = self
+            .tuning
+            .anchors
+            .iter()
+            .any(|(k, v)| (*k == "VD_STORE_EPHEMERAL_OK") & (v == "1"));
+        let mut env = vec![
             ("VD_NODE_ID", spec.node.0.to_string()),
             ("VD_BIND", spec.addr.to_string()),
             ("VD_PROBE_ADDR", spec.probe.to_string()),
@@ -152,7 +160,18 @@ impl ProcLaunchBackend {
             // RLM 5d: the ancestor-closure peer book (∪ anchors) the kernel computed — the child dials its
             // parent chain up to root without DNS. `book` is the ONE VD_PEERS formatter (DRY, reused).
             ("VD_PEERS", crate::book(&spec.peers)),
-        ]
+            // THE DURABLE OUTBOX (slice 4): one file per spawned shard, beside its log in the realm
+            // workdir — a planet's shard that dies between a despawn and its ack replays it at boot.
+            // The guard's facts (durable root / dev escape) ride the spawn anchors.
+            (
+                "VD_OUTBOX_PATH",
+                crate::node_outbox_path(&self.tuning.workdir, spec.node),
+            ),
+        ];
+        if dev_escape {
+            env.push(("VD_OUTBOX_EPHEMERAL_OK", "1".to_owned()));
+        }
+        env
     }
 }
 

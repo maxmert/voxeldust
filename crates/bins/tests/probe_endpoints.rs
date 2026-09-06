@@ -30,6 +30,11 @@ fn write_trust(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+/// The slot work dir for one case — the shard's durable outbox file lives in it.
+fn work_dir(tag: &str) -> std::path::PathBuf {
+    vd_bins::fresh_work_dir(&format!("vd-probe-{tag}"))
+}
+
 fn orch_store(tag: &str) -> String {
     let p = std::env::temp_dir().join(format!("vd-probe-{tag}-{}-orch.redb", std::process::id()));
     let _ = std::fs::remove_file(&p);
@@ -100,7 +105,12 @@ fn cluster_converges_to_ready_and_all_endpoints_serve() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
             &common,
-            &shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single),
+            &shard_env(
+                &addrs,
+                &DEV,
+                vd_bins::ClusterShape::Single,
+                &work_dir("ready"),
+            ),
         )
         .expect("spawn shard"),
     );
@@ -259,7 +269,12 @@ fn a_partitioned_shard_goes_not_ready_but_stays_live() {
     let store = orch_store("part");
     let common = common_env(&trust.display().to_string(), &DEV);
 
-    let mut shard_e = shard_env(&addrs, &DEV, vd_bins::ClusterShape::Single);
+    let mut shard_e = shard_env(
+        &addrs,
+        &DEV,
+        vd_bins::ClusterShape::Single,
+        &work_dir("part"),
+    );
     // A small active self-fence: grace 20 ticks (~0.4 s @50Hz), recheck 8 (grace >= 2*recheck). RealmConfirmedAt
     // re-arms every recheck round-trip while the orchestrator is alive; freezes when it dies.
     shard_e.push(("VD_SELF_FENCE_GRACE", "20".to_owned()));

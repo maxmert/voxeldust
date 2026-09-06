@@ -66,6 +66,7 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
     let shard = reserve_udp_addr();
     let admin1 = reserve_tcp_addr();
     let trust_dir = std::env::temp_dir().join(format!("vd-sigterm-{}", std::process::id()));
+    let work_dir = vd_bins::fresh_work_dir("vd-sigterm");
     let trust = ClusterTrust::generate("vd-sigterm").expect("trust");
     trust.write_der_dir(&trust_dir).expect("trust dir");
     // The DURABLE store survives the SIGTERM drain + restart (NOT removed between boots — it is the subject).
@@ -96,7 +97,7 @@ fn sigterm_drains_the_orchestrator_cleanly_and_the_store_survives() {
         spawn_node(
             env!("CARGO_BIN_EXE_vd-shard"),
             &common,
-            &shard_env(&addrs1, &DEV, vd_bins::ClusterShape::Single),
+            &shard_env(&addrs1, &DEV, vd_bins::ClusterShape::Single, &work_dir),
         )
         .expect("spawn shard"),
     );

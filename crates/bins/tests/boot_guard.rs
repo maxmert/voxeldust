@@ -168,7 +168,9 @@ fn shard_boot_env(
     addrs: &ClusterAddrs,
     extra: &[(&'static str, String)],
 ) -> Vec<(&'static str, String)> {
-    let mut env = vd_bins::shard_env(addrs, &DEV, vd_bins::ClusterShape::Single);
+    // Each lineage case gets its own work dir, so one refused shard's outbox never meets the next.
+    let work_dir = vd_bins::fresh_work_dir("vd-bootguard");
+    let mut env = vd_bins::shard_env(addrs, &DEV, vd_bins::ClusterShape::Single, &work_dir);
     env.extend(extra.iter().cloned());
     env
 }
