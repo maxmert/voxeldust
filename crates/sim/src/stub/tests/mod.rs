@@ -332,6 +332,18 @@ impl Rig {
     }
 }
 
+/// THE SHARD-KIND PAIR every "feature anywhere" fixture runs on (HR4 G-IDENTICAL, slice 3,
+/// 2026-09-06): a SYSTEM shard and a PLANET shard under their REAL capability profiles. A fixture
+/// that varied only the realm id proved one shard kind twice; the rule asks for two.
+fn system_kind() -> NodeKind {
+    NodeKind::Shard(crate::capability::profiles::system().expect("system profile"))
+}
+
+/// See [`system_kind`].
+fn planet_kind() -> NodeKind {
+    NodeKind::Shard(crate::capability::profiles::planet().expect("planet profile"))
+}
+
 fn wire_msg<T: serde::Serialize>(from: NodeId, class: MsgClass, msg: &T) -> Inbound {
     Inbound::Wire {
         from,
@@ -1480,9 +1492,10 @@ fn child_region_aabb() -> RealmRegion {
 /// DISTANCE to the child (the anti-vacuity guarantee — the region actually GATED the re-home, it was
 /// not a no-op that fired on an already-inside dot) + the child shape.
 fn drive_inward_crossing_feature(
+    kind: NodeKind,
     make_child: impl Fn() -> RealmRegion,
 ) -> (Vec<CrossingRequest>, f64, f64, Boundary) {
-    let mut rig = Rig::new();
+    let mut rig = Rig::with_config_and_kind(config(), kind);
     rig.grant_realm();
     let child = make_child();
     let to_realm = child.realm; // OTHER_REALM
@@ -1800,9 +1813,11 @@ fn render_shape(realm: RealmId) -> RealmShape {
 
 // ---- Slice 4 — the SHAPE lane descends the chain, one subtraction per level ------------------
 
-/// Drive ONE AoI tick for a shard hosting `own_realm` with a live `child` region, an in-range occupant,
-/// and a granted lease — returning every demand. The HR4 fixture runs this on two realm kinds.
+/// Drive ONE AoI tick for a shard of `kind` hosting `own_realm` with a live `child` region, an
+/// in-range occupant, and a granted lease — returning every demand. The HR4 fixture runs this on two
+/// SHARD KINDS (the profile, not only the realm id — slice 3, 2026-09-06).
 fn drive_aoi_spinup(
+    kind: NodeKind,
     own_realm: RealmId,
     own_frame: FrameRef,
     child: RealmRegion,
@@ -1814,7 +1829,7 @@ fn drive_aoi_spinup(
         own_coord: StubConfig::root_coord(own_realm),
         ..config()
     };
-    let mut rig = Rig::with_config(cfg);
+    let mut rig = Rig::with_config_and_kind(cfg, kind);
     grant_realm_for(&mut rig, own_realm);
     let root = region(ROOT_REALM, None, DVec3::ZERO, 1.0e9);
     let own = region_framed(

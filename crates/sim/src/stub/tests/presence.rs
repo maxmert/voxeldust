@@ -161,15 +161,16 @@ fn presence_new_rejects_a_zero_interval() {
 
 #[test]
 fn greeting_is_g_identical_across_shard_kinds() {
-    // HR4: the SAME greeting fixture on a System-realm shard and a Planet-realm shard emits the
-    // IDENTICAL ShardPresence set — the greeting is shard-kind-blind (reachability, not gameplay).
-    let mut system = Rig::with_config(config());
+    // HR4: the SAME greeting fixture on a SYSTEM shard and a PLANET shard — each under its REAL
+    // capability profile (slice 3, 2026-09-06; it used to vary the realm id only) — emits the
+    // IDENTICAL ShardPresence set: the greeting is shard-kind-blind (reachability, not gameplay).
+    let mut system = Rig::with_config_and_kind(config(), system_kind());
     let mut planet = {
         let mut cfg = config();
         cfg.realm = RealmId::Planet(7);
         cfg.held_realms = StubConfig::single_realm(RealmId::Planet(7));
         cfg.own_coord = StubConfig::root_coord(RealmId::Planet(7));
-        Rig::with_config(cfg)
+        Rig::with_config_and_kind(cfg, planet_kind())
     };
     system
         .world

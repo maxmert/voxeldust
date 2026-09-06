@@ -1763,9 +1763,12 @@ fn evaluate_realm_aoi_per_observer_hysteresis_is_stricter_than_the_old_global_mi
 fn assert_realm_aoi_feature_anywhere() {
     // HR4 G-IDENTICAL: the IDENTICAL AoI feature (an occupant reaching a child ⇒ exactly ONE SpinUp
     // keyed on the child's coord) fires byte-identically on a SYSTEM shard (child = Planet) AND a
-    // PLANET shard (child = Area). The loop is kind-BLIND — `own_coord.child(level_of(child))`, no
-    // match-on-realm-kind — so the two runs differ ONLY in the child realm named.
+    // PLANET shard (child = Area), each under its REAL capability profile (slice 3, 2026-09-06 —
+    // it used to vary the realm id only, one shard kind twice). The loop is kind-BLIND —
+    // `own_coord.child(level_of(child))`, no match-on-realm-kind — so the two runs differ ONLY in
+    // the profile and the child realm named.
     let a = drive_aoi_spinup(
+        system_kind(),
         OWN_REALM,
         FrameRef::SystemSpace { system_seed: 7 },
         aoi_child_framed(
@@ -1776,6 +1779,7 @@ fn assert_realm_aoi_feature_anywhere() {
         ),
     );
     let b = drive_aoi_spinup(
+        planet_kind(),
         RealmId::Planet(42),
         FrameRef::PlanetCentered { planet_seed: 42 },
         aoi_child_framed(

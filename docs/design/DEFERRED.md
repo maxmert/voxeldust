@@ -297,6 +297,18 @@ Status legend: 🟥 not started · 🟧 interim shipped (proper owed) · 🟩 pr
   this honest test-credit). This ledger sync closes their ledger-honesty findings.
 
 ### D-38 🟩 HR4's literal G-IDENTICAL gate — the first `assert_feature_anywhere` LANDED (Spherical Shell + Cartesian Aabb crossing); the `reanchor()`-forcing variant re-owed at P5
+- **✅ SLICE 3 (2026-09-06, foundation): every "feature anywhere" fixture now varies the SHARD KIND.** Read
+  from the code: seven capability profiles exist as data (galaxy, system, planet, ship, asteroid, station,
+  stub) and only three production reads consult one (`integrates_children`, `self_driven` ×2); the swept
+  crossing (stub vs planet) and the window emission (system vs planet) already ran on two kinds, but the
+  greeting, the realm AoI and the containment `assert_feature_anywhere` varied the REALM ID or the REGION
+  SHAPE only — one shard kind, proved twice. Now: ONE pair for the sim rigs (`system_kind()`/`planet_kind()`
+  in `stub/tests/mod.rs`, the real profiles), the greeting and the realm AoI take it, and the containment
+  fixture runs its Shell leg on the PLANET profile and its Aabb leg on the STATION profile (Spherical against
+  Cartesian, the pair that fixture is about). No capability and no profile was added; no feature changed.
+  ★ THE FRAME-SPACE SEAM (`FrameSpace`/`SphericalSpace`/`CartesianSpace`, `reanchor()`) stays owed and is
+  TERRAIN'S FIRST SLICE by the owner's word (2026-09-05, "yes to all"): it IS voxel geometry, so it lands
+  with the first voxel, not before it.
 - **LANDED (the foundation):** `crates/sim/src/capability.rs` has the validated `ShardProfile` capability DAG (private
   fields, `ShardProfile::build()` the only ctor), the 5 canonical kinds as DATA, the coherence test
   `canonical_profiles_are_coherent`, and the negative gate (incoherent profile fails loud, `capability.rs:227`). This is

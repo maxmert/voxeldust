@@ -1086,7 +1086,7 @@ fn assert_feature_anywhere() {
         "the Shell run is tied to the Spherical profile",
     );
     let (shell_reqs, shell_start_sd, shell_end_sd, shell_shape) =
-        drive_inward_crossing_feature(child_region_shell);
+        drive_inward_crossing_feature(NodeKind::Shard(planet), child_region_shell);
     // Spherical ⇔ Shell: the run's region IS a Shell (compared by equality, not `matches!`, so there
     // is no uncoverable false arm — HR5(d)). `child_region` uses r 1000.
     assert_eq!(shell_shape, Boundary::Shell { r: 1000.0 });
@@ -1099,7 +1099,7 @@ fn assert_feature_anywhere() {
         "the Aabb run is tied to the Cartesian profile",
     );
     let (aabb_reqs, aabb_start_sd, aabb_end_sd, aabb_shape) =
-        drive_inward_crossing_feature(child_region_aabb);
+        drive_inward_crossing_feature(NodeKind::Shard(station), child_region_aabb);
     // Cartesian ⇔ Aabb: the run's region IS an Aabb (equality, no `matches!` false arm — HR5(d)).
     assert_eq!(
         aabb_shape,
