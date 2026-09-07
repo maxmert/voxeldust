@@ -3,7 +3,7 @@
 Multiplayer voxel planet MMO — "Star Citizen meets Minecraft". Spherical voxel planets,
 player-built ships you walk inside while flying, Newtonian physics, distributed shard
 architecture. **This worktree is the approved total-greenfield rebuild** (June 2026);
-the old code lives on `main`/`ecs-system` as reference/spec ONLY.
+since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at Step 25); the old code lives on `ecs-system` as reference/spec ONLY.
 
 ## THE binding specs — read before designing anything
 
