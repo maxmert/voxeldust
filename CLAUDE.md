@@ -14,6 +14,22 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
 - `docs/design/owner_decisions_*.md` — ★ THE BINDING RULINGS, and **the NEWEST FILE WINS**. Read the
   newest one BEFORE relaying any plan or design content: these are later than every design doc, and a plan
   agreeing with itself proves nothing. Newest first:
+  - `owner_decisions_2026-09-07_voxels.md` — ★ THE VOXEL FOUNDATION. SL10 THE SEED-SHAPED WORLD: the
+    client MAY derive the world's STATIC SHAPE from the seed (a function of seed and address, never of
+    time or state) with ONE generator crate compiled into both hosts (a port is forbidden), no-drift as a
+    byte-for-byte MEASURED gate on every target, collision on the same shape, everything the seed does not
+    decide as a one-hop DIFF from the owning realm. Supersedes the 2026-08-27 S6 "no client-side
+    derivation" for the static shape ONLY; the star field stays shipped once. Plus the owner's nine
+    requirements for the voxel foundation (smooth terrain on voxels, trees as one object, ~20 square
+    shapes, sub-metre blocks inside the 1 m cell, no-volume attachments, params + client style, themes,
+    engine-agnostic render seam, seamless). ★ V4 = THE OWNER'S REVIEW of the proposal
+    (`docs/investigation/2026-09-07/00_proposed_voxel_foundation.md`, NOT binding): trees, grass and
+    decoration are ART ASSETS blended dynamically, never drawn primitives (modular record + server
+    skeleton kept); the removal kind is `Empty`, `Air` is the atmosphere; cross-realm edits POSTPONED;
+    a hull or station MAY hold terrain; a future O'Neill-cylinder realm means gravity is a per-realm
+    FUNCTION; common ore NOT public by default; the record, the pyramid bits and EVERY SL6 row are still
+    OPEN, and no slice starts before its own detailed discussion. Bevy continues; the client stays
+    replaceable (fully server-authoritative), and no other engine is named in any plan.
   - `owner_decisions_2026-09-05_suit.md` — ★ THE SUIT: a character WEARS its way to move in space; there
     are different suits; WITHOUT A SUIT a character cannot move in space; a suit is SIMILAR TO THE HULL —
     it states its rating (acceleration, cruise) as facts about what it IS, per entity, never a constant
@@ -214,6 +230,16 @@ Each of these was stated by the owner after a live defect. They are not preferen
     the number of children is a defect, and it must be measured on a realm with many, not argued.
     (This law does NOT relax SL7: the parent still decides area of interest for its direct children
     — it must simply do so without touching all of them.)
+
+15. **SL10 — THE SEED-SHAPED WORLD: ONE GENERATOR, TWO HOSTS, NO DRIFT.** Owner-stated 2026-09-07
+    (`owner_decisions_2026-09-07_voxels.md` V1). The client MAY derive the world's STATIC SHAPE from
+    the seed: what `(seed, address)` alone decides, never a function of time or live state. ONE Rust
+    generator crate is compiled into the server and into every client; a port is FORBIDDEN. No drift is
+    a MEASUREMENT: a gate compares server-built and client-built chunks byte for byte on every shipped
+    target. The server computes collision on that same shape. Everything the seed does not decide
+    (edits, placed blocks, attachments, growth, damage, live-state deposits) crosses as a one-hop DIFF
+    from the owning realm. This does NOT relax "the client only renders": no pose, no velocity, no
+    entity state is ever derived on the client.
 
     *Note: this file has no SL8. The seamless law (SL8) was written in the `new-system` worktree and
     is not committed there yet; that number is reserved for it so the two trees do not disagree.*

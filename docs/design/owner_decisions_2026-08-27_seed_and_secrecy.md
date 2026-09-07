@@ -71,6 +71,10 @@ terrain work it would be a retrofit.
 
 ## S6. ⚠ WHAT THIS DOES **NOT** DECIDE — the client-side derivation question is OPEN
 
+> **SUPERSEDED 2026-09-07 for the world's STATIC SHAPE ONLY** by `owner_decisions_2026-09-07_voxels.md`
+> V1 (SL10): one generator crate on both hosts, no-drift measured, collision on the same shape. The star
+> field ruling below (shipped once) stands.
+
 S3 says the geometry half is safe *in principle* to compute client-side. **It does NOT authorise the
 client to compute it**, because that collides with a standing law the owner stated emphatically:
 
