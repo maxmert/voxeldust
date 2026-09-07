@@ -140,6 +140,9 @@ pub fn drive_sagas_core(
     mut dir: ResMut<DirectoryRes>,
     mut runtime: ResMut<SagaRuntimeRes>,
     mut outbox: ResMut<OutboundBox>,
+    // The launcher's ledger (an orchestrator holds one; a node that launches nothing has none):
+    // the reaper's third leg reads it beside the latch (2026-09-06).
+    rlm: Option<Res<crate::rlm_runtime::RlmReconcilerRes>>,
 ) {
     let now = clock.universe_tick;
     let epoch = clock.epoch;
@@ -309,7 +312,8 @@ pub fn drive_sagas_core(
     // reconcile + the single commit (the revoke is durable this tick as a DELETE; a reaped record never
     // resurrects on a kill-9 — the COMP-2 guarantee). It mutates the directory in RAM; the reconcile then
     // drains the delta set the mutation recorded.
-    reap_lapsed_leases(&mut runtime, &mut dir.0, now);
+    let retired = |node: vd_core::NodeId| rlm.as_ref().is_some_and(|r| r.retired(node));
+    reap_lapsed_leases(&mut runtime, &mut dir.0, now, &retired);
     // D-37 Slice 3: ARM the standing re-homes the reaper just enqueued — SAME tick, still inside the
     // barrier, so the `lock_transfer` + the armed parked saga are captured by the reconcile + commit below
     // (durable this tick; on a kill-9 mid-window the RAM queue is lost but the still-dead UNLOCKED record

@@ -33,7 +33,9 @@ struct StarSkyUniform {
     // bind time. Nothing here is typed as a literal: the law lives in `vd_client::realm_scene`, is
     // unit-tested there, and this stage is its transliteration — the same discipline
     // `one_pixel_world_m` already follows.
-    flux_gain: f32,
+    // √(flux gain): applied BEFORE the square so `(base·√gain/d)²` never underflows f32 (see the
+    // Rust side). The law is the same `L/d²` up to the exposure; only the arithmetic order moved.
+    flux_gain_sqrt: f32,
     response_exponent: f32,
     halo_sigma_px: f32,
     halo_weight: f32,
@@ -122,8 +124,11 @@ fn vertex(in: VertexIn) -> VertexOut {
     // size. MEASURED: at a typical neighbour distance that floor was worth 4.1e14 m against a
     // sun-like star's 0.5 m — it won by 8e14, for every star, always. Luminosity was drawn from the
     // seed, carried across the wire, and then discarded at the last step.
-    let s = in.base_radius_m / max(dist_m, 1.0);
-    let flux = s * s * star.flux_gain;
+    // ★ SCALED BEFORE THE SQUARE (2026-09-07): `base/d` is ~1e-19 for a faint far star and its
+    // square is below f32's smallest normal, which the GPU flushes to zero — the star vanished.
+    // With √gain folded in first the term is ~1e-2..1e3 and the square is exact.
+    let s = in.base_radius_m * star.flux_gain_sqrt / max(dist_m, 1.0);
+    let flux = s * s;
     // ★ COMPRESSED, BECAUSE SIGHT IS. Linear flux made near stars into saturated white balls 19 px
     // across — a galaxy's flux range is a million to one and a screen's is 255. Eyes, film and star
     // charts are all logarithmic; stellar MAGNITUDE is exactly this compression, and a small power

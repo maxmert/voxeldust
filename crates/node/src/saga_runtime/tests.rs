@@ -1657,6 +1657,44 @@ fn rec(node: NodeId, lease_expires: u64) -> vd_wire::seams::directory::OwnerReco
 }
 
 #[test]
+fn should_reap_takes_the_launchers_word_when_the_latch_never_fired() {
+    // A shard that died with its pod: nobody sends to it, the latch stays silent, its lease lapses.
+    let liveness = LivenessTracker::new(LivenessTuning::default());
+    let dead = NodeId(1002);
+    let now = UniverseTick(200);
+    let quiesced = UniverseTick(50);
+    let max = 10u64;
+    let retired = |n: NodeId| n == dead;
+    // Past the deadline, retired by its launcher ⇒ reaped, though never latched.
+    assert!(should_reap_with(
+        &rec(dead, 90),
+        now,
+        &liveness,
+        quiesced,
+        max,
+        &retired
+    ));
+    // The timing legs still stand: inside the deadline, nothing.
+    assert!(!should_reap_with(
+        &rec(dead, 195),
+        now,
+        &liveness,
+        quiesced,
+        max,
+        &retired
+    ));
+    // A holder the launcher does not know: the latch alone judges it, and it is silent.
+    assert!(!should_reap_with(
+        &rec(NodeId(3), 90),
+        now,
+        &liveness,
+        quiesced,
+        max,
+        &retired
+    ));
+}
+
+#[test]
 fn should_reap_requires_quiesced_past_deadline_and_latched_dead() {
     // The Strong-AND CAP gate: reap iff quiesce-elapsed AND now PAST `lease_expires + max` AND
     // PERSISTENTLY (latched) confirmed dead. Covers all corners incl the `<=` deadline boundary.
@@ -1667,26 +1705,49 @@ fn should_reap_requires_quiesced_past_deadline_and_latched_dead() {
     let quiesced = UniverseTick(50); // window elapsed (now >= quiesced)
     let max = 10u64; // reassign horizon = lease_expires + 10
     // All three hold → reap (now 200 > lease_expires 90 + max 10 = 100; latched dead; quiesce elapsed).
-    assert!(should_reap(&rec(dead, 90), now, &liveness, quiesced, max));
+    assert!(should_reap_with(
+        &rec(dead, 90),
+        now,
+        &liveness,
+        quiesced,
+        max,
+        &|_n| false
+    ));
     // (1) NOT past the quiesce freeze → no reap.
-    assert!(!should_reap(
+    assert!(!should_reap_with(
         &rec(dead, 90),
         now,
         &liveness,
         UniverseTick(250),
-        max
+        max,
+        &|_n| false
     ));
     // (2a) NOT past the reassign deadline (now <= lease_expires + max) → no reap.
-    assert!(!should_reap(&rec(dead, 200), now, &liveness, quiesced, max));
+    assert!(!should_reap_with(
+        &rec(dead, 200),
+        now,
+        &liveness,
+        quiesced,
+        max,
+        &|_n| false
+    ));
     // (2b) EXACTLY at the deadline (now == lease_expires + max = 200) → the `<=` still blocks (boundary).
-    assert!(!should_reap(&rec(dead, 190), now, &liveness, quiesced, max));
+    assert!(!should_reap_with(
+        &rec(dead, 190),
+        now,
+        &liveness,
+        quiesced,
+        max,
+        &|_n| false
+    ));
     // (3) NOT latched dead (a node with no unreachable evidence) → no reap.
-    assert!(!should_reap(
+    assert!(!should_reap_with(
         &rec(NodeId(99), 90),
         now,
         &liveness,
         quiesced,
-        max
+        max,
+        &|_n| false
     ));
 }
 
@@ -1750,12 +1811,19 @@ fn should_reap_reaps_at_ttl_plus_max_after_the_pulse_expires_never_before() {
     let quiesced = UniverseTick(0);
     // NOT reaped at the OLD ttl-ish point (100) nor anywhere up to and including the horizon (350).
     assert!(
-        !should_reap(&rec, UniverseTick(100), &lv, quiesced, max),
+        !should_reap_with(&rec, UniverseTick(100), &lv, quiesced, max, &|_n| false),
         "old lapse@ttl must NOT reap"
     );
-    assert!(!should_reap(&rec, UniverseTick(200), &lv, quiesced, max));
+    assert!(!should_reap_with(
+        &rec,
+        UniverseTick(200),
+        &lv,
+        quiesced,
+        max,
+        &|_n| false
+    ));
     assert!(
-        !should_reap(&rec, UniverseTick(350), &lv, quiesced, max),
+        !should_reap_with(&rec, UniverseTick(350), &lv, quiesced, max, &|_n| false),
         "not reaped AT the horizon (<=)"
     );
     // At horizon+1 the PULSE is long dead (351 - 5 = 346 ≫ window 10) ...
@@ -1764,7 +1832,14 @@ fn should_reap_reaps_at_ttl_plus_max_after_the_pulse_expires_never_before() {
         "the pulse has expired"
     );
     // ... but the LATCH persists ⇒ should_reap reaps (failover completes, no orphan).
-    assert!(should_reap(&rec, UniverseTick(351), &lv, quiesced, max));
+    assert!(should_reap_with(
+        &rec,
+        UniverseTick(351),
+        &lv,
+        quiesced,
+        max,
+        &|_n| false
+    ));
 }
 
 #[test]
@@ -1811,7 +1886,7 @@ fn reaper_revokes_a_lapsed_confirmed_dead_session_only() {
     assert!(dir.lock_transfer(DirectoryKey::Session(SessionId(3)), TransferId(7)));
     let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // n = 1
     runtime.liveness.record_unreachable(dead, UniverseTick(50)); // only `dead` is confirmed
-    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
+    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100), &|_n| false);
     assert!(
         dir.head(DirectoryKey::Session(SessionId(1))).is_none(),
         "the lapsed, confirmed-dead session is reaped"
@@ -1846,7 +1921,7 @@ fn reaper_is_inert_at_zero_interval_and_respects_its_cadence() {
     );
     let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
     runtime.liveness.record_unreachable(dead, UniverseTick(50));
-    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(10_000));
+    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(10_000), &|_n| false);
     assert!(
         dir.head(DirectoryKey::Session(SessionId(1))).is_some(),
         "an inert reaper (interval 0) never reaps"
@@ -1867,7 +1942,7 @@ fn reaper_is_inert_at_zero_interval_and_respects_its_cadence() {
     let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
     runtime.liveness.record_unreachable(dead, UniverseTick(50));
     runtime.last_reap_tick = UniverseTick(100); // just swept at 100
-    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(103)); // 103 - 100 = 3 < 8 → not due
+    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(103), &|_n| false); // 103 - 100 = 3 < 8 → not due
     assert!(
         dir.head(DirectoryKey::Session(SessionId(1))).is_some(),
         "a sweep below the reaper interval since the last is skipped"
@@ -1904,7 +1979,7 @@ fn reap_in_freezing_orphan_enqueues_a_pending_rehome_and_arms_a_parked_saga() {
     runtime.liveness.record_unreachable(dead, UniverseTick(50)); // dead CONFIRMED (n = 1)
 
     // REAP: the orphan is ENQUEUED (not revoked); the directory record is untouched.
-    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
+    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100), &|_n| false);
     assert_eq!(
         runtime.pending_rehome,
         vec![PendingReHome {
@@ -1985,7 +2060,7 @@ fn reaper_leaves_a_locked_dead_entity_for_its_owning_saga() {
     );
     let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default());
     runtime.liveness.record_unreachable(dead, UniverseTick(50));
-    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
+    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100), &|_n| false);
     assert!(
         runtime.pending_rehome.is_empty(),
         "a LOCKED dead Entity is left to its owning saga, never standing-re-homed"
@@ -2023,7 +2098,7 @@ fn reaper_leaves_a_dead_entity_a_live_post_commit_saga_still_owns() {
         UniverseTick(0),
     );
     runtime.liveness.record_unreachable(dead, UniverseTick(50));
-    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
+    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100), &|_n| false);
     assert!(
         runtime.pending_rehome.is_empty(),
         "an unlocked dead-owner Entity a LIVE saga still owns is NOT double-armed (cross-checks sagas)"
@@ -2046,7 +2121,7 @@ fn process_rehome_parks_when_no_live_target() {
     let _ = dir.grant(entity, AuthorityRef::Shard(dead), Fence(3), UniverseTick(0));
     let mut runtime = SagaRuntimeRes::with_tuning(SagaTuning::default()); // EMPTY roster (default)
     runtime.liveness.record_unreachable(dead, UniverseTick(50));
-    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100));
+    reap_lapsed_leases(&mut runtime, &mut dir, UniverseTick(100), &|_n| false);
     assert_eq!(
         runtime.pending_rehome.len(),
         1,

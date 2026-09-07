@@ -66,6 +66,11 @@ pub struct LaunchLedger {
     /// `path → { minted node → mint tick }` — the SET of live launches per coord (never one overwriting
     /// ticket, so re-issuing a spawn cannot lose the prior node).
     pub minted: BTreeMap<RealmPath, BTreeMap<NodeId, UniverseTick>>,
+    /// The nodes a crash-recovery seed put here (2026-09-06): their mint ticks are from BEFORE the
+    /// restart, so the first head seen after it would read as a fork of thousands of ticks (measured:
+    /// 3,533 against a real 130-182) and poison the launch budget tuned from the gauge. They drain
+    /// with their entries; a fresh mint is never in here.
+    pub seeded: std::collections::BTreeSet<NodeId>,
     /// `path → consecutive launch failures` — the exponential-backoff streak (slice 3d).
     pub fail_streak: BTreeMap<RealmPath, u32>,
 }
@@ -171,10 +176,15 @@ impl RlmReconcilerRes {
         spawner: Box<dyn RealmSpawner + Send + Sync>,
         launch_seed: LaunchSeed,
     ) -> RlmReconcilerRes {
+        let seeded = launch_seed
+            .values()
+            .flat_map(|nodes| nodes.keys().copied())
+            .collect();
         RlmReconcilerRes {
             ledger: DemandLedger::default(),
             launches: LaunchLedger {
                 minted: launch_seed,
+                seeded,
                 fail_streak: BTreeMap::new(),
             },
             tuning,
@@ -305,6 +315,13 @@ impl RlmReconcilerRes {
     #[must_use]
     pub fn live_nodes(&self) -> std::collections::BTreeSet<NodeId> {
         self.spawner.live_nodes()
+    }
+
+    /// The launcher's own truth about a node it minted: retired means gone for good (see
+    /// `RealmSpawner::retired`). The lease reaper reads this beside the liveness latch.
+    #[must_use]
+    pub fn retired(&self, node: NodeId) -> bool {
+        self.spawner.retired(node)
     }
 
     /// Set the crash-recovery quiesce watermark (slice 3e boot path): teardown is blocked until `now`
@@ -514,8 +531,8 @@ impl RlmReconcilerRes {
         // one struct and this loop must now touch both.
         let LaunchLedger {
             minted,
+            seeded,
             fail_streak,
-            ..
         } = &mut self.launches;
         for (path, nodes) in &mut *minted {
             let rid = path
@@ -530,8 +547,11 @@ impl RlmReconcilerRes {
                 // RLM 5f-4: the head appeared — the launch→head-up latency (now - mint tick) is the MEASURED
                 // pod boot. Fold the max over the draining minted nodes into the monotone gauge so 5f-4j can
                 // tune the launch-TTL from real cluster boots. (These nodes drain in the retain below.)
-                for minted_at in nodes.values() {
-                    observed_boot = observed_boot.max(now.0.saturating_sub(minted_at.0));
+                for (node, minted_at) in nodes.iter() {
+                    // A re-seeded launch's mint tick is pre-crash: not a boot this process saw.
+                    if !seeded.contains(node) {
+                        observed_boot = observed_boot.max(now.0.saturating_sub(minted_at.0));
+                    }
                 }
             }
             nodes.retain(|node, minted_at| {
@@ -550,6 +570,7 @@ impl RlmReconcilerRes {
         }
         self.boot_ticks_observed_max = observed_boot;
         minted.retain(|_, nodes| !nodes.is_empty());
+        seeded.retain(|node| minted.values().any(|nodes| nodes.contains_key(node)));
     }
 
     /// Refresh the observability gauges (desired + running realm counts among tracked cells) using the
@@ -1584,6 +1605,10 @@ mod tests {
             .record_demand(&sys(7), DemandVerb::SpinUp, UniverseTick(100), Fence(1));
         rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(100), &BTreeSet::new());
         assert_eq!(rlm.retired_heads_reaped, 2);
+        // The reader the lease reaper uses: the launcher's word on a node it minted, and silence
+        // on an anchor it never did.
+        assert!(rlm.retired(home));
+        assert!(!rlm.retired(NodeId(2)));
         // The reaped realm's OLD pending launch went with its head; the entry now names only the
         // fresh shard this sweep spun up for the demand. The anchor's realm kept its entry.
         let home_minted = rlm.launches.minted.get(sys(7).path()).expect("re-spawned");
@@ -1613,6 +1638,36 @@ mod tests {
         // The demanded home is re-spawned FRESH (a new id, never the dead one).
         assert_eq!(rlm.spins_requested, 1);
         assert_eq!(sp.live_nodes(), BTreeSet::from([NodeId(1003)]));
+    }
+
+    #[test]
+    fn a_reseeded_launch_never_feeds_the_boot_gauge_but_a_fresh_one_does() {
+        // The restart shape: the seed carries a pre-crash mint tick (1); the head appears at 5,000.
+        let t = RlmTuning::cloud(20);
+        let sp = MemSpawner::new(MemHub::new(), NodeId(1000), 8);
+        let seeded = sp.spawn_realm(&sys(7), UniverseTick(1)).expect("seeded");
+        let mut seed = LaunchSeed::new();
+        seed.entry(sys(7).path().clone())
+            .or_default()
+            .insert(seeded, UniverseTick(1));
+        let mut rlm = RlmReconcilerRes::with_launch_seed(t, Box::new(sp.clone()), seed);
+        let mut d = dir();
+        grant(&mut d, RealmId::System(7), seeded.0, 3);
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(5_000), &BTreeSet::new());
+        assert_eq!(
+            rlm.boot_ticks_observed_max(),
+            0,
+            "a pre-crash mint is not a boot we saw"
+        );
+        assert!(rlm.launches.seeded.is_empty(), "drained with its entry");
+        // A fresh fork: minted at 5,000, its head up at 5,050 ⇒ the gauge reads fifty.
+        rlm.ledger
+            .record_demand(&sys(8), DemandVerb::SpinUp, UniverseTick(5_000), Fence(1));
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(5_000), &BTreeSet::new());
+        let fresh = *sp.live_nodes().iter().max().expect("a fresh shard");
+        grant(&mut d, RealmId::System(8), fresh.0, 4);
+        rlm.reconcile_and_drive(&mut d, &|_n| false, UniverseTick(5_050), &BTreeSet::new());
+        assert_eq!(rlm.boot_ticks_observed_max(), 50);
     }
 
     #[test]

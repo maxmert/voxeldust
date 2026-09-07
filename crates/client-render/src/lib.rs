@@ -168,6 +168,12 @@ pub struct RenderHandles {
     /// into the diagnosis surface. Zero while no cloud is drawn. The one instrument that can
     /// say "the sky is black" while the catalogue is held in full.
     pub stars_drawn: Arc<AtomicU64>,
+    /// The camera-mode instrument: the view code (`vd_devproto::CAMERA_MODE_*`) this renderer
+    /// holds, written at start and on every switch so the dev state can name what the player sees.
+    pub camera_mode: Arc<std::sync::atomic::AtomicU8>,
+    /// The star probe: the renderer writes its own projection of its brightest drawn stars here
+    /// every frame the cloud is placed (see `DevState::star_probe`).
+    pub star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
     /// Liveness flag the core thread flips false when its loop EXITS (gateway Close /
     /// panic). The window emits `AppExit` when it sees false — bidirectional shutdown.
     pub core_alive: Arc<AtomicBool>,
@@ -207,6 +213,8 @@ struct Net {
     input: SyncSender<InputAction>,
     dropped: Arc<AtomicU64>,
     stars_drawn: Arc<AtomicU64>,
+    camera_mode: Arc<std::sync::atomic::AtomicU8>,
+    star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
     core_alive: Arc<AtomicBool>,
     started_at: Instant,
 }
@@ -278,6 +286,14 @@ enum CameraMode {
 }
 
 impl CameraMode {
+    /// The instrument's code for this view (`vd_devproto::CAMERA_MODE_*`).
+    fn code(&self) -> u8 {
+        match self {
+            CameraMode::FirstPerson => vd_devproto::CAMERA_MODE_FIRST_PERSON,
+            CameraMode::ThirdPerson { .. } => vd_devproto::CAMERA_MODE_THIRD_PERSON,
+        }
+    }
+
     /// How far back and how far up this mode puts the eye. First person is `(0, 0)`, which returns
     /// EXACTLY the first-person eye — so the walking view and every gate on it stay untouched.
     fn chase(self) -> (f64, f64) {
@@ -304,6 +320,14 @@ mod camera_mode_tests {
         // The walking view and every pixel gate written against it must be untouched by the addition
         // of a second mode.
         assert_eq!(CameraMode::FirstPerson.chase(), (0.0, 0.0));
+        assert_eq!(
+            CameraMode::FirstPerson.code(),
+            vd_devproto::CAMERA_MODE_FIRST_PERSON
+        );
+        assert_eq!(
+            CameraMode::ThirdPerson { distance_m: 1.0 }.code(),
+            vd_devproto::CAMERA_MODE_THIRD_PERSON
+        );
     }
 
     #[test]
@@ -367,6 +391,9 @@ const DEFAULT_SKY_FAR_M: f32 = 1.0e9;
 #[derive(Component)]
 struct StarPointMarker;
 
+/// How many of the cloud's brightest stars the star probe reports (a diagnosis surface).
+const STAR_PROBE_COUNT: usize = 48;
+
 /// The custom vertex attributes the star sprite needs, beside `Mesh::ATTRIBUTE_POSITION`.
 ///
 /// The position holds the star's CENTRE, repeated for all four corners, so Bevy still computes a
@@ -401,7 +428,7 @@ struct StarSkyParams {
     sky_radius_m: f32,
     /// ★ THE POINT-SOURCE LAW'S NUMBERS, from Tier-A's `StarTuning` — never typed here. The law lives
     /// in `vd_client::realm_scene::star_draw`, where it is unit-tested; the shader transliterates it.
-    flux_gain: f32,
+    flux_gain_sqrt: f32,
     response_exponent: f32,
     halo_sigma_px: f32,
     halo_weight: f32,
@@ -462,6 +489,9 @@ impl Material for StarSkyMaterial {
 struct DrawnSky {
     /// `(generation, reference cell)` of the cloud on screen, or `None` while nothing is drawn.
     shown: Option<(u64, vd_core::glam::I64Vec3)>,
+    /// The star probe's subjects: the brightest stars of the cloud on screen — realm, position
+    /// relative to the reference (metres, the cloud's own local frame), amplitude at build.
+    probe: Vec<(String, DVec3, f64)>,
     /// THE one cloud entity, held so a new catalogue (or a rebase) can replace it.
     cloud: Option<Entity>,
     /// The material handle, held so the per-frame camera uniforms can be refreshed without touching
@@ -546,6 +576,10 @@ impl Plugin for StarSkyShaderPlugin {
 }
 
 pub fn run(handles: RenderHandles) {
+    // The instrument's first reading: a player starts in the chair (see `CameraMode`).
+    handles
+        .camera_mode
+        .store(CameraMode::FirstPerson.code(), Ordering::Relaxed);
     match handles.mode {
         RenderMode::Windowed => run_windowed(handles),
         RenderMode::Capture => run_capture(handles),
@@ -566,6 +600,8 @@ fn run_windowed(handles: RenderHandles) {
             input: handles.input,
             dropped: handles.dropped,
             stars_drawn: handles.stars_drawn,
+            camera_mode: handles.camera_mode,
+            star_probe: handles.star_probe,
             core_alive: handles.core_alive,
             started_at: handles.started_at,
         })
@@ -879,6 +915,7 @@ fn input_system(
             CameraMode::ThirdPerson { .. } => CameraMode::FirstPerson,
         };
         tracing::info!(mode = ?camera.mode, "view switched");
+        net.camera_mode.store(camera.mode.code(), Ordering::Relaxed);
     }
     // THROWAWAY: `X` swaps the throttle between its two ladders — normal for a star system, warp for
     // the run between stars (owner, 2026-09-02). The tier is kept; only what it means changes.
@@ -1049,6 +1086,7 @@ fn place_camera(
     mut camera: ResMut<CameraState>,
     view: Res<CaptureView>,
     mut eye: ResMut<RenderEye>,
+    drawn: Res<DrawnSky>,
     mut cam: Query<(&mut Transform, &Camera, &Projection), With<FollowCam>>,
 ) {
     let Some((mut transform, cam_props, projection)) = cam.iter_mut().next() else {
@@ -1125,6 +1163,33 @@ fn place_camera(
         own_pose.tier,
     ));
     *transform = camera_transform(direction, up);
+    // ★ THE STAR PROBE (2026-09-06): where THIS camera and THIS projection put the brightest stars
+    // of the cloud on screen, published for the dev state. The cloud's placement is the same
+    // `sky_cloud_transform` the sky system applies; the projection is Bevy's own for this camera.
+    if let Some((_, reference)) = drawn.shown
+        && let Some(anchor) = snap.sky_anchor_now(now_s)
+    {
+        let (translation, rotation) =
+            vd_client::render_snapshot::sky_cloud_transform(reference, &anchor, eye_pos);
+        let camera_global = bevy::transform::components::GlobalTransform::from(*transform);
+        let probe: Vec<vd_devproto::DevStarProbe> = drawn
+            .probe
+            .iter()
+            .filter_map(|(realm, local, amplitude)| {
+                let world = (rotation * *local + translation).as_vec3();
+                let on_screen = cam_props.world_to_viewport(&camera_global, world).ok()?;
+                Some(vd_devproto::DevStarProbe {
+                    realm: realm.clone(),
+                    x: f64::from(on_screen.x),
+                    y: f64::from(on_screen.y),
+                    amplitude: *amplitude,
+                })
+            })
+            .collect();
+        *net.star_probe
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = probe;
+    }
 }
 
 /// The camera's Bevy transform in the RENDER FRAME: at the origin, carrying the `f64`-built
@@ -1283,7 +1348,14 @@ fn sync_star_sky(
         sky_radius_m: (far_m * SKY_DEPTH_MARGIN) as f32,
         // THE LAW'S NUMBERS, read from Tier-A. `StarTuning::default()` is the starting point the
         // owner judges by looking; nothing here is a literal.
-        flux_gain: tuning.flux_gain as f32,
+        // ★ THE SQUARE ROOT, NOT THE GAIN (2026-09-07). The shader squares `base_radius / distance`
+        // — about 1e-19 for a faint far star — and that square (1e-38) falls below the smallest
+        // normal f32, which the GPU flushes to zero: flux 0, amplitude 0, star culled. MEASURED
+        // with exact positions: a third of the stars under amplitude 0.11 painted nothing, and 0.11
+        // is exactly where `(base/d)²` crosses the f32 floor. Scaled by √gain BEFORE the square,
+        // the term stays near 1 across the whole sky. The Tier-A law is unchanged; only its f32
+        // mirror is written in a form that survives f32.
+        flux_gain_sqrt: (tuning.flux_gain.sqrt()) as f32,
         response_exponent: tuning.response_exponent as f32,
         halo_sigma_px: tuning.halo_sigma_px as f32,
         halo_weight: tuning.halo_weight as f32,
@@ -1376,6 +1448,27 @@ fn sync_star_sky(
             );
             drawn.material = Some(material);
             drawn.shown = Some((sky.generation, reference));
+            // The probe's subjects: the brightest stars by the same law the shader mirrors, at the
+            // eye's distance from the reference (the eye is the cloud's centre up to the anchor's
+            // offset). Kept small — a diagnosis surface, not a second sky.
+            let star_tuning = vd_client::realm_scene::StarTuning::default();
+            let mut ranked: Vec<(String, DVec3, f64)> = sky
+                .rows
+                .iter()
+                .zip(points.iter())
+                .map(|(row, p)| {
+                    let look = vd_client::realm_scene::marker_look(row.class_code, row.luma_lsun);
+                    let draw = vd_client::realm_scene::star_draw(
+                        look.base_radius_m,
+                        p.pos_m.length(),
+                        &star_tuning,
+                    );
+                    (format!("{:?}", row.realm), p.pos_m, draw.amplitude)
+                })
+                .collect();
+            ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            ranked.truncate(STAR_PROBE_COUNT);
+            drawn.probe = ranked;
             net.stars_drawn
                 .store(points.len() as u64, Ordering::Relaxed);
             return;
@@ -1969,6 +2062,8 @@ fn run_capture(handles: RenderHandles) {
             input: handles.input,
             dropped: handles.dropped,
             stars_drawn: handles.stars_drawn,
+            camera_mode: handles.camera_mode,
+            star_probe: handles.star_probe,
             core_alive: handles.core_alive,
             started_at: handles.started_at,
         })

@@ -347,6 +347,26 @@ fn affirm_realm_head(
 /// no-op for any non-parent realm ⇒ purely additive to `affirm_realm_head` (byte-identical). NOTE: keys on the
 /// LOSSY `lowered()` `RealmId`, exactly like the directory itself does today — both must migrate to
 /// `path()`-keying together (DEFERRED); a boot `debug_assert` in `register_stub_shard` arms the alias case.
+/// ★ A PARENT THAT CHANGED TAKES ITS STAGED FRAMES WITH IT (2026-09-06). After a restart the
+/// directory names a parent shard that died with its pod; this realm stages its upward frames toward
+/// that node, and the node's book asks the orchestrator where it is, on a growing backoff, with no
+/// answer to give. When the parent's head names a NEW node, the frames toward the old one are for
+/// nobody: they are forgotten here, the same way the gateway forgets a vanished client's. Example:
+/// the star system re-spawned after a pod restart holds the dead galaxy as its parent until the new
+/// galaxy takes its lease; at that moment its stale placements toward the corpse are dropped. No new
+/// data crosses anywhere (SL6): the head reply the realm already polls is the whole signal.
+pub(crate) fn forget_old_parent(
+    before: Option<NodeId>,
+    now: Option<NodeId>,
+    outbox: &mut OutboundBox,
+) {
+    if let Some(old) = before
+        && before != now
+    {
+        outbox.forget_peer(old);
+    }
+}
+
 pub(crate) fn update_parent_node(
     realm: RealmId,
     record: Option<&vd_wire::seams::directory::OwnerRecord>,
@@ -819,7 +839,9 @@ pub(crate) fn on_directory_reply(
             // VU AoI S2a-2b — ALSO cache the node IFF this head is THIS shard's PARENT realm (the up-flow
             // target). Purely additive: `update_parent_node` no-ops for a non-parent realm, so the primary /
             // co-hosted authority machinery above is byte-identical.
+            let parent_before = parent_node.0;
             update_parent_node(realm, record.as_ref(), config, parent_node);
+            forget_old_parent(parent_before, parent_node.0, outbox);
             // Lane cure (findings 0/43, up half) — and IFF it is one of this shard's DIRECT CHILDREN,
             // cache its node as the up-lanes' admission authority (same reply arm, same cadence, HR3).
             update_child_node(realm, record.as_ref(), config, regions, child_nodes);
@@ -840,6 +862,7 @@ pub(crate) fn on_directory_reply(
             key: DirectoryKey::Ship(entity),
             record,
         } => {
+            let parent_before = parent_node.0;
             resolve_exterior_head(
                 entity,
                 record.as_ref(),
@@ -849,6 +872,7 @@ pub(crate) fn on_directory_reply(
                 parent_node,
                 exterior,
             );
+            forget_old_parent(parent_before, parent_node.0, outbox);
             // The ruler switch, slice 3 — my exterior's holder is known: a held lineage statement from
             // that node is applied, one from any other node discarded.
             crate::stub::lineage::apply_pending_lineage(

@@ -124,6 +124,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dropped = Arc::new(AtomicU64::new(0));
     // The stars on screen, written by the render thread (0 forever in a headless client).
     let stars_drawn = Arc::new(AtomicU64::new(0));
+    // The renderer's camera mode (first or third person), written by the render thread on every
+    // switch; `NONE` forever in a headless client. The camera-mode instrument (2026-09-06).
+    let camera_mode = Arc::new(std::sync::atomic::AtomicU8::new(
+        vd_devproto::CAMERA_MODE_NONE,
+    ));
+    // The renderer's own projection of its brightest stars (the star probe, 2026-09-06); empty
+    // forever in a headless client.
+    let star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
     let (command_tx, command_rx) = sync_channel::<InputAction>(COMMAND_MAILBOX_CAP);
     // The capture seam (Capture mode): the dev-control screenshot handler → the Bevy
     // render thread. Created in any dev-control+render build; only WIRED into the
@@ -212,6 +221,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step_seq,
             dropped,
             stars_drawn,
+            camera_mode,
+            star_probe,
             started_at,
             args.step_hz,
             vd_client_render::RenderMode::Windowed,
@@ -247,6 +258,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step_seq,
             dropped,
             stars_drawn,
+            camera_mode,
+            star_probe,
             started_at,
             args.step_hz,
             vd_client_render::RenderMode::Capture,
@@ -268,6 +281,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         step_seq,
         dropped,
         stars_drawn,
+        camera_mode,
+        star_probe,
         None, // no render sink
         None, // no external stop signal (exits on vdctl/gateway Close)
         started_at,
@@ -293,6 +308,8 @@ fn run_render(
     step_seq: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     stars_drawn: Arc<AtomicU64>,
+    camera_mode: Arc<std::sync::atomic::AtomicU8>,
+    star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
     started_at: Instant,
     step_hz: u32,
     mode: vd_client_render::RenderMode,
@@ -316,6 +333,8 @@ fn run_render(
     let worker_alive = core_alive.clone();
     let worker_dropped = dropped.clone();
     let worker_stars = stars_drawn.clone();
+    let worker_camera = camera_mode.clone();
+    let worker_probe = star_probe.clone();
     let core_thread = std::thread::spawn(move || {
         // Flip `core_alive` false on EXIT or PANIC so the window always learns.
         struct AliveGuard(Arc<AtomicBool>);
@@ -332,6 +351,8 @@ fn run_render(
             step_seq,
             worker_dropped,
             worker_stars,
+            worker_camera,
+            worker_probe,
             Some(render_sink),
             Some(worker_stop),
             started_at,
@@ -345,6 +366,8 @@ fn run_render(
         input: command_tx.clone(),
         dropped,
         stars_drawn,
+        camera_mode,
+        star_probe,
         core_alive,
         started_at,
         mode,
@@ -416,6 +439,8 @@ fn run_client_loop(
     step_seq: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     stars_drawn: Arc<AtomicU64>,
+    camera_mode: Arc<std::sync::atomic::AtomicU8>,
+    star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
     render_sink: Option<Arc<ArcSwap<RenderSnapshot>>>,
     stop: Option<Arc<AtomicBool>>,
     started_at: Instant,
@@ -448,16 +473,30 @@ fn run_client_loop(
         // every step. `published` is created in `main` regardless (one cheap alloc) so the
         // signature stays uniform; without a listener it simply never updates.
         #[cfg(feature = "dev-control")]
-        published.store(Arc::new(core.state().devstate(
-            now_s,
-            DevCounters {
-                dev_commands_applied: applied,
-                dev_commands_dropped: dropped.load(Ordering::Relaxed),
-                stars_drawn: stars_drawn.load(Ordering::Relaxed),
-            },
-        )));
+        published.store(Arc::new(
+            core.state().devstate(
+                now_s,
+                DevCounters {
+                    dev_commands_applied: applied,
+                    dev_commands_dropped: dropped.load(Ordering::Relaxed),
+                    stars_drawn: stars_drawn.load(Ordering::Relaxed),
+                    camera_mode: camera_mode.load(Ordering::Relaxed),
+                    star_probe: star_probe
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                },
+            ),
+        ));
         #[cfg(not(feature = "dev-control"))]
-        let _ = (&published, applied, &dropped, &stars_drawn);
+        let _ = (
+            &published,
+            applied,
+            &dropped,
+            &stars_drawn,
+            &camera_mode,
+            &star_probe,
+        );
         if let Some(sink) = &render_sink {
             sink.store(Arc::new(core.state().render_snapshot()));
         }

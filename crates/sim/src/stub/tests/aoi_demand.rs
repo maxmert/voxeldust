@@ -2004,6 +2004,38 @@ fn update_parent_node_caches_the_parent_shard_overwrites_revokes_and_ignores_non
 }
 
 #[test]
+fn a_parent_that_changed_takes_its_staged_frames_with_it() {
+    use crate::runtime::OutboundBox;
+    use crate::stub::realm_head::forget_old_parent;
+    let stage = |b: &mut OutboundBox, to: NodeId| {
+        b.0.push((
+            to,
+            MsgClass::Control,
+            vec![1].into(),
+            crate::io::Durability::Ephemeral,
+        ));
+    };
+    let old = NodeId(1001);
+    let new = NodeId(1012);
+    // No parent before: nothing to forget.
+    let mut outbox = OutboundBox::default();
+    stage(&mut outbox, old);
+    forget_old_parent(None, Some(old), &mut outbox);
+    assert_eq!(outbox.0.len(), 1);
+    // The same parent again: nothing to forget.
+    forget_old_parent(Some(old), Some(old), &mut outbox);
+    assert_eq!(outbox.0.len(), 1);
+    // A new parent: the frames toward the corpse are gone; the count says one.
+    forget_old_parent(Some(old), Some(new), &mut outbox);
+    assert_eq!(outbox.0.len(), 0);
+    assert_eq!(outbox.1, 1);
+    // The parent lost (a head with no holder): the frames toward the old one go too.
+    stage(&mut outbox, old);
+    forget_old_parent(Some(old), None, &mut outbox);
+    assert_eq!(outbox.0.len(), 0);
+}
+
+#[test]
 fn update_child_node_caches_a_rostered_childs_shard_revokes_and_ignores_non_children() {
     // The downward twin (findings 0/43): a realm-Head reply for a ROSTERED direct child caches its
     // node as the up-lanes' admission answer; a re-home overwrites; a non-Shard or absent record

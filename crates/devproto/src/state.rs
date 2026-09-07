@@ -184,6 +184,16 @@ pub struct DevState {
     /// Written by the render thread, read by the core thread — one shared counter, like
     /// `dev_commands_dropped`. A client with no renderer reports 0, truthfully.
     pub stars_drawn: u64,
+    /// ★ THE CAMERA-MODE INSTRUMENT (2026-09-06): which view the renderer holds right now —
+    /// `"first-person"`, `"third-person"`, or `"none"` in a client with no renderer. Recorded so a
+    /// flight can poll it through a hand-over and confirm or refuse a seen flip; the owner reported
+    /// one on the twenty-ninth flight and nothing recorded it. What the player SEES, named.
+    pub camera_mode: String,
+    /// ★ THE STAR PROBE (2026-09-06): the renderer's OWN projection of its brightest drawn stars —
+    /// realm, screen x/y through the live camera and projection, and the star law's amplitude. A
+    /// sky gate compares its expectation against THIS (the math) and THIS against the pixels (the
+    /// raster), so a disagreement is split in one run instead of argued. Empty with no renderer.
+    pub star_probe: Vec<DevStarProbe>,
     /// ★ WHERE THE GALAXY IS (owner ruling 2026-09-02 R1): the origin realm's centre in the galaxy's
     /// frame, in metres, as the gateway last stated it on the realm lane — the anchor the star cloud
     /// is placed by. `None` until the observer chain reaches the galaxy, which is exactly the case
@@ -289,6 +299,8 @@ pub(crate) mod tests {
             origin: Some(("System(7)".to_owned(), 1)),
             sky: None,
             stars_drawn: 0,
+            camera_mode: camera_mode_name(CAMERA_MODE_NONE).to_owned(),
+            star_probe: Vec::new(),
             sky_anchor: None,
             // A fixture has heard no beat (S11).
             sky_watch: "NeverHeard".to_owned(),
@@ -344,5 +356,47 @@ pub(crate) mod tests {
             serde_json::to_string(&DevPhase::AwaitingSubscription).expect("encode"),
             "\"awaiting_subscription\""
         );
+    }
+}
+
+/// One star the renderer projected itself (see `DevState::star_probe`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevStarProbe {
+    /// The star's realm, as `{:?}` of its `RealmId` (the same spelling the sky gate prints).
+    pub realm: String,
+    /// Screen position through the renderer's camera and projection, in pixels from the top-left.
+    pub x: f64,
+    pub y: f64,
+    /// The star law's amplitude at the eye (the same Tier-A `star_draw` the shader mirrors).
+    pub amplitude: f64,
+}
+
+/// The camera-mode codes the renderer publishes on its shared handle (an atomic byte the bin threads
+/// from the render thread to the dev state, exactly like the star count) — one number per view.
+pub const CAMERA_MODE_NONE: u8 = 0;
+pub const CAMERA_MODE_FIRST_PERSON: u8 = 1;
+pub const CAMERA_MODE_THIRD_PERSON: u8 = 2;
+
+/// The view's name for the dev state. An unknown code names itself as such — never a guess.
+#[must_use]
+pub fn camera_mode_name(code: u8) -> &'static str {
+    match code {
+        CAMERA_MODE_NONE => "none",
+        CAMERA_MODE_FIRST_PERSON => "first-person",
+        CAMERA_MODE_THIRD_PERSON => "third-person",
+        _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod camera_mode_tests {
+    use super::*;
+
+    #[test]
+    fn every_camera_code_has_its_name_and_a_stranger_says_so() {
+        assert_eq!(camera_mode_name(CAMERA_MODE_NONE), "none");
+        assert_eq!(camera_mode_name(CAMERA_MODE_FIRST_PERSON), "first-person");
+        assert_eq!(camera_mode_name(CAMERA_MODE_THIRD_PERSON), "third-person");
+        assert_eq!(camera_mode_name(7), "unknown");
     }
 }

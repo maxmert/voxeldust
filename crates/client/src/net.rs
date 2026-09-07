@@ -771,6 +771,8 @@ impl ClientState {
             dev_commands_applied,
             dev_commands_dropped,
             stars_drawn,
+            camera_mode,
+            star_probe,
         } = counters;
         let render_cursor = self.cursor(now_s).map(sanitize_f64);
         // Entities are sampled at the cursor only once it is anchored (a snapshot has
@@ -907,6 +909,8 @@ impl ClientState {
             dev_commands_applied,
             dev_commands_dropped,
             stars_drawn,
+            camera_mode: vd_devproto::camera_mode_name(camera_mode).to_owned(),
+            star_probe,
             transfer: DevTransferView::None,
         }
     }
@@ -916,7 +920,7 @@ impl ClientState {
 /// not own the thing counted: the dev-control mailbox (applied / shed) and the render thread's star
 /// cloud (drawn). One struct, so a new counter is one field and not one more positional argument at
 /// every call site.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DevCounters {
     /// Dev actions drained and applied this session.
     pub dev_commands_applied: u64,
@@ -924,6 +928,10 @@ pub struct DevCounters {
     pub dev_commands_dropped: u64,
     /// Points of light in the renderer's star cloud right now; 0 with no renderer.
     pub stars_drawn: u64,
+    /// The renderer's camera-mode code (`vd_devproto::CAMERA_MODE_*`); `NONE` with no renderer.
+    pub camera_mode: u8,
+    /// The renderer's own projection of its brightest drawn stars; empty with no renderer.
+    pub star_probe: Vec<vd_devproto::DevStarProbe>,
 }
 
 /// One drawn box's extent in metres — a sphere's radius, a box's half-diagonal length, and 0
@@ -2950,6 +2958,13 @@ mod tests {
                 dev_commands_applied: 3,
                 dev_commands_dropped: 1,
                 stars_drawn: 7,
+                camera_mode: vd_devproto::CAMERA_MODE_THIRD_PERSON,
+                star_probe: vec![vd_devproto::DevStarProbe {
+                    realm: "System(7)".to_owned(),
+                    x: 1.0,
+                    y: 2.0,
+                    amplitude: 3.0,
+                }],
             },
         );
         assert_eq!(s.phase, DevPhase::Active);
@@ -2978,6 +2993,9 @@ mod tests {
         assert_eq!(s.dev_commands_dropped, 1);
         // The bin's star count rides the same struct: the render thread's number, passed through.
         assert_eq!(s.stars_drawn, 7);
+        assert_eq!(s.camera_mode, "third-person");
+        assert_eq!(s.star_probe.len(), 1);
+        assert_eq!(s.star_probe[0].realm, "System(7)");
         // The honesty contract end-to-end: the built state JSON-encodes (finite floats).
         let line =
             vd_devproto::encode_response(&vd_devproto::DevResponse::State { state: s.clone() });

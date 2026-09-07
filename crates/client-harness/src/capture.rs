@@ -153,6 +153,8 @@ mod tests {
             origin: None,
             sky: None,
             stars_drawn: 0,
+            camera_mode: "none".to_owned(),
+            star_probe: Vec::new(),
             sky_anchor: None,
             // A fixture has heard no beat (S11).
             sky_watch: "NeverHeard".to_owned(),

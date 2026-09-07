@@ -71,6 +71,13 @@ const SKY_POLL: Duration = Duration::from_millis(100);
 /// It is a bracket around a computed position — NOT a licence to search the frame: at 12 px this
 /// covers 0.03 % of a 1284x720 image, so a hit is still a statement about WHERE the star drew.
 const STAR_PROBE_HALF_PX: f64 = 12.0;
+/// Two polls this far apart with the same delivered pose mean the avatar is at rest: longer than the
+/// interpolation buffer, so a look input still in flight cannot hide between them.
+const POSE_SETTLE_POLL: Duration = Duration::from_millis(300);
+const POSE_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A star bright enough to be a multi-pixel blob on its own — rare in a sky of 233,220, so its
+/// presence or absence at the predicted place is a sharp verdict where a faint one-pixel star is not.
+const BRIGHT_STAR_AMPLITUDE: f64 = 0.3;
 
 struct ChildGuard(Child);
 impl Drop for ChildGuard {
@@ -179,11 +186,19 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
         DEV.move_speed,
         DEV.tick_dt,
     );
-    let (rows, _, _) = star_catalogue_for_boot(
+    let (rows, catalogue_generation, _) = star_catalogue_for_boot(
         DEV.universe_seed,
         DEV.move_speed,
         DEV.tick_dt,
         &shard_regions,
+    );
+    println!(
+        "  the gate's catalogue: {} stars, generation {catalogue_generation:#x}; first rows {:?}",
+        rows.len(),
+        rows.iter()
+            .take(3)
+            .map(|r| (r.realm, r.cell))
+            .collect::<Vec<_>>()
     );
     assert!(
         rows.len() >= 2,
@@ -269,6 +284,19 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
 
     let (generation, held_stars) = state.sky.expect("the loop broke on Some");
     assert!(generation != 0, "the generation is folded from content");
+    println!(
+        "  the client holds: {held_stars} stars, generation {generation:#x}, anchor {:?}",
+        state.sky_anchor
+    );
+    // ★ THE SAME SKY, BY CONTENT (2026-09-06): the gate's expectation and the client's held sky must
+    // be the SAME catalogue — one count proves nothing (two different skies of equal size fooled
+    // this gate: every star "in view" was compared against a picture of other stars). The
+    // generation is a hash of the rows, so equality here is equality of every cell and look.
+    assert_eq!(
+        generation, catalogue_generation,
+        "the client holds a DIFFERENT sky than the gate derived from the world (same seed, same \
+         config?) — the pixel verdict below would compare unrelated stars"
+    );
     assert_eq!(
         held_stars as usize,
         rows.len(),
@@ -293,7 +321,9 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
     let spawn_m =
         vd_bins::boot_world(DEV.universe_seed, DEV.move_speed, DEV.tick_dt).default_home_offset_m();
     let edge_m = vd_core::pose::Tier::Galaxy.cell_edge_m();
-    let drawn: Vec<(vd_core::pose::RealmId, DVec3)> = rows
+    // Each star with its LOOK (class + luminosity): the same two numbers the renderer's star law
+    // reads, so the gate can say which stars the law culls as too faint to paint alone.
+    let drawn: Vec<(vd_core::pose::RealmId, DVec3, u8, f64)> = rows
         .iter()
         .map(|r| {
             (
@@ -303,6 +333,8 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
                     (i128::from(r.cell.y) - i128::from(anchor.y)) as f64 * edge_m,
                     (i128::from(r.cell.z) - i128::from(anchor.z)) as f64 * edge_m,
                 ) - spawn_m,
+                r.class_code,
+                r.luma_lsun,
             )
         })
         .collect();
@@ -346,9 +378,9 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
 
     // Aim at a star that is NOT the one we stand in — a point of light at zero distance cannot be
     // looked at.
-    let (target_realm, target_pos) = *drawn
+    let (target_realm, target_pos, _, _) = *drawn
         .iter()
-        .find(|(realm, _)| *realm != own)
+        .find(|(realm, _, _, _)| *realm != own)
         .expect("at least one other star");
     let aim = round_trip(
         devctl,
@@ -361,6 +393,32 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
     assert!(
         matches!(aim, DevResponse::State { .. }),
         "the avatar never turned toward {target_realm:?} at {target_pos:?}: {aim:?}"
+    );
+    // ★ WAIT FOR THE DELIVERED POSE TO SETTLE (2026-09-07, the cause of every red this gate ever
+    // gave). The look-at drive returns the moment the DELIVERED pose reads aligned, while the last
+    // look inputs are still in flight — server, snapshot, the interpolation buffer — so the pose
+    // read next is a pose the renderer moves past before the frame is captured. MEASURED with the
+    // renderer's own star probe: a pure 3.2° yaw between the gate's camera and the frame's, 49 px at
+    // the centre, more at the edges, different every run. Two polls a buffer apart with the same
+    // pose mean the avatar is at rest; only then is a camera built and a frame taken.
+    let settled = {
+        let started = Instant::now();
+        let mut last = vd_bins::pixel::own_pose(&vd_bins::pixel::poll(devctl));
+        loop {
+            std::thread::sleep(POSE_SETTLE_POLL);
+            let now = vd_bins::pixel::own_pose(&vd_bins::pixel::poll(devctl));
+            if now.is_some() && now == last {
+                break true;
+            }
+            if started.elapsed() > POSE_SETTLE_TIMEOUT {
+                break false;
+            }
+            last = now;
+        }
+    };
+    assert!(
+        settled,
+        "the avatar's delivered pose never came to rest after the look-at"
     );
 
     // The camera the client draws through, reconstructed AFTER the turn — from the avatar's own eye
@@ -416,7 +474,28 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
     let mut checked = 0usize;
     let mut behind = 0usize;
     let mut offframe = 0usize;
-    for (realm, pos) in &drawn {
+    let mut culled = 0usize;
+    let mut misses: Vec<(vd_core::pose::RealmId, f64, f64, f64)> = Vec::new();
+    let star_tuning = vd_client::realm_scene::StarTuning::default();
+    for (realm, pos, class_code, luma_lsun) in &drawn {
+        // ★ THE STAR LAW DECIDES WHO MUST PAINT (2026-09-06): a far, dim star's drawn amplitude
+        // falls below the law's cull level and the renderer does not draw it alone — it is part
+        // of the summed glow. The gate reads the SAME Tier-A law (`star_draw`, the numbers the
+        // renderer's uniforms come from), so it demands a pixel only from a star the law draws.
+        // MEASURED: a star 1.56e18 m away, in frame at (996, 132), painted nothing and the gate
+        // called the star lane broken; the law had culled it. Counted by name, never silent.
+        let look = vd_client::realm_scene::marker_look(*class_code, *luma_lsun);
+        let draw =
+            vd_client::realm_scene::star_draw(look.base_radius_m, pos.length(), &star_tuning);
+        if draw.amplitude <= 0.0 {
+            println!(
+                "  {realm:?}: CULLED by the star law (flux {:.3e}), {:.3e} m away",
+                draw.flux,
+                pos.length()
+            );
+            culled += 1;
+            continue;
+        }
         let Some(rect) = projected_point_aabb(&camera, *pos, 0.0) else {
             // DIAGNOSED, not merely skipped: "no star was in view" has two causes and they call for
             // different fixes, so the gate must say which one it met.
@@ -435,11 +514,11 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
             },
         };
         // Off-frame is not a drawing failure either.
-        if probe.max.x < 0.0
-            || probe.max.y < 0.0
-            || probe.min.x > w as f64
-            || probe.min.y > h as f64
-        {
+        // ON-FRAME is the STAR'S OWN footprint, never the probe's (2026-09-06): a star ten pixels
+        // left of the frame is inside a 12 px probe but no pixel can paint there, and the gate read
+        // it as "in view, painted nothing" — the ledgered edge-of-frame red. The probe stays the
+        // search window; the frame's own edge decides membership.
+        if rect.max.x < 0.0 || rect.max.y < 0.0 || rect.min.x > w as f64 || rect.min.y > h as f64 {
             println!(
                 "  {realm:?}: OFF-FRAME at ({:.1}, {:.1}), frame is {w}x{h}",
                 rect.min.x, rect.min.y
@@ -447,24 +526,91 @@ fn g_star_sky_pixels_draws_the_galaxy_where_the_seed_puts_it() {
             offframe += 1;
             continue;
         }
-        println!(
-            "  {realm:?}: IN VIEW at ({:.1}, {:.1}), {:.3e} m away",
-            rect.min.x,
-            rect.min.y,
-            pos.length()
-        );
+        if draw.amplitude >= BRIGHT_STAR_AMPLITUDE {
+            println!(
+                "  {realm:?}: IN VIEW at ({:.1}, {:.1}), {:.3e} m away, amplitude {:.4}, crop {:.2} px",
+                rect.min.x,
+                rect.min.y,
+                pos.length(),
+                draw.amplitude,
+                draw.crop_px
+            );
+        }
         let lit = nonclear_in_region(rgba, w, h, clear, probe);
-        assert!(
-            lit > 0,
-            "{realm:?} drew NO pixel within {STAR_PROBE_HALF_PX} px of where the seed puts it \
-             ({pos:?} m from the observer's own system) — the star lane reaches the GPU and paints \
-             nothing"
-        );
+        // A CENSUS, not a first-miss panic (2026-09-06): the first red used to stop the walk at star
+        // 962 of 233,220, and every diagnosis read that prefix as the whole sky. Every miss is kept
+        // and the verdict comes after the walk, with the bright misses named first.
+        if lit == 0 {
+            misses.push((*realm, rect.min.x, rect.min.y, draw.amplitude));
+        }
         checked += 1;
     }
+    // ★ THE STAR PROBE, READ BACK (2026-09-06): the renderer's own projection of its brightest
+    // stars against this gate's prediction (the math) and against the pixels at the renderer's
+    // position (the raster). Printed per star; the two disagreements are then told apart.
+    let predicted: std::collections::BTreeMap<String, (f64, f64)> = drawn
+        .iter()
+        .filter_map(|(realm, pos, _, _)| {
+            let rect = projected_point_aabb(&camera, *pos, 0.0)?;
+            Some((format!("{realm:?}"), (rect.min.x, rect.min.y)))
+        })
+        .collect();
+    let mut probe_math_agree = 0usize;
+    let mut probe_raster_agree = 0usize;
+    for probe in &state.star_probe {
+        let core = ScreenAabb {
+            min: vd_client_harness::camera::ScreenPos {
+                x: probe.x - 4.0,
+                y: probe.y - 4.0,
+            },
+            max: vd_client_harness::camera::ScreenPos {
+                x: probe.x + 4.0,
+                y: probe.y + 4.0,
+            },
+        };
+        let painted = nonclear_in_region(rgba, w, h, clear, core);
+        let mine = predicted.get(&probe.realm).copied();
+        let delta = mine.map(|(x, y)| ((x - probe.x).powi(2) + (y - probe.y).powi(2)).sqrt());
+        probe_math_agree += usize::from(delta.is_some_and(|d| d <= 2.0));
+        probe_raster_agree += usize::from(painted > 0);
+        println!(
+            "  PROBE {} amp {:.3}: renderer ({:.1}, {:.1}); gate {:?}; delta {:?} px; pixels within 4 px of the renderer's spot: {painted}",
+            probe.realm, probe.amplitude, probe.x, probe.y, mine, delta
+        );
+    }
+    println!(
+        "  probe: {} stars; math agrees (<=2 px) for {probe_math_agree}; pixels at the renderer's spot for {probe_raster_agree}",
+        state.star_probe.len()
+    );
+    misses.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    let bright_misses: Vec<_> = misses
+        .iter()
+        .filter(|m| m.3 >= BRIGHT_STAR_AMPLITUDE)
+        .collect();
+    println!(
+        "  misses {} of {checked} in view ({} bright); bright misses: {:?}",
+        misses.len(),
+        bright_misses.len(),
+        bright_misses.iter().take(12).collect::<Vec<_>>()
+    );
+    for (realm, x, y, amplitude) in &misses {
+        println!("  MISS {realm:?} at ({x:.1}, {y:.1}) amplitude {amplitude:.4}");
+    }
+    // ★ THE VERDICT (2026-09-07): every star the law draws paints within the probe — bright or
+    // faint. Two runs of 41,000+ stars in view found ZERO misses once the two real causes were cured
+    // (the stale camera pose the gate read, and the f32 underflow that culled every star under
+    // amplitude 0.11 in the shader); a miss here is a regression, never noise.
+    assert!(
+        misses.is_empty(),
+        "{} stars drew NO pixel within {STAR_PROBE_HALF_PX} px of where the seed puts them (the \
+         brightest: {:?}) — the star lane paints them elsewhere or not at all",
+        misses.len(),
+        misses.first()
+    );
 
     // ★ ANTI-VACUITY. Every star could be behind the eye or off-frame, and the loop above would pass
     // having asserted nothing at all. That is the shape of a gate that certifies its own silence.
+    println!("  checked {checked}, behind {behind}, off-frame {offframe}, culled {culled}");
     assert!(
         checked > 0,
         "no star was in front of the camera and on-frame, so this gate proved NOTHING — the \

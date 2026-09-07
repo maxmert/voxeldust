@@ -43,13 +43,12 @@ use vd_bins::{
     orchestrator_env, realm_store_path, reap_forked, reserve_tcp_addr, reserve_udp_addr,
     world_roster,
 };
-use vd_core::NodeId;
 use vd_core::entity_kind::EntityKind;
 use vd_core::flight::{TRAVERSE_S, realm_speed_cap_mps};
 use vd_core::glam::DVec3;
 use vd_core::ids::EntityId;
 use vd_core::pose::{RealmId, frame_for_realm};
-use vd_devproto::{CLIENT_NODE_BASE, DevPhase, DevRequest, DevResponse, DevState};
+use vd_devproto::{DevPhase, DevRequest, DevResponse, DevState};
 use vd_io_prod::trust::ClusterTrust;
 use vd_wire::admin::{AdminSnapshot, GatewayView};
 

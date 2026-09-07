@@ -1277,6 +1277,67 @@ honesty-hole class [[D-31]]/[[D-32]]/[[D-38]] closed). Ledgered here so each lan
   the release window through the door (`scripts/client.sh --k3d --window`). MEASURED: a capture client
   through the door reached Active in System 7 with 233,220 stars drawn, 11 realm boxes, 3,587 snapshots
   applied, 0 decode errors, 0 stale frames; the screenshot shows the star field and the system's star.
+  ★ ONE POD PER REALM, RULED SMART (owner, 2026-09-06: *"probably we don't need to have pod per ship or
+  area. But that might be true for planets and stations"*): NOT a pod per realm and NOT a kind fork
+  (HR3). The shape: HOST PODS — a pool of launcher pods, each forking shards exactly as the orchestrator
+  pod does today (same backend, boot state, outbox, port band, peer book); a realm STATES ITS WEIGHT
+  from what it plants (region count + look + reach + occupancy — what it IS, like a hull's rating), and
+  the orchestrator PACKS by weight: light shards (a hull, an area) share a host, a heavy shard (a planet,
+  a station at scale, the galaxy) gets a host of its own; the pool grows by count (SL9: ten thousand
+  ships need no pod each). A ship's shard stays on its host while the ship crosses systems (its parent
+  changes, its address does not — the peer book already reaches it there). A host's death retires only
+  its shards (the retired sweep + re-spawn, the reschedule proof's own path). OWED: the host-pool
+  `LaunchBackend` (days), the weight rule + packing (hours), the policy line admitting the band between
+  hosts; OPEN for the owner: the weight threshold that earns a pod, CPU-first or memory-first sizing —
+  both in one tuning struct. ★ TROUBLESHOOTING IS PART OF THE SHAPE (owner, 2026-09-06: *"I need to
+  understand on which pod the planet where we have troubles is, so I can open and read logs"*): (1) the
+  launch record names the HOST (pod name + address) beside the node, port and cookie, so the durable
+  ledger answers "where does this realm run" after any restart; (2) the orchestrator's admin snapshot
+  lists every realm head as realm → node → host pod → log path; (3) a shard's log file is named by its
+  REALM as well as its node (`realm-<node>-<kind>-<seed>.log`), under the host's log volume; (4) one
+  recipe answers the question: `just k3d-where <realm>` prints the host pod and the log path and tails
+  the log, `just k3d-logs <realm>` streams it. A planet in trouble is then three words away from its
+  log, whatever host packed it. Built on the day of a real deploy; the dev cluster keeps one host.
+  ★ THE SMALL ITEMS, CLOSED (2026-09-06, owner: *"Agree with all, unless all works according to our
+  main rules and laws and nothing is broken"*): (a) THE BOOT GAUGE — a crash-recovery seed's launches
+  carry pre-crash mint ticks; `LaunchLedger::seeded` keeps them out of `boot_ticks_observed_max` and
+  drains with their entries (test: a seeded head at 5,000 reads 0; a fresh fork 5,000→5,050 reads 50).
+  (b) THE LEASE REAPER — `should_reap_with` widens the third leg to `latched | retired` (the launcher's
+  truth, read from the reconciler by the saga barrier); the two timing legs stand, so a slow-but-alive
+  holder is still never reaped and a static shard nobody minted still needs the latch (the CAP choice
+  is unchanged). (c) THE PEER-LOCATE STORM — no new wire data (SL6): a shard whose parent head names a
+  NEW node forgets the frames it staged toward the old one (`forget_old_parent`, the gateway's own
+  forget), so the corpse's book stops being asked the moment the new parent takes its lease; the
+  backoff bounds the noise before that. (d) THE CAMERA-MODE INSTRUMENT — the renderer publishes its
+  view code on a shared handle beside the star count; `DevState.camera_mode` names it
+  (`first-person` / `third-person` / `none`), and `scripts/flight/star_poll.sh` prints `camera=` every
+  sample, so a one-second flip during a hand-over is a recorded sample, never a memory.
+  (e) THE EDGE STAR — TWO REAL DEFECTS UNDER ONE RED. The sky pixel gate (`star_sky_pixels`) was
+  red on "one star at the frame's edge". MEASURED 2026-09-06/07, in order: (1) the gate's on-frame
+  test used the 12 px PROBE's rectangle — fixed, the star's own footprint decides; (2) the gate
+  panicked at the FIRST miss, so every diagnosis read a 962-star prefix as the whole sky — it is now
+  a census over every star in view (41,000+ of 233,220) with the verdict after the walk; (3) it never
+  compared the client's held sky with its own catalogue by content — it now asserts the generation
+  hash (both 0xe4c072fc7bd8c34); (4) it demanded pixels from stars the star law culls — it reads the
+  same Tier-A `star_draw`; (5) ★ THE STALE CAMERA POSE: the look-at drive returns the moment the
+  DELIVERED pose reads aligned while the last look inputs are still in flight (server, snapshot, the
+  interpolation buffer), so the gate built its camera from a pose the renderer had moved past —
+  found with THE STAR PROBE (`DevState.star_probe`: the renderer projects its 48 brightest stars
+  through its own camera and projection), which showed one pure 3.2° yaw between the gate's camera
+  and the frame's, 49 px at the centre, different every run; cured: the gate waits for the delivered
+  pose to settle (two polls a buffer apart, identical) before it reads a camera or takes a frame;
+  after that the probe agreed with the gate to 0.001 px; (6) ★ THE f32 UNDERFLOW: with exact
+  positions, a third of the stars under amplitude 0.11 painted NOTHING at their exact spot. The
+  shader computed `(base_radius / distance)²` — about 1e-19 squared, below f32's smallest normal,
+  which the GPU flushes to zero: flux 0, amplitude 0, star culled. Amplitude 0.11 is exactly where
+  that square crosses the f32 floor. Cured: √gain is folded in BEFORE the square, so the term stays
+  near 1 across the whole sky; the Tier-A law is untouched. AFTER: 0 misses of 41,345 stars in view,
+  0 faint stars without a pixel of 371 sampled, multisampling on. Two hypotheses were tried and
+  REFUTED by measurement, and reverted: depth writes between stars (no change) and a floored point
+  profile (no change). One finding is OWED to the owner's anti-aliasing decision (the rendering
+  brief §3.8): with multisampling OFF the 12 px misses vanished in one run while the underflow loss
+  did not — multisampling at 4× dims a one-pixel star to a quarter, which the eye's own law may or
+  may not want; not decided here. The gate's verdict is now strict: every star the law draws paints.
     (00-namespace, 10-configmap, 20-networkpolicy, 30-orch, 40-gateway, 50-shard): 3 StatefulSets (per-pod
     volumeClaimTemplates for the M3 boot-counter + the cloud-required store root — a Deployment/emptyDir would wipe
     the monotone counter = the R-6a dedup-loss landmine), 3 headless Services ALL with `publishNotReadyAddresses:

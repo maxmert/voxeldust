@@ -132,13 +132,22 @@ impl LivenessTracker {
 /// alive holder and (b) realizes the binding CAP choice: the RAM tracker is empty on rehydrate ⇒ nobody
 /// latched ⇒ an orchestrator outage FREEZES recovery, NEVER mass-orphans. Three monomorphic `if`s (HR5; no
 /// short-circuit `&&`); each corner is covered.
+///
+/// The third leg is widened by THE LAUNCHER'S OWN TRUTH
+/// (2026-09-06): a holder is dead when the latch says so OR when the launcher that minted it says
+/// it is retired (minted here, no longer live — a shard that died with its pod, which nobody ever
+/// sends to, so the latch never fires). MEASURED in k3d: leases nine thousand ticks past expiry still
+/// listed their dead holders. The timing legs stand untouched (the quiesce window, the split-brain
+/// deadline), so a slow-but-alive holder is still never reaped, and a static shard nobody minted
+/// still needs the latch — the CAP choice is unchanged. Bitwise `|`: both operands covered (HR5).
 #[must_use]
-pub(crate) fn should_reap(
+pub(crate) fn should_reap_with(
     record: &OwnerRecord,
     now: UniverseTick,
     liveness: &LivenessTracker,
     quiesced_until: UniverseTick,
     max_self_fence_grace_ticks: u64,
+    retired: &dyn Fn(NodeId) -> bool,
 ) -> bool {
     if now.0 < quiesced_until.0 {
         return false;
@@ -150,7 +159,8 @@ pub(crate) fn should_reap(
     if now.0 <= reassign_after {
         return false;
     }
-    if !liveness.is_latched_dead(record.authority.node()) {
+    let node = record.authority.node();
+    if !(liveness.is_latched_dead(node) | retired(node)) {
         return false;
     }
     true
@@ -186,6 +196,7 @@ pub(crate) fn reap_lapsed_leases(
     runtime: &mut SagaRuntimeRes,
     dir: &mut DirectoryCore,
     now: UniverseTick,
+    retired: &dyn Fn(NodeId) -> bool,
 ) {
     let interval = dir.tuning().reaper_interval_ticks;
     if (interval == 0) | (now.0.saturating_sub(runtime.last_reap_tick.0) < interval) {
@@ -200,7 +211,14 @@ pub(crate) fn reap_lapsed_leases(
     let mut to_revoke: Vec<(DirectoryKey, Fence)> = Vec::new();
     let mut to_rehome: Vec<PendingReHome> = Vec::new();
     for (key, record) in dir.entries() {
-        if !should_reap(record, now, &runtime.liveness, quiesced_until, max_grace) {
+        if !should_reap_with(
+            record,
+            now,
+            &runtime.liveness,
+            quiesced_until,
+            max_grace,
+            retired,
+        ) {
             continue;
         }
         match key {

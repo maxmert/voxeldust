@@ -70,10 +70,9 @@ use vd_client_harness::camera::{CaptureCamera, DOT_MIN_APPARENT_RADIUS_PX, Scree
 use vd_client_harness::manifest::{MANIFEST_FILENAME, RunManifest};
 use vd_client_harness::verdict::{dot_pixels_distinct_from_surround, projected_point_aabb};
 use vd_client_render::{CAPTURE_H, CAPTURE_W};
-use vd_core::NodeId;
 use vd_core::glam::DVec3;
 use vd_core::pose::{LatticePos, RealmId, frame_for_realm};
-use vd_devproto::{CLIENT_NODE_BASE, DevPhase, DevRequest, DevResponse, DevState};
+use vd_devproto::{DevPhase, DevRequest, DevResponse, DevState};
 use vd_io_prod::trust::ClusterTrust;
 use vd_physics::celestial::OrbitalElements;
 use vd_physics::motion::Motion;
