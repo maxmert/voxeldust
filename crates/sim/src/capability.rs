@@ -8,14 +8,14 @@
 //!
 //! Feature code dispatches by capability accessor; `match`ing on a shard-kind
 //! discriminant in feature code is forbidden (G-NO-SHARD-FORK). Geometry differences
-//! are confined to `FrameSpace` impls selected by `voxel().geometry` (P4/P5).
+//! are confined to `GridMapping` arms selected by `voxel().geometry` (the voxel foundation, slice 2).
 //!
 //! KNOWN LIMIT (DEFERRED [[D-38]]): this is HR4's STRUCTURAL half. The NAMED
 //! `assert_feature_anywhere` gate EXISTS (`stub.rs` mod tests): ONE crossing fixture
 //! over a Shell AND an Aabb child region — but both runs share one `Rig::new()` shard
 //! kind (the profile ties are asserts on the profile objects). The two-SHARD-KIND run
 //! of one identical body is `drive_swept_crossing_feature` (D-PLACE-1). The variant
-//! forcing a `reanchor()` stays owed at P5 (`FrameSpace` does not exist yet).
+//! forcing a `reanchor()` stays owed at P5 (the grid seam is stateless; an anchor exists only if a physics library needs one BELOW it — ruling V6 A2).
 
 use serde::{Deserialize, Serialize};
 
@@ -32,12 +32,12 @@ pub enum NodeKind {
 }
 
 /// Voxel-realm geometry — the ONE seam where spherical planets and Cartesian ship
-/// grids differ (everything above `FrameSpace` is shared write-once).
+/// grids differ (everything above `vd_core::grid::GridMapping` is shared write-once).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VoxelGeometry {
-    /// Planet surface: tangent-anchored spherical projection with re-anchoring.
+    /// Planet surface: the cube-sphere grid (`GridMapping::CubeSphere`); no anchor (ruling V6 A2).
     Spherical,
-    /// Ship/station interior: flat grid, no re-anchoring (AnchorGen never advances).
+    /// Ship/station interior: the flat grid (`GridMapping::Identity`).
     Cartesian,
 }
 

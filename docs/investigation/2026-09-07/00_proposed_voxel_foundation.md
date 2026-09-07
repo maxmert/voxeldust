@@ -542,7 +542,14 @@ every block-store fixture below runs ENTIRELY on the twin — no real file.
 before and three runs after, on an idle machine, and the median wall time grows by **less than 5 %**.
 A bare "does not grow" cannot go red, because a suite's wall time always moves.
 
-**Slice 2 — The geometry seam. (R.)**
+**Slice 2 — The geometry seam. (R.) — LANDED 2026-09-07: `crates/core/src/grid/` (the address, the face
+bend, the compile-time seam table, the flat arm, the round arm, the seam value) and the sim's
+`grid_for` over a typed body extent; refuted by an Opus 5 pass (twenty findings, all answered — see
+`verdicts/slice_02_refutation.md` and `slice_02_geometry_seam.md` §12a for the measured results).
+Deviations from the plan below, stated: `warp.rs` is `bend.rs`; the grid parameters are derived by the
+sim's `grid_for` from a typed body extent with NO caller yet (the first is slice 9); the crust and the
+above-surface band are a PROVISIONAL derivation until slice 5; the round-versus-lump threshold of
+ruling V5 is the body definition's (slice 5).**
 *Lands:* `crates/core/src/grid/{mod,addr,warp,seam,identity,shell}.rs` — `CellAddr`, `GridMapping` with
 two arms and six operations, the warp with `const` constants, the `const` first guess and step count, the
 generated seam table with its pinned literal; `GridParams` DERIVED at each use from the realm's seed and

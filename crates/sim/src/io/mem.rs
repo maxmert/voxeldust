@@ -146,7 +146,10 @@ impl Store for MemStore {
         }
         self.lock()
             .committed
-            .range::<[u8], _>((std::ops::Bound::Included(from), std::ops::Bound::Excluded(to)))
+            .range::<[u8], _>((
+                std::ops::Bound::Included(from),
+                std::ops::Bound::Excluded(to),
+            ))
             .take(limit)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
@@ -904,7 +907,11 @@ mod tests {
         let mut s = MemStore::new();
         assert_eq!(s.get(b"k"), None, "an absent key reads as None");
         s.put(b"k", &(vec![7].into()));
-        assert_eq!(s.get(b"k"), None, "a staged put is invisible to a point read");
+        assert_eq!(
+            s.get(b"k"),
+            None,
+            "a staged put is invisible to a point read"
+        );
         s.commit();
         assert_eq!(
             s.get(b"k"),
@@ -938,12 +945,18 @@ mod tests {
             "from is included, to is excluded, ascending, staged rows invisible"
         );
         assert_eq!(s.range(b"a", b"z", 2).len(), 2, "the limit caps the count");
-        assert!(s.range(b"a", b"z", 0).is_empty(), "a zero limit reads nothing");
+        assert!(
+            s.range(b"a", b"z", 0).is_empty(),
+            "a zero limit reads nothing"
+        );
         assert!(
             s.range(b"c", b"a", 10).is_empty(),
             "an inverted range reads nothing and never panics"
         );
-        assert!(s.range(b"b", b"b", 10).is_empty(), "an empty range reads nothing");
+        assert!(
+            s.range(b"b", b"b", 10).is_empty(),
+            "an empty range reads nothing"
+        );
         // Reading on: the last key plus one zero byte is the smallest key above it.
         assert_eq!(
             s.range(b"b\0", b"z", 10),

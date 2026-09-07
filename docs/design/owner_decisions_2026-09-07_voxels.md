@@ -249,3 +249,22 @@ commit window and across a reopen. The per-realm handle already existed (`RealmS
 unit tests pass; Tier-A coverage PASS at 100 %; io-prod regions 94.99 % / 95.17 % against the floor of
 94; the sim suite's median wall time 115.75 s after against 115.76 s before (three runs each, idle
 machine), so the fast-suite property holds. Next: slice 2, the geometry seam.
+
+**Slice 2 — LANDED 2026-09-07 (the owner's "go").** `crates/core/src/grid/`: the cell address (signed,
+realm-local, four-bit rung, the frozen chunk packing), the face bend (Horner form, the constants' sum
+asserted at compile time, four Newton steps from `a₀ = t`), the seam table (generated at compile time,
+pinned by a digest, exhaustively tested at 62 cells; with this basis no seam is reversed, asserted at
+compile time), the flat arm (integer shifts, normalised at the door, the sub-metre site as the lattice's
+own bits capped at a byte per axis), the round arm (the ladder read from the SNAPPED count; the band's
+partial top slice is not a cell for any operation; the centre, a diverged position, an absent rung and
+an index off the body all REFUSE), and the seam value with its six operations. The sim's `grid_for`
+derives the grid from a TYPED BODY EXTENT (a round body's look, a lump's look, a built realm's sold
+slot), so the family is per-body data (ruling V5) and a look cannot be confused with a bound; no caller
+exists yet (the first is slice 9), and the round-versus-lump threshold is the body definition's (slice
+5). An Opus 5 refuter found twenty defects (two real: the centre and a NaN named a cell; the partial
+top cell), all answered. MEASURED: 38 + 4 tests; the golden no-drift digest equal in debug, release and
+on x86-64 under emulation; a lookup 19 ns on a 500 m asteroid, Earth and the largest body alike (spread
+1.02), 4 ns on a hull; the ladder on the home system's 10 planets and 11 moons snaps at most 4 024 m
+(0.025 %), never over half a unit; one gas giant of 89 156 km is above the address and has no grid;
+Tier-A coverage PASS at 100 %; io-prod 95.12 / 95.31 % against the floor of 94. Next: slice 3, the
+registry and the shape catalogue, after its discussion.

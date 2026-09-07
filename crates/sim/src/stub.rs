@@ -40,6 +40,7 @@ pub mod exterior;
 mod frames;
 mod ghost;
 mod greeting;
+pub mod grid;
 mod handoff;
 pub mod interest;
 pub mod lineage;

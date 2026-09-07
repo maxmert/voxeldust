@@ -28,6 +28,7 @@ pub mod fence;
 pub mod flight;
 pub mod frame;
 pub mod geometry;
+pub mod grid;
 pub mod home;
 pub mod ids;
 pub mod incarnation;
