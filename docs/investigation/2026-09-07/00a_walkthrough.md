@@ -318,8 +318,8 @@ identical fixture on two shard kinds.
 
 0. **The format sitting.** No code. The owner answers the four formats and says YES or NO to every SL6
    request by name. Nothing is planted without a YES.
-0b. **Split the 15,550-line sim shard file.** Blocked on nothing, and it gets more expensive every day.
-1. **Widen the persistence seam.** A point read, a bounded range, per-realm handles, and the memory twin.
+0b. **Split the sim shard file.** ALREADY LANDED 2026-08-21 (commit 40b5ce2); measured 2026-09-07, closed.
+1. **Widen the persistence seam.** LANDED 2026-09-07: a point read and a bounded range read on the store seam, on the memory twin and the disk store, parity extended; 643 sim tests; Tier-A 100 %; suite time +0 %.
 2. **The geometry seam.** The address and the two grid arms behind one value. Exhaustive seam test at a
    small planet, round-trip test at the largest.
 3. **The registry and the shape catalogue.** Five tables, the theme column, the identity digest, the ~20

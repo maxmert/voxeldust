@@ -168,3 +168,84 @@ The owner read `docs/investigation/2026-09-07/topic_01_address_and_grid.md` and 
 | Areas (D4a, D4b) — CONFIRMED and EXTENDED into a generic rule | *"areas should somehow repeat the model of the parent (ideally without breaking any laws, we need a very smart generic solution, as physics in those realms will be absolute copy of the parent — area on station will copy its physics, in the Cylinder — its physics, planet — its physics; same can be with the blocks curvature.)"* **Rule: an Area realm has NO grid and NO physics function of its own. It borrows its parent's grid mapping and its parent's gravity function through its told berth, which it reads as an instrument (SL1 clause 2).** Its cells ARE the parent's cells at the parent's bend, so the block forms match the parent's exactly, a vast city follows the planet's curvature by construction, and no flat build exists on a round world. What is area-local is only the ORIGIN of its addresses (an integer offset, subtracted in the parent when the area is made) and the ownership of the cells inside its box (D4b). An area on a station borrows the station's flat grid and its absence of gravity; an area in a cylinder borrows the cylinder's grid and its outward gravity. Two ways to make an area are both supported: (1) place the area first, then build inside it; (2) build on the planet first, then PROMOTE the box: the planet re-bases the records inside the box to the new area's origin and hands them to the new shard, with no change of form or size because both use the same grid. Promotion is designed in the area topic. An area whose box crosses a face edge keeps the parent's face in its address and uses the parent's seam table. |
 | The band rule for the underground | The client extracts every chunk inside the observer's band that holds a surface crossing, a sealed hole included; the engine culls what the camera cannot see; nothing outside the band is ever touched; the coarse rungs fold small holes away. **Owner: option A first** (extract everything in the band), with the band's extraction cost on an earthlike crust with caves MEASURED; option B (reachable-air flood fill, extraction at the moment of the dig) lands only if that number is too high. |
 | Realistic terrain and the storage, the ladder, the client load and the delta | The owner asked whether the smooth, realistic terrain changes them. Answer recorded in the reply of 2026-09-07: yes, and it was designed in — a density byte in every terrain record (the record grew from 8 to 12 bytes for it), a fill summary and a surface-height datum in the coarse entry, a brush edit that ships a handful of density rows, the extractor at every rung, and a client that meshes only chunks with a surface crossing. |
+
+---
+
+## V6. SLICE 0 — THE FORMAT SITTING, ANSWERED (2026-09-07, night)
+
+The owner read `docs/investigation/2026-09-07/topic_00_format_sitting.md` and said: *"The rest is
+approved."* Every recommendation in that document is now a RULING, with one exception (R-20) and one
+number still owed (D-1's tolerance).
+
+**Part A, the address — all five approved:** A1 the HR4 gate splits (G-IDENTICAL above the seam;
+G-MAPPING-TABLE exhaustive at N = 62 and G-MAPPING-ROUNDTRIP at the largest legal N on the seam);
+A2 HR4's wording changes from the stateful `FrameSpace` to the stateless `GridMapping` seam, any physics
+anchor sits below it; A3 a built realm's slot is a BOX; A4 the top rung is the one at which a face is at
+most 64 × 64 chunks; A5 the generator always places a landform at all eight cube corners.
+
+**Part B, the cell record — B-1 to B-13 approved:** twelve bytes fixed; a 16-bit kind with the registry
+capped at the full width; the density byte as the signed radial gap at the cell centre in 1/128 cell,
+present on every terrain cell and kept under a placed block; 6-bit rotation with the sixth bit zero;
+the tree's shape byte in the record and its growth stage in a side row; the removal = kind `Empty`,
+provenance `Placed`; the attachment key = (block address, face, slot byte); a second typed registry
+table for attachment kinds under one digest; body 0 = the realm's own grid and a never-reused persisted
+counter for the rest; the small-block seat DERIVED by one shared rule; several slots per face; a PREFIX
+registry digest at the client handshake plus a per-chunk refusal; the digest covers only what changes a
+saved record's meaning, never the style count.
+
+**Part C, the pyramid entry — C-1 to C-5 approved:** prune on equality with the generator's coarse
+answer; no surface-height delta by default (decided with the renderer before the first world); no sticky
+bit by default, provisional on the fly-away measurement; the canopy fold in a SECOND store family under
+the same key; the pyramid persisted at the checkpoint under a watermark.
+
+**Part D, the world identity — D-1 to D-6 approved:** the identity is frozen as a document beside A, B
+and C with an APPEND-ONLY octave rule (**the tolerance in metres is still OWED by the owner; asked at
+the generator topic**); the generator crate owns a body's radius and the forest reads it; the cave
+lattice step is decided on pictures before the seal; the noise is ~400 vendored lines on our integer
+hash inside the fenced float type, and the unused `noise` pin is deleted; the x86-64 leg runs emulated
+as a smoke test now and on a real x86-64 machine before SL10 V1.3 is called satisfied; the world tag has
+two halves (declared on the stamp and the handshake, measured on live handshakes only).
+
+**Part E, the SL6 table:**
+
+| Row | Answer |
+|---|---|
+| R-3 chunk diff rows on a paced reliable class | **YES** |
+| R-5 a reliable world action from the client | **YES** |
+| R-7 an exact cheap coarse fold inside the generator (a code ask) | **YES** — the bench decides whether it exists |
+| R-8 the realm's own surface tag in its look bag | **YES** |
+| R-9 the client's generator handshake | **YES** |
+| R-11 a body's pose in its realm's own row | **YES** |
+| R-13 the new tags inside the chunk diff | **YES** |
+| R-15 the canopy fold in the coarse rung | **YES** |
+| R-20 felt acceleration down to a child | **YES ON TRIAL, MARKED "TO TEST".** Owner: *"probably that makes sense, so we can try it out, but mark as to test — I'm afraid it might affect the performance. In theory the Ship Shard calculates the forces and passes them to the Parent, so theoretically speaking we can calculate how all occupants will be affected, but it will not be accurate near the planets, as weight can be different then. Probably planets/stars is the only place where it changes. So let's have it first for testing, but if performance or scalability is affected, we will calculate internally without any crossing."* The fallback is stated now: the hull derives its occupants' felt acceleration from the forces it already states, with no crossing, and accepts the error near a planet or a star where the parent's gravity differs. The trial's gate: the crossing's bytes per tick and its tick cost with 1, 100 and 600 hulls, against the shard's stated physics budget. |
+| R-1, R-2 the cross-realm edit forward and its ack | **NO** for v1 (postponed by the owner) |
+| R-6 a landed hull's collider surface up to its parent | **NO** for v1; decided at the collider topic (V60 option c preferred) |
+| R-10 a mesh peer's measured arithmetic profile | **NO** |
+| R-12 a HUD's live value | **NO** until signals land |
+| R-14 a falling crown | **NO** for v1; the tree topic answers the black-frame seam |
+| R-16 the planet's diff under an area | **NO**; an area's floor is built |
+| R-17 a sibling's placement down for a contact list | **NO** for the voxel foundation |
+| R-18 a warm lead per realm | **NO** unless the measurement says the reach plus the buffer is not enough |
+| R-19 one interest radius per window | **NO**, held in reserve |
+| R-21 buoyancy volume up | **NO** until oceans |
+| R-4 a rung floor pushed down | **WITHDRAWN** |
+
+Slice 4 may plant exactly the YES rows and R-20 behind its trial flag, and nothing else.
+
+**Slice 0b — CLOSED AS ALREADY LANDED (measured 2026-09-07 at the owner's "go").** The "15,550-line sim
+shard file" of the decision board (2026-08-04) was split on 2026-08-21 in commit `40b5ce2` ("Four files
+become sixty"). `crates/sim/src/stub/` holds 26 modules (15,883 lines; the largest, `drive.rs`, is
+2,182) plus 14 test files (20,939 lines). No file in the workspace exceeds 11,452 lines, and that one
+is a test file. The "engine arity workarounds" the gate wanted gone are bevy's bundled tuple
+`SystemParam`s under its 16-parameter ceiling (`aoi.rs:199`, `window.rs:539`), the idiomatic shape, not
+a defect. The proposal repeated the board's number without measuring; the sequence's next slice is 1.
+
+**Slice 1 — LANDED 2026-09-07 (the owner's "go").** The store seam gains `get` (the point read of one
+committed key) and `range` (the bounded half-open range read: `from <= key < to`, ascending, at most
+`limit`, inverted = empty, never a panic), on the memory twin and on the disk store; the contract items 5
+and 6 are written into the trait. The redb-versus-memory parity test compares both reads after every
+commit window and across a reopen. The per-realm handle already existed (`RealmStore`). MEASURED: 643 sim
+unit tests pass; Tier-A coverage PASS at 100 %; io-prod regions 94.99 % / 95.17 % against the floor of
+94; the sim suite's median wall time 115.75 s after against 115.76 s before (three runs each, idle
+machine), so the fast-suite property holds. Next: slice 2, the geometry seam.

@@ -114,8 +114,12 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
    registry; Durable vs Transient is policy fan-out on ONE machinery (batched `TransientGo`).
 3. **HR3 one tooling** — ONE transfer FSM/envelope/Fence/registry; ONE `shard` binary;
    shard types are `ShardProfile` capability configs. Never `match` on a shard kind in features.
-4. **HR4 features once, run anywhere** — capability DAG + `FrameSpace` seam; every feature
-   passes the identical fixture on ≥2 shard kinds (G-IDENTICAL) or it doesn't land.
+4. **HR4 features once, run anywhere** — capability DAG + the stateless `GridMapping` geometry
+   seam (renamed from `FrameSpace` by the owner on 2026-09-07, ruling V6 A2; any physics anchor sits
+   BELOW the seam); every feature ABOVE the seam passes the identical fixture on ≥2 shard kinds
+   (G-IDENTICAL) or it doesn't land; the seam ITSELF passes G-MAPPING-TABLE (exhaustive at N = 62,
+   the cube net) and G-MAPPING-ROUNDTRIP (at the largest legal N), because no fixture can give equal
+   results on a bent grid and a flat one (ruling V6 A1).
 5. **HR5 100% coverage** — Tier-A crates at 100% region+branch (`just coverage-fast`);
    exemptions only via `#[cfg_attr(coverage_nightly, coverage(off))]` or `coverage-exemptions.toml`.
    Generic-code gotcha (learned in SPIKE-0a/P0.3): llvm counts regions PER

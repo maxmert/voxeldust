@@ -1015,6 +1015,44 @@ impl Store for RedbStore {
         out
     }
 
+    fn get(&self, key: &[u8]) -> Option<Bytes> {
+        // FAIL-LOUD on a read fault, as `scan`: a silent `None` would read a faulting store as "absent".
+        let txn = self
+            .db
+            .begin_read()
+            .expect("RedbStore::get: begin_read fault — refusing to degrade to absent");
+        let table = txn
+            .open_table(KV)
+            .expect("RedbStore::get: open_table fault — refusing to degrade to absent");
+        table
+            .get(key)
+            .expect("RedbStore::get: read fault — refusing to degrade to absent")
+            .map(|v| bytes(v.value().to_vec()))
+    }
+
+    fn range(&self, from: &[u8], to: &[u8], limit: usize) -> Vec<(Vec<u8>, Bytes)> {
+        if from >= to {
+            return Vec::new(); // an inverted or empty range reads nothing (contract item 6)
+        }
+        let txn = self
+            .db
+            .begin_read()
+            .expect("RedbStore::range: begin_read fault — refusing to degrade to empty");
+        let table = txn
+            .open_table(KV)
+            .expect("RedbStore::range: open_table fault — refusing to degrade to empty");
+        let range = table
+            .range(from..to)
+            .expect("RedbStore::range: range fault — refusing to degrade to empty");
+        let mut out = Vec::new();
+        for entry in range.take(limit) {
+            let (k, v) =
+                entry.expect("RedbStore::range: mid-range read fault — refusing to truncate");
+            out.push((k.value().to_vec(), bytes(v.value().to_vec())));
+        }
+        out
+    }
+
     fn commit(&mut self) {
         // BLOCK-ON-PRIOR (the depth-1 invariant + the back-pressure for approach A): wait until the
         // PREVIOUS batch is durable before submitting the next. ~always already true at 50Hz; a real wait
@@ -1219,6 +1257,45 @@ mod tests {
                 s.scan(&[2]),
                 vec![(vec![2, 0], b(b"b")), (vec![2, 5], b(b"c"))],
                 "scan returns only the prefix run, ascending"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The voxel foundation, slice 1: the point read and the bounded range read on the disk store,
+    /// under the same contract as the memory twin (items 5 and 6).
+    #[test]
+    fn get_and_range_read_committed_state_only() {
+        let path = temp_path();
+        {
+            let (mut s, _h) = open(&path);
+            s.put(&[2, 0], &b(b"b"));
+            s.put(&[2, 5], &b(b"c"));
+            s.put(&[3, 0], &b(b"d"));
+            s.commit();
+            s.flush_blocking();
+            s.put(&[2, 7], &b(b"staged"));
+            assert_eq!(
+                s.get(&[2, 5]),
+                Some(b(b"c")),
+                "a committed key reads back by point read"
+            );
+            assert_eq!(s.get(&[2, 7]), None, "a staged put is invisible to a point read");
+            assert_eq!(s.get(&[9]), None, "an absent key reads as None");
+            assert_eq!(
+                s.range(&[2, 0], &[3, 0], 10),
+                vec![(vec![2, 0], b(b"b")), (vec![2, 5], b(b"c"))],
+                "from included, to excluded, ascending, staged rows invisible"
+            );
+            // Key 0 is the file's own label row, so the range starts above it.
+            assert_eq!(
+                s.range(&[1], &[9], 1),
+                vec![(vec![2, 0], b(b"b"))],
+                "the limit caps the count"
+            );
+            assert!(
+                s.range(&[3, 0], &[2, 0], 10).is_empty(),
+                "an inverted range reads nothing and never panics"
             );
         }
         let _ = std::fs::remove_file(&path);
@@ -1587,6 +1664,19 @@ mod tests {
                     "RedbStore diverged from MemStore after a window"
                 );
             }
+            // The voxel foundation, slice 1: the point read and the bounded range read agree too.
+            for key in [b"\x03a".as_slice(), b"\x03b", b"\x03c", b"\x01s"] {
+                assert_eq!(
+                    redb.get(key),
+                    mem.get(key),
+                    "RedbStore point read diverged from MemStore after a window"
+                );
+            }
+            assert_eq!(
+                redb.range(b"\x01", b"\x04", 3),
+                mem.range(b"\x01", b"\x04", 3),
+                "RedbStore range read diverged from MemStore after a window"
+            );
         }
         // REOPEN (the kill-9 round-trip): the durable RedbStore state still equals MemStore's final state.
         drop(redb);
@@ -1598,6 +1688,18 @@ mod tests {
                 "RedbStore lost or changed durable state across a reopen"
             );
         }
+        for key in [b"\x03a".as_slice(), b"\x03c"] {
+            assert_eq!(
+                redb2.get(key),
+                mem.get(key),
+                "RedbStore point read changed across a reopen"
+            );
+        }
+        assert_eq!(
+            redb2.range(b"\x01", b"\x04", 8),
+            mem.range(b"\x01", b"\x04", 8),
+            "RedbStore range read changed across a reopen"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

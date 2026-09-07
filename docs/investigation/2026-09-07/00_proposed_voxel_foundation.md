@@ -524,7 +524,7 @@ every item the law refuses. *Example: a pilot inside a hull berthed on a moon br
 ramp. That edit rides `InterShardFlow::BlockEdit` from the hull's shard to the moon's shard
 (`crates/wire/src/intershard.rs:124`). That arm is R-1, and nobody has asked whether it may exist.*
 
-**Slice 0b — Split the 15 550-line sim shard file. (R.)**
+**Slice 0b — Split the sim shard file. (R.) — CLOSED: ALREADY LANDED 2026-08-21 in commit 40b5ce2; the 15 550-line figure was the board's stale number, measured false on 2026-09-07 (26 modules, largest 2 182 lines).**
 *Lands:* a mechanical decomposition along capability lines.
 *Laws:* HR3, HR5.
 *Gate:* coverage unchanged; the demand-loop end-to-end runs green; the engine arity workarounds are gone.
@@ -532,7 +532,7 @@ ramp. That edit rides `InterShardFlow::BlockEdit` from the hull's shard to the m
 *Why here:* it is the only slice blocked on nothing, and it is the only one that gets strictly more
 expensive with every other slice, because most of the sim work below lands in that file.
 
-**Slice 1 — Widen the persistence seam. (R.)**
+**Slice 1 — Widen the persistence seam. (R.) — LANDED 2026-09-07: `Store::get` (the point read) and `Store::range` (the bounded half-open range read, ascending, limited, inverted = empty) on the seam, implemented on `MemStore` and `RedbStore`, the redb-vs-mem parity test extended to both reads across every window and a reopen; the per-realm handle already existed (`RealmStore` resource). MEASURED: 643 sim unit tests pass; Tier-A gate PASS 100 %; io-prod regions 94.99 % and 95.17 % (floor 94); the sim suite's median wall time 115.75 s after vs 115.76 s before (three runs each, idle machine).**
 *Lands:* a point read, a bounded range scan or cursor, per-realm store handles, and the memory twin for
 all of them, on `crates/sim/src/io/mod.rs`'s `Store`.
 *Laws:* the no-I/O-outside-the-seam convention; HR5.

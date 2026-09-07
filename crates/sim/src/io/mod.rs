@@ -471,6 +471,14 @@ pub trait Transport {
 ///    `commit`, only the last takes effect (a `delete` then `put` nets to the put; a `put` then `delete`
 ///    nets to the delete). The directory RECONCILE (delete-all-then-put-current in one barrier) relies on
 ///    this: a still-present record nets to a put, a revoked one to a lone delete (the audit COMP-2 cure).
+/// 5. `get(key)` returns the COMMITTED value at exactly `key`, or `None`; staged writes are invisible,
+///    exactly as in `scan`. THE VOXEL FOUNDATION (slice 1, 2026-09-07): a chunk's rows are read by their
+///    key. A prefix scan over a realm's whole chunk family for one chunk would grow with everything ever
+///    built in the realm, which SL9 forbids.
+/// 6. `range(from, to, limit)` returns every COMMITTED `(key, value)` with `from <= key < to`, ascending
+///    by key, at most `limit` of them; staged writes are invisible. An inverted range (`from >= to`) and
+///    a zero `limit` return nothing and never panic. To read on, a caller passes the last key it received
+///    plus one trailing zero byte as the next `from` — the smallest key above it.
 ///
 /// OBJECT-SAFE by construction (used as `&mut dyn Store`), so there is NO per-monomorphization region
 /// gotcha (HR5); ALL postcard encode/decode lives at the monomorphic call sites, never in the trait body.
@@ -481,6 +489,11 @@ pub trait Store {
     fn delete(&mut self, key: &[u8]);
     /// Every COMMITTED `(key, value)` whose key starts with `prefix`, ascending by key.
     fn scan(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Bytes)>;
+    /// The COMMITTED value at exactly `key`, or `None` (contract item 5): the point read.
+    fn get(&self, key: &[u8]) -> Option<Bytes>;
+    /// Every COMMITTED `(key, value)` with `from <= key < to`, ascending, at most `limit` (contract
+    /// item 6): the bounded range read.
+    fn range(&self, from: &[u8], to: &[u8], limit: usize) -> Vec<(Vec<u8>, Bytes)>;
     /// THE durability barrier: make every staged `put`/`delete` durable atomically (group-commit).
     fn commit(&mut self);
     /// BLOCK until every already-`commit`ted write is durable on disk (fsync'd), not merely submitted.

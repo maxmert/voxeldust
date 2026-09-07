@@ -135,6 +135,23 @@ impl Store for MemStore {
             .collect()
     }
 
+    fn get(&self, key: &[u8]) -> Option<Bytes> {
+        self.lock().committed.get(key).cloned()
+    }
+
+    fn range(&self, from: &[u8], to: &[u8], limit: usize) -> Vec<(Vec<u8>, Bytes)> {
+        if from >= to {
+            // An inverted or empty range reads nothing; `BTreeMap::range` would panic on `from > to`.
+            return Vec::new();
+        }
+        self.lock()
+            .committed
+            .range::<[u8], _>((std::ops::Bound::Included(from), std::ops::Bound::Excluded(to)))
+            .take(limit)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     fn commit(&mut self) {
         let mut inner = self.lock();
         let staged = std::mem::take(&mut inner.staged);
@@ -877,6 +894,64 @@ mod tests {
             s.scan(b"x:"),
             vec![(b"x:2".to_vec(), vec![2].into())],
             "the committed delete removed x:1, x:2 remains",
+        );
+    }
+
+    // ---- The voxel foundation, slice 1: the point read and the bounded range read -------------
+
+    #[test]
+    fn memstore_get_reads_a_committed_key_and_never_a_staged_one() {
+        let mut s = MemStore::new();
+        assert_eq!(s.get(b"k"), None, "an absent key reads as None");
+        s.put(b"k", &(vec![7].into()));
+        assert_eq!(s.get(b"k"), None, "a staged put is invisible to a point read");
+        s.commit();
+        assert_eq!(
+            s.get(b"k"),
+            Some(vec![7].into()),
+            "a committed put reads back by its key"
+        );
+        s.delete(b"k");
+        assert_eq!(
+            s.get(b"k"),
+            Some(vec![7].into()),
+            "a staged delete is invisible until commit"
+        );
+        s.commit();
+        assert_eq!(s.get(b"k"), None, "a committed delete reads as None");
+    }
+
+    #[test]
+    fn memstore_range_is_half_open_ascending_bounded_and_committed_only() {
+        let mut s = MemStore::new();
+        for (k, v) in [(b"a", 1u8), (b"b", 2), (b"c", 3), (b"d", 4)] {
+            s.put(k, &(vec![v].into()));
+        }
+        s.commit();
+        s.put(b"bb", &(vec![9].into())); // staged: invisible to every read
+        assert_eq!(
+            s.range(b"b", b"d", 10),
+            vec![
+                (b"b".to_vec(), vec![2].into()),
+                (b"c".to_vec(), vec![3].into())
+            ],
+            "from is included, to is excluded, ascending, staged rows invisible"
+        );
+        assert_eq!(s.range(b"a", b"z", 2).len(), 2, "the limit caps the count");
+        assert!(s.range(b"a", b"z", 0).is_empty(), "a zero limit reads nothing");
+        assert!(
+            s.range(b"c", b"a", 10).is_empty(),
+            "an inverted range reads nothing and never panics"
+        );
+        assert!(s.range(b"b", b"b", 10).is_empty(), "an empty range reads nothing");
+        // Reading on: the last key plus one zero byte is the smallest key above it.
+        assert_eq!(
+            s.range(b"b\0", b"z", 10),
+            vec![
+                (b"c".to_vec(), vec![3].into()),
+                (b"d".to_vec(), vec![4].into())
+            ],
+            "the continuation key skips the last row and nothing else"
         );
     }
 
