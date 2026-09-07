@@ -307,7 +307,21 @@ pub const PROTO_MAJOR: u16 = 1;
 /// `ShardToGateway` — `FrameFor` (one snapshot body for the sessions it names) and `EntityOutOfInterest`
 /// (one occupant left one observer's interest). Mesh-only: the client-facing `SnapshotDatagram` and
 /// `EventMsg::EntityRemoved` are unchanged, so the floor does not move.
-pub const PROTO_MINOR: u16 = 30;
+/// **31** — THE VOXEL WIRE PLANT (owner-approved 2026-09-07, ruling V8 of
+/// `docs/design/owner_decisions_2026-09-07_voxels.md`; SL6 rows R-3, R-5, R-8, R-9, R-11, R-13 YES and
+/// R-20 YES on trial, ruling V6): every voxel shape planted at the END of its enum in one commit, with
+/// no producer and no consumer, so the ten slices that fill them never move an index. Client-facing:
+/// `ClientControlMsg::WorldAction` (disc 6) and `HelloWorld` (disc 7); `ServerControlMsg::ActionRefused`
+/// (disc 17) and `WorldRefused` (disc 18); `BulkMsg::ChunkRows` (disc 1) and `ChunkManifest` (disc 2);
+/// `TAG_SURFACE` (4) and `TAG_BODIES` (5) in the window body. Mesh: `MsgClass::Bulk` (byte 9),
+/// `ShardToGateway::BulkFor` (disc 16), `GatewayToShard::SessionAction` (disc 7),
+/// `InterShardFlow::ChildFelt` (disc 44). Every one is APPENDED, so the floor does not move. The
+/// sender gates are OWED with the first producers: the gateway→client arms are gated on the negotiated
+/// minor by slices 5 and 10 when they first emit them, and the client→gateway direction (a client
+/// stating `WorldAction` or `HelloWorld` to a minor-30 gateway) has no gate in this build because the
+/// client tracks no negotiated minor yet — slice 5 lands that with the first client sender. TODAY a
+/// variant a peer predates lands on that peer's `undecodable` counter, and nothing else happens.
+pub const PROTO_MINOR: u16 = 31;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -565,8 +579,11 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 30,
-            "minor 30 is THE INTEREST BODY (D-9, owner-approved 2026-09-05): FrameFor (disc 14) and \
+            PROTO_MINOR, 31,
+            "minor 31 is THE VOXEL WIRE PLANT (owner-approved 2026-09-07, ruling V8): every voxel shape \
+             appended with no producer — WorldAction, HelloWorld, ActionRefused, WorldRefused, ChunkRows, \
+             ChunkManifest, BulkFor, SessionAction, MsgClass::Bulk, ChildFelt, TAG_SURFACE, TAG_BODIES; \
+             minor 30 is THE INTEREST BODY (D-9, owner-approved 2026-09-05): FrameFor (disc 14) and \
              EntityOutOfInterest (disc 15) on ShardToGateway — a snapshot body for the sessions it \
              names, and one occupant leaving one observer's interest; \
              minor 29 is THE REACH (owner ruling 2026-09-02 R6, built 2026-09-04): ReachStated (disc 43), \
@@ -669,7 +686,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.30");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.31");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is

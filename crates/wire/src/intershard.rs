@@ -6,7 +6,9 @@
 //! express a new cross-shard flow you MUST add a variant here, under review.
 //!
 //! Arms freeze INCREMENTALLY with their first consumer (the closed-set guarantee is
-//! the per-release conformance test below, not a day-one empty freeze). LANDED (16 arms):
+//! the per-release conformance test below, not a day-one empty freeze). LANDED (45 arms and 8
+//! tombstones as of minor 31; the closed test pins every index — the bullets below name the early
+//! ones, and every later arm carries its own ★ note in place):
 //! - P0: `Ghost`, `Transfer` (Durable class), `Directory`.
 //! - P2 route swap: `Saga` (saga→gateway transfer commands) + `SagaAck` (gateway→saga acks).
 //! - P2 transfer machinery (1d.1/1d.5b): `DirectoryReply`, `FlushSource`, `TransferAck`, `Demote`,
@@ -30,9 +32,14 @@
 //!   (its mass, cross-section, drag coefficient and declared states — reliable, retained, sent only on
 //!   a change and once per connection). ONE lane for every realm kind; WHETHER a realm speaks or
 //!   listens is a capability (`self_driven` / `integrates_children`), never a kind test.
+//! - The voxel foundation, slice 4 (THE WIRE PLANT, owner-approved 2026-09-07, ruling V8; SL6 row R-20
+//!   YES ON TRIAL): `ChildFelt` (the felt acceleration DOWN to a driven child, on change — the downward
+//!   twin of `ChildDrive`; producer behind the `felt_down` capability, default OFF). The ONLY inter-shard
+//!   arm the plant adds: every other YES row is a client-facing or gateway-facing shape.
 //!
-//! RESERVED (variant lands with its consumer): `BlockEdit` (P6), `Coupling` `EffectFree` ports (P8),
-//! `Signal` (P9 cross-shard functional-block signals).
+//! RESERVED (variant lands with its consumer): `BlockEdit` (P6 — the cross-realm edit forward and its
+//! ack, R-1/R-2, POSTPONED by the owner 2026-09-07; step ids 19 and 20 stay free), `Coupling`
+//! `EffectFree` ports (P8), `Signal` (P9 cross-shard functional-block signals).
 //!
 //! Effect classes (the G-SEALED invariant, enforced by `effect_class` + its test):
 //! - SIDE-EFFECTING arms carry `(TransferId, step_id)` idempotency and are ack-driven.
@@ -601,6 +608,46 @@ pub enum InterShardFlow {
     /// sends it — a planet has no drive facts to ride with, so the reach has its own arm. Producer-
     /// less reliable: stated once on a change, carried `Retained`. APPENDED (discriminant 43).
     ReachStated(ReachStated),
+    /// ★ WHAT THE PARENT DID WITH MY PUSH — the felt acceleration DOWN to a driven child (the voxel
+    /// foundation, slice 4; SL6 row R-20, owner YES ON TRIAL, ruling V6; producer behind the
+    /// `felt_down` capability, default OFF). Producer: a parent that integrates its children, for ONE
+    /// child, ON CHANGE. Consumer: that child's shard, which presses its occupants to the deck it
+    /// calls "down". The downward twin of `ChildDrive`: the child says what it is DOING (a push and a
+    /// turn), and the parent answers what it DID (the proper acceleration it integrated: the push plus
+    /// the parent's own gravity and drag), in the CHILD's own frame, in the same units.
+    ///
+    /// **NO PLACEMENT, NO VELOCITY, NO CENTRE — BY CONSTRUCTION OF THE TYPE.** An acceleration is the
+    /// same kind of datum as the drive; it names no position, so SL1 clause 4 (one hop, never your
+    /// parent's placement) and the no-placement scan hold. **ON CHANGE, QUANTISED**: stated when the
+    /// integrated value moves by more than a quantum the producer states, never per tick; the
+    /// producer's slice (13) states the quantum beside the trial's measurement.
+    ///
+    /// Classification: `FireAndForget` (it states a fact, it commands nothing) + `ProducerLessReliable`
+    /// — stated once on a change and then silence, so the carrier must retain and replay it or a crew
+    /// falls to the wrong wall until the next burn. THE SEVENTH producer-less arm: the push site
+    /// slice 13 builds MUST carry `Durability::Retained` (no producer exists in this build; the
+    /// durability pin holds the obligation). THE FALLBACK IS STATED NOW (owner): if the trial's bytes per
+    /// tick or tick cost with 600 hulls exceed the physics budget, the switch stays off and the hull
+    /// derives its occupants' felt acceleration from the forces it already states, with no crossing,
+    /// accepting the error near a planet or a star. APPENDED (discriminant 44, minor 31).
+    ChildFelt(ChildFelt),
+}
+
+/// The payload of [`InterShardFlow::ChildFelt`]: the proper acceleration the parent integrated for
+/// this child, in the child's own frame, in [`DRIVE_UNITS_PER_MPS2`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildFelt {
+    /// The receiving child's full lineage coord (the routing key; the child validates it lowers to
+    /// its OWN realm and drops a mis-route, as every down-lane does).
+    pub child: RealmCoord,
+    /// The PARENT's own realm fence at authoring (the child's zombie guard against a stale parent).
+    pub parent_fence: Fence,
+    /// The universe tick the integration happened at (every statement carries its instant, SL1
+    /// clause 6: a stale reading is refused, never used).
+    pub at: UniverseTick,
+    /// The felt acceleration in the CHILD's own frame, in [`DRIVE_UNITS_PER_MPS2`] (a millionth of a
+    /// metre per second squared per unit). Never a velocity, never a position.
+    pub felt: [i64; 3],
 }
 
 /// The payload of [`InterShardFlow::ReachStated`].
@@ -976,6 +1023,8 @@ impl InterShardFlow {
             }
             // The reach states what a child IS (how far it is seen); it commands nothing.
             InterShardFlow::ReachStated(_) => EffectClass::FireAndForget,
+            // Slice 4 (R-20): a stated fact, commands nothing.
+            InterShardFlow::ChildFelt(_) => EffectClass::FireAndForget,
         }
     }
 
@@ -1124,6 +1173,8 @@ impl InterShardFlow {
             InterShardFlow::ChildFacts(_) => FlowDurabilityClass::ProducerLessReliable,
             // Stated once on a change and never re-driven: the push site carries `Retained`.
             InterShardFlow::ReachStated(_) => FlowDurabilityClass::ProducerLessReliable,
+            // Slice 4 (R-20): stated once on a change, then silence — retained and replayed.
+            InterShardFlow::ChildFelt(_) => FlowDurabilityClass::ProducerLessReliable,
         }
     }
 }

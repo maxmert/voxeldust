@@ -590,6 +590,13 @@ fn every_arm() -> Vec<InterShardFlow> {
             size_reach_m: 10_000_000,
             light_reach_m: 7_700_000_000_000,
         }),
+        // The voxel wire plant (minor 31, R-20 on trial): what the parent did with the child's push.
+        InterShardFlow::ChildFelt(vd_wire::intershard::ChildFelt {
+            child: demand_child_coord(),
+            parent_fence: Fence(3),
+            at: UniverseTick(25),
+            felt: [0, -29_430_000, 0],
+        }),
     ]
 }
 
@@ -665,7 +672,8 @@ fn arm_tripwire(flow: &InterShardFlow) {
         | InterShardFlow::ExteriorMoved(_)
         | InterShardFlow::PeerLocate(_)
         | InterShardFlow::PeerLocated(_)
-        | InterShardFlow::ReachStated(_) => {}
+        | InterShardFlow::ReachStated(_)
+        | InterShardFlow::ChildFelt(_) => {}
     }
 }
 
@@ -846,6 +854,8 @@ fn every_arm_encodes_its_declared_discriminant_index() {
             InterShardFlow::PeerLocate(_) => 41,
             InterShardFlow::PeerLocated(_) => 42,
             InterShardFlow::ReachStated(_) => 43,
+            // The voxel wire plant (minor 31) holds 44 forever.
+            InterShardFlow::ChildFelt(_) => 44,
         }
     }
     // Every fixture's real leading byte matches its declared index (all indices < 128, so the
@@ -858,9 +868,9 @@ fn every_arm_encodes_its_declared_discriminant_index() {
     }
     // …and the fixture set spans the WHOLE contiguous index space, so a missing fixture (or a
     // gap postcard would assign past a deleted arm) cannot pass vacuously.
-    assert_eq!(seen.len(), 44);
+    assert_eq!(seen.len(), 45);
     assert_eq!(seen.first().copied(), Some(0));
-    assert_eq!(seen.last().copied(), Some(43));
+    assert_eq!(seen.last().copied(), Some(44));
 }
 
 /// THE TOMBSTONE GOLDEN SET — the discriminants no producer may ever fill again, stated as data.
@@ -902,6 +912,7 @@ fn the_tombstoned_discriminants_are_exactly_this_golden_set() {
             | InterShardFlow::PeerLocate(_)
             | InterShardFlow::PeerLocated(_)
             | InterShardFlow::ReachStated(_)
+            | InterShardFlow::ChildFelt(_)
             | InterShardFlow::ChildFacts(_)
             | InterShardFlow::Ghost(_)
             | InterShardFlow::Transfer(_)
@@ -1234,6 +1245,9 @@ fn durability_class_pins_the_producer_less_reliable_set() {
             // The reach (2026-09-04): stated once on a change; the SIXTH producer-less arm, its
             // push site carries `Durability::Retained`.
             InterShardFlow::ReachStated(_) => FlowDurabilityClass::ProducerLessReliable,
+            // The voxel wire plant (R-20, on trial): the felt acceleration is stated once on a
+            // change; the SEVENTH producer-less arm, its push site carries `Durability::Retained`.
+            InterShardFlow::ChildFelt(_) => FlowDurabilityClass::ProducerLessReliable,
             _ => FlowDurabilityClass::ReDriven,
         };
         assert_eq!(
@@ -1247,9 +1261,9 @@ fn durability_class_pins_the_producer_less_reliable_set() {
     }
     assert_eq!(
         producer_less.len(),
-        6,
-        "exactly five producer-less-reliable arms today (Ghost::Despawn + Ghost::SpawnV2 + \
-         TransientBatch + ChildFacts + ExteriorMoved): {producer_less:?}"
+        7,
+        "exactly seven producer-less-reliable arms today (Ghost::Despawn + Ghost::SpawnV2 + \
+         TransientBatch + ChildFacts + ExteriorMoved + ReachStated + ChildFelt): {producer_less:?}"
     );
 }
 

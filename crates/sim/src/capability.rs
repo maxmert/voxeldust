@@ -88,6 +88,16 @@ pub struct CapRequest {
     /// ship-specific lane cannot pass that gate, because the second parent would need ship-specific
     /// code to receive it — and then the ship WOULD know.
     pub integrates_children: bool,
+    /// ★ THE FELT-ACCELERATION TRIAL (the voxel foundation, slice 4; SL6 row R-20, owner YES ON TRIAL,
+    /// ruling V6): when on, this realm STATES to each driven child the proper acceleration it
+    /// integrated for that child (`InterShardFlow::ChildFelt`), so a crew inside a burning hull is
+    /// pressed to the right deck. Default OFF. The slice that measures the lane (slice 13, the bodies)
+    /// turns it on for the trial; if bytes per tick or tick cost with 600 hulls exceed the physics
+    /// budget, it stays off and the hull derives the felt acceleration from the forces it already
+    /// states, with no crossing. A switch, never a kind test (HR3). APPENDED at the end, like every
+    /// wire or config field, so a positional codec never reads it as another field.
+    #[serde(default)]
+    pub felt_down: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
@@ -114,6 +124,7 @@ pub struct ShardProfile {
     hull_host: bool,
     self_driven: bool,
     integrates_children: bool,
+    felt_down: bool,
 }
 
 impl ShardProfile {
@@ -145,6 +156,7 @@ impl ShardProfile {
             hull_host: req.hull_host,
             self_driven: req.self_driven,
             integrates_children: req.integrates_children,
+            felt_down: req.felt_down,
         })
     }
 
@@ -190,6 +202,13 @@ impl ShardProfile {
     #[must_use]
     pub fn integrates_children(&self) -> bool {
         self.integrates_children
+    }
+
+    /// The felt-acceleration trial switch (R-20): whether this realm states `ChildFelt` to its driven
+    /// children. Off in every shipped profile until slice 13 measures the lane.
+    #[must_use]
+    pub fn felt_down(&self) -> bool {
+        self.felt_down
     }
 
     /// Does this profile provide EVERY capability a re-home subject REQUIRES (D-37 target selection)? The
@@ -611,6 +630,23 @@ mod tests {
             coord(RealmKindTag::Universe).profile_kind(),
             coord(RealmKindTag::Galaxy).profile_kind()
         );
+    }
+
+    /// The felt-acceleration trial switch (slice 4, R-20): off by default in every profile, on only
+    /// when a request says so, and read through its accessor like every other switch.
+    #[test]
+    fn the_felt_down_switch_is_off_by_default_and_on_when_requested() {
+        let off = ShardProfile::build(CapRequest::default()).expect("an empty profile builds");
+        assert!(
+            !off.felt_down(),
+            "default OFF until slice 13 measures the lane"
+        );
+        let on = ShardProfile::build(CapRequest {
+            felt_down: true,
+            ..CapRequest::default()
+        })
+        .expect("the switch alone needs no voxel");
+        assert!(on.felt_down());
     }
 
     #[test]

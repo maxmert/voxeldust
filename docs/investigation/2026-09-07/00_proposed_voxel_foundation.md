@@ -583,16 +583,16 @@ assert the store refuses, naming both digests.
 open and a client handshake each already carry a budget in milliseconds. A number, never the word
 "negligible".
 
-**Slice 4 — The wire plant. (R.)**
-*Lands, while it is still free:* `BLOCK_STORE_FLUSH_STEP = 19` and `BLOCK_EDIT_FORWARD_STEP = 20` in ONE
-file with the disjointness test (ids 7..18 are taken, `crates/wire/src/intershard.rs:65-115`); the
-`BlockEdit(BlockEditForward)` and `BlockEditAck` arms; `MsgClass::Bulk` (reliable, paced);
-`BulkMsg::ChunkRows` and `ChunkManifest` as appended variants with the `ChunkRow` bag schema and its
-tags; `ShardToGateway::BulkFor`; `rung_floor: u8` on `WindowOpen` AND on the relay's downward request;
-`ClientControlMsg::WorldAction` with `BlockEdit` and a reserved `Fire`;
-`ClientControlMsg::HelloWorld { declared, measured }`; `TAG_SURFACE` beside `TAG_LOOK`
-(`crates/core/src/look.rs:31`); `ChannelKey` in `vd-core`; the block store's schema ids and the
-`last_owner_fence` row; `BlockStoreTuning` with every operational number named.
+**Slice 4 — The wire plant. (R.) — LANDED 2026-09-07, see `slice_04_wire_plant.md` §8.**
+*Lands, while it is still free:* every SL6 YES row's shape, appended at the end of its enum with no
+producer and no consumer: `MsgClass::Bulk`; `BulkMsg::ChunkRows` and `ChunkManifest` with the chunk-row
+bag schema and the storage report's seven tags; `ShardToGateway::BulkFor` with one audience;
+`ClientControlMsg::WorldAction` (one verb: placing Empty is the removal) and `HelloWorld`;
+`ServerControlMsg::ActionRefused` and `WorldRefused`; `GatewayToShard::SessionAction`; `TAG_SURFACE`
+and `TAG_BODIES` beside `TAG_LOOK`; `InterShardFlow::ChildFelt` behind the `felt_down` capability
+(R-20 on trial); the block store's schema ids and the owner-fence key; `BlockStoreTuning` with names and
+no values. NOT planted, by the owner's rulings: the cross-realm edit forward and its ack and their step
+ids (R-1/R-2 postponed), the rung floor (R-4 withdrawn), any tuning value.
 *Laws:* SL6 (each item is a request in §5, default NO), HR1 (one reviewed file), the incremental-freeze
 rule.
 *What it may plant:* **ONLY the §5 rows slice 0 recorded as YES.** A planted arm with no recorded
@@ -608,6 +608,10 @@ costs nothing.
 never on a keep-alive — pass under the budget with the reach datum's own margin.
 
 **Slice 5 — The generator crate `vd-terrain`, with the fence. (R.)**
+*Order (owner-agreed 2026-09-07, ruling V8 addendum):* **M-16 runs FIRST**, before any terrain is
+drawn — the exact cheap coarse summary at every rung, equal to the fold of the fine cells, with its cost
+stated. Everything sparse in slices 9 and 10 depends on it; if it costs `8^rung` evaluations the pyramid
+is dense and the storage plan collapses, so that is learned in slice 5 and not in slice 9.
 *Lands:* one crate depending on a 150-line `vd-seed` leaf (the integer hash of `crates/core/src/rng.rs`
 plus the digest of `crates/core/src/digest.rs`) and nothing else; the `Gf(f64)` newtype with a PRIVATE
 field, no `From`/`Deref`, and exactly `+ − × ÷ Neg sqrt floor trunc abs from_i64 to_i64`; a crate-scoped
@@ -759,6 +763,12 @@ edit and 4.9 GB, not the base's 1.1 and 0.9 GB); write amplification per entry; 
 edit at 13 rungs, which exists only if the coarse summary costs a handful of evaluations.
 
 **Slice 10 — Mining and placing on terrain; the diff lane. (R + S at the apply.)**
+*Order (owner-agreed 2026-09-07, ruling V8 addendum):* **the load harness opens the slice, the producer
+follows.** Build the rig for M-1 (100 builders at 2 edits/s, 128 observers), M-2 (a city entered at
+528 m/s), M-11 (10 000 dirty chunks in one tick) and M-17 (127 distant sessions and one close pilot on one
+window) first, run it against a STUB producer, record the numbers, and only then write the real producer
+against a gate that already exists. **The shared-buffer rule:** the gateway holds ONE buffer per bulk
+message and hands every recipient session the same bytes; never one copy per session.
 *Lands:* the edit path with reach, occupancy, rate and nonce validation; the two-stage receipt that
 refuses the loser when two players edit one cell in one tick; the diff rows on the new Bulk class with
 the HIERARCHICAL manifest; the per-chunk baseline on subscribe; the gap under a placed square block; the

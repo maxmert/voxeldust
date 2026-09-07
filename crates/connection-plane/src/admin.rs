@@ -58,6 +58,12 @@ pub fn gateway_view(
         sky_held_stated,
         sky_parts_skipped,
         sky_from_shard_refused: _,
+        // The voxel wire plant's three counters (slice 4) are expected to stay 0 and are retired by
+        // slices 5, 9 and 10, which build the paths they stand in for; they are read on the stats
+        // resource, not on the view.
+        world_actions_unrouted: _,
+        world_hello_stated: _,
+        bulk_for_unrouted: _,
         window_sender_mismatch,
         window_misauthored_body,
         window_unknown_row,
@@ -376,6 +382,9 @@ mod tests {
             sky_held_stated: 92,
             sky_parts_skipped: 93,
             sky_from_shard_refused: 94,
+            world_actions_unrouted: 95,
+            world_hello_stated: 96,
+            bulk_for_unrouted: 97,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);

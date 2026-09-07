@@ -31,6 +31,12 @@ use vd_core::tlv::{TlvReader, TlvWriter};
 const BODY_SCHEMA: SchemaId = SchemaId(30);
 /// A berth's shape. 31, for the same reason.
 const BERTH_SCHEMA: SchemaId = SchemaId(31);
+/// ★ THE BLOCK STORE's two row families (the voxel foundation, slice 4 plant; storage report §5.2 row
+/// 8; owner S4-7, 2026-09-07): the chunk diff rows and the pyramid rows of a realm, beside its body and
+/// its berths in the SAME realm store. PLANTED here so no later family can take these ids; the rows
+/// themselves land with slice 9 (the store), which is the first writer.
+pub const CHUNK_DELTA_SCHEMA: SchemaId = SchemaId(32);
+pub const CHUNK_PYRAMID_SCHEMA: SchemaId = SchemaId(33);
 
 /// ★ WHY THESE ROWS ARE FRAMED AND THE MOVEMENT LANE IS NOT.
 ///
@@ -79,6 +85,41 @@ mod tags {
 const BERTH: u8 = 1;
 /// The body family: this realm's own row. Exactly one, so it needs no key beyond its tag.
 const BODY: u8 = 2;
+/// The key family of the realm store's OWNER-FENCE row (slice 4 plant; storage report A-9): the
+/// realm fence of the last shard that wrote this store. A store REFUSES to open when the row is not
+/// strictly below the opener's fence, so a second writer on a cloud volume is caught by the fence and
+/// never by a file lock, which a network-backed volume cannot promise. The row's writer and its
+/// refusal land with slice 9; the key is fixed here so it can never collide with a family added later.
+const OWNER_FENCE: u8 = 3;
+
+/// The key of the owner-fence row (one per realm store).
+#[must_use]
+pub fn owner_fence_key() -> Vec<u8> {
+    vec![OWNER_FENCE]
+}
+
+/// ★ THE BLOCK STORE's OPERATIONAL NUMBERS (slice 4 plant; storage report §5.2 row 9; owner S4-6,
+/// 2026-09-07: the field NAMES now, the VALUES with slice 9's benches). Every field is a number a
+/// bench decides; none has a default here, because a number typed before its bench is a magic number.
+/// The first constructor is slice 9, which lands each value beside the measurement that chose it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockStoreTuning {
+    /// Ticks between two checkpoints of the pyramid tail (bench M-6: replay ≤ one interval of edits).
+    pub checkpoint_interval_ticks: u64,
+    /// The per-realm byte budget of the diff rows, sized to the scattered case (bench M-3: 100 M
+    /// marks 57 m apart).
+    pub realm_byte_budget: u64,
+    /// The most chunk rows one session receives per second (bench M-2: a city's catch-up under the
+    /// 20 Hz datagram's p99).
+    pub session_rows_per_second: u32,
+    /// The farthest a session may edit from its own occupant, in metres (the reach rule of slice 10).
+    pub max_reach_m: u32,
+    /// The cells per pyramid storage block (bench M-4: write amplification per changed entry).
+    pub pyramid_storage_block_cells: u32,
+    /// The most ticks an edit may park behind a stalled disk before the refusal is typed (bench M-10:
+    /// poses keep shipping, only the edit lane parks).
+    pub parked_ticks_max: u32,
+}
 
 /// The key for one built child's berth: the family tag, then the child's name.
 ///
@@ -183,10 +224,13 @@ pub fn decode_body(bytes: &[u8]) -> Result<BuiltBody, String> {
 #[cfg(test)]
 mod tests {
     use super::{
+        BERTH_SCHEMA, BODY_SCHEMA, BlockStoreTuning, CHUNK_DELTA_SCHEMA, CHUNK_PYRAMID_SCHEMA,
         berth_key, berth_prefix, body_key, decode_berth, decode_body, encode_berth, encode_body,
+        owner_fence_key,
     };
     use vd_core::built::{Berth, BlueprintId, BuiltBody, BuiltFacts};
     use vd_core::entity_kind::EntityKind;
+    use vd_core::entity_kind::SchemaId;
     use vd_core::fence::Fence;
     use vd_core::geometry::Boundary;
     use vd_core::glam::DVec3;
@@ -356,5 +400,41 @@ mod tests {
         let (body_b, berth_b) = (body.len(), berth.len());
         assert!(body_b < 200, "a body stays small: {body_b} bytes");
         assert!(berth_b < 200, "a berth stays small: {berth_b} bytes");
+    }
+
+    /// The slice 4 plant: the two block families and the owner-fence key never collide with what the
+    /// store already holds, and the tuning struct names every number without stating one.
+    #[test]
+    fn the_block_store_plant_takes_free_ids_and_a_free_key_family() {
+        let schemas = [
+            BODY_SCHEMA,
+            BERTH_SCHEMA,
+            CHUNK_DELTA_SCHEMA,
+            CHUNK_PYRAMID_SCHEMA,
+        ];
+        let distinct: std::collections::BTreeSet<u16> = schemas.iter().map(|s| s.0).collect();
+        assert_eq!(distinct.len(), schemas.len(), "a schema id is taken twice");
+        assert_eq!(
+            (CHUNK_DELTA_SCHEMA, CHUNK_PYRAMID_SCHEMA),
+            (SchemaId(32), SchemaId(33))
+        );
+        let families = [berth_prefix()[0], body_key()[0], owner_fence_key()[0]];
+        let distinct: std::collections::BTreeSet<_> = families.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            families.len(),
+            "a key family is taken twice"
+        );
+        assert_eq!(owner_fence_key(), vec![3]);
+        assert_ne!(owner_fence_key()[0], 0, "key 0 is the store's label row");
+        let tuning = BlockStoreTuning {
+            checkpoint_interval_ticks: 1,
+            realm_byte_budget: 1,
+            session_rows_per_second: 1,
+            max_reach_m: 1,
+            pyramid_storage_block_cells: 1,
+            parked_ticks_max: 1,
+        };
+        assert_eq!(tuning, tuning.clone(), "six named numbers, none shipped");
     }
 }

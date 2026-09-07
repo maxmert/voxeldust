@@ -47,6 +47,37 @@ pub const TAG_LUMA: u16 = 2;
 /// ship — the non-glowing subjects that had no lawful bag content at all before this tag).
 pub const TAG_EXTENT: u16 = 3;
 
+/// ★ THE SURFACE TAG (the voxel foundation, slice 4; SL6 row R-8, owner YES, ruling V6): the realm's
+/// OWN statement that it has a seed-shaped surface, and which generator shapes it. Payload:
+/// [`SurfaceStmt`]. Stated by the realm about ITSELF (it rides `BodyStmt::SelfLook`, which only a
+/// RUNNING realm may send — so a dormant realm is still never drawn), ONCE PER REALM ON CHANGE, carried
+/// retained, never on a keep-alive. A hull states no surface: it has none. A reader that knows only
+/// `TAG_LOOK` skips it (the skip-unknown rule). The first producer is slice 5, the generator.
+pub const TAG_SURFACE: u16 = 4;
+
+/// ★ THE BODIES TAG (slice 4 plant; SL6 row R-11, owner YES): the poses of a realm's own rigid bodies —
+/// a turret, a door, a piston carriage — INSIDE the realm's own row, under that row's one stamp, so
+/// the one-stamp rule never falls back into care. The payload is slice 13's (the bodies); until then
+/// no producer writes it and no reader asks for it. The number is reserved here so it can never be
+/// taken by another meaning.
+pub const TAG_BODIES: u16 = 5;
+
+/// What [`TAG_SURFACE`] carries: the realm's own frame (the seed is inside it for a seed-shaped
+/// realm) and the DECLARED generator tag of the build that runs it. A client compares the tag with its
+/// own before it derives one chunk; a mismatch refuses THIS realm's surface and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceStmt {
+    pub frame: crate::pose::FrameRef,
+    /// The declared half of the world identity (Format D): the generator crate's tag. Never the
+    /// measured half — a chip difference refuses a lane, never a look.
+    pub generator: u64,
+}
+
+/// The budget a realm's whole self-look bag must fit, with its outline, its luma and its surface
+/// beside each other: one conservative datagram (`vd_wire::channels::CONSERVATIVE_DATAGRAM_BUDGET`,
+/// stated here as the same number because core cannot name wire).
+pub const SELF_LOOK_BUDGET_BYTES: usize = 1200;
+
 /// ★ THE LIMITING MAGNITUDE (the reach, owner ruling 2026-09-02 R3, built 2026-09-04): the faintest
 /// apparent visual magnitude a dark-adapted eye still sees under a dark sky, 6.5 — the perception
 /// constant beside the dot angle ([`crate::geometry::VISIBILITY_THETA_MIN_RAD`]). A body whose light
@@ -101,16 +132,21 @@ pub fn look_bag(outline: &Boundary) -> Vec<u8> {
 /// `TAG_LOOK` then `TAG_LUMA`).
 #[must_use]
 pub fn self_look_bag(outline: &Boundary, luma: Option<(u8, f64)>) -> Vec<u8> {
+    self_look_writer(outline, luma).finish()
+}
+
+/// THE ONE PROLOGUE of every self-look: the outline, then the luma if any. Both self-look builders
+/// go through here, so a self-look can never be framed two ways.
+fn self_look_writer(outline: &Boundary, luma: Option<(u8, f64)>) -> TlvWriter {
     let writer = TlvWriter::new(WINDOW_BODY_SCHEMA)
         .required(TAG_LOOK, outline)
         .expect("a fresh writer holds no duplicate tag and a Boundary is far under the field cap");
-    let writer = match luma {
+    match luma {
         Some(datum) => writer
             .required(TAG_LUMA, &datum)
             .expect("distinct tag, two scalars"),
         None => writer,
-    };
-    writer.finish()
+    }
 }
 
 /// Encode a sleeping child's photometric marker datum as a `TAG_LUMA` bag.
@@ -166,6 +202,26 @@ pub fn look_of(bag: &[u8]) -> Result<Boundary, TlvError> {
 /// [`TlvError`] if the blob is not a well-formed window-body bag carrying `TAG_LUMA`.
 pub fn luma_of(bag: &[u8]) -> Result<(u8, f64), TlvError> {
     TlvReader::parse(WINDOW_BODY_SCHEMA, bag)?.required(TAG_LUMA)
+}
+
+/// A realm's self-look with its surface beside the outline and the optional luma: the bag a
+/// seed-shaped realm states once on change (R-8). The first producer is slice 5.
+#[must_use]
+pub fn surface_look_bag(
+    outline: &Boundary,
+    luma: Option<(u8, f64)>,
+    surface: &SurfaceStmt,
+) -> Vec<u8> {
+    self_look_writer(outline, luma)
+        .required(TAG_SURFACE, surface)
+        .expect("distinct tag, a frame and one scalar")
+        .finish()
+}
+
+/// The surface a self-look bag states; `None` for a realm that states none (a hull, a station
+/// without terrain), a typed refusal for a bag that is not a window body.
+pub fn surface_of(bag: &[u8]) -> Result<Option<SurfaceStmt>, TlvError> {
+    TlvReader::parse(WINDOW_BODY_SCHEMA, bag)?.optional(TAG_SURFACE)
 }
 
 #[cfg(test)]
@@ -361,4 +417,94 @@ pub struct StarRow {
 #[must_use]
 pub fn catalogue_generation(encoded: &[u8]) -> u64 {
     crate::digest::fnv1a(crate::digest::FNV_OFFSET, encoded)
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use crate::glam::{DQuat, DVec3};
+    use crate::pose::FrameRef;
+
+    /// The five window-body tags are distinct and never move: a reorder or a reuse re-means every
+    /// bag ever stated.
+    #[test]
+    fn the_window_body_tags_are_distinct_and_pinned() {
+        let tags = [TAG_LOOK, TAG_LUMA, TAG_EXTENT, TAG_SURFACE, TAG_BODIES];
+        let distinct: std::collections::BTreeSet<u16> = tags.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            tags.len(),
+            "a window-body tag is numbered twice"
+        );
+        assert_eq!(tags, [1, 2, 3, 4, 5], "the numbering moved");
+    }
+
+    fn moon() -> SurfaceStmt {
+        SurfaceStmt {
+            frame: FrameRef::PlanetCentered { planet_seed: 2298 },
+            generator: 0xcbf2_9ce4_8422_2325,
+        }
+    }
+
+    #[test]
+    fn a_surface_bag_roundtrips_and_a_reader_that_knows_only_the_look_still_reads_it() {
+        let outline = Boundary::Shell { r: 1_737_400.0 };
+        let bag = surface_look_bag(&outline, Some((5, 0.0)), &moon());
+        assert_eq!(surface_of(&bag), Ok(Some(moon())));
+        assert_eq!(
+            look_of(&bag),
+            Ok(outline),
+            "the outline is untouched beside the surface"
+        );
+        assert_eq!(luma_of(&bag), Ok((5, 0.0)));
+        // The skip-unknown rule: a bag with no surface says so, and a plain look bag is still a bag.
+        assert_eq!(
+            surface_of(&self_look_bag(&outline, None)),
+            Ok(None),
+            "a hull states no surface"
+        );
+        let no_luma = surface_look_bag(&outline, None, &moon());
+        assert_eq!(surface_of(&no_luma), Ok(Some(moon())));
+        assert_eq!(
+            luma_of(&no_luma),
+            Err(TlvError::MissingRequiredTag(TAG_LUMA))
+        );
+        assert_eq!(
+            surface_of(&[0, 0, 0]),
+            Err(TlvError::Truncated(3)),
+            "a bag that is not a window body is refused, never read as a look"
+        );
+        assert_eq!(
+            (TAG_SURFACE, TAG_BODIES),
+            (4, 5),
+            "the tag numbers never move"
+        );
+    }
+
+    #[test]
+    fn the_largest_self_look_fits_one_conservative_datagram() {
+        // MEASURED: the condition on R-8. The widest frame is the area's (two seeds); the outline is a
+        // full box; the luma rides beside.
+        let widest = SurfaceStmt {
+            frame: FrameRef::AreaLocal {
+                planet_seed: u64::MAX,
+                area_seed: u64::MAX,
+            },
+            generator: u64::MAX,
+        };
+        let outline = Boundary::Obb {
+            half: DVec3::new(f64::MAX, f64::MAX, f64::MAX),
+            orient: DQuat::IDENTITY,
+        };
+        let bag = surface_look_bag(&outline, Some((u8::MAX, f64::MAX)), &widest);
+        println!("[surface] the widest self-look bag is {} bytes", bag.len());
+        // MEASURED and pinned tight, so a growth of the bag is a red test and a recorded decision,
+        // never a silent drift toward the budget (the refuter's finding 12).
+        let len = bag.len();
+        assert_eq!(len, 124, "the widest self-look bag moved");
+        assert!(
+            len <= SELF_LOOK_BUDGET_BYTES,
+            "the self-look bag exceeds the datagram budget"
+        );
+    }
 }

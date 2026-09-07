@@ -2511,6 +2511,49 @@ fn a_gateway_that_still_asks_for_the_sky_is_counted_and_gets_nothing() {
     );
 }
 
+/// ★ THE VOXEL WIRE PLANT ARRIVES AT A SHARD WITH NO CONSUMER, AND IS COUNTED (slice 4).
+///
+/// A session's world action (R-5) and bulk bytes (R-3) are on the wire so their indices are fixed;
+/// the placement path that consumes the action is slice 10's, and a shard never receives bulk at all.
+/// Each is COUNTED, never silently dropped, and the shard says nothing back: a refusal it could act
+/// on needs the placement rule to name a reason.
+#[test]
+fn a_planted_world_action_and_stray_bulk_bytes_are_counted_and_answered_with_nothing() {
+    use vd_wire::channels::{BulkKind, BulkMsg, WorldAction};
+    let mut rig = window_rig();
+    let sent = rig.tick(vec![
+        wire_msg(
+            GATEWAY,
+            MsgClass::Control,
+            &GatewayToShard::SessionAction {
+                session: SessionId(1),
+                fence: Fence(1),
+                seq: 1,
+                action: WorldAction::Fire,
+            },
+        ),
+        wire_msg(
+            GATEWAY,
+            MsgClass::Bulk,
+            &BulkMsg::Blob {
+                kind: BulkKind::ChunkDelta,
+                bytes: vec![1, 2, 3],
+            },
+        ),
+    ]);
+    let stats = rig.world.resource::<StubStats>();
+    assert_eq!(stats.session_actions_unrouted, 1, "the action is visible");
+    assert_eq!(stats.bulk_unrouted, 1, "the stray bulk is visible");
+    assert_eq!(stats.undecodable, 0, "neither is a decode failure");
+    assert!(
+        !sent.iter().any(|(_, _, b)| {
+            postcard::from_bytes::<ShardToGateway>(b)
+                .is_ok_and(|m| format!("{m:?}").contains("BulkFor"))
+        }),
+        "no producer exists yet, so nothing bulk leaves the shard"
+    );
+}
+
 /// ★ THE GALAXY'S TICK, MEASURED (owner ruling 2026-09-02 R8 item 1; SL9). A rig hosting THE galaxy
 /// with its real census of direct children and ONE occupant, timing a full tick and the three
 /// walks that grow with the child count. Ignored: it builds the galaxy (seconds) and prints

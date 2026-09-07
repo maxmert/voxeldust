@@ -20,6 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 use vd_core::geometry::Boundary;
+use vd_core::grid::{CellAddr, ChunkCoord};
 use vd_core::pose::{FrameRef, RealmId, StampedPose};
 use vd_core::{EntityId, EpochId, Fence, SessionId, TickId, TransferId, UniverseTick};
 
@@ -81,6 +82,76 @@ pub enum ClientControlMsg {
         generation: u64,
     },
     Bye,
+    /// ★ A RELIABLE WORLD ACTION (the voxel foundation, slice 4; SL6 row R-5, owner YES, ruling V6): a
+    /// block edit today, a shot later ([`WorldAction::Fire`], reserved). `seq` is the session's own
+    /// counter, so a refusal can name it and a resend is idempotent. Rides the reliable control lane —
+    /// never the latest-wins input datagram, whose `action_bits` would drop a placement on loss.
+    /// Slice 10's gateway WILL hand it to the session's authority shard as
+    /// `GatewayToShard::SessionAction`; TODAY the gateway counts it (`world_actions_unrouted`) and
+    /// drops it, and no client sends one. APPENDED (discriminant 6, minor 31).
+    WorldAction {
+        seq: u64,
+        action: WorldAction,
+    },
+    /// ★ THE WORLD HANDSHAKE (R-9, owner YES; SL10 V1.3): the client's DECLARED world generation (the
+    /// generator crate's tag, Format D) and its boot-MEASURED arithmetic profile, sent right after
+    /// `Hello`. Slice 5's gateway WILL refuse a declared mismatch by name
+    /// ([`ServerControlMsg::WorldRefused`]); TODAY the gateway counts it (`world_hello_stated`) and
+    /// compares nothing, because no generator exists to compare against, and no client sends one.
+    /// The measured half gates lanes, never files. Not a realm boundary: a build stating its
+    /// identity. APPENDED (discriminant 7, minor 31).
+    HelloWorld {
+        declared: u64,
+        measured: u64,
+    },
+}
+
+/// The reliable actions a client may take on the world (R-5). One carrier, two consumers (D-39.1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorldAction {
+    /// Place a block or break a cell in the session's OWN realm (cross-realm edits are postponed by
+    /// the owner, ruling V4; a target outside the session's realm is refused as `NotYourRealm`).
+    BlockEdit(BlockEdit),
+    /// RESERVED for P11 combat: a shot is the other reliable action. No payload until then; a
+    /// receiver refuses it by name.
+    Fire,
+}
+
+/// One block edit: PLACE one kind at one site. There is ONE verb, because placing the Empty kind
+/// (registry kind 0) IS the removal path (ruling V4 item 13): a miner "breaks" a cell by placing
+/// Empty in it, and a second spelling of the same act would be two paths to test and refuse. The
+/// registry (`vd_core::registry`) decides whether the kind, the variant, the scale and the
+/// orientation are legal; the realm decides reach and occupancy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockEdit {
+    /// The cell, in the realm's own seed-shaped address.
+    pub at: CellAddr,
+    /// The registry kind; 0 is Empty, the removal.
+    pub kind: u16,
+    /// The style, below the kind's variant count.
+    pub variant: u8,
+    /// The small-block scale: 0 = the whole cell, 1 = half, 2 = quarter, 3 = eighth.
+    pub scale: u8,
+    /// The orientation code, `0..=23`, legal for the kind's form.
+    pub orientation: u8,
+    /// The site inside the cell at that scale (`[0, 0, 0]` for a whole cell).
+    pub site: [u8; 3],
+}
+
+/// Why a world action was refused (owner S4-2, 2026-09-07). Success needs no message: the block
+/// arrives on the diff lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActionRefusal {
+    /// The registry refused the kind, the variant, the scale or the orientation.
+    Registry,
+    /// The cell is beyond the session's reach.
+    OutOfReach,
+    /// The cell is not in the session's own realm (cross-realm edits are postponed).
+    NotYourRealm,
+    /// Something already holds the site.
+    Occupied,
+    /// The action is reserved and has no receiver in this build (`WorldAction::Fire`).
+    Reserved,
 }
 
 /// Gateway → client control messages.
@@ -245,6 +316,20 @@ pub enum ServerControlMsg {
         /// The generation the server's catalogue currently folds to.
         generation: u64,
     },
+    /// ★ A WORLD ACTION REFUSED (the voxel foundation, slice 4; owner S4-2, 2026-09-07): names the
+    /// client's `seq` and why, so a refused placement is never silent. Success needs no message — the
+    /// block arrives on the diff lane. APPENDED (discriminant 17, minor 31).
+    ActionRefused {
+        seq: u64,
+        reason: ActionRefusal,
+    },
+    /// ★ THE WORLD REFUSED (owner S4-3: a new arm, never a repurposed version refusal): the client's
+    /// declared world generation is not the cluster's. Both values are named, exactly as the
+    /// coordinate-unit refusal names its two. APPENDED (discriminant 18, minor 31).
+    WorldRefused {
+        ours: u64,
+        theirs: u64,
+    },
 }
 
 /// The 20 Hz client input frame (latest-wins; loss = skip a tick, never a wedge).
@@ -286,11 +371,47 @@ pub enum BulkMsg {
     /// Opaque, content-addressed bulk blob; concrete chunk schemas arrive with
     /// terrain (P4) as additive variants.
     Blob { kind: BulkKind, bytes: Vec<u8> },
+    /// ★ THE DIFF LANE's rows (the voxel foundation, slice 4; SL6 row R-3, owner YES, ruling V6): one
+    /// or more chunk rows of ONE realm, for the sessions the shard named in
+    /// `ShardToGateway::BulkFor`. Rides `MsgClass::Bulk` (reliable, paced). APPENDED (discriminant 1,
+    /// minor 31). The first producer is slice 10.
+    ChunkRows { realm: RealmId, rows: Vec<ChunkRow> },
+    /// ★ THE MANIFEST (R-3): under one coarse chunk, every chunk that holds a diff and the digest of
+    /// its current row, so a session entering interest asks only for what it lacks. APPENDED
+    /// (discriminant 2, minor 31). Slice 9 defines the digest's fold.
+    ChunkManifest {
+        realm: RealmId,
+        coarse: ChunkCoord,
+        digests: Vec<ChunkDigest>,
+    },
+}
+
+/// ★ ONE CHUNK ROW on the diff lane (R-3, R-13; the storage report's shape, §4.2): which chunk at
+/// which rung, the tick the owner stated it (send-on-change, newest wins), and the skip-unknown bag
+/// `vd_core::chunk_row` defines. The key and the instant ride here, never inside the bag; the rung is
+/// inside the key. The row carries no pose: the address IS the position in the stating realm's frame.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkRow {
+    pub key: ChunkCoord,
+    pub at: UniverseTick,
+    pub bag: Vec<u8>,
+}
+
+/// One entry of a chunk manifest: a chunk and the digest of its current row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkDigest {
+    pub chunk: ChunkCoord,
+    pub digest: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BulkKind {
+    /// ★TOMBSTONED (the voxel foundation, slice 4, minor 31): the P1.5 placeholder for a chunk's
+    /// bytes. Never produced. Its living replacement is `BulkMsg::ChunkRows` and
+    /// `BulkMsg::ChunkManifest`, typed rows under `MsgClass::Bulk`. Kept because deleting a nested
+    /// variant renumbers `Catalog`; a producer may never fill it again.
     ChunkSnapshot,
+    /// ★TOMBSTONED (slice 4, minor 31) — see `ChunkSnapshot`.
     ChunkDelta,
     Catalog,
 }
@@ -988,6 +1109,174 @@ mod tests {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
             let back: ClientControlMsg = postcard::from_bytes(&bytes).expect("decode");
             assert_eq!(back, msg);
+        }
+    }
+
+    fn a_cell() -> vd_core::grid::CellAddr {
+        vd_core::grid::CellAddr {
+            body: RealmId::Planet(7),
+            face: vd_core::grid::Face::PosY,
+            rung: vd_core::grid::Rung::new(0).expect("rung 0"),
+            i: 12,
+            j: -3,
+            k: 4_000,
+        }
+    }
+
+    fn a_chunk() -> vd_core::grid::ChunkCoord {
+        vd_core::grid::ChunkCoord {
+            body: RealmId::Planet(7),
+            face: vd_core::grid::Face::PosY,
+            rung: vd_core::grid::Rung::new(3).expect("rung 3"),
+            x: 1,
+            y: -1,
+            z: 64,
+        }
+    }
+
+    /// THE VOXEL WIRE PLANT (slice 4, minor 31): every planted client-facing variant roundtrips, sits
+    /// at its declared index (postcard writes the DECLARED index, so a reorder re-labels every later
+    /// arm), and every variant before it decodes unchanged.
+    #[test]
+    fn the_voxel_plant_is_additive_minor_31_and_pins_its_indices() {
+        // The self-look budget core states must be the datagram budget wire states (core cannot
+        // name wire, wire can check core).
+        assert_eq!(
+            vd_core::look::SELF_LOOK_BUDGET_BYTES,
+            CONSERVATIVE_DATAGRAM_BUDGET
+        );
+        let place = WorldAction::BlockEdit(BlockEdit {
+            at: a_cell(),
+            kind: 41,
+            variant: 0,
+            scale: 1,
+            orientation: 17,
+            site: [1, 0, 1],
+        });
+        // The removal IS placing Empty (kind 0): one verb, one path.
+        let brk = WorldAction::BlockEdit(BlockEdit {
+            at: a_cell(),
+            kind: 0,
+            variant: 0,
+            scale: 0,
+            orientation: 0,
+            site: [0, 0, 0],
+        });
+        let client: Vec<(ClientControlMsg, u8)> = vec![
+            (ClientControlMsg::Bye, 5),
+            (
+                ClientControlMsg::WorldAction {
+                    seq: 9,
+                    action: place,
+                },
+                6,
+            ),
+            (
+                ClientControlMsg::WorldAction {
+                    seq: 10,
+                    action: brk,
+                },
+                6,
+            ),
+            (
+                ClientControlMsg::WorldAction {
+                    seq: 11,
+                    action: WorldAction::Fire,
+                },
+                6,
+            ),
+            (
+                ClientControlMsg::HelloWorld {
+                    declared: 0xcbf2_9ce4_8422_2325,
+                    measured: 0x84_22_23_25,
+                },
+                7,
+            ),
+        ];
+        for (msg, index) in client {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            assert_eq!(bytes[0], index, "{msg:?} sits at its declared index");
+            assert_eq!(
+                postcard::from_bytes::<ClientControlMsg>(&bytes).expect("decode"),
+                msg
+            );
+        }
+        let server: Vec<(ServerControlMsg, u8)> = vec![
+            (
+                ServerControlMsg::Event(EventMsg::EntityRemoved {
+                    entity: eid(),
+                    at: UniverseTick(1),
+                }),
+                14,
+            ),
+            (
+                ServerControlMsg::ActionRefused {
+                    seq: 9,
+                    reason: ActionRefusal::OutOfReach,
+                },
+                17,
+            ),
+            (ServerControlMsg::WorldRefused { ours: 1, theirs: 2 }, 18),
+        ];
+        for (msg, index) in server {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            assert_eq!(bytes[0], index, "{msg:?} sits at its declared index");
+            assert_eq!(
+                postcard::from_bytes::<ServerControlMsg>(&bytes).expect("decode"),
+                msg
+            );
+        }
+        for reason in [
+            ActionRefusal::Registry,
+            ActionRefusal::OutOfReach,
+            ActionRefusal::NotYourRealm,
+            ActionRefusal::Occupied,
+            ActionRefusal::Reserved,
+        ] {
+            let bytes = postcard::to_allocvec(&reason).expect("encode");
+            assert_eq!(
+                postcard::from_bytes::<ActionRefusal>(&bytes).expect("decode"),
+                reason
+            );
+        }
+        let bulk: Vec<(BulkMsg, u8)> = vec![
+            (
+                BulkMsg::Blob {
+                    kind: BulkKind::Catalog,
+                    bytes: vec![1],
+                },
+                0,
+            ),
+            (
+                BulkMsg::ChunkRows {
+                    realm: RealmId::Planet(7),
+                    rows: vec![ChunkRow {
+                        key: a_chunk(),
+                        at: UniverseTick(5),
+                        bag: vd_core::chunk_row::chunk_row_bag(&[1, 2, 3]),
+                    }],
+                },
+                1,
+            ),
+            (
+                BulkMsg::ChunkManifest {
+                    realm: RealmId::Planet(7),
+                    coarse: a_chunk(),
+                    digests: vec![ChunkDigest {
+                        chunk: a_chunk(),
+                        digest: 77,
+                    }],
+                },
+                2,
+            ),
+        ];
+        for (msg, index) in bulk {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            assert_eq!(bytes[0], index, "{msg:?} sits at its declared index");
+            assert_eq!(
+                postcard::from_bytes::<BulkMsg>(&bytes).expect("decode"),
+                msg
+            );
         }
     }
 

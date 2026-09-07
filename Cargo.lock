@@ -6250,6 +6250,7 @@ dependencies = [
  "image",
  "libc",
  "postcard",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

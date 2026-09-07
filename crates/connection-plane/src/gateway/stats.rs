@@ -130,6 +130,18 @@ pub struct GatewayStats {
     /// CLIENTS STATING THE SKY THEY HOLD (S11). Each statement is what lets the gateway skip sending a
     /// 7.0 MB catalogue to a client that already has it.
     pub sky_held_stated: u64,
+    /// THE VOXEL WIRE PLANT (slice 4, R-5): a client's reliable world action arrived before the
+    /// gateway's forward to the session's authority shard exists (slice 10 builds it beside the
+    /// placement rule). COUNTED, never silently dropped. Expected 0 until slice 10; then retired.
+    pub world_actions_unrouted: u64,
+    /// THE VOXEL WIRE PLANT (slice 4, R-9): a client stated its declared and measured world halves.
+    /// Recorded only; the comparison against the cluster's generator is slice 5's, which lands the
+    /// generator and its tag together. A client that states nothing is served as today.
+    pub world_hello_stated: u64,
+    /// THE VOXEL WIRE PLANT (slice 4, R-3): a shard's bulk bytes for named sessions arrived before
+    /// the gateway's per-session bulk forward exists (slice 10 builds it beside the first producer).
+    /// COUNTED, never silently dropped. Expected 0 until slice 10; then retired.
+    pub bulk_for_unrouted: u64,
     /// CATALOGUE PARTS NOT SENT because the client already held that sky (S11). This is the saving,
     /// counted: every skipped part is bytes that did not cross for a galaxy that did not move.
     pub sky_parts_skipped: u64,

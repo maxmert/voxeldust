@@ -73,7 +73,9 @@ fn clamp_unit(a: f64) -> f64 {
 
 /// One of the six cube faces. The discriminant is the `face` byte of a cell address and is part of
 /// the address format (ruling V6, Format A): it never renumbers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[repr(u8)]
 pub enum Face {
     PosX = 0,
@@ -267,6 +269,33 @@ pub fn normalize(v: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The face byte on the wire is the address format's face number (ruling V6, Format A) — the
+    /// serde index, pinned face by face, so a reorder can never re-label a cell address.
+    #[test]
+    fn every_face_encodes_as_its_address_byte() {
+        let table = [
+            (Face::PosX, 0u8),
+            (Face::NegX, 1),
+            (Face::PosY, 2),
+            (Face::NegY, 3),
+            (Face::PosZ, 4),
+            (Face::NegZ, 5),
+        ];
+        for (face, byte) in table {
+            assert_eq!(
+                postcard::to_allocvec(&face).expect("encodes"),
+                vec![byte],
+                "{face:?}"
+            );
+            assert_eq!(face as u8, byte, "{face:?}: the repr and the wire agree");
+            assert_eq!(postcard::from_bytes::<Face>(&[byte]), Ok(face));
+        }
+        assert!(
+            postcard::from_bytes::<Face>(&[6]).is_err(),
+            "a seventh face is refused"
+        );
+    }
 
     #[test]
     fn the_bend_is_odd_monotone_and_reaches_the_edge_exactly() {

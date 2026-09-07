@@ -11450,3 +11450,59 @@ fn a_hand_over_holds_the_departed_strata_until_the_new_hops_first_level_lands() 
         "the departed stratum still holds while the chain is not whole: {drawn:?}"
     );
 }
+
+/// ★ THE VOXEL WIRE PLANT ARRIVES AT THE GATEWAY WITH NO PATH BEHIND IT, AND IS COUNTED (slice 4).
+///
+/// A client's world action (R-5), its world handshake (R-9) and a shard's bulk bytes (R-3) are on the
+/// wire so their indices are fixed; the paths that consume them are slices 10, 5 and 9. Each is
+/// COUNTED, never silently dropped, and nothing leaves the gateway for them: no bulk to any client,
+/// no action to any shard, no refusal it cannot yet name.
+#[test]
+fn the_planted_world_arms_are_counted_at_the_gateway_and_forwarded_nowhere() {
+    use vd_wire::channels::WorldAction;
+    let mut rig = Rig::new();
+    let sent = rig.tick(vec![
+        wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::WorldAction {
+                seq: 1,
+                action: WorldAction::Fire,
+            },
+        ),
+        wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::HelloWorld {
+                declared: 7,
+                measured: 8,
+            },
+        ),
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::BulkFor {
+                realm_fence: Fence(1),
+                audience: vd_wire::session_flow::BulkAudience::Sessions(vec![SessionId(1)]),
+                bytes: vec![9, 9],
+            },
+        ),
+    ]);
+    let stats = rig.world.resource::<GatewayStats>();
+    assert_eq!(stats.world_actions_unrouted, 1, "the action is visible");
+    assert_eq!(stats.world_hello_stated, 1, "the handshake is visible");
+    assert_eq!(stats.bulk_for_unrouted, 1, "the bulk is visible");
+    assert_eq!(stats.undecodable, 0, "none is a decode failure");
+    assert!(
+        !sent.iter().any(|(_, class, _)| *class == MsgClass::Bulk),
+        "no bulk leaves the gateway before slice 9 builds the forward"
+    );
+    assert!(
+        !sent.iter().any(|(to, _, b)| {
+            *to == SHARD
+                && postcard::from_bytes::<GatewayToShard>(b)
+                    .is_ok_and(|m| format!("{m:?}").contains("SessionAction"))
+        }),
+        "no action reaches a shard before slice 10 builds the forward"
+    );
+}

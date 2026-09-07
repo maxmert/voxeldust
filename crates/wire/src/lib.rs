@@ -9,7 +9,8 @@
 //!    `ControlMsg | InputDatagram | BulkMsg | EventMsg | SnapshotDatagram`.
 //! 2. **`InterShardFlow`** (shard↔shard / shard↔orchestrator) — one reviewed file
 //!    (`intershard.rs`), arms frozen INCREMENTALLY with their first consumer. The CURRENT
-//!    closed set is 24 arms: `Ghost | Transfer | Directory | Saga | SagaAck | DirectoryReply
+//!    closed set is 45 arms (pinned by `tests/intershard_closed.rs`; the voxel wire plant of
+//!    minor 31 added the last, `ChildFelt`). The first 24: `Ghost | Transfer | Directory | Saga | SagaAck | DirectoryReply
 //!    | FlushSource | TransferAck | Demote | Promote | TransientRelease | TransientDrop |
 //!    ReleaseComplete | TransientAbandon | ReHome | TransientDiscard | ReSolicitBatch |
 //!    CrossingRequest | TransientCrossingRequest | TransientCrossingGrant | CrossingAborted |

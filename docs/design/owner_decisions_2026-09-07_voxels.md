@@ -296,3 +296,61 @@ store open 73.5 µs and handshake 35.9 µs in release against the 200 µs gate, 
 Tier-A coverage PASS at 100 %; io-prod 95.12 / 95.33 % against the floor of 94. Still owed by the owner:
 the append-only tolerance in metres for the world identity (Format D). Next: slice 4, the wire plant of
 the SL6 YES rows only, after its discussion.
+
+## V8. SLICE 4 DISCUSSION — THE WIRE PLANT (2026-09-07)
+
+The owner read `docs/investigation/2026-09-07/slice_04_wire_plant.md`, asked one question, and said
+*"please do the slice 4 implementation"*: every recommendation in §6 of that document is a RULING.
+
+| Item | Ruling |
+|---|---|
+| What a plant is | Every voxel shape goes into the reviewed wire files NOW, at the END of its enum, in one commit, with no producer and no consumer, so the slices that fill them never move an index. An arm's PLACE freezes with the plant; its SHAPE freezes with its first consumer (the incremental-freeze rule). |
+| What is planted | Exactly the SL6 YES rows of V6 — R-3 (the bulk class, the chunk rows, the manifest, the bulk-for envelope), R-5 (the world action and its forward), R-8 (`TAG_SURFACE`), R-9 (`HelloWorld`), R-11 and R-13 (tag NUMBERS only), R-20 (`ChildFelt` behind the `felt_down` capability, default OFF) — plus the on-disk ids (the two block families, the owner-fence key) and the tuning struct's field names. |
+| What is NOT planted | The cross-realm edit forward and its ack (R-1/R-2 NO), their step ids 19 and 20 (stay free), the rung floor (R-4 withdrawn — a floor pushed down is a clamp, SL3), the tuning VALUES (slice 9's benches), and nothing from any NO row, not even a reserved name. |
+| S4-1 one commit, minors bumped once | **Yes.** `PROTO_MINOR` 30 → 31; the floor does not move (every planted variant is appended and sender-gated). |
+| S4-2 a refusal back to the client | **Yes, small:** `ServerControlMsg::ActionRefused { seq, reason }`. Success needs no message: the block arrives on the diff lane. |
+| S4-3 the world refusal | **A new arm,** `ServerControlMsg::WorldRefused { ours, theirs }`; reusing the version refusal repurposes a message. |
+| S4-4 `ChildFelt`'s shape | **Yes:** on change, quantised in the drive's units, reliable like `ChildFacts`; the trial flag is a `ShardProfile` capability, default OFF until slice 13 measures the lane. |
+| S4-5 number the tags now | **Yes:** the seven chunk-row tags and `TAG_BODIES`; payloads land with their slices. |
+| S4-6 tuning field names now | **Yes;** values with slice 9's benches. |
+| S4-7 the owner-fence row and the schema ids | **Yes,** in this slice. |
+
+**The owner's question — "explain the rung floor withdrawal."** Answered: a rung is one level of the
+pyramid's ladder; the floor was one byte from the gateway saying "send nothing finer than this rung";
+it is withdrawn because (1) the realm can work its own floor out from two facts it already holds, its
+own bound and the drawable floor, and it ships fine rungs only around its OWN occupants (V89, the
+local rule), and (2) a floor pushed down is somebody else deciding how fine a realm may draw itself,
+which SL3 refuses. The gateway still FILTERS per session what the realm chose to publish; that is not
+a clamp. It can only return re-argued against SL3 by name, after measurement M-17.
+
+**Slice 4 LANDED (2026-09-07; uncommitted until the owner's word).** Every YES row's shape is on the
+wire, appended, with no producer and no consumer: `WorldAction` (one verb — placing Empty IS the
+removal) and `HelloWorld` from the client; `ActionRefused` and `WorldRefused` back; `ChunkRows` and
+`ChunkManifest` on the new bulk class (byte 9); `BulkFor` with ONE audience by the shape of its type;
+`SessionAction` with the session's fence; `TAG_SURFACE` (a frame and the declared generator tag) and
+`TAG_BODIES` (a number) in the window body; `ChildFelt` (discriminant 44) behind the `felt_down`
+capability, default OFF; the chunk row's schema (21) and the STORAGE REPORT's seven tags; the block
+store's ids 32 and 33, the owner-fence key, and a tuning struct with six names and no value.
+`PROTO_MINOR` 30 → 31, the floor unmoved. Every receiver that meets a planted arm with no path behind
+it COUNTS it (five counters) and sends nothing. A rung byte above 15 is refused at the decoder. An Opus
+5 refuter found 21 defects (no law break; the three load-bearing: the rung's refusal died on the wire,
+an uncalled accessor, a second removal verb), all answered. MEASURED (`just voxel-measures`): an empty
+chunk-row message 46 B, a bulk-for envelope with three recipients 71 B, a moon's self-look with luma
+and surface 58 B, the widest self-look 124 B of the 1 200 budget (pinned), a felt acceleration 60 B, a
+placement 38 B, its forward 65 B, the handshake and the world refusal 21 B each; Tier-A coverage PASS at
+100 %; io-prod 95.14 / 95.31 % against the floor of 94. Pre-existing red on the branch, not the slice's:
+the flight-table gate expects 51 governed rows and reads the whole 3.5-million-region forest (the Step
+23 boot-plant symptom), two frame-conversion process tests, and one release-only should-panic in the
+sim stub. Next: slice 5, the generator, after its discussion.
+
+**V8 addendum — THE LOAD ORDER (owner agreed 2026-09-07: "Agree, write those three lines").** The owner
+asked whether the storing and passing of information is the most performant way for extreme loads. The
+answer on record: the shapes are cheap and do not block the fast path (the gateway re-emits bulk bytes it
+never decodes; poses and bulk ride different classes, measured at p99 under 1 ms for poses beside 1.8 GB
+of bulk; fixed 12-byte records inside one frame per chunk; statements on change; a sparse pyramid), but
+"the most performant" is UNMEASURED at load until the benches run. Three rulings on the order of work:
+(1) **slice 5 measures M-16 first** — the exact cheap coarse summary — before any terrain is drawn,
+because everything sparse depends on it; (2) **slice 10 opens with the load harness** (M-1, M-2, M-11,
+M-17) against a stub producer, records the numbers, and only then writes the real producer; (3) **one
+shared buffer per bulk message at the gateway**, never one copy per session. Written into the proposal's
+slice 5 and slice 10 paragraphs.

@@ -264,6 +264,11 @@ pub(crate) fn on_shard_control(
                 outbox,
             );
         }
+        // THE VOXEL WIRE PLANT (slice 4, R-3): the per-session bulk forward lands with the first
+        // producer in slice 10. Until then a `BulkFor` is COUNTED, never silently dropped.
+        ShardToGateway::BulkFor { .. } => {
+            stats.bulk_for_unrouted += 1;
+        }
         ShardToGateway::Frame { .. }
         | ShardToGateway::FrameFor { .. }
         | ShardToGateway::RealmFrame { .. } => {

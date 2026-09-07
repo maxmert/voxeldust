@@ -76,6 +76,9 @@ fn class_to_byte(class: MsgClass) -> u8 {
         MsgClass::GhostDelta => 6,
         MsgClass::RealmSnapshot => 7,
         MsgClass::SignalDelta => 8,
+        // Slice 4: the bulk lane (R-3), gateway→client. A chunk row a producer marks `Retained` will
+        // survive a source crash under this byte; no producer exists in this build (slice 10).
+        MsgClass::Bulk => 9,
     }
 }
 
@@ -91,6 +94,7 @@ fn class_from_byte(b: u8) -> Option<MsgClass> {
         6 => MsgClass::GhostDelta,
         7 => MsgClass::RealmSnapshot,
         8 => MsgClass::SignalDelta,
+        9 => MsgClass::Bulk,
         _ => return None,
     })
 }
@@ -802,7 +806,7 @@ mod tests {
     use super::*;
     use vd_sim::io::Transport; // FlakyTransport impls Transport (+ ReplayTransport via super::*)
 
-    const ALL_CLASSES: [MsgClass; 9] = [
+    const ALL_CLASSES: [MsgClass; 10] = [
         MsgClass::Control,
         MsgClass::Saga,
         MsgClass::Snapshot,
@@ -812,6 +816,7 @@ mod tests {
         MsgClass::GhostDelta,
         MsgClass::RealmSnapshot,
         MsgClass::SignalDelta,
+        MsgClass::Bulk,
     ];
 
     fn key(peer: u64, class: MsgClass, inc: u64, seq: u64) -> OutboxKey {
@@ -854,7 +859,7 @@ mod tests {
             assert_eq!(class_from_byte(b), Some(c), "round-trip {c:?}");
         }
         assert_eq!(seen.len(), ALL_CLASSES.len(), "every class mapped");
-        assert_eq!(class_from_byte(9), None, "an unknown byte decodes to None");
+        assert_eq!(class_from_byte(10), None, "an unknown byte decodes to None");
         assert_eq!(class_from_byte(255), None);
     }
 

@@ -20,6 +20,7 @@
 
 pub mod built;
 pub mod child_index;
+pub mod chunk_row;
 pub mod collections;
 pub mod controls;
 pub mod digest;

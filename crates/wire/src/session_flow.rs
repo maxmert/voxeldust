@@ -174,6 +174,18 @@ pub enum GatewayToShard {
     ///
     /// APPENDED variant (postcard-safe additive shape).
     SkyRequest,
+    /// ★ A SESSION's RELIABLE WORLD ACTION (the voxel foundation, slice 4; SL6 row R-5, owner YES,
+    /// ruling V6): slice 10's gateway WILL forward a client's `ClientControlMsg::WorldAction` to the
+    /// session's authority shard with the session's fence, so a stale session is refused, and slice
+    /// 10's shard WILL answer a refusal through the gateway (`ServerControlMsg::ActionRefused`) and
+    /// success through the diff lane. TODAY nothing sends one, and a shard that receives one counts
+    /// it (`session_actions_unrouted`) and drops it. APPENDED (discriminant 7, minor 31).
+    SessionAction {
+        session: SessionId,
+        fence: Fence,
+        seq: u64,
+        action: crate::channels::WorldAction,
+    },
 }
 
 /// Shard → gateway session replies and world frames.
@@ -501,6 +513,29 @@ pub enum ShardToGateway {
         entity: EntityId,
         at: UniverseTick,
     },
+    /// ★ BULK BYTES FOR AN AUDIENCE (the voxel foundation, slice 4; SL6 row R-3, owner YES, ruling
+    /// V6): a realm's `BulkMsg` (chunk rows, a manifest), already encoded, for ONE audience — the
+    /// sessions it names (the ones that hold the chunk) OR every holder of a window, never both and
+    /// never nobody, by the shape of [`BulkAudience`]. Slice 9's gateway WILL re-emit the bytes on
+    /// each session's bulk lane (`MsgClass::Bulk`) and NEVER decode them (it holds no chunk); TODAY
+    /// the gateway counts one (`bulk_for_unrouted`) and drops it, and no shard sends one. Stated on
+    /// the Control class, like every shard→gateway statement. Not a realm boundary: the connection
+    /// plane is not a realm (SL2, 2026-08-24). APPENDED (discriminant 16, minor 31).
+    BulkFor {
+        realm_fence: Fence,
+        audience: BulkAudience,
+        bytes: Vec<u8>,
+    },
+}
+
+/// Who a `BulkFor` is for: exactly one of the two, by construction of the type (a row for nobody, or
+/// for two audiences at once, is unrepresentable).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BulkAudience {
+    /// The named sessions — the ones that hold the chunk. An empty list is refused by the receiver.
+    Sessions(Vec<SessionId>),
+    /// Every session behind the gateway that holds this window.
+    WindowHolders(WindowId),
 }
 
 impl ShardToGateway {
@@ -524,7 +559,8 @@ impl ShardToGateway {
             | ShardToGateway::WindowStaticRows { .. }
             | ShardToGateway::StarCatalogue { .. }
             | ShardToGateway::StarSkyAlive { .. }
-            | ShardToGateway::EntityOutOfInterest { .. } => None,
+            | ShardToGateway::EntityOutOfInterest { .. }
+            | ShardToGateway::BulkFor { .. } => None,
         }
     }
 
@@ -553,7 +589,8 @@ impl ShardToGateway {
             | ShardToGateway::StarCatalogue { .. }
             | ShardToGateway::StarSkyAlive { .. }
             | ShardToGateway::FrameFor { .. }
-            | ShardToGateway::EntityOutOfInterest { .. } => None,
+            | ShardToGateway::EntityOutOfInterest { .. }
+            | ShardToGateway::BulkFor { .. } => None,
         }
     }
 }
@@ -1326,6 +1363,12 @@ mod tests {
                 entity: EntityId(7),
                 at: UniverseTick(11),
             },
+            // The voxel wire plant (minor 31): bulk bytes for named sessions.
+            ShardToGateway::BulkFor {
+                realm_fence: Fence(2),
+                audience: BulkAudience::Sessions(vec![SessionId(1), SessionId(4)]),
+                bytes: vec![7, 7],
+            },
         ]
     }
 
@@ -1364,6 +1407,13 @@ mod tests {
                 window: WindowId(2),
             },
             GatewayToShard::SkyRequest,
+            // The voxel wire plant (minor 31): a session's reliable world action.
+            GatewayToShard::SessionAction {
+                session: SessionId(1),
+                fence: Fence(2),
+                seq: 9,
+                action: crate::channels::WorldAction::Fire,
+            },
         ]
     }
 
@@ -1399,6 +1449,8 @@ mod tests {
                 // The interest body and the out-of-interest notice hold 14/15 (mesh minor 30) forever.
                 ShardToGateway::FrameFor { .. } => 14,
                 ShardToGateway::EntityOutOfInterest { .. } => 15,
+                // The voxel wire plant holds 16 (minor 31) forever.
+                ShardToGateway::BulkFor { .. } => 16,
             }
         }
         fn g2s_index(msg: &GatewayToShard) -> u8 {
@@ -1412,6 +1464,8 @@ mod tests {
                 GatewayToShard::WindowClose { .. } => 5,
                 // Asking for the sky holds 6 (S11) forever.
                 GatewayToShard::SkyRequest => 6,
+                // The voxel wire plant holds 7 (minor 31) forever.
+                GatewayToShard::SessionAction { .. } => 7,
             }
         }
         let mut seen = std::collections::BTreeSet::new();
@@ -1420,18 +1474,18 @@ mod tests {
             assert_eq!(bytes[0], s2g_index(&msg));
             seen.insert(bytes[0]);
         }
-        assert_eq!(seen.len(), 16);
+        assert_eq!(seen.len(), 17);
         assert_eq!(seen.first().copied(), Some(0));
-        assert_eq!(seen.last().copied(), Some(15));
+        assert_eq!(seen.last().copied(), Some(16));
         let mut seen = std::collections::BTreeSet::new();
         for msg in every_gateway_to_shard_arm() {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
             assert_eq!(bytes[0], g2s_index(&msg));
             seen.insert(bytes[0]);
         }
-        assert_eq!(seen.len(), 7);
+        assert_eq!(seen.len(), 8);
         assert_eq!(seen.first().copied(), Some(0));
-        assert_eq!(seen.last().copied(), Some(6));
+        assert_eq!(seen.last().copied(), Some(7));
     }
 
     /// The NESTED positional pins for the window lane's two payload enums — the same

@@ -225,6 +225,17 @@ pub(crate) fn on_client_control(
             }
         }
         ClientControlMsg::CutEmitted { .. } | ClientControlMsg::Pong { .. } => {}
+        // THE VOXEL WIRE PLANT (slice 4). The arms are on the wire so their indices are fixed; the
+        // forward to the session's authority shard (R-5) lands with the placement rule in slice 10,
+        // and the world comparison (R-9) lands with the generator in slice 5. Until then each is
+        // COUNTED, never silently dropped, and the client hears nothing: a refusal it could act on
+        // needs a rule to name a reason, and inventing one here would be a placeholder.
+        ClientControlMsg::WorldAction { .. } => {
+            stats.world_actions_unrouted += 1;
+        }
+        ClientControlMsg::HelloWorld { .. } => {
+            stats.world_hello_stated += 1;
+        }
     }
 }
 

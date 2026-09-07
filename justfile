@@ -726,3 +726,11 @@ k3d-agent: agent-image-build k3d-secrets
 
 # Convenience: full server bring-up THEN the agent proof (deferred, run explicitly).
 k3d-agent-e2e: k3d-all k3d-agent
+
+# THE VOXEL FOUNDATION's measurements (slices 3 and 4): the registry digest's cost at a store open and
+# a handshake (gate 200 us each) and the wire plant's encoded header sizes (gate: the self-look bag
+# fits one datagram, every empty header under 100 B). Each example ASSERTS its gate, so this recipe
+# can go red. Release, because the numbers are the point.
+voxel-measures:
+    cargo run --release -p vd-bins --example registry_cost
+    cargo run --release -p vd-bins --example wire_plant_size

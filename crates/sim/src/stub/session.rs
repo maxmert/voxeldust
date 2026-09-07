@@ -347,6 +347,13 @@ pub(crate) fn on_gateway_msg(
         GatewayToShard::SkyRequest => {
             stats.sky_requests_taken += 1;
         }
+        // A SESSION's WORLD ACTION (the voxel foundation, slice 4 plant; R-5): the arm is on the wire
+        // so its index is fixed, and the placement path that consumes it is slice 10's. Until then it
+        // is COUNTED, never silently dropped, and the client hears nothing: a refusal it could act on
+        // needs the placement rule to name a reason, and inventing one here would be a placeholder.
+        GatewayToShard::SessionAction { .. } => {
+            stats.session_actions_unrouted += 1;
+        }
     }
 }
 

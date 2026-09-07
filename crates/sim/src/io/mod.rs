@@ -82,6 +82,17 @@ pub enum MsgClass {
     /// child→parent latest-wins datagrams (a lost one self-heals on the next cadence/tick). A dedicated
     /// lane, sent shard→shard directly (never to a gateway). APPEND-ONLY (see the header).
     SignalDelta,
+    /// ★ THE BULK LANE (the voxel foundation, slice 4; SL6 row R-3, owner YES, ruling V6): the
+    /// GATEWAY→CLIENT class of the diff lane's chunk rows and manifests
+    /// (`vd_wire::channels::BulkMsg::ChunkRows`). The owning realm states its rows to the gateway as
+    /// `ShardToGateway::BulkFor` on the Control class; the gateway re-emits the bytes to the named
+    /// sessions on THIS class. A shard never sends or receives on it.
+    /// RELIABLE and PACED — an edit must never be lost (a dropped row is a vanished placement), and a
+    /// city's catch-up must never head-of-line-block the 20 Hz pose datagrams, which ride their own
+    /// classes. The carrier class is the decoder's discriminator (postcard is non-self-describing), so
+    /// the bulk family needs its own. UNROUTED until slice 9 turns the first producer on. APPENDED
+    /// (wire byte 9; outbox key byte 9 pinned separately in io-prod).
+    Bulk,
 }
 
 /// Carrier reliability: whether a class rides a reliable ordered stream or a
@@ -128,9 +139,12 @@ impl MsgClass {
             // datagrams (a lost beat is bridged by the retain TTL; a lost frame self-heals next
             // tick) — the UNRELIABLE lane, like the ghost pose delta.
             | MsgClass::SignalDelta => Reliability::Unreliable,
-            MsgClass::Control | MsgClass::Saga | MsgClass::Membership | MsgClass::GhostReliable => {
-                Reliability::Reliable
-            }
+            // The bulk lane is reliable: a lost chunk row is a vanished placement (R-3).
+            MsgClass::Control
+            | MsgClass::Saga
+            | MsgClass::Membership
+            | MsgClass::GhostReliable
+            | MsgClass::Bulk => Reliability::Reliable,
         }
     }
 }
@@ -654,6 +668,7 @@ mod tests {
         assert_eq!(pc(MsgClass::GhostDelta), vec![6]);
         assert_eq!(pc(MsgClass::RealmSnapshot), vec![7]);
         assert_eq!(pc(MsgClass::SignalDelta), vec![8]);
+        assert_eq!(pc(MsgClass::Bulk), vec![9]);
         // Round-trip closes the loop: the byte decodes back to the same variant.
         for (b, c) in [
             (0u8, MsgClass::Control),
@@ -665,6 +680,7 @@ mod tests {
             (6, MsgClass::GhostDelta),
             (7, MsgClass::RealmSnapshot),
             (8, MsgClass::SignalDelta),
+            (9, MsgClass::Bulk),
         ] {
             assert_eq!(
                 postcard::from_bytes::<MsgClass>(&[b]).expect("decodes"),
@@ -690,6 +706,9 @@ mod tests {
             MsgClass::RealmSnapshot.reliability(),
             Reliability::Unreliable
         );
+        // Slice 4: the bulk lane is reliable — a lost chunk row is a vanished placement.
+        assert_eq!(MsgClass::Bulk.reliability(), Reliability::Reliable);
+        assert_eq!(MsgClass::SignalDelta.reliability(), Reliability::Unreliable);
         // A NodeUnreachable notice is reliable feedback regardless of failed class.
         assert_eq!(
             Inbound::NodeUnreachable {

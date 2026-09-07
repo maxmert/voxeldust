@@ -17,8 +17,39 @@ use crate::pose::RealmId;
 use super::bend::Face;
 
 /// The detail rung of an address: a cell is `2^rung` metres. Four bits: `0..=15`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(try_from = "u8", into = "u8")]
 pub struct Rung(u8);
+
+/// A rung byte above the ladder's top, refused at the decoder (never a `Rung` that shifts by 200).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("rung {0} is above the ladder's top of 15")]
+pub struct RungOutOfRange(pub u8);
+
+impl TryFrom<u8> for Rung {
+    type Error = RungOutOfRange;
+    fn try_from(level: u8) -> Result<Rung, RungOutOfRange> {
+        Rung::new(level).ok_or(RungOutOfRange(level))
+    }
+}
+
+impl From<Rung> for u8 {
+    fn from(rung: Rung) -> u8 {
+        rung.0
+    }
+}
 
 impl Rung {
     /// The finest rung: one-metre cells, the only writable rung.
@@ -50,7 +81,9 @@ impl Rung {
 }
 
 /// The name of one cell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct CellAddr {
     /// The realm whose grid this is.
     pub body: RealmId,
@@ -71,7 +104,9 @@ pub const CHUNK_EDGE: i32 = 62;
 
 /// The coordinate of a chunk: the address's `(i, j, k)` each divided by the chunk edge, rounding
 /// toward negative infinity, so a flat grid's negative half packs without a special case.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct ChunkCoord {
     pub body: RealmId,
     pub face: Face,
@@ -240,5 +275,45 @@ mod tests {
             (0, 0, 61),
             "and sits at that chunk's top cell"
         );
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    /// The rung's refusal survives the wire (slice 4, the refuter's finding 1): a byte above the
+    /// ladder's top decodes to an ERROR, never to a `Rung` whose shift would panic or wrap.
+    #[test]
+    fn a_rung_byte_above_the_top_is_refused_at_the_decoder() {
+        let top = Rung::new(Rung::MAX).expect("the top rung");
+        let bytes = postcard::to_allocvec(&top).expect("encodes");
+        assert_eq!(bytes, vec![Rung::MAX], "one byte, the level");
+        assert_eq!(postcard::from_bytes::<Rung>(&bytes), Ok(top));
+        assert!(
+            postcard::from_bytes::<Rung>(&[Rung::MAX + 1]).is_err(),
+            "rung 16 is refused, never built"
+        );
+        assert!(postcard::from_bytes::<Rung>(&[200]).is_err());
+        assert_eq!(Rung::try_from(200), Err(RungOutOfRange(200)));
+        assert_eq!(Rung::try_from(3).map(u8::from), Ok(3));
+        assert_eq!(
+            RungOutOfRange(200).to_string(),
+            "rung 200 is above the ladder's top of 15"
+        );
+        // A whole address refuses with the rung, so a block edit at rung 200 never reaches a shift.
+        let addr = CellAddr {
+            body: crate::pose::RealmId::Planet(7),
+            face: Face::PosY,
+            rung: top,
+            i: 1,
+            j: 2,
+            k: 3,
+        };
+        let mut bytes = postcard::to_allocvec(&addr).expect("encodes");
+        assert_eq!(postcard::from_bytes::<CellAddr>(&bytes), Ok(addr));
+        let rung_at = bytes.len() - 3;
+        bytes[rung_at] = 200;
+        assert!(postcard::from_bytes::<CellAddr>(&bytes).is_err());
     }
 }

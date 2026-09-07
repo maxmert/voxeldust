@@ -412,6 +412,15 @@ pub struct StubStats {
     /// while some client behind it lacks the sky, so this settles once every client is served. A
     /// counter that keeps climbing means a client is never confirming what it holds.
     pub sky_requests_taken: u64,
+    /// THE VOXEL WIRE PLANT (slice 4): a session's reliable world action (`GatewayToShard::SessionAction`,
+    /// R-5) arrived at a shard that has no placement path yet (the first consumer is slice 10). COUNTED,
+    /// never silently dropped, so a client that edits before the path exists is visible in the counters
+    /// and not in a mystery. Expected to stay 0 until slice 10 lands; then this counter is retired.
+    pub session_actions_unrouted: u64,
+    /// THE VOXEL WIRE PLANT (slice 4): bytes on the bulk class (`MsgClass::Bulk`, R-3) reached a shard.
+    /// A shard produces bulk for the gateway and never receives it, so a non-zero count is a mis-route
+    /// or a peer ahead of this build. Expected to stay 0 forever.
+    pub bulk_unrouted: u64,
     /// THE STATIC ROSTER's sends (slice S10). Expected to reach a small number and STOP: a realm whose
     /// children do not move states them once per subscriber, then only on a keep-alive re-assert. A
     /// counter that keeps climbing on a static world means the send-on-change baseline is not holding.

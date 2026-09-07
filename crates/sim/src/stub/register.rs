@@ -547,6 +547,11 @@ fn process_inbound(
             // Membership (clock sync) is consumed by the node-level follower system;
             // Snapshot / RealmSnapshot are gateway→client render datagrams and never target a shard.
             MsgClass::Membership | MsgClass::Snapshot | MsgClass::RealmSnapshot => {}
+            // THE BULK LANE (the voxel foundation, slice 4 plant; R-3) is the GATEWAY→CLIENT class
+            // of the chunk rows. A shard states its rows to the gateway as `ShardToGateway::BulkFor`
+            // on the Control class and never sends or receives bytes on this class at all. Bytes on
+            // it arriving here are a mis-route or a peer ahead of this build: COUNTED, never decoded.
+            MsgClass::Bulk => stats.bulk_unrouted += 1,
             // The up-lanes' carrier. A malformed / mis-classed payload — and a frame of any
             // TOMBSTONED lane that rode it (`OccupantInterest`, slice D; `EntityInterest`/
             // `EntityCascade`, slice E; discriminants reserved forever) — is counted as
