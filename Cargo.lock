@@ -6343,6 +6343,7 @@ dependencies = [
  "proptest",
  "rstar",
  "serde",
+ "sha2",
  "thiserror 2.0.18",
 ]
 

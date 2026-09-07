@@ -11,6 +11,9 @@ postcard = { workspace = true }
 thiserror = { workspace = true }
 glam = { workspace = true }
 rstar = { workspace = true }
+# The registry's identity digest (ruling V7 S3-4: SHA-256 over the in-digest columns). Already a
+# workspace dependency (the connection plane's tickets); new to this crate only.
+sha2 = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

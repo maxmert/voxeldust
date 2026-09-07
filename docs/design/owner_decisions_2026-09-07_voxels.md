@@ -268,3 +268,31 @@ on x86-64 under emulation; a lookup 19 ns on a 500 m asteroid, Earth and the lar
 (0.025 %), never over half a unit; one gas giant of 89 156 km is above the address and has no grid;
 Tier-A coverage PASS at 100 %; io-prod 95.12 / 95.31 % against the floor of 94. Next: slice 3, the
 registry and the shape catalogue, after its discussion.
+
+## V7. SLICE 3 DISCUSSION — THE REGISTRY (2026-09-07, night)
+
+The owner read `docs/investigation/2026-09-07/slice_03_registry_catalogue.md` and answered.
+
+| Item | Ruling |
+|---|---|
+| THEMES ARE DROPPED | *"Themes is very controversial. If I found that block for a fantasy theme, I'd like to be able to place it anywhere in theory. Themes might complicate things."* No theme column on any kind row, no theme in the identity digest, no per-realm placement allow-list by theme. A kind is placeable anywhere any kind is placeable. Content packs are rows appended over time. Supersedes V2.7's "the registry and the record must leave room for themes" — the room is the 16-bit kind id itself (65 536 kinds), and no other structure. Ruling B-13's digest column set loses the theme column. |
+| The number of kinds | Dropping themes limits nothing: the cap is the record's 16-bit kind id; a kind is one REGISTERED (substance, form, function) row, never the product of all tables. |
+| The first substances | *"I would expect that we support way more if we want to build earth like planet as our home."* The registry must hold every substance the home planet's generator can emit, plus what a builder needs; it is append-only and grows without a migration. The first list is about fifty, grouped (bedrock, loose ground, surface and water, ores and minerals, grown and organic, building, air); slice 5's geology tables append what the strata need. Every substance's density and work of fracture come from cited physical tables, so mass and durability derive per kind. |
+| S3-1, S3-3, S3-4, S3-5 | **Approved as recommended:** twenty shapes exactly (the half-cube, the quarter post and the post belong to the sub-grid); a retired kind keeps its row with a replacement pointer; SHA-256 over the in-digest columns; the client's unknown-variant fallback is a render-registry row the server never learns of. |
+
+**Slice 3 LANDED (2026-09-07, after the owner's "Go"; uncommitted until the owner's word).**
+`crates/core/src/registry/`: 60 substances, 24 forms (the twenty shapes), one function, four attachment
+kinds, 523 block kinds and the 24 rotations, every table a `const` array whose index is the id, with an
+identity KEY beside a display NAME on every row. The kind numbering is ONE frozen recipe with an
+appended list at the end, pinned by a recipe digest. The identity digest is a SHA-256 prefix over keys,
+form geometry and the gap convention's tag — never a number, never a name — so a rename or a new style
+refuses nothing and a meaning swap refuses everything. Mass and integrity derive per kind from cited
+facts and reproduce the design's worked table exactly (granite 1 198, ice 207, steel 37 900). Placement
+is a stated rule (Empty; solid or loose non-ore terrain; the cube of every building substance). No theme
+column anywhere. The mason builds with the bedrock rows themselves; there is no "cut stone". An Opus 5
+refuter found 35 defects (three load-bearing: the numbering was not append-only, integrity floored soft
+substances to zero, the digest bound numbers instead of identity); all answered. MEASURED: 24 tests;
+store open 73.5 µs and handshake 35.9 µs in release against the 200 µs gate, asserted by the example;
+Tier-A coverage PASS at 100 %; io-prod 95.12 / 95.33 % against the floor of 94. Still owed by the owner:
+the append-only tolerance in metres for the world identity (Format D). Next: slice 4, the wire plant of
+the SL6 YES rows only, after its discussion.

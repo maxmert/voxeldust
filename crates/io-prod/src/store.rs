@@ -1280,7 +1280,11 @@ mod tests {
                 Some(b(b"c")),
                 "a committed key reads back by point read"
             );
-            assert_eq!(s.get(&[2, 7]), None, "a staged put is invisible to a point read");
+            assert_eq!(
+                s.get(&[2, 7]),
+                None,
+                "a staged put is invisible to a point read"
+            );
             assert_eq!(s.get(&[9]), None, "an absent key reads as None");
             assert_eq!(
                 s.range(&[2, 0], &[3, 0], 10),

@@ -566,13 +566,14 @@ byte-identical across tiers. **G-MAPPING-ROUNDTRIP** at `N = 2²⁶`, sampled at
 inside the crate in Rust — pass under 10⁻⁶ cells; and `addr_of` microseconds per call, to show it is O(1)
 and off the containment path (`crates/core/src/geometry.rs:1442` reads a `Boundary`, never a cell).
 
-**Slice 3 — The registry and the shape catalogue. (R.)**
-*Lands:* the substance, form, function, block-kind and attachment-kind tables in the proven
-`crates/core/src/entity_kind.rs:46-84` idiom — dense explicit discriminants, an `ALL` array, a
-`from_tag` that errors, an exhaustive `def()`; the theme column; the identity prefix digest over the
-identity-bearing columns only; the full ~20-shape catalogue declared with everything but the cube
-unplaceable; the 24-rotation integer table.
-*Laws:* HR3, HR5, SL5 (a theme is a column, never a second registry), the no-magic-numbers rule.
+**Slice 3 — The registry and the shape catalogue. (R.) — LANDED 2026-09-07, see
+`slice_03_registry_catalogue.md` §12.**
+*Lands:* the substance, form, function, block-kind and attachment-kind tables as `const` arrays whose
+index is the id, each row with an identity KEY beside a display NAME, a `def()` that refuses an unknown
+number; no theme column (ruling V7 dropped themes); the identity prefix digest over the keys and the
+form geometry only; the twenty-shape catalogue declared with everything but the cube unplaceable; the
+24-rotation integer table; mass and integrity derived per kind from cited facts.
+*Laws:* HR3, HR5, SL5, the no-magic-numbers rule.
 *Gate:* the drift tripwire for all five tables, including the round-trip assertion that a hand-edited
 row fails the build; and **the digest-column test**: append a kind and raise a variant count from 3 to 4,
 assert the stored-length prefix digest is UNCHANGED in both cases; then change one row's triple and
