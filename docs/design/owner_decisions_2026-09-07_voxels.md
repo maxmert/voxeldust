@@ -383,8 +383,9 @@ chunks × 12 rungs of the home planet), `vd-terrain` (S5-7), and the measurement
 answer falls from 710 µs at rung 0 to 266 µs at the top rung; the skips refuse 463 of a column's 470
 chunks without a cell pass; the boot self-check costs 13.5 ms). S5-3 (the deltas) and S5-6 (the seed
 law) bind the store, slice 9, and the block record; nothing in the generator contradicts them: it
-draws bulk stock only, no ore, no indicator. S5-5: the x86-64 leg did NOT run (Docker is off); it is
-`D-TERRAIN-1` in `DEFERRED.md` with G3 and G5. The Opus 5 refuter's 24 findings were all answered
+draws bulk stock only, no ore, no indicator. S5-5: after the commit the owner started Docker, and the
+aarch64 Linux leg and the EMULATED x86-64 leg both ran equal (`just terrain-legs`); the real x86-64
+machine is still owed as `D-TERRAIN-1` in `DEFERRED.md`, with G5. The Opus 5 refuter's 24 findings were all answered
 before any world was saved, so the version stays 1; the four that moved bytes (a skip that wrote
 different bytes from the cell pass, a cavern lattice that broke at every chunk edge, tube regions
 that walled at their borders, a pole on the wrong axis) are fixed and each has a test that failed

@@ -7718,7 +7718,7 @@ round-trip test in `frame_conversion_e2e`. The one mention in `vd-sim` is a comm
 **WHEN.** Its own slice, after S12 lands. Owner-directed sequencing: unblock now, land S12, then plan
 the rewrite.
 
-### D-TERRAIN-1 🟧 THE GENERATOR'S OWED LEGS — "no drift" is MEASURED on two targets, not on every shipped one (slice 5, 2026-09-08)
+### D-TERRAIN-1 🟧 THE GENERATOR'S OWED LEGS — "no drift" is MEASURED on three targets and EMULATED on the fourth (slice 5, 2026-09-08)
 
 **WHAT IS DEFERRED.** SL10 clause 3 says no drift is a measurement on EVERY shipped target. Slice 5
 landed `vd-seed` (the leaf) and `vd-terrain` (the one generator) with the four-layer float fence and
@@ -7728,8 +7728,8 @@ release, and `-C target-cpu=native`. The other legs have not run:
 
 | Leg | Target | Why it did not run | Proper |
 |---|---|---|---|
-| G3 | aarch64 Linux, the k3d image | Docker is off on this host (the owner keeps it off) | run `just terrain-pin` inside the image build; red on one byte |
-| G4 | x86-64 Linux | no x86-64 machine in the project; emulation needs Docker | emulation as a SMOKE test when Docker is up; a REAL x86-64 machine before SL10 clause 3 is called satisfied (rulings V6 D, V9 S5-5) |
+| G3 | aarch64 Linux, the k3d image's triple | **RAN 2026-09-08** (`just terrain-legs`, Docker up): the pinned image `rust:1.94.1-slim-bookworm` on `linux/arm64`, 2 592 digests equal, the tampered-table control red. Not the image BUILD itself (that builds the whole workspace); same base image, same triple, same profile | keep it in `terrain-legs`; run the pin inside the image build when the image next builds |
+| G4 | x86-64 Linux | **EMULATED 2026-09-08** (`just terrain-legs` on `linux/amd64` under the Mac's emulation): 2 592 digests equal. A smoke test: it can find a drift and can never prove its absence | a REAL x86-64 machine before SL10 clause 3 is called satisfied (rulings V6 D, V9 S5-5) |
 | G5 | the client binary against the server binary | the client does not link the generator yet | slice 7: `vdctl gen-digest` against the shard's boot digest, at login (the world hello's measured half) |
 
 **Example.** A player logs in from a Windows x86-64 client. The gateway on the aarch64 pod computed
@@ -7746,5 +7746,5 @@ name, but "no drift" is not yet a fact about that target.
   definition; a body's band is derived from its relief in the generator. The collider slice replaces
   the provisional band with the body's own.
 
-**WHEN.** G3 the next time the image builds with Docker up; G4 smoke the same day, G4 real before
-the first saved world; G5 in slice 7; the radius law and the provisional band in the collider slice.
+**WHEN.** G4 real before the first saved world (the only leg still owed for "no drift"); G5 in
+slice 7; the radius law and the provisional band in the collider slice.

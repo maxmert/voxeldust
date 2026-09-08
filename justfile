@@ -749,6 +749,13 @@ terrain-link-scan:
     cargo build --release -p vd-terrain -p vd-physics
     scripts/terrain_link_scan.sh --control
     scripts/terrain_link_scan.sh
+# ★ THE GOLDEN LEGS ON OTHER TARGETS (SL10 clause 3; needs Docker up): the leaf's and the generator's
+# tests, the 2 592-digest table included, in the pinned toolchain image on aarch64 Linux (the k3d
+# image's triple) and under x86-64 EMULATION (a smoke test: it can find a drift, never prove its
+# absence — a real x86-64 machine is owed, DEFERRED D-TERRAIN-1). Not in `gate`: it needs Docker.
+terrain-legs:
+    scripts/terrain_legs.sh linux/arm64
+    scripts/terrain_legs.sh linux/amd64
 # The lint layer's observed-failing control: with the `fence-control` feature the crate carries a
 # sine, a fused multiply-add and a max, and clippy MUST go red on all three.
 terrain-fence-control:

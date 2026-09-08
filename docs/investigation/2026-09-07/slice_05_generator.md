@@ -105,8 +105,8 @@ branch is against an integer-exact value, so a branch cannot flip on one ulp.
 |---|---|---|---|
 | G1 | aarch64 macOS, debug and release, stable and the coverage nightly | this Mac | RAN (2026-09-08): equal |
 | G2 | the same with `-C target-cpu=native` | this Mac | RAN: equal |
-| G3 | aarch64 Linux, the k3d image | the image build | DID NOT RUN (Docker off) — `D-TERRAIN-1` |
-| G4 | x86-64 Linux | emulation on this Mac (a smoke test: it can find a drift, never prove its absence); a real x86-64 machine before V1.3 is called satisfied (ruling V6 D) | DID NOT RUN (Docker off; no x86-64 machine) — `D-TERRAIN-1` |
+| G3 | aarch64 Linux, the k3d image's triple | `just terrain-legs` (the pinned image on `linux/arm64`) | RAN (2026-09-08, Docker up): equal |
+| G4 | x86-64 Linux | `just terrain-legs` on `linux/amd64` under emulation (a smoke test: it can find a drift, never prove its absence); a real x86-64 machine before V1.3 is called satisfied (ruling V6 D) | EMULATED: equal; REAL OWED — `D-TERRAIN-1` |
 | G5 | the client binary against the server binary | `vdctl gen-digest` and the shard's boot digest | OWED to slice 7, when the client links the crate |
 
 **Which layer covers which crate (the refuter's finding 18, stated honestly).** Layer 1, the `Gf`
@@ -406,11 +406,20 @@ call, and it is a version bump if it changes.
 answers table at its end. The four that moved bytes (F1 the skip bytes, F2 the cavern lattice edge,
 F3 the tube region walls, F4 the pole) each carry a test that was red before the fix.
 
-**Owed, by name:** `D-TERRAIN-1` in `DEFERRED.md` — G3 (the aarch64 Linux image) and G4 (x86-64) did
-not run: Docker is off on this host and no x86-64 machine exists in the project; the emulated smoke
-test runs when Docker is up, and the real x86-64 leg before SL10 clause 3 is called satisfied (ruling
-V6 D). G5 (the client binary against the server binary) is slice 7's, when the client links the crate.
-U12 (the extractor) is slice 6's.
+**The other targets (2026-09-08, after the commit, Docker up; `just terrain-legs`,
+`scripts/terrain_legs.sh`):** the leaf's and the generator's tests with the 2 592-digest table, in the
+pinned image `rust:1.94.1-slim-bookworm`, a target directory of their own:
+
+| Leg | Host reported | Result |
+|---|---|---|
+| G3 aarch64 Linux (`linux/arm64`, the k3d image's triple and base image) | `aarch64-unknown-linux-gnu` | 20 + 30 + 2 tests pass; every digest equal; the tampered table refused |
+| G4 x86-64 Linux (`linux/amd64`, EMULATED on this Mac) | `x86_64-unknown-linux-gnu` | 20 + 30 + 2 tests pass; every digest equal |
+
+So the table is equal on aarch64 macOS (three legs), aarch64 Linux and emulated x86-64 Linux.
+
+**Owed, by name:** `D-TERRAIN-1` in `DEFERRED.md` — the REAL x86-64 leg (emulation can find a drift
+and cannot prove its absence; ruling V6 D). G5 (the client binary against the server binary) is slice
+7's, when the client links the crate. U12 (the extractor) is slice 6's.
 
 Tests (release): seed 20, terrain 30 + 4 doc + the pin (2), core 377, wire 254, sim window lane 30,
 connection-plane 103 + 4 + 7, bins 58 + the home-body cross-pin, crate isolation 6 + the voxel pins 1 —
