@@ -6264,7 +6264,9 @@ dependencies = [
  "vd-io-prod",
  "vd-node",
  "vd-physics",
+ "vd-seed",
  "vd-sim",
+ "vd-terrain",
  "vd-wire",
 ]
 
@@ -6332,6 +6334,7 @@ dependencies = [
  "vd-harness",
  "vd-physics",
  "vd-sim",
+ "vd-terrain",
  "vd-wire",
 ]
 
@@ -6346,6 +6349,7 @@ dependencies = [
  "serde",
  "sha2",
  "thiserror 2.0.18",
+ "vd-seed",
 ]
 
 [[package]]
@@ -6431,6 +6435,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vd-seed"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+]
+
+[[package]]
 name = "vd-sim"
 version = "0.1.0"
 dependencies = [
@@ -6448,6 +6460,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vd-terrain"
+version = "0.1.0"
+dependencies = [
+ "vd-seed",
+]
+
+[[package]]
 name = "vd-tests"
 version = "0.1.0"
 dependencies = [
@@ -6462,6 +6481,7 @@ dependencies = [
  "vd-node",
  "vd-physics",
  "vd-sim",
+ "vd-terrain",
  "vd-wire",
 ]
 

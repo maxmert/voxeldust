@@ -23,7 +23,7 @@ use vd_core::{EntityId, Fence, NodeId, SessionId, TickId};
 use vd_sim::io::MsgClass;
 use vd_sim::io::PeerResetCause;
 use vd_sim::runtime::{NodeIdentity, OutboundBox};
-use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId};
+use vd_wire::channels::{ClientControlMsg, ServerControlMsg, SubId, WorldHalf};
 use vd_wire::seams::directory::{AuthorityRef, DirectoryKey, DirectoryOp};
 use vd_wire::session_flow::{
     GatewayToShard, ShardToGateway, peek_snapshot_frame_id, retag_snapshot_sub,
@@ -233,8 +233,31 @@ pub(crate) fn on_client_control(
         ClientControlMsg::WorldAction { .. } => {
             stats.world_actions_unrouted += 1;
         }
-        ClientControlMsg::HelloWorld { .. } => {
+        // ★ THE WORLD HELLO (slice 5; SL10 clause 3, R-9): the client states its declared world
+        // generation and its measured arithmetic profile. Either half differing from this gateway's is
+        // refused by name — the pair that differs and WHICH half, the declared half first — and the
+        // refusal is BINDING: the session ends, exactly as a version refusal ends it, so nothing is
+        // drawn against the wrong recipe. A client that states nothing is served as today; slice 7
+        // makes the statement mandatory when the client links the generator.
+        ClientControlMsg::HelloWorld { declared, measured } => {
             stats.world_hello_stated += 1;
+            let ours = config.world;
+            let mismatch = if declared != ours.declared {
+                Some((ours.declared, declared, WorldHalf::Declared))
+            } else if measured != ours.measured {
+                Some((ours.measured, measured, WorldHalf::Measured))
+            } else {
+                None
+            };
+            if let Some((ours, theirs, half)) = mismatch {
+                stats.world_refused += 1;
+                push_control(
+                    outbox,
+                    client,
+                    &ServerControlMsg::WorldRefused { ours, theirs, half },
+                );
+                end_session_of(client, config, sessions, outbox);
+            }
         }
     }
 }

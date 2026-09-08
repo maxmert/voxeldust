@@ -607,7 +607,7 @@ costs nothing.
 *Measurement:* the `TAG_SURFACE` bytes against the 1 200-byte datagram budget, stated on change and
 never on a keep-alive — pass under the budget with the reach datum's own margin.
 
-**Slice 5 — The generator crate `vd-terrain`, with the fence. (R.)**
+**Slice 5 — The generator crate `vd-terrain`, with the fence. (R.) — LANDED 2026-09-08, see `slice_05_generator.md` §11 (the radius stays the forest's input, the band is derived, caves are detail, feature anchors and trees are slice 14's; the x86-64 leg is OWED).**
 *Order (owner-agreed 2026-09-07, ruling V8 addendum):* **M-16 runs FIRST**, before any terrain is
 drawn — the exact cheap coarse summary at every rung, equal to the fold of the fine cells, with its cost
 stated. Everything sparse in slices 9 and 10 depends on it; if it costs `8^rung` evaluations the pyramid

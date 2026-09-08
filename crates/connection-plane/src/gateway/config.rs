@@ -313,6 +313,12 @@ pub struct GatewayConfig {
     /// gateway.
     pub seed_injector: SeedInjectorConfig,
     pub tuning: TransportTuning,
+    /// ★ THE WORLD IDENTITY (the voxel foundation, slice 5; SL10 clause 3, SL6 row R-9): the DECLARED
+    /// half (the recipe's version and the seed) and the MEASURED half (the home body's eight golden
+    /// chunks, evaluated by this binary on this chip at boot). A client states both in its world hello;
+    /// a mismatch is refused by name (`WorldRefused`) before anything is drawn. Computed by the
+    /// composition root; a fixture states any two numbers.
+    pub world: vd_terrain::WorldIdentity,
 }
 
 /// `VD_TRACE_REALM`'s value → the realm kind to trace; an unknown word is `None` (nothing traced,

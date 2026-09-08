@@ -1,0 +1,22 @@
+[package]
+name = "vd-terrain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "THE ONE GENERATOR (SL10; the voxel foundation, slice 5): (seed, address) -> the world's static shape, compiled into the server and into every client. Depends on the vd-seed leaf and on nothing else. Every float operation is fenced (Gf, the lint, the link scan) and the golden gate measures no drift."
+
+[lib]
+# The staticlib is what a client on another engine links (SL10 clause 2); it is also what the link
+# scan (`just terrain-link-scan`) reads for platform math symbols.
+crate-type = ["lib", "staticlib"]
+
+[features]
+# THE LINT CONTROL (slice 5): builds a module that calls a sine, a fused multiply-add and a max, so
+# `just terrain-fence-control` can watch the float fence go red. Never on in a shipped build.
+fence-control = []
+
+[dependencies]
+vd-seed = { workspace = true }
+
+[lints]
+workspace = true

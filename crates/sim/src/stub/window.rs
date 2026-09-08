@@ -491,7 +491,18 @@ pub(crate) fn current_bodies(
                 // its photometric datum beside the outline when it has one — the star (and its
                 // system) keeps its colour through the wake handover. Future star parameters
                 // are future tags on this same bag (skip-unknown makes them free).
-                bag: vd_core::look::self_look_bag(&look, child_luma.get(&config.realm).copied()),
+                // ★ THE SURFACE TAG (slice 5, R-8): a seed-shaped realm states its frame and the
+                // declared generator tag beside its outline; a hull states none.
+                bag: match config.surface {
+                    Some(surface) => vd_core::look::surface_look_bag(
+                        &look,
+                        child_luma.get(&config.realm).copied(),
+                        &surface,
+                    ),
+                    None => {
+                        vd_core::look::self_look_bag(&look, child_luma.get(&config.realm).copied())
+                    }
+                },
             },
         ));
     }

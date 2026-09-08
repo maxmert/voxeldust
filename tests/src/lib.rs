@@ -89,6 +89,8 @@ pub fn stub_config() -> StubConfig {
         // Slice 3e / C-3: the containment re-home trigger tuning. INERT here (the cluster scenarios plant
         // no `RealmRegions`, so `evaluate_realm_boundaries` early-returns — behaviour-identical).
         boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
+        // The scenario library's stub realms state no seed-shaped surface (slice 5).
+        surface: None,
         // D-WORLD-2: ARMED via THE production derivation (`crossing_redrive_env` — the same pair
         // every launcher hands its shards), so an unresolved-dest crossing re-drives a bounded
         // number of times and then aborts locally instead of stranding the entity forever.
@@ -656,6 +658,12 @@ fn build_cluster_kinds(
             // scenery lanes ran beside the window lane; a frozen picture once they were deleted
             // (window lane Slice C2). One cluster, one clock.
             tick_hz: 20,
+            // The scenario library's gateway states a fixed world identity (slice 5); no client in
+            // these scenarios states a world hello.
+            world: vd_terrain::WorldIdentity {
+                declared: 0,
+                measured: 0,
+            },
             trace_realm_kind: None,
             // D-3 INERT: the cluster scenarios do not exercise the session heartbeat (the D-3 cells do).
             lease_renew_interval_ticks: 0,

@@ -1,0 +1,52 @@
+//! ★ `vd-terrain` — THE ONE GENERATOR (SL10; the voxel foundation, slice 5; ruling V9).
+//!
+//! The world is too big to store, so the game stores one number — the seed — and a recipe. The recipe
+//! turns the seed and an address into the shape of the ground at that address: the substance of a cell
+//! and its GAP, how far the ground surface is from the cell's centre along the line from the body's
+//! centre. This crate IS the recipe. The server compiles it to collide; every client compiles it to
+//! draw; a port to another language is forbidden, because two recipes drift.
+//!
+//! What the recipe decides: only what never changes — the body from its seed, the hills, which common
+//! rock is where, where a cave runs, where the water stands. What it never decides: a hole a player
+//! dug, a wall a player built, where the copper is. Those are state; the owning realm stores them and
+//! ships them as a diff.
+//!
+//! **The fence.** Every float here is a [`Gf`], which offers only the operations IEEE-754 fixes on
+//! every target. A lint (`clippy.toml`) and a link scan (`just terrain-link-scan`) are the second and
+//! third layers; the golden gate (`tests/terrain_pin.rs`) is the measurement: the same bytes on every
+//! build and every chip, red on one differing byte.
+//!
+//! **Example.** A pilot flies to the home moon. The client computes the hills from the seed while the
+//! hull is 100 km out. Nothing about the hills crosses the network. The moon's shard computes the same
+//! hills to know where the boots land.
+
+pub mod body;
+pub mod carve;
+pub mod chunk;
+pub mod digest;
+pub mod gf;
+pub mod height;
+pub mod home;
+pub mod noise;
+pub mod strata;
+pub mod tag;
+
+pub use body::{BodyDefinition, OCTAVES, Octave};
+pub use chunk::{CHUNK_CELLS, CHUNK_EDGE, Cell, ChunkKey, ChunkLattice};
+pub use digest::{ChunkDigest, GOLDEN_SELF_CHECK_KEYS, chunk_digest, golden_self_check};
+pub use gf::Gf;
+pub use strata::{Biome, Stratum};
+pub use tag::{GENERATOR_VERSION, WorldIdentity, declared_world_tag};
+
+/// ★ THE LINT CONTROL (SL1 clause 5: a structural fence has a control that is seen failing). Built
+/// ONLY under the `fence-control` feature, which `just terrain-fence-control` turns on and expects
+/// clippy to go RED on — a sine, a fused multiply-add and a max, the three kinds of call the fence
+/// exists to refuse. A release build never contains it.
+#[cfg(feature = "fence-control")]
+pub mod fence_control {
+    /// Three calls the fence refuses; the recipe expects three red lints.
+    #[must_use]
+    pub fn control(x: f64) -> f64 {
+        x.sin() + x.mul_add(x, x) + x.max(1.0)
+    }
+}

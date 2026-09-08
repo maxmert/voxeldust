@@ -1,0 +1,16 @@
+[package]
+name = "vd-seed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "THE LEAF two hosts must compute identically (the voxel foundation, slice 5; ruling V9 S5-1): the integer hash, the content digest, the face bend and the ladder arithmetic. Depends on nothing that computes with floats."
+
+[dependencies]
+# Derive-only: the face byte rides the wire. serde pulls no float math and no libm.
+serde = { workspace = true }
+
+[dev-dependencies]
+postcard = { workspace = true }
+
+[lints]
+workspace = true

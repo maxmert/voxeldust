@@ -82,6 +82,10 @@ store-test-hooks = ["vd-io-prod/store-test-hooks"]
 
 [dependencies]
 vd-core = { workspace = true }
+# THE ONE GENERATOR (slice 5): the composition root folds its declared tag into the world label and
+# runs its self-check at boot; the terrain bench reads THE world's bodies through it.
+vd-terrain = { workspace = true }
+vd-seed = { workspace = true }
 vd-physics = { workspace = true }
 vd-devproto = { workspace = true }
 vd-client = { workspace = true }

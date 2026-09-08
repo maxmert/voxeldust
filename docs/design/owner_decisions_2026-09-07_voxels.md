@@ -354,3 +354,41 @@ because everything sparse depends on it; (2) **slice 10 opens with the load harn
 M-17) against a stub producer, records the numbers, and only then writes the real producer; (3) **one
 shared buffer per bulk message at the gateway**, never one copy per session. Written into the proposal's
 slice 5 and slice 10 paragraphs.
+
+## V9. SLICE 5 DISCUSSION — THE GENERATOR (2026-09-08)
+
+The owner read `docs/investigation/2026-09-07/slice_05_generator.md`, asked for it in plain words
+(recorded in the same document's spirit: every term explained, in-game examples), asked one question
+("is it the same when we build something? 10 m of dirt and 20 m of rock on top?" — answered: yes, a
+placed cell's gap goes from air to solid, the coarse entry holds the average change and the dominant
+substance, a rock mound from afar and dirt under rock up close, and the entry is deleted when every cell
+is taken away again; a tower of catalogue blocks is summarised by occupancy and substance under the same
+delete rule), and said *"Then all is approved for the slice, please implement."* Every recommendation
+in §9 of that document is a RULING:
+
+| Item | Ruling |
+|---|---|
+| S5-1 the leaf crate | **Yes.** A tiny crate both the core and the recipe depend on holds what two hosts must compute identically: the hash, the digest, and the address arithmetic the recipe needs (the face bend, the ladder step), moved out of the core and re-exported there. |
+| S5-2 Format D's tolerance | **ZERO.** Any recipe change that moves one rung-0 byte bumps the version and opens a world epoch; the octave table is frozen with the first saved world; detail is added on the client as style, which never moves the shape. |
+| S5-3 the pyramid stores DELTAS | **Yes.** A terrain entry holds the average change from the seed and the dominant substance; the far view draws the recipe's coarse hill plus the change; an entry is deleted when the change is zero and no block stands in it. Ruling C-1 ("prune on equality with the generator's coarse answer") is REPLACED by this. A block tower's entry holds occupancy and substance under the same delete rule. The generator is never asked to fold fine cells; it supplies one coarse answer per coarse cell at one evaluation with fewer octaves. |
+| S5-4 the golden set at every rung | **Yes,** about 832 digests, literals committed. |
+| S5-5 the x86-64 leg | **Yes:** emulation as a smoke test now; a real machine before "no drift" is called satisfied. |
+| S5-6 the seed law | **Yes:** bulk stock only from the seed; every ore is live state; no indicator material. |
+| S5-7 the name | **`vd-terrain`.** |
+| The order of work | Measurements first (the real-hash cost at every rung, M-16 as restated, the golden legs), then the crate, then the refuter. |
+
+**LANDED (2026-09-08), after the refuter.** The slice is built as ruled: `vd-seed` (S5-1), the
+version with tolerance zero (S5-2), the golden table at every rung (S5-4: 2 592 digests, 72 columns × 3
+chunks × 12 rungs of the home planet), `vd-terrain` (S5-7), and the measurements first (the coarse
+answer falls from 710 µs at rung 0 to 266 µs at the top rung; the skips refuse 463 of a column's 470
+chunks without a cell pass; the boot self-check costs 13.5 ms). S5-3 (the deltas) and S5-6 (the seed
+law) bind the store, slice 9, and the block record; nothing in the generator contradicts them: it
+draws bulk stock only, no ore, no indicator. S5-5: the x86-64 leg did NOT run (Docker is off); it is
+`D-TERRAIN-1` in `DEFERRED.md` with G3 and G5. The Opus 5 refuter's 24 findings were all answered
+before any world was saved, so the version stays 1; the four that moved bytes (a skip that wrote
+different bytes from the cell pass, a cavern lattice that broke at every chunk edge, tube regions
+that walled at their borders, a pole on the wrong axis) are fixed and each has a test that failed
+before the fix. One fact the measurements surfaced for the owner: the home planet's sea stands
+5 297 m under the ladder radius and covers about one column in a hundred (measured on 300 sampled
+columns per rung); the sea level is a seed draw and the owner has not yet judged the look.
+Results: `docs/investigation/2026-09-07/slice_05_generator.md` §11.

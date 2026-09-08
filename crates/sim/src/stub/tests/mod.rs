@@ -140,6 +140,7 @@ fn config() -> StubConfig {
         self_fence_grace_ticks: 0,
         snapshot_datagram_budget: 1100,
         boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
+        surface: None,
         request_ttl_ticks: 0,
         crossing_redrive_budget: 0,
         handoff_hold_ttl_ticks: 0,

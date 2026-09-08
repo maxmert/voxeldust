@@ -29,14 +29,9 @@ use super::bend::{Face, direction, face_coords, face_of, unbend};
 use super::seam::{Edge, SeamRecord, partner_of};
 use super::{Dir6, Step, metres_of};
 
-/// `π/2` and `2/π`: the standard library's constants (literal bit patterns, never a function call).
-use std::f64::consts::{FRAC_2_PI, FRAC_PI_2};
-/// Cells per chunk edge, as the ladder's chunk unit.
-const CHUNK_EDGE: u64 = 62;
-/// The top rung is the one at which a face is at most this many chunks across.
-const TOP_RUNG_CHUNKS: u64 = 64;
-/// The largest cell count the address admits: `i, j` are 27-bit signed, so `N ≤ 2²⁶`.
-const N_MAX: u64 = 1 << 26;
+// THE LADDER ARITHMETIC lives in the `vd-seed` leaf since slice 5 (ruling V9 S5-1), so the generator
+// and this grid snap a body, name a cell's radius and its face parameter with ONE implementation.
+use vd_seed::ladder::{self, Ladder};
 
 /// The radial band a body carries below and above its snapped surface, in whole metres. Seed-derived
 /// per body; PROVISIONAL derivation here until the generator crate's body definition owns it (the
@@ -67,21 +62,7 @@ impl BandParams {
 /// A cube-sphere grid: the cell count, the band and the rung count of one body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShellGrid {
-    n: u32,
-    floor_m: u32,
-    band_m: u32,
-    rungs: u8,
-}
-
-/// The top rung for a cell count: the smallest `p` with `n / 2^p ≤ 62 · 64`, i.e. a face is at most
-/// 64 chunks across. `n` here is a float so the ideal count and the snapped count go through ONE rule.
-fn top_rung_for(n: f64) -> u32 {
-    let chunks = (n / ((CHUNK_EDGE * TOP_RUNG_CHUNKS) as f64)).ceil() as u64;
-    if chunks <= 1 {
-        0
-    } else {
-        64 - (chunks - 1).leading_zeros()
-    }
+    ladder: Ladder,
 }
 
 impl ShellGrid {
@@ -91,98 +72,63 @@ impl ShellGrid {
     /// reaches the centre is not a shell and the centre has no direction.
     #[must_use]
     pub fn for_body(radius_m: f64, band: BandParams) -> Option<ShellGrid> {
-        if !radius_m.is_finite() || radius_m <= 0.0 {
-            return None;
-        }
-        let n_ideal = radius_m * FRAC_PI_2;
-        if n_ideal > 1e15 {
-            return None; // absurd; keeps the integer arithmetic below total
-        }
-        // Snap to the nearest multiple of the ladder unit chosen from the IDEAL count, then read the
-        // rung count from the SNAPPED count, so the rule "the top rung is the first at which a face is
-        // at most 64 chunks" holds for the N that is frozen. The snap can only move the count DOWN
-        // across a boundary, never up: every boundary `62 · 64 · 2^p` is itself a multiple of the
-        // unit `2^p`, so rounding a count below it never lands above it. A lower top keeps the tiling,
-        // because a multiple of `2^p` is a multiple of `2^(p−1)`.
-        let n = snap(n_ideal, top_rung_for(n_ideal));
-        let top = top_rung_for(n as f64);
-        if top > u32::from(Rung::MAX) || n > N_MAX {
-            return None;
-        }
-        let radius = (n as f64) * FRAC_2_PI;
-        let surface = radius.round() as u64;
-        let crust = u64::from(band.crust_m);
-        if crust >= surface {
-            return None;
-        }
-        let band_m = u32::try_from(crust + u64::from(band.above_m)).ok()?;
-        Some(ShellGrid {
-            n: n as u32,
-            floor_m: (surface - crust) as u32,
-            band_m,
-            rungs: (top + 1) as u8,
-        })
+        Ladder::for_radius(radius_m, band.crust_m, band.above_m).map(|ladder| ShellGrid { ladder })
     }
 
     /// Cells along a face edge at rung 0.
     #[must_use]
     pub const fn n(&self) -> u32 {
-        self.n
+        self.ladder.n
     }
 
     /// The floor radius in whole metres (`k = 0`).
     #[must_use]
     pub const fn floor_m(&self) -> u32 {
-        self.floor_m
+        self.ladder.floor_m
     }
 
     /// The band's thickness in whole metres.
     #[must_use]
     pub const fn band_m(&self) -> u32 {
-        self.band_m
+        self.ladder.band_m
     }
 
     /// How many rungs this body carries; a valid rung is `< rungs`.
     #[must_use]
     pub const fn rungs(&self) -> u8 {
-        self.rungs
+        self.ladder.rungs
     }
 
     /// The snapped radius `2N/π`, the sphere the realm draws itself at.
     #[must_use]
     pub fn radius_m(&self) -> f64 {
-        f64::from(self.n) * FRAC_2_PI
+        self.ladder.radius_m()
     }
 
     /// Cells along a face edge at `rung` (exact: `N` is a multiple of `2^(rungs−1)`).
     #[must_use]
     pub const fn cells_per_edge(&self, rung: Rung) -> u32 {
-        self.n >> rung.level()
+        self.ladder.cells_per_edge(rung.level())
     }
 
     /// Whole radial cells in the band at `rung`. The partial top slice does NOT count: a cell every
     /// operation can name is a cell every operation agrees exists.
     #[must_use]
     pub const fn cells_in_band(&self, rung: Rung) -> u32 {
-        self.band_m / rung.cell_m()
+        self.ladder.cells_in_band(rung.level())
     }
 
     /// Whether `(i, j, k)` at `rung` is a cell this body has.
     #[must_use]
     pub fn holds(&self, rung: Rung, i: i32, j: i32, k: i32) -> bool {
-        if rung.level() >= self.rungs {
-            return false;
-        }
-        let n_l = self.cells_per_edge(rung) as i32;
-        let band = self.cells_in_band(rung) as i32;
-        i >= 0 && i < n_l && j >= 0 && j < n_l && k >= 0 && k < band
+        self.ladder.holds(rung.level(), i, j, k)
     }
 
     /// The cell holding `pos` at `rung`: `None` at the centre, for a non-finite position, below the
     /// floor, at or above the rung's ceiling, or at a rung this body does not carry.
     #[must_use]
     pub fn addr_of(&self, pos: LatticePos, rung: Rung) -> Option<(Face, i32, i32, i32)> {
-        if rung.level() >= self.rungs {
+        if rung.level() >= self.ladder.rungs {
             return None;
         }
         let p = metres_of(pos);
@@ -192,7 +138,7 @@ impl ShellGrid {
         if !r.is_finite() || r <= 0.0 {
             return None;
         }
-        let floor = f64::from(self.floor_m);
+        let floor = f64::from(self.ladder.floor_m);
         let cell = f64::from(rung.cell_m());
         let ceiling = floor + f64::from(self.cells_in_band(rung)) * cell;
         if r < floor || r >= ceiling {
@@ -202,8 +148,8 @@ impl ShellGrid {
         let face = face_of(d);
         let (t, s) = face_coords(face, d);
         let n_l = self.cells_per_edge(rung);
-        let i = index_of(unbend(t), n_l);
-        let j = index_of(unbend(s), n_l);
+        let i = ladder::index_of(unbend(t), n_l);
+        let j = ladder::index_of(unbend(s), n_l);
         let k = ((r - floor) / cell).floor() as i32;
         Some((face, i, j, k))
     }
@@ -221,10 +167,10 @@ impl ShellGrid {
         if !self.holds(rung, i, j, k) {
             return None;
         }
-        let n_l = f64::from(self.cells_per_edge(rung));
-        let a = (2.0 * f64::from(i) + 1.0) / n_l - 1.0;
-        let b = (2.0 * f64::from(j) + 1.0) / n_l - 1.0;
-        let r = f64::from(self.floor_m) + (f64::from(k) + 0.5) * f64::from(rung.cell_m());
+        let n_l = self.cells_per_edge(rung);
+        let a = ladder::face_param(i, n_l);
+        let b = ladder::face_param(j, n_l);
+        let r = self.ladder.cell_radius_m(k, rung.level());
         Some(self.at(face, a, b, r))
     }
 
@@ -242,13 +188,11 @@ impl ShellGrid {
         if !self.holds(rung, i, j, k) {
             return None;
         }
-        let n_l = f64::from(self.cells_per_edge(rung));
-        let cell = f64::from(rung.cell_m());
-        let floor = f64::from(self.floor_m);
+        let n_l = self.cells_per_edge(rung);
         let corner = |di: i32, dj: i32, dk: i32| {
-            let a = 2.0 * f64::from(i + di) / n_l - 1.0;
-            let b = 2.0 * f64::from(j + dj) / n_l - 1.0;
-            let r = floor + f64::from(k + dk) * cell;
+            let a = ladder::corner_param(i + di, n_l);
+            let b = ladder::corner_param(j + dj, n_l);
+            let r = self.ladder.corner_radius_m(k + dk, rung.level());
             self.at(face, a, b, r)
         };
         Some([
@@ -271,9 +215,9 @@ impl ShellGrid {
         if !self.holds(rung, i, j, k) {
             return None;
         }
-        let n_l = f64::from(self.cells_per_edge(rung));
-        let a = (2.0 * f64::from(i) + 1.0) / n_l - 1.0;
-        let b = (2.0 * f64::from(j) + 1.0) / n_l - 1.0;
+        let n_l = self.cells_per_edge(rung);
+        let a = ladder::face_param(i, n_l);
+        let b = ladder::face_param(j, n_l);
         Some(direction(face, a, b))
     }
 
@@ -345,14 +289,6 @@ impl ShellGrid {
     }
 }
 
-/// The nearest multiple of `2^top` to `n_ideal`, at least one unit.
-fn snap(n_ideal: f64, top: u32) -> u64 {
-    let unit = 1u64 << top;
-    let q = (n_ideal / (unit as f64)).round() as u64;
-    let q = if q == 0 { 1 } else { q };
-    q * unit
-}
-
 /// The cell across a seam, given the seam record: the partner face's cell on its own side of the
 /// shared edge, at the same (or reversed) position along it. Takes the record so the reversed arm
 /// stays exercised even though the frozen basis never reverses a seam (asserted in `seam.rs`).
@@ -373,17 +309,12 @@ fn across_with(rec: SeamRecord, edge: Edge, along: i32, k: i32, n_l: i32) -> Ste
     }
 }
 
-/// The cell index of face position `a ∈ [−1, 1]` with `n_l` cells per edge; `a = 1` exactly names the
-/// last cell, not one past it.
-fn index_of(a: f64, n_l: u32) -> i32 {
-    let u = ((a + 1.0) * 0.5 * f64::from(n_l)).floor() as i32;
-    if u >= n_l as i32 { n_l as i32 - 1 } else { u }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use glam::I64Vec3;
+    use std::f64::consts::FRAC_2_PI;
+    use vd_seed::ladder::{CHUNK_EDGE, TOP_RUNG_CHUNKS};
 
     fn earth() -> ShellGrid {
         ShellGrid::for_body(6_371_000.0, BandParams::provisional(6_371_000.0)).expect("earth")
@@ -393,10 +324,12 @@ mod tests {
     /// table body. Radius `2·62/π ≈ 39.5 m`.
     fn tiny() -> ShellGrid {
         ShellGrid {
-            n: 62,
-            floor_m: 20,
-            band_m: 40,
-            rungs: 1,
+            ladder: Ladder {
+                n: 62,
+                floor_m: 20,
+                band_m: 40,
+                rungs: 1,
+            },
         }
     }
 
@@ -725,8 +658,12 @@ mod tests {
             "past the face"
         );
         assert_eq!(g.cell_center(Face::PosX, 0, -1, 0, Rung::ZERO), None);
-        assert_eq!(index_of(1.0, 62), 61, "the far edge names the last cell");
-        assert_eq!(index_of(-1.0, 62), 0);
+        assert_eq!(
+            ladder::index_of(1.0, 62),
+            61,
+            "the far edge names the last cell"
+        );
+        assert_eq!(ladder::index_of(-1.0, 62), 0);
     }
 
     #[test]

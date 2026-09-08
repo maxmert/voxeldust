@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/seed",
+    "crates/terrain",
     "crates/core",
     "crates/physics",
     "crates/devproto",
@@ -24,6 +26,8 @@ rust-version = "1.94"
 
 [workspace.dependencies]
 # Workspace crates (dependency rule: bins -> node -> sim -> wire -> core; harness -> node + sim; nothing depends on a bin)
+vd-seed = { path = "crates/seed" }
+vd-terrain = { path = "crates/terrain" }
 vd-core = { path = "crates/core" }
 vd-physics = { path = "crates/physics" }
 vd-devproto = { path = "crates/devproto" }
@@ -74,8 +78,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # new supply-chain; a single `libc::kill(pid, SIGTERM)` FFI call, test-only. User-approved (no unilateral dep).
 libc = "0.2"
 
-# Deterministic world generation (pin exact noise version: cross-platform determinism)
-noise = "=0.9.0"
+# Astrodynamics (the forest's orbits; the seed-shaped terrain has its own noise in vd-terrain)
 brahe = "1.2"
 
 # Identity
@@ -126,8 +129,6 @@ debug = false
 [profile.dev.build-override]
 debug = false
 
-# NOTE: re-add `[profile.dev.package.noise] opt-level = 3` when terrain generation
-# lands (P4) — debug-profile noise is ~40x slower and unusable for terrain gen.
 
 # Release profile for the container images (cloud-ready k3d, Slice 0). `strip` drops
 # symbols (smaller image layer); `lto = "thin"` is the size/perf-vs-build-time balance

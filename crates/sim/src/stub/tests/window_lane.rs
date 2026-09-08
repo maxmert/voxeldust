@@ -2554,6 +2554,57 @@ fn a_planted_world_action_and_stray_bulk_bytes_are_counted_and_answered_with_not
     );
 }
 
+/// ★ A SEED-SHAPED REALM STATES ITS SURFACE IN ITS OWN LOOK (the voxel foundation, slice 5; SL6 row
+/// R-8; SL3: a realm authors how it looks). A planet's shard states its frame and the declared
+/// generator tag beside its outline under `TAG_SURFACE`, so a client that holds the same recipe
+/// derives the hills from the seed; a realm with no surface states its outline alone, and a client
+/// draws no hill for a hull. Both arms, driven on one rig.
+#[test]
+fn a_seed_shaped_realm_states_its_surface_beside_its_look_and_a_hull_states_none() {
+    let surface = vd_core::look::SurfaceStmt {
+        frame: vd_core::pose::FrameRef::PlanetCentered { planet_seed: 2298 },
+        generator: 0xcbf2_9ce4_8422_2325,
+    };
+    let open = GatewayToShard::WindowOpen {
+        window: WindowId(1),
+        scope: WindowScope::Occupants,
+        static_held: None,
+    };
+    // A planet: the surface rides beside the outline.
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    rig.world.resource_mut::<StubConfig>().surface = Some(surface);
+    plant_aoi(&mut rig, vec![root_region(), own_region()]);
+    insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::ZERO);
+    let bodies = window_bodies(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
+    assert_eq!(bodies.len(), 1, "exactly one body: this realm's own look");
+    // Compared as a WHOLE constructed value (HR5: a `let…else { panic! }` leaves an uncoverable
+    // false arm): the statement IS a self-look of the outline with the surface beside it.
+    let planet_bag = vd_core::look::surface_look_bag(&own_region().shape, None, &surface);
+    assert_eq!(
+        bodies[0].3,
+        BodyStmt::SelfLook {
+            bag: planet_bag.clone()
+        },
+        "the planet states its outline and, beside it, its frame and the declared generator tag"
+    );
+    assert_eq!(vd_core::look::surface_of(&planet_bag), Ok(Some(surface)));
+    // A hull: no surface, the outline alone.
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    rig.world.resource_mut::<StubConfig>().surface = None;
+    plant_aoi(&mut rig, vec![root_region(), own_region()]);
+    insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::ZERO);
+    let bodies = window_bodies(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
+    assert_eq!(
+        bodies[0].3,
+        BodyStmt::SelfLook {
+            bag: vd_core::look::look_bag(&own_region().shape)
+        },
+        "a hull states its outline alone"
+    );
+}
+
 /// ★ THE GALAXY'S TICK, MEASURED (owner ruling 2026-09-02 R8 item 1; SL9). A rig hosting THE galaxy
 /// with its real census of direct children and ONE occupant, timing a full tick and the three
 /// walks that grow with the child count. Ignored: it builds the galaxy (seconds) and prints

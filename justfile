@@ -9,7 +9,7 @@ coverage_toolchain := env_var_or_default("VD_COVERAGE_TOOLCHAIN", "nightly-2026-
 # Tier-A: the 100%-region+branch domain (HR5). Each crate's OWN tests must cover
 # its full surface (llvm counts regions per compiled instance, so leaning on the
 # vd-tests binary would double-instance every crate — learned in P1.7).
-tier_a := "-p vd-core -p vd-physics -p vd-devproto -p vd-wire -p vd-sim -p vd-node -p vd-connection-plane -p vd-harness -p vd-client -p vd-client-harness"
+tier_a := "-p vd-seed -p vd-terrain -p vd-core -p vd-physics -p vd-devproto -p vd-wire -p vd-sim -p vd-node -p vd-connection-plane -p vd-harness -p vd-client -p vd-client-harness"
 
 # Inner loop: full deterministic suite (in-process tiers, fast).
 test:
@@ -405,7 +405,7 @@ acceptance-flight:
 # Everything a merge requires (render-smoke/render-boxes-smoke are GPU-required + local; spike2a is
 # a release build — all documented in their recipes). fmt-check FAILS on drift (run `just fmt` to
 # fix); every gate step is fail-on-violation, none mutates the tree.
-gate: fmt-check lint lint-combos test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke warp-pixels look-pixels two-ships world-from-inside node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity render-scale acceptance-flight coverage
+gate: fmt-check lint lint-combos terrain-pin terrain-link-scan terrain-fence-control test client-load orch-crash spike2a spike3a window-compose-load chain-latency rlm-soak render-smoke render-boxes-smoke render-crossing-smoke warp-pixels look-pixels two-ships world-from-inside node-per-realm-walk rlm-proc-spawn rlm-kill9 rlm-demand-login window-parity render-scale acceptance-flight coverage
 
 # One-time setup helper.
 coverage-setup:
@@ -734,3 +734,25 @@ k3d-agent-e2e: k3d-all k3d-agent
 voxel-measures:
     cargo run --release -p vd-bins --example registry_cost
     cargo run --release -p vd-bins --example wire_plant_size
+    cargo run --release -p vd-bins --example terrain_cost
+
+# THE GENERATOR's gates (the voxel foundation, slice 5; SL10). `terrain-pin` is the golden gate on this
+# host: the chunk digests of the home body at every rung, byte for byte, in debug, in release, and
+# with the chip's native flags (legs G1 and G2). `terrain-link-scan` is the third layer of the float
+# fence: the generator's own object code names no platform math symbol (a transcendental that arrived
+# through a dependency is caught here and nowhere else). `terrain-cost` is the measurement.
+terrain-pin:
+    cargo test -p vd-terrain --test terrain_pin
+    cargo test --release -p vd-terrain --test terrain_pin
+    RUSTFLAGS="-C target-cpu=native" cargo test --release -p vd-terrain --test terrain_pin
+terrain-link-scan:
+    cargo build --release -p vd-terrain -p vd-physics
+    scripts/terrain_link_scan.sh --control
+    scripts/terrain_link_scan.sh
+# The lint layer's observed-failing control: with the `fence-control` feature the crate carries a
+# sine, a fused multiply-add and a max, and clippy MUST go red on all three.
+terrain-fence-control:
+    ! cargo clippy -p vd-terrain --features fence-control -- -D warnings 2>/dev/null
+    cargo clippy -p vd-terrain --features fence-control -- -D warnings 2>&1 | grep -c "use of a disallowed method" | grep -q "^3$"
+terrain-cost:
+    cargo run --release -p vd-bins --example terrain_cost

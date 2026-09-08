@@ -63,6 +63,7 @@ pub fn gateway_view(
         // resource, not on the view.
         world_actions_unrouted: _,
         world_hello_stated: _,
+        world_refused: _,
         bulk_for_unrouted: _,
         window_sender_mismatch,
         window_misauthored_body,
@@ -384,6 +385,7 @@ mod tests {
             sky_from_shard_refused: 94,
             world_actions_unrouted: 95,
             world_hello_stated: 96,
+            world_refused: 98,
             bulk_for_unrouted: 97,
         };
         let view = gateway_view(&stats, 24, 25, 37);

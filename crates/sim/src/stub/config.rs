@@ -211,6 +211,13 @@ pub struct StubConfig {
     /// DEFAULT EMPTY ⇒ origin-at-rest ⇒ byte-identical to every existing rig. A `BTreeMap` (O(log n)
     /// lookup, scales to a real roster).
     pub spawn_poses: BTreeMap<AccountId, StampedPose>,
+    /// ★ THE SURFACE THIS REALM STATES ABOUT ITSELF (the voxel foundation, slice 5; SL6 row R-8, ruling
+    /// V6; SL3: a realm authors how it looks): `Some` for a seed-shaped body — its own frame (the seed is
+    /// inside it) and the DECLARED generator tag — stated in its self-look bag under `TAG_SURFACE`, once
+    /// per subscriber on change, never on a keep-alive. `None` for a realm without a seed-shaped surface
+    /// (a hull, a station, a star system), which then states no surface and a client draws none from
+    /// the seed. Derived at boot from the realm's frame, never from a realm kind.
+    pub surface: Option<vd_core::look::SurfaceStmt>,
 }
 
 impl StubConfig {

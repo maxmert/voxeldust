@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "Pure shard-agnostic domain: ids, Fence, kind registry, TLV blobs, closed-form celestial math, band geometry. NO I/O dependencies."
 
 [dependencies]
+# THE LEAF (slice 5, ruling V9 S5-1): the hash, the digest, the face bend and the ladder live there and
+# are re-exported here at their old paths.
+vd-seed = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }

@@ -91,6 +91,10 @@ fn config() -> GatewayConfig {
         auth_verifying_key: verifying_key(),
         session_seed: 7,
         tick_hz: 50,
+        world: vd_terrain::WorldIdentity {
+            declared: 7,
+            measured: 8,
+        },
         trace_realm_kind: None,
         lease_renew_interval_ticks: 0,
         session_recheck_interval: 0,
@@ -11491,8 +11495,87 @@ fn the_planted_world_arms_are_counted_at_the_gateway_and_forwarded_nowhere() {
     let stats = rig.world.resource::<GatewayStats>();
     assert_eq!(stats.world_actions_unrouted, 1, "the action is visible");
     assert_eq!(stats.world_hello_stated, 1, "the handshake is visible");
+    assert_eq!(
+        stats.world_refused, 0,
+        "the rig's identity is (7, 8): a matching hello is not refused"
+    );
     assert_eq!(stats.bulk_for_unrouted, 1, "the bulk is visible");
     assert_eq!(stats.undecodable, 0, "none is a decode failure");
+    assert!(
+        !sent.iter().any(|(to, _, b)| {
+            *to == CLIENT
+                && postcard::from_bytes::<ServerControlMsg>(b)
+                    .is_ok_and(|m| format!("{m:?}").contains("WorldRefused"))
+        }),
+        "a matching world is not refused"
+    );
+    // ★ THE WORLD REFUSED (slice 5): a client whose declared half differs hears both values; one whose
+    // measured half differs hears the measured pair.
+    let sent = rig.tick(vec![
+        wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::HelloWorld {
+                declared: 70,
+                measured: 8,
+            },
+        ),
+        wire(
+            CLIENT,
+            MsgClass::Control,
+            &ClientControlMsg::HelloWorld {
+                declared: 7,
+                measured: 80,
+            },
+        ),
+    ]);
+    let refusals: Vec<ServerControlMsg> = sent
+        .iter()
+        .filter(|(to, _, _)| *to == CLIENT)
+        .filter_map(|(_, _, b)| postcard::from_bytes::<ServerControlMsg>(b).ok())
+        .filter(|m| matches!(m, ServerControlMsg::WorldRefused { .. }))
+        .collect();
+    assert_eq!(
+        refusals,
+        vec![
+            ServerControlMsg::WorldRefused {
+                ours: 7,
+                theirs: 70,
+                half: vd_wire::channels::WorldHalf::Declared,
+            },
+            ServerControlMsg::WorldRefused {
+                ours: 8,
+                theirs: 80,
+                half: vd_wire::channels::WorldHalf::Measured,
+            },
+        ],
+        "each mismatch is refused by name and by half, the declared half first"
+    );
+    assert_eq!(rig.world.resource::<GatewayStats>().world_refused, 2);
+    // The refusal is binding: a client with a session loses it. Log one in, refuse its world, and
+    // its session is gone.
+    let (session_id, _) = rig.login();
+    assert!(
+        rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .contains_key(&session_id)
+    );
+    let _ = rig.tick(vec![wire(
+        CLIENT,
+        MsgClass::Control,
+        &ClientControlMsg::HelloWorld {
+            declared: 7,
+            measured: 80,
+        },
+    )]);
+    assert!(
+        !rig.world
+            .resource::<GatewaySessions>()
+            .by_session
+            .contains_key(&session_id),
+        "a refused world ends the session"
+    );
     assert!(
         !sent.iter().any(|(_, class, _)| *class == MsgClass::Bulk),
         "no bulk leaves the gateway before slice 9 builds the forward"

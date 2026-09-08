@@ -259,8 +259,14 @@ crates/connection-plane  vd-connection-plane  gateway internals (lib; gateway bi
 crates/harness           vd-harness  Topology, FaultFabric, ControlOracle, WireMonitor, ChaosRunner
 tests                    vd-tests  accumulated scenario suites — never delete a scenario
 ```
-Dependency rule: bins → node → sim → wire → core; harness → node + sim::io::mem; nothing
+Dependency rule: bins → node → sim → wire → core → seed; harness → node + sim::io::mem; nothing
 depends on a bin. Every node is lib + 4-line bin. `io-prod` / `tests-process` appear later.
+The voxel foundation (slice 5, ruling V9): `crates/seed` (vd-seed) is the LEAF two hosts must compute
+identically — the hash, the digest, the face bend, the ladder — and `crates/terrain` (vd-terrain) is
+THE ONE GENERATOR (SL10), which depends on the leaf and on nothing else. Today `bins`,
+`connection-plane` and `vd-tests` depend on terrain; `sim` and `physics` carry no terrain edge yet (the
+block store, slice 9, and the collider slice add theirs); the client's edge is slice 7's. Both new
+crates are Tier-A and carry the float fence (`clippy.toml`, `Gf`, the link scan).
 
 ## Non-negotiable conventions
 

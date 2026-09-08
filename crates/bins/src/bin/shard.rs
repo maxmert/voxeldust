@@ -391,6 +391,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // trigger's `RealmBoundaries` registry is empty ⇒ `evaluate_realm_boundaries` early-returns,
             // behaviour-identical); the tuning is validated at `register_stub_shard` regardless.
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
+            // ★ THE SURFACE (slice 5, R-8; HR3): a realm states a surface if and only if THE RECIPE DEFINES
+            // ITS BODY — its frame carries a seed and the ladder accepts its look radius. A gas giant above
+            // the address has a seed and no body, and states none; a hull has no seed and states none. A
+            // capability of the body, never a kind test.
+            surface: match own_frame {
+                vd_core::pose::FrameRef::PlanetCentered { planet_seed } => regions
+                    .iter()
+                    .find(|r| r.realm == own_realm)
+                    .and_then(|r| match r.look {
+                        Some(vd_core::geometry::Boundary::Shell { r }) => {
+                            vd_terrain::BodyDefinition::from_seed(planet_seed, r)
+                        }
+                        _ => None,
+                    })
+                    .map(|_| vd_core::look::SurfaceStmt {
+                        frame: own_frame,
+                        generator: vd_terrain::declared_world_tag(universe_seed),
+                    }),
+                _ => None,
+            },
             // D-WORLD-2 — the crossing-latch ttl + re-drive budget (resolved from the launcher-derived
             // env above): a delivered-but-unresolved crossing re-drives a bounded number of times, then
             // takes the LOCAL pre-CAS abort that clears the strand latch.

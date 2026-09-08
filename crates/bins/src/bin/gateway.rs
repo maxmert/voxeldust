@@ -189,6 +189,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sky,
             sky_generation,
             sky_frame,
+            // ★ THE WORLD IDENTITY (slice 5): the declared tag and the home body's measured self-check.
+            world: vd_bins::world_identity(universe_seed)?,
             // Track R / 1d.2: the STABLE routable-shard roster — the login shard PLUS every shard in
             // VD_KNOWN_SHARDS (parsed by the EXISTING `EnvConfig::node_list`), so a (render-ready) DEST's
             // frames are node-class dispatchable (`is_known_shard` ⇒ they reach `on_shard_frame` instead

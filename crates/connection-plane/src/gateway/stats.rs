@@ -134,10 +134,14 @@ pub struct GatewayStats {
     /// gateway's forward to the session's authority shard exists (slice 10 builds it beside the
     /// placement rule). COUNTED, never silently dropped. Expected 0 until slice 10; then retired.
     pub world_actions_unrouted: u64,
-    /// THE VOXEL WIRE PLANT (slice 4, R-9): a client stated its declared and measured world halves.
-    /// Recorded only; the comparison against the cluster's generator is slice 5's, which lands the
-    /// generator and its tag together. A client that states nothing is served as today.
+    /// A client stated its declared and measured world halves (slice 4's plant, compared since slice
+    /// 5 against this gateway's world identity). A client that states nothing is served as today;
+    /// slice 7 makes the statement mandatory.
     pub world_hello_stated: u64,
+    /// THE WORLD REFUSED (slice 5, SL10 clause 3): a client's declared or measured world half differed
+    /// from this gateway's and it was told so by name. A climbing count after a deploy means a client
+    /// build is behind the cluster's recipe, or a chip drifted.
+    pub world_refused: u64,
     /// THE VOXEL WIRE PLANT (slice 4, R-3): a shard's bulk bytes for named sessions arrived before
     /// the gateway's per-session bulk forward exists (slice 10 builds it beside the first producer).
     /// COUNTED, never silently dropped. Expected 0 until slice 10; then retired.

@@ -51,6 +51,8 @@ const FORBIDDEN_IN_TIER_A: &[&str] = &[
 
 /// The crates that must stay pure (reachable I/O only through the injected seam).
 const TIER_A: &[&str] = &[
+    "vd-seed",
+    "vd-terrain",
     "vd-core",
     "vd-physics",
     "vd-wire",
@@ -268,10 +270,50 @@ fn the_dependency_law_holds_bins_to_node_to_sim_to_wire_to_core() {
             .cloned()
             .collect()
     };
+    // The voxel foundation, slice 5 (ruling V9 S5-1): the leaf `vd-seed` is the root now — the hash,
+    // the digest, the face bend and the ladder — and the core re-exports it; the generator depends on
+    // the leaf and on NOTHING else, so a client on another engine links the recipe, the leaf and serde's derives.
     assert!(
-        internal(&graph["vd-core"]).is_empty(),
-        "vd-core is the root: it depends on no workspace crate"
+        internal(&graph["vd-seed"]).is_empty(),
+        "vd-seed is the root: it depends on no workspace crate"
     );
+    assert_eq!(
+        internal(&graph["vd-core"]),
+        BTreeSet::from(["vd-seed".to_owned()]),
+        "vd-core depends only on the leaf"
+    );
+    assert_eq!(
+        internal(&graph["vd-terrain"]),
+        BTreeSet::from(["vd-seed".to_owned()]),
+        "vd-terrain depends only on the leaf (SL10: one crate, two hosts, no engine edge)"
+    );
+    // The seed-shaped path's WHOLE dependency set, workspace and external: the leaf links serde's
+    // derives and nothing else; the generator links no external crate at all — no float library, no
+    // I/O, no motion.
+    let external = |name: &str| -> BTreeSet<String> {
+        graph[name]
+            .iter()
+            .filter(|d| !d.starts_with("vd-"))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(
+        external("vd-seed"),
+        BTreeSet::from(["serde".to_owned()]),
+        "vd-seed links serde's derives and nothing else"
+    );
+    assert!(
+        external("vd-terrain").is_empty(),
+        "vd-terrain links no external crate: {:?}",
+        external("vd-terrain")
+    );
+    for float_crate in ["glam", "libm", "noise", "nalgebra", "rapier3d"] {
+        assert!(
+            !graph["vd-terrain"].contains(float_crate) && !graph["vd-seed"].contains(float_crate),
+            "SL10 clause 4: the seed-shaped path must not link {float_crate} — its arithmetic is \
+             outside the fence"
+        );
+    }
     assert_eq!(
         internal(&graph["vd-wire"]),
         BTreeSet::from(["vd-core".to_owned()]),

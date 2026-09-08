@@ -95,11 +95,11 @@ pub enum ClientControlMsg {
     },
     /// ★ THE WORLD HANDSHAKE (R-9, owner YES; SL10 V1.3): the client's DECLARED world generation (the
     /// generator crate's tag, Format D) and its boot-MEASURED arithmetic profile, sent right after
-    /// `Hello`. Slice 5's gateway WILL refuse a declared mismatch by name
-    /// ([`ServerControlMsg::WorldRefused`]); TODAY the gateway counts it (`world_hello_stated`) and
-    /// compares nothing, because no generator exists to compare against, and no client sends one.
-    /// The measured half gates lanes, never files. Not a realm boundary: a build stating its
-    /// identity. APPENDED (discriminant 7, minor 31).
+    /// `Hello`. Since slice 5 the gateway compares both halves with its own world identity and refuses
+    /// a mismatch by name ([`ServerControlMsg::WorldRefused`], naming the half) and ends the session;
+    /// the first client sender is slice 7, when the client links the generator. The measured half
+    /// gates lanes, never files. Not a realm boundary: a build stating its identity. APPENDED
+    /// (discriminant 7, minor 31).
     HelloWorld {
         declared: u64,
         measured: u64,
@@ -136,6 +136,15 @@ pub struct BlockEdit {
     pub orientation: u8,
     /// The site inside the cell at that scale (`[0, 0, 0]` for a whole cell).
     pub site: [u8; 3],
+}
+
+/// Which half of the world identity a `WorldRefused` names (slice 5): the DECLARED half is the
+/// recipe's version and the seed — "update your build"; the MEASURED half is the arithmetic profile
+/// — "your build or your chip computes a different hill". The receiver acts differently on each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorldHalf {
+    Declared,
+    Measured,
 }
 
 /// Why a world action was refused (owner S4-2, 2026-09-07). Success needs no message: the block
@@ -323,12 +332,14 @@ pub enum ServerControlMsg {
         seq: u64,
         reason: ActionRefusal,
     },
-    /// ★ THE WORLD REFUSED (owner S4-3: a new arm, never a repurposed version refusal): the client's
-    /// declared world generation is not the cluster's. Both values are named, exactly as the
-    /// coordinate-unit refusal names its two. APPENDED (discriminant 18, minor 31).
+    /// ★ THE WORLD REFUSED (owner S4-3: a new arm, never a repurposed version refusal): one half of
+    /// the client's world identity is not the cluster's. Both values and WHICH half are named, exactly
+    /// as the coordinate-unit refusal names its two, and the session ends (slice 5: the refusal is
+    /// binding). APPENDED (discriminant 18, minor 31).
     WorldRefused {
         ours: u64,
         theirs: u64,
+        half: WorldHalf,
     },
 }
 
@@ -1216,7 +1227,14 @@ mod tests {
                 },
                 17,
             ),
-            (ServerControlMsg::WorldRefused { ours: 1, theirs: 2 }, 18),
+            (
+                ServerControlMsg::WorldRefused {
+                    ours: 1,
+                    theirs: 2,
+                    half: WorldHalf::Measured,
+                },
+                18,
+            ),
         ];
         for (msg, index) in server {
             let bytes = postcard::to_allocvec(&msg).expect("encode");

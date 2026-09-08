@@ -968,7 +968,62 @@ pub fn open_node_outbox(
 /// disagreement here is a player standing in the wrong place with nothing logged.
 #[must_use]
 pub fn world_generation() -> u64 {
-    vd_core::store_stamp::world_generation(&vd_physics::worldgen::world_shape_constants())
+    // ★ THE RECIPE's VERSION is folded in (the voxel foundation, slice 5; ruling V6 Part D, V9 S5-2:
+    // tolerance zero): a build whose generator moved one byte serves a different world, so it refuses a
+    // store written under the old recipe and a peer built with it. The seed is already part of the
+    // label the store carries.
+    vd_seed::digest::fnv1a_u64(
+        vd_core::store_stamp::world_generation(&vd_physics::worldgen::world_shape_constants()),
+        u64::from(vd_terrain::GENERATOR_VERSION),
+    )
+}
+
+/// ★ THE HOME SYSTEM of THE world: `System(7)`, the star system the dev cluster's static shard hosts
+/// and the process-tier gates log into (`parse_held_realms` in this file's tests, the `ladder_snap`
+/// example), whose first planet the recipe accepts is the home body every world identity is measured
+/// on (slice 5).
+pub const HOME_SYSTEM: u64 = 7;
+
+/// ★ THE HOME BODY (slice 5): the FIRST planet of the home system, in the forest's own order, whose
+/// look radius the ladder accepts, as the generator defines it — the body whose eight golden chunks are
+/// the world identity's MEASURED half. A planet the ladder refuses (above the address) is passed over;
+/// `None` when no planet of the home system is accepted (a world nobody can name).
+#[must_use]
+pub fn home_body(universe_seed: u64) -> Option<vd_terrain::BodyDefinition> {
+    let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+    let system_realm = vd_core::pose::RealmId::System(HOME_SYSTEM);
+    let system_lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+    let held = std::collections::BTreeSet::from([system_realm]);
+    let (rows, _) = vd_physics::worldgen::shard_boot_world(
+        universe_seed,
+        &config,
+        &held,
+        system_realm,
+        &system_lineage,
+    );
+    rows.into_iter()
+        .filter(|r| r.parent == Some(system_realm))
+        .find_map(|p| match (p.realm, p.look) {
+            (
+                vd_core::pose::RealmId::Planet(seed),
+                Some(vd_core::geometry::Boundary::Shell { r }),
+            ) => vd_terrain::BodyDefinition::from_seed(seed, r),
+            _ => None,
+        })
+}
+
+/// ★ THE WORLD IDENTITY this process serves (slice 5): the declared tag and the measured self-check of
+/// the home body, the two numbers a client must state at login.
+///
+/// # Errors
+/// When the home body cannot be named: a world with no home planet is not a world to serve.
+pub fn world_identity(universe_seed: u64) -> Result<vd_terrain::WorldIdentity, String> {
+    let body = home_body(universe_seed).ok_or_else(|| {
+        "the home system holds no round planet the generator can define".to_owned()
+    })?;
+    vd_terrain::WorldIdentity::of(universe_seed, &body).ok_or_else(|| {
+        "the home body cannot be self-checked: a golden key names no chunk".to_owned()
+    })
 }
 
 pub fn durable_stamp(

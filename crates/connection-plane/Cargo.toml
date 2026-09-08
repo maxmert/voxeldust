@@ -7,6 +7,8 @@ description = "Gateway internals as a LIBRARY: lock-free route table (ArcSwap), 
 
 [dependencies]
 vd-core = { workspace = true }
+# THE ONE GENERATOR (slice 5): the gateway holds the world identity a client must state at login.
+vd-terrain = { workspace = true }
 vd-wire = { workspace = true }
 vd-sim = { workspace = true }
 serde = { workspace = true }

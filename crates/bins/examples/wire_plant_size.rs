@@ -132,6 +132,7 @@ fn main() {
         &ServerControlMsg::WorldRefused {
             ours: u64::MAX,
             theirs: u64::MAX,
+            half: vd_wire::channels::WorldHalf::Declared,
         },
     );
     // The gates can fail: the surface bag must fit one datagram; every header stays under a hundred
