@@ -293,19 +293,14 @@ impl ShellGrid {
 /// shared edge, at the same (or reversed) position along it. Takes the record so the reversed arm
 /// stays exercised even though the frozen basis never reverses a seam (asserted in `seam.rs`).
 fn across_with(rec: SeamRecord, edge: Edge, along: i32, k: i32, n_l: i32) -> Step {
-    let along = if rec.reversed { n_l - 1 - along } else { along };
-    let edge_index = if rec.dst_edge.is_plus() { n_l - 1 } else { 0 };
-    let (i, j) = if rec.dst_edge.is_u() {
-        (edge_index, along)
-    } else {
-        (along, edge_index)
-    };
+    // ONE crossing rule, the leaf's (slice 6): the generator's halo and this step agree by construction.
+    let c = vd_seed::seam::across_with(rec, edge, along, n_l);
     Step::Across {
-        face: rec.dst_face,
-        i,
-        j,
+        face: c.face,
+        i: c.i,
+        j: c.j,
         k,
-        axis_swap: edge.is_u() != rec.dst_edge.is_u(),
+        axis_swap: c.axis_swap,
     }
 }
 

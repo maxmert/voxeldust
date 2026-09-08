@@ -32,11 +32,14 @@ pub enum Stratum {
     Andesite = 15,
     Quartzite = 16,
     Salt = 17,
+    /// THE REMOVAL (ruling V4): a mined cell holds `Empty`, never `Air`, which is the atmosphere.
+    /// Appended in slice 6 at code 18; `is_solid` is false and the registry substance is `void`.
+    Empty = 18,
 }
 
 impl Stratum {
     /// Every stratum, for the host's mapping test.
-    pub const ALL: [Stratum; 18] = [
+    pub const ALL: [Stratum; 19] = [
         Stratum::Air,
         Stratum::Water,
         Stratum::Snow,
@@ -55,6 +58,7 @@ impl Stratum {
         Stratum::Andesite,
         Stratum::Quartzite,
         Stratum::Salt,
+        Stratum::Empty,
     ];
 
     /// The registry KEY this stratum maps to (`vd_core::registry::SUBSTANCES` names its rows by
@@ -80,19 +84,27 @@ impl Stratum {
             Stratum::Andesite => "andesite",
             Stratum::Quartzite => "quartzite",
             Stratum::Salt => "salt",
+            Stratum::Empty => "void",
         }
     }
 
     /// Whether the cell is matter the surface passes through (not air, not water).
     #[must_use]
     pub const fn is_solid(self) -> bool {
-        !matches!(self, Stratum::Air | Stratum::Water)
+        !matches!(self, Stratum::Air | Stratum::Water | Stratum::Empty)
     }
 
     /// The byte a digest folds and a record stores.
     #[must_use]
     pub const fn code(self) -> u8 {
         self as u8
+    }
+
+    /// The stratum of a code byte; `None` for a byte no stratum owns (a decoder REFUSES, never
+    /// defaults).
+    #[must_use]
+    pub fn from_code(code: u8) -> Option<Stratum> {
+        Stratum::ALL.get(usize::from(code)).copied()
     }
 }
 
@@ -220,7 +232,7 @@ mod tests {
             assert!(codes.insert(s.code()), "{s:?} shares a code");
             assert!(keys.insert(s.registry_key()), "{s:?} shares a key");
         }
-        assert_eq!(codes.len(), 18);
+        assert_eq!(codes.len(), 19);
         assert!(!Stratum::Air.is_solid());
         assert!(!Stratum::Water.is_solid());
         assert!(Stratum::Granite.is_solid());

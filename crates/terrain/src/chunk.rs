@@ -34,6 +34,7 @@ use crate::carve::{
 use crate::gf::Gf;
 use crate::height::{biome_at, height_m};
 use crate::strata::{Biome, Stratum};
+
 use vd_seed::bend::{Face, direction};
 use vd_seed::ladder::{self, cell_m};
 
@@ -98,6 +99,9 @@ pub struct ColumnField {
     pub y: i32,
     /// `62 × 62` entries in packing order `b·62 + a`: the direction, the surface radius, the biome.
     pub columns: Vec<([Gf; 3], Gf, Biome)>,
+    /// The same columns' sites: a cell of this face, or — in a PARTIAL chunk at a face's far edge —
+    /// the partner face's cell or a corner phantom (slice 6, `lattice::site_of`).
+    pub sites: Vec<crate::lattice::Site>,
     /// The least and the greatest surface radius among the columns.
     pub lowest_m: Gf,
     pub highest_m: Gf,
@@ -121,7 +125,7 @@ pub fn quantise_gap(gap_cells: Gf) -> i8 {
 }
 
 /// Whether a chunk key names a chunk of the body at all.
-fn in_ladder(body: &BodyDefinition, key: ChunkKey) -> bool {
+pub(crate) fn in_ladder(body: &BodyDefinition, key: ChunkKey) -> bool {
     if key.rung >= body.ladder.rungs || key.x < 0 || key.y < 0 || key.z < 0 {
         return false;
     }
@@ -132,7 +136,7 @@ fn in_ladder(body: &BodyDefinition, key: ChunkKey) -> bool {
 }
 
 /// The direction of the cell `(i, j)` of a face at a rung with `n_l` cells per edge.
-fn dir_of(face: Face, n_l: u32, i: i32, j: i32) -> [Gf; 3] {
+pub(crate) fn dir_of(face: Face, n_l: u32, i: i32, j: i32) -> [Gf; 3] {
     let d = direction(face, ladder::face_param(i, n_l), ladder::face_param(j, n_l));
     [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])]
 }
@@ -158,22 +162,29 @@ pub fn column_field(
     ) {
         return None;
     }
-    let n_l = body.ladder.cells_per_edge(rung);
-    let edge = CHUNK_EDGE as i32;
-    let (i0, j0) = (x * edge, y * edge);
+    let key = ChunkKey {
+        face,
+        rung,
+        x,
+        y,
+        z: 0,
+    };
     let mut columns = Vec::with_capacity(CHUNK_EDGE * CHUNK_EDGE);
+    let mut sites = Vec::with_capacity(CHUNK_EDGE * CHUNK_EDGE);
     let mut lowest = Gf::from_f64(f64::INFINITY);
     let mut highest = Gf::from_f64(f64::NEG_INFINITY);
     let mut b = 0;
     while b < CHUNK_EDGE {
         let mut a = 0;
         while a < CHUNK_EDGE {
-            let dir = dir_of(face, n_l, i0 + a as i32, j0 + b as i32);
+            let site = crate::lattice::site_of(body, key, a as i32, b as i32);
+            let dir = crate::lattice::site_dir(body, key, site);
             let h = height_m(body, dir, rung);
             let biome = biome_at(body, dir, h);
             lowest = lowest.lesser(h);
             highest = highest.greater(h);
             columns.push((dir, h, biome));
+            sites.push(site);
             a += 1;
         }
         b += 1;
@@ -184,9 +195,39 @@ pub fn column_field(
         x,
         y,
         columns,
+        sites,
         lowest_m: lowest,
         highest_m: highest,
     })
+}
+
+/// THE FLUID at a radius: water under the sea, air over it. The one rule the above-surface skip,
+/// the cell pass and the halo share.
+#[must_use]
+pub fn fluid_at(body: &BodyDefinition, r: Gf) -> Stratum {
+    if r < body.sea_radius_m {
+        Stratum::Water
+    } else {
+        Stratum::Air
+    }
+}
+
+/// The cell more than a cell above every surface: the fluid at its radius, at the top code.
+#[must_use]
+pub fn above_surface_cell(body: &BodyDefinition, r: Gf) -> Cell {
+    Cell {
+        stratum: fluid_at(body, r),
+        gap: i8::MAX,
+    }
+}
+
+/// The cell more than a cell below every surface, stratum and cave: bedrock at the bottom code.
+#[must_use]
+pub fn below_surface_cell(body: &BodyDefinition) -> Cell {
+    Cell {
+        stratum: body.strata.bedrock.stratum(),
+        gap: i8::MIN,
+    }
 }
 
 /// A chunk filled from one rule per radial layer: the skip's fill.
@@ -234,14 +275,8 @@ pub fn generate_in(body: &BodyDefinition, column: &ColumnField, z: i32) -> Optio
             key,
             |c| {
                 let r = Gf::from_f64(body.ladder.cell_radius_m(k0 + c as i32, rung));
-                (
-                    if r < body.sea_radius_m {
-                        Stratum::Water
-                    } else {
-                        Stratum::Air
-                    },
-                    i8::MAX,
-                )
+                let cell = above_surface_cell(body, r);
+                (cell.stratum, cell.gap)
             },
             How::AboveSurface,
         ));
@@ -250,14 +285,14 @@ pub fn generate_in(body: &BodyDefinition, column: &ColumnField, z: i32) -> Optio
     // less every reach, so every gap is ≤ −1 and clamps to the bottom code, and every cell is past
     // the deepest stratum and the deepest cave: bedrock.
     if r_high + Gf::HALF * cell_m_f < column.lowest_m - reach {
-        let bedrock = body.strata.bedrock.stratum();
-        return Some(filled(key, |_| (bedrock, i8::MIN), How::BelowSurface));
+        let cell = below_surface_cell(body);
+        return Some(filled(key, |_| (cell.stratum, cell.gap), How::BelowSurface));
     }
     Some(cell_pass(body, column, key))
 }
 
 /// How far under a surface the strata and the caves can still change a cell, in metres, at a rung.
-fn reach_m(body: &BodyDefinition, cell_m_f: Gf) -> Gf {
+pub(crate) fn reach_m(body: &BodyDefinition, cell_m_f: Gf) -> Gf {
     let carve_any = tubes_carve_at(body, cell_m_f) | caverns_carve_at(body, cell_m_f);
     let cave_reach = if carve_any {
         Gf::from_i64(i64::from(body.caves.max_depth_m)) + body.caves.cavern_scale_m
@@ -274,7 +309,6 @@ fn reach_m(body: &BodyDefinition, cell_m_f: Gf) -> Gf {
 pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> ChunkLattice {
     let rung = key.rung;
     let edge = CHUNK_EDGE as i32;
-    let n_l = body.ladder.cells_per_edge(rung);
     let (i0, j0, k0) = (key.x * edge, key.y * edge, key.z * edge);
     let cell_m_f = Gf::from_i64(i64::from(cell_m(rung)));
     let r_low = Gf::from_f64(body.ladder.corner_radius_m(k0, rung));
@@ -325,34 +359,28 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
     // The cavern lattice on the GLOBAL node grid (one node per `CAVERN_STRIDE` cells of the face and
     // of the radial, counted from the face's and the band's origin), so two neighbouring chunks share
     // their boundary nodes exactly and the field is continuous across every chunk edge. Each node's
-    // direction comes from its own face parameter, never from a clamped column.
+    // direction comes from its own face parameter, never from a clamped column. A PARTIAL chunk at a
+    // face's far edge holds the partner face's columns as well: those read a lattice of the
+    // partner's own nodes, built over exactly the columns present.
     let stride = CAVERN_STRIDE as i32;
     let node0 = [i0 / stride, j0 / stride, k0 / stride];
-    let mut lattice = vec![Gf::ZERO; CAVERN_NODES * CAVERN_NODES * CAVERN_NODES];
-    if carve_caverns {
-        let mut nc = 0;
-        while nc < CAVERN_NODES {
-            let k = (node0[2] + nc as i32) * stride;
-            let r = Gf::from_f64(body.ladder.corner_radius_m(k, rung));
-            let mut nb = 0;
-            while nb < CAVERN_NODES {
-                let j = (node0[1] + nb as i32) * stride;
-                let mut na = 0;
-                while na < CAVERN_NODES {
-                    let i = (node0[0] + na as i32) * stride;
-                    let dir = dir_of(key.face, n_l, i, j);
-                    let p = [dir[0] * r, dir[1] * r, dir[2] * r];
-                    lattice[(nc * CAVERN_NODES + nb) * CAVERN_NODES + na] = cavern_value(body, p);
-                    na += 1;
-                }
-                nb += 1;
-            }
-            nc += 1;
-        }
-    }
+    let lattice = if carve_caverns {
+        NodeLattice::build(body, rung, key.face, node0, [CAVERN_NODES; 3])
+    } else {
+        NodeLattice::empty(key.face)
+    };
+    let foreign = if carve_caverns {
+        foreign_lattices(body, rung, key.face, &column.sites, node0[2], CAVERN_NODES)
+    } else {
+        Vec::new()
+    };
     let cave_min = Gf::from_i64(i64::from(body.caves.min_depth_m));
     let cave_max = Gf::from_i64(i64::from(body.caves.max_depth_m));
-    let stride_f = Gf::from_i64(CAVERN_STRIDE as i64);
+    let rule = CaveRule {
+        carve_any,
+        cave_min,
+        cave_max,
+    };
     let mut cells = Vec::with_capacity(CHUNK_CELLS);
     let mut c = 0;
     while c < CHUNK_EDGE {
@@ -362,37 +390,32 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
             let mut a = 0;
             while a < CHUNK_EDGE {
                 let (dir, h, biome) = column.columns[b * CHUNK_EDGE + a];
-                let rock_gap_cells = ((r - h) / cell_m_f).clamp(-Gf::ONE, Gf::ONE);
-                let depth = h - r;
-                let mut gap_cells = rock_gap_cells;
-                let mut stratum = if rock_gap_cells >= Gf::ZERO {
-                    if r < body.sea_radius_m {
-                        Stratum::Water
-                    } else {
-                        Stratum::Air
-                    }
+                let site = column.sites[b * CHUNK_EDGE + a];
+                let k = k0 + c as i32;
+                // A column of this face reads the chunk's node lattice; a partner face's column (a
+                // partial chunk at the face's far edge) reads that face's own global nodes, and a
+                // corner phantom reads the field at its own centre — the same rule the halo uses,
+                // so a partial chunk's cell beyond the face IS the partner's cell, byte for byte.
+                // The cavern value is read only where a cave can be — inside the depth band — so a
+                // cell far above or far below the surface pays no interpolation.
+                let value = if carve_caverns & rule.in_band(h - r) {
+                    cavern_of(&lattice, &foreign, site, k)
                 } else {
-                    body.strata
-                        .at(biome, depth.floor().to_i64_floor().max(0) as u32)
+                    Gf::ZERO
                 };
-                // The cavern lattice is all zero where caverns do not carve, and the tube list is
-                // empty where tubes do not: both contribute nothing there, with no branch.
-                if carve_any & (depth >= cave_min) & (depth <= cave_max) {
-                    let global = [i0 + a as i32, j0 + b as i32, k0 + c as i32];
-                    let value = trilinear(&lattice, node0, global, stride_f);
-                    let p = [dir[0] * r, dir[1] * r, dir[2] * r];
-                    let hollow_m = cavern_hollow_m(body, value).greater(tube_hollow_m(&tubes, p));
-                    if hollow_m > Gf::ZERO {
-                        // A hollow is never negative, so the greater is in air: the cell is hollow.
-                        gap_cells =
-                            gap_cells.greater((hollow_m / cell_m_f).clamp(Gf::ZERO, Gf::ONE));
-                        stratum = Stratum::Air;
-                    }
-                }
-                cells.push(Cell {
-                    stratum,
-                    gap: quantise_gap(gap_cells),
-                });
+                cells.push(finish_cell(
+                    body,
+                    &CellSite {
+                        dir,
+                        h,
+                        biome,
+                        r,
+                        cell_m_f,
+                    },
+                    &rule,
+                    value,
+                    &tubes,
+                ));
                 a += 1;
             }
             b += 1;
@@ -406,26 +429,240 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
     }
 }
 
-/// The cavern field at a global cell, interpolated from the eight global nodes around it with
-/// weights that are multiples of `1/CAVERN_STRIDE`: exact on every target, and the same number from
-/// whichever chunk holds the cell.
-fn trilinear(lattice: &[Gf], node0: [i32; 3], global: [i32; 3], stride: Gf) -> Gf {
+/// A box of cavern nodes on ONE face's global node grid: the nodes from `node0` over `dims`, each
+/// the field at the node's own direction and corner radius. The chunk's own lattice, the halo's
+/// extension of it, and the small lattices a partial chunk builds over a partner face's columns are
+/// all this one type, so every cell reads its nodes through one trilinear rule.
+pub(crate) struct NodeLattice {
+    pub face: Face,
+    pub node0: [i32; 3],
+    pub dims: [usize; 3],
+    pub values: Vec<Gf>,
+}
+
+impl NodeLattice {
+    /// Build the lattice: every node evaluated, in `(c, b, a)` order.
+    pub(crate) fn build(
+        body: &BodyDefinition,
+        rung: u8,
+        face: Face,
+        node0: [i32; 3],
+        dims: [usize; 3],
+    ) -> NodeLattice {
+        let n_l = body.ladder.cells_per_edge(rung);
+        let s = CAVERN_STRIDE as i32;
+        let mut values = Vec::with_capacity(dims[0] * dims[1] * dims[2]);
+        let mut nc = 0;
+        while nc < dims[2] {
+            let k = (node0[2] + nc as i32) * s;
+            let r = Gf::from_f64(body.ladder.corner_radius_m(k, rung));
+            let mut nb = 0;
+            while nb < dims[1] {
+                let j = (node0[1] + nb as i32) * s;
+                let mut na = 0;
+                while na < dims[0] {
+                    let i = (node0[0] + na as i32) * s;
+                    values.push(node_value(body, face, n_l, i, j, r));
+                    na += 1;
+                }
+                nb += 1;
+            }
+            nc += 1;
+        }
+        NodeLattice {
+            face,
+            node0,
+            dims,
+            values,
+        }
+    }
+
+    /// A lattice with no nodes, for a rung where caverns do not carve (never read).
+    pub(crate) fn empty(face: Face) -> NodeLattice {
+        NodeLattice {
+            face,
+            node0: [0; 3],
+            dims: [0; 3],
+            values: Vec::new(),
+        }
+    }
+
+    /// The field at a global cell of this face, interpolated from the eight nodes around it with
+    /// weights that are multiples of `1/CAVERN_STRIDE`: exact on every target, and the same number
+    /// from whichever lattice holds the nodes.
+    #[inline]
+    pub(crate) fn value_at(&self, cell: [i32; 3]) -> Gf {
+        let s = CAVERN_STRIDE as i32;
+        let (na, nb, nc) = (
+            (cell[0] / s - self.node0[0]) as usize,
+            (cell[1] / s - self.node0[1]) as usize,
+            (cell[2] / s - self.node0[2]) as usize,
+        );
+        let at =
+            |x: usize, y: usize, z: usize| self.values[(z * self.dims[1] + y) * self.dims[0] + x];
+        let stride = Gf::from_i64(CAVERN_STRIDE as i64);
+        trilinear8(
+            [
+                at(na, nb, nc),
+                at(na + 1, nb, nc),
+                at(na, nb + 1, nc),
+                at(na + 1, nb + 1, nc),
+                at(na, nb, nc + 1),
+                at(na + 1, nb, nc + 1),
+                at(na, nb + 1, nc + 1),
+                at(na + 1, nb + 1, nc + 1),
+            ],
+            [
+                Gf::from_i32(cell[0] % s) / stride,
+                Gf::from_i32(cell[1] % s) / stride,
+                Gf::from_i32(cell[2] % s) / stride,
+            ],
+        )
+    }
+}
+
+/// The lattices of every PARTNER face present among `sites` (a partial chunk's columns beyond its
+/// face, or a halo across a seam): one per face, over the node range those columns need, on the
+/// radial node range `[k_node0, k_node0 + k_dims)`.
+pub(crate) fn foreign_lattices(
+    body: &BodyDefinition,
+    rung: u8,
+    my_face: Face,
+    sites: &[crate::lattice::Site],
+    k_node0: i32,
+    k_dims: usize,
+) -> Vec<NodeLattice> {
     let s = CAVERN_STRIDE as i32;
-    let (na, nb, nc) = (
-        (global[0] / s - node0[0]) as usize,
-        (global[1] / s - node0[1]) as usize,
-        (global[2] / s - node0[2]) as usize,
-    );
-    let ta = Gf::from_i32(global[0] % s) / stride;
-    let tb = Gf::from_i32(global[1] % s) / stride;
-    let tc = Gf::from_i32(global[2] % s) / stride;
-    let at = |x: usize, y: usize, z: usize| lattice[(z * CAVERN_NODES + y) * CAVERN_NODES + x];
-    let l = |p: Gf, q: Gf, t: Gf| p + t * (q - p);
-    let x00 = l(at(na, nb, nc), at(na + 1, nb, nc), ta);
-    let x10 = l(at(na, nb + 1, nc), at(na + 1, nb + 1, nc), ta);
-    let x01 = l(at(na, nb, nc + 1), at(na + 1, nb, nc + 1), ta);
-    let x11 = l(at(na, nb + 1, nc + 1), at(na + 1, nb + 1, nc + 1), ta);
-    l(l(x00, x10, tb), l(x01, x11, tb), tc)
+    let mut out: Vec<NodeLattice> = Vec::new();
+    for face in Face::ALL {
+        if face == my_face {
+            continue;
+        }
+        let mut lo = [i32::MAX; 2];
+        let mut hi = [i32::MIN; 2];
+        let mut any = false;
+        for site in sites {
+            if site.face == face.index() {
+                lo = [lo[0].min(site.i), lo[1].min(site.j)];
+                hi = [hi[0].max(site.i), hi[1].max(site.j)];
+                any = true;
+            }
+        }
+        if any {
+            let node0 = [lo[0] / s, lo[1] / s, k_node0];
+            let dims = [
+                (hi[0] / s - node0[0] + 2) as usize,
+                (hi[1] / s - node0[1] + 2) as usize,
+                k_dims,
+            ];
+            out.push(NodeLattice::build(body, rung, face, node0, dims));
+        }
+    }
+    out
+}
+
+/// The cavern value of a cell by its SITE: the chunk's own lattice for a cell of its face, the
+/// partner's lattice for a cell across a seam. A corner PHANTOM has no lattice and no cave: the
+/// extractor never reads a phantom's bytes (its corner group is a prism of the three real columns),
+/// so its value is zero by rule. The same rule from a partial chunk's cell pass and from the halo,
+/// so a cell beyond the face IS the partner's cell, byte for byte.
+#[inline]
+pub(crate) fn cavern_of(
+    own: &NodeLattice,
+    foreign: &[NodeLattice],
+    site: crate::lattice::Site,
+    k: i32,
+) -> Gf {
+    if site.face == own.face.index() {
+        return own.value_at([site.i, site.j, k]);
+    }
+    for lattice in foreign {
+        if site.face == lattice.face.index() {
+            return lattice.value_at([site.i, site.j, k]);
+        }
+    }
+    Gf::ZERO
+}
+
+/// The cavern field at one global node: the node's own direction on its face, at the corner
+/// radius `r` of its radial index. Shared by the cell pass and the halo.
+pub(crate) fn node_value(body: &BodyDefinition, face: Face, n_l: u32, i: i32, j: i32, r: Gf) -> Gf {
+    let dir = dir_of(face, n_l, i, j);
+    cavern_value(body, [dir[0] * r, dir[1] * r, dir[2] * r])
+}
+
+/// What a cell's column and radial layer state about it: the inputs of the per-cell tail.
+pub(crate) struct CellSite {
+    pub dir: [Gf; 3],
+    pub h: Gf,
+    pub biome: Biome,
+    pub r: Gf,
+    pub cell_m_f: Gf,
+}
+
+/// The body's cave band at a rung: whether anything carves, and between which depths.
+pub(crate) struct CaveRule {
+    pub carve_any: bool,
+    pub cave_min: Gf,
+    pub cave_max: Gf,
+}
+
+impl CaveRule {
+    /// Whether a cell at `depth` under the surface can hold a cave at this rung.
+    pub(crate) fn in_band(&self, depth: Gf) -> bool {
+        self.carve_any & (depth >= self.cave_min) & (depth <= self.cave_max)
+    }
+}
+
+/// ★ THE PER-CELL TAIL, shared by the cell pass and the halo (slice 6): from a column's surface,
+/// a cell's radius, the interpolated cavern value and the tubes that can reach it, the cell's
+/// substance and gap. One function, so a halo cell computed by one chunk is byte-identical to the
+/// same cell computed by the chunk that owns it.
+#[inline]
+pub(crate) fn finish_cell(
+    body: &BodyDefinition,
+    site: &CellSite,
+    rule: &CaveRule,
+    value: Gf,
+    tubes: &[crate::carve::Tube],
+) -> Cell {
+    let (dir, h, r, cell_m_f) = (site.dir, site.h, site.r, site.cell_m_f);
+    let rock_gap_cells = ((r - h) / cell_m_f).clamp(-Gf::ONE, Gf::ONE);
+    let depth = h - r;
+    let mut gap_cells = rock_gap_cells;
+    let mut stratum = if rock_gap_cells >= Gf::ZERO {
+        fluid_at(body, r)
+    } else {
+        body.strata
+            .at(site.biome, depth.floor().to_i64_floor().max(0) as u32)
+    };
+    // The cavern lattice is all zero where caverns do not carve, and the tube list is empty where
+    // tubes do not: both contribute nothing there, with no branch.
+    if rule.in_band(depth) {
+        let p = [dir[0] * r, dir[1] * r, dir[2] * r];
+        let hollow_m = cavern_hollow_m(body, value).greater(tube_hollow_m(tubes, p));
+        if hollow_m > Gf::ZERO {
+            // A hollow is never negative, so the greater is in air: the cell is hollow.
+            gap_cells = gap_cells.greater((hollow_m / cell_m_f).clamp(Gf::ZERO, Gf::ONE));
+            stratum = Stratum::Air;
+        }
+    }
+    Cell {
+        stratum,
+        gap: quantise_gap(gap_cells),
+    }
+}
+
+/// The trilinear blend of eight node values `v[(c·2 + b)·2 + a]` at weights `t`: the one arithmetic
+/// the cell pass and the halo share.
+#[inline]
+pub(crate) fn trilinear8(v: [Gf; 8], t: [Gf; 3]) -> Gf {
+    let l = |p: Gf, q: Gf, w: Gf| p + w * (q - p);
+    let x00 = l(v[0], v[1], t[0]);
+    let x10 = l(v[2], v[3], t[0]);
+    let x01 = l(v[4], v[5], t[0]);
+    let x11 = l(v[6], v[7], t[0]);
+    l(l(x00, x10, t[1]), l(x01, x11, t[1]), t[2])
 }
 
 /// Generate one chunk; `None` for a key outside the body's ladder. The column pass and the cell
@@ -699,32 +936,28 @@ mod tests {
     /// interpolation is exact on every node.
     #[test]
     fn the_cavern_lattice_is_continuous_across_a_chunk_edge() {
-        let stride = Gf::from_i64(CAVERN_STRIDE as i64);
-        let mut lattice_a = vec![Gf::ZERO; CAVERN_NODES * CAVERN_NODES * CAVERN_NODES];
-        let mut lattice_b = lattice_a.clone();
+        let blank = |node0: [i32; 3]| NodeLattice {
+            face: Face::PosX,
+            node0,
+            dims: [CAVERN_NODES; 3],
+            values: vec![Gf::ZERO; CAVERN_NODES * CAVERN_NODES * CAVERN_NODES],
+        };
+        let mut lattice_a = blank([0, 0, 0]);
+        let mut lattice_b = blank([15, 0, 0]);
         // Chunk A covers cells 0..62 (global nodes 0..=16); chunk B covers 62..124 (node0 = 15,
         // global nodes 15..=31). Give global node 16 the value one in both.
-        lattice_a[16] = Gf::ONE;
-        lattice_b[1] = Gf::ONE;
+        lattice_a.values[16] = Gf::ONE;
+        lattice_b.values[1] = Gf::ONE;
         // Global cell 63 sits in chunk B, three quarters of the way from node 15 (cell 60) to node
         // 16 (cell 64); chunk A holds cell 61, a quarter of the way.
-        assert_eq!(
-            trilinear(&lattice_b, [15, 0, 0], [63, 0, 0], stride),
-            Gf::from_f64(0.75)
-        );
-        assert_eq!(
-            trilinear(&lattice_a, [0, 0, 0], [61, 0, 0], stride),
-            Gf::from_f64(0.25)
-        );
-        assert_eq!(
-            trilinear(&lattice_b, [15, 0, 0], [64, 0, 0], stride),
-            Gf::ONE,
-            "exact on the node"
-        );
-        assert_eq!(
-            trilinear(&lattice_a, [0, 0, 0], [0, 0, 0], stride),
-            Gf::ZERO
-        );
+        assert_eq!(lattice_b.value_at([63, 0, 0]), Gf::from_f64(0.75));
+        assert_eq!(lattice_a.value_at([61, 0, 0]), Gf::from_f64(0.25));
+        assert_eq!(lattice_b.value_at([64, 0, 0]), Gf::ONE, "exact on the node");
+        assert_eq!(lattice_a.value_at([0, 0, 0]), Gf::ZERO);
+        // An empty lattice is what a rung without caverns holds; it is never read.
+        let none = NodeLattice::empty(Face::NegY);
+        assert_eq!(none.values.len(), 0);
+        assert_eq!(none.face, Face::NegY);
         // On the home planet, two neighbouring evaluated chunks under the surface both carve.
         let m = home_planet();
         let z = surface_z(&m, Face::PosZ, 0, 40, 41) - 2;

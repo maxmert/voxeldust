@@ -742,9 +742,9 @@ voxel-measures:
 # fence: the generator's own object code names no platform math symbol (a transcendental that arrived
 # through a dependency is caught here and nowhere else). `terrain-cost` is the measurement.
 terrain-pin:
-    cargo test -p vd-terrain --test terrain_pin
-    cargo test --release -p vd-terrain --test terrain_pin
-    RUSTFLAGS="-C target-cpu=native" cargo test --release -p vd-terrain --test terrain_pin
+    cargo test -p vd-terrain --test terrain_pin --test mesh_pin
+    cargo test --release -p vd-terrain --test terrain_pin --test mesh_pin
+    RUSTFLAGS="-C target-cpu=native" cargo test --release -p vd-terrain --test terrain_pin --test mesh_pin
 terrain-link-scan:
     cargo build --release -p vd-terrain -p vd-physics
     scripts/terrain_link_scan.sh --control

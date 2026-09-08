@@ -23,18 +23,30 @@
 pub mod body;
 pub mod carve;
 pub mod chunk;
+pub mod compose;
 pub mod digest;
+pub mod extract;
 pub mod gf;
 pub mod height;
 pub mod home;
+pub mod lattice;
 pub mod noise;
+pub mod position;
+pub mod seat;
 pub mod strata;
 pub mod tag;
 
 pub use body::{BodyDefinition, OCTAVES, Octave};
 pub use chunk::{CHUNK_CELLS, CHUNK_EDGE, Cell, ChunkKey, ChunkLattice};
-pub use digest::{ChunkDigest, GOLDEN_SELF_CHECK_KEYS, chunk_digest, golden_self_check};
+pub use compose::{EditRow, compose};
+pub use digest::{
+    ChunkDigest, GOLDEN_SELF_CHECK_KEYS, chunk_digest, golden_self_check, mesh_digest,
+};
+pub use extract::{ChunkMesh, VERTEX_QUANTUM, extract};
 pub use gf::Gf;
+pub use lattice::{SampleBox, sample_box};
+pub use position::vertex_position_m;
+pub use seat::seat_eighths;
 pub use strata::{Biome, Stratum};
 pub use tag::{GENERATOR_VERSION, WorldIdentity, declared_world_tag};
 

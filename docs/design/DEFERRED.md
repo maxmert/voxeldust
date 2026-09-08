@@ -7748,3 +7748,26 @@ name, but "no drift" is not yet a fact about that target.
 
 **WHEN.** G4 real before the first saved world (the only leg still owed for "no drift"); G5 in
 slice 7; the radius law and the provisional band in the collider slice.
+
+### D-TERRAIN-2 🟧 THE EXTRACTOR'S OWED ITEMS — what slice 6 leaves to later slices and to the owner (2026-09-08)
+
+**WHAT IS DEFERRED.** Slice 6 landed the extractor (`vd-terrain`: `lattice`, `extract`, `position`,
+`compose`, `seat`) with its triangle table on every leg. These items are owed, each with a home:
+
+| Item | What is missing | Where it lives | When |
+|---|---|---|---|
+| The worker budget — DECIDED | The slice document §8 set 4 ms of worker time per rung-0 chunk. MEASURED: a surface chunk costs 3.3 ms (sample box 2.0 + extraction 1.3), a cave-dense chunk 6.1 ms, and the synthetic checkerboard bound 26 ms. **The owner set the budget at 8 ms (2026-09-08): "if that becomes a problem over time, we rethink and reimplement."** The bench gates the costliest named chunk against it; the client's residency lead (slice 7) is sized from it | `crates/bins/examples/terrain_cost.rs` (`EXTRACT_BUDGET_US`, `WORST_CASE_MEASURED_US`) | closed; revisit only on a measured problem |
+| The ambiguous face | Naive surface nets are not a manifold where the four cells of a face between two groups alternate rock and air: up to four quads share one edge there (MEASURED on the checkerboard: an edge used four times). The mesh is closed and no quad is emitted twice; a collider that refuses a non-manifold edge must be told. The manifold variant of dual contouring is the reserved upgrade (ruling V10 S6-1) | `extract.rs` `well_formed`, `an_ambiguous_face_shares_an_edge_between_four_quads` | the collider slice (11) decides whether it matters; the upgrade is a content door before the first saved world |
+| Coincident vertices and T-junctions | A cell exactly on the surface (gap 0, air) puts a crossing at its own centre, so two groups can quantise to one point; the zero-area triangle is DROPPED at emission and the quad's other half covers it, which leaves a T-junction. Draws and collides correctly; a mesh-cleaning pass (merge coincident vertices) is the collider's or the client's | `extract.rs` `is_degenerate`, `push_quad` | slice 11 (collider) and slice 7 (client) as they need it |
+| The collider consumer | Nothing collides yet: the triangles and `vertex_position_m` are the input the collider slice reads (SL10 clause 5) | slice 11 | slice 11 |
+| The client mesh leg (G5) | The world identity's MEASURED half now folds the eight self-check chunks' MESH digests beside their cell digests, so a client whose extractor drifts is refused at login — once a client links the crate | `digest.rs` `golden_self_check`; `D-TERRAIN-1` G5 | slice 7 |
+| A neighbour's edit onto the halo | `compose` addresses a box cell; `local_of_site` inverts `site_of` so a host lays a neighbour chunk's edit onto this chunk's halo. The HOST logic that gathers a chunk's own rows plus its six neighbours' edge rows is slice 9's (the store) and 10's (the lane) | `lattice.rs` `local_of_site`, `compose.rs` | slices 9, 10 |
+| The corner's cave field | The corner phantom column carries no cave value (it is never read by geometry); the three real columns at a corner read their own faces' node lattices, so the cave field is continuous up to the corner and undefined only on the phantom. No step is drawn; nothing is owed unless a corner cave is ever seen wrong | `chunk.rs` `cavern_of` | none, recorded |
+| `Stratum::Empty` | The removal kind (ruling V4) is appended at code 18 with registry substance `void`; a mined cell holds `Empty`, never `Air`. The record slice (9) maps it to the registry's Empty kind | `strata.rs` | slice 9 |
+
+**Example.** A pilot digs a tunnel mouth on a chunk edge of the home planet. Slice 6 can compose that
+edit onto both chunks' boxes (the owner's core and the neighbour's halo) and the two meshes meet. What
+does not exist yet is the store that keeps the edit and the lane that carries it to the neighbour's
+host — slices 9 and 10 — and the collider that stops her boots at the new floor — slice 11.
+
+**WHEN.** As listed; the budget question at the owner's next word.

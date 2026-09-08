@@ -28,15 +28,16 @@ use vd_terrain::home::home_planet;
 /// The committed table: one line per digest, `face rung x y z d0 d1`.
 const GOLDEN: &str = include_str!("golden_home.txt");
 
-/// Columns per face: ten spread by two odd strides, plus the face's corner column and its far edge
-/// column — the seams the bend must agree on.
-const COLUMNS_PER_FACE: usize = 12;
+/// Columns per face: ten spread by two odd strides, the face's corner column, its last FULL edge
+/// column, and the three LAST chunks (partial on the home planet) that hold the +u and +v seams and
+/// the (+u, +v) corner — the seams the bend must agree on.
+const COLUMNS_PER_FACE: usize = 15;
 /// The rows per column: the surface chunk and the chunks two below and two above it.
 const ROWS_PER_COLUMN: usize = 3;
 
 /// Seventy-two columns at a rung, distinct: the strides start at one so no stride key repeats the
 /// corner.
-fn column_keys(chunks: i32) -> Vec<(Face, i32, i32)> {
+fn column_keys(chunks: i32, last: i32) -> Vec<(Face, i32, i32)> {
     let mut keys = Vec::new();
     for (f, face) in Face::ALL.iter().enumerate() {
         let f = f as i32;
@@ -49,6 +50,12 @@ fn column_keys(chunks: i32) -> Vec<(Face, i32, i32)> {
         }
         keys.push((*face, 0, 0));
         keys.push((*face, chunks - 1, 0));
+        // The LAST chunk along each edge — partial on the home planet (a face edge is not a whole
+        // number of chunks) — and the (+u, +v) corner: the partner's cells beyond the face, both
+        // plus seams and the corner prism.
+        keys.push((*face, last, 0));
+        keys.push((*face, 0, last));
+        keys.push((*face, last, last));
     }
     keys
 }
@@ -60,7 +67,8 @@ fn table() -> Vec<String> {
     while rung < body.ladder().rungs {
         let chunks = (body.ladder().cells_per_edge(rung) as i32 / CHUNK_EDGE as i32).max(1);
         let top = (body.ladder().cells_in_band(rung) as i32 - 1) / CHUNK_EDGE as i32;
-        let keys = column_keys(chunks);
+        let last = (body.ladder().cells_per_edge(rung) as i32 - 1) / CHUNK_EDGE as i32;
+        let keys = column_keys(chunks, last);
         let distinct: std::collections::BTreeSet<(Face, i32, i32)> = keys.iter().copied().collect();
         assert_eq!(
             distinct.len(),

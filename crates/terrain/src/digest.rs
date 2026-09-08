@@ -43,6 +43,36 @@ pub fn digest_of(chunk: &crate::chunk::ChunkLattice) -> ChunkDigest {
     ChunkDigest([a, b])
 }
 
+/// The digest of an extracted chunk (slice 6): its key, its vertex count, every vertex's three
+/// integers and every triangle's three indices, little-endian, in order. Pins the triangle list —
+/// a quad list cannot go red on the diagonal that matters.
+#[must_use]
+pub fn mesh_digest(mesh: &crate::extract::ChunkMesh) -> ChunkDigest {
+    let key = mesh.key;
+    let mut a = fnv1a(FNV_OFFSET, &[key.face as u8, key.rung]);
+    let mut b = fnv1a(SECOND_OFFSET, &[key.face as u8, key.rung]);
+    for coord in [key.x, key.y, key.z] {
+        a = fnv1a(a, &coord.to_le_bytes());
+        b = fnv1a(b, &coord.to_le_bytes());
+    }
+    let count = (mesh.vertices.len() as u32).to_le_bytes();
+    a = fnv1a(a, &count);
+    b = fnv1a(b, &count);
+    for v in &mesh.vertices {
+        for x in v {
+            a = fnv1a(a, &x.to_le_bytes());
+            b = fnv1a(b, &x.to_le_bytes());
+        }
+    }
+    for t in &mesh.triangles {
+        for i in t {
+            a = fnv1a(a, &i.to_le_bytes());
+            b = fnv1a(b, &i.to_le_bytes());
+        }
+    }
+    ChunkDigest([a, b])
+}
+
 /// The eight self-check keys: one chunk per face at rung 0, near the surface, plus two at the top
 /// rung. Stated as `(face, rung, x, y)`; the radial index is the surface chunk of that column.
 pub const GOLDEN_SELF_CHECK_KEYS: [(Face, u8, i32, i32); 8] = [
@@ -61,15 +91,15 @@ pub const GOLDEN_SELF_CHECK_KEYS: [(Face, u8, i32, i32); 8] = [
 #[must_use]
 pub fn surface_chunk_z(body: &BodyDefinition, face: Face, rung: u8, x: i32, y: i32) -> i32 {
     let edge = crate::chunk::CHUNK_EDGE as i32;
-    let n_l = body.ladder.cells_per_edge(rung);
-    let a = vd_seed::ladder::face_param(x * edge + edge / 2, n_l);
-    let b = vd_seed::ladder::face_param(y * edge + edge / 2, n_l);
-    let d = vd_seed::bend::direction(face, a, b);
-    let dir = [
-        crate::gf::Gf::from_f64(d[0]),
-        crate::gf::Gf::from_f64(d[1]),
-        crate::gf::Gf::from_f64(d[2]),
-    ];
+    let key = ChunkKey {
+        face,
+        rung,
+        x,
+        y,
+        z: 0,
+    };
+    let site = crate::lattice::site_of(body, key, edge / 2, edge / 2);
+    let dir = crate::lattice::site_dir(body, key, site);
     let h = crate::height::height_m(body, dir, rung);
     let cell = i64::from(vd_seed::ladder::cell_m(rung));
     let k = (h.to_i64_floor() - i64::from(body.ladder.floor_m)) / cell;
@@ -98,7 +128,9 @@ pub fn self_check_key(body: &BodyDefinition, entry: (Face, u8, i32, i32)) -> Chu
     }
 }
 
-/// The boot self-check: the fold of the eight self-check digests, the world tag's MEASURED half.
+/// The boot self-check: the fold of the eight self-check chunks' CELL digests and, since slice 6,
+/// their MESH digests (the extractor, the halo, the seams and the corner are part of the shape a
+/// client must compute identically — SL10 clauses 3 and 5), the world tag's MEASURED half.
 /// `None` when a self-check key names no chunk of this body — a REFUSAL, never a fold of zeros
 /// (the decode-to-Default ban, in the one place whose job is to refuse).
 #[must_use]
@@ -109,6 +141,10 @@ pub fn golden_self_check(body: &BodyDefinition) -> Option<u64> {
         let d = chunk_digest(body, key)?.0;
         acc = fnv1a(acc, &d[0].to_le_bytes());
         acc = fnv1a(acc, &d[1].to_le_bytes());
+        let samples = crate::lattice::sample_box(body, key)?;
+        let m = mesh_digest(&crate::extract::extract(&samples)).0;
+        acc = fnv1a(acc, &m[0].to_le_bytes());
+        acc = fnv1a(acc, &m[1].to_le_bytes());
     }
     Some(acc)
 }

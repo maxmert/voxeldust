@@ -393,3 +393,52 @@ before the fix. One fact the measurements surfaced for the owner: the home plane
 5 297 m under the ladder radius and covers about one column in a hundred (measured on 300 sampled
 columns per rung); the sea level is a seed draw and the owner has not yet judged the look.
 Results: `docs/investigation/2026-09-07/slice_05_generator.md` §11.
+
+## V10. SLICE 6 DISCUSSION — THE EXTRACTOR (2026-09-08)
+
+The owner read `docs/investigation/2026-09-07/slice_06_extractor.md` (the extractor, the halo, the
+triangulation rule, integer vertices, the composition order, the seating rule), asked whether the
+proposals allow the best rendering quality — a seamless, believable horizon with no visible jump
+between detail levels, as in current open-world games — and showed a vista (a forest to the horizon,
+sharp far mesas, a tower on a far ridge, haze). The owner's statements, binding:
+
+- **No impostors.** A far tree drawn as a flat card is not believable. A forest to the horizon is:
+  near, the full art asset; middle, the asset's own coarser MESH detail levels, instanced; far, the
+  CANOPY FOLD (rulings C-4, R-15) drawn as a textured surface. Recorded in the slice document §12.
+- **No visible jump between detail levels.** The crossfade band per chunk (slices 7, 8), geomorphing
+  as the fallback if the measured pop stays visible.
+- The sharp far crease (surface nets round it by half a cell of the rung drawn; dual contouring keeps
+  it) and believable landforms (the recipe's job, not the extractor's) are both decided ON PICTURES in
+  slice 7, before the first saved world, when a version bump costs nothing.
+
+Then: *"Continue with the implementation of the slice 6."* Every recommendation in §9 of the slice
+document is a RULING:
+
+| Item | Ruling |
+|---|---|
+| S6-1 the extractor | Naive surface nets; dual contouring a reserved upgrade; the switch is a content door before the first saved world |
+| S6-2 the halo | Generated with the chunk: the neighbour cells are computed by the same per-cell rule from the seed, never fetched |
+| S6-3 the triangulation rule | The shorter diagonal on integer vertices, tie → the fixed diagonal |
+| S6-4 the output form | Integer vertices in cell space at 1/256 cell, triangle indices; the digest pins both |
+| S6-5 normals and colours | Not in the identity; the client derives them |
+| S6-6 the composition order | Generated shape → terrain cell edits → catalogue blocks → sub-metre blocks → attachments, a pure function landed now |
+| S6-7 the seating rule | The zero crossing along the cell's radial, snapped to 1/8 cell; a rock cell refuses; landed now |
+| S6-8 the tree expansion function | Not this slice (slice 14) |
+| S6-9 the gate | A triangle table beside the cell table, a composed row, a seating row, all legs |
+| S6-10 the version | Stays 1 unless slice 7's pictures change the cave lattice step |
+| The order of work | Measurements first (the extractor's cost at every rung, the worst case, the output size, the snap error, the halo's cost), then the crate, then the refuter |
+
+**LANDED (2026-09-08), after the refuter.** Built as ruled: surface nets in exact integer arithmetic
+(S6-1, S6-4), the halo generated with the chunk (S6-2), the shorter diagonal with a fixed tie (S6-3),
+normals and colours left to the client (S6-5), the composition order as a pure function (S6-6), the
+seating rule in eighths (S6-7), no tree code (S6-8), the triangle table with a composed and a seating
+row on every leg (S6-9), the version still 1 (S6-10). The Opus 5 refuter found 20; all answered; four
+moved the shape before any world was saved: the cube corner was a HOLE (the box's phantom column is
+diagonal to every real corner cell, so nobody owned its edges) and the three faces could not agree on
+a corner vertex — the corner is now a PRISM of the three real columns, quantised in barycentric
+weights to a common 256; a seam vertex could land one quantum apart (now half-to-even rounding); and
+the golden tables never covered a partial chunk (they do, 3 240 and 1 082 rows). THE BUDGET: the 4 ms
+worker budget per chunk held for a surface chunk (3.3 ms) and not for a cave-dense one (6.1 ms); the
+owner set it at **8 ms** (*"I think 8 should be ok. If that over time will become a problem, we can
+rethink and reimplement"*), and the bench gates against it (`D-TERRAIN-2`).
+Results: `docs/investigation/2026-09-07/slice_06_extractor.md` §13.

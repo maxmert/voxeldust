@@ -23,3 +23,4 @@ pub mod bend;
 pub mod digest;
 pub mod ladder;
 pub mod rng;
+pub mod seam;
