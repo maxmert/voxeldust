@@ -29,6 +29,11 @@ pub enum WaitField {
     /// indistinguishable; wait for a specific frame with `universe_tick ge N` (`N >= 1`),
     /// not `eq 0` / `le 0`.
     UniverseTick,
+    /// The terrain chunks the renderer draws right now (slice 7): a picture gate waits on `ge 1`.
+    TerrainChunksDrawn,
+    /// The terrain chunks still building (slice 7): a picture gate waits on `le 0` after the first
+    /// chunk is drawn, so it captures the whole wanted set and never sleeps for it.
+    TerrainChunksPending,
 }
 
 impl WaitField {
@@ -42,19 +47,23 @@ impl WaitField {
             WaitField::EntityCount
             | WaitField::SnapshotsApplied
             | WaitField::RealmFramesApplied
-            | WaitField::UniverseTick => false,
+            | WaitField::UniverseTick
+            | WaitField::TerrainChunksDrawn
+            | WaitField::TerrainChunksPending => false,
         }
     }
 
     /// Every field — the SINGLE source for CLI help / validation, so a new variant can
     /// never leave `vdctl`'s help text or error message stale (the DRY drift the audit hit).
-    pub const ALL: [WaitField; 6] = [
+    pub const ALL: [WaitField; 8] = [
         WaitField::Active,
         WaitField::EntityCount,
         WaitField::OwnEntitySet,
         WaitField::SnapshotsApplied,
         WaitField::RealmFramesApplied,
         WaitField::UniverseTick,
+        WaitField::TerrainChunksDrawn,
+        WaitField::TerrainChunksPending,
     ];
 
     /// The canonical snake_case name — matches the serde representation (pinned by a test),
@@ -68,6 +77,8 @@ impl WaitField {
             WaitField::SnapshotsApplied => "snapshots_applied",
             WaitField::RealmFramesApplied => "realm_frames_applied",
             WaitField::UniverseTick => "universe_tick",
+            WaitField::TerrainChunksDrawn => "terrain_chunks_drawn",
+            WaitField::TerrainChunksPending => "terrain_chunks_pending",
         }
     }
 }
@@ -175,6 +186,8 @@ fn field_value(state: &DevState, field: WaitField) -> u64 {
         WaitField::SnapshotsApplied => state.snapshots_applied,
         WaitField::RealmFramesApplied => state.realm_frames_applied,
         WaitField::UniverseTick => state.universe_tick.unwrap_or(0),
+        WaitField::TerrainChunksDrawn => state.terrain_chunks_drawn,
+        WaitField::TerrainChunksPending => state.terrain_chunks_pending,
     }
 }
 
@@ -196,6 +209,11 @@ mod tests {
         assert_eq!(field_value(&s, WaitField::SnapshotsApplied), 4);
         assert_eq!(field_value(&s, WaitField::RealmFramesApplied), 3);
         assert_eq!(field_value(&s, WaitField::UniverseTick), 101);
+        let mut terrain = sample();
+        terrain.terrain_chunks_drawn = 9;
+        terrain.terrain_chunks_pending = 2;
+        assert_eq!(field_value(&terrain, WaitField::TerrainChunksDrawn), 9);
+        assert_eq!(field_value(&terrain, WaitField::TerrainChunksPending), 2);
         // UniverseTick is None before the first snapshot -> reads 0.
         let mut fresh = sample();
         fresh.universe_tick = None;

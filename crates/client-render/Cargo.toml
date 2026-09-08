@@ -19,6 +19,9 @@ dynamic_linking = ["bevy/dynamic_linking"]
 [dependencies]
 vd-core = { workspace = true }
 vd-client = { workspace = true }
+# ★ THE ONE GENERATOR (slice 7): the renderer names a chunk key and a body, nothing more — the
+# library runs the recipe.
+vd-terrain = { workspace = true }
 vd-client-harness = { workspace = true }
 vd-devproto = { workspace = true }
 bevy = { workspace = true }

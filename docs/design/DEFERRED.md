@@ -7730,7 +7730,7 @@ release, and `-C target-cpu=native`. The other legs have not run:
 |---|---|---|---|
 | G3 | aarch64 Linux, the k3d image's triple | **RAN 2026-09-08** (`just terrain-legs`, Docker up): the pinned image `rust:1.94.1-slim-bookworm` on `linux/arm64`, 2 592 digests equal, the tampered-table control red. Not the image BUILD itself (that builds the whole workspace); same base image, same triple, same profile | keep it in `terrain-legs`; run the pin inside the image build when the image next builds |
 | G4 | x86-64 Linux | **EMULATED 2026-09-08** (`just terrain-legs` on `linux/amd64` under the Mac's emulation): 2 592 digests equal. A smoke test: it can find a drift and can never prove its absence | a REAL x86-64 machine before SL10 clause 3 is called satisfied (rulings V6 D, V9 S5-5) |
-| G5 | the client binary against the server binary | the client does not link the generator yet | slice 7: `vdctl gen-digest` against the shard's boot digest, at login (the world hello's measured half) |
+| G5 | the client binary against the server binary | 🟩 LIVE since slice 7 (2026-09-08): the client links the generator and states both halves of the world identity at login; a mismatch is `WorldRefused` and terminal. The process-tier flight with a SERVED mismatch is still owed (M7-5) | slice 7 landed it; M7-5's process test owed |
 
 **Example.** A player logs in from a Windows x86-64 client. The gateway on the aarch64 pod computed
 the home planet's eight golden chunks at boot. Until G4 runs on a real x86-64 chip, nobody has
@@ -7760,7 +7760,7 @@ slice 7; the radius law and the provisional band in the collider slice.
 | The ambiguous face | Naive surface nets are not a manifold where the four cells of a face between two groups alternate rock and air: up to four quads share one edge there (MEASURED on the checkerboard: an edge used four times). The mesh is closed and no quad is emitted twice; a collider that refuses a non-manifold edge must be told. The manifold variant of dual contouring is the reserved upgrade (ruling V10 S6-1) | `extract.rs` `well_formed`, `an_ambiguous_face_shares_an_edge_between_four_quads` | the collider slice (11) decides whether it matters; the upgrade is a content door before the first saved world |
 | Coincident vertices and T-junctions | A cell exactly on the surface (gap 0, air) puts a crossing at its own centre, so two groups can quantise to one point; the zero-area triangle is DROPPED at emission and the quad's other half covers it, which leaves a T-junction. Draws and collides correctly; a mesh-cleaning pass (merge coincident vertices) is the collider's or the client's | `extract.rs` `is_degenerate`, `push_quad` | slice 11 (collider) and slice 7 (client) as they need it |
 | The collider consumer | Nothing collides yet: the triangles and `vertex_position_m` are the input the collider slice reads (SL10 clause 5) | slice 11 | slice 11 |
-| The client mesh leg (G5) | The world identity's MEASURED half now folds the eight self-check chunks' MESH digests beside their cell digests, so a client whose extractor drifts is refused at login — once a client links the crate | `digest.rs` `golden_self_check`; `D-TERRAIN-1` G5 | slice 7 |
+| The client mesh leg (G5) — 🟩 LANDED | The client links the crate (slice 7) and states the measured half, mesh digests included, at login | `crates/client/src/net.rs` (`HelloWorld`, `WorldRefused`); `D-TERRAIN-1` G5 | slice 7 (2026-09-08) |
 | A neighbour's edit onto the halo | `compose` addresses a box cell; `local_of_site` inverts `site_of` so a host lays a neighbour chunk's edit onto this chunk's halo. The HOST logic that gathers a chunk's own rows plus its six neighbours' edge rows is slice 9's (the store) and 10's (the lane) | `lattice.rs` `local_of_site`, `compose.rs` | slices 9, 10 |
 | The corner's cave field | The corner phantom column carries no cave value (it is never read by geometry); the three real columns at a corner read their own faces' node lattices, so the cave field is continuous up to the corner and undefined only on the phantom. No step is drawn; nothing is owed unless a corner cave is ever seen wrong | `chunk.rs` `cavern_of` | none, recorded |
 | `Stratum::Empty` | The removal kind (ruling V4) is appended at code 18 with registry substance `void`; a mined cell holds `Empty`, never `Air`. The record slice (9) maps it to the registry's Empty kind | `strata.rs` | slice 9 |
@@ -7771,3 +7771,41 @@ does not exist yet is the store that keeps the edit and the lane that carries it
 host — slices 9 and 10 — and the collider that stops her boots at the new floor — slice 11.
 
 **WHEN.** As listed; the budget question at the owner's next word.
+
+### D-TERRAIN-3 🟥 ONE RUNG PER REALM, NAMED BY A DEV FLAG — an interim that slice 8 DELETES (owner-accepted for one slice, 2026-09-08)
+
+**WHAT IS WRONG.** Slice 7 draws the terrain at ONE rung per realm, named by a dev flag the window
+flight passes in, and the client library asserts that no two rungs of one realm are resident at once.
+The proper system is slice 8's: the tier rule (which rung, from the one angular rule), the crossfade
+band between rungs, coarse-before-fine ordering and the residency band. The flag exists only so the
+first pictures can be taken before that lands, and the assertion exists so a hard edge between two
+rungs — a seam SL8 forbids — cannot reach a picture before its detector exists.
+
+**THE OWNER'S WORD.** *"I really don't like to build something flagged, instead of proper system. If
+this is temporarily and will be fixed in the nearest slice, it's ok, but I don't want it to survive."*
+
+**WHEN.** Slice 8, the next slice. Slice 8 is not done until this row is 🟩 and the flag, the
+assertion and this row's code are gone.
+
+**LANDED WITH IT (2026-09-08, slice 7's pictures).** The three pictures
+(`docs/investigation/2026-09-07/pictures/`) are taken at ONE rung each — 0 from the ground, 3 from a
+hill, 9 from aloft — and the patch's far edge is a hard horizon in every one. That edge IS this row.
+
+### D-TERRAIN-4 🟥 THE STAND'S UP IS STATED BY THE OPERATOR — the spawn facing stand-in (2026-09-08)
+
+**WHAT IS WRONG.** A picture from a planet's surface needs an avatar whose own up is the radial and
+whose nose points where the picture looks. Slice 7 gets that from the `VD_SPAWN_POSES` stand-in: an
+entry may end in `@qx,qy,qz,qw`, lowered through `StoredHome::in_realm_facing`, and the pilot camera
+lifts the eye along the avatar's OWN up. The operator states the up; nothing derives it.
+
+**WHAT IS PROPER.** Ruling V11: UP IS THE SERVER'S — the realm's gravity function applied to the body
+(a planet: toward the centre; a station with magnetic boots: the wall's normal; a cylinder: away from
+the axis), stated to the client, applied by the client at once inside the body's limits and confirmed
+by the server; other players see the turn. A born avatar then stands up on its own, and a look-at
+verb turns it about THAT up. None of it exists yet; the windowed first-person camera still keeps the
+frame's `+Y` as its up, so a windowed walk on a planet is tilted until it lands.
+
+**WHEN.** The character/suit slice (slice 16 in the sequence), or earlier if a windowed walk on a
+planet is wanted before it. The stand-in itself is deleted with `VD_SPAWN_POSES` when P7's durable
+home store lands.
+

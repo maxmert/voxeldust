@@ -113,6 +113,10 @@ pub struct RealmBox {
     ///
     /// Identity for everything that does not turn, so every existing body draws exactly as before.
     pub facing: [f32; 4],
+    /// ★ THE SURFACE STATEMENT (slice 7): the realm says it is seed-shaped — the seed in its frame and
+    /// the recipe's tag. Present ⇒ the chunk lane may build its body; absent ⇒ the realm is drawn as
+    /// its outline only. Never a kind: a hull that holds terrain would state one too.
+    pub surface: Option<vd_core::look::SurfaceStmt>,
 }
 
 impl RealmBox {
@@ -362,6 +366,8 @@ fn row_box(r: &SceneRow, depth: u8) -> Option<RealmBox> {
             r.pose.orient.z as f32,
             r.pose.orient.w as f32,
         ],
+        // The surface, if the realm stated one; a bag that decodes to none states none.
+        surface: vd_core::look::surface_of(&r.bag).ok().flatten(),
     })
 }
 
@@ -1816,6 +1822,7 @@ mod tests {
             depth: 0,
             color_rgba: [0.0, 0.0, 0.0, BOX_ALPHA],
             facing: [0.0, 0.0, 0.0, 1.0],
+            surface: None,
         };
         let edge = Tier::Fine.cell_edge_m();
         assert_eq!(rbox.draw_center(), DVec3::new(3.0 * edge + 0.25, 0.0, 0.0));
@@ -1843,6 +1850,7 @@ mod tests {
             depth: 0,
             color_rgba: [0.0, 0.0, 0.0, BOX_ALPHA],
             facing: [0.0, 0.0, 0.0, 1.0],
+            surface: None,
         };
         assert_eq!(
             at(Tier::Fine).draw_center(),
@@ -1874,6 +1882,7 @@ mod tests {
             depth: 0,
             color_rgba: [0.1, 0.2, 0.3, BOX_ALPHA],
             facing: [0.0, 0.0, 0.0, 1.0],
+            surface: None,
         };
         // The centre is flattened ONCE, by the caller, through the one chokepoint; the prim lands
         // exactly there (slice 5: ONE term, no composition in here).
@@ -1911,6 +1920,7 @@ mod tests {
             depth: 0,
             color_rgba: [0.4, 0.5, 0.6, BOX_ALPHA],
             facing: [0.0, 0.0, 0.0, 1.0],
+            surface: None,
         };
         let prims = to_render_prims(&rbox, DVec3::new(0.0, 7.0, 0.0));
         assert_eq!(prims.len(), 1);

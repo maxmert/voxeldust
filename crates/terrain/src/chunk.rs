@@ -125,7 +125,7 @@ pub fn quantise_gap(gap_cells: Gf) -> i8 {
 }
 
 /// Whether a chunk key names a chunk of the body at all.
-pub(crate) fn in_ladder(body: &BodyDefinition, key: ChunkKey) -> bool {
+pub fn in_ladder(body: &BodyDefinition, key: ChunkKey) -> bool {
     if key.rung >= body.ladder.rungs || key.x < 0 || key.y < 0 || key.z < 0 {
         return false;
     }

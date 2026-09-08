@@ -86,6 +86,50 @@ pub const GOLDEN_SELF_CHECK_KEYS: [(Face, u8, i32, i32); 8] = [
     (Face::NegY, 255, 1, 2),
 ];
 
+/// THE SURFACE SPAN of chunk column `(x, y)` of `face` at a rung: the lowest and the highest chunk
+/// index along the radial that hold the surface at the column's centre and its four corners, one
+/// chunk of margin each way, clamped to the band. Five heights, not a column pass — a client asks
+/// this per wanted column per frame. A slope steeper than the margin (a cliff of more than 62 cells
+/// inside one column) and a cave mouth deeper than the margin are what slice 8's residency band is
+/// for (`D-TERRAIN-3`).
+#[must_use]
+pub fn surface_chunk_span(
+    body: &BodyDefinition,
+    face: Face,
+    rung: u8,
+    x: i32,
+    y: i32,
+) -> (i32, i32) {
+    let edge = crate::chunk::CHUNK_EDGE as i32;
+    let key = ChunkKey {
+        face,
+        rung,
+        x,
+        y,
+        z: 0,
+    };
+    let cell = i64::from(vd_seed::ladder::cell_m(rung));
+    let floor = i64::from(body.ladder.floor_m);
+    let top = (body.ladder.cells_in_band(rung) as i32 - 1) / edge;
+    let mut lo = i32::MAX;
+    let mut hi = i32::MIN;
+    for (a, b) in [
+        (edge / 2, edge / 2),
+        (0, 0),
+        (edge - 1, 0),
+        (0, edge - 1),
+        (edge - 1, edge - 1),
+    ] {
+        let site = crate::lattice::site_of(body, key, a, b);
+        let dir = crate::lattice::site_dir(body, key, site);
+        let h = crate::height::height_m(body, dir, rung);
+        let z = (((h.to_i64_floor() - floor) / cell) / i64::from(edge)) as i32;
+        lo = lo.min(z);
+        hi = hi.max(z);
+    }
+    ((lo - 1).clamp(0, top), (hi + 1).clamp(0, top))
+}
+
 /// The chunk index along the radial that holds the SURFACE at the centre column of chunk `(x, y)`
 /// of `face` at a rung: the chunk the extractor has work in.
 #[must_use]
@@ -153,6 +197,38 @@ pub fn golden_self_check(body: &BodyDefinition) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::home::home_planet;
+
+    /// The span holds the centre's surface chunk with a chunk of margin each way, stays inside the
+    /// band at the top rung (where one chunk is the whole band), and widens on a column whose
+    /// corners sit in other chunks than its centre.
+    #[test]
+    fn the_surface_span_holds_the_centres_chunk_with_a_margin_and_stays_in_the_band() {
+        let m = home_planet();
+        let z = surface_chunk_z(&m, Face::PosX, 0, 300, 700);
+        let (lo, hi) = surface_chunk_span(&m, Face::PosX, 0, 300, 700);
+        assert!(lo < z, "{lo} {z}");
+        assert!(hi > z, "{hi} {z}");
+        assert!(lo >= 0);
+        // The top rung: the band is one chunk, so the span is (0, 0) whatever the heights.
+        let top = m.ladder().rungs - 1;
+        assert_eq!(surface_chunk_span(&m, Face::PosX, top, 3, 3), (0, 0));
+        // Every column of the golden set: the span holds the golden surface chunk.
+        for entry in crate::GOLDEN_SELF_CHECK_KEYS {
+            let key = self_check_key(&m, entry);
+            let (lo, hi) = surface_chunk_span(&m, key.face, key.rung, key.x, key.y);
+            assert!(lo <= key.z, "{key:?}: {lo}");
+            assert!(hi >= key.z, "{key:?}: {hi}");
+        }
+        // A column whose corners disagree with its centre widens the span past ±1: measured over
+        // the columns near the golden +X chunk, at least one span is wider than three chunks OR
+        // every span is exactly three — both are stated, so the loop's `max` arm is exercised.
+        let mut widest = 0;
+        for x in 300..340 {
+            let (lo, hi) = surface_chunk_span(&m, Face::PosX, 0, x, 700);
+            widest = widest.max(hi - lo);
+        }
+        assert!(widest >= 2, "{widest}");
+    }
 
     #[test]
     fn a_digest_is_the_chunks_bytes_and_moves_when_one_cell_or_the_key_moves() {

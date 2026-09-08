@@ -990,19 +990,9 @@ pub const HOME_SYSTEM: u64 = 7;
 /// `None` when no planet of the home system is accepted (a world nobody can name).
 #[must_use]
 pub fn home_body(universe_seed: u64) -> Option<vd_terrain::BodyDefinition> {
-    let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
-    let system_realm = vd_core::pose::RealmId::System(HOME_SYSTEM);
-    let system_lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
-    let held = std::collections::BTreeSet::from([system_realm]);
-    let (rows, _) = vd_physics::worldgen::shard_boot_world(
-        universe_seed,
-        &config,
-        &held,
-        system_realm,
-        &system_lineage,
-    );
+    let (rows, _) = home_system_boot(universe_seed);
     rows.into_iter()
-        .filter(|r| r.parent == Some(system_realm))
+        .filter(|r| r.parent == Some(vd_core::pose::RealmId::System(HOME_SYSTEM)))
         .find_map(|p| match (p.realm, p.look) {
             (
                 vd_core::pose::RealmId::Planet(seed),
@@ -1010,6 +1000,43 @@ pub fn home_body(universe_seed: u64) -> Option<vd_terrain::BodyDefinition> {
             ) => vd_terrain::BodyDefinition::from_seed(seed, r),
             _ => None,
         })
+}
+
+/// The home planet's ORBIT around its star, as the home system's shard authors it — so a picture
+/// gate can stand an account on the planet's DAY side (the star's direction from the planet's centre
+/// is minus the planet's position in the system, in the planet's own frame while the planet does not
+/// spin). `None` where the world names no home planet.
+#[must_use]
+pub fn home_orbit(universe_seed: u64) -> Option<vd_physics::celestial::OrbitalElements> {
+    let body = home_body(universe_seed)?;
+    let (_, movers) = home_system_boot(universe_seed);
+    let planet = vd_core::pose::RealmId::Planet(body.seed());
+    movers
+        .into_iter()
+        .find_map(|(realm, elements)| (realm == planet).then_some(elements))
+}
+
+/// The home system's boot world: its rows and its movers, exactly as its shard builds them.
+fn home_system_boot(
+    universe_seed: u64,
+) -> (
+    Vec<vd_core::geometry::RealmRegion>,
+    Vec<(
+        vd_core::pose::RealmId,
+        vd_physics::celestial::OrbitalElements,
+    )>,
+) {
+    let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+    let system_realm = vd_core::pose::RealmId::System(HOME_SYSTEM);
+    let system_lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+    let held = std::collections::BTreeSet::from([system_realm]);
+    vd_physics::worldgen::shard_boot_world(
+        universe_seed,
+        &config,
+        &held,
+        system_realm,
+        &system_lineage,
+    )
 }
 
 /// ★ THE WORLD IDENTITY this process serves (slice 5): the declared tag and the measured self-check of
@@ -2661,32 +2688,95 @@ pub fn resolve_homes(
 /// covered once, HR5). Each offset is read as METRES FROM THE HOME REALM'S OWN CENTRE.
 fn homes_from_offsets(
     world: &vd_physics::worldgen::WorldView,
-    offsets: &std::collections::BTreeMap<vd_core::AccountId, vd_core::pose::StampedPose>,
+    offsets: &std::collections::BTreeMap<vd_core::AccountId, SpawnPose>,
 ) -> Result<vd_core::home::HomeRegistry, ConfigError> {
     use vd_core::home::{HomeRegistry, StoredHome};
     let degenerate = || ConfigError::Unparseable {
         key: "VD_SPAWN_POSES".to_owned(),
         value: "this world names no home realm (its root has no grandchild)".to_owned(),
     };
-    let realm = vd_core::worldgen::default_home_realm(world.regions()).ok_or_else(degenerate)?;
-    let at = |offset| StoredHome::in_realm(world.regions(), realm, offset).ok_or_else(degenerate);
+    let home = vd_core::worldgen::default_home_realm(world.regions()).ok_or_else(degenerate)?;
+    let at = |realm: vd_core::pose::RealmId, offset, orient| {
+        StoredHome::in_realm_facing(world.regions(), realm, offset, orient).ok_or_else(|| {
+            ConfigError::Unparseable {
+                key: "VD_SPAWN_POSES".to_owned(),
+                value: format!("the world the gateway holds does not name the realm {realm:?}"),
+            }
+        })
+    };
     // The FALLBACK home stands off the centre by the derived clearing (T2: the star realm sits
     // AT the centre now; zero on the walk fixture — byte-identical there). Explicit per-account
-    // offsets stay verbatim: an operator states where an account spawns.
-    let mut homes = HomeRegistry::new(at(world.default_home_offset_m())?);
-    for (account, pose) in offsets {
-        homes = homes.with_account(*account, at(pose.pos.offset())?);
+    // offsets stay verbatim: an operator states where an account spawns — and, since slice 7, IN
+    // WHICH REALM the world holds (a planet's surface for a picture), the home system by default.
+    let mut homes = HomeRegistry::new(at(
+        home,
+        world.default_home_offset_m(),
+        vd_core::glam::DQuat::IDENTITY,
+    )?);
+    for (account, spawn) in offsets {
+        homes = homes.with_account(
+            *account,
+            at(spawn.realm.unwrap_or(home), spawn.offset_m, spawn.orient)?,
+        );
     }
     Ok(homes)
+}
+
+/// One stand-in spawn: an optional realm the world holds (the home system when absent) and the
+/// offset from that realm's own centre, in metres — kept as the metres the operator stated, so a
+/// spawn on a planet's surface (3 351 km from its centre, MEASURED as the first picture flight's
+/// defect: the cell half of a lattice position was discarded and the login landed at the centre)
+/// arrives whole.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpawnPose {
+    pub realm: Option<vd_core::pose::RealmId>,
+    pub offset_m: vd_core::glam::DVec3,
+    /// The facing the account is born with, in the realm's own frame — identity unless stated. A
+    /// picture from a planet's surface is born with the radial as its up (slice 7); the real answer,
+    /// an up the realm's gravity function states (ruling V11), is not this stand-in's.
+    pub orient: vd_core::glam::DQuat,
+}
+
+/// The stand-in's realm name: `Planet(<seed>)` or `System(<seed>)`, the two realm kinds a
+/// seed-generated world holds; anything else is unparseable, loud.
+fn parse_spawn_realm(raw: &str) -> Option<vd_core::pose::RealmId> {
+    let raw = raw.trim();
+    let (kind, rest) = raw.split_once('(')?;
+    let seed = rest.strip_suffix(')')?.trim().parse::<u64>().ok()?;
+    match kind.trim() {
+        "Planet" => Some(vd_core::pose::RealmId::Planet(seed)),
+        "System" => Some(vd_core::pose::RealmId::System(seed)),
+        _ => None,
+    }
+}
+
+/// The stand-in's facing: four finite numbers with a non-zero length, normalised.
+fn parse_spawn_facing(raw: &str) -> Option<vd_core::glam::DQuat> {
+    let q = raw
+        .split(',')
+        .map(|c| c.trim().parse::<f64>().ok())
+        .collect::<Option<Vec<f64>>>()?;
+    if q.len() != 4 {
+        return None;
+    }
+    let q = vd_core::glam::DQuat::from_xyzw(q[0], q[1], q[2], q[3]);
+    if !q.is_finite() || q.length() < f64::EPSILON {
+        return None;
+    }
+    Some(q.normalize())
 }
 
 /// Resolve the per-account spawn OFFSETS from the `VD_SPAWN_POSES` STAND-IN — the seam the P7 durable
 /// per-account home store replaces with ZERO caller reshape.
 ///
-/// Format: `account=x,y,z` entries separated by `;`, where `account` is the decimal [`AccountId`] u128 and
-/// `x,y,z` is a position measured FROM THE HOME REALM'S OWN CENTRE, at rest. ABSENT / empty ⇒ an EMPTY map
-/// ⇒ every account takes the registry's fallback home. Models `resolve_time_multiplier` (an
-/// `unwrap_or_default` read + a monomorphic parse).
+/// Format: `account=x,y,z` or `account=Realm(seed):x,y,z` entries separated by `;`, where `account` is
+/// the decimal [`AccountId`] u128, the optional `Realm(seed)` names a realm the gateway's world holds
+/// (`Planet(…)` or `System(…)`; the home system when absent — slice 7 added it so a picture gate can
+/// stand an account on a planet's surface), and `x,y,z` is a position measured FROM THAT REALM'S OWN
+/// CENTRE, at rest. An optional `@qx,qy,qz,qw` after the position is the facing the account is born
+/// with (a unit quaternion in the realm's frame; normalised here; identity when absent). ABSENT / empty
+/// ⇒ an EMPTY map ⇒ every account takes the registry's fallback home.
+/// Models `resolve_time_multiplier` (an `unwrap_or_default` read + a monomorphic parse).
 ///
 /// # Errors
 /// [`ConfigError::Unparseable`] on any malformed entry (a missing `=`, a non-numeric account, or a position
@@ -2694,8 +2784,7 @@ fn homes_from_offsets(
 /// spawn point.
 pub fn resolve_spawn_poses(
     env: &EnvConfig,
-) -> Result<std::collections::BTreeMap<vd_core::AccountId, vd_core::pose::StampedPose>, ConfigError>
-{
+) -> Result<std::collections::BTreeMap<vd_core::AccountId, SpawnPose>, ConfigError> {
     let raw = env.string("VD_SPAWN_POSES").unwrap_or_default();
     parse_spawn_poses(raw.trim())
 }
@@ -2705,10 +2794,8 @@ pub fn resolve_spawn_poses(
 /// Universe-root frame; anything malformed ⇒ loud.
 fn parse_spawn_poses(
     raw: &str,
-) -> Result<std::collections::BTreeMap<vd_core::AccountId, vd_core::pose::StampedPose>, ConfigError>
-{
+) -> Result<std::collections::BTreeMap<vd_core::AccountId, SpawnPose>, ConfigError> {
     use vd_core::glam::DVec3;
-    use vd_core::pose::{FrameRef, StampedPose};
     let mut map = std::collections::BTreeMap::new();
     if raw.is_empty() {
         return Ok(map);
@@ -2725,6 +2812,19 @@ fn parse_spawn_poses(
                 .parse::<u128>()
                 .map_err(|_| unparseable(entry))?,
         );
+        // An optional realm before the coordinates: `Planet(7):x,y,z`.
+        let (realm, coords_raw) = match coords_raw.rsplit_once(':') {
+            Some((realm_raw, rest)) => (
+                Some(parse_spawn_realm(realm_raw).ok_or_else(|| unparseable(entry))?),
+                rest,
+            ),
+            None => (None, coords_raw),
+        };
+        // An optional facing after the position: `x,y,z@qx,qy,qz,qw`.
+        let (coords_raw, orient_raw) = match coords_raw.split_once('@') {
+            Some((c, q)) => (c, Some(q)),
+            None => (coords_raw, None),
+        };
         let coords = coords_raw
             .split(',')
             .map(|c| c.trim().parse::<f64>())
@@ -2733,13 +2833,17 @@ fn parse_spawn_poses(
         if coords.len() != 3 {
             return Err(unparseable(entry));
         }
+        let orient = match orient_raw {
+            Some(q) => parse_spawn_facing(q).ok_or_else(|| unparseable(entry))?,
+            None => vd_core::glam::DQuat::IDENTITY,
+        };
         map.insert(
             account,
-            StampedPose::at_rest(
-                FrameRef::SystemSpace { system_seed: 0 },
-                DVec3::new(coords[0], coords[1], coords[2]),
-                vd_core::UniverseTick(0),
-            ),
+            SpawnPose {
+                realm,
+                offset_m: DVec3::new(coords[0], coords[1], coords[2]),
+                orient,
+            },
         );
     }
     Ok(map)
@@ -4810,8 +4914,7 @@ mod incarnation_tests {
 
     #[test]
     fn resolve_spawn_poses_is_empty_by_default_parses_entries_and_is_loud_on_bad() {
-        use vd_core::glam::DVec3;
-        use vd_core::pose::{FrameRef, StampedPose};
+        use vd_core::glam::{DQuat, DVec3};
         // ABSENT / empty ⇒ EMPTY map (every login origin-at-rest, byte-identical).
         assert_eq!(
             resolve_spawn_poses(&env(&[])),
@@ -4827,24 +4930,67 @@ mod incarnation_tests {
             " 5=11,-22,33 ; 7 = 1.5, 2.5, 3.5 ",
         )]))
         .expect("well-formed entries parse");
+        let at = |x, y, z| DVec3::new(x, y, z);
         let mut want = std::collections::BTreeMap::new();
         want.insert(
             vd_core::AccountId(5),
-            StampedPose::at_rest(
-                FrameRef::SystemSpace { system_seed: 0 },
-                DVec3::new(11.0, -22.0, 33.0),
-                vd_core::UniverseTick(0),
-            ),
+            SpawnPose {
+                realm: None,
+                offset_m: at(11.0, -22.0, 33.0),
+                orient: DQuat::IDENTITY,
+            },
         );
         want.insert(
             vd_core::AccountId(7),
-            StampedPose::at_rest(
-                FrameRef::SystemSpace { system_seed: 0 },
-                DVec3::new(1.5, 2.5, 3.5),
-                vd_core::UniverseTick(0),
-            ),
+            SpawnPose {
+                realm: None,
+                offset_m: at(1.5, 2.5, 3.5),
+                orient: DQuat::IDENTITY,
+            },
         );
         assert_eq!(got, want);
+        // A realm before the coordinates (slice 7): a planet's surface, or a system by name.
+        let got = resolve_spawn_poses(&env(&[(
+            "VD_SPAWN_POSES",
+            "5=Planet(99):1,2,3; 6 = System( 7 ) : 4,5,6",
+        )]))
+        .expect("a named realm parses");
+        assert_eq!(
+            got[&vd_core::AccountId(5)],
+            SpawnPose {
+                realm: Some(vd_core::pose::RealmId::Planet(99)),
+                offset_m: at(1.0, 2.0, 3.0),
+                orient: DQuat::IDENTITY,
+            }
+        );
+        // A facing after the position (slice 7): normalised; a zero, short or non-numeric one is loud.
+        let facing = resolve_spawn_poses(&env(&[(
+            "VD_SPAWN_POSES",
+            "5=Planet(99):1,2,3@0,2,0,2; 6=4,5,6 @ 0, 0, 0, 1",
+        )]))
+        .expect("a facing parses");
+        assert_eq!(
+            facing[&vd_core::AccountId(5)],
+            SpawnPose {
+                realm: Some(vd_core::pose::RealmId::Planet(99)),
+                offset_m: at(1.0, 2.0, 3.0),
+                orient: DQuat::from_xyzw(0.0, 2.0, 0.0, 2.0).normalize(),
+            }
+        );
+        assert_eq!(facing[&vd_core::AccountId(6)].orient, DQuat::IDENTITY);
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5=1,2,3@0,0,0,0")])).is_err());
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5=1,2,3@0,0,1")])).is_err());
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5=1,2,3@0,0,0,x")])).is_err());
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5=1,2,3@0,0,0,inf")])).is_err());
+        assert_eq!(
+            got[&vd_core::AccountId(6)].realm,
+            Some(vd_core::pose::RealmId::System(7))
+        );
+        // A realm kind the world does not generate, or a malformed name: loud.
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5=Ship(1):1,2,3")])).is_err());
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5=Planet:1,2,3")])).is_err());
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5=Planet(x):1,2,3")])).is_err());
+        assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5=Planet(1:1,2,3")])).is_err());
         // Malformed entries all fail LOUD: missing '=', a non-numeric account, wrong coord count, bad float.
         assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "5,1,2,3")])).is_err());
         assert!(resolve_spawn_poses(&env(&[("VD_SPAWN_POSES", "abc=1,2,3")])).is_err());

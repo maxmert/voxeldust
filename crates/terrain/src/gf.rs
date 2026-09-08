@@ -76,6 +76,14 @@ impl Gf {
         Gf(f64::from_bits(bits))
     }
 
+    /// THE EXIT for a host outside the fence: the plain float, for a display path (a client's mesh
+    /// buffer, `vd_client::chunks::geometry_of`) that is not under the fence. Nothing inside the
+    /// crate calls it.
+    #[must_use]
+    pub const fn to_f64(self) -> f64 {
+        self.0
+    }
+
     /// The bit pattern: what a digest folds and a golden set pins.
     #[must_use]
     pub const fn to_bits(self) -> u64 {

@@ -6282,7 +6282,9 @@ dependencies = [
  "vd-core",
  "vd-devproto",
  "vd-physics",
+ "vd-seed",
  "vd-sim",
+ "vd-terrain",
  "vd-wire",
 ]
 
@@ -6313,6 +6315,7 @@ dependencies = [
  "vd-client-harness",
  "vd-core",
  "vd-devproto",
+ "vd-terrain",
 ]
 
 [[package]]

@@ -31,10 +31,11 @@ use crate::carve::CAVERN_STRIDE;
 use crate::carve::{
     Tube, caverns_carve_at, segment_distance_m, tube_region, tubes_carve_at, tubes_near,
 };
+pub use crate::chunk::in_ladder;
 use crate::chunk::{
     CAVERN_NODES, CHUNK_EDGE, CaveRule, Cell, CellSite, ChunkKey, NodeLattice, above_surface_cell,
     below_surface_cell, cavern_of, column_field, dir_of, finish_cell, foreign_lattices,
-    generate_in, in_ladder,
+    generate_in,
 };
 use crate::gf::Gf;
 use crate::height::{biome_at, height_m};

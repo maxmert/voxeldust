@@ -307,6 +307,21 @@ fn the_dependency_law_holds_bins_to_node_to_sim_to_wire_to_core() {
         "vd-terrain links no external crate: {:?}",
         external("vd-terrain")
     );
+    // ★ THE CLIENT LINKS THE RECIPE AND NO MOTION (slice 7, S7-1): `vd-terrain` and `vd-seed` are
+    // normal dependencies of `vd-client`; `vd-physics` (the forest, the orbits — SL4) is not, and
+    // never may be: the shipped client must not hold the code that moves the moon.
+    assert!(
+        graph["vd-client"].contains("vd-terrain"),
+        "the client links the one generator"
+    );
+    assert!(
+        graph["vd-client"].contains("vd-seed"),
+        "the client links the leaf"
+    );
+    assert!(
+        !graph["vd-client"].contains("vd-physics"),
+        "the shipped client never links a motion crate (SL4; slice 7)"
+    );
     for float_crate in ["glam", "libm", "noise", "nalgebra", "rapier3d"] {
         assert!(
             !graph["vd-terrain"].contains(float_crate) && !graph["vd-seed"].contains(float_crate),

@@ -15,6 +15,8 @@ pub enum DevPhase {
     AwaitingSubscription,
     Active,
     Closed,
+    /// The gateway refused this build's world identity (slice 7): terminal.
+    WorldRefused,
 }
 
 /// One rendered entity: its id (canonical `Display`) and composited world pose.
@@ -184,6 +186,14 @@ pub struct DevState {
     /// Written by the render thread, read by the core thread — one shared counter, like
     /// `dev_commands_dropped`. A client with no renderer reports 0, truthfully.
     pub stars_drawn: u64,
+    /// ★ THE TERRAIN ON SCREEN (slice 7): how many terrain chunks the renderer draws right now. Written
+    /// by the render thread like `stars_drawn`; 0 with no renderer or no rung flag. The one instrument
+    /// a picture gate waits on before it captures a hill.
+    pub terrain_chunks_drawn: u64,
+    /// The terrain chunks still BUILDING (slice 7): the instrument a picture gate waits on for "the
+    /// whole wanted set landed" — `terrain_chunks_drawn ge 1` says the first one did, this says
+    /// the last one did. 0 with no renderer or no rung flag.
+    pub terrain_chunks_pending: u64,
     /// ★ THE CAMERA-MODE INSTRUMENT (2026-09-06): which view the renderer holds right now —
     /// `"first-person"`, `"third-person"`, or `"none"` in a client with no renderer. Recorded so a
     /// flight can poll it through a hand-over and confirm or refuse a seen flip; the owner reported
@@ -299,6 +309,8 @@ pub(crate) mod tests {
             origin: Some(("System(7)".to_owned(), 1)),
             sky: None,
             stars_drawn: 0,
+            terrain_chunks_drawn: 0,
+            terrain_chunks_pending: 0,
             camera_mode: camera_mode_name(CAMERA_MODE_NONE).to_owned(),
             star_probe: Vec::new(),
             sky_anchor: None,

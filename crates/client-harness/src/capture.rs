@@ -153,6 +153,8 @@ mod tests {
             origin: None,
             sky: None,
             stars_drawn: 0,
+            terrain_chunks_drawn: 0,
+            terrain_chunks_pending: 0,
             camera_mode: "none".to_owned(),
             star_probe: Vec::new(),
             sky_anchor: None,

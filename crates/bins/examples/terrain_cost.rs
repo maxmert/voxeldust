@@ -268,6 +268,66 @@ fn main() -> ExitCode {
     );
     let _ = (HALO, CHUNK_EDGE);
 
+    // 6. THE CLIENT'S SIDE (slice 7, M7-2 and M7-3): the geometry the engine draws — the extractor's
+    //    output around the chunk's origin, with smooth normals — over the columns a ground picture
+    //    stands on at rung 0 (9 × 9 columns, the surface chunk and its two neighbours each): chunks
+    //    per second on ONE thread and on every core (the threaded workers' shape: one job per
+    //    chunk, no shared state), and the bytes per chunk handed to the engine.
+    {
+        use vd_client::chunks::{chunks_around, geometry_of};
+        let r = body.ladder().radius_m();
+        let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
+        let keys = chunks_around(&body, [d[0] * r, d[1] * r, d[2] * r], 0, 4);
+        let start = Instant::now();
+        let mut built = 0usize;
+        let mut bytes = 0usize;
+        let mut vertices = 0usize;
+        let mut triangles = 0usize;
+        for key in &keys {
+            if let Some(g) = geometry_of(&body, *key) {
+                built += 1;
+                vertices += g.vertices.len();
+                triangles += g.triangles.len();
+                bytes += g.vertices.len() * 12 + g.normals.len() * 12 + g.triangles.len() * 12;
+            }
+        }
+        let one_s = start.elapsed().as_secs_f64();
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let per = keys.len().div_ceil(threads).max(1);
+        let body_ref = &body;
+        let start = Instant::now();
+        let built_many: usize = std::thread::scope(|scope| {
+            let workers: Vec<_> = keys
+                .chunks(per)
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter()
+                            .filter(|k| geometry_of(body_ref, **k).is_some())
+                            .count()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|w| w.join().expect("a worker finishes"))
+                .sum()
+        });
+        let many_s = start.elapsed().as_secs_f64();
+        assert_eq!(built, built_many, "the threads build the same chunks");
+        println!(
+            "terrain_cost: client geometry, rung 0, {} chunks of {} keys: one thread {:.0} chunks/s ({:.2} ms each); {threads} threads {:.0} chunks/s ({:.1}x); {:.0} vertices, {:.0} triangles, {:.0} bytes per chunk",
+            built,
+            keys.len(),
+            built as f64 / one_s,
+            one_s * 1e3 / built.max(1) as f64,
+            built as f64 / many_s,
+            one_s / many_s,
+            vertices as f64 / built.max(1) as f64,
+            triangles as f64 / built.max(1) as f64,
+            bytes as f64 / built.max(1) as f64
+        );
+    }
+
     // 3. The boot self-check.
     let start = Instant::now();
     let digest = golden_self_check(&body).expect("the home body self-checks");

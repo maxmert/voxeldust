@@ -373,11 +373,16 @@ pub fn pilot_capture_camera(
     width: usize,
     height: usize,
 ) -> CaptureCamera {
-    let eye = own_pos + DVec3::Y * DEFAULT_EYE_OFFSET;
+    // The eye lifts along the AVATAR'S OWN up, not the frame's: an avatar born on a planet stands
+    // with the radial as its up (slice 7), and an eye lifted along the frame's `+Y` there sat beside
+    // the avatar's own marker instead of above it (MEASURED on the first ground picture: the marker
+    // filled the lower half of the frame). At rest the two are the same vector.
+    let up = own_orient * DVec3::Y;
+    let eye = own_pos + up * DEFAULT_EYE_OFFSET;
     CaptureCamera {
         eye,
         target: eye + own_orient * DVec3::NEG_Z,
-        up: own_orient * DVec3::Y,
+        up,
         fov_y: FIT_FOV_Y,
         width,
         height,
@@ -558,6 +563,20 @@ mod tests {
         // eyes together, with no local view state in between.
         let yawed = DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2);
         let turned = pilot_capture_camera(pos, yawed, 1284, 720);
+        // ROLLED (a quarter turn about the facing, as an avatar born on a planet's flank is) the eye
+        // lifts along the avatar's OWN up, which now points along world `-X`.
+        let rolled = pilot_capture_camera(
+            pos,
+            DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+            1284,
+            720,
+        );
+        assert!(
+            (rolled.eye - (pos + DVec3::NEG_X * DEFAULT_EYE_OFFSET)).length() < 1e-12,
+            "{:?}",
+            rolled.eye
+        );
+        assert!((rolled.up - DVec3::NEG_X).length() < 1e-12);
         assert_eq!(turned.eye, cam.eye);
         assert!((turned.target - (cam.eye + DVec3::NEG_X)).length() < 1e-12);
         assert!((turned.up - DVec3::Y).length() < 1e-12);

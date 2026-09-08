@@ -14,6 +14,7 @@
 //! the interpolation sample is a [`interp::RenderPose`] with NO velocity field, and
 //! `StampedPose::advanced_ballistic`/`.vel` are never read on the render path.
 
+pub mod chunks;
 pub mod input;
 pub mod interp;
 pub mod net;

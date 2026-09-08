@@ -6,6 +6,10 @@ rust-version.workspace = true
 description = "The renderer-FREE client logic core (P1.5): net + snapshot decode + continuous-f64 interpolation + input assembly, over the sim::io Transport seam. Tier-A (100% coverage); winit/wgpu/egui glue lives in the Tier-B client-bin. NO client-side prediction."
 
 [dependencies]
+# ★ THE ONE GENERATOR (SL10 clause 2, slice 7): the client links the recipe and the extractor the
+# server links — never a port. vd-seed is its leaf. No motion crate rides with them (SL4).
+vd-terrain = { workspace = true }
+vd-seed = { workspace = true }
 vd-core = { workspace = true }
 vd-devproto = { workspace = true }
 vd-wire = { workspace = true }

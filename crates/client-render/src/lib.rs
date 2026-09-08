@@ -155,6 +155,9 @@ pub struct CaptureResult {
 /// The handles the bin wires into the window (constructed on the main thread before
 /// `run_window`). Every field is `Send + Sync`, so the Bevy resource is plain.
 pub struct RenderHandles {
+    /// ★ THIS BUILD'S DECLARED RECIPE TAG (slice 7): a realm's surface statement must carry the same
+    /// one before the terrain draws it.
+    pub world_declared: u64,
     /// The lock-free render snapshot, published every step by the core thread.
     pub snapshot: Arc<ArcSwap<RenderSnapshot>>,
     /// The input mailbox — the SAME `SyncSender` the dev-control listener feeds.
@@ -168,6 +171,12 @@ pub struct RenderHandles {
     /// into the diagnosis surface. Zero while no cloud is drawn. The one instrument that can
     /// say "the sky is black" while the catalogue is held in full.
     pub stars_drawn: Arc<AtomicU64>,
+    /// THE TERRAIN ON SCREEN (`DevState::terrain_chunks_drawn`, slice 7): the window writes how many
+    /// terrain chunks it draws, the core thread reads it into the diagnosis surface.
+    pub terrain_drawn: Arc<AtomicU64>,
+    /// THE TERRAIN STILL BUILDING (`DevState::terrain_chunks_pending`, slice 7): how many chunks the
+    /// lane has asked the workers for and not yet harvested.
+    pub terrain_pending: Arc<AtomicU64>,
     /// The camera-mode instrument: the view code (`vd_devproto::CAMERA_MODE_*`) this renderer
     /// holds, written at start and on every switch so the dev state can name what the player sees.
     pub camera_mode: Arc<std::sync::atomic::AtomicU8>,
@@ -213,6 +222,8 @@ struct Net {
     input: SyncSender<InputAction>,
     dropped: Arc<AtomicU64>,
     stars_drawn: Arc<AtomicU64>,
+    terrain_drawn: Arc<AtomicU64>,
+    terrain_pending: Arc<AtomicU64>,
     camera_mode: Arc<std::sync::atomic::AtomicU8>,
     star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
     core_alive: Arc<AtomicBool>,
@@ -567,6 +578,8 @@ struct RenderEye {
 /// This repo has no `assets/` directory and no asset path of any kind. Loading the WGSL from disk
 /// would make a headless capture — and a deployed client — depend on finding a file beside the
 /// binary. Embedding it removes that failure mode entirely: the shader ships inside the executable.
+pub mod terrain;
+
 struct StarSkyShaderPlugin;
 
 impl Plugin for StarSkyShaderPlugin {
@@ -600,6 +613,8 @@ fn run_windowed(handles: RenderHandles) {
             input: handles.input,
             dropped: handles.dropped,
             stars_drawn: handles.stars_drawn,
+            terrain_drawn: handles.terrain_drawn,
+            terrain_pending: handles.terrain_pending,
             camera_mode: handles.camera_mode,
             star_probe: handles.star_probe,
             core_alive: handles.core_alive,
@@ -619,6 +634,10 @@ fn run_windowed(handles: RenderHandles) {
         // A window is always the human's own first-person view; the pilot-view switch exists only
         // for the HEADLESS capture path (there is no scene-fitting framing here to decline).
         .insert_resource(CaptureView { pilot: false })
+        .insert_resource(terrain::Terrain::new(
+            terrain::TerrainConfig::from_env(),
+            handles.world_declared,
+        ))
         .init_resource::<DotEntities>()
         .init_resource::<RealmBoxEntities>()
         .init_resource::<DrawnSky>() // S11: which sky is on screen, and around which system
@@ -664,6 +683,9 @@ fn run_windowed(handles: RenderHandles) {
                     // (chained so the despawn sees the just-spawned boxes the same frame — no scaffold
                     // flash in space).
                     (sync_realm_boxes, despawn_reference_scaffold).chain(),
+                    // ★ THE TERRAIN (slice 7): asks, harvests and places the chunks of every realm
+                    // that stated a surface, after the boxes so it reads the same eye.
+                    (terrain::sync_terrain, terrain::place_chunks).chain(),
                     // S11: the galaxy. Independent of the box/dot lanes — it re-spawns only on a
                     // crossing or a new catalogue, so it is not chained into their per-frame work.
                     sync_star_sky,
@@ -719,6 +741,10 @@ fn setup_scene(
 // (the windowed camera above; the shared world below — capture's offscreen camera lives
 // in `run_capture` and reuses `setup_world`.)
 
+/// The stub world's one key light, so the terrain's sun can retire it.
+#[derive(Component)]
+pub(crate) struct KeyLight;
+
 /// Marker for the empty-stub-world reference scaffolding (the ground plate + the landmark pillars) — a
 /// P1.5 MOTION reference, despawned by [`despawn_reference_scaffold`] the moment real realm content loads.
 /// Carries its WORLD ANCHOR so [`place_reference_scaffold`] can re-express it in the render frame each
@@ -763,6 +789,7 @@ fn derive_camera_planes(
     render_eye: Res<RenderEye>,
     drawn: DrawnQuery,
     mut cam: Query<&mut Projection, With<FollowCam>>,
+    mut frame: Local<u32>,
 ) {
     let Some((fov_y, viewport_h)) = render_eye.view else {
         return;
@@ -782,6 +809,15 @@ fn derive_camera_planes(
     {
         p.near = planes.near as f32;
         p.far = planes.far as f32;
+    }
+    *frame += 1;
+    if frame.is_multiple_of(terrain::DIAG_EVERY) {
+        tracing::debug!(
+            near = planes.near,
+            far = planes.far,
+            ?subjects,
+            "terrain diag: planes"
+        );
     }
 }
 
@@ -805,13 +841,15 @@ fn setup_world(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    // A single key light (dots are also emissive, so they read even unlit).
+    // A single key light (dots are also emissive, so they read even unlit). Retired by the terrain's
+    // sun the moment a star lights a drawn ground (`terrain::sync_terrain`).
     commands.spawn((
         DirectionalLight {
             shadows_enabled: false,
             ..default()
         },
         Transform::from_xyz(30.0, 60.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
+        KeyLight,
     ));
 
     // Reference ground plate (a thin slab — motion reference for the empty stub world). Tagged
@@ -1485,6 +1523,33 @@ fn sync_star_sky(
     }
 }
 
+/// ★ WHERE A ROW IS DRAWN, relative to the eye (slice 7 factors it out of `sync_realm_boxes` so the
+/// terrain places its chunks with the SAME reduction): a row of the eye's own unit reduces on the
+/// lattice; a row of another unit — a far realm — is placed from the sky anchor; and before the
+/// first avatar, the plain f64 subtraction.
+fn draw_center_of(
+    rbox: &RealmBox,
+    render_eye: &RenderEye,
+    snap: &RenderSnapshot,
+    now_s: f64,
+) -> DVec3 {
+    let far = |anchor: &vd_core::pose::StampedPose| {
+        let (translation, rotation) = vd_client::render_snapshot::sky_cloud_transform(
+            rbox.center.cell(),
+            anchor,
+            render_eye.eye,
+        );
+        translation + rotation * rbox.center.offset()
+    };
+    match (render_eye.eye_lattice, snap.sky_anchor_now(now_s)) {
+        (Some((_, tier)), Some(anchor)) if rbox.tier != tier => far(&anchor),
+        (Some((eye, tier)), _) => {
+            vd_client_harness::camera::eye_relative_lattice(rbox.center, eye, tier)
+        }
+        (None, _) => vd_client_harness::camera::eye_relative(rbox.draw_center(), render_eye.eye),
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources/queries
 fn sync_realm_boxes(
     net: Res<Net>,
@@ -1528,23 +1593,7 @@ fn sync_realm_boxes(
         // in is a far realm the composer could not turn exactly — it rides in the sky's frame, and
         // it is placed from the sky anchor exactly as the star cloud is (one transform, f64,
         // narrowed once). Without an anchor it cannot be placed and is left where it was.
-        let far = |anchor: &vd_core::pose::StampedPose| {
-            let (translation, rotation) = vd_client::render_snapshot::sky_cloud_transform(
-                rbox.center.cell(),
-                anchor,
-                render_eye.eye,
-            );
-            translation + rotation * rbox.center.offset()
-        };
-        let draw_center = match (render_eye.eye_lattice, snap.sky_anchor_now(now_s)) {
-            (Some((_, tier)), Some(anchor)) if rbox.tier != tier => far(&anchor),
-            (Some((eye, tier)), _) => {
-                vd_client_harness::camera::eye_relative_lattice(rbox.center, eye, tier)
-            }
-            (None, _) => {
-                vd_client_harness::camera::eye_relative(rbox.draw_center(), render_eye.eye)
-            }
-        };
+        let draw_center = draw_center_of(rbox, &render_eye, &snap, now_s);
         // Lower to render primitives (VERTICES) at that drawn centre — no shape branch here. THE
         // DRAW LAW's two arms are the two lawful AUTHORS, decided by the row's bag upstream in
         // Tier-A: a self-authored outline lowers through the shape tessellation; a parent-authored
@@ -2007,6 +2056,7 @@ fn phase_label(phase: ClientPhase) -> &'static str {
         ClientPhase::AwaitingSubscription => "subscribing",
         ClientPhase::Active => "live",
         ClientPhase::Closed => "closed",
+        ClientPhase::WorldRefused => "world refused",
     }
 }
 
@@ -2062,6 +2112,8 @@ fn run_capture(handles: RenderHandles) {
             input: handles.input,
             dropped: handles.dropped,
             stars_drawn: handles.stars_drawn,
+            terrain_drawn: handles.terrain_drawn,
+            terrain_pending: handles.terrain_pending,
             camera_mode: handles.camera_mode,
             star_probe: handles.star_probe,
             core_alive: handles.core_alive,
@@ -2081,6 +2133,10 @@ fn run_capture(handles: RenderHandles) {
         .insert_resource(CaptureView {
             pilot: handles.pilot_view,
         })
+        .insert_resource(terrain::Terrain::new(
+            terrain::TerrainConfig::from_env(),
+            handles.world_declared,
+        ))
         .insert_resource(CaptureChannel(captures))
         .insert_resource(CaptureCfg {
             runs_dir: handles.runs_dir,
@@ -2135,6 +2191,9 @@ fn run_capture(handles: RenderHandles) {
                     // review: the H2 confound). render_smoke (NO --realm-boxes) still keeps them: with
                     // no realm content the despawn is a no-op, so its content floor stands.
                     (sync_realm_boxes, despawn_reference_scaffold).chain(),
+                    // ★ THE TERRAIN (slice 7): asks, harvests and places the chunks of every realm
+                    // that stated a surface, after the boxes so it reads the same eye.
+                    (terrain::sync_terrain, terrain::place_chunks).chain(),
                     // S11: the galaxy. Independent of the box/dot lanes — it re-spawns only on a
                     // crossing or a new catalogue, so it is not chained into their per-frame work.
                     sync_star_sky,

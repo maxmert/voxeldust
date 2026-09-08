@@ -442,3 +442,80 @@ worker budget per chunk held for a surface chunk (3.3 ms) and not for a cave-den
 owner set it at **8 ms** (*"I think 8 should be ok. If that over time will become a problem, we can
 rethink and reimplement"*), and the bench gates against it (`D-TERRAIN-2`).
 Results: `docs/investigation/2026-09-07/slice_06_extractor.md` §13.
+
+## V11. UP IS THE SERVER'S, LOOKING IS AN INPUT (owner, 2026-09-08, during the slice 7 discussion)
+
+Asked whether the client may compute the camera's "up" on a planet from the planet's centre, the owner
+first said the camera is attached to a body (a hull now, a character later), so the body's pose says
+where up is, and other players must see a head turn; then asked for the best and most performant
+approach with PvP in view; and chose the standard: *"we will go with that standard, so up is decided
+on the server. Remember that it can be not constant. On the planet gravity directed to the center, so
+it's easy to calculate. On the stations without gravity, people should be able to walk on walls or
+ceiling (if station do not rotate) if they wear magnetic boots. So it can be dynamic there."*
+
+**Binding:**
+1. **UP is the server's.** The containing realm authors the body's pose, and the pose says where up
+   is. The client computes no up from any realm.
+2. **UP IS NOT A CONSTANT.** It is the realm's gravity FUNCTION (ruling V4: gravity is a per-realm
+   function, never a grid assumption) applied to the body's state: on a planet it points from the
+   centre through the body; on a station that does not rotate it is the normal of the wall, floor or
+   ceiling the body's magnetic boots hold, and it changes as the body walks around a corner; in a
+   rotating cylinder it points away from the axis. A body's stance (what it stands on) is server
+   state. **The same on the ships** (owner, in the same breath): a hull realm's gravity function —
+   none, so magnetic boots hold any deck, wall or ceiling; an artificial gravity the hull provides;
+   and the felt acceleration under thrust (R-20, on trial) — says where a crewmate's up is, and the
+   hull's shard authors it into the pose.
+3. **LOOKING IS AN INPUT.** The client applies the mouse to its own view at once, inside the body's
+   LIMITS (how far and how fast a head turns, how far a torso bends — facts about what the body IS,
+   stated as data like a hull's rating and a suit's acceleration, and applied by ONE function on both
+   hosts), and sends the view direction to the server every tick. The server applies the same limits
+   to the head and torso, authors the pose, and ships it; other players see the turn through the
+   interpolation buffer. The client's view is a request; the server's is the truth for every shot.
+4. **HITS ARE THE SERVER'S**, resolved from the server's pose in the server's direction; when combat
+   lands, the shard that resolves a hit keeps a short history of poses and rewinds the target to the
+   instant the shooter's client showed it (lag compensation), which is the standard that makes a hit
+   land where the player aimed.
+
+**For slice 7:** nothing of this is built. The camera sits fixed in the hull's frame; the hull's pose
+comes from the planet's shard; the ground pictures come from a hull the shard berths upright on the
+surface it computes from the same recipe. The look input, the limits per body, the stance and the head
+rotation come with the character (slice 16); lag compensation with combat.
+
+## V12. SLICE 7 DISCUSSION — THE CLIENT LINKS THE RECIPE (2026-09-08)
+
+The owner read `docs/investigation/2026-09-07/slice_07_client_link.md`, ruled the camera (V11), asked
+whether a chunk's addresses know anything of the planet's spin (no: the parent authors the spin on the
+row, the recipe lives in the planet's own frame, only the light changes on the surface — recorded in
+the document), and asked how long the one-rung dev flag survives: *"I really don't like to build
+something flagged, instead of proper system. If this is temporarily and will be fixed in the nearest
+slice, it's ok, but I don't want it to survive."* Answer: one slice; slice 8 deletes it; it is a RED
+row in DEFERRED.md (`D-TERRAIN-3`) that slice 8 must flip. The owner: *"Ok, sounds good, implement
+the slice 7 please."* Every recommendation in §9 of that document is a RULING:
+
+| Item | Ruling |
+|---|---|
+| S7-1 the link | `vd-terrain` and `vd-seed` are dependencies of `vd-client`; `vd-physics` stays dev-only; an isolation row refuses a client dependency on a motion crate |
+| S7-2 the world hello | The client states both halves at login, computed on the home planet's literals; a client that cannot compute them does not log in |
+| S7-3 the surface statement | The realm box carries it; the client builds the body from the seed in the frame and the look shell's radius; a foreign recipe tag is refused and counted, never drawn |
+| S7-4 the chunk lane | Three verbs and one data type; the library never refuses a legal rung; a bounded harvest per call |
+| S7-5 one rung per session | A dev flag names it, the library asserts never two — FOR ONE SLICE, registered as `D-TERRAIN-3`, deleted by slice 8 |
+| S7-6 the workers | An injected trait: inline in Tier-A tests, `std::thread::spawn` + `crossbeam-channel` in the binary; no new library |
+| S7-7 lighting | One directional light from the brightest luminous row in the window; normals derived on the client, flat or smooth by a debug switch |
+| S7-8 the camera's up | Ruling V11 |
+| S7-9 the C mirror | Not now |
+| S7-10 the gates | The drawn vertices equal the extractor's positions; the one-rung assertion; the isolation rows; the refusal counters; `vd-client` Tier-A at 100 % |
+| S7-11 the pictures | Part of the delivery: from orbit and from the ground, through the harness, judged by the owner before slice 8 |
+| The order of work | M7-1 (the link's cost) first, then the link and the world hello, the surface statement, the chunk lane, the renderer, the pictures, the refuter |
+
+**LANDING NOTE (2026-09-08).** Slice 7 is built: the link (M7-1: +51 280 bytes, +12.7 s), the world
+hello both ways, the surface statement into the row, the chunk lane with the injected workers, the
+renderer's chunks as children of the row, the sun from the brightest luminous row with its
+illuminance derived from the camera's exposure, and the THREE pictures through the harness
+(`docs/investigation/2026-09-07/pictures/`: ground at rung 0, hill at rung 3, aloft at rung 9, all
+on the day side). Five defects were found by the pictures and fixed by measurement (slice document
+§12.2), among them the column chooser that read a face's tangents as its parameter (230 km off) and
+the camera that lifted the eye along the frame's `+Y` on a planet. New stand-in for the pictures: the
+spawn pose may state a FACING (`D-TERRAIN-4` 🟥, until V11's server-side up lands). The crease
+question and the cave lattice step are NOT judgeable from these three pictures (no seam and no cave
+mouth in frame); slice 8's pictures owe both. S7-8 (the camera's up) is unchanged: nothing of V11 is
+built.

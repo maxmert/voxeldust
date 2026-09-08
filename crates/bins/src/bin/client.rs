@@ -107,7 +107,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         None, // R-6d3a: the client has no producer-less durable flows — no outbox needed.
     )?;
-    let core = ClientCore::new(transport, GATEWAY, ticket, ClientInterpTuning::DEFAULT);
+    // ★ THIS BUILD'S WORLD IDENTITY (slice 7; SL10 clause 3): the declared half from the recipe's
+    // version and the universe seed this launch was given, the measured half from the home planet's
+    // golden chunks computed by this binary on this chip. A client that cannot compute them does not
+    // log in (ruling V12 S7-2). The seed is read as the gateway reads it (`VD_UNIVERSE_SEED`, the
+    // shipped default absent) — a cluster on another seed refused every login while this was the
+    // compiled constant (the refuter's finding); the seed ON THE WIRE, at `Welcome`, is owed and is
+    // an ask (SL6: a new field on the connection plane's own lane).
+    let universe_seed: u64 = env.parse_or("VD_UNIVERSE_SEED", vd_physics::worldgen::HOME_SEED)?;
+    let world = vd_bins::world_identity(universe_seed)?;
+    let core = ClientCore::new(
+        transport,
+        GATEWAY,
+        ticket,
+        ClientInterpTuning::DEFAULT,
+        world,
+    );
 
     // THE BOOT FILE IS GONE (Slice C1, window_lane.md §2.11 — D-LANE-6 🟩, owner decision 10 THE
     // DRAW LAW): one world, one source — the STREAM. The client draws nothing until the composed
@@ -124,6 +139,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dropped = Arc::new(AtomicU64::new(0));
     // The stars on screen, written by the render thread (0 forever in a headless client).
     let stars_drawn = Arc::new(AtomicU64::new(0));
+    let terrain_drawn = Arc::new(AtomicU64::new(0));
+    let terrain_pending = Arc::new(AtomicU64::new(0));
     // The renderer's camera mode (first or third person), written by the render thread on every
     // switch; `NONE` forever in a headless client. The camera-mode instrument (2026-09-06).
     let camera_mode = Arc::new(std::sync::atomic::AtomicU8::new(
@@ -221,6 +238,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step_seq,
             dropped,
             stars_drawn,
+            terrain_drawn,
+            terrain_pending,
             camera_mode,
             star_probe,
             started_at,
@@ -229,6 +248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None,
             std::path::PathBuf::from("runs"),
             false,
+            vd_terrain::declared_world_tag(universe_seed),
         );
         drop(control);
         return Ok(());
@@ -258,6 +278,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step_seq,
             dropped,
             stars_drawn,
+            terrain_drawn,
+            terrain_pending,
             camera_mode,
             star_probe,
             started_at,
@@ -266,6 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(capture_rx),
             runs_dir,
             args.pilot_view,
+            vd_terrain::declared_world_tag(universe_seed),
         );
         drop(control);
         return Ok(());
@@ -281,6 +304,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         step_seq,
         dropped,
         stars_drawn,
+        terrain_drawn,
+        terrain_pending,
         camera_mode,
         star_probe,
         None, // no render sink
@@ -308,6 +333,8 @@ fn run_render(
     step_seq: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     stars_drawn: Arc<AtomicU64>,
+    terrain_drawn: Arc<AtomicU64>,
+    terrain_pending: Arc<AtomicU64>,
     camera_mode: Arc<std::sync::atomic::AtomicU8>,
     star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
     started_at: Instant,
@@ -316,6 +343,7 @@ fn run_render(
     captures: Option<crossbeam_channel::Receiver<vd_client_render::CaptureJob>>,
     runs_dir: std::path::PathBuf,
     pilot_view: bool,
+    world_declared: u64,
 ) {
     // Reliable, BIDIRECTIONAL shutdown — independent of the bounded input mailbox:
     //  - `stop` (window → worker): set when the window closes; the worker checks it every
@@ -333,6 +361,8 @@ fn run_render(
     let worker_alive = core_alive.clone();
     let worker_dropped = dropped.clone();
     let worker_stars = stars_drawn.clone();
+    let worker_terrain = terrain_drawn.clone();
+    let worker_pending = terrain_pending.clone();
     let worker_camera = camera_mode.clone();
     let worker_probe = star_probe.clone();
     let core_thread = std::thread::spawn(move || {
@@ -351,6 +381,8 @@ fn run_render(
             step_seq,
             worker_dropped,
             worker_stars,
+            worker_terrain,
+            worker_pending,
             worker_camera,
             worker_probe,
             Some(render_sink),
@@ -362,10 +394,13 @@ fn run_render(
     // Blocks on the main thread until the window closes — by the human, OR by the
     // AppExit the render crate emits when `core_alive` goes false.
     vd_client_render::run(vd_client_render::RenderHandles {
+        world_declared,
         snapshot: render_published,
         input: command_tx.clone(),
         dropped,
         stars_drawn,
+        terrain_drawn,
+        terrain_pending,
         camera_mode,
         star_probe,
         core_alive,
@@ -439,6 +474,8 @@ fn run_client_loop(
     step_seq: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     stars_drawn: Arc<AtomicU64>,
+    terrain_drawn: Arc<AtomicU64>,
+    terrain_pending: Arc<AtomicU64>,
     camera_mode: Arc<std::sync::atomic::AtomicU8>,
     star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
     render_sink: Option<Arc<ArcSwap<RenderSnapshot>>>,
@@ -480,6 +517,8 @@ fn run_client_loop(
                     dev_commands_applied: applied,
                     dev_commands_dropped: dropped.load(Ordering::Relaxed),
                     stars_drawn: stars_drawn.load(Ordering::Relaxed),
+                    terrain_chunks_drawn: terrain_drawn.load(Ordering::Relaxed),
+                    terrain_chunks_pending: terrain_pending.load(Ordering::Relaxed),
                     camera_mode: camera_mode.load(Ordering::Relaxed),
                     star_probe: star_probe
                         .lock()
@@ -494,6 +533,8 @@ fn run_client_loop(
             applied,
             &dropped,
             &stars_drawn,
+            &terrain_drawn,
+            &terrain_pending,
             &camera_mode,
             &star_probe,
         );

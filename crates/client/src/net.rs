@@ -52,6 +52,10 @@ pub enum ClientPhase {
     Active,
     /// Closed (client-initiated `Bye` or gateway `Close`).
     Closed,
+    /// ★ THE WORLD REFUSED (slice 7): the gateway serves another world identity than this build
+    /// computes — the declared half (update the build) or the measured half (this chip or this
+    /// build computes a different hill). Terminal: nothing is drawn against the wrong recipe.
+    WorldRefused,
 }
 
 /// What one step did (drained / sent counts), for the driver and tests.
@@ -139,14 +143,30 @@ pub struct ClientState {
     /// (walk scale ships none, so the published scene stays the boot `scene` — byte-identical). Read
     /// by `render_snapshot()` to OVERLAY each moving box's live pose onto the boot scene.
     realm_view: RealmView,
+    /// ★ THIS BUILD'S WORLD IDENTITY (slice 7; SL10 clause 3): the declared half (the recipe's
+    /// version and the universe seed) and the measured half (the home planet's golden chunks, cells
+    /// and mesh, computed by this binary on this chip). Stated to the gateway right after `Welcome`.
+    world: vd_terrain::WorldIdentity,
+    /// Whether the world hello went out (once per session).
+    world_stated: bool,
+    /// The gateway's refusal, if it came: `(ours, theirs, half)` as the wire names them.
+    world_refused: Option<(u64, u64, vd_wire::channels::WorldHalf)>,
 }
 
 impl ClientState {
     #[must_use]
-    pub fn new(gateway: NodeId, ticket: LoginTicket, tuning: ClientInterpTuning) -> ClientState {
+    pub fn new(
+        gateway: NodeId,
+        ticket: LoginTicket,
+        tuning: ClientInterpTuning,
+        world: vd_terrain::WorldIdentity,
+    ) -> ClientState {
         ClientState {
             gateway,
             ticket,
+            world,
+            world_stated: false,
+            world_refused: None,
             phase: ClientPhase::Connecting,
             session: None,
             held_subs: std::collections::BTreeSet::new(),
@@ -244,6 +264,12 @@ impl ClientState {
                 if self.phase == ClientPhase::AwaitingWelcome {
                     self.phase = ClientPhase::AwaitingSubscription;
                 }
+            }
+            // ★ THE WORLD REFUSED (slice 7): terminal. The refusal names both values and the half,
+            // so the operator reads which build or which chip is wrong.
+            ServerControlMsg::WorldRefused { ours, theirs, half } => {
+                self.world_refused = Some((ours, theirs, half));
+                self.phase = ClientPhase::WorldRefused;
             }
             ServerControlMsg::SubscriptionOpened { sub, .. } => {
                 self.held_subs.insert(sub);
@@ -581,7 +607,26 @@ impl ClientState {
                 .expect("closed wire enums serialize");
             let _ = self.send_bytes(transport, MsgClass::Control, buf);
         }
-        match self.phase {
+        // ★ THE WORLD HELLO (slice 7; SL10 clause 3): once, right after `Welcome`, before the first
+        // input. The gateway compares both halves with its own and refuses a mismatch by name.
+        let mut world_sent = 0;
+        if !self.world_stated
+            & matches!(
+                self.phase,
+                ClientPhase::AwaitingSubscription | ClientPhase::Active
+            )
+        {
+            let hello = ClientControlMsg::HelloWorld {
+                declared: self.world.declared,
+                measured: self.world.measured,
+            };
+            let buf = postcard::to_allocvec(&hello).expect("closed wire enums serialize");
+            if self.send_bytes(transport, MsgClass::Control, buf) {
+                self.world_stated = true;
+                world_sent = 1;
+            }
+        }
+        let phase_sent = match self.phase {
             ClientPhase::Connecting => {
                 let hello = ClientControlMsg::Hello {
                     version: ProtoVersion::CURRENT,
@@ -621,8 +666,10 @@ impl ClientState {
             }
             ClientPhase::AwaitingWelcome
             | ClientPhase::AwaitingSubscription
-            | ClientPhase::Closed => 0,
-        }
+            | ClientPhase::Closed
+            | ClientPhase::WorldRefused => 0,
+        };
+        world_sent + phase_sent
     }
 
     /// Learn the cluster's universe-tick rate from the wire (R1) — applied to the
@@ -771,6 +818,8 @@ impl ClientState {
             dev_commands_applied,
             dev_commands_dropped,
             stars_drawn,
+            terrain_chunks_drawn,
+            terrain_chunks_pending,
             camera_mode,
             star_probe,
         } = counters;
@@ -909,6 +958,8 @@ impl ClientState {
             dev_commands_applied,
             dev_commands_dropped,
             stars_drawn,
+            terrain_chunks_drawn,
+            terrain_chunks_pending,
             camera_mode: vd_devproto::camera_mode_name(camera_mode).to_owned(),
             star_probe,
             transfer: DevTransferView::None,
@@ -928,6 +979,10 @@ pub struct DevCounters {
     pub dev_commands_dropped: u64,
     /// Points of light in the renderer's star cloud right now; 0 with no renderer.
     pub stars_drawn: u64,
+    /// Terrain chunks on screen right now (slice 7); 0 with no renderer.
+    pub terrain_chunks_drawn: u64,
+    /// Terrain chunks still building (slice 7); 0 with no renderer.
+    pub terrain_chunks_pending: u64,
     /// The renderer's camera-mode code (`vd_devproto::CAMERA_MODE_*`); `NONE` with no renderer.
     pub camera_mode: u8,
     /// The renderer's own projection of its brightest drawn stars; empty with no renderer.
@@ -949,6 +1004,7 @@ fn dev_phase(phase: ClientPhase) -> DevPhase {
         ClientPhase::AwaitingSubscription => DevPhase::AwaitingSubscription,
         ClientPhase::Active => DevPhase::Active,
         ClientPhase::Closed => DevPhase::Closed,
+        ClientPhase::WorldRefused => DevPhase::WorldRefused,
     }
 }
 
@@ -1010,11 +1066,24 @@ impl<T: Transport> ClientCore<T> {
         gateway: NodeId,
         ticket: LoginTicket,
         tuning: ClientInterpTuning,
+        world: vd_terrain::WorldIdentity,
     ) -> ClientCore<T> {
         ClientCore {
             transport,
-            state: ClientState::new(gateway, ticket, tuning),
+            state: ClientState::new(gateway, ticket, tuning, world),
         }
+    }
+
+    /// The gateway's world refusal, if it came (`ours`, `theirs`, which half).
+    #[must_use]
+    pub fn world_refused(&self) -> Option<(u64, u64, vd_wire::channels::WorldHalf)> {
+        self.state.world_refused
+    }
+
+    /// Whether the world hello went out.
+    #[must_use]
+    pub fn world_stated(&self) -> bool {
+        self.state.world_stated
     }
 
     pub fn step(&mut self, now_s: f64) -> ClientStepReport {
@@ -1119,12 +1188,22 @@ mod tests {
         }
     }
 
+    /// This test build's world identity on the home planet: what the gateway of THE world holds.
+    fn world() -> vd_terrain::WorldIdentity {
+        vd_terrain::WorldIdentity::of(
+            vd_terrain::home::HOME_UNIVERSE_SEED,
+            &vd_terrain::home::home_planet(),
+        )
+        .expect("the home planet self-checks")
+    }
+
     fn core() -> ClientCore<MockTransport> {
         ClientCore::new(
             MockTransport::default(),
             GATEWAY,
             ticket(),
             ClientInterpTuning::DEFAULT,
+            world(),
         )
     }
 
@@ -1216,6 +1295,70 @@ mod tests {
         c.step(0.0);
         assert_eq!(c.state().phase(), ClientPhase::Active);
         assert_eq!(c.state().session(), Some(SessionId(9)));
+    }
+
+    /// ★ THE WORLD HELLO (slice 7): right after `Welcome` the client states its world identity, once;
+    /// a refusal ends the session in a terminal phase that names both values and the half.
+    #[test]
+    fn the_world_hello_goes_out_once_after_welcome_and_a_refusal_is_terminal() {
+        let mut c = core();
+        assert!(!c.world_stated());
+        c.step(0.0); // Hello
+        assert!(!c.world_stated(), "nothing is stated before Welcome");
+        c.transport.deliver(GATEWAY, MsgClass::Control, welcome());
+        let r = c.step(0.0);
+        assert_eq!(
+            r.sent, 1,
+            "the world hello went out on the step after Welcome"
+        );
+        assert!(c.world_stated());
+        let (class, buf) = c.transport.sent.last().cloned().expect("test fixture");
+        assert_eq!(class, MsgClass::Control);
+        let msg: ClientControlMsg = postcard::from_bytes(&buf).expect("test fixture");
+        assert_eq!(
+            msg,
+            ClientControlMsg::HelloWorld {
+                declared: world().declared,
+                measured: world().measured,
+            }
+        );
+        // Only once: the next step states nothing new.
+        let sent_before = c.transport.sent.len();
+        c.step(0.0);
+        assert_eq!(c.transport.sent.len(), sent_before);
+        // The refusal: terminal, named.
+        let refused = postcard::to_allocvec(&ServerControlMsg::WorldRefused {
+            ours: 1,
+            theirs: 2,
+            half: vd_wire::channels::WorldHalf::Measured,
+        })
+        .expect("test fixture");
+        c.transport.deliver(GATEWAY, MsgClass::Control, refused);
+        c.step(0.0);
+        assert_eq!(c.state().phase(), ClientPhase::WorldRefused);
+        assert_eq!(
+            c.world_refused(),
+            Some((1, 2, vd_wire::channels::WorldHalf::Measured))
+        );
+        assert_eq!(dev_phase(ClientPhase::WorldRefused), DevPhase::WorldRefused);
+        // Nothing goes out any more.
+        let sent_before = c.transport.sent.len();
+        c.step(0.0);
+        assert_eq!(c.transport.sent.len(), sent_before);
+    }
+
+    /// A refused send of the world hello is back-pressure: it is retried on the next step.
+    #[test]
+    fn a_refused_world_hello_send_is_retried() {
+        let mut c = core();
+        c.step(0.0);
+        c.transport.deliver(GATEWAY, MsgClass::Control, welcome());
+        c.transport.refuse = true;
+        c.step(0.0);
+        assert!(!c.world_stated());
+        c.transport.refuse = false;
+        c.step(0.0);
+        assert!(c.world_stated());
     }
 
     #[test]
@@ -2958,6 +3101,8 @@ mod tests {
                 dev_commands_applied: 3,
                 dev_commands_dropped: 1,
                 stars_drawn: 7,
+                terrain_chunks_drawn: 3,
+                terrain_chunks_pending: 2,
                 camera_mode: vd_devproto::CAMERA_MODE_THIRD_PERSON,
                 star_probe: vec![vd_devproto::DevStarProbe {
                     realm: "System(7)".to_owned(),
@@ -2993,6 +3138,8 @@ mod tests {
         assert_eq!(s.dev_commands_dropped, 1);
         // The bin's star count rides the same struct: the render thread's number, passed through.
         assert_eq!(s.stars_drawn, 7);
+        assert_eq!(s.terrain_chunks_drawn, 3);
+        assert_eq!(s.terrain_chunks_pending, 2);
         assert_eq!(s.camera_mode, "third-person");
         assert_eq!(s.star_probe.len(), 1);
         assert_eq!(s.star_probe[0].realm, "System(7)");

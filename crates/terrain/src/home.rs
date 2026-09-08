@@ -10,6 +10,11 @@
 
 use crate::body::BodyDefinition;
 
+/// ★ THE UNIVERSE SEED of THE world (SL5: one world), stated here so the client — which links no motion
+/// crate — can fold its DECLARED world tag; `crates/bins/tests/home_body_pin.rs` proves it is the
+/// forest's own seed.
+pub const HOME_UNIVERSE_SEED: u64 = 2298;
+
 /// The home planet's realm seed, as the forest draws it under the home universe seed.
 pub const HOME_PLANET_SEED: u64 = 7_701_581_858_760_374_086;
 /// The home planet's look radius, bit for bit, as the forest draws it.

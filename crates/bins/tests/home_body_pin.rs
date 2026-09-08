@@ -36,6 +36,11 @@ fn the_forests_home_planet_is_the_golden_gates_home_planet() {
     // The generator's own literals are the same two numbers (SL5: one world, stated once per crate,
     // tied here).
     assert_eq!(body.seed(), vd_terrain::home::HOME_PLANET_SEED);
+    assert_eq!(
+        HOME_SEED,
+        vd_terrain::home::HOME_UNIVERSE_SEED,
+        "the universe seed the client folds"
+    );
     assert_eq!(body, vd_terrain::home::home_planet());
     // ★ THE POLE AXIS (the refuter's finding 4): the biome's pole is the orbits' axis. The world's
     // perifocal plane is `z = 0` (`crates/physics/src/celestial.rs`): an orbit with no inclination

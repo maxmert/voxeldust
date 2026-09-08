@@ -35,7 +35,7 @@
 
 use std::collections::BTreeMap;
 
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 
 use crate::geometry::RealmRegion;
 use crate::ids::{AccountId, UniverseTick};
@@ -65,11 +65,28 @@ impl StoredHome {
     /// silently becoming the origin of some other realm.
     #[must_use]
     pub fn in_realm(regions: &[RealmRegion], realm: RealmId, offset: DVec3) -> Option<StoredHome> {
+        StoredHome::in_realm_facing(regions, realm, offset, DQuat::IDENTITY)
+    }
+
+    /// The home of `realm`, `offset` metres from that realm's own centre, standing with the facing
+    /// `orient` (in that realm's own frame). A home on a planet's surface stands with the radial as
+    /// its up, so the avatar's own up is the ground's up the moment it is born (the voxel foundation,
+    /// slice 7: the pictures); a home in open space stands as before, unturned.
+    #[must_use]
+    pub fn in_realm_facing(
+        regions: &[RealmRegion],
+        realm: RealmId,
+        offset: DVec3,
+        orient: DQuat,
+    ) -> Option<StoredHome> {
         let frame = regions.iter().find(|r| r.realm == realm)?.frame;
         let coord = crate::worldgen::coord_of_realm(regions, realm)?;
         Some(StoredHome {
             realm: coord,
-            pose: StampedPose::at_rest(frame, offset, UniverseTick(0)),
+            pose: StampedPose {
+                orient,
+                ..StampedPose::at_rest(frame, offset, UniverseTick(0))
+            },
         })
     }
 }
@@ -166,6 +183,33 @@ mod tests {
                 .pos
                 .delta_m(crate::pose::LatticePos::ORIGIN, home.pose.frame.tier()),
             DVec3::new(25.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn a_home_may_state_the_facing_it_stands_with_and_stands_unturned_by_default() {
+        let turned = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        let facing = StoredHome::in_realm_facing(
+            &forest(),
+            RealmId::System(7),
+            DVec3::new(25.0, 0.0, 0.0),
+            turned,
+        )
+        .expect("the forest names this realm");
+        assert_eq!(facing.pose.orient, turned);
+        assert_eq!(
+            facing.pose.pos,
+            StoredHome::in_realm(&forest(), RealmId::System(7), DVec3::new(25.0, 0.0, 0.0))
+                .expect("the forest names this realm")
+                .pose
+                .pos
+        );
+        let plain = StoredHome::in_realm(&forest(), RealmId::System(7), DVec3::ZERO)
+            .expect("the forest names this realm");
+        assert_eq!(plain.pose.orient, DQuat::IDENTITY);
+        assert_eq!(
+            StoredHome::in_realm_facing(&forest(), RealmId::System(99), DVec3::ZERO, turned),
+            None
         );
     }
 
