@@ -48,6 +48,26 @@ pub struct Octave {
     pub(crate) seed: u64,
 }
 
+impl Octave {
+    /// The octave's frequency: the body's radius divided by its wavelength.
+    #[must_use]
+    pub const fn frequency(&self) -> Gf {
+        self.frequency
+    }
+
+    /// The octave's amplitude in metres.
+    #[must_use]
+    pub const fn amplitude_m(&self) -> Gf {
+        self.amplitude_m
+    }
+
+    /// The octave's noise seed.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.seed
+    }
+}
+
 /// The cave parameters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Caves {
@@ -353,6 +373,13 @@ mod tests {
 
     #[test]
     fn every_rung_sums_strictly_fewer_octaves_than_the_rung_below_it() {
+        // The octave's public face (the skyline march reads it): each accessor is the field.
+        for o in crate::home::home_planet().octaves_at(0) {
+            assert_eq!(o.frequency(), o.frequency);
+            assert_eq!(o.amplitude_m(), o.amplitude_m);
+            assert_eq!(o.seed(), o.seed);
+            assert!(o.frequency() > Gf::ZERO);
+        }
         let m = home();
         let mut rung = 1u8;
         while rung < m.ladder.rungs {

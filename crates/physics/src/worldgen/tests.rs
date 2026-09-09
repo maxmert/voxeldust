@@ -14,8 +14,8 @@ use crate::celestial::KEPLER_ECC_MAX;
 use crate::celestial::{OrbitalElements, orbital_state};
 use crate::motion::Motion;
 use crate::taxonomy::{
-    FrostThresholds, SpectralClass, classify_spectral, habitable_zone_radius_au,
-    main_sequence_luminosity, orbital_axis_au,
+    FrostThresholds, M_EARTH_KG, R_EARTH_M, SpectralClass, classify_spectral,
+    habitable_zone_radius_au, main_sequence_luminosity, orbital_axis_au,
 };
 use core::f64::consts::TAU;
 use glam::DVec3;
@@ -7425,5 +7425,101 @@ fn the_layer_is_cached_once_and_the_planted_home_matches_the_forests_neighbourho
     assert!(
         !std::sync::Arc::ptr_eq(&a, &c),
         "the released layer is rebuilt on the next read"
+    );
+}
+
+/// `body_facts` on a hand forest: a planet under a lit system, a moon under that planet (the
+/// grandparent path), and the three `None` arms — an unknown realm, a body without a taxonomy row,
+/// a body whose parent is not in the forest. The earth-like verdict is the census's own.
+#[test]
+fn body_facts_reads_the_lit_chain_and_refuses_what_it_cannot_name() {
+    use crate::taxonomy::{Atmosphere, BodyTaxon, PlanetType, SpectralClass};
+    let star = StarPhotometrics {
+        mass_msun: 1.0,
+        class: SpectralClass::G,
+        luma_lsun: 1.0,
+    };
+    let taxon = BodyTaxon {
+        class: PlanetType::Rocky,
+        mass_kg: M_EARTH_KG,
+        radius_m: R_EARTH_M,
+        insolation_rel: 1.0,
+        t_eq_k: 255.0,
+        bond_albedo: 0.3,
+        atmosphere: Some(Atmosphere {
+            mean_molecular_weight: 28.0,
+            scale_height_m: 8_000.0,
+            reference_density_kgm3: Some(1.2),
+        }),
+    };
+    let system = RealmId::System(900);
+    let planet = RealmId::Planet(901);
+    let moon = RealmId::Planet(902);
+    let orphan = RealmId::Planet(903);
+    let bare = RealmId::Station(904);
+    let mk = |realm, parent, taxon, photometrics| GeneratedBody {
+        realm,
+        parent,
+        shape: Boundary::Shell { r: 1.0 },
+        taxon,
+        look: Some(Boundary::Shell { r: 1.0 }),
+        placement: Placement::StaticOffset(DVec3::ZERO),
+        photometrics,
+    };
+    let forest = vec![
+        mk(system, None, None, Some(star)),
+        mk(planet, Some(system), Some(taxon), None),
+        mk(moon, Some(planet), Some(taxon), None),
+        mk(orphan, Some(RealmId::Planet(999)), Some(taxon), None),
+        mk(bare, Some(system), None, None),
+    ];
+    let p = census::body_facts_in_forest(&forest, planet).expect("a lit planet");
+    assert_eq!(p.system, system);
+    assert_eq!(p.star, star);
+    assert_eq!(p.taxon, taxon);
+    assert_eq!(p.earth_like, census::earth_like(&star, &taxon));
+    let m = census::body_facts_in_forest(&forest, moon).expect("a lit moon");
+    assert_eq!(
+        m.system, system,
+        "a moon is lit through its planet's system"
+    );
+    assert_eq!(
+        census::body_facts_in_forest(&forest, RealmId::Planet(1)),
+        None
+    );
+    assert_eq!(census::body_facts_in_forest(&forest, bare), None);
+    assert_eq!(census::body_facts_in_forest(&forest, orphan), None);
+    // A system without a star lights nothing.
+    let dark = vec![
+        mk(system, None, None, None),
+        mk(planet, Some(system), Some(taxon), None),
+    ];
+    assert_eq!(census::body_facts_in_forest(&dark, planet), None);
+    // THE world, through the home system's SUBTREE (the galaxy-wide read is the seed-search tool's):
+    // the voxel home planet (the first body the ladder accepted, `vd_bins::home_body`) has facts,
+    // and they are the census's own row — the measurement U1 prints them; and the subtree's
+    // earth-like sweep names the system's earth-like body.
+    let config = UniverseConfig::world(1.0, 0.05);
+    let voxel_home = RealmId::Planet(7_701_581_858_760_374_086);
+    let held = std::collections::BTreeSet::from([RealmId::System(7)]);
+    let lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+    let f = census::body_facts_in_subtree(HOME_SEED, &config, &held, &lineage, voxel_home)
+        .expect("the home planet has facts");
+    assert_eq!(f.system, RealmId::System(7));
+    assert!(f.taxon.radius_m > 0.0);
+    let found = census::earth_like_in_subtree(HOME_SEED, &config, &held, &lineage);
+    assert!(found.iter().all(|c| c.system == RealmId::System(7)));
+    // The galaxy-wide read, on the test galaxy at a seed that holds an earth-like body: the facts
+    // of that body agree with the sweep's own row.
+    let cfg = test_world();
+    let sweep = earth_like_candidates(4, &cfg);
+    let first = sweep.first().expect("seed 4 holds an earth-like body");
+    let facts = census::body_facts(4, &cfg, first.body).expect("its facts");
+    assert!(facts.earth_like);
+    assert_eq!(facts.system, first.system);
+    assert_eq!(facts.taxon.radius_m, first.radius_m);
+    assert_eq!(
+        census::body_facts_in_subtree(HOME_SEED, &config, &held, &lineage, RealmId::Planet(1)),
+        None
     );
 }

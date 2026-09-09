@@ -40,9 +40,12 @@ const EYE_HEIGHT_M: f64 = 1.8;
 const HILL_M: f64 = 300.0;
 /// Altitude for the aloft picture, in metres.
 const ALOFT_M: f64 = 60_000.0;
-/// The star's height over the standing point's horizon, in degrees: low enough that the relief
-/// throws shade, high enough that the ground is lit.
-const SUN_ELEVATION_DEG: f64 = 25.0;
+/// The star's height over the standing point's horizon, in degrees (M8-L, ruling V13 L23: a raking
+/// light, 12°–18°): low enough that every spur throws a shadow, high enough that the ground is lit.
+const SUN_ELEVATION_DEG: f64 = 15.0;
+/// The star's azimuth from the camera's nose, in degrees (M8-L: 100°–140°, behind the shoulder — a
+/// picture shot INTO the light shows no relief, MEASURED on the slice 7 pictures).
+const SUN_OFF_NOSE_DEG: f64 = 120.0;
 /// How far below level each picture looks, in degrees.
 const GROUND_TILT_DEG: f64 = 8.0;
 const HILL_TILT_DEG: f64 = 15.0;
@@ -314,6 +317,22 @@ fn take_picture(f: &Fixture, gateway: SocketAddr, pic: &Picture) -> (u64, f64) {
         vd_bins::pixel::own_pose(&landed).map(|(p, _)| p),
         landed.universe_tick
     );
+    // THE STAND'S FACING, MEASURED (M8-L): the delivered orientation against the radial under the
+    // eye — how far the nose is below level, how far the avatar's up leans off the radial, and the
+    // ROLL (the camera's right axis lifted out of the local horizontal). A rolled horizon in a
+    // picture is a defect of the stand, never of the ground.
+    if let Some((p, q)) = vd_bins::pixel::own_pose(&landed) {
+        let radial = p.normalize();
+        let up = q * DVec3::Y;
+        let fwd = q * DVec3::NEG_Z;
+        let right = q * DVec3::X;
+        eprintln!(
+            "terrain_pictures/{name}: facing — nose {:.2}° below level, up {:.2}° off the radial, roll {:.2}° (right axis lifted)",
+            (-fwd.dot(radial)).asin().to_degrees(),
+            up.dot(radial).clamp(-1.0, 1.0).acos().to_degrees(),
+            right.dot(radial).clamp(-1.0, 1.0).asin().to_degrees()
+        );
+    }
     // The day side was computed at the clock's genesis: the login must be within a day of it (an
     // orbit is a year long; a day moves the star under one degree).
     assert!(
@@ -455,11 +474,14 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let d = (sun * zenith.cos() + along * zenith.sin()).normalize();
     let dir = [Gf::from_f64(d.x), Gf::from_f64(d.y), Gf::from_f64(d.z)];
     let h = vd_terrain::height::height_m(&body, dir, 0).to_f64();
-    // The nose: toward the star's azimuth, tilted below level by the picture's angle.
+    // The nose: the star's azimuth turned `SUN_OFF_NOSE_DEG` about the radial (the light comes over
+    // the camera's shoulder), tilted below level by the picture's angle.
     let toward_sun = (sun - d * sun.dot(d)).normalize();
+    let ahead =
+        vd_core::glam::DQuat::from_axis_angle(d, SUN_OFF_NOSE_DEG.to_radians()) * toward_sun;
     let nose = |tilt_deg: f64| {
         let t = tilt_deg.to_radians();
-        (toward_sun * t.cos() - d * t.sin()).normalize()
+        (ahead * t.cos() - d * t.sin()).normalize()
     };
     let ground = stand(d, EYE_HEIGHT_M, h, nose(GROUND_TILT_DEG));
     let hill = stand(d, HILL_M, h, nose(HILL_TILT_DEG));
@@ -473,8 +495,9 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let face = vd_seed::bend::face_of([d.x, d.y, d.z]);
     let (t, s) = vd_seed::bend::face_coords(face, [d.x, d.y, d.z]);
     eprintln!(
-        "terrain_pictures: {planet:?}, surface {h:.1} m, star at {sun:?}, standing on {face:?} at \
-         ({t:.3}, {s:.3}); spawns {spawn_poses}"
+        "terrain_pictures: {planet:?}, surface {h:.1} m, star at {sun:?} ({SUN_ELEVATION_DEG}° up, \
+         {SUN_OFF_NOSE_DEG}° off the nose), standing on {face:?} at ({t:.3}, {s:.3}); spawns \
+         {spawn_poses}"
     );
 
     let f = fixture();

@@ -1248,6 +1248,7 @@ fn slice4a_nonzero_cell_is_carried_unchanged_and_the_offset_crossing_still_fires
             },
             yaw: 0.0,
             pitch: 0.0,
+            up: vd_core::glam::DVec3::Y,
             last_applied_seq: None,
             look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
             prev_offset: LatticePos::from_metres(offset_inside, vd_core::pose::Tier::Fine),

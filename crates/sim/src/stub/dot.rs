@@ -17,6 +17,7 @@ use bevy_ecs::prelude::Resource;
 use std::collections::{BTreeMap, VecDeque};
 use vd_core::entity_kind::EntityKind;
 use vd_core::flight::{self, FlightTuning};
+use vd_core::glam::DVec3;
 use vd_core::kinematics::{self};
 use vd_core::placement::{PlacementBook, PlacementLedger};
 use vd_core::pose::{FrameRef, LatticePos, RealmId, StampedPose};
@@ -98,6 +99,14 @@ pub struct Dot {
     pub pose: StampedPose,
     pub yaw: f64,
     pub pitch: f64,
+    /// ★ THE UP THIS BODY STANDS ON (ruling V11: up is the server's). The look's yaw turns about it
+    /// and the pitch tilts against its horizon (`kinematics::orient_in_frame`). Today it is the up
+    /// the stand was BORN with — the frame's `+Y` in open space, the radial a planet spawn states —
+    /// until the realm's gravity function states it per tick (`D-TERRAIN-4`). MEASURED 2026-09-09:
+    /// the look rebuilt the orientation about the frame's `+Y` on every datagram, so a stand on a
+    /// planet rolled 26° the moment the first (zero) look arrived, and every picture's horizon
+    /// tilted with it.
+    pub up: DVec3,
     pub last_applied_seq: Option<u64>,
     /// The frame-local offset (`pose.pos.offset()`) at the END of the previous tick, written LAST each
     /// evaluation tick to `cur`. INERT under CONTAINMENT (task #135): the detector uses POINT membership
@@ -508,7 +517,7 @@ fn face(dot: &mut Dot, input: &InputDatagram) {
 
 impl Dot {
     fn orient_from_angles(&mut self) {
-        self.pose.orient = kinematics::orient_from_yaw_pitch(self.yaw, self.pitch);
+        self.pose.orient = kinematics::orient_in_frame(self.up, self.yaw, self.pitch);
     }
 }
 
@@ -550,8 +559,13 @@ pub(crate) fn stick_from_input(
 #[cfg(test)]
 mod stick_tests {
     use super::stick_from_input;
+    use super::{Dot, face};
+    use crate::authority::Authority;
     use vd_core::controls::{PILOT_PITCH_DOWN_INDEX, PILOT_PITCH_UP_INDEX, mask_of};
     use vd_core::glam::{DQuat, DVec3};
+    use vd_core::kinematics;
+    use vd_core::pose::{FrameRef, LatticePos, StampedPose};
+    use vd_core::{AccountId, EntityId, Fence, NodeId};
     use vd_wire::channels::InputDatagram;
 
     fn input(movement: [f32; 3], look: [f32; 2], action_bits: u32) -> InputDatagram {
@@ -583,6 +597,64 @@ mod stick_tests {
         let left = DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2);
         let (push, _) = stick_from_input(&input([1.0, 0.0, 0.0], [0.0, 0.0], 0), left);
         assert!(close(push, DVec3::new(-1.0, 0.0, 0.0)), "{push:?}");
+    }
+
+    #[test]
+    fn a_stand_born_on_a_planet_keeps_its_up_through_a_look() {
+        // A dot born with a tilted up (a planet's radial), its nose 8° below that horizon.
+        let up = DVec3::new(-0.507, 0.860, 0.005).normalize();
+        let pitch = -0.14;
+        let born = kinematics::orient_in_frame(up, 0.7, pitch);
+        let mut pose = StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 7 },
+            DVec3::new(1.0, 2.0, 3.0),
+            vd_core::UniverseTick(1),
+        );
+        pose.orient = born;
+        let (yaw, pitch_born) = kinematics::yaw_pitch_in_frame(up, born);
+        let mut dot = Dot {
+            last_stick: None,
+            entity: EntityId::pack(vd_core::entity_kind::EntityKind::Player, 1, 1, 1),
+            account: AccountId(1),
+            session_fence: Fence(1),
+            gateway: NodeId(2),
+            granted: true,
+            input_active: false,
+            adopting: false,
+            authority: Authority::Ghost {
+                source_fence: Fence::GENESIS,
+                since_tick: vd_core::ids::TickId(0),
+            },
+            departing: false,
+            entity_fence: Fence(1),
+            pose,
+            yaw,
+            pitch: pitch_born,
+            up,
+            last_applied_seq: None,
+            look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
+            prev_offset: LatticePos::ORIGIN,
+        };
+        // A zero look leaves the stand where it was born: no roll appears, the nose stays 8° down.
+        face(&mut dot, &input([0.0; 3], [0.0; 2], 0));
+        let nose = dot.pose.orient * DVec3::NEG_Z;
+        let nose_up = nose.dot(up);
+        assert!((nose_up - pitch.sin()).abs() < 1e-9, "{nose_up}");
+        assert!(
+            (dot.pose.orient * DVec3::X).dot(up).abs() < 1e-9,
+            "no roll: the right axis lies in the stand's horizon"
+        );
+        // A yaw turns about the stand's up: the pitch against its horizon is unchanged.
+        face(&mut dot, &input([0.0; 3], [0.5, 0.0], 0));
+        let nose = dot.pose.orient * DVec3::NEG_Z;
+        assert!((nose.dot(up) - pitch.sin()).abs() < 1e-9);
+        assert!((dot.pose.orient * DVec3::X).dot(up).abs() < 1e-9);
+        // In open space the up is the frame's +Y and the orientation is the canonical one, exactly.
+        dot.up = DVec3::Y;
+        dot.yaw = 1.2;
+        dot.pitch = 0.3;
+        face(&mut dot, &input([0.0; 3], [0.0; 2], 0));
+        assert_eq!(dot.pose.orient, kinematics::orient_from_yaw_pitch(1.2, 0.3));
     }
 
     #[test]

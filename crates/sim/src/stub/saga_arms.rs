@@ -594,8 +594,18 @@ fn re_home_apply(
                 //
                 // The angles are now DERIVED from the converted orientation, so the rebuild
                 // reproduces exactly the facing the crossing computed.
-                yaw: kinematics::yaw_pitch_from_orient(pose.orient).0,
-                pitch: kinematics::yaw_pitch_from_orient(pose.orient).1,
+                yaw: kinematics::yaw_pitch_in_frame(
+                    pose.orient * vd_core::glam::DVec3::Y,
+                    pose.orient,
+                )
+                .0,
+                pitch: kinematics::yaw_pitch_in_frame(
+                    pose.orient * vd_core::glam::DVec3::Y,
+                    pose.orient,
+                )
+                .1,
+                // The converted pose's own up crosses with it (ruling V11).
+                up: pose.orient * vd_core::glam::DVec3::Y,
                 last_applied_seq: None,
                 // Seed to the re-homed pose offset: this tick's swept segment is degenerate.
                 look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,

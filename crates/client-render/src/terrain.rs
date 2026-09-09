@@ -52,8 +52,19 @@ pub const FLAT_ENV: &str = "VD_TERRAIN_FLAT";
 const HARVEST_PER_FRAME: usize = 4;
 /// The default radius in chunk columns.
 const DEFAULT_RADIUS: i32 = 2;
-/// The fill light's share of the sun, so the shadow side of a hill reads as a hill.
-const FILL_SHARE: f32 = 0.08;
+/// THE SHADOW'S REACH, in chunks past the drawn radius (M8-L, ruling V13 L23): the cascaded shadow
+/// map covers the whole drawn patch and one chunk more, so no lit ground lies outside the shadow's
+/// range and reads as a hole in the shade. Four cascades, the first ending at a 64th of the reach —
+/// the engine's own default ratio. All of it is style: no vertex moves.
+const SHADOW_REACH_CHUNKS: i32 = 1;
+const SHADOW_CASCADES: usize = 4;
+const SHADOW_FIRST_CASCADE_SHARE: f32 = 1.0 / 64.0;
+/// THE NORMAL BIAS, DERIVED FROM THE SUN'S INCIDENCE (M8-L): a shadow map compares depths in texel
+/// steps, and a face lit at an angle `i` from its normal spans `tan(i)` texels of depth per texel of
+/// width, so a bias smaller than that shadows the face on itself ("shadow acne" — MEASURED on the
+/// first re-lit pictures: a 15° star put the whole patch in its own shadow). The bias is the engine's
+/// default plus `tan(i)` at the eye's own up, capped where the star is on the horizon.
+const SHADOW_BIAS_TAN_CAP: f32 = 8.0;
 
 /// THE SUN'S ILLUMINANCE, FROM THE CAMERA'S OWN EXPOSURE: the lux at which a white face turned
 /// square to the sun renders white — `π / exposure`, the inverse of the engine's own pipeline
@@ -184,7 +195,9 @@ pub struct TerrainChunk {
 #[derive(Component)]
 pub struct TerrainSun;
 
-/// The fill light opposite the sun.
+/// The fill light opposite the sun — RETIRED (M8-L): a fill on the shadow side flattened every
+/// picture; one light, one shadow. The marker stays so a stale entity of an older build is still
+/// addressable by the query.
 #[derive(Component)]
 pub struct TerrainFill;
 
@@ -196,7 +209,6 @@ pub struct Terrain {
     entities: BTreeMap<(RealmId, ChunkKey), Entity>,
     material: Option<Handle<StandardMaterial>>,
     sun: Option<Entity>,
-    fill: Option<Entity>,
     /// Realms whose body has no rung this session asks for: warned once each.
     past_ladder: BTreeSet<RealmId>,
 }
@@ -220,7 +232,6 @@ impl Terrain {
             entities: BTreeMap::new(),
             material: None,
             sun: None,
-            fill: None,
             past_ladder: BTreeSet::new(),
         }
     }
@@ -440,44 +451,46 @@ pub(crate) fn sync_terrain(
                     if let Ok(mut t) = light_tf.get_mut(sun) {
                         *t = transform;
                     }
-                    // The fill follows the sun: always from the far side of it.
-                    if let Some(fill) = terrain.fill
-                        && let Ok(mut t) = light_tf.get_mut(fill)
-                    {
-                        *t = Transform::default().looking_to(-dir, Vec3::Y);
-                    }
                 }
                 None => {
                     let lux = exposure
                         .iter()
                         .next()
                         .map_or_else(|| sun_lux(&bevy::camera::Exposure::default()), sun_lux);
+                    // THE SHADOW (M8-L): the sun casts one, over the whole drawn patch. The reach
+                    // is derived from what this session draws (the one rung and its radius, for
+                    // one slice — slice 8 reads the ladder's residency instead).
+                    let chunk_m = f64::from(vd_seed::ladder::cell_m(rung))
+                        * vd_terrain::chunk::CHUNK_EDGE as f64;
+                    let reach_m = (f64::from(radius + SHADOW_REACH_CHUNKS) * chunk_m) as f32;
+                    let cascades = bevy::light::CascadeShadowConfigBuilder {
+                        num_cascades: SHADOW_CASCADES,
+                        first_cascade_far_bound: reach_m * SHADOW_FIRST_CASCADE_SHARE,
+                        maximum_distance: reach_m,
+                        ..default()
+                    }
+                    .build();
+                    // The incidence at the eye: the angle between the light and the local up.
+                    let up =
+                        overhead.map_or(Vec3::Y, |u| Vec3::new(u.x as f32, u.y as f32, u.z as f32));
+                    let cos_i = (-dir).dot(up).clamp(0.0, 1.0);
+                    let tan_i =
+                        ((1.0 - cos_i * cos_i).sqrt() / cos_i.max(1e-3)).min(SHADOW_BIAS_TAN_CAP);
                     let sun = commands
                         .spawn((
                             DirectionalLight {
                                 illuminance: lux,
-                                shadows_enabled: false,
+                                shadows_enabled: true,
+                                shadow_normal_bias: DirectionalLight::DEFAULT_SHADOW_NORMAL_BIAS
+                                    + tan_i,
                                 ..default()
                             },
+                            cascades,
                             transform,
                             TerrainSun,
                         ))
                         .id();
                     terrain.sun = Some(sun);
-                    // The shadow side is never pure black: a weak FILL light from the opposite
-                    // direction, style like the sun itself, re-aimed with the sun every frame.
-                    let fill = commands
-                        .spawn((
-                            DirectionalLight {
-                                illuminance: lux * FILL_SHARE,
-                                shadows_enabled: false,
-                                ..default()
-                            },
-                            Transform::default().looking_to(-dir, Vec3::Y),
-                            TerrainFill,
-                        ))
-                        .id();
-                    terrain.fill = Some(fill);
                     // ONE SUN: the stub world's fixed key light retires the moment the sun is born
                     // (it lit the ground from a direction no star stands in, at three times white).
                     for key in &key_light {

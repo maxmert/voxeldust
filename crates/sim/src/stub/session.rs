@@ -186,8 +186,11 @@ pub(crate) fn on_gateway_msg(
                     // orientation from them every tick, so a birth that zeroed them would face the
                     // dot at the frame's default no matter what pose it was handed
                     // (`kinematics::yaw_pitch_from_orient` — the two stores of one truth).
-                    yaw: kinematics::yaw_pitch_from_orient(pose.orient).0,
-                    pitch: kinematics::yaw_pitch_from_orient(pose.orient).1,
+                    yaw: kinematics::yaw_pitch_in_frame(pose.orient * DVec3::Y, pose.orient).0,
+                    pitch: kinematics::yaw_pitch_in_frame(pose.orient * DVec3::Y, pose.orient).1,
+                    // The stand's own up (ruling V11, `D-TERRAIN-4`): a planet spawn states the
+                    // radial; a space spawn states the frame's `+Y`, which is what it always was.
+                    up: pose.orient * DVec3::Y,
                     last_applied_seq: None,
                     // Seed to the spawn offset: tick-1's swept segment is degenerate. Origin when no stored
                     // pose (byte-identical to the old `DVec3::ZERO`); the stored offset otherwise.
@@ -407,6 +410,7 @@ fn adopt_input_slot(
         pose: StampedPose::at_rest(config.frame, DVec3::ZERO, clock.universe_tick),
         yaw: 0.0,
         pitch: 0.0,
+        up: DVec3::Y,
         last_applied_seq: None,
         // Seed to the spawn offset (origin): tick-1's swept segment is degenerate.
         look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,

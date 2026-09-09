@@ -120,6 +120,91 @@ pub fn earth_like_t_bound_k(s_rel: f64) -> f64 {
     )
 }
 
+/// ONE BODY'S FACTS, as the census reads them: its illuminating star's photometrics, its own
+/// taxonomy row, and the earth-like verdict on that pair. The landform arc's measurement U1 (ruling
+/// V13 L27) reads the VOXEL home planet through this — the body the ladder accepted first — and asks
+/// whether it is the world the pictures should be taken on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyFacts {
+    /// The star system that lights the body (its parent, or its parent's parent for a moon).
+    pub system: RealmId,
+    pub star: StarPhotometrics,
+    pub taxon: crate::taxonomy::BodyTaxon,
+    /// The census's own earth-like verdict on `(star, taxon)`.
+    pub earth_like: bool,
+}
+
+/// The facts of `body` at one seed; `None` for a realm the forest does not name, a body without a
+/// taxonomy row (a star, a station), or a chain that names no photometric star.
+#[must_use]
+pub fn body_facts(seed_universe: u64, config: &UniverseConfig, body: RealmId) -> Option<BodyFacts> {
+    body_facts_in_forest(&system_forest_cached(seed_universe, config), body)
+}
+
+/// The facts of `body` read from ONE SUBTREE — the bodies a shard holding `held` boots with, under
+/// `lineage` — instead of the whole galaxy: seconds, not the twenty minutes the full fold costs
+/// (MEASURED 2026-09-09: `body_facts` on the home planet ran 20 min of one core through the galaxy
+/// forest before it was stopped). The boot-plant lesson, applied to a census read.
+#[must_use]
+pub fn body_facts_in_subtree(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    held: &std::collections::BTreeSet<RealmId>,
+    lineage: &std::collections::BTreeSet<RealmId>,
+    body: RealmId,
+) -> Option<BodyFacts> {
+    body_facts_in_forest(
+        &super::realm_subtree(seed_universe, config, held, lineage),
+        body,
+    )
+}
+
+/// Every earth-like body of ONE SUBTREE (see [`body_facts_in_subtree`]).
+#[must_use]
+pub fn earth_like_in_subtree(
+    seed_universe: u64,
+    config: &UniverseConfig,
+    held: &std::collections::BTreeSet<RealmId>,
+    lineage: &std::collections::BTreeSet<RealmId>,
+) -> Vec<EarthLikeCandidate> {
+    earth_like_in_forest(&super::realm_subtree(seed_universe, config, held, lineage))
+}
+
+/// The arithmetic of [`body_facts`] over a forest in hand (its three `None` arms are reachable from
+/// a unit test on a hand forest).
+pub(crate) fn body_facts_in_forest(bodies: &[GeneratedBody], body: RealmId) -> Option<BodyFacts> {
+    let b = bodies.iter().find(|b| b.realm == body)?;
+    let taxon = b.taxon?;
+    let (system, star) = illuminating_star(bodies, b)?;
+    Some(BodyFacts {
+        system,
+        star,
+        taxon,
+        earth_like: earth_like(&star, &taxon),
+    })
+}
+
+/// The STAR that lights a body: its parent system (a planet) or its grandparent (a moon), with that
+/// system's photometrics; `None` when the chain names no system or the system carries no star.
+fn illuminating_star(
+    bodies: &[GeneratedBody],
+    b: &GeneratedBody,
+) -> Option<(RealmId, StarPhotometrics)> {
+    let parent = b.parent?;
+    let system = match parent {
+        RealmId::System(_) => parent,
+        _ => bodies
+            .iter()
+            .find(|p| p.realm == parent)
+            .and_then(|p| p.parent)?,
+    };
+    let star = bodies
+        .iter()
+        .find(|p| p.realm == system)
+        .and_then(|p| p.photometrics)?;
+    Some((system, star))
+}
+
 /// SWEEP one seed: every Earth-like body of THE world at that seed (SL5: the one generator,
 /// read — never a variant). The tool's whole read path, shared by the bin and the tests.
 #[must_use]

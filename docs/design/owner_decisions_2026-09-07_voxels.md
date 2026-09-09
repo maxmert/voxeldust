@@ -519,3 +519,57 @@ spawn pose may state a FACING (`D-TERRAIN-4` 🟥, until V11's server-side up la
 question and the cave lattice step are NOT judgeable from these three pictures (no seam and no cave
 mouth in frame); slice 8's pictures owe both. S7-8 (the camera's up) is unchanged: nothing of V11 is
 built.
+
+## V13. THE LANDFORM ARC — THE OWNER'S ANSWERS (2026-09-09)
+
+The owner read `docs/investigation/2026-09-08/landforms/slice_landforms_discussion.md` (the 28-row
+register, §9) after the three slice 7 pictures ("no orienters and no details at all ... the surface will
+not be interesting enough") and the Crimson Desert reference. The owner: *"All sounds good ... In general
+I agree with your recommendations for landline changes."* Every recommendation in §9 is therefore a
+RULING unless a row below says otherwise. The six rows answered by name:
+
+| Row | Ruling |
+|---|---|
+| L1 | The client DERIVES the macro artifact; the home planet's artifact is a pinned build artifact; shipping stays a MEASURED fallback (the bulk lane A3 is designed, opened only on a failed first-visit measurement) |
+| L5 | ONE merged octave law: the ladder owns the ends (both metre constants deleted), a slope spectrum anchored on the angle of repose owns the amplitudes, the half-cell budget owns the cap, one downward-only per-column factor owns the modulation, the middle band is ridged and flow-aligned, coarsening is by wavelength |
+| L12 | The body CHARTER: ~20 quantised integers, authored ONCE and STORED; the forest draws the body-local half, the star system computes and quantises the orbit half and states it one hop down; the realm states the charter in its own surface statement. **This widens SL10 clause 1: the static shape is f(seed, address, stored charter).** |
+| L23 | Fund both: the light fix now (a raking star off the camera's nose, the shadow on, the three pictures re-shot) and a sky slice (aerial perspective from the scale height, a sky dome, a cascaded shadow map) |
+| L24 | A PAINT TABLE lands in the biome slice as the first step. **The owner: "we will use textures in the future ... we are trying to reach the Crimson Desert quality in general, so we will need to use techniques other AAA games are using."** The paint table is the seam the texture work (per-stratum materials, detail normals, triplanar blending, the techniques of the reference) replaces; the surface-style slice is a named later slice, not dropped |
+| L27 | Measure first (U1), then re-pick the home planet by the existing earth-like predicate if it is not earth-like; the re-pin is free until slice 14 |
+| A1 | YES: the charter rides the realm's own surface statement to its observers' clients (integers; bytes measured against the self-look budget first) |
+| A2 | YES: the orbit-derived facts (insolation, equilibrium temperature, eccentricity), quantised, from the star system to its planet, one hop down |
+
+Rows the owner did not name and that stay OPEN until their measurement: L25 (the 8 ms budget — "decide
+when the measurements are in hand"), L21 (a volcanic family this arc or later — after the budget), L20
+(a player's dam against the seed's river — to be ruled before a player finds it), L28 (a real x86-64
+machine before the solve slice; a ratchet tier for believability gates).
+
+THE ORDER (the discussion document §11, agreed): the arc is INTERLEAVED with the slices, not built in one
+block. Measurements first (U1, M1b, M8-L); slice 8 the ladder; 8p the picture instrument; 8L the light;
+8a the spectrum (the first honest vista, judged by the owner); 8b the charter (A1, A2); 8s the sky and
+the shadow; slices 9, 10, 11; 8c the solve; 8d water and rock; 8e biome and paint; 8f the third
+dimension; slice 18 the almanac and the weather; the forest (14) and the character (16) after.
+
+**V13 ADDENDUM — FOUNDATION FIRST (owner, 2026-09-09).** *"I'd prefer to build the very, VERY strong
+foundation, so everything is functional and we can change and improve on top of that, and only then
+make everything beautiful."* The line runs between the SHAPE and the LOOK. Everything that touches the
+shape or the data model is FOUNDATION and lands before the store's identity is pinned at slice 14: the
+charter and its crossings (A1, A2), the merged octave law, the relief law, the coarsening rule, the
+macro layout and the solve with its artifact and cache, rivers, lakes, the coast, the carve, the strata
+at a fixed radius, the rock map, the biome as a derived column property, the soil law, the 3-D
+removal term, the weather's state model (the almanac and the live list), the picture instrument and
+the measured gates, AND THE AUTHORED OVERRIDE: the edit pyramid carries an author's shape change as a
+stored layer over the seed's shape, so the shape can be improved after the freeze without
+re-addressing one block (it joins slice 8d). The LOOK waits until after the freeze: the sky haze, the
+cascaded shadow map, the paint table and textures, clouds and rain on screen, the tree assets, the
+character. The light fix (8L) stays early because it costs hours and makes the shape judgeable.
+
+THE ORDER: 0 measurements (U1, M1b, M8-L) → 8 the ladder + 8p the instrument → 8a the spectrum and the
+relief law + 8b the charter → 9, 10, 11 (the store, the diff lane, the collider) → 8c the solve, 8d
+water and rock with the authored override, 8e the biome classification and the soil (paint minimal),
+8f the third dimension → 18's state model (the almanac, the weather list; nothing drawn yet) → 14 the
+freeze → the look (the sky slice, paint and textures, clouds, the forest, the character). Until the
+look lands, the foundation slices are judged by measured proxies (slope histogram, drainage density,
+hypsometry, seam and drift gates) and by instrumented one-colour pictures; the owner's eye judges the
+last step. L27 (re-pick the home planet) is taken BEFORE anything is pinned.
+

@@ -85,6 +85,24 @@ pub fn forward_in_frame(up: DVec3, yaw: f64, pitch: f64) -> DVec3 {
     frame_from_up(up) * forward_from_yaw_pitch(yaw, pitch)
 }
 
+/// THE ORIENTATION for a `(yaw, pitch)` taken in the `up`-relative frame: [`frame_from_up`] after
+/// the canonical [`orient_from_yaw_pitch`]. For `up = +Y` it IS `orient_from_yaw_pitch` (the frame
+/// is the identity), so a walker in open space is unchanged to the bit; on a planet, `up` is the
+/// radial the stand was born with, and the horizon stays level as the look turns. Ruling V11: up
+/// is the server's, and this is where the server applies it.
+#[must_use]
+pub fn orient_in_frame(up: DVec3, yaw: f64, pitch: f64) -> DQuat {
+    frame_from_up(up) * orient_from_yaw_pitch(yaw, pitch)
+}
+
+/// Recover `(yaw, pitch)` from an orientation IN the `up`-relative frame — the inverse of
+/// [`orient_in_frame`] on the forward direction (the roll about the forward is not a look angle
+/// and is dropped, exactly as [`yaw_pitch_from_orient`] drops it for `up = +Y`).
+#[must_use]
+pub fn yaw_pitch_in_frame(up: DVec3, orient: DQuat) -> (f64, f64) {
+    forward_to_yaw_pitch(frame_from_up(up).inverse() * (orient * DVec3::NEG_Z))
+}
+
 /// The LOCAL-frame motion axes for an input `movement = [forward, strafe, vertical]`
 /// (each clamped to `[-1, 1]`): `(strafe, vertical, -forward)`. The sim applies
 /// `orient · these · speed·dt`.
@@ -160,6 +178,36 @@ pub fn secs_since_epoch(tick: u64, tick_hz: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_up_relative_orientation_is_the_canonical_one_for_world_up_and_keeps_a_tilted_horizon() {
+        use super::*;
+        // World up: bit-identical to the canonical pair, both ways.
+        for (yaw, pitch) in [(0.0, 0.0), (1.2, 0.3), (-2.5, -1.0), (3.0, 1.4)] {
+            assert_eq!(
+                orient_in_frame(DVec3::Y, yaw, pitch),
+                orient_from_yaw_pitch(yaw, pitch)
+            );
+            let o = orient_from_yaw_pitch(yaw, pitch);
+            assert_eq!(yaw_pitch_in_frame(DVec3::Y, o), yaw_pitch_from_orient(o));
+        }
+        // A tilted up (a planet's radial): the orientation's own up IS the radial for every look,
+        // and the pair round-trips through the forward within float error.
+        let up = DVec3::new(-0.507, 0.860, 0.005).normalize();
+        // At a level look the orientation's own up IS the radial.
+        assert!((orient_in_frame(up, 0.9, 0.0) * DVec3::Y).dot(up) > 1.0 - 1e-12);
+        for (yaw, pitch) in [(0.0, 0.0), (2.1, 0.5), (-0.7, -0.2)] {
+            let o = orient_in_frame(up, yaw, pitch);
+            // The right axis lies in the up-frame's horizon for every look: no roll.
+            assert!((o * DVec3::X).dot(up).abs() < 1e-12);
+            // The forward's pitch against the up-frame's horizon is the pitch asked for.
+            let fwd = o * DVec3::NEG_Z;
+            assert!((fwd.dot(up) - pitch.sin()).abs() < 1e-12);
+            let (y2, p2) = yaw_pitch_in_frame(up, o);
+            assert!((y2 - yaw).abs() < 1e-9, "{y2} {yaw}");
+            assert!((p2 - pitch).abs() < 1e-9, "{p2} {pitch}");
+        }
+    }
+
     use super::*;
     use crate::entity_kind::ContinuityModel;
     use crate::pose::{FrameRef, LatticePos, StampedPose};

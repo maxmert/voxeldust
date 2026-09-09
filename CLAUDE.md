@@ -243,7 +243,11 @@ Each of these was stated by the owner after a live defect. They are not preferen
     target. The server computes collision on that same shape. Everything the seed does not decide
     (edits, placed blocks, attachments, growth, damage, live-state deposits) crosses as a one-hop DIFF
     from the owning realm. This does NOT relax "the client only renders": no pose, no velocity, no
-    entity state is ever derived on the client.
+    entity state is ever derived on the client. ★ WIDENED 2026-09-09 (ruling V13 L12): the static shape
+    is a function of the seed, the address AND THE BODY'S CHARTER — about twenty quantised integers
+    (gravity, spin, tilt, water, air, age, the orbit-derived insolation) authored ONCE, stored, and
+    stated by the realm in its own surface statement. Both hosts read the same integers; no float fact
+    ever enters the recipe.
 
     *Note: this file has no SL8. The seamless law (SL8) was written in the `new-system` worktree and
     is not committed there yet; that number is reserved for it so the two trees do not disagree.*

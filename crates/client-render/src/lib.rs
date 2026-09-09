@@ -855,6 +855,7 @@ fn setup_world(
     // Reference ground plate (a thin slab — motion reference for the empty stub world). Tagged
     // `ReferenceScaffold`: despawned the moment real realm content loads (never in the space view).
     commands.spawn((
+        bevy::light::NotShadowCaster,
         Mesh3d(meshes.add(Cuboid::new(GROUND_HALF * 2.0, 0.2, GROUND_HALF * 2.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.06, 0.08, 0.11),
@@ -869,6 +870,7 @@ fn setup_world(
     for (i, color) in LANDMARK_COLORS.iter().enumerate() {
         let angle = i as f32 / LANDMARK_COLORS.len() as f32 * std::f32::consts::TAU;
         commands.spawn((
+            bevy::light::NotShadowCaster,
             Mesh3d(pillar.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: *color,
@@ -1328,6 +1330,7 @@ fn sync_world(
                         Mesh3d(assets.mesh.clone()),
                         MeshMaterial3d(material),
                         Transform::from_translation(rel.as_vec3()).with_scale(marker_scale(rel)),
+                        bevy::light::NotShadowCaster,
                         Dot,
                     ))
                     .id();
@@ -1467,6 +1470,7 @@ fn sync_star_sky(
                     .spawn((
                         Mesh3d(meshes.add(mesh)),
                         MeshMaterial3d(material.clone()),
+                        bevy::light::NotShadowCaster,
                         // THE PLACEMENT: the anchor and the eye, folded in f64 and narrowed once.
                         // The shader applies this model transform; nothing else moves the sky.
                         Transform {
@@ -1746,6 +1750,7 @@ fn spawn_marker(
             MeshMaterial3d(material.clone()),
             Transform::from_translation(Vec3::from_array(prim.transform.translation))
                 .with_scale(Vec3::from_array(prim.transform.scale)),
+            bevy::light::NotShadowCaster,
             RealmBoxMarker,
         ))
         .id();
@@ -1864,6 +1869,11 @@ fn spawn_realm_box(
             MeshMaterial3d(material),
             Transform::from_translation(Vec3::from_array(prim.transform.translation))
                 .with_scale(Vec3::from_array(prim.transform.scale)),
+            // AN OUTLINE CASTS NO SHADOW (M8-L, MEASURED 2026-09-09): the star system's look shell
+            // is a translucent sphere AROUND the star, so the sun's light crossed it on the way to
+            // every planet and the whole ground stood in the shell's shadow. Outlines and sprites
+            // are drawings of a realm's reach, not bodies.
+            bevy::light::NotShadowCaster,
             RealmBoxMarker,
         ))
         .id();

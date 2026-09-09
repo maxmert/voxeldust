@@ -762,6 +762,7 @@ fn a_large_world_partitions_into_multiple_under_budget_frames() {
                     pose: StampedPose::at_rest(config().frame, DVec3::ZERO, UniverseTick(100)),
                     yaw: 0.0,
                     pitch: 0.0,
+                    up: vd_core::glam::DVec3::Y,
                     last_applied_seq: None,
                     look_extent_m: vd_core::look::OCCUPANT_FIGURE_EXTENT_M,
                     prev_offset: LatticePos::ORIGIN,
