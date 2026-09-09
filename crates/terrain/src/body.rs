@@ -337,7 +337,7 @@ mod tests {
         assert!((m.sea_radius_m - m.radius_m).abs() <= relief);
         assert!(m.strata.max_depth_m() < 100);
         assert!(m.caves.min_depth_m < m.caves.max_depth_m);
-        assert_eq!(m.ladder.rungs, 12, "the home planet's ladder");
+        assert_eq!(m.ladder.rungs, 13, "the home planet's ladder");
         // The band holds the whole relief, the strata and the caves.
         let relief_whole = relief.floor().to_i64_floor() as u32 + 1;
         assert!(m.ladder.band_m >= 2 * relief_whole + m.strata.max_depth_m() + m.caves.max_depth_m);

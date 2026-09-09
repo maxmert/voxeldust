@@ -953,7 +953,17 @@ pub(crate) mod tests {
     #[test]
     fn a_home_planet_surface_is_well_formed_and_neighbours_share_no_triangle() {
         let m = home_planet();
-        let z = surface_chunk_z(&m, Face::NegZ, 0, 40, 41);
+        // Two neighbouring columns whose SURFACE lies in the same chunk along the radial, so the
+        // shared face carries the surface's own crossings: the first such pair from column 40 on
+        // (on the earth-like home planet the relief moves the surface a chunk between some
+        // neighbours, which is the extractor's business, not this fixture's).
+        let mut x0 = 40;
+        while surface_chunk_z(&m, Face::NegZ, 0, x0, 41)
+            != surface_chunk_z(&m, Face::NegZ, 0, x0 + 1, 41)
+        {
+            x0 += 1;
+        }
+        let z = surface_chunk_z(&m, Face::NegZ, 0, x0, 41);
         let key = |x: i32| ChunkKey {
             face: Face::NegZ,
             rung: 0,
@@ -961,8 +971,8 @@ pub(crate) mod tests {
             y: 41,
             z,
         };
-        let a = sample_box(&m, key(40)).expect("in the band");
-        let b = sample_box(&m, key(41)).expect("in the band");
+        let a = sample_box(&m, key(x0)).expect("in the band");
+        let b = sample_box(&m, key(x0 + 1)).expect("in the band");
         let ma = extract(&a);
         let mb = extract(&b);
         assert!(ma.triangles.len() > 1000);

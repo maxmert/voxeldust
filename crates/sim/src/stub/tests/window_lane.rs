@@ -717,8 +717,12 @@ fn slice6_relay_egress_measured_equals_w_times_c_times_blob_times_rate() {
     //
     // A ONE-BYTE MOVE IS THE PIN WORKING. A codec or schema change moves it by far more, which is
     // what this pin exists to catch. Schema unchanged, PROTO_MINOR unmoved.
+    // ★ RE-BASELINED 2124 → 2213 B on 2026-09-09 (ruling V13 L27): the home system is the NAMED
+    // earth-like one, which the galaxy places 1.9 × 10¹⁸ m from its origin, so every pose of the
+    // departure fixture carries a large integer cell and its postcard varint grows (+89 B over the
+    // fixture's rows). Schema unchanged, PROTO_MINOR unmoved.
     assert_eq!(
-        blob, 2124,
+        blob, 2213,
         "the pinned departure-fixture relay blob (bytes)"
     );
     eprintln!(
@@ -775,10 +779,18 @@ fn slice6_the_union_over_draw_is_measured_at_interim_scale() {
         .iter()
         .find(|(s, _)| *s != home)
         .expect("a ring sibling");
-    // Observer A: 300 m from the home star (deep inside its 11 458 m visibility band).
-    // Observer B: 300 m short of the ring sibling, on the line toward the galaxy origin.
-    let pos_a = DVec3::new(0.0, 0.0, -300.0);
-    let pos_b = sib_centre - sib_centre.normalize() * 300.0;
+    // Observer A: 300 m from the home star (deep inside its 11 458 m visibility band) — measured
+    // from the home's AUTHORED placement, which since 2026-09-09 (ruling V13 L27) is not the
+    // galaxy's origin: the named home stands where the galaxy puts it.
+    // Observer B: 300 m from the ring sibling, along the same fixed axis — never "toward the
+    // galaxy origin", because the sibling may BE the system at the origin (it is, since the named
+    // home moved off it), and a step along a zero vector is no position.
+    let (_, home_centre) = *systems
+        .iter()
+        .find(|(s, _)| *s == home)
+        .expect("the galaxy authors the home's placement");
+    let pos_a = home_centre + DVec3::new(0.0, 0.0, -300.0);
+    let pos_b = sib_centre + DVec3::new(0.0, 0.0, -300.0);
     // THE OUT-OF-BAND SINGLETON SETS (the oracle): which children each observer's own
     // position puts in band — the per-observer verdict a per-session fold WOULD have
     // computed. Asserted disjoint singletons so the union measurement has teeth.

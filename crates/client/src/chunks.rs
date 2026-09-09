@@ -739,9 +739,10 @@ mod tests {
                 g.origin_m[1] + f64::from(rel[1]),
                 g.origin_m[2] + f64::from(rel[2]),
             ];
-            if f64::from(n[0]) * p[0] + f64::from(n[1]) * p[1] + f64::from(n[2]) * p[2] > 0.0 {
-                outward += 1;
-            }
+            // Branchless (HR5): on the earth-like home every normal of this chunk faces outward,
+            // so an `if` here would carry an arm no world reaches.
+            let dot = f64::from(n[0]) * p[0] + f64::from(n[1]) * p[1] + f64::from(n[2]) * p[2];
+            outward += usize::from(dot > 0.0);
         }
         let total = g.normals.len();
         assert!(outward * 2 > total, "{outward} of {total} face outward");

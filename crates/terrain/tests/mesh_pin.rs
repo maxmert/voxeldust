@@ -168,9 +168,10 @@ fn every_golden_surface_of_the_home_planet_digests_to_its_committed_triangles() 
         println!("mesh_pin: RECORDED {} rows to {path}", lines.len());
         return;
     }
+    let rungs = usize::from(home_planet().ladder().rungs);
     assert_eq!(
         lines.len(),
-        6 * COLUMNS_PER_FACE * 12 + 2,
+        6 * COLUMNS_PER_FACE * rungs + 2,
         "seventy-two surfaces at every rung, the composed row and the seating row"
     );
     if let Err(report) = compare(GOLDEN, &lines) {

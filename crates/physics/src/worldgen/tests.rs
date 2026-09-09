@@ -4041,15 +4041,19 @@ fn walk_path_is_untouched_and_visual_planet_ids_are_distinct() {
 
 #[test]
 fn default_home_realm_walks_root_galaxy_system_and_refuses_a_degenerate_forest() {
-    // The login fallback home: the FIRST system under the first galaxy under the root — pure
-    // forest-walk, no seed knowledge. A degenerate forest (no root, or no chain below it) is
-    // `None`, so a cluster booted on one fails where it can be seen instead of placing every
-    // account somewhere arbitrary.
+    // The login home: the NAMED home system under the galaxy under the root (ruling V13 L27) —
+    // THE world's system layer at the home seed holds it, and a world that does not (the test
+    // galaxy at seed 0) has NO home, so a cluster booted on one fails where it can be seen instead
+    // of placing every account in whichever system the forest lists first. A degenerate forest
+    // (no root, or no chain below it) is `None` for the same reason.
+    let layer = system_layer_view(HOME_SEED, &UniverseConfig::world(1.0, 0.05));
+    let home = default_home_realm(layer.regions()).expect("THE world has a home system");
+    assert_eq!(home, vd_core::worldgen::HOME_SYSTEM);
     let world = boot_world_for_tests();
-    let home = default_home_realm(world.regions()).expect("THE world has a home system");
-    assert!(
-        matches!(home, RealmId::System(_)),
-        "the fallback home is a star system: {home:?}"
+    assert_eq!(
+        default_home_realm(world.regions()),
+        None,
+        "a world that does not hold the named home system has no home"
     );
     assert_eq!(default_home_realm(&[]), None, "an empty forest has no home");
     // A root with nothing under it: the galaxy hop refuses.
@@ -4729,18 +4733,59 @@ fn earth_like_candidates_reads_the_world_and_answers_with_its_numbers() {
 #[test]
 fn the_home_offset_is_twice_the_centre_holding_childs_bound_or_zero() {
     let cfg = test_world();
-    let world = WorldView::generated(0, &cfg);
-    let home = vd_core::worldgen::default_home_realm(world.regions()).expect("a home");
-    let star_bound = world
-        .regions()
-        .iter()
-        .find(|r| matches!(r.realm, RealmId::Star(_)) && r.parent == Some(home))
-        .map(|r| r.shape.finite_extent())
-        .expect("the home system holds its star");
+    // A hand forest that holds the NAMED home system (ruling V13 L27) with its star at its centre:
+    // the clearing is twice the star's bound. (THE world's own forest is minutes to build; the
+    // rule is about the forest's shape, which four bodies state.)
+    let star_r = 7.0e8;
+    let mk = |realm, parent, r: f64, placement| GeneratedBody {
+        realm,
+        parent,
+        shape: Boundary::Shell { r },
+        taxon: None,
+        look: Some(Boundary::Shell { r }),
+        placement,
+        photometrics: None,
+    };
+    let home = vd_core::worldgen::HOME_SYSTEM;
+    let bodies = vec![
+        mk(
+            vd_core::worldgen::UNIVERSE,
+            None,
+            1.0e22,
+            Placement::StaticOffset(DVec3::ZERO),
+        ),
+        mk(
+            vd_core::worldgen::GALAXY,
+            Some(vd_core::worldgen::UNIVERSE),
+            1.0e21,
+            Placement::StaticOffset(DVec3::ZERO),
+        ),
+        mk(
+            home,
+            Some(vd_core::worldgen::GALAXY),
+            1.0e13,
+            Placement::StaticOffset(DVec3::new(1.0e18, 0.0, 0.0)),
+        ),
+        mk(
+            RealmId::Star(1),
+            Some(home),
+            star_r,
+            Placement::StaticOffset(DVec3::ZERO),
+        ),
+    ];
+    let regions = to_regions(&bodies, &cfg);
+    let world = WorldView { bodies, regions };
+    assert_eq!(
+        vd_core::worldgen::default_home_realm(world.regions()),
+        Some(home)
+    );
     assert_eq!(
         world.default_home_offset_m(),
-        vd_core::glam::DVec3::new(0.0, 0.0, 2.0 * star_bound),
+        vd_core::glam::DVec3::new(0.0, 0.0, 2.0 * star_r),
     );
+    // A world that does not hold the named home (the test galaxy at seed 0): no home, no clearing.
+    let other = WorldView::generated(0, &cfg);
+    assert_eq!(other.default_home_offset_m(), vd_core::glam::DVec3::ZERO);
     // A view whose forest names no home realm: the clearing is zero.
     let empty = WorldView {
         bodies: Vec::new(),
@@ -7496,19 +7541,21 @@ fn body_facts_reads_the_lit_chain_and_refuses_what_it_cannot_name() {
     ];
     assert_eq!(census::body_facts_in_forest(&dark, planet), None);
     // THE world, through the home system's SUBTREE (the galaxy-wide read is the seed-search tool's):
-    // the voxel home planet (the first body the ladder accepted, `vd_bins::home_body`) has facts,
-    // and they are the census's own row — the measurement U1 prints them; and the subtree's
-    // earth-like sweep names the system's earth-like body.
+    // the NAMED home planet (ruling V13 L27) has facts, they are the census's own row, and the
+    // census calls it earth-like; the subtree's earth-like sweep names exactly it.
     let config = UniverseConfig::world(1.0, 0.05);
-    let voxel_home = RealmId::Planet(7_701_581_858_760_374_086);
-    let held = std::collections::BTreeSet::from([RealmId::System(7)]);
+    let home_planet = vd_core::worldgen::HOME_PLANET;
+    let held = std::collections::BTreeSet::from([vd_core::worldgen::HOME_SYSTEM]);
     let lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
-    let f = census::body_facts_in_subtree(HOME_SEED, &config, &held, &lineage, voxel_home)
+    let f = census::body_facts_in_subtree(HOME_SEED, &config, &held, &lineage, home_planet)
         .expect("the home planet has facts");
-    assert_eq!(f.system, RealmId::System(7));
-    assert!(f.taxon.radius_m > 0.0);
+    assert_eq!(f.system, vd_core::worldgen::HOME_SYSTEM);
+    assert!(f.earth_like, "{f:?}");
     let found = census::earth_like_in_subtree(HOME_SEED, &config, &held, &lineage);
-    assert!(found.iter().all(|c| c.system == RealmId::System(7)));
+    assert_eq!(
+        found.iter().map(|c| c.body).collect::<Vec<_>>(),
+        vec![home_planet]
+    );
     // The galaxy-wide read, on the test galaxy at a seed that holds an earth-like body: the facts
     // of that body agree with the sweep's own row.
     let cfg = test_world();

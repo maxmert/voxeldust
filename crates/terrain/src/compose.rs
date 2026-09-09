@@ -174,12 +174,14 @@ mod tests {
         // it is a site; A holds it at local a = 61, B at local a = −1.
         let c = {
             // The lowest air cell of the column, by a fixed-count scan; the cell under it is rock.
+            // Branchless (HR5): the scan keeps the lowest air cell by a select, because on the
+            // earth-like home this column is air all the way down the scan and a rock arm would
+            // never run.
             let mut lowest_air = 61;
             let mut c = 60;
             while c >= 0 {
-                if a.cell(61, 30, c).gap >= 0 {
-                    lowest_air = c;
-                }
+                let is_air = i32::from(a.cell(61, 30, c).gap >= 0);
+                lowest_air = is_air * c + (1 - is_air) * lowest_air;
                 c -= 1;
             }
             lowest_air.max(1) - 1

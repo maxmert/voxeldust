@@ -114,7 +114,16 @@ finishing (the subtree read of one system takes seconds). The seed-search tool p
 index over the forest (one map from realm to row) makes it linear; it is a tooling cost, not a game
 one, and it is registered for the tool, not built here.
 
-**What this decides.** L27 is no longer "re-pick inside the home system": the home system has nothing
+**The galaxy half, with the census indexed** (`forest_index`: every parent and star lookup a map
+read; the sibling-gap scan too): the sweep at the home seed takes **92 s** and finds **402 earth-like
+bodies**, every one at 0.748 S⊕ and 236.8 K (the orbital ladder quantises the flux), all accepted by
+the ladder. Ranked by the smallest distance from Earth in radius, gravity, flux and temperature, and
+among the ties the star closest to the Sun, the home is now `Planet(4030111653607004909)` in
+`System(1469594322681260607)`: 6 370.7 km, 1.000 M⊕, 9.82 m/s², an N₂-like atmosphere with a 7 161 m
+scale height, a G star of 0.953 M☉, nine planets and fifteen moons. The switch landed the same day
+(ruling V13, L27 landing note).
+
+**What this decided.** L27 was no longer "re-pick inside the home system": the home system has nothing
 to pick. The choice is between (a) moving the dev cluster's home system to the system that holds the
 earth-like body, (b) keeping System 7 and a non-earth-like voxel home, or (c) a seed re-search. The
 owner's word is needed; the re-pin is free until slice 14 either way.
@@ -197,3 +206,14 @@ re-runs; `04` computed 1.96 cells at an alpine slope, which is where the band ea
   foundation defect (the server's up was world +Y) and a renderer defect (an outline cast a shadow);
   both are fixed and measured. The pictures are level and lit; the terrain is what M1b says it is.
 - M8-0: slice 8's rung gate passes today at 0.37 px; the ladder may be built on the shipped octaves.
+
+## The first pictures on the earth-like home (2026-09-09, after the switch)
+
+The same three stands, flown on `Planet(4030111653607004909)` through the same gate: ground 510
+chunks, hill 507, aloft 1 250; paint share 1.000 on all three; every stand at roll 0.00° with its
+stated nose. The pictures (`docs/investigation/2026-09-07/pictures/`) show the same one-colour ground
+under the raking star, with more relief than the old rock (the relief cap scales with the radius):
+a rolling skyline with a few soft crests from the ground and from the hill, and a wide undulating
+plain from 60 km up. Nothing else changed in the recipe, so this is the shipped octave table on a
+body twice the size, and the spectrum (8a) is still the cure for lines.
+

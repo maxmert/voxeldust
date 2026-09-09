@@ -422,7 +422,7 @@ pub const DEV: DevClusterParams = DevClusterParams {
     // drain-burst invariant); sourced from the ONE config struct, never an inline literal.
     max_buffered_inputs: vd_connection_plane::gateway::TransportTuning::DEFAULT_MAX_BUFFERED_INPUTS
         as u32,
-    realm_seed: 7,
+    realm_seed: vd_core::worldgen::HOME_SYSTEM_SEED,
     // The realistic-demo flight speed (RLM Slice 3). A ship spends real seconds flying from where a body
     // becomes VISIBLE (angular size crosses θ_min — ~318 m for a planet) to where it CROSSES containment
     // (~4 m planet SOI), so the demand loop boots the child DURING that flight — the spin-up-ahead is a
@@ -978,26 +978,29 @@ pub fn world_generation() -> u64 {
     )
 }
 
-/// ★ THE HOME SYSTEM of THE world: `System(7)`, the star system the dev cluster's static shard hosts
-/// and the process-tier gates log into (`parse_held_realms` in this file's tests, the `ladder_snap`
-/// example), whose first planet the recipe accepts is the home body every world identity is measured
-/// on (slice 5).
-pub const HOME_SYSTEM: u64 = 7;
+/// ★ THE HOME SYSTEM of THE world — the ONE named in `vd_core::worldgen::HOME_SYSTEM` (ruling V13
+/// L27): the star system the dev cluster's static shard hosts and the process-tier gates log into,
+/// whose named earth-like planet (`vd_core::worldgen::HOME_PLANET`) is the home body every world
+/// identity is measured on (slice 5).
+pub const HOME_SYSTEM: u64 = vd_core::worldgen::HOME_SYSTEM_SEED;
 
-/// ★ THE HOME BODY (slice 5): the FIRST planet of the home system, in the forest's own order, whose
-/// look radius the ladder accepts, as the generator defines it — the body whose eight golden chunks are
+/// ★ THE HOME BODY (slice 5; re-named by ruling V13 L27): THE HOME PLANET named in
+/// `vd_core::worldgen::HOME_PLANET` — the earth-like planet of the home system — at the look radius
+/// the forest states for it, as the generator defines it — the body whose eight golden chunks are
 /// the world identity's MEASURED half. A planet the ladder refuses (above the address) is passed over;
 /// `None` when no planet of the home system is accepted (a world nobody can name).
 #[must_use]
 pub fn home_body(universe_seed: u64) -> Option<vd_terrain::BodyDefinition> {
     let (rows, _) = home_system_boot(universe_seed);
     rows.into_iter()
-        .filter(|r| r.parent == Some(vd_core::pose::RealmId::System(HOME_SYSTEM)))
+        .filter(|r| r.parent == Some(vd_core::worldgen::HOME_SYSTEM))
         .find_map(|p| match (p.realm, p.look) {
             (
                 vd_core::pose::RealmId::Planet(seed),
                 Some(vd_core::geometry::Boundary::Shell { r }),
-            ) => vd_terrain::BodyDefinition::from_seed(seed, r),
+            ) if p.realm == vd_core::worldgen::HOME_PLANET => {
+                vd_terrain::BodyDefinition::from_seed(seed, r)
+            }
             _ => None,
         })
 }
@@ -3227,9 +3230,15 @@ pub fn child_luma_from_draws(
 /// to reach a realm no shard hosts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorldRoster {
-    /// The login realm: `default_home_realm` over THE world's regions (the root's first grandchild) —
-    /// a lineage position, never a stated seed.
+    /// The login realm: `default_home_realm` over THE world's regions — the NAMED home system
+    /// (`vd_core::worldgen::HOME_SYSTEM`, ruling V13 L27), found under the galaxy.
     pub home: vd_core::pose::RealmId,
+    /// The home system's authored placement in the GALAXY's frame — read from the galaxy-hosted
+    /// boot, the parent that authors it (SL1), never folded from the root. It used to be asserted
+    /// ZERO (J1: the first system under the galaxy happened to sit at the galaxy's origin, which
+    /// made a home↔galaxy crossing an identity in the drawn space); the named home sits where the
+    /// galaxy puts it, and every gate that read ZERO now reads this.
+    pub home_centre: vd_core::glam::DVec3,
     /// The home region's PARENT — the between-systems space every departure lands in.
     pub galaxy: vd_core::pose::RealmId,
     /// The home system's INNERMOST mover — smallest SEMI-MAJOR AXIS, deliberately NOT smallest epoch
@@ -3447,26 +3456,21 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
     let held_gal = std::collections::BTreeSet::from([galaxy]);
     let (gal_regions, _) =
         boot_regions_and_movers(p.universe_seed, &held_gal, galaxy, p.move_speed, p.tick_dt);
-    let home_centre = gal_regions
+    // J1, RE-BASED (ruling V13 L27, 2026-09-09): the galaxy AUTHORS the home system's placement, and
+    // the roster carries it for every gate that reads where the home draws from the galaxy side.
+    // It used to assert ZERO — the first system under the galaxy sat at the galaxy's origin, so a
+    // home↔galaxy crossing was an identity in the drawn space. The named home sits where the galaxy
+    // puts it; the identity is gone and nothing stood on it but the old asserts.
+    let home_region = gal_regions
         .iter()
         .find(|r| r.realm == home)
-        .map(|r| r.center)
         .expect("the galaxy authors the home system's placement");
-    // J1: the home system sits at the GALACTIC ORIGIN — a home↔galaxy crossing is numerically an
-    // identity in the drawn space (the downward conversion subtracts zero), which is exactly why a
-    // file-based scene stays valid across that one crossing. ASSERTED, not assumed.
-    // ★ ZERO IS THE ONE VALUE THAT NEEDS NO UNIT (slice S9), which is why this assertion can read the
-    // parent-frame number directly: every step counts the origin the same way.
-    assert_eq!(
-        home_centre.in_parents_frame().cell(),
-        vd_core::glam::I64Vec3::ZERO,
-        "J1: the home system's authored placement fits one lattice cell",
-    );
-    assert_eq!(
-        home_centre.in_parents_frame().offset(),
-        vd_core::glam::DVec3::ZERO,
-        "J1: the home system sits at the galactic origin (ring index 0) — the identity the scene \
-         emitter and the render gate stand on",
+    let home_centre = home_region
+        .centre_m(&gal_regions)
+        .expect("the galaxy authors its own home system's placement");
+    assert!(
+        home_centre.is_finite(),
+        "J1: the home system's authored placement is a finite point of the galaxy: {home_centre:?}"
     );
     let (sibling, sibling_region) = gal_regions
         .iter()
@@ -3479,12 +3483,14 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
         .map(|(seed, r)| (vd_core::pose::RealmId::System(seed), r))
         .expect("the multi-star galaxy has a ring sibling of the home system");
     // INVERTED at the cell activation (real-scale addendum §A4.8 row 11): the generator now emits
-    // NORMALIZED centres, so a sibling placement carries its magnitude in the INTEGER half — the
+    // NORMALIZED centres, so a placement carries its magnitude in the INTEGER half — the
     // pre-activation assert ("fits inside one lattice cell") measured the hole this arc closes.
+    // Measured on the HOME since 2026-09-09: the named home stands off the galaxy's origin, and the
+    // lowest-seed sibling is now the system that sits AT the origin, whose cell is lawfully zero.
     assert_ne!(
-        sibling_region.center.in_parents_frame().cell(),
+        home_region.center.in_parents_frame().cell(),
         vd_core::glam::I64Vec3::ZERO,
-        "the sibling's authored placement rides the integer lattice (normalized centre)",
+        "the home's authored placement rides the integer lattice (normalized centre)",
     );
     // ★ THE FOURTEENTH SITE, AND THE TYPE FOUND IT (slice S9). This read the SIBLING's own step to
     // flatten a centre the GALAXY authored — 2048× wrong the moment those two steps differed, in
@@ -3494,10 +3500,9 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
         .centre_m(&gal_regions)
         .expect("the galaxy authors its own ring sibling's placement");
     assert_ne!(
-        sibling_centre,
-        vd_core::glam::DVec3::ZERO,
-        "J1: the sibling is NOT at the origin — two systems on one point would be two authorities \
-         over one position",
+        sibling_centre, home_centre,
+        "J1: the sibling is NOT where the home is — two systems on one point would be two \
+         authorities over one position",
     );
 
     // The SIBLING shard's own boot: the chain gate's leg E flies the SAME ±Z polar corridor into the
@@ -3529,6 +3534,7 @@ pub fn world_roster(p: &DevClusterParams) -> WorldRoster {
     WorldRoster {
         home,
         galaxy,
+        home_centre,
         inner,
         inner_elements,
         sibling,
@@ -4405,11 +4411,15 @@ mod world_roster_tests {
         assert!(roster.axis_clearance_m > 0.0 && roster.axis_clearance_m.is_finite());
         assert!(roster.pole_altitude_m > 0.0 && roster.pole_altitude_m.is_finite());
         assert!(roster.radial_gap_m > 0.0 && roster.radial_gap_m.is_finite());
-        assert!(roster.sibling_centre.length() > 0.0);
+        // The named home stands off the galaxy's origin, and its sibling stands elsewhere (the
+        // lowest-seed sibling is the system AT the origin, lawfully at zero since 2026-09-09).
+        assert!(roster.home_centre.length() > 0.0 && roster.home_centre.is_finite());
+        assert_ne!(roster.sibling_centre, roster.home_centre);
         eprintln!(
-            "[world-roster] home {} | galaxy {} | inner {} | sibling {} at {:.1} m; axis clearance \
+            "[world-roster] home {} at {:.3e} m | galaxy {} | inner {} | sibling {} at {:.1} m; axis clearance \
              {:.2} m, pole altitude {:.2} m, radial gap {:.2} m",
             roster.home,
+            roster.home_centre.length(),
             roster.galaxy,
             roster.inner,
             roster.sibling,

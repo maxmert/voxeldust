@@ -1,12 +1,15 @@
-//! ★ THE HOME PLANET — THE world's first body, stated as two literals (SL5: one world; the voxel
-//! foundation, slice 5). The generator may name no motion crate, so it cannot ask the forest which
-//! planet is home; it states the planet's seed and the exact bits of its look radius, and
-//! `crates/bins/tests/home_body_pin.rs` proves the forest still produces exactly those two numbers.
-//! Every unit test of this crate runs on this body, never on an invented one, and the golden gate
-//! pins its chunks.
+//! ★ THE HOME PLANET — THE world's earth-like planet, stated as two literals (SL5: one world; the
+//! voxel foundation, slice 5; re-named by ruling V13 L27 on 2026-09-09). The generator may name no
+//! motion crate, so it cannot ask the forest which planet is home; it states the planet's seed and
+//! the exact bits of its look radius, and `crates/bins/tests/home_body_pin.rs` proves the forest
+//! still produces exactly those two numbers and that the census calls the body earth-like. Every
+//! unit test of this crate runs on this body, never on an invented one, and the golden gate pins its
+//! chunks.
 //!
-//! **Example.** The home planet is 3 351 km across at its look radius; the ladder snaps it to
-//! 3 350 759 m, twelve rungs, fourteen octaves. A test that wants "a planet" wants this one.
+//! **Example.** The home planet is 6 371 km in radius at its look radius (Earth's own, to a
+//! kilometre); the ladder snaps it to 6 370 354 m, thirteen rungs, fourteen octaves. A test that wants "a planet"
+//! wants this one. The FIRST home planet (seed 7 701 581 858 760 374 086, 3 351 km, airless and
+//! hot) was the first body of `System(7)` the ladder accepted, not a chosen world.
 
 use crate::body::BodyDefinition;
 
@@ -15,10 +18,11 @@ use crate::body::BodyDefinition;
 /// forest's own seed.
 pub const HOME_UNIVERSE_SEED: u64 = 2298;
 
-/// The home planet's realm seed, as the forest draws it under the home universe seed.
-pub const HOME_PLANET_SEED: u64 = 7_701_581_858_760_374_086;
-/// The home planet's look radius, bit for bit, as the forest draws it.
-pub const HOME_PLANET_RADIUS_BITS: u64 = 0x4149_9139_1e69_2dfa;
+/// The home planet's realm seed, as the forest draws it under the home universe seed
+/// (`vd_core::worldgen::HOME_PLANET_SEED`, cross-pinned in `home_body_pin.rs`).
+pub const HOME_PLANET_SEED: u64 = 4_030_111_653_607_004_909;
+/// The home planet's look radius, bit for bit, as the forest draws it (6 370.7 km).
+pub const HOME_PLANET_RADIUS_BITS: u64 = 0x4158_4d6e_d403_3833;
 
 /// The home planet, defined by the recipe.
 #[must_use]
@@ -32,12 +36,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_home_planet_is_on_the_ladder_with_twelve_rungs() {
+    fn the_home_planet_is_on_the_ladder_with_thirteen_rungs() {
         let home = home_planet();
         assert_eq!(home.seed, HOME_PLANET_SEED);
-        assert_eq!(home.ladder.rungs, 12);
+        assert_eq!(home.ladder.rungs, 13);
         assert_eq!(home.octave_count, 14);
-        assert!((home.radius_m - crate::gf::Gf::from_f64(3_350_759.0)).abs() < crate::gf::Gf::ONE);
+        // The ladder snaps Earth's radius to 2N/π at N = 10 006 528 cells: 6 370 353.6 m.
+        assert!((home.radius_m - crate::gf::Gf::from_f64(6_370_353.6)).abs() < crate::gf::Gf::ONE);
     }
 
     /// MEASURED (the refuter's finding 10): the radius is an INPUT from outside the fence, and the

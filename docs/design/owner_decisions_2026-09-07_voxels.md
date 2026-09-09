@@ -573,3 +573,39 @@ look lands, the foundation slices are judged by measured proxies (slope histogra
 hypsometry, seam and drift gates) and by instrumented one-colour pictures; the owner's eye judges the
 last step. L27 (re-pick the home planet) is taken BEFORE anything is pinned.
 
+**L27 LANDED (owner, 2026-09-09: *"find the system and the earth-like home planet in the current seed and
+switch to it"*).** The home is no longer a lineage position (the first star system under the galaxy,
+which was `System(7)`, holding no earth-like body); it is NAMED in `vd_core::worldgen::HOME_SYSTEM`
+and `HOME_PLANET`, and every process reads it through `default_home_realm`. The choice: the census's
+402 earth-like bodies at seed 2298 (`earth_like_galaxy`, 92 s once the census was indexed — the linear
+parent lookups made it quadratic and it ran an hour without finishing) ranked by the smallest distance
+from Earth in radius, surface gravity, insolation and equilibrium temperature, and among the ties the
+star closest to the Sun. Every earth-like body of this world sits at 0.748 of Earth's insolation and
+236.8 K, because the orbital ladder quantises the flux, so the radius and the star decide.
+
+| | The old home | THE HOME |
+|---|---|---|
+| system | `System(7)` | `System(1469594322681260607)` |
+| planet | `Planet(7701581858760374086)` | `Planet(4030111653607004909)` |
+| radius | 3 351 km (0.53 R⊕) | 6 370.7 km (1.000 R⊕) |
+| mass, gravity | 0.093 M⊕, 3.29 m/s² | 1.000 M⊕, 9.82 m/s² |
+| insolation, T_eq | 6.25 S⊕, 429 K | 0.748 S⊕, 236.8 K |
+| atmosphere | none | N₂-like, scale height 7 161 m |
+| star | G, 1.025 M☉, 1.104 L☉ | G, 0.953 M☉, 0.823 L☉ |
+| the system | 9 planets | 9 planets, 15 moons |
+| the ladder | 12 rungs, N = 5 263 360 | 13 rungs, N = 10 006 528, radius 6 370 353.6 m |
+
+The golden tables were re-recorded on the new planet (3 510 cell digests, 1 172 mesh rows); the world
+identity's measured half moved with them (lawful before the slice-14 freeze). `home_body_pin.rs` now
+also proves the named planet is earth-like by the census's own predicate. The no-drift legs on the
+other targets (`just terrain-legs`, Docker) are owed a re-run on the new tables.
+**What the switch moved besides the numbers.** J1 — "the home system sits at the galactic origin, so
+a home↔galaxy crossing is an identity in the drawn space" — was an ACCIDENT of the old home (the
+first system under the galaxy happened to be placed at the origin), asserted by the world roster and
+by the render-crossing gate. It is re-based to the general law: the galaxy AUTHORS the home's
+placement (the roster carries it as `home_centre`), the home draws at the session origin while the
+session stands in it and at that authored placement while the session stands in the galaxy (a
+one-kilometre tolerance against the lattice's rounding at 10¹⁸ m). The lattice-normalisation check
+moved from the sibling to the home, because the lowest-seed sibling is now the system at the origin.
+The census is indexed (`forest_index`): a galaxy-wide earth-like sweep is one pass, 92 s.
+

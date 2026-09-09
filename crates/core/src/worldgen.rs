@@ -32,6 +32,28 @@ pub const SYSTEM_A_SEED: u64 = 7;
 /// whose seed happens to be 0 is now a star system rather than the universe.
 pub const UNIVERSE: RealmId = RealmId::Universe;
 pub const GALAXY: RealmId = RealmId::Galaxy(GALAXY_SEED);
+
+/// ★ THE HOME SYSTEM of THE world, NAMED (SL5: one world; ruling V13 L27, 2026-09-09). The home used
+/// to be a LINEAGE POSITION — the first star system under the galaxy in the forest's order — which
+/// is how the dev cluster came to live in `System(7)`, a system that holds no earth-like body
+/// (MEASURED, `home_body_facts`: a hot airless Mercury-sized rock as the voxel home planet). The
+/// home is now the ONE system named here, and every process reads it through [`default_home_realm`].
+///
+/// CHOSEN 2026-09-09 by a stated rule over the census's 402 earth-like bodies at the home seed
+/// (`earth_like_galaxy`): the smallest distance from Earth in radius, surface gravity, insolation
+/// and equilibrium temperature, and among the ties the star closest to the Sun. Every earth-like
+/// body of this world sits at 0.748 of Earth's insolation and 236.8 K (the orbital ladder quantises
+/// the flux), so the radius and the star decide. This one: radius 6 370.7 km, mass 1.000 M⊕, surface
+/// gravity 9.82 m/s², a G star of 0.953 M☉ and 0.823 L☉, nine planets and fifteen moons.
+/// `crates/bins/tests/home_body_pin.rs` proves the named planet is earth-like by the census's own
+/// predicate and that the forest still produces it.
+pub const HOME_SYSTEM_SEED: u64 = 1_469_594_322_681_260_607;
+pub const HOME_SYSTEM: RealmId = RealmId::System(HOME_SYSTEM_SEED);
+/// ★ THE HOME PLANET of THE world, NAMED: the earth-like planet of the home system (see above). The
+/// world identity's measured half is computed on it, every generator test runs on it, and the
+/// pictures are taken on it.
+pub const HOME_PLANET_SEED: u64 = 4_030_111_653_607_004_909;
+pub const HOME_PLANET: RealmId = RealmId::Planet(HOME_PLANET_SEED);
 pub const SYSTEM_A: RealmId = RealmId::System(SYSTEM_A_SEED);
 pub const SYSTEM_B: RealmId = RealmId::System(8);
 pub const PLANET_A: RealmId = RealmId::Planet(7);
@@ -156,8 +178,11 @@ pub fn coord_of_realm_indexed(
 pub fn default_home_realm(regions: &[RealmRegion]) -> Option<RealmId> {
     let root = regions.iter().find(|r| r.parent.is_none())?;
     let galaxy = regions.iter().find(|r| r.parent == Some(root.realm))?;
-    let system = regions.iter().find(|r| r.parent == Some(galaxy.realm))?;
-    Some(system.realm)
+    // The NAMED home system, under that galaxy — never the first system the forest happens to list.
+    regions
+        .iter()
+        .find(|r| r.realm == HOME_SYSTEM && r.parent == Some(galaxy.realm))
+        .map(|r| r.realm)
 }
 
 /// The ancestors-union-direct-children ("never siblings") filter over an ALREADY-BUILT forest — the shared
@@ -523,5 +548,56 @@ mod tests {
         );
         // Defensive: an empty chain folds to the ambient root (first None → UNIVERSE).
         assert_eq!(pin_realm_of(&[]), UNIVERSE);
+    }
+}
+
+#[cfg(test)]
+mod home_realm_tests {
+    use super::*;
+    use crate::geometry::{AoiConfig, Boundary, ContainmentBand, RealmRegion};
+    use crate::pose::{FrameRef, LatticePos};
+    use glam::DVec3;
+
+    fn region(realm: RealmId, parent: Option<RealmId>) -> RealmRegion {
+        RealmRegion {
+            realm,
+            center: crate::geometry::ParentCentre::authored(LatticePos::local(DVec3::ZERO)),
+            frame: FrameRef::SystemSpace { system_seed: 0 },
+            shape: Boundary::Shell { r: 1.0 },
+            look: Some(Boundary::Shell { r: 1.0 }),
+            band: ContainmentBand::for_containment_velocity_safe(1.0, 2.0, 0.0, 1.0, 0.0)
+                .expect("valid test band"),
+            aoi: AoiConfig::inert(),
+            parent,
+        }
+    }
+
+    /// The home is the NAMED system under the galaxy: another system listed first is passed over,
+    /// a forest without the named system has no home, and so has a forest without a root or a galaxy.
+    #[test]
+    fn the_home_realm_is_the_named_system_under_the_galaxy() {
+        let other = RealmId::System(HOME_SYSTEM_SEED + 1);
+        let forest = vec![
+            region(UNIVERSE, None),
+            region(GALAXY, Some(UNIVERSE)),
+            region(other, Some(GALAXY)),
+            region(HOME_SYSTEM, Some(GALAXY)),
+        ];
+        assert_eq!(default_home_realm(&forest), Some(HOME_SYSTEM));
+        let without = vec![
+            region(UNIVERSE, None),
+            region(GALAXY, Some(UNIVERSE)),
+            region(other, Some(GALAXY)),
+        ];
+        assert_eq!(default_home_realm(&without), None);
+        // The named system under a DIFFERENT parent is not the home either.
+        let misfiled = vec![
+            region(UNIVERSE, None),
+            region(GALAXY, Some(UNIVERSE)),
+            region(HOME_SYSTEM, Some(UNIVERSE)),
+        ];
+        assert_eq!(default_home_realm(&misfiled), None);
+        assert_eq!(default_home_realm(&[region(UNIVERSE, None)]), None);
+        assert_eq!(default_home_realm(&[]), None);
     }
 }

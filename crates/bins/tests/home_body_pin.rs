@@ -7,8 +7,8 @@
 
 use vd_physics::worldgen::HOME_SEED;
 
-const HOME_PLANET_SEED: u64 = 7_701_581_858_760_374_086;
-const HOME_PLANET_RADIUS_BITS: u64 = 0x4149_9139_1e69_2dfa;
+const HOME_PLANET_SEED: u64 = 4_030_111_653_607_004_909;
+const HOME_PLANET_RADIUS_BITS: u64 = 0x4158_4d6e_d403_3833;
 
 #[test]
 fn the_forests_home_planet_is_the_golden_gates_home_planet() {
@@ -17,6 +17,29 @@ fn the_forests_home_planet_is_the_golden_gates_home_planet() {
         body.seed(),
         HOME_PLANET_SEED,
         "the home planet's seed moved"
+    );
+    // ★ THE HOME PLANET IS EARTH-LIKE by the census's own predicate (ruling V13 L27): the named
+    // system holds exactly one earth-like body and it is the named planet.
+    assert_eq!(vd_core::worldgen::HOME_PLANET_SEED, HOME_PLANET_SEED);
+    let config =
+        vd_physics::worldgen::UniverseConfig::world(vd_bins::DEV.move_speed, vd_bins::DEV.tick_dt);
+    let held = std::collections::BTreeSet::from([vd_core::worldgen::HOME_SYSTEM]);
+    let lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+    let facts = vd_physics::worldgen::body_facts_in_subtree(
+        HOME_SEED,
+        &config,
+        &held,
+        &lineage,
+        vd_core::worldgen::HOME_PLANET,
+    )
+    .expect("the home planet has facts");
+    assert!(facts.earth_like, "the home planet is earth-like: {facts:?}");
+    let earth_like =
+        vd_physics::worldgen::earth_like_in_subtree(HOME_SEED, &config, &held, &lineage);
+    assert_eq!(
+        earth_like.iter().map(|c| c.body).collect::<Vec<_>>(),
+        vec![vd_core::worldgen::HOME_PLANET],
+        "the home system's one earth-like body is the home planet"
     );
     let golden = vd_terrain::BodyDefinition::from_seed(
         HOME_PLANET_SEED,

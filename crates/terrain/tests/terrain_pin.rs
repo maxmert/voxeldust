@@ -131,10 +131,10 @@ fn every_golden_chunk_of_the_home_planet_digests_to_its_committed_bytes() {
         return;
     }
     let body = home_planet();
-    assert_eq!(body.ladder().rungs, 12, "the home planet has twelve rungs");
+    let rungs = usize::from(body.ladder().rungs);
     assert_eq!(
         lines.len(),
-        6 * COLUMNS_PER_FACE * ROWS_PER_COLUMN * 12,
+        6 * COLUMNS_PER_FACE * ROWS_PER_COLUMN * rungs,
         "seventy-two columns, three rows each, at every rung"
     );
     if let Err(report) = compare(GOLDEN, &lines) {

@@ -12,7 +12,7 @@
 //! the COMPOSED STREAM (the `--realm-boxes` boot file is DELETED — D-LANE-6 🟩).
 //!
 //! J1 IS THE ORIGIN-MARKER ASSERT NOW: the home body draws at the session origin on BOTH sides of
-//! the crossing (the galaxy authors the home placement at ZERO — `world_roster` asserts it), the
+//! the crossing (the galaxy authors the home placement — `world_roster` carries it), the
 //! origin marker flips home ↔ galaxy, and the epoch bumps EXACTLY ONCE per crossing. THE
 //! NO-FLICKER GATE rides both legs (`cross_leg_watching_scene`): no delivered state across the
 //! swap shows an ABSENT scene, and every body persisting across the swap moves by no more than
@@ -201,6 +201,12 @@ fn own_pos(state: &vd_devproto::DevState) -> DVec3 {
 
 /// The client-reported DRAWN centre of `realm`'s box (`DevState.realm_boxes`, the same chokepoint
 /// the pixels go through) — panics if the client is not drawing it.
+/// How far the drawn home may stand from its authored placement, in metres: the composed row's
+/// centre is flattened through the lattice at the galaxy's own step, so a placement of 10^18 m
+/// carries a rounding of the order of one galaxy cell's f64 spacing; a kilometre is generous
+/// against that and a thousandth of the home system's own shell.
+const J1_PLACEMENT_TOLERANCE_M: f64 = 1_000.0;
+
 fn drawn_centre(state: &vd_devproto::DevState, realm: RealmId) -> DVec3 {
     let label = format!("{realm:?}");
     let row = state
@@ -559,9 +565,11 @@ fn screenshot(port: u16, label: &str) -> String {
 
 /// One capture: sample the state, screenshot, reconstruct the client's live camera from THAT state,
 /// and return everything a verdict needs. J1 — THE ORIGIN-MARKER ASSERT (§2.11) — runs at EVERY
-/// capture: the origin names the expected realm at the expected epoch, and the home body draws at
-/// the session origin on BOTH sides of the crossing (the galaxy authors the home placement at
-/// ZERO — `world_roster` asserts the world half; this asserts the drawn half).
+/// capture: the origin names the expected realm at the expected epoch, and the home body draws
+/// WHERE ITS AUTHOR PUTS IT: at the session origin while the session stands in the home, and at
+/// the galaxy's authored placement of the home (`world_roster.home_centre`) while the session
+/// stands in the galaxy. Re-based 2026-09-09 (ruling V13 L27): the named home no longer sits at the
+/// galaxy's origin, so the old "ZERO on both sides" identity is gone.
 struct Capture {
     state: vd_devproto::DevState,
     camera: CaptureCamera,
@@ -582,6 +590,7 @@ fn capture(
     cwd: &Path,
     label: &str,
     home: RealmId,
+    home_centre_in_galaxy: DVec3,
     expected_origin: RealmId,
     expected_epoch: u64,
 ) -> Capture {
@@ -650,12 +659,21 @@ fn capture(
             Some((format!("{expected_origin:?}"), expected_epoch)),
             "J1 (origin marker, capture '{label}'): the composed scene names its origin + epoch",
         );
-        assert_eq!(
-            drawn_centre(s, home),
-            DVec3::ZERO,
-            "J1 (drawn identity, capture '{label}'): the home body draws at the session origin \
-             on BOTH sides of the home<->galaxy crossing - the galaxy authors the home placement \
-             at ZERO",
+        // The home draws at the session origin while the session stands in it, and at the
+        // galaxy's authored placement while the session stands in the galaxy — the parent authors
+        // WHERE (SL1), and the composed scene states it in the origin realm's frame.
+        let expected_home_centre = if expected_origin == home {
+            DVec3::ZERO
+        } else {
+            home_centre_in_galaxy
+        };
+        let drawn = drawn_centre(s, home);
+        let gap = (drawn - expected_home_centre).length();
+        assert!(
+            gap <= J1_PLACEMENT_TOLERANCE_M,
+            "J1 (drawn placement, capture '{label}'): the home body draws where its author puts \
+             it — expected {expected_home_centre:?} in {expected_origin:?}, drawn {drawn:?}, gap \
+             {gap} m",
         );
     }
     let home_rect = union_aabb(
@@ -913,7 +931,15 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     };
     park_at(devctl, home_park, home_park_slop_m);
     // The login scene: origin = the home realm at the login epoch (0→1 at the first fold).
-    let inside = capture(devctl, &cwd, "inside", roster.home, roster.home, 1);
+    let inside = capture(
+        devctl,
+        &cwd,
+        "inside",
+        roster.home,
+        roster.home_centre,
+        roster.home,
+        1,
+    );
     assert_eq!(
         inside.state.location.as_deref(),
         Some(home_label.as_str()),
@@ -982,7 +1008,15 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     park_at(devctl, outside_park, outside_park_slop_m);
     let admin = loopback(ports.admin);
     // The swapped scene: origin = the galaxy realm, epoch = login + 1.
-    let outside = capture(devctl, &cwd, "outside", roster.home, roster.galaxy, 2);
+    let outside = capture(
+        devctl,
+        &cwd,
+        "outside",
+        roster.home,
+        roster.home_centre,
+        roster.galaxy,
+        2,
+    );
     assert_eq!(
         outside.state.location.as_deref(),
         Some(galaxy_label.as_str()),
@@ -1069,7 +1103,15 @@ fn g_render_crossing_smoke_dot_pixels_leave_the_home_shell_and_return() {
     // committed the crossing; pixels are always taken where the dot's rect is provably planet-free).
     park_at(devctl, home_park, home_park_slop_m);
     // Back home: origin = the home realm again, the SECOND bump (login 1 → out 2 → return 3).
-    let returned = capture(devctl, &cwd, "returned", roster.home, roster.home, 3);
+    let returned = capture(
+        devctl,
+        &cwd,
+        "returned",
+        roster.home,
+        roster.home_centre,
+        roster.home,
+        3,
+    );
     assert_eq!(
         returned.state.location.as_deref(),
         Some(home_label.as_str()),

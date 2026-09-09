@@ -87,9 +87,10 @@ fn main() -> ExitCode {
     };
     let voxel_home = RealmId::Planet(body.seed());
     println!(
-        "home_body_facts: the VOXEL home planet is {voxel_home:?}, ladder radius {:.1} km, {} rungs",
+        "home_body_facts: the VOXEL home planet is {voxel_home:?}, ladder radius {:.1} km, {} rungs (home system {:?})",
         body.ladder().radius_m() / 1000.0,
-        body.ladder().rungs
+        body.ladder().rungs,
+        vd_core::worldgen::HOME_SYSTEM
     );
     // The home SYSTEM's subtree: seconds. (The galaxy-wide sweep is `vd-seedsearch`'s, and it
     // costs twenty minutes of one core — MEASURED 2026-09-09.)
@@ -184,9 +185,10 @@ fn main() -> ExitCode {
             ),
         };
         println!(
-            "  {:?}: look radius {:.1} km, {class}, mass {mass:.3} Mearth, g {g:.2} m/s2, flux {flux:.3}, T_eq {t:.1} K, air {air}, earth-like {}, ladder {}",
+            "  {:?}: look radius {:.1} km (bits {:#018x}), {class}, mass {mass:.3} Mearth, g {g:.2} m/s2, flux {flux:.3}, T_eq {t:.1} K, air {air}, earth-like {}, ladder {}",
             r.realm,
             look / 1000.0,
+            look.to_bits(),
             facts.as_ref().is_some_and(|f| f.earth_like),
             match ladder {
                 Some(b) => format!(

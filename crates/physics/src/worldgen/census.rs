@@ -173,9 +173,10 @@ pub fn earth_like_in_subtree(
 /// The arithmetic of [`body_facts`] over a forest in hand (its three `None` arms are reachable from
 /// a unit test on a hand forest).
 pub(crate) fn body_facts_in_forest(bodies: &[GeneratedBody], body: RealmId) -> Option<BodyFacts> {
-    let b = bodies.iter().find(|b| b.realm == body)?;
+    let index = forest_index(bodies);
+    let b = &bodies[*index.get(&body)?];
     let taxon = b.taxon?;
-    let (system, star) = illuminating_star(bodies, b)?;
+    let (system, star) = illuminating_star(bodies, &index, b)?;
     Some(BodyFacts {
         system,
         star,
@@ -184,24 +185,31 @@ pub(crate) fn body_facts_in_forest(bodies: &[GeneratedBody], body: RealmId) -> O
     })
 }
 
+/// ONE INDEX over a forest in hand — realm to row — so a read of every body's parent is a lookup and
+/// not a scan. MEASURED 2026-09-09: the galaxy-wide earth-like sweep at the home seed looked up each
+/// body's parent and star by a linear search over the 3.5-million-body forest and passed an hour of
+/// one core without finishing; with the index the same sweep is one pass.
+fn forest_index(bodies: &[GeneratedBody]) -> std::collections::BTreeMap<RealmId, usize> {
+    bodies
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.realm, i))
+        .collect()
+}
+
 /// The STAR that lights a body: its parent system (a planet) or its grandparent (a moon), with that
 /// system's photometrics; `None` when the chain names no system or the system carries no star.
 fn illuminating_star(
     bodies: &[GeneratedBody],
+    index: &std::collections::BTreeMap<RealmId, usize>,
     b: &GeneratedBody,
 ) -> Option<(RealmId, StarPhotometrics)> {
     let parent = b.parent?;
     let system = match parent {
         RealmId::System(_) => parent,
-        _ => bodies
-            .iter()
-            .find(|p| p.realm == parent)
-            .and_then(|p| p.parent)?,
+        _ => index.get(&parent).and_then(|i| bodies[*i].parent)?,
     };
-    let star = bodies
-        .iter()
-        .find(|p| p.realm == system)
-        .and_then(|p| p.photometrics)?;
+    let star = index.get(&system).and_then(|i| bodies[*i].photometrics)?;
     Some((system, star))
 }
 
@@ -220,32 +228,18 @@ pub fn earth_like_candidates(
 /// photometric star) are reachable from a unit test. THE world never produces either: every
 /// generated body's parent is present and every system carries its star.
 pub(crate) fn earth_like_in_forest(bodies: &[GeneratedBody]) -> Vec<EarthLikeCandidate> {
+    let index = forest_index(bodies);
     let mut out = Vec::new();
     for b in bodies.iter().filter(|b| b.taxon.is_some()) {
         let taxon = b.taxon.expect("filtered on presence");
-        let Some(parent) = b.parent else { continue };
-        // The illuminating STAR: the body's parent system (a planet) or grandparent (a moon).
-        let system = match parent {
-            RealmId::System(_) => parent,
-            _ => match bodies
-                .iter()
-                .find(|p| p.realm == parent)
-                .and_then(|p| p.parent)
-            {
-                Some(gp) => gp,
-                None => continue,
-            },
-        };
-        let Some(star) = bodies
-            .iter()
-            .find(|p| p.realm == system)
-            .and_then(|p| p.photometrics)
-        else {
+        // The illuminating STAR: the body's parent system (a planet) or grandparent (a moon), by
+        // the index; a body whose chain names no system or no star is skipped.
+        let Some((system, star)) = illuminating_star(bodies, &index, b) else {
             continue;
         };
         if earth_like(&star, &taxon) {
             let (nearest_sibling_m, farthest_sibling_m, sibling_count) =
-                sibling_star_gaps(bodies, system);
+                sibling_star_gaps(bodies, &index, system);
             let (system_planets, system_moons) = system_census(bodies, system);
             out.push(EarthLikeCandidate {
                 system,
@@ -300,15 +294,16 @@ fn system_census(bodies: &[GeneratedBody], system: RealmId) -> (u32, u32) {
 /// offsets in the one galaxy frame the generator authored them in (Q-B's seeded 3-D placements),
 /// so this is a plain subtraction, never a fold from the root. An only child reports zeros with a
 /// zero count — the honest answer, not a sentinel.
-fn sibling_star_gaps(bodies: &[GeneratedBody], system: RealmId) -> (f64, f64, u32) {
+fn sibling_star_gaps(
+    bodies: &[GeneratedBody],
+    index: &std::collections::BTreeMap<RealmId, usize>,
+    system: RealmId,
+) -> (f64, f64, u32) {
     let offset_of = |realm: RealmId| {
-        bodies
-            .iter()
-            .find(|b| b.realm == realm)
-            .and_then(|b| match b.placement {
-                Placement::StaticOffset(at) => Some(at),
-                Placement::Orbital(_) => None,
-            })
+        index.get(&realm).and_then(|i| match bodies[*i].placement {
+            Placement::StaticOffset(at) => Some(at),
+            Placement::Orbital(_) => None,
+        })
     };
     let Some(here) = offset_of(system) else {
         return (0.0, 0.0, 0);
@@ -318,11 +313,7 @@ fn sibling_star_gaps(bodies: &[GeneratedBody], system: RealmId) -> (f64, f64, u3
     // ambient Universe/Galaxy shells wear the same `RealmId::System` spelling and sit at the
     // origin, and every system's own STAR sits at ZERO in ITS OWN frame — both reported a nearest
     // gap of 0 m on a home system that (by J1) sits at the galaxy origin itself.
-    let Some(parent) = bodies
-        .iter()
-        .find(|b| b.realm == system)
-        .and_then(|b| b.parent)
-    else {
+    let Some(parent) = index.get(&system).and_then(|i| bodies[*i].parent) else {
         return (0.0, 0.0, 0);
     };
     let mut nearest = f64::INFINITY;
