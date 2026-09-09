@@ -609,3 +609,37 @@ one-kilometre tolerance against the lattice's rounding at 10¹⁸ m). The lattic
 moved from the sibling to the home, because the lowest-seed sibling is now the system at the origin.
 The census is indexed (`forest_index`): a galaxy-wide earth-like sweep is one pass, 92 s.
 
+## V14. SLICE 8 DISCUSSION — THE DETAIL LADDER AND THE PICTURE INSTRUMENT (2026-09-09)
+
+The owner read `docs/investigation/2026-09-08/landforms/slice_08_ladder_discussion.md` twice (the second
+time as a replay in plain terms), added the far-view requirement — *"absolutely believable and smooth
+experience with amazing details, so it's indistinguishable from reality ... all that players built
+should be also visible extremely far ... [Enshrouded] took cubes, which gave the performance boost and
+way more details"* — and then: *"proceed with the recommendations."* Every row of §9 is a RULING:
+
+| Row | Ruling |
+|---|---|
+| D8-1 | The switch rule: one cell of the rung equals one pixel at the reference view (45° over 720 rows) — the drawable floor the reach already reads |
+| D8-2 | Hysteresis 0.9 / 1.1 of the switch distance to start; the pop detector fixes the pair |
+| D8-3 | The residency band from the realm's reach and the interpolation buffer, no new data; the ask R-18 (a stated lead) only on M8-1's measured failure |
+| D8-4 | Near-rung meshes at 16-bit positions and indices (254 KB per chunk); packed normals (185 KB) when the spectrum raises the vertex count |
+| D8-5 | The pop detector flies a HULL at 1.4, 240 and 528 m/s (the suit ruling: never a walking dot) |
+| D8-6 | Beyond the band the body draws at the rung above the coarsest drawn, from the recipe; the proxy outline retires |
+| D8-7 | Every picture carries the STAMP (altitude, horizon, radius drawn, rungs and chunk counts, the star's elevation and angle off the nose, the biome, the identity, the tick), the PROBE (what drew each pixel), the RULER, and the light stated (12°–18° up, 100°–140° off the nose) |
+| D8-8 | **The far-rung renderer is a LOOK decision, measured after the freeze**: cubes/splats of the ladder's own voxels, or meshes. Slice 8 keeps the seam OPEN: the client library hands the engine a chunk's cells beside its mesh, the tier rule and the crossfade are per column, the dither serves either. The far view of a player's build is the pyramid's coarse cells at the same rung as the ground (V4 row 7) |
+
+**The owner's target, restated for the record.** The picture must become indistinguishable from
+reality; the shape from the seed is one part of that, the look (photogrammetry textures, PBR,
+virtual texturing, virtual geometry, global illumination, clouds, scattering, temporal anti-aliasing)
+is the rest, and it lands after the freeze on a seam the shape does not touch (the client only
+renders; the client is replaceable). The foundation keeps true: the shape is identical on both hosts;
+the client holds cells and may draw them any way; builds live at every rung; the material seam
+carries the stratum per vertex and the biome per column. The honest limit: on 1 m cells the finest
+clean feature of the height field is ~8 m; 1–8 m comes from the fine floor and placed rock; below
+1 m is material and objects.
+
+**Order (V13 addendum stands):** 8p the instrument on the existing pictures first, then the tier
+rule and the wanted set, the crossfade, the residency band with M8-1, the mesh packing with M8-2,
+the pop detector with M8-3, the refuter, the gates, the pictures. The full process gate list on the
+new home (`just gate`) runs at 8p's end.
+

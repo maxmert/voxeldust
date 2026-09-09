@@ -16,6 +16,8 @@
 //!   frame: `step = orient * (strafe, vert, -fwd) · speed·dt`).
 //! - [`manifest`] — the `runs/` capture manifest serde (tick ↔ frame ↔ state).
 //! - [`capture`] — the `--at-tick` capture-alignment (reuses the wait-until predicate).
+//! - [`probe`] — the picture instrument's pure half (slice 8p): the probe codec, the stamp's
+//!   formulas, the blob reader the gates measure a probe with.
 
 pub mod assert;
 pub mod camera;
@@ -23,4 +25,5 @@ pub mod capture;
 pub mod input_map;
 pub mod manifest;
 pub mod nav;
+pub mod probe;
 pub mod verdict;

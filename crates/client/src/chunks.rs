@@ -46,6 +46,7 @@ use vd_core::geometry::Boundary;
 use vd_core::look::SurfaceStmt;
 use vd_core::pose::{FrameRef, RealmId};
 use vd_terrain::BodyDefinition;
+use vd_terrain::Gf;
 use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey};
 use vd_terrain::extract::extract;
 use vd_terrain::lattice::sample_box;
@@ -491,6 +492,142 @@ pub fn body_frame_point(eye_m: [f64; 3], centre_m: [f64; 3], facing_xyzw: [f64; 
     [p.x, p.y, p.z]
 }
 
+/// THE EYE'S GROUND TRUTH (8p, ruling V14 D8-7): the recipe's surface under a body-frame point, the
+/// point's height over it, and the biome there. The stamp on every judged picture states these,
+/// and the picture gate recomputes them from the state file — two readings of one recipe that must
+/// agree (M8-4). The surface is read at rung 0, the true shape; a drawn rung stands within its own
+/// bound of it. `None` at the body's centre (no direction) or for a non-finite point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EyeSurface {
+    /// The recipe's surface radius along the point's direction, in metres.
+    pub surface_m: f64,
+    /// The point's height over that surface, in metres (negative underground).
+    pub altitude_m: f64,
+    /// The biome of the column under the point.
+    pub biome: vd_terrain::strata::Biome,
+}
+
+/// A finite length greater than zero — one expression, so a NaN reads as "no", never as a branch.
+fn positive(x: f64) -> bool {
+    x.partial_cmp(&0.0) == Some(std::cmp::Ordering::Greater)
+}
+
+#[must_use]
+pub fn eye_surface(body: &BodyDefinition, point_m: [f64; 3]) -> Option<EyeSurface> {
+    let len = (point_m[0] * point_m[0] + point_m[1] * point_m[1] + point_m[2] * point_m[2]).sqrt();
+    if !positive(len) {
+        return None;
+    }
+    let dir = [
+        Gf::from_f64(point_m[0] / len),
+        Gf::from_f64(point_m[1] / len),
+        Gf::from_f64(point_m[2] / len),
+    ];
+    let surface = vd_terrain::height::height_m(body, dir, 0);
+    Some(EyeSurface {
+        surface_m: surface.to_f64(),
+        altitude_m: len - surface.to_f64(),
+        biome: vd_terrain::height::biome_at(body, dir, surface),
+    })
+}
+
+/// THE RULER'S ANGULAR SIZE (8p, ruling V14 D8-7): the ball's radius over its distance from the eye,
+/// `tan(2°)` (pinned by a test). A subject that subtends the same angle at every stand is readable
+/// in every picture — MEASURED: on the ground a 1 m ball 29 m off, from 60 km up an 8.7 km ball
+/// 245 km off — and the stamp states both numbers, so the owner reads the scale off the ball and
+/// the gate reads the projection off its pixels. The two bytes of the probe saturate at 65 535
+/// cells; a ball farther than that at its rung reads as 65 535, and the gate's distance check
+/// would say so.
+pub const RULER_TAN_HALF_ANGLE: f64 = 0.034_920_769_491_747_67;
+
+/// The ruler: a ball of known size hovering over the recipe's surface where the eye's centre ray
+/// meets it, in the body's frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ruler {
+    /// The ball's centre in the body's frame, in metres: the hit point lifted by TWO radii along
+    /// the radial, so the ball hovers one radius clear of the ground. A ball resting on a slope has
+    /// its uphill side cut off by the ground, and a gate that measures its disc would then measure
+    /// the slope; a ball clear of the ground is the whole disc, and its shadow still falls on the
+    /// ground under it, which is the orienter.
+    pub centre_m: [f64; 3],
+    /// The ball's radius, in metres.
+    pub radius_m: f64,
+    /// The ball's centre's distance from the eye, in metres.
+    pub distance_m: f64,
+}
+
+/// Bisection steps refining the hit between the last sample above the surface and the first below:
+/// twelve halve one cell to a four-thousandth of it.
+const RULER_REFINE_STEPS: u32 = 12;
+
+/// Where the centre ray from `eye_m` along `forward` meets the recipe's surface AT THE DRAWN RUNG
+/// (so the ball rests on the drawn ground, not on a finer shape it is not standing on), marched one
+/// cell at a time out to `reach_m` and refined by bisection. `None` when the ray leaves without
+/// touching ground within reach (an eye looking at the sky), for a rung the ladder lacks, or for a
+/// degenerate eye or direction. The ball's radius is the HIT's distance along the ray times
+/// [`RULER_TAN_HALF_ANGLE`], never smaller than half a cell.
+#[must_use]
+pub fn ruler_on_surface(
+    body: &BodyDefinition,
+    eye_m: [f64; 3],
+    forward: [f64; 3],
+    rung: u8,
+    reach_m: f64,
+) -> Option<Ruler> {
+    let eye = vd_core::glam::DVec3::from_array(eye_m);
+    let fwd = vd_core::glam::DVec3::from_array(forward).normalize_or_zero();
+    if rung >= body.ladder().rungs || !positive(eye.length()) || !positive(fwd.length()) {
+        return None;
+    }
+    let cell = f64::from(vd_seed::ladder::cell_m(rung));
+    let below = |t: f64| -> bool {
+        let p = eye + fwd * t;
+        let len = p.length();
+        let dir = [
+            Gf::from_f64(p.x / len),
+            Gf::from_f64(p.y / len),
+            Gf::from_f64(p.z / len),
+        ];
+        len <= vd_terrain::height::height_m(body, dir, rung).to_f64()
+    };
+    // An eye at or under the drawn surface plants nothing: the bracket would close on the eye and
+    // the ball would stand at the nose (the refuter's finding 7). The stamp's altitude says why.
+    if below(0.0) {
+        return None;
+    }
+    // March: the first sample at or under the surface ends it.
+    let mut above = 0.0_f64;
+    let mut t = cell;
+    while t <= reach_m && !below(t) {
+        above = t;
+        t += cell;
+    }
+    if t > reach_m {
+        return None;
+    }
+    let mut lo = above;
+    let mut hi = t;
+    let mut n = 0;
+    while n < RULER_REFINE_STEPS {
+        let mid = f64::midpoint(lo, hi);
+        // Branchless halving: the reading picks the side as a weight, so no arm depends on where
+        // the seed happens to put the crossing (HR5 — a recipe change could not redden this).
+        let under = f64::from(u8::from(below(mid)));
+        hi += (mid - hi) * under;
+        lo += (mid - lo) * (1.0 - under);
+        n += 1;
+    }
+    let hit = eye + fwd * hi;
+    let radial = hit.normalize_or_zero();
+    let radius_m = (hi * RULER_TAN_HALF_ANGLE).max(cell * 0.5);
+    let centre = hit + radial * (2.0 * radius_m);
+    Some(Ruler {
+        centre_m: centre.to_array(),
+        radius_m,
+        distance_m: (centre - eye).length(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,5 +1005,132 @@ mod tests {
         assert!((p[0] - 10.0).abs() < 1e-9, "{p:?}");
         assert!(p[1].abs() < 1e-9);
         assert!(p[2].abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_eye_surface_reads_the_recipe_under_the_eye_and_refuses_the_centre() {
+        let body = home_planet();
+        let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
+        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
+        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let eye = [
+            d[0] * (surface + 3.4),
+            d[1] * (surface + 3.4),
+            d[2] * (surface + 3.4),
+        ];
+        let read = eye_surface(&body, eye).expect("a direction");
+        assert_eq!(eye_surface(&body, eye), Some(read));
+        assert!((read.surface_m - surface).abs() < 1e-6, "{read:?}");
+        assert!((read.altitude_m - 3.4).abs() < 1e-6, "{read:?}");
+        assert_eq!(
+            read.biome,
+            vd_terrain::height::biome_at(&body, dir, Gf::from_f64(surface))
+        );
+        assert_eq!(eye_surface(&body, [0.0, 0.0, 0.0]), None);
+        assert_eq!(eye_surface(&body, [f64::NAN, 0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn the_ruler_stands_on_the_drawn_ground_ahead_and_is_absent_for_a_sky_ray() {
+        let body = home_planet();
+        let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
+        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
+        let up = vd_core::glam::DVec3::from_array(d);
+        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let eye = up * (surface + 3.4);
+        // A level direction tilted 8° down, like the ground picture's nose.
+        let level = up.cross(vd_core::glam::DVec3::Z).normalize();
+        let tilt = 8.0_f64.to_radians();
+        let nose = (level * tilt.cos() - up * tilt.sin()).normalize();
+        let ruler = ruler_on_surface(&body, eye.to_array(), nose.to_array(), 0, 400.0)
+            .expect("the ray meets the ground");
+        assert_eq!(
+            ruler_on_surface(&body, eye.to_array(), nose.to_array(), 0, 400.0),
+            Some(ruler)
+        );
+        // The ball hovers one radius clear of the rung-0 surface at its own hit direction: its
+        // centre stands two radii over the recipe there.
+        let c = vd_core::glam::DVec3::from_array(ruler.centre_m);
+        let cd = c.normalize();
+        let there = vd_terrain::height::height_m(
+            &body,
+            [Gf::from_f64(cd.x), Gf::from_f64(cd.y), Gf::from_f64(cd.z)],
+            0,
+        )
+        .to_f64();
+        let centre_len = c.length();
+        assert!(
+            (centre_len - there - 2.0 * ruler.radius_m).abs() < 0.01,
+            "{ruler:?}: centre {centre_len} m, surface {there} m"
+        );
+        assert!(
+            (ruler.distance_m - (c - eye).length()).abs() < 1e-9,
+            "{ruler:?}"
+        );
+        assert!(ruler.distance_m > 3.0, "{ruler:?}");
+        assert!(ruler.distance_m < 400.0, "{ruler:?}");
+        // The size law: the larger of the angular size AT THE HIT and half a cell.
+        let hit = c - cd * (2.0 * ruler.radius_m);
+        let by_angle = (hit - eye).length() * RULER_TAN_HALF_ANGLE;
+        assert!(
+            (ruler.radius_m - by_angle.max(0.5)).abs() < 1e-3,
+            "{ruler:?} vs {by_angle}"
+        );
+        // A ray to the sky meets nothing within reach.
+        assert_eq!(
+            ruler_on_surface(&body, eye.to_array(), up.to_array(), 0, 400.0),
+            None
+        );
+        // Straight down from aloft at a coarse rung: the hit is under the eye, one cell's step.
+        let aloft = up * (surface + 60_000.0);
+        let down = ruler_on_surface(&body, aloft.to_array(), (-up).to_array(), 9, 400_000.0)
+            .expect("the ground is below");
+        assert!(down.radius_m > 256.0, "{down:?}");
+        // The centre stands two radii over the rung-9 surface, which lies within the dropped
+        // octaves' bound of the rung-0 surface the eye's height was set from.
+        assert!(
+            (down.distance_m + 2.0 * down.radius_m - 60_000.0).abs() < 2_000.0,
+            "{down:?}"
+        );
+        let dc = vd_core::glam::DVec3::from_array(down.centre_m);
+        let dd = dc.normalize();
+        let there9 = vd_terrain::height::height_m(
+            &body,
+            [Gf::from_f64(dd.x), Gf::from_f64(dd.y), Gf::from_f64(dd.z)],
+            9,
+        )
+        .to_f64();
+        let down_len = dc.length();
+        assert!(
+            (down_len - there9 - 2.0 * down.radius_m).abs() < 1.0,
+            "{down:?}: centre {down_len} m, rung-9 surface {there9} m"
+        );
+        // An eye under the drawn surface plants nothing.
+        let buried = up * (surface - 5.0);
+        assert_eq!(
+            ruler_on_surface(&body, buried.to_array(), nose.to_array(), 0, 400.0),
+            None
+        );
+        // The angular size is two degrees, pinned to the trigonometry it names.
+        assert!((RULER_TAN_HALF_ANGLE - 2.0_f64.to_radians().tan()).abs() < 1e-15);
+        // Refusals: a rung the ladder lacks, a degenerate eye, a zero direction.
+        assert_eq!(
+            ruler_on_surface(
+                &body,
+                eye.to_array(),
+                nose.to_array(),
+                body.ladder().rungs,
+                400.0
+            ),
+            None
+        );
+        assert_eq!(
+            ruler_on_surface(&body, [0.0, 0.0, 0.0], nose.to_array(), 0, 400.0),
+            None
+        );
+        assert_eq!(
+            ruler_on_surface(&body, eye.to_array(), [0.0, 0.0, 0.0], 0, 400.0),
+            None
+        );
     }
 }

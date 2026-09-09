@@ -150,6 +150,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // forever in a headless client.
     let star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
+    // The renderer's terrain stamp (slice 8p): what it measured about the ground it draws; `None`
+    // forever in a headless client.
+    let terrain_stamp: Arc<std::sync::Mutex<Option<vd_devproto::DevTerrainStamp>>> =
+        Arc::new(std::sync::Mutex::new(None));
     let (command_tx, command_rx) = sync_channel::<InputAction>(COMMAND_MAILBOX_CAP);
     // The capture seam (Capture mode): the dev-control screenshot handler → the Bevy
     // render thread. Created in any dev-control+render build; only WIRED into the
@@ -242,6 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             terrain_pending,
             camera_mode,
             star_probe,
+            terrain_stamp,
             started_at,
             args.step_hz,
             vd_client_render::RenderMode::Windowed,
@@ -282,6 +287,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             terrain_pending,
             camera_mode,
             star_probe,
+            terrain_stamp,
             started_at,
             args.step_hz,
             vd_client_render::RenderMode::Capture,
@@ -308,6 +314,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terrain_pending,
         camera_mode,
         star_probe,
+        terrain_stamp,
         None, // no render sink
         None, // no external stop signal (exits on vdctl/gateway Close)
         started_at,
@@ -337,6 +344,7 @@ fn run_render(
     terrain_pending: Arc<AtomicU64>,
     camera_mode: Arc<std::sync::atomic::AtomicU8>,
     star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
+    terrain_stamp: Arc<std::sync::Mutex<Option<vd_devproto::DevTerrainStamp>>>,
     started_at: Instant,
     step_hz: u32,
     mode: vd_client_render::RenderMode,
@@ -365,6 +373,7 @@ fn run_render(
     let worker_pending = terrain_pending.clone();
     let worker_camera = camera_mode.clone();
     let worker_probe = star_probe.clone();
+    let worker_stamp = terrain_stamp.clone();
     let core_thread = std::thread::spawn(move || {
         // Flip `core_alive` false on EXIT or PANIC so the window always learns.
         struct AliveGuard(Arc<AtomicBool>);
@@ -385,6 +394,7 @@ fn run_render(
             worker_pending,
             worker_camera,
             worker_probe,
+            worker_stamp,
             Some(render_sink),
             Some(worker_stop),
             started_at,
@@ -403,6 +413,7 @@ fn run_render(
         terrain_pending,
         camera_mode,
         star_probe,
+        terrain_stamp,
         core_alive,
         started_at,
         mode,
@@ -478,6 +489,7 @@ fn run_client_loop(
     terrain_pending: Arc<AtomicU64>,
     camera_mode: Arc<std::sync::atomic::AtomicU8>,
     star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
+    terrain_stamp: Arc<std::sync::Mutex<Option<vd_devproto::DevTerrainStamp>>>,
     render_sink: Option<Arc<ArcSwap<RenderSnapshot>>>,
     stop: Option<Arc<AtomicBool>>,
     started_at: Instant,
@@ -524,6 +536,10 @@ fn run_client_loop(
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone(),
+                    terrain_stamp: terrain_stamp
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
                 },
             ),
         ));
@@ -537,6 +553,7 @@ fn run_client_loop(
             &terrain_pending,
             &camera_mode,
             &star_probe,
+            &terrain_stamp,
         );
         if let Some(sink) = &render_sink {
             sink.store(Arc::new(core.state().render_snapshot()));

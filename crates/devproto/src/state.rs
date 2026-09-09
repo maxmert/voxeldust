@@ -56,6 +56,11 @@ pub struct DevRealmBox {
     /// parent explicitly from the fold that knows it.
     pub parent: Option<String>,
     pub center: [f64; 3],
+    /// The row's facing (x, y, z, w) as the composer delivered it — the rotation between the
+    /// realm's own frame and the picture's. A gate that reads a point in the realm's frame (the
+    /// picture gate's eye over the recipe, slice 8p) rotates by THIS; it used to assume the identity,
+    /// which a spinning planet breaks silently (the refuter's finding 5).
+    pub facing: [f64; 4],
     /// The drawn EXTENT in metres (a sphere's radius; a box's half-diagonal length; 0 for a
     /// MARKER point) — read STREAMED, straight off the composed row's look bag (window_lane.md
     /// §2.11: camera reconstruction and harness verdicts read streamed extents; the regions.json
@@ -204,6 +209,13 @@ pub struct DevState {
     /// sky gate compares its expectation against THIS (the math) and THIS against the pixels (the
     /// raster), so a disagreement is split in one run instead of argued. Empty with no renderer.
     pub star_probe: Vec<DevStarProbe>,
+    /// ★ THE TERRAIN STAMP (slice 8p, ruling V14 D8-7): the measured facts the renderer writes on
+    /// every picture that draws ground — altitude over the recipe's surface, horizon, radius drawn,
+    /// rungs and chunk counts, the star's angles, the biome, the world identity, the tick, and the
+    /// ruler it planted. Written by the render thread like `star_probe`; `None` with no renderer,
+    /// no rung flag, or no body under the eye. The picture gate recomputes altitude and horizon
+    /// from THIS state's own pose and asserts they agree (M8-4).
+    pub terrain_stamp: Option<DevTerrainStamp>,
     /// ★ WHERE THE GALAXY IS (owner ruling 2026-09-02 R1): the origin realm's centre in the galaxy's
     /// frame, in metres, as the gateway last stated it on the realm lane — the anchor the star cloud
     /// is placed by. `None` until the observer chain reaches the galaxy, which is exactly the case
@@ -301,6 +313,7 @@ pub(crate) mod tests {
                 realm: "Planet(7)".to_owned(),
                 parent: Some("System(7)".to_owned()),
                 center: [10.0, 0.0, 0.0],
+                facing: [0.0, 0.0, 0.6, 0.8],
                 extent_m: 4.0,
                 body_kind: "look".to_owned(),
                 luma: None,
@@ -313,6 +326,32 @@ pub(crate) mod tests {
             terrain_chunks_pending: 0,
             camera_mode: camera_mode_name(CAMERA_MODE_NONE).to_owned(),
             star_probe: Vec::new(),
+            terrain_stamp: Some(DevTerrainStamp {
+                realm: "Planet(7)".to_owned(),
+                rung: 3,
+                cell_m: 8.0,
+                surface_m: 6_370_001.5,
+                altitude_m: 3.4,
+                horizon_m: 6_582.0,
+                horizon_dip_deg: 0.06,
+                drawn_radius_m: 372.0,
+                chunk_nearest_m: 12.5,
+                chunk_farthest_m: 401.0,
+                chunks_drawn: 169,
+                chunks_pending: 2,
+                star: Some(DevStarAngles {
+                    elevation_deg: 15.0,
+                    off_nose_deg: 120.0,
+                }),
+                biome: "Grassland".to_owned(),
+                world: "0x1234abcd".to_owned(),
+                tick: Some(101),
+                ruler: Some(DevRuler {
+                    centre_m: [1.0, -2.0, -15.0],
+                    radius_m: 0.55,
+                    distance_m: 15.2,
+                }),
+            }),
             sky_anchor: None,
             // A fixture has heard no beat (S11).
             sky_watch: "NeverHeard".to_owned(),
@@ -348,10 +387,15 @@ pub(crate) mod tests {
         // The drawn realm box rides its realm id + composited center + streamed extent + body kind.
         assert!(json.contains("\"realm\":\"Planet(7)\""));
         assert!(json.contains("\"extent_m\":4.0"));
+        assert!(json.contains("\"facing\":[0.0,0.0,0.6,0.8]"));
         assert!(json.contains("\"body_kind\":\"look\""));
         // The origin marker rides as (label, epoch) — the pixel gates' J1 surface.
         assert!(json.contains("\"origin\":[\"System(7)\",1]"));
         assert!(json.contains("\"stale_epoch_rows\":8"));
+        // The terrain stamp rides whole: its nested star angles and ruler included.
+        assert!(json.contains("\"altitude_m\":3.4"));
+        assert!(json.contains("\"off_nose_deg\":120.0"));
+        assert!(json.contains("\"radius_m\":0.55"));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
         // The three row-drop honesty counters ride the surface (audit :304 — a wrongly-armed
         // resurrect guard must be VISIBLE to `vdctl state`), each with its distinct sample value.
@@ -369,6 +413,61 @@ pub(crate) mod tests {
             "\"awaiting_subscription\""
         );
     }
+}
+
+/// THE TERRAIN STAMP (slice 8p; see `DevState::terrain_stamp`): what the renderer measured about
+/// the ground it drew, at the frame the state was sampled.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevTerrainStamp {
+    /// The body under the eye, as `{:?}` of its `RealmId`.
+    pub realm: String,
+    /// The rung drawn and its cell size in metres (one rung for one slice — `D-TERRAIN-3`).
+    pub rung: u8,
+    pub cell_m: f64,
+    /// The recipe's surface radius under the eye, in metres, and the eye's height over it.
+    pub surface_m: f64,
+    pub altitude_m: f64,
+    /// The smooth-sphere horizon of the sphere through the surface under the eye, from the eye's
+    /// height over it: the distance along the line of sight, in metres, and its dip below level,
+    /// in degrees.
+    pub horizon_m: f64,
+    pub horizon_dip_deg: f64,
+    /// The radius this session asks for, in metres (columns × chunk edge × cell).
+    pub drawn_radius_m: f64,
+    /// The nearest and farthest drawn chunk's origin from the eye, in metres (0 while none).
+    pub chunk_nearest_m: f64,
+    pub chunk_farthest_m: f64,
+    /// Chunks on screen and still building — the same two counts the wait fields read.
+    pub chunks_drawn: u64,
+    pub chunks_pending: u64,
+    /// The star the ground is lit by, or `None` when a work light stands in (no luminous row).
+    pub star: Option<DevStarAngles>,
+    /// The biome under the eye, as the recipe names it.
+    pub biome: String,
+    /// The world identity the client declared (the generator tag), as hex.
+    pub world: String,
+    /// The freshest delivered universe tick at the frame.
+    pub tick: Option<u64>,
+    /// The ruler ball, when the centre ray met the ground within the drawn radius.
+    pub ruler: Option<DevRuler>,
+}
+
+/// The star's angles at the stand (slice 8p): how high over the local level and how far off the
+/// camera's nose, both in degrees.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevStarAngles {
+    pub elevation_deg: f64,
+    pub off_nose_deg: f64,
+}
+
+/// The ruler ball (slice 8p): a sphere of stated radius at a stated eye-relative centre, in the
+/// composed picture's frame (metres from the eye, the frame's own axes) — what a gate projects
+/// through the pilot camera to predict the ball's pixel radius.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevRuler {
+    pub centre_m: [f64; 3],
+    pub radius_m: f64,
+    pub distance_m: f64,
 }
 
 /// One star the renderer projected itself (see `DevState::star_probe`).

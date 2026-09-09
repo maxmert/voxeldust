@@ -54,7 +54,8 @@ pub use dispatch::{DevError, DevRequest, DevResponse, InputAction, MAX_ACTION_IN
 pub use predicate::{WaitField, WaitOp, WaitPredicate};
 pub use state::{
     CAMERA_MODE_FIRST_PERSON, CAMERA_MODE_NONE, CAMERA_MODE_THIRD_PERSON, DevEntityRow, DevPhase,
-    DevRealmBox, DevStarProbe, DevState, DevTransferView, DevWindowCensus, camera_mode_name,
+    DevRealmBox, DevRuler, DevStarAngles, DevStarProbe, DevState, DevTerrainStamp, DevTransferView,
+    DevWindowCensus, camera_mode_name,
 };
 
 /// Ports reserved at the front of every slot block for the fixed cluster nodes

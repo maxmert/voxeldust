@@ -1,7 +1,10 @@
-//! ★ THE FIRST PICTURES OF THE HOME PLANET (the voxel foundation, slice 7; ruling V12 S7-11, M7-4):
-//! the client links the one generator, a login stands on the planet's surface, and the harness takes
-//! the pictures the owner judges — from the ground at rung 0, from a hill at a middle rung, and from
-//! aloft at a coarse rung.
+//! ★ THE FIRST PICTURES OF THE HOME PLANET (the voxel foundation, slice 7; ruling V12 S7-11, M7-4),
+//! WITH THE PICTURE INSTRUMENT (slice 8p; ruling V14 D8-7, M8-4): the client links the one
+//! generator, a login stands on the planet's surface, and the harness takes the pictures the owner
+//! judges — from the ground at rung 0, from a hill at a middle rung, and from aloft at a coarse rung.
+//! Every picture carries the STAMP (what the renderer measured), the PROBE (a second picture in
+//! which every pixel says what drew it and how far it is), the RULER (a ball of known size where the
+//! centre ray meets the ground) and one LIGHT at a stated angle.
 //!
 //! **The path is the shipped one.** A DEMAND cluster (orchestrator + gateway, no shard pre-booked);
 //! the stand-in spawn poses put three accounts INSIDE the home planet's realm (slice 7 gave the
@@ -13,9 +16,18 @@
 //! the flag names (`D-TERRAIN-3`: one rung, for one slice) and answers the harness with
 //! `terrain_chunks_drawn`, the instrument this gate waits on — never a sleep standing in for a signal.
 //!
-//! **What is asserted.** Chunks are on screen; the screenshot holds the terrain's own warm paint
-//! across the lower half of the frame; zero magenta (the missing-shader colour). The pictures are
-//! copied beside the slice document for the owner. GPU-required + LOCAL like every capture gate.
+//! **What is asserted (M8-4, the stamp's own truth).** The probe says the lower half of the frame is
+//! terrain, at the rung the flag named, on every pixel, AND THE PICTURE IS JUDGED THERE: where the
+//! probe says ground, the picture's own pixels carry the ground's lit paint; where it says the ball,
+//! the picture is red (the probe knows only the terrain and the ruler, so a marker or a box over the
+//! ground is caught by the picture's paint under the probe, not by the probe). The stamp's altitude
+//! and horizon agree with what this gate recomputes from the state file beside the picture and the
+//! recipe, in the row's DELIVERED facing; the stand held still across the capture; the star stands
+//! 12°–18° up and 100°–140° off the nose in the renderer's own reading; the ruler's disc on the probe
+//! measures what the stamp's stated ball projects to through the pilot camera, within one pixel;
+//! the probe's near and far distance under the ball are the stamp's within one cell; there is drawn
+//! ground under the ball; zero magenta. The pictures and their probes are copied beside the slice
+//! document for the owner. GPU-required + LOCAL like every capture gate.
 #![cfg(all(feature = "dev-control", feature = "render"))]
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -26,7 +38,14 @@ use vd_bins::{
     dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows, orchestrator_env,
     reap_forked, reserve_tcp_addr, reserve_udp_addr,
 };
+use vd_client::chunks::eye_surface;
 use vd_client_harness::assert::magenta_pixel_count;
+use vd_client_harness::capture::{probe_rel_for, state_rel_for};
+use vd_client_harness::probe::{
+    PROBE_KIND_RULER, PROBE_KIND_TERRAIN, equivalent_radius_px, horizon_m, probe_blob,
+    probe_share_in_rows,
+};
+use vd_client_harness::verdict::projected_point_aabb;
 use vd_core::glam::DVec3;
 use vd_devproto::{DevPhase, DevRequest, DevResponse, DevState, WaitField, WaitOp, WaitPredicate};
 use vd_io_prod::trust::ClusterTrust;
@@ -46,6 +65,10 @@ const SUN_ELEVATION_DEG: f64 = 15.0;
 /// The star's azimuth from the camera's nose, in degrees (M8-L: 100°–140°, behind the shoulder — a
 /// picture shot INTO the light shows no relief, MEASURED on the slice 7 pictures).
 const SUN_OFF_NOSE_DEG: f64 = 120.0;
+/// THE LIGHT, ASSERTED (slice 8p): the renderer's own reading of the star must fall in the bands the
+/// ruling names. The stand is built for 15° and 120°; a spinning planet or a wrong up would move it.
+const SUN_ELEVATION_BAND_DEG: (f64, f64) = (12.0, 18.0);
+const SUN_OFF_NOSE_BAND_DEG: (f64, f64) = (100.0, 140.0);
 /// How far below level each picture looks, in degrees.
 const GROUND_TILT_DEG: f64 = 8.0;
 const HILL_TILT_DEG: f64 = 15.0;
@@ -64,6 +87,29 @@ const ALOFT_RADIUS: i32 = 12;
 /// workers must build a few dozen chunks.
 const LOGIN_DEADLINE: Duration = Duration::from_secs(120);
 const TERRAIN_WAIT_TICKS: u64 = 1_800;
+/// M8-4's tolerances. The stamp's altitude against the gate's own reading of the same recipe at the
+/// same eye: the two differ only by the lattice reduction's rounding of the eye. The horizon is a
+/// formula of that altitude. The ruler's disc against its projection: one pixel, the rasteriser's
+/// own edge (the projection offsets a point along the camera's right axis, `f·r/d`; the true
+/// silhouette is `f·r/√(d²−r²)`, which at the ball's `r/d = tan 2°` differs by 0.06 %, a fiftieth
+/// of a pixel — and stays under a pixel until `r/d` passes 0.2, a hit under three cells, where the
+/// half-cell floor binds). The probe's nearest and farthest distance under the ball against
+/// `(d − r)/cell` and `d/cell`: one cell, the channel's own rounding — so a wrong high byte (256
+/// cells) or a wrong low byte is caught, which is the G/B channel's exactness measured.
+const ALTITUDE_TOLERANCE_M: f64 = 0.05;
+const HORIZON_TOLERANCE_M: f64 = 1.0;
+const RULER_TOLERANCE_PX: f64 = 1.0;
+const RULER_CELLS_TOLERANCE: f64 = 1.0;
+/// The picture under the probe: the share of the probe's ground pixels that carry the ground's lit
+/// paint in the picture, and of its ball pixels that are red. A black or unlit picture with a
+/// perfect probe fails here (the refuter's finding 1); a marker over the ground fails here.
+const PAINT_UNDER_PROBE_MIN: f64 = 0.95;
+const RED_UNDER_PROBE_MIN: f64 = 0.90;
+/// Rows under the ball's disc that must be drawn ground: from three pixels under its rim to eight.
+const GROUND_UNDER_BALL_ROWS: (usize, usize) = (3, 8);
+/// A still stand: the delivered position in the state file and in a poll after the capture agree to
+/// this, so the stamp, the pose and the probe describe one moment (a moving leg needs the straddle).
+const STILL_TOLERANCE_M: f64 = 1e-6;
 /// Where the pictures go for the owner.
 const PICTURE_DIR: &str = "docs/investigation/2026-09-07/pictures";
 
@@ -265,39 +311,56 @@ fn await_active(devctl: u16) -> DevState {
     }
 }
 
-/// The GROUND in a screenshot: pixels of the terrain's own warm paint (red over blue by a margin —
-/// the realm outlines are blue-ish, the sky black, the missing-shader colour magenta) in a row band
-/// `[y0, y1)` of the frame, outside the HUD's corner, as a share of that band.
-fn paint_share(rgba: &[u8], w: usize, h: usize, y0: usize, y1: usize) -> f64 {
-    let mut painted = 0u64;
-    let mut total = 0u64;
-    let mut y = y0;
-    while y < y1.min(h) {
-        let mut x = 0;
-        while x < w {
-            let hud = x < 320 && y < 180;
-            if !hud {
-                let i = (y * w + x) * 4;
-                let (r, g, b) = (rgba[i], rgba[i + 1], rgba[i + 2]);
-                let warm = r >= g && g >= b && r >= b + 8 && r > 24;
-                if warm {
-                    painted += 1;
-                }
-                total += 1;
-            }
-            x += 1;
-        }
-        y += 1;
-    }
-    painted as f64 / total.max(1) as f64
+/// THE GROUND'S LIT PAINT in the picture (slice 7's classifier, now applied only where the probe says
+/// ground): red over blue by a margin, not black.
+fn warm(px: &[u8]) -> bool {
+    let (r, g, b) = (px[0], px[1], px[2]);
+    r >= g && g >= b && r >= b + 8 && r > 24
 }
 
-/// One picture: login, wait for the terrain on screen, look, capture, judge, copy.
-fn take_picture(f: &Fixture, gateway: SocketAddr, pic: &Picture) -> (u64, f64) {
+/// THE BALL'S PAINT in the picture: a red HUE — red at least twice each other channel, above black —
+/// so the ball's shaded side counts as the ball (MEASURED on the fourth flight: a bright-margin test
+/// read the shade as "not the ball" on a quarter of the disc), while the ground's tan (red under
+/// twice green) does not.
+fn red(px: &[u8]) -> bool {
+    let (r, g, b) = (u16::from(px[0]), u16::from(px[1]), u16::from(px[2]));
+    r > 12 && r >= 2 * g && r >= 2 * b
+}
+
+/// The share of the probe's pixels of `kind` whose PICTURE pixel satisfies `paint`.
+fn paint_under_probe(picture: &[u8], probe: &[u8], kind: u8, paint: fn(&[u8]) -> bool) -> f64 {
+    let (mut hits, mut total) = (0u64, 0u64);
+    for (pic, pr) in picture.chunks_exact(4).zip(probe.chunks_exact(4)) {
+        let here = vd_client_harness::probe::decode_probe([pr[0], pr[1], pr[2]]).kind == kind;
+        total += u64::from(here);
+        hits += u64::from(here && paint(pic));
+    }
+    hits as f64 / total.max(1) as f64
+}
+
+/// Open a captured PNG as RGBA8 with its size.
+fn open_rgba(png: &Path) -> (Vec<u8>, usize, usize) {
+    let img = image::open(png)
+        .unwrap_or_else(|e| panic!("open captured PNG {}: {e}", png.display()))
+        .to_rgba8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    (img.into_raw(), w, h)
+}
+
+/// One picture: login, wait for the terrain on screen, look, capture, judge the picture, the
+/// probe, the stamp and the ruler, copy for the owner.
+fn take_picture(
+    f: &Fixture,
+    gateway: SocketAddr,
+    body: &vd_terrain::BodyDefinition,
+    planet: vd_core::pose::RealmId,
+    pic: &Picture,
+) -> (u64, f64) {
     let Picture {
         name,
         band,
         min_share,
+        rung,
         ..
     } = *pic;
     let client_quic = reserve_udp_addr();
@@ -386,34 +449,224 @@ fn take_picture(f: &Fixture, gateway: SocketAddr, pic: &Picture) -> (u64, f64) {
         other => panic!("{name}: screenshot was not captured (GPU precondition?): {other:?}"),
     };
     let png = f.cwd.join(&rel);
-    let img = image::open(&png)
-        .unwrap_or_else(|e| panic!("open captured PNG {}: {e}", png.display()))
-        .to_rgba8();
-    let (w, h) = (img.width() as usize, img.height() as usize);
-    let rgba = img.as_raw();
-    assert_eq!(magenta_pixel_count(rgba), 0, "{name}: zero magenta");
-    let share = paint_share(
-        rgba,
+    let (rgba, w, h) = open_rgba(&png);
+    assert_eq!(magenta_pixel_count(&rgba), 0, "{name}: zero magenta");
+    // THE PROBE beside the picture, the same size.
+    let probe_png = f.cwd.join(probe_rel_for(&rel));
+    let (probe, pw, ph) = open_rgba(&probe_png);
+    assert_eq!((pw, ph), (w, h), "{name}: the probe is the picture's size");
+    // THE STATE FILE beside the picture: the listener wrote the delivered state at capture time.
+    let run_dir = png
+        .parent()
+        .and_then(Path::parent)
+        .expect("shots/<name>.png sits in a run dir");
+    let state_path = run_dir.join(state_rel_for(&rel));
+    let state: DevState = serde_json::from_str(
+        &std::fs::read_to_string(&state_path)
+            .unwrap_or_else(|e| panic!("{name}: read {}: {e}", state_path.display())),
+    )
+    .expect("the state file decodes");
+    let stamp = state
+        .terrain_stamp
+        .clone()
+        .unwrap_or_else(|| panic!("{name}: the stamp is on the state file"));
+    eprintln!("terrain_pictures/{name}: stamp {stamp:?}");
+    // THE STAND HELD STILL: the state file (polled after the capture) and a poll now agree on the
+    // delivered position, so the stamp, the pose and the probe describe one moment.
+    let again = vd_bins::pixel::poll(devctl);
+    let (p_file, _) = vd_bins::pixel::own_pose(&state).expect("the file has the pose");
+    let (p_now, _) = vd_bins::pixel::own_pose(&again).expect("the poll has the pose");
+    assert!(
+        (p_file - p_now).length() <= STILL_TOLERANCE_M,
+        "{name}: the stand moved across the capture: {p_file:?} then {p_now:?}"
+    );
+    // 1. THE GROUND IS IN THE PICTURE — by the probe, not by paint: the share of terrain pixels in
+    //    the lower band, every one of them at the rung the flag named (a bit-exact reading of the
+    //    probe's channel through the sRGB target).
+    let share = probe_share_in_rows(
+        &probe,
         w,
         h,
         (band.0 * h as f64) as usize,
         (band.1 * h as f64) as usize,
+        PROBE_KIND_TERRAIN,
     );
     eprintln!(
-        "terrain_pictures/{name}: {last} chunks drawn, paint share {share:.3} in rows {:?} of {h}",
+        "terrain_pictures/{name}: {last} chunks drawn, terrain share {share:.3} in rows {:?} of {h}",
         band
     );
     assert!(
         share >= min_share,
-        "{name}: the ground is not in the picture: paint share {share:.3} < {min_share}"
+        "{name}: the ground is not in the picture: terrain share {share:.3} < {min_share}"
     );
-    // For the owner: beside the slice document.
+    let terrain = probe_blob(&probe, w, PROBE_KIND_TERRAIN);
+    assert_eq!(
+        (terrain.rung_min, terrain.rung_max),
+        (rung, rung),
+        "{name}: every terrain pixel states the drawn rung: {terrain:?}"
+    );
+    assert_eq!(stamp.rung, rung, "{name}: the stamp states the drawn rung");
+    assert_eq!(
+        stamp.chunks_pending, 0,
+        "{name}: the stamp was taken settled"
+    );
+    // THE PICTURE, JUDGED WHERE THE PROBE POINTS: the ground's lit paint under the probe's ground,
+    // red under its ball. The probe alone would pass a black picture.
+    let ground_paint = paint_under_probe(&rgba, &probe, PROBE_KIND_TERRAIN, warm);
+    let ball_paint = paint_under_probe(&rgba, &probe, PROBE_KIND_RULER, red);
+    eprintln!(
+        "terrain_pictures/{name}: paint under the probe — ground {ground_paint:.3}, ball {ball_paint:.3}"
+    );
+    assert!(
+        ground_paint >= PAINT_UNDER_PROBE_MIN,
+        "{name}: the picture is not lit ground where the probe says ground: {ground_paint:.3}"
+    );
+    assert!(
+        ball_paint >= RED_UNDER_PROBE_MIN,
+        "{name}: the picture is not the red ball where the probe says ball: {ball_paint:.3}"
+    );
+    // 2. THE STAMP'S OWN TRUTH (M8-4): the eye from the state's pose through the pilot camera, in
+    //    the planet's frame — its row's centre and its DELIVERED facing, the same four numbers the
+    //    renderer turns the terrain by — against the recipe.
+    let camera = vd_bins::pixel::pilot_camera(&state, w, h);
+    let label = format!("{planet:?}");
+    let row = state
+        .realm_boxes
+        .iter()
+        .find(|b| b.realm == label)
+        .expect("the planet's row is drawn");
+    let centre = DVec3::from_array(row.center);
+    let facing =
+        vd_core::glam::DQuat::from_xyzw(row.facing[0], row.facing[1], row.facing[2], row.facing[3])
+            .normalize();
+    let eye_body = facing.inverse() * (camera.eye - centre);
+    let ground = eye_surface(body, eye_body.to_array()).expect("the eye has a direction");
+    assert!(
+        (stamp.altitude_m - ground.altitude_m).abs() <= ALTITUDE_TOLERANCE_M,
+        "{name}: the stamp's altitude {:.3} m vs the state's {:.3} m",
+        stamp.altitude_m,
+        ground.altitude_m
+    );
+    assert!(
+        (stamp.surface_m - ground.surface_m).abs() <= ALTITUDE_TOLERANCE_M,
+        "{name}: the stamp's surface {:.3} m vs the state's {:.3} m",
+        stamp.surface_m,
+        ground.surface_m
+    );
+    assert_eq!(
+        stamp.biome,
+        format!("{:?}", ground.biome),
+        "{name}: the stamp's biome"
+    );
+    let expected_horizon = horizon_m(ground.surface_m, ground.altitude_m);
+    assert!(
+        (stamp.horizon_m - expected_horizon).abs() <= HORIZON_TOLERANCE_M,
+        "{name}: the stamp's horizon {:.1} m vs {:.1} m",
+        stamp.horizon_m,
+        expected_horizon
+    );
+    // 3. THE LIGHT, in the renderer's own reading.
+    let star = stamp
+        .star
+        .unwrap_or_else(|| panic!("{name}: the ground is lit by the star, not a work light"));
+    assert!(
+        (SUN_ELEVATION_BAND_DEG.0..=SUN_ELEVATION_BAND_DEG.1).contains(&star.elevation_deg),
+        "{name}: the star stands {:.2}° up, outside {SUN_ELEVATION_BAND_DEG:?}",
+        star.elevation_deg
+    );
+    assert!(
+        (SUN_OFF_NOSE_BAND_DEG.0..=SUN_OFF_NOSE_BAND_DEG.1).contains(&star.off_nose_deg),
+        "{name}: the star stands {:.2}° off the nose, outside {SUN_OFF_NOSE_BAND_DEG:?}",
+        star.off_nose_deg
+    );
+    // 4. THE RULER: the stamp's stated ball, projected through the pilot camera, against its disc on
+    //    the probe — the radius within one pixel, the centroid within one pixel — and the probe's
+    //    distance under it against the stamp's.
+    let ruler = stamp
+        .ruler
+        .unwrap_or_else(|| panic!("{name}: the centre ray meets the drawn ground"));
+    let rect = projected_point_aabb(
+        &camera,
+        camera.eye + DVec3::from_array(ruler.centre_m),
+        ruler.radius_m,
+    )
+    .expect("the ruler is ahead of the eye");
+    let predicted_px = (rect.max.x - rect.min.x) * 0.5;
+    let predicted_centre = (
+        f64::midpoint(rect.min.x, rect.max.x),
+        f64::midpoint(rect.min.y, rect.max.y),
+    );
+    let disc = probe_blob(&probe, w, PROBE_KIND_RULER);
+    let measured_px = equivalent_radius_px(disc.count);
+    let centroid = disc.centroid.expect("the ruler is on the probe");
+    eprintln!(
+        "terrain_pictures/{name}: ruler r {:.3} m at {:.1} m — predicted {predicted_px:.2} px at \
+         ({:.1}, {:.1}), measured {measured_px:.2} px at ({:.1}, {:.1}) from {} pixels, cells \
+         {}..{} of {} m",
+        ruler.radius_m,
+        ruler.distance_m,
+        predicted_centre.0,
+        predicted_centre.1,
+        centroid.0,
+        centroid.1,
+        disc.count,
+        disc.cells_min,
+        disc.cells_max,
+        stamp.cell_m
+    );
+    assert!(
+        (measured_px - predicted_px).abs() <= RULER_TOLERANCE_PX,
+        "{name}: the ruler's disc measures {measured_px:.2} px, its projection {predicted_px:.2} px"
+    );
+    let drift = (centroid.0 - predicted_centre.0).hypot(centroid.1 - predicted_centre.1);
+    assert!(
+        drift <= RULER_TOLERANCE_PX,
+        "{name}: the ruler's centroid stands {drift:.2} px from its projection"
+    );
+    assert_eq!(
+        (disc.rung_min, disc.rung_max),
+        (rung, rung),
+        "{name}: the ruler's pixels state the drawn rung"
+    );
+    // The G/B channel, measured: the ball's nearest pixel is `d − r` off, its rim `√(d² − r²)`
+    // (within a fiftieth of a cell of `d` at this angular size), each within one cell.
+    let near_cells = (ruler.distance_m - ruler.radius_m) / stamp.cell_m;
+    let rim_cells = (ruler.distance_m * ruler.distance_m - ruler.radius_m * ruler.radius_m).sqrt()
+        / stamp.cell_m;
+    assert!(
+        (f64::from(disc.cells_min) - near_cells).abs() <= RULER_CELLS_TOLERANCE,
+        "{name}: the probe's nearest ruler distance {} cells vs the stamp's {near_cells:.1}",
+        disc.cells_min
+    );
+    assert!(
+        (f64::from(disc.cells_max) - rim_cells).abs() <= RULER_CELLS_TOLERANCE,
+        "{name}: the probe's farthest ruler distance {} cells vs the stamp's rim {rim_cells:.1}",
+        disc.cells_max
+    );
+    // DRAWN GROUND UNDER THE BALL: the rows just under its rim, at its centroid's column, are
+    // terrain on the probe — the ball hovers over ground the picture shows, not over nothing.
+    let cx = centroid.0.round() as usize;
+    let rim_y = (centroid.1 + measured_px).round() as usize;
+    let mut k = GROUND_UNDER_BALL_ROWS.0;
+    while k <= GROUND_UNDER_BALL_ROWS.1 {
+        let y = rim_y + k;
+        assert!(y < h, "{name}: the ball's rim is at the frame's bottom");
+        let i = (y * w + cx) * 4;
+        let px = vd_client_harness::probe::decode_probe([probe[i], probe[i + 1], probe[i + 2]]);
+        assert_eq!(
+            px.kind, PROBE_KIND_TERRAIN,
+            "{name}: no drawn ground {k} px under the ball at ({cx}, {y}): {px:?}"
+        );
+        k += 1;
+    }
+    // For the owner: beside the slice document, the picture and its probe.
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(PICTURE_DIR);
     std::fs::create_dir_all(&dir).expect("the picture directory");
     let dest = dir.join(format!("{name}.png"));
     std::fs::copy(&png, &dest).expect("copy the picture");
+    std::fs::copy(&probe_png, dir.join(format!("{name}.probe.png"))).expect("copy the probe");
     eprintln!("terrain_pictures/{name}: written to {}", dest.display());
     (last, share)
 }
@@ -509,37 +762,43 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let (ground_chunks, ground_share) = take_picture(
         &f,
         a.gateway,
+        &body,
+        planet,
         &Picture {
             name: "ground",
             agent_index: 0,
             rung: GROUND_RUNG,
             radius: GROUND_RADIUS,
             band: (0.55, 1.0),
-            min_share: 0.30,
+            min_share: 0.95,
         },
     );
     let (hill_chunks, hill_share) = take_picture(
         &f,
         a.gateway,
+        &body,
+        planet,
         &Picture {
             name: "hill",
             agent_index: 1,
             rung: HILL_RUNG,
             radius: HILL_RADIUS,
             band: (0.5, 1.0),
-            min_share: 0.30,
+            min_share: 0.95,
         },
     );
     let (aloft_chunks, aloft_share) = take_picture(
         &f,
         a.gateway,
+        &body,
+        planet,
         &Picture {
             name: "aloft",
             agent_index: 2,
             rung: ALOFT_RUNG,
             radius: ALOFT_RADIUS,
             band: (0.5, 1.0),
-            min_share: 0.30,
+            min_share: 0.95,
         },
     );
     eprintln!(

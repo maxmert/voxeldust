@@ -93,6 +93,15 @@ pub fn state_rel_for(rel_path: &str) -> String {
     format!("state/{stem}.json")
 }
 
+/// THE PROBE BESIDE THE PICTURE (slice 8p): `shots/foo.png` → `shots/foo.probe.png`. The render
+/// thread writes the probe there; a gate derives the path from the picture's own with this rule and
+/// never guesses a second one. A path without the `.png` suffix gets the suffix appended whole.
+#[must_use]
+pub fn probe_rel_for(rel_path: &str) -> String {
+    let stem = rel_path.strip_suffix(".png").unwrap_or(rel_path);
+    format!("{stem}.probe.png")
+}
+
 /// Sanitize an agent-supplied name into a single SAFE path component: `[A-Za-z0-9_-]`
 /// kept, everything else (slashes, dots, spaces, …) mapped to `_`, and an empty result
 /// becomes `"capture"`. The ONE filename rule for everything an agent names on disk
@@ -157,6 +166,7 @@ mod tests {
             terrain_chunks_pending: 0,
             camera_mode: "none".to_owned(),
             star_probe: Vec::new(),
+            terrain_stamp: None,
             sky_anchor: None,
             // A fixture has heard no beat (S11).
             sky_watch: "NeverHeard".to_owned(),
@@ -248,6 +258,16 @@ mod tests {
         // No directory, and a non-.png path, both handled.
         assert_eq!(state_rel_for("hero.png"), "state/hero.json");
         assert_eq!(state_rel_for("weird"), "state/weird.json");
+    }
+
+    #[test]
+    fn the_probe_sits_beside_its_picture() {
+        assert_eq!(probe_rel_for("shots/hero.png"), "shots/hero.probe.png");
+        assert_eq!(
+            probe_rel_for("runs/x/shots/ground.png"),
+            "runs/x/shots/ground.probe.png"
+        );
+        assert_eq!(probe_rel_for("weird"), "weird.probe.png");
     }
 
     #[test]

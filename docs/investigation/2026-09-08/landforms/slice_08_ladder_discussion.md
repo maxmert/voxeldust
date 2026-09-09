@@ -188,6 +188,32 @@ The packing is a client-side choice; the extractor's vertices are `i16` already.
 | D8-5 | The pop detector's legs | (A) a hull at 1.4, 240 and 528 m/s; (B) only the two fast legs, the walk waits for the character | **(A)** | The 1.4 m/s regime is the one the player sees most; the suit ruling lets a hull fly it |
 | D8-6 | The globe beyond the band | (A) the rung above the coarsest drawn, from the crate; (B) keep the proxy outline | **(A)** | A realm draws itself (SL3) from its own recipe; the outline was a placeholder |
 | D8-7 | The stamp's fields (8p) | the list in §2 | **the list** | Each field is measured, never typed; the owner asked for orienters |
+| D8-8 | **The far-rung renderer** (owner, 2026-09-09: Enshrouded draws its far levels as CUBES, not triangles) | (A) every rung is a surface-nets MESH, as today; (B) the near rungs are meshes and the far rungs are the ladder's own VOXELS drawn as cubes or splats, one cell per pixel or more; (C) decided by a measurement in the look phase | **(C), and this slice keeps the seam OPEN for it:** the client library hands the engine a chunk's CELLS beside its mesh (it holds both today), the tier rule and the crossfade are written per column and not per triangle, and the dither works on either. Nothing in slice 8 chooses a triangle. | The far rungs ARE voxel grids already (rung L is the recipe at 2^L m cells, edits folded in); a cell drawn at one pixel is the same picture as a triangle, so the mesh's extraction (60 % of a chunk's cost) and its 254–405 KB are the price of a smoothness no far pixel shows. The choice is a LOOK decision (V13 addendum: after the freeze), and the foundation must not close it |
+
+### 9.1 What the far view must keep open (owner, 2026-09-09)
+
+The owner's target is a picture indistinguishable from reality, with everything players build visible
+from very far. Three things in THIS slice decide whether that stays reachable, and each is kept open:
+
+1. **The ladder is voxels, not triangles.** Rung `L` is the recipe's own cell grid at `2^L` metres with
+   the edit pyramid's deltas folded in (ruling V4 row 7; S5-3). A tower a player built is a set of
+   cells at rung 0 and a set of coarser cells at every rung above, so it is visible from as far as
+   its reach says, drawn from the same rung as the ground around it. This slice's tier rule and
+   residency band are stated per COLUMN of cells, so they serve a mesh renderer and a voxel
+   renderer alike (D8-8).
+2. **The mesh is one of two lowerings.** The client library already holds a chunk's cells (it runs
+   the recipe) and turns them into a mesh. It keeps both. Which one the engine draws at a far rung
+   is a look decision, measured after the freeze.
+3. **The metre is the shape's floor, not the picture's.** On 1 m cells the finest clean feature of
+   the height field is about 8 m (`04` §4.7); 1 m to 8 m relief comes from the fine floor and from
+   PLACED ROCK with its own collider; below 1 m the detail is the surface's MATERIAL (textures,
+   detail normals, displacement) and small objects — client work, after the freeze, on a seam the
+   shape does not touch.
+
+**Example.** A pilot builds a stone tower 60 m tall on the new home planet. At rung 0 it is 60
+cells of stone; at rung 6 it is one cell. From 100 km her friend sees a one-pixel speck where the
+tower stands, drawn from the rung-6 cells the pyramid holds — as a cube, if D8-8's measurement says
+cubes, as a triangle if not — and the picture is the same either way at that distance.
 
 ## 10. Laws
 
@@ -222,3 +248,64 @@ over the horizon and 100°–140° off the camera's nose, one light and one shad
 set for this slice: the ground at 1.8 m with the ladder to the horizon; the same from a hill; the
 approach sequence from 10 000 km to the ground, for the pop detector; and the globe from 2 000 km,
 where the rung above the band is what the owner sees.
+
+## 13. 8p — the picture instrument, BUILT (2026-09-09)
+
+Step 1 of §11 is done on the one-rung pictures. Every judged picture now carries the stamp, the
+probe, the ruler and one light at a stated angle, and the gate `terrain_pictures` asserts M8-4.
+
+### 13.1 What was built
+
+| Piece | Where | What it is |
+|---|---|---|
+| The stamp | `vd_devproto::DevTerrainStamp` on `DevState::terrain_stamp`; written by the renderer (`terrain.rs` §6, published by `place_chunks`); shown as four HUD lines on the picture | realm, rung and cell, the recipe's surface under the eye and the eye's height over it, the horizon and its dip, the radius drawn, nearest and farthest chunk, chunks drawn and pending, the star's elevation and azimuth off the nose, the biome, the world identity, the tick, the ruler |
+| The probe | `probe.wgsl` + `ProbeMaterial` (a code instead of a colour), a second camera on render layer 1 (no tonemapping, no dither, no MSAA, black clear), a second `ImageCopier` slot, `shots/<label>.probe.png` beside the picture | per pixel: `R = kind << 5 \| rung`, `G,B` = distance from the eye in cells of the rung; the codec is Tier-A (`vd_client_harness::probe`) and the renderer's uniform is built by it |
+| The twins | `terrain.rs`: every chunk gets a twin on layer 1 with the probe material; the ruler gets one too | what the probe camera sees; despawned with their chunk |
+| The ruler | `vd_client::chunks::ruler_on_surface` (Tier-A): the eye's centre ray marched one cell at a time to the drawn rung's surface, refined by bisection; a ball of radius `hit distance × tan 2°` (never under half a cell), hovering one radius clear of the ground | a subject of known size in every picture, at the same angular size on every stand; its shadow is the second orienter |
+| The light | the stamp's `star`, from `star_angles` (Tier-A) on the brightest row, the local up and the camera's nose | asserted 12°–18° up and 100°–140° off the nose |
+| The gate | `crates/bins/tests/terrain_pictures.rs` | the probe replaces the paint classifier of slice 7; M8-4 below |
+
+### 13.2 M8-4, MEASURED (three stands, the green flight of 2026-09-09)
+
+| Stand | Altitude (stamp = state) | Horizon | Ruler: predicted / measured radius | Probe cells under the ruler / stamp |
+|---|---|---|---|---|
+| ground, rung 0 | 3.382 m | 6.57 km, dip 0.06° | 30.65 px / 30.55 px | 28..29 / 28.2 |
+| hill, rung 3 | 301.54 m | 62.0 km, dip 0.56° | 30.91 px / 30.85 px | 140..145 / 139.7 |
+| aloft, rung 9 | 60 001.5 m | 876.6 km, dip 7.83° | 30.83 px / 30.75 px | 461..479 / 461.4 |
+
+Every terrain pixel of every probe states the flag's rung (a bit-exact reading of the probe's
+channel through the sRGB target); the star reads 15.00° up and 120.00° off the nose on all three;
+the terrain share in the lower band is 1.000 on all three; the ruler's centroid stands under 0.8 px
+from its projection; the probe's far rim under the ball reads `√(d² − r²)/cell` within one cell.
+THE PICTURE ITSELF is judged where the probe points (the refuter's finding 1): the ground's lit
+paint under the probe's ground reads 1.000 / 1.000 / 0.999, the ball's red hue under its disc
+0.981 / 0.985 / 0.988 — a black picture with a perfect probe fails.
+
+The refutation and its answers: `verdicts/slice_08p_refutation.md` (19 findings; 15 fixed, 4
+answered with a measurement or a bound). The row's delivered FACING now rides the state
+(`DevRealmBox::facing`), so the gate rotates the eye into the planet's frame instead of assuming
+the identity.
+
+### 13.3 What the instrument found on its first flights
+
+1. **The stamp read the wrong planet.** The window holds every planet of the system with a
+   surface statement; "the body under the eye" was the FIRST by id — a sibling 29 000 km away —
+   and the stamp read an altitude of 29 416 km. The work light had carried the same choice
+   silently since M8-L. Now: the body whose surface is nearest the eye.
+2. **A capture showed the frame before its request.** The readback runs one or two frames behind
+   the world, and the serve took the LATEST readback. The gate waited for "no chunk pending", asked
+   for the picture, and the hill picture showed a black gap on the ridge with three chunks
+   pending. Now every readback carries the main-world frame it was extracted at, a job remembers
+   the frame it arrived in, and it is served only by a readback stamped at or after it. Every
+   capture gate in the tree inherits this.
+3. **The horizon from the ladder's floor was 184 km for an eye 3.4 m up.** The floor radius stands
+   2 650 m under this planet's recipe. The horizon is now the sphere through the surface under
+   the eye.
+
+### 13.4 What the pictures say now (the owner's orienters)
+
+On the ground the eye is 3.4 m over the recipe and the ball 29 m ahead is 2 m across; the drawn
+patch ends 0.37 km out, far inside the 6.6 km horizon — the black edge is the one rung's radius
+(`D-TERRAIN-3`), which step 2 replaces with the rungs beyond. From the hill the ball is 82 m
+across at 1.2 km. From 60 km up the ball is 17 km across at 245 km and the drawn patch reaches
+548 km, past the 877 km horizon's dip.

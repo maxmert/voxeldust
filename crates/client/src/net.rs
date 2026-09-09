@@ -822,6 +822,7 @@ impl ClientState {
             terrain_chunks_pending,
             camera_mode,
             star_probe,
+            terrain_stamp,
         } = counters;
         let render_cursor = self.cursor(now_s).map(sanitize_f64);
         // Entities are sampled at the cursor only once it is anchored (a snapshot has
@@ -872,6 +873,14 @@ impl ClientState {
                 // a test asserts against: the "player rides its realm" gate reads THIS value, so it was
                 // effectively comparing the client to itself.
                 center: sanitize_vec3(b.draw_center()),
+                // The delivered facing, verbatim (the same four numbers the renderer turns the
+                // row's terrain by).
+                facing: sanitize_quat(vd_core::glam::DQuat::from_xyzw(
+                    f64::from(b.facing[0]),
+                    f64::from(b.facing[1]),
+                    f64::from(b.facing[2]),
+                    f64::from(b.facing[3]),
+                )),
                 // SHAKE DIAGNOSIS: which moment THIS box is being drawn from. A box whose tick tracks
                 // `entity_feed_newest_tick` shares the player's moment; one that drifts is authored by a
                 // shard whose clock is running independently. `None` = never streamed (boot placement).
@@ -962,6 +971,7 @@ impl ClientState {
             terrain_chunks_pending,
             camera_mode: vd_devproto::camera_mode_name(camera_mode).to_owned(),
             star_probe,
+            terrain_stamp,
             transfer: DevTransferView::None,
         }
     }
@@ -987,6 +997,8 @@ pub struct DevCounters {
     pub camera_mode: u8,
     /// The renderer's own projection of its brightest drawn stars; empty with no renderer.
     pub star_probe: Vec<vd_devproto::DevStarProbe>,
+    /// The renderer's terrain stamp (slice 8p); `None` with no renderer or no ground drawn.
+    pub terrain_stamp: Option<vd_devproto::DevTerrainStamp>,
 }
 
 /// One drawn box's extent in metres — a sphere's radius, a box's half-diagonal length, and 0
@@ -3110,6 +3122,25 @@ mod tests {
                     y: 2.0,
                     amplitude: 3.0,
                 }],
+                terrain_stamp: Some(vd_devproto::DevTerrainStamp {
+                    realm: "Planet(7)".to_owned(),
+                    rung: 0,
+                    cell_m: 1.0,
+                    surface_m: 100.0,
+                    altitude_m: 3.4,
+                    horizon_m: 26.3,
+                    horizon_dip_deg: 14.9,
+                    drawn_radius_m: 62.0,
+                    chunk_nearest_m: 1.0,
+                    chunk_farthest_m: 60.0,
+                    chunks_drawn: 3,
+                    chunks_pending: 2,
+                    star: None,
+                    biome: "Desert".to_owned(),
+                    world: "0x1".to_owned(),
+                    tick: Some(100),
+                    ruler: None,
+                }),
             },
         );
         assert_eq!(s.phase, DevPhase::Active);
@@ -3143,6 +3174,7 @@ mod tests {
         assert_eq!(s.camera_mode, "third-person");
         assert_eq!(s.star_probe.len(), 1);
         assert_eq!(s.star_probe[0].realm, "System(7)");
+        assert_eq!(s.terrain_stamp.as_ref().map(|t| t.altitude_m), Some(3.4));
         // The honesty contract end-to-end: the built state JSON-encodes (finite floats).
         let line =
             vd_devproto::encode_response(&vd_devproto::DevResponse::State { state: s.clone() });

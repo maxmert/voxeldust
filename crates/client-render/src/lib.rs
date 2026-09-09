@@ -23,6 +23,8 @@ use std::time::Instant;
 use arc_swap::ArcSwap;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::camera::RenderTarget;
+use bevy::camera::visibility::RenderLayers;
+use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::image::TextureFormatPixelInfo;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -51,7 +53,7 @@ use vd_client::realm_scene::{
 };
 use vd_client::render_snapshot::RenderSnapshot;
 use vd_client_harness::camera::FollowCamera;
-use vd_client_harness::capture::capture_rel_path;
+use vd_client_harness::capture::{capture_rel_path, probe_rel_for};
 use vd_client_harness::input_map::{self, MovementKeys, mouse_look};
 use vd_client_harness::manifest::CaptureKind;
 use vd_core::EntityId;
@@ -183,6 +185,9 @@ pub struct RenderHandles {
     /// The star probe: the renderer writes its own projection of its brightest drawn stars here
     /// every frame the cloud is placed (see `DevState::star_probe`).
     pub star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
+    /// The terrain stamp (slice 8p): the renderer writes what it measured about the ground it drew
+    /// every frame a body is under the eye (see `DevState::terrain_stamp`).
+    pub terrain_stamp: Arc<std::sync::Mutex<Option<vd_devproto::DevTerrainStamp>>>,
     /// Liveness flag the core thread flips false when its loop EXITS (gateway Close /
     /// panic). The window emits `AppExit` when it sees false — bidirectional shutdown.
     pub core_alive: Arc<AtomicBool>,
@@ -226,6 +231,7 @@ struct Net {
     terrain_pending: Arc<AtomicU64>,
     camera_mode: Arc<std::sync::atomic::AtomicU8>,
     star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
+    terrain_stamp: Arc<std::sync::Mutex<Option<vd_devproto::DevTerrainStamp>>>,
     core_alive: Arc<AtomicBool>,
     started_at: Instant,
 }
@@ -588,6 +594,91 @@ impl Plugin for StarSkyShaderPlugin {
     }
 }
 
+/// ★ THE PROBE (the voxel foundation, slice 8p; ruling V14 D8-7): a second picture, aligned to the
+/// first, in which every pixel says WHAT drew it and HOW FAR it is. A second camera on its own render
+/// layer draws the terrain's TWINS and the ruler's twin with this material, into a second image the
+/// same copier reads back, written beside the picture as `<label>.probe.png`. The codec is Tier-A
+/// (`vd_client_harness::probe`); this material's uniform is built by it and the gate reads pixels
+/// through it, so the two cannot disagree. The colour classifier of slice 7 is retired by it.
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+pub(crate) struct ProbeMaterial {
+    #[uniform(0)]
+    params: ProbeParams,
+}
+
+#[derive(ShaderType, Debug, Clone)]
+pub(crate) struct ProbeParams {
+    /// The R byte, `kind << 5 | rung`, from `probe_byte` — never typed here.
+    code: f32,
+    /// One cell of the rung, in metres: the distance channel's unit.
+    cell_m: f32,
+}
+
+impl ProbeMaterial {
+    /// The material for one kind at one rung.
+    pub(crate) fn new(kind: u8, rung: u8) -> ProbeMaterial {
+        ProbeMaterial {
+            params: ProbeParams {
+                code: f32::from(vd_client_harness::probe::probe_byte(kind, rung)),
+                cell_m: vd_seed::ladder::cell_m(rung) as f32,
+            },
+        }
+    }
+}
+
+impl Material for ProbeMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "embedded://vd_client_render/probe.wgsl".into()
+    }
+}
+
+struct ProbeShaderPlugin;
+
+impl Plugin for ProbeShaderPlugin {
+    fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "probe.wgsl");
+    }
+}
+
+/// The render layer the probe camera sees and the twins live on; the picture's camera and every
+/// drawn thing stay on the default layer, so nothing of the probe reaches the picture.
+pub(crate) const PROBE_LAYER: usize = 1;
+/// The two readback copiers' slots: the picture and the probe.
+const COPIER_MAIN: u8 = 0;
+const COPIER_PROBE: u8 = 1;
+
+/// The probe camera: follows the picture's camera exactly (transform and projection, copied every
+/// frame after the planes are derived), draws only [`PROBE_LAYER`], no tonemapping, no dither, no
+/// multisampling — so a byte written by the probe material is the byte read back.
+#[derive(Component)]
+struct ProbeCam;
+
+/// The probe's own image target (Capture mode), beside [`RenderTargetImage`].
+#[derive(Resource)]
+struct ProbeTargetImage(Handle<Image>);
+
+/// The picture camera's view, read; the probe camera's view, written.
+type PictureCameraQuery<'w, 's> =
+    Query<'w, 's, (&'static Transform, &'static Projection), (With<FollowCam>, Without<ProbeCam>)>;
+type ProbeCameraQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Transform, &'static mut Projection),
+    (With<ProbeCam>, Without<FollowCam>),
+>;
+
+/// Copy the picture camera's transform and projection onto the probe camera, after
+/// `derive_camera_planes` wrote the planes, so both draw the identical view.
+fn follow_probe_camera(main: PictureCameraQuery, mut probe: ProbeCameraQuery) {
+    let Some((t, p)) = main.iter().next() else {
+        return;
+    };
+    for (mut pt, mut pp) in &mut probe {
+        *pt = *t;
+        *pp = p.clone();
+    }
+}
+
 pub fn run(handles: RenderHandles) {
     // The instrument's first reading: a player starts in the chair (see `CameraMode`).
     handles
@@ -617,6 +708,7 @@ fn run_windowed(handles: RenderHandles) {
             terrain_pending: handles.terrain_pending,
             camera_mode: handles.camera_mode,
             star_probe: handles.star_probe,
+            terrain_stamp: handles.terrain_stamp,
             core_alive: handles.core_alive,
             started_at: handles.started_at,
         })
@@ -2039,13 +2131,69 @@ fn draw_hud(ctx: &egui::Context, net: &Net) {
     egui::Area::new(egui::Id::new("vd_hud"))
         .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
         .show(ctx, |ui| {
+            // One reading per line: a wrapped column hid the stamp behind its own words (slice 8p).
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             ui.label("VOXELDUST — dev client");
             ui.label(format!("status:   {}", phase_label(snap.phase())));
             ui.label(format!("location: {location}"));
             ui.label(format!("entity:   {entity}"));
             ui.label(format!("position: {pos}"));
             ui.label(format!("visible:  {}", rendered.len()));
+            // THE STAMP (slice 8p): what the renderer measured about the ground it draws — on the
+            // picture, so the owner reads the scale off it; in the state, so the gate checks it.
+            let stamp = net
+                .terrain_stamp
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(t) = stamp {
+                for line in stamp_lines(&t) {
+                    ui.label(line);
+                }
+            }
         });
+}
+
+/// The stamp as HUD lines — one derivation, shared by the window and the capture.
+fn stamp_lines(t: &vd_devproto::DevTerrainStamp) -> Vec<String> {
+    let star = t.star.as_ref().map_or_else(
+        || "work light (no star in the window)".to_owned(),
+        |a| {
+            format!(
+                "star {:.1}° up, {:.1}° off the nose",
+                a.elevation_deg, a.off_nose_deg
+            )
+        },
+    );
+    let ruler = t.ruler.as_ref().map_or_else(
+        || "none (no probe in this mode, or the centre ray meets no drawn ground)".to_owned(),
+        |r| format!("ball r {:.2} m at {:.1} m", r.radius_m, r.distance_m),
+    );
+    let tick = t.tick.map_or_else(|| "—".to_owned(), |k| k.to_string());
+    vec![
+        format!(
+            "ground:   {:.1} m over the recipe | horizon {:.2} km, dip {:.2}° | {}",
+            t.altitude_m,
+            t.horizon_m / 1000.0,
+            t.horizon_dip_deg,
+            t.biome
+        ),
+        format!(
+            "drawn:    rung {} ({} m cells) to {:.2} km | {} chunks, {} pending | {:.0}..{:.0} m",
+            t.rung,
+            t.cell_m,
+            t.drawn_radius_m / 1000.0,
+            t.chunks_drawn,
+            t.chunks_pending,
+            t.chunk_nearest_m,
+            t.chunk_farthest_m
+        ),
+        format!(
+            "light:    {star} | {} | world {} | tick {tick}",
+            t.realm, t.world
+        ),
+        format!("ruler:    {ruler}"),
+    ]
 }
 
 /// Close the window when the core loop has stopped — a gateway `Close` drove the session
@@ -2099,10 +2247,15 @@ struct RenderTargetImage(Handle<Image>);
 
 /// The render-world → main-world readback channel (crossbeam: a Bevy Resource needs Sync,
 /// which `std::sync::mpsc::Receiver` is not).
+/// One readback: the copier's slot (picture or probe), the main-world frame it was extracted at,
+/// and the padded bytes.
+type Readback = (u8, u64, Vec<u8>);
+/// The freshest readback per slot, with its frame stamp.
+type Readbacks = [Option<(u64, Vec<u8>)>; 2];
 #[derive(Resource, Deref)]
-struct MainWorldReceiver(crossbeam_channel::Receiver<Vec<u8>>);
+struct MainWorldReceiver(crossbeam_channel::Receiver<Readback>);
 #[derive(Resource, Deref)]
-struct RenderWorldSender(crossbeam_channel::Sender<Vec<u8>>);
+struct RenderWorldSender(crossbeam_channel::Sender<Readback>);
 
 /// The headless capture app (no window): renders the scene + egui HUD into an Image, reads
 /// it back each frame, writes a PNG on a dev-control request.
@@ -2126,6 +2279,7 @@ fn run_capture(handles: RenderHandles) {
             terrain_pending: handles.terrain_pending,
             camera_mode: handles.camera_mode,
             star_probe: handles.star_probe,
+            terrain_stamp: handles.terrain_stamp,
             core_alive: handles.core_alive,
             started_at: handles.started_at,
         })
@@ -2175,6 +2329,9 @@ fn run_capture(handles: RenderHandles) {
         .add_plugins((
             StarSkyShaderPlugin,
             MaterialPlugin::<StarSkyMaterial>::default(),
+            // The probe (slice 8p): Capture mode only — a window has no second picture.
+            ProbeShaderPlugin,
+            MaterialPlugin::<ProbeMaterial>::default(),
         ))
         .add_plugins(ImageCopyPlugin)
         .add_plugins(ScheduleRunnerPlugin::run_loop(
@@ -2210,6 +2367,8 @@ fn run_capture(handles: RenderHandles) {
                     place_reference_scaffold,
                 ),
                 derive_camera_planes,
+                // The probe camera takes the decided view and planes (slice 8p).
+                follow_probe_camera,
             )
                 .chain(),
         )
@@ -2242,7 +2401,44 @@ fn setup_capture(
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let handle = images.add(image);
     commands.insert_resource(RenderTargetImage(handle.clone()));
-    commands.spawn(ImageCopier::new(handle.clone(), size, &render_device));
+    commands.spawn(ImageCopier::new(
+        handle.clone(),
+        size,
+        &render_device,
+        COPIER_MAIN,
+    ));
+    // THE PROBE (slice 8p): the same format and size as the picture, its own copier slot, and a
+    // camera that sees only the probe layer. sRGB like the picture: the probe material emits the
+    // linear value whose stored byte is exact (see `probe.wgsl`).
+    let mut probe_image =
+        Image::new_target_texture(CAPTURE_W, CAPTURE_H, TextureFormat::bevy_default(), None);
+    probe_image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let probe_handle = images.add(probe_image);
+    commands.insert_resource(ProbeTargetImage(probe_handle.clone()));
+    commands.spawn(ImageCopier::new(
+        probe_handle.clone(),
+        size,
+        &render_device,
+        COPIER_PROBE,
+    ));
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            // Drawn before the picture's camera (a distinct order silences the ambiguity warning);
+            // black is the probe's "nothing drew this pixel".
+            order: -1,
+            clear_color: ClearColorConfig::Custom(Color::BLACK),
+            ..default()
+        },
+        Projection::Perspective(PerspectiveProjection::default()),
+        Transform::from_translation(Vec3::ZERO).looking_at(Vec3::NEG_Z, Vec3::Y),
+        RenderTarget::Image(probe_handle.into()),
+        RenderLayers::layer(PROBE_LAYER),
+        Tonemapping::None,
+        DebandDither::Disabled,
+        Msaa::Off,
+        ProbeCam,
+    ));
     commands.spawn((
         Camera3d::default(),
         // The SAME projection the windowed camera declares — parity, so the two cameras cannot
@@ -2267,35 +2463,60 @@ fn hud_offscreen(mut ctx: Single<&mut EguiContext, Without<PrimaryEguiContext>>,
     draw_hud(ctx.get_mut(), &net);
 }
 
-/// Serve at most one capture per frame: keep the freshest readback, and once a job is
-/// pending AND a warm frame exists, strip the row-padding, write the PNG, reply.
+/// Serve at most one capture per frame: keep the freshest readback of the picture AND of the probe
+/// (slice 8p — paired by the frame stamp the copier carries, so both PNGs show one frame), and once
+/// a job is pending AND a pair RENDERED AFTER THE REQUEST exists, strip the row-padding, write the
+/// PNGs, reply.
+///
+/// ★ A CAPTURE SHOWS A FRAME AT OR AFTER ITS REQUEST. The readback runs one or two frames behind the
+/// world (pipelined rendering), and this used to serve the LATEST readback — a frame older than the
+/// request. MEASURED on the first stamped hill picture (slice 8p): the gate waited until no chunk was
+/// pending, asked for the picture, and the picture showed three chunks still pending and a black
+/// gap on the ridge — the frame before the wait was satisfied. A job now remembers the frame it
+/// arrived in and is served only by a readback stamped at or after it.
 #[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources
 fn serve_captures(
     mut cfg: ResMut<CaptureCfg>,
     chan: Res<CaptureChannel>,
     receiver: Res<MainWorldReceiver>,
     target: Res<RenderTargetImage>,
+    probe_target: Option<Res<ProbeTargetImage>>,
     images: Res<Assets<Image>>,
     net: Res<Net>,
-    mut latest: Local<Option<Vec<u8>>>,
-    mut pending: Local<Option<CaptureJob>>,
+    mut latest: Local<Readbacks>,
+    mut pending: Local<Option<(CaptureJob, u64)>>,
 ) {
     cfg.frame += 1;
-    while let Ok(data) = receiver.try_recv() {
-        *latest = Some(data);
+    while let Ok((slot, frame, data)) = receiver.try_recv() {
+        latest[usize::from(slot)] = Some((frame, data));
     }
     if pending.is_none()
         && let Ok(job) = chan.0.try_recv()
     {
-        *pending = Some(job);
+        *pending = Some((job, u64::from(cfg.frame)));
     }
-    if cfg.frame < CAPTURE_PRE_ROLL || pending.is_none() {
+    let Some((_, asked_at)) = pending.as_ref() else {
+        return;
+    };
+    if cfg.frame < CAPTURE_PRE_ROLL {
         return;
     }
-    let Some(bytes) = latest.clone() else {
+    let Some((frame, bytes)) = latest[usize::from(COPIER_MAIN)].clone() else {
         return; // no readback frame yet — keep the job pending for a later frame
     };
-    let Some(job) = pending.take() else {
+    if frame < *asked_at {
+        return; // the readback predates the request — the frame it asked for is still in flight
+    }
+    // The probe of the SAME frame, when a probe target exists; a pair from two frames waits for
+    // the next drain (the two copies are sent back to back, so it is at most one frame away).
+    let probe_bytes = match &probe_target {
+        Some(_) => match &latest[usize::from(COPIER_PROBE)] {
+            Some((probe_frame, data)) if *probe_frame == frame => Some(data.clone()),
+            _ => return,
+        },
+        None => None,
+    };
+    let Some((job, _)) = pending.take() else {
         return;
     };
     let shot = cfg.shot;
@@ -2317,12 +2538,23 @@ fn serve_captures(
     // post-roundtrip poll), so the manifest tick identifies the captured world.
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
-    let result = write_capture_png(&path, &target, &images, &bytes).map(|()| CaptureResult {
-        path: path.display().to_string(),
-        rel_path: rel,
-        freshest_tick: snap.freshest_tick(),
-        cursor: snap.cursor(now_s),
-    });
+    let result = write_capture_png(&path, &target.0, &images, &bytes)
+        .and_then(|()| match (&probe_target, probe_bytes) {
+            // The probe beside the picture — the Tier-A pairing rule names its path.
+            (Some(probe), Some(data)) => write_capture_png(
+                &cfg.runs_dir.join(probe_rel_for(&rel)),
+                &probe.0,
+                &images,
+                &data,
+            ),
+            _ => Ok(()),
+        })
+        .map(|()| CaptureResult {
+            path: path.display().to_string(),
+            rel_path: rel,
+            freshest_tick: snap.freshest_tick(),
+            cursor: snap.cursor(now_s),
+        });
     match &result {
         Ok(r) => {
             cfg.shot += 1;
@@ -2336,11 +2568,11 @@ fn serve_captures(
 /// Strip the 256-byte row padding from the raw readback bytes and encode a PNG to `path`.
 fn write_capture_png(
     path: &std::path::Path,
-    target: &RenderTargetImage,
+    target: &Handle<Image>,
     images: &Assets<Image>,
     raw: &[u8],
 ) -> Result<(), String> {
-    let img = images.get(&target.0).ok_or("offscreen image missing")?;
+    let img = images.get(target).ok_or("offscreen image missing")?;
     let pixel_size = img
         .texture_descriptor
         .format
@@ -2389,18 +2621,30 @@ impl Plugin for ImageCopyPlugin {
     }
 }
 
-#[derive(Clone, Default, Resource, Deref, DerefMut)]
-struct ImageCopiers(Vec<ImageCopier>);
+/// The copiers extracted this render frame, with the main-world frame they were extracted at (so
+/// the picture's and the probe's readbacks of one frame pair up in `serve_captures`).
+#[derive(Clone, Default, Resource)]
+struct ImageCopiers {
+    copiers: Vec<ImageCopier>,
+    frame: u64,
+}
 
 #[derive(Clone, Component)]
 struct ImageCopier {
     buffer: Buffer,
     enabled: Arc<AtomicBool>,
     src_image: Handle<Image>,
+    /// Which readback this is: `COPIER_MAIN` or `COPIER_PROBE`.
+    slot: u8,
 }
 
 impl ImageCopier {
-    fn new(src_image: Handle<Image>, size: Extent3d, render_device: &RenderDevice) -> ImageCopier {
+    fn new(
+        src_image: Handle<Image>,
+        size: Extent3d,
+        render_device: &RenderDevice,
+        slot: u8,
+    ) -> ImageCopier {
         let padded_bytes_per_row = RenderDevice::align_copy_bytes_per_row(size.width as usize) * 4;
         let buffer = render_device.create_buffer(&BufferDescriptor {
             label: None,
@@ -2412,6 +2656,7 @@ impl ImageCopier {
             buffer,
             src_image,
             enabled: Arc::new(AtomicBool::new(true)),
+            slot,
         }
     }
 
@@ -2420,8 +2665,15 @@ impl ImageCopier {
     }
 }
 
-fn image_copy_extract(mut commands: Commands, image_copiers: Extract<Query<&ImageCopier>>) {
-    commands.insert_resource(ImageCopiers(image_copiers.iter().cloned().collect()));
+fn image_copy_extract(
+    mut commands: Commands,
+    image_copiers: Extract<Query<&ImageCopier>>,
+    cfg: Extract<Option<Res<CaptureCfg>>>,
+) {
+    commands.insert_resource(ImageCopiers {
+        copiers: image_copiers.iter().cloned().collect(),
+        frame: cfg.as_ref().map_or(0, |c| u64::from(c.frame)),
+    });
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, RenderLabel)]
@@ -2445,7 +2697,7 @@ impl render_graph::Node for ImageCopyDriver {
         else {
             return Ok(());
         };
-        for image_copier in image_copiers.iter() {
+        for image_copier in image_copiers.copiers.iter() {
             if !image_copier.enabled() {
                 continue;
             }
@@ -2492,7 +2744,7 @@ fn receive_image_from_buffer(
     render_device: Res<RenderDevice>,
     sender: Res<RenderWorldSender>,
 ) {
-    for image_copier in image_copiers.0.iter() {
+    for image_copier in image_copiers.copiers.iter() {
         if !image_copier.enabled() {
             continue;
         }
@@ -2507,7 +2759,11 @@ fn receive_image_from_buffer(
         if !matches!(rx.recv(), Ok(Ok(()))) {
             continue;
         }
-        let _ = sender.send(buffer_slice.get_mapped_range().to_vec());
+        let _ = sender.send((
+            image_copier.slot,
+            image_copiers.frame,
+            buffer_slice.get_mapped_range().to_vec(),
+        ));
         image_copier.buffer.unmap();
     }
 }
