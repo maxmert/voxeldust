@@ -309,3 +309,138 @@ patch ends 0.37 km out, far inside the 6.6 km horizon — the black edge is the 
 (`D-TERRAIN-3`), which step 2 replaces with the rungs beyond. From the hill the ball is 82 m
 across at 1.2 km. From 60 km up the ball is 17 km across at 245 km and the drawn patch reaches
 548 km, past the 877 km horizon's dip.
+
+## 14. Step 2 — the tier rule and the ladder to the horizon, BUILT (2026-09-09)
+
+`D-TERRAIN-3` is 🟩: the one-rung flag, its radius, the lane's one-rung refusal and `chunks_around`
+are deleted. The client draws THE LADDER for every body in its window, no flag.
+
+### 14.1 What was built
+
+| Piece | Where | What it is |
+|---|---|---|
+| The tier rule | `vd_client::ladder_view::rung_for_distance` | the finest rung whose cell is one pixel at the reference view, `cell(L) ≥ d · pixel`, the pixel being `vd_core::geometry::drawable_theta_min_rad` (the reach's own floor); switch distances 869 m, 1.7 km, 3.5 km, 7.0 km … |
+| The descent | `LadderView::wanted` | a quadtree from the top rung: every top-rung column within the REACH (the horizon from the eye's height plus the horizon of the recipe's tallest ground, its amplitude sum, 17 km on this planet) is a node; a node is SPLIT into its four children when the rule at its centre asks for a finer rung, DRAWN otherwise. The children tile the parent exactly, so the rings have no hole and no double. MEASURED before the descent: each rung's columns chosen by their own centres left black rectangles at every ring boundary (4 818 hole pixels on the hill, 16 297 aloft); a tiling test (400 directions from under the eye to the horizon, exactly one wanted column each) found the last gap, at the horizon's edge — a column is inside the horizon by its NEAREST point, not its centre |
+| Peaks past the horizon | `sightline_drop_m`, `surface_column` | past the geometric horizon a column is wanted only when its peak clears the sightline's drop `(d − d_h)²/2R` — from the ground a 14 m hill at 20 km, a 700 m mountain at 100 km. MEASURED before it: 6 556 chunks from the ground, most hidden by the planet's curve |
+| The column's own bound | `vd_terrain::digest::column_bound_m`, `surface_column` | the surface is sampled on a 5 × 5 grid per column and the span is widened by the recipe's own bound (each octave's amplitude × `(π·s/λ)²/2`, capped), instead of a whole chunk each way. MEASURED before it: three chunks per column, two empty; after: 692 chunks over 659 columns at rung 0 |
+| Coarse before fine | `WantedSet::keys` order, `overlapping_missing` | the wanted set lists the coarsest ring first; a chunk no longer wanted is released only when every wanted chunk over its footprint has arrived — a lookup on a per-face-and-rung index, never a scan (SL9) |
+| The globe beyond the band | the outermost ring | from 2 000 km the nadir is at the top rung, so the whole visible cap is one ring of 1 189 chunks and the limb is in frame: D8-6 with no proxy outline |
+| The gate | `terrain_pictures`, four stands (ground, hill, aloft, orbit) | every terrain pixel's rung is the rule's rung at the pixel's own distance within one rung; the finest rung on screen is the rule's rung at the eye's height; the reach passes the horizon; the centre column's topmost drawn pixel reaches the horizon's predicted row; NO BLOCK OF NOTHING under drawn ground (`ground_holes`: a hole that survives a one-pixel erosion is a missing chunk; a hairline crack is not) |
+
+### 14.2 MEASURED (the tenth ladder flight of 2026-09-09, after the refutation)
+
+| Stand | Rungs on screen | Chunks | Reach | Pixels one rung off the rule | Crack pixels / blocks |
+|---|---|---|---|---|---|
+| ground, 3.4 m | 0..9 | 4 107 (712, 519, 524, 606, 560, 495, 372, 210, 108, 1) | 465 km | 398 of 632 482 | 90 / 0 |
+| hill, 301 m | 0..9 | 4 514 | 465 km | 25 303 of 744 688 | 506 / 0 |
+| aloft, 60 km | 7..11 | 2 112 (480, 543, 469, 476, 144) | 1 335 km | 35 976 of 582 959 | 450 / 0 |
+| orbit, 2 000 km | 12 | 1 381 | 5 889 km | 0 of 463 413 | 0 / 0 |
+
+Before the refutation's fixes the orbit cap held 1 277 chunks: the 104 more are the columns the
+one-face fold had dropped (finding 1), and the far rings of the ground and hill grew by the peaks
+the coarse field had culled (finding 2). In every column of every picture the topmost drawn pixel
+stands at or above the horizon of the lowest ground the recipe can raise (from orbit three rows
+under the eye's own horizon — the limb is complete). The ruler stands at the rule's rung for its
+distance: rung 0 on the ground, rung 1 from the hill (2 m cells), rung 9 from aloft, rung 12 from
+orbit (a 124 km ball at 3 479 km).
+
+The refutation of this step and its answers: `verdicts/slice_08_step2_refutation.md` (19
+findings; the fold, the coarse-field peak, the one-metre march to 466 km, the never-withdrawn jobs,
+the unbounded span cache, and the argued bound were real, and each is fixed and measured).
+
+### 14.3 What is still owed in this slice, and what the pictures show
+
+- The boundary between two rings is a HARD EDGE with a hairline CRACK where a fine chunk meets a
+  coarse one along their shared edge (the two meshes do not share vertices): MEASURED 151 crack
+  pixels on the ground, 524 on the hill, 450 aloft, none from orbit, none of them a block. That is
+  step 3, the crossfade with the dither and the hysteresis pair (`HYSTERESIS_IN`/`OUT` are stated
+  in the view and applied there): inside the band both rungs are drawn, so a crack in one is
+  covered by the other, and the gate then asserts zero crack pixels.
+- The rings are full circles around the eye (residency around the eye, not the view wedge), so a
+  look-around never builds. The cost is the honest cost of D8-1 A: about 4 000 chunks from the
+  ground, 1.6 GB of mesh at today's bytes — M8-2's census, and step 5's packing is the lever.
+- Past two body radii the proxy outline still stands in for the globe; the handover is a seam the
+  pop detector measures (step 6).
+- The hill's ruler rim read 576 cells against 574.8 at 2 m cells: the probe's low byte is exact to
+  within one step of the target's 8-bit rounding, and the gate's tolerance says so (two cells).
+
+## 15. Step 3 — the crossfade, BUILT (2026-09-09)
+
+`D-TERRAIN-5` item 1 is 🟩: the picture gate asserts ZERO pixels of nothing under drawn ground on
+every stand — not a block, not a crack — and every stand is green.
+
+### 15.1 What was built
+
+| Piece | Where | What it is |
+|---|---|---|
+| The bands | `vd_client::ladder_view::fade_bands`, `HYSTERESIS_IN/OUT` (0.9, 1.1) | around every switch distance `s_L` a band `(0.9 s_L, 1.1 s_L)`; rung `L` is drawn from `0.9 s_{L−1}` to `1.1 s_L`, split while some point of it lies short of `1.1 s_{L−1}`. The band's two edges ARE the hysteresis: nothing flips at either |
+| THE GEOMORPH | `ChunkGeometry::morph`, `ATTRIBUTE_MORPH`, `ladder_fade.wgsl` (vertex) | every vertex carries where its own radial meets the next coarser rung's MESH (`ParentMesh`: the parent chunk's whole surface, every crossed edge of its box, `extract_all_edges`, bucketed by lattice cell; the eight parents a chunk faces, shared through the lane's bounded `ParentCache`); across its fade-out band the vertex slides from its own position to that one, on its own distance from the eye. At `1.1 s_L` the finer vertices lie on the coarser triangles, and the finer rung ends there (the fragment stage discards it past the edge). A hit farther than the sink bound is another surface (a cave) and the field is the target instead |
+| THE SINK | `chunks::sink_m`, `ChunkGeometry::sink`, `ATTRIBUTE_SINK` | nearer than its fade-in edge `1.1 s_{L−1}` — the finer rung's fade-out edge, the same line — a rung drops along each vertex's radial by the recipe's bound on the gap between the two fields plus a cell of each rung (the extractor's placement), from nothing at the line to the whole drop at `0.9 s_{L−1}`. Under that drop the coarser mesh is certainly below the finer one: it never shows through, and where the finer is still building the sunk coarser shows instead of a hole (coarse before fine, SL8). Nothing is discarded on the near side |
+| The shadow pass | `ladder_fade_prepass.wgsl`, `MaterialExtension::prepass_vertex_shader` | the same morph and sink, so the shadows fall from the surface the picture shows; every distance is read from the render frame's origin (the floating origin, where the eye stands), because the shadow pass's view is the light's |
+| THE SKYLINE | `vd_client::skyline` (Tier-A) | what the near ground hides, per azimuth, as a rigorous lower bound: every column inside the eye's horizon raises a WALL — its guaranteed floor over its own footprint quad on the eye's chart — on a fan of 3 600 rays; a column past the horizon is wanted only when its peak bound can show over the LOWEST wall on every ray its circumscribed disc touches. Replaces step 2's sightline drop against the eye's own sphere |
+| The sampled low | `vd_terrain::digest::surface_column` | a column's lowest sample is now a comparison (`lesser`), not a subtraction from the largest float that absorbed every sample: it read 6.9 km, and nothing had read it before the skyline |
+| One cell of margin below | `surface_column` | the extractor gives an edge to the chunk that owns its LOWER cell, so a crossing of a chunk's bottom boundary edge is drawn by the chunk below it; the span's low end steps one cell down |
+| THE SKIRTS | `chunks::add_skirts`, `SKIRT_CELLS` (2) | a strip two cells deep under every boundary edge of a chunk's mesh, facing outward, with its edge's normals, morphing and sinking with its edge. Two neighbours state a shared vertex from one set of quanta, but the engine adds each chunk's own origin to its own single-precision offsets, and the sums differ by a rounding (a tenth of a millimetre at a kilometre) — a hairline crack a pixel's centre can fall into. MEASURED on the hill: one pixel of nothing at 970 m where four rung-1 chunks meet, the same pixel on two flights |
+| The probe | `probe.wgsl` | the same morph, sink and far edge, so what the probe reads is what the picture shows; the ruler ball carries still attributes |
+| The gate | `terrain_pictures` | zero hole pixels (not only zero blocks); the rung rule judged outside the bands (≥ 0.9 exact); the finest rung ON SCREEN (the probe's) is the rule's rung at the eye's height or, inside a band, the finer one still fading; the finest RESIDENT rung at most one under it |
+
+### 15.2 What was measured on the way, and refused
+
+| Attempt | MEASURED | Why it was refused |
+|---|---|---|
+| A complementary dither on each fragment's own distance, both rungs drawn in the band | 116 holes, all in bands | two surfaces that stand apart along a pixel's ray cannot share one weight |
+| The same, the finer rung's weight read on the pixel's ray against a reference sphere | 788 then 895 holes on the horizon rows | ground with relief is not the sphere: a hill seen over a crest reads as the sphere's horizon |
+| The coarser rung whole beneath, the finer dithering out | 47 holes at 13–15 km | a finer hill seen over a near crest dithers out onto a coarser surface under the sightline |
+| The geomorph alone, the coarser whole beneath | 47 holes, the same pixels | not a crossfade defect at all: the ray tracer (`examples/ray_hole`) found the culled column |
+| Learned spans: a built chunk whose surface leaves through a face names its neighbour | 11 705 chunks from the ground against 4 107, 47 holes still | three times the chunks (sealed caves under the surface chain the exits) and no hole removed; taken out again |
+| The sightline drawn against the sphere lowered by the whole relief bound (16 km) | 8 775 chunks from the ground, every far ring a full annulus | rigorous, and culls nothing inside the reach |
+| The skyline over the disc INSCRIBED in each column | nothing culled (8 779) | adjacent discs leave an open bin at every corner, and a far column always found one |
+| A partition by distance on the coarser rung's fragments, once the finer footprint had arrived | 1 hole on the ground stand | two different meshes are not identical between vertices: on a grazing ray the finer read just past the line and the coarser just before it, and both discarded |
+| The skyline's first flight | 34 dark specks on the hill at 950 m, 1.9 km, 3.8 km | not holes: shadows. The shadow pass ran the engine's unmorphed vertex stage (fixed by the prepass stage), and — the specks unchanged after that — the finer rung morphed onto the coarser FIELD while the coarser MESH lies within a cell of it, so the two surfaces crossed each other along every fade-out edge and the coarser's bumps shadowed the finer. Hence the parent MESH as the target |
+| The parent mesh with the parent alone | halo vertices morphed 33 m down into a cave | a lower half's halo stands over the parent's own halo column, whose radial crossings no box can build; the lateral neighbours hold that column as their own last one |
+| The refutation's fixes (the cap as angles, the corners' ray span, the lowered floors, the sink's end past the edge, the seam rule, the alpha-masked prepass, the grown bounds) | 1 hole on the hill at 970 m, the same pixel twice | not any of them: a hairline crack where four rung-1 chunks meet, the engine's own single-precision rounding through two origins, that a pixel's centre sampled. Hence the skirts |
+
+The root cause of the 47 holes, found with the ray tracer: from the ground stand a ridge 15.5 km
+out peeked over one 13 km out, and the rung-4 column of the valley floor between them (its peak
+90 m UNDER the eye's surface, the sphere's tangent 3.9 m OVER it) was culled by step 2's sightline
+test — one row of sky between two crests. The ground between the eye and that valley lies below the
+eye's sphere, so the eye sees over it into a valley the sphere would hide: the sphere test was
+unsound wherever the ground has relief.
+
+### 15.3 MEASURED (the twenty-second flight of 2026-09-09, after the refutation and the skirts)
+
+| Stand | Rungs on screen | Chunks resident | Reach | Pixels one rung off the rule (in the bands) | Morph fallbacks of vertices | Hole pixels / blocks |
+|---|---|---|---|---|---|---|
+| ground, 3.4 m | 0..5 | 5 918 (949, 818, 831, 917, 809, 661, 544, 181, 114, 75, 19) | 465 km | 2 155 of 632 628 | 7 451 of 45 529 074 | 0 / 0 |
+| hill, 301 m | 0..9 | 7 056 (864, 819, 833, 950, 1 052, 904, 851, 382, 217, 154, 30) | 520 km | 77 363 of 749 175 | 8 197 of 49 386 184 | 0 / 0 |
+| aloft, 60 km | 7..11 | 3 526 (rung 6: 166 … rung 11: 300, rung 12: 16) | 1 335 km | 98 553 of 583 371 | 2 145 of 15 436 881 | 0 / 0 |
+| orbit, 2 000 km | 12 | 1 457 (29 at rung 11, 1 428 at rung 12) | 5 889 km | 0 of 463 413 | 14 of 6 651 714 | 0 / 0 |
+
+The chunks grew against step 2 (4 107 / 4 514 / 2 112 / 1 381): the bands hold two rungs over a
+fifth of every ring, and the skyline wants every column the eye can see into where the sphere
+test culled valleys it could see; the refutation's lowered floors (a cell and the sink under the
+field's bound) admit a few hundred more far columns (ground: 5 648 → 5 918). The far rings still
+shrink under the skyline (rung 8: 114 on the ground, against 1 090 with no culling at all). In
+every column of every picture the topmost drawn pixel reaches the horizon of the lowest ground;
+the ruler stands at the rule's rung on every stand. No seam vertex on any stand (all four look at
+mid-face ground). The dark specks at the fade-out edges fell from 34 to 2 pixels on the hill (of
+749 175: shading at the residual crease where a finer triangle cuts across a coarser edge); the
+five dark pixels on the orbit picture are the ruler ball's own shadow at that scale.
+
+### 15.4 What is still owed in this slice
+
+- At a band's far edge a finer triangle that spans a coarser crease is the chord under it; the sink
+  ramp ends past the edge so one finer cell of sink remains there (`sink_end_m`). The pop detector
+  (step 6) measures the edges on a moving eye; splitting the straddling triangles is the exact cure.
+- A vertex on a cube-face edge reads the coarser field from both faces (one target, one row of
+  field-vs-mesh crease along the twelve cube edges); the neighbouring face's parent mesh is the
+  exact cure (D-TERRAIN-5 item 8).
+- Every measurement is a STILL stand (D-TERRAIN-5 item 4): the morph on a moving eye, the arrival
+  of a finer rung over a sunk coarser one, and the skyline's recompute per half metre are owed to
+  M8-1 and step 6.
+- The skyline's cost is not measured on a moving eye: a recompute raises about 36 rays per 62 m
+  column at 1 km (about 2 000 near columns from the ground; MEASURED before the refutation's fix,
+  every wall walked the whole fan of 3 600). M8-2 measures it with the bytes.
+- A sealed cave under the surface is never wanted from above, and a cave that opens sideways is
+  drawn only with its own chunk: the column span is a surface model. The block system's own
+  residency (slice 9) owns caves; registered in `DEFERRED`.

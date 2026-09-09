@@ -9,6 +9,7 @@
 
 use crate::body::BodyDefinition;
 use crate::chunk::{ChunkKey, generate};
+use crate::gf::Gf;
 use vd_seed::bend::Face;
 use vd_seed::digest::{FNV_OFFSET, fnv1a};
 
@@ -86,12 +87,68 @@ pub const GOLDEN_SELF_CHECK_KEYS: [(Face, u8, i32, i32); 8] = [
     (Face::NegY, 255, 1, 2),
 ];
 
+/// The heights that sample a column: a grid of this many points along each edge (the corners, the
+/// centre and the quarter points), so the ground between two samples is a quarter chunk apart and
+/// the column bound below is sixteen times smaller than with the corners alone.
+pub const COLUMN_SAMPLES_PER_EDGE: i32 = 5;
+
+/// THE COLUMN BOUND: how far the surface inside one chunk column can stand from the heights that
+/// sample it, in metres — the recipe's own statement about itself, stated as a bound with a
+/// margin and MEASURED below (`the_column_bound_holds_against_a_dense_sample`). One octave varies
+/// between two samples `s` apart by at most its amplitude times `(π·s/λ)²/2` for a wave of period
+/// `λ`; the surface is sampled on a grid, so the two axes' terms add (a bump between four samples
+/// stands off both), which doubles it; and `λ` here is the octave's noise LATTICE CELL on the
+/// surface (`radius / frequency`, the period of `noise3`'s lattice), which is half a wave's period
+/// at most, so the term is four times a sinusoid's. Capped at the amplitude, summed over the
+/// rung's live octaves, with `s` a quarter chunk. The span reads this instead of a whole chunk of
+/// margin each way: MEASURED on the first ladder (slice 8 step 2), the margin made every column
+/// three chunks tall, two of them empty, and the rung-0 disc cost 2 014 chunks for about 620
+/// columns; with five samples the bound at the coarse rungs kept every far column "visible" over
+/// the horizon, and the grid cut it.
+#[must_use]
+pub fn column_bound_m(body: &BodyDefinition, rung: u8) -> Gf {
+    let edge_m = Gf::from_f64(crate::chunk::CHUNK_EDGE as f64)
+        * Gf::from_f64(f64::from(vd_seed::ladder::cell_m(rung)))
+        / Gf::from_f64(f64::from(COLUMN_SAMPLES_PER_EDGE - 1));
+    let pi = Gf::from_f64(std::f64::consts::PI);
+    // Half of a wave's second-order term, times two axes.
+    let two_axes_half = Gf::ONE;
+    let mut bound = Gf::ZERO;
+    for o in body.octaves_at(rung) {
+        // The octave's lattice cell on the surface: the radius over its frequency.
+        let lattice_m = body.radius_m / o.frequency;
+        let s = pi * edge_m / lattice_m;
+        let curve = s * s * two_axes_half;
+        // min(1, curve), branchless: one minus the positive part of (1 − curve).
+        let share = Gf::ONE - (Gf::ONE - curve).greater(Gf::ZERO);
+        bound += o.amplitude_m * share;
+    }
+    bound
+}
+
+/// What one chunk column holds along the radial: the chunk span of its surface and the surface's
+/// highest point, as the five heights and the column bound state them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColumnSpan {
+    /// The lowest and the highest chunk index that hold the surface, clamped to the band.
+    pub lo: i32,
+    pub hi: i32,
+    /// The lowest and the highest SAMPLED radius, in metres (the grid's own extrema, no bound).
+    pub sampled_low_m: Gf,
+    pub sampled_high_m: Gf,
+    /// The surface's highest radius inside the column, in metres, AT RUNG 0: the highest sample
+    /// plus the column bound plus the dropped octaves' bound (a coarse rung's field lies under the
+    /// true peak by up to the amplitudes it dropped — the refuter's finding: a ridge 14 km up read
+    /// 2 km at the top rung and its whole subtree was culled behind the horizon). What a ladder
+    /// view tests against the sightline's drop past the horizon.
+    pub peak_m: Gf,
+}
+
 /// THE SURFACE SPAN of chunk column `(x, y)` of `face` at a rung: the lowest and the highest chunk
-/// index along the radial that hold the surface at the column's centre and its four corners, one
-/// chunk of margin each way, clamped to the band. Five heights, not a column pass — a client asks
-/// this per wanted column per frame. A slope steeper than the margin (a cliff of more than 62 cells
-/// inside one column) and a cave mouth deeper than the margin are what slice 8's residency band is
-/// for (`D-TERRAIN-3`).
+/// index along the radial that hold the surface at the column's sample grid, widened by the column
+/// bound (above) each way, clamped to the band. Twenty-five heights, not a column pass — a client
+/// asks this per wanted column once and keeps it. A cave mouth under the surface chunk is what
+/// slice 8's residency band is for.
 #[must_use]
 pub fn surface_chunk_span(
     body: &BodyDefinition,
@@ -100,6 +157,13 @@ pub fn surface_chunk_span(
     x: i32,
     y: i32,
 ) -> (i32, i32) {
+    let span = surface_column(body, face, rung, x, y);
+    (span.lo, span.hi)
+}
+
+/// The span AND the peak of a column (see [`surface_chunk_span`]).
+#[must_use]
+pub fn surface_column(body: &BodyDefinition, face: Face, rung: u8, x: i32, y: i32) -> ColumnSpan {
     let edge = crate::chunk::CHUNK_EDGE as i32;
     let key = ChunkKey {
         face,
@@ -110,24 +174,51 @@ pub fn surface_chunk_span(
     };
     let cell = i64::from(vd_seed::ladder::cell_m(rung));
     let floor = i64::from(body.ladder.floor_m);
-    let top = (body.ladder.cells_in_band(rung) as i32 - 1) / edge;
+    let top = top_chunk_z(body, rung);
+    let bound = column_bound_m(body, rung);
+    let dropped = body.dropped_bound_m(rung);
     let mut lo = i32::MAX;
     let mut hi = i32::MIN;
-    for (a, b) in [
-        (edge / 2, edge / 2),
-        (0, 0),
-        (edge - 1, 0),
-        (0, edge - 1),
-        (edge - 1, edge - 1),
-    ] {
-        let site = crate::lattice::site_of(body, key, a, b);
-        let dir = crate::lattice::site_dir(body, key, site);
-        let h = crate::height::height_m(body, dir, rung);
-        let z = (((h.to_i64_floor() - floor) / cell) / i64::from(edge)) as i32;
-        lo = lo.min(z);
-        hi = hi.max(z);
+    let mut low = Gf::from_f64(f64::MAX);
+    let mut high = Gf::ZERO;
+    let step = (edge - 1) / (COLUMN_SAMPLES_PER_EDGE - 1);
+    let mut i = 0;
+    while i < COLUMN_SAMPLES_PER_EDGE {
+        let mut j = 0;
+        while j < COLUMN_SAMPLES_PER_EDGE {
+            let site = crate::lattice::site_of(body, key, i * step, j * step);
+            let dir = crate::lattice::site_dir(body, key, site);
+            let h = crate::height::height_m(body, dir, rung);
+            // One cell of margin at the bottom: the extractor gives an edge to the chunk that owns
+            // its LOWER cell, so a crossing of a chunk's bottom boundary edge is drawn by the chunk
+            // BELOW it; a surface whose low bound lands in a chunk's first cell may cross exactly
+            // there. (The top boundary edge is the chunk's own: no margin above.)
+            let z_lo = ((((h - bound).to_i64_floor() - floor) / cell - 1) / i64::from(edge)) as i32;
+            let z_hi = ((((h + bound).to_i64_floor() - floor) / cell) / i64::from(edge)) as i32;
+            lo = lo.min(z_lo);
+            hi = hi.max(z_hi);
+            // The extrema through the fenced comparisons. (MEASURED before this: the low was
+            // taken as `low − max(low − h, 0)` from the largest float, which every subtraction
+            // absorbed — a column's floor read 6.9 km, and nothing had read it yet.)
+            high = h.greater(high);
+            low = low.lesser(h);
+            j += 1;
+        }
+        i += 1;
     }
-    ((lo - 1).clamp(0, top), (hi + 1).clamp(0, top))
+    ColumnSpan {
+        lo: lo.clamp(0, top),
+        hi: hi.clamp(0, top),
+        sampled_low_m: low,
+        sampled_high_m: high,
+        peak_m: high + bound + dropped,
+    }
+}
+
+/// The highest chunk index along the radial of a rung's band: the last chunk a column can hold.
+#[must_use]
+pub fn top_chunk_z(body: &BodyDefinition, rung: u8) -> i32 {
+    (body.ladder.cells_in_band(rung) as i32 - 1) / crate::chunk::CHUNK_EDGE as i32
 }
 
 /// The chunk index along the radial that holds the SURFACE at the centre column of chunk `(x, y)`
@@ -198,17 +289,68 @@ mod tests {
     use super::*;
     use crate::home::home_planet;
 
-    /// The span holds the centre's surface chunk with a chunk of margin each way, stays inside the
+    /// The span holds the centre's surface chunk, widened by the column bound, stays inside the
     /// band at the top rung (where one chunk is the whole band), and widens on a column whose
     /// corners sit in other chunks than its centre.
     #[test]
-    fn the_surface_span_holds_the_centres_chunk_with_a_margin_and_stays_in_the_band() {
+    fn the_surface_span_holds_the_centres_chunk_within_the_bound_and_stays_in_the_band() {
         let m = home_planet();
         let z = surface_chunk_z(&m, Face::PosX, 0, 300, 700);
         let (lo, hi) = surface_chunk_span(&m, Face::PosX, 0, 300, 700);
-        assert!(lo < z, "{lo} {z}");
-        assert!(hi > z, "{hi} {z}");
+        assert!(lo <= z, "{lo} {z}");
+        assert!(hi >= z, "{hi} {z}");
         assert!(lo >= 0);
+        // The bound: metres at rung 0 (the finest octaves whole, the coarse ones a hair), under the
+        // sum of every live amplitude, and larger at a coarser rung where a chunk spans more ground
+        // — while the coarser rung's own dropped octaves leave it, so it stays under the total.
+        let b0_gf = column_bound_m(&m, 0);
+        let b0 = b0_gf.to_f64();
+        let total0: f64 = m
+            .octaves_at(0)
+            .iter()
+            .map(|o| o.amplitude_m().to_f64())
+            .sum();
+        assert!(b0 > 0.0);
+        assert!(b0 < total0, "{b0} vs {total0}");
+        let b9 = column_bound_m(&m, 9).to_f64();
+        assert!(b9 > b0, "{b9} vs {b0}");
+        let total9: f64 = m
+            .octaves_at(9)
+            .iter()
+            .map(|o| o.amplitude_m().to_f64())
+            .sum();
+        assert!(b9 <= total9 + 1e-9, "{b9} vs {total9}");
+        // The peak stands at or above every sample plus the bound: at least the centre's height.
+        let span = surface_column(&m, Face::PosX, 0, 300, 700);
+        assert_eq!((span.lo, span.hi), (lo, hi));
+        let key = ChunkKey {
+            face: Face::PosX,
+            rung: 0,
+            x: 300,
+            y: 700,
+            z: 0,
+        };
+        let edge = crate::chunk::CHUNK_EDGE as i32;
+        let site = crate::lattice::site_of(&m, key, edge / 2, edge / 2);
+        let dir = crate::lattice::site_dir(&m, key, site);
+        let centre_h = crate::height::height_m(&m, dir, 0);
+        assert!(span.peak_m >= centre_h + b0_gf, "{span:?} vs {centre_h:?}");
+        assert!(span.sampled_low_m <= centre_h);
+        assert!(span.sampled_high_m >= centre_h);
+        // At a coarse rung the peak carries the dropped octaves' bound too: it stands at least the
+        // rung-0 relief bound over the sampled high.
+        let coarse = surface_column(&m, Face::PosX, 9, 3, 5);
+        assert!(
+            coarse.peak_m >= coarse.sampled_high_m + m.dropped_bound_m(9),
+            "{coarse:?}"
+        );
+        // A column of one chunk exists at rung 0 now that the margin is the bound, not a chunk.
+        let mut single = 0;
+        for x in 300..340 {
+            let (lo, hi) = surface_chunk_span(&m, Face::PosX, 0, x, 700);
+            single += i32::from(lo == hi);
+        }
+        assert!(single > 0);
         // The top rung: the band is one chunk, so the span is (0, 0) whatever the heights.
         let top = m.ladder().rungs - 1;
         assert_eq!(surface_chunk_span(&m, Face::PosX, top, 3, 3), (0, 0));
@@ -219,15 +361,74 @@ mod tests {
             assert!(lo <= key.z, "{key:?}: {lo}");
             assert!(hi >= key.z, "{key:?}: {hi}");
         }
-        // A column whose corners disagree with its centre widens the span past ±1: measured over
-        // the columns near the golden +X chunk, at least one span is wider than three chunks OR
-        // every span is exactly three — both are stated, so the loop's `max` arm is exercised.
+        // A column whose corners disagree with its centre widens the span: measured over the
+        // columns near the golden +X chunk, at least one span is two chunks or more.
         let mut widest = 0;
         for x in 300..340 {
             let (lo, hi) = surface_chunk_span(&m, Face::PosX, 0, x, 700);
             widest = widest.max(hi - lo);
         }
-        assert!(widest >= 2, "{widest}");
+        assert!(widest >= 1, "{widest}");
+    }
+
+    /// THE BOUND, MEASURED: over columns near the golden +X chunk at rung 0 and at rung 9, a dense
+    /// sample of the column (every cell on a 16 × 16 grid) never leaves the sampled extrema widened
+    /// by the column bound — the bound is a bound, not an argument (the refuter's finding).
+    #[test]
+    fn the_column_bound_holds_against_a_dense_sample() {
+        let m = home_planet();
+        let edge = crate::chunk::CHUNK_EDGE as i32;
+        for (rung, xs) in [(0u8, 300..316), (9u8, 3..7)] {
+            let bound = column_bound_m(&m, rung);
+            for x in xs {
+                let span = surface_column(&m, Face::PosX, rung, x, 700 >> rung);
+                let key = ChunkKey {
+                    face: Face::PosX,
+                    rung,
+                    x,
+                    y: 700 >> rung,
+                    z: 0,
+                };
+                let mut a = 0;
+                let mut dense_low = Gf::from_f64(f64::MAX);
+                let mut dense_high = Gf::ZERO;
+                while a < edge {
+                    let mut b = 0;
+                    while b < edge {
+                        let site = crate::lattice::site_of(&m, key, a, b);
+                        let dir = crate::lattice::site_dir(&m, key, site);
+                        let h = crate::height::height_m(&m, dir, rung);
+                        assert!(
+                            h >= span.sampled_low_m - bound,
+                            "rung {rung} column {x} cell ({a}, {b}): {h:?} under {span:?} - {bound:?}"
+                        );
+                        assert!(
+                            h <= span.sampled_high_m + bound,
+                            "rung {rung} column {x} cell ({a}, {b}): {h:?} over {span:?} + {bound:?}"
+                        );
+                        dense_low = dense_low.lesser(h);
+                        dense_high = h.greater(dense_high);
+                        b += 4;
+                    }
+                    a += 4;
+                }
+                // The sampled extrema are heights of the column, so each lies within the bound
+                // of the dense extremum on its side — never a sentinel, never absorbed.
+                assert!(
+                    (span.sampled_low_m >= dense_low - bound)
+                        & (span.sampled_low_m <= dense_low + bound),
+                    "rung {rung} column {x}: sampled low {:?} against the dense low {dense_low:?} ± {bound:?}",
+                    span.sampled_low_m
+                );
+                assert!(
+                    (span.sampled_high_m >= dense_high - bound)
+                        & (span.sampled_high_m <= dense_high + bound),
+                    "rung {rung} column {x}: sampled high {:?} against the dense high {dense_high:?} ± {bound:?}",
+                    span.sampled_high_m
+                );
+                assert!(span.sampled_low_m <= span.sampled_high_m);
+            }
+        }
     }
 
     #[test]

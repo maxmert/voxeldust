@@ -274,10 +274,22 @@ fn main() -> ExitCode {
     //    per second on ONE thread and on every core (the threaded workers' shape: one job per
     //    chunk, no shared state), and the bytes per chunk handed to the engine.
     {
-        use vd_client::chunks::{chunks_around, geometry_of};
+        use vd_client::chunks::geometry_of;
+        use vd_client::ladder_view::LadderView;
         let r = body.ladder().radius_m();
         let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
-        let keys = chunks_around(&body, [d[0] * r, d[1] * r, d[2] * r], 0, 4);
+        // The ladder's own wanted set from an eye 3.4 m up (slice 8 step 2), the rung-0 chunks only,
+        // cut to the first 243 — the 9 × 9 columns × 3 chunks the slice-7 measurement used, so the
+        // per-chunk numbers stay comparable.
+        let eye = [d[0] * (r + 3.4), d[1] * (r + 3.4), d[2] * (r + 3.4)];
+        let wanted = LadderView::default().wanted(&body, eye);
+        let keys: Vec<vd_terrain::chunk::ChunkKey> = wanted
+            .keys
+            .iter()
+            .copied()
+            .filter(|k| k.rung == 0)
+            .take(243)
+            .collect();
         let start = Instant::now();
         let mut built = 0usize;
         let mut bytes = 0usize;

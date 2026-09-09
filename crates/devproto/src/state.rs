@@ -328,8 +328,9 @@ pub(crate) mod tests {
             star_probe: Vec::new(),
             terrain_stamp: Some(DevTerrainStamp {
                 realm: "Planet(7)".to_owned(),
-                rung: 3,
-                cell_m: 8.0,
+                rung_min: 0,
+                rung_max: 3,
+                chunks_per_rung: vec![(0, 100), (3, 69)],
                 surface_m: 6_370_001.5,
                 altitude_m: 3.4,
                 horizon_m: 6_582.0,
@@ -339,6 +340,9 @@ pub(crate) mod tests {
                 chunk_farthest_m: 401.0,
                 chunks_drawn: 169,
                 chunks_pending: 2,
+                morph_fallbacks: 3,
+                morph_seam: 0,
+                vertices: 2_000_000,
                 star: Some(DevStarAngles {
                     elevation_deg: 15.0,
                     off_nose_deg: 120.0,
@@ -350,6 +354,8 @@ pub(crate) mod tests {
                     centre_m: [1.0, -2.0, -15.0],
                     radius_m: 0.55,
                     distance_m: 15.2,
+                    rung: 0,
+                    cell_m: 1.0,
                 }),
             }),
             sky_anchor: None,
@@ -396,6 +402,7 @@ pub(crate) mod tests {
         assert!(json.contains("\"altitude_m\":3.4"));
         assert!(json.contains("\"off_nose_deg\":120.0"));
         assert!(json.contains("\"radius_m\":0.55"));
+        assert!(json.contains("\"chunks_per_rung\":[[0,100],[3,69]]"));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
         // The three row-drop honesty counters ride the surface (audit :304 — a wrongly-armed
         // resurrect guard must be VISIBLE to `vdctl state`), each with its distinct sample value.
@@ -421,9 +428,11 @@ pub(crate) mod tests {
 pub struct DevTerrainStamp {
     /// The body under the eye, as `{:?}` of its `RealmId`.
     pub realm: String,
-    /// The rung drawn and its cell size in metres (one rung for one slice — `D-TERRAIN-3`).
-    pub rung: u8,
-    pub cell_m: f64,
+    /// The finest and the coarsest rung on screen (slice 8 step 2: every ring from the eye to the
+    /// horizon), and how many chunks each rung draws, finest first.
+    pub rung_min: u8,
+    pub rung_max: u8,
+    pub chunks_per_rung: Vec<(u8, u64)>,
     /// The recipe's surface radius under the eye, in metres, and the eye's height over it.
     pub surface_m: f64,
     pub altitude_m: f64,
@@ -432,7 +441,8 @@ pub struct DevTerrainStamp {
     /// in degrees.
     pub horizon_m: f64,
     pub horizon_dip_deg: f64,
-    /// The radius this session asks for, in metres (columns × chunk edge × cell).
+    /// How far the ladder reaches, in metres: the horizon from the eye's height plus the horizon of
+    /// the recipe's tallest ground (a peak behind the geometric horizon is still drawn).
     pub drawn_radius_m: f64,
     /// The nearest and farthest drawn chunk's origin from the eye, in metres (0 while none).
     pub chunk_nearest_m: f64,
@@ -440,6 +450,12 @@ pub struct DevTerrainStamp {
     /// Chunks on screen and still building — the same two counts the wait fields read.
     pub chunks_drawn: u64,
     pub chunks_pending: u64,
+    /// The geomorph's counts over the drawn chunks (slice 8 step 3): vertices whose morph
+    /// target fell back to the coarser field (no parent triangle on their radial within the
+    /// sink bound), vertices on a face seam (the field by rule), and vertices in all.
+    pub morph_fallbacks: u64,
+    pub morph_seam: u64,
+    pub vertices: u64,
     /// The star the ground is lit by, or `None` when a work light stands in (no luminous row).
     pub star: Option<DevStarAngles>,
     /// The biome under the eye, as the recipe names it.
@@ -468,6 +484,10 @@ pub struct DevRuler {
     pub centre_m: [f64; 3],
     pub radius_m: f64,
     pub distance_m: f64,
+    /// The rung the ball stands on (the tier rule at its distance) and that rung's cell, in metres:
+    /// the probe states the ball's distance in these cells.
+    pub rung: u8,
+    pub cell_m: f64,
 }
 
 /// One star the renderer projected itself (see `DevState::star_probe`).

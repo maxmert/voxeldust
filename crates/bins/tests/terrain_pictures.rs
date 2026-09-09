@@ -1,23 +1,31 @@
-//! ★ THE FIRST PICTURES OF THE HOME PLANET (the voxel foundation, slice 7; ruling V12 S7-11, M7-4),
-//! WITH THE PICTURE INSTRUMENT (slice 8p; ruling V14 D8-7, M8-4): the client links the one
-//! generator, a login stands on the planet's surface, and the harness takes the pictures the owner
-//! judges — from the ground at rung 0, from a hill at a middle rung, and from aloft at a coarse rung.
-//! Every picture carries the STAMP (what the renderer measured), the PROBE (a second picture in
-//! which every pixel says what drew it and how far it is), the RULER (a ball of known size where the
-//! centre ray meets the ground) and one LIGHT at a stated angle.
+//! ★ THE PICTURES OF THE HOME PLANET TO THE HORIZON (the voxel foundation, slice 7; ruling V12
+//! S7-11, M7-4; slice 8 step 2, ruling V14 D8-1, D8-6), WITH THE PICTURE INSTRUMENT (slice 8p;
+//! ruling V14 D8-7, M8-4): the client links the one generator, a login stands on the planet's
+//! surface, and the harness takes the pictures the owner judges — from the ground, from a hill, from
+//! aloft, and from orbit where the globe's limb is in frame. The client draws THE LADDER: every ring
+//! from the rung under the eye out to the horizon and the peaks behind it, by the tier rule (one
+//! cell = one pixel at the reference view), no flag. Every picture carries the STAMP (what the
+//! renderer measured), the PROBE (a second picture in which every pixel says what drew it, at which
+//! rung, and how far it is), the RULER (a ball of known size where the centre ray meets the ground)
+//! and one LIGHT at a stated angle.
 //!
 //! **The path is the shipped one.** A DEMAND cluster (orchestrator + gateway, no shard pre-booked);
 //! the stand-in spawn poses put three accounts INSIDE the home planet's realm (slice 7 gave the
 //! stand-in a realm name and a facing): on the planet's DAY SIDE — the star's direction comes from the
 //! planet's own orbit, the same elements its shard authors — each born with the radial as its up and
 //! its nose toward the star, a little below level. One stands 1.8 m over the surface the recipe
-//! states, one 300 m over it, one 60 km over it. The login demands the planet's chain; the planet's
-//! shard boots and states its surface; the capture client draws the chunks around the eye at the rung
-//! the flag names (`D-TERRAIN-3`: one rung, for one slice) and answers the harness with
-//! `terrain_chunks_drawn`, the instrument this gate waits on — never a sleep standing in for a signal.
+//! states, one 300 m over it, one 60 km over it, one 2 000 km over it with its nose 45° down so the
+//! limb is in frame. The login demands the planet's chain; the planet's shard boots and states its
+//! surface; the capture client draws the ladder and answers the harness with `terrain_chunks_drawn`
+//! and `terrain_chunks_pending`, the instruments this gate waits on — never a sleep standing in for
+//! a signal.
 //!
-//! **What is asserted (M8-4, the stamp's own truth).** The probe says the lower half of the frame is
-//! terrain, at the rung the flag named, on every pixel, AND THE PICTURE IS JUDGED THERE: where the
+//! **What is asserted (M8-4, the stamp's own truth; step 2, the ladder).** The probe says the lower
+//! half of the frame is terrain, and EVERY TERRAIN PIXEL'S RUNG IS THE TIER RULE'S RUNG FOR ITS OWN
+//! DISTANCE within one rung (the boundary runs by the column's centre, a pixel by its own point);
+//! the finest rung on screen is the rule's rung at the eye's height; the ladder reaches past the
+//! horizon and the terrain in the picture's centre column reaches up to the horizon's own row, so
+//! there is no black between the ground and the sky; AND THE PICTURE IS JUDGED THERE: where the
 //! probe says ground, the picture's own pixels carry the ground's lit paint; where it says the ball,
 //! the picture is red (the probe knows only the terrain and the ruler, so a marker or a box over the
 //! ground is caught by the picture's paint under the probe, not by the probe). The stamp's altitude
@@ -39,11 +47,12 @@ use vd_bins::{
     reap_forked, reserve_tcp_addr, reserve_udp_addr,
 };
 use vd_client::chunks::eye_surface;
+use vd_client::ladder_view::{in_fade_band, rung_for_distance};
 use vd_client_harness::assert::magenta_pixel_count;
 use vd_client_harness::capture::{probe_rel_for, state_rel_for};
 use vd_client_harness::probe::{
-    PROBE_KIND_RULER, PROBE_KIND_TERRAIN, equivalent_radius_px, horizon_m, probe_blob,
-    probe_share_in_rows,
+    PROBE_KIND_NONE, PROBE_KIND_RULER, PROBE_KIND_TERRAIN, decode_probe, equivalent_radius_px,
+    ground_holes, horizon_m, probe_blob, probe_share_in_rows,
 };
 use vd_client_harness::verdict::projected_point_aabb;
 use vd_core::glam::DVec3;
@@ -59,6 +68,8 @@ const EYE_HEIGHT_M: f64 = 1.8;
 const HILL_M: f64 = 300.0;
 /// Altitude for the aloft picture, in metres.
 const ALOFT_M: f64 = 60_000.0;
+/// Altitude for the orbit picture, in metres: the globe's limb in frame (D8-6).
+const ORBIT_M: f64 = 2_000_000.0;
 /// The star's height over the standing point's horizon, in degrees (M8-L, ruling V13 L23: a raking
 /// light, 12°–18°): low enough that every spur throws a shadow, high enough that the ground is lit.
 const SUN_ELEVATION_DEG: f64 = 15.0;
@@ -73,20 +84,38 @@ const SUN_OFF_NOSE_BAND_DEG: (f64, f64) = (100.0, 140.0);
 const GROUND_TILT_DEG: f64 = 8.0;
 const HILL_TILT_DEG: f64 = 15.0;
 const ALOFT_TILT_DEG: f64 = 15.0;
+/// From orbit the horizon dips 40° below level; a nose 45° down puts the limb 5° over the frame's
+/// centre and the centre ray on the ground inside it.
+const ORBIT_TILT_DEG: f64 = 45.0;
 /// A day of universe ticks at the dev cluster's rate: the bound on how far from the clock's genesis
 /// a picture may be taken while its day side is computed at genesis.
 const TICKS_PER_DAY: u64 = 86_400 * 20;
-/// The rung and radius per picture (the one-rung dev flag, `D-TERRAIN-3`).
-const GROUND_RUNG: u8 = 0;
-const GROUND_RADIUS: i32 = 6;
-const HILL_RUNG: u8 = 3;
-const HILL_RADIUS: i32 = 6;
-const ALOFT_RUNG: u8 = 9;
-const ALOFT_RADIUS: i32 = 12;
 /// The login and the terrain's arrival, in client ticks (20 Hz): a planet shard must boot and the
-/// workers must build a few dozen chunks.
+/// workers must build the ladder — MEASURED about 4 300 chunks from the ground at 4 ms each on one
+/// thread, so a few seconds on every core; the wait allows a slow machine three minutes.
 const LOGIN_DEADLINE: Duration = Duration::from_secs(120);
-const TERRAIN_WAIT_TICKS: u64 = 1_800;
+const TERRAIN_WAIT_TICKS: u64 = 3_600;
+/// A terrain pixel's rung against the tier rule at the pixel's own distance: inside a crossfade
+/// band a pixel belongs to either of the band's two rungs by design, so the rule is asserted
+/// within one rung there; OUTSIDE every band a pixel sits on the rule's rung, and the share of
+/// such pixels that do must be high (MEASURED before the bands: 99.9 % on the ground, 96.6 % from
+/// the hill, 93.8 % aloft), so a rule off by one everywhere cannot pass.
+const RUNG_TOLERANCE: u8 = 1;
+const RUNG_EXACT_SHARE_MIN: f64 = 0.9;
+
+/// In EVERY column of the picture the topmost drawn pixel reaches at least up to the row of the
+/// horizon of the LOWEST GROUND THE RECIPE CAN RAISE — the sphere of the surface under the eye
+/// minus the recipe's relief bound — within this many rows. A skyline can stand under the sphere
+/// through the eye's own surface wherever the ground toward the horizon is lower (MEASURED on the
+/// ground stand: 28 rows, 1.75°, at the far left, where the stand's own hill overlooks a valley),
+/// and never under the horizon of the lowest ground; from orbit the two differ by three rows, so a
+/// missing cap at the limb is red there, and on the ground a missing chunk is a block.
+const HORIZON_ROW_TOLERANCE: usize = 3;
+/// The chunk count each stand draws, at least (MEASURED: 3 855 / 4 300 / 2 012 / 1 277).
+const GROUND_CHUNKS_MIN: u64 = 2_000;
+const HILL_CHUNKS_MIN: u64 = 2_000;
+const ALOFT_CHUNKS_MIN: u64 = 1_000;
+const ORBIT_CHUNKS_MIN: u64 = 500;
 /// M8-4's tolerances. The stamp's altitude against the gate's own reading of the same recipe at the
 /// same eye: the two differ only by the lattice reduction's rounding of the eye. The horizon is a
 /// formula of that altitude. The ruler's disc against its projection: one pixel, the rasteriser's
@@ -94,12 +123,14 @@ const TERRAIN_WAIT_TICKS: u64 = 1_800;
 /// silhouette is `f·r/√(d²−r²)`, which at the ball's `r/d = tan 2°` differs by 0.06 %, a fiftieth
 /// of a pixel — and stays under a pixel until `r/d` passes 0.2, a hit under three cells, where the
 /// half-cell floor binds). The probe's nearest and farthest distance under the ball against
-/// `(d − r)/cell` and `d/cell`: one cell, the channel's own rounding — so a wrong high byte (256
-/// cells) or a wrong low byte is caught, which is the G/B channel's exactness measured.
+/// `(d − r)/cell` and `√(d² − r²)/cell`: two cells — one of geometric rounding at the rim and one
+/// step of the target's own 8-bit rounding on the low byte (MEASURED on the hill at 2 m cells:
+/// 576 against 574.8) — so a wrong high byte (256 cells) is caught; the R byte's exactness is
+/// asserted on every terrain pixel, the G/B channel's to within one byte.
 const ALTITUDE_TOLERANCE_M: f64 = 0.05;
 const HORIZON_TOLERANCE_M: f64 = 1.0;
 const RULER_TOLERANCE_PX: f64 = 1.0;
-const RULER_CELLS_TOLERANCE: f64 = 1.0;
+const RULER_CELLS_TOLERANCE: f64 = 2.0;
 /// The picture under the probe: the share of the probe's ground pixels that carry the ground's lit
 /// paint in the picture, and of its ball pixels that are red. A black or unlit picture with a
 /// perfect probe fails here (the refuter's finding 1); a marker over the ground fails here.
@@ -208,18 +239,18 @@ fn boot_demand_cluster(
 }
 
 /// One picture's parameters: which account stands where (the agent index picks the account), the
-/// rung and radius the flags name, and the verdict's band and floor.
+/// nose's tilt below level (for the horizon's row), and the verdict's band and floor.
 #[derive(Clone, Copy)]
 struct Picture {
     name: &'static str,
     agent_index: u64,
-    rung: u8,
-    radius: i32,
+    tilt_deg: f64,
     band: (f64, f64),
     min_share: f64,
 }
 
-/// The capture client for one picture: the agent index picks the account, the flags pick the rung.
+/// The capture client for one picture: the agent index picks the account. No flag: the client
+/// draws the ladder (slice 8 step 2).
 fn spawn_capture_client(
     f: &Fixture,
     gateway: SocketAddr,
@@ -228,19 +259,13 @@ fn spawn_capture_client(
     devctl_port: u16,
 ) -> Child {
     let Picture {
-        name,
-        agent_index,
-        rung,
-        radius,
-        ..
+        name, agent_index, ..
     } = *pic;
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_client"));
     for (k, v) in &f.common {
         cmd.env(k, v);
     }
     cmd.env("VD_AUTH_SIGNING_KEY", dev_auth_signing_key_hex());
-    cmd.env(vd_client_render::terrain::RUNG_ENV, rung.to_string());
-    cmd.env(vd_client_render::terrain::RADIUS_ENV, radius.to_string());
     cmd.current_dir(&f.cwd);
     cmd.args([
         "--name",
@@ -360,7 +385,7 @@ fn take_picture(
         name,
         band,
         min_share,
-        rung,
+        tilt_deg,
         ..
     } = *pic;
     let client_quic = reserve_udp_addr();
@@ -481,8 +506,9 @@ fn take_picture(
         "{name}: the stand moved across the capture: {p_file:?} then {p_now:?}"
     );
     // 1. THE GROUND IS IN THE PICTURE — by the probe, not by paint: the share of terrain pixels in
-    //    the lower band, every one of them at the rung the flag named (a bit-exact reading of the
-    //    probe's channel through the sRGB target).
+    //    the lower band; and THE LADDER: every terrain pixel's rung is the tier rule's rung for the
+    //    pixel's own distance (its cells times its rung's cell), within one rung (a bit-exact reading
+    //    of the probe's channel through the sRGB target, judged by the rule).
     let share = probe_share_in_rows(
         &probe,
         w,
@@ -499,16 +525,189 @@ fn take_picture(
         share >= min_share,
         "{name}: the ground is not in the picture: terrain share {share:.3} < {min_share}"
     );
-    let terrain = probe_blob(&probe, w, PROBE_KIND_TERRAIN);
-    assert_eq!(
-        (terrain.rung_min, terrain.rung_max),
-        (rung, rung),
-        "{name}: every terrain pixel states the drawn rung: {terrain:?}"
+    // NO BLOCK OF NOTHING IN THE GROUND: a hole that survives a one-pixel erosion is a missing
+    // chunk (MEASURED on the first ladder pictures: black rectangles at the ring boundaries,
+    // 4 818 pixels on the hill, which the band's share let through).
+    let holes = ground_holes(&probe, w, h);
+    eprintln!(
+        "terrain_pictures/{name}: {} hole pixels under drawn ground, {} in blocks",
+        holes.pixels, holes.blocks
     );
-    assert_eq!(stamp.rung, rung, "{name}: the stamp states the drawn rung");
+    assert_eq!(
+        holes.blocks, 0,
+        "{name}: {} pixels of nothing under drawn ground survive erosion — a missing chunk",
+        holes.blocks
+    );
+    // NO CRACK EITHER (step 3): two rungs never meet at a mesh edge now — the finer slides onto the
+    // coarser surface across its band while the coarser is drawn whole beneath it — so no pixel
+    // of nothing lies under drawn ground.
+    assert_eq!(
+        holes.pixels, 0,
+        "{name}: {} pixels of nothing under drawn ground — a crack between two rungs",
+        holes.pixels
+    );
+    let terrain = probe_blob(&probe, w, PROBE_KIND_TERRAIN);
+    let rungs = body.ladder().rungs;
+    let mut off_by_one = 0u64;
+    let mut exact = 0u64;
+    let mut outside = 0u64;
+    for px in probe.chunks_exact(4) {
+        let p = decode_probe([px[0], px[1], px[2]]);
+        if p.kind == PROBE_KIND_TERRAIN {
+            let d = f64::from(p.cells) * f64::from(vd_seed::ladder::cell_m(p.rung));
+            let rule = rung_for_distance(d, rungs);
+            let gap = rule.abs_diff(p.rung);
+            assert!(
+                gap <= RUNG_TOLERANCE,
+                "{name}: a terrain pixel at rung {} states {} cells ({d:.0} m), where the rule says \
+                 rung {rule}",
+                p.rung,
+                p.cells
+            );
+            let in_band = in_fade_band(d, rungs);
+            off_by_one += u64::from(gap == 1);
+            exact += u64::from((gap == 0) & !in_band);
+            outside += u64::from(!in_band);
+        }
+    }
+    let exact_share = exact as f64 / outside.max(1) as f64;
+    assert!(
+        exact_share >= RUNG_EXACT_SHARE_MIN,
+        "{name}: only {exact_share:.3} of the terrain pixels outside the bands sit on the rule's \
+         rung"
+    );
+    eprintln!(
+        "terrain_pictures/{name}: rungs {}..{} on the probe, {} of {} terrain pixels one rung off \
+         the rule at their own distance; the stamp draws {:?}",
+        terrain.rung_min, terrain.rung_max, off_by_one, terrain.count, stamp.chunks_per_rung
+    );
+    // The finest rung ON SCREEN (the probe's) is the rule's rung at the eye's height — or, when
+    // that height lies inside a crossfade band, the finer rung that is still fading out there
+    // (step 3: MEASURED aloft, the eye at 60 km inside rung 6's band of 50–61 km, rung 6 under
+    // it). The stamp counts what is RESIDENT, which may hold one finer rung more: a column that
+    // straddles its fade-out edge is resident while every fragment of it lies past the edge and
+    // is discarded (MEASURED from orbit: 29 rung-11 chunks under the eye, no rung-11 pixel).
+    let rule_at_eye = rung_for_distance(stamp.altitude_m, rungs);
+    let in_band_at_eye = in_fade_band(stamp.altitude_m, rungs);
+    assert!(
+        terrain.rung_min == rule_at_eye || (in_band_at_eye && terrain.rung_min + 1 == rule_at_eye),
+        "{name}: the finest rung on screen ({}) is neither the rule's rung at the eye's height \
+         ({rule_at_eye}) nor, inside a band ({in_band_at_eye}), the one below it",
+        terrain.rung_min
+    );
+    assert!(
+        stamp.rung_min + 1 >= rule_at_eye && stamp.rung_min <= terrain.rung_min,
+        "{name}: the finest resident rung ({}) is more than one under the rule's rung at the \
+         eye's height ({rule_at_eye}), or finer than what is on screen ({})",
+        stamp.rung_min,
+        terrain.rung_min
+    );
+    // More than one rung is on screen, unless the eye's own rung is the top of the ladder (from
+    // orbit the whole cap is one ring).
+    assert!(
+        stamp.rung_max > stamp.rung_min || stamp.rung_min + 1 == rungs,
+        "{name}: the ladder holds one rung {}..{} under a ladder of {rungs}",
+        stamp.rung_min,
+        stamp.rung_max
+    );
+    assert!(
+        stamp.drawn_radius_m >= stamp.horizon_m,
+        "{name}: the ladder reaches {:.0} m, short of the horizon at {:.0} m",
+        stamp.drawn_radius_m,
+        stamp.horizon_m
+    );
+    // THE GEOMORPH'S TARGETS stand on the parent mesh: at most one vertex in a hundred fell back
+    // to the coarser field (a cave's own vertex, or a coarser surface past its parents).
+    assert!(
+        stamp.morph_fallbacks * 100 <= stamp.vertices,
+        "{name}: {} of {} morph targets fell back to the field ({} on a face seam by rule)",
+        stamp.morph_fallbacks,
+        stamp.vertices,
+        stamp.morph_seam
+    );
+    eprintln!(
+        "terrain_pictures/{name}: morph targets — {} fallbacks and {} seam vertices of {}",
+        stamp.morph_fallbacks, stamp.morph_seam, stamp.vertices
+    );
     assert_eq!(
         stamp.chunks_pending, 0,
         "{name}: the stamp was taken settled"
+    );
+    // THE GROUND REACHES THE HORIZON IN EVERY COLUMN: the topmost drawn pixel of each column lies
+    // at or above the horizon's predicted row for that column — the row where the pixel's own ray
+    // dips below level by the horizon's dip, through the pilot camera the renderer used. (The
+    // topmost DRAWN pixel: a crack does not read as the sky, and the ruler ball may cover the limb
+    // in its columns.) The refuter's finding: a check on one column, and a hole counter blind to
+    // the skyline, would miss a missing cap at the limb.
+    let camera = vd_bins::pixel::pilot_camera(&state, w, h);
+    let label = format!("{planet:?}");
+    let row = state
+        .realm_boxes
+        .iter()
+        .find(|b| b.realm == label)
+        .expect("the planet's row is drawn");
+    let centre = DVec3::from_array(row.center);
+    let radial = (camera.eye - centre).normalize();
+    // The horizon of the lowest ground the recipe can raise, from this eye.
+    let lowest_m = stamp.surface_m - body.relief_bound_m(0).to_f64();
+    let over_lowest = (camera.eye - centre).length() - lowest_m;
+    let dip = (lowest_m / (lowest_m + over_lowest))
+        .clamp(-1.0, 1.0)
+        .acos();
+    let (right, cam_up, back) = camera.basis();
+    let forward = -back;
+    let tan_half = (camera.fov_y * 0.5).tan();
+    let aspect = w as f64 / h as f64;
+    // The ray through a pixel's centre, and how far below level it points.
+    let below_level = |x: usize, y: usize| -> f64 {
+        let ndc_x = (x as f64 + 0.5) / w as f64 * 2.0 - 1.0;
+        let ndc_y = 1.0 - (y as f64 + 0.5) / h as f64 * 2.0;
+        let dir = (forward + right * (ndc_x * tan_half * aspect) + cam_up * (ndc_y * tan_half))
+            .normalize();
+        (-dir.dot(radial)).clamp(-1.0, 1.0).asin()
+    };
+    let mut worst: Option<(usize, usize, usize)> = None;
+    let mut x = 0;
+    while x < w {
+        // The horizon's row in this column: the first row whose ray dips by the horizon's dip.
+        let mut horizon_row = h;
+        let mut y = 0;
+        while y < h {
+            if below_level(x, y) >= dip {
+                horizon_row = y;
+                break;
+            }
+            y += 1;
+        }
+        // The topmost drawn pixel in this column.
+        let mut sky_row = h;
+        let mut y = 0;
+        while y < h {
+            let i = (y * w + x) * 4;
+            if decode_probe([probe[i], probe[i + 1], probe[i + 2]]).kind != PROBE_KIND_NONE {
+                sky_row = y;
+                break;
+            }
+            y += 1;
+        }
+        let short = sky_row.saturating_sub(horizon_row);
+        if worst.is_none_or(|(_, _, s)| short > s) {
+            worst = Some((x, horizon_row, short));
+        }
+        x += 1;
+    }
+    let (worst_x, worst_row, worst_short) = worst.expect("a column");
+    eprintln!(
+        "terrain_pictures/{name}: the skyline's worst column {worst_x} falls {worst_short} rows \
+         short of the lowest ground's horizon row {worst_row} (its dip {:.2}°, the eye's surface's \
+         {:.2}°, nose {tilt_deg}° down)",
+        dip.to_degrees(),
+        stamp.horizon_dip_deg
+    );
+    assert!(
+        worst_short <= HORIZON_ROW_TOLERANCE,
+        "{name}: in column {worst_x} the ground ends {worst_short} rows under the horizon's row \
+         {worst_row}"
     );
     // THE PICTURE, JUDGED WHERE THE PROBE POINTS: the ground's lit paint under the probe's ground,
     // red under its ball. The probe alone would pass a black picture.
@@ -528,14 +727,6 @@ fn take_picture(
     // 2. THE STAMP'S OWN TRUTH (M8-4): the eye from the state's pose through the pilot camera, in
     //    the planet's frame — its row's centre and its DELIVERED facing, the same four numbers the
     //    renderer turns the terrain by — against the recipe.
-    let camera = vd_bins::pixel::pilot_camera(&state, w, h);
-    let label = format!("{planet:?}");
-    let row = state
-        .realm_boxes
-        .iter()
-        .find(|b| b.realm == label)
-        .expect("the planet's row is drawn");
-    let centre = DVec3::from_array(row.center);
     let facing =
         vd_core::glam::DQuat::from_xyzw(row.facing[0], row.facing[1], row.facing[2], row.facing[3])
             .normalize();
@@ -612,7 +803,7 @@ fn take_picture(
         disc.count,
         disc.cells_min,
         disc.cells_max,
-        stamp.cell_m
+        ruler.cell_m
     );
     assert!(
         (measured_px - predicted_px).abs() <= RULER_TOLERANCE_PX,
@@ -625,14 +816,20 @@ fn take_picture(
     );
     assert_eq!(
         (disc.rung_min, disc.rung_max),
-        (rung, rung),
-        "{name}: the ruler's pixels state the drawn rung"
+        (ruler.rung, ruler.rung),
+        "{name}: the ruler's pixels state the ball's rung"
+    );
+    assert_eq!(
+        ruler.rung,
+        rung_for_distance(ruler.distance_m, rungs),
+        "{name}: the ball stands on the rule's rung for its distance"
     );
     // The G/B channel, measured: the ball's nearest pixel is `d − r` off, its rim `√(d² − r²)`
-    // (within a fiftieth of a cell of `d` at this angular size), each within one cell.
-    let near_cells = (ruler.distance_m - ruler.radius_m) / stamp.cell_m;
+    // (within a fiftieth of a cell of `d` at this angular size), each within one cell of the
+    // ball's own rung.
+    let near_cells = (ruler.distance_m - ruler.radius_m) / ruler.cell_m;
     let rim_cells = (ruler.distance_m * ruler.distance_m - ruler.radius_m * ruler.radius_m).sqrt()
-        / stamp.cell_m;
+        / ruler.cell_m;
     assert!(
         (f64::from(disc.cells_min) - near_cells).abs() <= RULER_CELLS_TOLERANCE,
         "{name}: the probe's nearest ruler distance {} cells vs the stamp's {near_cells:.1}",
@@ -739,10 +936,12 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let ground = stand(d, EYE_HEIGHT_M, h, nose(GROUND_TILT_DEG));
     let hill = stand(d, HILL_M, h, nose(HILL_TILT_DEG));
     let aloft = stand(d, ALOFT_M, h, nose(ALOFT_TILT_DEG));
+    let orbit = stand(d, ORBIT_M, h, nose(ORBIT_TILT_DEG));
     let spawn_poses = [
         spawn_entry(CLIENT_ACCOUNT_BASE, body.seed(), &ground),
         spawn_entry(CLIENT_ACCOUNT_BASE + 1, body.seed(), &hill),
         spawn_entry(CLIENT_ACCOUNT_BASE + 2, body.seed(), &aloft),
+        spawn_entry(CLIENT_ACCOUNT_BASE + 3, body.seed(), &orbit),
     ]
     .join(";");
     let face = vd_seed::bend::face_of([d.x, d.y, d.z]);
@@ -767,8 +966,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         &Picture {
             name: "ground",
             agent_index: 0,
-            rung: GROUND_RUNG,
-            radius: GROUND_RADIUS,
+            tilt_deg: GROUND_TILT_DEG,
             band: (0.55, 1.0),
             min_share: 0.95,
         },
@@ -781,8 +979,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         &Picture {
             name: "hill",
             agent_index: 1,
-            rung: HILL_RUNG,
-            radius: HILL_RADIUS,
+            tilt_deg: HILL_TILT_DEG,
             band: (0.5, 1.0),
             min_share: 0.95,
         },
@@ -795,23 +992,46 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         &Picture {
             name: "aloft",
             agent_index: 2,
-            rung: ALOFT_RUNG,
-            radius: ALOFT_RADIUS,
+            tilt_deg: ALOFT_TILT_DEG,
             band: (0.5, 1.0),
+            min_share: 0.95,
+        },
+    );
+    let (orbit_chunks, orbit_share) = take_picture(
+        &f,
+        a.gateway,
+        &body,
+        planet,
+        &Picture {
+            name: "orbit",
+            agent_index: 3,
+            tilt_deg: ORBIT_TILT_DEG,
+            // The limb arcs across the frame and dips to two thirds of the height at the sides
+            // (MEASURED on the first orbit picture: 0.932 of the lower half was ground, the rest
+            // the sky in the corners), so the band starts under it.
+            band: (0.72, 1.0),
             min_share: 0.95,
         },
     );
     eprintln!(
         "terrain_pictures: ground {ground_chunks} chunks ({ground_share:.3}), hill {hill_chunks} \
-         chunks ({hill_share:.3}), aloft {aloft_chunks} chunks ({aloft_share:.3})"
+         chunks ({hill_share:.3}), aloft {aloft_chunks} chunks ({aloft_share:.3}), orbit \
+         {orbit_chunks} chunks ({orbit_share:.3})"
     );
     assert!(
-        ground_chunks >= 9,
-        "the ground picture holds the columns around the eye"
+        ground_chunks >= GROUND_CHUNKS_MIN,
+        "the ground picture holds the ladder"
     );
-    assert!(hill_chunks >= 9, "the hill picture holds the columns below");
     assert!(
-        aloft_chunks >= 9,
-        "the aloft picture holds the columns below the eye"
+        hill_chunks >= HILL_CHUNKS_MIN,
+        "the hill picture holds the ladder"
+    );
+    assert!(
+        aloft_chunks >= ALOFT_CHUNKS_MIN,
+        "the aloft picture holds the ladder"
+    );
+    assert!(
+        orbit_chunks >= ORBIT_CHUNKS_MIN,
+        "the orbit picture holds the globe"
     );
 }

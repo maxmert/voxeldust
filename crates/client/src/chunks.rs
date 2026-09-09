@@ -25,9 +25,9 @@
 //! **Normals are style** (ruling S6-5): derived here from the triangles, area-weighted per vertex and
 //! normalised — a smooth look. They never move a vertex.
 //!
-//! **One rung per realm — FOR ONE SLICE** (`D-TERRAIN-3`, deleted by slice 8): a request for a second
-//! rung of a realm that already holds another is REFUSED and counted, never served, so a hard edge
-//! between two rungs cannot reach a picture before its crossfade exists.
+//! **Every rung at once** (slice 8 step 2): the ladder view (`ladder_view`) names the chunks of every
+//! ring out to the horizon, coarsest first, and the lane serves them all. The one-rung refusal of
+//! slice 7 (`D-TERRAIN-3`) is gone with its flag.
 //!
 //! **The worker seam.** [`ChunkWorkers`] is one trait with two methods: submit a job, drain finished
 //! jobs. The Tier-A tests drive [`InlineWorkers`], which runs a job on the calling thread, so every
@@ -39,18 +39,34 @@
 //! workers generate and extract them, and the engine harvests them a few per frame and draws them as
 //! children of the planet's row. The planet's shard drew nothing.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use vd_core::geometry::Boundary;
+use vd_core::glam::DVec3;
 use vd_core::look::SurfaceStmt;
 use vd_core::pose::{FrameRef, RealmId};
 use vd_terrain::BodyDefinition;
 use vd_terrain::Gf;
 use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey};
-use vd_terrain::extract::extract;
+use vd_terrain::extract::{extract, extract_all_edges};
 use vd_terrain::lattice::sample_box;
 use vd_terrain::position::vertex_position_m;
+
+/// HOW FAR A RUNG SINKS under the next finer one (slice 8 step 3): the recipe's own bound on the
+/// gap between the two fields (the octaves the coarser rung drops) plus a cell of each rung for
+/// the extractor's own placement, which lies within a vertex's group. Under that, the coarser
+/// mesh is certainly below the finer one; zero at rung 0, which is under nothing.
+#[must_use]
+pub fn sink_m(body: &BodyDefinition, rung: u8) -> f64 {
+    if rung == 0 {
+        return 0.0;
+    }
+    let finer = rung - 1;
+    (body.dropped_bound_m(rung) - body.dropped_bound_m(finer)).to_f64()
+        + f64::from(vd_seed::ladder::cell_m(rung))
+        + f64::from(vd_seed::ladder::cell_m(finer))
+}
 
 /// A finished chunk: integer vertices turned into floats around a floating origin.
 #[derive(Clone, Debug, PartialEq)]
@@ -58,6 +74,26 @@ pub struct ChunkGeometry {
     pub key: ChunkKey,
     /// The chunk's own origin in the realm's frame, in metres: the centre of its middle cell.
     pub origin_m: [f64; 3],
+    /// THE MORPH TARGETS (slice 8 step 3): each vertex where it stands on the NEXT COARSER rung's
+    /// MESH along its own radial ([`ParentMesh`]), relative to `origin_m` like the vertices — the
+    /// crossfade slides a vertex from its own position to this one across the rung's band, so the
+    /// finer surface becomes the coarser before it is dropped, exactly: at the band's far edge the
+    /// finer vertices lie on the coarser triangles. At the top rung a vertex is its own target.
+    pub morph: Vec<[f32; 3]>,
+    /// How many SURFACE vertices (within the sink bound of the coarser field) had no parent
+    /// triangle on their radial within that bound and read the field instead — a diagnosis
+    /// count the stamp carries and the picture gate bounds (MEASURED near zero). A cave's own
+    /// vertex, far under the field, reads the field by nature and is not counted.
+    pub morph_fallbacks: u32,
+    /// How many vertices stand on or past the face's edge and read the field by rule (the
+    /// parents are one face's; both faces read the field for the vertex they share).
+    pub morph_seam: u32,
+    /// THE SINK (slice 8 step 3): each vertex's radial times [`sink_m`] of its rung — how far
+    /// the chunk drops under the next finer rung's surface nearer than the finer rung's fade-out
+    /// edge, so a coarser surface never shows through a finer one (the dropped octaves cut both
+    /// ways) and the two are continuous at the edge, where the finer stands on the coarser. A
+    /// rung-0 chunk sinks nowhere.
+    pub sink: Vec<[f32; 3]>,
     /// Vertices in metres, relative to `origin_m`.
     pub vertices: Vec<[f32; 3]>,
     /// Per-vertex unit normals, derived from the triangles (style, never shape).
@@ -72,6 +108,8 @@ pub struct ChunkJob {
     pub realm: RealmId,
     pub body: Arc<BodyDefinition>,
     pub key: ChunkKey,
+    /// The parent meshes the geomorph reads its targets from, shared by every job of the lane.
+    pub parents: Arc<ParentCache>,
 }
 
 /// A finished job, as the engine harvests it.
@@ -104,11 +142,12 @@ impl ChunkWorkers for InlineWorkers {
     fn submit(&mut self, job: ChunkJob) {
         // Branchless (HR5): the lane refuses a key outside the ladder before it submits, so the
         // `None` arm of the seam's own refusal is never reached through the lane.
-        self.done
-            .extend(geometry_of(&job.body, job.key).map(|geometry| ChunkReady {
+        self.done.extend(
+            geometry_with(&job.body, job.realm, job.key, &job.parents).map(|geometry| ChunkReady {
                 realm: job.realm,
                 geometry,
-            }));
+            }),
+        );
     }
 
     fn cancel(&mut self, realm: RealmId, key: ChunkKey) {
@@ -128,35 +167,512 @@ impl ChunkWorkers for InlineWorkers {
     }
 }
 
+/// THE PARENT MESH (slice 8 step 3): a coarser chunk's whole surface — every crossed edge of its
+/// box, the halo's included (`extract_all_edges`) — as world positions, with its triangles
+/// bucketed by the box's own lattice cell across the face, so a finer vertex's radial finds the
+/// triangles under it in one lookup. The geomorph's target is where the finer vertex's radial
+/// meets THIS mesh, not the coarser field: the drawn coarser surface is the extractor's mesh,
+/// which lies within a cell of the field, and MEASURED with the field as the target the two
+/// surfaces crossed each other along every fade-out edge — the coarser mesh's bumps over the
+/// finer surface shadowed it (34 dark specks on the hill at 950 m, 1.9 km and 3.8 km). Two
+/// finer neighbours read one and the same parent surface for the vertex they share, because
+/// every crossing of the parent's box is in it, owned or not.
+#[derive(Debug)]
+pub struct ParentMesh {
+    key: ChunkKey,
+    positions: Vec<DVec3>,
+    triangles: Vec<[u32; 3]>,
+    /// Triangle indices per lattice cell `(a, b)` of the parent's box, `−1..=62` each: a
+    /// triangle is in every cell its vertices span.
+    buckets: BTreeMap<(i32, i32), Vec<u32>>,
+}
+
+impl ParentMesh {
+    /// The whole surface of the chunk at `key`; `None` outside the body.
+    #[must_use]
+    pub fn build(body: &BodyDefinition, key: ChunkKey) -> Option<ParentMesh> {
+        let samples = sample_box(body, key)?;
+        let mesh = extract_all_edges(&samples);
+        let q = i32::from(vd_terrain::VERTEX_QUANTUM as i16);
+        let cell_of = |v: [i16; 3]| -> (i32, i32) {
+            (i32::from(v[0]).div_euclid(q), i32::from(v[1]).div_euclid(q))
+        };
+        let positions: Vec<DVec3> = mesh
+            .vertices
+            .iter()
+            .map(|v| {
+                let p = vertex_position_m(body, &samples, *v);
+                DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64())
+            })
+            .collect();
+        let mut buckets: BTreeMap<(i32, i32), Vec<u32>> = BTreeMap::new();
+        for (i, t) in mesh.triangles.iter().enumerate() {
+            let cells = [
+                cell_of(mesh.vertices[t[0] as usize]),
+                cell_of(mesh.vertices[t[1] as usize]),
+                cell_of(mesh.vertices[t[2] as usize]),
+            ];
+            let (a0, a1) = (
+                cells[0].0.min(cells[1].0).min(cells[2].0),
+                cells[0].0.max(cells[1].0).max(cells[2].0),
+            );
+            let (b0, b1) = (
+                cells[0].1.min(cells[1].1).min(cells[2].1),
+                cells[0].1.max(cells[1].1).max(cells[2].1),
+            );
+            let mut a = a0;
+            while a <= a1 {
+                let mut b = b0;
+                while b <= b1 {
+                    buckets.entry((a, b)).or_default().push(i as u32);
+                    b += 1;
+                }
+                a += 1;
+            }
+        }
+        Some(ParentMesh {
+            key,
+            positions,
+            triangles: mesh.triangles,
+            buckets,
+        })
+    }
+
+    /// The key this mesh is the surface of.
+    #[must_use]
+    pub fn key(&self) -> ChunkKey {
+        self.key
+    }
+
+    /// How many triangles the surface holds.
+    #[must_use]
+    pub fn triangle_count(&self) -> usize {
+        self.triangles.len()
+    }
+
+    /// The radius at which the radial along `dir` (a unit vector from the body's centre) meets
+    /// this mesh within lattice cell `(a, b)`, nearest to `near_m` when it meets it more than
+    /// once (a cave under the surface); `None` when no triangle of that cell is on the radial.
+    #[must_use]
+    pub fn radial_hit_m(&self, a: i32, b: i32, dir: DVec3, near_m: f64) -> Option<f64> {
+        let mut best: Option<f64> = None;
+        for i in self.buckets.get(&(a, b)).map_or(&[][..], Vec::as_slice) {
+            let t = self.triangles[*i as usize];
+            let hit = ray_triangle_m(
+                dir,
+                self.positions[t[0] as usize],
+                self.positions[t[1] as usize],
+                self.positions[t[2] as usize],
+            );
+            // The nearest hit; a tie goes to the lower one, so the answer never depends on the
+            // order the triangles were met in.
+            best = match (best, hit) {
+                (Some(b), Some(h)) if ((h - near_m).abs(), h) < ((b - near_m).abs(), b) => Some(h),
+                (None, Some(h)) => Some(h),
+                (b, _) => b,
+            };
+        }
+        best
+    }
+}
+
+/// THE RADIAL AGAINST A TRIANGLE: the distance from the body's centre at which the ray along the
+/// unit `dir` crosses the triangle `p0 p1 p2` (Möller–Trumbore, in metres), `None` when it does
+/// not. A crossing on an edge or a corner counts on both sides, so two triangles that share the
+/// edge both answer, with the same distance.
+#[must_use]
+pub fn ray_triangle_m(dir: DVec3, p0: DVec3, p1: DVec3, p2: DVec3) -> Option<f64> {
+    let e1 = p1 - p0;
+    let e2 = p2 - p0;
+    let h = dir.cross(e2);
+    let det = e1.dot(h);
+    if det.abs() < RAY_EPSILON {
+        return None;
+    }
+    let inv = 1.0 / det;
+    // The ray starts at the centre: `s = origin − p0 = −p0`.
+    let s = -p0;
+    let u = s.dot(h) * inv;
+    let q = s.cross(e1);
+    let v = dir.dot(q) * inv;
+    let t = e2.dot(q) * inv;
+    let inside = (u >= -RAY_SLACK) & (v >= -RAY_SLACK) & (u + v <= 1.0 + RAY_SLACK) & (t > 0.0);
+    inside.then_some(t)
+}
+
+/// A determinant under this is a ray parallel to the triangle.
+const RAY_EPSILON: f64 = 1e-18;
+/// How far past an edge a crossing still counts, in the triangle's own barycentric units: the
+/// rounding of a radial that runs exactly along a shared edge.
+const RAY_SLACK: f64 = 1e-9;
+
+/// THE PARENT CACHE: the parent meshes the lane's workers built, shared and bounded — the eight
+/// finer chunks under one parent, and the halo users beside them, read one build. A map with a
+/// use order; the least recently used goes when the bound is passed. Its content is a pure
+/// function of the seed, so which worker built it, and when, changes nothing; two workers may
+/// build one parent at once, and the second build replaces the first with its equal.
+#[derive(Debug, Default)]
+pub struct ParentCache {
+    store: Mutex<ParentStore>,
+}
+
+#[derive(Debug, Default)]
+struct ParentStore {
+    map: BTreeMap<(RealmId, ChunkKey), Arc<ParentMesh>>,
+    order: VecDeque<(RealmId, ChunkKey)>,
+}
+
+/// How many parent meshes the cache keeps: about 24 MB at today's bytes.
+pub const PARENT_CACHE_ENTRIES: usize = 48;
+
+impl ParentCache {
+    /// The parent mesh of `key` in `realm`: the cached one, or a fresh build kept for the next
+    /// reader. `None` for a key outside the body.
+    #[must_use]
+    pub fn get(
+        &self,
+        realm: RealmId,
+        body: &BodyDefinition,
+        key: ChunkKey,
+    ) -> Option<Arc<ParentMesh>> {
+        {
+            let mut store = self.lock();
+            if let Some(found) = store.map.get(&(realm, key)) {
+                let found = Arc::clone(found);
+                // Least recently USED leaves first: a hit moves its key to the back.
+                store.order.retain(|k| *k != (realm, key));
+                store.order.push_back((realm, key));
+                return Some(found);
+            }
+        }
+        let built = Arc::new(ParentMesh::build(body, key)?);
+        self.insert(realm, key, Arc::clone(&built));
+        Some(built)
+    }
+
+    /// Keep a mesh; the oldest leaves when the bound is passed.
+    pub fn insert(&self, realm: RealmId, key: ChunkKey, mesh: Arc<ParentMesh>) {
+        let mut store = self.lock();
+        let fresh = store.map.insert((realm, key), mesh).is_none();
+        store
+            .order
+            .extend(std::iter::repeat_n((realm, key), usize::from(fresh)));
+        let excess = store.order.len().saturating_sub(PARENT_CACHE_ENTRIES);
+        let old: Vec<(RealmId, ChunkKey)> = store.order.drain(..excess).collect();
+        for k in old {
+            store.map.remove(&k);
+        }
+    }
+
+    /// Drop every mesh of a realm: its body may be stated anew with another seed.
+    pub fn forget(&self, realm: RealmId) {
+        let mut store = self.lock();
+        store.map.retain(|(r, _), _| *r != realm);
+        store.order.retain(|(r, _)| *r != realm);
+    }
+
+    /// How many meshes the cache holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.lock().map.len()
+    }
+
+    /// Whether the cache holds nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ParentStore> {
+        self.store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// THE PARENTS a chunk's geomorph reads: none at the top rung; else the chunk at the next
+/// coarser rung that holds this chunk's footprint, and its neighbours on every side this chunk
+/// FACES — across the face, the side its halo lies on (a lower half's halo stands over the
+/// parent's own halo column, whose radial crossings no box can build: the groups past the box
+/// do not exist, so that column's surface is the lateral neighbour's, which holds it as its own
+/// last column; MEASURED before this, a halo vertex found only a cave 33 m down); radially, the
+/// side it faces (a lower half looks down, an upper half up), because the coarser surface
+/// stands within its gap bound of the finer one and may cross into the next chunk. Up to eight
+/// keys, only those inside the face and the band; a halo across a face seam reads the field.
+#[must_use]
+pub fn parent_keys(body: &BodyDefinition, key: ChunkKey) -> Vec<ChunkKey> {
+    let rungs = body.ladder().rungs;
+    if key.rung + 1 >= rungs {
+        return Vec::new();
+    }
+    let rung = key.rung + 1;
+    let edge = CHUNK_EDGE as i32;
+    let last = (body.ladder().cells_per_edge(rung) as i32 - 1) / edge;
+    let top = vd_terrain::digest::top_chunk_z(body, rung);
+    let side = |i: i32| -> i32 { if i.rem_euclid(2) == 0 { -1 } else { 1 } };
+    let (px, py, pz) = (
+        key.x.div_euclid(2),
+        key.y.div_euclid(2),
+        key.z.div_euclid(2),
+    );
+    let mut out = Vec::new();
+    for dx in [0, side(key.x)] {
+        for dy in [0, side(key.y)] {
+            for dz in [0, side(key.z)] {
+                let (x, y, z) = (px + dx, py + dy, pz + dz);
+                let inside =
+                    (x >= 0) & (x <= last) & (y >= 0) & (y <= last) & (z >= 0) & (z <= top);
+                if inside {
+                    out.push(ChunkKey {
+                        face: key.face,
+                        rung,
+                        x,
+                        y,
+                        z,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The parent's lattice cell `(a, b)` under a finer vertex: the finer chunk's face cell in
+/// quanta, halved (two finer cells to a coarser one), less the parent box's origin — exact in
+/// integers, so a shared vertex reads the same cell from both its chunks.
+fn parent_cell(key: ChunkKey, parent: ChunkKey, v: [i16; 3]) -> (i32, i32) {
+    let edge = i64::from(CHUNK_EDGE as i32);
+    let q = i64::from(vd_terrain::VERTEX_QUANTUM as i16);
+    let cell = |fine: i32, coarse: i32, quanta: i16| -> i32 {
+        let global = i64::from(fine) * edge * q + i64::from(quanta);
+        let local = global - i64::from(coarse) * edge * q * 2;
+        local.div_euclid(q * 2) as i32
+    };
+    (cell(key.x, parent.x, v[0]), cell(key.y, parent.y, v[1]))
+}
+
 /// Run the recipe and the extractor for one chunk and turn the result into engine floats; `None`
 /// for a key outside the body (the lane never submits one, so this is the seam's own refusal).
+/// The geomorph's targets come from a fresh parent cache: the lane's workers share one through
+/// [`geometry_with`].
 #[must_use]
 pub fn geometry_of(body: &BodyDefinition, key: ChunkKey) -> Option<ChunkGeometry> {
+    // A fresh, private cache: the realm named in it is nobody's.
+    geometry_with(body, RealmId::Planet(0), key, &ParentCache::default())
+}
+
+/// [`geometry_of`] with the lane's parent cache, for the chunk of `realm`.
+#[must_use]
+pub fn geometry_with(
+    body: &BodyDefinition,
+    realm: RealmId,
+    key: ChunkKey,
+    parents: &ParentCache,
+) -> Option<ChunkGeometry> {
     let samples = sample_box(body, key)?;
     let mesh = extract(&samples);
     let half = (CHUNK_EDGE / 2) as i16 * vd_terrain::VERTEX_QUANTUM as i16;
     let origin = vertex_position_m(body, &samples, [half, half, half]);
     let origin_m = [origin[0].to_f64(), origin[1].to_f64(), origin[2].to_f64()];
-    let vertices: Vec<[f32; 3]> = mesh
-        .vertices
-        .iter()
-        .map(|v| {
-            let p = vertex_position_m(body, &samples, *v);
-            [
-                (p[0] - origin[0]).to_f64() as f32,
-                (p[1] - origin[1]).to_f64() as f32,
-                (p[2] - origin[2]).to_f64() as f32,
-            ]
-        })
+    let mut vertices: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
+    let mut morph: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
+    let mut sink: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
+    let sink_len = sink_m(body, key.rung);
+    // The coarser rung's surface along each vertex's radial: where the radial meets a parent
+    // mesh, nearest the vertex's own radius; the coarser FIELD where no parent triangle is on
+    // it (a cave's own vertex, or a coarser surface past both parents); the top rung morphs to
+    // itself.
+    let coarser = key
+        .rung
+        .saturating_add(1)
+        .min(body.ladder().rungs.saturating_sub(1));
+    let parent_meshes: Vec<Arc<ParentMesh>> = parent_keys(body, key)
+        .into_iter()
+        .filter_map(|p| parents.get(realm, body, p))
         .collect();
+    // How far the coarser surface can stand from this vertex: the sink of the coarser rung.
+    let reach_m = sink_m(body, coarser);
+    let mut fallbacks = 0u32;
+    let mut seam = 0u32;
+    // THE FACE SEAM: a vertex on or past the face's edge (the halo across a seam, or the shared
+    // edge itself) reads the coarser FIELD, from both faces alike — the parents are this face's
+    // own, and the two faces would read two meshes for one vertex.
+    let face_quanta = i64::from(body.ladder().cells_per_edge(key.rung))
+        * i64::from(CHUNK_EDGE as i32)
+        * i64::from(vd_terrain::VERTEX_QUANTUM as i16);
+    let on_seam = |v: [i16; 3]| -> bool {
+        let ga = i64::from(key.x)
+            * i64::from(CHUNK_EDGE as i32)
+            * i64::from(vd_terrain::VERTEX_QUANTUM as i16)
+            + i64::from(v[0]);
+        let gb = i64::from(key.y)
+            * i64::from(CHUNK_EDGE as i32)
+            * i64::from(vd_terrain::VERTEX_QUANTUM as i16)
+            + i64::from(v[1]);
+        (ga <= 0) | (ga >= face_quanta) | (gb <= 0) | (gb >= face_quanta)
+    };
+    for v in &mesh.vertices {
+        let p = vertex_position_m(body, &samples, *v);
+        vertices.push([
+            (p[0] - origin[0]).to_f64() as f32,
+            (p[1] - origin[1]).to_f64() as f32,
+            (p[2] - origin[2]).to_f64() as f32,
+        ]);
+        let abs = vd_core::glam::DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64());
+        let len = abs.length();
+        let dir = abs / len;
+        let target_m = if coarser == key.rung {
+            len
+        } else {
+            let at_seam = on_seam(*v);
+            seam += u32::from(at_seam);
+            let on_mesh = parent_meshes
+                .iter()
+                .filter(|_| !at_seam)
+                .fold(None, |best: Option<f64>, pm| {
+                    let (a, b) = parent_cell(key, pm.key(), *v);
+                    let hit = pm.radial_hit_m(a, b, dir, len);
+                    match (best, hit) {
+                        (Some(b), Some(h)) if ((h - len).abs(), h) < ((b - len).abs(), b) => {
+                            Some(h)
+                        }
+                        (None, Some(h)) => Some(h),
+                        (b, _) => b,
+                    }
+                })
+                // A hit farther than the two surfaces can stand apart is another surface (a
+                // cave under this one): the field, then.
+                .filter(|h| (h - len).abs() <= reach_m);
+            // The coarser field, read only where no hit stands: the target then, and the
+            // judge of what the vertex is — a SURFACE vertex with no parent triangle on its
+            // radial is a fallback (counted; the gate bounds it), a vertex far under the field
+            // is a cave's own and reads the field by nature.
+            let field = on_mesh.map_or_else(
+                || {
+                    vd_terrain::height::height_m(
+                        body,
+                        [
+                            Gf::from_f64(dir.x),
+                            Gf::from_f64(dir.y),
+                            Gf::from_f64(dir.z),
+                        ],
+                        coarser,
+                    )
+                    .to_f64()
+                },
+                |_| len,
+            );
+            let missing = on_mesh.is_none() & !at_seam;
+            fallbacks += u32::from(missing & ((field - len).abs() <= reach_m));
+            on_mesh.unwrap_or(field)
+        };
+        let t = dir * target_m;
+        morph.push([
+            (t.x - origin_m[0]) as f32,
+            (t.y - origin_m[1]) as f32,
+            (t.z - origin_m[2]) as f32,
+        ]);
+        let s = dir * sink_len;
+        sink.push([s.x as f32, s.y as f32, s.z as f32]);
+    }
     let normals = smooth_normals(&vertices, &mesh.triangles);
-    Some(ChunkGeometry {
+    let mut geometry = ChunkGeometry {
         key,
         origin_m,
+        morph,
+        morph_fallbacks: fallbacks,
+        morph_seam: seam,
+        sink,
         vertices,
         normals,
         triangles: mesh.triangles,
-    })
+    };
+    let drop_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
+    add_skirts(&mut geometry, drop_m);
+    Some(geometry)
+}
+
+/// How deep a skirt hangs under a chunk's edge, in cells of its rung.
+pub const SKIRT_CELLS: u32 = 2;
+
+/// THE SKIRTS: a strip hanging `drop_m` radially under every boundary edge of the chunk's mesh —
+/// an edge one triangle alone uses, which is where a neighbour's quads meet this chunk's. Two
+/// neighbours state their shared vertices from one set of quanta, but the engine adds each
+/// chunk's own origin to its own single-precision offsets, and the two sums differ by a rounding
+/// (a tenth of a millimetre at a kilometre): a hairline crack no eye can see, until a pixel's
+/// centre falls into it. MEASURED on the hill stand: one pixel of nothing at 970 m, where four
+/// rung-1 chunks meet, the same pixel on two flights. A skirt faces outward (away from its
+/// triangle's third corner), keeps its edge's normals so the light is continuous, and morphs and
+/// sinks with its edge (its bottom's targets are its top's, dropped the same), so the crack is
+/// covered at every distance. The rounding is the engine's own floating origin at work; the skirt
+/// is the standard cure, two cells deep, under the surface everywhere but in the crack.
+fn add_skirts(g: &mut ChunkGeometry, drop_m: f64) {
+    // Boundary edges: each edge as an ordered pair (lower index first) with its use count, the
+    // triangle's third corner, and the edge's own direction in that triangle.
+    let mut uses: BTreeMap<(u32, u32), (u32, u32, bool)> = BTreeMap::new();
+    for t in &g.triangles {
+        let mut i = 0;
+        while i < 3 {
+            let (a, b, c) = (t[i], t[(i + 1) % 3], t[(i + 2) % 3]);
+            let key = (a.min(b), a.max(b));
+            let e = uses.entry(key).or_insert((0, c, a < b));
+            e.0 += 1;
+            i += 1;
+        }
+    }
+    let o = DVec3::from_array(g.origin_m);
+    let at =
+        |v: [f32; 3]| -> DVec3 { DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2])) };
+    let mut skirt_tris: Vec<[u32; 3]> = Vec::new();
+    for ((lo, hi), (count, c, forward)) in uses {
+        if count != 1 {
+            continue;
+        }
+        // The edge as its triangle winds it: a → b.
+        let (a, b) = if forward { (lo, hi) } else { (hi, lo) };
+        let (pa, pb, pc) = (
+            at(g.vertices[a as usize]),
+            at(g.vertices[b as usize]),
+            at(g.vertices[c as usize]),
+        );
+        let bottom = |i: u32| -> ([f32; 3], [f32; 3], [f32; 3]) {
+            let p = at(g.vertices[i as usize]);
+            let dir = (o + p).normalize();
+            let d = dir * drop_m;
+            let m = at(g.morph[i as usize]) - d;
+            let q = p - d;
+            (
+                [q.x as f32, q.y as f32, q.z as f32],
+                [m.x as f32, m.y as f32, m.z as f32],
+                g.sink[i as usize],
+            )
+        };
+        let (qa, ma, sa) = bottom(a);
+        let (qb, mb, sb) = bottom(b);
+        let a2 = g.vertices.len() as u32;
+        let b2 = a2 + 1;
+        g.vertices.push(qa);
+        g.vertices.push(qb);
+        g.morph.push(ma);
+        g.morph.push(mb);
+        g.sink.push(sa);
+        g.sink.push(sb);
+        g.normals.push(g.normals[a as usize]);
+        g.normals.push(g.normals[b as usize]);
+        // The strip faces away from the triangle's third corner: the winding whose normal points
+        // from the edge's middle away from that corner.
+        let n = (pb - pa).cross(at(qb) - pa);
+        let away = (pa + pb) * 0.5 - pc;
+        let outward = n.dot(away) >= 0.0;
+        if outward {
+            skirt_tris.push([a, b, b2]);
+            skirt_tris.push([a, b2, a2]);
+        } else {
+            skirt_tris.push([a, b2, b]);
+            skirt_tris.push([a, a2, b2]);
+        }
+    }
+    g.triangles.extend(skirt_tris);
 }
 
 /// Per-vertex normals: the sum of the adjoining triangles' area-weighted normals, normalised. A
@@ -201,8 +717,6 @@ pub struct ChunkCounters {
     pub foreign_generator: u64,
     /// A surface statement whose frame carries no seed, or whose radius the ladder refuses.
     pub no_body: u64,
-    /// A request for a second rung of a realm that already holds one (`D-TERRAIN-3`).
-    pub second_rung: u64,
     /// A request for a key outside the body's ladder.
     pub outside: u64,
     /// Jobs submitted to the workers.
@@ -219,13 +733,13 @@ pub struct ChunkLane {
     bodies: BTreeMap<RealmId, Arc<BodyDefinition>>,
     /// Realms whose surface statement was refused: counted ONCE, never re-read each frame.
     refused: BTreeSet<RealmId>,
-    /// The one rung each realm holds (`D-TERRAIN-3`).
-    rung_of: BTreeMap<RealmId, u8>,
     resident: BTreeSet<(RealmId, ChunkKey)>,
     pending: BTreeSet<(RealmId, ChunkKey)>,
     /// Resident plus pending chunks per realm, so a release is a lookup, not a scan (SL9).
     held: BTreeMap<RealmId, usize>,
     counters: ChunkCounters,
+    /// The parent meshes the workers share.
+    parents: Arc<ParentCache>,
 }
 
 impl ChunkLane {
@@ -237,11 +751,11 @@ impl ChunkLane {
             declared,
             bodies: BTreeMap::new(),
             refused: BTreeSet::new(),
-            rung_of: BTreeMap::new(),
             resident: BTreeSet::new(),
             pending: BTreeSet::new(),
             held: BTreeMap::new(),
             counters: ChunkCounters::default(),
+            parents: Arc::new(ParentCache::default()),
         }
     }
 
@@ -300,8 +814,8 @@ impl ChunkLane {
     pub fn forget(&mut self, realm: RealmId) {
         self.bodies.remove(&realm);
         self.refused.remove(&realm);
-        self.rung_of.remove(&realm);
         self.held.remove(&realm);
+        self.parents.forget(realm);
         self.resident.retain(|(r, _)| *r != realm);
         let pending: Vec<ChunkKey> = self
             .pending
@@ -315,15 +829,21 @@ impl ChunkLane {
         }
     }
 
+    /// Whether a chunk has ARRIVED (harvested, resident) — the release hold's question (step 2): a
+    /// chunk still building is held, not arrived.
+    #[must_use]
+    pub fn is_resident(&self, realm: RealmId, key: ChunkKey) -> bool {
+        self.resident.contains(&(realm, key))
+    }
+
     /// Whether the lane holds or is building a chunk.
     #[must_use]
     pub fn holds(&self, realm: RealmId, key: ChunkKey) -> bool {
         self.resident.contains(&(realm, key)) | self.pending.contains(&(realm, key))
     }
 
-    /// Ask for a chunk. A realm without a body, a key outside its ladder, or a second rung of a
-    /// realm that holds one (`D-TERRAIN-3`) is refused and counted; a chunk already held or
-    /// building is not queued twice.
+    /// Ask for a chunk. A realm without a body or a key outside its ladder is refused and counted; a
+    /// chunk already held or building is not queued twice. Any rung, beside any other (step 2).
     pub fn request(&mut self, realm: RealmId, key: ChunkKey) {
         let Some(body) = self.bodies.get(&realm) else {
             self.counters.no_body += 1;
@@ -332,15 +852,6 @@ impl ChunkLane {
         if !vd_terrain::lattice::in_ladder(body, key) {
             self.counters.outside += 1;
             return;
-        }
-        match self.rung_of.get(&realm) {
-            Some(rung) if *rung != key.rung => {
-                self.counters.second_rung += 1;
-                return;
-            }
-            _ => {
-                self.rung_of.insert(realm, key.rung);
-            }
         }
         if self.holds(realm, key) {
             return;
@@ -352,6 +863,7 @@ impl ChunkLane {
             realm,
             body: Arc::clone(body),
             key,
+            parents: Arc::clone(&self.parents),
         });
     }
 
@@ -368,8 +880,8 @@ impl ChunkLane {
         out
     }
 
-    /// Drop a chunk: resident or still building (withdrawn from the workers). The last chunk of a
-    /// realm releases its rung. A lookup per realm, never a scan of every chunk held (SL9).
+    /// Drop a chunk: resident or still building (withdrawn from the workers). A lookup per realm,
+    /// never a scan of every chunk held (SL9).
     pub fn release(&mut self, realm: RealmId, key: ChunkKey) {
         let was_resident = self.resident.remove(&(realm, key));
         let was_pending = self.pending.remove(&(realm, key));
@@ -381,9 +893,16 @@ impl ChunkLane {
             *left -= 1;
             if *left == 0 {
                 self.held.remove(&realm);
-                self.rung_of.remove(&realm);
             }
         }
+    }
+
+    /// Every chunk still building, with its realm — what the engine walks to withdraw the ones no
+    /// longer wanted (the refuter's finding: only DRAWN chunks were released, so a moving eye left
+    /// every stale job in the workers' queue and `pending` never drained).
+    #[must_use]
+    pub fn pending_all(&self) -> Vec<(RealmId, ChunkKey)> {
+        self.pending.iter().copied().collect()
     }
 
     /// The chunks the lane holds for a realm.
@@ -395,80 +914,6 @@ impl ChunkLane {
             .map(|(_, k)| *k)
             .collect()
     }
-}
-
-/// THE CHUNKS AROUND A POINT at one rung — the surface chunk of every column within `radius`
-/// chunks of the column under `point_m` (a position in the body's frame, from a delivered row and
-/// the delivered eye), plus the chunk below and above it. FOR ONE SLICE (`D-TERRAIN-3`): slice 8's
-/// tier rule and residency band replace it. Columns past the face's edge are left out here; the
-/// partial chunk at the edge is included, because it is a chunk of the ladder.
-///
-/// A point farther from the centre than [`FAR_EYE_RADII`] radii gets nothing: from there the whole
-/// hemisphere is in view and one column under the eye draws nothing a player can see (MEASURED on
-/// the first ground picture: the two other planets of the home system, 1.5 × 10¹¹ m away, each
-/// cost a column of chunks placed where nobody looks).
-///
-/// The face coordinates a direction gives are the TANGENTS `W(a)`; the cell index wants the face
-/// parameter `a`, so the inverse bend sits between them (MEASURED on the ground picture: without it
-/// the column asked for lay 230 km from the eye; `vd_core::grid::shell` does the same).
-/// How many body radii from the centre an eye may stand and still get the column under it.
-pub const FAR_EYE_RADII: f64 = 2.0;
-/// The widest radius in chunk columns a caller may ask for: (2·64 + 1)² columns is the most any
-/// one-rung picture needs, and a radius past it (an operator's typo) would freeze the render
-/// thread for minutes per frame. Clamped, and the clamp is reported by the caller.
-pub const MAX_RADIUS: i32 = 64;
-
-#[must_use]
-pub fn chunks_around(
-    body: &BodyDefinition,
-    point_m: [f64; 3],
-    rung: u8,
-    radius: i32,
-) -> Vec<ChunkKey> {
-    use vd_seed::bend::{face_coords, face_of, unbend};
-    use vd_seed::ladder::index_of;
-    let radius = radius.clamp(0, MAX_RADIUS);
-    let len = (point_m[0] * point_m[0] + point_m[1] * point_m[1] + point_m[2] * point_m[2]).sqrt();
-    if len.is_nan()
-        || len <= 0.0
-        || len > body.ladder().radius_m() * FAR_EYE_RADII
-        || rung >= body.ladder().rungs
-    {
-        return Vec::new();
-    }
-    let d = [point_m[0] / len, point_m[1] / len, point_m[2] / len];
-    let face = face_of(d);
-    let (t, s) = face_coords(face, d);
-    let (a, b) = (unbend(t), unbend(s));
-    let n_l = body.ladder().cells_per_edge(rung);
-    let edge = CHUNK_EDGE as i32;
-    let last = (n_l as i32 - 1) / edge;
-    let (cx, cy) = (index_of(a, n_l) / edge, index_of(b, n_l) / edge);
-    let top = (body.ladder().cells_in_band(rung) as i32 - 1) / edge;
-    let mut keys = Vec::new();
-    let mut y = cy - radius;
-    while y <= cy + radius {
-        let mut x = cx - radius;
-        while x <= cx + radius {
-            if (x >= 0) & (x <= last) & (y >= 0) & (y <= last) {
-                let (lo, hi) = vd_terrain::digest::surface_chunk_span(body, face, rung, x, y);
-                let mut z = lo;
-                while z <= hi.min(top) {
-                    keys.push(ChunkKey {
-                        face,
-                        rung,
-                        x,
-                        y,
-                        z,
-                    });
-                    z += 1;
-                }
-            }
-            x += 1;
-        }
-        y += 1;
-    }
-    keys
 }
 
 /// A body-frame position from a delivered row's placement and facing and the delivered eye, all
@@ -559,6 +1004,12 @@ pub struct Ruler {
 /// Bisection steps refining the hit between the last sample above the surface and the first below:
 /// twelve halve one cell to a four-thousandth of it.
 const RULER_REFINE_STEPS: u32 = 12;
+/// THE MARCH'S OWN REACH, in cells of its rung: a ray that has met no ground within this many cells
+/// plants no ball. The reach a caller states is the ladder's, hundreds of kilometres; at one metre
+/// a cell that is a half-million-step march on the render thread for a ray that points at the sky
+/// (the refuter's finding). Four thousand cells is 4 km on the ground and 17 000 km at the top
+/// rung — every stand's ray meets ground well inside it, and a ray that does not gets no ruler.
+pub const RULER_MAX_CELLS: f64 = 4096.0;
 
 /// Where the centre ray from `eye_m` along `forward` meets the recipe's surface AT THE DRAWN RUNG
 /// (so the ball rests on the drawn ground, not on a finer shape it is not standing on), marched one
@@ -580,6 +1031,7 @@ pub fn ruler_on_surface(
         return None;
     }
     let cell = f64::from(vd_seed::ladder::cell_m(rung));
+    let reach_m = reach_m.min(cell * RULER_MAX_CELLS);
     let below = |t: f64| -> bool {
         let p = eye + fwd * t;
         let len = p.length();
@@ -745,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn the_lane_builds_holds_and_releases_chunks_and_never_serves_a_second_rung() {
+    fn the_lane_builds_holds_and_releases_chunks_of_every_rung() {
         let mut lane = lane();
         let body = home_planet();
         // No body yet: refused and counted.
@@ -765,30 +1217,38 @@ mod tests {
             },
         );
         assert_eq!(lane.counters().outside, 1);
-        // The first request sets the realm's rung; a second request of the same key is not queued twice.
+        // A second request of the same key is not queued twice.
         lane.request(planet(), k0);
         lane.request(planet(), k0);
         assert!(lane.holds(planet(), k0));
+        assert!(!lane.is_resident(planet(), k0));
         assert_eq!(lane.counters().submitted, 1);
-        // A second rung: refused (D-TERRAIN-3).
+        // A second rung beside the first: served (step 2 — every rung at once).
         let k3 = surface_key(&body, 3, 30, 70);
         lane.request(planet(), k3);
-        assert_eq!(lane.counters().second_rung, 1);
-        assert!(!lane.holds(planet(), k3));
-        // Harvest: the chunk is resident, with geometry relative to its origin.
+        assert!(lane.holds(planet(), k3));
+        assert_eq!(lane.counters().submitted, 2);
+        // Harvest: both chunks are resident, each with geometry relative to its origin.
         let ready = lane.poll(8);
-        assert_eq!(ready.len(), 1);
+        assert_eq!(ready.len(), 2);
         assert_eq!(ready[0].realm, planet());
-        assert_eq!(ready[0].geometry.key, k0);
-        assert_eq!(lane.resident(planet()), vec![k0]);
-        assert_eq!(lane.counters().harvested, 1);
+        let mut got: Vec<ChunkKey> = ready.iter().map(|r| r.geometry.key).collect();
+        got.sort();
+        let mut want = vec![k0, k3];
+        want.sort();
+        assert_eq!(got, want);
+        assert_eq!(lane.resident(planet()), want);
+        assert!(lane.is_resident(planet(), k0));
+        assert!(lane.is_resident(planet(), k3));
+        assert_eq!(lane.counters().harvested, 2);
         assert!(lane.poll(8).is_empty());
-        // Release the only chunk: the realm's rung is free, and rung 3 is served.
+        // Release both; a chunk released while building is never handed out.
         lane.release(planet(), k0);
+        lane.release(planet(), k3);
         assert!(!lane.holds(planet(), k0));
         lane.request(planet(), k3);
         assert!(lane.holds(planet(), k3));
-        // Release while building: never handed out.
+        assert!(!lane.is_resident(planet(), k3));
         lane.release(planet(), k3);
         assert!(lane.poll(8).is_empty());
         assert!(lane.resident(planet()).is_empty());
@@ -797,16 +1257,19 @@ mod tests {
         lane.request(planet(), k0);
         lane.request(planet(), k1);
         assert_eq!(lane.pending_count(), 2);
+        let mut building = lane.pending_all();
+        building.sort();
+        assert_eq!(building, vec![(planet(), k0), (planet(), k1)]);
         assert_eq!(lane.poll(1).len(), 1);
         assert_eq!(lane.pending_count(), 1);
         assert_eq!(lane.poll(1).len(), 1);
         assert_eq!(lane.pending_count(), 0);
         assert_eq!(lane.resident(planet()).len(), 2);
-        // Releasing ONE of two keeps the realm's rung: the other is still held, so rung 3 is refused.
+        // Releasing ONE of two keeps the other; another rung is served beside it.
         lane.release(planet(), k0);
         lane.request(planet(), k3);
-        assert_eq!(lane.counters().second_rung, 2);
-        assert!(!lane.holds(planet(), k3));
+        assert!(lane.holds(planet(), k3));
+        lane.release(planet(), k3);
         // A release of a chunk never held changes nothing.
         lane.release(planet(), k3);
         assert_eq!(lane.resident(planet()), vec![k1]);
@@ -820,6 +1283,7 @@ mod tests {
             realm: planet(),
             body: Arc::new(home_planet()),
             key: k0,
+            parents: Arc::new(ParentCache::default()),
         };
         assert!(format!("{:?}", job.clone()).contains("ChunkJob"));
         let mut inline = InlineWorkers::default();
@@ -840,9 +1304,9 @@ mod tests {
         let g = geometry_of(&body, key).expect("in the band");
         let samples = sample_box(&body, key).expect("in the band");
         let mesh = extract(&samples);
-        assert_eq!(g.triangles, mesh.triangles);
-        assert_eq!(g.vertices.len(), mesh.vertices.len());
-        assert_eq!(g.normals.len(), mesh.vertices.len());
+        assert_eq!(&g.triangles[..mesh.triangles.len()], &mesh.triangles[..]);
+        assert!(g.vertices.len() >= mesh.vertices.len());
+        assert_eq!(g.normals.len(), g.vertices.len());
         let mut worst = 0.0f64;
         for (v, rel) in mesh.vertices.iter().zip(g.vertices.iter()) {
             let p = vertex_position_m(&body, &samples, *v);
@@ -921,82 +1385,6 @@ mod tests {
     }
 
     #[test]
-    fn the_chunks_around_a_point_are_the_columns_near_it_at_one_rung() {
-        let body = home_planet();
-        let r = body.ladder().radius_m();
-        // A point on the +X face, near its centre: radius 1 → 3 × 3 columns × up to 3 chunks.
-        let keys = chunks_around(&body, [r, 1000.0, -500.0], 0, 1);
-        assert!(keys.len() >= 9);
-        assert!(keys.len() <= 27);
-        assert!(keys.iter().all(|k| k.face == Face::PosX));
-        assert!(keys.iter().all(|k| k.rung == 0));
-        let xs: BTreeSet<i32> = keys.iter().map(|k| k.x).collect();
-        assert_eq!(xs.len(), 3);
-        // At the coarsest rung, near the (−u, −v) corner of −Y: columns past the face are left out.
-        let top = body.ladder().rungs - 1;
-        let corner = chunks_around(&body, [-r, -r, -r], top, 2);
-        assert!(!corner.is_empty());
-        assert!(corner.iter().all(|k| k.x >= 0));
-        assert!(corner.iter().all(|k| k.y >= 0));
-        // Every key is in the ladder.
-        for k in corner.iter().chain(keys.iter()) {
-            assert!(vd_terrain::lattice::in_ladder(&body, *k), "{k:?}");
-        }
-        // The centre, a NaN, a rung the body lacks, or an eye farther than the far bound: nothing.
-        assert!(chunks_around(&body, [0.0, 0.0, 0.0], 0, 1).is_empty());
-        assert!(chunks_around(&body, [f64::NAN, 0.0, 0.0], 0, 1).is_empty());
-        // The radius is clamped: an absurd one is the widest allowed, a negative one is zero.
-        let widest = chunks_around(&body, [r, 1000.0, -500.0], 3, MAX_RADIUS);
-        assert_eq!(
-            chunks_around(&body, [r, 1000.0, -500.0], 3, i32::MAX),
-            widest
-        );
-        assert_eq!(
-            chunks_around(&body, [r, 1000.0, -500.0], 3, -5),
-            chunks_around(&body, [r, 1000.0, -500.0], 3, 0)
-        );
-        assert!(!widest.is_empty());
-        assert!(chunks_around(&body, [r, 0.0, 0.0], 99, 1).is_empty());
-        assert!(chunks_around(&body, [r * FAR_EYE_RADII * 1.01, 0.0, 0.0], 0, 1).is_empty());
-        assert!(!chunks_around(&body, [r * FAR_EYE_RADII * 0.99, 0.0, 0.0], 0, 1).is_empty());
-    }
-
-    /// THE COLUMN UNDER THE EYE IS UNDER THE EYE (the ground picture's measured defect: the tangents
-    /// a direction gives were read as the face parameter, and the column asked for lay 230 km from
-    /// the eye). At every rung and away from a face's centre — where the bend is largest — the
-    /// middle column's own direction is within one chunk of the point.
-    #[test]
-    fn the_column_under_a_point_holds_the_point_at_every_rung() {
-        use vd_seed::bend::{direction, face_of};
-        use vd_seed::ladder::face_param;
-        let body = home_planet();
-        let r = body.ladder().radius_m();
-        let edge = CHUNK_EDGE as i32;
-        // The ground picture's own standing point: well off the +X face's centre.
-        let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
-        let point = [d[0] * r, d[1] * r, d[2] * r];
-        let mut rung = 0u8;
-        while rung < body.ladder().rungs {
-            let keys = chunks_around(&body, point, rung, 0);
-            assert!(!keys.is_empty(), "rung {rung}");
-            let n_l = body.ladder().cells_per_edge(rung);
-            for k in &keys {
-                assert_eq!(k.face, face_of(d));
-                // The chunk's middle cell as a direction, against the point's own.
-                let a = face_param(k.x * edge + edge / 2, n_l);
-                let b = face_param(k.y * edge + edge / 2, n_l);
-                let c = direction(k.face, a, b);
-                let cos = c[0] * d[0] + c[1] * d[1] + c[2] * d[2];
-                let angle = cos.clamp(-1.0, 1.0).acos();
-                // One chunk's own size at that rung (its edge in metres), generously.
-                let chunk_m = f64::from(vd_seed::ladder::cell_m(rung)) * f64::from(edge);
-                assert!(angle * r <= chunk_m, "rung {rung}: {} m off", angle * r);
-            }
-            rung += 1;
-        }
-    }
-
-    #[test]
     fn a_body_frame_point_undoes_the_rows_placement_and_facing() {
         // The planet sits at (100, 0, 0) turned a quarter turn about +Z; the eye at (100, 10, 0).
         let q = vd_core::glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
@@ -1005,6 +1393,531 @@ mod tests {
         assert!((p[0] - 10.0).abs() < 1e-9, "{p:?}");
         assert!(p[1].abs() < 1e-9);
         assert!(p[2].abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_radial_meets_a_triangle_inside_it_and_on_its_edge_and_misses_it_beside() {
+        let p0 = DVec3::new(100.0, -1.0, -1.0);
+        let p1 = DVec3::new(100.0, 3.0, -1.0);
+        let p2 = DVec3::new(100.0, -1.0, 3.0);
+        // Through the inside: at the plane, 100 m out.
+        let t = ray_triangle_m(DVec3::X, p0, p1, p2).expect("inside");
+        assert!((t - 100.0).abs() < 1e-9, "{t}");
+        // Along an edge (y = −1): still a crossing.
+        let along = DVec3::new(100.0, -1.0, 1.0).normalize();
+        assert!(ray_triangle_m(along, p0, p1, p2).is_some());
+        // Beside the triangle: none. Parallel to it: none. Behind the centre: none.
+        assert_eq!(
+            ray_triangle_m(DVec3::new(100.0, 5.0, 5.0).normalize(), p0, p1, p2),
+            None
+        );
+        assert_eq!(ray_triangle_m(DVec3::Y, p0, p1, p2), None);
+        assert_eq!(ray_triangle_m(DVec3::NEG_X, p0, p1, p2), None);
+    }
+
+    #[test]
+    fn two_triangles_on_one_radial_answer_the_nearer_one_and_a_tie_the_lower() {
+        // A hand-built parent: two level triangles on the +x radial, at 100 m and 130 m, both
+        // in bucket (0, 0).
+        let tri = |r: f64| -> [DVec3; 3] {
+            [
+                DVec3::new(r, -1.0, -1.0),
+                DVec3::new(r, 3.0, -1.0),
+                DVec3::new(r, -1.0, 3.0),
+            ]
+        };
+        let (near, far) = (tri(100.0), tri(130.0));
+        let pm = ParentMesh {
+            key: ChunkKey {
+                face: Face::PosX,
+                rung: 1,
+                x: 0,
+                y: 0,
+                z: 0,
+            },
+            positions: vec![near[0], near[1], near[2], far[0], far[1], far[2]],
+            triangles: vec![[0, 1, 2], [3, 4, 5]],
+            buckets: [((0, 0), vec![0, 1])].into_iter().collect(),
+        };
+        // Asked near 128: the far one; near 102: the near one; at 115 (a tie): the lower.
+        assert_eq!(pm.radial_hit_m(0, 0, DVec3::X, 128.0), Some(130.0));
+        assert_eq!(pm.radial_hit_m(0, 0, DVec3::X, 102.0), Some(100.0));
+        assert_eq!(pm.radial_hit_m(0, 0, DVec3::X, 115.0), Some(100.0));
+        // The same triangles the other way round meet the same tie the same way.
+        let swapped = ParentMesh {
+            key: pm.key,
+            positions: vec![far[0], far[1], far[2], near[0], near[1], near[2]],
+            triangles: vec![[0, 1, 2], [3, 4, 5]],
+            buckets: [((0, 0), vec![0, 1])].into_iter().collect(),
+        };
+        assert_eq!(swapped.radial_hit_m(0, 0, DVec3::X, 115.0), Some(100.0));
+    }
+
+    #[test]
+    fn a_vertex_on_the_face_edge_reads_the_field_from_both_faces() {
+        let body = home_planet();
+        let cache = ParentCache::default();
+        // A chunk at the face's low x edge: its vertices at the edge read the field.
+        let edge = surface_key(&body, 0, 0, 700);
+        let g = geometry_with(&body, planet(), edge, &cache).expect("the edge chunk");
+        assert!(g.morph_seam > 0, "no seam vertex on an edge chunk");
+        let (fallbacks, vertices) = (g.morph_fallbacks, g.vertices.len() as u32);
+        assert!(
+            fallbacks * 100 < vertices,
+            "{fallbacks} fallbacks of {vertices}"
+        );
+        let samples = sample_box(&body, edge).expect("in the band");
+        let mesh = extract(&samples);
+        let o = DVec3::from_array(g.origin_m);
+        let mut checked = 0;
+        for (v, m) in mesh.vertices.iter().zip(&g.morph) {
+            if v[0] <= 0 {
+                let t = o + DVec3::new(f64::from(m[0]), f64::from(m[1]), f64::from(m[2]));
+                let dir = t.normalize();
+                let field = vd_terrain::height::height_m(
+                    &body,
+                    [
+                        Gf::from_f64(dir.x),
+                        Gf::from_f64(dir.y),
+                        Gf::from_f64(dir.z),
+                    ],
+                    1,
+                )
+                .to_f64();
+                let radius = t.length();
+                assert!((radius - field).abs() < 0.01, "{radius} vs {field}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+        // A chunk in the middle of the face has no seam vertex.
+        let mid = geometry_with(&body, planet(), surface_key(&body, 0, 300, 700), &cache)
+            .expect("a middle chunk");
+        assert_eq!(mid.morph_seam, 0);
+    }
+
+    #[test]
+    fn the_parent_mesh_stands_within_the_sink_of_its_field_on_every_radial() {
+        // THE SINK'S CLAIM, MEASURED: along every radial of a chunk's own vertices, the parent
+        // mesh's hit and the coarser field stand apart by less than the two cells the sink adds
+        // to the gap bound — the extractor's placement, read on the surface a radial meets, not
+        // only at a vertex.
+        let body = home_planet();
+        let cache = ParentCache::default();
+        let mut worst: f64 = 0.0;
+        let mut measured = 0;
+        for (x, y) in [(300, 700), (301, 700), (150, 350), (2506, 1781)] {
+            let rung = if x > 1000 {
+                5
+            } else if x < 200 {
+                1
+            } else {
+                0
+            };
+            let key = surface_key(&body, rung, x, y);
+            let coarser = rung + 1;
+            let samples = sample_box(&body, key).expect("in the band");
+            let mesh = extract(&samples);
+            let parents: Vec<Arc<ParentMesh>> = parent_keys(&body, key)
+                .into_iter()
+                .filter_map(|p| cache.get(planet(), &body, p))
+                .collect();
+            for v in mesh.vertices.iter().step_by(7) {
+                let p = vertex_position_m(&body, &samples, *v);
+                let pv = DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64());
+                let len = pv.length();
+                let dir = pv / len;
+                let field = vd_terrain::height::height_m(
+                    &body,
+                    [
+                        Gf::from_f64(dir.x),
+                        Gf::from_f64(dir.y),
+                        Gf::from_f64(dir.z),
+                    ],
+                    coarser,
+                )
+                .to_f64();
+                // The hit nearest the FIELD's own radius: the coarser surface, not a cave.
+                let hit = parents.iter().fold(None, |best: Option<f64>, pm| {
+                    let (a, b) = parent_cell(key, pm.key(), *v);
+                    match (best, pm.radial_hit_m(a, b, dir, field)) {
+                        (Some(b), Some(h)) if (h - field).abs() < (b - field).abs() => Some(h),
+                        (None, Some(h)) => Some(h),
+                        (b, _) => b,
+                    }
+                });
+                // Branchless (HR5): a radial with no hit adds nothing.
+                let met = hit.is_some();
+                worst = worst.max((hit.unwrap_or(field) - field).abs());
+                measured += usize::from(met);
+            }
+            let cells = f64::from(vd_seed::ladder::cell_m(coarser))
+                + f64::from(vd_seed::ladder::cell_m(rung));
+            assert!(
+                worst <= cells,
+                "rung {rung}: the parent mesh stands {worst:.2} m from its field, the sink allows {cells}"
+            );
+        }
+        assert!(measured > 1000, "{measured}");
+    }
+
+    #[test]
+    fn a_parent_mesh_answers_the_radials_over_its_cells_nearest_the_asked_radius() {
+        let body = home_planet();
+        let key = surface_key(&body, 1, 150, 350);
+        let pm = ParentMesh::build(&body, key).expect("the parent");
+        assert_eq!(pm.key(), key);
+        assert!(pm.triangle_count() > 0);
+        // Every vertex of the parent's own mesh is met by its own radial, at its own radius,
+        // within the cell it lies in (a vertex is on its triangles).
+        let samples = sample_box(&body, key).expect("in the band");
+        let mesh = extract_all_edges(&samples);
+        let q = i32::from(vd_terrain::VERTEX_QUANTUM as i16);
+        let mut met = 0;
+        for v in mesh.vertices.iter().step_by(41) {
+            let p = vertex_position_m(&body, &samples, *v);
+            let p = DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64());
+            let (a, b) = (i32::from(v[0]).div_euclid(q), i32::from(v[1]).div_euclid(q));
+            let r = p.length();
+            let hit = pm.radial_hit_m(a, b, p / r, r).expect("its own radial");
+            assert!((hit - r).abs() < 1e-3, "{hit} vs {r}");
+            met += 1;
+        }
+        assert!(met > 50);
+        // A cell with no triangle: no hit. Out of the body: no parent.
+        assert_eq!(pm.radial_hit_m(1000, 1000, DVec3::X, 1.0), None);
+        let outside = ChunkKey { z: -1, ..key };
+        assert!(ParentMesh::build(&body, outside).is_none());
+    }
+
+    #[test]
+    fn the_parent_cache_shares_a_build_and_forgets_the_oldest() {
+        let body = home_planet();
+        let cache = ParentCache::default();
+        assert!(cache.is_empty());
+        let key = surface_key(&body, 1, 150, 350);
+        let a = cache.get(planet(), &body, key).expect("built");
+        let b = cache.get(planet(), &body, key).expect("cached");
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(cache.len(), 1);
+        // The same key inserted again keeps one entry (and one place in the order).
+        cache.insert(planet(), key, Arc::clone(&a));
+        assert_eq!(cache.len(), 1);
+        // A key outside the body builds nothing and keeps nothing.
+        assert!(
+            cache
+                .get(planet(), &body, ChunkKey { z: -1, ..key })
+                .is_none()
+        );
+        assert_eq!(cache.len(), 1);
+        // A hit refreshes its place: after the cap is passed by fresh keys, the hit one stays
+        // and the oldest untouched one leaves.
+        let second = ChunkKey { x: 151, ..key };
+        let b2 = cache.get(planet(), &body, second).expect("built");
+        let _ = cache.get(planet(), &body, key).expect("hit, refreshed");
+        let mut i = 0;
+        while i < PARENT_CACHE_ENTRIES - 1 {
+            cache.insert(
+                planet(),
+                ChunkKey {
+                    x: 20_000 + i as i32,
+                    ..key
+                },
+                Arc::clone(&a),
+            );
+            i += 1;
+        }
+        assert_eq!(cache.len(), PARENT_CACHE_ENTRIES);
+        assert!(
+            cache
+                .get(planet(), &body, key)
+                .is_some_and(|c| Arc::ptr_eq(&c, &a))
+        );
+        assert!(
+            cache
+                .get(planet(), &body, second)
+                .is_some_and(|c| !Arc::ptr_eq(&c, &b2))
+        );
+        // The bound: one more than the cap, and the first one is gone.
+        let mut i = 0;
+        while i < PARENT_CACHE_ENTRIES {
+            cache.insert(
+                planet(),
+                ChunkKey {
+                    x: 10_000 + i as i32,
+                    ..key
+                },
+                Arc::clone(&a),
+            );
+            i += 1;
+        }
+        assert_eq!(cache.len(), PARENT_CACHE_ENTRIES);
+        assert!(
+            cache
+                .get(planet(), &body, key)
+                .is_some_and(|c| !Arc::ptr_eq(&c, &a))
+        );
+        // Forgetting a realm drops its meshes and nobody else's.
+        cache.insert(RealmId::Planet(1), key, Arc::clone(&a));
+        cache.forget(planet());
+        assert_eq!(cache.len(), 1);
+        cache.forget(RealmId::Planet(1));
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn the_parents_are_the_coarser_chunk_and_its_neighbour_on_the_side_faced() {
+        let body = home_planet();
+        let top = body.ladder().rungs - 1;
+        assert!(parent_keys(&body, surface_key(&body, top, 3, 3)).is_empty());
+        let even = ChunkKey {
+            face: Face::PosX,
+            rung: 0,
+            x: 301,
+            y: 700,
+            z: 276,
+        };
+        // x odd faces +x, y even faces −y, z even faces down: eight parents.
+        let ps = parent_keys(&body, even);
+        assert_eq!(ps.len(), 8);
+        assert_eq!((ps[0].rung, ps[0].x, ps[0].y, ps[0].z), (1, 150, 350, 138));
+        let xs: BTreeSet<i32> = ps.iter().map(|p| p.x).collect();
+        let ys: BTreeSet<i32> = ps.iter().map(|p| p.y).collect();
+        let zs: BTreeSet<i32> = ps.iter().map(|p| p.z).collect();
+        assert_eq!(xs, [150, 151].into_iter().collect());
+        assert_eq!(ys, [349, 350].into_iter().collect());
+        assert_eq!(zs, [137, 138].into_iter().collect());
+        let odd = ChunkKey { z: 277, ..even };
+        let zs: BTreeSet<i32> = parent_keys(&body, odd).iter().map(|p| p.z).collect();
+        assert_eq!(zs, [138, 139].into_iter().collect(), "an odd z faces up");
+        // At the band's floor, the face's edge and the band's top the outside is left out.
+        assert_eq!(parent_keys(&body, ChunkKey { z: 0, ..even }).len(), 4);
+        assert_eq!(parent_keys(&body, ChunkKey { x: 0, ..even }).len(), 4);
+        let top_z = vd_terrain::digest::top_chunk_z(&body, 0);
+        let top_parent = vd_terrain::digest::top_chunk_z(&body, 1);
+        let at_top = ChunkKey { z: top_z, ..even };
+        let ps = parent_keys(&body, at_top);
+        assert!(ps.iter().all(|p| p.z <= top_parent));
+        // The parent cell under a finer vertex: the finer chunk's cell halved, in the parent's
+        // box — a low halo vertex of an even chunk reads the parent's halo column −1.
+        assert_eq!(parent_cell(even, ps[0], [0, 0, 0]), (31, 0));
+        let even_x = ChunkKey { x: 300, ..even };
+        let parent = parent_keys(&body, even_x)[0];
+        assert_eq!(parent_cell(even_x, parent, [-256, 0, 0]), (-1, 0));
+        assert_eq!(parent_cell(even, parent, [62 * 256, 0, 0]), (62, 0));
+    }
+
+    #[test]
+    fn the_morph_targets_stand_on_the_parent_mesh_and_neighbours_share_them() {
+        let body = home_planet();
+        let cache = ParentCache::default();
+        let left = surface_key(&body, 0, 300, 700);
+        let right = ChunkKey { x: 301, ..left };
+        let gl = geometry_with(&body, planet(), left, &cache).expect("left");
+        let gr = geometry_with(&body, planet(), right, &cache).expect("right");
+        // Near nothing fell back to the field.
+        let fallbacks = gl.morph_fallbacks;
+        let vertices = gl.vertices.len() as u32;
+        assert!(
+            fallbacks * 100 < vertices,
+            "{fallbacks} fallbacks of {vertices}"
+        );
+        // The two chunks share their parent builds: eight parents each, twelve at most in all.
+        assert!(cache.len() <= 12, "{}", cache.len());
+        // Every target lies ON a parent triangle: the radial through it meets the parent mesh
+        // at its own radius.
+        let parents: Vec<Arc<ParentMesh>> = parent_keys(&body, left)
+            .into_iter()
+            .filter_map(|p| cache.get(planet(), &body, p))
+            .collect();
+        let samples = sample_box(&body, left).expect("in the band");
+        let mesh = extract(&samples);
+        let o = DVec3::from_array(gl.origin_m);
+        let mut checked = 0;
+        for (v, m) in mesh.vertices.iter().zip(&gl.morph) {
+            // The exact radial of the vertex (the target's own is rounded through f32).
+            let p = vertex_position_m(&body, &samples, *v);
+            let dir = DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64()).normalize();
+            let t = o + DVec3::new(f64::from(m[0]), f64::from(m[1]), f64::from(m[2]));
+            let r = t.length();
+            let on = parents.iter().any(|pm| {
+                let (a, b) = parent_cell(left, pm.key(), *v);
+                pm.radial_hit_m(a, b, dir, r)
+                    .is_some_and(|h| (h - r).abs() < 0.01)
+            });
+            checked += u32::from(on);
+        }
+        // The extractor's own vertices; the skirts' targets are their tops' dropped.
+        let targets = mesh.vertices.len() as u32;
+        assert!(
+            checked + fallbacks >= targets,
+            "{checked} on the parent of {targets}, {fallbacks} fallbacks"
+        );
+        // A vertex the two chunks share (the same world position) has the same target.
+        let ol = DVec3::from_array(gl.origin_m);
+        let or = DVec3::from_array(gr.origin_m);
+        let mut shared = 0;
+        let mut right_at: BTreeMap<[i64; 3], DVec3> = BTreeMap::new();
+        for (v, m) in gr.vertices.iter().zip(&gr.morph) {
+            let p = or + DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
+            let k = [
+                (p.x * 1000.0).round() as i64,
+                (p.y * 1000.0).round() as i64,
+                (p.z * 1000.0).round() as i64,
+            ];
+            right_at.insert(
+                k,
+                or + DVec3::new(f64::from(m[0]), f64::from(m[1]), f64::from(m[2])),
+            );
+        }
+        for (v, m) in gl.vertices.iter().zip(&gl.morph) {
+            let p = ol + DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
+            let k = [
+                (p.x * 1000.0).round() as i64,
+                (p.y * 1000.0).round() as i64,
+                (p.z * 1000.0).round() as i64,
+            ];
+            if let Some(tr) = right_at.get(&k) {
+                let tl = ol + DVec3::new(f64::from(m[0]), f64::from(m[1]), f64::from(m[2]));
+                assert!((tl - *tr).length() < 0.01, "{tl} vs {tr}");
+                shared += 1;
+            }
+        }
+        assert!(shared > 10, "{shared} shared vertices");
+    }
+
+    #[test]
+    fn the_skirts_hang_two_cells_under_every_boundary_edge_facing_outward() {
+        let body = home_planet();
+        let key = surface_key(&body, 0, 300, 700);
+        let samples = sample_box(&body, key).expect("in the band");
+        let mesh = extract(&samples);
+        let g = geometry_of(&body, key).expect("the chunk");
+        // The boundary edges of the extractor's mesh, by a count of their uses.
+        let mut uses: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+        for t in &mesh.triangles {
+            for i in 0..3 {
+                let (a, b) = (t[i], t[(i + 1) % 3]);
+                *uses.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        let boundary = uses.values().filter(|c| **c == 1).count();
+        assert!(boundary > 100, "{boundary} boundary edges");
+        assert_eq!(g.vertices.len(), mesh.vertices.len() + 2 * boundary);
+        assert_eq!(g.triangles.len(), mesh.triangles.len() + 2 * boundary);
+        // Every skirt vertex hangs two cells under a top vertex along its radial, keeps its
+        // normal, and its morph target is the top's target dropped the same.
+        let o = DVec3::from_array(g.origin_m);
+        let drop = 2.0;
+        let mut i = mesh.vertices.len();
+        while i < g.vertices.len() {
+            let q = o + DVec3::from(g.vertices[i].map(f64::from));
+            // The top: the vertex of the base mesh at the same radial, two cells up.
+            let top = g.vertices[..mesh.vertices.len()]
+                .iter()
+                .enumerate()
+                .find(|(_, v)| {
+                    let p = o + DVec3::from(v.map(f64::from));
+                    (p - q).length() < drop + 0.01
+                        && (p - q).normalize().dot(p.normalize()) > 0.999_999
+                        && ((p - q).length() - drop).abs() < 0.01
+                })
+                .map(|(j, _)| j)
+                .expect("a top vertex over the skirt vertex");
+            assert_eq!(g.normals[i], g.normals[top]);
+            assert_eq!(g.sink[i], g.sink[top]);
+            let mt = o + DVec3::from(g.morph[top].map(f64::from));
+            let ms = o + DVec3::from(g.morph[i].map(f64::from));
+            assert!(((mt - ms).length() - drop).abs() < 0.01);
+            i += 1;
+        }
+        // Every skirt triangle faces away from the chunk: its normal points away from the base
+        // triangle's third corner (checked through the winding rule the builder applied).
+        let mut outward = 0;
+        for t in &g.triangles[mesh.triangles.len()..] {
+            let p = |k: u32| o + DVec3::from(g.vertices[k as usize].map(f64::from));
+            let n = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));
+            // The strip is radial: its normal is across the radial, never along it.
+            let radial = p(t[0]).normalize();
+            let along = n.normalize().dot(radial);
+            assert!(along.abs() < 0.2, "{along}");
+            outward += 1;
+        }
+        assert_eq!(outward, 2 * boundary);
+    }
+
+    #[test]
+    fn the_sink_is_the_gap_bound_plus_a_cell_of_each_rung_and_rung_zero_sinks_nowhere() {
+        let body = home_planet();
+        assert_eq!(sink_m(&body, 0), 0.0);
+        let s1 = sink_m(&body, 1);
+        let gap = (body.dropped_bound_m(1) - body.dropped_bound_m(0)).to_f64();
+        assert!((s1 - (gap + 2.0 + 1.0)).abs() < 1e-9, "{s1}");
+        assert!(sink_m(&body, 3) > sink_m(&body, 1));
+        // On a chunk: rung 0 carries zeros; rung 1 carries its radial times the sink.
+        let g0 = geometry_of(&body, surface_key(&body, 0, 300, 700)).expect("rung 0");
+        assert_eq!(g0.sink.len(), g0.vertices.len());
+        assert!(g0.sink.iter().all(|s| *s == [0.0, 0.0, 0.0]));
+        let g1 = geometry_of(&body, surface_key(&body, 1, 150, 350)).expect("rung 1");
+        assert_eq!(g1.sink.len(), g1.vertices.len());
+        let o = vd_core::glam::DVec3::from_array(g1.origin_m);
+        for (v, s) in g1.vertices.iter().zip(&g1.sink) {
+            let pv =
+                o + vd_core::glam::DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
+            let sv = vd_core::glam::DVec3::new(f64::from(s[0]), f64::from(s[1]), f64::from(s[2]));
+            assert!((sv.length() - s1).abs() < 1e-3, "{} vs {s1}", sv.length());
+            assert!(sv.normalize().dot(pv.normalize()) > 0.999_999);
+        }
+    }
+
+    #[test]
+    fn the_morph_targets_stand_on_the_coarser_surface_and_the_top_rung_is_its_own() {
+        let body = home_planet();
+        let key = surface_key(&body, 0, 300, 700);
+        let g = geometry_of(&body, key).expect("the golden chunk");
+        assert_eq!(g.morph.len(), g.vertices.len());
+        // The gap between a vertex and its target is radial and within the octave dropped between
+        // rung 0 and rung 1 — the recipe's own bound — plus a cell of each rung for the two
+        // extractors' placement, and at least one target differs.
+        let bound = (body.dropped_bound_m(1) - body.dropped_bound_m(0)).to_f64() + 3.0;
+        let o = vd_core::glam::DVec3::from_array(g.origin_m);
+        let mut moved = 0;
+        let mut on_surface = 0;
+        for (v, m) in g.vertices.iter().zip(&g.morph) {
+            let pv =
+                o + vd_core::glam::DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
+            let pm =
+                o + vd_core::glam::DVec3::new(f64::from(m[0]), f64::from(m[1]), f64::from(m[2]));
+            let radial = pv.normalize();
+            let gap = pm - pv;
+            let along = gap.dot(radial);
+            let across = (gap - radial * along).length();
+            assert!(across < 0.01, "{across} m across the radial");
+            // The bound holds for a SURFACE vertex; a vertex of a sealed cave under the surface
+            // (the world has them) morphs to the parent's surface above it, as far as that is.
+            let surface = vd_terrain::height::height_m(
+                &body,
+                [
+                    Gf::from_f64(radial.x),
+                    Gf::from_f64(radial.y),
+                    Gf::from_f64(radial.z),
+                ],
+                0,
+            )
+            .to_f64();
+            let on = (pv.length() - surface).abs() < 2.0;
+            on_surface += i32::from(on);
+            // Branchless (HR5): a cave vertex's limit is beyond any target.
+            let limit = bound + 0.01 + (1.0 - f64::from(u8::from(on))) * 1.0e9;
+            assert!(along.abs() <= limit, "{along} m along, bound {bound}");
+            moved += i32::from(on & (along.abs() > 1e-3));
+        }
+        assert!(on_surface > 100, "{on_surface}");
+        assert!(moved > 0);
+        let top = body.ladder().rungs - 1;
+        let top_key = surface_key(&body, top, 3, 3);
+        let g = geometry_of(&body, top_key).expect("the top chunk");
+        assert_eq!(g.morph, g.vertices);
     }
 
     #[test]
@@ -1076,9 +1989,14 @@ mod tests {
             (ruler.radius_m - by_angle.max(0.5)).abs() < 1e-3,
             "{ruler:?} vs {by_angle}"
         );
-        // A ray to the sky meets nothing within reach.
+        // A ray to the sky meets nothing within reach — and a reach of the whole ladder is cut to
+        // the march's own, so the answer comes in thousands of steps, not a half-million.
         assert_eq!(
             ruler_on_surface(&body, eye.to_array(), up.to_array(), 0, 400.0),
+            None
+        );
+        assert_eq!(
+            ruler_on_surface(&body, eye.to_array(), up.to_array(), 0, 466_000.0),
             None
         );
         // Straight down from aloft at a coarse rung: the hit is under the eye, one cell's step.

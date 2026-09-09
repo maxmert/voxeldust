@@ -7772,7 +7772,16 @@ host — slices 9 and 10 — and the collider that stops her boots at the new fl
 
 **WHEN.** As listed; the budget question at the owner's next word.
 
-### D-TERRAIN-3 🟥 ONE RUNG PER REALM, NAMED BY A DEV FLAG — an interim that slice 8 DELETES (owner-accepted for one slice, 2026-09-08)
+### D-TERRAIN-3 🟩 ONE RUNG PER REALM, NAMED BY A DEV FLAG — DELETED by slice 8 step 2 (2026-09-09)
+
+**LANDED (2026-09-09, slice 8 step 2, ruling V14 D8-1/D8-6).** The flag (`VD_TERRAIN_RUNG`,
+`VD_TERRAIN_RADIUS`), the lane's one-rung refusal (`second_rung`) and `chunks_around` are gone. The
+client draws THE LADDER: `vd_client::ladder_view` names every ring from the rung under the eye to
+the horizon and the peaks behind it by the tier rule (one cell = one pixel at the reference view),
+coarsest first, and a chunk no longer wanted is released only when every wanted chunk over its
+footprint has arrived. The outermost ring is the globe beyond the band. The crossfade between rungs
+(step 3) and the residency band (step 4) follow in the same slice; until step 3 lands, the boundary
+between two rings is a hard edge on the pictures, stated on the stamp and measured by the probe.
 
 **WHAT IS WRONG.** Slice 7 draws the terrain at ONE rung per realm, named by a dev flag the window
 flight passes in, and the client library asserts that no two rungs of one realm are resident at once.
@@ -7790,6 +7799,58 @@ assertion and this row's code are gone.
 **LANDED WITH IT (2026-09-08, slice 7's pictures).** The three pictures
 (`docs/investigation/2026-09-07/pictures/`) are taken at ONE rung each — 0 from the ground, 3 from a
 hill, 9 from aloft — and the patch's far edge is a hard horizon in every one. That edge IS this row.
+
+### D-TERRAIN-5 🟥 THE LADDER'S OWN INTERIMS — what steps 2 and 3 leave for steps 4–6 of slice 8 (2026-09-09)
+
+**WHAT IS WRONG.** Step 2 draws every ring of the ladder to the horizon and step 3 crossfades the
+rings; what is left is an interim with a named step:
+1. 🟩 **The hard edge and the hairline crack between two rings** (MEASURED at step 2: 151 / 524 /
+   450 crack pixels on the ground / hill / aloft probes): step 3 built the crossfade — the geomorph
+   onto the parent MESH, the sink under the finer rung, the far edge, the skyline — and the picture
+   gate asserts ZERO pixels of nothing under drawn ground on every stand (the sixteenth flight of
+   2026-09-09: 0 / 0 / 0 / 0). `slice_08_ladder_discussion.md` §15.
+2. **Full-circle rings around the eye, and their bytes** (MEASURED after step 3: 5 648 chunks from
+   the ground, 6 960 from the hill; the bands hold two rungs over a fifth of every ring, and the
+   skyline wants every column the eye can see into): the honest cost of D8-1 A. → M8-2's census
+   and step 5's packing (D8-4). The parent cache the geomorph reads (an LRU of 48 parent meshes,
+   about 24 MB) and the parent builds it adds per finer chunk (UNMEASURED: a parent once per its
+   eight children and their halo users when the cache holds, a whole build per miss, and two
+   workers may build one parent at once) go into that census; `terrain_cost` still measures the
+   slice-7 cost with a private cache and is retired by it.
+3. **The far-eye handover**: past `FAR_EYE_RADII` (two body radii) the proxy outline stands in for
+   the globe, and the swap is a seam (SL8). → step 6's pop detector measures it; the globe from the
+   crate at the top rung replaces the outline when the reach names it.
+4. **Every measurement is a STILL stand**: the recompute on a moving eye, the release hold, the
+   withdrawal of stale jobs, the span cache's eviction, the morph across a band, and the skyline's
+   recompute per half metre (about 36 rays per near column at 1 km, about 2 000 near columns from
+   the ground) run on a moving eye only in the tests. THE ARRIVAL POP: while a finer chunk builds,
+   the sunk coarser rung shows `sink_m` metres under the surface the finer will draw (metres to
+   tens of metres at a coarse rung), and the ground rises by that in one frame when it lands —
+   a jump, which SL8 calls a seam. → M8-1 (a hull at 1.4 / 240 / 528 m/s) and step 6's pop
+   detector, which names the pop's size.
+5. **At a band's far edge the coarser mesh may stand over a finer chord by the crease's sagitta**:
+   the morph is exact at the finer VERTICES (they lie on the parent mesh), and a finer triangle
+   that spans a coarser crease is the chord under it. The sink ramp now ends past the edge, so one
+   finer cell of sink remains there (`sink_end_m`; MEASURED on the hill: 34 dark specks at the
+   edges fell to 2 with the parent-mesh target, then the residual sink). → step 6's pop detector
+   measures the edges on a moving eye; splitting the finer triangles that straddle a coarser edge
+   is the exact cure, if the residue ever shows.
+8. **A vertex on a cube-face edge reads the coarser FIELD, from both faces** (the parents are one
+   face's): one target on both sides, at the cost of the field-vs-mesh crease along the twelve
+   cube edges, over one row of vertices (`morph_seam` on the stamp counts them). → the exact cure
+   reads the neighbouring face's parent mesh (the extractor already maps cross-face sites); a
+   picture stand on a cube edge measures it. Step 5 or 6.
+6. **A sealed cave under the surface is never wanted from above, and a cave that opens sideways is
+   drawn only with its own chunk**: the column span (five samples and a bound) is a SURFACE model,
+   and the world holds caves (MEASURED: 6 774 vertices in the chunk under a surface chunk, behind
+   an all-rock boundary). A finer chunk's cave vertices morph to the parent's surface above them
+   when the parent has no cave there (a hit farther than the sink bound takes the field). → the
+   block system's own residency (slice 9) owns what is under the surface.
+7. **The reach reads the recipe's whole relief bound (16 km on the home planet)** while the planet's
+   true relief is far smaller: the far rings are culled by the skyline, not by the reach. A
+   measured, seed-derived extreme per body would tighten the reach. → with M8-2.
+
+**WHEN.** Slice 8, steps 4–6. The slice is not done until this row is 🟩.
 
 ### D-TERRAIN-4 🟥 THE STAND'S UP IS STATED BY THE OPERATOR — the spawn facing stand-in (2026-09-08)
 

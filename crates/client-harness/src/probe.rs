@@ -162,19 +162,71 @@ pub fn probe_share_in_rows(
     hits as f64 / total.max(1) as f64
 }
 
+/// HOLES IN THE GROUND: pixels that nothing drew, with drawn ground somewhere ABOVE them in their
+/// own column — the sky is above the ground's top, so a "nothing" pixel under it is a hole in the
+/// ground, never sky. Two kinds, told apart by erosion: a BLOCK is a hole pixel whose four
+/// neighbours are holes too (a missing chunk survives the erosion), a CRACK is a hole no wider than
+/// two pixels (the seam where a fine chunk meets a coarse one along their shared edge, which the
+/// crossfade band of step 3 covers with both rungs). MEASURED on the first ladder pictures (slice
+/// 8 step 2): 4 818 hole pixels on the hill in black rectangles at the ring boundaries, which the
+/// band's share let through at 99 %; after the descent 524 pixels in 171 thin runs — cracks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GroundHoles {
+    /// Every hole pixel.
+    pub pixels: u64,
+    /// The hole pixels that survive a one-pixel erosion: a block, never a crack.
+    pub blocks: u64,
+}
+
+#[must_use]
+pub fn ground_holes(rgba: &[u8], width: usize, height: usize) -> GroundHoles {
+    let mut hole = vec![false; width * height];
+    let mut x = 0;
+    while x < width {
+        let mut ground_above = false;
+        let mut y = 0;
+        while y < height {
+            let i = y * width + x;
+            let kind = decode_probe([rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]]).kind;
+            hole[i] = ground_above & (kind == PROBE_KIND_NONE);
+            ground_above |= kind == PROBE_KIND_TERRAIN;
+            y += 1;
+        }
+        x += 1;
+    }
+    let at = |x: usize, y: usize| hole[y * width + x];
+    let mut out = GroundHoles::default();
+    let mut y = 0;
+    while y < height {
+        let mut x = 0;
+        while x < width {
+            let h = at(x, y);
+            out.pixels += u64::from(h);
+            // A block: the pixel and its four neighbours (inside the frame) are all holes.
+            let inside = (x > 0) & (y > 0) & (x + 1 < width) & (y + 1 < height);
+            let eroded = h
+                & inside
+                & at(x.saturating_sub(1), y)
+                & at((x + 1).min(width - 1), y)
+                & at(x, y.saturating_sub(1))
+                & at(x, (y + 1).min(height - 1));
+            out.blocks += u64::from(eroded);
+            x += 1;
+        }
+        y += 1;
+    }
+    out
+}
+
 /// A blob's equivalent radius in pixels: the radius of the disc with its pixel count.
 #[must_use]
 pub fn equivalent_radius_px(count: u64) -> f64 {
     (count as f64 / std::f64::consts::PI).sqrt()
 }
 
-/// THE HORIZON of a smooth sphere of `radius_m` seen from `altitude_m` over it, in metres along the
-/// line of sight: `√(2Rh + h²)`. A height under the surface reads as zero.
-#[must_use]
-pub fn horizon_m(radius_m: f64, altitude_m: f64) -> f64 {
-    let h = altitude_m.max(0.0);
-    (2.0 * radius_m * h + h * h).sqrt()
-}
+/// THE HORIZON: the client library's own formula (`vd_client::ladder_view::horizon_m`), which the
+/// ladder's reach reads too — one derivation for the stamp, the reach and the gate.
+pub use vd_client::ladder_view::horizon_m;
 
 /// THE HORIZON'S DIP below level, in radians: `acos(R / (R + h))`.
 #[must_use]
@@ -307,6 +359,50 @@ mod tests {
         );
         // A zero width is read as one column, never a division by zero.
         assert_eq!(probe_blob(&rgba, 0, PROBE_KIND_RULER).count, 2);
+    }
+
+    #[test]
+    fn a_hole_is_nothing_under_ground_never_the_sky_over_it() {
+        // 2 columns × 4 rows: column 0 = sky, ground, NOTHING, ground (one hole); column 1 = sky,
+        // sky, ground, ruler (no hole — the ruler is drawn).
+        let t = encode_probe(ProbePixel {
+            kind: PROBE_KIND_TERRAIN,
+            rung: 0,
+            cells: 5,
+        });
+        let r = encode_probe(ProbePixel {
+            kind: PROBE_KIND_RULER,
+            rung: 0,
+            cells: 5,
+        });
+        let n = [0, 0, 0];
+        let px = [n, n, t, n, n, t, t, r];
+        let rgba: Vec<u8> = px.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+        assert_eq!(
+            ground_holes(&rgba, 2, 4),
+            GroundHoles {
+                pixels: 1,
+                blocks: 0
+            }
+        );
+        assert_eq!(ground_holes(&[], 0, 0), GroundHoles::default());
+        // A 5 × 5 frame: ground on the top row, then a 3 × 3 hole in the middle rows over ground:
+        // nine hole pixels, one of which (the centre) is a block; a one-pixel crack is none.
+        let mut grid: Vec<[u8; 3]> = Vec::new();
+        for y in 0..5 {
+            for x in 0..5 {
+                let ground = (y == 0) | (y == 4) | (x == 0) | (x == 4);
+                grid.push(if ground { t } else { n });
+            }
+        }
+        let rgba: Vec<u8> = grid.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+        assert_eq!(
+            ground_holes(&rgba, 5, 5),
+            GroundHoles {
+                pixels: 9,
+                blocks: 1
+            }
+        );
     }
 
     #[test]

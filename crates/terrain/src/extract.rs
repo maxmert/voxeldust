@@ -391,6 +391,14 @@ fn owned(samples: &SampleBox, p: [i32; 3], q: [i32; 3]) -> bool {
     (owns_cell(samples, p) | owns_cell(samples, q)) & (mine < other)
 }
 
+/// Whether the four groups around the edge from `p` along `axis` all exist in the box: the
+/// groups run `−1..=61`, and the ring takes `p` and `p − 1` across the edge, `p` along it.
+fn ring_fits(p: [i32; 3], axis: usize) -> bool {
+    let edge = CHUNK_EDGE as i32;
+    let (u, w) = ((axis + 1) % 3, (axis + 2) % 3);
+    (p[axis] < edge) & (p[u] >= 0) & (p[u] < edge) & (p[w] >= 0) & (p[w] < edge)
+}
+
 /// The index of the group at `origin` in the vertex map.
 fn group_index(origin: [i32; 3]) -> usize {
     let g = GROUPS_PER_AXIS;
@@ -410,9 +418,24 @@ fn len2(a: [i16; 3], b: [i16; 3]) -> i64 {
     s
 }
 
-/// Extract the chunk's surface from its sample box.
+/// Extract the chunk's surface from its sample box: the quads of the edges the chunk OWNS.
 #[must_use]
 pub fn extract(samples: &SampleBox) -> ChunkMesh {
+    extract_with(samples, false)
+}
+
+/// Extract the surface of EVERY crossed edge in the box, the chunk's own and its neighbours'
+/// alike (the halo's edges included): the surface as a whole around this chunk, with nothing
+/// given to a neighbour. What the client's geomorph reads a coarser rung's mesh from (slice 8
+/// step 3): a finer chunk's halo vertices stand over the coarser chunk's halo, whose crossings
+/// the coarser chunk does not own, and two finer neighbours must read one and the same coarser
+/// surface for the vertex they share. Never a drawn mesh: its quads double a neighbour's.
+#[must_use]
+pub fn extract_all_edges(samples: &SampleBox) -> ChunkMesh {
+    extract_with(samples, true)
+}
+
+fn extract_with(samples: &SampleBox, every_edge: bool) -> ChunkMesh {
     let edge = CHUNK_EDGE as i32;
     let mut vertex_of = vec![u32::MAX; GROUPS_PER_AXIS * GROUPS_PER_AXIS * GROUPS_PER_AXIS];
     let mut vertices: Vec<[i16; 3]> = Vec::new();
@@ -442,7 +465,9 @@ pub fn extract(samples: &SampleBox) -> ChunkMesh {
                     q[axis] += 1;
                     if q[axis] <= edge {
                         let gq = samples.cell(q[0], q[1], q[2]).gap;
-                        if (is_rock(gp) != is_rock(gq)) && owned(samples, p, q) {
+                        if (is_rock(gp) != is_rock(gq))
+                            && (owned(samples, p, q) || (every_edge && ring_fits(p, axis)))
+                        {
                             // The four groups around the edge, in the cycle that faces +axis.
                             let (u, w) = ((axis + 1) % 3, (axis + 2) % 3);
                             let mut origins = [p; 4];
@@ -619,6 +644,44 @@ pub(crate) mod tests {
                 tri
             })
             .collect()
+    }
+
+    #[test]
+    fn every_edge_holds_the_owned_surface_and_the_neighbours_share_of_it() {
+        let m = home_planet();
+        let key = ChunkKey {
+            face: Face::PosX,
+            rung: 0,
+            x: 300,
+            y: 700,
+            z: surface_chunk_z(&m, Face::PosX, 0, 300, 700),
+        };
+        let samples = sample_box(&m, key).expect("in the band");
+        let owned = extract(&samples);
+        let all = extract_all_edges(&samples);
+        // The whole holds more than the owned part: the halo's crossings are a neighbour's.
+        assert!(all.triangles.len() > owned.triangles.len());
+        assert!(all.vertices.len() >= owned.vertices.len());
+        // Every owned vertex is a vertex of the whole, at the same quanta (the same groups).
+        let whole: std::collections::BTreeSet<[i16; 3]> = all.vertices.iter().copied().collect();
+        for v in &owned.vertices {
+            assert!(whole.contains(v), "{v:?} owned but not in the whole");
+        }
+        // Every owned triangle is a triangle of the whole, by its vertices' quanta.
+        let tri = |mesh: &ChunkMesh, t: [u32; 3]| -> [[i16; 3]; 3] {
+            let mut c = [
+                mesh.vertices[t[0] as usize],
+                mesh.vertices[t[1] as usize],
+                mesh.vertices[t[2] as usize],
+            ];
+            c.sort_unstable();
+            c
+        };
+        let whole_tris: std::collections::BTreeSet<[[i16; 3]; 3]> =
+            all.triangles.iter().map(|t| tri(&all, *t)).collect();
+        for t in &owned.triangles {
+            assert!(whole_tris.contains(&tri(&owned, *t)));
+        }
     }
 
     #[test]

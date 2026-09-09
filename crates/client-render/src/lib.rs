@@ -417,6 +417,17 @@ const STAR_PROBE_COUNT: usize = 48;
 /// correct bounding box for the cloud. The corner sign is what the vertex shader expands.
 const ATTRIBUTE_STAR_CORNER: MeshVertexAttribute =
     MeshVertexAttribute::new("StarCorner", 0x5741_0001, VertexFormat::Float32x2);
+/// THE MORPH TARGET of a ground vertex (slice 8 step 3): where it stands on the next coarser
+/// rung's surface, relative to the chunk's origin like the position — shader location 8, past
+/// the engine's own attributes.
+pub(crate) const ATTRIBUTE_MORPH: MeshVertexAttribute =
+    MeshVertexAttribute::new("LadderMorph", 0x5741_0010, VertexFormat::Float32x3);
+const MORPH_SHADER_LOCATION: u32 = 8;
+/// THE SINK of a ground vertex (slice 8 step 3): its radial times the rung's sink, the drop the
+/// chunk makes under the next finer rung nearer than that rung's fade-out edge — location 9.
+pub(crate) const ATTRIBUTE_SINK: MeshVertexAttribute =
+    MeshVertexAttribute::new("LadderSink", 0x5741_0011, VertexFormat::Float32x3);
+const SINK_SHADER_LOCATION: u32 = 9;
 const ATTRIBUTE_STAR_COLOR: MeshVertexAttribute =
     MeshVertexAttribute::new("StarColor", 0x5741_0002, VertexFormat::Float32x4);
 const ATTRIBUTE_STAR_BASE_R: MeshVertexAttribute =
@@ -612,23 +623,129 @@ pub(crate) struct ProbeParams {
     code: f32,
     /// One cell of the rung, in metres: the distance channel's unit.
     cell_m: f32,
+    /// The crossfade bands (in_lo, in_hi, out_lo, out_hi), metres from the eye — the same morph,
+    /// sink and far edge the ground's material applies, so the probe reads what the picture
+    /// shows (step 3).
+    bands: Vec4,
 }
 
 impl ProbeMaterial {
-    /// The material for one kind at one rung.
-    pub(crate) fn new(kind: u8, rung: u8) -> ProbeMaterial {
+    /// The material for one kind at one rung, with its crossfade bands and its sink's end.
+    pub(crate) fn new(
+        kind: u8,
+        rung: u8,
+        bands: ([f64; 2], [f64; 2]),
+        sink_end_m: f64,
+    ) -> ProbeMaterial {
         ProbeMaterial {
             params: ProbeParams {
                 code: f32::from(vd_client_harness::probe::probe_byte(kind, rung)),
                 cell_m: vd_seed::ladder::cell_m(rung) as f32,
+                bands: fade_uniform(bands, sink_end_m),
             },
         }
     }
 }
 
+/// The bands as the shaders' uniform: (in_lo, sink_end, out_lo, out_hi), narrowed once — the
+/// second slot is where the SINK RAMP ends (`vd_client::ladder_view::sink_end_m`), a little past
+/// the fade-in edge, since the edge itself is what the finer rung's `out_hi` states.
+pub(crate) fn fade_uniform(bands: ([f64; 2], [f64; 2]), sink_end_m: f64) -> Vec4 {
+    let (fade_in, fade_out) = bands;
+    Vec4::new(
+        fade_in[0] as f32,
+        sink_end_m as f32,
+        fade_out[0] as f32,
+        fade_out[1] as f32,
+    )
+}
+
+/// ★ THE CROSSFADE (slice 8 step 3; ruling V14 D8-2, §5): the ground's own lit material, extended
+/// with the GEOMORPH that slides a rung's vertices onto the next coarser surface across its
+/// fade-out band, THE SINK that drops them under the next finer rung across its fade-in band
+/// (`ladder_fade.wgsl`, the vertex stage; each vertex carries its target on the coarser surface,
+/// `ATTRIBUTE_MORPH`, and its drop, `ATTRIBUTE_SINK`), and THE FAR EDGE where a rung ends (the
+/// fragment stage). One material per rung, carrying that rung's bands from the Tier-A
+/// `fade_bands`. A `StandardMaterial` extension: the light, the shadow and the paint are the
+/// engine's own; the shadow pass runs the same morph and sink (`ladder_fade_prepass.wgsl`), so
+/// the shadows fall from the surface the picture shows.
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+pub(crate) struct LadderFade {
+    /// The bands (in_lo, sink_end, out_lo, out_hi), metres from the eye. Slot 100: the base
+    /// material owns the slots below it.
+    #[uniform(100)]
+    bands: Vec4,
+}
+
+impl LadderFade {
+    pub(crate) fn new(bands: ([f64; 2], [f64; 2]), sink_end_m: f64) -> LadderFade {
+        LadderFade {
+            bands: fade_uniform(bands, sink_end_m),
+        }
+    }
+}
+
+impl bevy::pbr::MaterialExtension for LadderFade {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://vd_client_render/ladder_fade.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "embedded://vd_client_render/ladder_fade.wgsl".into()
+    }
+    fn prepass_vertex_shader() -> ShaderRef {
+        "embedded://vd_client_render/ladder_fade_prepass.wgsl".into()
+    }
+    fn prepass_fragment_shader() -> ShaderRef {
+        "embedded://vd_client_render/ladder_fade_prepass.wgsl".into()
+    }
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialExtensionKey<LadderFade>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
+            ATTRIBUTE_MORPH.at_shader_location(MORPH_SHADER_LOCATION),
+            ATTRIBUTE_SINK.at_shader_location(SINK_SHADER_LOCATION),
+        ])?];
+        Ok(())
+    }
+}
+
+/// The ground's material type: the standard material with the crossfade.
+pub(crate) type GroundMaterial = bevy::pbr::ExtendedMaterial<StandardMaterial, LadderFade>;
+
+struct LadderFadeShaderPlugin;
+
+impl Plugin for LadderFadeShaderPlugin {
+    fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "ladder_fade.wgsl");
+        bevy::asset::embedded_asset!(app, "ladder_fade_prepass.wgsl");
+    }
+}
+
 impl Material for ProbeMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://vd_client_render/probe.wgsl".into()
+    }
     fn fragment_shader() -> ShaderRef {
         "embedded://vd_client_render/probe.wgsl".into()
+    }
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<ProbeMaterial>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
+            ATTRIBUTE_MORPH.at_shader_location(MORPH_SHADER_LOCATION),
+            ATTRIBUTE_SINK.at_shader_location(SINK_SHADER_LOCATION),
+        ])?];
+        Ok(())
     }
 }
 
@@ -760,6 +877,9 @@ fn run_windowed(handles: RenderHandles) {
         .add_plugins((
             StarSkyShaderPlugin,
             MaterialPlugin::<StarSkyMaterial>::default(),
+            // The ground's crossfade material (slice 8 step 3).
+            LadderFadeShaderPlugin,
+            MaterialPlugin::<GroundMaterial>::default(),
         ))
         .add_systems(Startup, setup_scene)
         .add_systems(
@@ -2167,7 +2287,12 @@ fn stamp_lines(t: &vd_devproto::DevTerrainStamp) -> Vec<String> {
     );
     let ruler = t.ruler.as_ref().map_or_else(
         || "none (no probe in this mode, or the centre ray meets no drawn ground)".to_owned(),
-        |r| format!("ball r {:.2} m at {:.1} m", r.radius_m, r.distance_m),
+        |r| {
+            format!(
+                "ball r {:.2} m at {:.1} m, rung {} ({} m cells)",
+                r.radius_m, r.distance_m, r.rung, r.cell_m
+            )
+        },
     );
     let tick = t.tick.map_or_else(|| "—".to_owned(), |k| k.to_string());
     vec![
@@ -2179,11 +2304,12 @@ fn stamp_lines(t: &vd_devproto::DevTerrainStamp) -> Vec<String> {
             t.biome
         ),
         format!(
-            "drawn:    rung {} ({} m cells) to {:.2} km | {} chunks, {} pending | {:.0}..{:.0} m",
-            t.rung,
-            t.cell_m,
+            "drawn:    rungs {}..{} to {:.1} km | {} chunks {:?}, {} pending | {:.0}..{:.0} m",
+            t.rung_min,
+            t.rung_max,
             t.drawn_radius_m / 1000.0,
             t.chunks_drawn,
+            t.chunks_per_rung,
             t.chunks_pending,
             t.chunk_nearest_m,
             t.chunk_farthest_m
@@ -2329,6 +2455,9 @@ fn run_capture(handles: RenderHandles) {
         .add_plugins((
             StarSkyShaderPlugin,
             MaterialPlugin::<StarSkyMaterial>::default(),
+            // The ground's crossfade material (slice 8 step 3).
+            LadderFadeShaderPlugin,
+            MaterialPlugin::<GroundMaterial>::default(),
             // The probe (slice 8p): Capture mode only — a window has no second picture.
             ProbeShaderPlugin,
             MaterialPlugin::<ProbeMaterial>::default(),
