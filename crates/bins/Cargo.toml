@@ -129,3 +129,9 @@ workspace = true
 [[example]]
 name = "hull_flight_probe"
 required-features = ["dev-control"]
+
+# THE GPU SPIKE (ruling V17 item 3): the integer hash and a 32-bit shadow of the recipe's noise on
+# the GPU against the CPU, byte for byte, on a thousand chunks' columns.
+[[example]]
+name = "gpu_spike"
+required-features = ["render"]

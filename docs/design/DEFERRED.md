@@ -7930,6 +7930,17 @@ rings; what is left is an interim with a named step:
    recurs with the course in the log; then the fix (a lead that refuses an offset across an
    origin change is the likely shape); slice 8 step 6 at the latest.
 
+16. **THE GPU SPIKE, MEASURED (ruling V17 item 3, 2026-09-10, `slice_08_gpu_spike.md`)**: the
+   integer hash on Metal agrees with the CPU on 3 936 256 corners (0 differ); a 32-bit shadow of
+   the recipe's noise agrees on 3 936 256 columns of 1 024 chunks (0 differ) ONLY with
+   `#pragma METAL fp contract(off)` — Metal's default and its fast-math-off setting both contract
+   multiply-adds and differ on 98 % of columns by up to 76 ulps (4.6 mm). The recipe's own 64-bit
+   floats do not exist on Metal. OPEN, the owner's: the recipe's number format (64-bit CPU-only,
+   or 32-bit plus integers on both hosts), and SL10's "a port is forbidden" against a hand-written
+   WGSL copy (one source via `rust-gpu`, a port under a byte gate, or no GPU generation). Every
+   other shipped target (Vulkan `NoContraction`, DX12 `precise`) is UNMEASURED; naga emits neither.
+   → nothing moves until the ruling; the spike example stays as the gate's seed.
+
 **WHEN.** Slice 8, steps 4–6. The slice is not done until this row is 🟩.
 
 ### D-TERRAIN-4 🟥 THE STAND'S UP IS STATED BY THE OPERATOR — the spawn facing stand-in (2026-09-08)

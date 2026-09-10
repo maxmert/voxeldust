@@ -13,6 +13,10 @@
 //! logic lives in `vd-client-harness` (Tier-A); this crate is the glue, proven by the
 //! human-in-the-loop window + (T6) `G-RENDER-SMOKE`, not by `llvm-cov`.
 
+/// THE GPU SPIKE's handle on the graphics library (ruling V17 item 3): the bins' spike builds a
+/// bare compute device with feature flags Bevy's app does not request.
+pub use wgpu;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;

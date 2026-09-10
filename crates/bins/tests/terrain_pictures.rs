@@ -149,6 +149,14 @@ const PICTURE_DIR: &str = "docs/investigation/2026-09-07/pictures";
 /// Set in the environment, the gate refuses a picture that differs from the one on disk by one
 /// pixel (ruling V16: a packing changes bytes, never the picture).
 const PICTURE_IDENTICAL_ENV: &str = "VD_PICTURE_IDENTICAL";
+/// THE TOLERANCE (ruling V18): no content pixel may change by more than this many brightness
+/// levels, in any channel, against the EXACT picture. A packing that flips a crease pixel to
+/// the other slope (19 levels, the 16-bit radial) is refused; one that shades it a level darker
+/// is not.
+const TOLERANCE_LEVELS: u8 = 1;
+/// The exact pictures' directory beside the owner's: frozen from an exact flight, never
+/// overwritten by a run, the reference every compare reads when it exists.
+const EXACT_DIR: &str = "exact";
 /// THE CAPTURE TICK: a stand's picture is taken at a CONSTANT universe tick — this many ticks per
 /// stand, in the stands' order — so two flights of one stand capture the SAME moment of the world
 /// (the star at the same angle) and their pixels compare. MEASURED before this: two flights of one
@@ -948,14 +956,28 @@ fn take_picture(
         .join(PICTURE_DIR);
     std::fs::create_dir_all(&dir).expect("the picture directory");
     let dest = dir.join(format!("{name}.png"));
-    // THE PICTURE AGAINST THE ONE ON DISK (ruling V16: a packing changes bytes, never the
-    // picture): every pixel compared, the count and the widest channel step reported; with
-    // `VD_PICTURE_IDENTICAL` set, one differing pixel is a red gate.
+    // THE PICTURE AGAINST THE EXACT ONE (ruling V18: a packing may move no content pixel by
+    // more than `TOLERANCE_LEVELS`): every pixel compared, the count and the widest channel step
+    // reported, a step above the tolerance a red gate; with `VD_PICTURE_IDENTICAL` set, one
+    // differing pixel is. The reference is the frozen exact picture when it exists, else the
+    // owner's picture from the previous run.
     let dest_probe = dir.join(format!("{name}.probe.png"));
     let dest_hud = dir.join(format!("{name}.hud.json"));
-    if dest.exists() && dest_probe.exists() {
-        let (before, bw, bh) = open_rgba(&dest);
-        let (before_probe, pw2, ph2) = open_rgba(&dest_probe);
+    let exact = dir.join(EXACT_DIR);
+    let (reference, reference_probe, reference_hud) = if exact.join(format!("{name}.png")).exists()
+    {
+        eprintln!("terrain_pictures/{name}: compared against the frozen exact picture");
+        (
+            exact.join(format!("{name}.png")),
+            exact.join(format!("{name}.probe.png")),
+            exact.join(format!("{name}.hud.json")),
+        )
+    } else {
+        (dest.clone(), dest_probe.clone(), dest_hud.clone())
+    };
+    if reference.exists() && reference_probe.exists() {
+        let (before, bw, bh) = open_rgba(&reference);
+        let (before_probe, pw2, ph2) = open_rgba(&reference_probe);
         if (bw, bh) == (w, h) && (pw2, ph2) == (w, h) {
             // Only the CONTENT compares: a pixel either probe marks as terrain or ruler, and not
             // under the overlay. The HUD's stamp line carries the frame's tick, and that readout
@@ -966,7 +988,7 @@ fn take_picture(
             // in a sidecar; refutation P-3: a HUD whose longest line changed with the code left
             // its extra text counted as content), grown by the glyphs' antialiasing.
             let this_hud = stamp.hud_rect_px;
-            let before_hud: [f32; 4] = std::fs::read_to_string(&dest_hud)
+            let before_hud: [f32; 4] = std::fs::read_to_string(&reference_hud)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or(this_hud);
@@ -1022,7 +1044,7 @@ fn take_picture(
                     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/terrain_pictures");
                 std::fs::create_dir_all(&kept_dir).expect("the kept pictures' directory");
                 let keep = kept_dir.join(format!("{name}.before.png"));
-                std::fs::copy(&dest, &keep).expect("keep the previous picture");
+                std::fs::copy(&reference, &keep).expect("keep the reference picture");
                 std::fs::copy(&png, kept_dir.join(format!("{name}.after.png")))
                     .expect("keep the new picture");
                 let mut diff = vec![0u8; before.len()];
@@ -1064,6 +1086,11 @@ fn take_picture(
                     diff_path.display()
                 );
             }
+            assert!(
+                widest <= TOLERANCE_LEVELS,
+                "{name}: THE PICTURE CHANGED PAST THE TOLERANCE — {differing} pixels differ, the \
+                 widest channel step {widest} against the allowed {TOLERANCE_LEVELS} (ruling V18)"
+            );
             if std::env::var_os(PICTURE_IDENTICAL_ENV).is_some() {
                 assert_eq!(
                     differing, 0,

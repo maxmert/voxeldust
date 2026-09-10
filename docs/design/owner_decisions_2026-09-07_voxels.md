@@ -754,3 +754,37 @@ and lifts the build rate.
 3. The GPU spike: the recipe's noise in a compute shader against the CPU, byte for byte, on a
    thousand chunks, on this machine — BEFORE the lossy pieces, because its answer decides whether
    the second half is worth finishing on the CPU.
+
+## V18. THE TOLERANCE, AND THE GPU AFTER THE PICTURE (owner, 2026-09-10)
+
+**The state at the ruling.** Step 5's second half is committed (`ef2b33a`): the parent mesh's
+shrink, the render-world-only chunk mesh, the byte-bounded parent cache, the memory instrument,
+the settle wait's course. The GPU spike ran (`slice_08_gpu_spike.md`): the recipe's own 64-bit
+floats do not exist on Metal; the 64-bit integer hash agrees on 3 936 256 corners; a 32-bit
+shadow of the noise agrees on 3 936 256 columns ONLY with fused multiply-add contraction off
+(`#pragma METAL fp contract(off)`), which wgpu exposes no switch for; on the height columns the
+GPU equals fourteen CPU cores. The owner was given the two levers GPU generation does not move
+(the drawn bytes and the draw count: the lossy packing and the far-rung voxel renderer) and the
+recommendation: keep the recipe in 64-bit on the CPU, decide the tolerance, measure the far-rung
+renderer, and return to the GPU only if the workers are still the wall.
+
+**RULED.** *"Agree with the stated tolerance, please commit and proceed. Then we can decide on
+the quality of the picture and if CPU workers still a wall for better fps, then we will try to
+migrate to GPU (but discuss with me again before doing that)."*
+
+1. **THE TOLERANCE**: a lossy packing may ship when NO CONTENT PIXEL changes by more than ONE
+   brightness level (of 255, any channel) on any stand, against the EXACT picture. The picture
+   gate holds it on every run: the exact pictures are frozen beside the owner's pictures
+   (`pictures/exact/`), every flight compares against them, and the widest channel step above
+   one is a red gate. The first half's exact packing passes it; the 16-bit radial (19 levels)
+   failed it and stays refused. Example: the hill stand's crease at (641, 300) may shade one
+   level darker after a packing; it may not flip to the other slope.
+2. **THE ORDER NOW**: the lossy pieces under the tolerance — the packed normals first (the
+   smaller risk: shading moves by fractions of a level; a crease flip comes from a position),
+   then the 16-bit positions, per rung where the pixel cannot see the step — then the owner
+   judges the picture; then the far-rung voxel renderer's measurement (D8-8).
+3. **THE GPU**: the recipe STAYS 64-bit on the CPU. GPU generation is tried only if, after the
+   packing and the far-rung renderer, a flight still shows the CPU workers as the wall for the
+   frame rate — and ONLY after a second discussion with the owner. The spike example stays in the
+   tree as that day's gate seed; SL10's "a port is forbidden" is untouched.
+

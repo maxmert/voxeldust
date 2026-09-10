@@ -6317,6 +6317,7 @@ dependencies = [
  "vd-devproto",
  "vd-seed",
  "vd-terrain",
+ "wgpu",
 ]
 
 [[package]]

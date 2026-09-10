@@ -29,6 +29,10 @@ bevy = { workspace = true }
 bevy_egui = { workspace = true }
 image = { workspace = true }
 arc-swap = { workspace = true }
+# THE GPU SPIKE (ruling V17 item 3): the bare compute harness needs the device, the adapter and the
+# feature flags, which Bevy's re-export does not carry. The same wgpu Bevy 0.18 already links
+# (27, one version in the lock file) — a dep line, not a new library. Re-exported from lib.rs.
+wgpu = { version = "27", default-features = false }
 # The render-world -> main-world readback channel (+ the capture-job channel) must be
 # Bevy Resources, so they need Send+Sync receivers — std::sync::mpsc::Receiver is !Sync;
 # crossbeam's is Sync (the spike used it for exactly this).
