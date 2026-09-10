@@ -19,6 +19,7 @@ pub mod proc_launch;
 // an optional dep enabled by the `dev-control` feature.
 #[cfg(feature = "dev-control")]
 pub mod flight;
+pub mod memory;
 #[cfg(feature = "dev-control")]
 pub mod scene_camera;
 // The Slice-D pixel-gate instrument (window lane §2.8/§2.11): the straddled capture, the pilot

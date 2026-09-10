@@ -41,6 +41,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
+use vd_bins::memory::{
+    MemoryRead, footprint_report, heap_summary, report_rows, resident_mb, vmmap_rows, vmmap_summary,
+};
 use vd_bins::{
     Cluster, ClusterAddrs, ClusterShape, DEV, DevClusterParams, common_env, dev_auth_pubkey_hex,
     dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows, orchestrator_env,
@@ -385,6 +388,15 @@ fn open_rgba(png: &Path) -> (Vec<u8>, usize, usize) {
     (img.into_raw(), w, h)
 }
 
+/// The footprint table's rows the census prints: the largest categories after the header.
+const FOOTPRINT_ROWS: usize = 12;
+/// The heap summary's rows the census prints: the zone lines after its header.
+const HEAP_ROWS: usize = 6;
+/// The footprint table's header: the banner, the blank, the column names and their dashes.
+const FOOTPRINT_HEADER_ROWS: usize = 6;
+/// The heap summary's header: the process block, the footprint block and their blanks.
+const HEAP_HEADER_ROWS: usize = 21;
+
 /// One picture: login, wait for the terrain on screen, look, capture, judge the picture, the
 /// probe, the stamp and the ruler, copy for the owner.
 fn take_picture(
@@ -535,9 +547,17 @@ fn take_picture(
         .clone()
         .unwrap_or_else(|| panic!("{name}: the stamp is on the state file"));
     eprintln!("terrain_pictures/{name}: stamp {stamp:?}");
+    // THE CLIENT'S RESIDENT MEMORY (M8-2): what the capture client holds in RAM at the settled
+    // stand, from the operating system's own count.
+    let footprint_report = footprint_report(client.0.id());
+    let memory = MemoryRead {
+        resident_mb: resident_mb(client.0.id()),
+        ..MemoryRead::from_footprint(&footprint_report)
+    };
     eprintln!(
         "terrain_pictures/{name}: M8-2 CENSUS — {} chunks, {} vertices, {:.1} MB on screen ({:.0} \
-         KB a chunk), filled in {fill_s:.1} s, {frames_per_s:.1} frames/s on the still stand",
+         KB a chunk), filled in {fill_s:.1} s, {frames_per_s:.1} frames/s on the still stand, the \
+         client at {memory}",
         stamp.chunks_drawn,
         stamp.vertices,
         stamp.bytes_drawn as f64 / 1.0e6,
@@ -547,6 +567,21 @@ fn take_picture(
             0.0
         }
     );
+    // WHERE THE FOOTPRINT GOES: the tool's largest categories (the GPU's buffers on unified
+    // memory, the allocator's large blocks, the compressed pages), for the memory report.
+    for row in report_rows(&footprint_report, FOOTPRINT_HEADER_ROWS, FOOTPRINT_ROWS) {
+        eprintln!("terrain_pictures/{name}: footprint {row}");
+    }
+    // WHAT THE ALLOCATOR HOLDS (`heap`): the blocks in use by zone and by size class, so a
+    // footprint category can be read as held or as freed-and-retained.
+    for row in report_rows(&heap_summary(client.0.id()), HEAP_HEADER_ROWS, HEAP_ROWS) {
+        eprintln!("terrain_pictures/{name}: heap {row}");
+    }
+    // WHAT THE REGIONS ARE (`vmmap`): every region type with its sizes, so the footprint's
+    // owned-but-unmapped memory gets a name.
+    for row in vmmap_rows(&vmmap_summary(client.0.id())) {
+        eprintln!("terrain_pictures/{name}: vmmap {row}");
+    }
     // THE STAND HELD STILL: the state file (polled after the capture) and a poll now agree on the
     // delivered position, so the stamp, the pose and the probe describe one moment.
     let again = vd_bins::pixel::poll(devctl);

@@ -42,6 +42,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+use vd_bins::memory::MemoryRead;
 use vd_bins::{
     Cluster, ClusterAddrs, ClusterShape, DEV, DevClusterParams, common_env, dev_auth_pubkey_hex,
     dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows, orchestrator_env,
@@ -282,25 +283,72 @@ fn await_active(devctl: u16) -> DevState {
     }
 }
 
-/// Wait until the ladder has landed whole: a first chunk drawn, then nothing pending.
+/// Wait until the ladder has landed whole: a first chunk drawn, then nothing pending. The wait
+/// POLLS and prints its time course (MEASURED 2026-09-10: a boarding that never settled — the
+/// lead eye 5 591 km from the drawn one, 238 000 builds in three minutes — left only its last
+/// state behind; the course is what a diagnosis needs).
 fn await_settled(devctl: u16, leg: &str) {
-    for (field, op, value) in [
-        (WaitField::TerrainChunksDrawn, WaitOp::Ge, 1),
-        (WaitField::TerrainChunksPending, WaitOp::Le, 0),
-    ] {
-        let reply = round_trip(
-            devctl,
-            &DevRequest::WaitUntil {
-                predicate: WaitPredicate { field, op, value },
-                max_ticks: TERRAIN_WAIT_TICKS,
+    let reply = round_trip(
+        devctl,
+        &DevRequest::WaitUntil {
+            predicate: WaitPredicate {
+                field: WaitField::TerrainChunksDrawn,
+                op: WaitOp::Ge,
+                value: 1,
             },
-        );
+            max_ticks: TERRAIN_WAIT_TICKS,
+        },
+    );
+    assert!(
+        matches!(reply, DevResponse::State { .. }),
+        "{leg}: the terrain never drew a chunk: {reply:?}"
+    );
+    let started = Instant::now();
+    let deadline = Duration::from_millis(TERRAIN_WAIT_TICKS * 1_000 / 20);
+    let mut printed = 0u64;
+    loop {
+        let st = poll(devctl);
+        let stamp = st
+            .terrain_stamp
+            .as_ref()
+            .unwrap_or_else(|| panic!("{leg}: no terrain stamp while settling: {st:?}"));
+        if stamp.chunks_pending == 0 {
+            return;
+        }
+        let secs = started.elapsed().as_secs();
+        if secs / SETTLE_COURSE_S > printed {
+            printed = secs / SETTLE_COURSE_S;
+            let own = vd_bins::pixel::own_pose(&st).map(|(p, _)| p);
+            eprintln!(
+                "terrain_moving_eye/{leg}: settling t {secs:4} s — {} drawn, {} pending, {} \
+                 urgent {:?}, {} revealed, lead {:.1} m, {:.0} m up, rungs {}..{}, origin \
+                 {:?}, own {:?}, windows {:?}",
+                stamp.chunks_drawn,
+                stamp.chunks_pending,
+                stamp.chunks_urgent,
+                stamp.urgent_per_rung,
+                stamp.chunks_revealed,
+                stamp.lead_m,
+                stamp.altitude_m,
+                stamp.rung_min,
+                stamp.rung_max,
+                st.origin,
+                own,
+                st.entity_windows
+            );
+        }
         assert!(
-            matches!(reply, DevResponse::State { .. }),
-            "{leg}: the terrain never settled ({field:?} {op:?} {value}): {reply:?}"
+            started.elapsed() < deadline,
+            "{leg}: the terrain never settled (pending {} after {deadline:?}): {st:?}",
+            stamp.chunks_pending
         );
+        std::thread::sleep(Duration::from_millis(SETTLE_POLL_MS));
     }
 }
+
+/// The settle wait's poll period, and how often it prints its course.
+const SETTLE_POLL_MS: u64 = 250;
+const SETTLE_COURSE_S: u64 = 2;
 
 /// Set the sticky throttle: the character's walk on foot, or the hull's push once boarded.
 fn throttle(devctl: u16, axes: [f32; 3]) {
@@ -343,21 +391,28 @@ struct LegRead {
     revealed_samples: u64,
     max_pending: u64,
     min_drawn: u64,
+    /// THE CLIENT'S MEMORY at the leg's end and its growth over the leg (ruling V17 item 1),
+    /// from the operating system's footprint: a client whose footprint grows with the chunks it
+    /// uploads, past what it draws, leaks the upload.
+    memory_end: MemoryRead,
+    memory_grew: MemoryRead,
     max_lead_m: f64,
 }
 
 /// Read the band for `secs` seconds, one sample every `SAMPLE_MS`: the instrument is the stamp
 /// the renderer writes every frame, polled through dev-control — never a sleep standing in for
 /// a measurement.
-fn read_band(devctl: u16, leg: &str, secs: f64) -> LegRead {
+fn read_band(devctl: u16, client_pid: u32, leg: &str, secs: f64) -> LegRead {
     let mut read = LegRead {
         min_drawn: u64::MAX,
         ..LegRead::default()
     };
+    let memory_start = MemoryRead::of(client_pid);
     let started = Instant::now();
     // The counters at the first and the last sample: the leg's differences.
     let mut first: Option<[u64; 10]> = None;
     let mut last = [0u64; 10];
+    let mut last_drawn = 0u64;
     while started.elapsed().as_secs_f64() < secs {
         let st = poll(devctl);
         let stamp = st
@@ -404,6 +459,7 @@ fn read_band(devctl: u16, leg: &str, secs: f64) -> LegRead {
         read.revealed_samples += u64::from(stamp.chunks_revealed > 0);
         read.max_pending = read.max_pending.max(stamp.chunks_pending);
         read.min_drawn = read.min_drawn.min(stamp.chunks_drawn);
+        last_drawn = stamp.chunks_drawn;
         read.max_lead_m = read.max_lead_m.max(stamp.lead_m);
         std::thread::sleep(Duration::from_millis(SAMPLE_MS));
     }
@@ -423,6 +479,16 @@ fn read_band(devctl: u16, leg: &str, secs: f64) -> LegRead {
     read.parent_builds = last[7].saturating_sub(first[7]);
     read.parent_waits = last[8].saturating_sub(first[8]);
     read.harvest_nanos = last[9].saturating_sub(first[9]);
+    read.memory_end = MemoryRead::of(client_pid);
+    read.memory_grew = read.memory_end.since(memory_start);
+    // THE CLIENT'S MEMORY over the leg (ruling V17 item 1): the footprint at the end, and what
+    // grew, beside the chunks the leg uploaded — the growth per uploaded chunk, not per drawn
+    // chunk, is what a leak reads as.
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE MEMORY — at the end {}; over the leg it grew by {} \
+         while {} chunks were harvested and the screen ended at {} chunks",
+        read.memory_end, read.memory_grew, read.harvested, last_drawn
+    );
     // THE THREE RATES (M8-2a, ruling V15): what the workers build, what the engine harvests, and
     // the frames — per second of the leg — with the mean build time and the share of frames whose
     // harvest filled its cap. A harvest at its cap on most frames is the wall.
@@ -764,7 +830,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         // seed alone walked at 0.52 m/s). The walk covers about 84 m in its minute — a rung-0
         // chunk and a third: the eye's own chunk changes once.
         let speed = walk_at(devctl, WALK_MPS);
-        let read = read_band(devctl, "walk", LEG_S);
+        let read = read_band(devctl, client.0.id(), "walk", LEG_S);
         throttle(devctl, [0.0, 0.0, 0.0]);
         eprintln!("terrain_moving_eye/walk: the character walked at {speed:.2} m/s");
         assert!(
@@ -819,7 +885,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
             // `push_to` returns at or past the target, or panics at its deadline: the speed
             // needs no second assertion (refutation R4-7).
             let speed = push_to(devctl, planet, *target);
-            let read = read_band(devctl, &leg, LEG_S);
+            let read = read_band(devctl, client.0.id(), &leg, LEG_S);
             eprintln!(
                 "terrain_moving_eye/{leg}: leg {} coasted at {speed:.1} m/s",
                 i + 2

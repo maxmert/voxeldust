@@ -297,11 +297,81 @@ impl ChunkWorkers for InlineWorkers {
 #[derive(Debug)]
 pub struct ParentMesh {
     key: ChunkKey,
-    positions: Vec<DVec3>,
-    triangles: Vec<[u32; 3]>,
-    /// Triangle indices per lattice cell `(a, b)` of the parent's box, `−1..=62` each: a
-    /// triangle is in every cell its vertices span.
-    buckets: BTreeMap<(i32, i32), Vec<u32>>,
+    /// The mesh's origin in the body's frame, in metres: the centre of the parent's middle cell.
+    /// Positions are `f32` from it (step 5, D-TERRAIN-5 item 10): a chunk of 248 m at rung 2
+    /// rounds to 15 µm, the coarsest of 127 km to 8 mm — under a hundredth of a pixel at any
+    /// switch distance.
+    origin: DVec3,
+    positions: Vec<[f32; 3]>,
+    triangles: ParentTriangles,
+    /// THE BUCKETS as one table: for the lattice cell `(a, b)` of the parent's box, `−1..=62`
+    /// each, the triangles that span it lie in `bucket_tris[bucket_start[c]..bucket_start[c+1]]`
+    /// with `c = (a + 1) × 64 + (b + 1)`. A triangle is in every cell its vertices span.
+    bucket_start: Vec<u32>,
+    bucket_tris: Vec<u32>,
+}
+
+/// A parent mesh's triangles at 16 bits where its vertices fit, else at 32.
+#[derive(Debug)]
+enum ParentTriangles {
+    Narrow(Vec<[u16; 3]>),
+    Wide(Vec<[u32; 3]>),
+}
+
+impl ParentTriangles {
+    fn pack(triangles: Vec<[u32; 3]>, vertices: usize) -> ParentTriangles {
+        if vertices <= usize::from(u16::MAX) {
+            ParentTriangles::Narrow(
+                triangles
+                    .iter()
+                    .map(|t| [t[0] as u16, t[1] as u16, t[2] as u16])
+                    .collect(),
+            )
+        } else {
+            ParentTriangles::Wide(triangles)
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            ParentTriangles::Narrow(v) => v.len(),
+            ParentTriangles::Wide(v) => v.len(),
+        }
+    }
+
+    fn get(&self, i: usize) -> [u32; 3] {
+        match self {
+            ParentTriangles::Narrow(v) => {
+                let t = v[i];
+                [u32::from(t[0]), u32::from(t[1]), u32::from(t[2])]
+            }
+            ParentTriangles::Wide(v) => v[i],
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            ParentTriangles::Narrow(v) => v.capacity() * std::mem::size_of::<[u16; 3]>(),
+            ParentTriangles::Wide(v) => v.capacity() * std::mem::size_of::<[u32; 3]>(),
+        }
+    }
+}
+
+/// The lattice cells of a parent's box along one axis, `−1..=62`.
+const PARENT_CELLS: i32 = 64;
+
+/// The bucket of the lattice cell `(a, b)`, or `None` outside the box's cells.
+/// The bucket of a cell the mesh's own vertices stand in: the extractor keeps every vertex
+/// inside the box (its own test asserts the bound), so the cell is always in the grid, and a
+/// vertex outside it is a defect that stops the build here.
+fn bucket_of(a: i32, b: i32) -> usize {
+    parent_bucket(a, b).expect("the extractor keeps every vertex inside the parent's box")
+}
+
+fn parent_bucket(a: i32, b: i32) -> Option<usize> {
+    let (a, b) = (a + 1, b + 1);
+    ((0..PARENT_CELLS).contains(&a) & (0..PARENT_CELLS).contains(&b))
+        .then(|| (a * PARENT_CELLS + b) as usize)
 }
 
 impl ParentMesh {
@@ -314,44 +384,82 @@ impl ParentMesh {
         let cell_of = |v: [i16; 3]| -> (i32, i32) {
             (i32::from(v[0]).div_euclid(q), i32::from(v[1]).div_euclid(q))
         };
-        let positions: Vec<DVec3> = mesh
+        let half = (CHUNK_EDGE / 2) as i16 * vd_terrain::VERTEX_QUANTUM as i16;
+        let o = vertex_position_m(body, &samples, [half, half, half]);
+        let origin = DVec3::new(o[0].to_f64(), o[1].to_f64(), o[2].to_f64());
+        let positions: Vec<[f32; 3]> = mesh
             .vertices
             .iter()
             .map(|v| {
                 let p = vertex_position_m(body, &samples, *v);
-                DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64())
+                [
+                    (p[0].to_f64() - origin.x) as f32,
+                    (p[1].to_f64() - origin.y) as f32,
+                    (p[2].to_f64() - origin.z) as f32,
+                ]
             })
             .collect();
-        let mut buckets: BTreeMap<(i32, i32), Vec<u32>> = BTreeMap::new();
-        for (i, t) in mesh.triangles.iter().enumerate() {
-            let cells = [
-                cell_of(mesh.vertices[t[0] as usize]),
-                cell_of(mesh.vertices[t[1] as usize]),
-                cell_of(mesh.vertices[t[2] as usize]),
-            ];
-            let (a0, a1) = (
-                cells[0].0.min(cells[1].0).min(cells[2].0),
-                cells[0].0.max(cells[1].0).max(cells[2].0),
-            );
-            let (b0, b1) = (
-                cells[0].1.min(cells[1].1).min(cells[2].1),
-                cells[0].1.max(cells[1].1).max(cells[2].1),
-            );
-            let mut a = a0;
-            while a <= a1 {
-                let mut b = b0;
-                while b <= b1 {
-                    buckets.entry((a, b)).or_default().push(i as u32);
+        // The buckets, counted then filled: one pass for the counts, a prefix sum, one pass for
+        // the triangles — a flat table, no map and no vector per cell.
+        let cells = (PARENT_CELLS * PARENT_CELLS) as usize;
+        let mut counts = vec![0u32; cells + 1];
+        let spans: Vec<(i32, i32, i32, i32)> = mesh
+            .triangles
+            .iter()
+            .map(|t| {
+                let c = [
+                    cell_of(mesh.vertices[t[0] as usize]),
+                    cell_of(mesh.vertices[t[1] as usize]),
+                    cell_of(mesh.vertices[t[2] as usize]),
+                ];
+                (
+                    c[0].0.min(c[1].0).min(c[2].0),
+                    c[0].0.max(c[1].0).max(c[2].0),
+                    c[0].1.min(c[1].1).min(c[2].1),
+                    c[0].1.max(c[1].1).max(c[2].1),
+                )
+            })
+            .collect();
+        for (a0, a1, b0, b1) in &spans {
+            let mut a = *a0;
+            while a <= *a1 {
+                let mut b = *b0;
+                while b <= *b1 {
+                    counts[bucket_of(a, b) + 1] += 1;
                     b += 1;
                 }
                 a += 1;
             }
         }
+        let mut c = 1;
+        while c <= cells {
+            counts[c] += counts[c - 1];
+            c += 1;
+        }
+        let bucket_start = counts;
+        let mut fill = bucket_start.clone();
+        let mut bucket_tris = vec![0u32; bucket_start[cells] as usize];
+        for (i, (a0, a1, b0, b1)) in spans.iter().enumerate() {
+            let mut a = *a0;
+            while a <= *a1 {
+                let mut b = *b0;
+                while b <= *b1 {
+                    let c = bucket_of(a, b);
+                    bucket_tris[fill[c] as usize] = i as u32;
+                    fill[c] += 1;
+                    b += 1;
+                }
+                a += 1;
+            }
+        }
+        let vertices = positions.len();
         Some(ParentMesh {
             key,
+            origin,
             positions,
-            triangles: mesh.triangles,
-            buckets,
+            triangles: ParentTriangles::pack(mesh.triangles, vertices),
+            bucket_start,
+            bucket_tris,
         })
     }
 
@@ -367,20 +475,21 @@ impl ParentMesh {
         self.triangles.len()
     }
 
-    /// AN ESTIMATE of the bytes the mesh holds (M8-2a): the vectors' capacities (the positions,
-    /// the triangles, each bucket's indices) and a map node per bucket (a key, a value header and
-    /// the tree's links, taken as 48 bytes) — what one cache entry costs, within the allocator's
-    /// own rounding.
+    /// A vertex's position in the body's frame, in `f64`: the origin plus the narrowed offset.
+    fn position(&self, i: u32) -> DVec3 {
+        let p = self.positions[i as usize];
+        self.origin + DVec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2]))
+    }
+
+    /// AN ESTIMATE of the bytes the mesh holds (M8-2a): the vectors' capacities — the positions,
+    /// the triangles, the bucket table — what one cache entry costs, within the allocator's own
+    /// rounding.
     #[must_use]
     pub fn bytes(&self) -> usize {
-        const MAP_NODE: usize = 48;
-        self.positions.capacity() * std::mem::size_of::<DVec3>()
-            + self.triangles.capacity() * std::mem::size_of::<[u32; 3]>()
-            + self
-                .buckets
-                .values()
-                .map(|v| v.capacity() * std::mem::size_of::<u32>() + MAP_NODE)
-                .sum::<usize>()
+        self.positions.capacity() * std::mem::size_of::<[f32; 3]>()
+            + self.triangles.bytes()
+            + self.bucket_start.capacity() * std::mem::size_of::<u32>()
+            + self.bucket_tris.capacity() * std::mem::size_of::<u32>()
     }
 
     /// The radius at which the radial along `dir` (a unit vector from the body's centre) meets
@@ -389,13 +498,16 @@ impl ParentMesh {
     #[must_use]
     pub fn radial_hit_m(&self, a: i32, b: i32, dir: DVec3, near_m: f64) -> Option<f64> {
         let mut best: Option<f64> = None;
-        for i in self.buckets.get(&(a, b)).map_or(&[][..], Vec::as_slice) {
-            let t = self.triangles[*i as usize];
+        let range = parent_bucket(a, b).map_or(0..0, |c| {
+            self.bucket_start[c] as usize..self.bucket_start[c + 1] as usize
+        });
+        for i in &self.bucket_tris[range] {
+            let t = self.triangles.get(*i as usize);
             let hit = ray_triangle_m(
                 dir,
-                self.positions[t[0] as usize],
-                self.positions[t[1] as usize],
-                self.positions[t[2] as usize],
+                self.position(t[0]),
+                self.position(t[1]),
+                self.position(t[2]),
             );
             // The nearest hit; a tie goes to the lower one, so the answer never depends on the
             // order the triangles were met in.
@@ -436,8 +548,12 @@ pub fn ray_triangle_m(dir: DVec3, p0: DVec3, p1: DVec3, p2: DVec3) -> Option<f64
 /// A determinant under this is a ray parallel to the triangle.
 const RAY_EPSILON: f64 = 1e-18;
 /// How far past an edge a crossing still counts, in the triangle's own barycentric units: the
-/// rounding of a radial that runs exactly along a shared edge.
-const RAY_SLACK: f64 = 1e-9;
+/// rounding of a radial that runs exactly along a shared edge, and — since step 5 narrows a
+/// parent's positions to `f32` from its origin — a corner moved by that narrowing (8 mm on the
+/// coarsest parent's 2 km triangles, 4e-6 of the triangle; 15 µm on 4 m at rung 2, the same
+/// share). MEASURED without this: a ray through a parent's own vertex missed every triangle
+/// that met there.
+const RAY_SLACK: f64 = 1e-5;
 
 /// THE PARENT CACHE: the parent meshes the lane's workers build, shared and bounded — the eight
 /// finer chunks under one parent, and the halo users beside them, read one build. A map with a
@@ -478,8 +594,17 @@ struct ParentStore {
     building: BTreeSet<(RealmId, ChunkKey)>,
     /// A realm's epoch: `forget` bumps it, and a claim from before keeps nothing.
     epochs: BTreeMap<RealmId, u64>,
-    /// How many meshes the cache keeps.
+    /// How many meshes the cache keeps (the library's own bound; the engine lifts it and sets
+    /// the byte budget instead).
     capacity: usize,
+    /// THE BYTE BUDGET (refutation of step 5's second half, finding 2): the meshes' bytes the
+    /// cache keeps, a true bound — a count of entries at an estimated size was not one.
+    budget_bytes: usize,
+    /// Under the byte budget the cache never trims below this many meshes: one working set of
+    /// the workers, so a budget too small for the parents in flight stalls nothing.
+    floor: usize,
+    /// The bytes of the meshes held now (`ParentMesh::bytes`, summed on keep and trim).
+    held_bytes: usize,
     /// The counts (M8-2a): claims served from the map, claims that built, claims that waited on
     /// a build in flight (a wait counts once per claim, however many wakes it took).
     stats: ParentStats,
@@ -538,6 +663,8 @@ impl ParentCache {
         ParentCache {
             store: Mutex::new(ParentStore {
                 capacity: capacity.max(1),
+                budget_bytes: usize::MAX,
+                floor: 1,
                 ..ParentStore::default()
             }),
             landed: std::sync::Condvar::new(),
@@ -555,6 +682,29 @@ impl ParentCache {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.lock().capacity
+    }
+
+    /// BOUND THE CACHE BY BYTES: keep meshes while their bytes fit `bytes`, never fewer than
+    /// `floor` of them (at least one), and lift the count bound out of the way. The oldest leave
+    /// at once when what is held passes the new budget.
+    pub fn set_budget_bytes(&self, bytes: usize, floor: usize) {
+        let mut store = self.lock();
+        store.capacity = usize::MAX;
+        store.budget_bytes = bytes;
+        store.floor = floor.max(1);
+        trim(&mut store);
+    }
+
+    /// The byte budget (unbounded until `set_budget_bytes`).
+    #[must_use]
+    pub fn budget_bytes(&self) -> usize {
+        self.lock().budget_bytes
+    }
+
+    /// The bytes of the meshes held now.
+    #[must_use]
+    pub fn held_bytes(&self) -> usize {
+        self.lock().held_bytes
     }
 
     /// The parent mesh of `key` in `realm`: the cached one, a build in flight waited for, or a
@@ -644,6 +794,7 @@ impl ParentCache {
             store.map.retain(|(r, _), _| *r != realm);
             store.by_use.retain(|_, (r, _)| *r != realm);
             store.building.retain(|(r, _)| *r != realm);
+            store.held_bytes = store.map.values().map(|e| e.mesh.bytes()).sum();
             *store.epochs.entry(realm).or_insert(0) += 1;
         }
         self.landed.notify_all();
@@ -685,19 +836,28 @@ fn touch(store: &mut ParentStore, realm: RealmId, key: ChunkKey) -> Arc<ParentMe
 fn keep(store: &mut ParentStore, realm: RealmId, key: ChunkKey, mesh: Arc<ParentMesh>) {
     store.use_seq += 1;
     let now = store.use_seq;
+    store.held_bytes += mesh.bytes();
     if let Some(old) = store.map.insert((realm, key), Entry { mesh, used: now }) {
         store.by_use.remove(&old.used);
+        store.held_bytes -= old.mesh.bytes();
     }
     store.by_use.insert(now, (realm, key));
     trim(store);
 }
 
-/// The least recently used leave until the store holds its capacity.
+/// The least recently used leave until the store holds its capacity AND its bytes fit the
+/// budget — the byte bound stops at the floor, so a working set always stays.
 fn trim(store: &mut ParentStore) {
-    while store.map.len() > store.capacity {
+    while store.map.len() > store.capacity || over_budget(store) {
         let (_, key) = store.by_use.pop_first().expect("as many uses as entries");
-        store.map.remove(&key);
+        let gone = store.map.remove(&key).expect("held");
+        store.held_bytes -= gone.mesh.bytes();
     }
+}
+
+/// Whether the held bytes pass the budget with more than the floor held.
+fn over_budget(store: &ParentStore) -> bool {
+    store.held_bytes > store.budget_bytes && store.map.len() > store.floor
 }
 
 /// THE PARENTS a chunk's geomorph reads: none at the top rung; else the chunk at the next
@@ -1781,14 +1941,21 @@ mod tests {
     fn two_triangles_on_one_radial_answer_the_nearer_one_and_a_tie_the_lower() {
         // A hand-built parent: two level triangles on the +x radial, at 100 m and 130 m, both
         // in bucket (0, 0).
-        let tri = |r: f64| -> [DVec3; 3] {
-            [
-                DVec3::new(r, -1.0, -1.0),
-                DVec3::new(r, 3.0, -1.0),
-                DVec3::new(r, -1.0, 3.0),
-            ]
-        };
+        let tri = |r: f32| -> [[f32; 3]; 3] { [[r, -1.0, -1.0], [r, 3.0, -1.0], [r, -1.0, 3.0]] };
         let (near, far) = (tri(100.0), tri(130.0));
+        // Both triangles in the bucket of cell (0, 0) and no other: the table's starts step from
+        // 0 to 2 right after that cell.
+        let one_bucket = |a: i32, b: i32, tris: Vec<u32>| -> (Vec<u32>, Vec<u32>) {
+            let c = parent_bucket(a, b).expect("inside the box");
+            let mut start = vec![0u32; (PARENT_CELLS * PARENT_CELLS) as usize + 1];
+            let mut i = c + 1;
+            while i < start.len() {
+                start[i] = tris.len() as u32;
+                i += 1;
+            }
+            (start, tris)
+        };
+        let (bucket_start, bucket_tris) = one_bucket(0, 0, vec![0, 1]);
         let pm = ParentMesh {
             key: ChunkKey {
                 face: Face::PosX,
@@ -1797,9 +1964,11 @@ mod tests {
                 y: 0,
                 z: 0,
             },
+            origin: DVec3::ZERO,
             positions: vec![near[0], near[1], near[2], far[0], far[1], far[2]],
-            triangles: vec![[0, 1, 2], [3, 4, 5]],
-            buckets: [((0, 0), vec![0, 1])].into_iter().collect(),
+            triangles: ParentTriangles::pack(vec![[0, 1, 2], [3, 4, 5]], 6),
+            bucket_start: bucket_start.clone(),
+            bucket_tris: bucket_tris.clone(),
         };
         // Asked near 128: the far one; near 102: the near one; at 115 (a tie): the lower.
         assert_eq!(pm.radial_hit_m(0, 0, DVec3::X, 128.0), Some(130.0));
@@ -1808,9 +1977,11 @@ mod tests {
         // The same triangles the other way round meet the same tie the same way.
         let swapped = ParentMesh {
             key: pm.key,
+            origin: DVec3::ZERO,
             positions: vec![far[0], far[1], far[2], near[0], near[1], near[2]],
-            triangles: vec![[0, 1, 2], [3, 4, 5]],
-            buckets: [((0, 0), vec![0, 1])].into_iter().collect(),
+            triangles: ParentTriangles::pack(vec![[0, 1, 2], [3, 4, 5]], 6),
+            bucket_start,
+            bucket_tris,
         };
         assert_eq!(swapped.radial_hit_m(0, 0, DVec3::X, 115.0), Some(100.0));
     }
@@ -2653,5 +2824,126 @@ mod claim_tests {
                 nanos: 0
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod parent_shrink_tests {
+    use super::*;
+    use vd_core::pose::RealmId;
+
+    fn planet() -> RealmId {
+        RealmId::Planet(7)
+    }
+
+    /// The parent mesh's packing (step 5): a parent of the home planet holds its triangles at 16
+    /// bits and fewer bytes than the old form; a synthetic mesh past 65 535 vertices holds them at
+    /// 32; a cell outside the box has no bucket; the bucket table indexes every triangle of a
+    /// cell exactly as the map did.
+    /// THE BYTE BUDGET (refutation of step 5's second half, finding 2): the cache bounds the
+    /// bytes it holds, never fewer than the floor; a replaced key counts once; a forgotten realm
+    /// returns its bytes.
+    #[test]
+    fn the_byte_budget_bounds_the_held_bytes_and_the_floor_keeps_a_working_set() {
+        let body = vd_terrain::home::home_planet();
+        let key = |x: i32| ChunkKey {
+            face: vd_seed::bend::Face::PosX,
+            rung: 1,
+            x,
+            y: 5,
+            z: vd_terrain::digest::surface_chunk_z(&body, vd_seed::bend::Face::PosX, 1, x, 5),
+        };
+        let mesh = Arc::new(ParentMesh::build(&body, key(3)).expect("in the ladder"));
+        let one = mesh.bytes();
+        let cache = ParentCache::with_capacity(100);
+        assert_eq!(cache.budget_bytes(), usize::MAX);
+        assert_eq!(cache.held_bytes(), 0);
+        // Two and a half meshes of budget: the third insert trims the oldest.
+        cache.set_budget_bytes(one * 5 / 2, 1);
+        assert_eq!(cache.capacity(), usize::MAX);
+        cache.insert(planet(), key(3), Arc::clone(&mesh));
+        cache.insert(planet(), key(4), Arc::clone(&mesh));
+        assert_eq!((cache.len(), cache.held_bytes()), (2, 2 * one));
+        cache.insert(planet(), key(5), Arc::clone(&mesh));
+        assert_eq!((cache.len(), cache.held_bytes()), (2, 2 * one));
+        assert!(cache.get(planet(), &body, key(3)).is_some());
+        // A held key replaced counts once.
+        cache.insert(planet(), key(5), Arc::clone(&mesh));
+        assert_eq!((cache.len(), cache.held_bytes()), (2, 2 * one));
+        // Under the budget the floor holds: a zero budget with a floor of two keeps two.
+        cache.set_budget_bytes(0, 2);
+        assert_eq!((cache.len(), cache.held_bytes()), (2, 2 * one));
+        cache.set_budget_bytes(0, 0);
+        assert_eq!((cache.len(), cache.held_bytes()), (1, one));
+        // A forgotten realm returns its bytes.
+        cache.forget(planet());
+        assert_eq!((cache.len(), cache.held_bytes()), (0, 0));
+        // The count bound still trims on its own when it is the smaller one.
+        let counted = ParentCache::with_capacity(1);
+        counted.insert(planet(), key(3), Arc::clone(&mesh));
+        counted.insert(planet(), key(4), Arc::clone(&mesh));
+        assert_eq!((counted.len(), counted.held_bytes()), (1, one));
+    }
+
+    #[test]
+    fn a_parent_mesh_packs_its_triangles_and_indexes_its_buckets_flat() {
+        let body = vd_terrain::home::home_planet();
+        let key = ChunkKey {
+            face: vd_seed::bend::Face::PosX,
+            rung: 1,
+            x: 3,
+            y: 5,
+            z: vd_terrain::digest::surface_chunk_z(&body, vd_seed::bend::Face::PosX, 1, 3, 5),
+        };
+        let mesh = ParentMesh::build(&body, key).expect("in the ladder");
+        assert!(format!("{:?}", mesh.triangles).contains("Narrow"));
+        assert!(mesh.bytes() < 400 * 1024, "{} bytes", mesh.bytes());
+        assert_eq!(
+            mesh.bucket_start.len(),
+            (PARENT_CELLS * PARENT_CELLS) as usize + 1
+        );
+        assert_eq!(
+            *mesh.bucket_start.last().expect("the end"),
+            mesh.bucket_tris.len() as u32
+        );
+        // Every triangle stands in at least one bucket, and every bucket entry names a triangle.
+        assert!(
+            mesh.bucket_tris
+                .iter()
+                .all(|i| (*i as usize) < mesh.triangle_count())
+        );
+        assert!(mesh.bucket_tris.len() >= mesh.triangle_count());
+        assert_eq!(parent_bucket(-2, 0), None);
+        assert_eq!(parent_bucket(0, 63), None);
+        assert_eq!(parent_bucket(-1, -1), Some(0));
+        assert_eq!(parent_bucket(62, 62), Some(64 * 64 - 1));
+        // A hit on the surface through a cell the mesh spans (some cell of the grid answers with
+        // the vertex's own radius), none through a cell outside the grid.
+        let p = mesh.position(0);
+        let dir = p.normalize();
+        assert!(mesh.radial_hit_m(-2, -2, dir, p.length()).is_none());
+        let mut hit = false;
+        let mut a = -1;
+        while a <= 62 {
+            let mut b = -1;
+            while b <= 62 {
+                hit |= mesh
+                    .radial_hit_m(a, b, dir, p.length())
+                    .is_some_and(|m| (m - p.length()).abs() < 1.0e-3);
+                b += 1;
+            }
+            a += 1;
+        }
+        assert!(hit, "no cell of the grid answers the ray through vertex 0");
+        // The wide form: a synthetic mesh of one triangle whose vertex count passes 16 bits.
+        let wide = ParentTriangles::pack(vec![[0, 1, 70_000]], 70_001);
+        assert!(format!("{wide:?}").contains("Wide"));
+        assert_eq!(wide.len(), 1);
+        assert_eq!(wide.get(0), [0, 1, 70_000]);
+        assert_eq!(wide.bytes(), 12);
+        let narrow = ParentTriangles::pack(vec![[0, 1, 2]], 3);
+        assert_eq!(narrow.get(0), [0, 1, 2]);
+        assert_eq!(narrow.bytes(), 6);
+        assert!(format!("{narrow:?}").contains("Narrow"));
     }
 }

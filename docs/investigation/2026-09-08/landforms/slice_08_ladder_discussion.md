@@ -839,3 +839,141 @@ one-step floor, the hill on the same 18 pixels — the 16-bit form's own footpri
 the moving eye: the walk 26.9, 240 m/s 43.8, 528 m/s 24.4 frames a second (25.6, 41.0 and 27.5
 before the packing), the walk and the 240 m/s leg with zero frames with a gap; the probe's low
 pass at a gap of 752 and a queue of 1 723 (the same wall, §16.6).
+
+### 17.6 The parent mesh's shrink and the client's memory, MEASURED (2026-09-10, ruling V17 item 1)
+
+**What was built.** A parent mesh is the coarser chunk's surface that a finer chunk's morph targets
+are shot against (§16.6). It held its positions as `f64`, its triangles as `u32` and its buckets as
+a map of vectors: about 500 KB a mesh. Now it holds its positions as `f32` offsets from one `f64`
+origin (the parent's own centre): the offset reaches half the box, 31 cells, so the `f32` step is
+about 62 × 2⁻²³ of the cell — 15 µm at rung 1 (cell 2 m), 7.8 mm at the home planet's coarsest
+rung 11 (cell 2 048 m, offset 65 km), and 12.5 cm at the
+largest rung the ladder can name (rung 15, cell 32 768 m). Against the cell that step is 7.4e-6
+at every rung, which is what the morph reads it at. Its triangles are at 16 bits when the parent
+has fewer than 65 536 vertices and at 32 bits otherwise, and its buckets one flat table: a start
+index per cell of the 64 × 64 grid and one triangle list. The ray test that reads a parent widens
+its slack to that step (`RAY_SLACK` at 1e-5, against 7.4e-6 per component): at the old 1e-9 a ray
+through a narrowed vertex missed the triangle it stood on — the unit test that reads a real
+parent's radials over its cells found that (`a_parent_mesh_answers_the_radials_over_its_cells…`).
+An accepted hit stays within 1e-5 of an edge of its own triangle (2 cm at rung 11, 20 µm at rung
+1), and the candidate set is unchanged, so the slack can neither pull in another cell's triangle
+nor return a wild radius; a miss falls back to the field and the census counts it (unchanged,
+below).
+
+**Example.** The finest chunk under the eye on the hill stand shoots its 5 000 morph rays at the
+rung-1 parent above it. Before the shrink the cache held 512 of those parents in 256 MB; now the
+same budget holds about a thousand — the 89 % hit-rate setting of §16.6 — and the cache bounds
+itself by the meshes' OWN bytes (refutation finding 2: a count of entries at an estimated size
+was not a bound; a parent larger than the estimate overshot the budget silently), never fewer
+than the workers' working set.
+
+**MEASURED, `chunk_phases`:** 500 → 239 KB a parent mesh; a cold chunk build 61 → 42 ms (the
+parent's build is most of a cold chunk, and it writes half the bytes).
+
+**MEASURED, the picture flight (the four stands, Docker on, the cache at 512 entries — the
+byte bound came with the refutation and flies in the final chain):**
+the pictures within the one-step floor on every stand (ground 11, hill 1, aloft 6, orbit 5 content
+pixels at a channel step of 1 — the gate's own noise), the morph fallbacks unchanged (ground 7 985
+of 48 M vertices).
+
+**The client's resident memory, and why the first reading is not trusted.** The census prints the
+operating system's resident count (`ps`, RSS). With the shrink the ground stand read 3 122 MB
+against 3 646 MB before it, but the hill stand read 4 097 MB against 1 904 MB. A resident count
+falls when the machine is short of memory: the machine held 7.5 GB in swap during these flights
+(Docker on), so a still-growing client can read SMALLER than it is, and the hill's 1 904 MB was
+such a reading. The census now prints the physical footprint too (`footprint`, what the process
+holds in RAM PLUS what the system compressed or swapped on its behalf), which does not fall under
+pressure; the numbers that count are the footprint ones, below. The readers live in
+`vd_bins::memory` (resident, footprint by category, the heap summary, the region table) so the
+picture gate prints them and the moving-eye gate measures their growth per leg.
+
+**THE MAIN-WORLD COPY, DELETED (ruling V17 item 1).** The engine keeps a mesh in the main world
+too by default, and nothing on the client reads a chunk's mesh back (the culling box is the
+library's own, the geometry stays on the lane), so a chunk's mesh is now render-world only. The
+same four stands, both in the footprint's unit, Docker on:
+
+| Stand | Drawn | Footprint before → after | Small malloc blocks before → after | Resident before → after |
+|---|---|---|---|---|
+| ground | 2 460 MB | 8 591 → 6 611 MB | 3 892 → 1 967 MB | 3 418 → 2 052 MB |
+| hill | 2 582 MB | 8 247 → 6 463 MB | 3 476 → 1 698 MB | 2 270 → 2 025 MB |
+| aloft | 788 MB | 2 963 → 2 493 MB | 1 243 → 784 MB | 1 765 → 1 123 MB |
+| orbit | 339 MB | 1 674 → 1 610 MB | 524 → 491 MB | 1 112 → 1 066 MB |
+
+The pictures unchanged on every stand (within the one-step floor). The frame rates unchanged
+(ground 28.4, hill 27.0, aloft 52.4, orbit 52.4 on the still stand).
+
+**WHERE THE FOOTPRINT GOES NOW (the ground stand, 6 611 MB), MEASURED by category.**
+
+| Category | MB | What it is |
+|---|---|---|
+| graphics buffers (owned, unmapped) | 2 870 | the chunks on the GPU: 2 460 MB drawn plus the slab rounding, the depth and prepass targets; 145 regions, the engine's slabs |
+| owned, unmapped, not graphics | 1 546 | 12 371 regions — about two per chunk of the fill; the upload path's working set (below) |
+| small malloc blocks | 1 967 | the heap holds 712 MB IN USE (`heap -s`: 161 143 blocks); the rest is freed pages the allocator kept — it fell to 860 MB after the walk and 351 MB after the 528 m/s leg |
+| large malloc blocks | 161 | the parent cache and the lane |
+| the binary and its libraries | 372 | resident text |
+
+**THE UPLOAD PATH DOES NOT LEAK, MEASURED on the moving eye (three legs, the footprint at both
+ends of each leg):**
+
+| Leg | Chunks harvested | Footprint at the end | Growth: total / graphics / unmapped / small malloc |
+|---|---|---|---|
+| walk 1.4 m/s | 135 | 5 569 MB | −225 / +1 / 0 / −227 MB |
+| hull 240 m/s | 9 767 | 5 561 MB | +528 / +507 / 0 / +4 MB |
+| hull 528 m/s | 21 544 | 4 713 MB | −901 / −198 / 0 / −707 MB |
+
+The owned-unmapped memory grew by ZERO over 31 000 uploads: it is a pool bounded by the fill's
+peak, not a per-upload cost. Its size follows the drawn bytes on a still stand (0.64 × drawn
+across the four stands) and its region count is about two per chunk of the fill, which fits the
+two writes an upload makes (the vertex slab and the index slab) through the engine's staging path
+— that attribution is a HYPOTHESIS consistent with the count, UNMEASURED. The graphics buffers grew
+with the drawn set (6 677 → 7 564 chunks on the 240 m/s leg) and shrank when it shrank.
+
+**Example.** A pilot at 528 m/s for a minute has the client upload 21 544 chunks — three times
+the ground stand's fill — and the client ends the minute 900 MB SMALLER than it started it,
+because the allocator returned the pages the fill had dirtied and the drawn set shrank.
+
+**What is left, and where it lands.** (1) The graphics buffers are the drawn bytes: the lossy
+packing (V17 item 2, the tolerance decision) is the only lever, and it waits on the owner. (2) The
+upload pool at 0.6 × the drawn bytes: a persistent staging ring would bound it by the frame's
+uploads instead of the fill's — an engine-side change, deferred until the number matters
+(D-TERRAIN-5 item 14). (3) The allocator's retained pages: a fill dirties 2 GB of small blocks
+that the heap does not hold; they return over the next minute of flight. An allocator with a
+different policy is a new dependency and the owner's call, not this slice's.
+
+### 17.7 The second half, FINAL (2026-09-10, the gate chain on the refuted tree, Docker off)
+
+Coverage 100 % (the byte-bounded cache and the bucket passes included), lint, the combos, the
+pin, the pictures (four stands within the one-step floor, zero holes) and the moving eye green.
+The census with the byte-bounded parent cache (256 MB of meshes, never fewer than the workers'
+working set), the shrunk parent mesh and the render-world-only chunk mesh:
+
+| Stand | Chunks | On the GPU | Footprint (graphics / unmapped / small malloc) | Frames/s, still (§17.5 → now) |
+|---|---|---|---|---|
+| ground | 6 659 | 2 460 MB | 6 525 MB (2 870 / 1 543 / 1 885) | 28.0 → 29.4 |
+| hill | 7 360 | 2 582 MB | 6 235 MB (2 885 / 1 645 / 1 472) | 26.4 → 27.5 |
+| aloft | 3 529 | 788 MB | 2 815 MB (1 166 / 462 / 970) | 52.4 → 51.9 |
+| orbit | 1 457 | 339 MB | 1 604 MB (751 / 225 / 424) | 52.4 → 52.4 |
+
+The moving eye (the run that passed; frames a second, §17.5 → now): the walk 26.9 → 29.5 with
+zero frames with a gap; 240 m/s 43.8 → 45.1 with zero frames with a gap and the parent cache at
+90 % (76 % before the shrink freed the budget); 528 m/s 24.4 → 32.1, the probe's low pass at a
+gap of 1 026 chunks and a queue of 1 727 (the same wall, §16.6), the cache at 89 %. The memory
+over the legs: the unmapped pool grew by zero on every leg (0 / 0 / 0 MB over 136, 10 013 and
+21 291 uploads); the graphics buffers followed the drawn set (+628 MB as the screen grew to 7 622
+chunks, −144 MB as it shrank).
+
+**THE BOARDING THAT NEVER SETTLED (one run of two, OPEN — D-TERRAIN-5 item 15).** The first
+run of the final chain went red at "hull, aboard": after the crossing into the hull (which ran
+its saga twice, attempt 0 and attempt 1 ten seconds apart, on the failed run AND on the run that
+passed) the ladder never settled in three minutes. Its last state: the drawn eye 20 km above the
+surface by the planet's delivered box, the LEAD eye 5 591 km from it and 41 km UNDER the surface
+by the stamp, zero chunks drawn, 4 846 pending, 3 066 urgent, 238 265 chunk builds over the
+client's life — a thrash: the lead eye far from the drawn one wants everything within its reach,
+under-surface (item 12), and the wanted set flips. The second run settled at once and flew both
+legs green, so the state is a race at the boarding, not the tree. UNMEASURED: what the lead did
+between the origin swap and the stall — the settle wait was one blocking call and kept only its
+last state. The wait now POLLS and prints its course every two seconds (drawn, pending, urgent,
+lead, altitude, origin, own pose, the entity windows), so the next occurrence is a diagnosis.
+The lead's own formula is the suspect: the offset between the own pose composed at the drawn
+cursor and at the lead cursor, which straddle the origin swap for one buffer.
+

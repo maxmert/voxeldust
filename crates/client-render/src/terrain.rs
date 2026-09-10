@@ -103,8 +103,8 @@ fn sun_lux(exposure: &bevy::camera::Exposure) -> f32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerrainConfig {
     pub flat: bool,
-    /// THE PARENT CACHE'S MEMORY BUDGET, in bytes: the cache keeps as many parent meshes as fit
-    /// (`PARENT_MESH_BYTES_ESTIMATE` each), never fewer than one working set of the workers.
+    /// THE PARENT CACHE'S MEMORY BUDGET, in bytes: the cache keeps parent meshes while their
+    /// measured bytes fit, never fewer than one working set of the workers.
     pub parent_cache_bytes: usize,
     /// Finished chunks harvested per frame.
     pub harvest_per_frame: usize,
@@ -116,11 +116,11 @@ pub struct TerrainConfig {
 /// column of a ring arrives about half a second later (ESTIMATED from the ring's chunk size over
 /// the speed), so the entries must outlive that. MEASURED on the M8-1 flight at 240 m/s with 14
 /// workers (§16.6): 224 entries hit 53 % at 35 ms a chunk, 448 hit 76 % at 22 ms, 896 hit 89 % at
-/// 16 ms. 256 MB is about 512 entries at today's parent mesh; the shrink to about 190 KB (step 5,
-/// D-TERRAIN-5 item 10) fits the 89 % setting in the same budget.
+/// 16 ms. 256 MB holds about a thousand of the shrunk parent meshes (step 5, D-TERRAIN-5 item
+/// 10: MEASURED 239 KB at rung 1 on the home planet, against 500 KB before), so the 89 % setting
+/// fits the budget; the cache bounds itself by the meshes' own bytes, not by a count at an
+/// estimated size.
 pub const PARENT_CACHE_BYTES: usize = 256 << 20;
-/// A parent mesh's bytes, ESTIMATED (`ParentMesh::bytes`, `chunk_phases`: about 500 KB).
-pub const PARENT_MESH_BYTES_ESTIMATE: usize = 512 << 10;
 
 impl TerrainConfig {
     /// Read the flags from the environment; the budgets are the defaults.
@@ -448,12 +448,11 @@ impl Terrain {
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
         let workers: Box<dyn ChunkWorkers> = Box::new(ThreadedWorkers::start(threads));
         let lane = ChunkLane::new(workers, declared);
-        // The parent cache holds what the memory budget allows, never less than one working set
-        // of the workers (ruling V15; refutation T-8: a size that followed the cores alone had no
-        // ceiling).
-        let entries = (config.parent_cache_bytes / PARENT_MESH_BYTES_ESTIMATE)
-            .max(threads * PARENTS_PER_CHUNK);
-        lane.parents().set_capacity(entries);
+        // The parent cache holds what the memory budget allows, in the meshes' own bytes, never
+        // less than one working set of the workers (ruling V15; refutation T-8: a size that
+        // followed the cores alone had no ceiling).
+        lane.parents()
+            .set_budget_bytes(config.parent_cache_bytes, threads * PARENTS_PER_CHUNK);
         Terrain {
             config,
             lane,
@@ -581,9 +580,12 @@ fn packed_indices(geometry: &vd_client::chunks::ChunkGeometry) -> bevy::mesh::In
 /// morph metre per vertex, the extractor's triangles as indices. `flat` duplicates the vertices
 /// and takes one normal per face.
 fn mesh_of(geometry: &vd_client::chunks::ChunkGeometry, flat: bool) -> Mesh {
+    // RENDER WORLD ONLY (step 5, refutation P-16): the engine keeps a mesh in the main world too
+    // by default, and nothing reads a chunk's mesh back on the client — the culling box is the
+    // library's own and the geometry stays on the lane. One copy, in the render world.
     let mut mesh = Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
-        bevy::asset::RenderAssetUsages::default(),
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, geometry.vertices.clone())
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.normals.clone())

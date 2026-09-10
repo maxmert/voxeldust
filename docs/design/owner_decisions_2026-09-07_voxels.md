@@ -727,3 +727,30 @@ against CPU chunks on a sample every session) and the server keeps its CPU colli
 3. Still the owner's word, open: the frame-time budget for the harvest (a hitch against a coarser
    patch), and the rule under a deep queue (the finest ring not asked for while the queue is
    deeper than the workers drain in one buffer).
+
+## V17. STEP 5's SECOND HALF, THE ORDER (owner, 2026-09-10)
+
+**The state at the ruling.** Step 4, the throughput wall and step 5's first half are committed
+(`1a804e9`): a vertex of 40 bytes against 48, exact to float rounding, the pictures within a
+one-step floor, the frame rate above the unpacked one on every stand and leg. The 16-bit radial was
+MEASURED to move 5 hill pixels of 701 472 onto the neighbouring triangle at a crease (up to 19 of
+255 levels) and was refused under V16.
+
+**What the owner was told.** Two of the second half's pieces — 16-bit positions and packed normals
+— are quantisations of the same class as the 16-bit radial and will change a few crease pixels;
+under V16 as written they cannot ship. Three readings of "do not drop quality" were put to the
+owner: exact only; a stated tolerance a gate can hold (proposed: no content pixel by more than one
+level at any stand, which the first half passes and the 16-bit radial failed); or the owner rules
+per case from the difference images. The exact pieces — the parent mesh's shrink (CPU memory), the
+render-world-only meshes (client memory, UNMEASURED), the harvest's byte budget — need no
+tolerance. GPU generation does not cure the GPU's 2.5 GB nor the draw count; it removes the upload
+and lifts the build rate.
+
+**RULED: the ORDER** — *"Agree with proposed order, please execute."*
+
+1. The parent mesh's shrink and the render-world-only measurement (an instrument for resident
+   memory first, then the change, then the measurement), now.
+2. The tolerance decision, the owner's — OPEN at this ruling; nothing lossy ships before it.
+3. The GPU spike: the recipe's noise in a compute shader against the CPU, byte for byte, on a
+   thousand chunks, on this machine — BEFORE the lossy pieces, because its answer decides whether
+   the second half is worth finishing on the CPU.

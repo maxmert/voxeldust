@@ -7877,12 +7877,17 @@ rings; what is left is an interim with a named step:
    (418 built against 345 harvested at ×8). The lever is the bytes per upload (step 5's packing)
    and the main thread's cost per upload (MEASURED on run 18); the byte budget for the harvest (V15
    item 2) lands with the packing, where bytes become the unit.
-10. **THE PARENT MESH'S BYTES** (M8-2a, `ParentMesh::bytes`, `chunk_phases`): about 500 KB each
+10. 🟩 **THE PARENT MESH'S BYTES** (M8-2a, `ParentMesh::bytes`, `chunk_phases`): about 500 KB each
    (positions as `f64`, triangles as `u32`, the buckets as a map of vectors), so the shipped cache
-   (workers × 8 × 4 = 448 entries on 14 workers) holds about 225 MB. → step 5 with the packing:
-   positions as `f32` from the parent's origin, `u16` triangle indices (a parent mesh has fewer
-   than 65 536 vertices), the buckets as one flat table — about 190 KB, so the 89 % setting fits
-   the 256 MB budget.
+   (workers × 8 × 4 = 448 entries on 14 workers) holds about 225 MB. → DONE 2026-09-10 (step 5,
+   §17.6): positions as `f32` from the parent's origin, the triangles at 16 bits when the parent
+   has fewer than 65 536 vertices and 32 otherwise, the buckets as one flat table (a start per
+   cell, one triangle list) — MEASURED 239 KB a mesh, a cold build 61 → 42 ms; the cache now
+   bounds itself by the meshes' OWN bytes (the 256 MB budget holds about a thousand), never
+   fewer than the workers' working set — a count at an estimated size was not a bound
+   (refutation finding 2); the ray test that
+   reads the parent widens its slack to the `f32` step (`RAY_SLACK`), and the four stands' pictures
+   stay within the one-step floor.
 11. **The lead and the release are one buffer apart, and the lead carries no rotation** (step 4's
    refutation R4-5, R4-8): the scene overlay keeps the BOOT facing at every cursor, so a turning
    hull's rotation reaches neither the drawn scene nor the lead (a hull that yaws sees the planet
@@ -7904,7 +7909,26 @@ rings; what is left is an interim with a named step:
    item 2), in the one config struct beside the chunk cap. The first half (the morph metre, the radial as
    four 16-bit quanta on the vertex, the per-rung sink, 16-bit indices) is exact and MEASURED
    (§17.3): a vertex of 36 bytes against 48, the indices halved, and the frame rate above the
-   unpacked one on a still stand and on a moving eye.
+   unpacked one on a still stand and on a moving eye. → 2026-09-10 (ruling V17): the parent mesh's
+   shrink DONE (item 10); the main-world mesh copy DELETED and the memory MEASURED in the
+   footprint's unit (§17.6: ground 8 591 → 6 611 MB); the lossy packing WAITS on the owner's
+   tolerance decision (V17 item 2) and comes after the GPU spike (V17 item 3).
+
+14. **THE UPLOAD PATH'S POOL** (§17.6, MEASURED 2026-09-10): the client owns about 0.6 × the drawn
+   bytes of unmapped memory (1 546 MB at the ground stand, in about two regions per chunk of the
+   fill), bounded — it grew by zero over 31 000 uploads on the moving eye — so it is a working set,
+   not a leak. The attribution to the engine's staging buffers (one per slab write) is a
+   HYPOTHESIS consistent with the count, UNMEASURED. → a persistent staging ring bounded by the
+   frame's uploads instead of the fill's, when the number matters; engine-side.
+
+15. 🟥 **A BOARDING THAT NEVER SETTLED** (§17.7, MEASURED once in two runs, 2026-09-10): after the
+   crossing into the berthed hull the ladder thrashed for three minutes — the lead eye 5 591 km
+   from the drawn eye and 41 km under the surface, zero drawn, 4 846 pending, 238 265 builds. The
+   second run settled at once. A race at the origin swap; the lead offset (the own pose composed
+   at the drawn cursor minus at the lead cursor) straddles the swap for one buffer and is the
+   suspect. The settle wait now prints its course every two seconds. → fly the boarding until it
+   recurs with the course in the log; then the fix (a lead that refuses an offset across an
+   origin change is the likely shape); slice 8 step 6 at the latest.
 
 **WHEN.** Slice 8, steps 4–6. The slice is not done until this row is 🟩.
 
