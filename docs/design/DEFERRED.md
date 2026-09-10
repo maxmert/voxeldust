@@ -7820,14 +7820,16 @@ rings; what is left is an interim with a named step:
 3. **The far-eye handover**: past `FAR_EYE_RADII` (two body radii) the proxy outline stands in for
    the globe, and the swap is a seam (SL8). → step 6's pop detector measures it; the globe from the
    crate at the top rung replaces the outline when the reach names it.
-4. **Every measurement is a STILL stand**: the recompute on a moving eye, the release hold, the
-   withdrawal of stale jobs, the span cache's eviction, the morph across a band, and the skyline's
-   recompute per half metre (about 36 rays per near column at 1 km, about 2 000 near columns from
-   the ground) run on a moving eye only in the tests. THE ARRIVAL POP: while a finer chunk builds,
-   the sunk coarser rung shows `sink_m` metres under the surface the finer will draw (metres to
-   tens of metres at a coarse rung), and the ground rises by that in one frame when it lands —
-   a jump, which SL8 calls a seam. → M8-1 (a hull at 1.4 / 240 / 528 m/s) and step 6's pop
-   detector, which names the pop's size.
+4. **Every measurement was a STILL stand** — MEASURED at step 4 on a moving eye (M8-1, the eighth
+   run of 2026-09-09): the band is complete on every sample of a walk at 1.4 m/s (1 287 samples)
+   and of a hull leg at 240 m/s 1 000–1 400 m over the ground (1 274 samples, the queue at 102;
+   the sixth run's skim at 300 m and 244 m/s was past the wall: the queue steady at about 2 400,
+   rung 0 at 200 of 950 resident),
+   with the wanted set computed at the interpolation buffer's LEAD, the territory classes, and the
+   skyline's hysteresis (`slice_08_ladder_discussion.md` §16). Still owed here: THE ARRIVAL POP —
+   while a finer chunk builds, the sunk coarser rung shows `sink_m` metres under the surface the
+   finer will draw, and the ground rises by that in one frame when it lands, a jump SL8 calls a
+   seam → step 6's pop detector names its size; and the skyline's cost per recompute → M8-2.
 5. **At a band's far edge the coarser mesh may stand over a finer chord by the crease's sagitta**:
    the morph is exact at the finer VERTICES (they lie on the parent mesh), and a finer triangle
    that spans a coarser crease is the chord under it. The sink ramp now ends past the edge, so one
@@ -7835,20 +7837,74 @@ rings; what is left is an interim with a named step:
    edges fell to 2 with the parent-mesh target, then the residual sink). → step 6's pop detector
    measures the edges on a moving eye; splitting the finer triangles that straddle a coarser edge
    is the exact cure, if the residue ever shows.
-8. **A vertex on a cube-face edge reads the coarser FIELD, from both faces** (the parents are one
+6. **A vertex on a cube-face edge reads the coarser FIELD, from both faces** (the parents are one
    face's): one target on both sides, at the cost of the field-vs-mesh crease along the twelve
    cube edges, over one row of vertices (`morph_seam` on the stamp counts them). → the exact cure
    reads the neighbouring face's parent mesh (the extractor already maps cross-face sites); a
    picture stand on a cube edge measures it. Step 5 or 6.
-6. **A sealed cave under the surface is never wanted from above, and a cave that opens sideways is
+7. **A sealed cave under the surface is never wanted from above, and a cave that opens sideways is
    drawn only with its own chunk**: the column span (five samples and a bound) is a SURFACE model,
    and the world holds caves (MEASURED: 6 774 vertices in the chunk under a surface chunk, behind
    an all-rock boundary). A finer chunk's cave vertices morph to the parent's surface above them
    when the parent has no cave there (a hit farther than the sink bound takes the field). → the
    block system's own residency (slice 9) owns what is under the surface.
-7. **The reach reads the recipe's whole relief bound (16 km on the home planet)** while the planet's
+8. **The reach reads the recipe's whole relief bound (16 km on the home planet)** while the planet's
    true relief is far smaller: the far rings are culled by the skyline, not by the reach. A
    measured, seed-derived extreme per body would tighten the reach. → with M8-2.
+
+9. **THE THROUGHPUT WALL AT 528 m/s** (MEASURED, M8-1's probe leg, the eighth run of 2026-09-09):
+   at 528 m/s 860–1 700 m over the ground the band is incomplete on every one of 1 276 samples —
+   1 822 urgent chunks at the worst, across rungs 0 to 5, the queue at 2 798 — and the lead is NOT
+   the lever (one buffer, 120 ms, is 63 m: one rung-0 chunk; the ninth run read it at up to 64 m).
+   The probe inherits the 240 m/s leg's queue (1 173 chunks; a coasting hull cannot settle), and
+   the build rate is UNMEASURED as a number (M8-2). The ground stays on screen one to five rungs coarser
+   than the rule for the whole minute: a seam. 240 m/s sits near this machine's edge (the seventh
+   run failed the same leg at a queue of 333, beside a shard of an earlier run's kept fixture). The
+   gate asserts the walk and REPORTS both hull legs on every run: the eleventh run (2026-09-10) went
+   red at 240 m/s in the leg's last two seconds, 7 urgent on 24 frames with the queue at 213, when
+   the eye fell under 990 m over rising ground and rung 0 entered — and the twelfth run went red at 240 m/s
+   again (34 urgent, 59 frames, the queue at 338): 240 m/s at one kilometre up sits ON the wall,
+   three red readings of six, and breaks for certain the moment the finest ring joins. → ruling V15 (2026-09-10): measure the three rates first
+   (DONE, §16.5: the WORKERS bind at 60 ms a chunk because the parent cache misses on a moving eye;
+   warm, a chunk is 5 ms), then one pool with a priority queue ordered by parent, a cache sized to
+   the workers' working set and single-flight parent builds (DONE, §16.6: the request order by
+   class, rung and the parent's Morton code; the cache at workers × 8 × 4 entries hits 76 % and a
+   chunk costs 22 ms at 240 m/s; at ×8 it hits 89 % at 16 ms; over one kilometre the band holds at
+   528 m/s); then the disk cache; then step 5's packing; the rule under a deep queue, if any, is
+   the owner's word (§16.3). WHAT BINDS NOW at the probe's low pass (730–860 m up, the finest ring's
+   territory): THE HARVEST — the engine harvests about 350 chunks a second at 27 frames a second,
+   the cap of 24 a frame full on a quarter to a half of the frames, and the workers outrun it
+   (418 built against 345 harvested at ×8). The lever is the bytes per upload (step 5's packing)
+   and the main thread's cost per upload (MEASURED on run 18); the byte budget for the harvest (V15
+   item 2) lands with the packing, where bytes become the unit.
+10. **THE PARENT MESH'S BYTES** (M8-2a, `ParentMesh::bytes`, `chunk_phases`): about 500 KB each
+   (positions as `f64`, triangles as `u32`, the buckets as a map of vectors), so the shipped cache
+   (workers × 8 × 4 = 448 entries on 14 workers) holds about 225 MB. → step 5 with the packing:
+   positions as `f32` from the parent's origin, `u16` triangle indices (a parent mesh has fewer
+   than 65 536 vertices), the buckets as one flat table — about 190 KB, so the 89 % setting fits
+   the 256 MB budget.
+11. **The lead and the release are one buffer apart, and the lead carries no rotation** (step 4's
+   refutation R4-5, R4-8): the scene overlay keeps the BOOT facing at every cursor, so a turning
+   hull's rotation reaches neither the drawn scene nor the lead (a hull that yaws sees the planet
+   slide, UNMEASURED: no gate turns a hull yet); and the release reads the lead eye's wanted set,
+   so a chunk at its fade-out edge leaves one buffer before the drawn eye would drop it — under one
+   pixel by the tier rule at 528 m/s at rung 0, a third of a cell. → step 6's pop detector flies a
+   turning leg and measures both; the exact forms are the live facing on the overlay and the drawn
+   eye's set for the release.
+
+12. **An eye UNDER the surface has a zero horizon and wants everything within the reach** (MEASURED
+   on M8-1's first run: 1 930 chunks on a walk with the nose 8° down). → a stated floor for the
+   wanted set when the eye is under the lowest ground; step 6, with the pop detector's legs.
+
+13. **STEP 5's SECOND HALF, owed (ruling V16)**: positions at 16 bits over the chunk's box (a
+   millimetre at the finest rung, two metres at the coarsest — a QUANTISATION, since a vertex's
+   metre position comes through the face bend, not an integer) and normals in an octahedral 16+16
+   — each judged by the picture gate's masked compare against its own noise floor, refused if a
+   content pixel changes; the parent mesh's shrink (item 10); the harvest's byte budget (V15
+   item 2), in the one config struct beside the chunk cap. The first half (the morph metre, the radial as
+   four 16-bit quanta on the vertex, the per-rung sink, 16-bit indices) is exact and MEASURED
+   (§17.3): a vertex of 36 bytes against 48, the indices halved, and the frame rate above the
+   unpacked one on a still stand and on a moving eye.
 
 **WHEN.** Slice 8, steps 4–6. The slice is not done until this row is 🟩.
 

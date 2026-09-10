@@ -340,9 +340,25 @@ pub(crate) mod tests {
                 chunk_farthest_m: 401.0,
                 chunks_drawn: 169,
                 chunks_pending: 2,
+                chunks_urgent: 0,
+                chunks_revealed: 0,
+                urgent_per_rung: vec![(1, 2)],
+                urgent_frames: 4,
+                frames: 600,
+                built_chunks: 700,
+                build_nanos: 2_800_000_000,
+                harvested: 690,
+                harvest_full: 12,
+                harvest_nanos: 700_000_000,
+                parent_hits: 5_000,
+                parent_builds: 600,
+                parent_waits: 40,
+                lead_m: 0.0,
                 morph_fallbacks: 3,
                 morph_seam: 0,
                 vertices: 2_000_000,
+                bytes_drawn: 90_000_000,
+                hud_rect_px: [10.0, 10.0, 900.0, 170.0],
                 star: Some(DevStarAngles {
                     elevation_deg: 15.0,
                     off_nose_deg: 120.0,
@@ -403,6 +419,12 @@ pub(crate) mod tests {
         assert!(json.contains("\"off_nose_deg\":120.0"));
         assert!(json.contains("\"radius_m\":0.55"));
         assert!(json.contains("\"chunks_per_rung\":[[0,100],[3,69]]"));
+        assert!(json.contains("\"urgent_per_rung\":[[1,2]]"));
+        assert!(json.contains("\"urgent_frames\":4"));
+        assert!(json.contains("\"harvest_full\":12"));
+        assert!(json.contains("\"bytes_drawn\":90000000"));
+        assert!(json.contains("\"hud_rect_px\":[10.0,10.0,900.0,170.0]"));
+        assert!(json.contains("\"parent_waits\":40"));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
         // The three row-drop honesty counters ride the surface (audit :304 — a wrongly-armed
         // resurrect guard must be VISIBLE to `vdctl state`), each with its distinct sample value.
@@ -450,12 +472,57 @@ pub struct DevTerrainStamp {
     /// Chunks on screen and still building — the same two counts the wait fields read.
     pub chunks_drawn: u64,
     pub chunks_pending: u64,
+    /// THE BAND'S GAP (slice 8 step 4): wanted chunks inside their rung's own territory (nearer
+    /// than its switch distance) that are NOT resident this frame. Zero means the ground the
+    /// picture draws now is complete; M8-1 reads it every frame on a moving eye.
+    pub chunks_urgent: u64,
+    /// THE REVEALS' GAP: wanted chunks of peaks PAST the horizon (the skyline admits them) that
+    /// are not resident — a peak the eye sees before it is built, which no lead predicts; the
+    /// pop detector's, not the band's.
+    pub chunks_revealed: u64,
+    /// THE BAND'S GAP PER RUNG: `chunks_urgent` split by rung (rungs with no gap absent).
+    pub urgent_per_rung: Vec<(u8, u64)>,
+    /// THE FRAMES WITH A GAP since the client started: a gate reads the difference across a leg,
+    /// so no frame escapes a poll (ruling V14 M8-1: never incomplete for one FRAME).
+    pub urgent_frames: u64,
+    /// THE THREE RATES' COUNTERS since the client started (M8-2a, ruling V15): the frames the
+    /// terrain system ran (every frame, ground or none), the jobs the workers ran (with or
+    /// without a geometry) and the wall nanoseconds they spent (a wait on a sibling's parent
+    /// build included), the chunks the engine harvested, and the harvests that filled their
+    /// per-frame cap. A gate reads the differences across a leg.
+    pub frames: u64,
+    pub built_chunks: u64,
+    pub build_nanos: u64,
+    pub harvested: u64,
+    pub harvest_full: u64,
+    /// The main thread's nanoseconds in the harvest loop since the client started (M8-2a): the
+    /// cost of an upload, against the frame.
+    pub harvest_nanos: u64,
+    /// THE PARENT CACHE's counts since the client started (M8-2a): claims served from the cache,
+    /// claims that built a parent, claims that waited on a build in flight.
+    pub parent_hits: u64,
+    pub parent_builds: u64,
+    pub parent_waits: u64,
+    /// THE LEAD the band ran on this frame, in metres: how far the freshest delivered eye stands
+    /// from the drawn eye in the body's frame (one interpolation buffer of the eye's motion
+    /// through the body — a pilot inside a flying hull stands still in the hull and moves through
+    /// the planet). Zero on a still stand.
+    pub lead_m: f64,
     /// The geomorph's counts over the drawn chunks (slice 8 step 3): vertices whose morph
     /// target fell back to the coarser field (no parent triangle on their radial within the
     /// sink bound), vertices on a face seam (the field by rule), and vertices in all.
     pub morph_fallbacks: u64,
     pub morph_seam: u64,
     pub vertices: u64,
+    /// The drawn chunks' mesh bytes as the engine uploads them (M8-2's census) — the built mesh,
+    /// so under the flat-shading switch (vertices duplicated per face) they count the duplicates
+    /// while `vertices` counts the library's.
+    pub bytes_drawn: u64,
+    /// THE OVERLAY'S RECTANGLE in the picture, pixels (left, top, right, bottom): where the HUD
+    /// drew its lines this frame — the one part of a picture that legitimately differs between
+    /// two runs of one code (its tick readout), so a picture compare leaves it out. Zero when no
+    /// HUD drew.
+    pub hud_rect_px: [f32; 4],
     /// The star the ground is lit by, or `None` when a work light stands in (no luminous row).
     pub star: Option<DevStarAngles>,
     /// The biome under the eye, as the recipe names it.

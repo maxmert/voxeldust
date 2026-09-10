@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, unbounded};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
@@ -63,8 +63,9 @@ use super::{GroundMaterial, LadderFade, PROBE_LAYER, ProbeMaterial};
 
 /// Flat shading instead of smooth (a debug switch; both are style, ruling S6-5).
 pub const FLAT_ENV: &str = "VD_TERRAIN_FLAT";
-/// Finished chunks harvested per frame — a bounded harvest, never a stall. A ladder to the horizon
-/// is thousands of chunks (MEASURED: about 4 300 from the ground), so the harvest is wide enough to
+/// THE DEFAULT harvest cap: finished chunks harvested per frame — a bounded harvest, never a stall.
+/// A ladder to the horizon is thousands of chunks (MEASURED: about 4 300 from the ground), so the
+/// harvest is wide enough to
 /// land one in a few seconds and narrow enough to keep a frame.
 const HARVEST_PER_FRAME: usize = 24;
 /// How far the eye moves before the wanted set is recomputed, in metres: a still stand computes it
@@ -102,54 +103,136 @@ fn sun_lux(exposure: &bevy::camera::Exposure) -> f32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerrainConfig {
     pub flat: bool,
+    /// THE PARENT CACHE'S MEMORY BUDGET, in bytes: the cache keeps as many parent meshes as fit
+    /// (`PARENT_MESH_BYTES_ESTIMATE` each), never fewer than one working set of the workers.
+    pub parent_cache_bytes: usize,
+    /// Finished chunks harvested per frame.
+    pub harvest_per_frame: usize,
 }
 
+/// THE DEFAULT memory budget of the parent cache. The working set on a flight is every ring's
+/// LEADING EDGE, not one worker's neighbourhood: the pool builds hundreds of parents a second
+/// (ESTIMATED from the stamp's parent builds: about 600 a second at 224 entries) and the next
+/// column of a ring arrives about half a second later (ESTIMATED from the ring's chunk size over
+/// the speed), so the entries must outlive that. MEASURED on the M8-1 flight at 240 m/s with 14
+/// workers (§16.6): 224 entries hit 53 % at 35 ms a chunk, 448 hit 76 % at 22 ms, 896 hit 89 % at
+/// 16 ms. 256 MB is about 512 entries at today's parent mesh; the shrink to about 190 KB (step 5,
+/// D-TERRAIN-5 item 10) fits the 89 % setting in the same budget.
+pub const PARENT_CACHE_BYTES: usize = 256 << 20;
+/// A parent mesh's bytes, ESTIMATED (`ParentMesh::bytes`, `chunk_phases`: about 500 KB).
+pub const PARENT_MESH_BYTES_ESTIMATE: usize = 512 << 10;
+
 impl TerrainConfig {
-    /// Read the flags from the environment.
+    /// Read the flags from the environment; the budgets are the defaults.
     #[must_use]
     pub fn from_env() -> TerrainConfig {
         let flat = std::env::var(FLAT_ENV).is_ok_and(|v| v == "1");
-        TerrainConfig { flat }
+        TerrainConfig {
+            flat,
+            parent_cache_bytes: PARENT_CACHE_BYTES,
+            harvest_per_frame: HARVEST_PER_FRAME,
+        }
     }
 }
 
-/// THE THREADED WORKERS: a job channel fanned to `threads` threads, a done channel back. The
+/// THE THREADED WORKERS: a PRIORITY QUEUE served by `threads` threads, a done channel back. The
 /// library's seam, filled in by the binary (HR5: the library's own tests use the inline workers).
+/// The queue orders by the job's priority (the wanted set's own order, ruling V15), then by
+/// arrival; a worker takes the first. A cancel REMOVES the job from the queue (refutation T-3:
+/// a marker left a job with a poor priority in the map for ever); a job already taken runs, and
+/// the lane's poll drops what it no longer wants. A re-request moves a waiting job to its new
+/// priority (refutation T-1).
 pub struct ThreadedWorkers {
-    jobs: Sender<ChunkJob>,
+    queue: Arc<(Mutex<JobQueue>, std::sync::Condvar)>,
     done: Receiver<ChunkReady>,
-    /// Jobs withdrawn before a worker took them: a worker checks before it starts, so a released
-    /// chunk is never built (4 ms and 400 KB each, MEASURED at M7-2/M7-3).
-    cancelled: Arc<Mutex<BTreeSet<(RealmId, ChunkKey)>>>,
+    /// The jobs the workers ran (with or without a geometry), and the wall nanoseconds they spent
+    /// on them, a wait on a sibling's parent build included (M8-2a).
+    built: Arc<std::sync::atomic::AtomicU64>,
+    build_nanos: Arc<std::sync::atomic::AtomicU64>,
 }
+
+/// The queue: jobs by (priority, arrival), an index from the chunk to its place, and the close
+/// flag the workers leave on.
+#[derive(Default)]
+struct JobQueue {
+    jobs: BTreeMap<(u32, u64), ChunkJob>,
+    index: BTreeMap<(RealmId, ChunkKey), (u32, u64)>,
+    seq: u64,
+    closed: bool,
+}
+
+impl JobQueue {
+    /// Put a job at `priority`: a job already waiting for the same chunk is moved.
+    fn place(&mut self, job: ChunkJob) {
+        let at = (job.realm, job.key);
+        if let Some(old) = self.index.remove(&at) {
+            self.jobs.remove(&old);
+        }
+        self.seq += 1;
+        let slot = (job.priority, self.seq);
+        self.index.insert(at, slot);
+        self.jobs.insert(slot, job);
+    }
+
+    /// Take a waiting job out.
+    fn withdraw(&mut self, realm: RealmId, key: ChunkKey) -> Option<ChunkJob> {
+        let slot = self.index.remove(&(realm, key))?;
+        self.jobs.remove(&slot)
+    }
+}
+
+/// The parents one chunk reads at most (`vd_client::chunks::parent_keys`): its own and the
+/// lateral neighbours' on every side. One working set of the workers is `threads` times this.
+const PARENTS_PER_CHUNK: usize = 8;
 
 impl ThreadedWorkers {
     /// Start `threads` workers.
     #[must_use]
     pub fn start(threads: usize) -> ThreadedWorkers {
-        let (jobs, job_rx) = unbounded::<ChunkJob>();
+        let queue: Arc<(Mutex<JobQueue>, std::sync::Condvar)> =
+            Arc::new((Mutex::new(JobQueue::default()), std::sync::Condvar::new()));
         let (done_tx, done) = unbounded::<ChunkReady>();
-        let cancelled: Arc<Mutex<BTreeSet<(RealmId, ChunkKey)>>> =
-            Arc::new(Mutex::new(BTreeSet::new()));
+        let built = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let build_nanos = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut n = 0;
         while n < threads.max(1) {
-            let rx = job_rx.clone();
+            let queue = Arc::clone(&queue);
             let tx = done_tx.clone();
-            let withdrawn = Arc::clone(&cancelled);
+            let built_by_me = Arc::clone(&built);
+            let nanos_by_me = Arc::clone(&build_nanos);
             std::thread::Builder::new()
                 .name(format!("terrain-worker-{n}"))
                 .spawn(move || {
-                    while let Ok(job) = rx.recv() {
-                        let skip = withdrawn
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .remove(&(job.realm, job.key));
-                        if skip {
-                            continue;
-                        }
-                        if let Some(geometry) =
-                            geometry_with(&job.body, job.realm, job.key, &job.parents)
-                        {
+                    loop {
+                        // Take the first job by priority; wait while the queue is empty; leave
+                        // as soon as it is closed (refutation T-29: a close builds nothing more).
+                        let job = {
+                            let (lock, cvar) = &*queue;
+                            let mut q = lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            loop {
+                                if q.closed {
+                                    return;
+                                }
+                                if let Some((slot, job)) = q.jobs.pop_first() {
+                                    q.index.remove(&(job.realm, job.key));
+                                    let _ = slot;
+                                    break job;
+                                }
+                                q = cvar
+                                    .wait(q)
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            }
+                        };
+                        let started = std::time::Instant::now();
+                        let geometry = geometry_with(&job.body, job.realm, job.key, &job.parents);
+                        nanos_by_me.fetch_add(
+                            started.elapsed().as_nanos() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        built_by_me.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(geometry) = geometry {
                             let _ = tx.send(ChunkReady {
                                 realm: job.realm,
                                 geometry,
@@ -161,29 +244,72 @@ impl ThreadedWorkers {
             n += 1;
         }
         ThreadedWorkers {
-            jobs,
+            queue,
             done,
-            cancelled,
+            built,
+            build_nanos,
         }
+    }
+
+    /// How many jobs wait in the queue.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        let (lock, _) = &*self.queue;
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .jobs
+            .len()
+    }
+}
+
+impl Drop for ThreadedWorkers {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.queue;
+        {
+            let mut q = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            q.closed = true;
+            q.jobs.clear();
+            q.index.clear();
+        }
+        cvar.notify_all();
     }
 }
 
 impl ChunkWorkers for ThreadedWorkers {
+    fn built(&self) -> vd_client::chunks::BuildCount {
+        vd_client::chunks::BuildCount {
+            chunks: self.built.load(std::sync::atomic::Ordering::Relaxed),
+            nanos: self.build_nanos.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
     fn submit(&mut self, job: ChunkJob) {
-        // A re-request clears a cancel the workers never consumed (the job had already been taken
-        // when it was withdrawn); without this the stale entry would skip the new job for good.
-        self.cancelled
-            .lock()
+        let (lock, cvar) = &*self.queue;
+        lock.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(job.realm, job.key));
-        let _ = self.jobs.send(job);
+            .place(job);
+        cvar.notify_one();
+    }
+
+    fn reprioritise(&mut self, realm: RealmId, key: ChunkKey, priority: u32) {
+        let (lock, _) = &*self.queue;
+        let mut q = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(mut job) = q.withdraw(realm, key) {
+            job.priority = priority;
+            q.place(job);
+        }
     }
 
     fn cancel(&mut self, realm: RealmId, key: ChunkKey) {
-        self.cancelled
+        let (lock, _) = &*self.queue;
+        let _ = lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert((realm, key));
+            .withdraw(realm, key);
     }
 
     fn drain(&mut self, out: &mut Vec<ChunkReady>, max: usize) {
@@ -255,28 +381,26 @@ struct Drawn {
     entity: Entity,
     twin: Option<Entity>,
     counts: [u64; 3],
+    /// The mesh's bytes as the engine uploads them (M8-2): the vertex buffer and the indices.
+    bytes: u64,
+}
+
+/// The bytes a mesh costs the engine: its vertex stride times its vertices, and its indices.
+fn mesh_bytes(mesh: &Mesh) -> u64 {
+    let indices = match mesh.indices() {
+        Some(bevy::mesh::Indices::U16(v)) => v.len() * 2,
+        Some(bevy::mesh::Indices::U32(v)) => v.len() * 4,
+        None => 0,
+    };
+    mesh.get_vertex_size() * mesh.count_vertices() as u64 + indices as u64
 }
 
 /// The box the engine culls a chunk by, grown to wherever the vertex stage can put a vertex: its
-/// own position, its morph target, and its position less its whole sink.
+/// own position, its morph target, and its position less its whole sink (the library's own
+/// bounds, step 5).
 fn moved_bounds(geometry: &vd_client::chunks::ChunkGeometry) -> bevy::camera::primitives::Aabb {
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    let mut take = |p: Vec3| {
-        min = min.min(p);
-        max = max.max(p);
-    };
-    for ((v, m), s) in geometry
-        .vertices
-        .iter()
-        .zip(&geometry.morph)
-        .zip(&geometry.sink)
-    {
-        take(Vec3::from_array(*v));
-        take(Vec3::from_array(*m));
-        take(Vec3::from_array(*v) - Vec3::from_array(*s));
-    }
-    bevy::camera::primitives::Aabb::from_min_max(min.min(max), max.max(min))
+    let (lo, hi) = geometry.bounds;
+    bevy::camera::primitives::Aabb::from_min_max(Vec3::from_array(lo), Vec3::from_array(hi))
 }
 
 /// The terrain's state on the engine side.
@@ -297,6 +421,16 @@ pub struct Terrain {
     probe_materials: BTreeMap<(RealmId, u8, u8), Handle<ProbeMaterial>>,
     /// The drawn chunks' morph counts, summed: fallbacks to the field, seam vertices, vertices.
     morph_totals: [u64; 3],
+    /// The drawn chunks' mesh bytes, summed (M8-2's census).
+    bytes_drawn: u64,
+    /// THE FRAMES WITH A GAP: how many frames, since the start, drew with an urgent chunk
+    /// missing. A gate reads the difference across a leg and misses no frame, where a poll at 20
+    /// Hz sees one frame in three (refutation R4-6).
+    urgent_frames: u64,
+    /// The frames this system ran (M8-2a): the frame rate, against the build and harvest rates.
+    frames: u64,
+    /// The main thread's nanoseconds in the harvest loop since the start (M8-2a).
+    harvest_nanos: u64,
     sun: Option<Entity>,
     /// The ruler on screen, its shared assets, and its cached placement.
     ruler: Option<RulerEntities>,
@@ -313,15 +447,26 @@ impl Terrain {
     pub fn new(config: TerrainConfig, declared: u64) -> Terrain {
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
         let workers: Box<dyn ChunkWorkers> = Box::new(ThreadedWorkers::start(threads));
+        let lane = ChunkLane::new(workers, declared);
+        // The parent cache holds what the memory budget allows, never less than one working set
+        // of the workers (ruling V15; refutation T-8: a size that followed the cores alone had no
+        // ceiling).
+        let entries = (config.parent_cache_bytes / PARENT_MESH_BYTES_ESTIMATE)
+            .max(threads * PARENTS_PER_CHUNK);
+        lane.parents().set_capacity(entries);
         Terrain {
             config,
-            lane: ChunkLane::new(workers, declared),
+            lane,
             declared,
             entities: BTreeMap::new(),
             ladders: BTreeMap::new(),
             materials: BTreeMap::new(),
             probe_materials: BTreeMap::new(),
             morph_totals: [0; 3],
+            bytes_drawn: 0,
+            urgent_frames: 0,
+            frames: 0,
+            harvest_nanos: 0,
             sun: None,
             ruler: None,
             ruler_assets: None,
@@ -344,12 +489,16 @@ impl Terrain {
             .entry((realm, kind, rung))
             .or_insert_with(|| {
                 let rungs = body.ladder().rungs;
-                let (bands, sink_end) = if kind == PROBE_KIND_TERRAIN {
-                    (fade_bands(rung, rungs), sink_end_m(body, rung, rungs))
+                let (bands, sink_end, sink) = if kind == PROBE_KIND_TERRAIN {
+                    (
+                        fade_bands(rung, rungs),
+                        sink_end_m(body, rung, rungs),
+                        vd_client::chunks::sink_m(body, rung),
+                    )
                 } else {
-                    ((FADE_ALWAYS_IN, FADE_ALWAYS_OUT), FADE_ALWAYS_IN[1])
+                    ((FADE_ALWAYS_IN, FADE_ALWAYS_OUT), FADE_ALWAYS_IN[1], 0.0)
                 };
-                assets.add(ProbeMaterial::new(kind, rung, bands, sink_end))
+                assets.add(ProbeMaterial::new(kind, rung, bands, sink_end, sink))
             })
             .clone()
     }
@@ -381,6 +530,7 @@ impl Terrain {
                     extension: LadderFade::new(
                         fade_bands(rung, rungs),
                         sink_end_m(body, rung, rungs),
+                        vd_client::chunks::sink_m(body, rung),
                     ),
                 })
             })
@@ -416,8 +566,20 @@ fn facing_of(rbox: &RealmBox) -> DQuat {
     .normalize()
 }
 
+/// The triangles' indices at 16 bits where the vertices fit (step 5: exact, half the bytes), else
+/// at 32.
+fn packed_indices(geometry: &vd_client::chunks::ChunkGeometry) -> bevy::mesh::Indices {
+    let flat = geometry.triangles.iter().flatten().copied();
+    if geometry.vertices.len() <= usize::from(u16::MAX) {
+        bevy::mesh::Indices::U16(flat.map(|i| i as u16).collect())
+    } else {
+        bevy::mesh::Indices::U32(flat.collect())
+    }
+}
+
 /// A Bevy mesh from a chunk's geometry: positions and normals relative to the chunk's origin, the
-/// extractor's triangles as indices. `flat` duplicates the vertices and takes one normal per face.
+/// morph metre per vertex, the extractor's triangles as indices. `flat` duplicates the vertices
+/// and takes one normal per face.
 fn mesh_of(geometry: &vd_client::chunks::ChunkGeometry, flat: bool) -> Mesh {
     let mut mesh = Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
@@ -425,11 +587,9 @@ fn mesh_of(geometry: &vd_client::chunks::ChunkGeometry, flat: bool) -> Mesh {
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, geometry.vertices.clone())
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.normals.clone())
-    .with_inserted_attribute(super::ATTRIBUTE_MORPH, geometry.morph.clone())
-    .with_inserted_attribute(super::ATTRIBUTE_SINK, geometry.sink.clone())
-    .with_inserted_indices(bevy::mesh::Indices::U32(
-        geometry.triangles.iter().flatten().copied().collect(),
-    ));
+    .with_inserted_attribute(super::ATTRIBUTE_MORPH, geometry.morph_m.clone())
+    .with_inserted_attribute(super::ATTRIBUTE_RADIAL, geometry.radials.clone())
+    .with_inserted_indices(packed_indices(geometry));
     if flat {
         mesh.duplicate_vertices();
         mesh.compute_flat_normals();
@@ -482,6 +642,27 @@ fn placed(p: DVec3, scale: f64) -> Transform {
         .with_scale(Vec3::splat(scale as f32))
 }
 
+/// The own entity's drawn point among composited poses (at any cursor), if it is among them.
+fn own_world<S>(
+    snap: &vd_client::render_snapshot::RenderSnapshot,
+    own: Option<vd_core::EntityId>,
+    poses: &[(vd_core::EntityId, S, vd_client::interp::RenderPose)],
+) -> Option<DVec3> {
+    poses
+        .iter()
+        .find(|(id, _, _)| Some(*id) == own)
+        .map(|(_, _, p)| snap.world_pos(p))
+}
+
+/// A body in the window with the two eyes in its frame: the DRAWN eye (the stamp's, the ruler's)
+/// and the LEAD eye (the wanted set's), both in metres from the body's centre.
+struct EyeBody {
+    realm: RealmId,
+    body: Arc<vd_terrain::BodyDefinition>,
+    eye: [f64; 3],
+    lead: [f64; 3],
+}
+
 /// Whether the eye has moved more than [`EYE_STEP_M`] from the last one.
 fn moved(last: Option<[f64; 3]>, eye: [f64; 3]) -> bool {
     last.is_none_or(|l| (DVec3::from_array(l) - DVec3::from_array(eye)).length() > EYE_STEP_M)
@@ -509,12 +690,35 @@ pub(crate) fn sync_terrain(
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
     let scene = snap.scene_now(now_s);
-    // 1. Every stated surface becomes a body (once); the eye-relative centre of every row.
+    // Every frame this system runs (M8-2a; refutation T-15: counted only under a body before).
+    terrain.frames += 1;
+    // THE LEAD (slice 8 step 4, the residency band): the scene and the own eye at the LEAD
+    // cursor — the freshest delivered moment, one interpolation buffer ahead of what the picture
+    // draws. The wanted set is computed for the eye THERE, so every chunk is asked for one
+    // buffer before the picture needs it, from delivered data alone (never a speed the client
+    // derived, SL10 clause 7). The offset from the drawn eye to the lead eye is a difference of
+    // two delivered poses at two cursors; the row's centre at the lead cursor is the lead scene's.
+    let lead_cursor = snap.lead_cursor(now_s);
+    let scene_lead = lead_cursor.map(|c| snap.scene_at(c));
+    let own = snap.own_entity();
+    let own_now = own_world(&snap, own, &snap.rendered(now_s));
+    let own_lead = lead_cursor.and_then(|c| own_world(&snap, own, &snap.rendered_at(c)));
+    let lead_offset = match (own_now, own_lead) {
+        (Some(a), Some(b)) => b - a,
+        _ => DVec3::ZERO,
+    };
+    // 1. Every stated surface becomes a body (once); the eye-relative centre of every row, drawn
+    //    and at the lead.
     let mut centres: BTreeMap<RealmId, (DVec3, DQuat)> = BTreeMap::new();
+    let mut lead_centres: BTreeMap<RealmId, (DVec3, DQuat)> = BTreeMap::new();
     let mut brightest: Option<(f64, DVec3)> = None;
     for (realm, rbox) in scene.iter() {
         let draw_center = super::draw_center_of(rbox, &render_eye, &snap, now_s);
         centres.insert(realm, (draw_center, facing_of(rbox)));
+        if let Some(lead_box) = scene_lead.as_ref().and_then(|s| s.get(realm)) {
+            let lead_center = super::draw_center_of(lead_box, &render_eye, &snap, now_s);
+            lead_centres.insert(realm, (lead_center, facing_of(lead_box)));
+        }
         if let Some(surface) = rbox.surface {
             terrain.lane.state_surface(realm, &surface, &look_of(rbox));
         }
@@ -524,9 +728,10 @@ pub(crate) fn sync_terrain(
             brightest = Some((lux, draw_center));
         }
     }
-    // 2. THE WANTED SET per realm with a body: the ladder from the eye to the horizon, coarsest
-    //    first, recomputed when the eye has moved.
-    let with_bodies: Vec<(RealmId, Arc<vd_terrain::BodyDefinition>, [f64; 3])> = centres
+    // 2. THE WANTED SET per realm with a body: the ladder from the LEAD eye to the horizon,
+    //    coarsest first, recomputed when that eye has moved. The drawn eye (the stamp's, the
+    //    ruler's) is the second point of the pair.
+    let with_bodies: Vec<EyeBody> = centres
         .iter()
         .filter_map(|(realm, (centre, facing))| {
             terrain.lane.body(*realm).map(|b| {
@@ -535,15 +740,29 @@ pub(crate) fn sync_terrain(
                     [centre.x, centre.y, centre.z],
                     [facing.x, facing.y, facing.z, facing.w],
                 );
-                (*realm, Arc::clone(b), eye_body)
+                let (lead_centre, lead_facing) = lead_centres
+                    .get(realm)
+                    .copied()
+                    .unwrap_or((*centre, *facing));
+                let eye_lead = body_frame_point(
+                    [lead_offset.x, lead_offset.y, lead_offset.z],
+                    [lead_centre.x, lead_centre.y, lead_centre.z],
+                    [lead_facing.x, lead_facing.y, lead_facing.z, lead_facing.w],
+                );
+                EyeBody {
+                    realm: *realm,
+                    body: Arc::clone(b),
+                    eye: eye_body,
+                    lead: eye_lead,
+                }
             })
         })
         .collect();
-    for (realm, body, eye_body) in &with_bodies {
-        let ladder = terrain.ladders.entry(*realm).or_default();
-        if moved(ladder.eye, *eye_body) {
-            ladder.wanted = ladder.view.wanted(body, *eye_body);
-            ladder.eye = Some(*eye_body);
+    for eb in &with_bodies {
+        let ladder = terrain.ladders.entry(eb.realm).or_default();
+        if moved(ladder.eye, eb.lead) {
+            ladder.wanted = ladder.view.wanted(&eb.body, eb.lead);
+            ladder.eye = Some(eb.lead);
         }
     }
     // The realms whose row left the window: forget their ladder (their chunks go below).
@@ -566,6 +785,7 @@ pub(crate) fn sync_terrain(
             ladders,
             entities,
             morph_totals,
+            bytes_drawn,
             ..
         } = &mut *terrain;
         for (realm, key) in held {
@@ -586,6 +806,7 @@ pub(crate) fn sync_terrain(
                         morph_totals[i] -= drawn.counts[i];
                         i += 1;
                     }
+                    *bytes_drawn -= drawn.bytes;
                 }
             }
         }
@@ -597,10 +818,12 @@ pub(crate) fn sync_terrain(
                 lane.release(realm, key);
             }
         }
+        // Every wanted chunk not yet resident is asked for at its priority — a job already
+        // waiting moves to this frame's priority (the eye moved; its class may have changed).
         for (realm, ladder) in ladders.iter() {
-            for key in &ladder.wanted.keys {
-                if !lane.holds(*realm, *key) {
-                    lane.request(*realm, *key);
+            for (index, key) in ladder.wanted.keys.iter().enumerate() {
+                if !lane.is_resident(*realm, *key) {
+                    lane.request(*realm, *key, ladder.wanted.priority_of(index, *key));
                 }
             }
         }
@@ -608,7 +831,11 @@ pub(crate) fn sync_terrain(
     // 3. Harvest finished chunks — each with its rung's crossfade material — and their probe twins
     //    where a probe exists (Capture mode).
     let flat = terrain.config.flat;
-    for ready in terrain.lane.poll(HARVEST_PER_FRAME) {
+    let harvest_cap = terrain.config.harvest_per_frame;
+    // THE UPLOAD's cost on the main thread (M8-2a): the mesh conversion, the asset, the entity —
+    // per harvested chunk, so the harvest's own wall is named in milliseconds.
+    let harvest_started = std::time::Instant::now();
+    for ready in terrain.lane.poll(harvest_cap) {
         let realm = ready.realm;
         let key = ready.geometry.key;
         let wanted = terrain
@@ -624,7 +851,9 @@ pub(crate) fn sync_terrain(
             continue;
         };
         let material = terrain.ground_material(&mut ground_materials, realm, key.rung, &body);
-        let mesh = meshes.add(mesh_of(&ready.geometry, flat));
+        let built = mesh_of(&ready.geometry, flat);
+        let bytes = mesh_bytes(&built);
+        let mesh = meshes.add(built);
         // THE BOUNDS the engine culls by, grown to where the vertex stage can move a vertex: its
         // morph target and its whole sink (the engine reads the box from the positions alone).
         let bounds = moved_bounds(&ready.geometry);
@@ -670,15 +899,18 @@ pub(crate) fn sync_terrain(
             terrain.morph_totals[i] += counts[i];
             i += 1;
         }
+        terrain.bytes_drawn += bytes;
         terrain.entities.insert(
             (realm, key),
             Drawn {
                 entity,
                 twin,
                 counts,
+                bytes,
             },
         );
     }
+    terrain.harvest_nanos += harvest_started.elapsed().as_nanos() as u64;
     // 4. Every chunk rides its row: transform = draw_center + facing · origin, in f64, narrowed once
     //    (`place_chunks`, below, which runs after the spawn commands apply). The count on screen goes
     //    to the diagnosis surface.
@@ -720,12 +952,28 @@ pub(crate) fn sync_terrain(
     // 29 416 km over it. The instrument found the fault the work light had carried silently.
     let under_eye: Option<(RealmId, Arc<vd_terrain::BodyDefinition>, [f64; 3])> = with_bodies
         .iter()
-        .map(|(realm, body, eye_body)| {
-            let over = DVec3::from_array(*eye_body).length() - body.ladder().radius_m();
-            (over, *realm, Arc::clone(body), *eye_body)
+        .map(|eb| {
+            let over = DVec3::from_array(eb.eye).length() - eb.body.ladder().radius_m();
+            (over, eb)
         })
         .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, realm, body, eye_body)| (realm, body, eye_body));
+        .map(|(_, eb)| (eb.realm, Arc::clone(&eb.body), eb.eye));
+    // THE LEAD, MEASURED where the band runs: the distance from the drawn eye to the lead eye in
+    // the frame of the body UNDER THE EYE. Two earlier readings of this stamp, before this form,
+    // chose it: the own pose's offset alone read "lead 0.0 m" at 240 m/s (a pilot stands still
+    // inside a flying hull while the hull moves the eye through the planet), and the widest lead
+    // over every body read "lead 4 310 m" on a walk (a moon's: in the spinning planet's frame a
+    // moon moves kilometres per buffer — that moon's band, not this ground's). The shipped form
+    // reads 14–30 m at 240 m/s (M8-1, the ninth run).
+    let lead_m = under_eye
+        .as_ref()
+        .and_then(|(realm, _, eye_body)| {
+            with_bodies
+                .iter()
+                .find(|eb| eb.realm == *realm)
+                .map(|eb| (DVec3::from_array(*eye_body) - DVec3::from_array(eb.lead)).length())
+        })
+        .unwrap_or(0.0);
     let overhead = under_eye.as_ref().map(|(realm, _, _)| {
         let (centre, _) = centres[realm];
         -centre.normalize_or_zero()
@@ -856,6 +1104,29 @@ pub(crate) fn sync_terrain(
                     ));
                 }
             }
+            // THE BAND'S GAP, once per frame: the urgent chunks not yet harvested, by rung and in
+            // all (a chunk harvested this frame is spawned at the schedule's end and draws next
+            // frame: the gap reads one frame early, never late).
+            let (gap_per_rung, gap_revealed) = {
+                let Terrain { lane, ladders, .. } = &*terrain;
+                let mut counts: BTreeMap<u8, u64> = BTreeMap::new();
+                let mut revealed = 0;
+                for (r, l) in ladders {
+                    for (rung, n) in l
+                        .wanted
+                        .urgent_missing_per_rung(&|k| lane.is_resident(*r, k))
+                    {
+                        *counts.entry(rung).or_insert(0) += n;
+                    }
+                    revealed += l.wanted.revealed_missing(&|k| lane.is_resident(*r, k)) as u64;
+                }
+                (counts.into_iter().collect::<Vec<(u8, u64)>>(), revealed)
+            };
+            let gap: u64 = gap_per_rung.iter().map(|(_, n)| *n).sum();
+            terrain.urgent_frames += u64::from(gap > 0);
+            let built = terrain.lane.built();
+            let counters = terrain.lane.counters();
+            let parents = terrain.lane.parent_stats();
             terrain.stamp = Some(DevTerrainStamp {
                 realm: format!("{realm:?}"),
                 rung_min,
@@ -870,9 +1141,25 @@ pub(crate) fn sync_terrain(
                 chunk_farthest_m: 0.0,
                 chunks_drawn: terrain.entities.len() as u64,
                 chunks_pending: terrain.lane.pending_count() as u64,
+                chunks_urgent: gap,
+                chunks_revealed: gap_revealed,
+                urgent_per_rung: gap_per_rung,
+                urgent_frames: terrain.urgent_frames,
+                frames: terrain.frames,
+                built_chunks: built.chunks,
+                build_nanos: built.nanos,
+                harvested: counters.harvested,
+                harvest_full: counters.harvest_full,
+                harvest_nanos: terrain.harvest_nanos,
+                parent_hits: parents.hits,
+                parent_builds: parents.builds,
+                parent_waits: parents.waits,
+                lead_m,
                 morph_fallbacks: terrain.morph_totals[0],
                 morph_seam: terrain.morph_totals[1],
                 vertices: terrain.morph_totals[2],
+                bytes_drawn: terrain.bytes_drawn,
+                hud_rect_px: [0.0; 4],
                 star,
                 biome: format!("{:?}", ground.biome),
                 world: format!("{:#x}", terrain.declared),
@@ -908,17 +1195,13 @@ pub(crate) fn sync_terrain(
             let (mesh, paint) = match &terrain.ruler_assets {
                 Some(a) => a.clone(),
                 None => {
-                    // The ball's mesh carries the morph and sink attributes too (its own
-                    // positions and no drop: a ball never morphs nor sinks), because the probe's
-                    // material asks every mesh for them.
+                    // The ball's mesh carries the morph and radial attributes too (a zero
+                    // metre and an upward radial: a ball never morphs, and its material's
+                    // sink is zero), because the probe's material asks every mesh for them.
                     let mut ball = Mesh::from(Sphere::new(1.0));
-                    let positions: Vec<[f32; 3]> = ball
-                        .attribute(Mesh::ATTRIBUTE_POSITION)
-                        .and_then(|a| a.as_float3())
-                        .map_or_else(Vec::new, <[[f32; 3]]>::to_vec);
-                    let still = vec![[0.0f32; 3]; positions.len()];
-                    ball.insert_attribute(super::ATTRIBUTE_MORPH, positions);
-                    ball.insert_attribute(super::ATTRIBUTE_SINK, still);
+                    let count = ball.count_vertices();
+                    ball.insert_attribute(super::ATTRIBUTE_MORPH, vec![0.0f32; count]);
+                    ball.insert_attribute(super::ATTRIBUTE_RADIAL, vec![[0.0f32, 1.0, 0.0]; count]);
                     let a = (
                         meshes.add(ball),
                         materials.add(StandardMaterial {
@@ -1072,3 +1355,70 @@ pub(crate) fn place_chunks(
 /// drawn centre and facing, the chunks' nearest and farthest distance, the eye and its unit — the
 /// lines that found the 230 km column, kept for the next such hunt).
 pub(crate) const DIAG_EVERY: u32 = 60;
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+    use vd_client::chunks::ParentCache;
+    use vd_seed::bend::Face;
+
+    fn job(body: &Arc<vd_terrain::BodyDefinition>, x: i32, priority: u32) -> ChunkJob {
+        ChunkJob {
+            realm: RealmId::Planet(body.seed()),
+            body: Arc::clone(body),
+            key: ChunkKey {
+                face: Face::PosX,
+                rung: 3,
+                x,
+                y: 5,
+                z: vd_terrain::digest::surface_chunk_z(body, Face::PosX, 3, x, 5),
+            },
+            parents: Arc::new(ParentCache::default()),
+            priority,
+        }
+    }
+
+    fn drain_all(workers: &mut ThreadedWorkers, want: usize) -> Vec<i32> {
+        let mut out = Vec::new();
+        let started = std::time::Instant::now();
+        while out.len() < want && started.elapsed() < std::time::Duration::from_secs(60) {
+            workers.drain(&mut out, 8);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        out.iter().map(|r| r.geometry.key.x).collect()
+    }
+
+    /// THE ORDER (ruling V15): with one worker busy on a first job, three jobs submitted out of
+    /// order come back by priority; a re-request moves a waiting job; a cancel removes it; a drop
+    /// closes the queue and builds nothing more.
+    #[test]
+    fn the_pool_serves_by_priority_moves_and_withdraws_waiting_jobs_and_closes() {
+        let body = Arc::new(vd_terrain::home::home_planet());
+        let mut workers = ThreadedWorkers::start(1);
+        // A blocker the one worker takes at once, so the next three wait in the queue.
+        workers.submit(job(&body, 1, 0));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        workers.submit(job(&body, 5, 5));
+        workers.submit(job(&body, 2, 9));
+        workers.submit(job(&body, 3, 3));
+        // The chunk at x = 2 waits at 9: moved to 1, it goes first; x = 5 is withdrawn.
+        workers.reprioritise(RealmId::Planet(body.seed()), job(&body, 2, 0).key, 1);
+        workers.cancel(RealmId::Planet(body.seed()), job(&body, 5, 0).key);
+        assert!(workers.waiting() <= 2);
+        let order = drain_all(&mut workers, 3);
+        assert_eq!(order, vec![1, 2, 3]);
+        let count = workers.built();
+        assert_eq!(count.chunks, 3);
+        assert!(count.nanos > 0);
+        // A re-request of a chunk not waiting changes nothing; a cancel of one not waiting too.
+        workers.reprioritise(RealmId::Planet(body.seed()), job(&body, 7, 0).key, 1);
+        workers.cancel(RealmId::Planet(body.seed()), job(&body, 7, 0).key);
+        assert_eq!(workers.waiting(), 0);
+        // A job submitted twice sits once, at its last priority.
+        workers.submit(job(&body, 8, 4));
+        workers.submit(job(&body, 8, 2));
+        assert!(workers.waiting() <= 1);
+        // The drop closes the queue with jobs waiting: no hang.
+        drop(workers);
+    }
+}

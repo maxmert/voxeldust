@@ -148,7 +148,8 @@ From slice 8b it is the macro artifact, and this distance becomes its transfer d
 that distance today (`06` U-L4); after this slice the band does.
 
 **Example.** A hull approaches the home planet at 528 m/s. The planet's reach is its look radius; the
-interpolation buffer is 150 ms; at 528 m/s that is 79 m of lead, which is one chunk. If M8-1 shows the
+interpolation buffer is 120 ms (`INTERP_BUFFER_MS`; this text first said 150 ms); at 528 m/s that is
+63 m of lead, which is one rung-0 chunk. If M8-1 shows the
 band goes incomplete at that speed, the realm must state a lead, and the ask is made.
 
 ## 7. What the client holds, and the bytes
@@ -172,7 +173,8 @@ The packing is a client-side choice; the extractor's vertices are `i16` already.
 | # | What | How | Gate | State |
 |---|---|---|---|---|
 | **M8-0** | The rung disagreement in pixels at the switch distance | `cargo run --release -p vd-bins --example rung_disagreement` | p99 ≤ 1 px, max ≤ 2 px | **MEASURED: max 0.37 px, p99 0.24 px** |
-| M8-1 | The chunk arrival rate during a scripted descent at 1.4, 240 and 528 m/s, against the thread budget | a hull leg through the harness, the lane's pending count as the instrument | the band is never incomplete for one frame; the deepest queue reported | owed |
+| M8-1 | The chunk arrival rate during a scripted descent at 1.4, 240 and 528 m/s, against the thread budget | a hull leg through the harness, the lane's pending count as the instrument | the band is never incomplete for one frame; the deepest queue reported | **MEASURED (§16.2):** the walk holds; 240 m/s at 1 km up is ON the wall (three red of six); 528 m/s breaks on every frame |
+| **M8-2a** | THE THREE RATES on the M8-1 flight (ruling V15): what the workers build, what the engine harvests, the frames — and the phases of one build (`chunk_phases`) | the stamp's counters read across each leg; `cargo run --release -p vd-bins --example chunk_phases` | which rate binds, named | **MEASURED (§16.5):** the WORKERS bind — 60–64 ms a chunk on the flight against 5 ms with the parent meshes warm; the harvest never fills its cap at 240 m/s |
 | M8-2 | The vista census: chunks, vertices, bytes, fill time at a 50 km stand, rock only | the capture client's counters | under a stated ceiling (§9 D8-4); the fill under 2 s at the client's thread count | owed |
 | M8-3 | The pop detector on three hull legs | frame-to-frame difference on rung boundaries | no pixel changes by more than the dither's own noise | owed |
 | M8-4 | The stamp's own truth | the stamp's altitude and horizon against the state file and the ruler's pixels against its prediction | equal within one pixel | owed |
@@ -434,7 +436,7 @@ five dark pixels on the orbit picture are the ruler ball's own shadow at that sc
   (step 6) measures the edges on a moving eye; splitting the straddling triangles is the exact cure.
 - A vertex on a cube-face edge reads the coarser field from both faces (one target, one row of
   field-vs-mesh crease along the twelve cube edges); the neighbouring face's parent mesh is the
-  exact cure (D-TERRAIN-5 item 8).
+  exact cure (D-TERRAIN-5 item 6).
 - Every measurement is a STILL stand (D-TERRAIN-5 item 4): the morph on a moving eye, the arrival
   of a finer rung over a sunk coarser one, and the skyline's recompute per half metre are owed to
   M8-1 and step 6.
@@ -444,3 +446,396 @@ five dark pixels on the orbit picture are the ruler ball's own shadow at that sc
 - A sealed cave under the surface is never wanted from above, and a cave that opens sideways is
   drawn only with its own chunk: the column span is a surface model. The block system's own
   residency (slice 9) owns caves; registered in `DEFERRED`.
+
+## 16. Step 4 — the residency band, BUILT and MEASURED (2026-09-09)
+
+D8-3 (A) stands on the walk and at 240 m/s, MEASURED: the reach plus the interpolation buffer, no
+new data, and the band is complete on every sample. At 528 m/s the band fails on every sample —
+and the failure is a THROUGHPUT wall, not a lead shortfall. The ask that goes to the owner is
+therefore NOT R-18 (a stated lead): a lead of one chunk cannot bridge a gap of 1 800 chunks. §16.3
+names the levers.
+
+### 16.1 What was built
+
+| Piece | Where | What it is |
+|---|---|---|
+| THE LEAD | `RenderSnapshot::lead_cursor`, `rendered_at`; `client-render::terrain::sync_terrain` | the wanted set is computed for the eye at the LEAD cursor: the render cursor plus the buffer's ticks — at or past the freshest tick the shards have delivered, one interpolation buffer ahead of the picture; the sampler FREEZES at the newest pose and never coasts, so the lead eye steps forward as rows arrive (the stamp's lead is a sawtooth, 14–30 m at 240 m/s). Every chunk is asked for one buffer before the picture needs it, from delivered poses alone (SL10 clause 7: the client never subtracts two rows and calls it a speed). The lead eye in the body's frame is the body's centre at the lead scene plus the own pose at the lead cursor — a pilot's own pose stands still inside a flying hull while the planet's row moves through the hull's frame. The lead carries the TRANSLATION only: the scene overlay keeps the boot facing at every cursor, so a turning hull's rotation is not in the lead (nor in the drawn scene; `DEFERRED` D-TERRAIN-5 item 11) |
+| THE TERRITORY | `WantedSet` (`Margin`, `Urgent`, `Revealed`), `urgent_missing`, `urgent_missing_per_rung`, `revealed_missing` | a wanted chunk inside the horizon whose column lies in its rung's OWN territory (nearer than the rung's switch distance and farther than its fade-in edge) is URGENT: the picture draws it now, and one that is not resident is the band's gap. A wanted chunk in a band (a coarser column entering at its fade-in edge, still under the finer rung) is MARGIN: the finer rung covers it. A wanted chunk past the horizon (a peak the skyline admits) is REVEALED: an eye sees it over a crest before any lead can predict it — counted apart, the pop detector's (step 6) |
+| THE SKYLINE'S HYSTERESIS | `LadderView::kept`, `culled`, `KEEP_MARGIN_RAD` (0.05), `WANT_MARGIN_RAD` (0.01), `HORIZON_HYSTERESIS` (0.25) | a column the last descent kept clears the skyline with a wider margin than a new one, and a column the skyline culled stays skyline-judged until it lies a quarter inside the horizon — the horizon moves with the eye's height (a walker over a bump moves it from 4.8 to 5.7 km), and MEASURED on the walk a column flipped between "hidden" and "wanted unconditionally" step by step and was built for nothing |
+| The stamp | `DevTerrainStamp::{chunks_urgent, chunks_revealed, urgent_per_rung, lead_m}` | the band's gap, the reveals' gap, the gap per rung, and the lead the band ran on (the distance from the drawn eye to the lead eye in the frame of the body UNDER the eye — the widest over every body is a moon's: in the spinning planet's frame a moon moves kilometres per buffer) |
+| THE GATE | `terrain_moving_eye` (`just terrain-moving-eye`) | the walk at 1.4 m/s (the gate finds the stick's share by FEEDBACK against the measured walk; the minute covers 84 m, a rung-0 chunk and a third; ASSERTED: zero frames with a gap), a hull berthed in the planet's realm 500 m over the HIGHEST ground along the whole flight (read from the recipe every 100 m; between two samples the surface may stand higher, and the clearance carries that), the character boards it (the crossing commits), pushes to 240 m/s and coasts, pushes to 528 m/s and coasts (both hull legs MEASURED and reported, never asserted — §16.2's five readings). The gate measures every speed from the planet's row moving through the hull's frame; it reads the band's gap every 40 ms from the stamp, with a time course every second, and the verdict is the renderer's own count of FRAMES with a gap across the leg (no frame escapes a poll). The gate refuses to start beside a process of an earlier run's fixture |
+
+### 16.2 MEASURED (the eighth run of 2026-09-09)
+
+| Leg | Samples | The band's gap (max urgent; samples with a gap) | Reveals (max; samples) | Queue peak | Fewest drawn | Eye over the ground |
+|---|---|---|---|---|---|---|
+| walk, 1.40 m/s | 1 287 | **0; 0** | 2; 9 | 7 | 6 652 | 4–6 m |
+| hull, 240 m/s | 1 274 | **0; 0** | 3; 118 | 102 | 7 129 | 1 400 → 990 m |
+| hull, 528 m/s commanded, 540 measured (the probe) | 1 276 | **1 822; 1 276** | 31; 1 276 | 2 798 | 5 896 | 858 → 1 713 m |
+
+The probe's gap by rung, at 17.6 s: rung 0: 242, rung 1: 708, rung 2: 508, rung 3: 239, rung 4:
+85, rung 5: 13. The queue stood at 1 173 when the probe began (the 240 m/s leg ended at 990 m over
+rising ground, rung 0 entering) and never fell under 900. The ground stayed on screen throughout
+(the coarser rungs cover what the finer ones miss): no hole, but a picture one to five rungs
+coarser than the rule for a minute, which SL8 calls a seam.
+
+The ninth run (the gate as it stands: the walk and 240 m/s asserted, 528 m/s reported) repeats it:
+walk 0 gap on 1 379 samples, the lead 0.1–0.2 m; 240 m/s 0 gap on 1 270 samples, the queue at 144,
+the lead 14–30 m (one buffer of the hull's motion); the probe 1 804 urgent on all 1 229 samples, the
+queue at 2 780, the lead up to 64 m. The tenth run, after the refutation's fixes (pass B reads the
+true horizon, the verdict counts FRAMES with a gap, the clearance reads the whole flight): walk 0
+frames with a gap on 1 284 samples; 240 m/s 0 frames with a gap on 1 234 samples, the queue at 109,
+the lead up to 29 m; the probe 1 796 urgent at the worst on all 1 227 samples and 1 105 frames with
+a gap (the renderer drew about 18 frames a second under that queue), the queue at 2 762, the lead
+up to 64 m. The eleventh run (the full gate chain's, after thirty minutes of builds and flights):
+walk 0 frames with a gap on 1 291 samples; 240 m/s 7 urgent at the worst, 24 FRAMES with a gap on
+17 of 1 278 samples, the queue at 213 — all in the leg's last two seconds, when the eye fell under
+990 m over the rising ground and rung 0 entered (the queue went 37 → 94 → 147 → 194 in three
+seconds; runs 8 to 10 ended at 967–990 m and stayed green); the probe 1 830 urgent on 2 144 frames
+with a gap, the queue at 2 815. The twelfth run (the final gate, straight after the chain): walk 0
+frames with a gap on 1 289 samples; 240 m/s 34 urgent at the worst, 59 FRAMES with a gap on 75 of
+1 218 samples, the queue at 338. **So 240 m/s at one kilometre up sits ON the wall — three red
+readings of six — and breaks for certain the moment the finest ring joins**; the gate asserts the
+walk alone and REPORTS both hull legs (a leg that flaps at the machine's edge is a measurement, not
+a gate). Runs one to seven, on the way:
+
+| Run | MEASURED | What it taught |
+|---|---|---|
+| 1 | the walker's nose 8° down: under the surface after 13 m, horizon zero, 1 930 chunks pending | the walker faces LEVEL; with the eye under the surface everything within the reach is wanted (owed: a stated floor, `DEFERRED` D-TERRAIN-5 item 12) |
+| 2 | the naive stick share walked at 0.52 m/s | the foot speed by feedback against the measured walk |
+| 3–5 | 4, then 2 urgent chunks on the walk | the skyline's keep/want margins, the horizon's hysteresis, and the territory rule (a coarser column entering at its fade-in edge is under the finer rung: margin, not urgent) → 0 |
+| 6 | the hull at 300 m / 244 m/s: the queue ~2 400 steady, rung 0 at 200 of 950 resident; then a collapse to a dozen chunks 12 km on | a skim at 300 m is past the throughput wall; and the hull flew INTO rising ground (847 m along the path): the altitude is read from the recipe |
+| 7 | the hull at 1 347 m / 240 m/s: 0 urgent for 44 s, then a queue of 333 and 68 urgent | the same leg is green in run 8 (queue 102); a shard of run 6's kept fixture was found running beside run 7 (UNMEASURED whether it was the cause). 240 m/s sits near this machine's edge |
+
+### 16.3 What it means, and the ask
+
+**The lead is applied and is not the lever.** One buffer (120 ms) at 528 m/s is 63 m — one rung-0
+chunk (62 m), half a rung-1 chunk; the ninth run read the lead at up to 64 m. The gap is 1 800
+chunks across six rungs and the queue 2 800 deep: the eye sweeps more chunks per second than the
+workers build. An estimate from the geometry, NOT a measurement: at 1 000 m over the ground rung
+1's territory is a disc about 2.8 km across (a radius of 1.4 km, from its switch distance of
+1 738 m), rung 2's 5.7 km, rung 3's 11.5 km; at 528 m/s the eye uncovers a strip of each per
+second, about 100 + 50 + 25 chunk columns a second at rungs 1 to 3 alone (the strip's width times
+the speed, over the chunk's footprint), two to three chunks a column. The build rate is UNMEASURED
+as a number; M8-2's census (step 5) owes it. The probe began with 1 173 chunks already queued (the
+240 m/s leg ended over rising ground with rung 0 entering; a coasting hull cannot settle between
+two legs), so its first seconds carry that debt.
+
+**Where the wall stands, MEASURED:** a walk holds everywhere; 240 m/s at one kilometre over the
+ground is ON the wall (three red readings of six: the queue at 213–338 against 102–144 on the green
+ones), breaks for certain the moment the finest ring enters (run 11's last two seconds), and never
+held on a skim at 300 m (run 6); 528 m/s breaks throughout. Example: a hull
+crossing a plain at 240 m/s and 1 200 m up draws whole ground; the same hull over a ridge that rises
+to 300 m under it sees the finest ring arrive late for a few frames, and the coarser ring stands in.
+
+**The levers are the owner's:**
+
+1. **Throughput.** Step 5 shrinks the bytes per chunk (D8-4) and M8-2 measures the build rate and
+   the parent cache; the worker count is a client setting. Then the probe is flown again. This is
+   the recommended first move: a measurement, no new rule.
+2. **A rule under a deep queue** — the finest rungs are not asked for while the queue is deeper than
+   the workers can drain in one buffer. It keeps the ground whole at the cost of a coarser picture
+   at speed, which is the seam the probe already shows, only chosen. It needs no new data; it needs
+   the owner's word, because SL8 calls it a seam.
+3. **A stated lead (R-18).** Refused by this measurement: a lead is a distance, and no distance
+   builds chunks faster.
+
+Nothing new crosses a realm boundary in step 4 (SL6). Both hull legs stay in the gate as
+measurements, reported on every run, so the wall is seen the day it moves; the walk is the gate's
+assertion, and the owner names which hull legs it asserts once the lever is chosen.
+
+### 16.4 The rig, for the next flights
+
+- The walker faces level; a nose tilted down walks under the ground, and under the ground the
+  horizon is zero and everything within the reach is wanted.
+- The foot speed and the hull's speed are commanded by feedback and measured from rows, never
+  computed from a constant the shard does not share.
+- The hull's altitude is read from the recipe along the whole path, plus a clearance; nothing in
+  the gate states a height.
+- A failed run KEEPS its fixture, and its shards keep running: stop them before the next run (one
+  job at a time). Run 7 flew beside one.
+- The stamp's lead is the body's under the eye; the moon's lead is kilometres per buffer in the
+  spinning planet's frame, and it is the moon's ladder that recomputes every frame for it — the
+  same as before the lead (the moon moved that much through the eye's frame already). The stamp's
+  gap sums every body's ladder; a body past two of its radii wants nothing, so today the sum is
+  the planet's.
+- The release reads the LEAD eye's wanted set, so a chunk leaves one buffer before the drawn eye
+  would drop it: at its fade-out edge a rung-0 chunk goes at 64 % of its morph at 528 m/s (63 m
+  of a 174 m band), a difference under one pixel by the tier rule (a cell at the switch distance
+  is one pixel; the residual is a third of a cell). Step 6's pop detector measures it; the exact
+  form keeps the drawn eye's set for the release (`DEFERRED` D-TERRAIN-5 item 11).
+- The refutation of step 4 (`verdicts/slice_08_step4_refutation.md`, 30 findings): the horizon's
+  hysteresis sent ground inside the horizon to the "revealed" class and the gap under-read it
+  (fixed: pass B reads the true horizon); the hull's clearance was read over the probe leg alone
+  (fixed: the whole flight); the gate's verdict is now the renderer's count of frames with a gap.
+
+### 16.5 M8-2a — THE THREE RATES, MEASURED (2026-09-10, the thirteenth run and `chunk_phases`)
+
+Ruling V15 asked for the three rates before anyone touched the pool. The stamp now counts frames,
+chunks built (and the nanoseconds the workers spent), chunks harvested and harvests that filled
+their cap; the gate reads each across a leg.
+
+| Leg | Frames/s | Built/s | ms per chunk | Harvested/s | Harvest at its cap |
+|---|---|---|---|---|---|
+| walk, 1.4 m/s | 26.1 | 2 | 52 | 2 | 0 of 1 563 frames |
+| hull, 240 m/s | 28.6 | 151 | 64 | 151 | 0 of 1 715 |
+| hull, 528 m/s | 20.7 | 233 | 60 | 219 | 88 of 1 242 |
+
+**The harvest hypothesis is REFUTED.** The engine harvests everything the workers build; the cap of
+24 a frame fills on no frame at 240 m/s and on 7 % of frames at 528 m/s. **The workers bind:** 14
+threads at 60 ms of WALL time a chunk (the stamp's clock runs around the whole build, a wait on a
+sibling's parent included) are about 230 chunks a second, and the probe's demand is more.
+
+**Where the 60 ms goes** (`chunk_phases`, release, the home planet, face +X chunk (3, 5), five
+rounds each):
+
+| Rung | Box + extract | Vertices | Parents | One parent mesh | Whole build, parents WARM | Whole build, parents COLD | The morph's own cost |
+|---|---|---|---|---|---|---|---|
+| 0 | 2.76 ms | 4 256 | 8 | 4.34 ms | 5.33 ms | 61.1 ms | 2.57 ms |
+| 1 | 2.75 ms | 4 279 | 8 | 4.33 ms | 5.61 ms | 79.2 ms | 2.86 ms |
+| 2 | 2.68 ms | 4 207 | 8 | 3.82 ms | 4.52 ms | 50.0 ms | 1.84 ms |
+| 3 | 8.34 ms | 4 041 | 8 | 3.43 ms | 10.39 ms | 39.7 ms | 2.05 ms |
+| 4–8 | 2.3–2.6 ms | ~4 200 | 8 | 3.8–4.1 ms | 4.0–4.4 ms | 26–28 ms | 1.7–1.8 ms |
+| 9–11 | 2.1–2.2 ms | ~4 100 | 4 | 3.6–3.7 ms | 3.8–4.0 ms | 18 ms | 1.7–1.8 ms |
+
+A chunk with its parents in the cache costs 4 to 5.6 ms (the generator's 2.7 ms plus the geomorph's
+2.6 ms: the ray against the parent's triangles per vertex). A chunk whose eight parents all miss
+costs 28 to 79 ms. The flight measured 60 to 64 ms: on a moving eye the parent cache (48 entries,
+shared by 14 workers, each job needing 8) misses almost every time — the jobs of one ring arrive in
+the order the descent emitted them, spread around the eye, and no two neighbours build back to back.
+Rung 3's 8 ms box is the rung where the recipe's octaves cross a boundary (the V10 budget is 8 ms).
+
+**The lever, named by the measurement.** THE PARENT CACHE'S HIT RATE, not the harvest and not the
+thread count: with every parent warm the same 14 workers build about 2 800 chunks a second, twelve
+times today's 233. Three parts, in the V15 order's second item (the priority queue), now shaped by
+this:
+
+1. **Order the jobs by parent**: within a class and a rung, the four children of one parent and
+   their lateral neighbours build back to back, parents nearest the lead eye first — so the working
+   set of parents at any moment is the workers' current jobs' parents, not the whole ring's.
+2. **Size the cache to that working set**: the workers' count times the parents a chunk reads,
+   with a margin, in the one config struct — 14 × 8 × 2 = 224 entries, about 110 MB at today's
+   parent mesh (the packing of step 5 halves it).
+3. **Build each parent once**: with siblings adjacent, four workers miss the same parent at the
+   same moment; a build in flight is waited for, never repeated.
+
+Also MEASURED, for M8-2's census: the renderer draws 26 frames a second on a STILL walk with 6 700
+chunks on screen — the frame cost is the draw count, one mesh per chunk, and step 5's packing and
+batching own it.
+
+### 16.6 THE PARENT CACHE'S HIT RATE — the lever, built and MEASURED (2026-09-10, runs 14 to 17)
+
+What ruling V15's second item became after §16.5 named the cache:
+
+| Piece | Where | What it is |
+|---|---|---|
+| The request order | `ladder_view::RequestOrder`, `morton` | the wanted set's keys sort by class (urgent, revealed, margin), then the coarser rung first, then the PARENT column along a Morton curve over its face, then the chunk; the renderer requests each key at its index as the job's priority |
+| The priority pool | `client-render::terrain::ThreadedWorkers` | one pool, one queue ordered by (priority, arrival), a condition variable; a worker takes the first; a withdrawn job is skipped when taken (as before) |
+| The cache's capacity | `ParentCache::with_capacity`, `set_capacity`; `PARENTS_PER_CHUNK` (8) × workers × `PARENT_WORKING_SETS` | sized to the workers, not a constant of 48 |
+| Single flight | `ParentCache::claim`, `finish`, `Claim` | a parent one reader is building is WAITED for by the next, never built twice; a wait counts on the stamp |
+| The counters | `ParentStats` (hits, builds, waits), `ParentMesh::bytes`; the stamp's `parent_hits/builds/waits` | the gate prints the hit rate per leg; `chunk_phases` prints a parent mesh's bytes (about 500 KB) |
+
+MEASURED, the 240 m/s leg and the 528 m/s probe on the M8-1 flight (14 workers):
+
+| Run | Order | Cache entries | 240 m/s: ms/chunk, hit, frames/s, queue peak | 528 m/s: ms/chunk, hit, built/s, harvested/s, queue peak, worst gap |
+|---|---|---|---|---|
+| 13 (§16.5) | arrival | 48 | 64 ms, —, 29, 42 | 60 ms, —, 233, 219, 2 776, 1 804 |
+| 14 | class, rung, parent nearest-first | 224 | 36 ms, —, 36, 31 | 46 ms, —, 273, 272, 1 383, 959 |
+| 15 | class, rung, parent Morton | 224 | 35 ms, 53 %, 40, 30 | 42 ms, 52 %, 294, 294, 1 202, 819 |
+| 16 | the same | 896 (≈450 MB) | 16 ms, 89 %, 43, 23 | 21 ms, 89 %, 418, 345, 2 015, 1 234 — and from 27 s on, over one kilometre up, ZERO urgent at 528 m/s (the queue 14–26) |
+| 17 | the same | 448 (≈225 MB) | 22 ms, 76 %, 40, 40 | 29 ms, 74 %, 348, 347, 752, 461 — zero urgent over one kilometre |
+| 18 | the same | 448, the upload timed | **22 ms, 76 %, 40, 39** | **28 ms, 75 %, 340, 339, 832, 524** — zero urgent over one kilometre; 0.07 ms of the main thread per upload |
+
+The "ms a chunk" column is the worker's WALL time per job, a wait on a sibling's parent build
+included (the stamp's clock runs around the whole build; the lib reads no clock, so the wait is not
+split out). **THE SHIPPED SETTING is a memory budget of 256 MB** (`TerrainConfig::parent_cache_bytes`,
+about 512 entries at an estimated 512 KB a mesh — between runs 17 and 16), never fewer than one
+working set of the workers.
+
+The order alone bought a fifth; the capacity bought the rest. The cache turns over (ESTIMATED from
+the stamp's parent builds and the ring geometry, not printed as such): the pool builds about 600
+parents a second at 224 entries, so an entry lives 0.4 s, and the next column of the same ring
+arrives about half a second later. The working set is every ring's LEADING EDGE, about 300 to 500
+parents on this flight by that estimate, not one worker's neighbourhood.
+
+**What the probe still shows.** Over one kilometre the band holds at 528 m/s at every setting from
+run 16 on. On the low pass (730 to 860 m up, inside the finest ring's territory) the gap peaks at
+461–1 234 across rungs 0 to 4. At 896 entries the workers outran the harvest (418 built against 345
+harvested a second, the cap of 24 a frame full on 744 of 1 683 frames); at the shipped size the two
+are balanced (340 built, 339 harvested, the cap full on 325 of 1 632 frames), and the harvest loop
+itself costs the main thread 0.07 ms an upload — the frame's cost sits in the engine's own GPU
+upload of the changed assets and in the draw count, outside that loop. The byte budget for the
+harvest (V15 item 2) therefore belongs with step 5's packing, where the bytes per upload are the
+unit, and is NOT built here.
+
+**The price and the ask.** A parent mesh is about 500 KB by `ParentMesh::bytes` (an ESTIMATE over
+the vectors' capacities and a map node per bucket: positions as `f64`, triangles as `u32`, the
+buckets); 896 entries is 450 MB, a measurement setting. The shrink — positions as `f32` from the
+parent's origin, `u16` triangle indices (fewer than 65 536 vertices), the buckets as one flat table
+— cuts it to about 190 KB, so 896 entries is 170 MB and 448 is 85 MB (D-TERRAIN-5 item 10).
+
+**After the refutation** (`verdicts/slice_08_throughput_refutation.md`, 31 findings): a waiting
+job now moves to each frame's priority (T-1), the priority is a global order — class, depth, index —
+the same across realms (T-2), a cancel removes the job from the queue (T-3, T-4), a claim is a guard
+that a panic drops (T-5), a forgotten realm refuses a late landing (T-6), a hit refreshes a use
+counter and never scans (T-7), and the cache's size is a memory budget in the one config struct
+with the harvest cap beside it (T-8, T-9). **Run 19, the shipped form (the 256 MB budget, 512
+entries, the re-keyed queue), MEASURED:** the walk 0 frames with a gap; 240 m/s 0 frames with a gap,
+80 % hits, 20 ms of wall time a job, 41 frames a second, the queue at 35; the probe 388 jobs and 374
+harvests a second at 27.5 frames a second, 81 % hits, 24 ms a job, the gap at the low pass 770 and
+the queue 1 414, zero urgent over one kilometre. The probe's low pass varies by run (461 to 1 234 at
+the worst sample over runs 16 to 19): it is the finest ring's territory at 528 m/s, and step 5's
+packing is its lever.
+
+## 17. Step 5 — the packing, ruled V16: bytes change, the picture does not
+
+### 17.1 M8-2's baseline census, MEASURED (2026-09-10, before any packing)
+
+The stamp now carries the drawn chunks' mesh bytes as the engine uploads them; the picture gate
+prints the census per stand and compares every new picture with the one on disk, pixel by pixel.
+
+| Stand | Chunks | Vertices | On the GPU | Per chunk | Fill | Frames/s, still |
+|---|---|---|---|---|---|---|
+| ground, 3.4 m | 6 659 | 48.3 M | 3 374 MB | 495 KB | 11.9 s | 26.0 |
+| hill, 301 m | 7 360 | 50.7 M | 3 541 MB | 470 KB | 10.9 s | 23.5 |
+| aloft, 60 km | 3 529 | 15.5 M | 1 082 MB | 299 KB | 2.7 s | 51.9 |
+| orbit, 2 000 km | 1 457 | — | — | — | — | — |
+
+A vertex costs 48 bytes today (position, normal, morph target and sink, four vectors of three
+`f32`), and a triangle's three indices 12. The frame rate falls with the vertices and the bytes on
+screen: 48 million vertices at 26 frames a second on the ground, 15 million at 52 aloft. The
+packing is the first lever tried; what it bought is in §17.3 (an eighth of the frame for 44 % of
+the bytes), so the vertex count and the draw count hold the rest.
+
+**The noise floor (flight pair: the free-tick flight against the flight before it; the rule:
+every pixel).** Two flights of ONE code, each capturing at its own universe tick, differed by
+277 to 593 pixels of 924 480 per stand, the widest channel step 59 to 140. The star moves between
+the ticks and the silhouettes shift by a pixel. The gate now captures every stand at the first
+multiple of 1 200 ticks after the settle, so two flights capture the same moment of the world;
+the remaining difference between two flights of one code is the noise floor a packing is measured
+against. MEASURED, two flights of one code at the fixed ticks (flight pair A → B, unpacked; the
+rule: every pixel, no mask):
+
+| Stand | Pixels that differ | Widest channel step |
+|---|---|---|
+| ground | **0** of 924 480 | 0 |
+| hill | 76 | 59 |
+| aloft | 162 | 137 |
+| orbit | 71 | 137 |
+
+The ground stand is exact. The other three keep a residual of tens of pixels at the widest step
+(a silhouette's edge, the ruler ball or a star sprite, UNMEASURED which): the capture fires on the
+first frame at or past the tick, and that frame's cursor stands anywhere inside the tick. The
+gate's flag refuses one differing pixel; a packing is judged per stand against this floor.
+
+### 17.2 The exact packing, BUILT
+
+| Piece | Where | What it is |
+|---|---|---|
+| THE MORPH METRE | `ChunkGeometry::morph_m`, `morph_target`, `morph_targets`, `sink_of`, `bounds` | the target lies on the vertex's radial by construction (a radial hit on the parent mesh, or the coarser field in the same direction), so it is ONE signed metre along the radial from the vertex; the target is `vertex + radial × morph_m`, exact to float rounding. A skirt vertex carries its top's metre (both drop by the same along the radial) |
+| THE SINK AS A UNIFORM | `ChunkGeometry::sink_m`; `LadderFade::centre_sink`, `ProbeParams::centre_sink` | the rung's sink is one number per chunk, the material's uniform; no attribute |
+| THE RADIAL PER VERTEX | `ChunkGeometry::radials`, `RADIAL_STEP_RAD`; `ATTRIBUTE_RADIAL` (`Float32x3`, location 9) | a vertex's radial rides the vertex as three `f32` (12 bytes) in the realm's frame, turned into the world like a normal; it stands within 2e-7 rad of the exact one, `f32`'s own rounding (a unit test holds the bound over every vertex of a chunk). MEASURED as four signed 16-bit quanta first (8 bytes, 3e-5 rad): on the hill picture 18 content pixels of 701 472 differed from the float form, 13 by one level and 5 by 3 to 19 levels — isolated pixels in the far ground whose centre fell on the neighbouring triangle at a crease. A change of the picture; V16 refuses it, and the 16-bit form stands as the owner's option with its numbers (4 bytes a vertex, about 150 MB on the ground stand). The first form read the radial off a BODY CENTRE in the material's uniform; MEASURED, that rewrote every material as the eye moved and the engine re-prepared them: 26 → 19 frames a second on the walk, 41 → 18 at 240 m/s, with a millimetre's tolerance, and no better at 240 m/s with a millionth of the distance (the rewrite rate grows with the speed and each rewrite is a hitch). The uniform keeps the rung's sink alone and is never rewritten |
+| THE SHADERS | `ladder_fade.wgsl`, `ladder_fade_prepass.wgsl`, `probe.wgsl` | the morph in world space: `mix(own + radial × morph_m, own, whole(d)) − radial × sink × (1 − risen(d))`; the motion vector carries this frame's displacement onto last frame's own position |
+| 16-BIT INDICES | `packed_indices` | exact where a chunk has at most 65 535 vertices (every chunk today), 32-bit otherwise |
+| The bounds | `ChunkGeometry::bounds` | computed once in the library from the vertices, the targets and the sunk positions |
+
+A vertex is 40 bytes (position 12, normal 12, the morph metre 4, the radial 12) against 48; a
+triangle's indices 6 against 12. Normals and positions stay full width in this half (V16: a packed form that changes a
+pixel is refused; the pixel measurement comes first).
+
+### 17.3 The exact packing, MEASURED (2026-09-10)
+
+| Stand | On the GPU, before → after | Per chunk | Frames/s, still, before → after |
+|---|---|---|---|
+| ground | 3 374 → 1 880 MB | 495 → 276 KB | 26.0 → 29.4 |
+| hill | 3 541 → 1 974 MB | 470 → 262 KB | 23.5 → 26.9 |
+| aloft | 1 082 → 603 MB | 299 → 167 KB | 51.9 → 53.4 |
+| orbit | — → 260 MB | 174 KB | — → 52.9 |
+
+44 % fewer bytes on the GPU, and the still frame rate up an eighth on the near stands. Two things
+on the way: (1) the first packed flight wrote every material's centre uniform EVERY frame and the
+engine re-prepared them — 26 → 18 frames a second on the still ground stand; the write is now made
+only when the centre moved, and the frame rate came back and rose. (2) `target` is a reserved word
+in WGSL; the shader failed to compile and the first packed flight drew no ground at all (a red gate,
+"terrain share 0.000").
+
+**The pixels.** The first packed flight, compared with flight B's unpacked pictures at the same
+ticks, differed by 70 / 54 / 181 / 62 pixels (ground / hill / aloft / orbit), the widest channel
+step 137 — the size of the noise floor. A second packed flight, compared with the first, differed
+on the ground stand by 152 pixels, and the difference image put EVERY one of them inside an 18 × 11
+patch at the top middle: the stats overlay's counter, whose digits differ between runs. Not one
+terrain pixel differed. The gate now compares only the CONTENT — the pixels either probe marks as
+terrain or ruler — so the overlay never counts, and it keeps the previous picture and writes a
+difference image beside the run whenever content differs.
+
+**What is NOT measured, stated plainly.** The gate overwrote flight B's unpacked pictures before
+the mask existed, so the masked comparison of packed against UNPACKED is lost; a masked comparison
+of packed against packed (the packed noise floor) is what the next flight measures. What stands as
+the exactness proof of the geometry is a unit test in the library: over every vertex of two chunks
+the target the vector form carried and the target the metre form reconstructs differ by the
+narrowing alone, under a tenth of a millimetre (the gate's bound; the measured widest difference
+is printed by the test). A tenth of a millimetre at the switch distance is a thousandth of a pixel.
+
+**The packed noise floor (flight pair: two packed flights at the same ticks; the rule: the probe's
+content pixels, the overlay still counted):**
+ground 5 of 635 560 (the widest step 1), hill 158 of 752 164 (step 59), aloft 0 of 586 341, orbit 6
+of 466 445 (step 1). The hill's 158: its difference image put 157 of them inside the HUD's own text
+— the stamp line's "tick 2399" against "tick 2400", the captured frame's tick readout, which
+stands OVER the hill's far ground on that stand and so passed the probe mask — and about ten
+isolated pixels at one channel step. The renderer now reports the HUD's rectangle on the stamp and
+the compare leaves it out. With the overlay excluded (the next flight, packed against packed):
+ground 7 of 635 560, hill 0 of 703 652, aloft 2 of 586 341, orbit 5 of 466 445 — every residual at
+one channel step, a rounding flicker of a few pixels between two runs, never a change of the ground.
+
+
+**On a MOVING eye (the M8-1 flight, frames a second):**
+
+| Leg | Before the packing | The centre as a uniform, a millimetre's tolerance | The same, a millionth's tolerance | The radial on the vertex |
+|---|---|---|---|---|
+| walk, 1.4 m/s | 25.6 | 19.3 | 29.7 | 29.9 |
+| hull, 240 m/s | 41.0 | 18.3 | 18.6 | 45.1 |
+| hull, 528 m/s | 27.5 | 15.7 | — | 27.7 (the gap at the low pass 704, the queue 1 340) |
+
+A material rewritten is a material the engine re-prepares, and a centre in the uniform is
+rewritten as often as the eye moves past the tolerance — every frame at 240 m/s under any
+tolerance small enough to keep the radial exact. The radial on the vertex (8 bytes) needs no
+centre: no rewrite, no hitch, and the frame rate rises above the pre-packing one on every leg.
+
+### 17.4 The refutation of step 5's first half, answered (2026-09-10)
+
+`verdicts/slice_08_step5a_refutation.md`, 17 findings. SUPERSEDED by the radial on the vertex
+(§17.2): P-1 (a material born without the centre), P-2 (the rewrite's cost on a moving eye —
+MEASURED, then removed with the centre itself), P-13 (the tolerance) and P-14 (the ruler's
+rewrite) — no material carries a centre any more. FIXED: the compare masks the UNION of both pictures' overlay rectangles, grown by the glyphs'
+antialiasing, the reference's rectangle kept in a sidecar beside it (P-3); every stand captures at
+a CONSTANT tick and a late settle is a red gate (P-4); the two `&&` asserts are split and the bounds
+test covers a chunk that sinks (P-6, P-7); the worker builds the culling box and carries it on the
+geometry (P-8); `centre_is` compares within a millimetre (P-13); the ruler's probe material is not
+rewritten (P-14); the shaders state why the radial never normalises a zero (P-15); the census says
+what its two counts count under the flat switch (P-17); the three stale comments and the three doc
+numbers are rewritten (P-9, P-11, P-12); the noise-floor tables name their flight pair and rule
+(P-10). STANDS: the moving-eye cost of a material rewritten every frame is MEASURED on this chain's
+moving-eye flight (P-2; the fallback is an octahedral radial per vertex); the packed-against-
+unpacked measurement V16 asks for is LOST, stated to the owner (P-5) — from here the gate keeps
+every compared picture under `target/terrain_pictures`; the main-world copy of every mesh
+(`RenderAssetUsages::default()`, P-16) is owed a resident-memory measurement with step 5's second
+half.
+
+### 17.5 The first half, FINAL (2026-09-10, the gate chain on the float radial)
+
+Coverage 100 %, lint, combos, the pin, the pictures (zero holes on four stands) and the moving-eye
+flight green. The census with the radial as three `f32` (a vertex of 40 bytes, the indices at 16
+bits):
+
+| Stand | Chunks | On the GPU (before → now) | Per chunk | Frames/s, still (before → now) |
+|---|---|---|---|---|
+| ground | 6 659 | 3 374 → 2 460 MB | 495 → 361 KB | 26.0 → 28.0 |
+| hill | 7 360 | 3 541 → 2 582 MB | 470 → 343 KB | 23.5 → 26.4 |
+| aloft | 3 529 | 1 082 → 788 MB | 299 → 218 KB | 51.9 → 52.4 |
+| orbit | 1 457 | — → 339 MB | 227 KB | — → 52.4 |
+
+The pictures against the 16-bit radial's: the ground and orbit stands exact, aloft within its
+one-step floor, the hill on the same 18 pixels — the 16-bit form's own footprint flipping back. On
+the moving eye: the walk 26.9, 240 m/s 43.8, 528 m/s 24.4 frames a second (25.6, 41.0 and 27.5
+before the packing), the walk and the 240 m/s leg with zero frames with a gap; the probe's low
+pass at a gap of 752 and a queue of 1 723 (the same wall, §16.6).

@@ -60,6 +60,12 @@ impl RenderClock {
         }
     }
 
+    /// The tuning this clock projects with (the buffer it sits behind the freshest tick).
+    #[must_use]
+    pub fn tuning(&self) -> ClientInterpTuning {
+        self.tuning
+    }
+
     /// The freshest delivered universe tick the clock is anchored on (`None` until the
     /// first snapshot). The run-stable alignment quantity a capture records in its manifest
     /// — sampled from the SAME snapshot the pixels came from, so it identifies the captured
@@ -89,6 +95,11 @@ mod tests {
 
     fn clock() -> RenderClock {
         RenderClock::new(ClientInterpTuning::DEFAULT) // 120 ms @ 20 Hz → 2.4 tick buffer
+    }
+
+    #[test]
+    fn the_clock_states_its_tuning() {
+        assert_eq!(clock().tuning(), ClientInterpTuning::DEFAULT);
     }
 
     #[test]

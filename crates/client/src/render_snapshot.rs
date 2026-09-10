@@ -428,6 +428,27 @@ impl RenderSnapshot {
         self.clock.cursor(now_s)
     }
 
+    /// THE LEAD CURSOR (slice 8 step 4, the residency band): the render cursor plus the whole
+    /// interpolation buffer — the freshest moment the wire has DELIVERED, which the picture draws
+    /// only one buffer later. The terrain asks for the ground around the eye AT THIS MOMENT, so a
+    /// chunk is requested one buffer before the picture needs it: a lead from stated data alone
+    /// (the buffer is the wire's own contract), never from a speed the client derived (SL10
+    /// clause 7). `None` until the clock is anchored.
+    #[must_use]
+    pub fn lead_cursor(&self, now_s: f64) -> Option<f64> {
+        self.clock
+            .cursor(now_s)
+            .map(|c| c + self.clock.tuning().buffer_ticks())
+    }
+
+    /// The composited poses at a given cursor (the lead cursor, for the residency band): each
+    /// entity once, interpolated there — clamped into each entity's window like every sample, so
+    /// a cursor past a window freezes that entity at its freshest pose (never an extrapolation).
+    #[must_use]
+    pub fn rendered_at(&self, cursor: f64) -> Vec<(EntityId, SubId, RenderPose)> {
+        self.view.rendered(cursor)
+    }
+
     /// The composited poses to draw at display wall-time `now_s` — each entity exactly
     /// once, interpolated at the DISPLAY cursor (smooth at any refresh). Empty until the
     /// clock is anchored (nothing delivered yet).
@@ -633,6 +654,7 @@ mod tests {
             ClientPhase::Connecting,
         );
         assert_eq!(s.freshest_tick(), None);
+        assert_eq!(s.lead_cursor(0.0), None);
         // world_pos does not depend on the clock/cursor at all: it flattens the delivered position, so a
         // pose reduces to itself, finite and correct, even before the anchor.
         let pose = RenderPose {
@@ -673,6 +695,15 @@ mod tests {
 
         // At the anchor instant the cursor sits behind the window → frozen at prev.
         assert_eq!(snap.cursor(100.0), Some(9.6));
+        // THE LEAD CURSOR (slice 8 step 4): the render cursor plus the whole buffer is the
+        // freshest delivered moment, and the poses there are the freshest delivered poses;
+        // between the two, the interpolation the picture would draw at that moment.
+        assert_eq!(snap.lead_cursor(100.0), Some(12.0));
+        let lead = snap.rendered_at(12.0);
+        assert_eq!(lead.len(), 1);
+        assert_eq!(rp_world(&lead[0].2), DVec3::new(10.0, 0.0, 0.0));
+        let mid = snap.rendered_at(11.0);
+        assert_eq!(rp_world(&mid[0].2), DVec3::new(5.0, 0.0, 0.0));
         let early = snap.rendered(100.0);
         assert_eq!(early.len(), 1);
         assert_eq!(early[0].0, ent(1));

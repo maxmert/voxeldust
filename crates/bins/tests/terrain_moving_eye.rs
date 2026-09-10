@@ -1,0 +1,910 @@
+//! **M8-1 — THE RESIDENCY BAND ON A MOVING EYE** (the voxel foundation, slice 8 step 4; ruling V14
+//! D8-3 (A): the reach plus the interpolation buffer, no new data).
+//!
+//! Every picture of steps 8p to 3 was a STILL stand. This gate moves the eye over the home planet
+//! three ways and reads THE BAND'S GAP every frame — the stamp's `chunks_urgent`, the wanted
+//! chunks inside their rung's own territory that are not resident. The band is complete when the
+//! gap is zero; the assertion is that it is zero on every FRAME of the walk. The two hull legs are
+//! MEASURED and reported, never asserted — see `HULL_LEG_MPS`: at 240 m/s the band holds while the
+//! eye stays over the finest ring's territory and breaks the moment that ring enters; at 528 m/s
+//! it breaks throughout. The ask goes to the owner with the numbers (the slice discussion §16.3).
+//!
+//! 1. **THE WALK.** The own character walks on foot over the ground at the foot speed (1.4 m/s):
+//!    the placeholder walk the suit ruling keeps until the suit lands (on a floor the foot speed
+//!    is the character's own).
+//! 2. **THE HULL AT 240 m/s.** A player-built hull is berthed INSIDE THE PLANET'S REALM, 500 m
+//!    over the highest ground along its path (read from the recipe), the character boards it (walks into its wake, the crossing commits), and
+//!    pushes: its stick is the hull's push (the temporary control seam), scaled by the hull's own
+//!    rating. The gate holds the push until the hull passes 240 m/s and releases it; the hull
+//!    coasts (the live ambient has no pull and no drag), and the gate reads the band for a minute.
+//! 3. **THE HULL AT 528 m/s.** The gate holds the push again until 528 m/s and reads the band
+//!    again — and REPORTS it: the gap per rung, the deepest queue, the lead. MEASURED 2026-09-09 (eighth run):
+//!    the lead is applied (the wanted set is computed one buffer ahead) and the band still goes
+//!    incomplete on every sample, 1 822 urgent chunks at the worst, across rungs 0 to 5, the queue
+//!    at 2 798 — a THROUGHPUT wall (the eye sweeps more chunks per second than the workers build),
+//!    which no lead of a few chunks can bridge. The lever is the owner's (the slice discussion
+//!    §16), so this leg reports and the ask goes up with its numbers.
+//!
+//! The speeds are MEASURED, never assumed: the planet's row moves through the hull's frame, and
+//! two polls a known interval apart give the speed the gate then names. The gates fly the shipped
+//! path (the suit ruling of 2026-09-05): berth a hull, board it, push — never a walking dot at
+//! warp. SL10 clause 7 holds on the client: its lead is the interpolation buffer's own delivered
+//! poses, and this gate is what measures whether that lead is enough (D8-3 A). It is, on the walk
+//! and at 240 m/s; at 528 m/s the band fails by throughput, not by lead, so the ask that goes to
+//! the owner is not R-18 (a stated lead) but the build rate (the slice discussion §16).
+//!
+//! GPU-required + LOCAL, like the other picture gates; `just terrain-moving-eye`. Under a plain
+//! `cargo test --workspace` this file compiles to zero tests.
+#![cfg(all(feature = "dev-control", feature = "render"))]
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
+
+use vd_bins::{
+    Cluster, ClusterAddrs, ClusterShape, DEV, DevClusterParams, common_env, dev_auth_pubkey_hex,
+    dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows, orchestrator_env,
+    realm_store_path, reap_forked, reserve_tcp_addr, reserve_udp_addr,
+};
+use vd_core::EntityId;
+use vd_core::entity_kind::EntityKind;
+use vd_core::glam::DVec3;
+use vd_core::pose::{RealmId, frame_for_realm};
+use vd_devproto::{DevPhase, DevRequest, DevResponse, DevState, WaitField, WaitOp, WaitPredicate};
+use vd_io_prod::trust::ClusterTrust;
+use vd_terrain::Gf;
+
+const CLIENT_ACCOUNT_BASE: u64 = 1000;
+/// The walker's eye over the ground.
+const EYE_HEIGHT_M: f64 = 1.8;
+/// How far over the highest ground along its path the hull flies, and how densely that ground is
+/// read from the recipe (at rung 2, with the dropped octaves' bound added).
+const HULL_CLEARANCE_M: f64 = 500.0;
+const PATH_SAMPLE_M: f64 = 100.0;
+/// The day side, as the picture gate stands it: the star this high over the horizon.
+const SUN_ELEVATION_DEG: f64 = 15.0;
+const SUN_OFF_NOSE_DEG: f64 = 120.0;
+/// THE FOOT SPEED the walk leg commands, in metres per second: the character's own walk.
+const WALK_MPS: f64 = 1.4;
+/// THE HULL LEGS' speeds, in metres per second: a fast hull and the fastest one the slice names
+/// (ruling V14 M8-1). Both are read and REPORTED, never asserted. MEASURED on six runs of
+/// 2026-09-09/10 at 240 m/s, 1 400 m down to 960 m over rising ground: three runs green (the queue
+/// at 102, 144, 109), three red — the seventh (68 urgent, the queue at 333, beside a stray shard),
+/// the eleventh (7 urgent on 24 frames, the queue at 213, in the leg's last two seconds, when the
+/// eye fell under 990 m and rung 0 entered) and the twelfth (34 urgent on 59 frames, the queue at
+/// 338). At 528 m/s the band is incomplete on every frame (the
+/// queue at 2 800, rungs 0 to 5). A leg that flaps at the machine's edge is reported, not asserted.
+const HULL_LEG_MPS: [f64; 2] = [240.0, 528.0];
+/// How far below a leg's named speed the measured speed may fall.
+const SPEED_SHORTFALL: f64 = 0.9;
+/// How long each leg is read, and how often.
+const LEG_S: f64 = 60.0;
+const SAMPLE_MS: u64 = 40;
+/// How long a push may take to reach a leg's speed before the gate gives up.
+const PUSH_DEADLINE: Duration = Duration::from_secs(60);
+/// The interval two polls stand apart when a speed is measured.
+const SPEED_INTERVAL: Duration = Duration::from_millis(2_000);
+/// How far from the character the hull is berthed, along its nose: inside its wake by far, and a
+/// half-minute walk.
+const BERTH_STANDOFF_M: f64 = 40.0;
+const LOGIN_DEADLINE: Duration = Duration::from_secs(120);
+const BOARDING_DEADLINE: Duration = Duration::from_secs(300);
+const TERRAIN_WAIT_TICKS: u64 = 3_600;
+/// The hull's own push, ten gravities (the shipyard's own default), whole micro-metres per second
+/// per second: stated here so the legs' push times are derived, never guessed.
+const HULL_PUSH_MICRO_MPS2: i64 = 98_100_000;
+
+struct ChildGuard(Child);
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+struct Fixture {
+    base: PathBuf,
+    trust_dir: PathBuf,
+    common: Vec<(&'static str, String)>,
+    store_str: String,
+    launch_path: PathBuf,
+    cwd: PathBuf,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!(
+                "terrain_moving_eye: the fixture is KEPT for diagnosis at {}",
+                self.base.display()
+            );
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+fn fixture() -> Fixture {
+    let trust = ClusterTrust::generate("vd-terrain-moving-eye").expect("trust");
+    let base = std::env::temp_dir().join(format!("vd-terrain-moving-eye-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let trust_dir = base.join("trust");
+    std::fs::create_dir_all(&trust_dir).expect("trust dir");
+    trust.write_der_dir(&trust_dir).expect("write trust");
+    let cwd = base.join("capture-cwd");
+    std::fs::create_dir_all(&cwd).expect("capture cwd");
+    let store = base.join("orchestrator.redb");
+    let launch_path = store.with_file_name(vd_bins::LAUNCH_STORE_NAME);
+    let common = common_env(&trust_dir.display().to_string(), &DEV);
+    Fixture {
+        store_str: store.display().to_string(),
+        base,
+        trust_dir,
+        common,
+        launch_path,
+        cwd,
+    }
+}
+
+struct ForkedReaper(PathBuf);
+impl Drop for ForkedReaper {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            reap_forked(&launch_rows(&self.0));
+        }
+    }
+}
+
+fn demand_addrs(gateway_admin: SocketAddr) -> ClusterAddrs {
+    ClusterAddrs {
+        gateway_admin: Some(gateway_admin),
+        ..ClusterAddrs::reserve()
+    }
+}
+
+/// Boot the demand cluster with the spawn poses inside the home planet.
+fn boot_demand_cluster(
+    f: &Fixture,
+    a: &ClusterAddrs,
+    p: &DevClusterParams,
+    spawn_poses: &str,
+) -> Cluster {
+    let mut cluster = Cluster::new();
+    cluster.push(
+        "vd-orchestrator",
+        vd_bins::spawn_node(
+            env!("CARGO_BIN_EXE_vd-orchestrator"),
+            &f.common,
+            &orchestrator_env(a, p, &f.store_str, ClusterShape::Demand),
+        )
+        .expect("spawn orchestrator"),
+    );
+    let mut gw = gateway_env(a, &dev_auth_pubkey_hex(), p, ClusterShape::Demand);
+    gw.push(("VD_SPAWN_POSES", spawn_poses.to_owned()));
+    cluster.push(
+        "vd-gateway",
+        vd_bins::spawn_node(env!("CARGO_BIN_EXE_vd-gateway"), &f.common, &gw)
+            .expect("spawn gateway"),
+    );
+    cluster
+}
+
+/// The capture client for one leg: the agent index picks the account, the pilot view rides the
+/// own character.
+fn spawn_capture_client(
+    f: &Fixture,
+    gateway: SocketAddr,
+    name: &str,
+    agent_index: u64,
+    quic_port: u16,
+    devctl_port: u16,
+) -> Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_client"));
+    for (k, v) in &f.common {
+        cmd.env(k, v);
+    }
+    cmd.env("VD_AUTH_SIGNING_KEY", dev_auth_signing_key_hex());
+    cmd.current_dir(&f.cwd);
+    cmd.args([
+        "--name",
+        name,
+        "--agent-index",
+        &agent_index.to_string(),
+        "--gateway",
+        &gateway.to_string(),
+        "--client-quic",
+        &quic_port.to_string(),
+        "--trust-dir",
+        &f.trust_dir.display().to_string(),
+        "--dev-control",
+        &devctl_port.to_string(),
+        "--allow-dev-control",
+        "--capture",
+        "--capture-pilot",
+    ]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn().expect("spawn capture client")
+}
+
+fn await_listener(port: u16, child: &mut Child) {
+    let started = Instant::now();
+    loop {
+        if std::net::TcpStream::connect(vd_bins::loopback(port)).is_ok() {
+            return;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!(
+                "the capture client exited before serving dev-control ({status}) — GPU \
+                 precondition: this gate needs a working adapter (WGPU_BACKENDS/WGPU_POWER_PREF)"
+            );
+        }
+        assert!(
+            started.elapsed() < LOGIN_DEADLINE,
+            "the capture client never served dev-control on {port}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn round_trip(port: u16, req: &DevRequest) -> DevResponse {
+    dev_roundtrip(port, req).unwrap_or_else(|e| {
+        panic!("dev-control round-trip on {port} failed: {e} — capture client gone?")
+    })
+}
+
+fn poll(port: u16) -> DevState {
+    match round_trip(port, &DevRequest::State) {
+        DevResponse::State { state } => state,
+        other => panic!("a state poll answered {other:?}"),
+    }
+}
+
+fn await_active(devctl: u16) -> DevState {
+    let started = Instant::now();
+    loop {
+        if let Ok(DevResponse::State { state }) = dev_roundtrip(devctl, &DevRequest::State)
+            && state.phase == DevPhase::Active
+            && state.snapshots_applied >= 5
+            && !state.realm_boxes.is_empty()
+        {
+            return state;
+        }
+        assert!(
+            started.elapsed() < LOGIN_DEADLINE,
+            "the demand login onto the planet never converged"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Wait until the ladder has landed whole: a first chunk drawn, then nothing pending.
+fn await_settled(devctl: u16, leg: &str) {
+    for (field, op, value) in [
+        (WaitField::TerrainChunksDrawn, WaitOp::Ge, 1),
+        (WaitField::TerrainChunksPending, WaitOp::Le, 0),
+    ] {
+        let reply = round_trip(
+            devctl,
+            &DevRequest::WaitUntil {
+                predicate: WaitPredicate { field, op, value },
+                max_ticks: TERRAIN_WAIT_TICKS,
+            },
+        );
+        assert!(
+            matches!(reply, DevResponse::State { .. }),
+            "{leg}: the terrain never settled ({field:?} {op:?} {value}): {reply:?}"
+        );
+    }
+}
+
+/// Set the sticky throttle: the character's walk on foot, or the hull's push once boarded.
+fn throttle(devctl: u16, axes: [f32; 3]) {
+    let reply = round_trip(devctl, &DevRequest::Move { axes });
+    assert!(
+        matches!(reply, DevResponse::Ack),
+        "the throttle {axes:?} was refused: {reply:?}"
+    );
+}
+
+fn label_of(realm: RealmId) -> String {
+    frame_for_realm(realm, None)
+        .expect("every realm of THE world has a frame")
+        .label()
+}
+
+/// What one leg measured: the worst gap, the deepest queue, the fewest chunks on screen, the
+/// samples taken, and the lead the band ran on.
+#[derive(Debug, Default)]
+struct LegRead {
+    samples: u64,
+    max_urgent: u64,
+    urgent_samples: u64,
+    /// THE FRAMES WITH A GAP across the leg, from the renderer's own counter (every frame, not
+    /// every poll): the band's verdict.
+    gap_frames: u64,
+    /// THE THREE RATES' counters across the leg (M8-2a): frames drawn, chunks built and the
+    /// nanoseconds spent, chunks harvested, harvests that filled their cap.
+    frames: u64,
+    built: u64,
+    build_nanos: u64,
+    harvested: u64,
+    harvest_full: u64,
+    harvest_nanos: u64,
+    /// The parent cache across the leg: hits, builds, waits.
+    parent_hits: u64,
+    parent_builds: u64,
+    parent_waits: u64,
+    max_revealed: u64,
+    revealed_samples: u64,
+    max_pending: u64,
+    min_drawn: u64,
+    max_lead_m: f64,
+}
+
+/// Read the band for `secs` seconds, one sample every `SAMPLE_MS`: the instrument is the stamp
+/// the renderer writes every frame, polled through dev-control — never a sleep standing in for
+/// a measurement.
+fn read_band(devctl: u16, leg: &str, secs: f64) -> LegRead {
+    let mut read = LegRead {
+        min_drawn: u64::MAX,
+        ..LegRead::default()
+    };
+    let started = Instant::now();
+    // The counters at the first and the last sample: the leg's differences.
+    let mut first: Option<[u64; 10]> = None;
+    let mut last = [0u64; 10];
+    while started.elapsed().as_secs_f64() < secs {
+        let st = poll(devctl);
+        let stamp = st
+            .terrain_stamp
+            .as_ref()
+            .unwrap_or_else(|| panic!("{leg}: no terrain stamp while the leg runs: {st:?}"));
+        last = [
+            stamp.urgent_frames,
+            stamp.frames,
+            stamp.built_chunks,
+            stamp.build_nanos,
+            stamp.harvested,
+            stamp.harvest_full,
+            stamp.parent_hits,
+            stamp.parent_builds,
+            stamp.parent_waits,
+            stamp.harvest_nanos,
+        ];
+        first.get_or_insert(last);
+        // THE TIME COURSE, every twenty-fifth sample: how the queue and the gap move, so a
+        // capacity wall (the queue grows steadily) and a release storm (the screen empties at
+        // once) read differently.
+        if read.samples.is_multiple_of(25) {
+            eprintln!(
+                "terrain_moving_eye/{leg}: t {:5.1} s — {} drawn, {} pending, {} urgent {:?}, \
+                 {} revealed, lead {:.1} m, {:.0} m up, rungs {}..{} {:?}",
+                started.elapsed().as_secs_f64(),
+                stamp.chunks_drawn,
+                stamp.chunks_pending,
+                stamp.chunks_urgent,
+                stamp.urgent_per_rung,
+                stamp.chunks_revealed,
+                stamp.lead_m,
+                stamp.altitude_m,
+                stamp.rung_min,
+                stamp.rung_max,
+                stamp.chunks_per_rung
+            );
+        }
+        read.samples += 1;
+        read.max_urgent = read.max_urgent.max(stamp.chunks_urgent);
+        read.urgent_samples += u64::from(stamp.chunks_urgent > 0);
+        read.max_revealed = read.max_revealed.max(stamp.chunks_revealed);
+        read.revealed_samples += u64::from(stamp.chunks_revealed > 0);
+        read.max_pending = read.max_pending.max(stamp.chunks_pending);
+        read.min_drawn = read.min_drawn.min(stamp.chunks_drawn);
+        read.max_lead_m = read.max_lead_m.max(stamp.lead_m);
+        std::thread::sleep(Duration::from_millis(SAMPLE_MS));
+    }
+    let first = first.unwrap_or(last);
+    // A counter that went backwards (a client restart mid-leg) is refused, not wrapped.
+    assert!(
+        first.iter().zip(last.iter()).all(|(a, b)| a <= b),
+        "{leg}: a stamp counter went backwards — the client restarted during the leg"
+    );
+    read.gap_frames = last[0].saturating_sub(first[0]);
+    read.frames = last[1].saturating_sub(first[1]);
+    read.built = last[2].saturating_sub(first[2]);
+    read.build_nanos = last[3].saturating_sub(first[3]);
+    read.harvested = last[4].saturating_sub(first[4]);
+    read.harvest_full = last[5].saturating_sub(first[5]);
+    read.parent_hits = last[6].saturating_sub(first[6]);
+    read.parent_builds = last[7].saturating_sub(first[7]);
+    read.parent_waits = last[8].saturating_sub(first[8]);
+    read.harvest_nanos = last[9].saturating_sub(first[9]);
+    // THE THREE RATES (M8-2a, ruling V15): what the workers build, what the engine harvests, and
+    // the frames — per second of the leg — with the mean build time and the share of frames whose
+    // harvest filled its cap. A harvest at its cap on most frames is the wall.
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE THREE RATES — {:.1} frames/s, the workers ran {:.0} \
+         jobs/s ({:.2} ms of wall time each, a wait on a sibling's parent included), the engine \
+         harvested {:.0} chunks/s ({:.2} ms of the main thread each), the harvest filled its cap \
+         on {} of {} frames",
+        read.frames as f64 / secs,
+        read.built as f64 / secs,
+        if read.built > 0 {
+            read.build_nanos as f64 / read.built as f64 / 1.0e6
+        } else {
+            0.0
+        },
+        read.harvested as f64 / secs,
+        if read.harvested > 0 {
+            read.harvest_nanos as f64 / read.harvested as f64 / 1.0e6
+        } else {
+            0.0
+        },
+        read.harvest_full,
+        read.frames
+    );
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE PARENT CACHE — {} hits, {} builds, {} waits ({:.0} % hit)",
+        read.parent_hits,
+        read.parent_builds,
+        read.parent_waits,
+        if read.parent_hits + read.parent_builds > 0 {
+            100.0 * read.parent_hits as f64 / (read.parent_hits + read.parent_builds) as f64
+        } else {
+            0.0
+        }
+    );
+    eprintln!(
+        "terrain_moving_eye/{leg}: {} samples over {secs:.0} s — the band's gap peaked at {} \
+         urgent chunks ({} samples with a gap, {} FRAMES with a gap); the reveals past the \
+         horizon at {} chunks ({} samples); the queue at {} pending, {} chunks on screen at the \
+         least, the lead up to {:.1} m",
+        read.samples,
+        read.max_urgent,
+        read.urgent_samples,
+        read.gap_frames,
+        read.max_revealed,
+        read.revealed_samples,
+        read.max_pending,
+        read.min_drawn,
+        read.max_lead_m
+    );
+    read
+}
+
+/// THE PLANET'S MOTION THROUGH THE EYE'S FRAME: where the planet's row stands in the picture. For
+/// a character on the planet it stands still; for a character inside a flying hull it moves at
+/// the hull's own speed, the other way.
+fn planet_centre(state: &DevState, planet: RealmId) -> DVec3 {
+    let label = format!("{planet:?}");
+    let row = state
+        .realm_boxes
+        .iter()
+        .find(|b| b.realm == label)
+        .unwrap_or_else(|| panic!("the planet's row {label} is in the window: {state:?}"));
+    DVec3::from_array(row.center)
+}
+
+/// The speed of the eye through the planet, MEASURED from two polls `SPEED_INTERVAL` apart, in
+/// metres per second.
+fn measure_speed(devctl: u16, planet: RealmId) -> f64 {
+    let a = poll(devctl);
+    let t0 = Instant::now();
+    let c0 = planet_centre(&a, planet);
+    std::thread::sleep(SPEED_INTERVAL);
+    let b = poll(devctl);
+    let dt = t0.elapsed().as_secs_f64();
+    let c1 = planet_centre(&b, planet);
+    (c1 - c0).length() / dt
+}
+
+/// Push the hull along its nose until it passes `target_mps`, then release the stick: the hull
+/// coasts. The push time is derived from the hull's own rating and the speed it has; the speed is
+/// then measured, and the push repeated while it falls short.
+fn push_to(devctl: u16, planet: RealmId, target_mps: f64) -> f64 {
+    let push_mps2 = HULL_PUSH_MICRO_MPS2 as f64 / 1.0e6;
+    let started = Instant::now();
+    let mut speed = measure_speed(devctl, planet);
+    while speed < target_mps {
+        assert!(
+            started.elapsed() < PUSH_DEADLINE,
+            "the hull never reached {target_mps} m/s (at {speed:.1} m/s)"
+        );
+        let need_s = (target_mps - speed) / push_mps2;
+        throttle(devctl, [1.0, 0.0, 0.0]);
+        std::thread::sleep(Duration::from_secs_f64(need_s.max(0.05)));
+        throttle(devctl, [0.0, 0.0, 0.0]);
+        speed = measure_speed(devctl, planet);
+        eprintln!("terrain_moving_eye: pushed {need_s:.2} s, the hull flies at {speed:.1} m/s");
+    }
+    speed
+}
+
+/// A stand on the planet: the character's offset in the planet's frame and its facing.
+struct Stand {
+    offset_m: DVec3,
+    orient: vd_core::glam::DQuat,
+}
+
+fn stand(d: DVec3, height_m: f64, surface_m: f64, forward: DVec3) -> Stand {
+    let up = (d - forward * forward.dot(d)).normalize();
+    let right = forward.cross(up).normalize();
+    let basis = vd_core::glam::DMat3::from_cols(right, up, -forward);
+    Stand {
+        offset_m: d * (surface_m + height_m),
+        orient: vd_core::glam::DQuat::from_mat3(&basis).normalize(),
+    }
+}
+
+fn spawn_entry(account: u64, planet_seed: u64, st: &Stand) -> String {
+    format!(
+        "{account}=Planet({planet_seed}):{},{},{}@{},{},{},{}",
+        st.offset_m.x,
+        st.offset_m.y,
+        st.offset_m.z,
+        st.orient.x,
+        st.orient.y,
+        st.orient.z,
+        st.orient.w
+    )
+}
+
+/// The shipyard stand-in's default mint, restated so the gate knows the hull's name.
+fn minted_hull() -> RealmId {
+    RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, 1, 0))
+}
+
+/// Write the hull into THE PLANET'S file and its own: a berth inside the planet's realm, stated
+/// in the planet's frame, where the planet's shard reads it when it boots.
+fn plant_hull(f: &Fixture, planet: RealmId, berth_m: DVec3) -> RealmId {
+    let parent_store = realm_store_path(&f.base, planet);
+    let ship_store = realm_store_path(&f.base, minted_hull());
+    let out = Command::new(env!("CARGO_BIN_EXE_vd-build-ship"))
+        .args([
+            "--parent-store",
+            &parent_store,
+            "--ship-store",
+            &ship_store,
+            "--owner",
+            "1001",
+            "--max-push-micro-mps2",
+            &HULL_PUSH_MICRO_MPS2.to_string(),
+            "--berth-x-m",
+            &berth_m.x.to_string(),
+            "--berth-y-m",
+            &berth_m.y.to_string(),
+            "--berth-z-m",
+            &berth_m.z.to_string(),
+        ])
+        .output()
+        .expect("the shipyard's stand-in runs");
+    assert!(
+        out.status.success(),
+        "vd-build-ship: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let hull = minted_hull();
+    assert!(
+        printed.contains(&hull.to_string()),
+        "the tool names the hull it built ({hull}); it printed {printed:?}",
+    );
+    hull
+}
+
+/// The verdict of one leg: the band never incomplete on any sample.
+fn assert_band_complete(leg: &str, read: &LegRead) {
+    assert!(read.samples > 0, "{leg}: no sample");
+    assert!(read.min_drawn > 0, "{leg}: the ground left the screen");
+    assert_eq!(
+        read.gap_frames,
+        0,
+        "{leg}: THE BAND WENT INCOMPLETE on {} frames — {} urgent chunks missing at the worst \
+         sample, on {} of {} samples (the queue peaked at {} pending, the lead ran up to {:.1} m). \
+         Read the time course: a queue that grows steadily is a throughput wall (the workers' \
+         build rate), a gap with a shallow queue is the band's rule (the lead, the territory, the \
+         skyline).",
+        read.gap_frames,
+        read.max_urgent,
+        read.urgent_samples,
+        read.samples,
+        read.max_pending,
+        read.max_lead_m
+    );
+    assert_eq!(
+        read.max_urgent, 0,
+        "{leg}: a sample saw a gap no frame counted"
+    );
+}
+
+/// ONE JOB AT A TIME, enforced: a failed run keeps its fixture and its shards keep running; a
+/// later run beside them measures the machine, not the band (the seventh run of 2026-09-09
+/// failed the 240 m/s leg beside such a shard). The gate refuses to start while any process of
+/// an earlier fixture runs.
+fn refuse_stray_fixtures() {
+    let out = Command::new("ps")
+        .args(["-Ao", "command"])
+        .output()
+        .expect("ps lists the processes");
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let strays: Vec<&str> = listing
+        .lines()
+        .filter(|l| l.contains("vd-terrain-moving-eye-") && !l.contains(" ps "))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "an earlier run's fixture still runs; stop it first (one job at a time): {strays:#?}"
+    );
+}
+
+#[test]
+fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
+    refuse_stray_fixtures();
+    let _tier = vd_bins::cluster_tier();
+    let body = vd_bins::home_body(DEV.universe_seed).expect("the home planet");
+    let planet = RealmId::Planet(body.seed());
+    // THE STAND, as the picture gate finds it: the day side, on the equator, the star over the
+    // shoulder. The nose points along the ground.
+    let orbit = vd_bins::home_orbit(DEV.universe_seed).expect("the home planet's orbit");
+    let sun = -vd_physics::celestial::orbital_state(&orbit, 0.0)
+        .position
+        .normalize();
+    let along = sun.cross(DVec3::Z).normalize();
+    let zenith = (90.0_f64 - SUN_ELEVATION_DEG).to_radians();
+    let d = (sun * zenith.cos() + along * zenith.sin()).normalize();
+    let dir = [Gf::from_f64(d.x), Gf::from_f64(d.y), Gf::from_f64(d.z)];
+    let h = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+    let toward_sun = (sun - d * sun.dot(d)).normalize();
+    let ahead =
+        vd_core::glam::DQuat::from_axis_angle(d, SUN_OFF_NOSE_DEG.to_radians()) * toward_sun;
+    let level = ahead;
+    // The walker faces LEVEL: it walks along its nose, and a nose tilted down walks into the
+    // ground (MEASURED on the first run: 8° down, under the surface after 13 m, and with the eye
+    // under the surface the horizon is zero, no wall is raised, and everything within the reach
+    // is wanted — 1 930 chunks pending on a walk).
+    let walker = stand(d, EYE_HEIGHT_M, h, level);
+    // THE HULL'S ALTITUDE, FROM THE RECIPE: the hull flies level along the planet frame's `−Z`
+    // (its own nose) for the longest leg's distance, and the ground under that path rises where
+    // it rises; the berth stands `HULL_CLEARANCE_M` over the highest ground along the path, read
+    // from the recipe (MEASURED on the first hull leg at a stated 300 m: the hull flew into rising
+    // ground 12 km on, the eye stood under the surface, and the ladder collapsed to a dozen
+    // chunks). Nothing here states a height; the world does.
+    // The whole flight: both legs at their speeds for their read and their two speed polls, and
+    // the two pushes (a push from rest to `v` at the hull's rating covers `v² / 2a`), a fifth
+    // over (refutation R4-4: the first form read the probe leg alone, 40 km of a 50 km flight).
+    let push_mps2 = HULL_PUSH_MICRO_MPS2 as f64 / 1.0e6;
+    let read_s = LEG_S + 2.0 * SPEED_INTERVAL.as_secs_f64();
+    let leg_m = HULL_LEG_MPS
+        .iter()
+        .map(|v| v * read_s + v * v / (2.0 * push_mps2))
+        .sum::<f64>()
+        * 1.2;
+    let mut highest = h;
+    let mut s_m = 0.0;
+    while s_m <= leg_m {
+        let p = d * h + DVec3::NEG_Z * s_m;
+        let q = p.normalize();
+        let hq = vd_terrain::height::height_m(
+            &body,
+            [Gf::from_f64(q.x), Gf::from_f64(q.y), Gf::from_f64(q.z)],
+            2,
+        )
+        .to_f64();
+        highest = highest.max(hq + body.dropped_bound_m(2).to_f64());
+        // Between two samples the surface may stand higher than at either (the bound holds AT a
+        // sampled direction): the clearance carries that (refutation R4-30).
+        if ((s_m / PATH_SAMPLE_M).round() as u64).is_multiple_of(20) {
+            eprintln!(
+                "terrain_moving_eye: the ground {:.0} m along the path stands {:.0} m over the stand",
+                s_m,
+                hq - h
+            );
+        }
+        s_m += PATH_SAMPLE_M;
+    }
+    let hull_m = highest - h + HULL_CLEARANCE_M;
+    eprintln!(
+        "terrain_moving_eye: the ground along the {leg_m:.0} m path rises to {:.0} m over the \
+         stand's surface; the hull flies {hull_m:.0} m over it",
+        highest - h
+    );
+    let pilot = stand(d, hull_m, h, level);
+    // THE BERTH: the hull's centre `BERTH_STANDOFF_M` ahead of the pilot's stand, level with it,
+    // in the planet's frame. The hull's own nose is the planet frame's `−Z`: at this stand that
+    // is within a degree of level (the stand lies on the equator's plane), so a push flies the
+    // hull along the ground, rising slowly as the ground curves away.
+    let berth = pilot.offset_m + level * BERTH_STANDOFF_M;
+    let spawn_poses = [
+        spawn_entry(CLIENT_ACCOUNT_BASE, body.seed(), &walker),
+        spawn_entry(CLIENT_ACCOUNT_BASE + 1, body.seed(), &pilot),
+    ]
+    .join(";");
+    eprintln!(
+        "terrain_moving_eye: {planet:?}, surface {h:.1} m, the walker at {:?}, the pilot at {:?}, \
+         the hull berthed at {berth:?} (nose −Z, {:.2}° off level)",
+        walker.offset_m,
+        pilot.offset_m,
+        (DVec3::NEG_Z.dot(d)).asin().to_degrees()
+    );
+
+    let f = fixture();
+    let hull = plant_hull(&f, planet, berth);
+    let gw_admin = reserve_tcp_addr();
+    let a = demand_addrs(gw_admin);
+    let _reaper = ForkedReaper(f.launch_path.clone());
+    let _cluster = boot_demand_cluster(&f, &a, &DEV, &spawn_poses);
+
+    // ---- LEG 1: THE WALK.
+    let walk = {
+        let client_quic = reserve_udp_addr();
+        let devctl = reserve_tcp_addr().port();
+        let mut client = ChildGuard(spawn_capture_client(
+            &f,
+            a.gateway,
+            "walk",
+            0,
+            client_quic.port(),
+            devctl,
+        ));
+        await_listener(devctl, &mut client.0);
+        let landed = await_active(devctl);
+        assert_eq!(
+            landed.location.as_deref(),
+            Some(label_of(planet).as_str()),
+            "the walker lands on the planet: {landed:?}"
+        );
+        await_settled(devctl, "walk");
+        // THE FOOT SPEED is COMMANDED BY FEEDBACK: the share seeds from the shared parameter and
+        // the shard's own speed law scales it; the gate measures the speed the shard gives and
+        // corrects the share until the walk is the foot speed (MEASURED on the first run: the
+        // seed alone walked at 0.52 m/s). The walk covers about 84 m in its minute — a rung-0
+        // chunk and a third: the eye's own chunk changes once.
+        let speed = walk_at(devctl, WALK_MPS);
+        let read = read_band(devctl, "walk", LEG_S);
+        throttle(devctl, [0.0, 0.0, 0.0]);
+        eprintln!("terrain_moving_eye/walk: the character walked at {speed:.2} m/s");
+        assert!(
+            speed >= WALK_MPS * SPEED_SHORTFALL,
+            "the walk is slower than the foot speed: {speed:.2} m/s"
+        );
+        let _ = round_trip(devctl, &DevRequest::Close);
+        read
+    };
+
+    // ---- LEGS 2 AND 3: THE HULL.
+    let (fast, fastest) = {
+        let client_quic = reserve_udp_addr();
+        let devctl = reserve_tcp_addr().port();
+        let mut client = ChildGuard(spawn_capture_client(
+            &f,
+            a.gateway,
+            "hull",
+            1,
+            client_quic.port(),
+            devctl,
+        ));
+        await_listener(devctl, &mut client.0);
+        let landed = await_active(devctl);
+        assert_eq!(
+            landed.location.as_deref(),
+            Some(label_of(planet).as_str()),
+            "the pilot lands on the planet: {landed:?}"
+        );
+        await_settled(devctl, "hull, before boarding");
+        // BOARD: walk into the hull's wake; its shard spawns by the ordinary demand and the
+        // crossing commits when it runs. The aim is the berth in the planet's frame, which the
+        // pilot stands in until the crossing.
+        vd_bins::flight::cross_leg(
+            devctl,
+            "into the hull",
+            move |_tick| berth,
+            &label_of(hull),
+            BOARDING_DEADLINE,
+        );
+        let aboard = poll(devctl);
+        assert_eq!(
+            aboard.location.as_deref(),
+            Some(label_of(hull).as_str()),
+            "the pilot is aboard: {aboard:?}"
+        );
+        // From inside the hull the planet's ground is drawn: the ladder lands whole.
+        await_settled(devctl, "hull, aboard");
+        let mut reads = Vec::new();
+        for (i, target) in HULL_LEG_MPS.iter().enumerate() {
+            let leg = format!("hull {target} m/s");
+            // `push_to` returns at or past the target, or panics at its deadline: the speed
+            // needs no second assertion (refutation R4-7).
+            let speed = push_to(devctl, planet, *target);
+            let read = read_band(devctl, &leg, LEG_S);
+            eprintln!(
+                "terrain_moving_eye/{leg}: leg {} coasted at {speed:.1} m/s",
+                i + 2
+            );
+            reads.push(read);
+        }
+        let _ = round_trip(devctl, &DevRequest::Close);
+        let fastest = reads.pop().expect("two legs");
+        let fast = reads.pop().expect("two legs");
+        (fast, fastest)
+    };
+    // The verdicts, after every leg has flown (so every leg's numbers are always in the log).
+    report_leg(&format!("hull {} m/s", HULL_LEG_MPS[0]), &fast);
+    report_leg(&format!("hull {} m/s", HULL_LEG_MPS[1]), &fastest);
+    assert_band_complete("walk", &walk);
+    eprintln!(
+        "terrain_moving_eye: THE BAND HELD on every frame of the walk — {walk:?}; the hull legs \
+         read {fast:?} and {fastest:?}"
+    );
+}
+
+/// A HULL LEG'S REPORT: measured and named, never asserted (the file's doc). The ground must stay
+/// on screen (coarser rungs cover what the finer ones miss); the rest is the number the owner
+/// reads.
+fn report_leg(leg: &str, read: &LegRead) {
+    assert!(read.samples > 0, "{leg}: no sample");
+    assert!(read.min_drawn > 0, "{leg}: the ground left the screen");
+    if read.max_urgent == 0 {
+        eprintln!("terrain_moving_eye/{leg}: THE BAND HELD on every frame");
+    } else {
+        eprintln!(
+            "terrain_moving_eye/{leg}: THE BAND WENT INCOMPLETE (reported, not asserted) on {} \
+             frames: {} urgent chunks missing at the worst sample, on {} of {} samples; the queue \
+             peaked at {} pending; the lead ran up to {:.1} m. A throughput wall: the eye sweeps \
+             more chunks per second than the workers build. The lever is the owner's (slice 8 \
+             discussion §16).",
+            read.gap_frames,
+            read.max_urgent,
+            read.urgent_samples,
+            read.samples,
+            read.max_pending,
+            read.max_lead_m
+        );
+    }
+}
+
+/// Walk at `target_mps` by feedback: a share of the stick, the speed measured, the share
+/// corrected, until the walk is within a tenth of the target (or the correction loop is spent,
+/// and the gate then judges the measured speed).
+fn walk_at(devctl: u16, target_mps: f64) -> f64 {
+    let mut share = target_mps / DEV.move_speed;
+    let mut speed = 0.0;
+    let mut round = 0;
+    while round < 5 {
+        throttle(devctl, [share as f32, 0.0, 0.0]);
+        // The stick reaches the shard and the delivered pose the picture: a settling pause
+        // before the two polls, so the measurement is the steady walk.
+        std::thread::sleep(SPEED_INTERVAL);
+        speed = measure_speed_of_walker(devctl);
+        eprintln!("terrain_moving_eye/walk: share {share:.5} of the stick walks at {speed:.2} m/s");
+        if (speed - target_mps).abs() <= target_mps * 0.1 {
+            break;
+        }
+        if speed > 0.0 {
+            share *= target_mps / speed;
+        } else {
+            share *= 2.0;
+        }
+        round += 1;
+    }
+    speed
+}
+
+/// The walker's speed, MEASURED from its own row two polls apart.
+fn measure_speed_of_walker(devctl: u16) -> f64 {
+    let a = poll(devctl);
+    let t0 = Instant::now();
+    let p0 = vd_bins::pixel::own_pose(&a)
+        .expect("the walker's own row")
+        .0;
+    std::thread::sleep(SPEED_INTERVAL);
+    let b = poll(devctl);
+    let dt = t0.elapsed().as_secs_f64();
+    let p1 = vd_bins::pixel::own_pose(&b)
+        .expect("the walker's own row")
+        .0;
+    (p1 - p0).length() / dt
+}

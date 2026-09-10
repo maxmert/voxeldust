@@ -143,6 +143,19 @@ const GROUND_UNDER_BALL_ROWS: (usize, usize) = (3, 8);
 const STILL_TOLERANCE_M: f64 = 1e-6;
 /// Where the pictures go for the owner.
 const PICTURE_DIR: &str = "docs/investigation/2026-09-07/pictures";
+/// Set in the environment, the gate refuses a picture that differs from the one on disk by one
+/// pixel (ruling V16: a packing changes bytes, never the picture).
+const PICTURE_IDENTICAL_ENV: &str = "VD_PICTURE_IDENTICAL";
+/// THE CAPTURE TICK: a stand's picture is taken at a CONSTANT universe tick — this many ticks per
+/// stand, in the stands' order — so two flights of one stand capture the SAME moment of the world
+/// (the star at the same angle) and their pixels compare. MEASURED before this: two flights of one
+/// code differed by 277–593 pixels, the widest channel step up to 140, because each captured at
+/// its own tick. A stand that settles past its tick is a red gate, never a silent shift to the
+/// next (refutation P-4). One minute of ticks a stand: the longest settle is 12 s.
+const CAPTURE_TICK_GRID: u64 = 1_200;
+/// How far the overlay's rectangle grows on every side before the compare leaves it out: the
+/// glyphs' antialiasing.
+const HUD_MARGIN_PX: f32 = 2.0;
 
 struct ChildGuard(Child);
 impl Drop for ChildGuard {
@@ -428,7 +441,9 @@ fn take_picture(
         "{name}: the clock is not near its genesis: {:?}",
         landed.universe_tick
     );
-    // The terrain arrives: the instrument, never a sleep.
+    // The terrain arrives: the instrument, never a sleep. The fill is timed from here to the
+    // settle (M8-2's census).
+    let fill_started = Instant::now();
     let live = round_trip(
         devctl,
         &DevRequest::WaitUntil {
@@ -460,12 +475,36 @@ fn take_picture(
         matches!(settled, DevResponse::State { .. }),
         "{name}: the terrain never settled: {settled:?}"
     );
+    let fill_s = fill_started.elapsed().as_secs_f64();
     let last = vd_bins::pixel::poll(devctl).terrain_chunks_drawn;
-    // The account was born facing where the picture wants: capture.
+    // THE FRAME RATE on the still stand (M8-2): the renderer's own frame counter over a timed
+    // interval, read from the stamp.
+    let frames_at = |devctl: u16| {
+        vd_bins::pixel::poll(devctl)
+            .terrain_stamp
+            .map_or(0, |s| s.frames)
+    };
+    let frames_before = frames_at(devctl);
+    let frame_window = Instant::now();
+    std::thread::sleep(Duration::from_secs(2));
+    let frames_per_s =
+        (frames_at(devctl) - frames_before) as f64 / frame_window.elapsed().as_secs_f64();
+    // The account was born facing where the picture wants: capture, at the grid's next tick.
+    let settled_tick = vd_bins::pixel::poll(devctl).universe_tick.unwrap_or(0);
+    let capture_tick = CAPTURE_TICK_GRID * (pic.agent_index + 1);
+    eprintln!(
+        "terrain_pictures/{name}: settled at tick {settled_tick}; the capture waits for tick \
+         {capture_tick}"
+    );
+    assert!(
+        settled_tick < capture_tick,
+        "{name}: the terrain settled at tick {settled_tick}, past this stand's capture tick \
+         {capture_tick}: the picture would not be the same moment as the last flight's"
+    );
     let shot = round_trip(
         devctl,
         &DevRequest::Screenshot {
-            at_tick: None,
+            at_tick: Some(capture_tick),
             label: Some(name.to_owned()),
         },
     );
@@ -496,6 +535,18 @@ fn take_picture(
         .clone()
         .unwrap_or_else(|| panic!("{name}: the stamp is on the state file"));
     eprintln!("terrain_pictures/{name}: stamp {stamp:?}");
+    eprintln!(
+        "terrain_pictures/{name}: M8-2 CENSUS — {} chunks, {} vertices, {:.1} MB on screen ({:.0} \
+         KB a chunk), filled in {fill_s:.1} s, {frames_per_s:.1} frames/s on the still stand",
+        stamp.chunks_drawn,
+        stamp.vertices,
+        stamp.bytes_drawn as f64 / 1.0e6,
+        if stamp.chunks_drawn > 0 {
+            stamp.bytes_drawn as f64 / stamp.chunks_drawn as f64 / 1024.0
+        } else {
+            0.0
+        }
+    );
     // THE STAND HELD STILL: the state file (polled after the capture) and a poll now agree on the
     // delivered position, so the stamp, the pose and the probe describe one moment.
     let again = vd_bins::pixel::poll(devctl);
@@ -862,7 +913,144 @@ fn take_picture(
         .join(PICTURE_DIR);
     std::fs::create_dir_all(&dir).expect("the picture directory");
     let dest = dir.join(format!("{name}.png"));
+    // THE PICTURE AGAINST THE ONE ON DISK (ruling V16: a packing changes bytes, never the
+    // picture): every pixel compared, the count and the widest channel step reported; with
+    // `VD_PICTURE_IDENTICAL` set, one differing pixel is a red gate.
+    let dest_probe = dir.join(format!("{name}.probe.png"));
+    let dest_hud = dir.join(format!("{name}.hud.json"));
+    if dest.exists() && dest_probe.exists() {
+        let (before, bw, bh) = open_rgba(&dest);
+        let (before_probe, pw2, ph2) = open_rgba(&dest_probe);
+        if (bw, bh) == (w, h) && (pw2, ph2) == (w, h) {
+            // Only the CONTENT compares: a pixel either probe marks as terrain or ruler, and not
+            // under the overlay. The HUD's stamp line carries the frame's tick, and that readout
+            // differs between two runs of one code by design (MEASURED: 152 pixels of a
+            // packed-against-packed ground picture, every one inside the HUD's text); the
+            // renderer reports the HUD's rectangle on the stamp, and the compare leaves it out.
+            // The UNION of both pictures' overlay rectangles (the reference's rides beside it
+            // in a sidecar; refutation P-3: a HUD whose longest line changed with the code left
+            // its extra text counted as content), grown by the glyphs' antialiasing.
+            let this_hud = stamp.hud_rect_px;
+            let before_hud: [f32; 4] = std::fs::read_to_string(&dest_hud)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(this_hud);
+            let hud = [
+                this_hud[0].min(before_hud[0]) - HUD_MARGIN_PX,
+                this_hud[1].min(before_hud[1]) - HUD_MARGIN_PX,
+                this_hud[2].max(before_hud[2]) + HUD_MARGIN_PX,
+                this_hud[3].max(before_hud[3]) + HUD_MARGIN_PX,
+            ];
+            eprintln!(
+                "terrain_pictures/{name}: the overlays' rectangle ({:.0}, {:.0})–({:.0}, {:.0}) \
+                 is left out of the compare",
+                hud[0], hud[1], hud[2], hud[3]
+            );
+            let mut differing = 0usize;
+            let mut content = 0usize;
+            let mut widest = 0u8;
+            for (i, (((a, b), pa), pb)) in before
+                .chunks_exact(4)
+                .zip(rgba.chunks_exact(4))
+                .zip(before_probe.chunks_exact(4))
+                .zip(probe.chunks_exact(4))
+                .enumerate()
+            {
+                let (x, y) = ((i % w) as f32, (i / w) as f32);
+                let under_hud = x >= hud[0] && x <= hud[2] && y >= hud[1] && y <= hud[3];
+                let drawn = decode_probe([pa[0], pa[1], pa[2]]).kind != PROBE_KIND_NONE
+                    || decode_probe([pb[0], pb[1], pb[2]]).kind != PROBE_KIND_NONE;
+                if !drawn || under_hud {
+                    continue;
+                }
+                content += 1;
+                let step = a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| x.abs_diff(*y))
+                    .max()
+                    .unwrap_or(0);
+                differing += usize::from(step > 0);
+                widest = widest.max(step);
+            }
+            eprintln!(
+                "terrain_pictures/{name}: against the picture on disk — {differing} of {content} \
+                 content pixels differ (the probe's terrain and ruler), the widest channel step \
+                 {widest}"
+            );
+            // Where they differ: the previous picture kept beside the run, and a difference
+            // image — a differing pixel white on black — so the owner sees WHAT changed.
+            if differing > 0 {
+                // Kept OUTSIDE the fixture (a green run deletes its fixture): under the
+                // workspace's target directory.
+                let kept_dir =
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/terrain_pictures");
+                std::fs::create_dir_all(&kept_dir).expect("the kept pictures' directory");
+                let keep = kept_dir.join(format!("{name}.before.png"));
+                std::fs::copy(&dest, &keep).expect("keep the previous picture");
+                std::fs::copy(&png, kept_dir.join(format!("{name}.after.png")))
+                    .expect("keep the new picture");
+                let mut diff = vec![0u8; before.len()];
+                for (i, ((((a, b), pa), pb), d)) in before
+                    .chunks_exact(4)
+                    .zip(rgba.chunks_exact(4))
+                    .zip(before_probe.chunks_exact(4))
+                    .zip(probe.chunks_exact(4))
+                    .zip(diff.chunks_exact_mut(4))
+                    .enumerate()
+                {
+                    let (x, y) = ((i % w) as f32, (i / w) as f32);
+                    let under_hud = x >= hud[0] && x <= hud[2] && y >= hud[1] && y <= hud[3];
+                    let drawn = !under_hud
+                        && (decode_probe([pa[0], pa[1], pa[2]]).kind != PROBE_KIND_NONE
+                            || decode_probe([pb[0], pb[1], pb[2]]).kind != PROBE_KIND_NONE);
+                    let step = a
+                        .iter()
+                        .zip(b.iter())
+                        .map(|(x, y)| x.abs_diff(*y))
+                        .max()
+                        .unwrap_or(0);
+                    let v = if drawn && step > 0 { 255 } else { 0 };
+                    d.copy_from_slice(&[v, v, v, 255]);
+                }
+                let diff_path = kept_dir.join(format!("{name}.diff.png"));
+                image::save_buffer(
+                    &diff_path,
+                    &diff,
+                    w as u32,
+                    h as u32,
+                    image::ColorType::Rgba8,
+                )
+                .expect("write the difference image");
+                eprintln!(
+                    "terrain_pictures/{name}: the previous picture is kept at {} and the \
+                     difference image at {}",
+                    keep.display(),
+                    diff_path.display()
+                );
+            }
+            if std::env::var_os(PICTURE_IDENTICAL_ENV).is_some() {
+                assert_eq!(
+                    differing, 0,
+                    "{name}: THE PICTURE CHANGED — {differing} pixels differ (widest step \
+                     {widest}) and {PICTURE_IDENTICAL_ENV} refuses any change"
+                );
+            }
+        } else {
+            eprintln!(
+                "terrain_pictures/{name}: the picture on disk is {bw}×{bh}, this one {w}×{h}: not \
+                 compared"
+            );
+        }
+    }
+    // The previous picture and probe stay beside the run for a later look, the new ones go to
+    // the owner's directory.
     std::fs::copy(&png, &dest).expect("copy the picture");
+    std::fs::write(
+        &dest_hud,
+        serde_json::to_string(&stamp.hud_rect_px).expect("the rectangle encodes"),
+    )
+    .expect("write the overlay's rectangle beside the picture");
     std::fs::copy(&probe_png, dir.join(format!("{name}.probe.png"))).expect("copy the probe");
     eprintln!("terrain_pictures/{name}: written to {}", dest.display());
     (last, share)

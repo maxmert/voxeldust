@@ -35,6 +35,8 @@ struct ProbeUniform {
     cell_m: f32,
     // THE CROSSFADE BANDS (slice 8 step 3): (in_lo, sink_end, out_lo, out_hi), metres from the eye.
     bands: vec4<f32>,
+    // The rung's sink in metres (x), step 5.
+    sink: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> probe: ProbeUniform;
@@ -43,8 +45,12 @@ struct ProbeVertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(8) morph: vec3<f32>,
-    @location(9) sink: vec3<f32>,
+    // THE MORPH METRE (step 5): the vertex's distance along its own radial to the next coarser
+    // rung's surface.
+    @location(8) morph_m: f32,
+    // THE RADIAL (step 5): the vertex's unit direction from the body's centre in the chunk's
+    // frame.
+    @location(9) radial: vec3<f32>,
 }
 
 fn whole(d: f32) -> f32 {
@@ -61,8 +67,15 @@ fn vertex(vertex: ProbeVertex) -> VertexOutput {
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     let own = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
     let d = length(own.xyz);
-    let local = mix(vertex.morph, vertex.position, whole(d)) - vertex.sink * (1.0 - risen(d));
-    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(local, 1.0));
+    // The vertex's radial (its own attribute, turned into the world like a normal), its target
+    // along it, and its sink along it — the morph in world space (step 5: one metre and one
+    // radial per vertex, the sink one number per rung; no centre of the body, so no material
+    // is rewritten as the eye moves).
+    let radial = normalize(mesh_functions::mesh_normal_local_to_world(vertex.radial, vertex.instance_index));
+    let coarser = own.xyz + radial * vertex.morph_m;
+    let sink = radial * probe.sink.x;
+    let morphed = mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d));
+    out.world_position = vec4<f32>(morphed, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX

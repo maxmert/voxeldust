@@ -192,6 +192,62 @@ pub fn relief_m(body: &BodyDefinition) -> f64 {
     body.relief_bound_m(0).to_f64()
 }
 
+/// Where a wanted chunk stands for the band: in the hysteresis margin past its rung's switch, in
+/// the rung's own territory inside the eye's horizon (URGENT), or in that territory past the
+/// horizon (REVEALED).
+#[derive(Clone, Copy)]
+enum Territory {
+    Margin,
+    Urgent,
+    Revealed,
+}
+
+impl Territory {
+    /// The request order's first key: the picture's need now, then the peaks it sees, then the
+    /// bands' overlap a finer ring already covers.
+    fn rank(self) -> u8 {
+        match self {
+            Territory::Urgent => 0,
+            Territory::Revealed => 1,
+            Territory::Margin => 2,
+        }
+    }
+}
+
+/// THE REQUEST ORDER of one wanted chunk (ruling V15, M8-2a): the class, then the coarser rung
+/// first (a missing coarse chunk is a hole, a missing fine chunk a coarser patch), then the
+/// PARENT column along a MORTON curve over its face, then the chunk — so the four children of one
+/// parent and the neighbours on every side build back to back, and the workers' parent cache holds
+/// their parents. MEASURED: 60 ms a chunk on a flight with the cache missing, 5 ms warm; with the
+/// parents ordered nearest-first the fourteenth run still paid 46 ms, because two parents at one
+/// distance stand anywhere around the eye and their eight-parent neighbourhoods rarely overlap.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct RequestOrder {
+    class: u8,
+    depth: u8,
+    face: Face,
+    parent_morton: u64,
+}
+
+/// The Morton code of a column pair: the bits of `x` and `y` interleaved, so two codes close in
+/// value are two columns close on the face (in both axes, most of the time). A column index is
+/// never negative (a face's columns count from zero); a negative is clamped to zero, so it can
+/// never break the order, and it is not a column. The order groups by FACE: a chunk on a face
+/// edge reads a parent across the edge (`parent_keys`), and that parent is ordered with the other
+/// face — the one seam the curve does not cover.
+#[must_use]
+pub fn morton(x: i32, y: i32) -> u64 {
+    let mut code = 0u64;
+    let (x, y) = (x.max(0) as u64, y.max(0) as u64);
+    let mut bit = 0;
+    while bit < 32 {
+        code |= ((x >> bit) & 1) << (2 * bit);
+        code |= ((y >> bit) & 1) << (2 * bit + 1);
+        bit += 1;
+    }
+    code
+}
+
 /// A column of chunks: a face, a rung, and the chunk index across the face. Two columns on one face
 /// OVERLAP when one's footprint holds the other's (the same column, or an ancestor at a coarser
 /// rung); columns on different faces never overlap, the faces tile the sphere.
@@ -234,6 +290,20 @@ pub struct WantedSet {
     /// The wanted chunks by face and rung, then by column.
     index: BTreeMap<(Face, u8), ColumnIndex>,
     set: BTreeSet<ChunkKey>,
+    /// THE URGENT CHUNKS (slice 8 step 4): the wanted chunks of columns INSIDE THE EYE'S HORIZON
+    /// whose nearest point lies inside their rung's own territory, nearer than the rung's switch
+    /// distance — the ground the picture draws at that rung NOW, which the eye's motion carries
+    /// it into. The rest of a ring is the hysteresis margin past the switch (a fifth of it),
+    /// where the coarser rung still stands: ground asked for ahead of need. A missing urgent
+    /// chunk is the residency band incomplete; a missing margin chunk is not. M8-1 reads the
+    /// count of missing urgent chunks per frame on a moving eye.
+    urgent: BTreeSet<ChunkKey>,
+    /// THE REVEALED CHUNKS: the wanted chunks of columns PAST THE HORIZON inside their rung's
+    /// territory — peaks the skyline admits. One that is not resident is a peak the eye can see
+    /// before it is built (a reveal over a crest): not the band's motion, and not predictable
+    /// by any lead; the want margin builds most before they show, and the pop detector (step
+    /// 6) judges the rest. Counted apart, so the band's verdict stays the band's.
+    revealed: BTreeSet<ChunkKey>,
     /// How far the ladder reaches, in metres, and the rungs it holds.
     pub reach_m: f64,
     pub rung_min: u8,
@@ -279,6 +349,80 @@ impl WantedSet {
     #[must_use]
     pub fn contains(&self, key: ChunkKey) -> bool {
         self.set.contains(&key)
+    }
+
+    /// Mark a wanted chunk's territory.
+    fn mark(&mut self, key: ChunkKey, territory: Territory) {
+        match territory {
+            Territory::Margin => {}
+            Territory::Urgent => {
+                self.urgent.insert(key);
+            }
+            Territory::Revealed => {
+                self.revealed.insert(key);
+            }
+        }
+    }
+
+    /// Whether a wanted chunk is urgent.
+    #[must_use]
+    pub fn is_urgent(&self, key: ChunkKey) -> bool {
+        self.urgent.contains(&key)
+    }
+
+    /// THE JOB'S PRIORITY (the lower builds first) of the chunk at `index` in `keys`: a GLOBAL
+    /// order, the same across every realm's set (refutation T-2: an index alone let a moon's
+    /// margin chunk outrank the planet's urgent one) — the class in the top two bits, then the
+    /// depth (the coarser rung first) in six, then the index in the set, which the request order
+    /// already sorted by parent along the Morton curve.
+    #[must_use]
+    pub fn priority_of(&self, index: usize, key: ChunkKey) -> u32 {
+        let class: u32 = if self.urgent.contains(&key) {
+            0
+        } else if self.revealed.contains(&key) {
+            1
+        } else {
+            2
+        };
+        let depth = 63u32.saturating_sub(u32::from(key.rung));
+        (class << 30) | (depth << 24) | (index as u32 & 0x00FF_FFFF)
+    }
+
+    /// How many chunks are urgent.
+    #[must_use]
+    pub fn urgent_count(&self) -> usize {
+        self.urgent.len()
+    }
+
+    /// How many chunks are revealed peaks past the horizon.
+    #[must_use]
+    pub fn revealed_count(&self) -> usize {
+        self.revealed.len()
+    }
+
+    /// THE BAND'S GAP: how many urgent chunks have NOT `arrived` — zero when every chunk the
+    /// picture draws now, inside the horizon, is resident. A lookup per urgent chunk, never a
+    /// scan of the lane.
+    #[must_use]
+    pub fn urgent_missing(&self, arrived: &dyn Fn(ChunkKey) -> bool) -> usize {
+        self.urgent.iter().filter(|k| !arrived(**k)).count()
+    }
+
+    /// THE BAND'S GAP PER RUNG: the urgent chunks that have NOT `arrived`, counted by rung
+    /// (rungs with no gap are absent) — which ring of the ladder a moving eye outruns.
+    #[must_use]
+    pub fn urgent_missing_per_rung(&self, arrived: &dyn Fn(ChunkKey) -> bool) -> Vec<(u8, u64)> {
+        let mut counts: BTreeMap<u8, u64> = BTreeMap::new();
+        for key in self.urgent.iter().filter(|k| !arrived(**k)) {
+            *counts.entry(key.rung).or_insert(0) += 1;
+        }
+        counts.into_iter().collect()
+    }
+
+    /// THE REVEALS' GAP: how many revealed chunks have NOT `arrived`.
+    #[must_use]
+    pub fn revealed_missing(&self, arrived: &dyn Fn(ChunkKey) -> bool) -> usize {
+        self.revealed.iter().filter(|k| !arrived(**k)).count()
     }
 
     /// How many chunks are wanted.
@@ -343,7 +487,35 @@ impl WantedSet {
 pub struct LadderView {
     spans: BTreeMap<Column, (ColumnSpan, u64)>,
     generation: u64,
+    /// THE KEPT COLUMNS (slice 8 step 4): every column the last descent wanted. A column past
+    /// the horizon that was wanted is KEPT while its peak stands within [`KEEP_MARGIN_RAD`] under
+    /// the skyline, and a new one is wanted only when it stands within [`WANT_MARGIN_RAD`] under
+    /// it: hysteresis on the skyline's verdict. MEASURED on the walk of M8-1 without it: a
+    /// column just at the skyline flipped between hidden and seen as the eye moved half a
+    /// metre, and each flip released and rebuilt it — 4 chunks missing on 80 of 1 383 samples.
+    /// Keeping is free (the chunk is resident); rebuilding is not.
+    kept: BTreeSet<Column>,
+    /// THE CULLED COLUMNS: every column past the horizon the last descent judged hidden. Such a
+    /// column stays skyline-judged until it lies well inside the horizon
+    /// ([`HORIZON_HYSTERESIS`]): the horizon moves with the eye's height (a walker over a bump,
+    /// 1.8 m to 2.5 m, moves it from 4.8 km to 5.7 km), and MEASURED on the walk of M8-1 a
+    /// column hidden by the skyline at one step stood inside the horizon at the next, was
+    /// wanted unconditionally, and was built for nothing — 2 chunks missing on 17 of 1 291
+    /// samples.
+    culled: BTreeSet<Column>,
 }
+
+/// How far inside the horizon a column the skyline culled must lie before the horizon alone
+/// wants it: a quarter of the horizon's distance.
+pub const HORIZON_HYSTERESIS: f64 = 0.25;
+
+/// How far under the skyline a KEPT far column's peak may stand and stay wanted, in radians:
+/// about 3°, more than the near walls swing per frame at a hull's speed over a planet (a step
+/// of 8 m at a wall 300 m off is 1.6°).
+pub const KEEP_MARGIN_RAD: f64 = 0.05;
+/// How far under the skyline a NEW far column's peak may stand and be wanted, in radians: about
+/// 0.6°, so a peak a walk is about to reveal over a crest is built before it shows.
+pub const WANT_MARGIN_RAD: f64 = 0.01;
 
 /// THE GEOMETRY OF A COLUMN as the eye sees it: its centre's straight distance bounds (the nearest
 /// and farthest point, by the circumscribed disc), its centre's central angle and azimuth from
@@ -406,48 +578,77 @@ fn column_geometry(
     }
 }
 
-/// ONE STEP OF THE DESCENT for a column that is seen: split it into its four children while a
-/// child could carry weight (some point of this node lies short of the end of the band below it),
-/// and draw it — its span's chunks into the rung's own list — while some point of it carries
-/// weight.
-fn descend(
-    ladder: &vd_seed::ladder::Ladder,
-    body: &BodyDefinition,
-    col: Column,
-    geo: &ColumnGeometry,
-    span: &ColumnSpan,
-    next: &mut Vec<Column>,
-    per_rung: &mut [Vec<ChunkKey>],
-) {
-    let edge = CHUNK_EDGE as i32;
-    let (fade_in, fade_out) = fade_bands(col.rung, ladder.rungs);
-    if (col.rung > 0) & (geo.near < fade_in[1]) {
-        let child_rung = col.rung - 1;
-        let last = (ladder.cells_per_edge(child_rung) as i32 - 1) / edge;
-        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-            let child = Column {
-                face: col.face,
-                rung: child_rung,
-                x: col.x * 2 + dx,
-                y: col.y * 2 + dy,
-            };
-            if (child.x <= last) & (child.y <= last) {
-                next.push(child);
+/// THE SWEEP of one descent: the ladder and body it walks, and the keys of each rung with their
+/// territory, filled by both passes (the set lists the coarsest first).
+struct Sweep<'a> {
+    ladder: &'a vd_seed::ladder::Ladder,
+    body: &'a BodyDefinition,
+    per_rung: Vec<Vec<(ChunkKey, Territory)>>,
+}
+
+impl Sweep<'_> {
+    /// ONE STEP OF THE DESCENT for a column that is seen: split it into its four children while
+    /// a child could carry weight (some point of this node lies short of the end of the band
+    /// below it), and draw it — its span's chunks into the rung's own list — while some point of
+    /// it carries weight.
+    fn descend(
+        &mut self,
+        col: Column,
+        geo: &ColumnGeometry,
+        span: &ColumnSpan,
+        inside_horizon: bool,
+        next: &mut Vec<Column>,
+    ) {
+        let ladder = self.ladder;
+        let body = self.body;
+        let per_rung = &mut self.per_rung;
+        let edge = CHUNK_EDGE as i32;
+        let (fade_in, fade_out) = fade_bands(col.rung, ladder.rungs);
+        if (col.rung > 0) & (geo.near < fade_in[1]) {
+            let child_rung = col.rung - 1;
+            let last = (ladder.cells_per_edge(child_rung) as i32 - 1) / edge;
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let child = Column {
+                    face: col.face,
+                    rung: child_rung,
+                    x: col.x * 2 + dx,
+                    y: col.y * 2 + dy,
+                };
+                if (child.x <= last) & (child.y <= last) {
+                    next.push(child);
+                }
             }
         }
-    }
-    if (geo.far > fade_in[0]) & (geo.near < fade_out[1]) {
-        let top_z = vd_terrain::digest::top_chunk_z(body, col.rung);
-        let mut z = span.lo;
-        while z <= span.hi.min(top_z) {
-            per_rung[col.rung as usize].push(ChunkKey {
-                face: col.face,
-                rung: col.rung,
-                x: col.x,
-                y: col.y,
-                z,
-            });
-            z += 1;
+        if (geo.far > fade_in[0]) & (geo.near < fade_out[1]) {
+            // Inside the rung's OWN territory while some point of the column lies nearer than its
+            // switch distance (the top rung's is past everything) AND past the finer rung's far edge
+            // (the finer covers the ground up to there, so a column entering at its fade-in edge is
+            // under the finer rung and not yet the picture's need — MEASURED on the walk of M8-1: a
+            // coarser column crossing its fade-in edge counted as two missing chunks for a frame,
+            // under a finer rung that stood whole). URGENT for a column inside the eye's horizon
+            // (the ground the motion carries the eye into), REVEALED for one past it (a peak the
+            // skyline admits).
+            let inside = (geo.near < switch_m(col.rung)) & (geo.far > fade_in[1]);
+            let territory = match (inside, inside_horizon) {
+                (false, _) => Territory::Margin,
+                (true, true) => Territory::Urgent,
+                (true, false) => Territory::Revealed,
+            };
+            let top_z = vd_terrain::digest::top_chunk_z(body, col.rung);
+            let mut z = span.lo;
+            while z <= span.hi.min(top_z) {
+                per_rung[col.rung as usize].push((
+                    ChunkKey {
+                        face: col.face,
+                        rung: col.rung,
+                        x: col.x,
+                        y: col.y,
+                        z,
+                    },
+                    territory,
+                ));
+                z += 1;
+            }
         }
     }
 }
@@ -494,6 +695,8 @@ impl LadderView {
         {
             // Nothing wanted, nothing kept.
             self.spans.clear();
+            self.kept.clear();
+            self.culled.clear();
             return WantedSet::default();
         }
         let d = eye / len;
@@ -512,8 +715,11 @@ impl LadderView {
         self.generation += 1;
         let frame = EyeFrame::new(eye);
         let mut skyline = Skyline::new(len);
-        // The keys of each rung; both passes fill them, and the set lists the coarsest first.
-        let mut per_rung: Vec<Vec<ChunkKey>> = vec![Vec::new(); usize::from(rungs)];
+        let mut sweep = Sweep {
+            ladder: &ladder,
+            body,
+            per_rung: vec![Vec::new(); usize::from(rungs)],
+        };
         // The roots: every top-rung column of every face.
         let n_top = ladder.cells_per_edge(top) as i32;
         let chunks_top = (n_top - 1) / edge + 1;
@@ -546,7 +752,14 @@ impl LadderView {
                 if geo.near > reach {
                     continue;
                 }
-                if geo.near > horizon {
+                // Inside the horizon — but a column the skyline culled last time stays with the
+                // skyline until it lies well inside (the horizon's own hysteresis).
+                let boundary = if self.culled.contains(&col) {
+                    horizon * (1.0 - HORIZON_HYSTERESIS)
+                } else {
+                    horizon
+                };
+                if geo.near > boundary {
                     far.push(col);
                     continue;
                 }
@@ -563,13 +776,15 @@ impl LadderView {
                         - crate::chunks::sink_m(body, col.rung);
                     skyline.raise(&geo.quad, floor);
                 }
-                descend(&ladder, body, col, &geo, &span, &mut next, &mut per_rung);
+                sweep.descend(col, &geo, &span, true, &mut next);
             }
             level = next;
         }
         // PASS B — past the horizon, against the skyline the near ground raised: a column is seen
         // while its peak bound can show over the lowest wall at some azimuth it spans. A child of
         // a far column is far too (it lies inside its parent), and is judged on its own.
+        let mut culled: BTreeSet<Column> = BTreeSet::new();
+        let mut cleared: BTreeSet<Column> = BTreeSet::new();
         level = far;
         while !level.is_empty() {
             let mut next: Vec<Column> = Vec::new();
@@ -579,10 +794,21 @@ impl LadderView {
                     continue;
                 }
                 let span = self.span(body, col);
-                if !skyline.clears(geo.phi, geo.az, geo.rho, span.peak_m.to_f64()) {
+                let margin = if self.kept.contains(&col) {
+                    KEEP_MARGIN_RAD
+                } else {
+                    WANT_MARGIN_RAD
+                };
+                if !skyline.clears(geo.phi, geo.az, geo.rho, span.peak_m.to_f64(), margin) {
+                    culled.insert(col);
                     continue;
                 }
-                descend(&ladder, body, col, &geo, &span, &mut next, &mut per_rung);
+                cleared.insert(col);
+                // The territory reads the TRUE horizon: a column the hysteresis sent here from
+                // inside the horizon (between three quarters of it and the horizon) is ground the
+                // picture draws now, and its chunks are urgent, never "revealed" (refutation
+                // R4-1: the gap under-read it as a reveal).
+                sweep.descend(col, &geo, &span, geo.near <= horizon, &mut next);
             }
             level = next;
         }
@@ -590,13 +816,36 @@ impl LadderView {
             reach_m: reach,
             ..WantedSet::default()
         };
-        let mut rung = rungs;
-        while rung > 0 {
-            rung -= 1;
-            for key in per_rung[usize::from(rung)].drain(..) {
-                out.push(key);
+        let mut emitted: Vec<(RequestOrder, ChunkKey, Territory)> = Vec::new();
+        for rung_keys in &mut sweep.per_rung {
+            for (key, territory) in rung_keys.drain(..) {
+                let parent = Column {
+                    face: key.face,
+                    rung: key.rung + 1,
+                    x: key.x.div_euclid(2),
+                    y: key.y.div_euclid(2),
+                };
+                let order = RequestOrder {
+                    class: territory.rank(),
+                    depth: rungs - key.rung,
+                    face: key.face,
+                    parent_morton: morton(parent.x, parent.y),
+                };
+                emitted.push((order, key, territory));
             }
         }
+        emitted.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        for (_, key, territory) in emitted {
+            out.push(key);
+            out.mark(key, territory);
+        }
+        // The columns this descent wanted or judged clear of the skyline, and the ones it culled,
+        // for the next one's hysteresis. A far column that only descends (its own rung emits
+        // nothing there) is kept through the skyline it cleared, so its whole subtree does not
+        // hang on the narrower want margin (refutation R4-9).
+        self.kept = out.keys.iter().map(|k| Column::of(*k)).collect();
+        self.kept.extend(cleared);
+        self.culled = culled;
         // The spans this descent did not visit are dropped.
         let generation = self.generation;
         self.spans.retain(|_, (_, g)| *g == generation);
@@ -792,6 +1041,131 @@ mod tests {
     }
 
     #[test]
+    fn the_urgent_chunks_are_the_rungs_own_territory_and_the_gap_counts_the_missing() {
+        let body = home_planet();
+        let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
+        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
+        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let eye = [
+            d[0] * (surface + 3.4),
+            d[1] * (surface + 3.4),
+            d[2] * (surface + 3.4),
+        ];
+        let mut view = LadderView::default();
+        let w = view.wanted(&body, eye);
+        // Some chunks are urgent and some are not (the margin past every switch), and every
+        // urgent chunk is wanted.
+        let urgent = w.urgent_count();
+        assert!(urgent > 0);
+        assert!(urgent < w.len(), "{urgent} of {}", w.len());
+        assert_eq!(w.keys.iter().filter(|k| w.is_urgent(**k)).count(), urgent);
+        // The column under the eye is urgent at rung 0; a rung-0 column past the switch is not.
+        let foot = column_under(&body, d, 0);
+        assert!(
+            w.keys
+                .iter()
+                .any(|k| Column::of(*k) == foot && w.is_urgent(*k))
+        );
+        let margin = w
+            .keys
+            .iter()
+            .filter(|k| k.rung == 0 && !w.is_urgent(**k))
+            .count();
+        assert!(margin > 0, "no rung-0 chunk in the margin");
+        // The gap: with nothing arrived every urgent chunk is missing; with everything, none;
+        // with the margin alone arrived, still every urgent one.
+        assert_eq!(w.urgent_missing(&|_| false), urgent);
+        assert_eq!(w.urgent_missing(&|_| true), 0);
+        assert_eq!(w.urgent_missing(&|k| !w.is_urgent(k)), urgent);
+        // The gap per rung sums to the gap, holds no empty rung, and is empty when all arrived.
+        let per_rung = w.urgent_missing_per_rung(&|_| false);
+        assert_eq!(
+            per_rung.iter().map(|(_, n)| *n as usize).sum::<usize>(),
+            urgent
+        );
+        assert!(per_rung.iter().all(|(_, n)| *n > 0));
+        assert_eq!(w.urgent_missing_per_rung(&|_| true), Vec::new());
+        // The peaks past the horizon are revealed, not urgent, and their gap counts apart.
+        let revealed = w.revealed_count();
+        assert!(revealed > 0, "no revealed peak from the ground");
+        assert_eq!(w.revealed_missing(&|_| false), revealed);
+        assert_eq!(w.revealed_missing(&|_| true), 0);
+        // No urgent chunk is revealed: with every revealed chunk but this one arrived, nothing of
+        // it is missing (the sets are disjoint).
+        for k in w.keys.iter().filter(|k| w.is_urgent(**k)) {
+            assert_eq!(w.revealed_missing(&|r| r != *k), 0);
+        }
+        // A set built from keys alone holds no territory.
+        let plain = WantedSet::from_keys(w.keys.clone(), w.reach_m);
+        assert_eq!(plain.urgent_count(), 0);
+        assert_eq!(plain.revealed_count(), 0);
+        // HYSTERESIS: the descent keeps the columns it wanted; a second descent from the same eye
+        // wants the same set, and a step of half a metre changes it little — never the whole far
+        // ring (MEASURED without the kept set: whole far columns flipped per step).
+        let emitted: BTreeSet<Column> = w.keys.iter().map(|k| Column::of(*k)).collect();
+        assert!(view.kept.is_superset(&emitted));
+        assert!(
+            view.kept.len() > emitted.len(),
+            "no far column was kept for its clearance"
+        );
+        let again = view.wanted(&body, eye);
+        assert_eq!(again.keys, w.keys);
+        assert!(
+            !view.culled.is_empty(),
+            "no column was culled from the ground"
+        );
+        assert!(view.culled.is_disjoint(&view.kept));
+        let step = [eye[0] + 0.4, eye[1] + 0.2, eye[2] - 0.1];
+        let stepped = view.wanted(&body, step);
+        let before: BTreeSet<ChunkKey> = w.keys.iter().copied().collect();
+        let after: BTreeSet<ChunkKey> = stepped.keys.iter().copied().collect();
+        let churn = before.symmetric_difference(&after).count();
+        let len = w.len();
+        assert!(
+            churn * 50 < len,
+            "{churn} chunks changed on a half-metre step of {len}"
+        );
+        // A higher eye pushes the horizon out over columns the skyline culled: they stay
+        // skyline-judged until well inside it, and the ones it clears are urgent (the true
+        // horizon), never revealed.
+        let culled_before = view.culled.clone();
+        let raised = view.wanted(
+            &body,
+            [
+                d[0] * (surface + 12.0),
+                d[1] * (surface + 12.0),
+                d[2] * (surface + 12.0),
+            ],
+        );
+        assert!(raised.len() > w.len());
+        assert!(
+            raised
+                .keys
+                .iter()
+                .any(|k| culled_before.contains(&Column::of(*k)) && raised.is_urgent(*k)),
+            "no column the ground culled is urgent from 12 m up"
+        );
+    }
+
+    #[test]
+    fn the_morton_curve_interleaves_the_bits_and_keeps_neighbours_close() {
+        assert_eq!(morton(0, 0), 0);
+        assert_eq!(morton(1, 0), 1);
+        assert_eq!(morton(0, 1), 2);
+        assert_eq!(morton(1, 1), 3);
+        assert_eq!(morton(2, 0), 4);
+        assert_eq!(morton(3, 5), 0b100111);
+        assert_eq!(morton(-4, -9), 0);
+        assert_eq!(morton(i32::MAX, i32::MAX), (1u64 << 62) - 1);
+        // The four children of one 2×2 block are consecutive.
+        let block: Vec<u64> = [(4, 6), (5, 6), (4, 7), (5, 7)]
+            .iter()
+            .map(|(x, y)| morton(*x, *y))
+            .collect();
+        assert_eq!(block, vec![56, 57, 58, 59]);
+    }
+
+    #[test]
     fn the_ladder_from_the_ground_reaches_the_horizon_coarse_first() {
         let body = home_planet();
         let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
@@ -811,12 +1185,74 @@ mod tests {
         // ring with no visible peak is empty and names no rung).
         assert!(w.rung_max >= rung_for_distance(horizon_m(surface, 3.4), body.ladder().rungs));
         assert!(w.rung_max <= rung_for_distance(w.reach_m, body.ladder().rungs));
-        // Coarse first: the rungs in the key order never rise.
-        let mut last = u8::MAX;
+        // THE REQUEST ORDER (ruling V15): the classes never go back (urgent, then revealed, then
+        // margin); within a class the rungs never rise (coarse first); within a class and a rung
+        // each parent's children stand together (one run per parent).
+        let rank = |k: &ChunkKey| -> u8 {
+            if w.is_urgent(*k) {
+                0
+            } else if w.revealed.contains(k) {
+                1
+            } else {
+                2
+            }
+        };
+        let mut last_rank = 0u8;
+        let mut last_rung = u8::MAX;
+        // Per (class, rung): the runs of consecutive parents, and the distinct parents.
+        type Runs = BTreeMap<(u8, u8), (usize, BTreeSet<(Face, i32, i32)>)>;
+        let mut runs: Runs = BTreeMap::new();
+        let mut last_parent: Option<(u8, u8, Face, i32, i32)> = None;
         for k in &w.keys {
-            assert!(k.rung <= last, "a finer chunk before a coarser one");
-            last = k.rung;
+            let r = rank(k);
+            assert!(r >= last_rank, "a class went back in the key order");
+            if r != last_rank {
+                last_rung = u8::MAX;
+            }
+            assert!(
+                k.rung <= last_rung,
+                "a finer chunk before a coarser one in one class"
+            );
+            let parent = (r, k.rung, k.face, k.x.div_euclid(2), k.y.div_euclid(2));
+            let entry = runs.entry((r, k.rung)).or_insert((0, BTreeSet::new()));
+            if last_parent != Some(parent) {
+                entry.0 += 1;
+            }
+            entry.1.insert((k.face, parent.3, parent.4));
+            last_parent = Some(parent);
+            last_rank = r;
+            last_rung = k.rung;
         }
+        for ((r, rung), (run_count, parents)) in &runs {
+            assert_eq!(
+                *run_count,
+                parents.len(),
+                "class {r} rung {rung}: a parent's children are split across the order"
+            );
+        }
+        assert_eq!(rank(&w.keys[0]), 0, "the first chunk asked for is urgent");
+        // THE PRIORITY follows the key order, and the class leads it across sets: a margin chunk
+        // at index zero of another set ranks after an urgent chunk at the end of this one.
+        let mut last_priority = 0u32;
+        for (i, k) in w.keys.iter().enumerate() {
+            let p = w.priority_of(i, *k);
+            assert!(p >= last_priority, "the priority went back at {i}");
+            last_priority = p;
+        }
+        let urgent_last = w
+            .keys
+            .iter()
+            .rposition(|k| w.is_urgent(*k))
+            .expect("an urgent chunk");
+        let margin_first = w
+            .keys
+            .iter()
+            .position(|k| !w.is_urgent(*k) && !w.revealed.contains(k))
+            .expect("a margin chunk");
+        assert!(
+            w.priority_of(0, w.keys[margin_first])
+                > w.priority_of(urgent_last, w.keys[urgent_last])
+        );
         // The column under the eye is wanted at rung 0, and its chunks hold the surface.
         let foot = Column {
             face: face_of(d),

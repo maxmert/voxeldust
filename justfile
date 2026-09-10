@@ -266,6 +266,12 @@ render-boxes-smoke:
 render-crossing-smoke:
     cargo test --release -p vd-bins --features dev-control,render --test render_crossing_smoke -- --nocapture
 
+# M8-1 (slice 8 step 4, THE RESIDENCY BAND on a moving eye): one demand cluster, a walk on the home
+# planet's ground and two hull legs over it (a berthed hull, boarded, pushed), the band's gap read
+# every frame — GPU-required, LOCAL. Runs RELEASE (the debug client cannot build a ring in time).
+terrain-moving-eye:
+    cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye -- --nocapture --test-threads=1
+
 # G-WARP-PIXELS + G-HANDOVER (window_lane.md §2.8/§4 Slice D — THE WARP ACCEPTANCE): one DEMAND
 # cluster (no shard pre-booked), one headless capture client in the PILOT VIEW (`--capture-pilot`),
 # and one flight down THE world's own star ring — out of the home system, across the STAR GAP the

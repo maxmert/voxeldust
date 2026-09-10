@@ -21,8 +21,11 @@
 }
 
 struct LadderFade {
-    // The bands: (in_lo, sink_end, out_lo, out_hi), metres from the eye.
+    // The bands: (in_lo, sink_end, out_lo, out_hi), metres from the eye; the sink ramp ends a
+    // little past the fade-in edge, so at the edge one finer cell of sink remains.
     bands: vec4<f32>,
+    // The rung's sink in metres (x), step 5.
+    sink: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> fade: LadderFade;
@@ -31,8 +34,12 @@ struct FadeVertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(8) morph: vec3<f32>,
-    @location(9) sink: vec3<f32>,
+    // THE MORPH METRE (step 5): how far along its own radial the vertex stands from the next
+    // coarser rung's surface; the target is the vertex plus its radial times this.
+    @location(8) morph_m: f32,
+    // THE RADIAL (step 5): the vertex's unit direction from the body's centre in the chunk's
+    // frame.
+    @location(9) radial: vec3<f32>,
 }
 
 fn whole(d: f32) -> f32 {
@@ -49,8 +56,15 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     let own = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
     let d = length(own.xyz);
-    let local = mix(vertex.morph, vertex.position, whole(d)) - vertex.sink * (1.0 - risen(d));
-    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(local, 1.0));
+    // The vertex's radial (its own attribute, turned into the world like a normal), its target
+    // along it, and its sink along it — the morph in world space (step 5: one metre and one
+    // radial per vertex, the sink one number per rung; no centre of the body, so no material
+    // is rewritten as the eye moves).
+    let radial = normalize(mesh_functions::mesh_normal_local_to_world(vertex.radial, vertex.instance_index));
+    let coarser = own.xyz + radial * vertex.morph_m;
+    let sink = radial * fade.sink.x;
+    let morphed = mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d));
+    out.world_position = vec4<f32>(morphed, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
     out.unclipped_depth = out.position.z;
@@ -60,9 +74,11 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
 #endif
 #ifdef MOTION_VECTOR_PREPASS
-    // The same morphed position under last frame's placement: the ground itself does not move.
+    // The same morph under last frame's placement: the ground itself does not move, so last
+    // frame's own position carries this frame's displacement.
     let previous_from_local = mesh_functions::get_previous_world_from_local(vertex.instance_index);
-    out.previous_world_position = mesh_functions::mesh_position_local_to_world(previous_from_local, vec4<f32>(local, 1.0));
+    let previous_own = mesh_functions::mesh_position_local_to_world(previous_from_local, vec4<f32>(vertex.position, 1.0));
+    out.previous_world_position = vec4<f32>(previous_own.xyz + (morphed - own.xyz), 1.0);
 #endif
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = vertex.instance_index;

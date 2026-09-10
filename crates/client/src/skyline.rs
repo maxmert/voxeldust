@@ -247,9 +247,10 @@ impl Skyline {
     /// Whether a column — the cap of angular radius `rho` whose centre stands at central angle
     /// `phi` and azimuth `az` from the eye's foot, no point of it over the radius `peak_m` — can
     /// show over the skyline anywhere in its span: the highest elevation any point of it can
-    /// reach, against the lowest wall on the rays the cap touches.
+    /// reach, plus `margin` (radians, the caller's hysteresis), against the lowest wall on the
+    /// rays the cap touches.
     #[must_use]
-    pub fn clears(&self, phi: f64, az: f64, rho: f64, peak_m: f64) -> bool {
+    pub fn clears(&self, phi: f64, az: f64, rho: f64, peak_m: f64, margin: f64) -> bool {
         let phi_n = (phi - rho).max(0.0);
         let phi_f = phi + rho;
         let mut theta =
@@ -266,7 +267,7 @@ impl Skyline {
             lowest = lowest.min(self.wall(ray.rem_euclid(SKYLINE_RAYS as i64) as usize));
             ray += 1;
         }
-        theta >= lowest
+        theta + margin >= lowest
     }
 }
 
@@ -388,7 +389,7 @@ mod tests {
             cap(13_600.0, 1_000.0).1,
             R - 90.0,
         );
-        assert!(sky.clears(far.0, far.1, far.2, far.3));
+        assert!(sky.clears(far.0, far.1, far.2, far.3, 0.0));
         // A ridge 2 m over the eye's level, 650 m north, as five tiled 62 m columns: it spans
         // ±13°, the far column's disc ±4.2°, so the valley behind is hidden.
         let mut k = -2;
@@ -396,9 +397,15 @@ mod tests {
             sky.raise(&square(650.0, f64::from(k) * 62.0, 31.0), e + 2.0);
             k += 1;
         }
-        assert!(!sky.clears(far.0, far.1, far.2, far.3));
+        assert!(!sky.clears(far.0, far.1, far.2, far.3, 0.0));
         // The same valley east of the ridge is still seen.
-        assert!(sky.clears(cap(far.0, far.2).0, FRAC_PI_2, cap(far.0, far.2).1, far.3));
+        assert!(sky.clears(
+            cap(far.0, far.2).0,
+            FRAC_PI_2,
+            cap(far.0, far.2).1,
+            far.3,
+            0.0
+        ));
         // A far peak standing over the ridge's line is seen: 13.6 km out, the ridge's elevation
         // is about atan(2 / 650) ≈ 0.18°, so a peak 60 m over the eye clears (0.25°), 20 m does
         // not.
@@ -406,13 +413,15 @@ mod tests {
             cap(13_600.0, 1_000.0).0,
             0.0,
             cap(13_600.0, 1_000.0).1,
-            e + 60.0
+            e + 60.0,
+            0.0
         ));
         assert!(!sky.clears(
             cap(13_600.0, 1_000.0).0,
             0.0,
             cap(13_600.0, 1_000.0).1,
-            e + 20.0
+            e + 20.0,
+            0.0
         ));
         // The wall stands on the rays that cross the ridge (±14.05°) and on no other.
         assert!(sky.wall(ray_at(0.0)) > 0.0);
@@ -458,20 +467,39 @@ mod tests {
             cap(13_600.0, 1_000.0).0,
             -PI + 0.001,
             cap(13_600.0, 1_000.0).1,
-            R - 90.0
+            R - 90.0,
+            0.0
         ));
         assert!(sky.clears(
             cap(13_600.0, 1_000.0).0,
             0.0,
             cap(13_600.0, 1_000.0).1,
-            R - 90.0
+            R - 90.0,
+            0.0
         ));
         // A far column the eye stands over reads the lowest wall of all: under an all-round
         // crest a low peak is hidden and a high one seen.
         let mut sky = Skyline::new(e);
         sky.raise(&square(0.0, 5.0, 31.0), e + 2.0);
-        assert!(!sky.clears(cap(10.0, 31.0).0, 0.0, cap(10.0, 31.0).1, R - 90.0));
-        assert!(sky.clears(cap(10.0, 31.0).0, 0.0, cap(10.0, 31.0).1, e + 100.0));
+        assert!(!sky.clears(cap(10.0, 31.0).0, 0.0, cap(10.0, 31.0).1, R - 90.0, 0.0));
+        assert!(sky.clears(cap(10.0, 31.0).0, 0.0, cap(10.0, 31.0).1, e + 100.0, 0.0));
+    }
+
+    #[test]
+    fn a_margin_lets_a_column_just_under_the_skyline_through() {
+        let e = R + 3.4;
+        let mut sky = Skyline::new(e);
+        let mut k = -2;
+        while k <= 2 {
+            sky.raise(&square(650.0, f64::from(k) * 62.0, 31.0), e + 2.0);
+            k += 1;
+        }
+        // A peak 20 m over the eye at 13.6 km is under the ridge's line by about 0.09°: refused
+        // with no margin, let through with a 0.2° one; a valley far under stays refused.
+        let (phi, rho) = cap(13_600.0, 1_000.0);
+        assert!(!sky.clears(phi, 0.0, rho, e + 20.0, 0.0));
+        assert!(sky.clears(phi, 0.0, rho, e + 20.0, 0.2_f64.to_radians()));
+        assert!(!sky.clears(phi, 0.0, rho, R - 90.0, 0.2_f64.to_radians()));
     }
 
     #[test]
@@ -486,21 +514,35 @@ mod tests {
         // A column at the eye's surface radius that spans the tangent point of that radius
         // (6.6 km) reaches its highest there: seen over nothing at all, hidden under the wall.
         let open = Skyline::new(e);
-        assert!(open.clears(cap(6_500.0, 1_000.0).0, 0.0, cap(6_500.0, 1_000.0).1, R));
-        assert!(!sky.clears(cap(6_500.0, 1_000.0).0, 0.0, cap(6_500.0, 1_000.0).1, R));
+        assert!(open.clears(
+            cap(6_500.0, 1_000.0).0,
+            0.0,
+            cap(6_500.0, 1_000.0).1,
+            R,
+            0.0
+        ));
+        assert!(!sky.clears(
+            cap(6_500.0, 1_000.0).0,
+            0.0,
+            cap(6_500.0, 1_000.0).1,
+            R,
+            0.0
+        ));
         // The same column with a peak 10 m over the eye clears the wall (the near edge test): at
         // 5.5 km the sphere drops 2.4 m under the eye's level, so 1 m over the eye does not.
         assert!(sky.clears(
             cap(6_500.0, 1_000.0).0,
             0.0,
             cap(6_500.0, 1_000.0).1,
-            e + 10.0
+            e + 10.0,
+            0.0
         ));
         assert!(!sky.clears(
             cap(6_500.0, 1_000.0).0,
             0.0,
             cap(6_500.0, 1_000.0).1,
-            e + 1.0
+            e + 1.0,
+            0.0
         ));
     }
 }

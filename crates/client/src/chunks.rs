@@ -39,7 +39,7 @@
 //! workers generate and extract them, and the engine harvests them a few per frame and draws them as
 //! children of the planet's row. The planet's shard drew nothing.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use vd_core::geometry::Boundary;
@@ -74,12 +74,15 @@ pub struct ChunkGeometry {
     pub key: ChunkKey,
     /// The chunk's own origin in the realm's frame, in metres: the centre of its middle cell.
     pub origin_m: [f64; 3],
-    /// THE MORPH TARGETS (slice 8 step 3): each vertex where it stands on the NEXT COARSER rung's
-    /// MESH along its own radial ([`ParentMesh`]), relative to `origin_m` like the vertices — the
-    /// crossfade slides a vertex from its own position to this one across the rung's band, so the
-    /// finer surface becomes the coarser before it is dropped, exactly: at the band's far edge the
-    /// finer vertices lie on the coarser triangles. At the top rung a vertex is its own target.
-    pub morph: Vec<[f32; 3]>,
+    /// THE MORPH TARGETS (slice 8 step 3), PACKED (step 5, ruling V16): where each vertex stands on
+    /// the NEXT COARSER rung's MESH along its own radial ([`ParentMesh`]), as ONE signed metre
+    /// along that radial from the vertex — the target lies on the radial by construction (a
+    /// radial hit, or the coarser field in the same direction), so the target is `vertex + radial
+    /// × morph_m` ([`ChunkGeometry::morph_target`]), exact to float rounding, at a third of the
+    /// bytes. The crossfade slides a vertex from its own position to the target across the rung's
+    /// band, so the finer surface becomes the coarser before it is dropped: at the band's far edge
+    /// the finer vertices lie on the coarser triangles. At the top rung every value is zero.
+    pub morph_m: Vec<f32>,
     /// How many SURFACE vertices (within the sink bound of the coarser field) had no parent
     /// triangle on their radial within that bound and read the field instead — a diagnosis
     /// count the stamp carries and the picture gate bounds (MEASURED near zero). A cave's own
@@ -88,18 +91,99 @@ pub struct ChunkGeometry {
     /// How many vertices stand on or past the face's edge and read the field by rule (the
     /// parents are one face's; both faces read the field for the vertex they share).
     pub morph_seam: u32,
-    /// THE SINK (slice 8 step 3): each vertex's radial times [`sink_m`] of its rung — how far
-    /// the chunk drops under the next finer rung's surface nearer than the finer rung's fade-out
-    /// edge, so a coarser surface never shows through a finer one (the dropped octaves cut both
-    /// ways) and the two are continuous at the edge, where the finer stands on the coarser. A
-    /// rung-0 chunk sinks nowhere.
-    pub sink: Vec<[f32; 3]>,
+    /// THE SINK (slice 8 step 3), PACKED (step 5): [`sink_m`] of the chunk's rung, in metres along
+    /// every vertex's radial — ONE number per chunk, the shader's uniform; a vertex's sink vector
+    /// is `radial × sink_m` ([`ChunkGeometry::sink_of`]). How far the chunk drops under the next
+    /// finer rung's surface nearer than the finer rung's fade-out edge, so a coarser surface never
+    /// shows through a finer one (the dropped octaves cut both ways) and the two are continuous
+    /// at the edge, where the finer stands on the coarser. A rung-0 chunk sinks nowhere.
+    pub sink_m: f32,
     /// Vertices in metres, relative to `origin_m`.
     pub vertices: Vec<[f32; 3]>,
     /// Per-vertex unit normals, derived from the triangles (style, never shape).
     pub normals: Vec<[f32; 3]>,
+    /// THE RADIAL of each vertex (step 5): its unit direction from the body's centre in the
+    /// realm's frame, narrowed once to `f32` — the shader needs no centre of the body (MEASURED
+    /// with a centre uniform instead: a moving eye rewrote every material and the engine
+    /// re-prepared them, 41 → 18 frames a second at 240 m/s). Four signed 16-bit quanta were
+    /// MEASURED too: 4 bytes fewer a vertex, and on the hill picture 5 pixels of 701 472 fell on
+    /// the neighbouring triangle at a crease (up to 19 of 255 levels) — a change of the picture,
+    /// which ruling V16 refuses; the owner holds that option with its numbers.
+    pub radials: Vec<[f32; 3]>,
     /// The extractor's triangles, unchanged.
     pub triangles: Vec<[u32; 3]>,
+    /// THE BOX that holds every vertex, its morph target and its sunk position — wherever the
+    /// vertex stage can put a vertex, so the engine culls by it. Built by the worker (refutation
+    /// P-8: on the main thread it cost two square roots a vertex in the harvest loop). Zero for an
+    /// empty geometry.
+    pub bounds: ([f32; 3], [f32; 3]),
+}
+
+/// The widest angle between a vertex's narrowed radial and the exact one: `f32`'s own rounding,
+/// about 1e-7 rad — a third of a micrometre on a target three metres out at the finest rung.
+pub const RADIAL_STEP_RAD: f64 = 2.0e-7;
+
+impl ChunkGeometry {
+    /// The unit radial of vertex `i`: from the body's centre through the vertex, in `f64`.
+    fn radial(&self, i: usize) -> DVec3 {
+        let v = self.vertices[i];
+        (DVec3::from_array(self.origin_m)
+            + DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2])))
+        .normalize()
+    }
+
+    /// The morph target of vertex `i`, relative to the origin like the vertex.
+    #[must_use]
+    pub fn morph_target(&self, i: usize) -> [f32; 3] {
+        let v = self.vertices[i];
+        let t = DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]))
+            + self.radial(i) * f64::from(self.morph_m[i]);
+        [t.x as f32, t.y as f32, t.z as f32]
+    }
+
+    /// Every vertex's morph target, in the vertices' order.
+    #[must_use]
+    pub fn morph_targets(&self) -> Vec<[f32; 3]> {
+        (0..self.vertices.len())
+            .map(|i| self.morph_target(i))
+            .collect()
+    }
+
+    /// The sink vector of vertex `i`: its radial times the chunk's sink.
+    #[must_use]
+    pub fn sink_of(&self, i: usize) -> [f32; 3] {
+        let s = self.radial(i) * f64::from(self.sink_m);
+        [s.x as f32, s.y as f32, s.z as f32]
+    }
+
+    /// The box over every vertex, its morph target and its sunk position, as the worker builds
+    /// it into `bounds`. Zero for an empty geometry.
+    #[must_use]
+    pub fn measure_bounds(&self) -> ([f32; 3], [f32; 3]) {
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        let mut take = |p: [f32; 3]| {
+            let mut k = 0;
+            while k < 3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+                k += 1;
+            }
+        };
+        let mut i = 0;
+        while i < self.vertices.len() {
+            let v = self.vertices[i];
+            let s = self.sink_of(i);
+            take(v);
+            take(self.morph_target(i));
+            take([v[0] - s[0], v[1] - s[1], v[2] - s[2]]);
+            i += 1;
+        }
+        if self.vertices.is_empty() {
+            return ([0.0; 3], [0.0; 3]);
+        }
+        (lo, hi)
+    }
 }
 
 /// A job for the workers: one chunk of one body.
@@ -110,6 +194,10 @@ pub struct ChunkJob {
     pub key: ChunkKey,
     /// The parent meshes the geomorph reads its targets from, shared by every job of the lane.
     pub parents: Arc<ParentCache>,
+    /// THE ORDER (ruling V15): the lower builds first. The wanted set's own order — urgent before
+    /// revealed before margin, the coarser rung first, then by parent, the nearest first — so
+    /// the workers build neighbours back to back and their parent cache holds the parents.
+    pub priority: u32,
 }
 
 /// A finished job, as the engine harvests it.
@@ -124,6 +212,14 @@ pub struct ChunkReady {
 pub trait ChunkWorkers: Send + Sync {
     /// Take a job. It may finish now (inline) or later (a thread).
     fn submit(&mut self, job: ChunkJob);
+    /// THE BUILD COUNT (M8-2a, ruling V15): the jobs the workers ran since the start, with or
+    /// without a geometry, and the wall time they spent on them (a wait on a sibling's parent
+    /// build included) — the workers' own rate, read against the harvest's and the frame's.
+    fn built(&self) -> BuildCount;
+    /// Move a job still waiting in the queue to `priority` (refutation T-1: a queued job kept
+    /// the priority of the frame that first asked for it). A job already taken, or unknown, is
+    /// left alone.
+    fn reprioritise(&mut self, realm: RealmId, key: ChunkKey, priority: u32);
     /// Move up to `max` finished jobs into `out`.
     fn drain(&mut self, out: &mut Vec<ChunkReady>, max: usize);
     /// Withdraw a job the lane no longer wants: one not started is never run, one finished is not
@@ -131,11 +227,20 @@ pub trait ChunkWorkers: Send + Sync {
     fn cancel(&mut self, realm: RealmId, key: ChunkKey);
 }
 
+/// What the workers ran: jobs finished (with or without a geometry), and the wall nanoseconds
+/// spent on them (zero where the host has no clock — the inline workers count jobs only).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BuildCount {
+    pub chunks: u64,
+    pub nanos: u64,
+}
+
 /// The inline workers: a job runs on the calling thread at `submit`, and waits in a queue for
 /// `drain`. The Tier-A implementation, and a correct one for a single-threaded host.
 #[derive(Default)]
 pub struct InlineWorkers {
     done: std::collections::VecDeque<ChunkReady>,
+    built: u64,
 }
 
 impl ChunkWorkers for InlineWorkers {
@@ -148,6 +253,18 @@ impl ChunkWorkers for InlineWorkers {
                 geometry,
             }),
         );
+        self.built += 1;
+    }
+
+    fn built(&self) -> BuildCount {
+        BuildCount {
+            chunks: self.built,
+            nanos: 0,
+        }
+    }
+
+    fn reprioritise(&mut self, _realm: RealmId, _key: ChunkKey, _priority: u32) {
+        // A job runs at `submit`: nothing waits.
     }
 
     fn cancel(&mut self, realm: RealmId, key: ChunkKey) {
@@ -250,6 +367,22 @@ impl ParentMesh {
         self.triangles.len()
     }
 
+    /// AN ESTIMATE of the bytes the mesh holds (M8-2a): the vectors' capacities (the positions,
+    /// the triangles, each bucket's indices) and a map node per bucket (a key, a value header and
+    /// the tree's links, taken as 48 bytes) — what one cache entry costs, within the allocator's
+    /// own rounding.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        const MAP_NODE: usize = 48;
+        self.positions.capacity() * std::mem::size_of::<DVec3>()
+            + self.triangles.capacity() * std::mem::size_of::<[u32; 3]>()
+            + self
+                .buckets
+                .values()
+                .map(|v| v.capacity() * std::mem::size_of::<u32>() + MAP_NODE)
+                .sum::<usize>()
+    }
+
     /// The radius at which the radial along `dir` (a unit vector from the body's centre) meets
     /// this mesh within lattice cell `(a, b)`, nearest to `near_m` when it meets it more than
     /// once (a cave under the surface); `None` when no triangle of that cell is on the radial.
@@ -306,28 +439,126 @@ const RAY_EPSILON: f64 = 1e-18;
 /// rounding of a radial that runs exactly along a shared edge.
 const RAY_SLACK: f64 = 1e-9;
 
-/// THE PARENT CACHE: the parent meshes the lane's workers built, shared and bounded — the eight
+/// THE PARENT CACHE: the parent meshes the lane's workers build, shared and bounded — the eight
 /// finer chunks under one parent, and the halo users beside them, read one build. A map with a
-/// use order; the least recently used goes when the bound is passed. Its content is a pure
-/// function of the seed, so which worker built it, and when, changes nothing; two workers may
-/// build one parent at once, and the second build replaces the first with its equal.
-#[derive(Debug, Default)]
+/// use order (a counter per entry, so a hit is a lookup and never a scan, SL9); the least
+/// recently used leaves when the bound is passed. Its content is a pure function of the seed, so
+/// which worker builds it, and when, changes nothing. A reader CLAIMS a build in flight: the next
+/// reader of the same parent waits for it instead of repeating it (ruling V15: with siblings
+/// ordered back to back, four workers miss one parent at once). A claim is a guard: a build that
+/// panics drops it, and the drop releases the waiters (refutation T-5). A realm's `forget` bumps
+/// the realm's epoch, so a build that lands after it keeps nothing (refutation T-6).
+#[derive(Debug)]
 pub struct ParentCache {
     store: Mutex<ParentStore>,
+    /// Woken when a claimed build lands or is abandoned, for the readers that wait on it.
+    landed: std::sync::Condvar,
+}
+
+impl Default for ParentCache {
+    fn default() -> ParentCache {
+        ParentCache::with_capacity(PARENT_CACHE_ENTRIES)
+    }
+}
+
+#[derive(Debug)]
+struct Entry {
+    mesh: Arc<ParentMesh>,
+    /// The use counter's value at the last read.
+    used: u64,
 }
 
 #[derive(Debug, Default)]
 struct ParentStore {
-    map: BTreeMap<(RealmId, ChunkKey), Arc<ParentMesh>>,
-    order: VecDeque<(RealmId, ChunkKey)>,
+    map: BTreeMap<(RealmId, ChunkKey), Entry>,
+    /// The entries by their last use: the first is the least recently used.
+    by_use: BTreeMap<u64, (RealmId, ChunkKey)>,
+    use_seq: u64,
+    /// The parents a reader has claimed and builds now.
+    building: BTreeSet<(RealmId, ChunkKey)>,
+    /// A realm's epoch: `forget` bumps it, and a claim from before keeps nothing.
+    epochs: BTreeMap<RealmId, u64>,
+    /// How many meshes the cache keeps.
+    capacity: usize,
+    /// The counts (M8-2a): claims served from the map, claims that built, claims that waited on
+    /// a build in flight (a wait counts once per claim, however many wakes it took).
+    stats: ParentStats,
 }
 
-/// How many parent meshes the cache keeps: about 24 MB at today's bytes.
+/// What the parent cache did since it started.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ParentStats {
+    pub hits: u64,
+    pub builds: u64,
+    pub waits: u64,
+}
+
+/// How many parent meshes the cache keeps by default (the library's tests and a bare lane). The
+/// engine sizes it from its memory budget (`ParentCache::set_capacity`).
 pub const PARENT_CACHE_ENTRIES: usize = 48;
 
+/// What a claim found: the mesh (a hit), or the guard of the right to build it (a miss, claimed).
+#[derive(Debug)]
+pub enum Claim<'a> {
+    Hit(Arc<ParentMesh>),
+    Build(ClaimGuard<'a>),
+}
+
+/// THE RIGHT TO BUILD one parent, held until `finish` (the mesh, or `None` to abandon). A guard
+/// dropped any other way — a panic in the build — abandons the claim and wakes the waiters.
+#[derive(Debug)]
+pub struct ClaimGuard<'a> {
+    cache: &'a ParentCache,
+    realm: RealmId,
+    key: ChunkKey,
+    epoch: u64,
+    done: bool,
+}
+
+impl ClaimGuard<'_> {
+    /// End the claim: keep the mesh (or abandon with `None`) and wake the readers waiting on it.
+    pub fn finish(mut self, mesh: Option<Arc<ParentMesh>>) {
+        self.done = true;
+        self.cache.land(self.realm, self.key, self.epoch, mesh);
+    }
+}
+
+impl Drop for ClaimGuard<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.cache.land(self.realm, self.key, self.epoch, None);
+        }
+    }
+}
+
 impl ParentCache {
-    /// The parent mesh of `key` in `realm`: the cached one, or a fresh build kept for the next
-    /// reader. `None` for a key outside the body.
+    /// A cache that keeps `capacity` meshes (at least one).
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> ParentCache {
+        ParentCache {
+            store: Mutex::new(ParentStore {
+                capacity: capacity.max(1),
+                ..ParentStore::default()
+            }),
+            landed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Resize: the oldest leave when the new bound is smaller than what is held.
+    pub fn set_capacity(&self, capacity: usize) {
+        let mut store = self.lock();
+        store.capacity = capacity.max(1);
+        trim(&mut store);
+    }
+
+    /// How many meshes the cache keeps.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.lock().capacity
+    }
+
+    /// The parent mesh of `key` in `realm`: the cached one, a build in flight waited for, or a
+    /// fresh build kept for the next reader. `None` for a key outside the body.
     #[must_use]
     pub fn get(
         &self,
@@ -335,40 +566,87 @@ impl ParentCache {
         body: &BodyDefinition,
         key: ChunkKey,
     ) -> Option<Arc<ParentMesh>> {
-        {
-            let mut store = self.lock();
-            if let Some(found) = store.map.get(&(realm, key)) {
-                let found = Arc::clone(found);
-                // Least recently USED leaves first: a hit moves its key to the back.
-                store.order.retain(|k| *k != (realm, key));
-                store.order.push_back((realm, key));
-                return Some(found);
+        match self.claim(realm, key) {
+            Claim::Hit(found) => Some(found),
+            Claim::Build(guard) => {
+                let built = ParentMesh::build(body, key).map(Arc::new);
+                guard.finish(built.clone());
+                built
             }
         }
-        let built = Arc::new(ParentMesh::build(body, key)?);
-        self.insert(realm, key, Arc::clone(&built));
-        Some(built)
+    }
+
+    /// Claim `key`: a hit returns at once (and refreshes its use); a miss another reader builds
+    /// WAITS, then reads a hit; a miss nobody builds is claimed, and the guard must `finish`.
+    pub fn claim(&self, realm: RealmId, key: ChunkKey) -> Claim<'_> {
+        let mut store = self.lock();
+        let mut waited = false;
+        loop {
+            if store.map.contains_key(&(realm, key)) {
+                let found = touch(&mut store, realm, key);
+                store.stats.hits += 1;
+                store.stats.waits += u64::from(waited);
+                return Claim::Hit(found);
+            }
+            if !store.building.contains(&(realm, key)) {
+                store.building.insert((realm, key));
+                store.stats.builds += 1;
+                store.stats.waits += u64::from(waited);
+                let epoch = store.epochs.get(&realm).copied().unwrap_or(0);
+                return Claim::Build(ClaimGuard {
+                    cache: self,
+                    realm,
+                    key,
+                    epoch,
+                    done: false,
+                });
+            }
+            waited = true;
+            store = self
+                .landed
+                .wait(store)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// The counts since the start.
+    #[must_use]
+    pub fn stats(&self) -> ParentStats {
+        self.lock().stats
+    }
+
+    /// A claim lands: the mesh is kept when the realm's epoch is the claim's, and the waiters
+    /// wake either way.
+    fn land(&self, realm: RealmId, key: ChunkKey, epoch: u64, mesh: Option<Arc<ParentMesh>>) {
+        {
+            let mut store = self.lock();
+            store.building.remove(&(realm, key));
+            let current = store.epochs.get(&realm).copied().unwrap_or(0);
+            if let Some(mesh) = mesh.filter(|_| current == epoch) {
+                keep(&mut store, realm, key, mesh);
+            }
+        }
+        self.landed.notify_all();
     }
 
     /// Keep a mesh; the oldest leaves when the bound is passed.
     pub fn insert(&self, realm: RealmId, key: ChunkKey, mesh: Arc<ParentMesh>) {
         let mut store = self.lock();
-        let fresh = store.map.insert((realm, key), mesh).is_none();
-        store
-            .order
-            .extend(std::iter::repeat_n((realm, key), usize::from(fresh)));
-        let excess = store.order.len().saturating_sub(PARENT_CACHE_ENTRIES);
-        let old: Vec<(RealmId, ChunkKey)> = store.order.drain(..excess).collect();
-        for k in old {
-            store.map.remove(&k);
-        }
+        keep(&mut store, realm, key, mesh);
     }
 
-    /// Drop every mesh of a realm: its body may be stated anew with another seed.
+    /// Drop every mesh of a realm and refuse the builds in flight for it: its body may be stated
+    /// anew with another seed. A walk of the store — a forget is a realm leaving the window, not
+    /// a per-frame event.
     pub fn forget(&self, realm: RealmId) {
-        let mut store = self.lock();
-        store.map.retain(|(r, _), _| *r != realm);
-        store.order.retain(|(r, _)| *r != realm);
+        {
+            let mut store = self.lock();
+            store.map.retain(|(r, _), _| *r != realm);
+            store.by_use.retain(|_, (r, _)| *r != realm);
+            store.building.retain(|(r, _)| *r != realm);
+            *store.epochs.entry(realm).or_insert(0) += 1;
+        }
+        self.landed.notify_all();
     }
 
     /// How many meshes the cache holds.
@@ -387,6 +665,38 @@ impl ParentCache {
         self.store
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Refresh a held entry's use and hand out its mesh: two map operations, never a scan.
+fn touch(store: &mut ParentStore, realm: RealmId, key: ChunkKey) -> Arc<ParentMesh> {
+    store.use_seq += 1;
+    let now = store.use_seq;
+    let entry = store.map.get_mut(&(realm, key)).expect("held");
+    let before = entry.used;
+    entry.used = now;
+    let mesh = Arc::clone(&entry.mesh);
+    store.by_use.remove(&before);
+    store.by_use.insert(now, (realm, key));
+    mesh
+}
+
+/// Keep a mesh in the store (a held key is replaced and refreshed) and trim to the bound.
+fn keep(store: &mut ParentStore, realm: RealmId, key: ChunkKey, mesh: Arc<ParentMesh>) {
+    store.use_seq += 1;
+    let now = store.use_seq;
+    if let Some(old) = store.map.insert((realm, key), Entry { mesh, used: now }) {
+        store.by_use.remove(&old.used);
+    }
+    store.by_use.insert(now, (realm, key));
+    trim(store);
+}
+
+/// The least recently used leave until the store holds its capacity.
+fn trim(store: &mut ParentStore) {
+    while store.map.len() > store.capacity {
+        let (_, key) = store.by_use.pop_first().expect("as many uses as entries");
+        store.map.remove(&key);
     }
 }
 
@@ -475,8 +785,8 @@ pub fn geometry_with(
     let origin = vertex_position_m(body, &samples, [half, half, half]);
     let origin_m = [origin[0].to_f64(), origin[1].to_f64(), origin[2].to_f64()];
     let mut vertices: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
-    let mut morph: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
-    let mut sink: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
+    let mut morph: Vec<f32> = Vec::with_capacity(mesh.vertices.len());
+    let mut radials: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
     let sink_len = sink_m(body, key.rung);
     // The coarser rung's surface along each vertex's radial: where the radial meets a parent
     // mesh, nearest the vertex's own radius; the coarser FIELD where no parent triangle is on
@@ -566,29 +876,27 @@ pub fn geometry_with(
             fallbacks += u32::from(missing & ((field - len).abs() <= reach_m));
             on_mesh.unwrap_or(field)
         };
-        let t = dir * target_m;
-        morph.push([
-            (t.x - origin_m[0]) as f32,
-            (t.y - origin_m[1]) as f32,
-            (t.z - origin_m[2]) as f32,
-        ]);
-        let s = dir * sink_len;
-        sink.push([s.x as f32, s.y as f32, s.z as f32]);
+        // The target as one metre along the radial from the vertex, and the radial itself (step 5).
+        morph.push((target_m - len) as f32);
+        radials.push([dir.x as f32, dir.y as f32, dir.z as f32]);
     }
     let normals = smooth_normals(&vertices, &mesh.triangles);
     let mut geometry = ChunkGeometry {
         key,
         origin_m,
-        morph,
+        morph_m: morph,
         morph_fallbacks: fallbacks,
         morph_seam: seam,
-        sink,
+        sink_m: sink_len as f32,
         vertices,
         normals,
         triangles: mesh.triangles,
+        radials,
+        bounds: ([0.0; 3], [0.0; 3]),
     };
     let drop_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
     add_skirts(&mut geometry, drop_m);
+    geometry.bounds = geometry.measure_bounds();
     Some(geometry)
 }
 
@@ -635,28 +943,24 @@ fn add_skirts(g: &mut ChunkGeometry, drop_m: f64) {
             at(g.vertices[b as usize]),
             at(g.vertices[c as usize]),
         );
-        let bottom = |i: u32| -> ([f32; 3], [f32; 3], [f32; 3]) {
+        // A skirt vertex is its top dropped along the radial; its target drops by the same, so
+        // the metre along the radial from the vertex to the target is its top's (step 5).
+        let bottom = |i: u32| -> ([f32; 3], f32) {
             let p = at(g.vertices[i as usize]);
             let dir = (o + p).normalize();
-            let d = dir * drop_m;
-            let m = at(g.morph[i as usize]) - d;
-            let q = p - d;
-            (
-                [q.x as f32, q.y as f32, q.z as f32],
-                [m.x as f32, m.y as f32, m.z as f32],
-                g.sink[i as usize],
-            )
+            let q = p - dir * drop_m;
+            ([q.x as f32, q.y as f32, q.z as f32], g.morph_m[i as usize])
         };
-        let (qa, ma, sa) = bottom(a);
-        let (qb, mb, sb) = bottom(b);
+        let (qa, ma) = bottom(a);
+        let (qb, mb) = bottom(b);
         let a2 = g.vertices.len() as u32;
         let b2 = a2 + 1;
         g.vertices.push(qa);
         g.vertices.push(qb);
-        g.morph.push(ma);
-        g.morph.push(mb);
-        g.sink.push(sa);
-        g.sink.push(sb);
+        g.morph_m.push(ma);
+        g.morph_m.push(mb);
+        g.radials.push(g.radials[a as usize]);
+        g.radials.push(g.radials[b as usize]);
         g.normals.push(g.normals[a as usize]);
         g.normals.push(g.normals[b as usize]);
         // The strip faces away from the triangle's third corner: the winding whose normal points
@@ -723,6 +1027,9 @@ pub struct ChunkCounters {
     pub submitted: u64,
     /// Chunks harvested by the engine.
     pub harvested: u64,
+    /// Polls that returned the whole cap (M8-2a): a harvest that fills its cap every frame is the
+    /// wall, not the workers.
+    pub harvest_full: u64,
 }
 
 /// The lane: the bodies it knows, the chunks it holds, the workers it drives.
@@ -763,6 +1070,18 @@ impl ChunkLane {
     #[must_use]
     pub fn counters(&self) -> ChunkCounters {
         self.counters
+    }
+
+    /// What the workers have built (M8-2a).
+    #[must_use]
+    pub fn built(&self) -> BuildCount {
+        self.workers.built()
+    }
+
+    /// What the parent cache did (M8-2a).
+    #[must_use]
+    pub fn parent_stats(&self) -> ParentStats {
+        self.parents.stats()
     }
 
     /// How many chunks are still building: the instrument a picture gate waits on for "the whole
@@ -842,9 +1161,16 @@ impl ChunkLane {
         self.resident.contains(&(realm, key)) | self.pending.contains(&(realm, key))
     }
 
-    /// Ask for a chunk. A realm without a body or a key outside its ladder is refused and counted; a
-    /// chunk already held or building is not queued twice. Any rung, beside any other (step 2).
-    pub fn request(&mut self, realm: RealmId, key: ChunkKey) {
+    /// The parent cache the workers share (the engine sizes it to its workers).
+    #[must_use]
+    pub fn parents(&self) -> &Arc<ParentCache> {
+        &self.parents
+    }
+
+    /// Ask for a chunk, at `priority` (the lower builds first: the wanted set's own order). A realm
+    /// without a body or a key outside its ladder is refused and counted; a chunk already held or
+    /// building is not queued twice. Any rung, beside any other (step 2).
+    pub fn request(&mut self, realm: RealmId, key: ChunkKey, priority: u32) {
         let Some(body) = self.bodies.get(&realm) else {
             self.counters.no_body += 1;
             return;
@@ -853,7 +1179,11 @@ impl ChunkLane {
             self.counters.outside += 1;
             return;
         }
-        if self.holds(realm, key) {
+        if self.resident.contains(&(realm, key)) {
+            return;
+        }
+        if self.pending.contains(&(realm, key)) {
+            self.workers.reprioritise(realm, key, priority);
             return;
         }
         self.pending.insert((realm, key));
@@ -864,6 +1194,7 @@ impl ChunkLane {
             body: Arc::clone(body),
             key,
             parents: Arc::clone(&self.parents),
+            priority,
         });
     }
 
@@ -872,6 +1203,7 @@ impl ChunkLane {
     pub fn poll(&mut self, max: usize) -> Vec<ChunkReady> {
         let mut out = Vec::new();
         self.workers.drain(&mut out, max);
+        self.counters.harvest_full += u64::from((max > 0) & (out.len() == max));
         out.retain(|ready| self.pending.remove(&(ready.realm, ready.geometry.key)));
         for ready in &out {
             self.resident.insert((ready.realm, ready.geometry.key));
@@ -1202,7 +1534,7 @@ mod tests {
         let body = home_planet();
         // No body yet: refused and counted.
         let k0 = surface_key(&body, 0, 300, 700);
-        lane.request(planet(), k0);
+        lane.request(planet(), k0, 0);
         assert_eq!(lane.counters().no_body, 1);
         lane.state_surface(planet(), &surface(77), &look());
         // Outside the ladder: refused.
@@ -1215,17 +1547,18 @@ mod tests {
                 y: 0,
                 z: 0,
             },
+            0,
         );
         assert_eq!(lane.counters().outside, 1);
         // A second request of the same key is not queued twice.
-        lane.request(planet(), k0);
-        lane.request(planet(), k0);
+        lane.request(planet(), k0, 0);
+        lane.request(planet(), k0, 0);
         assert!(lane.holds(planet(), k0));
         assert!(!lane.is_resident(planet(), k0));
         assert_eq!(lane.counters().submitted, 1);
         // A second rung beside the first: served (step 2 — every rung at once).
         let k3 = surface_key(&body, 3, 30, 70);
-        lane.request(planet(), k3);
+        lane.request(planet(), k3, 0);
         assert!(lane.holds(planet(), k3));
         assert_eq!(lane.counters().submitted, 2);
         // Harvest: both chunks are resident, each with geometry relative to its origin.
@@ -1241,12 +1574,32 @@ mod tests {
         assert!(lane.is_resident(planet(), k0));
         assert!(lane.is_resident(planet(), k3));
         assert_eq!(lane.counters().harvested, 2);
+        // The build count and the harvest cap (M8-2a): two built, no poll filled its cap of 8.
+        assert_eq!(
+            lane.built(),
+            BuildCount {
+                chunks: 2,
+                nanos: 0
+            }
+        );
+        assert_eq!(lane.counters().harvest_full, 0);
+        // Two rung-0 chunks read their parents through the cache: some built, none waited; the
+        // cache is the lane's own.
+        assert!(lane.parent_stats().builds > 0);
+        assert_eq!(lane.parent_stats().waits, 0);
+        assert_eq!(lane.parents().stats(), lane.parent_stats());
+        // A request of a chunk already resident changes nothing.
+        lane.request(planet(), k0, 9);
+        assert_eq!(lane.counters().submitted, 2);
+        // A poll with a cap of zero harvests nothing and counts no full cap.
+        assert!(lane.poll(0).is_empty());
+        assert_eq!(lane.counters().harvest_full, 0);
         assert!(lane.poll(8).is_empty());
         // Release both; a chunk released while building is never handed out.
         lane.release(planet(), k0);
         lane.release(planet(), k3);
         assert!(!lane.holds(planet(), k0));
-        lane.request(planet(), k3);
+        lane.request(planet(), k3, 0);
         assert!(lane.holds(planet(), k3));
         assert!(!lane.is_resident(planet(), k3));
         lane.release(planet(), k3);
@@ -1254,8 +1607,8 @@ mod tests {
         assert!(lane.resident(planet()).is_empty());
         // A bounded harvest: two chunks queued, one per poll.
         let k1 = surface_key(&body, 0, 301, 700);
-        lane.request(planet(), k0);
-        lane.request(planet(), k1);
+        lane.request(planet(), k0, 0);
+        lane.request(planet(), k1, 0);
         assert_eq!(lane.pending_count(), 2);
         let mut building = lane.pending_all();
         building.sort();
@@ -1264,17 +1617,23 @@ mod tests {
         assert_eq!(lane.pending_count(), 1);
         assert_eq!(lane.poll(1).len(), 1);
         assert_eq!(lane.pending_count(), 0);
+        // Both polls filled their cap of one; a re-request of a pending chunk re-keys it (the
+        // inline workers have nothing waiting, so this is the seam's no-op).
+        assert_eq!(lane.counters().harvest_full, 2);
+        lane.request(planet(), k3, 7);
+        lane.request(planet(), k3, 3);
+        assert_eq!(lane.counters().submitted, 6);
         assert_eq!(lane.resident(planet()).len(), 2);
         // Releasing ONE of two keeps the other; another rung is served beside it.
         lane.release(planet(), k0);
-        lane.request(planet(), k3);
+        lane.request(planet(), k3, 0);
         assert!(lane.holds(planet(), k3));
         lane.release(planet(), k3);
         // A release of a chunk never held changes nothing.
         lane.release(planet(), k3);
         assert_eq!(lane.resident(planet()), vec![k1]);
         // Forgetting a realm withdraws what is still building: nothing is ever handed out for it.
-        lane.request(planet(), k0);
+        lane.request(planet(), k0, 0);
         lane.forget(planet());
         assert!(lane.poll(8).is_empty());
         assert_eq!(lane.pending_count(), 0);
@@ -1284,6 +1643,7 @@ mod tests {
             body: Arc::new(home_planet()),
             key: k0,
             parents: Arc::new(ParentCache::default()),
+            priority: 0,
         };
         assert!(format!("{:?}", job.clone()).contains("ChunkJob"));
         let mut inline = InlineWorkers::default();
@@ -1291,6 +1651,8 @@ mod tests {
         let mut out = Vec::new();
         inline.drain(&mut out, 8);
         assert_eq!(out.len(), 1);
+        assert_eq!(inline.built().chunks, 1);
+        assert!(format!("{:?}", inline.built()).contains("BuildCount"));
         assert_eq!(out[0].clone(), out[0]);
         assert!(format!("{:?}", out[0]).contains("ChunkReady"));
     }
@@ -1470,7 +1832,7 @@ mod tests {
         let mesh = extract(&samples);
         let o = DVec3::from_array(g.origin_m);
         let mut checked = 0;
-        for (v, m) in mesh.vertices.iter().zip(&g.morph) {
+        for (v, m) in mesh.vertices.iter().zip(g.morph_targets().iter()) {
             if v[0] <= 0 {
                 let t = o + DVec3::new(f64::from(m[0]), f64::from(m[1]), f64::from(m[2]));
                 let dir = t.normalize();
@@ -1638,6 +2000,16 @@ mod tests {
                 .get(planet(), &body, second)
                 .is_some_and(|c| !Arc::ptr_eq(&c, &b2))
         );
+        // The capacity is settable: a smaller bound drops the oldest at once.
+        assert_eq!(cache.capacity(), PARENT_CACHE_ENTRIES);
+        cache.set_capacity(PARENT_CACHE_ENTRIES + 10);
+        assert_eq!(cache.capacity(), PARENT_CACHE_ENTRIES + 10);
+        cache.set_capacity(PARENT_CACHE_ENTRIES);
+        assert_eq!(cache.len(), PARENT_CACHE_ENTRIES);
+        cache.set_capacity(0);
+        assert_eq!(cache.capacity(), 1);
+        assert_eq!(cache.len(), 1);
+        cache.set_capacity(PARENT_CACHE_ENTRIES);
         // The bound: one more than the cap, and the first one is gone.
         let mut i = 0;
         while i < PARENT_CACHE_ENTRIES {
@@ -1734,7 +2106,7 @@ mod tests {
         let mesh = extract(&samples);
         let o = DVec3::from_array(gl.origin_m);
         let mut checked = 0;
-        for (v, m) in mesh.vertices.iter().zip(&gl.morph) {
+        for (v, m) in mesh.vertices.iter().zip(gl.morph_targets().iter()) {
             // The exact radial of the vertex (the target's own is rounded through f32).
             let p = vertex_position_m(&body, &samples, *v);
             let dir = DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64()).normalize();
@@ -1758,7 +2130,7 @@ mod tests {
         let or = DVec3::from_array(gr.origin_m);
         let mut shared = 0;
         let mut right_at: BTreeMap<[i64; 3], DVec3> = BTreeMap::new();
-        for (v, m) in gr.vertices.iter().zip(&gr.morph) {
+        for (v, m) in gr.vertices.iter().zip(gr.morph_targets().iter()) {
             let p = or + DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
             let k = [
                 (p.x * 1000.0).round() as i64,
@@ -1770,7 +2142,7 @@ mod tests {
                 or + DVec3::new(f64::from(m[0]), f64::from(m[1]), f64::from(m[2])),
             );
         }
-        for (v, m) in gl.vertices.iter().zip(&gl.morph) {
+        for (v, m) in gl.vertices.iter().zip(gl.morph_targets().iter()) {
             let p = ol + DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
             let k = [
                 (p.x * 1000.0).round() as i64,
@@ -1825,9 +2197,13 @@ mod tests {
                 .map(|(j, _)| j)
                 .expect("a top vertex over the skirt vertex");
             assert_eq!(g.normals[i], g.normals[top]);
-            assert_eq!(g.sink[i], g.sink[top]);
-            let mt = o + DVec3::from(g.morph[top].map(f64::from));
-            let ms = o + DVec3::from(g.morph[i].map(f64::from));
+            let (si, st) = (
+                DVec3::from(g.sink_of(i).map(f64::from)),
+                DVec3::from(g.sink_of(top).map(f64::from)),
+            );
+            assert!((si - st).length() < 1e-3);
+            let mt = o + DVec3::from(g.morph_target(top).map(f64::from));
+            let ms = o + DVec3::from(g.morph_target(i).map(f64::from));
             assert!(((mt - ms).length() - drop).abs() < 0.01);
             i += 1;
         }
@@ -1856,12 +2232,14 @@ mod tests {
         assert!(sink_m(&body, 3) > sink_m(&body, 1));
         // On a chunk: rung 0 carries zeros; rung 1 carries its radial times the sink.
         let g0 = geometry_of(&body, surface_key(&body, 0, 300, 700)).expect("rung 0");
-        assert_eq!(g0.sink.len(), g0.vertices.len());
-        assert!(g0.sink.iter().all(|s| *s == [0.0, 0.0, 0.0]));
+        assert_eq!(g0.sink_m, 0.0);
+        assert!((0..g0.vertices.len()).all(|i| g0.sink_of(i) == [0.0, 0.0, 0.0]));
         let g1 = geometry_of(&body, surface_key(&body, 1, 150, 350)).expect("rung 1");
-        assert_eq!(g1.sink.len(), g1.vertices.len());
+        assert_eq!(g1.morph_m.len(), g1.vertices.len());
+        assert!((f64::from(g1.sink_m) - s1).abs() < 1e-3);
         let o = vd_core::glam::DVec3::from_array(g1.origin_m);
-        for (v, s) in g1.vertices.iter().zip(&g1.sink) {
+        for (i, v) in g1.vertices.iter().enumerate() {
+            let s = g1.sink_of(i);
             let pv =
                 o + vd_core::glam::DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
             let sv = vd_core::glam::DVec3::new(f64::from(s[0]), f64::from(s[1]), f64::from(s[2]));
@@ -1870,12 +2248,111 @@ mod tests {
         }
     }
 
+    /// THE PACKING IS EXACT (step 5, ruling V16): the target the vector form carried — the hit's
+    /// radial distance times the radial, less the origin, narrowed once — and the target the
+    /// metre form reconstructs — the narrowed vertex plus its radial times the metre — differ by
+    /// the narrowing alone. MEASURED here over every vertex of two chunks, with the bound the
+    /// gate holds: under a tenth of a millimetre, a thousandth of the finest cell.
+    #[test]
+    fn the_morph_metre_reconstructs_the_target_vector_to_float_rounding() {
+        let body = home_planet();
+        let mut widest = 0.0f64;
+        let mut counted = 0;
+        for key in [
+            surface_key(&body, 0, 300, 700),
+            surface_key(&body, 1, 150, 350),
+        ] {
+            let g = geometry_of(&body, key).expect("the chunk");
+            let o = vd_core::glam::DVec3::from_array(g.origin_m);
+            for (i, v) in g.vertices.iter().enumerate() {
+                // The vector form's target, as step 3 computed it: from the absolute position.
+                let abs = o + vd_core::glam::DVec3::new(
+                    f64::from(v[0]),
+                    f64::from(v[1]),
+                    f64::from(v[2]),
+                );
+                let len = abs.length();
+                let dir = abs / len;
+                let target_m = len + f64::from(g.morph_m[i]);
+                let t = dir * target_m - o;
+                let vector_form = [t.x as f32, t.y as f32, t.z as f32];
+                let metre_form = g.morph_target(i);
+                let mut k = 0;
+                while k < 3 {
+                    widest =
+                        widest.max((f64::from(vector_form[k]) - f64::from(metre_form[k])).abs());
+                    k += 1;
+                }
+                counted += 1;
+            }
+        }
+        assert!(counted > 5_000, "{counted} vertices");
+        assert!(widest < 1e-4, "the two forms differ by {widest} m");
+    }
+
+    /// THE VERTEX'S RADIAL (step 5): every vertex's narrowed radial stands within
+    /// `RADIAL_STEP_RAD` of the exact one, and a skirt vertex carries its top's.
+    #[test]
+    fn the_narrowed_radial_stands_within_its_step_of_the_exact_one() {
+        let body = home_planet();
+        let g = geometry_of(&body, surface_key(&body, 1, 150, 350)).expect("rung 1");
+        assert_eq!(g.radials.len(), g.vertices.len());
+        let mut widest = 0.0f64;
+        for i in 0..g.vertices.len() {
+            let exact = g.radial(i);
+            let r = g.radials[i];
+            let narrowed =
+                DVec3::new(f64::from(r[0]), f64::from(r[1]), f64::from(r[2])).normalize();
+            widest = widest.max(exact.dot(narrowed).clamp(-1.0, 1.0).acos());
+        }
+        assert!(widest <= RADIAL_STEP_RAD, "{widest} rad");
+    }
+
     #[test]
     fn the_morph_targets_stand_on_the_coarser_surface_and_the_top_rung_is_its_own() {
         let body = home_planet();
         let key = surface_key(&body, 0, 300, 700);
         let g = geometry_of(&body, key).expect("the golden chunk");
-        assert_eq!(g.morph.len(), g.vertices.len());
+        assert_eq!(g.morph_m.len(), g.vertices.len());
+        // THE BOUNDS hold every vertex, every target and every sunk position, on a chunk that
+        // sinks (rung 1) as on one that does not; the worker's box is the measured box; an empty
+        // geometry has none.
+        for g in [
+            &g,
+            &geometry_of(&body, surface_key(&body, 1, 150, 350)).expect("rung 1"),
+        ] {
+            let (lo, hi) = g.bounds;
+            assert_eq!(g.bounds, g.measure_bounds());
+            for (i, v) in g.vertices.iter().enumerate() {
+                let t = g.morph_target(i);
+                let s = g.sink_of(i);
+                let mut k = 0;
+                while k < 3 {
+                    assert!(lo[k] <= v[k]);
+                    assert!(v[k] <= hi[k]);
+                    assert!(lo[k] <= t[k]);
+                    assert!(t[k] <= hi[k]);
+                    assert!(lo[k] <= v[k] - s[k]);
+                    assert!(v[k] - s[k] <= hi[k]);
+                    k += 1;
+                }
+            }
+        }
+        let empty = ChunkGeometry {
+            key,
+            origin_m: g.origin_m,
+            morph_m: Vec::new(),
+            morph_fallbacks: 0,
+            morph_seam: 0,
+            sink_m: 0.0,
+            vertices: Vec::new(),
+            normals: Vec::new(),
+            radials: Vec::new(),
+            triangles: Vec::new(),
+            bounds: ([0.0; 3], [0.0; 3]),
+        };
+        assert_eq!(empty.measure_bounds(), ([0.0; 3], [0.0; 3]));
+        assert!(empty.morph_targets().is_empty());
         // The gap between a vertex and its target is radial and within the octave dropped between
         // rung 0 and rung 1 — the recipe's own bound — plus a cell of each rung for the two
         // extractors' placement, and at least one target differs.
@@ -1883,7 +2360,7 @@ mod tests {
         let o = vd_core::glam::DVec3::from_array(g.origin_m);
         let mut moved = 0;
         let mut on_surface = 0;
-        for (v, m) in g.vertices.iter().zip(&g.morph) {
+        for (v, m) in g.vertices.iter().zip(g.morph_targets().iter()) {
             let pv =
                 o + vd_core::glam::DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
             let pm =
@@ -1917,7 +2394,8 @@ mod tests {
         let top = body.ladder().rungs - 1;
         let top_key = surface_key(&body, top, 3, 3);
         let g = geometry_of(&body, top_key).expect("the top chunk");
-        assert_eq!(g.morph, g.vertices);
+        assert!(g.morph_m.iter().all(|m| *m == 0.0));
+        assert_eq!(g.morph_targets(), g.vertices);
     }
 
     #[test]
@@ -2049,6 +2527,131 @@ mod tests {
         assert_eq!(
             ruler_on_surface(&body, eye.to_array(), [0.0, 0.0, 0.0], 0, 400.0),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+    use vd_core::pose::RealmId;
+    use vd_seed::bend::Face;
+
+    fn planet() -> RealmId {
+        RealmId::Planet(7)
+    }
+
+    /// The guard of a claim that builds; `None` for a hit (both arms run in the test below).
+    fn guard_of(claim: Claim<'_>) -> Option<ClaimGuard<'_>> {
+        match claim {
+            Claim::Build(guard) => Some(guard),
+            Claim::Hit(_) => None,
+        }
+    }
+
+    fn key_at(body: &BodyDefinition, x: i32) -> ChunkKey {
+        ChunkKey {
+            face: Face::PosX,
+            rung: 1,
+            x,
+            y: 5,
+            z: vd_terrain::digest::surface_chunk_z(body, Face::PosX, 1, x, 5),
+        }
+    }
+
+    /// A waiter that hands a message back just before it claims, so the test knows it is at the
+    /// door; then the claimant parks a moment (the lib never sleeps — its clippy rule — and this
+    /// test parks only to give the waiter its way to the condition variable).
+    fn waiter(
+        cache: &Arc<ParentCache>,
+        key: ChunkKey,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::thread::JoinHandle<Option<usize>>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cache = Arc::clone(cache);
+        let handle = std::thread::spawn(move || {
+            tx.send(()).expect("the test listens");
+            match cache.claim(planet(), key) {
+                Claim::Hit(m) => Some(m.triangle_count()),
+                Claim::Build(guard) => {
+                    guard.finish(None);
+                    None
+                }
+            }
+        });
+        (rx, handle)
+    }
+
+    /// SINGLE FLIGHT (ruling V15): a parent claimed by one reader is waited for by the next, and
+    /// read as a hit when it lands; an abandoned claim hands the build to the waiter; a guard
+    /// dropped without a finish abandons too (a panic's path); a forgotten realm refuses a late
+    /// landing.
+    #[test]
+    fn a_claimed_parent_is_built_once_and_a_waiter_reads_the_landing() {
+        let body = vd_terrain::home::home_planet();
+        let cache = Arc::new(ParentCache::with_capacity(4));
+        let key = key_at(&body, 3);
+        // The first claim is a build.
+        let guard = guard_of(cache.claim(planet(), key)).expect("a cold cache builds");
+        assert!(format!("{guard:?}").contains("ClaimGuard"));
+        assert_eq!(
+            cache.stats(),
+            ParentStats {
+                hits: 0,
+                builds: 1,
+                waits: 0
+            }
+        );
+        // A second reader waits on the claim; it lands and the waiter reads a hit.
+        let (at_the_door, waiting) = waiter(&cache, key);
+        at_the_door.recv().expect("the waiter reports");
+        std::thread::park_timeout(std::time::Duration::from_millis(30));
+        let mesh = Arc::new(ParentMesh::build(&body, key).expect("in the ladder"));
+        assert!(mesh.bytes() > mesh.triangle_count() * 12);
+        guard.finish(Some(Arc::clone(&mesh)));
+        assert_eq!(
+            waiting.join().expect("the waiter returns"),
+            Some(mesh.triangle_count())
+        );
+        assert_eq!(cache.len(), 1);
+        let after = cache.stats();
+        assert_eq!((after.hits, after.builds), (1, 1));
+        assert!(after.waits <= 1);
+        // A hit is a Debug too, and it carries no guard.
+        let hit = cache.claim(planet(), key);
+        assert!(format!("{hit:?}").contains("Hit"));
+        assert!(guard_of(hit).is_none());
+        // An abandoned claim: the waiter wakes with nothing kept and claims the build itself.
+        let other = key_at(&body, 4);
+        let guard = guard_of(cache.claim(planet(), other)).expect("a miss builds");
+        let (at_the_door, waiting) = waiter(&cache, other);
+        at_the_door.recv().expect("the waiter reports");
+        std::thread::park_timeout(std::time::Duration::from_millis(30));
+        guard.finish(None);
+        assert_eq!(waiting.join().expect("the waiter returns"), None);
+        assert_eq!(cache.len(), 1);
+        // A guard dropped without a finish abandons the claim (the panic's path).
+        let third = key_at(&body, 5);
+        drop(guard_of(cache.claim(planet(), third)).expect("a miss builds"));
+        assert!(guard_of(cache.claim(planet(), third)).is_some());
+        assert_eq!(cache.len(), 1);
+        // A forgotten realm refuses the landing of a claim from before the forget.
+        let stale = guard_of(cache.claim(planet(), other)).expect("a miss builds");
+        cache.forget(planet());
+        assert!(cache.is_empty());
+        stale.finish(Some(Arc::clone(&mesh)));
+        assert!(cache.is_empty());
+        // `get` after the forget builds and keeps under the new epoch.
+        assert!(cache.get(planet(), &body, other).is_some());
+        assert_eq!(cache.len(), 1);
+        assert_eq!(
+            BuildCount::default(),
+            BuildCount {
+                chunks: 0,
+                nanos: 0
+            }
         );
     }
 }

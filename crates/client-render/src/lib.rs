@@ -417,17 +417,18 @@ const STAR_PROBE_COUNT: usize = 48;
 /// correct bounding box for the cloud. The corner sign is what the vertex shader expands.
 const ATTRIBUTE_STAR_CORNER: MeshVertexAttribute =
     MeshVertexAttribute::new("StarCorner", 0x5741_0001, VertexFormat::Float32x2);
-/// THE MORPH TARGET of a ground vertex (slice 8 step 3): where it stands on the next coarser
-/// rung's surface, relative to the chunk's origin like the position — shader location 8, past
-/// the engine's own attributes.
+/// THE MORPH METRE of a ground vertex (slice 8 step 3, packed in step 5): how far along its own
+/// radial the vertex stands from the next coarser rung's surface, one `f32` — shader location 8,
+/// past the engine's own attributes. The sink is the rung's uniform, not an attribute.
 pub(crate) const ATTRIBUTE_MORPH: MeshVertexAttribute =
-    MeshVertexAttribute::new("LadderMorph", 0x5741_0010, VertexFormat::Float32x3);
+    MeshVertexAttribute::new("LadderMorphM", 0x5741_0012, VertexFormat::Float32);
 const MORPH_SHADER_LOCATION: u32 = 8;
-/// THE SINK of a ground vertex (slice 8 step 3): its radial times the rung's sink, the drop the
-/// chunk makes under the next finer rung nearer than that rung's fade-out edge — location 9.
-pub(crate) const ATTRIBUTE_SINK: MeshVertexAttribute =
-    MeshVertexAttribute::new("LadderSink", 0x5741_0011, VertexFormat::Float32x3);
-const SINK_SHADER_LOCATION: u32 = 9;
+/// THE RADIAL of a ground vertex (step 5): its unit direction from the body's centre in the
+/// realm's frame, three `f32` — shader location 9. The shader needs no centre of the body, so no
+/// material is rewritten as the eye moves.
+pub(crate) const ATTRIBUTE_RADIAL: MeshVertexAttribute =
+    MeshVertexAttribute::new("LadderRadial", 0x5741_0014, VertexFormat::Float32x3);
+const RADIAL_SHADER_LOCATION: u32 = 9;
 const ATTRIBUTE_STAR_COLOR: MeshVertexAttribute =
     MeshVertexAttribute::new("StarColor", 0x5741_0002, VertexFormat::Float32x4);
 const ATTRIBUTE_STAR_BASE_R: MeshVertexAttribute =
@@ -627,21 +628,26 @@ pub(crate) struct ProbeParams {
     /// sink and far edge the ground's material applies, so the probe reads what the picture
     /// shows (step 3).
     bands: Vec4,
+    /// The rung's sink in metres (x), like the ground's material (step 5).
+    sink: Vec4,
 }
 
 impl ProbeMaterial {
-    /// The material for one kind at one rung, with its crossfade bands and its sink's end.
+    /// The material for one kind at one rung, with its crossfade bands, its sink's end and its
+    /// sink.
     pub(crate) fn new(
         kind: u8,
         rung: u8,
         bands: ([f64; 2], [f64; 2]),
         sink_end_m: f64,
+        sink_m: f64,
     ) -> ProbeMaterial {
         ProbeMaterial {
             params: ProbeParams {
                 code: f32::from(vd_client_harness::probe::probe_byte(kind, rung)),
                 cell_m: vd_seed::ladder::cell_m(rung) as f32,
                 bands: fade_uniform(bands, sink_end_m),
+                sink: Vec4::new(sink_m as f32, 0.0, 0.0, 0.0),
             },
         }
     }
@@ -663,8 +669,8 @@ pub(crate) fn fade_uniform(bands: ([f64; 2], [f64; 2]), sink_end_m: f64) -> Vec4
 /// ★ THE CROSSFADE (slice 8 step 3; ruling V14 D8-2, §5): the ground's own lit material, extended
 /// with the GEOMORPH that slides a rung's vertices onto the next coarser surface across its
 /// fade-out band, THE SINK that drops them under the next finer rung across its fade-in band
-/// (`ladder_fade.wgsl`, the vertex stage; each vertex carries its target on the coarser surface,
-/// `ATTRIBUTE_MORPH`, and its drop, `ATTRIBUTE_SINK`), and THE FAR EDGE where a rung ends (the
+/// (`ladder_fade.wgsl`, the vertex stage; each vertex carries its metre to the coarser surface,
+/// `ATTRIBUTE_MORPH`, and the rung's sink rides the uniform), and THE FAR EDGE where a rung ends (the
 /// fragment stage). One material per rung, carrying that rung's bands from the Tier-A
 /// `fade_bands`. A `StandardMaterial` extension: the light, the shadow and the paint are the
 /// engine's own; the shadow pass runs the same morph and sink (`ladder_fade_prepass.wgsl`), so
@@ -675,12 +681,17 @@ pub(crate) struct LadderFade {
     /// material owns the slots below it.
     #[uniform(100)]
     bands: Vec4,
+    /// THE RUNG'S SINK in metres (x), step 5: a vertex's sink is its own radial (an attribute)
+    /// times this. One number per rung, never rewritten.
+    #[uniform(100)]
+    sink: Vec4,
 }
 
 impl LadderFade {
-    pub(crate) fn new(bands: ([f64; 2], [f64; 2]), sink_end_m: f64) -> LadderFade {
+    pub(crate) fn new(bands: ([f64; 2], [f64; 2]), sink_end_m: f64, sink_m: f64) -> LadderFade {
         LadderFade {
             bands: fade_uniform(bands, sink_end_m),
+            sink: Vec4::new(sink_m as f32, 0.0, 0.0, 0.0),
         }
     }
 }
@@ -708,7 +719,7 @@ impl bevy::pbr::MaterialExtension for LadderFade {
             Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
             Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
             ATTRIBUTE_MORPH.at_shader_location(MORPH_SHADER_LOCATION),
-            ATTRIBUTE_SINK.at_shader_location(SINK_SHADER_LOCATION),
+            ATTRIBUTE_RADIAL.at_shader_location(RADIAL_SHADER_LOCATION),
         ])?];
         Ok(())
     }
@@ -743,7 +754,7 @@ impl Material for ProbeMaterial {
             Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
             Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
             ATTRIBUTE_MORPH.at_shader_location(MORPH_SHADER_LOCATION),
-            ATTRIBUTE_SINK.at_shader_location(SINK_SHADER_LOCATION),
+            ATTRIBUTE_RADIAL.at_shader_location(RADIAL_SHADER_LOCATION),
         ])?];
         Ok(())
     }
@@ -2248,7 +2259,7 @@ fn draw_hud(ctx: &egui::Context, net: &Net) {
         );
     let location = snap.location().unwrap_or_else(|| "—".to_owned());
     let entity = own.map(|e| e.to_string()).unwrap_or_else(|| "—".to_owned());
-    egui::Area::new(egui::Id::new("vd_hud"))
+    let drawn = egui::Area::new(egui::Id::new("vd_hud"))
         .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 10.0))
         .show(ctx, |ui| {
             // One reading per line: a wrapped column hid the stamp behind its own words (slice 8p).
@@ -2272,6 +2283,23 @@ fn draw_hud(ctx: &egui::Context, net: &Net) {
                 }
             }
         });
+    // THE OVERLAY'S RECTANGLE goes on the stamp, in pixels: a picture compare leaves it out (its
+    // tick readout differs between two runs of one code by design).
+    let rect = drawn.response.rect;
+    let ppp = ctx.pixels_per_point();
+    if let Some(t) = net
+        .terrain_stamp
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        t.hud_rect_px = [
+            rect.min.x * ppp,
+            rect.min.y * ppp,
+            rect.max.x * ppp,
+            rect.max.y * ppp,
+        ];
+    }
 }
 
 /// The stamp as HUD lines — one derivation, shared by the window and the capture.

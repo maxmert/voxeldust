@@ -2,18 +2,20 @@
 // material, extended with the GEOMORPH that carries a rung onto the next coarser one across a band
 // of distance, THE SINK that drops it under the next finer one, and THE FAR EDGE where it ends.
 //
-// Every vertex of a chunk at rung L carries a second position: where it stands on the rung L + 1
-// surface along its own radial (`morph`, computed by the client library from the same recipe when
-// the chunk is built). Across the band `(out_lo, out_hi)` around the rung's switch distance, the
-// vertex slides from its own position to that one, on its own distance from the eye: whole at
-// `out_lo`, on the coarser surface at `out_hi`. At `out_hi` the two surfaces coincide, so the
-// finer ends there (the fragment stage discards it at and past `out_hi`) without a pop, and the
-// coarser, present everywhere, carries on.
+// Every vertex of a chunk at rung L carries ONE METRE (`morph_m`, step 5): how far along its own
+// radial it stands from the rung L + 1 surface (computed by the client library from the same
+// recipe when the chunk is built); the radial is the vertex's world position less the body's
+// centre (the uniform), and the target is the vertex plus the radial times the metre. Across the
+// band `(out_lo, out_hi)` around the rung's switch distance, the vertex slides from its own
+// position to that target, on its own distance from the eye: whole at `out_lo`, on the coarser
+// surface at `out_hi`. At `out_hi` the two surfaces coincide, so the finer ends there (the
+// fragment stage discards it at and past `out_hi`) without a pop, and the coarser, present
+// everywhere, carries on.
 //
 // THE SINK. Nearer than its own fade-in edge `in_hi` — which is the finer rung's `out_hi`, the same
-// line — the chunk drops along each vertex's radial by `sink` (the recipe's bound on the gap
-// between the two fields plus a cell of each rung for the extractor's placement), from nothing at
-// `in_hi` to the whole drop at `in_lo`. Under that drop the coarser mesh is certainly below the
+// line — the chunk drops along each vertex's radial by the rung's sink (the uniform's `w`: the
+// recipe's bound on the gap between the two fields plus a cell of each rung for the extractor's
+// placement), from nothing at `in_hi` to the whole drop at `in_lo`. Under that drop the coarser mesh is certainly below the
 // finer one, so it never shows through where the finer is whole, and where the finer is still
 // building the sunk coarser shows instead of a hole (coarse before fine, SL8). Nothing is ever
 // discarded on the near side: MEASURED before the sink, a partition by distance between two
@@ -50,6 +52,8 @@ struct LadderFade {
     // The bands: (in_lo, sink_end, out_lo, out_hi), metres from the eye; the sink ramp ends a
     // little past the fade-in edge, so at the edge one finer cell of sink remains.
     bands: vec4<f32>,
+    // The rung's sink in metres (x), step 5.
+    sink: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> fade: LadderFade;
@@ -58,10 +62,12 @@ struct FadeVertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    // The vertex on the next coarser rung's surface, relative to the chunk's origin like `position`.
-    @location(8) morph: vec3<f32>,
-    // The vertex's drop under the next finer rung: its radial times the rung's sink.
-    @location(9) sink: vec3<f32>,
+    // THE MORPH METRE (step 5): how far along its own radial the vertex stands from the next
+    // coarser rung's surface; the target is the vertex plus its radial times this.
+    @location(8) morph_m: f32,
+    // THE RADIAL (step 5): the vertex's unit direction from the body's centre in the chunk's
+    // frame.
+    @location(9) radial: vec3<f32>,
 }
 
 // How whole the rung is at a distance: one below its fade-out band, zero past it.
@@ -81,8 +87,15 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     let own = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
     let d = length(own.xyz);
-    let local = mix(vertex.morph, vertex.position, whole(d)) - vertex.sink * (1.0 - risen(d));
-    out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(local, 1.0));
+    // The vertex's radial (its own attribute, turned into the world like a normal), its target
+    // along it, and its sink along it — the morph in world space (step 5: one metre and one
+    // radial per vertex, the sink one number per rung; no centre of the body, so no material
+    // is rewritten as the eye moves).
+    let radial = normalize(mesh_functions::mesh_normal_local_to_world(vertex.radial, vertex.instance_index));
+    let coarser = own.xyz + radial * vertex.morph_m;
+    let sink = radial * fade.sink.x;
+    let morphed = mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d));
+    out.world_position = vec4<f32>(morphed, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX

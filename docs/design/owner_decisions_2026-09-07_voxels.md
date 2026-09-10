@@ -643,3 +643,87 @@ rule and the wanted set, the crossfade, the residency band with M8-1, the mesh p
 the pop detector with M8-3, the refuter, the gates, the pictures. The full process gate list on the
 new home (`just gate`) runs at 8p's end.
 
+
+## V15. THE THROUGHPUT WALL — WORKERS, ORDER AND THE HARVEST (owner, 2026-09-10)
+
+**The measurement that raised it (M8-1, step 4).** The residency band holds on a walk and at 240 m/s
+one kilometre over the ground while the finest ring stays out of the picture; it breaks the moment
+that ring enters (three red readings of six at 240 m/s) and breaks on every frame at 528 m/s (about
+1 800 urgent chunks missing, the queue 2 800 deep). The lead is applied and is not the lever: one
+buffer at 528 m/s is 63 m, one chunk. The wall is THROUGHPUT — the eye sweeps more chunks per second
+than the client builds and harvests.
+
+**The owner's question.** *"Can we use several workers to deal with different LOD tiers? Will that be
+faster? In my opinion we need to support fast speeds above the surface of the planets with best
+possible details level. How is it done in the industry?"*
+
+**The answer the owner agreed to (*"Agree with the proposal, please continue"*).** The pool already
+holds one thread per core; a pool per tier idles when its rung has no work and loses those cores to
+the other rungs. What is missing is ORDER, a HARVEST that scales, CHEAPER chunks and a CACHE. The
+suspected wall (a hypothesis, to be measured first) is the harvest: 24 chunks a frame at the 20
+frames a second the probe leg measured is 480 chunks a second, under the estimated demand of 600 to
+700, while 14 workers at 4 ms a chunk could build about 3 000. Each upload also costs the main
+thread, so a deep queue lowers the frame rate and the frame rate lowers the harvest.
+
+**The order of work, RULED:**
+
+1. **MEASURE the three rates together** — the workers' build rate, the harvest rate, and the frame
+   rate — on the M8-1 flight (M8-2a), before anyone touches the pool.
+2. **ONE pool with a PRIORITY QUEUE** (never a pool per tier): urgent before revealed before margin;
+   within a class the coarser rung first (a missing coarse chunk is a hole, a missing fine chunk is
+   a coarser patch), then the nearest to the lead eye; jobs that leave the wanted set are cancelled
+   (they are today). A reservation of threads for the coarse rungs only if the sorted queue is
+   measured to starve them. **A BYTE BUDGET per frame for the harvest**, in the one config struct,
+   instead of a chunk count.
+3. **A DISK CACHE of built chunks** on the client: lawful under SL10 (the static shape is a function
+   of seed and address), keyed by the world identity and the chunk's address; the second flight over
+   the same ground costs nothing.
+4. **Step 5's packing** (D8-4) cuts the bytes per chunk.
+5. **Generation on the GPU** only if the four above still leave 528 m/s red: it is a second
+   implementation of the one recipe, and the no-drift gate would have to measure it byte for byte.
+
+**Restated for the record.** "The best possible detail at speed" is the tier rule's rung, complete:
+at one kilometre up the 1 m rung is a pixel only inside 869 m. The goal is the rule's rung whole at
+any speed a hull flies, and the levers above raise the number that decides it. A stated lead (R-18)
+stays refused: no lead builds chunks faster. Velocity extrapolation on the client stays forbidden
+(SL10 clause 7).
+
+**What shipped under V15, and what did not (2026-09-10, after the refutation).** Built: the three
+rates and the parent cache's counts on the stamp; one pool with a priority queue; the order by
+class, the coarser rung first, then the PARENT column along a MORTON curve (not "the nearest to the
+lead eye": two parents at one distance stand anywhere around the eye, and their neighbourhoods
+rarely overlap — MEASURED, §16.6); a waiting job moves to each frame's priority; single-flight
+parent builds; the cache as a MEMORY BUDGET in the one config struct (256 MB, never less than one
+working set of the workers). NOT built: the byte budget for the harvest — the harvest loop costs
+the main thread 0.07 ms an upload (MEASURED, run 18), so the budget belongs with step 5's packing,
+where the bytes per upload are the unit; a reservation of threads for the coarse rungs — nothing
+measured a starvation, and the sorted queue serves the coarse rungs first within a class. Still
+owed under V15: the disk cache (item 3), the packing (item 4).
+
+## V16. PACK WITHOUT A QUALITY DROP, THEN GENERATE ON THE GPU (owner, 2026-09-10)
+
+**The question.** After the throughput work (V15) the owner asked *"Can we do more to keep 60 fps?
+What if speed will be faster?"* and then *"Why you still want to have CPU instead of GPU?"*. The
+answer named the frame's unmeasured cost (the engine's GPU upload of new meshes, the draw count, the
+culling of 7 000 entities), the levers (measure the frame, pack the bytes, a frame-time budget for
+the harvest, fewer draw calls), the rule under a deep queue for a fast low hull, and GPU generation
+as the one lever that keeps the finest ring at any speed and makes the upload vanish — lawful under
+SL10 if the client keeps the CPU crate as the REFEREE (a byte-for-byte self-check of GPU chunks
+against CPU chunks on a sample every session) and the server keeps its CPU collision.
+
+**RULED:** *"I actually agree with your proposal: pack, but please make sure we DO NOT DROP QUALITY
+(step 5), and then let's do GPU generation."*
+
+1. **Step 5 packs the bytes and changes NOTHING in the picture.** Positions and indices are
+   integers already (the extractor's quanta), so they pack exactly. The morph and sink targets
+   become one scalar each along the vertex's own radial, exact to float rounding — the same class
+   as the trim gate. Normals stay full width until a PIXEL measurement shows a packed form changes
+   no pixel; a packed form that changes a pixel is refused. The picture gate measures the packed
+   picture against the unpacked one and reports the difference; the owner sees the number.
+2. **Then GPU generation** — the recipe, the extractor and the morph target on the GPU, the CPU
+   crate as the referee, collision on the server's CPU as today; the spike (a thousand chunks
+   byte for byte on this machine) is its first step, and its answer decides whether the recipe
+   needs an integer form first (a generator slice with a new golden pin).
+3. Still the owner's word, open: the frame-time budget for the harvest (a hitch against a coarser
+   patch), and the rule under a deep queue (the finest ring not asked for while the queue is
+   deeper than the workers drain in one buffer).
