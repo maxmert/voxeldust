@@ -963,22 +963,29 @@ fn take_picture(
     // owner's picture from the previous run.
     let dest_probe = dir.join(format!("{name}.probe.png"));
     let dest_hud = dir.join(format!("{name}.hud.json"));
+    // EVERY STAND HAS A FROZEN EXACT PICTURE (refutation N-10: a compare against the previous
+    // run's picture would let two lossy steps ratchet one level each). A new stand freezes its
+    // exact picture first — a missing reference is a red gate, never a skipped compare.
     let exact = dir.join(EXACT_DIR);
-    let (reference, reference_probe, reference_hud) = if exact.join(format!("{name}.png")).exists()
+    let reference = exact.join(format!("{name}.png"));
+    let reference_probe = exact.join(format!("{name}.probe.png"));
+    let reference_hud = exact.join(format!("{name}.hud.json"));
+    assert!(
+        reference.exists() && reference_probe.exists(),
+        "{name}: no frozen exact picture under {} — freeze one from an exact flight first",
+        exact.display()
+    );
+    eprintln!("terrain_pictures/{name}: compared against the frozen exact picture");
     {
-        eprintln!("terrain_pictures/{name}: compared against the frozen exact picture");
-        (
-            exact.join(format!("{name}.png")),
-            exact.join(format!("{name}.probe.png")),
-            exact.join(format!("{name}.hud.json")),
-        )
-    } else {
-        (dest.clone(), dest_probe.clone(), dest_hud.clone())
-    };
-    if reference.exists() && reference_probe.exists() {
         let (before, bw, bh) = open_rgba(&reference);
         let (before_probe, pw2, ph2) = open_rgba(&reference_probe);
-        if (bw, bh) == (w, h) && (pw2, ph2) == (w, h) {
+        assert_eq!(
+            ((bw, bh), (pw2, ph2)),
+            ((w, h), (w, h)),
+            "{name}: the frozen exact picture is {bw}×{bh} and its probe {pw2}×{ph2}; this one \
+             is {w}×{h}"
+        );
+        {
             // Only the CONTENT compares: a pixel either probe marks as terrain or ruler, and not
             // under the overlay. The HUD's stamp line carries the frame's tick, and that readout
             // differs between two runs of one code by design (MEASURED: 152 pixels of a
@@ -1098,11 +1105,6 @@ fn take_picture(
                      {widest}) and {PICTURE_IDENTICAL_ENV} refuses any change"
                 );
             }
-        } else {
-            eprintln!(
-                "terrain_pictures/{name}: the picture on disk is {bw}×{bh}, this one {w}×{h}: not \
-                 compared"
-            );
         }
     }
     // The previous picture and probe stay beside the run for a later look, the new ones go to
@@ -1113,7 +1115,7 @@ fn take_picture(
         serde_json::to_string(&stamp.hud_rect_px).expect("the rectangle encodes"),
     )
     .expect("write the overlay's rectangle beside the picture");
-    std::fs::copy(&probe_png, dir.join(format!("{name}.probe.png"))).expect("copy the probe");
+    std::fs::copy(&probe_png, &dest_probe).expect("copy the probe");
     eprintln!("terrain_pictures/{name}: written to {}", dest.display());
     (last, share)
 }

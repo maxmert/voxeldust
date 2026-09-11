@@ -61,7 +61,11 @@ struct LadderFade {
 struct FadeVertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
+#ifdef OCT_NORMAL
+    @location(1) oct_normal: vec2<f32>,
+#else
     @location(1) normal: vec3<f32>,
+#endif
     // THE MORPH METRE (step 5): how far along its own radial the vertex stands from the next
     // coarser rung's surface; the target is the vertex plus its radial times this.
     @location(8) morph_m: f32,
@@ -81,6 +85,16 @@ fn risen(d: f32) -> f32 {
     return clamp((d - fade.bands.x) / (fade.bands.y - fade.bands.x), 0.0, 1.0);
 }
 
+// THE PACKED NORMAL (ruling V18): two signed 16-bit numbers on the octahedron, unfolded to the
+// unit normal — the library's `oct_decode`, step for step.
+fn oct_decode(e: vec2<f32>) -> vec3<f32> {
+    var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    let t = clamp(-n.z, 0.0, 1.0);
+    n.x = n.x + select(t, -t, n.x >= 0.0);
+    n.y = n.y + select(t, -t, n.y >= 0.0);
+    return normalize(n);
+}
+
 @vertex
 fn vertex(vertex: FadeVertex) -> VertexOutput {
     var out: VertexOutput;
@@ -97,7 +111,12 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     let morphed = mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d));
     out.world_position = vec4<f32>(morphed, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
-    out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
+#ifdef OCT_NORMAL
+    let local_normal = oct_decode(vertex.oct_normal);
+#else
+    let local_normal = vertex.normal;
+#endif
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(local_normal, vertex.instance_index);
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = vertex.instance_index;
 #endif

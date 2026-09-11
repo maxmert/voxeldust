@@ -977,3 +977,76 @@ lead, altitude, origin, own pose, the entity windows), so the next occurrence is
 The lead's own formula is the suspect: the offset between the own pose composed at the drawn
 cursor and at the lead cursor, which straddle the origin swap for one buffer.
 
+## 18. The lossy packing under the tolerance (ruling V18)
+
+### 18.1 The tolerance gate, BUILT and MEASURED on the exact tree (2026-09-10)
+
+The exact pictures of the four stands are frozen beside the owner's (`pictures/exact/`, the final
+chain of `ef2b33a`). Every flight compares its picture against the frozen one over the content
+pixels (the probe's terrain and ruler, the overlays' union rectangle left out) and a channel step
+above ONE level is a red gate. The exact tree against itself: ground 0, hill 9, aloft 2, orbit 11
+pixels at one level — the gate's own noise floor, inside the tolerance.
+
+### 18.2 The packed normal, MEASURED (2026-09-10)
+
+**What it is.** A unit normal as two signed 16-bit numbers on the octahedron (the sphere folded
+onto a square) — four bytes against twelve; the shader unfolds it. The encoder picks, of the four
+quanta around the folded point, the one whose unfolded normal lies nearest the true one, judged by
+the cross product in 64-bit (a 32-bit dot near one cannot tell two candidates a ten-thousandth of
+a radian apart — MEASURED: the search picked a worse quantum until the comparison moved to the
+cross product). Over a real rung-1 chunk the widest angle is 4.2e-5 rad precise against 6.3e-5
+plain.
+
+**Example.** The hill's crease at (641, 300) has a normal 31° off the radial; packed and unpacked
+it is 31° off by less than three thousandths of a degree.
+
+**THE LIMB.** With every rung packed, three stands stayed within one level and the orbit stand
+moved ONE pixel of 466 445 by three levels — at the planet's limb, (807, 305), the same pixel on
+every run and under both roundings. The lighting at a limb divides by the view angle's cosine,
+which is near zero there, so it reads a normal's error a hundredfold: no 16-bit normal passes a
+one-level rule at a limb. The near stands never show a limb (the horizon is rough ground, not a
+smooth sphere's edge). So THE NORMAL IS PACKED BY RUNG: rungs 0 to 8 packed, rungs 9 and up (cells
+of 512 m and up, the far view of a body from high) exact. The mesh's own layout tells the shader
+which form it carries (a shader define), one shader source serves both.
+
+**MEASURED, four stands, Docker off, against the frozen exact pictures:**
+
+| Stand | GPU bytes, exact → packed by rung | Content pixels at one level | Widest step | Frames/s, still (runs vary ±5 on the far stands) |
+|---|---|---|---|---|
+| ground | 2 460 → 2 080 MB | 1 721 of 635 560 | 1 | 29.4 |
+| hill | 2 582 → 2 186 MB | 2 665 of 701 472 | 1 | 27.4 |
+| aloft | 788 → 732 MB | 1 208 of 586 341 | 1 | 47.8–52.4 |
+| orbit | 339 → 339 MB (all exact) | 7 of 466 445 | 1 | 47.3–52.9 |
+
+The frame rate on the still stands did not move with the bytes: the ground stand reads 29.4 before
+and after. The still stand is the draw count (§16.5), and the packing owns the bytes only. The
+far stands' rate varied by five frames a second between flights of ONE binary (46.8 then 52.4
+aloft; 47.8 then 52.9 orbit), and the orbit stand — whose render path is the exact tree's, every
+rung exact — read 47.9 on the answered tree against 52.4 on the exact one. MEASURED beside it:
+two other sessions' processes held 27 % and 20 % of a core during those flights (load 6.7). A
+far stand's frame is the main thread's, and the main thread shares the machine; a far stand's
+rate is quoted as a range until the census takes more than one sample on a quiet machine.
+
+**MEASURED on the moving eye (Docker off, the worker packing, the answered tree):** the walk
+29.9 frames a second with zero frames with a gap; 240 m/s 46.1 (45.1 before the packing) with
+zero frames with a gap and the parent cache at 90 %; 528 m/s 30.9 (32.1 before, inside the
+run-to-run range) at the same wall, the queue at 1 967. The harvest's cost on the main thread
+stayed at 0.02–0.03 ms a chunk: the packing runs on the worker (refutation N-2), and the harvest
+never saw it.
+
+**Two lessons the flights taught.** (1) The ruler ball is lit by the engine's standard material,
+which reads the engine's normal; with the packed one in its place the ball became a flat dark
+disc (145 levels). The ball now carries both forms, its probe twin reads the packed one. (2) A
+difference count without the gate's masks misleads: 48 "terrain" pixels at 138 levels were the
+HUD's tick readout, which the gate's overlay rectangle already leaves out.
+
+### 18.3 The 16-bit position, NOT BUILT — the recommendation
+
+The position at 16 bits over the chunk's box would take the vertex from 32 to 28 bytes: about
+200 MB at the ground stand, and by the measurement above no frames a second on a still stand. Its
+risk is the crease flip (a point moved a millimetre at rung 0 hands a pixel to the other slope —
+the 16-bit radial's own failure, 19 levels), and its machinery is a per-mesh scale in the
+transform, which bends the radial's rotation-only path. Against that, the far-rung voxel renderer
+(D8-8) moves the bytes AND the draw count. RECOMMENDED: the position stays exact; the packing ends
+with the normal; the next measurement is D8-8's.
+

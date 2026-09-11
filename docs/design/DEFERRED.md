@@ -7911,8 +7911,13 @@ rings; what is left is an interim with a named step:
    (§17.3): a vertex of 36 bytes against 48, the indices halved, and the frame rate above the
    unpacked one on a still stand and on a moving eye. → 2026-09-10 (ruling V17): the parent mesh's
    shrink DONE (item 10); the main-world mesh copy DELETED and the memory MEASURED in the
-   footprint's unit (§17.6: ground 8 591 → 6 611 MB); the lossy packing WAITS on the owner's
-   tolerance decision (V17 item 2) and comes after the GPU spike (V17 item 3).
+   footprint's unit (§17.6: ground 8 591 → 6 611 MB). → 2026-09-10 (ruling V18, the tolerance):
+   THE PACKED NORMAL shipped by rung (rungs 0–8 at four bytes, 9 and up exact — one limb pixel
+   of the orbit stand moved three levels under any 16-bit normal, §18.2): ground 2 460 → 2 080
+   MB, every stand within one level of the exact picture. The 16-bit position is NOT built
+   (§18.3: 28 against 32 bytes, no frame rate on a still stand, a crease-flip risk, a per-mesh
+   scale) — the far-rung voxel renderer (D8-8) is the next lever. The harvest's byte budget is
+   still owed.
 
 14. **THE UPLOAD PATH'S POOL** (§17.6, MEASURED 2026-09-10): the client owns about 0.6 × the drawn
    bytes of unmapped memory (1 546 MB at the ground stand, in about two regions per chunk of the

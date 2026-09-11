@@ -44,7 +44,11 @@ struct ProbeUniform {
 struct ProbeVertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
+#ifdef OCT_NORMAL
+    @location(1) oct_normal: vec2<f32>,
+#else
     @location(1) normal: vec3<f32>,
+#endif
     // THE MORPH METRE (step 5): the vertex's distance along its own radial to the next coarser
     // rung's surface.
     @location(8) morph_m: f32,
@@ -59,6 +63,16 @@ fn whole(d: f32) -> f32 {
 
 fn risen(d: f32) -> f32 {
     return clamp((d - probe.bands.x) / (probe.bands.y - probe.bands.x), 0.0, 1.0);
+}
+
+// THE PACKED NORMAL (ruling V18): two signed 16-bit numbers on the octahedron, unfolded to the
+// unit normal — the library's `oct_decode`, step for step.
+fn oct_decode(e: vec2<f32>) -> vec3<f32> {
+    var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    let t = clamp(-n.z, 0.0, 1.0);
+    n.x = n.x + select(t, -t, n.x >= 0.0);
+    n.y = n.y + select(t, -t, n.y >= 0.0);
+    return normalize(n);
 }
 
 @vertex
@@ -77,7 +91,12 @@ fn vertex(vertex: ProbeVertex) -> VertexOutput {
     let morphed = mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d));
     out.world_position = vec4<f32>(morphed, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
-    out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
+#ifdef OCT_NORMAL
+    let local_normal = oct_decode(vertex.oct_normal);
+#else
+    let local_normal = vertex.normal;
+#endif
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(local_normal, vertex.instance_index);
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = vertex.instance_index;
 #endif

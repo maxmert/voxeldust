@@ -102,6 +102,11 @@ pub struct ChunkGeometry {
     pub vertices: Vec<[f32; 3]>,
     /// Per-vertex unit normals, derived from the triangles (style, never shape).
     pub normals: Vec<[f32; 3]>,
+    /// THE PACKED NORMAL of each vertex (ruling V18): `oct_encode` of `normals`, built by the
+    /// worker — the harvest loop is the main thread's, and the encoder's four candidates a vertex
+    /// do not belong there (refutation N-2, the same rule as the bounds, P-8). The engine chooses
+    /// by rung which form a mesh carries.
+    pub packed_normals: Vec<[i16; 2]>,
     /// THE RADIAL of each vertex (step 5): its unit direction from the body's centre in the
     /// realm's frame, narrowed once to `f32` — the shader needs no centre of the body (MEASURED
     /// with a centre uniform instead: a moving eye rewrote every material and the engine
@@ -1041,6 +1046,7 @@ pub fn geometry_with(
         radials.push([dir.x as f32, dir.y as f32, dir.z as f32]);
     }
     let normals = smooth_normals(&vertices, &mesh.triangles);
+    let packed_normals = normals.iter().map(|n| oct_encode(*n)).collect();
     let mut geometry = ChunkGeometry {
         key,
         origin_m,
@@ -1050,6 +1056,7 @@ pub fn geometry_with(
         sink_m: sink_len as f32,
         vertices,
         normals,
+        packed_normals,
         triangles: mesh.triangles,
         radials,
         bounds: ([0.0; 3], [0.0; 3]),
@@ -1123,6 +1130,8 @@ fn add_skirts(g: &mut ChunkGeometry, drop_m: f64) {
         g.radials.push(g.radials[b as usize]);
         g.normals.push(g.normals[a as usize]);
         g.normals.push(g.normals[b as usize]);
+        g.packed_normals.push(g.packed_normals[a as usize]);
+        g.packed_normals.push(g.packed_normals[b as usize]);
         // The strip faces away from the triangle's third corner: the winding whose normal points
         // from the edge's middle away from that corner.
         let n = (pb - pa).cross(at(qb) - pa);
@@ -1137,6 +1146,95 @@ fn add_skirts(g: &mut ChunkGeometry, drop_m: f64) {
         }
     }
     g.triangles.extend(skirt_tris);
+}
+
+/// THE PACKED NORMAL (step 5's second half, ruling V18): a unit normal as two signed 16-bit
+/// numbers on the octahedron — the unit sphere folded onto a square, so two coordinates name every
+/// direction (Cigolle et al., "A Survey of Efficient Representations for Independent Unit
+/// Vectors"). The widest angle between a normal and its unpacked form is under
+/// `OCT_NORMAL_STEP_RAD`. Four bytes a vertex against twelve; the shader unfolds it.
+///
+/// **Example.** The hill's crease at (641, 300) has a normal 31° off the radial; packed and
+/// unpacked it is 31° off by less than a hundredth of a degree, and the light on it moves by a
+/// fraction of one level of 255.
+#[must_use]
+pub fn oct_encode(n: [f32; 3]) -> [i16; 2] {
+    let sum = n[0].abs() + n[1].abs() + n[2].abs();
+    // A zero normal (a vertex no triangle uses) folds to the square's centre: straight up.
+    let (mut x, mut y) = if sum > 0.0 {
+        (n[0] / sum, n[1] / sum)
+    } else {
+        (0.0, 0.0)
+    };
+    if n[2] < 0.0 {
+        let (fx, fy) = ((1.0 - y.abs()) * sign_of(x), (1.0 - x.abs()) * sign_of(y));
+        x = fx;
+        y = fy;
+    }
+    // THE PRECISE ROUNDING (Cigolle et al., "oct16P"): the nearest of the four quanta around the
+    // folded point is the one whose unfolded normal lies closest to the true one — a rounding of
+    // the coordinates alone misses it by up to a cell, because the fold is not a scaling.
+    // MEASURED: the plain rounding left one limb pixel of the orbit stand three levels off (the
+    // lighting there divides by a near-zero view angle, so it reads the normal's error a
+    // hundredfold); the precise one halves the widest angle.
+    let (qx, qy) = (x * f32::from(i16::MAX), y * f32::from(i16::MAX));
+    let mut best = [snorm16(x), snorm16(y)];
+    let mut best_err = f64::MAX;
+    for cx in [qx.floor(), qx.ceil()] {
+        for cy in [qy.floor(), qy.ceil()] {
+            let candidate = [clamp_i16(cx), clamp_i16(cy)];
+            if sine_error(n, oct_decode(candidate)) < best_err {
+                best_err = sine_error(n, oct_decode(candidate));
+                best = candidate;
+            }
+        }
+    }
+    best
+}
+
+/// The squared sine of the angle between two near-unit vectors, from the cross product in
+/// 64-bit: linear in the angle, so it tells two candidates a ten-thousandth of a radian apart.
+/// (A dot product near one cannot: the 32-bit components' rounding hides half a milliradian.)
+/// Every candidate lies within a quantum of the true normal, so no far-side guard is needed
+/// (refutation N-1: a guard no input reaches is a red coverage gate).
+fn sine_error(a: [f32; 3], b: [f32; 3]) -> f64 {
+    let a = DVec3::new(f64::from(a[0]), f64::from(a[1]), f64::from(a[2]));
+    let b = DVec3::new(f64::from(b[0]), f64::from(b[1]), f64::from(b[2]));
+    let c = a.cross(b);
+    c.dot(c)
+}
+
+/// A quantum already rounded, clamped to the signed 16-bit range.
+fn clamp_i16(q: f32) -> i16 {
+    q.clamp(f32::from(-i16::MAX), f32::from(i16::MAX)) as i16
+}
+
+/// The unit normal a packed pair names: the shader's own steps, for the tests and the bound.
+#[must_use]
+pub fn oct_decode(e: [i16; 2]) -> [f32; 3] {
+    // The GPU's own rule for a signed 16-bit quantum: divided by 32 767, and −32 768 reads −1.
+    let x = (f32::from(e[0]) / f32::from(i16::MAX)).max(-1.0);
+    let y = (f32::from(e[1]) / f32::from(i16::MAX)).max(-1.0);
+    let z = 1.0 - x.abs() - y.abs();
+    let t = (-z).clamp(0.0, 1.0);
+    let ux = x + if x >= 0.0 { -t } else { t };
+    let uy = y + if y >= 0.0 { -t } else { t };
+    let len = (ux * ux + uy * uy + z * z).sqrt();
+    [ux / len, uy / len, z / len]
+}
+
+/// The widest angle between a unit normal and its packed form, in radians (MEASURED in the
+/// tests over a real chunk's normals: about 5e-5; the 16-bit square's cell is 2 / 65 534).
+pub const OCT_NORMAL_STEP_RAD: f64 = 1.0e-4;
+
+/// `+1` for a non-negative number, `−1` otherwise (the octahedron's fold keeps a zero's side).
+fn sign_of(v: f32) -> f32 {
+    if v >= 0.0 { 1.0 } else { -1.0 }
+}
+
+/// A number in `[−1, 1]` as a signed 16-bit quantum, rounded to nearest.
+fn snorm16(v: f32) -> i16 {
+    (v.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
 }
 
 /// Per-vertex normals: the sum of the adjoining triangles' area-weighted normals, normalised. A
@@ -2461,6 +2559,108 @@ mod tests {
         assert!(widest < 1e-4, "the two forms differ by {widest} m");
     }
 
+    /// The angle between two unit vectors, in 64-bit from the cross product (an `acos` of a
+    /// 32-bit dot reads a rounding of 6e-8 as 3.5e-4 rad).
+    fn angle_between(a: [f32; 3], b: [f32; 3]) -> f64 {
+        let a = DVec3::new(f64::from(a[0]), f64::from(a[1]), f64::from(a[2]));
+        let b = DVec3::new(f64::from(b[0]), f64::from(b[1]), f64::from(b[2]));
+        a.cross(b).length().atan2(a.dot(b))
+    }
+
+    /// Every vertex a triangle uses has a unit normal. A zero one draws dark on the exact path
+    /// (the shader's normalise of a zero) and LIT under the packed one (a zero folds to the
+    /// square's centre, which unfolds to "up") — a whole-range change no tolerance allows. So
+    /// the extractor may never hand a used vertex a zero normal: asserted over every rung of the
+    /// home planet at four columns. (The black specks once blamed on this were the overlay's
+    /// tick readout, refutation N-3; no zero normal was ever measured.)
+    #[test]
+    fn no_used_vertex_of_a_chunk_has_a_zero_normal() {
+        let body = home_planet();
+        let mut zero = 0usize;
+        let mut total = 0usize;
+        for rung in 0..body.ladder().rungs {
+            for (x, y) in [(150, 350), (151, 350), (150, 351), (37, 88)] {
+                let g = geometry_of(&body, surface_key(&body, rung, x >> rung, y >> rung))
+                    .expect("in the ladder");
+                assert_eq!(g.packed_normals.len(), g.normals.len());
+                let mut used = vec![false; g.vertices.len()];
+                for t in &g.triangles {
+                    for i in t {
+                        used[*i as usize] = true;
+                    }
+                }
+                for (n, u) in g.normals.iter().zip(used.iter()) {
+                    total += usize::from(*u);
+                    zero += usize::from(*u) * usize::from(*n == [0.0, 0.0, 0.0]);
+                }
+            }
+        }
+        assert_eq!(
+            zero, 0,
+            "{zero} of {total} used vertices carry a zero normal"
+        );
+    }
+
+    /// THE PACKED NORMAL (ruling V18): every normal of a real chunk unpacks within
+    /// `OCT_NORMAL_STEP_RAD` of itself; the square's four quadrants, the lower hemisphere's fold,
+    /// the axes and a zero normal each round-trip.
+    #[test]
+    fn the_packed_normal_unpacks_within_its_step_on_every_vertex() {
+        let body = home_planet();
+        let g = geometry_of(&body, surface_key(&body, 1, 150, 350)).expect("rung 1");
+        let mut widest = 0.0f64;
+        let mut widest_plain = 0.0f64;
+        // The chunk's normals and twelve synthetic ones (both hemispheres, the axes, the
+        // quadrants), so the fold's both arms run below.
+        let s = 1.0 / 3.0f32.sqrt();
+        let samples = [
+            [s, s, s],
+            [-s, s, s],
+            [s, -s, s],
+            [-s, -s, s],
+            [s, s, -s],
+            [-s, s, -s],
+            [s, -s, -s],
+            [-s, -s, -s],
+            [1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        for n in g.normals.iter().copied().chain(samples) {
+            let back = oct_decode(oct_encode(n));
+            let angle = angle_between(n, back);
+            assert!(
+                angle <= OCT_NORMAL_STEP_RAD,
+                "{n:?} -> {back:?}: {angle} rad"
+            );
+            widest = widest.max(angle);
+            // The plain rounding of the folded coordinates, for the comparison the precise
+            // search must win.
+            let sum = n[0].abs() + n[1].abs() + n[2].abs();
+            let (mut x, mut y) = (n[0] / sum, n[1] / sum);
+            if n[2] < 0.0 {
+                let (fx, fy) = ((1.0 - y.abs()) * sign_of(x), (1.0 - x.abs()) * sign_of(y));
+                x = fx;
+                y = fy;
+            }
+            widest_plain = widest_plain.max(angle_between(n, oct_decode([snorm16(x), snorm16(y)])));
+        }
+        // MEASURED on this chunk: 4.2e-5 rad precise against 6.3e-5 plain.
+        eprintln!(
+            "the packed normal's widest angle over a real chunk: {widest:.3e} rad (plain rounding \
+             {widest_plain:.3e})"
+        );
+        // Strict: the precise search wins on this chunk by a third (4.2e-5 against 6.3e-5).
+        assert!(widest < widest_plain, "{widest} >= {widest_plain}");
+        assert!(widest <= OCT_NORMAL_STEP_RAD, "{widest} rad");
+        assert_eq!(oct_encode([0.0, 0.0, 0.0]), [0, 0]);
+        assert_eq!(oct_decode([0, 0]), [0.0, 0.0, 1.0]);
+        assert_eq!(oct_encode([0.0, 0.0, -1.0]), [i16::MAX, i16::MAX]);
+        assert_eq!(snorm16(2.0), i16::MAX);
+        assert_eq!(snorm16(-2.0), -i16::MAX);
+    }
+
     /// THE VERTEX'S RADIAL (step 5): every vertex's narrowed radial stands within
     /// `RADIAL_STEP_RAD` of the exact one, and a skirt vertex carries its top's.
     #[test]
@@ -2518,6 +2718,7 @@ mod tests {
             sink_m: 0.0,
             vertices: Vec::new(),
             normals: Vec::new(),
+            packed_normals: Vec::new(),
             radials: Vec::new(),
             triangles: Vec::new(),
             bounds: ([0.0; 3], [0.0; 3]),

@@ -433,6 +433,42 @@ const MORPH_SHADER_LOCATION: u32 = 8;
 pub(crate) const ATTRIBUTE_RADIAL: MeshVertexAttribute =
     MeshVertexAttribute::new("LadderRadial", 0x5741_0014, VertexFormat::Float32x3);
 const RADIAL_SHADER_LOCATION: u32 = 9;
+/// THE PACKED NORMAL of a ground vertex (ruling V18): two signed 16-bit numbers on the octahedron
+/// (`vd_client::chunks::oct_encode`) — shader location 1, in the engine's normal's place; the
+/// shader unfolds it. Four bytes against the engine's twelve.
+pub(crate) const ATTRIBUTE_OCT_NORMAL: MeshVertexAttribute =
+    MeshVertexAttribute::new("LadderOctNormal", 0x5741_0015, VertexFormat::Snorm16x2);
+const OCT_NORMAL_SHADER_LOCATION: u32 = 1;
+/// The shader define under which a ground shader reads the packed normal instead of the
+/// engine's; set by the mesh's own layout, so one shader serves both forms.
+const OCT_NORMAL_SHADER_DEF: &str = "OCT_NORMAL";
+
+/// THE GROUND'S VERTEX LAYOUT, for the fade material and the probe alike: the position, the
+/// normal in whichever form the mesh carries (the packed one when the mesh has it, else the
+/// engine's — the renderer packs by rung, `terrain::EXACT_NORMAL_RUNG`), the morph metre and
+/// the radial. The shader learns the form by a define.
+fn ground_vertex_layout(
+    descriptor: &mut RenderPipelineDescriptor,
+    layout: &MeshVertexBufferLayoutRef,
+) -> Result<(), SpecializedMeshPipelineError> {
+    let packed = layout.0.contains(ATTRIBUTE_OCT_NORMAL);
+    let normal = if packed {
+        descriptor
+            .vertex
+            .shader_defs
+            .push(OCT_NORMAL_SHADER_DEF.into());
+        ATTRIBUTE_OCT_NORMAL.at_shader_location(OCT_NORMAL_SHADER_LOCATION)
+    } else {
+        Mesh::ATTRIBUTE_NORMAL.at_shader_location(OCT_NORMAL_SHADER_LOCATION)
+    };
+    descriptor.vertex.buffers = vec![layout.0.get_layout(&[
+        Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+        normal,
+        ATTRIBUTE_MORPH.at_shader_location(MORPH_SHADER_LOCATION),
+        ATTRIBUTE_RADIAL.at_shader_location(RADIAL_SHADER_LOCATION),
+    ])?];
+    Ok(())
+}
 const ATTRIBUTE_STAR_COLOR: MeshVertexAttribute =
     MeshVertexAttribute::new("StarColor", 0x5741_0002, VertexFormat::Float32x4);
 const ATTRIBUTE_STAR_BASE_R: MeshVertexAttribute =
@@ -719,13 +755,7 @@ impl bevy::pbr::MaterialExtension for LadderFade {
         layout: &MeshVertexBufferLayoutRef,
         _key: bevy::pbr::MaterialExtensionKey<LadderFade>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
-            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
-            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
-            ATTRIBUTE_MORPH.at_shader_location(MORPH_SHADER_LOCATION),
-            ATTRIBUTE_RADIAL.at_shader_location(RADIAL_SHADER_LOCATION),
-        ])?];
-        Ok(())
+        ground_vertex_layout(descriptor, layout)
     }
 }
 
@@ -754,13 +784,7 @@ impl Material for ProbeMaterial {
         layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<ProbeMaterial>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        descriptor.vertex.buffers = vec![layout.0.get_layout(&[
-            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
-            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
-            ATTRIBUTE_MORPH.at_shader_location(MORPH_SHADER_LOCATION),
-            ATTRIBUTE_RADIAL.at_shader_location(RADIAL_SHADER_LOCATION),
-        ])?];
-        Ok(())
+        ground_vertex_layout(descriptor, layout)
     }
 }
 

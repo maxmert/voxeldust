@@ -43,7 +43,7 @@ use std::sync::Mutex;
 use bevy::camera::visibility::RenderLayers;
 use vd_client::chunks::{
     ChunkJob, ChunkLane, ChunkReady, ChunkWorkers, Ruler, body_frame_point, eye_surface,
-    geometry_with, ruler_on_surface,
+    geometry_with, oct_encode, ruler_on_surface,
 };
 use vd_client::ladder_view::{
     Column, FADE_ALWAYS_IN, FADE_ALWAYS_OUT, LadderView, WantedSet, fade_bands, rung_for_distance,
@@ -108,6 +108,12 @@ pub struct TerrainConfig {
     pub parent_cache_bytes: usize,
     /// Finished chunks harvested per frame.
     pub harvest_per_frame: usize,
+    /// THE FIRST RUNG WHOSE MESHES KEEP THE ENGINE'S EXACT NORMAL (ruling V18): below it the
+    /// packed four-byte normal, from it the twelve-byte one. MEASURED on the orbit stand: under
+    /// any 16-bit normal one pixel at the planet's limb (rungs 11–12) moved three levels — the
+    /// lighting there divides by a near-zero view angle and reads a normal's error a
+    /// hundredfold — while every near stand stayed within one level. Default `EXACT_NORMAL_RUNG`.
+    pub exact_normal_rung: u8,
 }
 
 /// THE DEFAULT memory budget of the parent cache. The working set on a flight is every ring's
@@ -131,6 +137,7 @@ impl TerrainConfig {
             flat,
             parent_cache_bytes: PARENT_CACHE_BYTES,
             harvest_per_frame: HARVEST_PER_FRAME,
+            exact_normal_rung: EXACT_NORMAL_RUNG,
         }
     }
 }
@@ -579,7 +586,7 @@ fn packed_indices(geometry: &vd_client::chunks::ChunkGeometry) -> bevy::mesh::In
 /// A Bevy mesh from a chunk's geometry: positions and normals relative to the chunk's origin, the
 /// morph metre per vertex, the extractor's triangles as indices. `flat` duplicates the vertices
 /// and takes one normal per face.
-fn mesh_of(geometry: &vd_client::chunks::ChunkGeometry, flat: bool) -> Mesh {
+fn mesh_of(geometry: &vd_client::chunks::ChunkGeometry, flat: bool, exact_normal_rung: u8) -> Mesh {
     // RENDER WORLD ONLY (step 5, refutation P-16): the engine keeps a mesh in the main world too
     // by default, and nothing reads a chunk's mesh back on the client — the culling box is the
     // library's own and the geometry stays on the lane. One copy, in the render world.
@@ -588,16 +595,48 @@ fn mesh_of(geometry: &vd_client::chunks::ChunkGeometry, flat: bool) -> Mesh {
         bevy::asset::RenderAssetUsages::RENDER_WORLD,
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, geometry.vertices.clone())
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.normals.clone())
     .with_inserted_attribute(super::ATTRIBUTE_MORPH, geometry.morph_m.clone())
     .with_inserted_attribute(super::ATTRIBUTE_RADIAL, geometry.radials.clone())
     .with_inserted_indices(packed_indices(geometry));
+    // THE NORMAL BY RUNG (ruling V18, `TerrainConfig::exact_normal_rung`): the worker's packed
+    // four bytes on the near rungs, the engine's twelve on the far ones; nothing is packed here
+    // (refutation N-2: the harvest loop is the main thread's).
+    let packed = geometry.key.rung < exact_normal_rung;
     if flat {
+        // THE FLAT LOOK (a dev switch): the engine recomputes a normal per face on the main
+        // thread, and the packing follows it here — the one place the encoder runs off the
+        // worker, by the switch's own nature.
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.normals.clone());
         mesh.duplicate_vertices();
         mesh.compute_flat_normals();
+        if packed {
+            let flat_normals: Vec<[i16; 2]> = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
+                Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) => {
+                    v.iter().map(|n| oct_encode(*n)).collect()
+                }
+                other => panic!("the flat normals are the engine's Float32x3, not {other:?}"),
+            };
+            mesh.remove_attribute(Mesh::ATTRIBUTE_NORMAL);
+            mesh.insert_attribute(
+                super::ATTRIBUTE_OCT_NORMAL,
+                bevy::mesh::VertexAttributeValues::Snorm16x2(flat_normals),
+            );
+        }
+    } else if packed {
+        mesh.insert_attribute(
+            super::ATTRIBUTE_OCT_NORMAL,
+            bevy::mesh::VertexAttributeValues::Snorm16x2(geometry.packed_normals.clone()),
+        );
+    } else {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.normals.clone());
     }
     mesh
 }
+
+/// The default first rung whose meshes keep the engine's exact normal (ruling V18, MEASURED on
+/// the orbit stand: `TerrainConfig::exact_normal_rung`). Cells of 512 m and up: the limb of a
+/// body seen from high.
+pub const EXACT_NORMAL_RUNG: u8 = 9;
 
 /// The two terrain lights' transforms: the sun and its fill, re-aimed together every frame.
 type LightQuery<'w, 's> = Query<
@@ -833,6 +872,7 @@ pub(crate) fn sync_terrain(
     // 3. Harvest finished chunks — each with its rung's crossfade material — and their probe twins
     //    where a probe exists (Capture mode).
     let flat = terrain.config.flat;
+    let exact_normal_rung = terrain.config.exact_normal_rung;
     let harvest_cap = terrain.config.harvest_per_frame;
     // THE UPLOAD's cost on the main thread (M8-2a): the mesh conversion, the asset, the entity —
     // per harvested chunk, so the harvest's own wall is named in milliseconds.
@@ -853,7 +893,7 @@ pub(crate) fn sync_terrain(
             continue;
         };
         let material = terrain.ground_material(&mut ground_materials, realm, key.rung, &body);
-        let built = mesh_of(&ready.geometry, flat);
+        let built = mesh_of(&ready.geometry, flat, exact_normal_rung);
         let bytes = mesh_bytes(&built);
         let mesh = meshes.add(built);
         // THE BOUNDS the engine culls by, grown to where the vertex stage can move a vertex: its
@@ -1202,6 +1242,20 @@ pub(crate) fn sync_terrain(
                     // sink is zero), because the probe's material asks every mesh for them.
                     let mut ball = Mesh::from(Sphere::new(1.0));
                     let count = ball.count_vertices();
+                    // The ball's normals packed like the ground's BESIDE the engine's own: the
+                    // ball itself is lit by the engine's standard material (which reads the
+                    // standard normal), its probe twin by the probe's shader (which reads the
+                    // packed one). MEASURED without the standard normal: a flat dark disc.
+                    let packed: Vec<[i16; 2]> = match ball.attribute(Mesh::ATTRIBUTE_NORMAL) {
+                        Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) => {
+                            v.iter().map(|n| oct_encode(*n)).collect()
+                        }
+                        other => panic!("the sphere's normals are Float32x3, not {other:?}"),
+                    };
+                    ball.insert_attribute(
+                        super::ATTRIBUTE_OCT_NORMAL,
+                        bevy::mesh::VertexAttributeValues::Snorm16x2(packed),
+                    );
                     ball.insert_attribute(super::ATTRIBUTE_MORPH, vec![0.0f32; count]);
                     ball.insert_attribute(super::ATTRIBUTE_RADIAL, vec![[0.0f32, 1.0, 0.0]; count]);
                     let a = (
