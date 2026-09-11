@@ -3154,6 +3154,8 @@ mod tests {
                     morph_seam: 0,
                     vertices: 0,
                     bytes_drawn: 0,
+                    shadow_casters: 0,
+                    shadow_bytes: 0,
                     hud_rect_px: [0.0; 4],
                     frame_ms: 0.0,
                     passes_ms: Vec::new(),

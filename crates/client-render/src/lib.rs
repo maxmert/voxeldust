@@ -462,6 +462,8 @@ pub(crate) const ATTRIBUTE_SPLAT_CORNER: MeshVertexAttribute =
     MeshVertexAttribute::new("LadderSplatCorner", 0x5741_0016, VertexFormat::Float32x2);
 const SPLAT_SHADER_LOCATION: u32 = 10;
 const SPLAT_SHADER_DEF: &str = "SPLAT";
+const LIGHT_CASTER_SHADER_DEF: &str = "LIGHT_CASTER";
+const LIGHT_CASTER_ENV: &str = "VD_TERRAIN_LIGHT_CASTER";
 
 /// THE GROUND'S VERTEX LAYOUT, for the fade material and the probe alike: the position, the
 /// normal in whichever form the mesh carries (the packed one when the mesh has it, else the
@@ -470,6 +472,7 @@ const SPLAT_SHADER_DEF: &str = "SPLAT";
 fn ground_vertex_layout(
     descriptor: &mut RenderPipelineDescriptor,
     layout: &MeshVertexBufferLayoutRef,
+    light_caster: bool,
 ) -> Result<(), SpecializedMeshPipelineError> {
     let packed = layout.0.contains(ATTRIBUTE_OCT_NORMAL);
     let normal = if packed {
@@ -490,6 +493,17 @@ fn ground_vertex_layout(
     if layout.0.contains(ATTRIBUTE_SPLAT_CORNER) {
         descriptor.vertex.shader_defs.push(SPLAT_SHADER_DEF.into());
         attributes.push(ATTRIBUTE_SPLAT_CORNER.at_shader_location(SPLAT_SHADER_LOCATION));
+    }
+    // THE LIGHT CASTER: the prepass shader — the shadow passes' vertex stage, since no camera
+    // prepass runs — skips the morph and the sink under this define and sinks the vertex by the
+    // caster's sink; the fade shader ignores it. Set by the material's key (the shadow ladder's
+    // casters), or by the ablation's switch for every mesh (a measurement, read once per
+    // pipeline).
+    if light_caster || std::env::var(LIGHT_CASTER_ENV).as_deref() == Ok("1") {
+        descriptor
+            .vertex
+            .shader_defs
+            .push(LIGHT_CASTER_SHADER_DEF.into());
     }
     descriptor.vertex.buffers = vec![layout.0.get_layout(&attributes)?];
     Ok(())
@@ -741,7 +755,12 @@ pub(crate) fn fade_uniform(bands: ([f64; 2], [f64; 2]), sink_end_m: f64) -> Vec4
 /// engine's own; the shadow pass runs the same morph and sink (`ladder_fade_prepass.wgsl`), so
 /// the shadows fall from the surface the picture shows.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+#[bind_group_data(LadderFadeKey)]
 pub(crate) struct LadderFade {
+    /// THE LIGHT CASTER (the shadow ladder): a material whose meshes exist for the sun alone —
+    /// the shadow pass's vertex stage skips the morph and the sink and sinks the vertex by the
+    /// caster's own sink (`splat.y`) instead. A pipeline key, not a uniform.
+    light_caster: bool,
     /// The bands (in_lo, sink_end, out_lo, out_hi), metres from the eye. Slot 100: the base
     /// material owns the slots below it.
     #[uniform(100)]
@@ -751,9 +770,25 @@ pub(crate) struct LadderFade {
     #[uniform(100)]
     sink: Vec4,
     /// THE RUNG'S CELL in metres (x): a splat's width (D8-8's measurement); read under the
-    /// `SPLAT` define only.
+    /// `SPLAT` define only. (y): THE CASTER'S SINK in metres, read under `LIGHT_CASTER` only —
+    /// a coarse caster stands under the fine drawn ground by the two rungs' bound, so the drawn
+    /// ground never shades itself against a surface that stands above it.
     #[uniform(100)]
     splat: Vec4,
+}
+
+/// The fade material's pipeline key: whether its meshes are light casters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct LadderFadeKey {
+    light_caster: bool,
+}
+
+impl From<&LadderFade> for LadderFadeKey {
+    fn from(m: &LadderFade) -> LadderFadeKey {
+        LadderFadeKey {
+            light_caster: m.light_caster,
+        }
+    }
 }
 
 impl LadderFade {
@@ -764,10 +799,18 @@ impl LadderFade {
         cell_m: f64,
     ) -> LadderFade {
         LadderFade {
+            light_caster: false,
             bands: fade_uniform(bands, sink_end_m),
             sink: Vec4::new(sink_m as f32, 0.0, 0.0, 0.0),
             splat: Vec4::new(cell_m as f32, 0.0, 0.0, 0.0),
         }
+    }
+
+    /// The same material as a light caster, sunk by `caster_sink_m`.
+    pub(crate) fn into_light_caster(mut self, caster_sink_m: f64) -> LadderFade {
+        self.light_caster = true;
+        self.splat.y = caster_sink_m as f32;
+        self
     }
 }
 
@@ -788,9 +831,9 @@ impl bevy::pbr::MaterialExtension for LadderFade {
         _pipeline: &bevy::pbr::MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        _key: bevy::pbr::MaterialExtensionKey<LadderFade>,
+        key: bevy::pbr::MaterialExtensionKey<LadderFade>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        ground_vertex_layout(descriptor, layout)
+        ground_vertex_layout(descriptor, layout, key.bind_group_data.light_caster)
     }
 }
 
@@ -819,7 +862,7 @@ impl Material for ProbeMaterial {
         layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<ProbeMaterial>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        ground_vertex_layout(descriptor, layout)
+        ground_vertex_layout(descriptor, layout, false)
     }
 }
 
@@ -834,6 +877,10 @@ impl Plugin for ProbeShaderPlugin {
 /// The render layer the probe camera sees and the twins live on; the picture's camera and every
 /// drawn thing stay on the default layer, so nothing of the probe reaches the picture.
 pub(crate) const PROBE_LAYER: usize = 1;
+/// THE SHADOW LAYER (D8-8's shadow ladder): the coarse casters live here — the sun sees the
+/// layer and the camera does not, so a caster chunk two rungs coarser than the drawn one throws
+/// the shadow and never appears in the picture.
+pub(crate) const SHADOW_LAYER: usize = 2;
 /// The two readback copiers' slots: the picture and the probe.
 const COPIER_MAIN: u8 = 0;
 const COPIER_PROBE: u8 = 1;

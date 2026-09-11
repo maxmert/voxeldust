@@ -886,6 +886,34 @@ fn over_budget(store: &ParentStore) -> bool {
     store.held_bytes > store.budget_bytes && store.map.len() > store.floor
 }
 
+/// THE COARSE KEY (the shadow ladder, D8-8's shadow cost): the chunk `steps` rungs up that holds
+/// this chunk's volume — each axis halved a step at a time, as `parent_keys` halves one step.
+/// `None` past the body's top rung or off the coarser rung's grid.
+#[must_use]
+pub fn coarse_key(body: &BodyDefinition, key: ChunkKey, steps: u8) -> Option<ChunkKey> {
+    let rung = key.rung.checked_add(steps)?;
+    if rung >= body.ladder().rungs {
+        return None;
+    }
+    let edge = CHUNK_EDGE as i32;
+    let last = (body.ladder().cells_per_edge(rung) as i32 - 1) / edge;
+    let top = vd_terrain::digest::top_chunk_z(body, rung);
+    let div = 1i32 << steps;
+    let (x, y, z) = (
+        key.x.div_euclid(div),
+        key.y.div_euclid(div),
+        key.z.div_euclid(div),
+    );
+    let inside = (x >= 0) & (x <= last) & (y >= 0) & (y <= last) & (z >= 0) & (z <= top);
+    inside.then_some(ChunkKey {
+        face: key.face,
+        rung,
+        x,
+        y,
+        z,
+    })
+}
+
 /// THE PARENTS a chunk's geomorph reads: none at the top rung; else the chunk at the next
 /// coarser rung that holds this chunk's footprint, and its neighbours on every side this chunk
 /// FACES — across the face, the side its halo lies on (a lower half's halo stands over the
@@ -2606,6 +2634,29 @@ mod tests {
         let a = DVec3::new(f64::from(a[0]), f64::from(a[1]), f64::from(a[2]));
         let b = DVec3::new(f64::from(b[0]), f64::from(b[1]), f64::from(b[2]));
         a.cross(b).length().atan2(a.dot(b))
+    }
+
+    /// The coarse key two rungs up holds the fine chunk's volume (each axis quartered), agrees
+    /// with two parent steps, and is refused past the top rung or off the coarser grid.
+    #[test]
+    fn the_coarse_key_holds_the_fine_chunk_and_stops_at_the_top() {
+        let body = home_planet();
+        let fine = surface_key(&body, 1, 150, 350);
+        let coarse = coarse_key(&body, fine, 2).expect("two rungs up");
+        assert_eq!((coarse.rung, coarse.x, coarse.y), (3, 37, 87));
+        assert_eq!(coarse.z, fine.z.div_euclid(4));
+        // One step agrees with the parent that holds the chunk.
+        let one = coarse_key(&body, fine, 1).expect("one rung up");
+        assert!(parent_keys(&body, fine).contains(&one));
+        // Zero steps is the key itself.
+        assert_eq!(coarse_key(&body, fine, 0), Some(fine));
+        // Past the top rung: refused.
+        let rungs = body.ladder().rungs;
+        assert_eq!(coarse_key(&body, fine, rungs), None);
+        assert_eq!(coarse_key(&body, fine, u8::MAX), None);
+        // Off the grid: a key below zero stays below zero after the halving.
+        let off = ChunkKey { z: -8, ..fine };
+        assert_eq!(coarse_key(&body, off, 2), None);
     }
 
     /// The upload bytes: the packed stride times the vertices plus the indices at 16 bits for a

@@ -1281,3 +1281,135 @@ boarded and settled in two to six seconds each, the settle course printing a nor
 the origin swap (the lead at zero, the altitude sane). The race stands at one failure in ten
 boardings today, still unseen with the course in the log.
 
+### 19.9 THE LIGHT CASTER, MEASURED (round five, quiet machine, 2026-09-11)
+
+The shadow passes' vertex stage without the morph and the sink (`VD_TERRAIN_LIGHT_CASTER=1`, one
+define in the prepass shader):
+
+| Flight | Ground frames/s | Hill frames/s |
+|---|---|---|
+| baseline | 30.0 | 27.0 |
+| light caster | 29.4 | 27.5 |
+| light caster, two cascades at rung 1 | 39.4 | 35.4 |
+
+**Read.** The work per caster vertex is not the cost: taking the morph and the sink out of four
+passes over 2 600 chunks changed nothing. The COUNT of caster vertices is — with two cascades at
+rung 1 the light caster adds three frames a second over the same setting with the full stage,
+and no more. So the lever is fewer caster vertices per area: the coarser shadow ladder (the far
+rings cast with meshes two rungs coarser, sixteen times fewer vertices, on a render layer the
+sun alone sees), or no ground casters at all (the terrain horizon map). The light caster stays
+as an instrument; it ships with the ladder if the pictures allow it, since alone it buys nothing.
+
+### 19.10 THE SHADOW LADDER, BUILT (option A, owner 2026-09-11)
+
+**What it is.** From rung 0 up (the shipped default after round seven, below; the first form
+started at rung 1 with two rungs), a drawn chunk casts no shadow itself. The chunk ONE rung
+coarser that holds its volume (`coarse_key`: each axis quartered, the same halving `parent_keys`
+does one step at a time) is asked from the lane at the margin class's priority, built by the same
+workers, and spawned on THE SHADOW LAYER — a render layer the sun sees and the camera does not
+(`RenderLayers::from_layers(&[0, SHADOW_LAYER])` on the sun) — with a LIGHT-CASTER material: the
+rung's own crossfade material under a pipeline key that makes the shadow pass's vertex stage skip
+the morph and the sink and sink the vertex by THE CASTER'S SINK instead. A drawn chunk holds the key
+of the caster it asked for; the caster leaves with its last wanter (a count per caster key). A
+coarse caster shares one key space and ONE residency with the drawn chunks (refutation of the
+ladder, findings 1–3): a key the ladder draws casts itself while a finer chunk wants it as a
+caster and is a non-caster otherwise; a key held as a caster that the ladder comes to want is
+dropped and rebuilt as a drawn chunk; a drawn key's residency is never released by a caster's
+want ending. A caster's culling box grows by its own sink (finding 4); a caster's request sorts
+behind every margin chunk of its rung (finding 6); the stamp's nearest and farthest skip casters
+(finding 7).
+
+**The caster's sink.** The coarse surface and the fine one disagree by the recipe's own bound
+between their rungs (`dropped_bound_m`, the octaves the coarser rung drops) plus a cell of each
+for the extractors' placement. The caster stands that far UNDER the drawn ground along every
+vertex's radial, so the fine ground never shades itself against a surface that stands above it
+(shadow acne); what remains is a shadow that floats off its hill by up to that bound — light
+leaks — which the pictures measure. Example: a rung-2 chunk casts from a rung-4 caster sunk by
+the two dropped octaves' amplitude plus 20 m; at 3 km that is a few pixels at the shadow's edge.
+
+**Sixteen times fewer caster vertices per area:** the rung-2 ring, 831 chunks, casts from about
+52 rung-4 chunks. The stamp carries the casters' count and bytes (`shadow_casters`,
+`shadow_bytes`); the census prints them. Switches: `VD_TERRAIN_SHADOW_COARSE_STEP` (0 turns the
+ladder off; the default 2) and `VD_TERRAIN_SHADOW_COARSE_FROM` (the default 1).
+
+**MEASURED (2026-09-11, quiet machine, Docker off):**
+
+| Flight | Ground frames/s | Hill | Coarse casters at the ground (MB) |
+|---|---|---|---|
+| ladder off (every drawn chunk casts) | 29.4 | 27.4 | 0 |
+| ladder, two rungs from rung 1 (the default) | **44.8** | **39.8** | 486 (93 MB) |
+| ladder, one rung from rung 1 | 44.8 | 39.3 | 737 (183 MB) |
+
+One rung and two rungs read the same: the coarse casters are no longer the cost, and what
+remains over the cap (55) is rung 0 casting its own ring, about 4 ms, plus the picture. The far
+stands are unchanged (at the runner's cap).
+
+**The look, against the exact look on the same tick (the overlay masked at the hill's wider
+line):** ground 22 pixels of 635 560 differ, 2 of them by more than five levels; hill 39 of
+701 137, 12 by more than five (the widest 18); aloft 14 at one level; orbit 4 at one level. The
+pictures are under `pictures/look/hill_shadow_ladder_*`. The dozen pixels are far shadow edges,
+as §19.9's estimate said; no acne (the caster's sink holds), no floating shadow the eye finds.
+Under ruling V18's letter the twelve pixels are past the tolerance; the shadow is a look the
+owner accepts or refuses from the pictures, and on acceptance the exact references are frozen
+again with the ladder in them.
+
+**What the casters cost.** 486 casters at the ground stand hold 93 MB and were built by the
+workers beside the drawn chunks (the fill 8.6 → 8.1 s: no slower). Casters are asked for every
+drawn rung from 1 up, the rings past the shadow's reach included; those never cast (the cascades
+end at 3.5 km) and could be left unasked — a lever for the memory, DEFERRED item 17's neighbour.
+
+**The near ring too (round seven).** With the ladder from rung 0 — the ring at the eye's feet
+cast by a coarser mesh as well — the ground stand reaches the runner's cap:
+
+| Flight | Ground frames/s | Hill | Casters at the ground (MB) |
+|---|---|---|---|
+| from rung 1, two rungs (the default) | 44.5 | 39.8 | 486 (93 MB) |
+| from rung 0, one rung (2 m cells cast for the 1 m ring) | **56.2** | **46.9** | 858 (221 MB) |
+| from rung 0, two rungs (4 m cells for the 1 m ring) | 56.3 | 47.8 | 572 (146 MB) |
+
+The near ring's own casting was the last four milliseconds. Whether a 2 m caster at the eye's
+feet keeps the look — a rock a metre wide, a step, a doorway's edge throw shadows a 2 m mesh
+does not know — is the look flight's question and the owner's call.
+
+**The near caster's look, MEASURED (the exact look on the same tick, the overlay masked):**
+from rung 0 with one rung — ground 17 pixels of 635 560 differ (2 past five levels, the widest
+22), hill 52 of 701 137 (12 past five, the widest 18), aloft 5 at one level, orbit 4 at one
+level: the same handful of far-shadow-edge pixels as the default, and nothing new at the eye's
+feet on these stands (smooth ground; a metre-wide rock is a picture the stands do not hold yet).
+
+
+### 19.11 ACCEPTED, REFUTED, FROZEN (2026-09-11)
+
+**The owner's acceptance.** *"I've checked hill_shadow_ladder_exact_above_ladder_below.png, looks
+ok."* The default is the accepted setting: from rung 0, one rung coarser (`SHADOW_COARSE_STEP = 1`,
+`SHADOW_COARSE_FROM_RUNG = 0`). The exact references were frozen again with the ladder in them
+(`VD_PICTURE_FREEZE=1`, a mode exclusive with the look grid and the census: ground 58.4 frames a
+second, hill 48.4 on the freeze flight).
+
+**The refutation** (`slice_08_shadow_refutation.md`): nine findings, all answered. The one that
+mattered — a caster and a drawn chunk shared ONE residency in the lane, so a key built as a caster
+blocked the ladder's own request for it, and a crossfade band could lose its coarse rung. The
+invariant now: a key the ladder draws casts itself while a finer chunk wants it as a caster; a key
+held as a caster that the ladder comes to want is dropped and rebuilt as a drawn chunk; a caster's
+last unwant never releases a drawn key; a replaced drawn chunk is despawned with its twin and its
+counts returned. Example: the hill's rung-1 chunk under the eye draws AND casts while the rung-0
+ring at the eye's feet wants it; when the eye walks off and the rung-0 ring drops, the chunk keeps
+drawing and stops casting.
+
+**The gates on the answered tree** (Docker off, one job at a time): coverage 100 % with zero real
+misses, lint, combos and the terrain pin green; the moving eye — the walk 51.3 frames a second and
+240 m/s 46.3 with ZERO frames with a gap, 528 m/s 31.3 with a gap on 447 of 1 876 frames (460 on
+the flight before the fixes: the throughput wall, unchanged), the boarding settled.
+
+**The picture gate after the fixes** read red on the ground stand by TWO content pixels of
+635 560, each a single far 2 m cell near the horizon about 20 levels darker: a drawn chunk that a
+finer chunk wants as its caster now casts, where before it cast nothing (finding 3). The hill,
+aloft and orbit stands matched their frozen pictures. The crops are
+`pictures/look/ground_refuter_pixel{0,1}_exact_left_fixed_right.png`. The owner accepted the two
+pixels (*"1. yes"*) and the four stands were frozen again on the answered tree; the picture gate
+then flew against the new references.
+
+**The picture gate against the new references, MEASURED:** ground 0 pixels differ, hill 11 of
+701 472 at one level, aloft 17 of 586 341 at one level, orbit 3 of 466 445 at one level — green
+under ruling V18. The still stands on the gate flight: ground 50.4 frames a second, hill 42.5,
+aloft 53.0, orbit 52.4.

@@ -156,6 +156,10 @@ const PICTURE_IDENTICAL_ENV: &str = "VD_PICTURE_IDENTICAL";
 const PICTURE_REPORT_ONLY_ENV: &str = "VD_PICTURE_REPORT_ONLY";
 /// A look measurement's capture grid, in multiples of the gate's.
 const LOOK_TICK_FACTOR: u64 = 3;
+/// THE FREEZE (ruling V18): with this set the run writes its pictures as the frozen exact
+/// references and compares nothing — used ONCE, on the owner's acceptance of a look from the
+/// difference images, never by a gate. The next run compares against them.
+const PICTURE_FREEZE_ENV: &str = "VD_PICTURE_FREEZE";
 /// AN ABLATION FLIGHT (D8-8): with this set the census prints and the stand ends — no picture
 /// judgement, no compare, the owner's pictures untouched. Never set by a gate.
 const PICTURE_CENSUS_ONLY_ENV: &str = "VD_PICTURE_CENSUS_ONLY";
@@ -604,6 +608,12 @@ fn take_picture(
             0.0
         }
     );
+    // THE SHADOW LADDER: the coarse casters on the shadow layer and their bytes.
+    eprintln!(
+        "terrain_pictures/{name}: SHADOW LADDER — {} coarse casters, {:.1} MB",
+        stamp.shadow_casters,
+        stamp.shadow_bytes as f64 / 1.0e6
+    );
     // THE FRAME'S ANATOMY (D8-8): the frame's time and every render pass's CPU and GPU time,
     // smoothed, so the wall of a still stand is named before anything is built against it.
     eprintln!(
@@ -1028,6 +1038,30 @@ fn take_picture(
     let reference = exact.join(format!("{name}.png"));
     let reference_probe = exact.join(format!("{name}.probe.png"));
     let reference_hud = exact.join(format!("{name}.hud.json"));
+    if std::env::var_os(PICTURE_FREEZE_ENV).is_some() {
+        // A freeze records the GATE's moment: a look measurement's coarser grid may never become
+        // the reference (refutation of the ladder, finding 5).
+        assert!(
+            std::env::var_os(PICTURE_REPORT_ONLY_ENV).is_none()
+                && std::env::var_os(PICTURE_CENSUS_ONLY_ENV).is_none(),
+            "{name}: a freeze runs on the gate's own grid — unset {PICTURE_REPORT_ONLY_ENV} and \
+             {PICTURE_CENSUS_ONLY_ENV}"
+        );
+        std::fs::create_dir_all(&exact).expect("the exact directory");
+        std::fs::copy(&png, &reference).expect("freeze the picture");
+        std::fs::copy(&probe_png, &reference_probe).expect("freeze the probe");
+        let rect = serde_json::to_string(&stamp.hud_rect_px).expect("the rectangle encodes");
+        std::fs::write(&reference_hud, &rect).expect("freeze the overlay's rectangle");
+        std::fs::copy(&png, &dest).expect("copy the picture");
+        std::fs::copy(&probe_png, &dest_probe).expect("copy the probe");
+        std::fs::write(&dest_hud, &rect).expect("write the overlay's rectangle beside the picture");
+        eprintln!(
+            "terrain_pictures/{name}: FROZEN as the exact reference under {} (the owner's \
+             acceptance); nothing compared",
+            exact.display()
+        );
+        return (last, share);
+    }
     assert!(
         reference.exists() && reference_probe.exists(),
         "{name}: no frozen exact picture under {} — freeze one from an exact flight first",

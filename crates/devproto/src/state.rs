@@ -358,6 +358,8 @@ pub(crate) mod tests {
                 morph_seam: 0,
                 vertices: 2_000_000,
                 bytes_drawn: 90_000_000,
+                shadow_casters: 52,
+                shadow_bytes: 15_000_000,
                 hud_rect_px: [10.0, 10.0, 900.0, 170.0],
                 frame_ms: 34.0,
                 passes_ms: vec![("main_opaque_pass_3d".to_owned(), 1.5, 20.0)],
@@ -425,6 +427,8 @@ pub(crate) mod tests {
         assert!(json.contains("\"urgent_frames\":4"));
         assert!(json.contains("\"harvest_full\":12"));
         assert!(json.contains("\"bytes_drawn\":90000000"));
+        assert!(json.contains("\"shadow_casters\":52"));
+        assert!(json.contains("\"shadow_bytes\":15000000"));
         assert!(json.contains("\"hud_rect_px\":[10.0,10.0,900.0,170.0]"));
         assert!(json.contains("\"frame_ms\":34.0"));
         assert!(json.contains("\"passes_ms\":[[\"main_opaque_pass_3d\",1.5,20.0]]"));
@@ -522,6 +526,10 @@ pub struct DevTerrainStamp {
     /// so under the flat-shading switch (vertices duplicated per face) they count the duplicates
     /// while `vertices` counts the library's.
     pub bytes_drawn: u64,
+    /// THE SHADOW LADDER (D8-8's shadow cost): the coarse casters on the shadow layer, and
+    /// their bytes on the GPU.
+    pub shadow_casters: u64,
+    pub shadow_bytes: u64,
     /// THE OVERLAY'S RECTANGLE in the picture, pixels (left, top, right, bottom): where the HUD
     /// drew its lines this frame — the one part of a picture that legitimately differs between
     /// two runs of one code (its tick readout), so a picture compare leaves it out. Zero when no

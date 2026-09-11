@@ -7971,6 +7971,18 @@ rings; what is left is an interim with a named step:
    MEASURED), a lighter caster vertex stage (UNMEASURED), a coarser shadow ladder on a render
    layer the sun alone sees (ESTIMATED 16× fewer far-ring caster vertices), the terrain horizon
    map (no ground casters at all). → the owner's choice; the switches stay as instruments.
+   ★ Round five (§19.9): the light caster (no morph, no sink in the shadow passes) changes
+   NOTHING alone (29.4 against 30.0) — the caster VERTEX COUNT is the cost, not the work per
+   vertex. The levers left: the coarser shadow ladder, or the horizon map.
+   ★ BUILT 2026-09-11 (option A, the owner's choice; §19.10): THE SHADOW LADDER — from rung 0
+   up a drawn chunk casts nothing and the chunk ONE rung coarser casts for it on a render layer
+   the sun alone sees, with a light-caster material sunk by the two rungs' bound. MEASURED: the
+   ground stand 29.4 → 56.2 frames a second (the runner's cap), the hill 27.4 → 46.9; the look
+   within a dozen far-shadow-edge pixels of the exact one on the hill, four on the orbit; the
+   casters 858 chunks, 221 MB at the ground. The owner ACCEPTED the look from the pictures and
+   the exact references are frozen with the ladder in them. OPEN: casters past the shadow's reach
+   are asked for and never cast (most of the 221 MB); a bound from the sun's elevation (the reach
+   plus the tallest hill over the sun's tangent) would leave them unasked.
 
 19. **THE FINISHED CHUNKS WAIT IN MEMORY WHEN THE HARVEST LAGS** (MEASURED 2026-09-11 on the
    528 m/s leg under a byte budget that bound below the old count cap): the workers outran the

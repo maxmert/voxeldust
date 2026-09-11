@@ -83,9 +83,18 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     // radial per vertex, the sink one number per rung; no centre of the body, so no material
     // is rewritten as the eye moves).
     let radial = normalize(mesh_functions::mesh_normal_local_to_world(vertex.radial, vertex.instance_index));
+#ifdef LIGHT_CASTER
+    // THE LIGHT CASTER (the shadow ladder): the caster skips the morph and the sink and stands
+    // under the drawn ground by the caster's own sink (the two rungs' bound), so the fine ground
+    // never shades itself against a coarse surface that stands above it. MEASURED alone (round
+    // five): the work per vertex is not the shadow's cost; the caster count is, which the
+    // ladder's coarse casters cut.
+    let morphed = own.xyz - radial * fade.splat.y;
+#else
     let coarser = own.xyz + radial * vertex.morph_m;
     let sink = radial * fade.sink.x;
     let morphed = mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d));
+#endif
 #ifdef SPLAT
     // THE SPLAT: the vertex as a camera-facing square one cell wide, spread in view space after
     // the morph and the sink, so it faces the eye by construction.

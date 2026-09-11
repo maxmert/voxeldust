@@ -59,7 +59,7 @@ use vd_core::pose::RealmId;
 use vd_devproto::{DevRuler, DevStarAngles, DevTerrainStamp};
 use vd_terrain::chunk::ChunkKey;
 
-use super::{GroundMaterial, LadderFade, PROBE_LAYER, ProbeMaterial};
+use super::{GroundMaterial, LadderFade, PROBE_LAYER, ProbeMaterial, SHADOW_LAYER};
 
 /// Flat shading instead of smooth (a debug switch; both are style, ruling S6-5).
 pub const FLAT_ENV: &str = "VD_TERRAIN_FLAT";
@@ -157,6 +157,31 @@ pub struct TerrainConfig {
     /// The first rung whose chunks cast no shadow (`VD_TERRAIN_SHADOW_CAST_RUNG=<rung>`): the
     /// casters' cost by rung, for the ablation; `None` lets every rung within the reach cast.
     pub shadow_cast_rung: Option<u8>,
+    /// THE SHADOW LADDER (D8-8's shadow cost, MEASURED §19.6–19.9: the casters' vertex count is
+    /// the still stand's wall): from `shadow_coarse_from_rung` up, a drawn chunk casts no shadow
+    /// itself; the chunk `shadow_coarse_step` rungs coarser that holds it is built on the shadow
+    /// layer and casts instead — sixteen times fewer caster vertices per area at two steps. Zero
+    /// steps turns the ladder off (every drawn chunk casts). Environment:
+    /// `VD_TERRAIN_SHADOW_COARSE_STEP`, `VD_TERRAIN_SHADOW_COARSE_FROM`.
+    pub shadow_coarse_step: u8,
+    pub shadow_coarse_from_rung: u8,
+}
+const SHADOW_COARSE_STEP_ENV: &str = "VD_TERRAIN_SHADOW_COARSE_STEP";
+const SHADOW_COARSE_FROM_ENV: &str = "VD_TERRAIN_SHADOW_COARSE_FROM";
+/// The shadow ladder's defaults (the owner's acceptance of the look, 2026-09-11, §19.10): one
+/// rung coarser from rung 0 up — the ring at the eye's feet casts from 2 m cells. MEASURED: the
+/// ground stand at the frame runner's cap (56 frames a second against 29 with every drawn chunk
+/// casting), the hill 47 against 27; the look within a dozen far-shadow-edge pixels of the exact
+/// one. Two rungs from rung 1 read 44.5 and 39.8 (the near ring's own casting was the last four
+/// milliseconds); two rungs from rung 0 read the same as one rung with 75 MB fewer casters, but
+/// a 4 m caster at the feet loses a metre-wide rock's shadow that a 2 m one keeps half of.
+const SHADOW_COARSE_STEP: u8 = 1;
+const SHADOW_COARSE_FROM_RUNG: u8 = 0;
+/// A coarse caster's request priority: the margin class at its rung, BEHIND every margin chunk
+/// of that rung (the index field at its widest) — a missing caster is a missing shadow, never a
+/// hole, so no drawn chunk waits for one.
+fn shadow_priority(rung: u8) -> u32 {
+    (2u32 << 30) | (u32::from(63 - rung.min(63)) << 24) | 0x00FF_FFFF
 }
 const SHADOW_CAST_RUNG_ENV: &str = "VD_TERRAIN_SHADOW_CAST_RUNG";
 const SHADOW_CAST_ENV: &str = "VD_TERRAIN_SHADOW_CAST";
@@ -221,6 +246,8 @@ impl TerrainConfig {
             shadow_cast_rung: std::env::var(SHADOW_CAST_RUNG_ENV)
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
+            shadow_coarse_step: env_or(SHADOW_COARSE_STEP_ENV, SHADOW_COARSE_STEP),
+            shadow_coarse_from_rung: env_or(SHADOW_COARSE_FROM_ENV, SHADOW_COARSE_FROM_RUNG),
         }
     }
 }
@@ -473,7 +500,33 @@ struct Drawn {
     counts: [u64; 3],
     /// The mesh's bytes as the engine uploads them (M8-2): the vertex buffer and the indices.
     bytes: u64,
+    /// The coarse caster this chunk asked for (the shadow ladder), released with it.
+    caster: Option<ChunkKey>,
 }
+
+/// A coarse caster on the shadow layer (the shadow ladder): its entity and its bytes.
+struct Caster {
+    entity: Entity,
+    bytes: u64,
+}
+
+/// Every placed chunk entity: the drawn ones, their probe twins and the sun's casters.
+type PlacedChunks<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static TerrainChunk,
+        &'static ChunkOrigin,
+        Option<&'static ProbeTwin>,
+        Option<&'static ShadowCaster>,
+        &'static mut Transform,
+    ),
+>;
+
+/// THE CASTER MARKER: a chunk entity that exists for the sun alone. Placed by the chunks'
+/// system like any chunk, never counted in the stamp's nearest and farthest.
+#[derive(Component)]
+pub struct ShadowCaster;
 
 /// The bytes a mesh costs the engine: its vertex stride times its vertices, and its indices.
 fn mesh_bytes(mesh: &Mesh) -> u64 {
@@ -513,6 +566,13 @@ pub struct Terrain {
     materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
     /// The probe materials, one per realm, kind and rung, built on first use.
     probe_materials: BTreeMap<(RealmId, u8, u8), Handle<ProbeMaterial>>,
+    /// THE SHADOW LADDER'S state: the light-caster materials per realm and rung; how many
+    /// drawn chunks want each coarse caster (a caster leaves with its last wanter); the casters
+    /// on the shadow layer, and their bytes.
+    shadow_materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
+    shadow_wanted: BTreeMap<(RealmId, ChunkKey), u32>,
+    shadow_casters: BTreeMap<(RealmId, ChunkKey), Caster>,
+    shadow_bytes: u64,
     /// The drawn chunks' morph counts, summed: fallbacks to the field, seam vertices, vertices.
     morph_totals: [u64; 3],
     /// The drawn chunks' mesh bytes, summed (M8-2's census).
@@ -552,6 +612,10 @@ impl Terrain {
             lane,
             declared,
             entities: BTreeMap::new(),
+            shadow_materials: BTreeMap::new(),
+            shadow_wanted: BTreeMap::new(),
+            shadow_casters: BTreeMap::new(),
+            shadow_bytes: 0,
             ladders: BTreeMap::new(),
             materials: BTreeMap::new(),
             probe_materials: BTreeMap::new(),
@@ -629,6 +693,103 @@ impl Terrain {
                 })
             })
             .clone()
+    }
+
+    /// THE CASTER'S MATERIAL for a realm and rung (the shadow ladder): the rung's own material as
+    /// a light caster, sunk by the two rungs' bound — the recipe's own bound between the drawn
+    /// rung and the caster's (`dropped_bound_m`), plus a cell of each for the extractors'
+    /// placement — so the drawn ground never stands under its caster.
+    /// THE CASTER'S SINK for a caster at `rung`: the recipe's own bound between the caster's rung
+    /// and the drawn rung it casts for (`dropped_bound_m`, the octaves the coarser rung drops),
+    /// plus a cell of each for the extractors' placement.
+    fn caster_sink_m(&self, body: &vd_terrain::BodyDefinition, rung: u8) -> f64 {
+        let fine = rung.saturating_sub(self.config.shadow_coarse_step);
+        (body.dropped_bound_m(rung) - body.dropped_bound_m(fine)).to_f64()
+            + f64::from(vd_seed::ladder::cell_m(rung))
+            + f64::from(vd_seed::ladder::cell_m(fine))
+    }
+
+    fn shadow_material(
+        &mut self,
+        assets: &mut Assets<GroundMaterial>,
+        realm: RealmId,
+        rung: u8,
+        body: &vd_terrain::BodyDefinition,
+    ) -> Handle<GroundMaterial> {
+        let bound_m = self.caster_sink_m(body, rung);
+        self.shadow_materials
+            .entry((realm, rung))
+            .or_insert_with(|| {
+                let rungs = body.ladder().rungs;
+                assets.add(GroundMaterial {
+                    base: StandardMaterial {
+                        base_color: Color::srgb(0.55, 0.50, 0.42),
+                        perceptual_roughness: 0.95,
+                        metallic: 0.0,
+                        cull_mode: Some(bevy::render::render_resource::Face::Back),
+                        alpha_mode: AlphaMode::Mask(0.5),
+                        ..default()
+                    },
+                    extension: LadderFade::new(
+                        fade_bands(rung, rungs),
+                        sink_end_m(body, rung, rungs),
+                        vd_client::chunks::sink_m(body, rung),
+                        f64::from(vd_seed::ladder::cell_m(rung)),
+                    )
+                    .into_light_caster(bound_m),
+                })
+            })
+            .clone()
+    }
+
+    /// THE SHADOW LADDER'S INVARIANT: one key, one residency in the lane. A key the ladder DRAWS
+    /// casts itself while some finer chunk wants it as a caster, and is a non-caster otherwise
+    /// (its own coarse caster casts for it). A key the ladder does not draw is built as a coarse
+    /// caster on the shadow layer while wanted. When the ladder comes to want a key held as a
+    /// caster, the caster is dropped and the key rebuilt as a drawn chunk (`convert_casters`).
+    /// (Refutation of the ladder, findings 1–3: a caster and a drawn chunk shared one residency
+    /// slot, so a crossfade band lost its coarse rung or leaked an entity.)
+    ///
+    /// A finer chunk asks for its caster: the count rises; on the first want a drawn key starts
+    /// casting itself, else the key is requested unless a caster already stands.
+    fn want_caster(&mut self, commands: &mut Commands, realm: RealmId, ckey: ChunkKey) {
+        let n = self.shadow_wanted.entry((realm, ckey)).or_insert(0);
+        *n += 1;
+        if *n > 1 {
+            return;
+        }
+        if let Some(drawn) = self.entities.get(&(realm, ckey)) {
+            commands
+                .entity(drawn.entity)
+                .remove::<bevy::light::NotShadowCaster>();
+        } else if !self.shadow_casters.contains_key(&(realm, ckey)) {
+            self.lane.request(realm, ckey, shadow_priority(ckey.rung));
+        }
+    }
+
+    /// A finer chunk leaves: the count falls; at zero a drawn key stops casting itself and a
+    /// caster is despawned and released — the lane's residency of a DRAWN key is never touched.
+    fn unwant_caster(&mut self, commands: &mut Commands, realm: RealmId, ckey: ChunkKey) {
+        match self.shadow_wanted.get_mut(&(realm, ckey)) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                return;
+            }
+            Some(_) => {}
+            None => return,
+        }
+        self.shadow_wanted.remove(&(realm, ckey));
+        if let Some(drawn) = self.entities.get(&(realm, ckey)) {
+            commands
+                .entity(drawn.entity)
+                .insert(bevy::light::NotShadowCaster);
+            return;
+        }
+        if let Some(c) = self.shadow_casters.remove(&(realm, ckey)) {
+            commands.entity(c.entity).despawn();
+            self.shadow_bytes -= c.bytes;
+        }
+        self.lane.release(realm, ckey);
     }
 
     /// The chunks on screen per rung, finest first.
@@ -987,15 +1148,19 @@ pub(crate) fn sync_terrain(
     // footprint is still building (coarse before fine, SL8). Then ask for what is wanted and not
     // held, in the wanted set's own order: the coarsest ring first.
     let held: Vec<(RealmId, ChunkKey)> = terrain.entities.keys().copied().collect();
-    {
+    let unwant = {
         let Terrain {
             lane,
             ladders,
             entities,
             morph_totals,
             bytes_drawn,
+            shadow_wanted,
+            shadow_casters,
+            shadow_bytes,
             ..
         } = &mut *terrain;
+        let mut unwant: Vec<(RealmId, ChunkKey)> = Vec::new();
         for (realm, key) in held {
             let wanted = ladders.get(&realm).map(|l| &l.wanted);
             let keep = wanted.is_some_and(|w| {
@@ -1015,13 +1180,31 @@ pub(crate) fn sync_terrain(
                         i += 1;
                     }
                     *bytes_drawn -= drawn.bytes;
+                    // THE SHADOW LADDER: the caster leaves with its last wanter (below, once the
+                    // lane is free again).
+                    if let Some(ckey) = drawn.caster {
+                        unwant.push((realm, ckey));
+                    }
+                }
+            }
+        }
+        // THE LADDER COMES TO WANT A KEY HELD AS A CASTER: the caster is dropped and released, so
+        // the request below rebuilds the key as a drawn chunk (which casts itself while wanted).
+        for (realm, ladder) in ladders.iter() {
+            for key in ladder.wanted.keys.iter() {
+                if let Some(c) = shadow_casters.remove(&(*realm, *key)) {
+                    commands.entity(c.entity).despawn();
+                    *shadow_bytes -= c.bytes;
+                    lane.release(*realm, *key);
                 }
             }
         }
         // A chunk still BUILDING that is no longer wanted is withdrawn from the workers (nothing is
-        // drawn for it, so no hold): a moving eye leaves no stale job in the queue.
+        // drawn for it, so no hold): a moving eye leaves no stale job in the queue. A coarse
+        // caster still wanted is not.
         for (realm, key) in lane.pending_all() {
-            let wanted = ladders.get(&realm).is_some_and(|l| l.wanted.contains(key));
+            let wanted = ladders.get(&realm).is_some_and(|l| l.wanted.contains(key))
+                || shadow_wanted.contains_key(&(realm, key));
             if !wanted {
                 lane.release(realm, key);
             }
@@ -1035,6 +1218,10 @@ pub(crate) fn sync_terrain(
                 }
             }
         }
+        unwant
+    };
+    for (realm, ckey) in unwant {
+        terrain.unwant_caster(&mut commands, realm, ckey);
     }
     // 3. Harvest finished chunks — each with its rung's crossfade material — and their probe twins
     //    where a probe exists (Capture mode).
@@ -1045,6 +1232,8 @@ pub(crate) fn sync_terrain(
     let shadow_cast = terrain.config.shadow_cast;
     let shadow_cast_rung = terrain.config.shadow_cast_rung;
     let shadow_receive = terrain.config.shadow_receive;
+    let coarse_step = terrain.config.shadow_coarse_step;
+    let coarse_from = terrain.config.shadow_coarse_from_rung;
     let harvest_cap = terrain.config.harvest_per_frame;
     let harvest_bytes = terrain.config.harvest_bytes_per_frame;
     // THE UPLOAD's cost on the main thread (M8-2a): the mesh conversion, the asset, the entity —
@@ -1057,14 +1246,67 @@ pub(crate) fn sync_terrain(
             .ladders
             .get(&realm)
             .is_some_and(|l| l.wanted.contains(key));
-        if !wanted {
+        let caster_wanted = terrain.shadow_wanted.contains_key(&(realm, key));
+        if !wanted && !caster_wanted {
             terrain.lane.release(realm, key);
             continue;
         }
         let Some(body) = terrain.lane.body(realm).map(Arc::clone) else {
+            // No body: released; a caster's wants are forgotten with it (nothing re-asks).
             terrain.lane.release(realm, key);
+            terrain.shadow_wanted.remove(&(realm, key));
             continue;
         };
+        if !wanted {
+            // THE SHADOW LADDER: a coarse caster lands on the shadow layer, for the sun alone,
+            // its culling box grown by its own sink (the caster stands under the drawn ground).
+            let material = terrain.shadow_material(&mut ground_materials, realm, key.rung, &body);
+            let sink_m = terrain.caster_sink_m(&body, key.rung);
+            let built = mesh_of(&ready.geometry, false, exact_normal_rung, false);
+            let bytes = mesh_bytes(&built);
+            let mesh = meshes.add(built);
+            let bounds = moved_bounds(&ready.geometry, sink_m as f32);
+            let entity = commands
+                .spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    Transform::default(),
+                    TerrainChunk {
+                        realm,
+                        rung: key.rung,
+                    },
+                    ChunkOrigin(ready.geometry.origin_m),
+                    bounds,
+                    RenderLayers::layer(SHADOW_LAYER),
+                    bevy::light::NotShadowReceiver,
+                    ShadowCaster,
+                ))
+                .id();
+            terrain.shadow_bytes += bytes;
+            if let Some(old) = terrain
+                .shadow_casters
+                .insert((realm, key), Caster { entity, bytes })
+            {
+                commands.entity(old.entity).despawn();
+                terrain.shadow_bytes -= old.bytes;
+            }
+            continue;
+        }
+        // THE SHADOW LADDER: a drawn chunk from the coarse rung up asks for the coarse chunk that
+        // holds it, which casts for it and for its neighbours; it casts nothing itself unless a
+        // finer chunk wants IT as a caster (the invariant, `want_caster`).
+        let caster = (coarse_step > 0 && key.rung >= coarse_from)
+            .then(|| vd_client::chunks::coarse_key(&body, key, coarse_step))
+            .flatten();
+        if let Some(ckey) = caster {
+            terrain.want_caster(&mut commands, realm, ckey);
+        }
+        // A caster that stood for this key gives way to the drawn chunk, which casts itself.
+        if let Some(c) = terrain.shadow_casters.remove(&(realm, key)) {
+            commands.entity(c.entity).despawn();
+            terrain.shadow_bytes -= c.bytes;
+        }
+        let casts_itself = terrain.shadow_wanted.contains_key(&(realm, key));
         let material = terrain.ground_material(&mut ground_materials, realm, key.rung, &body);
         let splat = splat_rung.is_some_and(|r| key.rung >= r);
         let built = mesh_of(&ready.geometry, flat, exact_normal_rung, splat);
@@ -1095,7 +1337,10 @@ pub(crate) fn sync_terrain(
         if hide_rung.is_some_and(|r| key.rung >= r) {
             commands.entity(entity).insert(Visibility::Hidden);
         }
-        if !shadow_cast || shadow_cast_rung.is_some_and(|r| key.rung >= r) {
+        if !shadow_cast
+            || shadow_cast_rung.is_some_and(|r| key.rung >= r)
+            || (caster.is_some() && !casts_itself)
+        {
             commands.entity(entity).insert(bevy::light::NotShadowCaster);
         }
         if !shadow_receive {
@@ -1133,15 +1378,32 @@ pub(crate) fn sync_terrain(
             i += 1;
         }
         terrain.bytes_drawn += bytes;
-        terrain.entities.insert(
+        if let Some(old) = terrain.entities.insert(
             (realm, key),
             Drawn {
                 entity,
                 twin,
                 counts,
                 bytes,
+                caster,
             },
-        );
+        ) {
+            // A key drawn twice (refutation of the ladder, finding 2): the old entity, its twin,
+            // its counts and its caster's want all leave with it.
+            commands.entity(old.entity).despawn();
+            if let Some(t) = old.twin {
+                commands.entity(t).despawn();
+            }
+            let mut i = 0;
+            while i < 3 {
+                terrain.morph_totals[i] -= old.counts[i];
+                i += 1;
+            }
+            terrain.bytes_drawn -= old.bytes;
+            if let Some(ckey) = old.caster {
+                terrain.unwant_caster(&mut commands, realm, ckey);
+            }
+        }
     }
     terrain.harvest_nanos += harvest_started.elapsed().as_nanos() as u64;
     // 4. Every chunk rides its row: transform = draw_center + facing · origin, in f64, narrowed once
@@ -1259,6 +1521,8 @@ pub(crate) fn sync_terrain(
                             cascades,
                             transform,
                             TerrainSun,
+                            // The sun sees the picture's layer and the shadow ladder's.
+                            RenderLayers::from_layers(&[0, SHADOW_LAYER]),
                         ))
                         .id();
                     terrain.sun = Some(sun);
@@ -1396,6 +1660,8 @@ pub(crate) fn sync_terrain(
                 morph_seam: terrain.morph_totals[1],
                 vertices: terrain.morph_totals[2],
                 bytes_drawn: terrain.bytes_drawn,
+                shadow_casters: terrain.shadow_casters.len() as u64,
+                shadow_bytes: terrain.shadow_bytes,
                 hud_rect_px: [0.0; 4],
                 frame_ms: diagnostics
                     .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
@@ -1520,12 +1786,7 @@ pub(crate) fn place_chunks(
     net: Res<super::Net>,
     render_eye: Res<super::RenderEye>,
     mut terrain: ResMut<Terrain>,
-    mut chunks: Query<(
-        &TerrainChunk,
-        &ChunkOrigin,
-        Option<&ProbeTwin>,
-        &mut Transform,
-    )>,
+    mut chunks: PlacedChunks,
     mut frame: Local<u32>,
 ) {
     let mut stamp = terrain.stamp.take();
@@ -1554,7 +1815,7 @@ pub(crate) fn place_chunks(
     let mut farthest = 0.0_f64;
     let mut placed = 0u32;
     let mut first: Option<(RealmId, [f64; 3], DVec3)> = None;
-    for (chunk, origin, twin, mut transform) in &mut chunks {
+    for (chunk, origin, twin, caster, mut transform) in &mut chunks {
         if let Some((centre, facing)) = rows.get(&chunk.realm) {
             let o = DVec3::new(origin.0[0], origin.0[1], origin.0[2]);
             let p = *centre + *facing * o;
@@ -1565,8 +1826,9 @@ pub(crate) fn place_chunks(
                 facing.z as f32,
                 facing.w as f32,
             );
-            // The twins ride the same rows but are not counted twice.
-            if twin.is_none() {
+            // The twins ride the same rows but are not counted twice; the casters ride them and
+            // are not counted at all (the sun's, not the picture's).
+            if twin.is_none() && caster.is_none() {
                 nearest = nearest.min(p.length());
                 farthest = farthest.max(p.length());
                 placed += 1;
