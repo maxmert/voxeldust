@@ -7919,7 +7919,12 @@ rings; what is left is an interim with a named step:
    scale) — the far-rung voxel renderer (D8-8) is the next lever. → 2026-09-11: THE HARVEST'S
    BYTE BUDGET is DONE (§20.1: 24 near chunks of 400 KB under a count cap of 48; the 528 m/s
    leg's gap peak and frames with a gap down by a third, the queue down by a third; a budget at
-   the mean chunk's bytes bound below the old cap and made everything worse — MEASURED).
+   the mean chunk's bytes bound below the old cap and made everything worse — MEASURED). → 2026-09-11: THE 16-BIT POSITION is MEASURED AND REFUSED (§21; owner: *"refuse"*): every
+   rung packed on the rung's own lattice with the origin snapped to it, the picture gate read 351 /
+   166 / 142 / 76 pixels over one level (widest 19–31) on the four stands, spread over every rung
+   in proportion to its share — the crease flip, at every rung alike — for a tenth of the GPU's
+   bytes and no frame rate. The position stays the float; the path is removed; step 5's packing
+   ends with the normal. Item 13 is CLOSED: what remains of step 5's second half is done or refused.
 
 14. **THE UPLOAD PATH'S POOL** (§17.6, MEASURED 2026-09-10): the client owns about 0.6 × the drawn
    bytes of unmapped memory (1 546 MB at the ground stand, in about two regions per chunk of the

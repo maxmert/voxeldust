@@ -174,6 +174,8 @@ const CAPTURE_ASK_AHEAD_TICKS: u64 = 200;
 /// the other slope (19 levels, the 16-bit radial) is refused; one that shades it a level darker
 /// is not.
 const TOLERANCE_LEVELS: u8 = 1;
+/// The stands whose picture changed past the tolerance, judged together at the flight's end.
+static PAST_TOLERANCE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 /// The exact pictures' directory beside the owner's: frozen from an exact flight, never
 /// overwritten by a run, the reference every compare reads when it exists.
 const EXACT_DIR: &str = "exact";
@@ -1191,13 +1193,16 @@ fn take_picture(
                      withheld ({differing} pixels differ, the widest step {widest} against the \
                      allowed {TOLERANCE_LEVELS}); the pictures are kept, the owner's untouched"
                 );
-            } else {
-                assert!(
-                    widest <= TOLERANCE_LEVELS,
+            } else if widest > TOLERANCE_LEVELS {
+                // THE VERDICT IS HELD until every stand has flown, so one flight reports every
+                // stand (the packing's measurement reads all four); the test fails at its end.
+                let verdict = format!(
                     "{name}: THE PICTURE CHANGED PAST THE TOLERANCE — {differing} pixels differ, \
                      the widest channel step {widest} against the allowed {TOLERANCE_LEVELS} \
                      (ruling V18)"
                 );
+                eprintln!("terrain_pictures/{verdict}");
+                PAST_TOLERANCE.lock().expect("the verdicts").push(verdict);
             }
             if std::env::var_os(PICTURE_IDENTICAL_ENV).is_some() {
                 assert_eq!(
@@ -1384,6 +1389,14 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
          chunks ({hill_share:.3}), aloft {aloft_chunks} chunks ({aloft_share:.3}), orbit \
          {orbit_chunks} chunks ({orbit_share:.3})"
     );
+    let past = PAST_TOLERANCE.lock().expect("the verdicts");
+    assert!(
+        past.is_empty(),
+        "THE PICTURE CHANGED PAST THE TOLERANCE on {} stand(s) (ruling V18):\n{}",
+        past.len(),
+        past.join("\n")
+    );
+    drop(past);
     assert!(
         ground_chunks >= GROUND_CHUNKS_MIN,
         "the ground picture holds the ladder"

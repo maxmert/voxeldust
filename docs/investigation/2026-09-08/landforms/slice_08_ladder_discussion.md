@@ -1413,3 +1413,37 @@ then flew against the new references.
 701 472 at one level, aloft 17 of 586 341 at one level, orbit 3 of 466 445 at one level — green
 under ruling V18. The still stands on the gate flight: ground 50.4 frames a second, hill 42.5,
 aloft 53.0, orbit 52.4.
+
+## 21. THE 16-BIT POSITION, MEASURED AND REFUSED (ruling V18, 2026-09-11)
+
+**What was built, for the measurement.** Every vertex's offset from its chunk's origin as four
+signed 16-bit quanta of the rung's own position lattice (a cell over 256, the extractor's own
+quantum: 3.9 mm at rung 0), the fourth lane zero; the chunk's origin snapped onto that lattice so
+two chunks state a shared vertex at ONE lattice point (no crack of the packing's own — a unit test
+held it on two neighbours); a vertex past the lattice's reach (±128 cells) fell back to the float
+form and was counted (zero fallbacks on every stand); the engine's own position attribute carried
+under its own id in the 16-bit format (the engine reads a mesh's format from the mesh's layout,
+so every pipeline specialised to it), the shader scaling the quanta by the rung's quantum from the
+material's uniform; the culling box grown by half a quantum. The picture gate learned to judge
+every stand at the flight's end (kept: one flight now reports all four).
+
+**MEASURED, every rung packed, against the frozen exact pictures:**
+
+| Stand | Bytes on screen | Frames a second | Pixels over one level | Widest step | Where |
+|---|---|---|---|---|---|
+| Ground | 1 886 MB (from 2 080) | 50.0 (from 50.4) | 351 of 5 068 changed | 19 | rungs 0–5, mostly rung 0 |
+| Hill | 1 983 MB (from 2 186) | 42.0 (from 42.5) | 166 of 5 357 | 22 | rungs 0–5 |
+| Aloft | 670 MB (from 732) | 53.5 (from 53.0) | 142 of 3 778 | 17 | rungs 9–11 |
+| Orbit | 313 MB (from 339) | 52.4 (from 52.4) | 76 of 2 191 | 31 | rung 12 |
+
+The changed pixels spread over every rung in proportion to the rung's share of the picture
+(the probe's rung per pixel), so no per-rung rule saves it — the half-quantum shift is the same
+fraction of a pixel at every rung, and a shading edge that crosses a pixel's centre hands the
+pixel to the other slope (§18.3's crease flip, the 16-bit radial's own failure). Thousands more
+pixels moved one level (within the floor). The gain: a tenth of the GPU's bytes on every stand
+and no frame rate on any.
+
+**RULED (owner, 2026-09-11): REFUSED** — *"1. yes, refuse."* Ruling V18's tolerance stands: the
+position stays the engine's float. The packed-position path is removed from the tree (nothing
+inert stays); this record and the four difference images (`pictures/look/*_packed_position_diff_*`)
+are what remains of it. Step 5's packing ends with the normal.
