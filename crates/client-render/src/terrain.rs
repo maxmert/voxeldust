@@ -67,7 +67,15 @@ pub const FLAT_ENV: &str = "VD_TERRAIN_FLAT";
 /// A ladder to the horizon is thousands of chunks (MEASURED: about 4 300 from the ground), so the
 /// harvest is wide enough to
 /// land one in a few seconds and narrow enough to keep a frame.
-const HARVEST_PER_FRAME: usize = 24;
+const HARVEST_PER_FRAME: usize = 48;
+/// The harvest's byte budget: twenty-four near chunks at 400 KB — above the ground stand's mean
+/// chunk (305 KB, §18.2) and its largest (about 320 KB with the skirts) — so a frame of near
+/// chunks uploads what it uploaded under the old count cap of 24, and a frame of far ones (200
+/// KB each) uploads 48 of them under the count cap. MEASURED at 24 × 305 KB: the budget bound
+/// under the real near chunk, the 528 m/s harvest fell from 355 to 300 chunks a second and the
+/// queue grew to 2 551 — a budget must stand above the count cap's worth, never at it.
+const HARVEST_BYTES_PER_FRAME: u64 = (24 * 400) << 10;
+const HARVEST_BYTES_ENV: &str = "VD_TERRAIN_HARVEST_BYTES";
 /// How far the eye moves before the wanted set is recomputed, in metres: a still stand computes it
 /// once; a hull at 528 m/s recomputes every frame.
 const EYE_STEP_M: f64 = 0.5;
@@ -106,15 +114,74 @@ pub struct TerrainConfig {
     /// THE PARENT CACHE'S MEMORY BUDGET, in bytes: the cache keeps parent meshes while their
     /// measured bytes fit, never fewer than one working set of the workers.
     pub parent_cache_bytes: usize,
-    /// Finished chunks harvested per frame.
+    /// Finished chunks harvested per frame, at most.
     pub harvest_per_frame: usize,
+    /// THE HARVEST'S BYTE BUDGET per frame (ruling V15 item 2): the upload stops when the
+    /// chunks' bytes reach it, so a frame of small far chunks takes more of them and a frame of
+    /// large near ones fewer. Default `HARVEST_BYTES_PER_FRAME`; `VD_TERRAIN_HARVEST_BYTES`
+    /// overrides it for a measurement.
+    pub harvest_bytes_per_frame: u64,
     /// THE FIRST RUNG WHOSE MESHES KEEP THE ENGINE'S EXACT NORMAL (ruling V18): below it the
     /// packed four-byte normal, from it the twelve-byte one. MEASURED on the orbit stand: under
     /// any 16-bit normal one pixel at the planet's limb (rungs 11–12) moved three levels — the
     /// lighting there divides by a near-zero view angle and reads a normal's error a
     /// hundredfold — while every near stand stayed within one level. Default `EXACT_NORMAL_RUNG`.
     pub exact_normal_rung: u8,
+    /// THE FAR-RUNG SPLAT (D8-8's LOOK measurement, `VD_TERRAIN_SPLATS=<rung>`): from this rung
+    /// up a chunk is drawn as one camera-facing square per surface vertex, one cell wide, with
+    /// the vertex's own normal, morph and radial — the ladder's own voxels drawn as splats instead
+    /// of the extracted mesh. `None` (the default, the shipped look) draws meshes on every rung.
+    /// A measurement of the LOOK and the frame rate; the bytes of this form are four copies of
+    /// each vertex and come DOWN only with vertex pulling, which follows the owner's look ruling.
+    pub splat_rung: Option<u8>,
+    /// THE ABLATION SWITCHES (D8-8, the frame's wall named by taking work away): the sun casts
+    /// shadows (`VD_TERRAIN_SHADOWS=0` turns them off), and chunks from `hide_rung` up are
+    /// spawned hidden (`VD_TERRAIN_HIDE_RUNG=<rung>`: built and counted, never drawn). Dev
+    /// switches for a measurement, never a gate's path.
+    pub shadows: bool,
+    pub hide_rung: Option<u8>,
+    /// THE SHADOW'S SHAPE (D8-8's ablation named the sun's shadow as the still stand's wall,
+    /// §19.6): how far it reaches (the rung whose switch distance ends it), how many cascades
+    /// draw it, and each cascade map's width in pixels. Defaults: the constants below; the
+    /// environment overrides them for a measurement (`VD_TERRAIN_SHADOW_REACH_RUNG`,
+    /// `VD_TERRAIN_SHADOW_CASCADES`, `VD_TERRAIN_SHADOW_MAP`).
+    pub shadow_reach_rung: u8,
+    pub shadow_cascades: usize,
+    pub shadow_map_px: u32,
+    /// The shadow's two halves, each a switch for the ablation: the chunks CAST into the maps
+    /// (`VD_TERRAIN_SHADOW_CAST=0` marks every chunk a non-caster: the maps stay empty) and the
+    /// chunks RECEIVE from them (`VD_TERRAIN_SHADOW_RECEIVE=0` marks every chunk a non-receiver:
+    /// the maps are drawn and never read).
+    pub shadow_cast: bool,
+    pub shadow_receive: bool,
+    /// The first rung whose chunks cast no shadow (`VD_TERRAIN_SHADOW_CAST_RUNG=<rung>`): the
+    /// casters' cost by rung, for the ablation; `None` lets every rung within the reach cast.
+    pub shadow_cast_rung: Option<u8>,
 }
+const SHADOW_CAST_RUNG_ENV: &str = "VD_TERRAIN_SHADOW_CAST_RUNG";
+const SHADOW_CAST_ENV: &str = "VD_TERRAIN_SHADOW_CAST";
+const SHADOW_RECEIVE_ENV: &str = "VD_TERRAIN_SHADOW_RECEIVE";
+
+/// The environment switches of the shadow's shape.
+const SHADOW_REACH_ENV: &str = "VD_TERRAIN_SHADOW_REACH_RUNG";
+const SHADOW_CASCADES_ENV: &str = "VD_TERRAIN_SHADOW_CASCADES";
+const SHADOW_MAP_ENV: &str = "VD_TERRAIN_SHADOW_MAP";
+/// The engine's own default width of a cascade's map, in pixels.
+const SHADOW_MAP_PX: u32 = 2048;
+
+/// A number from the environment, or the default.
+fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<T>().ok())
+        .unwrap_or(default)
+}
+
+/// The environment switch of the far-rung splat.
+const SPLAT_ENV: &str = "VD_TERRAIN_SPLATS";
+/// The environment switches of the ablation.
+const SHADOWS_ENV: &str = "VD_TERRAIN_SHADOWS";
+const HIDE_RUNG_ENV: &str = "VD_TERRAIN_HIDE_RUNG";
 
 /// THE DEFAULT memory budget of the parent cache. The working set on a flight is every ring's
 /// LEADING EDGE, not one worker's neighbourhood: the pool builds hundreds of parents a second
@@ -137,7 +204,23 @@ impl TerrainConfig {
             flat,
             parent_cache_bytes: PARENT_CACHE_BYTES,
             harvest_per_frame: HARVEST_PER_FRAME,
+            harvest_bytes_per_frame: env_or(HARVEST_BYTES_ENV, HARVEST_BYTES_PER_FRAME),
             exact_normal_rung: EXACT_NORMAL_RUNG,
+            splat_rung: std::env::var(SPLAT_ENV)
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok()),
+            shadows: std::env::var(SHADOWS_ENV).as_deref() != Ok("0"),
+            hide_rung: std::env::var(HIDE_RUNG_ENV)
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok()),
+            shadow_reach_rung: env_or(SHADOW_REACH_ENV, SHADOW_REACH_RUNG),
+            shadow_cascades: env_or(SHADOW_CASCADES_ENV, SHADOW_CASCADES),
+            shadow_map_px: env_or(SHADOW_MAP_ENV, SHADOW_MAP_PX),
+            shadow_cast: std::env::var(SHADOW_CAST_ENV).as_deref() != Ok("0"),
+            shadow_receive: std::env::var(SHADOW_RECEIVE_ENV).as_deref() != Ok("0"),
+            shadow_cast_rung: std::env::var(SHADOW_CAST_RUNG_ENV)
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok()),
         }
     }
 }
@@ -405,9 +488,13 @@ fn mesh_bytes(mesh: &Mesh) -> u64 {
 /// The box the engine culls a chunk by, grown to wherever the vertex stage can put a vertex: its
 /// own position, its morph target, and its position less its whole sink (the library's own
 /// bounds, step 5).
-fn moved_bounds(geometry: &vd_client::chunks::ChunkGeometry) -> bevy::camera::primitives::Aabb {
+fn moved_bounds(
+    geometry: &vd_client::chunks::ChunkGeometry,
+    margin_m: f32,
+) -> bevy::camera::primitives::Aabb {
     let (lo, hi) = geometry.bounds;
-    bevy::camera::primitives::Aabb::from_min_max(Vec3::from_array(lo), Vec3::from_array(hi))
+    let m = Vec3::splat(margin_m);
+    bevy::camera::primitives::Aabb::from_min_max(Vec3::from_array(lo) - m, Vec3::from_array(hi) + m)
 }
 
 /// The terrain's state on the engine side.
@@ -537,6 +624,7 @@ impl Terrain {
                         fade_bands(rung, rungs),
                         sink_end_m(body, rung, rungs),
                         vd_client::chunks::sink_m(body, rung),
+                        f64::from(vd_seed::ladder::cell_m(rung)),
                     ),
                 })
             })
@@ -586,7 +674,15 @@ fn packed_indices(geometry: &vd_client::chunks::ChunkGeometry) -> bevy::mesh::In
 /// A Bevy mesh from a chunk's geometry: positions and normals relative to the chunk's origin, the
 /// morph metre per vertex, the extractor's triangles as indices. `flat` duplicates the vertices
 /// and takes one normal per face.
-fn mesh_of(geometry: &vd_client::chunks::ChunkGeometry, flat: bool, exact_normal_rung: u8) -> Mesh {
+fn mesh_of(
+    geometry: &vd_client::chunks::ChunkGeometry,
+    flat: bool,
+    exact_normal_rung: u8,
+    splat: bool,
+) -> Mesh {
+    if splat {
+        return splat_mesh_of(geometry, exact_normal_rung);
+    }
     // RENDER WORLD ONLY (step 5, refutation P-16): the engine keeps a mesh in the main world too
     // by default, and nothing reads a chunk's mesh back on the client — the culling box is the
     // library's own and the geometry stays on the lane. One copy, in the render world.
@@ -631,6 +727,76 @@ fn mesh_of(geometry: &vd_client::chunks::ChunkGeometry, flat: bool, exact_normal
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.normals.clone());
     }
     mesh
+}
+
+/// THE SPLAT MESH (D8-8's measurement): every surface vertex four times, with the corner it
+/// stands at; the shader spreads the four into a camera-facing square one cell wide. The
+/// normal, the morph and the radial ride along unchanged, so the crossfade and the light are
+/// the mesh's own; the skirt vertices are left out (a splat has no edge to hide).
+fn splat_mesh_of(geometry: &vd_client::chunks::ChunkGeometry, exact_normal_rung: u8) -> Mesh {
+    let n = geometry.skirt_start as usize;
+    let corners: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+    let mut positions = Vec::with_capacity(n * 4);
+    let mut morph = Vec::with_capacity(n * 4);
+    let mut radials = Vec::with_capacity(n * 4);
+    let mut corner = Vec::with_capacity(n * 4);
+    let mut packed = Vec::with_capacity(n * 4);
+    let mut normals = Vec::with_capacity(n * 4);
+    let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
+    for i in 0..n {
+        let base = (i * 4) as u32;
+        for c in corners {
+            positions.push(geometry.vertices[i]);
+            morph.push(geometry.morph_m[i]);
+            radials.push(geometry.radials[i]);
+            corner.push(c);
+            packed.push(geometry.packed_normals[i]);
+            normals.push(geometry.normals[i]);
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    let mut mesh = Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(super::ATTRIBUTE_MORPH, morph)
+    .with_inserted_attribute(super::ATTRIBUTE_RADIAL, radials)
+    .with_inserted_attribute(super::ATTRIBUTE_SPLAT_CORNER, corner)
+    .with_inserted_indices(bevy::mesh::Indices::U32(indices));
+    if geometry.key.rung < exact_normal_rung {
+        mesh.insert_attribute(
+            super::ATTRIBUTE_OCT_NORMAL,
+            bevy::mesh::VertexAttributeValues::Snorm16x2(packed),
+        );
+    } else {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    }
+    mesh
+}
+
+/// THE FRAME'S ANATOMY (D8-8): every render pass the engine timed this frame, by name, with its
+/// CPU milliseconds (encoding) and its GPU milliseconds (running; zero without timestamps) —
+/// smoothed, from the render diagnostics' `render/<pass>/elapsed_cpu|elapsed_gpu` paths.
+fn render_passes_ms(store: &bevy::diagnostic::DiagnosticsStore) -> Vec<(String, f32, f32)> {
+    let mut by_pass: BTreeMap<String, (f32, f32)> = BTreeMap::new();
+    for d in store.iter() {
+        let path = d.path().as_str();
+        let Some(rest) = path.strip_prefix("render/") else {
+            continue;
+        };
+        let Some((pass, field)) = rest.rsplit_once('/') else {
+            continue;
+        };
+        let v = d.smoothed().unwrap_or(0.0) as f32;
+        let e = by_pass.entry(pass.to_owned()).or_insert((0.0, 0.0));
+        match field {
+            "elapsed_cpu" => e.0 = v,
+            "elapsed_gpu" => e.1 = v,
+            _ => {}
+        }
+    }
+    by_pass.into_iter().map(|(p, (c, g))| (p, c, g)).collect()
 }
 
 /// The default first rung whose meshes keep the engine's exact normal (ruling V18, MEASURED on
@@ -727,6 +893,7 @@ pub(crate) fn sync_terrain(
     mut visibility: Query<&mut Visibility>,
     key_light: Query<Entity, With<super::KeyLight>>,
     exposure: Query<&bevy::camera::Exposure, With<super::FollowCam>>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
 ) {
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
@@ -873,11 +1040,17 @@ pub(crate) fn sync_terrain(
     //    where a probe exists (Capture mode).
     let flat = terrain.config.flat;
     let exact_normal_rung = terrain.config.exact_normal_rung;
+    let splat_rung = terrain.config.splat_rung;
+    let hide_rung = terrain.config.hide_rung;
+    let shadow_cast = terrain.config.shadow_cast;
+    let shadow_cast_rung = terrain.config.shadow_cast_rung;
+    let shadow_receive = terrain.config.shadow_receive;
     let harvest_cap = terrain.config.harvest_per_frame;
+    let harvest_bytes = terrain.config.harvest_bytes_per_frame;
     // THE UPLOAD's cost on the main thread (M8-2a): the mesh conversion, the asset, the entity —
     // per harvested chunk, so the harvest's own wall is named in milliseconds.
     let harvest_started = std::time::Instant::now();
-    for ready in terrain.lane.poll(harvest_cap) {
+    for ready in terrain.lane.poll_within(harvest_cap, harvest_bytes) {
         let realm = ready.realm;
         let key = ready.geometry.key;
         let wanted = terrain
@@ -893,12 +1066,19 @@ pub(crate) fn sync_terrain(
             continue;
         };
         let material = terrain.ground_material(&mut ground_materials, realm, key.rung, &body);
-        let built = mesh_of(&ready.geometry, flat, exact_normal_rung);
+        let splat = splat_rung.is_some_and(|r| key.rung >= r);
+        let built = mesh_of(&ready.geometry, flat, exact_normal_rung, splat);
         let bytes = mesh_bytes(&built);
         let mesh = meshes.add(built);
         // THE BOUNDS the engine culls by, grown to where the vertex stage can move a vertex: its
         // morph target and its whole sink (the engine reads the box from the positions alone).
-        let bounds = moved_bounds(&ready.geometry);
+        // A splat reaches one cell past its vertex on the screen's plane.
+        let margin_m = if splat {
+            vd_seed::ladder::cell_m(key.rung) as f32
+        } else {
+            0.0
+        };
+        let bounds = moved_bounds(&ready.geometry, margin_m);
         let entity = commands
             .spawn((
                 Mesh3d(mesh.clone()),
@@ -912,6 +1092,17 @@ pub(crate) fn sync_terrain(
                 bounds,
             ))
             .id();
+        if hide_rung.is_some_and(|r| key.rung >= r) {
+            commands.entity(entity).insert(Visibility::Hidden);
+        }
+        if !shadow_cast || shadow_cast_rung.is_some_and(|r| key.rung >= r) {
+            commands.entity(entity).insert(bevy::light::NotShadowCaster);
+        }
+        if !shadow_receive {
+            commands
+                .entity(entity)
+                .insert(bevy::light::NotShadowReceiver);
+        }
         let twin = probe_materials.as_mut().map(|pm| {
             let probe = terrain.probe_material(pm, realm, PROBE_KIND_TERRAIN, key.rung, &body);
             commands
@@ -1038,9 +1229,13 @@ pub(crate) fn sync_terrain(
                         .next()
                         .map_or_else(|| sun_lux(&bevy::camera::Exposure::default()), sun_lux);
                     // THE SHADOW (M8-L): the sun casts one, over the two nearest rings.
-                    let reach_m = switch_m(SHADOW_REACH_RUNG) as f32;
+                    let reach_m = switch_m(terrain.config.shadow_reach_rung) as f32;
+                    // The map's width is an engine resource; set with the sun.
+                    commands.insert_resource(bevy::light::DirectionalLightShadowMap {
+                        size: terrain.config.shadow_map_px as usize,
+                    });
                     let cascades = bevy::light::CascadeShadowConfigBuilder {
-                        num_cascades: SHADOW_CASCADES,
+                        num_cascades: terrain.config.shadow_cascades,
                         first_cascade_far_bound: reach_m * SHADOW_FIRST_CASCADE_SHARE,
                         maximum_distance: reach_m,
                         ..default()
@@ -1056,7 +1251,7 @@ pub(crate) fn sync_terrain(
                         .spawn((
                             DirectionalLight {
                                 illuminance: lux,
-                                shadows_enabled: true,
+                                shadows_enabled: terrain.config.shadows,
                                 shadow_normal_bias: DirectionalLight::DEFAULT_SHADOW_NORMAL_BIAS
                                     + tan_i,
                                 ..default()
@@ -1202,6 +1397,11 @@ pub(crate) fn sync_terrain(
                 vertices: terrain.morph_totals[2],
                 bytes_drawn: terrain.bytes_drawn,
                 hud_rect_px: [0.0; 4],
+                frame_ms: diagnostics
+                    .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
+                    .and_then(bevy::diagnostic::Diagnostic::smoothed)
+                    .unwrap_or(0.0) as f32,
+                passes_ms: render_passes_ms(&diagnostics),
                 star,
                 biome: format!("{:?}", ground.biome),
                 world: format!("{:#x}", terrain.declared),

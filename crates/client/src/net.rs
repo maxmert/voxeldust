@@ -3155,6 +3155,8 @@ mod tests {
                     vertices: 0,
                     bytes_drawn: 0,
                     hud_rect_px: [0.0; 4],
+                    frame_ms: 0.0,
+                    passes_ms: Vec::new(),
                     star: None,
                     biome: "Desert".to_owned(),
                     world: "0x1".to_owned(),

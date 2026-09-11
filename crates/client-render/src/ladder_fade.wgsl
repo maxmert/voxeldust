@@ -42,6 +42,7 @@
 
 #import bevy_pbr::{
     mesh_functions,
+    mesh_view_bindings::view,
     forward_io::{VertexOutput, FragmentOutput},
     view_transformations::position_world_to_clip,
     pbr_fragment::pbr_input_from_standard_material,
@@ -54,6 +55,8 @@ struct LadderFade {
     bands: vec4<f32>,
     // The rung's sink in metres (x), step 5.
     sink: vec4<f32>,
+    // The rung's cell in metres (x): a splat's width (D8-8's measurement).
+    splat: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> fade: LadderFade;
@@ -72,6 +75,11 @@ struct FadeVertex {
     // THE RADIAL (step 5): the vertex's unit direction from the body's centre in the chunk's
     // frame.
     @location(9) radial: vec3<f32>,
+#ifdef SPLAT
+    // THE SPLAT CORNER (D8-8's measurement): which corner of the camera-facing square this copy
+    // of the vertex is.
+    @location(10) corner: vec2<f32>,
+#endif
 }
 
 // How whole the rung is at a distance: one below its fade-out band, zero past it.
@@ -109,8 +117,19 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     let coarser = own.xyz + radial * vertex.morph_m;
     let sink = radial * fade.sink.x;
     let morphed = mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d));
+#ifdef SPLAT
+    // THE SPLAT: the vertex as a camera-facing square one cell wide, spread in view space after
+    // the morph and the sink, so it faces the eye by construction.
+    let view_pos = view.view_from_world * vec4<f32>(morphed, 1.0);
+    // Two cells wide (MEASURED at one cell: 3 183 crack pixels between splats on the aloft
+    // stand — surface-nets vertices stand up to 1.7 cells apart on a diagonal).
+    let splat_pos = view_pos.xyz + vec3<f32>(vertex.corner * fade.splat.x, 0.0);
+    out.world_position = view.world_from_view * vec4<f32>(splat_pos, 1.0);
+    out.position = view.clip_from_view * vec4<f32>(splat_pos, 1.0);
+#else
     out.world_position = vec4<f32>(morphed, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
+#endif
 #ifdef OCT_NORMAL
     let local_normal = oct_decode(vertex.oct_normal);
 #else

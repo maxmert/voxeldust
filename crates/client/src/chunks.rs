@@ -117,6 +117,10 @@ pub struct ChunkGeometry {
     pub radials: Vec<[f32; 3]>,
     /// The extractor's triangles, unchanged.
     pub triangles: Vec<[u32; 3]>,
+    /// Where the skirt vertices begin: every vertex before this index stands on the surface (one
+    /// per surface cell, the extractor's own), every one from it hangs under an edge. The far-rung
+    /// splat (D8-8's measurement) draws the surface ones only.
+    pub skirt_start: u32,
     /// THE BOX that holds every vertex, its morph target and its sunk position — wherever the
     /// vertex stage can put a vertex, so the engine culls by it. Built by the worker (refutation
     /// P-8: on the main thread it cost two square roots a vertex in the harvest loop). Zero for an
@@ -128,7 +132,24 @@ pub struct ChunkGeometry {
 /// about 1e-7 rad — a third of a micrometre on a target three metres out at the finest rung.
 pub const RADIAL_STEP_RAD: f64 = 2.0e-7;
 
+/// The bytes a ground vertex costs the engine at the packed rungs (position 12, packed normal
+/// 4, morph 4, radial 12 — ruling V18's form); the exact rungs cost eight more.
+pub const UPLOAD_VERTEX_BYTES: u64 = 32;
+
 impl ChunkGeometry {
+    /// THE BYTES THIS CHUNK UPLOADS (ruling V15 item 2, the harvest's byte budget): its vertices
+    /// at the packed stride and its indices at 16 or 32 bits — the engine's own count within a
+    /// fifth (the exact rungs' wider normal), enough for a budget.
+    #[must_use]
+    pub fn upload_bytes(&self) -> u64 {
+        let index = if self.vertices.len() <= usize::from(u16::MAX) {
+            2
+        } else {
+            4
+        };
+        self.vertices.len() as u64 * UPLOAD_VERTEX_BYTES + self.triangles.len() as u64 * 3 * index
+    }
+
     /// The unit radial of vertex `i`: from the body's centre through the vertex, in `f64`.
     fn radial(&self, i: usize) -> DVec3 {
         let v = self.vertices[i];
@@ -1060,6 +1081,7 @@ pub fn geometry_with(
         triangles: mesh.triangles,
         radials,
         bounds: ([0.0; 3], [0.0; 3]),
+        skirt_start: 0,
     };
     let drop_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
     add_skirts(&mut geometry, drop_m);
@@ -1082,6 +1104,7 @@ pub const SKIRT_CELLS: u32 = 2;
 /// covered at every distance. The rounding is the engine's own floating origin at work; the skirt
 /// is the standard cure, two cells deep, under the surface everywhere but in the crack.
 fn add_skirts(g: &mut ChunkGeometry, drop_m: f64) {
+    g.skirt_start = g.vertices.len() as u32;
     // Boundary edges: each edge as an ordered pair (lower index first) with its use count, the
     // triangle's third corner, and the edge's own direction in that triangle.
     let mut uses: BTreeMap<(u32, u32), (u32, u32, bool)> = BTreeMap::new();
@@ -1459,9 +1482,27 @@ impl ChunkLane {
     /// Harvest up to `max` finished chunks. A chunk released while it was building is dropped
     /// here, never handed out.
     pub fn poll(&mut self, max: usize) -> Vec<ChunkReady> {
+        self.poll_within(max, u64::MAX)
+    }
+
+    /// THE HARVEST WITHIN A BYTE BUDGET (ruling V15 item 2): finished chunks one at a time until
+    /// `max` of them or until their upload bytes reach `budget_bytes` — a frame of small far
+    /// chunks takes more of them, a frame of large near ones fewer, so no frame hitches on a bad
+    /// mix. The first chunk always comes, whatever its size. The harvest counts as FULL when
+    /// either bound stopped it.
+    pub fn poll_within(&mut self, max: usize, budget_bytes: u64) -> Vec<ChunkReady> {
         let mut out = Vec::new();
-        self.workers.drain(&mut out, max);
-        self.counters.harvest_full += u64::from((max > 0) & (out.len() == max));
+        let mut bytes = 0u64;
+        while out.len() < max && bytes < budget_bytes {
+            let before = out.len();
+            self.workers.drain(&mut out, 1);
+            if out.len() == before {
+                break;
+            }
+            bytes += out[before].geometry.upload_bytes();
+        }
+        self.counters.harvest_full +=
+            u64::from((max > 0) & ((out.len() == max) | (bytes >= budget_bytes)));
         out.retain(|ready| self.pending.remove(&(ready.realm, ready.geometry.key)));
         for ready in &out {
             self.resident.insert((ready.realm, ready.geometry.key));
@@ -2567,6 +2608,82 @@ mod tests {
         a.cross(b).length().atan2(a.dot(b))
     }
 
+    /// The upload bytes: the packed stride times the vertices plus the indices at 16 bits for a
+    /// chunk under 65 536 vertices, and at 32 bits past it.
+    #[test]
+    fn the_upload_bytes_follow_the_stride_and_the_index_width() {
+        let body = home_planet();
+        let g = geometry_of(&body, surface_key(&body, 1, 150, 350)).expect("rung 1");
+        assert_eq!(
+            g.upload_bytes(),
+            g.vertices.len() as u64 * UPLOAD_VERTEX_BYTES + g.triangles.len() as u64 * 6
+        );
+        let mut wide = ChunkGeometry {
+            key: g.key,
+            origin_m: g.origin_m,
+            morph_m: Vec::new(),
+            morph_fallbacks: 0,
+            morph_seam: 0,
+            sink_m: 0.0,
+            vertices: vec![[0.0; 3]; 70_000],
+            normals: Vec::new(),
+            packed_normals: Vec::new(),
+            radials: Vec::new(),
+            triangles: vec![[0, 1, 2]],
+            bounds: ([0.0; 3], [0.0; 3]),
+            skirt_start: 0,
+        };
+        assert_eq!(wide.upload_bytes(), 70_000 * UPLOAD_VERTEX_BYTES + 12);
+        wide.vertices.truncate(3);
+        assert_eq!(wide.upload_bytes(), 3 * UPLOAD_VERTEX_BYTES + 6);
+    }
+
+    /// THE BYTE BUDGET (ruling V15 item 2): a budget under one chunk's bytes hands out exactly
+    /// one chunk and counts the harvest as full; a budget past every chunk's bytes hands out what
+    /// the count allows and counts full only at the count; an empty queue counts nothing.
+    #[test]
+    fn the_harvest_stops_within_its_byte_budget() {
+        let mut lane = lane();
+        let body = home_planet();
+        lane.state_surface(planet(), &surface(77), &look());
+        for x in 0..3 {
+            lane.request(planet(), surface_key(&body, 0, 302 + x, 700), 0);
+        }
+        let one = lane.poll_within(8, 1);
+        assert_eq!(one.len(), 1);
+        assert!(one[0].geometry.upload_bytes() > 1);
+        assert_eq!(lane.counters().harvest_full, 1);
+        let rest = lane.poll_within(8, u64::MAX);
+        assert_eq!(rest.len(), 2);
+        assert_eq!(lane.counters().harvest_full, 1);
+        assert!(lane.poll_within(8, 1).is_empty());
+        assert_eq!(lane.counters().harvest_full, 1);
+        // The count bound within a wide budget still counts full.
+        for x in 0..2 {
+            lane.request(planet(), surface_key(&body, 0, 310 + x, 700), 0);
+        }
+        assert_eq!(lane.poll_within(2, u64::MAX).len(), 2);
+        assert_eq!(lane.counters().harvest_full, 2);
+    }
+
+    /// The skirt start: every vertex before it is the surface's, every one from it a skirt copy of
+    /// a surface vertex (its radial and normal equal), and the split is not at either end.
+    #[test]
+    fn the_skirt_start_splits_the_surface_from_the_skirt() {
+        let body = home_planet();
+        let g = geometry_of(&body, surface_key(&body, 1, 150, 350)).expect("rung 1");
+        let start = g.skirt_start as usize;
+        assert!(start > 0);
+        assert!(start < g.vertices.len());
+        let mut copied = 0usize;
+        for i in start..g.vertices.len() {
+            let same =
+                (0..start).any(|j| g.normals[j] == g.normals[i] && g.radials[j] == g.radials[i]);
+            copied += usize::from(same);
+        }
+        assert_eq!(copied, g.vertices.len() - start);
+    }
+
     /// Every vertex a triangle uses has a unit normal. A zero one draws dark on the exact path
     /// (the shader's normalise of a zero) and LIT under the packed one (a zero folds to the
     /// square's centre, which unfolds to "up") — a whole-range change no tolerance allows. So
@@ -2722,6 +2839,7 @@ mod tests {
             radials: Vec::new(),
             triangles: Vec::new(),
             bounds: ([0.0; 3], [0.0; 3]),
+            skirt_start: 0,
         };
         assert_eq!(empty.measure_bounds(), ([0.0; 3], [0.0; 3]));
         assert!(empty.morph_targets().is_empty());

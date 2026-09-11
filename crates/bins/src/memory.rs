@@ -153,6 +153,44 @@ pub fn vmmap_rows(summary: &str) -> Vec<String> {
         .collect()
 }
 
+/// THE GPU'S BUSY SHARE (D8-8's ablation): the device's and the renderer's utilisation in
+/// percent, from the graphics driver's own statistics (`ioreg`, the accelerator's
+/// `PerformanceStatistics`); `None` where the platform offers none.
+#[must_use]
+pub fn gpu_busy() -> Option<(f64, f64)> {
+    let report = tool_output("ioreg", &["-r", "-d", "1", "-c", "AGXAccelerator"]);
+    let pick = |key: &str| -> Option<f64> {
+        let at = report.find(key)?;
+        let rest = &report[at + key.len()..];
+        let rest = rest.strip_prefix("\"=")?;
+        let end = rest.find(|c: char| !c.is_ascii_digit())?;
+        rest[..end].parse().ok()
+    };
+    Some((
+        pick("Device Utilization %")?,
+        pick("Renderer Utilization %")?,
+    ))
+}
+
+/// The GPU's busy share averaged over `samples` readings `gap` apart: what the GPU does while a
+/// stand holds still.
+#[must_use]
+pub fn gpu_busy_mean(samples: u32, gap: std::time::Duration) -> Option<(f64, f64)> {
+    let mut sum = (0.0, 0.0);
+    let mut n = 0.0;
+    for i in 0..samples {
+        if let Some((d, r)) = gpu_busy() {
+            sum.0 += d;
+            sum.1 += r;
+            n += 1.0;
+        }
+        if i + 1 < samples {
+            std::thread::sleep(gap);
+        }
+    }
+    (n > 0.0).then(|| (sum.0 / n, sum.1 / n))
+}
+
 /// The rows of a report worth printing: the footprint's largest categories after its header, or
 /// the heap summary's zone lines after ITS header.
 #[must_use]
@@ -332,6 +370,18 @@ Foot
         // A table with no first name line, and one whose `REGION TYPE` opens the text.
         assert_eq!(vmmap_rows("x\n\nREGION TYPE a\nrow\n\n").len(), 2);
         assert_eq!(vmmap_rows("REGION TYPE a\nrow").len(), 2);
+    }
+
+    /// The GPU's busy share reads on the platform that offers it, and averages.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_gpu_busy_share_reads() {
+        let (d, r) = gpu_busy().expect("the accelerator's statistics");
+        assert!(
+            (0.0..=100.0).contains(&d) && (0.0..=100.0).contains(&r),
+            "{d} {r}"
+        );
+        assert!(gpu_busy_mean(2, std::time::Duration::from_millis(10)).is_some());
     }
 
     #[test]

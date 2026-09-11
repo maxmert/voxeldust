@@ -7916,8 +7916,10 @@ rings; what is left is an interim with a named step:
    of the orbit stand moved three levels under any 16-bit normal, §18.2): ground 2 460 → 2 080
    MB, every stand within one level of the exact picture. The 16-bit position is NOT built
    (§18.3: 28 against 32 bytes, no frame rate on a still stand, a crease-flip risk, a per-mesh
-   scale) — the far-rung voxel renderer (D8-8) is the next lever. The harvest's byte budget is
-   still owed.
+   scale) — the far-rung voxel renderer (D8-8) is the next lever. → 2026-09-11: THE HARVEST'S
+   BYTE BUDGET is DONE (§20.1: 24 near chunks of 400 KB under a count cap of 48; the 528 m/s
+   leg's gap peak and frames with a gap down by a third, the queue down by a third; a budget at
+   the mean chunk's bytes bound below the old cap and made everything worse — MEASURED).
 
 14. **THE UPLOAD PATH'S POOL** (§17.6, MEASURED 2026-09-10): the client owns about 0.6 × the drawn
    bytes of unmapped memory (1 546 MB at the ground stand, in about two regions per chunk of the
@@ -7945,6 +7947,37 @@ rings; what is left is an interim with a named step:
    WGSL copy (one source via `rust-gpu`, a port under a byte gate, or no GPU generation). Every
    other shipped target (Vulkan `NoContraction`, DX12 `precise`) is UNMEASURED; naga emits neither.
    → nothing moves until the ruling; the spike example stays as the gate's seed.
+
+17. **THE FAR-RUNG VOXEL RENDERER'S PRODUCT FORM** (D8-8, the look MEASURED 2026-09-11, §19 of
+   the slice document): the look instrument in the tree draws a far chunk as four copies of every
+   surface vertex (`VD_TERRAIN_SPLATS`, a dev switch, never a gate's path) and weighs 1.5 to 3.8
+   times the mesh. The product form is vertex pulling — one record per surface vertex in a storage
+   buffer, the square spread by the vertex stage, no indices, no skirts — about a third of a mesh
+   chunk's bytes; then a rung's chunks merged into one buffer for the draw count. → after the
+   owner accepts the look from `pictures/look/`; the frame rate measured then, on a quiet machine
+   with Docker off (the look flights ran under a load of 104 and their rates are not quoted).
+   ★ MEASURED 2026-09-11 (§19.6, the ablation): the far rungs cost the near stands NOTHING
+   (rungs 6 and up hidden: no change; 3 and up: three frames a second), and the whole wall of a
+   near stand is THE SUN'S SHADOW — off, the ground stand goes 28.9 → 53.9 frames a second, the
+   frame runner's cap. The product form buys bytes, not frames; it waits.
+
+18. **THE SHADOW IS THE STILL STAND'S WALL** (§19.6, MEASURED 2026-09-11): four cascades over the
+   shadow's reach (rungs 0–2, about 2 600 chunks) run the full morphing vertex stage four more
+   times a frame — about 16 of the ground stand's 34 ms. ★ MEASURED in three more rounds
+   (§19.7–19.8): the casters' vertex work is the whole cost (no casters: the cap; no receivers:
+   no change; map size: no change); the cascade count and the reach recover a fifth each; the
+   cost grows with the rung because a low sun makes every cascade draw the far ring (rung 0 about
+   4 ms, rung 1 about 6, rung 2 about 11). Levers on the table: cast rungs 0–1 only (35.9 fps,
+   MEASURED), a lighter caster vertex stage (UNMEASURED), a coarser shadow ladder on a render
+   layer the sun alone sees (ESTIMATED 16× fewer far-ring caster vertices), the terrain horizon
+   map (no ground casters at all). → the owner's choice; the switches stay as instruments.
+
+19. **THE FINISHED CHUNKS WAIT IN MEMORY WHEN THE HARVEST LAGS** (MEASURED 2026-09-11 on the
+   528 m/s leg under a byte budget that bound below the old count cap): the workers outran the
+   harvest, the queue grew to 2 551 and the client's small allocations grew 2.2 GB over the
+   minute — a finished chunk waits with its whole geometry. The workers need a bound on the done
+   queue (pause when more than N finished chunks wait), sized from the harvest's own rate.
+   → slice 8 step 6, with the harvest budget's measurement.
 
 **WHEN.** Slice 8, steps 4–6. The slice is not done until this row is 🟩.
 

@@ -359,6 +359,8 @@ pub(crate) mod tests {
                 vertices: 2_000_000,
                 bytes_drawn: 90_000_000,
                 hud_rect_px: [10.0, 10.0, 900.0, 170.0],
+                frame_ms: 34.0,
+                passes_ms: vec![("main_opaque_pass_3d".to_owned(), 1.5, 20.0)],
                 star: Some(DevStarAngles {
                     elevation_deg: 15.0,
                     off_nose_deg: 120.0,
@@ -424,6 +426,8 @@ pub(crate) mod tests {
         assert!(json.contains("\"harvest_full\":12"));
         assert!(json.contains("\"bytes_drawn\":90000000"));
         assert!(json.contains("\"hud_rect_px\":[10.0,10.0,900.0,170.0]"));
+        assert!(json.contains("\"frame_ms\":34.0"));
+        assert!(json.contains("\"passes_ms\":[[\"main_opaque_pass_3d\",1.5,20.0]]"));
         assert!(json.contains("\"parent_waits\":40"));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
         // The three row-drop honesty counters ride the surface (audit :304 — a wrongly-armed
@@ -523,6 +527,13 @@ pub struct DevTerrainStamp {
     /// two runs of one code (its tick readout), so a picture compare leaves it out. Zero when no
     /// HUD drew.
     pub hud_rect_px: [f32; 4],
+    /// THE FRAME'S ANATOMY (D8-8's product form, MEASURED before it is built): the frame's time
+    /// in milliseconds, smoothed by the engine's own frame-time diagnostic.
+    pub frame_ms: f32,
+    /// Each render pass's time this frame, smoothed: (the pass, its CPU milliseconds encoding
+    /// it, its GPU milliseconds running it — zero where the GPU offers no timestamps). What a
+    /// frame is made of: the prepass, the shadows, the main pass, the copy out.
+    pub passes_ms: Vec<(String, f32, f32)>,
     /// The star the ground is lit by, or `None` when a work light stands in (no luminous row).
     pub star: Option<DevStarAngles>,
     /// The biome under the eye, as the recipe names it.

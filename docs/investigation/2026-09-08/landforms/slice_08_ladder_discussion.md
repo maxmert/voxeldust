@@ -190,7 +190,7 @@ The packing is a client-side choice; the extractor's vertices are `i16` already.
 | D8-5 | The pop detector's legs | (A) a hull at 1.4, 240 and 528 m/s; (B) only the two fast legs, the walk waits for the character | **(A)** | The 1.4 m/s regime is the one the player sees most; the suit ruling lets a hull fly it |
 | D8-6 | The globe beyond the band | (A) the rung above the coarsest drawn, from the crate; (B) keep the proxy outline | **(A)** | A realm draws itself (SL3) from its own recipe; the outline was a placeholder |
 | D8-7 | The stamp's fields (8p) | the list in §2 | **the list** | Each field is measured, never typed; the owner asked for orienters |
-| D8-8 | **The far-rung renderer** (owner, 2026-09-09: Enshrouded draws its far levels as CUBES, not triangles) | (A) every rung is a surface-nets MESH, as today; (B) the near rungs are meshes and the far rungs are the ladder's own VOXELS drawn as cubes or splats, one cell per pixel or more; (C) decided by a measurement in the look phase | **(C), and this slice keeps the seam OPEN for it:** the client library hands the engine a chunk's CELLS beside its mesh (it holds both today), the tier rule and the crossfade are written per column and not per triangle, and the dither works on either. Nothing in slice 8 chooses a triangle. | The far rungs ARE voxel grids already (rung L is the recipe at 2^L m cells, edits folded in); a cell drawn at one pixel is the same picture as a triangle, so the mesh's extraction (60 % of a chunk's cost) and its 254–405 KB are the price of a smoothness no far pixel shows. The choice is a LOOK decision (V13 addendum: after the freeze), and the foundation must not close it |
+| D8-8 | **The far-rung renderer** (owner, 2026-09-09: Enshrouded draws its far levels as CUBES, not triangles) | (A) every rung is a surface-nets MESH, as today; (B) the near rungs are meshes and the far rungs are the ladder's own VOXELS drawn as cubes or splats, one cell per pixel or more; (C) decided by a measurement in the look phase | **(C), and this slice keeps the seam OPEN for it:** the client library hands the engine a chunk's CELLS beside its mesh (it holds both today), the tier rule and the crossfade are written per column and not per triangle, and the dither works on either. Nothing in slice 8 chooses a triangle. | The far rungs ARE voxel grids already (rung L is the recipe at 2^L m cells, edits folded in); a cell drawn at one pixel is the same picture as a triangle, so the mesh's extraction (60 % of a chunk's cost) and its 254–405 KB are the price of a smoothness no far pixel shows. The choice is a LOOK decision (V13 addendum: after the freeze), and the foundation must not close it → **MEASURED 2026-09-11 (§19):** two-cell splats of the ladder's own vertices shade within ONE level of the mesh over the whole far ground and differ only on a one-pixel silhouette; zero cracks at two cells (3 183 at one). The look instrument is in the tree; the product form (vertex pulling, then per-rung merging, DEFERRED item 17) waits on the owner's look acceptance |
 
 ### 9.1 What the far view must keep open (owner, 2026-09-09)
 
@@ -1049,4 +1049,235 @@ the 16-bit radial's own failure, 19 levels), and its machinery is a per-mesh sca
 transform, which bends the radial's rotation-only path. Against that, the far-rung voxel renderer
 (D8-8) moves the bytes AND the draw count. RECOMMENDED: the position stays exact; the packing ends
 with the normal; the next measurement is D8-8's.
+
+## 19. THE FAR-RUNG VOXEL RENDERER — the LOOK, MEASURED (D8-8, 2026-09-11)
+
+### 19.1 The fact the tier rule sets
+
+The tier rule draws every cell at one to two pixels: rung `r` serves the distances where its cell
+is between one and two pixels high, and rung 0 alone grows past that near the eye (34 pixels at
+17 m). So on every stand every drawn cell above rung 0 is one or two pixels on the screen, and a
+mesh's smoothness inside a cell is a smoothness no pixel shows. At the ground stand 86 % of the
+chunks are rungs 1 and up; at the aloft and orbit stands, all of them.
+
+### 19.2 The instrument
+
+A LOOK switch, `VD_TERRAIN_SPLATS=<rung>`: from that rung up a chunk is drawn as one
+camera-facing square per surface vertex — the extractor's own vertex (surface nets place one per
+surface cell), with its normal, its morph metre and its radial, so the crossfade and the light
+are the mesh's own — instead of the extracted triangles. The picture gate in report-only mode
+(`VD_PICTURE_REPORT_ONLY=1`) captures on a three-times coarser tick grid (the splat form fills
+slower, §19.4), withholds the tolerance's verdict, keeps its pictures beside the run and leaves the
+owner's untouched; an exact flight on the same grid is the reference, and an offline compare
+(`look_compare.py`) counts the content pixels by their channel step.
+
+**The quad form is a look instrument, not a product form:** four copies of every vertex, so a
+splat chunk weighs 1.5 to 3.8 times its mesh. The product form (§19.5) is a different build.
+
+### 19.3 MEASURED: the look
+
+Two-cell splats from rung 3 up (every chunk of the far stands, 61 % of the near stands'), against
+the exact look on the same tick:
+
+| Stand | Content pixels | Differ | At one level | Over five levels | Where |
+|---|---|---|---|---|---|
+| ground | 637 061 | 6 478 (1.0 %) | 2 276 | 2 014 | the skyline band, one pixel high |
+| hill | 723 903 | 52 643 (7.3 %) | 29 725 | 2 921 | the skyline and the far slopes' shade |
+| aloft | 588 206 | 279 054 (47 %) | 260 031 (44 %) | 2 852 | the whole ground at ONE level; the limb over five |
+| orbit | 467 582 | 171 217 (37 %) | 147 836 (32 %) | 1 834 | the same |
+
+Read: a splat's normal is flat across its square where the mesh's is interpolated, so the far
+ground shades ONE level differently over broad waves (the aloft difference image is white waves
+over the whole ground: `pictures/look/aloft_diff_white_1_level_red_over_5.png`). Every difference
+past five levels sits on a SILHOUETTE: the skyline seen from the ground, the planet's limb seen
+from high — a square's edge against the sky is not a curve's. To the eye the two looks are the
+same picture (`pictures/look/*_mesh_above_splats_below.png`).
+
+**The crack, and its cure.** At ONE cell wide the aloft stand showed 3 183 pixels of sky through
+the ground between splats (the hole census): surface-nets vertices stand up to 1.7 cells apart on
+a diagonal. At TWO cells wide, zero holes on all four stands. Two cells is the width.
+
+### 19.4 MEASURED: what this form costs, and what was not measured
+
+GPU bytes at the ground stand 2 080 → 4 023 MB (four copies of every rung-3-and-up vertex), at
+the aloft stand 732 → 2 769 MB, at the orbit stand 339 → 1 279 MB; the fill of the ground stand
+10 → 45 s. The frame rates of these flights are NOT quoted: Docker restarted during them (its
+machine held 9.6 GB, the swap 10.6 GB, the load average reached 104), the exact look itself read
+14 frames a second at the ground against 29 before, and the near stands missed their capture tick
+twice. The rate of the product form is measured when it exists, on a quiet machine.
+
+### 19.5 What the measurement decides, and what it leaves to the owner
+
+1. **The look is the same.** A far cell drawn as a two-cell splat with the vertex's own normal
+   shades within one level of the mesh over the whole ground and differs only on a one-pixel
+   silhouette. The far-rung voxel renderer is a LOOK the owner can accept from these pictures.
+2. **The product form is vertex pulling, not quads:** one record per surface vertex (position
+   12 bytes, packed normal 4, morph 4, radial 12 — or less) in a storage buffer, the square
+   spread by the vertex stage from the vertex index; no index buffer, no skirts, no triangles.
+   Bytes: about a third of a mesh chunk's. The draw count falls only when a rung's chunks merge
+   into one buffer, which is the second step. Both are engineering with a measured look behind
+   them, not a look decision.
+3. **The silhouette.** A splat skyline is a row of squares; at two cells wide it reads as the
+   mesh's within a pixel. A softer edge (a round splat, a per-splat depth) is a look refinement
+   the owner may ask for after seeing the product form.
+4. **The near rungs stay meshes.** Rung 0 cells are up to 34 pixels wide; a splat there is a
+   visible square. The rung the splats begin at is the owner's look choice, from 1 up; the
+   measurement above shows rung 3 and up.
+
+**Example.** A pilot at 60 km sees 3 529 chunks, every cell one or two pixels. Today that is
+3 529 meshes of 15 million triangles and 732 MB. As splats it is 15 million squares from one
+record each, about 250 MB, and the same picture within one brightness level.
+
+### 19.6 THE STILL STAND'S WALL, NAMED BY ABLATION (2026-09-11) — it is the shadow, not the draw count
+
+Before the product form was built, the frame was taken apart: the engine's frame-time diagnostic
+and its render diagnostics on the stamp (CPU milliseconds per render pass; the GPU side records
+nothing on Metal, which offers no timestamps inside passes), the GPU's busy share from the
+driver's own statistics (`vd_bins::memory::gpu_busy`, ten readings while the stand holds still),
+and two dev switches: the sun's shadows off (`VD_TERRAIN_SHADOWS=0`) and the chunks from a rung
+up spawned hidden (`VD_TERRAIN_HIDE_RUNG`). A census-only flight (`VD_PICTURE_CENSUS_ONLY=1`)
+prints the numbers and judges no picture. Docker was on (its load steady in this hour); every
+flight is relative to the baseline of the same hour.
+
+| Flight | Ground frames/s (ms) | Ground GPU busy | Hill frames/s (ms) | Aloft | Orbit |
+|---|---|---|---|---|---|
+| baseline | 28.9 (34.1) | 86 % | 26.9 (37.3) | 48.8, 37 % | 52.9, 31 % |
+| shadows OFF | **53.9 (18.2)** | 72 % | **51.9 (18.6)** | 53.0 | 52.9 |
+| rungs 6 and up hidden | 29.0 (34.6) | 88 % | 27.9 (36.2) | 52.4 | 52.4 |
+| rungs 3 and up hidden | 31.9 (30.7) | 82 % | 31.4 (32.9) | 52.9 | 52.9 |
+| rungs 1 and up hidden | **52.9 (17.3)** | 66 % | **54.0 (18.2)** | 51.9 | 51.9 |
+
+Read, in order of weight:
+
+1. **The near stands are GPU-bound** (86 % busy with the client's CPU at 36 %; the render graph's
+   encoding costs 0.2 ms), and **the shadow is the whole wall**: with the sun's shadows off both
+   near stands sit at the frame runner's cap (about 53 frames a second at 18 ms — the headless
+   runner ticks at 60 Hz). The encoding of the four cascade passes costs nothing; their GPU work
+   costs 16 ms: every caster in the shadow's reach (rungs 0 to 2, about 2 600 chunks, 7 000
+   vertices each) runs the full morphing vertex stage FOUR times a frame — about 73 million vertex
+   runs for the shadow against about 10 million for the picture.
+2. **The far rungs cost the near stands nothing.** Rungs 6 and up hidden: no change. Rungs 3 and
+   up hidden: three frames a second. So the far-rung voxel renderer (§19.2–19.5) would not move
+   the still stand's frame rate; its gain is bytes (a fifth to a third) and the far stands, which
+   already sit at the cap.
+3. **Rungs 1 and 2 are the shadow's casters.** Hiding them (1 649 chunks with cells of 2 to 4 m)
+   reaches the cap exactly as shadows-off does, because the shadow's reach ends at rung 2's switch
+   distance: they are the casters the four cascades draw.
+4. **The far stands are capped, not bound**: 22 to 40 % busy at the runner's 60 Hz.
+5. **The GPU has a 30 % baseline from other applications** (the browser, Docker's machine,
+   Spotlight) in these readings; the client's own share on a near stand is about 55 %.
+
+**Example.** A pilot standing on the ground sees 6 659 chunks. The picture costs the GPU 18 ms.
+The sun's four shadow maps cost it another 16 ms, drawing the nearest 2 600 chunks four more
+times each, and the frame is 34 ms. Take the shadow's cost away and the frame is the runner's
+cap; take the whole far view away and it is 34 ms still.
+
+**What this decides.** The far-rung renderer's product form is not the frame-rate lever the plan
+took it for (§18.3 and the D8-8 row said "moves the draw count"; MEASURED: it does not). The
+lever is the shadow: its cascade count, its reach, its casters' vertex path and its map size —
+each a measurement of the same kind, none built yet. The owner decides the order.
+
+### 19.7 THE SHADOW'S COST, TAKEN APART (2026-09-11, rounds two and three)
+
+Round two flew the engine's own knobs (Docker's machine on, steady; every flight against its own
+baseline of the hour): the cascade count, the reach, the map size.
+
+| Flight | Ground frames/s | Hill frames/s |
+|---|---|---|
+| baseline | 28.9 | 27.5 |
+| two cascades (four today) | 32.9 | 28.9 |
+| the reach at rung 1 (rung 2 today) | 34.0 | 30.9 |
+| both | 36.0 | 32.9 |
+| maps of 1 024 pixels (2 048 today) | 28.0 | 27.9 |
+| two cascades and 1 024 | 33.5 | 28.5 |
+
+None reaches the cap that shadows-off reaches (54). Round three split the shadow into its halves
+on the quiet machine (Docker off, load 10): the casters (chunks drawn INTO the maps) and the
+receivers (pixels that READ the maps).
+
+| Flight | Ground | Hill |
+|---|---|---|
+| baseline, quiet | 26.0 | 25.4 |
+| no casters (every chunk `NotShadowCaster`: the maps stay empty) | **55.0** | **45.4** |
+| no receivers (every chunk `NotShadowReceiver`: the maps are drawn, never read) | 27.9 | 26.9 |
+| shadows off | 54.9 | 49.9 |
+
+**Read.** Drawing the casters into the maps is the whole cost; reading the maps costs two frames a
+second. The map's size costs nothing: the fill of the maps is not it. The cascade count and the
+reach each recover a fifth of it: the cost follows the casters' VERTEX work, and every cascade's
+light-space frustum at a sun 15° over the horizon stretches across most of the reach, so halving
+the cascades does not halve the casters drawn, and shortening the reach removes only the outer
+ring. About 2 600 chunks of 7 000 vertices run the ground's full morphing vertex stage into each
+cascade: the vertex throughput, not the pixels.
+
+**Example.** A pilot on the ground at a low sun. The sun's maps are empty in one flight and the
+frame runs at the cap; they are full and unread in the next and the frame is 26 frames a second.
+The pixels never asked the maps; the vertices filled them.
+
+**The levers that remain, each a measurement:** which rungs cast (round four: only rung 0; rungs
+0 and 1), a lighter caster vertex stage (the morph and the sink left out beyond the first
+cascade), and the terrain horizon map, which draws no caster at all for the ground's own shadow.
+
+### 19.8 THE CASTERS BY RUNG (round four, quiet machine, 2026-09-11)
+
+| Casters | Ground frames/s (ms) | Hill frames/s (ms) |
+|---|---|---|
+| none | 55.0 (18.2, the cap) | 45.4 |
+| rung 0 only (949 chunks, 1 m cells) | 45.9 (21.8) | 40.9 |
+| rungs 0 and 1 (+818 chunks, 2 m) | 35.9 (27.9) | 33.4 |
+| rungs 0 to 2, today (+831 chunks, 4 m) | 28.9 (34.6) | 26.9 |
+
+The cost per rung GROWS with the rung: rung 0 costs about 4 ms, rung 1 about 6, rung 2 about 11
+(the ground stand; the baselines of rounds three and four, 26.0 and 28.9, bound the noise at
+three frames a second). The reason is the sun's height: at 15° over the horizon a hill 3 km out
+shadows the ground at the eye's feet, so every cascade's light-space frustum — the near 55 m one
+included — must draw the far ring toward the sun, and the far ring is drawn four times. This is
+what a cascaded shadow map costs at a low sun on open ground, in every engine.
+
+**The levers, with what each is MEASURED or ESTIMATED to give at the ground stand:**
+
+| Lever | Frames/s | What it costs the look | Kind |
+|---|---|---|---|
+| cast rungs 0 and 1 only | 35.9 MEASURED | hills past 1.7 km throw no shadow | one number |
+| two cascades at rung 1 | 36.0 MEASURED | a coarser near shadow, and the same loss past 1.7 km | two numbers |
+| a lighter caster vertex stage (no morph past the first cascade) | UNMEASURED | none the eye sees at a map's texel | one shader define |
+| a coarser shadow ladder: the far rings cast with meshes two rungs coarser, on a render layer the sun sees and the camera does not | ESTIMATED 16× fewer caster vertices for the far ring | none at the map's 1.7 m texel | a second wanted set |
+| the terrain horizon map: no caster for the ground's own shadow | ESTIMATED the cap, plus one small cascade for movers | a shadow with no fixed reach at all | a slice of its own |
+
+## 20. The harvest's byte budget and the boardings (2026-09-11)
+
+### 20.1 The byte budget (ruling V15 item 2), MEASURED on the 528 m/s leg
+
+The harvest now stops at a byte budget or at a count, whichever comes first (`poll_within`; the
+first chunk always comes). The count cap rose from 24 to 48 and the budget stands at 24 near
+chunks of 400 KB, so a frame of near chunks uploads what it uploaded before and a frame of far
+ones (200 KB) uploads up to 48.
+
+| Setting | Harvested/s | Harvest full, frames | Gap peak (chunks) | Frames with a gap | Queue |
+|---|---|---|---|---|---|
+| count 24 (before) | 355–358 | 736 of 1 852 | 1 026–1 181 | 597–673 | 1 700–1 967 |
+| bytes 24 × 305 KB, count 48 | 300 | 1 184 of 1 846 | 1 616 | 1 025 | 2 551 |
+| bytes 24 × 400 KB, count 48 | **367** | 646 of 1 927 | **693** | **460** | **1 323** |
+
+**Read.** A budget at the mean near chunk's bytes bound BELOW the old cap (a near chunk with its
+skirts weighs about 316 KB), throttled the harvest to 300 a second and let 2 551 finished chunks
+wait — 2.2 GB of small allocations in a minute, because a finished chunk waits with its whole
+geometry (DEFERRED item 19: the done queue needs a bound). A budget above the cap's worth, with
+the count cap doubled, gave the best 528 m/s leg yet: the harvest at 367 a second, the gap's peak
+and the frames with a gap down by a third, the queue down by a third. The 240 m/s leg and the
+walk unchanged (zero frames with a gap).
+
+**Example.** At 528 m/s over the hill stand the ring ahead is mostly rung 3 to 6 chunks of 200
+to 250 KB. Under the count cap of 24 a frame uploaded 24 of them and left the rest; under the
+byte budget the same frame uploads 38 to 48, and the queue drains faster than it fills.
+
+### 20.2 The boardings, MEASURED (DEFERRED item 15)
+
+A diagnosis flight boards `VD_BOARDINGS` times before the legs, each pilot fresh, each on its own
+hull (the shipyard stand-in's `--seq`), the berths 200 m apart along the path. The first form
+put five pilots on ONE hull: the third never crossed within five minutes — the two boarded
+pilots' bodies stood at the berth, and players collide. With one hull per boarding, five of five
+boarded and settled in two to six seconds each, the settle course printing a normal refill after
+the origin swap (the lead at zero, the altitude sane). The race stands at one failure in ten
+boardings today, still unseen with the course in the log.
 

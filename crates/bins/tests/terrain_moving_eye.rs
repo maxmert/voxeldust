@@ -91,6 +91,13 @@ const SPEED_INTERVAL: Duration = Duration::from_millis(2_000);
 const BERTH_STANDOFF_M: f64 = 40.0;
 const LOGIN_DEADLINE: Duration = Duration::from_secs(120);
 const BOARDING_DEADLINE: Duration = Duration::from_secs(300);
+/// THE BOARDINGS (DEFERRED item 15, the boarding that never settled — one run in five): the
+/// gate boards once; a diagnosis flight sets `VD_BOARDINGS=<n>` and boards `n` times with `n`
+/// fresh pilots before the legs, each settle printing its course, so the race recurs with its
+/// course in the log.
+const BOARDINGS_ENV: &str = "VD_BOARDINGS";
+/// How far apart a diagnosis flight's berths stand along the flight path, in metres.
+const BERTH_SPACING_M: f64 = 200.0;
 const TERRAIN_WAIT_TICKS: u64 = 3_600;
 /// The hull's own push, ten gravities (the shipyard's own default), whole micro-metres per second
 /// per second: stated here so the legs' push times are derived, never guessed.
@@ -619,16 +626,20 @@ fn spawn_entry(account: u64, planet_seed: u64, st: &Stand) -> String {
     )
 }
 
-/// The shipyard stand-in's default mint, restated so the gate knows the hull's name.
-fn minted_hull() -> RealmId {
-    RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, 1, 0))
+/// The shipyard stand-in's mint for the hull with serial `seq`, restated so the gate knows the
+/// hull's name.
+fn minted_hull(seq: u64) -> RealmId {
+    RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, seq, 0))
 }
 
-/// Write the hull into THE PLANET'S file and its own: a berth inside the planet's realm, stated
-/// in the planet's frame, where the planet's shard reads it when it boots.
-fn plant_hull(f: &Fixture, planet: RealmId, berth_m: DVec3) -> RealmId {
+/// Write a hull into THE PLANET'S file and its own: a berth inside the planet's realm, stated
+/// in the planet's frame, where the planet's shard reads it when it boots. Serial `seq` names
+/// it (a diagnosis flight plants one hull per boarding: a boarded hull keeps its pilot's body,
+/// and a third pilot found the berth blocked — MEASURED 2026-09-11, the crossing never
+/// committed; players collide).
+fn plant_hull(f: &Fixture, planet: RealmId, berth_m: DVec3, seq: u64) -> RealmId {
     let parent_store = realm_store_path(&f.base, planet);
-    let ship_store = realm_store_path(&f.base, minted_hull());
+    let ship_store = realm_store_path(&f.base, minted_hull(seq));
     let out = Command::new(env!("CARGO_BIN_EXE_vd-build-ship"))
         .args([
             "--parent-store",
@@ -637,6 +648,8 @@ fn plant_hull(f: &Fixture, planet: RealmId, berth_m: DVec3) -> RealmId {
             &ship_store,
             "--owner",
             "1001",
+            "--seq",
+            &seq.to_string(),
             "--max-push-micro-mps2",
             &HULL_PUSH_MICRO_MPS2.to_string(),
             "--berth-x-m",
@@ -654,7 +667,7 @@ fn plant_hull(f: &Fixture, planet: RealmId, berth_m: DVec3) -> RealmId {
         String::from_utf8_lossy(&out.stderr)
     );
     let printed = String::from_utf8_lossy(&out.stdout);
-    let hull = minted_hull();
+    let hull = minted_hull(seq);
     assert!(
         printed.contains(&hull.to_string()),
         "the tool names the hull it built ({hull}); it printed {printed:?}",
@@ -779,16 +792,41 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         highest - h
     );
     let pilot = stand(d, hull_m, h, level);
+    let boardings: u64 = std::env::var(BOARDINGS_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    // One pilot's stand and one berth per boarding, spaced along the path so no boarded hull's
+    // body stands in a later pilot's way.
+    let mut pilots: Vec<Stand> = Vec::new();
+    let mut berths: Vec<DVec3> = Vec::new();
+    for b in 0..boardings {
+        let db = (d * h + level * (BERTH_SPACING_M * b as f64)).normalize();
+        let hb = vd_terrain::height::height_m(
+            &body,
+            [Gf::from_f64(db.x), Gf::from_f64(db.y), Gf::from_f64(db.z)],
+            0,
+        )
+        .to_f64();
+        let pb = stand(db, hull_m + (h - hb).max(0.0), hb, level);
+        berths.push(pb.offset_m + level * BERTH_STANDOFF_M);
+        pilots.push(pb);
+    }
     // THE BERTH: the hull's centre `BERTH_STANDOFF_M` ahead of the pilot's stand, level with it,
     // in the planet's frame. The hull's own nose is the planet frame's `−Z`: at this stand that
     // is within a degree of level (the stand lies on the equator's plane), so a push flies the
     // hull along the ground, rising slowly as the ground curves away.
     let berth = pilot.offset_m + level * BERTH_STANDOFF_M;
-    let spawn_poses = [
-        spawn_entry(CLIENT_ACCOUNT_BASE, body.seed(), &walker),
-        spawn_entry(CLIENT_ACCOUNT_BASE + 1, body.seed(), &pilot),
-    ]
-    .join(";");
+    let mut spawn_list = vec![spawn_entry(CLIENT_ACCOUNT_BASE, body.seed(), &walker)];
+    for (b, pb) in pilots.iter().enumerate() {
+        spawn_list.push(spawn_entry(
+            CLIENT_ACCOUNT_BASE + 1 + b as u64,
+            body.seed(),
+            pb,
+        ));
+    }
+    let spawn_poses = spawn_list.join(";");
     eprintln!(
         "terrain_moving_eye: {planet:?}, surface {h:.1} m, the walker at {:?}, the pilot at {:?}, \
          the hull berthed at {berth:?} (nose −Z, {:.2}° off level)",
@@ -798,7 +836,11 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     );
 
     let f = fixture();
-    let hull = plant_hull(&f, planet, berth);
+    let hulls: Vec<RealmId> = berths
+        .iter()
+        .enumerate()
+        .map(|(b, bm)| plant_hull(&f, planet, *bm, 1 + b as u64))
+        .collect();
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
     let _reaper = ForkedReaper(f.launch_path.clone());
@@ -841,44 +883,62 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         read
     };
 
-    // ---- LEGS 2 AND 3: THE HULL.
+    // ---- LEGS 2 AND 3: THE HULL. (A diagnosis flight boards `boardings` times with fresh
+    // pilots and flies the legs on the last.)
     let (fast, fastest) = {
-        let client_quic = reserve_udp_addr();
-        let devctl = reserve_tcp_addr().port();
-        let mut client = ChildGuard(spawn_capture_client(
-            &f,
-            a.gateway,
-            "hull",
-            1,
-            client_quic.port(),
-            devctl,
-        ));
-        await_listener(devctl, &mut client.0);
-        let landed = await_active(devctl);
-        assert_eq!(
-            landed.location.as_deref(),
-            Some(label_of(planet).as_str()),
-            "the pilot lands on the planet: {landed:?}"
-        );
-        await_settled(devctl, "hull, before boarding");
-        // BOARD: walk into the hull's wake; its shard spawns by the ordinary demand and the
-        // crossing commits when it runs. The aim is the berth in the planet's frame, which the
-        // pilot stands in until the crossing.
-        vd_bins::flight::cross_leg(
-            devctl,
-            "into the hull",
-            move |_tick| berth,
-            &label_of(hull),
-            BOARDING_DEADLINE,
-        );
-        let aboard = poll(devctl);
-        assert_eq!(
-            aboard.location.as_deref(),
-            Some(label_of(hull).as_str()),
-            "the pilot is aboard: {aboard:?}"
-        );
-        // From inside the hull the planet's ground is drawn: the ladder lands whole.
-        await_settled(devctl, "hull, aboard");
+        let mut boarded: Option<(ChildGuard, u16)> = None;
+        for b in 0..boardings {
+            let client_quic = reserve_udp_addr();
+            let devctl = reserve_tcp_addr().port();
+            let mut client = ChildGuard(spawn_capture_client(
+                &f,
+                a.gateway,
+                "hull",
+                1 + b,
+                client_quic.port(),
+                devctl,
+            ));
+            await_listener(devctl, &mut client.0);
+            let landed = await_active(devctl);
+            assert_eq!(
+                landed.location.as_deref(),
+                Some(label_of(planet).as_str()),
+                "the pilot lands on the planet: {landed:?}"
+            );
+            let tag = format!("hull {}, before boarding", b + 1);
+            await_settled(devctl, &tag);
+            // BOARD: walk into the hull's wake; its shard spawns by the ordinary demand and the
+            // crossing commits when it runs. The aim is the berth in the planet's frame, which
+            // the pilot stands in until the crossing.
+            let berth_b = berths[b as usize];
+            let hull_b = hulls[b as usize];
+            vd_bins::flight::cross_leg(
+                devctl,
+                "into the hull",
+                move |_tick| berth_b,
+                &label_of(hull_b),
+                BOARDING_DEADLINE,
+            );
+            let aboard = poll(devctl);
+            assert_eq!(
+                aboard.location.as_deref(),
+                Some(label_of(hull_b).as_str()),
+                "the pilot is aboard: {aboard:?}"
+            );
+            // From inside the hull the planet's ground is drawn: the ladder lands whole.
+            let tag = format!("hull {}, aboard", b + 1);
+            await_settled(devctl, &tag);
+            eprintln!(
+                "terrain_moving_eye: boarding {} of {boardings} settled",
+                b + 1
+            );
+            if let Some((prev, prev_devctl)) = boarded.take() {
+                let _ = round_trip(prev_devctl, &DevRequest::Close);
+                drop(prev);
+            }
+            boarded = Some((client, devctl));
+        }
+        let (client, devctl) = boarded.expect("at least one boarding");
         let mut reads = Vec::new();
         for (i, target) in HULL_LEG_MPS.iter().enumerate() {
             let leg = format!("hull {target} m/s");

@@ -42,7 +42,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use vd_bins::memory::{
-    MemoryRead, footprint_report, heap_summary, report_rows, resident_mb, vmmap_rows, vmmap_summary,
+    MemoryRead, footprint_report, gpu_busy_mean, heap_summary, report_rows, resident_mb,
+    vmmap_rows, vmmap_summary,
 };
 use vd_bins::{
     Cluster, ClusterAddrs, ClusterShape, DEV, DevClusterParams, common_env, dev_auth_pubkey_hex,
@@ -149,6 +150,21 @@ const PICTURE_DIR: &str = "docs/investigation/2026-09-07/pictures";
 /// Set in the environment, the gate refuses a picture that differs from the one on disk by one
 /// pixel (ruling V16: a packing changes bytes, never the picture).
 const PICTURE_IDENTICAL_ENV: &str = "VD_PICTURE_IDENTICAL";
+/// A LOOK MEASUREMENT (D8-8): with this set the compare reports and keeps its pictures but
+/// withholds the tolerance's verdict, and the owner's pictures are left untouched. Never set by
+/// a gate.
+const PICTURE_REPORT_ONLY_ENV: &str = "VD_PICTURE_REPORT_ONLY";
+/// A look measurement's capture grid, in multiples of the gate's.
+const LOOK_TICK_FACTOR: u64 = 3;
+/// AN ABLATION FLIGHT (D8-8): with this set the census prints and the stand ends — no picture
+/// judgement, no compare, the owner's pictures untouched. Never set by a gate.
+const PICTURE_CENSUS_ONLY_ENV: &str = "VD_PICTURE_CENSUS_ONLY";
+/// The GPU's busy share: readings and their spacing.
+const GPU_SAMPLES: u32 = 10;
+const GPU_SAMPLE_GAP_MS: u64 = 200;
+/// How many ticks before the capture tick the test asks for the capture (under the client's own
+/// bound on a deferred capture, 600 ticks).
+const CAPTURE_ASK_AHEAD_TICKS: u64 = 200;
 /// THE TOLERANCE (ruling V18): no content pixel may change by more than this many brightness
 /// levels, in any channel, against the EXACT picture. A packing that flips a crease pixel to
 /// the other slope (19 levels, the 16-bit radial) is refused; one that shades it a level darker
@@ -511,7 +527,12 @@ fn take_picture(
         (frames_at(devctl) - frames_before) as f64 / frame_window.elapsed().as_secs_f64();
     // The account was born facing where the picture wants: capture, at the grid's next tick.
     let settled_tick = vd_bins::pixel::poll(devctl).universe_tick.unwrap_or(0);
-    let capture_tick = CAPTURE_TICK_GRID * (pic.agent_index + 1);
+    // A look measurement captures on a coarser grid (MEASURED: the splat's quad form, four copies
+    // of every vertex, settles the ground stand at tick 1 734 to 2 847 against 710 for the mesh),
+    // and its reference is an exact flight on the SAME coarser grid, never the gate's pictures.
+    let look = std::env::var_os(PICTURE_REPORT_ONLY_ENV).is_some();
+    let capture_tick =
+        CAPTURE_TICK_GRID * (pic.agent_index + 1) * if look { LOOK_TICK_FACTOR } else { 1 };
     eprintln!(
         "terrain_pictures/{name}: settled at tick {settled_tick}; the capture waits for tick \
          {capture_tick}"
@@ -521,6 +542,14 @@ fn take_picture(
         "{name}: the terrain settled at tick {settled_tick}, past this stand's capture tick \
          {capture_tick}: the picture would not be the same moment as the last flight's"
     );
+    // The client holds a deferred capture for a bounded count of ticks; the test waits here for
+    // the grid's tick to come near before it asks (a look measurement's coarse grid sits past
+    // that bound).
+    while vd_bins::pixel::poll(devctl).universe_tick.unwrap_or(0) + CAPTURE_ASK_AHEAD_TICKS
+        < capture_tick
+    {
+        std::thread::sleep(Duration::from_millis(250));
+    }
     let shot = round_trip(
         devctl,
         &DevRequest::Screenshot {
@@ -575,6 +604,35 @@ fn take_picture(
             0.0
         }
     );
+    // THE FRAME'S ANATOMY (D8-8): the frame's time and every render pass's CPU and GPU time,
+    // smoothed, so the wall of a still stand is named before anything is built against it.
+    eprintln!(
+        "terrain_pictures/{name}: FRAME ANATOMY — {:.1} ms a frame; passes (cpu ms / gpu ms): {}",
+        stamp.frame_ms,
+        stamp
+            .passes_ms
+            .iter()
+            .map(|(p, c, g)| format!("{p} {c:.2}/{g:.2}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    // THE GPU'S BUSY SHARE while the stand holds still (D8-8's ablation): ten readings over two
+    // seconds of the driver's own statistics.
+    if let Some((device, renderer)) =
+        gpu_busy_mean(GPU_SAMPLES, Duration::from_millis(GPU_SAMPLE_GAP_MS))
+    {
+        eprintln!(
+            "terrain_pictures/{name}: GPU BUSY — device {device:.0} %, renderer {renderer:.0} % \
+             over {GPU_SAMPLES} readings"
+        );
+    }
+    if std::env::var_os(PICTURE_CENSUS_ONLY_ENV).is_some() {
+        eprintln!(
+            "terrain_pictures/{name}: CENSUS ONLY — the picture's judgements and the compare are \
+             skipped (an ablation flight)"
+        );
+        return (last, 0.0);
+    }
     // WHERE THE FOOTPRINT GOES: the tool's largest categories (the GPU's buffers on unified
     // memory, the allocator's large blocks, the compressed pages), for the memory report.
     for row in report_rows(&footprint_report, FOOTPRINT_HEADER_ROWS, FOOTPRINT_ROWS) {
@@ -1093,11 +1151,20 @@ fn take_picture(
                     diff_path.display()
                 );
             }
-            assert!(
-                widest <= TOLERANCE_LEVELS,
-                "{name}: THE PICTURE CHANGED PAST THE TOLERANCE — {differing} pixels differ, the \
-                 widest channel step {widest} against the allowed {TOLERANCE_LEVELS} (ruling V18)"
-            );
+            if std::env::var_os(PICTURE_REPORT_ONLY_ENV).is_some() {
+                eprintln!(
+                    "terrain_pictures/{name}: LOOK MEASUREMENT — the tolerance's verdict is \
+                     withheld ({differing} pixels differ, the widest step {widest} against the \
+                     allowed {TOLERANCE_LEVELS}); the pictures are kept, the owner's untouched"
+                );
+            } else {
+                assert!(
+                    widest <= TOLERANCE_LEVELS,
+                    "{name}: THE PICTURE CHANGED PAST THE TOLERANCE — {differing} pixels differ, \
+                     the widest channel step {widest} against the allowed {TOLERANCE_LEVELS} \
+                     (ruling V18)"
+                );
+            }
             if std::env::var_os(PICTURE_IDENTICAL_ENV).is_some() {
                 assert_eq!(
                     differing, 0,
@@ -1108,7 +1175,20 @@ fn take_picture(
         }
     }
     // The previous picture and probe stay beside the run for a later look, the new ones go to
-    // the owner's directory.
+    // the owner's directory — unless this is a look measurement, whose pictures stay beside the
+    // run only.
+    if std::env::var_os(PICTURE_REPORT_ONLY_ENV).is_some() {
+        let kept_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/terrain_pictures");
+        std::fs::create_dir_all(&kept_dir).expect("the kept pictures' directory");
+        std::fs::copy(&png, kept_dir.join(format!("{name}.look.png"))).expect("keep the look");
+        std::fs::copy(&probe_png, kept_dir.join(format!("{name}.look.probe.png")))
+            .expect("keep the look's probe");
+        eprintln!(
+            "terrain_pictures/{name}: the look is kept under {}",
+            kept_dir.display()
+        );
+        return (last, share);
+    }
     std::fs::copy(&png, &dest).expect("copy the picture");
     std::fs::write(
         &dest_hud,

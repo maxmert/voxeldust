@@ -13,6 +13,19 @@
 //! logic lives in `vd-client-harness` (Tier-A); this crate is the glue, proven by the
 //! human-in-the-loop window + (T6) `G-RENDER-SMOKE`, not by `llvm-cov`.
 
+/// The render plugin with GPU timestamps required (D8-8's frame anatomy): the render
+/// diagnostics record a pass's GPU time only with the timestamp features, which Metal on Apple
+/// silicon offers; without them only the CPU side of a pass is known.
+fn timestamped_render_plugin() -> bevy::render::RenderPlugin {
+    let mut settings = bevy::render::settings::WgpuSettings::default();
+    settings.features |=
+        wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    bevy::render::RenderPlugin {
+        render_creation: settings.into(),
+        ..Default::default()
+    }
+}
+
 /// THE GPU SPIKE's handle on the graphics library (ruling V17 item 3): the bins' spike builds a
 /// bare compute device with feature flags Bevy's app does not request.
 pub use wgpu;
@@ -442,6 +455,13 @@ const OCT_NORMAL_SHADER_LOCATION: u32 = 1;
 /// The shader define under which a ground shader reads the packed normal instead of the
 /// engine's; set by the mesh's own layout, so one shader serves both forms.
 const OCT_NORMAL_SHADER_DEF: &str = "OCT_NORMAL";
+/// THE SPLAT CORNER (D8-8's measurement): a far-rung chunk drawn as one camera-facing square per
+/// surface vertex, one cell wide; the corner names which of the square's four corners this
+/// vertex copy is, in view space — shader location 10, and the `SPLAT` define with it.
+pub(crate) const ATTRIBUTE_SPLAT_CORNER: MeshVertexAttribute =
+    MeshVertexAttribute::new("LadderSplatCorner", 0x5741_0016, VertexFormat::Float32x2);
+const SPLAT_SHADER_LOCATION: u32 = 10;
+const SPLAT_SHADER_DEF: &str = "SPLAT";
 
 /// THE GROUND'S VERTEX LAYOUT, for the fade material and the probe alike: the position, the
 /// normal in whichever form the mesh carries (the packed one when the mesh has it, else the
@@ -461,12 +481,17 @@ fn ground_vertex_layout(
     } else {
         Mesh::ATTRIBUTE_NORMAL.at_shader_location(OCT_NORMAL_SHADER_LOCATION)
     };
-    descriptor.vertex.buffers = vec![layout.0.get_layout(&[
+    let mut attributes = vec![
         Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
         normal,
         ATTRIBUTE_MORPH.at_shader_location(MORPH_SHADER_LOCATION),
         ATTRIBUTE_RADIAL.at_shader_location(RADIAL_SHADER_LOCATION),
-    ])?];
+    ];
+    if layout.0.contains(ATTRIBUTE_SPLAT_CORNER) {
+        descriptor.vertex.shader_defs.push(SPLAT_SHADER_DEF.into());
+        attributes.push(ATTRIBUTE_SPLAT_CORNER.at_shader_location(SPLAT_SHADER_LOCATION));
+    }
+    descriptor.vertex.buffers = vec![layout.0.get_layout(&attributes)?];
     Ok(())
 }
 const ATTRIBUTE_STAR_COLOR: MeshVertexAttribute =
@@ -725,13 +750,23 @@ pub(crate) struct LadderFade {
     /// times this. One number per rung, never rewritten.
     #[uniform(100)]
     sink: Vec4,
+    /// THE RUNG'S CELL in metres (x): a splat's width (D8-8's measurement); read under the
+    /// `SPLAT` define only.
+    #[uniform(100)]
+    splat: Vec4,
 }
 
 impl LadderFade {
-    pub(crate) fn new(bands: ([f64; 2], [f64; 2]), sink_end_m: f64, sink_m: f64) -> LadderFade {
+    pub(crate) fn new(
+        bands: ([f64; 2], [f64; 2]),
+        sink_end_m: f64,
+        sink_m: f64,
+        cell_m: f64,
+    ) -> LadderFade {
         LadderFade {
             bands: fade_uniform(bands, sink_end_m),
             sink: Vec4::new(sink_m as f32, 0.0, 0.0, 0.0),
+            splat: Vec4::new(cell_m as f32, 0.0, 0.0, 0.0),
         }
     }
 }
@@ -890,22 +925,26 @@ fn run_windowed(handles: RenderHandles) {
         .init_resource::<RealmBoxEntities>()
         .init_resource::<DrawnSky>() // S11: which sky is on screen, and around which system
         .init_resource::<RenderEye>()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Voxeldust — dev client".into(),
-                resolution: (WINDOW_W, WINDOW_H).into(),
-                ..default()
-            }),
-            // First-person: start the pointer LOCKED + hidden so mouse-look gets unbounded
-            // delta and never sticks at the window edge (the AAA FPS baseline). Esc releases
-            // it (click away / close); a click re-grabs — see `cursor_grab`.
-            primary_cursor_options: Some(CursorOptions {
-                grab_mode: CursorGrabMode::Locked,
-                visible: false,
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(timestamped_render_plugin())
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Voxeldust — dev client".into(),
+                        resolution: (WINDOW_W, WINDOW_H).into(),
+                        ..default()
+                    }),
+                    // First-person: start the pointer LOCKED + hidden so mouse-look gets unbounded
+                    // delta and never sticks at the window edge (the AAA FPS baseline). Esc releases
+                    // it (click away / close); a click re-grabs — see `cursor_grab`.
+                    primary_cursor_options: Some(CursorOptions {
+                        grab_mode: CursorGrabMode::Locked,
+                        visible: false,
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
         // egui (multipass primary context — the default; auto-creates the window's
         // PrimaryEguiContext + its EguiPrimaryContextPass schedule).
         .add_plugins(EguiPlugin::default())
@@ -914,6 +953,10 @@ fn run_windowed(handles: RenderHandles) {
         // with "resource does not exist", which is a runtime failure no compile can catch. Measured:
         // the capture client exited 101 before its listener came up.
         .add_plugins((
+            // THE FRAME'S ANATOMY (D8-8): the engine's frame-time diagnostic and its render
+            // diagnostics (CPU and GPU time per render pass), read onto the terrain stamp.
+            bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
+            bevy::render::diagnostic::RenderDiagnosticsPlugin,
             StarSkyShaderPlugin,
             MaterialPlugin::<StarSkyMaterial>::default(),
             // The ground's crossfade material (slice 8 step 3).
@@ -2495,6 +2538,7 @@ fn run_capture(handles: RenderHandles) {
         .init_resource::<RenderEye>()
         .add_plugins(
             DefaultPlugins
+                .set(timestamped_render_plugin())
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
@@ -2509,6 +2553,10 @@ fn run_capture(handles: RenderHandles) {
         // with "resource does not exist", which is a runtime failure no compile can catch. Measured:
         // the capture client exited 101 before its listener came up.
         .add_plugins((
+            // THE FRAME'S ANATOMY (D8-8): the engine's frame-time diagnostic and its render
+            // diagnostics (CPU and GPU time per render pass), read onto the terrain stamp.
+            bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
+            bevy::render::diagnostic::RenderDiagnosticsPlugin,
             StarSkyShaderPlugin,
             MaterialPlugin::<StarSkyMaterial>::default(),
             // The ground's crossfade material (slice 8 step 3).
