@@ -7965,6 +7965,32 @@ rings; what is left is an interim with a named step:
    sagas: 19 starts for 10 boardings — nine first attempts refused, one accepted at once — so the
    refused first attempt is the rule, not the race; it costs ten seconds a boarding and stays 🟥
    as its own item (the scan's shape against the hand-off's).
+   ★ THE PENDING FLUSH, BUILT 2026-09-12 (§24.3): the scan decides on the LED point and the source's
+   re-validation found the pilot still on its way, refused, shipped nothing, and the saga ran to its
+   ten-second freeze deadline. A flush refused as stale is now KEPT and tried every tick until it
+   holds, the crossing leaves flight or the saga's ttl lapses (`PendingFlushes`,
+   `retry_pending_flushes`; three counters; two rig tests). No new data crosses (SL6). → the storm's
+   number on the fix (saga starts against boardings, 19 for 10 before).
+   ★ THE TRACED STORM (§24.3): the kept flush ships on the retry (0.56 s after it was kept) — but
+   the saga was already dead (its patience for the flush is the abort deadline, 0.48 s). A trial
+   that waited the request ttl was flown and REVERTED: still two attempts a boarding, and it bends
+   the ttl-outlasts-the-saga invariant. THE SHAPE: on entering the freeze the saga cuts the pilot's
+   input at the gateway, so a pilot found outside at the decision cannot walk in until the abort's
+   thaw; the flush then finds the pilot inside and attempt 1 commits. The led point is the exterior
+   lane's alone; the occupant's decision is on its own swept pose — and still the flush found the
+   pilot 4 m outside seven ticks later. Two hypotheses, one measurement apart: (a) the dev-control
+   walk at 27 m/s passes through the 12 m shell before the freeze lands (a test-rig artefact a
+   player at 1.4 m/s never meets); (b) the scan and the flush measure against different centres or
+   books. → one log line at each instant (position, centre, radius, signed distance) and the storm
+   at the foot speed. The kept flush stays (bounded, tested, right when the entry becomes true).
+   ★ MEASURED (the refusal line's own numbers, §24.3): the book's placement of the hull is IDENTICAL
+   at the scan and at the flush — (b) is dead; the pilot's OWN pose moved 16 m in seven ticks
+   (2.3 m a tick, the full dev stick braked over 40 m, overshooting through the delivered pose's
+   lag) — (a) at the true speed. The product is right (a player at 0.028 m a tick is inside at the
+   flush); the rig walked wrong. FIX: `WalkTo.speed_share` (0 = the full stick), `cross_leg_at`,
+   the moving eye boards at the walk leg's measured foot share. ★ THE STORM ON THE FIX: ten
+   boardings, TEN saga starts, zero refused flushes (nineteen before). Item 15 is CLOSED as a rig
+   artefact; the crossing machinery is unchanged by it.
 
 16. **THE GPU SPIKE, MEASURED (ruling V17 item 3, 2026-09-10, `slice_08_gpu_spike.md`)**: the
    integer hash on Metal agrees with the CPU on 3 936 256 corners (0 differ); a 32-bit shadow of
@@ -8040,7 +8066,19 @@ rings; what is left is an interim with a named step:
    The 528 m/s leg: small allocations +2 424 MB → +14 MB, resident +2 641 MB → +3 MB, the queue's
    peak 2 027 → 1 044, the worst gap 1 216 → 313 urgent chunks (one flight; the wall's variance is
    wide), the same 23 000 chunks harvested.
-
+   ★ THE WALL MEASURED, ONE CHANGE AT A TIME (§24.4, 2026-09-12): the 528 m/s leg at fourteen
+   workers — the harvest cap doubled (96 chunks, 21.6 MB a frame; `VD_TERRAIN_HARVEST_PER_FRAME`,
+   `VD_TERRAIN_HARVEST_BYTES`) cuts the gap frames 397 → 48, the worst gap 268 → 15 urgent
+   chunks, the queue's peak 845 → 173, for one frame a second; ten workers (`VD_TERRAIN_WORKERS`)
+   give six frames a second back and the gap stays (368). The cap IS the wall; the residue is the
+   late ask (a 60 m lead at 528 m/s). ⚠ THE PAIR TOGETHER (ten workers + the cap doubled) kept the
+   gap (380 frames, the cap filled on one frame): three flights at 368–397 gap frames against ONE
+   at 48 — then the twin landed at 103 (cap 96 at fourteen: 48, 103; cap 48 at fourteen: 397,
+   388; cap 96 at TEN: 380). READING (two samples): at fourteen workers the doubled cap cuts the
+   gap frames four to eight times; at ten it changes nothing (the queue, not the harvest, holds
+   the chunks there). Frames: 29–31/s at fourteen, 37–39/s at ten. THE DEFAULTS (cap, count) are
+   the OWNER's choice between a whole band and frames on the owner's own machine; the ask's
+   timing (a lead in time) is the lever that could give both, next to build.
 20. **THE CROSSFADE MORPHS POSITIONS, NOT NORMALS** (MEASURED by the pop detector, 2026-09-11,
    §22.2): at 240 m/s two per cent of the pixels crossing the rung 1→2 and 2→3 boundaries step by
    up to 37 levels in one frame (566 of 25 600 on the last flight, 450 and 367 on the two before),

@@ -19,6 +19,7 @@ use crate::authority::{Authority, AuthorityCmd};
 use crate::io::{Durability, MsgClass};
 use crate::runtime::{ClockSample, OutboundBox};
 use crate::stub::StepOutcome;
+use bevy_ecs::prelude::{Res, ResMut, Resource};
 use std::collections::BTreeMap;
 use vd_core::kinematics::{self};
 use vd_core::placement::PlacementLedger;
@@ -648,44 +649,49 @@ fn foreign_takeover_target(dot: &Dot, entity: EntityId) -> bool {
 /// total paths, all covered: a non-Entity subject → no-op; the subject not held here → counted
 /// no-op (a stale/misrouted flush); held → ship. Monomorphic (the finder + ship are hoisted out of
 /// the decode arm — HR5 branchless shim).
+/// THE PENDING FLUSHES (D-TERRAIN-5 item 15, 2026-09-12): a flush the re-validation refused as
+/// STALE — the subject not yet out of this realm, or not yet into the destination, because the
+/// scan decided on the LED point, the saga's own ttl ahead — is kept here, keyed by its transfer,
+/// with the tick it was first asked, and tried again every tick ([`retry_pending_flushes`]) until
+/// it holds, the saga's ttl lapses, or the crossing is no longer in flight (an abort, a commit).
+/// MEASURED before it: a walking pilot's boarding took two saga attempts and ten seconds on nine
+/// boardings of ten — the refused flush shipped nothing and the saga ran to its abort deadline.
+/// Nothing new crosses a realm boundary (SL6): the retry ships the same `SourceFlushed`, later.
+#[derive(Resource, Debug, Default)]
+pub struct PendingFlushes(pub BTreeMap<TransferId, (FlushSource, TickId)>);
+
+/// What one attempt to ship an occupant's flush came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlushAttempt {
+    /// `SourceFlushed` went out.
+    Shipped,
+    /// The re-validation refused a STALE departure or entry: worth trying again.
+    Stale,
+    /// A fault, or no subject to ship: never worth trying again.
+    Never,
+}
+
+/// One attempt to ship the held subject's pose for `flush` (the occupant's path of
+/// [`on_flush_source`], shared with the retry). Monomorphic; every arm is a test's.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn on_flush_source(
-    flush: FlushSource,
+fn ship_occupant_flush(
+    flush: &FlushSource,
     config: &StubConfig,
     regions: &RealmRegions,
     placements: &PlacementLedger,
     tick: UniverseTick,
     dots: &Dots,
-    driven: &mut crate::stub::drive::DrivenChildren,
-    exterior: &crate::stub::realm_head::ExteriorAuthority,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
-) {
-    // The ruler switch, slice 2: a `Ship` subject is a driven child's EXTERIOR, flushed by its parent.
-    if let DirectoryKey::Ship(entity) = flush.subject {
-        crate::stub::exterior::flush_exterior(
-            flush.transfer,
-            flush.step_id,
-            entity,
-            flush.to_realm,
-            config,
-            regions,
-            placements,
-            tick,
-            driven,
-            exterior,
-            stats,
-            outbox,
-        );
-        return;
-    }
+) -> FlushAttempt {
     let Some(entity) = flush.subject.transfer_subject_entity() else {
-        return; // a non-Entity subject is not a per-entity pose flush
+        return FlushAttempt::Never; // a non-Entity subject is not a per-entity pose flush
     };
     let Some(dot) = dots.0.values().find(|d| flush_target(d, entity)) else {
         tracing::warn!(%entity, "FlushSource for an entity this shard does not hold — no pose to ship");
-        return;
+        return FlushAttempt::Never;
     };
+    let stale_before = stats.flush_stale_exit + stats.flush_stale_entry;
     let Some(pose) = flush_pose_for_dest(
         dot.pose,
         flush.to_realm,
@@ -696,10 +702,14 @@ pub(crate) fn on_flush_source(
         stats,
         true,
     ) else {
-        // A REAL fault, already counted + logged inside the helper. Ship NO `SourceFlushed`: the saga
-        // then times out and aborts, and the source keeps authority — the entity stays somewhere real
-        // rather than being handed over with a position nobody can vouch for.
-        return;
+        // Counted + logged inside the helper. Ship NO `SourceFlushed`: a STALE refusal is kept and
+        // tried again ([`PendingFlushes`]); a real fault lets the saga time out and abort, and the
+        // source keeps authority — the entity stays somewhere real rather than being handed over
+        // with a position nobody can vouch for.
+        let stale_now = stats.flush_stale_exit + stats.flush_stale_entry;
+        // A lookup, not a branch (HR5): a refusal that moved a stale counter is worth a retry.
+        const REFUSED: [FlushAttempt; 2] = [FlushAttempt::Never, FlushAttempt::Stale];
+        return REFUSED[usize::from(stale_now > stale_before)];
     };
     // THE B-1 MEASUREMENT (placement arc S0→S2): the instant the shipped pose SPEAKS AT against this
     // shard's clock at the flush. Before the fix the pose shipped at its frozen latch stamp and this
@@ -721,6 +731,129 @@ pub(crate) fn on_flush_source(
             state: vec![],
         }),
     );
+    FlushAttempt::Shipped
+}
+
+/// THE RETRY, every tick (D-TERRAIN-5 item 15): each kept flush is tried again while its crossing
+/// is still in flight and the saga's ttl has not lapsed; a shipped one leaves the table, a dropped
+/// one is counted. Runs after the stranded-crossing re-drive, so a latch the re-drive cleared this
+/// tick drops its flush this tick.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn retry_pending_flushes(
+    config: Res<StubConfig>,
+    clock: Res<ClockSample>,
+    regions: Res<RealmRegions>,
+    placements: Res<crate::stub::placement::Placements>,
+    dots: Res<Dots>,
+    in_flight: Res<RequestInFlight>,
+    mut pending: ResMut<PendingFlushes>,
+    mut stats: ResMut<StubStats>,
+    mut outbox: ResMut<OutboundBox>,
+) {
+    if pending.0.is_empty() {
+        return;
+    }
+    let now = clock.local_tick;
+    let ttl = u64::from(config.request_ttl_ticks);
+    let due: Vec<(TransferId, FlushSource, TickId)> = pending
+        .0
+        .iter()
+        .map(|(transfer, (flush, since))| (*transfer, *flush, *since))
+        .collect();
+    for (transfer, flush, since) in due {
+        // Kept this tick: the world is the one that refused it; the retry starts next tick.
+        if since == now {
+            continue;
+        }
+        let alive = flush
+            .subject
+            .transfer_subject_entity()
+            .is_some_and(|entity| in_flight.0.get(&entity) == Some(&transfer));
+        // A disarmed ttl (`0`, the unit rig) keeps nothing: the retry lives inside the saga's own
+        // patience, and a shard with no ttl has no such patience to lean on.
+        let lapsed = (ttl == 0) | (now.0.saturating_sub(since.0) >= ttl);
+        // Tried while the crossing is in flight and the ttl holds; a fault met on the retry (the
+        // subject gone, the destination unplaceable) drops it like a lapse — one drop, one counter.
+        let attempt = if alive & !lapsed {
+            ship_occupant_flush(
+                &flush,
+                &config,
+                &regions,
+                &placements.0,
+                clock.universe_tick,
+                &dots,
+                &mut stats,
+                &mut outbox,
+            )
+        } else {
+            FlushAttempt::Never
+        };
+        if attempt == FlushAttempt::Stale {
+            continue; // still not true: kept for the next tick
+        }
+        pending.0.remove(&transfer);
+        let shipped = attempt == FlushAttempt::Shipped;
+        stats.flush_retry_shipped += u64::from(shipped);
+        stats.flush_retry_dropped += u64::from(!shipped);
+        tracing::info!(
+            ?transfer,
+            shipped,
+            alive,
+            lapsed,
+            waited_ticks = now.0.saturating_sub(since.0),
+            "FLUSH RETRY ENDED: shipped, or dropped (the crossing left flight, the ttl lapsed, or a fault)"
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn on_flush_source(
+    flush: FlushSource,
+    config: &StubConfig,
+    regions: &RealmRegions,
+    placements: &PlacementLedger,
+    tick: UniverseTick,
+    local_tick: TickId,
+    dots: &Dots,
+    driven: &mut crate::stub::drive::DrivenChildren,
+    exterior: &crate::stub::realm_head::ExteriorAuthority,
+    pending: &mut PendingFlushes,
+    stats: &mut StubStats,
+    outbox: &mut OutboundBox,
+) {
+    // The ruler switch, slice 2: a `Ship` subject is a driven child's EXTERIOR, flushed by its parent.
+    if let DirectoryKey::Ship(entity) = flush.subject {
+        crate::stub::exterior::flush_exterior(
+            flush.transfer,
+            flush.step_id,
+            entity,
+            flush.to_realm,
+            config,
+            regions,
+            placements,
+            tick,
+            driven,
+            exterior,
+            stats,
+            outbox,
+        );
+        return;
+    }
+    // The occupant's flush: shipped now, kept for the retry when the refusal was a STALE one, or
+    // left to the saga's timeout when it was a fault.
+    if ship_occupant_flush(
+        &flush, config, regions, placements, tick, dots, stats, outbox,
+    ) == FlushAttempt::Stale
+    {
+        pending.0.insert(flush.transfer, (flush, local_tick));
+        stats.flush_kept += 1;
+        tracing::info!(
+            transfer = ?flush.transfer,
+            to = ?flush.to_realm,
+            local_tick = local_tick.0,
+            "FLUSH KEPT: the entry or the departure is not yet true — tried again every tick"
+        );
+    }
 }
 
 /// Whether a dot is the local held holder of `entity` whose pose the source flushes. Monomorphic

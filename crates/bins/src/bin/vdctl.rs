@@ -232,6 +232,7 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
                 arrive_epsilon,
                 max_ticks,
                 max_step_m: 0.0,
+                speed_share: 0.0,
             })
         }
         "look_at" => {
@@ -371,6 +372,7 @@ mod tests {
                 arrive_epsilon: DEFAULT_ARRIVE_EPSILON,
                 max_ticks: DEFAULT_WALK_TICKS,
                 max_step_m: 0.0,
+                speed_share: 0.0,
             }
         );
     }

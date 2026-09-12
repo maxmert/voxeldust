@@ -12,14 +12,15 @@ use super::{
     AoiMembership, AppliedSteps, ChildLiveness, ChildLuma, ChildRealmNodes, CoHostedAuthority,
     ContainmentProgress, CrossingProgress, Dots, EntityMint, FrameCounter, GatewayMsgCtx,
     GhostColliderRegistration, HandoffHolds, HoldRole, InBandVerdict, InputLog, InterestEmitLatch,
-    InterestHeld, OpenWindows, OwnedTransients, ParentRealmNode, PendingCrossings,
+    InterestHeld, OpenWindows, OwnedTransients, ParentRealmNode, PendingCrossings, PendingFlushes,
     PendingInputSlots, Placements, RealmAuthority, RealmConfirmedAt, RealmRegions, RelayHeld,
     RelayShip, RequestInFlight, StubConfig, StubStats, WasOccupied, announce_presence,
     author_placements, emit_frames, emit_realm_frames, emit_transient_batch, emit_window_rosters,
     evaluate_realm_aoi, evaluate_realm_boundaries, feed_source_ghosts, is_retained_ghost,
     on_directory_reply, on_gateway_msg, on_ghost_flow, placement_window_ticks, prune_holds,
     push_entity_removed, readvance_dots, readvance_transients, redrive_pending_adoptions,
-    redrive_stranded_crossings, request_pending_grants, retain_child_live, self_fence_lapsed_realm,
+    redrive_stranded_crossings, request_pending_grants, retain_child_live, retry_pending_flushes,
+    self_fence_lapsed_realm,
 };
 use crate::io::{Inbound, MsgClass};
 use crate::runtime::{ClockSample, InboundBox, NodeIdentity, OutboundBox};
@@ -103,6 +104,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(CrossingProgress::default());
     world.insert_resource(ContainmentProgress::default());
     world.insert_resource(RequestInFlight::default());
+    world.insert_resource(PendingFlushes::default());
     world.insert_resource(HandoffHolds::default());
     world.insert_resource(crate::stub::containment::ExteriorScan::default());
     world.insert_resource(crate::stub::exterior::RealmStore::default());
@@ -233,6 +235,13 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
             .chain()
             .after(emit_realm_frames)
             .run_if(has_synced),
+    );
+    // THE PENDING FLUSHES' RETRY (D-TERRAIN-5 item 15): after the stranded-crossing re-drive (a
+    // latch it cleared drops its flush this tick) and before the frames go out.
+    schedule.add_systems(
+        retry_pending_flushes
+            .after(redrive_stranded_crossings)
+            .before(emit_frames),
     );
 }
 
@@ -386,6 +395,7 @@ fn process_inbound(
         ResMut<RequestInFlight>,
         ResMut<CrossingProgress>,
         ResMut<HandoffHolds>,
+        ResMut<PendingFlushes>,
     ),
     mut outbox: ResMut<OutboundBox>,
     // Bundled tuple `SystemParam` (bevy's 16-param, LAST slot) — see [`VuAoiInbound`].
@@ -424,7 +434,7 @@ fn process_inbound(
         }
         _ => false,
     };
-    let (mut in_flight, mut progress, mut holds) = crossing;
+    let (mut in_flight, mut progress, mut holds, mut pending_flushes) = crossing;
     let (mut pending, mut pending_slots, mut open_windows) = pending;
     let (mut authority, mut confirmed, mut cohosted) = realm_auth;
     // UNGATED, and first: an expired hold must be reclaimed even on a shard that has lost its lease and
@@ -506,6 +516,7 @@ fn process_inbound(
                 &mut owned_transients,
                 &mut in_flight,
                 &mut progress,
+                &mut pending_flushes,
                 &mut stats,
                 &mut outbox,
                 &mut parent_node,

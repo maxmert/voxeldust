@@ -79,6 +79,11 @@ const HARVEST_PER_FRAME: usize = 48;
 /// the same chunks a frame (refutation: an unchanged budget would have cut the harvest by 11 %).
 const HARVEST_BYTES_PER_FRAME: u64 = (24 * 450) << 10;
 const HARVEST_BYTES_ENV: &str = "VD_TERRAIN_HARVEST_BYTES";
+/// The harvest's count cap as a setting (`VD_TERRAIN_HARVEST_PER_FRAME=<n>`), for the wall's
+/// measurement: MEASURED on the 528 m/s leg at fourteen workers, the harvest filled its cap on 593
+/// of 1 841 frames while the workers idled half the time — the cap, not the builders, held the
+/// finished chunks back (the bounded done queue then parked the workers behind it).
+const HARVEST_PER_FRAME_ENV: &str = "VD_TERRAIN_HARVEST_PER_FRAME";
 /// THE DONE QUEUE'S BOUND, in frames of the harvest cap (D-TERRAIN-5 item 19): a finished chunk
 /// waits in memory with its whole geometry until the harvest takes it, so the workers may run
 /// ahead of the harvest by this many frames' worth and no further — a worker that finishes a
@@ -176,6 +181,8 @@ pub struct TerrainConfig {
     /// `VD_TERRAIN_SHADOW_COARSE_STEP`, `VD_TERRAIN_SHADOW_COARSE_FROM`.
     pub shadow_coarse_step: u8,
     pub shadow_coarse_from_rung: u8,
+    /// The chunk workers' thread count; `0` = the machine's own parallelism.
+    pub workers: usize,
 }
 const SHADOW_COARSE_STEP_ENV: &str = "VD_TERRAIN_SHADOW_COARSE_STEP";
 const SHADOW_COARSE_FROM_ENV: &str = "VD_TERRAIN_SHADOW_COARSE_FROM";
@@ -194,6 +201,10 @@ const SHADOW_COARSE_FROM_RUNG: u8 = 0;
 fn shadow_priority(rung: u8) -> u32 {
     (2u32 << 30) | (u32::from(63 - rung.min(63)) << 24) | 0x00FF_FFFF
 }
+/// THE WORKER COUNT (`VD_TERRAIN_WORKERS=<n>`; `0` or unset = the machine's own parallelism): the
+/// threads that build chunks. A setting, so the throughput wall (§16.3) can be flown with the worker
+/// count as the only change.
+const WORKERS_ENV: &str = "VD_TERRAIN_WORKERS";
 const SHADOW_CAST_RUNG_ENV: &str = "VD_TERRAIN_SHADOW_CAST_RUNG";
 const SHADOW_CAST_ENV: &str = "VD_TERRAIN_SHADOW_CAST";
 const SHADOW_RECEIVE_ENV: &str = "VD_TERRAIN_SHADOW_RECEIVE";
@@ -239,7 +250,7 @@ impl TerrainConfig {
         TerrainConfig {
             flat,
             parent_cache_bytes: PARENT_CACHE_BYTES,
-            harvest_per_frame: HARVEST_PER_FRAME,
+            harvest_per_frame: env_or(HARVEST_PER_FRAME_ENV, HARVEST_PER_FRAME),
             harvest_bytes_per_frame: env_or(HARVEST_BYTES_ENV, HARVEST_BYTES_PER_FRAME),
             exact_normal_rung: EXACT_NORMAL_RUNG,
             splat_rung: std::env::var(SPLAT_ENV)
@@ -259,6 +270,7 @@ impl TerrainConfig {
                 .and_then(|v| v.parse::<u8>().ok()),
             shadow_coarse_step: env_or(SHADOW_COARSE_STEP_ENV, SHADOW_COARSE_STEP),
             shadow_coarse_from_rung: env_or(SHADOW_COARSE_FROM_ENV, SHADOW_COARSE_FROM_RUNG),
+            workers: env_or(WORKERS_ENV, 0),
         }
     }
 }
@@ -637,7 +649,12 @@ impl Terrain {
     /// workers: every client draws the ladder of every body in its window (slice 8 step 2 — no flag).
     #[must_use]
     pub fn new(config: TerrainConfig, declared: u64) -> Terrain {
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let threads = if config.workers > 0 {
+            config.workers
+        } else {
+            std::thread::available_parallelism().map_or(4, |n| n.get())
+        };
+        tracing::info!(threads, "terrain workers");
         // The done queue holds `DONE_QUEUE_FRAMES` frames of the harvest cap (item 19).
         let workers: Box<dyn ChunkWorkers> = Box::new(ThreadedWorkers::start(
             threads,
@@ -760,6 +777,12 @@ impl Terrain {
         body: &vd_terrain::BodyDefinition,
     ) -> Handle<GroundMaterial> {
         let bound_m = self.caster_sink_m(body, rung);
+        // THE CASTER'S CROSSFADE (2026-09-12): the caster's bands are the DRAWN rung's — the rung it
+        // casts for, `coarse_step` below — so its sink scales with that rung's wholeness in the
+        // shadow pass and reaches zero where the finer chunk has morphed onto this surface. MEASURED
+        // before it (the pop detector): the caster left unsunk in one frame at the handover, a step
+        // of about 50 levels along the shadow's edge.
+        let drawn_rung = rung.saturating_sub(self.config.shadow_coarse_step);
         self.shadow_materials
             .entry((realm, rung))
             .or_insert_with(|| {
@@ -774,8 +797,8 @@ impl Terrain {
                         ..default()
                     },
                     extension: LadderFade::new(
-                        fade_bands(rung, rungs),
-                        sink_end_m(body, rung, rungs),
+                        fade_bands(drawn_rung, rungs),
+                        sink_end_m(body, drawn_rung, rungs),
                         vd_client::chunks::sink_m(body, rung),
                         f64::from(vd_seed::ladder::cell_m(rung)),
                     )

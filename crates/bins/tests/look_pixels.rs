@@ -596,6 +596,7 @@ fn walk_chunk(devctl: u16, aim: DVec3, ticks: u64) {
             arrive_epsilon: 2.0,
             max_ticks: ticks,
             max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
+            speed_share: 0.0,
         },
     );
     throttle_stop(devctl);
@@ -660,6 +661,7 @@ fn close_to_range(devctl: u16, realm: RealmId, range_m: f64, deadline: Duration)
                 arrive_epsilon: range_m,
                 max_ticks: 25,
                 max_step_m: 0.0,
+                speed_share: 0.0,
             },
         );
         assert!(

@@ -885,6 +885,7 @@ mod dev_control {
                     arrive_epsilon,
                     max_ticks,
                     max_step_m,
+                    speed_share,
                 }) => match drive_walk_to(
                     &handles,
                     &mut framer,
@@ -892,6 +893,7 @@ mod dev_control {
                     arrive_epsilon,
                     max_ticks,
                     max_step_m,
+                    speed_share,
                 )
                 .await
                 {
@@ -1172,6 +1174,7 @@ mod dev_control {
     /// within `arrive_epsilon` (→ `State`) or the budget/Closed (→ `Timeout`). `arrive_epsilon`
     /// MUST exceed one sim step or the fixed-magnitude Move overshoots and never settles — the
     /// contract `nav::walk_to` pins; vdctl defaults it well above one step.
+    #[allow(clippy::too_many_arguments)]
     async fn drive_walk_to(
         handles: &Handles,
         framer: &mut LineFramer,
@@ -1179,12 +1182,19 @@ mod dev_control {
         arrive_epsilon: f64,
         max_ticks: u64,
         max_step_m: f64,
+        speed_share: f32,
     ) -> Option<DevResponse> {
         let target = DVec3::from_array(target);
+        // The stick's share: zero (the default) is the full stick.
+        let share = if speed_share > 0.0 {
+            f64::from(speed_share)
+        } else {
+            1.0
+        };
         // The walk's stick is sticky: a crossing releases it.
         let release = Some(InputAction::Move([0.0; 3]));
         drive_closed_loop(handles, framer, max_ticks, release, move |pos, orient| {
-            let step = nav::walk_to(pos, orient, target, arrive_epsilon, max_step_m);
+            let step = nav::walk_to(pos, orient, target, arrive_epsilon, max_step_m, share);
             LoopStep {
                 done: step.arrived,
                 action: step.action(),

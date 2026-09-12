@@ -415,6 +415,10 @@ pub(crate) fn flush_pose_for_dest(
                     signed_distance = sd,
                     at_tick = pose.universe_tick.0,
                     shard_tick = tick.0,
+                    book_at = book.at().0,
+                    from_pos_m = %vd_core::pose::describe(pose.pos, pose.frame),
+                    child_at = ?book.of(dest_region.frame).map(|p| p.origin),
+                    landed_m = %vd_core::pose::describe(placed.pos, placed.frame),
                     landed_len_m = placed
                         .pos
                         .delta_m(vd_core::pose::LatticePos::ORIGIN, placed.frame.tier())

@@ -298,7 +298,12 @@ impl RealmScene {
             .0
             .iter()
             .map(|(&realm, boot)| {
-                let overlaid = match view.realm_pose_on(realm, cursor, on_arc.contains(&realm)) {
+                let overlaid = match view.realm_pose_blended(
+                    realm,
+                    cursor,
+                    on_arc.contains(&realm),
+                    boot.parent,
+                ) {
                     Some(live) => RealmBox {
                         // The streamed pose carries its coarse cell SEPARATELY from its fine offset;
                         // recombine both. Taking `live.pos` alone (as this did) silently dropped the

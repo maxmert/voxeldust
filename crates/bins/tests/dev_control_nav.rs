@@ -185,6 +185,7 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
             arrive_epsilon,
             max_ticks: 600,
             max_step_m: 4.0 * step_m,
+            speed_share: 0.0,
         },
     )
     .expect("walk response");
@@ -236,6 +237,7 @@ fn walk_to_and_look_at_converge_then_an_unreachable_target_times_out() {
             arrive_epsilon,
             max_ticks: 10,
             max_step_m: 0.0,
+            speed_share: 0.0,
         },
     )
     .expect("timeout response");

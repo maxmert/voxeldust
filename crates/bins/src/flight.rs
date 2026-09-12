@@ -367,6 +367,7 @@ pub fn try_rendezvous_into_planet(
                 arrive_epsilon: acquire_edge_m * 0.25,
                 max_ticks: chunk_ticks,
                 max_step_m: 0.0,
+                speed_share: 0.0,
             },
         );
         // NO THROTTLE CUT between chunks — the cut is what killed the ramp (see above). The
@@ -446,6 +447,22 @@ pub fn cross_leg(
     want: &str,
     deadline: Duration,
 ) {
+    cross_leg_at(devctl_port, leg, aim, want, deadline, 1.0);
+}
+
+/// [`cross_leg`] at a STICK SHARE: the walk's axes scaled by `share` (1 = the full stick), so an
+/// occupant crosses at a fraction of the server's move speed. MEASURED (D-TERRAIN-5 item 15): the
+/// full dev stick moves a pilot 2.3 m a tick, through a hull's 12 m box in five ticks, and the
+/// crossing saga froze the pilot on the far side — the fast pass-through the flush refuses by
+/// design; a player at the foot speed is 0.2 m further at the flush, inside.
+pub fn cross_leg_at(
+    devctl_port: u16,
+    leg: &str,
+    aim: impl Fn(u64) -> DVec3,
+    want: &str,
+    deadline: Duration,
+    share: f32,
+) {
     let started = Instant::now();
     let mut loc = String::new();
     loop {
@@ -463,6 +480,7 @@ pub fn cross_leg(
                     max_ticks: CROSS_LEG_WALK_TICKS,
                     // The feedback-lag brake (see rendezvous_into_planet's knob).
                     max_step_m: 4.0 * crate::DEV.move_speed * crate::DEV.tick_dt,
+                    speed_share: share,
                 },
             );
             // CROSSED mid-chunk: the drive released its stick and stopped; the label is the
@@ -585,6 +603,7 @@ pub fn cross_leg_watching_scene(
                     // [`WATCHED_WALK_TICKS`] of the swap on both sides.
                     max_ticks: WATCHED_WALK_TICKS,
                     max_step_m: 4.0 * crate::DEV.move_speed * crate::DEV.tick_dt,
+                    speed_share: 0.0,
                 },
             );
             let _ = devctl(

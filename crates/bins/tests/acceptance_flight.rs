@@ -800,6 +800,7 @@ fn fly_watching(
                 arrive_epsilon: slop_m,
                 max_ticks: chunk_ticks,
                 max_step_m: slop_m,
+                speed_share: 0.0,
             },
         );
     }
@@ -859,6 +860,7 @@ fn close_to_range(devctl: u16, realm: RealmId, range_m: f64, deadline: Duration)
                 arrive_epsilon: range_m,
                 max_ticks: aoi_cadence_ticks(),
                 max_step_m: 0.0,
+                speed_share: 0.0,
             },
         );
         assert!(

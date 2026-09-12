@@ -514,6 +514,7 @@ fn park_at(devctl: u16, target: DVec3, arrive_within_m: f64) {
             arrive_epsilon: arrive_within_m,
             max_ticks: 3000,
             max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
+            speed_share: 0.0,
         },
     );
     assert!(

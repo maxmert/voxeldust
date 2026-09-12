@@ -368,6 +368,183 @@ fn flush_source_ships_the_held_dots_pose() {
     );
 }
 
+/// Plant an in-flight crossing of `entity` to the root under `TransferId(7)`: the latch AND its
+/// state with the re-emit payload (the stranded-crossing re-drive expects both), its timer armed
+/// at this tick so the re-drive stays quiet through a short test.
+fn plant_crossing_in_flight(rig: &mut Rig, entity: EntityId) {
+    let now = rig.world.resource::<ClockSample>().local_tick;
+    rig.world
+        .resource_mut::<RequestInFlight>()
+        .0
+        .insert(entity, TransferId(7));
+    rig.world.resource_mut::<CrossingProgress>().0.insert(
+        entity,
+        CrossingState {
+            last_commit_tick: Some(now),
+            latched_crossing: Some(LatchedCrossing {
+                to_realm: ROOT_REALM,
+                subject_fence: Fence(1),
+                session: SESSION,
+                exterior: false,
+                to_parent: None,
+            }),
+            ..Default::default()
+        },
+    );
+}
+
+/// D-TERRAIN-5 item 15: a flush refused as STALE (the dot still inside its own realm while the
+/// departure was decided on the led point) is KEPT and tried every tick; it ships the tick the
+/// departure becomes true, with the pose of that tick.
+#[test]
+fn a_flush_refused_as_stale_is_kept_and_ships_when_it_becomes_true() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let _ = rig.attach();
+    rig.world.resource_mut::<StubConfig>().request_ttl_ticks = 50;
+    // The forest: this realm's shell of 100 m inside the root's; a tick so the books are authored.
+    rig.world.insert_resource(clamped_forest());
+    let _ = rig.tick(vec![]);
+    let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+    // The crossing to the root is in flight under the flush's transfer.
+    plant_crossing_in_flight(&mut rig, entity);
+    // The dot stands at the origin, inside its own shell: the flush to the root is stale.
+    let sent = rig.tick(vec![flush_msg(entity)]);
+    assert_eq!(to_orch(&sent), vec![], "a stale departure ships nothing");
+    assert_eq!(rig.world.resource::<StubStats>().flush_stale_exit, 1);
+    assert_eq!(rig.world.resource::<StubStats>().flush_kept, 1);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 1);
+    // Still inside next tick: kept, still nothing.
+    rig.set_local_tick(2);
+    let sent = rig.tick(vec![]);
+    assert_eq!(to_orch(&sent), vec![]);
+    assert_eq!(rig.world.resource::<StubStats>().flush_stale_exit, 2);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 1);
+    // The dot walks out past the shell AND its hysteresis band (the band keeps a member up to
+    // a hundred metres past the shell): the kept flush ships this tick.
+    rig.set_local_tick(3);
+    rig.world
+        .resource_mut::<Dots>()
+        .0
+        .get_mut(&SESSION)
+        .expect("the dot")
+        .pose
+        .pos = LatticePos::from_metres(DVec3::new(260.0, 0.0, 0.0), vd_core::pose::Tier::Fine);
+    let dot = rig.world.resource::<Dots>().0[&SESSION];
+    let sent = rig.tick(vec![]);
+    assert_eq!(
+        to_orch(&sent),
+        vec![InterShardFlow::TransferAck(TransferAck::SourceFlushed {
+            transfer_id: TransferId(7),
+            step_id: FLUSH_SOURCE_STEP,
+            pose: dot.pose,
+            drained_seq: 0,
+            state: vec![],
+        })],
+        "the kept flush ships the tick the departure is true"
+    );
+    assert_eq!(rig.world.resource::<StubStats>().flush_retry_shipped, 1);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 0);
+    // A flush for a subject this shard does not hold is never kept.
+    rig.set_local_tick(4);
+    let sent = rig.tick(vec![flush_msg(EntityId(0xDEAD))]);
+    assert_eq!(to_orch(&sent), vec![]);
+    assert_eq!(rig.world.resource::<StubStats>().flush_kept, 1);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 0);
+    // A flush toward a sibling under the root (the dot 4.5 km short of it): the conversion
+    // climbs to the root and descends, the entry is not yet true, and the flush is kept like
+    // any other stale one — the destination's place in the tree does not change the rule.
+    *rig.world.resource_mut::<RealmRegions>() = RealmRegions::new(vec![
+        root_region(),
+        own_region(),
+        region(
+            RealmId::Planet(9),
+            Some(ROOT_REALM),
+            DVec3::new(5000.0, 0.0, 0.0),
+            500.0,
+        ),
+    ])
+    .with_own_realm(OWN_REALM);
+    plant_crossing_in_flight(&mut rig, entity);
+    rig.set_local_tick(5);
+    let sent = rig.tick(vec![wire_msg(
+        ORCH,
+        MsgClass::Saga,
+        &InterShardFlow::FlushSource(FlushSource {
+            transfer: TransferId(7),
+            subject: DirectoryKey::Entity(entity),
+            step_id: FLUSH_SOURCE_STEP,
+            to_realm: RealmId::Planet(9),
+            to_parent: Some(ROOT_REALM),
+        }),
+    )]);
+    assert_eq!(to_orch(&sent), vec![]);
+    assert_eq!(rig.world.resource::<StubStats>().flush_kept, 2);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 1);
+}
+
+/// D-TERRAIN-5 item 15: a kept flush is DROPPED when its crossing is no longer in flight (an
+/// abort or a commit cleared the latch), when the saga's ttl lapses, and at once on a shard whose
+/// ttl is disarmed; a kept flush whose subject vanished is dropped as a fault.
+#[test]
+fn a_kept_flush_is_dropped_when_the_crossing_leaves_flight_or_the_ttl_lapses() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let _ = rig.attach();
+    rig.world.resource_mut::<StubConfig>().request_ttl_ticks = 50;
+    rig.world.insert_resource(clamped_forest());
+    let _ = rig.tick(vec![]);
+    let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+    plant_crossing_in_flight(&mut rig, entity);
+    let _ = rig.tick(vec![flush_msg(entity)]);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 1);
+    // The latch clears (the saga aborted): the kept flush is dropped, nothing ships.
+    rig.world.resource_mut::<RequestInFlight>().0.clear();
+    rig.world.resource_mut::<CrossingProgress>().0.clear();
+    rig.set_local_tick(2);
+    let sent = rig.tick(vec![]);
+    assert_eq!(to_orch(&sent), vec![]);
+    assert_eq!(rig.world.resource::<StubStats>().flush_retry_dropped, 1);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 0);
+    // Kept again, then the ttl lapses while the dot stays inside (the kept flush aged past the
+    // ttl): dropped.
+    plant_crossing_in_flight(&mut rig, entity);
+    let _ = rig.tick(vec![flush_msg(entity)]);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 1);
+    rig.world
+        .resource_mut::<PendingFlushes>()
+        .0
+        .get_mut(&TransferId(7))
+        .expect("the kept flush")
+        .1 = TickId(0);
+    rig.set_local_tick(60);
+    let _ = rig.tick(vec![]);
+    assert_eq!(rig.world.resource::<StubStats>().flush_retry_dropped, 2);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 0);
+    // The subject vanishes while kept: dropped as a fault on the next tick.
+    plant_crossing_in_flight(&mut rig, entity);
+    let _ = rig.tick(vec![flush_msg(entity)]);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 1);
+    rig.world.resource_mut::<Dots>().0.clear();
+    rig.set_local_tick(61);
+    let _ = rig.tick(vec![]);
+    assert_eq!(rig.world.resource::<StubStats>().flush_retry_dropped, 3);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 0);
+    // A disarmed ttl keeps nothing past the tick it was asked.
+    rig.world.resource_mut::<StubConfig>().request_ttl_ticks = 0;
+    rig.world.resource_mut::<RequestInFlight>().0.clear();
+    rig.world.resource_mut::<CrossingProgress>().0.clear();
+    let _ = rig.attach();
+    let entity = rig.world.resource::<Dots>().0[&SESSION].entity;
+    plant_crossing_in_flight(&mut rig, entity);
+    let _ = rig.tick(vec![flush_msg(entity)]);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 1);
+    rig.set_local_tick(62);
+    let _ = rig.tick(vec![]);
+    assert_eq!(rig.world.resource::<StubStats>().flush_retry_dropped, 4);
+    assert_eq!(rig.world.resource::<PendingFlushes>().0.len(), 0);
+}
+
 #[test]
 fn flush_source_for_an_unheld_or_non_entity_subject_ships_nothing() {
     let mut rig = Rig::new();

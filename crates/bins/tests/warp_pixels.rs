@@ -774,6 +774,7 @@ fn walk_chunk(devctl: u16, aim: DVec3, ticks: u64) {
             arrive_epsilon: 3.0,
             max_ticks: ticks,
             max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
+            speed_share: 0.0,
         },
     );
     throttle(devctl, ALL_STOP);
@@ -1893,6 +1894,7 @@ fn g_warp_pixels_a_point_of_light_grows_hands_over_and_the_one_behind_shrinks_to
                     arrive_epsilon: 3.0,
                     max_ticks: chunk_ticks,
                     max_step_m: brake,
+                    speed_share: 0.0,
                 },
             );
             throttle(devctl, ALL_STOP);

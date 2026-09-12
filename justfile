@@ -272,6 +272,24 @@ render-crossing-smoke:
 terrain-moving-eye:
     cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye -- --nocapture --test-threads=1
 
+# THE PICTURE GATE (ruling V18): the five stands against their frozen exact references; a content
+# pixel that moves by more than the tolerance is red. `VD_PICTURE_FREEZE=1` (or a comma list of
+# stand names) refreezes on the owner's acceptance of a look; `VD_PICTURE_REPORT_ONLY=1` measures.
+terrain-pictures:
+    cargo test --release -p vd-bins --features dev-control,render --test terrain_pictures -- --nocapture --test-threads=1
+
+# THE BOARDING STORM (D-TERRAIN-5 item 15): ten pilots board ten hulls, each fresh, each settling
+# before the next; the legs fly on the last. The count of saga starts against boardings is the
+# number to read (a refused first attempt is one extra start per boarding).
+boarding-storm:
+    VD_BOARDINGS=10 cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye -- --nocapture --test-threads=1
+
+# THE FLIGHTS — the slice 8 foundation's own guard against regression (2026-09-12): the picture
+# gate, the moving eye and the boarding storm, on release binaries, one after the other (never two
+# timing flights at once). The rule: no slice lands before `just flights` is green. GPU-required,
+# a quiet machine, Docker off (§ the measured stalls); about twenty-five minutes.
+flights: terrain-pictures terrain-moving-eye boarding-storm
+
 # G-WARP-PIXELS + G-HANDOVER (window_lane.md §2.8/§4 Slice D — THE WARP ACCEPTANCE): one DEMAND
 # cluster (no shard pre-booked), one headless capture client in the PILOT VIEW (`--capture-pilot`),
 # and one flight down THE world's own star ring — out of the home system, across the STAR GAP the

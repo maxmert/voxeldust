@@ -12,13 +12,13 @@
 
 use super::{
     AppliedSteps, CrossingProgress, Dot, Dots, GhostColliderRegistration, GrantFlip, HandoffHolds,
-    InterestHeld, OwnedTransients, PendingCrossings, PendingInputSlots, RealmRegions, RelayHeld,
-    RequestInFlight, StubConfig, StubStats, aoi_recheck_cadence, drain_pending_crossing,
-    drain_pending_input_slots, flip_grant, on_crossing_aborted, on_flush_source, on_re_home,
-    on_realm_interest, on_release_complete, on_saga_demote, on_saga_promote, on_transfer_envelope,
-    on_transient_abandon, on_transient_crossing_grant, on_transient_discard, on_transient_promote,
-    on_transient_release, on_window_relay, push_entity_removed, push_session_reply,
-    self_fence_drop_transients,
+    InterestHeld, OwnedTransients, PendingCrossings, PendingFlushes, PendingInputSlots,
+    RealmRegions, RelayHeld, RequestInFlight, StubConfig, StubStats, aoi_recheck_cadence,
+    drain_pending_crossing, drain_pending_input_slots, flip_grant, on_crossing_aborted,
+    on_flush_source, on_re_home, on_realm_interest, on_release_complete, on_saga_demote,
+    on_saga_promote, on_transfer_envelope, on_transient_abandon, on_transient_crossing_grant,
+    on_transient_discard, on_transient_promote, on_transient_release, on_window_relay,
+    push_entity_removed, push_session_reply, self_fence_drop_transients,
 };
 use crate::io::MsgClass;
 use crate::runtime::{ClockSample, NodeIdentity, OutboundBox};
@@ -528,6 +528,7 @@ pub(crate) fn on_directory_reply(
     owned_transients: &mut OwnedTransients,
     in_flight: &mut RequestInFlight,
     progress: &mut CrossingProgress,
+    pending_flushes: &mut PendingFlushes,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
     parent_node: &mut ParentRealmNode,
@@ -615,9 +616,11 @@ pub(crate) fn on_directory_reply(
                 regions,
                 placements,
                 clock.universe_tick,
+                clock.local_tick,
                 dots,
                 driven,
                 exterior,
+                pending_flushes,
                 stats,
                 outbox,
             );

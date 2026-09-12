@@ -72,6 +72,7 @@ pub fn walk_to(
     target: DVec3,
     arrive_epsilon: f64,
     max_step_m: f64,
+    share: f64,
 ) -> WalkStep {
     let to_target = target - own_pos;
     let distance = to_target.length();
@@ -91,8 +92,10 @@ pub fn walk_to(
     } else {
         1.0
     };
+    // THE STICK'S SHARE: the axes scaled by `share` (1 = the full stick), so the walk moves at that
+    // fraction of the server's move speed.
     WalkStep {
-        movement: kinematics::movement_from_local(local * scale),
+        movement: kinematics::movement_from_local(local * scale * share),
         arrived: false,
     }
 }
@@ -191,7 +194,7 @@ mod tests {
     ) -> Option<u32> {
         let mut prev = f64::INFINITY;
         for tick in 0..max_ticks {
-            let s = walk_to(pos, orient, target, arrive_eps, 0.0);
+            let s = walk_to(pos, orient, target, arrive_eps, 0.0, 1.0);
             if s.arrived {
                 return Some(tick);
             }
@@ -250,6 +253,7 @@ mod tests {
             DVec3::ZERO,
             1.0,
             0.0,
+            1.0,
         );
         assert!(step.arrived);
         assert_eq!(step.movement, [0.0, 0.0, 0.0]);
@@ -265,6 +269,7 @@ mod tests {
             DVec3::new(0.0, 0.0, -10.0),
             0.1,
             0.0,
+            1.0,
         );
         assert!(!step.arrived);
         assert!(
@@ -292,7 +297,14 @@ mod tests {
         // points at the target.
         let orient = yawed(std::f64::consts::FRAC_PI_2, 0.0);
         let target = DVec3::new(5.0, 0.0, 0.0);
-        let step = walk_to(DVec3::ZERO, orient, target, 0.1, 0.0);
+        let step = walk_to(DVec3::ZERO, orient, target, 0.1, 0.0, 1.0);
+        // The share scales the stick: half the share, half the axes.
+        let half = walk_to(DVec3::ZERO, orient, target, 0.1, 0.0, 0.5);
+        let mut i = 0;
+        while i < 3 {
+            assert!((half.movement[i] - step.movement[i] * 0.5).abs() < 1e-6);
+            i += 1;
+        }
         let m = step.movement;
         let axes = kinematics::local_axes_from_movement(m); // replay via the SHARED convention
         let world_step = (orient * axes).normalize();
@@ -415,7 +427,7 @@ mod tests {
         let mut min_dist = f64::INFINITY;
         let mut ever_arrived = false;
         for _ in 0..200 {
-            let s = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, arrive_eps, 0.0);
+            let s = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, arrive_eps, 0.0, 1.0);
             ever_arrived |= s.arrived; // accumulate with `|=` (no branch to leave uncovered)
             min_dist = min_dist.min(pos.length());
             let axes = kinematics::local_axes_from_movement(s.movement);
@@ -437,8 +449,8 @@ mod tests {
     #[test]
     fn walk_to_treats_a_non_finite_brake_as_no_brake() {
         let pos = DVec3::new(0.0, 0.0, -0.55);
-        let braked_off = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, 0.02, 0.0);
-        let non_finite = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, 0.02, f64::NAN);
+        let braked_off = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, 0.02, 0.0, 1.0);
+        let non_finite = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, 0.02, f64::NAN, 1.0);
         assert_eq!(non_finite, braked_off);
         assert!(!non_finite.arrived);
     }
@@ -454,7 +466,7 @@ mod tests {
         let mut pos = DVec3::new(0.0, 0.0, -0.55);
         let mut arrived_at = None;
         for tick in 0..200 {
-            let s = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, arrive_eps, step_len);
+            let s = walk_to(pos, DQuat::IDENTITY, DVec3::ZERO, arrive_eps, step_len, 1.0);
             if s.arrived {
                 arrived_at = Some(tick);
                 break;

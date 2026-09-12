@@ -320,6 +320,13 @@ pub struct StubStats {
     /// left before the pose shipped). The saga aborts pre-commit and this shard keeps authority; a
     /// pass-through costs one aborted saga instead of a committed mislanding (Stage B1, §4v cure 1).
     pub flush_stale_entry: u64,
+    /// Flushes KEPT after a stale refusal (D-TERRAIN-5 item 15): the scan decided on the led point
+    /// and the subject had not yet arrived; the flush is tried again every tick.
+    pub flush_kept: u64,
+    /// Kept flushes that shipped on a later tick (the entry or the exit became true).
+    pub flush_retry_shipped: u64,
+    /// Kept flushes dropped: the crossing left flight (an abort or a commit) or the saga's ttl lapsed.
+    pub flush_retry_dropped: u64,
     /// Hand-offs REFUSED at the flush because this shard's OWN region would still hold the re-read
     /// pose (the departure decision went stale — the occupant came back inside before the pose
     /// shipped). Same abort-and-keep shape as `flush_stale_entry`, for the flap's mirrored half.

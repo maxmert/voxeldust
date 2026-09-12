@@ -87,12 +87,15 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     // is rewritten as the eye moves).
     let radial = normalize(mesh_functions::mesh_normal_local_to_world(vertex.radial, vertex.instance_index));
 #ifdef LIGHT_CASTER
-    // THE LIGHT CASTER (the shadow ladder): the caster skips the morph and the sink and stands
-    // under the drawn ground by the caster's own sink (the two rungs' bound), so the fine ground
-    // never shades itself against a coarse surface that stands above it. MEASURED alone (round
-    // five): the work per vertex is not the shadow's cost; the caster count is, which the
-    // ladder's coarse casters cut.
-    let morphed = own.xyz - radial * fade.splat.y;
+    // THE LIGHT CASTER (the shadow ladder): the caster skips the morph and stands under the drawn
+    // ground by the caster's own sink (the two rungs' bound), so the fine ground never shades
+    // itself against a coarse surface that stands above it. MEASURED alone (round five): the work
+    // per vertex is not the shadow's cost; the caster count is, which the ladder's coarse casters
+    // cut. THE CASTER'S CROSSFADE: the bands here are the DRAWN rung's (the rung this caster casts
+    // for), so the sink scales with that rung's wholeness — full where the finer chunk stands whole,
+    // zero at the band's end where it has morphed onto this surface and the caster gives way to the
+    // drawn chunk casting itself, unsunk: the shadow's edge moves with the crossfade, never at it.
+    let morphed = own.xyz - radial * fade.splat.y * whole(d);
 #else
     let coarser = own.xyz + radial * vertex.morph_m;
     let sink = radial * fade.sink.x;

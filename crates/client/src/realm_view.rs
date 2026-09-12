@@ -243,20 +243,24 @@ impl RealmView {
             .map(|track| track.sample_arc(cursor))
     }
 
-    /// A row's placement at `cursor`, ON THE ARC when the row is one of the origin's ancestors
-    /// (its facing change in the window IS the origin's own turn, so the recomposition is exact)
-    /// and on the plain blend otherwise (refutation, 2026-09-12: a sibling realm spinning on its
-    /// own would have its centre pulled toward the eye by the chord's deficit — the arc cannot
-    /// tell a row's own spin from the origin's turn, and the plain blend is exact for a centre
-    /// that does not move).
+    /// A row's placement at `cursor`: on the arc for the origin's ancestors; THROUGH ITS PARENT'S
+    /// ARC for every other row whose parent the window holds (the sibling's blend, item 21); the
+    /// plain blend for a row with no parent in the window.
     #[must_use]
-    pub fn realm_pose_on(&self, realm: RealmId, cursor: f64, arc: bool) -> Option<RenderPose> {
-        self.placements.get(&realm).map(|track| {
-            if arc {
-                track.sample_arc(cursor)
-            } else {
-                track.sample(cursor)
-            }
+    pub fn realm_pose_blended(
+        &self,
+        realm: RealmId,
+        cursor: f64,
+        arc: bool,
+        parent: Option<RealmId>,
+    ) -> Option<RenderPose> {
+        let track = self.placements.get(&realm)?;
+        if arc {
+            return Some(track.sample_arc(cursor));
+        }
+        Some(match parent.and_then(|p| self.placements.get(&p)) {
+            Some(parent_track) => track.sample_via_parent(parent_track, cursor),
+            None => track.sample(cursor),
         })
     }
 
@@ -813,6 +817,48 @@ mod tests {
         // A realm the feed never streamed stays None even once the feed is live — absence of a track is
         // not the same as a stale one, and conflating them would hide a realm that never arrived.
         assert_eq!(v.realm_newest_tick(RealmId::Planet(9)), None);
+    }
+
+    /// The blended pose: the arc for an ancestor; through the parent's arc for a row whose parent
+    /// the window holds; the plain blend for one whose parent it does not; `None` for a realm
+    /// never streamed.
+    #[test]
+    fn a_blended_pose_takes_the_arc_the_parent_or_the_plain_blend() {
+        let mut v = RealmView::default();
+        v.on_realm_snapshot(
+            None,
+            frame(
+                1,
+                10,
+                vec![
+                    (RealmId::Planet(1), pose(DVec3::new(1.0, 0.0, 0.0), 10)),
+                    (RealmId::Station(2), pose(DVec3::new(5.0, 0.0, 0.0), 10)),
+                ],
+            ),
+        );
+        v.on_realm_snapshot(
+            None,
+            frame(
+                2,
+                20,
+                vec![
+                    (RealmId::Planet(1), pose(DVec3::new(2.0, 0.0, 0.0), 20)),
+                    (RealmId::Station(2), pose(DVec3::new(6.0, 0.0, 0.0), 20)),
+                ],
+            ),
+        );
+        let arc = v.realm_pose_blended(RealmId::Planet(1), 15.0, true, None);
+        assert_eq!(arc, v.realm_pose(RealmId::Planet(1), 15.0));
+        let via = v.realm_pose_blended(RealmId::Station(2), 15.0, false, Some(RealmId::Planet(1)));
+        let station_plain = v.placements[&RealmId::Station(2)].sample(15.0);
+        assert_eq!(
+            via,
+            Some(station_plain),
+            "nothing turns: through the parent is the plain blend"
+        );
+        let plain = v.realm_pose_blended(RealmId::Station(2), 15.0, false, Some(RealmId::Planet(9)));
+        assert_eq!(plain, Some(station_plain));
+        assert_eq!(v.realm_pose_blended(RealmId::Planet(9), 15.0, false, None), None);
     }
 
     #[test]

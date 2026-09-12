@@ -187,6 +187,7 @@ fn fly_waypoint(
                 arrive_epsilon: arrive_within_m,
                 max_ticks: chunk,
                 max_step_m,
+                speed_share: 0.0,
             },
         )
         .unwrap_or_else(|| panic!("waypoint {leg}: no walk response"));

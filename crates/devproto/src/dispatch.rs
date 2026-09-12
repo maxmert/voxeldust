@@ -72,6 +72,13 @@ pub enum DevRequest {
         max_ticks: u64,
         #[serde(default)]
         max_step_m: f64,
+        /// THE STICK'S SHARE (0 = the full stick, the serde default and every earlier caller): the
+        /// walk's axes scaled down, so a closed-loop walk moves at a fraction of the server's move
+        /// speed — a pilot walking into a hull at the foot speed instead of the dev stick's
+        /// hundreds of metres a second (MEASURED: the full stick crossed a hull's 12 m box in
+        /// five ticks and the crossing froze the pilot on the far side).
+        #[serde(default)]
+        speed_share: f32,
     },
     /// Closed-loop: turn the own entity to face a world `target` (within
     /// `align_epsilon`) for up to `max_ticks`. Reply: `State` (aligned) / `Timeout`.
@@ -356,6 +363,7 @@ mod tests {
                 arrive_epsilon: 0.5,
                 max_ticks: 200,
                 max_step_m: 10.0,
+                speed_share: 0.25,
             },
             DevRequest::LookAt {
                 target: [0.0, 1.0, -1.0],

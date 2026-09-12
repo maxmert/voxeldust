@@ -169,6 +169,27 @@ impl Drop for Fixture {
 /// Keep the fixture (the runs with every recorded pair) after a green flight.
 const KEEP_FIXTURE_ENV: &str = "VD_KEEP_FIXTURE";
 
+/// THE FOOT SHARE the walk leg measured (the stick's share that walks at `WALK_MPS`), as bits:
+/// the boardings walk into their hulls at it.
+static FOOT_SHARE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// THE SOAK: the walk leg's length in seconds (`VD_WALK_S`), the minute by default. A ten-minute
+/// walk tells a working set that plateaus from a slow leak (MEASURED on every minute-long walk: the
+/// client's large allocations grew by about 80 MB over the leg).
+const WALK_S_ENV: &str = "VD_WALK_S";
+
+/// How often a running leg prints THE MEMORY, in seconds.
+const MEMORY_COURSE_S: f64 = 60.0;
+
+/// The walk leg's length: the environment's, else the leg's own.
+fn walk_s() -> f64 {
+    std::env::var(WALK_S_ENV)
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .unwrap_or(LEG_S)
+}
+
 fn fixture() -> Fixture {
     let trust = ClusterTrust::generate("vd-terrain-moving-eye").expect("trust");
     let base = std::env::temp_dir().join(format!("vd-terrain-moving-eye-{}", std::process::id()));
@@ -547,6 +568,7 @@ fn read_band(
         ..LegRead::default()
     };
     let memory_start = MemoryRead::of(client_pid);
+    let mut next_memory_s = MEMORY_COURSE_S;
     let started = Instant::now();
     // The counters at the first and the last sample: the leg's differences.
     let mut first: Option<[u64; 10]> = None;
@@ -629,6 +651,18 @@ fn read_band(
             stamp.harvest_nanos,
         ];
         first.get_or_insert(last);
+        // THE MEMORY COURSE, once a minute: the footprint's growth since the leg began, so a
+        // slow leak reads as a slope over a long leg (the soak).
+        if started.elapsed().as_secs_f64() >= next_memory_s {
+            let now_memory = MemoryRead::of(client_pid);
+            eprintln!(
+                "terrain_moving_eye/{leg}: THE MEMORY at t {:5.1} s — {}; grown by {}",
+                started.elapsed().as_secs_f64(),
+                now_memory,
+                now_memory.since(memory_start)
+            );
+            next_memory_s += MEMORY_COURSE_S;
+        }
         // THE TIME COURSE, every twenty-fifth sample: how the queue and the gap move, so a
         // capacity wall (the queue grows steadily) and a release storm (the screen empties at
         // once) read differently.
@@ -769,6 +803,27 @@ fn read_band(
 /// THE PLANET'S MOTION THROUGH THE EYE'S FRAME: where the planet's row stands in the picture. For
 /// a character on the planet it stands still; for a character inside a flying hull it moves at
 /// the hull's own speed, the other way.
+/// How long a boarding waits for the planet's row to reach the window after the origin swap.
+const PLANET_ROW_DEADLINE: Duration = Duration::from_secs(20);
+
+/// Wait until the planet's row is in the pilot's window (the realm feed re-delivers it after the
+/// origin swap; MEASURED once: a speed poll right after "settled" found the hull's own box alone).
+fn await_planet_row(devctl: u16, planet: RealmId) {
+    let label = format!("{planet:?}");
+    let started = Instant::now();
+    loop {
+        let st = poll(devctl);
+        if st.realm_boxes.iter().any(|b| b.realm == label) {
+            return;
+        }
+        assert!(
+            started.elapsed() < PLANET_ROW_DEADLINE,
+            "the planet's row {label} never reached the window after the boarding: {st:?}"
+        );
+        std::thread::sleep(Duration::from_millis(SETTLE_POLL_MS));
+    }
+}
+
 /// The planet's box facing in the pilot's window: how the planet's frame turns in the frame the
 /// window draws (the hull's, aboard), as a quaternion.
 fn planet_facing(state: &DevState, planet: RealmId) -> vd_core::glam::DQuat {
@@ -1163,8 +1218,17 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         // corrects the share until the walk is the foot speed (MEASURED on the first run: the
         // seed alone walked at 0.52 m/s). The walk covers about 84 m in its minute — a rung-0
         // chunk and a third: the eye's own chunk changes once.
-        let speed = walk_at(devctl, WALK_MPS);
-        let read = read_band(devctl, client.0.id(), "walk", LEG_S, &f.cwd, planet, None);
+        let (speed, share) = walk_at(devctl, WALK_MPS);
+        FOOT_SHARE.store(share.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let read = read_band(
+            devctl,
+            client.0.id(),
+            "walk",
+            walk_s(),
+            &f.cwd,
+            planet,
+            None,
+        );
         throttle(devctl, [0.0, 0.0, 0.0]);
         eprintln!("terrain_moving_eye/walk: the character walked at {speed:.2} m/s");
         assert!(
@@ -1204,12 +1268,15 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
             // the pilot stands in until the crossing.
             let berth_b = berths[b as usize];
             let hull_b = hulls[b as usize];
-            vd_bins::flight::cross_leg(
+            // At the foot speed (the walk's own measured share): a player's boarding, never the
+            // dev stick's pass-through (item 15).
+            vd_bins::flight::cross_leg_at(
                 devctl,
                 "into the hull",
                 move |_tick| berth_b,
                 &label_of(hull_b),
                 BOARDING_DEADLINE,
+                f32::from_bits(FOOT_SHARE.load(std::sync::atomic::Ordering::Relaxed)),
             );
             let aboard = poll(devctl);
             assert_eq!(
@@ -1220,6 +1287,9 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
             // From inside the hull the planet's ground is drawn: the ladder lands whole.
             let tag = format!("hull {}, aboard", b + 1);
             await_settled(devctl, &tag);
+            // The planet's row must be in the window before a leg reads the hull's speed or
+            // heading from it (the realm feed re-delivers after the origin swap).
+            await_planet_row(devctl, planet);
             eprintln!(
                 "terrain_moving_eye: boarding {} of {boardings} settled",
                 b + 1
@@ -1315,7 +1385,7 @@ fn report_leg(leg: &str, read: &LegRead) {
 /// Walk at `target_mps` by feedback: a share of the stick, the speed measured, the share
 /// corrected, until the walk is within a tenth of the target (or the correction loop is spent,
 /// and the gate then judges the measured speed).
-fn walk_at(devctl: u16, target_mps: f64) -> f64 {
+fn walk_at(devctl: u16, target_mps: f64) -> (f64, f32) {
     let mut share = target_mps / DEV.move_speed;
     let mut speed = 0.0;
     let mut round = 0;
@@ -1336,7 +1406,7 @@ fn walk_at(devctl: u16, target_mps: f64) -> f64 {
         }
         round += 1;
     }
-    speed
+    (speed, share as f32)
 }
 
 /// The walker's speed, MEASURED from its own row two polls apart.

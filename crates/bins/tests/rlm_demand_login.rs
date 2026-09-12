@@ -886,6 +886,7 @@ fn a_planet_to_system_return_commits_both_rehomes_and_the_player_rides() {
                 arrive_epsilon: 1.0,
                 max_ticks: 100,
                 max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
+                speed_share: 0.0,
             },
         );
         assert!(
@@ -1032,6 +1033,7 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
                     arrive_epsilon: 1.0,
                     max_ticks: 100,
                     max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
+                    speed_share: 0.0,
                 },
             );
             if let Some(p) = poll_state(devctl_port).as_ref().and_then(own_pos) {
@@ -1127,6 +1129,7 @@ fn repeated_planet_system_roundtrips_do_not_freeze() {
                     arrive_epsilon: 1.0,
                     max_ticks: 40,
                     max_step_m: 4.0 * DEV.move_speed * DEV.tick_dt,
+                    speed_share: 0.0,
                 },
             );
             let s = poll_state(devctl_port);
@@ -1635,6 +1638,7 @@ fn walk_leg(
                 arrive_epsilon: arrive_within_m,
                 max_ticks: chunk,
                 max_step_m,
+                speed_share: 0.0,
             },
         )
         .unwrap_or_else(|| panic!("leg {leg}: no walk response"));
@@ -1904,6 +1908,7 @@ fn a_flying_occupant_streams_a_neighbour_system_in_ahead_then_the_vacated_realm_
                 // a wider taper wedges the flight at walking pace); `brake_m` stays derived +
                 // printed as the overshoot yardstick.
                 max_step_m: 0.25 * shell,
+                speed_share: 0.0,
             },
         )
         .unwrap_or_else(|| panic!("fly approach: no walk response"));

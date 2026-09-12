@@ -198,6 +198,87 @@ impl EntityTrack {
         self.slot(self.len - 1)
     }
 
+    /// The pose stamped at exactly `tick`, if the window holds one (the parent row's pose at a
+    /// sibling's bracket tick — the frames deliver every row at the same ticks).
+    #[must_use]
+    fn pose_at_tick(&self, tick: UniverseTick) -> Option<StampedPose> {
+        let mut i = 0;
+        while i < self.len {
+            let p = self.slot(i);
+            if p.universe_tick == tick {
+                return Some(p);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// THE SIBLING'S BLEND (item 21, the refutation's owed form): this row blended as ITS
+    /// PLACEMENT IN ITS PARENT'S FRAME — `X = q_p⁻¹ (c − c_p)`, `R = q_p⁻¹ q` at each bracket
+    /// tick, lerped and slerped — and recomposed through the parent row's arc at the cursor:
+    /// `c = c_p(t) + q_p(t) X`, `q = q_p(t) R`. The origin's turn moves the parent on its arc and
+    /// the sibling with it; the sibling's own spin changes `R` alone, so its centre stays. The
+    /// plain blend where nothing turns, where the window holds one pose, or where the parent's
+    /// window lacks a pose at either bracket tick (a parent that arrived later than its child).
+    #[must_use]
+    pub fn sample_via_parent(&self, parent: &EntityTrack, cursor: f64) -> RenderPose {
+        let start = self.bracket_start(cursor);
+        let (prev, current) = match start {
+            None => (self.slot(0), self.slot(0)),
+            Some(i) if i + 1 < self.len => (self.slot(i), self.slot(i + 1)),
+            Some(i) => (self.slot(i), self.slot(i)),
+        };
+        let parents = (
+            parent.pose_at_tick(prev.universe_tick),
+            parent.pose_at_tick(current.universe_tick),
+        );
+        let (Some(pp), Some(pc)) = parents else {
+            return self.sample(cursor);
+        };
+        let unturned = (pp.orient == DQuat::IDENTITY) & (pc.orient == DQuat::IDENTITY);
+        if unturned | (prev == current) {
+            return self.sample(cursor);
+        }
+        let prev_time = tick_to_f64(prev.universe_tick);
+        let current_time = tick_to_f64(current.universe_tick);
+        let tier = stated_tier(current.frame);
+        let centre = |p: &StampedPose| {
+            let edge = stated_tier(p.frame).cell_edge_m();
+            p.pos.cell().as_dvec3() * edge + p.pos.offset()
+        };
+        let unit = |q: DQuat| {
+            if q.length_squared() > 0.0 {
+                q.normalize()
+            } else {
+                DQuat::IDENTITY
+            }
+        };
+        let (qp0, qp1) = (unit(pp.orient), unit(pc.orient));
+        let (qs0, qs1) = (unit(prev.orient), unit(current.orient));
+        // The sibling in the parent's frame at each tick.
+        let x0 = qp0.inverse() * (centre(&prev) - centre(&pp));
+        let x1 = qp1.inverse() * (centre(&current) - centre(&pc));
+        let r0 = qp0.inverse() * qs0;
+        let r1 = qp1.inverse() * qs1;
+        let x = lerp_at_game_time(x0, prev_time, x1, current_time, cursor, DVec3::lerp);
+        let r = lerp_at_game_time(r0, prev_time, r1, current_time, cursor, DQuat::slerp);
+        // The parent at the cursor, on its own arc.
+        let parent_now = parent.sample_arc(cursor);
+        let cp = vd_core::pose::LatticePos::at(parent_now.cell, parent_now.pos)
+            .delta_m(vd_core::pose::LatticePos::ORIGIN, parent_now.tier);
+        let qp = parent_now.orient;
+        let c = cp + qp * x;
+        let q = (qp * r).normalize();
+        let lattice = vd_core::pose::LatticePos::from_metres(c, tier);
+        RenderPose {
+            frame: current.frame,
+            cell: lattice.cell(),
+            pos: lattice.offset(),
+            orient: q,
+            tier,
+        }
+    }
+
     /// Append a strictly-newer pose, evicting the oldest once full.
     fn push(&mut self, pose: StampedPose) {
         if self.len < TRACK_POSES {
@@ -1009,6 +1090,106 @@ mod tests {
         let rp = EntityTrack::new(p).current_render_pose();
         assert_eq!(rp.cell, I64Vec3::new(3, -4, 5));
         assert_eq!(rp.pos, DVec3::new(0.25, 0.0, 0.0));
+    }
+
+    /// THE SIBLING'S BLEND: a sibling at rest in its parent's frame rides the parent's arc when the
+    /// origin turns (the plain blend cuts the chord); a sibling spinning in place under a still
+    /// parent keeps its centre and slerps its facing; the plain blend where the parent's window
+    /// lacks the tick, where nothing turns, or where one pose stands alone.
+    #[test]
+    fn a_sibling_rides_its_parents_arc_and_keeps_its_centre_under_its_own_spin() {
+        let flat = |p: &RenderPose| {
+            vd_core::pose::LatticePos::at(p.cell, p.pos)
+                .delta_m(vd_core::pose::LatticePos::default(), p.tier)
+        };
+        let frame = FrameRef::SystemSpace { system_seed: 1 };
+        let r = 6_371_000.0;
+        let turned = DQuat::from_rotation_y(-std::f64::consts::FRAC_PI_2);
+        // The parent (a planet 6 371 km ahead) as the origin yaws +90° between the ticks.
+        let p0 = StampedPose::at_rest(frame, DVec3::new(0.0, 0.0, -r), UniverseTick(10));
+        let mut p1 = StampedPose::at_rest(frame, DVec3::new(r, 0.0, 0.0), UniverseTick(20));
+        p1.orient = turned;
+        let mut parent = EntityTrack::new(p0);
+        parent.observe(p1);
+        // A sibling 1 000 m from the parent along the parent's own +X, at rest in the parent's
+        // frame: in the window it stands at the parent's centre plus the parent's facing times X.
+        let x = DVec3::new(1_000.0, 0.0, 0.0);
+        let s0 = StampedPose::at_rest(frame, DVec3::new(0.0, 0.0, -r) + x, UniverseTick(10));
+        let mut s1 = StampedPose::at_rest(frame, DVec3::new(r, 0.0, 0.0) + turned * x, UniverseTick(20));
+        s1.orient = turned;
+        let mut sibling = EntityTrack::new(s0);
+        sibling.observe(s1);
+        let via = sibling.sample_via_parent(&parent, 15.0);
+        let parent_mid = parent.sample_arc(15.0);
+        let expected = flat(&parent_mid) + parent_mid.orient * x;
+        let arc_error = (flat(&via) - expected).length();
+        assert!(arc_error < 1e-3, "the sibling rides the parent's arc: {arc_error}");
+        // The chord falls short of the arc's radius; the sibling's blend does not.
+        let chord = sibling.sample(15.0);
+        assert!((flat(&chord) - expected).length() > 1_000_000.0);
+        // A sibling spinning in place under a still parent: the centre stays, the facing turns.
+        let still = EntityTrack::new(StampedPose::at_rest(frame, DVec3::ZERO, UniverseTick(10)));
+        let mut still_parent = still;
+        still_parent.observe(StampedPose::at_rest(frame, DVec3::ZERO, UniverseTick(20)));
+        let spot = DVec3::new(500.0, 0.0, 0.0);
+        let mut w0 = StampedPose::at_rest(frame, spot, UniverseTick(10));
+        w0.orient = DQuat::IDENTITY;
+        let mut w1 = StampedPose::at_rest(frame, spot, UniverseTick(20));
+        w1.orient = turned;
+        let mut spinning = EntityTrack::new(w0);
+        spinning.observe(w1);
+        let mid = spinning.sample_via_parent(&still_parent, 15.0);
+        assert!((flat(&mid) - spot).length() < 1e-9, "the centre stays: {:?}", flat(&mid));
+        assert!(mid.orient.angle_between(DQuat::IDENTITY) > 0.1);
+        // The parent's window lacks the tick: the plain blend.
+        let late_parent = EntityTrack::new(StampedPose::at_rest(frame, DVec3::ZERO, UniverseTick(20)));
+        assert_eq!(spinning.sample_via_parent(&late_parent, 15.0), spinning.sample(15.0));
+        // Nothing turns, or one pose alone: the plain blend.
+        let mut straight = EntityTrack::new(pose_at(10, 100.0));
+        straight.observe(pose_at(20, 200.0));
+        assert_eq!(straight.sample_via_parent(&still_parent, 15.0), straight.sample(15.0));
+        let one = EntityTrack::new(pose_at(10, 100.0));
+        assert_eq!(one.sample_via_parent(&still_parent, 10.0), one.sample(10.0));
+    }
+
+    /// Before the sibling's window (the cursor older than its oldest pose) both bracket ends are
+    /// the oldest pose, and the blend through the parent is the plain sample — the parent's arc
+    /// has nothing to add between two equal ticks.
+    #[test]
+    fn a_siblings_blend_before_its_window_is_the_plain_sample() {
+        let frame = FrameRef::SystemSpace { system_seed: 1 };
+        let p0 = StampedPose::at_rest(frame, DVec3::new(0.0, 0.0, -10.0), UniverseTick(10));
+        let mut p1 = StampedPose::at_rest(frame, DVec3::new(10.0, 0.0, 0.0), UniverseTick(20));
+        p1.orient = DQuat::from_rotation_y(-std::f64::consts::FRAC_PI_2);
+        let mut parent = EntityTrack::new(p0);
+        parent.observe(p1);
+        let s0 = StampedPose::at_rest(frame, DVec3::new(1.0, 0.0, -10.0), UniverseTick(10));
+        let s1 = StampedPose::at_rest(frame, DVec3::new(10.0, 0.0, 1.0), UniverseTick(20));
+        let mut sibling = EntityTrack::new(s0);
+        sibling.observe(s1);
+        assert_eq!(sibling.sample_via_parent(&parent, 5.0), sibling.sample(5.0));
+    }
+
+    /// A parent whose stated facing is the zero quaternion (unnormalisable) reads as unturned in
+    /// the blend: the sibling's pose stays finite and its facing stays a unit quaternion.
+    #[test]
+    fn a_parent_with_a_zero_facing_blends_finite() {
+        let frame = FrameRef::SystemSpace { system_seed: 1 };
+        let zero = DQuat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+        let mut p0 = StampedPose::at_rest(frame, DVec3::new(0.0, 0.0, -10.0), UniverseTick(10));
+        p0.orient = zero;
+        let mut p1 = StampedPose::at_rest(frame, DVec3::new(10.0, 0.0, 0.0), UniverseTick(20));
+        p1.orient = zero;
+        let mut parent = EntityTrack::new(p0);
+        parent.observe(p1);
+        let s0 = StampedPose::at_rest(frame, DVec3::new(1.0, 0.0, -10.0), UniverseTick(10));
+        let s1 = StampedPose::at_rest(frame, DVec3::new(11.0, 0.0, 0.0), UniverseTick(20));
+        let mut sibling = EntityTrack::new(s0);
+        sibling.observe(s1);
+        let via = sibling.sample_via_parent(&parent, 15.0);
+        assert!(via.pos.is_finite(), "{via:?}");
+        let facing_len = via.orient.length();
+        assert!((facing_len - 1.0).abs() < 1e-9, "{facing_len}");
     }
 
     /// A finite facing that is not a unit (a zero quaternion) reads as identity on the arc: the

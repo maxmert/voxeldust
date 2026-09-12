@@ -2555,6 +2555,37 @@ mod tests {
     }
 
     #[test]
+    fn cutting_timeout_aborts_from_pre_freeze_deterministically() {
+        // The deterministic twin of the (Cutting, Timeout) arm — the proptests only hit it by a
+        // random draw (MEASURED 2026-09-12: one coverage run missed the line), so coverage must
+        // never depend on it. A Timeout in Cutting aborts BEFORE the freeze (no thaw compensator)
+        // and rejects the transfer as a cut timeout.
+        let c = ctx(false);
+        let (state, _) = drive(
+            &c,
+            start(&c).0,
+            &[SagaEvent::Prepared(PrepareResult::Ready)],
+        );
+        assert_eq!(state, SagaState::Cutting);
+        let (next, actions) = step(&c, state, SagaEvent::Timeout);
+        assert_eq!(
+            next,
+            SagaState::Aborting {
+                reason: AbortReason::CutTimeout,
+                awaiting_thaw: false,
+                awaiting_abort_ack: true,
+            }
+        );
+        assert!(actions.contains(&SagaAction::NotifyRejected(AbortReason::CutTimeout)));
+        assert!(
+            actions.contains(&SagaAction::Send(TransferControl::AbortTransfer {
+                transfer: c.transfer,
+                session: c.session,
+            }))
+        );
+    }
+
+    #[test]
     fn cut_confirmed_issues_freeze_and_flush() {
         // 1d.1: entering Freezing issues BOTH FreezeSource (to the gateway) and FlushSource (to
         // the source), and the state carries the two ungated sub-flags.

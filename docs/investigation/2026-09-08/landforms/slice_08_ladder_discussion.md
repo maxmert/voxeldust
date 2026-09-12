@@ -1899,3 +1899,302 @@ what stands:
 - The refuter also held that item 20 is not 🟩 (the references are not refrozen; the owner's
   look is owed) and that the seam's reference was not yet frozen when it read the tree — both
   true; the seam is frozen now and item 20 waits for the owner, as its entry says.
+
+## 24. THE FOUNDATION'S LAST FOUR (2026-09-12, the owner: "make sure we have a stable foundation")
+
+### 24.1 The soak — a ten-minute walk, MEASURED
+
+`VD_WALK_S=600` lengthens the walk, and every leg now prints THE MEMORY once a minute, so a slow
+growth reads as a slope. The ten-minute walk, the client's growth since the leg began:
+
+| minute | footprint | of it: graphics | unmapped | malloc large | resident |
+|--------|-----------|-----------------|----------|--------------|----------|
+| 1      | +95 MB    | +12             | 0        | +80          | +83 MB   |
+| 2      | +98       | +12             | +3       | +80          | +84      |
+| 3      | +112      | +14             | +14      | +80          | +83      |
+| 4      | +777      | +175            | +518     | +80          | +85      |
+| 5      | +785      | +175            | +524     | +80          | +86      |
+| 6      | +788      | +175            | +527     | +80          | +86      |
+| 7      | +797      | +175            | +535     | +80          | +87      |
+| 8      | +799      | +175            | +537     | +80          | +88      |
+| 9      | +807      | +175            | +543     | +80          | +88      |
+| end    | +824      | +177            | +552     | +80          | +97      |
+
+Not a leak: two steps and a plateau. The large allocations' 80 MB come in the first minute and
+never move (a working set). The step of minute four (graphics +160 MB, unmapped +500 MB) is the
+walk reaching new ground — the screen went from 6 677 to 7 151 chunks over the leg and 1 755
+chunks were harvested — and it is item 14's staging pool: about three bytes of unmapped
+staging per byte of geometry uploaded, kept after the upload. Over the last five minutes the
+footprint grew 22 MB. Example: a player who walks a valley for ten minutes holds about 800 MB
+more than when they landed, and holds it; they do not lose more with every step. Resident
+memory grew 97 MB in ten minutes. (The soak's boarding met a race seen once in sixteen flights:
+the first speed poll read the window before the realm feed had re-delivered the planet's row
+after the origin swap; the boarding now waits for the row, bounded at twenty seconds.)
+
+The long walk's detector: 300 pairs, the floor 5, 25 868 pixels past it at the rung 0→1 edge
+with the widest step 111 levels — the finest handover on a long walk shows steps the minute-long
+walk does not; item 5 of the list (the caster's crossfade) is the first suspect, unmeasured.
+
+### 24.2 The flights recipe
+
+`just flights` = the picture gate, the moving eye and the boarding storm, on release binaries,
+one after the other. The rule: no slice lands before it is green. `just terrain-pictures` and
+`just boarding-storm` are its parts; `VD_TERRAIN_WORKERS=<n>` sets the chunk workers' thread
+count (the throughput measurement's one lever).
+
+### 24.3 The refused first attempt — THE PENDING FLUSH (item 15, 2026-09-12)
+
+Why every boarding took two saga attempts and ten seconds, from the code: the containment scan
+decides a crossing on the LED point (the dot's position projected a request-ttl ahead, so the
+destination is awake in time); the orchestrator starts the saga and asks the source to flush the
+subject's pose; the source RE-VALIDATES the entry at that instant and finds the pilot still on
+its way (5 m short of the hull's shell, seven ticks after the scan); it refuses, ships nothing,
+and the saga waits for a flush that never comes until its freeze deadline (200 orchestrator
+ticks, ten seconds), aborts, clears the latch, and the scan fires again with the pilot now
+inside. The refusal was built for a fast pass-through (an arrival that crosses the destination
+within a tick), and it is right for that; a walking pilot is not that.
+
+The cure, at the source and with no new data crossing a realm boundary (SL6): a flush the
+re-validation refused as STALE (the departure not yet true, or the entry not yet true) is KEPT,
+keyed by its transfer with the tick it was asked, and tried again every tick from the next one;
+it ships the tick the entry or the departure becomes true (the same `SourceFlushed`, later); it
+is dropped when the crossing is no longer in flight (an abort or a commit cleared the latch),
+when the saga's ttl lapses, or when the subject vanished (a fault, as before). A refusal that
+was a fault (an unplaceable child, a subject this shard does not hold) is never kept. Example:
+a pilot walks into a hull; the scan fires with the pilot 20 m out; the flush is refused and
+kept; twelve ticks later the pilot stands inside, the kept flush ships, the saga commits — one
+attempt, a quarter of a second. Three counters read it (`flush_kept`, `flush_retry_shipped`,
+`flush_retry_dropped`). Two rig tests pin every arm: the kept-and-shipped path, the drop on an
+abort, on the ttl, on a vanished subject, and on a disarmed ttl. The storm's number follows.
+
+MEASURED, the first storm on the retry: 19 saga starts for 10 boardings — unchanged. The
+traced storm (the kept flush's life in the planet shard's log) then showed the whole shape:
+
+- The scan fires with the pilot 4.0 m outside the hull's shell. The flush is refused and KEPT.
+- The pilot stands at 4.0 m for twenty-six ticks (the walk arrived at its aim on the delivered
+  pose and cut the stick; the body glides to a stop), then 2.2 m, then inside.
+- The kept flush SHIPS on the retry, 28 ticks (0.56 s) after it was kept, 0.70 s after the saga
+  started. The retry works.
+- Sixty milliseconds later the scan fires AGAIN, attempt 1: the saga was already dead.
+
+Why the saga was dead, in two layers. First the saga's patience for the flush is the ABORT
+deadline (24 orchestrator ticks, 0.48 s at the dev cluster's rate) and the flush shipped at
+0.70 s. A trial that waited the request ttl instead (57 ticks) was flown and REVERTED: the storm
+still read two attempts a boarding, and a patience equal to the ttl breaks the invariant that the
+ttl strictly outlasts the saga (the source's re-drive would race a live saga by a tick).
+
+Second, and the real shape: on entering the freezing state the saga tells the GATEWAY to freeze
+the pilot's input at a marker. From that instant the pilot cannot walk. The twenty-six ticks at
+a constant 4.0 m outside are that freeze, not a glide; the move to 2.2 m and inside is the THAW
+after the abort, when the cut buffer drains at once; and attempt 1 then commits because the
+pilot now stands inside. So for an OCCUPANT — a pilot whose motion is their own input — a
+crossing decided while they are still outside the destination can never complete on that
+attempt: the freeze holds them where the decision found them. The kept flush is right and
+stays (it ships the moment the entry is true, and it is bounded), but it cannot move a frozen
+pilot. The LED point (the projection a request-ttl ahead) is used for the EXTERIOR lane alone —
+a hull the parent flies keeps flying under the freeze — so the occupant's decision was made on
+the pilot's own swept pose, and yet the flush found the pilot 4.0 m outside seven ticks later.
+Two hypotheses remained, one measurement apart: (a) the dev-control walk at 27 m/s passes
+through the hull's box before the freeze lands (a test-rig artefact a player at 1.4 m/s never
+meets); (b) the scan and the flush measure against different centres or books. THE MEASUREMENT
+(the containment scan at debug level, a kept storm): at the decision, tick 4425, the pilot's
+pose in the planet's frame is the hull's own box centre to four centimetres, and the scan reads
+it 2.98 m INSIDE the hull's region — a box of 12 by 6 by 40 m in the hull's own frame, so 3 m is
+the smallest half-width. At the refused flush, tick 4434, the flush's conversion lands the same
+pilot 18.8 m from the hull's origin and 5.7 m OUTSIDE the box. A pilot walks 0.54 m a tick at
+the dev speed; nine ticks are 4.9 m, not 18.8. So (a) looked dead and (b) looked alive. The
+next kept run printed, on the refusal line, the pose the flush read, the book's tick, the book's
+placement of the hull and the landed position — and it reversed that reading.
+
+**THE REFUSAL LINE'S NUMBERS (the second kept storm).** At the refused flush (tick 4431, the
+book at 4431) the book's placement of the hull is IDENTICAL to the placement the scan read at
+tick 4424, to the last decimal: the scan and the flush agree about where the hull is, and
+hypothesis (b) is dead. What differs is THE PILOT'S OWN POSE: the scan read it at the hull's
+centre; seven ticks later the flush read it 16.2 m away (1.9 m across, 7.6 m up, 14.3 m along
+the hull), 4.6 m outside the box; and the flush that committed at tick 4472 read it 1.3 m from
+the centre again. The pilot moved 16 m in seven ticks: 2.3 m a tick, about 115 m/s. The
+"0.54 m a tick" above was the WALK leg's share, not the boarding's: the boarding walked at the
+full dev stick (500 m/s, braked over the last 40 m), and the closed-loop drive steers from the
+delivered pose, which lags the server by the interpolation buffer — at metres a tick the
+pilot overshoots the aim by tens of metres and comes back. So (a) was right after all, with the
+true speed: the pilot passed THROUGH the hull's 12 m box in five ticks, the saga froze the pilot
+on the far side, and the flush refused the fast pass-through it was built to refuse. Then the
+thaw let the walk return the pilot to the centre and attempt 1 committed.
+
+**THE FIX IS THE RIG'S.** The product is right: a player walks 1.4 m/s, 0.028 m a tick, and is
+0.2 m further at the flush — inside; any occupant slower than the box's width over the saga's
+seven ticks (about 85 m/s for this hull) boards at the first attempt, and a faster one meets
+one abort and a second attempt a second later, which is the crossing's own conduct, not a seam.
+No special path for hulls or boardings and no longer deadline: the closed-loop walk gains a
+STICK SHARE (`WalkTo.speed_share`, zero = the full stick and every earlier caller), the crossing
+leg takes one (`cross_leg_at`), and the moving eye boards at the share its own walk leg measured
+for the foot speed (`FOOT_SHARE`). Every other crossing leg walks as before. The kept flush and
+its retry stay: bounded, tested, and right for any occupant that arrives within the ttl.
+
+**THE STORM ON THE FIX (ten boardings at the foot speed, 2026-09-12):** ten boardings, TEN saga
+starts, zero refused flushes, zero kept flushes; the same storm started nineteen sagas before.
+The flight's other legs are unchanged and green (1 039 s in all).
+
+(The round's coverage gate found one line the proptests hit only by a random draw — the saga's
+cut-timeout arm — against the FSM's own rule that coverage must never depend on a draw; it has
+its deterministic twin now, like the cancel arms.)
+
+### 24.4 The wall's throughput — the worker count as the only change, MEASURED
+
+The moving eye's 528 m/s leg, once with the machine's fourteen workers and once with seven
+(`VD_TERRAIN_WORKERS=7`), the same flight otherwise:
+
+| the 528 m/s leg              | 14 workers | 7 workers |
+|------------------------------|------------|-----------|
+| chunks built and harvested   | 399 / s    | 374 / s   |
+| one build, wall time         | 17.2 ms    | 14.6 ms   |
+| the workers' utilisation     | 49 %       | 78 %      |
+| parent-cache waits / builds  | 3 561 / 22 549 | 3 565 / 18 624 |
+| frames per second            | 30.7       | 43.3      |
+| frames with a gap            | 388        | 964       |
+| urgent chunks missing, worst | 178        | 218       |
+| the queue's peak             | 596        | 1 095     |
+
+Three readings. (1) At fourteen workers the workers idle half the time: the build is not the
+wall at that count. The 400 chunks a second are what the eye ASKS for; both counts deliver it.
+(2) At seven the queue doubles and the gap frames with it: seven is under the ask. (3) The
+frame rate is HIGHER with seven workers (43 against 31): fourteen builders starve the render
+thread of cores, and the pilot pays in frames. So the worker count has a middle worth finding
+(ten or eleven: enough for the ask, cores left for the picture) — one more flight each, the
+owner's lever. What fourteen workers cannot cure is the gap that stays: with the ask met, an
+urgent chunk is missing because it was asked LATE — the lead of 60 m is a tenth of a second at
+528 m/s, five frames, and a build takes one — so the next lever is the ASK's timing (a lead in
+time, or the wanted set computed a buffer ahead), not more builders. Example: a hull at
+528 m/s over a plain; the finest ring's chunks are built within a frame of being asked and
+still arrive a few frames late, because the ask itself came when the ground was already on the
+screen's edge.
+
+**THE HARVEST CAP AS THE ONLY CHANGE (2026-09-12, chain 17).** The 528 m/s leg at fourteen
+workers with the harvest cap at its default (48 chunks and 13.5 MB a frame) against the same
+flight with the cap doubled (`VD_TERRAIN_HARVEST_PER_FRAME=96 VD_TERRAIN_HARVEST_BYTES=22118400`,
+96 chunks and 21.6 MB a frame):
+
+| the 528 m/s leg, 14 workers  | cap 48 / 13.5 MB | cap 96 / 21.6 MB |
+|------------------------------|------------------|------------------|
+| chunks built and harvested   | 386 / s          | 413 / s          |
+| one build, wall time         | 17.1 ms          | 17.7 ms          |
+| the workers' utilisation     | 47 %             | 52 %             |
+| parent-cache hit rate        | 89 %             | 88 %             |
+| frames per second            | 30.9             | 29.6             |
+| frames on which the cap filled | 551 of 1 853   | 86 of 1 776      |
+| frames with a gap            | 397              | 48               |
+| urgent chunks missing, worst | 268              | 15               |
+| the queue's peak             | 845              | 173              |
+| the pop detector, widest     | 54               | 48               |
+
+The harvest cap WAS the wall at fourteen workers: doubling it cuts the gap frames by eight in
+nine (397 to 48), the worst gap from 268 urgent chunks to 15 and the queue's peak from 845 to
+173, for one frame a second (30.9 to 29.6) and 27 more chunks a second harvested. The
+residue — 48 frames, 15 chunks at the worst — is the late ask named above (the lead of 60 m
+at 528 m/s), which no cap cures. So the lever order is settled by measurement: the harvest cap
+first (a config change in `TerrainConfig`, the default owed a decision: 96 chunks and 21.6 MB
+a frame cost one frame a second on this machine and buy a band that stays whole), the ask's
+timing second, the worker count's middle third.
+
+**TEN WORKERS, THE CAP AT ITS DEFAULT (the same chain):** 37.2 frames a second (against 30.9
+at fourteen and 43.3 at seven), 416 chunks a second built and harvested, 15.7 ms a build, the
+workers busy 65 % of the time, the cap filled on 417 of 2 233 frames, 368 frames with a gap
+(42 urgent chunks at the worst), the queue's peak 306. The middle count buys six frames a
+second over fourteen and keeps the ask met, but the gap frames stay (368 against 397): the cap
+is the wall at ten too. So the two levers add: the cap doubled clears the gap, the count at ten
+gives the frames back. The next flight is the pair together, and the defaults follow the owner's
+choice between frames and a whole band on the owner's own machine.
+
+**THE PAIR TOGETHER (ten workers AND the cap doubled, chain 18):** 38.7 frames a second, 406
+chunks a second, 15.5 ms a build, the workers busy 63 %, the cap filled on ONE of 2 322 frames
+— and 380 frames with a gap (45 urgent chunks at the worst), the queue's peak 331. The cap never
+filled and the gap stayed. That contradicts the reading above, so the reading is withdrawn until
+measured again: the four flights are ONE each, and three of them (cap 48 at fourteen, cap 48 at
+ten, cap 96 at ten) sit at 368 to 397 gap frames while one (cap 96 at fourteen) sits at 48. A
+single flight at 48 against three at about 380 is either the lever or the scatter, and only a
+second flight of the same pair (fourteen workers, the cap doubled) tells which. That flight is
+queued after the coverage gate; until it lands the wall's lever is UNMEASURED, and the earlier
+"the cap IS the wall" is one sample.
+
+**THE TWIN LANDED (chain 20, fourteen workers + the cap doubled, the second flight):** 28.9
+frames a second, 421 chunks a second, 18.2 ms a build, the cap filled on 94 of 1 733 frames,
+103 frames with a gap (21 urgent chunks at the worst), the queue's peak 180. So the six flights
+read, gap frames at the 528 m/s leg:
+
+| workers | cap 48 / 13.5 MB | cap 96 / 21.6 MB |
+|---------|------------------|------------------|
+| 14      | 397, 388 (§24.4) | 48, 103          |
+| 10      | 368              | 380              |
+| 7       | 964              | —                |
+
+The reading that survives two samples: at FOURTEEN workers the doubled cap cuts the gap frames
+by four to eight times and the worst gap by an order (268 → 15, 21). At TEN workers the doubled
+cap changes nothing (368 → 380) although the cap never fills there: with fewer builders the
+chunks are late for a different reason (each urgent chunk waits behind the queue, 306 to 331
+deep, not behind the harvest), so the count and the cap are not substitutes — the count keeps
+the queue short, the cap lets the finished chunks onto the screen the frame they are done. The
+frames cost: 29 to 31 a second at fourteen against 37 to 39 at ten. THE OWNER'S CHOICE is now
+between two measured points on this machine: fourteen workers and the doubled cap (a whole band
+at 528 m/s but 30 frames a second) or ten workers (38 frames a second with 370 gap frames a
+minute at 528 m/s). The ask's timing (the lead in time) is the lever that could give both, and
+it is the next one to build; the defaults stay as they are until the owner picks.
+
+**A TRANSIENT SEEN ON THE WAY (three of eight flights):** the hull's WALKING leg reports a gap
+right after the boarding — 10, 51 and 76 frames, the worst sample missing 1, 293 and 1 265
+urgent chunks, the queue at 2 700 to 4 100 pending, the lead under a metre. That is the
+arrival's whole-band ask: the moment the pilot's origin moves into the hull, every chunk of the
+planet's band around the hull is wanted at once, at a speed where the lead cannot help. It is
+not new to this round (it shows on flights before and after every change here), it is bounded
+(the band fills within about a second), and it is the same "ask's timing" lever as the fast
+legs' residue: the wanted set computed a buffer ahead of a KNOWN crossing (the boarding's
+commit is known to the client one snapshot before the origin moves). Listed with the owed
+measurements; not a defect of the crossing (the pilot's own hull is drawn whole throughout —
+the missing chunks are the planet's band seen through the hull's windows).
+
+### 24.5 The caster's crossfade, MEASURED (item 3, 2026-09-12)
+
+The change: a coarse caster's fade bands are the DRAWN rung's (the rung it casts for), and in the
+shadow pass its sink scales with that rung's wholeness — full where the finer chunk stands whole,
+zero at the band's end where the finer chunk has morphed onto the caster's surface. So the caster
+that leaves and the drawn chunk that takes over cast the same surface, and the shadow's edge moves
+with the crossfade instead of at it (`shadow_material` builds the fade from `drawn_rung`; the
+prepass multiplies the sink by `whole(d)` under `LIGHT_CASTER`).
+
+The measurement is the pop detector's widest step per rung boundary, five flights before the
+change against two after it, the moving eye flown twice (the storm on item 15's fix and this chain's moving eye both carry
+the change):
+
+| leg | before (five flights) | after (two flights) |
+|---|---|---|
+| walk, rung 0 boundary | 12, 12, 16, 12, 12 | 16, 12, 12 |
+| walk, rung 1 boundary | 23, 20, 19, 19, 19 | 11, 10, 20 |
+| walk, widest of all | 23, 20, 19, 19, 19 | 16, 12, 20 |
+| hull 1.4 m/s, widest | 13, 17, 16, 19, 19 | 17, 16 |
+| hull 240 m/s, widest | 48, 37, 41, 53, 53 | 41, 45 |
+| hull 528 m/s, widest | 50, 47, 54, 47, 47 | 49, 54 |
+| hull turning, widest | 51, 50, 28, 61, 61 | 48, 53 |
+
+The walk's rung 1 handover read ten and eleven on the first two flights after the change and
+twenty on the third (the harvest-cap flight, whose walk leg never fills the cap): NO MEASURABLE
+CHANGE — the detector judges every pixel that crossed a rung boundary, and the shadow's edge is
+a small share of those, so a change in the shadow alone sits under this detector's floor. The
+hull legs are unchanged within their own scatter (the turning leg alone ranges 28 to 61 across
+five flights before the change): at 240 to 528 m/s the widest steps are not the caster's — they
+sit where the harvest wall's gap frames sit (§24.4), which is item 2's lever, not the shadow's.
+The still stands in report mode sit inside the report-mode scatter (§23), so the owner's frozen
+pictures need no re-freeze for this change on the evidence so far; the gate's own run decides.
+The change stands on its reasoning (the caster that leaves and the chunk that takes over cast
+the same surface at the handover) and on "no degradation" measured; a detector that judges the
+SHADOW'S edge alone (a mask on the lit-versus-shaded step, not on every rung crossing) is the
+measurement it still owes, and it is listed with the owed measurements below.
+
+### 24.6 The sibling's exact blend (item 4, 2026-09-12)
+
+A realm that is not the origin's ancestor (a sibling hull parked beside the pilot's hull, a
+moon seen from a ship in the same system) is drawn where its parent's ARC puts its parent at
+the frame's instant and where the sibling's own track puts it within that parent — the same
+blend the origin's chain uses, through `sample_via_parent` and `realm_pose_blended`. Before it,
+a sibling was drawn at its last shipped pose under its parent's arc-blended pose, and the two
+instants could differ by one snapshot. Unit tests in `vd-client` (248 green, the still-parent
+and moving-parent cases) prove the blend; the in-flight measurement (a second hull in view of
+the moving eye, judged by the pop detector) is owed with the storm's next extension.
