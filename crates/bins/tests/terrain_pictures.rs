@@ -86,6 +86,14 @@ const SUN_ELEVATION_BAND_DEG: (f64, f64) = (12.0, 18.0);
 const SUN_OFF_NOSE_BAND_DEG: (f64, f64) = (100.0, 140.0);
 /// How far below level each picture looks, in degrees.
 const GROUND_TILT_DEG: f64 = 8.0;
+/// (A FEATURE STAND — the sharpest metre-wide bump or pit within 60 m of the spot, seen from 4 m
+/// with the low sun throwing its shadow — was built and MEASURED 2026-09-12: the sharpest cell
+/// holds 0.01 m of relief over its neighbours two metres off; the recipe's finest octave has no
+/// metre-wide feature there. The stand waits for the block store's own features.)
+/// THE SEAM STAND: the eye on the edge of the spot's cube face, at the point whose sun elevation is
+/// nearest the spot's, looking along the seam tilted as the ground stand is — the face bend must not
+/// show (SL8: a seam is a defect). The edge is searched in this many steps.
+const SEAM_STEPS: i32 = 400;
 const HILL_TILT_DEG: f64 = 15.0;
 const ALOFT_TILT_DEG: f64 = 15.0;
 /// From orbit the horizon dips 40° below level; a nose 45° down puts the limb 5° over the frame's
@@ -156,6 +164,14 @@ const PICTURE_IDENTICAL_ENV: &str = "VD_PICTURE_IDENTICAL";
 const PICTURE_REPORT_ONLY_ENV: &str = "VD_PICTURE_REPORT_ONLY";
 /// A look measurement's capture grid, in multiples of the gate's.
 const LOOK_TICK_FACTOR: u64 = 3;
+/// Whether this stand freezes on this run: `VD_PICTURE_FREEZE` empty or `1` freezes every stand; a
+/// comma-separated list of names freezes those alone — a new stand's first reference, while the
+/// others' look stays the owner's to accept.
+fn freeze_wanted(name: &str) -> bool {
+    std::env::var(PICTURE_FREEZE_ENV)
+        .is_ok_and(|v| v.is_empty() || v == "1" || v.split(',').any(|s| s.trim() == name))
+}
+
 /// THE FREEZE (ruling V18): with this set the run writes its pictures as the frozen exact
 /// references and compares nothing — used ONCE, on the owner's acceptance of a look from the
 /// difference images, never by a gate. The next run compares against them.
@@ -293,6 +309,10 @@ struct Picture {
     tilt_deg: f64,
     band: (f64, f64),
     min_share: f64,
+    /// Where the star may stand off the nose, in degrees: over the shoulder for the stands that
+    /// choose their nose; anywhere behind the shoulder for the seam, whose nose the edge chooses
+    /// (MEASURED: no edge point has the star both low and 100°–140° off a nose along the edge).
+    off_nose_band: (f64, f64),
 }
 
 /// The capture client for one picture: the agent index picks the account. No flag: the client
@@ -441,6 +461,7 @@ fn take_picture(
         band,
         min_share,
         tilt_deg,
+        off_nose_band,
         ..
     } = *pic;
     let client_quic = reserve_udp_addr();
@@ -930,8 +951,8 @@ fn take_picture(
         star.elevation_deg
     );
     assert!(
-        (SUN_OFF_NOSE_BAND_DEG.0..=SUN_OFF_NOSE_BAND_DEG.1).contains(&star.off_nose_deg),
-        "{name}: the star stands {:.2}° off the nose, outside {SUN_OFF_NOSE_BAND_DEG:?}",
+        (off_nose_band.0..=off_nose_band.1).contains(&star.off_nose_deg),
+        "{name}: the star stands {:.2}° off the nose, outside {off_nose_band:?}",
         star.off_nose_deg
     );
     // 4. THE RULER: the stamp's stated ball, projected through the pilot camera, against its disc on
@@ -1040,7 +1061,7 @@ fn take_picture(
     let reference = exact.join(format!("{name}.png"));
     let reference_probe = exact.join(format!("{name}.probe.png"));
     let reference_hud = exact.join(format!("{name}.hud.json"));
-    if std::env::var_os(PICTURE_FREEZE_ENV).is_some() {
+    if freeze_wanted(name) {
         // A freeze records the GATE's moment: a look measurement's coarser grid may never become
         // the reference (refutation of the ladder, finding 5).
         assert!(
@@ -1308,11 +1329,90 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let hill = stand(d, HILL_M, h, nose(HILL_TILT_DEG));
     let aloft = stand(d, ALOFT_M, h, nose(ALOFT_TILT_DEG));
     let orbit = stand(d, ORBIT_M, h, nose(ORBIT_TILT_DEG));
+    let height_at = |p: DVec3| {
+        vd_terrain::height::height_m(
+            &body,
+            [Gf::from_f64(p.x), Gf::from_f64(p.y), Gf::from_f64(p.z)],
+            0,
+        )
+        .to_f64()
+    };
+    // THE SEAM: the point on the cube's twelve edges (every face's four), looking along the edge
+    // one way or the other, where the star stands INSIDE the gate's elevation band and nearest
+    // `SUN_OFF_NOSE_DEG` off the nose (the light over the shoulder, as every stand has it); where
+    // no point of any edge meets the band, the nearest by the sum of both misses. MEASURED on the
+    // spot's face alone: the elevation's nearest point put the star straight behind (177.75° off
+    // the nose), and the sum's nearest put it 37.65° up — the spot's own face has no edge point
+    // with the star low AND over the shoulder.
+    let seam_param = |i: i32| -1.0 + 2.0 * f64::from(i) / f64::from(SEAM_STEPS);
+    let seam_at = |face: vd_seed::bend::Face, edge: i32, i: i32| {
+        let (a, b) = match edge {
+            0 => (1.0, seam_param(i)),
+            1 => (-1.0, seam_param(i)),
+            2 => (seam_param(i), 1.0),
+            _ => (seam_param(i), -1.0),
+        };
+        DVec3::from_array(vd_seed::bend::direction(face, a, b))
+    };
+    // The nose along the edge at step `i`, one way (`sign` ±1), and the star's angles there.
+    let seam_nose = |face: vd_seed::bend::Face, edge: i32, i: i32, sign: f64| {
+        let p = seam_at(face, edge, i);
+        let tangent = (seam_at(face, edge, (i + 1).min(SEAM_STEPS))
+            - seam_at(face, edge, (i - 1).max(0)))
+        .normalize()
+            * sign;
+        let level_sun = (sun - p * sun.dot(p)).normalize();
+        let elevation = sun.dot(p).clamp(-1.0, 1.0).asin().to_degrees();
+        let off_nose = tangent.dot(level_sun).clamp(-1.0, 1.0).acos().to_degrees();
+        (p, tangent, elevation, off_nose)
+    };
+    let in_band =
+        |elevation: f64| (SUN_ELEVATION_BAND_DEG.0..=SUN_ELEVATION_BAND_DEG.1).contains(&elevation);
+    let mut seam = (f64::MAX, vd_seed::bend::Face::ALL[0], 0_i32, 0_i32, 1.0_f64);
+    for face in vd_seed::bend::Face::ALL {
+        let mut edge = 0;
+        while edge < 4 {
+            let mut i = 0;
+            while i <= SEAM_STEPS {
+                for sign in [1.0, -1.0] {
+                    let (_, _, elevation, off_nose) = seam_nose(face, edge, i, sign);
+                    let off_miss = (off_nose - SUN_OFF_NOSE_DEG).abs();
+                    // Inside the band the off-nose miss alone; outside it, a full turn's worth
+                    // more plus the elevation's miss, so any in-band point wins.
+                    let miss = if in_band(elevation) {
+                        off_miss
+                    } else {
+                        360.0 + (elevation - SUN_ELEVATION_DEG).abs() + off_miss
+                    };
+                    if miss < seam.0 {
+                        seam = (miss, face, edge, i, sign);
+                    }
+                }
+                i += 1;
+            }
+            edge += 1;
+        }
+    }
+    let (seam_dir, seam_ahead, seam_elevation, seam_off_nose) =
+        seam_nose(seam.1, seam.2, seam.3, seam.4);
+    let seam_h = height_at(seam_dir);
+    let seam_t = GROUND_TILT_DEG.to_radians();
+    let seam_forward = (seam_ahead * seam_t.cos() - seam_dir * seam_t.sin()).normalize();
+    let seam_stand = stand(seam_dir, EYE_HEIGHT_M, seam_h, seam_forward);
+    eprintln!(
+        "terrain_pictures: THE SEAM on edge {} of {:?} at step {} looking {} (the star \
+         {seam_elevation:.2}° up, {seam_off_nose:.2}° off the nose)",
+        seam.2,
+        seam.1,
+        seam.3,
+        if seam.4 > 0.0 { "forward" } else { "back" }
+    );
     let spawn_poses = [
         spawn_entry(CLIENT_ACCOUNT_BASE, body.seed(), &ground),
         spawn_entry(CLIENT_ACCOUNT_BASE + 1, body.seed(), &hill),
         spawn_entry(CLIENT_ACCOUNT_BASE + 2, body.seed(), &aloft),
         spawn_entry(CLIENT_ACCOUNT_BASE + 3, body.seed(), &orbit),
+        spawn_entry(CLIENT_ACCOUNT_BASE + 4, body.seed(), &seam_stand),
     ]
     .join(";");
     let face = vd_seed::bend::face_of([d.x, d.y, d.z]);
@@ -1340,6 +1440,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             tilt_deg: GROUND_TILT_DEG,
             band: (0.55, 1.0),
             min_share: 0.95,
+            off_nose_band: SUN_OFF_NOSE_BAND_DEG,
         },
     );
     let (hill_chunks, hill_share) = take_picture(
@@ -1353,6 +1454,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             tilt_deg: HILL_TILT_DEG,
             band: (0.5, 1.0),
             min_share: 0.95,
+            off_nose_band: SUN_OFF_NOSE_BAND_DEG,
         },
     );
     let (aloft_chunks, aloft_share) = take_picture(
@@ -1366,6 +1468,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             tilt_deg: ALOFT_TILT_DEG,
             band: (0.5, 1.0),
             min_share: 0.95,
+            off_nose_band: SUN_OFF_NOSE_BAND_DEG,
         },
     );
     let (orbit_chunks, orbit_share) = take_picture(
@@ -1382,12 +1485,27 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             // the sky in the corners), so the band starts under it.
             band: (0.72, 1.0),
             min_share: 0.95,
+            off_nose_band: SUN_OFF_NOSE_BAND_DEG,
+        },
+    );
+    let (seam_chunks, seam_share) = take_picture(
+        &f,
+        a.gateway,
+        &body,
+        planet,
+        &Picture {
+            name: "seam",
+            agent_index: 4,
+            tilt_deg: GROUND_TILT_DEG,
+            band: (0.55, 1.0),
+            min_share: 0.95,
+            off_nose_band: (SUN_OFF_NOSE_BAND_DEG.0, 180.0),
         },
     );
     eprintln!(
         "terrain_pictures: ground {ground_chunks} chunks ({ground_share:.3}), hill {hill_chunks} \
          chunks ({hill_share:.3}), aloft {aloft_chunks} chunks ({aloft_share:.3}), orbit \
-         {orbit_chunks} chunks ({orbit_share:.3})"
+         {orbit_chunks} chunks ({orbit_share:.3}), seam {seam_chunks} chunks ({seam_share:.3})"
     );
     let past = PAST_TOLERANCE.lock().expect("the verdicts");
     assert!(
@@ -1412,5 +1530,9 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     assert!(
         orbit_chunks >= ORBIT_CHUNKS_MIN,
         "the orbit picture holds the globe"
+    );
+    assert!(
+        seam_chunks >= GROUND_CHUNKS_MIN,
+        "the seam picture holds the ladder"
     );
 }

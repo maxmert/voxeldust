@@ -473,6 +473,12 @@ pub(crate) const ATTRIBUTE_SPLAT_CORNER: MeshVertexAttribute =
     MeshVertexAttribute::new("LadderSplatCorner", 0x5741_0016, VertexFormat::Float32x2);
 const SPLAT_SHADER_LOCATION: u32 = 10;
 const SPLAT_SHADER_DEF: &str = "SPLAT";
+/// THE MORPH NORMAL (D-TERRAIN-5 item 20): the shade the next coarser rung draws at the vertex's
+/// morph target, packed like the vertex's own normal; the shader blends the two across the
+/// fade-out band as it blends the positions — shader location 11, on every ground mesh.
+pub(crate) const ATTRIBUTE_MORPH_NORMAL: MeshVertexAttribute =
+    MeshVertexAttribute::new("LadderMorphNormal", 0x5741_0018, VertexFormat::Snorm16x2);
+const MORPH_NORMAL_SHADER_LOCATION: u32 = 11;
 const LIGHT_CASTER_SHADER_DEF: &str = "LIGHT_CASTER";
 const LIGHT_CASTER_ENV: &str = "VD_TERRAIN_LIGHT_CASTER";
 
@@ -500,6 +506,7 @@ fn ground_vertex_layout(
         normal,
         ATTRIBUTE_MORPH.at_shader_location(MORPH_SHADER_LOCATION),
         ATTRIBUTE_RADIAL.at_shader_location(RADIAL_SHADER_LOCATION),
+        ATTRIBUTE_MORPH_NORMAL.at_shader_location(MORPH_NORMAL_SHADER_LOCATION),
     ];
     if layout.0.contains(ATTRIBUTE_SPLAT_CORNER) {
         descriptor.vertex.shader_defs.push(SPLAT_SHADER_DEF.into());
@@ -3023,14 +3030,24 @@ fn image_copy_extract(
     mut commands: Commands,
     image_copiers: Extract<Query<&ImageCopier>>,
     cfg: Extract<Option<Res<CaptureCfg>>>,
-    terrain: Extract<Option<Res<terrain::Terrain>>>,
+    net: Extract<Option<Res<Net>>>,
 ) {
     commands.insert_resource(ImageCopiers {
         copiers: image_copiers.iter().cloned().collect(),
         frame: cfg.as_ref().map_or(0, |c| u64::from(c.frame)),
-        // THE TERRAIN STAMP of this very frame (slice 8 step 6): the extract runs after every
-        // main-world system of the frame, so the stamp is the one the extracted scene draws.
-        stamp: terrain.as_ref().and_then(|t| t.stamp.clone()).map(Arc::new),
+        // THE TERRAIN STAMP of this very frame (slice 8 step 6), THE PUBLISHED ONE: the extract
+        // runs after every main-world system of the frame — the placement that completed the
+        // stamp AND the overlay that wrote its rectangle on it — so the stamp beside the pixels
+        // is the frame's whole stamp. MEASURED with the resource's copy instead: the overlay's
+        // rectangle read zero on every recorded frame, the judge masked nothing, and the
+        // readouts that change while a hull turns set the turning leg's floor at 70 levels.
+        stamp: net.as_ref().and_then(|n| {
+            n.terrain_stamp
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .map(Arc::new)
+        }),
     });
 }
 

@@ -298,6 +298,66 @@ impl Column {
 /// The wanted chunks of one face and rung, by column.
 type ColumnIndex = BTreeMap<(i32, i32), Vec<ChunkKey>>;
 
+/// THE SHADOW'S REACH, for the casters (D-TERRAIN-5 item 18): how far the sun's cascades reach from
+/// the eye, the tangent of the sun's incidence at the eye, and how many rungs coarser a caster
+/// stands than the chunk that asks for it. A drawn chunk asks for its coarse caster only while that
+/// caster's shadow can fall on ground the cascades cover — see [`ShadowReach::caster_bound_m`].
+/// MEASURED without it (§19.10): 858 casters, 221 MB, at the ground stand, most past the shadow's
+/// reach and never cast.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadowReach {
+    /// The cascades' farthest distance from the eye, in metres.
+    pub reach_m: f64,
+    /// The tangent of the sun's incidence at the eye (zero overhead; capped by the caller at a
+    /// low sun, as the shadow bias caps it).
+    pub tan_i: f64,
+    /// How many rungs coarser a caster stands than the drawn chunk that asks for it.
+    pub coarse_step: u8,
+}
+
+/// How much the sun's tangent may change before the casting set is recomputed: a tenth of the
+/// larger tangent, plus [`SHADOW_TAN_FLOOR`] (so a sun at the zenith, whose tangent is zero, does
+/// not recompute on every frame's rounding).
+pub const SHADOW_TAN_HYSTERESIS: f64 = 0.1;
+pub const SHADOW_TAN_FLOOR: f64 = 0.01;
+
+impl ShadowReach {
+    /// The rung the caster of a drawn chunk of `rung` stands at, on a ladder whose top rung is
+    /// `top`: never past the top (refutation, 2026-09-12: a clamp at the global `RUNG_MAX` sampled
+    /// columns on rungs the body does not have). A chunk of the top rung has no caster.
+    #[must_use]
+    pub fn caster_rung(&self, rung: u8, top: u8) -> u8 {
+        rung.saturating_add(self.coarse_step).min(top)
+    }
+
+    /// THE CASTER BOUND for a caster column that peaks at `peak_m` (a radius) over ground within
+    /// the reach no lower than `low_m` (a radius): the farthest the CASTER'S nearest point may
+    /// stand from the eye and still throw a shadow onto that ground. The shadow of a peak
+    /// `peak − low` over the ground reaches `(peak − low) × tan` along it — nothing when the peak
+    /// stands under the ground. Both terms over-estimate, so a caster that could cast is always
+    /// asked for. MEASURED with the whole relief in place of the peak (the ground stand, the sun
+    /// 15° up): 858 → 838 casters — a 5 km relief at a low sun reaches 40 km, so the peak's own
+    /// height is the bound that bites; and with the caster's diagonal added to the bound in place
+    /// of its own nearest distance, every coarse chunk within a rung-12 caster's 227 km asked.
+    #[must_use]
+    pub fn caster_bound_m(&self, peak_m: f64, low_m: f64) -> f64 {
+        let shadow_m = (peak_m - low_m).max(0.0) * self.tan_i;
+        self.reach_m + shadow_m
+    }
+
+    /// Whether `other` is the same reach for the casting set's purposes: the same reach and step,
+    /// and tangents within [`SHADOW_TAN_HYSTERESIS`] of the larger one plus [`SHADOW_TAN_FLOOR`]
+    /// — symmetric, and never zero-width.
+    #[must_use]
+    pub fn same_as(&self, other: ShadowReach) -> bool {
+        let width =
+            SHADOW_TAN_HYSTERESIS * self.tan_i.abs().max(other.tan_i.abs()) + SHADOW_TAN_FLOOR;
+        (self.reach_m == other.reach_m)
+            & (self.coarse_step == other.coarse_step)
+            & ((self.tan_i - other.tan_i).abs() <= width)
+    }
+}
+
 /// THE WANTED SET: the chunks the ladder wants for one body, coarsest ring first, indexed by column
 /// so the release hold is a lookup and never a scan (SL9).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -321,6 +381,11 @@ pub struct WantedSet {
     /// by any lead; the want margin builds most before they show, and the pop detector (step
     /// 6) judges the rest. Counted apart, so the band's verdict stays the band's.
     revealed: BTreeSet<ChunkKey>,
+    /// THE CASTING CHUNKS (item 18): the wanted chunks whose coarse caster may throw a shadow
+    /// onto ground within the sun's reach ([`ShadowReach::caster_bound_m`]); meaningful only
+    /// while `bounded` — a descent without a shadow reach lets every chunk cast.
+    casting: BTreeSet<ChunkKey>,
+    bounded: bool,
     /// How far the ladder reaches, in metres, and the rungs it holds.
     pub reach_m: f64,
     pub rung_min: u8,
@@ -366,6 +431,23 @@ impl WantedSet {
     #[must_use]
     pub fn contains(&self, key: ChunkKey) -> bool {
         self.set.contains(&key)
+    }
+
+    /// Whether a wanted chunk may ask for its coarse caster (item 18): every chunk while the
+    /// descent had no shadow reach, else the casting set's own.
+    #[must_use]
+    pub fn casts(&self, key: ChunkKey) -> bool {
+        !self.bounded | self.casting.contains(&key)
+    }
+
+    /// How many wanted chunks may ask for a caster.
+    #[must_use]
+    pub fn casting_count(&self) -> usize {
+        if self.bounded {
+            self.casting.len()
+        } else {
+            self.keys.len()
+        }
     }
 
     /// Mark a wanted chunk's territory.
@@ -512,6 +594,9 @@ pub struct LadderView {
     /// metre, and each flip released and rebuilt it — 4 chunks missing on 80 of 1 383 samples.
     /// Keeping is free (the chunk is resident); rebuilding is not.
     kept: BTreeSet<Column>,
+    /// THE SHADOW'S REACH for the casters (item 18), the renderer's to set from the sun and its
+    /// cascades before a descent; `None` lets every wanted chunk ask for its caster.
+    pub shadow: Option<ShadowReach>,
     /// THE CULLED COLUMNS: every column past the horizon the last descent judged hidden. Such a
     /// column stays skyline-judged until it lies well inside the horizon
     /// ([`HORIZON_HYSTERESIS`]): the horizon moves with the eye's height (a walker over a bump,
@@ -600,7 +685,13 @@ fn column_geometry(
 struct Sweep<'a> {
     ladder: &'a vd_seed::ladder::Ladder,
     body: &'a BodyDefinition,
+    /// Each rung's keys with their territory.
     per_rung: Vec<Vec<(ChunkKey, Territory)>>,
+    /// The shadow's reach (item 18), `None` when every chunk may cast.
+    shadow: Option<ShadowReach>,
+    /// THE LOWEST GROUND WITHIN THE SHADOW'S REACH, a sampled radius in metres, over the columns
+    /// the descent met inside the reach: the ground a caster must stand over to shade.
+    low_within_reach_m: f64,
 }
 
 impl Sweep<'_> {
@@ -652,6 +743,10 @@ impl Sweep<'_> {
                 (true, false) => Territory::Revealed,
             };
             let top_z = vd_terrain::digest::top_chunk_z(body, col.rung);
+            // The lowest ground within the shadow's reach, for the casting set (item 18).
+            if self.shadow.is_some_and(|s| geo.near <= s.reach_m) {
+                self.low_within_reach_m = self.low_within_reach_m.min(span.sampled_low_m.to_f64());
+            }
             let mut z = span.lo;
             while z <= span.hi.min(top_z) {
                 per_rung[col.rung as usize].push((
@@ -738,6 +833,8 @@ impl LadderView {
             ladder: &ladder,
             body,
             per_rung: vec![Vec::new(); usize::from(rungs)],
+            shadow: self.shadow,
+            low_within_reach_m: f64::MAX,
         };
         // The roots: every top-rung column of every face.
         let n_top = ladder.cells_per_edge(top) as i32;
@@ -833,6 +930,7 @@ impl LadderView {
         }
         let mut out = WantedSet {
             reach_m: reach,
+            bounded: sweep.shadow.is_some(),
             ..WantedSet::default()
         };
         let mut emitted: Vec<(RequestOrder, ChunkKey, Territory)> = Vec::new();
@@ -854,9 +952,40 @@ impl LadderView {
             }
         }
         emitted.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        // THE CASTING SET (item 18): a chunk asks for its caster while its column's nearest point
+        // lies within the caster bound read from the CASTER column's own peak over the lowest
+        // ground within the reach (no ground within the reach: nothing to shade, the reach and the
+        // diagonal alone). With no shadow reach, every chunk.
+        let shadow = sweep.shadow;
+        let low_m = sweep.low_within_reach_m;
         for (_, key, territory) in emitted {
             out.push(key);
             out.mark(key, territory);
+            let casting = shadow.is_none_or(|s| {
+                let caster_rung = s.caster_rung(key.rung, top);
+                // The top rung has no coarser rung to cast for it: it never asks.
+                if caster_rung == key.rung {
+                    return false;
+                }
+                let step = caster_rung - key.rung;
+                let caster = Column {
+                    face: key.face,
+                    rung: caster_rung,
+                    x: key.x.div_euclid(1 << step),
+                    y: key.y.div_euclid(1 << step),
+                };
+                let peak_m = self.span(body, caster).peak_m.to_f64();
+                let low_m = if low_m == f64::MAX { peak_m } else { low_m };
+                // The caster's own nearest point, never nearer than the eye's height over the
+                // relief (a column wider than the eye is high reads under the eye by the disc).
+                let caster_near_m = column_geometry(&ladder, &frame, eye, caster, surface)
+                    .near
+                    .max(altitude - relief_m(body));
+                caster_near_m <= s.caster_bound_m(peak_m, low_m)
+            });
+            if casting {
+                out.casting.insert(key);
+            }
         }
         // The columns this descent wanted or judged clear of the skyline, and the ones it culled,
         // for the next one's hysteresis. A far column that only descends (its own rung emits
@@ -892,6 +1021,150 @@ pub fn column_under(body: &BodyDefinition, dir: [f64; 3], rung: u8) -> Column {
 mod tests {
     use super::*;
     use vd_terrain::home::home_planet;
+
+    /// THE CASTING SET (item 18): without a shadow reach every wanted chunk may cast; with one,
+    /// the chunks near the eye cast and the far ones do not, the bound growing with the sun's
+    /// tangent and with the rung's relief; the same reach within a tenth in the tangent is the
+    /// same for the recompute's purposes.
+    #[test]
+    fn a_shadow_reach_bounds_which_chunks_ask_for_a_caster() {
+        let body = home_planet();
+        let r = body.ladder().radius_m();
+        let eye = [r + EYE_HEIGHT_M, 0.0, 0.0];
+        let free = LadderView::default().wanted(&body, eye);
+        assert!(free.keys.iter().all(|k| free.casts(*k)));
+        assert_eq!(free.casting_count(), free.keys.len());
+        let mut view = LadderView::default();
+        let reach = ShadowReach {
+            reach_m: switch_m(2),
+            tan_i: 0.0,
+            coarse_step: 2,
+        };
+        view.shadow = Some(reach);
+        let bounded = view.wanted(&body, eye);
+        let casting = bounded.casting_count();
+        assert!(casting > 0);
+        assert!(casting < bounded.keys.len());
+        // The finest ring stands at the eye: every one of its chunks casts. The chunks that do
+        // not cast stand farther than every one that does (their columns' nearest points).
+        let finest: Vec<ChunkKey> = bounded
+            .keys
+            .iter()
+            .filter(|k| k.rung == bounded.rung_min)
+            .copied()
+            .collect();
+        assert!(!finest.is_empty());
+        assert!(finest.iter().all(|k| bounded.casts(*k)));
+        let surface = body.ladder().radius_m();
+        let frame = EyeFrame::new(DVec3::from_array(eye));
+        let top = body.ladder().rungs - 1;
+        // The CASTER column's nearest point, for a drawn key.
+        let caster_nearest = |k: &ChunkKey| {
+            let caster_rung = reach.caster_rung(k.rung, top);
+            let step = caster_rung - k.rung;
+            column_geometry(
+                body.ladder(),
+                &frame,
+                DVec3::from_array(eye),
+                Column {
+                    face: k.face,
+                    rung: caster_rung,
+                    x: k.x.div_euclid(1 << step),
+                    y: k.y.div_euclid(1 << step),
+                },
+                surface,
+            )
+            .near
+        };
+        // Rung by rung, below the top: the casters that are not asked for stand farther than
+        // every one that is (the sun overhead, so the bound is the reach alone).
+        for rung in bounded.rung_min..top {
+            let casting_max = bounded
+                .keys
+                .iter()
+                .filter(|k| (k.rung == rung) & bounded.casts(**k))
+                .map(caster_nearest)
+                .fold(f64::MIN, f64::max);
+            let silent_min = bounded
+                .keys
+                .iter()
+                .filter(|k| (k.rung == rung) & !bounded.casts(**k))
+                .map(caster_nearest)
+                .fold(f64::MAX, f64::min);
+            assert!(
+                silent_min >= casting_max,
+                "rung {rung}: {silent_min} vs {casting_max}"
+            );
+        }
+        // A lower sun throws longer shadows: more chunks cast.
+        view.shadow = Some(ShadowReach {
+            tan_i: 8.0,
+            ..reach
+        });
+        let low_sun = view.wanted(&body, eye);
+        assert!(low_sun.casting_count() >= casting);
+        // The bound: the reach, the peak's shadow over the low ground, the caster's diagonal; a
+        // peak under the ground shades nothing (the reach and the diagonal alone), and the
+        // diagonal grows with the rung.
+        let sun = ShadowReach {
+            reach_m: 100.0,
+            tan_i: 2.0,
+            coarse_step: 2,
+        };
+        assert!((sun.caster_bound_m(1_030.0, 1_000.0) - 160.0).abs() < 1e-9);
+        assert!((sun.caster_bound_m(990.0, 1_000.0) - 100.0).abs() < 1e-9);
+        // The caster's rung never passes the body's top rung.
+        assert_eq!(sun.caster_rung(0, 12), 2);
+        assert_eq!(sun.caster_rung(11, 12), 12);
+        assert_eq!(sun.caster_rung(12, 12), 12);
+        // The ladder's top rung has no caster: none of its chunks asks (a low sun, so the bound
+        // alone would let them).
+        assert!(
+            low_sun
+                .keys
+                .iter()
+                .filter(|k| k.rung == top)
+                .all(|k| !low_sun.casts(*k))
+        );
+        // The hysteresis is symmetric and has a floor: a zenith sun's tangents agree.
+        let sym = ShadowReach {
+            reach_m: 100.0,
+            tan_i: 1.0,
+            coarse_step: 2,
+        };
+        assert!(ShadowReach { tan_i: 0.0, ..sym }.same_as(ShadowReach {
+            tan_i: 0.005,
+            ..sym
+        }));
+        assert_eq!(
+            sym.same_as(ShadowReach { tan_i: 1.2, ..sym }),
+            ShadowReach { tan_i: 1.2, ..sym }.same_as(sym)
+        );
+        // NO GROUND WITHIN THE REACH (an eye 60 km up, the reach a few kilometres): nothing to
+        // shade, so no chunk asks for a caster.
+        let aloft = view.wanted(&body, [r + 60_000.0, 0.0, 0.0]);
+        assert!(!aloft.keys.is_empty());
+        assert_eq!(aloft.casting_count(), 0);
+        // The same reach within a tenth of the tangent; a different one past it.
+        let base = ShadowReach {
+            reach_m: 100.0,
+            tan_i: 1.0,
+            coarse_step: 2,
+        };
+        assert!(base.same_as(ShadowReach {
+            tan_i: 1.05,
+            ..base
+        }));
+        assert!(!base.same_as(ShadowReach { tan_i: 1.2, ..base }));
+        assert!(!base.same_as(ShadowReach {
+            reach_m: 200.0,
+            ..base
+        }));
+        assert!(!base.same_as(ShadowReach {
+            coarse_step: 1,
+            ..base
+        }));
+    }
 
     #[test]
     fn the_tier_rule_is_the_finest_rung_with_a_cell_of_one_pixel() {

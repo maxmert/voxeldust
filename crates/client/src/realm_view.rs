@@ -237,9 +237,27 @@ impl RealmView {
     /// difference between them the same difference the server computed — which is the shake fix.
     #[must_use]
     pub fn realm_pose(&self, realm: RealmId, cursor: f64) -> Option<RenderPose> {
+        // On the arc (item 21): a row blended as the origin's placement in the row's frame.
         self.placements
             .get(&realm)
-            .map(|track| track.sample(cursor))
+            .map(|track| track.sample_arc(cursor))
+    }
+
+    /// A row's placement at `cursor`, ON THE ARC when the row is one of the origin's ancestors
+    /// (its facing change in the window IS the origin's own turn, so the recomposition is exact)
+    /// and on the plain blend otherwise (refutation, 2026-09-12: a sibling realm spinning on its
+    /// own would have its centre pulled toward the eye by the chord's deficit — the arc cannot
+    /// tell a row's own spin from the origin's turn, and the plain blend is exact for a centre
+    /// that does not move).
+    #[must_use]
+    pub fn realm_pose_on(&self, realm: RealmId, cursor: f64, arc: bool) -> Option<RenderPose> {
+        self.placements.get(&realm).map(|track| {
+            if arc {
+                track.sample_arc(cursor)
+            } else {
+                track.sample(cursor)
+            }
+        })
     }
 
     /// SLICE 6 S5 — how the streamed realm placements classify at `cursor`; see

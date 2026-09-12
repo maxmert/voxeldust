@@ -107,6 +107,14 @@ pub struct ChunkGeometry {
     /// do not belong there (refutation N-2, the same rule as the bounds, P-8). The engine chooses
     /// by rung which form a mesh carries.
     pub packed_normals: Vec<[i16; 2]>,
+    /// THE MORPH NORMAL of each vertex (D-TERRAIN-5 item 20): the shade the next coarser rung
+    /// draws where this vertex's morph target lies — the parent's smooth normal at the radial's
+    /// hit — packed like `packed_normals`; the vertex's own normal where no parent triangle is on
+    /// its radial (the field's own, the top rung's, a cave's). The shader blends it with the own
+    /// normal across the fade-out band as it blends the positions, so the shade hands over with
+    /// the shape. MEASURED without it (§22.2): at 240 m/s 13 % of the pixels at the rung 1→2
+    /// handover stepped by up to 48 levels in one frame.
+    pub morph_normals: Vec<[i16; 2]>,
     /// THE RADIAL of each vertex (step 5): its unit direction from the body's centre in the
     /// realm's frame, narrowed once to `f32` — the shader needs no centre of the body (MEASURED
     /// with a centre uniform instead: a moving eye rewrote every material and the engine
@@ -133,8 +141,9 @@ pub struct ChunkGeometry {
 pub const RADIAL_STEP_RAD: f64 = 2.0e-7;
 
 /// The bytes a ground vertex costs the engine at the packed rungs (position 12, packed normal
-/// 4, morph 4, radial 12 — ruling V18's form); the exact rungs cost eight more.
-pub const UPLOAD_VERTEX_BYTES: u64 = 32;
+/// 4, morph normal 4, morph 4, radial 12 — ruling V18's form with item 20); the exact rungs cost
+/// eight more.
+pub const UPLOAD_VERTEX_BYTES: u64 = 36;
 
 impl ChunkGeometry {
     /// THE BYTES THIS CHUNK UPLOADS (ruling V15 item 2, the harvest's byte budget): its vertices
@@ -329,6 +338,10 @@ pub struct ParentMesh {
     /// switch distance.
     origin: DVec3,
     positions: Vec<[f32; 3]>,
+    /// THE PARENT'S OWN SHADING (D-TERRAIN-5 item 20): its smooth per-vertex normals, packed as
+    /// the drawn chunks pack theirs, so a finer vertex that morphs onto a parent triangle can
+    /// carry the shade the parent draws there.
+    normals: Vec<[i16; 2]>,
     triangles: ParentTriangles,
     /// THE BUCKETS as one table: for the lattice cell `(a, b)` of the parent's box, `−1..=62`
     /// each, the triangles that span it lie in `bucket_tris[bucket_start[c]..bucket_start[c+1]]`
@@ -479,10 +492,15 @@ impl ParentMesh {
             }
         }
         let vertices = positions.len();
+        let normals = smooth_normals(&positions, &mesh.triangles)
+            .iter()
+            .map(|n| oct_encode(*n))
+            .collect();
         Some(ParentMesh {
             key,
             origin,
             positions,
+            normals,
             triangles: ParentTriangles::pack(mesh.triangles, vertices),
             bucket_start,
             bucket_tris,
@@ -513,6 +531,7 @@ impl ParentMesh {
     #[must_use]
     pub fn bytes(&self) -> usize {
         self.positions.capacity() * std::mem::size_of::<[f32; 3]>()
+            + self.normals.capacity() * std::mem::size_of::<[i16; 2]>()
             + self.triangles.bytes()
             + self.bucket_start.capacity() * std::mem::size_of::<u32>()
             + self.bucket_tris.capacity() * std::mem::size_of::<u32>()
@@ -523,13 +542,24 @@ impl ParentMesh {
     /// once (a cave under the surface); `None` when no triangle of that cell is on the radial.
     #[must_use]
     pub fn radial_hit_m(&self, a: i32, b: i32, dir: DVec3, near_m: f64) -> Option<f64> {
-        let mut best: Option<f64> = None;
+        self.radial_hit(a, b, dir, near_m).map(|(h, _)| h)
+    }
+
+    /// [`radial_hit_m`](Self::radial_hit_m) with THE PARENT'S SHADE at the hit (item 20): the
+    /// parent's smooth normal interpolated over the triangle the radial met, as the parent draws
+    /// it there — what a finer vertex morphing onto that triangle must shade like at the band's
+    /// far edge.
+    #[must_use]
+    pub fn radial_hit(&self, a: i32, b: i32, dir: DVec3, near_m: f64) -> Option<(f64, DVec3)> {
+        // The nearest hit with its triangle and the crossing's weights; the shade is decoded once,
+        // for the winner alone (refutation, 2026-09-12: every candidate was decoded).
+        let mut best: Option<(f64, [u32; 3], f64, f64)> = None;
         let range = parent_bucket(a, b).map_or(0..0, |c| {
             self.bucket_start[c] as usize..self.bucket_start[c + 1] as usize
         });
         for i in &self.bucket_tris[range] {
             let t = self.triangles.get(*i as usize);
-            let hit = ray_triangle_m(
+            let hit = ray_triangle(
                 dir,
                 self.position(t[0]),
                 self.position(t[1]),
@@ -538,12 +568,20 @@ impl ParentMesh {
             // The nearest hit; a tie goes to the lower one, so the answer never depends on the
             // order the triangles were met in.
             best = match (best, hit) {
-                (Some(b), Some(h)) if ((h - near_m).abs(), h) < ((b - near_m).abs(), b) => Some(h),
-                (None, Some(h)) => Some(h),
+                (Some((b, _, _, _)), Some((h, u, v)))
+                    if ((h - near_m).abs(), h) < ((b - near_m).abs(), b) =>
+                {
+                    Some((h, t, u, v))
+                }
+                (None, Some((h, u, v))) => Some((h, t, u, v)),
                 (b, _) => b,
             };
         }
-        best
+        best.map(|(h, t, u, v)| {
+            let n = |k: u32| DVec3::from_array(oct_decode(self.normals[k as usize]).map(f64::from));
+            let shade = (n(t[0]) * (1.0 - u - v) + n(t[1]) * u + n(t[2]) * v).normalize_or_zero();
+            (h, shade)
+        })
     }
 }
 
@@ -553,6 +591,13 @@ impl ParentMesh {
 /// edge both answer, with the same distance.
 #[must_use]
 pub fn ray_triangle_m(dir: DVec3, p0: DVec3, p1: DVec3, p2: DVec3) -> Option<f64> {
+    ray_triangle(dir, p0, p1, p2).map(|(t, _, _)| t)
+}
+
+/// [`ray_triangle_m`] with the crossing's barycentric weights `(u, v)` of `p1` and `p2` (`p0`
+/// weighs `1 − u − v`), for the shade the parent draws at the crossing.
+#[must_use]
+pub fn ray_triangle(dir: DVec3, p0: DVec3, p1: DVec3, p2: DVec3) -> Option<(f64, f64, f64)> {
     let e1 = p1 - p0;
     let e2 = p2 - p0;
     let h = dir.cross(e2);
@@ -568,7 +613,7 @@ pub fn ray_triangle_m(dir: DVec3, p0: DVec3, p1: DVec3, p2: DVec3) -> Option<f64
     let v = dir.dot(q) * inv;
     let t = e2.dot(q) * inv;
     let inside = (u >= -RAY_SLACK) & (v >= -RAY_SLACK) & (u + v <= 1.0 + RAY_SLACK) & (t > 0.0);
-    inside.then_some(t)
+    inside.then_some((t, u, v))
 }
 
 /// A determinant under this is a ray parallel to the triangle.
@@ -1001,6 +1046,8 @@ pub fn geometry_with(
     let mut vertices: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
     let mut morph: Vec<f32> = Vec::with_capacity(mesh.vertices.len());
     let mut radials: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
+    // The parent's shade at each vertex's target, where a parent triangle was hit (item 20).
+    let mut shades: Vec<Option<DVec3>> = Vec::with_capacity(mesh.vertices.len());
     let sink_len = sink_m(body, key.rung);
     // The coarser rung's surface along each vertex's radial: where the radial meets a parent
     // mesh, nearest the vertex's own radius; the coarser FIELD where no parent triangle is on
@@ -1053,12 +1100,14 @@ pub fn geometry_with(
             let on_mesh = parent_meshes
                 .iter()
                 .filter(|_| !at_seam)
-                .fold(None, |best: Option<f64>, pm| {
+                .fold(None, |best: Option<(f64, DVec3)>, pm| {
                     let (a, b) = parent_cell(key, pm.key(), *v);
-                    let hit = pm.radial_hit_m(a, b, dir, len);
+                    let hit = pm.radial_hit(a, b, dir, len);
                     match (best, hit) {
-                        (Some(b), Some(h)) if ((h - len).abs(), h) < ((b - len).abs(), b) => {
-                            Some(h)
+                        (Some((b, _)), Some((h, s)))
+                            if ((h - len).abs(), h) < ((b - len).abs(), b) =>
+                        {
+                            Some((h, s))
                         }
                         (None, Some(h)) => Some(h),
                         (b, _) => b,
@@ -1066,7 +1115,9 @@ pub fn geometry_with(
                 })
                 // A hit farther than the two surfaces can stand apart is another surface (a
                 // cave under this one): the field, then.
-                .filter(|h| (h - len).abs() <= reach_m);
+                .filter(|(h, _)| (h - len).abs() <= reach_m);
+            shades.push(on_mesh.map(|(_, s)| s));
+            let on_mesh = on_mesh.map(|(h, _)| h);
             // The coarser field, read only where no hit stands: the target then, and the
             // judge of what the vertex is — a SURFACE vertex with no parent triangle on its
             // radial is a fallback (counted; the gate bounds it), a vertex far under the field
@@ -1095,7 +1146,19 @@ pub fn geometry_with(
         radials.push([dir.x as f32, dir.y as f32, dir.z as f32]);
     }
     let normals = smooth_normals(&vertices, &mesh.triangles);
-    let packed_normals = normals.iter().map(|n| oct_encode(*n)).collect();
+    let packed_normals: Vec<[i16; 2]> = normals.iter().map(|n| oct_encode(*n)).collect();
+    // The top rung morphs to itself and pushes no shade; every other rung one per vertex.
+    let morph_normals: Vec<[i16; 2]> = if shades.is_empty() {
+        packed_normals.clone()
+    } else {
+        shades
+            .iter()
+            .zip(packed_normals.iter())
+            .map(|(shade, own)| {
+                shade.map_or(*own, |s| oct_encode([s.x as f32, s.y as f32, s.z as f32]))
+            })
+            .collect()
+    };
     let mut geometry = ChunkGeometry {
         key,
         origin_m,
@@ -1106,6 +1169,7 @@ pub fn geometry_with(
         vertices,
         normals,
         packed_normals,
+        morph_normals,
         triangles: mesh.triangles,
         radials,
         bounds: ([0.0; 3], [0.0; 3]),
@@ -1183,6 +1247,8 @@ fn add_skirts(g: &mut ChunkGeometry, drop_m: f64) {
         g.normals.push(g.normals[b as usize]);
         g.packed_normals.push(g.packed_normals[a as usize]);
         g.packed_normals.push(g.packed_normals[b as usize]);
+        g.morph_normals.push(g.morph_normals[a as usize]);
+        g.morph_normals.push(g.morph_normals[b as usize]);
         // The strip faces away from the triangle's third corner: the winding whose normal points
         // from the edge's middle away from that corner.
         let n = (pb - pa).cross(at(qb) - pa);
@@ -2133,6 +2199,7 @@ mod tests {
             },
             origin: DVec3::ZERO,
             positions: vec![near[0], near[1], near[2], far[0], far[1], far[2]],
+            normals: vec![oct_encode([1.0, 0.0, 0.0]); 6],
             triangles: ParentTriangles::pack(vec![[0, 1, 2], [3, 4, 5]], 6),
             bucket_start: bucket_start.clone(),
             bucket_tris: bucket_tris.clone(),
@@ -2146,11 +2213,27 @@ mod tests {
             key: pm.key,
             origin: DVec3::ZERO,
             positions: vec![far[0], far[1], far[2], near[0], near[1], near[2]],
+            // The far triangle shaded along Y, the near one along X (item 20).
+            normals: vec![
+                oct_encode([0.0, 1.0, 0.0]),
+                oct_encode([0.0, 1.0, 0.0]),
+                oct_encode([0.0, 1.0, 0.0]),
+                oct_encode([1.0, 0.0, 0.0]),
+                oct_encode([1.0, 0.0, 0.0]),
+                oct_encode([1.0, 0.0, 0.0]),
+            ],
             triangles: ParentTriangles::pack(vec![[0, 1, 2], [3, 4, 5]], 6),
             bucket_start,
             bucket_tris,
         };
         assert_eq!(swapped.radial_hit_m(0, 0, DVec3::X, 115.0), Some(100.0));
+        // THE PARENT'S SHADE AT THE HIT (item 20): the near triangle's X, the far one's Y.
+        let (near_hit, near_shade) = swapped.radial_hit(0, 0, DVec3::X, 102.0).expect("near");
+        assert_eq!(near_hit, 100.0);
+        assert!((near_shade - DVec3::X).length() < 1e-3, "{near_shade:?}");
+        let (far_hit, far_shade) = swapped.radial_hit(0, 0, DVec3::X, 128.0).expect("far");
+        assert_eq!(far_hit, 130.0);
+        assert!((far_shade - DVec3::Y).length() < 1e-3, "{far_shade:?}");
     }
 
     #[test]
@@ -2679,6 +2762,7 @@ mod tests {
             vertices: vec![[0.0; 3]; 70_000],
             normals: Vec::new(),
             packed_normals: Vec::new(),
+            morph_normals: Vec::new(),
             radials: Vec::new(),
             triangles: vec![[0, 1, 2]],
             bounds: ([0.0; 3], [0.0; 3]),
@@ -2887,6 +2971,7 @@ mod tests {
             vertices: Vec::new(),
             normals: Vec::new(),
             packed_normals: Vec::new(),
+            morph_normals: Vec::new(),
             radials: Vec::new(),
             triangles: Vec::new(),
             bounds: ([0.0; 3], [0.0; 3]),

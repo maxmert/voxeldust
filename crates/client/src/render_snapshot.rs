@@ -387,7 +387,8 @@ impl RenderSnapshot {
         if self.realm_view.is_empty() {
             return (*self.scene).clone();
         }
-        self.scene.overlaid_at(&self.realm_view, cursor)
+        self.scene
+            .overlaid_at(&self.realm_view, cursor, self.origin)
     }
 
     /// The scene to DRAW at wall-time `now_s` — [`RenderSnapshot::scene_at`] on this snapshot's own

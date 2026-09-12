@@ -16,7 +16,7 @@
 //! is a pure function of identity with no per-kind arm (adversary H3). H4: the shape→vertex
 //! tessellation lives HERE in Tier-A, not in the coverage-exempt renderer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use glam::DVec3;
 use vd_core::geometry::Boundary;
@@ -286,12 +286,19 @@ impl RealmScene {
     /// from the pose's own label, the same statement the old code was reaching through `frame` to get),
     /// the drawn point is bit-identical, and `frame` keeps one meaning for the whole session.
     #[must_use]
-    pub fn overlaid_at(&self, view: &RealmView, cursor: f64) -> RealmScene {
+    pub fn overlaid_at(
+        &self,
+        view: &RealmView,
+        cursor: f64,
+        origin: Option<RealmId>,
+    ) -> RealmScene {
+        // THE ARC for the origin's ancestors alone (item 21; refutation 2026-09-12).
+        let on_arc = self.ancestors_of(origin);
         let boxes = self
             .0
             .iter()
             .map(|(&realm, boot)| {
-                let overlaid = match view.realm_pose(realm, cursor) {
+                let overlaid = match view.realm_pose_on(realm, cursor, on_arc.contains(&realm)) {
                     Some(live) => RealmBox {
                         // The streamed pose carries its coarse cell SEPARATELY from its fine offset;
                         // recombine both. Taking `live.pos` alone (as this did) silently dropped the
@@ -318,6 +325,24 @@ impl RealmScene {
             })
             .collect();
         RealmScene(boxes)
+    }
+}
+
+impl RealmScene {
+    /// THE ORIGIN'S ANCESTORS: the origin itself and its parents up the scene's parent links,
+    /// stopping at a realm the scene does not hold or a link already seen (a cycle — which also
+    /// bounds the walk by the scene's size, so no hop count is needed). Empty with no origin.
+    #[must_use]
+    pub fn ancestors_of(&self, origin: Option<RealmId>) -> BTreeSet<RealmId> {
+        let mut chain = BTreeSet::new();
+        let mut at = origin;
+        while let Some(realm) = at {
+            if !chain.insert(realm) {
+                break;
+            }
+            at = self.0.get(&realm).and_then(|b| b.parent);
+        }
+        chain
     }
 }
 
@@ -1222,7 +1247,7 @@ mod tests {
                 }],
             },
         );
-        let scene = level.overlaid_at(&view, f64::INFINITY);
+        let scene = level.overlaid_at(&view, f64::INFINITY, None);
         // Planet 1 moved: its CENTRE is the streamed value, carrying the streamed COARSE CELL as well
         // as the offset (dropping the cell here is the slice-5 defect), and the UNIT that cell is
         // counted in is the one the streamed pose stated.
@@ -1248,8 +1273,71 @@ mod tests {
         );
         // An EMPTY view overlays to the level scene byte-identical (the walk-scale case).
         assert_eq!(
-            level.overlaid_at(&RealmView::default(), f64::INFINITY),
+            level.overlaid_at(&RealmView::default(), f64::INFINITY, None),
             level
+        );
+        // With the origin stated, the planet on the origin's chain is overlaid on the arc: one
+        // pose alone, the same value (the arc's one-pose window is the plain blend).
+        let on_arc = level.overlaid_at(&view, f64::INFINITY, Some(RealmId::Planet(1)));
+        assert_eq!(
+            on_arc.get(RealmId::Planet(1)),
+            scene.get(RealmId::Planet(1))
+        );
+    }
+
+    /// THE ORIGIN'S ANCESTORS: the origin and its parents up the links the scene holds; a parent
+    /// the scene does not hold ends the chain; a cycle ends it; no origin, no chain.
+    #[test]
+    fn the_ancestors_of_the_origin_follow_the_parent_links_and_stop_at_a_cycle() {
+        let level = RealmScene::from_scene_rows(&[
+            row(
+                RealmId::System(7),
+                None,
+                DVec3::new(0.0, 0.0, 0.0),
+                look_shell(50.0),
+            ),
+            row(
+                RealmId::Planet(1),
+                Some(RealmId::System(7)),
+                DVec3::new(20.0, 0.0, 0.0),
+                look_shell(5.0),
+            ),
+            row(
+                RealmId::Station(2),
+                Some(RealmId::Planet(1)),
+                DVec3::new(-25.0, 0.0, 0.0),
+                look_shell(3.0),
+            ),
+            row(
+                RealmId::Station(3),
+                Some(RealmId::Planet(1)),
+                DVec3::new(25.0, 0.0, 0.0),
+                look_shell(3.0),
+            ),
+        ])
+        .expect("the level projects");
+        assert!(level.ancestors_of(None).is_empty());
+        let chain = level.ancestors_of(Some(RealmId::Station(2)));
+        assert_eq!(
+            chain,
+            BTreeSet::from([RealmId::Station(2), RealmId::Planet(1), RealmId::System(7)])
+        );
+        assert!(!chain.contains(&RealmId::Station(3)));
+        // An origin the scene does not hold is its own chain.
+        assert_eq!(
+            level.ancestors_of(Some(RealmId::Planet(9))),
+            BTreeSet::from([RealmId::Planet(9)])
+        );
+        // A cycle ends the walk with every link seen once.
+        let mut looped = level.clone();
+        looped
+            .0
+            .get_mut(&RealmId::System(7))
+            .expect("the system's box")
+            .parent = Some(RealmId::Station(2));
+        assert_eq!(
+            looped.ancestors_of(Some(RealmId::Station(2))),
+            BTreeSet::from([RealmId::Station(2), RealmId::Planet(1), RealmId::System(7)])
         );
     }
 

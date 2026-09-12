@@ -1573,6 +1573,12 @@ walking dot)"*. The moving eye's slow leg walks a character at 1.4 m/s — the b
 step 4 — and the detector reads it (floor 1, no pop). A hull flown at 1.4 m/s is a fifth leg if
 the ruling's letter is wanted; the refuter raised it (finding 13), and it waits for the owner.
 
+BUILT 2026-09-12 (the hardening arc, §23): the hull's legs are 1.4, 240 and 528 m/s, the slow one
+first, from rest. MEASURED: the push quantum (one tick at the hull's rating) takes the hull to
+2.8 m/s, past the target; the band held on every frame, the detector's floor 1 with 231 pixels
+past it (the widest 23) at the rung 2→3 edge — the hull stands 1.35 km up, so rung 2 is its
+finest. The ruling's letter is met.
+
 ### 22.4 The under-surface floor (D-TERRAIN-5 item 12)
 
 An eye the recipe's surface stands over (a dip where the mesh cuts under the field, a cave, the
@@ -1583,3 +1589,313 @@ skyline keeps its own truth below: MEASURED in the unit test, an eye ten metres 
 wants the same reach and finest rung as a standing eye, its coarsest ring no coarser and its
 chunks no more than the standing eye's (the far rings walled off by the ground around it: rung 3
 against 10 on the fixture, a comment in the test, not its gate) — never the reach-wide flood.
+
+## 23. THE HARDENING (2026-09-12, the owner: "build an extremely strong foundation first")
+
+### 23.1 Item 21(a), the arc — DONE
+
+A realm row is stated in the origin's frame: its centre is where that realm's origin stands as
+seen from the pilot's own realm. When the origin turns, every row's centre swings on an arc
+around the pilot, and a straight blend of two centres cuts the chord (§22.3: 8 km inside the arc
+at fifty degrees a second). Now a row is blended as THE ORIGIN'S OWN PLACEMENT IN THE ROW'S
+FRAME — the pilot's position there lerped, the pilot's rotation there slerped — and the row's
+centre and facing are recomposed at the cursor: on the arc, with no new data and no knowledge of
+which rows are the pilot's ancestors (every row is treated alike; the residue moves to the row's
+own spin over one tick, half a millimetre on a planet's radius). Where nothing turns the plain
+blend runs, byte-identical.
+
+MEASURED: the four stands within one level (7 / 11 / 10 / 0 pixels); the turning leg at up to
+fifty degrees a second — the lead 15 to 62 m through the turn (2 741 to 8 831 m before), the
+altitude flat at 1 700 m (dips to −8 km before), the band held on every frame with 6 433 chunks
+on screen at the least. The detector's floor on the turning leg stayed at 71 levels: a second
+cause moves the whole picture while the hull turns (the shadow cascades re-fitted to a rotating
+frustum are the suspect; an ablation with the shadows off measures it, §23.2).
+
+The 528 m/s leg on the same flight: a gap on 567 frames, the queue at 1 666 — and 166 / 210 on
+the flight before it. The wall's own variance is that wide; §22.2's "unattributed improvement"
+was the variance, not a change.
+
+### 23.2 The turning leg's floor, FOUND — the overlay's readouts (2026-09-12)
+
+With the arc in place the turning leg's detector floor stayed at 70 levels, with the shadows on
+and off alike (an ablation flight: the walk and the straight legs read the same without shadows,
+the 240 m/s handover's count halved — the shadow caster changes rung at the same edge as the
+normals do). A kept flight (`VD_KEEP_FIXTURE=1`) put the turning pairs under an offline reader:
+the misses had no global shift (a pose or timing error would show one), and the step image
+showed them: THE OVERLAY. The stamp's readouts stand inside the terrain the probe marks, the
+judge never masked them, and while a hull turns the readouts change every frame ("the planet
+turned …°", the lead, the light off the nose) — thousands of digit pixels at tens of levels,
+enough to set the floor at the still pixels' 99.9th percentile. On a straight leg the readouts
+barely change, so the floor read 1. The judge now masks the stamp's own rectangle
+(`hud_rect_px`, grown by the glyphs' antialiasing as the picture gate grows it) in both frames.
+The same reader showed a frozen pair inside a turn (two frames with one eye, no step): a
+delivery stall at the render cursor, the tick-hitch class, seen once; the census counters of the
+window's tracks are the instrument for it when it recurs.
+
+MEASURED with the mask (the flight after §23.3's fix): the turning leg's floor fell from 70 to
+14 levels (234 pixels past it of 18.7 million compared, the widest 48 at the rung 2→3
+handover); the walk and the straight legs read as before (floors 1, 1, 2). The residual 14,
+ATTRIBUTED by the step image of a kept turning pair: the pilot's own sphere (the stand-in body
+drawn at the own pose, which the probe marks as its own kind, so the judge skips it) and ITS
+CAST SHADOW on the ground — a dark wedge under the overlay that swings across the terrain as
+the hull turns. The shadow's pixels are terrain in both frames, shaded by a moving object: a
+true change of the picture, not a pop of the ladder. It sets the still pixels' 99.9th
+percentile only on the turning leg, where the sphere swings.
+
+### 23.3 A drive that outlived its realm — the boarding push, FOUND AND FIXED (2026-09-12)
+
+The flight that carried the mask panicked before its turning leg: "the hull never reached
+528 m/s (at 448.2 m/s)". Twelve pushes of 0.8 s each (a push adds 80 m/s at the hull's rating)
+left the reading where it was. The kept fixture (`VD_KEEP_FIXTURE`) told the story from its
+state dumps:
+
+- During the walk the hull's box stood still at the berth (0.0 m/s over sixty seconds, facing
+  identity). Before the pilot boarded, nothing pushed it.
+- The first leg started with no push: the reading was already 448 m/s. From inside the hull
+  the eye moved along the planet's body `−Y` axis at 443 m/s in a straight line — no gravity
+  bent it, and the radial part (23 % of it) climbed the hull from 2 343 m to 7 248 m. And the
+  planet's box facing in the window turned about the hull's own `Y` between every dump: THE
+  HULL SPUN. A push along a spinning nose averages to nothing, which is why twelve pushes read
+  as none.
+
+What pushed it. The boarding is a crossing leg: `WalkTo` the berth, a point stated in the
+planet's frame, in chunks of 400 ticks. In this flight the first crossing attempt was refused
+(the hand-off found the pilot 5.16 m outside the hull, "the occupant has left the destination")
+and the second attempt committed ten seconds later — INSIDE a walk chunk. From that tick the
+drive read its planet-frame target from the pilot's new pose in the hull's frame: a point
+6 200 km away, so a full stick on all three axes, every tick, for the rest of the chunk. Inside
+a hull the pilot's stick is the hull's drive (the temporary control seam): a push on three
+axes and a torque. 443 m/s along one body axis and a spin about it is exactly that stick held
+for four and a half seconds. The green flights had committed while the pilot stood parked
+(arrived, throttle cut, waiting), so the same chunk never straddled the commit there — the
+difference between the flights was timing, not code.
+
+The fix, at the harness seam (HR6, the product untouched): a closed-loop drive (`WalkTo`,
+`LookAt`) remembers the location label of its first delivered pose. When a later pose carries
+another label the drive pushes its release (a zero `Move` for the walk, a zero `Look` delta for
+the look) and returns a new reply, `Crossed { state }` — its target was stated in the realm the
+entity left, so continuing is not a walk any more. `vdctl` maps it to exit code 4; the crossing
+legs read the reached label straight from the reply. Two findings this leaves open, both under
+item 15: the first crossing attempt is refused on EVERY boarding (both green flights show two
+saga starts ten seconds apart; the scan decides "inside", the hand-off seven ticks later finds
+the pilot 5.16 m outside — two shapes, or a pilot still moving); and the §17.7 boarding that
+never settled (the lead eye 5 591 km off, under the surface for three minutes) has the shape
+of THIS mechanism at a higher spin — a chunk that straddled the swap, the hull driven and spun,
+the lead eye swung on the chord — which the boarding storm can now confirm or refute.
+
+MEASURED on the fix: the boarded hull stood at rest (the first push ran 2.43 s to 234 m/s, as
+on the green flights), the 528 m/s push ran 2.91 s to 525 m/s, every leg flew, the band held on
+every frame of the walk, the 240 m/s leg and the turn (the 528 m/s leg's wall: 527 gap frames,
+1 731 queued — inside its measured variance), and the flight passed.
+
+THE BOARDING STORM on the fix (`VD_BOARDINGS=10`, item 15): ten of ten pilots crossed and
+settled, each in two to eight seconds, every refill course normal (the lead at zero, the
+altitude sane, the urgent count falling to zero within six seconds); the boarding that never
+settled (§17.7) did not recur. Nineteen saga starts for ten boardings: nine first attempts were
+refused ("the occupant has left the destination", 5 m outside the hull seven ticks after the
+scan found it inside) and one was accepted at once — the refusal is the rule, not a race, and
+it costs ten seconds a boarding. It stays open under item 15 as its own question: the scan's
+shape against the hand-off's.
+
+### 23.4 Item 20, the morph normal — BUILT AND MEASURED (2026-09-12)
+
+The crossfade morphed positions and kept each vertex's own normal (§22.2): a finer rung's
+crease under a smooth coarser face shaded one way until the coarser rung took over, then the
+other — at 240 m/s, 13 % of the pixels crossing the rung 1→2 boundary stepped by up to 45
+levels in one frame. Now the parent mesh keeps its smooth normals (packed as the drawn chunks
+pack theirs), the radial hit returns the parent's normal interpolated over the triangle it met,
+and every vertex carries a MORPH NORMAL beside its own — the shade the next coarser rung draws
+at its morph target (its own where no parent triangle stands on its radial, and at the top
+rung). The shaders blend the two with the same weight that blends the positions, in the main
+pass, the prepass and the probe alike. Four bytes a vertex (36 at the packed rungs).
+
+MEASURED, the moving eye (pixels past the floor at the boundary, and the widest step):
+
+| boundary                | before          | with the morph normal |
+|-------------------------|-----------------|-----------------------|
+| walk, rung 0→1          | 239 (20 levels) | 164 (13)              |
+| 240 m/s, rung 1→2       | 3 843 (45)      | 376 (46)              |
+| 240 m/s, rung 2→3       | 1 038 (32)      | 1 065 (26)            |
+| 528 m/s, all boundaries | 7 122 (51)      | 3 998 (48)            |
+| 528 m/s, rung 2→3       | 5 656 (51)      | 2 845 (48)            |
+
+The rung 1→2 handover at 240 m/s fell tenfold. The rung 2→3 handover did not move: the shadows-
+off ablation (§23.2) had already put that edge on the shadow caster, which changes rung at the
+same boundary (item 18's territory, the caster's own handover). The widest steps stay (one
+pixel in a million at a crease the parent's smooth normal cannot carry); the floors are
+unchanged (1, 1, 2, 15).
+
+MEASURED, the stands (the picture gate in report-only mode, against the frozen references):
+ground 5 301 of 635 560 content pixels differ (the widest step 7), hill 116 713 of 701 472
+(13), aloft 131 469 of 586 341 (8), orbit 6 946 of 466 445 (2). The change is the crossfade
+bands' shading, which now hands over with the shape; on the hill the band's crease that stood
+across the reference is gone. THE OWNER'S LOOK IS OWED before the references freeze: the
+before/after crops of each stand's most-changed window are
+`docs/investigation/2026-09-07/pictures/look/<stand>_morph_normal_before_left_after_right.png`
+(the reference on the left, the morph normal on the right, three times life size).
+
+THE OWNER ACCEPTED THE LOOK (2026-09-12, "the look is fine"): every stand's exact reference is
+frozen on the gate's own grid with the morph normal in it — the four older stands and the seam
+— and the strict gate reads green against them.
+
+### 23.5 Item 19, the done queue — BOUNDED AND MEASURED (2026-09-12)
+
+The workers handed finished chunks to the harvest over an unbounded channel: when the harvest
+lagged, every finished chunk waited in memory with its whole geometry (2 551 of them on the
+528 m/s leg, 2.2 GB of small allocations over the minute). The channel is now bounded from the
+harvest's own rate — four frames of the harvest cap, 192 chunks — and a worker that finishes a
+chunk while that many wait pauses on the hand-over until the harvest takes one.
+
+MEASURED on the 528 m/s leg (the flight before, with the morph normal, against the flight
+with the bound):
+
+| the 528 m/s leg                    | unbounded  | bounded |
+|------------------------------------|------------|---------|
+| small allocations, growth          | +2 424 MB  | +14 MB  |
+| footprint, growth                  | +2 743 MB  | +262 MB |
+| resident, growth                   | +2 641 MB  | +3 MB   |
+| chunks harvested                   | 23 000     | 23 389  |
+| the queue's peak (pending)         | 2 027      | 1 044   |
+| urgent chunks missing at the worst | 1 216      | 313     |
+| frames with a gap                  | 671        | 502     |
+
+The wall itself moved with it: the workers no longer build ahead into memory nobody drains, so
+the queue and the worst gap fell by half or more (one flight; the wall's variance is wide,
+§23.1, so the gap numbers are indicative, the memory numbers are not in doubt).
+
+### 23.6 Item 18, the casters past the reach — BOUNDED AND MEASURED (2026-09-12)
+
+Every drawn chunk from the coarse rung up asked for its coarse caster, wherever it stood: the
+ground stand held 858 casters (221 MB), most of them past the sun's cascades and never cast.
+Now the ladder view decides which drawn chunks may ask (Tier-A, from the eye): a chunk asks
+while its column's nearest point lies within THE CASTER BOUND — the cascades' reach, plus the
+longest shadow its caster can throw onto ground within the reach, plus the caster's own
+diagonal — and the renderer wants and unwants casters as chunks enter and leave that set on
+every recompute (a change of the sun's tangent past a tenth recomputes too). The sun's tangent
+is read at every placement of the sun (the bias read it once, at its birth).
+
+MEASURED, the first bound — the whole relief over the sun's tangent: the ground stand 858 →
+838 casters (236 MB), the hill 858, the aloft 182 (45 MB), the orbit 0; the pictures within
+run noise of the flight before (ground 5 301 → 5 301 pixels against the reference, hill
+116 713 → 116 713, aloft 131 469 → 131 461, orbit 6 946 → 6 949 — the run-to-run noise is a
+dozen pixels, §23.1), so no shadow was lost. The bound barely bit: a 5 km relief at a 15° sun
+reaches 40 km, farther than the ladder's own drawn ground at the stands. The bound now reads
+THE CASTER COLUMN'S OWN PEAK over the lowest ground within the reach (a caster whose peak
+stands under that ground shades none of it, whatever the sun); its measurement follows.
+
+MEASURED, the peak bound (the same stands, the same 15° sun):
+
+| stand  | casters before | with the peak bound | the picture against the reference |
+|--------|----------------|---------------------|-----------------------------------|
+| ground | 858 (221 MB)   | 576 (182 MB)        | 5 301 pixels, as before           |
+| hill   | 858 (238 MB)   | 556 (174 MB)        | 116 713, as before                |
+| aloft  | 182 (45 MB)    | 0                   | 131 461, as before                |
+| orbit  | 0              | 0                   | 6 949, as before                  |
+
+No shadow was lost on any stand (the diffs against the frozen references are the morph
+normal's, unchanged to the pixel on the ground and the hill). From 60 km up nothing lies within
+the cascades' reach, so the aloft stand casts nothing at all now. On the ground a third of the
+casters and forty megabytes went; the rest stand within the reach or hold a peak that can
+shade it at a 15° sun — an honest bound, not a cap. The 528 m/s leg on the same flight: the
+queue peaked at 1 113, 302 urgent chunks missing at the worst sample, 559 frames with a gap
+(against 2 027 / 1 216 / 671 before items 18 and 19), the footprint grew 34 MB over the leg.
+
+THE CASTER'S OWN NEAREST POINT (after the refutation, §23.8): the bound had tested the drawn
+chunk's nearest point against the reach plus the shadow plus the CASTER'S DIAGONAL, and a
+coarse caster's diagonal is hundreds of kilometres (a rung-12 caster: 227 km), so every coarse
+chunk within that asked — the savings were the fine rungs' alone. Now the caster column's own
+geometry gives its nearest point (floored at the eye's height over the relief, because a
+column wider than the eye is high reads under the eye by the disc bound), and that is tested
+against the reach plus the shadow alone. The caster's rung is clamped to the body's top rung
+and a top-rung chunk never asks (it has no coarser rung).
+
+MEASURED, the caster's own nearest point (the same stands, the same 15° sun):
+
+| stand  | casters, unbounded | the peak bound | the caster's own nearest point |
+|--------|--------------------|----------------|--------------------------------|
+| ground | 858 (221 MB)       | 576 (182 MB)   | 414 (158 MB)                   |
+| hill   | 858 (238 MB)       | 556 (174 MB)   | 394 (150 MB)                   |
+| aloft  | 182 (45 MB)        | 0              | 0                              |
+| orbit  | 0                  | 0              | 0                              |
+| seam   | 616 (188 MB)       | —              | 488 (161 MB)                   |
+
+Every picture unchanged against its reference to the pixel (ground 5 301, hill 116 708 against
+116 713 — the run noise, aloft 131 461, orbit 6 946, seam 5 227): no shadow lost. Half the
+ground stand's casters and sixty megabytes went. The 528 m/s leg on the same flight: the
+queue peaked at 976, 276 urgent chunks missing at the worst sample, 416 frames with a gap
+(2 027 / 1 216 / 671 before items 18 and 19), the small allocations grew 142 MB over the leg
+(2.4 GB before item 19), and the turning leg's lead stayed within 26 to 45 m with the arc on
+the origin's ancestors alone.
+
+### 23.7 Two more stands — the seam kept, the feature refused by the world (2026-09-12)
+
+THE SEAM: the eye on one of the cube's twelve edges, looking along it tilted as the ground
+stand is, at the point where the star stands inside the gate's elevation band (12°–18°) and
+nearest over the shoulder. The face bend must not show (SL8): a picture along the seam,
+frozen, keeps it in the gate. MEASURED on the way there: the spot's own face's nearest point
+by elevation put the star straight behind (177.75° off the nose); the nearest by the sum of
+both misses put it 37.65° up; and over all twelve edges no point has the star both low and
+100°–140° off a nose along the edge — the edges cross the star's low ring where they run
+toward it (17.96° up and 177.71° off the nose at best). So the off-nose band is now the
+picture's own: the four stands that choose their nose keep 100°–140°, the seam accepts the
+star anywhere behind the shoulder (100°–180°; the light from behind, the ground lit, no
+glare). A per-stand freeze (`VD_PICTURE_FREEZE=seam`, a comma list; `1` or empty freezes
+every stand) lets a new stand take its first reference while the older stands' look stays the
+owner's to accept.
+
+THE FEATURE, refused: the stand was to picture the sharpest metre-wide bump or pit within
+60 m of the spot from 4 m, with the low sun throwing its shadow (the 4 m caster at the feet
+loses a metre-wide rock's shadow, §19.10). MEASURED from the recipe: the sharpest cell's
+relief over its neighbours two metres off is 0.01 m — the recipe's finest octave has no
+metre-wide feature there, and the picture would have been flat ground (the ruler's centroid
+gate also read 1.07 px off at a 21° nose, the disc's own perspective). The stand comes back
+with the block store's features, which are the metre-wide things the world will have.
+
+### 23.8 The refutation of the hardening arc (2026-09-12)
+
+A read-only refuter over the whole change set returned sixteen findings. What changed, and
+what stands:
+
+- **The caster's rung clamped at the global `RUNG_MAX`, not the body's top rung** (a defect):
+  every top-rung chunk sampled a caster column on a rung the ladder does not have — a phantom
+  span of twenty-five height evaluations per column per descent, kept in the span cache, for a
+  verdict the renderer then discarded. Now the caster's rung is clamped to the body's top and a
+  chunk with no coarser rung never asks. Tested.
+- **The arc blamed the origin for a turn the ROW made** (a defect): a sibling realm spinning on
+  its own (a tumbling hull ten kilometres away, fifty degrees a second) would have had its
+  centre pulled toward the eye by the chord's deficit, 2.4 m per window, because one sampled
+  facing cannot tell the row's own spin from the origin's turn. Now the arc blends the ORIGIN'S
+  ANCESTORS alone (the origin and its parents up the scene's parent links — their facing change
+  in the window IS the origin's own turn), and every other row keeps the plain blend, which is
+  exact for a centre that does not move. The exact form for a sibling — its placement blended in
+  the PARENT's frame and recomposed through the parent row's arc — needs no new data and is owed
+  (item 21(a), below). Tested (the chain, a cycle, an absent parent).
+- **A finite non-unit facing** (a zero quaternion, which the finiteness sanitizer passes) went
+  through `normalize` to a NaN centre. It reads as identity now. Tested.
+- **The crossing's release could be shed** by the full mailbox — the one push with no next tick.
+  It is now offered until the mailbox takes it (two hundred polls at most). A look drive
+  releases nothing (a zero look delta was a no-op).
+- **The "no ground within the reach" arm was untested** (HR5): an eye 60 km up now tests it
+  (no chunk asks for a caster). **The reach's hysteresis** was asymmetric and zero-width at a
+  zenith sun: symmetric now, with a floor. Tested.
+- **The caster-delta pass walked every realm's chunks** on every recompute (SL9): it ranges the
+  realm's own keys now.
+- **A zero overlay rectangle masked a 2×2 corner**: it masks nothing.
+- **The packed vertex grew by four bytes and the harvest's byte budget did not** (an 11 % cut
+  of the harvest under the byte bound): the budget grows by the same eighth (24 × 450 KB).
+- **The parent's shade was decoded for every candidate triangle**: once, for the winner.
+- Stands as measured, not changed: the bounded done queue parks every worker while the harvest
+  lags (an urgent chunk may wait four harvest frames, 66 ms) — the flights read the worst gap
+  falling 1 216 → 313 and the queue 2 027 → 1 044, so no inversion showed; the arc's absolute-
+  metre arithmetic at a coarse tier (a galaxy row) resolves to ten kilometres at 10²⁰ m, an
+  angle of 10⁻¹⁶, invisible.
+- Confirmed by the refuter, not refuted: the bounded channel cannot deadlock (the send is
+  outside the queue lock; the receiver drops after `Drop`, so a parked send returns); the bound
+  is the live-geometry bound (nothing parks between the channel and the world); every ground
+  mesh carries the morph normal; the blend weight is the position's; the published stamp cannot
+  be stale; `Crossed` cannot fire on the first pose; the seam search cannot produce a NaN or a
+  night-side stand; the caster bound over-estimates in every term; the four hull legs are
+  wired in order.
+- The refuter also held that item 20 is not 🟩 (the references are not refrozen; the owner's
+  look is owed) and that the seam's reference was not yet frozen when it read the tree — both
+  true; the seam is frozen now and item 20 waits for the owner, as its entry says.

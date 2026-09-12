@@ -47,6 +47,9 @@ struct FadeVertex {
     // THE RADIAL (step 5): the vertex's unit direction from the body's centre in the chunk's
     // frame.
     @location(9) radial: vec3<f32>,
+    // THE MORPH NORMAL (item 20): the shade the next coarser rung draws at this vertex's target,
+    // blended with the own normal across the fade-out band as the position is.
+    @location(11) morph_normal: vec2<f32>,
 #ifdef SPLAT
     // THE SPLAT CORNER (D8-8's measurement): which corner of the camera-facing square this copy
     // of the vertex is.
@@ -114,10 +117,12 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
 #endif
 #ifdef NORMAL_PREPASS_OR_DEFERRED_PREPASS
 #ifdef OCT_NORMAL
-    let local_normal = oct_decode(vertex.oct_normal);
+    let own_normal = oct_decode(vertex.oct_normal);
 #else
-    let local_normal = vertex.normal;
+    let own_normal = vertex.normal;
 #endif
+    // THE SHADE HANDS OVER WITH THE SHAPE (item 20): the same blend as the position's.
+    let local_normal = normalize(mix(oct_decode(vertex.morph_normal), own_normal, whole(d)));
     out.world_normal = mesh_functions::mesh_normal_local_to_world(local_normal, vertex.instance_index);
 #endif
 #ifdef MOTION_VECTOR_PREPASS

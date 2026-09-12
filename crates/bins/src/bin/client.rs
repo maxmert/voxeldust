@@ -1077,6 +1077,10 @@ mod dev_control {
         }
     }
 
+    /// How many polls a crossing's release is offered to a full mailbox before the drive gives
+    /// up (a second at the poll period; the mailbox drains every sim step).
+    const RELEASE_TRIES: u32 = 200;
+
     /// One closed-loop tick's outcome: the error-reducing input, and whether converged.
     struct LoopStep {
         action: InputAction,
@@ -1091,22 +1095,54 @@ mod dev_control {
     /// one clamped delta per datagram, matching `nav`'s per-tick convergence model), it polls
     /// the DELIVERED (lagged) own pose, asks `step` for the error-reducing input, emits it
     /// (shed-loud), and returns `State` on convergence / `Timeout` on `max_ticks` or a Closed
-    /// session / `None` on socket EOF. NO client prediction — the server stays sole authority;
-    /// this only injects ordinary Move/Look toward the goal on the delivered state.
+    /// session / `Crossed` when the own entity's location label changes (the drive's target
+    /// was stated in the realm it began in; `release` is pushed first, so the drive's sticky
+    /// input does not outlive its meaning) / `None` on socket EOF. NO client prediction — the
+    /// server stays sole authority; this only injects ordinary Move/Look toward the goal on
+    /// the delivered state.
     async fn drive_closed_loop(
         handles: &Handles,
         framer: &mut LineFramer,
         max_ticks: u64,
+        release: Option<InputAction>,
         mut step: impl FnMut(DVec3, DQuat) -> LoopStep,
     ) -> Option<DevResponse> {
         let start = handles.step_seq.load(Ordering::Relaxed);
         let mut last_sent = start.wrapping_sub(1); // force an emit on the first observed step
+        // THE DRIVE'S HOME: the location label at its first delivered pose. MEASURED without
+        // this (moving-eye flight 39776): a WalkTo chunk that straddled the boarding read the
+        // berth, a planet-frame point, from inside the hull, and pushed the hull toward it at
+        // full stick for the rest of its 400-tick budget — 443 m/s and a spin before the first
+        // leg, and every later push along the spinning nose averaged to nothing.
+        let mut home: Option<Option<String>> = None;
         loop {
             let state = handles.published.load_full();
             let seq = handles.step_seq.load(Ordering::Relaxed);
             if seq != last_sent {
                 last_sent = seq;
                 if let Some((pos, orient)) = own_pose(state.as_ref()) {
+                    let here = state.location.clone();
+                    match &home {
+                        None => home = Some(here),
+                        Some(h) if *h != here => {
+                            // THE RELEASE IS NEVER SHED (refutation, 2026-09-12): a walk's held
+                            // stick has no next tick to re-send it, so the mailbox is tried until
+                            // it takes the release, up to `RELEASE_TRIES` polls.
+                            if let Some(release) = release {
+                                let mut tries = 0;
+                                while handles.commands.try_send(release).is_err()
+                                    && tries < RELEASE_TRIES
+                                {
+                                    tries += 1;
+                                    tokio::time::sleep(WAIT_POLL).await;
+                                }
+                            }
+                            return Some(DevResponse::Crossed {
+                                state: state.as_ref().clone(),
+                            });
+                        }
+                        Some(_) => {}
+                    }
                     let step = step(pos, orient);
                     if step.done {
                         return Some(DevResponse::State {
@@ -1145,7 +1181,9 @@ mod dev_control {
         max_step_m: f64,
     ) -> Option<DevResponse> {
         let target = DVec3::from_array(target);
-        drive_closed_loop(handles, framer, max_ticks, move |pos, orient| {
+        // The walk's stick is sticky: a crossing releases it.
+        let release = Some(InputAction::Move([0.0; 3]));
+        drive_closed_loop(handles, framer, max_ticks, release, move |pos, orient| {
             let step = nav::walk_to(pos, orient, target, arrive_epsilon, max_step_m);
             LoopStep {
                 done: step.arrived,
@@ -1165,7 +1203,9 @@ mod dev_control {
         max_ticks: u64,
     ) -> Option<DevResponse> {
         let target = DVec3::from_array(target);
-        drive_closed_loop(handles, framer, max_ticks, move |pos, orient| {
+        // A look is a per-tick delta, nothing sticky: a crossing releases nothing.
+        let release = None;
+        drive_closed_loop(handles, framer, max_ticks, release, move |pos, orient| {
             let step = nav::look_at(pos, orient, target, align_epsilon);
             LoopStep {
                 done: step.aligned,

@@ -148,6 +148,14 @@ pub enum DevResponse {
     State { state: DevState },
     /// A wait-until elapsed without firing; carries the last state for diagnosis.
     Timeout { state: DevState },
+    /// A closed-loop drive (`WalkTo`/`LookAt`) stopped because the own entity CROSSED into
+    /// another realm: its target was stated in the realm the entity stood in when the drive
+    /// began, so a pose delivered in another realm makes that target meaningless. The drive
+    /// released its stick first (a zero `Move`). MEASURED before this reply existed: a WalkTo
+    /// chunk that straddled a boarding read the berth (a planet-frame point) from inside the
+    /// hull and pushed the hull toward it at full stick for the rest of its budget — 443 m/s
+    /// and a spin about its own axis before the pilot's first leg.
+    Crossed { state: DevState },
     /// A `Screenshot` was captured — the run-relative path + the actual delivered tick.
     Captured { path: String, tick: Option<u64> },
     /// A `Record` finished — the run-relative dir + the number of frames written.
@@ -288,6 +296,7 @@ mod tests {
             DevResponse::Ack,
             DevResponse::State { state: sample() },
             DevResponse::Timeout { state: sample() },
+            DevResponse::Crossed { state: sample() },
             DevResponse::Error {
                 error: DevError::NotAllowed,
             },

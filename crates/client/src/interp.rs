@@ -348,6 +348,76 @@ impl EntityTrack {
 
     /// Which branch [`EntityTrack::sample`] takes at `cursor` — read-only diagnosis (S5), derived from
     /// the SAME bracket the sample uses so the two can never disagree.
+    /// ★ THE ARC, NOT THE CHORD (slice 8 step 6 hardening, D-TERRAIN-5 item 21). A realm row is
+    /// stated in the ORIGIN's frame: its centre is where the realm's origin stands as seen from
+    /// the pilot's own realm, its facing how the realm's axes lie there. When the origin TURNS
+    /// (a hull that yaws), every row's centre swings on an arc around the pilot, and a straight
+    /// blend of two centres cuts the chord of that arc — MEASURED on a hull spinning fifty
+    /// degrees a second: the planet's centre 8 km inside the arc between two ticks, the eye
+    /// 8 km under the ground for a frame, the wanted set on the wrong place.
+    ///
+    /// So a row is blended as THE ORIGIN'S OWN PLACEMENT IN THE ROW'S FRAME: the pilot's position
+    /// there, `P = −q⁻¹·c`, moves on a line as the hull flies (a lerp), and the pilot's rotation
+    /// there, `Q = q⁻¹`, turns as the hull turns (a slerp); the row's centre and facing are
+    /// recomposed from the two at the cursor, `c = −Q⁻¹·P`, `q = Q⁻¹`, exactly on the arc. The
+    /// residue moves to the ROW's own spin over one tick (a planet turns once a day: half a
+    /// millimetre on its radius), never the origin's. With identity facings both poses are the
+    /// plain blend (`P = −c`), so a window nothing turns in is byte-identical to [`sample`] — the
+    /// path is taken only when a facing differs from the identity, and measured by the picture
+    /// gate.
+    ///
+    /// Example: the pilot's hull yaws 90° over two ticks with the home planet 6 371 km below.
+    /// The planet's centre in the window swings from "below and ahead" to "below and to the
+    /// left"; halfway, the chord would put it 1 866 km nearer than the ground is, the arc keeps
+    /// it 6 371 km away, where the ground stays.
+    #[must_use]
+    pub fn sample_arc(&self, cursor: f64) -> RenderPose {
+        let start = self.bracket_start(cursor);
+        let (prev, current) = match start {
+            None => (self.slot(0), self.slot(0)),
+            Some(i) if i + 1 < self.len => (self.slot(i), self.slot(i + 1)),
+            Some(i) => (self.slot(i), self.slot(i)),
+        };
+        // The plain blend where it is exact: nothing turned, or one pose alone (a degenerate
+        // window recomposed through a rotation would round its own centre).
+        let unturned = (prev.orient == DQuat::IDENTITY) & (current.orient == DQuat::IDENTITY);
+        if unturned | (prev == current) {
+            return self.sample(cursor);
+        }
+        let prev_time = tick_to_f64(prev.universe_tick);
+        let current_time = tick_to_f64(current.universe_tick);
+        let tier = stated_tier(current.frame);
+        let edge = tier.cell_edge_m();
+        // The whole centre in metres (the lever the rotation acts on), for both poses.
+        let centre = |p: &StampedPose| p.pos.cell().as_dvec3() * edge + p.pos.offset();
+        let (c0, c1) = (centre(&prev), centre(&current));
+        // A finite facing that is not a unit (a zero quaternion off a diverged shard passes the
+        // finiteness sanitizer) reads as identity — never a NaN into the centre.
+        let unit = |q: DQuat| {
+            if q.length_squared() > 0.0 {
+                q.normalize()
+            } else {
+                DQuat::IDENTITY
+            }
+        };
+        let (q0, q1) = (unit(prev.orient), unit(current.orient));
+        // The origin's placement in the row's frame at each pose.
+        let (p0, p1) = (-(q0.inverse() * c0), -(q1.inverse() * c1));
+        let (r0, r1) = (q0.inverse(), q1.inverse());
+        let p = lerp_at_game_time(p0, prev_time, p1, current_time, cursor, DVec3::lerp);
+        let r = lerp_at_game_time(r0, prev_time, r1, current_time, cursor, DQuat::slerp);
+        let q = r.inverse().normalize();
+        let c = -(q * p);
+        let lattice = vd_core::pose::LatticePos::from_metres(c, tier);
+        RenderPose {
+            frame: current.frame,
+            cell: lattice.cell(),
+            pos: lattice.offset(),
+            orient: q,
+            tier,
+        }
+    }
+
     #[must_use]
     pub fn window_at(&self, cursor: f64) -> SampleWindow {
         match self.bracket_start(cursor) {
@@ -939,5 +1009,79 @@ mod tests {
         let rp = EntityTrack::new(p).current_render_pose();
         assert_eq!(rp.cell, I64Vec3::new(3, -4, 5));
         assert_eq!(rp.pos, DVec3::new(0.25, 0.0, 0.0));
+    }
+
+    /// A finite facing that is not a unit (a zero quaternion) reads as identity on the arc: the
+    /// centre stays finite and on the plain blend.
+    #[test]
+    fn a_zero_facing_reads_as_identity_on_the_arc() {
+        let mut zeroed = pose_at(10, 100.0);
+        zeroed.orient = DQuat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+        let mut track = EntityTrack::new(zeroed);
+        track.observe(pose_at(20, 200.0));
+        let arc = track.sample_arc(15.0);
+        assert!(arc.pos.is_finite());
+        assert_eq!(arc.orient, DQuat::IDENTITY);
+        // The same point in metres (the arc's lattice normalizes the cell and offset its own way).
+        let flat = |p: &RenderPose| {
+            vd_core::pose::LatticePos::at(p.cell, p.pos)
+                .delta_m(vd_core::pose::LatticePos::default(), p.tier)
+        };
+        assert!((flat(&arc) - flat(&track.sample(15.0))).length() < 1e-9);
+    }
+
+    /// THE ARC (item 21): with identity facings the arc sample IS the plain blend, bit for bit,
+    /// and so is a one-pose window; with a turning origin the blended centre stays on the arc at
+    /// the row's radius where the chord's midpoint falls short, and the facing is halfway.
+    #[test]
+    fn the_arc_sample_is_the_plain_blend_without_a_turn_and_the_arc_with_one() {
+        let flat = |p: &RenderPose| {
+            vd_core::pose::LatticePos::at(p.cell, p.pos)
+                .delta_m(vd_core::pose::LatticePos::default(), p.tier)
+        };
+        let mut straight = EntityTrack::new(pose_at(10, 100.0));
+        straight.observe(pose_at(20, 200.0));
+        for cursor in [5.0, 10.0, 12.5, 15.0, 20.0, 25.0] {
+            assert_eq!(straight.sample_arc(cursor), straight.sample(cursor));
+        }
+        let r = 6_371_000.0;
+        let frame = FrameRef::SystemSpace { system_seed: 1 };
+        let turned = DQuat::from_rotation_y(-std::f64::consts::FRAC_PI_2);
+        // One pose, turned: the plain blend as well.
+        let mut lone = StampedPose::at_rest(frame, DVec3::new(r, 0.0, 0.0), UniverseTick(10));
+        lone.orient = turned;
+        let one = EntityTrack::new(lone);
+        assert_eq!(one.sample_arc(10.0), one.sample(10.0));
+        // The origin yaws +90° about Y between the ticks: the planet 6 371 km ahead (−Z) is
+        // then 6 371 km to the right (+X), and its frame reads turned by −90° in the window.
+        let before = StampedPose::at_rest(frame, DVec3::new(0.0, 0.0, -r), UniverseTick(10));
+        let mut after = StampedPose::at_rest(frame, DVec3::new(r, 0.0, 0.0), UniverseTick(20));
+        after.orient = turned;
+        let mut track = EntityTrack::new(before);
+        track.observe(after);
+        let arc = track.sample_arc(15.0);
+        let chord = track.sample(15.0);
+        let arc_c = flat(&arc);
+        let chord_c = flat(&chord);
+        assert!(
+            (arc_c.length() - r).abs() < 1e-3,
+            "the arc keeps the radius: {arc_c:?}"
+        );
+        assert!(
+            (chord_c.length() - r * std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-3,
+            "the chord falls short: {chord_c:?}"
+        );
+        let halfway = DVec3::new(
+            r * std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+            -r * std::f64::consts::FRAC_1_SQRT_2,
+        );
+        assert!((arc_c - halfway).length() < 1e-3, "{arc_c:?}");
+        let half_turn = DQuat::from_rotation_y(-std::f64::consts::FRAC_PI_4);
+        assert!(arc.orient.dot(half_turn).abs() > 1.0 - 1e-12);
+        assert_eq!((arc.frame, arc.tier), (frame, stated_tier(frame)));
+        // Past the window the arc clamps like the blend: the newest pose itself.
+        let end = track.sample_arc(30.0);
+        assert!((flat(&end) - DVec3::new(r, 0.0, 0.0)).length() < 1e-3);
     }
 }

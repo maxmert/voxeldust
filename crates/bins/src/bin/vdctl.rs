@@ -1,7 +1,7 @@
 //! `vdctl` — the agent-facing dev-control CLI (HR6). It builds ONE `DevRequest`
 //! from the command line, sends it as a JSON line to a client's loopback
 //! dev-control listener, prints the single `DevResponse` line, and maps the
-//! response to an exit code (Ack/State → 0, Timeout → 3, Error → 1) so Bash
+//! response to an exit code (Ack/State → 0, Timeout → 3, Crossed → 4, Error → 1) so Bash
 //! scenarios can branch. The request/response shapes are `vd-devproto`'s serde
 //! types — the SAME the client decodes — so the two cannot drift.
 //!
@@ -63,6 +63,7 @@ fn run() -> Result<ExitCode, String> {
         | DevResponse::Captured { .. }
         | DevResponse::Recorded { .. } => ExitCode::SUCCESS,
         DevResponse::Timeout { .. } => ExitCode::from(3),
+        DevResponse::Crossed { .. } => ExitCode::from(4),
         DevResponse::Error { .. } => ExitCode::FAILURE,
     })
 }

@@ -7948,6 +7948,23 @@ rings; what is left is an interim with a named step:
    suspect. The settle wait now prints its course every two seconds. → fly the boarding until it
    recurs with the course in the log; then the fix (a lead that refuses an offset across an
    origin change is the likely shape); slice 8 step 6 at the latest.
+   **2026-09-12, A CAUSE FOUND AND FIXED (§23.3):** a `WalkTo` chunk that straddled the boarding's
+   commit kept driving toward the berth — a planet-frame point — from inside the hull, a full
+   stick on three axes for the rest of its 400-tick budget; the hull left at 443 m/s along one
+   body axis and spinning (MEASURED from a kept fixture: the hull still at the berth through the
+   walk, then 443 m/s with no gravity bending the line and the planet's facing turning in the
+   window between dumps). A drive now stops and releases its stick when the location label
+   changes (`DevResponse::Crossed`). The never-settled boarding of §17.7 has this mechanism's
+   shape (a driven, spinning hull swings the lead eye on the chord) — UNCONFIRMED until the
+   boarding storm (`VD_BOARDINGS=10`) flies on the fix. Still open here: the first crossing
+   attempt is refused on every boarding (the hand-off finds the pilot 5.16 m outside the hull
+   seven ticks after the scan found it inside), and the second commits ten seconds later.
+   ★ THE STORM, MEASURED 2026-09-12 on the fix: ten of ten boardings crossed and settled, each
+   in two to eight seconds, every refill course normal (the lead at zero, the altitude sane, the
+   urgent count falling to zero); the never-settled boarding of §17.7 did not recur in ten. The
+   sagas: 19 starts for 10 boardings — nine first attempts refused, one accepted at once — so the
+   refused first attempt is the rule, not the race; it costs ten seconds a boarding and stays 🟥
+   as its own item (the scan's shape against the hand-off's).
 
 16. **THE GPU SPIKE, MEASURED (ruling V17 item 3, 2026-09-10, `slice_08_gpu_spike.md`)**: the
    integer hash on Metal agrees with the CPU on 3 936 256 corners (0 differ); a 32-bit shadow of
@@ -7995,6 +8012,22 @@ rings; what is left is an interim with a named step:
    the exact references are frozen with the ladder in them. OPEN: casters past the shadow's reach
    are asked for and never cast (most of the 221 MB); a bound from the sun's elevation (the reach
    plus the tallest hill over the sun's tangent) would leave them unasked.
+   ★ BOUNDED 2026-09-12 (§23.6): the ladder view's casting set — a drawn chunk asks for its
+   caster while its column's nearest point lies within the reach plus its caster's longest shadow
+   plus the caster's diagonal; the renderer wants and unwants casters on every recompute; the
+   sun's tangent is read at every placement. MEASURED with the whole relief as the hill: 858 →
+   838 casters at the ground stand, the pictures within run noise (no shadow lost) — a 5 km relief
+   at a 15° sun reaches 40 km. The bound now reads the caster column's own peak over the lowest
+   ground within the reach; its measurement is in §23.6.
+   🟩 THE PEAK BOUND, MEASURED 2026-09-12: the ground stand 858 → 576 casters (221 → 182 MB), the
+   hill 858 → 556, the aloft 182 → 0, the orbit 0; every picture unchanged to the pixel against
+   its reference (no shadow lost); the 528 m/s leg's queue peaked at 1 113 against 2 027.
+   ★ THE CASTER'S OWN NEAREST POINT (after the refutation, §23.8): the bound had added the
+   caster's diagonal (227 km at rung 12) so every coarse chunk asked; the caster column's own
+   geometry is tested now, and its rung is clamped to the body's top (a top-rung chunk never
+   asks). MEASURED: ground 414 casters (158 MB), hill 394, aloft 0, orbit 0, the seam 616 → 488;
+   pictures unchanged; the 528 m/s leg's queue peaked at 976 with 276 urgent missing at the worst.
+   What is left stands within the reach or holds a peak that can shade it at a 15° sun.
 
 19. **THE FINISHED CHUNKS WAIT IN MEMORY WHEN THE HARVEST LAGS** (MEASURED 2026-09-11 on the
    528 m/s leg under a byte budget that bound below the old count cap): the workers outran the
@@ -8002,6 +8035,11 @@ rings; what is left is an interim with a named step:
    minute — a finished chunk waits with its whole geometry. The workers need a bound on the done
    queue (pause when more than N finished chunks wait), sized from the harvest's own rate.
    → slice 8 step 6, with the harvest budget's measurement.
+   🟩 BOUNDED AND MEASURED 2026-09-12 (§23.5): the done channel holds four frames of the harvest
+   cap (192 chunks); a worker that finishes a chunk while that many wait pauses on the hand-over.
+   The 528 m/s leg: small allocations +2 424 MB → +14 MB, resident +2 641 MB → +3 MB, the queue's
+   peak 2 027 → 1 044, the worst gap 1 216 → 313 urgent chunks (one flight; the wall's variance is
+   wide), the same 23 000 chunks harvested.
 
 20. **THE CROSSFADE MORPHS POSITIONS, NOT NORMALS** (MEASURED by the pop detector, 2026-09-11,
    §22.2): at 240 m/s two per cent of the pixels crossing the rung 1→2 and 2→3 boundaries step by
@@ -8011,6 +8049,16 @@ rings; what is left is an interim with a named step:
    The cure is the normal's own morph: the coarser surface's normal beside the vertex's own (four
    bytes packed), blended across the band as the positions are; ruling V18's tolerance judges it on
    the stands and the detector on the legs. → the owner's word; slice 8's last seam.
+   ★ BUILT AND MEASURED 2026-09-12 (§23.4): the parent mesh keeps its packed normals, the radial hit
+   returns the parent's shade at the crossing, every vertex carries a morph normal the shaders
+   blend with the positions' own weight. The 240 m/s rung 1→2 handover fell from 3 843 pixels past
+   the floor to 376; the 528 m/s leg from 7 122 to 3 998; the walk's 0→1 from 239 to 164 (the
+   widest 20 → 13). The rung 2→3 handover did not move — the shadow caster's own rung change at
+   that edge (item 18's neighbour). The stands changed in their crossfade bands (ground 5 301
+   pixels, hill 116 713, aloft 131 469, orbit 6 946; the widest steps 7 / 13 / 8 / 2), the hill's
+   band crease gone. → THE OWNER'S LOOK before the references freeze; then 🟩.
+   🟩 2026-09-12: the owner accepted the look ("the look is fine"); every stand's exact reference
+   is frozen with the morph normal in it (the seam stand among them).
 
 21. **A SPINNING PARENT'S RESIDUES** (MEASURED on the turning legs, 2026-09-11, §22.3): (a) the
    track LERPS a realm's centre and SLERPS its facing, so a parent spinning in the window cuts the
@@ -8019,7 +8067,18 @@ rings; what is left is an interim with a named step:
    the exact form composes the centre FROM the interpolated placement (rotate, then subtract).
    The lead eye inherits the chord too: on the turning leg the lead ran to 2 741 m against 29 m on
    the straight leg (MEASURED, §22.3), and the pop detector's near limit, read from the stamped
-   eyes' travel, then eats the near picture. (b) The turn axis is a torque and the hull spins on after release; the instrument cancels the
+   eyes' travel, then eats the near picture. → 2026-09-12 (a) DONE, THE ARC (`EntityTrack::
+   sample_arc`, §23): a realm row is blended as the ORIGIN'S OWN PLACEMENT IN THE ROW'S FRAME
+   (its position lerped, its rotation slerped, the row's centre and facing recomposed at the
+   cursor), exactly on the arc — FOR THE ORIGIN'S ANCESTORS ALONE (refutation §23.8: a sibling
+   spinning on its own would be pulled toward the eye by the chord's deficit; every other row
+   keeps the plain blend). OWED: a sibling's exact form — its placement blended in the PARENT's
+   frame and recomposed through the parent row's arc, no new data — when a tumbling hull is
+   seen from a turning one; the plain blend where nothing turns (byte-identical: the four
+   stands within one level, ground 7 / hill 11 / aloft 10 / orbit 0). MEASURED on the turning
+   leg at up to fifty degrees a second: the lead 15–62 m through the turn (2 741–8 831 m before),
+   the altitude flat at 1 700 m (dips to −8 km before), the band held on every frame.
+   (b) The turn axis is a torque and the hull spins on after release; the instrument cancels the
    spin in rounds (§22.3), the product's own answer is the ship's safety block (slowing is gameplay,
    ruling 2026-08-27 item 4). (c) The frame-to-frame detector on a spinning hull reads its own
    reprojection error until (a) is cured; its readings on the straight legs and after the spin is

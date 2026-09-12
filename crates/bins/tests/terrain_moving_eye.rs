@@ -79,7 +79,9 @@ const WALK_MPS: f64 = 1.4;
 /// eye fell under 990 m and rung 0 entered) and the twelfth (34 urgent on 59 frames, the queue at
 /// 338). At 528 m/s the band is incomplete on every frame (the
 /// queue at 2 800, rungs 0 to 5). A leg that flaps at the machine's edge is reported, not asserted.
-const HULL_LEG_MPS: [f64; 2] = [240.0, 528.0];
+/// The hull's legs (ruling V14 D8-5: a hull at 1.4, 240 and 528 m/s — the walking pace flown, never
+/// a walking dot; the suit ruling). The slow leg first, from rest.
+const HULL_LEG_MPS: [f64; 3] = [1.4, 240.0, 528.0];
 /// How far below a leg's named speed the measured speed may fall.
 const SPEED_SHORTFALL: f64 = 0.9;
 /// How long each leg is read, and how often.
@@ -151,7 +153,9 @@ struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        // Kept on a failure, or on request (`VD_KEEP_FIXTURE`): the recorded pairs and their dumps
+        // are the pop detector's raw material for an offline reading.
+        if std::thread::panicking() || std::env::var_os(KEEP_FIXTURE_ENV).is_some() {
             eprintln!(
                 "terrain_moving_eye: the fixture is KEPT for diagnosis at {}",
                 self.base.display()
@@ -161,6 +165,9 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.base);
     }
 }
+
+/// Keep the fixture (the runs with every recorded pair) after a green flight.
+const KEEP_FIXTURE_ENV: &str = "VD_KEEP_FIXTURE";
 
 fn fixture() -> Fixture {
     let trust = ClusterTrust::generate("vd-terrain-moving-eye").expect("trust");
@@ -470,6 +477,12 @@ fn frame_of(f: &PairFrame, w: usize, h: usize) -> Frame<'_> {
         width: w,
         height: h,
         camera: frame_camera(f.stamp.eye_body_m, f.stamp.camera_body_xyzw, w, h),
+        // The overlay's rectangle, the stamp's own: its readouts are not the ground. An empty
+        // rectangle (no overlay drawn) masks nothing.
+        hud: {
+            let r = f.stamp.hud_rect_px.map(f64::from);
+            ((r[2] > r[0]) & (r[3] > r[1])).then_some(r)
+        },
     }
 }
 
@@ -1164,7 +1177,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
 
     // ---- LEGS 2 AND 3: THE HULL. (A diagnosis flight boards `boardings` times with fresh
     // pilots and flies the legs on the last.)
-    let (fast, turning, fastest) = {
+    let (slow, fast, turning, fastest) = {
         let mut boarded: Option<(ChildGuard, u16)> = None;
         for b in 0..boardings {
             let client_quic = reserve_udp_addr();
@@ -1256,19 +1269,21 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         );
         reads.push(read);
         let _ = round_trip(devctl, &DevRequest::Close);
-        let turning = reads.pop().expect("three legs");
-        let fastest = reads.pop().expect("three legs");
-        let fast = reads.pop().expect("three legs");
-        (fast, turning, fastest)
+        let turning = reads.pop().expect("four legs");
+        let fastest = reads.pop().expect("four legs");
+        let fast = reads.pop().expect("four legs");
+        let slow = reads.pop().expect("four legs");
+        (slow, fast, turning, fastest)
     };
     // The verdicts, after every leg has flown (so every leg's numbers are always in the log).
-    report_leg(&format!("hull {} m/s", HULL_LEG_MPS[0]), &fast);
-    report_leg(&format!("hull {} m/s", HULL_LEG_MPS[1]), &fastest);
+    report_leg(&format!("hull {} m/s", HULL_LEG_MPS[0]), &slow);
+    report_leg(&format!("hull {} m/s", HULL_LEG_MPS[1]), &fast);
+    report_leg(&format!("hull {} m/s", HULL_LEG_MPS[2]), &fastest);
     report_leg("hull turning", &turning);
     assert_band_complete("walk", &walk);
     eprintln!(
         "terrain_moving_eye: THE BAND HELD on every frame of the walk — {walk:?}; the hull legs \
-         read {fast:?}, {turning:?} and {fastest:?}"
+         read {slow:?}, {fast:?}, {turning:?} and {fastest:?}"
     );
 }
 

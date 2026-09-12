@@ -465,6 +465,11 @@ pub fn cross_leg(
                     max_step_m: 4.0 * crate::DEV.move_speed * crate::DEV.tick_dt,
                 },
             );
+            // CROSSED mid-chunk: the drive released its stick and stopped; the label is the
+            // reply's own.
+            if let Some(DevResponse::Crossed { state }) = &walked {
+                loc = state.location.clone().unwrap_or_default();
+            }
             if matches!(walked, Some(DevResponse::State { .. })) {
                 // ARRIVED at the aim: CUT THE THROTTLE (sticky Move) and stay PARKED waiting out
                 // the commit + the delivered flip. A mid-route chunk (`Timeout`) HOLDS the
@@ -588,6 +593,9 @@ pub fn cross_leg_watching_scene(
                     axes: [0.0, 0.0, 0.0],
                 },
             );
+            if let Some(DevResponse::Crossed { state }) = &walked {
+                loc = state.location.clone().unwrap_or_default();
+            }
             if matches!(walked, Some(DevResponse::State { .. })) {
                 let wait_until = Instant::now() + CROSS_LEG_COMMIT_WAIT;
                 while Instant::now() < wait_until && loc != want {

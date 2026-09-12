@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use crossbeam_channel::{Receiver, unbounded};
+use crossbeam_channel::{Receiver, bounded};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
@@ -46,8 +46,8 @@ use vd_client::chunks::{
     geometry_with, oct_encode, ruler_on_surface,
 };
 use vd_client::ladder_view::{
-    Column, FADE_ALWAYS_IN, FADE_ALWAYS_OUT, LadderView, WantedSet, fade_bands, rung_for_distance,
-    sink_end_m, switch_m,
+    Column, FADE_ALWAYS_IN, FADE_ALWAYS_OUT, LadderView, ShadowReach, WantedSet, fade_bands,
+    rung_for_distance, sink_end_m, switch_m,
 };
 use vd_client::realm_scene::{BoxShape, RealmBox};
 use vd_client_harness::probe::{
@@ -74,8 +74,19 @@ const HARVEST_PER_FRAME: usize = 48;
 /// KB each) uploads 48 of them under the count cap. MEASURED at 24 × 305 KB: the budget bound
 /// under the real near chunk, the 528 m/s harvest fell from 355 to 300 chunks a second and the
 /// queue grew to 2 551 — a budget must stand above the count cap's worth, never at it.
-const HARVEST_BYTES_PER_FRAME: u64 = (24 * 400) << 10;
+/// ★ 2026-09-12: the packed vertex grew from 32 to 36 bytes (the morph normal, item 20), so the
+/// same chunk charges an eighth more; the budget grows by the same eighth (24 × 450 KB) to admit
+/// the same chunks a frame (refutation: an unchanged budget would have cut the harvest by 11 %).
+const HARVEST_BYTES_PER_FRAME: u64 = (24 * 450) << 10;
 const HARVEST_BYTES_ENV: &str = "VD_TERRAIN_HARVEST_BYTES";
+/// THE DONE QUEUE'S BOUND, in frames of the harvest cap (D-TERRAIN-5 item 19): a finished chunk
+/// waits in memory with its whole geometry until the harvest takes it, so the workers may run
+/// ahead of the harvest by this many frames' worth and no further — a worker that finishes a
+/// chunk while that many wait pauses on the hand-over. MEASURED unbounded (the 528 m/s leg under
+/// the byte budget): the queue grew to 2 551 finished chunks and the client's small allocations
+/// by 2.2 GB over the minute. The bound holds four frames of the cap: 192 chunks, under 80 MB at
+/// the ground stand's mean chunk.
+const DONE_QUEUE_FRAMES: usize = 4;
 /// How far the eye moves before the wanted set is recomputed, in metres: a still stand computes it
 /// once; a hull at 528 m/s recomputes every frame.
 const EYE_STEP_M: f64 = 0.5;
@@ -303,12 +314,14 @@ impl JobQueue {
 const PARENTS_PER_CHUNK: usize = 8;
 
 impl ThreadedWorkers {
-    /// Start `threads` workers.
+    /// Start `threads` workers whose finished chunks wait in a queue of at most `done_bound`
+    /// (item 19): a worker that finishes a chunk while the queue is full pauses on the hand-over
+    /// until the harvest takes one, so the finished geometry in memory is bounded.
     #[must_use]
-    pub fn start(threads: usize) -> ThreadedWorkers {
+    pub fn start(threads: usize, done_bound: usize) -> ThreadedWorkers {
         let queue: Arc<(Mutex<JobQueue>, std::sync::Condvar)> =
             Arc::new((Mutex::new(JobQueue::default()), std::sync::Condvar::new()));
-        let (done_tx, done) = unbounded::<ChunkReady>();
+        let (done_tx, done) = bounded::<ChunkReady>(done_bound.max(1));
         let built = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let build_nanos = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut n = 0;
@@ -439,6 +452,28 @@ impl ChunkWorkers for ThreadedWorkers {
             n += 1;
         }
     }
+}
+
+/// The least chunk key in the map's order (the face first, then the rung, then the cell): where a
+/// realm's keys start in the drawn map.
+const FIRST_CHUNK_KEY: ChunkKey = ChunkKey {
+    face: vd_seed::bend::Face::PosX,
+    rung: 0,
+    x: i32::MIN,
+    y: i32::MIN,
+    z: i32::MIN,
+};
+
+/// THE SHADOW'S REACH for the ladder's casting set (item 18): the cascades' reach, the sun's
+/// tangent as last placed (the bias cap's worth before the sun is born — the longest shadows, so
+/// no caster is missed), and the shadow ladder's step. `None` while the shadow ladder is off (no
+/// shadows, no casters, or a zero step): every chunk may then ask for a caster, as before.
+fn shadow_reach(config: &TerrainConfig, sun_tan_i: Option<f32>) -> Option<ShadowReach> {
+    (config.shadows && config.shadow_cast && config.shadow_coarse_step > 0).then(|| ShadowReach {
+        reach_m: switch_m(config.shadow_reach_rung),
+        tan_i: f64::from(sun_tan_i.unwrap_or(SHADOW_BIAS_TAN_CAP)),
+        coarse_step: config.shadow_coarse_step,
+    })
 }
 
 /// One drawn chunk: which realm's row it rides, and its rung.
@@ -586,6 +621,9 @@ pub struct Terrain {
     /// The main thread's nanoseconds in the harvest loop since the start (M8-2a).
     harvest_nanos: u64,
     sun: Option<Entity>,
+    /// The tangent of the sun's incidence at the eye, as the sun was last placed (capped as the
+    /// shadow bias caps it): the shadow's reach for the casters reads it (item 18).
+    sun_tan_i: Option<f32>,
     /// The ruler on screen, its shared assets, and its cached placement.
     ruler: Option<RulerEntities>,
     ruler_assets: Option<(Handle<Mesh>, Handle<StandardMaterial>)>,
@@ -600,7 +638,11 @@ impl Terrain {
     #[must_use]
     pub fn new(config: TerrainConfig, declared: u64) -> Terrain {
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let workers: Box<dyn ChunkWorkers> = Box::new(ThreadedWorkers::start(threads));
+        // The done queue holds `DONE_QUEUE_FRAMES` frames of the harvest cap (item 19).
+        let workers: Box<dyn ChunkWorkers> = Box::new(ThreadedWorkers::start(
+            threads,
+            config.harvest_per_frame * DONE_QUEUE_FRAMES,
+        ));
         let lane = ChunkLane::new(workers, declared);
         // The parent cache holds what the memory budget allows, in the meshes' own bytes, never
         // less than one working set of the workers (ruling V15; refutation T-8: a size that
@@ -625,6 +667,7 @@ impl Terrain {
             frames: 0,
             harvest_nanos: 0,
             sun: None,
+            sun_tan_i: None,
             ruler: None,
             ruler_assets: None,
             ruler_cache: None,
@@ -850,6 +893,10 @@ fn mesh_of(
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, geometry.vertices.clone())
     .with_inserted_attribute(super::ATTRIBUTE_MORPH, geometry.morph_m.clone())
     .with_inserted_attribute(super::ATTRIBUTE_RADIAL, geometry.radials.clone())
+    .with_inserted_attribute(
+        super::ATTRIBUTE_MORPH_NORMAL,
+        bevy::mesh::VertexAttributeValues::Snorm16x2(geometry.morph_normals.clone()),
+    )
     .with_inserted_indices(packed_indices(geometry));
     // THE NORMAL BY RUNG (ruling V18, `TerrainConfig::exact_normal_rung`): the worker's packed
     // four bytes on the near rungs, the engine's twelve on the far ones; nothing is packed here
@@ -899,6 +946,7 @@ fn splat_mesh_of(geometry: &vd_client::chunks::ChunkGeometry, exact_normal_rung:
     let mut corner = Vec::with_capacity(n * 4);
     let mut packed = Vec::with_capacity(n * 4);
     let mut normals = Vec::with_capacity(n * 4);
+    let mut morph_normals = Vec::with_capacity(n * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(n * 6);
     for i in 0..n {
         let base = (i * 4) as u32;
@@ -909,6 +957,7 @@ fn splat_mesh_of(geometry: &vd_client::chunks::ChunkGeometry, exact_normal_rung:
             corner.push(c);
             packed.push(geometry.packed_normals[i]);
             normals.push(geometry.normals[i]);
+            morph_normals.push(geometry.morph_normals[i]);
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -920,6 +969,10 @@ fn splat_mesh_of(geometry: &vd_client::chunks::ChunkGeometry, exact_normal_rung:
     .with_inserted_attribute(super::ATTRIBUTE_MORPH, morph)
     .with_inserted_attribute(super::ATTRIBUTE_RADIAL, radials)
     .with_inserted_attribute(super::ATTRIBUTE_SPLAT_CORNER, corner)
+    .with_inserted_attribute(
+        super::ATTRIBUTE_MORPH_NORMAL,
+        bevy::mesh::VertexAttributeValues::Snorm16x2(morph_normals),
+    )
     .with_inserted_indices(bevy::mesh::Indices::U32(indices));
     if geometry.key.rung < exact_normal_rung {
         mesh.insert_attribute(
@@ -1126,11 +1179,71 @@ pub(crate) fn sync_terrain(
             })
         })
         .collect();
+    // THE SHADOW'S REACH for the casters (item 18): the cascades' reach, the sun's tangent as it
+    // was last placed (the cap's worth before the sun is born: the longest shadows, so no caster
+    // is missed), and the ladder's step. A change past the hysteresis recomputes the wanted set.
+    let shadow = shadow_reach(&terrain.config, terrain.sun_tan_i);
+    let mut recomputed: Vec<RealmId> = Vec::new();
     for eb in &with_bodies {
         let ladder = terrain.ladders.entry(eb.realm).or_default();
-        if moved(ladder.eye, eb.lead) {
+        let reach_changed = match (ladder.view.shadow, shadow) {
+            (Some(a), Some(b)) => !a.same_as(b),
+            (a, b) => a.is_some() != b.is_some(),
+        };
+        if moved(ladder.eye, eb.lead) || reach_changed {
+            ladder.view.shadow = shadow;
             ladder.wanted = ladder.view.wanted(&eb.body, eb.lead);
             ladder.eye = Some(eb.lead);
+            recomputed.push(eb.realm);
+        }
+    }
+    // THE CASTING DELTAS (item 18): a drawn chunk that left the casting set releases its caster;
+    // one that entered it asks for its caster.
+    let coarse_step = terrain.config.shadow_coarse_step;
+    let coarse_from = terrain.config.shadow_coarse_from_rung;
+    let mut caster_changes: Vec<(RealmId, ChunkKey, Option<ChunkKey>)> = Vec::new();
+    for realm in &recomputed {
+        let Some(ladder) = terrain.ladders.get(realm) else {
+            continue;
+        };
+        let Some(body) = terrain.lane.body(*realm) else {
+            continue;
+        };
+        // The realm's own keys alone (SL9: never a walk of every realm's chunks).
+        let first = (*realm, FIRST_CHUNK_KEY);
+        for ((r, key), drawn) in terrain.entities.range(first..) {
+            if r != realm {
+                break;
+            }
+            if coarse_step == 0 || key.rung < coarse_from {
+                continue;
+            }
+            match (drawn.caster, ladder.wanted.casts(*key)) {
+                (Some(_), false) => caster_changes.push((*realm, *key, None)),
+                (None, true) => {
+                    if let Some(ckey) = vd_client::chunks::coarse_key(body, *key, coarse_step) {
+                        caster_changes.push((*realm, *key, Some(ckey)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for (realm, key, want) in caster_changes {
+        let Some(drawn) = terrain.entities.get(&(realm, key)) else {
+            continue;
+        };
+        let had = drawn.caster;
+        match want {
+            Some(ckey) => terrain.want_caster(&mut commands, realm, ckey),
+            None => {
+                if let Some(ckey) = had {
+                    terrain.unwant_caster(&mut commands, realm, ckey);
+                }
+            }
+        }
+        if let Some(drawn) = terrain.entities.get_mut(&(realm, key)) {
+            drawn.caster = want;
         }
     }
     // The realms whose row left the window: forget their ladder (their chunks go below).
@@ -1294,7 +1407,12 @@ pub(crate) fn sync_terrain(
         // THE SHADOW LADDER: a drawn chunk from the coarse rung up asks for the coarse chunk that
         // holds it, which casts for it and for its neighbours; it casts nothing itself unless a
         // finer chunk wants IT as a caster (the invariant, `want_caster`).
-        let caster = (coarse_step > 0 && key.rung >= coarse_from)
+        // ... while its caster may throw a shadow within the sun's reach (item 18).
+        let casts = terrain
+            .ladders
+            .get(&realm)
+            .is_none_or(|l| l.wanted.casts(key));
+        let caster = (coarse_step > 0 && key.rung >= coarse_from && casts)
             .then(|| vd_client::chunks::coarse_key(&body, key, coarse_step))
             .flatten();
         if let Some(ckey) = caster {
@@ -1478,6 +1596,12 @@ pub(crate) fn sync_terrain(
         if dir.length_squared() > 0.0 {
             let dir = Vec3::new(dir.x as f32, dir.y as f32, dir.z as f32).normalize();
             let transform = Transform::default().looking_to(dir, Vec3::Y);
+            // The incidence at the eye: the angle between the light and the local up. Read at
+            // every placement for the casters' reach (item 18); the bias reads it at the birth.
+            let up = overhead.map_or(Vec3::Y, |u| Vec3::new(u.x as f32, u.y as f32, u.z as f32));
+            let cos_i = (-dir).dot(up).clamp(0.0, 1.0);
+            let tan_i = ((1.0 - cos_i * cos_i).sqrt() / cos_i.max(1e-3)).min(SHADOW_BIAS_TAN_CAP);
+            terrain.sun_tan_i = Some(tan_i);
             match terrain.sun {
                 Some(sun) => {
                     if let Ok(mut t) = light_tf.get_mut(sun) {
@@ -1502,12 +1626,6 @@ pub(crate) fn sync_terrain(
                         ..default()
                     }
                     .build();
-                    // The incidence at the eye: the angle between the light and the local up.
-                    let up =
-                        overhead.map_or(Vec3::Y, |u| Vec3::new(u.x as f32, u.y as f32, u.z as f32));
-                    let cos_i = (-dir).dot(up).clamp(0.0, 1.0);
-                    let tan_i =
-                        ((1.0 - cos_i * cos_i).sqrt() / cos_i.max(1e-3)).min(SHADOW_BIAS_TAN_CAP);
                     let sun = commands
                         .spawn((
                             DirectionalLight {
@@ -1733,6 +1851,11 @@ pub(crate) fn sync_terrain(
                     };
                     ball.insert_attribute(
                         super::ATTRIBUTE_OCT_NORMAL,
+                        bevy::mesh::VertexAttributeValues::Snorm16x2(packed.clone()),
+                    );
+                    // The ball morphs to itself: its morph normal is its own.
+                    ball.insert_attribute(
+                        super::ATTRIBUTE_MORPH_NORMAL,
                         bevy::mesh::VertexAttributeValues::Snorm16x2(packed),
                     );
                     ball.insert_attribute(super::ATTRIBUTE_MORPH, vec![0.0f32; count]);
@@ -1938,7 +2061,7 @@ mod worker_tests {
     #[test]
     fn the_pool_serves_by_priority_moves_and_withdraws_waiting_jobs_and_closes() {
         let body = Arc::new(vd_terrain::home::home_planet());
-        let mut workers = ThreadedWorkers::start(1);
+        let mut workers = ThreadedWorkers::start(1, HARVEST_PER_FRAME * DONE_QUEUE_FRAMES);
         // A blocker the one worker takes at once, so the next three wait in the queue.
         workers.submit(job(&body, 1, 0));
         std::thread::sleep(std::time::Duration::from_millis(50));

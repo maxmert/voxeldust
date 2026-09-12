@@ -60,6 +60,12 @@ pub const NEAR_LIMIT_PX: f64 = 0.25;
 /// The neighbourhood a reprojected pixel is matched and classified in: this many pixels each way.
 pub const NEIGHBOURHOOD: i64 = 1;
 
+/// THE OVERLAY'S MARGIN in pixels: the stamp's rectangle grown by the glyphs' antialiasing, as
+/// the picture gate grows it. MEASURED without the mask: the overlay's readouts change every
+/// frame while a hull turns, the probe marks the ground under them as terrain, and those digit
+/// pixels set the turning leg's floor at 70 levels.
+pub const HUD_MARGIN_PX: f64 = 2.0;
+
 /// A histogram of colour steps, one bin per level.
 pub type StepHist = Box<[u64; 256]>;
 
@@ -75,6 +81,9 @@ pub struct Frame<'a> {
     pub width: usize,
     pub height: usize,
     pub camera: CaptureCamera,
+    /// THE OVERLAY'S RECTANGLE (left, top, right, bottom, pixels), the stamp's `hud_rect_px`:
+    /// nothing under it is judged or matched — its readouts are not the ground.
+    pub hud: Option<[f64; 4]>,
 }
 
 impl Frame<'_> {
@@ -82,6 +91,17 @@ impl Frame<'_> {
     fn well_formed(&self) -> bool {
         let n = self.width * self.height * 4;
         (n > 0) & (self.rgba.len() == n) & (self.probe.len() == n)
+    }
+
+    /// Whether a pixel lies under the overlay (its rectangle grown by [`HUD_MARGIN_PX`]).
+    fn under_overlay(&self, x: usize, y: usize) -> bool {
+        self.hud.is_some_and(|r| {
+            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+            (px >= r[0] - HUD_MARGIN_PX)
+                & (py >= r[1] - HUD_MARGIN_PX)
+                & (px <= r[2] + HUD_MARGIN_PX)
+                & (py <= r[3] + HUD_MARGIN_PX)
+        })
     }
 }
 
@@ -256,7 +276,7 @@ fn best_match(
             let (x, y) = (qx as i64 + dx, qy as i64 + dy);
             let inside =
                 (x >= 0) & (y >= 0) & (x < before.width as i64) & (y < before.height as i64);
-            if inside {
+            if inside & !before.under_overlay(x as usize, y as usize) {
                 let j = (y as usize * before.width + x as usize) * 4;
                 let pa = decode_probe([before.probe[j], before.probe[j + 1], before.probe[j + 2]]);
                 if pa.kind == PROBE_KIND_TERRAIN {
@@ -295,7 +315,7 @@ pub fn judge_pair(before: &Frame<'_>, after: &Frame<'_>, cell_m: &dyn Fn(u8) -> 
         while x < after.width {
             let i = (y * after.width + x) * 4;
             let pb = decode_probe([after.probe[i], after.probe[i + 1], after.probe[i + 2]]);
-            if pb.kind != PROBE_KIND_TERRAIN {
+            if (pb.kind != PROBE_KIND_TERRAIN) | after.under_overlay(x, y) {
                 x += 1;
                 continue;
             }
@@ -420,6 +440,7 @@ mod tests {
             width: w,
             height: h,
             camera,
+            hud: None,
         }
     }
 
@@ -624,6 +645,37 @@ mod tests {
         let read = judge_pair(&ground, &d, &cell);
         assert!(read.off_frame > 0, "{read:?}");
         assert!(read.compared > 0, "{read:?}");
+    }
+
+    /// THE OVERLAY IS NOT THE GROUND: pixels under the second frame's rectangle are not judged,
+    /// and pixels under the first frame's rectangle are no match — a readout that changed by 50
+    /// levels between the frames counts nothing.
+    #[test]
+    fn the_overlay_is_neither_judged_nor_matched() {
+        let (w, h) = (8, 4);
+        let (rgba_a, probe, cam) = painted(w, h, 2, 500, 120, still_camera(w, h));
+        let (mut rgba_b, _, _) = painted(w, h, 2, 500, 120, still_camera(w, h));
+        // A readout in the top-left corner changed by 50 levels.
+        rgba_b[0] = 70;
+        rgba_b[4] = 70;
+        let mut a = frame(&rgba_a, &probe, w, h, cam);
+        let mut b = frame(&rgba_b, &probe, w, h, still_camera(w, h));
+        let unmasked = judge_pair(&a, &b, &cell);
+        assert_eq!(unmasked.compared, (w * h) as u64);
+        assert_eq!(unmasked.floor(), 50);
+        // The rectangle over those two pixels (its margin reaches their neighbours too).
+        a.hud = Some([0.0, 0.0, 1.0, 0.0]);
+        b.hud = Some([0.0, 0.0, 1.0, 0.0]);
+        let masked = judge_pair(&a, &b, &cell);
+        assert!(masked.compared < unmasked.compared);
+        assert_eq!(masked.floor(), 0);
+        // The first frame's rectangle alone: the second frame's changed pixels find no match
+        // under it and count as off the frame, never as a step.
+        b.hud = None;
+        let half = judge_pair(&a, &b, &cell);
+        assert_eq!(half.compared, unmasked.compared - 2);
+        assert_eq!(half.off_frame, 2);
+        assert_eq!(half.floor(), 0);
     }
 
     /// A frame of no size, or of bytes that do not match its size, reads nothing; the sky of
