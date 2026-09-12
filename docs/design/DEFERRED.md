@@ -8098,6 +8098,13 @@ rings; what is left is an interim with a named step:
    🟩 2026-09-12: the owner accepted the look ("the look is fine"); every stand's exact reference
    is frozen with the morph normal in it (the seam stand among them).
 
+20. **THE FROZEN PATCH (ruling F1, `owner_decisions_2026-09-12_frozen_patches.md`) — slice 9**: a
+   built area keeps the octave count it was built on; the count is a block-store row; both hosts
+   derive the patch with its count; a blend band at the edge; the added-octave tolerance is half a
+   metre at the 1 m rung (F2). OPEN for the slice 9 discussion (F3): the patch's extent, whether an
+   emptied patch thaws, the band's width and shape, the row's key. WHERE: the generator gains an
+   octave-count input (`vd-terrain`), the block store the row, the extractor the band. WHEN: slice 9.
+
 21. **A SPINNING PARENT'S RESIDUES** (MEASURED on the turning legs, 2026-09-11, §22.3): (a) the
    track LERPS a realm's centre and SLERPS its facing, so a parent spinning in the window cuts the
    chord of its arc between two ticks — at fifty degrees a second the stamp's altitude dipped to

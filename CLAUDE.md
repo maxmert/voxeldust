@@ -14,6 +14,17 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
 - `docs/design/owner_decisions_*.md` — ★ THE BINDING RULINGS, and **the NEWEST FILE WINS**. Read the
   newest one BEFORE relaying any plan or design content: these are later than every design doc, and a plan
   agreeing with itself proves nothing. Newest first:
+  - `owner_decisions_2026-09-12_frozen_patches.md` — ★ THE FROZEN PATCH (F1): a built area keeps the
+    octave COUNT it was built on (a small integer stored with the realm, shipped as a block-store row);
+    the client and the server derive that patch with its count and the rest with the newest; a BLEND
+    BAND at the edge. F2 the added-octave tolerance = HALF A METRE at the 1 m rung (ten band cells × a
+    slope of 1/20), unless the owner states another. F3 the patch's extent, thaw and band shape are for
+    the slice 9 discussion. F4 the GPU question ANSWERED (integers agree on the GPU; the 64-bit floats do
+    not exist there; no speed gain measured; V18 stands). F5 still owed: the wall's defaults, R-18. ★ F6 THE AVERAGE MACHINE: the terrain workers get a SHARE of
+    the cores, never all. ★ F7 THE RECIPE GOES INTEGER-ONLY AND THE GPU DOES THE CLIENT'S CHUNK WORK TO
+    THE MAXIMUM (one source, two targets; the server computes the same integers on the CPU; the pictures
+    re-judged); supersedes V18's "the recipe stays 64-bit". Order: the bench, the discussion, the build;
+    slice 9 and the frozen patch follow the new recipe.
   - `owner_decisions_2026-09-07_voxels.md` — ★ THE VOXEL FOUNDATION. SL10 THE SEED-SHAPED WORLD: the
     client MAY derive the world's STATIC SHAPE from the seed (a function of seed and address, never of
     time or state) with ONE generator crate compiled into both hosts (a port is forbidden), no-drift as a
