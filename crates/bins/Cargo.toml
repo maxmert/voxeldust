@@ -135,3 +135,9 @@ required-features = ["dev-control"]
 [[example]]
 name = "gpu_spike"
 required-features = ["render"]
+
+# THE INTEGER BENCH (ruling F7 step (a)): the height field's octave sum in fixed point on the CPU
+# and on the GPU, byte for byte, its precision against the float recipe, and its cost.
+[[example]]
+name = "integer_bench"
+required-features = ["render"]

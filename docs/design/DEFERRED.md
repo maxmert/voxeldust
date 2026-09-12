@@ -8105,6 +8105,19 @@ rings; what is left is an interim with a named step:
    emptied patch thaws, the band's width and shape, the row's key. WHERE: the generator gains an
    octave-count input (`vd-terrain`), the block store the row, the extractor the band. WHEN: slice 9.
 
+21. **THE INTEGER RECIPE ON THE GPU (ruling F7, `owner_decisions_2026-09-12_frozen_patches.md`)**:
+   the recipe goes integer-only and the GPU does the client's chunk work to the maximum, one source
+   compiled for both targets. ★ STEP (a) THE BENCH LANDED (`slice_08_integer_bench.md`,
+   `crates/bins/examples/integer_bench.rs`): the height field's octave sum in fixed point on the CPU
+   and on the GPU — 0 of 3 936 256 columns differ; within 1.06 mm (mean 0.13 mm) of today's float
+   recipe; one core +18 %; the GPU 127 ms for the four million columns with the transfer. The format
+   the bench settled on (directions 2⁻³⁰, frequency int + 2⁻²⁸ fraction, noise at 28 fraction bits,
+   amplitude at 1/32 768 m, the sum floored once) is the design's starting point. OPEN for step (b),
+   the design discussion: the integer bend and normalise (an integer square root, a rational π/4),
+   the caves' square root, the 33-bit radius, the vertex position and the morph on the GPU, the
+   one-source build path (`rust-gpu`, UNMEASURED) with `SHADER_INT64` gated at the handshake and a
+   CPU fallback of the same source, the scope of "to the maximum", the pins and pictures re-recorded.
+
 21. **A SPINNING PARENT'S RESIDUES** (MEASURED on the turning legs, 2026-09-11, §22.3): (a) the
    track LERPS a realm's centre and SLERPS its facing, so a parent spinning in the window cuts the
    chord of its arc between two ticks — at fifty degrees a second the stamp's altitude dipped to

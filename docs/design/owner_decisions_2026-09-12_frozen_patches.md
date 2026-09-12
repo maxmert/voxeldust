@@ -126,3 +126,7 @@ radius, the build path, the extraction on the GPU, the gate on every target), wi
 code. (c) The build. Slice 9 (the block store) and the frozen patch (F1) follow the new recipe,
 because they build on its output.
 
+**Step (a) DONE, 2026-09-12 (`slice_08_integer_bench.md`):** 0 of 3 936 256 columns differ between
+the CPU and the GPU; within 1.06 mm of today's float world; one core +18 %; the GPU 127 ms with the
+transfer. Step (b), the design discussion, is next.
+
