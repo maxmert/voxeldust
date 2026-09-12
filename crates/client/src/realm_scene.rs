@@ -112,7 +112,7 @@ pub struct RealmBox {
     /// A ship changes that: a hull that turns and shows the same face is not a ship, it is a marker.
     ///
     /// Identity for everything that does not turn, so every existing body draws exactly as before.
-    pub facing: [f32; 4],
+    pub facing: [f64; 4],
     /// ★ THE SURFACE STATEMENT (slice 7): the realm says it is seed-shaped — the seed in its frame and
     /// the recipe's tag. Present ⇒ the chunk lane may build its body; absent ⇒ the realm is drawn as
     /// its outline only. Never a kind: a hull that holds terrain would state one too.
@@ -301,6 +301,15 @@ impl RealmScene {
                         // the shipping shard put on this very pose, so a placement that arrives counted
                         // in a different lattice than the boot shape draws at its true distance.
                         tier: live.tier,
+                        // ★ THE LIVE FACING (slice 8 step 6, D-TERRAIN-5 item 11): the facing from
+                        // the SAME sample as the centre — the track interpolates both at this cursor.
+                        // MEASURED with the level's own facing kept here (the boot facing): a hull
+                        // spinning at fifty degrees a second saw its planet's centre turn smoothly
+                        // in the window while the facing stepped at the level's cadence, and the
+                        // eye those two imply in the planet's frame stood up to 280 km from the
+                        // hull (one tick of spin over a 6 371 km lever) — the whole ground left the
+                        // screen and stayed away. A placement is centre AND facing, stated together.
+                        facing: live.orient.to_array(),
                         ..*boot
                     },
                     None => *boot,
@@ -360,12 +369,7 @@ fn row_box(r: &SceneRow, depth: u8) -> Option<RealmBox> {
         color_rgba: color_for_realm(r.realm),
         // Straight off the authored pose, in the order the renderer wants it. The PARENT wrote this —
         // a realm never states its own facing any more than its own position (SL1).
-        facing: [
-            r.pose.orient.x as f32,
-            r.pose.orient.y as f32,
-            r.pose.orient.z as f32,
-            r.pose.orient.w as f32,
-        ],
+        facing: r.pose.orient.to_array(),
         // The surface, if the realm stated one; a bag that decodes to none states none.
         surface: vd_core::look::surface_of(&r.bag).ok().flatten(),
     })
@@ -837,7 +841,7 @@ pub fn to_render_prims(rbox: &RealmBox, draw_center: DVec3) -> Vec<MeshPrim> {
                     scale: [half.x as f32, half.y as f32, half.z as f32],
                     // The facing its parent authored. A box is the shape whose turning can be SEEN,
                     // which is exactly why a ship is drawn as one.
-                    rotation: rbox.facing,
+                    rotation: rbox.facing.map(|v| v as f32),
                 },
             }]
         }
@@ -852,7 +856,7 @@ pub fn to_render_prims(rbox: &RealmBox, draw_center: DVec3) -> Vec<MeshPrim> {
                     // A sphere looks the same whichever way it is turned, so this changes no pixel
                     // today. Carried anyway: the day a body gets a surface the facing must already
                     // be right, and a field that appears later is a field somebody forgets to fill.
-                    rotation: rbox.facing,
+                    rotation: rbox.facing.map(|v| v as f32),
                 },
             }]
         }
@@ -1211,7 +1215,8 @@ mod tests {
                         frame: streamed_frame,
                         pos: streamed_center,
                         vel: DVec3::ZERO,
-                        orient: DQuat::IDENTITY,
+                        // A turned placement: the facing rides the same sample as the centre.
+                        orient: DQuat::from_xyzw(0.0, 0.6, 0.0, 0.8),
                         universe_tick: UniverseTick(10),
                     },
                 }],
@@ -1225,6 +1230,8 @@ mod tests {
         assert_eq!(moved.center, streamed_center);
         assert_eq!(moved.center.cell(), I64Vec3::new(4, -2, 9));
         assert_eq!(moved.tier, stated_tier(streamed_frame));
+        // THE LIVE FACING (step 6): the streamed orientation, not the level's.
+        assert_eq!(moved.facing, [0.0, 0.6, 0.0, 0.8]);
         // EVERYTHING THE ROW ITSELF AUTHORED SURVIVES the overlay — the live feed restates a
         // placement, never an appearance (SL3: the parent says where, the realm says how it looks).
         let stated = level.get(RealmId::Planet(1)).expect("the level's planet");

@@ -12,7 +12,7 @@ use vd_core::pose::{LatticePos, Tier};
 pub const PITCH_LIMIT: f64 = 1.553_343;
 
 /// First-person eye height above the entity origin (m), along `up`.
-pub const DEFAULT_EYE_OFFSET: f64 = 1.6;
+pub const DEFAULT_EYE_OFFSET: f64 = vd_client::ladder_view::EYE_HEIGHT_M;
 
 /// A follow camera's orientation state (the entity position is supplied per frame).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -169,6 +169,22 @@ impl CaptureCamera {
         let px = (ndc_x * 0.5 + 0.5) * self.width as f64;
         let py = (1.0 - (ndc_y * 0.5 + 0.5)) * self.height as f64;
         Some(ScreenPos { x: px, y: py })
+    }
+
+    /// THE INVERSE of [`project_point`](Self::project_point) at a stated distance (slice 8 step 6,
+    /// the pop detector): the point `distance_m` from the eye along the ray through pixel
+    /// `(px, py)` — the same basis and the same viewport map, run backwards. The probe states a
+    /// pixel's distance from the eye (not its depth), so the ray's unit direction is scaled by
+    /// it. The caller's viewport is non-zero (a frame that exists has pixels).
+    #[must_use]
+    pub fn unproject(&self, px: f64, py: f64, distance_m: f64) -> DVec3 {
+        let aspect = self.width as f64 / self.height as f64;
+        let (right, up, back) = self.basis();
+        let focal = 1.0 / (self.fov_y * 0.5).tan();
+        let ndc_x = px / self.width as f64 * 2.0 - 1.0;
+        let ndc_y = 1.0 - py / self.height as f64 * 2.0;
+        let dir = (right * (ndc_x * aspect / focal) + up * (ndc_y / focal) - back).normalize();
+        self.eye + dir * distance_m
     }
 }
 

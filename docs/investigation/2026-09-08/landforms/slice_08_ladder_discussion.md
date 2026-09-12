@@ -1447,3 +1447,139 @@ and no frame rate on any.
 position stays the engine's float. The packed-position path is removed from the tree (nothing
 inert stays); this record and the four difference images (`pictures/look/*_packed_position_diff_*`)
 are what remains of it. Step 5's packing ends with the normal.
+
+## 22. STEP 6 — THE POP DETECTOR (ruling V14 M8-3, D8-2, D8-5; 2026-09-11)
+
+### 22.1 The instrument
+
+**A pop** is a change of the picture in ONE frame instead of across a band. The ruled instrument
+is a frame-to-frame difference on the rung boundaries. Built:
+
+- **THE PAIR.** Every two seconds of a leg the client records two CONSECUTIVE frames — the
+  picture, the probe and the frame's own stamp — through `Record { consecutive: true }`: the
+  first frame is the freshest rendered at or after the request, the second is asked for BY ITS
+  INDEX (the first's plus one) from a readback ring of the last eight frames (`READBACK_RING`);
+  a frame the ring has dropped is refused, never stood in for. The PNG encode runs on its own
+  thread (MEASURED on the walk with the encode on the main thread: 51 → 42 frames a second; off
+  it: 51). The terrain stamp travels with the readback FROM THE EXTRACT, so the dump beside a
+  frame states the drawn camera of the very pixels beside it. Three wrong forms were MEASURED on
+  the way: two requests paced by the clock (frames two to six apart); the stamp remembered under
+  the capture counter in the serving system (the placement system TOOK the stamp out of the
+  resource to publish it, so the extract found none and the dump fell back to the poll's stamp
+  of a random later frame: pairs 0, +2, +3 apart in the terrain's own count while the capture
+  frames were consecutive); the stamp kept in the resource (exact).
+- **THE STAMP** carries the drawn eye in the body's frame and the camera's rotation in that
+  frame (`eye_body_m`, `camera_body_xyzw`), and a dump beside a capture carries the renderer's
+  capture frame index (`capture_frame`).
+- **THE JUDGE** (`vd_client_harness::pop`, Tier-A): each terrain pixel of the second frame
+  becomes a point in the body's frame (the probe's distance, the camera's inverse projection —
+  `CaptureCamera::unproject`, the inverse of the ruler gate's projection) and projects into the
+  first frame; pixels nearer than the near limit (a stated distance is half a cell coarse:
+  `near_limit_m` bounds the miss to a quarter pixel) are left out. A pixel whose rung differs
+  between the two frames is a boundary pixel. Every pixel — boundary and still alike —
+  compares against the BEST MATCH in the reprojected pixel's 3 × 3 neighbourhood (MEASURED with
+  the nearest pixel alone at 240 m/s: a floor of 43 levels, the ground's shading changing by tens
+  of levels from one pixel to the next at a crease; with the neighbourhood: 7). The floor is the
+  step under which 99.9 % of the still pixels lie; the reading is the boundary pixels past it
+  and the widest, per boundary.
+- **THE PICTURE GATE** holds every stand's verdict to the flight's end (§21).
+- **AFTER THE REFUTATION** (`slice_08_pop_refutation.md`): ONE MOMENT PER FRAME — the camera
+  samples the display time and the snapshot once (`RenderEye::moment`) and the wanted set, the
+  stamp and the chunks' placement read that sample (three samples a frame had put the drawn
+  ground a metre ahead of the stamped eye at 528 m/s); a reading carries HISTOGRAMS and a leg's
+  sum pools them, so the floor, the count past it and the widest are one reading; a pixel is a
+  boundary pixel when any terrain pixel of its neighbourhood was drawn by another rung; the
+  box's facing is f64 end to end (a narrowed facing moved the stamped eye 0.7 m a frame on a
+  turning hull); a capture with no stamp says so; the readback ring lives only around a capture.
+
+### 22.2 The legs, MEASURED (pairs every two seconds, thirty a leg; the final flight, 2026-09-12)
+
+| Leg | Frames/s | Band | Pixels compared | Beside a boundary | Floor | Past the floor | Widest | Where |
+|---|---|---|---|---|---|---|---|---|
+| Walk 1.4 m/s | 51.7 | held | 14.3 M | 105 634 | 1 | 243 | 15 | rung 0→1 (161, 11), 2→3 (56, 15): the picture's own shimmer at thin features, at the still pixels' rate |
+| Hull 240 m/s | 44.6 | held | 13.3 M | 248 597 | 1 | 6 718 | 62 | rung 1→2 (4 340 of 33 850, 48), rung 2→3 (1 473 of 54 094, 62); rungs 3–8 under 10 |
+| Hull 528 m/s | 34.9 | a gap on 166 frames | 13.2 M | 381 870 | 6 | 2 416 | 72 | rung 1→2 (1 032, 72), 2→3 (1 287, 68), 6→7 (39, 62) |
+| Hull turning, last, at 528 m/s | 45.7 | held | 16.0 M | 269 417 | 66 | 174 | 86 | the turn's chord pooled into the leg (item 21), not a pop reading |
+
+"Beside a boundary" counts every pixel whose 3 × 3 neighbourhood holds another rung (after the
+refutation's finding 8), so it is the boundary's whole width on every pair. With ONE MOMENT PER
+FRAME (finding 1) the floor at 240 m/s fell from 9 levels to 1, and the seam stands out: at the
+rung 1→2 handover 13 % of the pixels step past the floor, up to 48 levels.
+
+**THE SEAM THE DETECTOR FOUND.** At 240 m/s the pixels that cross the rung 1→2 and 2→3
+boundaries step by up to 62 levels, on every flight (450 / 367 / 566 / 600 past the floor with
+the centre-rung count, 6 718 with the neighbourhood's). The crossfade morphs POSITIONS onto the
+coarser surface and keeps the finer rung's NORMALS, so at the fade-out edge, where the coarser
+rung takes over, the shade jumps by the two rungs' slope difference — a crease of the finer
+rung under a smooth face of the coarser. Example: a rung-1 chunk at 1.7 km lies on the rung-2
+surface at its far edge; its vertices agree with the coarser ones to the millimetre, but a
+gully the rung-1 normals still tilt into is flat to the rung-2 normals, and the pixel steps from
+shade to lit in one frame. The cure is the normal's own morph: a finer vertex carries the
+coarser surface's normal beside its own and the shader blends the two across the band as it
+blends the positions (packed: four bytes a vertex; ruling V18's tolerance judges it) — a slice-8
+item for the owner's word, recorded as D-TERRAIN-5 item 20.
+
+**The 528 m/s leg, UNATTRIBUTED:** on this flight the band's gap peaked at 35 urgent chunks on
+166 frames with the queue at 210, against 707 / 458 / 1 341 on every flight before. The two
+changes since are the one sampling moment per frame and the readback ring's 62 MB; no ablation
+separates them yet.
+
+### 22.3 The turning leg, and what it found
+
+**THE FIRST TURNING LEG (a five-second hold, no counter-turn) broke the world**: the lead eye
+jumped 2 946 km, the ground on screen fell to ZERO chunks, 6 511 urgent, a gap on 853 frames,
+18 frames a second with the workers building 1 600 chunks a second for a wanted set that never
+drew — and it stayed broken for the 528 m/s leg after it. The kept run's dumps named the
+mechanism: the planet's box in the pilot's window carried a LIVE centre (the per-tick track,
+interpolated at the display cursor) and the LEVEL's facing (`overlaid_at` kept `..*boot`,
+D-TERRAIN-5 item 11's "boot facing"), and the eye those two imply in the planet's frame —
+the facing's inverse on the centre's negative — stood up to 280 km from the hull (one tick of
+spin over a 6 371 km lever). ★ FIXED: the overlay takes the facing from the SAME live sample as
+the centre (`live.orient`, slerped by the track as the centre is lerped). MEASURED after, on the
+final flight: the band held on every frame of the turn, 6 378 chunks on screen at the least, the
+lead back under 40 m once the spin was cancelled (during the turn it ran to 8 831 m: the chord,
+item 21).
+
+**The turn axis is a TORQUE**, and the hull keeps spinning after the axis is released
+(MEASURED: about fifty degrees a second for the rest of the leg); the leg now turns for two
+seconds, counter-turns for two, then cancels the residual in rounds (`cancel_spin`; on the
+final flight the residual was −0.2°/s at 5.2 s). The product's own answer is
+the ship's safety block (slowing is gameplay, ruling 2026-08-27 item 4); the instrument closes
+the loop itself. The angular acceleration of a held axis was MEASURED at 37°/s per second
+(`TURN_ACCEL_DEG_S2`).
+
+**Two residues of a spinning parent, for the record (D-TERRAIN-5 item 21):**
+- The track LERPS the centre and SLERPS the facing, so a parent spinning in the window cuts the
+  chord of its arc between two ticks: during the fast turn the stamp's altitude dipped to −8 km
+  for a frame and the detector's floor rose to 73 levels. Bounded by the spin over one tick;
+  the exact form composes the centre from the interpolated placement (rotate, then subtract).
+- The speed reading from the planet's centre in the window is a rotation's victim (587 km/s at
+  5°/s of spin); the moving eye now reads the hull's place in the planet's frame
+  (`hull_in_planet`), rotation-invariant.
+
+**The order of legs**: a turn before the 528 m/s leg made that leg's push fire along the turned
+nose (the hull climbed, the ground left the view, no pixel compared), so the turning leg flies
+LAST, at the speed the hull has then.
+
+**The spin's rest band**: the shortest hold the round trip allows (0.05 s) changes the rate by
+about two degrees a second, so the loop stops there (MEASURED: 1.3 → 2.7°/s on a 0.04 s hold);
+the residual spin's chord still lifts the detector's floor on the turning leg (65 levels at
+2.7°/s: four metres of eye, four pixels at a kilometre), which is item 21's own measurement.
+
+### 22.5 Ruling V14 D8-5, for the owner's word
+
+D8-5 reads *"the pop detector flies a HULL at 1.4, 240 and 528 m/s (the suit ruling: never a
+walking dot)"*. The moving eye's slow leg walks a character at 1.4 m/s — the band's own gate from
+step 4 — and the detector reads it (floor 1, no pop). A hull flown at 1.4 m/s is a fifth leg if
+the ruling's letter is wanted; the refuter raised it (finding 13), and it waits for the owner.
+
+### 22.4 The under-surface floor (D-TERRAIN-5 item 12)
+
+An eye the recipe's surface stands over (a dip where the mesh cuts under the field, a cave, the
+frame of a hard landing) read a ZERO horizon. Now the wanted set's altitude is floored at the
+eye's own height (`EYE_HEIGHT_M`, the one datum the pilot camera lifts the eye by — the harness's
+offset reads it from here): the horizon and the reach of an eye standing on the surface. The
+skyline keeps its own truth below: MEASURED in the unit test, an eye ten metres under the field
+wants the same reach and finest rung as a standing eye, its coarsest ring no coarser and its
+chunks no more than the standing eye's (the far rings walled off by the ground around it: rung 3
+against 10 on the fixture, a comment in the test, not its gate) — never the reach-wide flood.

@@ -38,7 +38,7 @@
 #![cfg(all(feature = "dev-control", feature = "render"))]
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,9 @@ use vd_bins::{
     dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows, orchestrator_env,
     realm_store_path, reap_forked, reserve_tcp_addr, reserve_udp_addr,
 };
+use vd_client_harness::capture::{capture_rel_path, probe_rel_for, state_rel_for};
+use vd_client_harness::manifest::CaptureKind;
+use vd_client_harness::pop::{Frame, PairRead, frame_camera, judge_pair, sum_reads};
 use vd_core::EntityId;
 use vd_core::entity_kind::EntityKind;
 use vd_core::glam::DVec3;
@@ -82,6 +85,32 @@ const SPEED_SHORTFALL: f64 = 0.9;
 /// How long each leg is read, and how often.
 const LEG_S: f64 = 60.0;
 const SAMPLE_MS: u64 = 40;
+/// THE POP DETECTOR (step 6, ruling V14 M8-3): every this many seconds of a leg the client
+/// records a pair of consecutive frames (the picture, the probe and the frame's own stamp), and
+/// after the leg the pairs are judged: the colour step at every pixel whose rung changed between
+/// the two frames, against the floor of the pixels whose rung did not. Two frames at the
+/// client's own rate.
+const POP_PAIR_EVERY_S: f64 = 2.0;
+const POP_PAIR_FPS: u32 = 60;
+/// THE TURNING LEG (step 6, D-TERRAIN-5 item 11): at 240 m/s the hull holds its turn axis for
+/// half of this at the leg's start and the opposite axis for the other half, then coasts on the
+/// new heading — the wanted set on a heading the lead never asked for, and the drawn scene under
+/// a hull that yaws. MEASURED on the first turning leg (a five-second hold, no counter-turn): the
+/// turn axis is a torque and the hull kept spinning at about fifty degrees a second for the
+/// rest of the leg, so the counter-turn brings the spin back to rest (a torque of the same
+/// size for the same time), and the yaw is read on the course.
+const TURN_S: f64 = 4.0;
+const TURN_AXES: [f32; 3] = [0.0, 1.0, 0.0];
+/// The turn axis's angular acceleration, degrees a second per second of hold (MEASURED on the
+/// second turning leg: 29° after 1.3 s, 128° after 2.6 s).
+const TURN_ACCEL_DEG_S2: f64 = 37.0;
+const SPIN_RATE_WINDOW: Duration = Duration::from_millis(500);
+/// At rest within this: the shortest hold the round trip allows (about 0.05 s) changes the rate
+/// by two degrees a second, so a smaller rate cannot be corrected without overshooting
+/// (MEASURED: 1.3 → 2.7°/s on a 0.04 s hold). The one stop rule of `cancel_spin`.
+const SPIN_REST_DEG_S: f64 = 2.0;
+const SPIN_CANCEL_ROUNDS: u32 = 4;
+const SPIN_HOLD_MAX_S: f64 = 3.0;
 /// How long a push may take to reach a leg's speed before the gate gives up.
 const PUSH_DEADLINE: Duration = Duration::from_secs(60);
 /// The interval two polls stand apart when a speed is measured.
@@ -404,12 +433,102 @@ struct LegRead {
     memory_end: MemoryRead,
     memory_grew: MemoryRead,
     max_lead_m: f64,
+    /// THE POP DETECTOR'S reading across the leg's pairs (step 6): how many pairs were judged,
+    /// how many were not two consecutive frames (left out), and the sum of the judged.
+    pop_pairs: u64,
+    pop_skipped: u64,
+    pop: PairRead,
+}
+
+/// One recorded frame of a pair, read back from the run: its picture, its probe and its stamp.
+struct PairFrame {
+    rgba: image::RgbaImage,
+    probe: image::RgbaImage,
+    stamp: vd_devproto::DevTerrainStamp,
+    capture_frame: Option<u64>,
+}
+
+fn pair_frame(run: &Path, label: &str, index: u32) -> Option<PairFrame> {
+    let rel = capture_rel_path(CaptureKind::Frame, &format!("{label}-{index:04}"));
+    let rgba = image::open(run.join(&rel)).ok()?.to_rgba8();
+    let probe = image::open(run.join(probe_rel_for(&rel))).ok()?.to_rgba8();
+    let state: DevState =
+        serde_json::from_str(&std::fs::read_to_string(run.join(state_rel_for(&rel))).ok()?).ok()?;
+    Some(PairFrame {
+        rgba,
+        probe,
+        capture_frame: state.capture_frame,
+        stamp: state.terrain_stamp?,
+    })
+}
+
+/// A recorded frame as the detector reads it: its bytes and the camera its stamp states.
+fn frame_of(f: &PairFrame, w: usize, h: usize) -> Frame<'_> {
+    Frame {
+        rgba: f.rgba.as_raw(),
+        probe: f.probe.as_raw(),
+        width: w,
+        height: h,
+        camera: frame_camera(f.stamp.eye_body_m, f.stamp.camera_body_xyzw, w, h),
+    }
+}
+
+/// THE POP DETECTOR's judgement of a leg's pairs: the judged pairs' sum, and how many pairs were
+/// left out — a frame missing, or the two not consecutive (the stamp's own frame counter), or
+/// not of one size or one body.
+fn judge_pairs(pairs: &[(PathBuf, String)]) -> (u64, u64, PairRead) {
+    let cell = |rung: u8| f64::from(vd_seed::ladder::cell_m(rung));
+    let mut reads = Vec::new();
+    let mut skipped = 0u64;
+    for (run, label) in pairs {
+        let (Some(a), Some(b)) = (pair_frame(run, label, 0), pair_frame(run, label, 1)) else {
+            skipped += 1;
+            eprintln!("terrain_moving_eye: the pair {label} lacks a frame, a probe or a stamp");
+            continue;
+        };
+        let consecutive = b.stamp.frames == a.stamp.frames + 1;
+        let same = a.rgba.dimensions() == b.rgba.dimensions() && a.stamp.realm == b.stamp.realm;
+        if !consecutive || !same {
+            skipped += 1;
+            eprintln!(
+                "terrain_moving_eye: the pair {label} is terrain frames {} and {} ({}), left out \
+                 — capture frames {:?} and {:?}, ticks {:?} and {:?}, the eye moved {:.3} m",
+                a.stamp.frames,
+                b.stamp.frames,
+                if same {
+                    "not consecutive"
+                } else {
+                    "not one picture"
+                },
+                a.capture_frame,
+                b.capture_frame,
+                a.stamp.tick,
+                b.stamp.tick,
+                (DVec3::from_array(b.stamp.eye_body_m) - DVec3::from_array(a.stamp.eye_body_m))
+                    .length()
+            );
+            continue;
+        }
+        let (w, h) = a.rgba.dimensions();
+        let (w, h) = (w as usize, h as usize);
+        let (fa, fb) = (frame_of(&a, w, h), frame_of(&b, w, h));
+        reads.push(judge_pair(&fa, &fb, &cell));
+    }
+    (reads.len() as u64, skipped, sum_reads(&reads))
 }
 
 /// Read the band for `secs` seconds, one sample every `SAMPLE_MS`: the instrument is the stamp
 /// the renderer writes every frame, polled through dev-control — never a sleep standing in for
 /// a measurement.
-fn read_band(devctl: u16, client_pid: u32, leg: &str, secs: f64) -> LegRead {
+fn read_band(
+    devctl: u16,
+    client_pid: u32,
+    leg: &str,
+    secs: f64,
+    cwd: &Path,
+    planet: RealmId,
+    turn_until_s: Option<f64>,
+) -> LegRead {
     let mut read = LegRead {
         min_drawn: u64::MAX,
         ..LegRead::default()
@@ -420,7 +539,65 @@ fn read_band(devctl: u16, client_pid: u32, leg: &str, secs: f64) -> LegRead {
     let mut first: Option<[u64; 10]> = None;
     let mut last = [0u64; 10];
     let mut last_drawn = 0u64;
+    let slug: String = leg
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let mut pairs: Vec<(PathBuf, String)> = Vec::new();
+    let mut next_pair_s = 0.0;
+    // THE TURN: the axis held from the leg's start to half of `turn_until_s`, the opposite axis
+    // to `turn_until_s`, then released (a torque and its counter-torque).
+    let mut phase = u8::from(turn_until_s.is_some());
+    if phase == 1 {
+        throttle(devctl, TURN_AXES);
+    }
     while started.elapsed().as_secs_f64() < secs {
+        let t = started.elapsed().as_secs_f64();
+        if phase == 1 && turn_until_s.is_some_and(|until| t >= until * 0.5) {
+            throttle(devctl, [-TURN_AXES[0], -TURN_AXES[1], -TURN_AXES[2]]);
+            phase = 2;
+        }
+        if phase == 2 && turn_until_s.is_some_and(|until| t >= until) {
+            throttle(devctl, [0.0, 0.0, 0.0]);
+            let residual = cancel_spin(devctl, planet, leg);
+            eprintln!(
+                "terrain_moving_eye/{leg}: the turn is done at t {:.1} s, the residual spin \
+                 {residual:.1}°/s",
+                started.elapsed().as_secs_f64()
+            );
+            phase = 3;
+        }
+        // THE POP DETECTOR's pair: two frames at the client's rate, on the leg's clock.
+        if started.elapsed().as_secs_f64() >= next_pair_s {
+            let label = format!("pop-{slug}-{:03}", pairs.len());
+            let reply = round_trip(
+                devctl,
+                &DevRequest::Record {
+                    fps: POP_PAIR_FPS,
+                    secs: 2.0 / f64::from(POP_PAIR_FPS),
+                    label: Some(label.clone()),
+                    consecutive: true,
+                },
+            );
+            match reply {
+                DevResponse::Recorded { path, frames: 2 } => {
+                    let run = Path::new(&path);
+                    let run = if run.is_absolute() {
+                        run.to_path_buf()
+                    } else {
+                        cwd.join(run)
+                    };
+                    pairs.push((run, label));
+                }
+                other => {
+                    read.pop_skipped += 1;
+                    eprintln!(
+                        "terrain_moving_eye/{leg}: the pair {label} was not recorded: {other:?}"
+                    );
+                }
+            }
+            next_pair_s += POP_PAIR_EVERY_S;
+        }
         let st = poll(devctl);
         let stamp = st
             .terrain_stamp
@@ -445,7 +622,8 @@ fn read_band(devctl: u16, client_pid: u32, leg: &str, secs: f64) -> LegRead {
         if read.samples.is_multiple_of(25) {
             eprintln!(
                 "terrain_moving_eye/{leg}: t {:5.1} s — {} drawn, {} pending, {} urgent {:?}, \
-                 {} revealed, lead {:.1} m, {:.0} m up, rungs {}..{} {:?}",
+                 {} revealed, lead {:.1} m, {:.0} m up, rungs {}..{} {:?}, the planet turned \
+                 {:.1}° in the window",
                 started.elapsed().as_secs_f64(),
                 stamp.chunks_drawn,
                 stamp.chunks_pending,
@@ -456,7 +634,8 @@ fn read_band(devctl: u16, client_pid: u32, leg: &str, secs: f64) -> LegRead {
                 stamp.altitude_m,
                 stamp.rung_min,
                 stamp.rung_max,
-                stamp.chunks_per_rung
+                stamp.chunks_per_rung,
+                turned_deg(planet_facing(&st, planet))
             );
         }
         read.samples += 1;
@@ -470,6 +649,10 @@ fn read_band(devctl: u16, client_pid: u32, leg: &str, secs: f64) -> LegRead {
         read.max_lead_m = read.max_lead_m.max(stamp.lead_m);
         std::thread::sleep(Duration::from_millis(SAMPLE_MS));
     }
+    let (judged, skipped, pop) = judge_pairs(&pairs);
+    read.pop_pairs = judged;
+    read.pop_skipped += skipped;
+    read.pop = pop;
     let first = first.unwrap_or(last);
     // A counter that went backwards (a client restart mid-leg) is refused, not wrapped.
     assert!(
@@ -546,12 +729,51 @@ fn read_band(devctl: u16, client_pid: u32, leg: &str, secs: f64) -> LegRead {
         read.min_drawn,
         read.max_lead_m
     );
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE POP DETECTOR — {} pairs judged ({} left out), {} pixels \
+         compared ({} nearer than the limit, which reached {:.0} m; {} off the first frame), {} \
+         crossed a rung boundary, the floor at {} levels, {} past the floor, the widest {} \
+         levels; per boundary (finer rung, crossed, past the floor, widest) {:?}",
+        read.pop_pairs,
+        read.pop_skipped,
+        read.pop.compared,
+        read.pop.near_skipped,
+        read.pop.near_limit_m,
+        read.pop.off_frame,
+        read.pop.crossed(),
+        read.pop.floor(),
+        read.pop.over_floor(),
+        read.pop.widest(),
+        read.pop
+            .boundary_reads()
+            .iter()
+            .map(|b| (b.finer, b.crossed, b.over_floor, b.widest))
+            .collect::<Vec<_>>()
+    );
     read
 }
 
 /// THE PLANET'S MOTION THROUGH THE EYE'S FRAME: where the planet's row stands in the picture. For
 /// a character on the planet it stands still; for a character inside a flying hull it moves at
 /// the hull's own speed, the other way.
+/// The planet's box facing in the pilot's window: how the planet's frame turns in the frame the
+/// window draws (the hull's, aboard), as a quaternion.
+fn planet_facing(state: &DevState, planet: RealmId) -> vd_core::glam::DQuat {
+    let label = format!("{planet:?}");
+    let row = state
+        .realm_boxes
+        .iter()
+        .find(|b| b.realm == label)
+        .unwrap_or_else(|| panic!("the planet's row {label} is in the window: {state:?}"));
+    vd_core::glam::DQuat::from_array(row.facing).normalize()
+}
+
+/// How far a facing has turned from the identity, in degrees, 0 to 360 (its own axis's sense).
+fn turned_deg(q: vd_core::glam::DQuat) -> f64 {
+    let v = DVec3::new(q.x, q.y, q.z).length();
+    (2.0 * v.atan2(q.w)).to_degrees().rem_euclid(360.0)
+}
+
 fn planet_centre(state: &DevState, planet: RealmId) -> DVec3 {
     let label = format!("{planet:?}");
     let row = state
@@ -567,12 +789,69 @@ fn planet_centre(state: &DevState, planet: RealmId) -> DVec3 {
 fn measure_speed(devctl: u16, planet: RealmId) -> f64 {
     let a = poll(devctl);
     let t0 = Instant::now();
-    let c0 = planet_centre(&a, planet);
+    let c0 = hull_in_planet(&a, planet);
     std::thread::sleep(SPEED_INTERVAL);
     let b = poll(devctl);
     let dt = t0.elapsed().as_secs_f64();
-    let c1 = planet_centre(&b, planet);
+    let c1 = hull_in_planet(&b, planet);
     (c1 - c0).length() / dt
+}
+
+/// THE HULL'S PLACE IN THE PLANET'S FRAME, from the planet's box in the pilot's window: the
+/// facing's inverse on the centre's negative. Rotation-invariant — MEASURED with the box's centre
+/// alone: a hull spinning five degrees a second read 587 km/s, the centre swinging on a 6 371 km
+/// lever, and the push to 528 m/s never fired.
+fn hull_in_planet(state: &DevState, planet: RealmId) -> DVec3 {
+    planet_facing(state, planet).inverse() * -planet_centre(state, planet)
+}
+
+/// THE YAW RATE of the hull, degrees a second, signed about the turn axis: the planet's facing in
+/// the window read twice, `SPIN_RATE_WINDOW` apart.
+fn yaw_rate_deg_s(devctl: u16, planet: RealmId) -> f64 {
+    let q0 = planet_facing(&poll(devctl), planet);
+    let t0 = Instant::now();
+    std::thread::sleep(SPIN_RATE_WINDOW);
+    let q1 = planet_facing(&poll(devctl), planet);
+    let dt = t0.elapsed().as_secs_f64();
+    let r = (q1 * q0.inverse()).normalize();
+    let axis = DVec3::new(r.x, r.y, r.z);
+    let angle = 2.0 * axis.length().atan2(r.w);
+    let signed = if axis.y < 0.0 { -angle } else { angle };
+    signed.to_degrees() / dt
+}
+
+/// CANCEL THE SPIN: the turn axis is a torque (MEASURED: a hold turned the hull at
+/// `TURN_ACCEL_DEG_S2` a second for every second held, and it kept spinning after release), so
+/// after the counter-turn a residual rate remains; each round reads the rate and holds the
+/// opposite axis for the time that rate takes to cancel, until the hull is at rest within
+/// `SPIN_REST_DEG_S`. The product's own answer is a ship's safety block (ruling 2026-08-27, item
+/// 4: slowing is gameplay); the instrument closes the loop itself.
+fn cancel_spin(devctl: u16, planet: RealmId, leg: &str) -> f64 {
+    let mut rate = yaw_rate_deg_s(devctl, planet);
+    for round in 0..SPIN_CANCEL_ROUNDS {
+        if rate.abs() < SPIN_REST_DEG_S {
+            break;
+        }
+        let hold_s = (rate.abs() / TURN_ACCEL_DEG_S2).min(SPIN_HOLD_MAX_S);
+        let sign = if rate > 0.0 { 1.0 } else { -1.0 };
+        throttle(
+            devctl,
+            [
+                -sign * TURN_AXES[0],
+                -sign * TURN_AXES[1],
+                -sign * TURN_AXES[2],
+            ],
+        );
+        std::thread::sleep(Duration::from_secs_f64(hold_s));
+        throttle(devctl, [0.0, 0.0, 0.0]);
+        let after = yaw_rate_deg_s(devctl, planet);
+        eprintln!(
+            "terrain_moving_eye/{leg}: spin round {round}: {rate:.1}°/s, held the opposite axis \
+             {hold_s:.2} s, now {after:.1}°/s"
+        );
+        rate = after;
+    }
+    rate
 }
 
 /// Push the hull along its nose until it passes `target_mps`, then release the stick: the hull
@@ -872,7 +1151,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         // seed alone walked at 0.52 m/s). The walk covers about 84 m in its minute — a rung-0
         // chunk and a third: the eye's own chunk changes once.
         let speed = walk_at(devctl, WALK_MPS);
-        let read = read_band(devctl, client.0.id(), "walk", LEG_S);
+        let read = read_band(devctl, client.0.id(), "walk", LEG_S, &f.cwd, planet, None);
         throttle(devctl, [0.0, 0.0, 0.0]);
         eprintln!("terrain_moving_eye/walk: the character walked at {speed:.2} m/s");
         assert!(
@@ -885,7 +1164,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
 
     // ---- LEGS 2 AND 3: THE HULL. (A diagnosis flight boards `boardings` times with fresh
     // pilots and flies the legs on the last.)
-    let (fast, fastest) = {
+    let (fast, turning, fastest) = {
         let mut boarded: Option<(ChildGuard, u16)> = None;
         for b in 0..boardings {
             let client_quic = reserve_udp_addr();
@@ -945,25 +1224,51 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
             // `push_to` returns at or past the target, or panics at its deadline: the speed
             // needs no second assertion (refutation R4-7).
             let speed = push_to(devctl, planet, *target);
-            let read = read_band(devctl, client.0.id(), &leg, LEG_S);
+            let read = read_band(devctl, client.0.id(), &leg, LEG_S, &f.cwd, planet, None);
             eprintln!(
                 "terrain_moving_eye/{leg}: leg {} coasted at {speed:.1} m/s",
                 i + 2
             );
             reads.push(read);
         }
+        // THE TURNING LEG, LAST (after the straight legs, so their readings keep their history —
+        // MEASURED with the turn before the 528 m/s leg: the push then fired along the turned
+        // nose, the hull climbed, the ground left the view). The heading before and after, from
+        // the planet's box as the pilot's window states it (the hull's own box is its frame; the
+        // planet turns in it when the hull yaws).
+        let leg = "hull turning";
+        let before = planet_facing(&poll(devctl), planet);
+        let read = read_band(
+            devctl,
+            client.0.id(),
+            leg,
+            LEG_S,
+            &f.cwd,
+            planet,
+            Some(TURN_S),
+        );
+        let after = planet_facing(&poll(devctl), planet);
+        let turned = before.angle_between(after).to_degrees();
+        eprintln!(
+            "terrain_moving_eye/{leg}: the turn and its counter-turn over {TURN_S} s left the \
+             heading {turned:.1}° from the start (the planet's box facing before {before:?}, \
+             after {after:?})"
+        );
+        reads.push(read);
         let _ = round_trip(devctl, &DevRequest::Close);
-        let fastest = reads.pop().expect("two legs");
-        let fast = reads.pop().expect("two legs");
-        (fast, fastest)
+        let turning = reads.pop().expect("three legs");
+        let fastest = reads.pop().expect("three legs");
+        let fast = reads.pop().expect("three legs");
+        (fast, turning, fastest)
     };
     // The verdicts, after every leg has flown (so every leg's numbers are always in the log).
     report_leg(&format!("hull {} m/s", HULL_LEG_MPS[0]), &fast);
     report_leg(&format!("hull {} m/s", HULL_LEG_MPS[1]), &fastest);
+    report_leg("hull turning", &turning);
     assert_band_complete("walk", &walk);
     eprintln!(
         "terrain_moving_eye: THE BAND HELD on every frame of the walk — {walk:?}; the hull legs \
-         read {fast:?} and {fastest:?}"
+         read {fast:?}, {turning:?} and {fastest:?}"
     );
 }
 

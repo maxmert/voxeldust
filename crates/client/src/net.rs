@@ -876,10 +876,10 @@ impl ClientState {
                 // The delivered facing, verbatim (the same four numbers the renderer turns the
                 // row's terrain by).
                 facing: sanitize_quat(vd_core::glam::DQuat::from_xyzw(
-                    f64::from(b.facing[0]),
-                    f64::from(b.facing[1]),
-                    f64::from(b.facing[2]),
-                    f64::from(b.facing[3]),
+                    b.facing[0],
+                    b.facing[1],
+                    b.facing[2],
+                    b.facing[3],
                 )),
                 // SHAKE DIAGNOSIS: which moment THIS box is being drawn from. A box whose tick tracks
                 // `entity_feed_newest_tick` shares the player's moment; one that drifts is authored by a
@@ -971,6 +971,7 @@ impl ClientState {
             terrain_chunks_pending,
             camera_mode: vd_devproto::camera_mode_name(camera_mode).to_owned(),
             star_probe,
+            capture_frame: None,
             terrain_stamp,
             transfer: DevTransferView::None,
         }
@@ -3156,6 +3157,8 @@ mod tests {
                     bytes_drawn: 0,
                     shadow_casters: 0,
                     shadow_bytes: 0,
+                    eye_body_m: [0.0; 3],
+                    camera_body_xyzw: [0.0, 0.0, 0.0, 1.0],
                     hud_rect_px: [0.0; 4],
                     frame_ms: 0.0,
                     passes_ms: Vec::new(),

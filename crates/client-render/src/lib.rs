@@ -152,6 +152,11 @@ pub struct CaptureJob {
     pub label: Option<String>,
     /// The render thread sends the result here (or an Err string).
     pub reply: Sender<Result<CaptureResult, String>>,
+    /// THE EXACT FRAME (slice 8 step 6): serve this frame index and no other — the frame after
+    /// the one a pair's first capture returned. `None` serves the freshest frame rendered at or
+    /// after the request. An exact frame the ring no longer holds is refused (an `Err`), never
+    /// stood in for by a later one.
+    pub exact_frame: Option<u64>,
 }
 
 /// The result of a served capture.
@@ -169,6 +174,12 @@ pub struct CaptureResult {
     pub freshest_tick: Option<u64>,
     /// The render cursor at capture time (the same snapshot), for the manifest.
     pub cursor: Option<f64>,
+    /// THE FRAME'S OWN STAMP (slice 8 step 6): the terrain stamp of the very frame the pixels
+    /// show — remembered per frame as the readbacks run one or two frames behind — and that
+    /// frame's index. A state dump beside a record frame carries this stamp, so a pair of
+    /// consecutive frames states its two drawn cameras and proves it is consecutive.
+    pub frame: u64,
+    pub stamp: Option<vd_devproto::DevTerrainStamp>,
 }
 
 /// The handles the bin wires into the window (constructed on the main thread before
@@ -665,6 +676,13 @@ struct RenderEye {
     /// The camera's vertical FOV (rad) and viewport rows, sampled from the live camera — the two
     /// facts every apparent-size and near-plane derivation needs, read once per frame.
     view: Option<(f64, f64)>,
+    /// ★ THE FRAME'S MOMENT (slice 8 step 6, the refuter's finding): the display time and the
+    /// delivered snapshot the camera was placed from, sampled ONCE here and read by the terrain's
+    /// wanted set, its stamp and its placement — so the picture, the chunks under it and the
+    /// camera the stamp states are one instant. MEASURED with three samples a frame: a harvest
+    /// of a few milliseconds between them put the drawn ground a metre ahead of the stamped eye
+    /// at 528 m/s, a pixel at a kilometre, straight into the pop detector's floor.
+    moment: Option<(f64, Arc<RenderSnapshot>)>,
 }
 
 /// Run the client renderer. BLOCKS until exit; the bin MUST call this on the MAIN thread
@@ -1477,6 +1495,7 @@ fn place_camera(
 
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
+    eye.moment = Some((now_s, Arc::clone(&snap)));
     let own = snap.own_entity();
     let rendered = snap.rendered(now_s);
     let Some((_, _, own_pose)) = rendered.iter().find(|(id, _, _)| Some(*id) == own) else {
@@ -2520,10 +2539,18 @@ struct RenderTargetImage(Handle<Image>);
 /// The render-world → main-world readback channel (crossbeam: a Bevy Resource needs Sync,
 /// which `std::sync::mpsc::Receiver` is not).
 /// One readback: the copier's slot (picture or probe), the main-world frame it was extracted at,
-/// and the padded bytes.
-type Readback = (u8, u64, Vec<u8>);
-/// The freshest readback per slot, with its frame stamp.
-type Readbacks = [Option<(u64, Vec<u8>)>; 2];
+/// THE TERRAIN STAMP extracted with it (slice 8 step 6: the stamp of the very frame the pixels
+/// show, taken at the same extract, so a pair of consecutive frames states its two drawn
+/// cameras), and the padded bytes.
+type Readback = (u8, u64, Option<Arc<vd_devproto::DevTerrainStamp>>, Vec<u8>);
+/// THE READBACK RING per slot (slice 8 step 6): the last [`READBACK_RING`] frames' readbacks
+/// with their frame and terrain stamps, so a job may ask for the exact frame after the one it
+/// was served last — two consecutive frames of one pair — while the drain runs a frame or two
+/// behind.
+type Readbacks =
+    [std::collections::VecDeque<(u64, Option<Arc<vd_devproto::DevTerrainStamp>>, Vec<u8>)>; 2];
+/// How many frames' readbacks each slot keeps: past the drain's own lag and one PNG's encode.
+const READBACK_RING: usize = 8;
 #[derive(Resource, Deref)]
 struct MainWorldReceiver(crossbeam_channel::Receiver<Readback>);
 #[derive(Resource, Deref)]
@@ -2765,40 +2792,78 @@ fn serve_captures(
     net: Res<Net>,
     mut latest: Local<Readbacks>,
     mut pending: Local<Option<(CaptureJob, u64)>>,
+    mut served_at: Local<Option<u64>>,
 ) {
     cfg.frame += 1;
-    while let Ok((slot, frame, data)) = receiver.try_recv() {
-        latest[usize::from(slot)] = Some((frame, data));
+    // THE RING IS KEPT ONLY AROUND A CAPTURE: while a job is pending, or within a ring's worth of
+    // frames after the last served one (a pair's second frame is asked for by then); otherwise a
+    // slot holds its freshest readback alone (MEASURED: a full ring is 62 MB of the client's
+    // memory, held for nothing between captures).
+    let keep = if pending.is_some()
+        || served_at.is_some_and(|f| u64::from(cfg.frame).saturating_sub(f) <= READBACK_RING as u64)
+    {
+        READBACK_RING
+    } else {
+        1
+    };
+    while let Ok((slot, frame, stamp, data)) = receiver.try_recv() {
+        let ring = &mut latest[usize::from(slot)];
+        ring.push_back((frame, stamp, data));
+        while ring.len() > keep {
+            ring.pop_front();
+        }
     }
     if pending.is_none()
         && let Ok(job) = chan.0.try_recv()
     {
         *pending = Some((job, u64::from(cfg.frame)));
     }
-    let Some((_, asked_at)) = pending.as_ref() else {
+    let Some((job_ref, asked_at)) = pending.as_ref() else {
         return;
     };
     if cfg.frame < CAPTURE_PRE_ROLL {
         return;
     }
-    let Some((frame, bytes)) = latest[usize::from(COPIER_MAIN)].clone() else {
-        return; // no readback frame yet — keep the job pending for a later frame
+    // THE FRAME TO SERVE: the exact one the job names, or the freshest rendered at or after the
+    // request. An exact frame the ring has already dropped is refused.
+    let main = &latest[usize::from(COPIER_MAIN)];
+    let newest = main.back().map(|(f, _, _)| *f);
+    let served = match job_ref.exact_frame {
+        Some(exact) => match main.iter().find(|(f, _, _)| *f == exact) {
+            Some(hit) => Some(hit.clone()),
+            None if newest.is_some_and(|n| n > exact) => {
+                let Some((job, _)) = pending.take() else {
+                    return;
+                };
+                let _ = job.reply.send(Err(format!(
+                    "the exact frame {exact} has left the readback ring (newest {newest:?})"
+                )));
+                return;
+            }
+            None => None,
+        },
+        None => main.back().filter(|(f, _, _)| *f >= *asked_at).cloned(),
     };
-    if frame < *asked_at {
-        return; // the readback predates the request — the frame it asked for is still in flight
-    }
-    // The probe of the SAME frame, when a probe target exists; a pair from two frames waits for
-    // the next drain (the two copies are sent back to back, so it is at most one frame away).
+    let Some((frame, stamp, bytes)) = served else {
+        return; // the frame it asked for is still in flight — keep the job pending
+    };
+    // The probe of the SAME frame, when a probe target exists; the two copies are sent back to
+    // back, so the ring holds it at the same drain or the next.
     let probe_bytes = match &probe_target {
-        Some(_) => match &latest[usize::from(COPIER_PROBE)] {
-            Some((probe_frame, data)) if *probe_frame == frame => Some(data.clone()),
-            _ => return,
+        Some(_) => match latest[usize::from(COPIER_PROBE)]
+            .iter()
+            .find(|(f, _, _)| *f == frame)
+        {
+            Some((_, _, data)) => Some(data.clone()),
+            None => return,
         },
         None => None,
     };
     let Some((job, _)) = pending.take() else {
         return;
     };
+    *served_at = Some(u64::from(cfg.frame));
+    // The serve counter: every served job takes a number, written or not (the fallback stem).
     let shot = cfg.shot;
     // Organize captures by kind: screenshots under `shots/`, record frames under `frames/`
     // (the manifest stores these run-relative paths). The requester usually supplies the
@@ -2818,41 +2883,49 @@ fn serve_captures(
     // post-roundtrip poll), so the manifest tick identifies the captured world.
     let now_s = net.started_at.elapsed().as_secs_f64();
     let snap = net.snapshot.load();
-    let result = write_capture_png(&path, &target.0, &images, &bytes)
-        .and_then(|()| match (&probe_target, probe_bytes) {
-            // The probe beside the picture — the Tier-A pairing rule names its path.
-            (Some(probe), Some(data)) => write_capture_png(
-                &cfg.runs_dir.join(probe_rel_for(&rel)),
-                &probe.0,
-                &images,
-                &data,
-            ),
-            _ => Ok(()),
-        })
-        .map(|()| CaptureResult {
-            path: path.display().to_string(),
-            rel_path: rel,
-            freshest_tick: snap.freshest_tick(),
-            cursor: snap.cursor(now_s),
+    let result = CaptureResult {
+        path: path.display().to_string(),
+        rel_path: rel.clone(),
+        freshest_tick: snap.freshest_tick(),
+        cursor: snap.cursor(now_s),
+        frame,
+        stamp: stamp.map(|s| (*s).clone()),
+    };
+    cfg.shot += 1;
+    // THE ENCODE OFF THE MAIN THREAD (slice 8 step 6): a PNG of the picture took the frame
+    // thirty milliseconds on this thread — MEASURED on the walk leg with a pair every two
+    // seconds, 51 → 42 frames a second. The image's shape is read here; the padding strip, the
+    // encode and the write run on their own thread, which answers the job when the files exist.
+    let picture = images.get(&target.0).cloned();
+    let probe_image = probe_target
+        .as_ref()
+        .and_then(|p| images.get(&p.0).cloned());
+    let probe_path = cfg.runs_dir.join(probe_rel_for(&rel));
+    std::thread::spawn(move || {
+        let written = write_capture_png(&path, picture.as_ref(), &bytes).and_then(|()| {
+            match probe_bytes {
+                // The probe beside the picture — the Tier-A pairing rule names its path.
+                Some(data) => write_capture_png(&probe_path, probe_image.as_ref(), &data),
+                None => Ok(()),
+            }
         });
-    match &result {
-        Ok(r) => {
-            cfg.shot += 1;
-            tracing::info!(path = %r.path, "capture written");
+        let result = written.map(|()| result);
+        match &result {
+            Ok(r) => tracing::info!(path = %r.path, "capture written"),
+            Err(e) => tracing::warn!(error = %e, "capture failed"),
         }
-        Err(e) => tracing::warn!(error = %e, "capture failed"),
-    }
-    let _ = job.reply.send(result);
+        let _ = job.reply.send(result);
+    });
 }
 
-/// Strip the 256-byte row padding from the raw readback bytes and encode a PNG to `path`.
+/// Strip the 256-byte row padding from the raw readback bytes and encode a PNG to `path`; the
+/// image is the offscreen target's own (its format names the pixel size), cloned for the thread.
 fn write_capture_png(
     path: &std::path::Path,
-    target: &Handle<Image>,
-    images: &Assets<Image>,
+    img: Option<&Image>,
     raw: &[u8],
 ) -> Result<(), String> {
-    let img = images.get(target).ok_or("offscreen image missing")?;
+    let img = img.ok_or("offscreen image missing")?;
     let pixel_size = img
         .texture_descriptor
         .format
@@ -2907,6 +2980,7 @@ impl Plugin for ImageCopyPlugin {
 struct ImageCopiers {
     copiers: Vec<ImageCopier>,
     frame: u64,
+    stamp: Option<Arc<vd_devproto::DevTerrainStamp>>,
 }
 
 #[derive(Clone, Component)]
@@ -2949,10 +3023,14 @@ fn image_copy_extract(
     mut commands: Commands,
     image_copiers: Extract<Query<&ImageCopier>>,
     cfg: Extract<Option<Res<CaptureCfg>>>,
+    terrain: Extract<Option<Res<terrain::Terrain>>>,
 ) {
     commands.insert_resource(ImageCopiers {
         copiers: image_copiers.iter().cloned().collect(),
         frame: cfg.as_ref().map_or(0, |c| u64::from(c.frame)),
+        // THE TERRAIN STAMP of this very frame (slice 8 step 6): the extract runs after every
+        // main-world system of the frame, so the stamp is the one the extracted scene draws.
+        stamp: terrain.as_ref().and_then(|t| t.stamp.clone()).map(Arc::new),
     });
 }
 
@@ -3042,6 +3120,7 @@ fn receive_image_from_buffer(
         let _ = sender.send((
             image_copier.slot,
             image_copiers.frame,
+            image_copiers.stamp.clone(),
             buffer_slice.get_mapped_range().to_vec(),
         ));
         image_copier.buffer.unmap();

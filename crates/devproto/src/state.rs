@@ -216,6 +216,11 @@ pub struct DevState {
     /// no rung flag, or no body under the eye. The picture gate recomputes altitude and horizon
     /// from THIS state's own pose and asserts they agree (M8-4).
     pub terrain_stamp: Option<DevTerrainStamp>,
+    /// THE CAPTURE FRAME (slice 8 step 6): the renderer's own frame index of the captured
+    /// picture this dump sits beside — `None` for a plain poll. Two frames of a recorded pair
+    /// state indices one apart.
+    #[serde(default)]
+    pub capture_frame: Option<u64>,
     /// ★ WHERE THE GALAXY IS (owner ruling 2026-09-02 R1): the origin realm's centre in the galaxy's
     /// frame, in metres, as the gateway last stated it on the realm lane — the anchor the star cloud
     /// is placed by. `None` until the observer chain reaches the galaxy, which is exactly the case
@@ -326,6 +331,7 @@ pub(crate) mod tests {
             terrain_chunks_pending: 0,
             camera_mode: camera_mode_name(CAMERA_MODE_NONE).to_owned(),
             star_probe: Vec::new(),
+            capture_frame: Some(4242),
             terrain_stamp: Some(DevTerrainStamp {
                 realm: "Planet(7)".to_owned(),
                 rung_min: 0,
@@ -360,6 +366,8 @@ pub(crate) mod tests {
                 bytes_drawn: 90_000_000,
                 shadow_casters: 52,
                 shadow_bytes: 15_000_000,
+                eye_body_m: [6_371_000.0, 2.0, 3.0],
+                camera_body_xyzw: [0.0, 0.0, 0.6, 0.8],
                 hud_rect_px: [10.0, 10.0, 900.0, 170.0],
                 frame_ms: 34.0,
                 passes_ms: vec![("main_opaque_pass_3d".to_owned(), 1.5, 20.0)],
@@ -429,6 +437,8 @@ pub(crate) mod tests {
         assert!(json.contains("\"bytes_drawn\":90000000"));
         assert!(json.contains("\"shadow_casters\":52"));
         assert!(json.contains("\"shadow_bytes\":15000000"));
+        assert!(json.contains("\"eye_body_m\":[6371000.0,2.0,3.0]"));
+        assert!(json.contains("\"camera_body_xyzw\":[0.0,0.0,0.6,0.8]"));
         assert!(json.contains("\"hud_rect_px\":[10.0,10.0,900.0,170.0]"));
         assert!(json.contains("\"frame_ms\":34.0"));
         assert!(json.contains("\"passes_ms\":[[\"main_opaque_pass_3d\",1.5,20.0]]"));
@@ -477,6 +487,12 @@ pub struct DevTerrainStamp {
     /// The nearest and farthest drawn chunk's origin from the eye, in metres (0 while none).
     pub chunk_nearest_m: f64,
     pub chunk_farthest_m: f64,
+    /// THE DRAWN CAMERA (slice 8 step 6, the pop detector): the eye the frame was drawn from, in
+    /// the body's own frame, metres, and the camera's rotation in that frame (x, y, z, w) — the
+    /// camera the pixel model reconstructs for a frame, so two consecutive frames reproject into
+    /// one another and a pixel's rung can be compared before and after a boundary crossed it.
+    pub eye_body_m: [f64; 3],
+    pub camera_body_xyzw: [f64; 4],
     /// Chunks on screen and still building — the same two counts the wait fields read.
     pub chunks_drawn: u64,
     pub chunks_pending: u64,

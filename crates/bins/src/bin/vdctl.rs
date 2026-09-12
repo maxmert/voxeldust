@@ -9,7 +9,7 @@
 //!   move <fwd> <strafe> <vert> | look <yaw> <pitch> | action <index> <on|off>
 //!   close | reset | state | wait <field> <op> <value> [max_ticks]
 //!   screenshot [--at-tick <N>] [label]       (capture a PNG — a `--capture` client only)
-//!   record [--fps <N>] [--secs <D>] [label]  (capture a frame sequence — `--capture` only)
+//!   record [--fps <N>] [--secs <D>] [--consecutive] [label]  (capture a frame sequence — `--capture` only)
 //! where `<index>` is a 0-based action-bit index (converted to a single-bit mask, so
 //!       you can never accidentally press two), and `<field>`/`<op>` are a `WaitField`/
 //!       `WaitOp` — the live lists are shown in the `bad field` / `bad op` errors,
@@ -180,14 +180,20 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
             Ok(DevRequest::Screenshot { at_tick, label })
         }
         "record" => {
-            // record [--fps <N>] [--secs <D>] [label] — a reduced-rate frame sequence
-            // (Capture-mode client). The client paces + clamps; defaults fill in the rest.
+            // record [--fps <N>] [--secs <D>] [--consecutive] [label] — a reduced-rate frame
+            // sequence (Capture-mode client). The client paces + clamps; defaults fill in the
+            // rest. `--consecutive`: every frame the very next rendered one (the pop detector).
             let mut fps = DEFAULT_RECORD_FPS;
             let mut secs = DEFAULT_RECORD_SECS;
             let mut label = None;
+            let mut consecutive = false;
             let mut i = 0;
             while i < rest.len() {
                 match rest[i].as_str() {
+                    "--consecutive" => {
+                        consecutive = true;
+                        i += 1;
+                    }
                     "--fps" => {
                         let raw = rest.get(i + 1).ok_or("--fps requires a value")?;
                         fps = raw
@@ -209,7 +215,12 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
                     other => return Err(format!("record: unexpected argument {other:?}")),
                 }
             }
-            Ok(DevRequest::Record { fps, secs, label })
+            Ok(DevRequest::Record {
+                fps,
+                secs,
+                label,
+                consecutive,
+            })
         }
         "walk_to" => {
             let usage = "walk_to <x> <y> <z> [arrive_epsilon] [max_ticks]";

@@ -922,8 +922,13 @@ mod dev_control {
                 // cancellable on EOF, like Screenshot/WaitUntil; handled in serve_conn for
                 // the same reason. Otherwise → Unsupported in dispatch_immediate.
                 #[cfg(feature = "render")]
-                Ok(DevRequest::Record { fps, secs, label }) if handles.captures.is_some() => {
-                    match record(&handles, &mut framer, fps, secs, label).await {
+                Ok(DevRequest::Record {
+                    fps,
+                    secs,
+                    label,
+                    consecutive,
+                }) if handles.captures.is_some() => {
+                    match record(&handles, &mut framer, fps, secs, label, consecutive).await {
                         Some(response) => response,
                         None => return Ok(()), // socket closed mid-record
                     }
@@ -1202,7 +1207,7 @@ mod dev_control {
                 other => return other,                // Timeout / closed / EOF (None)
             }
         }
-        match capture_one(handles, CaptureKind::Screenshot, label).await {
+        match capture_one(handles, CaptureKind::Screenshot, label, None).await {
             Some(Ok(result)) => {
                 // The render-sampled tick (the captured frame's), not a post-roundtrip poll.
                 let tick = result.freshest_tick;
@@ -1230,6 +1235,7 @@ mod dev_control {
         fps: u32,
         secs: f64,
         label: Option<String>,
+        consecutive: bool,
     ) -> Option<DevResponse> {
         if handles.captures.is_none() {
             return Some(DevResponse::Error {
@@ -1246,18 +1252,25 @@ mod dev_control {
         let interval = Duration::from_secs_f64(plan.interval_secs);
         let base = label.unwrap_or_else(|| "rec".to_owned());
         let mut written = 0u64;
+        // CONSECUTIVE (slice 8 step 6): each frame after the first is asked for by its exact
+        // index, the last served frame plus one; a frame the ring has dropped ends the sequence.
+        let mut exact_frame: Option<u64> = None;
         for i in 0..plan.frames {
-            match capture_one(handles, CaptureKind::Frame, Some(format!("{base}-{i:04}"))).await {
+            let label = Some(format!("{base}-{i:04}"));
+            match capture_one(handles, CaptureKind::Frame, label, exact_frame).await {
                 Some(Ok(result)) => {
+                    exact_frame = consecutive.then_some(result.frame + 1);
                     persist_capture(handles, CaptureKind::Frame, result, None, false).await;
                     written += 1;
                 }
-                // Render thread gone / timed out: stop, return what we captured so far.
+                // Render thread gone / timed out / the exact frame gone: stop, return what we
+                // captured so far.
                 _ => break,
             }
             // Pace to the next frame, cancelling the instant a killed vdctl closes the socket
-            // (EOF) so a long recording never strands the task.
-            if i + 1 < plan.frames {
+            // (EOF) so a long recording never strands the task. A consecutive sequence never
+            // waits: the next frame is named, not timed.
+            if i + 1 < plan.frames && !consecutive {
                 tokio::select! {
                     _ = tokio::time::sleep(interval) => {}
                     read = framer.fill() => {
@@ -1295,6 +1308,7 @@ mod dev_control {
         handles: &Handles,
         kind: CaptureKind,
         label: Option<String>,
+        exact_frame: Option<u64>,
     ) -> Option<Result<vd_client_render::CaptureResult, ()>> {
         let captures = handles.captures.as_ref()?;
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
@@ -1303,6 +1317,7 @@ mod dev_control {
                 kind,
                 label,
                 reply: reply_tx,
+                exact_frame,
             })
             .is_err()
         {
@@ -1367,7 +1382,14 @@ mod dev_control {
         // bounded, low-severity skew. The MANIFEST's `freshest_tick`/`cursor` (from the
         // captured frame) are the aligned quantities; the state dump is a best-effort
         // diagnostic snapshot of the delivered world around the capture.
-        let state = current(handles); // for the session-diagnostic count + the dump
+        let mut state = current(handles); // for the session-diagnostic count + the dump
+        // THE FRAME'S OWN STAMP (slice 8 step 6): the terrain stamp of the captured frame, in
+        // place of the poll's — a record frame's dump then states the drawn camera of the pixels
+        // beside it, and its frame index.
+        // The captured frame's stamp, or NONE when that frame had none (no body under the eye):
+        // never the poll's stamp of a later frame beside a frame index it did not draw.
+        state.terrain_stamp = result.stamp.clone();
+        state.capture_frame = Some(result.frame);
         // The state dump sits beside the PNG (frames/foo.png → state/foo.json) — the
         // run-relative pairing is the Tier-A `state_rel_for`.
         let state_rel = state_rel_for(&result.rel_path);

@@ -50,7 +50,7 @@ fn main() {
     // The pilot camera: the eye 1.6 m up the avatar's own up, looking along its nose (the same
     // expression `pilot_capture_camera` states), at the reference view's field.
     let cam_up = orient * DVec3::Y;
-    let eye = stand + cam_up * 1.6;
+    let eye = stand + cam_up * vd_client::ladder_view::EYE_HEIGHT_M;
     let fov_y = vd_core::geometry::REFERENCE_VIEW_FOV_Y_RAD;
     let ground = eye_surface(&body, eye.to_array()).expect("the eye's ground");
     let horizon = horizon_m(ground.surface_m, ground.altitude_m);

@@ -25,5 +25,6 @@ pub mod capture;
 pub mod input_map;
 pub mod manifest;
 pub mod nav;
+pub mod pop;
 pub mod probe;
 pub mod verdict;

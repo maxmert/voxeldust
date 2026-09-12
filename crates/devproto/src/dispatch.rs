@@ -45,10 +45,17 @@ pub enum DevRequest {
     },
     /// Record a reduced-rate frame sequence for `secs` at `fps` (HR6). `label` is the
     /// agent's optional name for the recording. Reply: [`DevResponse::Recorded`].
+    ///
+    /// `consecutive` (slice 8 step 6, the pop detector): every frame after the first is the
+    /// very next rendered frame (served from the renderer's readback ring, no pacing by the
+    /// clock), so the sequence is frame-exact at the client's own rate; a frame the ring no
+    /// longer holds ends the sequence short. `fps` then only sizes the count with `secs`.
     Record {
         fps: u32,
         secs: f64,
         label: Option<String>,
+        #[serde(default)]
+        consecutive: bool,
     },
     /// Closed-loop: drive the own entity toward a world `target` (within
     /// `arrive_epsilon`) for up to `max_ticks`. Reply: `State` (arrived) / `Timeout`.
@@ -327,6 +334,13 @@ mod tests {
                 fps: 15,
                 secs: 2.0,
                 label: None,
+                consecutive: false,
+            },
+            DevRequest::Record {
+                fps: 60,
+                secs: 0.05,
+                label: Some("pair".to_owned()),
+                consecutive: true,
             },
             DevRequest::WalkTo {
                 target: [1.0, 2.0, 3.0],

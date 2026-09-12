@@ -591,7 +591,7 @@ pub struct Terrain {
     ruler_assets: Option<(Handle<Mesh>, Handle<StandardMaterial>)>,
     ruler_cache: Option<RulerCache>,
     /// This frame's stamp, assembled by `sync_terrain`, completed and published by `place_chunks`.
-    stamp: Option<DevTerrainStamp>,
+    pub(crate) stamp: Option<DevTerrainStamp>,
 }
 
 impl Terrain {
@@ -812,13 +812,9 @@ fn look_of(rbox: &RealmBox) -> Boundary {
 
 /// The row's facing as a rotation.
 fn facing_of(rbox: &RealmBox) -> DQuat {
-    DQuat::from_xyzw(
-        f64::from(rbox.facing[0]),
-        f64::from(rbox.facing[1]),
-        f64::from(rbox.facing[2]),
-        f64::from(rbox.facing[3]),
-    )
-    .normalize()
+    // At the box's own precision (f64 since step 6: a narrowed facing on a 6 371 km lever moved
+    // the stamped eye by 0.7 m between two frames of a turning hull).
+    DQuat::from_array(rbox.facing).normalize()
 }
 
 /// The triangles' indices at 16 bits where the vertices fit (step 5: exact, half the bytes), else
@@ -1056,11 +1052,14 @@ pub(crate) fn sync_terrain(
     exposure: Query<&bevy::camera::Exposure, With<super::FollowCam>>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
 ) {
-    let now_s = net.started_at.elapsed().as_secs_f64();
-    let snap = net.snapshot.load();
-    let scene = snap.scene_now(now_s);
     // Every frame this system runs (M8-2a; refutation T-15: counted only under a body before).
     terrain.frames += 1;
+    // THE FRAME'S MOMENT: the sample the camera was placed from (step 6), never a second one.
+    let Some((now_s, snap)) = render_eye.moment.clone() else {
+        terrain.stamp = None;
+        return;
+    };
+    let scene = snap.scene_now(now_s);
     // THE LEAD (slice 8 step 4, the residency band): the scene and the own eye at the LEAD
     // cursor — the freshest delivered moment, one interpolation buffer ahead of what the picture
     // draws. The wanted set is computed for the eye THERE, so every chunk is asked for one
@@ -1544,6 +1543,17 @@ pub(crate) fn sync_terrain(
         let f = t.forward();
         DVec3::new(f64::from(f.x), f64::from(f.y), f64::from(f.z))
     });
+    // The camera's rotation in the render frame, widened once: the stamp states it in the body's
+    // frame (step 6), beside the drawn eye.
+    let camera_rotation = cam.iter().next().map(|t| {
+        let q = t.rotation;
+        DQuat::from_xyzw(
+            f64::from(q.x),
+            f64::from(q.y),
+            f64::from(q.z),
+            f64::from(q.w),
+        )
+    });
     let mut ruler_now: Option<(DVec3, f64, u8, DevRuler)> = None;
     if let Some((realm, body, eye_body)) = under_eye.as_ref() {
         let (centre, facing) = centres[realm];
@@ -1628,10 +1638,13 @@ pub(crate) fn sync_terrain(
             let built = terrain.lane.built();
             let counters = terrain.lane.counters();
             let parents = terrain.lane.parent_stats();
+            let camera_body = camera_rotation.map_or(DQuat::IDENTITY, |c| facing.inverse() * c);
             terrain.stamp = Some(DevTerrainStamp {
                 realm: format!("{realm:?}"),
                 rung_min,
                 rung_max,
+                eye_body_m: eye_body,
+                camera_body_xyzw: camera_body.to_array(),
                 chunks_per_rung: terrain.drawn_per_rung(),
                 surface_m: ground.surface_m,
                 altitude_m: ground.altitude_m,
@@ -1789,7 +1802,13 @@ pub(crate) fn place_chunks(
     mut chunks: PlacedChunks,
     mut frame: Local<u32>,
 ) {
-    let mut stamp = terrain.stamp.take();
+    // THE STAMP STAYS IN THE RESOURCE (slice 8 step 6): the frame's completed stamp is
+    // published for the dev-control poll AND kept here, so the extract of this very frame
+    // carries it beside the pixels (a captured frame's dump then states the drawn camera of the
+    // picture it sits beside). MEASURED with `take()` here: the extract found none, the dump fell
+    // back to the poll's stamp of a random later frame, and no recorded pair was ever consecutive
+    // in the terrain's own count (0, +2, +3) while the capture frames were.
+    let mut stamp = terrain.stamp.clone();
     // Nothing drawn: nothing to place, and no scene to clone (a flight in open space used to walk
     // every row of the window for no pixel — SL9). The stamp still goes out.
     if chunks.is_empty() {
@@ -1798,8 +1817,14 @@ pub(crate) fn place_chunks(
             .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp;
         return;
     }
-    let now_s = net.started_at.elapsed().as_secs_f64();
-    let snap = net.snapshot.load();
+    // THE FRAME'S MOMENT (step 6): the camera's own sample, so the chunks stand where the
+    // stamped eye looked from.
+    let Some((now_s, snap)) = render_eye.moment.clone() else {
+        *net.terrain_stamp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp;
+        return;
+    };
     let scene = snap.scene_now(now_s);
     let mut rows: BTreeMap<RealmId, (DVec3, DQuat)> = BTreeMap::new();
     for (realm, rbox) in scene.iter() {
@@ -1844,7 +1869,8 @@ pub(crate) fn place_chunks(
     }
     *net.terrain_stamp
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp;
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp.clone();
+    terrain.stamp = stamp;
     *frame += 1;
     if frame.is_multiple_of(DIAG_EVERY) {
         for (realm, (centre, facing)) in &rows {

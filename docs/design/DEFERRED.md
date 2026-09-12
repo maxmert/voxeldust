@@ -7895,11 +7895,18 @@ rings; what is left is an interim with a named step:
    so a chunk at its fade-out edge leaves one buffer before the drawn eye would drop it — under one
    pixel by the tier rule at 528 m/s at rung 0, a third of a cell. → step 6's pop detector flies a
    turning leg and measures both; the exact forms are the live facing on the overlay and the drawn
-   eye's set for the release.
+   eye's set for the release. → 2026-09-11 (step 6, §22.3): MEASURED on the first turning leg — a hull that yawed
+   saw its ground vanish (the lead eye 2 946 km off, zero chunks on screen, a gap on 853 frames),
+   because the overlay kept the level's facing beside a live centre. ★ THE LIVE FACING IS DONE:
+   the overlay takes the facing from the same interpolated sample as the centre; the turn then
+   held the band on every frame with 7 600 chunks on screen. The release's one-buffer lead stays
+   as it was (under a pixel). Residues → item 21.
 
 12. **An eye UNDER the surface has a zero horizon and wants everything within the reach** (MEASURED
    on M8-1's first run: 1 930 chunks on a walk with the nose 8° down). → a stated floor for the
-   wanted set when the eye is under the lowest ground; step 6, with the pop detector's legs.
+   wanted set when the eye is under the lowest ground; step 6, with the pop detector's legs. → 2026-09-11 (step 6, §22.4): DONE — the wanted set's altitude is floored at the eye's own
+   height (`EYE_HEIGHT_M`), so an eye under the recipe's surface wants what a standing eye wants;
+   the skyline walls off the far rings from below (MEASURED: rung 3 against 10, fewer chunks).
 
 13. **STEP 5's SECOND HALF, owed (ruling V16)**: positions at 16 bits over the chunk's box (a
    millimetre at the finest rung, two metres at the coarsest — a QUANTISATION, since a vertex's
@@ -7995,6 +8002,28 @@ rings; what is left is an interim with a named step:
    minute — a finished chunk waits with its whole geometry. The workers need a bound on the done
    queue (pause when more than N finished chunks wait), sized from the harvest's own rate.
    → slice 8 step 6, with the harvest budget's measurement.
+
+20. **THE CROSSFADE MORPHS POSITIONS, NOT NORMALS** (MEASURED by the pop detector, 2026-09-11,
+   §22.2): at 240 m/s two per cent of the pixels crossing the rung 1→2 and 2→3 boundaries step by
+   up to 37 levels in one frame (566 of 25 600 on the last flight, 450 and 367 on the two before),
+   where a finer rung's crease lies under a smooth coarser face — the finer vertices morph onto the
+   coarser SURFACE but keep their own normals, so the shade jumps where the coarser rung takes over.
+   The cure is the normal's own morph: the coarser surface's normal beside the vertex's own (four
+   bytes packed), blended across the band as the positions are; ruling V18's tolerance judges it on
+   the stands and the detector on the legs. → the owner's word; slice 8's last seam.
+
+21. **A SPINNING PARENT'S RESIDUES** (MEASURED on the turning legs, 2026-09-11, §22.3): (a) the
+   track LERPS a realm's centre and SLERPS its facing, so a parent spinning in the window cuts the
+   chord of its arc between two ticks — at fifty degrees a second the stamp's altitude dipped to
+   −8 km for a frame and the detector's floor rose to 73 levels; bounded by the spin over one tick;
+   the exact form composes the centre FROM the interpolated placement (rotate, then subtract).
+   The lead eye inherits the chord too: on the turning leg the lead ran to 2 741 m against 29 m on
+   the straight leg (MEASURED, §22.3), and the pop detector's near limit, read from the stamped
+   eyes' travel, then eats the near picture. (b) The turn axis is a torque and the hull spins on after release; the instrument cancels the
+   spin in rounds (§22.3), the product's own answer is the ship's safety block (slowing is gameplay,
+   ruling 2026-08-27 item 4). (c) The frame-to-frame detector on a spinning hull reads its own
+   reprojection error until (a) is cured; its readings on the straight legs and after the spin is
+   cancelled are the measurement. → after (a), with the placement's interpolation.
 
 **WHEN.** Slice 8, steps 4–6. The slice is not done until this row is 🟩.
 

@@ -166,6 +166,7 @@ mod tests {
             terrain_chunks_pending: 0,
             camera_mode: "none".to_owned(),
             star_probe: Vec::new(),
+            capture_frame: None,
             terrain_stamp: None,
             sky_anchor: None,
             // A fixture has heard no beat (S11).

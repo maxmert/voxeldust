@@ -178,6 +178,23 @@ pub fn horizon_m(radius_m: f64, altitude_m: f64) -> f64 {
     (2.0 * radius_m * h + h * h).sqrt()
 }
 
+/// THE EYE'S HEIGHT over the ground it stands on, in metres: the pilot camera lifts the eye by
+/// this over the avatar's feet (the harness's own offset reads it from here), and it is THE FLOOR
+/// of the WANTED SET's altitude (slice 8 step 6, D-TERRAIN-5 item 12): an eye that the recipe's
+/// surface stands above — in a dip the mesh cuts under the field, in a cave, for the frame of a
+/// hard landing — wants what an eye standing on that surface wants, never a zero horizon's set.
+/// The stamp still states the eye's true altitude and its own horizon, unfloored.
+/// MEASURED before the floor (M8-1's first run): 1 930 chunks wanted on a walk from an eye the
+/// field stood over, the horizon zero and every column past it a skyline candidate.
+pub const EYE_HEIGHT_M: f64 = 1.6;
+
+/// The wanted set's altitude: the eye's height over the recipe's surface under it, never under
+/// the eye's own height ([`EYE_HEIGHT_M`]).
+#[must_use]
+pub fn floored_altitude_m(altitude_m: f64) -> f64 {
+    altitude_m.max(EYE_HEIGHT_M)
+}
+
 /// THE REACH of the ladder from an eye `altitude_m` over a surface of `surface_m`: its own horizon
 /// plus the horizon of the tallest ground the recipe can raise (`relief_m`), so a peak standing
 /// behind the geometric horizon is still wanted.
@@ -706,7 +723,9 @@ impl LadderView {
             0,
         )
         .to_f64();
-        let altitude = len - surface;
+        // THE FLOOR (item 12): an eye under the recipe's surface wants what an eye standing on
+        // it wants.
+        let altitude = floored_altitude_m(len - surface);
         let horizon = horizon_m(surface, altitude);
         let reach = reach_m(surface, altitude, relief_m(body));
         let edge = CHUNK_EDGE as i32;
@@ -1163,6 +1182,37 @@ mod tests {
             .map(|(x, y)| morton(*x, *y))
             .collect();
         assert_eq!(block, vec![56, 57, 58, 59]);
+    }
+
+    /// THE FLOOR (item 12): an eye ten metres UNDER the recipe's surface wants the same set as an
+    /// eye standing on it — the horizon of the eye's own height, never zero.
+    #[test]
+    fn an_eye_under_the_surface_wants_what_an_eye_on_it_wants() {
+        assert!((floored_altitude_m(-10.0) - EYE_HEIGHT_M).abs() < 1e-12);
+        assert!((floored_altitude_m(0.0) - EYE_HEIGHT_M).abs() < 1e-12);
+        assert!((floored_altitude_m(300.0) - 300.0).abs() < 1e-12);
+        let body = home_planet();
+        let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
+        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
+        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let at = |h: f64| {
+            [
+                d[0] * (surface + h),
+                d[1] * (surface + h),
+                d[2] * (surface + h),
+            ]
+        };
+        let under = LadderView::default().wanted(&body, at(-10.0));
+        let standing = LadderView::default().wanted(&body, at(EYE_HEIGHT_M));
+        assert!((under.reach_m - standing.reach_m).abs() < 1e-6);
+        assert_eq!(under.rung_min, standing.rung_min);
+        // The skyline keeps its own truth: from under the ground the far rings are walled off
+        // (MEASURED: the coarsest ring rung 3 against the standing eye's rung 10), so the set is
+        // bounded by the standing eye's and never the reach-wide flood.
+        assert!(under.rung_max <= standing.rung_max);
+        let (a, b) = (under.keys.len(), standing.keys.len());
+        assert!(a > 0, "under {a}, standing {b}");
+        assert!(a <= b, "under {a}, standing {b}");
     }
 
     #[test]
