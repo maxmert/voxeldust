@@ -196,6 +196,27 @@ the same). (3) The 128-bit division of the cell-count reciprocal: gated off the 
 The stable workspace declares the `spirv` target arch for the cfg check and EXCLUDES the shell
 crate (cargo-gpu builds it with its own toolchain). The build: `just recipe-gpu`.
 
+**THE COST, FOUND AND CURED (2026-09-13).** The shell first copied the octave table into each
+thread's private memory; reading the octaves in place from the buffer (`&[Octave]`, the recipe's
+own `repr(C)` words) changed nothing: 352 ms and 274 ms on the two passes against 285 and 348
+before. The MSL naga emits for the module (read with `naga-cli`) named the cost: a const array
+indexed at runtime — the sixteen-gradient table — becomes a PRIVATE COPY OF THE WHOLE TABLE PER
+USE, eight copies of sixteen entries per octave, per column (5 376 private stores a column). Three
+forms measured, the bench's four million columns:
+
+| the gradient table | the GPU, second pass | the CPU, one core |
+|---|---|---|
+| a const array indexed by the draw | 274–348 ms | 710 ms |
+| two packed words, a branch on the draw | 37 ms | 1 308 ms |
+| one packed word per component, no branch | 38 ms | 1 131 ms |
+| **a `match` over the sixteen draws** | **36 ms** | **728 ms** |
+
+The `match` is the one form both compilers like: the CPU lowers it to one table load, the GPU to
+a switch that copies nothing. It is the recipe's form now (`noise::gradient_of`); the face basis
+takes the same reading through a per-component packing, which is cheap at once per column. The
+one-source module now runs the columns FASTER than the hand-written transcription did (56–127
+ms), and the rule joins the kernel rules: no const array indexed at runtime on the GPU path.
+
 Read: SL10's "one generator, two hosts, no drift" now holds on the GPU by the same source, not by a
 transcription — the first time the GPU ran the shipped function. The GPU's cost through this path
 is the next measurement (the transcription ran the same columns in 56 ms; the one-source module's

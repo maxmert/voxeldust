@@ -29,8 +29,10 @@ pub const GAP_STEPS_PER_CELL: i64 = 128;
 /// a fixed-size array (a shader has no heap and no runtime-length slice of a local array).
 pub const OCTAVES_CAP: usize = 16;
 
-/// One octave of the height field in the recipe's formats.
+/// One octave of the height field in the recipe's formats. `repr(C)`: four words in this order,
+/// so a GPU reads a table of them in place from a buffer the CPU filled with the same bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct Octave {
     /// The octave's own noise seed.
     pub seed: u64,

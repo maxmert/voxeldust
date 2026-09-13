@@ -33,6 +33,8 @@ arc-swap = { workspace = true }
 # feature flags, which Bevy's re-export does not carry. The same wgpu Bevy 0.18 already links
 # (27, one version in the lock file) — a dep line, not a new library. Re-exported from lib.rs.
 wgpu = { version = "27", default-features = false, features = ["spirv"] }
+# THE RECIPE (ruling F8): the GPU self-check calls the same kernels the shell compiled to SPIR-V.
+vd-recipe = { workspace = true }
 # The render-world -> main-world readback channel (+ the capture-job channel) must be
 # Bevy Resources, so they need Send+Sync receivers — std::sync::mpsc::Receiver is !Sync;
 # crossbeam's is Sync (the spike used it for exactly this).

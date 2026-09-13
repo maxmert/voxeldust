@@ -277,9 +277,9 @@ fn part_4_the_one_source(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
         })
         .collect();
     let cpu_s = started.elapsed().as_secs_f64();
-    let count = [octaves.len() as u32, 0, 0, 0];
     // Twice: the first pass pays the pipeline's own compilation (naga's SPIR-V → MSL, then
-    // Metal's compiler); the second is the kernel's cost with the upload and the readback.
+    // Metal's compiler); the second is the kernel's cost with the upload and the readback. The
+    // octaves go up as the recipe's own `Octave` words, read in place by the module.
     let mut gpu_s = [0.0_f64; 2];
     let mut out = Vec::new();
     let mut pass = 0;
@@ -294,7 +294,6 @@ fn part_4_the_one_source(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
                 Binding::Storage(as_bytes_i64(&dirs)),
                 Binding::Storage(as_bytes_u64(&words)),
                 Binding::Output((n * 8) as u64),
-                Binding::Uniform(as_bytes_u32(&count)),
             ],
             n as u32,
         );

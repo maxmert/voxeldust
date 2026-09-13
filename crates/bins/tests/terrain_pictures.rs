@@ -331,6 +331,15 @@ fn spawn_capture_client(
         cmd.env(k, v);
     }
     cmd.env("VD_AUTH_SIGNING_KEY", dev_auth_signing_key_hex());
+    // THE INSTRUMENT RUNS AT THE WHOLE MACHINE (ruling F6): the game's default is a share of the
+    // cores, but the stands' capture grids and the flights' settle deadlines were measured at every
+    // core, so the harness states the whole count unless the knob names another (the knob is how
+    // the share itself is measured). MEASURED: at the share of three the ground stand settled at
+    // tick 2 389 against a capture tick of 1 200.
+    if std::env::var_os("VD_TERRAIN_WORKERS").is_none() {
+        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        cmd.env("VD_TERRAIN_WORKERS", cores.to_string());
+    }
     cmd.current_dir(&f.cwd);
     cmd.args([
         "--name",

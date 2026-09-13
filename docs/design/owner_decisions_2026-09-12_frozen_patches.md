@@ -182,3 +182,21 @@ the near stands moved (ground 46 274 pixels / widest step 28; hill 60 022 / 49; 
 the far stands did not (aloft 5 573 / 3; orbit 6 967 / 2) — a fine even speckle of one or two
 shade levels over the ground, no shape moved.
 
+**F6 LANDED (2026-09-13):** the terrain workers' default is the machine's SHARE — a quarter of the
+cores, at least two (`vd_client_render::terrain::worker_share`; on this Mac three, on an eight-core
+machine two); the knob `VD_TERRAIN_WORKERS` overrides it for a measurement. The §24.4 ceiling
+numbers were taken at the whole machine and stay the instrument's, not the target's. The picture
+and moving-eye harnesses launch their client at the WHOLE machine's count unless the knob names
+another (MEASURED: at the share of three the ground stand settled at tick 2 389 against a capture
+tick of 1 200), so the stands stay bit-exact and the knob is how the share itself is measured.
+
+**Step 10 COMMITTED (e5689f6):** the one source on the GPU — 0 of 3 936 256 columns differ through
+the recipe crate compiled to SPIR-V and loaded into Metal. The module's cost (274–352 ms for the
+columns against the transcription's 56–127 ms) is the open lever; reading the octaves in place
+changed nothing, so the cost sits in the compiled module itself (the next probe reads naga's MSL).
+
+**F8 decision 3 BUILT (2026-09-13):** the client compiles the recipe's GPU shell at build time and
+measures its own GPU at start against the CPU on the eight golden chunks' columns — PASSED on the
+Apple M4 Pro (30752 columns, 16000 µs); a GPU without 64-bit integers or with a differing
+word gets the CPU path and a log line.
+

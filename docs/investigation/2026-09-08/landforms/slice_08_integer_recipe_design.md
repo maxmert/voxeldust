@@ -99,6 +99,16 @@ on every CPU target, the link scan, the fence control.
 **Decision 3 (the owner): the runtime self-check as the GPU's gate.** Recommended: yes, and its
 cost at start is eight chunks, under a tenth of a second.
 
+**BUILT and MEASURED, 2026-09-13.** The client's build script (`crates/client-render/build.rs`)
+compiles the recipe's GPU shell to SPIR-V with cargo-gpu into the build's own output directory
+(no binary in the tree); `vd_client_render::gpu_check` runs that module on the columns of the
+eight golden chunks at start, through Bevy's own render device, and compares every word with the
+CPU's call of the same function; the verdict is a resource and a log line. In the picture gate's
+client on the Apple M4 Pro: `GPU RECIPE SELF-CHECK PASSED`, 30752 columns, 16000 µs. A
+GPU without 64-bit integers is reported as such and the CPU path runs; a differing word is
+counted and named. The kernel is the column height today; the cell field (G1) replaces it with
+the golden chunks' whole digests when it lands.
+
 ## 4. The build path — one source, two targets (from the research of 2026-09-12)
 
 **The facts** (each read in the pinned sources: naga 27.0.3, wgpu 27.0.1, Bevy 0.18.1, the rust-gpu
@@ -159,6 +169,12 @@ repository; the dates are the sources' own).
    dependency, and the client's `build.rs` compiles to SPIR-V through `cargo-gpu` with its pinned
    nightly. The same functions, the same tests (the doctest pattern proves both compilations in
    one place). The hand-written WGSL of the bench is deleted when this lands.
+1b. **THE KERNEL RULES THE GPU COMPILER SET (MEASURED, 2026-09-13):** an index loop, never a
+   slice iterator; no runtime-length slice of a local array (a fixed-size table form instead); no
+   8-bit integer (the tables are 32-bit words); no 128-bit word (the once-per-body reciprocal is
+   gated off the GPU target); and NO CONST ARRAY INDEXED AT RUNTIME — the compiler copies the whole
+   table into private memory per use (the gradient table cost the module eight times its due; a
+   `match` over the draws is the form both hosts like).
 2. **A fenced integer type, the way `Gf` fences floats**: `Gi(i64)` whose operators are only
    `wrapping_add/sub/mul`, `>>` and `<<` with the amount masked to 0..63 in the shared source,
    `&`, `|`, `^`, the compares, and the two loops (the square root, the exact landing). No `/`, no

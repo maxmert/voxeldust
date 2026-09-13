@@ -181,7 +181,8 @@ pub struct TerrainConfig {
     /// `VD_TERRAIN_SHADOW_COARSE_STEP`, `VD_TERRAIN_SHADOW_COARSE_FROM`.
     pub shadow_coarse_step: u8,
     pub shadow_coarse_from_rung: u8,
-    /// The chunk workers' thread count; `0` = the machine's own parallelism.
+    /// The chunk workers' thread count; `0` = the machine's SHARE (ruling F6: a quarter of the
+    /// cores, at least two — the rest belong to the game that is not built yet).
     pub workers: usize,
 }
 const SHADOW_COARSE_STEP_ENV: &str = "VD_TERRAIN_SHADOW_COARSE_STEP";
@@ -652,7 +653,7 @@ impl Terrain {
         let threads = if config.workers > 0 {
             config.workers
         } else {
-            std::thread::available_parallelism().map_or(4, |n| n.get())
+            worker_share(std::thread::available_parallelism().map_or(4, |n| n.get()))
         };
         tracing::info!(threads, "terrain workers");
         // The done queue holds `DONE_QUEUE_FRAMES` frames of the harvest cap (item 19).
@@ -2046,9 +2047,32 @@ pub(crate) fn place_chunks(
 /// lines that found the 230 km column, kept for the next such hunt).
 pub(crate) const DIAG_EVERY: u32 = 60;
 
+/// THE CORE SHARE (ruling F6, 2026-09-12; the owner: *"we are building a game that can be run on an
+/// average machine… those cores will need to do a bunch of other stuff"*): the terrain workers take
+/// a quarter of the machine's cores and never fewer than two. On an eight-core machine that is two
+/// workers; on this Mac's fourteen, three. The knob (`VD_TERRAIN_WORKERS`) overrides it for a
+/// measurement; the ceiling measurements of §24.4 were taken at the whole machine and stay as the
+/// instrument's numbers, not the target's.
+#[must_use]
+pub const fn worker_share(cores: usize) -> usize {
+    let quarter = cores / 4;
+    if quarter < 2 { 2 } else { quarter }
+}
+
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    #[test]
+    fn the_worker_share_is_a_quarter_of_the_cores_and_at_least_two() {
+        assert_eq!(worker_share(1), 2);
+        assert_eq!(worker_share(4), 2);
+        assert_eq!(worker_share(8), 2);
+        assert_eq!(worker_share(12), 3);
+        assert_eq!(worker_share(14), 3);
+        assert_eq!(worker_share(16), 4);
+        assert_eq!(worker_share(64), 16);
+    }
     use vd_client::chunks::ParentCache;
     use vd_seed::bend::Face;
 

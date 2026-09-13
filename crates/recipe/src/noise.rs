@@ -21,8 +21,35 @@ pub const NOISE_BITS: u32 = 28;
 pub const NOISE_ONE: Gi = Gi::new(1 << NOISE_BITS);
 const FRAC_MASK: Gi = Gi::new((1 << NOISE_BITS) - 1);
 
-/// Perlin's sixteen gradients, as 32-bit words: the GPU target carries no 8-bit integer without a
-/// capability of its own, and −1, 0 and 1 read the same in any width.
+/// Perlin's sixteen gradients as a MATCH over the draw: the CPU compiler lowers the sixteen arms
+/// to one table load, the GPU compiler to a switch that copies nothing. MEASURED (bench part 4,
+/// naga's MSL): a const array indexed at runtime became a private copy of the whole table PER USE
+/// on the GPU — eight copies of sixteen gradients per octave, per column, 274–348 ms for four
+/// million columns; a packed-word decode brought the GPU to 37 ms and cost the CPU 60 % more
+/// (1 131 ms against 710). The table below is the tests' reference for the arms.
+const fn gradient_of(h: u32) -> [i32; 3] {
+    match h & 15 {
+        0 => [1, 1, 0],
+        1 => [-1, 1, 0],
+        2 => [1, -1, 0],
+        3 => [-1, -1, 0],
+        4 => [1, 0, 1],
+        5 => [-1, 0, 1],
+        6 => [1, 0, -1],
+        7 => [-1, 0, -1],
+        8 => [0, 1, 1],
+        9 => [0, -1, 1],
+        10 => [0, 1, -1],
+        11 => [0, -1, -1],
+        12 => [1, 1, 0],
+        13 => [-1, 1, 0],
+        14 => [0, -1, 1],
+        _ => [0, -1, -1],
+    }
+}
+
+/// Perlin's sixteen gradients, the table the packed words encode (the tests' reference).
+#[cfg(test)]
 const GRADIENTS: [[i32; 3]; 16] = [
     [1, 1, 0],
     [-1, 1, 0],
@@ -64,7 +91,7 @@ fn dot(g: [i32; 3], dx: Gi, dy: Gi, dz: Gi) -> Gi {
 }
 
 fn gradient(seed: u64, x: i64, y: i64, z: i64) -> [i32; 3] {
-    GRADIENTS[(corner_hash(seed, x, y, z) & 15) as usize]
+    gradient_of((corner_hash(seed, x, y, z) & 15) as u32)
 }
 
 /// Gradient noise at a lattice point at [`NOISE_BITS`], in about `[−1, 1]` at [`NOISE_BITS`]: the
@@ -133,6 +160,17 @@ pub fn value3(seed: u64, p: [Gi; 3]) -> Gi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gradient_arms_are_the_table() {
+        let mut h = 0u32;
+        while h < 16 {
+            assert_eq!(gradient_of(h), GRADIENTS[h as usize], "gradient {h}");
+            h += 1;
+        }
+        // The draw is masked to four bits.
+        assert_eq!(gradient_of(16 + 3), GRADIENTS[3]);
+    }
 
     #[test]
     fn the_fade_and_the_blend_read_their_ends() {

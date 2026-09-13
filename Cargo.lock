@@ -6317,6 +6317,7 @@ dependencies = [
  "vd-client-harness",
  "vd-core",
  "vd-devproto",
+ "vd-recipe",
  "vd-seed",
  "vd-terrain",
  "wgpu",

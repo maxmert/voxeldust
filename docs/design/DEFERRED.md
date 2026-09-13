@@ -8168,8 +8168,19 @@ rings; what is left is an interim with a named step:
    differ from the CPU's call of the same function. Three rules the GPU compiler set: index loops
    (no slice iterators), no runtime-length slices of local arrays (a fixed-size table form), no 8-bit
    integers (the tables are 32-bit words); the 128-bit reciprocal is gated off the GPU target.
-   🟧 STILL OPEN: the GPU path's cost through the one source (the second-pass number in the bench
-   doc against the transcription's 56 ms), the runtime self-check gate, G1–G4, DX12/Vulkan legs.
+   ★ THE RUNTIME SELF-CHECK BUILT (F8 decision 3, 2026-09-13): `crates/client-render/build.rs`
+   compiles the shell with cargo-gpu into OUT_DIR at build time; `gpu_check` runs the module on the
+   eight golden chunks' columns through Bevy's render device at start and compares with the CPU
+   word for word — PASSED in the picture gate's client (30752 columns, 16000 µs); no 64-bit
+   integers → the CPU path, reported. F6's worker share landed (a quarter of the cores, at least
+   two). The one-source module's cost is UNRESOLVED (274–352 ms for the bench's columns; the
+   in-place octaves changed nothing; the next probe reads naga's MSL).
+   ★ THE MODULE'S COST CURED (2026-09-13): naga's MSL showed the sixteen-gradient const array
+   copied into private memory per use; a `match` over the draws gives the GPU 36 ms for the bench's
+   four million columns (the transcription: 56–127) and the CPU its 728 ms back — the fifth kernel
+   rule (no const array indexed at runtime on the GPU path).
+   🟧 STILL OPEN: G1 (the cell field, then the self-check on the whole digests), G2–G4, DX12/Vulkan
+   legs on other machines.
    ★ THE WORKSPACE REDS AT THIS LANDING, MEASURED ON THE LAST COMMIT (d165d3c, a fresh worktree,
    release, 2026-09-13) — ALL PRE-EXISTING, none from the recipe: `dual_cluster_crossing_smoke::
    a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier` (−3.962e14 m clear against the

@@ -692,6 +692,7 @@ struct RenderEye {
     moment: Option<(f64, Arc<RenderSnapshot>)>,
 }
 
+pub mod gpu_check;
 /// Run the client renderer. BLOCKS until exit; the bin MUST call this on the MAIN thread
 /// (winit/the runner need it) with the core loop on a separate thread. Dispatches on the
 /// mode: a real window (human) or headless offscreen capture (the agent's eyes).
@@ -1035,7 +1036,7 @@ fn run_windowed(handles: RenderHandles) {
             LadderFadeShaderPlugin,
             MaterialPlugin::<GroundMaterial>::default(),
         ))
-        .add_systems(Startup, setup_scene)
+        .add_systems(Startup, (setup_scene, gpu_check::gpu_recipe_self_check))
         .add_systems(
             Update,
             (
@@ -2653,7 +2654,7 @@ fn run_capture(handles: RenderHandles) {
         ))
         // Headless: no window ⇒ no primary egui context; the offscreen camera owns its own.
         .add_systems(PreStartup, disable_primary_egui_context)
-        .add_systems(Startup, setup_capture)
+        .add_systems(Startup, (setup_capture, gpu_check::gpu_recipe_self_check))
         .add_systems(OffscreenEguiPass, hud_offscreen)
         .add_systems(
             Update,
