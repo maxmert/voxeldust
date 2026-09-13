@@ -65,7 +65,8 @@ IN A GPU BUFFER, so nothing crosses the bus but the request (a chunk key) and th
 | step | what moves to the GPU | why this order |
 |---|---|---|
 | G1 ✅ **DONE 2026-09-13** | the CELL FIELD: the substance and the gap of every cell of a 64³ box, one invocation a cell, through the recipe's own `cell::cell_word` (the shell's `cell_field` entry point) | the bulk of the build; MEASURED byte for byte against the CPU's `sample_box` — **0 of 270 532 608 cells differ**: 0 of 2 097 152 over the eight golden chunks and 0 of 268 435 456 over the bench's square of 1 024 chunks (`slice_08_integer_bench.md` part 5) |
-| G2 | the extraction: surface nets on the box, into a vertex list and an index list | pure integer already; the data-dependent counts need a prefix sum (one workgroup pass), a standard shape |
+| G2-A ✅ **DONE 2026-09-13** | the PLAN: the COLUMN pass (a column's direction, surface and biome, from its site) and the NODE pass (the cavern field at a lattice node), so a box's request carries its key and its charter and the host keeps only the TOPOLOGY | the host's own share was 2.14 ms of a 3.93 ms box, almost all of it arithmetic; MEASURED byte for byte over **1 080 boxes** — the eight golden chunks, the square's 1 024, AND THE 48 SEAM BOXES this step added — **0 of 283 115 520 cells and 0 of 4 423 680 column directions differ**; the host's plan fell to **about 0.06 ms a box** (bench part 6) |
+| G2 🟥 **STOPPED, MEASURED** | the extraction: surface nets on the box, into a vertex list and an index list | pure integer already; the data-dependent counts need a prefix sum (one workgroup pass), a standard shape. ★ **ITS OWN LEVER IS GONE:** G2 was to pay by removing the megabyte of cells from the bus, and part 6 MEASURED that megabyte over five runs — the readings straddle zero and the LARGEST is a tenth of the path. The card's own arithmetic is the wall (about 1.9 ms a box against the three-worker share's 1.26 ms), and even taking the largest readback reading the card's share would still stand about a third above that share; extracting on the card ADDS card work besides. See part 6's own reading |
 | G3 | the vertex position and the normals | integers; per vertex; the site-order sum is a fixed order, so no atomics |
 | G4 | the morph metre and the morph normal | per vertex, a ray against the parent's mesh, which is ALREADY in a GPU buffer once G1–G3 run for the parent |
 | G5 | the ladder's per-vertex work | already on the GPU (the shaders); unchanged |
@@ -73,6 +74,34 @@ IN A GPU BUFFER, so nothing crosses the bus but the request (a chunk key) and th
 What stays on the CPU on the client: the wanted set, the queue, the ladder's bookkeeping, the
 digest of a chunk (read back only for the gate, below), and the whole path as a FALLBACK on a GPU
 without 64-bit integers (the same source, F6's share of the cores).
+
+★ **G2-A's MEASUREMENT, AND WHAT IT SAYS ABOUT THE REST OF THE ORDER (2026-09-13, bench part 6).**
+The plan moved to the card and the host's share fell about 38 times — 2.14 ms a box to about 0.06 ms —
+with 0 of 283 115 520 cells and 0 of 4 423 680 column directions differing over 1 080 boxes (the 48
+seam boxes included) and the three pin legs green. The whole GPU path is now about **2.0 ms a box**
+against 3.93 ms at G1. But the SAME part measured the readback directly, by running the three passes
+with nothing copied home, five times: **218 ms, −17 ms, 15 ms, 106 ms and 109 ms of a whole path of
+about 2 070 ms — readings that straddle zero, so the largest is a TENTH of the path and the
+measurement cannot separate the rest from noise.** **AND THE CONCLUSION HOLDS AT THAT TENTH:** take
+the largest reading at face value and the card's share is still about 1.8 ms a box against the
+three-worker share's 1.26 ms. So the bus was never the cost, and G2's own lever cannot close the
+gap on this machine. The wall is the card's arithmetic: about 1.9 ms a box, about 7 ns a cell,
+against one CPU core's 14 ns — the card is worth about two of this machine's cores on a kernel
+built from 64-bit integer multiplies, which Metal has no instruction for. The terrain's share is
+THREE cores, and three cores win.
+
+★ **THE DIGITS ARE SOFTER THAN THEY LOOK.** Two GPU passes over the SAME 1 024 boxes in one run
+read 1 821 ms and 2 074 ms — 13 % apart — and the readback readings span 218 ms. So every timing
+here is quoted to two figures and the gap is stated as ABOUT A THIRD, not as 37 %. The direction of
+the ruling stands on a gap far wider than the spread; the third digit does not stand at all.
+
+What the chain does buy is the CPU: about 490 chunks a second for about 0.03 of one core, against the workers' about 790
+for three cores — and then the card is busy and cannot draw. That is ruling F6's trade stated in
+numbers, and it is an OWNER decision, not a measurement that says "go". **So G2, G3 and G4 do not
+start, and the client's builder stays on the CPU workers.** What would change the reading: a kernel
+whose hot arithmetic is 32-bit (the noise's lattice point and fade already fit 32 bits; the bend and
+the radius do not), or a machine whose CPU share is two workers rather than three — on the average
+machine of F6 the card and the share are even.
 
 **G1's own measurement, and what it says about the order (2026-09-13).** The card computes a box
 in 1.79 ms with the upload and the 1 MB readback; the host still spends 2.14 ms on the box's PLAN
@@ -122,6 +151,16 @@ hidden: the tube carvers reach NONE of the eight golden boxes (MEASURED — the 
 boxes holding a carver of a real radius: 0 of the eight, 178 of the square's 1 024), so the runtime
 check does not exercise the carver kernel. The bench's square does, it is the build-time gate that
 found the carvers' fault, and it now goes RED if that count ever falls to zero.
+
+★ **A SECOND WEAKNESS OF THE SAME SHAPE, NAMED BY STEP G2-A:** neither the eight golden chunks nor
+the square stands at a FACE'S EDGE, so neither box ever holds a column of a PARTNER face or a CORNER
+PHANTOM — exactly the two arms the column kernel newly carries. The bench grew a THIRD set for it
+(part 6, "the seams": the four corner chunks of every face at rung 0 and at the coarsest rung), and
+that part goes red if no box of it crosses. The RUNTIME check still folds the golden chunks alone,
+because that set is the world identity's and not this step's to change; a card that miscompiled the
+phantom's normalise would be caught by the build-time gate and not at start. **OWED:** whether the
+runtime self-check should carry a seam chunk of its own — an owner question, because the golden set
+is what the handshake folds.
 
 **BUILT and MEASURED, 2026-09-13 (the column kernel; the cell field joined it the same day).** The client's build script (`crates/client-render/build.rs`)
 compiles the recipe's GPU shell to SPIR-V with cargo-gpu into the build's own output directory
@@ -217,6 +256,21 @@ repository; the dates are the sources' own).
    integer root only where a point stands inside a carver: the cave-dense chunk at the eight-metre
    rung fell from 73.7 ms to 7.8 ms of cell pass — 4.5 times cheaper than before this step — with
    no byte of the world moved.
+   ★ **A THIRD INSTANCE OF (a), from step G2-A (MEASURED, 2026-09-13; bench part 6):** the same
+   rule caught `bend::recip_sqrt`, whose square sum was a `while` loop over three components whose
+   body RE-BOUND a two-word accumulator (`(s_hi, s_lo) = add_wide(…)`). On the card the third
+   component's square was missing, so every direction the column pass wrote was 1.22 times too long
+   and all 32 768 columns of the eight golden boxes differed. The three steps are written out now.
+   The new reading: the accumulator need not be one word — a TUPLE the body re-binds goes stale the
+   same way, and "assign" covers a destructuring assignment. ★ **AND HOW IT WAS FOUND IN ONE RUN:**
+   the bench now compares the column pass's own DIRECTIONS, not only the cells they end up in. A
+   direction that differs in its last bit can still pack the same cell byte, so an OUTPUT the kernel
+   writes is worth comparing even when a later stage already is.
+   ★ **AND ONE MORE COMPILER REFUSAL (step G2-A):** an 8-bit integer is refused as a FUNCTION
+   PARAMETER too, not only as a table word. `bend::direction(face: u8, …)` compiled fine while only
+   `relief_columns` ran; the moment the column pass called it the back end refused the module
+   ("`u8` type used without `OpCapability Int8`"). Every face index on the recipe's path is a 32-bit
+   word now.
    ★ **AND THE INSTRUMENT:** two PROBE entry points (`isqrt_probe`, `hollow_probe`) run ONE kernel
    over a list of words. A box of a quarter of a million cells can only say that something
    differs; a probe says which function does. Both faults above were found with them in minutes,

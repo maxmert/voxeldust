@@ -12,6 +12,11 @@
 //! field is the one the client's chunk builder uses, so it is the one that must agree; the column
 //! kernel stays because it is cheap and it names a narrower fault.
 //!
+//! ★ THE WHOLE CHAIN IS CHECKED SINCE STEP G2-A: the box now goes through [`dispatch_box`], which
+//! runs the COLUMN pass and the NODE pass on the card before the cell field, and the check compares
+//! the columns' own DIRECTIONS as well as every cell — a direction that differs in its last bit can
+//! still pack the same cell byte, and the extractor places every vertex along it.
+//!
 //! **Example.** A laptop whose driver miscompiles a 64-bit shift builds the golden boxes wrong at
 //! start: the check counts the differing cells, the log names them, the flag stays false, and the
 //! player gets the CPU path — never a hill the server disagrees with.
@@ -34,10 +39,18 @@ const RECIPE_SPV: &[u8] = include_bytes!(env!("VD_RECIPE_GPU_SPV"));
 const ENTRY: &str = "relief_columns";
 /// The entry point of the cell-field kernel in the shell.
 const CELL_ENTRY: &str = "cell_field";
+/// The entry point of the COLUMN pass (step G2-A).
+const COLUMN_ENTRY: &str = "column_pass";
+/// The entry point of the NODE pass (step G2-A).
+const NODE_ENTRY: &str = "node_pass";
 /// The column kernel's workgroup width.
 const WORKGROUP: u32 = 256;
 /// The cell-field kernel's workgroup width.
 const CELL_WORKGROUP: u32 = 64;
+/// The column pass's workgroup width.
+const COLUMN_WORKGROUP: u32 = 64;
+/// The node pass's workgroup width along a lattice's first face axis.
+const NODE_WORKGROUP: u32 = 32;
 
 /// The verdict of the self-check, a resource every draw may read.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +120,7 @@ pub fn run(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) ->
         source: wgpu::util::make_spirv(RECIPE_SPV),
     });
     let pipeline = compute_pipeline(device, &module, ENTRY);
-    let cell_pipeline = compute_pipeline(device, &module, CELL_ENTRY);
+    let chain = BoxChain::new(device);
     let all = golden_columns(body);
     let mut columns = 0u32;
     let mut differing = 0u32;
@@ -154,14 +167,29 @@ pub fn run(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) ->
         let Some(plan) = vd_terrain::gpu::plan(body, key) else {
             continue;
         };
-        let cpu = plan.cells();
-        let gpu = dispatch_cells(device, queue, &cell_pipeline, &plan);
+        let run = plan.run();
+        let cpu = plan.cells_of(&run);
+        let cpu_dirs = BoxPlan::dirs_of(&run);
+        let (gpu, gpu_dirs) = dispatch_box(device, queue, &chain, &plan);
         cells += cpu.len() as u32;
         // A short readback is every cell differing, for the same reason as the columns above.
         differing_cells += if gpu.len() == cpu.len() {
             cpu.iter().zip(gpu.iter()).filter(|(a, b)| a != b).count() as u32
         } else {
             cpu.len() as u32
+        };
+        // ★ THE COLUMN PASS ITSELF (step G2-A): the directions the card wrote against the host's.
+        // The cells fold a direction through the whole cell kernel, so one that differs in its last
+        // bit could still pack the same byte; these are the words themselves, and the extractor
+        // places every vertex along them.
+        differing_cells += if gpu_dirs.len() == cpu_dirs.len() {
+            cpu_dirs
+                .iter()
+                .zip(gpu_dirs.iter())
+                .filter(|(a, b)| a != b)
+                .count() as u32
+        } else {
+            cpu_dirs.len() as u32
         };
     }
     GpuRecipeCheck {
@@ -190,62 +218,209 @@ fn compute_pipeline(
     })
 }
 
-/// ★ ONE BOX ON THE CARD: the plan's six buffers up, one word per cell back. The client's chunk
-/// builder runs this same call; the check is that call on the eight boxes the world identity folds.
+/// ★ THE BOX CHAIN — the three pipelines of the shell's module, in the order the card runs them
+/// (step G2-A). One module, three entry points; a host builds this once and runs every box through
+/// it.
+pub struct BoxChain {
+    /// The column pass: a column's direction, its surface and its biome.
+    pub column: wgpu::ComputePipeline,
+    /// The node pass: the cavern field at one lattice node.
+    pub node: wgpu::ComputePipeline,
+    /// The cell field: one word per cell of the box.
+    pub cell: wgpu::ComputePipeline,
+}
+
+impl BoxChain {
+    /// The chain built from the recipe's own SPIR-V — the module the build script compiled.
+    #[must_use]
+    pub fn new(device: &wgpu::Device) -> BoxChain {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("the recipe's box chain"),
+            source: wgpu::util::make_spirv(RECIPE_SPV),
+        });
+        BoxChain {
+            column: compute_pipeline(device, &module, COLUMN_ENTRY),
+            node: compute_pipeline(device, &module, NODE_ENTRY),
+            cell: compute_pipeline(device, &module, CELL_ENTRY),
+        }
+    }
+}
+
+/// ★ ONE BOX ON THE CARD, WHOLE (step G2-A): the column pass, the node pass and the cell field, in
+/// three compute passes of ONE command encoder, one submit, one wait. What goes up is TOPOLOGY —
+/// the two charters, one site per column, the lattice extents, the layer rows, the slice table and
+/// the carvers. What comes back is one word per cell and the columns' own directions, which the
+/// extractor places its vertices along.
+///
+/// Three passes rather than three dispatches of one: the column buffer and the node buffer are
+/// WRITTEN by the first two and READ by the third, and one compute pass may not hold both usages of
+/// one buffer.
+///
+/// **Example.** Chunk (face 2, rung 0, 19, 1, 4): about 80 kB up, then 4 096 octave sums, 6 859
+/// cavern nodes and 262 144 cells on the card, then 1.1 MB back — the same 262 144 words the
+/// shard's CPU writes for the same key.
 #[must_use]
-pub fn dispatch_cells(
+pub fn dispatch_box(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    pipeline: &wgpu::ComputePipeline,
+    chain: &BoxChain,
     plan: &BoxPlan,
-) -> Vec<u32> {
+) -> (Vec<u32>, Vec<[Gi; 3]>) {
+    box_chain(device, queue, chain, plan, true)
+}
+
+/// ★ THE CARD'S SHARE WITHOUT THE READBACK — the same three passes, submitted and waited for, with
+/// nothing copied home. The instrument that says how much of a box's cost is the megabyte crossing
+/// the bus, which is exactly what step G2 (the extraction on the card) removes.
+pub fn dispatch_box_compute_only(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    chain: &BoxChain,
+    plan: &BoxPlan,
+) {
+    let _ = box_chain(device, queue, chain, plan, false);
+}
+
+fn box_chain(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    chain: &BoxChain,
+    plan: &BoxPlan,
+    read: bool,
+) -> (Vec<u32>, Vec<[Gi; 3]>) {
     let edge = plan.charter.box_edge.raw() as u32;
-    let out_size = u64::from(edge) * u64::from(edge) * u64::from(edge) * 4;
+    let columns_n = u64::from(edge) * u64::from(edge);
+    let cells_size = columns_n * u64::from(edge) * 4;
+    let dirs_size = columns_n * 3 * 8;
+    // What goes up.
+    let plan_charter = words_buffer(device, &plan.plan_charter_words());
+    let sites = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: None,
+        contents: &plan
+            .site_words()
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect::<Vec<u8>>(),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let lattices = words_buffer(device, &plan.lattice_words());
+    let node_z = words_buffer(device, &plan.node_z_words());
+    let radii = words_buffer(device, &plan.node_radius_words());
     let charter = words_buffer(device, &plan.charter_words());
     let layers = words_buffer(device, &plan.layer_words());
-    let columns = words_buffer(device, &plan.column_words());
-    let nodes = words_buffer(device, &plan.node_words());
     let tubes = words_buffer(device, &plan.tube_words());
-    let out = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: out_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: out_size,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let buffers = [&charter, &layers, &columns, &nodes, &tubes, &out];
-    let entries: Vec<wgpu::BindGroupEntry> = buffers
-        .iter()
-        .enumerate()
-        .map(|(i, b)| wgpu::BindGroupEntry {
-            binding: i as u32,
-            resource: b.as_entire_binding(),
+    // What the card writes for itself and never ships back.
+    let scratch = |size: u64| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
         })
-        .collect();
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &entries,
-    });
+    };
+    let columns = scratch(columns_n * vd_terrain::gpu::COLUMN_WORDS as u64 * 8);
+    let nodes = scratch(plan.node_count as u64 * 8);
+    let (dirs, dirs_staging) = read_pair(device, dirs_size);
+    let (out, out_staging) = read_pair(device, cells_size);
+
+    let group = |pipeline: &wgpu::ComputePipeline, buffers: &[&wgpu::Buffer]| {
+        let entries: Vec<wgpu::BindGroupEntry> = buffers
+            .iter()
+            .enumerate()
+            .map(|(i, b)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: b.as_entire_binding(),
+            })
+            .collect();
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &entries,
+        })
+    };
+    let column_group = group(
+        &chain.column,
+        &[&plan_charter, &sites, &lattices, &columns, &dirs],
+    );
+    let node_group = group(
+        &chain.node,
+        &[&plan_charter, &lattices, &node_z, &radii, &nodes],
+    );
+    let cell_group = group(
+        &chain.cell,
+        &[&charter, &layers, &columns, &nodes, &tubes, &out],
+    );
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_pipeline(&chain.column);
+        pass.set_bind_group(0, &column_group, &[]);
+        pass.dispatch_workgroups((columns_n as u32).div_ceil(COLUMN_WORKGROUP), 1, 1);
+    }
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&chain.node);
+        pass.set_bind_group(0, &node_group, &[]);
+        pass.dispatch_workgroups(
+            plan.node_extent[0].div_ceil(NODE_WORKGROUP),
+            plan.node_extent[1],
+            plan.node_z.len() as u32,
+        );
+    }
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&chain.cell);
+        pass.set_bind_group(0, &cell_group, &[]);
         pass.dispatch_workgroups(edge.div_ceil(CELL_WORKGROUP), edge, edge);
     }
-    encoder.copy_buffer_to_buffer(&out, 0, &staging, 0, out_size);
+    if read {
+        encoder.copy_buffer_to_buffer(&out, 0, &out_staging, 0, cells_size);
+        encoder.copy_buffer_to_buffer(&dirs, 0, &dirs_staging, 0, dirs_size);
+    }
     queue.submit([encoder.finish()]);
-    let bytes = read_back(device, &staging, out_size);
-    bytes
-        .chunks_exact(4)
-        .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
-        .collect()
+    if !read {
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the device polls");
+        return (Vec::new(), Vec::new());
+    }
+    let cell_bytes = read_back(device, &out_staging, cells_size);
+    let dir_bytes = read_back(device, &dirs_staging, dirs_size);
+    (
+        cell_bytes
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
+            .collect(),
+        dir_bytes
+            .chunks_exact(24)
+            .map(|row| {
+                let word = |k: usize| {
+                    Gi::new(i64::from_le_bytes(
+                        row[k * 8..k * 8 + 8].try_into().expect("8 bytes"),
+                    ))
+                };
+                [word(0), word(1), word(2)]
+            })
+            .collect(),
+    )
+}
+
+/// A buffer the card writes and a staging buffer the host maps.
+fn read_pair(device: &wgpu::Device, size: u64) -> (wgpu::Buffer, wgpu::Buffer) {
+    (
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }),
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }),
+    )
 }
 
 /// A storage buffer of words.

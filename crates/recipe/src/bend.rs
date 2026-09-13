@@ -91,6 +91,50 @@ pub const BASIS: [Basis; 6] = [
     },
 ];
 
+/// A face's basis row as a MATCH over the six draws, never [`BASIS`] indexed at run time. The rule
+/// is the design's §1b, MEASURED on the gradient table (bench part 4): a const array a kernel
+/// indexes at run time becomes a PRIVATE COPY OF THE WHOLE TABLE PER USE on the card. A face index
+/// past five reads as the last row, so the function is total.
+///
+/// **Example.** The column at the +X face's cell (1033, 486) reads the first row; the corner phantom
+/// of a chunk on face +Z reads the fifth, and the three faces that meet at that corner each build
+/// the same direction from their own row.
+#[must_use]
+pub const fn basis_of(face: i32) -> Basis {
+    match face {
+        0 => Basis {
+            n: [1, 0, 0],
+            u: [0, 1, 0],
+            v: [0, 0, 1],
+        },
+        1 => Basis {
+            n: [-1, 0, 0],
+            u: [0, 0, 1],
+            v: [0, 1, 0],
+        },
+        2 => Basis {
+            n: [0, 1, 0],
+            u: [0, 0, 1],
+            v: [1, 0, 0],
+        },
+        3 => Basis {
+            n: [0, -1, 0],
+            u: [1, 0, 0],
+            v: [0, 0, 1],
+        },
+        4 => Basis {
+            n: [0, 0, 1],
+            u: [1, 0, 0],
+            v: [0, 1, 0],
+        },
+        _ => Basis {
+            n: [0, 0, -1],
+            u: [0, 1, 0],
+            v: [1, 0, 0],
+        },
+    }
+}
+
 /// The reciprocal of a face's cell count at [`INV_BITS`]: `floor(2⁶⁴ / n_l)`, computed ONCE per body
 /// on the CPU when the body's integers are drawn, and stored beside them. This is the recipe's only
 /// division, and it never runs in a kernel: a body's charter carries the result.
@@ -136,12 +180,8 @@ pub fn bend(a: Gi) -> Gi {
 /// The unit direction of cell `(face, i, j)` at [`DIR_BITS`], for a body whose cell-count reciprocal
 /// at this rung is `inv_n`. `face` is the face index; an index past 5 reads as −Z.
 #[must_use]
-pub fn direction(face: u8, i: i32, j: i32, inv_n: Gi) -> [Gi; 3] {
-    let basis = BASIS[if (face as usize) < 6 {
-        face as usize
-    } else {
-        5
-    }];
+pub fn direction(face: i32, i: i32, j: i32, inv_n: Gi) -> [Gi; 3] {
+    let basis = basis_of(face);
     let wa = bend(face_param(i, inv_n));
     let wb = bend(face_param(j, inv_n));
     normalise([
@@ -178,15 +218,23 @@ fn axis(basis: Basis, c: usize, wa: Gi, wb: Gi) -> Gi {
 /// sum at 80 fraction bits in two words, a seed from the 30-bit root and its exact reciprocal, and
 /// one Newton step of the reciprocal square root with the residual carried at 120 bits.
 fn recip_sqrt(v: [Gi; 3]) -> Gi {
-    // S = Σ v² at 80 fraction bits.
-    let (mut s_hi, mut s_lo) = (0u64, 0u64);
-    let mut c = 0;
-    while c < 3 {
-        let m = v[c].unsigned_abs();
-        let (h, l) = mul_wide(m, m);
-        (s_hi, s_lo) = add_wide(s_hi, s_lo, h, l);
-        c += 1;
-    }
+    // S = the sum of the three squares at 80 fraction bits, THE THREE STEPS WRITTEN OUT.
+    //
+    // ★ NOT A LOOP (the design's §1b rule, MEASURED for the third time in step G2-A): a loop may
+    // carry a value out ONLY by adding to it. This sum was `(s_hi, s_lo) = add_wide(…)` over three
+    // components, which is an accumulator the body ASSIGNS, and on the card it came back ONE STEP
+    // STALE — the third component's square was missing, so every direction the column pass wrote
+    // was 1.22 times too long and all 32 768 columns of the eight golden boxes differed. Three is a
+    // fixed count, so the steps are written out.
+    let square = |g: Gi| {
+        let m = g.unsigned_abs();
+        mul_wide(m, m)
+    };
+    let (h0, l0) = square(v[0]);
+    let (h1, l1) = square(v[1]);
+    let (h2, l2) = square(v[2]);
+    let (a_hi, a_lo) = add_wide(h0, l0, h1, l1);
+    let (s_hi, s_lo) = add_wide(a_hi, a_lo, h2, l2);
     // T = S >> 20: S at 60 fraction bits in one word (S < 3·2⁸⁰, so T < 2⁶²).
     let t = shr_wide(s_hi, s_lo, 20);
     // The seed: the 30-bit root and its exact reciprocal, widened to the direction's bits.
@@ -226,6 +274,23 @@ mod tests {
     )]
     fn real(g: Gi) -> f64 {
         g.raw() as f64 / ONE
+    }
+
+    /// ★ THE MATCH IS THE TABLE. `basis_of` spells the six rows out as literals because a const
+    /// array a kernel indexes at run time becomes a private copy of the whole table per use on the
+    /// card (the design's §1b). That makes it a SECOND copy of the same six rows, and nothing on the
+    /// kernel path compared them until this test: `BASIS` itself is read by no kernel. A row mistyped
+    /// in the match would bend one face of every body inside out, and every gate would stay green.
+    #[test]
+    fn the_basis_match_answers_exactly_the_basis_table() {
+        let mut k = 0i32;
+        while k < 6 {
+            assert_eq!(basis_of(k), BASIS[k as usize], "face {k}");
+            k += 1;
+        }
+        // The function is TOTAL: an index past the table reads the last row, never a panic.
+        assert_eq!(basis_of(6), BASIS[5]);
+        assert_eq!(basis_of(200), BASIS[5]);
     }
 
     #[test]
@@ -278,7 +343,7 @@ mod tests {
     fn a_direction_is_a_unit_vector_on_every_face_and_the_faces_meet_at_the_edge() {
         let n_l = 62u32;
         let inv_n = inv_n_of(n_l);
-        let mut face = 0u8;
+        let mut face = 0i32;
         while face < 6 {
             for (i, j) in [(0, 0), (30, 30), (61, 0), (0, 61), (61, 61), (7, 40)] {
                 let d = direction(face, i, j, inv_n);

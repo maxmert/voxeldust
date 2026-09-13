@@ -31,15 +31,15 @@ use crate::carve::{CAVERN_STRIDE_LOG2, Tube, caverns_carve_at, tubes_carve_at};
 pub use crate::chunk::in_ladder;
 use crate::chunk::{
     CAVERN_NODES, CHUNK_EDGE, Cell, CellSite, ChunkKey, ColumnField, NodeLattice, above_surface_cell,
-    below_surface_cell, cavern_of, charter_of, column_field, dir_of, finish_cell, foreign_lattices,
+    below_surface_cell, cavern_of, charter_of, column_field, finish_cell, foreign_extents,
     generate_in, point_at, tubes_reaching,
 };
-use crate::height::{biome_of, height};
+use crate::height::biome_of_code;
 use crate::strata::Biome;
 use crate::units::LENGTH_BITS;
 use vd_recipe::Gi;
-use vd_recipe::bend::{DIR_ONE, normalise};
 use vd_recipe::cell::CellCharter;
+use vd_recipe::plan::{column_surface, site_direction_of};
 use vd_seed::bend::Face;
 use vd_seed::seam::{Edge, across};
 
@@ -49,8 +49,11 @@ pub const HALO: i32 = 1;
 pub const BOX_EDGE: usize = CHUNK_EDGE + 2;
 /// Cells per box.
 pub const BOX_CELLS: usize = BOX_EDGE * BOX_EDGE * BOX_EDGE;
-/// The face byte of a corner phantom's site: no face.
+/// The face byte of a corner phantom's site: no face. The recipe's column kernel reads the same
+/// byte, and this assertion makes a change on one side a red BUILD rather than a phantom the card
+/// draws as a face cell.
 pub const CORNER_FACE: u8 = 255;
+const _: () = assert!(CORNER_FACE as i32 == vd_recipe::plan::CORNER_FACE);
 
 /// Where a box column lives: a cell `(i, j)` of a face, or a corner phantom (`face` is
 /// [`CORNER_FACE`], and `i`, `j` hold the corner's signs along the chunk's own `u` and `v`).
@@ -221,20 +224,18 @@ pub fn local_of_site(body: &BodyDefinition, key: ChunkKey, site: Site) -> Option
 /// corner's. A corner phantom's axis sum is `(±1, ±1, ±1)` at the bend's own One, and the recipe's
 /// [`normalise`] puts it on the sphere — the same kernel the bend itself ends with, so the three faces
 /// that meet at the corner read the same word triple.
+///
+/// ★ ONE SOURCE (step G2-A): the arithmetic is `vd_recipe::plan::site_direction_of`, the kernel the
+/// card's COLUMN PASS runs for every column of a box — its own face's cells and the phantoms alike.
 #[must_use]
 pub fn site_dir(body: &BodyDefinition, key: ChunkKey, site: Site) -> [Gi; 3] {
-    match Face::from_index(site.face) {
-        Some(face) => dir_of(face, body.inv_n(key.rung), site.i, site.j),
-        None => {
-            let basis = key.face.basis();
-            let axis = |c: usize| {
-                Gi::new(i64::from(basis.n[c])) * DIR_ONE
-                    + Gi::new(i64::from(site.i) * i64::from(basis.u[c])) * DIR_ONE
-                    + Gi::new(i64::from(site.j) * i64::from(basis.v[c])) * DIR_ONE
-            };
-            normalise([axis(0), axis(1), axis(2)])
-        }
-    }
+    site_direction_of(
+        body.inv_n(key.rung),
+        i32::from(key.face.index()),
+        i32::from(site.face),
+        site.i,
+        site.j,
+    )
 }
 
 /// ★ EVERYTHING A BOX NEEDS BEFORE ITS CELLS: each column's site, direction, surface and biome, the
@@ -254,61 +255,76 @@ pub(crate) struct BoxSetup {
     pub foreign: Vec<NodeLattice>,
     pub charter: CellCharter,
     pub carve_caverns: bool,
-    /// The lattices' first node along each axis, and the box's radial range.
+    /// The box's radial range.
+    pub k0: i32,
+    pub band: i32,
+}
+
+/// ★ THE TOPOLOGY OF ONE BOX — everything about it that is LOOKUP rather than arithmetic: which
+/// face each column belongs to, which carvers reach it, which cavern lattices its columns read, and
+/// the body's charter at this rung. This is what a HOST still does when the card runs the column
+/// pass and the node pass (step G2-A): it costs a few thousand integer comparisons against a
+/// quarter of a million cells of arithmetic.
+///
+/// **Example.** The chunk at the far corner of face `+X`: 4 096 sites, of which some belong to face
+/// `+Y` and four are corner phantoms; two lattices; the three tube carvers that reach the box.
+pub(crate) struct BoxTopology {
+    pub sites: Vec<Site>,
+    /// The carvers that can reach the box: a SUPERSET of what any one cell's owner keeps, and a
+    /// hollow is the exact greatest over the list, so the superset changes no byte.
+    pub tubes: Vec<Tube>,
+    /// The box's cavern lattices, the chunk's own face first: EMPTY at a rung that carves no cavern.
+    pub lattices: Vec<LatticeExtent>,
+    pub charter: CellCharter,
+    pub carve_caverns: bool,
     pub node0: [i32; 3],
     pub k0: i32,
     pub band: i32,
 }
 
-/// The prologue of one box: [`BoxSetup`] for `key`, whose core columns come from `column`.
-pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnField) -> BoxSetup {
+/// WHERE one cavern lattice of a box stands: its face, its first node along each axis, and how many
+/// nodes it holds along each. The values themselves are the node pass's answer, on either host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LatticeExtent {
+    pub face: Face,
+    pub node0: [i32; 3],
+    pub dims: [usize; 3],
+}
+
+/// The topology of the box at `key`.
+pub(crate) fn box_topology(body: &BodyDefinition, key: ChunkKey) -> BoxTopology {
     let rung = key.rung;
     let edge = CHUNK_EDGE as i32;
     let band = body.ladder.cells_in_band(rung) as i32;
     let k0 = key.z * edge;
-    // Every column: its site, its direction, and (for a halo column) its surface and biome. A core
-    // column's surface comes from the column pass, so no core work is repeated.
     let mut sites = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
-    let mut dirs = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
-    let mut surfaces: Vec<(Gi, Biome)> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     let mut b = -HALO;
     while b <= edge {
         let mut a = -HALO;
         while a <= edge {
-            let site = site_of(body, key, a, b);
-            let core_column = (a >= 0) & (a < edge) & (b >= 0) & (b < edge);
-            let (dir, h, biome) = if core_column {
-                column.columns[(b as usize) * CHUNK_EDGE + a as usize]
-            } else {
-                let dir = site_dir(body, key, site);
-                let h = height(body, dir, rung);
-                (dir, h, biome_of(body, dir, h))
-            };
-            sites.push(site);
-            dirs.push(dir);
-            surfaces.push((h, biome));
+            sites.push(site_of(body, key, a, b));
             a += 1;
         }
         b += 1;
     }
     // The tubes that can reach the box: the regions around its eight corners, then only the tubes
-    // within their radius of the box's bounding sphere.
+    // within their radius of the box's bounding sphere. NINE directions, never four thousand — the
+    // corners and the centre are the only columns the carver list reads.
     let carve_tubes = tubes_carve_at(body, rung);
     let carve_caverns = caverns_carve_at(body, rung);
     let r_low = body.ladder.corner_radius_steps(k0 - HALO, rung);
     let r_high = body.ladder.corner_radius_steps(k0 + edge + HALO, rung);
     let mut tubes: Vec<Tube> = Vec::new();
     if carve_tubes {
-        let centre_dir = dirs[SampleBox::column_index(edge >> 1, edge >> 1)];
-        let centre = point_at(centre_dir, Gi::new((r_low + r_high) >> 1));
+        let dir_at = |a: i32, b: i32| site_dir(body, key, sites[SampleBox::column_index(a, b)]);
+        let centre = point_at(dir_at(edge >> 1, edge >> 1), Gi::new((r_low + r_high) >> 1));
         let mut corners = [[Gi::ZERO; 3]; 8];
         let mut corner = 0;
         while corner < 8 {
             let a = if corner & 1 == 0 { -HALO } else { edge };
             let b = if corner & 2 == 0 { -HALO } else { edge };
-            let dir = dirs[SampleBox::column_index(a, b)];
             let r = Gi::new(if corner & 4 == 0 { r_low } else { r_high });
-            corners[corner] = point_at(dir, r);
+            corners[corner] = point_at(dir_at(a, b), r);
             corner += 1;
         }
         tubes = tubes_reaching(body, centre, corners);
@@ -323,14 +339,73 @@ pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnFie
         (node(k0) - 1).max(0),
     ];
     let k_dims = CAVERN_NODES + 2;
-    let (own, foreign) = if carve_caverns {
-        (
-            NodeLattice::build(body, rung, key.face, node0, [CAVERN_NODES + 2; 3]),
-            foreign_lattices(body, rung, key.face, &sites, node0[2], k_dims),
-        )
-    } else {
-        (NodeLattice::empty(key.face), Vec::new())
-    };
+    let mut lattices = Vec::new();
+    if carve_caverns {
+        lattices.push(LatticeExtent {
+            face: key.face,
+            node0,
+            dims: [CAVERN_NODES + 2; 3],
+        });
+        lattices.extend(foreign_extents(key.face, &sites, node0[2], k_dims));
+    }
+    BoxTopology {
+        sites,
+        tubes,
+        lattices,
+        charter: charter_of(body, rung, BOX_EDGE),
+        carve_caverns,
+        node0,
+        k0,
+        band,
+    }
+}
+
+/// The prologue of one box: [`BoxSetup`] for `key`, whose core columns come from `column`. The
+/// topology above, plus the two passes RUN ON THIS HOST — the columns' surfaces and the lattices'
+/// node values, through the very kernels the card runs.
+pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnField) -> BoxSetup {
+    let rung = key.rung;
+    let edge = CHUNK_EDGE as i32;
+    let topology = box_topology(body, key);
+    // Every column: its direction, its surface and its biome. A core column's surface comes from
+    // the column pass already run, so no core work is repeated.
+    let mut dirs = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
+    let mut surfaces: Vec<(Gi, Biome)> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
+    // ★ ONE COLUMN PASS (step G2-A): the charter once per box, the recipe's kernel per halo column.
+    let plan_charter = body.plan_charter(rung, key.face);
+    let mut b = -HALO;
+    while b <= edge {
+        let mut a = -HALO;
+        while a <= edge {
+            let core_column = (a >= 0) & (a < edge) & (b >= 0) & (b < edge);
+            let (dir, h, biome) = if core_column {
+                column.columns[(b as usize) * CHUNK_EDGE + a as usize]
+            } else {
+                let site = topology.sites[SampleBox::column_index(a, b)];
+                let s = column_surface(&plan_charter, i32::from(site.face), site.i, site.j);
+                (s.dir, s.h, biome_of_code(s.biome))
+            };
+            dirs.push(dir);
+            surfaces.push((h, biome));
+            a += 1;
+        }
+        b += 1;
+    }
+    let mut built = topology
+        .lattices
+        .iter()
+        .map(|e| NodeLattice::build(body, rung, e.face, e.node0, e.dims));
+    let own = built.next().unwrap_or_else(|| NodeLattice::empty(key.face));
+    let foreign: Vec<NodeLattice> = built.collect();
+    let BoxTopology {
+        sites,
+        tubes,
+        charter,
+        carve_caverns,
+        k0,
+        band,
+        ..
+    } = topology;
     BoxSetup {
         sites,
         dirs,
@@ -338,9 +413,8 @@ pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnFie
         tubes,
         own,
         foreign,
-        charter: charter_of(body, rung, BOX_EDGE),
+        charter,
         carve_caverns,
-        node0,
         k0,
         band,
     }
@@ -440,6 +514,7 @@ mod tests {
     use super::*;
     use crate::digest::surface_chunk_z;
     use crate::home::home_planet;
+    use vd_seed::bend::Face;
 
     fn key(face: Face, rung: u8, x: i32, y: i32, z: i32) -> ChunkKey {
         ChunkKey {

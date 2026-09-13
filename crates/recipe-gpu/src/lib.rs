@@ -9,11 +9,15 @@
 //! three to six times the transcription's time). The second is THE CELL FIELD (step G1): one
 //! invocation per cell of a box, each writing the cell's substance and gap as one word.
 //!
-//! **What the host still does for the cell field (G1 only).** The column pass — the direction, the
-//! surface and the biome of each column — and the cavern lattice's node values are computed on the
-//! CPU and uploaded; the host also resolves the lattice's TOPOLOGY (which face a column belongs to
-//! across a seam, and whether it is a corner phantom) into plain indices. Steps G2 and after move
-//! those to the card as well. The kernel's own arithmetic is already the recipe's.
+//! ★ **THE WHOLE CHAIN (step G2-A):** the COLUMN pass and the NODE pass now stand in front of the
+//! cell field on the CARD, so a box's request carries its key and its charter and nothing that has
+//! to be computed. Three compute passes of one command encoder: the cell field reads the column
+//! buffer and the node buffer the first two filled, and neither ever crosses the bus.
+//!
+//! **What the host still does.** TOPOLOGY only: which face a column belongs to across a seam and
+//! whether it is a corner phantom (`site_of`), which carvers reach the box, where each cavern
+//! lattice stands, and the radial layers' rules. That is a few thousand integer comparisons against
+//! a quarter of a million cells of arithmetic — MEASURED at 0.056 ms of a 2.01 ms box.
 //!
 //! **Example.** The client asks the GPU for the 262 144 cells of chunk (face 2, rung 0, 19, 1, 4)
 //! with its halo: 4 096 workgroups of 64 invocations, each reading its column, its radial layer and
@@ -30,6 +34,7 @@ use vd_recipe::cell::{
     above_cell_word, below_cell_word, cavern_at, cell_word,
 };
 use vd_recipe::height::{Octave, relief};
+use vd_recipe::plan::{CAVERN_STRIDE, NodeBlock, PlanCharter, column_row, node_value};
 
 /// The relief of one column per invocation: `dirs` holds three words per column at 40 fraction
 /// bits, `octaves` the body's live octaves as the recipe's own words, `out` one word per column.
@@ -98,6 +103,98 @@ pub fn cell_field(
             tubes,
         )
     };
+}
+
+/// ★ THE COLUMN PASS (step G2-A): one invocation per column of a box. It reads the column's SITE —
+/// which face it belongs to and its cell there, or a corner phantom — and writes the whole column
+/// row: the direction, the surface's radius, the biome, and where the column's cavern lattice sits.
+///
+/// The host no longer computes any of that. A box's request is now its key and its charter; the
+/// 4 096 octave sums a box needs run here.
+///
+/// The bindings, in order: the plan charter, four 32-bit words per column (the face, the cell's two
+/// indices, one of padding), the box's cavern lattices, one [`Column`] out per column, and the same
+/// columns' DIRECTIONS as three words each — the one thing a host still reads back, because the
+/// extractor places its vertices along them.
+#[spirv(compute(threads(64)))]
+pub fn column_pass(
+    #[spirv(global_invocation_id)] id: UVec3,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] charter: &PlanCharter,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] sites: &[i32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] lattices: &[NodeBlock],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] columns: &mut [Column],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] dirs: &mut [i64],
+) {
+    let i = id.x as usize;
+    if i >= columns.len() {
+        return;
+    }
+    let row = column_row(
+        charter,
+        lattices,
+        sites[i * 4],
+        sites[i * 4 + 1],
+        sites[i * 4 + 2],
+    );
+    dirs[i * 3] = row.dir[0].raw();
+    dirs[i * 3 + 1] = row.dir[1].raw();
+    dirs[i * 3 + 2] = row.dir[2].raw();
+    columns[i] = row;
+}
+
+/// ★ THE NODE PASS (step G2-A): one invocation per node of the box's cavern lattices. `id.x` is the
+/// node along the lattice's first face axis, `id.y` along its second, and `id.z` names a SLICE —
+/// which lattice and which radial node — through the small table the host lays down, so the kernel
+/// divides nothing to find its place.
+///
+/// The bindings, in order: the plan charter, the box's lattices, two words per slice (the lattice
+/// and the radial node index), the corner radius of each radial node, and the node values out.
+#[spirv(compute(threads(32)))]
+pub fn node_pass(
+    #[spirv(global_invocation_id)] id: UVec3,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] charter: &PlanCharter,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] lattices: &[NodeBlock],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] slices: &[i64],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] radii: &[i64],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] nodes: &mut [Gi],
+) {
+    // ★ EVERY READ IS GUARDED THE SAME WAY, and a failed guard WRITES NOTHING. A shader has no
+    // bound check of its own: an index past a buffer reads a neighbouring allocation on one card and
+    // zero on another, which is a drift SL10 could never measure. The three reads are the slice row,
+    // the lattice it names, and the radial radius; each is tested before it is taken.
+    let z = id.z as usize;
+    if z * 2 + 1 >= slices.len() {
+        return;
+    }
+    let lattice = slices[z * 2];
+    let nc = slices[z * 2 + 1];
+    if (lattice < 0) | (lattice as usize >= lattices.len()) | (nc < 0) | (nc as usize >= radii.len())
+    {
+        return;
+    }
+    let block = &lattices[lattice as usize];
+    let face = block.face.raw();
+    if face < 0 {
+        return;
+    }
+    let d0 = block.dims[0].raw();
+    let d1 = block.dims[1].raw();
+    let (na, nb) = (id.x as i64, id.y as i64);
+    if (na >= d0) | (nb >= d1) {
+        return;
+    }
+    let index = (block.base.raw() + (nc * d1 + nb) * d0 + na) as usize;
+    if index >= nodes.len() {
+        return;
+    }
+    let stride = CAVERN_STRIDE as i64;
+    nodes[index] = node_value(
+        charter,
+        face as i32,
+        ((block.node0[0].raw() + na) * stride) as i32,
+        ((block.node0[1].raw() + nb) * stride) as i32,
+        Gi::new(radii[nc as usize]),
+    );
 }
 
 /// ★ A PROBE: the integer square root of each input word, so a host can measure the card's own

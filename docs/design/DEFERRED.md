@@ -8201,12 +8201,70 @@ rings; what is left is an interim with a named step:
    which takes that chunk to **7.8 ms** — 4.5 times cheaper than before this step, no byte moved.
    `terrain-cost`'s costliest named chunk: 48.7 ms before, 10.8 ms after, against the owner's 8 ms
    budget (that assertion was already red and `terrain-cost` is not in `just gate`).
-   🟧 STILL OPEN: **G1 DOES NOT PAY YET, MEASURED** — the card's own share is 1.79 ms a box but the
-   host still spends 2.14 ms on the box's plan and a megabyte crosses back, against 1.24 ms a box
-   on the terrain's three-worker share; so the client's builder stays on the CPU workers and the
-   wiring waits for G2 (the design names the two seams it needs). The runtime self-check does not
-   reach a tube carver (MEASURED: 0 of the eight golden boxes hold one, against 178 of the square's
-   1 024); the bench's square is that gate, and it goes red if that count falls to zero. G2–G4, DX12/Vulkan legs on other machines.
+   ★ **G2-A, THE PLAN ON THE CARD, LANDED AND MEASURED (2026-09-13; bench part 6)**: the two passes
+   that stood in front of the cell field moved onto the card — the COLUMN pass
+   (`vd_recipe::plan::column_row`: a column's direction from its site, the octave sum, the biome —
+   `height::biome_of` moved into the recipe by this step — and where its cavern lattice sits) and the
+   NODE pass (`vd_recipe::plan::node_value`). Three compute passes, one command encoder, one submit:
+   the cell field reads the column buffer and the node buffer THE CARD ITSELF FILLED. A box's request
+   now carries its key and its charter; the host keeps TOPOLOGY only (`site_of` for 4 096 columns,
+   the nine directions the carver list reads, the lattice extents, the layer rows). `vd-terrain`'s own
+   column pass, halo and node lattice CALL the same kernels, so there is one arithmetic and not two.
+   **0 of 283 115 520 cells and 0 of 4 423 680 column DIRECTIONS differ over 1 080 boxes** — and the
+   bench grew a THIRD set for this step, THE SEAMS (the four corner chunks of every face at rung 0
+   and at the coarsest rung), because neither the golden chunks nor the square ever stands at a
+   face's edge: all 48 of those boxes hold BOTH a partner face's columns and a CORNER PHANTOM, the
+   two arms the column kernel newly carries, and part 6 goes red if that count falls to zero (the
+   carver count's own shape). The three pin legs, the
+   lint, the fence control and the link scan unchanged — no byte of the world moved. **The host's
+   share of a box fell about 38 times, 2.14 ms → about 0.06 ms; the whole GPU path 3.93 ms → about 2.0 ms a box.**
+   A third instance of the loop-tail rule was found and cured: `bend::recip_sqrt` summed three
+   squares in a loop whose body RE-BOUND a two-word accumulator, so on the card every direction was
+   1.22 times too long (the third square was missing). And one more compiler refusal: an 8-bit
+   integer is refused as a FUNCTION PARAMETER too (`direction(face: u8, …)`), so every face index on
+   the recipe's path is a 32-bit word now.
+   🟥 **G2 STOPPED, MEASURED — THE READBACK WAS NEVER THE COST.** G2 (the extraction on the card) was
+   designed to pay by removing the megabyte of cells from the bus. Part 6 measured that megabyte
+   directly, by running the same three passes with nothing copied home, FIVE times: **218 ms, −17 ms,
+   15 ms, 106 ms and 109 ms of a whole path of about 2 070 ms — readings that STRADDLE ZERO**, so the
+   measurement cannot separate the readback from its own noise and what it bounds is the size: the
+   LARGEST reading is a TENTH of the path. ★ **AND THE CONCLUSION HOLDS AT THAT TENTH:** hand the
+   whole of the largest reading to G2 and the card's share is still about 1.8 ms a box against the
+   three-worker share's 1.26 ms — a tenth of 2.0 ms does not close 2.0 against 1.26. The wall is the
+   CARD'S OWN ARITHMETIC: about 1.9 ms a box, about 7 ns a cell against one CPU core's 14 ns, because
+   every step is a 64-bit integer multiply and Metal has no instruction for one. The terrain's share
+   is three cores, which do the same box in about 1.26 ms. So G2 would ADD card work and could not
+   close a gap of ABOUT A THIRD with a lever of at most a tenth; G2, G3, G4 and the client wiring do
+   not start. ★ **THE DIGITS ARE SOFTER THAN THEY LOOK:** two GPU passes over the SAME 1 024 boxes in
+   one run read 1 821 ms and 2 074 ms — 13 % apart — so every timing here is quoted to two figures
+   and the gap is stated as about a third, never as 37 %. The direction of the ruling stands on a gap
+   far wider than the spread.
+   🟧 **WHAT THE CHAIN BUYS IS CORES, NOT SPEED — AN OWNER DECISION (F6).** about 490 chunks a second for
+   about 0.03 of one core and about all of the card, against the workers' about 790 for three cores
+   and no card at all. Roughly three fifths of the throughput for under one percent of the CPU, with the card then
+   unavailable to draw. The ruling file's status paragraph states the table; the owner decides.
+   What would change the reading without a ruling: a hot path in 32-bit words (the noise's lattice
+   point and fade already fit; the bend and the radius do not), or F6's own average machine, whose
+   share is TWO workers — there the card and the share are even.
+   ★ **AND A MEASUREMENT ABOUT THE PICTURE GATE ITSELF (2026-09-13, incidental):** the gate PASSES,
+   but it does NOT deliver "0 pixels differ". Two runs of the same binary on the same code read
+   ground 9 then 7, hill 0 then 10, aloft 10 then 0, orbit 19 then 18, seam 13 then 13 content
+   pixels differing, every one at a widest channel step of ONE — and the second run compared against
+   the pictures the FIRST run had just written. So the residual is the gate's OWN run-to-run noise
+   (the probe's terrain and its ruler), which its one-level tolerance absorbs, and a count of a few
+   pixels proves nothing about the world. The byte gate for the world is `terrain-pin` and
+   `mesh_pin`, which are green. ⚠ FOUR of the five PNGs under
+   `docs/investigation/2026-09-07/pictures/` are MODIFIED in the working tree because the gate
+   rewrites them every run — `aloft`, `ground`, `hill` and `orbit`; `seam.png` came back
+   byte-identical. The owner decides whether to keep the rewrite.
+   🟧 STILL OPEN: the runtime self-check does not reach a tube carver (MEASURED: 0 of the eight
+   golden boxes hold one, against 178 of the square's 1 024) and does not reach a SEAM either (no
+   golden chunk stands at a face's edge); the bench's square and its new seam set are those gates,
+   and each goes red if its own count falls to zero. Whether the runtime check should carry a seam
+   chunk is an owner question, because the golden set is what the handshake folds. DX12/Vulkan legs
+   on other machines. The two client seams the wiring would need are still unproven: a worker thread
+   submitting to the renderer's device, and `device.poll(wait)` from a worker while the renderer
+   submits.
    ★ THE WORKSPACE REDS AT THIS LANDING, MEASURED ON THE LAST COMMIT (d165d3c, a fresh worktree,
    release, 2026-09-13) — ALL PRE-EXISTING, none from the recipe: `dual_cluster_crossing_smoke::
    a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier` (−3.962e14 m clear against the

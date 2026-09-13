@@ -42,10 +42,10 @@
 
 use crate::body::BodyDefinition;
 use crate::carve::{
-    CAVERN_STRIDE, CAVERN_STRIDE_LOG2, cavern_value, caverns_carve_at, cell_steps, tube_region,
+    CAVERN_STRIDE, CAVERN_STRIDE_LOG2, caverns_carve_at, cell_steps, tube_region,
     tubes_carve_at, tubes_near,
 };
-use crate::height::{biome_of, height};
+use crate::height::biome_of_code;
 use crate::strata::{Biome, Stratum};
 use crate::units::{LENGTH_BITS, STEPS_PER_M, greater, lesser};
 use vd_recipe::Gi;
@@ -53,6 +53,7 @@ use vd_recipe::cell::{
     CellAt, CellCharter, Tube, above_cell_word, below_cell_word, cell_word, gap_of_word,
     strata_row, stratum_of_word,
 };
+use vd_recipe::plan::{PlanCharter, column_surface};
 use vd_recipe::root::isqrt;
 
 /// ★ THE ARITHMETIC IS THE RECIPE'S (ruling F7, step G1). A point in the body's frame and the
@@ -60,7 +61,7 @@ use vd_recipe::root::isqrt;
 /// the generator, the collider and the shader run ONE body of code and never a copy of it.
 pub(crate) use vd_recipe::cell::{point_at, trilinear8};
 
-use vd_seed::bend::{Face, direction_q};
+use vd_seed::bend::Face;
 
 /// Cells per chunk edge.
 pub const CHUNK_EDGE: usize = 62;
@@ -162,13 +163,6 @@ pub fn in_ladder(body: &BodyDefinition, key: ChunkKey) -> bool {
     i64::from(key.x) * edge < n_l && i64::from(key.y) * edge < n_l && i64::from(key.z) * edge < band
 }
 
-/// The direction of the cell `(i, j)` of a face, at the bend's [`DIR_BITS`] fraction bits, for a body
-/// whose cell-count reciprocal at this rung is `inv_n` (the charter holds one per rung, so a direction
-/// costs no divide).
-pub(crate) fn dir_of(face: Face, inv_n: Gi, i: i32, j: i32) -> [Gi; 3] {
-    direction_q(face, i, j, inv_n)
-}
-
 /// The column pass for the column of `(face, rung, x, y)`; `None` for a column outside the body.
 #[must_use]
 pub fn column_field(
@@ -203,14 +197,17 @@ pub fn column_field(
     // finding: a sentinel the arithmetic absorbs reads a column's floor kilometres out).
     let mut lowest = Gi::ZERO;
     let mut highest = Gi::ZERO;
+    // ★ ONE COLUMN PASS (step G2-A): the charter once per chunk, then the recipe's own kernel per
+    // column — the very kernel the card runs, so the shard's hill is the card's hill.
+    let charter = body.plan_charter(rung, face);
     let mut b = 0;
     while b < CHUNK_EDGE {
         let mut a = 0;
         while a < CHUNK_EDGE {
             let site = crate::lattice::site_of(body, key, a as i32, b as i32);
-            let dir = crate::lattice::site_dir(body, key, site);
-            let h = height(body, dir, rung);
-            let biome = biome_of(body, dir, h);
+            let surface = column_surface(&charter, i32::from(site.face), site.i, site.j);
+            let (dir, h) = (surface.dir, surface.h);
+            let biome = biome_of_code(surface.biome);
             if (a == 0) & (b == 0) {
                 lowest = h;
                 highest = h;
@@ -490,8 +487,11 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
     } else {
         NodeLattice::empty(key.face)
     };
-    let foreign = if carve_caverns {
-        foreign_lattices(body, rung, key.face, &column.sites, node0[2], CAVERN_NODES)
+    let foreign: Vec<NodeLattice> = if carve_caverns {
+        foreign_extents(key.face, &column.sites, node0[2], CAVERN_NODES)
+            .into_iter()
+            .map(|e| NodeLattice::build(body, rung, e.face, e.node0, e.dims))
+            .collect()
     } else {
         Vec::new()
     };
@@ -564,7 +564,9 @@ impl NodeLattice {
         node0: [i32; 3],
         dims: [usize; 3],
     ) -> NodeLattice {
-        let inv_n = body.inv_n(rung);
+        // The plan charter once per lattice, never once per node: the card's node pass reads the
+        // same row for the whole dispatch.
+        let charter = body.plan_charter(rung, face);
         let s = CAVERN_STRIDE as i32;
         let mut values = Vec::with_capacity(dims[0] * dims[1] * dims[2]);
         let mut nc = 0;
@@ -577,7 +579,7 @@ impl NodeLattice {
                 let mut na = 0;
                 while na < dims[0] {
                     let i = (node0[0] + na as i32) * s;
-                    values.push(node_value(body, face, inv_n, i, j, r));
+                    values.push(node_value(&charter, face, i, j, r));
                     na += 1;
                 }
                 nb += 1;
@@ -645,17 +647,15 @@ impl NodeLattice {
 /// The lattices of every PARTNER face present among `sites` (a partial chunk's columns beyond its
 /// face, or a halo across a seam): one per face, over the node range those columns need, on the
 /// radial node range `[k_node0, k_node0 + k_dims)`.
-pub(crate) fn foreign_lattices(
-    body: &BodyDefinition,
-    rung: u8,
+pub(crate) fn foreign_extents(
     my_face: Face,
     sites: &[crate::lattice::Site],
     k_node0: i32,
     k_dims: usize,
-) -> Vec<NodeLattice> {
+) -> Vec<crate::lattice::LatticeExtent> {
     // The node a face index sits in: the stride's shift, as `NodeLattice::value_at` reads it.
     let node = |v: i32| v >> CAVERN_STRIDE_LOG2;
-    let mut out: Vec<NodeLattice> = Vec::new();
+    let mut out = Vec::new();
     for face in Face::ALL {
         if face == my_face {
             continue;
@@ -672,12 +672,15 @@ pub(crate) fn foreign_lattices(
         }
         if any {
             let node0 = [node(lo[0]), node(lo[1]), k_node0];
-            let dims = [
-                (node(hi[0]) - node0[0] + 2) as usize,
-                (node(hi[1]) - node0[1] + 2) as usize,
-                k_dims,
-            ];
-            out.push(NodeLattice::build(body, rung, face, node0, dims));
+            out.push(crate::lattice::LatticeExtent {
+                face,
+                node0,
+                dims: [
+                    (node(hi[0]) - node0[0] + 2) as usize,
+                    (node(hi[1]) - node0[1] + 2) as usize,
+                    k_dims,
+                ],
+            });
         }
     }
     out
@@ -708,15 +711,8 @@ pub(crate) fn cavern_of(
 
 /// The cavern field at one global node: the node's own direction on its face, at the corner
 /// radius `r` (in whole gap steps) of its radial index. Shared by the cell pass and the halo.
-pub(crate) fn node_value(
-    body: &BodyDefinition,
-    face: Face,
-    inv_n: Gi,
-    i: i32,
-    j: i32,
-    r: Gi,
-) -> Gi {
-    cavern_value(body, point_at(dir_of(face, inv_n, i, j), r))
+pub(crate) fn node_value(charter: &PlanCharter, face: Face, i: i32, j: i32, r: Gi) -> Gi {
+    vd_recipe::plan::node_value(charter, i32::from(face.index()), i, j, r)
 }
 
 /// What a cell's column and radial layer state about it: the inputs of the per-cell tail.

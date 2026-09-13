@@ -225,3 +225,49 @@ about 400). The average machine cannot hold the finest ring at speed on its CPU 
 chain (the columns, the cave grid, the cells and the extraction all on the card) and the
 throughput-bounded wanted set are the two levers, both owed.
 
+**G2-A LANDED AND MEASURED (2026-09-13) — the PLAN on the card, and the number that stops G2.** The
+two passes that stood in front of the cell field moved onto the card: the COLUMN pass (a column's
+direction, its surface and its biome, from its site alone) and the NODE pass (the cavern field at a
+lattice node). A box's request now carries its key and its charter; the host keeps only the
+TOPOLOGY — which face each column belongs to across a seam, which carvers reach the box, where the
+lattices stand. `vd-terrain`'s own column pass and node lattice CALL the same recipe kernels, so
+there is one arithmetic and not two. MEASURED on 1 080 boxes: **0 of 283 115 520 cells and 0 of
+4 423 680 column directions differ** between the card and the host — and the bench grew a THIRD set
+for this step, THE SEAMS (the four corner chunks of every face at two rungs), because neither the
+golden chunks nor the square ever stands at a face's edge: all 48 of those boxes hold BOTH a
+partner face's columns and a corner phantom, which are exactly the two arms the column kernel newly
+carries. The three pin legs, the lint, the fence control and the link
+scan are unchanged, so no byte of the world moved. **The host's share of a box fell about 38
+times — 2.14 ms to about 0.06 ms — and the whole GPU path from 3.93 ms a box to about 2.0 ms.**
+
+★ **AND THE MEASUREMENT THAT STOPS G2.** G2 (the extraction on the card) was to pay by removing the
+megabyte of cells from the bus. The same part measured that megabyte by running the three passes
+with nothing copied home, FIVE times: **218 ms, −17 ms, 15 ms, 106 ms and 109 ms of a whole path of
+about 2 070 ms — readings that STRADDLE ZERO, so the largest is a TENTH of the path and the
+measurement cannot separate the rest from noise.** ★ **AND THE CONCLUSION HOLDS AT THAT TENTH:** hand
+the whole of the largest reading to G2 and the card's share is still about 1.8 ms a box against the
+three-worker share's 1.26 ms — a tenth of 2.0 ms does not close 2.0 against 1.26. So the bus was
+never the cost. The wall is the card's own arithmetic: about 1.9 ms a box, about 7 ns a cell,
+against one CPU core's 14 ns. The card is worth about TWO of this machine's cores on a kernel built
+from 64-bit integer multiplies (Metal has no instruction for one), and ruling F6's terrain share is
+THREE cores, which do the same box in about 1.26 ms. G2 would add card work, not remove it.
+
+★ **THE DIGITS ARE SOFTER THAN THEY LOOK.** Two GPU passes over the SAME 1 024 boxes in one run read
+1 821 ms and 2 074 ms — 13 % apart. Every timing above is therefore quoted to two figures and the
+gap is stated as ABOUT A THIRD, never as a percentage to three. The ruling stands on a gap far wider
+than the spread; the third digit does not stand at all.
+
+**SO THE CHAIN IS BUILT, PROVEN BYTE FOR BYTE, AND NOT WIRED INTO THE CLIENT.** What it would buy is
+not speed but CORES, and that is the owner's call, not a measurement's:
+
+| | chunks a second | the CPU it costs | the card it costs |
+|---|---|---|---|
+| the CPU workers (today, the client's path) | about 790 boxes | 3 cores of 14 | nothing |
+| the GPU chain (built, measured, unwired) | about 490 boxes | about 0.03 of ONE core | about all of it at full rate |
+
+Roughly three fifths of the throughput for under one percent of the CPU — and then the card is
+busy and cannot draw the picture. **OWED BY THE OWNER:** whether F6's "the cores belong to the game
+that is not built yet" is worth a third of the chunk rate and most of the card. What would change
+the reading without a ruling: a hot path in 32-bit words (the noise's lattice point and fade already
+fit; the bend and the radius do not), or the average machine of F6 itself, whose share is TWO
+workers — there the card and the share are even.

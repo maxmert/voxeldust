@@ -13,13 +13,11 @@
 //! without the last three ripples, and the two are never further apart than the dropped amplitudes
 //! promise (the test below measures it on the home planet).
 
-use crate::body::{BodyDefinition, RADIUS_RECIP_BITS as RECIP_BITS};
+use crate::body::BodyDefinition;
 use crate::strata::Biome;
-use crate::units::{LENGTH_BITS, direction_of_unit, greater, metres_of_q28, q28_of_metres};
+use crate::units::{direction_of_unit, metres_of_q28, q28_of_metres};
 use vd_recipe::Gi;
-use vd_recipe::bend::DIR_BITS;
-use vd_recipe::height::relief;
-use vd_recipe::noise::{NOISE_BITS, NOISE_ONE};
+use vd_recipe::height::{biome_of as recipe_biome, relief};
 
 /// The surface's radius along a unit direction at a rung, in GAP STEPS at
 /// [`crate::units::LENGTH_BITS`] fraction bits. `dir` carries the bend's 40 fraction bits.
@@ -41,46 +39,32 @@ pub fn height_m(body: &BodyDefinition, dir: [f64; 3], rung: u8) -> f64 {
 /// about (`crates/physics/src/celestial.rs`: the perifocal plane is `z = 0`), so ice caps face away
 /// from the orbital plane, never into it. An obliquity the parent authors per body is a later
 /// slice; until then every body's spin axis is its orbit's axis. Cross-pinned in
-/// `crates/bins/tests/home_body_pin.rs`.
-pub const POLE_AXIS: usize = 2;
-
-/// The climate constants, at the noise's fraction bits: how much of the slow temperature noise the
-/// climate reads, how much height cools a column, and the two thresholds the biomes stand on. Each is
-/// `round(share · 2²⁸)` of the share the float recipe read.
-const NOISE_SHARE: Gi = Gi::new(93_952_410); // 0.35
-const HEIGHT_SHARE: Gi = Gi::new(80_530_637); // 0.30
-const COLD_BELOW: Gi = Gi::new(93_952_410); // 0.35
-const WARM_ABOVE: Gi = Gi::new(201_326_592); // 0.75
-const DRY_BELOW: Gi = Gi::new(-26_843_546); // −0.10
+/// `crates/bins/tests/home_body_pin.rs`. The recipe's own kernel reads the same axis, and the test
+/// below measures that the two agree — a kernel that turned the poles would turn them here too.
+pub const POLE_AXIS: usize = vd_recipe::height::POLE_AXIS;
 
 /// The biome of a column: cold near the poles and high up, dry where the humidity noise says so, and
 /// highland where the surface stands far above the sea. `surface` is the column's surface radius in
 /// gap steps at [`crate::units::LENGTH_BITS`], as [`height`] answers it.
+///
+/// ★ ONE SOURCE (step G2-A): the arithmetic is `vd_recipe::height::biome_of`, the very kernel the
+/// card's column pass runs, and this crate only gives the answer its NAME. So the shard's cell pass
+/// and the card's picture can never disagree about a column's biome.
 #[must_use]
 pub fn biome_of(body: &BodyDefinition, dir: [Gi; 3], surface: Gi) -> Biome {
-    let above_sea = surface - body.sea_radius;
-    if above_sea > body.biome.highland_above {
-        return Biome::Highland;
+    biome_of_code(recipe_biome(&body.biome_charter(), dir, surface))
+}
+
+/// The biome a recipe code names. The codes are the enum's own discriminants, and the recipe's own
+/// kernel answers nothing else — a code past the four would be the recipe changed without this
+/// table, so it reads as grassland and the test below measures the four that exist.
+pub(crate) fn biome_of_code(code: Gi) -> Biome {
+    match code.raw() {
+        0 => Biome::Desert,
+        2 => Biome::Tundra,
+        3 => Biome::Highland,
+        _ => Biome::Grassland,
     }
-    // The latitude: the pole component's magnitude, at the noise's fraction bits.
-    let latitude = Gi::new(dir[POLE_AXIS].unsigned_abs() as i64) >> (DIR_BITS - NOISE_BITS);
-    let t_noise = relief(&[body.biome.temperature], dir);
-    // The height share: the gap steps over the sea against the highland height, one multiply by the
-    // charter's reciprocal. Only a column above the sea is cooled by its height. The reciprocal
-    // carries RADIUS_RECIP_BITS, so the shift leaves the share at the noise's own fraction bits.
-    let over_sea_steps = greater(above_sea, Gi::ZERO) >> LENGTH_BITS;
-    let height_share = over_sea_steps.mul_shr(body.biome.highland_recip, RECIP_BITS - NOISE_BITS);
-    // Warm at the equator, cold at the poles, plus a slow noise; cooler with height.
-    let temperature = NOISE_ONE - latitude + t_noise.mul_shr(NOISE_SHARE, NOISE_BITS)
-        - height_share.mul_shr(HEIGHT_SHARE, NOISE_BITS);
-    if temperature < COLD_BELOW {
-        return Biome::Tundra;
-    }
-    let humidity = relief(&[body.biome.humidity], dir);
-    if (temperature > WARM_ABOVE) & (humidity < DRY_BELOW) {
-        return Biome::Desert;
-    }
-    Biome::Grassland
 }
 
 /// THE FLOAT SEAM of the biome field: the biome of a column a host names with a float direction and a
@@ -101,6 +85,7 @@ mod tests {
         reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
     )]
     use super::*;
+    use vd_recipe::bend::DIR_BITS;
     use vd_seed::bend::Face;
 
     fn home() -> BodyDefinition {
@@ -232,18 +217,20 @@ mod tests {
         assert!(cooled > 0, "height cools some column: {cooled}");
     }
 
-    /// The climate constants are the shares the float recipe read, rounded once to the noise's bits.
+    /// THE BIOME CODE AND THE BIOME NAME ARE ONE TABLE. The recipe answers a code and this crate
+    /// names it; a code the recipe never answers reads as grassland, so the naming is total.
     #[test]
-    fn the_climate_constants_are_the_shares_at_the_noises_bits() {
-        let one = f64::from(1u32 << NOISE_BITS);
-        for (word, share) in [
-            (NOISE_SHARE, 0.35),
-            (HEIGHT_SHARE, 0.30),
-            (COLD_BELOW, 0.35),
-            (WARM_ABOVE, 0.75),
-            (DRY_BELOW, -0.10),
-        ] {
-            assert_eq!(word.raw(), (share * one).round() as i64, "{share}");
+    fn every_biome_code_names_its_own_biome() {
+        use vd_recipe::height::{BIOME_DESERT, BIOME_GRASSLAND, BIOME_HIGHLAND, BIOME_TUNDRA};
+        assert_eq!(biome_of_code(BIOME_DESERT), Biome::Desert);
+        assert_eq!(biome_of_code(BIOME_GRASSLAND), Biome::Grassland);
+        assert_eq!(biome_of_code(BIOME_TUNDRA), Biome::Tundra);
+        assert_eq!(biome_of_code(BIOME_HIGHLAND), Biome::Highland);
+        assert_eq!(biome_of_code(Gi::new(9)), Biome::Grassland, "total");
+        // Every biome's code is its own discriminant, which is what lets the charter's strata rows
+        // stand in the enum's order.
+        for b in Biome::ALL {
+            assert_eq!(biome_of_code(Gi::new(b as i64)), b);
         }
     }
 }

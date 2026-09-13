@@ -39,6 +39,7 @@ pub mod cell;
 pub mod gi;
 pub mod height;
 pub mod noise;
+pub mod plan;
 pub mod rng;
 pub mod root;
 pub mod wide;

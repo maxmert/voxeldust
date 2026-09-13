@@ -3,39 +3,43 @@
 //! `vd_recipe::cell::cell_word` on every cell of a chunk and its halo.
 //!
 //! **What this module is, and what it is not.** It is a LAYOUT, not a second recipe: it holds no
-//! arithmetic of the world's shape. The plan states the body's charter, one row per radial layer,
-//! one row per column, the cavern lattices' node values laid end to end, and the carvers that reach
-//! the box. Every number in it is computed by the same functions the CPU's own cell pass calls
-//! (`lattice::box_setup`), and the kernel that reads it is the same kernel the shard's collider
-//! calls. The card and the shard therefore cannot disagree; there is only one arithmetic.
+//! arithmetic of the world's shape. ★ Since step G2-A it holds no arithmetic of the world's PLAN
+//! either: the plan states the body's two charters, one site per column, the cavern lattices'
+//! EXTENTS, one row per radial layer, and the carvers that reach the box — and the CARD computes
+//! every direction, every surface, every biome and every node value from them. The kernels it runs
+//! are the kernels the shard's collider calls, so the card and the shard cannot disagree; there is
+//! only one arithmetic.
 //!
-//! **Why the host still resolves the lattice.** A column of a box may belong to the chunk's own
-//! face, to a PARTNER face across a seam, or to no face at all (a corner phantom). That is topology,
-//! not arithmetic, and it costs a few hundred lookups per box against a quarter of a million cells.
-//! So the host answers it once — a base, two node indices, two strides and two weights per column —
-//! and the kernel does nothing but read and blend. Step G2 moves the columns themselves to the card.
+//! **Why the host still resolves the topology.** A column of a box may belong to the chunk's own
+//! face, to a PARTNER face across a seam, or to no face at all (a corner phantom). That is a
+//! LOOKUP, not arithmetic, and it costs a few thousand integer comparisons per box against a
+//! quarter of a million cells. So the host answers it once and the kernel does arithmetic only.
+//! MEASURED: 0.056 ms of a 2.01 ms box, against 2.14 ms before step G2-A.
 //!
 //! **The one word per cell.** The kernel writes the substance code in a byte and the gap byte above
 //! it ([`vd_recipe::cell::pack`]). [`BoxPlan::box_of`] turns a readback into the same
 //! [`SampleBox`] the CPU builds, which the extractor then reads without knowing which host made it.
+//! [`BoxPlan::run`] is the same two passes ON THIS HOST — the reference a card is measured against,
+//! and the fallback path on a card the self-check refuses.
 //!
 //! **Example.** The client wants chunk (face 2, rung 0, 19, 1, 4) of the home planet. The worker
-//! builds its plan — 64 layers, 4 096 columns, 6 859 cavern nodes, the three tube carvers that
-//! reach it — uploads about half a megabyte, and reads back 262 144 words: the same 262 144 words
-//! the shard's CPU writes for the same key, which is why the ground the player walks on is the
-//! ground the card draws.
+//! builds its plan — 64 layers, 4 096 sites, two lattice extents, the three tube carvers that reach
+//! it — uploads about 80 kB, and reads back 262 144 words: the same 262 144 words the shard's CPU
+//! writes for the same key, which is why the ground the player walks on is the ground the card
+//! draws.
 
 use crate::body::BodyDefinition;
-use crate::carve::{CAVERN_STRIDE, CAVERN_STRIDE_LOG2};
-use crate::chunk::{CHUNK_EDGE, ChunkKey, ColumnField, cell_of_word, column_field, in_ladder};
-use crate::chunk::NodeLattice;
-use crate::lattice::{BOX_EDGE, HALO, SampleBox, Site, box_setup};
+use crate::carve::CAVERN_STRIDE;
+use crate::chunk::{CHUNK_EDGE, ChunkKey, cell_of_word, in_ladder};
+use crate::lattice::{BOX_EDGE, HALO, SampleBox, Site, box_topology};
 use crate::units::LENGTH_BITS;
 use vd_recipe::Gi;
 use vd_recipe::cell::{
     CellAt, CellCharter, Column, LAYER_ABOVE, LAYER_BELOW, LAYER_EVALUATED, Layer, Tube,
     above_cell_word, below_cell_word, cavern_at, cell_word,
 };
+use vd_recipe::height::{OCTAVES_CAP, Octave};
+use vd_recipe::plan::{NodeBlock, PlanCharter, column_row, node_of, node_value, weight_of};
 
 /// How many words each `repr(C)` row of the plan holds. A test measures each against the type's
 /// own size, so a field added to the recipe without a word added here is a red test, never a
@@ -47,37 +51,65 @@ pub const LAYER_WORDS: usize = 4;
 pub const COLUMN_WORDS: usize = 13;
 /// The words of one tube carver.
 pub const TUBE_WORDS: usize = 8;
+/// The 32-bit words of one column's SITE: the face, the two cell indices and one of padding.
+pub const SITE_WORDS: usize = 4;
+/// The words of the PLAN charter: eleven of its own, then the biome's two octaves and the body's
+/// octave table, four words each.
+pub const PLAN_CHARTER_WORDS: usize = 11 + (2 + OCTAVES_CAP) * OCTAVE_WORDS;
+/// The words of one octave.
+pub const OCTAVE_WORDS: usize = 4;
 
-/// ONE BOX, as words: what a compute pass reads and what it writes back into.
+/// One octave as [`OCTAVE_WORDS`] words, in the `repr(C)` order the kernel reads.
+fn octave_words(o: &Octave) -> [i64; OCTAVE_WORDS] {
+    [
+        o.seed as i64,
+        o.frequency_int.raw(),
+        o.frequency_frac.raw(),
+        o.amplitude.raw(),
+    ]
+}
+
+/// The words of one cavern lattice's row.
+pub const BLOCK_WORDS: usize = 8;
+
+/// ONE BOX, as words: what the three compute passes read and what they write back into. Step G2-A
+/// made this TOPOLOGY ONLY — no direction, no surface, no biome, no node value. The card computes
+/// those itself from [`BoxPlan::plan`] and the sites below.
 pub struct BoxPlan {
     pub key: ChunkKey,
-    /// The body's charter at this rung, with the box's own edge.
+    /// The body's charter at this rung, with the box's own edge — what the CELL pass reads.
     pub charter: CellCharter,
+    /// The body's charter for the COLUMN pass and the NODE pass.
+    pub plan: PlanCharter,
     /// One row per radial layer of the box, in the box's own order (`c` from the halo up).
     pub layers: Vec<Layer>,
-    /// One row per column of the box, in packing order `(b + 1) · 64 + (a + 1)`.
-    pub columns: Vec<Column>,
-    /// Every cavern lattice's values, laid end to end; a column's row says where its own begins.
-    /// Never empty: a card refuses a buffer of no bytes, so one spare word stands in.
-    pub nodes: Vec<Gi>,
+    /// One site per column of the box, in packing order `(b + 1) · 64 + (a + 1)`: which face the
+    /// column belongs to and its cell there, or a corner phantom.
+    pub sites: Vec<Site>,
+    /// The box's cavern lattices, the chunk's own face first. Never empty: where a rung carves no
+    /// cavern one block of NO FACE stands in, which no column can name, so no column has a lattice.
+    pub lattices: Vec<NodeBlock>,
+    /// One row per slice of the node dispatch: which lattice it belongs to and its radial node.
+    pub node_z: Vec<[Gi; 2]>,
+    /// The corner radius of each radial node index, in whole gap steps. Every lattice of a box
+    /// shares one radial range, so one row serves them all.
+    pub node_radii: Vec<Gi>,
+    /// How many words the node buffer holds; never zero, because a card refuses a buffer of no bytes.
+    pub node_count: usize,
+    /// The node dispatch's extent along the two face axes: the widest lattice of the box.
+    pub node_extent: [u32; 2],
     /// The carvers that can reach the box. Never empty for the same reason: a carver of NO RADIUS
     /// stands in, and `radius − distance` is never above zero for it, so it hollows nothing.
     pub tubes: Vec<Tube>,
-    /// The columns' sites and directions — what the extractor reads beside the cells.
-    pub sites: Vec<Site>,
-    pub dirs: Vec<[Gi; 3]>,
 }
 
-/// The node a cell index sits in: the stride's own SHIFT, which floors on both sides of zero (a
-/// halo cell at −1 reads the node pair `(−1, 0)`, never the truncating divide's `(0, 1)`).
-fn node_of(v: i32) -> i32 {
-    v >> CAVERN_STRIDE_LOG2
-}
-
-/// The weight of a cell index inside its node pair, at [`LENGTH_BITS`]: the stride is a power of
-/// two, so the weight is a MASK and the word is exact.
-fn weight_of(v: i32) -> Gi {
-    Gi::new(i64::from(v & (CAVERN_STRIDE as i32 - 1))) << (LENGTH_BITS - CAVERN_STRIDE_LOG2)
+/// THE TWO PASSES' ANSWER: what a host or a card writes into the column buffer and the node buffer
+/// before the cell pass reads them.
+pub struct BoxRun {
+    /// One row per column, whole: the direction, the surface, the biome and the lattice indices.
+    pub columns: Vec<Column>,
+    /// Every lattice's node values, laid end to end.
+    pub nodes: Vec<Gi>,
 }
 
 /// The plan of the box at `key`; `None` for a key outside the body's ladder.
@@ -86,74 +118,72 @@ pub fn plan(body: &BodyDefinition, key: ChunkKey) -> Option<BoxPlan> {
     if !in_ladder(body, key) {
         return None;
     }
-    let column = column_field(body, key.face, key.rung, key.x, key.y)?;
-    Some(plan_in(body, key, &column))
-}
-
-/// The plan of the box at `key`, whose core columns come from `column` — what a worker that already
-/// holds the column pass calls.
-#[must_use]
-pub fn plan_in(body: &BodyDefinition, key: ChunkKey, column: &ColumnField) -> BoxPlan {
-    let setup = box_setup(body, key, column);
     let edge = CHUNK_EDGE as i32;
     let rung = key.rung;
+    let topology = box_topology(body, key);
 
     // The lattices, laid end to end: the chunk's own face first, then each partner face present.
-    let mut nodes: Vec<Gi> = Vec::new();
-    let mut bases: Vec<(u8, usize, &NodeLattice)> = Vec::new();
-    if setup.carve_caverns {
-        bases.push((setup.own.face.index(), nodes.len(), &setup.own));
-        nodes.extend_from_slice(&setup.own.values);
-        for lattice in &setup.foreign {
-            bases.push((lattice.face.index(), nodes.len(), lattice));
-            nodes.extend_from_slice(&lattice.values);
+    let mut lattices = Vec::with_capacity(topology.lattices.len());
+    let mut node_z: Vec<[Gi; 2]> = Vec::new();
+    let mut node_count = 0usize;
+    let mut node_extent = [0u32; 2];
+    for (index, e) in topology.lattices.iter().enumerate() {
+        lattices.push(NodeBlock {
+            face: Gi::new(i64::from(e.face.index())),
+            base: Gi::new(node_count as i64),
+            node0: [
+                Gi::new(i64::from(e.node0[0])),
+                Gi::new(i64::from(e.node0[1])),
+                Gi::new(i64::from(e.node0[2])),
+            ],
+            dims: [
+                Gi::new(e.dims[0] as i64),
+                Gi::new(e.dims[1] as i64),
+                Gi::new(e.dims[2] as i64),
+            ],
+        });
+        let mut nc = 0;
+        while nc < e.dims[2] {
+            node_z.push([Gi::new(index as i64), Gi::new(nc as i64)]);
+            nc += 1;
         }
+        node_count += e.dims[0] * e.dims[1] * e.dims[2];
+        node_extent[0] = node_extent[0].max(e.dims[0] as u32);
+        node_extent[1] = node_extent[1].max(e.dims[1] as u32);
     }
-    if nodes.is_empty() {
-        // A card refuses a buffer of no bytes; no column reads this word, because none has a lattice.
-        nodes.push(Gi::ZERO);
-    }
-
-    // One row per column: what the column pass said, and where its lattice sits.
-    let mut columns = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
-    let mut col = 0;
-    while col < setup.sites.len() {
-        let site = setup.sites[col];
-        let (h, biome) = setup.surfaces[col];
-        let mut row = Column {
-            dir: setup.dirs[col],
-            h,
-            biome: Gi::new(biome as i64),
+    if lattices.is_empty() {
+        // NO FACE: a block no site can name, so every column reads `has` as zero and carves no cave.
+        // One spare word stands in for the node buffer, which a card refuses to create empty.
+        lattices.push(NodeBlock {
+            face: Gi::new(NO_FACE),
             ..Default::default()
-        };
-        let mut b = 0;
-        while b < bases.len() {
-            let (face, base, lattice) = bases[b];
-            if face == site.face {
-                row.base = Gi::new(base as i64);
-                row.na = Gi::new(i64::from(node_of(site.i) - lattice.node0[0]));
-                row.nb = Gi::new(i64::from(node_of(site.j) - lattice.node0[1]));
-                row.d0 = Gi::new(lattice.dims[0] as i64);
-                row.d1 = Gi::new(lattice.dims[1] as i64);
-                row.wa = weight_of(site.i);
-                row.wb = weight_of(site.j);
-                row.has = Gi::ONE;
-                break;
-            }
-            b += 1;
-        }
-        columns.push(row);
-        col += 1;
+        });
+        node_z.push([Gi::ZERO; 2]);
+        node_count = 1;
+        node_extent = [1, 1];
+    }
+    // The corner radius of each radial node index — one row for every lattice of the box, because
+    // every lattice of a box stands on the same radial range.
+    let k_dims = topology
+        .lattices
+        .first()
+        .map_or(1, |e| e.dims[2]);
+    let mut node_radii = Vec::with_capacity(k_dims);
+    let mut nc = 0;
+    while nc < k_dims {
+        let k = (topology.node0[2] + nc as i32) * CAVERN_STRIDE as i32;
+        node_radii.push(Gi::new(body.ladder().corner_radius_steps(k, rung)));
+        nc += 1;
     }
 
     // One row per radial layer: its cell radius, its rule, and its own node and weight.
     let mut layers = Vec::with_capacity(BOX_EDGE);
     let mut c = -HALO;
     while c <= edge {
-        let k = setup.k0 + c;
+        let k = topology.k0 + c;
         let rule = if k < 0 {
             LAYER_BELOW
-        } else if k >= setup.band {
+        } else if k >= topology.band {
             LAYER_ABOVE
         } else {
             LAYER_EVALUATED
@@ -164,7 +194,7 @@ pub fn plan_in(body: &BodyDefinition, key: ChunkKey, column: &ColumnField) -> Bo
             rule: Gi::new(rule),
             // A skipped layer never reads a node, and its own would sit outside the lattice.
             node: if evaluated {
-                Gi::new(i64::from(node_of(k) - setup.node0[2]))
+                node_of(k) - Gi::new(i64::from(topology.node0[2]))
             } else {
                 Gi::ZERO
             },
@@ -173,28 +203,80 @@ pub fn plan_in(body: &BodyDefinition, key: ChunkKey, column: &ColumnField) -> Bo
         c += 1;
     }
 
-    let mut tubes = setup.tubes;
+    let mut tubes = topology.tubes;
     if tubes.is_empty() {
         tubes.push(Tube::default());
     }
-    BoxPlan {
+    Some(BoxPlan {
         key,
-        charter: setup.charter,
+        charter: topology.charter,
+        plan: body.plan_charter(rung, key.face),
         layers,
-        columns,
-        nodes,
+        sites: topology.sites,
+        lattices,
+        node_z,
+        node_radii,
+        node_count,
+        node_extent,
         tubes,
-        sites: setup.sites,
-        dirs: setup.dirs,
-    }
+    })
 }
 
+/// The face word of the stand-in lattice block: no face at all, so no column can name it.
+const NO_FACE: i64 = -1;
+
 impl BoxPlan {
-    /// THE PLAN RUN ON THIS HOST: every cell's word, in the box's packing order, through the same
-    /// kernels the card runs. The CPU's reference for a GPU's answer, and the fallback path on a
+    /// ★ THE TWO PASSES RUN ON THIS HOST — the column pass and the node pass, through the very
+    /// kernels the card runs. The CPU's reference for a card's answer, and the fallback path on a
     /// card the self-check refuses.
     #[must_use]
-    pub fn cells(&self) -> Vec<u32> {
+    pub fn run(&self) -> BoxRun {
+        let mut columns = Vec::with_capacity(self.sites.len());
+        let mut i = 0;
+        while i < self.sites.len() {
+            let s = self.sites[i];
+            columns.push(column_row(
+                &self.plan,
+                &self.lattices,
+                i32::from(s.face),
+                s.i,
+                s.j,
+            ));
+            i += 1;
+        }
+        let mut nodes = Vec::with_capacity(self.node_count);
+        for block in &self.lattices {
+            if block.face.raw() == NO_FACE {
+                nodes.push(Gi::ZERO);
+                continue;
+            }
+            let mut nc = 0;
+            while nc < block.dims[2].raw() {
+                let r = self.node_radii[nc as usize];
+                let mut nb = 0;
+                while nb < block.dims[1].raw() {
+                    let mut na = 0;
+                    while na < block.dims[0].raw() {
+                        nodes.push(node_value(
+                            &self.plan,
+                            block.face.raw() as i32,
+                            ((block.node0[0].raw() + na) * i64::from(CAVERN_STRIDE as i32)) as i32,
+                            ((block.node0[1].raw() + nb) * i64::from(CAVERN_STRIDE as i32)) as i32,
+                            r,
+                        ));
+                        na += 1;
+                    }
+                    nb += 1;
+                }
+                nc += 1;
+            }
+        }
+        BoxRun { columns, nodes }
+    }
+
+    /// THE CELL PASS on this host: every cell's word, in the box's packing order.
+    #[must_use]
+    pub fn cells_of(&self, run: &BoxRun) -> Vec<u32> {
         let edge = self.charter.box_edge.raw() as usize;
         let mut out = Vec::with_capacity(edge * edge * edge);
         let mut c = 0;
@@ -203,7 +285,7 @@ impl BoxPlan {
             while b < edge {
                 let mut a = 0;
                 while a < edge {
-                    out.push(self.cell(a, b, c));
+                    out.push(self.cell(run, a, b, c));
                     a += 1;
                 }
                 b += 1;
@@ -215,10 +297,10 @@ impl BoxPlan {
 
     /// One cell's word, by its place in the box — the body of the GPU's entry point, on this host.
     #[must_use]
-    pub fn cell(&self, a: usize, b: usize, c: usize) -> u32 {
+    pub fn cell(&self, run: &BoxRun, a: usize, b: usize, c: usize) -> u32 {
         let edge = self.charter.box_edge.raw() as usize;
         let layer = &self.layers[c];
-        let column = &self.columns[b * edge + a];
+        let column = &run.columns[b * edge + a];
         match layer.rule.raw() {
             LAYER_BELOW => below_cell_word(&self.charter),
             LAYER_ABOVE => above_cell_word(&self.charter, layer.r_steps << LENGTH_BITS),
@@ -230,16 +312,17 @@ impl BoxPlan {
                     biome: column.biome,
                     r_steps: layer.r_steps,
                 },
-                cavern_at(column, layer, &self.nodes),
+                cavern_at(column, layer, &run.nodes),
                 &self.tubes,
             ),
         }
     }
 
     /// The box a readback names: the same [`SampleBox`] the CPU's own cell pass builds, which the
-    /// extractor reads without ever learning which host wrote the cells.
+    /// extractor reads without ever learning which host wrote the cells. `dirs` is the column pass's
+    /// own answer — three words a column, from this host's run or from the card's.
     #[must_use]
-    pub fn box_of(&self, words: &[u32]) -> SampleBox {
+    pub fn box_of(&self, words: &[u32], dirs: &[[Gi; 3]]) -> SampleBox {
         let mut cells = Vec::with_capacity(words.len());
         let mut i = 0;
         while i < words.len() {
@@ -250,8 +333,14 @@ impl BoxPlan {
             key: self.key,
             cells,
             sites: self.sites.clone(),
-            dirs: self.dirs.clone(),
+            dirs: dirs.to_vec(),
         }
+    }
+
+    /// The column pass's directions, as [`BoxPlan::box_of`] wants them.
+    #[must_use]
+    pub fn dirs_of(run: &BoxRun) -> Vec<[Gi; 3]> {
+        run.columns.iter().map(|c| c.dir).collect()
     }
 
     /// The charter as [`CHARTER_WORDS`] words, in the `repr(C)` order the kernel reads.
@@ -295,40 +384,90 @@ impl BoxPlan {
         w
     }
 
-    /// The columns as [`COLUMN_WORDS`] words each.
+    /// The PLAN charter as [`PLAN_CHARTER_WORDS`] words, in the `repr(C)` order the two passes read.
     #[must_use]
-    pub fn column_words(&self) -> Vec<i64> {
-        let mut w = Vec::with_capacity(self.columns.len() * COLUMN_WORDS);
+    pub fn plan_charter_words(&self) -> Vec<i64> {
+        let p = &self.plan;
+        let b = &p.biome;
+        let mut w = vec![
+            p.seed as i64,
+            p.cavern_recip.raw(),
+            p.cavern_shift.raw(),
+            p.inv_n.raw(),
+            p.radius.raw(),
+            p.octave_count.raw(),
+            p.key_face.raw(),
+            b.sea_radius.raw(),
+            b.highland_above.raw(),
+            b.highland_recip.raw(),
+            b.highland_shift.raw(),
+        ];
+        for o in [&b.temperature, &b.humidity] {
+            w.extend(octave_words(o));
+        }
         let mut i = 0;
-        while i < self.columns.len() {
-            let c = &self.columns[i];
+        while i < p.octaves.len() {
+            w.extend(octave_words(&p.octaves[i]));
+            i += 1;
+        }
+        w
+    }
+
+    /// The columns' SITES as [`SITE_WORDS`] 32-bit words each: the face, the cell's two indices and
+    /// one word of padding, so a row is four words wide and the kernel indexes it by a shift.
+    #[must_use]
+    pub fn site_words(&self) -> Vec<i32> {
+        let mut w = Vec::with_capacity(self.sites.len() * SITE_WORDS);
+        let mut i = 0;
+        while i < self.sites.len() {
+            let s = self.sites[i];
+            w.extend([i32::from(s.face), s.i, s.j, 0]);
+            i += 1;
+        }
+        w
+    }
+
+    /// The cavern lattices as [`BLOCK_WORDS`] words each.
+    #[must_use]
+    pub fn lattice_words(&self) -> Vec<i64> {
+        let mut w = Vec::with_capacity(self.lattices.len() * BLOCK_WORDS);
+        let mut i = 0;
+        while i < self.lattices.len() {
+            let b = &self.lattices[i];
             w.extend([
-                c.dir[0].raw(),
-                c.dir[1].raw(),
-                c.dir[2].raw(),
-                c.h.raw(),
-                c.biome.raw(),
-                c.base.raw(),
-                c.na.raw(),
-                c.nb.raw(),
-                c.d0.raw(),
-                c.d1.raw(),
-                c.wa.raw(),
-                c.wb.raw(),
-                c.has.raw(),
+                b.face.raw(),
+                b.base.raw(),
+                b.node0[0].raw(),
+                b.node0[1].raw(),
+                b.node0[2].raw(),
+                b.dims[0].raw(),
+                b.dims[1].raw(),
+                b.dims[2].raw(),
             ]);
             i += 1;
         }
         w
     }
 
-    /// The cavern nodes as one word each.
+    /// The node dispatch's slice table as two words each: the lattice and the radial node index.
     #[must_use]
-    pub fn node_words(&self) -> Vec<i64> {
-        let mut w = Vec::with_capacity(self.nodes.len());
+    pub fn node_z_words(&self) -> Vec<i64> {
+        let mut w = Vec::with_capacity(self.node_z.len() * 2);
         let mut i = 0;
-        while i < self.nodes.len() {
-            w.push(self.nodes[i].raw());
+        while i < self.node_z.len() {
+            w.extend([self.node_z[i][0].raw(), self.node_z[i][1].raw()]);
+            i += 1;
+        }
+        w
+    }
+
+    /// The radial nodes' corner radii as one word each.
+    #[must_use]
+    pub fn node_radius_words(&self) -> Vec<i64> {
+        let mut w = Vec::with_capacity(self.node_radii.len());
+        let mut i = 0;
+        while i < self.node_radii.len() {
+            w.push(self.node_radii[i].raw());
             i += 1;
         }
         w
@@ -413,10 +552,12 @@ mod tests {
             ),
         ] {
             let plan = plan(&m, k).expect("the key is on the ladder");
-            let words = plan.cells();
+            let run = plan.run();
+            let words = plan.cells_of(&run);
             assert_eq!(words.len(), BOX_CELLS);
+            assert_eq!(run.nodes.len(), plan.node_count, "{k:?}: the node count");
             let want = sample_box(&m, k).expect("the box");
-            let got = plan.box_of(&words);
+            let got = plan.box_of(&words, &BoxPlan::dirs_of(&run));
             assert_eq!(got.cells, want.cells, "{k:?}: the cells");
             assert_eq!(got.sites, want.sites, "{k:?}: the sites");
             assert_eq!(got.dirs, want.dirs, "{k:?}: the directions");
@@ -435,13 +576,32 @@ mod tests {
             surface_chunk_z(&m, Face::PosX, 0, last, last),
         );
         let edge_plan = plan(&m, edge_key).expect("the edge chunk");
+        let edge_run = edge_plan.run();
         assert!(
-            edge_plan.columns.iter().any(|c| c.base > Gi::ZERO),
+            edge_plan.lattices.len() > 1,
+            "the box lays a partner face's lattice down"
+        );
+        assert!(
+            edge_run.columns.iter().any(|c| c.base > Gi::ZERO),
             "a column reads a partner face's lattice"
         );
         assert!(
-            edge_plan.columns.iter().any(|c| c.has == Gi::ZERO),
+            edge_run.columns.iter().any(|c| c.has == Gi::ZERO),
             "a corner phantom has no lattice"
+        );
+        // Every slice of the node dispatch names a lattice the plan holds, and the radii cover the
+        // radial range every lattice of the box shares.
+        for z in &edge_plan.node_z {
+            assert!((z[0].raw() as usize) < edge_plan.lattices.len());
+            assert!((z[1].raw() as usize) < edge_plan.node_radii.len());
+        }
+        assert_eq!(
+            edge_plan.node_z.len(),
+            edge_plan
+                .lattices
+                .iter()
+                .map(|b| b.dims[2].raw() as usize)
+                .sum::<usize>()
         );
     }
 
@@ -455,24 +615,45 @@ mod tests {
         assert_eq!(size_of::<Layer>(), LAYER_WORDS * 8);
         assert_eq!(size_of::<Column>(), COLUMN_WORDS * 8);
         assert_eq!(size_of::<Tube>(), TUBE_WORDS * 8);
+        assert_eq!(size_of::<PlanCharter>(), PLAN_CHARTER_WORDS * 8);
+        assert_eq!(size_of::<NodeBlock>(), BLOCK_WORDS * 8);
+        assert_eq!(size_of::<Octave>(), OCTAVE_WORDS * 8);
         let m = home_planet();
         let k = key(Face::PosX, 0, 300, 700, surface_chunk_z(&m, Face::PosX, 0, 300, 700));
         let plan = plan(&m, k).expect("the key is on the ladder");
         assert_eq!(plan.charter_words().len(), CHARTER_WORDS);
+        assert_eq!(plan.plan_charter_words().len(), PLAN_CHARTER_WORDS);
         assert_eq!(plan.layer_words().len(), BOX_EDGE * LAYER_WORDS);
-        assert_eq!(
-            plan.column_words().len(),
-            BOX_EDGE * BOX_EDGE * COLUMN_WORDS
-        );
+        assert_eq!(plan.site_words().len(), BOX_EDGE * BOX_EDGE * SITE_WORDS);
         assert_eq!(plan.tube_words().len(), plan.tubes.len() * TUBE_WORDS);
-        assert_eq!(plan.node_words().len(), plan.nodes.len());
-        assert!(!plan.nodes.is_empty(), "a card refuses an empty buffer");
+        assert_eq!(
+            plan.lattice_words().len(),
+            plan.lattices.len() * BLOCK_WORDS
+        );
+        assert_eq!(plan.node_z_words().len(), plan.node_z.len() * 2);
+        assert_eq!(plan.node_radius_words().len(), plan.node_radii.len());
+        assert!(plan.node_count > 0, "a card refuses an empty buffer");
         assert!(!plan.tubes.is_empty());
-        // The charter's own words, read back in the order the kernel reads them.
+        assert!(!plan.lattices.is_empty());
+        // The charters' own words, read back in the order the kernels read them.
         let w = plan.charter_words();
         assert_eq!(w[0], plan.charter.sea_radius.raw());
         assert_eq!(w[13], i64::from(BOX_EDGE as u32));
         assert_eq!(w[CHARTER_WORDS - 1], plan.charter.strata[3].raw());
+        let p = plan.plan_charter_words();
+        assert_eq!(p[0], plan.plan.seed as i64);
+        assert_eq!(p[6], plan.plan.key_face.raw());
+        assert_eq!(p[10], plan.plan.biome.highland_shift.raw());
+        assert_eq!(p[11], plan.plan.biome.temperature.seed as i64);
+        assert_eq!(
+            p[PLAN_CHARTER_WORDS - 1],
+            plan.plan.octaves[OCTAVES_CAP - 1].amplitude.raw()
+        );
+        // The site rows, read back as the kernel reads them.
+        let s = plan.site_words();
+        assert_eq!(s[0], i32::from(plan.sites[0].face));
+        assert_eq!(s[1], plan.sites[0].i);
+        assert_eq!(s[2], plan.sites[0].j);
     }
 
     /// ★ A COARSE RUNG CARVES NO CAVES, so no column has a lattice and the spare word stands in —
@@ -483,11 +664,18 @@ mod tests {
         let rung = 8u8;
         let k = key(Face::PosY, rung, 1, 1, surface_chunk_z(&m, Face::PosY, rung, 1, 1));
         let plan = plan(&m, k).expect("the key is on the ladder");
-        assert_eq!(plan.nodes.len(), 1, "one spare word, no lattice");
-        assert!(plan.columns.iter().all(|c| c.has == Gi::ZERO));
+        let run = plan.run();
+        assert_eq!(plan.node_count, 1, "one spare word, no lattice");
+        assert_eq!(run.nodes.len(), 1);
+        assert_eq!(plan.lattices.len(), 1, "one block of NO FACE");
+        assert_eq!(plan.lattices[0].face.raw(), NO_FACE);
+        assert!(run.columns.iter().all(|c| c.has == Gi::ZERO));
         assert_eq!(plan.tubes.len(), 1, "one carver of no radius");
         assert_eq!(plan.tubes[0], Tube::default());
         let want = sample_box(&m, k).expect("the box");
-        assert_eq!(plan.box_of(&plan.cells()).cells, want.cells);
+        assert_eq!(
+            plan.box_of(&plan.cells_of(&run), &BoxPlan::dirs_of(&run)).cells,
+            want.cells
+        );
     }
 }

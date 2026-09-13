@@ -22,9 +22,11 @@ use crate::strata::{Bedrock, StrataTable, Stratum};
 use crate::units::{LENGTH_BITS, STEPS_PER_M};
 use vd_recipe::Gi;
 use vd_recipe::bend::inv_n_of;
-use vd_recipe::height::{AMP_BITS, Octave};
+use vd_recipe::height::{AMP_BITS, BiomeCharter, Octave};
 use vd_recipe::noise::NOISE_BITS;
 use vd_recipe::root::recip_pow2;
+use vd_recipe::plan::PlanCharter;
+use vd_seed::bend::Face;
 use vd_seed::ladder::Ladder;
 use vd_seed::rng::{SplitMix64, child_seed};
 
@@ -393,6 +395,48 @@ impl BodyDefinition {
             caves,
             biome,
         })
+    }
+
+    /// ★ THE BIOME CHARTER — the biome field's own numbers as the recipe's kernel reads them. One
+    /// source: `crate::height::biome_of` hands this row to `vd_recipe::height::biome_of`, and so
+    /// does the card's column pass, so the shard and the picture name one biome per column.
+    #[must_use]
+    pub fn biome_charter(&self) -> BiomeCharter {
+        BiomeCharter {
+            sea_radius: self.sea_radius,
+            highland_above: self.biome.highland_above,
+            highland_recip: self.biome.highland_recip,
+            highland_shift: Gi::new(i64::from(RADIUS_RECIP_BITS - NOISE_BITS)),
+            temperature: self.biome.temperature,
+            humidity: self.biome.humidity,
+        }
+    }
+
+    /// ★ THE PLAN CHARTER at a rung, for a chunk of `key_face` — everything the COLUMN PASS and the
+    /// NODE PASS read that is not a column's or a node's own address (`vd_recipe::plan`). The host
+    /// draws it once per box and the card runs both passes from it, so a box's request carries its
+    /// key and this row and nothing else.
+    ///
+    /// **Example.** The home planet at rung 0 for a chunk on face `+X`: fourteen live octaves, the
+    /// cell-count reciprocal of that rung, the cavern wavelength's reciprocal, and `+X`'s own index
+    /// — which is the basis a corner phantom of that chunk stands on.
+    #[must_use]
+    pub fn plan_charter(&self, rung: u8, key_face: Face) -> PlanCharter {
+        PlanCharter {
+            seed: self.seed,
+            cavern_recip: self.caves.cavern_recip,
+            // The point is 128 times the metres, so the shift takes those seven bits back out along
+            // with the reciprocal's own — the same shift `crate::carve::cavern_value` states.
+            cavern_shift: Gi::new(i64::from(
+                CAVERN_RECIP_BITS - NOISE_BITS + crate::units::STEPS_PER_M.trailing_zeros(),
+            )),
+            inv_n: self.inv_n(rung),
+            radius: self.radius,
+            octave_count: Gi::new(self.octaves_at(rung).len() as i64),
+            key_face: Gi::new(i64::from(key_face.index())),
+            biome: self.biome_charter(),
+            octaves: self.octaves,
+        }
     }
 
     /// The live octaves at rung `rung`: the coarsest `octave_count − rung`, never fewer than one.

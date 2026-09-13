@@ -22,7 +22,7 @@
 
 use crate::body::{BodyDefinition, CAVERN_RECIP_BITS};
 use vd_recipe::Gi;
-use vd_recipe::noise::{NOISE_BITS, NOISE_ONE, unit_value, value3};
+use vd_recipe::noise::{NOISE_BITS, NOISE_ONE, unit_value};
 use vd_recipe::root::recip_pow2;
 
 /// ★ THE TUBE CARVER IS THE RECIPE'S OWN (ruling F7, step G1): the segment, its radius, its stored
@@ -60,20 +60,15 @@ pub fn cell_steps(rung: u8) -> Gi {
 
 /// The cavern field's raw value at a point in the body's frame, in `[0, 1)` at the noise's fraction
 /// bits. The lattice point is the point in gap steps times the wavelength's reciprocal.
+///
+/// ★ ONE SOURCE (step G2-A): the arithmetic is `vd_recipe::plan::cavern_value`, the kernel the
+/// card's NODE PASS runs, so a room the shard collides with is the room the card draws.
 #[must_use]
 pub fn cavern_value(body: &BodyDefinition, point_steps: [Gi; 3]) -> Gi {
-    let recip = body.caves.cavern_recip;
     // point_m / λ at NOISE_BITS: the point is 128 times the metres, so the shift takes those seven
     // bits back out along with the reciprocal's own.
     let shift = CAVERN_RECIP_BITS - NOISE_BITS + crate::units::STEPS_PER_M.trailing_zeros();
-    value3(
-        body.seed,
-        [
-            point_steps[0].mul_shr(recip, shift),
-            point_steps[1].mul_shr(recip, shift),
-            point_steps[2].mul_shr(recip, shift),
-        ],
-    )
+    vd_recipe::plan::cavern_value(body.seed, body.caves.cavern_recip, shift, point_steps)
 }
 
 /// The tube region a point falls in: a cube of the body's tube region edge, indexed by the shift the

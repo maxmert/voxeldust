@@ -339,3 +339,153 @@ it is SLOWER end to end than the terrain's share of this machine's cores (3.93 m
 1.24 ms); wiring it into the worker pool would be a measured regression, and it would also have
 worker threads submitting to — and waiting on — the same device the renderer draws with. The
 design of that wiring, and the seams it needs, are in the G1 row of the design document's §2.
+
+## Part 6 — THE PLAN ON THE CARD (step G2-A, 2026-09-13)
+
+**What runs.** The two passes that stood IN FRONT of the cell field moved onto the card, so a box's
+request now carries its KEY and its CHARTER and nothing else that has to be computed:
+
+- **the COLUMN PASS** (`vd_recipe::plan::column_row`, the shell's `column_pass`): one invocation per
+  column of the box. It reads the column's SITE — which face it belongs to and its cell there, or a
+  corner phantom — and writes the direction (the 40-bit bend, the corner phantom's normalise
+  included), the surface's radius (the octave sum) and the BIOME (`vd_recipe::height::biome_of`,
+  moved into the recipe by this step), plus where the column's cavern lattice sits.
+- **the NODE PASS** (`vd_recipe::plan::node_value`, the shell's `node_pass`): one invocation per node
+  of the box's cavern lattices — the node's own direction and the value noise at its point.
+- **the CELL FIELD** then reads the column buffer and the node buffer THE CARD ITSELF FILLED.
+
+Three compute passes, ONE command encoder, one submit, one wait. (Three passes, not three dispatches
+of one pass: a buffer the column pass WRITES is a buffer the cell pass READS, and one compute pass
+may not hold both usages of one buffer.)
+
+What the HOST still does is TOPOLOGY only: `site_of` for the box's 4 096 columns, the nine
+directions the carver list reads, the lattice extents, the layer rows, the slice table and the
+radial radii. What crosses the bus upward is about 80 kB instead of half a megabyte; what comes back
+is the cells and the columns' DIRECTIONS, which the CPU's extractor places its vertices along.
+
+**THE RESULT — 0 cells differ, and 0 DIRECTIONS differ.** The two sets of part 5 (the eight golden
+chunks and the square of 1 024) plus A THIRD SET THIS STEP ADDED — **the seams**.
+
+| the set | boxes | cells | cells differing | directions differing |
+|---|---|---|---|---|
+| the eight golden chunks | 8 | 2 097 152 | **0** | **0** |
+| the square, face +X rung 0 | 1 024 | 268 435 456 | **0** | **0** |
+| ★ the seams (below) | 48 | 12 582 912 | **0** | **0** |
+| **all three** | **1 080** | **283 115 520** | **0** | **0** |
+
+The three pin legs are green, so no byte of the world moved.
+
+★ **WHY THE SEAMS ARE A NEW SET.** Neither the golden chunks nor the square stands at a FACE'S
+EDGE, so neither ever holds a column of a PARTNER face or a CORNER PHANTOM — exactly the two arms
+the column kernel newly carries, and the arms that reach a second cavern lattice and the phantom's
+own normalise. The set is the four corner chunks of every face at rung 0 and at the coarsest rung:
+**48 boxes, and all 48 hold BOTH a partner face's columns and a corner phantom** (MEASURED; the
+part goes red if that count ever falls to zero, as the carver count does).
+
+★ **AND WHY THE DIRECTIONS ARE COMPARED, not only the cells they end up in.** A direction that
+differs in its last bit can still pack the same cell byte, and the extractor places every vertex
+along that direction. The column kernel's first run proved the point: it wrote every direction 1.22
+times too long and the cells caught it only partly (1 563 810 of 2 097 152 differed).
+
+**THE COST (Apple M4 Pro, Metal, release), the 1 024 boxes of the square — the run of 2026-09-13
+after the CPU legs were levelled (below).**
+
+★ **READ THESE TO TWO FIGURES.** Two GPU passes over the SAME 1 024 boxes in ONE run read 1 821 ms
+and 2 074 ms — **13 % apart** — and the readback reading spans 218 ms across runs. The spread is
+the machine's, not the code's. Every number below is therefore quoted as ABOUT, and the reading
+that carries the ruling is a gap of about a third, which is wider than any spread observed.
+
+| the path | the whole | per box | at step G1 |
+|---|---|---|---|
+| the GPU, first pass (the pipeline's own compilation included) | 1 821 ms | ~1.8 ms | 3.76 ms |
+| the GPU, second pass (the plans, the upload, the readback) | 2 074 ms | **~2.0 ms** | 3.93 ms |
+| …of which THE PLANS on the CPU (topology only now) | 58 ms | **~0.06 ms** | 2.14 ms |
+| …of which the card's own share | 2 016 ms | ~1.9 ms | 1.79 ms |
+| the same three passes WITHOUT the readback | 1 965 ms | ~1.9 ms | — |
+| the CPU's own `sample_box`, ONE core | 3 791 ms | ~3.7 ms | 3.53 ms |
+| the CPU's own `sample_box`, THREE workers (this machine's share, F6) | 1 294 ms | **~1.26 ms** | 1.24 ms |
+
+**THE HOST'S PLAN FELL ABOUT 38 TIMES** — 2.14 ms a box to about 0.06 ms — which is what this step
+set out to do, and the whole GPU path fell from 3.93 ms a box to about 2.0 ms.
+
+★ **AND THE THREE CPU LEGS ARE NOW MEASURED ALIKE.** The first version of this part did not compare
+like with like, in three ways, each of which moved one leg against another: the ONE-CORE leg ran 64
+boxes and multiplied by sixteen while every GPU leg ran all 1 024; the WORKERS' leg drew the body
+from its seed INSIDE the timed scope, once per worker; and the bodies the legs read were different
+objects. Every leg now runs the same 1 024 keys and every body is drawn before any clock starts.
+What the correction bought is TRUST, not a different verdict: the extrapolated one-core figure read
+4 107 ms and the measured one reads 3 791 ms, but that leg has read 3 341, 3 791, 3 872 and 4 107 ms
+across runs, so the change sits inside its own spread and nothing may be claimed from the direction.
+What CAN be claimed is the shape: the one-core leg is now 2.93 times the three-worker leg, which is
+what three workers should give, and every leg now answers the same question about the same 1 024
+boxes.
+
+### ★ AND THE MEASUREMENT THAT STOPS G2: THE READBACK IS NOT THE COST
+
+G2 (the extraction on the card) was designed to pay by removing the megabyte of cells from the bus.
+This part measured that megabyte directly, by running the same three passes with nothing copied home
+(`dispatch_box_compute_only`). **Five runs, each of 1 024 boxes: the readback read 218 ms, −17 ms,
+15 ms, 106 ms and 109 ms out of a whole path of about 2 070 ms.** The readings STRADDLE ZERO, so the
+measurement cannot separate the readback from its own noise. What it DOES bound is the size: **the
+LARGEST reading is a tenth of the path — about 0.2 ms a box — and the rest are nearer nothing.**
+
+★ **AND THE CONCLUSION HOLDS AT THAT TENTH, which is why the bound is the honest number to quote.**
+Take the largest reading at face value, hand the whole of it to G2, and the card's share is still
+about 1.8 ms a box against the three-worker share's 1.26 ms. A tenth of 2.0 ms does not close 2.0
+against 1.26. (Quoting the smallest reading as "0.7 %" would have made the same point with a digit
+the measurement does not support; the bound makes it with one it does.)
+
+So the wall is THE CARD'S OWN ARITHMETIC: about 1.9 ms a box, of which the columns and the nodes
+are about 0.14 ms (part 4's rate) and the cell field the rest. The card computes a cell in about
+7 ns against one CPU core's 14 ns: **the card is worth about two of this machine's cores on this
+kernel, and the terrain's share is three.** The reason is visible in the recipe itself — every step
+is a 64-bit integer multiply, which Metal has no native instruction for and lowers to 32-bit pieces.
+
+**READ IT PLAINLY: G2 CANNOT MAKE THE CHAIN PAY.** Its own lever (the readback) is AT MOST a tenth
+of the path, and the gap to the CPU share is ABOUT A THIRD. Extracting on the card would ADD card
+work, not remove it. The chain's throughput would be about 490 boxes a second against the three
+workers' about 790, and it would want most of the card — which the renderer needs for the picture.
+
+**WHAT THE CHAIN DOES BUY, and what the owner must weigh.** The GPU path costs the HOST 0.056 ms a
+box. The CPU path costs THREE WHOLE CORES. Ruling F6 says the terrain gets a share of the cores and
+the rest belong to the game that is not built yet. So the trade on this machine is:
+
+| | chunks a second | the CPU it costs | the card it costs |
+|---|---|---|---|
+| the CPU workers (today) | about 790 boxes | 3 cores of 14 | nothing |
+| the GPU chain (G2-A) | about 490 boxes | about 0.03 of ONE core | about all of it at full rate |
+
+That is roughly three fifths of the throughput for under 1 % of the CPU — and the card is then
+unavailable to draw. It
+is a real choice and not a measurement, so it goes to the owner rather than into the client.
+
+### One more kernel fault, and the rule it confirmed for the third time
+
+The column pass's first run wrote every direction 1.22 times too long: all 32 768 columns of the
+eight golden boxes differed, in the same proportion on all three components. `bend::recip_sqrt`
+summed the three squares in a `while` loop whose body ASSIGNED the two-word accumulator
+(`(s_hi, s_lo) = add_wide(…)`), and on the card that value came back ONE STEP STALE — the third
+component's square was missing, and `S_partial / S_true` is exactly the 0.671 the ratio named. The
+three steps are written out now.
+
+This is the third instance of the same rule (the design's §1b: *a loop may carry a value out ONLY by
+adding to it*), and the first where the accumulator was a TUPLE the body re-binds rather than a
+single word. The fault was found in one run because the part now compares the column pass's own
+DIRECTIONS, not only the cells they end up in — a direction that differs in its last bit can still
+pack the same cell byte.
+
+### What step G2-A did NOT land
+
+The client's chunk builder still runs on the CPU workers, for the reason measured above. The two
+seams the wiring would need are still unproven: a worker thread submitting to the device the
+renderer draws with, and `device.poll(wait)` from a worker while the renderer submits.
+
+### An incidental measurement: the picture gate's own noise
+
+The gate passes, and it does NOT deliver "0 pixels differ". Two runs of the same binary on the same
+code read ground 9 then 7, hill 0 then 10, aloft 10 then 0, orbit 19 then 18, seam 13 then 13
+content pixels differing, every one at a widest channel step of ONE — and the second run compared
+against the pictures the FIRST run had just written. The residual is the gate's own run-to-run noise
+(the probe's terrain and its ruler), which its one-level tolerance absorbs. A count of a few pixels
+there proves nothing about the world; `terrain-pin` and `mesh_pin` are the byte gates, and they are
+green.

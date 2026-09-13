@@ -23,6 +23,12 @@
 //! ONE kernel over a list of words, because a box of a quarter of a million cells can only say that
 //! something differs, and a probe says which function does.
 //!
+//! ★ PART 6 (step G2-A, 2026-09-13) GREW PART 5 INTO THE WHOLE CHAIN: the COLUMN pass and the NODE
+//! pass now run on the card in front of the cell field, so the host uploads TOPOLOGY only. The part
+//! compares the columns' own DIRECTIONS as well as the cells — a direction that differs in its last
+//! bit can still pack the same cell byte — and it times the same three passes WITHOUT the readback,
+//! which is the number that says whether the bus or the card's arithmetic is the cost.
+//!
 //! Run: `just recipe-gpu` first, then
 //! `VD_RECIPE_SPV=target/recipe-gpu/vd_recipe_gpu.spv cargo run --release -p vd-bins --features \
 //! render --example integer_bench` (`VD_BENCH_PART5=1` measures part 5 alone).
@@ -396,18 +402,10 @@ fn part_5_the_cell_field(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
     // names the fault in one function where a box of a quarter of a million cells names only that
     // something differs (both found a real one on 2026-09-13: the root's loop and the carvers').
     probe_isqrt(device, queue, &spv);
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("cell_field"),
-        source: wgpu::util::make_spirv(&spv),
-    });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("cell_field"),
-        layout: None,
-        module: &module,
-        entry_point: Some("cell_field"),
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-        cache: None,
-    });
+    // ★ THE WHOLE CHAIN (step G2-A): the column pass, the node pass and the cell field, three
+    // compute passes in one command encoder, one submit, one readback — the CLIENT's own chain,
+    // built from the module its build script compiled, so the bench measures the shipped path.
+    let pipeline = BoxPipelines::new(device);
 
     // THE EIGHT GOLDEN CHUNKS: the keys the world identity folds, at the rungs they name.
     let golden: Vec<ChunkKey> = GOLDEN_SELF_CHECK_KEYS
@@ -466,6 +464,68 @@ fn part_5_the_cell_field(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
         std::process::exit(1);
     }
 
+    // ★ PART 6's OWN SET: THE BOXES THAT CROSS A SEAM. Neither the golden chunks nor the square
+    // stands at a face's edge (MEASURED: every one of the 1 032 lays down ONE lattice), so the
+    // column pass's two hardest cases — a column that belongs to a PARTNER face, and a CORNER
+    // PHANTOM that belongs to none — were never compared on the card. These are the last chunk of
+    // each face at rung 0 and at the coarsest rung, where a box holds all three.
+    let last0 = (body.ladder().cells_per_edge(RUNG) as i32 - 1) / CHUNK_EDGE as i32;
+    let top = body.ladder().rungs - 1;
+    let last_top = (body.ladder().cells_per_edge(top) as i32 - 1) / CHUNK_EDGE as i32;
+    let mut seams: Vec<ChunkKey> = Vec::new();
+    for face in Face::ALL {
+        for (rung, last) in [(RUNG, last0), (top, last_top)] {
+            for (x, y) in [(last, last), (0, last), (last, 0), (0, 0)] {
+                let key = ChunkKey {
+                    face,
+                    rung,
+                    x,
+                    y,
+                    z: surface_chunk_z(body, face, rung, x, y),
+                };
+                if in_ladder(body, key) {
+                    seams.push(key);
+                }
+            }
+        }
+    }
+    let crossing = seams
+        .iter()
+        .filter(|k| {
+            vd_terrain::gpu::plan(body, **k).is_some_and(|p| {
+                p.sites.iter().any(|s| s.face != k.face.index())
+                    && p.sites.iter().any(|s| s.face == vd_terrain::lattice::CORNER_FACE)
+            })
+        })
+        .count();
+    let (differing, first, _, _) = compare_boxes(device, queue, &pipeline, body, &seams);
+    println!(
+        "integer_bench: PART 6 THE SEAMS — {} boxes at the faces' edges ({} of them hold BOTH a \
+         partner face's columns and a corner phantom): {differing} cells or directions differ \
+         between the CPU and the GPU{}",
+        seams.len(),
+        crossing,
+        first
+    );
+    if differing > 0 {
+        std::process::exit(1);
+    }
+    // ★ THE SEAM PATH IS ACTUALLY WALKED, for the same reason the carvers are: a set that never
+    // crossed would pass every assertion above and leave the partner lattice and the phantom's
+    // normalise uncompared on the card.
+    // EVERY box of the set must cross, not merely one: the set IS the faces' corner chunks, so a
+    // box of it that held no partner column or no phantom would mean the set is no longer the set
+    // this part names, and the docs' claim of 48 of 48 would be quietly false.
+    if crossing != seams.len() {
+        println!(
+            "integer_bench: PART 6 — only {crossing} of {} boxes cross a seam, so the column \
+             pass's partner-face and corner-phantom arms are not compared on the GPU by the whole \
+             set — STOP",
+            seams.len()
+        );
+        std::process::exit(1);
+    }
+
     // The GPU a second time: the first pass paid the pipeline's own compilation.
     let started = Instant::now();
     let mut second_plans = 0.0_f64;
@@ -473,27 +533,43 @@ fn part_5_the_cell_field(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
         let at = Instant::now();
         let plan = vd_terrain::gpu::plan(body, *key).expect("the key is on the ladder");
         second_plans += at.elapsed().as_secs_f64();
-        let _ = cell_field_pass(device, queue, &pipeline, &plan);
+        let _ = box_pass(device, queue, &pipeline, &plan);
     }
     let gpu_second = started.elapsed().as_secs_f64();
 
-    // The CPU's own box, on one core and on the terrain's share of the cores (ruling F6).
+    // ★ THE READBACK'S OWN SHARE: the same three passes, submitted and waited for, with nothing
+    // copied home. The difference against the line above is the megabyte crossing the bus — the
+    // cost step G2 removes by extracting the mesh on the card.
     let started = Instant::now();
-    for key in &square[..64] {
-        let _ = vd_terrain::lattice::sample_box(body, *key).expect("the box");
+    for key in &square {
+        let plan = vd_terrain::gpu::plan(body, *key).expect("the key is on the ladder");
+        vd_client_render::gpu_check::dispatch_box_compute_only(device, queue, &pipeline, &plan);
     }
-    let cpu_one_core = started.elapsed().as_secs_f64() * (square.len() as f64 / 64.0);
+    let gpu_no_readback = started.elapsed().as_secs_f64();
+
+    // ★ THE CPU'S OWN BOX, on one core and on the terrain's share of the cores (ruling F6) — and
+    // MEASURED THE WAY THE GPU LEGS ARE. Three things the first version of this part did not do,
+    // each of which flattered or punished one leg against another: the one-core leg ran 64 boxes
+    // and multiplied by sixteen while the GPU legs ran all 1 024; the workers' leg DREW THE BODY
+    // FROM ITS SEED inside the timed scope, once per worker; and the body each leg read was a
+    // different object. Now every leg runs the same 1 024 keys, and every body is drawn before any
+    // clock starts.
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let workers = vd_client_render::terrain::worker_share(cores);
+    let bodies: Vec<BodyDefinition> = (0..workers).map(|_| home_planet()).collect();
+    let started = Instant::now();
+    for key in &square {
+        let _ = vd_terrain::lattice::sample_box(body, *key).expect("the box");
+    }
+    let cpu_one_core = started.elapsed().as_secs_f64();
     let started = Instant::now();
     std::thread::scope(|scope| {
-        for w in 0..workers {
+        for (w, own) in bodies.iter().enumerate() {
             let keys = &square;
             scope.spawn(move || {
-                let body = home_planet();
                 let mut i = w;
                 while i < keys.len() {
-                    let _ = vd_terrain::lattice::sample_box(&body, keys[i]).expect("the box");
+                    let _ = vd_terrain::lattice::sample_box(own, keys[i]).expect("the box");
                     i += workers;
                 }
             });
@@ -503,15 +579,18 @@ fn part_5_the_cell_field(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
     println!(
         "integer_bench: PART 5 THE COST — {} boxes: the GPU {:.0} ms on the first pass (with the \
          pipeline's compilation) and {:.0} ms on the second, both with the plans, the upload and \
-         the readback; of the second pass the PLANS on the CPU are {:.0} ms (the column pass, the \
-         cavern nodes, the carvers — step G2's work) and the card's own share is {:.0} ms. The \
-         CPU's own sample_box: {:.0} ms on one core, {:.0} ms on {workers} workers (the terrain's \
-         share of this machine).",
+         the readback; of the second pass the PLANS on the CPU are {:.0} ms (the sites, the \
+         carvers, the lattice extents and the layers — TOPOLOGY only since step G2-A) and the \
+         card's own share is {:.0} ms. WITHOUT THE READBACK the same three passes take {:.0} ms, so \
+         the bus carries {:.0} ms of it. The CPU's own sample_box: {:.0} ms on one core, {:.0} ms \
+         on {workers} workers (the terrain's share of this machine).",
         square.len(),
         gpu * 1.0e3,
         gpu_second * 1.0e3,
         second_plans * 1.0e3,
         (gpu_second - second_plans) * 1.0e3,
+        gpu_no_readback * 1.0e3,
+        (gpu_second - gpu_no_readback) * 1.0e3,
         cpu_one_core * 1.0e3,
         cpu_workers * 1.0e3
     );
@@ -524,7 +603,7 @@ fn part_5_the_cell_field(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
 fn compare_boxes(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    pipeline: &wgpu::ComputePipeline,
+    pipeline: &BoxPipelines,
     body: &BodyDefinition,
     keys: &[ChunkKey],
 ) -> (usize, String, f64, usize) {
@@ -532,10 +611,11 @@ fn compare_boxes(
     let mut first = String::new();
     let mut seconds = 0.0_f64;
     let mut with_carvers = 0usize;
+    let mut differing_dirs = 0usize;
     for key in keys {
         let started = Instant::now();
         let plan = vd_terrain::gpu::plan(body, *key).expect("the key is on the ladder");
-        let gpu = cell_field_pass(device, queue, pipeline, &plan);
+        let (gpu, gpu_dirs) = box_pass(device, queue, pipeline, &plan);
         seconds += started.elapsed().as_secs_f64();
         with_carvers += usize::from(
             plan.tubes
@@ -543,6 +623,28 @@ fn compare_boxes(
                 .any(|t| t.radius_steps > vd_recipe::Gi::ZERO),
         );
         let want = vd_terrain::lattice::sample_box(body, *key).expect("the box");
+        // ★ THE COLUMN PASS ITSELF, not only its consequence: the directions the card wrote against
+        // the ones the host's own column pass writes. A cell word folds the direction through the
+        // whole cell kernel, so a direction that differs in its last bit could still pack the same
+        // byte; this compares the words.
+        for (i, d) in want.dirs.iter().enumerate() {
+            if *d != gpu_dirs[i] {
+                if differing_dirs == 0 {
+                    println!(
+                        "integer_bench: PART 6 — the first differing direction at {key:?} column \
+                         {i} (site {:?}): the CPU says [{}, {}, {}], the GPU says [{}, {}, {}]",
+                        want.sites[i],
+                        d[0].raw(),
+                        d[1].raw(),
+                        d[2].raw(),
+                        gpu_dirs[i][0].raw(),
+                        gpu_dirs[i][1].raw(),
+                        gpu_dirs[i][2].raw(),
+                    );
+                }
+                differing_dirs += 1;
+            }
+        }
         for (i, cell) in want.cells.iter().enumerate() {
             let cpu = vd_recipe::cell::pack(
                 vd_recipe::Gi::new(i64::from(cell.stratum.code())),
@@ -558,35 +660,34 @@ fn compare_boxes(
                         cell.gap,
                         vd_recipe::cell::stratum_of_word(gpu[i]),
                         vd_recipe::cell::gap_of_word(gpu[i]),
-                        why(device, queue, pipeline, &plan, i, &gpu)
+                        why(&plan, i, &gpu)
                     );
                 }
             }
         }
     }
+    if differing_dirs > 0 {
+        println!(
+            "integer_bench: PART 6 — {differing_dirs} COLUMN DIRECTIONS differ between the card's \
+             column pass and the host's"
+        );
+        differing += differing_dirs;
+    }
     (differing, first, seconds, with_carvers)
 }
 
-/// WHY one cell differs: what the plan states about it, what the two carvers open there, and
-/// whether the card answers the same way twice. A diagnosis, never a gate.
-fn why(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipeline: &wgpu::ComputePipeline,
-    plan: &vd_terrain::gpu::BoxPlan,
-    index: usize,
-    gpu: &[u32],
-) -> String {
+/// WHY one cell differs: what the plan states about it and what the two carvers open there, on this
+/// host. A diagnosis, never a gate.
+fn why(plan: &vd_terrain::gpu::BoxPlan, index: usize, gpu: &[u32]) -> String {
     let edge = BOX_EDGE;
     let (a, b, c) = (index % edge, (index / edge) % edge, index / (edge * edge));
+    let run = plan.run();
     let layer = &plan.layers[c];
-    let column = &plan.columns[b * edge + a];
-    let value = vd_recipe::cell::cavern_at(column, layer, &plan.nodes);
+    let column = &run.columns[b * edge + a];
+    let value = vd_recipe::cell::cavern_at(column, layer, &run.nodes);
     let point = vd_recipe::cell::point_at(column.dir, layer.r_steps);
     let cavern = plan.charter.cavern_hollow_steps(value);
     let tube = vd_recipe::cell::tube_hollow_steps(&plan.tubes, point);
-    let again = cell_field_pass(device, queue, pipeline, plan);
-    let twice = gpu == again.as_slice();
     let no_tubes = vd_recipe::cell::cell_word(
         &plan.charter,
         &vd_recipe::cell::CellAt {
@@ -613,8 +714,7 @@ fn why(
         " [at (a {a}, b {b}, c {c}); the layer: rule {} r_steps {} node {} weight {}; the column: \
          h {} biome {} has {} base {} na {} nb {} d0 {} d1 {} wa {} wb {}; the cavern value {} \
          opens {} steps, the {} carvers open {} steps; without the carvers the CPU word is {} \
-         (tubes off) and {} (cavern off) against {}; the card answers the same way twice: {twice}; \
-         the plan holds {} nodes]",
+         (tubes off) and {} (cavern off) against {}; the plan holds {} nodes]",
         layer.rule.raw(),
         layer.r_steps.raw(),
         layer.node.raw(),
@@ -636,83 +736,14 @@ fn why(
         no_tubes,
         no_cavern,
         gpu[index],
-        plan.nodes.len(),
+        run.nodes.len(),
     )
 }
 
-/// One compute pass of the cell field: the plan's six buffers up, one word per cell back.
-fn cell_field_pass(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipeline: &wgpu::ComputePipeline,
-    plan: &vd_terrain::gpu::BoxPlan,
-) -> Vec<u32> {
-    let edge = BOX_EDGE as u32;
-    let cells = (edge * edge * edge) as u64;
-    let out_size = cells * 4;
-    let storage = |words: &[i64]| {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: &as_bytes_i64(words),
-            usage: wgpu::BufferUsages::STORAGE,
-        })
-    };
-    let charter = storage(&plan.charter_words());
-    let layers = storage(&plan.layer_words());
-    let columns = storage(&plan.column_words());
-    let nodes = storage(&plan.node_words());
-    let tubes = storage(&plan.tube_words());
-    let out = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: out_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: out_size,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let buffers = [&charter, &layers, &columns, &nodes, &tubes, &out];
-    let entries: Vec<wgpu::BindGroupEntry> = buffers
-        .iter()
-        .enumerate()
-        .map(|(i, b)| wgpu::BindGroupEntry {
-            binding: i as u32,
-            resource: b.as_entire_binding(),
-        })
-        .collect();
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: None,
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &entries,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(edge.div_ceil(64), edge, edge);
-    }
-    encoder.copy_buffer_to_buffer(&out, 0, &staging, 0, out_size);
-    queue.submit([encoder.finish()]);
-    let slice = staging.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        tx.send(r).expect("the receiver waits");
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("the device polls");
-    rx.recv().expect("a map result").expect("the map succeeds");
-    let bytes = slice.get_mapped_range().to_vec();
-    staging.unmap();
-    bytes
-        .chunks_exact(4)
-        .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
-        .collect()
-}
+/// ★ THE WHOLE CHAIN OF ONE BOX (step G2-A) is `vd_client_render::gpu_check::dispatch_box` — the
+/// SAME call the client's own self-check runs and the client's builder will run, so the bench
+/// measures the shipped path and not an instrument beside it.
+use vd_client_render::gpu_check::{BoxChain as BoxPipelines, dispatch_box as box_pass};
 
 // ---------------------------------------------------------------- part 4: the one source
 

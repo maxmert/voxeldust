@@ -264,7 +264,7 @@ pub fn direction(face: Face, a: f64, b: f64) -> [f64; 3] {
 /// stays beside it for the inverse path until its integer form lands.
 #[must_use]
 pub fn direction_q(face: Face, i: i32, j: i32, inv_n: vd_recipe::Gi) -> [vd_recipe::Gi; 3] {
-    vd_recipe::bend::direction(face.index(), i, j, inv_n)
+    vd_recipe::bend::direction(i32::from(face.index()), i, j, inv_n)
 }
 
 /// `v / |v|`, one square root and one divide per component, in this order.
@@ -523,13 +523,17 @@ mod tests {
             Face::NegZ,
         ] {
             let b = face.basis();
-            let r = vd_recipe::bend::BASIS[face.index() as usize];
+            // ★ THE KERNEL'S OWN FORM, not the table beside it: `basis_of` is the function every
+            // direction on either host reads, and `BASIS` is read by no kernel at all. Comparing
+            // the table alone would leave a mistyped row in the match invisible to every gate.
+            let r = vd_recipe::bend::basis_of(i32::from(face.index()));
             let wide = |a: Axis| [i32::from(a[0]), i32::from(a[1]), i32::from(a[2])];
             assert_eq!(
                 (wide(b.n), wide(b.u), wide(b.v)),
                 (r.n, r.u, r.v),
                 "{face:?}"
             );
+            assert_eq!(r, vd_recipe::bend::BASIS[face.index() as usize], "{face:?}");
         }
     }
 }
