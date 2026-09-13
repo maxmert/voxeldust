@@ -764,7 +764,7 @@ impl Terrain {
     /// plus a cell of each for the extractors' placement.
     fn caster_sink_m(&self, body: &vd_terrain::BodyDefinition, rung: u8) -> f64 {
         let fine = rung.saturating_sub(self.config.shadow_coarse_step);
-        (body.dropped_bound_m(rung) - body.dropped_bound_m(fine)).to_f64()
+        body.dropped_bound_m(rung) - body.dropped_bound_m(fine)
             + f64::from(vd_seed::ladder::cell_m(rung))
             + f64::from(vd_seed::ladder::cell_m(fine))
     }

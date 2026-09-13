@@ -7,9 +7,11 @@
 //! gateway, which evaluated the same eight at boot, compares. A chip whose arithmetic drifted by one
 //! ulp on one cell states a different number and is refused before it draws a hill.
 
-use crate::body::BodyDefinition;
+use crate::body::{BodyDefinition, RADIUS_RECIP_BITS};
 use crate::chunk::{ChunkKey, generate};
-use crate::gf::Gf;
+use crate::units::{LENGTH_BITS, STEPS_PER_M, greater, lesser, metres_of_q28};
+use vd_recipe::Gi;
+use vd_recipe::noise::{NOISE_BITS, NOISE_ONE};
 use vd_seed::bend::Face;
 use vd_seed::digest::{FNV_OFFSET, fnv1a};
 
@@ -91,6 +93,10 @@ pub const GOLDEN_SELF_CHECK_KEYS: [(Face, u8, i32, i32); 8] = [
 /// centre and the quarter points), so the ground between two samples is a quarter chunk apart and
 /// the column bound below is sixteen times smaller than with the corners alone.
 pub const COLUMN_SAMPLES_PER_EDGE: i32 = 5;
+/// The GAPS between those samples, as a shift: four gaps, so the grid's spacing is a shift and not a
+/// divide (ruling F7). Asserted against the sample count, so the two can never drift apart.
+pub const SAMPLE_GAPS_LOG2: u32 = 2;
+const _: () = assert!(1 << SAMPLE_GAPS_LOG2 == COLUMN_SAMPLES_PER_EDGE - 1);
 
 /// THE COLUMN BOUND: how far the surface inside one chunk column can stand from the heights that
 /// sample it, in metres — the recipe's own statement about itself, stated as a bound with a
@@ -105,25 +111,52 @@ pub const COLUMN_SAMPLES_PER_EDGE: i32 = 5;
 /// three chunks tall, two of them empty, and the rung-0 disc cost 2 014 chunks for about 620
 /// columns; with five samples the bound at the coarse rungs kept every far column "visible" over
 /// the horizon, and the grid cut it.
+///
+/// ★ ON INTEGERS (ruling F7). The sampling ratio `s = π·edge/lattice` is `π · edge · frequency /
+/// radius`: the frequency is the charter's own pair, the edge is an exact whole number of gap steps
+/// (62 × cell × 128 ÷ 4 = 1 984 × cell), the divide by the radius is ONE multiply by the charter's
+/// reciprocal, and π is [`PI`], `round(π · 2²⁸)`. The ratio is carried at [`BOUND_BITS`] fraction bits
+/// so its SQUARE lands at the noise's own 28 with no shift; the amplitude then reads its share and the
+/// sum is gap steps at [`LENGTH_BITS`].
 #[must_use]
-pub fn column_bound_m(body: &BodyDefinition, rung: u8) -> Gf {
-    let edge_m = Gf::from_f64(crate::chunk::CHUNK_EDGE as f64)
-        * Gf::from_f64(f64::from(vd_seed::ladder::cell_m(rung)))
-        / Gf::from_f64(f64::from(COLUMN_SAMPLES_PER_EDGE - 1));
-    let pi = Gf::from_f64(std::f64::consts::PI);
-    // Half of a wave's second-order term, times two axes.
-    let two_axes_half = Gf::ONE;
-    let mut bound = Gf::ZERO;
+pub fn column_bound(body: &BodyDefinition, rung: u8) -> Gi {
+    // The sample grid's own spacing in gap steps: a chunk's width over the grid's gaps. The gap count
+    // is a power of two ([`SAMPLE_GAPS_LOG2`]), so the division is a shift and the answer is exact
+    // (62 × 128 ÷ 4 = 1 984 steps a metre-rung cell).
+    let edge_steps = Gi::new(
+        (crate::chunk::CHUNK_EDGE as i64 * i64::from(vd_seed::ladder::cell_m(rung)) * STEPS_PER_M)
+            >> SAMPLE_GAPS_LOG2,
+    );
+    let mut bound = Gi::ZERO;
     for o in body.octaves_at(rung) {
-        // The octave's lattice cell on the surface: the radius over its frequency.
-        let lattice_m = body.radius_m / o.frequency;
-        let s = pi * edge_m / lattice_m;
-        let curve = s * s * two_axes_half;
+        let frequency = (o.frequency_int << NOISE_BITS) + o.frequency_frac;
+        // frequency × edge, then ÷ radius, then × π — each at BOUND_BITS.
+        let product = frequency.mul_shr(edge_steps, NOISE_BITS - BOUND_BITS);
+        let ratio = product.mul_shr(body.radius_recip, RADIUS_RECIP_BITS);
+        let s = ratio.mul_shr(PI, NOISE_BITS);
+        // Half of a wave's second-order term, times two axes: the two cancel, so the square stands.
+        let curve = s * s;
         // min(1, curve), branchless: one minus the positive part of (1 − curve).
-        let share = Gf::ONE - (Gf::ONE - curve).greater(Gf::ZERO);
-        bound += o.amplitude_m * share;
+        let share = NOISE_ONE - greater(NOISE_ONE - curve, Gi::ZERO);
+        bound += (o.amplitude * share) >> NOISE_BITS;
     }
-    bound
+    // The amplitudes carry AMP_BITS below a gap step; the bound leaves at the length format's bits.
+    bound << (LENGTH_BITS - vd_recipe::height::AMP_BITS)
+}
+
+/// The sampling ratio's fraction bits: half the noise's, so the ratio's SQUARE lands at the noise's
+/// own without a shift.
+pub const BOUND_BITS: u32 = NOISE_BITS >> 1;
+const _: () = assert!(2 * BOUND_BITS == NOISE_BITS);
+
+/// `round(π · 2²⁸)` — the one transcendental constant the recipe holds, as a word. Derived from the
+/// standard library's own `PI` and pinned by this module's test.
+pub const PI: Gi = Gi::new(843_314_857);
+
+/// THE COLUMN BOUND in metres, for a host outside the recipe.
+#[must_use]
+pub fn column_bound_m(body: &BodyDefinition, rung: u8) -> f64 {
+    metres_of_q28(column_bound(body, rung))
 }
 
 /// What one chunk column holds along the radial: the chunk span of its surface and the surface's
@@ -133,15 +166,17 @@ pub struct ColumnSpan {
     /// The lowest and the highest chunk index that hold the surface, clamped to the band.
     pub lo: i32,
     pub hi: i32,
-    /// The lowest and the highest SAMPLED radius, in metres (the grid's own extrema, no bound).
-    pub sampled_low_m: Gf,
-    pub sampled_high_m: Gf,
+    /// The lowest and the highest SAMPLED radius, in metres (the grid's own extrema, no bound). The
+    /// recipe decides them as words and states them here at the seam, because the ladder view that
+    /// reads them is outside the recipe.
+    pub sampled_low_m: f64,
+    pub sampled_high_m: f64,
     /// The surface's highest radius inside the column, in metres, AT RUNG 0: the highest sample
     /// plus the column bound plus the dropped octaves' bound (a coarse rung's field lies under the
     /// true peak by up to the amplitudes it dropped — the refuter's finding: a ridge 14 km up read
     /// 2 km at the top rung and its whole subtree was culled behind the horizon). What a ladder
     /// view tests against the sightline's drop past the horizon.
-    pub peak_m: Gf,
+    pub peak_m: f64,
 }
 
 /// THE SURFACE SPAN of chunk column `(x, y)` of `face` at a rung: the lowest and the highest chunk
@@ -172,36 +207,54 @@ pub fn surface_column(body: &BodyDefinition, face: Face, rung: u8, x: i32, y: i3
         y,
         z: 0,
     };
-    let cell = i64::from(vd_seed::ladder::cell_m(rung));
     let floor = i64::from(body.ladder.floor_m);
     let top = top_chunk_z(body, rung);
-    let bound = column_bound_m(body, rung);
-    let dropped = body.dropped_bound_m(rung);
+    let bound = column_bound(body, rung);
+    let dropped = body.dropped_bound(rung);
     let mut lo = i32::MAX;
     let mut hi = i32::MIN;
-    let mut low = Gf::from_f64(f64::MAX);
-    let mut high = Gf::ZERO;
-    let step = (edge - 1) / (COLUMN_SAMPLES_PER_EDGE - 1);
+    let mut low = Gi::ZERO;
+    let mut high = Gi::ZERO;
+    let step = (edge - 1) >> SAMPLE_GAPS_LOG2;
     let mut i = 0;
     while i < COLUMN_SAMPLES_PER_EDGE {
         let mut j = 0;
         while j < COLUMN_SAMPLES_PER_EDGE {
             let site = crate::lattice::site_of(body, key, i * step, j * step);
             let dir = crate::lattice::site_dir(body, key, site);
-            let h = crate::height::height_m(body, dir, rung);
+            let h = crate::height::height(body, dir, rung);
             // One cell of margin at the bottom: the extractor gives an edge to the chunk that owns
             // its LOWER cell, so a crossing of a chunk's bottom boundary edge is drawn by the chunk
             // BELOW it; a surface whose low bound lands in a chunk's first cell may cross exactly
             // there. (The top boundary edge is the chunk's own: no margin above.)
-            let z_lo = ((((h - bound).to_i64_floor() - floor) / cell - 1) / i64::from(edge)) as i32;
-            let z_hi = ((((h + bound).to_i64_floor() - floor) / cell) / i64::from(edge)) as i32;
+            // The cell and the chunk the surface lands in. The cell's width is a power of two metres
+            // (a shift); a CHUNK is 62 cells, which no shift divides — and this is a CPU-ONLY
+            // bookkeeping step (the client's wanted set, never a GPU kernel: the G1 cell field reads
+            // `z` as given), integer-exact on every host, so the one `/` stands, named.
+            #[allow(
+                clippy::integer_division,
+                reason = "CPU-only: a chunk is 62 cells, no power of two; never on a GPU kernel's path"
+            )]
+            let z_lo = (((metres_floor(h - bound) - floor) >> rung) - 1) / i64::from(edge);
+            #[allow(
+                clippy::integer_division,
+                reason = "CPU-only: a chunk is 62 cells, no power of two; never on a GPU kernel's path"
+            )]
+            let z_hi = ((metres_floor(h + bound) - floor) >> rung) / i64::from(edge);
+            let (z_lo, z_hi) = (z_lo as i32, z_hi as i32);
             lo = lo.min(z_lo);
             hi = hi.max(z_hi);
-            // The extrema through the fenced comparisons. (MEASURED before this: the low was
-            // taken as `low − max(low − h, 0)` from the largest float, which every subtraction
-            // absorbed — a column's floor read 6.9 km, and nothing had read it yet.)
-            high = h.greater(high);
-            low = low.lesser(h);
+            // The extrema, from the FIRST sample's own surface, never from a sentinel. (MEASURED
+            // before this: the low was taken as `low − max(low − h, 0)` from the largest float,
+            // which every subtraction absorbed — a column's floor read 6.9 km, and nothing had read
+            // it yet.)
+            if (i == 0) & (j == 0) {
+                low = h;
+                high = h;
+            } else {
+                high = greater(high, h);
+                low = lesser(low, h);
+            }
             j += 1;
         }
         i += 1;
@@ -209,14 +262,25 @@ pub fn surface_column(body: &BodyDefinition, face: Face, rung: u8, x: i32, y: i3
     ColumnSpan {
         lo: lo.clamp(0, top),
         hi: hi.clamp(0, top),
-        sampled_low_m: low,
-        sampled_high_m: high,
-        peak_m: high + bound + dropped,
+        sampled_low_m: metres_of_q28(low),
+        sampled_high_m: metres_of_q28(high),
+        peak_m: metres_of_q28(high + bound + dropped),
     }
+}
+
+/// A length in gap steps at [`LENGTH_BITS`], floored to whole METRES: one arithmetic shift, which
+/// floors on both sides of zero.
+#[must_use]
+fn metres_floor(length: Gi) -> i64 {
+    (length >> (LENGTH_BITS + STEPS_PER_M.trailing_zeros())).raw()
 }
 
 /// The highest chunk index along the radial of a rung's band: the last chunk a column can hold.
 #[must_use]
+#[allow(
+    clippy::integer_division,
+    reason = "CPU-only: a chunk is 62 cells, no power of two; never on a GPU kernel's path"
+)]
 pub fn top_chunk_z(body: &BodyDefinition, rung: u8) -> i32 {
     (body.ladder.cells_in_band(rung) as i32 - 1) / crate::chunk::CHUNK_EDGE as i32
 }
@@ -233,12 +297,17 @@ pub fn surface_chunk_z(body: &BodyDefinition, face: Face, rung: u8, x: i32, y: i
         y,
         z: 0,
     };
-    let site = crate::lattice::site_of(body, key, edge / 2, edge / 2);
+    let site = crate::lattice::site_of(body, key, edge >> 1, edge >> 1);
     let dir = crate::lattice::site_dir(body, key, site);
-    let h = crate::height::height_m(body, dir, rung);
-    let cell = i64::from(vd_seed::ladder::cell_m(rung));
-    let k = (h.to_i64_floor() - i64::from(body.ladder.floor_m)) / cell;
-    (k / i64::from(edge)) as i32
+    let h = crate::height::height(body, dir, rung);
+    // The cell index is the rung's shift; the chunk index is the one `/` by 62 this module keeps.
+    let k = (metres_floor(h) - i64::from(body.ladder.floor_m)) >> rung;
+    #[allow(
+        clippy::integer_division,
+        reason = "CPU-only: a chunk is 62 cells, no power of two; never on a GPU kernel's path"
+    )]
+    let z = k / i64::from(edge);
+    z as i32
 }
 
 /// The key a self-check entry names on this body: rung 255 means the body's top rung, and the
@@ -250,10 +319,20 @@ pub fn self_check_key(body: &BodyDefinition, entry: (Face, u8, i32, i32)) -> Chu
     } else {
         entry.1
     };
+    // CPU-ONLY, and never on a kernel's path: the self-check's eight keys are WRAPPED into whatever
+    // face the body has, so a three-kilometre rock has eight chunks to fold as well. A chunk is 62
+    // cells, which no shift divides.
+    #[allow(
+        clippy::integer_division,
+        reason = "CPU-only: a chunk is 62 cells, no power of two; the self-check's key wrap"
+    )]
     let chunks_per_edge =
         (body.ladder.cells_per_edge(rung) as i32 / crate::chunk::CHUNK_EDGE as i32).max(1);
-    let x = entry.2 % chunks_per_edge;
-    let y = entry.3 % chunks_per_edge;
+    #[allow(
+        clippy::modulo_arithmetic,
+        reason = "CPU-only: the self-check's key wrap into a small body's face"
+    )]
+    let (x, y) = (entry.2 % chunks_per_edge, entry.3 % chunks_per_edge);
     ChunkKey {
         face: entry.0,
         rung,
@@ -286,6 +365,14 @@ pub fn golden_self_check(body: &BodyDefinition) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
     use crate::home::home_planet;
 
@@ -303,23 +390,15 @@ mod tests {
         // The bound: metres at rung 0 (the finest octaves whole, the coarse ones a hair), under the
         // sum of every live amplitude, and larger at a coarser rung where a chunk spans more ground
         // — while the coarser rung's own dropped octaves leave it, so it stays under the total.
-        let b0_gf = column_bound_m(&m, 0);
-        let b0 = b0_gf.to_f64();
-        let total0: f64 = m
-            .octaves_at(0)
-            .iter()
-            .map(|o| o.amplitude_m().to_f64())
-            .sum();
-        assert!(b0 > 0.0);
-        assert!(b0 < total0, "{b0} vs {total0}");
-        let b9 = column_bound_m(&m, 9).to_f64();
-        assert!(b9 > b0, "{b9} vs {b0}");
-        let total9: f64 = m
-            .octaves_at(9)
-            .iter()
-            .map(|o| o.amplitude_m().to_f64())
-            .sum();
-        assert!(b9 <= total9 + 1e-9, "{b9} vs {total9}");
+        let b0 = column_bound(&m, 0);
+        let total0 = m.relief_bound(0);
+        assert!(b0 > Gi::ZERO);
+        assert!(b0 < total0, "{b0:?} vs {total0:?}");
+        let b9 = column_bound(&m, 9);
+        assert!(b9 > b0, "{b9:?} vs {b0:?}");
+        let total9 = m.relief_bound(9);
+        assert!(b9 <= total9, "{b9:?} vs {total9:?}");
+        assert_eq!(column_bound_m(&m, 0), metres_of_q28(b0));
         // The peak stands at or above every sample plus the bound: at least the centre's height.
         let span = surface_column(&m, Face::PosX, 0, 300, 700);
         assert_eq!((span.lo, span.hi), (lo, hi));
@@ -333,15 +412,18 @@ mod tests {
         let edge = crate::chunk::CHUNK_EDGE as i32;
         let site = crate::lattice::site_of(&m, key, edge / 2, edge / 2);
         let dir = crate::lattice::site_dir(&m, key, site);
-        let centre_h = crate::height::height_m(&m, dir, 0);
-        assert!(span.peak_m >= centre_h + b0_gf, "{span:?} vs {centre_h:?}");
+        let centre_h = metres_of_q28(crate::height::height(&m, dir, 0));
+        assert!(
+            span.peak_m >= centre_h + metres_of_q28(b0),
+            "{span:?} vs {centre_h}"
+        );
         assert!(span.sampled_low_m <= centre_h);
         assert!(span.sampled_high_m >= centre_h);
         // At a coarse rung the peak carries the dropped octaves' bound too: it stands at least the
         // rung-0 relief bound over the sampled high.
         let coarse = surface_column(&m, Face::PosX, 9, 3, 5);
         assert!(
-            coarse.peak_m >= coarse.sampled_high_m + m.dropped_bound_m(9),
+            coarse.peak_m >= coarse.sampled_high_m + metres_of_q28(m.dropped_bound(9)),
             "{coarse:?}"
         );
         // A column of one chunk exists at rung 0 now that the margin is the bound, not a chunk.
@@ -371,6 +453,15 @@ mod tests {
         assert!(widest >= 1, "{widest}");
     }
 
+    /// The one transcendental constant the recipe holds is the standard library's own π, rounded once
+    /// to the noise's fraction bits — stated here so a mistyped digit is a red test, not a moon.
+    #[test]
+    fn the_recipes_pi_is_the_standard_librarys_pi_at_the_noises_bits() {
+        let one = f64::from(1u32 << NOISE_BITS);
+        assert_eq!(PI.raw(), (std::f64::consts::PI * one).round() as i64);
+        assert_eq!(BOUND_BITS, 14);
+    }
+
     /// THE BOUND, MEASURED: over columns near the golden +X chunk at rung 0 and at rung 9, a dense
     /// sample of the column (every cell on a 16 × 16 grid) never leaves the sampled extrema widened
     /// by the column bound — the bound is a bound, not an argument (the refuter's finding).
@@ -390,24 +481,28 @@ mod tests {
                     z: 0,
                 };
                 let mut a = 0;
-                let mut dense_low = Gf::from_f64(f64::MAX);
-                let mut dense_high = Gf::ZERO;
+                let mut dense_low = f64::MAX;
+                let mut dense_high = f64::MIN;
                 while a < edge {
                     let mut b = 0;
                     while b < edge {
                         let site = crate::lattice::site_of(&m, key, a, b);
                         let dir = crate::lattice::site_dir(&m, key, site);
-                        let h = crate::height::height_m(&m, dir, rung);
+                        let h = metres_of_q28(crate::height::height(&m, dir, rung));
                         assert!(
                             h >= span.sampled_low_m - bound,
-                            "rung {rung} column {x} cell ({a}, {b}): {h:?} under {span:?} - {bound:?}"
+                            "rung {rung} column {x} cell ({a}, {b}): {h} under {span:?} - {bound}"
                         );
                         assert!(
                             h <= span.sampled_high_m + bound,
-                            "rung {rung} column {x} cell ({a}, {b}): {h:?} over {span:?} + {bound:?}"
+                            "rung {rung} column {x} cell ({a}, {b}): {h} over {span:?} + {bound}"
                         );
-                        dense_low = dense_low.lesser(h);
-                        dense_high = h.greater(dense_high);
+                        if h < dense_low {
+                            dense_low = h;
+                        }
+                        if h > dense_high {
+                            dense_high = h;
+                        }
                         b += 4;
                     }
                     a += 4;
@@ -417,13 +512,13 @@ mod tests {
                 assert!(
                     (span.sampled_low_m >= dense_low - bound)
                         & (span.sampled_low_m <= dense_low + bound),
-                    "rung {rung} column {x}: sampled low {:?} against the dense low {dense_low:?} ± {bound:?}",
+                    "rung {rung} column {x}: sampled low {:?} against the dense low {dense_low} ± {bound}",
                     span.sampled_low_m
                 );
                 assert!(
                     (span.sampled_high_m >= dense_high - bound)
                         & (span.sampled_high_m <= dense_high + bound),
-                    "rung {rung} column {x}: sampled high {:?} against the dense high {dense_high:?} ± {bound:?}",
+                    "rung {rung} column {x}: sampled high {:?} against the dense high {dense_high} ± {bound}",
                     span.sampled_high_m
                 );
                 assert!(span.sampled_low_m <= span.sampled_high_m);

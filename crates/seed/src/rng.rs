@@ -18,13 +18,12 @@ impl SplitMix64 {
         SplitMix64 { state: seed }
     }
 
-    /// The canonical SplitMix64 step.
+    /// The canonical SplitMix64 step — the recipe's one implementation (`vd_recipe::rng`), so the
+    /// harness's draws and the world's corner hashes come from the same arithmetic.
     pub fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
+        let (state, out) = vd_recipe::rng::splitmix_step(self.state);
+        self.state = state;
+        out
     }
 
     /// Uniform in `[0, 1)` (53-bit mantissa precision).
@@ -68,9 +67,9 @@ impl SplitMix64 {
 /// wall clock) — the whole seed tree is replicated by construction from the shared universe seed (HR1).
 #[must_use]
 pub fn child_seed(parent_seed: u64, salt: u64, index: u64) -> u64 {
-    let r1 = SplitMix64::new(parent_seed).next_u64();
-    let r2 = SplitMix64::new(r1 ^ salt).next_u64();
-    SplitMix64::new(r2 ^ index).next_u64()
+    let r1 = vd_recipe::rng::hash1(parent_seed);
+    let r2 = vd_recipe::rng::hash1(r1 ^ salt);
+    vd_recipe::rng::hash1(r2 ^ index)
 }
 
 /// The deterministic per-realm STREAM: fold the universe seed then each lineage-level seed (root → this
@@ -88,6 +87,14 @@ pub fn realm_stream(universe_seed: u64, lineage_seeds: &[u64]) -> SplitMix64 {
 
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
 
     #[test]

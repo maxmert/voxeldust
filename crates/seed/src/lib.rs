@@ -19,6 +19,17 @@
 //! direction is cell (face 2, 1181, 77)?". Both go through the bend in this crate, so the boots and the
 //! drawn hill name the same cell on an Apple chip and an Intel chip.
 
+// ★ NO `/` AND NO `%` ON THE RECIPE'S PATH (ruling F7, `owner_decisions_2026-09-12_frozen_patches.md`;
+// the design's §1: "no division operator anywhere"). naga's Metal back end cannot compile a 64-bit
+// division, and WGSL, SPIR-V and Rust disagree about a division by zero, so the arithmetic a GPU kernel
+// will run carries NEITHER operator: a power of two is a shift and a mask, and anything else is a
+// reciprocal drawn ONCE per body (or once per tube carver) and multiplied. The two lints below make that
+// a compile error rather than a review finding. A site that is CPU-ONLY today and integer-exact on every
+// host by definition says so with `#[allow(clippy::integer_division, reason = …)]` and names WHY; the
+// extractor (the GPU's step G2, not yet ported) is the one named exception.
+#![deny(clippy::integer_division)]
+#![deny(clippy::modulo_arithmetic)]
+
 pub mod bend;
 pub mod digest;
 pub mod ladder;

@@ -1,6 +1,17 @@
 //! ★ `Gf` — THE FENCED FLOAT (the voxel foundation, slice 5; SL10 clause 4, layer 1 of the fence).
 //!
-//! Every float the generator computes with is a `Gf`. The type offers exactly the operations
+//! ★ **THE SHAPE IS NO LONGER A FLOAT** (ruling F7, 2026-09-12). The recipe computes the world's static
+//! shape in [`vd_recipe`]'s integer kernels, and this type has exactly TWO callers left:
+//!
+//! 1. **THE DRAW of a body from its seed** (`body::BodyDefinition::from_seed`): the shares, caps and
+//!    weights the seed states, rounded ONCE into the body's integer charter, on the CPU, once per
+//!    body. A kernel never sees them, and a GPU never runs them. (Ruling V13 L12 owes the next step:
+//!    the realm stores the charter and states it, so even the draw runs once in the world's life.)
+//! 2. **THE DOORS between the recipe and metres** (`units`): four functions, each one IEEE-exact
+//!    multiply or divide by a power of two, for a host outside the recipe — a client's mesh buffer, a
+//!    picture's caption, a float query about an arbitrary point.
+//!
+//! Every float either of them computes with is a `Gf`. The type offers exactly the operations
 //! IEEE-754 fixes on every target — add, subtract, multiply, divide, negate, square root, floor,
 //! truncate, absolute value, comparison — and NOTHING else. The inner number is PRIVATE: there is no
 //! `From<Gf> for f64`, no `Deref`, no public field, so code that wants a sine cannot reach the number
@@ -35,8 +46,9 @@
 //! let m = x.mul_add(x, x); // no fused multiply-add
 //! ```
 //!
-//! **Example.** The height field sums octaves as `Gf`s. A contributor who writes `amp * noise.sin()`
-//! gets a compile error, not a moon whose hills differ by a metre between the Mac and the pod.
+//! **Example.** The home planet's draw states its relief as a share of its radius, as a `Gf`. A
+//! contributor who writes `relief * latitude.sin()` gets a compile error, not a moon whose hills
+//! differ by a metre between the Mac and the pod.
 
 use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign};
 
@@ -205,6 +217,14 @@ impl MulAssign for Gf {
 
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
 
     #[test]

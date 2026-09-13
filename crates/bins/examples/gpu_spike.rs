@@ -1,6 +1,8 @@
 //! ★ THE GPU SPIKE (ruling V17 item 3, 2026-09-10): can the world's recipe run on the GPU byte for
-//! byte? The recipe computes with 64-bit floats (`Gf`), which the Mac's GPU does not have, so the
-//! spike asks the two questions that remain, in order, each with a stop condition:
+//! byte? ANSWERED, and the answer moved the world: the recipe computed with 64-bit floats, which the
+//! Mac's GPU does not have, and this spike's part 2 measured why no float recipe may cross — so the
+//! recipe went INTEGER-ONLY (ruling F7, 2026-09-12). The spike is kept as the instrument that found
+//! it; its "real recipe" leg now times the integer recipe. The two questions it asked:
 //!
 //! 1. THE INTEGER HALF — the corner hash (`SplitMix64` on 64-bit integers) in a compute shader
 //!    against the CPU, on millions of corners. Integers have no rounding: one differing bit means
@@ -19,12 +21,14 @@ use std::time::Instant;
 
 use vd_client_render::wgpu;
 use vd_seed::bend::Face;
+use vd_terrain::BodyDefinition;
+use vd_terrain::body::{octave_amplitude_m, octave_frequency};
 use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey, in_ladder};
 use vd_terrain::digest::surface_chunk_z;
 use vd_terrain::home::home_planet;
 use vd_terrain::lattice::{site_dir, site_of};
 use vd_terrain::noise::corner_hash;
-use vd_terrain::{BodyDefinition, Gf};
+use vd_terrain::units::unit_of_direction;
 use wgpu::util::DeviceExt;
 
 /// The chunks the spike samples: a square of rung-0 chunks on face +X around the ground stand.
@@ -101,12 +105,8 @@ fn columns(body: &BodyDefinition) -> Vec<[f32; 3]> {
             assert!(in_ladder(body, key), "chunk ({x}, {y}) is off the ladder");
             for b in 0..CHUNK_EDGE as i32 {
                 for a in 0..CHUNK_EDGE as i32 {
-                    let d = site_dir(body, key, site_of(body, key, a, b));
-                    out.push([
-                        d[0].to_f64() as f32,
-                        d[1].to_f64() as f32,
-                        d[2].to_f64() as f32,
-                    ]);
+                    let d = unit_of_direction(site_dir(body, key, site_of(body, key, a, b)));
+                    out.push([d[0] as f32, d[1] as f32, d[2] as f32]);
                 }
             }
         }
@@ -154,10 +154,10 @@ fn part_1_the_integer_half(
     columns: &[[f32; 3]],
 ) {
     let octaves = body.octaves_at(RUNG);
-    let seed = octaves[0].seed();
+    let seed = octaves[0].seed;
     let mut corners: Vec<i32> = Vec::with_capacity(columns.len() * 3);
     for (i, c) in columns.iter().enumerate() {
-        let f = octaves[i % octaves.len()].frequency().to_f64() as f32;
+        let f = octave_frequency(&octaves[i % octaves.len()]) as f32;
         let k = (i & 7) as i32;
         corners.push((c[0] * f).floor() as i32 + (k & 1));
         corners.push((c[1] * f).floor() as i32 + ((k >> 1) & 1));
@@ -408,9 +408,9 @@ fn part_2_the_32_bit_question(
         .iter()
         .map(|o| {
             (
-                o.seed(),
-                o.frequency().to_f64() as f32,
-                o.amplitude_m().to_f64() as f32,
+                o.seed,
+                octave_frequency(o) as f32,
+                octave_amplitude_m(o) as f32,
             )
         })
         .collect();
@@ -425,12 +425,8 @@ fn part_2_the_32_bit_question(
     let real_started = Instant::now();
     let mut real_sum = 0.0f64;
     for d in columns {
-        let dir = [
-            Gf::from_f64(f64::from(d[0])),
-            Gf::from_f64(f64::from(d[1])),
-            Gf::from_f64(f64::from(d[2])),
-        ];
-        real_sum += vd_terrain::height::height_m(body, dir, RUNG).to_f64();
+        let dir = [f64::from(d[0]), f64::from(d[1]), f64::from(d[2])];
+        real_sum += vd_terrain::height::height_m(body, dir, RUNG);
     }
     let real_s = real_started.elapsed().as_secs_f64();
 

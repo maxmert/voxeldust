@@ -1,8 +1,8 @@
-//! ★ THE CARVERS — where a cave hollows the rock. Two kinds: a CAVERN FIELD, a slow value noise in
-//! three dimensions that opens rooms where it rises above a threshold, and TUBE CARVERS, seed-placed
-//! line segments of a stated radius that cut passages. Both give a "hollow" in metres: positive where
-//! the cell is air, and the cell's final gap is the greater of the rock's and the cave's, so air wins
-//! and a tunnel mouth is round.
+//! ★ THE CARVERS — where a cave hollows the rock, ON INTEGERS (ruling F7). Two kinds: a CAVERN FIELD,
+//! a slow value noise in three dimensions that opens rooms where it rises above a threshold, and TUBE
+//! CARVERS, seed-placed line segments of a stated radius that cut passages. Both give a "hollow" in
+//! GAP STEPS: positive where the cell is air, and the cell's final gap is the greater of the rock's
+//! and the cave's, so air wins and a tunnel mouth is round.
 //!
 //! **Caves are detail, like the fine octaves.** A cavern is sampled on a coarse lattice — one node per
 //! [`CAVERN_STRIDE`] cells — and interpolated between nodes with weights that are powers of two, so
@@ -11,66 +11,143 @@
 //! wider than a quarter of its wavelength. Coarser rungs draw the hill without its caves, exactly as
 //! they draw it without its ripples, and the crossfade closes the detail's arrival.
 //!
+//! **No kernel divides.** The cavern's wavelength enters as the charter's RECIPROCAL; the tube's
+//! region index is a shift, because the region's edge is a power of two metres; and a tube carries the
+//! reciprocal of its own squared length, drawn once with the tube, so the projection of a cell onto
+//! the segment is one two-word product. The distance itself is one integer square root.
+//!
 //! **Example.** Forty metres under a cliff the cavern field reads 0.71 against a threshold of 0.66:
 //! the cell is one metre inside a room. A tube of radius three metres runs past two cells away: the
-//! cell is one metre inside the tube. The greater says: hollow, by one metre.
+//! cell is one metre inside the tube. The greater says: hollow, by 128 gap steps.
 
-use crate::body::BodyDefinition;
-use crate::gf::Gf;
-use crate::noise::{unit_value, value3};
+use crate::body::{BodyDefinition, CAVERN_RECIP_BITS};
+use crate::units::greater;
+use vd_recipe::Gi;
+use vd_recipe::noise::{NOISE_BITS, NOISE_ONE, unit_value, value3};
+use vd_recipe::root::{isqrt, recip_pow2};
+use vd_seed::ladder::cell_m;
 use vd_seed::rng::child_seed;
 
 /// Cells between two nodes of the cavern lattice.
 pub const CAVERN_STRIDE: usize = 4;
+/// The same stride as a shift: the lattice's weights are exact multiples of `1/CAVERN_STRIDE`.
+pub const CAVERN_STRIDE_LOG2: u32 = 2;
+const _: () = assert!(1 << CAVERN_STRIDE_LOG2 == CAVERN_STRIDE);
 
-/// A tube carver: a segment in the body's frame, in metres, with a radius.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// The fraction bits a tube's projection parameter carries.
+const TUBE_T_BITS: u32 = 30;
+/// The fraction bits of a tube's squared-length reciprocal.
+const TUBE_RECIP_BITS: u32 = 62;
+
+/// A tube carver: a segment in the body's frame, in GAP STEPS, with a radius and the reciprocal of its
+/// own squared length (drawn once with the tube, so no cell divides).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tube {
-    pub start: [Gf; 3],
-    pub end: [Gf; 3],
-    pub radius_m: Gf,
+    pub start: [Gi; 3],
+    pub end: [Gi; 3],
+    pub radius_steps: Gi,
+    /// `floor(2^TUBE_RECIP_BITS / |end − start|²)`. A segment of no length reads one, and then the
+    /// projection lands on the start, which is the right answer for a point.
+    pub inv_len2: Gi,
+}
+
+impl Tube {
+    /// The distance from a point to the segment, in gap steps: the projection clamped to the segment
+    /// by the stored reciprocal, then one integer square root.
+    #[must_use]
+    pub fn distance_steps(&self, point: [Gi; 3]) -> Gi {
+        let ab = [
+            self.end[0] - self.start[0],
+            self.end[1] - self.start[1],
+            self.end[2] - self.start[2],
+        ];
+        let ap = [
+            point[0] - self.start[0],
+            point[1] - self.start[1],
+            point[2] - self.start[2],
+        ];
+        let dot = ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2];
+        // t = dot / |ab|², at TUBE_T_BITS, clamped to the segment.
+        let t = dot.mul_shr(self.inv_len2, TUBE_RECIP_BITS - TUBE_T_BITS);
+        let one = Gi::ONE << TUBE_T_BITS;
+        let t = if t < Gi::ZERO {
+            Gi::ZERO
+        } else if t > one {
+            one
+        } else {
+            t
+        };
+        let mut sum = 0u64;
+        let mut c = 0;
+        while c < 3 {
+            let d = ap[c] - ((ab[c] * t) >> TUBE_T_BITS);
+            let m = d.unsigned_abs();
+            sum = sum.wrapping_add(m.wrapping_mul(m));
+            c += 1;
+        }
+        Gi::new(isqrt(sum) as i64)
+    }
 }
 
 /// Whether tubes are carved at a rung: only where a cell is no wider than the tube.
 #[must_use]
-pub fn tubes_carve_at(body: &BodyDefinition, cell_m: Gf) -> bool {
-    cell_m <= body.caves.tube_radius_m * Gf::TWO
+pub fn tubes_carve_at(body: &BodyDefinition, rung: u8) -> bool {
+    cell_steps(rung) <= body.caves.tube_radius_steps * Gi::new(2)
 }
 
 /// Whether the cavern field is carved at a rung: only where a cell is no wider than a quarter of the
-/// field's wavelength.
+/// field's wavelength. Whole metres on both sides.
 #[must_use]
-pub fn caverns_carve_at(body: &BodyDefinition, cell_m: Gf) -> bool {
-    cell_m * Gf::from_i64(4) <= body.caves.cavern_wavelength_m
+pub fn caverns_carve_at(body: &BodyDefinition, rung: u8) -> bool {
+    cell_m(rung) * 4 <= body.caves.cavern_wavelength_m
 }
 
-/// The cavern field's raw value at a point in the body's frame, in `[0, 1)`.
+/// A cell's width at a rung, in gap steps — exact, a power of two times 128.
 #[must_use]
-pub fn cavern_value(body: &BodyDefinition, point_m: [Gf; 3]) -> Gf {
-    let f = Gf::ONE / body.caves.cavern_wavelength_m;
-    value3(body.seed, [point_m[0] * f, point_m[1] * f, point_m[2] * f])
+pub fn cell_steps(rung: u8) -> Gi {
+    Gi::new(i64::from(cell_m(rung)) * crate::units::STEPS_PER_M)
 }
 
-/// The hollow the cavern field opens for a field value, in metres: zero outside a room, positive
+/// The cavern field's raw value at a point in the body's frame, in `[0, 1)` at the noise's fraction
+/// bits. The lattice point is the point in gap steps times the wavelength's reciprocal.
+#[must_use]
+pub fn cavern_value(body: &BodyDefinition, point_steps: [Gi; 3]) -> Gi {
+    let recip = body.caves.cavern_recip;
+    // point_m / λ at NOISE_BITS: the point is 128 times the metres, so the shift takes those seven
+    // bits back out along with the reciprocal's own.
+    let shift = CAVERN_RECIP_BITS - NOISE_BITS + crate::units::STEPS_PER_M.trailing_zeros();
+    value3(
+        body.seed,
+        [
+            point_steps[0].mul_shr(recip, shift),
+            point_steps[1].mul_shr(recip, shift),
+            point_steps[2].mul_shr(recip, shift),
+        ],
+    )
+}
+
+/// The hollow the cavern field opens for a field value, in GAP STEPS: zero outside a room, positive
 /// inside.
 #[must_use]
-pub fn cavern_hollow_m(body: &BodyDefinition, value: Gf) -> Gf {
+pub fn cavern_hollow_steps(body: &BodyDefinition, value: Gi) -> Gi {
     let over = value - body.caves.cavern_threshold;
-    if over > Gf::ZERO {
-        over * body.caves.cavern_scale_m
+    if over > Gi::ZERO {
+        (over * body.caves.cavern_scale_steps) >> NOISE_BITS
     } else {
-        Gf::ZERO
+        Gi::ZERO
     }
 }
 
-/// The tube region a point falls in: a cube of the body's tube region edge, indexed by floor.
+/// The tube region a point falls in: a cube of the body's tube region edge, indexed by the shift the
+/// charter holds (the edge is a power of two metres, so the index needs no division and an arithmetic
+/// shift floors on both sides of the centre).
 #[must_use]
-pub fn tube_region(body: &BodyDefinition, point_m: [Gf; 3]) -> [i64; 3] {
-    let edge = Gf::from_i64(i64::from(body.caves.tube_region_m));
+pub fn tube_region(body: &BodyDefinition, point_steps: [Gi; 3]) -> [i64; 3] {
+    let shift = body.caves.tube_region_shift;
     [
-        (point_m[0] / edge).to_i64_floor(),
-        (point_m[1] / edge).to_i64_floor(),
-        (point_m[2] / edge).to_i64_floor(),
+        (point_steps[0] >> shift).raw(),
+        (point_steps[1] >> shift).raw(),
+        (point_steps[2] >> shift).raw(),
     ]
 }
 
@@ -78,7 +155,7 @@ pub fn tube_region(body: &BodyDefinition, point_m: [Gf; 3]) -> [i64; 3] {
 /// region toward a point in a neighbouring region.
 #[must_use]
 pub fn tubes_in(body: &BodyDefinition, region: [i64; 3]) -> Vec<Tube> {
-    let edge = Gf::from_i64(i64::from(body.caves.tube_region_m));
+    let edge = body.caves.tube_region_steps;
     let h = child_seed(
         child_seed(
             child_seed(body.caves.tube_seed, 1, region[0] as u64),
@@ -95,24 +172,30 @@ pub fn tubes_in(body: &BodyDefinition, region: [i64; 3]) -> Vec<Tube> {
         let hs = child_seed(h, 4, t as u64);
         let unit = |salt: u64| unit_value(child_seed(hs, salt, 0));
         let base = [
-            Gf::from_i64(region[0]) * edge,
-            Gf::from_i64(region[1]) * edge,
-            Gf::from_i64(region[2]) * edge,
+            Gi::new(region[0]) * edge,
+            Gi::new(region[1]) * edge,
+            Gi::new(region[2]) * edge,
         ];
-        let start = [
-            base[0] + unit(10) * edge,
-            base[1] + unit(11) * edge,
-            base[2] + unit(12) * edge,
-        ];
+        let at = |salt: u64| (unit(salt) * edge) >> NOISE_BITS;
+        let reach = |salt: u64| ((unit(salt) * Gi::new(3) - NOISE_ONE) * edge) >> NOISE_BITS;
+        let start = [base[0] + at(10), base[1] + at(11), base[2] + at(12)];
         let end = [
-            base[0] + (unit(13) * Gf::from_i64(3) - Gf::ONE) * edge,
-            base[1] + (unit(14) * Gf::from_i64(3) - Gf::ONE) * edge,
-            base[2] + (unit(15) * Gf::from_i64(3) - Gf::ONE) * edge,
+            base[0] + reach(13),
+            base[1] + reach(14),
+            base[2] + reach(15),
         ];
+        let mut len2 = 0u64;
+        let mut c = 0;
+        while c < 3 {
+            let m = (end[c] - start[c]).unsigned_abs();
+            len2 = len2.wrapping_add(m.wrapping_mul(m));
+            c += 1;
+        }
         out.push(Tube {
             start,
             end,
-            radius_m: body.caves.tube_radius_m,
+            radius_steps: body.caves.tube_radius_steps,
+            inv_len2: Gi::new(recip_pow2(len2, TUBE_RECIP_BITS) as i64),
         });
         t += 1;
     }
@@ -142,79 +225,81 @@ pub fn tubes_near(body: &BodyDefinition, lo: [i64; 3], hi: [i64; 3]) -> Vec<Tube
     out
 }
 
-/// The hollow a set of tubes opens at a point, in metres: the greatest of `radius − distance` over
+/// The hollow a set of tubes opens at a point, in GAP STEPS: the greatest of `radius − distance` over
 /// the tubes, never below zero.
 #[must_use]
-pub fn tube_hollow_m(tubes: &[Tube], point_m: [Gf; 3]) -> Gf {
-    let mut best = Gf::ZERO;
+pub fn tube_hollow_steps(tubes: &[Tube], point_steps: [Gi; 3]) -> Gi {
+    let mut best = Gi::ZERO;
     for tube in tubes {
-        let d = segment_distance_m(tube.start, tube.end, point_m);
-        best = best.greater(tube.radius_m - d);
+        best = greater(best, tube.radius_steps - tube.distance_steps(point_steps));
     }
     best
 }
 
-/// The distance from a point to a segment: the projection clamped to the segment, then one square
-/// root.
-#[must_use]
-pub fn segment_distance_m(a: [Gf; 3], b: [Gf; 3], p: [Gf; 3]) -> Gf {
-    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
-    let len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
-    let t = if len2 > Gf::ZERO {
-        ((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / len2).clamp(Gf::ZERO, Gf::ONE)
-    } else {
-        Gf::ZERO
-    };
-    let q = [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t];
-    let d = [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
-    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
-}
-
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
+    use crate::units::{STEPS_PER_M, metres_of_steps};
 
     fn home() -> BodyDefinition {
         crate::home::home_planet()
     }
 
-    fn g(v: f64) -> Gf {
-        Gf::from_f64(v)
+    /// A whole number of metres as gap steps.
+    fn s(metres: i64) -> Gi {
+        Gi::new(metres * STEPS_PER_M)
+    }
+
+    /// A tube between two points stated in whole metres.
+    fn tube(a: [i64; 3], b: [i64; 3], radius_m: i64) -> Tube {
+        let start = [s(a[0]), s(a[1]), s(a[2])];
+        let end = [s(b[0]), s(b[1]), s(b[2])];
+        let mut len2 = 0u64;
+        let mut c = 0;
+        while c < 3 {
+            let m = (end[c] - start[c]).unsigned_abs();
+            len2 = len2.wrapping_add(m.wrapping_mul(m));
+            c += 1;
+        }
+        Tube {
+            start,
+            end,
+            radius_steps: s(radius_m),
+            inv_len2: Gi::new(recip_pow2(len2, TUBE_RECIP_BITS) as i64),
+        }
     }
 
     #[test]
     fn the_segment_distance_is_exact_on_the_ends_the_middle_and_a_degenerate_segment() {
-        let a = [g(0.0), g(0.0), g(0.0)];
-        let b = [g(10.0), g(0.0), g(0.0)];
-        assert_eq!(segment_distance_m(a, b, [g(5.0), g(3.0), g(4.0)]), g(5.0));
+        let t = tube([0, 0, 0], [10, 0, 0], 3);
+        assert_eq!(t.distance_steps([s(5), s(3), s(4)]), s(5));
         assert_eq!(
-            segment_distance_m(a, b, [g(-3.0), g(4.0), g(0.0)]),
-            g(5.0),
+            t.distance_steps([s(-3), s(4), s(0)]),
+            s(5),
             "before the start"
         );
+        assert_eq!(t.distance_steps([s(13), s(0), s(4)]), s(5), "past the end");
+        let point = tube([0, 0, 0], [0, 0, 0], 3);
         assert_eq!(
-            segment_distance_m(a, b, [g(13.0), g(0.0), g(4.0)]),
-            g(5.0),
-            "past the end"
-        );
-        assert_eq!(
-            segment_distance_m(a, a, [g(0.0), g(0.0), g(2.0)]),
-            g(2.0),
+            point.distance_steps([s(0), s(0), s(2)]),
+            s(2),
             "a point segment"
         );
-        let tube = Tube {
-            start: a,
-            end: b,
-            radius_m: g(3.0),
-        };
-        assert_eq!(tube_hollow_m(&[tube], [g(5.0), g(1.0), g(0.0)]), g(2.0));
+        assert_eq!(tube_hollow_steps(&[t], [s(5), s(1), s(0)]), s(2));
         assert_eq!(
-            tube_hollow_m(&[tube], [g(5.0), g(9.0), g(0.0)]),
-            Gf::ZERO,
+            tube_hollow_steps(&[t], [s(5), s(9), s(0)]),
+            Gi::ZERO,
             "outside stays zero"
         );
-        assert_eq!(tube_hollow_m(&[], [g(5.0), g(1.0), g(0.0)]), Gf::ZERO);
+        assert_eq!(tube_hollow_steps(&[], [s(5), s(1), s(0)]), Gi::ZERO);
     }
 
     #[test]
@@ -224,12 +309,8 @@ mod tests {
         let mut solid = 0;
         let mut i = 0i64;
         while i < 4_000 {
-            let p = [
-                g(0.37) * Gf::from_i64(i),
-                g(0.61) * Gf::from_i64(i),
-                g(1.3) * Gf::from_i64(i),
-            ];
-            if cavern_hollow_m(&m, cavern_value(&m, p)) > Gf::ZERO {
+            let p = [Gi::new(47 * i), Gi::new(78 * i), Gi::new(166 * i)];
+            if cavern_hollow_steps(&m, cavern_value(&m, p)) > Gi::ZERO {
                 hollow += 1;
             } else {
                 solid += 1;
@@ -238,28 +319,39 @@ mod tests {
         }
         assert!(hollow > 0, "some rooms");
         assert!(solid > hollow, "mostly rock");
-        assert_eq!(cavern_hollow_m(&m, Gf::ZERO), Gf::ZERO);
-        assert!(cavern_hollow_m(&m, Gf::ONE) > Gf::ZERO);
+        assert_eq!(cavern_hollow_steps(&m, Gi::ZERO), Gi::ZERO);
+        assert!(cavern_hollow_steps(&m, NOISE_ONE) > Gi::ZERO);
         let mut total = 0;
         let mut r = 0i64;
         while r < 64 {
             let tubes = tubes_in(&m, [r, r * 7, -r]);
             assert!(tubes.len() <= 3);
             for t in &tubes {
-                assert_eq!(t.radius_m, m.caves.tube_radius_m);
-                assert!(t.start[0] >= Gf::from_i64(r) * Gf::from_i64(512));
-                assert!(t.start[0] < Gf::from_i64(r + 1) * Gf::from_i64(512));
+                assert_eq!(t.radius_steps, m.caves.tube_radius_steps);
+                assert!(t.start[0] >= Gi::new(r) * m.caves.tube_region_steps);
+                assert!(t.start[0] < Gi::new(r + 1) * m.caves.tube_region_steps);
             }
             total += tubes.len();
             r += 1;
         }
         assert!(total > 0, "some regions draw tubes");
-        assert_eq!(tube_region(&m, [g(1000.0), g(-1.0), g(0.0)]), [1, -1, 0]);
+        assert_eq!(tube_region(&m, [s(1000), s(-1), Gi::ZERO]), [1, -1, 0]);
         assert_eq!(
             tubes_in(&m, [3, 21, -3]),
             tubes_in(&m, [3, 21, -3]),
             "the same region, the same tubes"
         );
+        // Every tube's stored reciprocal is the exact floor of its own squared length's reciprocal.
+        for t in tubes_in(&m, [3, 21, -3]) {
+            let mut len2 = 0u64;
+            let mut c = 0;
+            while c < 3 {
+                let d = (t.end[c] - t.start[c]).unsigned_abs();
+                len2 += d * d;
+                c += 1;
+            }
+            assert_eq!(t.inv_len2.raw() as u64, recip_pow2(len2, TUBE_RECIP_BITS));
+        }
     }
 
     /// The refuter's finding 3: a tube may run from its region into the next two, so a chunk asks
@@ -294,12 +386,11 @@ mod tests {
     #[test]
     fn caves_are_detail_that_stops_at_coarse_rungs() {
         let m = home();
-        assert!(tubes_carve_at(&m, Gf::ONE), "a one-metre cell sees a tube");
-        assert!(
-            !tubes_carve_at(&m, Gf::from_i64(64)),
-            "a 64 m cell does not"
-        );
-        assert!(caverns_carve_at(&m, Gf::ONE));
-        assert!(!caverns_carve_at(&m, Gf::from_i64(1024)));
+        assert!(tubes_carve_at(&m, 0), "a one-metre cell sees a tube");
+        assert!(!tubes_carve_at(&m, 6), "a 64 m cell does not");
+        assert!(caverns_carve_at(&m, 0));
+        assert!(!caverns_carve_at(&m, 10));
+        assert_eq!(cell_steps(0), Gi::new(STEPS_PER_M));
+        assert_eq!(metres_of_steps(cell_steps(3).raw()), 8.0);
     }
 }

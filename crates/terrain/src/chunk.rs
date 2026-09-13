@@ -21,6 +21,13 @@
 //! inside rock, positive in air; a cell whose centre is exactly ON the surface reads 0 and is AIR;
 //! `+1` cell clamps to the top code 127, one step short of a full cell, which the extractor never needs.
 //!
+//! ★ **THE DENSITY IS ALL INTEGERS** (ruling F7). A cell centre's radius is an EXACT whole number of
+//! gap steps (the floor is whole metres and a cell is a power of two metres, so `floor + (k + ½)·cell`
+//! times 128 is a whole number — `vd_seed::ladder::cell_radius_steps`); the surface is the same unit at
+//! the noise's fraction bits; the gap is ONE subtraction, ONE shift by `rung + the noise's bits` (which
+//! divides by the cell's width and floors in one step) and the clamp to the byte. Nothing rounds twice
+//! and nothing is a float.
+//!
 //! **Example.** Chunk (face 2, rung 0, 19, 1, 4) of the home planet spans 62 m of radius; its columns'
 //! surfaces run through it, so it pays: 3 844 heights once for the column, then 238 328 cells for this
 //! chunk. The chunk two above it is skipped: every cell is air at the top code, exactly as the cell pass
@@ -28,25 +35,30 @@
 
 use crate::body::BodyDefinition;
 use crate::carve::{
-    CAVERN_STRIDE, cavern_hollow_m, cavern_value, caverns_carve_at, tube_hollow_m, tube_region,
-    tubes_carve_at, tubes_near,
+    CAVERN_STRIDE, CAVERN_STRIDE_LOG2, cavern_hollow_steps, cavern_value, caverns_carve_at,
+    cell_steps, tube_hollow_steps, tube_region, tubes_carve_at, tubes_near,
 };
-use crate::gf::Gf;
-use crate::height::{biome_at, height_m};
+use crate::height::{biome_of, height};
 use crate::strata::{Biome, Stratum};
+use crate::units::{LENGTH_BITS, STEPS_PER_M, greater, lesser};
+use vd_recipe::Gi;
+use vd_recipe::bend::DIR_BITS;
+use vd_recipe::root::isqrt;
 
-use vd_seed::bend::{Face, direction};
-use vd_seed::ladder::{self, cell_m};
+use vd_seed::bend::{Face, direction_q};
 
 /// Cells per chunk edge.
 pub const CHUNK_EDGE: usize = 62;
 /// Cells per chunk.
 pub const CHUNK_CELLS: usize = CHUNK_EDGE * CHUNK_EDGE * CHUNK_EDGE;
 /// Gap steps per cell: the registry's density convention (1/128 of a cell). Cross-pinned against
-/// `vd_core::registry::GAP_STEPS_PER_CELL` in `tests/tests/voxel_pins.rs`.
+/// `vd_core::registry::GAP_STEPS_PER_CELL` in `tests/tests/voxel_pins.rs` and against the recipe's own
+/// constant by this module's test.
 pub const GAP_STEPS_PER_CELL: i64 = 128;
+const _: () = assert!(GAP_STEPS_PER_CELL == vd_recipe::height::GAP_STEPS_PER_CELL);
+const _: () = assert!(GAP_STEPS_PER_CELL == STEPS_PER_M);
 /// The most nodes per axis a chunk's cavern lattice needs: the global nodes that cover its 62 cells.
-pub const CAVERN_NODES: usize = CHUNK_EDGE / CAVERN_STRIDE + 2;
+pub const CAVERN_NODES: usize = (CHUNK_EDGE >> CAVERN_STRIDE_LOG2) + 2;
 
 /// Which chunk: the face, the rung, and the chunk's coordinates in cells-per-62 along the face's
 /// two axes and the radial.
@@ -97,14 +109,15 @@ pub struct ColumnField {
     pub rung: u8,
     pub x: i32,
     pub y: i32,
-    /// `62 × 62` entries in packing order `b·62 + a`: the direction, the surface radius, the biome.
-    pub columns: Vec<([Gf; 3], Gf, Biome)>,
+    /// `62 × 62` entries in packing order `b·62 + a`: the direction at the bend's fraction bits, the
+    /// surface radius in gap steps at [`LENGTH_BITS`], the biome.
+    pub columns: Vec<([Gi; 3], Gi, Biome)>,
     /// The same columns' sites: a cell of this face, or — in a PARTIAL chunk at a face's far edge —
     /// the partner face's cell or a corner phantom (slice 6, `lattice::site_of`).
     pub sites: Vec<crate::lattice::Site>,
-    /// The least and the greatest surface radius among the columns.
-    pub lowest_m: Gf,
-    pub highest_m: Gf,
+    /// The least and the greatest surface radius among the columns, in gap steps at [`LENGTH_BITS`].
+    pub lowest: Gi,
+    pub highest: Gi,
 }
 
 impl ChunkLattice {
@@ -115,13 +128,14 @@ impl ChunkLattice {
     }
 }
 
-/// Quantise a gap in cells to the signed byte: floor to 1/128, clamped to `[−128, 127]`.
+/// Quantise a gap already counted in GAP STEPS (1/128 of a cell) to the signed byte: clamped to
+/// `[−128, 127]`. The floor happened in the one shift that made the steps, so nothing rounds twice;
+/// `+1` cell (128 steps) clamps to the top code 127, one step short of a full cell.
 #[must_use]
-pub fn quantise_gap(gap_cells: Gf) -> i8 {
-    let steps = (gap_cells * Gf::from_i64(GAP_STEPS_PER_CELL))
-        .floor()
-        .to_i64_floor();
-    steps.clamp(i64::from(i8::MIN), i64::from(i8::MAX)) as i8
+pub fn quantise_gap(gap_steps: Gi) -> i8 {
+    gap_steps
+        .raw()
+        .clamp(i64::from(i8::MIN), i64::from(i8::MAX)) as i8
 }
 
 /// Whether a chunk key names a chunk of the body at all.
@@ -135,10 +149,11 @@ pub fn in_ladder(body: &BodyDefinition, key: ChunkKey) -> bool {
     i64::from(key.x) * edge < n_l && i64::from(key.y) * edge < n_l && i64::from(key.z) * edge < band
 }
 
-/// The direction of the cell `(i, j)` of a face at a rung with `n_l` cells per edge.
-pub(crate) fn dir_of(face: Face, n_l: u32, i: i32, j: i32) -> [Gf; 3] {
-    let d = direction(face, ladder::face_param(i, n_l), ladder::face_param(j, n_l));
-    [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])]
+/// The direction of the cell `(i, j)` of a face, at the bend's [`DIR_BITS`] fraction bits, for a body
+/// whose cell-count reciprocal at this rung is `inv_n` (the charter holds one per rung, so a direction
+/// costs no divide).
+pub(crate) fn dir_of(face: Face, inv_n: Gi, i: i32, j: i32) -> [Gi; 3] {
+    direction_q(face, i, j, inv_n)
 }
 
 /// The column pass for the column of `(face, rung, x, y)`; `None` for a column outside the body.
@@ -171,18 +186,25 @@ pub fn column_field(
     };
     let mut columns = Vec::with_capacity(CHUNK_EDGE * CHUNK_EDGE);
     let mut sites = Vec::with_capacity(CHUNK_EDGE * CHUNK_EDGE);
-    let mut lowest = Gf::from_f64(f64::INFINITY);
-    let mut highest = Gf::from_f64(f64::NEG_INFINITY);
+    // The extremes start at the FIRST column's own surface, never at a sentinel (the refuter's
+    // finding: a sentinel the arithmetic absorbs reads a column's floor kilometres out).
+    let mut lowest = Gi::ZERO;
+    let mut highest = Gi::ZERO;
     let mut b = 0;
     while b < CHUNK_EDGE {
         let mut a = 0;
         while a < CHUNK_EDGE {
             let site = crate::lattice::site_of(body, key, a as i32, b as i32);
             let dir = crate::lattice::site_dir(body, key, site);
-            let h = height_m(body, dir, rung);
-            let biome = biome_at(body, dir, h);
-            lowest = lowest.lesser(h);
-            highest = highest.greater(h);
+            let h = height(body, dir, rung);
+            let biome = biome_of(body, dir, h);
+            if (a == 0) & (b == 0) {
+                lowest = h;
+                highest = h;
+            } else {
+                lowest = lesser(lowest, h);
+                highest = greater(highest, h);
+            }
             columns.push((dir, h, biome));
             sites.push(site);
             a += 1;
@@ -196,16 +218,16 @@ pub fn column_field(
         y,
         columns,
         sites,
-        lowest_m: lowest,
-        highest_m: highest,
+        lowest,
+        highest,
     })
 }
 
-/// THE FLUID at a radius: water under the sea, air over it. The one rule the above-surface skip,
-/// the cell pass and the halo share.
+/// THE FLUID at a radius (in gap steps at [`LENGTH_BITS`]): water under the sea, air over it. The one
+/// rule the above-surface skip, the cell pass and the halo share.
 #[must_use]
-pub fn fluid_at(body: &BodyDefinition, r: Gf) -> Stratum {
-    if r < body.sea_radius_m {
+pub fn fluid_at(body: &BodyDefinition, r: Gi) -> Stratum {
+    if r < body.sea_radius {
         Stratum::Water
     } else {
         Stratum::Air
@@ -214,7 +236,7 @@ pub fn fluid_at(body: &BodyDefinition, r: Gf) -> Stratum {
 
 /// The cell more than a cell above every surface: the fluid at its radius, at the top code.
 #[must_use]
-pub fn above_surface_cell(body: &BodyDefinition, r: Gf) -> Cell {
+pub fn above_surface_cell(body: &BodyDefinition, r: Gi) -> Cell {
     Cell {
         stratum: fluid_at(body, r),
         gap: i8::MAX,
@@ -264,17 +286,18 @@ pub fn generate_in(body: &BodyDefinition, column: &ColumnField, z: i32) -> Optio
     let rung = key.rung;
     let edge = CHUNK_EDGE as i32;
     let k0 = z * edge;
-    let cell_m_f = Gf::from_i64(i64::from(cell_m(rung)));
-    let r_low = Gf::from_f64(body.ladder.corner_radius_m(k0, rung));
-    let r_high = Gf::from_f64(body.ladder.corner_radius_m(k0 + edge, rung));
-    let reach = reach_m(body, cell_m_f);
+    // A half cell, in gap steps at LENGTH_BITS: the distance from a cell's lower corner to its centre.
+    let half_cell = (cell_steps(rung) << LENGTH_BITS) >> 1;
+    let r_low = corner_radius(body, k0, rung);
+    let r_high = corner_radius(body, k0 + edge, rung);
+    let reach = reach_steps(body, rung);
     // Above: the lowest cell CENTRE (r_low + ½ cell) is more than a cell over the highest surface,
     // so every gap is ≥ 1 and clamps to the top code; air or water by the cell's radius.
-    if r_low - Gf::HALF * cell_m_f > column.highest_m {
+    if r_low - half_cell > column.highest {
         return Some(filled(
             key,
             |c| {
-                let r = Gf::from_f64(body.ladder.cell_radius_m(k0 + c as i32, rung));
+                let r = cell_radius(body, k0 + c as i32, rung);
                 let cell = above_surface_cell(body, r);
                 (cell.stratum, cell.gap)
             },
@@ -284,23 +307,91 @@ pub fn generate_in(body: &BodyDefinition, column: &ColumnField, z: i32) -> Optio
     // Below: the highest cell CENTRE (r_high − ½ cell) is more than a cell under the lowest surface
     // less every reach, so every gap is ≤ −1 and clamps to the bottom code, and every cell is past
     // the deepest stratum and the deepest cave: bedrock.
-    if r_high + Gf::HALF * cell_m_f < column.lowest_m - reach {
+    if r_high + half_cell < column.lowest - reach {
         let cell = below_surface_cell(body);
         return Some(filled(key, |_| (cell.stratum, cell.gap), How::BelowSurface));
     }
     Some(cell_pass(body, column, key))
 }
 
-/// How far under a surface the strata and the caves can still change a cell, in metres, at a rung.
-pub(crate) fn reach_m(body: &BodyDefinition, cell_m_f: Gf) -> Gf {
-    let carve_any = tubes_carve_at(body, cell_m_f) | caverns_carve_at(body, cell_m_f);
+/// A cell centre's radius in gap steps at [`LENGTH_BITS`] — exact (the leaf's own integer twin).
+#[must_use]
+pub(crate) fn cell_radius(body: &BodyDefinition, k: i32, rung: u8) -> Gi {
+    Gi::new(body.ladder.cell_radius_steps(k, rung)) << LENGTH_BITS
+}
+
+/// A cell's lower corner radius in gap steps at [`LENGTH_BITS`] — exact.
+#[must_use]
+pub(crate) fn corner_radius(body: &BodyDefinition, k: i32, rung: u8) -> Gi {
+    Gi::new(body.ladder.corner_radius_steps(k, rung)) << LENGTH_BITS
+}
+
+/// How far under a surface the strata and the caves can still change a cell, in gap steps at
+/// [`LENGTH_BITS`], at a rung.
+pub(crate) fn reach_steps(body: &BodyDefinition, rung: u8) -> Gi {
+    let carve_any = tubes_carve_at(body, rung) | caverns_carve_at(body, rung);
     let cave_reach = if carve_any {
-        Gf::from_i64(i64::from(body.caves.max_depth_m)) + body.caves.cavern_scale_m
+        (Gi::new(i64::from(body.caves.max_depth_m) * STEPS_PER_M) + body.caves.cavern_scale_steps)
+            << LENGTH_BITS
     } else {
-        Gf::ZERO
+        Gi::ZERO
     };
-    let strata_reach = Gf::from_i64(i64::from(body.strata.max_depth_m())) + Gf::ONE;
-    strata_reach.greater(cave_reach)
+    let strata_reach =
+        Gi::new((i64::from(body.strata.max_depth_m()) + 1) * STEPS_PER_M) << LENGTH_BITS;
+    greater(strata_reach, cave_reach)
+}
+
+/// A point in the body's frame, in WHOLE gap steps: a direction at the bend's fraction bits times a
+/// radius in whole gap steps, through the two-word product. What the carvers read.
+#[must_use]
+pub(crate) fn point_at(dir: [Gi; 3], radius_steps: Gi) -> [Gi; 3] {
+    [
+        dir[0].mul_shr(radius_steps, DIR_BITS),
+        dir[1].mul_shr(radius_steps, DIR_BITS),
+        dir[2].mul_shr(radius_steps, DIR_BITS),
+    ]
+}
+
+/// The tubes that can reach a box of cells whose centre and eight corners are given in gap steps: the
+/// regions around the corners, then only the tubes within their radius of the box's bounding sphere. A
+/// SUPERSET of what any one cell's owner keeps, and a hollow is the exact greatest over the list, so
+/// the superset changes no byte. The cell pass and the halo share it.
+#[must_use]
+pub(crate) fn tubes_reaching(
+    body: &BodyDefinition,
+    centre: [Gi; 3],
+    corners: [[Gi; 3]; 8],
+) -> Vec<crate::carve::Tube> {
+    let mut reach = Gi::ZERO;
+    let mut lo = tube_region(body, centre);
+    let mut hi = lo;
+    let mut corner = 0;
+    while corner < 8 {
+        let p = corners[corner];
+        let mut sum = 0u64;
+        let mut axis = 0;
+        while axis < 3 {
+            let d = (p[axis] - centre[axis]).unsigned_abs();
+            sum = sum.wrapping_add(d.wrapping_mul(d));
+            axis += 1;
+        }
+        reach = greater(reach, Gi::new(isqrt(sum) as i64));
+        let region = tube_region(body, p);
+        let mut axis = 0;
+        while axis < 3 {
+            lo[axis] = lo[axis].min(region[axis]);
+            hi[axis] = hi[axis].max(region[axis]);
+            axis += 1;
+        }
+        corner += 1;
+    }
+    let mut tubes = Vec::new();
+    for tube in tubes_near(body, lo, hi) {
+        if tube.distance_steps(centre) <= reach + tube.radius_steps {
+            tubes.push(tube);
+        }
+    }
+    tubes
 }
 
 /// The cell pass: every cell of the chunk, in packing order. Public so a test can compare a skipped
@@ -310,51 +401,31 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
     let rung = key.rung;
     let edge = CHUNK_EDGE as i32;
     let (i0, j0, k0) = (key.x * edge, key.y * edge, key.z * edge);
-    let cell_m_f = Gf::from_i64(i64::from(cell_m(rung)));
-    let r_low = Gf::from_f64(body.ladder.corner_radius_m(k0, rung));
-    let r_high = Gf::from_f64(body.ladder.corner_radius_m(k0 + edge, rung));
-    let carve_tubes = tubes_carve_at(body, cell_m_f);
-    let carve_caverns = caverns_carve_at(body, cell_m_f);
+    let r_low = body.ladder.corner_radius_steps(k0, rung);
+    let r_high = body.ladder.corner_radius_steps(k0 + edge, rung);
+    let carve_tubes = tubes_carve_at(body, rung);
+    let carve_caverns = caverns_carve_at(body, rung);
     let carve_any = carve_tubes | carve_caverns;
     // The tubes that can reach this chunk: every tube of the regions around the chunk's own, then
     // only those that come within their radius of the chunk's bounding sphere (most chunks keep
     // none, and then no cell pays a segment distance).
     let mut tubes = Vec::new();
     if carve_tubes {
-        let centre_col = column.columns[(CHUNK_EDGE / 2) * CHUNK_EDGE + CHUNK_EDGE / 2].0;
-        let r_mid = (r_low + r_high) * Gf::HALF;
-        let centre = [
-            centre_col[0] * r_mid,
-            centre_col[1] * r_mid,
-            centre_col[2] * r_mid,
-        ];
-        let mut reach = Gf::ZERO;
-        let mut lo = tube_region(body, centre);
-        let mut hi = lo;
+        let half = CHUNK_EDGE >> 1;
+        let centre_col = column.columns[half * CHUNK_EDGE + half].0;
+        let r_mid = Gi::new((r_low + r_high) >> 1);
+        let centre = point_at(centre_col, r_mid);
+        let mut corners = [[Gi::ZERO; 3]; 8];
         let mut corner = 0;
         while corner < 8 {
             let a = if corner & 1 == 0 { 0 } else { CHUNK_EDGE - 1 };
             let b = if corner & 2 == 0 { 0 } else { CHUNK_EDGE - 1 };
             let (dir, _, _) = column.columns[b * CHUNK_EDGE + a];
-            let r = if corner & 4 == 0 { r_low } else { r_high };
-            let p = [dir[0] * r, dir[1] * r, dir[2] * r];
-            let d = [p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]];
-            reach = reach.greater((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
-            let region = tube_region(body, p);
-            let mut axis = 0;
-            while axis < 3 {
-                lo[axis] = lo[axis].min(region[axis]);
-                hi[axis] = hi[axis].max(region[axis]);
-                axis += 1;
-            }
+            let r = Gi::new(if corner & 4 == 0 { r_low } else { r_high });
+            corners[corner] = point_at(dir, r);
             corner += 1;
         }
-        for tube in tubes_near(body, lo, hi) {
-            let d = crate::carve::segment_distance_m(tube.start, tube.end, centre);
-            if d <= reach + tube.radius_m {
-                tubes.push(tube);
-            }
-        }
+        tubes = tubes_reaching(body, centre, corners);
     }
     // The cavern lattice on the GLOBAL node grid (one node per `CAVERN_STRIDE` cells of the face and
     // of the radial, counted from the face's and the band's origin), so two neighbouring chunks share
@@ -362,8 +433,10 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
     // direction comes from its own face parameter, never from a clamped column. A PARTIAL chunk at a
     // face's far edge holds the partner face's columns as well: those read a lattice of the
     // partner's own nodes, built over exactly the columns present.
-    let stride = CAVERN_STRIDE as i32;
-    let node0 = [i0 / stride, j0 / stride, k0 / stride];
+    // The node a cell sits in is the stride's own SHIFT, never a divide (ruling F7): the stride is a
+    // power of two, and the shift floors on both sides of zero, which is what the halo's `−1` wants.
+    let node = |v: i32| v >> CAVERN_STRIDE_LOG2;
+    let node0 = [node(i0), node(j0), node(k0)];
     let lattice = if carve_caverns {
         NodeLattice::build(body, rung, key.face, node0, [CAVERN_NODES; 3])
     } else {
@@ -374,17 +447,12 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
     } else {
         Vec::new()
     };
-    let cave_min = Gf::from_i64(i64::from(body.caves.min_depth_m));
-    let cave_max = Gf::from_i64(i64::from(body.caves.max_depth_m));
-    let rule = CaveRule {
-        carve_any,
-        cave_min,
-        cave_max,
-    };
+    let rule = CaveRule::of(body, carve_any);
     let mut cells = Vec::with_capacity(CHUNK_CELLS);
     let mut c = 0;
     while c < CHUNK_EDGE {
-        let r = Gf::from_f64(body.ladder.cell_radius_m(k0 + c as i32, rung));
+        let r_steps = Gi::new(body.ladder.cell_radius_steps(k0 + c as i32, rung));
+        let r = r_steps << LENGTH_BITS;
         let mut b = 0;
         while b < CHUNK_EDGE {
             let mut a = 0;
@@ -401,7 +469,7 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
                 let value = if carve_caverns & rule.in_band(h - r) {
                     cavern_of(&lattice, &foreign, site, k)
                 } else {
-                    Gf::ZERO
+                    Gi::ZERO
                 };
                 cells.push(finish_cell(
                     body,
@@ -409,8 +477,8 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
                         dir,
                         h,
                         biome,
-                        r,
-                        cell_m_f,
+                        r_steps,
+                        rung,
                     },
                     &rule,
                     value,
@@ -437,7 +505,8 @@ pub(crate) struct NodeLattice {
     pub face: Face,
     pub node0: [i32; 3],
     pub dims: [usize; 3],
-    pub values: Vec<Gf>,
+    /// The field at each node, at the noise's fraction bits.
+    pub values: Vec<Gi>,
 }
 
 impl NodeLattice {
@@ -449,20 +518,20 @@ impl NodeLattice {
         node0: [i32; 3],
         dims: [usize; 3],
     ) -> NodeLattice {
-        let n_l = body.ladder.cells_per_edge(rung);
+        let inv_n = body.inv_n(rung);
         let s = CAVERN_STRIDE as i32;
         let mut values = Vec::with_capacity(dims[0] * dims[1] * dims[2]);
         let mut nc = 0;
         while nc < dims[2] {
             let k = (node0[2] + nc as i32) * s;
-            let r = Gf::from_f64(body.ladder.corner_radius_m(k, rung));
+            let r = Gi::new(body.ladder.corner_radius_steps(k, rung));
             let mut nb = 0;
             while nb < dims[1] {
                 let j = (node0[1] + nb as i32) * s;
                 let mut na = 0;
                 while na < dims[0] {
                     let i = (node0[0] + na as i32) * s;
-                    values.push(node_value(body, face, n_l, i, j, r));
+                    values.push(node_value(body, face, inv_n, i, j, r));
                     na += 1;
                 }
                 nb += 1;
@@ -488,19 +557,29 @@ impl NodeLattice {
     }
 
     /// The field at a global cell of this face, interpolated from the eight nodes around it with
-    /// weights that are multiples of `1/CAVERN_STRIDE`: exact on every target, and the same number
-    /// from whichever lattice holds the nodes.
+    /// weights that are multiples of `1/CAVERN_STRIDE`: the stride is a power of two, so each weight
+    /// is an exact word at the noise's fraction bits — the same number on every target, and the same
+    /// number from whichever lattice holds the nodes.
+    ///
+    /// ★ NO `/` AND NO `%` (ruling F7): the stride is a power of two, so the node a cell sits in is an
+    /// arithmetic SHIFT and the weight inside the node pair is a MASK. The shift and the mask carry
+    /// FLOOR semantics on both sides of zero, which is what a halo wants: a cell at `−1` reads the node
+    /// pair `(−1, 0)` with the weight three quarters, instead of the truncating divide's pair `(0, 1)`
+    /// with the weight minus one quarter — an EXTRAPOLATION past the field's own node. (A cell index is
+    /// non-negative on every path the generator walks today, so this changes no byte of the world; it
+    /// is the arithmetic a GPU kernel can run, and it is right where the float recipe was wrong.)
     #[inline]
-    pub(crate) fn value_at(&self, cell: [i32; 3]) -> Gf {
-        let s = CAVERN_STRIDE as i32;
+    pub(crate) fn value_at(&self, cell: [i32; 3]) -> Gi {
+        let node = |v: i32| v >> CAVERN_STRIDE_LOG2;
         let (na, nb, nc) = (
-            (cell[0] / s - self.node0[0]) as usize,
-            (cell[1] / s - self.node0[1]) as usize,
-            (cell[2] / s - self.node0[2]) as usize,
+            (node(cell[0]) - self.node0[0]) as usize,
+            (node(cell[1]) - self.node0[1]) as usize,
+            (node(cell[2]) - self.node0[2]) as usize,
         );
         let at =
             |x: usize, y: usize, z: usize| self.values[(z * self.dims[1] + y) * self.dims[0] + x];
-        let stride = Gf::from_i64(CAVERN_STRIDE as i64);
+        let mask = CAVERN_STRIDE as i32 - 1;
+        let weight = |v: i32| Gi::new(i64::from(v & mask)) << (LENGTH_BITS - CAVERN_STRIDE_LOG2);
         trilinear8(
             [
                 at(na, nb, nc),
@@ -512,11 +591,7 @@ impl NodeLattice {
                 at(na, nb + 1, nc + 1),
                 at(na + 1, nb + 1, nc + 1),
             ],
-            [
-                Gf::from_i32(cell[0] % s) / stride,
-                Gf::from_i32(cell[1] % s) / stride,
-                Gf::from_i32(cell[2] % s) / stride,
-            ],
+            [weight(cell[0]), weight(cell[1]), weight(cell[2])],
         )
     }
 }
@@ -532,7 +607,8 @@ pub(crate) fn foreign_lattices(
     k_node0: i32,
     k_dims: usize,
 ) -> Vec<NodeLattice> {
-    let s = CAVERN_STRIDE as i32;
+    // The node a face index sits in: the stride's shift, as `NodeLattice::value_at` reads it.
+    let node = |v: i32| v >> CAVERN_STRIDE_LOG2;
     let mut out: Vec<NodeLattice> = Vec::new();
     for face in Face::ALL {
         if face == my_face {
@@ -549,10 +625,10 @@ pub(crate) fn foreign_lattices(
             }
         }
         if any {
-            let node0 = [lo[0] / s, lo[1] / s, k_node0];
+            let node0 = [node(lo[0]), node(lo[1]), k_node0];
             let dims = [
-                (hi[0] / s - node0[0] + 2) as usize,
-                (hi[1] / s - node0[1] + 2) as usize,
+                (node(hi[0]) - node0[0] + 2) as usize,
+                (node(hi[1]) - node0[1] + 2) as usize,
                 k_dims,
             ];
             out.push(NodeLattice::build(body, rung, face, node0, dims));
@@ -572,7 +648,7 @@ pub(crate) fn cavern_of(
     foreign: &[NodeLattice],
     site: crate::lattice::Site,
     k: i32,
-) -> Gf {
+) -> Gi {
     if site.face == own.face.index() {
         return own.value_at([site.i, site.j, k]);
     }
@@ -581,35 +657,54 @@ pub(crate) fn cavern_of(
             return lattice.value_at([site.i, site.j, k]);
         }
     }
-    Gf::ZERO
+    Gi::ZERO
 }
 
 /// The cavern field at one global node: the node's own direction on its face, at the corner
-/// radius `r` of its radial index. Shared by the cell pass and the halo.
-pub(crate) fn node_value(body: &BodyDefinition, face: Face, n_l: u32, i: i32, j: i32, r: Gf) -> Gf {
-    let dir = dir_of(face, n_l, i, j);
-    cavern_value(body, [dir[0] * r, dir[1] * r, dir[2] * r])
+/// radius `r` (in whole gap steps) of its radial index. Shared by the cell pass and the halo.
+pub(crate) fn node_value(
+    body: &BodyDefinition,
+    face: Face,
+    inv_n: Gi,
+    i: i32,
+    j: i32,
+    r: Gi,
+) -> Gi {
+    cavern_value(body, point_at(dir_of(face, inv_n, i, j), r))
 }
 
 /// What a cell's column and radial layer state about it: the inputs of the per-cell tail.
 pub(crate) struct CellSite {
-    pub dir: [Gf; 3],
-    pub h: Gf,
+    /// The column's direction, at the bend's fraction bits.
+    pub dir: [Gi; 3],
+    /// The column's surface radius, in gap steps at [`LENGTH_BITS`].
+    pub h: Gi,
     pub biome: Biome,
-    pub r: Gf,
-    pub cell_m_f: Gf,
+    /// The cell centre's radius in WHOLE gap steps — exact.
+    pub r_steps: Gi,
+    pub rung: u8,
 }
 
-/// The body's cave band at a rung: whether anything carves, and between which depths.
+/// The body's cave band at a rung: whether anything carves, and between which depths (in gap steps at
+/// [`LENGTH_BITS`]).
 pub(crate) struct CaveRule {
     pub carve_any: bool,
-    pub cave_min: Gf,
-    pub cave_max: Gf,
+    pub cave_min: Gi,
+    pub cave_max: Gi,
 }
 
 impl CaveRule {
+    /// The rule of a body at a rung.
+    pub(crate) fn of(body: &BodyDefinition, carve_any: bool) -> CaveRule {
+        CaveRule {
+            carve_any,
+            cave_min: Gi::new(i64::from(body.caves.min_depth_m) * STEPS_PER_M) << LENGTH_BITS,
+            cave_max: Gi::new(i64::from(body.caves.max_depth_m) * STEPS_PER_M) << LENGTH_BITS,
+        }
+    }
+
     /// Whether a cell at `depth` under the surface can hold a cave at this rung.
-    pub(crate) fn in_band(&self, depth: Gf) -> bool {
+    pub(crate) fn in_band(&self, depth: Gi) -> bool {
         self.carve_any & (depth >= self.cave_min) & (depth <= self.cave_max)
     }
 }
@@ -618,46 +713,60 @@ impl CaveRule {
 /// a cell's radius, the interpolated cavern value and the tubes that can reach it, the cell's
 /// substance and gap. One function, so a halo cell computed by one chunk is byte-identical to the
 /// same cell computed by the chunk that owns it.
+///
+/// ★ The whole tail is integers (ruling F7): one subtraction for the gap, ONE shift by
+/// `rung + LENGTH_BITS` that divides by the cell's width and floors in the same step, and the clamp to
+/// the byte. A hollow comes in as gap steps of METRE and shifts by the rung alone to become gap steps
+/// of CELL.
 #[inline]
 pub(crate) fn finish_cell(
     body: &BodyDefinition,
     site: &CellSite,
     rule: &CaveRule,
-    value: Gf,
+    value: Gi,
     tubes: &[crate::carve::Tube],
 ) -> Cell {
-    let (dir, h, r, cell_m_f) = (site.dir, site.h, site.r, site.cell_m_f);
-    let rock_gap_cells = ((r - h) / cell_m_f).clamp(-Gf::ONE, Gf::ONE);
-    let depth = h - r;
-    let mut gap_cells = rock_gap_cells;
-    let mut stratum = if rock_gap_cells >= Gf::ZERO {
+    let r = site.r_steps << LENGTH_BITS;
+    let depth = site.h - r;
+    // The rock's gap in gap steps OF A CELL: `(r − h) / cell`, floored once. A cell whose centre is
+    // exactly on the surface reads 0, which is air.
+    let rock_steps = (r - site.h) >> (u32::from(site.rung) + LENGTH_BITS);
+    let mut gap_steps = rock_steps;
+    let mut stratum = if depth <= Gi::ZERO {
         fluid_at(body, r)
     } else {
-        body.strata
-            .at(site.biome, depth.floor().to_i64_floor().max(0) as u32)
+        let depth_m = depth >> (LENGTH_BITS + STEP_SHIFT);
+        body.strata.at(site.biome, depth_m.raw() as u32)
     };
     // The cavern lattice is all zero where caverns do not carve, and the tube list is empty where
     // tubes do not: both contribute nothing there, with no branch.
     if rule.in_band(depth) {
-        let p = [dir[0] * r, dir[1] * r, dir[2] * r];
-        let hollow_m = cavern_hollow_m(body, value).greater(tube_hollow_m(tubes, p));
-        if hollow_m > Gf::ZERO {
-            // A hollow is never negative, so the greater is in air: the cell is hollow.
-            gap_cells = gap_cells.greater((hollow_m / cell_m_f).clamp(Gf::ZERO, Gf::ONE));
+        let p = point_at(site.dir, site.r_steps);
+        let hollow_steps = greater(
+            cavern_hollow_steps(body, value),
+            tube_hollow_steps(tubes, p),
+        );
+        if hollow_steps > Gi::ZERO {
+            // A hollow is never negative, so the greater is in air: the cell is hollow. The hollow is
+            // metres of gap step; the rung's shift makes it cells of gap step.
+            gap_steps = greater(gap_steps, hollow_steps >> u32::from(site.rung));
             stratum = Stratum::Air;
         }
     }
     Cell {
         stratum,
-        gap: quantise_gap(gap_cells),
+        gap: quantise_gap(gap_steps),
     }
 }
 
-/// The trilinear blend of eight node values `v[(c·2 + b)·2 + a]` at weights `t`: the one arithmetic
-/// the cell pass and the halo share.
+/// The shift from gap steps to whole metres: 128 steps a metre.
+const STEP_SHIFT: u32 = STEPS_PER_M.trailing_zeros();
+
+/// The trilinear blend of eight node values `v[(c·2 + b)·2 + a]` at weights `t`, at the noise's
+/// fraction bits: the one arithmetic the cell pass and the halo share.
 #[inline]
-pub(crate) fn trilinear8(v: [Gf; 8], t: [Gf; 3]) -> Gf {
-    let l = |p: Gf, q: Gf, w: Gf| p + w * (q - p);
+pub(crate) fn trilinear8(v: [Gi; 8], t: [Gi; 3]) -> Gi {
+    let l = |p: Gi, q: Gi, w: Gi| p + ((w * (q - p)) >> LENGTH_BITS);
     let x00 = l(v[0], v[1], t[0]);
     let x10 = l(v[2], v[3], t[0]);
     let x01 = l(v[4], v[5], t[0]);
@@ -675,8 +784,17 @@ pub fn generate(body: &BodyDefinition, key: ChunkKey) -> Option<ChunkLattice> {
 
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
     use crate::home::home_planet;
+    use vd_seed::ladder::cell_m;
 
     fn key(face: Face, rung: u8, x: i32, y: i32, z: i32) -> ChunkKey {
         ChunkKey {
@@ -694,17 +812,17 @@ mod tests {
 
     /// The column of the first `count` sampled columns whose surface stands deepest under the sea,
     /// by the column pass alone (cheap), with how deep.
-    fn deepest_sea_column(m: &BodyDefinition, rung: u8, count: i32) -> (Face, i32, i32, Gf) {
+    fn deepest_sea_column(m: &BodyDefinition, rung: u8, count: i32) -> (Face, i32, i32, Gi) {
         let chunks = m.ladder.cells_per_edge(rung) as i32 / CHUNK_EDGE as i32;
-        let mut best = (Face::PosX, 0, 0, Gf::from_f64(f64::NEG_INFINITY));
+        let mut best = (Face::PosX, 0, 0, Gi::ZERO);
         let mut i = 0;
         while i < count {
             let face = Face::ALL[(i % 6) as usize];
             let x = (i * 7919) % chunks;
             let y = (i * 104_729) % chunks;
             let column = column_field(m, face, rung, x, y).expect("a column");
-            let depth = m.sea_radius_m - column.highest_m;
-            if depth > best.3 {
+            let depth = m.sea_radius - column.highest;
+            if (i == 0) | (depth > best.3) {
                 best = (face, x, y, depth);
             }
             i += 1;
@@ -712,18 +830,25 @@ mod tests {
         best
     }
 
+    /// A whole number of metres as gap steps at the length format's fraction bits.
+    fn s(metres: i64) -> Gi {
+        Gi::new(metres * STEPS_PER_M) << LENGTH_BITS
+    }
+
     #[test]
     fn the_gap_quantises_to_a_signed_byte_and_clamps() {
-        assert_eq!(quantise_gap(Gf::ZERO), 0, "on the surface: zero, and air");
-        assert_eq!(quantise_gap(Gf::from_f64(-0.3)), -39, "floor(-38.4)");
-        assert_eq!(quantise_gap(Gf::from_f64(0.5)), 64);
+        // The steps arrive already floored by the one shift, so this is the clamp and nothing else.
+        assert_eq!(quantise_gap(Gi::ZERO), 0, "on the surface: zero, and air");
+        assert_eq!(quantise_gap(Gi::new(-39)), -39);
+        assert_eq!(quantise_gap(Gi::new(64)), 64);
         assert_eq!(
-            quantise_gap(Gf::ONE),
+            quantise_gap(Gi::new(128)),
             127,
             "one cell clamps to the top code, one step short"
         );
-        assert_eq!(quantise_gap(-Gf::ONE), -128);
-        assert_eq!(quantise_gap(Gf::from_i64(9)), 127);
+        assert_eq!(quantise_gap(Gi::new(-128)), -128);
+        assert_eq!(quantise_gap(Gi::new(-5_000)), -128);
+        assert_eq!(quantise_gap(Gi::new(9 * 128)), 127);
     }
 
     #[test]
@@ -767,7 +892,7 @@ mod tests {
         // The column pass is shared: the chunk is the same whether built alone or in the column.
         let column = column_field(&m, Face::PosX, 0, 300, 700).expect("a column");
         assert_eq!(generate_in(&m, &column, z), Some(chunk));
-        assert!(column.lowest_m <= column.highest_m);
+        assert!(column.lowest <= column.highest);
         assert_eq!(column.columns.len(), CHUNK_EDGE * CHUNK_EDGE);
         assert_eq!(generate_in(&m, &column, -1), None, "below the band");
         let other = column_field(&m, Face::PosX, 0, 301, 700).expect("a column");
@@ -856,21 +981,22 @@ mod tests {
         // "above" still starts under the sea and must hold water.
         let rung = 2;
         let (face, x, y, depth) = deepest_sea_column(&m, rung, 300);
-        let chunk_m = Gf::from_i64(i64::from(cell_m(rung)) * CHUNK_EDGE as i64);
-        let two_cells = Gf::from_i64(2 * i64::from(cell_m(rung)));
+        let chunk_m = s(i64::from(cell_m(rung)) * CHUNK_EDGE as i64);
+        let two_cells = s(2 * i64::from(cell_m(rung)));
         assert!(
             depth > chunk_m + two_cells,
             "the home planet's sea stands more than a chunk deep somewhere: {depth:?}"
         );
         let column = column_field(&m, face, rung, x, y).expect("a column");
-        let z_high = ((column.highest_m.to_i64_floor() - i64::from(m.ladder.floor_m))
+        let highest_m = (column.highest >> (LENGTH_BITS + 7)).raw();
+        let z_high = ((highest_m - i64::from(m.ladder.floor_m))
             / (i64::from(cell_m(rung)) * CHUNK_EDGE as i64)) as i32;
         // The chunk right above the one that holds the highest surface: on THE world (SL5, one world,
         // so this is a pinned fact, not luck) its lowest cell centre stands more than a cell over that
         // surface, and its floor is still under the sea.
         let z = z_high + 1;
         assert!(
-            Gf::from_f64(m.ladder.corner_radius_m(z * CHUNK_EDGE as i32, rung)) < m.sea_radius_m,
+            corner_radius(&m, z * CHUNK_EDGE as i32, rung) < m.sea_radius,
             "the chunk's floor is under the sea"
         );
         let under_sea = generate_in(&m, &column, z).expect("in the band");
@@ -891,7 +1017,7 @@ mod tests {
         // The sea stands where the surface dips under it: the deepest sampled column's surface chunk
         // holds water and, below the water, rock.
         let (face, x, y, depth) = deepest_sea_column(&m, rung, 300);
-        assert!(depth > Gf::ZERO, "the home planet has a sea");
+        assert!(depth > Gi::ZERO, "the home planet has a sea");
         let zs = surface_z(&m, face, rung, x, y);
         let sea = generate(&m, key(face, rung, x, y, zs)).expect("in the ladder");
         assert!(sea.cells.iter().any(|c| c.stratum == Stratum::Water));
@@ -923,9 +1049,8 @@ mod tests {
         assert!(hollow > 0, "some cave cells under the fine surface");
         // At a coarse rung the same ground carries no cave: the cell is wider than the detail.
         let rung = m.ladder.rungs - 1;
-        let cell_m_f = Gf::from_i64(i64::from(cell_m(rung)));
-        assert!(!tubes_carve_at(&m, cell_m_f));
-        assert!(!caverns_carve_at(&m, cell_m_f));
+        assert!(!tubes_carve_at(&m, rung));
+        assert!(!caverns_carve_at(&m, rung));
         let zc = surface_z(&m, Face::PosZ, rung, 0, 0);
         let coarse = generate(&m, key(Face::PosZ, rung, 0, 0, zc)).expect("in the ladder");
         assert_eq!(coarse.how, How::Evaluated);
@@ -940,20 +1065,21 @@ mod tests {
             face: Face::PosX,
             node0,
             dims: [CAVERN_NODES; 3],
-            values: vec![Gf::ZERO; CAVERN_NODES * CAVERN_NODES * CAVERN_NODES],
+            values: vec![Gi::ZERO; CAVERN_NODES * CAVERN_NODES * CAVERN_NODES],
         };
+        let one = Gi::ONE << LENGTH_BITS;
         let mut lattice_a = blank([0, 0, 0]);
         let mut lattice_b = blank([15, 0, 0]);
         // Chunk A covers cells 0..62 (global nodes 0..=16); chunk B covers 62..124 (node0 = 15,
         // global nodes 15..=31). Give global node 16 the value one in both.
-        lattice_a.values[16] = Gf::ONE;
-        lattice_b.values[1] = Gf::ONE;
+        lattice_a.values[16] = one;
+        lattice_b.values[1] = one;
         // Global cell 63 sits in chunk B, three quarters of the way from node 15 (cell 60) to node
-        // 16 (cell 64); chunk A holds cell 61, a quarter of the way.
-        assert_eq!(lattice_b.value_at([63, 0, 0]), Gf::from_f64(0.75));
-        assert_eq!(lattice_a.value_at([61, 0, 0]), Gf::from_f64(0.25));
-        assert_eq!(lattice_b.value_at([64, 0, 0]), Gf::ONE, "exact on the node");
-        assert_eq!(lattice_a.value_at([0, 0, 0]), Gf::ZERO);
+        // 16 (cell 64); chunk A holds cell 61, a quarter of the way. The weights are exact words.
+        assert_eq!(lattice_b.value_at([63, 0, 0]), (one >> 2) * Gi::new(3));
+        assert_eq!(lattice_a.value_at([61, 0, 0]), one >> 2);
+        assert_eq!(lattice_b.value_at([64, 0, 0]), one, "exact on the node");
+        assert_eq!(lattice_a.value_at([0, 0, 0]), Gi::ZERO);
         // An empty lattice is what a rung without caverns holds; it is never read.
         let none = NodeLattice::empty(Face::NegY);
         assert_eq!(none.values.len(), 0);

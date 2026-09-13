@@ -45,6 +45,12 @@ pub const fn cell_m(rung: u8) -> u32 {
     1 << rung
 }
 
+/// ★ GAP STEPS PER METRE — the integer recipe's unit of length (ruling F7): one step is 1/128 m,
+/// which is the density byte's own step at the one-metre rung. Every radius, every surface and every
+/// cave hollow the recipe holds is a whole number of these steps or a fixed-point fraction of one.
+/// Pinned against `vd_recipe::height::GAP_STEPS_PER_CELL` by the generator's own test.
+pub const STEPS_PER_M: i64 = 128;
+
 /// The first rung with at most [`TOP_RUNG_CHUNKS`] chunks along a face edge of `n` cells.
 #[must_use]
 pub fn top_rung_for(n: f64) -> u32 {
@@ -110,10 +116,12 @@ impl Ladder {
         self.n >> rung
     }
 
-    /// Whole cells in the band at a rung.
+    /// Whole cells in the band at a rung: the band's metres over the rung's cell width. A cell is a
+    /// POWER OF TWO metres, so the division is the rung's own shift (ruling F7: no `/` on the recipe's
+    /// path) and the answer is the same whole number it always was.
     #[must_use]
     pub const fn cells_in_band(&self, rung: u8) -> u32 {
-        self.band_m / cell_m(rung)
+        self.band_m >> rung
     }
 
     /// Whether the address is inside the body's grid at that rung.
@@ -138,6 +146,22 @@ impl Ladder {
     pub fn corner_radius_m(&self, k: i32, rung: u8) -> f64 {
         f64::from(self.floor_m) + f64::from(k) * f64::from(cell_m(rung))
     }
+
+    /// ★ THE INTEGER TWIN of [`Ladder::cell_radius_m`]: a cell centre's radius in GAP STEPS
+    /// ([`STEPS_PER_M`], 1/128 m), EXACT. The floor is whole metres and a cell is a power of two
+    /// metres, so `floor + (k + ½)·cell` is a half-integer count of metres and 128 times it is a
+    /// whole number — the integer recipe's density never rounds the radius (ruling F7).
+    #[must_use]
+    pub const fn cell_radius_steps(&self, k: i32, rung: u8) -> i64 {
+        (self.floor_m as i64) * STEPS_PER_M
+            + (2 * (k as i64) + 1) * (cell_m(rung) as i64) * (STEPS_PER_M >> 1)
+    }
+
+    /// ★ THE INTEGER TWIN of [`Ladder::corner_radius_m`]: a cell's lower corner in gap steps, exact.
+    #[must_use]
+    pub const fn corner_radius_steps(&self, k: i32, rung: u8) -> i64 {
+        (self.floor_m as i64) * STEPS_PER_M + (k as i64) * (cell_m(rung) as i64) * STEPS_PER_M
+    }
 }
 
 /// The face parameter of a cell's centre: `(2i + 1)/n_l − 1`, in `(−1, 1)`.
@@ -161,6 +185,14 @@ pub fn index_of(a: f64, n_l: u32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
 
     #[test]
@@ -174,13 +206,33 @@ mod tests {
         assert_eq!(earth.cells_per_edge(0), earth.n);
         assert_eq!(earth.cells_per_edge(3), earth.n >> 3);
         assert_eq!(earth.cells_in_band(0), earth.band_m);
-        assert_eq!(earth.cells_in_band(4), earth.band_m / 16);
+        assert_eq!(earth.cells_in_band(4), earth.band_m >> 4);
         assert!(earth.holds(0, 0, 0, 0));
         assert!(!earth.holds(earth.rungs, 0, 0, 0), "past the top rung");
         assert!(!earth.holds(0, -1, 0, 0));
         assert!(!earth.holds(0, 0, 0, earth.band_m as i32));
         assert_eq!(earth.cell_radius_m(0, 0), f64::from(earth.floor_m) + 0.5);
         assert_eq!(earth.corner_radius_m(2, 1), f64::from(earth.floor_m) + 4.0);
+        // The integer twins: the same radius in gap steps, exactly, at every rung and on both sides
+        // of the band's floor (the halo reads a `k` of −1).
+        let floor_steps = i64::from(earth.floor_m) * STEPS_PER_M;
+        assert_eq!(earth.cell_radius_steps(0, 0), floor_steps + 64);
+        assert_eq!(earth.corner_radius_steps(2, 1), floor_steps + 4 * 128);
+        assert_eq!(earth.corner_radius_steps(-1, 0), floor_steps - 128);
+        for rung in [0u8, 1, 5, 12] {
+            for k in [-1i32, 0, 1, 61, 4_097] {
+                assert_eq!(
+                    earth.cell_radius_steps(k, rung) as f64 / STEPS_PER_M as f64,
+                    earth.cell_radius_m(k, rung),
+                    "cell ({k}, {rung})"
+                );
+                assert_eq!(
+                    earth.corner_radius_steps(k, rung) as f64 / STEPS_PER_M as f64,
+                    earth.corner_radius_m(k, rung),
+                    "corner ({k}, {rung})"
+                );
+            }
+        }
         assert_eq!(Ladder::for_radius(f64::NAN, 1, 1), None);
         assert_eq!(Ladder::for_radius(0.0, 1, 1), None);
         assert_eq!(Ladder::for_radius(1e16, 1, 1), None, "absurd");

@@ -69,7 +69,6 @@ use crate::skyline::{DISC_MARGIN, EyeFrame, Skyline, WALL_MAX_HALF_ANGLE};
 use vd_seed::bend::{Face, direction, face_coords, face_of, unbend};
 use vd_seed::ladder::{cell_m, face_param, index_of};
 use vd_terrain::BodyDefinition;
-use vd_terrain::Gf;
 use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey};
 use vd_terrain::digest::ColumnSpan;
 
@@ -206,7 +205,7 @@ pub fn reach_m(surface_m: f64, altitude_m: f64, relief_m: f64) -> f64 {
 /// The tallest ground the recipe can raise over its radius, in metres: the recipe's own bound.
 #[must_use]
 pub fn relief_m(body: &BodyDefinition) -> f64 {
-    body.relief_bound_m(0).to_f64()
+    body.relief_bound_m(0)
 }
 
 /// Where a wanted chunk stands for the band: in the hysteresis margin past its rung's switch, in
@@ -745,7 +744,7 @@ impl Sweep<'_> {
             let top_z = vd_terrain::digest::top_chunk_z(body, col.rung);
             // The lowest ground within the shadow's reach, for the casting set (item 18).
             if self.shadow.is_some_and(|s| geo.near <= s.reach_m) {
-                self.low_within_reach_m = self.low_within_reach_m.min(span.sampled_low_m.to_f64());
+                self.low_within_reach_m = self.low_within_reach_m.min(span.sampled_low_m);
             }
             let mut z = span.lo;
             while z <= span.hi.min(top_z) {
@@ -812,12 +811,7 @@ impl LadderView {
             return WantedSet::default();
         }
         let d = eye / len;
-        let surface = vd_terrain::height::height_m(
-            body,
-            [Gf::from_f64(d.x), Gf::from_f64(d.y), Gf::from_f64(d.z)],
-            0,
-        )
-        .to_f64();
+        let surface = vd_terrain::height::height_m(body, [d.x, d.y, d.z], 0);
         // THE FLOOR (item 12): an eye under the recipe's surface wants what an eye standing on
         // it wants.
         let altitude = floored_altitude_m(len - surface);
@@ -886,8 +880,8 @@ impl LadderView {
                 // drawn over it. Only a small column raises a wall: a wide one's chart quad
                 // over-claims ground, and its floor is loose anyway.
                 if geo.rho <= WALL_MAX_HALF_ANGLE {
-                    let floor = span.sampled_low_m.to_f64()
-                        - (span.peak_m - span.sampled_high_m).to_f64()
+                    let floor = span.sampled_low_m
+                        - (span.peak_m - span.sampled_high_m)
                         - f64::from(cell_m(col.rung))
                         - crate::chunks::sink_m(body, col.rung);
                     skyline.raise(&geo.quad, floor);
@@ -915,7 +909,7 @@ impl LadderView {
                 } else {
                     WANT_MARGIN_RAD
                 };
-                if !skyline.clears(geo.phi, geo.az, geo.rho, span.peak_m.to_f64(), margin) {
+                if !skyline.clears(geo.phi, geo.az, geo.rho, span.peak_m, margin) {
                     culled.insert(col);
                     continue;
                 }
@@ -974,7 +968,7 @@ impl LadderView {
                     x: key.x.div_euclid(1 << step),
                     y: key.y.div_euclid(1 << step),
                 };
-                let peak_m = self.span(body, caster).peak_m.to_f64();
+                let peak_m = self.span(body, caster).peak_m;
                 let low_m = if low_m == f64::MAX { peak_m } else { low_m };
                 // The caster's own nearest point, never nearer than the eye's height over the
                 // relief (a column wider than the eye is high reads under the eye by the disc).
@@ -1336,8 +1330,8 @@ mod tests {
     fn the_urgent_chunks_are_the_rungs_own_territory_and_the_gap_counts_the_missing() {
         let body = home_planet();
         let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
-        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
-        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let dir = [d[0], d[1], d[2]];
+        let surface = vd_terrain::height::height_m(&body, dir, 0);
         let eye = [
             d[0] * (surface + 3.4),
             d[1] * (surface + 3.4),
@@ -1466,8 +1460,8 @@ mod tests {
         assert!((floored_altitude_m(300.0) - 300.0).abs() < 1e-12);
         let body = home_planet();
         let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
-        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
-        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let dir = [d[0], d[1], d[2]];
+        let surface = vd_terrain::height::height_m(&body, dir, 0);
         let at = |h: f64| {
             [
                 d[0] * (surface + h),
@@ -1492,8 +1486,8 @@ mod tests {
     fn the_ladder_from_the_ground_reaches_the_horizon_coarse_first() {
         let body = home_planet();
         let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
-        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
-        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let dir = [d[0], d[1], d[2]];
+        let surface = vd_terrain::height::height_m(&body, dir, 0);
         let eye = [
             d[0] * (surface + 3.4),
             d[1] * (surface + 3.4),
@@ -1725,8 +1719,8 @@ mod tests {
         // horizon on every face it crosses.
         let faces: BTreeSet<Face> = w.keys.iter().map(|k| k.face).collect();
         assert!(faces.len() > 1, "{faces:?}");
-        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
-        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let dir = [d[0], d[1], d[2]];
+        let surface = vd_terrain::height::height_m(&body, dir, 0);
         assert_tiled(&body, &w, d, surface, r + 2.0e6 - surface);
         // From orbit over a point near a FACE EDGE, 43° from the face's centre, the cap reaches
         // 83° from that centre (the refuter's finding: a fold through one face stopped at 76°).
@@ -1737,12 +1731,8 @@ mod tests {
             edge_d[2] * (r + 2.0e6),
         ];
         let w_edge = view.wanted(&body, edge_eye);
-        let edge_dir = [
-            Gf::from_f64(edge_d[0]),
-            Gf::from_f64(edge_d[1]),
-            Gf::from_f64(edge_d[2]),
-        ];
-        let edge_surface = vd_terrain::height::height_m(&body, edge_dir, 0).to_f64();
+        let edge_dir = [edge_d[0], edge_d[1], edge_d[2]];
+        let edge_surface = vd_terrain::height::height_m(&body, edge_dir, 0);
         assert_tiled(
             &body,
             &w_edge,
@@ -1762,8 +1752,8 @@ mod tests {
         let body = home_planet();
         // The corner where +X, +Y and +Z meet, a little inside the +X face.
         let d = vd_seed::bend::normalize([1.0, 0.97, 0.97]);
-        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
-        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let dir = [d[0], d[1], d[2]];
+        let surface = vd_terrain::height::height_m(&body, dir, 0);
         // From 60 km up the horizon is 877 km: the three faces at the corner are all inside it.
         let eye = [
             d[0] * (surface + 60_000.0),

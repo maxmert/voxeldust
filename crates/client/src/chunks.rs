@@ -47,7 +47,6 @@ use vd_core::glam::DVec3;
 use vd_core::look::SurfaceStmt;
 use vd_core::pose::{FrameRef, RealmId};
 use vd_terrain::BodyDefinition;
-use vd_terrain::Gf;
 use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey};
 use vd_terrain::extract::{extract, extract_all_edges};
 use vd_terrain::lattice::sample_box;
@@ -63,7 +62,7 @@ pub fn sink_m(body: &BodyDefinition, rung: u8) -> f64 {
         return 0.0;
     }
     let finer = rung - 1;
-    (body.dropped_bound_m(rung) - body.dropped_bound_m(finer)).to_f64()
+    body.dropped_bound_m(rung) - body.dropped_bound_m(finer)
         + f64::from(vd_seed::ladder::cell_m(rung))
         + f64::from(vd_seed::ladder::cell_m(finer))
 }
@@ -425,16 +424,16 @@ impl ParentMesh {
         };
         let half = (CHUNK_EDGE / 2) as i16 * vd_terrain::VERTEX_QUANTUM as i16;
         let o = vertex_position_m(body, &samples, [half, half, half]);
-        let origin = DVec3::new(o[0].to_f64(), o[1].to_f64(), o[2].to_f64());
+        let origin = DVec3::new(o[0], o[1], o[2]);
         let positions: Vec<[f32; 3]> = mesh
             .vertices
             .iter()
             .map(|v| {
                 let p = vertex_position_m(body, &samples, *v);
                 [
-                    (p[0].to_f64() - origin.x) as f32,
-                    (p[1].to_f64() - origin.y) as f32,
-                    (p[2].to_f64() - origin.z) as f32,
+                    (p[0] - origin.x) as f32,
+                    (p[1] - origin.y) as f32,
+                    (p[2] - origin.z) as f32,
                 ]
             })
             .collect();
@@ -1042,7 +1041,7 @@ pub fn geometry_with(
     let mesh = extract(&samples);
     let half = (CHUNK_EDGE / 2) as i16 * vd_terrain::VERTEX_QUANTUM as i16;
     let origin = vertex_position_m(body, &samples, [half, half, half]);
-    let origin_m = [origin[0].to_f64(), origin[1].to_f64(), origin[2].to_f64()];
+    let origin_m = [origin[0], origin[1], origin[2]];
     let mut vertices: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
     let mut morph: Vec<f32> = Vec::with_capacity(mesh.vertices.len());
     let mut radials: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
@@ -1085,11 +1084,11 @@ pub fn geometry_with(
     for v in &mesh.vertices {
         let p = vertex_position_m(body, &samples, *v);
         vertices.push([
-            (p[0] - origin[0]).to_f64() as f32,
-            (p[1] - origin[1]).to_f64() as f32,
-            (p[2] - origin[2]).to_f64() as f32,
+            (p[0] - origin[0]) as f32,
+            (p[1] - origin[1]) as f32,
+            (p[2] - origin[2]) as f32,
         ]);
-        let abs = vd_core::glam::DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64());
+        let abs = vd_core::glam::DVec3::new(p[0], p[1], p[2]);
         let len = abs.length();
         let dir = abs / len;
         let target_m = if coarser == key.rung {
@@ -1123,18 +1122,7 @@ pub fn geometry_with(
             // radial is a fallback (counted; the gate bounds it), a vertex far under the field
             // is a cave's own and reads the field by nature.
             let field = on_mesh.map_or_else(
-                || {
-                    vd_terrain::height::height_m(
-                        body,
-                        [
-                            Gf::from_f64(dir.x),
-                            Gf::from_f64(dir.y),
-                            Gf::from_f64(dir.z),
-                        ],
-                        coarser,
-                    )
-                    .to_f64()
-                },
+                || vd_terrain::height::height_m(body, [dir.x, dir.y, dir.z], coarser),
                 |_| len,
             );
             let missing = on_mesh.is_none() & !at_seam;
@@ -1688,15 +1676,11 @@ pub fn eye_surface(body: &BodyDefinition, point_m: [f64; 3]) -> Option<EyeSurfac
     if !positive(len) {
         return None;
     }
-    let dir = [
-        Gf::from_f64(point_m[0] / len),
-        Gf::from_f64(point_m[1] / len),
-        Gf::from_f64(point_m[2] / len),
-    ];
+    let dir = [point_m[0] / len, point_m[1] / len, point_m[2] / len];
     let surface = vd_terrain::height::height_m(body, dir, 0);
     Some(EyeSurface {
-        surface_m: surface.to_f64(),
-        altitude_m: len - surface.to_f64(),
+        surface_m: surface,
+        altitude_m: len - surface,
         biome: vd_terrain::height::biome_at(body, dir, surface),
     })
 }
@@ -1760,12 +1744,8 @@ pub fn ruler_on_surface(
     let below = |t: f64| -> bool {
         let p = eye + fwd * t;
         let len = p.length();
-        let dir = [
-            Gf::from_f64(p.x / len),
-            Gf::from_f64(p.y / len),
-            Gf::from_f64(p.z / len),
-        ];
-        len <= vd_terrain::height::height_m(body, dir, rung).to_f64()
+        let dir = [p.x / len, p.y / len, p.z / len];
+        len <= vd_terrain::height::height_m(body, dir, rung)
     };
     // An eye at or under the drawn surface plants nothing: the bracket would close on the eye and
     // the ball would stand at the nose (the refuter's finding 7). The stamp's altitude says why.
@@ -2068,7 +2048,7 @@ mod tests {
             let mut k = 0;
             while k < 3 {
                 let drawn = g.origin_m[k] + f64::from(rel[k]);
-                worst = worst.max((drawn - p[k].to_f64()).abs());
+                worst = worst.max((drawn - p[k]).abs());
                 k += 1;
             }
             // Relative to the origin, a chunk is at most 62 m wide: the float holds micrometres.
@@ -2257,16 +2237,7 @@ mod tests {
             if v[0] <= 0 {
                 let t = o + DVec3::new(f64::from(m[0]), f64::from(m[1]), f64::from(m[2]));
                 let dir = t.normalize();
-                let field = vd_terrain::height::height_m(
-                    &body,
-                    [
-                        Gf::from_f64(dir.x),
-                        Gf::from_f64(dir.y),
-                        Gf::from_f64(dir.z),
-                    ],
-                    1,
-                )
-                .to_f64();
+                let field = vd_terrain::height::height_m(&body, [dir.x, dir.y, dir.z], 1);
                 let radius = t.length();
                 assert!((radius - field).abs() < 0.01, "{radius} vs {field}");
                 checked += 1;
@@ -2307,19 +2278,10 @@ mod tests {
                 .collect();
             for v in mesh.vertices.iter().step_by(7) {
                 let p = vertex_position_m(&body, &samples, *v);
-                let pv = DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64());
+                let pv = DVec3::new(p[0], p[1], p[2]);
                 let len = pv.length();
                 let dir = pv / len;
-                let field = vd_terrain::height::height_m(
-                    &body,
-                    [
-                        Gf::from_f64(dir.x),
-                        Gf::from_f64(dir.y),
-                        Gf::from_f64(dir.z),
-                    ],
-                    coarser,
-                )
-                .to_f64();
+                let field = vd_terrain::height::height_m(&body, [dir.x, dir.y, dir.z], coarser);
                 // The hit nearest the FIELD's own radius: the coarser surface, not a cave.
                 let hit = parents.iter().fold(None, |best: Option<f64>, pm| {
                     let (a, b) = parent_cell(key, pm.key(), *v);
@@ -2359,7 +2321,7 @@ mod tests {
         let mut met = 0;
         for v in mesh.vertices.iter().step_by(41) {
             let p = vertex_position_m(&body, &samples, *v);
-            let p = DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64());
+            let p = DVec3::new(p[0], p[1], p[2]);
             let (a, b) = (i32::from(v[0]).div_euclid(q), i32::from(v[1]).div_euclid(q));
             let r = p.length();
             let hit = pm.radial_hit_m(a, b, p / r, r).expect("its own radial");
@@ -2530,7 +2492,7 @@ mod tests {
         for (v, m) in mesh.vertices.iter().zip(gl.morph_targets().iter()) {
             // The exact radial of the vertex (the target's own is rounded through f32).
             let p = vertex_position_m(&body, &samples, *v);
-            let dir = DVec3::new(p[0].to_f64(), p[1].to_f64(), p[2].to_f64()).normalize();
+            let dir = DVec3::new(p[0], p[1], p[2]).normalize();
             let t = o + DVec3::new(f64::from(m[0]), f64::from(m[1]), f64::from(m[2]));
             let r = t.length();
             let on = parents.iter().any(|pm| {
@@ -2648,7 +2610,7 @@ mod tests {
         let body = home_planet();
         assert_eq!(sink_m(&body, 0), 0.0);
         let s1 = sink_m(&body, 1);
-        let gap = (body.dropped_bound_m(1) - body.dropped_bound_m(0)).to_f64();
+        let gap = body.dropped_bound_m(1) - body.dropped_bound_m(0);
         assert!((s1 - (gap + 2.0 + 1.0)).abs() < 1e-9, "{s1}");
         assert!(sink_m(&body, 3) > sink_m(&body, 1));
         // On a chunk: rung 0 carries zeros; rung 1 carries its radial times the sink.
@@ -2982,7 +2944,7 @@ mod tests {
         // The gap between a vertex and its target is radial and within the octave dropped between
         // rung 0 and rung 1 — the recipe's own bound — plus a cell of each rung for the two
         // extractors' placement, and at least one target differs.
-        let bound = (body.dropped_bound_m(1) - body.dropped_bound_m(0)).to_f64() + 3.0;
+        let bound = (body.dropped_bound_m(1) - body.dropped_bound_m(0)) + 3.0;
         let o = vd_core::glam::DVec3::from_array(g.origin_m);
         let mut moved = 0;
         let mut on_surface = 0;
@@ -2998,16 +2960,7 @@ mod tests {
             assert!(across < 0.01, "{across} m across the radial");
             // The bound holds for a SURFACE vertex; a vertex of a sealed cave under the surface
             // (the world has them) morphs to the parent's surface above it, as far as that is.
-            let surface = vd_terrain::height::height_m(
-                &body,
-                [
-                    Gf::from_f64(radial.x),
-                    Gf::from_f64(radial.y),
-                    Gf::from_f64(radial.z),
-                ],
-                0,
-            )
-            .to_f64();
+            let surface = vd_terrain::height::height_m(&body, [radial.x, radial.y, radial.z], 0);
             let on = (pv.length() - surface).abs() < 2.0;
             on_surface += i32::from(on);
             // Branchless (HR5): a cave vertex's limit is beyond any target.
@@ -3028,8 +2981,8 @@ mod tests {
     fn the_eye_surface_reads_the_recipe_under_the_eye_and_refuses_the_centre() {
         let body = home_planet();
         let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
-        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
-        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let dir = [d[0], d[1], d[2]];
+        let surface = vd_terrain::height::height_m(&body, dir, 0);
         let eye = [
             d[0] * (surface + 3.4),
             d[1] * (surface + 3.4),
@@ -3041,7 +2994,7 @@ mod tests {
         assert!((read.altitude_m - 3.4).abs() < 1e-6, "{read:?}");
         assert_eq!(
             read.biome,
-            vd_terrain::height::biome_at(&body, dir, Gf::from_f64(surface))
+            vd_terrain::height::biome_at(&body, dir, surface)
         );
         assert_eq!(eye_surface(&body, [0.0, 0.0, 0.0]), None);
         assert_eq!(eye_surface(&body, [f64::NAN, 0.0, 0.0]), None);
@@ -3051,9 +3004,9 @@ mod tests {
     fn the_ruler_stands_on_the_drawn_ground_ahead_and_is_absent_for_a_sky_ray() {
         let body = home_planet();
         let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
-        let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
+        let dir = [d[0], d[1], d[2]];
         let up = vd_core::glam::DVec3::from_array(d);
-        let surface = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+        let surface = vd_terrain::height::height_m(&body, dir, 0);
         let eye = up * (surface + 3.4);
         // A level direction tilted 8° down, like the ground picture's nose.
         let level = up.cross(vd_core::glam::DVec3::Z).normalize();
@@ -3069,12 +3022,7 @@ mod tests {
         // centre stands two radii over the recipe there.
         let c = vd_core::glam::DVec3::from_array(ruler.centre_m);
         let cd = c.normalize();
-        let there = vd_terrain::height::height_m(
-            &body,
-            [Gf::from_f64(cd.x), Gf::from_f64(cd.y), Gf::from_f64(cd.z)],
-            0,
-        )
-        .to_f64();
+        let there = vd_terrain::height::height_m(&body, [cd.x, cd.y, cd.z], 0);
         let centre_len = c.length();
         assert!(
             (centre_len - there - 2.0 * ruler.radius_m).abs() < 0.01,
@@ -3116,12 +3064,7 @@ mod tests {
         );
         let dc = vd_core::glam::DVec3::from_array(down.centre_m);
         let dd = dc.normalize();
-        let there9 = vd_terrain::height::height_m(
-            &body,
-            [Gf::from_f64(dd.x), Gf::from_f64(dd.y), Gf::from_f64(dd.z)],
-            9,
-        )
-        .to_f64();
+        let there9 = vd_terrain::height::height_m(&body, [dd.x, dd.y, dd.z], 9);
         let down_len = dc.length();
         assert!(
             (down_len - there9 - 2.0 * down.radius_m).abs() < 1.0,

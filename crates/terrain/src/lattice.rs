@@ -27,21 +27,19 @@
 //! so the two meshes meet on the cube edge without a crack.
 
 use crate::body::BodyDefinition;
-use crate::carve::CAVERN_STRIDE;
-use crate::carve::{
-    Tube, caverns_carve_at, segment_distance_m, tube_region, tubes_carve_at, tubes_near,
-};
+use crate::carve::{CAVERN_STRIDE_LOG2, Tube, caverns_carve_at, tubes_carve_at};
 pub use crate::chunk::in_ladder;
 use crate::chunk::{
     CAVERN_NODES, CHUNK_EDGE, CaveRule, Cell, CellSite, ChunkKey, NodeLattice, above_surface_cell,
     below_surface_cell, cavern_of, column_field, dir_of, finish_cell, foreign_lattices,
-    generate_in,
+    generate_in, point_at, tubes_reaching,
 };
-use crate::gf::Gf;
-use crate::height::{biome_at, height_m};
+use crate::height::{biome_of, height};
 use crate::strata::Biome;
-use vd_seed::bend::{Face, normalize};
-use vd_seed::ladder::cell_m;
+use crate::units::LENGTH_BITS;
+use vd_recipe::Gi;
+use vd_recipe::bend::{DIR_ONE, normalise};
+use vd_seed::bend::Face;
 use vd_seed::seam::{Edge, across};
 
 /// The halo's depth in cells on every side.
@@ -70,8 +68,8 @@ pub struct SampleBox {
     pub cells: Vec<Cell>,
     /// `BOX_EDGE²` column sites, `(b + 1) · 64 + (a + 1)`.
     pub sites: Vec<Site>,
-    /// The same columns' unit directions.
-    pub dirs: Vec<[Gf; 3]>,
+    /// The same columns' unit directions, at the bend's fraction bits.
+    pub dirs: Vec<[Gi; 3]>,
 }
 
 impl SampleBox {
@@ -106,7 +104,7 @@ impl SampleBox {
 
     /// The direction of local column `(a, b)`.
     #[must_use]
-    pub fn dir(&self, a: i32, b: i32) -> [Gf; 3] {
+    pub fn dir(&self, a: i32, b: i32) -> [Gi; 3] {
         self.dirs[Self::column_index(a, b)]
     }
 
@@ -218,26 +216,22 @@ pub fn local_of_site(body: &BodyDefinition, key: ChunkKey, site: Site) -> Option
     None
 }
 
-/// The unit direction of a site: a face cell's own direction, or the corner's.
+/// The unit direction of a site, at the bend's fraction bits: a face cell's own direction, or the
+/// corner's. A corner phantom's axis sum is `(±1, ±1, ±1)` at the bend's own One, and the recipe's
+/// [`normalise`] puts it on the sphere — the same kernel the bend itself ends with, so the three faces
+/// that meet at the corner read the same word triple.
 #[must_use]
-pub fn site_dir(body: &BodyDefinition, key: ChunkKey, site: Site) -> [Gf; 3] {
-    let n_l = body.ladder.cells_per_edge(key.rung);
+pub fn site_dir(body: &BodyDefinition, key: ChunkKey, site: Site) -> [Gi; 3] {
     match Face::from_index(site.face) {
-        Some(face) => dir_of(face, n_l, site.i, site.j),
+        Some(face) => dir_of(face, body.inv_n(key.rung), site.i, site.j),
         None => {
             let basis = key.face.basis();
-            let d = normalize([
-                f64::from(basis.n[0])
-                    + f64::from(site.i * i32::from(basis.u[0]))
-                    + f64::from(site.j * i32::from(basis.v[0])),
-                f64::from(basis.n[1])
-                    + f64::from(site.i * i32::from(basis.u[1]))
-                    + f64::from(site.j * i32::from(basis.v[1])),
-                f64::from(basis.n[2])
-                    + f64::from(site.i * i32::from(basis.u[2]))
-                    + f64::from(site.j * i32::from(basis.v[2])),
-            ]);
-            [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])]
+            let axis = |c: usize| {
+                Gi::new(i64::from(basis.n[c])) * DIR_ONE
+                    + Gi::new(i64::from(site.i) * i64::from(basis.u[c])) * DIR_ONE
+                    + Gi::new(i64::from(site.j) * i64::from(basis.v[c])) * DIR_ONE
+            };
+            normalise([axis(0), axis(1), axis(2)])
         }
     }
 }
@@ -254,12 +248,11 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
     let edge = CHUNK_EDGE as i32;
     let band = body.ladder.cells_in_band(rung) as i32;
     let k0 = key.z * edge;
-    let cell_m_f = Gf::from_i64(i64::from(cell_m(rung)));
     // Every column: its site, its direction, and (for a halo column) its surface and biome. A core
     // column's surface comes from the column pass, so no core work is repeated.
     let mut sites = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     let mut dirs = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
-    let mut surfaces: Vec<(Gf, Biome)> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
+    let mut surfaces: Vec<(Gi, Biome)> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     let mut b = -HALO;
     while b <= edge {
         let mut a = -HALO;
@@ -270,8 +263,8 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
                 column.columns[(b as usize) * CHUNK_EDGE + a as usize]
             } else {
                 let dir = site_dir(body, key, site);
-                let h = height_m(body, dir, rung);
-                (dir, h, biome_at(body, dir, h))
+                let h = height(body, dir, rung);
+                (dir, h, biome_of(body, dir, h))
             };
             sites.push(site);
             dirs.push(dir);
@@ -283,59 +276,37 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
     // The tubes that can reach the box: the regions around its eight corners, then only the tubes
     // within their radius of the box's bounding sphere — a SUPERSET of what any cell's owner keeps,
     // and a hollow is the exact greatest over the list, so the superset changes no byte.
-    let carve_tubes = tubes_carve_at(body, cell_m_f);
-    let carve_caverns = caverns_carve_at(body, cell_m_f);
+    let carve_tubes = tubes_carve_at(body, rung);
+    let carve_caverns = caverns_carve_at(body, rung);
     let carve_any = carve_tubes | carve_caverns;
-    let r_low = Gf::from_f64(body.ladder.corner_radius_m(k0 - HALO, rung));
-    let r_high = Gf::from_f64(body.ladder.corner_radius_m(k0 + edge + HALO, rung));
+    let r_low = body.ladder.corner_radius_steps(k0 - HALO, rung);
+    let r_high = body.ladder.corner_radius_steps(k0 + edge + HALO, rung);
     let mut tubes: Vec<Tube> = Vec::new();
     if carve_tubes {
-        let centre_dir = dirs[SampleBox::column_index(edge / 2, edge / 2)];
-        let r_mid = (r_low + r_high) * Gf::HALF;
-        let centre = [
-            centre_dir[0] * r_mid,
-            centre_dir[1] * r_mid,
-            centre_dir[2] * r_mid,
-        ];
-        let mut reach = Gf::ZERO;
-        let mut lo = tube_region(body, centre);
-        let mut hi = lo;
+        let centre_dir = dirs[SampleBox::column_index(edge >> 1, edge >> 1)];
+        let centre = point_at(centre_dir, Gi::new((r_low + r_high) >> 1));
+        let mut corners = [[Gi::ZERO; 3]; 8];
         let mut corner = 0;
         while corner < 8 {
             let a = if corner & 1 == 0 { -HALO } else { edge };
             let b = if corner & 2 == 0 { -HALO } else { edge };
             let dir = dirs[SampleBox::column_index(a, b)];
-            let r = if corner & 4 == 0 { r_low } else { r_high };
-            let p = [dir[0] * r, dir[1] * r, dir[2] * r];
-            let d = [p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]];
-            reach = reach.greater((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
-            let region = tube_region(body, p);
-            let mut axis = 0;
-            while axis < 3 {
-                lo[axis] = lo[axis].min(region[axis]);
-                hi[axis] = hi[axis].max(region[axis]);
-                axis += 1;
-            }
+            let r = Gi::new(if corner & 4 == 0 { r_low } else { r_high });
+            corners[corner] = point_at(dir, r);
             corner += 1;
         }
-        for tube in tubes_near(body, lo, hi) {
-            if segment_distance_m(tube.start, tube.end, centre) <= reach + tube.radius_m {
-                tubes.push(tube);
-            }
-        }
+        tubes = tubes_reaching(body, centre, corners);
     }
-    let rule = CaveRule {
-        carve_any,
-        cave_min: Gf::from_i64(i64::from(body.caves.min_depth_m)),
-        cave_max: Gf::from_i64(i64::from(body.caves.max_depth_m)),
-    };
+    let rule = CaveRule::of(body, carve_any);
     // The chunk's own node lattice, EXTENDED by one node on every side so the same-face halo reads
     // it too; the partner faces' lattices over the halo columns across a seam.
-    let stride = CAVERN_STRIDE as i32;
+    // The node a cell sits in is the stride's SHIFT (ruling F7: no `/` on the recipe's path); one node
+    // back on every side, so the same-face halo reads the chunk's own lattice too.
+    let node = |v: i32| v >> CAVERN_STRIDE_LOG2;
     let node0 = [
-        (key.x * edge) / stride - 1,
-        (key.y * edge) / stride - 1,
-        (k0 / stride - 1).max(0),
+        node(key.x * edge) - 1,
+        node(key.y * edge) - 1,
+        (node(k0) - 1).max(0),
     ];
     let k_dims = CAVERN_NODES + 2;
     let (own, foreign) = if carve_caverns {
@@ -350,7 +321,8 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
     let mut c = -HALO;
     while c <= edge {
         let k = k0 + c;
-        let r = Gf::from_f64(body.ladder.cell_radius_m(k, rung));
+        let r_steps = Gi::new(body.ladder.cell_radius_steps(k, rung));
+        let r = r_steps << LENGTH_BITS;
         let mut b = -HALO;
         while b <= edge {
             let mut a = -HALO;
@@ -374,7 +346,7 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
                     let value = if carve_caverns & rule.in_band(h - r) {
                         cavern_of(&own, &foreign, site, k)
                     } else {
-                        Gf::ZERO
+                        Gi::ZERO
                     };
                     finish_cell(
                         body,
@@ -382,8 +354,8 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
                             dir,
                             h,
                             biome,
-                            r,
-                            cell_m_f,
+                            r_steps,
+                            rung,
                         },
                         &rule,
                         value,
@@ -407,6 +379,14 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
 
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
     use crate::digest::surface_chunk_z;
     use crate::home::home_planet;
@@ -573,8 +553,13 @@ mod tests {
         assert_eq!(phantom.face, CORNER_FACE);
         assert_eq!((phantom.i, phantom.j), (1, 1));
         let d = bx.dir(beyond, beyond);
-        let third = Gf::from_f64(1.0 / 3.0_f64.sqrt());
-        assert_eq!(d, [third, third, third]);
+        // `round(2⁴⁰ / √3)`, within the reciprocal square root's own two units.
+        let third = 634_803_334_274i64;
+        let mut c = 0;
+        while c < 3 {
+            assert!((d[c].raw() - third).abs() <= 2, "[{c}]: {:?}", d[c]);
+            c += 1;
+        }
         // Faces +Y and +Z hold the same corner in their own last chunks, at the same local column.
         let ky = key(Face::PosY, rung, last, last, zx);
         let by = sample_box(&m, ky).expect("in the band");
@@ -612,7 +597,11 @@ mod tests {
             }
         );
         let d0 = b0.dir(-1, -1);
-        assert_eq!(d0, [-third, -third, -third]);
+        let mut c = 0;
+        while c < 3 {
+            assert!((d0[c].raw() + third).abs() <= 2, "[{c}]: {:?}", d0[c]);
+            c += 1;
+        }
     }
 
     /// The band's floor edge is owned by nobody (no chunk lies below it), so it must never cross:

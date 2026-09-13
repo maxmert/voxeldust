@@ -51,6 +51,7 @@ const FORBIDDEN_IN_TIER_A: &[&str] = &[
 
 /// The crates that must stay pure (reachable I/O only through the injected seam).
 const TIER_A: &[&str] = &[
+    "vd-recipe",
     "vd-seed",
     "vd-terrain",
     "vd-core",
@@ -270,12 +271,22 @@ fn the_dependency_law_holds_bins_to_node_to_sim_to_wire_to_core() {
             .cloned()
             .collect()
     };
-    // The voxel foundation, slice 5 (ruling V9 S5-1): the leaf `vd-seed` is the root now — the hash,
-    // the digest, the face bend and the ladder — and the core re-exports it; the generator depends on
-    // the leaf and on NOTHING else, so a client on another engine links the recipe, the leaf and serde's derives.
+    // ★ THE SEED-SHAPED PATH'S THREE LAYERS (the voxel foundation, slice 5, ruling V9 S5-1; ruling F7,
+    // `owner_decisions_2026-09-12_frozen_patches.md`, which made the recipe integer-only and put its
+    // kernels in their own crate). `vd-recipe` is THE ROOT now: the fenced integer word, the two-word
+    // product, the root and the reciprocals, the bend, the noise and the octave sum — the crate that is
+    // compiled for the server's CPU, the client's CPU AND (slice 8's GPU steps) the client's GPU, so it
+    // may depend on nothing. `vd-seed` is the LEAF above it: the hash, the digest, the face bend and
+    // the ladder. `vd-terrain` is THE ONE GENERATOR above both, and on nothing else, so a client on
+    // another engine links the generator, the leaf, the kernels and serde's derives.
     assert!(
-        internal(&graph["vd-seed"]).is_empty(),
-        "vd-seed is the root: it depends on no workspace crate"
+        internal(&graph["vd-recipe"]).is_empty(),
+        "vd-recipe is the root: it depends on no workspace crate (ruling F7: one source, two targets)"
+    );
+    assert_eq!(
+        internal(&graph["vd-seed"]),
+        BTreeSet::from(["vd-recipe".to_owned()]),
+        "vd-seed depends only on the recipe's kernels (ruling F7: ONE hash, ONE bend)"
     );
     assert_eq!(
         internal(&graph["vd-core"]),
@@ -284,8 +295,9 @@ fn the_dependency_law_holds_bins_to_node_to_sim_to_wire_to_core() {
     );
     assert_eq!(
         internal(&graph["vd-terrain"]),
-        BTreeSet::from(["vd-seed".to_owned()]),
-        "vd-terrain depends only on the leaf (SL10: one crate, two hosts, no engine edge)"
+        BTreeSet::from(["vd-recipe".to_owned(), "vd-seed".to_owned()]),
+        "vd-terrain depends only on the leaf and the kernels (SL10: one crate, two hosts, no engine \
+         edge; ruling F7: the kernels are the integer recipe)"
     );
     // The seed-shaped path's WHOLE dependency set, workspace and external: the leaf links serde's
     // derives and nothing else; the generator links no external crate at all — no float library, no
@@ -307,6 +319,11 @@ fn the_dependency_law_holds_bins_to_node_to_sim_to_wire_to_core() {
         "vd-terrain links no external crate: {:?}",
         external("vd-terrain")
     );
+    assert!(
+        external("vd-recipe").is_empty(),
+        "vd-recipe links no external crate — a GPU compilation of it can reach nothing: {:?}",
+        external("vd-recipe")
+    );
     // ★ THE CLIENT LINKS THE RECIPE AND NO MOTION (slice 7, S7-1): `vd-terrain` and `vd-seed` are
     // normal dependencies of `vd-client`; `vd-physics` (the forest, the orbits — SL4) is not, and
     // never may be: the shipped client must not hold the code that moves the moon.
@@ -324,7 +341,9 @@ fn the_dependency_law_holds_bins_to_node_to_sim_to_wire_to_core() {
     );
     for float_crate in ["glam", "libm", "noise", "nalgebra", "rapier3d"] {
         assert!(
-            !graph["vd-terrain"].contains(float_crate) && !graph["vd-seed"].contains(float_crate),
+            !graph["vd-terrain"].contains(float_crate)
+                && !graph["vd-seed"].contains(float_crate)
+                && !graph["vd-recipe"].contains(float_crate),
             "SL10 clause 4: the seed-shaped path must not link {float_crate} — its arithmetic is \
              outside the fence"
         );

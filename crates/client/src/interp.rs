@@ -1115,7 +1115,11 @@ mod tests {
         // frame: in the window it stands at the parent's centre plus the parent's facing times X.
         let x = DVec3::new(1_000.0, 0.0, 0.0);
         let s0 = StampedPose::at_rest(frame, DVec3::new(0.0, 0.0, -r) + x, UniverseTick(10));
-        let mut s1 = StampedPose::at_rest(frame, DVec3::new(r, 0.0, 0.0) + turned * x, UniverseTick(20));
+        let mut s1 = StampedPose::at_rest(
+            frame,
+            DVec3::new(r, 0.0, 0.0) + turned * x,
+            UniverseTick(20),
+        );
         s1.orient = turned;
         let mut sibling = EntityTrack::new(s0);
         sibling.observe(s1);
@@ -1123,7 +1127,10 @@ mod tests {
         let parent_mid = parent.sample_arc(15.0);
         let expected = flat(&parent_mid) + parent_mid.orient * x;
         let arc_error = (flat(&via) - expected).length();
-        assert!(arc_error < 1e-3, "the sibling rides the parent's arc: {arc_error}");
+        assert!(
+            arc_error < 1e-3,
+            "the sibling rides the parent's arc: {arc_error}"
+        );
         // The chord falls short of the arc's radius; the sibling's blend does not.
         let chord = sibling.sample(15.0);
         assert!((flat(&chord) - expected).length() > 1_000_000.0);
@@ -1139,15 +1146,26 @@ mod tests {
         let mut spinning = EntityTrack::new(w0);
         spinning.observe(w1);
         let mid = spinning.sample_via_parent(&still_parent, 15.0);
-        assert!((flat(&mid) - spot).length() < 1e-9, "the centre stays: {:?}", flat(&mid));
+        let centre = flat(&mid);
+        assert!(
+            (centre - spot).length() < 1e-9,
+            "the centre stays: {centre:?}"
+        );
         assert!(mid.orient.angle_between(DQuat::IDENTITY) > 0.1);
         // The parent's window lacks the tick: the plain blend.
-        let late_parent = EntityTrack::new(StampedPose::at_rest(frame, DVec3::ZERO, UniverseTick(20)));
-        assert_eq!(spinning.sample_via_parent(&late_parent, 15.0), spinning.sample(15.0));
+        let late_parent =
+            EntityTrack::new(StampedPose::at_rest(frame, DVec3::ZERO, UniverseTick(20)));
+        assert_eq!(
+            spinning.sample_via_parent(&late_parent, 15.0),
+            spinning.sample(15.0)
+        );
         // Nothing turns, or one pose alone: the plain blend.
         let mut straight = EntityTrack::new(pose_at(10, 100.0));
         straight.observe(pose_at(20, 200.0));
-        assert_eq!(straight.sample_via_parent(&still_parent, 15.0), straight.sample(15.0));
+        assert_eq!(
+            straight.sample_via_parent(&still_parent, 15.0),
+            straight.sample(15.0)
+        );
         let one = EntityTrack::new(pose_at(10, 100.0));
         assert_eq!(one.sample_via_parent(&still_parent, 10.0), one.sample(10.0));
     }

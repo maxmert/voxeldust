@@ -25,7 +25,6 @@ use std::time::Instant;
 
 use vd_bins::DEV;
 use vd_seed::bend::Face;
-use vd_terrain::Gf;
 use vd_terrain::chunk::{CHUNK_EDGE, Cell, How, column_field, generate, generate_in};
 use vd_terrain::digest::{golden_self_check, self_check_key, surface_chunk_z};
 use vd_terrain::extract::extract;
@@ -56,7 +55,7 @@ fn main() -> ExitCode {
         body.ladder().radius_m(),
         body.ladder().rungs,
         body.octave_count(),
-        body.relief_bound_m(0).to_i64_floor()
+        body.relief_bound_m(0) as i64
     );
 
     // 1. At every rung: the COLUMN pass (the coarse answer — one height per column with the rung's
@@ -181,8 +180,8 @@ fn main() -> ExitCode {
             // A vertex more than half a cell UNDER the height surface is a cave wall's (the height
             // surface has no vertex there); every other vertex is the surface's own, creases and
             // cliffs included, and its distance to the height surface is the snap error.
-            let signed = (r - h) / Gf::from_f64(cell);
-            if signed < -Gf::HALF {
+            let signed = (r - h) / (cell);
+            if signed < -0.5 {
                 cave_vertices += 1;
             } else {
                 snap_errors.push(signed.abs().to_bits());
@@ -251,7 +250,14 @@ fn main() -> ExitCode {
             };
             BOX_EDGE * BOX_EDGE
         ],
-        dirs: vec![[Gf::ONE, Gf::ZERO, Gf::ZERO]; BOX_EDGE * BOX_EDGE],
+        dirs: vec![
+            [
+                vd_recipe::bend::DIR_ONE,
+                vd_recipe::Gi::ZERO,
+                vd_recipe::Gi::ZERO
+            ];
+            BOX_EDGE * BOX_EDGE
+        ],
     };
     let start = Instant::now();
     let mut worst = None;

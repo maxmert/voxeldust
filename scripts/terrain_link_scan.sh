@@ -36,7 +36,7 @@ if [ "${1:-}" = "--control" ]; then
   exit 0
 fi
 found=0
-for rlib in target/release/deps/libvd_terrain-*.rlib target/release/deps/libvd_seed-*.rlib; do
+for rlib in target/release/deps/libvd_terrain-*.rlib target/release/deps/libvd_seed-*.rlib target/release/deps/libvd_recipe-*.rlib; do
   if [ ! -f "$rlib" ]; then
     echo "terrain-link-scan: missing $rlib (build --release first)"
     exit 2

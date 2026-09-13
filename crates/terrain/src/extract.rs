@@ -30,6 +30,14 @@
 //! cells to the same 1/256-cell integers, so the two meshes meet without a crack and without a
 //! duplicated face.
 
+// ★ THE EXTRACTOR IS THE ONE NAMED EXCEPTION to "no `/` and no `%` on the recipe's path" (ruling F7;
+// the rule lives in `lib.rs`). Its arithmetic is already pure integer, but it divides: a group's vertex
+// is the AVERAGE of its crossings, and the average's denominator is the crossing count times the
+// crossings' own denominators — numbers the cell bytes decide, which no shift divides. Every such
+// divide is EXACT on every host (whole numbers, one rounding, `round_half_even`), and every remainder
+// is `rem_euclid` or an index wrap over three axes. The GPU's step G2 ports this file; the port is
+// where those divides become the prefix sum's own arithmetic, and this comment is the ledger entry
+// until then.
 use crate::chunk::{CHUNK_EDGE, ChunkKey};
 use crate::lattice::{CORNER_FACE, HALO, SampleBox, Site};
 
@@ -138,7 +146,13 @@ impl Average {
             let mut n = self.whole[k] * d;
             let mut i = 0;
             while i < self.frac_count[k] {
-                n += self.fracs[k][i].0 * (d / self.fracs[k][i].1);
+                #[allow(
+                    clippy::integer_division,
+                    reason = "THE EXTRACTOR (the GPU's step G2, not yet ported): the common \
+                              denominator divides by each crossing's own, exactly, on the CPU"
+                )]
+                let share = d / self.fracs[k][i].1;
+                n += self.fracs[k][i].0 * share;
                 i += 1;
             }
             // The average in cells is `n / (count·d)`; in quanta, `n·256 / (count·d)`.
@@ -261,7 +275,13 @@ pub fn prism_vertex(
         let mut n = whole[i] * d;
         let mut k = 0;
         while k < frac_count[i] {
-            n += fracs[i][k].0 * (d / fracs[i][k].1);
+            #[allow(
+                clippy::integer_division,
+                reason = "THE EXTRACTOR (the GPU's step G2, not yet ported): the common denominator \
+                          divides by each crossing's own, exactly, on the CPU"
+            )]
+            let share = d / fracs[i][k].1;
+            n += fracs[i][k].0 * share;
             k += 1;
         }
         num[i] = n;
@@ -547,16 +567,25 @@ pub fn push_quad(vertices: &[[i16; 3]], q: [u32; 4], flip: bool, triangles: &mut
 
 #[cfg(test)]
 pub(crate) mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
+
     use super::*;
     use crate::body::BodyDefinition;
     use crate::chunk::Cell;
     use crate::digest::surface_chunk_z;
-    use crate::gf::Gf;
     use crate::home::home_planet;
     use crate::lattice::{BOX_CELLS, BOX_EDGE, Site, sample_box};
     use crate::position::vertex_position_m;
     use crate::strata::Stratum;
     use std::collections::{BTreeMap, BTreeSet};
+    use vd_recipe::Gi;
     use vd_seed::bend::Face;
 
     /// A synthetic box (a BOUND, never a world): every cell's gap from a rule.
@@ -598,7 +627,7 @@ pub(crate) mod tests {
             };
             BOX_EDGE * BOX_EDGE
         ];
-        let dirs = vec![[Gf::ONE, Gf::ZERO, Gf::ZERO]; BOX_EDGE * BOX_EDGE];
+        let dirs = vec![[vd_recipe::bend::DIR_ONE, Gi::ZERO, Gi::ZERO]; BOX_EDGE * BOX_EDGE];
         SampleBox {
             key,
             cells,

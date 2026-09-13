@@ -6264,6 +6264,7 @@ dependencies = [
  "vd-io-prod",
  "vd-node",
  "vd-physics",
+ "vd-recipe",
  "vd-seed",
  "vd-sim",
  "vd-terrain",
@@ -6440,11 +6441,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vd-recipe"
+version = "0.1.0"
+
+[[package]]
 name = "vd-seed"
 version = "0.1.0"
 dependencies = [
  "postcard",
  "serde",
+ "vd-recipe",
 ]
 
 [[package]]
@@ -6468,6 +6474,7 @@ dependencies = [
 name = "vd-terrain"
 version = "0.1.0"
 dependencies = [
+ "vd-recipe",
  "vd-seed",
 ]
 

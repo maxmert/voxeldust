@@ -86,6 +86,8 @@ vd-core = { workspace = true }
 # runs its self-check at boot; the terrain bench reads THE world's bodies through it.
 vd-terrain = { workspace = true }
 vd-seed = { workspace = true }
+# The integer recipe: the bench examples read its kernels directly.
+vd-recipe = { workspace = true }
 vd-physics = { workspace = true }
 vd-devproto = { workspace = true }
 vd-client = { workspace = true }

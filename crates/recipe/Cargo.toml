@@ -1,0 +1,13 @@
+[package]
+name = "vd-recipe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "THE INTEGER RECIPE (ruling F7, 2026-09-12): the arithmetic of the world's static shape on 64-bit integers only — the fenced integer type, the two-word product, the integer root and reciprocal, the face bend at 40 fraction bits, the gradient noise at 28, the octave sum. One source, compiled for the server's CPU, the client's CPU and the client's GPU. Depends on nothing."
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true

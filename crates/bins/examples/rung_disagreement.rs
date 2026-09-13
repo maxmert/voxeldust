@@ -18,7 +18,6 @@ use std::process::ExitCode;
 
 use vd_bins::DEV;
 use vd_seed::bend::{Face, direction};
-use vd_terrain::Gf;
 use vd_terrain::height::height_m;
 
 /// Directions per face edge in the sample grid.
@@ -68,9 +67,9 @@ fn main() -> ExitCode {
                     let a = (2.0 * (f64::from(i) + 0.5) / f64::from(GRID)) - 1.0;
                     let b = (2.0 * (f64::from(j) + 0.5) / f64::from(GRID)) - 1.0;
                     let d = direction(face, a, b);
-                    let dg = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
-                    let fine = height_m(&body, dg, rung).to_f64();
-                    let coarse = height_m(&body, dg, rung + 1).to_f64();
+                    let dg = [d[0], d[1], d[2]];
+                    let fine = height_m(&body, dg, rung);
+                    let coarse = height_m(&body, dg, rung + 1);
                     diffs.push((fine - coarse).abs());
                     j += 1;
                 }
@@ -82,7 +81,7 @@ fn main() -> ExitCode {
         let p99 = diffs[(diffs.len() as f64 * 0.99) as usize];
         // A vertical step of `m` metres at the switch distance subtends `m / switch_m` radians.
         let px = |m: f64| (m / switch_m) / pixel_rad;
-        let bound = (body.relief_bound_m(rung) - body.relief_bound_m(rung + 1)).to_f64();
+        let bound = body.relief_bound_m(rung) - body.relief_bound_m(rung + 1);
         println!(
             "  {rung:>2} -> {:>2}      {cell:>8.0} m   {:>10.0} m   {max:>7.2}   {p99:>7.2}   {:>11.2}   {:>11.2}   {:>8.2}   {:>8.2}   {bound:>9.2}",
             rung + 1,

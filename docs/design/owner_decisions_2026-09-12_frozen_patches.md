@@ -130,3 +130,55 @@ because they build on its output.
 the CPU and the GPU; within 1.06 mm of today's float world; one core +18 %; the GPU 127 ms with the
 transfer. Step (b), the design discussion, is next.
 
+## F8. THE INTEGER RECIPE'S DESIGN — THE FIVE DECISIONS, RULED (owner: *"Ok, agreed. Agree with your other recommendations, please implement"*)
+
+The design document `slice_08_integer_recipe_design.md` (step (b)) is accepted with its five
+recommendations:
+
+1. **The direction carries 40 fraction bits** in a 64-bit word (MEASURED, bench part 3: within
+   0.02 mm of the float bend on every column; 0.29 ms of a chunk's build on one core; two-word
+   products from 32-bit halves on both hosts). The owner's question — *"why 40 and not 64?"* —
+   answered: every number IS a 64-bit integer; 40 is the binary point's position, and a product
+   doubles the fraction bits, so 64 would leave no word for the whole part.
+2. **The fallback for a GPU without 64-bit integers is the CPU path of the same source** (every CPU
+   has 64-bit integers; about 1 % of desktop GPUs lack them in shaders); limb emulation is refused.
+3. **The runtime self-check is the GPU's gate**: the client builds the eight golden chunks on its
+   own GPU at start and compares them with the CPU's; a GPU that differs gets the CPU path and a
+   line in the log.
+4. **The order**: the CPU integer recipe → the pictures re-frozen on the owner's look → the GPU
+   steps one at a time (the cell field, the extraction, the position, the morph) → slice 9.
+5. **The toolchain is rust-gpu** (one crate, two compilations, a pinned nightly from a `build.rs`),
+   with its WGSL transpile route in reserve; DX12 is unproven until measured on a Windows machine.
+
+Step (c), the build, starts with the CPU integer recipe.
+
+**Step (c) in progress, 2026-09-12.** C1 DONE: `crates/recipe` (vd-recipe) — the fenced integer
+`Gi` (wrapping ops, masked shifts, no `/`, `%`, negation or abs; four compile-fail doctests), the
+two-word product, the integer root and the exact reciprocal, the bend at 40 fraction bits with the
+cell-count reciprocal at a whole word (a 2⁻⁵⁶ reciprocal left the face's edge cells 3 mm off — the
+crate's own test caught it), the noise at 28, the octave sum; 19 unit tests + 4 doctests; lint
+clean; the coverage gate PASS at 100 % of lines and branch sides; registered in the workspace,
+the Tier-A list and the link scan. C2 DONE: `vd-seed` steps its hash through the recipe's
+`splitmix_step` (one implementation), `child_seed` through `hash1` (the pinned vectors unchanged),
+and offers `bend::direction_q` beside the float bend, tested within eight units of 2⁻⁴⁰ against
+it on every face at the centre, the edges and a corner. C3 (vd-terrain on the recipe, `Gf` deleted,
+pins and golden tables re-recorded) is in progress.
+
+**C3 LANDED, 2026-09-13.** `vd-terrain` computes the whole static shape in the recipe's kernels
+(the integer charter on the body, the direction, the height, the biome, the density, the caves, the
+vertex position, the column bound); `Gf` keeps two callers (the once-per-body draw and the metre
+doors at the seam); `GENERATOR_VERSION` is 2; the golden tables and the pins re-recorded by the
+recorder. MEASURED against the float world: 1.4992 mm widest, 0.2002 mm mean on 3 936 256 columns.
+An adversarial review found ten items — one red law test (the crate-isolation law still named the
+seed as the root; now the recipe is), the float fence missing on the recipe crate, `/` and `%` on
+the per-cell cavern lattice (now a shift and a mask; the lint `integer_division` and
+`modulo_arithmetic` now DENIED in the seed and the terrain, every remaining CPU-only site carrying
+its reason), a poison word from the cell-count reciprocal for a face under three cells (clamped),
+a false "exact" claim on the metre door above 2⁵³ (corrected: about four nanometres of the home
+planet's radius), the two rounding conventions undocumented (documented), a wrong cast in an
+example, the crate missing from the workspace dependencies — all fixed and re-gated (lint clean,
+the three pin legs, coverage PASS). The frozen pictures wait on the owner's look: in report mode
+the near stands moved (ground 46 274 pixels / widest step 28; hill 60 022 / 49; seam 67 579 / 21),
+the far stands did not (aloft 5 573 / 3; orbit 6 967 / 2) — a fine even speckle of one or two
+shade levels over the ground, no shape moved.
+

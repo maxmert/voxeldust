@@ -22,12 +22,13 @@ use std::time::Instant;
 
 use vd_client_render::wgpu;
 use vd_seed::bend::Face;
+use vd_terrain::BodyDefinition;
+use vd_terrain::body::{octave_amplitude_m, octave_frequency};
 use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey, in_ladder};
 use vd_terrain::digest::surface_chunk_z;
 use vd_terrain::home::home_planet;
 use vd_terrain::lattice::{site_dir, site_of};
-use vd_terrain::noise::{corner_hash, noise3};
-use vd_terrain::{BodyDefinition, Gf};
+use vd_terrain::noise::corner_hash;
 use wgpu::util::DeviceExt;
 
 /// The chunks the bench samples: the spike's square of rung-0 chunks on face +X.
@@ -87,16 +88,14 @@ fn main() {
     let octaves_q: Vec<OctaveQ> = octaves
         .iter()
         .map(|o| {
-            let f = o.frequency().to_f64();
+            let f = octave_frequency(o);
             let f_int = f.floor();
             OctaveQ {
-                seed: o.seed(),
+                seed: o.seed,
                 frequency_int: f_int as i64,
                 frequency_frac_q: to_fixed(f - f_int, FRAC_BITS),
-                amplitude_q: (o.amplitude_m().to_f64()
-                    * GAP_STEPS_PER_M
-                    * f64::from(1u32 << AMP_BITS))
-                .round() as i64,
+                amplitude_q: (octave_amplitude_m(o) * GAP_STEPS_PER_M * f64::from(1u32 << AMP_BITS))
+                    .round() as i64,
             }
         })
         .collect();
@@ -109,25 +108,28 @@ fn main() {
         .collect();
     let cpu_int_s = started.elapsed().as_secs_f64();
 
-    // One CPU core, today's float recipe (the octave sum without the radius, as `height_m`).
+    // One CPU core, THE SHIPPED RECIPE's own kernel (`vd_recipe::height::relief`) on the same
+    // directions, widened from this bench's 30 fraction bits to the bend's 40 (the kernel shifts them
+    // back, so the inputs are the same words).
+    //
+    // ★ THE FLOAT LEG IS GONE. This bench once measured the fixed-point relief against the FLOAT
+    // recipe's, and that measurement is what carried ruling F7: the recipe is integer-only now, the
+    // float recipe no longer exists, and `Gf` has left the shape. What is left to measure is an
+    // IDENTITY between three hosts of ONE arithmetic — the bench's transcription, the shipped kernel
+    // and the GPU — and the cost of each.
     let started = Instant::now();
-    let cpu_float: Vec<f64> = dirs
-        .iter()
+    let cpu_recipe: Vec<i64> = dirs_q
+        .chunks_exact(3)
         .map(|d| {
-            let dir = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
-            let mut h = Gf::ZERO;
-            for o in octaves {
-                let p = [
-                    dir[0] * o.frequency(),
-                    dir[1] * o.frequency(),
-                    dir[2] * o.frequency(),
-                ];
-                h += o.amplitude_m() * noise3(o.seed(), p);
-            }
-            h.to_f64()
+            let dir40 = [
+                vd_recipe::Gi::new(d[0]) << (vd_recipe::bend::DIR_BITS - DIR_BITS),
+                vd_recipe::Gi::new(d[1]) << (vd_recipe::bend::DIR_BITS - DIR_BITS),
+                vd_recipe::Gi::new(d[2]) << (vd_recipe::bend::DIR_BITS - DIR_BITS),
+            ];
+            vd_recipe::height::relief(octaves, dir40).raw()
         })
         .collect();
-    let cpu_float_s = started.elapsed().as_secs_f64();
+    let cpu_recipe_s = started.elapsed().as_secs_f64();
 
     // The GPU, the same integer path, the same integer inputs.
     let mut octave_words: Vec<u32> = Vec::new();
@@ -180,38 +182,767 @@ fn main() {
         std::process::exit(1);
     }
 
-    // THE PRECISION: the fixed-point relief against the float recipe's, in millimetres.
-    let mut widest_mm = 0.0_f64;
-    let mut sum_mm = 0.0_f64;
-    let mut over_one_step = 0usize;
-    for (q, f) in cpu_int.iter().zip(cpu_float.iter()) {
-        let d_mm = ((*q as f64) / (FRAC_ONE as f64 * GAP_STEPS_PER_M) - f).abs() * 1.0e3;
-        widest_mm = widest_mm.max(d_mm);
-        sum_mm += d_mm;
-        if d_mm > 1.0e3 / GAP_STEPS_PER_M {
-            over_one_step += 1;
-        }
-    }
+    // THE SHIPPED KERNEL against the transcription: the third host of the same arithmetic.
+    let shipped_differing = cpu_int
+        .iter()
+        .zip(cpu_recipe.iter())
+        .filter(|(a, b)| a != b)
+        .count();
     println!(
-        "integer_bench: PRECISION — the fixed-point relief against the float recipe's on {n} \
-         columns: widest {widest_mm:.3} mm, mean {:.3} mm, {over_one_step} columns further than \
-         one gap step (7.8 mm) apart",
-        sum_mm / n as f64
+        "integer_bench: IDENTITY — {n} columns: {shipped_differing} differ between this bench's \
+         transcription and the shipped recipe's own kernel"
     );
 
     // THE COST.
     println!(
-        "integer_bench: COST — {n} columns of {} octaves: the integer path on one CPU core {:.1} ms \
-         ({:.0} ns a column), the float recipe on one CPU core {:.1} ms ({:.0} ns a column), the \
+        "integer_bench: COST — {n} columns of {} octaves: the transcription on one CPU core {:.1} ms \
+         ({:.0} ns a column), the shipped recipe on one CPU core {:.1} ms ({:.0} ns a column), the \
          GPU {:.1} ms with the upload and the readback",
         octaves_q.len(),
         cpu_int_s * 1.0e3,
         cpu_int_s * 1.0e9 / n as f64,
-        cpu_float_s * 1.0e3,
-        cpu_float_s * 1.0e9 / n as f64,
+        cpu_recipe_s * 1.0e3,
+        cpu_recipe_s * 1.0e9 / n as f64,
+        gpu_s * 1.0e3
+    );
+
+    part_2_the_bend(&device, &queue, &body);
+    part_3_the_bend_at_40_bits(&device, &queue, &body);
+}
+
+// ------------------------------------------------------------- part 3: the bend at 40 bits
+
+/// The two-word product of two unsigned 64-bit words from 32-bit halves: `(hi, lo)`.
+fn mul_wide(a: u64, b: u64) -> (u64, u64) {
+    let (a0, a1) = (a & 0xFFFF_FFFF, a >> 32);
+    let (b0, b1) = (b & 0xFFFF_FFFF, b >> 32);
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+    let mid = (p00 >> 32) + (p01 & 0xFFFF_FFFF) + (p10 & 0xFFFF_FFFF);
+    let lo = (p00 & 0xFFFF_FFFF) | (mid << 32);
+    let hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    (hi, lo)
+}
+
+/// `(hi, lo) >> s` for `s` in `1..=127`, as one word (the caller keeps the result under 64 bits).
+fn shr_wide(hi: u64, lo: u64, s: u32) -> u64 {
+    if s >= 64 {
+        hi >> (s - 64)
+    } else {
+        (lo >> s) | (hi << (64 - s))
+    }
+}
+
+/// `(a × b) >> s` on signed words by sign and magnitude: truncated toward zero on both hosts.
+fn mul_shr(a: i64, b: i64, s: u32) -> i64 {
+    let (hi, lo) = mul_wide(a.unsigned_abs(), b.unsigned_abs());
+    let m = shr_wide(hi, lo, s) as i64;
+    if (a < 0) != (b < 0) { -m } else { m }
+}
+
+const Q40: u32 = 40;
+const ONE40: i64 = 1 << Q40;
+
+struct Bend40 {
+    k1: i64,
+    k2: i64,
+    k3: i64,
+}
+
+fn bend40_constants() -> Bend40 {
+    let one = ONE40 as f64;
+    let k1 = (vd_seed::bend::K1 * one).round() as i64;
+    let k2 = (vd_seed::bend::K2 * one).round() as i64;
+    Bend40 {
+        k1,
+        k2,
+        k3: ONE40 - k1 - k2,
+    }
+}
+
+fn bend40(k: &Bend40, a: i64) -> i64 {
+    let a2 = mul_shr(a, a, Q40);
+    let inner = k.k2 + mul_shr(a2, k.k3, Q40);
+    let inner2 = k.k1 + mul_shr(a2, inner, Q40);
+    mul_shr(a, inner2, Q40)
+}
+
+/// The unit direction of `(face, i, j)` at 40 fraction bits: the square sum at 80 bits in two
+/// words; the reciprocal square root seeded by the 30-bit path's exact reciprocal of the 30-bit
+/// root, then ONE Newton step `y ← y + y(1 − S·y²)/2` with the residual carried at 120 bits.
+fn direction40(k: &Bend40, face: Face, inv_n: i64, i: i32, j: i32) -> [i64; 3] {
+    let basis = face.basis();
+    let wa = bend40(
+        k,
+        mul_shr(2 * i64::from(i) + 1, inv_n, INV_BITS - Q40) - ONE40,
+    );
+    let wb = bend40(
+        k,
+        mul_shr(2 * i64::from(j) + 1, inv_n, INV_BITS - Q40) - ONE40,
+    );
+    let axis = |c: usize| {
+        i64::from(basis.n[c]) * ONE40 + wa * i64::from(basis.u[c]) + wb * i64::from(basis.v[c])
+    };
+    let v = [axis(0), axis(1), axis(2)];
+    // S = Σ v² at 80 fraction bits, in two words.
+    let (mut s_hi, mut s_lo) = (0u64, 0u64);
+    let mut c = 0;
+    while c < 3 {
+        let m = v[c].unsigned_abs();
+        let (h, l) = mul_wide(m, m);
+        let (nl, carry) = s_lo.overflowing_add(l);
+        s_lo = nl;
+        s_hi = s_hi + h + u64::from(carry);
+        c += 1;
+    }
+    // T = S >> 20: S at 60 fraction bits in one word (S < 3·2⁸⁰, so T < 2⁶²).
+    let t = shr_wide(s_hi, s_lo, 20);
+    // The seed: the 30-bit root and its exact reciprocal, widened to 40 bits.
+    let y0 = recip_q(isqrt(t as i64)) << 10;
+    // y0² at 60 fraction bits, in one word.
+    let (yh, yl) = mul_wide(y0 as u64, y0 as u64);
+    let y0sq = shr_wide(yh, yl, 20);
+    // P = T × y0² = S·y0² at 120 fraction bits, in two words; E = 2¹²⁰ − P (signed).
+    let (ph, pl) = mul_wide(t, y0sq);
+    let one120_hi = 1u64 << 56;
+    let (e_neg, e_hi, e_lo) = if ph > one120_hi || (ph == one120_hi && pl > 0) {
+        let (l, borrow) = pl.overflowing_sub(0);
+        (true, ph - one120_hi - u64::from(borrow), l)
+    } else {
+        let (l, borrow) = 0u64.overflowing_sub(pl);
+        (false, one120_hi - ph - u64::from(borrow), l)
+    };
+    // e at 70 fraction bits in one word (|E| ≈ 2⁻³⁰ · 2¹²⁰ = 2⁹⁰, so E >> 50 < 2⁴¹).
+    let e70 = shr_wide(e_hi, e_lo, 50) as i64;
+    let e70 = if e_neg { -e70 } else { e70 };
+    // y1 = y0 + y0·e/2: (y0 at 40) × (e at 70) >> 71.
+    let y1 = y0 + mul_shr(y0, e70, 71);
+    [
+        mul_shr(v[0], y1, Q40),
+        mul_shr(v[1], y1, Q40),
+        mul_shr(v[2], y1, Q40),
+    ]
+}
+
+fn part_3_the_bend_at_40_bits(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) {
+    let n_l = body.ladder().cells_per_edge(RUNG);
+    let inv_n = inv_n_of(n_l);
+    let radius_m = body.ladder().radius_m();
+    let k = bend40_constants();
+    let mut sites: Vec<i32> = Vec::new();
+    for y in FIRST_Y..FIRST_Y + CHUNKS_ACROSS {
+        for x in FIRST_X..FIRST_X + CHUNKS_ACROSS {
+            let key = ChunkKey {
+                face: FACE,
+                rung: RUNG,
+                x,
+                y,
+                z: surface_chunk_z(body, FACE, RUNG, x, y),
+            };
+            for b in 0..CHUNK_EDGE as i32 {
+                for a in 0..CHUNK_EDGE as i32 {
+                    let site = site_of(body, key, a, b);
+                    sites.push(i32::from(site.face));
+                    sites.push(site.i);
+                    sites.push(site.j);
+                }
+            }
+        }
+    }
+    let n = sites.len() / 3;
+
+    let started = Instant::now();
+    let cpu: Vec<i64> = (0..n)
+        .flat_map(|c| {
+            let face = Face::from_index(sites[c * 3] as u8).expect("a face");
+            direction40(&k, face, inv_n, sites[c * 3 + 1], sites[c * 3 + 2])
+        })
+        .collect();
+    let cpu_s = started.elapsed().as_secs_f64();
+
+    let float: Vec<[f64; 3]> = (0..n)
+        .map(|c| {
+            let face = Face::from_index(sites[c * 3] as u8).expect("a face");
+            vd_seed::bend::direction(
+                face,
+                vd_seed::ladder::face_param(sites[c * 3 + 1], n_l),
+                vd_seed::ladder::face_param(sites[c * 3 + 2], n_l),
+            )
+        })
+        .collect();
+
+    let mut words: Vec<u32> = Vec::new();
+    push_u64(&mut words, k.k1 as u64);
+    push_u64(&mut words, k.k2 as u64);
+    push_u64(&mut words, k.k3 as u64);
+    push_u64(&mut words, inv_n as u64);
+    push_u64(&mut words, 0);
+    push_u64(&mut words, 0);
+    let started = Instant::now();
+    let out = run_compute(
+        device,
+        queue,
+        BEND40_SHADER,
+        &[
+            Binding::Storage(as_bytes_i32(&sites)),
+            Binding::Output((n * 24) as u64),
+            Binding::Uniform(as_bytes_u32(&words)),
+        ],
+        n as u32,
+    );
+    let gpu_s = started.elapsed().as_secs_f64();
+    let gpu: Vec<i64> = out
+        .chunks_exact(8)
+        .map(|b| i64::from_le_bytes(b.try_into().expect("8 bytes")))
+        .collect();
+    let differing = cpu.iter().zip(gpu.iter()).filter(|(a, b)| a != b).count();
+    println!(
+        "integer_bench: PART 3 THE BEND AT 40 BITS — {n} columns: {differing} of {} direction \
+         components differ between the CPU and the GPU",
+        n * 3
+    );
+    if differing > 0 {
+        let i = cpu
+            .iter()
+            .zip(gpu.iter())
+            .position(|(a, b)| a != b)
+            .expect("one");
+        println!(
+            "integer_bench: PART 3 first difference at component {i}: CPU {} GPU {} — STOP",
+            cpu[i], gpu[i]
+        );
+        std::process::exit(1);
+    }
+    let (mut widest_mm, mut sum_mm) = (0.0_f64, 0.0_f64);
+    for c in 0..n {
+        let mut d2 = 0.0_f64;
+        for a in 0..3 {
+            let q = cpu[c * 3 + a] as f64 / ONE40 as f64;
+            let e = q - float[c][a];
+            d2 += e * e;
+        }
+        let mm = d2.sqrt() * radius_m * 1.0e3;
+        widest_mm = widest_mm.max(mm);
+        sum_mm += mm;
+    }
+    println!(
+        "integer_bench: PART 3 PRECISION — the 40-bit direction against the float bend's, \
+         laterally on the surface: widest {widest_mm:.4} mm, mean {:.4} mm (a step of 2⁻⁴⁰ is \
+         {:.4} mm here)",
+        sum_mm / n as f64,
+        radius_m * 1.0e3 / ONE40 as f64
+    );
+    println!(
+        "integer_bench: PART 3 COST — the 40-bit bend on one CPU core {:.1} ms ({:.0} ns a \
+         column, {:.3} ms a chunk of 3 844), the GPU {:.1} ms with the upload and the readback",
+        cpu_s * 1.0e3,
+        cpu_s * 1.0e9 / n as f64,
+        cpu_s * 1.0e3 / n as f64 * 3844.0,
         gpu_s * 1.0e3
     );
 }
+
+/// THE THROWAWAY TRANSCRIPTION of the 40-bit bend (an instrument only, see the header).
+const BEND40_SHADER: &str = r"
+@group(0) @binding(0) var<storage, read> sites: array<i32>;
+@group(0) @binding(1) var<storage, read_write> dirs: array<i64>;
+@group(0) @binding(2) var<uniform> k: array<vec4<u32>, 3>;
+
+const Q40: u32 = 40u;
+const ONE40: i64 = 1099511627776li;
+const BEND_BITS: u32 = 30u;
+const BEND_ONE: i64 = 1073741824li;
+const INV_SHIFT40: u32 = 16u;
+
+fn u64_of(w: vec2<u32>) -> u64 { return (u64(w.y) << 32u) | u64(w.x); }
+
+fn basis_n(face: i32) -> vec3<i64> {
+    switch face {
+        case 0: { return vec3<i64>(1li, 0li, 0li); }
+        case 1: { return vec3<i64>(-1li, 0li, 0li); }
+        case 2: { return vec3<i64>(0li, 1li, 0li); }
+        case 3: { return vec3<i64>(0li, -1li, 0li); }
+        case 4: { return vec3<i64>(0li, 0li, 1li); }
+        default: { return vec3<i64>(0li, 0li, -1li); }
+    }
+}
+fn basis_u(face: i32) -> vec3<i64> {
+    switch face {
+        case 0: { return vec3<i64>(0li, 1li, 0li); }
+        case 1: { return vec3<i64>(0li, 0li, 1li); }
+        case 2: { return vec3<i64>(0li, 0li, 1li); }
+        case 3: { return vec3<i64>(1li, 0li, 0li); }
+        case 4: { return vec3<i64>(1li, 0li, 0li); }
+        default: { return vec3<i64>(0li, 1li, 0li); }
+    }
+}
+fn basis_v(face: i32) -> vec3<i64> {
+    switch face {
+        case 0: { return vec3<i64>(0li, 0li, 1li); }
+        case 1: { return vec3<i64>(0li, 1li, 0li); }
+        case 2: { return vec3<i64>(1li, 0li, 0li); }
+        case 3: { return vec3<i64>(0li, 0li, 1li); }
+        case 4: { return vec3<i64>(0li, 1li, 0li); }
+        default: { return vec3<i64>(1li, 0li, 0li); }
+    }
+}
+
+fn mul_wide(a: u64, b: u64) -> vec2<u64> {
+    let a0 = a & 0xFFFFFFFFlu; let a1 = a >> 32u;
+    let b0 = b & 0xFFFFFFFFlu; let b1 = b >> 32u;
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+    let mid = (p00 >> 32u) + (p01 & 0xFFFFFFFFlu) + (p10 & 0xFFFFFFFFlu);
+    let lo = (p00 & 0xFFFFFFFFlu) | (mid << 32u);
+    let hi = p11 + (p01 >> 32u) + (p10 >> 32u) + (mid >> 32u);
+    return vec2<u64>(hi, lo);
+}
+
+fn shr_wide(hi: u64, lo: u64, s: u32) -> u64 {
+    if (s >= 64u) { return hi >> (s - 64u); }
+    return (lo >> s) | (hi << (64u - s));
+}
+
+fn uabs(a: i64) -> u64 { return select(u64(a), u64(-a), a < 0li); }
+
+fn mul_shr(a: i64, b: i64, s: u32) -> i64 {
+    let p = mul_wide(uabs(a), uabs(b));
+    let m = i64(shr_wide(p.x, p.y, s));
+    return select(m, -m, (a < 0li) != (b < 0li));
+}
+
+fn bend40(k1: i64, k2: i64, k3: i64, a: i64) -> i64 {
+    let a2 = mul_shr(a, a, Q40);
+    let inner = k2 + mul_shr(a2, k3, Q40);
+    let inner2 = k1 + mul_shr(a2, inner, Q40);
+    return mul_shr(a, inner2, Q40);
+}
+
+fn isqrt(n: i64) -> i64 {
+    var x = u64(n);
+    var res = 0lu;
+    var bit = 1lu << 62u;
+    while (bit > x) { bit = bit >> 2u; }
+    while (bit != 0lu) {
+        if (x >= res + bit) {
+            x = x - (res + bit);
+            res = (res >> 1u) + bit;
+        } else {
+            res = res >> 1u;
+        }
+        bit = bit >> 2u;
+    }
+    return i64(res);
+}
+
+fn recip_q(len: i64) -> i64 {
+    var r = BEND_ONE;
+    for (var step = 0u; step < 6u; step = step + 1u) {
+        let e = (1li << 60u) - len * r;
+        r = r + ((r * (e >> BEND_BITS)) >> BEND_BITS);
+    }
+    let top = 1li << 60u;
+    while (len * (r + 1li) <= top) { r = r + 1li; }
+    while (len * r > top) { r = r - 1li; }
+    return r;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let c = id.x;
+    if (c * 3u >= arrayLength(&dirs)) { return; }
+    let k1 = i64(u64_of(k[0].xy));
+    let k2 = i64(u64_of(k[0].zw));
+    let k3 = i64(u64_of(k[1].xy));
+    let inv_n = i64(u64_of(k[1].zw));
+    let face = sites[c * 3u];
+    let i = sites[c * 3u + 1u];
+    let j = sites[c * 3u + 2u];
+    let wa = bend40(k1, k2, k3, mul_shr(2li * i64(i) + 1li, inv_n, INV_SHIFT40) - ONE40);
+    let wb = bend40(k1, k2, k3, mul_shr(2li * i64(j) + 1li, inv_n, INV_SHIFT40) - ONE40);
+    let v = basis_n(face) * ONE40 + basis_u(face) * wa + basis_v(face) * wb;
+    var s_hi = 0lu;
+    var s_lo = 0lu;
+    for (var q = 0u; q < 3u; q = q + 1u) {
+        let m = uabs(v[q]);
+        let p = mul_wide(m, m);
+        let nl = s_lo + p.y;
+        let carry = select(0lu, 1lu, nl < s_lo);
+        s_lo = nl;
+        s_hi = s_hi + p.x + carry;
+    }
+    let t = shr_wide(s_hi, s_lo, 20u);
+    let y0 = recip_q(isqrt(i64(t))) << 10u;
+    let ysq = mul_wide(u64(y0), u64(y0));
+    let y0sq = shr_wide(ysq.x, ysq.y, 20u);
+    let p = mul_wide(t, y0sq);
+    let one120_hi = 1lu << 56u;
+    var e_neg = false;
+    var e_hi = 0lu;
+    var e_lo = 0lu;
+    if (p.x > one120_hi || (p.x == one120_hi && p.y > 0lu)) {
+        e_neg = true;
+        e_hi = p.x - one120_hi;
+        e_lo = p.y;
+    } else {
+        e_lo = 0lu - p.y;
+        e_hi = one120_hi - p.x - select(0lu, 1lu, p.y != 0lu);
+    }
+    var e70 = i64(shr_wide(e_hi, e_lo, 50u));
+    e70 = select(e70, -e70, e_neg);
+    let y1 = y0 + mul_shr(y0, e70, 71u);
+    dirs[c * 3u] = mul_shr(v.x, y1, Q40);
+    dirs[c * 3u + 1u] = mul_shr(v.y, y1, Q40);
+    dirs[c * 3u + 2u] = mul_shr(v.z, y1, Q40);
+}
+";
+
+// ---------------------------------------------------------------------- part 2: the bend
+
+/// THE INTEGER BEND: the face parameter, the quintic bend, the basis, the normalise (an integer
+/// square root and three integer divisions) at 30 fraction bits, on the CPU and on the GPU, on the
+/// same columns' `(face, i, j)`; compared bit for bit, and against the float bend's directions as a
+/// lateral distance on the home planet's surface.
+const BEND_BITS: u32 = 30;
+const BEND_ONE: i64 = 1 << BEND_BITS;
+
+struct BendQ {
+    k1: i64,
+    k2: i64,
+    k3: i64,
+}
+
+fn bend_constants() -> BendQ {
+    let one = BEND_ONE as f64;
+    let k1 = (vd_seed::bend::K1 * one).round() as i64;
+    let k2 = (vd_seed::bend::K2 * one).round() as i64;
+    BendQ {
+        k1,
+        k2,
+        k3: BEND_ONE - k1 - k2,
+    }
+}
+
+/// THE RECIPROCAL OF THE FACE'S CELL COUNT, computed ONCE per body: `floor(2⁵⁶ / n_l)`, so the
+/// face parameter is a multiply and a shift per column — no division on either host. (naga 27's
+/// Metal back end emits a guard for the 64-bit `/` operator that Metal's compiler rejects as
+/// ambiguous, MEASURED by this bench; a recipe without `/` needs no such operator anywhere.)
+const INV_BITS: u32 = 56;
+
+fn inv_n_of(n_l: u32) -> i64 {
+    ((1i128 << INV_BITS) / i128::from(n_l)) as i64
+}
+
+/// `(2i + 1)/n_l − 1` at 30 fraction bits by the reciprocal: `(2i + 1) × inv_n >> 26`.
+fn face_param_q(i: i32, inv_n: i64) -> i64 {
+    ((((2 * i64::from(i)) + 1) * inv_n) >> (INV_BITS - BEND_BITS)) - BEND_ONE
+}
+
+/// `2⁶⁰ / len` at 30 fraction bits by SIX Newton steps from the seed 1.0 (`len` is in [1, √3], so
+/// the seed is under 2/len and the iteration converges): `r ← r + r·(2⁶⁰ − len·r) / 2⁶⁰`, the
+/// residual shifted to 30 bits before the product so nothing passes 2⁶⁰.
+fn recip_q(len: i64) -> i64 {
+    let mut r = BEND_ONE;
+    let mut step = 0;
+    while step < 6 {
+        let e = (1i64 << (2 * BEND_BITS)) - len * r;
+        r += (r * (e >> BEND_BITS)) >> BEND_BITS;
+        step += 1;
+    }
+    // THE EXACT LANDING: the Newton steps truncate a few units low; two compare loops make `r`
+    // exactly `floor(2⁶⁰ / len)`, so the reciprocal is the division's own answer.
+    let top = 1i64 << (2 * BEND_BITS);
+    while len * (r + 1) <= top {
+        r += 1;
+    }
+    while len * r > top {
+        r -= 1;
+    }
+    r
+}
+
+/// `a(k₁ + a²(k₂ + a²k₃))` at 30 fraction bits, every product shifted back once.
+fn bend_q(k: &BendQ, a: i64) -> i64 {
+    let a2 = (a * a) >> BEND_BITS;
+    let inner = k.k2 + ((a2 * k.k3) >> BEND_BITS);
+    let inner2 = k.k1 + ((a2 * inner) >> BEND_BITS);
+    (a * inner2) >> BEND_BITS
+}
+
+/// The integer square root of a non-negative 64-bit number, one bit at a time.
+fn isqrt(n: i64) -> i64 {
+    let mut x = n as u64;
+    let mut res = 0u64;
+    let mut bit = 1u64 << 62;
+    while bit > x {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if x >= res + bit {
+            x -= res + bit;
+            res = (res >> 1) + bit;
+        } else {
+            res >>= 1;
+        }
+        bit >>= 2;
+    }
+    res as i64
+}
+
+/// The unit direction of `(face, i, j)` at 30 fraction bits.
+fn direction_q(k: &BendQ, face: Face, inv_n: i64, i: i32, j: i32) -> [i64; 3] {
+    let basis = face.basis();
+    let wa = bend_q(k, face_param_q(i, inv_n));
+    let wb = bend_q(k, face_param_q(j, inv_n));
+    let axis = |c: usize| {
+        i64::from(basis.n[c]) * BEND_ONE + wa * i64::from(basis.u[c]) + wb * i64::from(basis.v[c])
+    };
+    let v = [axis(0), axis(1), axis(2)];
+    let r = recip_q(isqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]));
+    let half = 1i64 << (BEND_BITS - 1);
+    [
+        (v[0] * r + half) >> BEND_BITS,
+        (v[1] * r + half) >> BEND_BITS,
+        (v[2] * r + half) >> BEND_BITS,
+    ]
+}
+
+fn part_2_the_bend(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) {
+    let n_l = body.ladder().cells_per_edge(RUNG);
+    let inv_n = inv_n_of(n_l);
+    let radius_m = body.ladder().radius_m();
+    let k = bend_constants();
+    // The columns' (face, i, j), the same square as part 1.
+    let mut sites: Vec<i32> = Vec::new();
+    for y in FIRST_Y..FIRST_Y + CHUNKS_ACROSS {
+        for x in FIRST_X..FIRST_X + CHUNKS_ACROSS {
+            let key = ChunkKey {
+                face: FACE,
+                rung: RUNG,
+                x,
+                y,
+                z: surface_chunk_z(body, FACE, RUNG, x, y),
+            };
+            for b in 0..CHUNK_EDGE as i32 {
+                for a in 0..CHUNK_EDGE as i32 {
+                    let site = site_of(body, key, a, b);
+                    assert!(
+                        Face::from_index(site.face).is_some(),
+                        "a corner in the square"
+                    );
+                    sites.push(i32::from(site.face));
+                    sites.push(site.i);
+                    sites.push(site.j);
+                }
+            }
+        }
+    }
+    let n = sites.len() / 3;
+
+    let started = Instant::now();
+    let cpu: Vec<i64> = (0..n)
+        .flat_map(|c| {
+            let face = Face::from_index(sites[c * 3] as u8).expect("a face");
+            direction_q(&k, face, inv_n, sites[c * 3 + 1], sites[c * 3 + 2])
+        })
+        .collect();
+    let cpu_s = started.elapsed().as_secs_f64();
+
+    let started = Instant::now();
+    let float: Vec<[f64; 3]> = (0..n)
+        .map(|c| {
+            let face = Face::from_index(sites[c * 3] as u8).expect("a face");
+            vd_seed::bend::direction(
+                face,
+                vd_seed::ladder::face_param(sites[c * 3 + 1], n_l),
+                vd_seed::ladder::face_param(sites[c * 3 + 2], n_l),
+            )
+        })
+        .collect();
+    let float_s = started.elapsed().as_secs_f64();
+
+    let mut words: Vec<u32> = Vec::new();
+    push_u64(&mut words, k.k1 as u64);
+    push_u64(&mut words, k.k2 as u64);
+    push_u64(&mut words, k.k3 as u64);
+    push_u64(&mut words, inv_n as u64);
+    push_u64(&mut words, 0);
+    push_u64(&mut words, 0);
+    let started = Instant::now();
+    let out = run_compute(
+        device,
+        queue,
+        BEND_SHADER,
+        &[
+            Binding::Storage(as_bytes_i32(&sites)),
+            Binding::Output((n * 24) as u64),
+            Binding::Uniform(as_bytes_u32(&words)),
+        ],
+        n as u32,
+    );
+    let gpu_s = started.elapsed().as_secs_f64();
+    let gpu: Vec<i64> = out
+        .chunks_exact(8)
+        .map(|b| i64::from_le_bytes(b.try_into().expect("8 bytes")))
+        .collect();
+    let differing = cpu.iter().zip(gpu.iter()).filter(|(a, b)| a != b).count();
+    println!(
+        "integer_bench: PART 2 THE BEND — {n} columns: {differing} of {} direction components \
+         differ between the CPU and the GPU",
+        n * 3
+    );
+    if differing > 0 {
+        let i = cpu
+            .iter()
+            .zip(gpu.iter())
+            .position(|(a, b)| a != b)
+            .expect("one");
+        println!(
+            "integer_bench: PART 2 first difference at component {i}: CPU {} GPU {} — STOP",
+            cpu[i], gpu[i]
+        );
+        std::process::exit(1);
+    }
+    let (mut widest_mm, mut sum_mm) = (0.0_f64, 0.0_f64);
+    for c in 0..n {
+        let mut d2 = 0.0_f64;
+        for a in 0..3 {
+            let q = cpu[c * 3 + a] as f64 / BEND_ONE as f64;
+            let e = q - float[c][a];
+            d2 += e * e;
+        }
+        let mm = d2.sqrt() * radius_m * 1.0e3;
+        widest_mm = widest_mm.max(mm);
+        sum_mm += mm;
+    }
+    println!(
+        "integer_bench: PART 2 PRECISION — the integer direction against the float bend's, as a \
+         lateral distance on the surface: widest {widest_mm:.3} mm, mean {:.3} mm (a direction \
+         step of 2⁻³⁰ is {:.3} mm here)",
+        sum_mm / n as f64,
+        radius_m * 1.0e3 / BEND_ONE as f64
+    );
+    println!(
+        "integer_bench: PART 2 COST — the integer bend on one CPU core {:.1} ms ({:.0} ns a \
+         column), the float bend {:.1} ms ({:.0} ns a column), the GPU {:.1} ms with the upload \
+         and the readback",
+        cpu_s * 1.0e3,
+        cpu_s * 1.0e9 / n as f64,
+        float_s * 1.0e3,
+        float_s * 1.0e9 / n as f64,
+        gpu_s * 1.0e3
+    );
+}
+
+/// THE THROWAWAY TRANSCRIPTION of the integer bend (an instrument only, see the header).
+const BEND_SHADER: &str = r"
+@group(0) @binding(0) var<storage, read> sites: array<i32>;
+@group(0) @binding(1) var<storage, read_write> dirs: array<i64>;
+@group(0) @binding(2) var<uniform> k: array<vec4<u32>, 3>;
+
+const BEND_BITS: u32 = 30u;
+const BEND_ONE: i64 = 1073741824li;
+
+fn u64_of(w: vec2<u32>) -> u64 { return (u64(w.y) << 32u) | u64(w.x); }
+
+fn basis_n(face: i32) -> vec3<i64> {
+    switch face {
+        case 0: { return vec3<i64>(1li, 0li, 0li); }
+        case 1: { return vec3<i64>(-1li, 0li, 0li); }
+        case 2: { return vec3<i64>(0li, 1li, 0li); }
+        case 3: { return vec3<i64>(0li, -1li, 0li); }
+        case 4: { return vec3<i64>(0li, 0li, 1li); }
+        default: { return vec3<i64>(0li, 0li, -1li); }
+    }
+}
+fn basis_u(face: i32) -> vec3<i64> {
+    switch face {
+        case 0: { return vec3<i64>(0li, 1li, 0li); }
+        case 1: { return vec3<i64>(0li, 0li, 1li); }
+        case 2: { return vec3<i64>(0li, 0li, 1li); }
+        case 3: { return vec3<i64>(1li, 0li, 0li); }
+        case 4: { return vec3<i64>(1li, 0li, 0li); }
+        default: { return vec3<i64>(0li, 1li, 0li); }
+    }
+}
+fn basis_v(face: i32) -> vec3<i64> {
+    switch face {
+        case 0: { return vec3<i64>(0li, 0li, 1li); }
+        case 1: { return vec3<i64>(0li, 1li, 0li); }
+        case 2: { return vec3<i64>(1li, 0li, 0li); }
+        case 3: { return vec3<i64>(0li, 0li, 1li); }
+        case 4: { return vec3<i64>(0li, 1li, 0li); }
+        default: { return vec3<i64>(1li, 0li, 0li); }
+    }
+}
+
+const INV_SHIFT: u32 = 26u;
+
+fn face_param_q(i: i32, inv_n: i64) -> i64 {
+    return ((((2li * i64(i)) + 1li) * inv_n) >> INV_SHIFT) - BEND_ONE;
+}
+
+fn recip_q(len: i64) -> i64 {
+    var r = BEND_ONE;
+    for (var step = 0u; step < 6u; step = step + 1u) {
+        let e = (1li << 60u) - len * r;
+        r = r + ((r * (e >> BEND_BITS)) >> BEND_BITS);
+    }
+    let top = 1li << 60u;
+    while (len * (r + 1li) <= top) { r = r + 1li; }
+    while (len * r > top) { r = r - 1li; }
+    return r;
+}
+
+fn bend_q(k1: i64, k2: i64, k3: i64, a: i64) -> i64 {
+    let a2 = (a * a) >> BEND_BITS;
+    let inner = k2 + ((a2 * k3) >> BEND_BITS);
+    let inner2 = k1 + ((a2 * inner) >> BEND_BITS);
+    return (a * inner2) >> BEND_BITS;
+}
+
+fn isqrt(n: i64) -> i64 {
+    var x = u64(n);
+    var res = 0lu;
+    var bit = 1lu << 62u;
+    while (bit > x) { bit = bit >> 2u; }
+    while (bit != 0lu) {
+        if (x >= res + bit) {
+            x = x - (res + bit);
+            res = (res >> 1u) + bit;
+        } else {
+            res = res >> 1u;
+        }
+        bit = bit >> 2u;
+    }
+    return i64(res);
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let c = id.x;
+    if (c * 3u >= arrayLength(&dirs)) { return; }
+    let k1 = i64(u64_of(k[0].xy));
+    let k2 = i64(u64_of(k[0].zw));
+    let k3 = i64(u64_of(k[1].xy));
+    let inv_n = i64(u64_of(k[1].zw));
+    let face = sites[c * 3u];
+    let i = sites[c * 3u + 1u];
+    let j = sites[c * 3u + 2u];
+    let wa = bend_q(k1, k2, k3, face_param_q(i, inv_n));
+    let wb = bend_q(k1, k2, k3, face_param_q(j, inv_n));
+    let v = basis_n(face) * BEND_ONE + basis_u(face) * wa + basis_v(face) * wb;
+    let r = recip_q(isqrt(v.x * v.x + v.y * v.y + v.z * v.z));
+    let half = 1li << 29u;
+    dirs[c * 3u] = (v.x * r + half) >> BEND_BITS;
+    dirs[c * 3u + 1u] = (v.y * r + half) >> BEND_BITS;
+    dirs[c * 3u + 2u] = (v.z * r + half) >> BEND_BITS;
+}
+";
 
 /// One octave in fixed point.
 struct OctaveQ {
@@ -489,7 +1220,7 @@ fn columns(body: &BodyDefinition) -> Vec<[f64; 3]> {
             for b in 0..CHUNK_EDGE as i32 {
                 for a in 0..CHUNK_EDGE as i32 {
                     let d = site_dir(body, key, site_of(body, key, a, b));
-                    out.push([d[0].to_f64(), d[1].to_f64(), d[2].to_f64()]);
+                    out.push(vd_terrain::units::unit_of_direction(d));
                 }
             }
         }
@@ -594,6 +1325,10 @@ fn run_compute(
     let bytes = slice.get_mapped_range().to_vec();
     staging.unmap();
     bytes
+}
+
+fn as_bytes_i32(v: &[i32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
 fn as_bytes_i64(v: &[i64]) -> Vec<u8> {

@@ -33,6 +33,14 @@ pub fn home_planet() -> BodyDefinition {
 
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
 
     #[test]
@@ -42,7 +50,7 @@ mod tests {
         assert_eq!(home.ladder.rungs, 13);
         assert_eq!(home.octave_count, 14);
         // The ladder snaps Earth's radius to 2N/π at N = 10 006 528 cells: 6 370 353.6 m.
-        assert!((home.radius_m - crate::gf::Gf::from_f64(6_370_353.6)).abs() < crate::gf::Gf::ONE);
+        assert!((home.radius_m() - 6_370_353.6).abs() < 1.0);
     }
 
     /// MEASURED (the refuter's finding 10): the radius is an INPUT from outside the fence, and the

@@ -15,8 +15,11 @@
 
 use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 
-/// The recipe's version. 1 is the first recipe of the voxel foundation (2026-09-08).
-pub const GENERATOR_VERSION: u32 = 1;
+/// The recipe's version. 1 was the first recipe of the voxel foundation (2026-09-08), on fenced
+/// 64-bit floats. 2 is THE INTEGER RECIPE (ruling F7, 2026-09-12): the same world, computed on
+/// fixed-point integers, which moved every surface by up to 1.5 mm and a quarter of a millimetre on
+/// average (MEASURED over the 3 936 256 columns of the spike's square).
+pub const GENERATOR_VERSION: u32 = 2;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -51,6 +54,14 @@ impl WorldIdentity {
 
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
 
     #[test]
@@ -59,7 +70,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 1,
+            GENERATOR_VERSION, 2,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -82,5 +93,5 @@ mod tests {
         );
     }
 
-    const DECLARED_PIN: u64 = 10_807_444_098_716_102_726;
+    const DECLARED_PIN: u64 = 1_561_458_573_009_577_845;
 }

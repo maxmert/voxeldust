@@ -12,7 +12,6 @@ use vd_client::ladder_view::{
     Column, LadderView, column_under, horizon_m, relief_m, rung_for_distance,
 };
 use vd_core::glam::DVec3;
-use vd_terrain::Gf;
 
 const SUN_ELEVATION_DEG: f64 = 15.0;
 const SUN_OFF_NOSE_DEG: f64 = 120.0;
@@ -35,8 +34,8 @@ fn main() {
     let along = sun.cross(DVec3::Z).normalize();
     let zenith = (90.0_f64 - SUN_ELEVATION_DEG).to_radians();
     let d = (sun * zenith.cos() + along * zenith.sin()).normalize();
-    let dir = [Gf::from_f64(d.x), Gf::from_f64(d.y), Gf::from_f64(d.z)];
-    let h = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+    let dir = [d.x, d.y, d.z];
+    let h = vd_terrain::height::height_m(&body, dir, 0);
     let toward_sun = (sun - d * sun.dot(d)).normalize();
     let ahead =
         vd_core::glam::DQuat::from_axis_angle(d, SUN_OFF_NOSE_DEG.to_radians()) * toward_sun;
@@ -86,12 +85,7 @@ fn main() {
             let p = eye + ray * t;
             let len = p.length();
             let pd = p / len;
-            let hh = vd_terrain::height::height_m(
-                &body,
-                [Gf::from_f64(pd.x), Gf::from_f64(pd.y), Gf::from_f64(pd.z)],
-                rung,
-            )
-            .to_f64();
+            let hh = vd_terrain::height::height_m(&body, [pd.x, pd.y, pd.z], rung);
             if len <= hh {
                 hit = Some((t, pd));
                 break;
@@ -121,7 +115,7 @@ fn main() {
                     wanted_columns.contains(&col),
                     span.lo,
                     span.hi,
-                    span.peak_m.to_f64() - ground.surface_m,
+                    span.peak_m - ground.surface_m,
                     if t <= horizon { "inside" } else { "beyond" }
                 );
             }

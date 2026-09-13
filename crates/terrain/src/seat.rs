@@ -42,9 +42,16 @@ pub fn seat_eighths(samples: &SampleBox, cell: [u8; 3]) -> Option<u8> {
         if is_rock(up as i8) {
             return None;
         }
-        // seat · 8 = 4 + 8·|g| / (|g| + up), rounded half up.
+        // seat · 8 = 4 + 8·|g| / (|g| + up), rounded half up. The denominator is the TWO CELLS' own
+        // gaps, so no shift divides it; this is the CPU's placement query (where a sub-metre block
+        // rests, slice 9), never the cell field (G1) or the vertex position (G3) a GPU kernel runs.
         let den = -g + up;
-        let eighths = 4 + (2 * SEAT_STEPS * (-g) + den) / (2 * den);
+        #[allow(
+            clippy::integer_division,
+            reason = "CPU-only placement query: the denominator is two cells' gaps, not a power of two"
+        )]
+        let rise = (2 * SEAT_STEPS * (-g) + den) / (2 * den);
+        let eighths = 4 + rise;
         if eighths > SEAT_STEPS {
             return None;
         }
@@ -54,7 +61,12 @@ pub fn seat_eighths(samples: &SampleBox, cell: [u8; 3]) -> Option<u8> {
     if is_rock(down as i8) {
         // seat · 8 = 8·|down| / (|down| + g) − 4, rounded half up, never under the floor.
         let den = -down + g;
-        let eighths = (2 * SEAT_STEPS * (-down) + den) / (2 * den) - 4;
+        #[allow(
+            clippy::integer_division,
+            reason = "CPU-only placement query: the denominator is two cells' gaps, not a power of two"
+        )]
+        let rise = (2 * SEAT_STEPS * (-down) + den) / (2 * den);
+        let eighths = rise - 4;
         return Some(eighths.max(0) as u8);
     }
     Some(0)
@@ -62,6 +74,14 @@ pub fn seat_eighths(samples: &SampleBox, cell: [u8; 3]) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
     use crate::extract::tests::synthetic;
 

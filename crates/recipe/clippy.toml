@@ -1,0 +1,56 @@
+# ★ THE FLOAT FENCE, layer 2, ON THE CRATE DESTINED FOR THE GPU (ruling F7,
+# `owner_decisions_2026-09-12_frozen_patches.md`; SL10 clause 4). This crate is THE INTEGER RECIPE: one
+# source compiled for the server's CPU, the client's CPU and — through `rust-gpu` — the client's GPU. A
+# shader holds no `libm`, so a platform math call here is not only a drift risk, it is a crate that
+# cannot be compiled for its second target at all. The crate's own `lib.rs` denies float ARITHMETIC,
+# integer division and the remainder outright; this file denies every float METHOD the leaf and the
+# generator deny, so a test or a doc example that reaches for a sine, a hypotenuse or a `min` goes red
+# here too. A test that reads a word as a real number says so with
+# `#[allow(clippy::float_arithmetic, reason = …)]` and uses only add, subtract, multiply, divide, square
+# root and the comparisons.
+disallowed-methods = [
+    { path = "f64::sin", reason = "SL10 clause 4: no platform transcendental in the seed-shaped world" },
+    { path = "f64::cos", reason = "SL10 clause 4" },
+    { path = "f64::tan", reason = "SL10 clause 4" },
+    { path = "f64::asin", reason = "SL10 clause 4" },
+    { path = "f64::acos", reason = "SL10 clause 4" },
+    { path = "f64::atan", reason = "SL10 clause 4" },
+    { path = "f64::atan2", reason = "SL10 clause 4" },
+    { path = "f64::exp", reason = "SL10 clause 4" },
+    { path = "f64::exp2", reason = "SL10 clause 4" },
+    { path = "f64::exp_m1", reason = "SL10 clause 4" },
+    { path = "f64::ln", reason = "SL10 clause 4" },
+    { path = "f64::ln_1p", reason = "SL10 clause 4" },
+    { path = "f64::log", reason = "SL10 clause 4" },
+    { path = "f64::log2", reason = "SL10 clause 4" },
+    { path = "f64::log10", reason = "SL10 clause 4" },
+    { path = "f64::powf", reason = "SL10 clause 4" },
+    { path = "f64::powi", reason = "SL10 clause 4: powi is a libm call on some targets" },
+    { path = "f64::cbrt", reason = "SL10 clause 4" },
+    { path = "f64::hypot", reason = "SL10 clause 4" },
+    { path = "f64::sinh", reason = "SL10 clause 4" },
+    { path = "f64::cosh", reason = "SL10 clause 4" },
+    { path = "f64::tanh", reason = "SL10 clause 4" },
+    { path = "f64::asinh", reason = "SL10 clause 4" },
+    { path = "f64::acosh", reason = "SL10 clause 4" },
+    { path = "f64::atanh", reason = "SL10 clause 4" },
+    { path = "f64::to_radians", reason = "SL10 clause 4" },
+    { path = "f64::to_degrees", reason = "SL10 clause 4" },
+    { path = "f64::mul_add", reason = "SL10 clause 4: a fused multiply-add rounds once where two chips round twice" },
+    { path = "f64::min", reason = "SL10 clause 4: documented non-deterministic on +0.0 against -0.0; write the comparison" },
+    { path = "f64::max", reason = "SL10 clause 4: documented non-deterministic on +0.0 against -0.0; write the comparison" },
+    { path = "f32::sin", reason = "SL10 clause 4: no f32 on the seed-shaped path at all" },
+    { path = "f32::cos", reason = "SL10 clause 4" },
+    { path = "f32::powf", reason = "SL10 clause 4" },
+    { path = "f32::mul_add", reason = "SL10 clause 4" },
+    { path = "std::time::SystemTime::now", reason = "a function of the seed and the address, never of time" },
+    { path = "std::time::Instant::now", reason = "a function of the seed and the address, never of time" },
+    { path = "std::thread::sleep", reason = "Tier-A: the seed-shaped path never sleeps; pacing belongs to the prod tick loop" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is arithmetic order; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order is arithmetic order; use BTreeSet" },
+    { path = "std::net::UdpSocket", reason = "no out-of-band network egress in Tier-A (HR1)" },
+    { path = "std::net::TcpStream", reason = "no out-of-band network egress in Tier-A (HR1)" },
+    { path = "std::net::TcpListener", reason = "no out-of-band network egress in Tier-A (HR1)" },
+]

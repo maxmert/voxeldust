@@ -57,7 +57,6 @@ use vd_core::glam::DVec3;
 use vd_core::pose::{RealmId, frame_for_realm};
 use vd_devproto::{DevPhase, DevRequest, DevResponse, DevState, WaitField, WaitOp, WaitPredicate};
 use vd_io_prod::trust::ClusterTrust;
-use vd_terrain::Gf;
 
 const CLIENT_ACCOUNT_BASE: u64 = 1000;
 /// The walker's eye over the ground.
@@ -1082,8 +1081,8 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     let along = sun.cross(DVec3::Z).normalize();
     let zenith = (90.0_f64 - SUN_ELEVATION_DEG).to_radians();
     let d = (sun * zenith.cos() + along * zenith.sin()).normalize();
-    let dir = [Gf::from_f64(d.x), Gf::from_f64(d.y), Gf::from_f64(d.z)];
-    let h = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+    let dir = [d.x, d.y, d.z];
+    let h = vd_terrain::height::height_m(&body, dir, 0);
     let toward_sun = (sun - d * sun.dot(d)).normalize();
     let ahead =
         vd_core::glam::DQuat::from_axis_angle(d, SUN_OFF_NOSE_DEG.to_radians()) * toward_sun;
@@ -1114,13 +1113,8 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     while s_m <= leg_m {
         let p = d * h + DVec3::NEG_Z * s_m;
         let q = p.normalize();
-        let hq = vd_terrain::height::height_m(
-            &body,
-            [Gf::from_f64(q.x), Gf::from_f64(q.y), Gf::from_f64(q.z)],
-            2,
-        )
-        .to_f64();
-        highest = highest.max(hq + body.dropped_bound_m(2).to_f64());
+        let hq = vd_terrain::height::height_m(&body, [q.x, q.y, q.z], 2);
+        highest = highest.max(hq + body.dropped_bound_m(2));
         // Between two samples the surface may stand higher than at either (the bound holds AT a
         // sampled direction): the clearance carries that (refutation R4-30).
         if ((s_m / PATH_SAMPLE_M).round() as u64).is_multiple_of(20) {
@@ -1150,12 +1144,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     let mut berths: Vec<DVec3> = Vec::new();
     for b in 0..boardings {
         let db = (d * h + level * (BERTH_SPACING_M * b as f64)).normalize();
-        let hb = vd_terrain::height::height_m(
-            &body,
-            [Gf::from_f64(db.x), Gf::from_f64(db.y), Gf::from_f64(db.z)],
-            0,
-        )
-        .to_f64();
+        let hb = vd_terrain::height::height_m(&body, [db.x, db.y, db.z], 0);
         let pb = stand(db, hull_m + (h - hb).max(0.0), hb, level);
         berths.push(pb.offset_m + level * BERTH_STANDOFF_M);
         pilots.push(pb);

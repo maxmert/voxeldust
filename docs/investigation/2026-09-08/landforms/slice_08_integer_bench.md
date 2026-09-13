@@ -51,6 +51,77 @@ fraction bits in the noise left 5 mm at the coarsest octave: 28 are needed. (4) 
 whole gap steps cost 3.9 mm an octave: carry eight more bits. With all four, the widest
 difference is 1.06 mm.
 
+## Part 2 — the bend in integers (the direction itself, not borrowed from the float bend)
+
+The same 3 936 256 columns' `(face, i, j)`; the face parameter `(2i + 1)/n_l − 1`, the quintic bend
+with `k₁ = round(π/4 · 2³⁰)`, `k₂ = round(0.15 · 2³⁰)`, `k₃ = 2³⁰ − k₁ − k₂` (the three sum to one
+exactly, so a face edge still lands on the cube edge exactly), the basis, and the normalise as an
+INTEGER SQUARE ROOT (bit by bit) and three divisions — all at 30 fraction bits, on the CPU and in
+a WGSL transcription on the GPU.
+
+Two forms were measured: the divisions spelled out as restoring long division (shifts, compares
+and subtracts), and the DIVISION-FREE form the design takes — the face parameter by a reciprocal
+computed once per body (`floor(2⁵⁶ / n_l)`, a multiply and a shift per column), the normalise by
+an integer Newton reciprocal of the length (six fixed steps from the seed 1.0, then two compare
+loops that land it exactly on `floor(2⁶⁰ / len)`), and the last product rounded to nearest.
+
+| | the divisions as loops | division-free |
+|---|---|---|
+| direction components that differ between the CPU and the GPU | **0 of 11 808 768** | **0 of 11 808 768** |
+| the integer direction against the float bend's, laterally on the surface: widest | 13.3 mm | 15.4 mm |
+| the same, mean | 5.1 mm | 5.4 mm (one step of 2⁻³⁰ is 5.9 mm on the home planet) |
+| the integer bend, one CPU core | 1 273 ms (323 ns a column) | 187 ms (48 ns a column) |
+| the float bend, one CPU core | 21 ms (5 ns a column) | 19 ms (5 ns a column) |
+| the GPU, with the transfer | 111 ms | 84 ms |
+
+**A FINDING FOR THE DESIGN — no 64-bit division operator on the Metal path today.** naga 27's
+Metal back end guards a 64-bit `/` against overflow with a `select` call that Metal's compiler
+rejects as ambiguous (`call to 'select' is ambiguous`: the `int` and the `long` overloads), so a
+shader with an `i64` division does not build on macOS (MEASURED here; the first Metal error the
+bench met). The bench spells its four divisions out as restoring long division (shifts, compares
+and subtracts only), which builds and agrees bit for bit — at 323 ns a column (four 64-step loops
+and a 32-step root; the float bend is 5 ns). The division-free form costs 48 ns a column, ten
+times less, and lands within one direction step of the float bend, the same as the loops. (A
+Newton reciprocal WITHOUT the exact landing read three steps low — 17 mm mean — because each
+step truncates; the two compare loops cure it, and the last product is rounded, not floored.)
+
+Read: the bend is lawful in integers, identical on both hosts, division-free at 48 ns a column
+(ten times the float bend, 60 columns' worth in a chunk's 3 844 — under 0.2 ms of a 5 ms build),
+and within one step of 5.9 mm of the float bend at 30 fraction bits; 32 fraction bits (1.5 mm
+steps) fit if the square sum is carried unsigned. Integer division has ONE answer wherever it is
+computed (no drift is possible), so a native `/` on the CPU beside a loop on a GPU would not be a
+port in the law's sense — but a recipe with no division needs no such argument, and runs on every
+back end naga has.
+
+## Part 3 — the direction at 40 fraction bits (the owner: millimetres must stay; performance must not suffer)
+
+The owner asked whether the 30-bit direction (5.9 mm steps on the home planet, 40 mm on the
+largest legal body) gives up precision, and ruled that performance must not suffer. Part 3
+measures the direction at 40 fraction bits: the two-word (128-bit) product spelled out from
+32-bit halves on both hosts (`mul_wide`, `shr_wide`, `mul_shr`), the bend's polynomial at 40 bits,
+the square sum at 80 bits in two words, and the reciprocal square root by ONE Newton step from the
+30-bit path's exact reciprocal (an error of 2⁻³⁰ squares to 2⁻⁶⁰, past 40 bits), the residual
+carried at 120 bits. No division anywhere.
+
+| | 30 bits (part 2) | 40 bits (part 3) | the float bend |
+|---|---|---|---|
+| direction components that differ between the CPU and the GPU | 0 of 11 808 768 | **0 of 11 808 768** | — |
+| against the float bend, laterally on the surface: mean | 5.4 mm | **0.0095 mm** | — |
+| the same, widest | 15.4 mm | **0.020 mm** | — |
+| one step of the direction on the home planet | 5.9 mm | 0.0058 mm | — |
+| one step on the largest legal body (42 700 km) | 40 mm | 0.039 mm | — |
+| one CPU core, a column | 44–48 ns | 77 ns | 5 ns |
+| one CPU core, a chunk's 3 844 columns | 0.17 ms | **0.29 ms** | 0.02 ms |
+| the GPU, the four million columns with the transfer | 31–84 ms | 107 ms | — |
+
+Read: at 40 bits the integer direction sits within two hundredths of a millimetre of the float
+bend on every column — a hundred times finer than the gap byte (7.8 mm) and the vertex grid
+(3.9 mm) that store and draw the surface — on the largest legal body too. Its cost is 0.29 ms of
+a chunk's build on one CPU core against 0.17 ms at 30 bits and 0.02 ms for the float bend: a
+tenth of a millisecond more per chunk, two percent of a five-millisecond build, and nothing on
+the GPU. The bench's 30-bit path stays as the seed of the 40-bit one (the reciprocal square root's
+first guess), so the 40-bit path is the 30-bit path plus one Newton step in two words.
+
 ## What the bench decides, and what it leaves to the design discussion
 
 Decided by measurement: the integer recipe is lawful under SL10 on both hosts (identical bytes),
@@ -59,11 +130,9 @@ cores' worth on the columns, transfer included).
 
 Left to the design (F7 step (b)), each a real decision:
 
-1. **The bend and the direction.** The bench takes the column directions from today's float bend
-   (`vd_seed::bend`: `W(a) = a(k₁ + a²(k₂ + a²k₃))` with `k₁ = π/4`, then a normalise with a square
-   root and three divisions) and rounds them to 2⁻³⁰. An integer recipe must produce the direction
-   itself: a rational `k₁`, an integer square root (the normalise), and the face parameter as a
-   pair of integers. The bend's own identity (the same point on both hosts) is then by construction.
+1. **The bend and the direction.** Parts 2 and 3 measured it: identical on both hosts at 30 and
+   at 40 fraction bits, division-free; 40 bits sit within 0.02 mm of the float bend for 0.29 ms
+   of a chunk's build on one core. The design takes 40.
 2. **The caves.** `value3` (a division by 2⁵³, a shift in fixed point) and the tube distance
    (`segment_distance_m`: a division and a square root) — an integer square root again.
 3. **The density.** `quantise_gap` already floors once at 1/128 cell; the integer radius in
@@ -81,3 +150,22 @@ Left to the design (F7 step (b)), each a real decision:
    share (F6) keeps.
 7. **The pins and the pictures**: `NOISE_PIN`, `VALUE_PIN`, the golden tables and the frozen
    exact pictures are re-recorded once, on the owner's look (F7 item 4).
+
+## The build's own measurement (F7 step (c), 2026-09-12)
+
+The CPU integer recipe landed: `vd-terrain` computes the static shape in `vd-recipe`'s kernels, and
+the one float left draws a body from its seed (the charter) and states metres at the seam.
+
+**MEASURED, the whole surface against the whole float surface** (not the relief alone, as part 1 was):
+over the 3 936 256 columns of this bench's own square (face +X, rung 0, chunks (3..35, 5..37)), the
+integer surface radius stands **1.4992 mm** from the float recipe's at the widest (cell (face +X,
+1033, 486)) and **0.2002 mm** on average. The instrument was a throwaway example (`float_vs_integer`)
+holding the float draw, the float bend and Perlin's noise in `f64`; it is deleted with the float
+recipe it measured, and this line is the record.
+
+The widest is bigger than part 1's 1.06 mm because the whole surface carries three more roundings
+than the relief alone: the radius rounded once into the charter, the 40-bit bend, and the frequency
+and amplitude rounded once each into the charter.
+
+`GENERATOR_VERSION` is 2; `NOISE_PIN` and `VALUE_PIN` are the integer noise's words; the golden
+tables are re-recorded. THE FROZEN PICTURES ARE NOT: they wait on the owner's look (F7 item 4).

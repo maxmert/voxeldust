@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/recipe",
     "crates/seed",
     "crates/terrain",
     "crates/core",
@@ -26,6 +27,9 @@ rust-version = "1.94"
 
 [workspace.dependencies]
 # Workspace crates (dependency rule: bins -> node -> sim -> wire -> core; harness -> node + sim; nothing depends on a bin)
+# ★ THE INTEGER RECIPE (ruling F7): the root of the seed-shaped path — the kernels compiled for the
+# server's CPU, the client's CPU and the client's GPU.
+vd-recipe = { path = "crates/recipe" }
 vd-seed = { path = "crates/seed" }
 vd-terrain = { path = "crates/terrain" }
 vd-core = { path = "crates/core" }

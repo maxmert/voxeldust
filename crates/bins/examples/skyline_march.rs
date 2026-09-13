@@ -18,9 +18,7 @@ use std::process::ExitCode;
 
 use vd_bins::DEV;
 use vd_seed::bend::{Face, direction};
-use vd_terrain::Gf;
 use vd_terrain::height::height_m;
-use vd_terrain::noise::noise3;
 
 /// The eye's height over its own surface, metres (`01` §6.1).
 const EYE_M: f64 = 373.0;
@@ -55,6 +53,20 @@ const FIRST_FINE: usize = 4;
 /// macro node — here octaves 5..=9 (12.5 km to 781 m).
 const RIDGED_BAND: std::ops::RangeInclusive<usize> = 5..=9;
 
+/// ONE octave's noise along a direction, as a real number: the recipe's own integer kernel with the
+/// amplitude of one noise unit, read out at the noise's fraction bits. The instrument needs the raw
+/// noise because it re-weights the octaves itself.
+fn octave_noise(o: &vd_recipe::height::Octave, dir: [vd_recipe::Gi; 3]) -> f64 {
+    let unit = vd_recipe::height::Octave {
+        amplitude: vd_recipe::Gi::new(1 << vd_recipe::height::AMP_BITS),
+        ..*o
+    };
+    // The word is a NOISE VALUE at 28 fraction bits; it is read as a real number directly, never
+    // narrowed to an i32 first (a 32-bit cast would silently wrap a value this instrument may widen).
+    vd_recipe::height::relief(&[unit], dir).raw() as f64
+        / f64::from(1u32 << vd_recipe::noise::NOISE_BITS)
+}
+
 /// The height field under a given amplitude table (the octaves' frequencies and seeds are the body's);
 /// `ridged` turns the middle band into ridged noise, re-centred so its amplitude means the same.
 fn height_with(
@@ -63,16 +75,10 @@ fn height_with(
     ridged: bool,
     dir: [f64; 3],
 ) -> f64 {
-    let d = [
-        Gf::from_f64(dir[0]),
-        Gf::from_f64(dir[1]),
-        Gf::from_f64(dir[2]),
-    ];
+    let d = vd_terrain::units::direction_of_unit(dir);
     let mut h = body.ladder().radius_m();
     for (i, (o, a)) in body.octaves_at(0).iter().zip(amplitudes).enumerate() {
-        let f = o.frequency();
-        let p = [d[0] * f, d[1] * f, d[2] * f];
-        let n = noise3(o.seed(), p).to_f64();
+        let n = octave_noise(o, d);
         let v = if ridged && RIDGED_BAND.contains(&i) {
             (1.0 - n.abs()) * 2.0 - 1.0
         } else {
@@ -191,11 +197,14 @@ fn main() -> ExitCode {
         octaves.len()
     );
     // The amplitude tables: today's, and the proposed spectrum's.
-    let today: Vec<f64> = octaves.iter().map(|o| o.amplitude_m().to_f64()).collect();
+    let today: Vec<f64> = octaves
+        .iter()
+        .map(vd_terrain::body::octave_amplitude_m)
+        .collect();
     let mut proposed = today.clone();
     println!("  octave  wavelength(m)  amplitude today(m)  proposed(m)  slope proposed");
     for (i, o) in octaves.iter().enumerate() {
-        let lambda = r / o.frequency().to_f64();
+        let lambda = r / vd_terrain::body::octave_frequency(o);
         if i >= FIRST_FINE {
             let x = ((i as f64) - O_PEAK) * std::f64::consts::LN_2;
             let s = S_PEAK / (1.0 + x * x / (SIGMA * SIGMA));
@@ -210,7 +219,8 @@ fn main() -> ExitCode {
     }
     let fine_rms: f64 = (FIRST_FINE..octaves.len())
         .map(|i| {
-            let s = proposed[i] * std::f64::consts::TAU / (r / octaves[i].frequency().to_f64());
+            let s = proposed[i] * std::f64::consts::TAU
+                / (r / vd_terrain::body::octave_frequency(&octaves[i]));
             s * s
         })
         .sum::<f64>()
@@ -218,25 +228,14 @@ fn main() -> ExitCode {
     println!(
         "  proposed: fine octaves sum {:.0} m of relief {:.0} m; fine RMS slope {fine_rms:.3} (tan 35° = 0.700)",
         proposed[FIRST_FINE..].iter().sum::<f64>(),
-        body.relief_bound_m(0).to_f64()
+        body.relief_bound_m(0)
     );
     let start = std::time::Instant::now();
     for (name, face, a, b) in STATIONS {
         let d = direction(face, a, b);
-        let dg = [Gf::from_f64(d[0]), Gf::from_f64(d[1]), Gf::from_f64(d[2])];
-        let h_today = height_m(&body, dg, 0).to_f64();
-        let field_today = |dir: [f64; 3]| {
-            height_m(
-                &body,
-                [
-                    Gf::from_f64(dir[0]),
-                    Gf::from_f64(dir[1]),
-                    Gf::from_f64(dir[2]),
-                ],
-                0,
-            )
-            .to_f64()
-        };
+        let dg = [d[0], d[1], d[2]];
+        let h_today = height_m(&body, dg, 0);
+        let field_today = |dir: [f64; 3]| height_m(&body, [dir[0], dir[1], dir[2]], 0);
         let field_new = |dir: [f64; 3]| height_with(&body, &proposed, false, dir);
         let field_ridged = |dir: [f64; 3]| height_with(&body, &proposed, true, dir);
         let sky_t = skyline(&body, &field_today, d);

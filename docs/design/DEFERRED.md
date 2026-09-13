@@ -8098,26 +8098,6 @@ rings; what is left is an interim with a named step:
    🟩 2026-09-12: the owner accepted the look ("the look is fine"); every stand's exact reference
    is frozen with the morph normal in it (the seam stand among them).
 
-20. **THE FROZEN PATCH (ruling F1, `owner_decisions_2026-09-12_frozen_patches.md`) — slice 9**: a
-   built area keeps the octave count it was built on; the count is a block-store row; both hosts
-   derive the patch with its count; a blend band at the edge; the added-octave tolerance is half a
-   metre at the 1 m rung (F2). OPEN for the slice 9 discussion (F3): the patch's extent, whether an
-   emptied patch thaws, the band's width and shape, the row's key. WHERE: the generator gains an
-   octave-count input (`vd-terrain`), the block store the row, the extractor the band. WHEN: slice 9.
-
-21. **THE INTEGER RECIPE ON THE GPU (ruling F7, `owner_decisions_2026-09-12_frozen_patches.md`)**:
-   the recipe goes integer-only and the GPU does the client's chunk work to the maximum, one source
-   compiled for both targets. ★ STEP (a) THE BENCH LANDED (`slice_08_integer_bench.md`,
-   `crates/bins/examples/integer_bench.rs`): the height field's octave sum in fixed point on the CPU
-   and on the GPU — 0 of 3 936 256 columns differ; within 1.06 mm (mean 0.13 mm) of today's float
-   recipe; one core +18 %; the GPU 127 ms for the four million columns with the transfer. The format
-   the bench settled on (directions 2⁻³⁰, frequency int + 2⁻²⁸ fraction, noise at 28 fraction bits,
-   amplitude at 1/32 768 m, the sum floored once) is the design's starting point. OPEN for step (b),
-   the design discussion: the integer bend and normalise (an integer square root, a rational π/4),
-   the caves' square root, the 33-bit radius, the vertex position and the morph on the GPU, the
-   one-source build path (`rust-gpu`, UNMEASURED) with `SHADER_INT64` gated at the handshake and a
-   CPU fallback of the same source, the scope of "to the maximum", the pins and pictures re-recorded.
-
 21. **A SPINNING PARENT'S RESIDUES** (MEASURED on the turning legs, 2026-09-11, §22.3): (a) the
    track LERPS a realm's centre and SLERPS its facing, so a parent spinning in the window cuts the
    chord of its arc between two ticks — at fifty degrees a second the stamp's altitude dipped to
@@ -8141,6 +8121,57 @@ rings; what is left is an interim with a named step:
    ruling 2026-08-27 item 4). (c) The frame-to-frame detector on a spinning hull reads its own
    reprojection error until (a) is cured; its readings on the straight legs and after the spin is
    cancelled are the measurement. → after (a), with the placement's interpolation.
+
+22. **THE FROZEN PATCH (ruling F1, `owner_decisions_2026-09-12_frozen_patches.md`) — slice 9**: a
+   built area keeps the octave count it was built on; the count is a block-store row; both hosts
+   derive the patch with its count; a blend band at the edge; the added-octave tolerance is half a
+   metre at the 1 m rung (F2). OPEN for the slice 9 discussion (F3): the patch's extent, whether an
+   emptied patch thaws, the band's width and shape, the row's key. WHERE: the generator gains an
+   octave-count input (`vd-terrain`), the block store the row, the extractor the band. WHEN: slice 9.
+
+23. **THE INTEGER RECIPE ON THE GPU (ruling F7, `owner_decisions_2026-09-12_frozen_patches.md`)**:
+   the recipe goes integer-only and the GPU does the client's chunk work to the maximum, one source
+   compiled for both targets. ★ STEP (a) THE BENCH LANDED (`slice_08_integer_bench.md`,
+   `crates/bins/examples/integer_bench.rs`): the height field's octave sum in fixed point on the CPU
+   and on the GPU — 0 of 3 936 256 columns differ; within 1.06 mm (mean 0.13 mm) of today's float
+   recipe; one core +18 %; the GPU 127 ms for the four million columns with the transfer. The format
+   the bench settled on (directions 2⁻³⁰, frequency int + 2⁻²⁸ fraction, noise at 28 fraction bits,
+   amplitude at 1/32 768 m, the sum floored once) is the design's starting point. PART 2, THE BEND in
+   integers, DIVISION-FREE (a reciprocal per body for the face parameter, an exactly-landed
+   Newton reciprocal for the normalise): 0 of 11 808 768 direction components differ; within one
+   step of 2⁻³⁰ (5.4 mm mean, 15 mm widest laterally); 48 ns a column (the float bend: 5 ns; the
+   divisions as bit loops: 323 ns) — because naga 27's Metal back end CANNOT COMPILE a 64-bit `/`
+   (an ambiguous `select` guard, MEASURED). PART 3, THE DIRECTION AT 40 BITS (two-word products
+   from 32-bit halves on both hosts): 0 differ; within 0.02 mm of the float bend on every column;
+   77 ns a column, 0.29 ms of a chunk's build on one core — the design takes 40 bits. The step
+   (b) design document is
+   `slice_08_integer_recipe_design.md`. OPEN for step (b),
+   the design discussion: the integer bend and normalise (an integer square root, a rational π/4),
+   the caves' square root, the 33-bit radius, the vertex position and the morph on the GPU, the
+   one-source build path (`rust-gpu`, UNMEASURED) with `SHADER_INT64` gated at the handshake and a
+   CPU fallback of the same source, the scope of "to the maximum", the pins and pictures re-recorded.
+   ★ STEP (b) RULED (F8: the five decisions accepted) and ★ **STEP (c) PART 1 — THE CPU INTEGER
+   RECIPE — LANDED (2026-09-12)**: `vd-recipe` holds the kernels (the fenced integer `Gi`, the
+   two-word product, the integer root and the two reciprocals, the bend at 40 bits, the noise at 28,
+   the octave sum); `vd-terrain` computes the whole static shape in them — the body's INTEGER CHARTER
+   (the octaves, the radius and the sea in gap steps, the cave band, three reciprocals so no kernel
+   divides), the direction, the height, the biome, the density, the caves, the vertex position and the
+   column bound. The unit of length is the GAP STEP, 1/128 m (`vd_terrain::units`); metres are four
+   doors at the seam. MEASURED against the float world it replaces: 1.4992 mm widest and 0.2002 mm
+   mean over 3 936 256 columns (`slice_08_integer_bench.md`). `GENERATOR_VERSION` is 2; the golden
+   tables and the noise pins are re-recorded; `Gf` keeps exactly two callers — the body's DRAW from its
+   seed and the four metre doors — and the lint, the link scan and the fence control still stand.
+   🟧 STILL OPEN: the frozen exact pictures (they wait on the owner's look, F7 item 4) and the GPU
+   steps G1–G4 with their runtime self-check.
+   ★ THE WORKSPACE REDS AT THIS LANDING, MEASURED ON THE LAST COMMIT (d165d3c, a fresh worktree,
+   release, 2026-09-13) — ALL PRE-EXISTING, none from the recipe: `dual_cluster_crossing_smoke::
+   a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier` (−3.962e14 m clear against the
+   ring sibling's wake radius — the reach ruling's wake band, both trees); `frame_conversion_e2e::
+   no_level_of_the_chain_can_place_itself_its_ancestors_or_a_sibling` (an extra Planet(8) in the
+   placeable set, both trees) and `::the_picture_does_not_compound_staleness_per_level_under_a_
+   lossy_link` (0.99 lossy vs 0.99 clean, both trees); `flight_table` ×2 (documented pre-existing
+   since 41b0ba0). The crate-isolation law was the one red the recipe caused, and it is fixed.
+
 
 **WHEN.** Slice 8, steps 4–6. The slice is not done until this row is 🟩.
 

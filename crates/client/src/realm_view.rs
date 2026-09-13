@@ -856,9 +856,13 @@ mod tests {
             Some(station_plain),
             "nothing turns: through the parent is the plain blend"
         );
-        let plain = v.realm_pose_blended(RealmId::Station(2), 15.0, false, Some(RealmId::Planet(9)));
+        let plain =
+            v.realm_pose_blended(RealmId::Station(2), 15.0, false, Some(RealmId::Planet(9)));
         assert_eq!(plain, Some(station_plain));
-        assert_eq!(v.realm_pose_blended(RealmId::Planet(9), 15.0, false, None), None);
+        assert_eq!(
+            v.realm_pose_blended(RealmId::Planet(9), 15.0, false, None),
+            None
+        );
     }
 
     #[test]

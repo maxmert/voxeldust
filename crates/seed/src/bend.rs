@@ -258,6 +258,15 @@ pub fn direction(face: Face, a: f64, b: f64) -> [f64; 3] {
     normalize([x, y, z])
 }
 
+/// THE INTEGER DIRECTION (ruling F7): the unit direction of cell `(face, i, j)` at 40 fraction bits
+/// from the recipe's integer bend, for a body whose cell-count reciprocal at this rung is `inv_n`
+/// (`vd_recipe::bend::inv_n_of(n_l)`). The same word triple on every host; the float [`direction`]
+/// stays beside it for the inverse path until its integer form lands.
+#[must_use]
+pub fn direction_q(face: Face, i: i32, j: i32, inv_n: vd_recipe::Gi) -> [vd_recipe::Gi; 3] {
+    vd_recipe::bend::direction(face.index(), i, j, inv_n)
+}
+
 /// `v / |v|`, one square root and one divide per component, in this order.
 #[must_use]
 pub fn normalize(v: [f64; 3]) -> [f64; 3] {
@@ -267,6 +276,14 @@ pub fn normalize(v: [f64; 3]) -> [f64; 3] {
 
 #[cfg(test)]
 mod tests {
+    //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
+    //! states the exact quotient a reciprocal stands for, and a fixture picks its sample columns with a
+    //! remainder. Neither runs in a kernel.
+    #![allow(
+        clippy::integer_division,
+        clippy::modulo_arithmetic,
+        reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
+    )]
     use super::*;
 
     /// The face byte on the wire is the address format's face number (ruling V6, Format A) — the
@@ -461,5 +478,53 @@ mod tests {
         assert!(lo < 0.72, "the narrowest cell edge is ~0.707 m (got {lo})");
         assert!(hi > 0.99, "the widest cell edge is ~1.005 m (got {hi})");
         assert!(hi < 1.02, "the widest cell edge is ~1.005 m (got {hi})");
+    }
+
+    #[test]
+    fn the_integer_direction_matches_the_float_bend_within_a_few_units() {
+        // MEASURED (bench part 3): within 0.02 mm laterally on the home planet — under four units
+        // of 2⁻⁴⁰; eight is the bar here, on every face, at the centre, the edges and a corner.
+        let n_l = 10_006_528u32;
+        let inv_n = vd_recipe::bend::inv_n_of(n_l);
+        let one = (1u64 << vd_recipe::bend::DIR_BITS) as f64;
+        for face in [
+            Face::PosX,
+            Face::NegX,
+            Face::PosY,
+            Face::NegY,
+            Face::PosZ,
+            Face::NegZ,
+        ] {
+            for (i, j) in [
+                (0, 0),
+                (5_003_264, 5_003_264),
+                (10_006_527, 0),
+                (7, 10_006_527),
+            ] {
+                let f = direction(
+                    face,
+                    crate::ladder::face_param(i, n_l),
+                    crate::ladder::face_param(j, n_l),
+                );
+                let q = direction_q(face, i, j, inv_n);
+                for c in 0..3 {
+                    let units = (q[c].raw() as f64 - f[c] * one).abs();
+                    assert!(units <= 8.0, "{face:?} ({i}, {j}) [{c}]: {units} units");
+                }
+            }
+        }
+        // The recipe's basis table is this crate's.
+        for face in [
+            Face::PosX,
+            Face::NegX,
+            Face::PosY,
+            Face::NegY,
+            Face::PosZ,
+            Face::NegZ,
+        ] {
+            let b = face.basis();
+            let r = vd_recipe::bend::BASIS[face.index() as usize];
+            assert_eq!((b.n, b.u, b.v), (r.n, r.u, r.v), "{face:?}");
+        }
     }
 }

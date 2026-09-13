@@ -24,7 +24,11 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     the cores, never all. ★ F7 THE RECIPE GOES INTEGER-ONLY AND THE GPU DOES THE CLIENT'S CHUNK WORK TO
     THE MAXIMUM (one source, two targets; the server computes the same integers on the CPU; the pictures
     re-judged); supersedes V18's "the recipe stays 64-bit". Order: the bench, the discussion, the build;
-    slice 9 and the frozen patch follow the new recipe.
+    slice 9 and the frozen patch follow the new recipe. ★ F8 THE FIVE DESIGN DECISIONS RULED (owner:
+    "agreed, please implement"): 40 fraction bits in 64-bit words (bench part 3: within 0.02 mm of the
+    float bend), the CPU path of the same source as the fallback, the runtime GPU self-check gate, the
+    order (CPU recipe → pictures → G1–G4 → slice 9), rust-gpu one crate two compilations. The design:
+    `docs/investigation/2026-09-08/landforms/slice_08_integer_recipe_design.md`.
   - `owner_decisions_2026-09-07_voxels.md` — ★ THE VOXEL FOUNDATION. SL10 THE SEED-SHAPED WORLD: the
     client MAY derive the world's STATIC SHAPE from the seed (a function of seed and address, never of
     time or state) with ONE generator crate compiled into both hosts (a port is forbidden), no-drift as a
@@ -276,9 +280,15 @@ tests                    vd-tests  accumulated scenario suites — never delete 
 ```
 Dependency rule: bins → node → sim → wire → core → seed; harness → node + sim::io::mem; nothing
 depends on a bin. Every node is lib + 4-line bin. `io-prod` / `tests-process` appear later.
-The voxel foundation (slice 5, ruling V9): `crates/seed` (vd-seed) is the LEAF two hosts must compute
-identically — the hash, the digest, the face bend, the ladder — and `crates/terrain` (vd-terrain) is
-THE ONE GENERATOR (SL10), which depends on the leaf and on nothing else. Today `bins`,
+The voxel foundation (slice 5, ruling V9; ruling F7 2026-09-12): `crates/recipe` (vd-recipe) is THE
+INTEGER RECIPE — the fenced integer word `Gi`, the two-word product, the root and the reciprocal, the
+bend at 40 fraction bits, the noise at 28, the octave sum — ONE SOURCE for the server's CPU, the
+client's CPU and (through rust-gpu, owed) the client's GPU, depending on nothing; `crates/seed`
+(vd-seed) is the LEAF two hosts must compute identically — the hash (stepped through the recipe),
+the digest, the face bend (the integer direction beside the float inverse), the ladder — and
+`crates/terrain` (vd-terrain) is THE ONE GENERATOR (SL10), which depends on the recipe, the leaf and
+nothing else; its recipe path names no float (the body's once-per-body draw and six seam doors are
+`Gf`'s last callers). Today `bins`,
 `connection-plane` and `vd-tests` depend on terrain; `sim` and `physics` carry no terrain edge yet (the
 block store, slice 9, and the collider slice add theirs); the client's edge is slice 7's. Both new
 crates are Tier-A and carry the float fence (`clippy.toml`, `Gf`, the link scan).

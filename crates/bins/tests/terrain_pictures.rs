@@ -62,7 +62,6 @@ use vd_client_harness::verdict::projected_point_aabb;
 use vd_core::glam::DVec3;
 use vd_devproto::{DevPhase, DevRequest, DevResponse, DevState, WaitField, WaitOp, WaitPredicate};
 use vd_io_prod::trust::ClusterTrust;
-use vd_terrain::Gf;
 
 /// The client's account for `--agent-index N` (the client binary's own rule).
 const CLIENT_ACCOUNT_BASE: u64 = 1000;
@@ -834,7 +833,7 @@ fn take_picture(
     let centre = DVec3::from_array(row.center);
     let radial = (camera.eye - centre).normalize();
     // The horizon of the lowest ground the recipe can raise, from this eye.
-    let lowest_m = stamp.surface_m - body.relief_bound_m(0).to_f64();
+    let lowest_m = stamp.surface_m - body.relief_bound_m(0);
     let over_lowest = (camera.eye - centre).length() - lowest_m;
     let dip = (lowest_m / (lowest_m + over_lowest))
         .clamp(-1.0, 1.0)
@@ -1314,8 +1313,8 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let along = sun.cross(DVec3::Z).normalize();
     let zenith = (90.0_f64 - SUN_ELEVATION_DEG).to_radians();
     let d = (sun * zenith.cos() + along * zenith.sin()).normalize();
-    let dir = [Gf::from_f64(d.x), Gf::from_f64(d.y), Gf::from_f64(d.z)];
-    let h = vd_terrain::height::height_m(&body, dir, 0).to_f64();
+    let dir = [d.x, d.y, d.z];
+    let h = vd_terrain::height::height_m(&body, dir, 0);
     // The nose: the star's azimuth turned `SUN_OFF_NOSE_DEG` about the radial (the light comes over
     // the camera's shoulder), tilted below level by the picture's angle.
     let toward_sun = (sun - d * sun.dot(d)).normalize();
@@ -1329,14 +1328,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let hill = stand(d, HILL_M, h, nose(HILL_TILT_DEG));
     let aloft = stand(d, ALOFT_M, h, nose(ALOFT_TILT_DEG));
     let orbit = stand(d, ORBIT_M, h, nose(ORBIT_TILT_DEG));
-    let height_at = |p: DVec3| {
-        vd_terrain::height::height_m(
-            &body,
-            [Gf::from_f64(p.x), Gf::from_f64(p.y), Gf::from_f64(p.z)],
-            0,
-        )
-        .to_f64()
-    };
+    let height_at = |p: DVec3| vd_terrain::height::height_m(&body, [p.x, p.y, p.z], 0);
     // THE SEAM: the point on the cube's twelve edges (every face's four), looking along the edge
     // one way or the other, where the star stands INSIDE the gate's elevation band and nearest
     // `SUN_OFF_NOSE_DEG` off the nose (the light over the shoulder, as every stand has it); where

@@ -3,7 +3,7 @@ name = "vd-terrain"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "THE ONE GENERATOR (SL10; the voxel foundation, slice 5): (seed, address) -> the world's static shape, compiled into the server and into every client. Depends on the vd-seed leaf and on nothing else. Every float operation is fenced (Gf, the lint, the link scan) and the golden gate measures no drift."
+description = "THE ONE GENERATOR (SL10; the voxel foundation, slice 5): (seed, address) -> the world's static shape, compiled into the server and into every client. Depends on the vd-recipe kernels and the vd-seed leaf and on nothing else. The recipe is INTEGER-ONLY (ruling F7); the one float left draws a body from its seed, under the fence (Gf, the lint, the link scan), and the golden gate measures no drift."
 
 [lib]
 # The staticlib is what a client on another engine links (SL10 clause 2); it is also what the link
@@ -17,6 +17,9 @@ fence-control = []
 
 [dependencies]
 vd-seed = { workspace = true }
+# ★ THE INTEGER RECIPE (ruling F7): the kernels of the static shape, ONE source for the server's CPU,
+# the client's CPU and (slice 8's GPU steps) the client's GPU.
+vd-recipe = { workspace = true }
 
 [lints]
 workspace = true
