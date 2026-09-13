@@ -21,26 +21,81 @@ use crate::gi::Gi;
 /// The fraction bits of the reciprocal's length and result.
 pub const RECIP_BITS: u32 = 30;
 
-/// `floor(√n)` of an unsigned word.
+/// ★ `floor(√n)` OF AN UNSIGNED WORD — the textbook restoring method, WRITTEN OUT as its
+/// [`ROOT_STEPS`] steps, with no loop and no branch.
+///
+/// **Why it is written out (MEASURED, 2026-09-13, step G1).** This root used to be two `while`
+/// loops. On the card the answer came out ONE STEP SHORT: `isqrt(1)` read 0 (`integer_bench`, the
+/// `isqrt_probe` entry point). Reading naga's Metal showed why: rust-gpu carries such a loop's
+/// value out in a SPILLED VARIABLE written at the TOP of the body, so the value read after the
+/// loop is the value from before the last step. Three loop shapes each read 0 for `isqrt(1)` —
+/// the counted `while`, the `loop` that returns from inside, and the branchless body. The octave
+/// sum's loop does NOT (its value leaves in a phi, and 3 936 256 columns agree), so the fault is
+/// the SHAPE, not the loop. Thirty-two steps in a row have no shape to get wrong, and they are
+/// faster on a card besides, where a loop costs a thread every iteration the widest lane takes.
+/// With the steps written out the probe reads 0 of 511 words differing.
+///
+/// **Why there is no branch either.** `fits` is a MASK — all ones where the bit fits under the
+/// remainder, all zeros where it does not — so the subtraction and the addition happen always and
+/// the word decides their value. One answer on every host, and nothing for a compiler to predict.
+///
+/// **Example.** A tube carver runs three metres from the pilot's boots. The squared distance in
+/// gap steps is 147 456; this root answers 384 gap steps on the shard and 384 on the card, so the
+/// passage the player walks into is the passage the card drew.
 #[must_use]
 pub const fn isqrt(n: u64) -> u64 {
-    let mut x = n;
-    let mut res = 0u64;
-    let mut bit = 1u64 << 62;
-    while bit > x {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if x >= res.wrapping_add(bit) {
-            x = x.wrapping_sub(res.wrapping_add(bit));
-            res = (res >> 1).wrapping_add(bit);
-        } else {
-            res >>= 1;
-        }
-        bit >>= 2;
-    }
+    let (x, res) = (n, 0u64);
+    let (x, res) = root_step(x, res, 1u64 << 62);
+    let (x, res) = root_step(x, res, 1u64 << 60);
+    let (x, res) = root_step(x, res, 1u64 << 58);
+    let (x, res) = root_step(x, res, 1u64 << 56);
+    let (x, res) = root_step(x, res, 1u64 << 54);
+    let (x, res) = root_step(x, res, 1u64 << 52);
+    let (x, res) = root_step(x, res, 1u64 << 50);
+    let (x, res) = root_step(x, res, 1u64 << 48);
+    let (x, res) = root_step(x, res, 1u64 << 46);
+    let (x, res) = root_step(x, res, 1u64 << 44);
+    let (x, res) = root_step(x, res, 1u64 << 42);
+    let (x, res) = root_step(x, res, 1u64 << 40);
+    let (x, res) = root_step(x, res, 1u64 << 38);
+    let (x, res) = root_step(x, res, 1u64 << 36);
+    let (x, res) = root_step(x, res, 1u64 << 34);
+    let (x, res) = root_step(x, res, 1u64 << 32);
+    let (x, res) = root_step(x, res, 1u64 << 30);
+    let (x, res) = root_step(x, res, 1u64 << 28);
+    let (x, res) = root_step(x, res, 1u64 << 26);
+    let (x, res) = root_step(x, res, 1u64 << 24);
+    let (x, res) = root_step(x, res, 1u64 << 22);
+    let (x, res) = root_step(x, res, 1u64 << 20);
+    let (x, res) = root_step(x, res, 1u64 << 18);
+    let (x, res) = root_step(x, res, 1u64 << 16);
+    let (x, res) = root_step(x, res, 1u64 << 14);
+    let (x, res) = root_step(x, res, 1u64 << 12);
+    let (x, res) = root_step(x, res, 1u64 << 10);
+    let (x, res) = root_step(x, res, 1u64 << 8);
+    let (x, res) = root_step(x, res, 1u64 << 6);
+    let (x, res) = root_step(x, res, 1u64 << 4);
+    let (x, res) = root_step(x, res, 1u64 << 2);
+    let (x, res) = root_step(x, res, 1u64 << 0);
+    let _ = x;
     res
 }
+
+/// One step of the restoring square root: the bit fits under the remainder, or it does not, and a
+/// MASK — never a branch — says which.
+const fn root_step(x: u64, res: u64, bit: u64) -> (u64, u64) {
+    let sum = res.wrapping_add(bit);
+    let fits = 0u64.wrapping_sub((x >= sum) as u64);
+    (
+        x.wrapping_sub(sum & fits),
+        (res >> 1).wrapping_add(bit & fits),
+    )
+}
+
+/// The steps [`isqrt`] takes, whatever the word: the powers of four a 64-bit word holds, from
+/// `4³¹` down to `4⁰`. A step whose bit stands above the root costs nothing — the remainder is
+/// smaller than the bit, so the mask is zero and the partial root stays where it is.
+pub const ROOT_STEPS: u32 = 32;
 
 /// `floor(2^bits / d)` for a positive `d` under 2⁶² and `bits` at most 63: the restoring binary
 /// division loop — one shift, one compare and one subtract per bit of the numerator. A `d` of zero
@@ -101,7 +156,22 @@ mod tests {
 
     #[test]
     fn the_root_is_the_floor_of_the_square_root() {
-        let cases: [u64; 9] = [0, 1, 2, 3, 4, 15, 16, u64::MAX, (1 << 62) + 12345];
+        let cases: [u64; 14] = [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            15,
+            16,
+            17,
+            100,
+            380_000,
+            1 << 40,
+            u64::MAX,
+            (1 << 62) + 12345,
+        ];
         for n in cases {
             let r = isqrt(n);
             assert!(u128::from(r) * u128::from(r) <= u128::from(n), "{n}");
@@ -110,6 +180,8 @@ mod tests {
                 "{n}"
             );
         }
+        // The widest word's root is the widest half-word: the steps and the range agree.
+        assert_eq!(isqrt(u64::MAX), (1u64 << ROOT_STEPS) - 1);
         // A sweep of the range the recipe uses: the square sum of a unit direction at 30 bits.
         let mut n = 1u64 << 60;
         while n < 3u64 << 60 {

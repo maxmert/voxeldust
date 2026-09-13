@@ -44,12 +44,44 @@
 //! let _ = a.abs();
 //! ```
 
+use core::cmp::Ordering;
 use core::ops::{Add, AddAssign, BitAnd, BitOr, BitXor, Mul, Shl, Shr, Sub, SubAssign};
 
 /// The fenced 64-bit integer. The field is private: every operation goes through the impls below.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Gi(i64);
+
+/// ★ THE COMPARISONS ARE WRITTEN OUT, NOT DERIVED (MEASURED, 2026-09-13, step G1). A DERIVED
+/// `PartialOrd` answers `a < b` by calling `partial_cmp`, and `partial_cmp` answers with an
+/// `Ordering` — which the standard library stores in an EIGHT-BIT word. The SPIR-V back end refused
+/// the whole module for it: *"`i8` type used without `OpCapability Int8`"*. So each operator is
+/// written here as the one comparison it is, `partial_cmp` and `cmp` stay for a host that sorts
+/// words (a table, a map), and no kernel ever reaches them. The same rule as the gradient table: the
+/// shape a CPU compiler folds away is the shape a shader compiler cannot spell.
+impl PartialOrd for Gi {
+    fn partial_cmp(&self, other: &Gi) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+    fn lt(&self, other: &Gi) -> bool {
+        self.0 < other.0
+    }
+    fn le(&self, other: &Gi) -> bool {
+        self.0 <= other.0
+    }
+    fn gt(&self, other: &Gi) -> bool {
+        self.0 > other.0
+    }
+    fn ge(&self, other: &Gi) -> bool {
+        self.0 >= other.0
+    }
+}
+
+impl Ord for Gi {
+    fn cmp(&self, other: &Gi) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+}
 
 impl Gi {
     /// Zero.
@@ -200,6 +232,23 @@ mod tests {
         assert!(Gi::new(-3).is_negative());
         assert!(!Gi::ZERO.is_negative());
         assert_eq!(Gi::new(i64::MIN).unsigned_abs(), 1u64 << 63);
+    }
+
+    /// ★ THE FOUR COMPARISONS ARE THE WORD'S OWN, and the ordering a host sorts by agrees with
+    /// them. (The operators are written out because a derived `PartialOrd` drags an eight-bit
+    /// `Ordering` into the shader, which the SPIR-V back end refuses — the module's own doc.)
+    #[test]
+    fn the_comparisons_read_the_word_and_the_ordering_agrees_with_them() {
+        let (low, high) = (Gi::new(-9), Gi::new(4));
+        // Each operator, both answers, as one equality (a bare `!(a < b)` is a lint).
+        assert_eq!([low < high, high < low], [true, false]);
+        assert_eq!([low <= high, high <= high, high <= low], [true, true, false]);
+        assert_eq!([high > low, low > high], [true, false]);
+        assert_eq!([high >= low, low >= low, low >= high], [true, true, false]);
+        assert_eq!(low.cmp(&high), core::cmp::Ordering::Less);
+        assert_eq!(high.cmp(&low), core::cmp::Ordering::Greater);
+        assert_eq!(low.cmp(&low), core::cmp::Ordering::Equal);
+        assert_eq!(low.partial_cmp(&high), Some(core::cmp::Ordering::Less));
     }
 
     /// ★ THE TWO ROUNDINGS, stated as a measurement: the same quotient, two answers, each fixed.

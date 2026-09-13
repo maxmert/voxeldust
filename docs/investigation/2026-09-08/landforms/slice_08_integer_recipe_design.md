@@ -64,7 +64,7 @@ IN A GPU BUFFER, so nothing crosses the bus but the request (a chunk key) and th
 
 | step | what moves to the GPU | why this order |
 |---|---|---|
-| G1 | the columns and the cell field: the gap bytes of a 64³ box | the bulk of the build; one thread per column, a loop down the box; the bench's arithmetic |
+| G1 ✅ **DONE 2026-09-13** | the CELL FIELD: the substance and the gap of every cell of a 64³ box, one invocation a cell, through the recipe's own `cell::cell_word` (the shell's `cell_field` entry point) | the bulk of the build; MEASURED byte for byte against the CPU's `sample_box` — **0 of 270 532 608 cells differ**: 0 of 2 097 152 over the eight golden chunks and 0 of 268 435 456 over the bench's square of 1 024 chunks (`slice_08_integer_bench.md` part 5) |
 | G2 | the extraction: surface nets on the box, into a vertex list and an index list | pure integer already; the data-dependent counts need a prefix sum (one workgroup pass), a standard shape |
 | G3 | the vertex position and the normals | integers; per vertex; the site-order sum is a fixed order, so no atomics |
 | G4 | the morph metre and the morph normal | per vertex, a ray against the parent's mesh, which is ALREADY in a GPU buffer once G1–G3 run for the parent |
@@ -73,6 +73,22 @@ IN A GPU BUFFER, so nothing crosses the bus but the request (a chunk key) and th
 What stays on the CPU on the client: the wanted set, the queue, the ladder's bookkeeping, the
 digest of a chunk (read back only for the gate, below), and the whole path as a FALLBACK on a GPU
 without 64-bit integers (the same source, F6's share of the cores).
+
+**G1's own measurement, and what it says about the order (2026-09-13).** The card computes a box
+in 1.79 ms with the upload and the 1 MB readback; the host still spends 2.14 ms on the box's PLAN
+(the column pass, the cavern nodes, the carvers, the lattice's topology), so the whole path costs
+3.93 ms a box against the terrain share's own 1.24 ms on three workers. **G1 alone does not pay.**
+It is a correctness landing and the ground G2 stands on: G2 removes the readback (the mesh never
+leaves the card), and the columns and the nodes moving up removes the plan. So the client's chunk
+builder still runs on the CPU workers, and the GPU path is not wired into the worker pool yet.
+**The wiring, when its measurement earns it:** split `vd_client::chunks::geometry_with` into a
+SAMPLE step and a GEOMETRY step (it calls `sample_box` at its first line and never again), give
+`ThreadedWorkers::start` an optional box source holding the render device, the queue and the
+`cell_field` pipeline (all three are `Send + Sync`), and let each worker call
+`vd_terrain::gpu::plan` → the card → `BoxPlan::box_of` → the same geometry step. The two seams
+that need care and that this step did NOT prove: a worker thread submitting to the device the
+renderer draws with, and `device.poll(wait)` from a worker waiting on the renderer's own
+submissions.
 
 What stays on the CPU on the server: everything — collision needs the gap bytes in the shard's
 memory, and a server has no GPU. The same source, the same bytes.
@@ -99,7 +115,15 @@ on every CPU target, the link scan, the fence control.
 **Decision 3 (the owner): the runtime self-check as the GPU's gate.** Recommended: yes, and its
 cost at start is eight chunks, under a tenth of a second.
 
-**BUILT and MEASURED, 2026-09-13.** The client's build script (`crates/client-render/build.rs`)
+★ **GROWN TO THE CELL FIELD (2026-09-13, step G1):** the check now runs BOTH kernels on the eight
+golden chunks — the octave sum over their 30 752 columns, and the CELL FIELD over their 2 097 152
+cells — and the resource and the log line carry both counts. One weakness, stated rather than
+hidden: the tube carvers reach NONE of the eight golden boxes (MEASURED — the bench counts the
+boxes holding a carver of a real radius: 0 of the eight, 178 of the square's 1 024), so the runtime
+check does not exercise the carver kernel. The bench's square does, it is the build-time gate that
+found the carvers' fault, and it now goes RED if that count ever falls to zero.
+
+**BUILT and MEASURED, 2026-09-13 (the column kernel; the cell field joined it the same day).** The client's build script (`crates/client-render/build.rs`)
 compiles the recipe's GPU shell to SPIR-V with cargo-gpu into the build's own output directory
 (no binary in the tree); `vd_client_render::gpu_check` runs that module on the columns of the
 eight golden chunks at start, through Bevy's own render device, and compares every word with the
@@ -175,6 +199,28 @@ repository; the dates are the sources' own).
    gated off the GPU target); and NO CONST ARRAY INDEXED AT RUNTIME — the compiler copies the whole
    table into private memory per use (the gradient table cost the module eight times its due; a
    `match` over the draws is the form both hosts like).
+   ★ **THREE MORE, from step G1 (MEASURED, 2026-09-13; `slice_08_integer_bench.md` part 5):**
+   (a) **A LOOP MAY CARRY A VALUE OUT ONLY BY ADDING TO IT.** An accumulator a BRANCH assigns, or
+   any value read after a loop whose body rewrites it, comes back ONE STEP STALE: rust-gpu carries
+   it in a word spilled at the TOP of the body. `isqrt` read 0 for `isqrt(1)` in three different
+   loop shapes; the carvers' `best = greater(best, open)` read the hollow back as zero. The cures:
+   thirty-two steps written out for the root, `best += if open > best { open − best } else { ZERO }`
+   for the carvers. The octave sum's `h += …` was right all along, which is what named the shape.
+   (b) **NO INDEX LOOP OVER A FIXED, TINY COUNT** — the tube's three axes are written out, because
+   a loop over them makes the two offset triples local arrays the shader indexes at run time.
+   (c) **NO DERIVED `PartialOrd`** on a fenced word: a derived `a < b` goes through `partial_cmp`,
+   whose `Ordering` is an EIGHT-BIT word, and the back end refuses the module ("`i8` type used
+   without `OpCapability Int8`"). `Gi` spells its four comparisons out.
+   ★ **AND A COST RULE THE SAME STEP MEASURED:** writing a loop out makes it pay its full count
+   every time, so a kernel that runs it per cell must be GUARDED by the cheap test that says
+   whether the answer matters. The carvers' hollow now compares SQUARED distances and pays the
+   integer root only where a point stands inside a carver: the cave-dense chunk at the eight-metre
+   rung fell from 73.7 ms to 7.8 ms of cell pass — 4.5 times cheaper than before this step — with
+   no byte of the world moved.
+   ★ **AND THE INSTRUMENT:** two PROBE entry points (`isqrt_probe`, `hollow_probe`) run ONE kernel
+   over a list of words. A box of a quarter of a million cells can only say that something
+   differs; a probe says which function does. Both faults above were found with them in minutes,
+   and the bench runs them before part 5 so the next one is too.
 2. **A fenced integer type, the way `Gf` fences floats**: `Gi(i64)` whose operators are only
    `wrapping_add/sub/mul`, `>>` and `<<` with the amount masked to 0..63 in the shared source,
    `&`, `|`, `^`, the compares, and the two loops (the square root, the exact landing). No `/`, no

@@ -48,6 +48,7 @@ pub mod compose;
 pub mod digest;
 pub mod extract;
 pub mod gf;
+pub mod gpu;
 pub mod height;
 pub mod home;
 pub mod lattice;

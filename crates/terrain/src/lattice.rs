@@ -30,8 +30,8 @@ use crate::body::BodyDefinition;
 use crate::carve::{CAVERN_STRIDE_LOG2, Tube, caverns_carve_at, tubes_carve_at};
 pub use crate::chunk::in_ladder;
 use crate::chunk::{
-    CAVERN_NODES, CHUNK_EDGE, CaveRule, Cell, CellSite, ChunkKey, NodeLattice, above_surface_cell,
-    below_surface_cell, cavern_of, column_field, dir_of, finish_cell, foreign_lattices,
+    CAVERN_NODES, CHUNK_EDGE, Cell, CellSite, ChunkKey, ColumnField, NodeLattice, above_surface_cell,
+    below_surface_cell, cavern_of, charter_of, column_field, dir_of, finish_cell, foreign_lattices,
     generate_in, point_at, tubes_reaching,
 };
 use crate::height::{biome_of, height};
@@ -39,6 +39,7 @@ use crate::strata::Biome;
 use crate::units::LENGTH_BITS;
 use vd_recipe::Gi;
 use vd_recipe::bend::{DIR_ONE, normalise};
+use vd_recipe::cell::CellCharter;
 use vd_seed::bend::Face;
 use vd_seed::seam::{Edge, across};
 
@@ -236,14 +237,31 @@ pub fn site_dir(body: &BodyDefinition, key: ChunkKey, site: Site) -> [Gi; 3] {
     }
 }
 
-/// The chunk with its halo; `None` for a key outside the body.
-#[must_use]
-pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
-    if !in_ladder(body, key) {
-        return None;
-    }
-    let column = column_field(body, key.face, key.rung, key.x, key.y)?;
-    let core = generate_in(body, &column, key.z)?;
+/// ★ EVERYTHING A BOX NEEDS BEFORE ITS CELLS: each column's site, direction, surface and biome, the
+/// tube carvers that can reach the box, the cavern lattices its columns read, and the body's charter
+/// at this rung. The CPU's own cell pass ([`sample_box`]) and the GPU's plan (`crate::gpu`) both
+/// start here, so the card and the shard read ONE box, never two that happen to agree.
+pub(crate) struct BoxSetup {
+    /// `BOX_EDGE²` columns in packing order `(b + 1) · 64 + (a + 1)`.
+    pub sites: Vec<Site>,
+    pub dirs: Vec<[Gi; 3]>,
+    pub surfaces: Vec<(Gi, Biome)>,
+    /// The carvers that can reach the box: a SUPERSET of what any one cell's owner keeps, and a
+    /// hollow is the exact greatest over the list, so the superset changes no byte.
+    pub tubes: Vec<Tube>,
+    /// The chunk's own face's node lattice, and one per partner face present among the columns.
+    pub own: NodeLattice,
+    pub foreign: Vec<NodeLattice>,
+    pub charter: CellCharter,
+    pub carve_caverns: bool,
+    /// The lattices' first node along each axis, and the box's radial range.
+    pub node0: [i32; 3],
+    pub k0: i32,
+    pub band: i32,
+}
+
+/// The prologue of one box: [`BoxSetup`] for `key`, whose core columns come from `column`.
+pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnField) -> BoxSetup {
     let rung = key.rung;
     let edge = CHUNK_EDGE as i32;
     let band = body.ladder.cells_in_band(rung) as i32;
@@ -274,11 +292,9 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
         b += 1;
     }
     // The tubes that can reach the box: the regions around its eight corners, then only the tubes
-    // within their radius of the box's bounding sphere — a SUPERSET of what any cell's owner keeps,
-    // and a hollow is the exact greatest over the list, so the superset changes no byte.
+    // within their radius of the box's bounding sphere.
     let carve_tubes = tubes_carve_at(body, rung);
     let carve_caverns = caverns_carve_at(body, rung);
-    let carve_any = carve_tubes | carve_caverns;
     let r_low = body.ladder.corner_radius_steps(k0 - HALO, rung);
     let r_high = body.ladder.corner_radius_steps(k0 + edge + HALO, rung);
     let mut tubes: Vec<Tube> = Vec::new();
@@ -297,11 +313,9 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
         }
         tubes = tubes_reaching(body, centre, corners);
     }
-    let rule = CaveRule::of(body, carve_any);
     // The chunk's own node lattice, EXTENDED by one node on every side so the same-face halo reads
-    // it too; the partner faces' lattices over the halo columns across a seam.
-    // The node a cell sits in is the stride's SHIFT (ruling F7: no `/` on the recipe's path); one node
-    // back on every side, so the same-face halo reads the chunk's own lattice too.
+    // it too; the partner faces' lattices over the halo columns across a seam. The node a cell sits
+    // in is the stride's SHIFT (ruling F7: no `/` on the recipe's path).
     let node = |v: i32| v >> CAVERN_STRIDE_LOG2;
     let node0 = [
         node(key.x * edge) - 1,
@@ -317,6 +331,44 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
     } else {
         (NodeLattice::empty(key.face), Vec::new())
     };
+    BoxSetup {
+        sites,
+        dirs,
+        surfaces,
+        tubes,
+        own,
+        foreign,
+        charter: charter_of(body, rung, BOX_EDGE),
+        carve_caverns,
+        node0,
+        k0,
+        band,
+    }
+}
+
+/// The chunk with its halo; `None` for a key outside the body.
+#[must_use]
+pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
+    if !in_ladder(body, key) {
+        return None;
+    }
+    let column = column_field(body, key.face, key.rung, key.x, key.y)?;
+    let core = generate_in(body, &column, key.z)?;
+    let rung = key.rung;
+    let edge = CHUNK_EDGE as i32;
+    let BoxSetup {
+        sites,
+        dirs,
+        surfaces,
+        tubes,
+        own,
+        foreign,
+        charter,
+        carve_caverns,
+        k0,
+        band,
+        ..
+    } = box_setup(body, key, &column);
     let mut cells = Vec::with_capacity(BOX_CELLS);
     let mut c = -HALO;
     while c <= edge {
@@ -331,33 +383,31 @@ pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
                     core.cell(a as usize, b as usize, c as usize)
                 } else if k < 0 {
                     // Below the band's floor: what the below-surface skip writes.
-                    below_surface_cell(body)
+                    below_surface_cell(&charter)
                 } else if k >= band {
                     // Above the band's top: what the above-surface skip writes. The top stands
                     // above every surface and above the sea (the room above is derived from the
                     // relief, and the sea lies within it), so this is air in practice; the rule is
                     // shared so it cannot drift from the skip's.
-                    above_surface_cell(body, r)
+                    above_surface_cell(&charter, r)
                 } else {
                     let col = SampleBox::column_index(a, b);
                     let site = sites[col];
                     let dir = dirs[col];
                     let (h, biome) = surfaces[col];
-                    let value = if carve_caverns & rule.in_band(h - r) {
+                    let value = if carve_caverns & charter.in_band(h - r) {
                         cavern_of(&own, &foreign, site, k)
                     } else {
                         Gi::ZERO
                     };
                     finish_cell(
-                        body,
+                        &charter,
                         &CellSite {
                             dir,
                             h,
                             biome,
                             r_steps,
-                            rung,
                         },
-                        &rule,
                         value,
                         &tubes,
                     )

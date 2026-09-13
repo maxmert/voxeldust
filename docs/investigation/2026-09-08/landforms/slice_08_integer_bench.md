@@ -223,3 +223,119 @@ is the next measurement (the transcription ran the same columns in 56 ms; the on
 second pass is the number above), and the client's runtime self-check (F8 decision 3) and the
 cell-field step (G1) grow from this entry point.
 
+
+## Part 5 — THE CELL FIELD on the GPU (step G1, 2026-09-13)
+
+**What runs.** Every cell of a BOX — a chunk's 62³ cells plus its one-cell halo, 262 144 in all —
+on the card, through the recipe's own `cell_word`, and compared with the CPU's `sample_box` BYTE
+FOR BYTE (the substance code and the gap byte of every cell). Two sets: the eight golden chunks
+the world identity folds, and the bench's square of 1 024 rung-0 chunks on face +X.
+
+The kernel is the shell's second entry point, `cell_field`: one invocation per cell, reading the
+body's charter at this rung, one row per radial layer, one row per column, the cavern lattices'
+node values, and the tube carvers that reach the box. What the CPU still prepares for each box
+(step G1 only, `vd_terrain::gpu::plan`): the column pass, the cavern nodes, the carvers, and the
+lattice's TOPOLOGY — which face a column belongs to across a seam, and whether it is a corner
+phantom with no lattice at all. Step G2 moves the columns themselves.
+
+**THE RESULT — 0 cells differ, in either set: 0 of 2 097 152 over the golden chunks and 0 of
+268 435 456 over the square, which is 0 of 270 532 608 cells over 1 032 boxes in all.**
+
+| what | boxes | cells | differing |
+|---|---|---|---|
+| the eight golden chunks | 8 | 2 097 152 | **0** |
+| the square, face +X rung 0, chunks (3..35, 5..37) | 1 024 | 268 435 456 | **0** |
+| **both sets** | **1 032** | **270 532 608** | **0** |
+
+**WHICH SET WALKS THE CARVERS, MEASURED.** The part counts the boxes whose carver list holds a
+carver of a real radius (a plan is never handed an empty buffer — a carver of no radius stands in —
+so the count asks for a radius, not a length): **0 of the eight golden boxes, 178 of the square's
+1 024.** So the square is the set that compares the segment distance, the squared guard and the
+hollow's accumulator on the card, and the part goes red if that count ever falls to zero. It also
+says plainly what the runtime self-check does NOT reach, because the self-check folds the golden
+chunks alone.
+
+**THE COST (Apple M4 Pro, Metal, release), the 1 024 boxes of the square.**
+
+| the path | the whole | per box |
+|---|---|---|
+| the GPU, first pass (the pipeline's own compilation included) | 3 845 ms | 3.76 ms |
+| the GPU, second pass (the plans, the upload, the readback) | 4 027 ms | 3.93 ms |
+| …of which THE PLANS on the CPU (the column pass, the nodes, the carvers) | 2 195 ms | 2.14 ms |
+| …of which the card's own share (with the upload and the 1 MB readback a box) | 1 832 ms | 1.79 ms |
+| the CPU's own `sample_box`, ONE core | 3 610 ms | 3.53 ms |
+| the CPU's own `sample_box`, THREE workers (this machine's terrain share, F6) | 1 270 ms | 1.24 ms |
+
+**READ IT PLAINLY: G1 ALONE DOES NOT PAY.** The card computes a box's cells, but the host still
+pays 2.14 ms preparing the plan and the box still crosses the bus as a megabyte of readback, so
+the whole path costs 3.93 ms a box against the terrain share's 1.24 ms. G1 is a CORRECTNESS
+landing — the shipped kernel now runs on the card and agrees on a quarter of a billion cells — and
+the ground G2 stands on. G2 (the extraction on the card) is what removes the readback; the columns
+and the nodes moving up is what removes the plan. Until both, the CPU workers stay the client's
+builder (see "What G1 did NOT land" below).
+
+### The two kernel faults G1 found, and the rules they add
+
+Both were found by PROBES — small entry points that run ONE kernel over a list of words — after
+the square reported 39 857 differing cells of 268 million and a box of a quarter of a million
+cells could only say "something differs". Both probes stay in the shell and the bench runs them
+before part 5.
+
+**(1) THE ROOT'S LOOP TAIL.** `root::isqrt` was two `while` loops with the answer read AFTER them.
+On the card `isqrt(1)` read 0. Reading naga's Metal for the module showed why: rust-gpu carries
+such a loop's value out in a SPILLED WORD written at the TOP of the body, so the value read after
+the loop is the value from before the last step. Three loop shapes each read 0 — the counted
+`while`, the `loop` that returns from inside, and a branchless body. The octave sum's loop does
+NOT fail (3 936 256 columns agree), so the fault is the SHAPE, not the loop. The root is now
+THIRTY-TWO STEPS WRITTEN OUT, each a mask (`fits` is all ones or all zeros, so nothing branches):
+0 of 511 probe words differ, and a card likes straight-line steps better than a loop besides.
+
+**(2) THE CARVERS' ACCUMULATOR.** `cell::tube_hollow_steps` kept the greatest hollow as
+`best = greater(best, open)` — an accumulator a BRANCH assigns, read after the loop. On the card
+the hollow read back as ZERO: 87 of the probe's 200 points, and every tube-hollowed cell of the
+square. Written as `best += if open > best { open − best } else { ZERO }` — an accumulator the
+loop only ADDS to, the octave sum's own shape — 0 of 200 differ.
+
+**THE RULE (joins §1b of the design):** on the GPU path, a loop may carry a value out ONLY by
+adding to it (`acc += …`). An accumulator a branch ASSIGNS, or any value read after a loop that
+the body rewrites, comes back one step stale. Where the step count is fixed, write the steps out.
+The probes are how the next such fault is named in one line instead of one day.
+
+Two smaller findings on the way: the tube's three axes are written out rather than walked by an
+index loop (a loop over three axes makes the two offset triples local arrays a shader must index
+at run time, §1b); and `Gi`'s comparisons are written out rather than DERIVED, because a derived
+`PartialOrd` answers `a < b` through `partial_cmp`, whose `Ordering` is an EIGHT-BIT word — the
+SPIR-V back end refused the whole module for it ("`i8` type used without `OpCapability Int8`").
+
+### The third finding: THE ROOT IS PAID ONLY INSIDE A CARVER
+
+Writing the root out made it thirty-two steps every time, and `terrain-cost` measured what that
+costs where carvers are many: the cave-dense chunk at the EIGHT-METRE rung went from 42.7 ms of
+cell pass to 73.7 ms. A box there is 496 m across, so it keeps many tube carvers, and every cell of
+the cave band measured its distance to every one of them.
+
+**The cure changes no byte and is worth far more than the regression.** A carver opens a hollow only
+where the point stands INSIDE its radius, and a point is inside exactly where its SQUARED distance
+is under the radius SQUARED — the root floors, so `isqrt(d²) < r` and `d² < r²` say the same thing.
+So `Tube::distance2_steps` answers without a root, `tube_hollow_steps` compares squares, and the
+root runs only for the few cells actually inside a passage.
+
+| the cave-dense chunk at the 8 m rung (`terrain-cost`, release) | the cell pass | the costliest named chunk |
+|---|---|---|
+| the loop root (this step's start) | 42.7 ms | 48.7 ms |
+| the root written out, no guard | 73.7 ms | 82.4 ms |
+| **the root written out, guarded by the squared radius** | **7.8 ms** | **10.8 ms** |
+
+So the chunk is **4.5 times cheaper than before this step**, and the picture gate's stands, which
+had begun settling past their capture ticks, settle well inside them again (756 / 1 200, 2 095 /
+2 400, 2 877 / 3 600, 3 981 / 4 800, 5 727 / 6 000). `terrain-cost`'s own 8 ms budget assertion was
+already red before this step at 48.7 ms; it is 10.8 ms now — still over, and still not a gate
+`just gate` runs, but a third of the way to the owner's number rather than six times past it.
+
+### What G1 did NOT land, and why
+
+The client's chunk builder still runs on the CPU workers. The GPU path is built and measured, and
+it is SLOWER end to end than the terrain's share of this machine's cores (3.93 ms a box against
+1.24 ms); wiring it into the worker pool would be a measured regression, and it would also have
+worker threads submitting to — and waiting on — the same device the renderer draws with. The
+design of that wiring, and the seams it needs, are in the G1 row of the design document's §2.

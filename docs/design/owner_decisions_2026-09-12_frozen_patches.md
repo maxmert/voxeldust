@@ -200,3 +200,28 @@ measures its own GPU at start against the CPU on the eight golden chunks' column
 Apple M4 Pro (30752 columns, 16000 µs); a GPU without 64-bit integers or with a differing
 word gets the CPU path and a log line.
 
+**G1 LANDED (2026-09-13) — the cell field on the GPU.** The recipe's per-cell kernel
+(`vd_recipe::cell`) runs on the card through the shell's `cell_field` entry point, and vd-terrain's
+own cell pass calls the same function, so the shard's collision and the card's picture are one
+arithmetic. MEASURED: **0 cells differ** between the CPU and the GPU — 0 of 2 097 152 over the
+eight golden chunks and 0 of 268 435 456 over the bench's square of 1 024 chunks, which is 0 of
+270 532 608 cells over 1 032 boxes in all — and no byte of the world moved (the three pin legs
+green). The runtime self-check now runs both kernels at start: 30 752
+columns and 2 097 152 cells. **G1 alone does not pay yet:** the card's own share is 1.79 ms a box,
+but the host still spends 2.14 ms preparing the box's plan and a megabyte crosses back, so the whole
+path is 3.93 ms a box against 1.24 ms on this machine's three-worker terrain share. The client's
+builder therefore stays on the CPU workers until G2 removes the readback. Two GPU kernel faults were
+found and cured on the way — a loop's value read after the loop, and an accumulator a branch
+assigns, both one step stale on the card — and both are now rules in the design's §1b, with two
+PROBE entry points as the instrument that names the next one in a line. A third measurement came
+free: the carvers' hollow now compares SQUARED distances and pays the integer root only inside a
+carver, which takes the cave-dense chunk at the eight-metre rung from 48.7 ms to 10.8 ms — 4.5
+times cheaper than before this step, with no byte of the world moved.
+
+**F6 MEASURED at the share (2026-09-13, three workers on this Mac):** walk and the slow hull whole
+at 49 frames/s; 240 m/s: 551 frames with a gap (13 urgent at the worst); 528 m/s: every frame
+with a gap (974 urgent at the worst, the queue at 2 187, 195 chunks/s built against the ask of
+about 400). The average machine cannot hold the finest ring at speed on its CPU share; the GPU
+chain (the columns, the cave grid, the cells and the extraction all on the card) and the
+throughput-bounded wanted set are the two levers, both owed.
+

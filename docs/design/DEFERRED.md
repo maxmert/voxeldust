@@ -8179,8 +8179,34 @@ rings; what is left is an interim with a named step:
    copied into private memory per use; a `match` over the draws gives the GPU 36 ms for the bench's
    four million columns (the transcription: 56–127) and the CPU its 728 ms back — the fifth kernel
    rule (no const array indexed at runtime on the GPU path).
-   🟧 STILL OPEN: G1 (the cell field, then the self-check on the whole digests), G2–G4, DX12/Vulkan
-   legs on other machines.
+   ★ **G1, THE CELL FIELD ON THE GPU, LANDED AND MEASURED (2026-09-13)**: the recipe's own
+   `cell::cell_word` — the per-cell tail, the strata rule, the two carvers and the cavern blend, on
+   plain words with a body's CHARTER carrying every substance CODE, so the recipe names no
+   substance — runs on the card through the shell's second entry point `cell_field`, one invocation
+   a cell of a 64³ box. `vd_terrain::gpu` lays the box out as words (the charter, one row a radial
+   layer, one row a column, the lattices' nodes end to end, the carvers) and `vd-terrain`'s own cell
+   pass and halo now CALL the kernel, so there is one arithmetic and not two. **0 cells differ**
+   between the CPU and the GPU — 0 of 2 097 152 over the eight golden chunks and 0 of 268 435 456
+   over the bench's square of 1 024 chunks, which is 0 of 270 532 608 over 1 032 boxes in all
+   (bench part 5); the three pin legs, the lint, the fence control and the link scan
+   are unchanged, so no byte of the world moved. The runtime self-check runs BOTH kernels on the
+   eight golden chunks now (30 752 columns and 2 097 152 cells). **Two kernel faults found by
+   PROBE entry points and cured**: a loop's value read after the loop comes back one step stale on
+   the card (`isqrt(1)` read 0; the root is thirty-two steps written out), and an accumulator a
+   BRANCH assigns does the same (the carvers' hollow read zero; it now only ADDS). The rules are in
+   §1b of the design; a derived `PartialOrd` is refused outright (its `Ordering` is an 8-bit word).
+   ★ **AND A COST CURED ON THE WAY (MEASURED, `terrain-cost`):** the root written out is thirty-two
+   steps every time, which took the cave-dense chunk at the 8 m rung from 42.7 to 73.7 ms of cell
+   pass; the carvers' hollow now compares SQUARED distances and pays the root only inside a carver,
+   which takes that chunk to **7.8 ms** — 4.5 times cheaper than before this step, no byte moved.
+   `terrain-cost`'s costliest named chunk: 48.7 ms before, 10.8 ms after, against the owner's 8 ms
+   budget (that assertion was already red and `terrain-cost` is not in `just gate`).
+   🟧 STILL OPEN: **G1 DOES NOT PAY YET, MEASURED** — the card's own share is 1.79 ms a box but the
+   host still spends 2.14 ms on the box's plan and a megabyte crosses back, against 1.24 ms a box
+   on the terrain's three-worker share; so the client's builder stays on the CPU workers and the
+   wiring waits for G2 (the design names the two seams it needs). The runtime self-check does not
+   reach a tube carver (MEASURED: 0 of the eight golden boxes hold one, against 178 of the square's
+   1 024); the bench's square is that gate, and it goes red if that count falls to zero. G2–G4, DX12/Vulkan legs on other machines.
    ★ THE WORKSPACE REDS AT THIS LANDING, MEASURED ON THE LAST COMMIT (d165d3c, a fresh worktree,
    release, 2026-09-13) — ALL PRE-EXISTING, none from the recipe: `dual_cluster_crossing_smoke::
    a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier` (−3.962e14 m clear against the

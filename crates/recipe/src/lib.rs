@@ -35,6 +35,7 @@
 #![deny(clippy::modulo_arithmetic)]
 
 pub mod bend;
+pub mod cell;
 pub mod gi;
 pub mod height;
 pub mod noise;

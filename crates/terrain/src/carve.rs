@@ -21,10 +21,15 @@
 //! cell is one metre inside the tube. The greater says: hollow, by 128 gap steps.
 
 use crate::body::{BodyDefinition, CAVERN_RECIP_BITS};
-use crate::units::greater;
 use vd_recipe::Gi;
 use vd_recipe::noise::{NOISE_BITS, NOISE_ONE, unit_value, value3};
-use vd_recipe::root::{isqrt, recip_pow2};
+use vd_recipe::root::recip_pow2;
+
+/// ★ THE TUBE CARVER IS THE RECIPE'S OWN (ruling F7, step G1): the segment, its radius, its stored
+/// reciprocal and the distance from a point to it live in `vd_recipe::cell`, so the server's CPU,
+/// the client's CPU and the client's GPU all measure a passage with ONE function. This crate DRAWS
+/// the carvers ([`tubes_in`]) and the recipe MEASURES them.
+pub use vd_recipe::cell::{TUBE_RECIP_BITS, Tube, tube_hollow_steps};
 use vd_seed::ladder::cell_m;
 use vd_seed::rng::child_seed;
 
@@ -33,61 +38,6 @@ pub const CAVERN_STRIDE: usize = 4;
 /// The same stride as a shift: the lattice's weights are exact multiples of `1/CAVERN_STRIDE`.
 pub const CAVERN_STRIDE_LOG2: u32 = 2;
 const _: () = assert!(1 << CAVERN_STRIDE_LOG2 == CAVERN_STRIDE);
-
-/// The fraction bits a tube's projection parameter carries.
-const TUBE_T_BITS: u32 = 30;
-/// The fraction bits of a tube's squared-length reciprocal.
-const TUBE_RECIP_BITS: u32 = 62;
-
-/// A tube carver: a segment in the body's frame, in GAP STEPS, with a radius and the reciprocal of its
-/// own squared length (drawn once with the tube, so no cell divides).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Tube {
-    pub start: [Gi; 3],
-    pub end: [Gi; 3],
-    pub radius_steps: Gi,
-    /// `floor(2^TUBE_RECIP_BITS / |end − start|²)`. A segment of no length reads one, and then the
-    /// projection lands on the start, which is the right answer for a point.
-    pub inv_len2: Gi,
-}
-
-impl Tube {
-    /// The distance from a point to the segment, in gap steps: the projection clamped to the segment
-    /// by the stored reciprocal, then one integer square root.
-    #[must_use]
-    pub fn distance_steps(&self, point: [Gi; 3]) -> Gi {
-        let ab = [
-            self.end[0] - self.start[0],
-            self.end[1] - self.start[1],
-            self.end[2] - self.start[2],
-        ];
-        let ap = [
-            point[0] - self.start[0],
-            point[1] - self.start[1],
-            point[2] - self.start[2],
-        ];
-        let dot = ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2];
-        // t = dot / |ab|², at TUBE_T_BITS, clamped to the segment.
-        let t = dot.mul_shr(self.inv_len2, TUBE_RECIP_BITS - TUBE_T_BITS);
-        let one = Gi::ONE << TUBE_T_BITS;
-        let t = if t < Gi::ZERO {
-            Gi::ZERO
-        } else if t > one {
-            one
-        } else {
-            t
-        };
-        let mut sum = 0u64;
-        let mut c = 0;
-        while c < 3 {
-            let d = ap[c] - ((ab[c] * t) >> TUBE_T_BITS);
-            let m = d.unsigned_abs();
-            sum = sum.wrapping_add(m.wrapping_mul(m));
-            c += 1;
-        }
-        Gi::new(isqrt(sum) as i64)
-    }
-}
 
 /// Whether tubes are carved at a rung: only where a cell is no wider than the tube.
 #[must_use]
@@ -124,18 +74,6 @@ pub fn cavern_value(body: &BodyDefinition, point_steps: [Gi; 3]) -> Gi {
             point_steps[2].mul_shr(recip, shift),
         ],
     )
-}
-
-/// The hollow the cavern field opens for a field value, in GAP STEPS: zero outside a room, positive
-/// inside.
-#[must_use]
-pub fn cavern_hollow_steps(body: &BodyDefinition, value: Gi) -> Gi {
-    let over = value - body.caves.cavern_threshold;
-    if over > Gi::ZERO {
-        (over * body.caves.cavern_scale_steps) >> NOISE_BITS
-    } else {
-        Gi::ZERO
-    }
 }
 
 /// The tube region a point falls in: a cube of the body's tube region edge, indexed by the shift the
@@ -225,17 +163,6 @@ pub fn tubes_near(body: &BodyDefinition, lo: [i64; 3], hi: [i64; 3]) -> Vec<Tube
     out
 }
 
-/// The hollow a set of tubes opens at a point, in GAP STEPS: the greatest of `radius − distance` over
-/// the tubes, never below zero.
-#[must_use]
-pub fn tube_hollow_steps(tubes: &[Tube], point_steps: [Gi; 3]) -> Gi {
-    let mut best = Gi::ZERO;
-    for tube in tubes {
-        best = greater(best, tube.radius_steps - tube.distance_steps(point_steps));
-    }
-    best
-}
-
 #[cfg(test)]
 mod tests {
     //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
@@ -305,12 +232,13 @@ mod tests {
     #[test]
     fn the_cavern_field_opens_rooms_and_the_tube_regions_draw_a_bounded_count() {
         let m = home();
+        let charter = crate::chunk::charter_of(&m, 0, 0);
         let mut hollow = 0;
         let mut solid = 0;
         let mut i = 0i64;
         while i < 4_000 {
             let p = [Gi::new(47 * i), Gi::new(78 * i), Gi::new(166 * i)];
-            if cavern_hollow_steps(&m, cavern_value(&m, p)) > Gi::ZERO {
+            if charter.cavern_hollow_steps(cavern_value(&m, p)) > Gi::ZERO {
                 hollow += 1;
             } else {
                 solid += 1;
@@ -319,8 +247,8 @@ mod tests {
         }
         assert!(hollow > 0, "some rooms");
         assert!(solid > hollow, "mostly rock");
-        assert_eq!(cavern_hollow_steps(&m, Gi::ZERO), Gi::ZERO);
-        assert!(cavern_hollow_steps(&m, NOISE_ONE) > Gi::ZERO);
+        assert_eq!(charter.cavern_hollow_steps(Gi::ZERO), Gi::ZERO);
+        assert!(charter.cavern_hollow_steps(NOISE_ONE) > Gi::ZERO);
         let mut total = 0;
         let mut r = 0i64;
         while r < 64 {

@@ -2139,6 +2139,25 @@ at 528 m/s but 30 frames a second) or ten workers (38 frames a second with 370 g
 minute at 528 m/s). The ask's timing (the lead in time) is the lever that could give both, and
 it is the next one to build; the defaults stay as they are until the owner picks.
 
+**THE AVERAGE MACHINE'S SHARE, MEASURED (ruling F6, 2026-09-13):** the moving eye at THREE
+workers (this Mac's share: a quarter of fourteen cores), every other setting the default:
+
+| leg | frames/s | chunks built/s | frames with a gap | worst gap (urgent chunks) | the queue's peak |
+|---|---|---|---|---|---|
+| walk | 49.9 | 2 | — | — | — |
+| hull 1.4 m/s | 49.1 | 112 | — | — | — |
+| hull 240 m/s | 45.1 | 161 | 551 | 13 | 159 |
+| hull 528 m/s | 43.2 | 195 | 2 594 (every frame) | 974 | 2 187 |
+| hull turning | — | — | 908 | 108 | 1 412 |
+
+At the share the walk and the slow hull are whole and the frames are at the ceiling; at 240 m/s
+the band already breaks on one frame in two (at fourteen workers that leg was whole); at 528 m/s
+every frame has a gap and the queue holds two thousand chunks — three builders make 195 chunks a
+second against the eye's ask of about 400. This is the baseline the GPU chain must beat on the
+average machine, and the number behind the throughput-bounded wanted set: at speed the finest
+ring must not be asked for what three builders cannot deliver, so the next rung is drawn whole
+and the finest fades in where it can.
+
 **A TRANSIENT SEEN ON THE WAY (three of eight flights):** the hull's WALKING leg reports a gap
 right after the boarding — 10, 51 and 76 frames, the worst sample missing 1, 293 and 1 265
 urgent chunks, the queue at 2 700 to 4 100 pending, the lead under a metre. That is the

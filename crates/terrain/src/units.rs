@@ -101,18 +101,11 @@ pub fn unit_of_direction(dir: [Gi; 3]) -> [f64; 3] {
     ]
 }
 
-/// The greater of two words, by the comparison — the recipe has no `max` (the float fence's rule,
-/// kept for the integer path so one reading order holds everywhere).
-#[must_use]
-pub fn greater(a: Gi, b: Gi) -> Gi {
-    if b > a { b } else { a }
-}
-
-/// The lesser of two words, by the comparison.
-#[must_use]
-pub fn lesser(a: Gi, b: Gi) -> Gi {
-    if b < a { b } else { a }
-}
+/// ★ THE GREATER AND THE LESSER ARE THE RECIPE'S (ruling F7, step G1): the recipe has no `max`
+/// (the float fence's rule, kept for the integer path so one reading order holds everywhere), and
+/// the comparison that stands in for it lives with the kernels that the GPU compiles. A tie keeps
+/// the LEFT word, here and in a shader alike.
+pub use vd_recipe::cell::{greater, lesser};
 
 #[cfg(test)]
 mod tests {

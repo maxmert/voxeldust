@@ -12,11 +12,20 @@
 //! the format must hold: the density byte is 1/128 of a cell), and times one CPU core on the
 //! integer path, one CPU core on the float path, and the GPU with its upload and readback.
 //!
-//! THE GPU SIDE IS A THROWAWAY TRANSCRIPTION, an instrument for this measurement only: the
-//! product's GPU path is ONE SOURCE compiled for both targets (F7 item 3), which this bench does not
-//! build. Nothing here changes the world.
+//! THE GPU SIDE OF PARTS 1 TO 3 IS A THROWAWAY TRANSCRIPTION, an instrument for those measurements
+//! only. Parts 4 and 5 run the product's own path: ONE SOURCE compiled for both targets (F7 item 3),
+//! the recipe crate itself through `crates/recipe-gpu`. Nothing here changes the world.
 //!
-//! Run: `cargo run --release -p vd-bins --features render --example integer_bench`.
+//! ★ PART 5 (step G1, 2026-09-13) is the CELL FIELD: every cell of a box — a chunk's 62³ plus its
+//! one-cell halo — through the recipe's own `cell::cell_word` on the card, against the CPU's
+//! `sample_box`, byte for byte. It runs the eight golden chunks the world identity folds and the
+//! square of 1 024 chunks, and it reports what each host costs. Two PROBES run before it: each runs
+//! ONE kernel over a list of words, because a box of a quarter of a million cells can only say that
+//! something differs, and a probe says which function does.
+//!
+//! Run: `just recipe-gpu` first, then
+//! `VD_RECIPE_SPV=target/recipe-gpu/vd_recipe_gpu.spv cargo run --release -p vd-bins --features \
+//! render --example integer_bench` (`VD_BENCH_PART5=1` measures part 5 alone).
 
 use std::time::Instant;
 
@@ -25,9 +34,9 @@ use vd_seed::bend::Face;
 use vd_terrain::BodyDefinition;
 use vd_terrain::body::{octave_amplitude_m, octave_frequency};
 use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey, in_ladder};
-use vd_terrain::digest::surface_chunk_z;
+use vd_terrain::digest::{GOLDEN_SELF_CHECK_KEYS, self_check_key, surface_chunk_z};
 use vd_terrain::home::home_planet;
-use vd_terrain::lattice::{site_dir, site_of};
+use vd_terrain::lattice::{BOX_CELLS, BOX_EDGE, site_dir, site_of};
 use vd_terrain::noise::corner_hash;
 use wgpu::util::DeviceExt;
 
@@ -66,6 +75,12 @@ const GAP_STEPS_PER_M: f64 = 128.0;
 fn main() {
     let body = home_planet();
     let (device, queue, int64) = device();
+    // A measurement of part 5 alone (`VD_BENCH_PART5=1`) skips the four column parts, which cost
+    // four million columns each and answer nothing about the cell field.
+    if std::env::var_os("VD_BENCH_PART5").is_some() {
+        part_5_the_cell_field(&device, &queue, &body);
+        return;
+    }
     let dirs = columns(&body);
     let octaves = body.octaves_at(RUNG);
     println!(
@@ -209,6 +224,494 @@ fn main() {
     part_2_the_bend(&device, &queue, &body);
     part_3_the_bend_at_40_bits(&device, &queue, &body);
     part_4_the_one_source(&device, &queue, &body);
+    part_5_the_cell_field(&device, &queue, &body);
+}
+
+/// A PROBE: the recipe's integer square root on the card against the CPU's.
+fn probe_isqrt(device: &wgpu::Device, queue: &wgpu::Queue, spv: &[u8]) {
+    // ★ THE WHOLE WORD'S RANGE, not just its bottom. The root takes thirty-two steps whatever the
+    // value, and a probe whose widest input is 2⁴⁰ never runs the first eleven of them on the card:
+    // a fault in the top steps would pass unseen. So the list carries the word's own ends, the
+    // squares just under and just over each power of four's boundary, and a spread of full-width
+    // words from the recipe's own hash.
+    let mut input: Vec<i64> = vec![
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        15,
+        16,
+        17,
+        100,
+        380_000,
+        1 << 40,
+        1 << 62,
+        (1 << 62) + 12_345,
+        1 << 63,
+        (1 << 63) + 1,
+        -1,
+        i64::MAX,
+        i64::MIN,
+    ];
+    let mut i = 1i64;
+    while i < 500 {
+        input.push(i * i * 7 + 3);
+        // The same step at the word's top: a square of a 32-bit root, one under it and one over.
+        let big = (i << 22) + 7_919;
+        input.push(big.wrapping_mul(big));
+        input.push(big.wrapping_mul(big).wrapping_sub(1));
+        // A full-width word of the recipe's own hash: a value no pattern in this list reaches.
+        input.push(vd_recipe::rng::corner_hash(0x5EED, i, i * 7, -i) as i64);
+        i += 1;
+    }
+    let n = input.len();
+    let out = run_compute_source(
+        device,
+        queue,
+        wgpu::util::make_spirv(spv),
+        "isqrt_probe",
+        &[
+            Binding::Storage(as_bytes_i64(&input)),
+            Binding::Output((n * 8) as u64),
+        ],
+        n as u32,
+    );
+    let gpu: Vec<i64> = out
+        .chunks_exact(8)
+        .map(|b| i64::from_le_bytes(b.try_into().expect("8 bytes")))
+        .collect();
+    let mut differing = 0;
+    let mut first = String::new();
+    for (i, v) in input.iter().enumerate() {
+        let cpu = vd_recipe::root::isqrt(*v as u64) as i64;
+        if cpu != gpu[i] {
+            differing += 1;
+            if first.is_empty() {
+                first = format!(" — the first: isqrt({v}) is {cpu} on the CPU and {} on the GPU", gpu[i]);
+            }
+        }
+    }
+    println!("integer_bench: PROBE isqrt — {n} words: {differing} differ{first}");
+    if differing > 0 {
+        std::process::exit(1);
+    }
+    probe_hollow(device, queue, spv);
+}
+
+/// A PROBE: the carvers' hollow on the card against the CPU's.
+fn probe_hollow(device: &wgpu::Device, queue: &wgpu::Queue, spv: &[u8]) {
+    let tube = vd_recipe::cell::Tube {
+        start: [vd_recipe::Gi::new(0), vd_recipe::Gi::new(0), vd_recipe::Gi::new(0)],
+        end: [vd_recipe::Gi::new(1_000), vd_recipe::Gi::new(0), vd_recipe::Gi::new(0)],
+        radius_steps: vd_recipe::Gi::new(400),
+        inv_len2: vd_recipe::Gi::new(
+            vd_recipe::root::recip_pow2(1_000 * 1_000, vd_recipe::cell::TUBE_RECIP_BITS) as i64,
+        ),
+    };
+    let tube_words: Vec<i64> = vec![
+        tube.start[0].raw(), tube.start[1].raw(), tube.start[2].raw(),
+        tube.end[0].raw(), tube.end[1].raw(), tube.end[2].raw(),
+        tube.radius_steps.raw(), tube.inv_len2.raw(),
+    ];
+    let mut points: Vec<i64> = Vec::new();
+    let mut i = 0i64;
+    while i < 200 {
+        points.extend([i * 11, i * 7 - 300, i * 3]);
+        i += 1;
+    }
+    let n = points.len() / 3;
+    let out = run_compute_source(
+        device,
+        queue,
+        wgpu::util::make_spirv(spv),
+        "hollow_probe",
+        &[
+            Binding::Storage(as_bytes_i64(&tube_words)),
+            Binding::Storage(as_bytes_i64(&points)),
+            Binding::Output((n * 3 * 8) as u64),
+        ],
+        n as u32,
+    );
+    let gpu: Vec<i64> = out
+        .chunks_exact(8)
+        .map(|b| i64::from_le_bytes(b.try_into().expect("8 bytes")))
+        .collect();
+    let mut hollow_differ = 0;
+    let mut distance_differ = 0;
+    let mut count_differ = 0;
+    let mut first = String::new();
+    for i in 0..n {
+        let p = [
+            vd_recipe::Gi::new(points[i * 3]),
+            vd_recipe::Gi::new(points[i * 3 + 1]),
+            vd_recipe::Gi::new(points[i * 3 + 2]),
+        ];
+        let hollow = vd_recipe::cell::tube_hollow_steps(&[tube], p).raw();
+        let distance = tube.distance_steps(p).raw();
+        if hollow != gpu[i * 3] {
+            hollow_differ += 1;
+            if first.is_empty() {
+                first = format!(
+                    " — the first at point {i}: the hollow is {hollow} on the CPU and {} on the GPU",
+                    gpu[i * 3]
+                );
+            }
+        }
+        if distance != gpu[i * 3 + 1] {
+            distance_differ += 1;
+        }
+        if gpu[i * 3 + 2] != 1 {
+            count_differ += 1;
+        }
+    }
+    println!(
+        "integer_bench: PROBE the carvers — {n} points: {hollow_differ} hollows differ, \
+         {distance_differ} distances differ, {count_differ} carver counts differ{first}"
+    );
+    if hollow_differ + distance_differ + count_differ > 0 {
+        std::process::exit(1);
+    }
+}
+
+// ----------------------------------------------------------------- part 5: the cell field
+
+/// ★ THE CELL FIELD ON THE GPU (step G1 of `slice_08_integer_recipe_design.md` §2): every cell of a
+/// box — the chunk's 62³ plus its one-cell halo — computed on the card by the recipe's own
+/// `cell_word`, through the shell's `cell_field` entry point, and compared BYTE FOR BYTE with the
+/// CPU's `sample_box`. The eight golden chunks the world identity folds first, then the bench's
+/// square of 1 024 rung-0 chunks on face +X, with the cost of each host beside it.
+///
+/// What the CPU still does for each box (G1 only): the column pass, the cavern lattice's node
+/// values, the carvers that reach the box and the lattice's topology — `vd_terrain::gpu::plan`.
+/// Its cost is reported on its own, because it is the next thing to move (step G2).
+fn part_5_the_cell_field(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) {
+    let Some(path) = std::env::var_os(SPV_ENV) else {
+        println!("integer_bench: PART 5 SKIPPED — set {SPV_ENV} to the SPIR-V cargo-gpu built");
+        return;
+    };
+    let spv = std::fs::read(&path).expect("the SPIR-V file reads");
+    // THE KERNEL PROBES first: the two kernels the cell field newly runs, on their own. A probe
+    // names the fault in one function where a box of a quarter of a million cells names only that
+    // something differs (both found a real one on 2026-09-13: the root's loop and the carvers').
+    probe_isqrt(device, queue, &spv);
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("cell_field"),
+        source: wgpu::util::make_spirv(&spv),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("cell_field"),
+        layout: None,
+        module: &module,
+        entry_point: Some("cell_field"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    // THE EIGHT GOLDEN CHUNKS: the keys the world identity folds, at the rungs they name.
+    let golden: Vec<ChunkKey> = GOLDEN_SELF_CHECK_KEYS
+        .iter()
+        .map(|entry| self_check_key(body, *entry))
+        .collect();
+    let (differing, first, _, golden_with_carvers) =
+        compare_boxes(device, queue, &pipeline, body, &golden);
+    println!(
+        "integer_bench: PART 5 THE GOLDEN CHUNKS — {} boxes of {} cells through the recipe's \
+         cell_field: {differing} cells differ between the CPU and the GPU{} ({golden_with_carvers} \
+         of the boxes hold a tube carver)",
+        golden.len(),
+        BOX_CELLS,
+        first
+    );
+    if differing > 0 {
+        std::process::exit(1);
+    }
+
+    // THE SQUARE: the same 1 024 chunks parts 1 to 4 read the columns of.
+    let square: Vec<ChunkKey> = (FIRST_Y..FIRST_Y + CHUNKS_ACROSS)
+        .flat_map(|y| {
+            (FIRST_X..FIRST_X + CHUNKS_ACROSS).map(move |x| (x, y))
+        })
+        .map(|(x, y)| ChunkKey {
+            face: FACE,
+            rung: RUNG,
+            x,
+            y,
+            z: surface_chunk_z(body, FACE, RUNG, x, y),
+        })
+        .collect();
+    let (differing, first, gpu, with_carvers) =
+        compare_boxes(device, queue, &pipeline, body, &square);
+    println!(
+        "integer_bench: PART 5 THE SQUARE — {} boxes of {BOX_CELLS} cells ({} cells): {differing} \
+         differ between the CPU and the GPU{}; {with_carvers} of the boxes hold a tube carver",
+        square.len(),
+        square.len() * BOX_CELLS,
+        first
+    );
+    if differing > 0 {
+        std::process::exit(1);
+    }
+    // ★ THE CARVER KERNEL IS ACTUALLY WALKED. The eight golden boxes hold no tube carver, so
+    // without this the whole carver path — the segment distance, the squared guard, the hollow's
+    // accumulator — could leave the GPU comparison silently, and the fault this very step found
+    // would come back unnoticed. A change to `tubes_reaching` that emptied every list would go red
+    // here instead of quietly narrowing the gate.
+    if with_carvers == 0 {
+        println!(
+            "integer_bench: PART 5 — NO BOX OF THE SQUARE HOLDS A TUBE CARVER, so the carver \
+             kernel was never compared on the GPU — STOP"
+        );
+        std::process::exit(1);
+    }
+
+    // The GPU a second time: the first pass paid the pipeline's own compilation.
+    let started = Instant::now();
+    let mut second_plans = 0.0_f64;
+    for key in &square {
+        let at = Instant::now();
+        let plan = vd_terrain::gpu::plan(body, *key).expect("the key is on the ladder");
+        second_plans += at.elapsed().as_secs_f64();
+        let _ = cell_field_pass(device, queue, &pipeline, &plan);
+    }
+    let gpu_second = started.elapsed().as_secs_f64();
+
+    // The CPU's own box, on one core and on the terrain's share of the cores (ruling F6).
+    let started = Instant::now();
+    for key in &square[..64] {
+        let _ = vd_terrain::lattice::sample_box(body, *key).expect("the box");
+    }
+    let cpu_one_core = started.elapsed().as_secs_f64() * (square.len() as f64 / 64.0);
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let workers = vd_client_render::terrain::worker_share(cores);
+    let started = Instant::now();
+    std::thread::scope(|scope| {
+        for w in 0..workers {
+            let keys = &square;
+            scope.spawn(move || {
+                let body = home_planet();
+                let mut i = w;
+                while i < keys.len() {
+                    let _ = vd_terrain::lattice::sample_box(&body, keys[i]).expect("the box");
+                    i += workers;
+                }
+            });
+        }
+    });
+    let cpu_workers = started.elapsed().as_secs_f64();
+    println!(
+        "integer_bench: PART 5 THE COST — {} boxes: the GPU {:.0} ms on the first pass (with the \
+         pipeline's compilation) and {:.0} ms on the second, both with the plans, the upload and \
+         the readback; of the second pass the PLANS on the CPU are {:.0} ms (the column pass, the \
+         cavern nodes, the carvers — step G2's work) and the card's own share is {:.0} ms. The \
+         CPU's own sample_box: {:.0} ms on one core, {:.0} ms on {workers} workers (the terrain's \
+         share of this machine).",
+        square.len(),
+        gpu * 1.0e3,
+        gpu_second * 1.0e3,
+        second_plans * 1.0e3,
+        (gpu_second - second_plans) * 1.0e3,
+        cpu_one_core * 1.0e3,
+        cpu_workers * 1.0e3
+    );
+}
+
+/// Every box of `keys` on the GPU against the CPU's own `sample_box`, cell for cell: the count of
+/// differing cells, a line naming the first, the GPU's wall time, and how many of the boxes hold a
+/// REAL tube carver (a plan is never given an empty carver buffer — a carver of no radius stands
+/// in — so the count asks for a radius, not for a length).
+fn compare_boxes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &wgpu::ComputePipeline,
+    body: &BodyDefinition,
+    keys: &[ChunkKey],
+) -> (usize, String, f64, usize) {
+    let mut differing = 0usize;
+    let mut first = String::new();
+    let mut seconds = 0.0_f64;
+    let mut with_carvers = 0usize;
+    for key in keys {
+        let started = Instant::now();
+        let plan = vd_terrain::gpu::plan(body, *key).expect("the key is on the ladder");
+        let gpu = cell_field_pass(device, queue, pipeline, &plan);
+        seconds += started.elapsed().as_secs_f64();
+        with_carvers += usize::from(
+            plan.tubes
+                .iter()
+                .any(|t| t.radius_steps > vd_recipe::Gi::ZERO),
+        );
+        let want = vd_terrain::lattice::sample_box(body, *key).expect("the box");
+        for (i, cell) in want.cells.iter().enumerate() {
+            let cpu = vd_recipe::cell::pack(
+                vd_recipe::Gi::new(i64::from(cell.stratum.code())),
+                vd_recipe::Gi::new(i64::from(cell.gap)),
+            );
+            if cpu != gpu[i] {
+                differing += 1;
+                if first.is_empty() {
+                    first = format!(
+                        " — the first at {key:?} cell {i}: the CPU says substance {} gap {}, the \
+                         GPU says substance {} gap {}{}",
+                        cell.stratum.code(),
+                        cell.gap,
+                        vd_recipe::cell::stratum_of_word(gpu[i]),
+                        vd_recipe::cell::gap_of_word(gpu[i]),
+                        why(device, queue, pipeline, &plan, i, &gpu)
+                    );
+                }
+            }
+        }
+    }
+    (differing, first, seconds, with_carvers)
+}
+
+/// WHY one cell differs: what the plan states about it, what the two carvers open there, and
+/// whether the card answers the same way twice. A diagnosis, never a gate.
+fn why(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &wgpu::ComputePipeline,
+    plan: &vd_terrain::gpu::BoxPlan,
+    index: usize,
+    gpu: &[u32],
+) -> String {
+    let edge = BOX_EDGE;
+    let (a, b, c) = (index % edge, (index / edge) % edge, index / (edge * edge));
+    let layer = &plan.layers[c];
+    let column = &plan.columns[b * edge + a];
+    let value = vd_recipe::cell::cavern_at(column, layer, &plan.nodes);
+    let point = vd_recipe::cell::point_at(column.dir, layer.r_steps);
+    let cavern = plan.charter.cavern_hollow_steps(value);
+    let tube = vd_recipe::cell::tube_hollow_steps(&plan.tubes, point);
+    let again = cell_field_pass(device, queue, pipeline, plan);
+    let twice = gpu == again.as_slice();
+    let no_tubes = vd_recipe::cell::cell_word(
+        &plan.charter,
+        &vd_recipe::cell::CellAt {
+            dir: column.dir,
+            h: column.h,
+            biome: column.biome,
+            r_steps: layer.r_steps,
+        },
+        value,
+        &[],
+    );
+    let no_cavern = vd_recipe::cell::cell_word(
+        &plan.charter,
+        &vd_recipe::cell::CellAt {
+            dir: column.dir,
+            h: column.h,
+            biome: column.biome,
+            r_steps: layer.r_steps,
+        },
+        vd_recipe::Gi::ZERO,
+        &plan.tubes,
+    );
+    format!(
+        " [at (a {a}, b {b}, c {c}); the layer: rule {} r_steps {} node {} weight {}; the column: \
+         h {} biome {} has {} base {} na {} nb {} d0 {} d1 {} wa {} wb {}; the cavern value {} \
+         opens {} steps, the {} carvers open {} steps; without the carvers the CPU word is {} \
+         (tubes off) and {} (cavern off) against {}; the card answers the same way twice: {twice}; \
+         the plan holds {} nodes]",
+        layer.rule.raw(),
+        layer.r_steps.raw(),
+        layer.node.raw(),
+        layer.weight.raw(),
+        column.h.raw(),
+        column.biome.raw(),
+        column.has.raw(),
+        column.base.raw(),
+        column.na.raw(),
+        column.nb.raw(),
+        column.d0.raw(),
+        column.d1.raw(),
+        column.wa.raw(),
+        column.wb.raw(),
+        value.raw(),
+        cavern.raw(),
+        plan.tubes.len(),
+        tube.raw(),
+        no_tubes,
+        no_cavern,
+        gpu[index],
+        plan.nodes.len(),
+    )
+}
+
+/// One compute pass of the cell field: the plan's six buffers up, one word per cell back.
+fn cell_field_pass(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &wgpu::ComputePipeline,
+    plan: &vd_terrain::gpu::BoxPlan,
+) -> Vec<u32> {
+    let edge = BOX_EDGE as u32;
+    let cells = (edge * edge * edge) as u64;
+    let out_size = cells * 4;
+    let storage = |words: &[i64]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: &as_bytes_i64(words),
+            usage: wgpu::BufferUsages::STORAGE,
+        })
+    };
+    let charter = storage(&plan.charter_words());
+    let layers = storage(&plan.layer_words());
+    let columns = storage(&plan.column_words());
+    let nodes = storage(&plan.node_words());
+    let tubes = storage(&plan.tube_words());
+    let out = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: out_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: out_size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let buffers = [&charter, &layers, &columns, &nodes, &tubes, &out];
+    let entries: Vec<wgpu::BindGroupEntry> = buffers
+        .iter()
+        .enumerate()
+        .map(|(i, b)| wgpu::BindGroupEntry {
+            binding: i as u32,
+            resource: b.as_entire_binding(),
+        })
+        .collect();
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &entries,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(edge.div_ceil(64), edge, edge);
+    }
+    encoder.copy_buffer_to_buffer(&out, 0, &staging, 0, out_size);
+    queue.submit([encoder.finish()]);
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        tx.send(r).expect("the receiver waits");
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("the device polls");
+    rx.recv().expect("a map result").expect("the map succeeds");
+    let bytes = slice.get_mapped_range().to_vec();
+    staging.unmap();
+    bytes
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
+        .collect()
 }
 
 // ---------------------------------------------------------------- part 4: the one source

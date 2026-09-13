@@ -131,6 +131,15 @@ impl Biome {
     ];
 }
 
+/// ★ THE RECIPE'S ROW COUNT IS THIS ENUM'S COUNT. The cell kernel picks a biome's strata row by a
+/// MASK (`vd_recipe::cell::BIOME_MASK`), because a mask cannot be out of bounds and a shader has no
+/// bound to test. A mask only names the right row while the rows are exactly the biomes: a FIFTH
+/// biome added here without a fifth row there would fold onto the desert's row silently, and every
+/// cell of that biome would read sand where it should read something else. This assertion makes
+/// that a red BUILD, not a wrong world; `chunk::charter_of` fills the rows in this enum's own order
+/// and `chunk`'s own test measures that each biome reads its own.
+const _: () = assert!(vd_recipe::cell::BIOMES == Biome::ALL.len());
+
 /// The body's bedrock kind: one draw from the seed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bedrock {

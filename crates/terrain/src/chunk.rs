@@ -21,6 +21,13 @@
 //! inside rock, positive in air; a cell whose centre is exactly ON the surface reads 0 and is AIR;
 //! `+1` cell clamps to the top code 127, one step short of a full cell, which the extractor never needs.
 //!
+//! ★ **THE PER-CELL ARITHMETIC IS THE RECIPE'S OWN KERNEL** (ruling F7, step G1): this module runs
+//! the ORCHESTRATION — the column pass, the cavern lattice's nodes, the carvers a chunk can reach —
+//! and every cell's substance and gap come from `vd_recipe::cell::cell_word`, the same function the
+//! client's card runs (`crate::gpu`). One arithmetic, three hosts; the substance CODES travel to it
+//! in the body's charter ([`charter_of`]), so the recipe names no substance and this crate keeps
+//! the naming.
+//!
 //! ★ **THE DENSITY IS ALL INTEGERS** (ruling F7). A cell centre's radius is an EXACT whole number of
 //! gap steps (the floor is whole metres and a cell is a power of two metres, so `floor + (k + ½)·cell`
 //! times 128 is a whole number — `vd_seed::ladder::cell_radius_steps`); the surface is the same unit at
@@ -35,15 +42,23 @@
 
 use crate::body::BodyDefinition;
 use crate::carve::{
-    CAVERN_STRIDE, CAVERN_STRIDE_LOG2, cavern_hollow_steps, cavern_value, caverns_carve_at,
-    cell_steps, tube_hollow_steps, tube_region, tubes_carve_at, tubes_near,
+    CAVERN_STRIDE, CAVERN_STRIDE_LOG2, cavern_value, caverns_carve_at, cell_steps, tube_region,
+    tubes_carve_at, tubes_near,
 };
 use crate::height::{biome_of, height};
 use crate::strata::{Biome, Stratum};
 use crate::units::{LENGTH_BITS, STEPS_PER_M, greater, lesser};
 use vd_recipe::Gi;
-use vd_recipe::bend::DIR_BITS;
+use vd_recipe::cell::{
+    CellAt, CellCharter, Tube, above_cell_word, below_cell_word, cell_word, gap_of_word,
+    strata_row, stratum_of_word,
+};
 use vd_recipe::root::isqrt;
+
+/// ★ THE ARITHMETIC IS THE RECIPE'S (ruling F7, step G1). A point in the body's frame and the
+/// cavern lattice's blend are kernels of `vd_recipe::cell`, re-read here under their own names, so
+/// the generator, the collider and the shader run ONE body of code and never a copy of it.
+pub(crate) use vd_recipe::cell::{point_at, trilinear8};
 
 use vd_seed::bend::{Face, direction_q};
 
@@ -133,9 +148,7 @@ impl ChunkLattice {
 /// `+1` cell (128 steps) clamps to the top code 127, one step short of a full cell.
 #[must_use]
 pub fn quantise_gap(gap_steps: Gi) -> i8 {
-    gap_steps
-        .raw()
-        .clamp(i64::from(i8::MIN), i64::from(i8::MAX)) as i8
+    vd_recipe::cell::gap_code(gap_steps).raw() as i8
 }
 
 /// Whether a chunk key names a chunk of the body at all.
@@ -223,33 +236,79 @@ pub fn column_field(
     })
 }
 
-/// THE FLUID at a radius (in gap steps at [`LENGTH_BITS`]): water under the sea, air over it. The one
-/// rule the above-surface skip, the cell pass and the halo share.
+/// ★ THE CHARTER OF THIS BODY AT THIS RUNG — every number the recipe's cell kernel reads that is
+/// not the cell's own, drawn ONCE per chunk and handed to every cell (`vd_recipe::cell`). The
+/// substance CODES travel in it, so the recipe names no substance and this crate keeps the naming:
+/// a renumbering here can never move a bit of that arithmetic. `box_edge` is what a GPU shell reads
+/// to find a cell's column; the CPU's own loops never read it.
 #[must_use]
-pub fn fluid_at(body: &BodyDefinition, r: Gi) -> Stratum {
-    if r < body.sea_radius {
-        Stratum::Water
-    } else {
-        Stratum::Air
+pub fn charter_of(body: &BodyDefinition, rung: u8, box_edge: usize) -> CellCharter {
+    let code = |s: Stratum| Gi::new(i64::from(s.code()));
+    let bedrock = body.strata.bedrock.stratum();
+    let row = |topsoil: Stratum, subsoil: Stratum| {
+        strata_row(code(topsoil), code(subsoil), code(body.strata.sediment))
+    };
+    let carve_any = tubes_carve_at(body, rung) | caverns_carve_at(body, rung);
+    CellCharter {
+        sea_radius: body.sea_radius,
+        cave_min: Gi::new(i64::from(body.caves.min_depth_m) * STEPS_PER_M) << LENGTH_BITS,
+        cave_max: Gi::new(i64::from(body.caves.max_depth_m) * STEPS_PER_M) << LENGTH_BITS,
+        cavern_threshold: body.caves.cavern_threshold,
+        cavern_scale_steps: body.caves.cavern_scale_steps,
+        carve_any: if carve_any { Gi::ONE } else { Gi::ZERO },
+        rung: Gi::new(i64::from(rung)),
+        topsoil_m: Gi::new(i64::from(body.strata.topsoil_m)),
+        subsoil_end_m: Gi::new(i64::from(body.strata.topsoil_m + body.strata.subsoil_m)),
+        strata_end_m: Gi::new(i64::from(body.strata.max_depth_m())),
+        air_code: code(Stratum::Air),
+        water_code: code(Stratum::Water),
+        bedrock_code: code(bedrock),
+        box_edge: Gi::new(box_edge as i64),
+        // The rows in the biomes' own order (`Biome as u8`), each the topsoil, the subsoil and the
+        // body's sediment. A highland's subsoil is the body's bedrock: bare rock under the gravel.
+        strata: [
+            row(Stratum::Sand, Stratum::Sandstone),
+            row(Stratum::Dirt, Stratum::Clay),
+            row(Stratum::Snow, Stratum::Permafrost),
+            row(Stratum::Gravel, bedrock),
+        ],
+    }
+}
+
+/// THE REFUSED SUBSTANCE — what a cell word names when its low byte names no stratum at all.
+///
+/// A word this crate's own charter made always names one, so this is reached ONLY by a garbled
+/// readback: a card that wrote nonsense, a buffer read short, a driver that lost a dispatch. Two
+/// things must hold then. The client must NOT PANIC — a wrong hill is a fault the GPU self-check
+/// counts and the log names, while a crash throws the player out of the world for a byte. And the
+/// cell must NOT BE A HOLE — a hole under a pilot's boots drops them through the ground, where a
+/// wrong rock only looks wrong. So the refusal is SOLID ROCK, and the self-check's differing count
+/// is what says a card is not to be trusted.
+pub const REFUSED_STRATUM: Stratum = Stratum::Granite;
+
+/// The cell a recipe word names: the substance by its code, the gap byte as it stands. The decode
+/// is TOTAL — a code no stratum owns reads [`REFUSED_STRATUM`], never a panic.
+#[must_use]
+pub fn cell_of_word(word: u32) -> Cell {
+    Cell {
+        stratum: match Stratum::from_code(stratum_of_word(word)) {
+            Some(stratum) => stratum,
+            None => REFUSED_STRATUM,
+        },
+        gap: gap_of_word(word),
     }
 }
 
 /// The cell more than a cell above every surface: the fluid at its radius, at the top code.
 #[must_use]
-pub fn above_surface_cell(body: &BodyDefinition, r: Gi) -> Cell {
-    Cell {
-        stratum: fluid_at(body, r),
-        gap: i8::MAX,
-    }
+pub fn above_surface_cell(charter: &CellCharter, r: Gi) -> Cell {
+    cell_of_word(above_cell_word(charter, r))
 }
 
 /// The cell more than a cell below every surface, stratum and cave: bedrock at the bottom code.
 #[must_use]
-pub fn below_surface_cell(body: &BodyDefinition) -> Cell {
-    Cell {
-        stratum: body.strata.bedrock.stratum(),
-        gap: i8::MIN,
-    }
+pub fn below_surface_cell(charter: &CellCharter) -> Cell {
+    cell_of_word(below_cell_word(charter))
 }
 
 /// A chunk filled from one rule per radial layer: the skip's fill.
@@ -286,6 +345,7 @@ pub fn generate_in(body: &BodyDefinition, column: &ColumnField, z: i32) -> Optio
     let rung = key.rung;
     let edge = CHUNK_EDGE as i32;
     let k0 = z * edge;
+    let charter = charter_of(body, rung, CHUNK_EDGE);
     // A half cell, in gap steps at LENGTH_BITS: the distance from a cell's lower corner to its centre.
     let half_cell = (cell_steps(rung) << LENGTH_BITS) >> 1;
     let r_low = corner_radius(body, k0, rung);
@@ -298,7 +358,7 @@ pub fn generate_in(body: &BodyDefinition, column: &ColumnField, z: i32) -> Optio
             key,
             |c| {
                 let r = cell_radius(body, k0 + c as i32, rung);
-                let cell = above_surface_cell(body, r);
+                let cell = above_surface_cell(&charter, r);
                 (cell.stratum, cell.gap)
             },
             How::AboveSurface,
@@ -308,7 +368,7 @@ pub fn generate_in(body: &BodyDefinition, column: &ColumnField, z: i32) -> Optio
     // less every reach, so every gap is ≤ −1 and clamps to the bottom code, and every cell is past
     // the deepest stratum and the deepest cave: bedrock.
     if r_high + half_cell < column.lowest - reach {
-        let cell = below_surface_cell(body);
+        let cell = below_surface_cell(&charter);
         return Some(filled(key, |_| (cell.stratum, cell.gap), How::BelowSurface));
     }
     Some(cell_pass(body, column, key))
@@ -339,17 +399,6 @@ pub(crate) fn reach_steps(body: &BodyDefinition, rung: u8) -> Gi {
     let strata_reach =
         Gi::new((i64::from(body.strata.max_depth_m()) + 1) * STEPS_PER_M) << LENGTH_BITS;
     greater(strata_reach, cave_reach)
-}
-
-/// A point in the body's frame, in WHOLE gap steps: a direction at the bend's fraction bits times a
-/// radius in whole gap steps, through the two-word product. What the carvers read.
-#[must_use]
-pub(crate) fn point_at(dir: [Gi; 3], radius_steps: Gi) -> [Gi; 3] {
-    [
-        dir[0].mul_shr(radius_steps, DIR_BITS),
-        dir[1].mul_shr(radius_steps, DIR_BITS),
-        dir[2].mul_shr(radius_steps, DIR_BITS),
-    ]
 }
 
 /// The tubes that can reach a box of cells whose centre and eight corners are given in gap steps: the
@@ -405,7 +454,6 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
     let r_high = body.ladder.corner_radius_steps(k0 + edge, rung);
     let carve_tubes = tubes_carve_at(body, rung);
     let carve_caverns = caverns_carve_at(body, rung);
-    let carve_any = carve_tubes | carve_caverns;
     // The tubes that can reach this chunk: every tube of the regions around the chunk's own, then
     // only those that come within their radius of the chunk's bounding sphere (most chunks keep
     // none, and then no cell pays a segment distance).
@@ -447,7 +495,7 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
     } else {
         Vec::new()
     };
-    let rule = CaveRule::of(body, carve_any);
+    let charter = charter_of(body, rung, CHUNK_EDGE);
     let mut cells = Vec::with_capacity(CHUNK_CELLS);
     let mut c = 0;
     while c < CHUNK_EDGE {
@@ -466,21 +514,19 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
                 // so a partial chunk's cell beyond the face IS the partner's cell, byte for byte.
                 // The cavern value is read only where a cave can be — inside the depth band — so a
                 // cell far above or far below the surface pays no interpolation.
-                let value = if carve_caverns & rule.in_band(h - r) {
+                let value = if carve_caverns & charter.in_band(h - r) {
                     cavern_of(&lattice, &foreign, site, k)
                 } else {
                     Gi::ZERO
                 };
                 cells.push(finish_cell(
-                    body,
+                    &charter,
                     &CellSite {
                         dir,
                         h,
                         biome,
                         r_steps,
-                        rung,
                     },
-                    &rule,
                     value,
                     &tubes,
                 ));
@@ -682,96 +728,34 @@ pub(crate) struct CellSite {
     pub biome: Biome,
     /// The cell centre's radius in WHOLE gap steps — exact.
     pub r_steps: Gi,
-    pub rung: u8,
 }
 
-/// The body's cave band at a rung: whether anything carves, and between which depths (in gap steps at
-/// [`LENGTH_BITS`]).
-pub(crate) struct CaveRule {
-    pub carve_any: bool,
-    pub cave_min: Gi,
-    pub cave_max: Gi,
-}
-
-impl CaveRule {
-    /// The rule of a body at a rung.
-    pub(crate) fn of(body: &BodyDefinition, carve_any: bool) -> CaveRule {
-        CaveRule {
-            carve_any,
-            cave_min: Gi::new(i64::from(body.caves.min_depth_m) * STEPS_PER_M) << LENGTH_BITS,
-            cave_max: Gi::new(i64::from(body.caves.max_depth_m) * STEPS_PER_M) << LENGTH_BITS,
-        }
-    }
-
-    /// Whether a cell at `depth` under the surface can hold a cave at this rung.
-    pub(crate) fn in_band(&self, depth: Gi) -> bool {
-        self.carve_any & (depth >= self.cave_min) & (depth <= self.cave_max)
-    }
-}
-
-/// ★ THE PER-CELL TAIL, shared by the cell pass and the halo (slice 6): from a column's surface,
-/// a cell's radius, the interpolated cavern value and the tubes that can reach it, the cell's
-/// substance and gap. One function, so a halo cell computed by one chunk is byte-identical to the
-/// same cell computed by the chunk that owns it.
+/// ★ THE PER-CELL TAIL IS THE RECIPE'S KERNEL (ruling F7, step G1). This function only names the
+/// crate's own types on either side of `vd_recipe::cell::cell_word`: the charter and the cell's
+/// numbers go in as words, one word comes back, and the substance code becomes a [`Stratum`] again.
+/// So the cell pass, the halo (slice 6) and the shader all run ONE arithmetic, and a halo cell one
+/// chunk computes is byte-identical to the same cell in the chunk that owns it.
 ///
-/// ★ The whole tail is integers (ruling F7): one subtraction for the gap, ONE shift by
-/// `rung + LENGTH_BITS` that divides by the cell's width and floors in the same step, and the clamp to
-/// the byte. A hollow comes in as gap steps of METRE and shifts by the rung alone to become gap steps
-/// of CELL.
+/// **Example.** The cell under the pilot's boots is asked by the shard for collision and by the
+/// card for the picture. Both calls land here, and here they land on the same function.
 #[inline]
 pub(crate) fn finish_cell(
-    body: &BodyDefinition,
+    charter: &CellCharter,
     site: &CellSite,
-    rule: &CaveRule,
     value: Gi,
-    tubes: &[crate::carve::Tube],
+    tubes: &[Tube],
 ) -> Cell {
-    let r = site.r_steps << LENGTH_BITS;
-    let depth = site.h - r;
-    // The rock's gap in gap steps OF A CELL: `(r − h) / cell`, floored once. A cell whose centre is
-    // exactly on the surface reads 0, which is air.
-    let rock_steps = (r - site.h) >> (u32::from(site.rung) + LENGTH_BITS);
-    let mut gap_steps = rock_steps;
-    let mut stratum = if depth <= Gi::ZERO {
-        fluid_at(body, r)
-    } else {
-        let depth_m = depth >> (LENGTH_BITS + STEP_SHIFT);
-        body.strata.at(site.biome, depth_m.raw() as u32)
-    };
-    // The cavern lattice is all zero where caverns do not carve, and the tube list is empty where
-    // tubes do not: both contribute nothing there, with no branch.
-    if rule.in_band(depth) {
-        let p = point_at(site.dir, site.r_steps);
-        let hollow_steps = greater(
-            cavern_hollow_steps(body, value),
-            tube_hollow_steps(tubes, p),
-        );
-        if hollow_steps > Gi::ZERO {
-            // A hollow is never negative, so the greater is in air: the cell is hollow. The hollow is
-            // metres of gap step; the rung's shift makes it cells of gap step.
-            gap_steps = greater(gap_steps, hollow_steps >> u32::from(site.rung));
-            stratum = Stratum::Air;
-        }
-    }
-    Cell {
-        stratum,
-        gap: quantise_gap(gap_steps),
-    }
-}
-
-/// The shift from gap steps to whole metres: 128 steps a metre.
-const STEP_SHIFT: u32 = STEPS_PER_M.trailing_zeros();
-
-/// The trilinear blend of eight node values `v[(c·2 + b)·2 + a]` at weights `t`, at the noise's
-/// fraction bits: the one arithmetic the cell pass and the halo share.
-#[inline]
-pub(crate) fn trilinear8(v: [Gi; 8], t: [Gi; 3]) -> Gi {
-    let l = |p: Gi, q: Gi, w: Gi| p + ((w * (q - p)) >> LENGTH_BITS);
-    let x00 = l(v[0], v[1], t[0]);
-    let x10 = l(v[2], v[3], t[0]);
-    let x01 = l(v[4], v[5], t[0]);
-    let x11 = l(v[6], v[7], t[0]);
-    l(l(x00, x10, t[1]), l(x01, x11, t[1]), t[2])
+    cell_of_word(cell_word(
+        charter,
+        &CellAt {
+            dir: site.dir,
+            h: site.h,
+            biome: Gi::new(site.biome as i64),
+            r_steps: site.r_steps,
+        },
+        value,
+        tubes,
+    ))
 }
 
 /// Generate one chunk; `None` for a key outside the body's ladder. The column pass and the cell
@@ -833,6 +817,88 @@ mod tests {
     /// A whole number of metres as gap steps at the length format's fraction bits.
     fn s(metres: i64) -> Gi {
         Gi::new(metres * STEPS_PER_M) << LENGTH_BITS
+    }
+
+    /// ★ THE CHARTER'S PACKED ROWS ARE THE DEPTH TABLE — every biome, every whole metre the table
+    /// covers and one past its end, on three bodies whose seeds draw different sediments and
+    /// different bedrock. The recipe's kernel reads the rows and never this crate's table, so this
+    /// is the measurement that the two say the same thing; without it a renumbering of the
+    /// substances would move the world's bytes and nothing would go red.
+    #[test]
+    fn the_charters_packed_rows_read_what_the_depth_table_reads() {
+        for seed in [0x5EEDu64, 0xA11CE, 0xF00D] {
+            let m = BodyDefinition::from_seed(seed, 6_371_000.0).expect("a body");
+            let charter = charter_of(&m, 0, CHUNK_EDGE);
+            let deepest = m.strata.max_depth_m() + 5;
+            for biome in Biome::ALL {
+                let mut depth = 0u32;
+                while depth <= deepest {
+                    let code = charter
+                        .stratum_code(Gi::new(biome as i64), Gi::new(i64::from(depth)))
+                        .raw() as u8;
+                    assert_eq!(
+                        Stratum::from_code(code),
+                        Some(m.strata.at(biome, depth)),
+                        "seed {seed:x}, {biome:?} at {depth} m"
+                    );
+                    depth += 1;
+                }
+            }
+            // The fluid rule, on either side of this body's own sea.
+            assert_eq!(
+                charter.fluid_code(m.sea_radius - Gi::ONE).raw() as u8,
+                Stratum::Water.code()
+            );
+            assert_eq!(
+                charter.fluid_code(m.sea_radius).raw() as u8,
+                Stratum::Air.code()
+            );
+            // The bedrock the skip writes is the table's own deepest answer.
+            assert_eq!(
+                below_surface_cell(&charter).stratum,
+                m.strata.at(Biome::Grassland, deepest)
+            );
+            // ★ EVERY BIOME READS ITS OWN ROW, AND NO TWO SHARE ONE. The kernel picks a row by a
+            // MASK over the biome's own discriminant, so a row that folded onto another's would
+            // read the wrong substance for a whole climate and nothing would go red. Two
+            // measurements say it cannot: the row a biome picks is the row AT ITS DISCRIMINANT,
+            // and the four topsoils are four different substances.
+            let mut topsoils = std::collections::BTreeSet::new();
+            for biome in Biome::ALL {
+                let row = charter.strata[biome as usize];
+                let picked = charter.stratum_code(Gi::new(biome as i64), Gi::ZERO);
+                assert_eq!(
+                    picked,
+                    (row >> vd_recipe::cell::ROW_TOPSOIL) & Gi::new(0xFF),
+                    "seed {seed:x}, {biome:?} reads the row at its own discriminant"
+                );
+                assert!(
+                    topsoils.insert(picked),
+                    "seed {seed:x}, {biome:?} shares its row with another biome"
+                );
+            }
+            assert_eq!(topsoils.len(), Biome::ALL.len());
+        }
+    }
+
+    /// A GARBLED WORD IS REFUSED, NEVER A PANIC (the decode is total): a low byte no stratum owns
+    /// reads solid rock, and every byte a charter can write reads its own stratum.
+    #[test]
+    fn a_cell_word_whose_code_names_no_stratum_reads_the_refused_rock() {
+        let word = |code: i64, gap: i64| vd_recipe::cell::pack(Gi::new(code), Gi::new(gap));
+        // Every code this crate's own charter can write reads back as itself.
+        for stratum in Stratum::ALL {
+            let cell = cell_of_word(word(i64::from(stratum.code()), -7));
+            assert_eq!(cell.stratum, stratum);
+            assert_eq!(cell.gap, -7);
+        }
+        // A byte past the last stratum, and the widest byte a word can carry: refused, not a panic,
+        // and the gap still reads what the word says.
+        let past = Stratum::ALL.len() as i64;
+        assert_eq!(cell_of_word(word(past, 42)).stratum, REFUSED_STRATUM);
+        assert_eq!(cell_of_word(word(past, 42)).gap, 42);
+        assert_eq!(cell_of_word(word(255, 0)).stratum, REFUSED_STRATUM);
+        assert!(REFUSED_STRATUM.is_solid(), "a refusal is never a hole");
     }
 
     #[test]
