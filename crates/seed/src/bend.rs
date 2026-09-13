@@ -524,7 +524,12 @@ mod tests {
         ] {
             let b = face.basis();
             let r = vd_recipe::bend::BASIS[face.index() as usize];
-            assert_eq!((b.n, b.u, b.v), (r.n, r.u, r.v), "{face:?}");
+            let wide = |a: Axis| [i32::from(a[0]), i32::from(a[1]), i32::from(a[2])];
+            assert_eq!(
+                (wide(b.n), wide(b.u), wide(b.v)),
+                (r.n, r.u, r.v),
+                "{face:?}"
+            );
         }
     }
 }

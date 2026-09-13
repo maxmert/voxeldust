@@ -8161,8 +8161,15 @@ rings; what is left is an interim with a named step:
    mean over 3 936 256 columns (`slice_08_integer_bench.md`). `GENERATOR_VERSION` is 2; the golden
    tables and the noise pins are re-recorded; `Gf` keeps exactly two callers — the body's DRAW from its
    seed and the four metre doors — and the lint, the link scan and the fence control still stand.
-   🟧 STILL OPEN: the frozen exact pictures (they wait on the owner's look, F7 item 4) and the GPU
-   steps G1–G4 with their runtime self-check.
+   ★ 2026-09-13: the five exact pictures RE-FROZEN on the owner's look; committed as Step 9
+   (ae08cc2). ★ STEP (c)(2)-A, THE ONE SOURCE ON THE GPU, MEASURED (bench part 4): the recipe crate
+   compiled to SPIR-V by cargo-gpu (rust-gpu rev 7fa56ad6, nightly 2026-05-22, `Int64`) through the
+   shell `crates/recipe-gpu` (`just recipe-gpu`), loaded by naga into Metal: 0 of 3 936 256 columns
+   differ from the CPU's call of the same function. Three rules the GPU compiler set: index loops
+   (no slice iterators), no runtime-length slices of local arrays (a fixed-size table form), no 8-bit
+   integers (the tables are 32-bit words); the 128-bit reciprocal is gated off the GPU target.
+   🟧 STILL OPEN: the GPU path's cost through the one source (the second-pass number in the bench
+   doc against the transcription's 56 ms), the runtime self-check gate, G1–G4, DX12/Vulkan legs.
    ★ THE WORKSPACE REDS AT THIS LANDING, MEASURED ON THE LAST COMMIT (d165d3c, a fresh worktree,
    release, 2026-09-13) — ALL PRE-EXISTING, none from the recipe: `dual_cluster_crossing_smoke::
    a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier` (−3.962e14 m clear against the

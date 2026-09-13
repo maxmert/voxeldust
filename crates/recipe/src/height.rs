@@ -25,6 +25,9 @@ pub const SAMPLE_BITS: u32 = 30;
 pub const AMP_BITS: u32 = 8;
 /// The gap steps in one cell — the density byte's unit, pinned against `vd_core`'s registry.
 pub const GAP_STEPS_PER_CELL: i64 = 128;
+/// The octave table's cap: a body draws at most this many octaves, and a GPU shell holds them in
+/// a fixed-size array (a shader has no heap and no runtime-length slice of a local array).
+pub const OCTAVES_CAP: usize = 16;
 
 /// One octave of the height field in the recipe's formats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,20 +48,53 @@ fn lattice(d30: Gi, o: &Octave) -> Gi {
 }
 
 /// The relief along a 40-bit direction over `octaves`, in gap steps at [`NOISE_BITS`], UNFLOORED:
-/// the caller adds the radius in the same unit and floors once to the gap byte.
+/// the caller adds the radius in the same unit and floors once to the gap byte. An index loop,
+/// never an iterator: the GPU compiler (rust-gpu) refuses an iterator's pointer arithmetic.
 #[must_use]
 pub fn relief(octaves: &[Octave], dir: [Gi; 3]) -> Gi {
-    let d = [
+    let d = sample_direction(dir);
+    let mut h = Gi::ZERO;
+    let mut k = 0;
+    while k < octaves.len() {
+        h += octave_term(&octaves[k], d);
+        k += 1;
+    }
+    h
+}
+
+/// [`relief`] over the first `count` octaves of a fixed-size table — the form a GPU shell calls,
+/// because a shader holds its octaves in a local array and cannot slice it to a runtime length.
+/// A `count` past the table reads the whole table.
+#[must_use]
+pub fn relief_of_table(octaves: &[Octave; OCTAVES_CAP], count: usize, dir: [Gi; 3]) -> Gi {
+    let d = sample_direction(dir);
+    let n = if count < OCTAVES_CAP {
+        count
+    } else {
+        OCTAVES_CAP
+    };
+    let mut h = Gi::ZERO;
+    let mut k = 0;
+    while k < n {
+        h += octave_term(&octaves[k], d);
+        k += 1;
+    }
+    h
+}
+
+/// The 40-bit direction shifted to the noise's sample bits.
+fn sample_direction(dir: [Gi; 3]) -> [Gi; 3] {
+    [
         dir[0] >> (DIR_BITS - SAMPLE_BITS),
         dir[1] >> (DIR_BITS - SAMPLE_BITS),
         dir[2] >> (DIR_BITS - SAMPLE_BITS),
-    ];
-    let mut h = Gi::ZERO;
-    for o in octaves {
-        let p = [lattice(d[0], o), lattice(d[1], o), lattice(d[2], o)];
-        h += (o.amplitude * noise3(o.seed, p)) >> AMP_BITS;
-    }
-    h
+    ]
+}
+
+/// One octave's term of the sum.
+fn octave_term(o: &Octave, d: [Gi; 3]) -> Gi {
+    let p = [lattice(d[0], o), lattice(d[1], o), lattice(d[2], o)];
+    (o.amplitude * noise3(o.seed, p)) >> AMP_BITS
 }
 
 /// A relief at [`NOISE_BITS`] floored to whole gap steps.
@@ -122,5 +158,12 @@ mod tests {
         assert_eq!(to_steps(Gi::ZERO - Gi::ONE), Gi::new(-1));
         // A direction change changes the relief.
         assert_ne!(h, relief(&octaves, [Gi::ZERO, DIR_ONE, Gi::ZERO]));
+        // The table form reads the same words: the first two of a full table, and a count past
+        // the table reads the whole table.
+        let mut table = [octaves[0]; OCTAVES_CAP];
+        table[1] = octaves[1];
+        assert_eq!(relief_of_table(&table, 2, dir), h);
+        assert_eq!(relief_of_table(&table, 0, dir), Gi::ZERO);
+        assert_eq!(relief_of_table(&table, 99, dir), relief(&table, dir));
     }
 }

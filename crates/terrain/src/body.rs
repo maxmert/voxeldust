@@ -28,8 +28,10 @@ use vd_recipe::root::recip_pow2;
 use vd_seed::ladder::Ladder;
 use vd_seed::rng::{SplitMix64, child_seed};
 
-/// The most octaves a body can have; the table is sized for it.
+/// The most octaves a body can have; the table is sized for it. The recipe holds the same cap: a
+/// GPU shell keeps the octaves in a fixed-size table of it (`vd_recipe::height::relief_of_table`).
 pub const OCTAVES: usize = 16;
+const _: () = assert!(OCTAVES == vd_recipe::height::OCTAVES_CAP);
 /// The most rungs a body can have: the address's four bits and one (`vd_seed::ladder::RUNG_MAX`).
 pub const RUNGS: usize = 16;
 /// The coarsest wavelength any body draws, in metres, and the wavelength below which no octave is

@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# The recipe's GPU shell is built by cargo-gpu with rust-gpu's pinned nightly, never by the stable
+# workspace (ruling F8 decision 5).
+exclude = ["crates/recipe-gpu"]
 members = [
     "crates/recipe",
     "crates/seed",
@@ -93,6 +96,11 @@ ed25519-dalek = "2"
 # Admin endpoint (io-prod only — Tier-B)
 serde_json = "1"
 axum = "0.8"
+
+[workspace.lints.rust]
+# The recipe's kernels compile for the GPU too (rust-gpu, `target_arch = "spirv"`); the stable
+# compiler does not know that arch, so it is declared here for the cfg check.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }
 
 [workspace.lints.clippy]
 # The disallowed-methods/types config lives in clippy.toml (sim/node scoped).

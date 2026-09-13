@@ -44,15 +44,17 @@ pub const K3: Gi = Gi::new(71_030_470_521);
 const _: () = assert!(K1.raw() + K2.raw() + K3.raw() == 1 << DIR_BITS);
 
 /// A face's basis: the normal, the `u` axis (along `i`) and the `v` axis (along `j`), each an axis
-/// with one component of ±1 — the address format's table, as `vd_seed::bend::BASIS` has it.
+/// with one component of ±1 — the address format's table, as `vd_seed::bend::BASIS` has it. The
+/// components are 32-bit words: the GPU target carries no 8-bit integer without a capability of
+/// its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Basis {
     /// The face's outward normal.
-    pub n: [i8; 3],
+    pub n: [i32; 3],
     /// The axis a cell's `i` counts along.
-    pub u: [i8; 3],
+    pub u: [i32; 3],
     /// The axis a cell's `j` counts along.
-    pub v: [i8; 3],
+    pub v: [i32; 3],
 }
 
 /// THE FACE BASIS TABLE, by face index: +X, −X, +Y, −Y, +Z, −Z.
@@ -97,12 +99,14 @@ pub const BASIS: [Basis; 6] = [
 /// `i64::MIN` and `2⁶⁴/1` truncates to zero, and either word would bend a face inside out. `2⁶⁴/3`
 /// still fits the word, so three is the floor. The clamp is a GUARD, not a path: a face of a body on
 /// the ladder never has fewer than one chunk's width of cells (62), because the ladder's own snap
-/// keeps every rung at least that wide.
+/// keeps every rung at least that wide. The GPU target does not compile this function (a 128-bit
+/// division) and never runs it: the charter carries the word.
 #[must_use]
 #[allow(
     clippy::integer_division,
     reason = "computed once per body on the CPU, never in a kernel"
 )]
+#[cfg(not(target_arch = "spirv"))]
 pub const fn inv_n_of(n_l: u32) -> Gi {
     let n = if n_l < INV_MIN_CELLS {
         INV_MIN_CELLS

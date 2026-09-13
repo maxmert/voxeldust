@@ -21,8 +21,9 @@ pub const NOISE_BITS: u32 = 28;
 pub const NOISE_ONE: Gi = Gi::new(1 << NOISE_BITS);
 const FRAC_MASK: Gi = Gi::new((1 << NOISE_BITS) - 1);
 
-/// Perlin's sixteen gradients.
-const GRADIENTS: [[i8; 3]; 16] = [
+/// Perlin's sixteen gradients, as 32-bit words: the GPU target carries no 8-bit integer without a
+/// capability of its own, and −1, 0 and 1 read the same in any width.
+const GRADIENTS: [[i32; 3]; 16] = [
     [1, 1, 0],
     [-1, 1, 0],
     [1, -1, 0],
@@ -58,11 +59,11 @@ pub fn lerp(a: Gi, b: Gi, t: Gi) -> Gi {
     a + ((t * (b - a)) >> NOISE_BITS)
 }
 
-fn dot(g: [i8; 3], dx: Gi, dy: Gi, dz: Gi) -> Gi {
+fn dot(g: [i32; 3], dx: Gi, dy: Gi, dz: Gi) -> Gi {
     Gi::new(g[0] as i64) * dx + Gi::new(g[1] as i64) * dy + Gi::new(g[2] as i64) * dz
 }
 
-fn gradient(seed: u64, x: i64, y: i64, z: i64) -> [i8; 3] {
+fn gradient(seed: u64, x: i64, y: i64, z: i64) -> [i32; 3] {
     GRADIENTS[(corner_hash(seed, x, y, z) & 15) as usize]
 }
 

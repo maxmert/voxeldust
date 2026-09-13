@@ -787,3 +787,10 @@ terrain-fence-control:
     cargo clippy -p vd-terrain --features fence-control -- -D warnings 2>&1 | grep -c "use of a disallowed method" | grep -q "^3$"
 terrain-cost:
     cargo run --release -p vd-bins --example terrain_cost
+
+# THE RECIPE ON THE GPU (ruling F8 decision 5): the shell crate compiled to SPIR-V by cargo-gpu with
+# rust-gpu's own pinned nightly (installed on first use), the 64-bit integer capability declared.
+# Install the tool once: `cargo +nightly-2026-06-06 install --git https://github.com/Rust-GPU/rust-gpu cargo-gpu --locked`.
+recipe-gpu out="target/recipe-gpu":
+    cargo gpu build --shader-crate crates/recipe-gpu --output-dir {{out}} --target spirv-unknown-vulkan1.2 --capabilities Int64 --auto-install-rust-toolchain
+

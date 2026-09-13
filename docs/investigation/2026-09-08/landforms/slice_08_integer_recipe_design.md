@@ -182,6 +182,11 @@ tracked by a pinned git revision and a second nightly. It is the only option tha
 in Rust, in our crate, under our tests. Recommended: **take it**, with the reserve route named
 above; the alternative is Slang, which is mature and moves the recipe out of Rust.
 
+**MEASURED, 2026-09-13 (bench part 4):** the recipe crate compiled to SPIR-V by cargo-gpu through
+the shell `crates/recipe-gpu`, loaded by naga into Metal with `Int64`, gives 0 differing columns
+of 3 936 256 against the CPU's call of the same function. The build path is real on this machine;
+DX12 and Vulkan stay unmeasured until a Windows or Linux machine runs the same module.
+
 ## 5. The pictures, the pins and the gates
 
 - The exact pictures are re-frozen once after the CPU integer recipe lands, on the owner's look,

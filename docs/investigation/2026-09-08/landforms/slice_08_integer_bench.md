@@ -169,3 +169,36 @@ and amplitude rounded once each into the charter.
 
 `GENERATOR_VERSION` is 2; `NOISE_PIN` and `VALUE_PIN` are the integer noise's words; the golden
 tables are re-recorded. THE FROZEN PICTURES ARE NOT: they wait on the owner's look (F7 item 4).
+
+## Part 4 — THE ONE SOURCE on the GPU (F8 decision 5, step (c)(2)-A, 2026-09-13)
+
+No hand-written shader: the recipe crate itself, compiled to SPIR-V by cargo-gpu (rust-gpu
+0.10.0-alpha.1 at revision 7fa56ad6, its pinned nightly 2026-05-22, the `Int64` capability) through
+the thin shell `crates/recipe-gpu` (one entry point, `relief_columns`, that reads its bindings and
+calls `vd_recipe::height::relief_of_table` — the function the server links), loaded through wgpu's
+SPIR-V front end (naga: SPIR-V → MSL) on the Apple M4 Pro, run on the same 3 936 256 columns over
+the home planet's own fourteen octaves, and compared with the CPU's call of the same function.
+
+| | |
+|---|---|
+| columns that differ between the CPU and the GPU through the one source | **0 of 3 936 256** |
+| the CPU, one core | 719 ms |
+| the GPU, the first pass (the pipeline's own compilation included) | 285 ms |
+| the GPU, the second pass (the upload and the readback included) | 348 ms |
+
+**What the GPU compiler refused on the way, and what changed — each a rule for the kernels.**
+(1) A `for` over a slice and a runtime-length slice of a stack array: the compiler cannot convert
+pointers to integers, so the octave sum is an index loop and the shell calls a fixed-size-table
+form (`relief_of_table`). (2) The 8-bit integer type of the gradient and basis tables: the GPU
+carries none without a capability of its own, so both tables are 32-bit words (−1, 0 and 1 read
+the same). (3) The 128-bit division of the cell-count reciprocal: gated off the GPU target
+(`#[cfg(not(target_arch = "spirv"))]`); the charter carries the word and the GPU never computes it.
+The stable workspace declares the `spirv` target arch for the cfg check and EXCLUDES the shell
+crate (cargo-gpu builds it with its own toolchain). The build: `just recipe-gpu`.
+
+Read: SL10's "one generator, two hosts, no drift" now holds on the GPU by the same source, not by a
+transcription — the first time the GPU ran the shipped function. The GPU's cost through this path
+is the next measurement (the transcription ran the same columns in 56 ms; the one-source module's
+second pass is the number above), and the client's runtime self-check (F8 decision 3) and the
+cell-field step (G1) grow from this entry point.
+

@@ -208,6 +208,130 @@ fn main() {
 
     part_2_the_bend(&device, &queue, &body);
     part_3_the_bend_at_40_bits(&device, &queue, &body);
+    part_4_the_one_source(&device, &queue, &body);
+}
+
+// ---------------------------------------------------------------- part 4: the one source
+
+/// The environment variable naming the SPIR-V cargo-gpu built from `crates/recipe-gpu`.
+const SPV_ENV: &str = "VD_RECIPE_SPV";
+
+/// THE ONE SOURCE ON THE GPU (F8 decision 5): the recipe crate itself, compiled to SPIR-V through
+/// rust-gpu (`crates/recipe-gpu`, entry `relief_columns`), loaded through wgpu's SPIR-V front end
+/// (naga: SPIR-V → MSL here), run on the bench's columns over the recipe's own octaves, and
+/// compared with the CPU's `vd_recipe::height::relief` bit for bit. No hand-written shader: the
+/// kernel the GPU runs is the function the server links.
+fn part_4_the_one_source(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) {
+    let Some(path) = std::env::var_os(SPV_ENV) else {
+        println!("integer_bench: PART 4 SKIPPED — set {SPV_ENV} to the SPIR-V cargo-gpu built");
+        return;
+    };
+    let spv = std::fs::read(&path).expect("the SPIR-V file reads");
+    let n_l = body.ladder().cells_per_edge(RUNG);
+    let inv_n = vd_recipe::bend::inv_n_of(n_l);
+    // The columns' 40-bit directions from the recipe's own bend, the same words on both hosts.
+    let mut dirs: Vec<i64> = Vec::new();
+    for y in FIRST_Y..FIRST_Y + CHUNKS_ACROSS {
+        for x in FIRST_X..FIRST_X + CHUNKS_ACROSS {
+            let key = ChunkKey {
+                face: FACE,
+                rung: RUNG,
+                x,
+                y,
+                z: surface_chunk_z(body, FACE, RUNG, x, y),
+            };
+            for b in 0..CHUNK_EDGE as i32 {
+                for a in 0..CHUNK_EDGE as i32 {
+                    let site = site_of(body, key, a, b);
+                    let d = vd_seed::bend::direction_q(
+                        Face::from_index(site.face).expect("a face"),
+                        site.i,
+                        site.j,
+                        inv_n,
+                    );
+                    dirs.extend([d[0].raw(), d[1].raw(), d[2].raw()]);
+                }
+            }
+        }
+    }
+    let n = dirs.len() / 3;
+    let octaves = body.octaves_at(RUNG);
+    let mut words: Vec<u64> = Vec::new();
+    for o in octaves {
+        words.extend([
+            o.seed,
+            o.frequency_int.raw() as u64,
+            o.frequency_frac.raw() as u64,
+            o.amplitude.raw() as u64,
+        ]);
+    }
+    let started = Instant::now();
+    let cpu: Vec<i64> = (0..n)
+        .map(|i| {
+            let d = [
+                vd_recipe::Gi::new(dirs[i * 3]),
+                vd_recipe::Gi::new(dirs[i * 3 + 1]),
+                vd_recipe::Gi::new(dirs[i * 3 + 2]),
+            ];
+            vd_recipe::height::relief(octaves, d).raw()
+        })
+        .collect();
+    let cpu_s = started.elapsed().as_secs_f64();
+    let count = [octaves.len() as u32, 0, 0, 0];
+    // Twice: the first pass pays the pipeline's own compilation (naga's SPIR-V → MSL, then
+    // Metal's compiler); the second is the kernel's cost with the upload and the readback.
+    let mut gpu_s = [0.0_f64; 2];
+    let mut out = Vec::new();
+    let mut pass = 0;
+    while pass < 2 {
+        let started = Instant::now();
+        out = run_compute_source(
+            device,
+            queue,
+            wgpu::util::make_spirv(&spv),
+            "relief_columns",
+            &[
+                Binding::Storage(as_bytes_i64(&dirs)),
+                Binding::Storage(as_bytes_u64(&words)),
+                Binding::Output((n * 8) as u64),
+                Binding::Uniform(as_bytes_u32(&count)),
+            ],
+            n as u32,
+        );
+        gpu_s[pass] = started.elapsed().as_secs_f64();
+        pass += 1;
+    }
+    let gpu: Vec<i64> = out
+        .chunks_exact(8)
+        .map(|b| i64::from_le_bytes(b.try_into().expect("8 bytes")))
+        .collect();
+    let differing = cpu.iter().zip(gpu.iter()).filter(|(a, b)| a != b).count();
+    println!(
+        "integer_bench: PART 4 THE ONE SOURCE — {n} columns of {} octaves through the recipe crate \
+         compiled to SPIR-V: {differing} differ between the CPU and the GPU (CPU {:.1} ms; the GPU \
+         {:.1} ms on the first pass with the pipeline's compilation, {:.1} ms on the second, both \
+         with the upload and the readback)",
+        octaves.len(),
+        cpu_s * 1.0e3,
+        gpu_s[0] * 1.0e3,
+        gpu_s[1] * 1.0e3
+    );
+    if differing > 0 {
+        let i = cpu
+            .iter()
+            .zip(gpu.iter())
+            .position(|(a, b)| a != b)
+            .expect("one");
+        println!(
+            "integer_bench: PART 4 first difference at column {i}: CPU {} GPU {} — STOP",
+            cpu[i], gpu[i]
+        );
+        std::process::exit(1);
+    }
+}
+
+fn as_bytes_u64(v: &[u64]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
 // ------------------------------------------------------------- part 3: the bend at 40 bits
@@ -1234,7 +1358,8 @@ enum Binding {
     Uniform(Vec<u8>),
 }
 
-/// One compute pass: the bindings in order, `n` invocations, the output buffer read back.
+/// One compute pass from a WGSL string (the throwaway transcriptions): the bindings in order, `n`
+/// invocations, the output buffer read back.
 fn run_compute(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1242,15 +1367,35 @@ fn run_compute(
     bindings: &[Binding],
     n: u32,
 ) -> Vec<u8> {
+    run_compute_source(
+        device,
+        queue,
+        wgpu::ShaderSource::Wgsl(source.into()),
+        "main",
+        bindings,
+        n,
+    )
+}
+
+/// One compute pass from any shader source and entry point (part 4 passes the SPIR-V the one
+/// source compiled to).
+fn run_compute_source(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source: wgpu::ShaderSource<'_>,
+    entry: &str,
+    bindings: &[Binding],
+    n: u32,
+) -> Vec<u8> {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("integer_bench"),
-        source: wgpu::ShaderSource::Wgsl(source.into()),
+        source,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("integer_bench"),
         layout: None,
         module: &module,
-        entry_point: Some("main"),
+        entry_point: Some(entry),
         compilation_options: wgpu::PipelineCompilationOptions::default(),
         cache: None,
     });

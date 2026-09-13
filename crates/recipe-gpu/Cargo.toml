@@ -1,0 +1,15 @@
+[package]
+name = "vd-recipe-gpu"
+version = "0.1.0"
+edition = "2021"
+description = "THE RECIPE'S GPU COMPILATION (ruling F8 decision 5): the compute entry points that run the one recipe crate on the client's GPU, compiled to SPIR-V by cargo-gpu with its pinned nightly. This crate holds NO arithmetic of its own — only the entry points and their bindings; every kernel is vd-recipe's, the same source the server and the client's CPU link."
+
+# Built by cargo-gpu with rust-gpu's own toolchain, never by the stable workspace.
+[workspace]
+
+[lib]
+crate-type = ["dylib", "lib"]
+
+[dependencies]
+vd-recipe = { path = "../recipe" }
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "7fa56ad6" }
