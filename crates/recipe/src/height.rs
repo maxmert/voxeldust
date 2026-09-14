@@ -168,10 +168,8 @@ pub fn biome_of(charter: &BiomeCharter, dir: [Gi; 3], surface: Gi) -> Gi {
     } else {
         Gi::ZERO
     };
-    let height_share = (over_sea >> LENGTH_BITS).mul_shr(
-        charter.highland_recip,
-        charter.highland_shift.raw() as u32,
-    );
+    let height_share = (over_sea >> LENGTH_BITS)
+        .mul_shr(charter.highland_recip, charter.highland_shift.raw() as u32);
     // Warm at the equator, cold at the poles, plus a slow noise; cooler with height.
     let temperature = NOISE_ONE - latitude + t_noise.mul_shr(NOISE_SHARE, NOISE_BITS)
         - height_share.mul_shr(HEIGHT_SHARE, NOISE_BITS);
@@ -334,12 +332,7 @@ mod tests {
             BIOME_GRASSLAND
         );
         // The codes are the four the host names, and no two are the same.
-        let all = [
-            BIOME_DESERT,
-            BIOME_GRASSLAND,
-            BIOME_TUNDRA,
-            BIOME_HIGHLAND,
-        ];
+        let all = [BIOME_DESERT, BIOME_GRASSLAND, BIOME_TUNDRA, BIOME_HIGHLAND];
         let mut i = 0;
         while i < all.len() {
             assert_eq!(all[i], Gi::new(i as i64));

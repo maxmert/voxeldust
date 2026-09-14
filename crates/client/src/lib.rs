@@ -15,6 +15,7 @@
 //! `StampedPose::advanced_ballistic`/`.vel` are never read on the render path.
 
 pub mod ask_pace;
+pub mod card_budget;
 pub mod chunks;
 pub mod input;
 pub mod interp;

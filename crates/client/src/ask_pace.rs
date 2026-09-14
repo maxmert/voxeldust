@@ -92,14 +92,18 @@ pub const THROUGHPUT_ALPHA_MAX: f64 = 0.5;
 /// mean build time is the ceiling: three workers at 15 ms a build can finish about 200 chunks a
 /// second whether or not the ladder wants them.
 ///
-/// ★ WHEN THE CARD JOINS (ruling F9 item 2, the card as a budgeted second builder) THIS MUST COUNT
-/// BOTH BUILDERS: the capacity is then the threads' own plus whatever the card delivers inside its
-/// time budget, because the bound sizes the ask against everything that can build.
+/// ★ AND THE CARD JOINS IT (ruling F9 item 2, LANDED): the capacity is the threads' own PLUS
+/// whatever the card delivers inside its time budget ([`crate::card_budget::CardBudget`]), because
+/// the bound sizes the ask against everything that can build. The two are kept apart inside — the
+/// threads' mean build time must never be averaged with the card's — and added at the reading.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Throughput {
     /// The counters and the moment of the last reading: chunks built, nanoseconds spent, when.
     mark: Option<(u64, u64, f64)>,
+    /// The CPU workers' own smoothed capacity, chunks a second.
     value: f64,
+    /// The card's capacity as it last stated itself, chunks a second. Zero where no card builds.
+    card: f64,
 }
 
 impl Throughput {
@@ -115,14 +119,14 @@ impl Throughput {
     ) -> f64 {
         let Some((chunks_at, nanos_at, at_s)) = self.mark else {
             self.mark = Some((chunks_built, nanos_built, now_s));
-            return self.value;
+            return self.both();
         };
         let dt = now_s - at_s;
         let chunks = chunks_built.saturating_sub(chunks_at);
         let nanos = nanos_built.saturating_sub(nanos_at);
         let readable = (dt > 0.0) & (chunks > 0) & (nanos > 0) & (window_s > 0.0);
         if !readable {
-            return self.value;
+            return self.both();
         }
         self.mark = Some((chunks_built, nanos_built, now_s));
         let mean_s = nanos as f64 / chunks as f64 / 1.0e9;
@@ -132,13 +136,31 @@ impl Throughput {
         let share = (dt / window_s).clamp(0.0, THROUGHPUT_ALPHA_MAX);
         let alpha = if self.value > 0.0 { share } else { 1.0 };
         self.value += alpha * (capacity - self.value);
-        self.value
+        self.both()
     }
 
-    /// The capacity as it stands, without taking a reading (the stamp's readout).
+    /// ★ THE CARD'S OWN CAPACITY, as the card last stated it (ruling F9 item 2): chunks a second
+    /// inside its time budget. It is STATED, never smoothed here, because the card smooths its own
+    /// two times already ([`crate::card_budget::CardBudget`]).
+    pub fn set_card(&mut self, card_per_s: f64) {
+        self.card = card_per_s.max(0.0);
+    }
+
+    /// The capacity of BOTH builders as it stands, without taking a reading (the stamp's readout).
     #[must_use]
     pub fn value(&self) -> f64 {
-        self.value
+        self.both()
+    }
+
+    /// The card's own share of the capacity.
+    #[must_use]
+    pub fn card_value(&self) -> f64 {
+        self.card
+    }
+
+    /// Both builders, added: what the bounded ask sizes its horizon against.
+    fn both(&self) -> f64 {
+        self.value + self.card
     }
 }
 
@@ -273,7 +295,10 @@ mod tests {
     #[test]
     fn the_horizon_arrives_at_a_hundred_and_forty_four_frames_a_second_and_at_thirty() {
         let want = ask_bound(RUNGS, fast());
-        assert!(want.binds(), "the fixture must bind for this to mean anything");
+        assert!(
+            want.binds(),
+            "the fixture must bind for this to mean anything"
+        );
         // The moment the horizon first stands within the hysteresis of what is asked, over a
         // fixed thirty seconds of frames. Zero means it never arrived.
         let arrive_s = |dt_s: f64| -> f64 {
@@ -296,13 +321,28 @@ mod tests {
         // quarter of a length a second, which is about twelve seconds of sliding.
         let quick = arrive_s(1.0 / 144.0);
         let slow = arrive_s(1.0 / 30.0);
-        assert!(quick > 0.0, "at 144 frames a second the horizon never arrived");
-        assert!(slow > 0.0, "at 30 frames a second the horizon never arrived");
-        assert!(quick < 15.0, "at 144 frames a second the horizon took {quick} s");
-        assert!(slow < 15.0, "at 30 frames a second the horizon took {slow} s");
+        assert!(
+            quick > 0.0,
+            "at 144 frames a second the horizon never arrived"
+        );
+        assert!(
+            slow > 0.0,
+            "at 30 frames a second the horizon never arrived"
+        );
+        assert!(
+            quick < 15.0,
+            "at 144 frames a second the horizon took {quick} s"
+        );
+        assert!(
+            slow < 15.0,
+            "at 30 frames a second the horizon took {slow} s"
+        );
         // The same wall time either way: the slew is a rate, not a step per frame.
         let spread = (quick - slow).abs() / quick.max(slow);
-        assert!(spread < 0.2, "144 fps took {quick} s and 30 fps took {slow} s");
+        assert!(
+            spread < 0.2,
+            "144 fps took {quick} s and 30 fps took {slow} s"
+        );
     }
 
     /// AND IT HOLDS once it has arrived: a settled horizon stops moving, so the descent and the
@@ -316,7 +356,10 @@ mod tests {
             pace.slew(&want, RUNGS, ASK_BOUND_HYSTERESIS, 1.0 / 144.0);
             t += 1.0 / 144.0;
         }
-        assert!(pace.held().same_as(&want, RUNGS, ASK_BOUND_HYSTERESIS), "it never arrived");
+        assert!(
+            pace.held().same_as(&want, RUNGS, ASK_BOUND_HYSTERESIS),
+            "it never arrived"
+        );
         let settled = pace.held().clone();
         pace.slew(&want, RUNGS, ASK_BOUND_HYSTERESIS, 1.0 / 144.0);
         assert_eq!(&settled, pace.held());
@@ -357,7 +400,10 @@ mod tests {
             "the materials ({rebinds}) must follow more often than the descent ({descents})"
         );
         // Settled, neither runs again.
-        assert!(pace.held().same_as(&want, RUNGS, ASK_BOUND_HYSTERESIS), "it never arrived");
+        assert!(
+            pace.held().same_as(&want, RUNGS, ASK_BOUND_HYSTERESIS),
+            "it never arrived"
+        );
         let mut quiet = 0u32;
         let mut u = 0.0f64;
         while u < 4.0 {
@@ -452,7 +498,10 @@ mod tests {
         // The first reading is taken whole: three workers, 15 ms a build, 200 chunks a second.
         assert_eq!(rate.read(0, 0, 0.0, 3, 10.0), 0.0);
         let first = rate.read(100, 100 * 15_000_000, 1.0, 3, 10.0);
-        assert!((first - 200.0).abs() < 1.0, "the first reading read {first}");
+        assert!(
+            (first - 200.0).abs() < 1.0,
+            "the first reading read {first}"
+        );
         // A minute of idle, then a reading at half the capacity: the average must not collapse
         // onto it.
         let after = rate.read(200, 100 * 15_000_000 + 100 * 30_000_000, 61.0, 3, 10.0);
@@ -477,6 +526,33 @@ mod tests {
         assert_eq!(rate.read(40, 4_000_000, 2.0, 3, 10.0), held);
         // A window of zero: no reading.
         assert_eq!(rate.read(60, 6_000_000, 3.0, 3, 0.0), held);
+    }
+
+    /// ★ THE CARD COUNTS IN THE SAME CAPACITY (ruling F9 item 2): the bound sizes its horizon
+    /// against EVERYTHING that builds, so the reading is the workers' own plus the card's, and the
+    /// two never mix inside — the workers' mean build time is theirs alone.
+    #[test]
+    fn the_capacity_counts_the_workers_and_the_card_together() {
+        let mut rate = Throughput::default();
+        assert_eq!(rate.read(0, 0, 0.0, 3, 10.0), 0.0);
+        let workers = rate.read(100, 100 * 15_000_000, 1.0, 3, 10.0);
+        assert!((workers - 200.0).abs() < 1.0, "the workers read {workers}");
+        // The card states 73 chunks a second: the horizon grows by exactly that.
+        rate.set_card(73.0);
+        assert_eq!(rate.card_value(), 73.0);
+        assert_eq!(rate.value(), workers + 73.0);
+        // A reading that cannot be read still carries the card, and so does the first mark.
+        assert_eq!(
+            rate.read(100, 100 * 15_000_000, 2.0, 3, 10.0),
+            workers + 73.0
+        );
+        let mut fresh = Throughput::default();
+        fresh.set_card(50.0);
+        assert_eq!(fresh.read(10, 10, 0.0, 3, 10.0), 50.0);
+        // A card that cannot be negative: a card switched off states nothing.
+        rate.set_card(-5.0);
+        assert_eq!(rate.card_value(), 0.0);
+        assert_eq!(rate.value(), workers);
     }
 
     /// THE FRAME'S OWN SECONDS: the first frame has none, a moment that went backwards has none,

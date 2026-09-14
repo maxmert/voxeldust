@@ -405,6 +405,425 @@ fn box_chain(
     )
 }
 
+/// ★ WHAT ONE BOX ON THE CARD COST, and what it wrote (ruling F9 item 2, review item 1).
+pub struct CardRun {
+    /// The cells, as the card wrote them — RAW BYTES. The decode is the geometry stage's work, not
+    /// the card thread's (review item 1c).
+    pub cells: Vec<u8>,
+    /// The columns' directions, raw.
+    pub dirs: Vec<u8>,
+    /// THE CARD'S OWN SECONDS for this box: the device's own timestamps where it offers them, and
+    /// the submit-to-map wall time where it does not.
+    pub device_s: f64,
+}
+
+/// How many words of a query set one box writes: the first pass's start and the last pass's end.
+const CARD_TIMESTAMPS: u32 = 2;
+
+/// ★ THE CARD'S REUSED GEAR (review item 1b): every buffer one box needs, kept and GROWN, never
+/// created again. A box writes into the buffers with `Queue::write_buffer` and the bind groups are
+/// kept beside them, so the steady state of the card's builder allocates NOTHING — no buffer, no
+/// bind group and no byte vector — for a box.
+///
+/// **Example.** The pilot flies at 528 m/s. The card builds forty boxes a second for a minute: the
+/// first box creates fourteen buffers and three bind groups, and the other two thousand three
+/// hundred write into the same ones.
+pub struct BoxGear {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    chain: BoxChain,
+    /// The uploads, in the order the passes read them.
+    plan_charter: Slot,
+    sites: Slot,
+    lattices: Slot,
+    node_z: Slot,
+    radii: Slot,
+    charter: Slot,
+    layers: Slot,
+    tubes: Slot,
+    /// What the card writes for itself.
+    columns: Slot,
+    nodes: Slot,
+    /// What comes home, and the staging it is mapped through.
+    dirs: Slot,
+    dirs_staging: Slot,
+    out: Slot,
+    out_staging: Slot,
+    /// The three bind groups, rebuilt only when a buffer was grown.
+    groups: Option<[wgpu::BindGroup; 3]>,
+    /// One byte vector, reused for every upload of every box.
+    scratch: Vec<u8>,
+    /// THE CARD'S OWN CLOCK, where the device offers one: the query set, the buffer the card
+    /// resolves it into, the staging the host maps, and the nanoseconds one tick is worth.
+    clock: Option<(wgpu::QuerySet, wgpu::Buffer, wgpu::Buffer, f32)>,
+}
+
+/// One pooled buffer and the bytes it holds.
+#[derive(Default)]
+struct Slot {
+    buffer: Option<wgpu::Buffer>,
+    bytes: u64,
+}
+
+impl Slot {
+    /// The buffer, grown to `need` bytes where it is too small. Answers whether it was rebuilt, so
+    /// the bind groups follow. A buffer is never shrunk: a box at a finer rung asks for the same
+    /// bytes as the last one of its rung.
+    fn ensure(&mut self, device: &wgpu::Device, need: u64, usage: wgpu::BufferUsages) -> bool {
+        if self.bytes >= need.max(1) {
+            return false;
+        }
+        self.bytes = need.max(1);
+        self.buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: self.bytes,
+            usage,
+            mapped_at_creation: false,
+        }));
+        true
+    }
+
+    /// The buffer, once it has been ensured.
+    fn get(&self) -> &wgpu::Buffer {
+        self.buffer.as_ref().expect("the slot was ensured")
+    }
+}
+
+/// The usages of a buffer the host writes and a pass reads.
+const UPLOAD: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST);
+/// The usages of a buffer the card writes for itself.
+const SCRATCH: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE;
+/// The usages of a buffer the card writes and the host reads.
+const READ_OUT: wgpu::BufferUsages =
+    wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_SRC);
+/// The usages of the staging a readback is mapped through.
+const STAGING: wgpu::BufferUsages =
+    wgpu::BufferUsages::MAP_READ.union(wgpu::BufferUsages::COPY_DST);
+
+impl BoxGear {
+    /// The gear for one card thread. The clock is the device's own where it offers timestamps.
+    #[must_use]
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> BoxGear {
+        let chain = BoxChain::new(&device);
+        let clock = device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+            .then(|| {
+                let set = device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("the card's own clock"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: CARD_TIMESTAMPS,
+                });
+                let size = u64::from(CARD_TIMESTAMPS) * 8;
+                let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                let staging = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size,
+                    usage: STAGING,
+                    mapped_at_creation: false,
+                });
+                (set, resolve, staging, queue.get_timestamp_period())
+            });
+        BoxGear {
+            device,
+            queue,
+            chain,
+            plan_charter: Slot::default(),
+            sites: Slot::default(),
+            lattices: Slot::default(),
+            node_z: Slot::default(),
+            radii: Slot::default(),
+            charter: Slot::default(),
+            layers: Slot::default(),
+            tubes: Slot::default(),
+            columns: Slot::default(),
+            nodes: Slot::default(),
+            dirs: Slot::default(),
+            dirs_staging: Slot::default(),
+            out: Slot::default(),
+            out_staging: Slot::default(),
+            groups: None,
+            scratch: Vec::new(),
+            clock: None,
+        }
+        .with_clock(clock)
+    }
+
+    fn with_clock(
+        mut self,
+        clock: Option<(wgpu::QuerySet, wgpu::Buffer, wgpu::Buffer, f32)>,
+    ) -> BoxGear {
+        self.clock = clock;
+        self
+    }
+
+    /// Whether the card's own time is READ FROM THE DEVICE (its timestamps) rather than taken from
+    /// the host's wall clock around the submit. The stamp states which, because the budget rations
+    /// this number (review item 1a).
+    #[must_use]
+    pub fn device_timed(&self) -> bool {
+        self.clock.is_some()
+    }
+
+    /// Fill a pooled buffer from 64-bit words, through the one scratch vector.
+    fn write_words(&mut self, which: Which, words: &[i64], usage: wgpu::BufferUsages) -> bool {
+        let mut scratch = std::mem::take(&mut self.scratch);
+        scratch.clear();
+        for w in words {
+            scratch.extend_from_slice(&w.to_le_bytes());
+        }
+        let grown = self.upload(which, &scratch, usage);
+        self.scratch = scratch;
+        grown
+    }
+
+    /// Fill a pooled buffer from 32-bit words.
+    fn write_small(&mut self, which: Which, words: &[i32], usage: wgpu::BufferUsages) -> bool {
+        let mut scratch = std::mem::take(&mut self.scratch);
+        scratch.clear();
+        for w in words {
+            scratch.extend_from_slice(&w.to_le_bytes());
+        }
+        let grown = self.upload(which, &scratch, usage);
+        self.scratch = scratch;
+        grown
+    }
+
+    /// The bytes into the pooled buffer, growing it where this box is the widest one yet.
+    fn upload(&mut self, which: Which, bytes: &[u8], usage: wgpu::BufferUsages) -> bool {
+        let device = self.device.clone();
+        let queue = self.queue.clone();
+        let slot = self.slot(which);
+        let grown = slot.ensure(&device, bytes.len() as u64, usage);
+        queue.write_buffer(slot.get(), 0, bytes);
+        grown
+    }
+
+    fn slot(&mut self, which: Which) -> &mut Slot {
+        match which {
+            Which::PlanCharter => &mut self.plan_charter,
+            Which::Sites => &mut self.sites,
+            Which::Lattices => &mut self.lattices,
+            Which::NodeZ => &mut self.node_z,
+            Which::Radii => &mut self.radii,
+            Which::Charter => &mut self.charter,
+            Which::Layers => &mut self.layers,
+            Which::Tubes => &mut self.tubes,
+        }
+    }
+
+    /// ★ ONE BOX ON THE CARD, WHOLE — the column pass, the node pass and the cell field, in three
+    /// compute passes of ONE command encoder, one submit, one wait. Every failure is an answer,
+    /// never a panic (review item 4): a card that stops answering detaches the builder and the CPU
+    /// share carries the ladder alone.
+    pub fn run(&mut self, plan: &BoxPlan) -> Result<CardRun, String> {
+        let edge = plan.charter.box_edge.raw() as u32;
+        let columns_n = u64::from(edge) * u64::from(edge);
+        let cells_size = columns_n * u64::from(edge) * 4;
+        let dirs_size = columns_n * 3 * 8;
+        // What goes up, through the one scratch vector and the pooled buffers.
+        let mut grown = self.write_words(Which::PlanCharter, &plan.plan_charter_words(), UPLOAD);
+        grown |= self.write_small(Which::Sites, &plan.site_words(), UPLOAD);
+        grown |= self.write_words(Which::Lattices, &plan.lattice_words(), UPLOAD);
+        grown |= self.write_words(Which::NodeZ, &plan.node_z_words(), UPLOAD);
+        grown |= self.write_words(Which::Radii, &plan.node_radius_words(), UPLOAD);
+        grown |= self.write_words(Which::Charter, &plan.charter_words(), UPLOAD);
+        grown |= self.write_words(Which::Layers, &plan.layer_words(), UPLOAD);
+        grown |= self.write_words(Which::Tubes, &plan.tube_words(), UPLOAD);
+        // What the card writes for itself, and what comes home.
+        let column_bytes = columns_n * vd_terrain::gpu::COLUMN_WORDS as u64 * 8;
+        grown |= self.columns.ensure(&self.device, column_bytes, SCRATCH);
+        grown |= self
+            .nodes
+            .ensure(&self.device, plan.node_count as u64 * 8, SCRATCH);
+        grown |= self.dirs.ensure(&self.device, dirs_size, READ_OUT);
+        grown |= self.out.ensure(&self.device, cells_size, READ_OUT);
+        self.dirs_staging.ensure(&self.device, dirs_size, STAGING);
+        self.out_staging.ensure(&self.device, cells_size, STAGING);
+        if grown || self.groups.is_none() {
+            self.groups = Some(self.build_groups());
+        }
+        let groups = self.groups.as_ref().expect("the groups were built");
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: self.clock.as_ref().map(|(set, ..)| {
+                    wgpu::ComputePassTimestampWrites {
+                        query_set: set,
+                        beginning_of_pass_write_index: Some(0),
+                        end_of_pass_write_index: None,
+                    }
+                }),
+            });
+            pass.set_pipeline(&self.chain.column);
+            pass.set_bind_group(0, &groups[0], &[]);
+            pass.dispatch_workgroups((columns_n as u32).div_ceil(COLUMN_WORKGROUP), 1, 1);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.chain.node);
+            pass.set_bind_group(0, &groups[1], &[]);
+            pass.dispatch_workgroups(
+                plan.node_extent[0].div_ceil(NODE_WORKGROUP),
+                plan.node_extent[1],
+                plan.node_z.len() as u32,
+            );
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: self.clock.as_ref().map(|(set, ..)| {
+                    wgpu::ComputePassTimestampWrites {
+                        query_set: set,
+                        beginning_of_pass_write_index: None,
+                        end_of_pass_write_index: Some(1),
+                    }
+                }),
+            });
+            pass.set_pipeline(&self.chain.cell);
+            pass.set_bind_group(0, &groups[2], &[]);
+            pass.dispatch_workgroups(edge.div_ceil(CELL_WORKGROUP), edge, edge);
+        }
+        encoder.copy_buffer_to_buffer(self.out.get(), 0, self.out_staging.get(), 0, cells_size);
+        encoder.copy_buffer_to_buffer(self.dirs.get(), 0, self.dirs_staging.get(), 0, dirs_size);
+        if let Some((set, resolve, staging, _)) = self.clock.as_ref() {
+            encoder.resolve_query_set(set, 0..CARD_TIMESTAMPS, resolve, 0);
+            encoder.copy_buffer_to_buffer(resolve, 0, staging, 0, u64::from(CARD_TIMESTAMPS) * 8);
+        }
+        let at = Instant::now();
+        self.queue.submit([encoder.finish()]);
+        let cells = map_bytes(&self.device, self.out_staging.get(), cells_size)?;
+        let dirs = map_bytes(&self.device, self.dirs_staging.get(), dirs_size)?;
+        let wall_s = at.elapsed().as_secs_f64();
+        // ★ THE CARD'S OWN SECONDS: the device's clock where it has one, the submit-to-map wall
+        // time where it has not. The budget rations THIS number, so which one it is matters.
+        let device_s = match self.clock.as_ref() {
+            Some((_, _, staging, period_ns)) => {
+                let ticks = map_bytes(&self.device, staging, u64::from(CARD_TIMESTAMPS) * 8)?;
+                let word = |k: usize| -> u64 {
+                    u64::from_le_bytes(ticks[k * 8..k * 8 + 8].try_into().unwrap_or([0; 8]))
+                };
+                let span = word(1).saturating_sub(word(0)) as f64;
+                span * f64::from(*period_ns) / 1.0e9
+            }
+            None => wall_s,
+        };
+        Ok(CardRun {
+            cells,
+            dirs,
+            device_s,
+        })
+    }
+
+    /// The three bind groups over the pooled buffers, in the order the passes read them.
+    fn build_groups(&self) -> [wgpu::BindGroup; 3] {
+        let group = |pipeline: &wgpu::ComputePipeline, buffers: [&wgpu::Buffer; 5]| {
+            let entries: Vec<wgpu::BindGroupEntry> = buffers
+                .iter()
+                .enumerate()
+                .map(|(i, b)| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: b.as_entire_binding(),
+                })
+                .collect();
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &entries,
+            })
+        };
+        let group6 = |pipeline: &wgpu::ComputePipeline, buffers: [&wgpu::Buffer; 6]| {
+            let entries: Vec<wgpu::BindGroupEntry> = buffers
+                .iter()
+                .enumerate()
+                .map(|(i, b)| wgpu::BindGroupEntry {
+                    binding: i as u32,
+                    resource: b.as_entire_binding(),
+                })
+                .collect();
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &entries,
+            })
+        };
+        [
+            group(
+                &self.chain.column,
+                [
+                    self.plan_charter.get(),
+                    self.sites.get(),
+                    self.lattices.get(),
+                    self.columns.get(),
+                    self.dirs.get(),
+                ],
+            ),
+            group(
+                &self.chain.node,
+                [
+                    self.plan_charter.get(),
+                    self.lattices.get(),
+                    self.node_z.get(),
+                    self.radii.get(),
+                    self.nodes.get(),
+                ],
+            ),
+            group6(
+                &self.chain.cell,
+                [
+                    self.charter.get(),
+                    self.layers.get(),
+                    self.columns.get(),
+                    self.nodes.get(),
+                    self.tubes.get(),
+                    self.out.get(),
+                ],
+            ),
+        ]
+    }
+}
+
+/// Which pooled upload a write goes to.
+#[derive(Clone, Copy)]
+enum Which {
+    PlanCharter,
+    Sites,
+    Lattices,
+    NodeZ,
+    Radii,
+    Charter,
+    Layers,
+    Tubes,
+}
+
+/// The bytes of a mapped staging buffer, once the card is done — AN ANSWER, never a panic. The
+/// buffer is unmapped before the answer returns, so the same staging serves the next box.
+fn map_bytes(device: &wgpu::Device, staging: &wgpu::Buffer, size: u64) -> Result<Vec<u8>, String> {
+    let slice = staging.slice(..size);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| format!("the device did not poll: {e}"))?;
+    rx.recv()
+        .map_err(|e| format!("the map never answered: {e}"))?
+        .map_err(|e| format!("the map failed: {e}"))?;
+    let bytes = slice.get_mapped_range().to_vec();
+    staging.unmap();
+    Ok(bytes)
+}
+
 /// A buffer the card writes and a staging buffer the host maps.
 fn read_pair(device: &wgpu::Device, size: u64) -> (wgpu::Buffer, wgpu::Buffer) {
     (
@@ -526,10 +945,144 @@ fn dispatch(
         .collect()
 }
 
+/// ★ THE SEAM PROBE'S SWITCH (ruling F9 item 2, step 1): `VD_TERRAIN_GPU_SEAM=<seconds>` starts a
+/// WORKER THREAD that many seconds after the client starts, and that thread dispatches the box
+/// chain on the RENDERER'S OWN device — submitting and waiting — for as long as the client runs.
+/// Absent, no thread starts and nothing changes.
+///
+/// It answers the two questions ruling F9 item 2 must answer before the card may build: does a
+/// worker thread submitting compute to the renderer's device cost the renderer its frames, and
+/// does a worker's `device.poll(wait)` stall the renderer's own submits? The client's frame counter
+/// and its worst frame before and after the probe starts are the measurement; the probe's own log
+/// line states its rate and its worst box.
+pub const SEAM_PROBE_ENV: &str = "VD_TERRAIN_GPU_SEAM";
+/// A box this long is a STALL, not a box: the probe counts it and names it. Half a second is
+/// twenty frames of the capture client's own sixty-a-second loop — far past any box the bench ever
+/// measured (about 2 ms), so a reading here is a seam fault and never a slow card.
+const SEAM_STALL: std::time::Duration = std::time::Duration::from_millis(500);
+/// HOW OFTEN THE PROBE STATES WHAT IT MEASURED: every two seconds. The capture client's own loop
+/// runs at sixty frames a second, so a two-second window holds about a hundred frames — enough that
+/// one slow frame moves the window's rate by a percent and not by a third, and short enough that a
+/// thirty-five-second run holds seven quiet windows and nine busy ones (review item 10).
+const SEAM_REPORT_S: f64 = 2.0;
+/// HOW OFTEN THE IDLE PHASE LOOKS AT ITS CLOCK: a fiftieth of a second. It is the phase that builds
+/// NOTHING, so the only thing this paces is when the probe notices that its idle seconds are up;
+/// a fiftieth is a fortieth of the report window, so no window is ever short by a measurable part
+/// (review item 10).
+const SEAM_IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// ★ THE SEAM PROBE (ruling F9 item 2, step 1): a worker thread that builds the eight golden boxes
+/// on the renderer's own device, over and over, while the renderer draws — and that STATES WHAT
+/// THE RENDERER IS DOING as it does so, because no other thread can.
+///
+/// The probe runs in TWO PHASES, so one client run holds both halves of the comparison: it IDLES
+/// for `after_s` seconds and reports the frames the renderer drew, then it BUILDS and reports the
+/// same frames beside its own rate. The difference between the two phases is the seam's cost.
+///
+/// **Example.** The capture client stands in the home system. For fifteen seconds nothing but the
+/// renderer touches the card, and the probe says so every two seconds; then the probe begins, and
+/// the same line says how many boxes it built, what a box cost it, whether any box took past
+/// [`SEAM_STALL`] — and what the renderer's frames did while it did that.
+pub fn spawn_seam_probe(
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    after_s: f64,
+    meter: std::sync::Arc<crate::terrain::FrameMeter>,
+) {
+    std::thread::Builder::new()
+        .name("terrain-gpu-seam".to_owned())
+        .spawn(move || {
+            let body = vd_terrain::home::home_planet();
+            let plans: Vec<BoxPlan> = GOLDEN_SELF_CHECK_KEYS
+                .iter()
+                .filter_map(|entry| vd_terrain::gpu::plan(&body, self_check_key(&body, *entry)))
+                .collect();
+            // THE PROBE RUNS THE BUILDER'S OWN GEAR (review item 1): the same pooled buffers, the
+            // same timestamps, the same read back — so what it measures ALONE is what the flight
+            // then measures UNDER LOAD, and the two numbers are comparable.
+            let mut gear = BoxGear::new(device, queue);
+            tracing::info!(
+                boxes = plans.len(),
+                after_s,
+                device_timed = gear.device_timed(),
+                "THE SEAM PROBE is armed: it idles first, then submits the box chain to the \
+                 renderer's own device and waits for it"
+            );
+            let started = Instant::now();
+            // The building phase's own clock: the probe's rate is its own, never diluted by the
+            // seconds it stood idle.
+            let mut build_started = Instant::now();
+            let mut building = false;
+            // The phase's own counters, and the mark the report's window runs from.
+            let mut built = 0u64;
+            let mut nanos = 0u64;
+            let mut worst_ns = 0u64;
+            let mut frames_at = meter.frames.load(std::sync::atomic::Ordering::Relaxed);
+            let mut mark = Instant::now();
+            let mut peak_ns = 0u64;
+            let mut stalls = 0u64;
+            loop {
+                if building {
+                    for plan in &plans {
+                        let at = Instant::now();
+                        let Ok(run) = gear.run(plan) else {
+                            tracing::warn!("THE SEAM PROBE stops: a box failed on the device");
+                            return;
+                        };
+                        // The answer is READ, so nothing here can be optimised away.
+                        assert!(
+                            !run.cells.is_empty() & !run.dirs.is_empty(),
+                            "the card wrote a box"
+                        );
+                        let dt = at.elapsed();
+                        built += 1;
+                        // THE CARD'S OWN SECONDS, not the thread's: the budget rations these.
+                        nanos += (run.device_s * 1.0e9) as u64;
+                        worst_ns = worst_ns.max(dt.as_nanos() as u64);
+                        stalls += u64::from(dt >= SEAM_STALL);
+                    }
+                } else {
+                    std::thread::sleep(SEAM_IDLE_TICK);
+                }
+                peak_ns = peak_ns.max(meter.peak_ns.load(std::sync::atomic::Ordering::Relaxed));
+                let window_s = mark.elapsed().as_secs_f64();
+                if window_s >= SEAM_REPORT_S {
+                    let frames_now = meter.frames.load(std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!(
+                        phase = if building { "building" } else { "idle" },
+                        frames_per_s = frames_now.saturating_sub(frames_at) as f64 / window_s,
+                        worst_frame_ms = peak_ns as f64 / 1.0e6,
+                        boxes = built,
+                        boxes_per_s =
+                            built as f64 / build_started.elapsed().as_secs_f64().max(1.0e-9),
+                        mean_ms = nanos as f64 / built.max(1) as f64 / 1.0e6,
+                        worst_ms = worst_ns as f64 / 1.0e6,
+                        stalls,
+                        device_timed = gear.device_timed(),
+                        "THE SEAM PROBE"
+                    );
+                    frames_at = frames_now;
+                    peak_ns = 0;
+                    mark = Instant::now();
+                }
+                if !building && (started.elapsed().as_secs_f64() >= after_s.max(0.0)) {
+                    building = true;
+                    build_started = Instant::now();
+                    frames_at = meter.frames.load(std::sync::atomic::Ordering::Relaxed);
+                    peak_ns = 0;
+                    mark = Instant::now();
+                    tracing::info!("THE SEAM PROBE starts building on the renderer's own device");
+                }
+            }
+        })
+        .expect("the seam probe's thread starts");
+}
+
 /// The startup system: the check on the home planet (the body the world identity is measured
 /// on), the verdict logged and kept as a resource.
 pub fn gpu_recipe_self_check(
     mut commands: Commands,
+    mut terrain: ResMut<crate::terrain::Terrain>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
 ) {
@@ -559,6 +1112,26 @@ pub fn gpu_recipe_self_check(
             "GPU RECIPE SELF-CHECK SKIPPED: this GPU offers no 64-bit integers — the CPU path of \
              the same source runs on this machine"
         );
+    }
+    // ★ THE CARD AS A SECOND BUILDER (ruling F9 item 2): the self-check's verdict decides at start
+    // whether the card may build the world's shape at all. It runs here because this is where the
+    // renderer's own device first exists and the verdict first stands.
+    terrain.attach_card(device.clone(), queue.clone(), check.trusted());
+    // ★ THE SEAM PROBE (ruling F9 item 2, step 1), only where a measurement asks for it by name.
+    if let Some(after_s) = std::env::var(SEAM_PROBE_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+    {
+        if check.trusted() {
+            spawn_seam_probe(
+                device.clone(),
+                queue.clone(),
+                after_s,
+                terrain.frame_meter(),
+            );
+        } else {
+            tracing::warn!("THE SEAM PROBE is asked for, but this GPU is not trusted");
+        }
     }
     commands.insert_resource(check);
 }

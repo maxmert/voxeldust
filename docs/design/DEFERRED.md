@@ -8239,6 +8239,46 @@ rings; what is left is an interim with a named step:
    one run read 1 821 ms and 2 074 ms — 13 % apart — so every timing here is quoted to two figures
    and the gap is stated as about a third, never as 37 %. The direction of the ruling stands on a gap
    far wider than the spread.
+   ★ **THE CARD IS NOW THE CLIENT'S SECOND BUILDER (ruling F9 item 2, 2026-09-14;
+   `slice_08_ladder_discussion.md` §26).** THE TWO CLIENT SEAMS WERE MEASURED FIRST (`just gpu-seam`,
+   `crates/bins/tests/gpu_seam.rs`): a worker thread submitting the box chain to the RENDERER'S OWN
+   device and waiting for it costs the renderer nothing — **52.2 frames a second against 51.5 while
+   it is quiet, the same 20.9 ms worst single frame, and 0 stalls over 9 936 boxes** (the client's
+   own start window is dropped by name; it reads 76.6 ms). ★★ **AND THE CARD'S OWN CLOCK CHANGED THE
+   PICTURE: a box costs the card 0.08 ms, not the 1.8 ms the host's wall clock reads.** The 1.8 ms is
+   the ROUND TRIP — the submit, the wait, the map and the read back — so the bench's old "the card is
+   worth about two of this machine's cores" was a reading of LATENCY, not of the card's arithmetic.
+   THE BUILDER is two stages (the card thread only plans, uploads, submits and reads back; a second
+   thread decodes and meshes), over pooled buffers and bind groups that are grown and never rebuilt,
+   with every failure an answer that DETACHES the card and leaves the CPU share to carry the ladder.
+   **THE JUDGE, five flights of one binary at the average machine's three workers, the 528 m/s leg:**
+
+   | | card OFF | quarter, capacity SUMMED | quarter, NOT summed, skip 1 | skip 0 | whole frame |
+   |---|---|---|---|---|---|
+   | frames/s | 45.8 | 43.3 | **45.7** | 45.8 | 46.0 |
+   | worst gap | 125 | 442 | **87** | 113 | 84 |
+   | queue | 1 442 | 1 900 | **529** | 615 | 486 |
+
+   ★ **TWO CAUSES, BOTH MEASURED.** (1) Summing the card's capacity into the bounded ask pulls the
+   finest ring's horizon from 405 m to 569 m and the band goes MORE incomplete, not less — so the
+   capacity is stated and NOT summed (`VD_TERRAIN_GPU_BOUND=1` sums it). (2) A card that takes the
+   single most urgent request reads 113 urgent chunks against 87, and 65 against 10 at 240 m/s — so
+   the card skips ONE (`VD_TERRAIN_GPU_SKIP`) — and skipping THE WORKER COUNT instead, flown because
+   such a card stands down wherever the CPU share keeps up, is WORSE on every reading but the queue
+   (97 urgent chunks against 87 at 528 m/s, 58 against 50 turning, and 3 394 against a band that
+   held on the slow hull's leg). With both rules the SLOW HULL's band now holds on every frame,
+   against 3 714 urgent chunks without the card. 🟨 Two readings are not
+   strictly better and both sit inside the leg's own spread (frames 45.7 against 45.8; the pop's
+   widest step 46 against 44), and 🟥 the turning leg's gap rises 14 → 50.
+   ★ **AND THE PICTURE GATE MEASURED THE OTHER HALF: THE CARD COSTS A STILL STAND** — the hill
+   stand's terrain settles at tick **2 408** against **2 081** with no card, past that stand's own
+   capture tick, because the round trip that pays on a queue of hundreds is pure latency on a queue
+   of three. **SO THE CARD SHIPS AS A KNOB (`VD_TERRAIN_GPU=1`), NOT AS THE DEFAULT**, and
+   `just terrain-pictures-card` is the run that measures it (the ground stand: 0 of 635 557 content
+   pixels differ), NOT a gate — it is red on the hill and is not in `just flights`. OWED: the card
+   standing down where the queue is short (the cure the measurement points at); the turning leg;
+   two boxes in flight (the round trip is twenty times the card's own arithmetic); whether a DAMPED
+   sum beats no sum.
    🟧 **WHAT THE CHAIN BUYS IS CORES, NOT SPEED — AN OWNER DECISION (F6).** about 490 chunks a second for
    about 0.03 of one core and about all of the card, against the workers' about 790 for three cores
    and no card at all. Roughly three fifths of the throughput for under one percent of the CPU, with the card then

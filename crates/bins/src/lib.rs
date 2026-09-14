@@ -2014,6 +2014,9 @@ pub const RENDER_SMOKE_SLOT: u16 = WORKTREE_SLOT_CEILING + 18; // 82: G-RENDER-S
 pub const CROSSING_SLOT: u16 = WORKTREE_SLOT_CEILING + 19; // 83: dual_cluster_crossing_smoke
 /// RLM demand-walk (VU): the `up --demand` launcher smoke's slot.
 pub const DEMAND_SMOKE_SLOT: u16 = WORKTREE_SLOT_CEILING + 20; // 84: demand_cluster_smoke
+/// ★ THE CARD'S SEAM PROBE (ruling F9 item 2, step 1): the slot the seam measurement's client runs
+/// on, so it can never collide with G-RENDER-SMOKE's.
+pub const GPU_SEAM_SLOT: u16 = WORKTREE_SLOT_CEILING + 21; // 85: gpu_seam
 
 /// Run one `vd-devcluster` subcommand against a slot (the launcher binary path comes from
 /// the calling test's `env!("CARGO_BIN_EXE_vd-devcluster")`).

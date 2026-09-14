@@ -390,9 +390,8 @@ pub const ASK_BOUND_SLACK: f64 = 0.17;
 
 // THE DERIVATION, ASSERTED WHERE IT CANNOT ROT: the slack covers the worst simultaneous stand of
 // the two tolerances (the drawn edge inside the asked edge), and it is never less than their sum.
-const _: () = assert!(
-    (1.0 + ASK_BOUND_SLACK) * (1.0 - ASK_BOUND_REBIND) * (1.0 - ASK_BOUND_BRACKET) >= 1.0
-);
+const _: () =
+    assert!((1.0 + ASK_BOUND_SLACK) * (1.0 - ASK_BOUND_REBIND) * (1.0 - ASK_BOUND_BRACKET) >= 1.0);
 const _: () = assert!(ASK_BOUND_SLACK >= ASK_BOUND_BRACKET + ASK_BOUND_REBIND);
 
 impl AskBound {
@@ -2474,7 +2473,10 @@ mod ask_bound_tests {
     fn the_descents_slack_covers_every_band_the_horizon_may_slide_to() {
         let rungs = 12u8;
         let held = ask_bound(rungs, fast());
-        assert!(held.binds(), "the fixture must bind for this to mean anything");
+        assert!(
+            held.binds(),
+            "the fixture must bind for this to mean anything"
+        );
         // The slack is not the bound: the same switches read as the same bound.
         let asked = held.clone().with_slack(ASK_BOUND_SLACK);
         assert!(asked.same_as(&held, rungs, 0.0));
@@ -2492,8 +2494,7 @@ mod ask_bound_tests {
         // A HAIR inside each tolerance, so the guard's own comparison is decided by the
         // arithmetic and not by the last bit of a double at the exact boundary.
         let hair = 1.0e-12;
-        let worst_asked =
-            scaled(&held, 1.0 - ASK_BOUND_BRACKET + hair).with_slack(ASK_BOUND_SLACK);
+        let worst_asked = scaled(&held, 1.0 - ASK_BOUND_BRACKET + hair).with_slack(ASK_BOUND_SLACK);
         let worst_drawn = scaled(&held, 1.0 / (1.0 - ASK_BOUND_REBIND) - hair);
         // THE GUARD ITSELF: these two really are a bracket and a rebind from the held horizon, so
         // the walk below is a stand the pace can produce and not a pair that never happens.
@@ -2512,8 +2513,14 @@ mod ask_bound_tests {
             let (drawn_in, drawn_out) = worst_drawn.fade_bands(rung, rungs);
             assert!(ask_in[0] <= drawn_in[0], "rung {rung}: the fade-in's start");
             assert!(ask_in[1] >= drawn_in[1], "rung {rung}: the fade-in's end");
-            assert!(ask_out[0] <= drawn_out[0], "rung {rung}: the fade-out's start");
-            assert!(ask_out[1] >= drawn_out[1], "rung {rung}: the fade-out's end");
+            assert!(
+                ask_out[0] <= drawn_out[0],
+                "rung {rung}: the fade-out's start"
+            );
+            assert!(
+                ask_out[1] >= drawn_out[1],
+                "rung {rung}: the fade-out's end"
+            );
             checked += 1;
             rung += 1;
         }
@@ -2521,8 +2528,7 @@ mod ask_bound_tests {
         // AND THE BRACKET ALONE FALLS SHORT: the same worst stand asked with a slack of the
         // bracket draws a band outside the ring the descent asked for. This is the defect the
         // derivation cures, asserted so it cannot come back.
-        let short =
-            scaled(&held, 1.0 - ASK_BOUND_BRACKET + hair).with_slack(ASK_BOUND_BRACKET);
+        let short = scaled(&held, 1.0 - ASK_BOUND_BRACKET + hair).with_slack(ASK_BOUND_BRACKET);
         let (_, short_out) = short.fade_bands(0, rungs);
         let (_, drawn_out) = worst_drawn.fade_bands(0, rungs);
         assert!(

@@ -541,12 +541,18 @@ mod tests {
     fn a_point_is_the_direction_times_the_radius_through_the_two_word_product() {
         let one = Gi::ONE << DIR_BITS;
         let r = Gi::new(815_405_260);
-        assert_eq!(point_at([one, Gi::ZERO, Gi::ZERO], r), [r, Gi::ZERO, Gi::ZERO]);
+        assert_eq!(
+            point_at([one, Gi::ZERO, Gi::ZERO], r),
+            [r, Gi::ZERO, Gi::ZERO]
+        );
         // Half the direction reads half the radius, and the product passes 63 bits on the way.
         let half = one >> 1;
         assert_eq!(point_at([half, half, Gi::ZERO], r)[0], Gi::new(407_702_630));
         // A negative component keeps its sign.
-        assert_eq!(point_at([Gi::ZERO - one, Gi::ZERO, Gi::ZERO], r)[0], Gi::ZERO - r);
+        assert_eq!(
+            point_at([Gi::ZERO - one, Gi::ZERO, Gi::ZERO], r)[0],
+            Gi::ZERO - r
+        );
     }
 
     #[test]
@@ -577,7 +583,11 @@ mod tests {
         assert_eq!(gap_code(Gi::ZERO), Gi::ZERO);
         assert_eq!(gap_code(Gi::new(-39)), Gi::new(-39));
         assert_eq!(gap_code(Gi::new(64)), Gi::new(64));
-        assert_eq!(gap_code(Gi::new(128)), GAP_TOP, "a full cell is one step short");
+        assert_eq!(
+            gap_code(Gi::new(128)),
+            GAP_TOP,
+            "a full cell is one step short"
+        );
         assert_eq!(gap_code(Gi::new(-128)), GAP_BOTTOM);
         assert_eq!(gap_code(Gi::new(-5_000)), GAP_BOTTOM);
         assert_eq!(gap_code(Gi::new(9 * 128)), GAP_TOP);
@@ -622,7 +632,10 @@ mod tests {
             radius_steps: Gi::new(1),
             inv_len2: Gi::new(crate::root::recip_pow2(0, TUBE_RECIP_BITS) as i64),
         };
-        assert_eq!(point.distance_steps([Gi::new(9), Gi::ZERO, Gi::ZERO]), Gi::new(4));
+        assert_eq!(
+            point.distance_steps([Gi::new(9), Gi::ZERO, Gi::ZERO]),
+            Gi::new(4)
+        );
         // The hollow: the greatest of `radius − distance`, never below zero, and nothing at all
         // from an empty list.
         assert_eq!(
@@ -689,7 +702,10 @@ mod tests {
             assert_eq!(c.stratum_code(b, Gi::new(5_000)), c.bedrock_code);
         }
         // A biome word past the table wraps by the mask, never out of the rows.
-        assert_eq!(c.stratum_code(Gi::new(4), Gi::ZERO), c.stratum_code(Gi::ZERO, Gi::ZERO));
+        assert_eq!(
+            c.stratum_code(Gi::new(4), Gi::ZERO),
+            c.stratum_code(Gi::ZERO, Gi::ZERO)
+        );
         // The cavern's hollow: nothing under the threshold, and the scale above it.
         assert_eq!(c.cavern_hollow_steps(Gi::ZERO), Gi::ZERO);
         assert_eq!(c.cavern_hollow_steps(c.cavern_threshold), Gi::ZERO);
@@ -704,7 +720,10 @@ mod tests {
         assert_eq!((row >> ROW_SUBSOIL) & BYTE, Gi::new(9));
         assert_eq!((row >> ROW_SEDIMENT) & BYTE, Gi::new(10));
         // A code past a byte keeps only its byte, so a row can never bleed into its neighbour.
-        assert_eq!((strata_row(Gi::new(0x1FF), Gi::ZERO, Gi::ZERO) >> ROW_SUBSOIL) & BYTE, Gi::ZERO);
+        assert_eq!(
+            (strata_row(Gi::new(0x1FF), Gi::ZERO, Gi::ZERO) >> ROW_SUBSOIL) & BYTE,
+            Gi::ZERO
+        );
     }
 
     /// One cell of rock, one of air, one of water, one hollowed by a cavern and one by a tube.
@@ -742,7 +761,11 @@ mod tests {
         let value = c.cavern_threshold + (Gi::ONE << (NOISE_BITS - 2));
         let w = cell_word(&c, &deep, value, &[]);
         assert_eq!(stratum_of_word(w), 0, "a room is air");
-        assert_eq!(gap_of_word(w), 127, "five metres of hollow clamps to the top");
+        assert_eq!(
+            gap_of_word(w),
+            127,
+            "five metres of hollow clamps to the top"
+        );
         // The same cell with the field UNDER the threshold stays rock.
         let w = cell_word(&c, &deep, Gi::ZERO, &[]);
         assert_eq!(stratum_of_word(w), 5);
@@ -762,9 +785,16 @@ mod tests {
         let w = cell_word(&c, &shallow, value, &[tube]);
         assert_eq!(stratum_of_word(w), 5);
         // A COARSER RUNG: the rung shifts the gap and the hollow into cells of gap step.
-        let coarse = CellCharter { rung: Gi::new(2), ..c };
+        let coarse = CellCharter {
+            rung: Gi::new(2),
+            ..c
+        };
         let w = cell_word(&coarse, &at(2_000 - 40, 2_000, 1), Gi::ZERO, &[]);
-        assert_eq!(gap_of_word(w), -10, "a four-metre cell reads a quarter of the steps");
+        assert_eq!(
+            gap_of_word(w),
+            -10,
+            "a four-metre cell reads a quarter of the steps"
+        );
         // The skips write the bytes the kernel would.
         let high = Gi::new(2_000) << LENGTH_BITS;
         let under_the_sea = Gi::new(500) << LENGTH_BITS;

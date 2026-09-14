@@ -42,8 +42,8 @@
 
 use crate::body::BodyDefinition;
 use crate::carve::{
-    CAVERN_STRIDE, CAVERN_STRIDE_LOG2, caverns_carve_at, cell_steps, tube_region,
-    tubes_carve_at, tubes_near,
+    CAVERN_STRIDE, CAVERN_STRIDE_LOG2, caverns_carve_at, cell_steps, tube_region, tubes_carve_at,
+    tubes_near,
 };
 use crate::height::biome_of_code;
 use crate::strata::{Biome, Stratum};

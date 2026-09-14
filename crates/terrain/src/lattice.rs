@@ -30,9 +30,9 @@ use crate::body::BodyDefinition;
 use crate::carve::{CAVERN_STRIDE_LOG2, Tube, caverns_carve_at, tubes_carve_at};
 pub use crate::chunk::in_ladder;
 use crate::chunk::{
-    CAVERN_NODES, CHUNK_EDGE, Cell, CellSite, ChunkKey, ColumnField, NodeLattice, above_surface_cell,
-    below_surface_cell, cavern_of, charter_of, column_field, finish_cell, foreign_extents,
-    generate_in, point_at, tubes_reaching,
+    CAVERN_NODES, CHUNK_EDGE, Cell, CellSite, ChunkKey, ColumnField, NodeLattice,
+    above_surface_cell, below_surface_cell, cavern_of, charter_of, column_field, finish_cell,
+    foreign_extents, generate_in, point_at, tubes_reaching,
 };
 use crate::height::biome_of_code;
 use crate::strata::Biome;

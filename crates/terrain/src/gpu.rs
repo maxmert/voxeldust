@@ -164,10 +164,7 @@ pub fn plan(body: &BodyDefinition, key: ChunkKey) -> Option<BoxPlan> {
     }
     // The corner radius of each radial node index — one row for every lattice of the box, because
     // every lattice of a box stands on the same radial range.
-    let k_dims = topology
-        .lattices
-        .first()
-        .map_or(1, |e| e.dims[2]);
+    let k_dims = topology.lattices.first().map_or(1, |e| e.dims[2]);
     let mut node_radii = Vec::with_capacity(k_dims);
     let mut nc = 0;
     while nc < k_dims {
@@ -533,7 +530,13 @@ mod tests {
         // that makes the plan lay a second lattice down and a column read it.
         let last = (m.ladder().cells_per_edge(0) as i32 - 1) / CHUNK_EDGE as i32;
         for k in [
-            key(Face::PosX, 0, 300, 700, surface_chunk_z(&m, Face::PosX, 0, 300, 700)),
+            key(
+                Face::PosX,
+                0,
+                300,
+                700,
+                surface_chunk_z(&m, Face::PosX, 0, 300, 700),
+            ),
             key(
                 Face::PosX,
                 0,
@@ -541,7 +544,13 @@ mod tests {
                 last,
                 surface_chunk_z(&m, Face::PosX, 0, last, last),
             ),
-            key(Face::PosZ, 3, 5, 7, surface_chunk_z(&m, Face::PosZ, 3, 5, 7)),
+            key(
+                Face::PosZ,
+                3,
+                5,
+                7,
+                surface_chunk_z(&m, Face::PosZ, 3, 5, 7),
+            ),
             key(Face::PosX, 0, 300, 700, 0),
             key(
                 Face::PosX,
@@ -563,7 +572,10 @@ mod tests {
             assert_eq!(got.dirs, want.dirs, "{k:?}: the directions");
             assert_eq!(got.key, want.key);
         }
-        assert!(plan(&m, key(Face::PosX, 0, -1, 0, 0)).is_none(), "off the ladder");
+        assert!(
+            plan(&m, key(Face::PosX, 0, -1, 0, 0)).is_none(),
+            "off the ladder"
+        );
         // ★ THE SEAM IS ACTUALLY CROSSED: the last chunk's box holds a PARTNER face's columns, the
         // plan lays that face's lattice down after its own, and those columns read it. Stated as a
         // measurement, because a box that never crosses would pass every assertion above and leave
@@ -619,7 +631,13 @@ mod tests {
         assert_eq!(size_of::<NodeBlock>(), BLOCK_WORDS * 8);
         assert_eq!(size_of::<Octave>(), OCTAVE_WORDS * 8);
         let m = home_planet();
-        let k = key(Face::PosX, 0, 300, 700, surface_chunk_z(&m, Face::PosX, 0, 300, 700));
+        let k = key(
+            Face::PosX,
+            0,
+            300,
+            700,
+            surface_chunk_z(&m, Face::PosX, 0, 300, 700),
+        );
         let plan = plan(&m, k).expect("the key is on the ladder");
         assert_eq!(plan.charter_words().len(), CHARTER_WORDS);
         assert_eq!(plan.plan_charter_words().len(), PLAN_CHARTER_WORDS);
@@ -662,7 +680,13 @@ mod tests {
     fn a_rung_without_caves_plans_no_lattice_and_still_names_the_same_cells() {
         let m = home_planet();
         let rung = 8u8;
-        let k = key(Face::PosY, rung, 1, 1, surface_chunk_z(&m, Face::PosY, rung, 1, 1));
+        let k = key(
+            Face::PosY,
+            rung,
+            1,
+            1,
+            surface_chunk_z(&m, Face::PosY, rung, 1, 1),
+        );
         let plan = plan(&m, k).expect("the key is on the ladder");
         let run = plan.run();
         assert_eq!(plan.node_count, 1, "one spare word, no lattice");
@@ -674,7 +698,8 @@ mod tests {
         assert_eq!(plan.tubes[0], Tube::default());
         let want = sample_box(&m, k).expect("the box");
         assert_eq!(
-            plan.box_of(&plan.cells_of(&run), &BoxPlan::dirs_of(&run)).cells,
+            plan.box_of(&plan.cells_of(&run), &BoxPlan::dirs_of(&run))
+                .cells,
             want.cells
         );
     }

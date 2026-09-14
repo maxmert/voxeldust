@@ -110,8 +110,8 @@ fn corner_axis(n: i32, u: i32, v: i32, i: i32, j: i32) -> Gi {
 #[must_use]
 pub fn column_surface(charter: &PlanCharter, face: i32, i: i32, j: i32) -> ColumnSurface {
     let dir = site_direction(charter, face, i, j);
-    let h =
-        charter.radius + relief_of_table(&charter.octaves, charter.octave_count.raw() as usize, dir);
+    let h = charter.radius
+        + relief_of_table(&charter.octaves, charter.octave_count.raw() as usize, dir);
     ColumnSurface {
         dir,
         h,
@@ -420,7 +420,10 @@ mod tests {
         // node pair below it, never the truncating divide's pair above.
         assert_eq!(across.na, node_of(-1) - partner.node0[0]);
         assert_eq!(node_of(-1), Gi::new(-1));
-        assert_eq!(weight_of(-1), Gi::new(3) << (LENGTH_BITS - CAVERN_STRIDE_LOG2));
+        assert_eq!(
+            weight_of(-1),
+            Gi::new(3) << (LENGTH_BITS - CAVERN_STRIDE_LOG2)
+        );
         assert_eq!(node_of(4), Gi::ONE);
         assert_eq!(weight_of(4), Gi::ZERO);
         // A CORNER PHANTOM names no lattice at all, and no lattice at all names none either.
@@ -439,7 +442,9 @@ mod tests {
         let none = column_row(&c, &[], 4, 300, 701);
         assert_eq!(none.has, Gi::ZERO);
         assert_eq!(
-            [none.base, none.na, none.nb, none.d0, none.d1, none.wa, none.wb],
+            [
+                none.base, none.na, none.nb, none.d0, none.d1, none.wa, none.wb
+            ],
             [Gi::ZERO; 7]
         );
         // ★ THE FIRST BLOCK OF A FACE WINS: a second block of the same face changes nothing.

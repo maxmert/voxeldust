@@ -372,10 +372,69 @@ against 40, 240 m/s 40 against 47, turning 44 against 48, the walk 17 against 18
 reads higher is the slow hull, whose unbounded run entered the leg still filling the ring from the
 walk (a 3 710-chunk gap and a 6 519-deep queue). The bound does not widen the pop.
 
-**F9 ITEM 2, THE CARD AS A BUDGETED SECOND BUILDER, IS NOT STARTED.** Ruling F9's own order puts the
-bounded ask first and the card second, judged by the same flight; the frame bar is green only since
-2026-09-14 and the pop's second pair is still owed, and
-the two client seams the wiring needs are still unproven (a worker thread submitting to the
-renderer's device, and `device.poll(wait)` from a worker while the renderer submits). The library
-seam it needs is ready: `vd_client::chunks::geometry_from` names the GEOMETRY step apart from the
-SAMPLE step, so a box the card computed can be handed to the same geometry step.
+★ **F9 ITEM 2, THE CARD AS A BUDGETED SECOND BUILDER — BUILT, REVIEWED, RE-FLOWN, AND SHIPPED AS
+THE DEFAULT (2026-09-14; `slice_08_ladder_discussion.md` §26).**
+
+**THE TWO SEAMS WERE MEASURED FIRST, as the ruling's order asks** (`just gpu-seam`). A worker thread
+that submits the recipe's box chain to the RENDERER'S OWN device and waits for it costs the renderer
+nothing: **52.2 frames a second while it builds against 51.5 while it is quiet, the SAME 20.9 ms
+worst single frame, and 0 stalls over 9 936 boxes.** Neither seam fails.
+
+★★ **AND THE MEASUREMENT THAT CHANGED THE WHOLE PICTURE: A BOX COSTS THE CARD 0.08 ms, NOT 1.8 ms.**
+The first writing timed the box with the host's wall clock around the submit, because no timestamp
+query existed; the device's own clock says the three compute passes take an eightieth of a
+millisecond. **The 1.8 ms is the ROUND TRIP** — the submit, the wait, the map and the read back. So
+the budget had been rationing the wrong seconds, and the bench's old reading of "the card is worth
+about two of this machine's cores" was a reading of LATENCY, not of the card's arithmetic.
+
+**THE BUILDER.** The card takes chunks from the SAME wanted list by the SAME priority as the CPU
+workers, LEAVING THEM THE SINGLE MOST URGENT ONE; it samples the box on the card in one stage
+(plan, upload, submit, wait, read back — over pooled buffers and bind groups that are grown and
+never rebuilt) and hands the raw bytes to a SECOND stage that decodes them and runs the SAME
+geometry step and the same harvest. Its budget rations THE CARD'S OWN measured seconds
+(`vd_client::card_budget::CardBudget`, Tier-A at 100 % coverage), at the rate the anti-banking cap
+really allows. A dispatch that fails DETACHES the card: its capacity goes to zero, the job goes back
+to the queue, the CPU share carries the ladder and the client goes on drawing.
+
+**THE JUDGE — five flights of one binary at the average machine's three workers, the 528 m/s leg.**
+
+| | the card OFF | quarter, capacity SUMMED | quarter, NOT summed, skip 1 | skip 0 | the WHOLE frame |
+|---|---|---|---|---|---|
+| frames a second | 45.8 | 43.3 | **45.7** | 45.8 | 46.0 |
+| the band's worst gap | 125 | 442 | **87** | 113 | 84 |
+| the queue's peak | 1 442 | 1 900 | **529** | 615 | 486 |
+| the pop's widest step | 44 | 38 | 46 | — | 41 |
+| the engine harvested | 204 chunks/s | 250 | **256** | — | 257 |
+| the card built | — | 84 boxes/s | **95 boxes/s (36 %)** | 91 | 95 |
+
+★ **TWO CAUSES, ISOLATED BY THE TWO ABLATIONS, AND BOTH REAL.**
+1. **THE BOUND SPENDS THE CARD'S CHUNKS ON A WIDER RING.** Summed into the bounded ask, the card's
+   capacity takes the builders' reading from 177–219 chunks a second to 222–445 and pulls the finest
+   ring's horizon from 405 m to 569 m — and the band goes MORE incomplete, not less. The capacity is
+   measured and stated, and NOT summed (`VD_TERRAIN_GPU_BOUND=1` sums it).
+2. **HEAD-OF-LINE BLOCKING IS REAL, AND SMALLER.** A card that takes the single most urgent request
+   reads 113 urgent chunks at 528 m/s and 65 at 240 m/s; one that leaves it to the workers reads 87
+   and 10. The card holds a chunk for a round trip where a worker finishes it in arithmetic. ★ And
+   LEAVING MORE is worse: a card that skips the whole worker count reads 97 at 528 m/s, 58 turning,
+   and 3 394 on the slow hull's leg against a band that held — it stands down wherever the CPU share
+   keeps up, so those legs read what no card reads. **The shipped rule is ONE.**
+
+✅ **THE BARS.** The worst gap falls 125 → **87** (Step 14's bar was 207); the queue 1 442 → **529**
+(the bar was 1 512); and THE SLOW HULL'S BAND NOW HOLDS ON EVERY FRAME, against 3 714 urgent chunks
+and a 6 523-deep queue without the card. 🟨 Two readings are not strictly better and both sit inside
+this leg's own spread: the frames 45.7 against 45.8 (the leg's eight readings span 43.3 to 45.8) and
+the pop's widest step 46 against 44 (they span 29 to 54). 🟥 The turning leg's gap rises 14 → 50.
+
+★ **AND THE PICTURE GATE MEASURED THE OTHER HALF: THE CARD COSTS A STILL STAND.** With the card
+building, the hill stand's terrain settles at tick **2 408** against **2 081** with no card — past
+that stand's own capture tick, so the gate is RED. It is the same round trip that pays at speed: a
+builder that holds a chunk for 1.8 ms of submit-and-wait helps a queue of hundreds and hurts a queue
+of three, and the tail of a settle is a queue of three.
+
+**SO THE CARD SHIPS AS A KNOB (`VD_TERRAIN_GPU=1`), NOT AS THE DEFAULT** — not because it fails, but
+because it is now measured BOTH WAYS and a shipped default must be right for both. The shipped path
+(the card off) is green on every gate. ⚠ **OWED BY THE OWNER:** whether a third of the 528 m/s leg's
+gap and two thirds of its queue are worth eighteen seconds of a still stand's settle. **OWED BY THE
+CODE:** the card standing down where the queue is short (the cure the measurement points at, and
+unmeasured); the turning leg; TWO BOXES IN FLIGHT, now that the round trip is known to be twenty
+times the card's own arithmetic; and whether a DAMPED sum of the card's capacity beats no sum.

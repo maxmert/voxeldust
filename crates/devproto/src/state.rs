@@ -363,6 +363,14 @@ pub(crate) mod tests {
                 build_rate_per_s: 0.0,
                 eye_speed_mps: 0.0,
                 ask_horizon_m: Vec::new(),
+                card_boxes: 11,
+                card_nanos: 22_000_000,
+                card_budget_nanos: 33_000_000,
+                card_per_box_ms: 2.0,
+                card_boxes_per_frame: 2.75,
+                card_capacity_per_s: 91.0,
+                card_device_timed: true,
+                frame_peak_ms: 33.4,
                 frame_work_ns: Vec::new(),
                 morph_fallbacks: 3,
                 morph_seam: 0,
@@ -548,6 +556,33 @@ pub struct DevTerrainStamp {
     pub build_rate_per_s: f64,
     pub eye_speed_mps: f64,
     pub ask_horizon_m: Vec<f64>,
+    /// ★ THE CARD AS A SECOND BUILDER (ruling F9 item 2): what the card built and what it was
+    /// allowed, since the client started. `card_boxes` counts the chunks the card sampled and the
+    /// worker handed to the same geometry step; `card_nanos` is the wall time those boxes took on
+    /// the card; `card_budget_nanos` is the time the frames GRANTED the card (its share of every
+    /// frame). A gate reads the differences across a leg, so a leg states the card's own rate and
+    /// how much of its budget it used. All three are zero where no card builds — an untrusted GPU,
+    /// or `VD_TERRAIN_GPU=0`.
+    pub card_boxes: u64,
+    pub card_nanos: u64,
+    pub card_budget_nanos: u64,
+    /// The card's MEASURED time for one box, smoothed, in milliseconds, and how many boxes this
+    /// frame's own budget allows at that time. Zero while no card builds.
+    pub card_per_box_ms: f64,
+    pub card_boxes_per_frame: f64,
+    /// THE CARD'S OWN CAPACITY, chunks a second — the smaller of what its pipeline carries and what
+    /// its share of every second pays for. This is the number the bounded ask adds to the workers'
+    /// own, so a flight can say how much of the horizon the card bought.
+    pub card_capacity_per_s: f64,
+    /// WHETHER THE CARD'S TIME IS THE DEVICE'S OWN READING (its timestamps) or the host's wall
+    /// clock around the submit. The budget rations the card's time, so which clock measured it is
+    /// part of the measurement.
+    pub card_device_timed: bool,
+    /// THE WORST SINGLE FRAME of the last second, in milliseconds: the terrain system times the
+    /// gap between its own runs, which is the frame. The engine's `frame_ms` is a SMOOTHED
+    /// average and hides one long frame; a second builder on the renderer's own device is judged
+    /// by exactly that frame, so the peak is stated beside the mean.
+    pub frame_peak_ms: f32,
     /// ★ THE FRAME'S OWN WORK, piece by piece, since the client started: the piece's name, the
     /// wall NANOSECONDS it cost in all, its worst SINGLE FRAME, and how many times it RAN. The
     /// pieces are the builders' throughput read, the bounded ask's arithmetic, the wanted set's

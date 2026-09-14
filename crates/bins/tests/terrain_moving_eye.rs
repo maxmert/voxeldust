@@ -478,6 +478,21 @@ struct LegRead {
     max_rate: f64,
     max_speed_mps: f64,
     tightest_horizon_m: Vec<f64>,
+    /// ★ THE CARD AS A SECOND BUILDER across the leg (ruling F9 item 2): the chunks the card
+    /// built, the card's own nanoseconds over them, and the nanoseconds the frames GRANTED it.
+    /// The card's measured time for one box and the boxes its budget allows a frame are read at
+    /// the leg's last sample, because both are already smoothed readings and not counters.
+    card_boxes: u64,
+    card_nanos: u64,
+    card_budget_nanos: u64,
+    card_per_box_ms: f64,
+    card_boxes_per_frame: f64,
+    /// The card's own capacity as the bounded ask reads it, and whether the card's time is the
+    /// DEVICE's own reading or the host's wall clock (review item 1a).
+    card_capacity_per_s: f64,
+    card_device_timed: bool,
+    /// THE WORST SINGLE FRAME of the leg, in milliseconds, from the stamp's own rolling peak.
+    frame_peak_ms: f32,
     /// ★ THE FRAME'S OWN WORK at the leg's first and last sample (the frame bar's instrument):
     /// the piece, its nanoseconds in all, its worst single frame, and how many times it ran. The
     /// leg's own cost is the difference of the two.
@@ -597,8 +612,8 @@ fn read_band(
     let mut next_memory_s = MEMORY_COURSE_S;
     let started = Instant::now();
     // The counters at the first and the last sample: the leg's differences.
-    let mut first: Option<[u64; 10]> = None;
-    let mut last = [0u64; 10];
+    let mut first: Option<[u64; 13]> = None;
+    let mut last = [0u64; 13];
     let mut last_drawn = 0u64;
     let slug: String = leg
         .chars()
@@ -675,6 +690,11 @@ fn read_band(
             stamp.parent_builds,
             stamp.parent_waits,
             stamp.harvest_nanos,
+            // ★ THE CARD (ruling F9 item 2): what it built, what its boxes cost it, what the
+            // frames granted it.
+            stamp.card_boxes,
+            stamp.card_nanos,
+            stamp.card_budget_nanos,
         ];
         first.get_or_insert(last);
         // THE MEMORY COURSE, once a minute: the footprint's growth since the leg began, so a
@@ -744,6 +764,12 @@ fn read_band(
             stamp.build_rate_per_s
         };
         read.max_speed_mps = read.max_speed_mps.max(stamp.eye_speed_mps);
+        // The card's two smoothed readings, and the leg's own worst frame.
+        read.card_per_box_ms = stamp.card_per_box_ms;
+        read.card_boxes_per_frame = stamp.card_boxes_per_frame;
+        read.card_capacity_per_s = stamp.card_capacity_per_s;
+        read.card_device_timed = stamp.card_device_timed;
+        read.frame_peak_ms = read.frame_peak_ms.max(stamp.frame_peak_ms);
         if read.work_first.is_empty() {
             read.work_first = stamp.frame_work_ns.clone();
         }
@@ -781,6 +807,9 @@ fn read_band(
     read.parent_builds = last[7].saturating_sub(first[7]);
     read.parent_waits = last[8].saturating_sub(first[8]);
     read.harvest_nanos = last[9].saturating_sub(first[9]);
+    read.card_boxes = last[10].saturating_sub(first[10]);
+    read.card_nanos = last[11].saturating_sub(first[11]);
+    read.card_budget_nanos = last[12].saturating_sub(first[12]);
     read.memory_end = MemoryRead::of(client_pid);
     read.memory_grew = read.memory_end.since(memory_start);
     // THE CLIENT'S MEMORY over the leg (ruling V17 item 1): the footprint at the end, and what
@@ -834,12 +863,57 @@ fn read_band(
             .map(|m| m.round() as i64)
             .collect::<Vec<i64>>()
     );
+    // ★ THE CARD AS A SECOND BUILDER (ruling F9 item 2): what the card built over this leg, what
+    // one box cost it as it measured itself, and how much of its share of the frames it used. A
+    // card that is off, or one the self-check refused, reads zeroes on every count.
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE CARD — built {} boxes ({:.0} a second, {:.0} % of the \
+         chunks built), {:.2} ms a box by {}; the frames granted it {:.2} ms each \
+         and it spent {:.2} ms of each ({:.0} % of its budget); its budget allows {:.1} boxes a \
+         frame and it states {:.0} chunks/s of capacity",
+        read.card_boxes,
+        read.card_boxes as f64 / secs,
+        if read.built + read.card_boxes > 0 {
+            100.0 * read.card_boxes as f64 / (read.built + read.card_boxes) as f64
+        } else {
+            0.0
+        },
+        read.card_per_box_ms,
+        if read.card_device_timed {
+            "the device's own clock"
+        } else {
+            "the host's wall clock"
+        },
+        if read.frames > 0 {
+            read.card_budget_nanos as f64 / read.frames as f64 / 1.0e6
+        } else {
+            0.0
+        },
+        if read.frames > 0 {
+            read.card_nanos as f64 / read.frames as f64 / 1.0e6
+        } else {
+            0.0
+        },
+        if read.card_budget_nanos > 0 {
+            100.0 * read.card_nanos as f64 / read.card_budget_nanos as f64
+        } else {
+            0.0
+        },
+        read.card_boxes_per_frame,
+        read.card_capacity_per_s
+    );
     // ★ THE FRAME'S WORK (ruling F9 item 1's frame bar): what the bounded ask's own pieces cost
     // the MAIN THREAD, per frame of this leg. A frame rate that falls with the bound on is one of
     // these pieces or none of them, and this line is how the flight says which.
     eprintln!(
         "terrain_moving_eye/{leg}: THE FRAME'S WORK — {}",
         frame_work(&read)
+    );
+    // THE LEG'S WORST SINGLE FRAME, from the stamp's own rolling peak over one second: the
+    // measurement a second builder on the renderer's device is judged by, beside the mean.
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE FRAME'S PEAK — the worst single frame {:.1} ms",
+        read.frame_peak_ms
     );
     eprintln!(
         "terrain_moving_eye/{leg}: THE PARENT CACHE — {} hits, {} builds, {} waits ({:.0} % hit)",

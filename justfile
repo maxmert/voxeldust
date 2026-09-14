@@ -272,11 +272,29 @@ render-crossing-smoke:
 terrain-moving-eye:
     cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye -- --nocapture --test-threads=1
 
+# ★ THE CARD'S SEAM (ruling F9 item 2, step 1): one capture client; half way through it a WORKER
+# THREAD starts dispatching the recipe's box chain on the RENDERER'S OWN device and waiting for it.
+# Reports the frames a second and the worst single frame before and after — the measurement that
+# says whether the card may be a second builder at all. GPU-required, LOCAL. Runs RELEASE.
+gpu-seam:
+    cargo test --release -p vd-bins --features dev-control,render --test gpu_seam -- --nocapture --test-threads=1
+
 # THE PICTURE GATE (ruling V18): the five stands against their frozen exact references; a content
 # pixel that moves by more than the tolerance is red. `VD_PICTURE_FREEZE=1` (or a comma list of
 # stand names) refreezes on the owner's acceptance of a look; `VD_PICTURE_REPORT_ONLY=1` measures.
 terrain-pictures:
     cargo test --release -p vd-bins --features dev-control,render --test terrain_pictures -- --nocapture --test-threads=1
+
+# ★ THE PICTURE GATE WITH THE CARD BUILDING (ruling F9 item 2; review item 6): the same five
+# stands, built by the card beside the CPU workers. It is the automated run that exercises the card
+# AS A BUILDER, and what it proves is that the card's box makes the SAME picture — the ground stand
+# reads 0 of 635 557 content pixels differing. ⚠ IT IS RED TODAY, and for a MEASURED reason, which
+# is why it is NOT in `just flights`: the card DELAYS A STILL STAND'S SETTLE (the hill settles at
+# tick 2 408 against 2 081 with no card, past that stand's own capture tick 2 400), because a
+# builder that holds a chunk for a round trip helps a queue of hundreds and hurts a queue of three.
+# Run it to measure the card, never as a green light. GPU-required, LOCAL, RELEASE.
+terrain-pictures-card:
+    VD_TERRAIN_GPU=1 cargo test --release -p vd-bins --features dev-control,render --test terrain_pictures -- --nocapture --test-threads=1
 
 # THE BOARDING STORM (D-TERRAIN-5 item 15): ten pilots board ten hulls, each fresh, each settling
 # before the next; the legs fly on the last. The count of saga starts against boardings is the

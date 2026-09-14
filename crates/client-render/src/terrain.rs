@@ -41,11 +41,12 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use bevy::camera::visibility::RenderLayers;
+use vd_client::ask_pace::{AskPace, FrameClock, PeakHold, Throughput};
+use vd_client::card_budget::{CARD_BUDGET_FRACTION, CardBudget, clamped_fraction};
 use vd_client::chunks::{
     ChunkJob, ChunkLane, ChunkReady, ChunkWorkers, Ruler, body_frame_point, eye_surface,
-    geometry_with, oct_encode, ruler_on_surface,
+    geometry_from, geometry_with, oct_encode, ruler_on_surface,
 };
-use vd_client::ask_pace::{AskPace, FrameClock, PeakHold, Throughput};
 use vd_client::ladder_view::{
     AskBound, AskRate, Column, FADE_ALWAYS_IN, FADE_ALWAYS_OUT, LadderView, ShadowReach, WantedSet,
     rung_for_distance, switch_m,
@@ -225,6 +226,30 @@ pub struct TerrainConfig {
     /// paces the descent, MEASURED — and a nonzero value caps the descents a realm's bound can
     /// force a second.
     pub ask_bound_descent_s: f64,
+    /// ★ THE CARD AS A SECOND BUILDER (ruling F9 item 2): whether the card may build chunks at
+    /// all. The CPU share is the default and the fallback; `VD_TERRAIN_GPU=0` keeps the card out,
+    /// and a card the self-check does not trust builds nothing whatever this says.
+    pub gpu_card: bool,
+    /// THE CARD'S SHARE OF A FRAME (`VD_TERRAIN_GPU_BUDGET=<fraction>`): how much of each frame the
+    /// card may spend building, so it keeps the rest to DRAW. The default is
+    /// [`CARD_BUDGET_FRACTION`], a quarter, whose measured reason is stated there; `1.0` lets the
+    /// card build all it can, which is the flight that says what the budget buys. A typed value is
+    /// CLAMPED to none-or-all, and a value that had to be clamped is said in the log.
+    pub gpu_budget: f64,
+    /// ★ THE HEAD-OF-LINE RULE (review item 9, `VD_TERRAIN_GPU_SKIP=<n>`): how many of the queue's
+    /// most urgent requests the card leaves to the CPU workers. `None` reads the measured default
+    /// ([`CARD_SKIP`], one).
+    pub gpu_skip: Option<usize>,
+    /// ★ WHETHER THE CARD'S CAPACITY IS SUMMED INTO THE BOUNDED ASK (`VD_TERRAIN_GPU_BOUND=1`).
+    ///
+    /// OFF by default, and the default is MEASURED (§26.4, three flights of one binary at the
+    /// average machine's three workers, the 528 m/s leg): summed, the bound reads 222 to 445 chunks
+    /// a second, pulls the finest ring's horizon out from 405 m to 569 m, and the band goes MORE
+    /// incomplete, not less — 442 urgent chunks at the worst against 125 with no card at all, and
+    /// the frames fall to 43.3. NOT summed, the very same card and the very same chunks read 87
+    /// urgent chunks, a queue of 529 against 1 442, and 45.7 frames a second. The card's chunks are
+    /// worth more spent on the ask the eye already has than on a wider one.
+    pub gpu_bound: bool,
     /// THE SPEED'S HOLD, seconds: the window the LARGEST reading of the lead's sawtooth is kept
     /// over ([`vd_client::ask_pace::PeakHold`]). The sawtooth's period is the snapshot interval
     /// (0.05 s at the 20 Hz universe tick), so a second holds twenty of its teeth — and because
@@ -283,6 +308,18 @@ fn env_on(name: &str) -> bool {
         .is_ok_and(|v| off.contains(&v.as_str()))
 }
 
+/// WHETHER A SWITCH THAT IS OFF BY DEFAULT WAS ARMED BY NAME. The mirror of [`env_on`], for the
+/// switches whose default the measurement decides against ([`GPU_CARD_ENV`], [`GPU_BOUND_ENV`]):
+/// each is off unless a
+/// person writes `1`, `true`, `on` or `yes`, in any case. Two readers, because there are two kinds
+/// of default and a switch must mean what it says either way.
+fn env_armed(name: &str) -> bool {
+    let yes = ["1", "true", "on", "yes"];
+    std::env::var(name)
+        .map(|v| v.trim().to_ascii_lowercase())
+        .is_ok_and(|v| yes.contains(&v.as_str()))
+}
+
 /// The environment switch of the far-rung splat.
 const SPLAT_ENV: &str = "VD_TERRAIN_SPLATS";
 /// The environment switches of the ablation.
@@ -337,6 +374,12 @@ impl TerrainConfig {
             ask_bound_bracket: vd_client::ladder_view::ASK_BOUND_BRACKET,
             ask_bound_descent_s: vd_client::ladder_view::ASK_BOUND_DESCENT_S,
             speed_hold_s: SPEED_HOLD_S,
+            gpu_card: env_armed(GPU_CARD_ENV),
+            gpu_budget: clamped_fraction(env_or(GPU_BUDGET_ENV, CARD_BUDGET_FRACTION)),
+            gpu_skip: std::env::var(GPU_SKIP_ENV)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok()),
+            gpu_bound: env_armed(GPU_BOUND_ENV),
         }
     }
 }
@@ -390,9 +433,13 @@ pub struct ThreadedWorkers {
     queue: Arc<(Mutex<JobQueue>, std::sync::Condvar)>,
     done: Receiver<ChunkReady>,
     /// The jobs the workers ran (with or without a geometry), and the wall nanoseconds they spent
-    /// on them, a wait on a sibling's parent build included (M8-2a).
+    /// on them, a wait on a sibling's parent build included (M8-2a). The CARD's own chunks are
+    /// counted apart, in [`CardMeter`], because the two builders' mean times must never be mixed.
     built: Arc<std::sync::atomic::AtomicU64>,
     build_nanos: Arc<std::sync::atomic::AtomicU64>,
+    /// ★ THE CARD'S SEAM (ruling F9 item 2): the same queue and the same done channel, kept for
+    /// the moment the renderer's own device exists.
+    card: CardSeam,
 }
 
 /// The queue: jobs by (priority, arrival), an index from the chunk to its place, and the close
@@ -452,24 +499,9 @@ impl ThreadedWorkers {
                     loop {
                         // Take the first job by priority; wait while the queue is empty; leave
                         // as soon as it is closed (refutation T-29: a close builds nothing more).
-                        let job = {
-                            let (lock, cvar) = &*queue;
-                            let mut q = lock
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            loop {
-                                if q.closed {
-                                    return;
-                                }
-                                if let Some((slot, job)) = q.jobs.pop_first() {
-                                    q.index.remove(&(job.realm, job.key));
-                                    let _ = slot;
-                                    break job;
-                                }
-                                q = cvar
-                                    .wait(q)
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            }
+                        // ONE rule, for the CPU workers and for the card alike (ruling F9 item 2).
+                        let Some(job) = next_job(&queue) else {
+                            return;
                         };
                         let started = std::time::Instant::now();
                         let geometry = geometry_with(&job.body, job.realm, job.key, &job.parents);
@@ -490,11 +522,23 @@ impl ThreadedWorkers {
             n += 1;
         }
         ThreadedWorkers {
+            card: CardSeam {
+                queue: Arc::clone(&queue),
+                done: done_tx,
+                meter: Arc::new(CardMeter::default()),
+            },
             queue,
             done,
             built,
             build_nanos,
         }
+    }
+
+    /// ★ THE CARD'S SEAM ON THESE WORKERS (ruling F9 item 2): the client keeps it and fills it in
+    /// once the renderer's device exists.
+    #[must_use]
+    pub fn card_seam(&self) -> CardSeam {
+        self.card.clone()
     }
 
     /// How many jobs wait in the queue.
@@ -520,6 +564,12 @@ impl Drop for ThreadedWorkers {
             q.index.clear();
         }
         cvar.notify_all();
+        // The card waits on its own grant, never on the queue, so it is closed by its own flag.
+        self.card
+            .meter
+            .closed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.card.meter.granted.notify_all();
     }
 }
 
@@ -536,7 +586,12 @@ impl ChunkWorkers for ThreadedWorkers {
         lock.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .place(job);
-        cvar.notify_one();
+        // ★ EVERY BUILDER IS WOKEN, never one of them (review item 9's own defect, MEASURED: the
+        // walk's settle hung for ever on ONE pending chunk). The card waits for the request AFTER
+        // the workers' next few, so a queue of one holds nothing FOR THE CARD — and a `notify_one`
+        // that happened to wake the card left the CPU workers asleep beside a job they could have
+        // taken. Two kinds of waiter on one queue means every wake is a broadcast.
+        cvar.notify_all();
     }
 
     fn reprioritise(&mut self, realm: RealmId, key: ChunkKey, priority: u32) {
@@ -567,6 +622,371 @@ impl ChunkWorkers for ThreadedWorkers {
             }
             n += 1;
         }
+    }
+}
+
+/// ★ THE FRAME METER (ruling F9 item 2, step 1): the frames the terrain system has run, and the
+/// worst single frame of the last second in nanoseconds — shared, so an INSTRUMENT ON ANOTHER
+/// THREAD can read what the renderer is doing while it works. The seam probe is that instrument:
+/// it is the one thing that must say what a worker on the renderer's own device costs the frames,
+/// and it cannot ask the main thread for them.
+#[derive(Default)]
+pub struct FrameMeter {
+    /// The frames the terrain system has run since the client started.
+    pub frames: std::sync::atomic::AtomicU64,
+    /// The worst single frame of the last second, in nanoseconds.
+    pub peak_ns: std::sync::atomic::AtomicU64,
+}
+
+/// ★ THE CARD'S KNOBS (ruling F9 item 2). `VD_TERRAIN_GPU=1/true/on/yes` makes the card a second
+/// builder — and the default is OFF for a reason the flights MEASURED TWICE (§26.4): at speed the
+/// card pays (the band's worst gap at 528 m/s falls from 125 urgent chunks to 87 and the queue from
+/// 1 442 to 529), and on a STILL STAND it costs (the picture gate's hill stand settles at tick
+/// 2 408 against 2 081 with no card, past that stand's own capture tick). A builder that holds a
+/// chunk for a round trip helps a queue of hundreds and hurts a queue of three, and the shipped
+/// path must be right for both until that is cured; `VD_TERRAIN_GPU_BUDGET=<fraction>` is its share of a frame (the default is
+/// [`CARD_BUDGET_FRACTION`], a quarter, clamped to none-or-all by
+/// [`vd_client::card_budget::clamped_fraction`]); `VD_TERRAIN_GPU_SKIP=<n>` is the head-of-line
+/// rule below; `VD_TERRAIN_GPU_BOUND=1` SUMS the card's capacity into the bounded ask, which the
+/// measurement refuses as a default (see [`GPU_BOUND_ENV`]'s own note).
+const GPU_CARD_ENV: &str = "VD_TERRAIN_GPU";
+const GPU_BUDGET_ENV: &str = "VD_TERRAIN_GPU_BUDGET";
+const GPU_SKIP_ENV: &str = "VD_TERRAIN_GPU_SKIP";
+const GPU_BOUND_ENV: &str = "VD_TERRAIN_GPU_BOUND";
+
+/// ★ THE HEAD-OF-LINE RULE (review item 9): how many of the queue's most urgent requests the card
+/// LEAVES ALONE. The card holds a chunk longer than a CPU worker does — its box waits on the
+/// device while a worker's box is pure arithmetic — so a card that takes the single most urgent
+/// request delays exactly the chunk the picture is waiting for. The card therefore takes the
+/// request AFTER the workers' next few.
+///
+/// ★ THE DEFAULT IS ONE, and THREE flights of one binary pick it (§26.4). Against a card that
+/// takes the head of the queue it reads 87 urgent chunks at 528 m/s against 113, and 10 against 65
+/// at 240 m/s. Against a card that skips THE WORKER COUNT — tried because that card stays out of
+/// the tail of a still stand — it reads 87 against 97 at 528 m/s, 50 against 58 turning, and, on
+/// the slow hull's leg, **a band that holds on every frame against 3 394 urgent chunks**: a card
+/// that skips three never enters that leg's queue at all, so the leg reads what no card at all
+/// reads. And the still stand it was meant to cure stayed RED either way (the hill stand settled at
+/// tick 2 446 at one and 2 408 at three, against a capture tick of 2 400), which is why the card
+/// ships behind [`GPU_CARD_ENV`] and this default follows the flights.
+/// `VD_TERRAIN_GPU_SKIP=<n>` names another; `0` gives the card the head of the queue again.
+const CARD_SKIP: usize = 1;
+
+/// HOW LONG THE CARD WAITS FOR ITS NEXT GRANT before it looks again. The frames grant, and a frame
+/// is about 22 ms; a tenth of a second is the longest the card can sleep past a grant, and it is
+/// only ever reached where the frames have STOPPED (a client shutting down), which is exactly when
+/// the card must wake to see the close flag.
+const CARD_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// ★ THE CARD'S METER: what the card built, what it cost, and what the frames granted it — shared
+/// by the card's own threads and the frame that grants (ruling F9 item 2).
+#[derive(Default)]
+pub struct CardMeter {
+    /// The chunks the card sampled and handed to the geometry stage.
+    boxes: std::sync::atomic::AtomicU64,
+    /// The wall nanoseconds THE CARD ITSELF took over those boxes (never the host's stages).
+    nanos: std::sync::atomic::AtomicU64,
+    /// The nanoseconds the frames actually added to the card's allowance since the client started.
+    granted_nanos: std::sync::atomic::AtomicU64,
+    /// The budget's arithmetic, in the Tier-A library.
+    budget: Mutex<CardBudget>,
+    /// The workers are closing: the card leaves.
+    closed: std::sync::atomic::AtomicBool,
+    /// Whether the card's own time is READ FROM THE DEVICE's timestamps, or taken from the host's
+    /// wall clock around the submit (review item 1a). The stamp states which.
+    device_timed: std::sync::atomic::AtomicBool,
+    /// A failure is told once, never on every box.
+    told: std::sync::atomic::AtomicBool,
+    /// The card's thread waits on this for its next grant.
+    granted: std::sync::Condvar,
+}
+
+impl CardMeter {
+    /// THE FRAME GRANTS the card its share and wakes it.
+    ///
+    /// The counter adds WHAT THE ALLOWANCE ACTUALLY TOOK (review item 7): a frame that granted into
+    /// a full allowance added nothing, and the stamp says so, so the budget's use is read against
+    /// the time the card could really have spent.
+    fn grant(&self, frame_s: f64, fraction: f64) {
+        let added = self
+            .budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .grant(frame_s, fraction);
+        self.granted_nanos
+            .fetch_add((added * 1.0e9) as u64, std::sync::atomic::Ordering::Relaxed);
+        self.granted.notify_one();
+    }
+
+    /// THE CARD WAITS for a grant that covers one box. `false` means the workers closed, or the
+    /// card has left.
+    fn take_blocking(&self) -> bool {
+        let mut budget = self
+            .budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if self.closed.load(std::sync::atomic::Ordering::Relaxed) | budget.is_detached() {
+                return false;
+            }
+            if budget.take() {
+                return true;
+            }
+            budget = self
+                .granted
+                .wait_timeout(budget, CARD_WAIT)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// ★ THE CARD HAS LEFT (review item 4): a dispatch failed. The budget detaches, the capacity is
+    /// zero from here on, the client keeps drawing and the CPU share carries the ladder alone. The
+    /// failure is told ONCE.
+    fn detach(&self, why: &str) {
+        self.budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .detach();
+        if !self.told.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                why,
+                "THE CARD HAS LEFT: a box failed on the device, so the card builds nothing more — \
+                 the CPU workers carry the whole ladder and the client goes on drawing"
+            );
+        }
+        self.granted.notify_all();
+    }
+
+    /// What the card built and what it cost, for the stamp: the chunks, the card's own nanoseconds,
+    /// the nanoseconds granted, the measured time of one box in milliseconds, how many boxes this
+    /// frame's own budget allows, the card's own capacity, and whether the card's time is the
+    /// DEVICE's own reading.
+    fn read(&self) -> (u64, u64, u64, f64, f64, f64, bool) {
+        let budget = self
+            .budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            self.boxes.load(std::sync::atomic::Ordering::Relaxed),
+            self.nanos.load(std::sync::atomic::Ordering::Relaxed),
+            self.granted_nanos
+                .load(std::sync::atomic::Ordering::Relaxed),
+            budget.per_box_s() * 1.0e3,
+            budget.boxes_per_frame(),
+            budget.capacity_per_s(),
+            self.device_timed.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// The card's own capacity, chunks a second, as the bounded ask must read it. Zero once the
+    /// card has left.
+    fn capacity_per_s(&self) -> f64 {
+        self.budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .capacity_per_s()
+    }
+}
+
+/// ★ THE CARD'S SEAM ON THE WORKERS (ruling F9 item 2): everything the card's threads need to take
+/// jobs from the SAME queue by the SAME priority and hand their chunks to the SAME harvest. The
+/// client holds one of these from the moment the workers start, and fills it in at start-up — the
+/// renderer's own device does not exist until then.
+#[derive(Clone)]
+pub struct CardSeam {
+    queue: Arc<(Mutex<JobQueue>, std::sync::Condvar)>,
+    done: crossbeam_channel::Sender<ChunkReady>,
+    meter: Arc<CardMeter>,
+}
+
+/// One sampled box on its way from the card to the geometry stage: the job it belongs to, the plan
+/// that names the box, and the RAW bytes the card wrote. The decode is the geometry stage's work.
+struct SampledBox {
+    job: ChunkJob,
+    plan: vd_terrain::gpu::BoxPlan,
+    cells: Vec<u8>,
+    dirs: Vec<u8>,
+}
+
+impl CardSeam {
+    /// ★ THE CARD BECOMES A BUILDER, in TWO STAGES (ruling F9 item 2; review item 1c).
+    ///
+    /// THE CARD THREAD plans a box's topology, uploads it into the pooled buffers, submits the
+    /// three passes and reads the bytes back — and does nothing else, so the time the budget
+    /// rations is the card's own and the thread is free the moment the device is.
+    /// THE GEOMETRY THREAD decodes those bytes into the box (`BoxPlan::box_of`) and runs the SAME
+    /// geometry step the CPU workers run (`vd_client::chunks::geometry_from`), then sends the chunk
+    /// down the same done channel to the same harvest.
+    ///
+    /// **Example.** The pilot flies at 528 m/s. The wanted set asks for a ring of metre-rung
+    /// chunks; the CPU workers take the most urgent ones and the card takes the one after them
+    /// (`skip`), computes its 262 144 cells and 4 096 column directions — byte for byte what the
+    /// shard's CPU writes — and hands the bytes on while it starts the next box.
+    pub fn attach(&self, device: wgpu::Device, queue: wgpu::Queue, skip: usize, done_bound: usize) {
+        let (tx, rx) = bounded::<SampledBox>(done_bound.max(1));
+        // THE GEOMETRY STAGE.
+        let done = self.done.clone();
+        let meter = Arc::clone(&self.meter);
+        std::thread::Builder::new()
+            .name("terrain-card-geometry".to_owned())
+            .spawn(move || {
+                while let Ok(sampled) = rx.recv() {
+                    let at = std::time::Instant::now();
+                    let samples = sampled
+                        .plan
+                        .box_of(&cells_of(&sampled.cells), &dirs_of(&sampled.dirs));
+                    let geometry = geometry_from(
+                        &sampled.job.body,
+                        sampled.job.realm,
+                        sampled.job.key,
+                        &samples,
+                        &sampled.job.parents,
+                    );
+                    meter
+                        .budget
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .note_geometry(at.elapsed().as_secs_f64());
+                    if let Some(geometry) = geometry {
+                        let _ = done.send(ChunkReady {
+                            realm: sampled.job.realm,
+                            geometry,
+                        });
+                    }
+                }
+            })
+            .expect("the card's geometry thread starts");
+        // THE CARD THREAD.
+        let jobs = Arc::clone(&self.queue);
+        let meter = Arc::clone(&self.meter);
+        std::thread::Builder::new()
+            .name("terrain-card".to_owned())
+            .spawn(move || {
+                let mut gear = crate::gpu_check::BoxGear::new(device, queue);
+                meter
+                    .device_timed
+                    .store(gear.device_timed(), std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(
+                    device_timed = gear.device_timed(),
+                    skip,
+                    "THE CARD'S BUILDER starts: it takes the request after the workers' next few, \
+                     and its own time is read from the device where the device offers it"
+                );
+                loop {
+                    // THE BUDGET FIRST: the card never holds a job it may not build yet, so a job
+                    // it cannot afford stays in the queue for a CPU worker.
+                    if !meter.take_blocking() {
+                        return;
+                    }
+                    let Some(job) = next_job_for_card(&jobs, skip) else {
+                        return;
+                    };
+                    // A key outside the body's ladder is the seam's own refusal: it is NOT a box,
+                    // so it is neither timed nor counted (review item 3).
+                    let Some(plan) = vd_terrain::gpu::plan(&job.body, job.key) else {
+                        continue;
+                    };
+                    let at = std::time::Instant::now();
+                    let run = match gear.run(&plan) {
+                        Ok(run) => run,
+                        Err(why) => {
+                            // The job goes back to the queue for a CPU worker, and the card leaves.
+                            let (lock, cvar) = &*jobs;
+                            lock.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .place(job);
+                            cvar.notify_all();
+                            meter.detach(&why);
+                            return;
+                        }
+                    };
+                    meter
+                        .budget
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .note_box(run.device_s, at.elapsed().as_secs_f64());
+                    meter
+                        .boxes
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    meter.nanos.fetch_add(
+                        (run.device_s * 1.0e9) as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if tx
+                        .send(SampledBox {
+                            job,
+                            plan,
+                            cells: run.cells,
+                            dirs: run.dirs,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
+            .expect("the card's builder thread starts");
+    }
+}
+
+/// The cells of a readback, decoded on the GEOMETRY stage's own thread.
+fn cells_of(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap_or([0; 4])))
+        .collect()
+}
+
+/// The column directions of a readback, decoded on the GEOMETRY stage's own thread.
+fn dirs_of(bytes: &[u8]) -> Vec<[vd_recipe::Gi; 3]> {
+    bytes
+        .chunks_exact(24)
+        .map(|row| {
+            let word = |k: usize| {
+                vd_recipe::Gi::new(i64::from_le_bytes(
+                    row[k * 8..k * 8 + 8].try_into().unwrap_or([0; 8]),
+                ))
+            };
+            [word(0), word(1), word(2)]
+        })
+        .collect()
+}
+
+/// The first job of the queue by priority, waiting while the queue is empty; `None` once the
+/// workers close. The card and the CPU workers take from this one queue by this one rule.
+fn next_job(jobs: &Arc<(Mutex<JobQueue>, std::sync::Condvar)>) -> Option<ChunkJob> {
+    take_job(jobs, 0)
+}
+
+/// ★ THE CARD'S OWN TAKE (review item 9): the same queue and the same order, but the card leaves
+/// the `skip` most urgent requests to the CPU workers and takes the one after them. A queue that
+/// holds no more than `skip` requests holds nothing for the card, and it waits.
+fn next_job_for_card(
+    jobs: &Arc<(Mutex<JobQueue>, std::sync::Condvar)>,
+    skip: usize,
+) -> Option<ChunkJob> {
+    take_job(jobs, skip)
+}
+
+/// One job out of the queue, `skip` places down the priority order; `None` once the workers close.
+fn take_job(jobs: &Arc<(Mutex<JobQueue>, std::sync::Condvar)>, skip: usize) -> Option<ChunkJob> {
+    let (lock, cvar) = &**jobs;
+    let mut q = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    loop {
+        if q.closed {
+            return None;
+        }
+        if let Some(slot) = q.jobs.keys().nth(skip).copied() {
+            let job = q.jobs.remove(&slot).expect("the slot was just read");
+            q.index.remove(&(job.realm, job.key));
+            return Some(job);
+        }
+        q = cvar
+            .wait(q)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
 }
 
@@ -754,6 +1174,19 @@ pub struct Terrain {
     /// ceiling), and the counter and the moment the last reading was taken at.
     workers: usize,
     throughput: Throughput,
+    /// ★ THE CARD AS A SECOND BUILDER (ruling F9 item 2): the seam the client fills in once the
+    /// renderer's device exists, and the meter both sides read. `attached` says whether a card
+    /// builder is running at all, so a client with no trusted card grants nothing.
+    card: CardSeam,
+    card_attached: bool,
+    /// THE WORST SINGLE FRAME of the last [`WORK_PEAK_S`] seconds: the terrain system times the
+    /// gap between its own runs, which is the frame itself. The engine's own frame-time diagnostic
+    /// is a SMOOTHED mean and hides one long frame; a second builder on the renderer's own device
+    /// is judged by exactly that frame.
+    frame_peak: PeakHold,
+    frame_peak_ms: f64,
+    /// The frames and the worst frame, shared with an instrument on another thread.
+    frame_meter: Arc<FrameMeter>,
     /// This frame's own seconds, which is how far the deliverable horizons may slide (ruling F9
     /// item 1).
     frame_clock: FrameClock,
@@ -790,10 +1223,10 @@ impl Terrain {
         };
         tracing::info!(threads, "terrain workers");
         // The done queue holds `DONE_QUEUE_FRAMES` frames of the harvest cap (item 19).
-        let workers: Box<dyn ChunkWorkers> = Box::new(ThreadedWorkers::start(
-            threads,
-            config.harvest_per_frame * DONE_QUEUE_FRAMES,
-        ));
+        let threaded =
+            ThreadedWorkers::start(threads, config.harvest_per_frame * DONE_QUEUE_FRAMES);
+        let card = threaded.card_seam();
+        let workers: Box<dyn ChunkWorkers> = Box::new(threaded);
         let lane = ChunkLane::new(workers, declared);
         // The parent cache holds what the memory budget allows, in the meshes' own bytes, never
         // less than one working set of the workers (ruling V15; refutation T-8: a size that
@@ -818,6 +1251,11 @@ impl Terrain {
             frames: 0,
             workers: threads,
             throughput: Throughput::default(),
+            card,
+            card_attached: false,
+            frame_peak: PeakHold::default(),
+            frame_peak_ms: 0.0,
+            frame_meter: Arc::new(FrameMeter::default()),
             frame_clock: FrameClock::default(),
             work_ns: BTreeMap::new(),
             harvest_nanos: 0,
@@ -856,10 +1294,20 @@ impl Terrain {
             .collect()
     }
 
-    /// ★ THE BUILDERS' THROUGHPUT, read as a CAPACITY (ruling F9 item 1): the pure reader in the
-    /// Tier-A library ([`vd_client::ask_pace::Throughput`]) over the lane's own counters.
+    /// ★ THE BUILDERS' THROUGHPUT, read as a CAPACITY (ruling F9 item 1, and ruling F9 item 2's
+    /// second builder): the pure reader in the Tier-A library
+    /// ([`vd_client::ask_pace::Throughput`]) over the lane's own counters, PLUS the card's own
+    /// capacity inside its time budget ([`vd_client::card_budget::CardBudget`]). The bounded ask
+    /// sizes its horizon against everything that builds, so a card that builds widens the horizon
+    /// and a card that does not leaves it exactly where it was.
     fn read_throughput(&mut self, now_s: f64) -> f64 {
         let built = self.lane.built();
+        self.throughput
+            .set_card(if self.card_attached & self.config.gpu_bound {
+                self.card.meter.capacity_per_s()
+            } else {
+                0.0
+            });
         self.throughput.read(
             built.chunks,
             built.nanos,
@@ -867,6 +1315,58 @@ impl Terrain {
             self.workers,
             self.config.throughput_window_s,
         )
+    }
+
+    /// ★ THE CARD BECOMES A BUILDER (ruling F9 item 2): the renderer's own device and queue, once
+    /// they exist and once the self-check has TRUSTED them. A card that is not trusted builds
+    /// nothing; so does `VD_TERRAIN_GPU=0`; the CPU share is the default and the fallback.
+    pub fn attach_card(&mut self, device: wgpu::Device, queue: wgpu::Queue, trusted: bool) {
+        if !self.config.gpu_card {
+            tracing::info!("THE CARD BUILDS NOTHING: VD_TERRAIN_GPU is off");
+            return;
+        }
+        if !trusted {
+            tracing::warn!(
+                "THE CARD BUILDS NOTHING: the recipe's self-check did not trust this GPU — the \
+                 CPU workers build the whole ladder"
+            );
+            return;
+        }
+        let skip = self.config.gpu_skip.unwrap_or(CARD_SKIP);
+        self.card.attach(
+            device,
+            queue,
+            skip,
+            self.config.harvest_per_frame * DONE_QUEUE_FRAMES,
+        );
+        self.card_attached = true;
+        tracing::info!(
+            budget = self.config.gpu_budget,
+            skip,
+            summed = self.config.gpu_bound,
+            "THE CARD IS A SECOND BUILDER: it takes chunks from the same queue by the same \
+             priority, inside its share of every frame"
+        );
+    }
+
+    /// The frames and the worst frame, for an instrument on another thread (the seam probe).
+    #[must_use]
+    pub fn frame_meter(&self) -> Arc<FrameMeter> {
+        Arc::clone(&self.frame_meter)
+    }
+
+    /// THE FRAME GRANTS THE CARD its share, and the frame's own worst reading is kept. The answer
+    /// is what the stamp states about the card.
+    fn grant_card(&mut self, frame_s: f64, now_s: f64) -> (u64, u64, u64, f64, f64, f64, bool) {
+        self.frame_peak_ms = self.frame_peak.read(frame_s * 1.0e3, now_s, WORK_PEAK_S);
+        self.frame_meter.peak_ns.store(
+            (self.frame_peak_ms * 1.0e6) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        if self.card_attached {
+            self.card.meter.grant(frame_s, self.config.gpu_budget);
+        }
+        self.card.meter.read()
     }
 
     /// ★ THE CROSSFADE FOLLOWS THE BOUND (ruling F9 item 1): a realm whose deliverable horizons
@@ -1372,6 +1872,10 @@ pub(crate) fn sync_terrain(
 ) {
     // Every frame this system runs (M8-2a; refutation T-15: counted only under a body before).
     terrain.frames += 1;
+    terrain
+        .frame_meter
+        .frames
+        .store(terrain.frames, std::sync::atomic::Ordering::Relaxed);
     // THE FRAME'S MOMENT: the sample the camera was placed from (step 6), never a second one.
     let Some((now_s, snap)) = render_eye.moment.clone() else {
         terrain.stamp = None;
@@ -1454,6 +1958,8 @@ pub(crate) fn sync_terrain(
     let work_started = std::time::Instant::now();
     let throughput = terrain.read_throughput(now_s);
     let frame_s = terrain.frame_clock.seconds(now_s);
+    // ★ THE CARD'S SHARE OF THIS FRAME (ruling F9 item 2), and the frame's own worst reading.
+    let card = terrain.grant_card(frame_s, now_s);
     let work_throughput = work_started.elapsed();
     let lead_s = lead_cursor.map_or(0.0, |_| snap.lead_seconds());
     let bound_on = terrain.config.ask_bound;
@@ -1502,7 +2008,9 @@ pub(crate) fn sync_terrain(
         if ladder.pace.take_rebind(rungs, rebind_fraction) {
             rebind.push(eb.realm);
         }
-        let bound_changed = ladder.pace.take_descent(rungs, bracket, descent_every_s, now_s);
+        let bound_changed = ladder
+            .pace
+            .take_descent(rungs, bracket, descent_every_s, now_s);
         if bound_changed {
             ladder.view.bound = ladder.pace.asked().clone();
         }
@@ -2143,6 +2651,16 @@ pub(crate) fn sync_terrain(
                     .get(realm)
                     .map(|l: &RealmLadder| l.view.bound.horizons_m())
                     .unwrap_or_default(),
+                // ★ THE CARD AS A SECOND BUILDER (ruling F9 item 2): what it built, what its
+                // boxes cost it, and what the frames granted it.
+                card_boxes: card.0,
+                card_nanos: card.1,
+                card_budget_nanos: card.2,
+                card_per_box_ms: card.3,
+                card_boxes_per_frame: card.4,
+                card_capacity_per_s: card.5,
+                card_device_timed: card.6,
+                frame_peak_ms: terrain.frame_peak_ms as f32,
                 frame_work_ns: terrain.frame_work(),
                 morph_fallbacks: terrain.morph_totals[0],
                 morph_seam: terrain.morph_totals[1],

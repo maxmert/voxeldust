@@ -242,7 +242,10 @@ mod tests {
         let (low, high) = (Gi::new(-9), Gi::new(4));
         // Each operator, both answers, as one equality (a bare `!(a < b)` is a lint).
         assert_eq!([low < high, high < low], [true, false]);
-        assert_eq!([low <= high, high <= high, high <= low], [true, true, false]);
+        assert_eq!(
+            [low <= high, high <= high, high <= low],
+            [true, true, false]
+        );
         assert_eq!([high > low, low > high], [true, false]);
         assert_eq!([high >= low, low >= low, low >= high], [true, true, false]);
         assert_eq!(low.cmp(&high), core::cmp::Ordering::Less);
