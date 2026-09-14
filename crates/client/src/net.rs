@@ -3161,6 +3161,8 @@ mod tests {
                     card_boxes_per_frame: 0.0,
                     card_capacity_per_s: 0.0,
                     card_device_timed: false,
+                    card_judged: 0,
+                    card_stood_down: 0,
                     frame_peak_ms: 0.0,
                     frame_work_ns: Vec::new(),
                     morph_fallbacks: 0,

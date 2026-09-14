@@ -279,6 +279,16 @@ terrain-moving-eye:
 gpu-seam:
     cargo test --release -p vd-bins --features dev-control,render --test gpu_seam -- --nocapture --test-threads=1
 
+# ★★ THE NO-DRIFT GATE OVER MANY KEYS (SL10; §26.10, 2026-09-14): the card's box against the CPU's
+# on the keys a real stand draws, not on eight golden ones. It reuses ONE gear BY NAME, because the
+# defect it pins — a pooled buffer that grew and never shrank, so a box read the rows of a bigger
+# box before it — is invisible to a check that builds every box on fresh buffers. MEASURED: 1 022 of
+# the seam stand's 6 049 boxes drifted before the cure and none after it. The gate sweeps EVERY box
+# the stand wants (30 s); `VD_GPU_DRIFT_BOXES=<n>` takes the first n for a quick look while a cure
+# is being hunted. GPU-required, LOCAL, RELEASE.
+gpu-drift:
+    cargo test --release -p vd-bins --features render --test gpu_no_drift -- --nocapture --test-threads=1
+
 # THE PICTURE GATE (ruling V18): the five stands against their frozen exact references; a content
 # pixel that moves by more than the tolerance is red. `VD_PICTURE_FREEZE=1` (or a comma list of
 # stand names) refreezes on the owner's acceptance of a look; `VD_PICTURE_REPORT_ONLY=1` measures.
@@ -287,12 +297,13 @@ terrain-pictures:
 
 # ★ THE PICTURE GATE WITH THE CARD BUILDING (ruling F9 item 2; review item 6): the same five
 # stands, built by the card beside the CPU workers. It is the automated run that exercises the card
-# AS A BUILDER, and what it proves is that the card's box makes the SAME picture — the ground stand
-# reads 0 of 635 557 content pixels differing. ⚠ IT IS RED TODAY, and for a MEASURED reason, which
-# is why it is NOT in `just flights`: the card DELAYS A STILL STAND'S SETTLE (the hill settles at
-# tick 2 408 against 2 081 with no card, past that stand's own capture tick 2 400), because a
-# builder that holds a chunk for a round trip helps a queue of hundreds and hurts a queue of three.
-# Run it to measure the card, never as a green light. GPU-required, LOCAL, RELEASE.
+# AS A BUILDER. ★ IT IS GREEN (2026-09-14): the settle was cured by the stand-down rule and the
+# SEAM STAND'S HOLE by the drift's own cure (§26.10 — the gear's pooled buffers are sized exactly
+# to the box, so a box never reads the rows of a bigger box before it). MEASURED with the card
+# building: every stand settles inside its own capture tick (ground 726, hill 2 050, aloft 2 863,
+# orbit 3 979, seam 5 648), the seam draws its 6 401 chunks with 0 HOLE PIXELS and 52 649 957
+# vertices — the card-off run's own count — and the five stands read 9 / 8 / 7 / 1 / 13 content
+# pixels against the frozen references at a widest channel step of ONE.
 terrain-pictures-card:
     VD_TERRAIN_GPU=1 cargo test --release -p vd-bins --features dev-control,render --test terrain_pictures -- --nocapture --test-threads=1
 

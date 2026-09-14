@@ -158,6 +158,15 @@ impl Throughput {
         self.card
     }
 
+    /// ★ THE CPU WORKERS' OWN CAPACITY, without the card (the owner's step after Step 15). The
+    /// stand-down rule reads THIS one ([`crate::card_gate::QueueDepth`]), because its question is
+    /// what the queue costs WITHOUT the card: a card counted into its own threshold would keep
+    /// itself out of every queue it is good at.
+    #[must_use]
+    pub fn workers_value(&self) -> f64 {
+        self.value
+    }
+
     /// Both builders, added: what the bounded ask sizes its horizon against.
     fn both(&self) -> f64 {
         self.value + self.card
@@ -531,6 +540,21 @@ mod tests {
     /// ★ THE CARD COUNTS IN THE SAME CAPACITY (ruling F9 item 2): the bound sizes its horizon
     /// against EVERYTHING that builds, so the reading is the workers' own plus the card's, and the
     /// two never mix inside — the workers' mean build time is theirs alone.
+    #[test]
+    fn the_workers_own_capacity_is_read_apart_from_the_card() {
+        let mut t = Throughput::default();
+        t.read(0, 0, 0.0, 3, 10.0);
+        t.read(30, 300_000_000, 1.0, 3, 10.0);
+        let workers = t.workers_value();
+        assert!(
+            workers > 0.0,
+            "three workers at 10 ms a chunk have a capacity"
+        );
+        t.set_card(50.0);
+        assert_eq!(t.workers_value(), workers, "the card is not the workers'");
+        assert_eq!(t.value(), workers + 50.0, "and the bound reads both");
+    }
+
     #[test]
     fn the_capacity_counts_the_workers_and_the_card_together() {
         let mut rate = Throughput::default();

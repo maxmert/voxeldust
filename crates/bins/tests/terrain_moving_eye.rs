@@ -491,6 +491,11 @@ struct LegRead {
     /// DEVICE's own reading or the host's wall clock (review item 1a).
     card_capacity_per_s: f64,
     card_device_timed: bool,
+    /// ★ THE STAND-DOWN RULE across the leg (the owner's step after Step 15): how many frames
+    /// judged the queue for the card, and how many of them stood the card down because the CPU
+    /// workers could finish the queue before that ground reaches the screen.
+    card_judged: u64,
+    card_stood_down: u64,
     /// THE WORST SINGLE FRAME of the leg, in milliseconds, from the stamp's own rolling peak.
     frame_peak_ms: f32,
     /// ★ THE FRAME'S OWN WORK at the leg's first and last sample (the frame bar's instrument):
@@ -612,8 +617,8 @@ fn read_band(
     let mut next_memory_s = MEMORY_COURSE_S;
     let started = Instant::now();
     // The counters at the first and the last sample: the leg's differences.
-    let mut first: Option<[u64; 13]> = None;
-    let mut last = [0u64; 13];
+    let mut first: Option<[u64; 15]> = None;
+    let mut last = [0u64; 15];
     let mut last_drawn = 0u64;
     let slug: String = leg
         .chars()
@@ -695,6 +700,10 @@ fn read_band(
             stamp.card_boxes,
             stamp.card_nanos,
             stamp.card_budget_nanos,
+            // ★ THE STAND-DOWN RULE: the frames that judged the queue, and those that stood the
+            // card down.
+            stamp.card_judged,
+            stamp.card_stood_down,
         ];
         first.get_or_insert(last);
         // THE MEMORY COURSE, once a minute: the footprint's growth since the leg began, so a
@@ -810,6 +819,8 @@ fn read_band(
     read.card_boxes = last[10].saturating_sub(first[10]);
     read.card_nanos = last[11].saturating_sub(first[11]);
     read.card_budget_nanos = last[12].saturating_sub(first[12]);
+    read.card_judged = last[13].saturating_sub(first[13]);
+    read.card_stood_down = last[14].saturating_sub(first[14]);
     read.memory_end = MemoryRead::of(client_pid);
     read.memory_grew = read.memory_end.since(memory_start);
     // THE CLIENT'S MEMORY over the leg (ruling V17 item 1): the footprint at the end, and what
@@ -870,7 +881,8 @@ fn read_band(
         "terrain_moving_eye/{leg}: THE CARD — built {} boxes ({:.0} a second, {:.0} % of the \
          chunks built), {:.2} ms a box by {}; the frames granted it {:.2} ms each \
          and it spent {:.2} ms of each ({:.0} % of its budget); its budget allows {:.1} boxes a \
-         frame and it states {:.0} chunks/s of capacity",
+         frame and it states {:.0} chunks/s of capacity; the stand-down rule judged {} frames and \
+         stood the card down on {} of them ({:.0} %)",
         read.card_boxes,
         read.card_boxes as f64 / secs,
         if read.built + read.card_boxes > 0 {
@@ -900,7 +912,14 @@ fn read_band(
             0.0
         },
         read.card_boxes_per_frame,
-        read.card_capacity_per_s
+        read.card_capacity_per_s,
+        read.card_judged,
+        read.card_stood_down,
+        if read.card_judged > 0 {
+            100.0 * read.card_stood_down as f64 / read.card_judged as f64
+        } else {
+            0.0
+        }
     );
     // ★ THE FRAME'S WORK (ruling F9 item 1's frame bar): what the bounded ask's own pieces cost
     // the MAIN THREAD, per frame of this leg. A frame rate that falls with the bound on is one of

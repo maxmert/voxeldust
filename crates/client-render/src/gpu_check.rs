@@ -27,8 +27,8 @@ use bevy::prelude::*;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use vd_recipe::Gi;
 use vd_terrain::BodyDefinition;
-use vd_terrain::chunk::CHUNK_EDGE;
-use vd_terrain::digest::{GOLDEN_SELF_CHECK_KEYS, self_check_key};
+use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey, in_ladder};
+use vd_terrain::digest::{GOLDEN_SELF_CHECK_KEYS, self_check_key, surface_chunk_z};
 use vd_terrain::gpu::BoxPlan;
 use vd_terrain::lattice::{site_dir, site_of};
 use wgpu::util::DeviceExt;
@@ -65,6 +65,10 @@ pub struct GpuRecipeCheck {
     pub cells: u32,
     /// The cells that differed between the GPU and the CPU.
     pub differing_cells: u32,
+    /// ★ HOW MANY TIMES THE POOL PASS ASKED ITS REUSED GEAR FOR FEWER ROWS than the box before it
+    /// (§26.10). It is the number that says the pass COULD have failed: a list whose boxes all ask
+    /// for the same rows never meets the defect that drew a hole at the seam stand.
+    pub pool_shrinks: u32,
     /// The wall time of the whole check, in microseconds.
     pub micros: u32,
 }
@@ -80,6 +84,52 @@ impl GpuRecipeCheck {
             & (self.differing_cells == 0)
             & (self.cells > 0)
     }
+}
+
+/// ★★ THE POOL PASS'S OWN KEYS (§26.10, 2026-09-14): PAIRS — the WIDEST box of a face and then the
+/// their faces' own CORNER, run BIGGEST FIRST so that every box after the first asks its gear for
+/// FEWER rows than the box before it.
+///
+/// WHY A CORNER. A box's cavern lattices are one per face its caverns touch: a box in the middle
+/// of a face carries ONE, a box at the face's corner carries its PARTNERS too. The keys the world
+/// identity folds all sit inside their faces, so all eight ask for the same rows — MEASURED: with
+/// the pool's old growing rule restored, the eight-key pass stayed GREEN while the seam stand's
+/// own set read 1 022 differing boxes. A gate that cannot fail is not a gate, so the check's own
+/// list now carries the SHRINK the defect needs.
+///
+/// **Example.** The pilot's client starts. The check builds the corner box of face +X at rung 0,
+/// which carries two lattices, and then a box in the middle of that face, which carries one: a
+/// gear that kept the corner box's rows would give the middle box the corner's caverns, and the
+/// player would fly at a hill the shard does not have.
+pub fn pool_keys(body: &BodyDefinition) -> Vec<ChunkKey> {
+    let mut keys: Vec<ChunkKey> = Vec::new();
+    for entry in GOLDEN_SELF_CHECK_KEYS {
+        let key = self_check_key(body, entry);
+        // THE WIDEST BOX OF THIS FACE: the face's own CORNER at the finest rung, where the caverns
+        // of THREE faces meet, so the box carries a lattice for each of them.
+        let widest = ChunkKey {
+            face: key.face,
+            rung: 0,
+            x: 0,
+            y: 0,
+            z: surface_chunk_z(body, key.face, 0, 0, 0),
+        };
+        // THE NARROWEST BOX OF THE SAME CORNER: the top rung, where no cavern is carved at all, so
+        // the box carries ONE stand-in row — while its columns still sit on all three faces.
+        let narrowest = ChunkKey {
+            face: key.face,
+            rung: body.ladder().rungs.saturating_sub(1),
+            x: 0,
+            y: 0,
+            z: surface_chunk_z(body, key.face, body.ladder().rungs.saturating_sub(1), 0, 0),
+        };
+        for candidate in [widest, narrowest, key] {
+            if in_ladder(body, candidate) & !keys.contains(&candidate) {
+                keys.push(candidate);
+            }
+        }
+    }
+    keys
 }
 
 /// The columns of the eight golden chunks: their 40-bit directions, and the rung each is at. The
@@ -112,6 +162,7 @@ pub fn run(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) ->
             differing: 0,
             cells: 0,
             differing_cells: 0,
+            pool_shrinks: 0,
             micros: started.elapsed().as_micros() as u32,
         };
     }
@@ -157,11 +208,57 @@ pub fn run(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) ->
         }
         rung += 1;
     }
+    // ★★ THE POOL'S OWN CHECK (the drift hunt, 2026-09-14): the golden boxes AGAIN, but all of them
+    // through ONE BoxGear — the builder's own pooled buffers, reused from box to box.
+    //
+    // WHY IT IS A CHECK OF ITS OWN. The loop below builds every box on FRESH buffers, so it can
+    // never see what the builder's pool does: a buffer longer than the box's own rows, whose tail
+    // a kernel still walks (`vd_recipe::plan::column_row` walks the box's lattices by the slice's
+    // LENGTH). MEASURED on the seam stand: 1 022 of 6 049 boxes drifted through a reused gear and
+    // none through fresh ones, and the cells they drifted to were the PREVIOUS BOX'S. The golden
+    // keys differ in their lattice counts — a key near a face edge carries a partner, one in the
+    // middle carries none — so running them in order on ONE gear is exactly that trap.
+    let mut pool_cells = 0u32;
+    let mut pool_differing = 0u32;
+    let mut pool_shrinks = 0u32;
+    {
+        let mut gear = BoxGear::new(device.clone(), queue.clone());
+        let mut widest: Option<(usize, usize)> = None;
+        for key in pool_keys(body) {
+            let Some(plan) = vd_terrain::gpu::plan(body, key) else {
+                continue;
+            };
+            // HOW OFTEN THIS PASS REALLY SHRANK A BINDING: the number a gate reads to know the
+            // pass could have failed at all.
+            let asks = (plan.lattice_words().len(), plan.node_count);
+            if let Some(before) = widest {
+                pool_shrinks += u32::from((asks.0 < before.0) | (asks.1 < before.1));
+            }
+            widest = Some(asks);
+            let cpu = plan.cells_of(&plan.run());
+            let Ok(run) = gear.run(&plan) else {
+                pool_differing += cpu.len() as u32;
+                continue;
+            };
+            let gpu: Vec<u32> = run
+                .cells
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap_or([0; 4])))
+                .collect();
+            pool_cells += cpu.len() as u32;
+            pool_differing += if gpu.len() == cpu.len() {
+                cpu.iter().zip(gpu.iter()).filter(|(a, b)| a != b).count() as u32
+            } else {
+                cpu.len() as u32
+            };
+        }
+    }
+
     // ★ THE CELL FIELD: the eight golden boxes, every cell's substance and gap, on the card against
     // the same kernels on this machine's own CPU (`BoxPlan::cells`, which the generator's own test
     // measures against the cell pass byte for byte).
-    let mut cells = 0u32;
-    let mut differing_cells = 0u32;
+    let mut cells = pool_cells;
+    let mut differing_cells = pool_differing;
     for entry in GOLDEN_SELF_CHECK_KEYS {
         let key = self_check_key(body, entry);
         let Some(plan) = vd_terrain::gpu::plan(body, key) else {
@@ -198,6 +295,7 @@ pub fn run(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) ->
         differing,
         cells,
         differing_cells,
+        pool_shrinks,
         micros: started.elapsed().as_micros() as u32,
     }
 }
@@ -415,6 +513,10 @@ pub struct CardRun {
     /// THE CARD'S OWN SECONDS for this box: the device's own timestamps where it offers them, and
     /// the submit-to-map wall time where it does not.
     pub device_s: f64,
+    /// ★ THE ROUND TRIP, seconds: from the submit to the mapped answer. With several boxes in
+    /// flight the trips OVERLAP, so this is what one box waits and never what the builder pays
+    /// per box ([`vd_client::card_budget::CardBudget::stage_s`] divides it by the lanes).
+    pub trip_s: f64,
 }
 
 /// How many words of a query set one box writes: the first pass's start and the last pass's end.
@@ -456,6 +558,22 @@ pub struct BoxGear {
     /// THE CARD'S OWN CLOCK, where the device offers one: the query set, the buffer the card
     /// resolves it into, the staging the host maps, and the nanoseconds one tick is worth.
     clock: Option<(wgpu::QuerySet, wgpu::Buffer, wgpu::Buffer, f32)>,
+    /// ★ THE BOX THIS GEAR HAS IN FLIGHT, if any (the owner's step after Step 15): the maps it
+    /// asked for the moment it submitted, and what they are worth. A builder holds SEVERAL gears
+    /// and submits into the next while this one is still on the device.
+    pending: Option<Pending>,
+}
+
+/// ★ ONE BOX IN FLIGHT: the maps the card asked for at the submit, and what it must read when the
+/// device is done. The maps are asked for BEFORE the wait, which is what lets a second box be
+/// submitted while this one is still on the device.
+struct Pending {
+    cells: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    dirs: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    clock: Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
+    cells_size: u64,
+    dirs_size: u64,
+    at: Instant,
 }
 
 /// One pooled buffer and the bytes it holds.
@@ -466,11 +584,26 @@ struct Slot {
 }
 
 impl Slot {
-    /// The buffer, grown to `need` bytes where it is too small. Answers whether it was rebuilt, so
-    /// the bind groups follow. A buffer is never shrunk: a box at a finer rung asks for the same
-    /// bytes as the last one of its rung.
+    /// ★ THE BUFFER, SIZED EXACTLY TO THIS BOX (the drift hunt, 2026-09-14). Answers whether it was
+    /// rebuilt, so the bind groups follow.
+    ///
+    /// ⚠ IT USED TO GROW AND NEVER SHRINK, and that was a DEFECT SL10 calls a drift. A kernel that
+    /// walks a binding by its SLICE'S OWN LENGTH — `vd_recipe::plan::column_row` walks the box's
+    /// lattices that way, and `tube_hollow_steps` walks the carvers — reads the buffer's rows, not
+    /// the box's. A box with ONE lattice, built on a gear whose lattice buffer still held TWO from
+    /// an earlier box, gave every column that matched the stale block's face a lattice it does not
+    /// have; the cell that followed indexed the node buffer out of its own range, its invocation
+    /// died, and the cell kept THE EARLIER BOX'S WORD.
+    ///
+    /// MEASURED (`VD_BENCH_PART7=1`, the seam stand's own wanted set): 1 022 of 6 049 boxes drifted
+    /// through a reused gear and NOT ONE through a fresh one; the same box after a rung-0 box read
+    /// 128 834 cells of that box's surface — air, snow, permafrost, limestone — where its own deep
+    /// bedrock belongs. Sizing the lattice slot alone exactly cured it; every slot is sized exactly
+    /// now, because the rule ("the slice IS this box's rows") belongs to every binding and not to
+    /// the one that was caught. A steady state at one rung still allocates nothing: the sizes
+    /// repeat, and only a change of rung or of topology rebuilds a buffer.
     fn ensure(&mut self, device: &wgpu::Device, need: u64, usage: wgpu::BufferUsages) -> bool {
-        if self.bytes >= need.max(1) {
+        if self.bytes == need.max(1) {
             return false;
         }
         self.bytes = need.max(1);
@@ -550,6 +683,7 @@ impl BoxGear {
             groups: None,
             scratch: Vec::new(),
             clock: None,
+            pending: None,
         }
         .with_clock(clock)
     }
@@ -617,11 +751,28 @@ impl BoxGear {
         }
     }
 
-    /// ★ ONE BOX ON THE CARD, WHOLE — the column pass, the node pass and the cell field, in three
-    /// compute passes of ONE command encoder, one submit, one wait. Every failure is an answer,
-    /// never a panic (review item 4): a card that stops answering detaches the builder and the CPU
-    /// share carries the ladder alone.
+    /// ★ ONE BOX ON THE CARD, WHOLE: submit it and wait for it. The builder itself does NOT use
+    /// this — it submits into one gear while it collects from another — and the seam probe does,
+    /// when it is asked to measure one box in flight.
     pub fn run(&mut self, plan: &BoxPlan) -> Result<CardRun, String> {
+        self.submit(plan);
+        self.collect()
+    }
+
+    /// Whether this gear has a box on the device.
+    #[must_use]
+    pub fn in_flight(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// ★ ONE BOX ONTO THE CARD — the column pass, the node pass and the cell field, in three
+    /// compute passes of ONE command encoder and ONE submit — AND THE MAPS ASKED FOR AT ONCE (the
+    /// owner's step after Step 15). Nothing here waits: the wait is [`BoxGear::collect`]'s, so a
+    /// builder with several gears keeps the bus full instead of the round trip.
+    ///
+    /// A gear that already holds a box in flight would lose it, so the builder keeps one gear per
+    /// box in flight and never submits into a gear it has not collected from.
+    pub fn submit(&mut self, plan: &BoxPlan) {
         let edge = plan.charter.box_edge.raw() as u32;
         let columns_n = u64::from(edge) * u64::from(edge);
         let cells_size = columns_n * u64::from(edge) * 4;
@@ -701,26 +852,59 @@ impl BoxGear {
         }
         let at = Instant::now();
         self.queue.submit([encoder.finish()]);
-        let cells = map_bytes(&self.device, self.out_staging.get(), cells_size)?;
-        let dirs = map_bytes(&self.device, self.dirs_staging.get(), dirs_size)?;
-        let wall_s = at.elapsed().as_secs_f64();
+        // ★ THE MAPS ARE ASKED FOR NOW, not after the wait: a map asked for here resolves when the
+        // device reaches it, and the thread is free to submit the next box meanwhile.
+        self.pending = Some(Pending {
+            cells: start_map(self.out_staging.get(), cells_size),
+            dirs: start_map(self.dirs_staging.get(), dirs_size),
+            clock: self
+                .clock
+                .as_ref()
+                .map(|(_, _, staging, _)| start_map(staging, u64::from(CARD_TIMESTAMPS) * 8)),
+            cells_size,
+            dirs_size,
+            at,
+        });
+    }
+
+    /// ★ THE BOX COMES HOME: wait for the device, read the bytes, and state what the box cost.
+    /// Every failure is an answer, never a panic (review item 4): a card that stops answering
+    /// detaches the builder and the CPU share carries the ladder alone.
+    pub fn collect(&mut self) -> Result<CardRun, String> {
+        let Some(pending) = self.pending.take() else {
+            return Err("the gear had no box in flight".to_owned());
+        };
+        let cells = finish_map(
+            &self.device,
+            self.out_staging.get(),
+            pending.cells_size,
+            &pending.cells,
+        )?;
+        let dirs = finish_map(
+            &self.device,
+            self.dirs_staging.get(),
+            pending.dirs_size,
+            &pending.dirs,
+        )?;
+        let trip_s = pending.at.elapsed().as_secs_f64();
         // ★ THE CARD'S OWN SECONDS: the device's clock where it has one, the submit-to-map wall
         // time where it has not. The budget rations THIS number, so which one it is matters.
-        let device_s = match self.clock.as_ref() {
-            Some((_, _, staging, period_ns)) => {
-                let ticks = map_bytes(&self.device, staging, u64::from(CARD_TIMESTAMPS) * 8)?;
+        let device_s = match (self.clock.as_ref(), pending.clock.as_ref()) {
+            (Some((_, _, staging, period_ns)), Some(rx)) => {
+                let ticks = finish_map(&self.device, staging, u64::from(CARD_TIMESTAMPS) * 8, rx)?;
                 let word = |k: usize| -> u64 {
                     u64::from_le_bytes(ticks[k * 8..k * 8 + 8].try_into().unwrap_or([0; 8]))
                 };
                 let span = word(1).saturating_sub(word(0)) as f64;
                 span * f64::from(*period_ns) / 1.0e9
             }
-            None => wall_s,
+            _ => trip_s,
         };
         Ok(CardRun {
             cells,
             dirs,
             device_s,
+            trip_s,
         })
     }
 
@@ -805,21 +989,36 @@ enum Which {
     Tubes,
 }
 
-/// The bytes of a mapped staging buffer, once the card is done — AN ANSWER, never a panic. The
-/// buffer is unmapped before the answer returns, so the same staging serves the next box.
-fn map_bytes(device: &wgpu::Device, staging: &wgpu::Buffer, size: u64) -> Result<Vec<u8>, String> {
-    let slice = staging.slice(..size);
+/// ASK FOR A STAGING BUFFER'S BYTES, without waiting: the map is queued behind the work already
+/// submitted, and the answer arrives on the channel when the device reaches it.
+fn start_map(
+    staging: &wgpu::Buffer,
+    size: u64,
+) -> std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>> {
     let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
+    staging
+        .slice(..size)
+        .map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+    rx
+}
+
+/// The bytes of a staging buffer whose map was asked for — AN ANSWER, never a panic. The buffer is
+/// unmapped before the answer returns, so the same staging serves the next box.
+fn finish_map(
+    device: &wgpu::Device,
+    staging: &wgpu::Buffer,
+    size: u64,
+    rx: &std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+) -> Result<Vec<u8>, String> {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .map_err(|e| format!("the device did not poll: {e}"))?;
     rx.recv()
         .map_err(|e| format!("the map never answered: {e}"))?
         .map_err(|e| format!("the map failed: {e}"))?;
-    let bytes = slice.get_mapped_range().to_vec();
+    let bytes = staging.slice(..size).get_mapped_range().to_vec();
     staging.unmap();
     Ok(bytes)
 }
@@ -988,6 +1187,7 @@ pub fn spawn_seam_probe(
     queue: wgpu::Queue,
     after_s: f64,
     meter: std::sync::Arc<crate::terrain::FrameMeter>,
+    lanes: usize,
 ) {
     std::thread::Builder::new()
         .name("terrain-gpu-seam".to_owned())
@@ -999,12 +1199,18 @@ pub fn spawn_seam_probe(
                 .collect();
             // THE PROBE RUNS THE BUILDER'S OWN GEAR (review item 1): the same pooled buffers, the
             // same timestamps, the same read back — so what it measures ALONE is what the flight
-            // then measures UNDER LOAD, and the two numbers are comparable.
-            let mut gear = BoxGear::new(device, queue);
+            // then measures UNDER LOAD, and the two numbers are comparable. ★ And it runs AS MANY
+            // BOXES IN FLIGHT as the builder does (the owner's step after Step 15), so the probe's
+            // rate is the rate the builder can reach.
+            let mut gears: Vec<BoxGear> = (0..lanes.max(1))
+                .map(|_| BoxGear::new(device.clone(), queue.clone()))
+                .collect();
+            let device_timed = gears[0].device_timed();
             tracing::info!(
                 boxes = plans.len(),
                 after_s,
-                device_timed = gear.device_timed(),
+                device_timed,
+                lanes = gears.len(),
                 "THE SEAM PROBE is armed: it idles first, then submits the box chain to the \
                  renderer's own device and waits for it"
             );
@@ -1023,23 +1229,29 @@ pub fn spawn_seam_probe(
             let mut stalls = 0u64;
             loop {
                 if building {
-                    for plan in &plans {
-                        let at = Instant::now();
-                        let Ok(run) = gear.run(plan) else {
-                            tracing::warn!("THE SEAM PROBE stops: a box failed on the device");
-                            return;
-                        };
-                        // The answer is READ, so nothing here can be optimised away.
-                        assert!(
-                            !run.cells.is_empty() & !run.dirs.is_empty(),
-                            "the card wrote a box"
-                        );
-                        let dt = at.elapsed();
-                        built += 1;
-                        // THE CARD'S OWN SECONDS, not the thread's: the budget rations these.
-                        nanos += (run.device_s * 1.0e9) as u64;
-                        worst_ns = worst_ns.max(dt.as_nanos() as u64);
-                        stalls += u64::from(dt >= SEAM_STALL);
+                    // ★ EVERY LANE IN FLIGHT AT ONCE: the whole window is submitted before the
+                    // first answer is waited on, so the bus and not the round trip is the ceiling.
+                    for window in plans.chunks(gears.len()) {
+                        for (gear, plan) in gears.iter_mut().zip(window) {
+                            gear.submit(plan);
+                        }
+                        for gear in gears.iter_mut().take(window.len()) {
+                            let Ok(run) = gear.collect() else {
+                                tracing::warn!("THE SEAM PROBE stops: a box failed on the device");
+                                return;
+                            };
+                            // The answer is READ, so nothing here can be optimised away.
+                            assert!(
+                                !run.cells.is_empty() & !run.dirs.is_empty(),
+                                "the card wrote a box"
+                            );
+                            built += 1;
+                            // THE CARD'S OWN SECONDS, not the thread's: the budget rations these.
+                            nanos += (run.device_s * 1.0e9) as u64;
+                            let trip_ns = (run.trip_s * 1.0e9) as u64;
+                            worst_ns = worst_ns.max(trip_ns);
+                            stalls += u64::from(run.trip_s >= SEAM_STALL.as_secs_f64());
+                        }
                     }
                 } else {
                     std::thread::sleep(SEAM_IDLE_TICK);
@@ -1058,7 +1270,8 @@ pub fn spawn_seam_probe(
                         mean_ms = nanos as f64 / built.max(1) as f64 / 1.0e6,
                         worst_ms = worst_ns as f64 / 1.0e6,
                         stalls,
-                        device_timed = gear.device_timed(),
+                        device_timed,
+                        lanes = gears.len(),
                         "THE SEAM PROBE"
                     );
                     frames_at = frames_now;
@@ -1123,11 +1336,13 @@ pub fn gpu_recipe_self_check(
         .and_then(|v| v.trim().parse::<f64>().ok())
     {
         if check.trusted() {
+            let lanes = terrain.config.gpu_flights;
             spawn_seam_probe(
                 device.clone(),
                 queue.clone(),
                 after_s,
                 terrain.frame_meter(),
+                lanes,
             );
         } else {
             tracing::warn!("THE SEAM PROBE is asked for, but this GPU is not trusted");

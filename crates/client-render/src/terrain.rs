@@ -250,6 +250,14 @@ pub struct TerrainConfig {
     /// urgent chunks, a queue of 529 against 1 442, and 45.7 frames a second. The card's chunks are
     /// worth more spent on the ask the eye already has than on a wider one.
     pub gpu_bound: bool,
+    /// ★ HOW MANY BOXES THE CARD KEEPS IN FLIGHT (`VD_TERRAIN_GPU_FLIGHTS=<n>`): the default is
+    /// [`CARD_IN_FLIGHT`], whose measured reason is stated there.
+    pub gpu_flights: usize,
+    /// ★ THE DRIFT HUNT (`VD_TERRAIN_GPU_VERIFY=1`): every box the card builds is built AGAIN on
+    /// the CPU and compared cell for cell, and the first difference is told with its KEY and its
+    /// CELL. SL10 asks for no drift as a MEASUREMENT; this is that measurement on the shipped path.
+    /// It doubles the geometry stage's work, so it is a hunt's knob and never a default.
+    pub gpu_verify: bool,
     /// THE SPEED'S HOLD, seconds: the window the LARGEST reading of the lead's sawtooth is kept
     /// over ([`vd_client::ask_pace::PeakHold`]). The sawtooth's period is the snapshot interval
     /// (0.05 s at the 20 Hz universe tick), so a second holds twenty of its teeth — and because
@@ -380,6 +388,8 @@ impl TerrainConfig {
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok()),
             gpu_bound: env_armed(GPU_BOUND_ENV),
+            gpu_flights: env_or(GPU_FLIGHTS_ENV, CARD_IN_FLIGHT).max(1),
+            gpu_verify: env_armed(GPU_VERIFY_ENV),
         }
     }
 }
@@ -639,12 +649,13 @@ pub struct FrameMeter {
 }
 
 /// ★ THE CARD'S KNOBS (ruling F9 item 2). `VD_TERRAIN_GPU=1/true/on/yes` makes the card a second
-/// builder — and the default is OFF for a reason the flights MEASURED TWICE (§26.4): at speed the
-/// card pays (the band's worst gap at 528 m/s falls from 125 urgent chunks to 87 and the queue from
-/// 1 442 to 529), and on a STILL STAND it costs (the picture gate's hill stand settles at tick
-/// 2 408 against 2 081 with no card, past that stand's own capture tick). A builder that holds a
-/// chunk for a round trip helps a queue of hundreds and hurts a queue of three, and the shipped
-/// path must be right for both until that is cured; `VD_TERRAIN_GPU_BUDGET=<fraction>` is its share of a frame (the default is
+/// builder — and the default is OFF for a MEASURED reason, though no longer the first one. At speed
+/// the card pays (§26.8: the band's worst gap at 528 m/s falls from 222 urgent chunks to 39 and the
+/// queue from 1 660 to 368, and the turning leg's gap from 106 to 0), and the still stands are
+/// CURED by the stand-down rule ([`vd_client::card_gate`]). ⚠ WHAT KEEPS IT OFF is a defect of the
+/// card's own box: the picture gate's SEAM stand draws the same 6 401 chunks with 14 959 pixels of
+/// nothing under the drawn ground, at one box in flight as well as two — so the card's box is not
+/// the CPU's for every key, and the boot self-check compares eight golden keys (§26.9); `VD_TERRAIN_GPU_BUDGET=<fraction>` is its share of a frame (the default is
 /// [`CARD_BUDGET_FRACTION`], a quarter, clamped to none-or-all by
 /// [`vd_client::card_budget::clamped_fraction`]); `VD_TERRAIN_GPU_SKIP=<n>` is the head-of-line
 /// rule below; `VD_TERRAIN_GPU_BOUND=1` SUMS the card's capacity into the bounded ask, which the
@@ -652,6 +663,8 @@ pub struct FrameMeter {
 const GPU_CARD_ENV: &str = "VD_TERRAIN_GPU";
 const GPU_BUDGET_ENV: &str = "VD_TERRAIN_GPU_BUDGET";
 const GPU_SKIP_ENV: &str = "VD_TERRAIN_GPU_SKIP";
+const GPU_FLIGHTS_ENV: &str = "VD_TERRAIN_GPU_FLIGHTS";
+const GPU_VERIFY_ENV: &str = "VD_TERRAIN_GPU_VERIFY";
 const GPU_BOUND_ENV: &str = "VD_TERRAIN_GPU_BOUND";
 
 /// ★ THE HEAD-OF-LINE RULE (review item 9): how many of the queue's most urgent requests the card
@@ -672,6 +685,38 @@ const GPU_BOUND_ENV: &str = "VD_TERRAIN_GPU_BOUND";
 /// `VD_TERRAIN_GPU_SKIP=<n>` names another; `0` gives the card the head of the queue again.
 const CARD_SKIP: usize = 1;
 
+/// ★ HOW MANY BOXES THE CARD KEEPS IN FLIGHT (the owner's step after Step 15): TWO.
+///
+/// The card's own three passes cost it 0.08 ms by the device's own clock; the ROUND TRIP that
+/// carries the answer home — the submit, the device's queue, the map back — costs 1.8 ms of wall
+/// time. A builder that waits for each trip before it starts the next is bounded by the TRIP, not
+/// by the card: it can never build more than about 550 boxes a second however cheap the arithmetic
+/// is. Submitting the next box before the last one is read back hides the wait behind the next
+/// box's work.
+///
+/// ★ MEASURED by the seam probe alone, on this machine, over the eight golden boxes (`just
+/// gpu-seam` at `VD_TERRAIN_GPU_FLIGHTS=1/2/4`, the renderer drawing beside it):
+///
+/// | boxes in flight | the probe's boxes a second | the worst box | the renderer's frames |
+/// |---|---|---|---|
+/// | one | 547 | 7.64 ms | 101.1 % of quiet |
+/// | TWO | **1 005** | 9.23 ms | 101.3 % of quiet |
+/// | four | 1 522 | 10.91 ms | 101.8 % of quiet |
+///
+/// Two nearly doubles the rate, and four raises it by half again — the round trip WAS the ceiling,
+/// exactly as the 0.08 ms box against the 1.8 ms trip said. ★ But the BUILDER's own ceiling is not
+/// the trip: it is the GEOMETRY STAGE, one thread at about 11 ms a chunk, which is why the card's
+/// stated capacity in the flights is about 90 chunks a second and not 500. So the lanes buy the
+/// device's idleness back and nothing more, and TWO is what ships: it keeps the device fed while
+/// one answer is mapped home, and costs one extra set of every buffer (about 2.5 MB at the finest
+/// rung) instead of three. More geometry threads are the next lever, and they are not measured.
+///
+/// ⚠ AND THE CARD'S OWN CLOCK READS HIGH WITH LANES: a box's two timestamps bracket whatever else
+/// the device ran between them, so the probe reads 0.07 ms a box at one lane, 0.16 at two and 0.24
+/// at four for the same arithmetic. The budget therefore rations an UPPER BOUND on the card's own
+/// seconds, which is the safe direction — the card can only spend less than it is charged.
+const CARD_IN_FLIGHT: usize = 2;
+
 /// HOW LONG THE CARD WAITS FOR ITS NEXT GRANT before it looks again. The frames grant, and a frame
 /// is about 22 ms; a tenth of a second is the longest the card can sleep past a grant, and it is
 /// only ever reached where the frames have STOPPED (a client shutting down), which is exactly when
@@ -690,6 +735,19 @@ pub struct CardMeter {
     granted_nanos: std::sync::atomic::AtomicU64,
     /// The budget's arithmetic, in the Tier-A library.
     budget: Mutex<CardBudget>,
+    /// ★ THE STAND-DOWN RULE'S ANSWER (the owner's step after Step 15): HOW MANY CHUNKS THE CARD
+    /// MAY HOLD AT ONCE — zero where the queue is shallow or the eye is still, so the card takes
+    /// nothing at all. The FRAME writes it, from the pure rule in the Tier-A library
+    /// ([`vd_client::card_gate::QueueDepth::card_may_hold`]); the card's builder reads it. It
+    /// starts ZERO, so a card no frame has judged yet takes nothing.
+    hold_cap: std::sync::atomic::AtomicU64,
+    /// WHAT THE CARD HOLDS RIGHT NOW: the chunks it has taken and not yet handed to the harvest —
+    /// the boxes in flight on the device and the ones waiting for the geometry stage.
+    holding: std::sync::atomic::AtomicU64,
+    /// How many frames judged the queue, and how many of them stood the card down: the stamp and
+    /// the flight state both, so a card that never builds says WHY.
+    judged: std::sync::atomic::AtomicU64,
+    stood_down: std::sync::atomic::AtomicU64,
     /// The workers are closing: the card leaves.
     closed: std::sync::atomic::AtomicBool,
     /// Whether the card's own time is READ FROM THE DEVICE's timestamps, or taken from the host's
@@ -715,11 +773,84 @@ impl CardMeter {
             .grant(frame_s, fraction);
         self.granted_nanos
             .fetch_add((added * 1.0e9) as u64, std::sync::atomic::Ordering::Relaxed);
-        self.granted.notify_one();
+        self.granted.notify_all();
     }
 
-    /// THE CARD WAITS for a grant that covers one box. `false` means the workers closed, or the
-    /// card has left.
+    /// ★ THE FRAME JUDGES THE QUEUE (the owner's step after Step 15): the pure stand-down rule
+    /// over the readings the bounded ask already holds. The answer is counted, so the flight can
+    /// say how often the card stood down and the stamp can state it.
+    fn judge(&self, depth: vd_client::card_gate::QueueDepth) {
+        let stage_s = self
+            .budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stage_s();
+        let cap = depth.card_may_hold(stage_s);
+        self.hold_cap
+            .store(cap as u64, std::sync::atomic::Ordering::Relaxed);
+        self.judged
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cap == 0 {
+            self.stood_down
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.granted.notify_all();
+    }
+
+    /// THE CARD TAKES ONE MORE CHUNK: it holds it until the geometry stage hands it to the harvest.
+    fn hold(&self) {
+        self.holding
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// THE CARD LETS ONE GO: the chunk reached the harvest, or the job went back to the queue.
+    fn release(&self) {
+        self.holding
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |held| Some(held.saturating_sub(1)),
+            )
+            .unwrap_or_default();
+    }
+
+    /// Whether the card may take one more chunk: the frame's own cap against what the card holds.
+    fn has_room(&self) -> bool {
+        self.holding.load(std::sync::atomic::Ordering::Relaxed)
+            < self.hold_cap.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// What the stand-down rule said: how many frames judged, and how many stood the card down.
+    fn stand_down(&self) -> (u64, u64) {
+        (
+            self.judged.load(std::sync::atomic::Ordering::Relaxed),
+            self.stood_down.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// ★ MAY THE CARD START A BOX RIGHT NOW — asked WITHOUT waiting and WITHOUT spending, so the
+    /// builder can fill its lanes without ever holding a job it may not build. The card's builder
+    /// is the only thread that spends, so what this answers is still true when it takes.
+    fn can_take(&self) -> bool {
+        if self.closed.load(std::sync::atomic::Ordering::Relaxed) | !self.has_room() {
+            return false;
+        }
+        self.budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .can_take()
+    }
+
+    /// THE BUILDER SPENDS one box's own time, once it holds the job (never blocks).
+    fn take_now(&self) -> bool {
+        self.budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// THE CARD WAITS for a queue deep enough to want it AND a grant that covers one box. `false`
+    /// means the workers closed, or the card has left.
     fn take_blocking(&self) -> bool {
         let mut budget = self
             .budget
@@ -729,7 +860,9 @@ impl CardMeter {
             if self.closed.load(std::sync::atomic::Ordering::Relaxed) | budget.is_detached() {
                 return false;
             }
-            if budget.take() {
+            // ★ THE STAND-DOWN RULE FIRST: a card the frame has left no room for takes no job, so
+            // a still stand's short queue is the CPU workers' alone.
+            if self.has_room() && budget.take() {
                 return true;
             }
             budget = self
@@ -823,7 +956,15 @@ impl CardSeam {
     /// chunks; the CPU workers take the most urgent ones and the card takes the one after them
     /// (`skip`), computes its 262 144 cells and 4 096 column directions — byte for byte what the
     /// shard's CPU writes — and hands the bytes on while it starts the next box.
-    pub fn attach(&self, device: wgpu::Device, queue: wgpu::Queue, skip: usize, done_bound: usize) {
+    pub fn attach(
+        &self,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        skip: usize,
+        done_bound: usize,
+        lanes: usize,
+        verify: bool,
+    ) {
         let (tx, rx) = bounded::<SampledBox>(done_bound.max(1));
         // THE GEOMETRY STAGE.
         let done = self.done.clone();
@@ -831,11 +972,33 @@ impl CardSeam {
         std::thread::Builder::new()
             .name("terrain-card-geometry".to_owned())
             .spawn(move || {
+                let mut told = 0u32;
+                let mut next_spot = std::time::Instant::now();
                 while let Ok(sampled) = rx.recv() {
                     let at = std::time::Instant::now();
                     let samples = sampled
                         .plan
                         .box_of(&cells_of(&sampled.cells), &dirs_of(&sampled.dirs));
+                    // ★★ THE SPOT-CHECK, and the DRIFT HUNT (`VD_TERRAIN_GPU_VERIFY=1`): the same
+                    // box on the CPU, cell for cell. The hunt checks EVERY box; the shipped path
+                    // checks ONE A SECOND. Either runs BEFORE the geometry step, so a box that
+                    // drifted is named with the key that drew it — and on the shipped path the
+                    // card LEAVES, because a shape that is not the CPU's may not reach the screen.
+                    let now = std::time::Instant::now();
+                    let spot = now >= next_spot;
+                    if verify | spot {
+                        next_spot = now + CARD_SPOT_CHECK;
+                        let drifted = verify_card_box(
+                            &sampled.job.body,
+                            sampled.job.key,
+                            &samples,
+                            told < VERIFY_TOLD_MAX,
+                        );
+                        told += u32::from(drifted);
+                        if drifted {
+                            meter.detach("a card box was not the CPU's");
+                        }
+                    }
                     let geometry = geometry_from(
                         &sampled.job.body,
                         sampled.job.realm,
@@ -854,6 +1017,10 @@ impl CardSeam {
                             geometry,
                         });
                     }
+                    // ★ THE CARD LETS THE CHUNK GO (the owner's step after Step 15): what the card
+                    // HOLDS is what it has taken and not yet delivered, and the frame's cap is
+                    // read against exactly that.
+                    meter.release();
                 }
             })
             .expect("the card's geometry thread starts");
@@ -863,49 +1030,109 @@ impl CardSeam {
         std::thread::Builder::new()
             .name("terrain-card".to_owned())
             .spawn(move || {
-                let mut gear = crate::gpu_check::BoxGear::new(device, queue);
+                // ★ ONE GEAR PER BOX IN FLIGHT (the owner's step after Step 15): the card submits
+                // into the next lane while the last one is still on the device, so the throughput
+                // is the bus's and not the round trip's.
+                let mut gears: Vec<crate::gpu_check::BoxGear> = (0..lanes.max(1))
+                    .map(|_| crate::gpu_check::BoxGear::new(device.clone(), queue.clone()))
+                    .collect();
+                let device_timed = gears[0].device_timed();
                 meter
                     .device_timed
-                    .store(gear.device_timed(), std::sync::atomic::Ordering::Relaxed);
+                    .store(device_timed, std::sync::atomic::Ordering::Relaxed);
+                meter
+                    .budget
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set_lanes(gears.len());
                 tracing::info!(
-                    device_timed = gear.device_timed(),
+                    device_timed,
                     skip,
-                    "THE CARD'S BUILDER starts: it takes the request after the workers' next few, \
+                    lanes = gears.len(),
+                    "THE CARD'S BUILDER starts: it takes the request after the workers' next few \
+                     when the queue is deep enough to want it, it keeps several boxes in flight, \
                      and its own time is read from the device where the device offers it"
                 );
+                // The boxes on the device, oldest first: which lane each flies in, and what it is.
+                let mut flying: std::collections::VecDeque<(
+                    usize,
+                    ChunkJob,
+                    vd_terrain::gpu::BoxPlan,
+                )> = std::collections::VecDeque::new();
+                // The lanes with nothing in flight.
+                let mut idle: Vec<usize> = (0..gears.len()).rev().collect();
                 loop {
-                    // THE BUDGET FIRST: the card never holds a job it may not build yet, so a job
-                    // it cannot afford stays in the queue for a CPU worker.
-                    if !meter.take_blocking() {
-                        return;
+                    // ★ FILL THE LANES. A builder with NOTHING in flight waits — for a queue deep
+                    // enough to want it, for its grant, and for a job. One that already holds a box
+                    // never waits: it takes what is there and goes back to collect.
+                    while let Some(lane) = idle.pop() {
+                        let job = if flying.is_empty() {
+                            // THE BUDGET AND THE STAND-DOWN RULE FIRST: the card never holds a job
+                            // it may not build, so a job it cannot afford stays for a CPU worker.
+                            if !meter.take_blocking() {
+                                return;
+                            }
+                            let Some(job) = next_job_for_card(&jobs, skip) else {
+                                return;
+                            };
+                            meter.hold();
+                            job
+                        } else {
+                            // The same order, asked and never waited on: the peek answers what the
+                            // spend would, because this thread is the only spender.
+                            if !meter.can_take() {
+                                idle.push(lane);
+                                break;
+                            }
+                            let Some(job) = take_job_now(&jobs, skip) else {
+                                idle.push(lane);
+                                break;
+                            };
+                            if !meter.take_now() {
+                                // Nothing else spends, so this cannot happen after a peek — and
+                                // if it ever did, the job goes back rather than being held.
+                                give_back(&jobs, job);
+                                idle.push(lane);
+                                break;
+                            }
+                            meter.hold();
+                            job
+                        };
+                        // A key outside the body's ladder is the seam's own refusal: it is NOT a
+                        // box, so it is neither timed nor counted (review item 3).
+                        let Some(plan) = vd_terrain::gpu::plan(&job.body, job.key) else {
+                            meter.release();
+                            idle.push(lane);
+                            continue;
+                        };
+                        gears[lane].submit(&plan);
+                        flying.push_back((lane, job, plan));
                     }
-                    let Some(job) = next_job_for_card(&jobs, skip) else {
-                        return;
-                    };
-                    // A key outside the body's ladder is the seam's own refusal: it is NOT a box,
-                    // so it is neither timed nor counted (review item 3).
-                    let Some(plan) = vd_terrain::gpu::plan(&job.body, job.key) else {
+                    // ★ THE OLDEST BOX COMES HOME, while the others stay on the device.
+                    let Some((lane, job, plan)) = flying.pop_front() else {
                         continue;
                     };
-                    let at = std::time::Instant::now();
-                    let run = match gear.run(&plan) {
+                    let run = match gears[lane].collect() {
                         Ok(run) => run,
                         Err(why) => {
-                            // The job goes back to the queue for a CPU worker, and the card leaves.
-                            let (lock, cvar) = &*jobs;
-                            lock.lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .place(job);
-                            cvar.notify_all();
+                            // Every job the card holds goes back to the queue for a CPU worker,
+                            // and the card leaves.
+                            give_back(&jobs, job);
+                            meter.release();
+                            for (_, held, _) in flying {
+                                give_back(&jobs, held);
+                                meter.release();
+                            }
                             meter.detach(&why);
                             return;
                         }
                     };
+                    idle.push(lane);
                     meter
                         .budget
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .note_box(run.device_s, at.elapsed().as_secs_f64());
+                        .note_box(run.device_s, run.trip_s);
                     meter
                         .boxes
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -928,6 +1155,76 @@ impl CardSeam {
             })
             .expect("the card's builder thread starts");
     }
+}
+
+/// How many differing boxes the drift hunt names in full before it only counts them.
+const VERIFY_TOLD_MAX: u32 = 8;
+
+/// ★★ THE SPOT-CHECK'S PACE: one card box a second, rebuilt on the CPU and compared (the drift
+/// hunt, 2026-09-14). SL10 asks for no drift as a MEASUREMENT, and the boot self-check measures it
+/// ONCE, on eight keys; this measures it FOR EVER, on the keys the player's own flight asks for.
+/// A box costs the geometry thread about 11 ms, so one a second is about a hundredth of that
+/// thread and nothing at all of the frame. A box that is not the CPU's DETACHES the card — the
+/// same path a failed dispatch takes — so a drift costs the picture nothing but the card.
+const CARD_SPOT_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// ★ THE DRIFT HUNT'S COMPARE (`VD_TERRAIN_GPU_VERIFY=1`): the card's box against the CPU's, cell
+/// for cell and direction for direction. Answers whether this box DIFFERED, and tells the first
+/// difference with the key that drew it, so a hunt names a key and not a stand.
+fn verify_card_box(
+    body: &vd_terrain::BodyDefinition,
+    key: ChunkKey,
+    card: &vd_terrain::lattice::SampleBox,
+    tell: bool,
+) -> bool {
+    let Some(cpu) = vd_terrain::lattice::sample_box(body, key) else {
+        return false;
+    };
+    let mut cells = 0usize;
+    let mut first: Option<(usize, String, String)> = None;
+    let mut i = 0;
+    while i < cpu.cells.len().min(card.cells.len()) {
+        if cpu.cells[i] != card.cells[i] {
+            cells += 1;
+            if first.is_none() {
+                first = Some((
+                    i,
+                    format!("{:?}", card.cells[i]),
+                    format!("{:?}", cpu.cells[i]),
+                ));
+            }
+        }
+        i += 1;
+    }
+    let mut dirs = 0usize;
+    let mut j = 0;
+    while j < cpu.dirs.len().min(card.dirs.len()) {
+        dirs += usize::from(cpu.dirs[j] != card.dirs[j]);
+        j += 1;
+    }
+    let lengths = (cpu.cells.len() != card.cells.len()) | (cpu.dirs.len() != card.dirs.len());
+    let differed = (cells > 0) | (dirs > 0) | lengths;
+    if differed & tell {
+        let (index, on_card, on_cpu) = first.unwrap_or((0, String::new(), String::new()));
+        tracing::error!(
+            face = ?key.face,
+            rung = key.rung,
+            x = key.x,
+            y = key.y,
+            z = key.z,
+            cells,
+            dirs,
+            card_cells = card.cells.len(),
+            cpu_cells = cpu.cells.len(),
+            card_dirs = card.dirs.len(),
+            cpu_dirs = cpu.dirs.len(),
+            index,
+            on_card,
+            on_cpu,
+            "THE CARD'S BOX IS NOT THE CPU'S"
+        );
+    }
+    differed
 }
 
 /// The cells of a readback, decoded on the GEOMETRY stage's own thread.
@@ -967,6 +1264,36 @@ fn next_job_for_card(
     skip: usize,
 ) -> Option<ChunkJob> {
     take_job(jobs, skip)
+}
+
+/// ★ ONE JOB OUT OF THE QUEUE WITHOUT WAITING, `skip` places down the priority order: `None` where
+/// the queue holds no more than `skip` requests, and `None` once the workers close. The card's fill
+/// loop takes this way while it already holds a box in flight — a builder that waits there would
+/// leave the device idle.
+fn take_job_now(
+    jobs: &Arc<(Mutex<JobQueue>, std::sync::Condvar)>,
+    skip: usize,
+) -> Option<ChunkJob> {
+    let (lock, _) = &**jobs;
+    let mut q = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if q.closed {
+        return None;
+    }
+    let slot = q.jobs.keys().nth(skip).copied()?;
+    let job = q.jobs.remove(&slot).expect("the slot was just read");
+    q.index.remove(&(job.realm, job.key));
+    Some(job)
+}
+
+/// A JOB GOES BACK to the queue for a CPU worker, at its own priority, and every waiter is woken.
+fn give_back(jobs: &Arc<(Mutex<JobQueue>, std::sync::Condvar)>, job: ChunkJob) {
+    let (lock, cvar) = &**jobs;
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .place(job);
+    cvar.notify_all();
 }
 
 /// One job out of the queue, `skip` places down the priority order; `None` once the workers close.
@@ -1333,19 +1660,23 @@ impl Terrain {
             return;
         }
         let skip = self.config.gpu_skip.unwrap_or(CARD_SKIP);
+        let lanes = self.config.gpu_flights;
         self.card.attach(
             device,
             queue,
             skip,
             self.config.harvest_per_frame * DONE_QUEUE_FRAMES,
+            lanes,
+            self.config.gpu_verify,
         );
         self.card_attached = true;
         tracing::info!(
             budget = self.config.gpu_budget,
             skip,
+            lanes,
             summed = self.config.gpu_bound,
             "THE CARD IS A SECOND BUILDER: it takes chunks from the same queue by the same \
-             priority, inside its share of every frame"
+             priority, inside its share of every frame, while the queue is deep enough to want it"
         );
     }
 
@@ -1355,9 +1686,33 @@ impl Terrain {
         Arc::clone(&self.frame_meter)
     }
 
+    /// ★ THE FRAME JUDGES THE QUEUE FOR THE CARD (the owner's step after Step 15): the pure
+    /// stand-down rule ([`vd_client::card_gate::QueueDepth`]) over the readings the bounded ask
+    /// already holds — the requests the lane is waiting on, the CPU WORKERS' own capacity, the
+    /// eye's delivered speed and the lead the client asks ahead by. Below the depth the card takes
+    /// nothing, so a still stand's short queue is the CPU workers' alone.
+    ///
+    /// The speed and the lead are the FASTEST body's: the eye is inside one realm, and a queue is
+    /// urgent because THAT realm's ground is on its way to the screen.
+    fn judge_queue(&mut self, workers_per_s: f64, speed_mps: f64, lead_m: f64) {
+        if !self.card_attached {
+            return;
+        }
+        self.card.meter.judge(vd_client::card_gate::QueueDepth {
+            pending: self.lane.pending_count(),
+            workers_per_s,
+            speed_mps,
+            lead_m,
+        });
+    }
+
     /// THE FRAME GRANTS THE CARD its share, and the frame's own worst reading is kept. The answer
     /// is what the stamp states about the card.
-    fn grant_card(&mut self, frame_s: f64, now_s: f64) -> (u64, u64, u64, f64, f64, f64, bool) {
+    fn grant_card(
+        &mut self,
+        frame_s: f64,
+        now_s: f64,
+    ) -> (u64, u64, u64, f64, f64, f64, bool, u64, u64) {
         self.frame_peak_ms = self.frame_peak.read(frame_s * 1.0e3, now_s, WORK_PEAK_S);
         self.frame_meter.peak_ns.store(
             (self.frame_peak_ms * 1.0e6) as u64,
@@ -1366,7 +1721,11 @@ impl Terrain {
         if self.card_attached {
             self.card.meter.grant(frame_s, self.config.gpu_budget);
         }
-        self.card.meter.read()
+        let read = self.card.meter.read();
+        let (judged, stood_down) = self.card.meter.stand_down();
+        (
+            read.0, read.1, read.2, read.3, read.4, read.5, read.6, judged, stood_down,
+        )
     }
 
     /// ★ THE CROSSFADE FOLLOWS THE BOUND (ruling F9 item 1): a realm whose deliverable horizons
@@ -1970,6 +2329,10 @@ pub(crate) fn sync_terrain(
     let speed_hold_s = terrain.config.speed_hold_s;
     let mut recomputed: Vec<RealmId> = Vec::new();
     let mut rebind: Vec<RealmId> = Vec::new();
+    // ★ THE FASTEST BODY'S OWN EYE, for the card's stand-down rule (the owner's step after
+    // Step 15): the eye is inside one realm, and a queue is urgent because THAT realm's ground is
+    // on its way to the screen.
+    let mut fastest_mps = 0.0f64;
     // ★ THE FRAME'S OWN WORK (ruling F9 item 1's frame bar): the wall time this frame spends in
     // each piece the bounded ask added, and in the descent it may re-run. The flight reads them.
     let mut work_bound = std::time::Duration::ZERO;
@@ -1988,6 +2351,7 @@ pub(crate) fn sync_terrain(
         // `speed_hold_s` seconds, which reaches ZERO when the hull stops.
         ladder.speed_mps = ladder.speed.read(reading, now_s, speed_hold_s);
         let speed_mps = ladder.speed_mps;
+        fastest_mps = fastest_mps.max(speed_mps);
         // The bound reads the LAST DESCENT's own altitude and its own chunks-a-column: both are
         // measurements the descent already made, and the recipe is not run a second time for them.
         // Before the first descent there is no measurement, and the ask is the tier rule's.
@@ -2030,6 +2394,12 @@ pub(crate) fn sync_terrain(
             descents += 1;
         }
     }
+    // ★ THE CARD'S STAND-DOWN RULE (the owner's step after Step 15): the frame judges whether the
+    // queue is deep enough to want a second builder at all. THE LEAD IS THE HELD SPEED'S OWN — the
+    // lead's metres are a sawtooth that reads zero the instant a row lands, and the speed is that
+    // sawtooth's held peak, so the pair the rule divides must come from the same reading.
+    let workers_per_s = terrain.throughput.workers_value();
+    terrain.judge_queue(workers_per_s, fastest_mps, fastest_mps * lead_s);
     // THE CROSSFADE FOLLOWS THE BOUND: the realm's three material families carry the same
     // effective switch distances the descent asked at, rewritten in place.
     let rebinds = rebind.len() as u64;
@@ -2660,6 +3030,8 @@ pub(crate) fn sync_terrain(
                 card_boxes_per_frame: card.4,
                 card_capacity_per_s: card.5,
                 card_device_timed: card.6,
+                card_judged: card.7,
+                card_stood_down: card.8,
                 frame_peak_ms: terrain.frame_peak_ms as f32,
                 frame_work_ns: terrain.frame_work(),
                 morph_fallbacks: terrain.morph_totals[0],
@@ -2913,6 +3285,33 @@ pub const fn worker_share(cores: usize) -> usize {
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    /// ★★ THE SPOT-CHECK'S OWN COMPARE (§26.10, the drift hunt): the shipped path rebuilds one
+    /// card box a second on the CPU and compares it cell for cell, and a box that is not the CPU's
+    /// DETACHES the card. This states that the compare answers what it is asked — a box that IS
+    /// the CPU's passes, and ONE CELL of a different substance fails.
+    ///
+    /// **Example.** The pilot flies over the seam. The card hands the geometry stage a box whose
+    /// deep bedrock came out as the last box's limestone; the compare says so, the card leaves,
+    /// and the CPU workers carry the ladder — the pilot never flies at a hill the shard has not
+    /// got.
+    #[test]
+    fn the_spot_check_names_a_box_that_is_not_the_cpus() {
+        let body = vd_terrain::home::home_planet();
+        let key = vd_terrain::digest::self_check_key(&body, vd_terrain::GOLDEN_SELF_CHECK_KEYS[0]);
+        let mut box_of =
+            vd_terrain::lattice::sample_box(&body, key).expect("the box is on the ladder");
+        assert!(
+            !verify_card_box(&body, key, &box_of, false),
+            "the CPU's own box is the CPU's box"
+        );
+        // ONE CELL a step out of place is the whole difference a hole is made of.
+        box_of.cells[0].gap = box_of.cells[0].gap.wrapping_add(1);
+        assert!(
+            verify_card_box(&body, key, &box_of, false),
+            "one differing cell is a box that is not the CPU's"
+        );
+    }
 
     #[test]
     fn the_worker_share_is_a_quarter_of_the_cores_and_at_least_two() {

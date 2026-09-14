@@ -8273,12 +8273,58 @@ rings; what is left is an interim with a named step:
    ★ **AND THE PICTURE GATE MEASURED THE OTHER HALF: THE CARD COSTS A STILL STAND** — the hill
    stand's terrain settles at tick **2 408** against **2 081** with no card, past that stand's own
    capture tick, because the round trip that pays on a queue of hundreds is pure latency on a queue
-   of three. **SO THE CARD SHIPS AS A KNOB (`VD_TERRAIN_GPU=1`), NOT AS THE DEFAULT**, and
-   `just terrain-pictures-card` is the run that measures it (the ground stand: 0 of 635 557 content
-   pixels differ), NOT a gate — it is red on the hill and is not in `just flights`. OWED: the card
-   standing down where the queue is short (the cure the measurement points at); the turning leg;
-   two boxes in flight (the round trip is twenty times the card's own arithmetic); whether a DAMPED
-   sum beats no sum.
+   of three.
+   ★★ **THE STAND-DOWN RULE AND THE BOXES IN FLIGHT (the owner's step after Step 15, 2026-09-14;
+   §26.6 and §26.7).** THE CARD NOW TAKES A REQUEST ONLY WHEN THE QUEUE IS DEEP, and the depth is a
+   TIME: the requests the CPU WORKERS ALONE cannot finish before the ground reaches the screen
+   (`vd_client::card_gate::QueueDepth`, Tier-A, 100 % covered — the workers' capacity, the eye's
+   delivered speed and the lead, the same three readings the bounded ask holds). A STILL EYE HAS NO
+   DEADLINE, so the card stands down on a still stand whatever the queue holds. ★ AND THE RULE HAS A
+   SECOND HALF the first still stand MEASURED: with the depth alone the hill settled at tick 2 509,
+   WORSE, because the card HOARDS — it hands its bytes to ONE geometry thread at about 11 ms a
+   chunk behind a channel 192 deep, and the hill's card took 960 chunks, ten seconds of that stage.
+   So the card may HOLD only what it can finish in time (`deadline ÷ its own stage`, ten chunks at
+   the 528 m/s leg's 0.117 s and 11 ms). MEASURED with both halves: **every stand settles inside its
+   own capture tick and four of the five settle EARLIER than with no card at all** (ground 742
+   against 1 068, hill 2 061 against 2 081, seam 5 669 against 5 686) while the card builds MORE
+   (1 229 chunks on the hill against 960). SEVERAL BOXES IN FLIGHT (`BoxGear::submit`/`collect`,
+   `VD_TERRAIN_GPU_FLIGHTS`, two by default): the seam probe alone reads **547 boxes a second at one,
+   1 005 at two, 1 522 at four** — the round trip WAS the ceiling — but the BUILDER's ceiling is its
+   one geometry thread, so the lanes buy the device's idleness back and nothing more.
+   🟥 **AND THE PICTURE GATE THEN FOUND A DEFECT THE CARD HAS ALWAYS HAD, at the SEAM stand — the
+   first stand the card ever reached, because the hill failed before it.** With the card building,
+   the seam stand draws the SAME 6 401 chunks and **14 959 pixels of nothing under drawn ground
+   survive erosion** — a chunk whose mesh is not the CPU's (52.63 M vertices against 52.65 M). It is
+   NOT the lanes: at `VD_TERRAIN_GPU_FLIGHTS=1` the same stand reads 18 346. So the card's box is
+   not the CPU's for every key, and the boot self-check cannot see it: it compares EIGHT golden
+   keys. **SO THE CARD STAYS A KNOB (`VD_TERRAIN_GPU=1`), NOT THE DEFAULT**, and
+   `just terrain-pictures-card` stays out of `just flights`. OWED, in order: (1) the no-drift gate
+   over MANY keys, not eight (SL10 asks for byte-for-byte, and the picture gate is what found the
+   drift); (2) the turning leg; (3) more geometry threads, now that the trip is no longer the
+   ceiling; (4) whether a DAMPED sum beats no sum.
+   ★★ **THE DRIFT HUNTED DOWN, AND THE NO-DRIFT GATE WIDENED (2026-09-14; §26.10).** The hole was
+   the card's POOL, not its arithmetic: `BoxGear`'s slots GREW and never shrank, and a kernel walks
+   a binding by its SLICE'S OWN LENGTH (`vd_recipe::plan::column_row` walks the box's lattices), so
+   a box with ONE cavern lattice built on a gear still holding TWO found a row naming its own face,
+   indexed the node buffer outside its range, and kept the EARLIER box's words. THE KEY: `PosX,
+   rung 9, (69, 7, 0)`, cell 4 096 — the CPU's bedrock against the previous box's limestone.
+   MEASURED over the seam stand's own 6 049 boxes: **1 022 drift with the pool that grew, 0 with
+   every slot sized exactly to its box**. THE GATE (`just gpu-drift`,
+   `crates/bins/tests/gpu_no_drift.rs`) sweeps that whole stand on the client's own gears at its own
+   two lanes, pins the failing pair on ONE gear, and states the stand's order that made it; the BOOT
+   self-check now runs PAIRS (the widest box of a face, then the narrowest of the same corner),
+   because the control PROVED the eight golden keys blind — green with the defect in place, 11 938
+   differing cells with the pairs; and the shipped client rebuilds ONE CARD BOX A SECOND on the CPU
+   and DETACHES the card on a mismatch (`VD_TERRAIN_GPU_VERIFY=1` checks every box).
+   ★ **THE JUDGE, RE-FLOWN ON THE CURED CARD (§26.10c, three flights of one binary, three
+   workers):** at the shipped quarter the 528 m/s leg's worst gap falls 144 → **44** urgent chunks
+   and its queue 1 550 → **401**, the turning leg 92 → **7**, and the frames hold (45.9 against
+   45.9); 🟥 the pop detector's widest step reads above the card-off flight on four legs of five
+   (46 against 40 at 528 m/s) and the SLOW HULL'S band goes from holding to 3 357 urgent chunks.
+   **SO THE CARD STAYS A KNOB AND THE DEFAULT STAYS THE CPU SHARE** — not for any of the three
+   reasons that kept it one, but because a default must be right on every leg. OWED: the slow
+   hull's band (the card, or the leg's entry out of the walk); whether the pop reads higher
+   SYSTEMATICALLY (pairs, not single flights); more geometry threads; a DAMPED sum.
    🟧 **WHAT THE CHAIN BUYS IS CORES, NOT SPEED — AN OWNER DECISION (F6).** about 490 chunks a second for
    about 0.03 of one core and about all of the card, against the workers' about 790 for three cores
    and no card at all. Roughly three fifths of the throughput for under one percent of the CPU, with the card then

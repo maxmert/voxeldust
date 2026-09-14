@@ -572,6 +572,16 @@ fn take_picture(
         "terrain_pictures/{name}: settled at tick {settled_tick}; the capture waits for tick \
          {capture_tick}"
     );
+    // ★ THE CARD ON A STILL STAND (the owner's step after Step 15): what the card built on the way
+    // to this stand, and how often the stand-down rule kept it out of the queue. A stand that
+    // settles like the card-off flight's must show the rule standing the card down.
+    if let Some(card) = vd_bins::pixel::poll(devctl).terrain_stamp {
+        eprintln!(
+            "terrain_pictures/{name}: THE CARD — built {} boxes; the stand-down rule judged {} \
+             frames and stood the card down on {} of them",
+            card.card_boxes, card.card_judged, card.card_stood_down
+        );
+    }
     assert!(
         settled_tick < capture_tick,
         "{name}: the terrain settled at tick {settled_tick}, past this stand's capture tick \

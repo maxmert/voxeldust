@@ -87,6 +87,13 @@ fn main() {
         part_5_the_cell_field(&device, &queue, &body);
         return;
     }
+    // ★ THE DRIFT HUNT (`VD_BENCH_PART7=1`, 2026-09-14): the seam stand's own wanted set through
+    // the CLIENT'S OWN GEAR, box for box against the CPU. It answers where the seam stand's hole
+    // comes from — the kernel, or the client's path around it.
+    if std::env::var_os("VD_BENCH_PART7").is_some() {
+        part_7_the_drift_hunt(&device, &queue, &body);
+        return;
+    }
     let dirs = columns(&body);
     let octaves = body.octaves_at(RUNG);
     println!(
@@ -396,6 +403,312 @@ fn probe_hollow(device: &wgpu::Device, queue: &wgpu::Queue, spv: &[u8]) {
     if hollow_differ + distance_differ + count_differ > 0 {
         std::process::exit(1);
     }
+}
+
+// ------------------------------------------------------------- part 7: the drift hunt
+
+/// ★ THE SEAM STAND'S EYE, in the home planet's own frame — the place the picture gate stands at
+/// for its fifth picture (the gate's own log line: *landed in Planet 4030111653607004909 at
+/// DVec3(4280492.264785528, −1990175.7967535623, −4280492.264785528)*). The stand sits ON a cube
+/// face seam, which is why its wanted set holds the boxes that carry partner columns.
+const SEAM_STAND_EYE_M: [f64; 3] = [
+    4_280_492.264_785_528,
+    -1_990_175.796_753_562_3,
+    -4_280_492.264_785_528,
+];
+
+/// How many differing boxes the hunt names in full before it only counts them.
+const HUNT_TOLD_MAX: usize = 4;
+
+/// ★ PART 7 — THE DRIFT HUNT (2026-09-14). The seam stand draws a hole where the card builds
+/// (14 959 pixels of nothing under drawn ground, §26.9), so ONE of these is true: the card's
+/// KERNEL is wrong for some key, or the CLIENT's path around it is (the pooled buffers, the lanes,
+/// a stale byte). This part settles that: it computes the stand's OWN wanted set, runs every box
+/// through the CLIENT'S OWN GEAR — `vd_client_render::gpu_check::BoxGear`, the same pooled buffers
+/// and bind groups, reused across boxes exactly as the builder reuses them — and compares each box
+/// with `vd_terrain::lattice::sample_box`, cell for cell and direction for direction.
+///
+/// A difference here is the kernel's or the pool's. NO difference here means the drift lives in
+/// the client's own path, and `VD_TERRAIN_GPU_VERIFY=1` is the instrument for that.
+fn part_7_the_drift_hunt(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) {
+    let mut view = vd_client::ladder_view::LadderView::default();
+    let wanted = view.wanted(body, SEAM_STAND_EYE_M);
+    let lanes: usize = std::env::var("VD_BENCH_LANES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    println!(
+        "integer_bench: PART 7 — the seam stand wants {} chunks; every one through the client's \
+         own gear ({lanes} in flight) against the CPU",
+        wanted.keys.len()
+    );
+    // ★ THE FAILING KEY'S OWN CHARTER, word by word: the hunt's first question is whether the
+    // card read the charter it was given, and this says what the host gave it.
+    let failing = ChunkKey {
+        face: Face::PosX,
+        rung: 9,
+        x: 69,
+        y: 7,
+        z: 0,
+    };
+    if let Some(plan) = vd_terrain::gpu::plan(body, failing) {
+        println!(
+            "integer_bench: PART 7 — the charter of {failing:?}: bedrock {} air {} water {} \
+             box_edge {} rung {}; the words {:?}",
+            plan.charter.bedrock_code.raw(),
+            plan.charter.air_code.raw(),
+            plan.charter.water_code.raw(),
+            plan.charter.box_edge.raw(),
+            plan.charter.rung.raw(),
+            plan.charter_words(),
+        );
+        let below = plan.layers.iter().filter(|l| l.rule.raw() == 1).count();
+        println!(
+            "integer_bench: PART 7 — {below} of {} layers follow the BELOW rule; the tubes {} and \
+             the strata rows {:?}",
+            plan.layers.len(),
+            plan.tubes.len(),
+            plan.charter.strata,
+        );
+    }
+    // ★ ONE BOX ON A FRESH GEAR (`VD_BENCH_ONE=1`): the failing key alone, on a gear that has
+    // built nothing before it. A difference here is the KERNEL'S; agreement here with a difference
+    // in the sweep is the POOL'S (a byte left by an earlier box).
+    // ★ THE PREDECESSOR EXPERIMENT (`VD_BENCH_PAIR=1`): a rung-0 box FIRST, then the failing box
+    // TWICE on the same gear. If the first answer drifts and the second does not, the fault is the
+    // FIRST submit after the pool changed shape; if both drift, it is what the pool still holds.
+    if std::env::var_os("VD_BENCH_PAIR").is_some() {
+        let before = ChunkKey {
+            face: vd_seed::bend::Face::NegZ,
+            rung: 0,
+            x: 35929,
+            y: 161395,
+            z: 305,
+        };
+        let mut gear = vd_client_render::gpu_check::BoxGear::new(device.clone(), queue.clone());
+        if let Some(plan) = vd_terrain::gpu::plan(body, before) {
+            let _ = gear.run(&plan).expect("the card answered");
+        }
+        let plan = vd_terrain::gpu::plan(body, failing).expect("the key is on the ladder");
+        let cpu = vd_terrain::lattice::sample_box(body, failing).expect("the box");
+        let mut attempt = 0;
+        while attempt < 3 {
+            let run = gear.run(&plan).expect("the card answered");
+            let card = plan.box_of(&cells_of(&run.cells), &dirs_of(&run.dirs));
+            let differing = cpu
+                .cells
+                .iter()
+                .zip(card.cells.iter())
+                .filter(|(a, b)| a != b)
+                .count();
+            println!(
+                "integer_bench: PART 7 — the failing box after a rung-0 box, attempt {attempt}: \
+                 {differing} cells differ"
+            );
+            attempt += 1;
+        }
+        return;
+    }
+    if std::env::var_os("VD_BENCH_ONE").is_some() {
+        let plan = vd_terrain::gpu::plan(body, failing).expect("the key is on the ladder");
+        let mut gear = vd_client_render::gpu_check::BoxGear::new(device.clone(), queue.clone());
+        let run = gear.run(&plan).expect("the card answered");
+        let card = plan.box_of(&cells_of(&run.cells), &dirs_of(&run.dirs));
+        let cpu = vd_terrain::lattice::sample_box(body, failing).expect("the box");
+        let differing = cpu
+            .cells
+            .iter()
+            .zip(card.cells.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        println!(
+            "integer_bench: PART 7 — ONE BOX ON A FRESH GEAR at {failing:?}: {differing} cells \
+             differ of {}",
+            cpu.cells.len()
+        );
+        return;
+    }
+    let mut gears: Vec<vd_client_render::gpu_check::BoxGear> = (0..lanes.max(1))
+        .map(|_| vd_client_render::gpu_check::BoxGear::new(device.clone(), queue.clone()))
+        .collect();
+    let started = Instant::now();
+    let mut built = 0usize;
+    let mut differing_boxes = 0usize;
+    let mut told = 0usize;
+    // ★ WHAT THE BOX BEFORE IT ASKED FOR: a pooled buffer that is grown and never shrunk keeps
+    // the tail of a BIGGER predecessor, so a box that asks for LESS than the one before it is the
+    // box that reads a stale byte. These counts name which buffer.
+    let mut last: Option<(ChunkKey, usize, usize, usize, usize)> = None;
+    let mut window: Vec<(ChunkKey, vd_terrain::gpu::BoxPlan)> = Vec::new();
+    let mut keys = wanted.keys.iter();
+    loop {
+        // Fill the lanes, then collect them in the same order: the builder's own shape.
+        window.clear();
+        while window.len() < gears.len() {
+            let Some(key) = keys.next() else { break };
+            let Some(plan) = vd_terrain::gpu::plan(body, *key) else {
+                continue;
+            };
+            gears[window.len()].submit(&plan);
+            window.push((*key, plan));
+        }
+        if window.is_empty() {
+            break;
+        }
+        for (lane, (key, plan)) in window.iter().enumerate() {
+            let run = gears[lane].collect().expect("the card answered");
+            let card = plan.box_of(&cells_of(&run.cells), &dirs_of(&run.dirs));
+            let cpu =
+                vd_terrain::lattice::sample_box(body, *key).expect("the box is on the ladder");
+            // ★ THE THIRD ANSWER: the PLAN'S OWN CPU run — the same charter, the same layer rules,
+            // the same kernel, on this host. It splits the verdict: a card that agrees with the
+            // plan and disagrees with `sample_box` is INNOCENT, and the two CPU paths differ.
+            let host_run = plan.run();
+            let host = plan.cells_of(&host_run);
+            built += 1;
+            let mut cells = 0usize;
+            let mut first = String::new();
+            for (i, want) in cpu.cells.iter().enumerate() {
+                if *want != card.cells[i] {
+                    cells += 1;
+                    if first.is_empty() {
+                        let edge = BOX_EDGE;
+                        let (a, b, c) = (i % edge, (i / edge) % edge, i / (edge * edge));
+                        // ★ WHAT THE CELL'S OWN LAYER AND COLUMN SAY, on this host: the arm the
+                        // kernel takes is decided by the layer's rule and by the DEPTH, so a drift
+                        // names one of the two.
+                        let layer = plan.layers[c];
+                        let column = host_run.columns[b * edge + a];
+                        let r = layer.r_steps << vd_recipe::cell::LENGTH_BITS;
+                        let depth = column.h - r;
+                        let depth_m =
+                            depth >> (vd_recipe::cell::LENGTH_BITS + vd_recipe::cell::STEP_SHIFT);
+                        println!(
+                            "integer_bench: PART 7 — the cell's layer {c}: rule {} r_steps {}; \
+                             the column's h {} biome {}; the depth {} = {} whole metres, and the \
+                             charter's strata end at {} metres",
+                            layer.rule.raw(),
+                            layer.r_steps.raw(),
+                            column.h.raw(),
+                            column.biome.raw(),
+                            depth.raw(),
+                            depth_m.raw(),
+                            plan.charter.strata_end_m.raw(),
+                        );
+                        first = format!(
+                            " cell {i} (local {}, {}, {}): the CPU says substance {} gap {}, the \
+                             card says substance {} gap {}",
+                            a as i32 - 1,
+                            b as i32 - 1,
+                            c as i32 - 1,
+                            want.stratum.code(),
+                            want.gap,
+                            card.cells[i].stratum.code(),
+                            card.cells[i].gap,
+                        );
+                    }
+                }
+            }
+            let mut dirs = 0usize;
+            for (i, want) in cpu.dirs.iter().enumerate() {
+                dirs += usize::from(*want != card.dirs[i]);
+            }
+            // ★ WHICH ARM DRIFTS: the differences by the layer's RULE and by the pair of
+            // substances. An ABOVE or BELOW layer is a pure CHARTER READ; an EVALUATED layer is
+            // the kernel's arithmetic. Which of the two drifts names the cause.
+            let counts = (
+                *key,
+                plan.plan_charter_words().len(),
+                plan.tubes.len(),
+                plan.node_count,
+                plan.lattice_words().len(),
+            );
+            if (cells > 0) & (told < HUNT_TOLD_MAX) {
+                println!(
+                    "integer_bench: PART 7 — this box asks for (plan charter, tubes, nodes, \
+                     lattices) {:?}; the box before it {:?}",
+                    (counts.1, counts.2, counts.3, counts.4),
+                    last,
+                );
+            }
+            last = Some(counts);
+            if (cells > 0) & (told < HUNT_TOLD_MAX) {
+                let edge = BOX_EDGE;
+                let mut by_rule = [0usize; 3];
+                let mut pairs: std::collections::BTreeMap<(i64, u8, u8), usize> =
+                    std::collections::BTreeMap::new();
+                for (i, want) in cpu.cells.iter().enumerate() {
+                    if *want == card.cells[i] {
+                        continue;
+                    }
+                    let rule = plan.layers[i / (edge * edge)].rule.raw();
+                    by_rule[(rule as usize).min(2)] += 1;
+                    *pairs
+                        .entry((rule, want.stratum.code(), card.cells[i].stratum.code()))
+                        .or_default() += 1;
+                }
+                println!(
+                    "integer_bench: PART 7 — the differing cells by rule (evaluated, below, \
+                     above): {by_rule:?}; by (rule, the CPU's substance, the card's): {pairs:?}"
+                );
+            }
+            // WHICH PAIR DISAGREES: the card against the plan's own host run, and that host run
+            // against `sample_box`.
+            let mut card_vs_host = 0usize;
+            let mut host_vs_sample = 0usize;
+            for (i, want) in cpu.cells.iter().enumerate() {
+                let host_cell = vd_terrain::chunk::cell_of_word(host[i]);
+                card_vs_host += usize::from(card.cells[i] != host_cell);
+                host_vs_sample += usize::from(host_cell != *want);
+            }
+            if (cells > 0) | (dirs > 0) {
+                differing_boxes += 1;
+                if told < HUNT_TOLD_MAX {
+                    told += 1;
+                    println!(
+                        "integer_bench: PART 7 — ★ THE CARD'S BOX IS NOT THE CPU'S at {key:?}: \
+                         {cells} cells and {dirs} directions differ; the card against the plan's \
+                         own host run {card_vs_host}, that host run against sample_box \
+                         {host_vs_sample}; the first layer's rule {} r_steps {};{first}",
+                        plan.layers[0].rule.raw(),
+                        plan.layers[0].r_steps.raw(),
+                    );
+                }
+            }
+        }
+    }
+    let seconds = started.elapsed().as_secs_f64();
+    println!(
+        "integer_bench: PART 7 — {built} boxes through the card's own gear in {seconds:.1} s; \
+         {differing_boxes} of them differ from the CPU's"
+    );
+    assert_eq!(
+        differing_boxes, 0,
+        "PART 7: the card's box is not the CPU's on the seam stand's own wanted set"
+    );
+}
+
+/// The cells of a readback, as the client's geometry stage decodes them.
+fn cells_of(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap_or([0; 4])))
+        .collect()
+}
+
+/// The column directions of a readback, as the client's geometry stage decodes them.
+fn dirs_of(bytes: &[u8]) -> Vec<[vd_recipe::Gi; 3]> {
+    bytes
+        .chunks_exact(24)
+        .map(|row| {
+            let word = |k: usize| {
+                vd_recipe::Gi::new(i64::from_le_bytes(
+                    row[k * 8..k * 8 + 8].try_into().unwrap_or([0; 8]),
+                ))
+            };
+            [word(0), word(1), word(2)]
+        })
+        .collect()
 }
 
 // ----------------------------------------------------------------- part 5: the cell field

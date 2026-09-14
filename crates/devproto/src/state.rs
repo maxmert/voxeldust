@@ -370,6 +370,8 @@ pub(crate) mod tests {
                 card_boxes_per_frame: 2.75,
                 card_capacity_per_s: 91.0,
                 card_device_timed: true,
+                card_judged: 44,
+                card_stood_down: 4,
                 frame_peak_ms: 33.4,
                 frame_work_ns: Vec::new(),
                 morph_fallbacks: 3,
@@ -578,6 +580,13 @@ pub struct DevTerrainStamp {
     /// clock around the submit. The budget rations the card's time, so which clock measured it is
     /// part of the measurement.
     pub card_device_timed: bool,
+    /// ★ THE STAND-DOWN RULE (the owner's step after Step 15): how many frames judged the queue
+    /// for the card, and how many of them STOOD IT DOWN because the CPU workers could finish the
+    /// queue before that ground reaches the screen. A card that builds nothing on a still stand
+    /// says so here, and a gate reads the difference across a leg. Both are zero where no card
+    /// builds at all.
+    pub card_judged: u64,
+    pub card_stood_down: u64,
     /// THE WORST SINGLE FRAME of the last second, in milliseconds: the terrain system times the
     /// gap between its own runs, which is the frame. The engine's `frame_ms` is a SMOOTHED
     /// average and hides one long frame; a second builder on the renderer's own device is judged

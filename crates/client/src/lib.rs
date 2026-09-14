@@ -16,6 +16,7 @@
 
 pub mod ask_pace;
 pub mod card_budget;
+pub mod card_gate;
 pub mod chunks;
 pub mod input;
 pub mod interp;

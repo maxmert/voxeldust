@@ -75,6 +75,10 @@ pub struct CardBudget {
     /// ★ THE CARD HAS LEFT (review item 4): a dispatch failed, the builder is gone, and the card's
     /// capacity is zero from here on. Nothing turns this back on inside one run.
     detached: bool,
+    /// ★ HOW MANY BOXES THE CARD KEEPS IN FLIGHT (the owner's step after Step 15): the dispatch
+    /// stage's own wall time is a ROUND TRIP, and `lanes` of them overlap, so the stage carries
+    /// `lanes` boxes in the time one box takes. One until the builder says otherwise.
+    lanes: f64,
 }
 
 impl CardBudget {
@@ -150,23 +154,40 @@ impl CardBudget {
         self.allowance_s - before
     }
 
-    /// ★ THE BUILDER SPENDS: may one more box be dispatched now? A `true` answer has already taken
-    /// the box's own time out of the allowance. Before the first box there is no measured time, so
-    /// the first grant of any size buys the PROBE that measures one.
-    pub fn take(&mut self) -> bool {
-        if self.detached {
-            return false;
-        }
-        let cost = if self.per_box_s > 0.0 {
+    /// ★ HOW MANY BOXES THE BUILDER KEEPS IN FLIGHT (the owner's step after Step 15). The builder
+    /// states it once, at start. A count below one is read as one: a builder always carries at
+    /// least the box it is waiting on.
+    pub fn set_lanes(&mut self, lanes: usize) {
+        self.lanes = (lanes as f64).max(1.0);
+    }
+
+    /// WHAT ONE BOX COSTS THE ALLOWANCE, seconds. Before the first box there is no measured time,
+    /// so the whole allowance buys the PROBE that measures one.
+    fn cost_s(&self) -> f64 {
+        if self.per_box_s > 0.0 {
             self.per_box_s
         } else {
-            // The probe: nothing is measured yet, so the whole allowance buys this one box.
             self.allowance_s
-        };
-        if (cost <= 0.0) | (self.allowance_s < cost) {
+        }
+    }
+
+    /// ★ MAY ONE MORE BOX BE DISPATCHED — asked WITHOUT spending (the owner's step after Step 15).
+    /// The builder's fill loop peeks before it takes a job out of the queue, so a job is never
+    /// held by a card that cannot afford it. The card thread is the only spender, so what a peek
+    /// answers is still true when that same thread takes.
+    #[must_use]
+    pub fn can_take(&self) -> bool {
+        let cost = self.cost_s();
+        !self.detached & (cost > 0.0) & (self.allowance_s >= cost)
+    }
+
+    /// ★ THE BUILDER SPENDS: may one more box be dispatched now? A `true` answer has already taken
+    /// the box's own time out of the allowance.
+    pub fn take(&mut self) -> bool {
+        if !self.can_take() {
             return false;
         }
-        self.allowance_s -= cost;
+        self.allowance_s -= self.cost_s();
         true
     }
 
@@ -211,12 +232,17 @@ impl CardBudget {
 
     /// THE PIPELINE'S OWN CEILING, seconds a chunk: the SLOWER of the two stages, because a
     /// pipeline delivers no faster than its slowest stage. Zero until both are measured.
+    ///
+    /// ★ THE DISPATCH STAGE IS DIVIDED BY THE LANES (the owner's step after Step 15): its wall
+    /// time is a ROUND TRIP — the submit, the device's own work, the map home — and `lanes` trips
+    /// overlap, so that stage delivers a box every `trip / lanes` seconds. The GEOMETRY stage is
+    /// one thread doing arithmetic and is never divided.
     #[must_use]
     pub fn stage_s(&self) -> f64 {
         if (self.per_dispatch_s <= 0.0) | (self.per_geometry_s <= 0.0) {
             return 0.0;
         }
-        self.per_dispatch_s.max(self.per_geometry_s)
+        (self.per_dispatch_s / self.lanes.max(1.0)).max(self.per_geometry_s)
     }
 
     /// ★ THE CARD'S CAPACITY, chunks a second: the SMALLER of its two ceilings — what its pipeline
@@ -462,6 +488,57 @@ mod tests {
             "the budget binds when it is thin"
         );
         assert_eq!(budget.capacity_per_s(), budget.spend_rate_per_s());
+    }
+
+    /// ★ THE LANES DIVIDE THE ROUND TRIP (the owner's step after Step 15): four boxes in flight
+    /// carry four of the dispatch stage's trips at once, so that stage stops being the ceiling.
+    #[test]
+    fn the_boxes_in_flight_divide_the_dispatch_stage() {
+        // A dispatch stage that is the SLOWER one: a 20 ms round trip against an 11 ms geometry.
+        let trip_s = 0.020;
+        let mut budget = CardBudget::default();
+        budget.note_box(BOX_S, trip_s);
+        budget.note_geometry(GEOMETRY_S);
+        budget.grant(FRAME_S, 1.0);
+        assert_eq!(
+            budget.stage_s(),
+            trip_s,
+            "one box in flight: the trip binds"
+        );
+        budget.set_lanes(2);
+        assert_eq!(budget.stage_s(), GEOMETRY_S, "two trips overlap");
+        budget.set_lanes(4);
+        assert_eq!(
+            budget.stage_s(),
+            GEOMETRY_S,
+            "and the geometry binds from there"
+        );
+        // A count below one is read as one: a builder always carries the box it waits on.
+        budget.set_lanes(0);
+        assert_eq!(budget.stage_s(), trip_s);
+    }
+
+    /// ★ THE PEEK ANSWERS WHAT THE SPEND WOULD: the builder's fill loop asks before it takes a job
+    /// out of the queue, and the card thread is the only spender.
+    #[test]
+    fn the_peek_answers_what_the_spend_would() {
+        let mut budget = CardBudget::default();
+        assert!(!budget.can_take(), "no grant, no box");
+        budget.note_box(BOX_S, DISPATCH_S);
+        budget.note_geometry(GEOMETRY_S);
+        assert!(!budget.can_take(), "still no grant");
+        budget.grant(FRAME_S, CARD_BUDGET_FRACTION);
+        assert!(budget.can_take(), "the grant covers a box");
+        assert!(budget.take(), "and the spend agrees");
+        assert!(budget.can_take(), "the grant covers a second");
+        assert!(budget.take());
+        assert!(!budget.can_take(), "the third is past the frame's share");
+        assert!(!budget.take());
+        // A card that has left answers no, whatever it holds.
+        budget.grant(FRAME_S, CARD_BUDGET_FRACTION);
+        assert!(budget.can_take());
+        budget.detach();
+        assert!(!budget.can_take());
     }
 
     /// AND AN UNMEASURED CARD NEVER WIDENS THE HORIZON: no box, no dispatch, no geometry or no

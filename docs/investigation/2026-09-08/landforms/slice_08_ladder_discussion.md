@@ -2798,17 +2798,300 @@ why it is NOT in `just flights` — a run that measures the card, never a green 
 path (`just terrain-pictures`, the card off) is green: 0 / 10 / 7 / 18 / 0 content pixels at a widest
 channel step of one.
 
-Owed, in the order a measurement would take them:
+Owed, in the order a measurement would take them — ★ ITEMS 1 AND 3 ARE NOW BUILT AND MEASURED
+(§26.6 and §26.7); item 2 is answered in §26.8; item 4 still stands:
 
-1. **THE STILL STAND.** The card should stand down where the queue is short — the tail of a settle
-   and a walk are exactly where a round trip is pure latency. ⚠ Raising the head-of-line rule is
-   NOT that floor, and the flight says so: at the worker count the card also stands down on a leg
-   whose queue is six thousand deep the moment the CPU workers are keeping up, and the slow hull's
-   band goes from holding on every frame to 3 394 urgent chunks. A floor ON THE QUEUE'S DEPTH, by
-   name, is the cure, and it is unmeasured.
-2. THE TURNING LEG (14 → 50 urgent chunks). The other leg the card costs.
-3. THE ROUND TRIP, now that the card's own arithmetic is known to be 0.08 ms and the trip 1.8 ms:
-   two boxes in flight at once would hide the wait behind the next box's compute, and would shorten
-   exactly the latency that costs the settle.
+1. ~~THE STILL STAND~~ — BUILT: the stand-down rule, §26.6.
+2. ~~THE TURNING LEG~~ — MEASURED and named, §26.8.
+3. ~~THE ROUND TRIP~~ — BUILT: several boxes in flight, §26.7.
 4. WHETHER A DAMPED SUM IS BETTER THAN NO SUM: the card's capacity is real, and the bound refusing
    it entirely is a blunt answer to a measured harm.
+
+### 26.6 THE STAND-DOWN RULE — the card takes a request only when the queue is DEEP
+
+The owner's step after Step 15. The rule is pure arithmetic in the Tier-A library
+(`vd_client::card_gate::QueueDepth`, 100 % covered, both arms of every branch tested with a still
+eye, a walk and full cruise); the render crate only wires it, and the stamp and the flight state how
+often it stood the card down.
+
+**THE DEPTH IS A TIME, NOT A COUNT.** The queue is deep when it holds more requests than the CPU
+WORKERS ALONE can finish BEFORE THE GROUND REACHES THE SCREEN — the same three readings the bounded
+ask already holds: the workers' own capacity, the eye's delivered speed, and the lead the client
+asks ahead by. The deadline is `lead ÷ speed`; the workers finish `capacity × deadline` in it; the
+queue must stand past twice that (`CARD_DEEP_MARGIN`, because the three readings wander by a tenth
+over a leg). **A still eye has NO deadline at all** — it uncovers no ground, so nothing the queue
+holds is late, so the card stands down whatever the queue holds.
+
+★★ **AND THE RULE HAS A SECOND HALF, WHICH THE FIRST STILL STAND MEASURED.** With the depth alone
+the hill stand settled at tick **2 509** — WORSE than the 2 446 of the head-of-line rule. The cause
+is not the round trip: it is a BACKLOG. A card that takes a request does not finish it; it hands the
+bytes to ONE geometry thread that meshes about ninety chunks a second, and the channel in front of
+that thread holds 192. MEASURED: the hill stand's card took 960 chunks, which is ten seconds of its
+own geometry stage, where three CPU workers would have finished the same chunks in under six — so
+every chunk behind the hoard landed later than it would have with no card at all. So the card may
+HOLD only what it can finish in time: `deadline ÷ its own stage`, ten chunks at the 528 m/s leg's
+0.117 s deadline and an 11 ms stage. It costs the card nothing — a pipeline ten deep at 11 ms a
+chunk IS ninety chunks a second — and it forbids exactly the hoard.
+
+**MEASURED, `just terrain-pictures-card` (the card building, the stands still):**
+
+| the stand | settles, no card | settles, the depth alone | settles, the depth AND the hold |
+|---|---|---|---|
+| ground (capture tick 1 200) | 1 068 | 1 113 | **742** |
+| hill (capture tick 2 400) | 2 081 | 2 509 | **2 061** |
+| aloft (3 600) | — | — | 2 880 |
+| orbit (4 800) | — | — | 3 998 |
+| seam (6 000) | 5 686 | — | 5 669 |
+
+✅ **EVERY STAND NOW SETTLES INSIDE ITS OWN CAPTURE TICK, AND FOUR OF THE FIVE SETTLE EARLIER THAN
+WITH NO CARD AT ALL** — while the card builds MORE than it did before (1 229 chunks on the hill
+against 960). The rule stood the card down on 302 of the ground stand's 534 judged frames and on 120
+of the orbit stand's 138.
+
+### 26.7 SEVERAL BOXES IN FLIGHT — the bus instead of the round trip
+
+The card's own three passes cost 0.08 ms by the device's clock; the ROUND TRIP that carries the
+answer home costs 1.8 ms. A builder that waits for each trip before it starts the next is bounded by
+the TRIP. `BoxGear` therefore splits into `submit` (the uploads, the three passes, one submit, and
+the maps ASKED FOR AT ONCE) and `collect` (the wait and the read back), and the builder holds one
+gear per box in flight: it submits into the next while the last is still on the device.
+
+**MEASURED by the seam probe alone, `just gpu-seam` at `VD_TERRAIN_GPU_FLIGHTS=1/2/4`:**
+
+| boxes in flight | the probe's boxes a second | the worst box | the renderer's frames |
+|---|---|---|---|
+| one | 547 | 7.64 ms | 101.1 % of quiet |
+| **two (ships)** | **1 005** | 9.23 ms | 101.3 % of quiet |
+| four | 1 522 | 10.91 ms | 101.8 % of quiet |
+
+Two nearly doubles the rate and four raises it by half again: the trip WAS the ceiling. ★ But the
+BUILDER's ceiling is not the trip — it is the GEOMETRY STAGE, one thread at about 11 ms a chunk,
+which is why the card states about ninety chunks a second in the flights and not five hundred. So
+the lanes buy back the device's idleness and nothing more, and TWO ships: it keeps the device fed
+while one answer is mapped home and costs one extra set of every buffer (about 2.5 MB) instead of
+three. MORE GEOMETRY THREADS ARE THE NEXT LEVER, and they are unmeasured. ⚠ The card's own clock
+reads HIGH with lanes (0.07 ms a box at one, 0.16 at two, 0.24 at four for the same arithmetic),
+because a box's two timestamps bracket whatever else the device ran between them — so the budget
+rations an upper bound, which is the safe direction.
+
+### 26.8 THE JUDGE, RE-FLOWN ON THE STAND-DOWN RULE — three flights of one binary, three workers
+
+★ EVERY NUMBER BELOW IS FROM ONE BINARY ON ONE AFTERNOON. The machine's own state moves between
+sessions (the card-off 528 m/s leg read 125 urgent chunks in the morning's binary and 222 in this
+one), so a bar is read WITHIN a flight set and never across them.
+
+| the leg | frames/s OFF → quarter → whole | the band's worst gap | the queue's peak |
+|---|---|---|---|
+| walk, 1.4 m/s | 49.9 → 49.6 → 48.0 | 0 → 0 → 0 | 6 → 5 → 5 |
+| hull, 1.4 m/s | 47.8 → 47.9 → 53.3 | 0 → 0 → 3 351 | 4 → 5 → 6 160 |
+| hull, 240 m/s | 45.2 → **45.8** → 46.0 | 12 → **2** → 2 | 200 → **64** → 56 |
+| hull, 528 m/s | 44.7 → **45.9** → 46.1 | 222 → **39** → 88 | 1 660 → **368** → 514 |
+| hull, turning | 44.3 → **47.2** → 47.6 | 106 → **0** → 9 | 1 549 → **213** → 409 |
+
+**THE 528 m/s LEG IN FULL, at the quarter (the shipped budget):** 45.9 frames a second; the workers
+ran 187 jobs a second and the engine harvested 270 chunks a second; the card built 5 049 boxes (84 a
+second, 31 % of the chunks) at 0.23 ms a box by the device's own clock, spending 3 % of the 1.26 ms
+each frame granted it; the stand-down rule judged 2 755 frames and stood the card down on 154 of
+them (6 %); the band's gap peaked at 39 urgent chunks over 1 225 samples and the queue at 368.
+
+**HOW OFTEN THE RULE STOOD THE CARD DOWN, at the quarter:** the walk **100 %** (the card built NOT
+ONE box), the slow hull **100 %**, 240 m/s 96 %, 528 m/s 6 %, turning 77 %. The rule does exactly
+what it says: the card is idle where the workers keep up, and nearly always at work where they
+cannot.
+
+**AGAINST RULING F9's BARS, at the quarter:**
+
+- ✅ **THE FRAMES ARE NOT BELOW THE CARD-OFF FLIGHT'S** on four legs of five (45.8 against 45.2,
+  45.9 against 44.7, 47.2 against 44.3, 47.9 against 47.8); the walk reads 49.6 against 49.9, three
+  tenths of a frame on a leg where **the card built nothing at all**.
+- ✅ **THE WORST GAP FALLS**, 222 → **39** (far below Step 14's 207).
+- ✅ **THE QUEUE FALLS**, 1 660 → **368** (far below Step 14's 1 512).
+- ✅ **THE TURNING LEG IS CURED** — 106 → **0**, where the card USED to make it worse (14 → 50 in
+  the first round). ★ **THAT IS THE OWNER'S ITEM 3 ANSWERED, AND THE CAUSE WAS THE CARD'S OWN RULE,
+  NOT THE ASK'S:** the card hoarded a backlog and took urgent chunks it could not finish in time,
+  and a turning eye's urgent set is small and changes at every descent — so those were exactly the
+  chunks the picture was waiting for. The hold cap forbids the hoard, and the leg's gap goes to
+  zero.
+- 🟨 **THE POP'S WIDEST STEP IS HIGHER**, 32 → 44 at 528 m/s and 34 → 56 turning. ⚠ It is NOT the
+  card: on the WALK, where the card built NOT ONE BOX, the same reading moved 13 → 24. The pop
+  detector's widest step wanders by that much between runs of one code (29 to 54 over eight flights
+  of one leg in the earlier rounds). UNMEASURED whether a card-on flight reads higher
+  SYSTEMATICALLY; the honest statement is that this reading cannot separate them.
+
+### 26.9 WHAT THE STILL STANDS THEN FOUND — a hole at the seam, and it is the CARD'S OWN
+
+With the still stands cured, `just terrain-pictures-card` reached the SEAM stand for the first time
+— every earlier card run failed at the hill before it. **The seam stand draws the same 6 401 chunks
+as the card-off run and 14 959 pixels of nothing under drawn ground survive the erosion**: a missing
+mesh, not a missing chunk (52.63 M vertices against the card-off run's 52.65 M). ⚠ **It is NOT the
+lanes:** at `VD_TERRAIN_GPU_FLIGHTS=1` the same stand reads 18 346 of the same pixels.
+
+**So the card's box is not the CPU's for every key**, and the boot self-check cannot see it: it
+compares the EIGHT golden keys, and every one of them passes. SL10 asks for byte-for-byte on every
+shipped target; the picture gate is what found the drift, and the no-drift gate is what must be
+widened. **THE CARD THEREFORE STAYS A KNOB** (`VD_TERRAIN_GPU=1`), `just terrain-pictures-card`
+stays out of `just flights`, and nothing else about the card should be judged until this is cured.
+
+### 26.10 ★★ THE DRIFT, HUNTED DOWN — one key, one stale row, and the gate that was eight keys wide
+
+§26.9 left the card with a defect and nothing else was allowed to be judged until it was cured. It
+is cured. The hunt, the cause, the cure and the widened gate, in that order.
+
+**THE INSTRUMENT** (`crates/bins/examples/integer_bench.rs`, `VD_BENCH_PART7=1`). The seam stand's
+OWN wanted set — the 6 049 boxes the picture gate's fifth stand asks for, in the order it asks for
+them — run through THE CLIENT'S OWN GEAR (`vd_client_render::gpu_check::BoxGear`, the same pooled
+buffers, reused box after box exactly as the builder reuses them) and compared with
+`vd_terrain::lattice::sample_box`, cell for cell and direction for direction. It named the key at
+once.
+
+**THE KEY AND THE CELL.** `ChunkKey { face: PosX, rung: 9, x: 69, y: 7, z: 0 }` — cell 4 096, local
+`(−1, −1, 0)`: **the CPU says substance 16 (bedrock) at gap −128, the card says substance 10 at gap
+−128**. 128 834 of that box's 262 144 cells differ, every one of them in an EVALUATED layer, and
+the substances the card wrote are the SURFACE of the box before it — air, snow, permafrost,
+limestone — where deep bedrock belongs. 1 022 of the stand's 6 049 boxes drift the same way, and
+NOT ONE drifts on a gear that has built nothing before it.
+
+**THE CAUSE — THE POOL, NOT THE KERNEL.** The card's arithmetic was never wrong. `BoxGear`'s slots
+GREW and never shrank (`if self.bytes >= need { return false }`), and a kernel walks a binding by
+ITS SLICE'S OWN LENGTH — `vd_recipe::plan::column_row` walks the box's lattices that way. The stand
+asks for the failing box IMMEDIATELY BEHIND a box that carries TWO cavern lattices (`ChunkKey {
+face: NegZ, rung: 0, x: 35 929, y: 161 395, z: 305 }`, 16 lattice words and 9 595 nodes, its two
+rows naming faces NegZ **and PosX**), and the failing box carries ONE row of 8 words and ONE node.
+So the gear still held two rows, the second of them naming PosX — THE FAILING BOX'S OWN FACE — and
+every column of that box found a lattice the box does not have; the cell that followed indexed the
+node buffer outside its own range, its invocation died, and the output buffer — pooled too, and the
+same size at that rung — kept THE EARLIER BOX'S WORDS. That is the hole: not a chunk that never
+came, a chunk whose mesh is the last one's.
+
+**THE CURE, IN ONE PLACE.** Every slot is sized EXACTLY to the box it is building (`==`, not `>=`).
+The rule is "the slice IS this box's rows", and it belongs to every binding, not to the one that was
+caught. A steady state at one rung still allocates nothing — the sizes repeat, and only a change of
+rung or of topology rebuilds a buffer.
+
+**MEASURED, BOTH WAYS** (`VD_BENCH_PART7=1 VD_BENCH_LANES=2`):
+
+| the seam stand's own 6 049 boxes | the pool that GREW | sized EXACTLY (ships) |
+|---|---|---|
+| boxes that are not the CPU's | **1 022** | **0** |
+| the first of them | PosX rung 9 (69, 7, 0), 128 834 cells | — |
+
+### 26.10a THE GATE, WIDENED — three measurements, each one proved able to fail
+
+`just gpu-drift` (`crates/bins/tests/gpu_no_drift.rs`) is the no-drift gate SL10 asks for. It is
+GPU-required and local, like the seam probe and the picture gate.
+
+1. **THE SWEEP — the seam stand's OWN 6 049 boxes**, through the same gears at the same two lanes
+   the client flies, on ONE reused gear set BY NAME. **MEASURED: 6 049 of 6 049 agree, in 25.3 s.**
+   ★ THE CONTROL: with the pool's old growing rule restored the same sweep names 8 drifting keys in
+   its first report and 1 022 in all.
+2. **THE PIN — the two boxes that drifted, in their own order, on one gear.** It asserts the pair is
+   still a SHRINK (a world whose ladder changed would leave a pin that pins nothing), then compares
+   the card's box with the plan's host run AND with `sample_box`. ★ THE CONTROL: 128 834 cells.
+3. **THE ORDER — why that key.** A CPU-only test: the seam stand asks for the failing box at index
+   3 015, immediately behind the wide box at 3 014.
+
+★★ **AND THE BOOT SELF-CHECK'S OWN KEYS ARE NOW A TRAP, BECAUSE MEASUREMENT SAID THEY WERE NOT
+ONE.** The first widening ran the EIGHT GOLDEN KEYS through one reused gear — and the control proved
+it BLIND: with the growing rule restored it stayed green on every one of them. The eight keys all
+sit inside their own faces, so they all ask for the same rows, and a pass that never shrinks a
+binding can never meet a stale row. The check now runs PAIRS, one per golden key: **the WIDEST box
+of that face** (its corner at the finest rung, where three faces' caverns meet — three lattice rows
+and 8 151 nodes), then **the NARROWEST box of the same corner** (the top rung, where no cavern is
+carved at all — one stand-in row and one node, while its columns still sit on all three faces), then
+the golden key itself. `GpuRecipeCheck::pool_shrinks` states how often the pass really asked its gear
+for fewer rows — **7 on the home planet**, and the gate asserts it is not zero, so a list that stops
+trapping says so. ★ THE CONTROL: with the growing rule restored the paired pass reads **11 938
+differing cells** and the client refuses the card at start.
+
+★ **AND THE SHIPPED PATH CHECKS ITSELF FOR EVER.** The boot check runs once, on one machine's
+start. The client now also rebuilds ONE CARD BOX A SECOND on the CPU and compares it cell for cell
+(`verify_card_box`, about a hundredth of the geometry thread), and a box that is not the CPU's
+DETACHES the card down the same path a failed dispatch takes: the budget states zero capacity, the
+job goes back to the queue, the CPU share carries the ladder, and the player never sees a hill the
+shard has not got. `VD_TERRAIN_GPU_VERIFY=1` checks EVERY box, which is the hunt's own knob.
+★ MEASURED on the shipped path: across the picture gate's five stands the card built 3 452 boxes and
+the spot-check named NOT ONE of them, so the card never detached and every stand drew a card-built
+ladder.
+
+★ **WHAT THE CURE COSTS THE CARD, MEASURED (`just gpu-seam`, two lanes).** A binding sized exactly
+is REBUILT wherever a box's topology differs from the last one's, where the growing pool kept one —
+so the probe reads **859 boxes a second against the 1 005 it read before the cure**, at 0.21 ms a
+box, with **0 stalls** and the renderer's frames at **101.3 % of its quiet rate** (47.9 against 47.3,
+the worst single frame 26.3 ms against 24.7). The seam still holds, and the builder's own ceiling is
+its one geometry thread at about ninety chunks a second, which is a tenth of either rate — so the
+cure costs the BUILDER nothing that can be measured in a flight. A pool that answers the wrong bytes
+is not an optimisation.
+
+### 26.10b THE PICTURE GATE, GREEN WITH THE CARD BUILDING (2026-09-14)
+
+`just terrain-pictures-card` on the cured code, the five stands still and the card building beside
+the three CPU workers:
+
+| the stand | settles (capture tick) | the card built | the rule stood it down | content pixels differing | hole pixels |
+|---|---|---|---|---|---|
+| ground | **726** (1 200) | 815 boxes | 346 of 587 frames | 9 of 635 557 | 0 |
+| hill | **2 050** (2 400) | 1 134 | 95 of 408 | 8 of 701 472 | 0 |
+| aloft | **2 863** (3 600) | 425 | 102 of 173 | 7 of 586 341 | 0 |
+| orbit | **3 979** (4 800) | 29 | 106 of 124 | 1 of 466 445 | 0 |
+| seam | **5 648** (6 000) | 1 049 | 110 of 495 | 13 of 672 789 | **0, against 14 959** |
+
+✅ Every stand settles inside its own capture tick, every picture stands within a widest channel
+step of ONE against the SAME frozen exact references the card-off gate reads, and **the seam stand
+draws its 6 401 chunks with 52 649 957 vertices — the card-off run's own count**, where the drifting
+card read 52.63 M and left 14 959 pixels of nothing. The shipped path (`just terrain-pictures`, the
+card off) is unchanged by any of this: the cure lives in the card's gear alone.
+
+### 26.10c THE JUDGE, RE-FLOWN ON THE CURED CARD — and why the card STAYS A KNOB
+
+The cure touched the card's own path (every binding is now sized to its box, so a change of rung or
+of topology rebuilds a buffer where the old pool kept one), so the judge was flown again: THREE
+flights of ONE binary at the average machine's three workers, the card OFF, the card at a QUARTER of
+each frame, and the card given the WHOLE frame. ★ As always, a bar is read WITHIN this flight set.
+
+| the leg | frames/s OFF → ¼ → whole | the band's worst gap | the queue's peak | the pop's widest step |
+|---|---|---|---|---|
+| walk, 1.4 m/s | 50.2 → 49.7 → 49.7 | 0 → 0 → 0 | — | 24 → 24 → 13 |
+| hull, 1.4 m/s | 50.6 → 48.9 → 51.2 | **0 → 3 357 → 1 853** | — → 6 166 → 4 667 | 17 → 19 → 25 |
+| hull, 240 m/s | 46.0 → 45.6 → 46.1 | 11 → **1** → 2 | 133 → **65** → 58 | 43 → 46 → 41 |
+| hull, 528 m/s | 45.9 → **45.9** → 46.3 | 144 → **44** → 30 | 1 550 → **401** → 330 | 40 → **46** → 37 |
+| hull, turning | 46.1 → 46.2 → 47.9 | 92 → **7** → **0** | 1 455 → 328 → — | 46 → 51 → 54 |
+
+**THE CARD'S OWN WORK at the quarter:** the walk 0 boxes (the stand-down rule judged 2 984 frames
+and stood it down on ALL of them), the slow hull 2 763 boxes (44 % of the chunks, stood down on
+72 %), 240 m/s 289 (3 %, stood down on 97 %), **528 m/s 5 032 boxes — 84 a second, 31 % of every
+chunk built — stood down on only 5 %**, turning 1 200 (10 %, 77 %). A box costs the device 0.15 ms
+by its own clock and the card spends 2 % of what the frames grant it.
+
+**AGAINST RULING F9's BARS, at the quarter:**
+
+- ✅ **THE 528 m/s GAP AND QUEUE FALL AGAIN:** 144 → **44** urgent chunks and 1 550 → **401**.
+- ✅ **THE TURNING LEG:** 92 → **7**, and 0 at the whole frame.
+- ✅ **THE FRAMES AT 528 m/s ARE NOT BELOW THE CARD-OFF FLIGHT'S** (45.9 against 45.9), and the
+  turning leg reads 46.2 against 46.1.
+- 🟨 **THE FRAMES ARE BELOW ON THREE LEGS**: the walk 49.7 against 50.2 (where THE CARD BUILT NOT
+  ONE BOX, so the difference is the machine and not the card), 240 m/s 45.6 against 46.0, the slow
+  hull 48.9 against 50.6.
+- 🟥 **THE POP DETECTOR'S WIDEST STEP IS ABOVE THE CARD-OFF FLIGHT'S ON FOUR LEGS OF FIVE** at the
+  quarter: 46 against 40 at 528 m/s, 46 against 43 at 240, 51 against 46 turning, 19 against 17 on
+  the slow hull; it is EQUAL on the walk, where the card built nothing. The whole-frame flight then
+  reads BELOW the card-off flight on three of those legs (37, 41, 13), which is the same wander the
+  earlier rounds measured (29 to 54 over eight flights of one leg) — so this reading still cannot
+  separate the card from the noise, and it is not ABOVE only by luck either.
+- 🟥 **THE SLOW HULL'S BAND GOES INCOMPLETE WITH THE CARD**: 3 357 urgent chunks at the quarter and
+  1 853 at the whole frame, against a band that HELD on every frame with the card off. It is the
+  reverse of §26.8's reading, where the card cured that leg. UNMEASURED which of the two it is: the
+  leg enters straight out of the walk and its reading has swung between 0 and 3 714 across rounds
+  with and without the card, so the honest statement is that this leg's band is not yet a stable
+  instrument.
+
+★★ **SO THE CARD STAYS A KNOB (`VD_TERRAIN_GPU=1`), AND THE DEFAULT STAYS THE CPU SHARE.** Not one
+of the three reasons that kept it a knob before survives — the still stands are cured, the picture
+gate is green, and the drift is gone — but the judge no longer clears every bar either: at the
+shipped quarter the pop's widest step reads above the card-off flight on four legs of five, and the
+slow hull's band goes from holding to 3 357 urgent chunks. A shipped default must be right on every
+leg, and two legs are not right. ⚠ **OWED BY THE OWNER** (unchanged, and now askable on cured code):
+whether two thirds of the 528 m/s leg's gap and three quarters of its queue are worth the card at
+all. **OWED BY THE CODE:** (1) the slow hull's band — is it the card, or the leg's own entry out of
+the walk? (2) whether the pop's widest step reads higher with the card SYSTEMATICALLY, which needs
+pairs and not single flights; (3) more geometry threads, now that the trip is no longer the ceiling;
+(4) whether a DAMPED sum of the card's capacity beats no sum.
