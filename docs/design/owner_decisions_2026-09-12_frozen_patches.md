@@ -271,3 +271,111 @@ that is not built yet" is worth a third of the chunk rate and most of the card. 
 the reading without a ruling: a hot path in 32-bit words (the noise's lattice point and fade already
 fit; the bend and the radius do not), or the average machine of F6 itself, whose share is TWO
 workers — there the card and the share are even.
+
+## F9. THE BOUNDED ASK, AND THE CARD AS A BUDGETED BUILDER (owner, 2026-09-13: *"Agree with your proposal, please implement"*)
+
+**The measurement that raised it (Step 13, F6's baseline):** on the average machine's share the
+eye at 528 m/s asks for about 400 chunks a second and three CPU workers build 195; the card does
+the recipe's 64-bit integer work at the speed of about two cores and, building alone, cannot draw.
+Neither alone reaches the ask; together they can, if the card keeps time to draw.
+
+**RULED.**
+
+1. **THE THROUGHPUT-BOUNDED ASK** (the rule §16.3 left to the owner's word): the client measures
+   its builders' throughput as it goes and asks for the finest ring only as far ahead as the
+   builders can deliver it before the ground reaches the screen; beyond that it asks for the next
+   rung, which stands whole, and the ladder's crossfade blends the finer rung in as it lands. The
+   bound never binds where the builders deliver the whole ask (a strong machine, a walk, a slow
+   approach); it binds only at speed on a small share. A hole and a pop stay defects: the bound
+   trades detail the eye cannot see at speed for the holes and late pops the unbounded ask makes.
+   The owner's question — *"will the seamless experience degrade?"* — answered: the detail at
+   speed drops on a weak machine; the seamlessness does not; completeness first (V15 read under
+   SL8).
+2. **THE CARD AS A SECOND BUILDER WITH A TIME BUDGET**: the GPU chain (built and proven in Step
+   13) is wired into the client beside the CPU share, taking chunks from the same wanted list,
+   under a fixed slice of each frame (a knob; a quarter by default) so the card keeps the rest to
+   draw; the self-check decides at start whether the card may build at all; the CPU share is the
+   default and the fallback.
+3. **THE MESH EXTRACTION ON THE CARD (G2) IS SKIPPED** until a measurement changes the numbers
+   (a card with fast 64-bit integers, or a 32-bit hot path).
+4. **THE ORDER**: the bounded ask first (it helps every machine), measured on the three-worker
+   flight (the pop detector's widest step must not rise; the band's completeness at the DRAWN rung
+   must reach every frame); then the card as a budgeted builder, its budget a knob, the same flight
+   the judge; then slice 9.
+
+
+**F9 ITEM 1 — THE THROUGHPUT-BOUNDED ASK — BUILT AND FLOWN (2026-09-13).** The client measures its
+builders' CAPACITY (the worker count over the mean wall time of a build, smoothed over ten seconds —
+a capacity, never the chunks they happened to finish, which on a walk is the ask and not the
+ceiling) and the eye's own speed (the PEAK of the lead's metres over the interpolation buffer's
+seconds — two DELIVERED poses, SL10 clause 7), and gives every rung a DELIVERABLE HORIZON: its
+EFFECTIVE SWITCH DISTANCE (`vd_client::ladder_view::AskBound`). The descent's split, the rung's
+territory, the crossfade's bands and the sink's ramp all read that ONE number, so a column inside
+the horizon is still asked at the tier rule's rung, one beyond it is asked at the NEXT rung whose
+territory now reaches in, and the handover is the ladder's own crossfade and never a cut. The
+horizon SLIDES (a quarter of its own length a second, after the cure below) instead of jumping,
+because a jumped band moves every
+chunk in it in one frame. The bound never binds where the builders cover the ask — a still stand, a
+walk, a strong machine, an empty ring — and `VD_TERRAIN_BOUND=0` switches it off.
+
+**THE JUDGE, two flights of one binary at the average machine's three workers** (§25.5):
+
+| the 528 m/s leg | bound OFF | bound ON |
+|---|---|---|
+| the band's worst gap, at the DRAWN rung | 981 urgent chunks | **449** |
+| the queue's peak | 2 199 | **1 611** |
+| the pop detector's widest step | 48 levels | **47** |
+| frames a second | 43.5 | **39.1** |
+
+✅ The band's completeness at the drawn rung improves by more than half at 528 m/s, and ✅ the pop
+detector's widest step does not rise (both readings sit inside the leg's own 47-to-54 range over
+seven earlier flights). 🟥 **THE FRAMES FELL, 43.5 to 39.1**, three times measured — **and the cause
+was then MEASURED and CURED (2026-09-14, §25.7 and §25.8).** The flight now times each piece the
+bound added: the throughput read, the bound's arithmetic and the materials' rewrite cost 0.000 to
+0.003 ms a frame, and **every millisecond was the wanted set's DESCENT** — 9.7 ms a frame unbounded
+against 18.1 bounded, because the horizon SLID every frame and a slid horizon forced a descent for
+every body in the window. The cure separates the two rates: the drawn bands still slide every frame
+(a jumped band is a pop), the DESCENT re-runs only when the horizon leaves the ring it last asked
+for, and it asks that ring WIDER by the same fraction — but only at the rungs the bound actually
+moved, because widening a rung that never slides costs every column of the widening. **RE-FLOWN, the
+same pair on one binary: 45.0 frames a second with the bound on against 43.8 with it off, the
+descent 8.565 ms against 9.805 — the bounded ask is now FASTER than the unbounded one — with the
+worst gap 401 against 974 and the queue 1 768 against 2 189.** 🟨 The pop detector reads 43 against
+that pair's OFF value of 29 on the 528 m/s leg, where four legs of five improved; 29 is the lowest
+of the eight readings that leg has produced (54, 50, 48, 48, 47, 43, 35, 29) and a second pair is
+owed. 🟥 The 240 m/s leg still shows 540 frames with a gap (14 urgent
+chunks at the worst against the unbounded pair's 11 on 449), but the bound is INERT there — 0 of
+1 227 samples — so that residue is the ask's TIMING, which §24.4 named and no bound cures. The still stands are untouched (the picture gate: 0 to 18 content pixels
+differing at a widest step of one, inside the gate's own noise), so the frozen pictures stand.
+
+★★ **AND AN ADVERSARIAL REVIEW THEN FOUND THAT THE FEATURE NEVER BOUND ABOVE 54 FRAMES A SECOND**
+(2026-09-14, cured; §25.9). The horizon's hysteresis gated the PER-FRAME STEP instead of the
+distance from the target, and a step is proportional to the frame's own seconds: below 18.7 ms a
+frame every step was refused and the horizon never left the tier rule's own radii at all. On a fast
+machine the bounded ask did nothing, and the flights that judged it ran at 39 to 47 frames a second
+— under the cliff by luck. The gate now reads the DISTANCE, so the horizon arrives in the same wall
+time at any frame rate. **THE CURE THAT MATTERS IS WHERE THE CODE LIVES:** the pace had grown in the
+Tier-B render crate, which no test reaches. It is now `vd_client::ask_pace` in the Tier-A library at
+100 % coverage, and the render crate only wires it. Three more defects fell out of the move — the
+speed's "peak hold" was a decay that still read 194 m/s a second after a hull stopped dead from 528;
+the descent's slack was the bracket alone, where the two tolerances together need 1.170 against an
+asked edge of 1.10, so it is now DERIVED and asserted at compile time; and a reading after a long
+idle threw the capacity's ten-second window away. Each is now a unit test.
+
+★ **THE SECOND PAIR, FLOWN ON THE CURED CODE (2026-09-14, §25.10): EVERY BAR OF F9 IS GREEN.** One
+binary, three workers, the bound ON against OFF at 528 m/s — **frames 45.6 against 43.3** (the
+bounded ask is FASTER than the unbounded one), the worst gap at the DRAWN rung **207 against 972**,
+the queue **1 512 against 2 194**, the descent **7.695 ms a frame against 10.345**. The TURNING leg
+holds the band on EVERY frame with the bound on, against 102 urgent chunks at the worst without it.
+And the pop detector, which one pair had left open, now IMPROVES on four legs of five: 528 m/s 37
+against 40, 240 m/s 40 against 47, turning 44 against 48, the walk 17 against 18. The one leg that
+reads higher is the slow hull, whose unbounded run entered the leg still filling the ring from the
+walk (a 3 710-chunk gap and a 6 519-deep queue). The bound does not widen the pop.
+
+**F9 ITEM 2, THE CARD AS A BUDGETED SECOND BUILDER, IS NOT STARTED.** Ruling F9's own order puts the
+bounded ask first and the card second, judged by the same flight; the frame bar is green only since
+2026-09-14 and the pop's second pair is still owed, and
+the two client seams the wiring needs are still unproven (a worker thread submitting to the
+renderer's device, and `device.poll(wait)` from a worker while the renderer submits). The library
+seam it needs is ready: `vd_client::chunks::geometry_from` names the GEOMETRY step apart from the
+SAMPLE step, so a box the card computed can be handed to the same geometry step.

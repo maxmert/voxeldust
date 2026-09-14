@@ -24,7 +24,11 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     the cores, never all. ★ F7 THE RECIPE GOES INTEGER-ONLY AND THE GPU DOES THE CLIENT'S CHUNK WORK TO
     THE MAXIMUM (one source, two targets; the server computes the same integers on the CPU; the pictures
     re-judged); supersedes V18's "the recipe stays 64-bit". Order: the bench, the discussion, the build;
-    slice 9 and the frozen patch follow the new recipe. ★ F8 THE FIVE DESIGN DECISIONS RULED (owner:
+    slice 9 and the frozen patch follow the new recipe. ★ F9 (2026-09-13) THE BOUNDED ASK (the client asks
+    for the finest ring only as far as its builders can deliver it before the ground reaches the screen;
+    the next rung stands whole meanwhile; a hole and a pop stay defects) AND THE CARD AS A BUDGETED SECOND
+    BUILDER (a slice of each frame, a knob; the self-check decides; the CPU share is the fallback); G2 (the
+    mesh on the card) SKIPPED on measurement. ★ F8 THE FIVE DESIGN DECISIONS RULED (owner:
     "agreed, please implement"): 40 fraction bits in 64-bit words (bench part 3: within 0.02 mm of the
     float bend), the CPU path of the same source as the fallback, the runtime GPU self-check gate, the
     order (CPU recipe → pictures → G1–G4 → slice 9), rust-gpu one crate two compilations. The design:

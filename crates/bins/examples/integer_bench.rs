@@ -295,7 +295,10 @@ fn probe_isqrt(device: &wgpu::Device, queue: &wgpu::Queue, spv: &[u8]) {
         if cpu != gpu[i] {
             differing += 1;
             if first.is_empty() {
-                first = format!(" — the first: isqrt({v}) is {cpu} on the CPU and {} on the GPU", gpu[i]);
+                first = format!(
+                    " — the first: isqrt({v}) is {cpu} on the CPU and {} on the GPU",
+                    gpu[i]
+                );
             }
         }
     }
@@ -309,17 +312,31 @@ fn probe_isqrt(device: &wgpu::Device, queue: &wgpu::Queue, spv: &[u8]) {
 /// A PROBE: the carvers' hollow on the card against the CPU's.
 fn probe_hollow(device: &wgpu::Device, queue: &wgpu::Queue, spv: &[u8]) {
     let tube = vd_recipe::cell::Tube {
-        start: [vd_recipe::Gi::new(0), vd_recipe::Gi::new(0), vd_recipe::Gi::new(0)],
-        end: [vd_recipe::Gi::new(1_000), vd_recipe::Gi::new(0), vd_recipe::Gi::new(0)],
+        start: [
+            vd_recipe::Gi::new(0),
+            vd_recipe::Gi::new(0),
+            vd_recipe::Gi::new(0),
+        ],
+        end: [
+            vd_recipe::Gi::new(1_000),
+            vd_recipe::Gi::new(0),
+            vd_recipe::Gi::new(0),
+        ],
         radius_steps: vd_recipe::Gi::new(400),
-        inv_len2: vd_recipe::Gi::new(
-            vd_recipe::root::recip_pow2(1_000 * 1_000, vd_recipe::cell::TUBE_RECIP_BITS) as i64,
-        ),
+        inv_len2: vd_recipe::Gi::new(vd_recipe::root::recip_pow2(
+            1_000 * 1_000,
+            vd_recipe::cell::TUBE_RECIP_BITS,
+        ) as i64),
     };
     let tube_words: Vec<i64> = vec![
-        tube.start[0].raw(), tube.start[1].raw(), tube.start[2].raw(),
-        tube.end[0].raw(), tube.end[1].raw(), tube.end[2].raw(),
-        tube.radius_steps.raw(), tube.inv_len2.raw(),
+        tube.start[0].raw(),
+        tube.start[1].raw(),
+        tube.start[2].raw(),
+        tube.end[0].raw(),
+        tube.end[1].raw(),
+        tube.end[2].raw(),
+        tube.radius_steps.raw(),
+        tube.inv_len2.raw(),
     ];
     let mut points: Vec<i64> = Vec::new();
     let mut i = 0i64;
@@ -428,9 +445,7 @@ fn part_5_the_cell_field(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
 
     // THE SQUARE: the same 1 024 chunks parts 1 to 4 read the columns of.
     let square: Vec<ChunkKey> = (FIRST_Y..FIRST_Y + CHUNKS_ACROSS)
-        .flat_map(|y| {
-            (FIRST_X..FIRST_X + CHUNKS_ACROSS).map(move |x| (x, y))
-        })
+        .flat_map(|y| (FIRST_X..FIRST_X + CHUNKS_ACROSS).map(move |x| (x, y)))
         .map(|(x, y)| ChunkKey {
             face: FACE,
             rung: RUNG,
@@ -494,7 +509,9 @@ fn part_5_the_cell_field(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
         .filter(|k| {
             vd_terrain::gpu::plan(body, **k).is_some_and(|p| {
                 p.sites.iter().any(|s| s.face != k.face.index())
-                    && p.sites.iter().any(|s| s.face == vd_terrain::lattice::CORNER_FACE)
+                    && p.sites
+                        .iter()
+                        .any(|s| s.face == vd_terrain::lattice::CORNER_FACE)
             })
         })
         .count();

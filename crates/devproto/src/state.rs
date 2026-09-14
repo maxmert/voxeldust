@@ -360,6 +360,10 @@ pub(crate) mod tests {
                 parent_builds: 600,
                 parent_waits: 40,
                 lead_m: 0.0,
+                build_rate_per_s: 0.0,
+                eye_speed_mps: 0.0,
+                ask_horizon_m: Vec::new(),
+                frame_work_ns: Vec::new(),
                 morph_fallbacks: 3,
                 morph_seam: 0,
                 vertices: 2_000_000,
@@ -532,6 +536,24 @@ pub struct DevTerrainStamp {
     /// through the body — a pilot inside a flying hull stands still in the hull and moves through
     /// the planet). Zero on a still stand.
     pub lead_m: f64,
+    /// ★ THE BOUNDED ASK (ruling F9 item 1): what the client measured about its builders and its
+    /// own motion this frame, and what the ask was bounded to.
+    ///
+    /// `build_rate_per_s` is the builders' CAPACITY — the worker count over the mean wall time of
+    /// a build, smoothed — never the chunks they happened to finish. `eye_speed_mps` is the eye's
+    /// speed through the body under it, the lead's metres over the interpolation buffer's seconds
+    /// (two delivered poses, SL10 clause 7). `ask_horizon_m` is each rung's DELIVERABLE HORIZON in
+    /// metres, finest first: how far that rung is asked for. EMPTY while the bound does not bind,
+    /// which is the tier rule's own switch distances and the ladder every earlier flight flew.
+    pub build_rate_per_s: f64,
+    pub eye_speed_mps: f64,
+    pub ask_horizon_m: Vec<f64>,
+    /// ★ THE FRAME'S OWN WORK, piece by piece, since the client started: the piece's name, the
+    /// wall NANOSECONDS it cost in all, its worst SINGLE FRAME, and how many times it RAN. The
+    /// pieces are the builders' throughput read, the bounded ask's arithmetic, the wanted set's
+    /// DESCENT and the crossfade materials' rewrite. A gate reads the differences across a leg,
+    /// so a frame rate that falls with the bound on names its own cause.
+    pub frame_work_ns: Vec<(String, u64, u64, u64)>,
     /// The geomorph's counts over the drawn chunks (slice 8 step 3): vertices whose morph
     /// target fell back to the coarser field (no parent triangle on their radial within the
     /// sink bound), vertices on a face seam (the field by rule), and vertices in all.

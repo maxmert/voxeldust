@@ -45,9 +45,10 @@ use vd_client::chunks::{
     ChunkJob, ChunkLane, ChunkReady, ChunkWorkers, Ruler, body_frame_point, eye_surface,
     geometry_with, oct_encode, ruler_on_surface,
 };
+use vd_client::ask_pace::{AskPace, FrameClock, PeakHold, Throughput};
 use vd_client::ladder_view::{
-    Column, FADE_ALWAYS_IN, FADE_ALWAYS_OUT, LadderView, ShadowReach, WantedSet, fade_bands,
-    rung_for_distance, sink_end_m, switch_m,
+    AskBound, AskRate, Column, FADE_ALWAYS_IN, FADE_ALWAYS_OUT, LadderView, ShadowReach, WantedSet,
+    rung_for_distance, switch_m,
 };
 use vd_client::realm_scene::{BoxShape, RealmBox};
 use vd_client_harness::probe::{
@@ -124,7 +125,7 @@ fn sun_lux(exposure: &bevy::camera::Exposure) -> f32 {
 }
 
 /// What the flags said at startup.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerrainConfig {
     pub flat: bool,
     /// THE PARENT CACHE'S MEMORY BUDGET, in bytes: the cache keeps parent meshes while their
@@ -184,6 +185,52 @@ pub struct TerrainConfig {
     /// The chunk workers' thread count; `0` = the machine's SHARE (ruling F6: a quarter of the
     /// cores, at least two — the rest belong to the game that is not built yet).
     pub workers: usize,
+    /// ★ THE BOUNDED ASK (ruling F9 item 1): the client measures its builders' throughput and asks
+    /// the finest ring only as far ahead as they can deliver it before the ground reaches the
+    /// screen. The product default is ON; `VD_TERRAIN_BOUND=0` switches it off for the comparison
+    /// flight alone.
+    pub ask_bound: bool,
+    /// THE THROUGHPUT'S WINDOW, seconds: the exponential average over which the builders' CAPACITY
+    /// is read. The capacity is a property of the MACHINE (its worker count over its mean build
+    /// time), not of the flight, so the window may be long; what must follow the flight quickly is
+    /// the SPEED, and that has its own one-second peak hold. MEASURED at three seconds (the third
+    /// and fourth bounded flights): the reading still wandered 183 to 225 chunks a second over one
+    /// leg, and the horizon wandered a tenth either side of its mean with it, which asked and
+    /// cancelled the same finest-ring chunks frame after frame. TEN seconds is what ships, and it
+    /// holds about two thousand builds. One reading may carry at most half of the average
+    /// ([`vd_client::ask_pace::THROUGHPUT_ALPHA_MAX`]), so a long idle cannot throw the window
+    /// away (review item 10).
+    pub throughput_window_s: f64,
+    /// THE HORIZON'S HYSTERESIS: how far the horizon IN FORCE must stand FROM THE ONE THE
+    /// MEASUREMENT ASKS FOR before it slides toward it at all
+    /// ([`vd_client::ladder_view::ASK_BOUND_HYSTERESIS`]). It gates the DISTANCE, never the
+    /// per-frame step: a step is proportional to the frame's own seconds, and a gate on the step
+    /// refused every step above about 54 frames a second, which left the bound never binding at
+    /// all on a fast machine (review item 1, THE BLOCKER). The horizon never jumps — it SLIDES at
+    /// [`vd_client::ladder_view::ASK_BOUND_SLEW_PER_S`], because the crossfade band rides on it
+    /// and a jumped band is a pop.
+    pub ask_bound_hysteresis: f64,
+    /// HOW FAR A HORIZON MUST MOVE before the crossfade's three material families follow it
+    /// ([`vd_client::ladder_view::ASK_BOUND_REBIND`]). A material rewrite costs the engine a bind
+    /// group, and the horizon wanders.
+    pub ask_bound_rebind: f64,
+    /// HOW FAR THE HORIZON MAY SLIDE before the DESCENT follows it
+    /// ([`vd_client::ladder_view::ASK_BOUND_BRACKET`]). The descent is the costliest thing on the
+    /// main thread, and it asks a ring wider by [`vd_client::ladder_view::ASK_BOUND_SLACK`] —
+    /// DERIVED from this fraction and the materials' own together — so no band it did not cover is
+    /// ever drawn.
+    pub ask_bound_bracket: f64,
+    /// HOW OFTEN THE BOUND MAY FORCE A DESCENT, seconds, per realm
+    /// ([`vd_client::ladder_view::ASK_BOUND_DESCENT_S`]). ZERO as shipped — the bracket alone
+    /// paces the descent, MEASURED — and a nonzero value caps the descents a realm's bound can
+    /// force a second.
+    pub ask_bound_descent_s: f64,
+    /// THE SPEED'S HOLD, seconds: the window the LARGEST reading of the lead's sawtooth is kept
+    /// over ([`vd_client::ask_pace::PeakHold`]). The sawtooth's period is the snapshot interval
+    /// (0.05 s at the 20 Hz universe tick), so a second holds twenty of its teeth — and because
+    /// the hold is a true maximum over a window and not a decay, a hull that stops reads a still
+    /// eye within that second instead of reading 194 m/s (review item 5).
+    pub speed_hold_s: f64,
 }
 const SHADOW_COARSE_STEP_ENV: &str = "VD_TERRAIN_SHADOW_COARSE_STEP";
 const SHADOW_COARSE_FROM_ENV: &str = "VD_TERRAIN_SHADOW_COARSE_FROM";
@@ -225,6 +272,17 @@ fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
+/// WHETHER A SWITCH IS ON. A switch is on unless it is turned off by name, and the names of NO are
+/// the ones a person writes: `0`, `false`, `off`, `no`, in any case (review item 9). One reading
+/// for every switch, so `VD_TERRAIN_BOUND=false` and `VD_TERRAIN_SHADOWS=off` mean what they say
+/// instead of silently meaning ON.
+fn env_on(name: &str) -> bool {
+    let off = ["0", "false", "off", "no"];
+    !std::env::var(name)
+        .map(|v| v.trim().to_ascii_lowercase())
+        .is_ok_and(|v| off.contains(&v.as_str()))
+}
+
 /// The environment switch of the far-rung splat.
 const SPLAT_ENV: &str = "VD_TERRAIN_SPLATS";
 /// The environment switches of the ablation.
@@ -257,24 +315,69 @@ impl TerrainConfig {
             splat_rung: std::env::var(SPLAT_ENV)
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
-            shadows: std::env::var(SHADOWS_ENV).as_deref() != Ok("0"),
+            shadows: env_on(SHADOWS_ENV),
             hide_rung: std::env::var(HIDE_RUNG_ENV)
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
             shadow_reach_rung: env_or(SHADOW_REACH_ENV, SHADOW_REACH_RUNG),
             shadow_cascades: env_or(SHADOW_CASCADES_ENV, SHADOW_CASCADES),
             shadow_map_px: env_or(SHADOW_MAP_ENV, SHADOW_MAP_PX),
-            shadow_cast: std::env::var(SHADOW_CAST_ENV).as_deref() != Ok("0"),
-            shadow_receive: std::env::var(SHADOW_RECEIVE_ENV).as_deref() != Ok("0"),
+            shadow_cast: env_on(SHADOW_CAST_ENV),
+            shadow_receive: env_on(SHADOW_RECEIVE_ENV),
             shadow_cast_rung: std::env::var(SHADOW_CAST_RUNG_ENV)
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
             shadow_coarse_step: env_or(SHADOW_COARSE_STEP_ENV, SHADOW_COARSE_STEP),
             shadow_coarse_from_rung: env_or(SHADOW_COARSE_FROM_ENV, SHADOW_COARSE_FROM_RUNG),
             workers: env_or(WORKERS_ENV, 0),
+            ask_bound: env_on(ASK_BOUND_ENV),
+            throughput_window_s: THROUGHPUT_WINDOW_S,
+            ask_bound_hysteresis: vd_client::ladder_view::ASK_BOUND_HYSTERESIS,
+            ask_bound_rebind: vd_client::ladder_view::ASK_BOUND_REBIND,
+            ask_bound_bracket: vd_client::ladder_view::ASK_BOUND_BRACKET,
+            ask_bound_descent_s: vd_client::ladder_view::ASK_BOUND_DESCENT_S,
+            speed_hold_s: SPEED_HOLD_S,
         }
     }
 }
+
+/// THE FRAME'S WORK, the pieces by name (the frame bar's instrument, ruling F9 item 1): the
+/// builders' throughput read, the bound's own arithmetic (the speed hold, `ask_bound`, the slew
+/// and the two hysteresis tests), the wanted set's DESCENT, and the crossfade materials' rewrite.
+const WORK_THROUGHPUT: &str = "throughput";
+const WORK_BOUND: &str = "bound";
+const WORK_DESCENT: &str = "descent";
+const WORK_REBIND: &str = "rebind";
+
+/// ★ HOW LONG A PIECE'S WORST FRAME IS REMEMBERED FOR: one second (review item 8). The peak in
+/// the stamp is a ROLLING one, not the run's own, so a flight reading the stamp can name the worst
+/// frame OF A LEG instead of the worst frame since the client started. The moving-eye flight
+/// samples every 40 ms, so a one-second window is read about twenty-five times over and no frame
+/// of a leg escapes it.
+const WORK_PEAK_S: f64 = 1.0;
+
+/// ONE PIECE OF THE FRAME'S WORK: its wall nanoseconds since the client started, how many times it
+/// ran, and the worst single frame of the last [`WORK_PEAK_S`] seconds.
+#[derive(Default)]
+struct WorkPiece {
+    total_ns: u64,
+    runs: u64,
+    peak: PeakHold,
+    peak_ns: f64,
+}
+
+/// The lead sawtooth's peak is held for this many seconds (see `TerrainConfig::speed_hold_s`).
+const SPEED_HOLD_S: f64 = 1.0;
+
+/// THE BOUNDED ASK's switch (`VD_TERRAIN_BOUND=0`): off for the comparison flight, on everywhere
+/// else. Ruling F9 item 1.
+const ASK_BOUND_ENV: &str = "VD_TERRAIN_BOUND";
+/// The builders' throughput is read over this many seconds (see `TerrainConfig`).
+const THROUGHPUT_WINDOW_S: f64 = 10.0;
+/// THE CHUNKS A COLUMN HOLDS before any descent has measured it (ruling F9 item 1): two. MEASURED
+/// on the home planet (§17.1's census: 6 659 chunks over the ground stand's columns): a column
+/// holds one chunk where the surface crosses one, and two where it crosses a chunk boundary.
+const CHUNKS_PER_COLUMN: f64 = 2.0;
 
 /// THE THREADED WORKERS: a PRIORITY QUEUE served by `threads` threads, a done channel back. The
 /// library's seam, filled in by the binary (HR5: the library's own tests use the inline workers).
@@ -538,6 +641,20 @@ struct RealmLadder {
     view: LadderView,
     eye: Option<[f64; 3]>,
     wanted: WantedSet,
+    /// ★ THE HORIZON AS IT STANDS NOW, AND THE THREE RATES THAT READ IT (ruling F9 item 1): the
+    /// pure pace, in the Tier-A library, where every arm of it is a unit test
+    /// ([`vd_client::ask_pace::AskPace`]). The render crate only wires it: the descent reads
+    /// `pace.asked()`, the crossfade's materials read `pace.drawn()`, and the slew moves
+    /// `pace.held()` every frame.
+    pace: AskPace,
+    /// ★ THE EYE'S SPEED through this body, metres a second, as the bounded ask reads it (ruling
+    /// F9 item 1): the LARGEST reading of the last `speed_hold_s` seconds
+    /// ([`vd_client::ask_pace::PeakHold`]), because the lead's metres are a sawtooth whose mean is
+    /// half the true speed. The hold is a true maximum over a window and reaches ZERO when the
+    /// hull stops; the decay it replaced still read 194 m/s a second after a stop from 528.
+    speed: PeakHold,
+    /// The speed the hold last read, for the stamp.
+    speed_mps: f64,
 }
 
 /// One drawn chunk: its entity, its probe twin in Capture mode, and its morph counts (targets
@@ -631,6 +748,22 @@ pub struct Terrain {
     urgent_frames: u64,
     /// The frames this system ran (M8-2a): the frame rate, against the build and harvest rates.
     frames: u64,
+    /// ★ THE BUILDERS' THROUGHPUT for the bounded ask (ruling F9 item 1): how many workers build,
+    /// the smoothed CAPACITY in chunks a second (the worker count over the mean wall time of a
+    /// build — never the chunks they happened to finish, which on a walk is the ask and not the
+    /// ceiling), and the counter and the moment the last reading was taken at.
+    workers: usize,
+    throughput: Throughput,
+    /// This frame's own seconds, which is how far the deliverable horizons may slide (ruling F9
+    /// item 1).
+    frame_clock: FrameClock,
+    /// ★ THE FRAME'S OWN WORK, named piece by piece (ruling F9 item 1's frame bar): for each
+    /// piece the wall NANOSECONDS it has cost since the client started, how many times it RAN,
+    /// and the worst SINGLE FRAME of it IN THE LAST [`WORK_PEAK_S`] SECONDS. A frame rate that
+    /// falls with the bound on is either one of these pieces or none of them, and this is how the
+    /// flight tells which — per leg, because the peak is a rolling window and not the run's own
+    /// (review item 8).
+    work_ns: BTreeMap<&'static str, WorkPiece>,
     /// The main thread's nanoseconds in the harvest loop since the start (M8-2a).
     harvest_nanos: u64,
     sun: Option<Entity>,
@@ -683,6 +816,10 @@ impl Terrain {
             bytes_drawn: 0,
             urgent_frames: 0,
             frames: 0,
+            workers: threads,
+            throughput: Throughput::default(),
+            frame_clock: FrameClock::default(),
+            work_ns: BTreeMap::new(),
             harvest_nanos: 0,
             sun: None,
             sun_tan_i: None,
@@ -690,6 +827,99 @@ impl Terrain {
             ruler_assets: None,
             ruler_cache: None,
             stamp: None,
+        }
+    }
+
+    /// ONE PIECE'S WALL TIME THIS FRAME, added to its running total, and offered to its rolling
+    /// peak (the frame bar's instrument).
+    fn note_work(&mut self, name: &'static str, dt: std::time::Duration, runs: u64, now_s: f64) {
+        let ns = dt.as_nanos() as u64;
+        let piece = self.work_ns.entry(name).or_default();
+        piece.total_ns += ns;
+        piece.runs += runs;
+        piece.peak_ns = piece.peak.read(ns as f64, now_s, WORK_PEAK_S);
+    }
+
+    /// THE FRAME'S WORK as the stamp states it: the piece, its nanoseconds in all, its worst
+    /// single frame of the last [`WORK_PEAK_S`] seconds, and how many times it ran.
+    fn frame_work(&self) -> Vec<(String, u64, u64, u64)> {
+        self.work_ns
+            .iter()
+            .map(|(name, piece)| {
+                (
+                    (*name).to_owned(),
+                    piece.total_ns,
+                    piece.peak_ns as u64,
+                    piece.runs,
+                )
+            })
+            .collect()
+    }
+
+    /// ★ THE BUILDERS' THROUGHPUT, read as a CAPACITY (ruling F9 item 1): the pure reader in the
+    /// Tier-A library ([`vd_client::ask_pace::Throughput`]) over the lane's own counters.
+    fn read_throughput(&mut self, now_s: f64) -> f64 {
+        let built = self.lane.built();
+        self.throughput.read(
+            built.chunks,
+            built.nanos,
+            now_s,
+            self.workers,
+            self.config.throughput_window_s,
+        )
+    }
+
+    /// ★ THE CROSSFADE FOLLOWS THE BOUND (ruling F9 item 1): a realm whose deliverable horizons
+    /// moved rewrites its own materials in place — the ground's, the probe's and the caster's —
+    /// because all three carry the rung's bands as a uniform read from the same effective switch
+    /// distances the descent asks at. Nothing is rebuilt and nothing is respawned.
+    fn rebind_bands(
+        &mut self,
+        realm: RealmId,
+        body: &vd_terrain::BodyDefinition,
+        ground: &mut Assets<GroundMaterial>,
+        probes: Option<&mut Assets<ProbeMaterial>>,
+    ) {
+        let rungs = body.ladder().rungs;
+        let Some(ladder) = self.ladders.get(&realm) else {
+            return;
+        };
+        let bound = ladder.pace.drawn().clone();
+        let coarse_step = self.config.shadow_coarse_step;
+        for ((_, rung), handle) in self.materials.range((realm, 0u8)..=(realm, u8::MAX)) {
+            if let Some(m) = ground.get_mut(handle) {
+                m.extension.set_bands(
+                    bound.fade_bands(*rung, rungs),
+                    bound.sink_end_m(body, *rung, rungs),
+                );
+            }
+        }
+        // A caster's bands are the DRAWN rung's — the rung it casts for (§24.5) — so they follow
+        // the bound at that rung, not at the caster's own.
+        for ((_, rung), handle) in self.shadow_materials.range((realm, 0u8)..=(realm, u8::MAX)) {
+            let drawn = rung.saturating_sub(coarse_step);
+            if let Some(m) = ground.get_mut(handle) {
+                m.extension.set_bands(
+                    bound.fade_bands(drawn, rungs),
+                    bound.sink_end_m(body, drawn, rungs),
+                );
+            }
+        }
+        if let Some(probes) = probes {
+            for ((_, kind, rung), handle) in self
+                .probe_materials
+                .range((realm, 0u8, 0u8)..=(realm, u8::MAX, u8::MAX))
+            {
+                if *kind != PROBE_KIND_TERRAIN {
+                    continue;
+                }
+                if let Some(m) = probes.get_mut(handle) {
+                    m.set_bands(
+                        bound.fade_bands(*rung, rungs),
+                        bound.sink_end_m(body, *rung, rungs),
+                    );
+                }
+            }
         }
     }
 
@@ -703,14 +933,15 @@ impl Terrain {
         rung: u8,
         body: &vd_terrain::BodyDefinition,
     ) -> Handle<ProbeMaterial> {
+        let bound = self.bound_of(realm);
         self.probe_materials
             .entry((realm, kind, rung))
             .or_insert_with(|| {
                 let rungs = body.ladder().rungs;
                 let (bands, sink_end, sink) = if kind == PROBE_KIND_TERRAIN {
                     (
-                        fade_bands(rung, rungs),
-                        sink_end_m(body, rung, rungs),
+                        bound.fade_bands(rung, rungs),
+                        bound.sink_end_m(body, rung, rungs),
                         vd_client::chunks::sink_m(body, rung),
                     )
                 } else {
@@ -729,6 +960,7 @@ impl Terrain {
         rung: u8,
         body: &vd_terrain::BodyDefinition,
     ) -> Handle<GroundMaterial> {
+        let bound = self.bound_of(realm);
         self.materials
             .entry((realm, rung))
             .or_insert_with(|| {
@@ -746,14 +978,22 @@ impl Terrain {
                         ..default()
                     },
                     extension: LadderFade::new(
-                        fade_bands(rung, rungs),
-                        sink_end_m(body, rung, rungs),
+                        bound.fade_bands(rung, rungs),
+                        bound.sink_end_m(body, rung, rungs),
                         vd_client::chunks::sink_m(body, rung),
                         f64::from(vd_seed::ladder::cell_m(rung)),
                     ),
                 })
             })
             .clone()
+    }
+
+    /// THE BOUNDED ASK in force for a realm (ruling F9 item 1): the tier rule's own radii while
+    /// the realm has no ladder yet.
+    fn bound_of(&self, realm: RealmId) -> AskBound {
+        self.ladders
+            .get(&realm)
+            .map_or_else(AskBound::unbounded, |l| l.pace.drawn().clone())
     }
 
     /// THE CASTER'S MATERIAL for a realm and rung (the shadow ladder): the rung's own material as
@@ -784,6 +1024,7 @@ impl Terrain {
         // before it (the pop detector): the caster left unsunk in one frame at the handover, a step
         // of about 50 levels along the shadow's edge.
         let drawn_rung = rung.saturating_sub(self.config.shadow_coarse_step);
+        let bound = self.bound_of(realm);
         self.shadow_materials
             .entry((realm, rung))
             .or_insert_with(|| {
@@ -798,8 +1039,8 @@ impl Terrain {
                         ..default()
                     },
                     extension: LadderFade::new(
-                        fade_bands(drawn_rung, rungs),
-                        sink_end_m(body, drawn_rung, rungs),
+                        bound.fade_bands(drawn_rung, rungs),
+                        bound.sink_end_m(body, drawn_rung, rungs),
                         vd_client::chunks::sink_m(body, rung),
                         f64::from(vd_seed::ladder::cell_m(rung)),
                     )
@@ -1207,20 +1448,99 @@ pub(crate) fn sync_terrain(
     // was last placed (the cap's worth before the sun is born: the longest shadows, so no caster
     // is missed), and the ladder's step. A change past the hysteresis recomputes the wanted set.
     let shadow = shadow_reach(&terrain.config, terrain.sun_tan_i);
+    // ★ THE BOUNDED ASK (ruling F9 item 1): the builders' measured capacity, and the eye's own
+    // speed through each body — the LEAD offset over the buffer's own seconds, both of them
+    // differences of DELIVERED poses (SL10 clause 7: the client never coasts a pose forward).
+    let work_started = std::time::Instant::now();
+    let throughput = terrain.read_throughput(now_s);
+    let frame_s = terrain.frame_clock.seconds(now_s);
+    let work_throughput = work_started.elapsed();
+    let lead_s = lead_cursor.map_or(0.0, |_| snap.lead_seconds());
+    let bound_on = terrain.config.ask_bound;
+    let hysteresis = terrain.config.ask_bound_hysteresis;
+    let rebind_fraction = terrain.config.ask_bound_rebind;
+    let bracket = terrain.config.ask_bound_bracket;
+    let descent_every_s = terrain.config.ask_bound_descent_s;
+    let speed_hold_s = terrain.config.speed_hold_s;
     let mut recomputed: Vec<RealmId> = Vec::new();
+    let mut rebind: Vec<RealmId> = Vec::new();
+    // ★ THE FRAME'S OWN WORK (ruling F9 item 1's frame bar): the wall time this frame spends in
+    // each piece the bounded ask added, and in the descent it may re-run. The flight reads them.
+    let mut work_bound = std::time::Duration::ZERO;
+    let mut work_descent = std::time::Duration::ZERO;
+    let mut descents = 0u64;
     for eb in &with_bodies {
+        let piece = std::time::Instant::now();
+        let rungs = eb.body.ladder().rungs;
+        let reading = if lead_s > 0.0 {
+            (DVec3::from_array(eb.lead) - DVec3::from_array(eb.eye)).length() / lead_s
+        } else {
+            0.0
+        };
         let ladder = terrain.ladders.entry(eb.realm).or_default();
+        // THE SAWTOOTH'S PEAK (see `RealmLadder::speed`): the largest reading of the last
+        // `speed_hold_s` seconds, which reaches ZERO when the hull stops.
+        ladder.speed_mps = ladder.speed.read(reading, now_s, speed_hold_s);
+        let speed_mps = ladder.speed_mps;
+        // The bound reads the LAST DESCENT's own altitude and its own chunks-a-column: both are
+        // measurements the descent already made, and the recipe is not run a second time for them.
+        // Before the first descent there is no measurement, and the ask is the tier rule's.
+        let candidate = if bound_on & !ladder.wanted.is_empty() {
+            vd_client::ladder_view::ask_bound(
+                rungs,
+                AskRate {
+                    chunks_per_s: throughput,
+                    speed_mps,
+                    altitude_m: ladder.wanted.altitude_m,
+                    chunks_per_column: ladder.wanted.chunks_per_column(CHUNKS_PER_COLUMN),
+                },
+            )
+        } else {
+            AskBound::unbounded()
+        };
+        ladder.pace.slew(&candidate, rungs, hysteresis, frame_s);
+        if ladder.pace.take_rebind(rungs, rebind_fraction) {
+            rebind.push(eb.realm);
+        }
+        let bound_changed = ladder.pace.take_descent(rungs, bracket, descent_every_s, now_s);
+        if bound_changed {
+            ladder.view.bound = ladder.pace.asked().clone();
+        }
         let reach_changed = match (ladder.view.shadow, shadow) {
             (Some(a), Some(b)) => !a.same_as(b),
             (a, b) => a.is_some() != b.is_some(),
         };
-        if moved(ladder.eye, eb.lead) || reach_changed {
+        let run_descent = moved(ladder.eye, eb.lead) || reach_changed || bound_changed;
+        work_bound += piece.elapsed();
+        if run_descent {
+            let descent = std::time::Instant::now();
             ladder.view.shadow = shadow;
             ladder.wanted = ladder.view.wanted(&eb.body, eb.lead);
             ladder.eye = Some(eb.lead);
             recomputed.push(eb.realm);
+            work_descent += descent.elapsed();
+            descents += 1;
         }
     }
+    // THE CROSSFADE FOLLOWS THE BOUND: the realm's three material families carry the same
+    // effective switch distances the descent asked at, rewritten in place.
+    let rebinds = rebind.len() as u64;
+    let piece = std::time::Instant::now();
+    for realm in &rebind {
+        if let Some(body) = terrain.lane.body(*realm).map(Arc::clone) {
+            terrain.rebind_bands(
+                *realm,
+                &body,
+                &mut ground_materials,
+                probe_materials.as_deref_mut(),
+            );
+        }
+    }
+    let work_rebind = piece.elapsed();
+    terrain.note_work(WORK_THROUGHPUT, work_throughput, 1, now_s);
+    terrain.note_work(WORK_BOUND, work_bound, 1, now_s);
+    terrain.note_work(WORK_DESCENT, work_descent, descents, now_s);
+    terrain.note_work(WORK_REBIND, work_rebind, rebinds, now_s);
     // THE CASTING DELTAS (item 18): a drawn chunk that left the casting set releases its caster;
     // one that entered it asks for its caster.
     let coarse_step = terrain.config.shadow_coarse_step;
@@ -1811,6 +2131,19 @@ pub(crate) fn sync_terrain(
                 parent_builds: parents.builds,
                 parent_waits: parents.waits,
                 lead_m,
+                // THE BOUNDED ASK (ruling F9 item 1): the builders' capacity, the eye's speed
+                // through the body under it, and that body's deliverable horizons.
+                build_rate_per_s: terrain.throughput.value(),
+                eye_speed_mps: terrain
+                    .ladders
+                    .get(realm)
+                    .map_or(0.0, |l: &RealmLadder| l.speed_mps),
+                ask_horizon_m: terrain
+                    .ladders
+                    .get(realm)
+                    .map(|l: &RealmLadder| l.view.bound.horizons_m())
+                    .unwrap_or_default(),
+                frame_work_ns: terrain.frame_work(),
                 morph_fallbacks: terrain.morph_totals[0],
                 morph_seam: terrain.morph_totals[1],
                 vertices: terrain.morph_totals[2],

@@ -8265,6 +8265,111 @@ rings; what is left is an interim with a named step:
    on other machines. The two client seams the wiring would need are still unproven: a worker thread
    submitting to the renderer's device, and `device.poll(wait)` from a worker while the renderer
    submits.
+   ★ **F9 ITEM 1 — THE THROUGHPUT-BOUNDED ASK — LANDED (2026-09-13).** The client no longer asks for
+   more chunks than its builders can deliver before the ground reaches the screen. It measures its
+   builders' CAPACITY (`Terrain::read_throughput`: the worker count over the mean wall time of a
+   build, an exponential average over ten seconds — a capacity, never the chunks they happened to
+   finish, which on a walk is the ask and not the ceiling) and the eye's own speed (the lead's metres
+   over the interpolation buffer's seconds — two DELIVERED poses, SL10 clause 7), and gives every rung
+   a DELIVERABLE HORIZON: its EFFECTIVE SWITCH DISTANCE (`vd_client::ladder_view::AskBound`,
+   `ask_bound`). The walk is coarsest-first with the capacity as a budget; the rung the budget runs
+   out on keeps the reach it pays for, and every finer rung is at most half its coarser neighbour —
+   the tier rule's own shape, so no two rungs land on one distance. Because the descent's split, the
+   rung's territory, the crossfade's bands and the sink's ramp ALL read that one number, a column
+   inside the horizon is still asked at the tier rule's rung, one beyond it is asked at the next rung
+   whose territory now reaches in, and the handover is the ladder's own crossfade and never a cut.
+   The horizon SLIDES (`AskBound::slewed_toward`, a quarter of its own length a second after the
+   frame-bar cure below) instead of jumping,
+   because a jumped band moves every chunk in it in one frame, which is a pop. The bound NEVER binds
+   where the builders cover the ask — a still stand, a walk, a strong machine, an empty ring — and
+   then `AskBound::unbounded` IS the tier rule's own radii, which is why the frozen pictures are
+   untouched. `VD_TERRAIN_BOUND=0` switches it off for the comparison flight; the product default is
+   on. Unit tests in `vd-client` cover the arithmetic and the invariant (inside the horizon the
+   tier rule's rung, beyond it the next rung, never unasked). The design and both flights:
+   `slice_08_ladder_discussion.md` §25.
+   ★ **AND TWO FAULTS THE FLIGHTS FOUND BEFORE IT WORKED.** (1) THE SAWTOOTH: the lead eye FREEZES at
+   the freshest DELIVERED pose and never coasts, so the lead's metres are a sawtooth whose MEAN is
+   about half the true speed (MEASURED: 236 m/s read on the 528 m/s leg, 483 at the peak). A
+   half-read speed halves every ask and the bound was INERT on all 1 228 samples; the client now
+   HOLDS the peak for a second (`TerrainConfig::speed_hold_s`), which is a MAXIMUM OVER READINGS and
+   still no extrapolation. (2) THE LADDER'S RADIUS IS ITS FLOOR, not the recipe's surface: it stands
+   kilometres under the ground, and reading it as the eye's altitude made every near ring look empty
+   (a ring whose slant does not reach the ground has no ask), so the budget covered everything. The
+   descent now STATES the altitude it ran at (`WantedSet::altitude_m`) and the bound reads that.
+   ★ **THE JUDGE, two flights of ONE binary at the average machine's three workers** (§25.5), the
+   528 m/s leg, bound OFF → ON: the band's worst gap at the DRAWN rung **981 → 449**, the queue's
+   peak **2 199 → 1 611**, the pop detector's widest step **48 → 47**, frames a second
+   **43.5 → 39.1**. ✅ completeness improves by more than half; ✅ the pop does not rise (both inside
+   the leg's own 47-to-54 range over seven earlier flights); 🟥 **THE FRAMES FELL, three times
+   measured (39.1, 38.9, 38.7 against 43.5/43.2)** — ★ **AND THE CAUSE WAS MEASURED AND CURED
+   (2026-09-14).** The flight now times each piece the bound added and prints `THE FRAME'S WORK` per
+   leg. On the 528 m/s leg the throughput read cost 0.000 ms a frame, the bound's arithmetic 0.003,
+   the materials' rewrite 0.000 — and **the wanted set's DESCENT 18.117 ms a frame against the
+   unbounded flight's 9.723**, from +9 % more runs and +53 % per run: the horizon SLID every frame,
+   and a slid horizon forced a descent for every body in the window (the planet's own runs every
+   frame at that speed anyway; the extras are the far bodies, whose descents are the expensive
+   ones). THE CURE, three measured steps: (1) the DRAWN bands still slide every frame — a jumped
+   band is a pop — but the DESCENT re-runs only when the horizon leaves the ring it last asked for
+   (`ASK_BOUND_BRACKET`), and asks that ring wider by the same fraction (`AskBound::with_slack`), so
+   no band the picture draws was ever unasked: **39.1 → 41.8 frames a second**; (2) a rate limit of
+   half a second on top made it WORSE (40.1) and stays at zero in the config as the lever it is;
+   (3) the slack goes ONLY where the horizon moves, since a rung left at the tier rule's own radius
+   never slides and widening it costs every column of the widening: **45.0 frames a second and the
+   descent 8.565 ms — BELOW the unbounded flight's own 9.805**. The slew slowed with it, half a
+   length a second to a quarter (a 0.8 s band traversal, softer not harsher). ★ **RE-FLOWN, one
+   binary, bound OFF → ON at 528 m/s: frames 43.8 → 45.0, the worst gap at the DRAWN rung 974 →
+   401, the queue 2 189 → 1 768, the pop 29 → 43.** 🟨 The pop is the one mixed reading: four legs of
+   five improve (240 m/s 48 → 36, turning 54 → 44, the slow hull 21 → 17, the walk 20 → 20) and the
+   528 leg's OFF value of 29 is the lowest of that leg's eight readings (54, 50, 48, 48, 47, 43, 35,
+   29), so a second pair is owed. 🟥 The 240 m/s leg still
+   reads 540 frames with a gap (14 urgent at the worst, against the unbounded pair's 449 and 11) and
+   the bound is INERT there (0 of 1 227 samples) — that residue
+   is the ask's TIMING (§24.4), which no bound cures. The still stands are untouched (the picture
+   gate: 0 to 18 content pixels differing at a widest step of ONE, inside the gate's own noise), so
+   the frozen pictures stand; `terrain-pin` is green, so no byte of the world moved.
+   ★★ **AND THEN AN ADVERSARIAL REVIEW FOUND THAT IT NEVER BOUND ABOVE 54 FRAMES A SECOND
+   (2026-09-14, cured; §25.9).** THE BLOCKER: the horizon's hysteresis gated THE PER-FRAME STEP, not
+   the distance from the target. A step is `0.2678 · dt` of the horizon, so below 18.7 ms a frame
+   every step was smaller than the half-percent hysteresis and the horizon never left the tier
+   rule's own radii AT ALL — on a machine above 53.6 frames a second the whole feature was a no-op,
+   and the flights that judged it ran at 39 to 47, inside the cliff by luck. The gate now reads the
+   DISTANCE: the horizon slides every frame until it stands within the hysteresis of what the
+   measurement asks for, then holds, so the arrival takes the same WALL TIME at any frame rate
+   (asserted at 144 and at 30 frames a second). ★ THE REAL CURE IS WHERE THE CODE LIVES: the pace
+   had grown in the Tier-B render crate, where no test could reach it. It is now
+   `vd_client::ask_pace` (`AskPace`, `PeakHold`, `Throughput`, `FrameClock`) in Tier-A at 100 %
+   region and branch coverage, and the render crate only wires it. Three more defects fell out of
+   the move, each now a test: (1) the speed's "one-second peak hold" was an exponential DECAY — a
+   hull that stopped dead from 528 m/s still read 194 m/s a second later, and the bound went on
+   coarsening ground the pilot stood still on; `PeakHold` is a true maximum over a window of eight
+   slots and reads ZERO. (2) The descent's slack was the bracket alone, and the picture could draw
+   a band the descent never asked for: the drawn base may stand `1/(1−REBIND)` out and the asked
+   base `1−BRACKET` in, so the worst stand is 1.170 against an asked edge of 1.10.
+   `ASK_BOUND_SLACK` is now DERIVED from the two (0.17), asserted at COMPILE TIME, and the unit test
+   walks the worst stand at every rung and asserts that the bracket alone falls short. (3) A reading
+   taken after a long idle threw the ten-second capacity window away (its weight clamped to one);
+   one reading now carries at most half (`THROUGHPUT_ALPHA_MAX`). Plus: every terrain switch reads
+   `0`/`false`/`off`/`no` in any case, where only the exact `0` used to turn one off; the flight's
+   frame-anatomy peak is now PER LEG (the stamp's peak rolls over one second, the flight samples
+   every 40 ms); and `descent_due`/`rebind_due` are `take_descent`/`take_rebind`, which say that
+   they move what they answer about.
+   ★ **THE SECOND PAIR, ON THE CURED CODE (2026-09-14, §25.10) — EVERY BAR GREEN.** One binary,
+   three workers, bound ON → OFF at 528 m/s: **frames 45.6 → 43.3** (the bounded ask is FASTER), the
+   worst gap at the DRAWN rung **207 → 972**, the queue **1 512 → 2 194**, and the descent **7.695 →
+   10.345 ms a frame** (its worst frame 33.4 against 36.7, now reported PER LEG). ★ The TURNING leg
+   HOLDS THE BAND ON EVERY FRAME with the bound on, against 102 urgent chunks at the worst without
+   it. ★ **THE POP QUESTION IS ANSWERED AND IT IMPROVES:** 528 m/s **37 → 40**, 240 m/s **40 → 47**,
+   turning **44 → 48**, the walk 17 → 18; only the slow hull reads higher (28 → 11), and that leg's
+   OFF reading came with a 3 710-chunk gap and a 6 519-deep queue because the OFF run entered it
+   still filling the ring from the walk. The bound does not widen the pop.
+   🟧 STILL OPEN after it: the 240 m/s leg's late ask (1 027 frames with a gap against 576, worst gap
+   15 chunks); a turn is not in the
+   ask rate (only translation is), so the turning leg is untouched; and F9 item 2, the card as a
+   budgeted second builder — NOT STARTED, because ruling F9's own order puts the bounded ask first
+   and judges the card by the same flight, the pop's second pair is owed, and the two client seams
+   below are still unproven. The
+   library seam it needs IS ready: `vd_client::chunks::geometry_from` names the GEOMETRY step apart
+   from the SAMPLE step, so a box the card computed can be handed to the same geometry step.
    ★ THE WORKSPACE REDS AT THIS LANDING, MEASURED ON THE LAST COMMIT (d165d3c, a fresh worktree,
    release, 2026-09-13) — ALL PRE-EXISTING, none from the recipe: `dual_cluster_crossing_smoke::
    a_dot_re_homes_home_to_galaxy_over_the_process_dual_shard_tier` (−3.962e14 m clear against the

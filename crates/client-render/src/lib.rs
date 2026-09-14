@@ -756,6 +756,12 @@ impl ProbeMaterial {
             },
         }
     }
+
+    /// THE BANDS REWRITTEN IN PLACE — the probe's own half of [`LadderFade::set_bands`], so what
+    /// the probe reads is what the picture shows under the bounded ask too.
+    pub(crate) fn set_bands(&mut self, bands: ([f64; 2], [f64; 2]), sink_end_m: f64) {
+        self.params.bands = fade_uniform(bands, sink_end_m);
+    }
 }
 
 /// The bands as the shaders' uniform: (in_lo, sink_end, out_lo, out_hi), narrowed once — the
@@ -830,6 +836,14 @@ impl LadderFade {
             sink: Vec4::new(sink_m as f32, 0.0, 0.0, 0.0),
             splat: Vec4::new(cell_m as f32, 0.0, 0.0, 0.0),
         }
+    }
+
+    /// THE BANDS REWRITTEN IN PLACE (ruling F9 item 1, the bounded ask): a rung's crossfade bands
+    /// move when its deliverable horizon moves, and the bands are a uniform — so every drawn chunk
+    /// of that rung reads the new ones on the next frame, with no mesh rebuilt and no entity
+    /// respawned. The sink's depth and the splat's cell are the rung's own and never move.
+    pub(crate) fn set_bands(&mut self, bands: ([f64; 2], [f64; 2]), sink_end_m: f64) {
+        self.bands = fade_uniform(bands, sink_end_m);
     }
 
     /// The same material as a light caster, sunk by `caster_sink_m`.

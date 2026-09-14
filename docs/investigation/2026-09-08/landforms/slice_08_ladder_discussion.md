@@ -2217,3 +2217,400 @@ a sibling was drawn at its last shipped pose under its parent's arc-blended pose
 instants could differ by one snapshot. Unit tests in `vd-client` (248 green, the still-parent
 and moving-parent cases) prove the blend; the in-flight measurement (a second hull in view of
 the moving eye, judged by the pop detector) is owed with the storm's next extension.
+
+## 25. ★ THE BOUNDED ASK (ruling F9 item 1, 2026-09-13)
+
+### 25.1 The rule, and why it is one number per rung
+
+Ruling F9 item 1: *the client measures its builders' throughput as it goes and asks for the finest
+ring only as far ahead as the builders can deliver it before the ground reaches the screen; beyond
+that it asks for the next rung, which stands whole, and the ladder's crossfade blends the finer
+rung in as it lands.*
+
+The measurement behind it (§24.4, F6's baseline): on this machine's SHARE of three workers, an eye
+at 528 m/s asks for about 400 chunks a second and three workers build 195. Every frame of that leg
+has a gap and the queue holds two thousand chunks. The unbounded ask cannot be met, so the picture
+shows holes and late pops; the bounded ask trades detail the eye cannot see at speed for a picture
+that stands whole.
+
+**The form.** The bound is ONE NUMBER PER RUNG — the rung's EFFECTIVE SWITCH DISTANCE
+(`vd_client::ladder_view::AskBound`). Every part of the ladder already reads a rung's switch
+distance:
+
+| what reads it | where | what the bound does to it |
+|---|---|---|
+| the descent's SPLIT | `Sweep::descend`, `geo.near < fade_in[1]` | a column splits into the finer rung only inside that rung's horizon |
+| the rung's TERRITORY | `descend`, `geo.near < switch_m(rung)` | the rung is urgent out to its horizon, not to the tier rule's radius |
+| the CROSSFADE's bands | `AskBound::fade_bands` → the three materials' uniform | the band sits on the horizon, so the handover is a crossfade and never a cut |
+| the SINK's ramp | `AskBound::sink_end_m` | a rung with no finer rung under it sinks nowhere, exactly as rung 0 does |
+
+So moving that one number moves all four together. A column of the finest rung INSIDE the horizon
+is still asked at the tier rule's own rung; one BEYOND it is asked at the next rung, whose territory
+now reaches in to the horizon — the parent was already wanted under the crossfade, and now it is
+wanted whole. No column is ever left unasked (the invariant test asserts exactly that).
+
+### 25.2 The arithmetic
+
+```
+  rate    = the builders' CAPACITY, chunks a second   (the worker count ÷ the mean wall time of a
+                                                       build, an exponential average over 10 s;
+                                                       one reading carries at most half of it)
+  v       = the eye's speed through the body, m/s     (the lead's metres ÷ the buffer's seconds:
+                                                       two DELIVERED poses, SL10 clause 7)
+  h       = the eye's height over the surface, m
+  z       = the chunks a column holds                 (the last descent's own keys ÷ columns)
+
+  for rung L:   R_L      = HYSTERESIS_OUT · switch(L)        the distance the split admits rung L
+                g(R)     = √(max(0, R² − h²))                the ground circle at slant R
+                A_L      = (62 · cell(L))²                   a column's footprint
+                q_L(R)   = 2 · g(R) · v · z / A_L            the chunks a second the ask adds
+
+  walk COARSEST FIRST with a budget b = rate:
+      q_L(R_L) ≤ b  ⇒  the rung keeps the tier rule's radius,  b −= q_L(R_L)
+      otherwise     ⇒  the rung keeps the reach b pays for,    b = 0
+  then, from the top down, every finer rung is at most HALF its coarser neighbour — the tier rule's
+  own shape, so no two rungs ever land on one distance (two rungs sharing a crossfade band would
+  draw a half-transparent shell).
+```
+
+Three readings follow from the shape, and each is a unit test:
+
+- **A still stand, a walk or a strong machine never binds.** `v = 0` makes every `q` zero; a large
+  `rate` covers every rung; either way `ask_bound` returns `AskBound::unbounded`, which IS the tier
+  rule's own radii — so the picture gate's still stands are byte for byte what they were.
+- **A ring that reaches no ground costs nothing.** An eye a kilometre up has no ground within
+  869 m, so `g(R_0) = 0` and the finest ring is free. That is why the bound barely touches a hull
+  at altitude and bites hardest on a low, fast pass — which is where §16.2's probe measured the
+  wall.
+- **The horizon follows both levers.** More builders push it out; a faster eye pulls it in.
+
+**What the estimate is honest about.** `q_L` counts the WHOLE leading edge of a ring, where the
+skyline and the horizon cull part of it, and it counts translation only, where a turn uncovers
+ground too. So the bound binds a little sooner than the true ask needs. Ruling F9 puts completeness
+first, and the flight is the judge.
+
+**The hysteresis.** The horizon IN FORCE slides toward the one the measurement asks for until the
+two stand within half a percent (`ASK_BOUND_HYSTERESIS` = 0.005) of each other, and then it holds.
+Without it the measured rate and the measured speed would walk the crossfade bands in and out for
+ever, and every material's uniform with them; half a percent of a 491 m horizon is two and a half
+metres, which no eye can see, and any real move is far larger.
+
+★ **AND IT GATES THE DISTANCE, NEVER THE STEP.** The first writing compared the horizon before a
+frame's step with the horizon after it, and discarded the step when the two were within the
+hysteresis. A step is `0.2678 · dt` of the horizon, so the gate refused EVERY step below about
+18.7 ms a frame — above 53.6 frames a second the bound never left the tier rule's own radii and the
+whole feature silently did nothing. §25.9 tells that story.
+
+**The knob.** `VD_TERRAIN_BOUND=0` switches the bound off for the comparison flight; the product
+default is ON.
+
+### 25.3 What it cost the still stands, MEASURED (the picture gate, 2026-09-13)
+
+The bound must not bind on a still stand: a still eye has no speed, so every `q` is zero, the
+budget covers everything and `ask_bound` returns `AskBound::unbounded` — which IS the tier rule's
+own radii. The picture gate is that measurement, and it ran at the whole machine's fourteen
+workers, as the harness always does.
+
+
+| stand | content pixels differing | widest channel step |
+|---|---|---|
+| ground | 0 of 635 557 | 0 |
+| hill | 10 of 701 472 | 1 |
+| aloft | 0 of 586 341 | 0 |
+| orbit | 18 of 466 445 | 1 |
+| seam | 0 of 672 789 | 0 |
+
+Every stand sits inside the gate's OWN run-to-run noise (§23's incidental measurement: two runs of
+one binary read 0 to 19 content pixels differing at a widest step of ONE), and three of the five read
+zero. So the bound bound nothing on a still stand, and the owner's frozen pictures need no second
+look. `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in
+129.07s`.
+
+### 25.4 THE SAWTOOTH — the first bounded flight found the speed, not the bound (2026-09-13)
+
+The first flight of the bounded ask, at the average machine's three workers, read `the ask was
+bound on 0 of 1228 samples` on the 528 m/s leg, with 968 urgent chunks missing at the worst sample.
+The bound was inert, and the reason is the SPEED, not the arithmetic.
+
+The lead eye FREEZES at the freshest DELIVERED pose and never coasts (§16.1; SL10 clause 7), so the
+lead's METRES are a SAWTOOTH: zero the instant a row lands, and the whole buffer's travel just
+before the next one. MEASURED (§16.2): at 240 m/s the lead reads 14 to 30 m and at 528 m/s up to
+64 m, against a buffer of 0.12 s — so the sawtooth's PEAK is the true speed (64 ÷ 0.12 = 533 m/s)
+and its mean is about half of it. The flight's own time course showed it plainly: on the 528 m/s
+leg the eye read 236 m/s most frames and 483 m/s at the peak. A speed half the truth halves every
+`q`, the budget then covered the ask on most frames, and the horizon slewed back out as fast as it
+slewed in.
+
+**The cure, and it is still a measurement.** The client HOLDS the peak: `speed_mps` is the
+reading, or what is left of the last peak after this frame's share of a one-second hold
+(`TerrainConfig::speed_hold_s`). The sawtooth's period is the snapshot interval (0.05 s at the
+20 Hz universe tick), so one second holds twenty of its teeth, and a hull that stops reads a still
+eye within a second. Nothing is extrapolated: the peak is a MAXIMUM OVER READINGS, each of them a
+difference of two delivered poses.
+
+### 25.5 THE JUDGE — the moving eye at the average machine's three workers, the bound ON and OFF
+### (2026-09-13)
+
+Two flights of the SAME binary, `VD_TERRAIN_WORKERS=3`, one leg after another, the only difference
+`VD_TERRAIN_BOUND=0`. The walk leg is the gate's assertion; the hull legs are reported.
+
+| the leg | frames/s OFF → ON | worst gap OFF → ON | frames with a gap OFF → ON | queue's peak OFF → ON | pop's widest OFF → ON | the ask bound |
+|---|---|---|---|---|---|---|
+| walk, 1.4 m/s | 50.1 → 49.8 | 0 → 0 | 0 → 0 | 4 → 6 | 18 → 24 | never |
+| hull, 1.4 m/s | 48.8 → 47.9 | 3 695 → 0 | 709 → 0 | 6 504 → 4 | 13 → 15 | never |
+| hull, 240 m/s | 45.4 → 45.4 | 11 → 11 | 436 → 478 | 132 → 181 | 46 → 36 | never |
+| **hull, 528 m/s** | **43.5 → 39.1** | **981 → 449** | **2 612 → 2 348** | **2 199 → 1 611** | **48 → 47** | **on 1 150 of 1 214 samples** |
+| hull, turning | 47.1 → 47.4 | 102 → 119 | 942 → 873 | 1 408 → 1 403 | 49 → 53 | on 70 of 1 213 |
+
+The slow hull's 3 695 chunks on the OFF flight are §24.4's known BOARDING TRANSIENT (the whole
+band of the planet wanted the instant the pilot's origin moves into the hull); it shows on some
+flights and not on others, before and after this change, and it is not the bound's.
+
+**The tightest horizons the 528 m/s leg reached** (metres, finest rung first):
+`[436, 872, 3476, 6953, …]` — the tier rule's own are `[869, 1738, 3477, 6953, …]`, so rung 0 and
+rung 1 came in by half and every rung from 2 up stood where the tier rule puts it. At 766 m over
+the ground neither of those two rings holds any ground at all, so what the pilot sees is the
+four-metre ring reaching in to the eye's own foot instead of the one- and two-metre rings arriving
+late.
+
+**Against ruling F9's own bar, read honestly:**
+
+- ✅ **THE BAND'S COMPLETENESS AT THE DRAWN RUNG IMPROVES AT 528 m/s** — the worst sample's gap
+  falls from 981 urgent chunks to 449 and the queue's peak from 2 199 to 1 611. With the bound in
+  force the ask no longer HOLDS a finer chunk the picture is not waiting for, so this count IS the
+  drawn rung's, which is the number the owner ruled on.
+- ✅ **THE POP DETECTOR'S WIDEST STEP DOES NOT RISE** at 528 m/s (48 → 47), nor on the walk's own
+  terms (the walk and the slow hull move by a few levels inside their own scatter). The leg's
+  historical range over seven earlier flights is 47 to 54 (§24.5), and both readings sit in it.
+- 🟥 **THE FRAMES FALL AT 528 m/s: 43.5 → 39.1**, and the same leg read 38.7 and 38.9 on two
+  earlier flights of the bound, so the fall is real and not scatter. **The cause is UNMEASURED.**
+  The chunks DRAWN are the same (5 945 against 5 993 at the same moment of the leg), the chunks
+  BUILT are the same (195 a second), and the render passes report zero milliseconds on this GPU, so
+  the frame's anatomy could not be read. What was tried and did NOT recover the frames: rewriting
+  the crossfade materials only when a horizon moves a twentieth (`ASK_BOUND_REBIND`), and widening
+  the throughput's window from three seconds to ten. The next probe is the lane's own request and
+  cancel counts: the horizon still wanders, and a finest-ring chunk asked and cancelled frame after
+  frame costs the queue's lock, not the picture.
+- 🟥 **THE 240 m/s LEG DOES NOT REACH EVERY FRAME** (478 frames with a gap, 11 urgent chunks at the
+  worst). The bound is INERT there — 160 chunks a second built against an ask the arithmetic puts
+  near 100 — so this residue is the ASK'S TIMING, which §24.4 already named and which no bound
+  cures: the chunk is built within a frame of being asked and the ask itself came late.
+
+
+### 25.6 What the bounded ask does NOT cure, and what it still owes
+
+- **A TURN is not in it.** The ask rate counts the eye's TRANSLATION only; a hull that turns on the
+  spot uncovers ground too, and the turning leg's gap is untouched by this bound. The lead itself
+  carries no rotation either (`DEFERRED` D-TERRAIN-5 item 11), so the two owe one measurement
+  together.
+- **THE ARRIVAL'S WHOLE-BAND ASK** (§24.4's transient): the moment a pilot's origin moves into a
+  hull, every chunk of the planet's band around the hull is wanted at once. A bound sized from a
+  steady ask cannot see that coming; the lever named there — the wanted set computed a buffer ahead
+  of a KNOWN crossing — is still the right one.
+- **THE ESTIMATE'S OWN SLACK.** `q_L` counts a ring's whole leading edge where the skyline and the
+  horizon cull part of it. A measured ask rate (the keys that ENTER the wanted set per second, per
+  rung) would replace the geometry with a measurement, but it feeds back on itself — once the bound
+  binds, the measured ask is the BOUNDED one — so it needs an unbounded counter to divide by, and
+  that is a second descent. Left as it stands until a flight says the slack matters.
+
+### 25.7 ★ THE FRAME BAR — the cause MEASURED, and the cure (2026-09-14)
+
+§25.5 left the frame rate red at 528 m/s (43.5 with the bound off, 39.1 with it on) and the cause
+UNMEASURED. The GPU reports zero milliseconds for every render pass on this machine and the drawn
+and built chunk counts were equal, so the time had to be the MAIN THREAD's own. The flight now
+carries a wall-clock timer around each of the pieces the bounded ask added — the builders'
+throughput read, the bound's arithmetic (the speed hold, `ask_bound`, the slew, the two hysteresis
+tests), the wanted set's DESCENT, and the crossfade materials' rewrite — and prints them per leg as
+`THE FRAME'S WORK`.
+
+**THE MEASUREMENT, the 528 m/s leg, two flights of one binary:**
+
+| the piece | bound OFF | bound ON |
+|---|---|---|
+| the throughput read | 0.000 ms a frame | 0.000 ms |
+| the bound's arithmetic | 0.002 ms | 0.003 ms |
+| the materials' rewrite | 0.000 ms, ran 0 times | 0.000 ms, ran 187 times |
+| **the DESCENT** | **9.723 ms a frame**, ran 7 721 times over 2 624 frames | **18.117 ms a frame**, ran 8 390 times over 2 339 frames |
+| frames a second | 43.7 | 39.1 |
+
+**The bound's own arithmetic is free.** Every millisecond is the DESCENT, and it is dearer two ways:
+it ran 8 390 times against 7 721 (+9 %), and each run cost 5.05 ms against 3.30 ms (+53 %). The
+horizon SLIDES every frame, and a slid horizon forced a descent for EVERY body in the window — the
+planet's own descent runs every frame at 528 m/s anyway (the eye moves 13 m a frame), so the extra
+runs are the OTHER bodies, whose reaches are vast and whose descents are the expensive ones.
+
+**THE CURE, in three steps, each measured.**
+
+1. **THE DESCENT AND THE DRAWN BANDS MOVE AT DIFFERENT RATES** (the coordinator's hypothesis, and
+   the measurement's). The drawn bands still slide every frame — a jumped band is a pop — but the
+   descent re-runs only when the horizon has left the ring it last asked for (`ASK_BOUND_BRACKET`,
+   a tenth), and the descent's own ask is WIDENED (`AskBound::with_slack`), so what the picture
+   draws always lies inside what the descent asked for. **MEASURED: 39.1 → 41.8 frames a second,
+   the descent 18.1 → 11.5 ms a frame.**
+
+   ★ **AND THE WIDENING IS A DERIVATION, NOT THE BRACKET** (found by the adversarial review, cured
+   2026-09-14). The bracket alone does not cover the case: the picture and the descent read the
+   horizon at TWO tolerances — the materials follow within `ASK_BOUND_REBIND` (a twentieth), the
+   descent within `ASK_BOUND_BRACKET` (a tenth) — so at the worst stand of both at once the drawn
+   base stands `1 / ((1 − 0.05)(1 − 0.10)) = 1.170` times the asked base, against an asked outer
+   edge of 1.10. The picture could draw a band the descent never asked for. `ASK_BOUND_SLACK` is
+   now computed from the two (0.17), asserted against them at COMPILE TIME, and the unit test walks
+   the worst stand at every rung and asserts that the bracket alone falls short.
+2. **A RATE LIMIT ON TOP CHANGED NOTHING** (half a second per body): **40.1 frames a second**, worse
+   than the bracket alone, because the widened bracket it came with cost more than the crossings it
+   saved. The crossings were never the cost; the guard stays in the config at zero as the lever it
+   is.
+3. **THE SLACK GOES ONLY WHERE THE HORIZON MOVES.** A rung the bound left at the tier rule's own
+   radius never slides, so widening it buys nothing and costs the descent every column of the
+   widening — and the coarse rungs, whose rings are the widest of all, never move. **MEASURED:
+   45.0 frames a second and the descent 8.565 ms a frame — BELOW the unbounded flight's own 9.723,
+   because the bounded ladder visits fewer columns once it is not paying for a widening it does not
+   need.**
+
+**And the slew slowed with it**, from half a length a second to a quarter: the band's traversal is
+then about 0.8 s, softer than before and not harsher — and it halves how often the bracket is
+crossed.
+
+### 25.8 ★ THE JUDGE, RE-FLOWN ON THE CURE — the frames are back (2026-09-14)
+
+Two flights of ONE binary, `VD_TERRAIN_WORKERS=3`, the only difference `VD_TERRAIN_BOUND=0`.
+
+| the leg | frames/s OFF → ON | worst gap OFF → ON | frames with a gap OFF → ON | queue's peak OFF → ON | pop's widest OFF → ON | the ask bound |
+|---|---|---|---|---|---|---|
+| walk, 1.4 m/s | 50.0 → 50.1 | 0 → 0 | 0 → 0 | 5 → 5 | 20 → 20 | never |
+| hull, 1.4 m/s | 48.1 → 48.0 | 0 → 0 | 0 → 0 | 4 → 3 | 21 → 17 | never |
+| hull, 240 m/s | 45.5 → 45.9 | 11 → 14 | 449 → 540 | 160 → 177 | 48 → 36 | never |
+| **hull, 528 m/s** | **43.8 → 45.0** | **974 → 401** | 2 625 → 2 695 | **2 189 → 1 768** | 29 → 43 | on 1 222 of 1 222 |
+| hull, turning | 47.4 → 47.0 | 129 → 108 | 884 → 778 | 1 439 → 1 496 | 54 → 44 | on 1 200 of 1 200 |
+
+**THE FRAME'S WORK on the 528 m/s leg**, the same pair: the throughput read and the materials'
+rewrite cost 0.000 ms a frame either way, the bound's arithmetic 0.002 against 0.003 ms, and the
+DESCENT **9.805 ms a frame with the bound off against 8.565 ms with it on** — the bounded ladder's
+descent is now CHEAPER than the unbounded one, because it visits fewer columns and pays for a
+widening only where a horizon actually moves.
+
+**Against ruling F9's own bar:**
+
+- ✅ **THE FRAMES ARE BACK.** 45.0 against 43.8 on the same binary — the bound now runs FASTER than
+  the unbounded ask at 528 m/s, and inside the OFF flights' own spread of 43.2 to 45.1 across five
+  flights of this leg. Every other leg is within a tenth of a frame of its unbounded pair.
+- ✅ **THE COMPLETENESS GAIN SURVIVED AND GREW.** The worst sample's gap at the DRAWN rung falls
+  from 974 urgent chunks to **401** (it was 449 before the cure) and the queue's peak from 2 189 to
+  **1 768**.
+- 🟨 **THE POP DETECTOR is mixed, and one pair does not settle it.** Four legs of five improve or
+  hold (240 m/s 48 → 36, turning 54 → 44, the slow hull 21 → 17, the walk 20 → 20); the 528 m/s leg
+  reads 43 against this pair's OFF value of **29**. That 29 is the LOWEST reading that leg has ever
+  produced — the eight readings of it are 54, 50, 48, 48, 47, 43, 35 and 29 — and 43 sits below its
+  own median. The honest statement is that the detector's scatter on this leg is wider than the
+  difference, and a second pair is owed.
+- 🟥 **THE 240 m/s LEG is unchanged and still short of every frame** (449 → 540 frames with a gap,
+  11 → 14 urgent at the worst). The bound is INERT there — 0 of 1 227 samples — so this residue is
+  the ask's TIMING (§24.4), which no bound cures.
+
+### 25.9 ★ THE BLOCKER — the bounded ask never bound above 54 frames a second (2026-09-14)
+
+An adversarial review of the whole slice found a fault that every flight had hidden, and it is the
+most useful thing in this section: **the feature did nothing on a fast machine, and no test could
+have said so.**
+
+**WHAT WAS WRONG.** The horizon in force slides toward the one the measurement asks for. The step it
+may take in one frame is `(horizon + column width) · 0.25 · dt` — proportional to THE FRAME'S OWN
+SECONDS. The first writing then asked "is the step worth taking?" by comparing the horizon before
+the step with the horizon after it, and discarding the step when the two stood within the hysteresis
+(half a percent) of each other:
+
+```
+    let next = self.bound_target.slewed_toward(target, rungs, dt_s);
+    if self.bound_target.same_as(&next, rungs, fraction) { return; }   // ← the fault
+    self.bound_target = next;
+```
+
+A step of `0.2678 · dt` relative is smaller than half a percent whenever `dt < 0.0187 s`. **Above
+53.6 frames a second EVERY step was refused, at every rung, for ever** — the horizon never left the
+tier rule's own radii, `AskBound::unbounded` was what the descent read, and the bounded ask was a
+no-op. It is not a slow convergence; it is a cliff with nothing on the other side of it.
+
+**WHY NOTHING CAUGHT IT.** The unit tests exercised `slewed_toward` (the step) and `ask_bound` (the
+arithmetic), both of which were correct. The GATE between them lived in the render crate, which is
+Tier-B and whose only tests are the workers'. And the judge flights ran at 39 to 47 frames a second
+on this machine — under the cliff, by luck. A fast machine, the one the player is most likely to
+have, would have flown the whole slice and measured nothing.
+
+**THE FIX.** The hysteresis gates THE DISTANCE FROM THE TARGET, never the step. The horizon slides
+every frame until it stands within half a percent of what the measurement asks for, and then it
+holds:
+
+```
+    if self.held.same_as(want, rungs, hysteresis) { return; }          // arrived: hold
+    self.held = self.held.slewed_toward(want, rungs, dt_s);
+```
+
+The arrival then takes the same WALL TIME at any frame rate, which is what a rate means. Two unit
+tests assert exactly that: the horizon arrives inside five seconds at 144 frames a second AND at 30,
+and the two times agree within a fifth.
+
+**AND THE REAL CURE IS WHERE THE CODE NOW LIVES.** The gate was in Tier-B because the pace had grown
+there piece by piece — the slew, the descent's bracket, the materials' rebind, the throughput's
+smoothing, the speed's hold. None of them is renderer work; all of them are arithmetic with two
+arms. They are now `vd_client::ask_pace` (`AskPace`, `PeakHold`, `Throughput`, `FrameClock`) in the
+Tier-A library at 100 % region and branch coverage, and the render crate only wires them. Three more
+defects fell out of the move, each now a test:
+
+- **THE SPEED'S "PEAK HOLD" WAS A DECAY.** It kept a fraction of the last peak each frame, so a hull
+  that stopped dead from 528 m/s still read **194 m/s a second later** and the bound went on
+  coarsening ground the pilot stood still on. `PeakHold` is a true maximum over a window of eight
+  slots: the hull that stops reads zero.
+- **THE DESCENT'S SLACK DID NOT COVER THE DRAWN BAND** — the derivation above (§25.7), now a
+  compile-time assertion.
+- **A LONG IDLE THREW THE CAPACITY'S WINDOW AWAY.** The smoothing weighed a reading by the share of
+  the ten-second window it covered, and a reading after a minute's gap covered all of it: the
+  average collapsed onto one sample of one frame's luck. A reading now carries at most half
+  (`THROUGHPUT_ALPHA_MAX`).
+
+**AND TWO SMALLER ONES.** `VD_TERRAIN_BOUND=false` used to mean ON, because only the exact string
+`0` switched a knob off; every terrain switch now reads `0`, `false`, `off` and `no` in any case.
+And the flight's frame-anatomy line printed the worst frame OF THE WHOLE RUN against each leg's own
+mean; the stamp's peak now rolls over one second, the flight samples every 40 ms, so the largest
+sample of a leg IS that leg's worst frame.
+
+### 25.10 ★ THE SECOND PAIR, ON THE CURED CODE — and the pop question is answered (2026-09-14)
+
+The review's blocker (§25.9) changed the shipped behaviour: the horizon now slides at any frame rate,
+the slack is derived, the speed hold is a true maximum and the descent asks a ring that is wider only
+where the horizon moves. So the judge was flown again — one binary, `VD_TERRAIN_WORKERS=3`, the only
+difference `VD_TERRAIN_BOUND=0`.
+
+| the leg | frames/s ON → OFF | worst gap ON → OFF | frames with a gap | queue's peak | pop's widest ON → OFF |
+|---|---|---|---|---|---|
+| walk, 1.4 m/s | 50.1 → 50.0 | 0 → 0 | 0 → 0 | — | 17 → 18 |
+| hull, 1.4 m/s | 48.0 → 49.0 | **0** → 3 710 | 0 → 714 | — → 6 519 | 28 → 11 |
+| hull, 240 m/s | 45.9 → 45.2 | 15 → 9 | 1 027 → 576 | 294 → 160 | **40 → 47** |
+| **hull, 528 m/s** | **45.6 → 43.3** | **207 → 972** | 2 613 → 2 600 | **1 512 → 2 194** | **37 → 40** |
+| hull, turning | 47.7 → 47.1 | **0** → 102 | **0** → 964 | — → 1 409 | **44 → 48** |
+
+**THE FRAME'S WORK on the 528 m/s leg**, the same pair, now with a PER-LEG worst frame (the stamp's
+peak rolls over one second and the flight samples every 40 ms, so the largest sample of a leg is that
+leg's own worst frame): the throughput read and the materials' rewrite cost 0.000 ms a frame either
+way, the bound's arithmetic 0.002 ms, and the DESCENT **7.695 ms a frame with the bound ON against
+10.345 with it OFF**, its worst frame **33.4 ms against 36.7**. The bounded descent ran 6 628 times
+over 2 736 frames; the unbounded one 8 099 times over 2 600.
+
+**Against ruling F9's own bar — every line is green now.**
+
+- ✅ **THE FRAMES.** 45.6 against 43.3 at 528 m/s: the bounded ask is FASTER than the unbounded one,
+  and the margin grew after the cure (45.0 against 43.8 last round). Every other leg is within a
+  frame of its pair.
+- ✅ **THE COMPLETENESS.** The worst sample's gap at the DRAWN rung falls from 972 urgent chunks to
+  **207** — better than the 401 of the first cured round and the 449 of the round before it — and the
+  queue's peak from 2 194 to **1 512**. ★ The TURNING leg now **holds the band on every frame** with
+  the bound on, against 102 urgent chunks at the worst and 964 frames with a gap without it.
+- ✅ **THE POP IS ANSWERED, and it improves.** The 528 m/s leg reads **37 against 40**, the 240 m/s
+  leg **40 against 47**, the turning leg **44 against 48**, the walk 17 against 18. Only the slow
+  hull reads higher (28 against 11), and that leg's OFF reading came with a 3 710-chunk gap and a
+  6 519-deep queue — the OFF run entered it still filling the ring from the walk (its workers ran 112
+  jobs a second against the bounded run's 4), so its picture was coarse for a different reason. §25.8
+  left this owed on a single pair whose OFF value was the lowest that leg had ever produced; the
+  second pair settles it: **the bound does not widen the pop.**
+- 🟨 **THE 240 m/s LEG'S TIMING RESIDUE STANDS** (1 027 frames with a gap against 576), and the bound
+  binds there now that the speed is read honestly. It is the ask's TIMING (§24.4), and its worst gap
+  is 15 chunks — a fifteenth of the 528 leg's.

@@ -75,6 +75,22 @@ What stays on the CPU on the client: the wanted set, the queue, the ladder's boo
 digest of a chunk (read back only for the gate, below), and the whole path as a FALLBACK on a GPU
 without 64-bit integers (the same source, F6's share of the cores).
 
+★ **AND THE WANTED SET IS NOW BOUNDED BY THROUGHPUT (ruling F9 item 1, LANDED 2026-09-13).** Whatever
+builds the chunks, the client no longer asks for more of them than its builders can deliver before
+the ground reaches the screen. It measures its builders' CAPACITY (the worker count over the mean
+wall time of a build, smoothed over three seconds) and its own speed (the lead's metres over the
+interpolation buffer's seconds — two DELIVERED poses, SL10 clause 7), and gives every rung a
+DELIVERABLE HORIZON: the rung's effective switch distance
+(`vd_client::ladder_view::AskBound`). Inside a rung's horizon the tier rule's own rung is asked;
+beyond it the NEXT rung, whose territory now reaches in to the horizon, stands whole — and because
+the crossfade's bands and the sink's ramp read the SAME effective switch distances, the handover is
+the ladder's own crossfade and never a cut. The horizon SLIDES toward what the measurement asks for
+(half its own length a second) instead of jumping, because a jumped band is a pop. The bound never
+binds where the builders cover the ask: a still stand, a walk, a strong machine and an empty ring
+all read the tier rule's own radii, which is why the frozen pictures are untouched.
+`VD_TERRAIN_BOUND=0` switches it off for the comparison flight. The design and both flights:
+`slice_08_ladder_discussion.md` §25.
+
 ★ **G2-A's MEASUREMENT, AND WHAT IT SAYS ABOUT THE REST OF THE ORDER (2026-09-13, bench part 6).**
 The plan moved to the card and the host's share fell about 38 times — 2.14 ms a box to about 0.06 ms —
 with 0 of 283 115 520 cells and 0 of 4 423 680 column directions differing over 1 080 boxes (the 48

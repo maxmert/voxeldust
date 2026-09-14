@@ -442,6 +442,16 @@ impl RenderSnapshot {
             .map(|c| c + self.clock.tuning().buffer_ticks())
     }
 
+    /// THE LEAD'S OWN SECONDS: how far ahead of the drawn picture the lead cursor stands, in
+    /// seconds — the interpolation buffer itself, the wire's own contract. The bounded ask
+    /// (ruling F9 item 1) divides the lead's METRES by this to read the eye's speed, so the speed
+    /// is a difference of two DELIVERED poses over a stated time and never an extrapolation
+    /// (SL10 clause 7).
+    #[must_use]
+    pub fn lead_seconds(&self) -> f64 {
+        self.clock.tuning().interp_buffer_ms / 1000.0
+    }
+
     /// The composited poses at a given cursor (the lead cursor, for the residency band): each
     /// entity once, interpolated there — clamped into each entity's window like every sample, so
     /// a cursor past a window freezes that entity at its freshest pose (never an extrapolation).
@@ -700,6 +710,10 @@ mod tests {
         // freshest delivered moment, and the poses there are the freshest delivered poses;
         // between the two, the interpolation the picture would draw at that moment.
         assert_eq!(snap.lead_cursor(100.0), Some(12.0));
+        // THE LEAD'S OWN SECONDS (ruling F9 item 1): the interpolation buffer itself, which the
+        // bounded ask divides the lead's METRES by to read the eye's speed. The cursor's 2.4 ticks
+        // at the default 20 Hz are these 0.12 s.
+        assert_eq!(snap.lead_seconds(), 0.12);
         let lead = snap.rendered_at(12.0);
         assert_eq!(lead.len(), 1);
         assert_eq!(rp_world(&lead[0].2), DVec3::new(10.0, 0.0, 0.0));

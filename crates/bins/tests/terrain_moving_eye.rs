@@ -469,6 +469,24 @@ struct LegRead {
     memory_end: MemoryRead,
     memory_grew: MemoryRead,
     max_lead_m: f64,
+    /// ★ THE BOUNDED ASK across the leg (ruling F9 item 1): the samples whose ask was bound at
+    /// all, the builders' lowest and highest measured capacity, the eye's fastest measured speed,
+    /// and the TIGHTEST deliverable horizons seen (the sample whose finest rung came in farthest).
+    /// Empty horizons mean the bound never bound on this leg — the tier rule's own radii stood.
+    bound_samples: u64,
+    min_rate: f64,
+    max_rate: f64,
+    max_speed_mps: f64,
+    tightest_horizon_m: Vec<f64>,
+    /// ★ THE FRAME'S OWN WORK at the leg's first and last sample (the frame bar's instrument):
+    /// the piece, its nanoseconds in all, its worst single frame, and how many times it ran. The
+    /// leg's own cost is the difference of the two.
+    work_first: Vec<(String, u64, u64, u64)>,
+    work_last: Vec<(String, u64, u64, u64)>,
+    /// THE WORST SINGLE FRAME OF THIS LEG, per piece. The stamp's own peak is a ROLLING one over
+    /// the last second, and the flight samples every 40 ms, so the largest reading of the leg's
+    /// samples is the leg's own worst frame — not the whole run's (review item 8).
+    work_peak: std::collections::BTreeMap<String, u64>,
     /// THE POP DETECTOR'S reading across the leg's pairs (step 6): how many pairs were judged,
     /// how many were not two consecutive frames (left out), and the sum of the judged.
     pop_pairs: u64,
@@ -677,8 +695,9 @@ fn read_band(
         if read.samples.is_multiple_of(25) {
             eprintln!(
                 "terrain_moving_eye/{leg}: t {:5.1} s — {} drawn, {} pending, {} urgent {:?}, \
-                 {} revealed, lead {:.1} m, {:.0} m up, rungs {}..{} {:?}, the planet turned \
-                 {:.1}° in the window",
+                 {} revealed, lead {:.1} m, {:.0} m up, rungs {}..{} {:?}, the builders at \
+                 {:.0} chunks/s and the eye at {:.0} m/s with the ask bound to {:?}; the frame at \
+                 {:.1} ms over {:?} with {} casters; the planet turned {:.1}° in the window",
                 started.elapsed().as_secs_f64(),
                 stamp.chunks_drawn,
                 stamp.chunks_pending,
@@ -690,6 +709,20 @@ fn read_band(
                 stamp.rung_min,
                 stamp.rung_max,
                 stamp.chunks_per_rung,
+                stamp.build_rate_per_s,
+                stamp.eye_speed_mps,
+                stamp
+                    .ask_horizon_m
+                    .iter()
+                    .map(|m| m.round() as i64)
+                    .collect::<Vec<i64>>(),
+                stamp.frame_ms,
+                stamp
+                    .passes_ms
+                    .iter()
+                    .map(|(name, cpu, gpu)| format!("{name} {cpu:.1}/{gpu:.1}"))
+                    .collect::<Vec<String>>(),
+                stamp.shadow_casters,
                 turned_deg(planet_facing(&st, planet))
             );
         }
@@ -702,6 +735,30 @@ fn read_band(
         read.min_drawn = read.min_drawn.min(stamp.chunks_drawn);
         last_drawn = stamp.chunks_drawn;
         read.max_lead_m = read.max_lead_m.max(stamp.lead_m);
+        // ★ THE BOUNDED ASK (ruling F9 item 1): what the client measured, and how far in the
+        // finest rung came. The tightest sample is the one whose finest rung stands nearest.
+        read.max_rate = read.max_rate.max(stamp.build_rate_per_s);
+        read.min_rate = if read.min_rate > 0.0 {
+            read.min_rate.min(stamp.build_rate_per_s)
+        } else {
+            stamp.build_rate_per_s
+        };
+        read.max_speed_mps = read.max_speed_mps.max(stamp.eye_speed_mps);
+        if read.work_first.is_empty() {
+            read.work_first = stamp.frame_work_ns.clone();
+        }
+        read.work_last = stamp.frame_work_ns.clone();
+        for (name, _, peak, _) in &stamp.frame_work_ns {
+            let worst = read.work_peak.entry(name.clone()).or_insert(0);
+            *worst = (*worst).max(*peak);
+        }
+        if !stamp.ask_horizon_m.is_empty() {
+            read.bound_samples += 1;
+            let tightest = read.tightest_horizon_m.first().copied().unwrap_or(f64::MAX);
+            if stamp.ask_horizon_m[0] < tightest {
+                read.tightest_horizon_m = stamp.ask_horizon_m.clone();
+            }
+        }
         std::thread::sleep(Duration::from_millis(SAMPLE_MS));
     }
     let (judged, skipped, pop) = judge_pairs(&pairs);
@@ -757,6 +814,32 @@ fn read_band(
         },
         read.harvest_full,
         read.frames
+    );
+    // ★ THE BOUNDED ASK (ruling F9 item 1): what the client measured about its builders and its
+    // own motion, and how far in the finest rungs came. With the bound in force the band's gap
+    // below is read at the DRAWN rung — the ask no longer holds a finer chunk the picture is not
+    // waiting for, so a column whose finest chunk is absent but whose next-rung chunk is drawn
+    // counts as COMPLETE, which is the number ruling F9 asks for.
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE BOUNDED ASK — the builders measured {:.0} to {:.0} \
+         chunks/s, the eye up to {:.1} m/s; the ask was bound on {} of {} samples; the tightest \
+         horizons (metres, finest rung first) {:?}",
+        read.min_rate,
+        read.max_rate,
+        read.max_speed_mps,
+        read.bound_samples,
+        read.samples,
+        read.tightest_horizon_m
+            .iter()
+            .map(|m| m.round() as i64)
+            .collect::<Vec<i64>>()
+    );
+    // ★ THE FRAME'S WORK (ruling F9 item 1's frame bar): what the bounded ask's own pieces cost
+    // the MAIN THREAD, per frame of this leg. A frame rate that falls with the bound on is one of
+    // these pieces or none of them, and this line is how the flight says which.
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE FRAME'S WORK — {}",
+        frame_work(&read)
     );
     eprintln!(
         "terrain_moving_eye/{leg}: THE PARENT CACHE — {} hits, {} builds, {} waits ({:.0} % hit)",
@@ -1353,6 +1436,32 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         "terrain_moving_eye: THE BAND HELD on every frame of the walk — {walk:?}; the hull legs \
          read {slow:?}, {fast:?}, {turning:?} and {fastest:?}"
     );
+}
+
+/// THE FRAME'S WORK across a leg, piece by piece: the mean milliseconds a frame, how many times
+/// the piece ran against the frames drawn, and ITS WORST SINGLE FRAME OF THIS LEG (the stamp's
+/// peak rolls over one second and the flight samples every 40 ms, so the largest of the leg's
+/// samples is the leg's own worst frame).
+fn frame_work(read: &LegRead) -> String {
+    let frames = read.frames.max(1) as f64;
+    let mut out: Vec<String> = Vec::new();
+    for (name, total, _, runs) in &read.work_last {
+        let before = read
+            .work_first
+            .iter()
+            .find(|(n, _, _, _)| n == name)
+            .map(|(_, t, _, r)| (*t, *r))
+            .unwrap_or((0, 0));
+        let ns = total.saturating_sub(before.0) as f64;
+        let ran = runs.saturating_sub(before.1);
+        out.push(format!(
+            "{name} {:.3} ms a frame (ran {ran} times over {} frames, the worst frame {:.3} ms)",
+            ns / frames / 1.0e6,
+            read.frames,
+            read.work_peak.get(name).copied().unwrap_or(0) as f64 / 1.0e6
+        ));
+    }
+    out.join("; ")
 }
 
 /// A HULL LEG'S REPORT: measured and named, never asserted (the file's doc). The ground must stay

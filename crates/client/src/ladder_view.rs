@@ -90,18 +90,7 @@ pub const FADE_ALWAYS_OUT: [f64; 2] = [1.0e30, 2.0e30];
 /// in; the top rung is always out-of-fade (never fades out).
 #[must_use]
 pub fn fade_bands(rung: u8, rungs: u8) -> ([f64; 2], [f64; 2]) {
-    let band = |r: u8| [HYSTERESIS_IN * switch_m(r), HYSTERESIS_OUT * switch_m(r)];
-    let fade_in = if rung == 0 {
-        FADE_ALWAYS_IN
-    } else {
-        band(rung - 1)
-    };
-    let fade_out = if rung + 1 >= rungs {
-        FADE_ALWAYS_OUT
-    } else {
-        band(rung)
-    };
-    (fade_in, fade_out)
+    AskBound::unbounded().fade_bands(rung, rungs)
 }
 
 /// WHERE THE SINK RAMP ENDS for a rung: past its fade-in edge `in_hi` (the finer rung's fade-out
@@ -114,14 +103,7 @@ pub fn fade_bands(rung: u8, rungs: u8) -> ([f64; 2], [f64; 2]) {
 /// its own surface with distance — continuous, never a pop. Rung 0 sinks nowhere: its edge.
 #[must_use]
 pub fn sink_end_m(body: &BodyDefinition, rung: u8, rungs: u8) -> f64 {
-    let (fade_in, _) = fade_bands(rung, rungs);
-    if rung == 0 {
-        return fade_in[1];
-    }
-    let crease = f64::from(cell_m(rung - 1));
-    let sink = crate::chunks::sink_m(body, rung);
-    // sink > crease always: the sink holds a cell of each rung and the gap bound.
-    fade_in[1] + (fade_in[1] - fade_in[0]) * crease / (sink - crease)
+    AskBound::unbounded().sink_end_m(body, rung, rungs)
 }
 
 /// Whether a distance lies inside a crossfade band of some rung: where two rungs share the ground.
@@ -166,6 +148,409 @@ pub fn rung_for_distance(d_m: f64, rungs: u8) -> u8 {
         need_m.log2().ceil() as u8
     };
     rung.min(rungs.saturating_sub(1))
+}
+
+/// ★ THE BOUNDED ASK (ruling F9 item 1, 2026-09-13) — the client asks the finest ring only as far
+/// ahead as its own builders can deliver it before the ground reaches the screen; past that it
+/// asks the NEXT rung, which stands whole, and the crossfade blends the finer rung in as it lands.
+///
+/// The bound is ONE NUMBER PER RUNG: the rung's EFFECTIVE SWITCH DISTANCE, never farther than the
+/// tier rule's own [`switch_m`]. Every part of the ladder already reads a rung's switch distance —
+/// the descent's split, the rung's territory, the crossfade's bands, the sink's ramp — so moving
+/// that one number moves all of them together, and the picture stays a crossfade instead of a cut.
+///
+/// **Example.** The pilot's hull crosses the home planet at 528 m/s, a kilometre up, on a machine
+/// whose terrain share is three workers. The tier rule wants metre cells out to 869 m, two-metre
+/// cells to 1.7 km and four-metre cells to 3.5 km; three workers build about 195 chunks a second
+/// against an ask of about 400. The bound answers: four-metre cells out to about 2.1 km, and the
+/// eight-metre ring takes over there. The pilot sees whole ground one rung coarser instead of holes
+/// at every rung; when the hull slows to a walk the horizons grow back to the tier rule's own and
+/// the metre cells fade in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AskBound {
+    /// Each rung's effective switch distance, in metres, finest first. `None` is the tier rule's
+    /// own radii — the bound does not bind, and the ladder is the one every earlier flight flew.
+    switches: Option<Vec<f64>>,
+    /// ★ THE DESCENT'S SLACK (ruling F9 item 1, the frame bar): the fraction each crossfade band's
+    /// edges are pushed OUT by. The DESCENT carries it; the bound the materials carry does not.
+    ///
+    /// Why it exists. The horizon SLIDES every frame, and the descent may not follow it every
+    /// frame — MEASURED (§25.7): a descent costs 3 to 5 ms and re-running one per body per frame
+    /// cost 8.4 ms a frame at 528 m/s, which is the whole of the frame rate's fall. So the descent
+    /// runs on the horizon as it stood, and asks for a ring WIDER than that horizon's own bands by
+    /// this fraction — wide enough to cover every band the drawn horizon may slide to before the
+    /// next descent. A hole is ruled out by the DERIVATION, not by the shape: the fraction is
+    /// [`ASK_BOUND_SLACK`], computed from the descent's bracket and the materials' rebind together
+    /// and asserted against both at compile time, because the picture and the descent read the
+    /// horizon at two different tolerances and the worst stand of the two is their product.
+    slack: f64,
+}
+
+/// ★ HOW FAST A DELIVERABLE HORIZON MAY MOVE: a quarter of its own length every second.
+///
+/// A horizon carries a CROSSFADE BAND with it (`AskBound::fade_bands`), and a band that JUMPS is a
+/// pop — every chunk in it changes its morph weight in one frame, and a rung-5 chunk's morph metre
+/// is tens of metres. A band that SLIDES is what the crossfade was built for: the band is a fifth
+/// of the switch distance wide, so a quarter of a length a second carries a chunk across the whole
+/// band in about 0.8 s — fifty frames of fade at 60 Hz, softer than the fade an approaching eye
+/// makes.
+/// (The eye's own crossing at 528 m/s and a 3.5 km switch takes about 1.3 s, so the horizon's own
+/// motion is of the same order and never faster than a few times it.)
+///
+/// A horizon at rest may still move: a rung's step is read from its horizon PLUS its own column's
+/// width, so a rung bound in to nothing can always grow back.
+///
+/// MEASURED at half a length a second (§25.7): the horizon then crossed the descent's own bracket
+/// about five times a second for every body in the window, and each crossing costs a descent. The
+/// quarter shipped here halves those crossings, and the band traversal it makes is softer than the
+/// half was, not harsher.
+pub const ASK_BOUND_SLEW_PER_S: f64 = 0.25;
+
+/// How far a rung's horizon must move before the client adopts the step at all: half a percent of
+/// the horizon. The measured build rate and the measured speed wander frame to frame, so the
+/// horizon they ask for wanders too; without this the descent would run and every material's bands
+/// would be rewritten on every frame for a change no eye can see. The SLEW above is what keeps the
+/// horizon from flapping; this is what keeps it from churning once it has arrived.
+pub const ASK_BOUND_HYSTERESIS: f64 = 0.005;
+
+/// ★ HOW FAR A HORIZON MUST MOVE BEFORE THE CROSSFADE'S MATERIALS FOLLOW IT: a twentieth.
+///
+/// The DESCENT follows the horizon every frame — it runs every frame at speed anyway — but the
+/// three material families carry the bands as a UNIFORM, and rewriting a material makes the engine
+/// prepare its bind group again. MEASURED (the third bounded flight, 2026-09-13): the horizon the
+/// measurement asks for wanders about a tenth either side of its own mean from frame to frame (the
+/// build rate reads 182 to 226 chunks a second over one leg), so the materials were rewritten on
+/// nearly every frame of the 528 m/s leg and the frame rate fell from 43.2 to 38.7.
+///
+/// A twentieth is well inside the crossfade band's own width (a fifth of the switch distance).
+/// What makes the difference safe is not that it is small but that [`ASK_BOUND_SLACK`] is derived
+/// from THIS fraction and the descent's bracket together, so the ring the descent asked for covers
+/// the band the picture draws at the worst stand of both.
+pub const ASK_BOUND_REBIND: f64 = 0.05;
+
+/// WHAT THE CLIENT MEASURED about its builders and its own motion, for the bounded ask. Every
+/// number here is a MEASUREMENT the client already holds; nothing is derived from a pose the
+/// client made up (SL10 clause 7: the speed comes from two DELIVERED poses, the same pair the
+/// lead eye is made of).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AskRate {
+    /// THE BUILDERS' THROUGHPUT, chunks a second: the workers' count over the mean wall time of a
+    /// build, smoothed. Read as a CAPACITY, not as what the builders happened to do — on a walk
+    /// the builders are idle and the chunks they finished are the ask, not the ceiling.
+    pub chunks_per_s: f64,
+    /// THE EYE'S SPEED through the body's frame, metres a second, from delivered poses alone.
+    pub speed_mps: f64,
+    /// The eye's height over the surface under it, metres.
+    pub altitude_m: f64,
+    /// The chunks one column holds, measured on the last descent (a column of the home planet
+    /// holds one or two: the surface crosses one chunk, two where it crosses a chunk boundary).
+    pub chunks_per_column: f64,
+}
+
+/// A COLUMN'S FOOTPRINT at a rung, in metres: a chunk column is [`CHUNK_EDGE`] cells across.
+#[must_use]
+pub fn column_span_m(rung: u8) -> f64 {
+    CHUNK_EDGE as f64 * f64::from(cell_m(rung))
+}
+
+/// THE GROUND CIRCLE an eye `altitude_m` over the surface reaches at slant distance `slant_m`:
+/// its radius along the ground. Zero where the slant does not reach the ground at all — an eye a
+/// kilometre up has NO ground within 869 m of it, which is why the finest ring is empty at
+/// altitude and the bound there costs nothing.
+fn ground_radius_m(slant_m: f64, altitude_m: f64) -> f64 {
+    (slant_m * slant_m - altitude_m * altitude_m)
+        .max(0.0)
+        .sqrt()
+}
+
+/// THE ASK RATE of one rung, chunks a second, when the rung is asked out to `reach_m` (a slant
+/// distance): an eye moving at `speed` uncovers a strip `2 · ground_radius` wide of new ground
+/// every second, and each new column of the rung costs `chunks_per_column` builds.
+///
+/// An ESTIMATE, and a deliberately generous one: it counts the whole circle's leading edge, where
+/// the skyline and the horizon cull part of it, so the bound binds a little sooner than the true
+/// ask needs. Completeness first (ruling F9 item 1); the flight is the judge.
+fn ask_rate_per_s(rung: u8, reach_m: f64, rate: AskRate) -> f64 {
+    let span = column_span_m(rung);
+    2.0 * ground_radius_m(reach_m, rate.altitude_m) * rate.speed_mps * rate.chunks_per_column
+        / (span * span)
+}
+
+/// THE REACH one rung can hold at `budget` chunks a second: the inverse of [`ask_rate_per_s`],
+/// as a slant distance from the eye.
+fn ask_reach_m(rung: u8, budget: f64, rate: AskRate) -> f64 {
+    let span = column_span_m(rung);
+    let ground = budget * span * span / (2.0 * rate.speed_mps * rate.chunks_per_column);
+    (ground * ground + rate.altitude_m * rate.altitude_m).sqrt()
+}
+
+/// THE DELIVERABLE HORIZONS of a ladder of `rungs` rungs, from what the client measured
+/// ([`AskRate`]).
+///
+/// The walk is COARSEST FIRST, with the builders' throughput as a budget. A coarse ring is cheap
+/// (its columns hold four times the area of the ring below it and it is only twice as wide), so it
+/// is served first and costs little; the budget that is left buys the finer rings. The rung where
+/// the budget runs out keeps the reach the budget pays for, and every finer rung follows the
+/// ladder's own half-and-double from there — so no two rungs ever share a crossfade band.
+///
+/// The bound NEVER BINDS where the builders cover the ask: a still stand (no speed, no ask), a
+/// walk, a strong machine, or an eye whose rings are empty all read the tier rule's own radii and
+/// the returned bound is [`AskBound::unbounded`], byte for byte the ladder of every earlier flight.
+#[must_use]
+pub fn ask_bound(rungs: u8, rate: AskRate) -> AskBound {
+    let measured = (rate.chunks_per_s > 0.0)
+        & (rate.speed_mps > 0.0)
+        & (rate.chunks_per_column > 0.0)
+        & (rungs > 0);
+    if !measured {
+        return AskBound::unbounded();
+    }
+    let mut switches = vec![0.0f64; usize::from(rungs)];
+    let mut budget = rate.chunks_per_s;
+    let mut binds = false;
+    let mut rung = rungs;
+    while rung > 0 {
+        rung -= 1;
+        let full = switch_m(rung);
+        let need = ask_rate_per_s(rung, HYSTERESIS_OUT * full, rate);
+        let fits = need <= budget;
+        // The rung the budget covers keeps the tier rule's radius; the rung it runs out on keeps
+        // what the rest of the budget pays for, read back through the same strip.
+        let reach = ask_reach_m(rung, budget, rate) / HYSTERESIS_OUT;
+        switches[usize::from(rung)] = if fits { full } else { reach.min(full) };
+        budget = if fits { budget - need } else { 0.0 };
+        binds |= !fits;
+    }
+    if !binds {
+        return AskBound::unbounded();
+    }
+    // THE LADDER'S OWN SHAPE under the binding rung: a finer rung's switch is at most half its
+    // coarser neighbour's, exactly as the tier rule's own are. Without it two bound rungs can land
+    // on one distance, and two rungs that share a crossfade band draw a half-transparent shell.
+    let mut rung = usize::from(rungs) - 1;
+    while rung > 0 {
+        rung -= 1;
+        switches[rung] = switches[rung].min(switches[rung + 1] * 0.5);
+    }
+    AskBound {
+        switches: Some(switches),
+        slack: 0.0,
+    }
+}
+
+/// ★ HOW FAR THE DRAWN HORIZON MAY SLIDE BEFORE THE DESCENT FOLLOWS IT: a tenth.
+///
+/// The descent is the costliest thing the terrain system does on the main thread — MEASURED on the
+/// 528 m/s leg (§25.7): 9.7 ms a frame with the bound off, and 18.1 ms with it on, because the
+/// sliding horizon forced a descent for every body on every frame. The DRAWN bands must still
+/// slide (a jumped band is a pop), so the two are separated: the bands slide every frame, and the
+/// descent re-runs only when the horizon has left the ring it last asked for. At the slew's quarter
+/// of a length a second a tenth is about two fifths of a second.
+///
+/// The descent's own ask is widened by [`ASK_BOUND_SLACK`] ([`AskBound::with_slack`]) — DERIVED
+/// from this fraction and the materials' own, never equal to this one — so the ring it asked for
+/// covers the bands the picture draws until the next descent.
+///
+/// ★ AND THE DESCENT MAY BE RATE-LIMITED BESIDES ([`ASK_BOUND_DESCENT_S`], zero as shipped), which
+/// would cap the descents a body's bound can force a second whatever the slew or the speed.
+pub const ASK_BOUND_BRACKET: f64 = 0.10;
+
+/// HOW OFTEN THE BOUND MAY FORCE A DESCENT, in seconds, per body: ZERO — the bracket alone paces
+/// it. MEASURED (§25.7): a limit of half a second read 40.1 frames a second against 41.8 without
+/// one, because the crossings were never the cost; the guard stays as the lever it is, and its
+/// other arm is tested (`ask_pace::tests::the_rate_limit_refuses_a_descent_until_its_interval_has_passed`).
+///
+/// The descent is the costliest thing the terrain system does on the main thread (§25.7), and it
+/// already runs whenever the eye moves half a metre. At ZERO the pacing is the BRACKET's alone:
+/// the descent follows when the horizon has left the ring it asked for, and the slack below is
+/// what makes that safe. A nonzero value would cap the descents a body's bound can force per
+/// second, at the cost of a horizon the picture may outrun — which is why the slack would have to
+/// grow with it.
+pub const ASK_BOUND_DESCENT_S: f64 = 0.0;
+
+/// ★ HOW MUCH WIDER THE DESCENT ASKS THAN THE HORIZON IT RAN ON: about a sixth, DERIVED from the
+/// two tolerances it must cover (review item 3). It is not a taste.
+///
+/// The picture and the descent read the horizon at two different tolerances. The materials follow
+/// the held horizon within [`ASK_BOUND_REBIND`], so the DRAWN base may stand as far out as
+/// `1 / (1 − REBIND)` of the held one. The descent follows within [`ASK_BOUND_BRACKET`], so the
+/// ASKED base may stand as far in as `1 − BRACKET` of it. At the worst of both at once the drawn
+/// base is `1 / ((1 − REBIND)(1 − BRACKET))` — about 1.170 — of the asked base, and every band is
+/// a fixed multiple of its base, so the drawn band's outer edge stands 1.170 times the asked one's
+/// unless the ask is widened by exactly that much.
+///
+/// A HOLE IS THEREFORE NOT "IMPOSSIBLE BY CONSTRUCTION" BY ITSELF — it is impossible because this
+/// number is derived from the two tolerances and asserted against them below. With the slack at
+/// the bracket alone (a tenth) the drawn edge could reach 1.170 times the asked base against an
+/// asked outer edge of 1.10, and the picture could draw a band the descent never asked for.
+/// The derivation reads 0.1696 at today's two tolerances; the number is rounded up to a
+/// seventeen-hundredth so it is a figure a person can hold, and the assertions below fail the
+/// BUILD if either tolerance ever moves past it.
+pub const ASK_BOUND_SLACK: f64 = 0.17;
+
+// THE DERIVATION, ASSERTED WHERE IT CANNOT ROT: the slack covers the worst simultaneous stand of
+// the two tolerances (the drawn edge inside the asked edge), and it is never less than their sum.
+const _: () = assert!(
+    (1.0 + ASK_BOUND_SLACK) * (1.0 - ASK_BOUND_REBIND) * (1.0 - ASK_BOUND_BRACKET) >= 1.0
+);
+const _: () = assert!(ASK_BOUND_SLACK >= ASK_BOUND_BRACKET + ASK_BOUND_REBIND);
+
+impl AskBound {
+    /// The tier rule's own radii: the bound does not bind.
+    #[must_use]
+    pub fn unbounded() -> AskBound {
+        AskBound {
+            switches: None,
+            slack: 0.0,
+        }
+    }
+
+    /// A BOUND STATED OUTRIGHT, one effective switch distance per rung, finest first — what
+    /// [`ask_bound`] builds, and what a test builds to stand a horizon exactly where it wants it.
+    #[must_use]
+    pub fn from_switches(switches: Vec<f64>) -> AskBound {
+        AskBound {
+            switches: Some(switches),
+            slack: 0.0,
+        }
+    }
+
+    /// THE SAME BOUND, ASKED WIDER: every band's edges pushed out by `slack` (see the field). The
+    /// descent carries this; the bound the crossfade's materials carry never does.
+    #[must_use]
+    pub fn with_slack(mut self, slack: f64) -> AskBound {
+        self.slack = slack.max(0.0);
+        self
+    }
+
+    /// Whether the bound moves any rung in from the tier rule's own radius.
+    #[must_use]
+    pub fn binds(&self) -> bool {
+        self.switches.is_some()
+    }
+
+    /// A rung's EFFECTIVE switch distance, in metres: the tier rule's own where the bound does not
+    /// bind, and a rung past the bound's own ladder reads the tier rule's too.
+    #[must_use]
+    pub fn switch_m(&self, rung: u8) -> f64 {
+        match &self.switches {
+            None => switch_m(rung),
+            Some(s) => s
+                .get(usize::from(rung))
+                .copied()
+                .unwrap_or_else(|| switch_m(rung)),
+        }
+    }
+
+    /// Every rung's effective switch distance, finest first — the stamp's readout. Empty where the
+    /// bound does not bind.
+    #[must_use]
+    pub fn horizons_m(&self) -> Vec<f64> {
+        self.switches.clone().unwrap_or_default()
+    }
+
+    /// Whether `other` is the same bound for the ask's purposes: every rung of the two within
+    /// `fraction` of the larger of the pair ([`ASK_BOUND_HYSTERESIS`]). Symmetric, and never
+    /// zero-width, so a horizon that jitters is never adopted and one that really moves always is.
+    #[must_use]
+    pub fn same_as(&self, other: &AskBound, rungs: u8, fraction: f64) -> bool {
+        let mut rung = 0u8;
+        let mut same = true;
+        while rung < rungs {
+            let (a, b) = (self.switch_m(rung), other.switch_m(rung));
+            same &= (a - b).abs() <= fraction * a.abs().max(b.abs());
+            rung += 1;
+        }
+        same
+    }
+
+    /// ★ THE HORIZON SLIDES, IT NEVER JUMPS (ruling F9 item 1): the bound this one becomes after
+    /// `dt_s` seconds of moving toward `target`, each rung by at most [`ASK_BOUND_SLEW_PER_S`] of
+    /// its own horizon plus its own column's width. A rung already at its target stays there
+    /// exactly, so a settled bound stops changing and the descent stops recomputing.
+    ///
+    /// **Example.** The pilot's hull pushes from a hover to 528 m/s. The measurement asks at once
+    /// for four-metre cells at 2.1 km instead of 3.5 km; the horizon walks the 1.4 km in about a
+    /// second and a half, and the pilot sees the eight-metre ring fade in over the four-metre one
+    /// exactly as it fades in when the hull flies toward it.
+    #[must_use]
+    pub fn slewed_toward(&self, target: &AskBound, rungs: u8, dt_s: f64) -> AskBound {
+        let mut switches = vec![0.0f64; usize::from(rungs)];
+        let mut free = true;
+        let mut rung = 0u8;
+        while rung < rungs {
+            let now = self.switch_m(rung);
+            let want = target.switch_m(rung);
+            let step = (now + column_span_m(rung)) * ASK_BOUND_SLEW_PER_S * dt_s.max(0.0);
+            let gap = want - now;
+            let next = if gap.abs() <= step {
+                want
+            } else {
+                now + step.copysign(gap)
+            };
+            switches[usize::from(rung)] = next;
+            free &= next >= switch_m(rung);
+            rung += 1;
+        }
+        if free {
+            return AskBound::unbounded();
+        }
+        AskBound {
+            switches: Some(switches),
+            slack: 0.0,
+        }
+    }
+
+    /// THE BANDS of a rung under this bound — [`fade_bands`] read at the effective switch
+    /// distances. A rung whose finer neighbour is bound in to nothing has no finer rung to fade in
+    /// from at all, and is always in, exactly as rung 0 is.
+    #[must_use]
+    pub fn fade_bands(&self, rung: u8, rungs: u8) -> ([f64; 2], [f64; 2]) {
+        // THE SLACK GOES ONLY WHERE THE HORIZON MOVES: a rung the bound left at the tier rule's
+        // own radius never slides, so widening it buys nothing and costs the descent every column
+        // of the widening. MEASURED (§25.7): widening every rung cost 0.23 ms of a 3.53 ms
+        // descent, and the coarse rungs — whose rings are the widest of all — never moved.
+        let slack = |s: f64, rung: u8| {
+            if s < switch_m(rung) { self.slack } else { 0.0 }
+        };
+        let band = |s: f64, r: u8| {
+            let k = slack(s, r);
+            [
+                HYSTERESIS_IN * s * (1.0 - k),
+                HYSTERESIS_OUT * s * (1.0 + k),
+            ]
+        };
+        let fade_in = if rung == 0 {
+            FADE_ALWAYS_IN
+        } else {
+            let finer = self.switch_m(rung - 1);
+            if finer > 0.0 {
+                band(finer, rung - 1)
+            } else {
+                FADE_ALWAYS_IN
+            }
+        };
+        let fade_out = if rung + 1 >= rungs {
+            FADE_ALWAYS_OUT
+        } else {
+            band(self.switch_m(rung), rung)
+        };
+        (fade_in, fade_out)
+    }
+
+    /// WHERE THE SINK RAMP ENDS for a rung under this bound — [`sink_end_m`] read at the effective
+    /// switch distances.
+    #[must_use]
+    pub fn sink_end_m(&self, body: &BodyDefinition, rung: u8, rungs: u8) -> f64 {
+        let (fade_in, _) = self.fade_bands(rung, rungs);
+        if fade_in[0] == FADE_ALWAYS_IN[0] {
+            return fade_in[1];
+        }
+        let crease = f64::from(cell_m(rung - 1));
+        let sink = crate::chunks::sink_m(body, rung);
+        // sink > crease always: the sink holds a cell of each rung and the gap bound.
+        fade_in[1] + (fade_in[1] - fade_in[0]) * crease / (sink - crease)
+    }
 }
 
 /// THE HORIZON of a smooth sphere of `radius_m` seen from `altitude_m` over it, in metres along the
@@ -385,6 +770,13 @@ pub struct WantedSet {
     /// while `bounded` — a descent without a shadow reach lets every chunk cast.
     casting: BTreeSet<ChunkKey>,
     bounded: bool,
+    /// THE ALTITUDE THIS DESCENT RAN AT, in metres over the recipe's surface under the eye,
+    /// floored as [`floored_altitude_m`] floors it. The bounded ask reads it (ruling F9 item 1):
+    /// a ring whose slant distance does not reach the ground has no ask at all, and only the
+    /// RECIPE'S surface says where the ground is — the ladder's own radius is its FLOOR, which
+    /// stands kilometres under the recipe, and reading that in its place made every near ring look
+    /// empty and the bound inert (MEASURED, the second bounded flight of 2026-09-13).
+    pub altitude_m: f64,
     /// How far the ladder reaches, in metres, and the rungs it holds.
     pub reach_m: f64,
     pub rung_min: u8,
@@ -529,6 +921,24 @@ impl WantedSet {
         self.keys.len()
     }
 
+    /// HOW MANY COLUMNS the set holds — the wanted chunks divided by this is the chunks a column
+    /// holds, which the bounded ask reads as the cost of uncovering one new column (ruling F9
+    /// item 1). One on ground the surface crosses once, two where it crosses a chunk boundary.
+    #[must_use]
+    pub fn columns(&self) -> usize {
+        self.index.values().map(BTreeMap::len).sum()
+    }
+
+    /// THE CHUNKS A COLUMN HOLDS, as this descent measured it; `default` while nothing is wanted.
+    #[must_use]
+    pub fn chunks_per_column(&self, default: f64) -> f64 {
+        let columns = self.columns();
+        if columns == 0 {
+            return default;
+        }
+        self.keys.len() as f64 / columns as f64
+    }
+
     /// Whether nothing is wanted.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -596,6 +1006,10 @@ pub struct LadderView {
     /// THE SHADOW'S REACH for the casters (item 18), the renderer's to set from the sun and its
     /// cascades before a descent; `None` lets every wanted chunk ask for its caster.
     pub shadow: Option<ShadowReach>,
+    /// THE BOUNDED ASK (ruling F9 item 1), the renderer's to set from its measured throughput and
+    /// the eye's delivered speed before a descent. The default is [`AskBound::unbounded`]: the
+    /// tier rule's own radii, the ladder every earlier flight flew.
+    pub bound: AskBound,
     /// THE CULLED COLUMNS: every column past the horizon the last descent judged hidden. Such a
     /// column stays skyline-judged until it lies well inside the horizon
     /// ([`HORIZON_HYSTERESIS`]): the horizon moves with the eye's height (a walker over a bump,
@@ -684,6 +1098,9 @@ fn column_geometry(
 struct Sweep<'a> {
     ladder: &'a vd_seed::ladder::Ladder,
     body: &'a BodyDefinition,
+    /// THE BOUNDED ASK (ruling F9 item 1): the effective switch distance of every rung. The
+    /// descent splits, emits and classes against these, never against the tier rule's own.
+    bound: &'a AskBound,
     /// Each rung's keys with their territory.
     per_rung: Vec<Vec<(ChunkKey, Territory)>>,
     /// The shadow's reach (item 18), `None` when every chunk may cast.
@@ -708,9 +1125,13 @@ impl Sweep<'_> {
     ) {
         let ladder = self.ladder;
         let body = self.body;
+        let bound = self.bound;
         let per_rung = &mut self.per_rung;
         let edge = CHUNK_EDGE as i32;
-        let (fade_in, fade_out) = fade_bands(col.rung, ladder.rungs);
+        // THE BOUNDED ASK (ruling F9 item 1): a column SPLITS into the finer rung only while it
+        // stands inside that rung's DELIVERABLE HORIZON; past the horizon it does not split, and
+        // its own rung — whose territory now reaches in to the horizon — stands whole instead.
+        let (fade_in, fade_out) = bound.fade_bands(col.rung, ladder.rungs);
         if (col.rung > 0) & (geo.near < fade_in[1]) {
             let child_rung = col.rung - 1;
             let last = (ladder.cells_per_edge(child_rung) as i32 - 1) / edge;
@@ -735,7 +1156,7 @@ impl Sweep<'_> {
             // under a finer rung that stood whole). URGENT for a column inside the eye's horizon
             // (the ground the motion carries the eye into), REVEALED for one past it (a peak the
             // skyline admits).
-            let inside = (geo.near < switch_m(col.rung)) & (geo.far > fade_in[1]);
+            let inside = (geo.near < bound.switch_m(col.rung)) & (geo.far > fade_in[1]);
             let territory = match (inside, inside_horizon) {
                 (false, _) => Territory::Margin,
                 (true, true) => Territory::Urgent,
@@ -823,9 +1244,11 @@ impl LadderView {
         self.generation += 1;
         let frame = EyeFrame::new(eye);
         let mut skyline = Skyline::new(len);
+        let bound = self.bound.clone();
         let mut sweep = Sweep {
             ladder: &ladder,
             body,
+            bound: &bound,
             per_rung: vec![Vec::new(); usize::from(rungs)],
             shadow: self.shadow,
             low_within_reach_m: f64::MAX,
@@ -924,6 +1347,7 @@ impl LadderView {
         }
         let mut out = WantedSet {
             reach_m: reach,
+            altitude_m: altitude,
             bounded: sweep.shadow.is_some(),
             ..WantedSet::default()
         };
@@ -1768,5 +2192,442 @@ mod tests {
         }
         // The three faces tile the cap around the corner out to the horizon.
         assert_tiled(&body, &w, d, surface, 60_000.0);
+    }
+}
+
+/// ★ THE BOUNDED ASK's own tests (ruling F9 item 1): the horizon arithmetic, both arms of every
+/// branch, and the invariant the descent owes — inside a rung's horizon the tier rule's own rung is
+/// asked, past it the next rung, and no ground is ever left unasked.
+#[cfg(test)]
+mod ask_bound_tests {
+    use super::*;
+    use vd_terrain::home::home_planet;
+
+    /// A rate that binds on the home planet: a hull at 528 m/s over the ground, three workers.
+    fn fast() -> AskRate {
+        AskRate {
+            chunks_per_s: 195.0,
+            speed_mps: 528.0,
+            altitude_m: EYE_HEIGHT_M,
+            chunks_per_column: 2.0,
+        }
+    }
+
+    /// THE BOUND NEVER BINDS where the builders cover the ask: nothing measured, nothing moving,
+    /// no column, no ladder — and a machine whose throughput is large. Every one of them reads the
+    /// tier rule's own switch distance at every rung.
+    #[test]
+    fn a_covered_ask_reads_the_tier_rules_own_radii() {
+        let rungs = 12u8;
+        let covered = [
+            AskRate {
+                chunks_per_s: 0.0,
+                ..fast()
+            },
+            AskRate {
+                speed_mps: 0.0,
+                ..fast()
+            },
+            AskRate {
+                chunks_per_column: 0.0,
+                ..fast()
+            },
+            AskRate {
+                chunks_per_s: 1.0e9,
+                ..fast()
+            },
+        ];
+        for rate in covered {
+            let bound = ask_bound(rungs, rate);
+            assert!(!bound.binds(), "{rate:?} bound the ask");
+            assert_eq!(bound.horizons_m(), Vec::<f64>::new());
+            let mut rung = 0u8;
+            while rung < rungs {
+                assert_eq!(bound.switch_m(rung), switch_m(rung));
+                rung += 1;
+            }
+        }
+        // A ladder with no rung at all: nothing to bound.
+        assert!(!ask_bound(0, fast()).binds());
+    }
+
+    /// AT SPEED ON A SMALL SHARE the bound binds: the finest rungs come in, every rung stays
+    /// inside the tier rule's own radius, and no two rungs share a distance (a shared crossfade
+    /// band would draw a half-transparent shell).
+    #[test]
+    fn a_share_that_cannot_keep_up_brings_the_finest_rungs_in() {
+        let rungs = 12u8;
+        let bound = ask_bound(rungs, fast());
+        assert!(bound.binds());
+        let horizons = bound.horizons_m();
+        assert_eq!(horizons.len(), usize::from(rungs));
+        assert!(horizons[0] < switch_m(0), "{horizons:?}");
+        let mut rung = 0u8;
+        while rung < rungs {
+            assert!(bound.switch_m(rung) <= switch_m(rung), "rung {rung}");
+            assert!(bound.switch_m(rung) > 0.0, "rung {rung}");
+            rung += 1;
+        }
+        rung = 1;
+        while rung < rungs {
+            // Every finer rung's switch is at most half its coarser neighbour's, as the tier
+            // rule's own are.
+            let finer = bound.switch_m(rung - 1);
+            let coarser = bound.switch_m(rung);
+            assert!(
+                finer <= coarser * 0.5 + 1.0e-9,
+                "rung {rung}: {finer}, {coarser}"
+            );
+            rung += 1;
+        }
+        // A rung past the bound's own ladder reads the tier rule's own.
+        assert_eq!(bound.switch_m(rungs), switch_m(rungs));
+    }
+
+    /// THE BUILDERS' THROUGHPUT MOVES THE HORIZON OUT, and the eye's speed moves it in.
+    #[test]
+    fn the_horizon_follows_the_throughput_and_the_speed() {
+        let slow = ask_bound(12, fast());
+        let faster_builders = ask_bound(
+            12,
+            AskRate {
+                chunks_per_s: 400.0,
+                ..fast()
+            },
+        );
+        assert!(faster_builders.switch_m(0) > slow.switch_m(0));
+        let faster_eye = ask_bound(
+            12,
+            AskRate {
+                speed_mps: 1056.0,
+                ..fast()
+            },
+        );
+        assert!(faster_eye.switch_m(0) < slow.switch_m(0));
+    }
+
+    /// AN EYE ALOFT pays nothing for its empty finest rings: a ring whose slant distance does not
+    /// reach the ground has no ask at all, so the budget it leaves buys the coarser rings.
+    #[test]
+    fn a_ring_that_reaches_no_ground_costs_the_builders_nothing() {
+        // A kilometre up, the rung-0 ring (869 m) holds no ground at all.
+        let aloft = AskRate {
+            altitude_m: 1_000.0,
+            ..fast()
+        };
+        assert_eq!(ground_radius_m(switch_m(0), aloft.altitude_m), 0.0);
+        assert!(ground_radius_m(switch_m(4), aloft.altitude_m) > 0.0);
+        assert_eq!(ask_rate_per_s(0, switch_m(0), aloft), 0.0);
+        let bound = ask_bound(12, aloft);
+        assert!(bound.binds());
+        // The rings the eye can actually see stand farther out than the same rings do for an eye
+        // on the ground, whose rung-0 disc is full of ground and eats the budget.
+        assert!(bound.switch_m(1) > ask_bound(12, fast()).switch_m(1));
+        assert!(bound.switch_m(2) > ask_bound(12, fast()).switch_m(2));
+    }
+
+    /// ★ THE FLIGHT'S OWN OPERATING POINTS (the moving eye at the average machine's three
+    /// workers, MEASURED 2026-09-13): the bound must be INERT where the builders keep up and must
+    /// BIND where they cannot, at the very numbers the flight reads off the stamp.
+    #[test]
+    fn the_bound_is_inert_at_240_and_binds_at_528() {
+        let body = home_planet();
+        let rungs = body.ladder().rungs;
+        // A column of the home planet holds one chunk where the surface crosses one; the flight's
+        // own descents read it, and both points below use that.
+        let column = 1.0;
+        // The 240 m/s leg: 223 m/s read from the lead, 1 117 m up, 170 chunks a second built.
+        let steady = ask_bound(
+            rungs,
+            AskRate {
+                chunks_per_s: 170.0,
+                speed_mps: 223.0,
+                altitude_m: 1_117.0,
+                chunks_per_column: column,
+            },
+        );
+        assert!(!steady.binds(), "{:?}", steady.horizons_m());
+        // The 528 m/s leg: 515 m/s, 766 m up, 193 chunks a second. The builders cannot hold the
+        // ask, and the finest rungs come in.
+        let fast = ask_bound(
+            rungs,
+            AskRate {
+                chunks_per_s: 193.0,
+                speed_mps: 515.0,
+                altitude_m: 766.0,
+                chunks_per_column: column,
+            },
+        );
+        assert!(fast.binds());
+        assert!(fast.switch_m(1) < switch_m(1), "{:?}", fast.horizons_m());
+    }
+
+    /// THE HYSTERESIS reads two bounds as the same while every rung is within its fraction, and
+    /// as different past it — symmetric, and never zero-width.
+    #[test]
+    fn the_hysteresis_keeps_a_jittering_horizon_and_adopts_a_moved_one() {
+        let rungs = 12u8;
+        let a = ask_bound(rungs, fast());
+        let hair = ask_bound(
+            rungs,
+            AskRate {
+                chunks_per_s: 200.0,
+                ..fast()
+            },
+        );
+        let far = ask_bound(
+            rungs,
+            AskRate {
+                chunks_per_s: 60.0,
+                ..fast()
+            },
+        );
+        assert!(a.same_as(&hair, rungs, 0.25));
+        assert!(hair.same_as(&a, rungs, 0.25));
+        assert!(!a.same_as(&hair, rungs, ASK_BOUND_HYSTERESIS));
+        assert!(!a.same_as(&far, rungs, 0.25));
+        assert!(!far.same_as(&a, rungs, 0.25));
+        // The unbounded pair is the same as itself, at every rung.
+        let free = AskBound::unbounded();
+        assert!(free.same_as(&AskBound::unbounded(), rungs, 0.0));
+        assert!(!free.same_as(&a, rungs, ASK_BOUND_HYSTERESIS));
+    }
+
+    /// ★ THE HORIZON SLIDES, IT NEVER JUMPS: a step of one frame moves each rung by a slice of its
+    /// own horizon, a long step lands exactly on the target, a settled bound stops moving, and the
+    /// way back to the tier rule's own radii ends in [`AskBound::unbounded`].
+    #[test]
+    fn the_horizon_slides_toward_its_target_and_settles_on_it() {
+        let rungs = 12u8;
+        let target = ask_bound(rungs, fast());
+        let free = AskBound::unbounded();
+        // One frame of a fortieth of a second: a step, not the target.
+        let frame = 1.0 / 40.0;
+        let one = free.slewed_toward(&target, rungs, frame);
+        assert!(one.binds());
+        assert!(one.switch_m(0) < free.switch_m(0));
+        assert!(one.switch_m(0) > target.switch_m(0));
+        // Enough seconds to cross the whole distance: exactly the target.
+        let landed = free.slewed_toward(&target, rungs, 1_000.0);
+        assert_eq!(landed.horizons_m(), target.horizons_m());
+        // A bound already at its target does not move, at any step.
+        assert_eq!(
+            target.slewed_toward(&target, rungs, frame).horizons_m(),
+            target.horizons_m()
+        );
+        // And the way home ends unbounded, never at a bound that merely equals the tier rule's.
+        assert!(!target.slewed_toward(&free, rungs, 1_000.0).binds());
+        // A rung bound in to nothing can still grow: its own column's width is its floor step.
+        let nothing = ask_bound(
+            rungs,
+            AskRate {
+                chunks_per_s: 1.0e-9,
+                altitude_m: 0.0,
+                ..fast()
+            },
+        );
+        assert_eq!(nothing.switch_m(0), 0.0);
+        assert!(nothing.slewed_toward(&free, rungs, frame).switch_m(0) > 0.0);
+        // A moment that went backwards moves nothing.
+        assert_eq!(
+            free.slewed_toward(&target, rungs, -1.0).horizons_m(),
+            free.slewed_toward(&target, rungs, 0.0).horizons_m()
+        );
+    }
+
+    /// THE BANDS FOLLOW THE BOUND: a rung's fade-out band sits on its own effective switch, its
+    /// fade-in band on the finer rung's, rung 0 is always in, and the top rung never fades out.
+    #[test]
+    fn the_crossfade_bands_read_the_effective_switch_distances() {
+        let body = home_planet();
+        let rungs = body.ladder().rungs;
+        let bound = ask_bound(rungs, fast());
+        let (in0, out0) = bound.fade_bands(0, rungs);
+        assert_eq!(in0, FADE_ALWAYS_IN);
+        assert_eq!(out0[0], HYSTERESIS_IN * bound.switch_m(0));
+        assert_eq!(out0[1], HYSTERESIS_OUT * bound.switch_m(0));
+        let (in1, _) = bound.fade_bands(1, rungs);
+        assert_eq!(in1[0], HYSTERESIS_IN * bound.switch_m(0));
+        let (_, top_out) = bound.fade_bands(rungs - 1, rungs);
+        assert_eq!(top_out, FADE_ALWAYS_OUT);
+        // The sink's ramp moves with the band, and rung 0 sinks nowhere.
+        assert_eq!(bound.sink_end_m(&body, 0, rungs), FADE_ALWAYS_IN[1]);
+        assert!(bound.sink_end_m(&body, 1, rungs) > in1[1]);
+        // The unbounded bound is the free functions, step for step.
+        let free = AskBound::unbounded();
+        assert_eq!(free.fade_bands(1, rungs), fade_bands(1, rungs));
+        assert_eq!(
+            free.sink_end_m(&body, 1, rungs),
+            sink_end_m(&body, 1, rungs)
+        );
+    }
+
+    /// ★ THE DESCENT'S SLACK COVERS THE SLIDE (ruling F9 item 1, the frame bar; review item 2).
+    ///
+    /// The picture and the descent read the horizon at two tolerances: the materials follow the
+    /// held horizon within [`ASK_BOUND_REBIND`], the descent within [`ASK_BOUND_BRACKET`]. This
+    /// walks THE WORST STAND OF BOTH AT ONCE — a drawn horizon a rebind OUT and an asked horizon a
+    /// bracket IN — and asserts that every band the picture draws lies inside the ring the descent
+    /// asked for. It asserts the guard itself, so the walk cannot go vacuous, and it asserts that
+    /// the bracket ALONE falls short, which is why [`ASK_BOUND_SLACK`] is derived from the two.
+    #[test]
+    fn the_descents_slack_covers_every_band_the_horizon_may_slide_to() {
+        let rungs = 12u8;
+        let held = ask_bound(rungs, fast());
+        assert!(held.binds(), "the fixture must bind for this to mean anything");
+        // The slack is not the bound: the same switches read as the same bound.
+        let asked = held.clone().with_slack(ASK_BOUND_SLACK);
+        assert!(asked.same_as(&held, rungs, 0.0));
+        // THE WORST STAND OF BOTH TOLERANCES AT ONCE, at every rung, built outright instead of
+        // hoping some rate lands there.
+        let scaled = |bound: &AskBound, k: f64| {
+            let mut switches = Vec::new();
+            let mut rung = 0u8;
+            while rung < rungs {
+                switches.push(bound.switch_m(rung) * k);
+                rung += 1;
+            }
+            AskBound::from_switches(switches)
+        };
+        // A HAIR inside each tolerance, so the guard's own comparison is decided by the
+        // arithmetic and not by the last bit of a double at the exact boundary.
+        let hair = 1.0e-12;
+        let worst_asked =
+            scaled(&held, 1.0 - ASK_BOUND_BRACKET + hair).with_slack(ASK_BOUND_SLACK);
+        let worst_drawn = scaled(&held, 1.0 / (1.0 - ASK_BOUND_REBIND) - hair);
+        // THE GUARD ITSELF: these two really are a bracket and a rebind from the held horizon, so
+        // the walk below is a stand the pace can produce and not a pair that never happens.
+        assert!(
+            worst_asked.same_as(&held, rungs, ASK_BOUND_BRACKET),
+            "the asked horizon must sit inside the descent's own bracket"
+        );
+        assert!(
+            worst_drawn.same_as(&held, rungs, ASK_BOUND_REBIND),
+            "the drawn horizon must sit inside the materials' own rebind"
+        );
+        let mut checked = 0u32;
+        let mut rung = 0u8;
+        while rung < rungs {
+            let (ask_in, ask_out) = worst_asked.fade_bands(rung, rungs);
+            let (drawn_in, drawn_out) = worst_drawn.fade_bands(rung, rungs);
+            assert!(ask_in[0] <= drawn_in[0], "rung {rung}: the fade-in's start");
+            assert!(ask_in[1] >= drawn_in[1], "rung {rung}: the fade-in's end");
+            assert!(ask_out[0] <= drawn_out[0], "rung {rung}: the fade-out's start");
+            assert!(ask_out[1] >= drawn_out[1], "rung {rung}: the fade-out's end");
+            checked += 1;
+            rung += 1;
+        }
+        assert_eq!(checked, u32::from(rungs), "every rung must be walked");
+        // AND THE BRACKET ALONE FALLS SHORT: the same worst stand asked with a slack of the
+        // bracket draws a band outside the ring the descent asked for. This is the defect the
+        // derivation cures, asserted so it cannot come back.
+        let short =
+            scaled(&held, 1.0 - ASK_BOUND_BRACKET + hair).with_slack(ASK_BOUND_BRACKET);
+        let (_, short_out) = short.fade_bands(0, rungs);
+        let (_, drawn_out) = worst_drawn.fade_bands(0, rungs);
+        assert!(
+            short_out[1] < drawn_out[1],
+            "the bracket alone must fall short of the drawn band"
+        );
+        // No slack is the bands themselves.
+        let exact = ask_bound(rungs, fast());
+        assert_eq!(
+            exact.fade_bands(2, rungs),
+            exact.clone().with_slack(0.0).fade_bands(2, rungs)
+        );
+    }
+
+    /// A RUNG BOUND IN TO NOTHING has no finer rung to fade in from, so it is always in and sinks
+    /// nowhere — exactly as rung 0 is. (An eye AT the surface whose builders cannot hold even the
+    /// coarsest ring: the arithmetic's own floor.)
+    #[test]
+    fn a_rung_with_no_finer_neighbour_is_always_in() {
+        let body = home_planet();
+        let rungs = body.ladder().rungs;
+        let none = AskRate {
+            chunks_per_s: 1.0e-9,
+            altitude_m: 0.0,
+            ..fast()
+        };
+        let bound = ask_bound(rungs, none);
+        assert!(bound.binds());
+        assert_eq!(bound.switch_m(0), 0.0);
+        let (fade_in, _) = bound.fade_bands(1, rungs);
+        assert_eq!(fade_in, FADE_ALWAYS_IN);
+        assert_eq!(bound.sink_end_m(&body, 1, rungs), FADE_ALWAYS_IN[1]);
+    }
+
+    /// THE CHUNKS A COLUMN HOLDS, as the descent measures it: the default while nothing is wanted,
+    /// and the set's own ratio once it is.
+    #[test]
+    fn a_wanted_set_states_the_chunks_a_column_holds() {
+        let empty = WantedSet::default();
+        assert_eq!(empty.columns(), 0);
+        assert_eq!(empty.chunks_per_column(2.0), 2.0);
+        let body = home_planet();
+        let r = body.ladder().radius_m();
+        let set = LadderView::default().wanted(&body, [r + EYE_HEIGHT_M, 0.0, 0.0]);
+        assert!(set.columns() > 0);
+        let per = set.chunks_per_column(2.0);
+        assert!((1.0..=4.0).contains(&per), "{per}");
+        assert_eq!(per, set.len() as f64 / set.columns() as f64);
+    }
+
+    /// ★ THE INVARIANT (ruling F9 item 1): with the bound in force, a column of the finest rung
+    /// INSIDE that rung's deliverable horizon is still asked at the tier rule's own rung; one
+    /// BEYOND the horizon is asked at the next rung instead; and no ground the unbounded ask
+    /// wanted is left unasked.
+    #[test]
+    fn inside_the_horizon_the_tier_rules_rung_is_asked_and_beyond_it_the_next() {
+        let body = home_planet();
+        let rungs = body.ladder().rungs;
+        let r = body.ladder().radius_m();
+        let eye = [r + EYE_HEIGHT_M, 0.0, 0.0];
+        let free = LadderView::default().wanted(&body, eye);
+        let bound = ask_bound(rungs, fast());
+        assert!(bound.binds());
+        let mut view = LadderView {
+            bound: bound.clone(),
+            ..LadderView::default()
+        };
+        let held = view.wanted(&body, eye);
+        assert!(!held.is_empty());
+        // The bounded ask is the smaller one, and it starts no finer than the free one.
+        assert!(held.len() < free.len(), "{} {}", held.len(), free.len());
+        assert!(held.rung_min >= free.rung_min);
+        let ladder = *body.ladder();
+        let surface = vd_terrain::height::height_m(&body, [1.0, 0.0, 0.0], 0);
+        let frame = EyeFrame::new(DVec3::from_array(eye));
+        let near_of = |col: Column| {
+            column_geometry(&ladder, &frame, DVec3::from_array(eye), col, surface).near
+        };
+        let mut inside = 0u32;
+        let mut beyond = 0u32;
+        let columns: BTreeSet<Column> = free.keys.iter().map(|k| Column::of(*k)).collect();
+        for col in columns {
+            // NEVER UNASKED: some wanted chunk of the bounded ask stands over this ground.
+            assert!(
+                held.overlapping_missing(col, &|_| false),
+                "{col:?} was left unasked"
+            );
+            let at_own_rung = held.keys.iter().any(|k| {
+                (k.rung == col.rung) & (k.x == col.x) & (k.y == col.y) & (k.face == col.face)
+            });
+            let near = near_of(col);
+            let horizon = bound.switch_m(col.rung);
+            // Inside the rung's own deliverable horizon: the tier rule's rung still stands.
+            if near < horizon {
+                assert!(at_own_rung, "{col:?} inside {horizon} m was not asked");
+                inside += 1;
+            }
+            // Past the crossfade band around that horizon: the next rung stands instead.
+            if near > HYSTERESIS_OUT * horizon {
+                assert!(!at_own_rung, "{col:?} past {horizon} m was asked anyway");
+                beyond += 1;
+            }
+        }
+        // Both arms were exercised: the bound bit, and it did not take everything.
+        assert!(inside > 0);
+        assert!(beyond > 0);
     }
 }

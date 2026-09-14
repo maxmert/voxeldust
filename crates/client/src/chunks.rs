@@ -1030,6 +1030,12 @@ pub fn geometry_of(body: &BodyDefinition, key: ChunkKey) -> Option<ChunkGeometry
 }
 
 /// [`geometry_of`] with the lane's parent cache, for the chunk of `realm`.
+///
+/// A chunk's build is TWO STEPS, and this is the pair run together: the SAMPLE step
+/// ([`vd_terrain::lattice::sample_box`]) reads the recipe into a box of cells, and the GEOMETRY
+/// step ([`geometry_from`]) turns that box into a mesh. They are named apart because a second
+/// builder may do the sample step elsewhere — the card computes the same box byte for byte
+/// (`vd_terrain::gpu`) — and hand the box to the same geometry step (ruling F9 item 2).
 #[must_use]
 pub fn geometry_with(
     body: &BodyDefinition,
@@ -1038,9 +1044,23 @@ pub fn geometry_with(
     parents: &ParentCache,
 ) -> Option<ChunkGeometry> {
     let samples = sample_box(body, key)?;
-    let mesh = extract(&samples);
+    geometry_from(body, realm, key, &samples, parents)
+}
+
+/// THE GEOMETRY STEP of a chunk's build: the mesh, the vertices, the morph targets and the normals
+/// from a box of cells somebody already sampled. The box is the recipe's own output, whoever
+/// computed it.
+#[must_use]
+pub fn geometry_from(
+    body: &BodyDefinition,
+    realm: RealmId,
+    key: ChunkKey,
+    samples: &vd_terrain::lattice::SampleBox,
+    parents: &ParentCache,
+) -> Option<ChunkGeometry> {
+    let mesh = extract(samples);
     let half = (CHUNK_EDGE / 2) as i16 * vd_terrain::VERTEX_QUANTUM as i16;
-    let origin = vertex_position_m(body, &samples, [half, half, half]);
+    let origin = vertex_position_m(body, samples, [half, half, half]);
     let origin_m = [origin[0], origin[1], origin[2]];
     let mut vertices: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
     let mut morph: Vec<f32> = Vec::with_capacity(mesh.vertices.len());
@@ -1082,7 +1102,7 @@ pub fn geometry_with(
         (ga <= 0) | (ga >= face_quanta) | (gb <= 0) | (gb >= face_quanta)
     };
     for v in &mesh.vertices {
-        let p = vertex_position_m(body, &samples, *v);
+        let p = vertex_position_m(body, samples, *v);
         vertices.push([
             (p[0] - origin[0]) as f32,
             (p[1] - origin[1]) as f32,
