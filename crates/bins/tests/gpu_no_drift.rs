@@ -24,7 +24,6 @@
 
 use vd_client_render::gpu_check::BoxGear;
 use vd_client_render::wgpu;
-use vd_seed::bend::Face;
 use vd_terrain::BodyDefinition;
 use vd_terrain::chunk::ChunkKey;
 use vd_terrain::home::home_planet;
@@ -39,25 +38,32 @@ const SEAM_STAND_EYE_M: [f64; 3] = [
     -4_280_492.264_785_528,
 ];
 
-/// ★ THE KEY THE SEAM STAND DREW A HOLE FOR: the first box of the 1 022 that drifted. It carries
-/// EIGHT lattices, and the box before it in the stand's own order carries SIXTEEN.
-const FAILING_KEY: ChunkKey = ChunkKey {
-    face: Face::PosX,
-    rung: 9,
-    x: 69,
-    y: 7,
-    z: 0,
-};
-
-/// ★ THE BOX BEFORE IT, which grew the pool: a rung-0 box with SIXTEEN lattices. The pair is the
-/// whole defect in two submits — a bigger box, then a smaller one on the same gear.
-const PREDECESSOR_KEY: ChunkKey = ChunkKey {
-    face: Face::NegZ,
-    rung: 0,
-    x: 35_929,
-    y: 161_395,
-    z: 305,
-};
+/// ★ THE PAIR THAT DREW A HOLE, FOUND BY ITS OWN SHAPE and no longer by two literals (re-derived
+/// 2026-09-15, when the extended ladder moved every chunk key in the world): the FIRST place in the
+/// seam stand's own order where a box asks for FEWER cavern lattice rows than the box right before
+/// it. That shrink IS the defect the pin holds — the wide box grew the gear's lattice binding, the
+/// narrow box wrote fewer rows, and the kernel walked the binding by its slice's own length, so
+/// every column of the narrow box found a lattice that box does not have.
+///
+/// `None` where the stand asks for no shrink at all, which the tests below refuse by name.
+fn shrinking_pair(body: &BodyDefinition) -> Option<(ChunkKey, ChunkKey)> {
+    let mut view = vd_client::ladder_view::LadderView::default();
+    let wanted = view.wanted(body, SEAM_STAND_EYE_M);
+    let mut previous: Option<(ChunkKey, usize)> = None;
+    for key in &wanted.keys {
+        let Some(plan) = vd_terrain::gpu::plan(body, *key) else {
+            continue;
+        };
+        let words = plan.lattice_words().len();
+        if let Some((before, before_words)) = previous {
+            if words < before_words {
+                return Some((before, *key));
+            }
+        }
+        previous = Some((*key, words));
+    }
+    None
+}
 
 /// HOW MANY OF THE STAND'S OWN BOXES THE SWEEP TAKES: EVERY ONE. The whole wanted set is 6 049
 /// boxes and MEASURED 30 s on this machine, which a local GPU gate can pay — and the 1 022 that
@@ -146,14 +152,21 @@ fn the_smaller_box_after_a_bigger_one_is_still_the_cpus_box() {
     let (device, queue) = device();
     let body = home_planet();
     let mut gear = BoxGear::new(device, queue);
-    let before = vd_terrain::gpu::plan(&body, PREDECESSOR_KEY).expect("the key is on the ladder");
-    let after = vd_terrain::gpu::plan(&body, FAILING_KEY).expect("the key is on the ladder");
-    // The pair is only a trap while the second box asks for FEWER lattice rows than the first: the
-    // gate states that, so a world whose ladder changes cannot leave this test passing on nothing.
+    let (predecessor, failing) =
+        shrinking_pair(&body).expect("the seam stand asks a narrow box behind a wide one");
+    let before = vd_terrain::gpu::plan(&body, predecessor).expect("the key is on the ladder");
+    let after = vd_terrain::gpu::plan(&body, failing).expect("the key is on the ladder");
+    // The pair is only a trap while the second box asks for FEWER lattice rows than the first, which
+    // is how `shrinking_pair` chose it; the gate states it again so the choice cannot go quiet.
     assert!(
         after.lattice_words().len() < before.lattice_words().len(),
-        "the pin needs a SHRINK: {PREDECESSOR_KEY:?} asks for {} lattice words and {FAILING_KEY:?} \
-         for {}",
+        "the pin needs a SHRINK: {predecessor:?} asks for {} lattice words and {failing:?} for {}",
+        before.lattice_words().len(),
+        after.lattice_words().len()
+    );
+    eprintln!(
+        "gpu_no_drift: the shrinking pair is {predecessor:?} ({} lattice words) then {failing:?} \
+         ({} words)",
         before.lattice_words().len(),
         after.lattice_words().len()
     );
@@ -170,12 +183,11 @@ fn the_smaller_box_after_a_bigger_one_is_still_the_cpus_box() {
     let (count, first) = differing(&after, &card);
     assert_eq!(
         count, 0,
-        "THE CARD'S BOX IS NOT THE CPU'S at {FAILING_KEY:?}, first at {first:?}"
+        "THE CARD'S BOX IS NOT THE CPU'S at {failing:?}, first at {first:?}"
     );
     // AND AGAINST THE GENERATOR'S OWN READING, which is what the shard computes collision on and
     // what SL10 names: the plan's host run is one path to the box, `sample_box` is the other.
-    let cpu =
-        vd_terrain::lattice::sample_box(&body, FAILING_KEY).expect("the box is on the ladder");
+    let cpu = vd_terrain::lattice::sample_box(&body, failing).expect("the box is on the ladder");
     let built = after.box_of(&card, &vd_terrain::gpu::BoxPlan::dirs_of(&after.run()));
     let cells = cpu
         .cells
@@ -185,7 +197,7 @@ fn the_smaller_box_after_a_bigger_one_is_still_the_cpus_box() {
         .count();
     assert_eq!(
         cells, 0,
-        "the card's box is not `sample_box`'s at {FAILING_KEY:?}"
+        "the card's box is not `sample_box`'s at {failing:?}"
     );
 }
 
@@ -297,15 +309,18 @@ fn the_stand_asks_for_the_narrow_box_right_behind_a_wide_one() {
     let body = home_planet();
     let mut view = vd_client::ladder_view::LadderView::default();
     let wanted = view.wanted(&body, SEAM_STAND_EYE_M);
+    let (predecessor, failing) =
+        shrinking_pair(&body).expect("the seam stand asks a narrow box behind a wide one");
     let at = wanted
         .keys
         .iter()
-        .position(|k| *k == FAILING_KEY)
+        .position(|k| *k == failing)
         .expect("the seam stand asks for the key that drew the hole");
+    assert_eq!(wanted.keys[at - 1], predecessor, "the pair is consecutive");
     let before = vd_terrain::gpu::plan(&body, wanted.keys[at - 1]).expect("the box before it");
-    let after = vd_terrain::gpu::plan(&body, FAILING_KEY).expect("the box that drifted");
+    let after = vd_terrain::gpu::plan(&body, failing).expect("the box that drifted");
     eprintln!(
-        "gpu_no_drift: the seam stand wants {} boxes; {FAILING_KEY:?} stands at {at}, behind \
+        "gpu_no_drift: the seam stand wants {} boxes; {failing:?} stands at {at}, behind \
          {:?} which carries {} lattice words and {} nodes against its own {} and {}",
         wanted.keys.len(),
         before.key,

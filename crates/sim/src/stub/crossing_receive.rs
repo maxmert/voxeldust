@@ -335,15 +335,15 @@ fn apply_crossing(
         // becomes Owned only on the saga `Promote`, after the source has demoted). `on_saga_promote`
         // gates its flip on THIS journal entry (`STUB_CROSSING_STEP` applied) — pose-before-promote,
         // so the relocated promote still never emits a poseless origin-default frame.
-        dot.pose = pose.sanitized();
-        // ★ RE-SEED THE SWEPT PRIOR AT THE ARRIVAL POINT. The Ghost was built with its prior at the
-        // realm ORIGIN, because a freshly-minted dot has no history. Once membership tests the tick's
-        // whole motion segment, leaving it there would make the first scan after arrival sweep a
-        // realm-wide line from the destination's centre to wherever the subject actually landed —
-        // through every region on that line, none of which it visited — and feed the result straight
-        // into a re-home decision. An arrival is a discontinuity, not a movement: the correct prior is
-        // the arrival point itself, which is what every other pose-setting site already seeds.
-        dot.prev_offset = dot.pose.pos;
+        // ★ THE WHOLE ARRIVING POSE (2026-09-14): the position, the facing the crossing computed,
+        // and the swept prior re-seeded at the arrival point — [`Dot::adopt_pose`] writes the three
+        // together, because the look rebuilds the orientation from the angle pair every tick and a
+        // pose written without its pair is a facing thrown away on the next input. The Ghost this
+        // lands on was minted with a ZERO pair and its prior at the realm ORIGIN, so both matter:
+        // without the pair a pilot who boards a hull looking one way faces the hull's default the
+        // moment their first look arrives; without the prior the first membership scan sweeps a
+        // realm-wide line from the destination's centre.
+        dot.adopt_pose(pose.sanitized());
         stats.crossings_applied += 1;
     }
     outbox.push_flow(

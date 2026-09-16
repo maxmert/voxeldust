@@ -16,7 +16,7 @@ use crate::pose::RealmId;
 
 use super::bend::Face;
 
-/// The detail rung of an address: a cell is `2^rung` metres. Four bits: `0..=15`.
+/// The detail rung of an address: a cell is `2^rung` metres. Five bits: `0..=21`.
 #[derive(
     Clone,
     Copy,
@@ -35,7 +35,7 @@ pub struct Rung(u8);
 
 /// A rung byte above the ladder's top, refused at the decoder (never a `Rung` that shifts by 200).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("rung {0} is above the ladder's top of 15")]
+#[error("rung {0} is above the ladder's top of 21")]
 pub struct RungOutOfRange(pub u8);
 
 impl TryFrom<u8> for Rung {
@@ -54,8 +54,10 @@ impl From<Rung> for u8 {
 impl Rung {
     /// The finest rung: one-metre cells, the only writable rung.
     pub const ZERO: Rung = Rung(0);
-    /// The coarsest rung the address can name.
-    pub const MAX: u8 = 15;
+    /// The coarsest rung the address can name. ★ TWENTY-ONE since 2026-09-15: the top rung is ONE
+    /// CHUNK per face edge (`vd_seed::ladder::TOP_RUNG_CHUNKS`), so the largest face the address can
+    /// name needs six more rungs than the old sixty-four-chunk top did.
+    pub const MAX: u8 = vd_seed::ladder::RUNG_MAX;
 
     /// A rung from its number; `None` above [`Rung::MAX`] (a decoder REFUSES, never defaults).
     #[must_use]
@@ -198,10 +200,10 @@ mod tests {
     const BODY: RealmId = RealmId::Planet(7);
 
     #[test]
-    fn a_rung_is_four_bits_and_a_cell_index_is_bounded() {
+    fn a_rung_is_five_bits_and_a_cell_index_is_bounded() {
         assert_eq!(Rung::new(0), Some(Rung::ZERO));
-        assert_eq!(Rung::new(15).map(Rung::level), Some(15));
-        assert_eq!(Rung::new(16), None, "a rung above fifteen is refused");
+        assert_eq!(Rung::new(21).map(Rung::level), Some(21));
+        assert_eq!(Rung::new(22), None, "a rung above twenty-one is refused");
         assert_eq!(Rung::new(3).map(Rung::cell_m), Some(8));
         assert_eq!(
             CellIndex::new(CellIndex::MAX).map(CellIndex::get),
@@ -292,14 +294,14 @@ mod wire_tests {
         assert_eq!(postcard::from_bytes::<Rung>(&bytes), Ok(top));
         assert!(
             postcard::from_bytes::<Rung>(&[Rung::MAX + 1]).is_err(),
-            "rung 16 is refused, never built"
+            "rung 22 is refused, never built"
         );
         assert!(postcard::from_bytes::<Rung>(&[200]).is_err());
         assert_eq!(Rung::try_from(200), Err(RungOutOfRange(200)));
         assert_eq!(Rung::try_from(3).map(u8::from), Ok(3));
         assert_eq!(
             RungOutOfRange(200).to_string(),
-            "rung 200 is above the ladder's top of 15"
+            "rung 200 is above the ladder's top of 21"
         );
         // A whole address refuses with the rung, so a block edit at rung 200 never reaches a shift.
         let addr = CellAddr {

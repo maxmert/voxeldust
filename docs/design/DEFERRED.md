@@ -7817,9 +7817,73 @@ rings; what is left is an interim with a named step:
    eight children and their halo users when the cache holds, a whole build per miss, and two
    workers may build one parent at once) go into that census; `terrain_cost` still measures the
    slice-7 cost with a private cache and is retired by it.
-3. **The far-eye handover**: past `FAR_EYE_RADII` (two body radii) the proxy outline stands in for
-   the globe, and the swap is a seam (SL8). → step 6's pop detector measures it; the globe from the
-   crate at the top rung replaces the outline when the reach names it.
+3. 🟩 **The far-eye handover** — the two-radii cutoff is DELETED (owner 2026-09-15: *"Replace the
+   two-radii cutoff with the drawable floor. To have a seamless experience we should use the
+   visibility radius each realm has. As soon as we can see ANY details (not the dot), realm should
+   start draw itself, but with proper LOD of course"*). MEASURED before it (the owner's own window
+   flight): a hull climbing off the home planet drew 2 706 chunks at 5 856 km, ZERO at 7 932 km with
+   the plain outline standing in, 2 526 again at 5 086 km. The ladder's far edge is now the DRAWABLE
+   FLOOR READ ON THE LADDER'S OWN COARSEST TILE (`ladder_view::drawn_reach_m` —
+   `column_span_m(top) / pixel_rad()`, which is `switch_m`'s own shape one step up): 2.2071 × 10⁸ m
+   on the home planet, 34.65 body radii, twenty-eight times past where the ground used to vanish,
+   and about 17 to 55 radii on EVERY body by the ladder's own construction. Past it every tile the
+   ladder owns is under a pixel, it has no coarser rung to fall to, and the realm's own outline is
+   the drawing (SL3). The far edge was then inside the realm's own visibility radius (34.65 against
+   76.39 radii here). (⚠ HISTORY: this paragraph describes the ladder as it stood before the
+   extension. `drawn_reach_m` no longer exists — see the DELETED entry below.)
+   ★ THE WIDE READING WAS BUILT AND FLOWN FIRST and the MEASUREMENT REFUSED IT: with the far edge at
+   the whole body being one pixel (1 738 radii), the home planet's own MOON (radius 353 km, top rung
+   8) stood inside its own edge from its orbit and the picture gate drew it — +3 987 chunks on every
+   stand (ground 6 658 → 10 642, aloft 3 528 → 7 515), graphics memory 2 265 → 3 104 MB, the still
+   stands' frame time 19.7 → 21.3, 24.0 → 24.3, 24.0 → 26.1 and 17.3 → 22.8 ms — for a moon ONE AND
+   A HALF PIXELS across. The tile floor culls it at 1.3795 × 10⁷ m. WHAT THE TILE FLOOR COSTS: at
+   34.65 radii the globe is about 3.3° (fifty pixels) when its outline takes over, so the handover
+   is not invisible; the difference the eye can still see there is COLOUR, not shape (the relief
+   subtends 0.06 px), and its cure is SL3 — the outline drawn to look like the realm — never a
+   ladder drawing sub-pixel tiles. (⚠ HISTORY: both readings are moot — the client has no far edge
+   at all since 2026-09-15.)
+   The top rung's TERRITORY was fixed with it: it has no coarser rung to hand the ground to, so it
+   reaches everywhere (`AskBound::territory_m`, the same branch `fade_bands` already makes) — before
+   the fix an eye 1.5 radii up classed 1 857 of its 2 015 chunks MARGIN, the lowest request class,
+   and the band could never read incomplete aloft.
+   ★ STILL OWED HERE: **the wanted set SATURATES with distance instead of falling** — MEASURED
+   3 716 chunks at 3 radii, 4 875 at 10, 5 219 at the far edge (and 5 353 at 1 000 radii with the
+   edge lifted), against 8 389 from the ground — because past a few radii a far eye sees the whole
+   HEMISPHERE of top-rung columns and the ladder has no rung coarser than its top. Proper LOD past
+   that needs rungs coarser than `TOP_RUNG_CHUNKS = 64` (which moves every body's address and every
+   frozen digest) or the realm's own outline drawn as the ladder's last rung (SL3) — the owner's
+   call. The FAR picture stand (`terrain_pictures`, the globe a quarter of the frame high at 10.2
+   radii) is a CANDIDATE: its reference is written under `pictures/candidate/`, the gate reports its
+   verdict and never turns red on it, and THE OWNER HAS NOT LOOKED AT IT. The far stand is judged by
+   its own eyes because two of `take_picture`'s readings MEASURABLY refuse a far eye — the ruler
+   ball's march reaches 4 096 cells (17 000 km at the top rung, against an eye 65 000 km up) and
+   plants nothing, and `ground_holes` reads the sky under a globe as a hole (55 011 pixels on the
+   first far flight, every one of them sky).
+   ★★ THE SATURATION IS CURED (2026-09-15, owner: *"agree with extending the ladder and re-use
+   existing mechanisms"*). THE TOP RUNG IS NOW ONE CHUNK PER FACE EDGE — `TOP_RUNG_CHUNKS = 1` in
+   `vd_seed::ladder`, `RUNG_MAX` 15 → 21, and the band is COVERED by whole cells instead of floored
+   to them so a coarse rung is never empty. The home planet goes from thirteen rungs to NINETEEN and
+   from 9 600 top-rung columns to SIX, and its radius snaps 28 684 m lower (6 370 354 → 6 341 670 m,
+   −0.45 %; the owner accepts the rounding, nothing is built on the ground yet). ★ RE-MEASURED 2026-09-15 with the
+   far-eye probe on the home planet, on the finished code (the earlier reading of this line, "7 614
+   on the ground, 910 at 1.5 radii", predated the crust rule and counted COLUMNS at 1.5 radii, not
+   chunks): **7 839 chunks on the ground, 1 197 at 1.5 radii (910 columns), 439 at 2, 208 at 3,
+   123 at 5, 61 at 10, and SIX from 34 radii out to a THOUSAND** — the count FALLS with distance
+   and never empties, and the descent's cost falls with it (19.23 ms on the ground, 0.60 ms at
+   1.5 radii, 0.02 ms at 10, under 0.01 ms past 34). The same shape holds on the moon, on the home system's largest planet and on
+   its smallest. The wide-reading measurement that chose the tile floor is spent: the moon that cost
+   +3 987 chunks now costs SIX.
+   ★★ THE CLIENT'S FAR EDGE IS DELETED (2026-09-15, owner: *"agree"*). THE SERVER'S VISIBILITY
+   RADIUS IS THE ONLY RULE — one radius per realm, tested by its parent; a realm has a row in the
+   pilot's window only inside it, and the ladder draws a body at any distance while the body has a
+   row. `ladder_view::drawn_reach_m` and its guard in `wanted` are GONE, and the test that asserted
+   the far edge against the stated reach now asserts what the ladder does instead: an eye at a
+   hundred and at a thousand body radii wants a NON-EMPTY set of at most the top rung's own six
+   chunks, and a thousand radii never wants more than ten radii does. WHY IT DIED, MEASURED: the
+   extended ladder put that edge at 1.4126 × 10¹⁰ m (2 227 radii) against the realm's stated
+   4.8444 × 10⁸ m (76.39 radii) — 29 times outside, because a top-rung chunk column is 16 253 km
+   across, wider than the body — so it could never fire. The measurement that built it (a far body
+   costing about 5 000 chunks) is SPENT: a far globe now costs SIX chunks, one tile a cube face.
 4. **Every measurement was a STILL stand** — MEASURED at step 4 on a moving eye (M8-1, the eighth
    run of 2026-09-09): the band is complete on every sample of a walk at 1.4 m/s (1 287 samples)
    and of a hull leg at 240 m/s 1 000–1 400 m over the ground (1 274 samples, the queue at 102;

@@ -309,7 +309,7 @@ mod tests {
         // A landing pad on a moon: a point 30 m above the snapped surface on the +Y face.
         let g = moon();
         let (cells_per_edge, floor_m, band_m, rungs) = band(g.domain());
-        assert_eq!((cells_per_edge, rungs), (314_112, 8));
+        assert_eq!((cells_per_edge, rungs), (311_296, 14));
         assert_eq!(band(hull().domain()), (0, 0, 0, 0), "a box is not a band");
         let r = f64::from(floor_m) + f64::from(band_m) * 0.5;
         let pad = LatticePos::from_metres(DVec3::new(1.0, r, 2.0), Tier::Fine);
@@ -434,7 +434,9 @@ mod tests {
 
     /// The pin. Computed once on aarch64-apple-darwin in debug, confirmed in release and on the
     /// x86-64 target (the x86-64 leg under emulation is a smoke test, not the law's proof — V6 D-5).
-    const GOLDEN_DIGEST: u64 = 2_969_074_991_149_515_478;
+    /// ★ RE-PINNED 2026-09-15: the extended ladder snaps every body to a coarser count, so every
+    /// cell centre of the round arm moved. The old value was 2 969 074 991 149 515 478.
+    const GOLDEN_DIGEST: u64 = 17_877_402_555_090_228_062;
 
     #[test]
     fn every_direction_is_listed_once() {

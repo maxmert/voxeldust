@@ -44,9 +44,9 @@ use std::time::{Duration, Instant};
 
 use vd_bins::memory::MemoryRead;
 use vd_bins::{
-    Cluster, ClusterAddrs, ClusterShape, DEV, DevClusterParams, common_env, dev_auth_pubkey_hex,
-    dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows, orchestrator_env,
-    realm_store_path, reap_forked, reserve_tcp_addr, reserve_udp_addr,
+    Cluster, ClusterAddrs, ClusterShape, DEV, DevClusterParams, admin_get_body, common_env,
+    dev_auth_pubkey_hex, dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows,
+    orchestrator_env, realm_store_path, reap_forked, reserve_tcp_addr, reserve_udp_addr,
 };
 use vd_client_harness::capture::{capture_rel_path, probe_rel_for, state_rel_for};
 use vd_client_harness::manifest::CaptureKind;
@@ -55,8 +55,12 @@ use vd_core::EntityId;
 use vd_core::entity_kind::EntityKind;
 use vd_core::glam::DVec3;
 use vd_core::pose::{RealmId, frame_for_realm};
-use vd_devproto::{DevPhase, DevRequest, DevResponse, DevState, WaitField, WaitOp, WaitPredicate};
+use vd_devproto::{
+    DevBandRelease, DevLadderForget, DevPhase, DevRequest, DevResponse, DevSceneSwap, DevState,
+    WaitField, WaitOp, WaitPredicate,
+};
 use vd_io_prod::trust::ClusterTrust;
+use vd_wire::admin::AdminSnapshot;
 
 const CLIENT_ACCOUNT_BASE: u64 = 1000;
 /// The walker's eye over the ground.
@@ -93,6 +97,19 @@ const SAMPLE_MS: u64 = 40;
 /// client's own rate.
 const POP_PAIR_EVERY_S: f64 = 2.0;
 const POP_PAIR_FPS: u32 = 60;
+/// ★ HOW MANY PAIRS A LEG RECORDS, whatever its length: [`LEG_S`] over [`POP_PAIR_EVERY_S`],
+/// derived so the two can never disagree. A leg of the gate's own length records a pair every
+/// two seconds exactly as it always did; a LONG leg (the departure's climb, a soak's walk)
+/// spreads the same count over its own length instead of recording hundreds of pairs and
+/// spending the leg judging them.
+const POP_PAIRS_PER_LEG: f64 = LEG_S / POP_PAIR_EVERY_S;
+/// ★ THE DEPARTURE LEG (owner 2026-09-15, the two-radii cutoff's replacement): the hull climbs
+/// STRAIGHT UP from its berth — the stick along the berth's own radial, no torque, the same three
+/// numbers every other leg pushes with — until it stands this many body radii from the centre.
+/// The owner's window flight lost the ground at 1.25 radii and got it back at 1.80; this leg flies
+/// through that band and eight radii past it, with the pop detector running and the drawn chunk
+/// count sampled the whole way.
+const DEPARTURE_RADII: f64 = 10.0;
 /// THE TURNING LEG (step 6, D-TERRAIN-5 item 11): at 240 m/s the hull holds its turn axis for
 /// half of this at the leg's start and the opposite axis for the other half, then coasts on the
 /// new heading — the wanted set on a heading the lead never asked for, and the drawn scene under
@@ -126,6 +143,12 @@ const BOARDING_DEADLINE: Duration = Duration::from_secs(300);
 /// fresh pilots before the legs, each settle printing its course, so the race recurs with its
 /// course in the log.
 const BOARDINGS_ENV: &str = "VD_BOARDINGS";
+/// THE LEGS TO FLY (`VD_LEGS`): a comma list naming which hull legs run, so a diagnosis flight can
+/// fly the walk, the boarding and ONE hull leg instead of the whole hour. A name is either an index
+/// into `HULL_LEG_MPS` (`0` = 1.4 m/s, `1` = 240 m/s, `2` = 528 m/s) or the word `turn` for the
+/// turning leg. `VD_LEGS=0` flies the walk, the boarding and the 1.4 m/s leg alone. The knob absent
+/// flies every leg, which is the gate.
+const LEGS_ENV: &str = "VD_LEGS";
 /// How far apart a diagnosis flight's berths stand along the flight path, in metres.
 const BERTH_SPACING_M: f64 = 200.0;
 const TERRAIN_WAIT_TICKS: u64 = 3_600;
@@ -512,6 +535,35 @@ struct LegRead {
     pop_pairs: u64,
     pop_skipped: u64,
     pop: PairRead,
+    /// ★ THE BOARDING INSTRUMENT across the leg (2026-09-14): the band at the leg's FIRST sample
+    /// (drawn, pending, urgent) — the sample that reads the whole-band rebuild a boarding cost;
+    /// the ladders the terrain forgot before the leg started and over the leg, with the last
+    /// forget; the scene swaps the view took and the last one's facing; and the gateway's own
+    /// forced/deferred origin-swap counters at the leg's first and last sample.
+    first_drawn: u64,
+    first_pending: u64,
+    first_urgent: u64,
+    forgets_start: u64,
+    forgets_end: u64,
+    last_forget: Option<DevLadderForget>,
+    swaps: u64,
+    swap: Option<DevSceneSwap>,
+    /// The WHOLESALE releases the terrain counted over the leg, and the last one it read.
+    releases_start: u64,
+    releases_end: u64,
+    last_release: Option<DevBandRelease>,
+    /// The frames whose own pose was stated in another realm's frame than the picture's origin.
+    foreign_start: u64,
+    foreign_end: u64,
+    /// ★ THE CAMERA'S REFUSAL over the leg (2026-09-15): the frames the camera held its eye
+    /// because the own pose named another realm, and the eye's largest single-frame jump against
+    /// the largest single-frame displacement of the delivered pose in the picture's own frame.
+    refusals_start: u64,
+    refusals_end: u64,
+    jump_m: f64,
+    step_m: f64,
+    gw_forced: (u64, u64),
+    gw_deferred: (u64, u64),
 }
 
 /// One recorded frame of a pair, read back from the run: its picture, its probe and its stamp.
@@ -597,9 +649,220 @@ fn judge_pairs(pairs: &[(PathBuf, String)]) -> (u64, u64, PairRead) {
     (reads.len() as u64, skipped, sum_reads(&reads))
 }
 
+/// Which hull legs this flight runs (`VD_LEGS`): the indices into [`HULL_LEG_MPS`], and whether the
+/// turning leg runs. The knob absent means every leg — the gate's own shape.
+fn legs_wanted() -> (Vec<usize>, bool, bool) {
+    let Some(raw) = std::env::var(LEGS_ENV).ok() else {
+        return ((0..HULL_LEG_MPS.len()).collect(), true, true);
+    };
+    let mut legs = Vec::new();
+    let mut turning = false;
+    let mut departure = false;
+    for name in raw.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        if name.eq_ignore_ascii_case("turn") {
+            turning = true;
+        } else if name.eq_ignore_ascii_case("up") {
+            departure = true;
+        } else {
+            let i: usize = name
+                .parse()
+                .unwrap_or_else(|_| panic!("{LEGS_ENV}: {name:?} is not a leg index or `turn`"));
+            assert!(i < HULL_LEG_MPS.len(), "{LEGS_ENV}: no leg {i}");
+            legs.push(i);
+        }
+    }
+    (legs, turning, departure)
+}
+
+/// ★ HOW LONG THE DEPARTURE'S CLIMB TAKES, in seconds: the time a hull at its own rated push needs
+/// to cover the gap from its berth to [`DEPARTURE_RADII`] body radii, from rest —
+/// `√(2 · distance / push)`. Derived from the hull's own rating and the body's own radius, never a
+/// literal: a hull with a stronger rating flies the same leg in less time.
+fn departure_s(radius_m: f64, berth_radius_m: f64) -> f64 {
+    let push_mps2 = HULL_PUSH_MICRO_MPS2 as f64 / 1.0e6;
+    let climb_m = (DEPARTURE_RADII * radius_m - berth_radius_m).max(0.0);
+    (2.0 * climb_m / push_mps2).sqrt()
+}
+
+/// ★ THE GATEWAY'S ORIGIN-SWAP COUNTERS (the walk-aboard blank, `window.rs` `advance_covering`):
+/// the swaps the window lane DEFERRED because the new chain did not cover the lineage, and the
+/// swaps it FORCED after a whole hold. A forced swap ships a level with the hull alone.
+fn gateway_swaps(admin: SocketAddr) -> (u64, u64) {
+    let Some(body) = admin_get_body(admin, "/admin/snapshot", Some(Duration::from_secs(2))) else {
+        return (0, 0);
+    };
+    let Ok(snapshot) = serde_json::from_str::<AdminSnapshot>(&body) else {
+        return (0, 0);
+    };
+    snapshot
+        .gateway
+        .map(|g| (g.window_origin_swap_forced, g.window_origin_swap_deferred))
+        .unwrap_or((0, 0))
+}
+
+/// ★ THE BOARDING INSTRUMENT, printed whole (2026-09-14): what the gateway's window lane did with
+/// the origin swap, what the client's view took at it, and what the client's terrain forgot.
+fn print_boarding_instrument(tag: &str, st: &DevState, gw: (u64, u64)) {
+    let stamp = st.terrain_stamp.as_ref();
+    eprintln!(
+        "terrain_moving_eye/{tag}: THE BOARDING INSTRUMENT — the gateway forced {} origin swaps \
+         and deferred {}; the view took {} swaps, the last {:?}; the terrain forgot {} ladders, \
+         the last {:?}; the terrain released a band wholesale {} times, the last {:?}; the eye \
+         stood in another realm's frame on {} frames; the camera refused the own pose on {} \
+         frames and the eye's largest single-frame jump is {:.3} m against a delivered step of \
+         {:.3} m; the band reads {} drawn, {} pending, {} \
+         urgent; origin {:?}; rows {:?}",
+        gw.0,
+        gw.1,
+        stamp.map_or(0, |s| s.scene_swaps),
+        stamp.and_then(|s| s.swap.clone()),
+        stamp.map_or(0, |s| s.ladders_forgotten),
+        stamp.and_then(|s| s.last_forget.clone()),
+        stamp.map_or(0, |s| s.band_releases),
+        stamp.and_then(|s| s.last_release.clone()),
+        stamp.map_or(0, |s| s.eye_foreign_frames),
+        stamp.map_or(0, |s| s.eye_refusals),
+        stamp.map_or(0.0, |s| s.eye_jump_m),
+        stamp.map_or(0.0, |s| s.eye_step_m),
+        stamp.map_or(0, |s| s.chunks_drawn),
+        stamp.map_or(0, |s| s.chunks_pending),
+        stamp.map_or(0, |s| s.chunks_urgent),
+        st.origin,
+        st.realm_boxes.iter().map(|b| &b.realm).collect::<Vec<_>>()
+    );
+}
+
+/// * THE GAP'S OWN LINE (2026-09-16, the walk-gap measurement -- THE FLIGHT TEST ONLY, no product
+/// code). The time course prints every twenty-fifth sample, so a band that goes incomplete on
+/// seven samples of 1 234 can leave nothing in the log. This states ONE sample whole, and the
+/// counters DIFFERENCED against the sample before it: the chunks the workers finished in that
+/// interval and the mean wall time each of them cost. That mean is the nearest thing the stamp
+/// carries to a per-chunk build time.
+///
+/// * WHAT THE STAMP NOW CARRIES (2026-09-16): the worst SINGLE chunk's build and its key, and the
+/// LATCHED gap row - the missing urgent chunks by name, what the previous descent called each of
+/// them, and what the descent did on that frame. `gap_record` prints the latched row.
+fn gap_line(t: f64, stamp: &vd_devproto::DevTerrainStamp, prev: Option<(f64, [u64; 6])>) -> String {
+    let now = [
+        stamp.built_chunks,
+        stamp.build_nanos,
+        stamp.harvested,
+        stamp.harvest_full,
+        stamp.harvest_nanos,
+        stamp.parent_waits,
+    ];
+    let (dt, d) = match prev {
+        Some((pt, pv)) => (
+            t - pt,
+            [
+                now[0].saturating_sub(pv[0]),
+                now[1].saturating_sub(pv[1]),
+                now[2].saturating_sub(pv[2]),
+                now[3].saturating_sub(pv[3]),
+                now[4].saturating_sub(pv[4]),
+                now[5].saturating_sub(pv[5]),
+            ],
+        ),
+        None => (0.0, [0u64; 6]),
+    };
+    let per_chunk_ms = if d[0] > 0 {
+        d[1] as f64 / d[0] as f64 / 1.0e6
+    } else {
+        0.0
+    };
+    format!(
+        "t {t:6.2} s - {} URGENT {:?}, {} pending, {} drawn {:?}, {} revealed, lead {:.2} m, \
+         the builders at {:.0} chunks/s, the eye at {:.2} m/s, the ask bound to {:?}, rungs \
+         {}..{}; since the sample before ({:.3} s): {} chunks built in {:.1} ms, {:.2} ms a \
+         chunk; {} harvested ({} full caps) in {:.1} ms; the parent cache waited {} times; the \
+         frame's peak {:.1} ms; {:.0} m up",
+        stamp.chunks_urgent,
+        stamp.urgent_per_rung,
+        stamp.chunks_pending,
+        stamp.chunks_drawn,
+        stamp.chunks_per_rung,
+        stamp.chunks_revealed,
+        stamp.lead_m,
+        stamp.build_rate_per_s,
+        stamp.eye_speed_mps,
+        stamp
+            .ask_horizon_m
+            .iter()
+            .map(|m| m.round() as i64)
+            .collect::<Vec<i64>>(),
+        stamp.rung_min,
+        stamp.rung_max,
+        dt,
+        d[0],
+        d[1] as f64 / 1.0e6,
+        per_chunk_ms,
+        d[2],
+        d[3],
+        d[4] as f64 / 1.0e6,
+        d[5],
+        stamp.frame_peak_ms,
+        stamp.altitude_m,
+    )
+}
+
+/// THE LATCHED GAP ROW (2026-09-16, the walk-gap measurement -- THE FLIGHT TEST ONLY): the last
+/// frame whose band went incomplete, named. A gap lasts ONE frame and the poll is every
+/// forty-five milliseconds, so the live count sees about half of them; the stamp latches the last
+/// row and this prints it whenever `urgent_frames` moved.
+///
+/// Each missing chunk states what the PREVIOUS descent's set called it: `absent` means this very
+/// frame's own descent first wanted it (no builder could have had it), `urgent` means the ring
+/// asked earlier and a builder is late. The DRAWN eye's own reading follows, so a chunk urgent for
+/// the LEAD eye alone is told from one the picture already needs.
+fn gap_record(t: f64, frames: u64, gap: &vd_devproto::DevBandGap, peak: (u64, &str)) -> String {
+    let misses = gap
+        .misses
+        .iter()
+        .map(|m| {
+            format!(
+                "{} (rung {}) was {}, {:.0} m from the drawn eye, its territory {:.0} m, the \
+                 horizon {:.0} m, the drawn eye {} it",
+                m.key,
+                m.rung,
+                m.was,
+                m.near_drawn_m,
+                m.territory_m,
+                m.horizon_m,
+                if m.drawn_urgent {
+                    "WANTS"
+                } else {
+                    "does NOT want"
+                }
+            )
+        })
+        .collect::<Vec<String>>();
+    format!(
+        "t {t:6.2} s - THE LATCHED GAP of frame {} (this sample's frame {frames}): {} urgent \
+         missing in {}; the descent {} this frame, the lead eye had drifted {:.3} m of a {:.3} m \
+         step, {:.3} s since the last descent, the lead {:.3} m; the worst single chunk ever \
+         built {:.1} ms ({}); MISSING: {:?}",
+        gap.frame,
+        gap.urgent,
+        gap.realm,
+        if gap.descent {
+            "RE-CUT the ring"
+        } else {
+            "did not run"
+        },
+        gap.drift_m,
+        gap.step_m,
+        gap.since_descent_s,
+        gap.lead_m,
+        peak.0 as f64 / 1.0e6,
+        peak.1,
+        misses
+    )
+}
+
 /// Read the band for `secs` seconds, one sample every `SAMPLE_MS`: the instrument is the stamp
 /// the renderer writes every frame, polled through dev-control — never a sleep standing in for
 /// a measurement.
+#[allow(clippy::too_many_arguments)] // one leg's whole instrument list
 fn read_band(
     devctl: u16,
     client_pid: u32,
@@ -608,11 +871,17 @@ fn read_band(
     cwd: &Path,
     planet: RealmId,
     turn_until_s: Option<f64>,
+    gw_admin: SocketAddr,
 ) -> LegRead {
     let mut read = LegRead {
         min_drawn: u64::MAX,
+        gw_forced: (0, 0),
+        gw_deferred: (0, 0),
         ..LegRead::default()
     };
+    // ★ THE GATEWAY'S ORIGIN-SWAP COUNTERS at the leg's start: a FORCED swap ships a level with
+    // the hull alone, which is the suspected cause of the band's rebuild.
+    let (forced_start, deferred_start) = gateway_swaps(gw_admin);
     let memory_start = MemoryRead::of(client_pid);
     let mut next_memory_s = MEMORY_COURSE_S;
     let started = Instant::now();
@@ -626,12 +895,26 @@ fn read_band(
         .collect();
     let mut pairs: Vec<(PathBuf, String)> = Vec::new();
     let mut next_pair_s = 0.0;
+    // THE PAIR INTERVAL follows the LEG's own length: a leg of the gate's length records a pair
+    // every `POP_PAIR_EVERY_S` exactly as before, and a long leg records the same COUNT of pairs
+    // spread over its own length.
+    let pair_every_s = (secs / POP_PAIRS_PER_LEG).max(POP_PAIR_EVERY_S);
     // THE TURN: the axis held from the leg's start to half of `turn_until_s`, the opposite axis
     // to `turn_until_s`, then released (a torque and its counter-torque).
     let mut phase = u8::from(turn_until_s.is_some());
     if phase == 1 {
         throttle(devctl, TURN_AXES);
     }
+    // * THE GAP'S OWN LINE carries three things across the samples: the previous sample's own
+    // line (printed when a gap OPENS, so the log holds the sample before it), the previous
+    // sample's counters (differenced) and the previous sample's urgent count (so the sample
+    // AFTER a gap closes is printed too).
+    let mut prev_line: Option<String> = None;
+    let mut prev_counters: Option<(f64, [u64; 6])> = None;
+    let mut prev_urgent: u64 = 0;
+    // THE GAP LATCH's own reading at the sample before (2026-09-16): the count of frames whose
+    // band went incomplete, so a moved count prints the row the stamp latched.
+    let mut prev_urgent_frames: u64 = u64::MAX;
     while started.elapsed().as_secs_f64() < secs {
         let t = started.elapsed().as_secs_f64();
         if phase == 1 && turn_until_s.is_some_and(|until| t >= until * 0.5) {
@@ -677,7 +960,7 @@ fn read_band(
                     );
                 }
             }
-            next_pair_s += POP_PAIR_EVERY_S;
+            next_pair_s += pair_every_s;
         }
         let st = poll(devctl);
         let stamp = st
@@ -706,6 +989,49 @@ fn read_band(
             stamp.card_stood_down,
         ];
         first.get_or_insert(last);
+        // ★ THE BOARDING INSTRUMENT: the band at the leg's FIRST sample, and the forgets and
+        // swaps the whole leg saw.
+        if read.samples == 0 {
+            read.first_drawn = stamp.chunks_drawn;
+            read.first_pending = stamp.chunks_pending;
+            read.first_urgent = stamp.chunks_urgent;
+            read.forgets_start = stamp.ladders_forgotten;
+            read.releases_start = stamp.band_releases;
+            read.foreign_start = stamp.eye_foreign_frames;
+            read.refusals_start = stamp.eye_refusals;
+        }
+        read.forgets_end = stamp.ladders_forgotten;
+        read.releases_end = stamp.band_releases;
+        read.foreign_end = stamp.eye_foreign_frames;
+        read.refusals_end = stamp.eye_refusals;
+        read.jump_m = stamp.eye_jump_m;
+        read.step_m = stamp.eye_step_m;
+        // ★ THE EYE NEVER JUMPS FARTHER THAN THE PILOT WAS DELIVERED (2026-09-15, the camera's
+        // refusal), read on EVERY sample of every leg — the boarding's origin swap lands between
+        // the settle and the leg's first sample, so a gate that reads only the settle reads the
+        // counters before the disagreement exists. Both numbers are measured between two readings
+        // of ONE realm's frame, so an origin swap is not a jump; the bound is the flight's own
+        // largest delivered step, never a literal.
+        assert!(
+            stamp.eye_jump_m <= stamp.eye_step_m,
+            "{leg}: the eye jumped {:.3} m in one frame while the delivered pose moved at most \
+             {:.3} m in the picture's own frame — the camera placed an eye from a pose stated in \
+             another realm ({} refusals, {} foreign frames)",
+            stamp.eye_jump_m,
+            stamp.eye_step_m,
+            stamp.eye_refusals,
+            stamp.eye_foreign_frames
+        );
+        if stamp.last_release.is_some() {
+            read.last_release = stamp.last_release.clone();
+        }
+        read.swaps = stamp.scene_swaps;
+        if stamp.last_forget.is_some() {
+            read.last_forget = stamp.last_forget.clone();
+        }
+        if stamp.swap.is_some() {
+            read.swap = stamp.swap.clone();
+        }
         // THE MEMORY COURSE, once a minute: the footprint's growth since the leg began, so a
         // slow leak reads as a slope over a long leg (the soak).
         if started.elapsed().as_secs_f64() >= next_memory_s {
@@ -755,6 +1081,46 @@ fn read_band(
                 turned_deg(planet_facing(&st, planet))
             );
         }
+        // EVERY GAP FRAME, not only the sampled ones (2026-09-16): the latch moves whenever a
+        // frame's band went incomplete, so this prints a row the live count never showed.
+        if stamp.urgent_frames != prev_urgent_frames {
+            if let Some(gap) = stamp.last_gap.as_ref() {
+                eprintln!(
+                    "terrain_moving_eye/{leg}: {}",
+                    gap_record(
+                        t,
+                        stamp.frames,
+                        gap,
+                        (stamp.build_peak_nanos, stamp.build_peak_key.as_str())
+                    )
+                );
+            }
+            prev_urgent_frames = stamp.urgent_frames;
+        }
+        let line = gap_line(t, stamp, prev_counters);
+        if stamp.chunks_urgent > 0 && prev_urgent == 0 {
+            if let Some(before) = prev_line.as_deref() {
+                eprintln!("terrain_moving_eye/{leg}: THE GAP, the sample BEFORE - {before}");
+            }
+        }
+        if stamp.chunks_urgent > 0 {
+            eprintln!("terrain_moving_eye/{leg}: THE GAP - {line}");
+        } else if prev_urgent > 0 {
+            eprintln!("terrain_moving_eye/{leg}: THE GAP, the sample AFTER - {line}");
+        }
+        prev_urgent = stamp.chunks_urgent;
+        prev_counters = Some((
+            t,
+            [
+                stamp.built_chunks,
+                stamp.build_nanos,
+                stamp.harvested,
+                stamp.harvest_full,
+                stamp.harvest_nanos,
+                stamp.parent_waits,
+            ],
+        ));
+        prev_line = Some(line);
         read.samples += 1;
         read.max_urgent = read.max_urgent.max(stamp.chunks_urgent);
         read.urgent_samples += u64::from(stamp.chunks_urgent > 0);
@@ -796,6 +1162,9 @@ fn read_band(
         }
         std::thread::sleep(Duration::from_millis(SAMPLE_MS));
     }
+    let (forced_end, deferred_end) = gateway_swaps(gw_admin);
+    read.gw_forced = (forced_start, forced_end);
+    read.gw_deferred = (deferred_start, deferred_end);
     let (judged, skipped, pop) = judge_pairs(&pairs);
     read.pop_pairs = judged;
     read.pop_skipped += skipped;
@@ -960,6 +1329,38 @@ fn read_band(
         read.min_drawn,
         read.max_lead_m
     );
+    // ★ THE BOARDING INSTRUMENT for this leg (2026-09-14).
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE BOARDING INSTRUMENT — the leg's FIRST sample read {} \
+         drawn, {} pending, {} urgent; the terrain had forgotten {} ladders at the start and {} \
+         at the end, the last {:?}; the view had taken {} scene swaps, the last {:?}; the \
+         terrain released a realm's band wholesale {} times at the start and {} at the end, the \
+         last {:?}; the eye stood in another realm's frame on {} frames at the start and {} at \
+         the end; the camera refused the own pose on {} frames at the start and {} at the end, \
+         and the eye's largest single-frame jump is {:.3} m against a delivered step of {:.3} m; \
+         gateway forced {} origin swaps (from {}) and deferred {} (from {})",
+        read.first_drawn,
+        read.first_pending,
+        read.first_urgent,
+        read.forgets_start,
+        read.forgets_end,
+        read.last_forget,
+        read.swaps,
+        read.swap,
+        read.releases_start,
+        read.releases_end,
+        read.last_release,
+        read.foreign_start,
+        read.foreign_end,
+        read.refusals_start,
+        read.refusals_end,
+        read.jump_m,
+        read.step_m,
+        read.gw_forced.1,
+        read.gw_forced.0,
+        read.gw_deferred.1,
+        read.gw_deferred.0
+    );
     eprintln!(
         "terrain_moving_eye/{leg}: THE POP DETECTOR — {} pairs judged ({} left out), {} pixels \
          compared ({} nearer than the limit, which reached {:.0} m; {} off the first frame), {} \
@@ -1039,14 +1440,38 @@ fn planet_centre(state: &DevState, planet: RealmId) -> DVec3 {
 /// The speed of the eye through the planet, MEASURED from two polls `SPEED_INTERVAL` apart, in
 /// metres per second.
 fn measure_speed(devctl: u16, planet: RealmId) -> f64 {
-    let a = poll(devctl);
-    let t0 = Instant::now();
-    let c0 = hull_in_planet(&a, planet);
-    std::thread::sleep(SPEED_INTERVAL);
-    let b = poll(devctl);
-    let dt = t0.elapsed().as_secs_f64();
-    let c1 = hull_in_planet(&b, planet);
-    (c1 - c0).length() / dt
+    // ★ A MEASUREMENT THAT READS TWO FRAMES AS ONE IS A WRONG MEASUREMENT (2026-09-15, the
+    // camera's own rule applied to the instrument). The planet's box is stated in the realm the
+    // window composes the picture in; a boarding swaps that realm from the planet to the hull, and
+    // the two readings then differ by the planet's RADIUS with nothing having moved. MEASURED
+    // before this check: the 1.4 m/s hull leg reported "coasted at about 3 175 000 m/s" in four
+    // flights of six — 6 351 km over the two-second window — and the push never fired, so the leg
+    // never flew at its own speed. A pair that straddles an origin change is refused and read
+    // again.
+    let started = Instant::now();
+    loop {
+        let a = poll(devctl);
+        let t0 = Instant::now();
+        let c0 = hull_in_planet(&a, planet);
+        std::thread::sleep(SPEED_INTERVAL);
+        let b = poll(devctl);
+        let dt = t0.elapsed().as_secs_f64();
+        let c1 = hull_in_planet(&b, planet);
+        if a.origin == b.origin {
+            return (c1 - c0).length() / dt;
+        }
+        assert!(
+            started.elapsed() < PUSH_DEADLINE,
+            "the window's origin changed under every speed reading: {:?} then {:?}",
+            a.origin,
+            b.origin
+        );
+        eprintln!(
+            "terrain_moving_eye: the speed reading straddled an origin swap ({:?} then {:?}) — \
+             reading it again",
+            a.origin, b.origin
+        );
+    }
 }
 
 /// THE HULL'S PLACE IN THE PLANET'S FRAME, from the planet's box in the pilot's window: the
@@ -1402,6 +1827,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
             &f.cwd,
             planet,
             None,
+            gw_admin,
         );
         throttle(devctl, [0.0, 0.0, 0.0]);
         eprintln!("terrain_moving_eye/walk: the character walked at {speed:.2} m/s");
@@ -1414,8 +1840,9 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     };
 
     // ---- LEGS 2 AND 3: THE HULL. (A diagnosis flight boards `boardings` times with fresh
-    // pilots and flies the legs on the last.)
-    let (slow, fast, turning, fastest) = {
+    // pilots and flies the legs on the last; `VD_LEGS` names which legs it flies.)
+    let (wanted_legs, wanted_turn, wanted_departure) = legs_wanted();
+    let reads: Vec<(String, LegRead)> = {
         let mut boarded: Option<(ChildGuard, u16)> = None;
         for b in 0..boardings {
             let client_quic = reserve_udp_addr();
@@ -1468,6 +1895,47 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
                 "terrain_moving_eye: boarding {} of {boardings} settled",
                 b + 1
             );
+            // ★ THE BOARDING INSTRUMENT, right at the settle (2026-09-14).
+            let settled = poll(devctl);
+            print_boarding_instrument(
+                &format!("boarding {}", b + 1),
+                &settled,
+                gateway_swaps(gw_admin),
+            );
+            // ★ THE BOARDING KEEPS THE BAND (2026-09-14, the boarding measurement's own gate).
+            // A pilot who walks aboard a berthed hull looks at the same ground from the same
+            // height: nothing new is wanted, so nothing may be thrown away. Two counters say it —
+            // the ladders the terrain forgot because a realm's row missed a frame's scene, and the
+            // frames that released a realm's whole band at once. MEASURED BEFORE THE CURE: seven
+            // forgets and one wholesale release of 7 289 chunks on the swap's own frame, five runs
+            // of six.
+            let stamp = settled
+                .terrain_stamp
+                .as_ref()
+                .expect("the client stamps every frame once the ground is drawn");
+            assert_eq!(
+                (stamp.ladders_forgotten, stamp.band_releases),
+                (0, 0),
+                "the boarding threw the band away: last forget {:?}, last release {:?}",
+                stamp.last_forget,
+                stamp.last_release
+            );
+            // ★ THE EYE NEVER JUMPS FARTHER THAN THE PILOT WAS DELIVERED (2026-09-15, the camera's
+            // refusal). Both numbers are read between two readings of ONE realm's frame, so an
+            // origin swap is not a jump; the bound is the flight's own largest delivered step, not
+            // a literal. MEASURED BEFORE THE CURE: the camera flattened a pose stated in the hull
+            // into the planet's picture, the eye stood at the planet's CENTRE, and the jump read
+            // the planet's whole radius against a walking step.
+            assert!(
+                stamp.eye_jump_m <= stamp.eye_step_m,
+                "the eye jumped {:.3} m in one frame while the pilot was delivered at most \
+                 {:.3} m: the camera placed an eye from a pose stated in another realm ({} \
+                 refusals so far, {} foreign frames)",
+                stamp.eye_jump_m,
+                stamp.eye_step_m,
+                stamp.eye_refusals,
+                stamp.eye_foreign_frames
+            );
             if let Some((prev, prev_devctl)) = boarded.take() {
                 let _ = round_trip(prev_devctl, &DevRequest::Close);
                 drop(prev);
@@ -1475,59 +1943,135 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
             boarded = Some((client, devctl));
         }
         let (client, devctl) = boarded.expect("at least one boarding");
-        let mut reads = Vec::new();
-        for (i, target) in HULL_LEG_MPS.iter().enumerate() {
+        let mut reads: Vec<(String, LegRead)> = Vec::new();
+        for i in &wanted_legs {
+            let target = HULL_LEG_MPS[*i];
             let leg = format!("hull {target} m/s");
             // `push_to` returns at or past the target, or panics at its deadline: the speed
             // needs no second assertion (refutation R4-7).
-            let speed = push_to(devctl, planet, *target);
-            let read = read_band(devctl, client.0.id(), &leg, LEG_S, &f.cwd, planet, None);
+            let speed = push_to(devctl, planet, target);
+            let read = read_band(
+                devctl,
+                client.0.id(),
+                &leg,
+                LEG_S,
+                &f.cwd,
+                planet,
+                None,
+                gw_admin,
+            );
             eprintln!(
                 "terrain_moving_eye/{leg}: leg {} coasted at {speed:.1} m/s",
                 i + 2
             );
-            reads.push(read);
+            reads.push((leg, read));
         }
         // THE TURNING LEG, LAST (after the straight legs, so their readings keep their history —
         // MEASURED with the turn before the 528 m/s leg: the push then fired along the turned
         // nose, the hull climbed, the ground left the view). The heading before and after, from
         // the planet's box as the pilot's window states it (the hull's own box is its frame; the
         // planet turns in it when the hull yaws).
-        let leg = "hull turning";
-        let before = planet_facing(&poll(devctl), planet);
-        let read = read_band(
-            devctl,
-            client.0.id(),
-            leg,
-            LEG_S,
-            &f.cwd,
-            planet,
-            Some(TURN_S),
-        );
-        let after = planet_facing(&poll(devctl), planet);
-        let turned = before.angle_between(after).to_degrees();
-        eprintln!(
-            "terrain_moving_eye/{leg}: the turn and its counter-turn over {TURN_S} s left the \
-             heading {turned:.1}° from the start (the planet's box facing before {before:?}, \
-             after {after:?})"
-        );
-        reads.push(read);
+        if wanted_turn {
+            let leg = "hull turning";
+            let before = planet_facing(&poll(devctl), planet);
+            let read = read_band(
+                devctl,
+                client.0.id(),
+                leg,
+                LEG_S,
+                &f.cwd,
+                planet,
+                Some(TURN_S),
+                gw_admin,
+            );
+            let after = planet_facing(&poll(devctl), planet);
+            let turned = before.angle_between(after).to_degrees();
+            eprintln!(
+                "terrain_moving_eye/{leg}: the turn and its counter-turn over {TURN_S} s left \
+                 the heading {turned:.1}° from the start (the planet's box facing before \
+                 {before:?}, after {after:?})"
+            );
+            reads.push((leg.to_owned(), read));
+        }
+        // ★ THE DEPARTURE LEG, LAST (owner 2026-09-15): the hull climbs STRAIGHT UP off the home
+        // planet, through the band where the two-radii cutoff used to take the ground away, and
+        // out toward `DEPARTURE_RADII` body radii.
+        //
+        // THE STICK IS THE PILOT'S OWN UP — the `Space` key, `[forward, strafe, vertical]` with the
+        // vertical alone. A hull's push is `facing · (0, vertical, −forward)` (`stub::dot::
+        // stick_from_input`): the pilot's FACING carries it, not the hull's nose, and the STRAFE
+        // slot is not a push at all — it is the yaw turn. She boarded standing on the planet's
+        // surface, so her own up IS the berth's radial, and nothing turns her during the climb, so
+        // the push stays radial the whole way. No torque, no second berth, no new machinery: one
+        // key a player holds. MEASURED BEFORE THIS FORM: a stick that wrote the radial into all
+        // three slots put the radial's biggest component into the strafe slot, where it became a
+        // YAW; the hull never climbed and the altitude fell from 1 139 m to 940 m in six seconds,
+        // which is free fall.
+        if wanted_departure {
+            let leg = "hull departure";
+            let berth_radius_m = berths[boardings as usize - 1].length();
+            let secs = departure_s(body.ladder().radius_m(), berth_radius_m);
+            let up = [0.0_f32, 0.0, 1.0];
+            let altitude_now = |st: &DevState| -> f64 {
+                st.terrain_stamp
+                    .as_ref()
+                    .map_or(0.0, |s| s.altitude_m + s.surface_m)
+            };
+            let before_m = altitude_now(&poll(devctl));
+            eprintln!(
+                "terrain_moving_eye/{leg}: the hull climbs from {:.0} m ({:.3} radii) toward \
+                 {DEPARTURE_RADII} radii at {:.1} m/s², holding the stick {up:?} for {secs:.0} s \
+                 (it passes the old two-radii cutoff at about {:.0} s)",
+                before_m,
+                before_m / body.ladder().radius_m(),
+                HULL_PUSH_MICRO_MPS2 as f64 / 1.0e6,
+                secs * (2.0 / DEPARTURE_RADII).sqrt(),
+            );
+            throttle(devctl, up);
+            let read = read_band(
+                devctl,
+                client.0.id(),
+                leg,
+                secs,
+                &f.cwd,
+                planet,
+                None,
+                gw_admin,
+            );
+            throttle(devctl, [0.0, 0.0, 0.0]);
+            // WHERE THE CLIMB ENDED: the STAMP's own radius over the planet's centre. The pilot's
+            // own row is stated in the HULL's frame once she is aboard, so its length is her seat,
+            // never her height.
+            let after_m = altitude_now(&poll(devctl));
+            eprintln!(
+                "terrain_moving_eye/{leg}: the climb ended {after_m:.0} m from the centre ({:.2} \
+                 body radii, from {:.2}); the fewest chunks drawn on any of its {} samples: {}",
+                after_m / body.ladder().radius_m(),
+                before_m / body.ladder().radius_m(),
+                read.samples,
+                read.min_drawn,
+            );
+            // ★ THE LEG MUST ACTUALLY LEAVE: a climb that never passes the deleted cutoff proves
+            // nothing about it. Two body radii is the number that was there.
+            assert!(
+                after_m > 2.0 * body.ladder().radius_m(),
+                "{leg}: the hull ended {after_m:.0} m from the centre, short of the two body radii \
+                 the deleted cutoff stood at ({:.0} m) — the climb did not fly",
+                2.0 * body.ladder().radius_m()
+            );
+            reads.push((leg.to_owned(), read));
+        }
         let _ = round_trip(devctl, &DevRequest::Close);
-        let turning = reads.pop().expect("four legs");
-        let fastest = reads.pop().expect("four legs");
-        let fast = reads.pop().expect("four legs");
-        let slow = reads.pop().expect("four legs");
-        (slow, fast, turning, fastest)
+        reads
     };
     // The verdicts, after every leg has flown (so every leg's numbers are always in the log).
-    report_leg(&format!("hull {} m/s", HULL_LEG_MPS[0]), &slow);
-    report_leg(&format!("hull {} m/s", HULL_LEG_MPS[1]), &fast);
-    report_leg(&format!("hull {} m/s", HULL_LEG_MPS[2]), &fastest);
-    report_leg("hull turning", &turning);
+    for (leg, read) in &reads {
+        report_leg(leg, read);
+    }
     assert_band_complete("walk", &walk);
     eprintln!(
-        "terrain_moving_eye: THE BAND HELD on every frame of the walk — {walk:?}; the hull legs \
-         read {slow:?}, {fast:?}, {turning:?} and {fastest:?}"
+        "terrain_moving_eye: THE BAND HELD on every frame of the walk — {walk:?}; the hull \
+         legs read {reads:?}"
     );
 }
 

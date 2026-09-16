@@ -6823,10 +6823,15 @@ fn a_crossing_swap_falls_back_to_the_fresh_tick_when_the_old_one_is_not_retained
     );
 }
 
-/// §2.7's same-T swap, the short-prefix fallback: a crossing whose new chain is NOT fully
-/// fresh (a stale upper stratum caps the prefix) also falls back to the fresh fold.
+/// §2.7's same-T swap, the short-prefix case. ★ REWRITTEN 2026-09-14 (the boarding
+/// measurement): a crossing whose new chain is NOT fully fresh used to swap at once, and the
+/// level it shipped then carried the leaf's rows alone — the pilot walked aboard a hull and the
+/// client forgot every other realm's ladder. The swap now WAITS for a fold that covers the chain
+/// (the old picture stays meanwhile, bounded by one hold). What the test still pins is the part
+/// that was always right: the same-T PREFERENCE never blocks the swap — the moment the upper
+/// stratum folds at the leaf's own fresh tick, the level ships at that freshest stamp.
 #[test]
-fn a_crossing_swap_falls_back_when_the_new_chain_is_not_fully_fresh() {
+fn a_crossing_swap_waits_for_a_fold_that_covers_the_chain_then_takes_the_freshest_stamp() {
     let cfg = config();
     let (mut sessions, sid, _) = one_active_session();
     sessions
@@ -6935,8 +6940,50 @@ fn a_crossing_swap_falls_back_when_the_new_chain_is_not_fully_fresh() {
         .frame = PLANET7;
     let mut ob = OutboundBox::default();
     compose_scenes_pass(&cfg, &test_clock(), &mut sessions, &mut stats, &mut ob);
+    assert_eq!(
+        scene_levels(&ob).len(),
+        0,
+        "a fold that stops at the leaf ships no swap level"
+    );
+    assert_eq!(stats.window_origin_swap_deferred, 1);
+    assert_eq!(
+        sessions.by_session[&sid].shadow.origin,
+        Some(RealmId::System(7)),
+        "the old picture stays until the fold covers the chain"
+    );
+    // The upper stratum lands at the leaf's own fresh tick: the fold covers the chain and the
+    // swap takes it, at the freshest common stamp.
+    sessions
+        .windows
+        .get_mut(&WindowId(3))
+        .expect("present")
+        .ingest
+        .ingest_frame(
+            window::WindowLevel {
+                at: UniverseTick(102),
+                hop: Some(vd_wire::session_flow::HopRow {
+                    child: RealmId::Planet(7),
+                    placement: vd_core::frame::FramePlacement::moving(
+                        DVec3::new(30.0, 0.0, 0.0),
+                        DVec3::ZERO,
+                    ),
+                }),
+                rows: vec![vd_wire::channels::RealmSnap {
+                    realm: RealmId::Planet(7),
+                    frame: PLANET7,
+                    pose: vd_core::pose::StampedPose::at_rest(
+                        SYS7,
+                        DVec3::new(30.0, 0.0, 0.0),
+                        UniverseTick(102),
+                    ),
+                }],
+            },
+            &tuning,
+        );
+    let mut ob = OutboundBox::default();
+    compose_scenes_pass(&cfg, &test_clock(), &mut sessions, &mut stats, &mut ob);
     let levels = scene_levels(&ob);
-    assert_eq!(levels.len(), 1, "the swap level still ships");
+    assert_eq!(levels.len(), 1, "the swap level ships with a whole fold");
     assert_eq!(
         sessions.by_session[&sid].shadow.last_t,
         Some(UniverseTick(102)),

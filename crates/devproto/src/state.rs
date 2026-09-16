@@ -353,6 +353,8 @@ pub(crate) mod tests {
                 frames: 600,
                 built_chunks: 700,
                 build_nanos: 2_800_000_000,
+                build_peak_nanos: 31_000_000,
+                build_peak_key: "F0 r3 (12, 34, 5)".to_owned(),
                 harvested: 690,
                 harvest_full: 12,
                 harvest_nanos: 700_000_000,
@@ -398,6 +400,65 @@ pub(crate) mod tests {
                     distance_m: 15.2,
                     rung: 0,
                     cell_m: 1.0,
+                }),
+                ladders_forgotten: 2,
+                last_forget: Some(DevLadderForget {
+                    realm: "Planet(7)".to_owned(),
+                    frame: 900,
+                    held: 7153,
+                    pending: 0,
+                    rows: 1,
+                    still_a_parent: false,
+                }),
+                scene_swaps: 1,
+                swap: Some(DevSceneSwap {
+                    yaw: 3.01,
+                    pitch: 0.48,
+                    from: Some("Planet(7)".to_owned()),
+                    to: Some("Hull(9)".to_owned()),
+                    rows: 1,
+                    prev_origin_row: false,
+                    own_frame: "PlanetCentered(7)".to_owned(),
+                }),
+                band_releases: 3,
+                last_release: Some(DevBandRelease {
+                    realm: "Planet(7)".to_owned(),
+                    frame: 901,
+                    released: 7153,
+                    descent: true,
+                    eye_before: Some([1.0, 2.0, 3.0]),
+                    eye_after: [4.0, 5.0, 6.0],
+                    lead_offset_m: 0.5,
+                    wanted_before: 7288,
+                    wanted_after: 512,
+                    rows: 11,
+                    lead_rows: 11,
+                    origin: "Hull(9)".to_owned(),
+                    own_frame: "ShipLocal(9)".to_owned(),
+                    own_lead_frame: "PlanetCentered(7)".to_owned(),
+                }),
+                eye_foreign_frames: 4,
+                eye_refusals: 2,
+                eye_jump_m: 0.125,
+                eye_step_m: 0.25,
+                last_gap: Some(DevBandGap {
+                    realm: "Planet(7)".to_owned(),
+                    frame: 902,
+                    urgent: 2,
+                    misses: vec![DevBandMiss {
+                        key: "F0 r3 (12, 34, 5)".to_owned(),
+                        rung: 3,
+                        was: "absent".to_owned(),
+                        near_drawn_m: 6_401.0,
+                        territory_m: 6_957.0,
+                        horizon_m: 6_582.0,
+                        drawn_urgent: true,
+                    }],
+                    descent: true,
+                    drift_m: 0.51,
+                    step_m: 0.5,
+                    since_descent_s: 0.36,
+                    lead_m: 0.14,
                 }),
             }),
             sky_anchor: None,
@@ -457,6 +518,20 @@ pub(crate) mod tests {
         assert!(json.contains("\"frame_ms\":34.0"));
         assert!(json.contains("\"passes_ms\":[[\"main_opaque_pass_3d\",1.5,20.0]]"));
         assert!(json.contains("\"parent_waits\":40"));
+        // ★ THE BOARDING INSTRUMENT rides the stamp: the forget count, the last forget and the
+        // facing the view took at the last scene swap.
+        assert!(json.contains("\"ladders_forgotten\":2"));
+        assert!(json.contains("\"still_a_parent\":false"));
+        assert!(json.contains("\"scene_swaps\":1"));
+        assert!(json.contains("\"prev_origin_row\":false"));
+        assert!(json.contains("\"own_frame\":\"PlanetCentered(7)\""));
+        assert!(json.contains("\"band_releases\":3"));
+        assert!(json.contains("\"own_lead_frame\":\"PlanetCentered(7)\""));
+        assert!(json.contains("\"lead_offset_m\":0.5"));
+        assert!(json.contains("\"eye_foreign_frames\":4"));
+        assert!(json.contains("\"eye_refusals\":2"));
+        assert!(json.contains("\"eye_jump_m\":0.125"));
+        assert!(json.contains("\"eye_step_m\":0.25"));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
         // The three row-drop honesty counters ride the surface (audit :304 — a wrongly-armed
         // resurrect guard must be VISIBLE to `vdctl state`), each with its distinct sample value.
@@ -531,6 +606,13 @@ pub struct DevTerrainStamp {
     pub frames: u64,
     pub built_chunks: u64,
     pub build_nanos: u64,
+    /// ★ THE WORST SINGLE CHUNK (2026-09-16, the walk-gap measurement): the longest wall time ONE
+    /// chunk's build took since the client started, in nanoseconds, and the key of that chunk.
+    /// `build_nanos` is a SUM, so a single thirty-millisecond chunk hides inside a mean of
+    /// fourteen; a flight differences these two across an interval to say whether one dense chunk
+    /// held the band open. Empty and zero while nothing is built.
+    pub build_peak_nanos: u64,
+    pub build_peak_key: String,
     pub harvested: u64,
     pub harvest_full: u64,
     /// The main thread's nanoseconds in the harvest loop since the client started (M8-2a): the
@@ -634,6 +716,136 @@ pub struct DevTerrainStamp {
     pub tick: Option<u64>,
     /// The ruler ball, when the centre ray met the ground within the drawn radius.
     pub ruler: Option<DevRuler>,
+    /// ★ THE BOARDING INSTRUMENT (2026-09-14, the walk-aboard blank): how many times the terrain
+    /// has FORGOTTEN a realm's ladder because that realm's row was absent from a frame's scene.
+    /// A forget releases every chunk of that realm, so a pilot who boards a hull and loses the
+    /// planet's row for one frame rebuilds the whole band. The count runs from the client's start.
+    pub ladders_forgotten: u64,
+    /// The last forget, with what it cost.
+    pub last_forget: Option<DevLadderForget>,
+    /// ★ THE SCENE SWAP the view last took (the same instrument): how many swaps the camera has
+    /// taken since the client started, and what the last one read.
+    pub scene_swaps: u64,
+    pub swap: Option<DevSceneSwap>,
+    /// ★ THE BOARDING INSTRUMENT, second half (2026-09-14): how many FRAMES released more than a
+    /// handful of one realm's chunks at once, and what the last such frame read. A forget is not
+    /// the only way a band dies: a wanted set computed from an eye in the wrong frame releases
+    /// every drawn chunk through the ordinary release loop, with no forget at all.
+    pub band_releases: u64,
+    pub last_release: Option<DevBandRelease>,
+    /// ★ THE FOREIGN EYE (2026-09-14): the frames whose own pose was stated in a realm's frame
+    /// other than the one the picture is composed in. The descent refuses such a frame, so the
+    /// count is how long the pilot's own pose and the picture's origin disagreed — a boarding
+    /// crossing whose level lands a beat after the pose does.
+    pub eye_foreign_frames: u64,
+    /// ★ THE CAMERA'S OWN REFUSAL (2026-09-15): how many frames the CAMERA refused the own pose
+    /// because it was stated in a realm other than the one the picture is composed in, and placed
+    /// the eye it last placed instead. The terrain's `eye_foreign_frames` counts the same
+    /// disagreement at either cursor; this counts the frames the eye itself was held.
+    pub eye_refusals: u64,
+    /// ★ THE JUMP AND ITS BOUND (the same instrument): the largest distance the placed eye moved
+    /// in ONE frame, and the largest distance the DELIVERED own pose moved in one frame, both in
+    /// metres and both measured only between two readings of ONE realm's frame. The eye may never
+    /// jump farther than the pilot was delivered — before the refusal a boarding read the planet's
+    /// whole radius here against a walking step.
+    pub eye_jump_m: f64,
+    pub eye_step_m: f64,
+    /// ★ THE BAND'S LAST GAP (2026-09-16, the walk-gap measurement): the last frame whose band
+    /// went incomplete, and what was missing on it. The stamp is polled every forty-five
+    /// milliseconds and a gap lasts ONE frame, so `chunks_urgent` alone misses most of them; this
+    /// row is LATCHED and a flight reads it whenever `urgent_frames` moved.
+    pub last_gap: Option<DevBandGap>,
+}
+
+/// ONE FRAME WHOSE BAND WENT INCOMPLETE (see [`DevTerrainStamp::last_gap`]): the realm, the frame,
+/// how many urgent chunks were missing, the missing chunks themselves (capped), and what the
+/// descent did on that frame - whether it re-cut the ring, how far the LEAD eye had moved from the
+/// last cut before it did, the threshold that decides a re-cut, the seconds since the previous cut,
+/// and the lead's own metres. Example: the walker crosses a crest, the descent re-cuts the ring
+/// after half a metre of travel, a rung-3 column the skyline hid comes inside the horizon, and this
+/// row names it with `was` reading "absent".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevBandGap {
+    pub realm: String,
+    pub frame: u64,
+    pub urgent: u64,
+    pub misses: Vec<DevBandMiss>,
+    pub descent: bool,
+    pub drift_m: f64,
+    pub step_m: f64,
+    pub since_descent_s: f64,
+    pub lead_m: f64,
+}
+
+/// ONE MISSING URGENT CHUNK (see [`DevBandGap`]): the chunk, its rung, what the PREVIOUS descent's
+/// wanted set called it ("absent", "margin", "revealed" or "urgent"), and the DRAWN eye's own
+/// reading of its column - the nearest point, the rung's territory edge, the eye's horizon, and
+/// whether that eye's own ring calls the chunk urgent. `was` reading "absent" means this very
+/// descent first wanted the chunk, so no builder could have had it; "urgent" means the ring asked
+/// for it earlier and the builders are late.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevBandMiss {
+    pub key: String,
+    pub rung: u8,
+    pub was: String,
+    pub near_drawn_m: f64,
+    pub territory_m: f64,
+    pub horizon_m: f64,
+    pub drawn_urgent: bool,
+}
+
+/// ONE WHOLESALE RELEASE (see [`DevTerrainStamp::last_release`]): the realm whose chunks went,
+/// the frame, how many went, whether the descent recomputed the wanted set on that frame, the
+/// ladder's eye in the body's own frame before and after the descent (metres), the lead offset's
+/// length, the wanted set's size before and after, the rows the drawn scene and the LEAD scene
+/// held, the origin, and the frame the own pose was delivered in at the drawn cursor and at the
+/// lead cursor — the pair that says whether one frame read two origins at once.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevBandRelease {
+    pub realm: String,
+    pub frame: u64,
+    pub released: u64,
+    pub descent: bool,
+    pub eye_before: Option<[f64; 3]>,
+    pub eye_after: [f64; 3],
+    pub lead_offset_m: f64,
+    pub wanted_before: u64,
+    pub wanted_after: u64,
+    pub rows: u64,
+    pub lead_rows: u64,
+    pub origin: String,
+    pub own_frame: String,
+    pub own_lead_frame: String,
+}
+
+/// ONE FORGET (see [`DevTerrainStamp::last_forget`]): the realm whose ladder went, the frame it
+/// went on, the chunks it held drawn and the chunks it had building, how many rows the scene held
+/// at that frame, and whether any remaining row still names it as its parent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevLadderForget {
+    pub realm: String,
+    pub frame: u64,
+    pub held: u64,
+    pub pending: u64,
+    pub rows: u64,
+    pub still_a_parent: bool,
+}
+
+/// ONE SCENE SWAP (see [`DevTerrainStamp::swap`]): the facing the view took from the delivered
+/// pose, the realm it left, the realm it entered, how many rows the new scene held, and whether
+/// the realm it LEFT (a boarding pilot's planet) still had a row in that scene.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevSceneSwap {
+    pub yaw: f64,
+    pub pitch: f64,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub rows: u64,
+    pub prev_origin_row: bool,
+    /// ★ THE FRAME THE FACING CAME FROM (2026-09-14): the own pose the camera read yaw and pitch
+    /// from is a statement in ONE realm's frame. A swap that reads a pose still stated in the
+    /// realm the pilot LEFT takes a facing that means another direction in the new frame.
+    pub own_frame: String,
 }
 
 /// The star's angles at the stand (slice 8p): how high over the local level and how far off the

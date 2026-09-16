@@ -34,8 +34,8 @@ use vd_seed::rng::{SplitMix64, child_seed};
 /// GPU shell keeps the octaves in a fixed-size table of it (`vd_recipe::height::relief_of_table`).
 pub const OCTAVES: usize = 16;
 const _: () = assert!(OCTAVES == vd_recipe::height::OCTAVES_CAP);
-/// The most rungs a body can have: the address's four bits and one (`vd_seed::ladder::RUNG_MAX`).
-pub const RUNGS: usize = 16;
+/// The most rungs a body can have: the address's five bits and one (`vd_seed::ladder::RUNG_MAX`).
+pub const RUNGS: usize = 22;
 /// The coarsest wavelength any body draws, in metres, and the wavelength below which no octave is
 /// added. The table can never overflow: the cap halves to under the floor within `OCTAVES` steps.
 pub const LONG_WAVE_CAP_M: u64 = 400_000;
@@ -537,7 +537,7 @@ mod tests {
         assert!((m.sea_radius_m() - m.radius_m()).abs() <= relief);
         assert!(m.strata.max_depth_m() < 100);
         assert!(m.caves.min_depth_m < m.caves.max_depth_m);
-        assert_eq!(m.ladder.rungs, 13, "the home planet's ladder");
+        assert_eq!(m.ladder.rungs, 19, "the home planet's ladder");
         // The band holds the whole relief, the strata and the caves.
         let relief_whole = relief as u32 + 1;
         assert!(m.ladder.band_m >= 2 * relief_whole + m.strata.max_depth_m() + m.caves.max_depth_m);
@@ -562,7 +562,7 @@ mod tests {
         // The radius: the word is the metres to within half a step's 2⁻²⁸, and the whole-step twin is
         // its floor.
         let radius_m = m.radius_m();
-        assert!((radius_m - 6_370_353.6).abs() < 1.0, "{radius_m}");
+        assert!((radius_m - 6_341_670.0).abs() < 1.0, "{radius_m}");
         assert_eq!(m.radius_steps, m.radius >> LENGTH_BITS);
         // The two reciprocals, against the divisions they replace.
         let radius_steps = m.radius_steps.raw();
@@ -643,11 +643,17 @@ mod tests {
             assert!(frequency_q(o) > Gi::ZERO);
             assert!(o.amplitude > Gi::ZERO);
         }
+        // ★ THE LADDER IS LONGER THAN THE TABLE since 2026-09-15: the home planet has nineteen rungs
+        // and fourteen octaves, so a rung drops one octave until ONE is left and then keeps that one.
         let mut rung = 1u8;
         while rung < m.ladder.rungs {
             let below = m.octaves_at(rung - 1).len();
             let here = m.octaves_at(rung).len();
-            assert!(here < below, "rung {rung}: {here} vs {below}");
+            if below > 1 {
+                assert!(here < below, "rung {rung}: {here} vs {below}");
+            } else {
+                assert_eq!(here, 1, "rung {rung}: the last octave stays");
+            }
             rung += 1;
         }
         assert!(m.octaves_at(m.ladder.rungs - 1).len() < m.octaves_at(0).len());

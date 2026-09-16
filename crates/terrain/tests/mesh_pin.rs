@@ -26,27 +26,40 @@ use vd_terrain::strata::Stratum;
 const GOLDEN: &str = include_str!("golden_home_mesh.txt");
 
 const COLUMNS_PER_FACE: usize = 15;
+/// The home planet's own row count, PINNED: the same columns the cell table names (fifteen a face
+/// while the rung has them, every one it has above that), plus the composed row and the seating row.
+const GOLDEN_ROWS: usize = 1_460;
 
 /// The same seventy-two columns the cell table pins.
 fn column_keys(chunks: i32, last: i32) -> Vec<(Face, i32, i32)> {
     let mut keys = Vec::new();
     for (f, face) in Face::ALL.iter().enumerate() {
         let f = f as i32;
+        let mut candidates = Vec::new();
         let mut i = 1;
         while i <= 10 {
             let x = (i * 7_919 + f * 104_729) % chunks;
             let y = (i * 15_485_863 + f * 32_452_843) % chunks;
-            keys.push((*face, x, y));
+            candidates.push((x, y));
             i += 1;
         }
-        keys.push((*face, 0, 0));
-        keys.push((*face, chunks - 1, 0));
-        // The LAST chunk along each edge — partial on the home planet (a face edge is not a whole
-        // number of chunks) — and the (+u, +v) corner: the partner's cells beyond the face, both
+        candidates.push((0, 0));
+        candidates.push((chunks - 1, 0));
+        // The LAST chunk along each edge - partial on the home planet (a face edge is not a whole
+        // number of chunks) - and the (+u, +v) corner: the partner's cells beyond the face, both
         // plus seams and the corner prism.
-        keys.push((*face, last, 0));
-        keys.push((*face, 0, last));
-        keys.push((*face, last, last));
+        candidates.push((last, 0));
+        candidates.push((0, last));
+        candidates.push((last, last));
+        // A COARSE RUNG HAS FEWER COLUMNS THAN THE LIST ASKS FOR (the extended ladder, 2026-09-15):
+        // the top rung is ONE CHUNK a face edge, so a face holds one column and the strides all name
+        // it. Take each column ONCE and take every one the rung has.
+        let mut seen = std::collections::BTreeSet::new();
+        for (x, y) in candidates {
+            if seen.insert((x, y)) {
+                keys.push((*face, x, y));
+            }
+        }
     }
     keys
 }
@@ -168,11 +181,16 @@ fn every_golden_surface_of_the_home_planet_digests_to_its_committed_triangles() 
         println!("mesh_pin: RECORDED {} rows to {path}", lines.len());
         return;
     }
-    let rungs = usize::from(home_planet().ladder().rungs);
+    assert_eq!(home_planet().ladder().rungs, 19, "the home planet's ladder");
     assert_eq!(
         lines.len(),
-        6 * COLUMNS_PER_FACE * rungs + 2,
-        "seventy-two surfaces at every rung, the composed row and the seating row"
+        GOLDEN_ROWS,
+        "every column the rung has, the composed row and the seating row"
+    );
+    assert_eq!(
+        column_keys(160_668, 160_668).len(),
+        6 * COLUMNS_PER_FACE,
+        "a rung with columns to spare still takes fifteen a face"
     );
     if let Err(report) = compare(GOLDEN, &lines) {
         panic!(

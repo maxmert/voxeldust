@@ -51,7 +51,7 @@ use vd_client::ladder_view::{
     AskBound, AskRate, Column, FADE_ALWAYS_IN, FADE_ALWAYS_OUT, LadderView, ShadowReach, WantedSet,
     rung_for_distance, switch_m,
 };
-use vd_client::realm_scene::{BoxShape, RealmBox};
+use vd_client::realm_scene::{BoxShape, RealmBox, RealmScene};
 use vd_client_harness::probe::{
     PROBE_KIND_RULER, PROBE_KIND_TERRAIN, horizon_dip_rad, horizon_m, star_angles,
 };
@@ -447,6 +447,10 @@ pub struct ThreadedWorkers {
     /// counted apart, in [`CardMeter`], because the two builders' mean times must never be mixed.
     built: Arc<std::sync::atomic::AtomicU64>,
     build_nanos: Arc<std::sync::atomic::AtomicU64>,
+    /// ★ THE WORST SINGLE CHUNK (2026-09-16, the walk-gap measurement): the longest wall time one
+    /// build took and the chunk it took it on. Two workers that beat the peak in the same instant
+    /// may leave either key: the instrument names a dense chunk, it does not order them.
+    build_peak: Arc<Mutex<(u64, Option<ChunkKey>)>>,
     /// ★ THE CARD'S SEAM (ruling F9 item 2): the same queue and the same done channel, kept for
     /// the moment the renderer's own device exists.
     card: CardSeam,
@@ -497,12 +501,14 @@ impl ThreadedWorkers {
         let (done_tx, done) = bounded::<ChunkReady>(done_bound.max(1));
         let built = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let build_nanos = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let build_peak: Arc<Mutex<(u64, Option<ChunkKey>)>> = Arc::new(Mutex::new((0, None)));
         let mut n = 0;
         while n < threads.max(1) {
             let queue = Arc::clone(&queue);
             let tx = done_tx.clone();
             let built_by_me = Arc::clone(&built);
             let nanos_by_me = Arc::clone(&build_nanos);
+            let peak_by_me = Arc::clone(&build_peak);
             std::thread::Builder::new()
                 .name(format!("terrain-worker-{n}"))
                 .spawn(move || {
@@ -515,10 +521,16 @@ impl ThreadedWorkers {
                         };
                         let started = std::time::Instant::now();
                         let geometry = geometry_with(&job.body, job.realm, job.key, &job.parents);
-                        nanos_by_me.fetch_add(
-                            started.elapsed().as_nanos() as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
+                        let took = started.elapsed().as_nanos() as u64;
+                        nanos_by_me.fetch_add(took, std::sync::atomic::Ordering::Relaxed);
+                        {
+                            let mut peak = peak_by_me
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if took > peak.0 {
+                                *peak = (took, Some(job.key));
+                            }
+                        }
                         built_by_me.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if let Some(geometry) = geometry {
                             let _ = tx.send(ChunkReady {
@@ -541,6 +553,7 @@ impl ThreadedWorkers {
             done,
             built,
             build_nanos,
+            build_peak,
         }
     }
 
@@ -585,9 +598,15 @@ impl Drop for ThreadedWorkers {
 
 impl ChunkWorkers for ThreadedWorkers {
     fn built(&self) -> vd_client::chunks::BuildCount {
+        let peak = *self
+            .build_peak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         vd_client::chunks::BuildCount {
             chunks: self.built.load(std::sync::atomic::Ordering::Relaxed),
             nanos: self.build_nanos.load(std::sync::atomic::Ordering::Relaxed),
+            peak_nanos: peak.0,
+            peak_key: peak.1,
         }
     }
 
@@ -1402,6 +1421,26 @@ struct RealmLadder {
     speed: PeakHold,
     /// The speed the hold last read, for the stamp.
     speed_mps: f64,
+    /// ★ THE ROW'S GRACE (2026-09-14, the boarding cure): the display moment at which this
+    /// realm last HAD a row in the drawn scene. A realm's row can be absent for a frame or two
+    /// while the gateway re-composes a picture in a new origin, and forgetting the ladder there
+    /// releases every chunk the realm holds — the whole band, rebuilt from nothing. The ladder
+    /// is forgotten only once the row has been away longer than the interpolation buffer, which
+    /// is the wire's own statement of how stale a delivered picture may legitimately be.
+    /// `None` until the first frame the realm is seen with a row.
+    row_seen_s: Option<f64>,
+    /// ★ THE LAST DESCENT'S OWN SET (2026-09-16, the walk-gap measurement): the wanted set this
+    /// ladder held before the newest descent replaced it, moved across for nothing. A missing
+    /// urgent chunk reads its class here: `absent` means this very descent first wanted it, so no
+    /// builder could have had it, and `urgent` means the ring asked earlier and a builder is late.
+    prev: WantedSet,
+    /// ★ THE DESCENT'S OWN PACE (the same measurement): the display moment of the last descent,
+    /// how far the LEAD eye had moved from the last descent's before this frame judged it, the
+    /// seconds since the last descent, and whether this frame re-cut the ring.
+    last_descent_s: Option<f64>,
+    drift_m: f64,
+    since_descent_s: f64,
+    descent_ran: bool,
 }
 
 /// One drawn chunk: its entity, its probe twin in Capture mode, and its morph counts (targets
@@ -1489,12 +1528,37 @@ pub struct Terrain {
     morph_totals: [u64; 3],
     /// The drawn chunks' mesh bytes, summed (M8-2's census).
     bytes_drawn: u64,
+    /// ★ THE BAND'S LAST GAP (2026-09-16, the walk-gap measurement): the last frame whose band
+    /// went incomplete, LATCHED. A gap lasts one frame and the stamp is polled every forty-five
+    /// milliseconds, so the live count misses most of them.
+    last_gap: Option<vd_devproto::DevBandGap>,
     /// THE FRAMES WITH A GAP: how many frames, since the start, drew with an urgent chunk
     /// missing. A gate reads the difference across a leg and misses no frame, where a poll at 20
     /// Hz sees one frame in three (refutation R4-6).
     urgent_frames: u64,
     /// The frames this system ran (M8-2a): the frame rate, against the build and harvest rates.
     frames: u64,
+    /// ★ THE BOARDING INSTRUMENT (2026-09-14, the walk-aboard blank): how many times a realm's
+    /// ladder was forgotten because that realm had no row in a frame's scene, and what the last
+    /// forget cost. The release loop below a forget drops EVERY chunk of that realm, so a single
+    /// frame without the planet's row rebuilds a pilot's whole band.
+    ladders_forgotten: u64,
+    last_forget: Option<vd_devproto::DevLadderForget>,
+    /// ★ THE BOARDING INSTRUMENT, second half (2026-09-14): how many frames released more than
+    /// [`WHOLESALE_RELEASE`] of ONE realm's chunks at once, and what the last such frame read. A
+    /// forget is not the only way a band dies — a wanted set computed from an eye in the wrong
+    /// frame releases every drawn chunk through the ordinary release loop below.
+    band_releases: u64,
+    last_release: Option<vd_devproto::DevBandRelease>,
+    /// ★ THE FOREIGN EYE (2026-09-14, the boarding cure): the frames whose own pose was stated in
+    /// a realm's frame OTHER than the one the picture is composed in. The eye is the own pose
+    /// flattened, so on such a frame the eye is a number measured from another realm's centre —
+    /// a pilot who has boarded reads a few metres from the hull's centre while the picture is
+    /// still drawn from the planet's, and the eye lands at the planet's CENTRE. A wanted set
+    /// computed there is the far view, and the whole band is released. The descent REFUSES such
+    /// a frame (SL1 clause 6: a stale reading is refused, never used); the count says how long
+    /// the disagreement lasts.
+    eye_foreign_frames: u64,
     /// ★ THE BUILDERS' THROUGHPUT for the bounded ask (ruling F9 item 1): how many workers build,
     /// the smoothed CAPACITY in chunks a second (the worker count over the mean wall time of a
     /// build — never the chunks they happened to finish, which on a walk is the ask and not the
@@ -1574,8 +1638,14 @@ impl Terrain {
             probe_materials: BTreeMap::new(),
             morph_totals: [0; 3],
             bytes_drawn: 0,
+            last_gap: None,
             urgent_frames: 0,
             frames: 0,
+            ladders_forgotten: 0,
+            last_forget: None,
+            band_releases: 0,
+            last_release: None,
+            eye_foreign_frames: 0,
             workers: threads,
             throughput: Throughput::default(),
             card,
@@ -2195,6 +2265,46 @@ fn own_world<S>(
         .map(|(_, _, p)| snap.world_pos(p))
 }
 
+/// The frame the own entity's pose is stated in at a cursor, as a label — `"-"` when the own
+/// entity has no pose among the composited ones there (the boarding instrument's frame pair).
+fn own_frame_of<S>(
+    own: Option<vd_core::EntityId>,
+    poses: &[(vd_core::EntityId, S, vd_client::interp::RenderPose)],
+) -> String {
+    poses
+        .iter()
+        .find(|(id, _, _)| Some(*id) == own)
+        .map_or_else(|| "-".to_owned(), |(_, _, p)| format!("{:?}", p.frame))
+}
+
+/// Whether the own entity's pose at a cursor is stated in the realm the picture is composed in —
+/// the eye and the rows measured from ONE centre. `true` when the own entity has no pose there or
+/// the picture names no origin (nothing to disagree with). See the refusal in [`sync_terrain`].
+fn eye_at_home<S>(
+    own: Option<vd_core::EntityId>,
+    poses: &[(vd_core::EntityId, S, vd_client::interp::RenderPose)],
+    picture_realm: Option<RealmId>,
+) -> bool {
+    let stated = poses
+        .iter()
+        .find(|(id, _, _)| Some(*id) == own)
+        .map(|(_, _, p)| p.frame.realm());
+    match (stated, picture_realm) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// ★ A WHOLESALE RELEASE (2026-09-14): more than this many of ONE realm's chunks released in one
+/// frame is not a moving eye trimming its band — it is the band itself going. The instrument
+/// names such a frame; the flight reads it.
+const WHOLESALE_RELEASE: u64 = 64;
+
+/// ★ HOW MANY MISSING CHUNKS A GAP ROW NAMES (2026-09-16, the walk-gap measurement): the walk's
+/// worst gap read two, a hull's at 528 m/s read thousands, and a stamp is a diagnostic message on
+/// one connection. Eight names the walk's gap whole and bounds the hull's row.
+const GAP_KEYS_CAP: usize = 8;
+
 /// A body in the window with the two eyes in its frame: the DRAWN eye (the stamp's, the ruler's)
 /// and the LEAD eye (the wanted set's), both in metres from the body's centre.
 struct EyeBody {
@@ -2250,12 +2360,41 @@ pub(crate) fn sync_terrain(
     let lead_cursor = snap.lead_cursor(now_s);
     let scene_lead = lead_cursor.map(|c| snap.scene_at(c));
     let own = snap.own_entity();
-    let own_now = own_world(&snap, own, &snap.rendered(now_s));
-    let own_lead = lead_cursor.and_then(|c| own_world(&snap, own, &snap.rendered_at(c)));
+    let rendered_now = snap.rendered(now_s);
+    let rendered_lead = lead_cursor.map(|c| snap.rendered_at(c));
+    let own_now = own_world(&snap, own, &rendered_now);
+    let own_lead = rendered_lead
+        .as_ref()
+        .and_then(|r| own_world(&snap, own, r));
     let lead_offset = match (own_now, own_lead) {
         (Some(a), Some(b)) => b - a,
         _ => DVec3::ZERO,
     };
+    // ★ THE BOARDING INSTRUMENT (2026-09-14): the frame the own pose is DELIVERED in at each of
+    // the two cursors. A boarding pilot's drawn pose and lead pose may be stated in two different
+    // realms' frames for a frame — the planet's and the hull's — and a descent that reads the
+    // pair computes a wanted set for an eye that stands nowhere.
+    let own_frame_now = own_frame_of(own, &rendered_now);
+    let own_frame_lead = rendered_lead
+        .as_ref()
+        .map_or_else(|| "-".to_owned(), |r| own_frame_of(own, r));
+    // ★ THE EYE MUST STAND IN THE PICTURE'S OWN FRAME (2026-09-14, the boarding cure; SL1 clause
+    // 6: a stale reading is REFUSED, never used). The eye is the own pose flattened, and the
+    // rows are composed in the origin realm's frame. Between a pilot's crossing and the level
+    // that carries the new origin the two disagree for a beat: the pose already reads a few
+    // metres from the hull's centre while the picture is still drawn from the planet's, so the
+    // eye lands at the PLANET'S CENTRE, the descent runs with an altitude of minus six thousand
+    // kilometres, and the wanted set it computes holds none of the 7 288 chunks that are drawn —
+    // the release loop below then drops every one of them. A frame whose eye is not a reading in
+    // the picture's own frame recomputes NOTHING: the wanted set of the last agreeing frame
+    // stands, the band stays whole, and the next agreeing frame moves it.
+    let picture_realm = snap.origin();
+    let eye_at_home_now = eye_at_home(own, &rendered_now, picture_realm);
+    let eye_at_home_lead = rendered_lead
+        .as_ref()
+        .is_none_or(|r| eye_at_home(own, r, picture_realm));
+    let eye_refused = !(eye_at_home_now & eye_at_home_lead);
+    terrain.eye_foreign_frames += u64::from(eye_refused);
     // 1. Every stated surface becomes a body (once); the eye-relative centre of every row, drawn
     //    and at the lead.
     let mut centres: BTreeMap<RealmId, (DVec3, DQuat)> = BTreeMap::new();
@@ -2338,6 +2477,13 @@ pub(crate) fn sync_terrain(
     let mut work_bound = std::time::Duration::ZERO;
     let mut work_descent = std::time::Duration::ZERO;
     let mut descents = 0u64;
+    // ★ THE BOARDING INSTRUMENT (2026-09-14): each ladder's eye and wanted size BEFORE this
+    // frame's descent, so a wholesale release can name what the descent changed.
+    let before: BTreeMap<RealmId, (Option<[f64; 3]>, u64)> = terrain
+        .ladders
+        .iter()
+        .map(|(r, l)| (*r, (l.eye, l.wanted.keys.len() as u64)))
+        .collect();
     for eb in &with_bodies {
         let piece = std::time::Instant::now();
         let rungs = eb.body.ladder().rungs;
@@ -2382,12 +2528,22 @@ pub(crate) fn sync_terrain(
             (Some(a), Some(b)) => !a.same_as(b),
             (a, b) => a.is_some() != b.is_some(),
         };
-        let run_descent = moved(ladder.eye, eb.lead) || reach_changed || bound_changed;
+        let wanted_move = moved(ladder.eye, eb.lead) || reach_changed || bound_changed;
+        let run_descent = wanted_move & !eye_refused;
         work_bound += piece.elapsed();
+        // ★ THE DESCENT'S PACE, READ (2026-09-16, the walk-gap measurement): how far the LEAD
+        // eye has moved from the eye the standing ring was cut for, and how long ago it was cut.
+        ladder.drift_m = ladder.eye.map_or(0.0, |last| {
+            (DVec3::from_array(last) - DVec3::from_array(eb.lead)).length()
+        });
+        ladder.since_descent_s = ladder.last_descent_s.map_or(0.0, |t| now_s - t);
+        ladder.descent_ran = run_descent;
         if run_descent {
             let descent = std::time::Instant::now();
             ladder.view.shadow = shadow;
-            ladder.wanted = ladder.view.wanted(&eb.body, eb.lead);
+            let fresh = ladder.view.wanted(&eb.body, eb.lead);
+            ladder.prev = std::mem::replace(&mut ladder.wanted, fresh);
+            ladder.last_descent_s = Some(now_s);
             ladder.eye = Some(eb.lead);
             recomputed.push(eb.realm);
             work_descent += descent.elapsed();
@@ -2468,20 +2624,75 @@ pub(crate) fn sync_terrain(
             drawn.caster = want;
         }
     }
-    // The realms whose row left the window: forget their ladder (their chunks go below).
+    // The realms whose row left the window: forget their ladder (their chunks go below) — but
+    // ★ ONLY AFTER THE ROW'S GRACE (2026-09-14, the boarding cure). A row absent from ONE
+    // frame's scene is not a realm that left: at a boarding the gateway composes the first
+    // picture in the hull's frame, and the planet's row can miss a beat while it does. The
+    // grace is the interpolation buffer — the wire's own contract for how old a delivered
+    // picture may be — never a frame count this crate chose. Example: the pilot steps aboard a
+    // berthed hull; the planet's row is away for two frames; its 7 288 chunks stay drawn and
+    // the ground never blinks.
+    let grace_s = snap.lead_seconds();
+    for (realm, ladder) in terrain.ladders.iter_mut() {
+        if centres.contains_key(realm) {
+            ladder.row_seen_s = Some(now_s);
+        }
+    }
     let gone: Vec<RealmId> = terrain
         .ladders
-        .keys()
-        .filter(|r| !centres.contains_key(r))
-        .copied()
+        .iter()
+        .filter(|(r, l)| {
+            vd_client::ladder_view::row_lapsed(
+                centres.contains_key(r),
+                l.row_seen_s,
+                now_s,
+                grace_s,
+            )
+        })
+        .map(|(r, _)| *r)
         .collect();
     for realm in gone {
+        // ★ THE BOARDING INSTRUMENT (2026-09-14): NAME the forget. The release loop below drops
+        // every chunk this realm holds, so this line is the whole cost of one frame without a
+        // row. `still_a_parent` says whether the delivered scene still names the realm as some
+        // row's parent — a hull whose row states the planet as its parent while the planet's own
+        // row is absent.
+        let held = terrain.entities.keys().filter(|(r, _)| *r == realm).count() as u64;
+        let pending = terrain
+            .lane
+            .pending_all()
+            .into_iter()
+            .filter(|(r, _)| *r == realm)
+            .count() as u64;
+        let still_a_parent = scene.iter().any(|(_, b)| b.parent == Some(realm));
+        terrain.ladders_forgotten += 1;
+        terrain.last_forget = Some(vd_devproto::DevLadderForget {
+            realm: format!("{realm:?}"),
+            frame: terrain.frames,
+            held,
+            pending,
+            rows: centres.len() as u64,
+            still_a_parent,
+        });
+        tracing::warn!(
+            ?realm,
+            frame = terrain.frames,
+            held,
+            pending,
+            rows = centres.len(),
+            still_a_parent,
+            origin = ?snap.origin(),
+            forgets = terrain.ladders_forgotten,
+            "the terrain forgets a realm's ladder: no row for it in this frame's scene"
+        );
         terrain.ladders.remove(&realm);
     }
     // Release what is no longer wanted — with THE HOLD: a chunk stays while a wanted chunk over its
     // footprint is still building (coarse before fine, SL8). Then ask for what is wanted and not
     // held, in the wanted set's own order: the coarsest ring first.
     let held: Vec<(RealmId, ChunkKey)> = terrain.entities.keys().copied().collect();
+    // ★ THE BOARDING INSTRUMENT (2026-09-14): how many DRAWN chunks each realm loses this frame.
+    let mut released_count: BTreeMap<RealmId, u64> = BTreeMap::new();
     let unwant = {
         let Terrain {
             lane,
@@ -2504,6 +2715,7 @@ pub(crate) fn sync_terrain(
             if !keep {
                 lane.release(realm, key);
                 if let Some(drawn) = entities.remove(&(realm, key)) {
+                    *released_count.entry(realm).or_default() += 1;
                     commands.entity(drawn.entity).despawn();
                     if let Some(twin) = drawn.twin {
                         commands.entity(twin).despawn();
@@ -2556,6 +2768,58 @@ pub(crate) fn sync_terrain(
     };
     for (realm, ckey) in unwant {
         terrain.unwant_caster(&mut commands, realm, ckey);
+    }
+    // ★ THE BOARDING INSTRUMENT (2026-09-14): a frame that released a WHOLESALE count of one
+    // realm's chunks names itself — the realm, the count, whether the descent ran, the eye in the
+    // body's own frame before and after it, the lead offset, the wanted set's size on both sides,
+    // the drawn and lead scenes' row counts, the origin, and the frame the own pose was delivered
+    // in at each cursor. A band that dies without a forget dies HERE, and this line says why.
+    for (realm, released) in &released_count {
+        if *released <= WHOLESALE_RELEASE {
+            continue;
+        }
+        let (eye_before, wanted_before) = before.get(realm).copied().unwrap_or((None, 0));
+        let (eye_after, wanted_after) = terrain.ladders.get(realm).map_or(([0.0; 3], 0), |l| {
+            (l.eye.unwrap_or([0.0; 3]), l.wanted.keys.len() as u64)
+        });
+        let descent = recomputed.contains(realm);
+        terrain.band_releases += 1;
+        let row = vd_devproto::DevBandRelease {
+            realm: format!("{realm:?}"),
+            frame: terrain.frames,
+            released: *released,
+            descent,
+            eye_before,
+            eye_after,
+            lead_offset_m: lead_offset.length(),
+            wanted_before,
+            wanted_after,
+            rows: centres.len() as u64,
+            lead_rows: scene_lead.as_ref().map_or(0, RealmScene::len) as u64,
+            origin: format!("{:?}", snap.origin()),
+            own_frame: own_frame_now.clone(),
+            own_lead_frame: own_frame_lead.clone(),
+        };
+        tracing::warn!(
+            realm = %row.realm,
+            frame = row.frame,
+            released = row.released,
+            descent = row.descent,
+            eye_before = ?row.eye_before,
+            eye_after = ?row.eye_after,
+            lead_offset_m = row.lead_offset_m,
+            wanted_before = row.wanted_before,
+            wanted_after = row.wanted_after,
+            rows = row.rows,
+            lead_rows = row.lead_rows,
+            origin = %row.origin,
+            own_frame = %row.own_frame,
+            own_lead_frame = %row.own_lead_frame,
+            releases = terrain.band_releases,
+            eye_foreign_frames = terrain.eye_foreign_frames,
+            "the terrain releases a realm's band wholesale in one frame"
+        );
+        terrain.last_release = Some(row);
     }
     // 3. Harvest finished chunks — each with its rung's crossfade material — and their probe twins
     //    where a probe exists (Capture mode).
@@ -2975,6 +3239,50 @@ pub(crate) fn sync_terrain(
             };
             let gap: u64 = gap_per_rung.iter().map(|(_, n)| *n).sum();
             terrain.urgent_frames += u64::from(gap > 0);
+            // ★ THE GAP, NAMED AND LATCHED (2026-09-16, the walk-gap measurement): which chunks
+            // the band lacks, what the LAST descent called each of them, and what the DRAWN eye
+            // reads of each one's column. A chunk the last set called `absent` was first wanted by
+            // this frame's own descent; one it called `urgent` was asked earlier and is late.
+            if gap > 0 {
+                let misses: Vec<vd_devproto::DevBandMiss> = {
+                    let Terrain { lane, ladders, .. } = &*terrain;
+                    ladders.get(realm).map_or_else(Vec::new, |l| {
+                        l.wanted
+                            .urgent_missing_keys(&|k| lane.is_resident(*realm, k), GAP_KEYS_CAP)
+                            .into_iter()
+                            .map(|key| {
+                                let probe = l.view.probe(body, eye_body, key);
+                                vd_devproto::DevBandMiss {
+                                    key: format!("{key:?}"),
+                                    rung: key.rung,
+                                    was: l.prev.class_of(key).name().to_owned(),
+                                    near_drawn_m: probe.near_m,
+                                    territory_m: probe.territory_m,
+                                    horizon_m: probe.horizon_m,
+                                    drawn_urgent: probe.urgent,
+                                }
+                            })
+                            .collect()
+                    })
+                };
+                let pace = terrain
+                    .ladders
+                    .get(realm)
+                    .map_or((false, 0.0, 0.0), |l: &RealmLadder| {
+                        (l.descent_ran, l.drift_m, l.since_descent_s)
+                    });
+                terrain.last_gap = Some(vd_devproto::DevBandGap {
+                    realm: format!("{realm:?}"),
+                    frame: terrain.frames,
+                    urgent: gap,
+                    misses,
+                    descent: pace.0,
+                    drift_m: pace.1,
+                    step_m: EYE_STEP_M,
+                    since_descent_s: pace.2,
+                    lead_m,
+                });
+            }
             let built = terrain.lane.built();
             let counters = terrain.lane.counters();
             let parents = terrain.lane.parent_stats();
@@ -3002,6 +3310,10 @@ pub(crate) fn sync_terrain(
                 frames: terrain.frames,
                 built_chunks: built.chunks,
                 build_nanos: built.nanos,
+                build_peak_nanos: built.peak_nanos,
+                build_peak_key: built
+                    .peak_key
+                    .map_or_else(String::new, |k| format!("{k:?}")),
                 harvested: counters.harvested,
                 harvest_full: counters.harvest_full,
                 harvest_nanos: terrain.harvest_nanos,
@@ -3051,6 +3363,21 @@ pub(crate) fn sync_terrain(
                 world: format!("{:#x}", terrain.declared),
                 tick: snap.freshest_tick(),
                 ruler: ruler_now.as_ref().map(|(_, _, _, d)| *d),
+                // ★ THE BOARDING INSTRUMENT (2026-09-14): the forgets, and the scene swap the
+                // view last took (`place_camera` runs before this system, in the same chain).
+                ladders_forgotten: terrain.ladders_forgotten,
+                last_forget: terrain.last_forget.clone(),
+                scene_swaps: render_eye.swaps,
+                swap: render_eye.swap.clone(),
+                band_releases: terrain.band_releases,
+                last_release: terrain.last_release.clone(),
+                eye_foreign_frames: terrain.eye_foreign_frames,
+                // ★ THE CAMERA'S REFUSAL AND THE EYE'S JUMP (2026-09-15): decided in
+                // `place_camera`, which runs before this system in the same chain.
+                eye_refusals: render_eye.track.refusals,
+                eye_jump_m: render_eye.track.jump_max_m,
+                eye_step_m: render_eye.track.step_max_m,
+                last_gap: terrain.last_gap.clone(),
             });
         }
     }

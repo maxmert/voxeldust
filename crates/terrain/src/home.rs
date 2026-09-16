@@ -7,7 +7,7 @@
 //! chunks.
 //!
 //! **Example.** The home planet is 6 371 km in radius at its look radius (Earth's own, to a
-//! kilometre); the ladder snaps it to 6 370 354 m, thirteen rungs, fourteen octaves. A test that wants "a planet"
+//! kilometre); the ladder snaps it to 6 341 670 m, nineteen rungs, fourteen octaves. A test that wants "a planet"
 //! wants this one. The FIRST home planet (seed 7 701 581 858 760 374 086, 3 351 km, airless and
 //! hot) was the first body of `System(7)` the ladder accepted, not a chosen world.
 
@@ -44,13 +44,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_home_planet_is_on_the_ladder_with_thirteen_rungs() {
+    fn the_home_planet_is_on_the_ladder_with_nineteen_rungs() {
         let home = home_planet();
         assert_eq!(home.seed, HOME_PLANET_SEED);
-        assert_eq!(home.ladder.rungs, 13);
+        assert_eq!(home.ladder.rungs, 19);
         assert_eq!(home.octave_count, 14);
-        // The ladder snaps Earth's radius to 2N/π at N = 10 006 528 cells: 6 370 353.6 m.
-        assert!((home.radius_m() - 6_370_353.6).abs() < 1.0);
+        // The ladder snaps Earth's radius to 2N/π at N = 9 961 472 cells: 6 341 670.0 m.
+        assert!((home.radius_m() - 6_341_670.0).abs() < 1.0);
     }
 
     /// MEASURED (the refuter's finding 10): the radius is an INPUT from outside the fence, and the

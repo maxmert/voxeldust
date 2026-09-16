@@ -975,7 +975,10 @@ mod tests {
         let mut checked = 0;
         // A fine rung, a middle rung and the coarsest: the last holds only a chunk or two per column.
         for rung in [0u8, 5, m.ladder.rungs - 1] {
-            let (x, y) = (10, 10);
+            // The coarsest rung has ONE column a face, so the sample column is clamped to what the
+            // rung actually holds.
+            let columns = (m.ladder.cells_per_edge(rung) as i32 - 1) / CHUNK_EDGE as i32;
+            let (x, y) = (10.min(columns), 10.min(columns));
             let column = column_field(&m, Face::NegZ, rung, x, y).expect("a column");
             let top = (m.ladder.cells_in_band(rung) as i32 - 1) / CHUNK_EDGE as i32;
             let zs = surface_z(&m, Face::NegZ, rung, x, y);

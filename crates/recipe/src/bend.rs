@@ -314,14 +314,19 @@ mod tests {
         reason = "the test states the exact reciprocal"
     )]
     fn the_face_parameter_is_the_cell_centre_in_the_face() {
-        let n_l = 10_006_528u32;
+        let n_l = 9_961_472u32;
         let inv_n = inv_n_of(n_l);
         assert_eq!(inv_n.raw(), ((1u128 << 64) / u128::from(n_l)) as i64);
-        // The first cell's centre, the middle, the last: (2i + 1)/n_l − 1, within a unit.
-        for i in [0i32, 5_003_263, 5_003_264, 10_006_527] {
+        // The first cell's centre, the middle, the last: (2i + 1)/n_l − 1, within a couple of units.
+        // The bar is the RECIPROCAL'S OWN ARITHMETIC, not a taste: `inv_n` is `2⁶⁴/n_l` TRUNCATED, and the
+        // face parameter multiplies it by `2i + 1`, so the truncation is multiplied too - up to
+        // `2·n_l/2²⁴` units of `2⁻⁴⁰`, which is 1.19 on the home planet's own count, and the shift
+        // adds its own unit. MEASURED at the face's last cell after the ladder was extended: 1.58
+        // units (it was under 1.5 at the old count of 10 006 528, which is why the bar read 1.5).
+        for i in [0i32, 4_980_735, 4_980_736, 9_961_471] {
             let want = (2.0 * f64::from(i) + 1.0) / f64::from(n_l) - 1.0;
             let got = real(face_param(i, inv_n));
-            assert!((got - want).abs() < 1.5 / ONE, "{i}: {got} vs {want}");
+            assert!((got - want).abs() < 2.5 / ONE, "{i}: {got} vs {want}");
         }
         // The smallest face a rung can have: 62 cells; the reciprocal fits the word.
         assert_eq!(inv_n_of(62).raw(), ((1u128 << 64) / 62) as i64);

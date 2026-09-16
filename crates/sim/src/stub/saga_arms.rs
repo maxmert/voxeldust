@@ -558,9 +558,12 @@ fn re_home_apply(
         dot.granted = true;
         dot.departing = false;
         dot.adopting = false;
-        dot.pose = pose;
-        // Seed to the re-homed pose offset: this tick's swept segment is degenerate.
-        dot.prev_offset = pose.pos;
+        // The whole arriving pose (2026-09-14): position, the facing the conversion computed, and
+        // the swept prior — ONE write, the same the crossing ingress uses. The held dot this flips
+        // may carry the angle pair of the realm it LEFT, and the look rebuilds the orientation from
+        // that pair every tick; deriving the pair here is what the fresh-mint arm below already
+        // does for the orphan case (★THE RE-HOME FACING).
+        dot.adopt_pose(pose);
         stats.re_home_flipped += 1;
     } else {
         // Deterministic clientless session key (entity id ↦ session) so seed-replay stays byte-identical and

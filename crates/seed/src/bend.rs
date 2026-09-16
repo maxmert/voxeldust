@@ -484,7 +484,7 @@ mod tests {
     fn the_integer_direction_matches_the_float_bend_within_a_few_units() {
         // MEASURED (bench part 3): within 0.02 mm laterally on the home planet — under four units
         // of 2⁻⁴⁰; eight is the bar here, on every face, at the centre, the edges and a corner.
-        let n_l = 10_006_528u32;
+        let n_l = 9_961_472u32;
         let inv_n = vd_recipe::bend::inv_n_of(n_l);
         let one = (1u64 << vd_recipe::bend::DIR_BITS) as f64;
         for face in [
@@ -497,9 +497,9 @@ mod tests {
         ] {
             for (i, j) in [
                 (0, 0),
-                (5_003_264, 5_003_264),
-                (10_006_527, 0),
-                (7, 10_006_527),
+                (4_980_736, 4_980_736),
+                (9_961_471, 0),
+                (7, 9_961_471),
             ] {
                 let f = direction(
                     face,

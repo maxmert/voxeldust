@@ -16,7 +16,7 @@
 //! body and a lump is the body definition's (slice 5, the world identity); today the caller decides.
 //!
 //! **Example.** A moon's shard knows its own look: a shell of 200 km. The grid is the cube-sphere with
-//! 314 112 cells per face edge and eight rungs. A hull's shard knows its bound: a box of 16 by 8 by 32
+//! 311 296 cells per face edge and fourteen rungs. A hull's shard knows its bound: a box of 16 by 8 by 32
 //! metres. The grid is the flat box in whole cells, and a thruster one metre aft of the origin sits at
 //! `k = −1`. A three-kilometre potato asteroid states its look as a lump and gets a flat grid
 //! inscribed in it.
@@ -73,10 +73,10 @@ mod tests {
         assert_eq!(
             g.domain(),
             GridDomain::Band {
-                cells_per_edge: 314_112,
-                floor_m: 199_710,
-                band_m: 520,
-                rungs: 8
+                cells_per_edge: 311_296,
+                floor_m: 189_985,
+                band_m: 8_452,
+                rungs: 14
             }
         );
     }

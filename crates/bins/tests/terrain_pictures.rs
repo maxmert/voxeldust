@@ -98,6 +98,18 @@ const ALOFT_TILT_DEG: f64 = 15.0;
 /// From orbit the horizon dips 40° below level; a nose 45° down puts the limb 5° over the frame's
 /// centre and the centre ray on the ground inside it.
 const ORBIT_TILT_DEG: f64 = 45.0;
+/// ★ THE FAR STAND (2026-09-15, the two-radii cutoff's replacement): the globe fills this share of
+/// the frame's HEIGHT, with the nose straight at the planet's centre — so the picture is the body
+/// drawn by its own recipe at the top rung, sky all around it, at a distance the old cutoff refused.
+/// The distance follows from the share alone: the globe's angular RADIUS is half of the share of
+/// the reference view's field of view, so the eye stands `R / sin(fov · share / 2)` from the centre
+/// — about 10.2 body radii, 65 000 km over the home planet, five times the old cutoff.
+const FAR_FRAME_SHARE: f64 = 0.25;
+/// THE FAR STAND'S CANDIDATE REFERENCE: its own directory beside the frozen exact pictures. The
+/// gate COMPARES against it and REPORTS the verdict; it never turns red on it, because the owner
+/// has not looked at this stand yet. When the owner accepts it, the picture moves to `exact/` and
+/// the stand joins the five frozen ones.
+const CANDIDATE_DIR: &str = "candidate";
 /// A day of universe ticks at the dev cluster's rate: the bound on how far from the clock's genesis
 /// a picture may be taken while its day side is computed at genesis.
 const TICKS_PER_DAY: u64 = 86_400 * 20;
@@ -1278,6 +1290,212 @@ fn take_picture(
     (last, share)
 }
 
+/// ★ THE FAR STAND'S DISTANCE from the body's centre, in metres: where the globe fills
+/// [`FAR_FRAME_SHARE`] of the reference view's height. Derived, never a literal.
+fn far_distance_m(radius_m: f64) -> f64 {
+    radius_m / (vd_core::geometry::REFERENCE_VIEW_FOV_Y_RAD * FAR_FRAME_SHARE * 0.5).sin()
+}
+
+/// ★ THE FAR STAND'S PICTURE — REPORTED, NEVER RED PAST THE GROUND BEING THERE.
+///
+/// The five frozen stands are judged by [`take_picture`], whose readings assume a NEAR eye: a ruler
+/// ball marched out of the eye (its march reaches 4 096 cells, 17 000 km at the top rung, against
+/// an eye 65 000 km up), a horizon row in every column, a lower band that is nearly all ground.
+/// None of those describes a globe hanging in the middle of a frame of sky, so the far stand is
+/// read by its own eyes. What it DOES assert is what the owner's flight of 2026-09-15 found
+/// missing: the ground reaches the screen at all from past the old cutoff, and no pixel of nothing
+/// lies inside it.
+///
+/// Its reference is a CANDIDATE ([`CANDIDATE_DIR`]): written on the first flight, compared and
+/// REPORTED on every flight after, and never red — the owner has not looked at this stand yet.
+fn take_far_picture(
+    f: &Fixture,
+    gateway: SocketAddr,
+    body: &vd_terrain::BodyDefinition,
+    pic: &Picture,
+) -> u64 {
+    let name = pic.name;
+    let client_quic = reserve_udp_addr();
+    let devctl = reserve_tcp_addr().port();
+    let mut client = ChildGuard(spawn_capture_client(
+        f,
+        gateway,
+        pic,
+        client_quic.port(),
+        devctl,
+    ));
+    await_listener(devctl, &mut client.0);
+    let landed = await_active(devctl);
+    eprintln!(
+        "terrain_pictures/{name}: landed in {:?} at {:?}, universe tick {:?}",
+        landed.location,
+        vd_bins::pixel::own_pose(&landed).map(|(p, _)| p),
+        landed.universe_tick
+    );
+    let fill_started = Instant::now();
+    let live = round_trip(
+        devctl,
+        &DevRequest::WaitUntil {
+            predicate: WaitPredicate {
+                field: WaitField::TerrainChunksDrawn,
+                op: WaitOp::Ge,
+                value: 1,
+            },
+            max_ticks: TERRAIN_WAIT_TICKS,
+        },
+    );
+    assert!(
+        matches!(live, DevResponse::State { .. }),
+        "{name}: THE GLOBE NEVER REACHED THE SCREEN from {:.1} body radii — the two-radii cutoff \
+         is back: {live:?}",
+        far_distance_m(body.ladder().radius_m()) / body.ladder().radius_m()
+    );
+    let settled = round_trip(
+        devctl,
+        &DevRequest::WaitUntil {
+            predicate: WaitPredicate {
+                field: WaitField::TerrainChunksPending,
+                op: WaitOp::Le,
+                value: 0,
+            },
+            max_ticks: TERRAIN_WAIT_TICKS,
+        },
+    );
+    assert!(
+        matches!(settled, DevResponse::State { .. }),
+        "{name}: the terrain never settled: {settled:?}"
+    );
+    let fill_s = fill_started.elapsed().as_secs_f64();
+    let last = vd_bins::pixel::poll(devctl).terrain_chunks_drawn;
+    let capture_tick = CAPTURE_TICK_GRID * (pic.agent_index + 1);
+    while vd_bins::pixel::poll(devctl).universe_tick.unwrap_or(0) + CAPTURE_ASK_AHEAD_TICKS
+        < capture_tick
+    {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let shot = round_trip(
+        devctl,
+        &DevRequest::Screenshot {
+            at_tick: Some(capture_tick),
+            label: Some(name.to_owned()),
+        },
+    );
+    let rel = match shot {
+        DevResponse::Captured { path, .. } => path,
+        other => panic!("{name}: screenshot was not captured: {other:?}"),
+    };
+    let png = f.cwd.join(&rel);
+    let (rgba, w, h) = open_rgba(&png);
+    assert_eq!(magenta_pixel_count(&rgba), 0, "{name}: zero magenta");
+    let probe_png = f.cwd.join(probe_rel_for(&rel));
+    let (probe, pw, ph) = open_rgba(&probe_png);
+    assert_eq!((pw, ph), (w, h), "{name}: the probe is the picture's size");
+    let run_dir = png
+        .parent()
+        .and_then(Path::parent)
+        .expect("shots/<name>.png sits in a run dir");
+    let state: DevState = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join(state_rel_for(&rel)))
+            .unwrap_or_else(|e| panic!("{name}: read the state file: {e}")),
+    )
+    .expect("the state file decodes");
+    let stamp = state
+        .terrain_stamp
+        .clone()
+        .unwrap_or_else(|| panic!("{name}: the stamp is on the state file"));
+    eprintln!("terrain_pictures/{name}: stamp {stamp:?}");
+    // 1. THE GLOBE IS DRAWN, AND IT IS THE RECIPE'S OWN: the probe's terrain pixels as an
+    //    equivalent disc, against the radius the stand was built for.
+    let terrain = probe_blob(&probe, w, PROBE_KIND_TERRAIN);
+    let measured_px = equivalent_radius_px(terrain.count);
+    let predicted_px = FAR_FRAME_SHARE * 0.5 * h as f64;
+    eprintln!(
+        "terrain_pictures/{name}: THE GLOBE — {last} chunks drawn, {} terrain pixels, an \
+         equivalent disc radius of {measured_px:.1} px against the stand's own {predicted_px:.1} \
+         px, rungs {}..{} on the probe; filled in {fill_s:.1} s; the stamp draws {:?}",
+        terrain.count, terrain.rung_min, terrain.rung_max, stamp.chunks_per_rung
+    );
+    // 2. THE HOLE COUNT, REPORTED: [`ground_holes`] calls a pixel a hole when it draws NOTHING and
+    //    some pixel ABOVE it in its own column draws ground. On a near stand, where the ground
+    //    fills the frame, that is exactly a missing chunk. On THIS stand the globe hangs in the
+    //    middle of a frame of sky, so every sky pixel UNDER the globe answers the same description
+    //    — MEASURED on the first far flight: 55 011 hole pixels, 53 177 of them surviving erosion,
+    //    every one of them sky. The instrument is a near stand's; the reading is kept, the verdict
+    //    is not.
+    let holes = ground_holes(&probe, w, h);
+    eprintln!(
+        "terrain_pictures/{name}: {} hole pixels under drawn ground, {} in blocks (REPORTED: at          this stand the sky under the globe reads as a hole, so the count is a reading, never a          verdict)",
+        holes.pixels, holes.blocks
+    );
+    // 3. THE CANDIDATE REFERENCE: written once, compared and REPORTED after.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(PICTURE_DIR);
+    let candidate_dir = dir.join(CANDIDATE_DIR);
+    std::fs::create_dir_all(&candidate_dir).expect("the candidate directory");
+    let candidate = candidate_dir.join(format!("{name}.png"));
+    let candidate_probe = candidate_dir.join(format!("{name}.probe.png"));
+    if candidate.exists() && candidate_probe.exists() {
+        let (before, bw, bh) = open_rgba(&candidate);
+        let (before_probe, _, _) = open_rgba(&candidate_probe);
+        if (bw, bh) == (w, h) {
+            let mut differing = 0usize;
+            let mut content = 0usize;
+            let mut widest = 0u8;
+            for (((a, b), pa), pb) in before
+                .chunks_exact(4)
+                .zip(rgba.chunks_exact(4))
+                .zip(before_probe.chunks_exact(4))
+                .zip(probe.chunks_exact(4))
+            {
+                let drawn = decode_probe([pa[0], pa[1], pa[2]]).kind != PROBE_KIND_NONE
+                    || decode_probe([pb[0], pb[1], pb[2]]).kind != PROBE_KIND_NONE;
+                if !drawn {
+                    continue;
+                }
+                content += 1;
+                let step = a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| x.abs_diff(*y))
+                    .max()
+                    .unwrap_or(0);
+                differing += usize::from(step > 0);
+                widest = widest.max(step);
+            }
+            eprintln!(
+                "terrain_pictures/{name}: THE CANDIDATE, REPORTED AND NEVER RED — {differing} of \
+                 {content} content pixels differ from the candidate reference, the widest channel \
+                 step {widest} against the allowed {TOLERANCE_LEVELS}. THE OWNER HAS NOT LOOKED AT \
+                 THIS STAND; until he does, this line is a reading, never a verdict."
+            );
+        } else {
+            eprintln!(
+                "terrain_pictures/{name}: the candidate reference is {bw}×{bh} and this picture \
+                 {w}×{h}: nothing compared"
+            );
+        }
+    } else {
+        std::fs::copy(&png, &candidate).expect("write the candidate reference");
+        std::fs::copy(&probe_png, &candidate_probe).expect("write the candidate probe");
+        eprintln!(
+            "terrain_pictures/{name}: THE CANDIDATE REFERENCE IS WRITTEN at {} — THE OWNER HAS NOT \
+             LOOKED AT IT. The gate compares against it from the next flight and reports; it turns \
+             red on it only once the owner accepts the stand and it moves to {}/.",
+            candidate.display(),
+            EXACT_DIR
+        );
+    }
+    // For the owner, beside the five frozen stands.
+    std::fs::copy(&png, dir.join(format!("{name}.png"))).expect("copy the picture");
+    std::fs::copy(&probe_png, dir.join(format!("{name}.probe.png"))).expect("copy the probe");
+    eprintln!(
+        "terrain_pictures/{name}: written to {}",
+        dir.join(format!("{name}.png")).display()
+    );
+    last
+}
+
 /// One standing account: its offset from the planet's centre and the facing it is born with.
 struct Stand {
     offset_m: DVec3,
@@ -1293,6 +1511,22 @@ fn stand(d: DVec3, height_m: f64, surface_m: f64, forward: DVec3) -> Stand {
     let basis = vd_core::glam::DMat3::from_cols(right, up, -forward);
     Stand {
         offset_m: d * (surface_m + height_m),
+        orient: vd_core::glam::DQuat::from_mat3(&basis).normalize(),
+    }
+}
+
+/// ★ A STAND AT THE NADIR: `distance_m` from the body's CENTRE along `d`, the nose straight down
+/// the radial at the centre. [`stand`] cannot serve it — its up is the radial less the nose's own
+/// share of it, and at the nadir the nose IS the radial, so that up is nothing at all. The roll
+/// about the nose is not a picture, so any direction across it serves as up.
+fn stand_at_nadir(d: DVec3, distance_m: f64) -> Stand {
+    let forward = -d;
+    let seed = if d.z.abs() < 0.9 { DVec3::Z } else { DVec3::X };
+    let right = forward.cross(seed).normalize();
+    let up = right.cross(forward);
+    let basis = vd_core::glam::DMat3::from_cols(right, up, -forward);
+    Stand {
+        offset_m: d * distance_m,
         orient: vd_core::glam::DQuat::from_mat3(&basis).normalize(),
     }
 }
@@ -1347,6 +1581,15 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let hill = stand(d, HILL_M, h, nose(HILL_TILT_DEG));
     let aloft = stand(d, ALOFT_M, h, nose(ALOFT_TILT_DEG));
     let orbit = stand(d, ORBIT_M, h, nose(ORBIT_TILT_DEG));
+    // ★ THE FAR STAND (2026-09-15): the globe a quarter of the frame high, the nose at its centre.
+    let far_m = far_distance_m(body.ladder().radius_m());
+    let far = stand_at_nadir(d, far_m);
+    eprintln!(
+        "terrain_pictures: THE FAR STAND stands {far_m:.0} m from the centre ({:.2} body radii, \
+         {:.0} m over the surface), where the globe fills {FAR_FRAME_SHARE} of the frame's height",
+        far_m / body.ladder().radius_m(),
+        far_m - h,
+    );
     let height_at = |p: DVec3| vd_terrain::height::height_m(&body, [p.x, p.y, p.z], 0);
     // THE SEAM: the point on the cube's twelve edges (every face's four), looking along the edge
     // one way or the other, where the star stands INSIDE the gate's elevation band and nearest
@@ -1424,6 +1667,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         spawn_entry(CLIENT_ACCOUNT_BASE + 2, body.seed(), &aloft),
         spawn_entry(CLIENT_ACCOUNT_BASE + 3, body.seed(), &orbit),
         spawn_entry(CLIENT_ACCOUNT_BASE + 4, body.seed(), &seam_stand),
+        spawn_entry(CLIENT_ACCOUNT_BASE + 5, body.seed(), &far),
     ]
     .join(";");
     let face = vd_seed::bend::face_of([d.x, d.y, d.z]);
@@ -1513,10 +1757,27 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             off_nose_band: (SUN_OFF_NOSE_BAND_DEG.0, 180.0),
         },
     );
+    // ★ THE FAR STAND, LAST: the five frozen stands fly first, so a far-stand failure can never
+    // hide their verdicts.
+    let far_chunks = take_far_picture(
+        &f,
+        a.gateway,
+        &body,
+        &Picture {
+            name: "far",
+            agent_index: 5,
+            tilt_deg: 90.0,
+            band: (0.0, 1.0),
+            min_share: 0.0,
+            off_nose_band: (0.0, 180.0),
+        },
+    );
+    eprintln!("terrain_pictures: far {far_chunks} chunks");
     eprintln!(
         "terrain_pictures: ground {ground_chunks} chunks ({ground_share:.3}), hill {hill_chunks} \
          chunks ({hill_share:.3}), aloft {aloft_chunks} chunks ({aloft_share:.3}), orbit \
-         {orbit_chunks} chunks ({orbit_share:.3}), seam {seam_chunks} chunks ({seam_share:.3})"
+         {orbit_chunks} chunks ({orbit_share:.3}), seam {seam_chunks} chunks ({seam_share:.3}), \
+         far {far_chunks} chunks (a candidate stand, reported and never red)"
     );
     let past = PAST_TOLERANCE.lock().expect("the verdicts");
     assert!(

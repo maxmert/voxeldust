@@ -153,9 +153,9 @@ mod tests {
     )]
     fn a_word_wider_than_a_mantissa_rounds_on_the_way_out_and_a_huge_float_saturates_on_the_way_in()
     {
-        // The home planet's radius as the recipe holds it: 6 370 353.6 m at 35 fraction bits, which is
+        // The home planet's radius as the recipe holds it: 6 341 670.0 m at 35 fraction bits, which is
         // about 2⁶⁰ — seven bits past a mantissa.
-        let radius = Gi::new(815_405_260i64 << LENGTH_BITS);
+        let radius = Gi::new(811_733_764i64 << LENGTH_BITS);
         assert!(
             radius.raw() > (1i64 << 53),
             "the word is wider than a mantissa"
@@ -167,7 +167,7 @@ mod tests {
             (metres - exact).abs() <= exact / f64::from(1u32 << 26) / f64::from(1u32 << 26),
             "the door rounds by at most one part in 2⁵²: {metres} vs {exact}"
         );
-        assert!((metres - 6_370_353.6).abs() < 1.0, "{metres}");
+        assert!((metres - 6_341_670.0).abs() < 1.0, "{metres}");
         // A word that FITS a mantissa is exact to the last bit.
         assert_eq!(metres_of_q28(Gi::new(3 << LENGTH_BITS)), 3.0 / 128.0);
         // THE DOOR IN SATURATES: a metre count past the word's end clamps at the largest word, it does

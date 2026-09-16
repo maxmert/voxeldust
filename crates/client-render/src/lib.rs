@@ -690,6 +690,22 @@ struct RenderEye {
     /// of a few milliseconds between them put the drawn ground a metre ahead of the stamped eye
     /// at 528 m/s, a pixel at a kilometre, straight into the pop detector's floor.
     moment: Option<(f64, Arc<RenderSnapshot>)>,
+    /// ★ THE BOARDING INSTRUMENT (2026-09-14, the walk-aboard blank): how many SCENE SWAPS the
+    /// view has taken since the client started, and what the last one read — the facing it took
+    /// from the delivered pose, the realm it left, the realm it entered, how many rows the new
+    /// scene held, and whether the realm it LEFT still had a row there. It rides the frame's eye
+    /// because `place_camera` decides both and the terrain reads both at the same instant: a
+    /// pilot who walks aboard a hull and finds the planet's row gone from the swap's scene loses
+    /// the planet's whole ladder on that frame.
+    swaps: u64,
+    swap: Option<vd_devproto::DevSceneSwap>,
+    /// ★ THE CAMERA'S MEMORY (2026-09-15, the boarding's last seam): the stand it last placed,
+    /// the two readings its jump is measured between, and its three counters. A frame whose own
+    /// pose is stated in a realm other than the one the picture is composed in REFUSES that pose
+    /// and places the held stand again — the last delivered eye, re-drawn. The client never moves
+    /// the eye forward on its own. The RULE is `vd_client::ladder_view::EyeTrack`; this resource
+    /// only carries it from frame to frame.
+    track: vd_client::ladder_view::EyeTrack,
 }
 
 pub mod gpu_check;
@@ -1529,16 +1545,56 @@ fn place_camera(
     // delivered facing is the server's own answer in the NEW frame, so the camera takes it — once,
     // at the swap — and the mouse continues from there. A walker who steps into a hull that has
     // turned keeps looking where they looked.
+    //
+    // ★ WHICH IS WHY THE SERVER MUST STATE A TRUE ONE (2026-09-14, the boarding measurement): the
+    // camera takes this pose's orientation verbatim, so a destination shard that stores an
+    // arriving pose without deriving the look's angle pair from it hands the camera the frame's
+    // default heading — `Dot::adopt_pose` in `vd-sim` is where that rule now lives. The reading
+    // itself is NOT second-guessed here: the client renders what it is told.
     let origin = snap.origin();
-    if origin != camera.last_origin {
+    // ★ THE CAMERA REFUSES A POSE STATED IN ANOTHER REALM (2026-09-15; the rule itself is
+    // `vd_client::ladder_view::camera_stand`, beside the descent's own refusal). The own pose and
+    // the picture's origin ride two lanes with two clocks: at a boarding the pose reads the HULL
+    // while the window still composes the PLANET's picture, and flattening it anyway puts the eye
+    // at the planet's centre, six thousand kilometres under the ground the pilot stands on.
+    //
+    // The swap is taken on an agreeing frame ONLY, which is also how the delivered FACING the swap
+    // adopts is guaranteed to be a statement in the new origin's own frame — a facing read from a
+    // refused pose is a direction in another realm.
+    let stated = own_pose.frame.realm();
+    let at_home = vd_client::ladder_view::pose_at_home(stated, origin);
+    if at_home && origin != camera.last_origin {
         let (yaw, pitch) = vd_core::kinematics::yaw_pitch_from_orient(own_pose.orient);
         camera.cam.yaw = yaw;
         camera.cam.pitch = pitch;
+        let from = camera.last_origin;
         camera.last_origin = origin;
-        tracing::info!(
-            ?origin,
+        // ★ THE BOARDING INSTRUMENT (2026-09-14): what the NEW scene held at the swap. The
+        // terrain forgets a realm's ladder the moment that realm's row is absent, so the one
+        // number that decides whether a boarding costs the whole band is whether the realm the
+        // pilot LEFT — the planet — still has a row in the level that carried the new origin.
+        let swap_scene = snap.scene_now(now_s);
+        let rows = swap_scene.len() as u64;
+        let prev_origin_row = from.is_some_and(|p| swap_scene.get(p).is_some());
+        eye.swaps += 1;
+        eye.swap = Some(vd_devproto::DevSceneSwap {
             yaw,
             pitch,
+            from: from.map(|r| format!("{r:?}")),
+            to: origin.map(|r| format!("{r:?}")),
+            rows,
+            prev_origin_row,
+            own_frame: format!("{:?}", own_pose.frame),
+        });
+        tracing::info!(
+            ?origin,
+            ?from,
+            yaw,
+            pitch,
+            rows,
+            prev_origin_row,
+            own_frame = ?own_pose.frame,
+            swaps = eye.swaps,
             "scene swap: the view takes the delivered facing"
         );
     }
@@ -1575,16 +1631,23 @@ fn place_camera(
         let e = camera.cam.chase_eye(own_world, back_m, lift_m);
         (e, camera.cam.forward(), camera.cam.up)
     };
-    eye.eye = eye_pos;
     // ★ THE EYE ON THE LATTICE (slice S4). The camera's own offset from the avatar is a SMALL local
     // displacement — a few metres — so carrying it as a lattice step is exact at any magnitude, unlike
     // the flattened `eye` above, which is a distance from the frame origin and rounds with it.
-    eye.eye_lattice = Some((
-        vd_core::pose::LatticePos::at(own_pose.cell, own_pose.pos)
+    let delivered = vd_client::ladder_view::EyeStand {
+        eye: eye_pos,
+        lattice: vd_core::pose::LatticePos::at(own_pose.cell, own_pose.pos)
             .translated(eye_pos - own_world, own_pose.tier),
-        own_pose.tier,
-    ));
-    *transform = camera_transform(direction, up);
+        tier: own_pose.tier,
+        direction,
+        up,
+    };
+    // THE DECISION AND ITS INSTRUMENT, both in Tier-A: this pose's stand, or the one the camera
+    // last placed; and how far the eye moved against how far the pilot was delivered.
+    let stand = eye.track.place(stated, origin, delivered);
+    eye.eye = stand.eye;
+    eye.eye_lattice = Some((stand.lattice, stand.tier));
+    *transform = camera_transform(stand.direction, stand.up);
     // ★ THE STAR PROBE (2026-09-06): where THIS camera and THIS projection put the brightest stars
     // of the cloud on screen, published for the dev state. The cloud's placement is the same
     // `sky_cloud_transform` the sky system applies; the projection is Bevy's own for this camera.
@@ -1592,7 +1655,7 @@ fn place_camera(
         && let Some(anchor) = snap.sky_anchor_now(now_s)
     {
         let (translation, rotation) =
-            vd_client::render_snapshot::sky_cloud_transform(reference, &anchor, eye_pos);
+            vd_client::render_snapshot::sky_cloud_transform(reference, &anchor, stand.eye);
         let camera_global = bevy::transform::components::GlobalTransform::from(*transform);
         let probe: Vec<vd_devproto::DevStarProbe> = drawn
             .probe

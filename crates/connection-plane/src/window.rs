@@ -1427,7 +1427,21 @@ impl ShadowScene {
             // Only while the missing hop's window is OPEN AND UNCONFIRMED (`hop_pending`): a
             // lineage the windows can never cover (no head resolved, a refused window) swaps at
             // once, as before — nothing is coming that would be worth a wait.
-            if self.origin.is_some() && !covers_lineage && hop_pending {
+            //
+            // ★ THE PARTIAL SWAP LEVEL (2026-09-14, the boarding measurement). The chain may
+            // COVER the lineage and the swap still ship a picture of ONE row. At a boarding the
+            // origin's own window and the new hop's window are both newborn; their rings share
+            // no stamp with the levels above them for a beat or two, so the fold's fresh prefix
+            // stops at the leaf. The swap CLEARS the ring and the hold, and the hold-filling
+            // loop below reads `self.ring.back()` — empty — so nothing stands in for the strata
+            // the fold did not reach. The level then carries the hull alone, the client forgets
+            // every other realm's ladder, and a pilot who walks aboard rebuilds a whole band of
+            // ground from nothing. So a swap onto a fold that does not cover the chain is
+            // deferred by the SAME rule and the SAME hold: the old picture stays until the fold
+            // is whole, then the swap lands with every row in it. A fold that never becomes
+            // whole is forced after one hold, exactly as a chain that never covers is.
+            let fold_partial = fold.as_ref().is_none_or(|f| f.fresh_levels < authors.len());
+            if self.origin.is_some() & ((!covers_lineage & hop_pending) | fold_partial) {
                 if self.swap_deferred_ticks < tuning.hold_ttl_ticks {
                     self.swap_deferred_ticks += 1;
                     report.swap_deferred = true;
@@ -3421,9 +3435,21 @@ mod tests {
         assert!(r.epoch_bumped);
         assert_eq!(scene.origin_epoch, 2);
         assert_eq!(scene.newest(), Some(UniverseTick(102)), "the ring survived");
-        // A crossing (new origin): epoch bumps, the ring resets whole.
-        let r = scene.advance(RealmId::Planet(7), &[RealmId::Planet(7)], None, &t);
-        assert!(r.epoch_bumped);
+        // A crossing (new origin) with NO fold at all: there is no picture to swap TO, so the
+        // swap WAITS (2026-09-14, the boarding measurement — a swap onto a fold that does not
+        // cover the chain ships a level of one row), bounded by one hold; then it is forced, the
+        // epoch bumps and the ring resets whole.
+        let mut forced = None;
+        for i in 1..=(t.hold_ttl_ticks + 1) {
+            let r = scene.advance(RealmId::Planet(7), &[RealmId::Planet(7)], None, &t);
+            if r.swap_forced {
+                forced = Some(i);
+                assert!(r.epoch_bumped);
+                break;
+            }
+            assert_eq!((r.swap_deferred, r.epoch_bumped), (true, false));
+        }
+        assert_eq!(forced, Some(t.hold_ttl_ticks + 1));
         assert_eq!(scene.origin_epoch, 3);
         assert_eq!(scene.newest(), None);
     }
@@ -3728,6 +3754,170 @@ mod tests {
         );
         assert!(report.epoch_bumped & !report.swap_deferred & !report.swap_forced);
         assert_eq!(scene.origin, Some(landing));
+    }
+
+    /// ★ THE PARTIAL SWAP LEVEL (2026-09-14, the boarding measurement): a swap whose FOLD does
+    /// not cover the chain ships a picture of one row, because the swap clears the ring and the
+    /// hold and nothing then stands in for the strata the fold did not reach. The chain may
+    /// COVER the lineage and the fold still stop at the leaf — the two newborn windows share no
+    /// stamp with the levels above them yet. So the swap waits for a whole fold, for at most one
+    /// hold, and is forced after it. Example: the pilot walks aboard a berthed hull; the hull's
+    /// own window and the planet's `Child(hull)` window are both one tick old, the fold reaches
+    /// the hull alone, and the old picture stays until the planet's stratum folds with it.
+    #[test]
+    fn an_origin_swap_waits_for_a_fold_that_covers_the_chain() {
+        let tuning = tuning(); // hold TTL 21
+        let (authors, leaf_level, parent_level) = two_level_fixture();
+        // The old picture: the pilot stands in System 7, the whole chain folded.
+        let mut scene = ShadowScene::default();
+        let report = scene.advance_covering(
+            RealmId::System(7),
+            &authors,
+            Some(compose(
+                RealmId::System(7),
+                sys(),
+                T,
+                &authors,
+                &[&leaf_level, &parent_level],
+                2,
+                &[],
+            )),
+            &tuning,
+            true,
+            false,
+        );
+        assert!(report.epoch_bumped);
+        let epoch = scene.origin_epoch;
+        let drawn: Vec<RealmId> = scene.drawn_rows().map(|r| r.realm).collect();
+        assert_eq!(drawn.len(), 3, "the planet, the galaxy and the sibling");
+        // The pilot lands on Planet 7. The chain COVERS the lineage (both windows confirmed) and
+        // no hop is pending — but only the leaf level folds fresh, so the fold reaches one of
+        // the chain's two authors.
+        let landing = RealmId::Planet(7);
+        let landing_authors = [landing, RealmId::System(7)];
+        let partial = |t: UniverseTick| {
+            let own = level(t, None, Vec::new());
+            let fold = compose(landing, planet(), t, &landing_authors, &[&own], 1, &[]);
+            assert_eq!(fold.fresh_levels, 1, "the leaf alone folded");
+            fold
+        };
+        for i in 1..=tuning.hold_ttl_ticks {
+            let t = UniverseTick(T.0 + i);
+            let report = scene.advance_covering(
+                landing,
+                &landing_authors,
+                Some(partial(t)),
+                &tuning,
+                true,
+                false,
+            );
+            assert_eq!(
+                (
+                    report.swap_deferred,
+                    report.epoch_bumped,
+                    report.swap_forced
+                ),
+                (true, false, false),
+                "a fold short of the chain defers the swap"
+            );
+            assert_eq!(
+                scene.origin,
+                Some(RealmId::System(7)),
+                "the old origin stays"
+            );
+            assert_eq!(scene.origin_epoch, epoch);
+            assert_eq!(
+                scene.drawn_rows().map(|r| r.realm).collect::<Vec<_>>(),
+                drawn,
+                "the old picture stays drawn — no realm loses its row"
+            );
+        }
+        // A WHOLE fold lands: the swap takes it, and the level carries both strata.
+        let t = UniverseTick(T.0 + tuning.hold_ttl_ticks + 1);
+        let leaf = level(t, None, Vec::new());
+        let parent = level(
+            t,
+            Some(hop(landing, DVec3::new(30.0, 0.0, 0.0), DVec3::ZERO)),
+            vec![
+                row(
+                    RealmId::Planet(7),
+                    planet(),
+                    sys(),
+                    DVec3::new(30.0, 0.0, 0.0),
+                    t,
+                ),
+                row(
+                    RealmId::Planet(9),
+                    planet(),
+                    sys(),
+                    DVec3::new(90.0, 0.0, 0.0),
+                    t,
+                ),
+            ],
+        );
+        let whole = compose(
+            landing,
+            planet(),
+            t,
+            &landing_authors,
+            &[&leaf, &parent],
+            2,
+            &[],
+        );
+        assert_eq!(whole.fresh_levels, 2, "both levels folded");
+        let report =
+            scene.advance_covering(landing, &landing_authors, Some(whole), &tuning, true, false);
+        assert_eq!(
+            (
+                report.swap_deferred,
+                report.epoch_bumped,
+                report.swap_forced
+            ),
+            (false, true, false)
+        );
+        assert_eq!(scene.origin, Some(landing));
+        assert_eq!(scene.swap_deferred_ticks, 0);
+        assert_eq!(
+            scene.drawn_rows().map(|r| r.realm).collect::<Vec<_>>(),
+            vec![RealmId::Planet(9), RealmId::System(7)],
+            "the swap level carries the whole chain, not the hull alone"
+        );
+        // A fold that NEVER becomes whole is forced after one hold, exactly as a chain that
+        // never covers the lineage is — the swap is bounded, never withheld for ever.
+        let base = t.0;
+        let mut forced = None;
+        for i in 1..=(tuning.hold_ttl_ticks + 1) {
+            let t = UniverseTick(base + i);
+            let own = level(t, None, Vec::new());
+            let two = [RealmId::System(7), GALAXY];
+            let fold = compose(RealmId::System(7), sys(), t, &two, &[&own], 1, &[]);
+            let report =
+                scene.advance_covering(RealmId::System(7), &two, Some(fold), &tuning, true, false);
+            if report.swap_forced {
+                forced = Some(i);
+                assert_eq!((report.epoch_bumped, report.swap_deferred), (true, false));
+                break;
+            }
+            assert_eq!((report.swap_deferred, report.epoch_bumped), (true, false));
+        }
+        assert_eq!(
+            forced,
+            Some(tuning.hold_ttl_ticks + 1),
+            "forced after exactly one hold"
+        );
+        // AND THE FOLD THAT IS ABSENT ALTOGETHER: no common tick anywhere at a swap is the same
+        // partial picture, and it defers too (the login, with no old picture, still swaps).
+        let mut fresh = ShadowScene::default();
+        let report = fresh.advance_covering(landing, &landing_authors, None, &tuning, true, false);
+        assert_eq!(
+            (
+                report.swap_deferred,
+                report.epoch_bumped,
+                report.swap_forced
+            ),
+            (false, true, false),
+            "a login with no old picture never waits"
+        );
     }
 
     /// The guard's arithmetic: the lineage root→leaf, the chain leaf→root; the first uncovered

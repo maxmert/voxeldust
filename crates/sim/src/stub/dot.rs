@@ -519,6 +519,30 @@ impl Dot {
     fn orient_from_angles(&mut self) {
         self.pose.orient = kinematics::orient_in_frame(self.up, self.yaw, self.pitch);
     }
+
+    /// ★ AN ARRIVING POSE IS ADOPTED WHOLE (2026-09-14, the boarding measurement). The pose's
+    /// orientation and the look's angle pair are TWO STORES OF ONE TRUTH: [`face`] rebuilds the
+    /// orientation from `up`, `yaw` and `pitch` on every input datagram, so a site that writes the
+    /// pose alone has the facing thrown away by the next tick's look — the body snaps to the
+    /// destination frame's default heading while the pilot's camera keeps the heading it had.
+    ///
+    /// MEASURED at a boarding: the pilot walks aboard a berthed hull facing yaw 3.0105 and the
+    /// camera takes yaw −0.0 / pitch 0.0 at the scene swap, because the crossing stored the
+    /// converted pose on a Ghost minted with a zero pair. The re-home arm already derived the pair
+    /// (2026-08-21, the owner flying: *"the direction I look and the direction W moves me are not
+    /// aligned"*); this is that same rule, in ONE place both arms call.
+    ///
+    /// `up` is the pose's own up (ruling V11 — it crosses with the pose), the pair is derived from
+    /// the converted orientation, and the swept prior is re-seeded at the arrival point (an arrival
+    /// is a discontinuity, not a movement).
+    pub(crate) fn adopt_pose(&mut self, pose: StampedPose) {
+        self.pose = pose;
+        self.up = pose.orient * DVec3::Y;
+        let (yaw, pitch) = kinematics::yaw_pitch_in_frame(self.up, pose.orient);
+        self.yaw = yaw;
+        self.pitch = pitch;
+        self.prev_offset = pose.pos;
+    }
 }
 
 /// ★ THE KEYS BECOME THE STICK, AND THE PUSH FOLLOWS THE PILOT'S FACING (owner, 2026-09-02).

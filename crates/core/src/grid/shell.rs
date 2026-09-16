@@ -3,12 +3,14 @@
 //!
 //! **The ladder** (ruling V6 A4). A body with `T` rungs has `N = q · 2^(T−1)` cells along a face edge,
 //! so every rung tiles the face exactly, and its snapped radius is `R = 2N/π`. `T` comes from `N`: the
-//! top rung is the FIRST rung at which a face is at most `64 × 64` chunks. An Earth-sized body lands
-//! within 0.01 % of its seed radius (MEASURED against the rule: 646 m on 6 371 km).
+//! top rung is the FIRST rung at which a face is at most `1 × 1` chunk — SIX CHUNKS hold the whole
+//! globe (owner 2026-09-15, `vd_seed::ladder::TOP_RUNG_CHUNKS`). An Earth-sized body lands within
+//! 1.6 % of its seed radius at worst (MEASURED against the rule: 28 684 m, 0.45 %, on 6 371 km).
 //!
 //! **The radial band.** `k` counts cells up from the floor radius `R − D_crust`. At rung `L` the band
-//! holds `⌊band / 2^L⌋` whole cells and NOTHING above them: a coarse rung loses the partial top slice,
-//! so every cell any operation names is a cell every other operation agrees exists. A radial cell is
+//! holds `⌈band / 2^L⌉` cells, so every rung COVERS the whole band and no rung is empty — which is
+//! what lets the coarse rungs of the extended ladder exist at all, since the top rung's cell is
+//! hundreds of kilometres and the band is tens. A radial cell is
 //! exactly `2^L` m tall at every altitude, so `k` is an integer subtraction and a shift. A chunk is a
 //! frustum; only index-space code knows it.
 //!
@@ -17,8 +19,8 @@
 //! division by zero into a cell.
 //!
 //! **Example.** The home planet's seed draws 6 371 000 m. The ladder snaps the cell count to a
-//! multiple of 4 096 and the planet states its look at 6 370 354 m. A pilot who watches the planet
-//! grow from a dot sees that sphere; the first chunks at rung 12 sit exactly on it, so nothing pops.
+//! multiple of 262 144 and the planet states its look at 6 341 670 m. A pilot who watches the planet
+//! grow from a dot sees that sphere; the first chunks at rung 18 sit exactly on it, so nothing pops.
 
 use glam::DVec3;
 
@@ -347,12 +349,15 @@ mod tests {
     #[test]
     fn the_ladder_snaps_known_bodies_within_half_a_ladder_unit() {
         // U-5's rule table, MEASURED against the crate (ruling V6 A4).
+        // ★ RE-PINNED 2026-09-15 (the extended ladder): the top rung is ONE CHUNK per face edge, so
+        // every body carries six more rungs and snaps to a coarser unit — a pebble to five rungs, a
+        // super-Earth to twenty.
         let cases: [(f64, u32, u8, f64); 5] = [
-            (500.0, 785, 1, 500.0),
-            (200_000.0, 314_112, 8, 199_970.0),
-            (1_737_000.0, 2_728_960, 11, 1_737_310.0),
-            (6_371_000.0, 10_006_528, 13, 6_370_354.0),
-            (12_742_000.0, 20_013_056, 14, 12_740_707.0),
+            (500.0, 784, 5, 499.110),
+            (200_000.0, 311_296, 14, 198_177.189),
+            (1_737_000.0, 2_752_512, 17, 1_752_303.563),
+            (6_371_000.0, 9_961_472, 19, 6_341_670.037),
+            (12_742_000.0, 19_922_944, 20, 12_683_340.074),
         ];
         for (r, n, rungs, snapped) in cases {
             let g = ShellGrid::for_body(r, BandParams::provisional(r)).expect("body");
@@ -367,15 +372,16 @@ mod tests {
                 (got - r).abs() <= unit_m / 2.0 + 1e-6,
                 "within half a ladder unit for {r}"
             );
-            // The band sits around the snapped surface.
+            // The band sits around the snapped surface, with the crust ROUNDED UP to a whole number
+            // of top-rung cells (2026-09-15) so every rung's `k = 0` starts at the same radius and
+            // the coarsest rung holds a rock cell under the surface and an air cell over it.
             let band = BandParams::provisional(r);
-            assert_eq!(
-                u64::from(g.floor_m()) + u64::from(band.crust_m),
-                got.round() as u64
-            );
-            assert_eq!(g.band_m(), band.crust_m + band.above_m);
+            let cell = u64::from(1u32 << (rungs - 1));
+            let crust = u64::from(band.crust_m).div_ceil(cell).max(1) * cell;
+            assert_eq!(u64::from(g.floor_m()) + crust, got.round() as u64);
+            assert_eq!(u64::from(g.band_m()), crust + u64::from(band.above_m));
             // Every rung tiles the face exactly, and the top rung is the FIRST at which a face is at
-            // most 64 chunks across.
+            // most ONE chunk across (62 cells).
             for level in 0..rungs {
                 let rung = Rung::new(level).expect("rung");
                 assert_eq!(
@@ -392,21 +398,21 @@ mod tests {
             assert_ne!(
                 over,
                 Some(false),
-                "the rung below the top is over 64 chunks for {r}"
+                "the rung below the top is over one chunk for {r}"
             );
         }
     }
 
     #[test]
     fn at_an_octave_boundary_the_top_rung_is_read_from_the_snapped_count() {
-        // Radius 40 427.67 m: the ideal count 63 504 asks for a 32-cell unit, the nearest multiple
-        // 63 488 is exactly 16 chunks × 62 × 64 at rung 4, so the top rung is 4 and the body has FIVE
-        // rungs, not six (the refuter's F6, at every octave).
+        // Radius 40 427.67 m: the ideal count 63 504 asks for a 2 048-cell unit, the nearest multiple
+        // 63 488 is exactly 1 024 chunks × 62 at rung 10, so the top rung is 10 and the body has
+        // ELEVEN rungs, not twelve (the refuter's F6, at every octave).
         let pinned =
             ShellGrid::for_body(40_427.67, BandParams::provisional(40_427.67)).expect("body");
-        assert_eq!((pinned.n(), pinned.rungs()), (63_488, 5));
+        assert_eq!((pinned.n(), pinned.rungs()), (63_488, 11));
         // At every octave boundary and just past it, the rule holds for the frozen N: the top rung
-        // is at most 64 chunks across, the rung below it is more, and N tiles the top rung.
+        // is at most ONE chunk across, the rung below it is more, and N tiles the top rung.
         let mut r = 40_427.67;
         while r < 4.0e7 {
             for radius in [r, r * 1.000_1, r * 0.999_9] {
@@ -416,7 +422,7 @@ mod tests {
                 let below = Rung::new(g.rungs() - 2).expect("below");
                 assert!(
                     u64::from(g.cells_per_edge(below)) > CHUNK_EDGE * TOP_RUNG_CHUNKS,
-                    "the rung below the top is over 64 chunks for {radius}"
+                    "the rung below the top is over one chunk for {radius}"
                 );
                 assert_eq!(
                     g.n() % (1 << (g.rungs() - 1)),
@@ -468,29 +474,42 @@ mod tests {
             None,
             "exactly the surface"
         );
-        // A pebble: the ideal cell count rounds to zero and the ladder floors it at one cell.
+        // A pebble: the ideal cell count rounds to zero and the ladder floors it at one cell. It
+        // needs a radius of a few metres to exist at all, because its crust is rounded up to one
+        // whole cell and a body cannot stand on a floor deeper than itself.
         let pebble = ShellGrid::for_body(
-            0.2,
+            3.0,
             BandParams {
                 crust_m: 0,
                 above_m: 3,
             },
         )
         .expect("pebble");
-        assert_eq!((pebble.n(), pebble.rungs()), (1, 1));
+        assert_eq!((pebble.n(), pebble.rungs()), (5, 1));
+        assert_eq!(
+            ShellGrid::for_body(
+                0.2,
+                BandParams {
+                    crust_m: 0,
+                    above_m: 3,
+                },
+            ),
+            None,
+            "a body smaller than one cell of crust has no grid"
+        );
         // The largest legal body: N = 2^26 exactly at radius 2N/π.
         let r = f64::from(1u32 << 26) * FRAC_2_PI;
         let g = ShellGrid::for_body(r, BandParams::provisional(r)).expect("largest legal body");
         assert_eq!(g.n(), 1 << 26);
         assert_eq!(
             g.rungs(),
-            16,
-            "rungs 0..=15: sixteen of them, the address's four bits"
+            22,
+            "rungs 0..=21: twenty-two of them, the address's five bits"
         );
         assert_eq!(
-            g.cells_per_edge(Rung::new(15).expect("rung")),
-            2048,
-            "34 chunks across at the top (62 × 33 = 2 046 < 2 048)"
+            g.cells_per_edge(Rung::new(21).expect("rung")),
+            32,
+            "one chunk across at the top (32 cells of the chunk's 62)"
         );
     }
 
@@ -571,32 +590,39 @@ mod tests {
     }
 
     #[test]
-    fn the_partial_top_slice_of_a_coarse_rung_is_not_a_cell_anywhere() {
-        // The refuter's F3: the home planet's band is 16 566 m; at rung 12 (4 096 m cells) it holds
-        // FOUR whole cells and the 182 m above them are nobody's. Every operation agrees.
+    fn the_partial_top_slice_of_a_coarse_rung_is_a_whole_cell_everywhere() {
+        // ★ REVERSED 2026-09-15 (the extended ladder). The band is COVERED, never floored: the home
+        // planet's band is 270 427 m, so at rung 12 (4 096 m cells) it holds SIXTY-SEVEN cells —
+        // sixty-six whole ones and a sixty-seventh that stands 4 005 m proud of the band. Every
+        // operation agrees on it, and the sixty-eighth is nobody's. The floor is what made a coarse
+        // rung empty and could hide the surface above the band's own ceiling, which is why it went.
         let g = earth();
         let rung = Rung::new(12).expect("rung");
-        assert_eq!(g.cells_in_band(rung), 4);
-        assert_eq!(
-            g.cell_center(Face::PosZ, 5, 5, 4, rung),
-            None,
-            "k = 4 is not a cell"
+        assert_eq!(g.cells_in_band(rung), 67);
+        assert!(
+            g.cell_center(Face::PosZ, 5, 5, 66, rung).is_some(),
+            "k = 66 is the covering cell"
         );
-        assert_eq!(g.cell_corners(Face::PosZ, 5, 5, 4, rung), None);
-        assert_eq!(g.outward(Face::PosZ, 5, 5, 4, rung), None);
         assert_eq!(
-            g.neighbor(rung, Face::PosZ, 5, 5, 3, Dir6::KPlus),
+            g.cell_center(Face::PosZ, 5, 5, 67, rung),
+            None,
+            "k = 67 is not a cell"
+        );
+        assert_eq!(g.cell_corners(Face::PosZ, 5, 5, 67, rung), None);
+        assert_eq!(g.outward(Face::PosZ, 5, 5, 67, rung), None);
+        assert_eq!(
+            g.neighbor(rung, Face::PosZ, 5, 5, 66, Dir6::KPlus),
             Step::Outside,
             "the top cell has no cell above it"
         );
         assert_eq!(
-            g.neighbor(rung, Face::PosZ, 5, 5, 4, Dir6::KMinus),
+            g.neighbor(rung, Face::PosZ, 5, 5, 67, Dir6::KMinus),
             Step::Outside
         );
-        // A position in the lost slice is refused at rung 12 and named at rung 0.
-        let r = f64::from(g.floor_m()) + 4.0 * 4096.0 + 100.0;
+        // A position in the covering slice is named at rung 12 and at rung 0 alike.
+        let r = f64::from(g.floor_m()) + 66.0 * 4096.0 + 50.0;
         let p = LatticePos::from_metres(DVec3::new(0.0, 0.0, r), Tier::Fine);
-        assert_eq!(g.addr_of(p, rung), None);
+        assert_eq!(g.addr_of(p, rung), Some((Face::PosZ, 1_216, 1_216, 66)));
         assert!(g.addr_of(p, Rung::ZERO).is_some());
     }
 

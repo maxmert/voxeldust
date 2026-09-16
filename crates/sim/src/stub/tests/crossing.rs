@@ -602,6 +602,55 @@ fn an_arriving_crossing_reseeds_the_swept_prior_at_the_arrival_point() {
     );
 }
 
+/// ★ THE BOARDING'S LOST FACING (2026-09-14, measured by the flight): a pilot walked aboard a
+/// berthed hull looking at yaw 3.0105 and the camera took yaw −0.0 / pitch 0.0 the moment the
+/// picture swapped into the hull's frame. The crossing CONVERTS the pose's orientation correctly,
+/// but the look rebuilds that orientation from `up`, `yaw` and `pitch` on every input datagram —
+/// and the adopted Ghost is minted with a ZERO pair. Storing the pose alone therefore threw the
+/// facing away on the first look after every crossing. The re-home arm already derived the pair
+/// (2026-08-21, the owner flying); `Dot::adopt_pose` is that rule in ONE place, and this is the
+/// crossing's half of it.
+#[test]
+fn an_arriving_crossing_keeps_the_facing_the_conversion_computed() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let _ = rig.tick(vec![open_input_slot(SESSION, GATEWAY, 5)]);
+    let _ = rig.tick(vec![adopted_head(Fence(2))]);
+    // A crossed pose that FACES somewhere — the conversion turned the pilot into this realm's
+    // frame. A pose at rest would prove nothing: its orientation IS the identity.
+    let orient = vd_core::kinematics::orient_in_frame(DVec3::Y, 2.5, 0.4);
+    let pose = StampedPose {
+        orient,
+        ..crossing_pose()
+    };
+    let _ = rig.tick(vec![crossing_msg(TransferId(7), Fence(2), pose)]);
+    let _ = rig.tick(vec![promote_msg(Fence(2), NodeId(99))]);
+    // The arriving dot's angle pair is DERIVED from the crossed orientation, and its up crosses
+    // with the pose (ruling V11).
+    let dot = rig.world.resource::<Dots>().0[&SESSION];
+    assert_eq!(dot.up, pose.orient * DVec3::Y);
+    assert_eq!(
+        (dot.yaw, dot.pitch),
+        vd_core::kinematics::yaw_pitch_in_frame(dot.up, pose.orient)
+    );
+    // THE PROOF THAT MATTERS: a ZERO look rebuilds the orientation from that pair, so the facing
+    // the crossing computed must survive it. Before the cure the body snapped to the frame's
+    // default heading here, 2.5 radians away from where the pilot was looking.
+    // The slot resumed from seq 5, so seq 6 is the first the shard accepts.
+    let _ = rig.tick(vec![input_msg(6, Fence(1), [0.0, 0.0, 0.0], [0.0, 0.0])]);
+    let looked = rig.world.resource::<Dots>().0[&SESSION];
+    assert_eq!(
+        looked.last_applied_seq,
+        Some(6),
+        "the look was APPLIED — without that this proves nothing"
+    );
+    let after = looked.pose.orient;
+    assert!(
+        after.angle_between(pose.orient) < 1e-9,
+        "the look kept the crossed facing, not the frame's default: {after:?}"
+    );
+}
+
 #[test]
 fn a_crossing_to_an_adopted_dot_stores_the_pose_stays_ghost_then_promote_flips_owned() {
     let mut rig = Rig::new();

@@ -18,8 +18,11 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 /// The recipe's version. 1 was the first recipe of the voxel foundation (2026-09-08), on fenced
 /// 64-bit floats. 2 is THE INTEGER RECIPE (ruling F7, 2026-09-12): the same world, computed on
 /// fixed-point integers, which moved every surface by up to 1.5 mm and a quarter of a millimetre on
-/// average (MEASURED over the 3 936 256 columns of the spike's square).
-pub const GENERATOR_VERSION: u32 = 2;
+/// average (MEASURED over the 3 936 256 columns of the spike's square). ★ 3 IS THE EXTENDED LADDER
+/// (owner, 2026-09-15): the top rung became ONE CHUNK per face edge, so every body's cell count
+/// snaps to a coarser unit and every body's radius moves by up to 1.6 % — the home planet by
+/// 28 683 m. Every address moved with it, so every chunk of every body is a new byte.
+pub const GENERATOR_VERSION: u32 = 3;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -70,7 +73,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 2,
+            GENERATOR_VERSION, 3,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -93,5 +96,5 @@ mod tests {
         );
     }
 
-    const DECLARED_PIN: u64 = 1_561_458_573_009_577_845;
+    const DECLARED_PIN: u64 = 10_363_069_377_454_183_796;
 }

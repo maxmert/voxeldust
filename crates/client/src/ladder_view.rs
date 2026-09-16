@@ -113,13 +113,24 @@ pub fn in_fade_band(d_m: f64, rungs: u8) -> bool {
     let (fade_in, fade_out) = fade_bands(rung, rungs);
     ((d_m > fade_in[0]) & (d_m < fade_in[1])) | ((d_m > fade_out[0]) & (d_m < fade_out[1]))
 }
-/// How many body radii from the centre an eye may stand and still get the ladder. Past it the
-/// whole hemisphere is in view and the body's proxy outline stands in (the handover is a seam the
-/// pop detector measures in step 6; MEASURED on the first ground picture: two planets 1.5 × 10¹¹ m
-/// away each cost a column of chunks placed where nobody looks).
-pub const FAR_EYE_RADII: f64 = 2.0;
-// The descent's roots are EVERY top-rung column of EVERY face (at most 64 per edge by the ladder's
-// construction, so at most 24 576 on any body), each tested by its nearest point against the
+// ★ THE CLIENT HAS NO FAR EDGE (owner 2026-09-15, *"agree"*): THE SERVER'S VISIBILITY RADIUS IS
+// THE ONLY RULE. One radius per realm, tested by its parent; a realm has a row in the pilot's
+// window only inside it, and the ladder draws a body at any distance while the body has a row.
+//
+// WHY THE CLIENT'S OWN EDGE DIED. It was `drawn_reach_m` — "one top-rung chunk column stands one
+// pixel". Since the ladder was extended (owner 2026-09-15) a top-rung column is wider than the body
+// itself, so that line landed at about 2 200 body radii, 29 times OUTSIDE the realm's own stated
+// radius of 76.39: it could never fire, because no parent ships a row out there. The measurement
+// that built it — a far body costing about 5 000 chunks — is SPENT: the extended ladder draws a far
+// globe with SIX chunks, one tile a cube face.
+//
+// Example. The pilot lifts her hull off the home planet and keeps climbing. The ground stays the
+// recipe's own the whole way out and coarsens by the descent's own rules — a few hundred chunks at
+// 1.5 radii, a few dozen at 10, and SIX from 34 radii out to wherever the parent still ships the
+// planet's row. Past the parent's radius there is no row, so there is nothing to draw.
+
+// The descent's roots are EVERY top-rung column of EVERY face (ONE per edge by the ladder's
+// construction since 2026-09-15, so SIX on any body), each tested by its nearest point against the
 // reach. MEASURED before this (the refuter's finding): the roots were a square around the eye's
 // foot folded through the foot's own face, whose bend reaches 76° from that face's centre — a
 // hull 2 000 km over a point near a face edge sees ground out to 83°, and 7° of arc, 780 km
@@ -537,6 +548,27 @@ impl AskBound {
         (fade_in, fade_out)
     }
 
+    /// ★ THE OUTER EDGE OF A RUNG'S OWN TERRITORY, in metres: the distance past which the coarser
+    /// rung draws the ground instead. It is the rung's effective switch distance — and for the TOP
+    /// rung there is no coarser rung to hand to, so its territory reaches EVERYWHERE, exactly as
+    /// its fade-out band is [`FADE_ALWAYS_OUT`] and the tier rule's own
+    /// [`rung_for_distance`] clamps to it. ONE branch, the same one [`AskBound::fade_bands`]
+    /// already makes, never a test on how far the eye stands.
+    ///
+    /// MEASURED before this (the far-eye probe, 2026-09-15): an eye 1.5 radii over the home planet
+    /// wanted 2 015 top-rung chunks and called 1 857 of them MARGIN — the lowest request class,
+    /// the one that means "a finer ring already covers this ground" — because the top rung's own
+    /// switch distance is 0.56 radii and every column stood past it. The band could never read
+    /// incomplete aloft, whatever was missing, and the workers built the ground the pilot was
+    /// looking at last.
+    #[must_use]
+    pub fn territory_m(&self, rung: u8, rungs: u8) -> f64 {
+        if rung + 1 >= rungs {
+            return f64::INFINITY;
+        }
+        self.switch_m(rung)
+    }
+
     /// WHERE THE SINK RAMP ENDS for a rung under this bound — [`sink_end_m`] read at the effective
     /// switch distances.
     #[must_use]
@@ -782,6 +814,45 @@ pub struct WantedSet {
     pub rung_max: u8,
 }
 
+/// ★ WHAT A DESCENT CALLED A CHUNK (2026-09-16, the walk-gap instrument), stated outside this
+/// module: `Urgent` is ground the picture draws at that rung now, `Revealed` a peak past the
+/// horizon, `Margin` ground a coarser rung still stands over, and `Absent` a chunk the set does
+/// not want at all. [`Territory`] stays private: it is the descent's own word, and this is the
+/// instrument's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BandClass {
+    Absent,
+    Margin,
+    Revealed,
+    Urgent,
+}
+
+impl BandClass {
+    /// The class's own word, for a stamp that carries strings.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            BandClass::Absent => "absent",
+            BandClass::Margin => "margin",
+            BandClass::Revealed => "revealed",
+            BandClass::Urgent => "urgent",
+        }
+    }
+}
+
+/// ★ ONE CHUNK'S READING FROM ONE EYE (see [`LadderView::probe`]): the column's nearest and
+/// farthest points from that eye in metres, the rung's own territory edge, the eye's horizon, and
+/// whether the pair of them call the chunk urgent. All zero, and not urgent, for an eye at the
+/// body's own centre.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BandProbe {
+    pub near_m: f64,
+    pub far_m: f64,
+    pub territory_m: f64,
+    pub horizon_m: f64,
+    pub urgent: bool,
+}
+
 impl WantedSet {
     /// A wanted set from keys, in the order given.
     #[must_use]
@@ -859,6 +930,26 @@ impl WantedSet {
         self.urgent.contains(&key)
     }
 
+    /// ★ WHAT THIS SET CALLED A CHUNK (2026-09-16, the walk-gap instrument): the class the descent
+    /// gave it, or [`BandClass::Absent`] where the set does not want it at all. The band's gap
+    /// reads the PREVIOUS descent's set through this, so a missing urgent chunk can say whether
+    /// the ring had already asked for it (the builders are late) or whether this very descent
+    /// first wanted it (the ask is late). Example: the walker crosses a crest, a rung-3 column
+    /// the skyline hid comes inside the horizon, and the frame that first wants it counts it
+    /// missing — `Absent` names that, `Urgent` would name a slow builder.
+    #[must_use]
+    pub fn class_of(&self, key: ChunkKey) -> BandClass {
+        if self.urgent.contains(&key) {
+            BandClass::Urgent
+        } else if self.revealed.contains(&key) {
+            BandClass::Revealed
+        } else if self.set.contains(&key) {
+            BandClass::Margin
+        } else {
+            BandClass::Absent
+        }
+    }
+
     /// THE JOB'S PRIORITY (the lower builds first) of the chunk at `index` in `keys`: a GLOBAL
     /// order, the same across every realm's set (refutation T-2: an index alone let a moon's
     /// margin chunk outrank the planet's urgent one) — the class in the top two bits, then the
@@ -906,6 +997,27 @@ impl WantedSet {
             *counts.entry(key.rung).or_insert(0) += 1;
         }
         counts.into_iter().collect()
+    }
+
+    /// ★ THE BAND'S GAP, NAMED (2026-09-16, the walk-gap measurement): the urgent chunks that have
+    /// NOT `arrived`, at most `cap` of them, coarsest rung first. The counts alone say how many the
+    /// band lacks; a cure needs to know WHICH, so the gap line can read each one's class in the
+    /// previous descent's set and its distance from the drawn eye.
+    #[must_use]
+    pub fn urgent_missing_keys(
+        &self,
+        arrived: &dyn Fn(ChunkKey) -> bool,
+        cap: usize,
+    ) -> Vec<ChunkKey> {
+        let mut out: Vec<ChunkKey> = self
+            .urgent
+            .iter()
+            .filter(|k| !arrived(**k))
+            .take(cap)
+            .copied()
+            .collect();
+        out.sort_by(|a, b| b.rung.cmp(&a.rung).then(a.cmp(b)));
+        out
     }
 
     /// THE REVEALS' GAP: how many revealed chunks have NOT `arrived`.
@@ -1155,7 +1267,8 @@ impl Sweep<'_> {
             // under a finer rung that stood whole). URGENT for a column inside the eye's horizon
             // (the ground the motion carries the eye into), REVEALED for one past it (a peak the
             // skyline admits).
-            let inside = (geo.near < bound.switch_m(col.rung)) & (geo.far > fade_in[1]);
+            let inside =
+                (geo.near < bound.territory_m(col.rung, ladder.rungs)) & (geo.far > fade_in[1]);
             let territory = match (inside, inside_horizon) {
                 (false, _) => Territory::Margin,
                 (true, true) => Territory::Urgent,
@@ -1216,14 +1329,55 @@ impl LadderView {
     /// dropped too — black rectangles on the hill and aloft pictures at every ring boundary, 4 818
     /// and 16 297 probe pixels of nothing.
     ///
-    /// Empty for an eye at the centre, or farther than [`FAR_EYE_RADII`] radii.
+    /// Empty for an eye at the body's own centre, where the descent has no radial to stand on.
+    /// THAT IS THE ONLY GUARD (owner 2026-09-15, *"agree"*): the client has NO far edge, because
+    /// the server's visibility radius is the only rule — a realm has a row in the pilot's window
+    /// only inside it, so the ladder is never asked for a body the parent does not ship. At every
+    /// distance the descent's own rules coarsen the body: past the top rung's fade-in band no
+    /// column splits, so a far eye gets the top rung's six columns and nothing finer.
+    /// ★ ONE CHUNK READ FROM ONE EYE (2026-09-16, the walk-gap instrument): where the chunk's
+    /// column stands for an eye at `eye_m`, and whether THAT eye's own ring calls it urgent - its
+    /// nearest point inside the rung's territory, its farthest past the finer rung's far edge, and
+    /// its nearest inside the eye's own horizon. The descent asks at the LEAD eye and the band
+    /// judges the same frame, so a gap line reads this at the DRAWN eye to say whether the picture
+    /// needs the chunk yet.
+    ///
+    /// It runs ONE column's geometry and no descent: the skyline is not raised, so a column the
+    /// skyline hides reads urgent here while a descent would not want it. The instrument states
+    /// that; it is not the band's rule.
+    #[must_use]
+    pub fn probe(&self, body: &BodyDefinition, eye_m: [f64; 3], key: ChunkKey) -> BandProbe {
+        let eye = DVec3::from_array(eye_m);
+        let len = eye.length();
+        let ladder = *body.ladder();
+        if len.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            // An eye at the body's own centre has no radial: the descent wants nothing there.
+            return BandProbe::default();
+        }
+        let d = eye / len;
+        let surface = vd_terrain::height::height_m(body, [d.x, d.y, d.z], 0);
+        let altitude = floored_altitude_m(len - surface);
+        let horizon = horizon_m(surface, altitude);
+        let frame = EyeFrame::new(eye);
+        let col = Column::of(key);
+        let geo = column_geometry(&ladder, &frame, eye, col, surface);
+        let (fade_in, _) = self.bound.fade_bands(col.rung, ladder.rungs);
+        let territory = self.bound.territory_m(col.rung, ladder.rungs);
+        let inside = (geo.near < territory) & (geo.far > fade_in[1]);
+        BandProbe {
+            near_m: geo.near,
+            far_m: geo.far,
+            territory_m: territory,
+            horizon_m: horizon,
+            urgent: inside & (geo.near <= horizon),
+        }
+    }
+
     pub fn wanted(&mut self, body: &BodyDefinition, eye_m: [f64; 3]) -> WantedSet {
         let eye = DVec3::from_array(eye_m);
         let len = eye.length();
         let ladder = *body.ladder();
-        if len.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
-            || len > ladder.radius_m() * FAR_EYE_RADII
-        {
+        if len.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             // Nothing wanted, nothing kept.
             self.spans.clear();
             self.kept.clear();
@@ -1331,16 +1485,38 @@ impl LadderView {
                 } else {
                     WANT_MARGIN_RAD
                 };
-                if !skyline.clears(geo.phi, geo.az, geo.rho, span.peak_m, margin) {
+                let clears = skyline.clears(geo.phi, geo.az, geo.rho, span.peak_m, margin);
+                if clears {
+                    cleared.insert(col);
+                } else {
                     culled.insert(col);
+                }
+                // ★ INSIDE THE TRUE HORIZON THE SKYLINE DECIDES URGENCY, NEVER THE ASK
+                // (2026-09-16, the walk-gap cure). A column the skyline hides and that stands
+                // PAST the horizon is nothing: it is neither drawn now nor about to be. A hidden
+                // column INSIDE the horizon is different - the eye's next step may uncover it,
+                // and pass A already wants every column inside the horizon without asking the
+                // skyline at all ("wanting a hidden one is safe"). The horizon's own hysteresis
+                // holds such a column in this pass, so before this line it was not asked for at
+                // all, and the frame it cleared the skyline it entered the ring URGENT from
+                // NOTHING - missing on the very frame it was first wanted.
+                //
+                // MEASURED (the walk flight of 2026-09-16): the band went incomplete on 18 frames
+                // of a minute's walk, 2 chunks at the worst; EVERY missing chunk read "was absent"
+                // in the descent one frame before, the DRAWN eye already wanted it, the descent had
+                // re-cut the ring 22 ms earlier with a drift of 0.000 m, and the builders stood at
+                // 400 chunks a second. Each stood at rung 3 or 4, between 0.89 and 0.99 of the
+                // eye's own horizon - the skyline's own edge. So the chunk is now ASKED while it is
+                // hidden, as a REVEAL (the class for ground a crest may show), and the frame the
+                // skyline clears it, it is already resident.
+                if !clears & (geo.near > horizon) {
                     continue;
                 }
-                cleared.insert(col);
                 // The territory reads the TRUE horizon: a column the hysteresis sent here from
                 // inside the horizon (between three quarters of it and the horizon) is ground the
                 // picture draws now, and its chunks are urgent, never "revealed" (refutation
-                // R4-1: the gap under-read it as a reveal).
-                sweep.descend(col, &geo, &span, geo.near <= horizon, &mut next);
+                // R4-1: the gap under-read it as a reveal) - while the skyline clears it.
+                sweep.descend(col, &geo, &span, clears & (geo.near <= horizon), &mut next);
             }
             level = next;
         }
@@ -1434,10 +1610,409 @@ pub fn column_under(body: &BodyDefinition, dir: [f64; 3], rung: u8) -> Column {
     }
 }
 
+/// ★ THE ROW'S GRACE (2026-09-14, the boarding cure): may a realm's ladder be forgotten?
+///
+/// A ladder is forgotten when the realm's row leaves the drawn scene, and forgetting it releases
+/// every chunk that realm holds — a whole band of ground, rebuilt from nothing. But a row absent
+/// from ONE frame's scene is not a realm that left. At a boarding the gateway composes the first
+/// picture in the hull's frame, and the planet's row can miss a beat while it does; a realm that
+/// truly left never comes back, so waiting costs nothing but a beat of memory.
+///
+/// So the answer is YES only when the row is absent AND it has been absent longer than `grace_s`.
+/// The caller's grace is the INTERPOLATION BUFFER — the wire's own contract for how old a
+/// delivered picture may legitimately be — never a frame count a renderer chose.
+///
+/// `last_seen_s` is the display moment the realm last HAD a row, and `None` means it never did.
+///
+/// Example: the pilot walks aboard a berthed hull; the planet's row is away for two frames; its
+/// 7 288 chunks stay drawn, and the ground under the hull never blinks.
+#[must_use]
+pub fn row_lapsed(has_row: bool, last_seen_s: Option<f64>, now_s: f64, grace_s: f64) -> bool {
+    let away = match last_seen_s {
+        Some(seen) => now_s - seen > grace_s,
+        None => true,
+    };
+    !has_row & away
+}
+
+/// ★ WHERE THE CAMERA STANDS AND WHICH WAY IT LOOKS — the whole of one frame's placement, so a
+/// frame that refuses its own pose can re-draw the LAST one exactly (position AND facing).
+///
+/// The eye rides twice: as metres (`eye`, what the camera transform needs) and on the lattice
+/// (`lattice` with its `tier`, what every drawn position reduces against). Both are kept, because
+/// re-deriving one from the other is the rounding this slice exists to remove.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EyeStand {
+    /// The eye in the picture's own frame, metres.
+    pub eye: vd_core::glam::DVec3,
+    /// The same eye on the lattice, in `tier` units.
+    pub lattice: vd_core::pose::LatticePos,
+    /// The unit `lattice` is counted in.
+    pub tier: vd_core::pose::Tier,
+    /// Where the camera looks, and which way is up — the facing, kept whole.
+    pub direction: vd_core::glam::DVec3,
+    pub up: vd_core::glam::DVec3,
+}
+
+/// Is the own pose a reading in the realm the picture is composed in?
+///
+/// The camera places the eye by flattening the own pose into the picture's frame. The two are
+/// different statements on different lanes — the pose rides the entity lane, the picture's origin
+/// rides the window lane — and at a boarding they disagree for two to five frames: the pose already
+/// reads a few metres from the HULL's centre while the picture is still drawn from the PLANET's.
+/// Flattened anyway, that pose puts the eye at the planet's centre, six thousand kilometres under
+/// the ground the pilot is standing on.
+///
+/// A picture that names no origin has nothing to disagree with (the pre-login state).
+#[must_use]
+pub fn pose_at_home(
+    stated: vd_core::pose::RealmId,
+    picture: Option<vd_core::pose::RealmId>,
+) -> bool {
+    match picture {
+        Some(realm) => realm == stated,
+        None => true,
+    }
+}
+
+/// ★ THE CAMERA REFUSES A POSE STATED IN ANOTHER REALM (2026-09-15, the boarding's last seam;
+/// SL1 clause 6: a stale reading is REFUSED, never used).
+///
+/// Given the realm the own pose names, the realm the picture is composed in, the stand this
+/// frame's pose would place, and the stand the camera placed LAST frame, answers with the stand to
+/// place and whether the pose was refused.
+///
+/// * They agree — the camera places the eye from the pose, as it always has.
+/// * They disagree and there IS a last stand — the pose is refused and the last stand is placed
+///   again, unchanged: the last delivered eye, RE-DRAWN. Never moved forward, because moving it
+///   forward would be the client predicting where the pilot is, which it may not do.
+/// * They disagree and there is no last stand — nothing has been drawn yet, so there is nothing to
+///   hold; the delivered stand is placed and the frame is not counted as a refusal.
+///
+/// The first frame a pose in the picture's frame lands, the camera places from it and the hold
+/// ends — there is no timer here, and nothing decays.
+///
+/// Example: the pilot walks aboard a berthed hull. For three frames their pose says `ShipLocal`
+/// while the window still composes the planet's picture. The camera holds the eye on the ground
+/// where it stood, looking the way the pilot looked; the fourth frame's picture is the hull's, the
+/// pose agrees, and the eye steps aboard.
+#[must_use]
+pub fn camera_stand(
+    stated: vd_core::pose::RealmId,
+    picture: Option<vd_core::pose::RealmId>,
+    delivered: EyeStand,
+    held: Option<EyeStand>,
+) -> (EyeStand, bool) {
+    match held {
+        Some(last) if !pose_at_home(stated, picture) => (last, true),
+        _ => (delivered, false),
+    }
+}
+
+/// ★ THE CAMERA'S EYE, FRAME AFTER FRAME (2026-09-15) — the whole of the camera's memory, so the
+/// renderer only WIRES the rule and never decides it.
+///
+/// It holds the stand the camera last placed (what a refusal re-draws), the two readings the jump
+/// and its bound are measured between, and the three numbers the dev stamp carries.
+///
+/// Example: the pilot walks aboard. Three frames refuse their pose and the eye stays on the
+/// ground; `refusals` reads 3, `jump_max_m` stays at a walking step, and the frame the hull's
+/// picture arrives the eye steps aboard by the walking those three frames delivered.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EyeTrack {
+    /// The stand the camera placed last frame, whole.
+    held: Option<EyeStand>,
+    /// The placed eye and the realm the picture was composed in, last frame.
+    placed_at: Option<(vd_core::pose::RealmId, vd_core::glam::DVec3)>,
+    /// The own pose's own point the last time it was stated in the picture's own frame. KEPT
+    /// across a hold: a hold's catching-up step must be measured against the walking the pilot
+    /// really did over the same frames, or the bound would refuse the very step it allows.
+    delivered_at: Option<(vd_core::pose::RealmId, vd_core::glam::DVec3)>,
+    /// How many frames the camera refused a pose stated in another realm.
+    pub refusals: u64,
+    /// The largest single-frame jump of the PLACED eye, metres.
+    pub jump_max_m: f64,
+    /// The largest single-frame displacement of the DELIVERED own pose, metres — the bound the
+    /// jump is judged against.
+    pub step_max_m: f64,
+}
+
+impl EyeTrack {
+    /// Place this frame's eye: the delivered stand when the own pose names the picture's own
+    /// realm, the held one when it names another. Reads the two distances on the way and answers
+    /// with the stand the camera must draw from.
+    ///
+    /// The BOUND is the delivered stand's own eye, not the pilot's point: a pilot who turns on the
+    /// spot moves the eye by the eye's own height, and a bound that read the point alone would
+    /// call that turn a jump.
+    pub fn place(
+        &mut self,
+        stated: vd_core::pose::RealmId,
+        picture: Option<vd_core::pose::RealmId>,
+        delivered: EyeStand,
+    ) -> EyeStand {
+        let (stand, refused) = camera_stand(stated, picture, delivered, self.held);
+        self.refusals += u64::from(refused);
+        let placed_now = picture.map(|realm| (realm, stand.eye));
+        if let Some(jump) = frame_step_m(self.placed_at, placed_now) {
+            self.jump_max_m = self.jump_max_m.max(jump);
+        }
+        let delivered_now = if pose_at_home(stated, picture) {
+            picture.map(|realm| (realm, delivered.eye))
+        } else {
+            None
+        };
+        if let Some(step) = frame_step_m(self.delivered_at, delivered_now) {
+            self.step_max_m = self.step_max_m.max(step);
+        }
+        if delivered_now.is_some() {
+            self.delivered_at = delivered_now;
+        }
+        self.placed_at = placed_now;
+        self.held = Some(stand);
+        stand
+    }
+}
+
+/// How far a point moved between two frames, when both readings are stated in the SAME realm's
+/// frame — `None` otherwise, because a distance between two frames' coordinates is not a distance.
+///
+/// The eye's JUMP and the pilot's own DELIVERED step are both this measurement, so the gate that
+/// compares them compares two readings of one shape. A frame change is not a jump: at a boarding
+/// the picture's origin moves from the planet's centre to the hull's, and every coordinate in it
+/// moves by the planet's radius without anything moving at all.
+///
+/// Example: the eye stands on the planet at 6 371 004 m from its centre and the next frame reads
+/// 6 371 004.02 m — a step of two centimetres, one frame of a 1.4 m/s walk. The frame after that
+/// the picture is the hull's, and the pair is refused rather than read as 6 371 km.
+#[must_use]
+pub fn frame_step_m(
+    before: Option<(vd_core::pose::RealmId, vd_core::glam::DVec3)>,
+    after: Option<(vd_core::pose::RealmId, vd_core::glam::DVec3)>,
+) -> Option<f64> {
+    let (was, at) = (before?, after?);
+    if was.0 == at.0 {
+        Some((at.1 - was.1).length())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vd_core::pose::RealmId;
     use vd_terrain::home::home_planet;
+
+    /// ★ THE ROW'S GRACE: a row that is THERE never lapses; an absent row lapses only once it has
+    /// been away longer than the grace; a realm that never had a row lapses at once.
+    #[test]
+    fn a_rows_grace_holds_a_ladder_for_one_interpolation_buffer() {
+        // Exact binary values, so the comparison's own edge is the thing measured and not a
+        // decimal's rounding.
+        let grace = 0.25;
+        // The planet's row is in this frame's scene: nothing lapses, however old the last sight.
+        assert!(!row_lapsed(true, Some(1.0), 99.0, grace));
+        assert!(!row_lapsed(true, None, 99.0, grace));
+        // The row is away, but for less than the grace: the ladder stays.
+        assert!(!row_lapsed(false, Some(10.0), 10.125, grace));
+        // Exactly the grace is still within it (the comparison is strict).
+        assert!(!row_lapsed(false, Some(10.0), 10.25, grace));
+        // Away for longer than the grace: the realm really left.
+        assert!(row_lapsed(false, Some(10.0), 10.5, grace));
+        // A realm that never had a row has nothing to wait for.
+        assert!(row_lapsed(false, None, 10.0, grace));
+    }
+
+    /// A stand for the tests: the eye, its lattice twin and the facing, all named by one number
+    /// so a held stand and a delivered one can never be confused.
+    fn stand(x: f64) -> EyeStand {
+        let eye = DVec3::new(x, 0.0, 0.0);
+        EyeStand {
+            eye,
+            lattice: vd_core::pose::LatticePos::from_metres(eye, vd_core::pose::Tier::Fine),
+            tier: vd_core::pose::Tier::Fine,
+            direction: DVec3::new(0.0, 0.0, -x),
+            up: DVec3::new(0.0, x, 0.0),
+        }
+    }
+
+    /// ★ THE CAMERA REFUSES A POSE STATED IN ANOTHER REALM. The pilot walks aboard the hull: for
+    /// a beat their pose says the hull and the picture still says the planet. The camera holds the
+    /// eye and the facing it last placed; the first pose in the picture's own frame ends the hold.
+    #[test]
+    fn the_camera_holds_its_eye_while_the_pose_and_the_picture_name_two_realms() {
+        let planet = RealmId::Planet(7);
+        let hull = RealmId::Ship(vd_core::EntityId::pack(
+            vd_core::entity_kind::EntityKind::Ship,
+            1,
+            1,
+            0,
+        ));
+        let (ground, aboard) = (stand(1.0), stand(2.0));
+        // The pose names the realm the picture is composed in: the camera places from it.
+        assert_eq!(
+            camera_stand(planet, Some(planet), ground, None),
+            (ground, false),
+            "an agreeing pose places the eye"
+        );
+        assert_eq!(
+            camera_stand(planet, Some(planet), aboard, Some(ground)),
+            (aboard, false),
+            "an agreeing pose places the eye even with a stand to hold"
+        );
+        // The pose names the HULL while the picture is still the PLANET's: the eye and the facing
+        // of the last frame stand again, unchanged.
+        assert_eq!(
+            camera_stand(hull, Some(planet), aboard, Some(ground)),
+            (ground, true),
+            "a foreign pose is refused and the held stand is placed again"
+        );
+        // Nothing drawn yet: there is no stand to hold, so the delivered one is placed and the
+        // frame is no refusal.
+        assert_eq!(
+            camera_stand(hull, Some(planet), aboard, None),
+            (aboard, false),
+            "with nothing held there is nothing to hold"
+        );
+        // The first pose in the picture's own frame ends the hold at once.
+        assert_eq!(
+            camera_stand(hull, Some(hull), aboard, Some(ground)),
+            (aboard, false),
+            "the first agreeing pose after a hold places the eye"
+        );
+        // A picture that names no origin has nothing to disagree with.
+        assert_eq!(
+            camera_stand(hull, None, aboard, Some(ground)),
+            (aboard, false),
+            "no origin, no disagreement"
+        );
+        assert_eq!(
+            (
+                pose_at_home(hull, None),
+                pose_at_home(hull, Some(hull)),
+                pose_at_home(hull, Some(planet)),
+            ),
+            (true, true, false),
+            "a pose is at home in the picture's own realm, and in no other"
+        );
+    }
+
+    /// ★ THE HOLD, FRAME AFTER FRAME, AND THE JUMP IT MAY NOT EXCEED (2026-09-15). The pilot
+    /// walks on the planet, their pose names the hull for two frames while the picture is still
+    /// the planet's, and then the picture is the hull's too. The eye is held through the two
+    /// frames and never moves farther in one frame than the delivered pose moved over the same
+    /// frames.
+    #[test]
+    fn the_track_holds_the_eye_through_a_boarding_and_never_jumps_farther_than_the_walk() {
+        let planet = RealmId::Planet(7);
+        let hull = RealmId::Ship(vd_core::EntityId::pack(
+            vd_core::entity_kind::EntityKind::Ship,
+            1,
+            1,
+            0,
+        ));
+        let mut track = EyeTrack::default();
+        // Frame 1: the first delivered pose. Nothing to measure against yet.
+        let first = stand(0.0);
+        assert_eq!(track.place(planet, Some(planet), first), first);
+        assert_eq!(
+            (track.refusals, track.jump_max_m, track.step_max_m),
+            (0, 0.0, 0.0),
+            "the first frame has no earlier reading to measure against"
+        );
+        // Frame 2: a walking step on the planet. The numbers are exact in binary, so the
+        // comparison measures the rule and not a decimal's rounding.
+        let second = stand(0.25);
+        assert_eq!(track.place(planet, Some(planet), second), second);
+        assert_eq!(
+            (track.refusals, track.jump_max_m, track.step_max_m),
+            (0, 0.25, 0.25),
+            "the eye moved exactly the walk"
+        );
+        // Frames 3 and 4: the pose names the HULL while the picture is still the PLANET's. The
+        // stand that pose would place stands a thousand metres away — the boarding's own defect in
+        // miniature. The eye is held; it moves nowhere, and the delivered reading is not read.
+        let aboard = stand(1000.0);
+        assert_eq!(
+            track.place(hull, Some(planet), aboard),
+            second,
+            "the held stand is placed again"
+        );
+        assert_eq!(
+            track.place(hull, Some(planet), aboard),
+            second,
+            "and again, for as long as they disagree"
+        );
+        assert_eq!(
+            (track.refusals, track.jump_max_m, track.step_max_m),
+            (2, 0.25, 0.25),
+            "two refusals, and the eye stood still through both"
+        );
+        // Frame 5: the pose names the planet again, two frames of walking further on. The eye
+        // catches up by exactly what was delivered — the jump never passes the bound.
+        let third = stand(0.75);
+        assert_eq!(track.place(planet, Some(planet), third), third);
+        assert_eq!(
+            (track.refusals, track.jump_max_m, track.step_max_m),
+            (2, 0.5, 0.5),
+            "the catching-up jump equals the walking the hold covered"
+        );
+        // Frame 6: the picture is the hull's now and the pose agrees. The origin changed, so
+        // neither distance is read: a coordinate in the hull's frame is not a distance from one
+        // in the planet's.
+        let inside = stand(3.0);
+        assert_eq!(track.place(hull, Some(hull), inside), inside);
+        assert_eq!(
+            (track.refusals, track.jump_max_m, track.step_max_m),
+            (2, 0.5, 0.5),
+            "an origin swap is not a jump"
+        );
+        // Frame 7: a picture that names no origin (the pre-login state) measures nothing.
+        let nowhere = stand(9.0);
+        assert_eq!(track.place(hull, None, nowhere), nowhere);
+        assert_eq!(
+            (track.refusals, track.jump_max_m, track.step_max_m),
+            (2, 0.5, 0.5),
+            "no origin, nothing to measure"
+        );
+    }
+
+    /// ★ A STEP IS READ ONLY BETWEEN TWO READINGS OF ONE FRAME. Two metres of walking on the
+    /// planet is two metres; the planet's centre against the hull's centre is not a distance at
+    /// all, and the pair is refused.
+    #[test]
+    fn a_step_is_measured_only_between_two_readings_of_one_realms_frame() {
+        let planet = RealmId::Planet(7);
+        let hull = RealmId::Ship(vd_core::EntityId::pack(
+            vd_core::entity_kind::EntityKind::Ship,
+            1,
+            1,
+            0,
+        ));
+        let a = DVec3::new(0.0, 0.0, 0.0);
+        let b = DVec3::new(3.0, 4.0, 0.0);
+        assert_eq!(
+            frame_step_m(Some((planet, a)), Some((planet, b))),
+            Some(5.0),
+            "two readings of the planet's frame are five metres apart"
+        );
+        assert_eq!(
+            frame_step_m(Some((planet, a)), Some((hull, b))),
+            None,
+            "the picture's origin changed: there is no distance to read"
+        );
+        assert_eq!(
+            frame_step_m(None, Some((planet, b))),
+            None,
+            "no first reading"
+        );
+        assert_eq!(
+            frame_step_m(Some((planet, a)), None),
+            None,
+            "no second reading"
+        );
+    }
 
     /// THE CASTING SET (item 18): without a shadow reach every wanted chunk may cast; with one,
     /// the chunks near the eye cast and the far ones do not, the bound growing with the sun's
@@ -1543,6 +2118,15 @@ mod tests {
                 .filter(|k| k.rung == top)
                 .all(|k| !low_sun.casts(*k))
         );
+        // ★ THE SAME CLAIM READ WHERE THE TOP RUNG IS ACTUALLY DRAWN (the extended ladder,
+        // 2026-09-15). From an eye 1.8 m up the descent never reaches rung 18, so the filter above
+        // is EMPTY and proves nothing — the "no coarser rung to cast for me" arm was never run.
+        // From 34 body radii the whole globe IS the top rung, one chunk a face, and every one of
+        // them is silent while the same low sun stands.
+        let far_up = view.wanted(&body, [r * 34.0, 0.0, 0.0]);
+        assert_eq!(far_up.keys.len(), 6);
+        assert_eq!((far_up.rung_min, far_up.rung_max), (top, top));
+        assert_eq!(far_up.casting_count(), 0);
         // The hysteresis is symmetric and has a floor: a zenith sun's tangents agree.
         let sym = ShadowReach {
             reach_m: 100.0,
@@ -1747,6 +2331,152 @@ mod tests {
         assert!(!narrow.overlapping_missing(held, &|_| false));
         assert_eq!(WantedSet::default().per_rung(), Vec::<(u8, u64)>::new());
         assert!(WantedSet::default().is_empty());
+    }
+
+    /// THE WALK the gap was measured on: the pilot's step between two descents, and how many
+    /// steps the test walks. The flight measured about one chunk born urgent every six metres of
+    /// walking, so forty metres names several and costs a fraction of a second.
+    const WALK_STEP_M: f64 = 1.0;
+    const WALK_STEPS: usize = 250;
+    const WALK_ALTITUDE_M: f64 = 3.4;
+
+    /// THE CHUNKS BORN URGENT between two descents: the ones this ring calls URGENT that the
+    /// descent before did not want AT ALL. A chunk born urgent cannot be resident on the frame it
+    /// is first wanted, so the band reads a gap however fast the builders run.
+    fn born_urgent(before: &WantedSet, now: &WantedSet) -> Vec<ChunkKey> {
+        now.keys
+            .iter()
+            .copied()
+            .filter(|k| {
+                (now.class_of(*k) == BandClass::Urgent) & (before.class_of(*k) == BandClass::Absent)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nothing_enters_the_ring_urgent_from_nothing_on_a_walk() {
+        // MEASURED, the walk flight of 2026-09-16 (`scratchpad/walk_gap_fix.md`): the band went
+        // incomplete on 18 frames of a minute's walk, and EVERY missing chunk read `was absent` -
+        // the descent one frame earlier did not want it at all, while the DRAWN eye already wanted
+        // it and the builders stood idle at 400 chunks a second. A chunk first wanted this frame
+        // cannot be resident this frame, so the ask bought nothing.
+        //
+        // THE RULE: a chunk the ring calls URGENT must have been ASKED FOR before - as a reveal or
+        // as a margin chunk. Nothing may enter the ring urgent from nothing. The walk here is the
+        // flight's own: the pilot walks along the ground of the home planet at her own height over
+        // the recipe's surface, and a descent runs at every step.
+        let body = home_planet();
+        let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
+        let up = DVec3::new(d[0], d[1], d[2]);
+        let east = up.cross(DVec3::Z).normalize();
+        let radius = body.ladder().radius_m();
+        let mut view = LadderView::default();
+        let mut prev: Option<WantedSet> = None;
+        let mut first: Option<WantedSet> = None;
+        let mut born: Vec<(usize, ChunkKey)> = Vec::new();
+        let mut step = 0usize;
+        while step < WALK_STEPS {
+            let arc = step as f64 * WALK_STEP_M / radius;
+            let dir = (up * arc.cos() + east * arc.sin()).normalize();
+            let surface = vd_terrain::height::height_m(&body, [dir.x, dir.y, dir.z], 0);
+            let eye = (dir * (surface + WALK_ALTITUDE_M)).to_array();
+            let now = view.wanted(&body, eye);
+            if let Some(before) = prev.as_ref() {
+                born.extend(born_urgent(before, &now).into_iter().map(|k| (step, k)));
+            }
+            first = first.or_else(|| Some(now.clone()));
+            prev = Some(now);
+            step += 1;
+        }
+        assert_eq!(
+            born.iter().map(|(_, k)| *k).collect::<Vec<ChunkKey>>(),
+            Vec::new(),
+            "chunks entered the ring urgent from nothing over {:.0} m of walking: {born:?}",
+            WALK_STEPS as f64 * WALK_STEP_M
+        );
+        // ★ THE DETECTOR ITSELF FIRES when there IS a birth, so an empty result above is the rule
+        // holding and never a reader that cannot read. Against NO descent at all, every urgent
+        // chunk of the walker's first ring is born urgent — which is exactly why the rule is about
+        // two CONSECUTIVE descents and never about the first one: the first frame has nothing
+        // behind it, and the pilot stands still while it is built.
+        let first = first.expect("a walk of at least one step");
+        assert_eq!(
+            born_urgent(&WantedSet::default(), &first).len(),
+            first.urgent_count()
+        );
+        assert!(first.urgent_count() > 0);
+    }
+
+    #[test]
+    fn the_gap_names_its_chunks_and_one_eye_reads_one_column() {
+        // THE WALK-GAP INSTRUMENT (2026-09-16): a missing urgent chunk states its class in a set
+        // and its column's reading from an eye, so a gap line can say whether the ring first
+        // wanted the chunk this very frame or asked for it earlier.
+        let body = home_planet();
+        let d = vd_seed::bend::normalize([1.0, 0.31, -0.22]);
+        let dir = [d[0], d[1], d[2]];
+        let surface = vd_terrain::height::height_m(&body, dir, 0);
+        let eye = [
+            d[0] * (surface + 3.4),
+            d[1] * (surface + 3.4),
+            d[2] * (surface + 3.4),
+        ];
+        let mut view = LadderView::default();
+        let w = view.wanted(&body, eye);
+        // EVERY CLASS, counted through `class_of`: the urgent ones, the revealed peaks, and the
+        // rest of every ring, which is the margin.
+        let class_count = |c: BandClass| w.keys.iter().filter(|k| w.class_of(**k) == c).count();
+        assert_eq!(class_count(BandClass::Urgent), w.urgent_count());
+        assert_eq!(class_count(BandClass::Revealed), w.revealed_count());
+        assert_eq!(
+            class_count(BandClass::Margin),
+            w.len() - w.urgent_count() - w.revealed_count()
+        );
+        assert_eq!(class_count(BandClass::Absent), 0);
+        // A chunk the set does not hold is absent. The key stands over a face the eye is not on.
+        let away = key(Face::NegX, 0, 0, 0, 0);
+        assert!(!w.contains(away));
+        assert_eq!(w.class_of(away), BandClass::Absent);
+        assert_eq!(BandClass::Absent.name(), "absent");
+        assert_eq!(BandClass::Margin.name(), "margin");
+        assert_eq!(BandClass::Revealed.name(), "revealed");
+        assert_eq!(BandClass::Urgent.name(), "urgent");
+        // THE GAP, NAMED: with nothing arrived the keys are the urgent ones, capped, coarsest
+        // rung first; with everything arrived there are none.
+        let named = w.urgent_missing_keys(&|_| false, 4);
+        assert_eq!(named.len(), 4);
+        assert_eq!(named.iter().filter(|k| w.is_urgent(**k)).count(), 4);
+        let mut rungs: Vec<u8> = named.iter().map(|k| k.rung).collect();
+        let mut sorted = rungs.clone();
+        sorted.sort_by(|a, b| b.cmp(a));
+        assert_eq!(rungs, sorted);
+        rungs.dedup();
+        assert_eq!(w.urgent_missing_keys(&|_| true, 4), Vec::new());
+        assert_eq!(
+            w.urgent_missing_keys(&|_| false, w.len() + 1).len(),
+            w.urgent_count()
+        );
+        // ONE COLUMN READ FROM ONE EYE: an urgent chunk's column stands inside its rung's
+        // territory and inside the horizon, so the same eye's own reading calls it urgent.
+        let hot = named[named.len() - 1];
+        let read = view.probe(&body, eye, hot);
+        assert!(read.urgent);
+        assert!(read.near_m <= read.horizon_m, "{read:?}");
+        assert!(read.near_m < read.territory_m, "{read:?}");
+        assert!(read.far_m > read.near_m, "{read:?}");
+        // A REVEALED peak stands PAST the horizon, so the same reading does not call it urgent.
+        let peak = *w
+            .keys
+            .iter()
+            .find(|k| w.class_of(**k) == BandClass::Revealed)
+            .expect("a peak past the horizon");
+        let seen = view.probe(&body, eye, peak);
+        assert!(!seen.urgent);
+        // An eye at the body's own centre has no radial and reads nothing.
+        assert_eq!(
+            view.probe(&body, [0.0, 0.0, 0.0], hot),
+            BandProbe::default()
+        );
     }
 
     #[test]
@@ -2039,13 +2769,12 @@ mod tests {
         let reach = w.reach_m;
         assert!(total < 8_000, "{total} chunks: {per:?}, reach {reach} m");
         // The spans are kept for the columns the descent visits — a second call from the same
-        // eye reads none anew and holds the same set; from far away nothing stays.
+        // eye reads none anew and holds the same set; at the body's own centre nothing stays.
         let held = view.spans_held();
         let again = view.wanted(&body, eye);
         assert_eq!(again, w);
         assert_eq!(view.spans_held(), held);
-        let r = body.ladder().radius_m();
-        assert!(view.wanted(&body, [r * 3.0, 0.0, 0.0]).is_empty());
+        assert_eq!(view.wanted(&body, [0.0, 0.0, 0.0]).len(), 0);
         assert_eq!(view.spans_held(), 0);
         // Every wanted chunk is in the ladder.
         for k in &w.keys {
@@ -2124,18 +2853,25 @@ mod tests {
     }
 
     #[test]
-    fn the_ladder_from_orbit_is_the_globe_at_the_top_rung_and_from_far_away_nothing() {
+    fn the_ladder_from_orbit_is_the_globe_in_four_coarse_rings_and_no_pose_wants_nothing() {
         let body = home_planet();
         let d = vd_seed::bend::normalize([0.2, 0.9, 0.4]);
         let r = body.ladder().radius_m();
         let mut view = LadderView::default();
-        // 2 000 km up: the nadir is at the top rung, so the whole visible cap is one ring.
+        // 2 000 km up: the whole visible cap, coarsening outward by the tier rule alone.
         let orbit = [d[0] * (r + 2.0e6), d[1] * (r + 2.0e6), d[2] * (r + 2.0e6)];
         let w = view.wanted(&body, orbit);
         let top = body.ladder().rungs - 1;
-        // The top rung holds the cap; the rung below fades in where its band reaches the nadir.
-        assert_eq!(w.rung_max, top);
-        assert!(w.rung_min + 1 >= top, "{}", w.rung_min);
+        // ★ RE-MEASURED 2026-09-15 (the extended ladder). The cap spans FOUR rungs — 11 under the
+        // nadir out to 14 at the horizon — and the ladder's own top (18, a 262 km cell) is six rungs
+        // COARSER than any orbit needs. Before the extension the top rung was 12 and the cap stood
+        // on it alone, because the ladder had nothing coarser to fall to.
+        assert_eq!((w.rung_min, w.rung_max), (11, 14));
+        assert!(
+            w.rung_max < top,
+            "an orbit needs no top rung: {} of {top}",
+            w.rung_max
+        );
         assert!(w.len() > 200, "{}", w.len());
         assert!(w.len() < 6_000, "{}", w.len());
         // The cap crosses face edges: more than one face is wanted, and the cap tiles out to the
@@ -2163,11 +2899,122 @@ mod tests {
             edge_surface,
             r + 2.0e6 - edge_surface,
         );
-        // Beyond two radii: nothing; at the centre: nothing.
-        let far = [d[0] * r * 3.0, d[1] * r * 3.0, d[2] * r * 3.0];
-        assert!(view.wanted(&body, far).is_empty());
-        assert!(view.wanted(&body, [0.0, 0.0, 0.0]).is_empty());
-        assert!(view.wanted(&body, [f64::NAN, 0.0, 0.0]).is_empty());
+        // At the centre, and at a pose that is no pose: nothing. THREE RADII IS NOT FAR — the
+        // globe stands there (`a_far_eye_draws_the_globe_at_every_distance`).
+        assert_eq!(view.wanted(&body, [0.0, 0.0, 0.0]).len(), 0);
+        assert_eq!(view.wanted(&body, [f64::NAN, 0.0, 0.0]).len(), 0);
+    }
+
+    /// ★ THE FAR EYE DRAWS THE GLOBE AT EVERY DISTANCE — THE CLIENT HAS NO FAR EDGE (owner
+    /// 2026-09-15, *"agree"*: the server's visibility radius is the only rule; a realm has a row in
+    /// the window only inside it, and the ladder draws a body at any distance while the body has a
+    /// row). The pilot lifts her hull off the home planet and keeps climbing: the ground never
+    /// leaves the screen, and it coarsens to the top rung by the descent's own rules — no branch
+    /// on how far the eye stands.
+    ///
+    /// MEASURED BEFORE THIS (the owner's window flight of 2026-09-15): 2 706 chunks at 5 856 km of
+    /// altitude, ZERO at 7 932 km with the body's plain outline standing in, 2 526 again at
+    /// 5 086 km. The cutoff was two body radii. Its replacement — the ladder's own far edge, "one
+    /// top-rung chunk column stands one pixel" — is deleted by the same ruling: the extended ladder
+    /// put it at about 2 200 radii, 29 times outside the realm's stated 76.39, so it could never
+    /// fire.
+    #[test]
+    fn a_far_eye_draws_the_globe_at_every_distance() {
+        let body = home_planet();
+        let r = body.ladder().radius_m();
+        let top = body.ladder().rungs - 1;
+        let d = vd_seed::bend::normalize([0.2, 0.9, 0.4]);
+        let at = |k: f64| [d[0] * r * k, d[1] * r * k, d[2] * r * k];
+        let set = |k: f64| LadderView::default().wanted(&body, at(k));
+        // ★ THE COUNT FALLS WITH DISTANCE, and it falls to SIX (the extended ladder, owner
+        // 2026-09-15). MEASURED on this direction: 1 124 chunks at 1.5 radii, 432 at 2, 216 at 3,
+        // 121 at 5, 61 at 10, 27 at 20, and SIX — the whole globe, one chunk a face — from 34 radii
+        // out, at every distance. Before the extension the same walk ROSE instead: 2 015, 2 867,
+        // 3 716, 4 381, 4 875, 5 219, because the ladder's top rung held 9 600 columns and a far
+        // eye wanted the visible hemisphere of them. (The reading was 877 before the crust was
+        // rounded up to a whole top-rung cell. Only the NEAREST stand moved; every farther reading
+        // is unchanged. WHY the nearest one moved is UNMEASURED.)
+        let walk: Vec<usize> = [1.5, 2.0, 3.0, 5.0, 10.0, 20.0, 34.0]
+            .iter()
+            .map(|k| set(*k).len())
+            .collect();
+        assert_eq!(walk, vec![1_124, 432, 216, 121, 61, 27, 6]);
+        for pair in walk.windows(2) {
+            assert!(pair[1] <= pair[0], "the count rose with distance: {walk:?}");
+        }
+        // THE TOP RUNG ALONE, ONE CHUNK A COLUMN, from 34 radii out — and the six columns are the
+        // six faces, so the globe is drawn by one tile a face. The top rung's own chunk count is
+        // SIX by the ladder's construction (one chunk per face edge since 2026-09-15).
+        let per_edge = body.ladder().cells_per_edge(top) as usize;
+        let per_edge = per_edge.div_ceil(vd_terrain::chunk::CHUNK_EDGE);
+        let top_columns = 6 * per_edge * per_edge;
+        assert_eq!(top_columns, 6, "the top rung holds {top_columns} columns");
+        for k in [34.0, 100.0, 1_000.0] {
+            let w = set(k);
+            assert_eq!((w.rung_min, w.rung_max), (top, top), "{k} radii");
+            assert_eq!((w.len(), w.columns()), (6, 6), "{k} radii");
+            assert_eq!(
+                w.urgent_count(),
+                6,
+                "{k} radii: every one is the picture's own need"
+            );
+            let faces: BTreeSet<Face> = w.keys.iter().map(|k| k.face).collect();
+            assert_eq!(faces.len(), 6, "{k} radii: {faces:?}");
+        }
+        // ★ THE CLIENT HAS NO FAR EDGE (owner 2026-09-15, *"agree"*). An eye at a hundred and at a
+        // thousand body radii still wants a NON-EMPTY set, at most the top rung's own six chunks,
+        // and a thousand radii never wants more than ten radii does. The realm's stated visibility
+        // radius is 76.39 radii — its parent ships no row past that — so a thousand radii is a
+        // claim about the ladder's own arithmetic and never a picture anybody sees.
+        let reach_radii =
+            vd_core::geometry::visibility_reach_m(r, vd_core::geometry::VISIBILITY_THETA_MIN_RAD)
+                / r;
+        assert!((76.0..77.0).contains(&reach_radii), "{reach_radii} radii");
+        let at_ten = set(10.0).len();
+        for k in [100.0, 1_000.0] {
+            let n = set(k).len();
+            assert!((1..=top_columns).contains(&n), "{k} radii: {n}");
+            assert!(n <= at_ten, "{k} radii: {n} over ten radii's {at_ten}");
+        }
+    }
+
+    /// ★ THE TOP RUNG'S TERRITORY REACHES EVERYWHERE, because there is no coarser rung to hand the
+    /// ground to — the same branch [`AskBound::fade_bands`] makes for the fade-out band.
+    ///
+    /// MEASURED BEFORE THIS (the far-eye probe): an eye 1.5 radii over the home planet wanted
+    /// 2 015 top-rung chunks and called 1 857 of them MARGIN — "a finer ring already covers this
+    /// ground" — because the top rung's own switch distance is 0.56 radii. The band could never
+    /// read incomplete aloft, and the workers built the ground the pilot had already left.
+    #[test]
+    fn the_top_rungs_territory_has_no_outer_edge_and_every_other_rungs_is_its_switch() {
+        let rungs = 13u8;
+        let free = AskBound::unbounded();
+        assert_eq!(free.territory_m(rungs - 1, rungs), f64::INFINITY);
+        assert_eq!(free.territory_m(0, rungs), switch_m(0));
+        assert_eq!(free.territory_m(rungs - 2, rungs), switch_m(rungs - 2));
+        // A bound rung reads the bound's own radius; the top rung still reaches everywhere.
+        let bound = AskBound::from_switches(vec![100.0; usize::from(rungs)]);
+        assert_eq!(bound.territory_m(0, rungs), 100.0);
+        assert_eq!(bound.territory_m(rungs - 1, rungs), f64::INFINITY);
+        // The ground on the TOP RUNG is URGENT, never MARGIN: from 34 radii the top rung is the
+        // only rung the descent reaches, and every one of its six chunks is the picture's own need.
+        // ★ RE-MEASURED 2026-09-15: 1.5 radii no longer reads the top rung at all — the extended
+        // ladder answers there with rungs 12 to 14, whose territory IS their own switch distance,
+        // so a margin chunk there is the rule working and not the defect this test pins.
+        let body = home_planet();
+        let r = body.ladder().radius_m();
+        let d = vd_seed::bend::normalize([0.2, 0.9, 0.4]);
+        let top_only = LadderView::default()
+            .wanted(&body, [d[0] * r * 34.0, d[1] * r * 34.0, d[2] * r * 34.0]);
+        assert_eq!(top_only.rung_min, body.ladder().rungs - 1);
+        assert_eq!(
+            top_only.urgent_count(),
+            top_only.len(),
+            "a top-rung chunk was classed MARGIN"
+        );
+        let aloft =
+            LadderView::default().wanted(&body, [d[0] * r * 1.5, d[1] * r * 1.5, d[2] * r * 1.5]);
+        assert_eq!((aloft.rung_min, aloft.rung_max), (12, 14));
     }
 
     #[test]
