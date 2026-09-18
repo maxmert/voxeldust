@@ -823,7 +823,8 @@ mod tests {
     #[test]
     fn the_charters_packed_rows_read_what_the_depth_table_reads() {
         for seed in [0x5EEDu64, 0xA11CE, 0xF00D] {
-            let m = BodyDefinition::from_seed(seed, 6_371_000.0).expect("a body");
+            let m = BodyDefinition::from_seed(seed, 6_371_000.0, crate::home::home_facts())
+                .expect("a body");
             let charter = charter_of(&m, 0, CHUNK_EDGE);
             let deepest = m.strata.max_depth_m() + 5;
             for biome in Biome::ALL {
@@ -1039,13 +1040,20 @@ mod tests {
         );
         assert_eq!(column_field(&m, Face::PosX, 0, 0, 1 << 20), None);
         // A chunk above the SEABED but under the SEA: skipped as above every surface, and filled with
-        // water where the cell is under the sea. MEASURED on the home planet (the sea stands 5 297 m
-        // under the ladder radius and covers about one column in a hundred): the deepest of 300
-        // sampled columns at rung 2 (4 m cells, 248 m chunks) stands 489 m under the sea, more than a
-        // chunk and two cells, so the first chunk above its highest surface that is skipped as
-        // "above" still starts under the sea and must hold water.
+        // water where the cell is under the sea. RE-MEASURED 2026-09-16 on slice 8a stage 2 (the
+        // ridged band): the deepest of 1 000 sampled columns at rung 2 (4 m cells, 248 m chunks)
+        // stands 1 382 m under the sea, more than a chunk and two cells, so the first chunk above its
+        // highest surface that is skipped as "above" still starts under the sea and must hold water.
+        //
+        // ★ WHY THE SCAN WIDENED FROM 300 COLUMNS TO 1 000, and it is a MEASUREMENT. Ridged noise is
+        // ONE-SIDED, so the ground ROSE where the crests stand while the sea's own draw did not move
+        // (the sea is solved against the lifted field in stage 6, `slice_8a_design.md` §1.6). The wet
+        // share of the surface therefore fell, and the SAME 300 scattered columns now meet nothing
+        // deeper than 126 m — a third of a chunk. One thousand columns meet 1 382 m, and ten thousand
+        // meet 2 389 m, so the deep sea is still there and the scan was simply too thin to find it.
+        // (The wet share itself is UNMEASURED at this stage; stage 6 solves the sea and states it.)
         let rung = 2;
-        let (face, x, y, depth) = deepest_sea_column(&m, rung, 300);
+        let (face, x, y, depth) = deepest_sea_column(&m, rung, 1_000);
         let chunk_m = s(i64::from(cell_m(rung)) * CHUNK_EDGE as i64);
         let two_cells = s(2 * i64::from(cell_m(rung)));
         assert!(

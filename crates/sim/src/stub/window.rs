@@ -493,11 +493,15 @@ pub(crate) fn current_bodies(
                 // are future tags on this same bag (skip-unknown makes them free).
                 // ★ THE SURFACE TAG (slice 5, R-8): a seed-shaped realm states its frame and the
                 // declared generator tag beside its outline; a hull states none.
+                // ★ THE CHARTER TAG (slice 8b stage 2, crossing A1): the body's physical
+                // facts as whole numbers, beside the surface. A realm without a charter states
+                // none — absence of the tag is absence of the datum, never a default.
                 bag: match config.surface {
                     Some(surface) => vd_core::look::surface_look_bag(
                         &look,
                         child_luma.get(&config.realm).copied(),
                         &surface,
+                        config.charter.as_ref(),
                     ),
                     None => {
                         vd_core::look::self_look_bag(&look, child_luma.get(&config.realm).copied())

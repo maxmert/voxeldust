@@ -88,6 +88,20 @@ fn probe(label: &str, body: &vd_terrain::BodyDefinition) {
         vd_client::ladder_view::column_span_m(top),
         vd_client::ladder_view::column_span_m(top) / radius,
     );
+    // ★ THE ALIAS AT THE RUNGS PAST THE TABLE (slice 8a stage 5; the owner's ruling T6 ask 3: keep
+    // ONE aliased octave there, THE RATIO PRINTED, 8c named as the fix). A rung whose survival rule
+    // kept nothing is given the body's widest octave anyway, and the body states how many cells of
+    // that rung one wavelength of it covers. Under two it stands under Nyquist.
+    let mut alias = String::new();
+    for rung in 0..rungs {
+        if body.aliases_at(rung) {
+            alias.push_str(&format!(" {rung}:{:.2}", body.cells_per_wave(rung)));
+        }
+    }
+    if alias.is_empty() {
+        alias.push_str(" none — the table outlasts the ladder");
+    }
+    println!("far_eye_probe: the ALIASED rungs (rung:cells per wavelength, 8c is the fix):{alias}");
     let d = vd_core::glam::DVec3::new(0.3, 0.5, 0.81).normalize();
     let mut radii: Vec<f64> = vec![1.001, 1.5, 2.0, 3.0, 5.0, 10.0, 34.0, 100.0, 1000.0];
     radii.push(reach_m / radius);
@@ -159,7 +173,15 @@ fn children_census(home: &vd_terrain::BodyDefinition) -> Vec<(String, vd_terrain
                 continue;
             }
         };
-        let Some(child) = vd_terrain::BodyDefinition::from_seed(seed, r) else {
+        // ★ THE BODY IS DRAWN FROM ITS OWN REALM'S CHARTER (slice 8b stage 3): the relief law
+        // reads the moon's stated gravity and density, which is why a moon is shape-limited and
+        // its parent planet is strength-limited.
+        let Some(facts) = vd_bins::body_charter(DEV.universe_seed, &held, &lineage, row.realm)
+            .map(|c| vd_bins::facts_of_charter(&c))
+        else {
+            continue;
+        };
+        let Some(child) = vd_terrain::BodyDefinition::from_seed(seed, r, facts) else {
             continue;
         };
         let ladder = *child.ladder();
@@ -215,7 +237,12 @@ fn census(home: &vd_terrain::BodyDefinition) -> Vec<(String, vd_terrain::BodyDef
         let vd_core::pose::RealmId::Planet(seed) = row.realm else {
             continue;
         };
-        let Some(sibling) = vd_terrain::BodyDefinition::from_seed(seed, r) else {
+        let Some(facts) = vd_bins::body_charter(DEV.universe_seed, &held, &lineage, row.realm)
+            .map(|c| vd_bins::facts_of_charter(&c))
+        else {
+            continue;
+        };
+        let Some(sibling) = vd_terrain::BodyDefinition::from_seed(seed, r, facts) else {
             continue;
         };
         if row.realm == home_realm {

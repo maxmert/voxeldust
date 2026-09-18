@@ -1086,12 +1086,15 @@ fn dispatch(
             .collect::<Vec<u8>>(),
         usage: wgpu::BufferUsages::STORAGE,
     });
-    let mut octave_bytes = Vec::with_capacity(octaves.len() * 32);
+    // ★ ONE WRITER OF THE OCTAVE ROW. This probe hands the shell's own relief kernel the very rows
+    // the plan charter carries, so it writes them through the generator's own writer. A second copy
+    // here read four words of an eight-word row the moment the `kind` word landed (slice 8a stage 2).
+    let mut octave_bytes =
+        Vec::with_capacity(octaves.len() * vd_terrain::gpu::OCTAVE_WORDS * size_of::<i64>());
     for o in octaves {
-        octave_bytes.extend(o.seed.to_le_bytes());
-        octave_bytes.extend(o.frequency_int.raw().to_le_bytes());
-        octave_bytes.extend(o.frequency_frac.raw().to_le_bytes());
-        octave_bytes.extend(o.amplitude.raw().to_le_bytes());
+        for word in vd_terrain::gpu::octave_words(o) {
+            octave_bytes.extend(word.to_le_bytes());
+        }
     }
     let octaves_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: None,

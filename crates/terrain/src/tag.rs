@@ -22,7 +22,14 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 /// (owner, 2026-09-15): the top rung became ONE CHUNK per face edge, so every body's cell count
 /// snaps to a coarser unit and every body's radius moves by up to 1.6 % — the home planet by
 /// 28 683 m. Every address moved with it, so every chunk of every body is a new byte.
-pub const GENERATOR_VERSION: u32 = 3;
+/// ★ 4 IS THE LANDFORM ARC's FIRST TWO SLICES (owner, 2026-09-16..18; rulings T1–T9): 8a — the
+/// slope spectrum on the fine octaves, the ridged middle band, the per-column roughness factor on
+/// its placeholder, the cap-rock bench, the wavelength survival rule with its stated alias, and the
+/// crossfade under the ridge — and 8b — the relief law read from the body's own charter (the home
+/// planet's mountains halved to 8 276 m). The charter's other words (the spin, the tilt, the derived
+/// pressure, the greenhouse, the crust, the water, the sea) are STATED and read by no kernel yet, so
+/// they move no byte; the recipe's sea keeps its draw until 8c (ruling T8).
+pub const GENERATOR_VERSION: u32 = 4;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -73,7 +80,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 3,
+            GENERATOR_VERSION, 4,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -96,5 +103,5 @@ mod tests {
         );
     }
 
-    const DECLARED_PIN: u64 = 10_363_069_377_454_183_796;
+    const DECLARED_PIN: u64 = 4_196_931_793_486_802_419;
 }

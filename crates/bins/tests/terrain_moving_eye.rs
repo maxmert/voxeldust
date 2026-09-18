@@ -733,15 +733,15 @@ fn print_boarding_instrument(tag: &str, st: &DevState, gw: (u64, u64)) {
 }
 
 /// * THE GAP'S OWN LINE (2026-09-16, the walk-gap measurement -- THE FLIGHT TEST ONLY, no product
-/// code). The time course prints every twenty-fifth sample, so a band that goes incomplete on
-/// seven samples of 1 234 can leave nothing in the log. This states ONE sample whole, and the
-/// counters DIFFERENCED against the sample before it: the chunks the workers finished in that
-/// interval and the mean wall time each of them cost. That mean is the nearest thing the stamp
-/// carries to a per-chunk build time.
+///   code). The time course prints every twenty-fifth sample, so a band that goes incomplete on
+///   seven samples of 1 234 can leave nothing in the log. This states ONE sample whole, and the
+///   counters DIFFERENCED against the sample before it: the chunks the workers finished in that
+///   interval and the mean wall time each of them cost. That mean is the nearest thing the stamp
+///   carries to a per-chunk build time.
 ///
 /// * WHAT THE STAMP NOW CARRIES (2026-09-16): the worst SINGLE chunk's build and its key, and the
-/// LATCHED gap row - the missing urgent chunks by name, what the previous descent called each of
-/// them, and what the descent did on that frame. `gap_record` prints the latched row.
+///   LATCHED gap row - the missing urgent chunks by name, what the previous descent called each of
+///   them, and what the descent did on that frame. `gap_record` prints the latched row.
 fn gap_line(t: f64, stamp: &vd_devproto::DevTerrainStamp, prev: Option<(f64, [u64; 6])>) -> String {
     let now = [
         stamp.built_chunks,
@@ -1098,10 +1098,11 @@ fn read_band(
             prev_urgent_frames = stamp.urgent_frames;
         }
         let line = gap_line(t, stamp, prev_counters);
-        if stamp.chunks_urgent > 0 && prev_urgent == 0 {
-            if let Some(before) = prev_line.as_deref() {
-                eprintln!("terrain_moving_eye/{leg}: THE GAP, the sample BEFORE - {before}");
-            }
+        if stamp.chunks_urgent > 0
+            && prev_urgent == 0
+            && let Some(before) = prev_line.as_deref()
+        {
+            eprintln!("terrain_moving_eye/{leg}: THE GAP, the sample BEFORE - {before}");
         }
         if stamp.chunks_urgent > 0 {
             eprintln!("terrain_moving_eye/{leg}: THE GAP - {line}");

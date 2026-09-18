@@ -9,6 +9,17 @@
 //! answers for a host that holds its direction as floats: the doors of [`crate::units`] on either side
 //! of the integer field, and the only floats this module names.
 //!
+//! ★ **THE CAP-ROCK BENCH** (slice 8a stage 4) stands AFTER the sum: the column's surface is pulled
+//! toward the nearest BED TOP, and a bed top stands at a FIXED RADIUS, so a bench runs along a whole
+//! hillside at ONE HEIGHT. Its strength fades with the rung and is zero where a tread falls under
+//! four cells, so a coarse rung draws the hill without it — which is why the dropped-octave bound
+//! below gained the terrace's own Lipschitz factor and its fade's own step.
+//!
+//! ★ **THE PER-COLUMN ROUGHNESS FACTOR** (slice 8a stage 3) stands inside the sum: the FINE octaves
+//! are multiplied ONCE by `m ∈ [M_MIN, 1]`, which the column's own slow field draws. So a plain is
+//! flat and a range is rough out of one table, and the factor never depends on the rung — which is
+//! why the dropped-octave bound below still holds exactly.
+//!
 //! **Example.** Along the direction of the pilot's boots the field at rung 3 is the rung-0 hill
 //! without the last three ripples, and the two are never further apart than the dropped amplitudes
 //! promise (the test below measures it on the home planet).
@@ -17,13 +28,20 @@ use crate::body::BodyDefinition;
 use crate::strata::Biome;
 use crate::units::{direction_of_unit, metres_of_q28, q28_of_metres};
 use vd_recipe::Gi;
-use vd_recipe::height::{biome_of as recipe_biome, relief};
+use vd_recipe::height::{biome_of as recipe_biome, relief_shaped, roughness_factor};
+use vd_recipe::terrace::terrace;
 
 /// The surface's radius along a unit direction at a rung, in GAP STEPS at
 /// [`crate::units::LENGTH_BITS`] fraction bits. `dir` carries the bend's 40 fraction bits.
 #[must_use]
 pub fn height(body: &BodyDefinition, dir: [Gi; 3], rung: u8) -> Gi {
-    body.radius + relief(body.octaves_at(rung), dir)
+    // ★ THE BENCH IS LAST (slice 8a stage 4): the octave sum answers the raw surface and the terrace
+    // pulls it toward the nearest bed top. ONE SOURCE — `vd_recipe::terrace::terrace` is the very
+    // function the card's column pass runs, so a picture and a pair of boots stand on one bench.
+    terrace(
+        &body.terrace_at(rung),
+        body.radius + relief_shaped(body.octaves_at(rung), dir, body.roughness()),
+    )
 }
 
 /// THE FLOAT SEAM of the height field: the surface's radius in METRES along a direction a host holds
@@ -33,6 +51,25 @@ pub fn height(body: &BodyDefinition, dir: [Gi; 3], rung: u8) -> Gi {
 #[must_use]
 pub fn height_m(body: &BodyDefinition, dir: [f64; 3], rung: u8) -> f64 {
     metres_of_q28(height(body, direction_of_unit(dir), rung))
+}
+
+/// ★ THE PER-COLUMN ROUGHNESS FACTOR as a real number in `[M_MIN, 1]`, for a host outside the recipe
+/// — the slope histogram's instrument reads it to say which columns are a PLAIN and which a RANGE
+/// (slice 8a stage 3, measurement M-C). The shape is the recipe's own kernel; this crate only names
+/// the answer, so an instrument can never measure a factor the field does not use.
+#[must_use]
+pub fn roughness_at(body: &BodyDefinition, dir: [f64; 3]) -> f64 {
+    crate::units::share_of_q28(roughness_factor(body.roughness(), direction_of_unit(dir)))
+}
+
+/// ★ THE CAP-ROCK BENCH as a real number, for a host outside the recipe (slice 8a stage 4): a
+/// surface radius in METRES, pulled toward the nearest bed top at a rung. The skyline march reads it
+/// so its own field is the field the world ships and not a field nobody draws; the shape between the
+/// two doors is the recipe's own integer kernel, so an instrument can never measure a bench the
+/// ground does not have.
+#[must_use]
+pub fn terrace_m(body: &BodyDefinition, surface_m: f64, rung: u8) -> f64 {
+    metres_of_q28(terrace(&body.terrace_at(rung), q28_of_metres(surface_m)))
 }
 
 /// THE POLE AXIS of every body: `+Z` in the body's own frame — the axis the world's orbits turn
@@ -152,6 +189,27 @@ mod tests {
                 q28_of_metres(surface_m)
             )
         );
+        // ★ THE CAP-ROCK BENCH's own door (slice 8a stage 4): the same kernel the column pass runs,
+        // in metres, so an instrument can never measure a bench the ground does not have. Three
+        // statements: the door IS the kernel; the height field already carries it, so terracing a
+        // terraced surface at rung 0 moves it again; and a rung the bench does not reach answers its
+        // argument unchanged.
+        let raw = m.radius
+            + vd_recipe::height::relief_shaped(
+                m.octaves_at(0),
+                dir(Face::PosX, 0.2, 0.3),
+                m.roughness(),
+            );
+        assert_eq!(
+            terrace_m(&m, metres_of_q28(raw), 0),
+            metres_of_q28(vd_recipe::terrace::terrace(&m.terrace_at(0), raw))
+        );
+        let benched = metres_of_q28(height(&m, dir(Face::PosX, 0.2, 0.3), 0));
+        assert!(
+            (terrace_m(&m, metres_of_q28(raw), 0) - benched).abs() < 1e-6,
+            "the height field carries the bench already"
+        );
+        assert_eq!(terrace_m(&m, 1_234_567.0, 9), 1_234_567.0);
     }
 
     #[test]
@@ -215,6 +273,44 @@ mod tests {
             j += 1;
         }
         assert!(cooled > 0, "height cools some column: {cooled}");
+    }
+
+    /// ★ THE FLOAT DOOR OF THE ROUGHNESS FACTOR answers the recipe's own word as a share (slice 8a
+    /// stage 3). The instrument that measures the planet's plains and ranges (M-C, the slope
+    /// histogram) reads THIS function, so a door that answered something else would make every
+    /// number in that measurement a different field's.
+    ///
+    /// Three statements. (1) The door is the recipe's own kernel through the exit for a share —
+    /// exactly, because the divisor is a power of two. (2) Over a scan the answer stays inside
+    /// `[M_MIN, 1]`. (3) The scan meets a plain and a range, so the door carries the contrast and
+    /// not a constant.
+    #[test]
+    fn the_float_door_of_the_roughness_factor_reads_the_recipes_own_word() {
+        use vd_recipe::height::roughness_factor;
+        let m = home();
+        let (mut plains, mut ranges) = (0, 0);
+        let mut i = 0u32;
+        while i < 200 {
+            let a = -1.0 + f64::from(i % 20) / 10.0;
+            let b = -1.0 + f64::from(i / 20) / 5.0;
+            let d = dir(Face::ALL[(i % 6) as usize], a, b);
+            // The float direction the door takes in, through the same bend the integer path used.
+            let unit = crate::units::unit_of_direction(d);
+            let word = roughness_factor(m.roughness(), crate::units::direction_of_unit(unit));
+            let share = roughness_at(&m, unit);
+            assert_eq!(
+                share,
+                crate::units::share_of_q28(word),
+                "the door is the word at {i}"
+            );
+            assert!(share >= 0.06, "under the floor at {i}: {share}");
+            assert!(share <= 1.0, "over the ceiling at {i}: {share}");
+            plains += i32::from(share <= 0.25);
+            ranges += i32::from(share >= 0.75);
+            i += 1;
+        }
+        assert!(plains > 0, "the door meets a plain: {plains}");
+        assert!(ranges > 0, "and a range: {ranges}");
     }
 
     /// THE BIOME CODE AND THE BIOME NAME ARE ONE TABLE. The recipe answers a code and this crate

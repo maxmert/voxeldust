@@ -118,6 +118,39 @@ const _: () = assert!(1 << SAMPLE_GAPS_LOG2 == COLUMN_SAMPLES_PER_EDGE - 1);
 /// reciprocal, and π is [`PI`], `round(π · 2²⁸)`. The ratio is carried at [`BOUND_BITS`] fraction bits
 /// so its SQUARE lands at the noise's own 28 with no shift; the amplitude then reads its share and the
 /// sum is gap steps at [`LENGTH_BITS`].
+///
+/// ★ **A RIDGED OCTAVE IS BOUNDED BY ITS FIRST-ORDER TERM** (slice 8a stage 2;
+/// `slice_8a_design.md` §2.2). The curvature argument above needs a SECOND derivative, and a ridged
+/// octave has a KINK at `n = 0` — that is what a crest IS — so its second derivative is unbounded
+/// there and the argument does not hold. Its FIRST derivative is bounded, and it is exactly twice
+/// the smooth octave's (the transform's slope is `∓2` where the noise's is `±1`), so the term
+/// becomes `min(1, 2·π·edge·f/R) × amplitude`. That is LARGER than the curvature term wherever the
+/// curvature term is honest, and it is honest where the curvature term is not. Without it a surface
+/// chunk's column span can be short and a chunk is missed — a hole, which is a defect.
+///
+/// **A worked number.** The home planet's 781 m octave at rung 0: `s = 0.0625`, so the smooth term
+/// is `s² = 0.0039` of its 25.1 m amplitude (98 mm) and the ridged term is `2s = 0.125` of it
+/// (3.14 m) — thirty-two times as much, which is `2/s`.
+///
+/// The choice is an ARITHMETIC MASK on the octave's own `kind` word, the same select the kernel
+/// uses, so the two can never answer different questions about one octave.
+///
+/// ★ **A FINE OCTAVE CARRIES THE ROUGHNESS FACTOR'S OWN VARIATION** (slice 8a stage 3;
+/// `slice_8a_design.md` §1.2 and §2.3). The amplitudes below are read at the factor's CEILING
+/// (`m = 1`), which bounds the fine octaves' own VALUE — but the factor itself moves across a
+/// chunk, and `m₁·F₁ − m₂·F₂ = m₁(F₁ − F₂) + F₂(m₁ − m₂)`. The first half is the term already
+/// summed; the second is `Σ_fine a × |Δm|`, and it is added to every fine octave's share:
+///
+/// ```text
+///    |Δm| ≤ (1 − m_min) · max|fade′| · |Δr| = (1 − m_min) · (15/16) · min(1, s_rough²)
+/// ```
+///
+/// `max|fade′| = 30·t²(t−1)²` at `t = ½`, which is `15/8`, and `Δr` is HALF the field's own change
+/// because the reading is `(n + 1)/2` — so the two make `15/16`. `s_rough` is the same sampling
+/// ratio the octaves use, on the roughness field's own frequency. The field is CONTINENTAL (20 km
+/// to 120 km), so at rung 0 the term is millimetres; at a coarse rung, where a chunk is kilometres
+/// wide, it is real, and without it a surface chunk's span could be short — a hole, which is a
+/// defect.
 #[must_use]
 pub fn column_bound(body: &BodyDefinition, rung: u8) -> Gi {
     // The sample grid's own spacing in gap steps: a chunk's width over the grid's gaps. The gap count
@@ -127,22 +160,79 @@ pub fn column_bound(body: &BodyDefinition, rung: u8) -> Gi {
         (crate::chunk::CHUNK_EDGE as i64 * i64::from(vd_seed::ladder::cell_m(rung)) * STEPS_PER_M)
             >> SAMPLE_GAPS_LOG2,
     );
+    // ★ THE ROUGHNESS FACTOR'S OWN VARIATION over the same sample spacing, at the noise's bits: the
+    // field's second-order share, capped at one, times `(1 − m_min) · 15/16`. A FINE octave adds it;
+    // a coarse one does not, because the factor never touches a coarse octave.
+    let rough = body.roughness();
+    let drift = (curvature_share(body, edge_steps, &rough.octave)
+        .mul_shr(NOISE_ONE - rough.m_min, NOISE_BITS)
+        * Gi::new(FADE_SLOPE_NUM))
+        >> FADE_SLOPE_LOG2;
+    let first_fine = rough.first_fine.raw() as usize;
     let mut bound = Gi::ZERO;
-    for o in body.octaves_at(rung) {
+    let live = body.octaves_at(rung);
+    let mut k = 0usize;
+    while k < live.len() {
+        let o = &live[k];
         let frequency = (o.frequency_int << NOISE_BITS) + o.frequency_frac;
         // frequency × edge, then ÷ radius, then × π — each at BOUND_BITS.
         let product = frequency.mul_shr(edge_steps, NOISE_BITS - BOUND_BITS);
         let ratio = product.mul_shr(body.radius_recip, RADIUS_RECIP_BITS);
         let s = ratio.mul_shr(PI, NOISE_BITS);
         // Half of a wave's second-order term, times two axes: the two cancel, so the square stands.
+        // `s` carries BOUND_BITS, so its square carries the noise's own bits with no shift.
         let curve = s * s;
-        // min(1, curve), branchless: one minus the positive part of (1 − curve).
-        let share = NOISE_ONE - greater(NOISE_ONE - curve, Gi::ZERO);
+        // A RIDGED octave's first-order term, `2s`, at the noise's bits: one more shift left than
+        // the one that takes BOUND_BITS to NOISE_BITS.
+        let first = s << (BOUND_BITS + 1);
+        // The select, on the mask and never on a branch.
+        let term = curve + (o.kind & (first - curve));
+        // The factor's own drift, on a FINE octave only.
+        let term = term + if k < first_fine { Gi::ZERO } else { drift };
+        // min(1, term), branchless: one minus the positive part of (1 − term).
+        let share = NOISE_ONE - greater(NOISE_ONE - term, Gi::ZERO);
         bound += (o.amplitude * share) >> NOISE_BITS;
+        k += 1;
     }
     // The amplitudes carry AMP_BITS below a gap step; the bound leaves at the length format's bits.
-    bound << (LENGTH_BITS - vd_recipe::height::AMP_BITS)
+    let bound = bound << (LENGTH_BITS - vd_recipe::height::AMP_BITS);
+    // ★ THE CAP-ROCK BENCH AMPLIFIES IT (slice 8a stage 4). Everything above bounds how far the
+    // surface can stand from the samples that measure it — a DIFFERENCE — and the terrace multiplies
+    // every difference under it by at most `1 + (7/9)·strength` (`vd_terrain::body::TERRACE_LIP_NUM`,
+    // re-derived for the quintic and LARGER than `04`'s cubic constant). One multiply at the end,
+    // because the terrace is a function of the height alone and reads nothing about the column.
+    // Without it a surface chunk's span can be short and a chunk is missed — a hole, which is a
+    // defect.
+    //
+    // ★ THE BENCH ADDS THE LESSER OF ITS TWO HONEST BOUNDS. The terrace amplifies a difference by
+    // `Lip − 1` of it; it also never carries ANY column further than its own pull bound, so a
+    // difference of two columns cannot gain more than twice that. Both hold, and the cheaper one is
+    // the one the span pays for: near the ground a chunk is narrow and the amplification is small,
+    // while at a coarse rung a chunk is kilometres wide and twice the pull is the far smaller number.
+    // `greater` against zero is the fence's own branchless lesser.
+    let amplified = bound.mul_shr(body.lip(rung) - NOISE_ONE, NOISE_BITS);
+    let capped = body.pull_bound(rung) << 1;
+    let added = amplified - greater(amplified - capped, Gi::ZERO);
+    bound + added + (body.terrace_slack() << 1)
 }
+
+/// ONE OCTAVE'S SECOND-ORDER SHARE over a sample spacing, capped at one, at [`NOISE_BITS`]: the
+/// curvature argument [`column_bound`] states, on one octave's own frequency. The roughness field's
+/// own drift reads it, and so could any other slow field a later slice adds.
+fn curvature_share(body: &BodyDefinition, edge_steps: Gi, o: &vd_recipe::height::Octave) -> Gi {
+    let frequency = (o.frequency_int << NOISE_BITS) + o.frequency_frac;
+    let product = frequency.mul_shr(edge_steps, NOISE_BITS - BOUND_BITS);
+    let ratio = product.mul_shr(body.radius_recip, RADIUS_RECIP_BITS);
+    let s = ratio.mul_shr(PI, NOISE_BITS);
+    let curve = s * s;
+    NOISE_ONE - greater(NOISE_ONE - curve, Gi::ZERO)
+}
+
+/// `max|fade′| ÷ 2 = 15/16` as a numerator and a shift: the quintic `t³(t(6t − 15) + 10)` has slope
+/// `30·t²(t − 1)²`, whose largest value is `15/8` at `t = ½`, and the roughness reading is HALF the
+/// field, so the two make fifteen sixteenths. A numerator and a shift, never a divide (ruling F7).
+const FADE_SLOPE_NUM: i64 = 15;
+const FADE_SLOPE_LOG2: u32 = 4;
 
 /// The sampling ratio's fraction bits: half the noise's, so the ratio's SQUARE lands at the noise's
 /// own without a shift.
@@ -376,6 +466,164 @@ mod tests {
     use super::*;
     use crate::home::home_planet;
 
+    /// ★ A RIDGED OCTAVE WIDENS THE COLUMN BOUND (slice 8a stage 2; `slice_8a_design.md` §2.2).
+    ///
+    /// A ridged octave has a KINK at `n = 0` — that is what a crest IS — so the curvature argument
+    /// the smooth bound rests on does not hold for it, and the bound must fall back on the FIRST
+    /// derivative, which is twice the noise's. The test states the whole bound from first principles
+    /// in real numbers — `s = π · edge / λ`, `min(1, s²)` for a smooth octave and `min(1, 2s)` for a
+    /// ridged one, times the amplitude — and compares it with the shipped word.
+    ///
+    /// RED before the stage: every octave took the curvature term, so the home planet's bound at
+    /// rung 0 stood at the smooth number and a chunk whose crest left the column's span was missed —
+    /// a hole, which is a defect.
+    #[test]
+    fn a_ridged_octave_widens_the_column_bound() {
+        let m = home_planet();
+        // THE HOME PLANET HAS CRESTS: the band in metres selects five octaves, 12.5 km down to
+        // 781 m — read from the body's own charter, never from the draw.
+        let live = m.octaves_at(0);
+        let radius_m = m.radius_m();
+        let mut ridged_count = 0;
+        for o in live {
+            let lambda = radius_m / crate::body::octave_frequency(o);
+            let in_band = (lambda >= crate::body::RIDGE_LO_M as f64)
+                & (lambda <= crate::body::RIDGE_HI_M as f64);
+            assert_eq!(
+                o.kind == vd_recipe::height::OCTAVE_RIDGED,
+                in_band,
+                "octave of {lambda} m"
+            );
+            ridged_count += i32::from(in_band);
+        }
+        assert_eq!(
+            ridged_count, 5,
+            "octaves 5..=9 are crests on the home planet"
+        );
+
+        // THE SAME BODY WITH EVERY OCTAVE SMOOTH: the ONLY difference is the kind word, so what
+        // separates the two bounds is the transform and nothing else.
+        let mut plain = m;
+        let mut o = 0;
+        while o < plain.octaves.len() {
+            plain.octaves[o].kind = vd_recipe::height::OCTAVE_SMOOTH;
+            o += 1;
+        }
+
+        // The bound stated in real numbers, at a stated rung: the sum, and HOW MANY of its terms
+        // stood at the ceiling. The count is read below, because a ceiling no octave ever reaches
+        // is a line nobody walks.
+        let want_m = |body: &BodyDefinition, rung: u8| -> (f64, usize) {
+            let edge_m = f64::from(crate::chunk::CHUNK_EDGE as u32)
+                * f64::from(vd_seed::ladder::cell_m(rung))
+                / f64::from(1u32 << SAMPLE_GAPS_LOG2);
+            let mut sum = 0.0;
+            let mut at_ceiling = 0usize;
+            for o in body.octaves_at(rung) {
+                let lambda = radius_m / crate::body::octave_frequency(o);
+                let s = std::f64::consts::PI * edge_m / lambda;
+                let term = if o.kind == vd_recipe::height::OCTAVE_RIDGED {
+                    2.0 * s
+                } else {
+                    s * s
+                };
+                // The cap is WRITTEN AS A COMPARISON: the fence bans `f64::min` (it is documented
+                // non-deterministic on +0.0 against −0.0), even in a test.
+                let capped = if term > 1.0 {
+                    at_ceiling += 1;
+                    1.0
+                } else {
+                    term
+                };
+                sum += crate::body::octave_amplitude_m(o) * capped;
+            }
+            // ★ THE CAP-ROCK BENCH AMPLIFIES THE WHOLE SUM (slice 8a stage 4): the column bound is a
+            // bound on a DIFFERENCE, and the terrace multiplies every difference under it by its own
+            // rung's Lipschitz word, then stands its own rounding slack on top — twice, because a
+            // difference reads two columns.
+            let lip = crate::units::share_of_q28(body.lip(rung));
+            let slack = 2.0 * metres_of_q28(body.terrace_slack());
+            (sum * lip + slack, at_ceiling)
+        };
+
+        // Rung 0, where the five crests are live and none of them is capped: the ridged bound is
+        // STRICTLY wider, and both stand where the real-number statement puts them.
+        let ridged_m = column_bound_m(&m, 0);
+        let smooth_m = column_bound_m(&plain, 0);
+        assert!(
+            ridged_m > smooth_m,
+            "the crests widen the bound: {ridged_m} m against {smooth_m} m"
+        );
+        // The shipped word stands AT OR UNDER the real-number statement and within one part in
+        // fifty of it. Under, because every step of the integer path truncates toward zero; within
+        // one part in fifty, because the sampling ratio is carried at [`BOUND_BITS`] = 14 fraction
+        // bits and the coarsest crest's own ratio is only 64 of those units. A bound that drifted
+        // far from the statement would say the two are no longer the same quantity.
+        let (want_ridged, ridged_at_ceiling) = want_m(&m, 0);
+        let (want_smooth, smooth_at_ceiling) = want_m(&plain, 0);
+        // The doc comment's claim, stated as a measurement: at rung 0 a chunk is narrower than every
+        // live octave, so no term stands at its ceiling and the bound is the whole sum.
+        assert_eq!(ridged_at_ceiling, 0, "a crest caps at rung 0");
+        assert_eq!(smooth_at_ceiling, 0, "a smooth octave caps at rung 0");
+        assert!(
+            ridged_m <= want_ridged,
+            "the ridged bound {ridged_m} m over its statement {want_ridged} m"
+        );
+        assert!(
+            ridged_m > want_ridged * 0.97,
+            "the ridged bound {ridged_m} m against {want_ridged} m"
+        );
+        assert!(
+            smooth_m <= want_smooth,
+            "the smooth bound {smooth_m} m over its statement {want_smooth} m"
+        );
+        assert!(
+            smooth_m > want_smooth * 0.98,
+            "the smooth bound {smooth_m} m against {want_smooth} m"
+        );
+
+        // ★ THE WORKED NUMBER the doc comment states: the 781 m octave at rung 0 alone. Its sample
+        // spacing is a quarter chunk — 15.5 m at rung 0 — so `s = π · 15.5 / 781.25 = 0.0623`, the
+        // smooth term is `s² = 0.0039` of its amplitude and the ridged term is `2s = 0.1247` of it.
+        // The ratio is `2/s`, which is thirty-two.
+        let finest_crest = live
+            .iter()
+            .rfind(|o| o.kind == vd_recipe::height::OCTAVE_RIDGED)
+            .expect("a crest");
+        let lambda = radius_m / crate::body::octave_frequency(finest_crest);
+        assert!((lambda - 781.25).abs() < 0.5, "{lambda} m");
+        let edge_m = f64::from(crate::chunk::CHUNK_EDGE as u32) / 4.0;
+        let ratio = 2.0 / (std::f64::consts::PI * edge_m / lambda);
+        assert!((ratio - 32.1).abs() < 0.2, "the first order buys {ratio}×");
+
+        // The bound still NESTS and still stands under the live amplitudes at every rung, which is
+        // the promise the span reads it for.
+        //
+        // ★ AND THE CEILING IS REAL GROUND, NOT A LINE NOBODY WALKS. At a COARSE rung the sample
+        // spacing is wider than the octave's own wavelength — at the home planet's top rung a chunk
+        // is four thousand kilometres and the longest wave is four hundred — so `s` passes one and
+        // the term stands at its ceiling. The loop counts every capped term over every rung, and the
+        // count below states that the coarse rungs meet them.
+        let mut at_ceiling = 0usize;
+        let mut rung = 0u8;
+        while rung < m.ladder.rungs {
+            at_ceiling += want_m(&m, rung).1;
+            assert!(
+                column_bound(&m, rung) <= m.relief_bound(rung),
+                "rung {rung}: the bound leaves the amplitudes"
+            );
+            assert!(
+                column_bound(&m, rung) >= column_bound(&plain, rung),
+                "rung {rung}"
+            );
+            rung += 1;
+        }
+        assert!(
+            at_ceiling > 0,
+            "no octave of any rung stands at the bound's ceiling: the cap is never taken"
+        );
+    }
+
     /// The span holds the centre's surface chunk, widened by the column bound, stays inside the
     /// band at the top rung (where one chunk is the whole band), and widens on a column whose
     /// corners sit in other chunks than its centre.
@@ -427,12 +675,28 @@ mod tests {
             "{coarse:?}"
         );
         // A column of one chunk exists at rung 0 now that the margin is the bound, not a chunk.
+        //
+        // ★ AND AT RUNG 0 IT NO LONGER DOES — THE CAP-ROCK BENCH'S PRICE, MEASURED (slice 8a stage
+        // 4). The terrace amplifies every variation under it by 1.4358, so the rung-0 column bound
+        // stands at 32.98 m where it stood at 22.97 m, and TWICE it — 65.96 m — is over a 62-cell
+        // chunk. No rung-0 column can fit in one chunk any more: over 400 columns of face `+X` the
+        // spans read 0 of one chunk, 338 of two and 62 of three or more. The claim therefore moves
+        // to a rung the bench does not reach, where it still holds.
         let mut single = 0;
         for x in 300..340 {
-            let (lo, hi) = surface_chunk_span(&m, Face::PosX, 0, x, 700);
+            let (lo, hi) = surface_chunk_span(&m, Face::PosX, 6, x, 700);
             single += i32::from(lo == hi);
         }
-        assert!(single > 0);
+        assert!(
+            single > 0,
+            "a one-chunk column at a rung the bench leaves alone"
+        );
+        let mut wide = 0;
+        for x in 300..340 {
+            let (lo, hi) = surface_chunk_span(&m, Face::PosX, 0, x, 700);
+            wide += i32::from(hi > lo);
+        }
+        assert_eq!(wide, 40, "every rung-0 column spans two chunks or more");
         // The top rung: the band is one chunk, so the span is (0, 0) whatever the heights.
         let top = m.ladder().rungs - 1;
         assert_eq!(surface_chunk_span(&m, Face::PosX, top, 3, 3), (0, 0));
@@ -559,6 +823,7 @@ mod tests {
         let other = BodyDefinition::from_seed(
             m.seed + 1,
             f64::from_bits(crate::home::HOME_PLANET_RADIUS_BITS),
+            crate::home::home_facts(),
         )
         .expect("on the ladder");
         assert_ne!(chunk_digest(&other, key), Some(d));
@@ -583,7 +848,8 @@ mod tests {
         let check = golden_self_check(&m).expect("the home planet self-checks");
         assert_eq!(golden_self_check(&m), Some(check));
         // A tiny unnamed test body: the keys wrap into it, and its check differs.
-        let rock = BodyDefinition::from_seed(5, 3_000.0).expect("a test body of 3 km");
+        let rock = BodyDefinition::from_seed(5, 3_000.0, crate::body::ROCK_3KM_FACTS)
+            .expect("a test body of 3 km");
         for entry in GOLDEN_SELF_CHECK_KEYS {
             let key = self_check_key(&rock, entry);
             assert!(

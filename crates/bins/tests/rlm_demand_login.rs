@@ -451,6 +451,29 @@ fn a_demand_login_draws_moving_planets_not_a_frozen_scene() {
         std::thread::sleep(Duration::from_millis(200));
     }
     eprintln!("[repro] drawn realm_boxes t0: {:?}", last.realm_boxes);
+    // ★ THE CHARTER REACHED THE CLIENT (the landform arc, slice 8b stage 2; crossing A1). A running
+    // seed-shaped realm states its physical facts as whole numbers in its own look bag, and the
+    // client decodes them off the composed row. This is the END-TO-END read: shard → gateway →
+    // client → the diagnosis surface. A realm that states no surface states no charter and is not
+    // counted here, so the assertion is about what DID arrive and is never vacuous.
+    let chartered: Vec<_> = last
+        .realm_boxes
+        .iter()
+        .filter(|b| b.charter.is_some())
+        .collect();
+    eprintln!("[charter] drawn realms carrying a charter: {chartered:?}");
+    assert!(
+        !chartered.is_empty(),
+        "no drawn realm carried a charter: {:?}",
+        last.realm_boxes
+    );
+    for b in &chartered {
+        let c = b.charter.expect("filtered on presence");
+        assert!(
+            c.gravity_mm_s2 > 0 && c.bulk_density_kgm3 > 0 && c.t_eq_mk > 0,
+            "a charter arrived with a word at zero: {b:?}"
+        );
+    }
     let planet0: Vec<_> = last
         .realm_boxes
         .iter()

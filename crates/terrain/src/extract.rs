@@ -1045,22 +1045,38 @@ pub(crate) mod tests {
     #[test]
     fn a_home_planet_surface_is_well_formed_and_neighbours_share_no_triangle() {
         let m = home_planet();
-        // Two neighbouring columns whose SURFACE lies in the same chunk along the radial, so the
-        // shared face carries the surface's own crossings: the first such pair from column 40 on
-        // (on the earth-like home planet the relief moves the surface a chunk between some
-        // neighbours, which is the extractor's business, not this fixture's).
-        let mut x0 = 40;
-        while surface_chunk_z(&m, Face::NegZ, 0, x0, 41)
-            != surface_chunk_z(&m, Face::NegZ, 0, x0 + 1, 41)
-        {
-            x0 += 1;
+        // ★ TWO NEIGHBOURING CHUNKS WHOSE SURFACE LIES IN THE SAME CHUNK ALONG THE RADIAL, so the
+        // shared face carries the surface's own crossings. The walk reads the BODY'S OWN LADDER for
+        // where to look — a stretch a chunk wide, a quarter of the way along the face — and it
+        // counts BOTH kinds of pair it meets. On an earth-like body the relief moves the surface a
+        // chunk between some neighbours, which is the extractor's business and not this fixture's;
+        // counting both kinds is what keeps the search honest when the ground moves under it, and a
+        // stretch that held only one kind would say so here instead of walking past it.
+        let chunks_per_edge = (m.ladder().cells_per_edge(0) as i32 - 1) / CHUNK_EDGE as i32;
+        let y0 = chunks_per_edge / 4;
+        let mut x0 = -1;
+        let mut split = 0;
+        let mut x = chunks_per_edge / 4;
+        while x < chunks_per_edge / 4 + CHUNK_EDGE as i32 {
+            if surface_chunk_z(&m, Face::NegZ, 0, x, y0)
+                == surface_chunk_z(&m, Face::NegZ, 0, x + 1, y0)
+            {
+                if x0 < 0 {
+                    x0 = x;
+                }
+            } else {
+                split += 1;
+            }
+            x += 1;
         }
-        let z = surface_chunk_z(&m, Face::NegZ, 0, x0, 41);
+        assert!(x0 >= 0, "a pair of chunks whose surface shares a chunk");
+        assert!(split > 0, "and a pair whose surface crosses a chunk");
+        let z = surface_chunk_z(&m, Face::NegZ, 0, x0, y0);
         let key = |x: i32| ChunkKey {
             face: Face::NegZ,
             rung: 0,
             x,
-            y: 41,
+            y: y0,
             z,
         };
         let a = sample_box(&m, key(x0)).expect("in the band");

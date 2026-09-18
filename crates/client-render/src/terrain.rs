@@ -35,6 +35,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// The ruler ball's icosphere subdivisions: facets of about half a degree, so a silhouette facet's
+/// depth stands under a quarter of a cell past the true limb on every pinned stand (see the ball's
+/// construction).
+const RULER_BALL_SUBDIVISIONS: u32 = 7;
+
 use bevy::prelude::*;
 use crossbeam_channel::{Receiver, bounded};
 use std::collections::BTreeSet;
@@ -2408,7 +2413,9 @@ pub(crate) fn sync_terrain(
             lead_centres.insert(realm, (lead_center, facing_of(lead_box)));
         }
         if let Some(surface) = rbox.surface {
-            terrain.lane.state_surface(realm, &surface, &look_of(rbox));
+            terrain
+                .lane
+                .state_surface(realm, &surface, rbox.charter.as_ref(), &look_of(rbox));
         }
         if let Some((_, lux)) = rbox.luma
             && brightest.is_none_or(|(b, _)| lux > b)
@@ -2501,6 +2508,10 @@ pub(crate) fn sync_terrain(
         // The bound reads the LAST DESCENT's own altitude and its own chunks-a-column: both are
         // measurements the descent already made, and the recipe is not run a second time for them.
         // Before the first descent there is no measurement, and the ask is the tier rule's.
+        // ★ AND THE BOUND READS THE BODY (ruling T7 rules 2 and 3): the body's own octave table
+        // states each handover's step, which floors the switch distance and widens the crossfade
+        // band where a dropped octave would stand over the ladder's own tolerance. Inert on every
+        // body whose table drops under a cell, which is every body the recipe draws today.
         let candidate = if bound_on & !ladder.wanted.is_empty() {
             vd_client::ladder_view::ask_bound(
                 rungs,
@@ -2513,7 +2524,8 @@ pub(crate) fn sync_terrain(
             )
         } else {
             AskBound::unbounded()
-        };
+        }
+        .for_body(&eb.body, rungs);
         ladder.pace.slew(&candidate, rungs, hysteresis, frame_s);
         if ladder.pace.take_rebind(rungs, rebind_fraction) {
             rebind.push(eb.realm);
@@ -3411,7 +3423,19 @@ pub(crate) fn sync_terrain(
                     // The ball's mesh carries the morph and radial attributes too (a zero
                     // metre and an upward radial: a ball never morphs, and its material's
                     // sink is zero), because the probe's material asks every mesh for them.
-                    let mut ball = Mesh::from(Sphere::new(1.0));
+                    // ★ THE BALL'S FACETS ARE THE RULER'S OWN ERROR (slice 8b stage 7, MEASURED on the
+                    // orbit stand): the default icosphere (five subdivisions, facets spanning about
+                    // 2°) puts a silhouette facet's depth up to `r·sin 2°` past the true limb — 4.4 km
+                    // on a 125 km ball, 1.06 cells of its rung, and one stray pixel read 2.1 cells
+                    // past the rim against the gate's 2-cell tolerance. Seven subdivisions (facets of
+                    // about 0.5°) bound that excess at `r·sin 0.5°` — a quarter of a cell there, and
+                    // under a hundredth of a cell on the ground's metre ball — so the probe's rim
+                    // reading is the limb's to within its own quantisation. The tolerance is not
+                    // moved; the instrument is.
+                    let mut ball = Sphere::new(1.0)
+                        .mesh()
+                        .ico(RULER_BALL_SUBDIVISIONS)
+                        .expect("an icosphere of seven subdivisions");
                     let count = ball.count_vertices();
                     // The ball's normals packed like the ground's BESIDE the engine's own: the
                     // ball itself is lit by the engine's standard material (which reads the

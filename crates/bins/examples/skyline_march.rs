@@ -6,9 +6,11 @@
 //! ±5° of bearing by more than a threshold. Printed for the field TODAY (the shipped octave table) and
 //! for the field under the PROPOSED slope spectrum (`03_erosion_rivers.md` §4.2.3: the fine octaves'
 //! amplitudes from a rational bump in the octave index, anchored on the angle of repose; the coarse
-//! octaves unchanged; the roughness field at its maximum everywhere, which is the prediction's stated
-//! assumption). The spectrum's own table is reprinted beside the computed amplitudes so a mismatch
-//! shows.
+//! octaves unchanged). The third column adds the RIDGED BAND and the PER-COLUMN ROUGHNESS FACTOR,
+//! which together are the field the world ships — so the third column and the TODAY column must
+//! print the same numbers. That agreement is a CROSS-CHECK THAT COULD FAIL: this instrument states
+//! the shape in plain 64-bit floats and the world computes it in the recipe's fenced integers. The
+//! spectrum's own table is reprinted beside the computed amplitudes so a mismatch shows.
 //!
 //! ```text
 //! cargo run --release -p vd-bins --example skyline_march
@@ -48,19 +50,27 @@ const S_PEAK: f64 = 0.3998;
 /// The first FINE octave (0..FIRST_FINE are the coarse ones the macro field replaces later).
 const FIRST_FINE: usize = 4;
 
-/// The MIDDLE BAND the proposal makes RIDGED (`03` §4.2.3 / `04`: `1 − |noise|`, so a crest is a
-/// line instead of a bump): the octaves whose wavelength lies between the hillslope length and the
-/// macro node — here octaves 5..=9 (12.5 km to 781 m).
-const RIDGED_BAND: std::ops::RangeInclusive<usize> = 5..=9;
+/// The MIDDLE BAND the shipped field makes RIDGED (`04` §4.4 rule 2: `1 − |noise|`, so a crest is a
+/// LINE instead of a bump). ★ STATED IN METRES, the same pair the generator states
+/// (`vd_terrain::body::RIDGE_LO_M` / `RIDGE_HI_M`), so the instrument and the world cannot drift
+/// apart: an octave is ridged while its wavelength lies in `[RIDGE_LO_M, RIDGE_HI_M]`. On the home
+/// planet that is octaves 5..=9, 12.5 km down to 781 m — the band M1b-2 measured.
+const RIDGE_LO_M: u64 = vd_terrain::body::RIDGE_LO_M;
+const RIDGE_HI_M: u64 = vd_terrain::body::RIDGE_HI_M;
 
 /// ONE octave's noise along a direction, as a real number: the recipe's own integer kernel with the
 /// amplitude of one noise unit, read out at the noise's fraction bits. The instrument needs the raw
 /// noise because it re-weights the octaves itself.
 fn octave_noise(o: &vd_recipe::height::Octave, dir: [vd_recipe::Gi; 3]) -> f64 {
-    let unit = vd_recipe::height::Octave {
-        amplitude: vd_recipe::Gi::new(1 << vd_recipe::height::AMP_BITS),
-        ..*o
-    };
+    // ★ SMOOTH, ALWAYS. The instrument applies the ridge ITSELF below, so the octave it reads back
+    // must be the RAW gradient noise: reading a ridged octave here and ridging it again would
+    // measure a field nobody ships.
+    let unit = vd_recipe::height::Octave::smooth(
+        o.seed,
+        o.frequency_int,
+        o.frequency_frac,
+        vd_recipe::Gi::new(1 << vd_recipe::height::AMP_BITS),
+    );
     // The word is a NOISE VALUE at 28 fraction bits; it is read as a real number directly, never
     // narrowed to an i32 first (a 32-bit cast would silently wrap a value this instrument may widen).
     vd_recipe::height::relief(&[unit], dir).raw() as f64
@@ -68,25 +78,49 @@ fn octave_noise(o: &vd_recipe::height::Octave, dir: [vd_recipe::Gi; 3]) -> f64 {
 }
 
 /// The height field under a given amplitude table (the octaves' frequencies and seeds are the body's);
-/// `ridged` turns the middle band into ridged noise, re-centred so its amplitude means the same.
+/// `ridged` turns the middle band into ridged noise, re-centred so its amplitude means the same, and
+/// `rough` multiplies the FINE octaves by the column's own ROUGHNESS FACTOR (slice 8a stage 3).
+///
+/// ★ THE FACTOR IS READ THROUGH THE GENERATOR'S OWN DOOR (`vd_terrain::height::roughness_at`), not
+/// re-derived here: the instrument states the SHAPE in plain floats and the world computes the same
+/// shape in the fenced integers, so the two columns agreeing is a cross-check that could fail.
 fn height_with(
     body: &vd_terrain::BodyDefinition,
     amplitudes: &[f64],
     ridged: bool,
+    rough: bool,
+    bench: bool,
     dir: [f64; 3],
 ) -> f64 {
     let d = vd_terrain::units::direction_of_unit(dir);
-    let mut h = body.ladder().radius_m();
+    let r = body.ladder().radius_m();
+    let factor = if rough {
+        vd_terrain::height::roughness_at(body, dir)
+    } else {
+        1.0
+    };
+    let mut h = r;
     for (i, (o, a)) in body.octaves_at(0).iter().zip(amplitudes).enumerate() {
+        let lambda = r / vd_terrain::body::octave_frequency(o);
+        let in_band = lambda >= RIDGE_LO_M as f64 && lambda <= RIDGE_HI_M as f64;
         let n = octave_noise(o, d);
-        let v = if ridged && RIDGED_BAND.contains(&i) {
+        let v = if ridged && in_band {
             (1.0 - n.abs()) * 2.0 - 1.0
         } else {
             n
         };
-        h += a * v;
+        let m = if i >= FIRST_FINE { factor } else { 1.0 };
+        h += a * v * m;
     }
-    h
+    // ★ THE CAP-ROCK BENCH (slice 8a stage 4), THROUGH THE GENERATOR'S OWN DOOR
+    // (`vd_terrain::height::terrace_m`) and never re-derived here — the same rule the roughness
+    // factor above follows. The instrument states the octave table in plain floats; the bench is the
+    // world's own fenced-integer kernel, so the two agreeing is a cross-check that could fail.
+    if bench {
+        vd_terrain::height::terrace_m(body, h, 0)
+    } else {
+        h
+    }
 }
 
 fn normalize(v: [f64; 3]) -> [f64; 3] {
@@ -202,7 +236,10 @@ fn main() -> ExitCode {
         .map(vd_terrain::body::octave_amplitude_m)
         .collect();
     let mut proposed = today.clone();
-    println!("  octave  wavelength(m)  amplitude today(m)  proposed(m)  slope proposed");
+    println!(
+        "  the ridged band: [{RIDGE_LO_M} m, {RIDGE_HI_M} m] — an octave is a CREST inside it"
+    );
+    println!("  octave  wavelength(m)  amplitude today(m)  proposed(m)  slope proposed  kind");
     for (i, o) in octaves.iter().enumerate() {
         let lambda = r / vd_terrain::body::octave_frequency(o);
         if i >= FIRST_FINE {
@@ -210,8 +247,13 @@ fn main() -> ExitCode {
             let s = S_PEAK / (1.0 + x * x / (SIGMA * SIGMA));
             proposed[i] = s * lambda / std::f64::consts::TAU;
         }
+        let kind = if lambda >= RIDGE_LO_M as f64 && lambda <= RIDGE_HI_M as f64 {
+            "ridged"
+        } else {
+            "smooth"
+        };
         println!(
-            "  {i:>6}  {lambda:>13.1}  {:>18.1}  {:>11.1}  {:.4}",
+            "  {i:>6}  {lambda:>13.1}  {:>18.1}  {:>11.1}  {:.4}  {kind}",
             today[i],
             proposed[i],
             proposed[i] * std::f64::consts::TAU / lambda
@@ -236,8 +278,10 @@ fn main() -> ExitCode {
         let dg = [d[0], d[1], d[2]];
         let h_today = height_m(&body, dg, 0);
         let field_today = |dir: [f64; 3]| height_m(&body, [dir[0], dir[1], dir[2]], 0);
-        let field_new = |dir: [f64; 3]| height_with(&body, &proposed, false, dir);
-        let field_ridged = |dir: [f64; 3]| height_with(&body, &proposed, true, dir);
+        // The spectrum alone, and the spectrum with the ridge AND the per-column roughness factor —
+        // which is what the world now ships, so the third column and the TODAY column must agree.
+        let field_new = |dir: [f64; 3]| height_with(&body, &proposed, false, false, false, dir);
+        let field_ridged = |dir: [f64; 3]| height_with(&body, &proposed, true, true, true, dir);
         let sky_t = skyline(&body, &field_today, d);
         let sky_n = skyline(&body, &field_new, d);
         let sky_r = skyline(&body, &field_ridged, d);
@@ -250,8 +294,10 @@ fn main() -> ExitCode {
             (lo, hi)
         };
         println!(
-            "  {name} {face:?} ({a:.6}, {b:.6}): surface {:+.1} m over the ladder radius",
-            h_today - r
+            "  {name} {face:?} ({a:.6}, {b:.6}): surface {:+.1} m over the ladder radius, \
+             roughness factor {:.4}",
+            h_today - r,
+            vd_terrain::height::roughness_at(&body, dg)
         );
         println!(
             "    TODAY:    largest rise {rise_t:.4}°, skyline range {:.2}°..{:.2}°, breaks/60° at {:?}° = {:?}",
@@ -268,8 +314,9 @@ fn main() -> ExitCode {
             breaks_n
         );
         println!(
-            "    +RIDGED {:?}: largest rise {rise_r:.4}°, skyline range {:.2}°..{:.2}°, breaks/60° at {:?}° = {:?}",
-            RIDGED_BAND,
+            "    +RIDGED [{RIDGE_LO_M} m, {RIDGE_HI_M} m] +ROUGHNESS +BENCH ({:.0} m beds, strength {:.3}): largest rise {rise_r:.4}°, skyline range {:.2}°..{:.2}°, breaks/60° at {:?}° = {:?}",
+            body.bed_spacing_m(),
+            body.terrace_strength(0),
             range(&sky_r).0,
             range(&sky_r).1,
             THRESHOLDS_DEG,

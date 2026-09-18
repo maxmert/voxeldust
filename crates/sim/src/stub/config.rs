@@ -218,6 +218,17 @@ pub struct StubConfig {
     /// (a hull, a station, a star system), which then states no surface and a client draws none from
     /// the seed. Derived at boot from the realm's frame, never from a realm kind.
     pub surface: Option<vd_core::look::SurfaceStmt>,
+    /// ★ THE CHARTER THIS REALM STATES ABOUT ITSELF (the landform arc, slice 8b stage 2; ruling V13
+    /// L12, crossing A1): `Some` for a body whose own shard could derive its physical facts from the
+    /// subtree it already boots — gravity, bulk density, escape velocity, insolation, the
+    /// equilibrium temperature, the atmosphere, the orbit. Stated in the self-look bag under
+    /// `TAG_CHARTER`, beside the surface, once per subscriber on change.
+    ///
+    /// **It travels WITH the surface or not at all.** A shard that cannot derive its charter states
+    /// no surface (slice 8b §4.2 rule 2): it does not guess and it does not default. `None` here
+    /// with `surface: Some` is what a test rig produces, and the client refuses that realm's ground
+    /// and counts the refusal.
+    pub charter: Option<vd_core::look::BodyCharter>,
 }
 
 impl StubConfig {

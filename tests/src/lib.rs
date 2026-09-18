@@ -91,6 +91,7 @@ pub fn stub_config() -> StubConfig {
         boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
         // The scenario library's stub realms state no seed-shaped surface (slice 5).
         surface: None,
+        charter: None,
         // D-WORLD-2: ARMED via THE production derivation (`crossing_redrive_env` — the same pair
         // every launcher hands its shards), so an unresolved-dest crossing re-drives a bounded
         // number of times and then aborts locally instead of stranding the entity forever.

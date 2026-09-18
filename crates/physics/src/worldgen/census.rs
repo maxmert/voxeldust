@@ -104,7 +104,18 @@ pub fn earth_like(star: &StarPhotometrics, taxon: &crate::taxonomy::BodyTaxon) -
     let temperate_k =
         (earth_like_t_bound_k(s_lo)..=earth_like_t_bound_k(s_hi)).contains(&taxon.t_eq_k);
     let air = taxon.atmosphere.is_some();
-    yellow_sun & rocky & earth_sized & temperate_flux & temperate_k & air
+    // ★ THE LIQUID-WATER CLAUSE (ruling T9, 2026-09-18): earth-like WITH A SEA, by construction.
+    // The surface temperature is the greenhouse's (the thermostat inside the band) and the pressure
+    // is the derived one (Earth's, scaled by the mass, the gravity and the area); water must be
+    // liquid at that surface — over the triple point, under the boiling point at that pressure.
+    // Read through the charter's own laws, never a second formula (HR3).
+    let liquid = air & {
+        let g = crate::taxonomy::surface_gravity_mps2(taxon.mass_kg, taxon.radius_m);
+        let p = super::charter::surface_pressure_pa(taxon.mass_kg, taxon.radius_m, g);
+        let (_, t_surface) = super::charter::greenhouse(taxon.t_eq_k, taxon.insolation_rel, rocky);
+        super::charter::water_is_liquid(t_surface, p)
+    };
+    yellow_sun & rocky & earth_sized & temperate_flux & temperate_k & air & liquid
 }
 
 /// The temperate band's temperature at flux `s` — the SAME Kopparapu limits converted once

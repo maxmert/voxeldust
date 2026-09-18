@@ -22,8 +22,9 @@
 use crate::bend::{DIR_ONE, basis_of, direction, normalise};
 use crate::cell::{Column, LENGTH_BITS, point_at};
 use crate::gi::Gi;
-use crate::height::{BiomeCharter, OCTAVES_CAP, Octave, biome_of, relief_of_table};
+use crate::height::{BiomeCharter, OCTAVES_CAP, Octave, Roughness, biome_of, relief_of_table};
 use crate::noise::value3;
+use crate::terrace::{Terrace, terrace};
 
 /// The face byte of a CORNER PHANTOM column: no face at all. Three faces meet at a cube corner and
 /// the fourth cell of a two-by-two ring does not exist, so a box holds a placeholder there on the
@@ -57,6 +58,14 @@ pub struct PlanCharter {
     pub key_face: Gi,
     /// The biome field.
     pub biome: BiomeCharter,
+    /// ★ THE PER-COLUMN ROUGHNESS FACTOR's words (slice 8a stage 3): the slow placeholder octave,
+    /// the factor's floor, and the index the fine band begins at. The column pass multiplies its
+    /// fine half by the factor ONCE.
+    pub roughness: Roughness,
+    /// ★ THE CAP-ROCK BENCH's words (slice 8a stage 4): the datum radius, the bed spacing and its
+    /// two reciprocals, and the strength ALREADY FADED for this rung. The column pass pulls its
+    /// surface toward the nearest bed top ONCE, after the octave sum.
+    pub terrace: Terrace,
     /// The octaves, coarsest first.
     pub octaves: [Octave; OCTAVES_CAP],
 }
@@ -110,8 +119,19 @@ fn corner_axis(n: i32, u: i32, v: i32, i: i32, j: i32) -> Gi {
 #[must_use]
 pub fn column_surface(charter: &PlanCharter, face: i32, i: i32, j: i32) -> ColumnSurface {
     let dir = site_direction(charter, face, i, j);
-    let h = charter.radius
-        + relief_of_table(&charter.octaves, charter.octave_count.raw() as usize, dir);
+    // ★ THE BENCH IS LAST (slice 8a stage 4): the octave sum answers the raw surface, and the
+    // terrace then pulls it toward the nearest bed top. The biome below reads the TERRACED surface,
+    // because the biome reads where the ground actually stands.
+    let h = terrace(
+        &charter.terrace,
+        charter.radius
+            + relief_of_table(
+                &charter.octaves,
+                charter.octave_count.raw() as usize,
+                dir,
+                &charter.roughness,
+            ),
+    );
     ColumnSurface {
         dir,
         h,
@@ -278,12 +298,7 @@ mod tests {
     use crate::noise::{NOISE_BITS, NOISE_ONE};
 
     fn octave(seed: u64, frequency_int: i64, amplitude: i64) -> Octave {
-        Octave {
-            seed,
-            frequency_int: Gi::new(frequency_int),
-            frequency_frac: Gi::ZERO,
-            amplitude: Gi::new(amplitude),
-        }
+        Octave::smooth(seed, Gi::new(frequency_int), Gi::ZERO, Gi::new(amplitude))
     }
 
     fn charter() -> PlanCharter {
@@ -306,6 +321,18 @@ mod tests {
                 temperature: octave(11, 1, 1 << AMP_BITS),
                 humidity: octave(13, 1, 1 << AMP_BITS),
             },
+            // A roughness field of its own: a slow octave of unit amplitude, a floor of 0.06 at the
+            // noise's bits, and the fine band beginning at the second octave.
+            roughness: Roughness {
+                octave: octave(17, 1, 1 << AMP_BITS),
+                m_min: Gi::new(16_106_127),
+                first_fine: Gi::ONE,
+            },
+            // NO BENCH: the charter's own column tests state the octave sum and the biome, and a
+            // bench would move every one of their numbers. `column_surface` reads the row all the
+            // same, so the test below measures that a zero strength is the identity on the whole
+            // path and not only inside the terrace's own kernel.
+            terrace: Terrace::NONE,
             octaves,
         }
     }
@@ -319,7 +346,10 @@ mod tests {
         let got = column_surface(&c, 4, 300, 700);
         let dir = direction(4, 300, 700, c.inv_n);
         assert_eq!(got.dir, dir);
-        assert_eq!(got.h, c.radius + relief_of_table(&c.octaves, 2, dir));
+        assert_eq!(
+            got.h,
+            c.radius + relief_of_table(&c.octaves, 2, dir, &c.roughness)
+        );
         assert_eq!(got.biome, biome_of(&c.biome, dir, got.h));
         // The phantom: the chunk's own face normal with the corner's two signs.
         let corner = column_surface(&c, CORNER_FACE, -1, 1);
@@ -344,7 +374,7 @@ mod tests {
         assert_ne!(corner.dir, dir);
         assert_eq!(
             corner.h,
-            c.radius + relief_of_table(&c.octaves, 2, corner.dir)
+            c.radius + relief_of_table(&c.octaves, 2, corner.dir, &c.roughness)
         );
     }
 

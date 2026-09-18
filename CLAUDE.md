@@ -14,6 +14,19 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
 - `docs/design/owner_decisions_*.md` — ★ THE BINDING RULINGS, and **the NEWEST FILE WINS**. Read the
   newest one BEFORE relaying any plan or design content: these are later than every design doc, and a plan
   agreeing with itself proves nothing. Newest first:
+  - `owner_decisions_2026-09-16_terrain.md` — ★ T9 (2026-09-18) NO PHYSICAL NUMBER IS DRAWN — every physical
+    fact (pressure, temperature, water, spin, crust, relief cap) is COMPUTED by a published law with a stated
+    calibration body; a draw only for the seed's identity choices, an unrecoverable history (a tilt), or a
+    NAMED scatter around a computed value; a band standing in for a missing law is a defect. T8 the drowning:
+    the sea's mechanism built, 8a's pictures judged DRY until 8c. ★ THE TERRAIN ARC BEFORE SLICE 9 (T1): the WHOLE of 8 lands
+    before the block store — M1b → 8a the spectrum → 8b the charter → 8s the sky (moved INTO 8, the light's
+    exception) → 8c the solve → 8d water and rock (+ the authored override) → 8e biome and soil → 8f the third
+    dimension → 8o THE OCEAN (T2: the sea surface as a shape, the bathymetry kept, tides from the almanac;
+    buoyancy in 11, waves as look, real ships that sail) → 18's state model → then 9, 10, 11, then 14 the
+    freeze. T3 TIME: closed form from the tick (the sun, the seasons, the tides, the almanac) / live state
+    stepped by the shard and shipped as a WEATHER LIST / NEVER the land's shape (no erosion in the game; the
+    authored override is the only shape change after the freeze). The reference (crimson desert) is ONE zone
+    of ONE planet; zones come from charter → climate → biome. L25: 8a measures its densest chunk first.
   - `owner_decisions_2026-09-12_frozen_patches.md` — ★ THE FROZEN PATCH (F1): a built area keeps the
     octave COUNT it was built on (a small integer stored with the realm, shipped as a block-store row);
     the client and the server derive that patch with its count and the rest with the newest; a BLEND

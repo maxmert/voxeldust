@@ -117,6 +117,13 @@ pub struct RealmBox {
     /// the recipe's tag. Present ⇒ the chunk lane may build its body; absent ⇒ the realm is drawn as
     /// its outline only. Never a kind: a hull that holds terrain would state one too.
     pub surface: Option<vd_core::look::SurfaceStmt>,
+    /// ★ THE BODY CHARTER (slice 8b stage 1, crossing A1): the realm's own statement of its physical
+    /// facts as whole numbers — gravity, bulk density, insolation, the atmosphere. Present ⇒ the
+    /// chunk lane may build its body from the SAME integers the realm's own shard holds (SL10);
+    /// absent ⇒ the lane refuses that realm's surface and counts the refusal, because a body's
+    /// gravity may not be guessed. A malformed charter word decodes to `None` here and is refused
+    /// one step later, never read as a default.
+    pub charter: Option<vd_core::look::BodyCharter>,
 }
 
 impl RealmBox {
@@ -402,6 +409,8 @@ fn row_box(r: &SceneRow, depth: u8) -> Option<RealmBox> {
         facing: r.pose.orient.to_array(),
         // The surface, if the realm stated one; a bag that decodes to none states none.
         surface: vd_core::look::surface_of(&r.bag).ok().flatten(),
+        // The charter beside it, by the same rule: absence of the tag is absence of the datum.
+        charter: vd_core::look::charter_of_bag(&r.bag).ok().flatten(),
     })
 }
 
@@ -1923,6 +1932,7 @@ mod tests {
             color_rgba: [0.0, 0.0, 0.0, BOX_ALPHA],
             facing: [0.0, 0.0, 0.0, 1.0],
             surface: None,
+            charter: None,
         };
         let edge = Tier::Fine.cell_edge_m();
         assert_eq!(rbox.draw_center(), DVec3::new(3.0 * edge + 0.25, 0.0, 0.0));
@@ -1951,6 +1961,7 @@ mod tests {
             color_rgba: [0.0, 0.0, 0.0, BOX_ALPHA],
             facing: [0.0, 0.0, 0.0, 1.0],
             surface: None,
+            charter: None,
         };
         assert_eq!(
             at(Tier::Fine).draw_center(),
@@ -1983,6 +1994,7 @@ mod tests {
             color_rgba: [0.1, 0.2, 0.3, BOX_ALPHA],
             facing: [0.0, 0.0, 0.0, 1.0],
             surface: None,
+            charter: None,
         };
         // The centre is flattened ONCE, by the caller, through the one chokepoint; the prim lands
         // exactly there (slice 5: ONE term, no composition in here).
@@ -2021,6 +2033,7 @@ mod tests {
             color_rgba: [0.4, 0.5, 0.6, BOX_ALPHA],
             facing: [0.0, 0.0, 0.0, 1.0],
             surface: None,
+            charter: None,
         };
         let prims = to_render_prims(&rbox, DVec3::new(0.0, 7.0, 0.0));
         assert_eq!(prims.len(), 1);

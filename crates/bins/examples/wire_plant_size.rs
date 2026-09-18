@@ -70,6 +70,7 @@ fn main() {
             frame: FrameRef::PlanetCentered { planet_seed: 2298 },
             generator: u64::MAX,
         },
+        None,
     );
     let surface_b = surface.len();
     println!(

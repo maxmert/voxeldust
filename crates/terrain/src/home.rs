@@ -11,7 +11,7 @@
 //! wants this one. The FIRST home planet (seed 7 701 581 858 760 374 086, 3 351 km, airless and
 //! hot) was the first body of `System(7)` the ladder accepted, not a chosen world.
 
-use crate::body::BodyDefinition;
+use crate::body::{BodyDefinition, BodyFacts};
 
 /// ★ THE UNIVERSE SEED of THE world (SL5: one world), stated here so the client — which links no motion
 /// crate — can fold its DECLARED world tag; `crates/bins/tests/home_body_pin.rs` proves it is the
@@ -24,11 +24,34 @@ pub const HOME_PLANET_SEED: u64 = 4_030_111_653_607_004_909;
 /// The home planet's look radius, bit for bit, as the forest draws it (6 370.7 km).
 pub const HOME_PLANET_RADIUS_BITS: u64 = 0x4158_4d6e_d403_3833;
 
+/// ★ THE HOME PLANET'S OWN CHARTER WORDS, stated here as literals for exactly the reason the seed
+/// and the radius are (slice 8b stage 3; the design's §5.3): the generator may name no motion crate,
+/// and the client's binary folds its DECLARED world tag before it connects to anything, so for the
+/// home body there is no author to state a charter yet. `crates/bins/tests/home_body_pin.rs`
+/// (`charter_pin`) proves the forest's own draw is exactly these two numbers, so the golden table
+/// and THE world can never part company in silence.
+///
+/// 9.818 m/s². The design's §2.1 wrote 9 821 by hand from L27's prose; the forest draws 9 818, and
+/// the forest wins.
+pub const HOME_PLANET_GRAVITY_MM_S2: u32 = 9_818;
+/// 5 513 kg/m³ — Earth's own 5 514 to a part in five thousand.
+pub const HOME_PLANET_BULK_DENSITY_KGM3: u32 = 5_513;
+
+/// The home planet's facts, as its realm states them.
+#[must_use]
+pub fn home_facts() -> BodyFacts {
+    BodyFacts::new(HOME_PLANET_GRAVITY_MM_S2, HOME_PLANET_BULK_DENSITY_KGM3)
+}
+
 /// The home planet, defined by the recipe.
 #[must_use]
 pub fn home_planet() -> BodyDefinition {
-    BodyDefinition::from_seed(HOME_PLANET_SEED, f64::from_bits(HOME_PLANET_RADIUS_BITS))
-        .expect("the home planet is on the ladder")
+    BodyDefinition::from_seed(
+        HOME_PLANET_SEED,
+        f64::from_bits(HOME_PLANET_RADIUS_BITS),
+        home_facts(),
+    )
+    .expect("the home planet is on the ladder")
 }
 
 #[cfg(test)]
@@ -62,11 +85,11 @@ mod tests {
         let r = f64::from_bits(HOME_PLANET_RADIUS_BITS);
         let home = home_planet();
         assert_eq!(
-            BodyDefinition::from_seed(HOME_PLANET_SEED, r + 1e-3),
+            BodyDefinition::from_seed(HOME_PLANET_SEED, r + 1e-3, home_facts()),
             Some(home)
         );
         assert_eq!(
-            BodyDefinition::from_seed(HOME_PLANET_SEED, r - 1e-3),
+            BodyDefinition::from_seed(HOME_PLANET_SEED, r - 1e-3, home_facts()),
             Some(home)
         );
         let mut ulps = r;
@@ -76,13 +99,14 @@ mod tests {
             i += 1;
         }
         assert_eq!(
-            BodyDefinition::from_seed(HOME_PLANET_SEED, ulps),
+            BodyDefinition::from_seed(HOME_PLANET_SEED, ulps, home_facts()),
             Some(home)
         );
         // The snap unit is one top-rung cell edge: a radius moved by half of it can change the body.
         let unit_m = f64::from(1u32 << (home.ladder.rungs - 1)) * std::f64::consts::FRAC_2_PI;
         assert_ne!(
-            BodyDefinition::from_seed(HOME_PLANET_SEED, r + unit_m).map(|b| b.ladder.n),
+            BodyDefinition::from_seed(HOME_PLANET_SEED, r + unit_m, home_facts())
+                .map(|b| b.ladder.n),
             Some(home.ladder.n),
             "a whole snap unit moves the edge count"
         );

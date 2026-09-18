@@ -148,6 +148,81 @@ pub fn switch_m(rung: u8) -> f64 {
     f64::from(cell_m(rung)) / pixel_rad()
 }
 
+/// ★ THE STEP A HANDOVER MAKES, in metres — ruling T7 rules 2 and 3 both read this ONE number, and
+/// it comes from the BODY'S OWN OCTAVE TABLE, never from a per-rung literal.
+///
+/// Where rung `rung` hands the ground to rung `rung + 1`, the picture changes by exactly the octaves
+/// the coarser rung drops (`vd_terrain::BodyDefinition::octaves_at`), at the per-column roughness
+/// factor's ceiling of ONE — the same ceiling the ladder's own band is sized at, so 8c's macro field
+/// may replace the factor without moving this number.
+///
+/// ★ **THE BODY STATES IT** (`vd_terrain::BodyDefinition::step_bound_m`, slice 8a stage 4), and the
+/// client never re-derives it from two bounds. Since the cap-rock bench landed the step is no longer
+/// a plain difference of amplitude sums: the terrace AMPLIFIES the dropped octaves by its own rung's
+/// Lipschitz constant and adds its fade's own step, and only the body knows both.
+///
+/// **Example.** On the home planet the rung 7 → 8 handover drops the 3 125 m crest: 198.8 m against
+/// a 256 m cell of the rung that takes over. The rung 0 → 1 handover drops a 30 cm ripple.
+#[must_use]
+pub fn handover_step_m(body: &BodyDefinition, rung: u8) -> f64 {
+    body.step_bound_m(rung).max(0.0)
+}
+
+/// ★ THAT STEP IN PIXELS — the ladder's own tolerance, and the line the judge
+/// (`cargo run -p vd-bins --example rung_disagreement`) measures on: ONE CELL OF THE RUNG THAT
+/// TAKES OVER, which is one pixel at that rung's own switch distance.
+///
+/// A rung's surface is the finer surface with the octaves its own cells cannot carry left out
+/// (ruling V9), so a rung may stand a cell of its own away from the rung below it and no more.
+/// Under one, the handover cannot be seen; over one, the eye catches the ground move.
+#[must_use]
+pub fn step_px(step_m: f64, rung: u8) -> f64 {
+    step_m / f64::from(cell_m(rung + 1))
+}
+
+/// ★ RULE 2 — HOW MUCH WIDER THE CROSSFADE BAND STANDS, as a factor on its own half width
+/// (ruling T7 rule 2, owner 2026-09-17).
+///
+/// The crossfade turns the handover's step into a RAMP: the band's width is the ground over which
+/// the step is paid off, so the rate the eye sees is the step over the band. The ladder's own band
+/// (`HYSTERESIS_IN`…`HYSTERESIS_OUT`, a fifth of the switch distance) was sized on a step of ONE
+/// cell; a step of `r` cells needs `r` times the ground to fall at that same rate. So the band
+/// widens by exactly [`step_px`], and never narrows.
+///
+/// ★ **IT IS INERT TODAY, BY MEASUREMENT.** After ruling T7 rule 1 every pair of the home planet's
+/// table drops under one cell — the worst reads 0.999, at the rung the cap-rock bench fades over
+/// (slice 8a stage 4; it was 0.88 at rung 9 → 10 before the bench) — so this answers ONE everywhere
+/// and no band moves. It wakes by itself if a later term (the cap-rock bench, the terrace, 8c's
+/// macro field) pushes a pair over, which is why it reads the table instead of a frozen number.
+///
+/// ★ **AND IT IS NOT DEAD CODE:** the recipe already draws a body it wakes on — the rock of seed
+/// 382 at a 300 km look radius reads 1.52 cells at its rung 3 → 4 handover, which is the body the
+/// crate's own test flies (`a_body_over_the_tolerance_widens_its_band_and_pushes_its_switch_out`).
+#[must_use]
+pub fn band_widen(step_m: f64, rung: u8) -> f64 {
+    step_px(step_m, rung).max(1.0)
+}
+
+/// ★ RULE 3 — THE SWITCH DISTANCE FLOOR (ruling T7 rule 3, owner 2026-09-17): a rung hands the
+/// ground over at the LARGER of two distances — where its own cell stands one pixel (today's rule,
+/// [`switch_m`]) and where THE STEP THE HANDOVER MAKES stands under the ladder's own tolerance.
+///
+/// **The derivation.** The tolerance is one cell of the rung that takes over ([`step_px`]). A cell
+/// of rung `L + 1` is twice a cell of rung `L`, so at the handover distance `D` the tolerance is
+/// `2 · D · pixel_rad` metres, and the step stands inside it while `D ≥ step_m / (2 · pixel_rad)` —
+/// which is the same line as "the step is one pixel at the COARSER rung's own switch distance",
+/// because that distance is twice this one. One bound, two rules.
+///
+/// ★ **IT IS INERT TODAY** on the home planet, for the same measured reason [`band_widen`] is, and
+/// it protects the picture where the band alone would have to stretch too far. It is a FLOOR: the
+/// bounded ask (ruling F9) may pull a rung's horizon in for deliverability, but never so near that
+/// the handover's step shows — a missing chunk is covered by the next rung, a step over the
+/// tolerance is a seam with nothing under it.
+#[must_use]
+pub fn switch_floor_m(step_m: f64) -> f64 {
+    step_m / (2.0 * pixel_rad())
+}
+
 /// THE TIER RULE: the finest rung whose cell is at least one pixel at distance `d_m`, clamped to the
 /// body's top rung. A distance at or under the pixel's own size reads rung 0.
 #[must_use]
@@ -195,6 +270,14 @@ pub struct AskBound {
     /// and asserted against both at compile time, because the picture and the descent read the
     /// horizon at two different tolerances and the worst stand of the two is their product.
     slack: f64,
+    /// ★ THE BODY'S OWN HANDOVER STEPS (ruling T7 rules 2 and 3), finest first, in metres —
+    /// [`handover_step_m`] read once per body ([`AskBound::for_body`]). Rule 3's FLOOR and rule 2's
+    /// WIDENING are both derived from this one row, so a bound that has read a body draws the
+    /// body's own ladder and one that has not draws the tier rule's.
+    ///
+    /// EMPTY means no body has been read: every step is zero, the floor is zero and the widening is
+    /// one, which is the ladder every earlier flight flew.
+    steps_m: Vec<f64>,
 }
 
 /// ★ HOW FAST A DELIVERABLE HORIZON MAY MOVE: a quarter of its own length every second.
@@ -346,6 +429,9 @@ pub fn ask_bound(rungs: u8, rate: AskRate) -> AskBound {
     AskBound {
         switches: Some(switches),
         slack: 0.0,
+        // The builders' own bound reads no body; the caller states the body's row
+        // ([`AskBound::for_body`], ruling T7 rules 2 and 3).
+        steps_m: Vec::new(),
     }
 }
 
@@ -412,7 +498,30 @@ impl AskBound {
         AskBound {
             switches: None,
             slack: 0.0,
+            steps_m: Vec::new(),
         }
+    }
+
+    /// ★ THE SAME BOUND, HAVING READ A BODY (ruling T7 rules 2 and 3): every rung's handover step
+    /// from the body's own octave table, so the floor and the widening are the body's own. A rung
+    /// with no coarser neighbour has no handover and no step.
+    #[must_use]
+    pub fn for_body(mut self, body: &BodyDefinition, rungs: u8) -> AskBound {
+        let mut steps = Vec::with_capacity(usize::from(rungs));
+        let mut rung = 0u8;
+        while rung + 1 < rungs {
+            steps.push(handover_step_m(body, rung));
+            rung += 1;
+        }
+        self.steps_m = steps;
+        self
+    }
+
+    /// The handover step at a rung, in metres: zero where no body has been read and zero at the top
+    /// rung, which hands over to nobody.
+    #[must_use]
+    pub fn step_m(&self, rung: u8) -> f64 {
+        self.steps_m.get(usize::from(rung)).copied().unwrap_or(0.0)
     }
 
     /// A BOUND STATED OUTRIGHT, one effective switch distance per rung, finest first — what
@@ -422,6 +531,7 @@ impl AskBound {
         AskBound {
             switches: Some(switches),
             slack: 0.0,
+            steps_m: Vec::new(),
         }
     }
 
@@ -440,16 +550,19 @@ impl AskBound {
     }
 
     /// A rung's EFFECTIVE switch distance, in metres: the tier rule's own where the bound does not
-    /// bind, and a rung past the bound's own ladder reads the tier rule's too.
+    /// bind, and a rung past the bound's own ladder reads the tier rule's too — never nearer than
+    /// the body's own floor ([`switch_floor_m`], ruling T7 rule 3), which is zero until a body has
+    /// been read and inert on the home planet's table.
     #[must_use]
     pub fn switch_m(&self, rung: u8) -> f64 {
-        match &self.switches {
+        let base = match &self.switches {
             None => switch_m(rung),
             Some(s) => s
                 .get(usize::from(rung))
                 .copied()
                 .unwrap_or_else(|| switch_m(rung)),
-        }
+        };
+        base.max(switch_floor_m(self.step_m(rung)))
     }
 
     /// Every rung's effective switch distance, finest first — the stamp's readout. Empty where the
@@ -503,11 +616,18 @@ impl AskBound {
             rung += 1;
         }
         if free {
-            return AskBound::unbounded();
+            return AskBound {
+                switches: None,
+                slack: 0.0,
+                steps_m: target.steps_m.clone(),
+            };
         }
         AskBound {
             switches: Some(switches),
             slack: 0.0,
+            // ★ THE BODY'S OWN ROW COMES FROM THE TARGET (ruling T7): the bound we move toward is
+            // the one built from the body this frame, and the body's table does not slide.
+            steps_m: target.steps_m.clone(),
         }
     }
 
@@ -523,12 +643,18 @@ impl AskBound {
         let slack = |s: f64, rung: u8| {
             if s < switch_m(rung) { self.slack } else { 0.0 }
         };
+        // ★ THE BAND WIDENS BY THE HANDOVER'S OWN STEP (ruling T7 rule 2): the ladder's own half
+        // width was sized on a step of one cell, so a step of `r` cells is paid off over `r` times
+        // the ground and falls at the same rate on the screen. INERT where the step stands under a
+        // cell, which is every pair of the home planet's table after rule 1.
         let band = |s: f64, r: u8| {
             let k = slack(s, r);
-            [
-                HYSTERESIS_IN * s * (1.0 - k),
-                HYSTERESIS_OUT * s * (1.0 + k),
-            ]
+            // The widening, as the EXTRA over the ladder's own band: at one it is zero and the two
+            // edges are the constants themselves, bit for bit, which is why no flight moves.
+            let extra = band_widen(self.step_m(r), r) - 1.0;
+            let lo = (HYSTERESIS_IN - (1.0 - HYSTERESIS_IN) * extra).max(0.0);
+            let hi = HYSTERESIS_OUT + (HYSTERESIS_OUT - 1.0) * extra;
+            [lo * s * (1.0 - k), hi * s * (1.0 + k)]
         };
         let fade_in = if rung == 0 {
             FADE_ALWAYS_IN
@@ -1804,6 +1930,12 @@ mod tests {
     use vd_core::pose::RealmId;
     use vd_terrain::home::home_planet;
 
+    /// ★ THE FACTS OF THE 300 km TEST BODY the two ruling-T7 tests below read (slice 8b stage 3).
+    /// COMPUTED at 3 000 kg/m³ by `g = (4/3)πGρR`: `g = 0.2516 m/s²`, so 251 mm/s². The body is
+    /// SHAPE-limited — its strength arm is 636 km against a shape arm of 23 100 m — which is what a
+    /// 300 km body is.
+    const SMALL_BODY_FACTS: vd_terrain::BodyFacts = vd_terrain::BodyFacts::new(251, 3_000);
+
     /// ★ THE ROW'S GRACE: a row that is THERE never lapses; an absent row lapses only once it has
     /// been away longer than the grace; a realm that never had a row lapses at once.
     #[test]
@@ -2165,6 +2297,119 @@ mod tests {
             coarse_step: 1,
             ..base
         }));
+    }
+
+    /// ★ THE HANDOVER'S STEP STANDS UNDER THE LADDER'S OWN TOLERANCE ON THE HOME PLANET — which is
+    /// what makes ruling T7 rules 2 and 3 INERT today (they are machinery, not a change to the
+    /// picture), and it is an assertion that could fail: before rule 1 the rung 6 → 7 handover
+    /// dropped the 3 125 m crest, 198.84 m against a 128 m cell — 1.55 of a cell.
+    ///
+    /// The tolerance is ONE CELL OF THE RUNG THAT TAKES OVER, the line the judge
+    /// (`cargo run --release -p vd-bins --example rung_disagreement`) measures on.
+    #[test]
+    fn the_home_planets_table_leaves_both_the_band_and_the_floor_inert() {
+        let body = home_planet();
+        let rungs = body.ladder().rungs;
+        let bound = AskBound::unbounded().for_body(&body, rungs);
+        let mut worst = 0.0f64;
+        let mut rung = 0u8;
+        while rung + 1 < rungs {
+            let step = handover_step_m(&body, rung);
+            assert_eq!(bound.step_m(rung), step, "rung {rung}");
+            worst = worst.max(step_px(step, rung));
+            // Rule 2 is inert: the band is the ladder's own, bit for bit.
+            assert_eq!(band_widen(step, rung), 1.0, "rung {rung}");
+            assert_eq!(
+                bound.fade_bands(rung, rungs),
+                fade_bands(rung, rungs),
+                "rung {rung}"
+            );
+            // Rule 3 is inert: the floor stands inside the tier rule's own switch distance.
+            assert!(switch_floor_m(step) < switch_m(rung), "rung {rung}");
+            assert_eq!(bound.switch_m(rung), switch_m(rung), "rung {rung}");
+            rung += 1;
+        }
+        // The top rung hands over to nobody, so it has no step at all.
+        assert_eq!(bound.step_m(rungs - 1), 0.0);
+        assert_eq!(bound.step_m(rungs), 0.0);
+        // The line is not slack: the worst pair stands at 0.999 of a cell — rung 3 → 4, the rung the
+        // CAP-ROCK BENCH fades over (slice 8a stage 4). The bench's strength is SOLVED against this
+        // very line, so the pair sits on it by construction, with the ladder's own margin of two gap
+        // steps and no more. Before the bench the worst pair was rung 9 → 10 at 0.88 of a cell.
+        assert!((0.5..1.0).contains(&worst), "the worst pair reads {worst}");
+    }
+
+    /// ★ RULES 2 AND 3 WAKE BY THEMSELVES ON A BODY WHOSE TABLE NEEDS THEM — MEASURED, not
+    /// invented: the recipe draws the body of seed 382 at a look radius of 300 km with a rung
+    /// 3 → 4 handover of 1.52 cells, over the ladder's own tolerance. No number in this test is
+    /// typed: the step comes from that body's own octave table, exactly as it does in the picture.
+    ///
+    /// ★ RED BEFORE ruling T7 rules 2 and 3: the band stood at the ladder's own fifth whatever the
+    /// step, and the switch distance was the cell's alone — this body's rung 3 surface handed over
+    /// where its own step stood over a pixel and a half, and the crossfade had a pixel and a half
+    /// to hide in a band sized for one.
+    #[test]
+    fn a_body_over_the_tolerance_widens_its_band_and_pushes_its_switch_out() {
+        let body = vd_terrain::BodyDefinition::from_seed(382, 300_000.0, SMALL_BODY_FACTS)
+            .expect("a real body");
+        let rungs = body.ladder().rungs;
+        let bound = AskBound::unbounded().for_body(&body, rungs);
+        let step = handover_step_m(&body, 3);
+        let ratio = step_px(step, 3);
+        assert!(ratio > 1.0, "the measurement that made this test: {ratio}");
+        // Rule 2: the band is wider by exactly the ratio, around the same switch distance.
+        assert_eq!(band_widen(step, 3), ratio);
+        let (_, out) = bound.fade_bands(3, rungs);
+        let s = bound.switch_m(3);
+        assert!((out[0] - s * (1.0 - (1.0 - HYSTERESIS_IN) * ratio)).abs() < 1e-9);
+        assert!((out[1] - s * (1.0 + (HYSTERESIS_OUT - 1.0) * ratio)).abs() < 1e-9);
+        // The band still widens about the switch distance itself: the eye crosses where it did.
+        assert!((out[0] + out[1] - 2.0 * s).abs() < 1e-6);
+        // Rule 3: the switch distance is the floor, which stands past the tier rule's own.
+        assert_eq!(s, switch_floor_m(step));
+        assert!(s > switch_m(3));
+        assert!(
+            (s / switch_m(3) - ratio).abs() < 1e-9,
+            "by exactly the ratio"
+        );
+        // And the rungs the body's own table leaves alone read the tier rule's, bit for bit.
+        assert_eq!(bound.switch_m(0), switch_m(0));
+        assert_eq!(bound.fade_bands(0, rungs), fade_bands(0, rungs));
+        // A bound that never read a body draws the tier ladder, whatever the body's table says.
+        assert_eq!(AskBound::unbounded().switch_m(3), switch_m(3));
+    }
+
+    /// ★ THE BODY'S ROW SURVIVES THE SLEW AND THE SLACK (ruling T7): the horizon slides and the
+    /// descent asks wider, and both keep the floor the body's own table states — otherwise the
+    /// picture would draw a band the rule had already refused.
+    #[test]
+    fn the_bodys_row_rides_the_slew_and_the_slack() {
+        let body = vd_terrain::BodyDefinition::from_seed(382, 300_000.0, SMALL_BODY_FACTS)
+            .expect("a real body");
+        let rungs = body.ladder().rungs;
+        let want = AskBound::unbounded().for_body(&body, rungs);
+        let floor = switch_floor_m(handover_step_m(&body, 3));
+        // A held bound that has read no body slews toward the one that has, and takes its row.
+        let held = AskBound::unbounded().slewed_toward(&want, rungs, 1.0);
+        assert_eq!(held.step_m(3), want.step_m(3));
+        assert_eq!(held.switch_m(3), floor);
+        assert_eq!(
+            held.clone().with_slack(ASK_BOUND_SLACK).step_m(3),
+            want.step_m(3)
+        );
+        // And a bound the builders really bind still never hands over nearer than the floor.
+        let bound = AskBound::from_switches(vec![1.0; usize::from(rungs)]).for_body(&body, rungs);
+        assert_eq!(bound.switch_m(3), floor);
+        // Even at rung 0, where the body's own step is under a pixel, the floor outlives an ask of
+        // one metre: a step the eye can see is never handed over at arm's length.
+        assert_eq!(bound.switch_m(0), switch_floor_m(handover_step_m(&body, 0)));
+        assert!(bound.switch_m(0) > 1.0);
+        // A slew that lands on the tier rule's own radii keeps the row too.
+        let free = AskBound::unbounded()
+            .for_body(&body, rungs)
+            .slewed_toward(&want, rungs, 1.0e9);
+        assert_eq!(free.step_m(3), want.step_m(3));
+        assert_eq!(free.switch_m(3), floor);
     }
 
     #[test]
@@ -2654,7 +2899,35 @@ mod tests {
         // The coarsest ring holds the horizon at least, and never passes the reach's rung (a far
         // ring with no visible peak is empty and names no rung).
         assert!(w.rung_max >= rung_for_distance(horizon_m(surface, 3.4), body.ladder().rungs));
-        assert!(w.rung_max <= rung_for_distance(w.reach_m, body.ladder().rungs));
+        // ★ IT IS THE DRAWN GROUND THAT THE REACH BOUNDS, NOT THE SHADOW CASTERS (re-read
+        // 2026-09-18, slice 8b stage 3). A caster is a COARSER column a chunk asks for so its
+        // shadow has something to fall on; its rung is a fixed step over the chunk's own
+        // (`Shadow::caster_rung`) and reads no distance at all. MEASURED here: the reach is
+        // 349 096 m, whose own rung is 9, and rungs 0 to 9 carry every urgent and every revealed
+        // chunk — while 22 chunks stand at rung 10 and not one of them is drawn.
+        //
+        // The two agreed until this stage only because the reach was longer: the relief law halved
+        // the home planet's mountains, so the peak a standing eye can see is lower and the reach
+        // fell from over 445 km to 349 km, which is one rung.
+        let drawn_max = w
+            .keys
+            .iter()
+            .filter(|k| w.is_urgent(**k) | w.revealed.contains(*k))
+            .map(|k| k.rung)
+            .max()
+            .expect("the ground under a standing eye names a rung");
+        assert!(
+            drawn_max <= rung_for_distance(w.reach_m, body.ladder().rungs),
+            "the drawn ground reaches rung {drawn_max} at a reach of {} m",
+            w.reach_m
+        );
+        // The reading is taken into a word BEFORE the assertion: an expression inside a passing
+        // assertion's message never runs, and llvm counts it as a miss (HR5).
+        let over = i32::from(w.rung_max) - i32::from(drawn_max);
+        assert!(
+            over <= 1,
+            "the casters stand {over} rungs over the drawn ground"
+        );
         // THE REQUEST ORDER (ruling V15): the classes never go back (urgent, then revealed, then
         // margin); within a class the rungs never rise (coarse first); within a class and a rung
         // each parent's children stand together (one run per parent).
@@ -2758,16 +3031,43 @@ mod tests {
             columns0.len()
         );
         let rung0 = per.iter().find(|(r, _)| *r == 0).map_or(0, |(_, n)| *n);
+        // ★ TWO OR THREE CHUNKS A COLUMN SINCE THE CAP-ROCK BENCH, WHERE IT WAS ONE OR TWO (slice
+        // 8a stage 4, MEASURED on this very fixture with the bench's strength toggled off: 1 668
+        // chunks over 877 columns before, 1 943 after — 1.90 a column against 2.22). The terrace
+        // amplifies every variation under it by 1.4358, so the rung-0 column bound stands at 32.98 m
+        // where it stood at 22.97 m, and twice it is over a 62-cell chunk: NO rung-0 column can fit
+        // in one chunk any more. It is the bench's own price and it is stated, not hidden.
         assert!(
-            rung0 < 2 * columns0_n as u64,
+            rung0 < 3 * columns0_n as u64,
             "rung 0: {rung0} chunks over {columns0_n} columns"
         );
         // Past the horizon only peaks are wanted, and every ring carries its crossfade band (a
-        // fifth more chunks than the ring alone): the whole ladder stays under eight thousand
-        // chunks (MEASURED 2026-09-09: 4 107 before the bands, 7 073 with them).
+        // fifth more chunks than the ring alone): the whole ladder stays under THIRTEEN thousand
+        // chunks (MEASURED 2026-09-09: 4 107 before the bands, 7 073 with them; 10 987 since slice
+        // 8a stage 2; 12 391 since the cap-rock bench).
+        //
+        // ★ WHY THE CEILING MOVED FROM EIGHT THOUSAND TO TWELVE, AND IT IS A MEASUREMENT, NOT AN
+        // ARGUMENT. Stage 2 makes five octaves RIDGED, and a ridged octave has a kink, so
+        // `vd_terrain::digest::column_bound` must bound it by its FIRST derivative instead of its
+        // curvature (`slice_8a_design.md` §2.2). The bound at rung 0 grows, every column's chunk
+        // SPAN grows with it, and the ladder wants more chunks. The two causes were separated by
+        // running this very fixture on the ridged field with the OLD curvature bound: 6 613 chunks,
+        // which is FEWER than the 7 073 of 2026-09-09. So the rougher GROUND costs nothing here;
+        // the honest BOUND costs 4 374 chunks, a growth of 66 %.
+        //
+        // ⚠ OWED, the arc's call and not this stage's: whether a ridged octave can carry a tighter
+        // bound than its first derivative (a curvature term away from the kink plus a kink term). A
+        // bound that is honest and loose costs chunks; a bound that is tight and wrong is a HOLE.
+        //
+        // ★ THIRTEEN THOUSAND SINCE THE CAP-ROCK BENCH (slice 8a stage 4), and the cause is the same
+        // shape: a bound, not the ground. MEASURED on this fixture with the bench's strength toggled
+        // off, 11 586 chunks; with it, 12 391 — a growth of 6.9 %, all of it in the column SPAN the
+        // terrace's Lipschitz constant widens. The span already takes the LESSER of the terrace's
+        // two honest bounds (`vd_terrain::digest::column_bound`), which is what keeps the rise at
+        // 6.9 % instead of the 11.0 % the amplification alone asked for.
         let total = w.len();
         let reach = w.reach_m;
-        assert!(total < 8_000, "{total} chunks: {per:?}, reach {reach} m");
+        assert!(total < 13_000, "{total} chunks: {per:?}, reach {reach} m");
         // The spans are kept for the columns the descent visits — a second call from the same
         // eye reads none anew and holds the same set; at the body's own centre nothing stays.
         let held = view.spans_held();
@@ -2927,18 +3227,29 @@ mod tests {
         let at = |k: f64| [d[0] * r * k, d[1] * r * k, d[2] * r * k];
         let set = |k: f64| LadderView::default().wanted(&body, at(k));
         // ★ THE COUNT FALLS WITH DISTANCE, and it falls to SIX (the extended ladder, owner
-        // 2026-09-15). MEASURED on this direction: 1 124 chunks at 1.5 radii, 432 at 2, 216 at 3,
+        // 2026-09-15). MEASURED on this direction: 1 128 chunks at 1.5 radii, 432 at 2, 216 at 3,
         // 121 at 5, 61 at 10, 27 at 20, and SIX — the whole globe, one chunk a face — from 34 radii
         // out, at every distance. Before the extension the same walk ROSE instead: 2 015, 2 867,
         // 3 716, 4 381, 4 875, 5 219, because the ladder's top rung held 9 600 columns and a far
         // eye wanted the visible hemisphere of them. (The reading was 877 before the crust was
         // rounded up to a whole top-rung cell. Only the NEAREST stand moved; every farther reading
-        // is unchanged. WHY the nearest one moved is UNMEASURED.)
+        // is unchanged. WHY the nearest one moved is UNMEASURED.) ★ The nearest stand moved AGAIN,
+        // 1 124 to 1 128, at slice 8a stage 2: the ridged band widens the column bound, so four more
+        // columns of the nearest stand carry a second chunk. Every farther reading is unchanged,
+        // because a coarse rung keeps no ridged octave. ★ AND BACK, 1 128 to 1 124, at stage 3: the
+        // per-column roughness factor LOWERS the fine half of most columns, so the ground that
+        // reached into a second chunk no longer does. Every farther reading is unchanged again, for
+        // the same reason — a coarse rung keeps no fine octave, so the factor cannot reach it.
+        // ★ AND THE NEAREST THREE STANDS MOVED at slice 8b stage 3, THE RELIEF LAW: 1 124 to 1 015
+        // at 1.5 radii, 432 to 425 at 2, 216 to 214 at 3, 121 to 120 at 5. The relief halved, so a
+        // column's ground reaches into fewer chunks of the band; the three farthest readings (61,
+        // 27, 6) are unchanged, because from ten radii out the globe is drawn by its coarse rungs
+        // and a coarse rung's chunk count is the ladder's own, not the ground's.
         let walk: Vec<usize> = [1.5, 2.0, 3.0, 5.0, 10.0, 20.0, 34.0]
             .iter()
             .map(|k| set(*k).len())
             .collect();
-        assert_eq!(walk, vec![1_124, 432, 216, 121, 61, 27, 6]);
+        assert_eq!(walk, vec![1_015, 425, 214, 120, 61, 27, 6]);
         for pair in walk.windows(2) {
             assert!(pair[1] <= pair[0], "the count rose with distance: {walk:?}");
         }

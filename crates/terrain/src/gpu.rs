@@ -54,18 +54,74 @@ pub const TUBE_WORDS: usize = 8;
 /// The 32-bit words of one column's SITE: the face, the two cell indices and one of padding.
 pub const SITE_WORDS: usize = 4;
 /// The words of the PLAN charter: eleven of its own, then the biome's two octaves and the body's
-/// octave table, four words each.
-pub const PLAN_CHARTER_WORDS: usize = 11 + (2 + OCTAVES_CAP) * OCTAVE_WORDS;
-/// The words of one octave.
-pub const OCTAVE_WORDS: usize = 4;
+/// octave table, [`OCTAVE_WORDS`] words each.
+pub const PLAN_CHARTER_WORDS: usize =
+    11 + (2 + OCTAVES_CAP) * OCTAVE_WORDS + ROUGHNESS_WORDS + TERRACE_WORDS;
+/// The words of one octave: SIX of its own (the `fine` mask joined at slice 8a stage 3) and two of
+/// explicit padding, so the row's stride stays 64 bytes. The charter's octave block holds
+/// 1 024 bytes, not 512.
+pub const OCTAVE_WORDS: usize = 8;
 
-/// One octave as [`OCTAVE_WORDS`] words, in the `repr(C)` order the kernel reads.
-fn octave_words(o: &Octave) -> [i64; OCTAVE_WORDS] {
+/// The words of the ROUGHNESS row: one octave and two of its own (slice 8a stage 3).
+pub const ROUGHNESS_WORDS: usize = OCTAVE_WORDS + 2;
+
+/// The words of the CAP-ROCK BENCH's row: five of its own and three of explicit padding, so the
+/// row's stride is 64 bytes (slice 8a stage 4).
+pub const TERRACE_WORDS: usize = 8;
+
+/// The bench's row as [`TERRACE_WORDS`] words, in the `repr(C)` order the column pass reads.
+/// ★ ONE WRITER, like [`octave_words`] and [`roughness_words`]: a second packer of this row would
+/// read half a row the day the row grows, which is exactly what happened when the `kind` word
+/// landed.
+#[must_use]
+pub fn terrace_words(t: &vd_recipe::terrace::Terrace) -> [i64; TERRACE_WORDS] {
+    [
+        t.datum.raw(),
+        t.spacing.raw(),
+        t.spacing_recip.raw(),
+        t.half_recip.raw(),
+        t.strength.raw(),
+        t.pad[0].raw(),
+        t.pad[1].raw(),
+        t.pad[2].raw(),
+    ]
+}
+
+/// The roughness row as [`ROUGHNESS_WORDS`] words, in the `repr(C)` order the column pass reads.
+/// ★ ONE WRITER, like [`octave_words`]: a second packer of this row would read half a row the day
+/// the row grows, which is exactly what happened when the `kind` word landed.
+#[must_use]
+pub fn roughness_words(r: &vd_recipe::height::Roughness) -> [i64; ROUGHNESS_WORDS] {
+    let o = octave_words(&r.octave);
+    [
+        o[0],
+        o[1],
+        o[2],
+        o[3],
+        o[4],
+        o[5],
+        o[6],
+        o[7],
+        r.m_min.raw(),
+        r.first_fine.raw(),
+    ]
+}
+
+/// One octave as [`OCTAVE_WORDS`] words, in the `repr(C)` order the kernel reads. ★ PUBLIC, because
+/// the client's GPU self-check hands the very same rows to the shell's own relief kernel: two
+/// writers of one row would drift the moment the row grew, which is exactly what happened when the
+/// `kind` word landed.
+#[must_use]
+pub fn octave_words(o: &Octave) -> [i64; OCTAVE_WORDS] {
     [
         o.seed as i64,
         o.frequency_int.raw(),
         o.frequency_frac.raw(),
         o.amplitude.raw(),
+        o.kind.raw(),
+        o.fine.raw(),
+        o.pad[0].raw(),
+        o.pad[1].raw(),
     ]
 }
 
@@ -402,6 +458,8 @@ impl BoxPlan {
         for o in [&b.temperature, &b.humidity] {
             w.extend(octave_words(o));
         }
+        w.extend(roughness_words(&p.roughness));
+        w.extend(terrace_words(&p.terrace));
         let mut i = 0;
         while i < p.octaves.len() {
             w.extend(octave_words(&p.octaves[i]));
@@ -552,12 +610,17 @@ mod tests {
                 surface_chunk_z(&m, Face::PosZ, 3, 5, 7),
             ),
             key(Face::PosX, 0, 300, 700, 0),
+            // ★ THE TOP CHUNK OF THE BAND, read from the ladder itself: the LAST chunk index the
+            // band holds, `(cells_in_band − 1) / CHUNK_EDGE`, so the box's halo reaches OVER the
+            // band's top and the plan lays a LAYER_ABOVE row down. One less than that — which is
+            // what this fixture asked for until the ladder grew at Step 17 — sits wholly inside the
+            // band, and the whole `LAYER_ABOVE` path then goes unwalked on this host and on the card.
             key(
                 Face::PosX,
                 0,
                 300,
                 700,
-                (m.ladder().cells_in_band(0) as i32 / CHUNK_EDGE as i32) - 1,
+                (m.ladder().cells_in_band(0) as i32 - 1) / CHUNK_EDGE as i32,
             ),
         ] {
             let plan = plan(&m, k).expect("the key is on the ladder");
@@ -628,6 +691,7 @@ mod tests {
         assert_eq!(size_of::<Column>(), COLUMN_WORDS * 8);
         assert_eq!(size_of::<Tube>(), TUBE_WORDS * 8);
         assert_eq!(size_of::<PlanCharter>(), PLAN_CHARTER_WORDS * 8);
+        assert_eq!(size_of::<vd_recipe::terrace::Terrace>(), TERRACE_WORDS * 8);
         assert_eq!(size_of::<NodeBlock>(), BLOCK_WORDS * 8);
         assert_eq!(size_of::<Octave>(), OCTAVE_WORDS * 8);
         let m = home_planet();
@@ -663,10 +727,47 @@ mod tests {
         assert_eq!(p[6], plan.plan.key_face.raw());
         assert_eq!(p[10], plan.plan.biome.highland_shift.raw());
         assert_eq!(p[11], plan.plan.biome.temperature.seed as i64);
+        // ★ THE ROUGHNESS ROW at its own place: the head's eleven words, the biome's two octaves,
+        // then the placeholder octave and the factor's two words (slice 8a stage 3). A row whose
+        // stride slipped would read the first octave of the table here.
+        let rough_at = 11 + 2 * OCTAVE_WORDS;
+        assert_eq!(p[rough_at], plan.plan.roughness.octave.seed as i64);
         assert_eq!(
-            p[PLAN_CHARTER_WORDS - 1],
-            plan.plan.octaves[OCTAVES_CAP - 1].amplitude.raw()
+            p[rough_at + 3],
+            plan.plan.roughness.octave.amplitude.raw(),
+            "the placeholder's amplitude is one noise unit"
         );
+        assert_eq!(p[rough_at + OCTAVE_WORDS], plan.plan.roughness.m_min.raw());
+        assert_eq!(
+            p[rough_at + OCTAVE_WORDS + 1],
+            plan.plan.roughness.first_fine.raw()
+        );
+        // ★ THE CAP-ROCK BENCH's row next (slice 8a stage 4), then the octave table. A row whose
+        // stride slipped would read the first octave of the table at the bench's datum.
+        let bench_at = rough_at + ROUGHNESS_WORDS;
+        assert_eq!(p[bench_at], plan.plan.terrace.datum.raw());
+        assert_eq!(p[bench_at + 1], plan.plan.terrace.spacing.raw());
+        assert_eq!(p[bench_at + 2], plan.plan.terrace.spacing_recip.raw());
+        assert_eq!(p[bench_at + 3], plan.plan.terrace.half_recip.raw());
+        assert_eq!(
+            p[bench_at + 4],
+            m.terrace_at(k.rung).strength.raw(),
+            "the bench's strength is the RUNG's own"
+        );
+        assert_eq!(p[bench_at + 5], 0, "the bench's padding is zero");
+        assert_eq!(
+            p[bench_at + TERRACE_WORDS],
+            plan.plan.octaves[0].seed as i64,
+            "the octave table begins right after the bench's row"
+        );
+        // The LAST octave's own five words, at their places in the block, and the three of padding
+        // that follow them: a row whose stride slipped would read the next octave's seed here.
+        let last = PLAN_CHARTER_WORDS - OCTAVE_WORDS;
+        let tail = &plan.plan.octaves[OCTAVES_CAP - 1];
+        assert_eq!(p[last], tail.seed as i64);
+        assert_eq!(p[last + 3], tail.amplitude.raw());
+        assert_eq!(p[last + 4], tail.kind.raw());
+        assert_eq!(p[PLAN_CHARTER_WORDS - 1], 0, "the row's padding is zero");
         // The site rows, read back as the kernel reads them.
         let s = plan.site_words();
         assert_eq!(s[0], i32::from(plan.sites[0].face));

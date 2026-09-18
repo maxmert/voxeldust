@@ -885,6 +885,15 @@ impl ClientState {
                 // `entity_feed_newest_tick` shares the player's moment; one that drifts is authored by a
                 // shard whose clock is running independently. `None` = never streamed (boot placement).
                 newest_tick: self.realm_view.realm_newest_tick(realm).map(|t| t.0),
+                // ★ THE CHARTER THE REALM STATED (slice 8b stage 2): five of its twenty words, so a
+                // process gate can say the client received one and read the right numbers.
+                charter: b.charter.map(|c| vd_devproto::state::DevBodyCharter {
+                    gravity_mm_s2: c.gravity_mm_s2,
+                    bulk_density_kgm3: c.bulk_density_kgm3,
+                    insolation_q12: c.insolation_q12,
+                    t_eq_mk: c.t_eq_mk,
+                    flags: c.flags,
+                }),
             })
             .collect();
         DevState {
@@ -3318,6 +3327,49 @@ mod tests {
                 half: DVec3::new(3.0, 4.0, 0.0),
             }),
         };
+        // ★ A SEED-SHAPED BODY STATES ITS CHARTER (slice 8b stage 2): its physical facts as whole
+        // numbers, in the same bag as its outline, and the diagnosis surface carries five of them so
+        // a process gate can read what the client received.
+        let charter = vd_core::look::BodyCharter {
+            gravity_mm_s2: 9_818,
+            bulk_density_kgm3: 5_513,
+            escape_velocity_mps: 11_185,
+            insolation_q12: 3_065,
+            t_eq_mk: 236_785,
+            t_surface_mk: None,
+            bond_albedo_q12: 1_228,
+            mu_q8: Some(7_168),
+            scale_height_m: Some(7_160),
+            p_surf_pa: None,
+            tau_vis_q12: None,
+            tau_ir_q12: None,
+            day_s: None,
+            obliquity_cos_q1024: None,
+            water_km3: None,
+            sea_offset_mm: None,
+            elastic_thickness_m: None,
+            ecc_q16: 1_017,
+            year_s: 34_727_239,
+            flags: 1_027,
+        };
+        let chartered_row = vd_wire::channels::SceneRow {
+            realm: RealmId::Planet(11),
+            parent: Some(RealmId::System(7)),
+            pose: StampedPose::at_rest(
+                FrameRef::SystemSpace { system_seed: 0 },
+                DVec3::new(0.0, 60.0, 0.0),
+                UniverseTick(100),
+            ),
+            bag: vd_core::look::surface_look_bag(
+                &vd_core::geometry::Boundary::Shell { r: 6.0 },
+                None,
+                &vd_core::look::SurfaceStmt {
+                    frame: FrameRef::PlanetCentered { planet_seed: 2298 },
+                    generator: 7,
+                },
+                Some(&charter),
+            ),
+        };
         c.transport.deliver(
             GATEWAY,
             MsgClass::Control,
@@ -3328,12 +3380,38 @@ mod tests {
                     scene_row(RealmId::System(7), None, 40.0),
                     marker_row,
                     box_row,
+                    chartered_row,
                 ],
             ),
         );
         c.step(0.0);
         let dev = c.state().devstate(0.0, DevCounters::default());
-        assert_eq!(dev.realm_boxes.len(), 3);
+        assert_eq!(dev.realm_boxes.len(), 4);
+        let chartered = dev
+            .realm_boxes
+            .iter()
+            .find(|b| b.realm == format!("{:?}", RealmId::Planet(11)))
+            .expect("the seed-shaped body is surfaced");
+        assert_eq!(
+            chartered.charter,
+            Some(vd_devproto::state::DevBodyCharter {
+                gravity_mm_s2: 9_818,
+                bulk_density_kgm3: 5_513,
+                insolation_q12: 3_065,
+                t_eq_mk: 236_785,
+                flags: 1_027,
+            }),
+            "the client holds the physical facts the realm stated"
+        );
+        // A realm that states no charter says so — absence of the tag is absence of the datum.
+        assert_eq!(
+            dev.realm_boxes
+                .iter()
+                .find(|b| b.realm == format!("{:?}", RealmId::Station(4)))
+                .and_then(|b| b.charter),
+            None,
+            "a station has no body and states no charter"
+        );
         let station = dev
             .realm_boxes
             .iter()

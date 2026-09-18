@@ -12,6 +12,7 @@
 //! tests, not the coverage gate.
 
 pub mod proc_launch;
+pub mod sea;
 
 // The dev-control-only helpers (Tier-B process-gate glue): `flight` is the ONE pilot every cluster
 // gate flies (rendezvous-and-park + label-asserted crossing legs); `scene_camera` reconstructs the
@@ -992,6 +993,11 @@ pub const HOME_SYSTEM: u64 = vd_core::worldgen::HOME_SYSTEM_SEED;
 /// `None` when no planet of the home system is accepted (a world nobody can name).
 #[must_use]
 pub fn home_body(universe_seed: u64) -> Option<vd_terrain::BodyDefinition> {
+    // ★ THE CHARTER THE LAW READS (the landform arc, slice 8b stage 3). The home planet's own
+    // realm authors these two whole numbers; the generator's own literals in
+    // `vd_terrain::home` state the same pair, and `charter_pin` proves the forest and the
+    // literals agree. A body whose charter the forest cannot derive is no body at all.
+    let facts = facts_of_charter(&home_body_charter(universe_seed)?);
     let (rows, _) = home_system_boot(universe_seed);
     rows.into_iter()
         .filter(|r| r.parent == Some(vd_core::worldgen::HOME_SYSTEM))
@@ -1000,10 +1006,82 @@ pub fn home_body(universe_seed: u64) -> Option<vd_terrain::BodyDefinition> {
                 vd_core::pose::RealmId::Planet(seed),
                 Some(vd_core::geometry::Boundary::Shell { r }),
             ) if p.realm == vd_core::worldgen::HOME_PLANET => {
-                vd_terrain::BodyDefinition::from_seed(seed, r)
+                vd_terrain::BodyDefinition::from_seed(seed, r, facts)
             }
             _ => None,
         })
+}
+
+/// ★ THE HOME PLANET'S CHARTER, as its own realm authors it (slice 8b stage 2's author, read here by
+/// stage 3's law). The same subtree [`home_body`] reads, asked for the body's physical facts.
+#[must_use]
+pub fn home_body_charter(universe_seed: u64) -> Option<vd_core::look::BodyCharter> {
+    let held = std::collections::BTreeSet::from([vd_core::pose::RealmId::System(HOME_SYSTEM)]);
+    let lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+    body_charter(
+        universe_seed,
+        &held,
+        &lineage,
+        vd_core::worldgen::HOME_PLANET,
+    )
+}
+
+/// ★ THE CHARTER OF ANY BODY of a subtree (slice 8b stage 3): what a measurement that walks a whole
+/// system asks, once per body. A shard asks [`boot_charter`] for its own body and never for
+/// anybody else's — this is the tool's path, not the game's.
+#[must_use]
+pub fn body_charter(
+    universe_seed: u64,
+    held: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    lineage: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    body: vd_core::pose::RealmId,
+) -> Option<vd_core::look::BodyCharter> {
+    let config = vd_physics::worldgen::UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+    vd_physics::worldgen::body_charter_in_subtree(universe_seed, &config, held, lineage, body)
+}
+
+/// ★ THE TWO WORDS THE RELIEF LAW READS, taken off a realm's charter (slice 8b stage 3). One place
+/// for the copy on this side of the wire; the client does the same two-word copy on its own side,
+/// because no crate sits under both `vd-bins` and `vd-client` that may name `vd-terrain`.
+/// ★ THE SEA THE REALM STATES (slice 8b stage 6; ruling T8): where the body holds water and that
+/// water is liquid at its surface, solve the level it stands at over the body's own shape and write
+/// it into the charter as whole millimetres over the ladder radius, with the sea flag. A dry, frozen
+/// or steaming world — or a body the recipe refuses — states no sea. ONE call site (the shard's
+/// boot) and ONE solve; the client reads the integer and never re-solves.
+#[must_use]
+pub fn charter_with_sea(
+    charter: vd_core::look::BodyCharter,
+    body: Option<&vd_terrain::BodyDefinition>,
+) -> vd_core::look::BodyCharter {
+    let Some(body) = body else {
+        return charter;
+    };
+    let liquid = match (charter.t_surface_mk, charter.p_surf_pa) {
+        (Some(t_mk), Some(p_pa)) => {
+            vd_physics::worldgen::water_is_liquid(f64::from(t_mk) / 1_000.0, f64::from(p_pa))
+        }
+        _ => false,
+    };
+    let water_m3 = charter.water_km3.map_or(0.0, |km3| km3 as f64 * 1.0e9);
+    if !liquid {
+        return charter;
+    }
+    let Some(level) = crate::sea::solve_sea_level(body, water_m3) else {
+        return charter;
+    };
+    let Some(offset_mm) = vd_physics::worldgen::quantise_i32(level.offset_m, 1_000.0) else {
+        return charter;
+    };
+    vd_core::look::BodyCharter {
+        sea_offset_mm: Some(offset_mm),
+        flags: charter.flags | vd_core::look::CHARTER_FLAG_HAS_SEA,
+        ..charter
+    }
+}
+
+#[must_use]
+pub fn facts_of_charter(charter: &vd_core::look::BodyCharter) -> vd_terrain::BodyFacts {
+    vd_terrain::BodyFacts::new(charter.gravity_mm_s2, charter.bulk_density_kgm3)
 }
 
 /// The home planet's ORBIT around its star, as the home system's shard authors it — so a picture
@@ -3038,6 +3116,34 @@ pub fn boot_world_built(
         own_row,
     );
     (regions, movers.into_iter().collect(), lit)
+}
+
+/// ★ THE CHARTER A SHARD DERIVES FOR ITS OWN BODY (the landform arc, slice 8b stage 2; crossing A1).
+///
+/// The same world [`boot_world_built`] reads, asked one more question: what are the hosted realm's
+/// physical facts, as whole numbers? Derived LOCALLY from the subtree the shard already boots — no
+/// message, no wire arm, nothing across a realm boundary (slice 8b §4.2 rule 1; V13's A2 approval is
+/// kept unspent).
+///
+/// `None` for a realm with no body in the seed — a hull, a station, an area, a star system — and for
+/// a body whose facts will not all fit the units the record states them in. Its shard then states no
+/// surface at all (§4.2 rule 2): it does not guess and it does not default.
+#[must_use]
+pub fn boot_charter(
+    universe_seed: u64,
+    held_realms: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+    hosted: vd_core::pose::RealmId,
+    occupant_v_max_mps: f64,
+    tick_dt_s: f64,
+    lineage: &std::collections::BTreeSet<vd_core::pose::RealmId>,
+) -> Option<vd_core::look::BodyCharter> {
+    vd_physics::worldgen::body_charter_in_subtree(
+        universe_seed,
+        &process_world_config(occupant_v_max_mps, tick_dt_s),
+        held_realms,
+        lineage,
+        hosted,
+    )
 }
 
 /// The WORLD a node boots into, for the SAME `scale` [`boot_regions_and_movers`] selects its regions from.

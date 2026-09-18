@@ -16,6 +16,16 @@
 //! **SO THIS GATE REUSES ONE GEAR, BY NAME.** A gate that builds every box on fresh buffers cannot
 //! see the defect at all — which is exactly why the first eight-key check did not.
 //!
+//! ★ **WHERE THE PIN'S PAIR COMES FROM, SINCE 2026-09-16.** The SWEEP still flies the seam stand's
+//! own wanted set, box after box. The PIN no longer takes its pair from that order: stage 1's
+//! extended ladder moved the stand onto ground where every box it wants carries ONE cavern lattice,
+//! so no narrow box stands behind a wide one there any more. The pair is now CONSTRUCTED from the
+//! body's own ladder and CHOSEN BY THE TRAP — a face's CORNER box at rung 0, which carries three
+//! cavern lattice rows, against the SAME corner at the TOP rung, where nothing is carved and the
+//! box carries one row of no face while its columns still stand on both partner faces. A shrink
+//! alone is not the trap, and MEASURING that was the day's second lesson. See
+//! [`the_body_asks_for_a_narrow_box_right_behind_a_wide_one`].
+//!
 //! GPU-REQUIRED AND LOCAL, like the seam probe and the picture gate: it needs a working adapter,
 //! it is not in `just gate`, and it is run with `just gpu-drift`. Without the `render` feature this
 //! file compiles to zero tests.
@@ -24,45 +34,211 @@
 
 use vd_client_render::gpu_check::BoxGear;
 use vd_client_render::wgpu;
+use vd_seed::bend::Face;
 use vd_terrain::BodyDefinition;
-use vd_terrain::chunk::ChunkKey;
+use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey, in_ladder};
+use vd_terrain::digest::surface_chunk_z;
 use vd_terrain::home::home_planet;
 
 /// ★ THE SEAM STAND'S EYE, in the home planet's own frame — where the picture gate stands for its
-/// fifth picture, and the stand whose hole found the drift. The stand sits ON a cube face seam, so
-/// its wanted set holds the boxes that carry a PARTNER lattice beside the ones that carry none:
-/// the very shrink the pool's old rule could not survive.
+/// fifth picture, and the stand whose hole found the drift. The SWEEP below flies its whole wanted
+/// set, which is why this eye stays.
+///
+/// ⚠ ITS ORDER NO LONGER HOLDS A SHRINK. It once did — the stand sits on a cube face seam, and its
+/// set held boxes carrying a PARTNER lattice beside boxes carrying none. On stage 1's extended
+/// ladder every box it wants carries ONE. MEASURED, and printed by every run: see the finding on
+/// [`the_body_asks_for_a_narrow_box_right_behind_a_wide_one`].
 const SEAM_STAND_EYE_M: [f64; 3] = [
     4_280_492.264_785_528,
     -1_990_175.796_753_562_3,
     -4_280_492.264_785_528,
 ];
 
-/// ★ THE PAIR THAT DREW A HOLE, FOUND BY ITS OWN SHAPE and no longer by two literals (re-derived
-/// 2026-09-15, when the extended ladder moved every chunk key in the world): the FIRST place in the
-/// seam stand's own order where a box asks for FEWER cavern lattice rows than the box right before
-/// it. That shrink IS the defect the pin holds — the wide box grew the gear's lattice binding, the
-/// narrow box wrote fewer rows, and the kernel walked the binding by its slice's own length, so
-/// every column of the narrow box found a lattice that box does not have.
-///
-/// `None` where the stand asks for no shrink at all, which the tests below refuse by name.
-fn shrinking_pair(body: &BodyDefinition) -> Option<(ChunkKey, ChunkKey)> {
-    let mut view = vd_client::ladder_view::LadderView::default();
-    let wanted = view.wanted(body, SEAM_STAND_EYE_M);
+/// ★ WHAT ONE ORDER OF BOXES ASKS ITS GEAR FOR: each box's cavern-lattice row count in the order
+/// a builder meets them, the histogram of those counts, and how many times a box asks for FEWER rows
+/// than the box right before it. That SHRINK is the trap the pin holds — the wide box grew the gear's
+/// lattice binding, the narrow box wrote fewer rows, and the kernel walked the binding by its slice's
+/// own length, so every column of the narrow box found a lattice that box does not have.
+struct Census {
+    /// How many of the keys stand on the ladder and have a plan.
+    planned: usize,
+    /// Lattice words per box, against how many boxes ask for that many.
+    histogram: std::collections::BTreeMap<usize, usize>,
+    /// How many consecutive pairs shrink.
+    shrinks: usize,
+    /// The FIRST shrinking pair in the order: the wide box, then the narrow one behind it.
+    pair: Option<(ChunkKey, ChunkKey)>,
+}
+
+impl Census {
+    /// The order's own reading, in one line a reader can act on.
+    fn state(&self, name: &str) -> String {
+        format!(
+            "{name}: {} boxes planned, lattice-word histogram {:?}, {} shrinks",
+            self.planned, self.histogram, self.shrinks
+        )
+    }
+}
+
+/// The census of `keys`, read in the order given.
+fn census(body: &BodyDefinition, keys: &[ChunkKey]) -> Census {
+    let mut out = Census {
+        planned: 0,
+        histogram: std::collections::BTreeMap::new(),
+        shrinks: 0,
+        pair: None,
+    };
     let mut previous: Option<(ChunkKey, usize)> = None;
-    for key in &wanted.keys {
+    for key in keys {
         let Some(plan) = vd_terrain::gpu::plan(body, *key) else {
             continue;
         };
         let words = plan.lattice_words().len();
-        if let Some((before, before_words)) = previous {
-            if words < before_words {
-                return Some((before, *key));
+        out.planned += 1;
+        *out.histogram.entry(words).or_default() += 1;
+        if let Some((before, before_words)) = previous
+            && words < before_words
+        {
+            out.shrinks += 1;
+            if out.pair.is_none() {
+                out.pair = Some((before, *key));
             }
         }
         previous = Some((*key, words));
     }
+    out
+}
+
+/// The keys the seam stand itself asks for, in its own order — a MEASUREMENT the tests print, and no
+/// longer where the pin's pair comes from. See the finding on
+/// [`the_body_asks_for_a_narrow_box_right_behind_a_wide_one`].
+fn seam_stand_keys(body: &BodyDefinition) -> Vec<ChunkKey> {
+    let mut view = vd_client::ladder_view::LadderView::default();
+    view.wanted(body, SEAM_STAND_EYE_M).keys
+}
+
+/// The TOP rung of a body: the coarsest, where no cavern is carved at all.
+fn top_rung(body: &BodyDefinition) -> u8 {
+    body.ladder().rungs.saturating_sub(1)
+}
+
+/// The MIDDLE chunk index along a face edge at rung 0 — the last chunk index, halved. A CHUNK
+/// index, never a cell index: a cell index put every middle box off the ladder, and the census
+/// counted twelve boxes where the construction names eighteen.
+#[allow(
+    clippy::integer_division,
+    reason = "a test on the host: a chunk is 62 cells, which no shift divides"
+)]
+fn middle_chunk(body: &BodyDefinition) -> i32 {
+    ((body.ladder().cells_per_edge(0) as i32 - 1) / CHUNK_EDGE as i32) >> 1
+}
+
+/// ★★ THE CANDIDATE ORDER, BUILT FROM THE LADDER SO THE PIN CANNOT GO QUIET (re-derived
+/// 2026-09-16, stage 2 of slice 8a, when the ground moved the seam stand's whole wanted set into
+/// ONE row count). Three boxes per face, and the pair search below picks the trap out of them:
+///
+/// - THE FACE'S CORNER AT RUNG 0. Caverns are carved at rung 0 and its halo reaches across TWO
+///   seams, so it carries THREE cavern lattice rows: its own face and both partners.
+/// - THE SAME CORNER AT THE TOP RUNG. No cavern is carved there at all, so the box carries ONE
+///   stand-in row of NO FACE — while its columns STILL sit on all three faces.
+/// - THE MIDDLE OF THE FACE AT RUNG 0, which carries one real row and whose columns all sit on its
+///   own face.
+fn shrinking_order(body: &BodyDefinition) -> Vec<ChunkKey> {
+    let mut keys: Vec<ChunkKey> = Vec::new();
+    let top = top_rung(body);
+    let middle = middle_chunk(body);
+    for face in Face::ALL {
+        let corner = ChunkKey {
+            face,
+            rung: 0,
+            x: 0,
+            y: 0,
+            z: surface_chunk_z(body, face, 0, 0, 0),
+        };
+        let coarse_corner = ChunkKey {
+            face,
+            rung: top,
+            x: 0,
+            y: 0,
+            z: surface_chunk_z(body, face, top, 0, 0),
+        };
+        let mid = ChunkKey {
+            face,
+            rung: 0,
+            x: middle,
+            y: middle,
+            z: surface_chunk_z(body, face, 0, middle, middle),
+        };
+        for candidate in [corner, coarse_corner, mid] {
+            if in_ladder(body, candidate) {
+                keys.push(candidate);
+            }
+        }
+    }
+    keys
+}
+
+/// ★★ WHETHER A PAIR IS THE TRAP, AND NOT MERELY A SHRINK — the whole lesson of 2026-09-16.
+///
+/// `vd_recipe::plan::column_row` takes the FIRST row whose face the column names (`has == 0` guards
+/// every later row), so a stale row sitting BEHIND a row the box really has is read by nobody. The
+/// trap needs a column of the narrow box whose face the narrow box's OWN rows do not carry, while
+/// the wide box's rows carry it at an index the narrow box never wrote. Then the kernel walks the
+/// binding by its slice's own length, finds the stale row, and reads a lattice this box does not
+/// have.
+///
+/// **Example.** The pilot's client builds the corner box of face `+X` at rung 0: three rows — `+X`,
+/// `+Y`, `−Z`. Next it builds the SAME corner at the top rung, where nothing is carved: one row of
+/// NO FACE. On a gear that kept the first box's rows, every halo column of that box standing on
+/// `+Y` finds the earlier box's `+Y` lattice and the player flies at a cave that is not there.
+///
+/// Answers the face a stale row would hand over, or `None` where the pair is safe by construction.
+fn stale_face_of(
+    wide: &vd_terrain::gpu::BoxPlan,
+    narrow: &vd_terrain::gpu::BoxPlan,
+) -> Option<i64> {
+    let kept = narrow.lattices.len();
+    if wide.lattices.len() <= kept {
+        return None;
+    }
+    for site in &narrow.sites {
+        if site.face == vd_terrain::lattice::CORNER_FACE {
+            continue;
+        }
+        let want = i64::from(site.face);
+        if narrow.lattices.iter().any(|b| b.face.raw() == want) {
+            continue;
+        }
+        if wide.lattices[kept..].iter().any(|b| b.face.raw() == want) {
+            return Some(want);
+        }
+    }
     None
+}
+
+/// ★ THE PIN'S PAIR, AND THE CENSUS THAT FOUND IT: the first ordered pair of [`shrinking_order`]
+/// that is a TRAP by [`stale_face_of`]. The panic is the FINDING a body owes the reader — a body
+/// on which no box can hand a stale row to another has nothing for the pooled-buffer pin to hold,
+/// and the histogram says so in the same breath.
+fn shrinking_pair(body: &BodyDefinition) -> (Census, ChunkKey, ChunkKey, i64) {
+    let order = shrinking_order(body);
+    let found = census(body, &order);
+    let plans: Vec<(ChunkKey, vd_terrain::gpu::BoxPlan)> = order
+        .iter()
+        .filter_map(|k| vd_terrain::gpu::plan(body, *k).map(|p| (*k, p)))
+        .collect();
+    for (wi, (wide_key, wide)) in plans.iter().enumerate() {
+        for (narrow_key, narrow) in plans.iter().skip(wi + 1) {
+            if let Some(face) = stale_face_of(wide, narrow) {
+                return (found, *wide_key, *narrow_key, face);
+            }
+        }
+    }
+    panic!(
+        "NO BOX OF THIS BODY CAN HAND A STALE CAVERN LATTICE ROW TO ANOTHER: the pooled-buffer pin \
+         has nothing to hold. {}",
+        found.state("the constructed order")
+    );
 }
 
 /// HOW MANY OF THE STAND'S OWN BOXES THE SWEEP TAKES: EVERY ONE. The whole wanted set is 6 049
@@ -152,8 +328,17 @@ fn the_smaller_box_after_a_bigger_one_is_still_the_cpus_box() {
     let (device, queue) = device();
     let body = home_planet();
     let mut gear = BoxGear::new(device, queue);
-    let (predecessor, failing) =
-        shrinking_pair(&body).expect("the seam stand asks a narrow box behind a wide one");
+    let (found, predecessor, failing, stale_face) = shrinking_pair(&body);
+    eprintln!("gpu_no_drift: {}", found.state("the constructed order"));
+    assert!(
+        found.shrinks >= 1,
+        "the pin needs a SHRINK to hold anything. {}",
+        found.state("the constructed order")
+    );
+    eprintln!(
+        "gpu_no_drift: a gear that kept the wide box's rows hands face {stale_face} to the narrow \
+         box's columns"
+    );
     let before = vd_terrain::gpu::plan(&body, predecessor).expect("the key is on the ladder");
     let after = vd_terrain::gpu::plan(&body, failing).expect("the key is on the ladder");
     // The pair is only a trap while the second box asks for FEWER lattice rows than the first, which
@@ -296,34 +481,52 @@ fn the_card_builds_the_seam_stands_own_boxes_byte_for_byte() {
     );
 }
 
-/// ★ WHY THAT KEY, AND NOT ANOTHER — the stand's own order (§26.10). The seam stand asks for the
-/// failing box IMMEDIATELY AFTER a box that carries TWO cavern lattices, and the second of those
-/// two names the failing box's OWN FACE. That is the whole trap: the wide box grew the gear's
-/// lattice binding to two rows, the narrow box wrote one, and the kernel walked the binding by its
-/// slice's own length — so every column of the narrow box found a lattice that box does not have.
+/// ★ WHY THAT PAIR, AND NOT ANOTHER — and the FINDING the seam stand now states (2026-09-16).
 ///
-/// This test needs no card. It states the ORDER, so a ladder that ever stops putting a narrow box
-/// behind a wide one tells us here, where the pin above would quietly stop pinning anything.
+/// **THE FINDING.** The seam stand's own wanted set NO LONGER HOLDS A SHRINK. Every box it asks
+/// for carries ONE cavern lattice — eight lattice words — so no narrow box stands behind a wide
+/// one anywhere in its order. MEASURED on stage 2's ground: 6 302 boxes wanted, 6 302 planned,
+/// histogram `{8: 6302}`, 0 shrinks; and the SAME reading on the tree before stage 2 (5 907 boxes,
+/// `{8: 5907}`, 0 shrinks), so it is stage 1's extended ladder that moved the stand, not the ridge.
+/// The pin that read its order therefore stopped pinning anything, and it said so by failing.
+///
+/// **THE CURE, AND THE SECOND LESSON.** The pair is now CONSTRUCTED from the body's own ladder
+/// ([`shrinking_order`]) and then CHOSEN BY THE TRAP ITSELF ([`stale_face_of`]), never by the
+/// shrink alone. A shrink is not enough: `vd_recipe::plan::column_row` takes the FIRST row whose
+/// face a column names, so a stale row behind a real one is read by nobody. MEASURED on this very
+/// file — a first cure paired a rung-0 CORNER box (three rows) with a rung-0 MIDDLE box (one row),
+/// a true shrink, and with the pool's old growing rule restored the pin stayed GREEN, because
+/// every column of a middle box names its own face and takes row zero. The shipped pair is the
+/// corner at rung 0 against the SAME corner at the TOP rung, where nothing is carved: one row of
+/// NO FACE, and columns still standing on both partner faces, which the stale rows then hand over.
+///
+/// This test needs no card. It states the order and refuses a construction with no trap in it —
+/// where the pin above would quietly hold nothing.
 #[test]
-fn the_stand_asks_for_the_narrow_box_right_behind_a_wide_one() {
+fn the_body_asks_for_a_narrow_box_right_behind_a_wide_one() {
     let body = home_planet();
-    let mut view = vd_client::ladder_view::LadderView::default();
-    let wanted = view.wanted(&body, SEAM_STAND_EYE_M);
-    let (predecessor, failing) =
-        shrinking_pair(&body).expect("the seam stand asks a narrow box behind a wide one");
-    let at = wanted
-        .keys
-        .iter()
-        .position(|k| *k == failing)
-        .expect("the seam stand asks for the key that drew the hole");
-    assert_eq!(wanted.keys[at - 1], predecessor, "the pair is consecutive");
-    let before = vd_terrain::gpu::plan(&body, wanted.keys[at - 1]).expect("the box before it");
-    let after = vd_terrain::gpu::plan(&body, failing).expect("the box that drifted");
+    // The stand's own reading, kept as a MEASUREMENT: the day the ground moves a shrink back into
+    // its order, this line says so.
+    let stand = census(&body, &seam_stand_keys(&body));
     eprintln!(
-        "gpu_no_drift: the seam stand wants {} boxes; {failing:?} stands at {at}, behind \
-         {:?} which carries {} lattice words and {} nodes against its own {} and {}",
-        wanted.keys.len(),
-        before.key,
+        "gpu_no_drift: {}",
+        stand.state("the seam stand's own order")
+    );
+    let order = shrinking_order(&body);
+    let (found, wide, narrow, stale_face) = shrinking_pair(&body);
+    eprintln!("gpu_no_drift: {}", found.state("the constructed order"));
+    assert!(
+        found.shrinks >= 1,
+        "the construction asks every gear for the same rows: the pin is idle. {}",
+        found.state("the constructed order")
+    );
+    let before = vd_terrain::gpu::plan(&body, wide).expect("the wide box");
+    let after = vd_terrain::gpu::plan(&body, narrow).expect("the narrow box");
+    eprintln!(
+        "gpu_no_drift: the constructed order holds {} boxes; the trap is {wide:?} ({} lattice \
+         words, {} nodes) then {narrow:?} ({} words, {} nodes), and the stale row hands over face \
+         {stale_face}",
+        order.len(),
         before.lattice_words().len(),
         before.node_count,
         after.lattice_words().len(),
@@ -331,10 +534,15 @@ fn the_stand_asks_for_the_narrow_box_right_behind_a_wide_one() {
     );
     assert!(
         after.lattice_words().len() < before.lattice_words().len(),
-        "the box before the failing one no longer carries more lattice rows: the pin is idle"
+        "the wide box no longer carries more lattice rows: the pin is idle"
     );
     assert!(
         after.node_count < before.node_count,
-        "the box before the failing one no longer carries more nodes: the pin is idle"
+        "the wide box no longer carries more nodes: the pin is idle"
+    );
+    assert_eq!(
+        stale_face_of(&before, &after),
+        Some(stale_face),
+        "the pair is a TRAP and not merely a shrink"
     );
 }

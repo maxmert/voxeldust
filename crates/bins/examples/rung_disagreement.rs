@@ -81,7 +81,11 @@ fn main() -> ExitCode {
         let p99 = diffs[(diffs.len() as f64 * 0.99) as usize];
         // A vertical step of `m` metres at the switch distance subtends `m / switch_m` radians.
         let px = |m: f64| (m / switch_m) / pixel_rad;
-        let bound = body.relief_bound_m(rung) - body.relief_bound_m(rung + 1);
+        // ★ THE BOUND THE LADDER ACTUALLY USES (slice 8a stage 4): the body's own STEP BOUND, which
+        // carries the cap-rock bench's Lipschitz word and its fade's own step. Before the bench it
+        // was a difference of two value bounds and the two agreed; they no longer do, and the
+        // column that matters is the one ruling T7's rules 2 and 3 read.
+        let bound = body.step_bound_m(rung);
         println!(
             "  {rung:>2} -> {:>2}      {cell:>8.0} m   {:>10.0} m   {max:>7.2}   {p99:>7.2}   {:>11.2}   {:>11.2}   {:>8.2}   {:>8.2}   {bound:>9.2}",
             rung + 1,

@@ -56,6 +56,12 @@ use vd_terrain::position::vertex_position_m;
 /// gap between the two fields (the octaves the coarser rung drops) plus a cell of each rung for
 /// the extractor's own placement, which lies within a vertex's group. Under that, the coarser
 /// mesh is certainly below the finer one; zero at rung 0, which is under nothing.
+///
+/// ★ SINCE THE CAP-ROCK BENCH (slice 8a stage 4) the difference of the two dropped bounds IS the
+/// body's own handover step (`vd_terrain::BodyDefinition::step_bound`), which carries the terrace's
+/// Lipschitz word and the fade's own step as well as the dropped octaves. The bench amplifies every
+/// variation under it, so a sink sized on the octaves alone would be short and a coarse mesh would
+/// show through a finer one at a fade edge.
 #[must_use]
 pub fn sink_m(body: &BodyDefinition, rung: u8) -> f64 {
     if rung == 0 {
@@ -1412,6 +1418,13 @@ pub struct ChunkCounters {
     pub foreign_generator: u64,
     /// A surface statement whose frame carries no seed, or whose radius the ladder refuses.
     pub no_body: u64,
+    /// ★ A surface statement with NO CHARTER (slice 8b stage 1): the realm states it is seed-shaped
+    /// and states none of its physical facts, so the lane refuses THIS realm's ground and counts it.
+    /// One realm's ground is missing; the world stands.
+    pub no_charter: u64,
+    /// Surface statements accepted WITH a charter in hand — the presence counter beside the
+    /// refusal, so "nobody ships a charter" and "everybody does" are two different readings.
+    pub charters_held: u64,
     /// A request for a key outside the body's ladder.
     pub outside: u64,
     /// Jobs submitted to the workers.
@@ -1429,6 +1442,10 @@ pub struct ChunkLane {
     /// This client's declared recipe tag: a realm's surface must state the same one.
     declared: u64,
     bodies: BTreeMap<RealmId, Arc<BodyDefinition>>,
+    /// The charter each body's realm stated, held beside the body. Nothing reads it yet: stage 3 is
+    /// where the relief law takes it, and the record is carried now because appending a word after
+    /// the freeze is impossible.
+    charters: BTreeMap<RealmId, vd_core::look::BodyCharter>,
     /// Realms whose surface statement was refused: counted ONCE, never re-read each frame.
     refused: BTreeSet<RealmId>,
     resident: BTreeSet<(RealmId, ChunkKey)>,
@@ -1448,6 +1465,7 @@ impl ChunkLane {
             workers,
             declared,
             bodies: BTreeMap::new(),
+            charters: BTreeMap::new(),
             refused: BTreeSet::new(),
             resident: BTreeSet::new(),
             pending: BTreeSet::new(),
@@ -1482,13 +1500,24 @@ impl ChunkLane {
         self.pending.len()
     }
 
-    /// State a realm's surface: its statement and its look. The body is built from the seed in the
-    /// statement's frame and the look shell's radius. A statement with a foreign recipe tag, a
-    /// frame without a seed, or a radius the ladder refuses is counted and the realm gets no body.
-    /// Stating the same surface twice keeps the body; a refused realm is counted once and then
-    /// ignored until it is forgotten (a refusal used to be re-counted and the body re-derived on
-    /// every frame — the refuter's finding).
-    pub fn state_surface(&mut self, realm: RealmId, surface: &SurfaceStmt, look: &Boundary) {
+    /// State a realm's surface: its statement, its CHARTER and its look. The body is built from the
+    /// seed in the statement's frame and the look shell's radius. A statement with a foreign recipe
+    /// tag, NO CHARTER, a frame without a seed, or a radius the ladder refuses is counted and the
+    /// realm gets no body. Stating the same surface twice keeps the body; a refused realm is counted
+    /// once and then ignored until it is forgotten (a refusal used to be re-counted and the body
+    /// re-derived on every frame — the refuter's finding).
+    ///
+    /// ★ THE CHARTER IS REQUIRED (slice 8b §4.1/§4.2 rule 3). A shard that cannot derive its charter
+    /// states no surface, so in the shipped path the two always arrive together. A surface that
+    /// arrives alone is a fault, and the lane says so with a counter instead of inventing a gravity.
+    /// The charter is HELD, not yet read: stage 3 is where the relief law takes it.
+    pub fn state_surface(
+        &mut self,
+        realm: RealmId,
+        surface: &SurfaceStmt,
+        charter: Option<&vd_core::look::BodyCharter>,
+        look: &Boundary,
+    ) {
         if self.bodies.contains_key(&realm) | self.refused.contains(&realm) {
             return;
         }
@@ -1497,21 +1526,41 @@ impl ChunkLane {
             self.refused.insert(realm);
             return;
         }
+        let Some(charter) = charter else {
+            self.counters.no_charter += 1;
+            self.refused.insert(realm);
+            return;
+        };
+        // ★ THE CLIENT BUILDS THE BODY FROM THE SAME INTEGERS THE SHARD USED (slice 8b stage 3).
+        // The two words come off the realm's own charter, not off anything the client derives, so
+        // the client's chunks equal the shard's byte for byte and the no-drift gate stays a
+        // measurement that could fail.
+        let facts = vd_terrain::BodyFacts::new(charter.gravity_mm_s2, charter.bulk_density_kgm3);
         let body = match (surface.frame, look) {
             (FrameRef::PlanetCentered { planet_seed }, Boundary::Shell { r }) => {
-                BodyDefinition::from_seed(planet_seed, *r)
+                BodyDefinition::from_seed(planet_seed, *r, facts)
             }
             _ => None,
         };
         match body {
             Some(body) => {
                 self.bodies.insert(realm, Arc::new(body));
+                self.charters.insert(realm, *charter);
+                self.counters.charters_held += 1;
             }
             None => {
                 self.counters.no_body += 1;
                 self.refused.insert(realm);
             }
         }
+    }
+
+    /// The charter the lane holds for a realm — what the realm stated about itself, in whole
+    /// numbers. Nothing in the shipped path reads it yet (stage 3 is where the relief law does);
+    /// the dev state reads it so a flight can prove a client received one.
+    #[must_use]
+    pub fn charter(&self, realm: RealmId) -> Option<&vd_core::look::BodyCharter> {
+        self.charters.get(&realm)
     }
 
     /// The body the lane holds for a realm.
@@ -1523,6 +1572,7 @@ impl ChunkLane {
     /// Forget a realm: its body and every chunk of it.
     pub fn forget(&mut self, realm: RealmId) {
         self.bodies.remove(&realm);
+        self.charters.remove(&realm);
         self.refused.remove(&realm);
         self.held.remove(&realm);
         self.parents.forget(realm);
@@ -1824,6 +1874,38 @@ mod tests {
         RealmId::Planet(HOME_PLANET_SEED)
     }
 
+    /// The home planet's charter as its own realm states it: the words the census draws, and
+    /// ABSENCE for the words a later stage draws.
+    ///
+    /// ★ THE TWO RELIEF WORDS ARE THE HOME PLANET'S OWN (slice 8b stage 3), because the lane now
+    /// BUILDS THE BODY FROM THEM. They were the design's hand figures (9 821 and 5 514) while
+    /// nobody read them; the moment the relief law read them the fixture's body stopped being the
+    /// home planet, which is the measurement that says the charter reaches the shape.
+    fn charter() -> vd_core::look::BodyCharter {
+        vd_core::look::BodyCharter {
+            gravity_mm_s2: vd_terrain::home::HOME_PLANET_GRAVITY_MM_S2,
+            bulk_density_kgm3: vd_terrain::home::HOME_PLANET_BULK_DENSITY_KGM3,
+            escape_velocity_mps: 11_190,
+            insolation_q12: 3_065,
+            t_eq_mk: 236_795,
+            t_surface_mk: None,
+            bond_albedo_q12: 1_228,
+            mu_q8: Some(7_168),
+            scale_height_m: Some(7_161),
+            p_surf_pa: None,
+            tau_vis_q12: None,
+            tau_ir_q12: None,
+            day_s: None,
+            obliquity_cos_q1024: None,
+            water_km3: None,
+            sea_offset_mm: None,
+            elastic_thickness_m: None,
+            ecc_q16: 1_130,
+            year_s: 34_766_100,
+            flags: vd_core::look::CHARTER_FLAG_HAS_AIR | vd_core::look::CHARTER_FLAG_SOLID_SURFACE,
+        }
+    }
+
     fn surface(generator: u64) -> SurfaceStmt {
         SurfaceStmt {
             frame: FrameRef::PlanetCentered {
@@ -1869,12 +1951,12 @@ mod tests {
         let look = Boundary::Shell {
             r: body.ladder().radius_m(),
         };
-        lane.state_surface(planet(), &foreign, &look);
-        lane.state_surface(planet(), &foreign, &look);
+        lane.state_surface(planet(), &foreign, Some(&charter()), &look);
+        lane.state_surface(planet(), &foreign, Some(&charter()), &look);
         assert_eq!(lane.counters().foreign_generator, 1);
         assert!(lane.body(planet()).is_none());
         lane.forget(planet());
-        lane.state_surface(planet(), &foreign, &look);
+        lane.state_surface(planet(), &foreign, Some(&charter()), &look);
         assert_eq!(lane.counters().foreign_generator, 2);
         // A frame without a seed: no body, counted once too.
         let seedless = SurfaceStmt {
@@ -1882,22 +1964,33 @@ mod tests {
             frame: FrameRef::SystemSpace { system_seed: 7 },
         };
         let system = RealmId::System(7);
-        lane.state_surface(system, &seedless, &look);
-        lane.state_surface(system, &seedless, &look);
+        lane.state_surface(system, &seedless, Some(&charter()), &look);
+        lane.state_surface(system, &seedless, Some(&charter()), &look);
         assert_eq!(lane.counters().no_body, 1);
     }
 
     #[test]
     fn a_surface_statement_becomes_the_home_planet_and_a_foreign_one_is_refused() {
         let mut lane = lane();
-        lane.state_surface(planet(), &surface(77), &look());
+        lane.state_surface(planet(), &surface(77), Some(&charter()), &look());
         assert_eq!(lane.body(planet()).map(|b| **b), Some(home_planet()));
-        // Stated again: the same body, nothing counted.
-        lane.state_surface(planet(), &surface(77), &look());
-        assert_eq!(lane.counters(), ChunkCounters::default());
+        assert_eq!(
+            lane.charter(planet()),
+            Some(&charter()),
+            "the charter is held beside the body"
+        );
+        // Stated again: the same body, nothing counted but the one charter already held.
+        lane.state_surface(planet(), &surface(77), Some(&charter()), &look());
+        assert_eq!(
+            lane.counters(),
+            ChunkCounters {
+                charters_held: 1,
+                ..ChunkCounters::default()
+            }
+        );
         // A foreign recipe tag: refused, counted, no body.
         let other = RealmId::Planet(5);
-        lane.state_surface(other, &surface(78), &look());
+        lane.state_surface(other, &surface(78), Some(&charter()), &look());
         assert!(lane.body(other).is_none());
         assert_eq!(lane.counters().foreign_generator, 1);
         // A frame without a seed, and a radius the ladder refuses: no body. Each on its own realm —
@@ -1908,11 +2001,13 @@ mod tests {
                 frame: FrameRef::SystemSpace { system_seed: 1 },
                 generator: 77,
             },
+            Some(&charter()),
             &look(),
         );
         lane.state_surface(
             RealmId::Planet(7),
             &surface(77),
+            Some(&charter()),
             &Boundary::Shell { r: -1.0 },
         );
         assert_eq!(lane.counters().no_body, 2);
@@ -1920,6 +2015,7 @@ mod tests {
         lane.state_surface(
             RealmId::Planet(8),
             &surface(77),
+            Some(&charter()),
             &Boundary::Aabb {
                 half: vd_core::glam::DVec3::ONE,
             },
@@ -1927,6 +2023,33 @@ mod tests {
         assert_eq!(lane.counters().no_body, 3);
         lane.forget(planet());
         assert!(lane.body(planet()).is_none());
+        assert!(
+            lane.charter(planet()).is_none(),
+            "a forgotten realm's charter goes with its body"
+        );
+    }
+
+    /// ★ G-REFUSE (slice 8b stage 1): a realm that states a surface and NO CHARTER is refused, and
+    /// the counter says so. The observed-failing control of the A1 crossing — without it a client
+    /// would build a planet from numbers nobody authored.
+    #[test]
+    fn a_surface_without_a_charter_is_refused_and_counted() {
+        let mut lane = lane();
+        lane.state_surface(planet(), &surface(77), None, &look());
+        assert_eq!(lane.counters().no_charter, 1, "the refusal is counted");
+        assert!(lane.body(planet()).is_none(), "no body is built");
+        assert!(lane.charter(planet()).is_none());
+        // Counted ONCE: a refused realm is ignored until it is forgotten.
+        lane.state_surface(planet(), &surface(77), None, &look());
+        assert_eq!(lane.counters().no_charter, 1);
+        assert_eq!(lane.counters().charters_held, 0);
+        // Forgotten, then stated WITH a charter: the body is built and the charter is held.
+        lane.forget(planet());
+        lane.state_surface(planet(), &surface(77), Some(&charter()), &look());
+        assert_eq!(lane.body(planet()).map(|b| **b), Some(home_planet()));
+        assert_eq!(lane.charter(planet()), Some(&charter()));
+        assert_eq!(lane.counters().charters_held, 1);
+        assert_eq!(lane.counters().no_charter, 1);
     }
 
     #[test]
@@ -1937,7 +2060,7 @@ mod tests {
         let k0 = surface_key(&body, 0, 300, 700);
         lane.request(planet(), k0, 0);
         assert_eq!(lane.counters().no_body, 1);
-        lane.state_surface(planet(), &surface(77), &look());
+        lane.state_surface(planet(), &surface(77), Some(&charter()), &look());
         // Outside the ladder: refused.
         lane.request(
             planet(),
@@ -2291,6 +2414,7 @@ mod tests {
         let mut worst: f64 = 0.0;
         let mut measured = 0;
         let mut over = 0usize;
+        let mut outside: Vec<f64> = Vec::new();
         for (x, y) in [(300, 700), (301, 700), (150, 350), (2506, 1781)] {
             let rung = if x > 1000 {
                 5
@@ -2328,30 +2452,60 @@ mod tests {
                 let cells = f64::from(vd_seed::ladder::cell_m(coarser))
                     + f64::from(vd_seed::ladder::cell_m(rung));
                 over += usize::from(gap > cells);
+                if gap > cells {
+                    outside.push(hit.unwrap_or(field) - field);
+                }
                 worst = worst.max(gap);
                 measured += usize::from(met);
             }
         }
-        // ★ THE SIX RADIALS THAT DO NOT, MEASURED 2026-09-15 on the extended ladder's body AFTER the
-        // crust was rounded up to a whole top-rung cell: 4 136 of the 4 142 radials stand inside the
-        // sink; six stand outside it, at 26.11, 26.27, 30.91, 61.42, 64.52 and 210.26 m. On every one
-        // the PARENT'S OWN CELL COLUMN reads AIR UNDER ROCK — a CAVE — so the radial slips past the
-        // hill into the cave and reports the cave's depth, not the extractor's placement. The worst
-        // is the clearest case: the parent chunk one slice lower (z = 1 049) holds NO surface at all,
-        // only a one-cell cavern, and that cavern's face is the only hit its column answers with.
-        // The sink is a claim about the SURFACE, and a cave is not the surface.
+        // ★ THE ONE RADIAL THAT DOES NOT, RE-MEASURED 2026-09-18 on slice 8b stage 3 (THE RELIEF
+        // LAW): 4 475 of the 4 476 radials stand inside the sink; ONE stands outside it, at 31.29 m.
+        //
+        // The number moves at every stage that moves the ground, and it has moved six times now:
+        // SIX of 4 142 radials (worst 210.26 m) before the spectrum; NINETEEN of 5 284 (worst
+        // 170.28 m) at 8a stage 1; THREE of 3 242 (worst 136.21 m) at stage 2; THIRTEEN of 6 180
+        // (worst 128.91 m) at stage 3; FIFTEEN of 5 630 (worst 197.08 m) at stage 4; ONE of 4 476
+        // (worst 31.29 m) here, where the relief law halved the mountains and the caves under this
+        // box with them. The RADIAL COUNT is
+        // the field's own roughness read back: a
+        // smoother column carries more vertices over the parent's cells that answer a radial at
+        // all, and the factor lowers the fine half of nine columns in ten.
+        //
+        // ★ THE RESIDUE IS THE SAME CLASS, and it is MEASURED, not argued — the two discriminators
+        // are ASSERTED below and each could fail:
+        //   1. EVERY ONE of the hits stands BELOW its field. The fifteen signed gaps are all
+        //      negative, the deepest −197.08 m. A misplaced parent mesh would stand on
+        //      both sides of the field and at the CELL's own scale (3 m at rung 0, 6 m at rung 1).
+        //   2. Every gap sits inside the body's own CAVE BAND (8 m to 370 m under the surface).
+        // So the radial slips past the hill into a cave and reports the cave's depth, not the
+        // extractor's placement. The sink is a claim about the SURFACE, and a cave is not the surface.
+        //
         // ⚠ OWED, THE OWNER'S CALL: whether a morph target should follow its parent into a cave at
         // all. Until it is answered this test states the MEASURED residue by name, so it goes red
         // the moment the residue grows.
         assert_eq!(
-            over, 6,
+            over, 1,
             "{over} of {measured} radials outside the sink, the worst {worst:.2} m"
         );
         assert!(
-            worst < 211.0,
+            worst < 32.0,
             "the worst radial stands {worst:.2} m from its field"
         );
         assert!(measured > 1000, "{measured}");
+        // The two discriminators, as assertions: the residue is a radial in a CAVE, never a mesh in
+        // the wrong place.
+        let mut below = 0;
+        let mut in_band = 0;
+        for gap in &outside {
+            below += usize::from(*gap < 0.0);
+            in_band += usize::from((gap.abs() >= 8.0) & (gap.abs() <= 370.0));
+        }
+        assert_eq!(
+            below, over,
+            "every residue stands BELOW its field: {outside:?}"
+        );
+        assert_eq!(in_band, over, "and inside the cave band: {outside:?}");
     }
 
     #[test]
@@ -2537,6 +2691,8 @@ mod tests {
         let mesh = extract(&samples);
         let o = DVec3::from_array(gl.origin_m);
         let mut checked = 0;
+        let mut deep = 0u32;
+        let mut deepest: f64 = 0.0;
         for (v, m) in mesh.vertices.iter().zip(gl.morph_targets().iter()) {
             // The exact radial of the vertex (the target's own is rounded through f32).
             let p = vertex_position_m(&body, &samples, *v);
@@ -2549,18 +2705,55 @@ mod tests {
                     .is_some_and(|h| (h - r).abs() < 0.01)
             });
             checked += u32::from(on);
+            // ★ A VERTEX IN A CAVE READS THE FIELD BY RULE, and the builder does not count it as a
+            // fallback (`missing & ((field − len).abs() <= reach_m)`). The test names the same rule
+            // through the same function, so the two can never drift apart.
+            let len = DVec3::new(p[0], p[1], p[2]).length();
+            let field = vd_terrain::height::height_m(&body, [dir.x, dir.y, dir.z], left.rung + 1);
+            let reach = sink_m(&body, left.rung + 1);
+            if !on & ((field - len).abs() > reach) {
+                deep += 1;
+                deepest = deepest.min(len - field);
+            }
         }
         // The extractor's own vertices; the skirts' targets are their tops' dropped.
         let targets = mesh.vertices.len() as u32;
-        // ★ MEASURED 2026-09-15 on the extended ladder's body AFTER the crust was rounded up to a
-        // whole top-rung cell: 4 489 of the 4 493 targets lie on a parent triangle and the other
-        // four are recorded fallbacks. NONE is neither — the claim is whole again. (Before the
-        // crust rule the same box held 8 189 targets and two of them fell into a CAVE MOUTH in the
-        // parent; the rounded crust moved the box's own ground and the two caves went with it.)
+        // ★ RE-MEASURED 2026-09-17 on slice 8a stage 4 (the cap-rock bench): the targets of this
+        // box lie on a parent triangle but for TWO, which stand IN A CAVE; 0 are recorded fallbacks
+        // and 0 stand on a box seam. None is none of the four — the claim is whole. (Stage 3 read
+        // 8 572 of 8 579 with SEVEN in a cave; the bench moves the ground, so it moves which
+        // vertices fall through it.)
+        //
+        // ★ THE CAVE ARM IS NAMED HERE FOR THE FIRST TIME, and a PROBE found it rather than an
+        // argument. The builder's own rule is explicit: a vertex whose coarser field stands farther
+        // than the SINK away is "a cave's own and reads the field by nature", so it is neither a
+        // parent hit nor a counted fallback. The seven stand 26.42 m to 45.85 m UNDER their coarser
+        // field — inside the body's own cave band — and their targets sit EXACTLY on that field
+        // (a gap of 0.000 m). Six have no parent hit in their cell at all; the seventh's only hit is
+        // 27.49 m below, which is the cave's far wall.
+        //
+        // This box held no such vertex on the earlier ground, so the two-way claim happened to hold.
+        // The test now reads the SAME `sink_m` the builder reads, so the two can never drift apart.
+        //
+        // (2026-09-18, slice 8b stage 3, THE RELIEF LAW: the box now holds FOUR cave vertices, not
+        // two, and the deepest stands 26.57 m under its field — still inside the body's own cave
+        // band. The mountains halved, so more of this box's ground sits at the depth the caves are
+        // carved at.)
+        //
+        // (2026-09-15, the earlier reading: 4 489 of 4 493 on a parent triangle, four fallbacks.
+        // Before the crust rule the same box held 8 189 targets and two fell into a CAVE MOUTH in
+        // the parent.)
+        let seam = gl.morph_seam;
         assert_eq!(
-            checked + fallbacks,
+            checked + fallbacks + seam + deep,
             targets,
-            "{checked} on the parent of {targets}, {fallbacks} fallbacks"
+            "{checked} on the parent of {targets}, {fallbacks} fallbacks, {seam} on a seam, {deep} in a cave"
+        );
+        assert_eq!(seam, 0, "this box holds no seam vertex");
+        assert_eq!(deep, 4, "the cave vertices of this box");
+        assert!(
+            (-28.0..=-26.0).contains(&deepest),
+            "the deepest cave vertex stands {deepest:.2} m under its field"
         );
         // A vertex the two chunks share (the same world position) has the same target.
         let ol = DVec3::from_array(gl.origin_m);
@@ -2796,7 +2989,7 @@ mod tests {
     fn the_harvest_stops_within_its_byte_budget() {
         let mut lane = lane();
         let body = home_planet();
-        lane.state_surface(planet(), &surface(77), &look());
+        lane.state_surface(planet(), &surface(77), Some(&charter()), &look());
         for x in 0..3 {
             lane.request(planet(), surface_key(&body, 0, 302 + x, 700), 0);
         }
@@ -3067,10 +3260,18 @@ mod tests {
         let level = up.cross(vd_core::glam::DVec3::Z).normalize();
         let tilt = 8.0_f64.to_radians();
         let nose = (level * tilt.cos() - up * tilt.sin()).normalize();
-        let ruler = ruler_on_surface(&body, eye.to_array(), nose.to_array(), 0, 400.0)
+        // ★ THE REACH IS 1 200 m, RE-MEASURED 2026-09-16 on slice 8a stage 2 (the ridged band).
+        // The eye stands 3.4 m over its own ground and the nose points 8° down, so the ray falls
+        // 55.7 m over 400 m — which used to be enough. The ridge lifted the crest the eye stands on
+        // and steepened the ground ahead of it, so the ray now meets the surface at 1 113.8 m, and a
+        // 400 m march finds nothing. MEASURED: 400, 600 and 800 m answer NOTHING; 1 200 m and every
+        // longer reach answer the same 1 113.8 m hit. The ruler is the picture's own size reference,
+        // so a hill the eye looks over is exactly the case it must answer.
+        let reach_m = 1_200.0;
+        let ruler = ruler_on_surface(&body, eye.to_array(), nose.to_array(), 0, reach_m)
             .expect("the ray meets the ground");
         assert_eq!(
-            ruler_on_surface(&body, eye.to_array(), nose.to_array(), 0, 400.0),
+            ruler_on_surface(&body, eye.to_array(), nose.to_array(), 0, reach_m),
             Some(ruler)
         );
         // The ball hovers one radius clear of the rung-0 surface at its own hit direction: its
@@ -3088,7 +3289,7 @@ mod tests {
             "{ruler:?}"
         );
         assert!(ruler.distance_m > 3.0, "{ruler:?}");
-        assert!(ruler.distance_m < 400.0, "{ruler:?}");
+        assert!(ruler.distance_m < reach_m, "{ruler:?}");
         // The size law: the larger of the angular size AT THE HIT and half a cell.
         let hit = c - cd * (2.0 * ruler.radius_m);
         let by_angle = (hit - eye).length() * RULER_TAN_HALF_ANGLE;
@@ -3352,18 +3553,28 @@ mod parent_shrink_tests {
         };
         let mesh = ParentMesh::build(&body, key).expect("in the ladder");
         assert!(format!("{:?}", mesh.triangles).contains("Narrow"));
-        // ★ THE BOUND IS THE PACKING'S, NOT THE TERRAIN'S (re-stated 2026-09-15). A 400 kB ceiling
-        // was a statement about this box's own ground: on the extended ladder's body the box is
-        // cave-riddled and holds 37 754 triangles and 999 080 bytes, while its neighbours along the
-        // face hold 8 000 to 11 000 triangles and 258 to 340 kB. Thirty-two bytes a triangle is what
-        // the 16-bit packing claims, and it holds on every one of them (MEASURED: 26.5 to 31.6).
-        // The two readings are taken BEFORE the assert: an argument inside the message is only
-        // evaluated when the assert fails, which is a region no green run can cover (HR5).
-        let mesh_bytes = mesh.bytes();
+        // ★ THE BOUND IS THE PACKING'S, NOT THE TERRAIN'S (re-stated 2026-09-15; the INDEX split out
+        // 2026-09-17, slice 8a stage 3). A 400 kB ceiling was a statement about this box's own
+        // ground: on the extended ladder's body the box is cave-riddled and holds tens of thousands
+        // of triangles, while its neighbours along the face hold 8 000 to 11 000.
+        //
+        // What the packing claims is THIRTY-TWO BYTES A TRIANGLE for the mesh itself — the
+        // positions, the normals and the 16-bit triangle rows — BESIDE the bucket index, which is a
+        // fixed 4 097-word table plus one word per bucket entry and belongs to the GRID, not to the
+        // triangles. Stating the two together made the claim depend on the triangle COUNT: this box
+        // held 7 992 triangles on stage 3's ground and 255 796 bytes, which is 32.007 a triangle
+        // with the index folded in and 29.96 without it. The index is now subtracted by name, and
+        // the claim is the packing's again.
+        //
+        // The readings are taken BEFORE the assert: an argument inside the message is only evaluated
+        // when the assert fails, which is a region no green run can cover (HR5).
+        let index_bytes = (mesh.bucket_start.capacity() + mesh.bucket_tris.capacity())
+            * std::mem::size_of::<u32>();
+        let mesh_bytes = mesh.bytes() - index_bytes;
         let mesh_tris = mesh.triangle_count();
         assert!(
             mesh_bytes < mesh_tris * 32,
-            "{mesh_bytes} bytes for {mesh_tris} triangles"
+            "{mesh_bytes} bytes for {mesh_tris} triangles, beside a {index_bytes}-byte index"
         );
         assert_eq!(
             mesh.bucket_start.len(),

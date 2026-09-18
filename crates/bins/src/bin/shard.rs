@@ -207,6 +207,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &boot_berths,
         own_row,
     );
+    // ★ THE CHARTER THIS REALM STATES ABOUT ITSELF (the landform arc, slice 8b stage 2; crossing A1,
+    // approved in V13). Derived from the subtree this shard already boots — its own mass, its own
+    // radius, its illuminating star and its own orbit — and floored into whole numbers through the
+    // ONE door in `vd-physics`. NOTHING CROSSES A REALM BOUNDARY: V13's A2 lane is measured
+    // unnecessary and stays unspent (slice 8b §4.2).
+    let own_charter = vd_bins::boot_charter(
+        universe_seed,
+        &held_realms,
+        own_realm,
+        move_speed * time_multiplier,
+        tick_dt,
+        &boot_lineage,
+    );
+
     // ★ A SHARD MUST BE ABLE TO PLACE ITSELF, AND IT MUST SAY SO CLEARLY WHEN IT CANNOT
     // (owner ruling 2026-08-30). A realm the star-system LAYER names — the universe, the galaxy, a
     // star system — builds its own world from the seed alone. A realm BELOW one cannot: a planet's
@@ -264,6 +278,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // that leaned on it proved nothing about the game as shipped. THE world's own shells are the only
     // crossing boundaries a shard ever arms.
     let regions = seed_regions;
+    // ★ THE SURFACE (slice 5, R-8; HR3): a realm states a surface if and only if THE RECIPE DEFINES
+    // ITS BODY — its frame carries a seed and the ladder accepts its look radius — AND ITS CHARTER IS
+    // IN HAND (slice 8b §4.2 rule 2: a shard that cannot derive its charter states no surface; it does
+    // not guess and it does not default). A gas giant above the address has a seed and no body, and
+    // states none; a hull has no seed and states none. A capability of the body, never a kind test.
+    //
+    // ★ AND THE BODY IS DRAWN FROM THE CHARTER'S OWN INTEGERS (slice 8b stage 3): the relief law
+    // reads this realm's stated gravity and density, and the client that draws this realm reads the
+    // same two whole numbers off the same bag. One derivation, two hosts, no drift.
+    let own_body = own_charter.and_then(|charter| match own_frame {
+        vd_core::pose::FrameRef::PlanetCentered { planet_seed } => regions
+            .iter()
+            .find(|r| r.realm == own_realm)
+            .and_then(|r| match r.look {
+                Some(vd_core::geometry::Boundary::Shell { r }) => {
+                    vd_terrain::BodyDefinition::from_seed(
+                        planet_seed,
+                        r,
+                        vd_terrain::BodyFacts::new(
+                            charter.gravity_mm_s2,
+                            charter.bulk_density_kgm3,
+                        ),
+                    )
+                }
+                _ => None,
+            }),
+        _ => None,
+    });
+    // ★ THE SEA (slice 8b stage 6; ruling T8): solved ONCE here over the body's own shape from the
+    // charter's water, stated as a whole number of millimetres; the recipe keeps its draw until 8c.
+    let own_charter =
+        own_charter.map(|charter| vd_bins::charter_with_sea(charter, own_body.as_ref()));
+    let own_surface = own_body.as_ref().map(|_| vd_core::look::SurfaceStmt {
+        frame: own_frame,
+        generator: vd_terrain::declared_world_tag(universe_seed),
+    });
     // This line used to print the SCALE this shard booted, and reading it across a live cluster is
     // how the two-worlds defect was caught: the orchestrator said one thing and its gateway another.
     // There is no scale to print now. The seed is, because one world generated from one seed is
@@ -391,26 +441,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // trigger's `RealmBoundaries` registry is empty ⇒ `evaluate_realm_boundaries` early-returns,
             // behaviour-identical); the tuning is validated at `register_stub_shard` regardless.
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
-            // ★ THE SURFACE (slice 5, R-8; HR3): a realm states a surface if and only if THE RECIPE DEFINES
-            // ITS BODY — its frame carries a seed and the ladder accepts its look radius. A gas giant above
-            // the address has a seed and no body, and states none; a hull has no seed and states none. A
-            // capability of the body, never a kind test.
-            surface: match own_frame {
-                vd_core::pose::FrameRef::PlanetCentered { planet_seed } => regions
-                    .iter()
-                    .find(|r| r.realm == own_realm)
-                    .and_then(|r| match r.look {
-                        Some(vd_core::geometry::Boundary::Shell { r }) => {
-                            vd_terrain::BodyDefinition::from_seed(planet_seed, r)
-                        }
-                        _ => None,
-                    })
-                    .map(|_| vd_core::look::SurfaceStmt {
-                        frame: own_frame,
-                        generator: vd_terrain::declared_world_tag(universe_seed),
-                    }),
-                _ => None,
-            },
+            // The surface and the charter, derived together above.
+            surface: own_surface,
+            // The charter rides WITH the surface, in the same bag, on the same on-change lane — and
+            // only with it. A body the recipe refuses (a gas giant above the address) derives a
+            // charter and states no surface, so it states no charter either: a fact about a ground
+            // nobody draws is 127 bytes saying nothing.
+            charter: own_surface.and(own_charter),
             // D-WORLD-2 — the crossing-latch ttl + re-drive budget (resolved from the launcher-derived
             // env above): a delivered-but-unresolved crossing re-drives a bounded number of times, then
             // takes the LOCAL pre-CAS abort that clears the strand latch.

@@ -31,7 +31,17 @@ fn main() -> ExitCode {
             RealmId::Planet(s) => Some(s),
             _ => None,
         };
-        let ladder = seed.and_then(|s| vd_terrain::BodyDefinition::from_seed(s, c.radius_m));
+        // ★ THE RELIEF LAW's TWO WORDS (slice 8b stage 3), through the census's own door. A
+        // galaxy-wide walk cannot build a subtree per candidate, so it reads the pair from the
+        // body's own mass and radius — the SAME expression the charter a realm states is built
+        // from (`vd_physics::worldgen::relief_words`).
+        let [g_word, rho_word] = vd_physics::worldgen::relief_words(c.mass_kg, c.radius_m);
+        let facts = g_word
+            .zip(rho_word)
+            .map(|(g, rho)| vd_terrain::BodyFacts::new(g, rho));
+        let ladder = seed
+            .zip(facts)
+            .and_then(|(s, f)| vd_terrain::BodyDefinition::from_seed(s, c.radius_m, f));
         println!(
             "  {:?} in {:?}{}: star {:?} {:.4} Msun {:.4} Lsun; radius {:.1} km, mass {:.3} Mearth, density {:.0} kg/m3, g {:.2} m/s2, flux {:.3}, T_eq {:.1} K, air {}, {} planets {} moons in the system; ladder {}",
             c.body,

@@ -4,7 +4,7 @@
 //!
 //! 1. the cost of one surface chunk at EVERY rung, and the measurement: the top rung's column pass
 //!    costs less than rung 0's (the EXACT half — fewer octaves at every rung — is a unit test in
-//!    the generator crate, `every_rung_sums_strictly_fewer_octaves_than_the_rung_below_it`);
+//!    the generator crate, `every_rung_sums_no_more_octaves_than_the_rung_below_it`);
 //! 2. how many chunks of one NAMED radial column the skips refuse without a cell pass;
 //! 3. the boot self-check's cost (eight chunks) and its digest;
 //! 4. the home planet's seed and ladder, the same body `vd_bins::home_body` gives the gateway;

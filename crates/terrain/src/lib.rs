@@ -59,7 +59,7 @@ pub mod strata;
 pub mod tag;
 pub mod units;
 
-pub use body::{BodyDefinition, OCTAVES};
+pub use body::{BodyDefinition, BodyFacts, OCTAVES};
 pub use chunk::{CHUNK_CELLS, CHUNK_EDGE, Cell, ChunkKey, ChunkLattice};
 pub use compose::{EditRow, compose};
 pub use digest::{

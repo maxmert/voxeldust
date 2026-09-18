@@ -2577,6 +2577,30 @@ fn a_seed_shaped_realm_states_its_surface_beside_its_look_and_a_hull_states_none
         frame: vd_core::pose::FrameRef::PlanetCentered { planet_seed: 2298 },
         generator: 0xcbf2_9ce4_8422_2325,
     };
+    // ★ THE CHARTER RIDES WITH IT (slice 8b stage 2): the body's physical facts as whole numbers.
+    // The words a later stage draws are ABSENT, never zero.
+    let charter = vd_core::look::BodyCharter {
+        gravity_mm_s2: 9_821,
+        bulk_density_kgm3: 5_514,
+        escape_velocity_mps: 11_190,
+        insolation_q12: 3_065,
+        t_eq_mk: 236_795,
+        t_surface_mk: None,
+        bond_albedo_q12: 1_228,
+        mu_q8: Some(7_168),
+        scale_height_m: Some(7_161),
+        p_surf_pa: None,
+        tau_vis_q12: None,
+        tau_ir_q12: None,
+        day_s: None,
+        obliquity_cos_q1024: None,
+        water_km3: None,
+        sea_offset_mm: None,
+        elastic_thickness_m: None,
+        ecc_q16: 1_130,
+        year_s: 34_766_100,
+        flags: vd_core::look::CHARTER_FLAG_HAS_AIR | vd_core::look::CHARTER_FLAG_SOLID_SURFACE,
+    };
     let open = GatewayToShard::WindowOpen {
         window: WindowId(1),
         scope: WindowScope::Occupants,
@@ -2586,13 +2610,15 @@ fn a_seed_shaped_realm_states_its_surface_beside_its_look_and_a_hull_states_none
     let mut rig = Rig::new();
     rig.grant_realm();
     rig.world.resource_mut::<StubConfig>().surface = Some(surface);
+    rig.world.resource_mut::<StubConfig>().charter = Some(charter);
     plant_aoi(&mut rig, vec![root_region(), own_region()]);
     insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::ZERO);
     let bodies = window_bodies(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
     assert_eq!(bodies.len(), 1, "exactly one body: this realm's own look");
     // Compared as a WHOLE constructed value (HR5: a `let…else { panic! }` leaves an uncoverable
     // false arm): the statement IS a self-look of the outline with the surface beside it.
-    let planet_bag = vd_core::look::surface_look_bag(&own_region().shape, None, &surface);
+    let planet_bag =
+        vd_core::look::surface_look_bag(&own_region().shape, None, &surface, Some(&charter));
     assert_eq!(
         bodies[0].3,
         BodyStmt::SelfLook {
@@ -2601,10 +2627,16 @@ fn a_seed_shaped_realm_states_its_surface_beside_its_look_and_a_hull_states_none
         "the planet states its outline and, beside it, its frame and the declared generator tag"
     );
     assert_eq!(vd_core::look::surface_of(&planet_bag), Ok(Some(surface)));
+    assert_eq!(
+        vd_core::look::charter_of_bag(&planet_bag),
+        Ok(Some(charter)),
+        "the planet states its physical facts beside its surface"
+    );
     // A hull: no surface, the outline alone.
     let mut rig = Rig::new();
     rig.grant_realm();
     rig.world.resource_mut::<StubConfig>().surface = None;
+    rig.world.resource_mut::<StubConfig>().charter = None;
     plant_aoi(&mut rig, vec![root_region(), own_region()]);
     insert_owned_dot(&mut rig, TRIG_SESSION, player(7), DVec3::ZERO);
     let bodies = window_bodies(&rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]));
@@ -2614,6 +2646,11 @@ fn a_seed_shaped_realm_states_its_surface_beside_its_look_and_a_hull_states_none
             bag: vd_core::look::look_bag(&own_region().shape)
         },
         "a hull states its outline alone"
+    );
+    assert_eq!(
+        vd_core::look::charter_of_bag(&vd_core::look::look_bag(&own_region().shape)),
+        Ok(None),
+        "a hull has no body, so it states no charter"
     );
 }
 

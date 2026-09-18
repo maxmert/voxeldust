@@ -42,6 +42,7 @@ pub mod noise;
 pub mod plan;
 pub mod rng;
 pub mod root;
+pub mod terrace;
 pub mod wide;
 
 pub use gi::Gi;

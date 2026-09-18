@@ -73,6 +73,13 @@ const HILL_M: f64 = 300.0;
 const ALOFT_M: f64 = 60_000.0;
 /// Altitude for the orbit picture, in metres: the globe's limb in frame (D8-6).
 const ORBIT_M: f64 = 2_000_000.0;
+/// ★ THE CAVE STAND (ruling T1's cave rule, 2026-09-16; a candidate stand for the owner's look):
+/// the chunk the chunk-budget bench named as the densest on the walk's path — half its columns
+/// cross rock and air three times or more (`12_chunk_budget_base.md` §2) — as `(face, rung, x, y)`
+/// on the home planet, at the hill's height over its own surface. Whether a cave MOUTH stands in
+/// frame there is UNMEASURED until the owner looks; the stand is where the caves are.
+const CAVE_CHUNK: (vd_seed::bend::Face, u8, u32, u32) =
+    (vd_seed::bend::Face::NegX, 1, 39_847, 28_299);
 /// The star's height over the standing point's horizon, in degrees (M8-L, ruling V13 L23: a raking
 /// light, 12°–18°): low enough that every spur throws a shadow, high enough that the ground is lit.
 const SUN_ELEVATION_DEG: f64 = 15.0;
@@ -211,8 +218,13 @@ const EXACT_DIR: &str = "exact";
 /// (the star at the same angle) and their pixels compare. MEASURED before this: two flights of one
 /// code differed by 277–593 pixels, the widest channel step up to 140, because each captured at
 /// its own tick. A stand that settles past its tick is a red gate, never a silent shift to the
-/// next (refutation P-4). One minute of ticks a stand: the longest settle is 12 s.
-const CAPTURE_TICK_GRID: u64 = 1_200;
+/// next (refutation P-4). ★ RE-DERIVED (slice 8b stage 7, MEASURED on a quiet machine at the
+/// average machine's share of three workers): a stand LANDS about 220 ticks after the previous
+/// stand's capture and SETTLES up to 1 001 ticks after landing (the seam stand, 8 064 chunks after
+/// the bench; the ground 775, the hill 882) — the "12 s" this grid was first sized on is 50 s now.
+/// Two minutes of ticks a stand: twice the measured landing-plus-settle, the same margin of two the
+/// first sizing carried (60 s over 12 s was five). A stand that settles past it is still a red gate.
+const CAPTURE_TICK_GRID: u64 = 2_400;
 /// How far the overlay's rectangle grows on every side before the compare leaves it out: the
 /// glyphs' antialiasing.
 const HUD_MARGIN_PX: f32 = 2.0;
@@ -1050,6 +1062,38 @@ fn take_picture(
         "{name}: the probe's nearest ruler distance {} cells vs the stamp's {near_cells:.1}",
         disc.cells_min
     );
+    // ★ THE RIM'S DIAGNOSTIC (slice 8b stage 7): MEASURED on the orbit stand after the relief law,
+    // the farthest ruler pixel read 853 cells against a rim of 850.9 — 2.1 cells over the stated
+    // tolerance. Before the tolerance is re-derived, the run SAYS which pixels stand past the rim:
+    // a ring at the silhouette is the rasteriser's edge; a few strays are something else.
+    {
+        let rim_floor = rim_cells.floor() as u16;
+        let mut histogram: Vec<(u16, usize)> = Vec::new();
+        let mut far_min = (usize::MAX, usize::MAX);
+        let mut far_max = (0usize, 0usize);
+        for (i, px) in probe.chunks_exact(4).enumerate() {
+            let p = decode_probe([px[0], px[1], px[2]]);
+            if p.kind != PROBE_KIND_RULER || p.cells + 1 < rim_floor {
+                continue;
+            }
+            match histogram.iter_mut().find(|(c, _)| *c == p.cells) {
+                Some((_, n)) => *n += 1,
+                None => histogram.push((p.cells, 1)),
+            }
+            if p.cells == disc.cells_max {
+                let (x, y) = (i % w, i / w);
+                far_min = (far_min.0.min(x), far_min.1.min(y));
+                far_max = (far_max.0.max(x), far_max.1.max(y));
+            }
+        }
+        histogram.sort_unstable();
+        eprintln!(
+            "terrain_pictures/{name}: THE RIM — ruler pixels at or past {rim_floor} cells, by cell: \
+             {histogram:?}; the pixels at the farthest cell {} span x {}..{} y {}..{} (the disc's \
+             centre {predicted_centre:?}, radius {predicted_px:.2} px)",
+            disc.cells_max, far_min.0, far_max.0, far_min.1, far_max.1
+        );
+    }
     assert!(
         (f64::from(disc.cells_max) - rim_cells).abs() <= RULER_CELLS_TOLERANCE,
         "{name}: the probe's farthest ruler distance {} cells vs the stamp's rim {rim_cells:.1}",
@@ -1584,6 +1628,28 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     // ★ THE FAR STAND (2026-09-15): the globe a quarter of the frame high, the nose at its centre.
     let far_m = far_distance_m(body.ladder().radius_m());
     let far = stand_at_nadir(d, far_m);
+    // ★ THE CAVE STAND: the named chunk's centre on its face, through the ladder's own cell count
+    // at its rung, at the hill's height, the nose level and the star over the shoulder as at every
+    // stand.
+    let (cave_face, cave_rung, cave_x, cave_y) = CAVE_CHUNK;
+    let cave_n = f64::from(body.ladder().cells_per_edge(cave_rung));
+    let cave_edge = f64::from(vd_seed::ladder::CHUNK_EDGE as u32);
+    let cave_a = -1.0 + 2.0 * (f64::from(cave_x) * cave_edge + cave_edge / 2.0) / cave_n;
+    let cave_b = -1.0 + 2.0 * (f64::from(cave_y) * cave_edge + cave_edge / 2.0) / cave_n;
+    let d_cave = DVec3::from_array(vd_seed::bend::direction(cave_face, cave_a, cave_b));
+    let h_cave = vd_terrain::height::height_m(&body, [d_cave.x, d_cave.y, d_cave.z], 0);
+    let toward_sun_cave = (sun - d_cave * sun.dot(d_cave)).normalize();
+    let ahead_cave = vd_core::glam::DQuat::from_axis_angle(d_cave, SUN_OFF_NOSE_DEG.to_radians())
+        * toward_sun_cave;
+    let cave_tilt = HILL_TILT_DEG.to_radians();
+    let cave_nose = (ahead_cave * cave_tilt.cos() - d_cave * cave_tilt.sin()).normalize();
+    let cave = stand(d_cave, HILL_M, h_cave, cave_nose);
+    eprintln!(
+        "terrain_pictures: THE CAVE STAND stands {HILL_M} m over the surface of chunk {:?} rung \
+         {cave_rung} ({cave_x}, {cave_y}) at face position ({cave_a:.4}, {cave_b:.4}), surface \
+         {h_cave:.1} m",
+        cave_face
+    );
     eprintln!(
         "terrain_pictures: THE FAR STAND stands {far_m:.0} m from the centre ({:.2} body radii, \
          {:.0} m over the surface), where the globe fills {FAR_FRAME_SHARE} of the frame's height",
@@ -1668,6 +1734,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         spawn_entry(CLIENT_ACCOUNT_BASE + 3, body.seed(), &orbit),
         spawn_entry(CLIENT_ACCOUNT_BASE + 4, body.seed(), &seam_stand),
         spawn_entry(CLIENT_ACCOUNT_BASE + 5, body.seed(), &far),
+        spawn_entry(CLIENT_ACCOUNT_BASE + 6, body.seed(), &cave),
     ]
     .join(";");
     let face = vd_seed::bend::face_of([d.x, d.y, d.z]);
@@ -1773,6 +1840,23 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         },
     );
     eprintln!("terrain_pictures: far {far_chunks} chunks");
+    // ★ THE CAVE STAND, a candidate like the far stand: reported, never red, until the owner looks.
+    let cave_chunks = take_far_picture(
+        &f,
+        a.gateway,
+        &body,
+        &Picture {
+            name: "cave",
+            agent_index: 6,
+            tilt_deg: HILL_TILT_DEG,
+            band: (0.0, 1.0),
+            min_share: 0.0,
+            off_nose_band: (0.0, 180.0),
+        },
+    );
+    eprintln!(
+        "terrain_pictures: cave {cave_chunks} chunks (a candidate stand, reported and never red)"
+    );
     eprintln!(
         "terrain_pictures: ground {ground_chunks} chunks ({ground_share:.3}), hill {hill_chunks} \
          chunks ({hill_share:.3}), aloft {aloft_chunks} chunks ({aloft_share:.3}), orbit \

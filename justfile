@@ -798,6 +798,13 @@ terrain-pin:
     cargo test -p vd-terrain --test terrain_pin --test mesh_pin
     cargo test --release -p vd-terrain --test terrain_pin --test mesh_pin
     RUSTFLAGS="-C target-cpu=native" cargo test --release -p vd-terrain --test terrain_pin --test mesh_pin
+# ★ `charter-pin` (the landform arc, slice 8b stage 2): the home body's CHARTER — its twenty whole
+# numbers — stated as literals and cross-checked against the forest's own draw. It exists because NO
+# DIGEST FOLDS A CHARTER WORD (slice_8b_design.md §1.8): `digest_of` folds a chunk's cells, so the
+# golden table catches a charter word only where it moves a cell, and in stage 2 no kernel reads the
+# charter at all. Without this, every integer the later slices will trust is untested data.
+charter-pin:
+    cargo test --release -p vd-bins --test home_body_pin -- --nocapture
 terrain-link-scan:
     cargo build --release -p vd-terrain -p vd-physics
     scripts/terrain_link_scan.sh --control

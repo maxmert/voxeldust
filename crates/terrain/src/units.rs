@@ -58,6 +58,14 @@ pub fn metres_of_fixed(length: Gi, bits: u32) -> f64 {
     (Gf::from_i64(length.raw()) / Gf::from_i64(STEPS_PER_M << bits)).to_f64()
 }
 
+/// THE EXIT FOR A SHARE: a word at the noise's own fraction bits, as a plain float in `[0, 1]` —
+/// what the roughness factor is (slice 8a stage 3). The divisor is a power of two, so the division
+/// is exact.
+#[must_use]
+pub fn share_of_q28(share: Gi) -> f64 {
+    (Gf::from_i64(share.raw()) / Gf::from_i64(1 << LENGTH_BITS)).to_f64()
+}
+
 /// THE EXIT TO METRES for a length in WHOLE gap steps.
 #[must_use]
 pub fn metres_of_steps(steps: i64) -> f64 {

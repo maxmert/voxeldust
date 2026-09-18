@@ -62,6 +62,126 @@ pub const TAG_SURFACE: u16 = 4;
 /// taken by another meaning.
 pub const TAG_BODIES: u16 = 5;
 
+/// ★ THE CHARTER TAG (the landform arc, slice 8b stage 1; ruling V13 L12, crossing A1 approved):
+/// the realm's OWN statement of its BODY'S PHYSICAL FACTS as whole numbers — [`BodyCharter`].
+/// Payload: one postcard [`BodyCharter`].
+///
+/// **Why it exists.** The client holds a planet's seed and its shell radius and nothing else, and it
+/// may not link the motion crate that holds the planet's mass (SL4). So it cannot derive the gravity
+/// the relief law reads, nor the insolation the biome reads. The realm states the integers instead,
+/// on the bag that already carries its surface tag, and both hosts then read THE SAME INTEGERS
+/// (SL10). It is a realm's statement ABOUT ITSELF, to the clients the gateway composes for — never a
+/// parent's per-child message, which carries a placement and nothing else (SL3).
+///
+/// **It opens no wire arm.** A new tag in this bag is not a new arm: the codec skips what it does not
+/// know, so a reader that knows only `TAG_LOOK` still reads the outline (the additive-forever rule).
+///
+/// Example: the home planet states its gravity in whole mm/s², once, on change; every client that
+/// sees the planet then holds the same integer the planet's own shard holds.
+pub const TAG_CHARTER: u16 = 6;
+
+/// ★ THE BODY CHARTER (ruling V13 L12: about twenty quantised integers, authored once and stored;
+/// the landform arc's `slice_8b_design.md` §4.1) — a round body's physical facts as WHOLE NUMBERS.
+///
+/// **THE INTEGER IS THE FACT.** The body's own realm computes each number once, with full precision,
+/// and floors it into the unit stated below. Nothing downstream ever re-derives it, and no float of
+/// it ever crosses. That is what lets the server's CPU, the client's CPU and the client's card agree
+/// byte for byte on the shape they build from it (SL10).
+///
+/// **A WORD WITH NO AUTHOR YET IS `None`, NEVER ZERO.** Nine of the twenty words are drawn by later
+/// stages of the arc (the spin, the tilt, the two optical depths, the surface pressure, the surface
+/// temperature, the elastic thickness, the water inventory and the sea). A zero in their place would
+/// be read as a fact nobody authored — a sea at the ladder radius nobody solved. They are stated
+/// ABSENT, exactly as the bag states an absent tag, and the decode-to-Default ban says the same thing
+/// one level up.
+///
+/// **The whole record is carried NOW, before any kernel reads most of it** — the design's ask 7
+/// recommendation, taken as ASSUMED pending the owner's answer. Appending a word is free while the
+/// ground may still move (ruling T1's free window) and impossible after the freeze (slice 14).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BodyCharter {
+    /// Surface gravity, whole mm/s². One step is 1 part in 9 821 on the home planet.
+    pub gravity_mm_s2: u32,
+    /// Bulk density `M / ((4/3)πR³)`, whole kg/m³.
+    pub bulk_density_kgm3: u32,
+    /// Escape velocity, whole m/s.
+    pub escape_velocity_mps: u32,
+    /// Insolation relative to Earth's, in 1/4096 S⊕.
+    pub insolation_q12: u32,
+    /// Equilibrium temperature, whole millikelvin.
+    pub t_eq_mk: u32,
+    /// Mean SURFACE temperature, whole millikelvin. Drawn by stage 4's greenhouse (the thermostat,
+    /// the design's ask 2 taken as ASSUMED); read by no kernel until 8e.
+    pub t_surface_mk: Option<u32>,
+    /// Bond albedo, in 1/4096.
+    pub bond_albedo_q12: u32,
+    /// The atmosphere's mean molecular weight, in 1/256 atomic units. ABSENT on an airless body.
+    pub mu_q8: Option<u32>,
+    /// The atmosphere's isothermal scale height, whole metres. ABSENT on an airless body.
+    pub scale_height_m: Option<u32>,
+    /// Surface pressure, whole pascals. DERIVED (ruling T9): Earth's, scaled by the mass, the
+    /// gravity and the inverse square of the radius, where the shoreline keeps the air.
+    pub p_surf_pa: Option<u32>,
+    /// The Rayleigh optical depth at 550 nm, in 1/4096. Drawn by stage 4; the sky (8s) reads it.
+    pub tau_vis_q12: Option<u32>,
+    /// The grey greenhouse optical depth, in 1/4096. Drawn by stage 4; the climate (8c) reads it.
+    pub tau_ir_q12: Option<u32>,
+    /// The rotation period, whole seconds. Drawn by stage 4 under tidal locking (a locked body's
+    /// day is its year, and `CHARTER_FLAG_TIDALLY_LOCKED` says so).
+    pub day_s: Option<u32>,
+    /// The COSINE of the obliquity, in 1/1024 — never an angle, because the fence bans `sin` and
+    /// `cos`. Drawn and damped by stage 4; its prior is the design's ask 4, taken as ASSUMED.
+    pub obliquity_cos_q1024: Option<i32>,
+    /// The body's whole water inventory, whole cubic kilometres. ABSENT until stage 5 computes it
+    /// from the formation zone and the two retention verdicts.
+    pub water_km3: Option<u64>,
+    /// The sea's offset from the ladder radius, whole millimetres. Solved by the owning realm at boot
+    /// (stage 6) where the water is liquid at the surface; ABSENT where it is not. Until 8c gives the
+    /// ground its second hump the recipe does not read it (ruling T8: the pictures are judged dry).
+    /// Before stage 6 the doc read: ABSENT until stage 6 solves it by
+    /// bisection of the water volume over the shape; absent FOREVER on a body whose condensable is
+    /// not liquid at the surface (an ice world has water and no coast).
+    pub sea_offset_mm: Option<i32>,
+    /// The lithosphere's effective elastic thickness, whole metres. Drawn by stage 4; the solve
+    /// (8c) reads it. ABSENT on a body with no solid surface.
+    pub elastic_thickness_m: Option<u32>,
+    /// The orbit's eccentricity, in 1/65536.
+    pub ecc_q16: u32,
+    /// The orbital period, whole seconds.
+    pub year_s: u64,
+    /// The flag word — see [`CHARTER_FLAG_HAS_AIR`], [`CHARTER_FLAG_SOLID_SURFACE`],
+    /// [`CHARTER_FLAG_TIDALLY_LOCKED`], [`CHARTER_FLAG_HAS_SEA`] and [`charter_star_class_code`].
+    /// Only the bits whose author exists today are defined; a bit a later stage authors (the
+    /// condensable) is NOT a bit of this word yet, because a clear bit would be read as a fact
+    /// nobody set.
+    pub flags: u32,
+}
+
+/// The charter flag: the body holds an atmosphere (the census's own shoreline-and-envelope verdict).
+pub const CHARTER_FLAG_HAS_AIR: u32 = 1;
+/// The charter flag: the body has a surface you can stand on (it is not a giant).
+pub const CHARTER_FLAG_SOLID_SURFACE: u32 = 2;
+/// The charter flag: the body is tidally locked — its day is its year, one face to its star
+/// (authored by the spin law of slice 8b stage 4; a permanent day side and a permanent night side).
+pub const CHARTER_FLAG_TIDALLY_LOCKED: u32 = 4;
+/// The charter flag: the body HAS A SEA — its water is liquid at its surface and the owning realm
+/// solved the level it stands at (`sea_offset_mm`; slice 8b stage 6). Clear on a dry world, an ice
+/// world (water, but frozen) and a steam world.
+pub const CHARTER_FLAG_HAS_SEA: u32 = 8;
+/// Where the illuminating star's class code sits in [`BodyCharter::flags`] — the same code the
+/// photometric datum states (`SpectralClass as u8`), so one meaning has one encoding.
+pub const CHARTER_STAR_CLASS_SHIFT: u32 = 8;
+/// The mask of [`CHARTER_STAR_CLASS_SHIFT`]'s field (seven classes fit in three bits; four bits are
+/// kept so a later class table cannot overflow it).
+pub const CHARTER_STAR_CLASS_MASK: u32 = 0xF << CHARTER_STAR_CLASS_SHIFT;
+
+/// The illuminating star's class code, read out of a charter's flag word.
+#[must_use]
+pub fn charter_star_class_code(flags: u32) -> u8 {
+    let code = (flags & CHARTER_STAR_CLASS_MASK) >> CHARTER_STAR_CLASS_SHIFT;
+    u8::try_from(code).unwrap_or(u8::MAX)
+}
+
 /// What [`TAG_SURFACE`] carries: the realm's own frame (the seed is inside it for a seed-shaped
 /// realm) and the DECLARED generator tag of the build that runs it. A client compares the tag with its
 /// own before it derives one chunk; a mismatch refuses THIS realm's surface and nothing else.
@@ -204,24 +324,50 @@ pub fn luma_of(bag: &[u8]) -> Result<(u8, f64), TlvError> {
     TlvReader::parse(WINDOW_BODY_SCHEMA, bag)?.required(TAG_LUMA)
 }
 
-/// A realm's self-look with its surface beside the outline and the optional luma: the bag a
-/// seed-shaped realm states once on change (R-8). The first producer is slice 5.
+/// A realm's self-look with its surface beside the outline and the optional luma, and its CHARTER
+/// beside the surface: the bag a seed-shaped realm states once on change (R-8; slice 8b A1). ONE
+/// builder, so a charter-bearing and a plain surface bag can never be framed two ways. Tags ride
+/// ascending — `TAG_LOOK`, `TAG_LUMA`, `TAG_SURFACE`, `TAG_CHARTER`.
+///
+/// A realm that cannot derive its charter states NO surface (slice 8b §4.2 rule 2), so in the shipped
+/// path the two arrive together; the `None` arm is what a rig that states a bare surface produces,
+/// and the client refuses it and counts the refusal rather than guessing a body's gravity.
 #[must_use]
 pub fn surface_look_bag(
     outline: &Boundary,
     luma: Option<(u8, f64)>,
     surface: &SurfaceStmt,
+    charter: Option<&BodyCharter>,
 ) -> Vec<u8> {
-    self_look_writer(outline, luma)
+    let writer = self_look_writer(outline, luma)
         .required(TAG_SURFACE, surface)
-        .expect("distinct tag, a frame and one scalar")
-        .finish()
+        .expect("distinct tag, a frame and one scalar");
+    match charter {
+        Some(charter) => writer
+            .required(TAG_CHARTER, charter)
+            .expect("distinct tag, twenty whole numbers"),
+        None => writer,
+    }
+    .finish()
 }
 
 /// The surface a self-look bag states; `None` for a realm that states none (a hull, a station
 /// without terrain), a typed refusal for a bag that is not a window body.
 pub fn surface_of(bag: &[u8]) -> Result<Option<SurfaceStmt>, TlvError> {
     TlvReader::parse(WINDOW_BODY_SCHEMA, bag)?.optional(TAG_SURFACE)
+}
+
+/// The CHARTER a self-look bag states; `None` for a realm that states none, a typed refusal for a
+/// bag that is not a window body or whose charter word is malformed.
+///
+/// A malformed charter is an ERROR, never a `Default`: a body whose gravity decoded to zero would
+/// build a mountain of unbounded height, and the decode-to-Default ban exists for exactly that.
+///
+/// # Errors
+/// [`TlvError`] when the blob is not a well-formed window-body bag, or when its `TAG_CHARTER`
+/// payload does not decode as a [`BodyCharter`].
+pub fn charter_of_bag(bag: &[u8]) -> Result<Option<BodyCharter>, TlvError> {
+    TlvReader::parse(WINDOW_BODY_SCHEMA, bag)?.optional(TAG_CHARTER)
 }
 
 #[cfg(test)]
@@ -429,14 +575,21 @@ mod surface_tests {
     /// bag ever stated.
     #[test]
     fn the_window_body_tags_are_distinct_and_pinned() {
-        let tags = [TAG_LOOK, TAG_LUMA, TAG_EXTENT, TAG_SURFACE, TAG_BODIES];
+        let tags = [
+            TAG_LOOK,
+            TAG_LUMA,
+            TAG_EXTENT,
+            TAG_SURFACE,
+            TAG_BODIES,
+            TAG_CHARTER,
+        ];
         let distinct: std::collections::BTreeSet<u16> = tags.iter().copied().collect();
         assert_eq!(
             distinct.len(),
             tags.len(),
             "a window-body tag is numbered twice"
         );
-        assert_eq!(tags, [1, 2, 3, 4, 5], "the numbering moved");
+        assert_eq!(tags, [1, 2, 3, 4, 5, 6], "the numbering moved");
     }
 
     fn moon() -> SurfaceStmt {
@@ -446,10 +599,114 @@ mod surface_tests {
         }
     }
 
+    /// A charter shaped like the one a stage-2 author states: the words the census draws are
+    /// present, the words a later stage draws are ABSENT.
+    fn charter() -> BodyCharter {
+        BodyCharter {
+            gravity_mm_s2: 9_821,
+            bulk_density_kgm3: 5_514,
+            escape_velocity_mps: 11_190,
+            insolation_q12: 3_065,
+            t_eq_mk: 236_795,
+            t_surface_mk: None,
+            bond_albedo_q12: 1_228,
+            mu_q8: Some(7_168),
+            scale_height_m: Some(7_161),
+            p_surf_pa: None,
+            tau_vis_q12: None,
+            tau_ir_q12: None,
+            day_s: None,
+            obliquity_cos_q1024: None,
+            water_km3: None,
+            sea_offset_mm: None,
+            elastic_thickness_m: None,
+            ecc_q16: 1_130,
+            year_s: 34_766_100,
+            flags: CHARTER_FLAG_HAS_AIR
+                | CHARTER_FLAG_SOLID_SURFACE
+                | (4 << CHARTER_STAR_CLASS_SHIFT),
+        }
+    }
+
+    /// ★ THE CHARTER RIDES THE SAME BAG, AND ABSENCE IS ABSENCE (slice 8b stage 1). A charter-bearing
+    /// bag still reads as an outline to a reader that knows only `TAG_LOOK`; a bag without a charter
+    /// says so and is never read as a body of zero gravity.
+    #[test]
+    fn a_charter_rides_the_surface_bag_and_a_bag_without_one_states_none() {
+        let outline = Boundary::Shell {
+            r: 6_370_747.312_696_504,
+        };
+        let bag = surface_look_bag(&outline, Some((4, 0.823)), &moon(), Some(&charter()));
+        assert_eq!(charter_of_bag(&bag), Ok(Some(charter())));
+        assert_eq!(surface_of(&bag), Ok(Some(moon())));
+        assert_eq!(look_of(&bag), Ok(outline), "the outline is untouched");
+        assert_eq!(luma_of(&bag), Ok((4, 0.823)));
+        // The words a later stage authors are ABSENT, not zero — a sea nobody solved is not a sea
+        // at the ladder radius.
+        assert_eq!(
+            charter_of_bag(&bag).map(|c| c.and_then(|c| c.sea_offset_mm)),
+            Ok(None)
+        );
+        assert_eq!(
+            charter_of_bag(&bag).map(|c| c.and_then(|c| c.water_km3)),
+            Ok(None)
+        );
+        // A surface bag that states no charter says so; a plain self-look states neither.
+        let bare = surface_look_bag(&outline, None, &moon(), None);
+        assert_eq!(charter_of_bag(&bare), Ok(None));
+        assert_eq!(surface_of(&bare), Ok(Some(moon())));
+        assert_eq!(charter_of_bag(&self_look_bag(&outline, None)), Ok(None));
+        assert_ne!(bag, bare);
+        // A blob that is not a window body is refused, never guessed at.
+        assert_eq!(charter_of_bag(&[0, 0, 0]), Err(TlvError::Truncated(3)));
+        assert_eq!(TAG_CHARTER, 6, "the tag number never moves");
+    }
+
+    /// A MALFORMED charter word is an error, never a `Default`: the decode-to-Default ban, measured.
+    #[test]
+    fn a_malformed_charter_word_is_refused_and_never_defaults() {
+        let outline = Boundary::Shell { r: 1.0 };
+        let broken = TlvWriter::new(WINDOW_BODY_SCHEMA)
+            .required(TAG_LOOK, &outline)
+            .expect("fresh writer")
+            .required(TAG_CHARTER, &(1u8, 2u8))
+            .expect("distinct tag")
+            .finish();
+        // The outline still reads — the bag is well formed; only the charter word is not a charter.
+        assert_eq!(look_of(&broken), Ok(outline));
+        let refused = charter_of_bag(&broken);
+        assert!(
+            refused.is_err(),
+            "a short charter word decoded: {refused:?}"
+        );
+    }
+
+    /// The flag word's three readers, each driven both ways.
+    #[test]
+    fn the_charter_flags_state_the_air_the_ground_and_the_star() {
+        let c = charter();
+        assert_eq!(c.flags & CHARTER_FLAG_HAS_AIR, CHARTER_FLAG_HAS_AIR);
+        assert_eq!(
+            c.flags & CHARTER_FLAG_SOLID_SURFACE,
+            CHARTER_FLAG_SOLID_SURFACE
+        );
+        assert_eq!(charter_star_class_code(c.flags), 4, "a G-class sun");
+        let airless_giant = 6 << CHARTER_STAR_CLASS_SHIFT;
+        assert_eq!(airless_giant & CHARTER_FLAG_HAS_AIR, 0);
+        assert_eq!(airless_giant & CHARTER_FLAG_SOLID_SURFACE, 0);
+        assert_eq!(charter_star_class_code(airless_giant), 6);
+        assert_eq!(charter_star_class_code(0), 0);
+        assert_eq!(
+            charter_star_class_code(u32::MAX),
+            15,
+            "the field is four bits"
+        );
+    }
+
     #[test]
     fn a_surface_bag_roundtrips_and_a_reader_that_knows_only_the_look_still_reads_it() {
         let outline = Boundary::Shell { r: 1_737_400.0 };
-        let bag = surface_look_bag(&outline, Some((5, 0.0)), &moon());
+        let bag = surface_look_bag(&outline, Some((5, 0.0)), &moon(), None);
         assert_eq!(surface_of(&bag), Ok(Some(moon())));
         assert_eq!(
             look_of(&bag),
@@ -463,7 +720,7 @@ mod surface_tests {
             Ok(None),
             "a hull states no surface"
         );
-        let no_luma = surface_look_bag(&outline, None, &moon());
+        let no_luma = surface_look_bag(&outline, None, &moon(), None);
         assert_eq!(surface_of(&no_luma), Ok(Some(moon())));
         assert_eq!(
             luma_of(&no_luma),
@@ -496,12 +753,55 @@ mod surface_tests {
             half: DVec3::new(f64::MAX, f64::MAX, f64::MAX),
             orient: DQuat::IDENTITY,
         };
-        let bag = surface_look_bag(&outline, Some((u8::MAX, f64::MAX)), &widest);
+        // ★ THE WIDEST CHARTER (slice 8b stage 1): every word present and every word at its
+        // widest varint, so the pin below bounds every charter any body can ever state.
+        let charter = BodyCharter {
+            gravity_mm_s2: u32::MAX,
+            bulk_density_kgm3: u32::MAX,
+            escape_velocity_mps: u32::MAX,
+            insolation_q12: u32::MAX,
+            t_eq_mk: u32::MAX,
+            t_surface_mk: Some(u32::MAX),
+            bond_albedo_q12: u32::MAX,
+            mu_q8: Some(u32::MAX),
+            scale_height_m: Some(u32::MAX),
+            p_surf_pa: Some(u32::MAX),
+            tau_vis_q12: Some(u32::MAX),
+            tau_ir_q12: Some(u32::MAX),
+            day_s: Some(u32::MAX),
+            obliquity_cos_q1024: Some(i32::MIN),
+            water_km3: Some(u64::MAX),
+            sea_offset_mm: Some(i32::MIN),
+            elastic_thickness_m: Some(u32::MAX),
+            ecc_q16: u32::MAX,
+            year_s: u64::MAX,
+            flags: u32::MAX,
+        };
+        let bag = surface_look_bag(&outline, Some((u8::MAX, f64::MAX)), &widest, Some(&charter));
         println!("[surface] the widest self-look bag is {} bytes", bag.len());
+        println!(
+            "[surface] the widest charter-less self-look bag is {} bytes",
+            surface_look_bag(&outline, Some((u8::MAX, f64::MAX)), &widest, None).len()
+        );
+        assert_eq!(
+            charter_of_bag(&bag),
+            Ok(Some(charter)),
+            "the widest charter roundtrips"
+        );
         // MEASURED and pinned tight, so a growth of the bag is a red test and a recorded decision,
         // never a silent drift toward the budget (the refuter's finding 12).
         let len = bag.len();
-        assert_eq!(len, 124, "the widest self-look bag moved");
+        // ★ MEASURED 2026-09-18 (slice 8b stage 1): 124 → 251 bytes. The charter's whole field —
+        // its TLV tag, its length and twenty widest words — costs 127 bytes, so 949 of the 1 200
+        // stay free. The pin was red at 124 before the charter landed, which is what makes this a
+        // measurement and not an estimate. A bag with NO charter is still 124 bytes, asserted
+        // beside it: nothing that was on the lane yesterday moved a byte.
+        assert_eq!(len, 251, "the widest self-look bag moved");
+        assert_eq!(
+            surface_look_bag(&outline, Some((u8::MAX, f64::MAX)), &widest, None).len(),
+            124,
+            "the widest CHARTER-LESS self-look bag moved"
+        );
         assert!(
             len <= SELF_LOOK_BUDGET_BYTES,
             "the self-look bag exceeds the datagram budget"

@@ -88,6 +88,30 @@ pub struct DevRealmBox {
     /// separates a FROZEN box (tick stops advancing) from a live one, so a smoothness gate cannot be
     /// satisfied by a box that simply stopped updating.
     pub newest_tick: Option<u64>,
+    /// ★ THE CHARTER THIS REALM STATED (the landform arc, slice 8b stage 2): five of the twenty
+    /// whole numbers a seed-shaped body states about itself, as the client decoded them off the
+    /// realm's own look bag. `None` for a realm that states none — a hull, a station, a star system.
+    ///
+    /// **It is a DIAGNOSIS PROJECTION, never a second record.** The whole twenty words live in
+    /// `vd_core::look::BodyCharter` and are pinned by `charter_pin`; these five are what a process
+    /// gate reads to say "the client received the home planet's charter, and it is the right one".
+    pub charter: Option<DevBodyCharter>,
+}
+
+/// Five words of a realm's stated [`DevRealmBox::charter`] — see that field for why it is five and
+/// not twenty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevBodyCharter {
+    /// Surface gravity, whole mm/s² (the home planet reads 9 818).
+    pub gravity_mm_s2: u32,
+    /// Bulk density, whole kg/m³.
+    pub bulk_density_kgm3: u32,
+    /// Insolation relative to Earth's, in 1/4096 S⊕.
+    pub insolation_q12: u32,
+    /// Equilibrium temperature, whole millikelvin.
+    pub t_eq_mk: u32,
+    /// The flag word: the air, the ground, and the illuminating star's class.
+    pub flags: u32,
 }
 
 /// SLICE 6 S5 — how one feed's tracks classified at the render cursor. The shake was invisible for a
@@ -323,6 +347,13 @@ pub(crate) mod tests {
                 body_kind: "look".to_owned(),
                 luma: None,
                 newest_tick: Some(100),
+                charter: Some(DevBodyCharter {
+                    gravity_mm_s2: 9_818,
+                    bulk_density_kgm3: 5_513,
+                    insolation_q12: 3_065,
+                    t_eq_mk: 236_785,
+                    flags: 1_027,
+                }),
             }],
             origin: Some(("System(7)".to_owned(), 1)),
             sky: None,

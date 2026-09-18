@@ -45,6 +45,7 @@
 mod aoi;
 mod body;
 mod census;
+mod charter;
 mod config;
 mod forest_query;
 mod generate;
@@ -60,6 +61,7 @@ mod tests;
 pub(crate) use aoi::*;
 pub use body::*;
 pub use census::*;
+pub use charter::*;
 pub use config::*;
 pub use forest_query::*;
 pub use generate::*;
