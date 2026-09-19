@@ -578,8 +578,17 @@ impl Material for StarSkyMaterial {
     /// The fragment stage emits premultiplied colour with alpha ZERO, so that reduces exactly to
     /// `src + dst` — true addition. The Milky Way's glow is the sum of stars too faint to separate,
     /// and this is the mechanism that produces it rather than painting it.
+    ///
+    /// ★ IN THE OPAQUE PHASE, BEFORE THE SKY (slice 8s, design §5). The engine's sky pass runs after
+    /// the opaque pass and before the transparent one, and composes `inscatter + transmittance × what
+    /// is already drawn`. A star drawn in the transparent phase lands ON TOP of the finished sky at
+    /// full brightness — stars through the noon sky, a defect. So the cloud draws in the opaque
+    /// phase: the same true addition, set explicitly in `specialize` (`One + One`, no depth write —
+    /// the depth stays cleared, so the sky pass reads every star pixel as SKY), and the air's
+    /// transmittance dims the stars while the day's in-scatter hides them, which is the physical
+    /// result. `Opaque` here names the PHASE; the blend state names the arithmetic.
     fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Add
+        AlphaMode::Opaque
     }
     fn specialize(
         _pipeline: &MaterialPipeline,
@@ -594,6 +603,23 @@ impl Material for StarSkyMaterial {
             ATTRIBUTE_STAR_BASE_R.at_shader_location(3),
         ])?;
         descriptor.vertex.buffers = vec![vertex_layout];
+        // True addition, and no depth write (see `alpha_mode`).
+        let additive = bevy::render::render_resource::BlendComponent {
+            src_factor: bevy::render::render_resource::BlendFactor::One,
+            dst_factor: bevy::render::render_resource::BlendFactor::One,
+            operation: bevy::render::render_resource::BlendOperation::Add,
+        };
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            for target in fragment.targets.iter_mut().flatten() {
+                target.blend = Some(bevy::render::render_resource::BlendState {
+                    color: additive,
+                    alpha: additive,
+                });
+            }
+        }
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.depth_write_enabled = false;
+        }
         Ok(())
     }
 }
@@ -620,6 +646,9 @@ struct DrawnSky {
     probe: Vec<(String, DVec3, f64)>,
     /// THE one cloud entity, held so a new catalogue (or a rebase) can replace it.
     cloud: Option<Entity>,
+    /// WHY NOTHING IS DRAWN, the last stated reason (the instrument, 2026-09-18): the star gate read
+    /// "held and never drawn" with no line saying which of the builder's exits fired. Logged on change.
+    silent: Option<&'static str>,
     /// The material handle, held so the per-frame camera uniforms can be refreshed without touching
     /// the star data.
     material: Option<Handle<StarSkyMaterial>>,
@@ -650,7 +679,7 @@ struct Dot;
 
 /// Marker: the follow camera.
 #[derive(Component)]
-struct FollowCam;
+pub(crate) struct FollowCam;
 
 /// ★ THE RENDER FRAME (S5 — D-LOOK-3): the eye's position in the composed picture's own frame,
 /// decided ONCE per frame by [`place_camera`] and read by everything that places geometry.
@@ -717,6 +746,7 @@ pub mod gpu_check;
 /// This repo has no `assets/` directory and no asset path of any kind. Loading the WGSL from disk
 /// would make a headless capture — and a deployed client — depend on finding a file beside the
 /// binary. Embedding it removes that failure mode entirely: the shader ships inside the executable.
+mod sky;
 pub mod terrain;
 
 struct StarSkyShaderPlugin;
@@ -1020,6 +1050,8 @@ fn run_windowed(handles: RenderHandles) {
         // A window is always the human's own first-person view; the pilot-view switch exists only
         // for the HEADLESS capture path (there is no scene-fitting framing here to decline).
         .insert_resource(CaptureView { pilot: false })
+        .insert_resource(sky::SkyConfig::from_env())
+        .insert_resource(sky::SkyMedia::default())
         .insert_resource(terrain::Terrain::new(
             terrain::TerrainConfig::from_env(),
             handles.world_declared,
@@ -1082,7 +1114,9 @@ fn run_windowed(handles: RenderHandles) {
                     (sync_realm_boxes, despawn_reference_scaffold).chain(),
                     // ★ THE TERRAIN (slice 7): asks, harvests and places the chunks of every realm
                     // that stated a surface, after the boxes so it reads the same eye.
-                    (terrain::sync_terrain, terrain::place_chunks).chain(),
+                    // ★ THE SKY (slice 8s): after the terrain listed the bodies and placed the sun,
+                    // BEFORE the placement publishes the frame's stamp (the sky's row rides it).
+                    (terrain::sync_terrain, sky::sync_sky, terrain::place_chunks).chain(),
                     // S11: the galaxy. Independent of the box/dot lanes — it re-spawns only on a
                     // crossing or a new catalogue, so it is not chained into their per-frame work.
                     sync_star_sky,
@@ -1103,6 +1137,7 @@ fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    sky_config: Res<sky::SkyConfig>,
 ) {
     // First-person follow camera — ORIENTED each frame by `place_camera` and always AT THE RENDER
     // ORIGIN (S5's camera-relative flatten). Its near/far are rewritten every frame by
@@ -1131,6 +1166,22 @@ fn setup_scene(
             bevy::render::view::Hdr,
         ));
         tracing::info!("VD_STAR_BLOOM=1 — bloom and HDR enabled for this run");
+    }
+    // ★ THE SKY NEEDS HDR (slice 8s, design §4.8): the atmosphere component requires it, and the
+    // picture's brightness range is the sky's. Bloom with it, judged on the pictures (ask 3). The
+    // engine's default grey ambient is a magic light: with the sky on, the dome lights the shadows.
+    if sky_config.enabled {
+        cam.insert((
+            bevy::post_process::bloom::Bloom::NATURAL,
+            bevy::render::view::Hdr,
+            // ★ THE EDGE (owner's look, 2026-09-19): upstream's sky pass read ONE depth sample a
+            // pixel and wrote one colour, so the multisampled terrain edge flattened into a stair —
+            // MEASURED on the ground stand's horizon (no crossing pixel blended) and the far stand's
+            // limb. SMAA in its place blended a third of the columns; the cure is in the vendored
+            // pass itself, which now composites PER SAMPLE (`vendor/bevy_pbr/PATCH.md`), so the
+            // engine's multisampling is the anti-alias again, as before the sky.
+        ));
+        commands.insert_resource(bevy::light::GlobalAmbientLight::NONE);
     }
     setup_world(&mut commands, &mut meshes, &mut materials);
 }
@@ -1809,7 +1860,12 @@ fn sync_star_sky(
     mut drawn: ResMut<DrawnSky>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StarSkyMaterial>>,
-    camera: Single<(&Camera, &Projection)>,
+    // ★ THE PICTURE'S CAMERA, BY NAME (2026-09-18). `Single` over every camera matched TWO once the
+    // probe camera arrived (slice 8p) — and a `Single` that matches two SKIPS THE SYSTEM, silently:
+    // the star cloud was never built in a capture client from that day on, and the star gate read
+    // "held and never drawn" without a line to say why (the instrument below now says). The probe
+    // camera is not the picture; the cloud reads the picture's own camera.
+    camera: Single<(&Camera, &Projection), With<FollowCam>>,
     mut clouds: Query<&mut Transform, With<StarPointMarker>>,
     mut commands: Commands,
 ) {
@@ -1869,8 +1925,27 @@ fn sync_star_sky(
         }
         drawn.shown = None;
         net.stars_drawn.store(0, Ordering::Relaxed);
+        let reason = match (snap.sky().is_some(), snap.sky_anchor_now(now_s).is_some()) {
+            (false, _) => "no whole sky held yet",
+            (true, false) => "no sky anchor at the render cursor yet",
+            (true, true) => "unreachable",
+        };
+        if drawn.silent != Some(reason) {
+            drawn.silent = Some(reason);
+            tracing::info!(
+                reason,
+                cursor = ?snap.cursor(now_s),
+                "star sky: nothing drawn"
+            );
+        }
         return;
     };
+    if drawn.silent.take().is_some() {
+        tracing::info!(
+            generation = sky.generation,
+            "star sky: the whole sky and its anchor are in hand"
+        );
+    }
     // The reference the cloud on screen was built from, if it is still the right cloud: the same
     // catalogue, and a placement still inside the single-precision bound.
     let kept = drawn.shown.filter(|(generation, reference)| {
@@ -1892,6 +1967,10 @@ fn sync_star_sky(
             let points = sky.points_from(reference);
             let cloud = vd_client::render_snapshot::StarCloud::build(&points);
             if cloud.is_empty() {
+                if drawn.silent != Some("the cloud is empty") {
+                    drawn.silent = Some("the cloud is empty");
+                    tracing::info!(rows = sky.rows.len(), "star sky: the cloud is empty");
+                }
                 return;
             }
             // ★ ONE MESH, ONE ENTITY, WHATEVER THE CENSUS. At 150,000 stars this is 14.4 MB of
@@ -2681,6 +2760,8 @@ fn run_capture(handles: RenderHandles) {
         .insert_resource(CaptureView {
             pilot: handles.pilot_view,
         })
+        .insert_resource(sky::SkyConfig::from_env())
+        .insert_resource(sky::SkyMedia::default())
         .insert_resource(terrain::Terrain::new(
             terrain::TerrainConfig::from_env(),
             handles.world_declared,
@@ -2752,7 +2833,9 @@ fn run_capture(handles: RenderHandles) {
                     (sync_realm_boxes, despawn_reference_scaffold).chain(),
                     // ★ THE TERRAIN (slice 7): asks, harvests and places the chunks of every realm
                     // that stated a surface, after the boxes so it reads the same eye.
-                    (terrain::sync_terrain, terrain::place_chunks).chain(),
+                    // ★ THE SKY (slice 8s): after the terrain listed the bodies and placed the sun,
+                    // BEFORE the placement publishes the frame's stamp (the sky's row rides it).
+                    (terrain::sync_terrain, sky::sync_sky, terrain::place_chunks).chain(),
                     // S11: the galaxy. Independent of the box/dot lanes — it re-spawns only on a
                     // crossing or a new catalogue, so it is not chained into their per-frame work.
                     sync_star_sky,
@@ -2782,6 +2865,7 @@ fn setup_capture(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     render_device: Res<RenderDevice>,
+    sky_config: Res<sky::SkyConfig>,
 ) {
     let size = Extent3d {
         width: CAPTURE_W,
@@ -2831,22 +2915,33 @@ fn setup_capture(
         Msaa::Off,
         ProbeCam,
     ));
-    commands.spawn((
-        Camera3d::default(),
-        // The SAME projection the windowed camera declares — parity, so the two cameras cannot
-        // diverge on a projection field. Both are rewritten every frame by `derive_camera_planes`
-        // (S5): Bevy builds a reverse-Z INFINITE perspective, whose depth code is `near/z` and whose
-        // relative resolution is therefore constant at every range, so the planes are a statement
-        // about the picture rather than a clip distance anyone has to guess.
-        Projection::Perspective(PerspectiveProjection::default()),
-        Transform::from_translation(Vec3::ZERO).looking_at(Vec3::NEG_Z, Vec3::Y),
-        // In Bevy 0.18 RenderTarget is a SEPARATE component (not a Camera field).
-        RenderTarget::Image(handle.into()),
-        // bevy_egui creates+manages a (non-primary) EguiContext on this entity and renders
-        // its passes INTO this camera's image, so the readback composites scene + HUD.
-        EguiMultipassSchedule::new(OffscreenEguiPass),
-        FollowCam,
-    ));
+    let picture_cam = commands
+        .spawn((
+            Camera3d::default(),
+            // The SAME projection the windowed camera declares — parity, so the two cameras cannot
+            // diverge on a projection field. Both are rewritten every frame by `derive_camera_planes`
+            // (S5): Bevy builds a reverse-Z INFINITE perspective, whose depth code is `near/z` and whose
+            // relative resolution is therefore constant at every range, so the planes are a statement
+            // about the picture rather than a clip distance anyone has to guess.
+            Projection::Perspective(PerspectiveProjection::default()),
+            Transform::from_translation(Vec3::ZERO).looking_at(Vec3::NEG_Z, Vec3::Y),
+            // In Bevy 0.18 RenderTarget is a SEPARATE component (not a Camera field).
+            RenderTarget::Image(handle.into()),
+            // bevy_egui creates+manages a (non-primary) EguiContext on this entity and renders
+            // its passes INTO this camera's image, so the readback composites scene + HUD.
+            EguiMultipassSchedule::new(OffscreenEguiPass),
+            FollowCam,
+        ))
+        .id();
+    // ★ THE SKY NEEDS HDR (slice 8s): the same pair the window's camera gets, and the dome as the
+    // ambient light instead of the engine's grey. The probe camera never gets the sky.
+    if sky_config.enabled {
+        commands.entity(picture_cam).insert((
+            bevy::post_process::bloom::Bloom::NATURAL,
+            bevy::render::view::Hdr,
+        ));
+        commands.insert_resource(bevy::light::GlobalAmbientLight::NONE);
+    }
     setup_world(&mut commands, &mut meshes, &mut materials);
 }
 

@@ -152,3 +152,8 @@ debug = false
 [profile.release]
 strip = true
 lto = "thin"
+
+# THE PLANET-CENTRE PATCH (slice 8s, owner-agreed 2026-09-18): a verbatim bevy_pbr 0.18.1 with the
+# atmosphere's planet centre STATED instead of fixed under the world origin. See vendor/bevy_pbr/PATCH.md.
+[patch.crates-io]
+bevy_pbr = { path = "vendor/bevy_pbr" }

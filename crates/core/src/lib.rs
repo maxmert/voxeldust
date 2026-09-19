@@ -41,6 +41,7 @@ pub mod realm_coord;
 pub mod realm_path;
 pub mod registry;
 pub mod rng;
+pub mod stellar;
 pub mod store_stamp;
 pub mod taxonomy;
 pub mod tlv;

@@ -419,6 +419,7 @@ pub(crate) mod tests {
                 frame_ms: 34.0,
                 passes_ms: vec![("main_opaque_pass_3d".to_owned(), 1.5, 20.0)],
                 star: Some(DevStarAngles {
+                    direction_body: [0.0, 0.0, 1.0],
                     elevation_deg: 15.0,
                     off_nose_deg: 120.0,
                 }),
@@ -472,6 +473,7 @@ pub(crate) mod tests {
                 eye_refusals: 2,
                 eye_jump_m: 0.125,
                 eye_step_m: 0.25,
+                sky: None,
                 last_gap: Some(DevBandGap {
                     realm: "Planet(7)".to_owned(),
                     frame: 902,
@@ -481,7 +483,7 @@ pub(crate) mod tests {
                         rung: 3,
                         was: "absent".to_owned(),
                         near_drawn_m: 6_401.0,
-                        territory_m: 6_957.0,
+                        territory_m: Some(6_957.0),
                         horizon_m: 6_582.0,
                         drawn_urgent: true,
                     }],
@@ -786,6 +788,25 @@ pub struct DevTerrainStamp {
     /// milliseconds and a gap lasts ONE frame, so `chunks_urgent` alone misses most of them; this
     /// row is LATCHED and a flight reads it whenever `urgent_frames` moved.
     pub last_gap: Option<DevBandGap>,
+    /// ★ THE SKY ON THIS FRAME (slice 8s): which body's air the eye got, its shell, the eye's radius
+    /// from that body's centre, the render mode, the control knob, the sun disc, and the derived
+    /// Rayleigh coefficient against Bruneton's Earth value. `None` while no body with air is in
+    /// the window (an airless stand, or the sky switched off).
+    pub sky: Option<DevSkyStamp>,
+}
+
+/// THE SKY'S ROW on [`DevTerrainStamp`] (slice 8s).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DevSkyStamp {
+    pub realm: String,
+    pub bottom_m: f64,
+    pub top_m: f64,
+    pub eye_r_m: f64,
+    pub raymarched: bool,
+    pub flat: bool,
+    pub sun_disk_deg: f64,
+    pub rayleigh_ratio: f64,
+    pub ozone: bool,
 }
 
 /// ONE FRAME WHOSE BAND WENT INCOMPLETE (see [`DevTerrainStamp::last_gap`]): the realm, the frame,
@@ -820,7 +841,11 @@ pub struct DevBandMiss {
     pub rung: u8,
     pub was: String,
     pub near_drawn_m: f64,
-    pub territory_m: f64,
+    /// The rung's territory edge, metres — `None` at the TOP rung, whose territory is unbounded
+    /// (`LadderView::territory_m` says infinity there, and JSON cannot carry an infinity: it
+    /// travels as `null` and the reader refuses the whole state — MEASURED 2026-09-18 on the
+    /// hull gate, a gap row at rung 18 in the star system's space).
+    pub territory_m: Option<f64>,
     pub horizon_m: f64,
     pub drawn_urgent: bool,
 }
@@ -885,6 +910,10 @@ pub struct DevSceneSwap {
 pub struct DevStarAngles {
     pub elevation_deg: f64,
     pub off_nose_deg: f64,
+    /// ★ THE SUN'S DIRECTION IN THE BODY'S FRAME (slice 8s), unit: the gate casts every ground pixel
+    /// onto the globe and asks whether the sun is up there — under the sky the night side is black
+    /// (the engine's grey ambient is gone; the dome lights only the day side).
+    pub direction_body: [f64; 3],
 }
 
 /// The ruler ball (slice 8p): a sphere of stated radius at a stated eye-relative centre, in the

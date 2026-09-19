@@ -162,10 +162,9 @@ const HORIZON_TOLERANCE_M: f64 = 1.0;
 const RULER_TOLERANCE_PX: f64 = 1.0;
 const RULER_CELLS_TOLERANCE: f64 = 2.0;
 /// The picture under the probe: the share of the probe's ground pixels that carry the ground's lit
-/// paint in the picture, and of its ball pixels that are red. A black or unlit picture with a
+/// paint in the picture (the ball's sunlit share is its own law, `lit_fraction`). A black or unlit picture with a
 /// perfect probe fails here (the refuter's finding 1); a marker over the ground fails here.
 const PAINT_UNDER_PROBE_MIN: f64 = 0.95;
-const RED_UNDER_PROBE_MIN: f64 = 0.90;
 /// Rows under the ball's disc that must be drawn ground: from three pixels under its rim to eight.
 const GROUND_UNDER_BALL_ROWS: (usize, usize) = (3, 8);
 /// A still stand: the delivered position in the state file and in a poll after the capture agree to
@@ -438,16 +437,94 @@ fn await_active(devctl: u16) -> DevState {
 /// ground): red over blue by a margin, not black.
 fn warm(px: &[u8]) -> bool {
     let (r, g, b) = (px[0], px[1], px[2]);
-    r >= g && g >= b && r >= b + 8 && r > 24
+    r >= g && g >= b && r >= b + 8 && r > PAINT_BLACK_FLOOR
 }
 
-/// THE BALL'S PAINT in the picture: a red HUE — red at least twice each other channel, above black —
-/// so the ball's shaded side counts as the ball (MEASURED on the fourth flight: a bright-margin test
-/// read the shade as "not the ball" on a quarter of the disc), while the ground's tan (red under
-/// twice green) does not.
+/// Where the paint stops being black: the floor `warm` always had, named once.
+const PAINT_BLACK_FLOOR: u8 = 24;
+
+/// THE GROUND'S PAINT SEEN THROUGH THE AIR (slice 8s): lit, not black — any channel over the floor.
+/// The ground's own tan survives the air only where the eye stands within ONE SCALE HEIGHT of the
+/// ground: below it the ray to the ground crosses a small part of the column and the paint reads
+/// `warm` as before; above it (aloft, 60 km: 0.999 of the column under the eye, the sun 15° up) the
+/// aerial perspective veils the ground in the sky's own blue — MEASURED at the aloft stand under the
+/// sky: the ground's mean (91, 91, 112), its warm share 0.000 — which is the model working, not the
+/// ground missing. There the gate asks for LIT ground and reports the warm share.
+fn lit(px: &[u8]) -> bool {
+    px[0] > PAINT_BLACK_FLOOR || px[1] > PAINT_BLACK_FLOOR || px[2] > PAINT_BLACK_FLOOR
+}
+
+/// THE BALL'S SUNLIT PAINT in the picture: a red HUE — red at least twice each other channel, above
+/// black. Before the sky (slice 8s) the shaded side passed this too (it was lit by the engine's grey
+/// ambient, so it stayed a dark red); under the SKY the dome lights the shade BLUE-GREY — MEASURED on
+/// the first sky pictures: the shade's pixels read (27, 23, 28) at the hill stand, and no hue rule
+/// can call that red, because it is not. So this rule names the SUNLIT part of the ball, and the
+/// gate asks for exactly the share of the disc the stand's own sun lights (`lit_fraction`). The
+/// ground's tan (red under twice green) still does not pass.
 fn red(px: &[u8]) -> bool {
     let (r, g, b) = (u16::from(px[0]), u16::from(px[1]), u16::from(px[2]));
     r > 12 && r >= 2 * g && r >= 2 * b
+}
+
+/// ★ THE SUNLIT FRACTION OF THE BALL'S DISC, from the stand's own light (slice 8s): the star stands
+/// `elevation_deg` over the eye's horizon and `off_nose_deg` round from the nose, the nose tilts
+/// `tilt_deg` DOWN, and the ball sits on the nose's ray. The lit share of a sphere's disc is
+/// `(1 + cos φ) / 2` with `φ` the angle between the sun and the direction from the ball to the eye
+/// (minus the nose): `cos φ = sin e · sin t − cos e · cos t · cos(off)`. MEASURED before the rule was
+/// written: the twice-red share read 0.763 at the ground stand (the law: 0.757) and 0.767 at the
+/// hill (the law: 0.767).
+fn lit_fraction(elevation_deg: f64, off_nose_deg: f64, tilt_deg: f64) -> f64 {
+    let (e, t, off) = (
+        elevation_deg.to_radians(),
+        tilt_deg.to_radians(),
+        off_nose_deg.to_radians(),
+    );
+    let cos_phase = e.sin() * t.sin() - e.cos() * t.cos() * off.cos();
+    (1.0 + cos_phase) / 2.0
+}
+
+/// THE DISC'S ONE-PIXEL BANDS as a share of its pixels: the rim the picture's anti-aliasing blends
+/// with the ground, and the terminator's soft edge — each one pixel wide, `2 / r` of the disc
+/// apiece (a circle's perimeter over its area), with `r` from the probe's own ruler count.
+fn disc_band_share(probe: &[u8]) -> f64 {
+    let ruler = probe
+        .chunks_exact(4)
+        .filter(|pr| {
+            vd_client_harness::probe::decode_probe([pr[0], pr[1], pr[2]]).kind == PROBE_KIND_RULER
+        })
+        .count();
+    let radius_px = (ruler as f64 / std::f64::consts::PI).sqrt();
+    2.0 / radius_px.max(1.0)
+}
+
+/// The share of the probe's pixels of `kind` that `keep` selects (by pixel index) whose PICTURE
+/// pixel satisfies `paint`, and how many pixels were selected.
+fn paint_share_where(
+    picture: &[u8],
+    probe: &[u8],
+    kind: u8,
+    paint: fn(&[u8]) -> bool,
+    keep: &dyn Fn(usize) -> bool,
+) -> (f64, u64) {
+    let (mut hits, mut total) = (0u64, 0u64);
+    for (i, (pic, pr)) in picture
+        .chunks_exact(4)
+        .zip(probe.chunks_exact(4))
+        .enumerate()
+    {
+        let here =
+            vd_client_harness::probe::decode_probe([pr[0], pr[1], pr[2]]).kind == kind && keep(i);
+        total += u64::from(here);
+        hits += u64::from(here && paint(pic));
+    }
+    (
+        if total == 0 {
+            0.0
+        } else {
+            hits as f64 / total as f64
+        },
+        total,
+    )
 }
 
 /// The share of the probe's pixels of `kind` whose PICTURE pixel satisfies `paint`.
@@ -938,19 +1015,76 @@ fn take_picture(
     );
     // THE PICTURE, JUDGED WHERE THE PROBE POINTS: the ground's lit paint under the probe's ground,
     // red under its ball. The probe alone would pass a black picture.
-    let ground_paint = paint_under_probe(&rgba, &probe, PROBE_KIND_TERRAIN, warm);
-    let ball_paint = paint_under_probe(&rgba, &probe, PROBE_KIND_RULER, red);
+    // ★ VEILED OR NOT (slice 8s, see `lit`): the eye above one scale height of this body's air —
+    // the scale height read back off the stamp's own sky row (the shell is `H · 16 ln 2` high).
+    let veiled = stamp.sky.as_ref().is_some_and(|sky| {
+        stamp.altitude_m > (sky.top_m - sky.bottom_m) / vd_client::sky::SHELL_TOP_SCALE_HEIGHTS
+    });
+    let warm_share = paint_under_probe(&rgba, &probe, PROBE_KIND_TERRAIN, warm);
+    // ★ DAY AND NIGHT (slice 8s): above one scale height the frame holds ground past the
+    // terminator — from the orbit stand a third of the drawn globe is night, and night is BLACK
+    // under the sky (the dome lights only the day side; the engine's grey ambient is gone —
+    // MEASURED: the orbit stand read lit 0.815 with the night side counted). The gate casts each
+    // ground pixel's ray onto the globe (the recipe's surface radius) and asks whether the sun is
+    // up there; the day side must be lit, the night side is reported.
+    let sun_body = stamp
+        .star
+        .map(|s| DVec3::from_array(s.direction_body))
+        .unwrap_or(DVec3::ZERO);
+    let radius_m = stamp.surface_m;
+    let is_day = |i: usize| -> bool {
+        let (x, y) = (i % w, i / w);
+        let ndc_x = (x as f64 + 0.5) / w as f64 * 2.0 - 1.0;
+        let ndc_y = 1.0 - (y as f64 + 0.5) / h as f64 * 2.0;
+        let dir = (forward + right * (ndc_x * tan_half * aspect) + cam_up * (ndc_y * tan_half))
+            .normalize();
+        // The nearest crossing of the globe's sphere along the ray; a ray that misses (a rim
+        // pixel the relief raised) counts as day, so it is judged, never excused.
+        let o = camera.eye - centre;
+        let b = o.dot(dir);
+        let c = o.length_squared() - radius_m * radius_m;
+        let disc = b * b - c;
+        if disc < 0.0 {
+            return true;
+        }
+        let t = -b - disc.sqrt();
+        let p = o + dir * t;
+        p.normalize().dot(sun_body) > 0.0
+    };
+    let (day_lit, day_n) = paint_share_where(&rgba, &probe, PROBE_KIND_TERRAIN, lit, &is_day);
+    let (night_lit, night_n) =
+        paint_share_where(&rgba, &probe, PROBE_KIND_TERRAIN, lit, &|i| !is_day(i));
+    if veiled {
+        eprintln!(
+            "terrain_pictures/{name}: day and night under the probe — {day_n} day pixels lit \
+             {day_lit:.3}, {night_n} night pixels lit {night_lit:.3}"
+        );
+    }
+    let ground_paint = if veiled { day_lit } else { warm_share };
+    // The ball through the same air: its sunlit red is veiled with the ground (MEASURED at the
+    // aloft stand, the ball 251 km off: the twice-red share 0.579 against the law's 0.767), so
+    // above one scale height the ball must be LIT and its sunlit share is reported.
+    let red_share = paint_under_probe(&rgba, &probe, PROBE_KIND_RULER, red);
+    let ball_paint = if veiled {
+        paint_under_probe(&rgba, &probe, PROBE_KIND_RULER, lit)
+    } else {
+        red_share
+    };
     eprintln!(
-        "terrain_pictures/{name}: paint under the probe — ground {ground_paint:.3}, ball {ball_paint:.3}"
+        "terrain_pictures/{name}: paint under the probe — ground {ground_paint:.3} ({}, warm share \
+         {warm_share:.3}), ball {ball_paint:.3} (red share {red_share:.3})",
+        if veiled {
+            "veiled by the air: lit"
+        } else {
+            "under one scale height: warm"
+        }
     );
     assert!(
         ground_paint >= PAINT_UNDER_PROBE_MIN,
         "{name}: the picture is not lit ground where the probe says ground: {ground_paint:.3}"
     );
-    assert!(
-        ball_paint >= RED_UNDER_PROBE_MIN,
-        "{name}: the picture is not the red ball where the probe says ball: {ball_paint:.3}"
-    );
+    // (The ball's sunlit share is judged against the stand's own light below, once the stamp's
+    // star is read.)
     // 2. THE STAMP'S OWN TRUTH (M8-4): the eye from the state's pose through the pilot camera, in
     //    the planet's frame — its row's centre and its DELIVERED facing, the same four numbers the
     //    renderer turns the terrain by — against the recipe.
@@ -992,6 +1126,28 @@ fn take_picture(
         "{name}: the star stands {:.2}° up, outside {SUN_ELEVATION_BAND_DEG:?}",
         star.elevation_deg
     );
+    // ★ THE BALL SHOWS ITS SUNLIT FRACTION (slice 8s): the red share of the disc equals what the
+    // stand's own sun lights, within the rim and the terminator (one pixel each).
+    let lit_share = lit_fraction(star.elevation_deg, star.off_nose_deg, tilt_deg);
+    let bands = 2.0 * disc_band_share(&probe);
+    eprintln!(
+        "terrain_pictures/{name}: the ball's sunlit share {red_share:.3} against the law's \
+         {lit_share:.3} (tolerance {bands:.3}, two one-pixel bands of the disc){}",
+        if veiled { " — veiled, reported" } else { "" }
+    );
+    if veiled {
+        // The ball's shade is black without the dome's fill (it hangs in near-vacuum from the
+        // orbit stand), so the LIT share is at least the sunlit fraction.
+        assert!(
+            ball_paint >= lit_share - bands,
+            "{name}: the ball's lit share {ball_paint:.3} is under the law's sunlit {lit_share:.3} − {bands:.3}"
+        );
+    } else {
+        assert!(
+            (red_share - lit_share).abs() <= bands,
+            "{name}: the ball's sunlit share {red_share:.3} is not the law's {lit_share:.3} ± {bands:.3}"
+        );
+    }
     assert!(
         (off_nose_band.0..=off_nose_band.1).contains(&star.off_nose_deg),
         "{name}: the star stands {:.2}° off the nose, outside {off_nose_band:?}",

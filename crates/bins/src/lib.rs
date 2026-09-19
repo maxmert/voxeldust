@@ -1950,8 +1950,31 @@ pub fn dev_roundtrip(port: u16, request: &DevRequest) -> Result<DevResponse, Str
     if reply.trim().is_empty() {
         return Err("no response (client closed the connection)".to_owned());
     }
-    serde_json::from_str(reply.trim()).map_err(|e| format!("decode response: {e}"))
+    // On a decode failure the reply's own bytes are the diagnosis (a JSON `null` where a number
+    // was expected is how a NaN or an infinity travels), so the neighbourhood of every `null`
+    // rides the error, bounded — the key stands just before its value.
+    serde_json::from_str(reply.trim()).map_err(|e| {
+        let text = reply.trim();
+        let nulls: Vec<String> = text
+            .match_indices("null")
+            .take(DECODE_ERROR_NULLS_SHOWN)
+            .map(|(i, _)| {
+                let from = text
+                    .char_indices()
+                    .map(|(j, _)| j)
+                    .rfind(|j| *j <= i.saturating_sub(DECODE_ERROR_NULL_CONTEXT))
+                    .unwrap_or(0);
+                text[from..i + 4].to_owned()
+            })
+            .collect();
+        format!("decode response: {e} — the nulls in the reply: {nulls:?}")
+    })
 }
+
+/// How many `null`s a decode error names, and how many bytes before each (the key and a little
+/// of the row it sits in): enough to find the field, never the whole state.
+const DECODE_ERROR_NULLS_SHOWN: usize = 24;
+const DECODE_ERROR_NULL_CONTEXT: usize = 96;
 
 // ---- the dev-cluster on-disk layout (ONE definition) ---------------------------
 

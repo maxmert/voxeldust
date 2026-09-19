@@ -117,7 +117,7 @@ const SHADOW_FIRST_CASCADE_SHARE: f32 = 1.0 / 64.0;
 const SHADOW_BIAS_TAN_CAP: f32 = 8.0;
 /// THE RULER'S PAINT (slice 8p): a matte red ball, lit like the ground it stands on and casting its
 /// own shadow — the shadow is the second orienter, it says the ball touches the ground. Style.
-const RULER_SRGB: [f32; 3] = [0.85, 0.12, 0.10];
+pub const RULER_SRGB: [f32; 3] = [0.85, 0.12, 0.10];
 const RULER_ROUGHNESS: f32 = 0.6;
 
 /// THE SUN'S ILLUMINANCE, FROM THE CAMERA'S OWN EXPOSURE: the lux at which a white face turned
@@ -303,7 +303,7 @@ const SHADOW_MAP_ENV: &str = "VD_TERRAIN_SHADOW_MAP";
 const SHADOW_MAP_PX: u32 = 2048;
 
 /// A number from the environment, or the default.
-fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
+pub(crate) fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse::<T>().ok())
@@ -1595,7 +1595,14 @@ pub struct Terrain {
     work_ns: BTreeMap<&'static str, WorkPiece>,
     /// The main thread's nanoseconds in the harvest loop since the start (M8-2a).
     harvest_nanos: u64,
-    sun: Option<Entity>,
+    pub(crate) sun: Option<Entity>,
+    /// ★ THE SKY'S INPUTS (slice 8s), listed every frame for `sky::sync_sky`: every body in the
+    /// window with a charter, the brightest luminous row's luminosity, the sun disc last sized,
+    /// the body whose air the camera holds.
+    pub(crate) sky_bodies: Vec<crate::sky::SkyBody>,
+    pub(crate) sun_luma: Option<f64>,
+    pub(crate) sun_disk: Option<f32>,
+    pub(crate) sky_realm: Option<RealmId>,
     /// The tangent of the sun's incidence at the eye, as the sun was last placed (capped as the
     /// shadow bias caps it): the shadow's reach for the casters reads it (item 18).
     sun_tan_i: Option<f32>,
@@ -1662,6 +1669,10 @@ impl Terrain {
             work_ns: BTreeMap::new(),
             harvest_nanos: 0,
             sun: None,
+            sky_bodies: Vec::new(),
+            sun_luma: None,
+            sun_disk: None,
+            sky_realm: None,
             sun_tan_i: None,
             ruler: None,
             ruler_assets: None,
@@ -2405,7 +2416,11 @@ pub(crate) fn sync_terrain(
     let mut centres: BTreeMap<RealmId, (DVec3, DQuat)> = BTreeMap::new();
     let mut lead_centres: BTreeMap<RealmId, (DVec3, DQuat)> = BTreeMap::new();
     let mut brightest: Option<(f64, DVec3)> = None;
+    let mut charters: BTreeMap<RealmId, vd_core::look::BodyCharter> = BTreeMap::new();
     for (realm, rbox) in scene.iter() {
+        if let Some(charter) = rbox.charter {
+            charters.insert(realm, charter);
+        }
         let draw_center = super::draw_center_of(rbox, &render_eye, &snap, now_s);
         centres.insert(realm, (draw_center, facing_of(rbox)));
         if let Some(lead_box) = scene_lead.as_ref().and_then(|s| s.get(realm)) {
@@ -2453,6 +2468,22 @@ pub(crate) fn sync_terrain(
             })
         })
         .collect();
+    // ★ THE SKY'S INPUTS (slice 8s): every body with a charter, its centre in the render frame
+    // (the same centre the chunks are placed from), for `sky::sync_sky` after this system.
+    terrain.sky_bodies = with_bodies
+        .iter()
+        .filter_map(|eb| {
+            let charter = *charters.get(&eb.realm)?;
+            let (centre, _) = centres.get(&eb.realm)?;
+            Some(crate::sky::SkyBody {
+                realm: eb.realm,
+                centre: *centre,
+                radius_m: eb.body.ladder().radius_m(),
+                charter,
+            })
+        })
+        .collect();
+    terrain.sun_luma = brightest.map(|(lux, _)| lux);
     // THE SHADOW'S REACH for the casters (item 18): the cascades' reach, the sun's tangent as it
     // was last placed (the cap's worth before the sun is born: the longest shadows, so no caster
     // is missed), and the ladder's step. A change past the hysteresis recomputes the wanted set.
@@ -3186,6 +3217,7 @@ pub(crate) fn sync_terrain(
                     DevStarAngles {
                         elevation_deg: elevation.to_degrees(),
                         off_nose_deg: off_nose.to_degrees(),
+                        direction_body: (facing.inverse() * star.normalize_or_zero()).to_array(),
                     }
                 })
             });
@@ -3269,7 +3301,10 @@ pub(crate) fn sync_terrain(
                                     rung: key.rung,
                                     was: l.prev.class_of(key).name().to_owned(),
                                     near_drawn_m: probe.near_m,
-                                    territory_m: probe.territory_m,
+                                    territory_m: probe
+                                        .territory_m
+                                        .is_finite()
+                                        .then_some(probe.territory_m),
                                     horizon_m: probe.horizon_m,
                                     drawn_urgent: probe.urgent,
                                 }
@@ -3390,6 +3425,7 @@ pub(crate) fn sync_terrain(
                 eye_jump_m: render_eye.track.jump_max_m,
                 eye_step_m: render_eye.track.step_max_m,
                 last_gap: terrain.last_gap.clone(),
+                sky: None,
             });
         }
     }

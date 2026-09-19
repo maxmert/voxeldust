@@ -268,8 +268,7 @@ impl SpectralClass {
     /// Broken-power-law mass-luminosity segments `(mass_hi, coeff, exponent)` ascending
     /// (Duric 2004, "Advanced Astrophysics"): `L/Lsun = coeff * M^exponent`. Nearly
     /// continuous at the breaks (a `mass_luminosity_is_continuous` tripwire guards it).
-    pub const MLR_SEGMENTS: [(f64, f64, f64); 3] =
-        [(0.43, 0.23, 2.3), (2.0, 1.0, 4.0), (55.0, 1.4, 3.5)];
+    pub const MLR_SEGMENTS: [(f64, f64, f64); 3] = vd_core::stellar::MLR_SEGMENTS;
 
     /// Recover a class from its tag byte; unknown tags error (HR2), never Default.
     pub fn from_tag(tag: u8) -> Result<SpectralClass, UnknownTaxonTag> {
@@ -584,37 +583,20 @@ pub fn classify_planet(
 // Every constant below is a CITED physical value (the no-magic-numbers discipline: cited
 // physics constants and published fit coefficients, gathered here once, never inline).
 
-/// Nominal solar luminosity in W — IAU 2015 Resolution B3, exactly defined.
-pub const L_SUN_W: f64 = 3.828e26;
-/// Nominal solar radius in m — IAU 2015 Resolution B3.
-pub const R_SUN_M: f64 = 6.957e8;
+// ★ MOVED TO `vd_core::stellar` (slice 8s): the client's sky reads the same numbers. Re-exported
+// here under the old names so no caller moved.
+pub use vd_core::stellar::{
+    AU_M, BOLTZMANN_J_K, L_SUN_W, R_SUN_M, STEFAN_BOLTZMANN_W_M2_K4, STELLAR_MR_SEGMENTS,
+    segmented_power_law, star_radius_m,
+};
 /// Solar mass in kg (the `G*M_sun` split the tree's `G = 6.674e-11` implies).
 pub const M_SUN_KG: f64 = 1.989e30;
 /// Earth mass in kg (IAU nominal).
 pub const M_EARTH_KG: f64 = 5.972e24;
 /// Earth MEAN radius in m — the radius the Chen-Kipping / Zeng Earth-unit fits are stated in.
 pub const R_EARTH_M: f64 = 6.371e6;
-/// The astronomical unit in m — IAU 2012 Resolution B2, exactly defined.
-pub const AU_M: f64 = 1.495978707e11;
-/// Stefan-Boltzmann constant, W m^-2 K^-4 — CODATA 2018, exact under the SI redefinition.
-pub const STEFAN_BOLTZMANN_W_M2_K4: f64 = 5.670374419e-8;
-/// Boltzmann constant, J/K — SI 2019, exactly defined.
-pub const BOLTZMANN_J_K: f64 = 1.380649e-23;
 /// Atomic mass unit, kg — CODATA 2018.
 pub const ATOMIC_MASS_KG: f64 = 1.66053906660e-27;
-
-/// Segmented broken-power-law `coeff * x^exponent` over ascending `(x_hi, coeff, exponent)`
-/// rows; `x` above every break reuses the top row. THE one evaluator every mass-radius /
-/// mass-luminosity table in this file goes through (HR3 — one machinery, tables as data).
-#[must_use]
-pub fn segmented_power_law(x: f64, segments: &[(f64, f64, f64)]) -> f64 {
-    let (_, coeff, exponent) = segments
-        .iter()
-        .find(|(hi, _, _)| x <= *hi)
-        .copied()
-        .unwrap_or(segments[segments.len() - 1]);
-    coeff * x.powf(exponent)
-}
 
 /// Chen & Kipping 2017 (ApJ 834:17, "Forecaster") planet mass-radius broken power law in
 /// EARTH units: Terran / Neptunian / Jovian segments; the 131.6 Mearth Neptunian->Jovian
@@ -625,11 +607,6 @@ pub const PMR_SEGMENTS: [(f64, f64, f64); 3] = [
     (f64::MAX, 17.7346, -0.044),
 ];
 
-/// Demircan & Kahraman 1991 (Ap&SS 181:313) stellar mass-radius segments in SOLAR units:
-/// `R/Rsun = 1.06*M^0.945` below 1.66 Msun, `1.2917*M^0.555` above.
-pub const STELLAR_MR_SEGMENTS: [(f64, f64, f64); 2] =
-    [(1.66, 1.06, 0.945), (f64::MAX, 1.2917, 0.555)];
-
 /// Zeng, Sasselov & Jacobsen 2016 (ApJ 819:127) rocky-core mass-radius (CMF 0.33), Earth
 /// units: `R = M^0.27`.
 pub const ROCK_MR_SEGMENTS: [(f64, f64, f64); 1] = [(f64::MAX, 1.0, 0.27)];
@@ -637,14 +614,6 @@ pub const ROCK_MR_SEGMENTS: [(f64, f64, f64); 1] = [(f64::MAX, 1.0, 0.27)];
 /// Zeng et al. 2019 (PNAS 116:9723) 50% H2O ice-rock mass-radius, Earth units:
 /// `R = 1.24 * M^0.27` (coefficient re-read from the paper at implementation).
 pub const ICE_MR_SEGMENTS: [(f64, f64, f64); 1] = [(f64::MAX, 1.24, 0.27)];
-
-/// A star's photospheric radius in metres from its drawn mass (Demircan & Kahraman 1991
-/// through the one segmented evaluator). ONE function, two call sites by design: the
-/// System's look and the Star realm's own look both read THIS (taxonomy design par 5.2).
-#[must_use]
-pub fn star_radius_m(mass_msun: f64) -> f64 {
-    R_SUN_M * segmented_power_law(mass_msun, &STELLAR_MR_SEGMENTS)
-}
 
 /// A planet's TOTAL radius in metres from its drawn mass (Chen & Kipping 2017) — the
 /// population-statistical radius the re-solve uses for looks/SOIs before the taxonomy's

@@ -820,13 +820,16 @@ fn gap_record(t: f64, frames: u64, gap: &vd_devproto::DevBandGap, peak: (u64, &s
         .iter()
         .map(|m| {
             format!(
-                "{} (rung {}) was {}, {:.0} m from the drawn eye, its territory {:.0} m, the \
+                "{} (rung {}) was {}, {:.0} m from the drawn eye, its territory {}, the \
                  horizon {:.0} m, the drawn eye {} it",
                 m.key,
                 m.rung,
                 m.was,
                 m.near_drawn_m,
-                m.territory_m,
+                m.territory_m.map_or_else(
+                    || "unbounded (the top rung)".to_owned(),
+                    |t| format!("{t:.0} m")
+                ),
                 m.horizon_m,
                 if m.drawn_urgent {
                     "WANTS"

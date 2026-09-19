@@ -247,7 +247,7 @@ const EARTH_MASS_KG: f64 = 5.972e24;
 /// THE RAYLEIGH DEPTH at 550 nm, calibrated on Earth (Bodhaine et al. 1999: 0.0973 at one bar,
 /// 9.81 m/s², a mean molecular weight of 28.96 u): the column is `p / (g · μ)`.
 const EARTH_RAYLEIGH_550: f64 = 0.0973;
-const EARTH_P_SURF_PA: f64 = 101_325.0;
+use vd_core::stellar::EARTH_P_SURF_PA;
 const EARTH_G_MPS2: f64 = 9.81;
 const EARTH_MU: f64 = 28.96;
 /// THE GREY GREENHOUSE calibrated on Earth: `T_s = T_eq · (1 + ¾·τ_ir)^(1/4)`, and Earth's 288 K
@@ -258,7 +258,7 @@ const EARTH_TAU_IR: f64 = 0.860;
 /// rises on a cold world and falls on a warm one until the surface stands at Earth's own mean —
 /// a CALIBRATION ON ONE BODY. Outside the band the thermostat cannot hold and the greenhouse is
 /// Earth's own (the maximum-greenhouse floor is not modelled: UNMEASURED).
-const THERMOSTAT_SET_K: f64 = 288.0;
+const THERMOSTAT_SET_K: f64 = vd_core::stellar::EARTH_MEAN_SURFACE_K;
 /// THE ELASTIC THICKNESS (Watts 2001): `T_e` tracks the depth to a fixed isotherm, so it falls as
 /// the surface heat flow rises; radiogenic heat scales with `ρ·R` and decays with age. Earth's
 /// 35 km at its own `ρ·R` and 4.54 Gyr is the reference; the decay is a rational `1 / (1 + t/τ)`

@@ -3203,6 +3203,7 @@ mod tests {
                     eye_jump_m: 0.0,
                     eye_step_m: 0.0,
                     last_gap: None,
+                    sky: None,
                 }),
             },
         );

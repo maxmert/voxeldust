@@ -8550,3 +8550,40 @@ frame's `+Y` as its up, so a windowed walk on a planet is tilted until it lands.
 planet is wanted before it. The stand-in itself is deleted with `VD_SPAWN_POSES` when P7's durable
 home store lands.
 
+
+### D-TERRAIN-6 🟥 THE SKY'S OWED ITEMS — what slice 8s states as placeholders, interims and later passes (2026-09-18)
+Design: `docs/investigation/2026-09-08/landforms/slice_8s_design.md`; the owner's answers of 2026-09-18 in its §11.
+- **THE AEROSOL PLACEHOLDER (design §4.3).** `vd_client::sky` scales Bevy's (Bruneton's) Earth aerosol term by the surface
+  number density `(p/T)/(p⊕/T⊕)` and its scale height by `H/H⊕` — a law with a calibration body and no typed number, lawful
+  under T9 in that exact form. MISSING: the SOURCE law — dust from aridity (8c's rain shadow, 8e's biome), salt from the sea
+  (8o), ash (no slice). WHEN: 8e at the latest; the placeholder dies when the source law lands. Its only inputs are charter
+  words: the day anyone tunes it to look good it is a defect.
+- **OZONE UNDER THE EARTH-LIKE BITS (design §4.4; owner: present).** The layer exists where the charter states air AND a
+  sea — the liquid-water clause standing in for a biosphere word (free oxygen) that no charter carries. WHEN: the biosphere
+  word (8e or later); the rule then reads it.
+- **THE GROUND ALBEDO FOR THE SECOND BOUNCE (design §4.6).** The charter's BOND albedo (clouds included) stands in for the
+  surface albedo the multiple-scattering term wants. WHEN: 8e's paint table states a surface albedo.
+- **ONE ATMOSPHERE A FRAME (design §7).** The eye gets the air of the body whose shell subtends the largest angle
+  (`sky.rs::pick`); a SECOND body with air in the same frame has no rim, and the handover between two airy bodies is a
+  measured pixel step (G-SKY-HANDOVER, S6 owed). MISSING: a second atmosphere pass for the far body, and the census count
+  of systems holding two airy bodies within sight. WHEN: when the handover gate reads red, or when such a pair is reachable.
+- ~~**THE STARS BEFORE THE SKY (design §5, S4).**~~ 🟩 LANDED 2026-09-19: the star cloud draws in the OPAQUE phase with
+  `One + One` blending and no depth write (`StarSkyMaterial::specialize`), so the sky pass composes
+  `inscatter + transmittance × stars` — MEASURED: the orbit stand holds the galaxy over the blue rim, the noon ground stand
+  none. Found on the way: `sync_star_sky` had been SKIPPED since slice 8p (`Single` over two cameras) — cured by naming
+  the picture camera; the star and hull gates are green again.
+- **THE MODE (design §6, S5).** `VD_SKY_MODE` defaults to the raymarched mode (right at every altitude); the lookup mode
+  clamps at 32 km. MISSING: the frame-cost table on the seven stands and the descent, and — only if the cost does not fit —
+  a switch measured under one channel step. WHEN: 8s S5.
+- **THE DESCENT LEG AND THE TWO NEW STANDS (design §9, S7).** G-SKY-LANDING (orbit → ground at the hull rating, the sky's
+  per-frame step against the model's own prediction), the DUSK stand (the sun 2° under the horizon) and the HIGH stand
+  (300 km). WHEN: 8s S7, before the owner's look freezes the sky.
+- **THE PATCHED ENGINE CRATE (`vendor/bevy_pbr/PATCH.md`).** A verbatim `bevy_pbr` 0.18.1 with the planet centre STATED
+  (`Atmosphere::planet_center`) instead of fixed under the world origin. MISSING: the upstream pull request. WHEN: the patch
+  dies at the Bevy upgrade gate (0.19) — either upstream carries the change by then or the copy is re-based once.
+- **TEMPORAL ANTI-ALIAS FOR THE FLIGHT.** The sky pass flattens a multisampled edge (one depth sample a pixel), so the
+  picture cameras run `Msaa::Off` + SMAA (owner's look, 2026-09-19: "the pixel edge of the terrain and the atmosphere").
+  SMAA is per-frame; TAA would be the flight's answer but is temporal (the picture gates compare frames) and the star
+  sprites carry no motion vectors (a custom vertex path). WHEN: the look after the freeze, with the motion vectors.
+- **THE CONTROL KNOB `VD_SKY_FLAT`.** A measurement knob that reproduces upstream's flat centre for G-SKY-CONTROL. It is
+  never a mode anybody flies; it leaves with the patch.

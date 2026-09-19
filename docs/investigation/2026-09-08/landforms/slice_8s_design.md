@@ -376,7 +376,7 @@ No new wire arm, no new lane, no new word. The gateway and every shard are untou
 
 | gate | what it measures | red when |
 |---|---|---|
-| G-SKY-CONTROL | unpatched: ground and orbit zenith equal; patched: orbit zenith black, rim on the limb | the control did not fail, or the patch did not cure it |
+| G-SKY-CONTROL | unpatched (`VD_SKY_FLAT=1`): the flat centre must give a WRONG picture at the ground stand; patched: the same stand right. ★ MEASURED 2026-09-18: the flat centre read the ground BLACK (lit-ground paint 0.000 — the sun under the flat model's horizon, because world Y is not up in our frame), the patch read 0.998 with a blue sky. The orbit form (ground and orbit zenith equal) never ran: the flat run stopped at the first gate | the control did not fail, or the patch did not cure it |
 | G-SKY-ZENITH | the ground stand's zenith colour against the analytic single-scatter value for the charter's τ_vis (Bruneton's closed form, computed in the test in f64) | > the LUT's stated quantum |
 | G-SKY-AIRLESS | a stand on a body with `HAS_AIR` clear: the picture BYTE-IDENTICAL to the same stand with `VD_SKY=0` | any pixel differs |
 | G-SKY-STARS | noon at the ground stand: no star pixel brighter than its sky neighbours; night: the star gate's references re-frozen once, then held | a star through the day sky; a night drift |
@@ -384,6 +384,7 @@ No new wire arm, no new lane, no new word. The gateway and every shard are untou
 | G-SKY-MODE | (only if a switch exists, §6) the two modes' pictures at the switch altitude | > 1 channel step |
 | G-SKY-HANDOVER | (§7) the pixel step at the handover frame | > 1 channel step |
 | G-SKY-COST | frame time on the seven stands and the descent leg, both modes, printed | a report; the knob decides |
+| the paint gates under the sky (★ BUILT 2026-09-18, run 7 green) | the ball's red share is its SUNLIT FRACTION `(1 + cos φ)/2` from the stand's own sun (measured 0.763 vs 0.757, 0.746 vs 0.767); above ONE SCALE HEIGHT the ground and the ball are veiled by the air and must be LIT, their hue shares reported; NIGHT IS BLACK — the stamp's star row carries the sun's body-frame direction and every ground pixel is cast onto the globe: the day side lit ≥ 0.95, the night side reported | a day pixel black; a near-ground ball off its sunlit share by more than two one-pixel bands |
 | the pictures | the seven stands re-frozen on the owner's look; TWO NEW STANDS: **dusk** (the ground stand with the sun 2° under the horizon: the twilight arch and the first stars) and **high** (300 km: the shell thick under the eye, the rim wide) | as today |
 
 ---
