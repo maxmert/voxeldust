@@ -8572,9 +8572,13 @@ Design: `docs/investigation/2026-09-08/landforms/slice_8s_design.md`; the owner'
   `inscatter + transmittance × stars` — MEASURED: the orbit stand holds the galaxy over the blue rim, the noon ground stand
   none. Found on the way: `sync_star_sky` had been SKIPPED since slice 8p (`Single` over two cameras) — cured by naming
   the picture camera; the star and hull gates are green again.
-- **THE MODE (design §6, S5).** `VD_SKY_MODE` defaults to the raymarched mode (right at every altitude); the lookup mode
-  clamps at 32 km. MISSING: the frame-cost table on the seven stands and the descent, and — only if the cost does not fit —
-  a switch measured under one channel step. WHEN: 8s S5.
+- ~~**THE MODE (design §6, S5).**~~ 🟩 MEASURED AND DECIDED 2026-09-19: ONE MODE, the raymarched one, always; no switch.
+  The lookup mode with its table stretched to the drawn radius (`lut_far_m`, per frame) differs from the raymarched
+  picture by up to 142 channel steps at the ground stand and 136 aloft (half a million pixels), and from orbit it leaves
+  7 % of the day side BLACK (its 32 slices over 5 762 km miss the shell) — a wrong picture, not a cheaper one. The
+  raymarched mode's cost on the stamp's frame time: ground 34.8 vs 33.1 ms, hill 41.0 vs 36.3, aloft 20.1 vs 19.6,
+  orbit 23.9 vs 20.1 (1.7–4.7 ms a frame at 1280×720, MSAA 4×, the sky per sample). `VD_SKY_MODE=lut` stays a
+  measurement knob. The frame PEAKS (85–99 ms at the far and cave stands) are the chunk fills, not the sky.
 - **THE DESCENT LEG AND THE TWO NEW STANDS (design §9, S7).** G-SKY-LANDING (orbit → ground at the hull rating, the sky's
   per-frame step against the model's own prediction), the DUSK stand (the sun 2° under the horizon) and the HIGH stand
   (300 km). WHEN: 8s S7, before the owner's look freezes the sky.

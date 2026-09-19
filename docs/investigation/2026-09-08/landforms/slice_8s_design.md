@@ -316,6 +316,11 @@ first, near the zenith, where the air is thinnest — the order real stars appea
 
 ## 6. THE MODE AND THE DISTANCE (the first seam candidate)
 
+**★ MEASURED AND DECIDED (S5, 2026-09-19): the raymarched mode, always; no switch.** The lookup mode with
+its table stretched to the drawn radius is a WRONG picture (up to 142 channel steps against the raymarched
+one at the ground stand, 136 aloft; 7 % of the day side black from orbit), and the raymarched mode costs
+1.7–4.7 ms a frame more at the four measured stands. Rule 1 below applies; rule 2 never ran.
+
 Two modes exist (§2.4). A SWITCH between them at some altitude is a seam candidate (the taxonomy's
 brightness-pop). The rule:
 

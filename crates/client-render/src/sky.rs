@@ -130,6 +130,18 @@ fn pick(bodies: &[SkyBody]) -> Option<(&SkyBody, laws::SkyTerms)> {
         })
 }
 
+/// The picture's cameras with whatever air they hold: the atmosphere and its settings, if any.
+type SkyCameras<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        Option<&'static mut Atmosphere>,
+        Option<&'static mut AtmosphereSettings>,
+    ),
+    With<super::FollowCam>,
+>;
+
 /// THE SKY SYSTEM: after the terrain listed the bodies and placed the sun, put the chosen body's
 /// air on the picture's camera (or take it off), move its centre with the eye, size the sun disc,
 /// and state it all on the stamp.
@@ -138,7 +150,7 @@ pub(crate) fn sync_sky(
     mut terrain: ResMut<Terrain>,
     mut media: ResMut<SkyMedia>,
     mut assets: ResMut<Assets<ScatteringMedium>>,
-    mut cams: Query<(Entity, Option<&mut Atmosphere>), With<super::FollowCam>>,
+    mut cams: SkyCameras,
     mut commands: Commands,
 ) {
     if !config.enabled {
@@ -146,7 +158,7 @@ pub(crate) fn sync_sky(
     }
     let chosen = pick(&terrain.sky_bodies).map(|(b, t)| (b.clone(), t));
     let Some((body, terms)) = chosen else {
-        for (cam, present) in &mut cams {
+        for (cam, present, _) in &mut cams {
             if present.is_some() {
                 commands.entity(cam).remove::<(
                     Atmosphere,
@@ -176,10 +188,21 @@ pub(crate) fn sync_sky(
         .or_insert_with(|| assets.add(medium_of(&terms, body.realm)))
         .clone();
     let same_body = terrain.sky_realm == Some(body.realm);
-    for (cam, present) in &mut cams {
-        match present {
-            // The same body's air: only its centre moves with the eye.
-            Some(mut atmosphere) if same_body => atmosphere.planet_center = planet_center,
+    // ★ THE LOOKUP MODE'S REACH (design §6, S5): the engine's table of the air in front of the
+    // ground covers a fixed distance (32 km by default) and repeats its last value beyond it, so
+    // it is set PER FRAME to the drawn radius — the table reaches as far as the drawn ground. The
+    // stamp states it; the measurement judges the mode.
+    let lut_far_m = terrain.stamp.as_ref().map_or(
+        AtmosphereSettings::default().aerial_view_lut_max_distance,
+        |s| s.drawn_radius_m as f32,
+    );
+    for (cam, present, settings) in &mut cams {
+        match (present, settings) {
+            // The same body's air: only its centre and the table's reach move with the eye.
+            (Some(mut atmosphere), Some(mut settings)) if same_body => {
+                atmosphere.planet_center = planet_center;
+                settings.aerial_view_lut_max_distance = lut_far_m;
+            }
             _ => {
                 commands.entity(cam).insert((
                     Atmosphere {
@@ -195,6 +218,7 @@ pub(crate) fn sync_sky(
                         } else {
                             AtmosphereMode::LookupTexture
                         },
+                        aerial_view_lut_max_distance: lut_far_m,
                         ..default()
                     },
                     AtmosphereEnvironmentMapLight {
@@ -235,6 +259,7 @@ pub(crate) fn sync_sky(
             top_m: terms.top_radius_m,
             eye_r_m,
             raymarched: config.raymarched,
+            lut_far_m: f64::from(lut_far_m),
             flat: config.flat,
             sun_disk_deg: disk.map_or(0.0, |a| f64::from(a).to_degrees()),
             rayleigh_ratio: terms.rayleigh_550_per_m / laws::EARTH_RAYLEIGH_550_PER_M,

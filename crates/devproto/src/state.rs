@@ -803,6 +803,9 @@ pub struct DevSkyStamp {
     pub top_m: f64,
     pub eye_r_m: f64,
     pub raymarched: bool,
+    /// The lookup mode's far distance for the air in front of the ground, metres (S5): the drawn
+    /// radius, set per frame, so the table reaches as far as the drawn ground.
+    pub lut_far_m: f64,
     pub flat: bool,
     pub sun_disk_deg: f64,
     pub rayleigh_ratio: f64,
