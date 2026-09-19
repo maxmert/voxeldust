@@ -4035,6 +4035,7 @@ fn freshest_session_confirmed_maxes_over_active_and_selffenced() {
         Session {
             sky_held: None,
             sky_parts_sent: 0,
+            artifact_held: std::collections::BTreeMap::new(),
             client: CLIENT,
             account: AccountId(5),
             fence: Fence(1),
@@ -4121,6 +4122,7 @@ fn one_active_session() -> (GatewaySessions, SessionId, OutboundBox) {
         Session {
             sky_held: None,
             sky_parts_sent: 0,
+            artifact_held: std::collections::BTreeMap::new(),
             client: CLIENT,
             account: AccountId(5),
             fence: Fence(1),
@@ -4378,6 +4380,7 @@ fn sweep_keeps_a_shared_reverse_index_entry_with_a_surviving_subscriber() {
         Session {
             sky_held: None,
             sky_parts_sent: 0,
+            artifact_held: std::collections::BTreeMap::new(),
             client: NodeId(101),
             account: AccountId(6),
             fence: Fence(1),
@@ -5453,6 +5456,7 @@ fn active_session() -> Session {
     Session {
         sky_held: None,
         sky_parts_sent: 0,
+        artifact_held: std::collections::BTreeMap::new(),
         client: CLIENT,
         account: AccountId(5),
         fence: Fence(1),
@@ -10841,6 +10845,7 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
         let mut session = Session {
             sky_held: None,
             sky_parts_sent: 0,
+            artifact_held: std::collections::BTreeMap::new(),
             client: CLIENT,
             account: AccountId(i as u128),
             fence: Fence(1),
@@ -11635,4 +11640,122 @@ fn the_planted_world_arms_are_counted_at_the_gateway_and_forwarded_nowhere() {
         }),
         "no action reaches a shard before slice 10 builds the forward"
     );
+}
+
+/// ★ THE ARTIFACT SHIP AT THE GATEWAY (slice 8c stage C4c; the owner's ruling of 2026-09-19): a
+/// shard's `BulkFor` to the sessions it NAMES is relayed to each Active session's client as one
+/// `ServerControlMsg::ArtifactPart` carrying the bytes unread; a name that is no session is counted;
+/// a stale realm fence, a session under minor 32, an empty audience and the window-holder audience
+/// are counted and relay nothing; the client's `ArtifactHeld` is recorded on its session.
+#[test]
+fn a_shards_bulk_for_named_sessions_is_relayed_as_artifact_parts() {
+    use vd_wire::session_flow::BulkAudience;
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login();
+    let bulk = |fence: Fence, audience: BulkAudience| {
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::BulkFor {
+                realm_fence: fence,
+                audience,
+                bytes: vec![3, 1, 2],
+            },
+        )
+    };
+    let parts_to_client = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<Vec<u8>> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == CLIENT)
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<ServerControlMsg>(b) {
+                    Ok(ServerControlMsg::ArtifactPart { bytes }) => Some(bytes),
+                    _ => None,
+                },
+            )
+            .collect()
+    };
+    // The named session and a name that is nobody: one part out, one count.
+    let sent = rig.tick(vec![bulk(
+        Fence(1),
+        BulkAudience::Sessions(vec![sid, SessionId(999)]),
+    )]);
+    assert_eq!(parts_to_client(&sent), vec![vec![3, 1, 2]]);
+    {
+        let stats = rig.world.resource::<GatewayStats>();
+        assert_eq!(stats.artifact_parts_relayed, 1);
+        assert_eq!(stats.bulk_for_unrouted, 1);
+    }
+    // A stale fence (the sub accepted Fence(1)), an empty audience, the window holders: nothing.
+    let sent = rig.tick(vec![
+        bulk(Fence(0), BulkAudience::Sessions(vec![sid])),
+        bulk(Fence(1), BulkAudience::Sessions(vec![])),
+        bulk(
+            Fence(1),
+            BulkAudience::WindowHolders(vd_wire::session_flow::WindowId(1)),
+        ),
+    ]);
+    assert!(parts_to_client(&sent).is_empty());
+    {
+        let stats = rig.world.resource::<GatewayStats>();
+        assert_eq!(stats.artifact_parts_relayed, 1);
+        assert_eq!(stats.bulk_for_unrouted, 4);
+    }
+    // A session negotiated under minor 32 never sees the arm.
+    rig.world
+        .resource_mut::<GatewaySessions>()
+        .by_session
+        .get_mut(&sid)
+        .expect("the session")
+        .negotiated_minor = 31;
+    let sent = rig.tick(vec![bulk(Fence(1), BulkAudience::Sessions(vec![sid]))]);
+    assert!(parts_to_client(&sent).is_empty());
+    assert_eq!(rig.world.resource::<GatewayStats>().bulk_for_unrouted, 5);
+    rig.world
+        .resource_mut::<GatewaySessions>()
+        .by_session
+        .get_mut(&sid)
+        .expect("the session")
+        .negotiated_minor = vd_wire::version::PROTO_MINOR;
+    // A session that is not Active (its phase forced back) is skipped and counted.
+    let phase = std::mem::replace(
+        &mut rig
+            .world
+            .resource_mut::<GatewaySessions>()
+            .by_session
+            .get_mut(&sid)
+            .expect("the session")
+            .phase,
+        SessionPhase::AwaitingDirectory,
+    );
+    let sent = rig.tick(vec![bulk(Fence(1), BulkAudience::Sessions(vec![sid]))]);
+    assert!(parts_to_client(&sent).is_empty());
+    assert_eq!(rig.world.resource::<GatewayStats>().bulk_for_unrouted, 6);
+    rig.world
+        .resource_mut::<GatewaySessions>()
+        .by_session
+        .get_mut(&sid)
+        .expect("the session")
+        .phase = phase;
+    let sent = rig.tick(vec![bulk(Fence(2), BulkAudience::Sessions(vec![sid]))]);
+    assert_eq!(parts_to_client(&sent).len(), 1);
+    assert_eq!(
+        rig.world.resource::<GatewayStats>().artifact_parts_relayed,
+        2
+    );
+    // The client states what it holds; the session records it.
+    let _ = rig.tick(vec![wire(
+        CLIENT,
+        MsgClass::Control,
+        &ClientControlMsg::ArtifactHeld {
+            realm: RealmId::Planet(7),
+            digest: [11, 22],
+        },
+    )]);
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().by_session[&sid]
+            .artifact_held
+            .get(&RealmId::Planet(7)),
+        Some(&[11, 22])
+    );
+    assert_eq!(rig.world.resource::<GatewayStats>().artifact_held_stated, 1);
 }

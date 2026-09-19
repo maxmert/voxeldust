@@ -61,7 +61,7 @@ fn main() -> ExitCode {
         let start = Instant::now();
         let mut verts = 0;
         for _ in 0..ROUNDS {
-            let samples = sample_box(&body, key).expect("in the ladder");
+            let samples = sample_box(&body, None, key).expect("in the ladder");
             verts = extract(&samples).vertices.len();
         }
         let extract_ms = ms(start, ROUNDS);
@@ -70,26 +70,26 @@ fn main() -> ExitCode {
         let start = Instant::now();
         let mut parent_bytes = 0;
         for _ in 0..ROUNDS {
-            parent_bytes = ParentMesh::build(&body, parents[0]).map_or(0, |m| m.bytes());
+            parent_bytes = ParentMesh::build(&body, None, parents[0]).map_or(0, |m| m.bytes());
         }
         let parent_ms = ms(start, ROUNDS);
         // 3. The whole build, WARM: every parent in the cache.
         let warm = ParentCache::default();
         for p in &parents {
-            if let Some(m) = ParentMesh::build(&body, *p) {
+            if let Some(m) = ParentMesh::build(&body, None, *p) {
                 warm.insert(realm, *p, Arc::new(m));
             }
         }
         let start = Instant::now();
         for _ in 0..ROUNDS {
-            let _ = geometry_with(&body, realm, key, &warm);
+            let _ = geometry_with(&body, None, realm, key, &warm);
         }
         let warm_ms = ms(start, ROUNDS);
         // 4. The whole build, COLD: a fresh cache each round, every parent a miss.
         let start = Instant::now();
         for _ in 0..ROUNDS {
             let cold = ParentCache::default();
-            let _ = geometry_with(&body, realm, key, &cold);
+            let _ = geometry_with(&body, None, realm, key, &cold);
         }
         let cold_ms = ms(start, ROUNDS);
         println!(

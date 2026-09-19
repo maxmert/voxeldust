@@ -38,6 +38,7 @@ pub mod bend;
 pub mod cell;
 pub mod gi;
 pub mod height;
+pub mod macro_field;
 pub mod noise;
 pub mod plan;
 pub mod rng;

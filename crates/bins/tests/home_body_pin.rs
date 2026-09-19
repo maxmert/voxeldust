@@ -10,6 +10,65 @@ use vd_physics::worldgen::HOME_SEED;
 const HOME_PLANET_SEED: u64 = 4_030_111_653_607_004_909;
 const HOME_PLANET_RADIUS_BITS: u64 = 0x4158_4d6e_d403_3833;
 
+use vd_bins::solve_words_of;
+
+/// ★ THE SOLVE WORDS' CROSS-PIN (slice 8c stage C3): every charter word the solve reads, for the
+/// home planet and its moon, is the census's own; and the generator's flag bits are the charter's.
+#[test]
+fn the_generators_solve_words_are_the_censuss_charter() {
+    let config =
+        vd_physics::worldgen::UniverseConfig::world(vd_bins::DEV.move_speed, vd_bins::DEV.tick_dt);
+    let held = std::collections::BTreeSet::from([vd_core::worldgen::HOME_SYSTEM]);
+    let lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+    let home = vd_physics::worldgen::body_charter_in_subtree(
+        HOME_SEED,
+        &config,
+        &held,
+        &lineage,
+        vd_core::worldgen::HOME_PLANET,
+    )
+    .expect("the home planet has a charter");
+    assert_eq!(
+        solve_words_of(&home),
+        vd_terrain::home::home_solve_words(),
+        "the home planet's charter moved: {home:?}"
+    );
+    let moon_held = std::collections::BTreeSet::from([vd_core::worldgen::HOME_PLANET]);
+    let moon_lineage = std::collections::BTreeSet::from([
+        vd_core::worldgen::GALAXY,
+        vd_core::worldgen::HOME_SYSTEM,
+    ]);
+    let moon = vd_physics::worldgen::body_charter_in_subtree(
+        HOME_SEED,
+        &config,
+        &moon_held,
+        &moon_lineage,
+        vd_core::pose::RealmId::Planet(vd_terrain::home::HOME_MOON_SEED),
+    )
+    .expect("the moon has a charter");
+    assert_eq!(
+        solve_words_of(&moon),
+        vd_terrain::home::home_moon_solve_words(),
+        "the moon's charter moved: {moon:?}"
+    );
+    assert_eq!(
+        vd_terrain::solve::WORD_FLAG_HAS_AIR,
+        vd_core::look::CHARTER_FLAG_HAS_AIR
+    );
+    assert_eq!(
+        vd_terrain::solve::WORD_FLAG_SOLID_SURFACE,
+        vd_core::look::CHARTER_FLAG_SOLID_SURFACE
+    );
+    assert_eq!(
+        vd_terrain::solve::WORD_FLAG_TIDALLY_LOCKED,
+        vd_core::look::CHARTER_FLAG_TIDALLY_LOCKED
+    );
+    assert_eq!(
+        vd_terrain::solve::WORD_FLAG_HAS_SEA,
+        vd_core::look::CHARTER_FLAG_HAS_SEA
+    );
+}
+
 /// ★ THE HOME MOON's CROSS-PIN (the landform arc, slice 8c stage C1): the generator states the
 /// home planet's moon as literals so the solve's driver test runs on a REAL SMALL BODY OF THE
 /// WORLD; this proves the forest still draws exactly those numbers — the seed, the bits of the
@@ -145,10 +204,13 @@ fn the_forests_home_planet_is_the_golden_gates_home_planet() {
     );
     let identity = vd_bins::world_identity(HOME_SEED).expect("a world identity");
     assert_eq!(identity.declared, vd_terrain::declared_world_tag(HOME_SEED));
+    // ★ THROUGH THE GOLDEN FIELDS (slice 8c stage C4c): the composition root's identity is the
+    // generator's own pinned word, read through the artifact's fields in the build.
     assert_eq!(
         Some(identity.measured),
-        vd_terrain::golden_self_check(&body)
+        vd_terrain::golden_self_check(&body, Some(&vd_terrain::home::home_golden_fields()))
     );
+    assert_eq!(identity.measured, vd_terrain::home::HOME_IDENTITY_MEASURED);
     // The generator's own literals are the same two numbers (SL5: one world, stated once per crate,
     // tied here).
     assert_eq!(body.seed(), vd_terrain::home::HOME_PLANET_SEED);

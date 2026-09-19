@@ -112,7 +112,7 @@ fn table() -> Vec<String> {
                 y,
                 z,
             };
-            let samples = sample_box(&body, key).expect("a home planet chunk");
+            let samples = sample_box(&body, None, key).expect("a home planet chunk");
             let d = mesh_digest(&extract(&samples));
             lines.push(format!(
                 "{} {rung} {x} {y} {z} {:016x} {:016x}",
@@ -123,7 +123,7 @@ fn table() -> Vec<String> {
     }
     // The composed row.
     let key = composed_key();
-    let mut samples = sample_box(&body, key).expect("the composed chunk");
+    let mut samples = sample_box(&body, None, key).expect("the composed chunk");
     assert_eq!(compose(&mut samples, &composed_rows()), 0);
     let d = mesh_digest(&extract(&samples));
     lines.push(format!(
@@ -206,7 +206,7 @@ fn every_golden_surface_of_the_home_planet_digests_to_its_committed_triangles() 
 fn the_composed_surface_differs_from_the_plain_one_and_the_rows_are_re_ranked() {
     let body = home_planet();
     let key = composed_key();
-    let plain = sample_box(&body, key).expect("the chunk");
+    let plain = sample_box(&body, None, key).expect("the chunk");
     let mut composed = plain.clone();
     assert_eq!(compose(&mut composed, &composed_rows()), 0);
     assert_ne!(

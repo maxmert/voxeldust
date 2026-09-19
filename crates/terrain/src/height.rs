@@ -53,6 +53,43 @@ pub fn height_m(body: &BodyDefinition, dir: [f64; 3], rung: u8) -> f64 {
     metres_of_q28(height(body, direction_of_unit(dir), rung))
 }
 
+/// ★ THE HEIGHT WITH THE MACRO FIELD (slice 8c stage C4c): the surface's radius in metres along a
+/// float direction at a rung when the host holds an artifact — `Z` read off the field at the rung-0
+/// cell the direction falls in (within half a metre sideways, which the smooth macro field cannot
+/// tell apart), plus the FINE octaves the rung keeps, then the bench: the column kernel's own sum
+/// (`vd_recipe::plan::column_surface_from`) along a direction that is nobody's cell centre. `None`
+/// where the field holds no row for the stencil (the coarser rung stands, ruling F9).
+///
+/// The client's geomorph reads this for a vertex with no parent triangle on its radial, so the
+/// vertex morphs toward the artifact's coarser surface and never toward the recipe's own relief,
+/// which the artifact replaced.
+#[must_use]
+pub fn height_field_m(
+    body: &BodyDefinition,
+    field: &dyn crate::artifact::ZField,
+    dir: [f64; 3],
+    rung: u8,
+) -> Option<f64> {
+    let lattice = body.macro_lattice()?.coarser(field.level())?;
+    let face = vd_seed::bend::face_of(dir);
+    let (t, s) = vd_seed::bend::face_coords(face, dir);
+    let n0 = body.ladder().cells_per_edge(0);
+    let i = vd_seed::ladder::index_of(vd_seed::bend::unbend(t), n0);
+    let j = vd_seed::ladder::index_of(vd_seed::bend::unbend(s), n0);
+    let z = crate::artifact::sample_z(&lattice, field, face, 0, i, j)?;
+    let relief = vd_recipe::height::relief_of_table_from(
+        body.octave_table(),
+        body.first_fine(),
+        body.octaves_at(rung).len(),
+        direction_of_unit(dir),
+        body.roughness(),
+    );
+    Some(metres_of_q28(terrace(
+        &body.terrace_at(rung),
+        body.radius + z + relief,
+    )))
+}
+
 /// ★ THE PER-COLUMN ROUGHNESS FACTOR as a real number in `[M_MIN, 1]`, for a host outside the recipe
 /// — the slope histogram's instrument reads it to say which columns are a PLAIN and which a RANGE
 /// (slice 8a stage 3, measurement M-C). The shape is the recipe's own kernel; this crate only names

@@ -321,7 +321,15 @@ pub const PROTO_MAJOR: u16 = 1;
 /// stating `WorldAction` or `HelloWorld` to a minor-30 gateway) has no gate in this build because the
 /// client tracks no negotiated minor yet — slice 5 lands that with the first client sender. TODAY a
 /// variant a peer predates lands on that peer's `undecodable` counter, and nothing else happens.
-pub const PROTO_MINOR: u16 = 31;
+/// **32** — THE ARTIFACT SHIP (the landform arc, slice 8c stage C4c; owner-approved 2026-09-19:
+/// the solve runs once on the server, its artifact is saved in the shard's db and shipped to every
+/// client — the ONE SL6 row of `slice_8c_design.md` §8, approved): `BulkMsg::ArtifactHead` (disc 3),
+/// `ArtifactPyramid` (disc 4) and `ArtifactTile` (disc 5), the three shapes a shard's `BulkFor` carries;
+/// `ServerControlMsg::ArtifactPart` (disc 19), the gateway's relay of those bytes to one session on the
+/// Control class with the sky's pacing; `ClientControlMsg::ArtifactHeld` (disc 8), the client's word
+/// that it holds a realm's head and pyramid at a digest. Every one is APPENDED, so the floor does not
+/// move. The parts ride Control until the diff lane (slice 10) builds the client's bulk receiver.
+pub const PROTO_MINOR: u16 = 32;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -579,8 +587,11 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 31,
-            "minor 31 is THE VOXEL WIRE PLANT (owner-approved 2026-09-07, ruling V8): every voxel shape \
+            PROTO_MINOR, 32,
+            "minor 32 is THE ARTIFACT SHIP (owner ruling 2026-09-19, slice 8c C4c): ArtifactHead (disc 3), \
+             ArtifactPyramid (disc 4), ArtifactTile (disc 5) on BulkMsg, ArtifactPart (disc 19) on \
+             ServerControlMsg, ArtifactHeld (disc 8) on ClientControlMsg; \
+             minor 31 is THE VOXEL WIRE PLANT (owner-approved 2026-09-07, ruling V8): every voxel shape \
              appended with no producer — WorldAction, HelloWorld, ActionRefused, WorldRefused, ChunkRows, \
              ChunkManifest, BulkFor, SessionAction, MsgClass::Bulk, ChildFelt, TAG_SURFACE, TAG_BODIES; \
              minor 30 is THE INTEREST BODY (D-9, owner-approved 2026-09-05): FrameFor (disc 14) and \
@@ -686,7 +697,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.31");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.32");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is

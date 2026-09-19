@@ -137,6 +137,21 @@ pub enum DevTransferView {
     None,
 }
 
+/// ★ WHAT THE CLIENT HOLDS OF THE REALMS' ARTIFACTS (slice 8c stage C4c).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevArtifacts {
+    /// Realms whose artifact head arrived.
+    pub realms: u64,
+    /// Of those, realms whose whole pyramid is here (the far view is whole).
+    pub whole: u64,
+    /// Pyramid levels received whole, summed over realms.
+    pub levels: u64,
+    /// Tiles received, summed over realms.
+    pub tiles: u64,
+    /// Parts refused: no head yet, a wrong shape, or not an artifact's part at all.
+    pub refused: u64,
+}
+
 /// The decoded, delivered client state — wire truth, the agent's diagnosis surface.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DevState {
@@ -204,6 +219,11 @@ pub struct DevState {
     /// client honest about what it RECEIVED. What it DREW is [`DevState::stars_drawn`], and the two
     /// disagree exactly when the sky is broken — which is the reason the second field exists.
     pub sky: Option<(u64, u64)>,
+    /// ★ THE ARTIFACTS THE CLIENT HOLDS (slice 8c stage C4c): how many realms' heads arrived, how
+    /// many of those pyramids are whole, the levels and tiles received, and the parts refused by
+    /// name — so a flight can prove a client RECEIVED a planet's shape, and what it did not.
+    #[serde(default)]
+    pub artifacts: DevArtifacts,
     /// ★ THE STARS ON SCREEN (owner ruling 2026-09-02 R9 step 1): how many points of light the
     /// renderer's star cloud holds RIGHT NOW. Zero while nothing is drawn.
     ///
@@ -357,6 +377,7 @@ pub(crate) mod tests {
             }],
             origin: Some(("System(7)".to_owned(), 1)),
             sky: None,
+            artifacts: DevArtifacts::default(),
             stars_drawn: 0,
             terrain_chunks_drawn: 0,
             terrain_chunks_pending: 0,

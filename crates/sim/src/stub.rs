@@ -29,6 +29,7 @@
 //! this was one file.
 
 mod aoi;
+pub mod artifact_ship;
 pub mod built_store;
 mod config;
 mod containment;

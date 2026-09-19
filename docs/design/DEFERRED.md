@@ -8668,3 +8668,115 @@ item below is a stated interim of that core, named here so no picture is judged 
   floor: fine). WHEN: C5's sea gate reads the loaded minimum against `Ladder::floor_m` and turns red past it.
 - **THE TRANSFORM BAND** (`TRANSFORM_SHARE = 0.1`) and **the age's halving** (`1 − age/2`) are stated shape
   knobs of the belt law, not physical facts; both are part of the world tag once the artifact lands.
+
+**C3 THE SOLVE (built 2026-09-19: `climate.rs`, `craters.rs`, the passes in `solve.rs`) — its stated knobs and interims:**
+- **THE CLIMATE's stated knobs (not laws):** the moist share of the dry adiabat (`LAPSE_MOIST_SHARE 0.666`,
+  Earth's 6.5 over 9.76 K/km); the Held–Hou `ΔH 0.388` (a reverse fit to Earth's 30°; misses Mars); the
+  belt's rising and sinking shares (1.0 / 0.09, 05 §5.4's 2 000 / 100 mm anchor) and the bump shape of the
+  belt, the cell position linear in the SINE of latitude; the orographic gain 8 and the lift's clamp
+  [0.1, 4] (Smith 2003's linear model, the Cascades: a kilometre over 8 km doubles the rain); the ELA's dry
+  offset 1 200 m at 2 000 mm/yr (the Andes); Earth's potential evaporation 1 000 mm/yr; the diffusion `D`
+  scaled by the surface pressure; a PROGRADE spin assumed (the charter carries no spin sign — owed word);
+  `sea_z` is NOT read (no continental-interior dryness beyond the rain shadow: a stated limit of the O(1) form).
+- **THE CRATERS' stated knobs:** `CRATER_MIN_NODES 2` (smaller craters are 8f's); no crater wider than the
+  radius; the complex profile's floor, peak and peak-height shares (0.5 / 0.2 / 0.1); the ejecta's reach one
+  radius past the rim. The surface age is the SYSTEM's age: tectonic renewal is not modelled, so an active
+  planet reaches crater saturation and the sweep is its only eraser. A crater is CLIPPED at the envelope.
+- **THE PASSES' stated knobs:** `SMOOTH_PASSES 2` (the rebound spreads over about one coarse node, the
+  flexural parameter) and the NEAREST-PARENT prolongation (C4's C1 interpolation is the artifact read's, not
+  the rebound's); the talus's half fraction and its two tangents (35° dry, 25° wet-vegetated); the ice's
+  cut capped at the ice's own thickness and integrated over Earth's Quaternary (`GLACIAL_EPOCH_YR`, a
+  stated history under T9); the coast band from Earth's 10 m storm wave; `AGE_GATE_MIN_NODES 100`.
+- **THE ENVELOPE BINDS BY THE LADDER's BAND, not the relief draw** (`solve::envelope_steps`): on the home
+  moon the relief the seed drew (14 487 m) stands over the band the spectrum sizes (12 385 m), so the band
+  is the bound. C4 subtracts the fine octaves' sum from it when `Z` replaces the coarse octaves.
+- **NO ICE ON A DRY BODY** is a guard in the driver (`water_km3 == 0` puts the line over every node): the
+  climate module's ELA on a cold dry body reads "always frozen"; the guard is the law of 03 §4.9, stated
+  in the driver rather than the module. WHEN: C4 folds it into the climate's ELA.
+- **G-AGE's CALIBRATION of `K0`** is READ by the bench (the median hypsometric integral against Strahler's
+  band, `VD_BENCH_K0_SCAN`), not yet BOUND: the constant stays the literature's middle until the scan says
+  otherwise — see the bench report's C3 row.
+- ★ **ASK 2 RULED (owner, 2026-09-19): ONCE ON THE SERVER, SAVED IN THE SHARD'S DB, SHIPPED TO ALL
+  CLIENTS IN TILES** (the design's §13). The SL6 row is APPROVED: one new payload kind — the artifact's
+  pyramid once, then node-row tiles on demand, each digested. WHEN: C4.
+- **G-AGE IS A READING, NOT A CALIBRATION (MEASURED 2026-09-19, `slice_8c_bench.md` §9.3):** the median
+  hypsometric integral of the home planet's hundred-node basins reads 0.71–0.73 at `K0` × 0.001, 0.01, 0.1,
+  1 and 10. On an 8 km lattice a hundred-node basin is a platform with a few incisions and its integral
+  reads the platform, not the trunk. `K0` stays Stock & Montgomery's middle. WHEN: C4 or later — the
+  convergence measurement M12 (the same age at twice the passes) and a relief-against-age statistic over
+  the belts; until then no picture is judged on the rivers' depth.
+- **THE COST'S TWO BIG ROWS (MEASURED):** the climate's 930 ns a node (8.2 s a recompute on the home
+  planet, four in the schedule) and the craters' 11 s (145 000 breadth-first stamps). The climate's
+  latitude-only rows can be tabulated once per body; the craters' stamps can reach the nodes by the
+  lattice's block rather than a walk. Neither is on any player's tick; both bound the wake-ahead lead and
+  the artifact's ship (ask 2 answered SHIP on the 57 s).
+- **THE TALUS'S FIRST FORM DIVERGED** (half the SUM of the excess over eight neighbours; the field grew a
+  hundred-thousandfold in eight passes) and was cured to half the LARGEST excess, MEASURED to halve every
+  pass. 03 §4.8's claim that the proportional split "cannot overshoot" was wrong as written; the ledger
+  keeps the correction so the design document is read with it.
+
+**C4a THE READ and C4b THE STORE (built 2026-09-19; the ruling: once on the server, saved in the shard's db, shipped to all clients):**
+- **THE RUNTIME STAYS ON THE OLD SHAPE UNTIL C4c.** Every chunk entry gained the field (`Option<&dyn ZField>`), and
+  every runtime caller passes `None` — the shard and the client build the recipe's coarse relief, as before — so the
+  two hosts hold ONE shape until the tiles cross (C4c). `None` is a stated test fixture, never a shipped path after
+  C4c; the golden tables did not move (MACRO_NODE_M 8 224 → 8 192 moved no byte on the home planet, MEASURED by
+  `just terrain-pin`).
+- **THE CORNER BLEND IS A CLAMP** (`artifact::node_at`): within two nodes of a cube corner the read's missing
+  quadrant takes the face's nearest node — MEASURED on the moon as a step of about 160 m over a metre across the
+  seam inside the blend, against under 2 m outside it. The quintic-fade blend of 03 §5.4 is owed; gate
+  G-MACRO-CORNER is the seam test's corner half and asserts only that the step stays under the relief.
+- **THE GPU PATH HAS NO `Z`.** `vd_terrain::gpu::plan` builds the card's words without the field; a card chunk under
+  an artifact differs from the CPU's, so the runtime self-check gate (ruling F9) parks the card builder until the
+  recipe-gpu kernel carries the Catmull-Rom read and a node buffer. WHEN: after C4c, measured by `just gpu-drift`.
+- **THE HOME PLANET's ARTIFACT IS 85.8 MB** (8 871 936 rows of nine bytes and six pyramid levels; the design's 22 MB
+  was on the stale lattice); its digest is pinned (`crates/bins/tests/home_artifact_pin.rs`, `just artifact-pin`,
+  71 s of one core in release) and the shard's boot refuses a store whose rows lie. The other targets' legs of
+  G-DRIFT are UNMEASURED until the legs script runs the pin.
+- **THE SELF-CHECK's TWO TOP-RUNG KEYS** read the whole face's nodes under an artifact; the sparse pin for the
+  world hello (the eight golden chunks' rows in the build) lands with C4c's switch to `Some`, with the two keys
+  moved to a mid rung and `GENERATOR_VERSION` bumped in the same step.
+- **THE ARTIFACT WORKER IS THE COMPOSITION ROOT's** (`vd_bins::artifact_worker`, a thread and a channel in the
+  binary, inline in tests): the sim never names the generator. The ECS holds no artifact yet; C4c's tile source
+  is the injected provider the window lane reads.
+
+**C4c THE SHIP (built 2026-09-19; wire minor 32; the sim's emitter, the gateway's relay, the client's book):**
+- **THE SHIP REACHES OCCUPANTS ONLY.** The realm's shard ships the head, the pyramid's parts and the tiles under the
+  pose to each session whose dot it holds (`vd_sim::stub::artifact_ship`, `BulkAudience::Sessions`). A client that
+  sees the planet FROM ITS PARENT (a hull in the star system's frame, the far view) is a WINDOW HOLDER, and that
+  audience has no producer: the gateway counts it (`bulk_for_unrouted`) and the client draws that realm from the
+  recipe's own coarse relief (`field: None`) until it is inside. The step from the recipe's shape to the artifact's
+  as the pilot crosses INTO the planet's realm is a visible pop — a seam (SL8). WHEN: the window-holder ship —
+  the head and the pyramid to every session whose window shows the realm, paced against `Session::artifact_held`
+  (the field exists, nothing reads it yet) — before the first owner look at a planet from orbit.
+- **THE RECIPE-TO-ARTIFACT REBUILD AT LOGIN.** A client draws a realm the moment its surface statement arrives, before
+  the head; when the head lands, the chunk lane drops that realm's chunks and parents (`ChunkCounters::artifact_rebuilds`)
+  and rebuilds on the field. Once, at login, a visible change of shape. The cure is for the realm's surface
+  statement to say an artifact FOLLOWS, so the lane waits; that is a look-bag word (the realm's own statement, not
+  a crossing) and is owed with the window-holder ship.
+- **THE PARTS RIDE THE CONTROL CLASS** as `ServerControlMsg::ArtifactPart` with the sky's pacing (four tiles and eight
+  pyramid parts a tick a session): the client's bulk receiver on `MsgClass::Bulk` is slice 10's (the diff lane). The
+  head and the pyramid are shipped ONCE per session per realm by the shard's own record (`ArtifactShipped`); a session
+  that leaves and returns is served again. The client's `ArtifactHeld` statement is recorded on the gateway's session
+  and read by nothing yet.
+- **THE TILES REACH ONE FACE.** `ArtifactTiles::tiles_under` names the tiles within the interest side on the face
+  the occupant's direction falls on; a tile across a cube edge arrives when the occupant crosses onto that face. A
+  fine chunk at the seam whose stencil reads the partner face's tile WAITS for it (counted as `awaiting_artifact`)
+  while the coarser rung stands. WHEN: the seam ring, with the window-holder ship.
+- **THE CARD TAKES NO ARTIFACT JOB** (`card_slot`): a chunk that reads a field is the CPU builders' alone, because the
+  card holds no `Z` (C4a's row above). Under an artifact the card builds the far view's recipe chunks only — of
+  realms that shipped nothing — so on the home planet it idles. WHEN: the recipe-gpu node buffer.
+- **THE WORLD IDENTITY READS THE GOLDEN FIELDS** (`vd_terrain::artifact::GoldenFields`, the literal
+  `crates/terrain/tests/golden_home_z.txt`: the home artifact's rows under the six rung-0 self-check keys and its
+  coarsest pyramid level, which the two top-rung keys read the way the far view does). Both hosts fold the eight
+  chunks through the artifact's read at boot with no artifact in hand; the measured half is pinned
+  (`home::HOME_IDENTITY_MEASURED`), `GENERATOR_VERSION` is 5, and the artifact pin proves the literals are the
+  solve's own rows. Re-record with `just golden-z-record` after a deliberate change of the solve. The chunk golden
+  tables did not move (they pin the recipe's own relief, `field: None`, which the artifact did not touch). The other
+  targets' legs of G-DRIFT stay UNMEASURED until the legs script runs the artifact pin.
+- **THE BOOK IS BOUNDED BY THE DRAWN SET.** A realm that leaves the drawn set (a delta's `removed`) takes its
+  artifact with it; the head and the pyramid come again from its shard on return. The tile cache is NOT saved through
+  the client's store (the design's §14 said it would be, like the star catalogue): a re-login re-ships the tiles
+  under the boots, four a tick. WHEN: the client-side artifact store, with slice 10's bulk receiver.
+- **THE INTEREST SIDE IS THE TILE RADIUS, UNMEASURED against the finest ring's horizon**: a rung-9 chunk (16 km) at
+  the horizon from a low flight may read tiles the shard has not shipped; it waits and rung 10 (the pyramid)
+  stands. Measured on the first window flight; the flight's numbers go in the bench report's C4c row.

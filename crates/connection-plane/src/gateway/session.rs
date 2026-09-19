@@ -314,6 +314,12 @@ pub(crate) struct Session {
     ///
     /// Reset to zero when the sky's generation changes, because a new sky is a new transfer.
     pub(crate) sky_parts_sent: u32,
+    /// ★ THE ARTIFACTS THIS SESSION HOLDS (slice 8c stage C4c): per realm, the digest the client
+    /// last stated it holds the head and pyramid at — the sky's `sky_held` for a planet's far
+    /// shape. Nothing reads it yet: the parts a shard ships to a NAMED session are relayed as they
+    /// come (the shard paces them once per session), and the window-holder path that would pace
+    /// against this mark is owed with the far view.
+    pub(crate) artifact_held: std::collections::BTreeMap<vd_core::pose::RealmId, [u64; 2]>,
     /// RLM 5f-3d — the STANDING home-realm identity of a dynamic session: set once at the committed lease
     /// and NEVER cleared, so it outlives the `AwaitingHomeRealm` phase payload. Two live readers: the
     /// bounded-TTL Close diagnostic (which can fire in `AwaitingAttach`, where the phase payload is gone —

@@ -56,6 +56,10 @@ pub struct RenderSnapshot {
     /// smaller galaxy, it is a galaxy with holes, and the holes look exactly like stars that are not
     /// there.
     sky: Option<Arc<SkyDraw>>,
+    /// ★ THE ARTIFACTS THE CLIENT HOLDS (slice 8c stage C4c) — per realm, the head, the pyramid
+    /// levels that are whole and the tiles, by pointer: the core replaces the book copy-on-write
+    /// as parts land, and a snapshot's clone is a pointer bump.
+    artifacts: Arc<crate::artifact_book::ArtifactBook>,
     /// THE REALM THE SESSION IS STANDING IN (S11) — the composed scene's own origin.
     ///
     /// Carried so the renderer can find the observer's ANCHOR in the star catalogue. It adds no wire
@@ -289,6 +293,7 @@ impl RenderSnapshot {
             scene,
             realm_view,
             sky: None,
+            artifacts: Arc::default(),
             origin: None,
             sky_anchor: None,
             sky_anchor_track: None,
@@ -310,6 +315,31 @@ impl RenderSnapshot {
     #[must_use]
     pub fn sky(&self) -> Option<&Arc<SkyDraw>> {
         self.sky.as_ref()
+    }
+
+    /// The same snapshot, carrying the artifact book the client holds (slice 8c stage C4c).
+    #[must_use]
+    pub fn with_artifacts(
+        mut self,
+        book: Arc<crate::artifact_book::ArtifactBook>,
+    ) -> RenderSnapshot {
+        self.artifacts = book;
+        self
+    }
+
+    /// A realm's artifact as held, if its head arrived.
+    #[must_use]
+    pub fn artifact(
+        &self,
+        realm: vd_core::pose::RealmId,
+    ) -> Option<&crate::artifact_book::ArtifactCache> {
+        self.artifacts.get(realm)
+    }
+
+    /// The whole artifact book.
+    #[must_use]
+    pub fn artifacts(&self) -> &Arc<crate::artifact_book::ArtifactBook> {
+        &self.artifacts
     }
 
     /// The realm the session is standing in — the composed scene's origin.

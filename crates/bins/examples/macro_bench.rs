@@ -30,7 +30,10 @@ use vd_terrain::BodyDefinition;
 use vd_terrain::home::home_moon;
 use vd_terrain::land::{Kind, LandWords, humps, hypsometry, initial_land};
 use vd_terrain::macro_lattice::MacroLattice;
-use vd_terrain::solve::{MacroSolve, Schedule, Z_STEPS_PER_M, solve};
+use vd_terrain::solve::{
+    FACIES_COAST, FACIES_ICE, FACIES_LAKE, FACIES_SEA, MacroSolve, Schedule, SolveWords,
+    Z_STEPS_PER_M, age_gate, solve, solve_full,
+};
 
 /// The node ceiling a body must stand under to be solved by default.
 const DEFAULT_MAX_NODES: usize = 10_000_000;
@@ -132,14 +135,14 @@ fn bench_land(label: &str, body: &BodyDefinition, words: &LandWords, age_yr: u64
     let mut routes = Vec::new();
     let mut since = schedule.flood_every;
     let mut last = Default::default();
-    for _ in 0..schedule.passes {
+    for pass in 0..schedule.passes {
         if since >= schedule.flood_every {
             routes.push(state.route());
             state.accumulate();
             since = 0;
         }
         since += 1;
-        last = state.sweep(gain);
+        last = state.sweep(gain, pass, schedule.passes);
     }
     let t_solve = t.elapsed();
     let r = routes.last().copied().unwrap_or_default();
@@ -158,6 +161,255 @@ fn bench_land(label: &str, body: &BodyDefinition, words: &LandWords, age_yr: u64
         metres(hi),
         last.lowered
     );
+}
+
+/// ★ THE FULL SOLVE's bench (stage C3): the whole schedule — the craters, the climate inside it,
+/// the uplift, the rebound, the talus, the ice, the coast, the envelope — timed as one, with the
+/// gates' readings: G-AGE (the basins' integrals against Strahler's band), the facies shares, the
+/// deposits. `VD_BENCH_K0_SCAN=1` adds the erodibility scan on this body (a tenth, one, ten times
+/// the stated `K0_PER_YR`) so the calibration against the age is a MEASURED choice.
+fn bench_full(label: &str, body: &BodyDefinition, words: &SolveWords) {
+    let schedule = Schedule::standard(words.age_yr);
+    let rss_before = peak_rss_bytes();
+    let t = Instant::now();
+    let Some((state, facies, report)) = solve_full(body, words, schedule) else {
+        return;
+    };
+    let t_full = t.elapsed();
+    let rss = peak_rss_bytes();
+    let n = state.node_count();
+    let total: u128 = state.area.iter().map(|&a| u128::from(a)).sum();
+    let share = |bit: u8| {
+        (0..n)
+            .filter(|&k| facies[k] & bit != 0)
+            .map(|k| u128::from(state.area[k]))
+            .sum::<u128>() as f64
+            / total as f64
+            * 100.0
+    };
+    let (lo, hi) = state.range();
+    let last_route = report.routes.last().copied().unwrap_or_default();
+    let cut: u64 = report.sweeps.iter().map(|s| s.total_cut).sum();
+    let lifted: usize = report.rebounds.iter().map(|r| r.1).sum();
+    let talus_first = report.talus.first().map_or(0, |t| t.1);
+    let talus_last = report.talus.last().map_or(0, |t| t.1);
+    println!(
+        "\n{label} — THE FULL SOLVE (C3): {:.3} s wall on one thread; peak RSS {:.0} MB ({:.1} B/node over \
+         the start); {} craters; {} routings (last: {} outlets, {} lake nodes, {} flat, undrained {}, \
+         cyclic {}); cuts {:.0} m summed over the sweeps; rebounds {} (nodes lifted {}); talus worst \
+         excess {:.1} m first, {:.1} m last; ice: {} nodes, thickest {:.0} m, deepest cut {:.0} m; \
+         envelope: max |z| {:.0} m, scaled {}; coast band {:.1} m; deposits in {} basins",
+        t_full.as_secs_f64(),
+        mb(rss),
+        rss.saturating_sub(rss_before) as f64 / n as f64,
+        report.craters,
+        report.routes.len(),
+        last_route.outlets,
+        last_route.raised,
+        last_route.flat,
+        last_route.undrained,
+        last_route.cyclic,
+        cut as f64 / f64::from(Z_STEPS_PER_M),
+        report.rebounds.len(),
+        lifted,
+        talus_first as f64 / f64::from(Z_STEPS_PER_M),
+        talus_last as f64 / f64::from(Z_STEPS_PER_M),
+        report.ice.0,
+        report.ice.1,
+        metres(report.ice.2),
+        metres(report.envelope.0),
+        report.envelope.1,
+        metres(report.coast_band),
+        report.deposits
+    );
+    println!(
+        "  the shape: relief {:.0}..{:.0} m; facies by area: sea {:.1} %, lake {:.1} %, coast {:.1} %, \
+         ice {:.1} %",
+        metres(lo),
+        metres(hi),
+        share(FACIES_SEA),
+        share(FACIES_LAKE),
+        share(FACIES_COAST),
+        share(FACIES_ICE)
+    );
+    match age_gate(&report.integrals) {
+        Some((median, mature)) => println!(
+            "  G-AGE: {} basins of 100+ land nodes; the median hypsometric integral {:.2} — {}",
+            report.integrals.len(),
+            f64::from(median) / 256.0,
+            if mature {
+                "MATURE (GREEN)"
+            } else {
+                "outside Strahler's maturity band (RED)"
+            }
+        ),
+        None => println!("  G-AGE: no basin of 100+ land nodes to read"),
+    }
+    // THE PHASES ALONE (the generator may not read a clock, so the bench times them): the
+    // climate once, the crater record once, one talus pass, one rebound, the ice once — on the
+    // final state, which holds a routing.
+    {
+        let lattice = MacroLattice::of(body).expect("a lattice");
+        let t = Instant::now();
+        let c = vd_terrain::climate::climate(body, &lattice, words, &state.z, Some(state.sea_z));
+        let t_climate = t.elapsed();
+        let t = Instant::now();
+        let craters = vd_terrain::craters::crater_population(body, &lattice, words);
+        let t_population = t.elapsed();
+        let mut scratch = state.z.clone();
+        let t = Instant::now();
+        vd_terrain::craters::apply_craters(
+            &mut scratch,
+            &lattice,
+            &craters,
+            body.facts().gravity_mm_s2,
+        );
+        let t_apply = t.elapsed();
+        drop(scratch);
+        let mut probe = state.clone();
+        let tan: Vec<u32> = c
+            .aridity_q8
+            .iter()
+            .map(|&a| vd_terrain::solve::tan_repose_q16(a))
+            .collect();
+        let t = Instant::now();
+        probe.talus(&tan);
+        let t_talus = t.elapsed();
+        let t = Instant::now();
+        probe.rebound(vd_terrain::land::flexural_parameter_m(
+            words.elastic_thickness_m,
+            body.facts().gravity_mm_s2,
+        ));
+        let t_rebound = t.elapsed();
+        let t = Instant::now();
+        probe.ice(&c.ela_z, body.facts().gravity_mm_s2);
+        let t_ice = t.elapsed();
+        println!(
+            "  phases alone: climate {:.3} s, crater population {:.3} s ({} craters), craters applied {:.3} s, \
+             one talus pass {:.3} s, one rebound {:.3} s, the ice {:.3} s",
+            t_climate.as_secs_f64(),
+            t_population.as_secs_f64(),
+            craters.len(),
+            t_apply.as_secs_f64(),
+            t_talus.as_secs_f64(),
+            t_rebound.as_secs_f64(),
+            t_ice.as_secs_f64()
+        );
+    }
+    if std::env::var_os("VD_BENCH_K0_SCAN").is_some() {
+        for factor in [0.1, 0.01, 0.001, 10.0] {
+            let scan = Schedule {
+                k0_per_yr: schedule.k0_per_yr * factor,
+                ..schedule
+            };
+            let t = Instant::now();
+            let Some((_, _, r)) = solve_full(body, words, scan) else {
+                continue;
+            };
+            match age_gate(&r.integrals) {
+                Some((median, mature)) => println!(
+                    "  K0 × {factor}: {:.3} s; median integral {:.2} over {} basins — {}",
+                    t.elapsed().as_secs_f64(),
+                    f64::from(median) / 256.0,
+                    r.integrals.len(),
+                    if mature { "mature" } else { "not mature" }
+                ),
+                None => println!("  K0 × {factor}: no basin to read"),
+            }
+        }
+    }
+}
+
+/// ★ THE TRACE (`VD_BENCH_TRACE=1`): the full schedule replayed pass by pass in the open, with the
+/// field's extremes after every step — the instrument that says WHICH pass runs away when the
+/// whole solve does.
+fn bench_trace(label: &str, body: &BodyDefinition, words: &SolveWords) {
+    let schedule = Schedule::standard(words.age_yr);
+    let Some(lattice) = MacroLattice::of(body) else {
+        return;
+    };
+    let land = initial_land(body, &lattice, &words.land());
+    let Some(mut state) = MacroSolve::from_land(body, &land) else {
+        return;
+    };
+    let gravity = body.facts().gravity_mm_s2;
+    let extremes = |state: &MacroSolve, what: &str| {
+        let (lo, hi) = state.range();
+        println!(
+            "  trace {label}: {what}: z {:.0}..{:.0} m",
+            metres(lo),
+            metres(hi)
+        );
+    };
+    extremes(&state, "the land");
+    let craters = vd_terrain::craters::crater_population(body, &lattice, words);
+    vd_terrain::craters::apply_craters(&mut state.z, &lattice, &craters, gravity);
+    let relief = vd_terrain::solve::envelope_steps(body);
+    for z in &mut state.z {
+        *z = (*z).clamp(-relief, relief);
+    }
+    for (u, &z) in state.uplift.iter_mut().zip(&state.z) {
+        *u = (*u).clamp(-relief - z, relief - z);
+    }
+    state.z_flood.clone_from(&state.z);
+    extremes(&state, "the craters, clipped");
+    let gain = schedule.gain();
+    let alpha = vd_terrain::land::flexural_parameter_m(words.elastic_thickness_m, gravity);
+    let mut climate = None;
+    for pass in 0..schedule.passes {
+        if pass % schedule.climate_every == 0 {
+            let c = vd_terrain::climate::climate(body, &lattice, words, &state.z, land.sea_z);
+            state.rain.clone_from(&c.rain_mm_yr);
+            climate = Some(c);
+            let r = state.route();
+            state.accumulate();
+            println!(
+                "  trace {label}: pass {pass} climate+routing: outlets {}, lakes {}, flat {}, undrained {}",
+                r.outlets, r.raised, r.flat, r.undrained
+            );
+        }
+        let s = state.sweep(gain, pass, schedule.passes);
+        let (lo, hi) = state.range();
+        println!(
+            "  trace {label}: pass {pass} sweep: lowered {}, max cut {:.1} m, z {:.0}..{:.0} m",
+            s.lowered,
+            metres(s.max_cut),
+            metres(lo),
+            metres(hi)
+        );
+        if (pass + 1) % schedule.isostasy_every == 0 {
+            let (level, lifted, max_lift) = state.rebound(alpha);
+            let (lo, hi) = state.range();
+            println!(
+                "  trace {label}: pass {pass} rebound level {level}: lifted {lifted}, max lift {:.1} m, z {:.0}..{:.0} m",
+                metres(max_lift),
+                metres(lo),
+                metres(hi)
+            );
+        }
+    }
+    let climate = climate.expect("a climate");
+    let tan: Vec<u32> = climate
+        .aridity_q8
+        .iter()
+        .map(|&a| vd_terrain::solve::tan_repose_q16(a))
+        .collect();
+    for k in 0..schedule.talus_passes {
+        let (shed, worst) = state.talus(&tan);
+        let (lo, hi) = state.range();
+        println!(
+            "  trace {label}: talus {k}: shed {shed}, worst excess {:.1} m, z {:.0}..{:.0} m",
+            worst as f64 / f64::from(Z_STEPS_PER_M),
+            metres(lo),
+            metres(hi)
+        );
+    }
+    let (_, under, thickest, deepest) = state.ice(&climate.ela_z, gravity);
+    println!(
+        "  trace {label}: ice: {under} nodes, thickest {thickest:.0} m, deepest cut {:.1} m",
+        metres(deepest)
+    );
+    extremes(&state, "after the ice");
 }
 
 /// One body's bench: the phases timed, the schedule timed, the memory read.
@@ -188,7 +440,7 @@ fn bench(label: &str, body: &BodyDefinition, age_yr: u64) {
     let t_acc = t.elapsed();
     let schedule = Schedule::standard(age_yr);
     let t = Instant::now();
-    let sweep = state.sweep(schedule.gain());
+    let sweep = state.sweep(schedule.gain(), 0, 1);
     let t_sweep = t.elapsed();
     let rss_phases = peak_rss_bytes();
     drop(state);
@@ -271,6 +523,11 @@ fn main() -> ExitCode {
             &vd_terrain::home::home_moon_land_words(),
             age_yr,
         );
+        bench_full(
+            "the home moon",
+            &home_moon(),
+            &vd_terrain::home::home_moon_solve_words(),
+        );
     }
     // The home system's other planets the ladder accepts, smallest first.
     let config = UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
@@ -326,19 +583,24 @@ fn main() -> ExitCode {
                     &lineage,
                     realm,
                 );
-                match charter.and_then(|c| {
-                    c.elastic_thickness_m
-                        .map(|te| (c.water_km3.unwrap_or(0), te))
-                }) {
-                    Some((water_km3, elastic_thickness_m)) => bench_land(
-                        &label,
-                        &body,
-                        &LandWords {
-                            water_km3,
-                            elastic_thickness_m,
-                        },
-                        age_yr,
-                    ),
+                match charter.and_then(|c| c.elastic_thickness_m.map(|te| (c, te))) {
+                    Some((c, elastic_thickness_m)) => {
+                        bench_land(
+                            &label,
+                            &body,
+                            &LandWords {
+                                water_km3: c.water_km3.unwrap_or(0),
+                                elastic_thickness_m,
+                            },
+                            age_yr,
+                        );
+                        let words = vd_bins::solve_words_of(&c);
+                        if std::env::var_os("VD_BENCH_TRACE").is_some() {
+                            bench_trace(&label, &body, &words);
+                        } else {
+                            bench_full(&label, &body, &words);
+                        }
+                    }
                     None => println!(
                         "  no charter words for the land (no elastic thickness): C2 skipped"
                     ),

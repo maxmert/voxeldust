@@ -525,7 +525,13 @@ impl ThreadedWorkers {
                             return;
                         };
                         let started = std::time::Instant::now();
-                        let geometry = geometry_with(&job.body, job.realm, job.key, &job.parents);
+                        let geometry = geometry_with(
+                            &job.body,
+                            job.artifact.as_deref(),
+                            job.realm,
+                            job.key,
+                            &job.parents,
+                        );
                         let took = started.elapsed().as_nanos() as u64;
                         nanos_by_me.fetch_add(took, std::sync::atomic::Ordering::Relaxed);
                         {
@@ -1023,8 +1029,11 @@ impl CardSeam {
                             meter.detach("a card box was not the CPU's");
                         }
                     }
+                    // The card never takes a job with an artifact (it holds no `Z`), so the
+                    // field here is always none: the box is the recipe's own.
                     let geometry = geometry_from(
                         &sampled.job.body,
+                        sampled.job.artifact.as_deref(),
                         sampled.job.realm,
                         sampled.job.key,
                         &samples,
@@ -1201,7 +1210,7 @@ fn verify_card_box(
     card: &vd_terrain::lattice::SampleBox,
     tell: bool,
 ) -> bool {
-    let Some(cpu) = vd_terrain::lattice::sample_box(body, key) else {
+    let Some(cpu) = vd_terrain::lattice::sample_box(body, None, key) else {
         return false;
     };
     let mut cells = 0usize;
@@ -1305,10 +1314,22 @@ fn take_job_now(
     if q.closed {
         return None;
     }
-    let slot = q.jobs.keys().nth(skip).copied()?;
+    let slot = card_slot(&q, skip)?;
     let job = q.jobs.remove(&slot).expect("the slot was just read");
     q.index.remove(&(job.realm, job.key));
     Some(job)
+}
+
+/// ★ THE SLOT THE CARD MAY TAKE: `skip` places down the order, and then the first job WITHOUT an
+/// artifact — a chunk that reads an artifact's field is the CPU builders' alone, because the card
+/// holds no `Z` (slice 8c stage C4c; ruling F9, the card builder parked). `None` where every job
+/// past the skip carries one, or the queue holds no more than `skip`.
+fn card_slot(q: &JobQueue, skip: usize) -> Option<(u32, u64)> {
+    q.jobs
+        .iter()
+        .skip(skip)
+        .find(|(_, job)| job.artifact.is_none())
+        .map(|(slot, _)| *slot)
 }
 
 /// A JOB GOES BACK to the queue for a CPU worker, at its own priority, and every waiter is woken.
@@ -1330,7 +1351,14 @@ fn take_job(jobs: &Arc<(Mutex<JobQueue>, std::sync::Condvar)>, skip: usize) -> O
         if q.closed {
             return None;
         }
-        if let Some(slot) = q.jobs.keys().nth(skip).copied() {
+        // The CPU workers (skip 0) take the first job whatever it reads; the card takes the first
+        // past its skip that reads no artifact.
+        let slot = if skip == 0 {
+            q.jobs.keys().next().copied()
+        } else {
+            card_slot(&q, skip)
+        };
+        if let Some(slot) = slot {
             let job = q.jobs.remove(&slot).expect("the slot was just read");
             q.index.remove(&(job.realm, job.key));
             return Some(job);
@@ -2433,6 +2461,11 @@ pub(crate) fn sync_terrain(
             terrain
                 .lane
                 .state_surface(realm, &surface, rbox.charter.as_ref(), &look_of(rbox));
+        }
+        // ★ THE ARTIFACT the realm shipped (slice 8c stage C4c), as the client's book holds it
+        // this frame: the lane refreshes its pointer when a level or a tile landed.
+        if let Some(cache) = snap.artifact(realm) {
+            terrain.lane.state_artifact(realm, cache);
         }
         if let Some((_, lux)) = rbox.luma
             && brightest.is_none_or(|(b, _)| lux > b)
@@ -3689,7 +3722,7 @@ mod worker_tests {
         let body = vd_terrain::home::home_planet();
         let key = vd_terrain::digest::self_check_key(&body, vd_terrain::GOLDEN_SELF_CHECK_KEYS[0]);
         let mut box_of =
-            vd_terrain::lattice::sample_box(&body, key).expect("the box is on the ladder");
+            vd_terrain::lattice::sample_box(&body, None, key).expect("the box is on the ladder");
         assert!(
             !verify_card_box(&body, key, &box_of, false),
             "the CPU's own box is the CPU's box"
@@ -3728,6 +3761,7 @@ mod worker_tests {
             },
             parents: Arc::new(ParentCache::default()),
             priority,
+            artifact: None,
         }
     }
 

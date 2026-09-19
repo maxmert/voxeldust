@@ -7,14 +7,16 @@
 //! Does NOT own: the shard's authority. Which node holds a realm is the directory's answer, learned
 //! through `directory`; nothing here promotes a peer by having heard from it.
 
+use super::routing::push_control;
 use super::{
     GatewayConfig, GatewaySessions, GatewayStats, SessionPhase, WindowRow, announce_own_entity,
     fan_entity_removed, fan_out_of_interest, lineage_apply, on_window_relayed, on_window_row,
     session_target, store_route,
 };
 use crate::window;
-use vd_core::NodeId;
+use vd_core::{Fence, NodeId, SessionId};
 use vd_sim::runtime::{ClockSample, OutboundBox};
+use vd_wire::channels::ServerControlMsg;
 use vd_wire::intershard::{InterShardFlow, ShardPresence};
 use vd_wire::session_flow::ShardToGateway;
 
@@ -264,11 +266,23 @@ pub(crate) fn on_shard_control(
                 outbox,
             );
         }
-        // THE VOXEL WIRE PLANT (slice 4, R-3): the per-session bulk forward lands with the first
-        // producer in slice 10. Until then a `BulkFor` is COUNTED, never silently dropped.
-        ShardToGateway::BulkFor { .. } => {
-            stats.bulk_for_unrouted += 1;
-        }
+        // ★ THE BULK RELAY (slice 8c stage C4c, the artifact ship): a shard's bytes for the sessions
+        // it NAMES are relayed to each one as `ServerControlMsg::ArtifactPart`, never decoded here
+        // (the gateway holds no chunk and no artifact); a session that is not Active, not behind
+        // this gateway, or negotiated under minor 32 is skipped and counted. The WINDOW-HOLDER
+        // audience has no producer yet (the far view's pyramid is owed) and stays COUNTED.
+        ShardToGateway::BulkFor {
+            realm_fence,
+            audience,
+            bytes,
+        } => match audience {
+            vd_wire::session_flow::BulkAudience::Sessions(named) => {
+                relay_bulk(from, realm_fence, &named, bytes, sessions, stats, outbox);
+            }
+            vd_wire::session_flow::BulkAudience::WindowHolders(_) => {
+                stats.bulk_for_unrouted += 1;
+            }
+        },
         ShardToGateway::Frame { .. }
         | ShardToGateway::FrameFor { .. }
         | ShardToGateway::RealmFrame { .. } => {
@@ -384,5 +398,55 @@ pub(crate) fn on_shard_control(
                 stats,
             );
         }
+    }
+}
+
+/// ★ THE RELAY of one shard's bulk bytes to the sessions it named: each Active session behind this
+/// gateway whose sub on `from` is at or past the shard's fence, and whose negotiated minor knows
+/// the arm, gets the bytes as one `ArtifactPart`; every other name is counted, never guessed at.
+fn relay_bulk(
+    from: NodeId,
+    realm_fence: Fence,
+    named: &[SessionId],
+    bytes: Vec<u8>,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    if named.is_empty() {
+        stats.bulk_for_unrouted += 1;
+        return;
+    }
+    for session_id in named {
+        let Some(session) = sessions.by_session.get(session_id) else {
+            stats.bulk_for_unrouted += 1;
+            continue;
+        };
+        if !matches!(session.phase, SessionPhase::Active { .. }) {
+            stats.bulk_for_unrouted += 1;
+            continue;
+        }
+        let stale = session
+            .hot
+            .subs
+            .load()
+            .lookup(from)
+            .is_some_and(|entry| realm_fence.is_stale_against(entry.accepted));
+        if stale {
+            stats.bulk_for_unrouted += 1;
+            continue;
+        }
+        if session.negotiated_minor < 32 {
+            stats.bulk_for_unrouted += 1;
+            continue;
+        }
+        push_control(
+            outbox,
+            session.client,
+            &ServerControlMsg::ArtifactPart {
+                bytes: bytes.clone(),
+            },
+        );
+        stats.artifact_parts_relayed += 1;
     }
 }

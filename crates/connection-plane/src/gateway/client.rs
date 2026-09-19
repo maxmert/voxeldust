@@ -140,6 +140,7 @@ pub(crate) fn on_client_control(
                     // A fresh session holds no sky until it says otherwise (S11).
                     sky_held: None,
                     sky_parts_sent: 0,
+                    artifact_held: std::collections::BTreeMap::new(),
                     client,
                     account: login.account,
                     fence,
@@ -257,6 +258,16 @@ pub(crate) fn on_client_control(
                     &ServerControlMsg::WorldRefused { ours, theirs, half },
                 );
                 end_session_of(client, config, sessions, outbox);
+            }
+        }
+        // ★ THE ARTIFACT HELD (slice 8c stage C4c): the client states it holds a realm's head and
+        // pyramid at a digest; recorded on the session for the window-holder pacing that is owed.
+        ClientControlMsg::ArtifactHeld { realm, digest } => {
+            if let Some(session_id) = sessions.by_client.get(&client).copied()
+                && let Some(session) = sessions.by_session.get_mut(&session_id)
+            {
+                session.artifact_held.insert(realm, digest);
+                stats.artifact_held_stated += 1;
             }
         }
     }

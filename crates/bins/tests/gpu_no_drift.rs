@@ -372,7 +372,8 @@ fn the_smaller_box_after_a_bigger_one_is_still_the_cpus_box() {
     );
     // AND AGAINST THE GENERATOR'S OWN READING, which is what the shard computes collision on and
     // what SL10 names: the plan's host run is one path to the box, `sample_box` is the other.
-    let cpu = vd_terrain::lattice::sample_box(&body, failing).expect("the box is on the ladder");
+    let cpu =
+        vd_terrain::lattice::sample_box(&body, None, failing).expect("the box is on the ladder");
     let built = after.box_of(&card, &vd_terrain::gpu::BoxPlan::dirs_of(&after.run()));
     let cells = cpu
         .cells

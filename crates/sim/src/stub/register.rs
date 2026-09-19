@@ -108,6 +108,8 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(HandoffHolds::default());
     world.insert_resource(crate::stub::containment::ExteriorScan::default());
     world.insert_resource(crate::stub::exterior::RealmStore::default());
+    world.insert_resource(crate::stub::artifact_ship::ArtifactSource::default());
+    world.insert_resource(crate::stub::artifact_ship::ArtifactShipped::default());
     world.insert_resource(crate::stub::lineage::LineageOwed::default());
     world.insert_resource(crate::stub::lineage::PendingLineage::default());
     world.insert_resource(RealmRegions::default());
@@ -230,8 +232,14 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     // `.run_if(has_synced)` (a fresh shard demands nothing pre-sync — determinism).
     // ★ THE WINDOW ROSTERS AND BODIES RUN AFTER THE FOLD (owner decision 3, 2026-09-02 — R10): they
     // ship the children in each window's range, and the range is what the fold just decided.
+    // ★ THE ARTIFACT SHIP (slice 8c stage C4c) runs after the rosters: what an occupant is shipped
+    // follows the pose the frames just read.
     schedule.add_systems(
-        (evaluate_realm_aoi, emit_window_rosters)
+        (
+            evaluate_realm_aoi,
+            emit_window_rosters,
+            crate::stub::artifact_ship::emit_artifact,
+        )
             .chain()
             .after(emit_realm_frames)
             .run_if(has_synced),

@@ -70,7 +70,7 @@ fn main() -> ExitCode {
         let start = Instant::now();
         let mut column = None;
         for _ in 0..rounds {
-            column = column_field(&body, Face::PosX, rung, x, y);
+            column = column_field(&body, None, Face::PosX, rung, x, y);
         }
         let column_us = start.elapsed().as_secs_f64() * 1e6 / f64::from(rounds);
         let column = column.expect("in the ladder");
@@ -104,7 +104,7 @@ fn main() -> ExitCode {
             y: 13,
             z,
         };
-        match generate(&body, key).expect("in the ladder").how {
+        match generate(&body, None, key).expect("in the ladder").how {
             How::Evaluated => evaluated += 1,
             How::AboveSurface | How::BelowSurface => skipped += 1,
         }
@@ -148,7 +148,7 @@ fn main() -> ExitCode {
         let start = Instant::now();
         let mut samples = None;
         for _ in 0..rounds {
-            samples = sample_box(&body, key);
+            samples = sample_box(&body, None, key);
         }
         let box_us = start.elapsed().as_secs_f64() * 1e6 / f64::from(rounds);
         let samples = samples.expect("in the band");
@@ -211,12 +211,12 @@ fn main() -> ExitCode {
     };
     let start = Instant::now();
     for _ in 0..rounds {
-        let _ = generate(&body, k0);
+        let _ = generate(&body, None, k0);
     }
     let bare_us = start.elapsed().as_secs_f64() * 1e6 / f64::from(rounds);
     let start = Instant::now();
     for _ in 0..rounds {
-        let _ = sample_box(&body, k0);
+        let _ = sample_box(&body, None, k0);
     }
     let halo_us = start.elapsed().as_secs_f64() * 1e6 / f64::from(rounds);
     println!(
@@ -348,7 +348,7 @@ fn main() -> ExitCode {
 
     // 3. The boot self-check.
     let start = Instant::now();
-    let digest = golden_self_check(&body).expect("the home body self-checks");
+    let digest = golden_self_check(&body, None).expect("the home body self-checks");
     let check_ms = start.elapsed().as_secs_f64() * 1e3;
     for entry in GOLDEN_SELF_CHECK_KEYS {
         let key = self_check_key(&body, entry);

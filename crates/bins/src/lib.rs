@@ -11,6 +11,10 @@
 //! This is Tier-B (process glue): exercised by the process-tier parity + smoke
 //! tests, not the coverage gate.
 
+pub mod artifact_boot;
+pub mod artifact_source;
+pub mod artifact_store;
+pub mod artifact_worker;
 pub mod proc_launch;
 pub mod sea;
 
@@ -1113,6 +1117,31 @@ pub fn home_system_world(
     home_system_boot(universe_seed)
 }
 
+/// ★ THE SOLVE WORDS OF A CHARTER (slice 8c stage C3): the ONE mapping from the census's charter to
+/// the generator's words, with the census's system age — shared by the shard's boot, the cross-pin
+/// and the bench, so a field can never be read into the wrong word.
+#[must_use]
+pub fn solve_words_of(c: &vd_core::look::BodyCharter) -> vd_terrain::solve::SolveWords {
+    vd_terrain::solve::SolveWords {
+        water_km3: c.water_km3.unwrap_or(0),
+        elastic_thickness_m: c.elastic_thickness_m.unwrap_or(0),
+        insolation_q12: c.insolation_q12,
+        t_eq_mk: c.t_eq_mk,
+        t_surface_mk: c.t_surface_mk,
+        bond_albedo_q12: c.bond_albedo_q12,
+        mu_q8: c.mu_q8,
+        scale_height_m: c.scale_height_m,
+        p_surf_pa: c.p_surf_pa,
+        tau_ir_q12: c.tau_ir_q12,
+        day_s: c.day_s,
+        obliquity_cos_q1024: c.obliquity_cos_q1024,
+        ecc_q16: c.ecc_q16,
+        year_s: c.year_s,
+        flags: c.flags,
+        age_yr: (vd_physics::taxonomy::SYSTEM_AGE_GYR * 1.0e9) as u64,
+    }
+}
+
 /// The home system's boot world: its rows and its movers, exactly as its shard builds them.
 fn home_system_boot(
     universe_seed: u64,
@@ -1145,7 +1174,10 @@ pub fn world_identity(universe_seed: u64) -> Result<vd_terrain::WorldIdentity, S
     let body = home_body(universe_seed).ok_or_else(|| {
         "the home system holds no round planet the generator can define".to_owned()
     })?;
-    vd_terrain::WorldIdentity::of(universe_seed, &body).ok_or_else(|| {
+    // ★ THROUGH THE GOLDEN FIELDS (slice 8c stage C4c): the artifact's read is part of the shape
+    // both hosts must compute identically, so the self-check reads it from literals in the build.
+    let fields = vd_terrain::home::home_golden_fields();
+    vd_terrain::WorldIdentity::of(universe_seed, &body, Some(&fields)).ok_or_else(|| {
         "the home body cannot be self-checked: a golden key names no chunk".to_owned()
     })
 }

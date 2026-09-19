@@ -47,10 +47,13 @@ use vd_core::glam::DVec3;
 use vd_core::look::SurfaceStmt;
 use vd_core::pose::{FrameRef, RealmId};
 use vd_terrain::BodyDefinition;
+use vd_terrain::artifact::ZField;
 use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey};
 use vd_terrain::extract::{extract, extract_all_edges};
 use vd_terrain::lattice::sample_box;
 use vd_terrain::position::vertex_position_m;
+
+use crate::artifact_book::{ArtifactCache, FieldPick, SharedField};
 
 /// HOW FAR A RUNG SINKS under the next finer one (slice 8 step 3): the recipe's own bound on the
 /// gap between the two fields (the octaves the coarser rung drops) plus a cell of each rung for
@@ -238,6 +241,12 @@ pub struct ChunkJob {
     /// revealed before margin, the coarser rung first, then by parent, the nearest first — so
     /// the workers build neighbours back to back and their parent cache holds the parents.
     pub priority: u32,
+    /// ★ THE ARTIFACT the realm shipped (slice 8c stage C4c), shared by pointer: the build reads
+    /// its field for this rung and for the parents' rung. `None` for a realm that shipped none,
+    /// whose chunks are the recipe's own coarse relief — the pre-artifact shape, never a shipped
+    /// path once every solid body ships. A job with an artifact is the CPU builders' alone: the
+    /// card holds no `Z` (ruling F9, the card builder parked).
+    pub artifact: Option<Arc<ArtifactCache>>,
 }
 
 /// A finished job, as the engine harvests it.
@@ -294,7 +303,14 @@ impl ChunkWorkers for InlineWorkers {
         // Branchless (HR5): the lane refuses a key outside the ladder before it submits, so the
         // `None` arm of the seam's own refusal is never reached through the lane.
         self.done.extend(
-            geometry_with(&job.body, job.realm, job.key, &job.parents).map(|geometry| ChunkReady {
+            geometry_with(
+                &job.body,
+                job.artifact.as_deref(),
+                job.realm,
+                job.key,
+                &job.parents,
+            )
+            .map(|geometry| ChunkReady {
                 realm: job.realm,
                 geometry,
             }),
@@ -429,8 +445,13 @@ fn parent_bucket(a: i32, b: i32) -> Option<usize> {
 impl ParentMesh {
     /// The whole surface of the chunk at `key`; `None` outside the body.
     #[must_use]
-    pub fn build(body: &BodyDefinition, key: ChunkKey) -> Option<ParentMesh> {
-        let samples = sample_box(body, key)?;
+    pub fn build(
+        body: &BodyDefinition,
+        artifact: Option<&ArtifactCache>,
+        key: ChunkKey,
+    ) -> Option<ParentMesh> {
+        let field = field_of(body, artifact, key)?;
+        let samples = sample_box(body, field.as_deref().map(|f| f as &dyn ZField), key)?;
         let mesh = extract_all_edges(&samples);
         let q = i32::from(vd_terrain::VERTEX_QUANTUM as i16);
         let cell_of = |v: [i16; 3]| -> (i32, i32) {
@@ -798,12 +819,13 @@ impl ParentCache {
         &self,
         realm: RealmId,
         body: &BodyDefinition,
+        artifact: Option<&ArtifactCache>,
         key: ChunkKey,
     ) -> Option<Arc<ParentMesh>> {
         match self.claim(realm, key) {
             Claim::Hit(found) => Some(found),
             Claim::Build(guard) => {
-                let built = ParentMesh::build(body, key).map(Arc::new);
+                let built = ParentMesh::build(body, artifact, key).map(Arc::new);
                 guard.finish(built.clone());
                 built
             }
@@ -1040,7 +1062,48 @@ fn parent_cell(key: ChunkKey, parent: ChunkKey, v: [i16; 3]) -> (i32, i32) {
 #[must_use]
 pub fn geometry_of(body: &BodyDefinition, key: ChunkKey) -> Option<ChunkGeometry> {
     // A fresh, private cache: the realm named in it is nobody's.
-    geometry_with(body, RealmId::Planet(0), key, &ParentCache::default())
+    geometry_with(body, None, RealmId::Planet(0), key, &ParentCache::default())
+}
+
+/// ★ THE FIELD A CHUNK READS (slice 8c stage C4c): `Some(None)` without an artifact (the recipe's
+/// own coarse relief), `Some(Some(field))` when the artifact's field for this chunk is whole, and
+/// `None` while it is not — the build makes nothing, and the coarser rung stands (ruling F9). A
+/// body with no macro lattice (too small for one) reads the recipe whatever it was shipped.
+#[must_use]
+pub fn field_of(
+    body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
+    key: ChunkKey,
+) -> Option<Option<SharedField>> {
+    let Some(artifact) = artifact else {
+        return Some(None);
+    };
+    let Some(lattice) = body.macro_lattice() else {
+        return Some(None);
+    };
+    match artifact.field_for(&lattice, key) {
+        FieldPick::Ready(field) => Some(Some(field)),
+        FieldPick::Waiting => None,
+    }
+}
+
+/// The coarser surface along a direction, for a vertex with no parent triangle on its radial: the
+/// artifact's field at that rung (`None` where the field holds no row there), or the recipe's own
+/// relief without an artifact.
+fn coarser_field_m(
+    body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
+    dir: [f64; 3],
+    rung: u8,
+) -> Option<f64> {
+    let Some(artifact) = artifact else {
+        return Some(vd_terrain::height::height_m(body, dir, rung));
+    };
+    let Some(lattice) = body.macro_lattice() else {
+        return Some(vd_terrain::height::height_m(body, dir, rung));
+    };
+    let field = artifact.field_at_rung(&lattice, rung)?;
+    vd_terrain::height::height_field_m(body, &*field, dir, rung)
 }
 
 /// [`geometry_of`] with the lane's parent cache, for the chunk of `realm`.
@@ -1053,12 +1116,14 @@ pub fn geometry_of(body: &BodyDefinition, key: ChunkKey) -> Option<ChunkGeometry
 #[must_use]
 pub fn geometry_with(
     body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
     realm: RealmId,
     key: ChunkKey,
     parents: &ParentCache,
 ) -> Option<ChunkGeometry> {
-    let samples = sample_box(body, key)?;
-    geometry_from(body, realm, key, &samples, parents)
+    let field = field_of(body, artifact, key)?;
+    let samples = sample_box(body, field.as_deref().map(|f| f as &dyn ZField), key)?;
+    geometry_from(body, artifact, realm, key, &samples, parents)
 }
 
 /// THE GEOMETRY STEP of a chunk's build: the mesh, the vertices, the morph targets and the normals
@@ -1067,6 +1132,7 @@ pub fn geometry_with(
 #[must_use]
 pub fn geometry_from(
     body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
     realm: RealmId,
     key: ChunkKey,
     samples: &vd_terrain::lattice::SampleBox,
@@ -1092,7 +1158,7 @@ pub fn geometry_from(
         .min(body.ladder().rungs.saturating_sub(1));
     let parent_meshes: Vec<Arc<ParentMesh>> = parent_keys(body, key)
         .into_iter()
-        .filter_map(|p| parents.get(realm, body, p))
+        .filter_map(|p| parents.get(realm, body, artifact, p))
         .collect();
     // How far the coarser surface can stand from this vertex: the sink of the coarser rung.
     let reach_m = sink_m(body, coarser);
@@ -1155,8 +1221,10 @@ pub fn geometry_from(
             // judge of what the vertex is — a SURFACE vertex with no parent triangle on its
             // radial is a fallback (counted; the gate bounds it), a vertex far under the field
             // is a cave's own and reads the field by nature.
+            // With an artifact whose field holds no row on this radial (a tile not here), the
+            // vertex keeps its own radius: no target, no morph, counted below as a fallback.
             let field = on_mesh.map_or_else(
-                || vd_terrain::height::height_m(body, [dir.x, dir.y, dir.z], coarser),
+                || coarser_field_m(body, artifact, [dir.x, dir.y, dir.z], coarser).unwrap_or(len),
                 |_| len,
             );
             let missing = on_mesh.is_none() & !at_seam;
@@ -1434,6 +1502,14 @@ pub struct ChunkCounters {
     /// Polls that returned the whole cap (M8-2a): a harvest that fills its cap every frame is the
     /// wall, not the workers.
     pub harvest_full: u64,
+    /// ★ A request whose artifact field is not whole yet (slice 8c stage C4c): the level still
+    /// assembling, or a tile the stencil reads not here. Not queued; asked again next frame; the
+    /// coarser rung stands (ruling F9).
+    pub awaiting_artifact: u64,
+    /// ★ A realm whose artifact ARRIVED after chunks of it were built from the recipe's own
+    /// relief (slice 8c stage C4c): those chunks and parents are dropped and rebuilt on the field.
+    /// The one visible change is a recipe-to-artifact step at login, ledgered.
+    pub artifact_rebuilds: u64,
 }
 
 /// The lane: the bodies it knows, the chunks it holds, the workers it drives.
@@ -1448,6 +1524,9 @@ pub struct ChunkLane {
     charters: BTreeMap<RealmId, vd_core::look::BodyCharter>,
     /// Realms whose surface statement was refused: counted ONCE, never re-read each frame.
     refused: BTreeSet<RealmId>,
+    /// ★ THE ARTIFACTS the realms shipped (slice 8c stage C4c), by pointer, refreshed when the
+    /// book's epoch for a realm changes.
+    artifacts: BTreeMap<RealmId, Arc<ArtifactCache>>,
     resident: BTreeSet<(RealmId, ChunkKey)>,
     pending: BTreeSet<(RealmId, ChunkKey)>,
     /// Resident plus pending chunks per realm, so a release is a lookup, not a scan (SL9).
@@ -1467,6 +1546,7 @@ impl ChunkLane {
             bodies: BTreeMap::new(),
             charters: BTreeMap::new(),
             refused: BTreeSet::new(),
+            artifacts: BTreeMap::new(),
             resident: BTreeSet::new(),
             pending: BTreeSet::new(),
             held: BTreeMap::new(),
@@ -1569,11 +1649,17 @@ impl ChunkLane {
         self.bodies.get(&realm)
     }
 
-    /// Forget a realm: its body and every chunk of it.
+    /// Forget a realm: its body, its artifact and every chunk of it.
     pub fn forget(&mut self, realm: RealmId) {
         self.bodies.remove(&realm);
         self.charters.remove(&realm);
         self.refused.remove(&realm);
+        self.artifacts.remove(&realm);
+        self.drop_chunks(realm);
+    }
+
+    /// Drop every chunk of a realm — resident, building, and the parents — keeping its body.
+    fn drop_chunks(&mut self, realm: RealmId) {
         self.held.remove(&realm);
         self.parents.forget(realm);
         self.resident.retain(|(r, _)| *r != realm);
@@ -1587,6 +1673,30 @@ impl ChunkLane {
             self.pending.remove(&(realm, key));
             self.workers.cancel(realm, key);
         }
+    }
+
+    /// ★ STATE A REALM'S ARTIFACT (slice 8c stage C4c), as the client's book holds it now. Held by
+    /// pointer and refreshed when the book's epoch moved (a level or a tile landed), so the next
+    /// request reads the newest field. The FIRST artifact for a realm that already has chunks
+    /// drops them: they were built from the recipe's own relief and would stand beside chunks
+    /// built on the field (counted as `artifact_rebuilds`).
+    pub fn state_artifact(&mut self, realm: RealmId, cache: &ArtifactCache) {
+        let held = self.artifacts.get(&realm).map(|a| (a.head, a.epoch));
+        if held == Some((cache.head, cache.epoch)) {
+            return;
+        }
+        let first = held.is_none_or(|(head, _)| head != cache.head);
+        if first && (self.held.get(&realm).copied().unwrap_or(0) > 0) {
+            self.counters.artifact_rebuilds += 1;
+            self.drop_chunks(realm);
+        }
+        self.artifacts.insert(realm, Arc::new(cache.clone()));
+    }
+
+    /// The artifact the lane holds for a realm.
+    #[must_use]
+    pub fn artifact(&self, realm: RealmId) -> Option<&Arc<ArtifactCache>> {
+        self.artifacts.get(&realm)
     }
 
     /// Whether a chunk has ARRIVED (harvested, resident) — the release hold's question (step 2): a
@@ -1627,6 +1737,14 @@ impl ChunkLane {
             self.workers.reprioritise(realm, key, priority);
             return;
         }
+        // ★ THE ARTIFACT'S FIELD MUST BE WHOLE FOR THIS CHUNK (slice 8c stage C4c): a chunk whose
+        // level is assembling or whose tiles are not all here is not queued — asked again next
+        // frame, while the coarser rung stands (ruling F9).
+        let artifact = self.artifacts.get(&realm).map(Arc::clone);
+        if field_of(body, artifact.as_deref(), key).is_none() {
+            self.counters.awaiting_artifact += 1;
+            return;
+        }
         self.pending.insert((realm, key));
         *self.held.entry(realm).or_insert(0) += 1;
         self.counters.submitted += 1;
@@ -1636,6 +1754,7 @@ impl ChunkLane {
             key,
             parents: Arc::clone(&self.parents),
             priority,
+            artifact,
         });
     }
 
@@ -2170,6 +2289,7 @@ mod tests {
             key: k0,
             parents: Arc::new(ParentCache::default()),
             priority: 0,
+            artifact: None,
         };
         assert!(format!("{:?}", job.clone()).contains("ChunkJob"));
         let mut inline = InlineWorkers::default();
@@ -2190,7 +2310,7 @@ mod tests {
         let body = home_planet();
         let key = surface_key(&body, 0, 300, 700);
         let g = geometry_of(&body, key).expect("in the band");
-        let samples = sample_box(&body, key).expect("in the band");
+        let samples = sample_box(&body, None, key).expect("in the band");
         let mesh = extract(&samples);
         assert_eq!(&g.triangles[..mesh.triangles.len()], &mesh.triangles[..]);
         assert!(g.vertices.len() >= mesh.vertices.len());
@@ -2375,14 +2495,14 @@ mod tests {
         let cache = ParentCache::default();
         // A chunk at the face's low x edge: its vertices at the edge read the field.
         let edge = surface_key(&body, 0, 0, 700);
-        let g = geometry_with(&body, planet(), edge, &cache).expect("the edge chunk");
+        let g = geometry_with(&body, None, planet(), edge, &cache).expect("the edge chunk");
         assert!(g.morph_seam > 0, "no seam vertex on an edge chunk");
         let (fallbacks, vertices) = (g.morph_fallbacks, g.vertices.len() as u32);
         assert!(
             fallbacks * 100 < vertices,
             "{fallbacks} fallbacks of {vertices}"
         );
-        let samples = sample_box(&body, edge).expect("in the band");
+        let samples = sample_box(&body, None, edge).expect("in the band");
         let mesh = extract(&samples);
         let o = DVec3::from_array(g.origin_m);
         let mut checked = 0;
@@ -2398,8 +2518,14 @@ mod tests {
         }
         assert!(checked > 0);
         // A chunk in the middle of the face has no seam vertex.
-        let mid = geometry_with(&body, planet(), surface_key(&body, 0, 300, 700), &cache)
-            .expect("a middle chunk");
+        let mid = geometry_with(
+            &body,
+            None,
+            planet(),
+            surface_key(&body, 0, 300, 700),
+            &cache,
+        )
+        .expect("a middle chunk");
         assert_eq!(mid.morph_seam, 0);
     }
 
@@ -2425,11 +2551,11 @@ mod tests {
             };
             let key = surface_key(&body, rung, x, y);
             let coarser = rung + 1;
-            let samples = sample_box(&body, key).expect("in the band");
+            let samples = sample_box(&body, None, key).expect("in the band");
             let mesh = extract(&samples);
             let parents: Vec<Arc<ParentMesh>> = parent_keys(&body, key)
                 .into_iter()
-                .filter_map(|p| cache.get(planet(), &body, p))
+                .filter_map(|p| cache.get(planet(), &body, None, p))
                 .collect();
             for v in mesh.vertices.iter().step_by(7) {
                 let p = vertex_position_m(&body, &samples, *v);
@@ -2512,12 +2638,12 @@ mod tests {
     fn a_parent_mesh_answers_the_radials_over_its_cells_nearest_the_asked_radius() {
         let body = home_planet();
         let key = surface_key(&body, 1, 150, 350);
-        let pm = ParentMesh::build(&body, key).expect("the parent");
+        let pm = ParentMesh::build(&body, None, key).expect("the parent");
         assert_eq!(pm.key(), key);
         assert!(pm.triangle_count() > 0);
         // Every vertex of the parent's own mesh is met by its own radial, at its own radius,
         // within the cell it lies in (a vertex is on its triangles).
-        let samples = sample_box(&body, key).expect("in the band");
+        let samples = sample_box(&body, None, key).expect("in the band");
         let mesh = extract_all_edges(&samples);
         let q = i32::from(vd_terrain::VERTEX_QUANTUM as i16);
         let mut met = 0;
@@ -2534,7 +2660,7 @@ mod tests {
         // A cell with no triangle: no hit. Out of the body: no parent.
         assert_eq!(pm.radial_hit_m(1000, 1000, DVec3::X, 1.0), None);
         let outside = ChunkKey { z: -1, ..key };
-        assert!(ParentMesh::build(&body, outside).is_none());
+        assert!(ParentMesh::build(&body, None, outside).is_none());
     }
 
     #[test]
@@ -2543,8 +2669,8 @@ mod tests {
         let cache = ParentCache::default();
         assert!(cache.is_empty());
         let key = surface_key(&body, 1, 150, 350);
-        let a = cache.get(planet(), &body, key).expect("built");
-        let b = cache.get(planet(), &body, key).expect("cached");
+        let a = cache.get(planet(), &body, None, key).expect("built");
+        let b = cache.get(planet(), &body, None, key).expect("cached");
         assert!(Arc::ptr_eq(&a, &b));
         assert_eq!(cache.len(), 1);
         // The same key inserted again keeps one entry (and one place in the order).
@@ -2553,15 +2679,17 @@ mod tests {
         // A key outside the body builds nothing and keeps nothing.
         assert!(
             cache
-                .get(planet(), &body, ChunkKey { z: -1, ..key })
+                .get(planet(), &body, None, ChunkKey { z: -1, ..key })
                 .is_none()
         );
         assert_eq!(cache.len(), 1);
         // A hit refreshes its place: after the cap is passed by fresh keys, the hit one stays
         // and the oldest untouched one leaves.
         let second = ChunkKey { x: 151, ..key };
-        let b2 = cache.get(planet(), &body, second).expect("built");
-        let _ = cache.get(planet(), &body, key).expect("hit, refreshed");
+        let b2 = cache.get(planet(), &body, None, second).expect("built");
+        let _ = cache
+            .get(planet(), &body, None, key)
+            .expect("hit, refreshed");
         let mut i = 0;
         while i < PARENT_CACHE_ENTRIES - 1 {
             cache.insert(
@@ -2577,12 +2705,12 @@ mod tests {
         assert_eq!(cache.len(), PARENT_CACHE_ENTRIES);
         assert!(
             cache
-                .get(planet(), &body, key)
+                .get(planet(), &body, None, key)
                 .is_some_and(|c| Arc::ptr_eq(&c, &a))
         );
         assert!(
             cache
-                .get(planet(), &body, second)
+                .get(planet(), &body, None, second)
                 .is_some_and(|c| !Arc::ptr_eq(&c, &b2))
         );
         // The capacity is settable: a smaller bound drops the oldest at once.
@@ -2611,7 +2739,7 @@ mod tests {
         assert_eq!(cache.len(), PARENT_CACHE_ENTRIES);
         assert!(
             cache
-                .get(planet(), &body, key)
+                .get(planet(), &body, None, key)
                 .is_some_and(|c| !Arc::ptr_eq(&c, &a))
         );
         // Forgetting a realm drops its meshes and nobody else's.
@@ -2670,8 +2798,8 @@ mod tests {
         let cache = ParentCache::default();
         let left = surface_key(&body, 0, 300, 700);
         let right = ChunkKey { x: 301, ..left };
-        let gl = geometry_with(&body, planet(), left, &cache).expect("left");
-        let gr = geometry_with(&body, planet(), right, &cache).expect("right");
+        let gl = geometry_with(&body, None, planet(), left, &cache).expect("left");
+        let gr = geometry_with(&body, None, planet(), right, &cache).expect("right");
         // Near nothing fell back to the field.
         let fallbacks = gl.morph_fallbacks;
         let vertices = gl.vertices.len() as u32;
@@ -2685,9 +2813,9 @@ mod tests {
         // at its own radius.
         let parents: Vec<Arc<ParentMesh>> = parent_keys(&body, left)
             .into_iter()
-            .filter_map(|p| cache.get(planet(), &body, p))
+            .filter_map(|p| cache.get(planet(), &body, None, p))
             .collect();
-        let samples = sample_box(&body, left).expect("in the band");
+        let samples = sample_box(&body, None, left).expect("in the band");
         let mesh = extract(&samples);
         let o = DVec3::from_array(gl.origin_m);
         let mut checked = 0;
@@ -2792,7 +2920,7 @@ mod tests {
     fn the_skirts_hang_two_cells_under_every_boundary_edge_facing_outward() {
         let body = home_planet();
         let key = surface_key(&body, 0, 300, 700);
-        let samples = sample_box(&body, key).expect("in the band");
+        let samples = sample_box(&body, None, key).expect("in the band");
         let mesh = extract(&samples);
         let g = geometry_of(&body, key).expect("the chunk");
         // The boundary edges of the extractor's mesh, by a count of their uses.
@@ -3433,7 +3561,7 @@ mod claim_tests {
         let (at_the_door, waiting) = waiter(&cache, key);
         at_the_door.recv().expect("the waiter reports");
         std::thread::park_timeout(std::time::Duration::from_millis(30));
-        let mesh = Arc::new(ParentMesh::build(&body, key).expect("in the ladder"));
+        let mesh = Arc::new(ParentMesh::build(&body, None, key).expect("in the ladder"));
         assert!(mesh.bytes() > mesh.triangle_count() * 12);
         guard.finish(Some(Arc::clone(&mesh)));
         assert_eq!(
@@ -3469,7 +3597,7 @@ mod claim_tests {
         stale.finish(Some(Arc::clone(&mesh)));
         assert!(cache.is_empty());
         // `get` after the forget builds and keeps under the new epoch.
-        assert!(cache.get(planet(), &body, other).is_some());
+        assert!(cache.get(planet(), &body, None, other).is_some());
         assert_eq!(cache.len(), 1);
         assert_eq!(
             BuildCount::default(),
@@ -3509,7 +3637,7 @@ mod parent_shrink_tests {
             y: 5,
             z: vd_terrain::digest::surface_chunk_z(&body, vd_seed::bend::Face::PosX, 1, x, 5),
         };
-        let mesh = Arc::new(ParentMesh::build(&body, key(3)).expect("in the ladder"));
+        let mesh = Arc::new(ParentMesh::build(&body, None, key(3)).expect("in the ladder"));
         let one = mesh.bytes();
         let cache = ParentCache::with_capacity(100);
         assert_eq!(cache.budget_bytes(), usize::MAX);
@@ -3522,7 +3650,7 @@ mod parent_shrink_tests {
         assert_eq!((cache.len(), cache.held_bytes()), (2, 2 * one));
         cache.insert(planet(), key(5), Arc::clone(&mesh));
         assert_eq!((cache.len(), cache.held_bytes()), (2, 2 * one));
-        assert!(cache.get(planet(), &body, key(3)).is_some());
+        assert!(cache.get(planet(), &body, None, key(3)).is_some());
         // A held key replaced counts once.
         cache.insert(planet(), key(5), Arc::clone(&mesh));
         assert_eq!((cache.len(), cache.held_bytes()), (2, 2 * one));
@@ -3551,7 +3679,7 @@ mod parent_shrink_tests {
             y: 5,
             z: vd_terrain::digest::surface_chunk_z(&body, vd_seed::bend::Face::PosX, 1, 3, 5),
         };
-        let mesh = ParentMesh::build(&body, key).expect("in the ladder");
+        let mesh = ParentMesh::build(&body, None, key).expect("in the ladder");
         assert!(format!("{:?}", mesh.triangles).contains("Narrow"));
         // ★ THE BOUND IS THE PACKING'S, NOT THE TERRAIN'S (re-stated 2026-09-15; the INDEX split out
         // 2026-09-17, slice 8a stage 3). A 400 kB ceiling was a statement about this box's own

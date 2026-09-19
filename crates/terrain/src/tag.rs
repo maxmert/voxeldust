@@ -29,7 +29,7 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 /// planet's mountains halved to 8 276 m). The charter's other words (the spin, the tilt, the derived
 /// pressure, the greenhouse, the crust, the water, the sea) are STATED and read by no kernel yet, so
 /// they move no byte; the recipe's sea keeps its draw until 8c (ruling T8).
-pub const GENERATOR_VERSION: u32 = 4;
+pub const GENERATOR_VERSION: u32 = 5;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -54,10 +54,14 @@ impl WorldIdentity {
     /// This binary's identity for `universe_seed`, measured on `home`; `None` when the home body
     /// cannot be self-checked (a refusal, never a fold of zeros).
     #[must_use]
-    pub fn of(universe_seed: u64, home: &crate::body::BodyDefinition) -> Option<WorldIdentity> {
+    pub fn of(
+        universe_seed: u64,
+        home: &crate::body::BodyDefinition,
+        fields: Option<&crate::artifact::GoldenFields>,
+    ) -> Option<WorldIdentity> {
         Some(WorldIdentity {
             declared: declared_world_tag(universe_seed),
-            measured: crate::digest::golden_self_check(home)?,
+            measured: crate::digest::golden_self_check(home, fields)?,
         })
     }
 }
@@ -80,7 +84,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 4,
+            GENERATOR_VERSION, 5,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -93,15 +97,26 @@ mod tests {
     #[test]
     fn the_world_identity_pairs_the_declared_tag_with_the_measured_self_check() {
         let home = crate::home::home_planet();
-        let id = WorldIdentity::of(2298, &home).expect("the home planet self-checks");
+        let fields = crate::home::home_golden_fields();
+        let id =
+            WorldIdentity::of(2298, &home, Some(&fields)).expect("the home planet self-checks");
         assert_eq!(id.declared, DECLARED_PIN);
-        assert_eq!(Some(id.measured), crate::digest::golden_self_check(&home));
+        assert_eq!(
+            Some(id.measured),
+            crate::digest::golden_self_check(&home, Some(&fields))
+        );
         assert_eq!(
             Some(id),
-            WorldIdentity::of(2298, &home),
+            WorldIdentity::of(2298, &home, Some(&fields)),
             "the same binary, the same pair"
         );
+        // ★ THE MEASURED HALF IS PINNED (slice 8c stage C4c): the eight chunks read through the
+        // golden fields fold to this word on every host, or the world hello is refused by name.
+        assert_eq!(id.measured, crate::home::HOME_IDENTITY_MEASURED);
+        // Without the fields the eight chunks are the recipe's own relief: another word.
+        let bare = WorldIdentity::of(2298, &home, None).expect("the recipe self-checks");
+        assert_ne!(bare.measured, id.measured);
     }
 
-    const DECLARED_PIN: u64 = 4_196_931_793_486_802_419;
+    const DECLARED_PIN: u64 = 6_109_822_358_729_732_162;
 }

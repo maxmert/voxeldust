@@ -140,6 +140,47 @@ impl MacroLattice {
         })
     }
 
+    /// The lattice of `body` at a KNOWN edge (the body's own word, [`BodyDefinition::macro_lattice`]);
+    /// `None` for a zero edge or one that does not divide the cell count.
+    #[must_use]
+    pub fn with_edge(body: &BodyDefinition, edge: u32) -> Option<MacroLattice> {
+        let n = body.ladder().n;
+        if edge == 0 || !n.is_multiple_of(edge) {
+            return None;
+        }
+        Some(MacroLattice {
+            edge,
+            cells_per_node: n / edge,
+            inv_edge: inv_n_of(edge),
+            radius_m: Gf::from_f64(body.ladder().radius_m()),
+        })
+    }
+
+    /// ★ THE COARSER LATTICE `k` levels up the pyramid (03 §4.7): `edge / 2^k` nodes an edge, each
+    /// covering `2^k × 2^k` of these nodes on the same face; `None` where the edge does not halve
+    /// that many times. The seam table works at any edge, so the coarse stencil crosses a cube
+    /// edge by construction.
+    #[must_use]
+    pub fn coarser(&self, k: u32) -> Option<MacroLattice> {
+        let edge = self.edge >> k;
+        if edge == 0 || (edge << k) != self.edge {
+            return None;
+        }
+        Some(MacroLattice {
+            edge,
+            cells_per_node: self.cells_per_node << k,
+            inv_edge: inv_n_of(edge),
+            radius_m: self.radius_m,
+        })
+    }
+
+    /// The node's size in metres: the ladder radius over the edge, times π/2 — the arc a node
+    /// spans at the face centre (8 192 m on the home planet by construction).
+    #[must_use]
+    pub fn node_m(&self) -> f64 {
+        self.radius_m.to_f64() * std::f64::consts::FRAC_PI_2 / f64::from(self.edge)
+    }
+
     /// The nodes over the globe: six faces of `edge²`.
     #[must_use]
     pub fn node_count(&self) -> usize {
@@ -448,6 +489,43 @@ mod tests {
             corner_side < side,
             "corner side {corner_side} under centre side {side}"
         );
+    }
+
+    /// The coarser lattices of the home planet halve down to 19 an edge (2⁶ · 19) and no further;
+    /// the moon's to 17; a node's size doubles at every level.
+    #[test]
+    fn the_coarser_lattices_halve_to_the_odd_factor() {
+        let home = MacroLattice::of(&home_planet()).expect("a lattice");
+        let coarse = home.coarser(6).expect("six levels");
+        assert_eq!(coarse.edge, 19);
+        assert_eq!(coarse.cells_per_node, 8_192 << 6);
+        assert_eq!(home.coarser(7), None);
+        assert_eq!(home.coarser(11), None, "a level past the edge");
+        assert_eq!(home.coarser(0), Some(home));
+        assert!((home.node_m() - 8_192.0).abs() < 1.0);
+        assert!((coarse.node_m() - 8_192.0 * 64.0).abs() < 1.0);
+        let moon = MacroLattice::of(&home_moon()).expect("a lattice");
+        assert_eq!(moon.coarser(2).expect("two levels").edge, 17);
+        assert_eq!(moon.coarser(3), None);
+        // The coarse node of a fine node: the same face, the indices shifted.
+        let fine = moon.index(Face::PosY, 37, 6);
+        let (face, i, j) = moon.split(fine);
+        let coarse = moon.coarser(2).expect("two levels");
+        assert_eq!(
+            coarse.split(coarse.index(face, i >> 2, j >> 2)),
+            (Face::PosY, 9, 1)
+        );
+    }
+
+    /// The body's own lattice word is the rule's answer, and a wrong edge is refused.
+    #[test]
+    fn the_bodys_lattice_is_the_rules_and_a_wrong_edge_is_refused() {
+        let home = home_planet();
+        assert_eq!(home.macro_lattice(), MacroLattice::of(&home));
+        assert_eq!(home.macro_lattice().map(|l| l.edge), Some(1_216));
+        assert_eq!(MacroLattice::with_edge(&home, 0), None);
+        assert_eq!(MacroLattice::with_edge(&home, 1_000), None);
+        assert_eq!(home_moon().macro_lattice().map(|l| l.edge), Some(68));
     }
 
     /// The chunk's lookup: rung-0 cell 8 191 is node 0 and cell 8 192 is node 1; at rung 13 one

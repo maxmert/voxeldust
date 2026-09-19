@@ -310,10 +310,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // charter's water, stated as a whole number of millimetres; the recipe keeps its draw until 8c.
     let own_charter =
         own_charter.map(|charter| vd_bins::charter_with_sea(charter, own_body.as_ref()));
-    let own_surface = own_body.as_ref().map(|_| vd_core::look::SurfaceStmt {
-        frame: own_frame,
-        generator: vd_terrain::declared_world_tag(universe_seed),
-    });
+    // ★ A BODY WITH NO SOLID SURFACE STATES NO SURFACE (slice 8c stage C4, the owner's answer to
+    // ask F): a giant's charter clears the solid-surface flag, so it gets no solve, no artifact and
+    // no chunk — the client draws its look bag (its outline and its luma) until the cloud shell of
+    // its own slice lands.
+    let own_solid = own_charter
+        .as_ref()
+        .is_some_and(|c| c.flags & vd_core::look::CHARTER_FLAG_SOLID_SURFACE != 0);
+    let own_surface = own_body
+        .as_ref()
+        .filter(|_| own_solid)
+        .map(|_| vd_core::look::SurfaceStmt {
+            frame: own_frame,
+            generator: vd_terrain::declared_world_tag(universe_seed),
+        });
+    // ★ THE ARTIFACT (slice 8c stage C4; the owner's ruling of 2026-09-19): read from this realm's
+    // own store, or solved ONCE on a worker thread off the tick and written when it lands. A store
+    // whose rows lie refuses the boot here, by name.
+    let mut artifact_boot = match (&own_body, &own_charter) {
+        (Some(body), Some(charter)) if own_solid => Some(
+            vd_bins::artifact_boot::ArtifactBoot::begin(
+                realm_store.as_ref().map(|s| s as &dyn vd_sim::io::Store),
+                vd_terrain::declared_world_tag(universe_seed),
+                body,
+                &vd_bins::solve_words_of(charter),
+                Box::new(vd_bins::artifact_worker::ThreadedWorker::default()),
+            )
+            .map_err(|reason| format!("this realm's store holds a wrong artifact: {reason}"))?,
+        ),
+        _ => None,
+    };
+    if let Some(boot) = &artifact_boot {
+        match boot.solving {
+            Some(reason) => tracing::info!(?reason, "the artifact is being solved off the tick"),
+            None => tracing::info!(
+                digest = ?boot.artifact().map(|a| a.digest()),
+                "the artifact was read from this realm's store"
+            ),
+        }
+    }
     // This line used to print the SCALE this shard booted, and reading it across a live cluster is
     // how the two-worlds defect was caught: the orchestrator said one thing and its gateway another.
     // There is no scale to print now. The seed is, because one world generated from one seed is
@@ -475,6 +510,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(store) = realm_store {
         *world.resource_mut::<vd_sim::stub::exterior::RealmStore>() =
             vd_sim::stub::exterior::RealmStore(Some(Box::new(store)));
+    }
+    // ★ THE ARTIFACT SHIP'S SOURCE (slice 8c stage C4c): an artifact read from the store at boot
+    // is installed now; one still solving is installed on the tick it lands (below).
+    if let Some((boot, body)) = artifact_boot.as_ref().zip(own_body.as_ref())
+        && let Some(artifact) = boot.artifact()
+        && let Some(source) = vd_bins::artifact_source::artifact_source_of(
+            own_realm,
+            vd_terrain::declared_world_tag(universe_seed),
+            body,
+            artifact,
+        )
+    {
+        *world.resource_mut::<vd_sim::stub::artifact_ship::ArtifactSource>() =
+            vd_sim::stub::artifact_ship::ArtifactSource(Some(source));
+        tracing::info!("the artifact ship is armed from the store");
     }
     if let Some(body) = stored_body {
         *world.resource_mut::<vd_sim::stub::drive::OwnBody>() =
@@ -654,6 +704,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
         let started = std::time::Instant::now();
         let _ = node.step_tick();
+        // ★ THE ARTIFACT LANDS (slice 8c stage C4): once, when the worker answers — the rows go to
+        // this realm's store on this tick, and the digest and the wall time are logged (the number
+        // the wake-ahead lead is measured against).
+        if let Some(boot) = artifact_boot.as_mut().filter(|b| b.solving()) {
+            let landed = {
+                let world = node.world_mut();
+                let mut store = world.resource_mut::<vd_sim::stub::exterior::RealmStore>();
+                let store: Option<&mut dyn vd_sim::io::Store> = store
+                    .0
+                    .as_deref_mut()
+                    .map(|s| s as &mut dyn vd_sim::io::Store);
+                boot.poll(store)
+            };
+            if let Some(millis) = landed {
+                tracing::info!(
+                    millis,
+                    digest = ?boot.artifact().map(|a| a.digest()),
+                    "the artifact landed and was written to this realm's store"
+                );
+                // ★ THE SHIP IS ARMED the tick the artifact lands (slice 8c stage C4c).
+                if let Some((artifact, body)) = boot.artifact().zip(own_body.as_ref())
+                    && let Some(source) = vd_bins::artifact_source::artifact_source_of(
+                        own_realm,
+                        vd_terrain::declared_world_tag(universe_seed),
+                        body,
+                        artifact,
+                    )
+                {
+                    *node
+                        .world_mut()
+                        .resource_mut::<vd_sim::stub::artifact_ship::ArtifactSource>() =
+                        vd_sim::stub::artifact_ship::ArtifactSource(Some(source));
+                    tracing::info!("the artifact ship is armed from the solve");
+                }
+            }
+        }
         let took = started.elapsed();
         slowest = slowest.max(took);
         pace_total += took;

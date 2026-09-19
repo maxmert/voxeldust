@@ -608,4 +608,10 @@ pub struct StubStats {
     /// THE INTEREST — the cube side changed (an occupant with a bigger look arrived), so every
     /// observer's hold was re-keyed from empty.
     pub interest_rule_reset: u64,
+    /// ★ THE ARTIFACT SHIP (slice 8c stage C4c) — heads sent to occupants, once each.
+    pub artifact_heads_sent: u64,
+    /// THE ARTIFACT SHIP — pyramid parts sent, summed over occupants.
+    pub artifact_pyramid_parts_sent: u64,
+    /// THE ARTIFACT SHIP — tiles sent, summed over occupants, each once per session.
+    pub artifact_tiles_sent: u64,
 }

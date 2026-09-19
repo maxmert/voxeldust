@@ -104,6 +104,15 @@ pub enum ClientControlMsg {
         declared: u64,
         measured: u64,
     },
+    /// ★ THE ARTIFACT HELD (the landform arc, slice 8c stage C4c; the owner's ruling of 2026-09-19:
+    /// the solve runs once on the server and its artifact is shipped to every client): the client
+    /// holds this realm's artifact HEAD and PYRAMID at this digest, so the gateway stops pacing
+    /// their parts to it — the sky's `SkyHeld` for a planet's far shape. APPENDED (discriminant 8,
+    /// minor 32).
+    ArtifactHeld {
+        realm: RealmId,
+        digest: [u64; 2],
+    },
 }
 
 /// The reliable actions a client may take on the world (R-5). One carrier, two consumers (D-39.1).
@@ -341,6 +350,14 @@ pub enum ServerControlMsg {
         theirs: u64,
         half: WorldHalf,
     },
+    /// ★ ONE PART OF A REALM'S ARTIFACT (slice 8c stage C4c): the gateway's relay of a shard's
+    /// `ShardToGateway::BulkFor` bytes to one named session — a [`BulkMsg`] the client decodes (the
+    /// head, a pyramid level's part, or a tile); the gateway never decodes it. On the Control class
+    /// with the sky's pacing, until the diff lane (slice 10) builds the client's bulk receiver and
+    /// the parts move to `MsgClass::Bulk` (ledgered). APPENDED (discriminant 19, minor 32).
+    ArtifactPart {
+        bytes: Vec<u8>,
+    },
 }
 
 /// The 20 Hz client input frame (latest-wins; loss = skip a tick, never a wedge).
@@ -394,6 +411,38 @@ pub enum BulkMsg {
         realm: RealmId,
         coarse: ChunkCoord,
         digests: Vec<ChunkDigest>,
+    },
+    /// ★ THE ARTIFACT'S HEAD (slice 8c stage C4c; the SL6 row the owner approved 2026-09-19): what a
+    /// realm's solve produced — the world tag it was solved under, the artifact's version, the macro
+    /// lattice's edge, the digest, the tiles along a face's edge, and how many pyramid levels follow.
+    /// A client refuses a part whose head it does not hold. APPENDED (discriminant 3, minor 32).
+    ArtifactHead {
+        realm: RealmId,
+        world_tag: u64,
+        version: u32,
+        edge: u32,
+        digest: [u64; 2],
+        tiles_per_edge: u32,
+        levels: u32,
+    },
+    /// ★ ONE PART OF A PYRAMID LEVEL: level `level` (from 1), part `part` of `parts`, the heights in
+    /// whole metres in the coarser lattice's node order — the globe from orbit. APPENDED
+    /// (discriminant 4, minor 32).
+    ArtifactPyramid {
+        realm: RealmId,
+        level: u32,
+        part: u32,
+        parts: u32,
+        z_m: Vec<i16>,
+    },
+    /// ★ ONE TILE of node rows (nine bytes a row, row-major from the tile's origin), shipped by the
+    /// owning realm to an occupant under its interest. APPENDED (discriminant 5, minor 32).
+    ArtifactTile {
+        realm: RealmId,
+        face: u8,
+        tx: u32,
+        ty: u32,
+        rows: Vec<u8>,
     },
 }
 
@@ -1203,6 +1252,13 @@ mod tests {
                 },
                 7,
             ),
+            (
+                ClientControlMsg::ArtifactHeld {
+                    realm: RealmId::Planet(7),
+                    digest: [1, 2],
+                },
+                8,
+            ),
         ];
         for (msg, index) in client {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
@@ -1234,6 +1290,12 @@ mod tests {
                     half: WorldHalf::Measured,
                 },
                 18,
+            ),
+            (
+                ServerControlMsg::ArtifactPart {
+                    bytes: vec![3, 0, 0],
+                },
+                19,
             ),
         ];
         for (msg, index) in server {
@@ -1286,6 +1348,38 @@ mod tests {
                     }],
                 },
                 2,
+            ),
+            (
+                BulkMsg::ArtifactHead {
+                    realm: RealmId::Planet(7),
+                    world_tag: 9,
+                    version: 1,
+                    edge: 1_216,
+                    digest: [1, 2],
+                    tiles_per_edge: 19,
+                    levels: 6,
+                },
+                3,
+            ),
+            (
+                BulkMsg::ArtifactPyramid {
+                    realm: RealmId::Planet(7),
+                    level: 1,
+                    part: 0,
+                    parts: 3,
+                    z_m: vec![-5, 7],
+                },
+                4,
+            ),
+            (
+                BulkMsg::ArtifactTile {
+                    realm: RealmId::Planet(7),
+                    face: 2,
+                    tx: 1,
+                    ty: 18,
+                    rows: vec![9; 9],
+                },
+                5,
             ),
         ];
         for (msg, index) in bulk {

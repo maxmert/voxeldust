@@ -53,7 +53,7 @@ use vd_recipe::cell::{
     CellAt, CellCharter, Tube, above_cell_word, below_cell_word, cell_word, gap_of_word,
     strata_row, stratum_of_word,
 };
-use vd_recipe::plan::{PlanCharter, column_surface};
+use vd_recipe::plan::{PlanCharter, column_surface_from};
 use vd_recipe::root::isqrt;
 
 /// ★ THE ARITHMETIC IS THE RECIPE'S (ruling F7, step G1). A point in the body's frame and the
@@ -167,6 +167,7 @@ pub fn in_ladder(body: &BodyDefinition, key: ChunkKey) -> bool {
 #[must_use]
 pub fn column_field(
     body: &BodyDefinition,
+    field: Option<&dyn crate::artifact::ZField>,
     face: Face,
     rung: u8,
     x: i32,
@@ -200,12 +201,45 @@ pub fn column_field(
     // ★ ONE COLUMN PASS (step G2-A): the charter once per chunk, then the recipe's own kernel per
     // column — the very kernel the card runs, so the shard's hill is the card's hill.
     let charter = body.plan_charter(rung, face);
+    // ★ THE MACRO FIELD (slice 8c stage C4): with an artifact every column reads `Z` under its
+    // own site and sums the FINE octaves only; a column whose stencil the field does not hold
+    // makes no chunk (the client keeps the coarser rung standing, ruling F9). Without a field the
+    // column is the recipe's own coarse relief — the crate's kernel tests and the pre-artifact
+    // measurements, never a shipped path.
+    // The field stands at a pyramid level (zero for the rows): the read gathers on the lattice of
+    // that level, so a coarse rung reads the means the client holds from orbit.
+    let lattice = match field {
+        Some(f) => Some(body.macro_lattice()?.coarser(f.level())?),
+        None => None,
+    };
+    let first = if field.is_some() {
+        body.first_fine()
+    } else {
+        0
+    };
+    let n_cells = body.ladder.cells_per_edge(rung) as i32;
     let mut b = 0;
     while b < CHUNK_EDGE {
         let mut a = 0;
         while a < CHUNK_EDGE {
             let site = crate::lattice::site_of(body, key, a as i32, b as i32);
-            let surface = column_surface(&charter, i32::from(site.face), site.i, site.j);
+            let z = match (field, lattice) {
+                (Some(f), Some(l)) => {
+                    // A corner phantom names no cell: its `Z` is the key face's corner node,
+                    // which the read reaches by the cell the phantom would be on that face.
+                    let (zf, zi, zj) = if site.face == crate::lattice::CORNER_FACE {
+                        let gi = key.x * CHUNK_EDGE as i32 + a as i32;
+                        let gj = key.y * CHUNK_EDGE as i32 + b as i32;
+                        (face, gi.clamp(-1, n_cells), gj.clamp(-1, n_cells))
+                    } else {
+                        (Face::from_index(site.face).unwrap_or(face), site.i, site.j)
+                    };
+                    crate::artifact::sample_z(&l, f, zf, rung, zi, zj)?
+                }
+                _ => Gi::ZERO,
+            };
+            let surface =
+                column_surface_from(&charter, i32::from(site.face), site.i, site.j, z, first);
             let (dir, h) = (surface.dir, surface.h);
             let biome = biome_of_code(surface.biome);
             if (a == 0) & (b == 0) {
@@ -757,8 +791,12 @@ pub(crate) fn finish_cell(
 /// Generate one chunk; `None` for a key outside the body's ladder. The column pass and the cell
 /// pass in one call, for a host that needs one chunk.
 #[must_use]
-pub fn generate(body: &BodyDefinition, key: ChunkKey) -> Option<ChunkLattice> {
-    let column = column_field(body, key.face, key.rung, key.x, key.y)?;
+pub fn generate(
+    body: &BodyDefinition,
+    field: Option<&dyn crate::artifact::ZField>,
+    key: ChunkKey,
+) -> Option<ChunkLattice> {
+    let column = column_field(body, field, key.face, key.rung, key.x, key.y)?;
     generate_in(body, &column, key.z)
 }
 
@@ -800,7 +838,7 @@ mod tests {
             let face = Face::ALL[(i % 6) as usize];
             let x = (i * 7919) % chunks;
             let y = (i * 104_729) % chunks;
-            let column = column_field(m, face, rung, x, y).expect("a column");
+            let column = column_field(m, None, face, rung, x, y).expect("a column");
             let depth = m.sea_radius - column.highest;
             if (i == 0) | (depth > best.3) {
                 best = (face, x, y, depth);
@@ -918,7 +956,7 @@ mod tests {
     fn a_surface_chunk_is_evaluated_and_its_cells_are_rock_below_and_air_above() {
         let m = home_planet();
         let z = surface_z(&m, Face::PosX, 0, 300, 700);
-        let chunk = generate(&m, key(Face::PosX, 0, 300, 700, z)).expect("in the ladder");
+        let chunk = generate(&m, None, key(Face::PosX, 0, 300, 700, z)).expect("in the ladder");
         assert_eq!(chunk.how, How::Evaluated);
         assert_eq!(chunk.cells.len(), CHUNK_CELLS);
         let mut air = 0;
@@ -949,16 +987,16 @@ mod tests {
         );
         assert_eq!(
             chunk,
-            generate(&m, chunk.key).expect("again"),
+            generate(&m, None, chunk.key).expect("again"),
             "the same bytes"
         );
         // The column pass is shared: the chunk is the same whether built alone or in the column.
-        let column = column_field(&m, Face::PosX, 0, 300, 700).expect("a column");
+        let column = column_field(&m, None, Face::PosX, 0, 300, 700).expect("a column");
         assert_eq!(generate_in(&m, &column, z), Some(chunk));
         assert!(column.lowest <= column.highest);
         assert_eq!(column.columns.len(), CHUNK_EDGE * CHUNK_EDGE);
         assert_eq!(generate_in(&m, &column, -1), None, "below the band");
-        let other = column_field(&m, Face::PosX, 0, 301, 700).expect("a column");
+        let other = column_field(&m, None, Face::PosX, 0, 301, 700).expect("a column");
         let mut short = other.clone();
         short.columns.truncate(5);
         assert_eq!(
@@ -980,7 +1018,7 @@ mod tests {
             // rung actually holds.
             let columns = (m.ladder.cells_per_edge(rung) as i32 - 1) / CHUNK_EDGE as i32;
             let (x, y) = (10.min(columns), 10.min(columns));
-            let column = column_field(&m, Face::NegZ, rung, x, y).expect("a column");
+            let column = column_field(&m, None, Face::NegZ, rung, x, y).expect("a column");
             let top = (m.ladder.cells_in_band(rung) as i32 - 1) / CHUNK_EDGE as i32;
             let zs = surface_z(&m, Face::NegZ, rung, x, y);
             for z in [0, 1, zs - 3, zs - 1, zs + 1, zs + 3, top - 1, top] {
@@ -1005,11 +1043,11 @@ mod tests {
         let m = home_planet();
         let z = surface_z(&m, Face::NegZ, 0, 10, 10);
         let top = (m.ladder.cells_in_band(0) as i32 - 1) / CHUNK_EDGE as i32;
-        let above = generate(&m, key(Face::NegZ, 0, 10, 10, top)).expect("in the band");
+        let above = generate(&m, None, key(Face::NegZ, 0, 10, 10, top)).expect("in the band");
         assert_eq!(above.how, How::AboveSurface);
         assert!(above.cells.iter().all(|c| !c.stratum.is_solid()));
         assert!(above.cells.iter().all(|c| c.gap == i8::MAX));
-        let below = generate(&m, key(Face::NegZ, 0, 10, 10, 0)).expect("in the band");
+        let below = generate(&m, None, key(Face::NegZ, 0, 10, 10, 0)).expect("in the band");
         assert_eq!(below.how, How::BelowSurface);
         assert!(below.cells.iter().all(|c| c.gap == i8::MIN));
         assert!(
@@ -1021,24 +1059,24 @@ mod tests {
         assert!(top > z, "the band reaches above the surface");
         // Outside the ladder: refused, never a default chunk.
         assert_eq!(
-            generate(&m, key(Face::PosX, m.ladder.rungs, 0, 0, 0)),
+            generate(&m, None, key(Face::PosX, m.ladder.rungs, 0, 0, 0)),
             None,
             "past the top rung"
         );
-        assert_eq!(generate(&m, key(Face::PosX, 0, -1, 0, 0)), None);
-        assert_eq!(generate(&m, key(Face::PosX, 0, 0, -1, 0)), None);
-        assert_eq!(generate(&m, key(Face::PosX, 0, 0, 0, -1)), None);
+        assert_eq!(generate(&m, None, key(Face::PosX, 0, -1, 0, 0)), None);
+        assert_eq!(generate(&m, None, key(Face::PosX, 0, 0, -1, 0)), None);
+        assert_eq!(generate(&m, None, key(Face::PosX, 0, 0, 0, -1)), None);
         assert_eq!(
-            generate(&m, key(Face::PosX, 0, 0, 0, top + 1)),
+            generate(&m, None, key(Face::PosX, 0, 0, 0, top + 1)),
             None,
             "past the band"
         );
         assert_eq!(
-            generate(&m, key(Face::PosX, 0, 1 << 20, 0, 0)),
+            generate(&m, None, key(Face::PosX, 0, 1 << 20, 0, 0)),
             None,
             "past the face"
         );
-        assert_eq!(column_field(&m, Face::PosX, 0, 0, 1 << 20), None);
+        assert_eq!(column_field(&m, None, Face::PosX, 0, 0, 1 << 20), None);
         // A chunk above the SEABED but under the SEA: skipped as above every surface, and filled with
         // water where the cell is under the sea. RE-MEASURED 2026-09-16 on slice 8a stage 2 (the
         // ridged band): the deepest of 1 000 sampled columns at rung 2 (4 m cells, 248 m chunks)
@@ -1060,7 +1098,7 @@ mod tests {
             depth > chunk_m + two_cells,
             "the home planet's sea stands more than a chunk deep somewhere: {depth:?}"
         );
-        let column = column_field(&m, face, rung, x, y).expect("a column");
+        let column = column_field(&m, None, face, rung, x, y).expect("a column");
         let highest_m = (column.highest >> (LENGTH_BITS + 7)).raw();
         let z_high = ((highest_m - i64::from(m.ladder.floor_m))
             / (i64::from(cell_m(rung)) * CHUNK_EDGE as i64)) as i32;
@@ -1084,7 +1122,7 @@ mod tests {
         let m = home_planet();
         let rung = 3;
         let z = surface_z(&m, Face::PosY, rung, 20, 20);
-        let chunk = generate(&m, key(Face::PosY, rung, 20, 20, z)).expect("in the ladder");
+        let chunk = generate(&m, None, key(Face::PosY, rung, 20, 20, z)).expect("in the ladder");
         assert_eq!(chunk.how, How::Evaluated);
         assert_eq!(chunk.cells.len(), CHUNK_CELLS);
         // The sea stands where the surface dips under it: the deepest sampled column's surface chunk
@@ -1092,7 +1130,7 @@ mod tests {
         let (face, x, y, depth) = deepest_sea_column(&m, rung, 300);
         assert!(depth > Gi::ZERO, "the home planet has a sea");
         let zs = surface_z(&m, face, rung, x, y);
-        let sea = generate(&m, key(face, rung, x, y, zs)).expect("in the ladder");
+        let sea = generate(&m, None, key(face, rung, x, y, zs)).expect("in the ladder");
         assert!(sea.cells.iter().any(|c| c.stratum == Stratum::Water));
         assert!(
             sea.cells.iter().any(|c| c.stratum.is_solid()),
@@ -1104,7 +1142,7 @@ mod tests {
     fn caves_hollow_some_cells_under_a_fine_surface_and_none_at_a_coarse_rung() {
         let m = home_planet();
         let z = surface_z(&m, Face::PosZ, 0, 40, 41);
-        let column = column_field(&m, Face::PosZ, 0, 40, 41).expect("a column");
+        let column = column_field(&m, None, Face::PosZ, 0, 40, 41).expect("a column");
         assert!(z >= 6, "the surface chunk sits well above the floor");
         let mut hollow = 0;
         let mut dz = 1;
@@ -1125,7 +1163,7 @@ mod tests {
         assert!(!tubes_carve_at(&m, rung));
         assert!(!caverns_carve_at(&m, rung));
         let zc = surface_z(&m, Face::PosZ, rung, 0, 0);
-        let coarse = generate(&m, key(Face::PosZ, rung, 0, 0, zc)).expect("in the ladder");
+        let coarse = generate(&m, None, key(Face::PosZ, rung, 0, 0, zc)).expect("in the ladder");
         assert_eq!(coarse.how, How::Evaluated);
     }
 
@@ -1160,8 +1198,8 @@ mod tests {
         // On the home planet, two neighbouring evaluated chunks under the surface both carve.
         let m = home_planet();
         let z = surface_z(&m, Face::PosZ, 0, 40, 41) - 2;
-        let left = generate(&m, key(Face::PosZ, 0, 40, 41, z)).expect("in the band");
-        let right = generate(&m, key(Face::PosZ, 0, 41, 41, z)).expect("in the band");
+        let left = generate(&m, None, key(Face::PosZ, 0, 40, 41, z)).expect("in the band");
+        let right = generate(&m, None, key(Face::PosZ, 0, 41, 41, z)).expect("in the band");
         assert_eq!(left.how, How::Evaluated);
         assert_eq!(right.how, How::Evaluated);
     }

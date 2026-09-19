@@ -24,8 +24,12 @@ const SECOND_OFFSET: u64 = !FNV_OFFSET;
 
 /// The digest of one chunk; `None` for a key outside the ladder.
 #[must_use]
-pub fn chunk_digest(body: &BodyDefinition, key: ChunkKey) -> Option<ChunkDigest> {
-    Some(digest_of(&generate(body, key)?))
+pub fn chunk_digest(
+    body: &BodyDefinition,
+    field: Option<&dyn crate::artifact::ZField>,
+    key: ChunkKey,
+) -> Option<ChunkDigest> {
+    Some(digest_of(&generate(body, field, key)?))
 }
 
 /// The digest of a generated chunk: its key, then its cells in packing order.
@@ -438,14 +442,25 @@ pub fn self_check_key(body: &BodyDefinition, entry: (Face, u8, i32, i32)) -> Chu
 /// `None` when a self-check key names no chunk of this body — a REFUSAL, never a fold of zeros
 /// (the decode-to-Default ban, in the one place whose job is to refuse).
 #[must_use]
-pub fn golden_self_check(body: &BodyDefinition) -> Option<u64> {
+pub fn golden_self_check(
+    body: &BodyDefinition,
+    fields: Option<&crate::artifact::GoldenFields>,
+) -> Option<u64> {
     let mut acc = FNV_OFFSET;
+    // The golden fields need the body's macro lattice; a body with none reads the recipe alone.
+    let lattice = fields.and_then(|_| body.macro_lattice());
     for entry in GOLDEN_SELF_CHECK_KEYS {
         let key = self_check_key(body, entry);
-        let d = chunk_digest(body, key)?.0;
+        // ★ THE FIELD PER KEY (slice 8c stage C4c): the rows for a fine key, the top level for a
+        // top-rung key — the runtime's own pick — or the recipe's relief with no fields.
+        let field: Option<&dyn crate::artifact::ZField> = match (fields, lattice.as_ref()) {
+            (Some(f), Some(l)) => Some(f.field_for(l, key.rung)?),
+            _ => None,
+        };
+        let d = chunk_digest(body, field, key)?.0;
         acc = fnv1a(acc, &d[0].to_le_bytes());
         acc = fnv1a(acc, &d[1].to_le_bytes());
-        let samples = crate::lattice::sample_box(body, key)?;
+        let samples = crate::lattice::sample_box(body, field, key)?;
         let m = mesh_digest(&crate::extract::extract(&samples)).0;
         acc = fnv1a(acc, &m[0].to_le_bytes());
         acc = fnv1a(acc, &m[1].to_le_bytes());
@@ -801,22 +816,22 @@ mod tests {
             y: 700,
             z,
         };
-        let d = chunk_digest(&m, key).expect("in the ladder");
+        let d = chunk_digest(&m, None, key).expect("in the ladder");
         assert_eq!(
-            chunk_digest(&m, key),
+            chunk_digest(&m, None, key),
             Some(d),
             "the same bytes, the same digest"
         );
         let beside = ChunkKey { x: 301, ..key };
-        assert_ne!(chunk_digest(&m, beside), Some(d));
+        assert_ne!(chunk_digest(&m, None, beside), Some(d));
         assert_ne!(d.0[0], d.0[1], "two folds, two offsets");
         assert_eq!(
-            chunk_digest(&m, ChunkKey { rung: 99, ..key }),
+            chunk_digest(&m, None, ChunkKey { rung: 99, ..key }),
             None,
             "outside the ladder is refused"
         );
         // One cell changed: the digest moves.
-        let mut chunk = generate(&m, key).expect("in the ladder");
+        let mut chunk = generate(&m, None, key).expect("in the ladder");
         chunk.cells[7].gap = chunk.cells[7].gap.wrapping_add(1);
         assert_ne!(digest_of(&chunk), d);
         // A second body (the home planet's seed plus one): every digest differs.
@@ -826,7 +841,7 @@ mod tests {
             crate::home::home_facts(),
         )
         .expect("on the ladder");
-        assert_ne!(chunk_digest(&other, key), Some(d));
+        assert_ne!(chunk_digest(&other, None, key), Some(d));
     }
 
     #[test]
@@ -836,7 +851,7 @@ mod tests {
             let key = self_check_key(&m, entry);
             assert!(key.rung < m.ladder.rungs);
             assert!(
-                chunk_digest(&m, key).is_some(),
+                chunk_digest(&m, None, key).is_some(),
                 "{entry:?} names a chunk of the home planet"
             );
         }
@@ -845,19 +860,19 @@ mod tests {
             .map(|e| self_check_key(&m, *e))
             .collect();
         assert_eq!(keys.len(), 8, "eight distinct chunks");
-        let check = golden_self_check(&m).expect("the home planet self-checks");
-        assert_eq!(golden_self_check(&m), Some(check));
+        let check = golden_self_check(&m, None).expect("the home planet self-checks");
+        assert_eq!(golden_self_check(&m, None), Some(check));
         // A tiny unnamed test body: the keys wrap into it, and its check differs.
         let rock = BodyDefinition::from_seed(5, 3_000.0, crate::body::ROCK_3KM_FACTS)
             .expect("a test body of 3 km");
         for entry in GOLDEN_SELF_CHECK_KEYS {
             let key = self_check_key(&rock, entry);
             assert!(
-                chunk_digest(&rock, key).is_some(),
+                chunk_digest(&rock, None, key).is_some(),
                 "{entry:?} wraps into a tiny body"
             );
         }
-        assert_ne!(golden_self_check(&rock), Some(check));
+        assert_ne!(golden_self_check(&rock, None), Some(check));
         let z0 = surface_chunk_z(&m, Face::PosX, 0, 300, 700);
         let z3 = surface_chunk_z(&m, Face::PosX, 3, 37, 87);
         assert!(

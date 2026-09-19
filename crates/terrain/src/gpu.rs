@@ -628,7 +628,7 @@ mod tests {
             let words = plan.cells_of(&run);
             assert_eq!(words.len(), BOX_CELLS);
             assert_eq!(run.nodes.len(), plan.node_count, "{k:?}: the node count");
-            let want = sample_box(&m, k).expect("the box");
+            let want = sample_box(&m, None, k).expect("the box");
             let got = plan.box_of(&words, &BoxPlan::dirs_of(&run));
             assert_eq!(got.cells, want.cells, "{k:?}: the cells");
             assert_eq!(got.sites, want.sites, "{k:?}: the sites");
@@ -797,7 +797,7 @@ mod tests {
         assert!(run.columns.iter().all(|c| c.has == Gi::ZERO));
         assert_eq!(plan.tubes.len(), 1, "one carver of no radius");
         assert_eq!(plan.tubes[0], Tube::default());
-        let want = sample_box(&m, k).expect("the box");
+        let want = sample_box(&m, None, k).expect("the box");
         assert_eq!(
             plan.box_of(&plan.cells_of(&run), &BoxPlan::dirs_of(&run))
                 .cells,

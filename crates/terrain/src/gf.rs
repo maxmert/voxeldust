@@ -160,6 +160,71 @@ impl Gf {
     pub fn is_finite(self) -> bool {
         self.0.is_finite()
     }
+
+    /// ★ THE FENCED EXPONENTIAL (slice 8c stage C3, the design's ask 6: the climate's laws — the
+    /// vapour pressure, the lapse rate's integral — need `exp` and `ln`, and the fence bans the
+    /// platform's). `e^x = 2^k · e^f` with `k = round(x · log₂e)` and `|f| ≤ ln2 / 2`: `e^f` is a
+    /// Taylor polynomial of degree thirteen in Horner form (its truncation under the word's own
+    /// precision, `0.347¹⁴/14! < 10⁻¹⁷`), and `2^k` is a
+    /// BIT PATTERN — the exponent field of the word — never a call. Add, multiply, divide by a
+    /// whole-number literal, floor, and an integer shift: one answer on every target. Saturates past
+    /// `k = ±1 022`, which is `|x| > 708`.
+    ///
+    /// **Example.** The climate asks how much water vapour the air over the home planet's coast can
+    /// hold at 300 K: the Clausius–Clapeyron law raises `e` to `−5 400 / 300`, and this function
+    /// answers the same bytes on the planet's shard and on every client that draws the coast.
+    #[must_use]
+    pub fn exp(self) -> Gf {
+        let k = (self * Gf(std::f64::consts::LOG2_E) + Gf::HALF).floor();
+        let f = self - k * Gf(std::f64::consts::LN_2);
+        // e^f = 1 + f(1 + f/2(1 + f/3(… (1 + f/13)))).
+        let mut p = Gf::ONE + f / Gf(13.0);
+        let mut n = 12.0;
+        while n >= 1.0 {
+            p = Gf::ONE + f * p / Gf(n);
+            n -= 1.0;
+        }
+        let ki = k.to_i64_floor().clamp(-1_022, 1_022);
+        let scale = Gf(f64::from_bits(((ki + 1_023) as u64) << 52));
+        p * scale
+    }
+
+    /// ★ THE FENCED LOGARITHM: `ln x = ln m + e · ln2` with `x = m · 2^e` read off the word's bits,
+    /// `m` centred in `[√½, √2)`, and `ln m = 2·atanh(t)` for `t = (m − 1)/(m + 1)` (`|t| ≤ 0.172`)
+    /// as the odd series to `t¹⁵` (its truncation under `10⁻¹³`). A non-positive `x` answers
+    /// negative infinity, IEEE's own answer for `ln 0`, so a caller's defect stays a named infinity
+    /// and never a wrong finite number.
+    #[must_use]
+    pub fn ln(self) -> Gf {
+        if self.0 <= 0.0 {
+            return Gf(f64::NEG_INFINITY);
+        }
+        let bits = self.0.to_bits();
+        let mut e = ((bits >> 52) & 0x7ff) as i64 - 1_023;
+        let mut m = Gf(f64::from_bits(
+            (bits & ((1u64 << 52) - 1)) | (1_023u64 << 52),
+        ));
+        if m.0 > std::f64::consts::SQRT_2 {
+            m = m / Gf::TWO;
+            e += 1;
+        }
+        let t = (m - Gf::ONE) / (m + Gf::ONE);
+        let t2 = t * t;
+        // 2t(1 + t²/3 + t⁴/5 + … + t¹⁴/15), Horner from the inside.
+        let mut p = Gf::ONE / Gf(15.0);
+        let mut n = 13.0;
+        while n >= 1.0 {
+            p = Gf::ONE / Gf(n) + t2 * p;
+            n -= 2.0;
+        }
+        Gf::TWO * t * p + Gf::from_i64(e) * Gf(std::f64::consts::LN_2)
+    }
+
+    /// `x^y` for a positive `x`: `exp(y · ln x)` under the fence.
+    #[must_use]
+    pub fn powf(self, y: Gf) -> Gf {
+        (y * self.ln()).exp()
+    }
 }
 
 impl Add for Gf {
@@ -278,5 +343,46 @@ mod tests {
         assert_eq!(Gf::from_i64(-5).clamp(-Gf::ONE, Gf::ONE), -Gf::ONE);
         assert_eq!(Gf::from_i64(5).clamp(-Gf::ONE, Gf::ONE), Gf::ONE);
         assert_eq!(Gf::HALF.clamp(-Gf::ONE, Gf::ONE), Gf::HALF);
+    }
+
+    /// ★ THE FENCED EXPONENTIAL AND LOGARITHM against LITERAL values (a test may not call the
+    /// platform's either): the exact points, the known constants, the round trip over twelve
+    /// decades, and the saturation.
+    #[test]
+    fn the_fenced_exp_and_ln_meet_the_known_values() {
+        assert_eq!(Gf::ZERO.exp(), Gf::ONE);
+        assert_eq!(Gf::ONE.ln(), Gf::ZERO);
+        let e = Gf::ONE.exp().to_f64();
+        assert!((e - std::f64::consts::E).abs() < 1e-14, "{e}");
+        let ln2 = Gf::TWO.ln().to_f64();
+        assert!((ln2 - std::f64::consts::LN_2).abs() < 1e-15, "{ln2}");
+        let ln10 = Gf::from_f64(10.0).ln().to_f64();
+        assert!((ln10 - std::f64::consts::LN_10).abs() < 1e-14, "{ln10}");
+        // exp(−18) = 1.522 997 974 471 263e−8 (a Clausius–Clapeyron exponent's order).
+        let small = Gf::from_f64(-18.0).exp().to_f64();
+        assert!(
+            (small / 1.522_997_974_471_263e-8 - 1.0).abs() < 1e-11,
+            "{small}"
+        );
+        // exp(20) = 485 165 195.409 790 3.
+        let big = Gf::from_f64(20.0).exp().to_f64();
+        assert!((big / 485_165_195.409_790_3 - 1.0).abs() < 1e-11, "{big}");
+        // The round trip over twelve decades, and the mantissa's other half (m > √2).
+        let mut x = 1.0e-6;
+        while x < 1.0e6 {
+            let back = Gf::from_f64(x).ln().exp().to_f64();
+            assert!((back / x - 1.0).abs() < 1e-12, "{x} -> {back}");
+            x *= 1.7;
+        }
+        // ln of a non-positive number is a named infinity; the saturation stays finite.
+        assert_eq!(Gf::ZERO.ln().to_f64(), f64::NEG_INFINITY);
+        assert_eq!(Gf::from_f64(-3.0).ln().to_f64(), f64::NEG_INFINITY);
+        assert!(Gf::from_f64(800.0).exp().is_finite());
+        assert!(Gf::from_f64(-800.0).exp().to_f64() < 1e-300);
+        // powf: 2^10 and 9^0.5.
+        let p = Gf::TWO.powf(Gf::from_f64(10.0)).to_f64();
+        assert!((p - 1_024.0).abs() < 1e-9, "{p}");
+        let r = Gf::from_f64(9.0).powf(Gf::HALF).to_f64();
+        assert!((r - 3.0).abs() < 1e-12, "{r}");
     }
 }

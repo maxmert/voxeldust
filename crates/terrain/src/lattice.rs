@@ -422,11 +422,15 @@ pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnFie
 
 /// The chunk with its halo; `None` for a key outside the body.
 #[must_use]
-pub fn sample_box(body: &BodyDefinition, key: ChunkKey) -> Option<SampleBox> {
+pub fn sample_box(
+    body: &BodyDefinition,
+    field: Option<&dyn crate::artifact::ZField>,
+    key: ChunkKey,
+) -> Option<SampleBox> {
     if !in_ladder(body, key) {
         return None;
     }
-    let column = column_field(body, key.face, key.rung, key.x, key.y)?;
+    let column = column_field(body, field, key.face, key.rung, key.x, key.y)?;
     let core = generate_in(body, &column, key.z)?;
     let rung = key.rung;
     let edge = CHUNK_EDGE as i32;
@@ -540,7 +544,7 @@ mod tests {
         a_range: (i32, i32),
         b_range: (i32, i32),
     ) -> usize {
-        let sb = sample_box(m, k).expect("in the band");
+        let sb = sample_box(m, None, k).expect("in the band");
         let mut compared = 0;
         let mut b = b_range.0;
         while b <= b_range.1 {
@@ -550,7 +554,7 @@ mod tests {
                 let face = Face::from_index(site.face).expect("a face cell");
                 let edge = CHUNK_EDGE as i32;
                 let owner = key(face, k.rung, site.i / edge, site.j / edge, k.z);
-                let own = crate::chunk::generate(m, owner).expect("the owner's chunk");
+                let own = crate::chunk::generate(m, None, owner).expect("the owner's chunk");
                 let (la, lb) = ((site.i % edge) as usize, (site.j % edge) as usize);
                 let mut c = 0;
                 while c < edge {
@@ -574,8 +578,8 @@ mod tests {
         let m = home_planet();
         let z = surface_chunk_z(&m, Face::PosX, 0, 300, 700);
         let k = key(Face::PosX, 0, 300, 700, z);
-        let sb = sample_box(&m, k).expect("in the band");
-        let core = crate::chunk::generate(&m, k).expect("in the band");
+        let sb = sample_box(&m, None, k).expect("in the band");
+        let core = crate::chunk::generate(&m, None, k).expect("in the band");
         assert_eq!(sb.cells.len(), BOX_CELLS);
         assert_eq!(sb.sites.len(), BOX_EDGE * BOX_EDGE);
         let mut c = 0;
@@ -595,14 +599,16 @@ mod tests {
         assert!(!SampleBox::is_core(-1, 0, 0));
         assert!(!SampleBox::is_core(0, 62, 0));
         assert!(!SampleBox::is_core(0, 0, -1));
-        assert_eq!(sample_box(&m, key(Face::PosX, 0, 300, 700, -1)), None);
+        assert_eq!(sample_box(&m, None, key(Face::PosX, 0, 300, 700, -1)), None);
         // The same-face halo on the −a and +b sides, and the radial layers, match their owners.
         let edge = CHUNK_EDGE as i32;
         let n = halo_strip_matches(&m, k, (-1, -1), (0, edge - 1))
             + halo_strip_matches(&m, k, (0, edge - 1), (edge, edge));
         assert_eq!(n, 2 * CHUNK_EDGE * CHUNK_EDGE);
-        let below = crate::chunk::generate(&m, key(Face::PosX, 0, 300, 700, z - 1)).expect("below");
-        let above = crate::chunk::generate(&m, key(Face::PosX, 0, 300, 700, z + 1)).expect("above");
+        let below =
+            crate::chunk::generate(&m, None, key(Face::PosX, 0, 300, 700, z - 1)).expect("below");
+        let above =
+            crate::chunk::generate(&m, None, key(Face::PosX, 0, 300, 700, z + 1)).expect("above");
         let mut b = 0;
         while b < edge {
             let mut a = 0;
@@ -632,7 +638,7 @@ mod tests {
         // The last chunk at the +u edge of +X (its +a side crosses to +Y), away from the corners.
         let z = surface_chunk_z(&m, Face::PosX, rung, last, 7);
         let k = key(Face::PosX, rung, last, 7, z);
-        let sb = sample_box(&m, k).expect("in the band");
+        let sb = sample_box(&m, None, k).expect("in the band");
         let first_beyond = n_l - last * edge;
         assert!(first_beyond <= edge, "the chunk reaches the face edge");
         assert_eq!(sb.site(first_beyond - 1, 3).face, Face::PosX.index());
@@ -652,7 +658,7 @@ mod tests {
         // And the −v side of +X crosses to −Z: the halo row b = −1 of a chunk at y = 0.
         let z2 = surface_chunk_z(&m, Face::PosX, rung, 5, 0);
         let k2 = key(Face::PosX, rung, 5, 0, z2);
-        let sb2 = sample_box(&m, k2).expect("in the band");
+        let sb2 = sample_box(&m, None, k2).expect("in the band");
         assert_eq!(sb2.site(3, -1).face, Face::NegZ.index());
         let n2 = halo_strip_matches(&m, k2, (0, edge - 1), (-1, -1));
         assert_eq!(n2, CHUNK_EDGE * CHUNK_EDGE);
@@ -673,7 +679,7 @@ mod tests {
         // column (beyond, beyond) of the last chunk of +X.
         let zx = surface_chunk_z(&m, Face::PosX, rung, last, last);
         let kx = key(Face::PosX, rung, last, last, zx);
-        let bx = sample_box(&m, kx).expect("in the band");
+        let bx = sample_box(&m, None, kx).expect("in the band");
         let phantom = bx.site(beyond, beyond);
         assert_eq!(phantom.face, CORNER_FACE);
         assert_eq!((phantom.i, phantom.j), (1, 1));
@@ -687,11 +693,11 @@ mod tests {
         }
         // Faces +Y and +Z hold the same corner in their own last chunks, at the same local column.
         let ky = key(Face::PosY, rung, last, last, zx);
-        let by = sample_box(&m, ky).expect("in the band");
+        let by = sample_box(&m, None, ky).expect("in the band");
         assert_eq!(by.site(beyond, beyond).face, CORNER_FACE);
         assert_eq!(by.dir(beyond, beyond), d);
         let kz = key(Face::PosZ, rung, last, last, zx);
-        let bz = sample_box(&m, kz).expect("in the band");
+        let bz = sample_box(&m, None, kz).expect("in the band");
         assert_eq!(bz.dir(beyond, beyond), d);
         let mut c = -1;
         while c <= edge {
@@ -712,7 +718,7 @@ mod tests {
         assert_eq!(bx.site(3, beyond).face, Face::PosZ.index());
         // A phantom at the (−u, −v) corner of a minus face.
         let k0 = key(Face::NegY, rung, 0, 0, zx);
-        let b0 = sample_box(&m, k0).expect("in the band");
+        let b0 = sample_box(&m, None, k0).expect("in the band");
         assert_eq!(
             b0.site(-1, -1),
             Site {
@@ -742,7 +748,7 @@ mod tests {
             (Face::PosY, 5, 5),
             (Face::NegZ, 40, 4000),
         ] {
-            let sb = sample_box(&m, key(face, 0, x, y, 0)).expect("the floor chunk");
+            let sb = sample_box(&m, None, key(face, 0, x, y, 0)).expect("the floor chunk");
             let mut n = 0;
             while n < BOX_EDGE * BOX_EDGE {
                 let (a, b) = ((n % BOX_EDGE) as i32 - 1, (n / BOX_EDGE) as i32 - 1);
@@ -831,7 +837,7 @@ mod tests {
     fn below_the_floor_is_bedrock_and_above_the_band_is_air_or_water() {
         let m = home_planet();
         let top = (m.ladder.cells_in_band(0) as i32 - 1) / CHUNK_EDGE as i32;
-        let floor = sample_box(&m, key(Face::NegZ, 0, 10, 10, 0)).expect("the floor chunk");
+        let floor = sample_box(&m, None, key(Face::NegZ, 0, 10, 10, 0)).expect("the floor chunk");
         assert_eq!(
             floor.cell(5, 5, -1),
             Cell {
@@ -839,7 +845,7 @@ mod tests {
                 gap: i8::MIN
             }
         );
-        let ceiling = sample_box(&m, key(Face::NegZ, 0, 10, 10, top)).expect("the top chunk");
+        let ceiling = sample_box(&m, None, key(Face::NegZ, 0, 10, 10, top)).expect("the top chunk");
         let above = ceiling.cell(5, 5, CHUNK_EDGE as i32);
         assert_eq!(above.gap, i8::MAX);
         assert!(!above.stratum.is_solid());

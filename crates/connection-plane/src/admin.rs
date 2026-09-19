@@ -65,6 +65,8 @@ pub fn gateway_view(
         world_hello_stated: _,
         world_refused: _,
         bulk_for_unrouted: _,
+        artifact_parts_relayed: _,
+        artifact_held_stated: _,
         window_sender_mismatch,
         window_misauthored_body,
         window_unknown_row,
@@ -387,6 +389,8 @@ mod tests {
             world_hello_stated: 96,
             world_refused: 98,
             bulk_for_unrouted: 97,
+            artifact_parts_relayed: 0,
+            artifact_held_stated: 0,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);

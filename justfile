@@ -823,6 +823,18 @@ terrain-fence-control:
     cargo clippy -p vd-terrain --features fence-control -- -D warnings 2>&1 | grep -c "use of a disallowed method" | grep -q "^3$"
 terrain-cost:
     cargo run --release -p vd-bins --example terrain_cost
+# ★ THE ARTIFACT PIN (slice 8c stage C4; gate G-DRIFT): the home planet's full solve on this chip
+# against the committed digest — a minute of one core, red on one differing byte.
+artifact-pin:
+    cargo test --release -p vd-bins --test home_artifact_pin
+# ★ THE GOLDEN FIELDS' RECORDER (slice 8c stage C4c): after a deliberate change of the solve, re-record the
+# world identity's fields and pin the measured word it prints (`HOME_IDENTITY_MEASURED`), with a
+# `GENERATOR_VERSION` bump.
+golden-z-record:
+    cargo run --release -p vd-bins --example golden_z_record
+# ★ THE SOLVE'S BENCH (slice 8c; measurement M-L1 and the stages after it).
+macro-bench:
+    cargo run --release -p vd-bins --example macro_bench
 
 # THE RECIPE ON THE GPU (ruling F8 decision 5): the shell crate compiled to SPIR-V by cargo-gpu with
 # rust-gpu's own pinned nightly (installed on first use), the 64-bit integer capability declared.

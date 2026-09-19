@@ -37,6 +37,14 @@ const BERTH_SCHEMA: SchemaId = SchemaId(31);
 /// themselves land with slice 9 (the store), which is the first writer.
 pub const CHUNK_DELTA_SCHEMA: SchemaId = SchemaId(32);
 pub const CHUNK_PYRAMID_SCHEMA: SchemaId = SchemaId(33);
+/// ★ THE ARTIFACT's THREE ROW FAMILIES (the landform arc, slice 8c stage C4; the owner's ruling of
+/// 2026-09-19: the solve runs once on the server and the artifact is saved in the shard's db): one
+/// HEAD row (the version, the lattice edge, the digest), one row per TILE of node rows, and one
+/// PYRAMID row. The sim never names the generator: a tile is bytes it stores and ships, and the
+/// composition root, which links the generator, is the one reader that decodes them.
+pub const ARTIFACT_HEAD_SCHEMA: SchemaId = SchemaId(34);
+pub const ARTIFACT_TILE_SCHEMA: SchemaId = SchemaId(35);
+pub const ARTIFACT_PYRAMID_SCHEMA: SchemaId = SchemaId(36);
 
 /// ★ WHY THESE ROWS ARE FRAMED AND THE MOVEMENT LANE IS NOT.
 ///
@@ -92,6 +100,25 @@ const BODY: u8 = 2;
 /// refusal land with slice 9; the key is fixed here so it can never collide with a family added later.
 const OWNER_FENCE: u8 = 3;
 
+/// ★ THE ARTIFACT's families (slice 8c stage C4): the head, the tiles, the pyramid.
+const ARTIFACT_HEAD: u8 = 4;
+const ARTIFACT_TILE: u8 = 5;
+const ARTIFACT_PYRAMID: u8 = 6;
+
+/// The artifact rows' tags — their own numbering, one schema each, append-only.
+mod art {
+    pub const WORLD_TAG: u16 = 1;
+    pub const VERSION: u16 = 2;
+    pub const EDGE: u16 = 3;
+    pub const DIGEST: u16 = 4;
+    pub const TILES_PER_EDGE: u16 = 5;
+    pub const FACE: u16 = 1;
+    pub const TX: u16 = 2;
+    pub const TY: u16 = 3;
+    pub const BYTES: u16 = 4;
+    pub const LEVELS: u16 = 1;
+}
+
 /// The key of the owner-fence row (one per realm store).
 #[must_use]
 pub fn owner_fence_key() -> Vec<u8> {
@@ -119,6 +146,134 @@ pub struct BlockStoreTuning {
     /// The most ticks an edit may park behind a stalled disk before the refusal is typed (bench M-10:
     /// poses keep shipping, only the edit lane parks).
     pub parked_ticks_max: u32,
+}
+
+/// The artifact's head: what a reader checks before it trusts a tile.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactHead {
+    /// The generator's declared world tag the artifact was solved under.
+    pub world_tag: u64,
+    /// The artifact's own version.
+    pub version: u32,
+    /// The macro lattice's edge.
+    pub edge: u32,
+    /// The digest, two words.
+    pub digest: [u64; 2],
+    /// The tiles along a face's edge.
+    pub tiles_per_edge: u32,
+}
+
+/// One stored tile: its place and its rows' bytes, opaque to the sim.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactTile {
+    pub face: u8,
+    pub tx: u32,
+    pub ty: u32,
+    /// The rows, nine bytes each, row-major from the tile's origin.
+    pub bytes: Vec<u8>,
+}
+
+/// The key of the artifact's head: the family tag alone.
+#[must_use]
+pub fn artifact_head_key() -> Vec<u8> {
+    vec![ARTIFACT_HEAD]
+}
+
+/// The key of one tile: the family tag, the face, then the tile's column and row, big-endian so a
+/// prefix scan walks a face in order.
+#[must_use]
+pub fn artifact_tile_key(face: u8, tx: u32, ty: u32) -> Vec<u8> {
+    let mut k = vec![ARTIFACT_TILE, face];
+    k.extend(tx.to_be_bytes());
+    k.extend(ty.to_be_bytes());
+    k
+}
+
+/// The prefix that reads every tile in one scan.
+#[must_use]
+pub fn artifact_tile_prefix() -> Vec<u8> {
+    vec![ARTIFACT_TILE]
+}
+
+/// The key of the pyramid: the family tag alone.
+#[must_use]
+pub fn artifact_pyramid_key() -> Vec<u8> {
+    vec![ARTIFACT_PYRAMID]
+}
+
+/// The head, framed.
+#[must_use]
+pub fn encode_artifact_head(head: &ArtifactHead) -> Vec<u8> {
+    TlvWriter::new(ARTIFACT_HEAD_SCHEMA)
+        .required(art::WORLD_TAG, &head.world_tag)
+        .and_then(|w| w.required(art::VERSION, &head.version))
+        .and_then(|w| w.required(art::EDGE, &head.edge))
+        .and_then(|w| w.required(art::DIGEST, &head.digest))
+        .and_then(|w| w.required(art::TILES_PER_EDGE, &head.tiles_per_edge))
+        .expect("a head's fields are small and encode infallibly")
+        .finish()
+}
+
+/// A tile, framed.
+#[must_use]
+pub fn encode_artifact_tile(tile: &ArtifactTile) -> Vec<u8> {
+    TlvWriter::new(ARTIFACT_TILE_SCHEMA)
+        .required(art::FACE, &tile.face)
+        .and_then(|w| w.required(art::TX, &tile.tx))
+        .and_then(|w| w.required(art::TY, &tile.ty))
+        .and_then(|w| w.required(art::BYTES, &tile.bytes))
+        .expect("a tile's bytes encode infallibly")
+        .finish()
+}
+
+/// The pyramid, framed: every level's heights as little-endian words, one blob per level.
+#[must_use]
+pub fn encode_artifact_pyramid(levels: &[Vec<u8>]) -> Vec<u8> {
+    TlvWriter::new(ARTIFACT_PYRAMID_SCHEMA)
+        .required(art::LEVELS, &levels)
+        .expect("a pyramid's bytes encode infallibly")
+        .finish()
+}
+
+/// A head read back, or a named refusal (a row that does not decode is refused, never defaulted).
+///
+/// # Errors
+/// The bytes are not a head this build can read.
+pub fn decode_artifact_head(bytes: &[u8]) -> Result<ArtifactHead, String> {
+    let r = TlvReader::parse(ARTIFACT_HEAD_SCHEMA, bytes)
+        .map_err(|e| format!("a stored artifact head does not decode: {e}"))?;
+    Ok(ArtifactHead {
+        world_tag: field(&r, art::WORLD_TAG, "world tag")?,
+        version: field(&r, art::VERSION, "version")?,
+        edge: field(&r, art::EDGE, "edge")?,
+        digest: field(&r, art::DIGEST, "digest")?,
+        tiles_per_edge: field(&r, art::TILES_PER_EDGE, "tiles per edge")?,
+    })
+}
+
+/// A tile read back, or a named refusal.
+///
+/// # Errors
+/// The bytes are not a tile this build can read.
+pub fn decode_artifact_tile(bytes: &[u8]) -> Result<ArtifactTile, String> {
+    let r = TlvReader::parse(ARTIFACT_TILE_SCHEMA, bytes)
+        .map_err(|e| format!("a stored artifact tile does not decode: {e}"))?;
+    Ok(ArtifactTile {
+        face: field(&r, art::FACE, "face")?,
+        tx: field(&r, art::TX, "tx")?,
+        ty: field(&r, art::TY, "ty")?,
+        bytes: field(&r, art::BYTES, "bytes")?,
+    })
+}
+
+/// A pyramid read back, or a named refusal.
+///
+/// # Errors
+/// The bytes are not a pyramid this build can read.
+pub fn decode_artifact_pyramid(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let r = TlvReader::parse(ARTIFACT_PYRAMID_SCHEMA, bytes)
+        .map_err(|e| format!("a stored artifact pyramid does not decode: {e}"))?;
+    field(&r, art::LEVELS, "levels")
 }
 
 /// The key for one built child's berth: the family tag, then the child's name.
@@ -224,6 +379,11 @@ pub fn decode_body(bytes: &[u8]) -> Result<BuiltBody, String> {
 #[cfg(test)]
 mod tests {
     use super::{
+        ArtifactHead, ArtifactTile, artifact_head_key, artifact_pyramid_key, artifact_tile_key,
+        artifact_tile_prefix, decode_artifact_head, decode_artifact_pyramid, decode_artifact_tile,
+        encode_artifact_head, encode_artifact_pyramid, encode_artifact_tile,
+    };
+    use super::{
         BERTH_SCHEMA, BODY_SCHEMA, BlockStoreTuning, CHUNK_DELTA_SCHEMA, CHUNK_PYRAMID_SCHEMA,
         berth_key, berth_prefix, body_key, decode_berth, decode_body, encode_berth, encode_body,
         owner_fence_key,
@@ -236,6 +396,51 @@ mod tests {
     use vd_core::glam::DVec3;
     use vd_core::ids::{AccountId, EntityId};
     use vd_core::pose::RealmId;
+
+    /// ★ THE ARTIFACT's ROWS (slice 8c stage C4): the head, a tile and a pyramid round-trip through
+    /// their frames; the keys order a face's tiles by column then row; a row that does not decode is
+    /// refused by name, never defaulted.
+    #[test]
+    fn artifact_rows_round_trip_and_refuse_garbage() {
+        let head = ArtifactHead {
+            world_tag: 0xdead_beef,
+            version: 1,
+            edge: 1_216,
+            digest: [7, 11],
+            tiles_per_edge: 19,
+        };
+        assert_eq!(
+            decode_artifact_head(&encode_artifact_head(&head)),
+            Ok(head.clone())
+        );
+        let tile = ArtifactTile {
+            face: 3,
+            tx: 2,
+            ty: 18,
+            bytes: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+        };
+        assert_eq!(
+            decode_artifact_tile(&encode_artifact_tile(&tile)),
+            Ok(tile.clone())
+        );
+        let levels = vec![vec![1u8, 0, 2, 0], vec![3, 0]];
+        assert_eq!(
+            decode_artifact_pyramid(&encode_artifact_pyramid(&levels)),
+            Ok(levels)
+        );
+        assert_eq!(artifact_head_key(), vec![4]);
+        assert_eq!(artifact_pyramid_key(), vec![6]);
+        assert_eq!(artifact_tile_prefix(), vec![5]);
+        assert_eq!(
+            artifact_tile_key(3, 2, 18),
+            vec![5, 3, 0, 0, 0, 2, 0, 0, 0, 18]
+        );
+        assert!(artifact_tile_key(3, 2, 18) < artifact_tile_key(3, 3, 0));
+        assert!(artifact_tile_key(3, 2, 18) > artifact_tile_key(3, 2, 17));
+        assert!(decode_artifact_head(b"nonsense").is_err());
+        assert!(decode_artifact_tile(&encode_artifact_head(&head)).is_err());
+        assert!(decode_artifact_pyramid(&encode_artifact_tile(&tile)).is_err());
+    }
 
     fn ship(seq: u64) -> RealmId {
         RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, seq, 0))

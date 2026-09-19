@@ -242,6 +242,37 @@ pub fn relief_of_table(
     (whole - fine) + fine.mul_shr(m, NOISE_BITS)
 }
 
+/// ★ [`relief_of_table`] FROM A FIRST OCTAVE (slice 8c stage C4): the octaves before `first` are
+/// the COARSE ones the macro field `Z` replaces, so a column that reads `Z` sums from `first` on.
+/// The roughness factor still multiplies the fine mask's octaves alone. `first` at or past `count`
+/// sums nothing.
+#[must_use]
+pub fn relief_of_table_from(
+    octaves: &[Octave; OCTAVES_CAP],
+    first: usize,
+    count: usize,
+    dir: [Gi; 3],
+    rough: &Roughness,
+) -> Gi {
+    let d = sample_direction(dir);
+    let n = if count < OCTAVES_CAP {
+        count
+    } else {
+        OCTAVES_CAP
+    };
+    let m = factor_of(rough.m_min, roughness_raw(rough, d));
+    let mut whole = Gi::ZERO;
+    let mut fine = Gi::ZERO;
+    let mut k = first;
+    while k < n {
+        let term = octave_term(&octaves[k], d);
+        whole += term;
+        fine += term & octaves[k].fine;
+        k += 1;
+    }
+    (whole - fine) + fine.mul_shr(m, NOISE_BITS)
+}
+
 /// The 40-bit direction shifted to the noise's sample bits.
 fn sample_direction(dir: [Gi; 3]) -> [Gi; 3] {
     [

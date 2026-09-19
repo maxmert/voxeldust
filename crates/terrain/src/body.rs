@@ -91,7 +91,7 @@ pub const TAN_REPOSE: f64 = 0.70;
 /// `03` §4.2.1 requires. On the home planet it selects octaves 4..13 — 25 km down to 49 m — which is
 /// the band every number in the arc was computed on. **8c replaces the constant with
 /// `4 · macro_node_m` and the band does not move on the home planet, by construction.**
-pub const MACRO_NODE_M: u64 = 8_224;
+pub const MACRO_NODE_M: u64 = crate::macro_lattice::MACRO_CELL_TARGET_M;
 pub const MACRO_SAMPLES_PER_WAVE: u64 = 4;
 pub const FINE_ABOVE_M: u64 = MACRO_SAMPLES_PER_WAVE * MACRO_NODE_M;
 /// A BODY ALWAYS HOLDS AT LEAST ONE FINE OCTAVE, so the constraint below never divides by zero: the
@@ -483,6 +483,8 @@ pub(crate) mod salt {
     /// affinities and ages, the crust's named scatter. Read by the solve once per body, never by
     /// the draw of the body itself, so no chunk byte moved when it was added.
     pub const LAND: u64 = 0x5e_ed_0a;
+    /// ★ THE CRATERS' stream (slice 8c stage C3): where each impact sits and how large it is.
+    pub const CRATERS: u64 = 0x5e_ed_0b;
 }
 
 /// The cave parameters, as the kernels read them.
@@ -676,6 +678,9 @@ pub struct BodyDefinition {
     pub(crate) strata: StrataTable,
     pub(crate) caves: Caves,
     pub(crate) biome: BiomeField,
+    /// ★ THE MACRO LATTICE'S EDGE (slice 8c stage C4): the divisor rule's answer for this body, so
+    /// a column finds its macro node without the search; zero where the rule finds no edge.
+    pub(crate) macro_edge: u32,
 }
 
 /// A draw in `[lo, hi)` metres as a whole number.
@@ -865,6 +870,20 @@ impl BodyDefinition {
     pub fn relief_arms_m(&self) -> (f64, f64) {
         let (strength, shape) = relief_arms(self.facts, Gf::from_f64(self.ladder.radius_m()));
         (strength.to_f64(), shape.to_f64())
+    }
+
+    /// ★ THE MACRO LATTICE of this body (slice 8c stage C4): `None` where the divisor rule found no
+    /// edge (a pebble).
+    #[must_use]
+    pub fn macro_lattice(&self) -> Option<crate::macro_lattice::MacroLattice> {
+        crate::macro_lattice::MacroLattice::with_edge(self, self.macro_edge)
+    }
+
+    /// ★ THE FIRST FINE OCTAVE's index: the octaves before it are the coarse ones the macro field
+    /// replaces when an artifact is read.
+    #[must_use]
+    pub fn first_fine(&self) -> usize {
+        self.roughness.first_fine.raw() as usize
     }
 
     /// The cell-count reciprocal of a rung: what a direction needs instead of a divide. A rung past
@@ -1247,6 +1266,7 @@ impl BodyDefinition {
             strata,
             caves,
             biome,
+            macro_edge: crate::macro_lattice::macro_edge(ladder.n).unwrap_or(0),
         })
     }
 
@@ -1292,6 +1312,12 @@ impl BodyDefinition {
             terrace: self.terrace_at(rung),
             octaves: self.octaves,
         }
+    }
+
+    /// The whole octave table, for a sum that starts at a first octave (the field-aware height).
+    #[must_use]
+    pub fn octave_table(&self) -> &[Octave; OCTAVES] {
+        &self.octaves
     }
 
     /// ★ THE LIVE OCTAVES AT RUNG `rung` — the survival rule of ruling T7 rule 1, read from the row

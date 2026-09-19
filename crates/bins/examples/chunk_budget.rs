@@ -113,7 +113,7 @@ fn time_chunk(
     let start = Instant::now();
     let mut column: Option<ColumnField> = None;
     for _ in 0..rounds {
-        column = column_field(body, key.face, key.rung, key.x, key.y);
+        column = column_field(body, None, key.face, key.rung, key.x, key.y);
     }
     let columns_ms = start.elapsed().as_secs_f64() * 1e3 / rf;
     let column = column?;
@@ -127,7 +127,7 @@ fn time_chunk(
     let start = Instant::now();
     let mut samples = None;
     for _ in 0..rounds {
-        samples = sample_box(body, key);
+        samples = sample_box(body, None, key);
     }
     let box_ms = start.elapsed().as_secs_f64() * 1e3 / rf;
     let samples = samples?;
@@ -146,7 +146,7 @@ fn time_chunk(
     let before = parents.stats();
     let start = Instant::now();
     for p in parent_keys(body, key) {
-        let _ = parents.get(realm, body, p);
+        let _ = parents.get(realm, body, None, p);
     }
     let parents_ms = start.elapsed().as_secs_f64() * 1e3;
     let after = parents.stats();
@@ -155,7 +155,7 @@ fn time_chunk(
     let start = Instant::now();
     let mut geometry = None;
     for _ in 0..rounds {
-        geometry = geometry_from(body, realm, key, &samples, parents);
+        geometry = geometry_from(body, None, realm, key, &samples, parents);
     }
     let geometry_all_ms = start.elapsed().as_secs_f64() * 1e3 / rf;
     let geometry = geometry?;
@@ -377,7 +377,7 @@ fn named_chunk(body: &vd_terrain::BodyDefinition, realm: RealmId, named: ChunkKe
             );
         }
     }
-    let Some(column) = column_field(body, named.face, named.rung, named.x, named.y) else {
+    let Some(column) = column_field(body, None, named.face, named.rung, named.x, named.y) else {
         return;
     };
     let Some(lattice) = generate_in(body, &column, named.z) else {
@@ -442,26 +442,26 @@ fn named_chunk(body: &vd_terrain::BodyDefinition, realm: RealmId, named: ChunkKe
 
 fn parent_hit(body: &vd_terrain::BodyDefinition, realm: RealmId, named: ChunkKey, rounds: u32) {
     println!("\n=== 3. THE PARENT HIT ON THE NAMED CHUNK ===");
-    let Some(samples) = sample_box(body, named) else {
+    let Some(samples) = sample_box(body, None, named) else {
         return;
     };
     let rf = f64::from(rounds);
     let parents = parent_keys(body, named);
     let warm = ParentCache::with_capacity(64);
     for p in &parents {
-        if let Some(m) = ParentMesh::build(body, *p) {
+        if let Some(m) = ParentMesh::build(body, None, *p) {
             warm.insert(realm, *p, Arc::new(m));
         }
     }
     let start = Instant::now();
     for _ in 0..rounds {
-        let _ = geometry_from(body, realm, named, &samples, &warm);
+        let _ = geometry_from(body, None, realm, named, &samples, &warm);
     }
     let warm_ms = start.elapsed().as_secs_f64() * 1e3 / rf;
     let start = Instant::now();
     for _ in 0..rounds {
         let fresh = ParentCache::with_capacity(64);
-        let _ = geometry_from(body, realm, named, &samples, &fresh);
+        let _ = geometry_from(body, None, realm, named, &samples, &fresh);
     }
     let cold_ms = start.elapsed().as_secs_f64() * 1e3 / rf;
     let mut parent_ms = 0.0;
@@ -470,7 +470,7 @@ fn parent_hit(body: &vd_terrain::BodyDefinition, realm: RealmId, named: ChunkKey
         let start = Instant::now();
         let mut tris = 0;
         for _ in 0..rounds {
-            tris = ParentMesh::build(body, *p).map_or(0, |m| m.triangle_count());
+            tris = ParentMesh::build(body, None, *p).map_or(0, |m| m.triangle_count());
         }
         parent_ms += start.elapsed().as_secs_f64() * 1e3 / rf;
         parent_tris += tris;
@@ -505,7 +505,7 @@ fn parent_anatomy(body: &vd_terrain::BodyDefinition, named: ChunkKey, rounds: u3
         let start = Instant::now();
         let mut samples = None;
         for _ in 0..rounds {
-            samples = sample_box(body, *p);
+            samples = sample_box(body, None, *p);
         }
         let box_ms = start.elapsed().as_secs_f64() * 1e3 / rf;
         let Some(samples) = samples else { continue };
@@ -527,7 +527,7 @@ fn parent_anatomy(body: &vd_terrain::BodyDefinition, named: ChunkKey, rounds: u3
         let surface_ms = start.elapsed().as_secs_f64() * 1e3 / rf;
         let start = Instant::now();
         for _ in 0..rounds {
-            let _ = ParentMesh::build(body, *p);
+            let _ = ParentMesh::build(body, None, *p);
         }
         let all_ms = start.elapsed().as_secs_f64() * 1e3 / rf;
         let rest_ms = all_ms - box_ms - edge_ms;

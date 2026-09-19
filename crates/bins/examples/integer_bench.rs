@@ -490,7 +490,7 @@ fn part_7_the_drift_hunt(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
             let _ = gear.run(&plan).expect("the card answered");
         }
         let plan = vd_terrain::gpu::plan(body, failing).expect("the key is on the ladder");
-        let cpu = vd_terrain::lattice::sample_box(body, failing).expect("the box");
+        let cpu = vd_terrain::lattice::sample_box(body, None, failing).expect("the box");
         let mut attempt = 0;
         while attempt < 3 {
             let run = gear.run(&plan).expect("the card answered");
@@ -514,7 +514,7 @@ fn part_7_the_drift_hunt(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
         let mut gear = vd_client_render::gpu_check::BoxGear::new(device.clone(), queue.clone());
         let run = gear.run(&plan).expect("the card answered");
         let card = plan.box_of(&cells_of(&run.cells), &dirs_of(&run.dirs));
-        let cpu = vd_terrain::lattice::sample_box(body, failing).expect("the box");
+        let cpu = vd_terrain::lattice::sample_box(body, None, failing).expect("the box");
         let differing = cpu
             .cells
             .iter()
@@ -558,8 +558,8 @@ fn part_7_the_drift_hunt(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
         for (lane, (key, plan)) in window.iter().enumerate() {
             let run = gears[lane].collect().expect("the card answered");
             let card = plan.box_of(&cells_of(&run.cells), &dirs_of(&run.dirs));
-            let cpu =
-                vd_terrain::lattice::sample_box(body, *key).expect("the box is on the ladder");
+            let cpu = vd_terrain::lattice::sample_box(body, None, *key)
+                .expect("the box is on the ladder");
             // ★ THE THIRD ANSWER: the PLAN'S OWN CPU run — the same charter, the same layer rules,
             // the same kernel, on this host. It splits the verdict: a card that agrees with the
             // plan and disagrees with `sample_box` is INNOCENT, and the two CPU paths differ.
@@ -889,7 +889,7 @@ fn part_5_the_cell_field(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
     let bodies: Vec<BodyDefinition> = (0..workers).map(|_| home_planet()).collect();
     let started = Instant::now();
     for key in &square {
-        let _ = vd_terrain::lattice::sample_box(body, *key).expect("the box");
+        let _ = vd_terrain::lattice::sample_box(body, None, *key).expect("the box");
     }
     let cpu_one_core = started.elapsed().as_secs_f64();
     let started = Instant::now();
@@ -899,7 +899,7 @@ fn part_5_the_cell_field(device: &wgpu::Device, queue: &wgpu::Queue, body: &Body
             scope.spawn(move || {
                 let mut i = w;
                 while i < keys.len() {
-                    let _ = vd_terrain::lattice::sample_box(own, keys[i]).expect("the box");
+                    let _ = vd_terrain::lattice::sample_box(own, None, keys[i]).expect("the box");
                     i += workers;
                 }
             });
@@ -952,7 +952,7 @@ fn compare_boxes(
                 .iter()
                 .any(|t| t.radius_steps > vd_recipe::Gi::ZERO),
         );
-        let want = vd_terrain::lattice::sample_box(body, *key).expect("the box");
+        let want = vd_terrain::lattice::sample_box(body, None, *key).expect("the box");
         // ★ THE COLUMN PASS ITSELF, not only its consequence: the directions the card wrote against
         // the ones the host's own column pass writes. A cell word folds the direction through the
         // whole cell kernel, so a direction that differs in its last bit could still pack the same

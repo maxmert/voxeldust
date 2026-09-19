@@ -161,6 +161,7 @@ mod tests {
             realm_boxes: Vec::new(),
             origin: None,
             sky: None,
+            artifacts: vd_devproto::state::DevArtifacts::default(),
             stars_drawn: 0,
             terrain_chunks_drawn: 0,
             terrain_chunks_pending: 0,

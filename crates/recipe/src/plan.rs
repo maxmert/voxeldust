@@ -22,7 +22,7 @@
 use crate::bend::{DIR_ONE, basis_of, direction, normalise};
 use crate::cell::{Column, LENGTH_BITS, point_at};
 use crate::gi::Gi;
-use crate::height::{BiomeCharter, OCTAVES_CAP, Octave, Roughness, biome_of, relief_of_table};
+use crate::height::{BiomeCharter, OCTAVES_CAP, Octave, Roughness, biome_of, relief_of_table_from};
 use crate::noise::value3;
 use crate::terrace::{Terrace, terrace};
 
@@ -118,6 +118,23 @@ fn corner_axis(n: i32, u: i32, v: i32, i: i32, j: i32) -> Gi {
 /// calls.
 #[must_use]
 pub fn column_surface(charter: &PlanCharter, face: i32, i: i32, j: i32) -> ColumnSurface {
+    column_surface_from(charter, face, i, j, Gi::ZERO, 0)
+}
+
+/// ★ THE COLUMN PASS WITH THE MACRO FIELD (slice 8c stage C4): the surface is the radius, plus `z`
+/// — the eroded height the host read off the artifact for this column, at the length format —
+/// plus the octaves from `first` on (the coarse ones `Z` replaces are left out), then the bench.
+/// Without an artifact the host passes zero and the first octave, and the column is the recipe's
+/// own coarse relief.
+#[must_use]
+pub fn column_surface_from(
+    charter: &PlanCharter,
+    face: i32,
+    i: i32,
+    j: i32,
+    z: Gi,
+    first: usize,
+) -> ColumnSurface {
     let dir = site_direction(charter, face, i, j);
     // ★ THE BENCH IS LAST (slice 8a stage 4): the octave sum answers the raw surface, and the
     // terrace then pulls it toward the nearest bed top. The biome below reads the TERRACED surface,
@@ -125,8 +142,10 @@ pub fn column_surface(charter: &PlanCharter, face: i32, i: i32, j: i32) -> Colum
     let h = terrace(
         &charter.terrace,
         charter.radius
-            + relief_of_table(
+            + z
+            + relief_of_table_from(
                 &charter.octaves,
+                first,
                 charter.octave_count.raw() as usize,
                 dir,
                 &charter.roughness,
@@ -294,6 +313,7 @@ mod tests {
     use super::*;
     use crate::bend::{DIR_BITS, inv_n_of};
     use crate::cell::LENGTH_BITS;
+    use crate::height::relief_of_table;
     use crate::height::{AMP_BITS, GAP_STEPS_PER_CELL};
     use crate::noise::{NOISE_BITS, NOISE_ONE};
 

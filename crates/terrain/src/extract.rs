@@ -685,7 +685,7 @@ pub(crate) mod tests {
             y: 700,
             z: surface_chunk_z(&m, Face::PosX, 0, 300, 700),
         };
-        let samples = sample_box(&m, key).expect("in the band");
+        let samples = sample_box(&m, None, key).expect("in the band");
         let owned = extract(&samples);
         let all = extract_all_edges(&samples);
         // The whole holds more than the owned part: the halo's crossings are a neighbour's.
@@ -1079,8 +1079,8 @@ pub(crate) mod tests {
             y: y0,
             z,
         };
-        let a = sample_box(&m, key(x0)).expect("in the band");
-        let b = sample_box(&m, key(x0 + 1)).expect("in the band");
+        let a = sample_box(&m, None, key(x0)).expect("in the band");
+        let b = sample_box(&m, None, key(x0 + 1)).expect("in the band");
         let ma = extract(&a);
         let mb = extract(&b);
         assert!(ma.triangles.len() > 1000);
@@ -1128,7 +1128,7 @@ pub(crate) mod tests {
             y: 7,
             z,
         };
-        let bx = sample_box(&m, kx).expect("in the band");
+        let bx = sample_box(&m, None, kx).expect("in the band");
         let mx = extract(&bx);
         let site = bx.site(beyond, 0);
         assert_eq!(site.face, Face::PosY.index());
@@ -1139,7 +1139,7 @@ pub(crate) mod tests {
             y: site.j / CHUNK_EDGE as i32,
             z,
         };
-        let by = sample_box(&m, ky).expect("in the band");
+        let by = sample_box(&m, None, ky).expect("in the band");
         let my = extract(&by);
         well_formed(&bx, &mx);
         well_formed(&by, &my);
@@ -1178,7 +1178,7 @@ pub(crate) mod tests {
             z,
         };
         let boxes = [Face::PosX, Face::PosY, Face::PosZ]
-            .map(|f| sample_box(&m, key(f)).expect("in the band"));
+            .map(|f| sample_box(&m, None, key(f)).expect("in the band"));
         let meshes = boxes.each_ref().map(extract);
         // The corner group of every box: the phantom at local (beyond, beyond), the prism at
         // origin (beyond − 1, beyond − 1, c). For every layer where the surface crosses it, the

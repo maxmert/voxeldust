@@ -91,7 +91,7 @@ fn table() -> Vec<String> {
             "rung {rung}: every column is distinct"
         );
         for (face, x, y) in keys {
-            let column = column_field(&body, face, rung, x, y).expect("a home planet column");
+            let column = column_field(&body, None, face, rung, x, y).expect("a home planet column");
             let zs = surface_chunk_z(&body, face, rung, x, y);
             for z in [(zs - 2).max(0), zs, (zs + 2).min(top)] {
                 let chunk = generate_in(&body, &column, z).expect("a home planet chunk");

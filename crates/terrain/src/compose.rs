@@ -176,8 +176,8 @@ mod tests {
             z,
         };
         let (ka, kb) = (key(40), key(41));
-        let mut a = sample_box(&m, ka).expect("in the band");
-        let mut b = sample_box(&m, kb).expect("in the band");
+        let mut a = sample_box(&m, None, ka).expect("in the band");
+        let mut b = sample_box(&m, None, kb).expect("in the band");
         // The edit: the last column of chunk A at a surface layer, mined to Empty. In world terms
         // it is a site; A holds it at local a = 61, B at local a = −1.
         let c = {
@@ -210,7 +210,7 @@ mod tests {
         // Every group across the shared face, the mined cell's included, gives the same vertex
         // in metres from both boxes; and the mined cell moved a vertex.
         use crate::extract::vertex_of_group;
-        let plain = sample_box(&m, ka).expect("in the band");
+        let plain = sample_box(&m, None, ka).expect("in the band");
         let mut compared = 0;
         let mut moved = 0;
         let mut cc = -1;

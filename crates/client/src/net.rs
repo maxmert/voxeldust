@@ -23,9 +23,11 @@ use vd_devproto::{
 use vd_sim::io::Store as _;
 use vd_sim::io::{Inbound, MsgClass, Transport};
 use vd_wire::channels::{
-    ClientControlMsg, EventMsg, InputDatagram, RealmSnapshotDatagram, ServerControlMsg,
+    BulkMsg, ClientControlMsg, EventMsg, InputDatagram, RealmSnapshotDatagram, ServerControlMsg,
     SnapshotDatagram, SnapshotVerdict,
 };
+
+use crate::artifact_book::{ArtifactIngest, ArtifactReceiver};
 use vd_wire::seams::tickets::LoginTicket;
 use vd_wire::version::ProtoVersion;
 
@@ -134,6 +136,12 @@ pub struct ClientState {
     /// control handler has no transport. Drained on the next send. Latest-wins: only the newest sky is
     /// worth stating, and stating an older one would ask for work nobody needs.
     pending_sky_held: Option<u64>,
+    /// ★ THE ARTIFACTS (slice 8c stage C4c): the receiver of every realm's head, pyramid and
+    /// tiles, whose book the render snapshot shares by pointer.
+    artifacts: ArtifactReceiver,
+    /// THE STATEMENTS WAITING TO GO OUT (slice 8c stage C4c): the realms whose pyramid became
+    /// whole, with the digest held, each stated once as `ArtifactHeld` on the next send.
+    pending_artifact_held: Vec<(vd_core::pose::RealmId, [u64; 2])>,
     /// THE ORIGIN MARKER (§2.7): the realm the current scene is composed in, as the level stated
     /// it. `None` before the first level. The diagnosis surface (`DevState.origin`) reads it —
     /// the pixel gates' "origin marker == home realm" assert.
@@ -187,6 +195,8 @@ impl ClientState {
             scene: Arc::new(RealmScene::default()),
             sky: crate::star_sky::StarSky::default(),
             pending_sky_held: None,
+            artifacts: ArtifactReceiver::default(),
+            pending_artifact_held: Vec::new(),
             sky_draw: None,
             sky_anchor: None,
             sky_anchor_track: None,
@@ -359,8 +369,13 @@ impl ClientState {
                     Ok(scene) => {
                         self.scene = Arc::new(scene);
                         // The realms that LEFT the drawn set take their tracks with them (the
-                        // same-origin swap keeps every track, so this is the only place one ends).
+                        // same-origin swap keeps every track, so this is the only place one ends)
+                        // — and their artifacts (slice 8c stage C4c): a realm that returns is
+                        // served its head and pyramid again by its shard.
                         self.realm_view.forget(&removed);
+                        for realm in &removed {
+                            self.artifacts.forget(*realm);
+                        }
                     }
                     Err(_) => self.decode_errors += 1,
                 }
@@ -405,6 +420,22 @@ impl ClientState {
                 let at = self.latest_universe_tick.unwrap_or(0);
                 if self.sky.beat_at(generation, at) == crate::star_sky::SkyBeat::Current {
                     self.state_sky_held(generation);
+                }
+            }
+            // ★ ONE PART OF A REALM'S ARTIFACT (slice 8c stage C4c): the head, a pyramid part or a
+            // tile the realm's shard shipped and the gateway relayed unread. The receiver keeps or
+            // refuses it by name; the moment a realm's pyramid is whole the client states so, and
+            // the shard stops shipping those parts to this session.
+            ServerControlMsg::ArtifactPart { bytes } => {
+                match postcard::from_bytes::<BulkMsg>(&bytes) {
+                    Ok(msg) => {
+                        if let ArtifactIngest::PyramidWhole { realm, digest } =
+                            self.artifacts.accept(msg)
+                        {
+                            self.pending_artifact_held.push((realm, digest));
+                        }
+                    }
+                    Err(_) => self.decode_errors += 1,
                 }
             }
             // Node-AWARE legacy control a pure-renderer client no longer acts on: `AuthorityChanged`
@@ -491,6 +522,12 @@ impl ClientState {
     /// so the exchange settles only when the client answers. A client that never states this is served
     /// the catalogue again on every beat, which is safe but wasteful; a client that states a sky it
     /// does not have would be denied one, which is why this is called only where a whole sky is proven.
+    /// The artifact receiver: what the client holds of every realm's artifact, and its counters.
+    #[must_use]
+    pub fn artifacts(&self) -> &ArtifactReceiver {
+        &self.artifacts
+    }
+
     fn state_sky_held(&mut self, generation: u64) {
         self.pending_sky_held = Some(generation);
         // ★ THE SKY THE RENDERER ALREADY HOLDS IS NOT REBUILT (2026-08-29). A confirming beat arrives
@@ -604,6 +641,12 @@ impl ClientState {
         // handshake and must not wait on one. Taken, so a statement is sent once.
         if let Some(generation) = self.pending_sky_held.take() {
             let buf = postcard::to_allocvec(&ClientControlMsg::SkyHeld { generation })
+                .expect("closed wire enums serialize");
+            let _ = self.send_bytes(transport, MsgClass::Control, buf);
+        }
+        // THE HELD-ARTIFACT STATEMENTS (slice 8c stage C4c), the same way: each once.
+        for (realm, digest) in std::mem::take(&mut self.pending_artifact_held) {
+            let buf = postcard::to_allocvec(&ClientControlMsg::ArtifactHeld { realm, digest })
                 .expect("closed wire enums serialize");
             let _ = self.send_bytes(transport, MsgClass::Control, buf);
         }
@@ -801,6 +844,8 @@ impl ClientState {
         )
         // A pointer bump, whatever the census (S11).
         .with_sky(self.sky_draw.clone())
+        // The artifact book, by pointer (slice 8c stage C4c).
+        .with_artifacts(self.artifacts.book())
         .with_origin(self.origin)
         // Where the galaxy is, as last stated — the one thing that places the sky (2026-09-02).
         .with_sky_anchor(self.sky_anchor)
@@ -930,6 +975,20 @@ impl ClientState {
                 .origin
                 .map(|o| (format!("{o:?}"), self.realm_view.epoch())),
             // THE SKY (S11) — the whole catalogue this client holds, or nothing while it is partial.
+            artifacts: vd_devproto::state::DevArtifacts {
+                realms: self.artifacts.book().len() as u64,
+                whole: self
+                    .artifacts
+                    .book()
+                    .realms()
+                    .filter(|(_, c)| c.whole())
+                    .count() as u64,
+                levels: self.artifacts.counters.levels_whole,
+                tiles: self.artifacts.counters.tiles,
+                refused: self.artifacts.counters.no_head
+                    + self.artifacts.counters.shape
+                    + self.artifacts.counters.not_artifact,
+            },
             sky: self
                 .sky_draw
                 .as_ref()
@@ -1215,6 +1274,7 @@ mod tests {
         vd_terrain::WorldIdentity::of(
             vd_terrain::home::HOME_UNIVERSE_SEED,
             &vd_terrain::home::home_planet(),
+            Some(&vd_terrain::home::home_golden_fields()),
         )
         .expect("the home planet self-checks")
     }

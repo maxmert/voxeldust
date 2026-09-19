@@ -177,8 +177,13 @@ pub struct Boundary {
 /// ★ THE INITIAL LAND of one body over its macro lattice.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Land {
-    /// The heights in sixteenths from the ladder radius, the water load applied under the sea.
+    /// The heights in sixteenths from the ladder radius — the ISOSTASY, the water load applied
+    /// under the sea. The belts are not in it: they RISE during the age ([`Land::uplift`]).
     pub z: Vec<i32>,
+    /// ★ THE UPLIFT OVER THE AGE, sixteenths: what each node's belt, trench, arc, ridge or rift
+    /// adds to it by the end of the age. The solve applies it pass by pass while the rivers cut,
+    /// so a range is the balance of the two (C3); a trench's is negative — it subsides.
+    pub uplift: Vec<i32>,
     /// The sea's level in sixteenths; `None` on a body with no water.
     pub sea_z: Option<i32>,
     /// The node's plate.
@@ -447,7 +452,7 @@ fn affinity_noise(octaves: &[Octave], dir: [Gi; 3]) -> Gf {
 }
 
 /// A node's direction as fenced floats.
-fn dir_of(dir: [Gi; 3]) -> [Gf; 3] {
+pub(crate) fn dir_of(dir: [Gi; 3]) -> [Gf; 3] {
     let one = Gf::from_i64(1 << DIR_BITS);
     [
         Gf::from_i64(dir[0].raw()) / one,
@@ -623,7 +628,9 @@ pub fn initial_land_from(
         tallest = tallest.greater(h.abs());
     }
     let room = (relief - tallest).greater(Gf::ZERO);
-    // 4. Orogeny: the belts under the room.
+    // 4. Orogeny: the belts under the room — THE UPLIFT OVER THE AGE, kept beside the land.
+    let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
+    let mut uplift = Vec::with_capacity(n);
     for k in 0..n {
         let b = boundaries[k];
         let own = &plates[usize::from(b.plate)];
@@ -634,7 +641,7 @@ pub fn initial_land_from(
         let amplitude = room
             * (b.convergence.abs() / Gf::TWO).clamp(Gf::ZERO, Gf::ONE)
             * (Gf::ONE - own.age * Gf::HALF);
-        dry[k] += uplift_m(
+        let up = uplift_m(
             b.kind,
             crust[k] >= 128,
             other_continental,
@@ -643,21 +650,30 @@ pub fn initial_land_from(
             amplitude,
             width,
         );
+        uplift.push((up * steps).to_i64_floor() as i32);
     }
-    let mean = Gf::ZERO;
-    let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
     let z_dry: Vec<i32> = dry
         .iter()
-        .map(|&h| ((h - mean) * steps).to_i64_floor() as i32)
+        .map(|&h| (h * steps).to_i64_floor() as i32)
         .collect();
     // 5. The sea, with the load.
     let sea_z = sea_level(&z_dry, &area, words.water_km3);
-    let z = match sea_z {
+    let z: Vec<i32> = match sea_z {
         Some(level) => z_dry.iter().map(|&h| loaded_height(h, level)).collect(),
         None => z_dry,
     };
+    // ★ THE UPLIFT KEEPS THE ENVELOPE ON BOTH SIDES: a trench's subsidence may not carry a node
+    // under `−relief` any more than a belt may carry one over `+relief` (MEASURED on the home
+    // planet: the trenches reached −9 333 m under an 8 276 m relief and the whole planet was
+    // scaled down by a ninth at the end). Each node's total is clamped against its LOADED height,
+    // so its land plus its uplift stays inside the relief.
+    let relief_steps = (relief * steps).to_i64_floor() as i32;
+    for (u, &h) in uplift.iter_mut().zip(&z) {
+        *u = (*u).clamp(-relief_steps - h, relief_steps - h);
+    }
     Land {
         z,
+        uplift,
         sea_z,
         plate: boundaries.iter().map(|b| b.plate).collect(),
         kind: boundaries.iter().map(|b| b.kind as u8).collect(),
@@ -944,6 +960,10 @@ mod tests {
         assert!(land.kind.iter().all(|&k| k == Kind::None as u8));
         assert!(land.boundary_m.iter().all(|&b| b == u32::MAX));
         assert!(land.plate.iter().all(|&p| p == 0));
+        assert!(
+            land.uplift.iter().all(|&u| u == 0),
+            "a stagnant lid lifts nothing"
+        );
         let continental =
             land.crust.iter().filter(|&&c| c >= 128).count() as f64 / land.crust.len() as f64;
         assert!(
@@ -1025,9 +1045,11 @@ mod tests {
         ];
         // Three million cubic kilometres: about two kilometres of water over the moon's surface,
         // so the sea covers the lowlands and the floors sink under it, and the whole stays in the band.
+        // A THIN lithosphere (5 km), so the belt's half-width (two flexural parameters, about
+        // 130 km at the moon's gravity) leaves nodes on the far side of the moon outside it.
         let words = LandWords {
             water_km3: 3_000_000,
-            elastic_thickness_m: 30_000,
+            elastic_thickness_m: 5_000,
         };
         let land = initial_land_from(&moon, &lattice, &words, plates);
         assert_eq!(land.plates.len(), 2);
@@ -1040,20 +1062,23 @@ mod tests {
         let under = (0..n).filter(|&k| land.z[k] <= sea).count();
         assert!(under > 0, "nothing under the sea");
         assert!(under < n, "under {under} of {n}: everything under the sea");
-        // The belts: near the boundary on the continental side the land stands over the far field.
+        // The belts: near the boundary on the continental side the uplift stands over zero, and
+        // far from any boundary it is EXACTLY zero (the bump's exact zero outside its width).
         let near_max = (0..n)
             .filter(|&k| land.boundary_m[k] < 20_000 && land.crust[k] >= 128)
-            .map(|k| land.z[k])
+            .map(|k| land.uplift[k])
             .max()
             .expect("a near node");
-        let far_max = (0..n)
-            .filter(|&k| land.boundary_m[k] > 300_000)
-            .map(|k| land.z[k])
-            .max()
-            .expect("a far node");
+        assert!(near_max > 0, "belt {near_max}");
         assert!(
-            near_max > far_max,
-            "belt {near_max} over the far field {far_max}"
+            (0..n)
+                .filter(|&k| land.boundary_m[k] > 250_000)
+                .all(|k| land.uplift[k] == 0),
+            "the far field lifts"
+        );
+        assert!(
+            (0..n).filter(|&k| land.boundary_m[k] > 250_000).count() > 0,
+            "a far node exists"
         );
         let band = (moon.relief_bound_m(0) * f64::from(Z_STEPS_PER_M)) as i32;
         assert!(land.z.iter().all(|&z| z.abs() <= band));

@@ -184,3 +184,103 @@ finding stands — no uplift, and the erodibility uncalibrated against the age.
 9. **The crust's scaling by the relief law's cap** (ledger D-TERRAIN-7, C2): the investigation's `1/g`
    alone gives a 350 km moon a thousand kilometres of crust; the build bounds it by the shape arm.
    Recommend accepting it as the law's statement.
+
+## 9. Stage C3 — THE SOLVE, measured (2026-09-19)
+
+`crates/terrain/src/climate.rs` (the climate inside the schedule), `crates/terrain/src/craters.rs`
+(the impact record), and in `solve.rs` the uplift in the sweep, the sediment budget, the flexural
+rebound on the coarse lattice, the talus, the ice, the coast band, the envelope, the facies byte and
+gate G-AGE's reading; `Gf::exp`, `Gf::ln` and `Gf::powf` as fenced polynomials (ask 6). The same
+bench, the home planet alone, the machine quiet.
+
+### 9.1 The cost — and ask 2's answer
+
+| phase, the home planet (8 871 936 nodes) | one thread |
+|---|---|
+| the whole full solve (the land, the craters, 40 sweeps, 4 climates, 4 routings, 8 rebounds, 8 talus passes, the ice, the coast, the envelope, the gates' readings) | **57 s** |
+| one climate recompute (four in the schedule) | 8.2 s |
+| the craters applied (144 967 craters) | 11.1 s |
+| the core (C1's routings and sweeps) and the land (C2) | about 9 s |
+| one talus pass (eight) | 0.18 s |
+| one rebound (eight) | 0.018 s |
+| the ice | 0.011 s |
+| the crater population's draw | 0.04 s |
+| peak memory over the process's start | about 60 B a node, as C1 |
+
+**Ask 2 is answered by the number: SHIP the artifact.** Fifty-seven seconds of one core is not "a
+few seconds", and a client approaching a planet must not spend a minute of a core before it can draw
+the ground. So the realm solves once, keeps the artifact, and ships it on the bulk lane (one SL6
+row, the design's §8), the home planet's pinned in the build. The climate is the cost to cut first
+if the solve must be faster: it is 930 ns a node, and its latitude-only rows (the temperature
+contrast, the belt) are the same for every node on a latitude and can be tabulated once; the craters
+are once per body and their 11 s are the breadth-first stamps of 145 000 craters.
+
+### 9.2 The gates and the shape
+
+- **Every routing drains, no cycle**, on every body and every pass (G-DRAINAGE).
+- **THE TALUS DIVERGED, and was cured by a trace.** The first full run sent the talus's worst
+  excess from 41 km to 143 000 km over its eight passes and the envelope then scaled the planet to
+  nothing. The pass-by-pass trace (`VD_BENCH_TRACE=1`, §9.3) showed the forty sweeps, the uplift
+  and the rebound holding the field inside ±9.3 km, and the talus alone running away: it moved half
+  the excess SUMMED over eight neighbours, so a peak with many low neighbours dropped far under them
+  and the pair grew. Bounded by half the LARGEST single excess (03 §4.8's proportional split kept),
+  the excess halves every pass: 8.2 km, 3.1 km, 833 m, 417 m, 383 m, 192 m, 192 m, 96 m — the
+  monotone fall 03 §14 M13 asks for.
+- **THE ICE**: 678 694 nodes (7.6 % of the area) stand over the equilibrium line; the thickest ice
+  5 435 m; the deepest trough cut 1 925 m.
+- **THE COAST BAND**: 11.8 m on the home planet (Earth's 10 m storm wave under its denser air).
+- **THE ENVELOPE**: the trenches' subsidence first carried the field to −9 333 m under an 8 276 m
+  relief; the uplift is now clamped against the CRATERED, LOADED field (twice: in the land against
+  the loaded height, in the driver against the crater-clipped one), and the floor holds at −8 276 m
+  through all forty passes. The top reaches 8 993 m: the rebound lifting un-eroded ridges over their
+  start, exactly the case 03 §4.13 built the uniform scale for; the scale of 0.92 is applied at the
+  end and the field leaves at ±8 276 m.
+- **THE SHAPE**: sea 83.4 %, lakes 2.3 %, coast 0.4 %, ice 7.6 % by area — 16.6 % land; 721 414
+  basins carry a deposit; the land share rose from C2's 10.5 % because the belts now stand as uplift
+  over the age.
+
+### 9.3 ★ GATE G-AGE DOES NOT MEASURE THE ERODIBILITY — the finding
+
+The median hypsometric integral over the 1 434 basins of a hundred land nodes or more reads **0.71**,
+and the erodibility scan reads **0.73, 0.71, 0.73 and 0.71 at a tenth, a hundredth, a thousandth and
+ten times** the stated `K0`. Four decades of erodibility move the integral by two hundredths. So the
+integral in this form does not read the age of the rivers: on an 8 km lattice a basin of a hundred
+nodes is a continental platform with a few incisions, whose mean stands near its maximum whatever
+the trunk was cut to, and Strahler's 0.35–0.60 band was measured on kilometre-scale basins with
+continuous topography. The gate stays as a reading; it is NOT the calibration of `K0`, which stays
+the literature's middle (Stock & Montgomery 1999) and is ledgered as owed to a measurement that can
+move: the design's convergence test M12 (the same age at twice the passes) and a relief-against-age
+statistic over the belts, both C4's or later.
+
+### 9.4 The trace (the instrument)
+
+| step | z after it, the home planet |
+|---|---|
+| the land (isostasy, loaded) | −4 647 .. 4 395 m |
+| the craters, clipped at the relief | −8 276 .. 8 276 m |
+| pass 0: the first sweep after the first climate and routing | max cut 13 062 m (a coast next to a trench cut to its base in one pass: `c` is hundreds on a trunk) |
+| passes 1–4 | max cut 32, 64, 96, 128 m (the uplift's step, cut back each pass) |
+| the rebounds (level 4, 131 km nodes) | max lift 572, 313, 439, 251, 385, 214, 346, 198 m |
+| after 40 passes | −8 276 .. 8 998 m (the clamp holding the floor; the rebound's lift on the top) |
+| the talus, eight passes | worst excess 8 213 → 96 m |
+| the ice | −8 276 .. 8 993 m; the envelope's scale of 0.92 follows |
+
+## 10. Stage C4 — THE ARTIFACT, THE STORE, THE SHIP (built 2026-09-19)
+
+What is MEASURED and what is not, stage by stage. The design's §14 says what was built; this section says what
+the numbers are.
+
+| item | measured | value |
+|---|---|---|
+| the home planet's artifact | yes (`just artifact-pin`) | 8 871 936 rows × 9 B + 6 pyramid levels = 85.8 MB; digest `[0x7d45_41f7_7236_b266, 0xe47e_822c_6e65_0d8d]`; 71 s of one core in release |
+| the corner blend's step | yes (moon, G-MACRO-CORNER) | ~160 m over a metre inside the two-node clamp band; < 2 m outside it |
+| the golden chunk tables under the recipe (`None`) | yes (`just terrain-pin`) | unchanged by C4a–c (the recipe did not move) |
+| the world identity through the golden fields | yes (`golden_z_record`, the tag test, the artifact pin) | `HOME_IDENTITY_MEASURED` pinned; the recipe-only word differs |
+| the ship's pace | stated, not measured on a link | 8 pyramid parts + 4 tiles a tick a session; a tile is up to 64 × 64 × 9 B = 36 KB, so 144 KB a tick, 2.9 MB/s at 20 Hz; the head and the six levels of the home planet are 2.96 M words = 5.9 MB, shipped in 184 parts (16 384 words each) over 23 ticks (1.2 s) |
+| the client's per-chunk field pick | unit-tested (moon) | rung ≥ 10 reads a pyramid level on the home planet (`level_for`); a rung-0 chunk waits for 1–2 tiles, 4 at a face edge |
+| the recipe→artifact rebuild at login | UNMEASURED | the count is `ChunkCounters::artifact_rebuilds`; the visible step is judged on the first window flight |
+| the far view's pop at the crossing into the planet's realm | UNMEASURED | the window-holder ship is owed; the step is bounded by the artifact's own relief against the recipe's coarse octaves |
+| the tiles' arrival against the finest ring's horizon | UNMEASURED | `ChunkCounters::awaiting_artifact` on the first window flight |
+
+The other targets' legs (the x86-64 leg, the k3d pod) of the artifact pin are UNMEASURED until the legs script runs
+`just artifact-pin` there.

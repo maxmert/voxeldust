@@ -146,6 +146,10 @@ pub struct GatewayStats {
     /// the gateway's per-session bulk forward exists (slice 10 builds it beside the first producer).
     /// COUNTED, never silently dropped. Expected 0 until slice 10; then retired.
     pub bulk_for_unrouted: u64,
+    /// ★ THE ARTIFACT SHIP (slice 8c stage C4c): bulk parts relayed to named sessions.
+    pub artifact_parts_relayed: u64,
+    /// THE ARTIFACT SHIP: `ArtifactHeld` statements recorded on sessions.
+    pub artifact_held_stated: u64,
     /// CATALOGUE PARTS NOT SENT because the client already held that sky (S11). This is the saving,
     /// counted: every skipped part is bytes that did not cross for a galaxy that did not move.
     pub sky_parts_skipped: u64,

@@ -206,7 +206,7 @@ mod tests {
             y: 7,
             z,
         };
-        let bx = sample_box(&m, kx).expect("in the band");
+        let bx = sample_box(&m, None, kx).expect("in the band");
         // The centre of local cell (3, 4, 5): weight one on that cell.
         let p = vertex_position(&m, &bx, [3 * 256, 4 * 256, 5 * 256]);
         let dir = bx.dir(3, 4);
@@ -253,7 +253,7 @@ mod tests {
             z,
         };
         let boxes = [Face::PosX, Face::PosY, Face::PosZ]
-            .map(|f| sample_box(&m, key(f)).expect("in the band"));
+            .map(|f| sample_box(&m, None, key(f)).expect("in the band"));
         // In every box the phantom is at (beyond, beyond) and the own corner cell at (beyond − 1,
         // beyond − 1); the prism group's origin is (beyond − 1, beyond − 1, c).
         let base = ((beyond - 1) * 256) as i16;
@@ -293,7 +293,7 @@ mod tests {
             y: 0,
             z,
         };
-        let b0 = sample_box(&m, k0).expect("in the band");
+        let b0 = sample_box(&m, None, k0).expect("in the band");
         let p0 = vertex_position(&m, &b0, [0, 0, 5 * 256]);
         let d0 = point_at(b0.dir(0, 0), r);
         let mut k = 0;

@@ -310,7 +310,7 @@ on a digest mismatch. The charter's `sea_offset_mm` already crosses.
 |---|---|---|
 | C1 THE BENCH — 🟩 BUILT AND MEASURED 2026-09-19 | the solve's core (`crates/terrain/src/macro_lattice.rs`, `solve.rs`; the bench `crates/bins/examples/macro_bench.rs`; the report `slice_8c_bench.md`) on THE world's bodies, single-threaded: the home planet's WHOLE SCHEDULE (40 sweeps, 4 routings) **7.2 s of one thread** on 8 871 936 nodes (the design's estimate: 12–40 s on 2.46 M); one routing 0.93 s, one sweep 0.25 s, the state 52 B/node (461 MB); every node drains, no cycle | M-L1 measured; ask 2: the core alone is under the "few seconds" line for a derive — the decision waits for C3's passes on top of it |
 | C2 THE INITIAL LAND — 🟩 BUILT AND MEASURED 2026-09-19 | `crates/terrain/src/land.rs`: the plate law (the home planet 14, its moon a stagnant lid), the crust field with Airy isostasy and the water load (the exact fixed point: Earth's 4 455 m dry step is 6 476 m loaded), the belts as the room under the relief, the sea by an integer bisection over the nodes; 1.33 s on the home planet (`slice_8c_bench.md` §7) | G-LAND-HYPSOMETRY GREEN on every body (the home planet: floors −4 688 m, platforms +1 812 m); ★ FINDING: the census's 2.03 Earth oceans leave the home planet 10.5 % LAND (ask 8) |
-| C3 THE SOLVE | the schedule with the climate inside; sediment, flexure, talus, ice, coast, craters (ask 4); the envelope assertion | the per-basin hypsometric integral = the erosional age; every land node drains to a lake or the sea |
+| C3 THE SOLVE — 🟩 BUILT AND MEASURED 2026-09-19 | `climate.rs`, `craters.rs`, the passes in `solve.rs`; `solve_full`; the fenced exp/ln (ask 6: polynomials); the home planet's full solve **57 s** of one thread (the climate 8.2 s × 4, the craters 11 s) — ask 2 ANSWERED: SHIP the artifact (`slice_8c_bench.md` §9) | every node drains; the talus's divergence found by a pass-by-pass trace and cured (half the LARGEST excess); ★ G-AGE READS 0.71 AT EVERY `K0` OVER FOUR DECADES — it measures the platforms' flatness, not the rivers' age; `K0`'s calibration is owed to M12 |
 | C4 THE ARTIFACT AND THE READ | the rows, the pyramid, the digest, the home pin; `height_m` reads `Z` and the roughness field; the coarse octaves replaced; the ladder's coarsening re-measured; the version bump | no-drift on the artifact (byte-identical on every target); the seam/corner gate; the rung-disagreement judge under a pixel |
 | C5 THE SEA | the sea re-solved over the new hypsometry; the draw deleted; the coast marked | the ocean share MEASURED (T8's cure); the water sheet judged wet |
 | C6 THE LOOK | the seven stands + the VISTA stand (the largest-relief chunk, chosen by measurement), re-taken | the owner's look; the freeze on his word |
@@ -363,3 +363,87 @@ Rivers as drawn things, lakes, the water sheet, the channel carve, the rock map 
 (8d); the biome, the soil, the tree line, the paint table (8e); arches, overhangs, cave mouths (8f); the
 ocean's surface, tides and sailing (8o); the almanac and the live weather (18). 8c gives every one of
 them the skeleton and the rows they read.
+
+---
+
+## 13. THE OWNER'S ANSWERS (2026-09-19)
+
+The seven asks of §11 were taken at their recommendations ("the 8c sounds good", "proceed"), and the
+asks the build added were answered on the measurements:
+
+- **Ask 2, SHIP OR DERIVE — RULED: ONCE ON THE SERVER, SAVED IN THE SHARD'S DB, SHIPPED TO ALL
+  CLIENTS.** The full solve is 56 s of one core on the home planet (`slice_8c_bench.md` §9.1) and the
+  solve is global (the flood and the routing need every node before any node is right), so a client
+  cannot derive one valley without solving the planet. The realm solves once, keeps the artifact in its
+  own store, and ships it IN TILES: the coarse pyramid first (the top level 4.8 KB, all levels 1.6 MB —
+  the globe from orbit), then the node rows under the eye on demand (a 1 000 km circle ≈ 46 000 nodes
+  ≈ 400 KB), each tile with its digest, on the bounded-ask shape of ruling F9. The whole table (80 MB
+  on the home planet) never crosses at once. The client keeps the DERIVE path as the fallback where it
+  holds the seed and the charter and no realm is reachable, so SL10 stands. ONE new payload kind (the
+  SL6 row of §8), approved by this answer.
+- **Ask 8, the home planet's land share — ACCEPT.** The water law is sound (a ramp anchored on Earth and
+  the snow line; the home planet formed further out than Earth relative to its star's snow line and holds
+  twice Earth's water). With the belts standing as uplift the home planet is 16.6 % land; judged on the
+  pictures at C6.
+- **Ask 9, the crust scales by the relief law's cap — ACCEPT.**
+- **The erodibility's calibration — ACCEPTED as a change of plan:** G-AGE is a reading, not the
+  calibration (it reads 0.70–0.73 over four decades of `K0`); `K0` stays the literature's middle; the
+  calibration moves to the convergence measurement M12, C4 or later.
+- **A body with no solid surface — YES to part 1:** the solve REFUSES a body whose charter has the
+  solid-surface flag clear (no lattice, no artifact; the four giants of the home system sit at the
+  lattice's ceiling with no ground to solve). Part 2, the giant's cloud-shell LOOK without a grid, waits
+  for its own slice.
+
+**C4 therefore builds:** the artifact rows and the pyramid; the digest and the version; the golden
+self-check's rows for the home planet pinned in the build (the eight golden chunks' nodes, kilobytes,
+not the 80 MB table) so the world hello stays a literal; the chunk read of `Z` on the true lattice and
+the roughness field; the coarse octaves replaced; the shard's solve on the worker seam at the realm's
+first boot, the row in its store, the "not ready" refusal until it exists; the tiles on the lane; the
+client's tile cache and the chunk builder reading it; the giants' refusal.
+
+## 14. C4 AS BUILT — the read, the store, the ship (2026-09-19)
+
+**C4a THE READ (landed first, the runtime on the old shape until C4b/c).** `vd_recipe::macro_field`
+is the integer Catmull-Rom kernel over sixteen node words; `vd_terrain::artifact` holds the rows (nine
+bytes a node), the pyramid, the digest, the tiles, and the read `sample_z` that gathers the sixteen
+nodes through the seam table. The column kernel gained the eroded height and a first-octave index
+(`column_surface_from`), and every chunk entry (`column_field`, `generate`, `sample_box`,
+`chunk_digest`, `golden_self_check`, `WorldIdentity::of`) gained the field as an explicit
+`Option<&dyn ZField>`: `Some` on every shipped path once C4b and C4c land, `None` for the crate's own
+kernel tests and the pre-artifact measurements. Every runtime caller passes `None` at this step, so the
+shard and the client stay on ONE shape (the recipe's own coarse relief) until both carry the artifact.
+
+**C4b THE STORE (the shard).** At the realm's first boot the shard reads its artifact rows from its own
+store (one TLV row family per tile, the pyramid and the digest, `vd_bins::artifact_store`); absent,
+it hands the solve to a worker thread — a bins-level seam in the composition root, inline in Tier-A
+tests, never a thread in the sim — keeps ticking, and writes the rows when the worker answers. A body
+whose charter has no solid surface (the giants) gets no solve and states NO SURFACE, so the client
+draws its look bag (the outline, the luma) and asks for no chunk. The home planet's artifact digest is
+pinned in the build (G-DRIFT: a boot whose solve digests differently is red).
+
+**C4c THE SHIP (built 2026-09-19; wire minor 32).** Three bulk payloads under `ShardToGateway::BulkFor`
+(`BulkMsg::ArtifactHead`, `ArtifactPyramid`, `ArtifactTile`), relayed by the gateway to each named
+session as `ServerControlMsg::ArtifactPart` without decoding, and one word back
+(`ClientControlMsg::ArtifactHeld`). The shard's emitter (`vd_sim::stub::artifact_ship`) runs after the
+window rosters, for every session whose dot the realm holds: the HEAD and the PYRAMID's parts once per
+session (coarsest level first, eight parts a tick — the globe from orbit within seconds), then the TILES
+under the occupant's pose within the interest side, four a tick, each once, nearest first. The realm
+holds the occupant's pose, so nothing is asked and nothing new crosses upward (SL2, SL7); the bytes come
+from an injected `TileSource` (`vd_bins::artifact_source`), so the sim never names the generator.
+
+The client's `ArtifactReceiver` assembles the levels and keeps a `TileCache` per realm in an
+`ArtifactBook` shared with the renderer by pointer (copy-on-write; a level and a tile sit behind their
+own `Arc`s). The chunk lane picks the field per chunk (`ArtifactCache::field_for`): a pyramid level for
+a rung whose chunk spans four or more of that level's nodes (rung 10 and up on the home planet), the
+tiles for the rest — and a chunk whose level is assembling or whose stencil's tiles are not all here is
+NOT queued (`awaiting_artifact`), asked again next frame while the coarser rung stands (ruling F9). The
+parent meshes and the geomorph's fallback read the same field at the parent's rung
+(`height_field_m`). The card takes no job with an artifact (it holds no `Z`).
+
+What this cut does NOT do, ledgered in `DEFERRED.md` D-TERRAIN-7: the ship reaches OCCUPANTS only (the
+far view from a parent realm draws the recipe's relief until the pilot is inside — a pop at the
+crossing); the first head drops chunks built before it (a pop at login); the parts ride the Control class
+until slice 10's bulk receiver; the tiles reach one face; the tile cache is not saved on the client. The
+world identity's self-check reads the artifact through GOLDEN FIELDS in the build (the rows under the
+six rung-0 keys, the coarsest pyramid level for the two top-rung keys; `just golden-z-record`), pinned as
+`HOME_IDENTITY_MEASURED` under `GENERATOR_VERSION` 5.

@@ -41,10 +41,13 @@
 #![deny(clippy::integer_division)]
 #![deny(clippy::modulo_arithmetic)]
 
+pub mod artifact;
 pub mod body;
 pub mod carve;
 pub mod chunk;
+pub mod climate;
 pub mod compose;
+pub mod craters;
 pub mod digest;
 pub mod extract;
 pub mod gf;

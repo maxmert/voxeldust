@@ -11,12 +11,31 @@
 //! wants this one. The FIRST home planet (seed 7 701 581 858 760 374 086, 3 351 km, airless and
 //! hot) was the first body of `System(7)` the ladder accepted, not a chosen world.
 
+use crate::artifact::GoldenFields;
 use crate::body::{BodyDefinition, BodyFacts};
 
 /// ★ THE UNIVERSE SEED of THE world (SL5: one world), stated here so the client — which links no motion
 /// crate — can fold its DECLARED world tag; `crates/bins/tests/home_body_pin.rs` proves it is the
 /// forest's own seed.
 pub const HOME_UNIVERSE_SEED: u64 = 2298;
+
+/// ★ THE GOLDEN FIELDS' TEXT (slice 8c stage C4c): the home artifact's rows under the six rung-0
+/// self-check keys and its coarsest pyramid level, recorded by `cargo run --release -p vd-bins
+/// --example golden_z_record` after a deliberate change of the solve, and proved to be the solve's
+/// own rows by `crates/bins/tests/home_artifact_pin.rs`.
+const HOME_GOLDEN_Z: &str = include_str!("../tests/golden_home_z.txt");
+
+/// ★ THE MEASURED HALF OF THE HOME WORLD'S IDENTITY (slice 8c stage C4c): the eight self-check
+/// chunks read through the golden fields, folded. Recorded with the fields; a host that folds another
+/// word has drifted, and its world hello is refused by name.
+pub const HOME_IDENTITY_MEASURED: u64 = 0xd34a_4fdc_7ed0_9312;
+
+/// The golden fields, parsed from the literal in the build. A torn literal is a defect, not a
+/// refusal: the build carries it, so it panics here and never ships.
+#[must_use]
+pub fn home_golden_fields() -> GoldenFields {
+    GoldenFields::parse(HOME_GOLDEN_Z).expect("the golden fields' text is whole in the build")
+}
 
 /// The home planet's realm seed, as the forest draws it under the home universe seed
 /// (`vd_core::worldgen::HOME_PLANET_SEED`, cross-pinned in `home_body_pin.rs`).
@@ -66,6 +85,53 @@ pub const HOME_PLANET_ELASTIC_THICKNESS_M: u32 = 36_789;
 /// The moon's: no water, and a lithosphere three times its own radius thick — a stagnant lid.
 pub const HOME_MOON_WATER_KM3: u64 = 0;
 pub const HOME_MOON_ELASTIC_THICKNESS_M: u32 = 1_094_578;
+
+/// ★ THE HOME PLANET'S SOLVE WORDS (slice 8c stage C3): every charter word the solve reads, as the
+/// census computes them — `home_body_pin.rs` (`solve_words_pin`) proves each one.
+#[must_use]
+pub const fn home_solve_words() -> crate::solve::SolveWords {
+    crate::solve::SolveWords {
+        water_km3: HOME_PLANET_WATER_KM3,
+        elastic_thickness_m: HOME_PLANET_ELASTIC_THICKNESS_M,
+        insolation_q12: 3_065,
+        t_eq_mk: 236_785,
+        t_surface_mk: Some(288_000),
+        bond_albedo_q12: 1_228,
+        mu_q8: Some(7_168),
+        scale_height_m: Some(7_160),
+        p_surf_pa: Some(101_409),
+        tau_ir_q12: Some(6_490),
+        day_s: Some(259_597),
+        obliquity_cos_q1024: Some(586),
+        ecc_q16: 1_017,
+        year_s: 34_727_239,
+        flags: 1_027,
+        age_yr: HOME_SYSTEM_AGE_YR,
+    }
+}
+
+/// The moon's solve words: airless, tidally locked, dry.
+#[must_use]
+pub const fn home_moon_solve_words() -> crate::solve::SolveWords {
+    crate::solve::SolveWords {
+        water_km3: HOME_MOON_WATER_KM3,
+        elastic_thickness_m: HOME_MOON_ELASTIC_THICKNESS_M,
+        insolation_q12: 3_065,
+        t_eq_mk: 252_139,
+        t_surface_mk: Some(252_139),
+        bond_albedo_q12: 409,
+        mu_q8: None,
+        scale_height_m: None,
+        p_surf_pa: None,
+        tau_ir_q12: Some(0),
+        day_s: Some(54_899),
+        obliquity_cos_q1024: Some(972),
+        ecc_q16: 565,
+        year_s: 54_899,
+        flags: 1_030,
+        age_yr: HOME_SYSTEM_AGE_YR,
+    }
+}
 
 /// The home planet's land words, as its realm states them.
 #[must_use]
