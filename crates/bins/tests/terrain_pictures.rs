@@ -1649,15 +1649,96 @@ fn take_far_picture(
         "terrain_pictures/{name}: {} hole pixels under drawn ground, {} in blocks (REPORTED: at          this stand the sky under the globe reads as a hole, so the count is a reading, never a          verdict)",
         holes.pixels, holes.blocks
     );
-    // 3. THE CANDIDATE REFERENCE: written once, compared and REPORTED after.
+    // 3. THE REFERENCE. ★ ACCEPTED (the owner's word, 2026-09-19: "freeze all the sky pictures"):
+    //    with an EXACT reference in place the stand has joined the frozen ones — the picture is
+    //    compared against it under the gate's own tolerance (ruling V18), the overlay's rectangle
+    //    masked, and a step past it is RED (a report under the look knob, like every frozen stand);
+    //    the freeze knob writes it like any other. Without one, the candidate path stays: written
+    //    once, compared and REPORTED after.
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(PICTURE_DIR);
+    let exact_dir = dir.join(EXACT_DIR);
+    let exact = exact_dir.join(format!("{name}.png"));
+    let exact_probe = exact_dir.join(format!("{name}.probe.png"));
     let candidate_dir = dir.join(CANDIDATE_DIR);
     std::fs::create_dir_all(&candidate_dir).expect("the candidate directory");
     let candidate = candidate_dir.join(format!("{name}.png"));
     let candidate_probe = candidate_dir.join(format!("{name}.probe.png"));
-    if candidate.exists() && candidate_probe.exists() {
+    let candidate_present = candidate.exists() && candidate_probe.exists();
+    if freeze_wanted(name) {
+        std::fs::create_dir_all(&exact_dir).expect("the exact directory");
+        std::fs::copy(&png, &exact).expect("freeze the picture");
+        std::fs::copy(&probe_png, &exact_probe).expect("freeze the probe");
+        eprintln!(
+            "terrain_pictures/{name}: FROZEN as the exact reference under {} (the owner's \
+             acceptance); nothing compared",
+            exact_dir.display()
+        );
+    } else if exact.exists() && exact_probe.exists() {
+        let (before, bw, bh) = open_rgba(&exact);
+        let (before_probe, _, _) = open_rgba(&exact_probe);
+        assert_eq!(
+            (bw, bh),
+            (w, h),
+            "{name}: the exact reference is the picture's size"
+        );
+        let hud = stamp.hud_rect_px.map(f64::from);
+        let under_hud = |i: usize| {
+            let (x, y) = ((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
+            (hud[2] > hud[0])
+                & (hud[3] > hud[1])
+                & (x >= hud[0])
+                & (x <= hud[2])
+                & (y >= hud[1])
+                & (y <= hud[3])
+        };
+        let (mut differing, mut past, mut content, mut widest) = (0usize, 0usize, 0usize, 0u8);
+        for (i, (((a, b), pa), pb)) in before
+            .chunks_exact(4)
+            .zip(rgba.chunks_exact(4))
+            .zip(before_probe.chunks_exact(4))
+            .zip(probe.chunks_exact(4))
+            .enumerate()
+        {
+            if under_hud(i) {
+                continue;
+            }
+            let drawn = decode_probe([pa[0], pa[1], pa[2]]).kind != PROBE_KIND_NONE
+                || decode_probe([pb[0], pb[1], pb[2]]).kind != PROBE_KIND_NONE;
+            if !drawn {
+                continue;
+            }
+            content += 1;
+            let step = a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| x.abs_diff(*y))
+                .max()
+                .unwrap_or(0);
+            differing += usize::from(step > 0);
+            past += usize::from(step > TOLERANCE_LEVELS);
+            widest = widest.max(step);
+        }
+        let line = format!(
+            "{differing} of {content} content pixels differ from the frozen exact picture, {past} \
+             past the tolerance, the widest channel step {widest} against the allowed \
+             {TOLERANCE_LEVELS} (ruling V18)"
+        );
+        if std::env::var_os(PICTURE_REPORT_ONLY_ENV).is_some() {
+            eprintln!(
+                "terrain_pictures/{name}: LOOK MEASUREMENT — the verdict is withheld: {line}"
+            );
+        } else {
+            eprintln!(
+                "terrain_pictures/{name}: compared against the frozen exact picture — {line}"
+            );
+            assert!(
+                past == 0,
+                "{name}: THE PICTURE CHANGED PAST THE TOLERANCE — {line}"
+            );
+        }
+    } else if candidate_present {
         let (before, bw, bh) = open_rgba(&candidate);
         let (before_probe, _, _) = open_rgba(&candidate_probe);
         if (bw, bh) == (w, h) {
