@@ -110,6 +110,23 @@ const POP_PAIRS_PER_LEG: f64 = LEG_S / POP_PAIR_EVERY_S;
 /// through that band and eight radii past it, with the pop detector running and the drawn chunk
 /// count sampled the whole way.
 const DEPARTURE_RADII: f64 = 10.0;
+/// ★ THE DESCENT LEG (slice 8s S7, G-SKY-LANDING): the hull climbs to this many scale heights
+/// OVER THE SHELL'S TOP (the stamp's sky row states the shell) and stops there, pushes down to the
+/// rated cruise (`HULL_LEG_MPS[2]`), falls through the whole air under the body's gravity with the
+/// pop detector recording pairs, and arrests the fall with a full push up where the arrest needs
+/// half the altitude left. THE SKY JUDGE reads every pair: over the sky's pixels (the probe's
+/// "nothing", outside the overlay) the widest channel step, against the law's allowance — the air's
+/// brightness changes no faster than its density `e^(−z/H)`, so over a step `Δr` of the eye the sky
+/// moves at most `2 · 255 · Δr / H` levels (the in-scatter and the transmittance, a factor each),
+/// never under one level (a channel step). A step past the allowance is a pop.
+const DESCENT_MARGIN_SCALE_HEIGHTS: f64 = 1.0;
+/// How long the arrest of the fall may take before the leg gives up waiting for the altitude to rise.
+const DESCENT_ARREST_DEADLINE: Duration = Duration::from_secs(90);
+/// How many half-length reads the descent adds while the air's drag keeps the hull above the
+/// arrest altitude — bounded, so a hull that floats never reads forever.
+const DESCENT_EXTRA_READS: u8 = 4;
+/// The channel's levels, the ceiling a step can reach.
+const CHANNEL_LEVELS: f64 = 255.0;
 /// THE TURNING LEG (step 6, D-TERRAIN-5 item 11): at 240 m/s the hull holds its turn axis for
 /// half of this at the leg's start and the opposite axis for the other half, then coasts on the
 /// new heading — the wanted set on a heading the lead never asked for, and the drawn scene under
@@ -535,6 +552,13 @@ struct LegRead {
     pop_pairs: u64,
     pop_skipped: u64,
     pop: PairRead,
+    /// ★ THE SKY JUDGE across the leg's pairs (S7): the pairs read, the widest channel step over
+    /// the sky's pixels, how many pairs stepped past the law's allowance, and the largest
+    /// allowance the law gave (the eye's largest step between two frames).
+    sky_pairs: u64,
+    sky_widest: f64,
+    sky_over: u64,
+    sky_allowed_max: f64,
     /// ★ THE BOARDING INSTRUMENT across the leg (2026-09-14): the band at the leg's FIRST sample
     /// (drawn, pending, urgent) — the sample that reads the whole-band rebuild a boarding cost;
     /// the ladders the terrain forgot before the leg started and over the leg, with the last
@@ -608,9 +632,92 @@ fn frame_of(f: &PairFrame, w: usize, h: usize) -> Frame<'_> {
 /// THE POP DETECTOR's judgement of a leg's pairs: the judged pairs' sum, and how many pairs were
 /// left out — a frame missing, or the two not consecutive (the stamp's own frame counter), or
 /// not of one size or one body.
-fn judge_pairs(pairs: &[(PathBuf, String)]) -> (u64, u64, PairRead) {
+/// THE SKY JUDGE of one pair (S7, G-SKY-LANDING): THE AIR's step — the mean colour over the sky
+/// region of both frames, against the law's allowance for the eye's step between them. The region
+/// is every column's run of sky from the top (the probe's "nothing" kind in BOTH frames) minus a
+/// MARGIN at its end, so the horizon's anti-aliased edge and the ground's own motion never enter:
+/// the margin is one pixel (the edge) plus how far the horizon moves across the frame for the eye's
+/// step (`Δ · px_per_rad / horizon`), rounded up. Pixels under the overlay are left out. MEASURED
+/// before this form: a per-pixel widest step read 13–22 levels on a WALK at 1.4 m/s — the edge
+/// pixels and the stars, which shift under a pixel and swing tens of levels while the air stands
+/// still. The stars stay inside the region; a sub-pixel shift moves their light between pixels and
+/// leaves the mean where it was. `None` where a frame has no sky row (no body with air under the
+/// eye) or the region is empty.
+fn judge_sky_pair(a: &PairFrame, b: &PairFrame, w: usize, h: usize) -> Option<(f64, f64)> {
+    let sky = a.stamp.sky.as_ref()?;
+    let scale_height_m = (sky.top_m - sky.bottom_m) / vd_client::sky::SHELL_TOP_SCALE_HEIGHTS;
+    let (ea, eb) = (
+        DVec3::from_array(a.stamp.eye_body_m),
+        DVec3::from_array(b.stamp.eye_body_m),
+    );
+    let dr = (eb.length() - ea.length()).abs();
+    let step_m = (eb - ea).length();
+    let allowed = (2.0 * CHANNEL_LEVELS * dr / scale_height_m).max(1.0);
+    let px_per_rad = h as f64 / vd_core::geometry::REFERENCE_VIEW_FOV_Y_RAD;
+    let margin = 1 + (step_m * px_per_rad / a.stamp.horizon_m.max(1.0)).ceil() as usize;
+    let hud = a.stamp.hud_rect_px.map(f64::from);
+    let under_hud = |x: usize, y: usize| {
+        (hud[2] > hud[0])
+            & (hud[3] > hud[1])
+            & ((x as f64 + 0.5) >= hud[0])
+            & ((x as f64 + 0.5) <= hud[2])
+            & ((y as f64 + 0.5) >= hud[1])
+            & ((y as f64 + 0.5) <= hud[3])
+    };
+    let (pa, pb) = (a.probe.as_raw(), b.probe.as_raw());
+    let (ra, rb) = (a.rgba.as_raw(), b.rgba.as_raw());
+    let is_sky = |probe: &[u8], i: usize| {
+        vd_client_harness::probe::decode_probe([probe[i], probe[i + 1], probe[i + 2]]).kind == 0
+    };
+    let mut sum_a = [0u64; 3];
+    let mut sum_b = [0u64; 3];
+    let mut n = 0u64;
+    for x in 0..w {
+        // The column's run of sky from the top, in both frames.
+        let mut run = 0usize;
+        while run < h {
+            let i = (run * w + x) * 4;
+            if !is_sky(pa, i) || !is_sky(pb, i) {
+                break;
+            }
+            run += 1;
+        }
+        let keep = run.saturating_sub(margin);
+        for y in 0..keep {
+            if under_hud(x, y) {
+                continue;
+            }
+            let i = (y * w + x) * 4;
+            for c in 0..3 {
+                sum_a[c] += u64::from(ra[i + c]);
+                sum_b[c] += u64::from(rb[i + c]);
+            }
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    let step = (0..3)
+        .map(|c| (sum_a[c] as f64 - sum_b[c] as f64).abs() / n as f64)
+        .fold(0.0_f64, f64::max);
+    Some((step, allowed))
+}
+
+/// The sky judge's sum over a leg: pairs read, the widest step, the pairs past their allowance,
+/// the largest allowance.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct SkyRead {
+    pairs: u64,
+    widest: f64,
+    over: u64,
+    allowed_max: f64,
+}
+
+fn judge_pairs(pairs: &[(PathBuf, String)]) -> (u64, u64, PairRead, SkyRead) {
     let cell = |rung: u8| f64::from(vd_seed::ladder::cell_m(rung));
     let mut reads = Vec::new();
+    let mut sky = SkyRead::default();
     let mut skipped = 0u64;
     for (run, label) in pairs {
         let (Some(a), Some(b)) = (pair_frame(run, label, 0), pair_frame(run, label, 1)) else {
@@ -645,24 +752,39 @@ fn judge_pairs(pairs: &[(PathBuf, String)]) -> (u64, u64, PairRead) {
         let (w, h) = (w as usize, h as usize);
         let (fa, fb) = (frame_of(&a, w, h), frame_of(&b, w, h));
         reads.push(judge_pair(&fa, &fb, &cell));
+        if let Some((step, allowed)) = judge_sky_pair(&a, &b, w, h) {
+            sky.pairs += 1;
+            sky.widest = sky.widest.max(step);
+            sky.over += u64::from(step > allowed);
+            sky.allowed_max = sky.allowed_max.max(allowed);
+            if step > allowed {
+                eprintln!(
+                    "terrain_moving_eye: THE SKY STEPPED on the pair {label}: {step:.3} levels \
+                     against the law's {allowed:.2}"
+                );
+            }
+        }
     }
-    (reads.len() as u64, skipped, sum_reads(&reads))
+    (reads.len() as u64, skipped, sum_reads(&reads), sky)
 }
 
 /// Which hull legs this flight runs (`VD_LEGS`): the indices into [`HULL_LEG_MPS`], and whether the
 /// turning leg runs. The knob absent means every leg — the gate's own shape.
-fn legs_wanted() -> (Vec<usize>, bool, bool) {
+fn legs_wanted() -> (Vec<usize>, bool, bool, bool) {
     let Some(raw) = std::env::var(LEGS_ENV).ok() else {
-        return ((0..HULL_LEG_MPS.len()).collect(), true, true);
+        return ((0..HULL_LEG_MPS.len()).collect(), true, true, true);
     };
     let mut legs = Vec::new();
     let mut turning = false;
     let mut departure = false;
+    let mut descent = false;
     for name in raw.split(',').map(str::trim).filter(|n| !n.is_empty()) {
         if name.eq_ignore_ascii_case("turn") {
             turning = true;
         } else if name.eq_ignore_ascii_case("up") {
             departure = true;
+        } else if name.eq_ignore_ascii_case("down") {
+            descent = true;
         } else {
             let i: usize = name
                 .parse()
@@ -671,7 +793,7 @@ fn legs_wanted() -> (Vec<usize>, bool, bool) {
             legs.push(i);
         }
     }
-    (legs, turning, departure)
+    (legs, turning, departure, descent)
 }
 
 /// ★ HOW LONG THE DEPARTURE'S CLIMB TAKES, in seconds: the time a hull at its own rated push needs
@@ -1169,7 +1291,11 @@ fn read_band(
     let (forced_end, deferred_end) = gateway_swaps(gw_admin);
     read.gw_forced = (forced_start, forced_end);
     read.gw_deferred = (deferred_start, deferred_end);
-    let (judged, skipped, pop) = judge_pairs(&pairs);
+    let (judged, skipped, pop, sky) = judge_pairs(&pairs);
+    read.sky_pairs = sky.pairs;
+    read.sky_widest = sky.widest;
+    read.sky_over = sky.over;
+    read.sky_allowed_max = sky.allowed_max;
     read.pop_pairs = judged;
     read.pop_skipped += skipped;
     read.pop = pop;
@@ -1364,6 +1490,11 @@ fn read_band(
         read.gw_forced.0,
         read.gw_deferred.1,
         read.gw_deferred.0
+    );
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE SKY JUDGE — {} pairs read, the widest step of the air's \
+         mean {:.3} levels, {} pairs past the law's allowance (the largest allowance {:.2} levels)",
+        read.sky_pairs, read.sky_widest, read.sky_over, read.sky_allowed_max
     );
     eprintln!(
         "terrain_moving_eye/{leg}: THE POP DETECTOR — {} pairs judged ({} left out), {} pixels \
@@ -1845,7 +1976,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
 
     // ---- LEGS 2 AND 3: THE HULL. (A diagnosis flight boards `boardings` times with fresh
     // pilots and flies the legs on the last; `VD_LEGS` names which legs it flies.)
-    let (wanted_legs, wanted_turn, wanted_departure) = legs_wanted();
+    let (wanted_legs, wanted_turn, wanted_departure, wanted_descent) = legs_wanted();
     let reads: Vec<(String, LegRead)> = {
         let mut boarded: Option<(ChildGuard, u16)> = None;
         for b in 0..boardings {
@@ -1994,6 +2125,151 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
                 "terrain_moving_eye/{leg}: the turn and its counter-turn over {TURN_S} s left \
                  the heading {turned:.1}° from the start (the planet's box facing before \
                  {before:?}, after {after:?})"
+            );
+            reads.push((leg.to_owned(), read));
+        }
+        // ★ THE DESCENT LEG (slice 8s S7, G-SKY-LANDING): up to one scale height over the shell's
+        // top and stopped there, down to the rated cruise, the fall through the whole air with the
+        // pop detector recording, the sky judged on every pair, the fall arrested.
+        if wanted_descent {
+            let leg = "hull descent";
+            let a_mps2 = HULL_PUSH_MICRO_MPS2 as f64 / 1.0e6;
+            let g_mps2 = {
+                let system = RealmId::System(vd_bins::HOME_SYSTEM);
+                let held = std::collections::BTreeSet::from([system]);
+                let lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+                let charter =
+                    vd_bins::body_charter(vd_bins::DEV.universe_seed, &held, &lineage, planet)
+                        .expect("the home planet states a charter");
+                f64::from(charter.gravity_mm_s2) / 1000.0
+            };
+            let altitude =
+                |st: &DevState| -> f64 { st.terrain_stamp.as_ref().map_or(0.0, |s| s.altitude_m) };
+            let state = poll(devctl);
+            let sky = state
+                .terrain_stamp
+                .as_ref()
+                .and_then(|s| s.sky.clone())
+                .expect("the home planet's sky row is on the stamp");
+            let shell_m = sky.top_m - sky.bottom_m;
+            let scale_height_m = shell_m / vd_client::sky::SHELL_TOP_SCALE_HEIGHTS;
+            let start_alt_m = shell_m + DESCENT_MARGIN_SCALE_HEIGHTS * scale_height_m;
+            let now_alt_m = altitude(&state);
+            let climb_m = (start_alt_m - now_alt_m).max(0.0);
+            // Up at (a − g) for t1, down at (a + g) for t2 = t1·(a − g)/(a + g): at rest at the top.
+            let up_net = a_mps2 - g_mps2;
+            let down_net = a_mps2 + g_mps2;
+            let t1 = (2.0 * climb_m / (up_net * (1.0 + up_net / down_net))).sqrt();
+            let t2 = t1 * up_net / down_net;
+            eprintln!(
+                "terrain_moving_eye/{leg}: the shell is {shell_m:.0} m (H {scale_height_m:.0} m); \
+                 the climb from {now_alt_m:.0} m to {start_alt_m:.0} m: up {t1:.1} s at \
+                 {up_net:.1} m/s², down {t2:.1} s at {down_net:.1} m/s²"
+            );
+            throttle(devctl, [0.0, 0.0, 1.0]);
+            std::thread::sleep(Duration::from_secs_f64(t1));
+            throttle(devctl, [0.0, 0.0, -1.0]);
+            std::thread::sleep(Duration::from_secs_f64(t2));
+            throttle(devctl, [0.0, 0.0, 0.0]);
+            let top_alt_m = altitude(&poll(devctl));
+            // The fall: a push down UNTIL THE MEASURED radial speed reaches the rated cruise (the
+            // climb's own residual is whatever it is — MEASURED on the first descent: the hull was
+            // still rising at the top, a fixed push never reversed it, and the eye climbed
+            // through the whole read), then the body's gravity alone, to the altitude where a
+            // full push up needs half of what is left to arrest.
+            let v0 = HULL_LEG_MPS[2];
+            let radial_speed = || {
+                let before = altitude(&poll(devctl));
+                std::thread::sleep(SPEED_INTERVAL);
+                let after = altitude(&poll(devctl));
+                (after - before) / SPEED_INTERVAL.as_secs_f64()
+            };
+            throttle(devctl, [0.0, 0.0, -1.0]);
+            let push_started = Instant::now();
+            let mut v_r = radial_speed();
+            while v_r > -v0 && push_started.elapsed() < PUSH_DEADLINE {
+                v_r = radial_speed();
+            }
+            throttle(devctl, [0.0, 0.0, 0.0]);
+            let fall_alt_m = altitude(&poll(devctl));
+            let v_down = (-v_r).max(0.0);
+            let end_alt_m = (v_down * v_down + 2.0 * g_mps2 * fall_alt_m) / (a_mps2 + g_mps2);
+            let drop_m = (fall_alt_m - end_alt_m).max(0.0);
+            let t_fall = (-v_down + (v_down * v_down + 2.0 * g_mps2 * drop_m).sqrt()) / g_mps2;
+            eprintln!(
+                "terrain_moving_eye/{leg}: stopped at {top_alt_m:.0} m; pushed down to \
+                 {v_down:.0} m/s in {:.1} s (at {fall_alt_m:.0} m); the fall from there to \
+                 {end_alt_m:.0} m takes {t_fall:.0} s under gravity ({g_mps2:.2} m/s²)",
+                push_started.elapsed().as_secs_f64()
+            );
+            let mut read = read_band(
+                devctl,
+                client.0.id(),
+                leg,
+                t_fall,
+                &f.cwd,
+                planet,
+                None,
+                gw_admin,
+            );
+            // ★ THE AIR'S OWN DRAG (MEASURED on the second descent: 76 s of free fall predicted
+            // 23 km, the hull stood at 38 km — the realm's air slows a hull): the read goes on in
+            // halves of the free-fall time until the arrest altitude is reached, and the sky
+            // judge's readings are merged, so the densest air is flown through too.
+            let mut extra = 0u8;
+            while altitude(&poll(devctl)) > end_alt_m && extra < DESCENT_EXTRA_READS {
+                extra += 1;
+                let more = read_band(
+                    devctl,
+                    client.0.id(),
+                    leg,
+                    t_fall * 0.5,
+                    &f.cwd,
+                    planet,
+                    None,
+                    gw_admin,
+                );
+                read.sky_pairs += more.sky_pairs;
+                read.sky_widest = read.sky_widest.max(more.sky_widest);
+                read.sky_over += more.sky_over;
+                read.sky_allowed_max = read.sky_allowed_max.max(more.sky_allowed_max);
+                read.min_drawn = read.min_drawn.min(more.min_drawn);
+                read.samples += more.samples;
+                eprintln!(
+                    "terrain_moving_eye/{leg}: the read went on ({extra}): the hull at {:.0} m \
+                     against the arrest altitude {end_alt_m:.0} m",
+                    altitude(&poll(devctl))
+                );
+            }
+            // The arrest: a full push up until the altitude rises.
+            throttle(devctl, [0.0, 0.0, 1.0]);
+            let arrest_started = Instant::now();
+            let mut last_alt = altitude(&poll(devctl));
+            let lowest = loop {
+                std::thread::sleep(Duration::from_millis(SETTLE_POLL_MS));
+                let alt = altitude(&poll(devctl));
+                if alt > last_alt || arrest_started.elapsed() > DESCENT_ARREST_DEADLINE {
+                    break alt.min(last_alt);
+                }
+                last_alt = alt;
+            };
+            throttle(devctl, [0.0, 0.0, 0.0]);
+            eprintln!(
+                "terrain_moving_eye/{leg}: the fall arrested; the lowest altitude {lowest:.0} m \
+                 (the arrest took {:.1} s); the fewest chunks drawn on any of its {} samples: {}",
+                arrest_started.elapsed().as_secs_f64(),
+                read.samples,
+                read.min_drawn
+            );
+            // ★ G-SKY-LANDING: no pair's sky stepped past the law's allowance.
+            assert!(
+                read.sky_over == 0,
+                "{leg}: THE SKY POPPED on {} of {} pairs — the widest step {:.3} levels against \
+                 an allowance of at most {:.2} (ruling SL8: a seam is a defect)",
+                read.sky_over,
+                read.sky_pairs,
+                read.sky_widest,
+                read.sky_allowed_max
             );
             reads.push((leg.to_owned(), read));
         }

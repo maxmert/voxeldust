@@ -1098,6 +1098,21 @@ pub fn home_orbit(universe_seed: u64) -> Option<vd_physics::celestial::OrbitalEl
         .find_map(|(realm, elements)| (realm == planet).then_some(elements))
 }
 
+/// The home system's world for a gate: its rows and its movers' orbits by realm — slice 8s S6 reads
+/// the airy planets' places at a tick to stand between two of them.
+#[must_use]
+pub fn home_system_world(
+    universe_seed: u64,
+) -> (
+    Vec<vd_core::geometry::RealmRegion>,
+    Vec<(
+        vd_core::pose::RealmId,
+        vd_physics::celestial::OrbitalElements,
+    )>,
+) {
+    home_system_boot(universe_seed)
+}
+
 /// The home system's boot world: its rows and its movers, exactly as its shard builds them.
 fn home_system_boot(
     universe_seed: u64,

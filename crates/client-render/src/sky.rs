@@ -39,6 +39,11 @@ const SKY_ENV_PX_ENV: &str = "VD_SKY_ENV_PX";
 /// fixes it, `(0, −R, 0)` under the world origin, so the unpatched reading can be measured against
 /// the patched one from the same stand. A measurement knob, never a mode anybody flies.
 const SKY_FLAT_ENV: &str = "VD_SKY_FLAT";
+/// ★ `VD_SKY_PICK=<planet seed>`: THE HANDOVER'S MEASUREMENT KNOB (design §7, S6) — hold the pick on
+/// one body with air, so two pilots at ONE stand between two airy bodies take the two pictures a
+/// handover would flip between, and their difference is what the flip costs. Never a mode anybody
+/// flies; a body without air, or absent, leaves the rule in force.
+const SKY_PICK_ENV: &str = "VD_SKY_PICK";
 
 /// What the flags said at startup: the operational knobs, in ONE struct (no inline literals).
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +52,7 @@ pub struct SkyConfig {
     pub raymarched: bool,
     pub env_map_px: u32,
     pub flat: bool,
+    pub pick_hold: Option<u64>,
 }
 
 impl SkyConfig {
@@ -62,6 +68,9 @@ impl SkyConfig {
                 AtmosphereEnvironmentMapLight::default().size.x,
             ),
             flat: env_or(SKY_FLAT_ENV, 0u8) != 0,
+            pick_hold: std::env::var(SKY_PICK_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse().ok()),
         }
     }
 }
@@ -119,15 +128,22 @@ fn medium_of(terms: &laws::SkyTerms, realm: RealmId) -> ScatteringMedium {
         .with_label(format!("sky of {realm:?}"))
 }
 
-/// The pick (design §7): the body with air whose shell subtends the largest angle at the eye.
-fn pick(bodies: &[SkyBody]) -> Option<(&SkyBody, laws::SkyTerms)> {
-    bodies
+/// The pick (design §7): the body with air whose shell subtends the largest angle at the eye — or
+/// the body the measurement knob holds, where it has air.
+fn pick(bodies: &[SkyBody], hold: Option<u64>) -> Option<(&SkyBody, laws::SkyTerms)> {
+    let airy: Vec<(&SkyBody, laws::SkyTerms)> = bodies
         .iter()
         .filter_map(|b| laws::sky_terms(&b.charter, b.radius_m).map(|t| (b, t)))
-        .max_by(|(a, ta), (b, tb)| {
-            laws::shell_angle(ta.top_radius_m, a.centre.length())
-                .total_cmp(&laws::shell_angle(tb.top_radius_m, b.centre.length()))
-        })
+        .collect();
+    if let Some(seed) = hold
+        && let Some(held) = airy.iter().find(|(b, _)| b.realm == RealmId::Planet(seed))
+    {
+        return Some(*held);
+    }
+    airy.into_iter().max_by(|(a, ta), (b, tb)| {
+        laws::shell_angle(ta.top_radius_m, a.centre.length())
+            .total_cmp(&laws::shell_angle(tb.top_radius_m, b.centre.length()))
+    })
 }
 
 /// The picture's cameras with whatever air they hold: the atmosphere and its settings, if any.
@@ -156,7 +172,7 @@ pub(crate) fn sync_sky(
     if !config.enabled {
         return;
     }
-    let chosen = pick(&terrain.sky_bodies).map(|(b, t)| (b.clone(), t));
+    let chosen = pick(&terrain.sky_bodies, config.pick_hold).map(|(b, t)| (b.clone(), t));
     let Some((body, terms)) = chosen else {
         for (cam, present, _) in &mut cams {
             if present.is_some() {
@@ -230,10 +246,11 @@ pub(crate) fn sync_sky(
         }
     }
     terrain.sky_realm = Some(body.realm);
-    // The sun disc: the star's luminosity over the body's insolation, on the sun the terrain placed.
+    // The sun disc: the star's luminosity over THE EYE'S distance to it, on the sun the terrain
+    // placed — never the picked body's insolation (S6's finding).
     let disk = terrain
-        .sun_luma
-        .and_then(|luma| laws::sun_disk_angle_rad(luma, body.charter.insolation_q12))
+        .sun_star
+        .and_then(|(luma, distance_m)| laws::sun_disk_angle_rad(luma, distance_m))
         .map(|a| a as f32);
     if let Some(sun) = terrain.sun
         && disk != terrain.sun_disk
@@ -261,6 +278,9 @@ pub(crate) fn sync_sky(
             raymarched: config.raymarched,
             lut_far_m: f64::from(lut_far_m),
             flat: config.flat,
+            pick_held: config
+                .pick_hold
+                .is_some_and(|seed| body.realm == RealmId::Planet(seed)),
             sun_disk_deg: disk.map_or(0.0, |a| f64::from(a).to_degrees()),
             rayleigh_ratio: terms.rayleigh_550_per_m / laws::EARTH_RAYLEIGH_550_PER_M,
             ozone: terms.ozone.is_some(),

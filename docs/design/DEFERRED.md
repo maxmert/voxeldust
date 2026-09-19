@@ -8563,10 +8563,15 @@ Design: `docs/investigation/2026-09-08/landforms/slice_8s_design.md`; the owner'
   word (8e or later); the rule then reads it.
 - **THE GROUND ALBEDO FOR THE SECOND BOUNCE (design §4.6).** The charter's BOND albedo (clouds included) stands in for the
   surface albedo the multiple-scattering term wants. WHEN: 8e's paint table states a surface albedo.
-- **ONE ATMOSPHERE A FRAME (design §7).** The eye gets the air of the body whose shell subtends the largest angle
-  (`sky.rs::pick`); a SECOND body with air in the same frame has no rim, and the handover between two airy bodies is a
-  measured pixel step (G-SKY-HANDOVER, S6 owed). MISSING: a second atmosphere pass for the far body, and the census count
-  of systems holding two airy bodies within sight. WHEN: when the handover gate reads red, or when such a pair is reachable.
+- **ONE ATMOSPHERE A FRAME (design §7) — S6 MEASURED 2026-09-19.** The eye gets the air of the body whose shell subtends
+  the largest angle (`sky.rs::pick`). THE HANDOVER GATE (the picture test's handover stand: the pair whose handover is the
+  largest on the run's tick, two pilots at the point where the shells fill the same angle, the pick held on each body by
+  `VD_SKY_PICK`): widest channel step **0** on **0** pixels — no pop. The home system holds FIVE airy planets and no airy
+  moon; at closest approach the largest pair's shells stand 0.80 px in radius at the handover, on this run 0.24 px: every
+  handover here is between two points of light. STILL MISSING: a second atmosphere pass for a SECOND airy body in one frame
+  — a double planet or an airy moon, where the losing body stands over a pixel; UNMEASURED until such a pair is reachable
+  (the census count of such systems in the galaxy is owed with it). The stand also exposed and cured a defect: the sun disc
+  took its distance from the picked body's insolation (1.49° under one pick, 0.87° under the other); it is the eye's own now.
 - ~~**THE STARS BEFORE THE SKY (design §5, S4).**~~ 🟩 LANDED 2026-09-19: the star cloud draws in the OPAQUE phase with
   `One + One` blending and no depth write (`StarSkyMaterial::specialize`), so the sky pass composes
   `inscatter + transmittance × stars` — MEASURED: the orbit stand holds the galaxy over the blue rim, the noon ground stand
@@ -8579,9 +8584,15 @@ Design: `docs/investigation/2026-09-08/landforms/slice_8s_design.md`; the owner'
   raymarched mode's cost on the stamp's frame time: ground 34.8 vs 33.1 ms, hill 41.0 vs 36.3, aloft 20.1 vs 19.6,
   orbit 23.9 vs 20.1 (1.7–4.7 ms a frame at 1280×720, MSAA 4×, the sky per sample). `VD_SKY_MODE=lut` stays a
   measurement knob. The frame PEAKS (85–99 ms at the far and cave stands) are the chunk fills, not the sky.
-- **THE DESCENT LEG AND THE TWO NEW STANDS (design §9, S7).** G-SKY-LANDING (orbit → ground at the hull rating, the sky's
-  per-frame step against the model's own prediction), the DUSK stand (the sun 2° under the horizon) and the HIGH stand
-  (300 km). WHEN: 8s S7, before the owner's look freezes the sky.
+- ~~**THE DESCENT LEG AND THE TWO NEW STANDS (design §9, S7).**~~ 🟩 BUILT AND MEASURED 2026-09-19. The moving-eye
+  flight's DESCENT LEG (`VD_LEGS=down`; in the gate by default): the hull climbs to one scale height over the shell's
+  top, pushes down to the rated cruise from a MEASURED radial speed, falls under the charter's gravity — the realm's air
+  DRAGS it below free fall, so the read goes on in halves to the arrest altitude — and arrests. THE SKY JUDGE on every
+  pop pair reads THE AIR: the mean colour over the sky region kept clear of the horizon by a derived margin, against the
+  law `max(1, 2·255·Δr/H)`. G-SKY-LANDING: from 103 km down to 6.5 km the air's mean stepped at most 0.092 levels per
+  frame pair (0.018 above 38 km), 0 pairs past the law; on the walk 0.001. The DUSK stand (the star 2° under the
+  horizon) and the HIGH stand (three shell heights, 238 km) are candidates in the docs picture folder. STILL OWED: the
+  last 6.5 km in motion (the arrest's floor on this hull) — the ground stands and the walk cover it standing still.
 - **THE PATCHED ENGINE CRATE (`vendor/bevy_pbr/PATCH.md`).** A verbatim `bevy_pbr` 0.18.1 with the planet centre STATED
   (`Atmosphere::planet_center`) instead of fixed under the world origin. MISSING: the upstream pull request. WHEN: the patch
   dies at the Bevy upgrade gate (0.19) — either upstream carries the change by then or the copy is re-based once.

@@ -1600,7 +1600,9 @@ pub struct Terrain {
     /// window with a charter, the brightest luminous row's luminosity, the sun disc last sized,
     /// the body whose air the camera holds.
     pub(crate) sky_bodies: Vec<crate::sky::SkyBody>,
-    pub(crate) sun_luma: Option<f64>,
+    /// The brightest luminous row's luminosity and the EYE's distance to it, metres (the sun disc
+    /// is the eye's own, S6).
+    pub(crate) sun_star: Option<(f64, f64)>,
     pub(crate) sun_disk: Option<f32>,
     pub(crate) sky_realm: Option<RealmId>,
     /// The tangent of the sun's incidence at the eye, as the sun was last placed (capped as the
@@ -1670,7 +1672,7 @@ impl Terrain {
             harvest_nanos: 0,
             sun: None,
             sky_bodies: Vec::new(),
-            sun_luma: None,
+            sun_star: None,
             sun_disk: None,
             sky_realm: None,
             sun_tan_i: None,
@@ -2483,7 +2485,7 @@ pub(crate) fn sync_terrain(
             })
         })
         .collect();
-    terrain.sun_luma = brightest.map(|(lux, _)| lux);
+    terrain.sun_star = brightest.map(|(lux, centre)| (lux, centre.length()));
     // THE SHADOW'S REACH for the casters (item 18): the cascades' reach, the sun's tangent as it
     // was last placed (the cap's worth before the sun is born: the longest shadows, so no caster
     // is missed), and the ladder's step. A change past the hysteresis recomputes the wanted set.

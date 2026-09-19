@@ -13,8 +13,7 @@
 
 use vd_core::look::{BodyCharter, CHARTER_FLAG_HAS_AIR, CHARTER_FLAG_HAS_SEA};
 use vd_core::stellar::{
-    AU_M, EARTH_MEAN_SURFACE_K, EARTH_P_SURF_PA, earth_scale_height_m,
-    star_radius_from_luminosity_m,
+    EARTH_MEAN_SURFACE_K, EARTH_P_SURF_PA, earth_scale_height_m, star_radius_from_luminosity_m,
 };
 
 /// The wavelength the charter's Rayleigh optical depth is stated at, nm.
@@ -195,17 +194,17 @@ pub fn sky_terms(charter: &BodyCharter, radius_m: f64) -> Option<SkyTerms> {
     })
 }
 
-/// THE SUN DISC'S ANGULAR DIAMETER, radians, from the star row's luminosity and the body's charter
-/// insolation: the distance is `AU · √(L / S)` (the inverse-square law the charter's insolation was
-/// stated with), the radius is the star's from its luminosity (`vd_core::stellar`). `None` where the
-/// insolation or the luminosity is zero (no star lights this body).
+/// THE SUN DISC'S ANGULAR DIAMETER, radians, from the star row's luminosity and THE EYE'S OWN
+/// distance to the star: `2 · R(L) / d`, the radius the star's from its luminosity
+/// (`vd_core::stellar`). `None` where the distance or the luminosity is zero (no star lights the
+/// eye). ★ MEASURED at the handover stand (S6, 2026-09-19): the disc used to read the PICKED BODY's
+/// insolation for its distance, so an eye between two planets saw the sun 1.49° wide under one pick
+/// and 0.87° under the other — the disc is the eye's, and the picked body has no say in it.
 #[must_use]
-pub fn sun_disk_angle_rad(luma_lsun: f64, insolation_q12: u32) -> Option<f64> {
-    let insolation = f64::from(insolation_q12) / Q12;
-    if insolation <= 0.0 || luma_lsun <= 0.0 {
+pub fn sun_disk_angle_rad(luma_lsun: f64, distance_m: f64) -> Option<f64> {
+    if distance_m <= 0.0 || luma_lsun <= 0.0 {
         return None;
     }
-    let distance_m = AU_M * (luma_lsun / insolation).sqrt();
     Some(2.0 * star_radius_from_luminosity_m(luma_lsun) / distance_m)
 }
 
@@ -219,7 +218,7 @@ pub fn shell_angle(top_radius_m: f64, distance_m: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vd_core::stellar::{R_SUN_M, scale_height_m};
+    use vd_core::stellar::{AU_M, R_SUN_M, scale_height_m};
 
     /// A charter at Earth's own words: the scale height by the shared law, Earth's pressure, the
     /// Rayleigh depth the charter author calibrates on (0.0973), the thermostat's set point.
@@ -389,16 +388,15 @@ mod tests {
 
     #[test]
     fn the_sun_disc_is_half_a_degree_at_one_au_and_none_without_a_star() {
-        let angle = sun_disk_angle_rad(1.0, 4096).expect("lit");
+        let angle = sun_disk_angle_rad(1.0, AU_M).expect("lit");
         // 2 · 1.06 R☉ / AU (the fit's 1.06 at one solar mass).
         assert!((angle - 2.0 * 1.06 * R_SUN_M / AU_M).abs() < 1e-15);
         let deg = angle.to_degrees();
         assert!((deg - 0.565).abs() < 0.005, "{deg}");
-        assert_eq!(sun_disk_angle_rad(1.0, 0), None);
-        assert_eq!(sun_disk_angle_rad(0.0, 4096), None);
-        // Four times the luminosity at the same insolation stands twice as far: the disc is the
-        // star's larger radius over twice the distance.
-        let far = sun_disk_angle_rad(4.0, 4096).expect("lit");
+        assert_eq!(sun_disk_angle_rad(1.0, 0.0), None);
+        assert_eq!(sun_disk_angle_rad(0.0, AU_M), None);
+        // Twice as far, the same star: half the disc.
+        let far = sun_disk_angle_rad(4.0, 2.0 * AU_M).expect("lit");
         let expect = 2.0 * star_radius_from_luminosity_m(4.0) / (2.0 * AU_M);
         assert!((far - expect).abs() < 1e-15);
     }

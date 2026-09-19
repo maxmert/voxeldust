@@ -73,6 +73,23 @@ const HILL_M: f64 = 300.0;
 const ALOFT_M: f64 = 60_000.0;
 /// Altitude for the orbit picture, in metres: the globe's limb in frame (D8-6).
 const ORBIT_M: f64 = 2_000_000.0;
+/// ★ THE HANDOVER'S TWO PILOTS (S6): the agents after the cave stand; both capture on the grid, one
+/// step apart, and the bodies' places are read at the tick between their two captures.
+const HANDOVER_AGENT_A: u64 = 7;
+const HANDOVER_TICK: u64 = CAPTURE_TICK_GRID * (HANDOVER_AGENT_A + 1) + CAPTURE_TICK_GRID / 2;
+/// The HUD's rows at the top of a picture (its readouts differ between two pilots by design).
+const HUD_ROWS: usize = 200;
+/// ★ THE DUSK STAND (slice 8s S7, design §9): the eye on the ground with the star this far UNDER
+/// the horizon — inside civil twilight (0° to −6°), where the sky shows the most physics at once:
+/// the red band low, the blue arch over it, the first stars at the zenith. The nose toward the
+/// star's azimuth, level. A candidate: reported, never red.
+const DUSK_BELOW_DEG: f64 = 2.0;
+/// ★ THE HIGH STAND (S7): this many SHELL HEIGHTS over the surface (the shell the sky computes for
+/// the body: `H · 16 ln 2`) — between the aloft stand inside the air and the orbit stand far above
+/// it, where the shell under the eye is thick and the rim wide. A candidate.
+const HIGH_SHELLS: f64 = 3.0;
+const DUSK_AGENT: u64 = HANDOVER_AGENT_A + 2;
+const HIGH_AGENT: u64 = HANDOVER_AGENT_A + 3;
 /// ★ THE CAVE STAND (ruling T1's cave rule, 2026-09-16; a candidate stand for the owner's look):
 /// the chunk the chunk-budget bench named as the densest on the walk's path — half its columns
 /// cross rock and air three times or more (`12_chunk_budget_base.md` §2) — as `(face, rung, x, y)`
@@ -335,6 +352,8 @@ struct Picture {
     /// choose their nose; anywhere behind the shoulder for the seam, whose nose the edge chooses
     /// (MEASURED: no edge point has the star both low and 100°–140° off a nose along the edge).
     off_nose_band: (f64, f64),
+    /// S6: the body the sky's pick is held on for this pilot (`VD_SKY_PICK`), or none.
+    pick: Option<u64>,
 }
 
 /// The capture client for one picture: the agent index picks the account. No flag: the client
@@ -354,6 +373,9 @@ fn spawn_capture_client(
         cmd.env(k, v);
     }
     cmd.env("VD_AUTH_SIGNING_KEY", dev_auth_signing_key_hex());
+    if let Some(seed) = pic.pick {
+        cmd.env("VD_SKY_PICK", seed.to_string());
+    }
     // THE INSTRUMENT RUNS AT THE WHOLE MACHINE (ruling F6): the game's default is a share of the
     // cores, but the stands' capture grids and the flights' settle deadlines were measured at every
     // core, so the harness states the whole count unless the knob names another (the knob is how
@@ -1732,6 +1754,157 @@ fn stand_at_nadir(d: DVec3, distance_m: f64) -> Stand {
 }
 
 /// The stand-in's entry for one account.
+/// A spawn in the HOME SYSTEM's own frame, for a stand between two planets (S6).
+fn spawn_entry_in_system(account: u64, pos_m: DVec3, orient: vd_core::glam::DQuat) -> String {
+    format!(
+        "{account}=System({}):{},{},{}@{},{},{},{}",
+        vd_bins::HOME_SYSTEM,
+        pos_m.x,
+        pos_m.y,
+        pos_m.z,
+        orient.x,
+        orient.y,
+        orient.z,
+        orient.w
+    )
+}
+
+/// The handover stand between two airy bodies (S6).
+struct Handover {
+    seed_a: u64,
+    seed_b: u64,
+    distance_m: f64,
+    from_a_m: f64,
+    radius_px: f64,
+    eye_m: DVec3,
+    orient: vd_core::glam::DQuat,
+}
+
+/// ★ THE HANDOVER STAND (S6, design §7): among the home system's planets with air, the PAIR whose
+/// handover is the largest at `tick` — at the point between them where their two shells fill the
+/// same angle, `d_A = D · top_A / (top_A + top_B)`, both shells stand `atan((top_A + top_B) / D)` in
+/// radius, so the losing body's size in pixels is the pop's whole extent. The places come from the
+/// same closed-form orbit the system shard authors placements with; the nose points at the first
+/// body. `None` with fewer than two bodies with air.
+fn handover_stand(tick: u64) -> Option<Handover> {
+    let (rows, movers) = vd_bins::home_system_world(DEV.universe_seed);
+    let system = vd_core::pose::RealmId::System(vd_bins::HOME_SYSTEM);
+    let held = std::collections::BTreeSet::from([system]);
+    let lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+    let secs = vd_core::kinematics::secs_since_epoch(tick, 1.0 / DEV.tick_dt);
+    let px_per_rad =
+        vd_core::geometry::REFERENCE_VIEW_ROWS_PX / vd_core::geometry::REFERENCE_VIEW_FOV_Y_RAD;
+    // (seed, shell top, place at the tick) for every planet with air.
+    let mut airy: Vec<(u64, f64, DVec3)> = Vec::new();
+    for r in rows.iter().filter(|r| r.parent == Some(system)) {
+        let (
+            vd_core::pose::RealmId::Planet(seed),
+            Some(vd_core::geometry::Boundary::Shell { r: look }),
+        ) = (r.realm, r.look)
+        else {
+            continue;
+        };
+        let Some(charter) = vd_bins::body_charter(DEV.universe_seed, &held, &lineage, r.realm)
+        else {
+            continue;
+        };
+        let Some(planet) =
+            vd_terrain::BodyDefinition::from_seed(seed, look, vd_bins::facts_of_charter(&charter))
+        else {
+            continue;
+        };
+        let Some(terms) = vd_client::sky::sky_terms(&charter, planet.ladder().radius_m()) else {
+            continue;
+        };
+        let Some((_, elements)) = movers.iter().find(|(realm, _)| *realm == r.realm) else {
+            continue;
+        };
+        let place = vd_physics::celestial::orbital_state(elements, secs).position;
+        airy.push((seed, terms.top_radius_m, place));
+    }
+    let mut best: Option<Handover> = None;
+    for i in 0..airy.len() {
+        for j in (i + 1)..airy.len() {
+            let (seed_a, top_a, pa) = airy[i];
+            let (seed_b, top_b, pb) = airy[j];
+            let distance_m = (pb - pa).length();
+            let from_a_m = distance_m * top_a / (top_a + top_b);
+            let radius_px = ((top_a + top_b) / distance_m).atan() * px_per_rad;
+            if best.as_ref().is_none_or(|b| radius_px > b.radius_px) {
+                let eye_m = pa + (pb - pa) * (from_a_m / distance_m);
+                let toward_a = (pa - eye_m).normalize();
+                let up = if toward_a.z.abs() < 0.9 {
+                    DVec3::Z
+                } else {
+                    DVec3::X
+                };
+                best = Some(Handover {
+                    seed_a,
+                    seed_b,
+                    distance_m,
+                    from_a_m,
+                    radius_px,
+                    eye_m,
+                    orient: vd_client_harness::camera::look_rotation(toward_a, up),
+                });
+            }
+        }
+    }
+    best
+}
+
+/// One handover pilot's picture (S6): stand, wait for the grid tick, shoot; no ground is asked for
+/// — the bodies are points of light from here.
+fn take_handover_picture(f: &Fixture, gateway: SocketAddr, pic: &Picture) -> PathBuf {
+    let name = pic.name;
+    let client_quic = reserve_udp_addr();
+    let devctl = reserve_tcp_addr().port();
+    let mut client = ChildGuard(spawn_capture_client(
+        f,
+        gateway,
+        pic,
+        client_quic.port(),
+        devctl,
+    ));
+    await_listener(devctl, &mut client.0);
+    let landed = await_active(devctl);
+    eprintln!(
+        "terrain_pictures/{name}: landed in {:?}, universe tick {:?}",
+        landed.location, landed.universe_tick
+    );
+    let capture_tick = CAPTURE_TICK_GRID * (pic.agent_index + 1);
+    while vd_bins::pixel::poll(devctl).universe_tick.unwrap_or(0) + CAPTURE_ASK_AHEAD_TICKS
+        < capture_tick
+    {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let shot = round_trip(
+        devctl,
+        &DevRequest::Screenshot {
+            at_tick: Some(capture_tick),
+            label: Some(name.to_owned()),
+        },
+    );
+    let rel = match shot {
+        DevResponse::Captured { path, .. } => path,
+        other => panic!("{name}: screenshot was not captured: {other:?}"),
+    };
+    let png = f.cwd.join(&rel);
+    let run_dir = png
+        .parent()
+        .and_then(Path::parent)
+        .expect("shots/<name>.png sits in a run dir");
+    if let Ok(text) = std::fs::read_to_string(run_dir.join(state_rel_for(&rel)))
+        && let Ok(state) = serde_json::from_str::<DevState>(&text)
+    {
+        eprintln!(
+            "terrain_pictures/{name}: the sky row {:?}",
+            state.terrain_stamp.as_ref().and_then(|s| s.sky.as_ref())
+        );
+    }
+    png
+}
+
 fn spawn_entry(account: u64, planet_seed: u64, st: &Stand) -> String {
     format!(
         "{account}=Planet({planet_seed}):{},{},{}@{},{},{},{}",
@@ -1778,6 +1951,35 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         (ahead * t.cos() - d * t.sin()).normalize()
     };
     let ground = stand(d, EYE_HEIGHT_M, h, nose(GROUND_TILT_DEG));
+    // ★ THE DUSK STAND (S7): the radial where the star stands `DUSK_BELOW_DEG` UNDER the horizon,
+    // the nose on the star's azimuth, level.
+    let zenith_dusk = (90.0_f64 + DUSK_BELOW_DEG).to_radians();
+    let d_dusk = (sun * zenith_dusk.cos() + along * zenith_dusk.sin()).normalize();
+    let h_dusk = vd_terrain::height::height_m(&body, [d_dusk.x, d_dusk.y, d_dusk.z], 0);
+    let nose_dusk = (sun - d_dusk * sun.dot(d_dusk)).normalize();
+    let dusk = stand(d_dusk, EYE_HEIGHT_M, h_dusk, nose_dusk);
+    // ★ THE HIGH STAND (S7): `HIGH_SHELLS` shell heights up, the orbit stand's tilt.
+    let shell_m = {
+        let system = vd_core::pose::RealmId::System(vd_bins::HOME_SYSTEM);
+        let held = std::collections::BTreeSet::from([system]);
+        let lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+        let charter = vd_bins::body_charter(
+            DEV.universe_seed,
+            &held,
+            &lineage,
+            vd_core::pose::RealmId::Planet(body.seed()),
+        )
+        .expect("the home planet states a charter");
+        let terms = vd_client::sky::sky_terms(&charter, body.ladder().radius_m())
+            .expect("the home planet has air");
+        terms.top_radius_m - terms.bottom_radius_m
+    };
+    let high_m = HIGH_SHELLS * shell_m;
+    let high = stand(d, high_m, h, nose(ORBIT_TILT_DEG));
+    eprintln!(
+        "terrain_pictures: THE DUSK STAND: the star {DUSK_BELOW_DEG}° under the horizon, surface \
+         {h_dusk:.1} m; THE HIGH STAND: {high_m:.0} m up ({HIGH_SHELLS} shells of {shell_m:.0} m)"
+    );
     let hill = stand(d, HILL_M, h, nose(HILL_TILT_DEG));
     let aloft = stand(d, ALOFT_M, h, nose(ALOFT_TILT_DEG));
     let orbit = stand(d, ORBIT_M, h, nose(ORBIT_TILT_DEG));
@@ -1883,7 +2085,11 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         seam.3,
         if seam.4 > 0.0 { "forward" } else { "back" }
     );
-    let spawn_poses = [
+    // ★ THE HANDOVER STAND (slice 8s S6, design §7): the pair of airy bodies whose handover is the
+    // LARGEST on this run's own tick, and one stand between them where their shells fill the same
+    // angle; two pilots stand there, each holding the sky's pick on one body.
+    let handover = handover_stand(HANDOVER_TICK);
+    let mut spawn_list = vec![
         spawn_entry(CLIENT_ACCOUNT_BASE, body.seed(), &ground),
         spawn_entry(CLIENT_ACCOUNT_BASE + 1, body.seed(), &hill),
         spawn_entry(CLIENT_ACCOUNT_BASE + 2, body.seed(), &aloft),
@@ -1891,8 +2097,42 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         spawn_entry(CLIENT_ACCOUNT_BASE + 4, body.seed(), &seam_stand),
         spawn_entry(CLIENT_ACCOUNT_BASE + 5, body.seed(), &far),
         spawn_entry(CLIENT_ACCOUNT_BASE + 6, body.seed(), &cave),
-    ]
-    .join(";");
+    ];
+    if let Some(h) = &handover {
+        spawn_list.push(spawn_entry_in_system(
+            CLIENT_ACCOUNT_BASE + HANDOVER_AGENT_A,
+            h.eye_m,
+            h.orient,
+        ));
+        spawn_list.push(spawn_entry_in_system(
+            CLIENT_ACCOUNT_BASE + HANDOVER_AGENT_A + 1,
+            h.eye_m,
+            h.orient,
+        ));
+    }
+    spawn_list.push(spawn_entry(
+        CLIENT_ACCOUNT_BASE + DUSK_AGENT,
+        body.seed(),
+        &dusk,
+    ));
+    spawn_list.push(spawn_entry(
+        CLIENT_ACCOUNT_BASE + HIGH_AGENT,
+        body.seed(),
+        &high,
+    ));
+    if let Some(h) = &handover {
+        eprintln!(
+            "terrain_pictures: THE HANDOVER STAND between Planet({}) and Planet({}): {:.0} m apart at \
+             tick {HANDOVER_TICK}, the eye {:.0} m from the first; each body's shell stands {:.3} px \
+             in radius there (the losing body's size, the pop's whole extent)",
+            h.seed_a, h.seed_b, h.distance_m, h.from_a_m, h.radius_px
+        );
+    } else {
+        eprintln!(
+            "terrain_pictures: THE HANDOVER STAND: fewer than two bodies with air — no handover"
+        );
+    }
+    let spawn_poses = spawn_list.join(";");
     let face = vd_seed::bend::face_of([d.x, d.y, d.z]);
     let (t, s) = vd_seed::bend::face_coords(face, [d.x, d.y, d.z]);
     eprintln!(
@@ -1919,6 +2159,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             band: (0.55, 1.0),
             min_share: 0.95,
             off_nose_band: SUN_OFF_NOSE_BAND_DEG,
+            pick: None,
         },
     );
     let (hill_chunks, hill_share) = take_picture(
@@ -1933,6 +2174,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             band: (0.5, 1.0),
             min_share: 0.95,
             off_nose_band: SUN_OFF_NOSE_BAND_DEG,
+            pick: None,
         },
     );
     let (aloft_chunks, aloft_share) = take_picture(
@@ -1947,6 +2189,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             band: (0.5, 1.0),
             min_share: 0.95,
             off_nose_band: SUN_OFF_NOSE_BAND_DEG,
+            pick: None,
         },
     );
     let (orbit_chunks, orbit_share) = take_picture(
@@ -1964,6 +2207,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             band: (0.72, 1.0),
             min_share: 0.95,
             off_nose_band: SUN_OFF_NOSE_BAND_DEG,
+            pick: None,
         },
     );
     let (seam_chunks, seam_share) = take_picture(
@@ -1978,6 +2222,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             band: (0.55, 1.0),
             min_share: 0.95,
             off_nose_band: (SUN_OFF_NOSE_BAND_DEG.0, 180.0),
+            pick: None,
         },
     );
     // ★ THE FAR STAND, LAST: the five frozen stands fly first, so a far-stand failure can never
@@ -1993,6 +2238,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             band: (0.0, 1.0),
             min_share: 0.0,
             off_nose_band: (0.0, 180.0),
+            pick: None,
         },
     );
     eprintln!("terrain_pictures: far {far_chunks} chunks");
@@ -2008,10 +2254,110 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             band: (0.0, 1.0),
             min_share: 0.0,
             off_nose_band: (0.0, 180.0),
+            pick: None,
         },
     );
     eprintln!(
         "terrain_pictures: cave {cave_chunks} chunks (a candidate stand, reported and never red)"
+    );
+    // ★ THE HANDOVER (S6): the two pictures a handover flips between, from one stand, one tick
+    // apart on the grid; their difference below the HUD is what the flip costs. A candidate:
+    // reported, never red — past one channel step the second pass is owed (D-TERRAIN-6).
+    if let Some(h) = &handover {
+        let png_a = take_handover_picture(
+            &f,
+            a.gateway,
+            &Picture {
+                name: "handover_a",
+                agent_index: HANDOVER_AGENT_A,
+                tilt_deg: 0.0,
+                band: (0.0, 1.0),
+                min_share: 0.0,
+                off_nose_band: (0.0, 180.0),
+                pick: Some(h.seed_a),
+            },
+        );
+        let png_b = take_handover_picture(
+            &f,
+            a.gateway,
+            &Picture {
+                name: "handover_b",
+                agent_index: HANDOVER_AGENT_A + 1,
+                tilt_deg: 0.0,
+                band: (0.0, 1.0),
+                min_share: 0.0,
+                off_nose_band: (0.0, 180.0),
+                pick: Some(h.seed_b),
+            },
+        );
+        let (ra, w, hh) = open_rgba(&png_a);
+        let (rb, wb, hb) = open_rgba(&png_b);
+        assert_eq!((w, hh), (wb, hb), "the two handover pictures are one size");
+        let (mut widest, mut past) = (0u8, 0u64);
+        for y in HUD_ROWS..hh {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let step = (0..3)
+                    .map(|c| ra[i + c].abs_diff(rb[i + c]))
+                    .max()
+                    .unwrap_or(0);
+                widest = widest.max(step);
+                past += u64::from(step > 1);
+            }
+        }
+        eprintln!(
+            "terrain_pictures/handover: THE HANDOVER, REPORTED AND NEVER RED — the pick held on \
+             Planet({}) against Planet({}), the losing body {:.3} px in radius: the widest channel \
+             step {widest} against the allowed 1, {past} pixels past it below the HUD — {}",
+            h.seed_a,
+            h.seed_b,
+            h.radius_px,
+            if widest <= 1 {
+                "no pop; the one-atmosphere rule stands as built"
+            } else {
+                "a pop; the second pass for the far body is owed (D-TERRAIN-6)"
+            }
+        );
+        let kept = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(PICTURE_DIR)
+            .join("candidate");
+        std::fs::create_dir_all(&kept).ok();
+        std::fs::copy(&png_a, kept.join("handover_a.png")).ok();
+        std::fs::copy(&png_b, kept.join("handover_b.png")).ok();
+    }
+    // ★ THE DUSK AND HIGH STANDS (S7): candidates, reported and never red, for the owner's look.
+    let dusk_chunks = take_far_picture(
+        &f,
+        a.gateway,
+        &body,
+        &Picture {
+            name: "dusk",
+            agent_index: DUSK_AGENT,
+            tilt_deg: 0.0,
+            band: (0.0, 1.0),
+            min_share: 0.0,
+            off_nose_band: (0.0, 180.0),
+            pick: None,
+        },
+    );
+    let high_chunks = take_far_picture(
+        &f,
+        a.gateway,
+        &body,
+        &Picture {
+            name: "high",
+            agent_index: HIGH_AGENT,
+            tilt_deg: ORBIT_TILT_DEG,
+            band: (0.0, 1.0),
+            min_share: 0.0,
+            off_nose_band: (0.0, 180.0),
+            pick: None,
+        },
+    );
+    eprintln!(
+        "terrain_pictures: dusk {dusk_chunks} chunks, high {high_chunks} chunks (candidate stands, \
+         reported and never red)"
     );
     eprintln!(
         "terrain_pictures: ground {ground_chunks} chunks ({ground_share:.3}), hill {hill_chunks} \

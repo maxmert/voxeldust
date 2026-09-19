@@ -13,6 +13,7 @@
 use std::process::ExitCode;
 
 use vd_bins::DEV;
+use vd_core::glam::DVec3;
 use vd_core::pose::RealmId;
 use vd_physics::celestial::G;
 use vd_physics::taxonomy::{
@@ -219,6 +220,7 @@ fn main() -> ExitCode {
     relief_law_table();
     water_table();
     sea_table();
+    air_table();
     ExitCode::SUCCESS
 }
 
@@ -546,5 +548,158 @@ fn sea_table() {
                 &moon_lineage,
             );
         }
+    }
+}
+
+/// ★ M-A — THE AIR CENSUS (slice 8s, S6 the handover): every body with air in the home system and
+/// among the home planet's moons, with the shell's top the sky computes for it; then every PAIR of
+/// airy bodies with the HANDOVER POINT between them — where the two shells fill the same angle at
+/// the eye, `d_A = D · top_A / (top_A + top_B)` — and the LOSING body's angular radius there in
+/// pixels of the picture (720 rows over a 45° field: 916.7 px per radian). A handover can be seen
+/// only where that radius stands over one pixel; a pair of planets a hundred million kilometres
+/// apart hands over between two points of light.
+fn air_table() {
+    let config = UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
+    let system = RealmId::System(vd_bins::HOME_SYSTEM);
+    let lineage = std::collections::BTreeSet::from([vd_core::worldgen::GALAXY]);
+    let held = std::collections::BTreeSet::from([system]);
+    let (rows, _) =
+        vd_physics::worldgen::shard_boot_world(DEV.universe_seed, &config, &held, system, &lineage);
+    println!(
+        "\nM-A — THE AIR CENSUS (slice 8s S6): the bodies with air, their shell tops, and every \
+         pair's handover point with the losing body's size there."
+    );
+    println!("body\trole\tair\tradius_m\tshell_top_m\tp_surf_Pa\tpos_in_parent_m");
+    // (realm, role, radius, top, position in the frame the pair shares) for the bodies with air.
+    let mut airy: Vec<(RealmId, &'static str, f64, f64, DVec3, &'static str)> = Vec::new();
+    let mut describe = |role: &'static str,
+                        frame: &'static str,
+                        realm: RealmId,
+                        look: f64,
+                        pos: DVec3,
+                        held: &std::collections::BTreeSet<RealmId>,
+                        lineage: &std::collections::BTreeSet<RealmId>| {
+        let RealmId::Planet(seed) = realm else {
+            return;
+        };
+        let Some(charter) = vd_bins::body_charter(DEV.universe_seed, held, lineage, realm) else {
+            println!("{realm:?}\t{role}\tNO CHARTER");
+            return;
+        };
+        let Some(body) =
+            vd_terrain::BodyDefinition::from_seed(seed, look, vd_bins::facts_of_charter(&charter))
+        else {
+            println!("{realm:?}\t{role}\tNO BODY (the ladder refused the look {look:.0} m)");
+            return;
+        };
+        let radius = body.ladder().radius_m();
+        match vd_client::sky::sky_terms(&charter, radius) {
+            Some(terms) => {
+                println!(
+                    "{realm:?}\t{role}\tAIR\t{radius:.0}\t{:.0}\t{}\t({:.0}, {:.0}, {:.0})",
+                    terms.top_radius_m,
+                    charter.p_surf_pa.unwrap_or(0),
+                    pos.x,
+                    pos.y,
+                    pos.z
+                );
+                airy.push((realm, role, radius, terms.top_radius_m, pos, frame));
+            }
+            None => println!("{realm:?}\t{role}\tairless\t{radius:.0}\t-\t-\t-"),
+        }
+    };
+    let system_row = rows
+        .iter()
+        .find(|r| r.realm == system)
+        .expect("the system's own row is in its boot");
+    for r in rows.iter().filter(|r| r.parent == Some(system)) {
+        if let (RealmId::Planet(_), Some(vd_core::geometry::Boundary::Shell { r: look })) =
+            (r.realm, r.look)
+        {
+            let role = if r.realm == vd_core::worldgen::HOME_PLANET {
+                "the home planet"
+            } else {
+                "a planet"
+            };
+            describe(
+                role,
+                "system",
+                r.realm,
+                look,
+                r.center.metres_in(system_row),
+                &held,
+                &lineage,
+            );
+        }
+    }
+    let home_realm = vd_core::worldgen::HOME_PLANET;
+    let moon_held = std::collections::BTreeSet::from([home_realm]);
+    let moon_lineage = std::collections::BTreeSet::from([
+        vd_core::worldgen::GALAXY,
+        vd_core::worldgen::HOME_SYSTEM,
+    ]);
+    let (moon_rows, _) = vd_physics::worldgen::shard_boot_world(
+        DEV.universe_seed,
+        &config,
+        &moon_held,
+        home_realm,
+        &moon_lineage,
+    );
+    let home_row = moon_rows
+        .iter()
+        .find(|r| r.realm == home_realm)
+        .expect("the home planet's own row is in its boot");
+    for r in moon_rows.iter().filter(|r| r.parent == Some(home_realm)) {
+        if let (RealmId::Planet(_), Some(vd_core::geometry::Boundary::Shell { r: look })) =
+            (r.realm, r.look)
+        {
+            describe(
+                "a moon of the home planet",
+                "home planet",
+                r.realm,
+                look,
+                r.center.metres_in(home_row),
+                &moon_held,
+                &moon_lineage,
+            );
+        }
+    }
+    // Every pair: the handover point and the losing body's size there, in pixels.
+    const PX_PER_RAD: f64 = 720.0 / (45.0_f64 * std::f64::consts::PI / 180.0);
+    println!(
+        "\npair\tdistance_m\thandover_from_A_m\tA_radius_px_at_handover\tB_radius_px_at_handover\tframe"
+    );
+    let home_pos = rows
+        .iter()
+        .find(|r| r.realm == home_realm)
+        .map_or(DVec3::ZERO, |r| r.center.metres_in(system_row));
+    for i in 0..airy.len() {
+        for j in (i + 1)..airy.len() {
+            let (ra, _, _, top_a, pa, fa) = airy[i];
+            let (rb, _, _, top_b, pb, fb) = airy[j];
+            // A moon's position is in the home planet's frame: shift it into the system's for a
+            // planet–moon pair (the planet's spin turns the axes, but a DISTANCE is the same in
+            // both frames, and only the distance enters here).
+            let (pa_sys, pb_sys) = (
+                if fa == "system" { pa } else { home_pos + pa },
+                if fb == "system" { pb } else { home_pos + pb },
+            );
+            let d = (pa_sys - pb_sys).length();
+            let d_a = d * top_a / (top_a + top_b);
+            let d_b = d - d_a;
+            let px_a = (top_a / d_a).atan() * PX_PER_RAD;
+            let px_b = (top_b / d_b).atan() * PX_PER_RAD;
+            println!(
+                "{ra:?} – {rb:?}\t{d:.0}\t{d_a:.0}\t{px_a:.2}\t{px_b:.2}\t{}",
+                if fa == fb {
+                    fa
+                } else {
+                    "system (the moon shifted)"
+                }
+            );
+        }
+    }
+    if airy.len() < 2 {
+        println!("(fewer than two bodies with air: no handover exists in the home system)");
     }
 }

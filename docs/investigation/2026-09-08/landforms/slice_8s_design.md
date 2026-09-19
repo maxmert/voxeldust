@@ -339,6 +339,12 @@ draw no atmosphere for a measurement (the picture gate's airless control, §9).
 
 ## 7. MULTI-PLANET: WHICH AIR THE EYE GETS, AND THE HANDOVER
 
+**★ MEASURED (S6, 2026-09-19): the handover costs nothing visible in the home system.** Five bodies with
+air, no airy moon; the two pictures at the handover stand (the pick held on each body) differ by a widest
+step of 0 on 0 pixels; the losing body's shell stands 0.24 px in radius there (0.80 px at closest approach).
+The stand exposed a defect on the way: the sun disc read the picked body's insolation for its distance —
+it reads the eye's own now. A second airy body over a pixel in size stays ledgered (D-TERRAIN-6).
+
 One atmosphere a frame (§2.5). The rule, generic for every realm kind:
 
 - **The eye gets the air of the body with air whose SHELL SUBTENDS THE LARGEST ANGLE at the eye** —
@@ -385,7 +391,7 @@ No new wire arm, no new lane, no new word. The gateway and every shard are untou
 | G-SKY-ZENITH | the ground stand's zenith colour against the analytic single-scatter value for the charter's τ_vis (Bruneton's closed form, computed in the test in f64) | > the LUT's stated quantum |
 | G-SKY-AIRLESS | a stand on a body with `HAS_AIR` clear: the picture BYTE-IDENTICAL to the same stand with `VD_SKY=0` | any pixel differs |
 | G-SKY-STARS | noon at the ground stand: no star pixel brighter than its sky neighbours; night: the star gate's references re-frozen once, then held | a star through the day sky; a night drift |
-| G-SKY-LANDING | the moving-eye descent (a new leg: orbit → ground at the 528 m/s hull rating): the per-frame step of the mean sky colour and of the rim's width, against the model's OWN prediction for that altitude step × 2 | a frame steps more than the model predicts (a pop) |
+| G-SKY-LANDING (★ BUILT AND GREEN 2026-09-19, S7) | the moving-eye DESCENT leg: one scale height over the shell's top, down to the rated cruise, the fall through the air (the realm's drag slows it; the read goes on to the arrest altitude); the SKY JUDGE on every pop pair reads the air's mean over the sky region clear of the horizon, against `max(1, 2·255·Δr/H)`. MEASURED: 103 km → 6.5 km, the widest step 0.092 levels, 0 pairs past the law | a pair's air steps past the law (a pop) |
 | G-SKY-MODE | (only if a switch exists, §6) the two modes' pictures at the switch altitude | > 1 channel step |
 | G-SKY-HANDOVER | (§7) the pixel step at the handover frame | > 1 channel step |
 | G-SKY-COST | frame time on the seven stands and the descent leg, both modes, printed | a report; the knob decides |

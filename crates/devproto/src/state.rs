@@ -807,6 +807,8 @@ pub struct DevSkyStamp {
     /// radius, set per frame, so the table reaches as far as the drawn ground.
     pub lut_far_m: f64,
     pub flat: bool,
+    /// Whether `VD_SKY_PICK` held the pick on this body (S6's measurement knob).
+    pub pick_held: bool,
     pub sun_disk_deg: f64,
     pub rayleigh_ratio: f64,
     pub ozone: bool,
