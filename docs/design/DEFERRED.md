@@ -8602,3 +8602,37 @@ Design: `docs/investigation/2026-09-08/landforms/slice_8s_design.md`; the owner'
   sprites carry no motion vectors (a custom vertex path). WHEN: the look after the freeze, with the motion vectors.
 - **THE CONTROL KNOB `VD_SKY_FLAT`.** A measurement knob that reproduces upstream's flat centre for G-SKY-CONTROL. It is
   never a mode anybody flies; it leaves with the patch.
+
+### D-TERRAIN-7 🟥 THE SOLVE'S CORE (8c stage C1) — what the bench states as fallbacks, and what C2–C5 owe (2026-09-19)
+Design: `docs/investigation/2026-09-08/landforms/slice_8c_design.md`; the bench's report `slice_8c_bench.md`. The core —
+`crates/terrain/src/macro_lattice.rs` (the divisor rule, the node addressing, the neighbours through the seam table, the
+node area, the chord) and `crates/terrain/src/solve.rs` (the priority flood, the D8 receivers, the flats by distance, the
+topological order, the discharge, the implicit stream-power sweep, the schedule) — is BUILT and MEASURED (M-L1). Every
+item below is a stated interim of that core, named here so no picture is judged on it by mistake.
+- **THE STARTING SURFACE IS THE RECIPE'S OWN RELIEF** at the node's rung (`solve::initial_surface`), one-humped noise. So
+  the flood finds a closed basin under a third of the home planet (3.15 M of 8.87 M nodes are LAKE nodes on the first
+  routing) and the drawn sea seeds only 16 839 outlets. WHEN: C2, the initial land (plates, isostasy on the crust field
+  with the water load, orogeny) replaces it and gate G-LAND-HYPSOMETRY reads two humps.
+- **THE RAIN IS `P_MIN_MM_YR = 1` EVERYWHERE** (03 §4.5's stated fallback): the discharge is the drainage area, the rivers
+  are right in shape and wrong in size — a desert continent grows an Amazon. WHEN: C3, the climate inside the schedule
+  fills `MacroSolve::rain` per node.
+- **NO UPLIFT, AND THE ERODIBILITY IS THE LITERATURE'S MIDDLE** (`K0_PER_YR = 2 × 10⁻⁶`, Earth; Stock & Montgomery 1999).
+  MEASURED consequence, on every body benched: with the system's five-billion-year age as the erosional age and no uplift
+  term, the implicit sweep reaches its base levels inside the forty passes — the LAST sweep lowers ZERO nodes on the home
+  planet, the moon, the rocky planet and the ocean planet; the land is cut flat to its lakes and its sea. That is the
+  arithmetic of `c = Δt·K·√Q/L` at a headwater node (about 7 a pass) and a trunk (hundreds). WHEN: C3 — the uplift from
+  L3 enters the sweep, and gate G-AGE (the per-basin hypsometric integral against the age) ties `K₀` down; until then the
+  solve's SHAPE is not a shape of any age and no picture is judged on it.
+- **THE DIRECTION CACHE** (`[i32; 3]` a node at 30 fraction bits, 12 B/node) so the routing's chords cost no bend; the
+  chord reads directions truncated by ten bits — six millimetres on the home planet, under the whole-metre floor. A
+  stated rounding, part of the world identity when the artifact lands (C4).
+- **THE MEMORY CEILING** `MACRO_EDGE_CEILING = 2 048` (25.2 M nodes, ~1.3 GB transient at the measured bytes a node) binds
+  on the home system's four giants and the 7 393 km rocky planet stands at 11.9 M nodes (edge 1 408). A giant has no solid
+  surface for the solve to run on; the solve should REFUSE a body whose charter states none (`CHARTER_FLAG_SOLID_SURFACE`
+  clear) rather than lattice it — owed with C4's artifact, where the body's charter reaches the solve.
+- **THE SOLVE IS NOT YET OFF THE TICK AND NOT YET STORED.** C1 is a library and a bench; no shard calls it. WHEN: C4 — the
+  injected worker seam (ruling S7-6), the artifact row in the shard's store, the home planet's pinned artifact, the
+  "not ready" refusal of a chunk request until the artifact exists (03 §5.3).
+- **THE OCEAN PLANET's 39 km relief.** `Planet(14964011474468519458)` (0.16 M⊕, g 2.76) draws ±39 km of relief under the
+  relief law's strength arm. Lawful under T6 as written; whether a small ocean world should stand so tall is a look for the
+  owner when 8d's water sheet draws it. Named here, decided nowhere yet.

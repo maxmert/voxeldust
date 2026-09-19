@@ -37,6 +37,26 @@ pub const HOME_PLANET_GRAVITY_MM_S2: u32 = 9_818;
 /// 5 513 kg/m³ — Earth's own 5 514 to a part in five thousand.
 pub const HOME_PLANET_BULK_DENSITY_KGM3: u32 = 5_513;
 
+/// ★ THE HOME PLANET'S MOON (the landform arc, slice 8c stage C1): the smallest round body the
+/// home system holds that the ladder accepts — 353 km, airless, tidally locked — stated as the
+/// same literals the planet is, so the solve's DRIVER test runs on a REAL SMALL BODY OF THE WORLD
+/// (06 §3.3: not a variant, not a test world) in milliseconds, and `home_body_pin.rs` (`moon_pin`)
+/// proves the forest draws exactly these numbers. The design counted on a 50 km body of 384
+/// nodes; the home system holds none that small, and its moon's lattice is 68 nodes an edge,
+/// 27 744 nodes (MEASURED 2026-09-19).
+pub const HOME_MOON_SEED: u64 = 2_918_819_812_335_288_845;
+/// The moon's look radius, bit for bit, as the forest draws it (353.0 km).
+pub const HOME_MOON_RADIUS_BITS: u64 = 0x4115_8bc0_1ca5_d6aa;
+/// 0.330 m/s² and 3 344 kg/m³ — the forest's own charter words for the moon.
+pub const HOME_MOON_GRAVITY_MM_S2: u32 = 330;
+pub const HOME_MOON_BULK_DENSITY_KGM3: u32 = 3_344;
+
+/// ★ THE HOME SYSTEM'S AGE in years (the landform arc, slice 8c; the design's ask 3): the erosional
+/// age the solve steps through is the SYSTEM'S OWN age from the census — a derived fact, never a
+/// typed dial — and the generator, which may name no motion crate, states the census's number
+/// here; `home_body_pin.rs` proves the census still says it.
+pub const HOME_SYSTEM_AGE_YR: u64 = 5_000_000_000;
+
 /// The home planet's facts, as its realm states them.
 #[must_use]
 pub fn home_facts() -> BodyFacts {
@@ -54,6 +74,17 @@ pub fn home_planet() -> BodyDefinition {
     .expect("the home planet is on the ladder")
 }
 
+/// The home planet's moon, defined by the recipe.
+#[must_use]
+pub fn home_moon() -> BodyDefinition {
+    BodyDefinition::from_seed(
+        HOME_MOON_SEED,
+        f64::from_bits(HOME_MOON_RADIUS_BITS),
+        BodyFacts::new(HOME_MOON_GRAVITY_MM_S2, HOME_MOON_BULK_DENSITY_KGM3),
+    )
+    .expect("the home moon is on the ladder")
+}
+
 #[cfg(test)]
 mod tests {
     //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test
@@ -65,6 +96,15 @@ mod tests {
         reason = "a test states an exact quotient or picks a sample column; never a kernel's path"
     )]
     use super::*;
+
+    #[test]
+    fn the_home_moon_is_on_the_ladder() {
+        let moon = home_moon();
+        assert_eq!(moon.seed, HOME_MOON_SEED);
+        // The ladder snaps the moon's radius to 2N/π at N = 557 056 cells: 354 632.9 m.
+        assert!((moon.radius_m() - 354_632.9).abs() < 1.0);
+        assert_eq!(moon.ladder.n, 557_056);
+    }
 
     #[test]
     fn the_home_planet_is_on_the_ladder_with_nineteen_rungs() {

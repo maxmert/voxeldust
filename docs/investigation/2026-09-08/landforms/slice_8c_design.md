@@ -83,7 +83,13 @@ nodes    = 6 · n_macro²
 ```
 
 Home planet: `n_macro = 640`, a node of 8 224 m, 2 457 600 nodes. A 200 km moon: 32 per edge, 6 144
-nodes. A 50 km body: the clamp at 8, 384 nodes. Why it is lawful: the target is a metric statement about
+nodes. A 50 km body: the clamp at 8, 384 nodes. **★ CORRECTED BY THE BUILD (C1, 2026-09-19):** those
+rows were computed on the OLD home planet's `N = 5 263 360`; THE world's home planet has
+`N = 9 961 472 = 2¹⁹ · 19` (the extended ladder, version 3), whose divisor 1 216 gives a node of EXACTLY
+8 192 m and **8 871 936 nodes** — 3.6 times the design's count. The home system holds no 200 km moon and
+no 50 km body: its smallest round body is the home planet's own moon (353 km, `N = 557 056`, edge 68,
+27 744 nodes), which is the solve's driver-test body (`vd_terrain::home::home_moon`). The ceiling
+(`MACRO_EDGE_CEILING = 2 048`, 25 165 824 nodes) binds on the four giants of the home system. Why it is lawful: the target is a metric statement about
 THE world — the drainage skeleton is resolved at about eight kilometres everywhere — like `SHORT_WAVE_M`;
 the ceiling is a cost knob and named as one.
 
@@ -302,7 +308,7 @@ on a digest mismatch. The charter's `sea_offset_mm` already crosses.
 
 | stage | what lands | proof |
 |---|---|---|
-| C1 THE BENCH | the solve's core (lattice, D8, flood, discharge, stream power) on the home planet at 8 224 m, single-threaded, off the tick: WALL TIME and PEAK MEMORY; the same on a 200 km moon and a 50 km body | M-L1 measured; the ship/derive decision (ask 2) |
+| C1 THE BENCH — 🟩 BUILT AND MEASURED 2026-09-19 | the solve's core (`crates/terrain/src/macro_lattice.rs`, `solve.rs`; the bench `crates/bins/examples/macro_bench.rs`; the report `slice_8c_bench.md`) on THE world's bodies, single-threaded: the home planet's WHOLE SCHEDULE (40 sweeps, 4 routings) **7.2 s of one thread** on 8 871 936 nodes (the design's estimate: 12–40 s on 2.46 M); one routing 0.93 s, one sweep 0.25 s, the state 52 B/node (461 MB); every node drains, no cycle | M-L1 measured; ask 2: the core alone is under the "few seconds" line for a derive — the decision waits for C3's passes on top of it |
 | C2 THE INITIAL LAND | plates, the crust field, isostasy with the water load, orogeny under the relief law | the LAND hypsometric curve is BIMODAL (a gate that can fail); the slope histogram |
 | C3 THE SOLVE | the schedule with the climate inside; sediment, flexure, talus, ice, coast, craters (ask 4); the envelope assertion | the per-basin hypsometric integral = the erosional age; every land node drains to a lake or the sea |
 | C4 THE ARTIFACT AND THE READ | the rows, the pyramid, the digest, the home pin; `height_m` reads `Z` and the roughness field; the coarse octaves replaced; the ladder's coarsening re-measured; the version bump | no-drift on the artifact (byte-identical on every target); the seam/corner gate; the rung-disagreement judge under a pixel |

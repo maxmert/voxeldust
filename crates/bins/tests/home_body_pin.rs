@@ -10,6 +10,68 @@ use vd_physics::worldgen::HOME_SEED;
 const HOME_PLANET_SEED: u64 = 4_030_111_653_607_004_909;
 const HOME_PLANET_RADIUS_BITS: u64 = 0x4158_4d6e_d403_3833;
 
+/// ★ THE HOME MOON's CROSS-PIN (the landform arc, slice 8c stage C1): the generator states the
+/// home planet's moon as literals so the solve's driver test runs on a REAL SMALL BODY OF THE
+/// WORLD; this proves the forest still draws exactly those numbers — the seed, the bits of the
+/// look radius, the two charter words — and that the census's system age is the age the
+/// generator states as the erosional age (the design's ask 3).
+#[test]
+fn the_forests_home_moon_is_the_generators_home_moon() {
+    let config =
+        vd_physics::worldgen::UniverseConfig::world(vd_bins::DEV.move_speed, vd_bins::DEV.tick_dt);
+    let home_realm = vd_core::worldgen::HOME_PLANET;
+    let held = std::collections::BTreeSet::from([home_realm]);
+    let lineage = std::collections::BTreeSet::from([
+        vd_core::worldgen::GALAXY,
+        vd_core::worldgen::HOME_SYSTEM,
+    ]);
+    let (rows, _) =
+        vd_physics::worldgen::shard_boot_world(HOME_SEED, &config, &held, home_realm, &lineage);
+    let moons: Vec<(vd_core::pose::RealmId, f64)> = rows
+        .iter()
+        .filter(|r| r.parent == Some(home_realm))
+        .filter_map(|r| match (r.realm, r.look) {
+            (
+                realm @ vd_core::pose::RealmId::Planet(_),
+                Some(vd_core::geometry::Boundary::Shell { r: look }),
+            ) => Some((realm, look)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(moons.len(), 1, "the home planet has one moon: {moons:?}");
+    let (moon_realm, look) = moons[0];
+    assert_eq!(
+        moon_realm,
+        vd_core::pose::RealmId::Planet(vd_terrain::home::HOME_MOON_SEED),
+        "the moon's seed moved"
+    );
+    assert_eq!(
+        look.to_bits(),
+        vd_terrain::home::HOME_MOON_RADIUS_BITS,
+        "the moon's look radius moved: bits {:#018x}",
+        look.to_bits()
+    );
+    let facts = vd_physics::worldgen::body_facts_in_subtree(
+        HOME_SEED, &config, &held, &lineage, moon_realm,
+    )
+    .expect("the moon has facts");
+    let [g, rho] = vd_physics::worldgen::relief_words(facts.taxon.mass_kg, facts.taxon.radius_m);
+    assert_eq!(g, Some(vd_terrain::home::HOME_MOON_GRAVITY_MM_S2));
+    assert_eq!(rho, Some(vd_terrain::home::HOME_MOON_BULK_DENSITY_KGM3));
+    let forest = vd_terrain::BodyDefinition::from_seed(
+        vd_terrain::home::HOME_MOON_SEED,
+        look,
+        vd_terrain::BodyFacts::new(g.expect("g"), rho.expect("rho")),
+    )
+    .expect("on the ladder");
+    assert_eq!(forest, vd_terrain::home::home_moon());
+    // The erosional age is the census's own system age, to the year.
+    assert_eq!(
+        (vd_physics::taxonomy::SYSTEM_AGE_GYR * 1.0e9) as u64,
+        vd_terrain::home::HOME_SYSTEM_AGE_YR
+    );
+}
+
 #[test]
 fn the_forests_home_planet_is_the_golden_gates_home_planet() {
     let body = vd_bins::home_body(HOME_SEED).expect("the home system holds a round planet");
