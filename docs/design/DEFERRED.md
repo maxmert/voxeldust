@@ -8636,3 +8636,35 @@ item below is a stated interim of that core, named here so no picture is judged 
 - **THE OCEAN PLANET's 39 km relief.** `Planet(14964011474468519458)` (0.16 M⊕, g 2.76) draws ±39 km of relief under the
   relief law's strength arm. Lawful under T6 as written; whether a small ocean world should stand so tall is a look for the
   owner when 8d's water sheet draws it. Named here, decided nowhere yet.
+
+**C2 THE INITIAL LAND (built 2026-09-19, `crates/terrain/src/land.rs`) — its stated interims:**
+- **THE CRUST'S SCALING IS THE RELIEF LAW'S CAP, NOT `1/g` ALONE.** 02 §4.2 scaled the crust thickness as
+  `1/g` at fixed composition; on the home moon (`g = 0.33`) that gives a thousand kilometres of crust and a
+  158 km isostatic step, which no 350 km body can hold. The build scales the thicknesses by the body's relief
+  cap over Earth's — the strength arm IS the `1/g` law, and the shape arm (`0.077·R`) is what bounds a small
+  body. Calibration Earth (cap 8 850 m, dry step 4 455 m). A law the investigation did not write; stated here
+  so the owner can refuse it.
+- **THE CONTINENTAL SHARE IS EARTH'S 40 % ON EVERY BODY** (`CONTINENTAL_SHARE`): no published law gives another
+  body's share of continental crust, so the crust field's threshold is the area quantile at Earth's. The one
+  calibration with no scaling; a stagnant lid (the moon) gets the same two-level crust (highlands and
+  lowlands). WHEN: a law, if one is found; else the owner's word that Earth's share stands.
+- **THE BELT PROFILES ARE STATED SHAPES** (`uplift_m`: a bump `(1 − x²)²` per kind and crust pair, the trench and
+  the rift a quarter as wide, their depths as shares of the belt) with an exact zero outside their width.
+  The belts' amplitude is the ROOM under the relief once the tallest platform stands, so the envelope holds by
+  construction. The island arc's LINE OF CONES and the hotspot chains (02 §4.3) are NOT built: an arc is a
+  half-height belt today. WHEN: with C3's craters and ice, or 8f, on the pictures' word.
+- **NO ABYSSAL HILLS, NO RIDGE AXIAL VALLEY** (02 §7.2): the ocean floor is the isostatic plain plus the ridge
+  bump. WHEN: 8o's bathymetry look.
+- **THE LAKE DOUBLE COUNT** (02 §7.1): the sea's bisection spends the whole inventory on the sea; the lakes the
+  flood then fills hold water the inventory has already spent. WHEN: C5 — one subtraction, the lakes' volume
+  read off the routing.
+- **THE PER-PLATE CHARACTER IS THE FAR SIDE'S CRUST**: at a boundary the far plate's continental-ness is read
+  from its affinity OFFSET's sign, not from the crust share across the boundary (which the node does not hold).
+  A stated approximation; the pictures judge it at the coasts where a range should face a trench.
+- **THE LOADED FLOOR AGAINST THE LADDER'S FLOOR.** The water load sinks an ocean floor BELOW the dry relief
+  (Earth's 4 455 m step is 6 476 m loaded), and the envelope of 03 §4.13 bounds the DRY land only; the ladder's
+  band (the crust under the surface) must still hold the bathymetry, or the collider has no cells under the
+  deep sea. UNMEASURED on every body but the home planet (whose floors reach −6 188 m against a 6 079 526 m
+  floor: fine). WHEN: C5's sea gate reads the loaded minimum against `Ladder::floor_m` and turns red past it.
+- **THE TRANSFORM BAND** (`TRANSFORM_SHARE = 0.1`) and **the age's halving** (`1 − age/2`) are stated shape
+  knobs of the belt law, not physical facts; both are part of the world tag once the artifact lands.

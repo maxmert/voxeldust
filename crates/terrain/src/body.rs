@@ -463,7 +463,7 @@ const _: () = assert!(TUBE_REGION_M.is_power_of_two());
 
 /// The salts of the seed tree: each part of the body draws from its own stream, so adding a draw to
 /// one part never moves another.
-mod salt {
+pub(crate) mod salt {
     pub const OCTAVES: u64 = 0x5e_ed_01;
     pub const SEA: u64 = 0x5e_ed_02;
     pub const STRATA: u64 = 0x5e_ed_03;
@@ -479,6 +479,10 @@ mod salt {
     /// else — the spacing is derived from the strata and the strength is solved from the ladder. A
     /// NEW salt never moves an existing draw.
     pub const BENCH: u64 = 0x5e_ed_09;
+    /// ★ THE INITIAL LAND's stream (slice 8c stage C2): the plate sites, their drifts, their
+    /// affinities and ages, the crust's named scatter. Read by the solve once per body, never by
+    /// the draw of the body itself, so no chunk byte moved when it was added.
+    pub const LAND: u64 = 0x5e_ed_0a;
 }
 
 /// The cave parameters, as the kernels read them.
@@ -680,7 +684,7 @@ fn draw_m(rng: &mut SplitMix64, lo: u64, hi: u64) -> u32 {
 }
 
 /// A draw in `[0, 1)` as a fenced float: the top 53 bits over 2^53, exact.
-fn draw_unit(rng: &mut SplitMix64) -> Gf {
+pub(crate) fn draw_unit(rng: &mut SplitMix64) -> Gf {
     Gf::from_i64((rng.next_u64() >> 11) as i64) / Gf::from_i64(1 << 53)
 }
 
@@ -799,7 +803,7 @@ fn spectrum_amplitude_m(s_peak: Gf, o: usize, wave_m: Gf) -> Gf {
 /// fraction at the noise's fraction bits. MEASURED (the integer bench, part 1): a frequency rounded
 /// to 2⁻⁸ moved the coarsest lattice point by a ten-thousandth of a cell, which eight kilometres of
 /// amplitude turned into metres — so the fraction carries the noise's own 28 bits.
-fn frequency_of(frequency: Gf) -> (Gi, Gi) {
+pub(crate) fn frequency_of(frequency: Gf) -> (Gi, Gi) {
     let whole = frequency.floor();
     (
         Gi::new(whole.to_i64_floor()),

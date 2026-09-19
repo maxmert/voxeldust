@@ -57,6 +57,34 @@ pub const HOME_MOON_BULK_DENSITY_KGM3: u32 = 3_344;
 /// here; `home_body_pin.rs` proves the census still says it.
 pub const HOME_SYSTEM_AGE_YR: u64 = 5_000_000_000;
 
+/// ★ THE HOME PLANET'S LAND WORDS (slice 8c stage C2): the two charter words the initial land
+/// reads — the water inventory in whole km³ and the lithosphere's elastic thickness in whole
+/// metres — as the census computes them (`home_body_pin.rs` proves it), stated here because the
+/// generator may name no motion crate and the driver test needs them.
+pub const HOME_PLANET_WATER_KM3: u64 = 2_735_928_089;
+pub const HOME_PLANET_ELASTIC_THICKNESS_M: u32 = 36_789;
+/// The moon's: no water, and a lithosphere three times its own radius thick — a stagnant lid.
+pub const HOME_MOON_WATER_KM3: u64 = 0;
+pub const HOME_MOON_ELASTIC_THICKNESS_M: u32 = 1_094_578;
+
+/// The home planet's land words, as its realm states them.
+#[must_use]
+pub const fn home_land_words() -> crate::land::LandWords {
+    crate::land::LandWords {
+        water_km3: HOME_PLANET_WATER_KM3,
+        elastic_thickness_m: HOME_PLANET_ELASTIC_THICKNESS_M,
+    }
+}
+
+/// The moon's land words.
+#[must_use]
+pub const fn home_moon_land_words() -> crate::land::LandWords {
+    crate::land::LandWords {
+        water_km3: HOME_MOON_WATER_KM3,
+        elastic_thickness_m: HOME_MOON_ELASTIC_THICKNESS_M,
+    }
+}
+
 /// The home planet's facts, as its realm states them.
 #[must_use]
 pub fn home_facts() -> BodyFacts {

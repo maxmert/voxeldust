@@ -136,3 +136,51 @@ this bench and the first picture.
 the uniform rain, the missing uplift and the uncalibrated erodibility, the direction cache's rounding,
 the memory ceiling and the giants, the solve not yet off the tick nor stored, the ocean planet's
 39 km relief.
+
+## 7. Stage C2 — THE INITIAL LAND, measured (2026-09-19)
+
+`crates/terrain/src/land.rs`: the plates by the plate law, the crust field with Airy isostasy and the
+water load, the belts under the relief, the sea by an integer bisection over the nodes with the load
+inside it, the hypsometry. The same bench, the same quiet window (load 1.99 at the start).
+
+| body | plates | land, one thread | continental crust | sea over the mean | ocean share | G-LAND-HYPSOMETRY | the schedule from the land |
+|---|---|---|---|---|---|---|---|
+| the home moon | 1 (a stagnant lid) | 4 ms | 40.0 % | none | 0 % | TWO HUMPS at −5 423 m and +8 327 m, valley 0.03 — GREEN | 34 ms; no lake, 15 523 flat nodes, every node drains |
+| the rocky planet (24 Earth oceans) | 6 | 0.69 s | 40.0 % | +84 km | 100 % | TWO HUMPS at −42.6 km and −33.1 km — GREEN | 2.6 s; every node an outlet |
+| the ocean planet (356 Earth oceans) | 3 | 0.76 s | 40.0 % | +1 125 km | 100 % | TWO HUMPS — GREEN | 2.9 s; every node an outlet |
+| **THE HOME PLANET** (2.03 Earth oceans) | **14** | **1.33 s** | **40.0 %** | **+3 676 m** | **89.5 %** | **TWO HUMPS at −4 688 m (the floors) and +1 812 m (the platforms), valley 0.08 — GREEN** | **6.5 s; 7.93 M outlets, 3 285 lake nodes, 755 k flat nodes, every node drains** |
+
+**The second hump exists.** On the home planet the ocean floors stand 6 500 m under the continental
+platforms once the water loads them — Earth's own 6 476 m, from the same two laws. The plates: 14
+(Earth's 15 by the same law), with 7.3 % of the surface within 250 km of a convergent boundary, 6.1 %
+of a divergent one, 1.6 % of a transform. The land costs 150 ns a node: 1.33 s on the home planet,
+on top of the core's 7 s. Within 250 km of a boundary the belts rise to +5 183 m over the mean, the
+trenches fall to −6 188 m.
+
+**★ THE FINDING THE OWNER MUST SEE: the home planet is 10.5 % land.** The census's water law (8b
+stage 5) gives the home planet 2 735 928 089 km³ of water — 2.03 Earth oceans (the census's own
+column `earth_oceans`). Over an Earth-like hypsometry that much water stands 3 676 m over the mean,
+1 864 m over the continental platforms, and only the belts break the surface: 89.5 % ocean, where
+Earth is 71 % and the design's §7.1 promised "a water-rich earth-like planet gets 60–75 % ocean".
+This is not the drowning of ruling T8 (that was one hump; this is two humps with too much water on
+them), and it is not a defect of the isostasy: an Earth with twice its water would look like this.
+The two other planets of the home system that hold water hold 24 and 356 Earth oceans and are
+water worlds outright, which their classes say. So the number that decides whether the home planet
+has continents is the WATER INVENTORY LAW's calibration (8b's formation-zone model), or the
+continental share (Earth's 40 %, the one calibration with no law behind it), or both. Nothing here
+is tuned to hide it; ask 8 in §8 puts it to the owner.
+
+**The sweeps still cut the land flat** (the last sweep lowers zero nodes on every body): the C3
+finding stands — no uplift, and the erodibility uncalibrated against the age.
+
+## 8. The asks C2 adds
+
+8. **The home planet's land share.** 10.5 % land at the census's 2.03 Earth oceans and Earth's 40 %
+   continental crust. Options: (a) re-read the water law's calibration in 8b (the formation-zone
+   retention gave the home planet twice Earth's water); (b) state the continental share as a law of
+   the water inventory (a wetter body differentiates more crust — no published law); (c) accept a
+   world of island continents. Recommend (a): the water inventory is a derived word with a model
+   behind it, and the model is the place a factor of two hides.
+9. **The crust's scaling by the relief law's cap** (ledger D-TERRAIN-7, C2): the investigation's `1/g`
+   alone gives a 350 km moon a thousand kilometres of crust; the build bounds it by the shape arm.
+   Recommend accepting it as the law's statement.

@@ -254,6 +254,18 @@ impl MacroSolve {
         })
     }
 
+    /// ★ THE SOLVE'S STATE FROM THE INITIAL LAND (stage C2): the land's heights and its sea level
+    /// as the start, in place of the recipe's noise. A body with no sea gets a level under every
+    /// node, so the flood seeds from its lowest nodes.
+    #[must_use]
+    pub fn from_land(body: &BodyDefinition, land: &crate::land::Land) -> Option<MacroSolve> {
+        let mut state = MacroSolve::new(body)?;
+        state.z.clone_from(&land.z);
+        state.z_flood.clone_from(&land.z);
+        state.sea_z = land.sea_z.unwrap_or(i32::MIN);
+        Some(state)
+    }
+
     /// The nodes.
     #[must_use]
     pub fn node_count(&self) -> usize {
@@ -529,11 +541,29 @@ fn uncache(d: [i32; 3]) -> [Gi; 3] {
     ]
 }
 
-/// ★ THE DRIVER: the schedule over `body` — a routing and an accumulation every `flood_every`
-/// passes, a sweep every pass. `None` where the body has no lattice.
+/// ★ THE DRIVER: the schedule over `body` from the recipe's own relief (the C1 start) — a routing
+/// and an accumulation every `flood_every` passes, a sweep every pass. `None` where the body has
+/// no lattice.
 #[must_use]
 pub fn solve(body: &BodyDefinition, schedule: Schedule) -> Option<(MacroSolve, SolveReport)> {
-    let mut state = MacroSolve::new(body)?;
+    run(MacroSolve::new(body)?, schedule)
+}
+
+/// ★ THE DRIVER FROM THE INITIAL LAND (stage C2): the same schedule from the land the plates,
+/// the isostasy and the belts made under the charter's words.
+#[must_use]
+pub fn solve_land(
+    body: &BodyDefinition,
+    words: &crate::land::LandWords,
+    schedule: Schedule,
+) -> Option<(MacroSolve, SolveReport)> {
+    let lattice = MacroLattice::of(body)?;
+    let land = crate::land::initial_land(body, &lattice, words);
+    run(MacroSolve::from_land(body, &land)?, schedule)
+}
+
+/// The schedule over a state.
+fn run(mut state: MacroSolve, schedule: Schedule) -> Option<(MacroSolve, SolveReport)> {
     let gain = schedule.gain();
     let mut report = SolveReport::default();
     let mut since_route = schedule.flood_every;
@@ -629,6 +659,30 @@ mod tests {
             .map(|i| state.discharge[i])
             .sum();
         assert_eq!(out, total);
+    }
+
+    /// ★ THE DRIVER FROM THE LAND on the moon: a stagnant lid with no sea, so the flood seeds from
+    /// the six lowest nodes, every node drains, and the sweeps only lower.
+    #[test]
+    fn the_moon_solves_from_its_initial_land() {
+        let moon = home_moon();
+        let (state, report) = solve_land(
+            &moon,
+            &crate::home::home_moon_land_words(),
+            Schedule::standard(HOME_SYSTEM_AGE_YR),
+        )
+        .expect("a solve");
+        assert_eq!(state.sea_z, i32::MIN);
+        assert_eq!(report.routes.len(), 4);
+        for r in &report.routes {
+            assert!(!r.sea_seeded);
+            assert_eq!(
+                (r.outlets, r.undrained, r.cyclic),
+                (OUTLETS_WITHOUT_SEA, 0, 0)
+            );
+        }
+        let band = (moon.relief_bound_m(0) * f64::from(Z_STEPS_PER_M)) as i32;
+        assert!(state.z.iter().all(|&z| z.abs() <= band));
     }
 
     /// The flood's two seedings on the moon: with the sea under every node the six lowest nodes

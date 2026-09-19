@@ -28,6 +28,7 @@ use vd_core::pose::RealmId;
 use vd_physics::worldgen::{UniverseConfig, body_facts_in_subtree, shard_boot_world};
 use vd_terrain::BodyDefinition;
 use vd_terrain::home::home_moon;
+use vd_terrain::land::{Kind, LandWords, humps, hypsometry, initial_land};
 use vd_terrain::macro_lattice::MacroLattice;
 use vd_terrain::solve::{MacroSolve, Schedule, Z_STEPS_PER_M, solve};
 
@@ -57,6 +58,106 @@ fn mb(bytes: u64) -> f64 {
 
 fn metres(steps: i32) -> f64 {
     f64::from(steps) / f64::from(Z_STEPS_PER_M)
+}
+
+/// ★ THE INITIAL LAND's bench (stage C2): the land timed, its plates, its crust share, its sea,
+/// gate G-LAND-HYPSOMETRY's reading (two humps and the valley between), then the schedule from
+/// the land.
+fn bench_land(label: &str, body: &BodyDefinition, words: &LandWords, age_yr: u64) {
+    let Some(lattice) = MacroLattice::of(body) else {
+        return;
+    };
+    let t = Instant::now();
+    let land = initial_land(body, &lattice, words);
+    let t_land = t.elapsed();
+    let n = lattice.node_count();
+    let area: Vec<u64> = (0..n as u32).map(|k| lattice.area_m2(k)).collect();
+    let total: u128 = area.iter().map(|&a| u128::from(a)).sum();
+    let share = |pred: &dyn Fn(usize) -> bool| {
+        (0..n)
+            .filter(|&k| pred(k))
+            .map(|k| u128::from(area[k]))
+            .sum::<u128>() as f64
+            / total as f64
+    };
+    let continental = share(&|k| land.crust[k] >= 128);
+    let ocean = land.sea_z.map_or(0.0, |sea| share(&|k| land.z[k] <= sea));
+    let kinds = [
+        Kind::None,
+        Kind::Convergent,
+        Kind::Divergent,
+        Kind::Transform,
+    ]
+    .map(|kind| share(&|k| land.kind[k] == kind as u8 && land.boundary_m[k] < 250_000));
+    let (lo, hi) = land
+        .z
+        .iter()
+        .fold((i32::MAX, i32::MIN), |(lo, hi), &z| (lo.min(z), hi.max(z)));
+    println!(
+        "\n{label} — THE INITIAL LAND (C2): {:.3} s; {} plates; continental crust {:.1} % of the area; \
+         relief {:.0}..{:.0} m; sea {}; ocean share {:.1} %; within 250 km of a boundary: convergent \
+         {:.1} %, divergent {:.1} %, transform {:.1} %",
+        t_land.as_secs_f64(),
+        land.plates.len(),
+        continental * 100.0,
+        metres(lo),
+        metres(hi),
+        land.sea_z
+            .map_or("none".to_owned(), |s| format!("{:.0} m", metres(s))),
+        ocean * 100.0,
+        kinds[1] * 100.0,
+        kinds[2] * 100.0,
+        kinds[3] * 100.0
+    );
+    let (base, hist) = hypsometry(&land.z, &area);
+    match humps(&hist) {
+        Some((low, high, valley)) => println!(
+            "  G-LAND-HYPSOMETRY: TWO HUMPS at {:.0} m and {:.0} m, the valley between {:.2} of the lower \
+             hump ({})",
+            metres(base) + f64::from(low as u32) * 250.0,
+            metres(base) + f64::from(high as u32) * 250.0,
+            valley,
+            if valley < 0.5 {
+                "GREEN"
+            } else {
+                "RED: the valley is not a valley"
+            }
+        ),
+        None => println!("  G-LAND-HYPSOMETRY: ONE HUMP — RED"),
+    }
+    let t = Instant::now();
+    let mut state = MacroSolve::from_land(body, &land).expect("a state");
+    let schedule = Schedule::standard(age_yr);
+    let gain = schedule.gain();
+    let mut routes = Vec::new();
+    let mut since = schedule.flood_every;
+    let mut last = Default::default();
+    for _ in 0..schedule.passes {
+        if since >= schedule.flood_every {
+            routes.push(state.route());
+            state.accumulate();
+            since = 0;
+        }
+        since += 1;
+        last = state.sweep(gain);
+    }
+    let t_solve = t.elapsed();
+    let r = routes.last().copied().unwrap_or_default();
+    let (lo, hi) = state.range();
+    println!(
+        "  THE SCHEDULE FROM THE LAND: {:.3} s; last routing: sea seeded {}, outlets {}, lake nodes {}, flat {}, \
+         undrained {}, cyclic {}; relief after {:.0}..{:.0} m; last sweep lowered {} nodes",
+        t_solve.as_secs_f64(),
+        r.sea_seeded,
+        r.outlets,
+        r.raised,
+        r.flat,
+        r.undrained,
+        r.cyclic,
+        metres(lo),
+        metres(hi),
+        last.lowered
+    );
 }
 
 /// One body's bench: the phases timed, the schedule timed, the memory read.
@@ -158,10 +259,18 @@ fn main() -> ExitCode {
         println!("macro_bench: REFUSED — the home system holds no planet the recipe accepts");
         return ExitCode::FAILURE;
     };
-    let only: Option<u64> = std::env::var("VD_BENCH_BODY").ok().and_then(|v| v.parse().ok());
+    let only: Option<u64> = std::env::var("VD_BENCH_BODY")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let wanted = |seed: u64| only.is_none_or(|s| s == seed);
     if wanted(home_moon().seed()) {
         bench("the home moon", &home_moon(), age_yr);
+        bench_land(
+            "the home moon",
+            &home_moon(),
+            &vd_terrain::home::home_moon_land_words(),
+            age_yr,
+        );
     }
     // The home system's other planets the ladder accepts, smallest first.
     let config = UniverseConfig::world(DEV.move_speed, DEV.tick_dt);
@@ -208,7 +317,33 @@ fn main() -> ExitCode {
                 l.node_count(),
                 l.edge
             ),
-            _ => bench(&label, &body, age_yr),
+            _ => {
+                bench(&label, &body, age_yr);
+                let charter = vd_physics::worldgen::body_charter_in_subtree(
+                    DEV.universe_seed,
+                    &config,
+                    &held,
+                    &lineage,
+                    realm,
+                );
+                match charter.and_then(|c| {
+                    c.elastic_thickness_m
+                        .map(|te| (c.water_km3.unwrap_or(0), te))
+                }) {
+                    Some((water_km3, elastic_thickness_m)) => bench_land(
+                        &label,
+                        &body,
+                        &LandWords {
+                            water_km3,
+                            elastic_thickness_m,
+                        },
+                        age_yr,
+                    ),
+                    None => println!(
+                        "  no charter words for the land (no elastic thickness): C2 skipped"
+                    ),
+                }
+            }
         }
     }
     ExitCode::SUCCESS

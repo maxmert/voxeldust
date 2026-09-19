@@ -65,6 +65,19 @@ fn the_forests_home_moon_is_the_generators_home_moon() {
     )
     .expect("on the ladder");
     assert_eq!(forest, vd_terrain::home::home_moon());
+    // ★ THE LAND WORDS (slice 8c stage C2): the moon's water and elastic thickness are the pinned ones.
+    let charter = vd_physics::worldgen::body_charter_in_subtree(
+        HOME_SEED, &config, &held, &lineage, moon_realm,
+    )
+    .expect("the moon has a charter");
+    assert_eq!(
+        charter.water_km3,
+        Some(vd_terrain::home::HOME_MOON_WATER_KM3)
+    );
+    assert_eq!(
+        charter.elastic_thickness_m,
+        Some(vd_terrain::home::HOME_MOON_ELASTIC_THICKNESS_M)
+    );
     // The erosional age is the census's own system age, to the year.
     assert_eq!(
         (vd_physics::taxonomy::SYSTEM_AGE_GYR * 1.0e9) as u64,
@@ -112,6 +125,23 @@ fn the_forests_home_planet_is_the_golden_gates_home_planet() {
     assert_eq!(
         body, golden,
         "the forest's home planet and the golden gate's home planet are the same body"
+    );
+    // ★ THE HOME PLANET'S LAND WORDS (slice 8c stage C2) are the pinned ones.
+    let charter = vd_physics::worldgen::body_charter_in_subtree(
+        HOME_SEED,
+        &config,
+        &held,
+        &lineage,
+        vd_core::worldgen::HOME_PLANET,
+    )
+    .expect("the home planet has a charter");
+    assert_eq!(
+        charter.water_km3,
+        Some(vd_terrain::home::HOME_PLANET_WATER_KM3)
+    );
+    assert_eq!(
+        charter.elastic_thickness_m,
+        Some(vd_terrain::home::HOME_PLANET_ELASTIC_THICKNESS_M)
     );
     let identity = vd_bins::world_identity(HOME_SEED).expect("a world identity");
     assert_eq!(identity.declared, vd_terrain::declared_world_tag(HOME_SEED));
