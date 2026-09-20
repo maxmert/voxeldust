@@ -353,29 +353,32 @@ fn the_home_bodys_charter_is_the_forests_charter() {
         vd_bins::facts_of_charter(&charter),
     )
     .expect("the home body");
-    let stated = vd_bins::charter_with_sea(charter, Some(&body));
-    let level =
-        vd_bins::sea::solve_sea_level(&body, charter.water_km3.expect("water") as f64 * 1.0e9)
-            .expect("a sea");
-    println!(
-        "[charter_pin] G-SEA: the home planet's sea stands {:.3} m over the ladder radius, ocean share {:.4} at rung {} ({} samples)",
-        level.offset_m, level.ocean_share, level.rung, level.samples
-    );
+    // ★ THE SEA THE CHARTER STATES IS THE SOLVE'S (slice 8c stage C5): the home planet's pinned
+    // level (`HOME_PLANET_SEA_M`, proved by the artifact pin) becomes the charter's millimetres and
+    // its flag; a realm with no artifact yet states none; a body whose water is not liquid states
+    // none whatever the solve found.
+    let stated = vd_bins::charter_with_sea(charter, Some(vd_terrain::home::HOME_PLANET_SEA_M));
     assert_eq!(
         stated.sea_offset_mm,
-        Some(4_957_341),
-        "the stated sea moved"
+        Some(vd_terrain::home::HOME_PLANET_SEA_M * 1_000),
+        "the stated sea is the solve's level in millimetres"
     );
     assert_eq!(
         stated.flags & vd_core::look::CHARTER_FLAG_HAS_SEA,
         vd_core::look::CHARTER_FLAG_HAS_SEA,
         "the home planet has a sea"
     );
+    assert_eq!(vd_bins::charter_with_sea(charter, None).sea_offset_mm, None);
+    let frozen = vd_core::look::BodyCharter {
+        t_surface_mk: Some(150_000),
+        ..charter
+    };
     assert_eq!(
-        vd_physics::worldgen::quantise_i32(level.offset_m, 1_000.0),
-        stated.sea_offset_mm,
-        "the stored offset is the derived one (G-SEA)"
+        vd_bins::charter_with_sea(frozen, Some(0)).sea_offset_mm,
+        None,
+        "ice states no coast"
     );
+    let _ = body;
     assert_eq!(
         [
             charter.t_surface_mk.is_some(),

@@ -284,3 +284,14 @@ the numbers are.
 
 The other targets' legs (the x86-64 leg, the k3d pod) of the artifact pin are UNMEASURED until the legs script runs
 `just artifact-pin` there.
+
+## 11. Stage C5 — THE SEA, measured (2026-09-20)
+
+| item | measured | value |
+|---|---|---|
+| the home planet's sea, re-solved over the eroded field | yes (`golden_z_record`, `home_artifact_pin`) | **+4 455 m** over the ladder radius; the initial land's sea stood +3 676 m — erosion lowers the land and the basins fill, so the level that holds 2.03 Earth oceans rises |
+| the ocean share (G-SEA, area-weighted) | yes | **89.95 %** (8 995 / 10 000); 10.05 % land — the low end of ask 8's 10.5–16.6 % |
+| the artifact's digest with the sea | yes | `[0x071e_adfc_3a98_db8c, 0x35c0_949b_1c9e_f2d7]` (version 2) |
+| the solve's wall time | yes | 68.9 s of one core in release (the re-solve adds one bisection, under a second) |
+| the level's coincidence with Earth's 4 455 m dry step | NOTED, unexplained | two laws, one number; a halved inventory must move the level (owed at C6) |
+| the water sheet's cost and look | UNMEASURED | judged at C6's stands; the ocean's own look is 8o's |

@@ -503,10 +503,26 @@ pub fn area_quantile(values: &[Gf], area: &[u64], share: f64) -> Gf {
 /// that would drown the whole field; `None` for no water.
 #[must_use]
 pub fn sea_level(z_dry: &[i32], area: &[u64], water_km3: u64) -> Option<i32> {
+    sea_level_over(z_dry, area, water_km3, true)
+}
+
+/// ★ THE SEA RE-SOLVED over a LOADED field (slice 8c stage C5): the level that holds the inventory
+/// over a field whose isostatic sink is already in it — the eroded field at the end of the solve —
+/// so the water's own load is not counted twice.
+#[must_use]
+pub fn sea_level_loaded(z: &[i32], area: &[u64], water_km3: u64) -> Option<i32> {
+    sea_level_over(z, area, water_km3, false)
+}
+
+fn sea_level_over(z_dry: &[i32], area: &[u64], water_km3: u64, with_load: bool) -> Option<i32> {
     if water_km3 == 0 {
         return None;
     }
-    let load = Gf::ONE / (Gf::ONE - Gf::from_f64(WATER_DENSITY_KGM3 / MANTLE_DENSITY_KGM3));
+    let load = if with_load {
+        Gf::ONE / (Gf::ONE - Gf::from_f64(WATER_DENSITY_KGM3 / MANTLE_DENSITY_KGM3))
+    } else {
+        Gf::ONE
+    };
     // The target in area·sixteenths: the inventory in m³ times the steps a metre, over the load.
     let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
     let target_m3_steps = Gf::from_i64(water_km3 as i64) * Gf::from_f64(1.0e9) * steps / load;

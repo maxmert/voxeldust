@@ -258,6 +258,7 @@ fn main() -> ExitCode {
             ];
             BOX_EDGE * BOX_EDGE
         ],
+        water: vec![vd_recipe::Gi::ZERO; BOX_EDGE * BOX_EDGE],
     };
     let start = Instant::now();
     let mut worst = None;

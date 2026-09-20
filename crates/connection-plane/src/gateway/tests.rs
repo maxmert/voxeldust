@@ -11758,4 +11758,14 @@ fn a_shards_bulk_for_named_sessions_is_relayed_as_artifact_parts() {
         Some(&[11, 22])
     );
     assert_eq!(rig.world.resource::<GatewayStats>().artifact_held_stated, 1);
+    // A statement from a client with no session is nobody's: nothing recorded.
+    let _ = rig.tick(vec![wire(
+        NodeId(99),
+        MsgClass::Control,
+        &ClientControlMsg::ArtifactHeld {
+            realm: RealmId::Planet(8),
+            digest: [1, 1],
+        },
+    )]);
+    assert_eq!(rig.world.resource::<GatewayStats>().artifact_held_stated, 1);
 }

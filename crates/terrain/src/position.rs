@@ -178,6 +178,111 @@ pub fn vertex_position_m(body: &BodyDefinition, samples: &SampleBox, v: [i16; 3]
 
 const _: () = assert!(STEPS_PER_M == 128);
 
+/// The water sheet's points in metres, their unit radials, and its triangles.
+pub type WaterSheet = (Vec<[f64; 3]>, Vec<[f64; 3]>, Vec<[u32; 3]>);
+
+/// ★ THE WATER SHEET's points (slice 8c stage C5): over the chunk's 62 × 62 core columns and the
+/// halo column past each edge, one quad per cell of the face grid whose four corners hold ANY
+/// water; the quad stands flat at the HIGHEST water level among its wet corners (a shore quad
+/// reaches under the land, which hides it), each corner at that radius along its own column. Four
+/// points a quad (a level is a quad's, not a column's), in METRES of the body's frame, with each
+/// point's unit radial, and two triangles a quad. Empty for a dry chunk. The client's mesh is the
+/// last step out of it (the floating origin, the single-precision cast).
+#[must_use]
+pub fn water_sheet(samples: &SampleBox) -> WaterSheet {
+    let mut points = Vec::new();
+    let mut radials = Vec::new();
+    let mut triangles = Vec::new();
+    let unit = (1u64 << vd_recipe::bend::DIR_BITS) as f64;
+    let steps = STEPS_PER_M as f64;
+    let mut b = 0i32;
+    while b < CHUNK_EDGE as i32 {
+        let mut a = 0i32;
+        while a < CHUNK_EDGE as i32 {
+            let corners = [
+                SampleBox::column_index(a, b),
+                SampleBox::column_index(a + 1, b),
+                SampleBox::column_index(a, b + 1),
+                SampleBox::column_index(a + 1, b + 1),
+            ];
+            let mut level = Gi::ZERO;
+            for col in corners {
+                if samples.water[col] > level {
+                    level = samples.water[col];
+                }
+            }
+            if level > Gi::ZERO {
+                let base = points.len() as u32;
+                for col in corners {
+                    let dir = samples.dirs[col];
+                    let p = point_at(dir, level >> vd_recipe::cell::LENGTH_BITS);
+                    points.push([
+                        p[0].raw() as f64 / steps,
+                        p[1].raw() as f64 / steps,
+                        p[2].raw() as f64 / steps,
+                    ]);
+                    radials.push([
+                        dir[0].raw() as f64 / unit,
+                        dir[1].raw() as f64 / unit,
+                        dir[2].raw() as f64 / unit,
+                    ]);
+                }
+                triangles.push([base, base + 1, base + 3]);
+                triangles.push([base, base + 3, base + 2]);
+            }
+            a += 1;
+        }
+        b += 1;
+    }
+    (points, radials, triangles)
+}
+
+#[cfg(test)]
+mod water_sheet_tests {
+    use super::*;
+    use crate::chunk::ChunkKey;
+    use vd_seed::bend::Face;
+
+    /// ★ THE SHEET (C5): a chunk under a stated sea yields a quad per cell, four points a quad at
+    /// the sea's radius along each corner's column with the column's unit radial; a dry chunk
+    /// yields nothing; a chunk where one corner column is wet yields that quad alone.
+    #[test]
+    fn the_sheet_stands_flat_at_the_water_and_only_where_water_is() {
+        let moon = crate::home::home_moon();
+        let key = ChunkKey {
+            face: Face::PosY,
+            rung: 4,
+            x: 3,
+            y: 3,
+            z: 0,
+        };
+        let wet = moon.with_sea_m(Some(3_000));
+        let bx = crate::lattice::sample_box(&wet, None, key).expect("a box");
+        let (points, radials, triangles) = water_sheet(&bx);
+        let quads = CHUNK_EDGE * CHUNK_EDGE;
+        assert_eq!(points.len(), quads * 4);
+        assert_eq!(radials.len(), quads * 4);
+        assert_eq!(triangles.len(), quads * 2);
+        let radius = wet.sea_radius_m();
+        for (p, r) in points.iter().zip(&radials) {
+            let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            assert!((len - radius).abs() < 0.02, "{len} vs {radius}");
+            let rl = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+            assert!((rl - 1.0).abs() < 1e-9);
+            assert!((p[0] / len - r[0]).abs() < 1e-6);
+        }
+        assert_eq!(triangles[0], [0, 1, 3]);
+        assert_eq!(triangles[1], [0, 3, 2]);
+        let dry = crate::lattice::sample_box(&moon, None, key).expect("a box");
+        assert_eq!(water_sheet(&dry).0.len(), 0);
+        let mut one = dry;
+        one.water[SampleBox::column_index(0, 0)] = wet.sea_radius;
+        let (points, _, triangles) = water_sheet(&one);
+        assert_eq!(points.len(), 4);
+        assert_eq!(triangles.len(), 2);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! ★ A TEST MAY DIVIDE (ruling F7's rule is about the SHIPPED path, not the measurement): a test

@@ -306,14 +306,24 @@ impl CellCharter {
         (self.carve_any != Gi::ZERO) & (depth >= self.cave_min) & (depth <= self.cave_max)
     }
 
-    /// THE FLUID at a radius: the sea under its own surface, the atmosphere over it.
+    /// ★ THE FLUID at a radius under a COLUMN's water surface (slice 8c stage C5): water under
+    /// `water`, the atmosphere over it. A column's water is the artifact's row (the sea's level,
+    /// a lake's spill level) or the body's sea where no row is held, or ZERO for a dry column —
+    /// and a radius is never under zero, so a dry column holds only air above its rock.
     #[must_use]
-    pub fn fluid_code(&self, r: Gi) -> Gi {
-        if r < self.sea_radius {
+    pub fn fluid_at(&self, r: Gi, water: Gi) -> Gi {
+        if r < water {
             self.water_code
         } else {
             self.air_code
         }
+    }
+
+    /// THE FLUID at a radius under the BODY's sea: what a host fills in for a column with no row
+    /// of its own (the card's plan, the halo above the band).
+    #[must_use]
+    pub fn fluid_code(&self, r: Gi) -> Gi {
+        self.fluid_at(r, self.sea_radius)
     }
 
     /// The substance at `depth_m` WHOLE metres under the surface (0 is the surface cell) in a
@@ -358,6 +368,9 @@ pub struct CellAt {
     pub biome: Gi,
     /// The cell centre's radius in WHOLE gap steps — exact.
     pub r_steps: Gi,
+    /// ★ The column's water surface radius in gap steps at [`LENGTH_BITS`] (slice 8c stage C5),
+    /// or ZERO for a dry column: the host fills it from the artifact's row, or from the body's sea.
+    pub water: Gi,
 }
 
 /// ★ THE CELL KERNEL — one cell's substance and gap, as one word.
@@ -381,7 +394,7 @@ pub fn cell_word(charter: &CellCharter, at: &CellAt, value: Gi, tubes: &[Tube]) 
     // exactly on the surface reads 0, which is air.
     let mut gap_steps = (r - at.h) >> (rung + LENGTH_BITS);
     let mut stratum = if depth <= Gi::ZERO {
-        charter.fluid_code(r)
+        charter.fluid_at(r, at.water)
     } else {
         charter.stratum_code(at.biome, depth >> (LENGTH_BITS + STEP_SHIFT))
     };
@@ -401,11 +414,12 @@ pub fn cell_word(charter: &CellCharter, at: &CellAt, value: Gi, tubes: &[Tube]) 
     pack(stratum, gap_code(gap_steps))
 }
 
-/// The cell of a layer more than a cell ABOVE every surface of its column: the fluid at its radius,
-/// at the top code. `r` is the cell centre's radius in gap steps at [`LENGTH_BITS`].
+/// The cell of a layer more than a cell ABOVE every surface of its column: the fluid at its radius
+/// under the column's water surface, at the top code. `r` is the cell centre's radius in gap steps
+/// at [`LENGTH_BITS`].
 #[must_use]
-pub fn above_cell_word(charter: &CellCharter, r: Gi) -> u32 {
-    pack(charter.fluid_code(r), GAP_TOP)
+pub fn above_cell_word(charter: &CellCharter, r: Gi, water: Gi) -> u32 {
+    pack(charter.fluid_at(r, water), GAP_TOP)
 }
 
 /// The cell of a layer more than a cell BELOW every surface, stratum and cave: bedrock at the
@@ -685,10 +699,14 @@ mod tests {
             ..c
         };
         assert!(!quiet.in_band(q(55)), "a rung with no caves carves none");
-        // The fluid.
+        // The fluid, under the body's sea and under a column's own water (a lake over the sea, a
+        // dry column with none).
         assert_eq!(c.fluid_code(q(1_000) - Gi::ONE), c.water_code);
         assert_eq!(c.fluid_code(q(1_000)), c.air_code);
         assert_eq!(c.fluid_code(q(1_000) + Gi::ONE), c.air_code);
+        assert_eq!(c.fluid_at(q(1_000) + Gi::ONE, q(1_200)), c.water_code);
+        assert_eq!(c.fluid_at(q(1_200), q(1_200)), c.air_code);
+        assert_eq!(c.fluid_at(Gi::ONE, Gi::ZERO), c.air_code);
         // The strata, in every biome, at every depth the table covers.
         for (biome, topsoil, subsoil) in [(0, 4, 9), (1, 5, 6), (2, 2, 8), (3, 7, 13)] {
             let b = Gi::new(biome);
@@ -737,6 +755,7 @@ mod tests {
             h: Gi::new(h_steps) * step,
             biome: Gi::new(biome),
             r_steps: Gi::new(r_steps),
+            water: c.sea_radius,
         };
         // A cell whose centre is 39 steps under a surface at 2 000: rock, gap −39, and at 2 metres
         // of depth (39 steps is 0 whole metres) the topsoil of biome 1.
@@ -798,9 +817,12 @@ mod tests {
         // The skips write the bytes the kernel would.
         let high = Gi::new(2_000) << LENGTH_BITS;
         let under_the_sea = Gi::new(500) << LENGTH_BITS;
-        assert_eq!(gap_of_word(above_cell_word(&c, high)), 127);
-        assert_eq!(stratum_of_word(above_cell_word(&c, high)), 0);
-        assert_eq!(stratum_of_word(above_cell_word(&c, under_the_sea)), 1);
+        assert_eq!(gap_of_word(above_cell_word(&c, high, c.sea_radius)), 127);
+        assert_eq!(stratum_of_word(above_cell_word(&c, high, c.sea_radius)), 0);
+        assert_eq!(
+            stratum_of_word(above_cell_word(&c, under_the_sea, c.sea_radius)),
+            1
+        );
         assert_eq!(gap_of_word(below_cell_word(&c)), -128);
         assert_eq!(stratum_of_word(below_cell_word(&c)), 13);
     }

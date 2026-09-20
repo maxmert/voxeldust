@@ -1548,6 +1548,9 @@ pub struct Terrain {
     /// The ground's materials, one per realm and rung with that rung's crossfade bands, built on
     /// first use.
     materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
+    /// ★ THE WATER'S materials per realm and rung (slice 8c stage C5): the ground's fade with the
+    /// water's own colour, culling nothing.
+    water_materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
     /// The probe materials, one per realm, kind and rung, built on first use.
     probe_materials: BTreeMap<(RealmId, u8, u8), Handle<ProbeMaterial>>,
     /// THE SHADOW LADDER'S state: the light-caster materials per realm and rung; how many
@@ -1677,6 +1680,7 @@ impl Terrain {
             shadow_bytes: 0,
             ladders: BTreeMap::new(),
             materials: BTreeMap::new(),
+            water_materials: BTreeMap::new(),
             probe_materials: BTreeMap::new(),
             morph_totals: [0; 3],
             bytes_drawn: 0,
@@ -1985,6 +1989,41 @@ impl Terrain {
             + f64::from(vd_seed::ladder::cell_m(fine))
     }
 
+    /// ★ THE WATER'S MATERIAL for a realm's rung (slice 8c stage C5): the same crossfade the ground
+    /// rides — so a rung's sheet ends where the finer rung's begins — with the water's own colour
+    /// and no culling (a quad's winding is nobody's promise). The look is the ocean slice's (8o).
+    fn water_material(
+        &mut self,
+        assets: &mut Assets<GroundMaterial>,
+        realm: RealmId,
+        rung: u8,
+        body: &vd_terrain::BodyDefinition,
+    ) -> Handle<GroundMaterial> {
+        let bound = self.bound_of(realm);
+        self.water_materials
+            .entry((realm, rung))
+            .or_insert_with(|| {
+                let rungs = body.ladder().rungs;
+                assets.add(GroundMaterial {
+                    base: StandardMaterial {
+                        base_color: Color::srgb(0.06, 0.24, 0.42),
+                        perceptual_roughness: 0.15,
+                        metallic: 0.0,
+                        cull_mode: None,
+                        alpha_mode: AlphaMode::Mask(0.5),
+                        ..default()
+                    },
+                    extension: LadderFade::new(
+                        bound.fade_bands(rung, rungs),
+                        bound.sink_end_m(body, rung, rungs),
+                        vd_client::chunks::sink_m(body, rung),
+                        f64::from(vd_seed::ladder::cell_m(rung)),
+                    ),
+                })
+            })
+            .clone()
+    }
+
     fn shadow_material(
         &mut self,
         assets: &mut Assets<GroundMaterial>,
@@ -2171,6 +2210,36 @@ fn mesh_of(
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.normals.clone());
     }
     mesh
+}
+
+/// ★ THE WATER SHEET'S MESH (slice 8c stage C5): the ground's attributes — a position, a normal
+/// (the radial: a flat sheet faces up), a morph of zero, the radial, the morph normal — so the
+/// ground's fade shader draws it with the ground's bands.
+fn water_mesh_of(geometry: &vd_client::chunks::ChunkGeometry) -> Mesh {
+    let n = geometry.water_vertices.len();
+    let packed: Vec<[i16; 2]> = geometry
+        .water_radials
+        .iter()
+        .map(|r| oct_encode(*r))
+        .collect();
+    let indices: Vec<u32> = geometry
+        .water_triangles
+        .iter()
+        .flat_map(|t| [t[0], t[1], t[2]])
+        .collect();
+    Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, geometry.water_vertices.clone())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.water_radials.clone())
+    .with_inserted_attribute(super::ATTRIBUTE_MORPH, vec![0.0f32; n])
+    .with_inserted_attribute(super::ATTRIBUTE_RADIAL, geometry.water_radials.clone())
+    .with_inserted_attribute(
+        super::ATTRIBUTE_MORPH_NORMAL,
+        bevy::mesh::VertexAttributeValues::Snorm16x2(packed),
+    )
+    .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
 /// THE SPLAT MESH (D8-8's measurement): every surface vertex four times, with the corner it
@@ -3015,6 +3084,18 @@ pub(crate) fn sync_terrain(
                 bounds,
             ))
             .id();
+        // ★ THE WATER SHEET (slice 8c stage C5) rides as the chunk's CHILD: it moves with the
+        // chunk's origin, hides with it, and leaves with it; it casts no shadow.
+        if !ready.geometry.water_triangles.is_empty() {
+            let water = terrain.water_material(&mut ground_materials, realm, key.rung, &body);
+            let sheet = meshes.add(water_mesh_of(&ready.geometry));
+            commands.entity(entity).with_child((
+                Mesh3d(sheet),
+                MeshMaterial3d(water),
+                Transform::default(),
+                bevy::light::NotShadowCaster,
+            ));
+        }
         if hide_rung.is_some_and(|r| key.rung >= r) {
             commands.entity(entity).insert(Visibility::Hidden);
         }

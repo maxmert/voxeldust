@@ -74,6 +74,9 @@ pub struct SampleBox {
     pub sites: Vec<Site>,
     /// The same columns' unit directions, at the bend's fraction bits.
     pub dirs: Vec<[Gi; 3]>,
+    /// ★ The same columns' WATER surface radius (slice 8c stage C5) at [`LENGTH_BITS`], or ZERO
+    /// for a dry column — what the client's water sheet stands on.
+    pub water: Vec<Gi>,
 }
 
 impl SampleBox {
@@ -247,6 +250,8 @@ pub(crate) struct BoxSetup {
     pub sites: Vec<Site>,
     pub dirs: Vec<[Gi; 3]>,
     pub surfaces: Vec<(Gi, Biome)>,
+    /// Each column's water surface radius, or ZERO (C5).
+    pub water: Vec<Gi>,
     /// The carvers that can reach the box: a SUPERSET of what any one cell's owner keeps, and a
     /// hollow is the exact greatest over the list, so the superset changes no byte.
     pub tubes: Vec<Tube>,
@@ -371,6 +376,7 @@ pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnFie
     // the column pass already run, so no core work is repeated.
     let mut dirs = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     let mut surfaces: Vec<(Gi, Biome)> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
+    let mut water: Vec<Gi> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     // ★ ONE COLUMN PASS (step G2-A): the charter once per box, the recipe's kernel per halo column.
     let plan_charter = body.plan_charter(rung, key.face);
     let mut b = -HALO;
@@ -378,15 +384,25 @@ pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnFie
         let mut a = -HALO;
         while a <= edge {
             let core_column = (a >= 0) & (a < edge) & (b >= 0) & (b < edge);
-            let (dir, h, biome) = if core_column {
-                column.columns[(b as usize) * CHUNK_EDGE + a as usize]
+            let (dir, h, biome, w) = if core_column {
+                let (dir, h, biome) = column.columns[(b as usize) * CHUNK_EDGE + a as usize];
+                (
+                    dir,
+                    h,
+                    biome,
+                    column.water[(b as usize) * CHUNK_EDGE + a as usize],
+                )
             } else {
+                // A halo column reads no artifact row: the recipe's own relief under the body's
+                // sea — the halo is the extractor's neighbourhood, never a drawn column, and its
+                // water is the sea alone (a lake at a chunk's edge is the neighbour's own column).
                 let site = topology.sites[SampleBox::column_index(a, b)];
                 let s = column_surface(&plan_charter, i32::from(site.face), site.i, site.j);
-                (s.dir, s.h, biome_of_code(s.biome))
+                (s.dir, s.h, biome_of_code(s.biome), body.sea_radius)
             };
             dirs.push(dir);
             surfaces.push((h, biome));
+            water.push(w);
             a += 1;
         }
         b += 1;
@@ -410,6 +426,7 @@ pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnFie
         sites,
         dirs,
         surfaces,
+        water,
         tubes,
         own,
         foreign,
@@ -438,6 +455,7 @@ pub fn sample_box(
         sites,
         dirs,
         surfaces,
+        water,
         tubes,
         own,
         foreign,
@@ -467,12 +485,13 @@ pub fn sample_box(
                     // above every surface and above the sea (the room above is derived from the
                     // relief, and the sea lies within it), so this is air in practice; the rule is
                     // shared so it cannot drift from the skip's.
-                    above_surface_cell(&charter, r)
+                    above_surface_cell(&charter, r, water[SampleBox::column_index(a, b)])
                 } else {
                     let col = SampleBox::column_index(a, b);
                     let site = sites[col];
                     let dir = dirs[col];
                     let (h, biome) = surfaces[col];
+                    let column_water = water[col];
                     let value = if carve_caverns & charter.in_band(h - r) {
                         cavern_of(&own, &foreign, site, k)
                     } else {
@@ -485,6 +504,7 @@ pub fn sample_box(
                             h,
                             biome,
                             r_steps,
+                            water: column_water,
                         },
                         value,
                         &tubes,
@@ -502,6 +522,7 @@ pub fn sample_box(
         cells,
         sites,
         dirs,
+        water,
     })
 }
 

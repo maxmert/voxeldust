@@ -55,7 +55,7 @@ use crate::units::{LENGTH_BITS, STEPS_PER_M};
 
 /// The artifact's own version: part of the world identity with the generator's; a change to a row's
 /// meaning or the pyramid's rule bumps it.
-pub const ARTIFACT_VERSION: u32 = 1;
+pub const ARTIFACT_VERSION: u32 = 2;
 /// A tile's edge in nodes: 64 × 64 rows of nine bytes is 36 KB — under a second on the lane.
 pub const TILE_EDGE: u32 = 64;
 /// The water level's word for a dry node.
@@ -155,6 +155,10 @@ pub struct Artifact {
     /// The macro lattice's edge.
     pub edge: u32,
     pub version: u32,
+    /// ★ THE SEA'S LEVEL (slice 8c stage C5), whole metres over the ladder radius, RE-SOLVED over
+    /// the eroded field so the water inventory fits under it; [`DRY_M`] on a body with no water.
+    /// Folded into the digest; a host that holds the artifact gives its body this sea.
+    pub sea_m: i16,
     pub rows: Vec<Row>,
     /// Level `k` (from 1) holds `6 · (edge >> k)²` heights in whole metres, the integer mean of its
     /// 2 × 2 block below; as many levels as the edge halves to.
@@ -210,21 +214,37 @@ pub trait ZField {
     fn level(&self) -> u32 {
         0
     }
+    /// ★ THE WATER AND THE FACIES of a node (slice 8c stage C5): the row's water word (the sea's
+    /// level, a lake's spill level, or [`DRY_M`]) and its facies bits where the field holds rows;
+    /// `None` where it holds no such words (a pyramid level, a field of heights alone), and the
+    /// column reads the body's sea and marks no coast.
+    fn water_facies(&self, _node: u32) -> Option<(i16, u8)> {
+        None
+    }
 }
 
 impl ZField for Artifact {
     fn z_m(&self, node: u32) -> Option<i16> {
         self.rows.get(node as usize).map(|r| r.z_m)
     }
+    fn water_facies(&self, node: u32) -> Option<(i16, u8)> {
+        self.rows
+            .get(node as usize)
+            .map(|r| (r.water_m, r.receiver_facies >> FACIES_SHIFT))
+    }
 }
 
-/// A few nodes' heights, stated: the golden pin's rows for the eight self-check chunks.
+/// A few nodes' rows, stated: the golden pin's `(z_m, water_m, facies)` for the fine self-check
+/// chunks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SparseZ(pub BTreeMap<u32, i16>);
+pub struct SparseRows(pub BTreeMap<u32, (i16, i16, u8)>);
 
-impl ZField for SparseZ {
+impl ZField for SparseRows {
     fn z_m(&self, node: u32) -> Option<i16> {
-        self.0.get(&node).copied()
+        self.0.get(&node).map(|r| r.0)
+    }
+    fn water_facies(&self, node: u32) -> Option<(i16, u8)> {
+        self.0.get(&node).map(|r| (r.1, r.2))
     }
 }
 
@@ -298,6 +318,10 @@ impl ZField for TileCache {
     fn z_m(&self, node: u32) -> Option<i16> {
         self.row(node).map(|r| r.z_m)
     }
+    fn water_facies(&self, node: u32) -> Option<(i16, u8)> {
+        self.row(node)
+            .map(|r| (r.water_m, r.receiver_facies >> FACIES_SHIFT))
+    }
 }
 
 /// ★ A PYRAMID LEVEL AS A FIELD (the far view, 03 §9): level `k` of the pyramid over the lattice
@@ -357,6 +381,28 @@ pub fn tile_width(edge: u32, t: u32) -> u32 {
     (edge - t * TILE_EDGE).min(TILE_EDGE)
 }
 
+/// ★ THE WATER AND THE FACIES UNDER A CELL (slice 8c stage C5): the words of the NEAREST node to
+/// the cell's centre — never an interpolation, because a water surface is flat within its basin
+/// and a blend between a sea node and a dry neighbour would name a level no water stands at, and
+/// a facies bit is a bit. `None` where the field holds no such words (a pyramid level): the column
+/// reads the body's sea and marks no coast. A water of [`DRY_M`] is a dry column.
+#[must_use]
+pub fn sample_row(
+    lattice: &MacroLattice,
+    field: &dyn ZField,
+    face: Face,
+    rung: u8,
+    i: i32,
+    j: i32,
+) -> Option<(i16, u8)> {
+    let half = Gi::new(1i64 << (NOISE_BITS - 1));
+    let (ni, ta) = node_and_fraction(lattice, rung, i);
+    let (nj, tb) = node_and_fraction(lattice, rung, j);
+    let ni = ni + i64::from(ta >= half);
+    let nj = nj + i64::from(tb >= half);
+    field.water_facies(node_at(lattice, face, ni, nj))
+}
+
 /// The tile a global node index lies in: `(face, tx, ty)`.
 #[must_use]
 pub fn tile_of_node(edge: u32, node: u32) -> (u8, u32, u32) {
@@ -401,8 +447,10 @@ pub fn nodes_of_chunk(lattice: &MacroLattice, key: ChunkKey) -> BTreeSet<u32> {
 pub struct GoldenFields {
     /// How many pyramid levels the artifact holds (the level a rung reads depends on it).
     pub levels: u32,
-    /// The rows under the fine keys.
-    pub rows: SparseZ,
+    /// The artifact's sea (`Artifact::sea_m`): the top-rung keys read it for their columns' water.
+    pub sea_m: i16,
+    /// The rows under the fine keys: the height and the water level.
+    pub rows: SparseRows,
     /// The coarsest level, whole.
     pub top: PyramidField,
 }
@@ -422,48 +470,59 @@ impl GoldenFields {
         }
     }
 
-    /// The fields as text, one item a line: `h levels top_level`, `t z` for each top word in order,
-    /// `r node z` for each row.
+    /// The fields as text, one item a line: `h levels top_level sea_m`, `t z` for each top word in
+    /// order, `r node z water facies` for each row.
     #[must_use]
     pub fn to_text(&self) -> String {
-        let mut out = format!("h {} {}\n", self.levels, self.top.level);
+        let mut out = format!("h {} {} {}\n", self.levels, self.top.level, self.sea_m);
         for z in &self.top.z_m {
             out.push_str(&format!("t {z}\n"));
         }
-        for (node, z) in &self.rows.0 {
-            out.push_str(&format!("r {node} {z}\n"));
+        for (node, (z, w, f)) in &self.rows.0 {
+            out.push_str(&format!("r {node} {z} {w} {f}\n"));
         }
         out
+    }
+
+    /// The body's sea as the fields state it: `None` for a dry body.
+    #[must_use]
+    pub fn sea(&self) -> Option<i32> {
+        (self.sea_m != DRY_M).then_some(i32::from(self.sea_m))
     }
 
     /// The fields back from [`GoldenFields::to_text`]; `None` for a line that is not one of the three.
     #[must_use]
     pub fn parse(text: &str) -> Option<GoldenFields> {
-        let mut levels = None;
-        let mut top_level = None;
+        let mut header = None;
         let mut top = Vec::new();
         let mut rows = BTreeMap::new();
         for line in text.lines() {
             let mut w = line.split_whitespace();
             match w.next()? {
                 "h" => {
-                    levels = Some(w.next()?.parse::<u32>().ok()?);
-                    top_level = Some(w.next()?.parse::<u32>().ok()?);
+                    let levels = w.next()?.parse::<u32>().ok()?;
+                    let top_level = w.next()?.parse::<u32>().ok()?;
+                    let sea_m = w.next()?.parse::<i16>().ok()?;
+                    header = Some((levels, top_level, sea_m));
                 }
                 "t" => top.push(w.next()?.parse::<i16>().ok()?),
                 "r" => {
                     let node = w.next()?.parse::<u32>().ok()?;
                     let z = w.next()?.parse::<i16>().ok()?;
-                    rows.insert(node, z);
+                    let water = w.next()?.parse::<i16>().ok()?;
+                    let facies = w.next()?.parse::<u8>().ok()?;
+                    rows.insert(node, (z, water, facies));
                 }
                 _ => return None,
             }
         }
+        let (levels, top_level, sea_m) = header?;
         Some(GoldenFields {
-            levels: levels?,
-            rows: SparseZ(rows),
+            levels,
+            sea_m,
+            rows: SparseRows(rows),
             top: PyramidField {
-                level: top_level?,
+                level: top_level,
                 z_m: top,
             },
         })
@@ -566,9 +625,20 @@ impl Artifact {
         Artifact {
             edge: lattice.edge,
             version: ARTIFACT_VERSION,
+            sea_m: if has_water && state.sea_z != i32::MIN {
+                metres_i16(state.sea_z)
+            } else {
+                DRY_M
+            },
             rows,
             pyramid,
         }
+    }
+
+    /// The sea as the artifact states it: `None` for a dry body.
+    #[must_use]
+    pub fn sea(&self) -> Option<i32> {
+        (self.sea_m != DRY_M).then_some(i32::from(self.sea_m))
     }
 
     /// The nodes.
@@ -876,13 +946,74 @@ mod tests {
         assert_eq!(partial.z_m(lattice.index(Face::PosX, 66, 66)), None);
         assert_eq!(sample_z(&lattice, &partial, Face::PosX, 13, 66, 66), None);
         assert!(sample_z(&lattice, &partial, Face::PosX, 13, 30, 30).is_some());
-        // A sparse field answers only what it holds.
-        let mut sparse = SparseZ::default();
+        // A sparse field answers only what it holds — the height and the water alike; a pyramid
+        // level holds no water word.
+        let mut sparse = SparseRows::default();
         assert_eq!(sample_z(&lattice, &sparse, Face::PosX, 13, 30, 30), None);
+        assert_eq!(sparse.water_facies(0), None);
+        assert_eq!(
+            PyramidField::of(&artifact, 1)
+                .expect("level 1")
+                .water_facies(0),
+            None
+        );
+        let words = (
+            artifact.rows[7].water_m,
+            artifact.rows[7].receiver_facies >> FACIES_SHIFT,
+        );
+        assert_eq!(artifact.water_facies(7), Some(words));
+        assert_eq!(cache.water_facies(7), Some(words));
+        assert_eq!(artifact.water_facies(n as u32), None);
+        // ★ THE NEAREST ROW (C5): a cell in the first half of a node reads that node, past the
+        // half the next one; a pyramid level answers nothing; the airless moon's rows are dry.
+        let size = lattice.cells_per_node as i32;
+        let node_3 = lattice.index(Face::PosX, 3, 3);
+        let node_4 = lattice.index(Face::PosX, 4, 3);
+        let want = |node: u32| {
+            let r = artifact.rows[node as usize];
+            Some((r.water_m, r.receiver_facies >> FACIES_SHIFT))
+        };
+        assert_eq!(
+            sample_row(
+                &lattice,
+                &artifact,
+                Face::PosX,
+                0,
+                3 * size + size / 2,
+                3 * size + size / 2
+            ),
+            want(node_3)
+        );
+        assert_eq!(
+            sample_row(
+                &lattice,
+                &artifact,
+                Face::PosX,
+                0,
+                3 * size + size - 1,
+                3 * size + size / 2
+            ),
+            want(node_4)
+        );
+        assert_eq!(
+            sample_row(
+                &lattice,
+                PyramidField::of(&artifact, 1).as_ref().expect("level 1"),
+                Face::PosX,
+                0,
+                3 * size,
+                3 * size
+            ),
+            None
+        );
+        assert_eq!(want(node_3).map(|w| w.0), Some(DRY_M));
         for row in 0..4 {
             for col in 0..4 {
                 let node = lattice.index(Face::PosX, 29 + col, 29 + row);
-                sparse.0.insert(node, artifact.rows[node as usize].z_m);
+                let r = artifact.rows[node as usize];
+                sparse
+                    .0
+                    .insert(node, (r.z_m, r.water_m, r.receiver_facies >> FACIES_SHIFT));
             }
         }
         assert_eq!(
@@ -966,7 +1097,7 @@ mod tests {
     fn the_golden_fields_round_trip_and_pick_by_rung() {
         let (state, artifact) = moon_artifact(&home_moon_solve_words());
         let lattice = state.lattice;
-        let mut rows = SparseZ::default();
+        let mut rows = SparseRows::default();
         for node in nodes_of_chunk(
             &lattice,
             ChunkKey {
@@ -977,10 +1108,13 @@ mod tests {
                 z: 0,
             },
         ) {
-            rows.0.insert(node, artifact.rows[node as usize].z_m);
+            let r = artifact.rows[node as usize];
+            rows.0
+                .insert(node, (r.z_m, r.water_m, r.receiver_facies >> FACIES_SHIFT));
         }
         let fields = GoldenFields {
             levels: artifact.pyramid.len() as u32,
+            sea_m: artifact.sea_m,
             rows,
             top: PyramidField::of(&artifact, 2).expect("level 2"),
         };
@@ -988,7 +1122,40 @@ mod tests {
         assert_eq!(GoldenFields::parse(&text), Some(fields.clone()));
         assert_eq!(GoldenFields::parse("x 1 2"), None);
         assert_eq!(GoldenFields::parse("t 1"), None);
-        assert_eq!(GoldenFields::parse("h 2 2\nr 1"), None);
+        for torn in [
+            "h",
+            "h 2",
+            "h 2 2",
+            "h x 2 0",
+            "h 2 x 0",
+            "h 2 2 x",
+            "t",
+            "t x",
+            "r",
+            "r 1",
+            "r 1 2",
+            "r 1 2 3",
+            "r x 2 3 4",
+            "r 1 x 3 4",
+            "r 1 2 x 4",
+            "r 1 2 3 x",
+            "h 2 2 0\nr 1",
+            "h 2 2 0\nr 1 2 3",
+            "r 1 2 3 4",
+            "t 5",
+            "",
+            "h 2 2 0\n\nt 1",
+        ] {
+            assert_eq!(GoldenFields::parse(torn), None, "{torn:?}");
+        }
+        // The airless moon states no sea; a wet one states its level.
+        assert_eq!(fields.sea(), None);
+        assert_eq!(artifact.sea(), None);
+        let wet = GoldenFields {
+            sea_m: -300,
+            ..fields.clone()
+        };
+        assert_eq!(wet.sea(), Some(-300));
         assert_eq!(fields.field_for(&lattice, 0).map(|f| f.level()), Some(0));
         assert_eq!(fields.field_for(&lattice, 13).map(|f| f.level()), Some(2));
         // Rung 10 reads level 1 on the moon, which the golden fields do not hold.

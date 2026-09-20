@@ -142,14 +142,12 @@ pub(crate) fn emit_artifact(
         }
         record.pyramid_parts = last;
         // The tiles under the occupant: its pose in this realm's frame, as a direction.
-        let pos = match placements.0.at(config.realm, dot.pose.universe_tick) {
-            Ok(book) => {
-                transfer_frame(&dot.pose, own_frame, book)
-                    .unwrap_or(dot.pose)
-                    .pos
-            }
-            Err(_) => dot.pose.pos,
-        };
+        let pos = placements
+            .0
+            .at(config.realm, dot.pose.universe_tick)
+            .ok()
+            .and_then(|book| transfer_frame(&dot.pose, own_frame, book).ok())
+            .map_or(dot.pose.pos, |converted| converted.pos);
         let radial = pos.delta_m(LatticePos::ORIGIN, tier);
         let dir = radial.normalize_or_zero();
         if dir == vd_core::glam::DVec3::ZERO {
@@ -218,7 +216,7 @@ mod tests {
         }
         fn tiles_under(&self, dir: [f64; 3], _radius_m: f64) -> Vec<(u8, u32, u32)> {
             // Six tiles on the face the direction points at, more than one tick ships.
-            let face = if dir[2] > 0.5 { 4 } else { 0 };
+            let face = u8::from(dir[2] > 0.5) * 4;
             (0..6).map(|k| (face, k, 0)).collect()
         }
         fn tile(&self, face: u8, tx: u32, ty: u32) -> Option<Bytes> {
@@ -258,32 +256,36 @@ mod tests {
         let mut outbox = OutboundBox::default();
         let realm_fence = Fence(3);
         let audience = || BulkAudience::Sessions(vec![session]);
-        // Tick one: the head, every part (three under the pace), the first four tiles.
-        if !record.head {
-            push_bulk(&mut outbox, gateway, realm_fence, audience(), source.head());
-            record.head = true;
-        }
+        // Tick one: the head, every part (three under the pace), the first four tiles — the
+        // pacing itself runs on the schedule (`stub::tests::artifact_ship`); this is the push.
+        push_bulk(&mut outbox, gateway, realm_fence, audience(), source.head());
+        record.head = true;
         let parts = source.pyramid_parts();
         let last = PYRAMID_PARTS_PER_TICK.min(parts.len());
         for part in &parts[..last] {
             push_bulk(&mut outbox, gateway, realm_fence, audience(), part.clone());
         }
         record.pyramid_parts = last;
-        let mut sent = 0;
-        for tile in source.tiles_under([0.0, 0.0, 1.0], 1_000.0) {
-            if sent >= TILES_PER_TICK {
-                break;
-            }
-            if record.tiles.contains(&tile) {
-                continue;
-            }
-            let Some(bytes) = source.tile(tile.0, tile.1, tile.2) else {
-                continue;
-            };
+        for tile in source
+            .tiles_under([0.0, 0.0, 1.0], 1_000.0)
+            .into_iter()
+            .take(TILES_PER_TICK)
+        {
+            let bytes = source
+                .tile(tile.0, tile.1, tile.2)
+                .expect("the first five exist");
             push_bulk(&mut outbox, gateway, realm_fence, audience(), bytes);
             record.tiles.insert(tile);
-            sent += 1;
         }
+        assert_eq!(source.tile(4, 5, 0), None);
+        assert_eq!(source.tiles_under([0.0, 0.0, -1.0], 1.0)[0].0, 0);
+        // A message that is not a bulk one is not counted among the bulks.
+        outbox.0.push((
+            gateway,
+            MsgClass::Control,
+            crate::io::bytes(vec![0xFF]),
+            Durability::Ephemeral,
+        ));
         let out = bulks(&outbox);
         assert_eq!(out.len(), 1 + 3 + 4);
         assert_eq!(out[0], (gateway, audience(), vec![0xA0]));

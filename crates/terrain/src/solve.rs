@@ -312,6 +312,10 @@ pub struct FullReport {
     pub deposits: usize,
     /// The coast band, sixteenths.
     pub coast_band: i32,
+    /// ★ THE SEA RE-SOLVED (stage C5): its level in sixteenths over the final field, and the share
+    /// of the globe's area under it (gate G-SEA's reading); `None` and zero on a dry body.
+    pub sea_z: Option<i32>,
+    pub ocean_share: f64,
 }
 
 /// A basin must hold this many land nodes to be read by gate G-AGE: a hundred nodes is about
@@ -392,7 +396,10 @@ pub struct BasinIntegral {
 /// The sea's level of `body` in sixteenths from the ladder radius.
 #[must_use]
 pub fn sea_level(body: &BodyDefinition) -> i32 {
-    ((body.sea_radius - body.radius).raw() >> Z_SHIFT) as i32
+    match body.sea_m() {
+        Some(m) => m.saturating_mul(Z_STEPS_PER_M),
+        None => i32::MIN,
+    }
 }
 
 /// The rung whose cell is about a node: `log₂` of the node's size in rung-0 cells, at most the
@@ -431,7 +438,7 @@ impl MacroSolve {
     /// lattice.
     #[must_use]
     pub fn new(body: &BodyDefinition) -> Option<MacroSolve> {
-        let lattice = MacroLattice::of(body)?;
+        let lattice = body.macro_lattice()?;
         let n = lattice.node_count();
         let z = initial_surface(body, &lattice);
         let dir: Vec<[i32; 3]> = (0..n as u32)
@@ -1049,6 +1056,27 @@ impl MacroSolve {
             .collect()
     }
 
+    /// ★ THE OCEAN SHARE (stage C5, gate G-SEA): the area under the sea over the globe's area, a
+    /// plain number for the report; zero with no sea.
+    #[must_use]
+    pub fn ocean_share(&self) -> f64 {
+        if self.sea_z == i32::MIN {
+            return 0.0;
+        }
+        let mut wet = 0u128;
+        let mut all = 0u128;
+        for (k, &z) in self.z.iter().enumerate() {
+            all += u128::from(self.area[k]);
+            if z <= self.sea_z {
+                wet += u128::from(self.area[k]);
+            }
+        }
+        if all == 0 {
+            return 0.0;
+        }
+        wet as f64 / all as f64
+    }
+
     /// ★ THE ENVELOPE (03 §4.13): `|z| ≤ relief` at every node, or every height is scaled DOWN
     /// uniformly by `relief / max|z|` — one fenced division, one floor a node — so the shape is
     /// kept and the containment band never moves. Returns the greatest `|z|` before, and whether
@@ -1134,7 +1162,7 @@ pub fn solve_land(
     words: &crate::land::LandWords,
     schedule: Schedule,
 ) -> Option<(MacroSolve, SolveReport)> {
-    let lattice = MacroLattice::of(body)?;
+    let lattice = body.macro_lattice()?;
     let land = crate::land::initial_land(body, &lattice, words);
     run(MacroSolve::from_land(body, &land)?, schedule)
 }
@@ -1157,7 +1185,7 @@ pub fn solve_full(
     words: &SolveWords,
     schedule: Schedule,
 ) -> Option<(MacroSolve, Vec<u8>, FullReport)> {
-    let lattice = MacroLattice::of(body)?;
+    let lattice = body.macro_lattice()?;
     let land = crate::land::initial_land(body, &lattice, &words.land());
     let mut state = MacroSolve::from_land(body, &land)?;
     let gravity = body.facts().gravity_mm_s2;
@@ -1233,6 +1261,14 @@ pub fn solve_full(
     report.ice = (under, thickest, deepest);
     drop(climate);
     report.envelope = state.envelope(relief);
+    // ★ THE SEA, RE-SOLVED over the eroded field (stage C5; the design's §6, ruling T8's cure): the
+    // inventory must fit under the level over the field AS IT STANDS, whose isostatic sink the land
+    // already applied. The final routing, the coast and the facies read this sea.
+    if let Some(sea) = crate::land::sea_level_loaded(&state.z, &state.area, words.water_km3) {
+        state.sea_z = sea;
+    }
+    report.sea_z = (words.water_km3 > 0).then_some(state.sea_z);
+    report.ocean_share = state.ocean_share();
     // The final routing, so the water levels, the basins and the facies read the final land.
     report.routes.push(state.route());
     report.coast_band = coast_band(words, gravity);
@@ -1737,6 +1773,42 @@ mod tests {
         assert!(facies.iter().any(|&f| f & FACIES_SEA != 0));
         assert!(facies.iter().any(|&f| f & FACIES_COAST != 0));
         assert!(!report.integrals.is_empty());
+        // ★ THE SEA RE-SOLVED (C5): the report names the level the state holds, and the ocean
+        // share is the area under it — a part of the moon, never all of it, never none.
+        assert_eq!(report.sea_z, Some(state.sea_z));
+        assert!(
+            report.ocean_share > 0.0 && report.ocean_share < 1.0,
+            "{}",
+            report.ocean_share
+        );
+        assert!((state.ocean_share() - report.ocean_share).abs() < 1e-12);
+        let wet_nodes = state.z.iter().filter(|&&z| z <= state.sea_z).count();
+        assert!(wet_nodes > 0 && wet_nodes < state.node_count());
+        // A dry state reads no share; a sea over every node reads one.
+        let mut dry = MacroSolve::new(&moon).expect("a state");
+        dry.sea_z = i32::MIN;
+        assert_eq!(dry.ocean_share(), 0.0);
+        dry.sea_z = i32::MAX;
+        assert_eq!(dry.ocean_share(), 1.0);
+        dry.z.clear();
+        dry.area.clear();
+        assert_eq!(dry.ocean_share(), 0.0, "no area, no share");
+        // A body with no macro lattice has no solve of any kind.
+        let rock = moon.without_macro_lattice();
+        assert!(MacroSolve::new(&rock).is_none());
+        assert!(solve(&rock, Schedule::standard(HOME_SYSTEM_AGE_YR)).is_none());
+        assert!(
+            solve_land(
+                &rock,
+                &crate::home::home_moon_land_words(),
+                Schedule::standard(HOME_SYSTEM_AGE_YR)
+            )
+            .is_none()
+        );
+        assert!(solve_full(&rock, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).is_none());
+        // The seed-built body states no sea, so the bench's own start is dry.
+        assert_eq!(sea_level(&moon), i32::MIN);
+        assert_eq!(sea_level(&moon.with_sea_m(Some(-2))), -2 * Z_STEPS_PER_M);
         let (median, mature) = age_gate(&report.integrals).expect("a reading");
         assert!(median > 0);
         let _ = mature;

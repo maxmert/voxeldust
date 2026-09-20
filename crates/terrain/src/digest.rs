@@ -449,6 +449,16 @@ pub fn golden_self_check(
     let mut acc = FNV_OFFSET;
     // The golden fields need the body's macro lattice; a body with none reads the recipe alone.
     let lattice = fields.and_then(|_| body.macro_lattice());
+    // ★ THE SEA THE FIELDS STATE (stage C5) stands on the body for the read, as it does on a host
+    // that holds the artifact: the top-rung keys' columns hold water under it.
+    let wet;
+    let body = match fields {
+        Some(f) => {
+            wet = body.with_sea_m(f.sea());
+            &wet
+        }
+        None => body,
+    };
     for entry in GOLDEN_SELF_CHECK_KEYS {
         let key = self_check_key(body, entry);
         // ★ THE FIELD PER KEY (slice 8c stage C4c): the rows for a fine key, the top level for a

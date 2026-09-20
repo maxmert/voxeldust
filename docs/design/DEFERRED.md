@@ -8780,3 +8780,49 @@ item below is a stated interim of that core, named here so no picture is judged 
 - **THE INTEREST SIDE IS THE TILE RADIUS, UNMEASURED against the finest ring's horizon**: a rung-9 chunk (16 km) at
   the horizon from a low flight may read tiles the shard has not shipped; it waits and rung 10 (the pyramid)
   stands. Measured on the first window flight; the flight's numbers go in the bench report's C4c row.
+
+**C5 THE SEA (built 2026-09-20; the design's §6, ruling T8's cure, ruling T9):**
+- **THE SEA IS SOLVED, NEVER DRAWN.** The recipe's `sea_radius` draw is deleted (its salt `0x5e_ed_02` retired), and a
+  seed-built body has NO sea: its biome datum is the ladder radius, its columns hold only air over rock. The solve
+  RE-SOLVES the sea over the eroded field at its end (`land::sea_level_loaded`, the inventory under the level with
+  the isostatic sink already in the field), the artifact carries it (`Artifact::sea_m`, in the digest, the store's
+  head and the wire's head), and each host gives its body the sea when it holds the artifact (`with_sea_m`): the
+  shard at boot or on the tick the solve lands, the client on the head. The charter's `sea_offset_mm` (8b's word)
+  is now FILLED FROM THE ARTIFACT (`charter_with_sea(charter, sea_m)`) and the 8b bisection over the recipe's
+  one-humped relief (`bins::sea`) is DELETED: the solve's own bisection over the two-humped field is that mechanism
+  on the shape the water stands on. A realm still solving states no sea until the artifact lands, then re-states
+  its charter on the window from that tick.
+- **MEASURED (G-SEA, `home_artifact_pin`, `golden_z_record`):** the home planet's sea stands **+4 455 m** over the
+  ladder radius with an ocean share of **89.95 %** (`HOME_PLANET_SEA_M`, `HOME_PLANET_OCEAN_SHARE_Q4`) — 10 % land,
+  the low end of the 10.5–16.6 % the owner accepted on ask 8 (the initial land read 16.6 %; erosion and the basins'
+  fill raise the re-solved sea). The level's coincidence with Earth's 4 455 m dry step (the isostasy calibration's
+  number) is NOTED and UNEXPLAINED: the two are computed by different laws, and a tie would be a defect. WHEN: a
+  check at the owner's look (C6) — solve with the inventory halved and read the level move.
+- **THE WATER IS PER COLUMN.** The cell kernel's fluid rule reads a COLUMN's water surface (`CellAt::water`,
+  `fluid_at`): the artifact's row under the column (the sea's level, a lake's spill level — lakes stand where the
+  hydrology put them), the body's sea where the field holds no water word (the far view's pyramid, the halo, the
+  card), nothing for a dry row. The read is the NEAREST node's row, never an interpolation (a water surface is flat
+  within its basin). The card's plan keeps the body's sea for every column (it holds no row).
+- **THE COAST IS MARKED AS SAND.** A column whose nearest row carries the coast bit and that stands above its water
+  takes the desert's strata (sand over sandstone): the beach. A named beach biome with its own strata is owed to 8e.
+- **THE WATER SHEET IS THE FIRST LOOK, NOT THE OCEAN.** The client builds, per chunk, a flat sheet at each wet
+  column's water level (`position::water_sheet`: one quad per face-grid cell whose corners hold any water, at the
+  highest level among them; a shore quad reaches under the land), drawn as the chunk's CHILD with the ground's fade
+  and the water's colour, culling nothing, casting no shadow. What it is NOT: the ocean slice's (8o) sea surface
+  as a shape, waves, depth colour, foam, refraction. UNMEASURED: the sheet's cost per chunk (up to 3 844 quads at
+  a sea chunk) and its look at a rung handover (two sheets at one level fade by the ground's rule). WHEN: 8o.
+- **THE GOLDEN FIELDS CARRY THE ROWS' WATER AND FACIES** (`SparseRows`, `r node z water facies`) and the sea
+  (`h levels top sea_m`), so the identity's eight chunks fold the water cells and the beach; `GENERATOR_VERSION` 6;
+  the golden tables re-recorded (the recipe-only chunks lost their drawn sea's water cells); the artifact version 2
+  (a stored version-1 artifact is RE-SOLVED at boot, not refused — stale, not lying).
+- **THE C1 BENCH STARTS DRY**: `solve::sea_level(body)` reads the body's stated sea and is `i32::MIN` without one;
+  the bench's own solve (`solve`, not `solve_land`) has no sea unless a test states one.
+- **COVERAGE (MEASURED 2026-09-20, `cargo llvm-cov --branch --lib --tests` on recipe, terrain, sim, client, gateway,
+  wire):** the C4c/C5 files in the client (`artifact_book`, `chunks`, `net`, `render_snapshot`), the gateway, the
+  sim's `artifact_ship` and the terrain's `height`, `body`, `lattice`, `position` are at 100 % lines and branches. A
+  RESIDUE stays in the terrain crate: `artifact.rs` 1 line / 3 branches, `chunk.rs` 1 branch, `solve.rs` 1 line /
+  4 branches — the `?` arms after a second `macro_lattice()` check inside `MacroSolve::from_land` (unreachable once
+  the caller's own check passed; the cure is one check, the lattice handed in) and per-binary branch readings the
+  report does not resolve to a line. WHEN: the next terrain slice's coverage pass, with `MacroSolve::from_land`
+  taking the lattice. The older misses outside these files (`rlm.rs`, `directory.rs`, `regions.rs`, `window.rs`,
+  `ladder_view.rs`, …) are covered by the integration suites this lib+tests run excludes and are not C5's.

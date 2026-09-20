@@ -30,6 +30,7 @@ pub fn head_of(artifact: &Artifact, world_tag: u64) -> ArtifactHead {
         edge: artifact.edge,
         digest: artifact.digest(),
         tiles_per_edge: artifact.tiles_per_edge(),
+        sea_m: artifact.sea_m,
     }
 }
 
@@ -170,6 +171,7 @@ pub fn read_artifact(
     let artifact = Artifact {
         edge: head.edge,
         version: head.version,
+        sea_m: head.sea_m,
         rows,
         pyramid,
     };

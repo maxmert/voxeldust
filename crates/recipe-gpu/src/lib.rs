@@ -89,7 +89,8 @@ pub fn cell_field(
     out[index] = if rule == LAYER_BELOW {
         below_cell_word(charter)
     } else if rule == LAYER_ABOVE {
-        above_cell_word(charter, layer.r_steps << LENGTH_BITS)
+        // The card holds no artifact row: every column's water is the body's sea.
+        above_cell_word(charter, layer.r_steps << LENGTH_BITS, charter.sea_radius)
     } else {
         cell_word(
             charter,
@@ -98,6 +99,7 @@ pub fn cell_field(
                 h: column.h,
                 biome: column.biome,
                 r_steps: layer.r_steps,
+                water: charter.sea_radius,
             },
             cavern_at(column, layer, nodes),
             tubes,

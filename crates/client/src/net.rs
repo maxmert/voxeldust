@@ -1492,6 +1492,135 @@ mod tests {
         );
     }
 
+    /// ★ THE ARTIFACT PARTS ARRIVE (slice 8c stage C4c): a head opens the book, the levels make
+    /// the pyramid whole and the client states `ArtifactHeld` once on the next send, a tile lands,
+    /// a torn part is a decode error, the render snapshot shares the book, the dev state counts
+    /// it, and a realm that leaves the drawn set takes its artifact with it.
+    #[test]
+    fn artifact_parts_are_assembled_and_the_held_word_goes_out_once() {
+        use vd_terrain::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
+        use vd_terrain::solve::{Schedule, solve_full};
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate =
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let artifact =
+            vd_terrain::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        let realm = vd_core::pose::RealmId::Planet(moon.seed());
+        let part = |msg: &BulkMsg| {
+            postcard::to_allocvec(&ServerControlMsg::ArtifactPart {
+                bytes: postcard::to_allocvec(msg).expect("fixture"),
+            })
+            .expect("fixture")
+        };
+        let held = |c: &ClientCore<MockTransport>| {
+            c.transport
+                .sent
+                .iter()
+                .filter(|(_, b)| {
+                    matches!(
+                        postcard::from_bytes::<ClientControlMsg>(b),
+                        Ok(ClientControlMsg::ArtifactHeld { .. })
+                    )
+                })
+                .count()
+        };
+        let mut c = core();
+        activate(&mut c);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            part(&BulkMsg::ArtifactHead {
+                realm,
+                world_tag: 9,
+                version: artifact.version,
+                edge: artifact.edge,
+                digest: artifact.digest(),
+                tiles_per_edge: artifact.tiles_per_edge(),
+                levels: artifact.pyramid.len() as u32,
+                sea_m: artifact.sea_m,
+            }),
+        );
+        c.step(0.0);
+        assert_eq!(c.state().artifacts().counters.heads, 1);
+        assert_eq!(held(&c), 0);
+        assert!(c.state().render_snapshot().artifact(realm).is_some());
+        assert_eq!(c.state().render_snapshot().artifacts().len(), 1);
+        // The two levels, coarsest first: the second completes the pyramid.
+        for (k, level) in artifact.pyramid.iter().enumerate().rev() {
+            c.transport.deliver(
+                GATEWAY,
+                MsgClass::Control,
+                part(&BulkMsg::ArtifactPyramid {
+                    realm,
+                    level: k as u32 + 1,
+                    part: 0,
+                    parts: 1,
+                    z_m: level.clone(),
+                }),
+            );
+            c.step(0.0);
+        }
+        assert_eq!(held(&c), 1, "the held word went out once");
+        c.step(0.0);
+        assert_eq!(held(&c), 1, "and only once");
+        // A tile lands; a torn part is counted.
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            part(&BulkMsg::ArtifactTile {
+                realm,
+                face: 0,
+                tx: 0,
+                ty: 0,
+                rows: artifact.tile(vd_seed::bend::Face::PosX, 0, 0).to_bytes(),
+            }),
+        );
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            postcard::to_allocvec(&ServerControlMsg::ArtifactPart {
+                bytes: vec![0xFF, 0xFF, 0xFF],
+            })
+            .expect("fixture"),
+        );
+        let errors = c.state().decode_errors;
+        c.step(0.0);
+        assert_eq!(c.state().artifacts().counters.tiles, 1);
+        assert_eq!(c.state().decode_errors, errors + 1);
+        let s = c.state().devstate(0.0, DevCounters::default());
+        assert_eq!(s.artifacts.realms, 1);
+        assert_eq!(s.artifacts.whole, 1);
+        assert_eq!(s.artifacts.levels, 2);
+        assert_eq!(s.artifacts.tiles, 1);
+        assert_eq!(s.artifacts.refused, 0);
+        // A scene, then a delta that removes the realm: the artifact leaves with it.
+        let hull = vd_core::pose::RealmId::Station(1);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            scene_level(hull, 1, vec![scene_row(realm, Some(hull), 5.0)]),
+        );
+        c.step(0.0);
+        c.transport.deliver(
+            GATEWAY,
+            MsgClass::Control,
+            postcard::to_allocvec(&ServerControlMsg::RealmSceneDelta {
+                origin: hull,
+                origin_epoch: 1,
+                added: vec![],
+                removed: vec![realm],
+            })
+            .expect("fixture"),
+        );
+        c.step(0.0);
+        assert!(c.state().render_snapshot().artifact(realm).is_none());
+        assert_eq!(c.state().artifacts().book().len(), 0);
+    }
+
     #[test]
     fn own_entity_via_own_entity() {
         // The node-agnostic OwnEntity signal names this client's avatar by EntityId alone.

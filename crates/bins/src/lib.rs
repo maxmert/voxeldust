@@ -16,7 +16,6 @@ pub mod artifact_source;
 pub mod artifact_store;
 pub mod artifact_worker;
 pub mod proc_launch;
-pub mod sea;
 
 // The dev-control-only helpers (Tier-B process-gate glue): `flight` is the ONE pilot every cluster
 // gate flies (rendezvous-and-park + label-asserted crossing legs); `scene_camera` reconstructs the
@@ -1047,17 +1046,19 @@ pub fn body_charter(
 /// ★ THE TWO WORDS THE RELIEF LAW READS, taken off a realm's charter (slice 8b stage 3). One place
 /// for the copy on this side of the wire; the client does the same two-word copy on its own side,
 /// because no crate sits under both `vd-bins` and `vd-client` that may name `vd-terrain`.
-/// ★ THE SEA THE REALM STATES (slice 8b stage 6; ruling T8): where the body holds water and that
-/// water is liquid at its surface, solve the level it stands at over the body's own shape and write
-/// it into the charter as whole millimetres over the ladder radius, with the sea flag. A dry, frozen
-/// or steaming world — or a body the recipe refuses — states no sea. ONE call site (the shard's
-/// boot) and ONE solve; the client reads the integer and never re-solves.
+/// ★ THE SEA THE REALM STATES (slice 8b stage 6, ruling T8; slice 8c stage C5, the design's §6):
+/// the level the SOLVE found for the body's water inventory over its eroded shape — the artifact's
+/// own word, whole metres over the ladder radius — written into the charter as whole millimetres
+/// with the sea flag, where the water is liquid at the surface. A dry, frozen or steaming world, or
+/// a realm whose artifact is not here yet, states no sea. ONE solve (the artifact's) and no second
+/// one: the 8b bisection over the recipe's one-humped relief is deleted, because the solve's own
+/// bisection over the two-humped field IS that mechanism on the shape the water stands on.
 #[must_use]
 pub fn charter_with_sea(
     charter: vd_core::look::BodyCharter,
-    body: Option<&vd_terrain::BodyDefinition>,
+    sea_m: Option<i32>,
 ) -> vd_core::look::BodyCharter {
-    let Some(body) = body else {
+    let Some(sea_m) = sea_m else {
         return charter;
     };
     let liquid = match (charter.t_surface_mk, charter.p_surf_pa) {
@@ -1066,18 +1067,11 @@ pub fn charter_with_sea(
         }
         _ => false,
     };
-    let water_m3 = charter.water_km3.map_or(0.0, |km3| km3 as f64 * 1.0e9);
     if !liquid {
         return charter;
     }
-    let Some(level) = crate::sea::solve_sea_level(body, water_m3) else {
-        return charter;
-    };
-    let Some(offset_mm) = vd_physics::worldgen::quantise_i32(level.offset_m, 1_000.0) else {
-        return charter;
-    };
     vd_core::look::BodyCharter {
-        sea_offset_mm: Some(offset_mm),
+        sea_offset_mm: Some(sea_m.saturating_mul(1_000)),
         flags: charter.flags | vd_core::look::CHARTER_FLAG_HAS_SEA,
         ..charter
     }

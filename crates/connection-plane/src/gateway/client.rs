@@ -263,9 +263,8 @@ pub(crate) fn on_client_control(
         // ★ THE ARTIFACT HELD (slice 8c stage C4c): the client states it holds a realm's head and
         // pyramid at a digest; recorded on the session for the window-holder pacing that is owed.
         ClientControlMsg::ArtifactHeld { realm, digest } => {
-            if let Some(session_id) = sessions.by_client.get(&client).copied()
-                && let Some(session) = sessions.by_session.get_mut(&session_id)
-            {
+            let session_id = sessions.by_client.get(&client).copied();
+            if let Some(session) = session_id.and_then(|id| sessions.by_session.get_mut(&id)) {
                 session.artifact_held.insert(realm, digest);
                 stats.artifact_held_stated += 1;
             }

@@ -77,6 +77,7 @@ impl TileSource for ArtifactTiles {
             digest: self.artifact.digest(),
             tiles_per_edge: self.artifact.tiles_per_edge(),
             levels: self.artifact.pyramid.len() as u32,
+            sea_m: self.artifact.sea_m,
         })
     }
 
@@ -185,6 +186,7 @@ mod tests {
                 digest: artifact.digest(),
                 tiles_per_edge: 2,
                 levels: 2,
+                sea_m: artifact.sea_m,
             }
         );
         let parts = source.pyramid_parts();

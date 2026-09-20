@@ -176,6 +176,64 @@ mod tests {
         vd_seed::bend::direction_q(face, i, j, m.inv_n(0))
     }
 
+    /// ★ THE HEIGHT WITH THE MACRO FIELD (C4c): through the moon's artifact it answers along any
+    /// direction, agrees with the column kernel's own surface at a cell centre to a step, reads a
+    /// pyramid level at a coarse rung, and answers nothing through a cache missing the tile.
+    #[test]
+    fn the_height_reads_the_artifacts_field_along_a_direction() {
+        use crate::CHUNK_EDGE;
+        use crate::artifact::{PyramidField, TileCache};
+        use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
+        use crate::solve::{Schedule, solve_full};
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let artifact =
+            crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        // A cell centre on face +X: the column kernel's surface (with the field) and the height
+        // along that centre's own direction agree to the cell's rounding.
+        let n0 = moon.ladder().cells_per_edge(0);
+        let (i, j) = (2_000, 3_000);
+        let column = crate::chunk::column_field(
+            &moon,
+            Some(&artifact),
+            Face::PosX,
+            0,
+            i / CHUNK_EDGE as i32,
+            j / CHUNK_EDGE as i32,
+        )
+        .expect("a column");
+        let idx = ((j % CHUNK_EDGE as i32) * CHUNK_EDGE as i32 + (i % CHUNK_EDGE as i32)) as usize;
+        let (dir_q, h, _) = column.columns[idx];
+        let dir = [
+            dir_q[0].raw() as f64 / (1u64 << DIR_BITS) as f64,
+            dir_q[1].raw() as f64 / (1u64 << DIR_BITS) as f64,
+            dir_q[2].raw() as f64 / (1u64 << DIR_BITS) as f64,
+        ];
+        let along = height_field_m(&moon, &artifact, dir, 0).expect("a height");
+        let want = metres_of_q28(h);
+        assert!((along - want).abs() < 0.02, "{along} vs {want}");
+        let _ = n0;
+        // A coarse rung through a pyramid level answers; a torn cache does not; a level the
+        // lattice cannot coarsen to and a body with no macro lattice answer nothing.
+        let level = PyramidField::of(&artifact, 1).expect("level 1");
+        assert!(height_field_m(&moon, &level, dir, 12).is_some());
+        let empty = TileCache::new(lattice.edge);
+        assert_eq!(height_field_m(&moon, &empty, dir, 0), None);
+        let level_9 = PyramidField {
+            level: 9,
+            z_m: vec![],
+        };
+        assert_eq!(height_field_m(&moon, &level_9, dir, 12), None);
+        let rock = moon.without_macro_lattice();
+        assert_eq!(height_field_m(&rock, &empty, dir, 0), None);
+        // The recipe's own height along the same direction differs from the field's.
+        assert!((height_m(&moon, dir, 0) - along).abs() > 0.0);
+    }
+
     #[test]
     fn the_surface_stays_inside_the_band_and_coarser_rungs_stay_within_the_dropped_bound() {
         let m = home();
@@ -251,7 +309,11 @@ mod tests {
 
     #[test]
     fn every_biome_appears_on_the_moon_and_the_poles_are_cold() {
-        let m = home();
+        // A seed-built body has no sea and its datum is the ladder radius (C5); the biomes are
+        // scanned on a body with a stated sea three kilometres under it, where highlands stand.
+        let dry = home();
+        assert_eq!(dry.biome_datum(), dry.radius);
+        let m = dry.with_sea_m(Some(-3_000));
         let mut seen = [false; 4];
         let mut i = 0u32;
         while i < 2_000 {
@@ -262,22 +324,21 @@ mod tests {
             seen[biome_of(&m, d, h) as usize] = true;
             i += 1;
         }
-        // Forced cases, so every arm is driven whatever the seed draws.
-        let pole = dir(Face::PosZ, 0.0, 0.0);
+        // Forced cases, so every arm is driven whatever the seed draws. The biome's datum is the
+        // ladder radius on this seed-built body (no sea, C5) and the sea's radius on a wet one.
+        let datum = m.biome_datum();
+        assert_eq!(datum, m.sea_radius);
         assert_eq!(
-            biome_of(&m, pole, m.sea_radius),
-            Biome::Tundra,
-            "the pole is cold"
+            m.with_sea_m(Some(-700)).biome_datum(),
+            m.radius - (Gi::new(700 * crate::units::STEPS_PER_M) << vd_recipe::cell::LENGTH_BITS)
         );
+        let pole = dir(Face::PosZ, 0.0, 0.0);
+        assert_eq!(biome_of(&m, pole, datum), Biome::Tundra, "the pole is cold");
         let anywhere = dir(Face::PosX, 0.1, 0.1);
         assert_eq!(
-            biome_of(
-                &m,
-                anywhere,
-                m.sea_radius + m.biome.highland_above + Gi::ONE
-            ),
+            biome_of(&m, anywhere, datum + m.biome.highland_above + Gi::ONE),
             Biome::Highland,
-            "far above the sea is highland"
+            "far above the datum is highland"
         );
         assert!(seen[Biome::Grassland as usize], "grassland exists");
         assert!(seen[Biome::Tundra as usize]);
@@ -287,7 +348,7 @@ mod tests {
         let mut j = 0;
         while j < 2_000 {
             let d = dir(Face::PosX, -1.0 + f64::from(j) / 1_000.0, 0.0);
-            desert |= biome_of(&m, d, m.sea_radius) == Biome::Desert;
+            desert |= biome_of(&m, d, datum) == Biome::Desert;
             j += 1;
         }
         assert!(

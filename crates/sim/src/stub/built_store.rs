@@ -112,6 +112,8 @@ mod art {
     pub const EDGE: u16 = 3;
     pub const DIGEST: u16 = 4;
     pub const TILES_PER_EDGE: u16 = 5;
+    /// The sea's level, whole metres over the ladder radius (slice 8c stage C5).
+    pub const SEA_M: u16 = 6;
     pub const FACE: u16 = 1;
     pub const TX: u16 = 2;
     pub const TY: u16 = 3;
@@ -161,6 +163,9 @@ pub struct ArtifactHead {
     pub digest: [u64; 2],
     /// The tiles along a face's edge.
     pub tiles_per_edge: u32,
+    /// ★ The sea's level (slice 8c stage C5), whole metres over the ladder radius, or the dry
+    /// word (`i16::MIN`) — a word the sim carries and never reads.
+    pub sea_m: i16,
 }
 
 /// One stored tile: its place and its rows' bytes, opaque to the sim.
@@ -210,6 +215,7 @@ pub fn encode_artifact_head(head: &ArtifactHead) -> Vec<u8> {
         .and_then(|w| w.required(art::EDGE, &head.edge))
         .and_then(|w| w.required(art::DIGEST, &head.digest))
         .and_then(|w| w.required(art::TILES_PER_EDGE, &head.tiles_per_edge))
+        .and_then(|w| w.required(art::SEA_M, &head.sea_m))
         .expect("a head's fields are small and encode infallibly")
         .finish()
 }
@@ -248,6 +254,7 @@ pub fn decode_artifact_head(bytes: &[u8]) -> Result<ArtifactHead, String> {
         edge: field(&r, art::EDGE, "edge")?,
         digest: field(&r, art::DIGEST, "digest")?,
         tiles_per_edge: field(&r, art::TILES_PER_EDGE, "tiles per edge")?,
+        sea_m: field(&r, art::SEA_M, "sea")?,
     })
 }
 
@@ -408,6 +415,7 @@ mod tests {
             edge: 1_216,
             digest: [7, 11],
             tiles_per_edge: 19,
+            sea_m: -1_250,
         };
         assert_eq!(
             decode_artifact_head(&encode_artifact_head(&head)),

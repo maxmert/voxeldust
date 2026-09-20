@@ -465,7 +465,8 @@ const _: () = assert!(TUBE_REGION_M.is_power_of_two());
 /// one part never moves another.
 pub(crate) mod salt {
     pub const OCTAVES: u64 = 0x5e_ed_01;
-    pub const SEA: u64 = 0x5e_ed_02;
+    // `0x5e_ed_02` was the SEA's salt until slice 8c stage C5 deleted the draw (ruling T9): the
+    // number is RETIRED, never reused — a new draw under it would shadow an old world's stream.
     pub const STRATA: u64 = 0x5e_ed_03;
     pub const BIOME: u64 = 0x5e_ed_04;
     pub const CAVERN: u64 = 0x5e_ed_05;
@@ -633,8 +634,9 @@ pub struct BodyDefinition {
     /// `relief_bound_m(0)`, which the spectrum's own amplitudes size — and it is stored because a
     /// measurement must be able to read the law's answer rather than re-derive it.
     pub(crate) relief: Gi,
-    /// The sea's radius: the ladder radius plus the seed's sea offset, in gap steps at
-    /// [`LENGTH_BITS`].
+    /// The sea's radius in gap steps at [`LENGTH_BITS`]: the ladder radius plus the SOLVED sea's
+    /// level ([`BodyDefinition::with_sea_m`]), or ZERO — no sea — for a body built from its seed
+    /// alone (slice 8c stage C5: the draw is deleted).
     pub(crate) sea_radius: Gi,
     /// The cell-count reciprocal of every rung (`vd_recipe::bend::inv_n_of`), so a direction costs no
     /// divide. Entries past the body's own rungs are zero and never read.
@@ -1057,16 +1059,13 @@ impl BodyDefinition {
             first_fine: Gi::new(first_fine as i64),
         };
 
-        // The sea: between 40 % of the relief below the ladder radius and 30 % above it.
-        // ★ RULING T8 (a), slice 8b stage 6: the owning realm SOLVES the sea's level from the
-        // body's water inventory (`crate::sea`) and states it in its charter, but the recipe keeps
-        // THIS draw until 8c gives the ground its second hump — the solved level would put almost
-        // the whole one-humped globe under water, and a picture with a sea level nothing draws is a
-        // lie. 8c's switch is one line: this word reads the stated offset.
-        let mut sea_rng = SplitMix64::new(child_seed(seed, salt::SEA, 0));
-        let sea_offset =
-            (draw_unit(&mut sea_rng) * Gf::from_f64(0.7) - Gf::from_f64(0.4)) * relief_m;
-        let sea_radius = length_of(radius_m + sea_offset.floor());
+        // ★ THE SEA IS NOT DRAWN (slice 8c stage C5; ruling T9: no physical number is drawn). The
+        // solve computes the sea's level from the body's water inventory over its own solved shape
+        // (`solve::solve_full`, the bisection of `land::sea_level`), the artifact carries it, and
+        // a host that holds the artifact states it here with [`BodyDefinition::with_sea_m`]. A body
+        // built from its seed alone has NO sea: its radius stands at zero, under every cell, so the
+        // recipe's own relief is dry — the shape the pictures were judged on under ruling T8.
+        let sea_radius = Gi::ZERO;
 
         // The strata.
         let mut strata_rng = SplitMix64::new(child_seed(seed, salt::STRATA, 0));
@@ -1276,7 +1275,10 @@ impl BodyDefinition {
     #[must_use]
     pub fn biome_charter(&self) -> BiomeCharter {
         BiomeCharter {
-            sea_radius: self.sea_radius,
+            // ★ THE BIOME'S DATUM (slice 8c stage C5): the rule reads a column's height ABOVE THE
+            // SEA; a body with no sea (the seed-built shape, a dry moon) reads its height above
+            // the ladder radius — never above zero, which would make every column a highland.
+            sea_radius: self.biome_datum(),
             highland_above: self.biome.highland_above,
             highland_recip: self.biome.highland_recip,
             highland_shift: Gi::new(i64::from(RADIUS_RECIP_BITS - NOISE_BITS)),
@@ -1312,6 +1314,54 @@ impl BodyDefinition {
             terrace: self.terrace_at(rung),
             octaves: self.octaves,
         }
+    }
+
+    /// ★ THE SAME BODY WITH ITS SOLVED SEA (slice 8c stage C5): the sea's level in whole metres
+    /// over the ladder radius, as the artifact states it (`Artifact::sea_m`). Read by the cell
+    /// kernel for every column that holds no water row of its own — the far view's pyramid chunks,
+    /// the halo above the band — and by the biome charter. `None` states no sea.
+    #[must_use]
+    pub fn with_sea_m(mut self, sea_m: Option<i32>) -> BodyDefinition {
+        self.sea_radius = match sea_m {
+            Some(m) => self.radius + (Gi::new(i64::from(m) * STEPS_PER_M) << LENGTH_BITS),
+            None => Gi::ZERO,
+        };
+        self
+    }
+
+    /// ★ THE PEBBLE STAND-IN: the same body with NO macro lattice — what the divisor rule states
+    /// for a body of fewer than eight cells a face, which the ladder admits and `from_seed`
+    /// refuses (its crust is deeper than the body). Every reader of the lattice has a "no lattice"
+    /// arm (the recipe's own relief, no solve, no artifact); this is how a test outside this crate
+    /// reaches those arms with a real body. Never a shipped path.
+    #[must_use]
+    pub fn without_macro_lattice(mut self) -> BodyDefinition {
+        self.macro_edge = 0;
+        self
+    }
+
+    /// The radius the biome rule measures height from: the sea's, or the ladder radius on a body
+    /// with no sea.
+    #[must_use]
+    pub fn biome_datum(&self) -> Gi {
+        if self.sea_radius == Gi::ZERO {
+            self.radius
+        } else {
+            self.sea_radius
+        }
+    }
+
+    /// The sea's level in whole metres over the ladder radius, or `None` with no sea.
+    #[must_use]
+    pub fn sea_m(&self) -> Option<i32> {
+        if self.sea_radius == Gi::ZERO {
+            return None;
+        }
+        Some(
+            ((self.sea_radius - self.radius) >> LENGTH_BITS)
+                .raw()
+                .div_euclid(STEPS_PER_M) as i32,
+        )
     }
 
     /// The whole octave table, for a sum that starts at a first octave (the field-aware height).
@@ -2335,7 +2385,14 @@ mod tests {
             assert!(frequency_q(&live[o]) > frequency_q(&live[o - 1]));
             o += 1;
         }
-        assert!((m.sea_radius_m() - m.radius_m()).abs() <= relief);
+        // No sea from the seed (C5): the draw is deleted; a stated sea stands where it is told.
+        assert_eq!(m.sea_radius, Gi::ZERO);
+        assert_eq!(m.sea_m(), None);
+        let wet = m.with_sea_m(Some(-1_250));
+        assert_eq!(wet.sea_m(), Some(-1_250));
+        assert!((wet.sea_radius_m() - (wet.radius_m() - 1_250.0)).abs() < 1e-6);
+        assert_eq!(wet.with_sea_m(None).sea_m(), None);
+        assert!(relief > 0.0);
         assert!(m.strata.max_depth_m() < 100);
         assert!(m.caves.min_depth_m < m.caves.max_depth_m);
         assert_eq!(m.ladder.rungs, 19, "the home planet's ladder");

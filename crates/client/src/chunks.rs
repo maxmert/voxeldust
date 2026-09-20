@@ -123,6 +123,15 @@ pub struct ChunkGeometry {
     /// the shape. MEASURED without it (§22.2): at 240 m/s 13 % of the pixels at the rung 1→2
     /// handover stepped by up to 48 levels in one frame.
     pub morph_normals: Vec<[i16; 2]>,
+    /// ★ THE WATER SHEET (slice 8c stage C5): a flat surface at each wet column's water level —
+    /// the sea's, a lake's — over the chunk's core, four vertices a quad in metres relative to
+    /// `origin_m`, with the radial of each; empty for a dry chunk. It rides the same fade as the
+    /// ground (a morph of zero: the sheet is flat at every rung), so the coarser rung's sheet ends
+    /// where the finer's begins. The look — waves, depth, the shore's foam — is the ocean slice's
+    /// (8o); this is the water judged wet.
+    pub water_vertices: Vec<[f32; 3]>,
+    pub water_radials: Vec<[f32; 3]>,
+    pub water_triangles: Vec<[u32; 3]>,
     /// THE RADIAL of each vertex (step 5): its unit direction from the body's centre in the
     /// realm's frame, narrowed once to `f32` — the shader needs no centre of the body (MEASURED
     /// with a centre uniform instead: a moving eye rewrote every material and the engine
@@ -1249,6 +1258,7 @@ pub fn geometry_from(
             })
             .collect()
     };
+    let (water_vertices, water_radials, water_triangles) = water_sheet(samples, origin_m);
     let mut geometry = ChunkGeometry {
         key,
         origin_m,
@@ -1260,6 +1270,9 @@ pub fn geometry_from(
         normals,
         packed_normals,
         morph_normals,
+        water_vertices,
+        water_radials,
+        water_triangles,
         triangles: mesh.triangles,
         radials,
         bounds: ([0.0; 3], [0.0; 3]),
@@ -1269,6 +1282,39 @@ pub fn geometry_from(
     add_skirts(&mut geometry, drop_m);
     geometry.bounds = geometry.measure_bounds();
     Some(geometry)
+}
+
+/// ★ THE WATER SHEET's build (slice 8c stage C5): over the chunk's 62 × 62 core columns and the
+/// halo column past each edge, one quad per cell of the face grid whose four corners hold ANY
+/// water; the quad stands flat at the HIGHEST water level among its wet corners (a shore quad
+/// reaches under the land, which hides it), each corner at that radius along its own column.
+/// Four vertices a quad (a level is a quad's, not a column's), two triangles, both windings drawn
+/// by a material that culls nothing. Empty for a dry chunk.
+/// The water sheet as the mesh takes it: single-precision vertices about the origin, radials,
+/// triangles.
+pub type ClientWaterSheet = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[u32; 3]>);
+
+#[must_use]
+pub fn water_sheet(
+    samples: &vd_terrain::lattice::SampleBox,
+    origin_m: [f64; 3],
+) -> ClientWaterSheet {
+    let (points, radials, triangles) = vd_terrain::position::water_sheet(samples);
+    let vertices = points
+        .iter()
+        .map(|p| {
+            [
+                (p[0] - origin_m[0]) as f32,
+                (p[1] - origin_m[1]) as f32,
+                (p[2] - origin_m[2]) as f32,
+            ]
+        })
+        .collect();
+    let radials = radials
+        .iter()
+        .map(|r| [r[0] as f32, r[1] as f32, r[2] as f32])
+        .collect();
+    (vertices, radials, triangles)
 }
 
 /// How deep a skirt hangs under a chunk's edge, in cells of its rung.
@@ -1686,9 +1732,17 @@ impl ChunkLane {
             return;
         }
         let first = held.is_none_or(|(head, _)| head != cache.head);
-        if first && (self.held.get(&realm).copied().unwrap_or(0) > 0) {
-            self.counters.artifact_rebuilds += 1;
-            self.drop_chunks(realm);
+        if first {
+            if self.held.get(&realm).copied().unwrap_or(0) > 0 {
+                self.counters.artifact_rebuilds += 1;
+                self.drop_chunks(realm);
+            }
+            // ★ THE BODY TAKES THE SOLVED SEA (C5): every chunk built from here on reads the
+            // artifact's sea where its column holds no water row (the far view, the halo).
+            if let Some(body) = self.bodies.get(&realm) {
+                let wet = body.with_sea_m(cache.head.sea());
+                self.bodies.insert(realm, Arc::new(wet));
+            }
         }
         self.artifacts.insert(realm, Arc::new(cache.clone()));
     }
@@ -2042,6 +2096,223 @@ mod tests {
 
     fn lane() -> ChunkLane {
         ChunkLane::new(Box::new(InlineWorkers::default()), 77)
+    }
+
+    /// ★ THE WATER SHEET ON A CHUNK (C5): a chunk under a stated sea carries a sheet — four
+    /// vertices a quad about the chunk's origin with unit radials — and a dry chunk none.
+    #[test]
+    fn a_chunk_under_the_sea_carries_a_water_sheet() {
+        let wet = home_planet().with_sea_m(Some(0));
+        let key = surface_key(&wet, 4, 300, 700);
+        let g = geometry_with(&wet, None, planet(), key, &ParentCache::default()).expect("built");
+        assert!(!g.water_triangles.is_empty());
+        assert_eq!(g.water_vertices.len(), g.water_radials.len());
+        assert_eq!(g.water_triangles.len() * 2, g.water_vertices.len());
+        let origin = DVec3::from_array(g.origin_m);
+        for (v, r) in g.water_vertices.iter().zip(&g.water_radials) {
+            let p = origin + DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
+            let len = p.length();
+            assert!((len - wet.sea_radius_m()).abs() < 0.5, "{len}");
+            let rv = DVec3::new(f64::from(r[0]), f64::from(r[1]), f64::from(r[2]));
+            assert!((rv.length() - 1.0).abs() < 1e-5);
+        }
+        let dry = home_planet();
+        let g = geometry_with(&dry, None, planet(), key, &ParentCache::default()).expect("built");
+        assert!(g.water_triangles.is_empty());
+        assert!(g.water_vertices.is_empty());
+    }
+
+    /// ★ THE LANE ON THE ARTIFACT (slice 8c stage C4c, C5): the moon's artifact stated to the lane
+    /// gives its body the solved sea; a coarse chunk reads a pyramid level and builds; a fine
+    /// chunk whose tiles are not here waits (counted) while the same request with the tiles held
+    /// builds; a first head after chunks were built drops them (counted); a second statement of
+    /// the same cache is a no-op; the parents and the morph fallback read the field.
+    #[test]
+    fn the_lane_builds_on_the_artifacts_field_and_waits_for_its_tiles() {
+        use crate::artifact_book::ArtifactReceiver;
+        use vd_terrain::home::{
+            HOME_MOON_BULK_DENSITY_KGM3, HOME_MOON_GRAVITY_MM_S2, HOME_MOON_RADIUS_BITS,
+            HOME_MOON_SEED, HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words,
+        };
+        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_wire::channels::BulkMsg;
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate =
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let artifact =
+            vd_terrain::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        let realm = RealmId::Planet(HOME_MOON_SEED);
+        let mut rx = ArtifactReceiver::default();
+        rx.accept(BulkMsg::ArtifactHead {
+            realm,
+            world_tag: 9,
+            version: artifact.version,
+            edge: artifact.edge,
+            digest: artifact.digest(),
+            tiles_per_edge: artifact.tiles_per_edge(),
+            levels: artifact.pyramid.len() as u32,
+            sea_m: artifact.sea_m,
+        });
+        for (k, level) in artifact.pyramid.iter().enumerate().rev() {
+            rx.accept(BulkMsg::ArtifactPyramid {
+                realm,
+                level: k as u32 + 1,
+                part: 0,
+                parts: 1,
+                z_m: level.clone(),
+            });
+        }
+        let moon_charter = vd_core::look::BodyCharter {
+            gravity_mm_s2: HOME_MOON_GRAVITY_MM_S2,
+            bulk_density_kgm3: HOME_MOON_BULK_DENSITY_KGM3,
+            ..charter()
+        };
+        let surface = SurfaceStmt {
+            frame: FrameRef::PlanetCentered {
+                planet_seed: HOME_MOON_SEED,
+            },
+            generator: 77,
+        };
+        let look = Boundary::Shell {
+            r: f64::from_bits(HOME_MOON_RADIUS_BITS),
+        };
+        let mut lane = lane();
+        lane.state_surface(realm, &surface, Some(&moon_charter), &look);
+        assert_eq!(lane.body(realm).expect("a body").sea_m(), None);
+        // A chunk built before the head: the recipe's own relief.
+        let top = lane.body(realm).expect("a body").ladder().rungs - 1;
+        let key = |rung: u8, x: i32, y: i32| ChunkKey {
+            face: Face::PosX,
+            rung,
+            x,
+            y,
+            z: vd_terrain::digest::surface_chunk_z(&moon, Face::PosX, rung, x, y),
+        };
+        lane.request(realm, key(top, 0, 0), 0);
+        assert_eq!(lane.poll(8).len(), 1);
+        assert_eq!(lane.artifact(realm), None);
+        // The head arrives: the chunks are dropped and rebuilt; the body takes the sea.
+        let cache = rx.book().get(realm).cloned().expect("a cache");
+        lane.state_artifact(realm, &cache);
+        assert_eq!(lane.counters().artifact_rebuilds, 1);
+        assert_eq!(lane.resident(realm), vec![]);
+        assert!(lane.artifact(realm).is_some());
+        assert_eq!(lane.body(realm).expect("a body").sea_m(), artifact.sea());
+        lane.state_artifact(realm, &cache);
+        assert_eq!(
+            lane.counters().artifact_rebuilds,
+            1,
+            "the same cache again is nothing"
+        );
+        // A coarse chunk reads the pyramid and builds; its parent (the top rung) reads the field
+        // for the morph targets.
+        lane.request(realm, key(top - 1, 0, 0), 0);
+        let built = lane.poll(8);
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].geometry.key.rung, top - 1);
+        assert_eq!(lane.counters().awaiting_artifact, 0);
+        // A fine chunk waits for its tiles.
+        lane.request(realm, key(0, 4_000, 4_000), 0);
+        assert_eq!(lane.counters().awaiting_artifact, 1);
+        assert!(lane.poll(8).is_empty());
+        // The tiles land: the same request builds.
+        for tx in 0..artifact.tiles_per_edge() {
+            for ty in 0..artifact.tiles_per_edge() {
+                rx.accept(BulkMsg::ArtifactTile {
+                    realm,
+                    face: Face::PosX.index(),
+                    tx,
+                    ty,
+                    rows: artifact.tile(Face::PosX, tx, ty).to_bytes(),
+                });
+            }
+        }
+        let cache = rx.book().get(realm).cloned().expect("a cache");
+        lane.state_artifact(realm, &cache);
+        assert_eq!(
+            lane.counters().artifact_rebuilds,
+            1,
+            "a later cache drops nothing"
+        );
+        lane.request(realm, key(0, 4_000, 4_000), 0);
+        assert_eq!(lane.counters().awaiting_artifact, 1);
+        let built = lane.poll(8);
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].geometry.key.rung, 0);
+        // The field pick and the fallback height, directly.
+        let body = **lane.body(realm).expect("a body");
+        let picked = |f: Option<Option<SharedField>>| f.map(|f| f.map(|f| f.level()));
+        assert_eq!(
+            picked(field_of(&body, Some(&cache), key(0, 4_000, 4_000))),
+            Some(Some(0))
+        );
+        assert_eq!(
+            picked(field_of(&body, None, key(0, 4_000, 4_000))),
+            Some(None)
+        );
+        let dir = [1.0, 0.0, 0.0];
+        assert!(coarser_field_m(&body, Some(&cache), dir, top).is_some());
+        assert!(coarser_field_m(&body, None, dir, top).is_some());
+        // A body too small for a macro lattice reads the recipe whatever it holds.
+        let pebble = body.without_macro_lattice();
+        assert!(pebble.macro_lattice().is_none());
+        assert_eq!(
+            picked(field_of(&pebble, Some(&cache), key(0, 0, 0))),
+            Some(None)
+        );
+        assert!(coarser_field_m(&pebble, Some(&cache), dir, 0).is_some());
+        // The parent's level still assembling: the child builds with no parent mesh and its morph
+        // fallback reads nothing through the level, so it keeps its own radius.
+        let mut half = ArtifactReceiver::default();
+        half.accept(BulkMsg::ArtifactHead {
+            realm,
+            world_tag: 9,
+            version: artifact.version,
+            edge: artifact.edge,
+            digest: artifact.digest(),
+            tiles_per_edge: artifact.tiles_per_edge(),
+            levels: artifact.pyramid.len() as u32,
+            sea_m: artifact.sea_m,
+        });
+        half.accept(BulkMsg::ArtifactPyramid {
+            realm,
+            level: 1,
+            part: 0,
+            parts: 1,
+            z_m: artifact.pyramid[0].clone(),
+        });
+        let half_cache = half.book().get(realm).cloned().expect("a cache");
+        assert!(ParentMesh::build(&body, Some(&half_cache), key(top - 1, 0, 0)).is_none());
+        assert_eq!(
+            coarser_field_m(&body, Some(&half_cache), dir, top - 1),
+            None
+        );
+        assert!(
+            geometry_with(
+                &body,
+                Some(&half_cache),
+                realm,
+                key(top - 1, 0, 0),
+                &ParentCache::default()
+            )
+            .is_none(),
+            "a waiting field builds nothing"
+        );
+        let mut lane2 = ChunkLane::new(Box::new(InlineWorkers::default()), 77);
+        // A head stated before the body and before any chunk: nothing dropped, nothing rebuilt.
+        lane2.state_artifact(realm, &half_cache);
+        assert_eq!(lane2.counters().artifact_rebuilds, 0);
+        lane2.state_surface(realm, &surface, Some(&moon_charter), &look);
+        lane2.state_artifact(realm, &cache);
+        assert_eq!(lane2.counters().artifact_rebuilds, 0);
+        assert_eq!(lane2.body(realm).expect("a body").sea_m(), artifact.sea());
+        // Forgetting the realm drops the artifact with the body.
+        lane.forget(realm);
+        assert_eq!(lane.artifact(realm), None);
     }
 
     fn surface_key(body: &BodyDefinition, rung: u8, x: i32, y: i32) -> ChunkKey {
@@ -3100,6 +3371,9 @@ mod tests {
             normals: Vec::new(),
             packed_normals: Vec::new(),
             morph_normals: Vec::new(),
+            water_vertices: Vec::new(),
+            water_radials: Vec::new(),
+            water_triangles: Vec::new(),
             radials: Vec::new(),
             triangles: vec![[0, 1, 2]],
             bounds: ([0.0; 3], [0.0; 3]),
@@ -3309,6 +3583,9 @@ mod tests {
             normals: Vec::new(),
             packed_normals: Vec::new(),
             morph_normals: Vec::new(),
+            water_vertices: Vec::new(),
+            water_radials: Vec::new(),
+            water_triangles: Vec::new(),
             radials: Vec::new(),
             triangles: Vec::new(),
             bounds: ([0.0; 3], [0.0; 3]),

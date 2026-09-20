@@ -39,6 +39,16 @@ pub struct ArtifactHead {
     pub digest: [u64; 2],
     pub tiles_per_edge: u32,
     pub levels: u32,
+    /// The sea's level, whole metres over the ladder radius, or `i16::MIN` for a dry body (C5).
+    pub sea_m: i16,
+}
+
+impl ArtifactHead {
+    /// The sea as the head states it: `None` for a dry body.
+    #[must_use]
+    pub fn sea(&self) -> Option<i32> {
+        (self.sea_m != vd_terrain::artifact::DRY_M).then_some(i32::from(self.sea_m))
+    }
 }
 
 /// A field a chunk build reads, shared with the builders.
@@ -252,6 +262,7 @@ impl ArtifactReceiver {
                 digest,
                 tiles_per_edge,
                 levels,
+                sea_m,
             } => self.accept_head(
                 realm,
                 ArtifactHead {
@@ -261,6 +272,7 @@ impl ArtifactReceiver {
                     digest,
                     tiles_per_edge,
                     levels,
+                    sea_m,
                 },
             ),
             BulkMsg::ArtifactPyramid {
@@ -448,6 +460,7 @@ mod tests {
             digest: artifact.digest(),
             tiles_per_edge: artifact.tiles_per_edge(),
             levels: artifact.pyramid.len() as u32,
+            sea_m: artifact.sea_m,
         }
     }
 
@@ -494,6 +507,12 @@ mod tests {
         let cache = rx.book().get(realm()).copied_head();
         assert_eq!(cache.levels, 2);
         assert_eq!(cache.edge, 68);
+        assert_eq!(cache.sea(), None, "the airless moon states no sea");
+        let wet = ArtifactHead {
+            sea_m: -40,
+            ..cache
+        };
+        assert_eq!(wet.sea(), Some(-40));
         // Level 2 whole in one part (6 · 17² = 1 734 words).
         let l2 = artifact.pyramid[1].clone();
         assert_eq!(l2.len(), 1_734);
@@ -548,18 +567,10 @@ mod tests {
             y: 0,
             z: 0,
         };
-        assert!(matches!(
-            cache.field_for(&lattice, key(13)),
-            FieldPick::Ready(_)
-        ));
         assert_eq!(
             format!("{:?}", cache.field_for(&lattice, key(13))),
             "Ready(level 2)"
         );
-        assert!(matches!(
-            cache.field_for(&lattice, key(0)),
-            FieldPick::Waiting
-        ));
         assert_eq!(
             format!("{:?}", cache.field_for(&lattice, key(0))),
             "Waiting"
@@ -603,28 +614,24 @@ mod tests {
         assert_eq!(cache.tiles().len(), 1);
         let node = lattice.index(Face::PosX, 3, 3);
         assert_eq!(cache.tiles().z_m(node), artifact.z_m(node));
-        let mut bad_tile = BulkMsg::ArtifactTile {
+        let bad_tile = |face: u8, tx: u32, ty: u32, rows: Vec<u8>| BulkMsg::ArtifactTile {
             realm: realm(),
-            face: 0,
-            tx: 2,
-            ty: 0,
-            rows: vec![],
+            face,
+            tx,
+            ty,
+            rows,
         };
-        assert_eq!(rx.accept(bad_tile.clone()), ArtifactIngest::Shape);
-        if let BulkMsg::ArtifactTile { face, tx, .. } = &mut bad_tile {
-            *face = 6;
-            *tx = 0;
-        }
-        assert_eq!(rx.accept(bad_tile.clone()), ArtifactIngest::Shape);
-        if let BulkMsg::ArtifactTile { face, rows, .. } = &mut bad_tile {
-            *face = 0;
-            *rows = vec![0; 5];
-        }
-        assert_eq!(rx.accept(bad_tile.clone()), ArtifactIngest::Shape);
-        if let BulkMsg::ArtifactTile { rows, .. } = &mut bad_tile {
-            *rows = vec![0; 9 * 3];
-        }
-        assert_eq!(rx.accept(bad_tile), ArtifactIngest::Shape);
+        assert_eq!(rx.accept(bad_tile(0, 2, 0, vec![])), ArtifactIngest::Shape);
+        assert_eq!(rx.accept(bad_tile(0, 0, 2, vec![])), ArtifactIngest::Shape);
+        assert_eq!(rx.accept(bad_tile(6, 0, 0, vec![])), ArtifactIngest::Shape);
+        assert_eq!(
+            rx.accept(bad_tile(0, 0, 0, vec![0; 5])),
+            ArtifactIngest::Shape
+        );
+        assert_eq!(
+            rx.accept(bad_tile(0, 0, 0, vec![0; 9 * 3])),
+            ArtifactIngest::Shape
+        );
         // A chunk over that tile alone is ready now.
         let mid = ChunkKey {
             face: Face::PosX,
@@ -633,10 +640,10 @@ mod tests {
             y: 4_000,
             z: 0,
         };
-        assert!(matches!(
-            cache.field_for(&lattice, mid),
-            FieldPick::Ready(_)
-        ));
+        assert_eq!(
+            format!("{:?}", cache.field_for(&lattice, mid)),
+            "Ready(level 0)"
+        );
         // Not an artifact.
         assert_eq!(
             rx.accept(BulkMsg::ChunkManifest {
@@ -662,36 +669,89 @@ mod tests {
                 pyramids_whole: 1,
                 tiles: 1,
                 no_head: 2,
-                shape: 9,
+                shape: 10,
                 duplicates: 4,
                 not_artifact: 1,
             }
         );
-        // A new head with another digest starts the realm over.
-        let mut other = head_of(&artifact);
-        if let BulkMsg::ArtifactHead { digest, .. } = &mut other {
-            digest[0] ^= 1;
-        }
-        assert_eq!(rx.accept(other), ArtifactIngest::Head);
+        // A new head with another digest starts the realm over — with a part still assembling,
+        // which it drops (on a fresh receiver, whose level 2 is not whole).
+        let mut fresh = ArtifactReceiver::default();
+        assert_eq!(fresh.accept(head_of(&artifact)), ArtifactIngest::Head);
+        assert_eq!(
+            fresh.accept(part_of(2, 0, 2, artifact.pyramid[1][..800].to_vec())),
+            ArtifactIngest::Part
+        );
+        let head_with =
+            |realm: RealmId, edge: u32, levels: u32, digest: [u64; 2]| BulkMsg::ArtifactHead {
+                realm,
+                world_tag: 9,
+                version: artifact.version,
+                edge,
+                digest,
+                tiles_per_edge: artifact.tiles_per_edge(),
+                levels,
+                sea_m: artifact.sea_m,
+            };
+        let mut other_digest = artifact.digest();
+        other_digest[0] ^= 1;
+        assert_eq!(
+            fresh.accept(head_with(realm(), 68, 2, other_digest)),
+            ArtifactIngest::Head
+        );
+        assert!(fresh.assembling.is_empty(), "the head dropped the part");
+        assert_eq!(
+            rx.accept(head_with(realm(), 68, 2, other_digest)),
+            ArtifactIngest::Head
+        );
         assert_eq!(rx.book().get(realm()).expect("held").levels_held(), 0);
         assert!(rx.book().get(realm()).expect("held").tiles().is_empty());
+        // Before any level is here a coarse chunk WAITS for its level.
+        assert_eq!(
+            format!(
+                "{:?}",
+                rx.book()
+                    .get(realm())
+                    .expect("held")
+                    .field_for(&lattice, key(13))
+            ),
+            "Waiting"
+        );
         // A head of no edge or too many levels is refused.
-        let mut zero = head_of(&artifact);
-        if let BulkMsg::ArtifactHead { edge, realm, .. } = &mut zero {
-            *edge = 0;
-            *realm = RealmId::Planet(42);
-        }
-        assert_eq!(rx.accept(zero), ArtifactIngest::Shape);
-        let mut deep = head_of(&artifact);
-        if let BulkMsg::ArtifactHead { levels, realm, .. } = &mut deep {
-            *levels = 12;
-            *realm = RealmId::Planet(42);
-        }
-        assert_eq!(rx.accept(deep), ArtifactIngest::Shape);
+        assert_eq!(
+            rx.accept(head_with(RealmId::Planet(42), 0, 2, artifact.digest())),
+            ArtifactIngest::Shape
+        );
+        assert_eq!(
+            rx.accept(head_with(RealmId::Planet(42), 68, 12, artifact.digest())),
+            ArtifactIngest::Shape
+        );
+        // A head whose levels the edge does not halve to: the level's part is refused by shape
+        // once whole (68 does not halve three times).
+        assert_eq!(
+            rx.accept(head_with(RealmId::Planet(43), 68, 3, artifact.digest())),
+            ArtifactIngest::Head
+        );
+        assert_eq!(
+            rx.accept(BulkMsg::ArtifactPyramid {
+                realm: RealmId::Planet(43),
+                level: 3,
+                part: 0,
+                parts: 1,
+                z_m: vec![0; 6 * 8 * 8],
+            }),
+            ArtifactIngest::Shape
+        );
+        rx.forget(RealmId::Planet(43));
         assert_eq!(rx.book().len(), 1);
         assert_eq!(rx.book().realms().count(), 1);
-        // The forget.
+        // The forget, with a part assembling: both go.
+        assert_eq!(
+            rx.accept(part_of(2, 0, 2, artifact.pyramid[1][..800].to_vec())),
+            ArtifactIngest::Part
+        );
         rx.forget(realm());
+        assert!(rx.assembling.is_empty());
         rx.forget(realm());
         assert!(rx.book().is_empty());
         assert_eq!(rx.book().get(realm()), None);

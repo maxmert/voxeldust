@@ -476,7 +476,8 @@ fn sea_table() {
             println!("{realm:?}\t{role}\tREFUSED BY THE LADDER");
             return;
         };
-        let stated = vd_bins::charter_with_sea(charter, Some(&body));
+        // The sea is the SOLVE's (slice 8c stage C5): this census states the water and whether it
+        // is liquid; the level is the artifact's, read by `just artifact-pin` and the shard's boot.
         let t_k = charter.t_surface_mk.map_or(0.0, |t| f64::from(t) / 1000.0);
         let p_pa = charter.p_surf_pa.map_or(0.0, f64::from);
         let boils = if p_pa > 0.0 {
@@ -485,23 +486,11 @@ fn sea_table() {
             0.0
         };
         let liquid = vd_physics::worldgen::water_is_liquid(t_k, p_pa);
-        let water_m3 = charter.water_km3.map_or(0.0, |km3| km3 as f64 * 1.0e9);
-        match vd_bins::sea::solve_sea_level(&body, water_m3) {
-            Some(level) => println!(
-                "{realm:?}\t{role}\t{}\t{t_k:.1}\t{p_pa:.0}\t{boils:.1}\t{liquid}\t{:?}\t{:.1}\t{:.4}\t{}\t{}",
-                charter.water_km3.unwrap_or(0),
-                stated.sea_offset_mm,
-                level.offset_m,
-                level.ocean_share,
-                level.rung,
-                level.samples,
-            ),
-            None => println!(
-                "{realm:?}\t{role}\t{}\t{t_k:.1}\t{p_pa:.0}\t{boils:.1}\t{liquid}\t{:?}\tNO WATER",
-                charter.water_km3.unwrap_or(0),
-                stated.sea_offset_mm,
-            ),
-        }
+        println!(
+            "{realm:?}\t{role}\t{}\t{t_k:.1}\t{p_pa:.0}\t{boils:.1}\t{liquid}\tradius {:.0} m (the sea's level is the solve's: artifact-pin)",
+            charter.water_km3.unwrap_or(0),
+            body.radius_m(),
+        );
     };
     let mut planets: Vec<(RealmId, f64)> = rows
         .iter()

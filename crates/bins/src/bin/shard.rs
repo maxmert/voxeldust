@@ -306,10 +306,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         _ => None,
     });
-    // ★ THE SEA (slice 8b stage 6; ruling T8): solved ONCE here over the body's own shape from the
-    // charter's water, stated as a whole number of millimetres; the recipe keeps its draw until 8c.
-    let own_charter =
-        own_charter.map(|charter| vd_bins::charter_with_sea(charter, own_body.as_ref()));
     // ★ A BODY WITH NO SOLID SURFACE STATES NO SURFACE (slice 8c stage C4, the owner's answer to
     // ask F): a giant's charter clears the solid-surface flag, so it gets no solve, no artifact and
     // no chunk — the client draws its look bag (its outline and its luma) until the cloud shell of
@@ -349,6 +345,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         }
     }
+    // ★ THE SEA (slice 8b stage 6, ruling T8; slice 8c stage C5): the artifact's own level, stated
+    // in the charter as whole millimetres and given to this realm's body; a realm still solving
+    // states no sea until the artifact lands (below), and its clients read the sea off the head.
+    let own_sea = artifact_boot
+        .as_ref()
+        .and_then(|b| b.artifact())
+        .and_then(|a| a.sea());
+    let own_charter = own_charter.map(|charter| vd_bins::charter_with_sea(charter, own_sea));
+    let mut own_body = own_body.map(|b| b.with_sea_m(own_sea));
     // This line used to print the SCALE this shard booted, and reading it across a live cluster is
     // how the two-worlds defect was caught: the orchestrator said one thing and its gateway another.
     // There is no scale to print now. The seed is, because one world generated from one seed is
@@ -723,7 +728,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     digest = ?boot.artifact().map(|a| a.digest()),
                     "the artifact landed and was written to this realm's store"
                 );
-                // ★ THE SHIP IS ARMED the tick the artifact lands (slice 8c stage C4c).
+                // ★ THE SHIP IS ARMED the tick the artifact lands (slice 8c stage C4c), and the
+                // realm's body and charter take the solved sea (C5): the charter is re-stated on
+                // the window from this tick on.
+                if let Some(artifact) = boot.artifact() {
+                    let sea = artifact.sea();
+                    own_body = own_body.map(|b| b.with_sea_m(sea));
+                    let mut config = node.world_mut().resource_mut::<vd_sim::stub::StubConfig>();
+                    config.charter = config
+                        .charter
+                        .map(|charter| vd_bins::charter_with_sea(charter, sea));
+                }
                 if let Some((artifact, body)) = boot.artifact().zip(own_body.as_ref())
                     && let Some(source) = vd_bins::artifact_source::artifact_source_of(
                         own_realm,
@@ -736,7 +751,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .world_mut()
                         .resource_mut::<vd_sim::stub::artifact_ship::ArtifactSource>() =
                         vd_sim::stub::artifact_ship::ArtifactSource(Some(source));
-                    tracing::info!("the artifact ship is armed from the solve");
+                    tracing::info!(
+                        sea_m = ?artifact.sea(),
+                        "the artifact ship is armed from the solve"
+                    );
                 }
             }
         }

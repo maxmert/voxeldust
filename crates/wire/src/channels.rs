@@ -424,6 +424,10 @@ pub enum BulkMsg {
         digest: [u64; 2],
         tiles_per_edge: u32,
         levels: u32,
+        /// ★ The sea's level (slice 8c stage C5), whole metres over the ladder radius, or
+        /// `i16::MIN` for a dry body: the client gives its body this sea with the head. Added
+        /// inside minor 32 before any peer shipped it.
+        sea_m: i16,
     },
     /// ★ ONE PART OF A PYRAMID LEVEL: level `level` (from 1), part `part` of `parts`, the heights in
     /// whole metres in the coarser lattice's node order — the globe from orbit. APPENDED
@@ -1358,6 +1362,7 @@ mod tests {
                     digest: [1, 2],
                     tiles_per_edge: 19,
                     levels: 6,
+                    sea_m: -1_250,
                 },
                 3,
             ),

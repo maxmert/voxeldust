@@ -329,6 +329,8 @@ pub const PROTO_MAJOR: u16 = 1;
 /// Control class with the sky's pacing; `ClientControlMsg::ArtifactHeld` (disc 8), the client's word
 /// that it holds a realm's head and pyramid at a digest. Every one is APPENDED, so the floor does not
 /// move. The parts ride Control until the diff lane (slice 10) builds the client's bulk receiver.
+/// `ArtifactHead` gained `sea_m` (slice 8c stage C5, the solved sea) INSIDE minor 32, before any
+/// peer shipped it: the head is one shape from the minor's first day out.
 pub const PROTO_MINOR: u16 = 32;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]

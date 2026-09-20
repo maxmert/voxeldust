@@ -356,7 +356,11 @@ impl BoxPlan {
         let column = &run.columns[b * edge + a];
         match layer.rule.raw() {
             LAYER_BELOW => below_cell_word(&self.charter),
-            LAYER_ABOVE => above_cell_word(&self.charter, layer.r_steps << LENGTH_BITS),
+            LAYER_ABOVE => above_cell_word(
+                &self.charter,
+                layer.r_steps << LENGTH_BITS,
+                self.charter.sea_radius,
+            ),
             _ => cell_word(
                 &self.charter,
                 &CellAt {
@@ -364,6 +368,8 @@ impl BoxPlan {
                     h: column.h,
                     biome: column.biome,
                     r_steps: layer.r_steps,
+                    // The card holds no artifact row: every column's water is the body's sea.
+                    water: self.charter.sea_radius,
                 },
                 cavern_at(column, layer, &run.nodes),
                 &self.tubes,
@@ -387,6 +393,8 @@ impl BoxPlan {
             cells,
             sites: self.sites.clone(),
             dirs: dirs.to_vec(),
+            // The card's columns read no artifact row: the body's sea stands over every one.
+            water: vec![self.charter.sea_radius; self.sites.len()],
         }
     }
 
