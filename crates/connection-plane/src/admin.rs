@@ -67,6 +67,13 @@ pub fn gateway_view(
         bulk_for_unrouted: _,
         artifact_parts_relayed: _,
         artifact_held_stated: _,
+        artifact_wants_sent,
+        artifact_wants_unresolved,
+        artifact_parts_cached,
+        artifact_parts_stray,
+        artifact_parts_served,
+        artifact_parts_skipped,
+        artifact_caches_evicted,
         window_sender_mismatch,
         window_misauthored_body,
         window_unknown_row,
@@ -190,6 +197,13 @@ pub fn gateway_view(
         window_origin_swap_forced,
         scene_levels_restated,
         window_trace_rows,
+        artifact_wants_sent,
+        artifact_wants_unresolved,
+        artifact_parts_cached,
+        artifact_parts_stray,
+        artifact_parts_served,
+        artifact_parts_skipped,
+        artifact_caches_evicted,
         sessions_closed_peer_lost,
         sessions_closed_peer_reincarnated,
         sessions_replaced_by_relogin,
@@ -391,6 +405,13 @@ mod tests {
             bulk_for_unrouted: 97,
             artifact_parts_relayed: 0,
             artifact_held_stated: 0,
+            artifact_wants_sent: 70,
+            artifact_wants_unresolved: 71,
+            artifact_parts_cached: 72,
+            artifact_parts_stray: 73,
+            artifact_parts_served: 74,
+            artifact_parts_skipped: 75,
+            artifact_caches_evicted: 76,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);
@@ -453,6 +474,13 @@ mod tests {
         assert_eq!(view.window_origin_swap_forced, 56);
         assert_eq!(view.scene_levels_restated, 57);
         assert_eq!(view.window_trace_rows, 59);
+        assert_eq!(view.artifact_wants_sent, 70);
+        assert_eq!(view.artifact_wants_unresolved, 71);
+        assert_eq!(view.artifact_parts_cached, 72);
+        assert_eq!(view.artifact_parts_stray, 73);
+        assert_eq!(view.artifact_parts_served, 74);
+        assert_eq!(view.artifact_parts_skipped, 75);
+        assert_eq!(view.artifact_caches_evicted, 76);
         assert_eq!(view.sessions_closed_peer_lost, 60);
         assert_eq!(view.sessions_closed_peer_reincarnated, 61);
         assert_eq!(view.sessions_replaced_by_relogin, 62);

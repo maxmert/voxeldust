@@ -253,6 +253,16 @@ pub struct GatewayView {
     pub scene_levels_restated: u64,
     /// Rows logged by the per-tick trace (2026-09-05).
     pub window_trace_rows: u64,
+    /// ★ THE FAR-VIEW SHIP's counters (2026-09-20, exported after the first flights hid them):
+    /// wants sent to shards, wants with no resolved head, parts cached from shards, stray parts
+    /// (no want), parts served to sessions, serves skipped (the session holds it), caches evicted.
+    pub artifact_wants_sent: u64,
+    pub artifact_wants_unresolved: u64,
+    pub artifact_parts_cached: u64,
+    pub artifact_parts_stray: u64,
+    pub artifact_parts_served: u64,
+    pub artifact_parts_skipped: u64,
+    pub artifact_caches_evicted: u64,
     /// Sessions closed because the client's connection died or a frame toward it was undeliverable
     /// (2026-09-05, the vanished-client wedge).
     pub sessions_closed_peer_lost: u64,
@@ -795,6 +805,13 @@ mod tests {
                 window_origin_swap_forced: 56,
                 scene_levels_restated: 57,
                 window_trace_rows: 59,
+                artifact_wants_sent: 70,
+                artifact_wants_unresolved: 71,
+                artifact_parts_cached: 72,
+                artifact_parts_stray: 73,
+                artifact_parts_served: 74,
+                artifact_parts_skipped: 75,
+                artifact_caches_evicted: 76,
                 sessions_closed_peer_lost: 60,
                 sessions_closed_peer_reincarnated: 61,
                 sessions_replaced_by_relogin: 62,

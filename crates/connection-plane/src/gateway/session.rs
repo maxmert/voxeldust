@@ -320,6 +320,16 @@ pub(crate) struct Session {
     /// come (the shard paces them once per session), and the window-holder path that would pace
     /// against this mark is owed with the far view.
     pub(crate) artifact_held: std::collections::BTreeMap<vd_core::pose::RealmId, [u64; 2]>,
+    /// ★ HOW FAR THROUGH EACH REALM'S ARTIFACT THIS SESSION HAS BEEN SERVED (the far-view ship):
+    /// zero is nothing, one is the head, one plus `k` is `k` pyramid parts — the sky's
+    /// `sky_parts_sent` per realm. Reset when the realm's artifact changes.
+    pub(crate) artifact_parts_sent: std::collections::BTreeMap<vd_core::pose::RealmId, u32>,
+    /// ★ THE TILES THIS SESSION WAS SERVED per realm (the one tile path, 2026-09-20): each tile
+    /// once, of those within the session's own reach of the realm; evicted with the realm.
+    pub(crate) artifact_tiles_sent: std::collections::BTreeMap<
+        vd_core::pose::RealmId,
+        std::collections::BTreeSet<(u8, u32, u32)>,
+    >,
     /// RLM 5f-3d — the STANDING home-realm identity of a dynamic session: set once at the committed lease
     /// and NEVER cleared, so it outlives the `AwaitingHomeRealm` phase payload. Two live readers: the
     /// bounded-TTL Close diagnostic (which can fire in `AwaitingAttach`, where the phase payload is gone —
@@ -515,6 +525,12 @@ pub struct GatewaySessions {
     /// or a live subscription, and the map is PRUNED each tick to the realms the Active
     /// sessions' lineages + subs actually name — zero sessions ⇒ empty (the teardown truth).
     pub(crate) realm_heads: BTreeMap<RealmId, NodeId>,
+    /// ★ THE ARTIFACTS HELD FOR THE REALMS THE SESSIONS DRAW (the far-view ship): one per realm,
+    /// opaque bytes cached from the realm's shard and served per session; forgotten when no
+    /// session draws the realm.
+    pub(crate) artifacts: BTreeMap<RealmId, super::artifact::GatewayArtifact>,
+    /// When each realm's artifact was last asked for, so a want goes out once a beat at most.
+    pub(crate) artifact_wants: BTreeMap<RealmId, vd_core::TickId>,
 }
 
 /// RLM 5f-3d — ONE realm's pre-Active home bootstrap: the state EVERY session booting into that realm

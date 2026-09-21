@@ -28,7 +28,7 @@ const HOME_GOLDEN_Z: &str = include_str!("../tests/golden_home_z.txt");
 /// ★ THE MEASURED HALF OF THE HOME WORLD'S IDENTITY (slice 8c stage C4c): the eight self-check
 /// chunks read through the golden fields, folded. Recorded with the fields; a host that folds another
 /// word has drifted, and its world hello is refused by name.
-pub const HOME_IDENTITY_MEASURED: u64 = 0x9d23_0f49_bf93_67e8;
+pub const HOME_IDENTITY_MEASURED: u64 = 0xd807_09fb_ff45_0e10;
 
 /// ★ THE HOME PLANET'S SEA (slice 8c stage C5; gate G-SEA): the level the solve finds for the
 /// planet's water inventory over its eroded field, whole metres over the ladder radius, and the

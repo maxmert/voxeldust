@@ -605,7 +605,7 @@ fn main() -> ExitCode {
             continue;
         }
         let mut view = LadderView::default();
-        let wanted = view.wanted(&body, [eye.x, eye.y, eye.z]);
+        let wanted = view.wanted(&body, [eye.x, eye.y, eye.z], None);
         let len = eye.length();
         let surface =
             vd_terrain::height::height_m(&body, [eye.x / len, eye.y / len, eye.z / len], 0);

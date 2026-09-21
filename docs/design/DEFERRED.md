@@ -8739,29 +8739,188 @@ item below is a stated interim of that core, named here so no picture is judged 
   binary, inline in tests): the sim never names the generator. The ECS holds no artifact yet; C4c's tile source
   is the injected provider the window lane reads.
 
-**C4c THE SHIP (built 2026-09-19; wire minor 32; the sim's emitter, the gateway's relay, the client's book):**
-- **THE SHIP REACHES OCCUPANTS ONLY.** The realm's shard ships the head, the pyramid's parts and the tiles under the
-  pose to each session whose dot it holds (`vd_sim::stub::artifact_ship`, `BulkAudience::Sessions`). A client that
-  sees the planet FROM ITS PARENT (a hull in the star system's frame, the far view) is a WINDOW HOLDER, and that
-  audience has no producer: the gateway counts it (`bulk_for_unrouted`) and the client draws that realm from the
-  recipe's own coarse relief (`field: None`) until it is inside. The step from the recipe's shape to the artifact's
-  as the pilot crosses INTO the planet's realm is a visible pop — a seam (SL8). WHEN: the window-holder ship —
-  the head and the pyramid to every session whose window shows the realm, paced against `Session::artifact_held`
-  (the field exists, nothing reads it yet) — before the first owner look at a planet from orbit.
-- **THE RECIPE-TO-ARTIFACT REBUILD AT LOGIN.** A client draws a realm the moment its surface statement arrives, before
-  the head; when the head lands, the chunk lane drops that realm's chunks and parents (`ChunkCounters::artifact_rebuilds`)
-  and rebuilds on the field. Once, at login, a visible change of shape. The cure is for the realm's surface
-  statement to say an artifact FOLLOWS, so the lane waits; that is a look-bag word (the realm's own statement, not
-  a crossing) and is owed with the window-holder ship.
-- **THE PARTS RIDE THE CONTROL CLASS** as `ServerControlMsg::ArtifactPart` with the sky's pacing (four tiles and eight
-  pyramid parts a tick a session): the client's bulk receiver on `MsgClass::Bulk` is slice 10's (the diff lane). The
-  head and the pyramid are shipped ONCE per session per realm by the shard's own record (`ArtifactShipped`); a session
-  that leaves and returns is served again. The client's `ArtifactHeld` statement is recorded on the gateway's session
-  and read by nothing yet.
-- **THE TILES REACH ONE FACE.** `ArtifactTiles::tiles_under` names the tiles within the interest side on the face
-  the occupant's direction falls on; a tile across a cube edge arrives when the occupant crosses onto that face. A
-  fine chunk at the seam whose stencil reads the partner face's tile WAITS for it (counted as `awaiting_artifact`)
-  while the coarser rung stands. WHEN: the seam ring, with the window-holder ship.
+**C4c THE SHIP (built 2026-09-19; wire minor 32; the sim's emitter, the gateway's relay, the client's book) and
+THE FAR-VIEW SHIP (built 2026-09-20, the owner: "the view doesn't depend on where the occupant is — the realm
+draws itself"):**
+- 🟩 **THE SHIP REACHES EVERYONE WHO DRAWS THE REALM (SL3).** The realm states its artifact's digest in its own
+  look bag (`TAG_ARTIFACT`, `StubConfig::artifact`), which reaches a gateway the way its surface does — through
+  the realm's own window or its parent's relay. On the keep-alive beat the gateway reads the artifacts every
+  session's picture names (`gateway/artifact.rs`), asks the realm's shard ONCE (`GatewayToShard::ArtifactWant`,
+  the head resolved by the same directory poll as a lineage ancestor's), CACHES the head and the pyramid the shard
+  answers with (`BulkFor { audience: Realm }`, one copy per realm, like the sky), SERVES them paced to every session
+  that draws the realm and has not stated `ArtifactHeld`, and forgets a realm nobody draws. The shard ships TILES
+  to occupants only (only an occupant wants fine rungs). The former occupants-only head/pyramid ship is deleted.
+- 🟩 **THE RECIPE IS NEVER DRAWN FOR A REALM THAT STATES AN ARTIFACT.** The client's lane holds each realm's stated
+  digest (`ChunkLane::expect_artifact`, off the realm box's `artifact`) and builds NOTHING for it until the head at
+  that digest is here — never the recipe's own relief — so there is no recipe-to-artifact rebuild at login and no
+  pop at a crossing; a realm that states no artifact (a hull, a station, a realm still solving) builds the recipe's
+  relief as before. A tile that arrives before its head (two lanes, two paces) is PARKED, bounded, and lands with it.
+- 🟩 **THE FIRST FLIGHT'S DEFECT (measured 2026-09-20, `dev-cluster up --demand` + the window): THE ONE-ROW
+  PYRAMID BROKE THE STORE'S FIELD CAP.** Every big planet's shard panicked on the tick its solve landed
+  (`a pyramid's bytes encode infallibly: FieldTooLarge { tag: 1 }` at the store write): the home planet's six
+  pyramid levels are 5.9 MB and a TLV field caps at one mebibyte; the moon's fit, so its shard lived. The demand
+  loop re-spawned each dead shard into another seventy-second solve and the same panic (four cores burning, no
+  far view ever arriving). CURE: the pyramid is stored as an INDEX row (the part size, every level's part count)
+  and one row per PART of `PYRAMID_PART_WORDS` heights — the wire's own cut, one constant in the sim, so a shard
+  ships what it stores; a part row of an earlier solve that the new one does not rewrite is dropped in the same
+  commit; a missing, misplaced or malformed part is refused by name. `ARTIFACT_VERSION` is 3 (the stored rows'
+  cut is part of what the version names), a version-2 store re-solves at boot, and the home digest is
+  re-recorded. Unit-tested: a 1.2 MB level cut into 37 rows round-trips; the stale rows go on the next write.
+  The rest of the first flight held: the login, the sky, the hull at the berth, the far planets' recipe chunks
+  (30 drawn at rung 20 from the spawn), and the moon's artifact landed in 98 ms and armed its ship.
+- 🟩 **THE SECOND FLIGHT'S DEFECTS (owner's pictures, 2026-09-20; measured with the instruments below):**
+  - **THE REALM THE OCCUPANT STANDS IN WAS NEVER ASKED FOR.** The gateway read "the realms a session draws"
+    off the composed rows, which hold a body row for every ancestor and a row for every child and NONE for
+    the origin (its row is synthesised for the client alone). So the far-view ship wanted every planet in
+    the sky except the one the pilot stood over, and the globe underfoot took its solved shape only when a
+    boarded hull made the planet an ancestor — the owner: *"land appeared only when I boarded"*. CURED:
+    `gateway/artifact.rs::drawn_realms` puts the session's origin first, then the rows (the want and the
+    serve both read it); unit test `the_realm_the_occupant_stands_in_has_its_artifact_wanted_and_served_too`.
+    MEASURED after: the home planet's head wanted, cached and served within a second of its landing, the
+    lane holding it at the stated digest (`artifact_expected == artifact_held`), the globe solved from the
+    spawn with nobody boarding (`runs/…/after_landing.png`).
+  - **THE FAR VIEW READ 262 KM NODES.** `PyramidField::level_for` took the COARSEST level with four nodes
+    across the chunk: rung 14 (16 km cells) read level 5, every rung read another level, so the coast
+    redrew itself at each rung swap (*"the land is changing when I'm moving"*) and the globe from orbit
+    was blobs under a sheet. CURED: the finest level whose node is at least the cell (rungs 10–14 read
+    level 1 alike). The top-rung identity keys (rung 18) now read level 5, so the golden fields hold the
+    level the top rung reads (the recorder picks it by the same rule), `GENERATOR_VERSION` 7,
+    `HOME_IDENTITY_MEASURED` re-recorded; the chunk golden tables (the recipe's relief) did not move.
+  - **THE INSTRUMENTS THAT WERE MISSING.** The client's dev stamp now carries the lane's refusals
+    (`no_body`, `outside`, `submitted`, `awaiting_artifact`, `artifact_rebuilds`) and the two artifact words
+    of the body under the eye (`artifact_expected`, `artifact_held`); `DevArtifacts::held` names the realms
+    the book holds; the gateway's artifact counters ride the admin view (`vd_wire::admin`), and its log
+    says the want, the cache and the first serve per realm; `scripts/client.sh --capture --pilot` renders
+    the capture from the pilot's eye (without it the capture frames the whole scene and draws no ground
+    under the pilot — the first capture flight measured a different picture than the window for that
+    reason, not a defect). Every one of these was needed to find the two defects above.
+- 🟩 **THE SEA IS ONE SURFACE UNDER EVERY CELL (2026-09-20, the owner: *"the form of the shores is changing
+  all the time"*, *"morphing for all objects at rung crossings"*).** The sheet was a quad per cell where a corner
+  column was wet, so its extent grew and shrank with the rung's cell and its edge stepped at every ring swap
+  while the land under it morphed. Now every cell of a body with a sea carries the sea's level at least
+  (`SampleBox::sea`, `position::water_sheet`): the sea is the same surface at every rung (a sphere's
+  tessellation moves a vertex by its sagitta, centimetres), and the shore is the land's own crossing of it,
+  continuous under the land's morph. A lake stands above the sea by its corners' own word. The cost is a
+  sheet under land cells too, two triangles a cell; the separate coarse sea sphere per realm (8o) is the
+  optimisation when it is measured to matter. UNMEASURED by eye until the owner flies it.
+- 🟩 **THE CAMERA'S UP IS THE SERVER'S (2026-09-20, the owner: *"axes on any move of the occupant are always
+  broken; W should move forward where I look, doesn't matter how axis is located in any realm"*).** The server
+  turns a body's look about the up it was born with — the delivered facing's own +Y, on a planet the radial
+  the stand states (ruling V11) — and pushes where the facing points; the hull's push already follows the
+  pilot's facing (`stick_from_input`). The CLIENT camera turned about the frame's +Y everywhere ("world-Y
+  now; planet-radial later"), so on any stand whose radial was not +Y the eye and the body turned about two
+  axes and W went where the body faced. CURED at the scene swap: the camera takes the delivered facing's +Y
+  as its up and the look's angle pair in that up's frame (the server's own decomposition). Two things that
+  were NOT defects but read as "W and S stopped working": (1) the leg script's gentle 50 m/s² hull at the
+  normal ladder's top (1e-5 of the rating) pushes 0.5 mm/s² — the owner's cluster berths the shipyard's
+  rating again; (2) an occupant's W walks at the geometric throttle's foot pace in the normal ladder (a
+  metre-and-a-half a second, invisible 20 km up) — `X` swaps to the fast ladder. Owed: a spawn whose nose
+  points straight down (a nadir stand) is a gimbal for the look's yaw; the owner's stand is level.
+- 🟩 **THE SPAN READS THE FIELD THE CHUNK IS BUILT ON (2026-09-20, the owner's coast flight: *"the water
+  shores' shapes are constantly changing while I'm flying"* — flown by the code the same afternoon, level at
+  12 km at up to 420 m/s, and the frames showed the sea in CHUNK-SHAPED squares with razor-straight edges
+  where the land is, different from frame to frame).** CAUSE, MEASURED (`crates/bins/examples/span_miss.rs`,
+  300 km around the coast stand): the client's ladder asked a column's chunk SLICES from the recipe's own
+  relief (`digest::surface_column` → `height::height`), while the chunk it then built stood on the artifact's
+  `Z` plus the fine octaves (stage C4). The two surfaces stand 2.1 km apart on average and 5.9 km at worst
+  against a column bound of 0.35–1.8 km, so at rung 4 the asked slices missed the ground somewhere in 87 % of
+  the columns and held NONE of it in 5 840 land columns (rung 5: 73 %, 1 031; rung 6: 51 %, 218; rung 7:
+  3.75 %; rung 8 and up: none, their slices are 16 km tall). An asked slice with no ground builds an EMPTY
+  chunk, which the instruments count as built and drawn, and the flat sea sheet (drawn per chunk at the sea
+  radius whatever the slice) shows through it: land drawn as sea, chunk by chunk, differently at each rung —
+  the "changing shores", the "squares everywhere", and part of "the sea appears when I board" (a swap
+  re-descends). CURE: `digest::surface_column_field` samples the SAME column read the builder runs
+  (`ColumnRead`, the artifact's `Z` at the site plus the rung's fine octaves and the bench), with the bound
+  widened by the field's own step between neighbouring samples; `vd_client::ladder_view::column_span` reads
+  it on the field the rung reads (`field_at_rung`), and while that field is not whole for the column (its
+  tiles not here) the span is PROVISIONAL — the finest whole pyramid level's, or the recipe's — so the
+  column stays wanted and the coarser rung stands (ruling F9), read again at every descent, and the renderer
+  re-runs the descent when the artifact's epoch changes while any span is provisional. MEASURED after: 0
+  field-span misses at every rung 4–11 over the same 300 km; the moon's own artifact holds every core column
+  of a chunk inside the field span at a rows rung and a level rung (unit test). One arithmetic for both
+  spans (`span_of`). The skyline's peak now reads the artifact too (a ridge the recipe put 2 km lower used
+  to be culled behind the horizon). Left as it was: the water sheet is still drawn for a chunk whatever its
+  slice, so an empty chunk still shows sea.
+  ★ **THE SECOND HALF, FOUND BY THE HOLE INSTRUMENT (the same evening).** The rebuilt client still
+  showed the same squares in the same places. The engine's frustum culling OFF (`VD_TERRAIN_NO_CULL=1`)
+  changed nothing; the bounded ask OFF changed nothing; the wanted set REPLAYED offline for the recorded
+  eye (`examples/wanted_probe.rs`) asked the right slices for every column and found 0 hole columns. The
+  lane's own stamp then named the cause (`hole_columns`, `empty_keys @L<level>`, `awaiting_keys` with
+  their missing tiles, `margin_missing`, `stale_builds`, `lattice_edge`): 1 849 resident hole columns at
+  rest, EVERY named one at the recipe's slice — the FIRST descents ran before the artifact's head arrived,
+  `column_span` returned the recipe's span as FINAL with no artifact, and a final span is never read again
+  while the column stays visited. CURED: with no artifact yet, a body that has a macro lattice (every
+  solved body) gets a PROVISIONAL recipe span, read again at every descent until the head lands. ALSO
+  CURED on the way: a job the workers were already running on the recipe when the head arrived landed
+  under the fresh request's pending entry (`built_on`, `stale_builds`: refused; one build wasted per
+  stale key, once per head). MEASURED on the pilot-eye coast leg (12 km, 0–420 m/s, 40 s, two flights of
+  one binary): **0 hole pixels inside the drawn ground from frame 15 to the end, against 42 000–76 000 a
+  frame before** (`probe_holes.py` on the probe frames); the frames show continuous coastlines and no
+  chunk edge. The hole instrument's own defect, MEASURED and cured before it was believed: a dropped
+  realm's empty chunks stayed in the empty set and read as 717 phantom holes (the empty set is cleared
+  with the realm and a hole needs a resident key). LESSON: a counter of chunks built cannot see a chunk
+  built empty, and a span kept as final is a decision the instrument must be able to see.
+- 🟥 **THE FAR RING'S TILES ARE NEVER SERVED.** The stamp names, at rest and for the whole leg, the same
+  rung-9 chunks at the edge of the ring (`NegY 9 115–125 131–132 8`, about 23) waiting for tile
+  `(3, 7, 7)`: the gateway's `tiles_within` picks tiles by their CENTRE within the reach, and a chunk
+  whose stencil reaches into a tile whose centre stands past the reach waits forever; they are past the
+  horizon (the revealed class) and the coarser rung stands, so nothing shows, but the ask never ends.
+  WHEN: with the tile path's next pass. WHERE: `terrain/src/artifact.rs::tiles_within` (a tile whose
+  NEAREST node is within the reach), and `tile_reach_m` against the ladder's asked outer edge (the switch
+  distance times the hysteresis and the slack), one number for the shard, the gateway and the ladder.
+- 🟥 **THE WATER SHEET COVERS EVERY PYRAMID COLUMN.** A column read through a pyramid level holds no water
+  word, so it takes the body's sea (`sample_row` → `None` → `body.sea_radius`), and the sheet stands at the
+  sea level over every cell of every far-view chunk; the land shows only where the level's mean height
+  stands above the sea. Right for the ocean, wrong for a lake basin above the sea (a sheet at the sea's
+  level under a highland lake) and for the cost (a sheet quad under every land cell). WHEN: C6, with the
+  pyramid carrying a per-node water word or a land share. WHERE: `terrain/src/chunk.rs` (the C5 column
+  water), `terrain/src/position.rs::water_sheet`.
+- 🟩 **THE LINES AT EVERY CHUNK EDGE** (the owner's pictures from 400 km; the pilot-eye captures at 410 km
+  and 20 km over land found by `land_stand`: a one-pixel line of sea colour on every chunk edge, wavy with
+  the ground, so a real gap of tens of metres and not a rounding crack). CAUSE: a chunk's HALO columns (the
+  ring one column past each edge, the extractor's neighbourhood) read the recipe's own relief and the
+  body's sea, while the core columns under an artifact read the field's `Z`, the row's water and the fine
+  octaves only — so every boundary quad sloped to a height and a water its neighbour did not share. CURED:
+  ONE column rule (`chunk::ColumnRead`) for the core and the halo; `box_setup` takes the field; the
+  neighbour-agreement test `two_neighbours_agree_on_their_shared_column_under_the_artifact` at a row rung
+  and a pyramid rung. The rung-0 identity chunks moved with their halo, so the golden fields are re-recorded
+  once more under `GENERATOR_VERSION` 7 (uncommitted, one bump for the day's two output changes). The
+  suspects that were not it: the one-sided edge normal (still one-sided, ledgered below), the skirt.
+- 🟥 **A RE-SPAWNED HULL ADDRESSES ITS PARENT BY THE DEAD NODE (measured 2026-09-20, 12:35–12:37).** The
+  capture client left, the whole tree went dormant (every shard "drained on shutdown signal" at 12:35:34),
+  and the owner's window a minute later re-spawned it (nodes 1013–1025). The new home planet (1016) read
+  its artifact from the store and demanded the hull; the new hull (1018) then addressed its parent as node
+  1003 — the FIRST planet's node — and the orchestrator answered `PEER LOCATE UNANSWERED: no launch record
+  names that node` for a minute: the hull's frames never reached the live planet, the planet's window never
+  listed the hull, and the owner saw no hull beside the spawn. UNMEASURED where 1018 read 1003 from (a stale
+  directory record inside its lease, or a node id kept in the hull's own store). WHEN: the realm lifecycle,
+  before the next dormant-then-return flight; WHERE: the hull's parent link at boot (`shard.rs`, the
+  exterior/adoption path), the directory's record at re-spawn. WORKAROUND: a fresh `dev-cluster` boot.
+- 🟥 **THE EDGE NORMAL IS ONE-SIDED**: `smooth_normals` averages a chunk's own triangles, so a boundary
+  vertex's shade comes from one side. Not visible in the 20 km capture after the halo cure at a high sun;
+  UNMEASURED at a low sun. WHEN: C6's dusk stand; the whole mesh (`extract_all_edges`) can give both sides.
+- UNMEASURED: the beat-paced serve (a megabyte a beat a session) against the first frame's want; the second
+  session's cache hit; the k3d door.
+- 🟩 **THE ONE TILE PATH (owner's ruling 2026-09-20: *"not ANY seams — only generic mechanisms … all is decided by
+  visibility radius of each shard + LOD"*; the view field approved: *"Ok, please proceed"*).** The far-view ship
+  obeyed the law for the head and the pyramid and forgot the tiles: the shard shipped them to its OWN occupants
+  only, so a pilot inside a hull got none and the same eye saw a different ground in the hull than on foot (the
+  owner: *"the sea was rendered only when I boarded"*, *"the form of the shores is changing all the time"*). NOW:
+  `GatewayToShard::ArtifactWant` carries an optional `ArtifactView` (the eye's direction and distance from the
+  realm's centre, in the realm's frame); the gateway states each session's view of every drawn realm whose head it
+  holds, read off the row it composes for that session (a pilot in a hull is placed by the hull — SL7), once a
+  beat; the shard answers the tiles its OWN reach rule names under that view (`tile_reach_m` + `tiles_within` in
+  the terrain crate), four a tick on the realm audience, each once per gateway; the gateway caches them with the
+  realm's head and serves each session those within ITS reach by the same two functions, each once, in the beat's
+  budget. The shard's own occupants keep the same rule through their own poses (the shard holds those lawfully) —
+  one rule, one cache, one serve, two eye sources, no pose crossing (SL2). MEASURED on the scripted hull leg
+  (`flight_hull_leg.sh`: board the berthed hull by a slow strafe, half stick on a 50 m/s² hull, 40 s): tiles held
+  by the pilot in the hull **9 → 37**, 0 missing under drawn ground and 0 revealed for the whole descent, 989
+  missing for one sample in the last second at 930 m/s into rung 1 (the builders' budget). A tile across a cube
+  edge still waits for the partner face's tile (the view's face only); WHEN: the seam ring.
+- **THE PARTS RIDE THE CONTROL CLASS** as `ServerControlMsg::ArtifactPart` with the sky's pacing: the client's bulk
+  receiver on `MsgClass::Bulk` is slice 10's (the diff lane). The client's `ArtifactHeld` statement is recorded on
+  the gateway's session and skips the head and pyramid serve.
 - **THE CARD TAKES NO ARTIFACT JOB** (`card_slot`): a chunk that reads a field is the CPU builders' alone, because the
   card holds no `Z` (C4a's row above). Under an artifact the card builds the far view's recipe chunks only — of
   realms that shipped nothing — so on the home planet it idles. WHEN: the recipe-gpu node buffer.
@@ -8769,7 +8928,7 @@ item below is a stated interim of that core, named here so no picture is judged 
   `crates/terrain/tests/golden_home_z.txt`: the home artifact's rows under the six rung-0 self-check keys and its
   coarsest pyramid level, which the two top-rung keys read the way the far view does). Both hosts fold the eight
   chunks through the artifact's read at boot with no artifact in hand; the measured half is pinned
-  (`home::HOME_IDENTITY_MEASURED`), `GENERATOR_VERSION` is 5, and the artifact pin proves the literals are the
+  (`home::HOME_IDENTITY_MEASURED`), `GENERATOR_VERSION` was 5 (7 since the far view's level pick, 2026-09-20: the golden fields hold the level the top-rung keys read, level 5), and the artifact pin proves the literals are the
   solve's own rows. Re-record with `just golden-z-record` after a deliberate change of the solve. The chunk golden
   tables did not move (they pin the recipe's own relief, `field: None`, which the artifact did not touch). The other
   targets' legs of G-DRIFT stay UNMEASURED until the legs script runs the artifact pin.
@@ -8777,11 +8936,33 @@ item below is a stated interim of that core, named here so no picture is judged 
   artifact with it; the head and the pyramid come again from its shard on return. The tile cache is NOT saved through
   the client's store (the design's §14 said it would be, like the star catalogue): a re-login re-ships the tiles
   under the boots, four a tick. WHEN: the client-side artifact store, with slice 10's bulk receiver.
-- **THE INTEREST SIDE IS THE TILE RADIUS, UNMEASURED against the finest ring's horizon**: a rung-9 chunk (16 km) at
-  the horizon from a low flight may read tiles the shard has not shipped; it waits and rung 10 (the pyramid)
-  stands. Measured on the first window flight; the flight's numbers go in the bench report's C4c row.
+- 🟩 **THE INTEREST SIDE WAS THE TILE RADIUS — MEASURED RED AND CURED (2026-09-20, the owner: *"land/water
+  appear and disappear while flying"*, *"the sea was rendered only when I boarded"*).** A standing dot's
+  interest side is 76 m, so the shard shipped ONE tile under it while the client asked the fine rungs out to
+  rung 9's 445 km switch: on a scripted 40 s descent from 20 km (`flight_leg.sh`, the pilot-eye capture, the
+  stamp every 3 s) the still stand read 730 chunks wanted under drawn ground and missing, 2.2 million
+  requests refused for a field not whole and climbing 19 000 a second, one tile, and 598 chunks revealed on
+  the way down. In a hull the interest side grows with the look and the speed, so the tiles came and the
+  fine chunks (the sea sheet with them) appeared — which is why the owner saw the sea on boarding. CURED:
+  ONE ring rule in `vd_terrain::artifact` (`switch_m`, `horizon_m`, the pixel from `vd_core` passed in; the
+  client's ladder delegates), `tile_reach_m` = the finest tile-reading rung's switch bounded by the eye's
+  horizon plus two nodes, and the source ships the tiles within the larger of the interest side and that
+  reach (`TileSource::tiles_under(dir, radial_m, interest_m)`). MEASURED after, the same leg: 0 missing under
+  drawn ground standing still, the refusals frozen at 59 792 (the far planets' fine rungs, out of reach by
+  design), nine tiles, 0 revealed on the descent; 201 missing for one sample in the last second of a 1 km/s
+  plunge into rung 1 — the builders' budget (ruling F9), not the tiles.
 
 **C5 THE SEA (built 2026-09-20; the design's §6, ruling T8's cure, ruling T9):**
+- 🟥 **THE SEA WORD SATURATES ON A WATER WORLD (measured on the second flight, 2026-09-20).** `Artifact::sea_m`
+  is an `i16` of whole metres (`metres_i16` clamps to ±32 767): the rocky water world of the home system
+  (24 Earth oceans, the bench's §7 row: sea **+84 km**) landed and armed its ship stating `sea_m=Some(32767)`,
+  and the ocean planet's +1 125 km would state the same word. A LYING number, not a stale one: the client's
+  water sheet and the coast bit on those two bodies stand 51 km and 1 092 km too low. The home planet (+4 455 m)
+  and every body under ±32 km are exact. CURE OWED with C6 THE LOOK before any picture of a water world: the sea
+  as an `i32` in the artifact, the store head, the wire head and the digest (one more `ARTIFACT_VERSION` bump,
+  taken together with C6's changes so the pins move once), or the sea in the charter's ladder units. WHERE:
+  `terrain/src/artifact.rs` (`sea_m`, `metres_i16`), `sim/stub/built_store.rs` (`SEA_M`),
+  `wire/src/channels.rs` (`ArtifactHead::sea_m`).
 - **THE SEA IS SOLVED, NEVER DRAWN.** The recipe's `sea_radius` draw is deleted (its salt `0x5e_ed_02` retired), and a
   seed-built body has NO sea: its biome datum is the ladder radius, its columns hold only air over rock. The solve
   RE-SOLVES the sea over the eroded field at its end (`land::sea_level_loaded`, the inventory under the level with

@@ -16,8 +16,7 @@
 
 use std::sync::Arc;
 
-use vd_seed::bend::{Face, face_of, unbend};
-use vd_seed::ladder::index_of;
+use vd_seed::bend::Face;
 use vd_sim::io::Bytes;
 use vd_sim::stub::artifact_ship::TileSource;
 use vd_terrain::artifact::{Artifact, TILE_EDGE};
@@ -26,8 +25,9 @@ use vd_wire::channels::BulkMsg;
 
 use crate::artifact_store::tile_bytes;
 
-/// A pyramid part's size in heights: 16 384 words is 32 KB, a tile's weight.
-pub const PYRAMID_PART_WORDS: usize = 16_384;
+/// A pyramid part's size in heights: the store's own cut (16 384 words, 32 KB, a tile's weight),
+/// so a shard ships what it stores.
+pub use vd_sim::stub::built_store::PYRAMID_PART_WORDS;
 
 /// The source over one realm's artifact.
 pub struct ArtifactTiles {
@@ -35,9 +35,66 @@ pub struct ArtifactTiles {
     pub world_tag: u64,
     pub artifact: Arc<Artifact>,
     pub lattice: MacroLattice,
+    /// The body's radius and its ladder's top rung, for the tile reach under an occupant's altitude.
+    body_radius_m: f64,
+    top_rung: u8,
+    /// ★ THE DIGEST TAKEN ONCE (the second flight, 2026-09-20): the emitter asks for it every
+    /// tick, and hashing the home planet's 85 MB of rows on every ask cost the shard 90 ms a tick
+    /// (the water world 47 ms, the moon 0.3 ms — the cost of the artifact's size, five times the
+    /// budget on every big planet from the tick its solve landed).
+    digest: [u64; 2],
+    /// ★ THE PYRAMID's PARTS ENCODED ONCE (the same flight): the artifact never changes under a
+    /// source, so its 181 parts (5.9 MB on the home planet) are the same bytes on every ask.
+    /// Filled on the first ask.
+    parts: std::sync::OnceLock<Vec<Bytes>>,
 }
 
 impl ArtifactTiles {
+    /// A source over `artifact`, the parts not yet encoded.
+    #[must_use]
+    pub fn new(
+        realm: vd_core::pose::RealmId,
+        world_tag: u64,
+        artifact: Arc<Artifact>,
+        lattice: MacroLattice,
+        body_radius_m: f64,
+        top_rung: u8,
+    ) -> ArtifactTiles {
+        let digest = artifact.digest();
+        ArtifactTiles {
+            realm,
+            world_tag,
+            artifact,
+            lattice,
+            body_radius_m,
+            top_rung,
+            digest,
+            parts: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The tiles whose nodes lie within `radius_m` of the unit direction `dir`, the nearest first:
+    /// the terrain crate's own geometry, the gateway's too.
+    fn tiles_within(&self, dir: [f64; 3], radius_m: f64) -> Vec<(u8, u32, u32)> {
+        vd_terrain::artifact::tiles_within(&self.lattice, dir, radius_m)
+    }
+
+    fn encode_parts(&self) -> Vec<Bytes> {
+        let mut out = Vec::new();
+        for (k, level) in self.artifact.pyramid.iter().enumerate().rev() {
+            let parts = level.len().div_ceil(PYRAMID_PART_WORDS).max(1) as u32;
+            for (part, words) in level.chunks(PYRAMID_PART_WORDS).enumerate() {
+                out.push(encode(&BulkMsg::ArtifactPyramid {
+                    realm: self.realm,
+                    level: k as u32 + 1,
+                    part: part as u32,
+                    parts,
+                    z_m: words.to_vec(),
+                }));
+            }
+        }
+        out
+    }
     /// The tile that holds macro cell `(i, j)` of a face.
     #[must_use]
     pub fn tile_of(i: u32, j: u32) -> (u32, u32) {
@@ -55,12 +112,14 @@ pub fn artifact_source_of(
     artifact: &Arc<Artifact>,
 ) -> Option<Box<dyn TileSource>> {
     let lattice = body.macro_lattice()?;
-    Some(Box::new(ArtifactTiles {
+    Some(Box::new(ArtifactTiles::new(
         realm,
         world_tag,
-        artifact: Arc::clone(artifact),
+        Arc::clone(artifact),
         lattice,
-    }))
+        body.radius_m(),
+        body.ladder().rungs - 1,
+    )))
 }
 
 fn encode(msg: &BulkMsg) -> Bytes {
@@ -68,13 +127,17 @@ fn encode(msg: &BulkMsg) -> Bytes {
 }
 
 impl TileSource for ArtifactTiles {
+    fn digest(&self) -> [u64; 2] {
+        self.digest
+    }
+
     fn head(&self) -> Bytes {
         encode(&BulkMsg::ArtifactHead {
             realm: self.realm,
             world_tag: self.world_tag,
             version: self.artifact.version,
             edge: self.artifact.edge,
-            digest: self.artifact.digest(),
+            digest: self.digest,
             tiles_per_edge: self.artifact.tiles_per_edge(),
             levels: self.artifact.pyramid.len() as u32,
             sea_m: self.artifact.sea_m,
@@ -82,55 +145,19 @@ impl TileSource for ArtifactTiles {
     }
 
     fn pyramid_parts(&self) -> Vec<Bytes> {
-        let mut out = Vec::new();
-        for (k, level) in self.artifact.pyramid.iter().enumerate().rev() {
-            let parts = level.len().div_ceil(PYRAMID_PART_WORDS).max(1) as u32;
-            for (part, words) in level.chunks(PYRAMID_PART_WORDS).enumerate() {
-                out.push(encode(&BulkMsg::ArtifactPyramid {
-                    realm: self.realm,
-                    level: k as u32 + 1,
-                    part: part as u32,
-                    parts,
-                    z_m: words.to_vec(),
-                }));
-            }
-        }
-        out
+        self.parts.get_or_init(|| self.encode_parts()).clone()
     }
 
-    fn tiles_under(&self, dir: [f64; 3], radius_m: f64) -> Vec<(u8, u32, u32)> {
-        let face = face_of(dir);
-        let basis = vd_seed::bend::BASIS[face.index() as usize];
-        let axis = |a: [i8; 3]| {
-            dir[0] * f64::from(a[0]) + dir[1] * f64::from(a[1]) + dir[2] * f64::from(a[2])
-        };
-        let n = axis(basis.n);
-        if n <= 0.0 {
-            return Vec::new();
-        }
-        let (a, b) = (unbend(axis(basis.u) / n), unbend(axis(basis.v) / n));
-        let edge = self.lattice.edge;
-        let (i, j) = (index_of(a, edge), index_of(b, edge));
-        let reach_nodes = (radius_m / self.lattice.node_m()).ceil().max(1.0) as i64;
-        let lo = |c: i32| (i64::from(c) - reach_nodes).max(0) as u32 / TILE_EDGE;
-        let hi =
-            |c: i32| ((i64::from(c) + reach_nodes).min(i64::from(edge) - 1)) as u32 / TILE_EDGE;
-        let mut out = Vec::new();
-        for ty in lo(j)..=hi(j) {
-            for tx in lo(i)..=hi(i) {
-                out.push((face.index(), tx, ty));
-            }
-        }
-        // The nearest first: by the square of the tile-centre distance to the occupant's cell.
-        let (ci, cj) = (i64::from(i), i64::from(j));
-        out.sort_by_key(|&(_, tx, ty)| {
-            let (mx, my) = (
-                i64::from(tx * TILE_EDGE + TILE_EDGE / 2),
-                i64::from(ty * TILE_EDGE + TILE_EDGE / 2),
-            );
-            (mx - ci) * (mx - ci) + (my - cj) * (my - cj)
-        });
-        out
+    fn tiles_under(&self, dir: [f64; 3], radial_m: f64, interest_m: f64) -> Vec<(u8, u32, u32)> {
+        let reach_m = vd_terrain::artifact::tile_reach_m(
+            &self.lattice,
+            self.artifact.pyramid.len() as u32,
+            self.top_rung,
+            self.body_radius_m,
+            radial_m,
+            vd_core::geometry::drawable_theta_min_rad(),
+        );
+        self.tiles_within(dir, interest_m.max(reach_m))
     }
 
     fn tile(&self, face: u8, tx: u32, ty: u32) -> Option<Bytes> {
@@ -169,12 +196,15 @@ mod tests {
             })
             .expect("the moon solves"),
         );
-        let source = ArtifactTiles {
-            realm: vd_core::pose::RealmId::Planet(moon.seed()),
-            world_tag: 5,
-            artifact: artifact.clone(),
-            lattice: moon.macro_lattice().expect("a lattice"),
-        };
+        let source = ArtifactTiles::new(
+            vd_core::pose::RealmId::Planet(moon.seed()),
+            5,
+            artifact.clone(),
+            moon.macro_lattice().expect("a lattice"),
+            moon.radius_m(),
+            moon.ladder().rungs - 1,
+        );
+        assert_eq!(source.digest(), artifact.digest());
         let head = postcard::from_bytes::<BulkMsg>(&source.head()).expect("decodes");
         assert_eq!(
             head,
@@ -190,46 +220,73 @@ mod tests {
             }
         );
         let parts = source.pyramid_parts();
+        // The parts are encoded once: a second ask hands back the same bytes.
+        assert!(
+            source
+                .pyramid_parts()
+                .iter()
+                .zip(&parts)
+                .all(|(a, b)| Arc::ptr_eq(a, b))
+        );
         // Level 2 (6 · 17² = 1 734 words) is one part; level 1 (6 · 34² = 6 936) is one part.
         assert_eq!(parts.len(), 2);
-        match postcard::from_bytes::<BulkMsg>(&parts[0]).expect("decodes") {
+        assert_eq!(
+            postcard::from_bytes::<BulkMsg>(&parts[0]).expect("decodes"),
             BulkMsg::ArtifactPyramid {
-                level,
-                part,
-                parts,
-                z_m,
-                ..
-            } => {
-                assert_eq!((level, part, parts), (2, 0, 1));
-                assert_eq!(z_m, artifact.pyramid[1]);
+                realm: vd_core::pose::RealmId::Planet(moon.seed()),
+                level: 2,
+                part: 0,
+                parts: 1,
+                z_m: artifact.pyramid[1].clone(),
             }
-            other => panic!("{other:?}"),
-        }
+        );
         // Under +Z at the face centre (node 34 of 68), 300 km is 37 nodes (8.15 km each): the
         // four tiles of face +Z, the nearest first; 100 km (13 nodes) stays inside tile 0.
-        assert_eq!(source.tiles_under([0.0, 0.0, 1.0], 100_000.0).len(), 1);
-        let under = source.tiles_under([0.0, 0.0, 1.0], 300_000.0);
+        assert_eq!(source.tiles_within([0.0, 0.0, 1.0], 100_000.0).len(), 1);
+        let under = source.tiles_within([0.0, 0.0, 1.0], 300_000.0);
         assert_eq!(under.len(), 4);
         assert!(under.iter().all(|&(f, _, _)| f == Face::PosZ.index()));
         assert_eq!(under[0], (Face::PosZ.index(), 0, 0));
         // A small radius near the corner of the face keeps one tile.
-        let corner = source.tiles_under([0.0, 0.0, 1.0], 10.0);
+        let corner = source.tiles_within([0.0, 0.0, 1.0], 10.0);
         assert_eq!(corner.len(), 1);
+        // ★ THE TILES REACH AS FAR AS THE FINE RUNGS READ (2026-09-20): an occupant 20 km up sees
+        // to a 121 km horizon, one tile; 200 km up the horizon is 426 km and the rung-9 ring's
+        // 445 km bounds nothing, so all four tiles of the face come, and the interest side wins
+        // when it is the larger.
+        let r = moon.radius_m();
+        assert_eq!(
+            source
+                .tiles_under([0.0, 0.0, 1.0], r + 20_000.0, 10.0)
+                .len(),
+            1
+        );
+        assert_eq!(
+            source
+                .tiles_under([0.0, 0.0, 1.0], r + 200_000.0, 10.0)
+                .len(),
+            4
+        );
+        assert_eq!(source.tiles_under([0.0, 0.0, 1.0], r, 300_000.0).len(), 4);
         // A direction under the face (the far side) names nothing on this face's basis... it names
         // the face it points at, never this one: −Z is its own face.
-        let far = source.tiles_under([0.0, 0.0, -1.0], 10.0);
+        let far = source.tiles_within([0.0, 0.0, -1.0], 10.0);
         assert_eq!(far[0].0, Face::NegZ.index());
+        // No direction at all stands under no tile.
+        assert!(source.tiles_under([0.0, 0.0, 0.0], r, 10.0).is_empty());
         let tile = source.tile(Face::PosZ.index(), 1, 1).expect("a tile");
-        match postcard::from_bytes::<BulkMsg>(&tile).expect("decodes") {
+        assert_eq!(
+            postcard::from_bytes::<BulkMsg>(&tile).expect("decodes"),
             BulkMsg::ArtifactTile {
-                face, tx, ty, rows, ..
-            } => {
-                assert_eq!((face, tx, ty), (Face::PosZ.index(), 1, 1));
-                assert_eq!(rows.len(), 4 * 4 * vd_terrain::artifact::ROW_BYTES);
+                realm: vd_core::pose::RealmId::Planet(moon.seed()),
+                face: Face::PosZ.index(),
+                tx: 1,
+                ty: 1,
+                rows: tile_bytes(&artifact.tile(Face::PosZ, 1, 1)),
             }
-            other => panic!("{other:?}"),
-        }
+        );
         assert_eq!(source.tile(Face::PosZ.index(), 2, 0), None);
+        assert_eq!(source.tile(Face::PosZ.index(), 0, 2), None);
         assert_eq!(source.tile(9, 0, 0), None);
         assert_eq!(ArtifactTiles::tile_of(130, 5), (2, 0));
         // The shard's helper: a source over the moon; none over a body with no macro lattice.
@@ -241,17 +298,10 @@ mod tests {
         )
         .expect("a source");
         assert_eq!(installed.head(), source.head());
-        let pebble = vd_terrain::BodyDefinition::from_seed(
-            moon.seed(),
-            1_000.0,
-            vd_terrain::BodyFacts::new(1, 1),
+        let pebble = moon.without_macro_lattice();
+        assert!(pebble.macro_lattice().is_none());
+        assert!(
+            artifact_source_of(vd_core::pose::RealmId::Planet(1), 5, &pebble, &artifact).is_none()
         );
-        if let Some(pebble) = pebble {
-            assert!(
-                pebble.macro_lattice().is_some()
-                    || artifact_source_of(vd_core::pose::RealmId::Planet(1), 5, &pebble, &artifact)
-                        .is_none()
-            );
-        }
     }
 }

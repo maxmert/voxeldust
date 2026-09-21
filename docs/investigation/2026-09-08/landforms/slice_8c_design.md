@@ -440,10 +440,17 @@ NOT queued (`awaiting_artifact`), asked again next frame while the coarser rung 
 parent meshes and the geomorph's fallback read the same field at the parent's rung
 (`height_field_m`). The card takes no job with an artifact (it holds no `Z`).
 
-What this cut does NOT do, ledgered in `DEFERRED.md` D-TERRAIN-7: the ship reaches OCCUPANTS only (the
-far view from a parent realm draws the recipe's relief until the pilot is inside — a pop at the
-crossing); the first head drops chunks built before it (a pop at login); the parts ride the Control class
+**THE FAR-VIEW SHIP (built 2026-09-20; the owner: the view depends on the rung, never on where the
+occupant is — SL3).** The realm states its artifact's digest in its own look bag (`TAG_ARTIFACT`); a
+gateway whose session draws the realm asks the realm's shard once (`ArtifactWant`), caches the head and
+the pyramid it answers with on the realm audience (`BulkFor { audience: Realm }`), and serves them paced
+to every session that draws the realm — in orbit, on the ground, passing by — until the session states
+`ArtifactHeld`. The shard ships tiles to occupants only. The client's lane builds nothing for a realm
+that states an artifact until the head at that digest is here, so no recipe shape is ever drawn for it:
+no pop at login, no pop at the crossing.
+
+What this cut does NOT do, ledgered in `DEFERRED.md` D-TERRAIN-7: the parts ride the Control class
 until slice 10's bulk receiver; the tiles reach one face; the tile cache is not saved on the client. The
 world identity's self-check reads the artifact through GOLDEN FIELDS in the build (the rows under the
 six rung-0 keys, the coarsest pyramid level for the two top-rung keys; `just golden-z-record`), pinned as
-`HOME_IDENTITY_MEASURED` under `GENERATOR_VERSION` 5.
+`HOME_IDENTITY_MEASURED` under `GENERATOR_VERSION` 6.

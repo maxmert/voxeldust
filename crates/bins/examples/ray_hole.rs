@@ -73,7 +73,7 @@ fn main() {
         (-ray.dot(radial)).asin().to_degrees()
     );
     let mut view = LadderView::default();
-    let wanted = view.wanted(&body, eye.to_array());
+    let wanted = view.wanted(&body, eye.to_array(), None);
     let wanted_columns: std::collections::BTreeSet<Column> =
         wanted.keys.iter().map(|k| Column::of(*k)).collect();
     // March the ray against the recipe at rungs 0, 5 and 6: where does it land?

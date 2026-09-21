@@ -46,6 +46,7 @@ use crate::carve::{
     tubes_near,
 };
 use crate::height::biome_of_code;
+use crate::macro_lattice::MacroLattice;
 use crate::strata::{Biome, Stratum};
 use crate::units::{LENGTH_BITS, STEPS_PER_M, greater, lesser};
 use vd_recipe::Gi;
@@ -223,47 +224,20 @@ pub fn column_field(
         0
     };
     let n_cells = body.ladder.cells_per_edge(rung) as i32;
+    let read = ColumnRead {
+        body,
+        field,
+        lattice: lattice.as_ref(),
+        charter: &charter,
+        first,
+        key,
+        n_cells,
+    };
     let mut b = 0;
     while b < CHUNK_EDGE {
         let mut a = 0;
         while a < CHUNK_EDGE {
-            let site = crate::lattice::site_of(body, key, a as i32, b as i32);
-            let (z, w, coast) = match (field, lattice) {
-                (Some(f), Some(l)) => {
-                    // A corner phantom names no cell: its `Z` is the key face's corner node,
-                    // which the read reaches by the cell the phantom would be on that face.
-                    let (zf, zi, zj) = if site.face == crate::lattice::CORNER_FACE {
-                        let gi = key.x * CHUNK_EDGE as i32 + a as i32;
-                        let gj = key.y * CHUNK_EDGE as i32 + b as i32;
-                        (face, gi.clamp(-1, n_cells), gj.clamp(-1, n_cells))
-                    } else {
-                        (Face::from_index(site.face).unwrap_or(face), site.i, site.j)
-                    };
-                    // ★ THE WATER AND THE COAST (C5): the nearest row's level as a radius (the
-                    // body's sea where the field holds no water word; ZERO — none — for a dry
-                    // row), and the row's coast bit.
-                    let (w, coast) = match crate::artifact::sample_row(&l, f, zf, rung, zi, zj) {
-                        Some((crate::artifact::DRY_M, facies)) => {
-                            (Gi::ZERO, facies & crate::solve::FACIES_COAST != 0)
-                        }
-                        Some((level, facies)) => (
-                            body.radius + (Gi::new(i64::from(level) * STEPS_PER_M) << LENGTH_BITS),
-                            facies & crate::solve::FACIES_COAST != 0,
-                        ),
-                        None => (body.sea_radius, false),
-                    };
-                    (
-                        crate::artifact::sample_z(&l, f, zf, rung, zi, zj)?,
-                        w,
-                        coast,
-                    )
-                }
-                _ => (Gi::ZERO, body.sea_radius, false),
-            };
-            let surface =
-                column_surface_from(&charter, i32::from(site.face), site.i, site.j, z, first);
-            let (dir, h) = (surface.dir, surface.h);
-            let biome = biome_of_code(surface.biome);
+            let (dir, h, biome, w, site) = read.column(a as i32, b as i32)?;
             if (a == 0) & (b == 0) {
                 lowest = h;
                 highest = h;
@@ -271,14 +245,6 @@ pub fn column_field(
                 lowest = lesser(lowest, h);
                 highest = greater(highest, h);
             }
-            // ★ THE COAST MARKED (C5): a column in the coast band that stands above its water is
-            // a beach — sand over sandstone, the desert's own strata — and the water below it is
-            // where the sheet meets the ground.
-            let biome = if coast & (h >= w) {
-                Biome::Desert
-            } else {
-                biome
-            };
             columns.push((dir, h, biome));
             water.push(w);
             sites.push(site);
@@ -297,6 +263,86 @@ pub fn column_field(
         lowest,
         highest,
     })
+}
+
+/// ★ ONE COLUMN RULE FOR THE CORE AND THE HALO (2026-09-20): what a column's site reads under a
+/// field — its `Z` from the field's stencil, its water and coast from the nearest row, the fine
+/// octaves over it — and, with no field, the recipe's own relief. The halo columns used to read
+/// the recipe's relief while the core read the artifact, so every chunk's boundary quad sloped to
+/// a height its neighbour did not share: a grid of cracks, one per chunk edge, that the owner
+/// photographed from 400 km and the pilot-eye capture measured as a one-pixel line of sea colour
+/// on every edge at 20 km. A column past a face's edge (the halo across a seam, a corner phantom)
+/// reads by the same rule as the core's seam columns.
+pub(crate) struct ColumnRead<'a> {
+    pub body: &'a BodyDefinition,
+    pub field: Option<&'a dyn crate::artifact::ZField>,
+    /// The macro lattice of the field's level, when a field is read.
+    pub lattice: Option<&'a MacroLattice>,
+    pub charter: &'a PlanCharter,
+    /// The first fine octave summed over a field (zero without one).
+    pub first: usize,
+    pub key: ChunkKey,
+    pub n_cells: i32,
+}
+
+impl ColumnRead<'_> {
+    /// The column at `(a, b)` of the key's chunk, the halo's `−1` and `CHUNK_EDGE` included: its
+    /// direction, surface height, biome, water radius and site. `None` when the field does not
+    /// hold the column's stencil (the chunk is not built; the coarser rung stands, ruling F9).
+    pub fn column(&self, a: i32, b: i32) -> Option<([Gi; 3], Gi, Biome, Gi, crate::lattice::Site)> {
+        let body = self.body;
+        let key = self.key;
+        let rung = key.rung;
+        let face = key.face;
+        let site = crate::lattice::site_of(body, key, a, b);
+        let (z, w, coast) = match (self.field, self.lattice) {
+            (Some(f), Some(l)) => {
+                // A corner phantom names no cell: its `Z` is the key face's corner node,
+                // which the read reaches by the cell the phantom would be on that face.
+                let (zf, zi, zj) = if site.face == crate::lattice::CORNER_FACE {
+                    let gi = key.x * CHUNK_EDGE as i32 + a;
+                    let gj = key.y * CHUNK_EDGE as i32 + b;
+                    (face, gi.clamp(-1, self.n_cells), gj.clamp(-1, self.n_cells))
+                } else {
+                    (Face::from_index(site.face).unwrap_or(face), site.i, site.j)
+                };
+                // ★ THE WATER AND THE COAST (C5): the nearest row's level as a radius (the
+                // body's sea where the field holds no water word; ZERO — none — for a dry
+                // row), and the row's coast bit.
+                let (w, coast) = match crate::artifact::sample_row(l, f, zf, rung, zi, zj) {
+                    Some((crate::artifact::DRY_M, facies)) => {
+                        (Gi::ZERO, facies & crate::solve::FACIES_COAST != 0)
+                    }
+                    Some((level, facies)) => (
+                        body.radius + (Gi::new(i64::from(level) * STEPS_PER_M) << LENGTH_BITS),
+                        facies & crate::solve::FACIES_COAST != 0,
+                    ),
+                    None => (body.sea_radius, false),
+                };
+                (crate::artifact::sample_z(l, f, zf, rung, zi, zj)?, w, coast)
+            }
+            _ => (Gi::ZERO, body.sea_radius, false),
+        };
+        let surface = column_surface_from(
+            self.charter,
+            i32::from(site.face),
+            site.i,
+            site.j,
+            z,
+            self.first,
+        );
+        let (dir, h) = (surface.dir, surface.h);
+        let biome = biome_of_code(surface.biome);
+        // ★ THE COAST MARKED (C5): a column in the coast band that stands above its water is
+        // a beach — sand over sandstone, the desert's own strata — and the water below it is
+        // where the sheet meets the ground.
+        let biome = if coast & (h >= w) {
+            Biome::Desert
+        } else {
+            biome
+        };
+        Some((dir, h, biome, w, site))
+    }
 }
 
 /// ★ THE CHARTER OF THIS BODY AT THIS RUNG — every number the recipe's cell kernel reads that is
@@ -1200,19 +1246,24 @@ mod tests {
         assert!(wet.water.iter().all(|&w| w == level));
         // The columns stand at the field's zero plus the fine octaves: under 200 m, so the coast
         // bit marks no beach where the water covers the ground, and sand where it stands above.
-        let beaches = wet
-            .columns
-            .iter()
-            .zip(&wet.water)
-            .filter(|(c, w)| c.1 >= **w && c.2 == Biome::Desert)
-            .count();
-        let drowned = wet
-            .columns
-            .iter()
-            .zip(&wet.water)
-            .filter(|(c, w)| c.1 < **w)
-            .count();
-        assert_eq!(beaches + drowned, CHUNK_EDGE * CHUNK_EDGE);
+        // ONE count for every field below: a column is a beach when it stands at or over its own
+        // water AND the coast bit gave it sand. The count runs over a water that stands under the
+        // ground and over a water that covers it, so both answers of the first half are read.
+        let beaches = |f: &ColumnField| {
+            f.columns
+                .iter()
+                .zip(&f.water)
+                .filter(|(c, w)| c.1 >= **w && c.2 == Biome::Desert)
+                .count()
+        };
+        let drowned = |f: &ColumnField| {
+            f.columns
+                .iter()
+                .zip(&f.water)
+                .filter(|(c, w)| c.1 < **w)
+                .count()
+        };
+        assert_eq!(beaches(&wet) + drowned(&wet), CHUNK_EDGE * CHUNK_EDGE);
         let arid = column_field(&moon, Some(&dry), Face::PosZ, 0, 4_000, 4_000).expect("columns");
         assert!(arid.water.iter().all(|&w| w == Gi::ZERO));
         // The coast bit over a water that stands UNDER every column: every column is a beach.
@@ -1225,6 +1276,19 @@ mod tests {
         let beach =
             column_field(&moon, Some(&shore), Face::PosZ, 0, 4_000, 4_000).expect("columns");
         assert!(beach.columns.iter().all(|(_, _, b)| *b == Biome::Desert));
+        assert_eq!(beaches(&beach), CHUNK_EDGE * CHUNK_EDGE);
+        assert_eq!(drowned(&beach), 0);
+        // The coast bit over a water that stands 30 km OVER every column: the ground is under the
+        // water everywhere, so no column is a beach.
+        let mut flood = SparseRows::default();
+        for node in nodes_of_chunk(&lattice, key(4_000)) {
+            flood
+                .0
+                .insert(node, (0, 30_000, crate::solve::FACIES_COAST));
+        }
+        let deep = column_field(&moon, Some(&flood), Face::PosZ, 0, 4_000, 4_000).expect("columns");
+        assert_eq!(drowned(&deep), CHUNK_EDGE * CHUNK_EDGE);
+        assert_eq!(beaches(&deep), 0);
         // A column field of the wrong width makes no chunk.
         let torn_field = ColumnField {
             columns: Vec::new(),
@@ -1277,10 +1341,12 @@ mod tests {
             bx.water[crate::lattice::SampleBox::column_index(5, 5)],
             level
         );
-        // The halo past the core reads the body's sea.
+        // The halo past the core reads the rows too (2026-09-20: one column rule for the core and
+        // the halo — a halo that read the body's sea while the core read the rows cracked the
+        // sheet's edge cells as it cracked the ground).
         assert_eq!(
             bx.water[crate::lattice::SampleBox::column_index(-1, 5)],
-            moon.sea_radius
+            level
         );
     }
 
@@ -1338,6 +1404,55 @@ mod tests {
     /// The refuter's finding 2: the cavern field is one global field. Two neighbouring chunks sample
     /// the same global nodes, so a cell reads the same value whichever chunk holds it, and the
     /// interpolation is exact on every node.
+    /// ★ TWO NEIGHBOURS AGREE ON THEIR SHARED COLUMN UNDER THE ARTIFACT (2026-09-20): the left
+    /// chunk's halo column past its edge is the right chunk's own first column — the same height,
+    /// the same water, the same biome — at a fine rung (the rows) and a coarse one (a pyramid
+    /// level). Before this the halo read the recipe's relief while the core read the artifact,
+    /// and every chunk edge was a crack the pilot-eye capture measured from 20 km.
+    #[test]
+    fn two_neighbours_agree_on_their_shared_column_under_the_artifact() {
+        use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
+        use crate::lattice::{HALO, SampleBox, box_setup};
+        use crate::solve::{Schedule, solve_full};
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let artifact =
+            crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        let level1 = crate::artifact::PyramidField::of(&artifact, 1).expect("level 1");
+        let edge = CHUNK_EDGE as i32;
+        for (rung, field, x, y) in [
+            (3u8, &artifact as &dyn crate::artifact::ZField, 40i32, 41i32),
+            (11u8, &level1 as &dyn crate::artifact::ZField, 1, 1),
+        ] {
+            let key = |x: i32| ChunkKey {
+                face: Face::PosZ,
+                rung,
+                x,
+                y,
+                z: 0,
+            };
+            let left_columns =
+                column_field(&moon, Some(field), Face::PosZ, rung, x, y).expect("columns");
+            let right_columns =
+                column_field(&moon, Some(field), Face::PosZ, rung, x + 1, y).expect("columns");
+            let left = box_setup(&moon, Some(field), key(x), &left_columns).expect("a box");
+            let right = box_setup(&moon, Some(field), key(x + 1), &right_columns).expect("a box");
+            let mut b = -HALO;
+            while b <= edge {
+                let l = SampleBox::column_index(edge, b);
+                let r = SampleBox::column_index(0, b);
+                assert_eq!(left.surfaces[l], right.surfaces[r], "rung {rung} b {b}");
+                assert_eq!(left.water[l], right.water[r], "rung {rung} b {b}");
+                assert_eq!(left.dirs[l], right.dirs[r], "rung {rung} b {b}");
+                b += 1;
+            }
+        }
+    }
+
     #[test]
     fn the_cavern_lattice_is_continuous_across_a_chunk_edge() {
         let blank = |node0: [i32; 3]| NodeLattice {

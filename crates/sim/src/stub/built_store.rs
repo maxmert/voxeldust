@@ -37,14 +37,28 @@ const BERTH_SCHEMA: SchemaId = SchemaId(31);
 /// themselves land with slice 9 (the store), which is the first writer.
 pub const CHUNK_DELTA_SCHEMA: SchemaId = SchemaId(32);
 pub const CHUNK_PYRAMID_SCHEMA: SchemaId = SchemaId(33);
-/// ★ THE ARTIFACT's THREE ROW FAMILIES (the landform arc, slice 8c stage C4; the owner's ruling of
+/// ★ THE ARTIFACT's ROW FAMILIES (the landform arc, slice 8c stage C4; the owner's ruling of
 /// 2026-09-19: the solve runs once on the server and the artifact is saved in the shard's db): one
-/// HEAD row (the version, the lattice edge, the digest), one row per TILE of node rows, and one
-/// PYRAMID row. The sim never names the generator: a tile is bytes it stores and ships, and the
-/// composition root, which links the generator, is the one reader that decodes them.
+/// HEAD row (the version, the lattice edge, the digest), one row per TILE of node rows, one
+/// PYRAMID INDEX row (the part size and every level's part count) and one row per PYRAMID PART.
+/// The sim never names the generator: a tile is bytes it stores and ships, and the composition
+/// root, which links the generator, is the one reader that decodes them.
+///
+/// MEASURED in the first flight of the far-view ship (2026-09-20): the home planet's pyramid is
+/// 5.9 MB and a TLV field caps at one mebibyte, so artifact version 2's ONE pyramid row panicked
+/// every big planet's shard on the tick its solve landed (the moon's row fit, so its shard lived),
+/// and the demand loop re-spawned each shard into another seventy-second solve and the same
+/// panic. Schema 36 (the whole pyramid in one row) is RETIRED with version 2 and never reused.
 pub const ARTIFACT_HEAD_SCHEMA: SchemaId = SchemaId(34);
 pub const ARTIFACT_TILE_SCHEMA: SchemaId = SchemaId(35);
-pub const ARTIFACT_PYRAMID_SCHEMA: SchemaId = SchemaId(36);
+pub const ARTIFACT_PYRAMID_INDEX_SCHEMA: SchemaId = SchemaId(37);
+pub const ARTIFACT_PYRAMID_PART_SCHEMA: SchemaId = SchemaId(38);
+
+/// ★ A PYRAMID PART's size in heights: 16 384 words is 32 KB, a tile's weight. The store's part
+/// row and the wire's part are the SAME cut, so a shard ships what it stores, and both stay far
+/// under the TLV field cap the one-row pyramid broke.
+pub const PYRAMID_PART_WORDS: usize = 16_384;
+const _: () = assert!(PYRAMID_PART_WORDS * 2 < vd_core::tlv::MAX_FIELD_BYTES);
 
 /// ★ WHY THESE ROWS ARE FRAMED AND THE MOVEMENT LANE IS NOT.
 ///
@@ -100,10 +114,12 @@ const BODY: u8 = 2;
 /// refusal land with slice 9; the key is fixed here so it can never collide with a family added later.
 const OWNER_FENCE: u8 = 3;
 
-/// ★ THE ARTIFACT's families (slice 8c stage C4): the head, the tiles, the pyramid.
+/// ★ THE ARTIFACT's families (slice 8c stage C4): the head, the tiles, the pyramid's index and
+/// its parts.
 const ARTIFACT_HEAD: u8 = 4;
 const ARTIFACT_TILE: u8 = 5;
 const ARTIFACT_PYRAMID: u8 = 6;
+const ARTIFACT_PYRAMID_PART: u8 = 7;
 
 /// The artifact rows' tags — their own numbering, one schema each, append-only.
 mod art {
@@ -118,7 +134,13 @@ mod art {
     pub const TX: u16 = 2;
     pub const TY: u16 = 3;
     pub const BYTES: u16 = 4;
-    pub const LEVELS: u16 = 1;
+    /// The pyramid index's fields.
+    pub const PART_WORDS: u16 = 1;
+    pub const PARTS_PER_LEVEL: u16 = 2;
+    /// A pyramid part's fields.
+    pub const LEVEL: u16 = 1;
+    pub const PART: u16 = 2;
+    pub const PART_BYTES: u16 = 3;
 }
 
 /// The key of the owner-fence row (one per realm store).
@@ -178,6 +200,25 @@ pub struct ArtifactTile {
     pub bytes: Vec<u8>,
 }
 
+/// ★ The pyramid's index: how its levels were cut into part rows.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactPyramidIndex {
+    /// The heights per part the writer cut with.
+    pub part_words: u32,
+    /// The part rows of each level, the finest level first, as the artifact holds them.
+    pub parts_per_level: Vec<u32>,
+}
+
+/// One part of one pyramid level: its place and its heights' bytes, opaque to the sim.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactPyramidPart {
+    /// The level, from 1 (the finest), as the wire numbers it.
+    pub level: u32,
+    pub part: u32,
+    /// The heights, two little-endian bytes each.
+    pub bytes: Vec<u8>,
+}
+
 /// The key of the artifact's head: the family tag alone.
 #[must_use]
 pub fn artifact_head_key() -> Vec<u8> {
@@ -200,10 +241,26 @@ pub fn artifact_tile_prefix() -> Vec<u8> {
     vec![ARTIFACT_TILE]
 }
 
-/// The key of the pyramid: the family tag alone.
+/// The key of the pyramid's index: the family tag alone.
 #[must_use]
 pub fn artifact_pyramid_key() -> Vec<u8> {
     vec![ARTIFACT_PYRAMID]
+}
+
+/// The key of one pyramid part: the family tag, the level, then the part, big-endian so a prefix
+/// scan walks a level in order.
+#[must_use]
+pub fn artifact_pyramid_part_key(level: u32, part: u32) -> Vec<u8> {
+    let mut k = vec![ARTIFACT_PYRAMID_PART];
+    k.extend(level.to_be_bytes());
+    k.extend(part.to_be_bytes());
+    k
+}
+
+/// The prefix that reads every pyramid part in one scan.
+#[must_use]
+pub fn artifact_pyramid_part_prefix() -> Vec<u8> {
+    vec![ARTIFACT_PYRAMID_PART]
 }
 
 /// The head, framed.
@@ -232,12 +289,25 @@ pub fn encode_artifact_tile(tile: &ArtifactTile) -> Vec<u8> {
         .finish()
 }
 
-/// The pyramid, framed: every level's heights as little-endian words, one blob per level.
+/// The pyramid's index, framed.
 #[must_use]
-pub fn encode_artifact_pyramid(levels: &[Vec<u8>]) -> Vec<u8> {
-    TlvWriter::new(ARTIFACT_PYRAMID_SCHEMA)
-        .required(art::LEVELS, &levels)
-        .expect("a pyramid's bytes encode infallibly")
+pub fn encode_artifact_pyramid_index(index: &ArtifactPyramidIndex) -> Vec<u8> {
+    TlvWriter::new(ARTIFACT_PYRAMID_INDEX_SCHEMA)
+        .required(art::PART_WORDS, &index.part_words)
+        .and_then(|w| w.required(art::PARTS_PER_LEVEL, &index.parts_per_level))
+        .expect("an index's fields are small and encode infallibly")
+        .finish()
+}
+
+/// One pyramid part, framed. The writer cuts a part at [`PYRAMID_PART_WORDS`], under the field
+/// cap by construction.
+#[must_use]
+pub fn encode_artifact_pyramid_part(part: &ArtifactPyramidPart) -> Vec<u8> {
+    TlvWriter::new(ARTIFACT_PYRAMID_PART_SCHEMA)
+        .required(art::LEVEL, &part.level)
+        .and_then(|w| w.required(art::PART, &part.part))
+        .and_then(|w| w.required(art::PART_BYTES, &part.bytes))
+        .expect("a part is cut under the field cap and encodes infallibly")
         .finish()
 }
 
@@ -273,14 +343,31 @@ pub fn decode_artifact_tile(bytes: &[u8]) -> Result<ArtifactTile, String> {
     })
 }
 
-/// A pyramid read back, or a named refusal.
+/// A pyramid index read back, or a named refusal.
 ///
 /// # Errors
-/// The bytes are not a pyramid this build can read.
-pub fn decode_artifact_pyramid(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    let r = TlvReader::parse(ARTIFACT_PYRAMID_SCHEMA, bytes)
-        .map_err(|e| format!("a stored artifact pyramid does not decode: {e}"))?;
-    field(&r, art::LEVELS, "levels")
+/// The bytes are not a pyramid index this build can read.
+pub fn decode_artifact_pyramid_index(bytes: &[u8]) -> Result<ArtifactPyramidIndex, String> {
+    let r = TlvReader::parse(ARTIFACT_PYRAMID_INDEX_SCHEMA, bytes)
+        .map_err(|e| format!("a stored artifact pyramid index does not decode: {e}"))?;
+    Ok(ArtifactPyramidIndex {
+        part_words: field(&r, art::PART_WORDS, "part words")?,
+        parts_per_level: field(&r, art::PARTS_PER_LEVEL, "parts per level")?,
+    })
+}
+
+/// A pyramid part read back, or a named refusal.
+///
+/// # Errors
+/// The bytes are not a pyramid part this build can read.
+pub fn decode_artifact_pyramid_part(bytes: &[u8]) -> Result<ArtifactPyramidPart, String> {
+    let r = TlvReader::parse(ARTIFACT_PYRAMID_PART_SCHEMA, bytes)
+        .map_err(|e| format!("a stored artifact pyramid part does not decode: {e}"))?;
+    Ok(ArtifactPyramidPart {
+        level: field(&r, art::LEVEL, "level")?,
+        part: field(&r, art::PART, "part")?,
+        bytes: field(&r, art::PART_BYTES, "part bytes")?,
+    })
 }
 
 /// The key for one built child's berth: the family tag, then the child's name.
@@ -386,9 +473,12 @@ pub fn decode_body(bytes: &[u8]) -> Result<BuiltBody, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactHead, ArtifactTile, artifact_head_key, artifact_pyramid_key, artifact_tile_key,
-        artifact_tile_prefix, decode_artifact_head, decode_artifact_pyramid, decode_artifact_tile,
-        encode_artifact_head, encode_artifact_pyramid, encode_artifact_tile,
+        ArtifactHead, ArtifactPyramidIndex, ArtifactPyramidPart, ArtifactTile, PYRAMID_PART_WORDS,
+        artifact_head_key, artifact_pyramid_key, artifact_pyramid_part_key,
+        artifact_pyramid_part_prefix, artifact_tile_key, artifact_tile_prefix,
+        decode_artifact_head, decode_artifact_pyramid_index, decode_artifact_pyramid_part,
+        decode_artifact_tile, encode_artifact_head, encode_artifact_pyramid_index,
+        encode_artifact_pyramid_part, encode_artifact_tile,
     };
     use super::{
         BERTH_SCHEMA, BODY_SCHEMA, BlockStoreTuning, CHUNK_DELTA_SCHEMA, CHUNK_PYRAMID_SCHEMA,
@@ -404,9 +494,11 @@ mod tests {
     use vd_core::ids::{AccountId, EntityId};
     use vd_core::pose::RealmId;
 
-    /// ★ THE ARTIFACT's ROWS (slice 8c stage C4): the head, a tile and a pyramid round-trip through
-    /// their frames; the keys order a face's tiles by column then row; a row that does not decode is
-    /// refused by name, never defaulted.
+    /// ★ THE ARTIFACT's ROWS (slice 8c stage C4; the pyramid's part rows since the far-view ship's
+    /// first flight, 2026-09-20): the head, a tile, the pyramid's index and a part round-trip
+    /// through their frames; the keys order a face's tiles by column then row and a level's parts
+    /// in order; a part cut at the store's size stays under the TLV field cap; a row that does not
+    /// decode is refused by name, never defaulted.
     #[test]
     fn artifact_rows_round_trip_and_refuse_garbage() {
         let head = ArtifactHead {
@@ -431,14 +523,32 @@ mod tests {
             decode_artifact_tile(&encode_artifact_tile(&tile)),
             Ok(tile.clone())
         );
-        let levels = vec![vec![1u8, 0, 2, 0], vec![3, 0]];
+        let index = ArtifactPyramidIndex {
+            part_words: PYRAMID_PART_WORDS as u32,
+            parts_per_level: vec![37, 10, 3],
+        };
         assert_eq!(
-            decode_artifact_pyramid(&encode_artifact_pyramid(&levels)),
-            Ok(levels)
+            decode_artifact_pyramid_index(&encode_artifact_pyramid_index(&index)),
+            Ok(index.clone())
         );
+        let part = ArtifactPyramidPart {
+            level: 1,
+            part: 36,
+            bytes: vec![0xAB; PYRAMID_PART_WORDS * 2],
+        };
+        let encoded = encode_artifact_pyramid_part(&part);
+        assert!(encoded.len() < vd_core::tlv::MAX_FIELD_BYTES);
+        assert_eq!(decode_artifact_pyramid_part(&encoded), Ok(part));
         assert_eq!(artifact_head_key(), vec![4]);
         assert_eq!(artifact_pyramid_key(), vec![6]);
         assert_eq!(artifact_tile_prefix(), vec![5]);
+        assert_eq!(artifact_pyramid_part_prefix(), vec![7]);
+        assert_eq!(
+            artifact_pyramid_part_key(1, 36),
+            vec![7, 0, 0, 0, 1, 0, 0, 0, 36]
+        );
+        assert!(artifact_pyramid_part_key(1, 1) < artifact_pyramid_part_key(1, 2));
+        assert!(artifact_pyramid_part_key(1, 300) < artifact_pyramid_part_key(2, 0));
         assert_eq!(
             artifact_tile_key(3, 2, 18),
             vec![5, 3, 0, 0, 0, 2, 0, 0, 0, 18]
@@ -447,7 +557,16 @@ mod tests {
         assert!(artifact_tile_key(3, 2, 18) > artifact_tile_key(3, 2, 17));
         assert!(decode_artifact_head(b"nonsense").is_err());
         assert!(decode_artifact_tile(&encode_artifact_head(&head)).is_err());
-        assert!(decode_artifact_pyramid(&encode_artifact_tile(&tile)).is_err());
+        assert!(
+            decode_artifact_pyramid_index(&encoded)
+                .expect_err("another schema")
+                .contains("pyramid index does not decode")
+        );
+        assert!(
+            decode_artifact_pyramid_part(&encode_artifact_pyramid_index(&index))
+                .expect_err("another schema")
+                .contains("pyramid part does not decode")
+        );
     }
 
     fn ship(seq: u64) -> RealmId {

@@ -614,4 +614,10 @@ pub struct StubStats {
     pub artifact_pyramid_parts_sent: u64,
     /// THE ARTIFACT SHIP — tiles sent, summed over occupants, each once per session.
     pub artifact_tiles_sent: u64,
+    /// ★ THE FAR-VIEW SHIP — wants for this realm's artifact received from gateways.
+    pub artifact_wants_received: u64,
+    /// THE FAR-VIEW SHIP — wants for another realm's artifact (the gateway asked the wrong shard).
+    pub artifact_wants_foreign: u64,
+    /// THE FAR-VIEW SHIP — wants at a digest this realm does not hold, dropped.
+    pub artifact_wants_stale: u64,
 }

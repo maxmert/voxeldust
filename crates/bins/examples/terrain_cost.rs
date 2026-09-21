@@ -259,6 +259,7 @@ fn main() -> ExitCode {
             BOX_EDGE * BOX_EDGE
         ],
         water: vec![vd_recipe::Gi::ZERO; BOX_EDGE * BOX_EDGE],
+        sea: vd_recipe::Gi::ZERO,
     };
     let start = Instant::now();
     let mut worst = None;
@@ -289,7 +290,7 @@ fn main() -> ExitCode {
         // cut to the first 243 — the 9 × 9 columns × 3 chunks the slice-7 measurement used, so the
         // per-chunk numbers stay comparable.
         let eye = [d[0] * (r + 3.4), d[1] * (r + 3.4), d[2] * (r + 3.4)];
-        let wanted = LadderView::default().wanted(&body, eye);
+        let wanted = LadderView::default().wanted(&body, eye, None);
         let keys: Vec<vd_terrain::chunk::ChunkKey> = wanted
             .keys
             .iter()

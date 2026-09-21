@@ -1615,7 +1615,18 @@ fn place_camera(
     let stated = own_pose.frame.realm();
     let at_home = vd_client::ladder_view::pose_at_home(stated, origin);
     if at_home && origin != camera.last_origin {
-        let (yaw, pitch) = vd_core::kinematics::yaw_pitch_from_orient(own_pose.orient);
+        // ★ THE UP IS THE SERVER'S (ruling V11; 2026-09-20, the owner: "axes on any move of the
+        // occupant are always broken"): the camera turned about the frame's +Y while the body
+        // turns about the up it was BORN with — the delivered facing's own +Y (`Dot::adopt_pose`,
+        // `session.rs`), which on a planet is the radial the stand states — so on any stand whose
+        // radial was not +Y the mouse turned the eye about one axis and the body about another,
+        // and W went where the body faced, not where the eye looked. The camera now takes the
+        // same up and the look's angle pair in that up's frame, the server's own decomposition.
+        let up = own_pose.orient * DVec3::Y;
+        let (yaw, pitch) = vd_core::kinematics::yaw_pitch_from_orient(
+            vd_core::kinematics::frame_from_up(up).inverse() * own_pose.orient,
+        );
+        camera.cam.up = up;
         camera.cam.yaw = yaw;
         camera.cam.pitch = pitch;
         let from = camera.last_origin;

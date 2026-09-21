@@ -184,7 +184,11 @@ pub type WaterSheet = (Vec<[f64; 3]>, Vec<[f64; 3]>, Vec<[u32; 3]>);
 /// ★ THE WATER SHEET's points (slice 8c stage C5): over the chunk's 62 × 62 core columns and the
 /// halo column past each edge, one quad per cell of the face grid whose four corners hold ANY
 /// water; the quad stands flat at the HIGHEST water level among its wet corners (a shore quad
-/// reaches under the land, which hides it), each corner at that radius along its own column. Four
+/// reaches under the land, which hides it), each corner at that radius along its own column.
+/// ★ THE SEA UNDER EVERY CELL (2026-09-20): on a body with a sea every cell holds the sea's level
+/// at least, so the sea is one surface at every rung and the shore is where the land crosses it —
+/// continuous under the land's morph, never a sheet edge that steps at a ring swap. A lake stands
+/// above the sea by its own corners' word. Four
 /// points a quad (a level is a quad's, not a column's), in METRES of the body's frame, with each
 /// point's unit radial, and two triangles a quad. Empty for a dry chunk. The client's mesh is the
 /// last step out of it (the floating origin, the single-precision cast).
@@ -205,7 +209,7 @@ pub fn water_sheet(samples: &SampleBox) -> WaterSheet {
                 SampleBox::column_index(a, b + 1),
                 SampleBox::column_index(a + 1, b + 1),
             ];
-            let mut level = Gi::ZERO;
+            let mut level = samples.sea;
             for col in corners {
                 if samples.water[col] > level {
                     level = samples.water[col];
@@ -280,6 +284,27 @@ mod water_sheet_tests {
         let (points, _, triangles) = water_sheet(&one);
         assert_eq!(points.len(), 4);
         assert_eq!(triangles.len(), 2);
+        // ★ THE SEA UNDER EVERY CELL: on a body with a sea, columns whose rows are dry (the land)
+        // still carry the sea's surface, under the land; a lake corner above the sea raises its
+        // quad to the lake.
+        let mut land = crate::lattice::sample_box(&wet, None, key).expect("a box");
+        for w in &mut land.water {
+            *w = Gi::ZERO;
+        }
+        let (points, _, triangles) = water_sheet(&land);
+        assert_eq!(points.len(), quads * 4);
+        assert_eq!(triangles.len(), quads * 2);
+        let lake = wet.sea_radius + (Gi::new(50 * STEPS_PER_M) << vd_recipe::cell::LENGTH_BITS);
+        land.water[SampleBox::column_index(0, 0)] = lake;
+        let (points, _, _) = water_sheet(&land);
+        let len = (points[0][0] * points[0][0]
+            + points[0][1] * points[0][1]
+            + points[0][2] * points[0][2])
+            .sqrt();
+        assert!((len - (wet.sea_radius_m() + 50.0)).abs() < 0.02, "{len}");
+        let last = points[points.len() - 1];
+        let len = (last[0] * last[0] + last[1] * last[1] + last[2] * last[2]).sqrt();
+        assert!((len - wet.sea_radius_m()).abs() < 0.02, "{len}");
     }
 }
 

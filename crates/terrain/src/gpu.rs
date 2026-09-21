@@ -395,6 +395,7 @@ impl BoxPlan {
             dirs: dirs.to_vec(),
             // The card's columns read no artifact row: the body's sea stands over every one.
             water: vec![self.charter.sea_radius; self.sites.len()],
+            sea: self.charter.sea_radius,
         }
     }
 

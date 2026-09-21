@@ -31,6 +31,7 @@
 //! The whole surface is re-exported here, so `vd_connection_plane::gateway::X` resolves exactly as
 //! it did when this was one file.
 
+mod artifact;
 mod client;
 mod config;
 mod directory;

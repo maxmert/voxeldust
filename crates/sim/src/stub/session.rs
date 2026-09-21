@@ -135,6 +135,7 @@ pub(crate) fn on_gateway_msg(
     log: &mut InputLog,
     pending_slots: &mut PendingInputSlots,
     windows: &mut OpenWindows,
+    wants: &mut crate::stub::artifact_ship::ArtifactWants,
     stats: &mut StubStats,
     outbox: &mut OutboundBox,
 ) {
@@ -356,6 +357,17 @@ pub(crate) fn on_gateway_msg(
         // needs the placement rule to name a reason, and inventing one here would be a placeholder.
         GatewayToShard::SessionAction { .. } => {
             stats.session_actions_unrouted += 1;
+        }
+        // ★ THE ARTIFACT WANT (the far-view ship): a gateway that draws this realm asks for its
+        // artifact; the emitter answers on the next tick, paced.
+        GatewayToShard::ArtifactWant {
+            realm,
+            digest,
+            view,
+        } => {
+            crate::stub::artifact_ship::on_artifact_want(
+                from, realm, digest, view, ctx.config, wants, stats,
+            );
         }
     }
 }

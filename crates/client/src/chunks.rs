@@ -146,6 +146,14 @@ pub struct ChunkGeometry {
     /// per surface cell, the extractor's own), every one from it hangs under an edge. The far-rung
     /// splat (D8-8's measurement) draws the surface ones only.
     pub skirt_start: u32,
+    /// ★ THE FIELD THE CHUNK WAS BUILT ON (the coast flight's hole instrument, 2026-09-20): the
+    /// pyramid level it read (zero for the rows, the tiles), or [`NO_FIELD`] for the recipe's own
+    /// relief or a box sampled elsewhere (the card).
+    pub field_level: u32,
+    /// ★ THE ARTIFACT THE CHUNK WAS BUILT ON (the coast flight's stale builds, 2026-09-20): the
+    /// head's digest, or `None` for the recipe's own relief. The lane refuses a chunk built on
+    /// another artifact than the one it holds for the realm when the chunk lands.
+    pub built_on: Option<[u64; 2]>,
     /// THE BOX that holds every vertex, its morph target and its sunk position — wherever the
     /// vertex stage can put a vertex, so the engine culls by it. Built by the worker (refutation
     /// P-8: on the main thread it cost two square roots a vertex in the harvest loop). Zero for an
@@ -1132,7 +1140,10 @@ pub fn geometry_with(
 ) -> Option<ChunkGeometry> {
     let field = field_of(body, artifact, key)?;
     let samples = sample_box(body, field.as_deref().map(|f| f as &dyn ZField), key)?;
-    geometry_from(body, artifact, realm, key, &samples, parents)
+    let mut geometry = geometry_from(body, artifact, realm, key, &samples, parents)?;
+    geometry.field_level = field.as_deref().map_or(NO_FIELD, |f| f.level());
+    geometry.built_on = artifact.map(|a| a.head.digest);
+    Some(geometry)
 }
 
 /// THE GEOMETRY STEP of a chunk's build: the mesh, the vertices, the morph targets and the normals
@@ -1277,6 +1288,8 @@ pub fn geometry_from(
         radials,
         bounds: ([0.0; 3], [0.0; 3]),
         skirt_start: 0,
+        field_level: NO_FIELD,
+        built_on: None,
     };
     let drop_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
     add_skirts(&mut geometry, drop_m);
@@ -1556,7 +1569,33 @@ pub struct ChunkCounters {
     /// relief (slice 8c stage C4c): those chunks and parents are dropped and rebuilt on the field.
     /// The one visible change is a recipe-to-artifact step at login, ledgered.
     pub artifact_rebuilds: u64,
+    /// ★ CHUNKS HARVESTED WITH NO TRIANGLE (the coast flight's hole instrument, 2026-09-20): a
+    /// chunk whose asked slice held no ground counts as built and drawn everywhere else, and the
+    /// sea sheet shows through it. Named on the stamp too ([`ChunkLane::take_empty`]).
+    pub empty_chunks: u64,
+    /// ★ STALE BUILDS REFUSED (the coast flight, 2026-09-20): a chunk that landed built on
+    /// another artifact than the lane holds for its realm — a job the workers were already
+    /// running on the recipe's relief when the head arrived, whose result landed under the fresh
+    /// request's pending entry and stood resident, empty, where the ground is. MEASURED: a third
+    /// of the 717 hole columns at rest were such chunks. The lane drops it and the next request
+    /// builds it on the field.
+    pub stale_builds: u64,
 }
+
+/// How many refused requests and empty chunks a frame NAMES on the stamp (the counters count them
+/// all).
+pub const NAMED_PER_FRAME: usize = 12;
+
+/// One refused request, named: the realm, the key, and the tiles its stencil still waits for
+/// (none when the head itself is not here at the stated digest).
+pub type Refusal = (RealmId, ChunkKey, Vec<(u8, u32, u32)>);
+
+/// The field level of a chunk built on no field (`ChunkGeometry::field_level`).
+pub const NO_FIELD: u32 = u32::MAX;
+
+/// How many slices either way of an empty chunk [`ChunkLane::hole_columns`] looks for a sibling
+/// with ground: a column's span is the column bound over the ground, a few slices at most.
+pub const HOLE_SIBLING_SLICES: i32 = 4;
 
 /// The lane: the bodies it knows, the chunks it holds, the workers it drives.
 pub struct ChunkLane {
@@ -1573,11 +1612,25 @@ pub struct ChunkLane {
     /// ★ THE ARTIFACTS the realms shipped (slice 8c stage C4c), by pointer, refreshed when the
     /// book's epoch for a realm changes.
     artifacts: BTreeMap<RealmId, Arc<ArtifactCache>>,
+    /// ★ THE ARTIFACT EACH REALM STATES it serves (the far-view ship): a realm that states a
+    /// digest is built on that artifact and on nothing else — a request while the head at that
+    /// digest is not here WAITS (counted), and the recipe's own relief is never drawn for it.
+    expected: BTreeMap<RealmId, [u64; 2]>,
     resident: BTreeSet<(RealmId, ChunkKey)>,
     pending: BTreeSet<(RealmId, ChunkKey)>,
     /// Resident plus pending chunks per realm, so a release is a lookup, not a scan (SL9).
     held: BTreeMap<RealmId, usize>,
     counters: ChunkCounters,
+    /// ★ THE REQUESTS REFUSED FOR THE ARTIFACT THIS FRAME, NAMED (the coast flight's hole
+    /// instrument): drained by the renderer into the stamp each frame, capped.
+    awaiting_frame: Vec<Refusal>,
+    /// ★ THE CHUNKS HARVESTED EMPTY THIS FRAME, NAMED with the field level they were built on:
+    /// drained into the stamp, capped.
+    empty_frame: Vec<(RealmId, ChunkKey, u32)>,
+    /// ★ EVERY RESIDENT CHUNK THAT HOLDS NO TRIANGLE, with the field level it was built on: what
+    /// [`ChunkLane::hole_columns`] reads to find a column none of whose resident slices holds
+    /// ground.
+    empty_resident: BTreeMap<(RealmId, ChunkKey), u32>,
     /// The parent meshes the workers share.
     parents: Arc<ParentCache>,
 }
@@ -1593,12 +1646,75 @@ impl ChunkLane {
             charters: BTreeMap::new(),
             refused: BTreeSet::new(),
             artifacts: BTreeMap::new(),
+            expected: BTreeMap::new(),
             resident: BTreeSet::new(),
             pending: BTreeSet::new(),
             held: BTreeMap::new(),
             counters: ChunkCounters::default(),
+            awaiting_frame: Vec::new(),
+            empty_frame: Vec::new(),
+            empty_resident: BTreeMap::new(),
             parents: Arc::new(ParentCache::default()),
         }
+    }
+
+    /// The requests refused for the artifact since the last take, named (capped at
+    /// [`NAMED_PER_FRAME`]).
+    pub fn take_awaiting(&mut self) -> Vec<Refusal> {
+        std::mem::take(&mut self.awaiting_frame)
+    }
+
+    /// The chunks harvested empty since the last take, named with their field level (capped at
+    /// [`NAMED_PER_FRAME`]).
+    pub fn take_empty(&mut self) -> Vec<(RealmId, ChunkKey, u32)> {
+        std::mem::take(&mut self.empty_frame)
+    }
+
+    /// ★ THE HOLE COLUMNS of a realm (the coast flight's hole instrument, 2026-09-20): the chunk
+    /// columns that hold a resident chunk and NO resident chunk with a triangle — the ground of
+    /// that column is drawn by nobody, and the sea sheet stands where it should be. The count,
+    /// and the first [`NAMED_PER_FRAME`] of them by their empty key. A walk of the EMPTY resident
+    /// chunks (an instrument's cost, a few thousand at most) with a lookup per neighbouring slice,
+    /// never a scan of the whole resident set.
+    #[must_use]
+    pub fn hole_columns(&self, realm: RealmId) -> (u64, Vec<(ChunkKey, u32)>) {
+        let mut seen: BTreeSet<(vd_seed::bend::Face, u8, i32, i32)> = BTreeSet::new();
+        let mut count = 0u64;
+        let mut named = Vec::new();
+        // An empty chunk the lane no longer holds names no hole (a dropped realm's leftovers
+        // MEASURED as 717 phantom holes before this guard). The guard reads inside the walk's own
+        // filter, not as an `if` in the body: the lane writes `empty_resident` and `resident`
+        // together on every path it has, so the body's `if` could never take both ways and HR5
+        // could not measure it. Example: a key the home moon's realm dropped names no hole.
+        for ((_, key), level) in self
+            .empty_resident
+            .iter()
+            .filter(|((r, k), _)| (*r == realm) & self.resident.contains(&(realm, *k)))
+        {
+            if !seen.insert((key.face, key.rung, key.x, key.y)) {
+                continue;
+            }
+            // A column's slices are a few apart at most: the span is the bound over the ground.
+            let mut holds_ground = false;
+            let mut dz = -HOLE_SIBLING_SLICES;
+            while dz <= HOLE_SIBLING_SLICES {
+                let sibling = ChunkKey {
+                    z: key.z + dz,
+                    ..*key
+                };
+                holds_ground |= (dz != 0)
+                    & self.resident.contains(&(realm, sibling))
+                    & !self.empty_resident.contains_key(&(realm, sibling));
+                dz += 1;
+            }
+            if !holds_ground {
+                count += 1;
+                if named.len() < NAMED_PER_FRAME {
+                    named.push((*key, *level));
+                }
+            }
+        }
+        (count, named)
     }
 
     /// The counters.
@@ -1701,7 +1817,37 @@ impl ChunkLane {
         self.charters.remove(&realm);
         self.refused.remove(&realm);
         self.artifacts.remove(&realm);
+        self.expected.remove(&realm);
         self.drop_chunks(realm);
+    }
+
+    /// ★ STATE THE ARTIFACT A REALM SAYS IT SERVES (the far-view ship), off its look bag: `Some`
+    /// makes every request for the realm wait until the head at that digest is here; `None`
+    /// (a realm that states none) lets the recipe's own relief build. A change of digest drops
+    /// the chunks built on the old one.
+    pub fn expect_artifact(&mut self, realm: RealmId, digest: Option<[u64; 2]>) {
+        let before = self.expected.get(&realm).copied();
+        if before == digest {
+            return;
+        }
+        match digest {
+            Some(d) => {
+                self.expected.insert(realm, d);
+            }
+            None => {
+                self.expected.remove(&realm);
+            }
+        }
+        if before.is_some() && self.held.get(&realm).copied().unwrap_or(0) > 0 {
+            self.counters.artifact_rebuilds += 1;
+            self.drop_chunks(realm);
+        }
+    }
+
+    /// The artifact a realm states it serves, as the lane holds it.
+    #[must_use]
+    pub fn expected_artifact(&self, realm: RealmId) -> Option<[u64; 2]> {
+        self.expected.get(&realm).copied()
     }
 
     /// Drop every chunk of a realm — resident, building, and the parents — keeping its body.
@@ -1709,6 +1855,7 @@ impl ChunkLane {
         self.held.remove(&realm);
         self.parents.forget(realm);
         self.resident.retain(|(r, _)| *r != realm);
+        self.empty_resident.retain(|(r, _), _| *r != realm);
         let pending: Vec<ChunkKey> = self
             .pending
             .iter()
@@ -1793,10 +1940,35 @@ impl ChunkLane {
         }
         // ★ THE ARTIFACT'S FIELD MUST BE WHOLE FOR THIS CHUNK (slice 8c stage C4c): a chunk whose
         // level is assembling or whose tiles are not all here is not queued — asked again next
-        // frame, while the coarser rung stands (ruling F9).
+        // frame, while the coarser rung stands (ruling F9). ★ AND A REALM THAT STATES AN ARTIFACT
+        // IS BUILT ON IT ALONE (the far-view ship): until the head at the stated digest is here,
+        // nothing is built for it — never the recipe's own relief, which would pop away later.
         let artifact = self.artifacts.get(&realm).map(Arc::clone);
+        if let Some(expected) = self.expected.get(&realm)
+            && artifact.as_ref().map(|a| a.head.digest) != Some(*expected)
+        {
+            self.counters.awaiting_artifact += 1;
+            if self.awaiting_frame.len() < NAMED_PER_FRAME {
+                self.awaiting_frame.push((realm, key, Vec::new()));
+            }
+            return;
+        }
         if field_of(body, artifact.as_deref(), key).is_none() {
             self.counters.awaiting_artifact += 1;
+            if self.awaiting_frame.len() < NAMED_PER_FRAME {
+                // ★ THE REFUSAL NAMES THE TILES the stencil still waits for. `field_of` refuses
+                // ONLY when the realm holds an artifact AND the body holds a macro lattice, so
+                // both are here. The lane reads the pair as an iterator of one: a second arm
+                // would say the pair can be absent, it cannot, and HR5 could not measure it.
+                // Example: the home moon's chunk at rung 0 names the artifact tiles under it.
+                let missing: Vec<(u8, u32, u32)> = artifact
+                    .as_deref()
+                    .zip(body.macro_lattice())
+                    .into_iter()
+                    .flat_map(|(a, lattice)| a.missing_tiles(&lattice, key))
+                    .collect();
+                self.awaiting_frame.push((realm, key, missing));
+            }
             return;
         }
         self.pending.insert((realm, key));
@@ -1837,8 +2009,39 @@ impl ChunkLane {
         self.counters.harvest_full +=
             u64::from((max > 0) & ((out.len() == max) | (bytes >= budget_bytes)));
         out.retain(|ready| self.pending.remove(&(ready.realm, ready.geometry.key)));
+        // ★ A STALE BUILD IS REFUSED: built on another artifact than the realm's now (the recipe's
+        // relief before the head, or an older head). Its pending entry is gone with the retain
+        // above, so the next request submits it again, on the field.
+        let stale = |lane: &ChunkLane, ready: &ChunkReady| {
+            ready.geometry.built_on != lane.artifacts.get(&ready.realm).map(|a| a.head.digest)
+        };
+        let mut kept = Vec::with_capacity(out.len());
+        for ready in out {
+            if stale(self, &ready) {
+                self.counters.stale_builds += 1;
+                let left = self.held.entry(ready.realm).or_insert(1);
+                *left -= 1;
+                continue;
+            }
+            kept.push(ready);
+        }
+        let out = kept;
         for ready in &out {
             self.resident.insert((ready.realm, ready.geometry.key));
+            if ready.geometry.triangles.is_empty() {
+                self.counters.empty_chunks += 1;
+                self.empty_resident.insert(
+                    (ready.realm, ready.geometry.key),
+                    ready.geometry.field_level,
+                );
+                if self.empty_frame.len() < NAMED_PER_FRAME {
+                    self.empty_frame.push((
+                        ready.realm,
+                        ready.geometry.key,
+                        ready.geometry.field_level,
+                    ));
+                }
+            }
         }
         self.counters.harvested += out.len() as u64;
         out
@@ -1848,6 +2051,7 @@ impl ChunkLane {
     /// never a scan of every chunk held (SL9).
     pub fn release(&mut self, realm: RealmId, key: ChunkKey) {
         let was_resident = self.resident.remove(&(realm, key));
+        self.empty_resident.remove(&(realm, key));
         let was_pending = self.pending.remove(&(realm, key));
         if was_pending {
             self.workers.cancel(realm, key);
@@ -2127,6 +2331,133 @@ mod tests {
     /// chunk whose tiles are not here waits (counted) while the same request with the tiles held
     /// builds; a first head after chunks were built drops them (counted); a second statement of
     /// the same cache is a no-op; the parents and the morph fallback read the field.
+    /// ★ A STALE BUILD IS REFUSED (2026-09-20): a job the workers were already running on the
+    /// recipe's relief when the realm's head arrived lands after the rebuild dropped the realm's
+    /// chunks, under the fresh request's pending entry. Workers that keep a finished job through
+    /// a cancel stand in for the running thread. The lane refuses it, counts it, and the next
+    /// request builds the chunk on the field; a chunk built on the field is kept.
+    #[test]
+    fn a_chunk_built_on_the_recipe_that_lands_after_the_head_is_refused_and_rebuilt() {
+        use crate::artifact_book::ArtifactReceiver;
+        use vd_terrain::home::{
+            HOME_MOON_BULK_DENSITY_KGM3, HOME_MOON_GRAVITY_MM_S2, HOME_MOON_RADIUS_BITS,
+            HOME_MOON_SEED, HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words,
+        };
+        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_wire::channels::BulkMsg;
+        /// Inline workers whose cancel does nothing: a job already on a thread.
+        struct LateWorkers(InlineWorkers);
+        impl ChunkWorkers for LateWorkers {
+            fn submit(&mut self, job: ChunkJob) {
+                self.0.submit(job);
+            }
+            fn drain(&mut self, out: &mut Vec<ChunkReady>, max: usize) {
+                self.0.drain(out, max);
+            }
+            fn cancel(&mut self, _realm: RealmId, _key: ChunkKey) {}
+            fn reprioritise(&mut self, realm: RealmId, key: ChunkKey, priority: u32) {
+                self.0.reprioritise(realm, key, priority);
+            }
+            fn built(&self) -> BuildCount {
+                self.0.built()
+            }
+        }
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate =
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let artifact =
+            vd_terrain::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        let realm = RealmId::Planet(HOME_MOON_SEED);
+        let mut rx = ArtifactReceiver::default();
+        rx.accept(BulkMsg::ArtifactHead {
+            realm,
+            world_tag: 9,
+            version: artifact.version,
+            edge: artifact.edge,
+            digest: artifact.digest(),
+            tiles_per_edge: artifact.tiles_per_edge(),
+            levels: artifact.pyramid.len() as u32,
+            sea_m: artifact.sea_m,
+        });
+        for (k, level) in artifact.pyramid.iter().enumerate().rev() {
+            rx.accept(BulkMsg::ArtifactPyramid {
+                realm,
+                level: k as u32 + 1,
+                part: 0,
+                parts: 1,
+                z_m: level.clone(),
+            });
+        }
+        let cache = rx.book().get(realm).cloned().expect("a cache");
+        let moon_charter = vd_core::look::BodyCharter {
+            gravity_mm_s2: HOME_MOON_GRAVITY_MM_S2,
+            bulk_density_kgm3: HOME_MOON_BULK_DENSITY_KGM3,
+            ..charter()
+        };
+        let surface = SurfaceStmt {
+            frame: FrameRef::PlanetCentered {
+                planet_seed: HOME_MOON_SEED,
+            },
+            generator: 77,
+        };
+        let look = Boundary::Shell {
+            r: f64::from_bits(HOME_MOON_RADIUS_BITS),
+        };
+        let mut lane = ChunkLane::new(Box::new(LateWorkers(InlineWorkers::default())), 77);
+        lane.state_surface(realm, &surface, Some(&moon_charter), &look);
+        let top = lane.body(realm).expect("a body").ladder().rungs - 1;
+        let key = ChunkKey {
+            face: Face::PosX,
+            rung: top - 1,
+            x: 0,
+            y: 0,
+            z: vd_terrain::digest::surface_chunk_z(&moon, Face::PosX, top - 1, 0, 0),
+        };
+        // Built on the recipe before the head, sitting finished in the workers: then the head
+        // lands, the rebuild drops the realm's chunks, and the same key is asked again.
+        lane.request(realm, key, 0);
+        assert_eq!(lane.counters().submitted, 1);
+        // The same key asked again while it builds is never submitted twice: the lane states the
+        // new priority to the workers, and what they built stands at one chunk.
+        lane.request(realm, key, 7);
+        assert_eq!(lane.counters().submitted, 1);
+        assert_eq!(lane.built().chunks, 1);
+        lane.state_artifact(realm, &cache);
+        assert_eq!(lane.counters().artifact_rebuilds, 1);
+        lane.request(realm, key, 0);
+        assert_eq!(lane.counters().submitted, 2);
+        // The first to land is the recipe's build: refused, not resident, counted. Its landing
+        // took the fresh request's pending entry with it, so the fresh build that lands next is
+        // dropped too (the lane cannot tell which job an entry belongs to), the key is neither
+        // resident nor pending, and the next request builds it once more — one build wasted per
+        // stale key, once per head, never a chunk standing on the wrong ground.
+        let first = lane.poll(1);
+        assert_eq!(first.len(), 0, "the stale build is refused");
+        assert_eq!(lane.counters().stale_builds, 1);
+        assert!(!lane.is_resident(realm, key));
+        let second = lane.poll(1);
+        assert_eq!(
+            second.len(),
+            0,
+            "the fresh build lands under no pending entry"
+        );
+        assert!(!lane.holds(realm, key));
+        lane.request(realm, key, 0);
+        assert_eq!(lane.counters().submitted, 3);
+        let third = lane.poll(1);
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].geometry.built_on, Some(artifact.digest()));
+        assert!(lane.is_resident(realm, key));
+        assert_eq!(lane.counters().stale_builds, 1);
+        // The held count is one chunk: a release empties the realm.
+        lane.release(realm, key);
+        assert_eq!(lane.resident(realm), vec![]);
+    }
+
     #[test]
     fn the_lane_builds_on_the_artifacts_field_and_waits_for_its_tiles() {
         use crate::artifact_book::ArtifactReceiver;
@@ -2215,10 +2546,29 @@ mod tests {
         assert_eq!(built.len(), 1);
         assert_eq!(built[0].geometry.key.rung, top - 1);
         assert_eq!(lane.counters().awaiting_artifact, 0);
-        // A fine chunk waits for its tiles.
+        // A fine chunk waits for its tiles — and the refusal is NAMED with the tiles it waits for.
         lane.request(realm, key(0, 4_000, 4_000), 0);
         assert_eq!(lane.counters().awaiting_artifact, 1);
         assert!(lane.poll(8).is_empty());
+        let named = lane.take_awaiting();
+        assert_eq!(named.len(), 1);
+        assert_eq!((named[0].0, named[0].1), (realm, key(0, 4_000, 4_000)));
+        assert_eq!(
+            named[0].2,
+            cache.missing_tiles(&lattice, key(0, 4_000, 4_000)),
+            "the tiles the stencil waits for"
+        );
+        assert!(!named[0].2.is_empty());
+        assert!(
+            cache.missing_tiles(&lattice, key(top - 1, 0, 0)).is_empty(),
+            "a rung that reads a level waits for no tile"
+        );
+        assert!(lane.take_awaiting().is_empty(), "taken once");
+        // The cap: thirteen refusals name twelve.
+        for i in 0..13 {
+            lane.request(realm, key(0, 4_000 + i, 4_000), 0);
+        }
+        assert_eq!(lane.take_awaiting().len(), NAMED_PER_FRAME);
         // The tiles land: the same request builds.
         for tx in 0..artifact.tiles_per_edge() {
             for ty in 0..artifact.tiles_per_edge() {
@@ -2239,10 +2589,131 @@ mod tests {
             "a later cache drops nothing"
         );
         lane.request(realm, key(0, 4_000, 4_000), 0);
-        assert_eq!(lane.counters().awaiting_artifact, 1);
+        assert_eq!(lane.counters().awaiting_artifact, 14);
+        assert!(
+            lane.take_awaiting().is_empty(),
+            "nothing refused once the tiles are here"
+        );
         let built = lane.poll(8);
         assert_eq!(built.len(), 1);
         assert_eq!(built[0].geometry.key.rung, 0);
+        // ★ THE RECIPE'S OWN SLICE BUILDS EMPTY ON THE ARTIFACT (the coast flight, 2026-09-20):
+        // `key` asked the slice the recipe's relief stands in, the chunk was built on the field,
+        // and it holds NO triangle — the hole the sea sheet showed through, counted and named now.
+        assert!(built[0].geometry.triangles.is_empty());
+        assert_eq!(built[0].geometry.field_level, 0, "built on the rows");
+        assert_eq!(built[0].geometry.built_on, Some(artifact.digest()));
+        assert_eq!(lane.counters().empty_chunks, 1);
+        assert_eq!(lane.take_empty(), vec![(realm, key(0, 4_000, 4_000), 0)]);
+        assert!(lane.take_empty().is_empty(), "taken once");
+        // The FIELD span's slices hold the ground: at least one of them builds with triangles, and
+        // the empty count grows by exactly the slices that hold none.
+        let with_sea = **lane.body(realm).expect("a body");
+        let span = vd_terrain::digest::surface_column_field(
+            &with_sea,
+            &artifact,
+            Face::PosX,
+            0,
+            4_000,
+            4_000,
+        )
+        .expect("a span");
+        let span_keys: Vec<ChunkKey> = (span.lo..=span.hi)
+            .map(|z| ChunkKey {
+                face: Face::PosX,
+                rung: 0,
+                x: 4_000,
+                y: 4_000,
+                z,
+            })
+            .filter(|k| *k != key(0, 4_000, 4_000))
+            .collect();
+        for k in &span_keys {
+            lane.request(realm, *k, 0);
+        }
+        let built = lane.poll(8);
+        assert_eq!(built.len(), span_keys.len());
+        let with_ground = built
+            .iter()
+            .filter(|b| !b.geometry.triangles.is_empty())
+            .count();
+        assert!(with_ground > 0, "the field span holds the ground");
+        let empties = built.len() - with_ground;
+        assert_eq!(lane.counters().empty_chunks, 1 + empties as u64);
+        assert_eq!(lane.take_empty().len(), empties);
+        // ★ THE HOLE COLUMNS: the column holds an empty chunk and one with ground — no hole;
+        // release every chunk with ground and the column is a hole, named by its empty key;
+        // release the empty ones too and nothing is left to be a hole.
+        assert_eq!(lane.hole_columns(realm), (0, vec![]));
+        for b in built.iter().filter(|b| !b.geometry.triangles.is_empty()) {
+            lane.release(realm, b.geometry.key);
+        }
+        let (holes, named) = lane.hole_columns(realm);
+        assert_eq!(holes, 1);
+        assert_eq!(named.len(), 1);
+        assert_eq!(
+            (
+                named[0].0.face,
+                named[0].0.rung,
+                named[0].0.x,
+                named[0].0.y,
+                named[0].1
+            ),
+            (Face::PosX, 0, 4_000, 4_000, 0)
+        );
+        lane.release(realm, key(0, 4_000, 4_000));
+        for b in built.iter().filter(|b| b.geometry.triangles.is_empty()) {
+            lane.release(realm, b.geometry.key);
+        }
+        assert_eq!(lane.hole_columns(realm), (0, vec![]));
+        // ★ THE CAPS ON THE STAMP: thirteen columns whose asked slice holds no ground name twelve
+        // empty chunks and twelve holes, while the counters carry all thirteen.
+        let thirteen: Vec<ChunkKey> = (0..13).map(|i| key(0, 4_000 + i, 4_000)).collect();
+        for k in &thirteen {
+            lane.request(realm, *k, 0);
+        }
+        let built = lane.poll(16);
+        assert_eq!(built.len(), thirteen.len());
+        let empties = built
+            .iter()
+            .filter(|b| b.geometry.triangles.is_empty())
+            .count();
+        assert_eq!(
+            empties,
+            thirteen.len(),
+            "the recipe's slice holds no ground"
+        );
+        assert_eq!(lane.take_empty().len(), NAMED_PER_FRAME);
+        let (holes, named) = lane.hole_columns(realm);
+        assert_eq!(holes, thirteen.len() as u64);
+        assert_eq!(named.len(), NAMED_PER_FRAME);
+        for k in &thirteen {
+            lane.release(realm, *k);
+        }
+        assert_eq!(lane.hole_columns(realm), (0, vec![]));
+        // A realm's rebuild (a NEW head) drops its empty chunks with the rest: no phantom hole.
+        lane.request(realm, key(0, 4_000, 4_000), 0);
+        assert_eq!(lane.poll(8).len(), 1);
+        assert_eq!(lane.hole_columns(realm).0, 1);
+        let mut other = cache.head;
+        other.digest = [other.digest[0] ^ 1, other.digest[1]];
+        let fresh = {
+            let mut rx2 = ArtifactReceiver::default();
+            rx2.accept(BulkMsg::ArtifactHead {
+                realm,
+                world_tag: 9,
+                version: other.version,
+                edge: other.edge,
+                digest: other.digest,
+                tiles_per_edge: other.tiles_per_edge,
+                levels: other.levels,
+                sea_m: other.sea_m,
+            });
+            rx2.book().get(realm).cloned().expect("a cache")
+        };
+        lane.state_artifact(realm, &fresh);
+        assert_eq!(lane.counters().artifact_rebuilds, 2);
+        assert_eq!(lane.hole_columns(realm), (0, vec![]));
         // The field pick and the fallback height, directly.
         let body = **lane.body(realm).expect("a body");
         let picked = |f: Option<Option<SharedField>>| f.map(|f| f.map(|f| f.level()));
@@ -2265,8 +2736,9 @@ mod tests {
             Some(None)
         );
         assert!(coarser_field_m(&pebble, Some(&cache), dir, 0).is_some());
-        // The parent's level still assembling: the child builds with no parent mesh and its morph
-        // fallback reads nothing through the level, so it keeps its own radius.
+        // The level the two top rungs read (level 1 on the moon) still assembling, the level
+        // above it here: the child builds with no parent mesh and its morph fallback reads
+        // nothing through the level, so it keeps its own radius.
         let mut half = ArtifactReceiver::default();
         half.accept(BulkMsg::ArtifactHead {
             realm,
@@ -2280,10 +2752,10 @@ mod tests {
         });
         half.accept(BulkMsg::ArtifactPyramid {
             realm,
-            level: 1,
+            level: 2,
             part: 0,
             parts: 1,
-            z_m: artifact.pyramid[0].clone(),
+            z_m: artifact.pyramid[1].clone(),
         });
         let half_cache = half.book().get(realm).cloned().expect("a cache");
         assert!(ParentMesh::build(&body, Some(&half_cache), key(top - 1, 0, 0)).is_none());
@@ -2310,6 +2782,48 @@ mod tests {
         lane2.state_artifact(realm, &cache);
         assert_eq!(lane2.counters().artifact_rebuilds, 0);
         assert_eq!(lane2.body(realm).expect("a body").sea_m(), artifact.sea());
+        // ★ THE EXPECTATION (the far-view ship): a realm that states an artifact at a digest the
+        // lane does not hold builds NOTHING — not the recipe's relief; once the head at that
+        // digest is here it builds; a changed digest drops what was built; `None` lets the
+        // recipe build again.
+        let mut lane3 = ChunkLane::new(Box::new(InlineWorkers::default()), 77);
+        lane3.state_surface(realm, &surface, Some(&moon_charter), &look);
+        lane3.expect_artifact(realm, Some(artifact.digest()));
+        assert_eq!(lane3.expected_artifact(realm), Some(artifact.digest()));
+        lane3.request(realm, key(top, 0, 0), 0);
+        assert_eq!(lane3.counters().awaiting_artifact, 1);
+        assert!(lane3.poll(8).is_empty());
+        // The cap holds on the head's own refusal too: thirteen more refusals name twelve, and
+        // the counter carries them all.
+        for i in 0..13 {
+            lane3.request(realm, key(0, 4_000 + i, 4_000), 0);
+        }
+        assert_eq!(lane3.counters().awaiting_artifact, 14);
+        assert_eq!(lane3.take_awaiting().len(), NAMED_PER_FRAME);
+        lane3.state_artifact(realm, &cache);
+        lane3.request(realm, key(top, 0, 0), 0);
+        assert_eq!(lane3.poll(8).len(), 1);
+        lane3.expect_artifact(realm, Some(artifact.digest()));
+        assert_eq!(
+            lane3.counters().artifact_rebuilds,
+            0,
+            "the same digest again is nothing"
+        );
+        lane3.expect_artifact(realm, Some([9, 9]));
+        assert_eq!(
+            lane3.counters().artifact_rebuilds,
+            1,
+            "a new digest drops the chunks"
+        );
+        assert_eq!(lane3.resident(realm), vec![]);
+        lane3.request(realm, key(top, 0, 0), 0);
+        assert_eq!(lane3.counters().awaiting_artifact, 15);
+        lane3.expect_artifact(realm, None);
+        assert_eq!(lane3.expected_artifact(realm), None);
+        lane3.request(realm, key(top, 0, 0), 0);
+        assert_eq!(lane3.poll(8).len(), 1);
+        lane3.forget(realm);
+        assert_eq!(lane3.expected_artifact(realm), None);
         // Forgetting the realm drops the artifact with the body.
         lane.forget(realm);
         assert_eq!(lane.artifact(realm), None);
@@ -3378,6 +3892,8 @@ mod tests {
             triangles: vec![[0, 1, 2]],
             bounds: ([0.0; 3], [0.0; 3]),
             skirt_start: 0,
+            field_level: NO_FIELD,
+            built_on: None,
         };
         assert_eq!(wide.upload_bytes(), 70_000 * UPLOAD_VERTEX_BYTES + 12);
         wide.vertices.truncate(3);
@@ -3590,6 +4106,8 @@ mod tests {
             triangles: Vec::new(),
             bounds: ([0.0; 3], [0.0; 3]),
             skirt_start: 0,
+            field_level: NO_FIELD,
+            built_on: None,
         };
         assert_eq!(empty.measure_bounds(), ([0.0; 3], [0.0; 3]));
         assert!(empty.morph_targets().is_empty());

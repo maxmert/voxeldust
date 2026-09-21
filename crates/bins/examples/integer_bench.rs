@@ -432,7 +432,7 @@ const HUNT_TOLD_MAX: usize = 4;
 /// the client's own path, and `VD_TERRAIN_GPU_VERIFY=1` is the instrument for that.
 fn part_7_the_drift_hunt(device: &wgpu::Device, queue: &wgpu::Queue, body: &BodyDefinition) {
     let mut view = vd_client::ladder_view::LadderView::default();
-    let wanted = view.wanted(body, SEAM_STAND_EYE_M);
+    let wanted = view.wanted(body, SEAM_STAND_EYE_M, None);
     let lanes: usize = std::env::var("VD_BENCH_LANES")
         .ok()
         .and_then(|v| v.parse().ok())

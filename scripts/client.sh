@@ -36,6 +36,7 @@ AGENT=0
 NAME="client"
 WINDOW=0
 CAPTURE=0
+PILOT=0
 FAST=0
 K3D=0
 while [[ $# -gt 0 ]]; do
@@ -46,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         --name) NAME="${2:?--name needs a value}"; shift 2 ;;
         --window) WINDOW=1; shift ;;
         --capture) CAPTURE=1; shift ;;
+        --pilot) PILOT=1; shift ;;
         # Link Bevy as ONE shared library instead of statically into the client binary
         # (see the FAST block below). Pure build-speed knob; changes no behaviour.
         --fast) FAST=1; shift ;;
@@ -140,6 +142,9 @@ CMD=(
 )
 [[ "$WINDOW" == "1" ]] && CMD+=(--window)
 [[ "$CAPTURE" == "1" ]] && CMD+=(--capture)
+# `--pilot` renders a capture from the AVATAR'S eye (the picture gate's view) instead of the
+# whole-scene framing; it needs `--capture`.
+[[ "$PILOT" == "1" ]] && CMD+=(--capture-pilot)
 
 # `--fast` only: hand the dynamic loader the search path it needs. A dylib build leaves the
 # binary asking for `@rpath/libstd-*.dylib` while carrying NO LC_RPATH at all, so running it

@@ -186,6 +186,30 @@ pub enum GatewayToShard {
         seq: u64,
         action: crate::channels::WorldAction,
     },
+    /// ★ THE ARTIFACT WANT (slice 8c, the far-view ship; SL3): the gateway asks the realm's shard
+    /// for the head and the pyramid of the artifact the realm stated under `TAG_ARTIFACT` at this
+    /// digest, because a session behind it draws the realm and holds no such artifact. The shard
+    /// answers with `ShardToGateway::BulkFor { audience: Realm(realm) }` parts, paced; a want at a
+    /// digest the shard does not hold is dropped and counted. APPENDED (discriminant 8, minor 32).
+    ///
+    /// ★ `view` (the one tile path, owner's word 2026-09-20): `Some` asks for the TILES a viewer
+    /// standing at that view needs — the shard applies its own reach rule and answers them on the
+    /// same realm audience; `None` asks for the head and the pyramid. The view is a direction and a
+    /// distance from the realm's centre, in the realm's own frame: what the gateway composes for the
+    /// session already, never a pose entering the realm's simulation.
+    ArtifactWant {
+        realm: RealmId,
+        digest: [u64; 2],
+        view: Option<ArtifactView>,
+    },
+}
+
+/// ★ A VIEWER'S VIEW OF A REALM, for the tiles it needs: the unit direction from the realm's
+/// centre to the eye and the eye's distance from the centre, metres, in the realm's own frame.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactView {
+    pub dir: [f64; 3],
+    pub radial_m: f64,
 }
 
 /// Shard → gateway session replies and world frames.
@@ -536,6 +560,13 @@ pub enum BulkAudience {
     Sessions(Vec<SessionId>),
     /// Every session behind the gateway that holds this window.
     WindowHolders(WindowId),
+    /// ★ EVERY SESSION BEHIND THE GATEWAY THAT DRAWS THIS REALM (slice 8c, the far-view ship): the
+    /// artifact's head and pyramid parts a shard sends in answer to `GatewayToShard::ArtifactWant`.
+    /// The gateway CACHES them per realm (opaque, like the sky it holds) and paces them to each
+    /// session that draws the realm and has not stated it holds them — a pilot in orbit, a pilot on
+    /// the ground, a pilot passing by, all alike (SL3: a realm draws itself, whoever looks).
+    /// APPENDED (discriminant 2, minor 32).
+    Realm(RealmId),
 }
 
 impl ShardToGateway {
@@ -1372,6 +1403,23 @@ mod tests {
         ]
     }
 
+    /// The bulk audiences' positional pin: the sessions, the window holders, the realm.
+    #[test]
+    fn the_bulk_audiences_keep_their_indices() {
+        for (audience, index) in [
+            (BulkAudience::Sessions(vec![SessionId(1)]), 0u8),
+            (BulkAudience::WindowHolders(WindowId(3)), 1),
+            (BulkAudience::Realm(RealmId::Planet(7)), 2),
+        ] {
+            let bytes = postcard::to_allocvec(&audience).expect("encode");
+            assert_eq!(bytes[0], index, "{audience:?}");
+            assert_eq!(
+                postcard::from_bytes::<BulkAudience>(&bytes).expect("decode"),
+                audience
+            );
+        }
+    }
+
     /// EVERY `GatewayToShard` arm, one fixture each, in declaration order.
     fn every_gateway_to_shard_arm() -> Vec<GatewayToShard> {
         vec![
@@ -1413,6 +1461,14 @@ mod tests {
                 fence: Fence(2),
                 seq: 9,
                 action: crate::channels::WorldAction::Fire,
+            },
+            GatewayToShard::ArtifactWant {
+                realm: RealmId::Planet(7),
+                digest: [1, 2],
+                view: Some(ArtifactView {
+                    dir: [0.0, 0.0, 1.0],
+                    radial_m: 1.5e6,
+                }),
             },
         ]
     }
@@ -1466,6 +1522,8 @@ mod tests {
                 GatewayToShard::SkyRequest => 6,
                 // The voxel wire plant holds 7 (minor 31) forever.
                 GatewayToShard::SessionAction { .. } => 7,
+                // The far-view ship holds 8 (minor 32) forever.
+                GatewayToShard::ArtifactWant { .. } => 8,
             }
         }
         let mut seen = std::collections::BTreeSet::new();
@@ -1483,9 +1541,9 @@ mod tests {
             assert_eq!(bytes[0], g2s_index(&msg));
             seen.insert(bytes[0]);
         }
-        assert_eq!(seen.len(), 8);
+        assert_eq!(seen.len(), 9);
         assert_eq!(seen.first().copied(), Some(0));
-        assert_eq!(seen.last().copied(), Some(7));
+        assert_eq!(seen.last().copied(), Some(8));
     }
 
     /// The NESTED positional pins for the window lane's two payload enums — the same

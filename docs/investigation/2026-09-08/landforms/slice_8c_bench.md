@@ -277,7 +277,7 @@ the numbers are.
 | the golden chunk tables under the recipe (`None`) | yes (`just terrain-pin`) | unchanged by C4a–c (the recipe did not move) |
 | the world identity through the golden fields | yes (`golden_z_record`, the tag test, the artifact pin) | `HOME_IDENTITY_MEASURED` pinned; the recipe-only word differs |
 | the ship's pace | stated, not measured on a link | 8 pyramid parts + 4 tiles a tick a session; a tile is up to 64 × 64 × 9 B = 36 KB, so 144 KB a tick, 2.9 MB/s at 20 Hz; the head and the six levels of the home planet are 2.96 M words = 5.9 MB, shipped in 184 parts (16 384 words each) over 23 ticks (1.2 s) |
-| the client's per-chunk field pick | unit-tested (moon) | rung ≥ 10 reads a pyramid level on the home planet (`level_for`); a rung-0 chunk waits for 1–2 tiles, 4 at a face edge |
+| the client's per-chunk field pick | unit-tested (moon); re-ruled 2026-09-20 | rung ≥ 10 reads a pyramid level on the home planet (`level_for`): the FINEST level whose node is at least the cell — level 1 (16 km) for rungs 10–14, one level up per rung above; the first rule took the coarsest level with four nodes across the chunk (262 km nodes at rung 14), measured as blobs and a coast that moved at every rung swap; a rung-0 chunk waits for 1–2 tiles, 4 at a face edge |
 | the recipe→artifact rebuild at login | UNMEASURED | the count is `ChunkCounters::artifact_rebuilds`; the visible step is judged on the first window flight |
 | the far view's pop at the crossing into the planet's realm | UNMEASURED | the window-holder ship is owed; the step is bounded by the artifact's own relief against the recipe's coarse octaves |
 | the tiles' arrival against the finest ring's horizon | UNMEASURED | `ChunkCounters::awaiting_artifact` on the first window flight |
@@ -295,3 +295,103 @@ The other targets' legs (the x86-64 leg, the k3d pod) of the artifact pin are UN
 | the solve's wall time | yes | 68.9 s of one core in release (the re-solve adds one bisection, under a second) |
 | the level's coincidence with Earth's 4 455 m dry step | NOTED, unexplained | two laws, one number; a halved inventory must move the level (owed at C6) |
 | the water sheet's cost and look | UNMEASURED | judged at C6's stands; the ocean's own look is 8o's |
+
+## 12. The far-view ship's first flight (2026-09-20) — the store's field cap
+
+The first `dev-cluster up --demand` + window flight of C4c and C5 together. The flight's measurements:
+
+| item | measured | value |
+|---|---|---|
+| the login, the sky, the hull at the berth | yes | as before: the whole sky in hand 20 s after the window opened; the berthed hull 40 m from the spawn |
+| the far planets before any artifact | yes | 30 recipe chunks at rung 20 drawn from the spawn (the nearest planet 5.5e10 m away); every planet box stated `artifact: None` because no solve had landed |
+| the moon's solve | yes | landed and armed its ship 98 ms after the boot (a 353 km body); its store rows fit |
+| **the home planet's solve** | **yes — a DEFECT** | the shard panicked on the tick the solve landed: `a pyramid's bytes encode infallibly: FieldTooLarge { tag: 1 }` at `built_store.rs:240`. The six pyramid levels are 2.96 M heights = 5.9 MB in ONE store row, and a TLV field caps at 1 MiB (`MAX_FIELD_BYTES`). Every big planet's shard died the same way (17 solves started, 1 landed); the demand loop re-spawned each into another 70 s solve and the same panic — four shards at 100 % CPU, no far view. |
+| the cure | built, unit-tested | the pyramid stored as an index row + one row per part of `PYRAMID_PART_WORDS` (16 384 heights, 32 KB — the wire's cut; the home planet's pyramid is 181 rows); `ARTIFACT_VERSION` 3; a 1.2 MB level round-trips through 37 rows; stale rows dropped on rewrite |
+| the home artifact's digest, version 3 | yes (`just artifact-pin`, re-recorded) | `[0xc194_6467_da41_3505, 0x3232_0b11_b552_d9b6]` (85 760 604 bytes, 6 levels, 68.2 s; the rows did not move — only the version word in the digest's head did) |
+| the far view's arrival, the sea sheet, the tiles under the boots | UNMEASURED | the second flight, after the cure |
+
+### 12.1 The second flight (2026-09-20, after the cure)
+
+| item | measured | value |
+|---|---|---|
+| the solves, five planets at once on the 14-core machine | yes | the home planet 78.3 s (sea +4 455 m, the pin's word); the moon 97 ms; the rocky water world 36.3 s; two more 43.9 s and 122.9 s; **0 panics**, no re-spawn |
+| the far-view path from the spawn | yes | the client held **3 whole artifacts (12 pyramid levels)** within the beat after each landing, 0 tiles (no occupant on a planet), 0 refused; the drawn set names only the bodies in range, so the two farther landings stayed on their shards |
+| **the water world's sea word** | **yes — a DEFECT** | the rocky water world armed its ship with `sea_m=Some(32767)`: `i16` metres saturate, the solve found +84 km (§7). Ledgered in DEFERRED's C5 block; the cure rides C6's version bump |
+| the far view on the artifact, the sea sheet's look, the tiles under the boots | UNMEASURED | needs a flight to a planet (the owner's stick or an agent leg); the lane's `artifact_rebuilds` / `awaiting_artifact` are not in the dev state yet — owed with the gateway's hidden artifact counters (`admin.rs` drops them as `_`) |
+
+### 12.2 The owner's pictures and the pilot-eye captures (2026-09-20, 11:25–13:38)
+
+The instruments first (the stamp's lane refusals and the two artifact words, `DevArtifacts::held`, the gateway's
+artifact counters and its three log lines, `client.sh --capture --pilot`, the `land_stand` finder), then the
+measurements, then the cures, each measured again:
+
+| item | measured | value |
+|---|---|---|
+| the shard's tick after its artifact landed | yes | 90–96 ms (home), 47 ms (the water world), 0.3 ms (the moon): the source hashed 85 MB per tick for its digest and re-encoded 181 parts per tick. CURED (cached once, parts on a want): **0.05 ms** |
+| the realm the occupant stands in | yes | the gateway wanted every planet in the sky except the one under the pilot (the origin has no composed row); the globe underfoot took its shape only when a boarded hull made the planet an ancestor. CURED (`drawn_realms`): the head wanted, cached and served **within one second** of the landing; `artifact_expected == artifact_held` on the client; the solved globe from the spawn with nobody boarding |
+| the level a far-view rung reads | yes | rung 14 read level 5 (262 km nodes), every rung another level. CURED: the finest level whose node ≥ the cell (rungs 10–14: level 1, 16 km); `GENERATOR_VERSION` 7, the golden fields hold the level the top rung (18) reads: level 5 |
+| the lines on every chunk edge | yes | a one-pixel line of sea colour on every edge at 410 km and at 20 km (the halo read the recipe, the core the artifact). CURED (`ColumnRead`): the 20 km capture over the same land is a continuous surface |
+| the capture client's view | yes | without `--capture-pilot` the capture frames the whole realm-box scene and draws no ground under the pilot; with it, the window's own view |
+| **a moving eye in a HULL: the tiles for a viewer** (`flight_hull_leg.sh`, boarded by a slow strafe, half stick on a 50 m/s² hull, 40 s) | yes | BEFORE the one tile path: the pilot in the hull held only the 9 tiles received on foot at the berth. AFTER: 37 tiles, 0 missing and 0 revealed on the descent, 989 missing for one sample at 930 m/s into rung 1 (the builders' budget) |
+| **a moving eye: the tiles under the occupant** (a 40 s descent from 20 km at 500–1 000 m/s, the stamp every 3 s) | yes | BEFORE: 1 tile received, 730 chunks missing under drawn ground standing still, refusals 2.2 M climbing 19 k/s, 598 revealed on the descent. AFTER (`tile_reach_m`): 9 tiles, 0 missing standing still, refusals frozen, 0 revealed; 201 missing for one sample in the last second at 1 km/s into rung 1 (the builders' budget) |
+
+Lesson for the ledger: the store's field cap is a number the artifact pin never met, because the pin solves and
+digests without a store; the moon's round-trip test used a body whose pyramid fits. A store test with a level
+over the cap now exists. Every new row family must be tested at the LARGEST body's size, not the smallest's.
+
+### 12.3 The coast flight: the span against the artifact (2026-09-20, evening)
+
+The owner, on the level stand with the shipyard hull: *"the water shores' shapes are constantly changing
+while I'm flying."* Flown by the code (`flight_coast_leg.sh`: the 50 m/s² hull, level at 12 km, a quarter
+stick, 40 s to 420 m/s, two frames a second): the frames show the sea in CHUNK-SHAPED squares with straight
+edges where the land is, and the squares differ from frame to frame; the probe frames show those squares as
+BLACK — no terrain mesh under the sheet at all.
+
+**The cause, measured** (`crates/bins/examples/span_miss.rs`, ±150 km around the coast stand, the 5 × 5
+sample grid of every column): the ladder asked a column's chunk slices from the recipe's own relief
+(`digest::surface_column` → `height::height`), while the chunk it built stood on the artifact's `Z` plus
+the fine octaves. The two surfaces are 2.1 km apart on average, 5.9 km at worst.
+
+| rung | columns | slices missing the ground somewhere | land columns with NO ground in any asked slice | column bound |
+|---|---|---|---|---|
+| 4 | 92 112 | 86.96 % | 5 840 | 346 m |
+| 5 | 23 104 | 73.43 % | 1 031 | 566 m |
+| 6 | 5 929 | 51.24 % | 218 | 811 m |
+| 7 | 1 521 | 3.75 % | 0 | 970 m |
+| 8–11 | 555 | 0 | 0 | 0.9–1.8 km (a slice is 16 km and up) |
+
+An empty chunk counts as built and drawn, so no stamp counter ever saw it; the water sheet is drawn per
+chunk at the sea radius whatever the slice, so the hole read as sea. That is the changing shore, the squares,
+and part of "the sea appeared when I boarded" (a scene swap re-descends and asks other slices).
+
+**The cure:** `digest::surface_column_field` — the span through the builder's own column read
+(`ColumnRead`), the bound widened by the field's step between neighbouring samples; the ladder's
+`column_span` reads it on the field the rung reads, provisional while the tiles are not here (the finest
+whole level, else the recipe; read again each descent; the renderer re-descends when the artifact's epoch
+changes while any span is provisional). **Measured after:** 0 field-span misses at every rung 4–11 over the
+same 300 km (the table's recipe columns unchanged, the field column all zero). The moon's own artifact pins
+it in a unit test at a rows rung and a level rung. The pilot-eye coast leg on the rebuilt client is the
+judge for the picture.
+
+**The second half (the same evening).** The rebuilt client still drew the same squares. Ablations that
+changed nothing: the engine's frustum culling off (`VD_TERRAIN_NO_CULL=1`), the bounded ask off; the wanted
+set replayed offline for the recorded eye (`examples/wanted_probe.rs`) asked the right slices for every
+column (0 hole columns of 4 574). The lane's own stamp (`hole_columns`, `empty_keys @L<level>`,
+`awaiting_keys` with the missing tiles, `margin_missing`, `stale_builds`) named it: the first descents ran
+BEFORE the artifact's head arrived, the recipe span was returned as FINAL with no artifact and never read
+again. Cured: a recipe span on a body that has a macro lattice is PROVISIONAL until the head lands; a chunk
+that lands built on another artifact than the lane holds is refused (`built_on`). **Measured, two flights of
+one binary on the same leg: 0 hole pixels inside the drawn ground from frame 15 on, against 42 000–76 000 a
+frame before.**
+
+| frame | hole pixels BEFORE (run 1789933423) | AFTER (run 1789935981) | AFTER (run 1789937031) |
+|---|---|---|---|
+| 0 | 9 782 | 42 | 52 |
+| 20 | 53 784 | 0 | 0 |
+| 40 | 76 714 | 0 | 0 |
+| 60 | 42 204 | 0 | 0 |
+| 75 | 31 045 | 0 | 0 |
+
+Owed from the instrument: the far ring's tiles (about 23 rung-9 chunks past the horizon wait forever for a
+tile whose centre stands past the reach; ledgered).
+

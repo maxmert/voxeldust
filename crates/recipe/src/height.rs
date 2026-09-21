@@ -499,6 +499,43 @@ mod tests {
         assert_eq!(relief_of_table(&table, 99, dir, &flat), relief(&table, dir));
     }
 
+    /// ★ THE FROM-FIRST TABLE FORM CLAMPS ITS COUNT (slice 8c stage C4). A count at or past the
+    /// table's size reads the WHOLE table; a `first` at or past that count sums nothing; a `first`
+    /// of one drops the first octave's term.
+    ///
+    /// **Example.** The column under the pilot's boots reads the macro field `Z` for the coarse
+    /// octaves, so it sums from a later octave on. A GPU shell states a count of 99 because a
+    /// shader holds a fixed array, and the column still reads the sixteen octaves the table holds.
+    #[test]
+    fn the_from_first_table_form_clamps_the_count() {
+        let a = octave(1, 15.9259, 8011.2287);
+        let b = octave(2, 31.8518, 4111.0007);
+        let dir = [DIR_ONE, Gi::ZERO, Gi::ZERO];
+        let mut table = [a; OCTAVES_CAP];
+        table[1] = b;
+        let flat = flat_roughness();
+        // A count AT the table's size takes the clamp arm and reads the whole table.
+        assert_eq!(
+            relief_of_table_from(&table, 0, OCTAVES_CAP, dir, &flat),
+            relief(&table, dir)
+        );
+        // A count PAST the table reads the whole table too.
+        assert_eq!(
+            relief_of_table_from(&table, 0, 99, dir, &flat),
+            relief(&table, dir)
+        );
+        // From the second octave on, the sum drops the first octave's term.
+        assert_eq!(
+            relief_of_table_from(&table, 1, OCTAVES_CAP, dir, &flat),
+            relief(&table[1..], dir)
+        );
+        // A first at or past the clamped count sums nothing.
+        assert_eq!(
+            relief_of_table_from(&table, OCTAVES_CAP, 99, dir, &flat),
+            Gi::ZERO
+        );
+    }
+
     /// ★ A RIDGED OCTAVE IS `1 − |n|`, RE-CENTRED (slice 8a stage 2; `slice_8a_design.md` §2.2).
     ///
     /// The test states the transform ITSELF, from the raw noise read back through a smooth octave of

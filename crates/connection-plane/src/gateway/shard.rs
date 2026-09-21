@@ -267,10 +267,12 @@ pub(crate) fn on_shard_control(
             );
         }
         // ★ THE BULK RELAY (slice 8c stage C4c, the artifact ship): a shard's bytes for the sessions
-        // it NAMES are relayed to each one as `ServerControlMsg::ArtifactPart`, never decoded here
-        // (the gateway holds no chunk and no artifact); a session that is not Active, not behind
-        // this gateway, or negotiated under minor 32 is skipped and counted. The WINDOW-HOLDER
-        // audience has no producer yet (the far view's pyramid is owed) and stays COUNTED.
+        // it NAMES (the tiles under an occupant) are relayed to each one as
+        // `ServerControlMsg::ArtifactPart`, never decoded here; a session that is not Active, not
+        // behind this gateway, or negotiated under minor 32 is skipped and counted. A shard's
+        // answer to an ARTIFACT WANT rides the REALM audience and is CACHED for every session that
+        // draws the realm (`artifact.rs`, the far-view ship). The window-holder audience has no
+        // producer and stays COUNTED.
         ShardToGateway::BulkFor {
             realm_fence,
             audience,
@@ -278,6 +280,16 @@ pub(crate) fn on_shard_control(
         } => match audience {
             vd_wire::session_flow::BulkAudience::Sessions(named) => {
                 relay_bulk(from, realm_fence, &named, bytes, sessions, stats, outbox);
+            }
+            vd_wire::session_flow::BulkAudience::Realm(realm) => {
+                super::artifact::cache_artifact_part(
+                    from,
+                    realm,
+                    bytes,
+                    clock.local_tick,
+                    sessions,
+                    stats,
+                );
             }
             vd_wire::session_flow::BulkAudience::WindowHolders(_) => {
                 stats.bulk_for_unrouted += 1;

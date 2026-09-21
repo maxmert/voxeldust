@@ -488,6 +488,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // charter and states no surface, so it states no charter either: a fact about a ground
             // nobody draws is 127 bytes saying nothing.
             charter: own_surface.and(own_charter),
+            // ★ THE ARTIFACT WORD (the far-view ship): the digest the store gave at boot; a
+            // realm still solving states none until the solve lands (below).
+            artifact: artifact_boot
+                .as_ref()
+                .and_then(|b| b.artifact())
+                .map(|a| a.digest()),
             // D-WORLD-2 — the crossing-latch ttl + re-drive budget (resolved from the launcher-derived
             // env above): a delivered-but-unresolved crossing re-drives a bounded number of times, then
             // takes the LOCAL pre-CAS abort that clears the strand latch.
@@ -738,6 +744,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.charter = config
                         .charter
                         .map(|charter| vd_bins::charter_with_sea(charter, sea));
+                    config.artifact = Some(artifact.digest());
                 }
                 if let Some((artifact, body)) = boot.artifact().zip(own_body.as_ref())
                     && let Some(source) = vd_bins::artifact_source::artifact_source_of(

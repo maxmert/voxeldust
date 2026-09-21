@@ -784,6 +784,7 @@ mod tests {
             facing: [0.0, 0.0, 0.0, 1.0],
             surface: None,
             charter: None,
+            artifact: None,
         };
         let sphere_prims = to_render_prims(&sphere, DVec3::ZERO);
         assert_eq!(sphere_prims.len(), 1);
@@ -807,6 +808,7 @@ mod tests {
             facing: [0.0, 0.0, 0.0, 1.0],
             surface: None,
             charter: None,
+            artifact: None,
         };
         let box_prims = to_render_prims(&boxed, DVec3::ZERO);
         assert_eq!(box_prims.len(), 1);

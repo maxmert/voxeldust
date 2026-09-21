@@ -34,12 +34,11 @@ use crate::chunk::{
     above_surface_cell, below_surface_cell, cavern_of, charter_of, column_field, finish_cell,
     foreign_extents, generate_in, point_at, tubes_reaching,
 };
-use crate::height::biome_of_code;
 use crate::strata::Biome;
 use crate::units::LENGTH_BITS;
 use vd_recipe::Gi;
 use vd_recipe::cell::CellCharter;
-use vd_recipe::plan::{column_surface, site_direction_of};
+use vd_recipe::plan::site_direction_of;
 use vd_seed::bend::Face;
 use vd_seed::seam::{Edge, across};
 
@@ -77,6 +76,12 @@ pub struct SampleBox {
     /// ★ The same columns' WATER surface radius (slice 8c stage C5) at [`LENGTH_BITS`], or ZERO
     /// for a dry column — what the client's water sheet stands on.
     pub water: Vec<Gi>,
+    /// ★ THE BODY'S SEA as a radius at [`LENGTH_BITS`], ZERO for a body with none (2026-09-20, the
+    /// owner: "the form of the shores is changing all the time"): the sea is ONE surface under
+    /// every cell of the body, so the shore is the land's own crossing of it and follows the land's
+    /// morph through every rung; a sheet drawn only where a column was wet grew and shrank with
+    /// the rung's cell, and its edge stepped at every ring swap.
+    pub sea: Gi,
 }
 
 impl SampleBox {
@@ -368,7 +373,12 @@ pub(crate) fn box_topology(body: &BodyDefinition, key: ChunkKey) -> BoxTopology 
 /// The prologue of one box: [`BoxSetup`] for `key`, whose core columns come from `column`. The
 /// topology above, plus the two passes RUN ON THIS HOST — the columns' surfaces and the lattices'
 /// node values, through the very kernels the card runs.
-pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnField) -> BoxSetup {
+pub(crate) fn box_setup(
+    body: &BodyDefinition,
+    field: Option<&dyn crate::artifact::ZField>,
+    key: ChunkKey,
+    column: &ColumnField,
+) -> Option<BoxSetup> {
     let rung = key.rung;
     let edge = CHUNK_EDGE as i32;
     let topology = box_topology(body, key);
@@ -377,8 +387,27 @@ pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnFie
     let mut dirs = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     let mut surfaces: Vec<(Gi, Biome)> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     let mut water: Vec<Gi> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
-    // ★ ONE COLUMN PASS (step G2-A): the charter once per box, the recipe's kernel per halo column.
+    // ★ ONE COLUMN PASS (step G2-A): the charter once per box, the column rule per halo column —
+    // the core's own rule (2026-09-20: a halo that read the recipe while the core read the
+    // artifact cracked every chunk edge).
     let plan_charter = body.plan_charter(rung, key.face);
+    let lattice = match field {
+        Some(f) => Some(body.macro_lattice()?.coarser(f.level())?),
+        None => None,
+    };
+    let read = crate::chunk::ColumnRead {
+        body,
+        field,
+        lattice: lattice.as_ref(),
+        charter: &plan_charter,
+        first: if field.is_some() {
+            body.first_fine()
+        } else {
+            0
+        },
+        key,
+        n_cells: body.ladder.cells_per_edge(rung) as i32,
+    };
     let mut b = -HALO;
     while b <= edge {
         let mut a = -HALO;
@@ -393,12 +422,9 @@ pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnFie
                     column.water[(b as usize) * CHUNK_EDGE + a as usize],
                 )
             } else {
-                // A halo column reads no artifact row: the recipe's own relief under the body's
-                // sea — the halo is the extractor's neighbourhood, never a drawn column, and its
-                // water is the sea alone (a lake at a chunk's edge is the neighbour's own column).
-                let site = topology.sites[SampleBox::column_index(a, b)];
-                let s = column_surface(&plan_charter, i32::from(site.face), site.i, site.j);
-                (s.dir, s.h, biome_of_code(s.biome), body.sea_radius)
+                // A halo column is the neighbour's own column: it reads what the neighbour reads.
+                let (dir, h, biome, w, _) = read.column(a, b)?;
+                (dir, h, biome, w)
             };
             dirs.push(dir);
             surfaces.push((h, biome));
@@ -422,7 +448,7 @@ pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnFie
         band,
         ..
     } = topology;
-    BoxSetup {
+    Some(BoxSetup {
         sites,
         dirs,
         surfaces,
@@ -434,7 +460,7 @@ pub(crate) fn box_setup(body: &BodyDefinition, key: ChunkKey, column: &ColumnFie
         carve_caverns,
         k0,
         band,
-    }
+    })
 }
 
 /// The chunk with its halo; `None` for a key outside the body.
@@ -464,7 +490,7 @@ pub fn sample_box(
         k0,
         band,
         ..
-    } = box_setup(body, key, &column);
+    } = box_setup(body, field, key, &column)?;
     let mut cells = Vec::with_capacity(BOX_CELLS);
     let mut c = -HALO;
     while c <= edge {
@@ -523,6 +549,7 @@ pub fn sample_box(
         sites,
         dirs,
         water,
+        sea: body.sea_radius,
     })
 }
 

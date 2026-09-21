@@ -29,7 +29,10 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 /// planet's mountains halved to 8 276 m). The charter's other words (the spin, the tilt, the derived
 /// pressure, the greenhouse, the crust, the water, the sea) are STATED and read by no kernel yet, so
 /// they move no byte; the recipe's sea keeps its draw until 8c (ruling T8).
-pub const GENERATOR_VERSION: u32 = 6;
+/// 7 (2026-09-20): the far view's level pick — a rung reads the finest pyramid level whose node is at
+/// least its cell (`PyramidField::level_for`), so every chunk from rung 10 up moved; the recipe's own
+/// relief did not (the chunk golden tables stand).
+pub const GENERATOR_VERSION: u32 = 7;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -84,7 +87,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 6,
+            GENERATOR_VERSION, 7,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -118,5 +121,5 @@ mod tests {
         assert_ne!(bare.measured, id.measured);
     }
 
-    const DECLARED_PIN: u64 = 9_927_149_072_703_928_257;
+    const DECLARED_PIN: u64 = 17_976_115_674_562_111_424;
 }

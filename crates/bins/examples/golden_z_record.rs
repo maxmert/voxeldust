@@ -42,7 +42,16 @@ fn main() {
                 .insert(node, (r.z_m, r.water_m, r.receiver_facies >> FACIES_SHIFT));
         }
     }
-    let top = PyramidField::of(&artifact, levels).expect("the coarsest level");
+    // ★ THE LEVEL THE TOP-RUNG KEYS READ (2026-09-20): the runtime's own pick for the top rung,
+    // which is the coarsest level only when the top rung's cell reaches it (it does not on the
+    // home planet: rung 18 reads level 5 of 6). A golden field the far view never reads would
+    // prove nothing about the picture.
+    let top_level = GOLDEN_SELF_CHECK_KEYS
+        .iter()
+        .map(|entry| PyramidField::level_for(&lattice, levels, self_check_key(&body, *entry).rung))
+        .max()
+        .expect("eight keys");
+    let top = PyramidField::of(&artifact, top_level).expect("the top-rung keys' level");
     let fields = GoldenFields {
         levels,
         sea_m: artifact.sea_m,

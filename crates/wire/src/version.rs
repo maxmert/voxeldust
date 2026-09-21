@@ -330,7 +330,9 @@ pub const PROTO_MAJOR: u16 = 1;
 /// that it holds a realm's head and pyramid at a digest. Every one is APPENDED, so the floor does not
 /// move. The parts ride Control until the diff lane (slice 10) builds the client's bulk receiver.
 /// `ArtifactHead` gained `sea_m` (slice 8c stage C5, the solved sea) INSIDE minor 32, before any
-/// peer shipped it: the head is one shape from the minor's first day out.
+/// peer shipped it: the head is one shape from the minor's first day out. THE FAR-VIEW SHIP (the
+/// same day, SL3 — a realm draws itself, whoever looks): `GatewayToShard::ArtifactWant` (disc 8) and
+/// `BulkAudience::Realm` (disc 2), both inside minor 32 for the same reason.
 pub const PROTO_MINOR: u16 = 32;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]

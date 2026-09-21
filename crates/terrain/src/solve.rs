@@ -1776,14 +1776,15 @@ mod tests {
         // ★ THE SEA RE-SOLVED (C5): the report names the level the state holds, and the ocean
         // share is the area under it — a part of the moon, never all of it, never none.
         assert_eq!(report.sea_z, Some(state.sea_z));
-        assert!(
-            report.ocean_share > 0.0 && report.ocean_share < 1.0,
-            "{}",
-            report.ocean_share
-        );
+        // Two statements, never one `and`: a short-circuit hides the second half from the count.
+        let share = report.ocean_share;
+        assert!(share > 0.0, "{share}");
+        assert!(share < 1.0, "{share}");
         assert!((state.ocean_share() - report.ocean_share).abs() < 1e-12);
         let wet_nodes = state.z.iter().filter(|&&z| z <= state.sea_z).count();
-        assert!(wet_nodes > 0 && wet_nodes < state.node_count());
+        let nodes = state.node_count();
+        assert!(wet_nodes > 0, "{wet_nodes}");
+        assert!(wet_nodes < nodes, "{wet_nodes} of {nodes}");
         // A dry state reads no share; a sea over every node reads one.
         let mut dry = MacroSolve::new(&moon).expect("a state");
         dry.sea_z = i32::MIN;

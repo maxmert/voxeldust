@@ -124,6 +124,11 @@ pub struct RealmBox {
     /// gravity may not be guessed. A malformed charter word decodes to `None` here and is refused
     /// one step later, never read as a default.
     pub charter: Option<vd_core::look::BodyCharter>,
+    /// ★ THE ARTIFACT THE REALM STATES (the far-view ship): the digest of the solved artifact its
+    /// shard serves, off the same bag. A realm that states one is NOT drawn from the recipe alone:
+    /// the chunk lane waits for the head at this digest (the gateway serves it), so the shape a
+    /// pilot sees from orbit is the solved one from its first frame, and no pop follows.
+    pub artifact: Option<[u64; 2]>,
 }
 
 impl RealmBox {
@@ -411,6 +416,8 @@ fn row_box(r: &SceneRow, depth: u8) -> Option<RealmBox> {
         surface: vd_core::look::surface_of(&r.bag).ok().flatten(),
         // The charter beside it, by the same rule: absence of the tag is absence of the datum.
         charter: vd_core::look::charter_of_bag(&r.bag).ok().flatten(),
+        // The artifact word, by the same rule.
+        artifact: vd_core::look::artifact_of_bag(&r.bag).ok().flatten(),
     })
 }
 
@@ -1933,6 +1940,7 @@ mod tests {
             facing: [0.0, 0.0, 0.0, 1.0],
             surface: None,
             charter: None,
+            artifact: None,
         };
         let edge = Tier::Fine.cell_edge_m();
         assert_eq!(rbox.draw_center(), DVec3::new(3.0 * edge + 0.25, 0.0, 0.0));
@@ -1962,6 +1970,7 @@ mod tests {
             facing: [0.0, 0.0, 0.0, 1.0],
             surface: None,
             charter: None,
+            artifact: None,
         };
         assert_eq!(
             at(Tier::Fine).draw_center(),
@@ -1995,6 +2004,7 @@ mod tests {
             facing: [0.0, 0.0, 0.0, 1.0],
             surface: None,
             charter: None,
+            artifact: None,
         };
         // The centre is flattened ONCE, by the caller, through the one chokepoint; the prim lands
         // exactly there (slice 5: ONE term, no composition in here).
@@ -2034,6 +2044,7 @@ mod tests {
             facing: [0.0, 0.0, 0.0, 1.0],
             surface: None,
             charter: None,
+            artifact: None,
         };
         let prims = to_render_prims(&rbox, DVec3::new(0.0, 7.0, 0.0));
         assert_eq!(prims.len(), 1);

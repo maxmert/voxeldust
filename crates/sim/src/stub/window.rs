@@ -497,11 +497,14 @@ pub(crate) fn current_bodies(
                 // facts as whole numbers, beside the surface. A realm without a charter states
                 // none — absence of the tag is absence of the datum, never a default.
                 bag: match config.surface {
-                    Some(surface) => vd_core::look::surface_look_bag(
+                    // ★ THE ARTIFACT TAG (the far-view ship): the digest of the artifact this
+                    // realm serves, so every gateway that draws it asks for the shape.
+                    Some(surface) => vd_core::look::surface_look_bag_with(
                         &look,
                         child_luma.get(&config.realm).copied(),
                         &surface,
                         config.charter.as_ref(),
+                        config.artifact,
                     ),
                     None => {
                         vd_core::look::self_look_bag(&look, child_luma.get(&config.realm).copied())

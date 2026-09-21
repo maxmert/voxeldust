@@ -129,6 +129,7 @@ fn config() -> StubConfig {
     StubConfig {
         // A rig realm is not a seed-shaped body, so it states neither a surface nor a charter.
         charter: None,
+        artifact: None,
         realm: RealmId::System(7),
         held_realms: StubConfig::single_realm(RealmId::System(7)),
         frame: FrameRef::SystemSpace { system_seed: 7 },

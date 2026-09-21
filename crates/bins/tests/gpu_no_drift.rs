@@ -114,7 +114,7 @@ fn census(body: &BodyDefinition, keys: &[ChunkKey]) -> Census {
 /// [`the_body_asks_for_a_narrow_box_right_behind_a_wide_one`].
 fn seam_stand_keys(body: &BodyDefinition) -> Vec<ChunkKey> {
     let mut view = vd_client::ladder_view::LadderView::default();
-    view.wanted(body, SEAM_STAND_EYE_M).keys
+    view.wanted(body, SEAM_STAND_EYE_M, None).keys
 }
 
 /// The TOP rung of a body: the coarsest, where no cavern is carved at all.
@@ -425,7 +425,7 @@ fn the_card_builds_the_seam_stands_own_boxes_byte_for_byte() {
     let (device, queue) = device();
     let body: BodyDefinition = home_planet();
     let mut view = vd_client::ladder_view::LadderView::default();
-    let wanted = view.wanted(&body, SEAM_STAND_EYE_M);
+    let wanted = view.wanted(&body, SEAM_STAND_EYE_M, None);
     // Zero is every box the stand wants; a count takes that many.
     let cap = std::env::var("VD_GPU_DRIFT_BOXES")
         .ok()

@@ -138,7 +138,7 @@ pub enum DevTransferView {
 }
 
 /// ★ WHAT THE CLIENT HOLDS OF THE REALMS' ARTIFACTS (slice 8c stage C4c).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DevArtifacts {
     /// Realms whose artifact head arrived.
     pub realms: u64,
@@ -150,6 +150,10 @@ pub struct DevArtifacts {
     pub tiles: u64,
     /// Parts refused: no head yet, a wrong shape, or not an artifact's part at all.
     pub refused: u64,
+    /// The realms whose head the book holds, as `{:?}`, with whether each pyramid is whole
+    /// (2026-09-20: the counts alone could not say WHICH planet's head had not come).
+    #[serde(default)]
+    pub held: Vec<(String, bool)>,
 }
 
 /// The decoded, delivered client state — wire truth, the agent's diagnosis surface.
@@ -413,6 +417,21 @@ pub(crate) mod tests {
                 parent_hits: 5_000,
                 parent_builds: 600,
                 parent_waits: 40,
+                no_body: 1,
+                outside: 2,
+                submitted: 705,
+                awaiting_artifact: 9,
+                artifact_rebuilds: 1,
+                awaiting_keys: vec!["PosX 0 4000 4000 3: tiles [(0, 2, 2)]".to_owned()],
+                empty_chunks: 4,
+                empty_keys: vec!["PosX 4 12 9 269".to_owned()],
+                hole_columns: 2,
+                hole_keys: vec!["PosX 6 984 1157 66".to_owned()],
+                margin_missing: 5,
+                stale_builds: 3,
+                lattice_edge: 1216,
+                artifact_expected: Some([0xD1, 0xD2]),
+                artifact_held: None,
                 lead_m: 0.0,
                 build_rate_per_s: 0.0,
                 eye_speed_mps: 0.0,
@@ -572,6 +591,19 @@ pub(crate) mod tests {
         assert!(json.contains("\"frame_ms\":34.0"));
         assert!(json.contains("\"passes_ms\":[[\"main_opaque_pass_3d\",1.5,20.0]]"));
         assert!(json.contains("\"parent_waits\":40"));
+        // ★ THE LANE's REFUSALS ride the stamp, and the two artifact words.
+        assert!(json.contains("\"awaiting_artifact\":9"));
+        assert!(json.contains("\"artifact_rebuilds\":1"));
+        assert!(json.contains("\"awaiting_keys\":[\"PosX 0 4000 4000 3: tiles [(0, 2, 2)]\"]"));
+        assert!(json.contains("\"empty_chunks\":4"));
+        assert!(json.contains("\"empty_keys\":[\"PosX 4 12 9 269\"]"));
+        assert!(json.contains("\"hole_columns\":2"));
+        assert!(json.contains("\"hole_keys\":[\"PosX 6 984 1157 66\"]"));
+        assert!(json.contains("\"margin_missing\":5"));
+        assert!(json.contains("\"stale_builds\":3"));
+        assert!(json.contains("\"lattice_edge\":1216"));
+        assert!(json.contains("\"artifact_expected\":[209,210]"));
+        assert!(json.contains("\"artifact_held\":null"));
         // ★ THE BOARDING INSTRUMENT rides the stamp: the forget count, the last forget and the
         // facing the view took at the last scene swap.
         assert!(json.contains("\"ladders_forgotten\":2"));
@@ -677,6 +709,42 @@ pub struct DevTerrainStamp {
     pub parent_hits: u64,
     pub parent_builds: u64,
     pub parent_waits: u64,
+    /// ★ THE LANE's REFUSALS since the client started (the far-view ship's first flights,
+    /// 2026-09-20: the owner saw a globe of six chunks under an artifact and nothing here said
+    /// why): requests refused for a realm with no body, for a key outside the body's ladder, and
+    /// for a field not whole yet (`awaiting_artifact`: the head not here at the stated digest, a
+    /// level assembling, a tile the stencil reads missing); the jobs submitted; and the realms
+    /// rebuilt when their artifact arrived over recipe-built chunks.
+    pub no_body: u64,
+    pub outside: u64,
+    pub submitted: u64,
+    pub awaiting_artifact: u64,
+    pub artifact_rebuilds: u64,
+    /// ★ THE HOLE INSTRUMENT (the owner's coast flight, 2026-09-20): the requests refused for the
+    /// artifact THIS FRAME, named with the tiles they wait for (`face rung x y z: tiles …`, capped),
+    /// the chunks ever harvested with no triangle, and the ones harvested empty this frame, named
+    /// (capped). A chunk built empty counts as drawn everywhere else, and the sea sheet shows
+    /// through it.
+    pub awaiting_keys: Vec<String>,
+    pub empty_chunks: u64,
+    pub empty_keys: Vec<String>,
+    /// ★ THE HOLE COLUMNS NOW: chunk columns of the realm under the eye whose every resident
+    /// slice holds no triangle (the count and the first few, by their empty key), and the
+    /// wanted chunks of the MARGIN class not resident (the urgent and the revealed gaps have
+    /// their own fields above).
+    pub hole_columns: u64,
+    pub hole_keys: Vec<String>,
+    pub margin_missing: u64,
+    /// Chunks refused when they landed built on another artifact than the lane holds.
+    pub stale_builds: u64,
+    /// The macro lattice's edge in nodes of the body under the eye as the lane holds it (zero
+    /// for a body with none): what the level a rung reads is derived from.
+    pub lattice_edge: u32,
+    /// The artifact the body under the eye STATES (the digest off its look bag) and the one the
+    /// lane HOLDS for it (the head that arrived) — equal when the lane builds on the field, and
+    /// the two words that say which side is missing when it does not.
+    pub artifact_expected: Option<[u64; 2]>,
+    pub artifact_held: Option<[u64; 2]>,
     /// THE LEAD the band ran on this frame, in metres: how far the freshest delivered eye stands
     /// from the drawn eye in the body's frame (one interpolation buffer of the eye's motion
     /// through the body — a pilot inside a flying hull stands still in the hull and moves through

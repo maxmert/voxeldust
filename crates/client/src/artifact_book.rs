@@ -138,6 +138,20 @@ impl ArtifactCache {
         }
     }
 
+    /// ★ THE TILES A CHUNK STILL WAITS FOR (the coast flight's hole instrument, 2026-09-20): the
+    /// tiles of its stencil the cache does not hold, at a rung that reads the rows; none at a rung
+    /// that reads a level. What a refused request is NAMED with on the stamp.
+    #[must_use]
+    pub fn missing_tiles(&self, lattice: &MacroLattice, key: ChunkKey) -> Vec<(u8, u32, u32)> {
+        if PyramidField::level_for(lattice, self.head.levels, key.rung) != 0 {
+            return Vec::new();
+        }
+        tiles_of_chunk(lattice, key)
+            .into_iter()
+            .filter(|&(f, tx, ty)| !self.tiles.holds(f, tx, ty))
+            .collect()
+    }
+
     /// The field a RUNG reads along any direction (the geomorph's parent fallback): the level,
     /// whole or not here; or the tiles, which answer nothing for a node they lack.
     #[must_use]
@@ -197,6 +211,8 @@ pub enum ArtifactIngest {
     PyramidWhole { realm: RealmId, digest: [u64; 2] },
     /// A tile kept.
     Tile,
+    /// A tile parked until its realm's head arrives.
+    Parked,
     /// A part or a tile for a realm whose head has not arrived: refused.
     NoHead,
     /// A part or a tile of the wrong shape (a level past the head's, a part past its count, rows
@@ -216,6 +232,9 @@ pub struct ArtifactCounters {
     pub levels_whole: u64,
     pub pyramids_whole: u64,
     pub tiles: u64,
+    /// Tiles parked before their head, and the parked tiles dropped past the bound.
+    pub parked: u64,
+    pub parked_dropped: u64,
     pub no_head: u64,
     pub shape: u64,
     pub duplicates: u64,
@@ -233,8 +252,20 @@ struct LevelParts {
 pub struct ArtifactReceiver {
     book: Arc<ArtifactBook>,
     assembling: BTreeMap<(RealmId, u32), LevelParts>,
+    /// ★ TILES THAT ARRIVED BEFORE THEIR HEAD (the far-view ship): the tiles come from the
+    /// realm's shard on their own lane and the head from the gateway's cache on another, so a
+    /// tile may land first. It is PARKED, bounded per realm, and applied when the head lands —
+    /// never dropped (each tile is shipped once) and never applied unchecked.
+    parked: BTreeMap<RealmId, Vec<ParkedTile>>,
     pub counters: ArtifactCounters,
 }
+
+/// A parked tile: its face, its column and row in tiles, and its rows' bytes.
+type ParkedTile = (u8, u32, u32, Vec<u8>);
+
+/// How many tiles a realm may park before its head arrives: the pace ships four a tick, so this
+/// is over a minute of tiles; past it the oldest is dropped and counted.
+pub const PARKED_TILES_MAX: usize = 256;
 
 impl ArtifactReceiver {
     /// The book, to share: a pointer bump.
@@ -249,6 +280,7 @@ impl ArtifactReceiver {
             Arc::make_mut(&mut self.book).realms.remove(&realm);
         }
         self.assembling.retain(|(r, _), _| *r != realm);
+        self.parked.remove(&realm);
     }
 
     /// ★ ONE PART IN. The book is written copy-on-write, so the renderer's pointer stays whole.
@@ -311,6 +343,7 @@ impl ArtifactReceiver {
                 c.pyramids_whole += 1;
             }
             ArtifactIngest::Tile => c.tiles += 1,
+            ArtifactIngest::Parked => c.parked += 1,
             ArtifactIngest::NoHead => c.no_head += 1,
             ArtifactIngest::Shape => c.shape += 1,
             ArtifactIngest::NotArtifact => c.not_artifact += 1,
@@ -328,6 +361,11 @@ impl ArtifactReceiver {
             .realms
             .insert(realm, ArtifactCache::new(head));
         self.assembling.retain(|(r, _), _| *r != realm);
+        // The tiles that waited for this head land now, through the same checks.
+        for (face, tx, ty, rows) in self.parked.remove(&realm).unwrap_or_default() {
+            let landed = self.accept_tile(realm, face, tx, ty, &rows);
+            self.count(landed);
+        }
         ArtifactIngest::Head
     }
 
@@ -396,7 +434,13 @@ impl ArtifactReceiver {
         rows: &[u8],
     ) -> ArtifactIngest {
         let Some(cache) = self.book.realms.get(&realm) else {
-            return ArtifactIngest::NoHead;
+            let parked = self.parked.entry(realm).or_default();
+            if parked.len() >= PARKED_TILES_MAX {
+                parked.remove(0);
+                self.counters.parked_dropped += 1;
+            }
+            parked.push((face, tx, ty, rows.to_vec()));
+            return ArtifactIngest::Parked;
         };
         let head = cache.head;
         if face >= 6 || tx >= head.tiles_per_edge || ty >= head.tiles_per_edge {
@@ -497,11 +541,32 @@ mod tests {
         let (_moon, lattice, artifact) = moon();
         let mut rx = ArtifactReceiver::default();
         assert_eq!(rx.accept(part_of(1, 0, 1, vec![])), ArtifactIngest::NoHead);
+        // A tile before the head is PARKED and lands with the head; a torn one parked lands as a
+        // shape refusal then; the bound drops the oldest.
         assert_eq!(
-            rx.accept(tile_of(&artifact, Face::PosX, 0, 0)),
-            ArtifactIngest::NoHead
+            rx.accept(tile_of(&artifact, Face::PosX, 1, 0)),
+            ArtifactIngest::Parked
         );
+        assert_eq!(
+            rx.accept(BulkMsg::ArtifactTile {
+                realm: realm(),
+                face: 0,
+                tx: 1,
+                ty: 1,
+                rows: vec![1, 2, 3],
+            }),
+            ArtifactIngest::Parked
+        );
+        for _ in 0..PARKED_TILES_MAX {
+            assert_eq!(
+                rx.accept(tile_of(&artifact, Face::PosX, 1, 1)),
+                ArtifactIngest::Parked
+            );
+        }
+        assert_eq!(rx.counters.parked_dropped, 2);
         assert_eq!(rx.accept(head_of(&artifact)), ArtifactIngest::Head);
+        assert_eq!(rx.book().get(realm()).expect("held").tiles().len(), 1);
+        assert!(rx.parked.is_empty());
         assert_eq!(rx.accept(head_of(&artifact)), ArtifactIngest::SameHead);
         let before = rx.book();
         let cache = rx.book().get(realm()).copied_head();
@@ -559,7 +624,8 @@ mod tests {
         assert_eq!(cache.level(3), None);
         // The older pointer saw no level (copy-on-write).
         assert_eq!(before.get(realm()).expect("held").levels_held(), 0);
-        // A rung-13 chunk reads level 2, ready; a rung-0 chunk reads the tiles, waiting.
+        // A rung-13 chunk reads level 1 and a rung-15 chunk level 2, ready; a rung-0 chunk reads
+        // the tiles, waiting.
         let key = |rung: u8| ChunkKey {
             face: Face::PosX,
             rung,
@@ -569,6 +635,10 @@ mod tests {
         };
         assert_eq!(
             format!("{:?}", cache.field_for(&lattice, key(13))),
+            "Ready(level 1)"
+        );
+        assert_eq!(
+            format!("{:?}", cache.field_for(&lattice, key(15))),
             "Ready(level 2)"
         );
         assert_eq!(
@@ -580,7 +650,11 @@ mod tests {
             0
         );
         assert_eq!(
-            cache.field_at_rung(&lattice, 13).expect("level 2").level(),
+            cache.field_at_rung(&lattice, 13).expect("level 1").level(),
+            1
+        );
+        assert_eq!(
+            cache.field_at_rung(&lattice, 15).expect("level 2").level(),
             2
         );
         // A level of the wrong length is refused by shape, and the level stays absent.
@@ -611,7 +685,7 @@ mod tests {
         );
         let cache = rx.book().get(realm()).cloned().expect("a cache");
         assert_eq!(cache.epoch, epoch + 1);
-        assert_eq!(cache.tiles().len(), 1);
+        assert_eq!(cache.tiles().len(), 2);
         let node = lattice.index(Face::PosX, 3, 3);
         assert_eq!(cache.tiles().z_m(node), artifact.z_m(node));
         let bad_tile = |face: u8, tx: u32, ty: u32, rows: Vec<u8>| BulkMsg::ArtifactTile {
@@ -667,10 +741,12 @@ mod tests {
                 parts: 3,
                 levels_whole: 2,
                 pyramids_whole: 1,
-                tiles: 1,
-                no_head: 2,
+                tiles: 2,
+                parked: PARKED_TILES_MAX as u64 + 2,
+                parked_dropped: 2,
+                no_head: 1,
                 shape: 10,
-                duplicates: 4,
+                duplicates: PARKED_TILES_MAX as u64 - 1 + 4,
                 not_artifact: 1,
             }
         );

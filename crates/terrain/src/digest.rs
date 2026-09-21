@@ -8,7 +8,7 @@
 //! ulp on one cell states a different number and is refused before it draws a hill.
 
 use crate::body::{BodyDefinition, RADIUS_RECIP_BITS};
-use crate::chunk::{ChunkKey, generate};
+use crate::chunk::{ChunkKey, ColumnRead, generate};
 use crate::units::{LENGTH_BITS, STEPS_PER_M, greater, lesser, metres_of_q28};
 use vd_recipe::Gi;
 use vd_recipe::noise::{NOISE_BITS, NOISE_ONE};
@@ -101,6 +101,8 @@ pub const COLUMN_SAMPLES_PER_EDGE: i32 = 5;
 /// divide (ruling F7). Asserted against the sample count, so the two can never drift apart.
 pub const SAMPLE_GAPS_LOG2: u32 = 2;
 const _: () = assert!(1 << SAMPLE_GAPS_LOG2 == COLUMN_SAMPLES_PER_EDGE - 1);
+/// The samples of one column: the grid squared.
+pub const COLUMN_SAMPLES: usize = (COLUMN_SAMPLES_PER_EDGE * COLUMN_SAMPLES_PER_EDGE) as usize;
 
 /// THE COLUMN BOUND: how far the surface inside one chunk column can stand from the heights that
 /// sample it, in metres — the recipe's own statement about itself, stated as a bound with a
@@ -290,7 +292,9 @@ pub fn surface_chunk_span(
     (span.lo, span.hi)
 }
 
-/// The span AND the peak of a column (see [`surface_chunk_span`]).
+/// The span AND the peak of a column (see [`surface_chunk_span`]) on the RECIPE'S OWN relief: a
+/// body with no artifact. A body whose realm states an artifact is spanned by
+/// [`surface_column_field`], on the field the chunk is built on.
 #[must_use]
 pub fn surface_column(body: &BodyDefinition, face: Face, rung: u8, x: i32, y: i32) -> ColumnSpan {
     let edge = crate::chunk::CHUNK_EDGE as i32;
@@ -301,22 +305,141 @@ pub fn surface_column(body: &BodyDefinition, face: Face, rung: u8, x: i32, y: i3
         y,
         z: 0,
     };
-    let floor = i64::from(body.ladder.floor_m);
-    let top = top_chunk_z(body, rung);
-    let bound = column_bound(body, rung);
-    let dropped = body.dropped_bound(rung);
-    let mut lo = i32::MAX;
-    let mut hi = i32::MIN;
-    let mut low = Gi::ZERO;
-    let mut high = Gi::ZERO;
     let step = (edge - 1) >> SAMPLE_GAPS_LOG2;
+    let mut heights = [Gi::ZERO; COLUMN_SAMPLES];
     let mut i = 0;
     while i < COLUMN_SAMPLES_PER_EDGE {
         let mut j = 0;
         while j < COLUMN_SAMPLES_PER_EDGE {
             let site = crate::lattice::site_of(body, key, i * step, j * step);
             let dir = crate::lattice::site_dir(body, key, site);
-            let h = crate::height::height(body, dir, rung);
+            heights[(i * COLUMN_SAMPLES_PER_EDGE + j) as usize] =
+                crate::height::height(body, dir, rung);
+            j += 1;
+        }
+        i += 1;
+    }
+    span_of(body, rung, &heights, column_bound(body, rung))
+}
+
+/// ★ THE SPAN ON THE ARTIFACT'S FIELD (2026-09-20, the owner's coast flight: *"the water shores'
+/// shapes are constantly changing while I'm flying"*). The client asked a column's chunk slices
+/// from the recipe's own relief while the chunk it then built stood on the artifact's `Z` plus
+/// the fine octaves — MEASURED around the coast stand (`examples/span_miss.rs`): the two surfaces
+/// stand 2.1 km apart on average and 5.9 km at worst, against a column bound of 0.35 to 1.8 km,
+/// so at rung 4 the asked slices missed the ground somewhere in 87 % of the columns and held none
+/// of it in 5 840 land columns, at rung 6 in 51 %, and from rung 8 up in none. An asked slice with
+/// no ground builds an EMPTY chunk, the flat sea sheet shows through it, and the picture said
+/// "sea" over land — square by square, differently at each rung, so the shore redrew itself at
+/// every swap. This span samples the SAME column read the chunk builder runs (`ColumnRead`), so
+/// the slices asked are the slices the surface stands in, by construction.
+///
+/// The bound is the column bound plus THE FIELD'S OWN STEP between neighbouring samples — the
+/// widest height difference between two adjacent samples along either axis: the field is a smooth
+/// spline over macro nodes many samples wide, so between two samples it stands within the step
+/// they show. `None` where the field does not hold a sample's stencil (the tiles are not here;
+/// the coarser rung stands, ruling F9), where the field's level lies past the lattice, or on a
+/// body with no macro lattice.
+///
+/// **Example.** At the coast stand a rung-4 column's land stands 4 609 m over the ladder radius on
+/// the artifact and 2 100 m on the recipe: the old span asked slices 2 and 3 (992 m each), the
+/// ground stood in slice 4, the chunk built empty and the sea sheet showed where the beach is.
+/// This span asks slice 4.
+#[must_use]
+pub fn surface_column_field(
+    body: &BodyDefinition,
+    field: &dyn crate::artifact::ZField,
+    face: Face,
+    rung: u8,
+    x: i32,
+    y: i32,
+) -> Option<ColumnSpan> {
+    let lattice = body.macro_lattice()?.coarser(field.level())?;
+    let edge = crate::chunk::CHUNK_EDGE as i32;
+    let key = ChunkKey {
+        face,
+        rung,
+        x,
+        y,
+        z: 0,
+    };
+    let charter = body.plan_charter(rung, face);
+    let read = ColumnRead {
+        body,
+        field: Some(field),
+        lattice: Some(&lattice),
+        charter: &charter,
+        first: body.first_fine(),
+        key,
+        n_cells: body.ladder.cells_per_edge(rung) as i32,
+    };
+    let step = (edge - 1) >> SAMPLE_GAPS_LOG2;
+    let mut heights = [Gi::ZERO; COLUMN_SAMPLES];
+    let mut i = 0;
+    while i < COLUMN_SAMPLES_PER_EDGE {
+        let mut j = 0;
+        while j < COLUMN_SAMPLES_PER_EDGE {
+            let (_, h, _, _, _) = read.column(i * step, j * step)?;
+            heights[(i * COLUMN_SAMPLES_PER_EDGE + j) as usize] = h;
+            j += 1;
+        }
+        i += 1;
+    }
+    Some(span_of(
+        body,
+        rung,
+        &heights,
+        column_bound(body, rung) + field_step(&heights),
+    ))
+}
+
+/// The field's own step: the widest height difference between two neighbouring samples of the
+/// grid along either axis, branchless (`greater` on both differences is the absolute value).
+fn field_step(heights: &[Gi; COLUMN_SAMPLES]) -> Gi {
+    let n = COLUMN_SAMPLES_PER_EDGE as usize;
+    let mut widest = Gi::ZERO;
+    let mut i = 0;
+    while i < n {
+        let mut j = 0;
+        while j + 1 < n {
+            let along_j = (heights[i * n + j], heights[i * n + j + 1]);
+            let along_i = (heights[j * n + i], heights[(j + 1) * n + i]);
+            widest = greater(
+                widest,
+                greater(along_j.0 - along_j.1, along_j.1 - along_j.0),
+            );
+            widest = greater(
+                widest,
+                greater(along_i.0 - along_i.1, along_i.1 - along_i.0),
+            );
+            j += 1;
+        }
+        i += 1;
+    }
+    widest
+}
+
+/// The span of a column from its sampled heights and its bound: ONE arithmetic for the recipe's
+/// span and the field's.
+fn span_of(
+    body: &BodyDefinition,
+    rung: u8,
+    heights: &[Gi; COLUMN_SAMPLES],
+    bound: Gi,
+) -> ColumnSpan {
+    let edge = crate::chunk::CHUNK_EDGE as i32;
+    let floor = i64::from(body.ladder.floor_m);
+    let top = top_chunk_z(body, rung);
+    let dropped = body.dropped_bound(rung);
+    let mut lo = i32::MAX;
+    let mut hi = i32::MIN;
+    let mut low = Gi::ZERO;
+    let mut high = Gi::ZERO;
+    let mut i = 0;
+    while i < COLUMN_SAMPLES_PER_EDGE {
+        let mut j = 0;
+        while j < COLUMN_SAMPLES_PER_EDGE {
+            let h = heights[(i * COLUMN_SAMPLES_PER_EDGE + j) as usize];
             // One cell of margin at the bottom: the extractor gives an edge to the chunk that owns
             // its LOWER cell, so a crossing of a chunk's bottom boundary edge is drawn by the chunk
             // BELOW it; a surface whose low bound lands in a chunk's first cell may cross exactly
@@ -740,6 +863,92 @@ mod tests {
             widest = widest.max(hi - lo);
         }
         assert!(widest >= 1, "{widest}");
+    }
+
+    /// ★ THE SPAN ON THE FIELD (2026-09-20): on the home moon's own artifact, every core column of
+    /// a chunk column stands in a slice the field span asks for — at a rung that reads the rows
+    /// and at one that reads a pyramid level — the peak stands over the highest column, and the
+    /// recipe's span asks other slices on at least one column (the cause of the coast's empty
+    /// chunks, MEASURED on the home planet at 87 % of the rung-4 columns). A level the lattice
+    /// cannot coarsen to, a tile cache missing the stencil, and a body with no macro lattice all
+    /// give no span.
+    #[test]
+    fn the_field_span_asks_the_slices_the_fields_own_ground_stands_in() {
+        use crate::artifact::{PyramidField, TileCache, ZField};
+        use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
+        use crate::solve::{Schedule, solve_full};
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let artifact =
+            crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        let moon = moon.with_sea_m(artifact.sea());
+        let level1 = PyramidField::of(&artifact, 1).expect("level 1");
+        let edge = i64::from(crate::chunk::CHUNK_EDGE as i32);
+        let floor = i64::from(moon.ladder.floor_m);
+        let mut differ = 0;
+        for (rung, field, xs, y) in [
+            (3u8, &artifact as &dyn ZField, 36..44, 41i32),
+            (11u8, &level1 as &dyn ZField, 0..3, 1),
+        ] {
+            for x in xs {
+                let span =
+                    surface_column_field(&moon, field, Face::PosZ, rung, x, y).expect("a span");
+                let columns =
+                    crate::chunk::column_field(&moon, Some(field), Face::PosZ, rung, x, y)
+                        .expect("columns");
+                let slice = |h: Gi| ((metres_floor(h) - floor) >> rung) / edge;
+                assert!(
+                    i64::from(span.lo) <= slice(columns.lowest),
+                    "rung {rung} x {x}: {span:?} under {:?}",
+                    columns.lowest
+                );
+                assert!(
+                    i64::from(span.hi) >= slice(columns.highest),
+                    "rung {rung} x {x}: {span:?} over {:?}",
+                    columns.highest
+                );
+                assert!(
+                    span.peak_m >= metres_of_q28(columns.highest),
+                    "rung {rung} x {x}"
+                );
+                assert!(span.sampled_high_m <= metres_of_q28(columns.highest) + 0.001);
+                assert!(span.sampled_low_m >= metres_of_q28(columns.lowest) - 0.001);
+                let recipe = surface_column(&moon, Face::PosZ, rung, x, y);
+                differ += i32::from((recipe.lo, recipe.hi) != (span.lo, span.hi));
+            }
+        }
+        assert!(differ > 0, "the artifact moved no column's slices");
+        let level_9 = PyramidField {
+            level: 9,
+            z_m: vec![],
+        };
+        assert!(surface_column_field(&moon, &level_9, Face::PosZ, 0, 4_000, 4_000).is_none());
+        let torn = TileCache::new(lattice.edge);
+        assert!(surface_column_field(&moon, &torn, Face::PosZ, 0, 4_000, 4_000).is_none());
+        let rock = moon.without_macro_lattice();
+        assert!(surface_column_field(&rock, &artifact, Face::PosZ, 0, 0, 0).is_none());
+    }
+
+    /// The field's step is the widest difference between two neighbouring samples along either
+    /// axis of the grid, and zero on a flat field.
+    #[test]
+    fn the_field_step_is_the_widest_neighbouring_difference() {
+        let n = COLUMN_SAMPLES_PER_EDGE as usize;
+        let mut h = [Gi::ZERO; COLUMN_SAMPLES];
+        assert_eq!(field_step(&h), Gi::ZERO);
+        // A dip at (1, 2): forty against its four neighbours.
+        h[n + 2] = Gi::new(-40);
+        assert_eq!(field_step(&h), Gi::new(40));
+        // A rise at (1, 3): sixty-five against the dip beside it, along the row.
+        h[n + 3] = Gi::new(25);
+        assert_eq!(field_step(&h), Gi::new(65));
+        // A rise at (3, 0): a hundred against (4, 0) and (2, 0), along the column.
+        h[3 * n] = Gi::new(100);
+        assert_eq!(field_step(&h), Gi::new(100));
     }
 
     /// The one transcendental constant the recipe holds is the standard library's own π, rounded once

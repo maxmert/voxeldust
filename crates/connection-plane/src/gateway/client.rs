@@ -141,6 +141,8 @@ pub(crate) fn on_client_control(
                     sky_held: None,
                     sky_parts_sent: 0,
                     artifact_held: std::collections::BTreeMap::new(),
+                    artifact_parts_sent: std::collections::BTreeMap::new(),
+                    artifact_tiles_sent: std::collections::BTreeMap::new(),
                     client,
                     account: login.account,
                     fence,

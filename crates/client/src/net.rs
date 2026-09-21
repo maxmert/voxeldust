@@ -988,6 +988,12 @@ impl ClientState {
                 refused: self.artifacts.counters.no_head
                     + self.artifacts.counters.shape
                     + self.artifacts.counters.not_artifact,
+                held: self
+                    .artifacts
+                    .book()
+                    .realms()
+                    .map(|(r, c)| (format!("{r:?}"), c.whole()))
+                    .collect(),
             },
             sky: self
                 .sky_draw
@@ -3350,6 +3356,21 @@ mod tests {
                     parent_hits: 0,
                     parent_builds: 0,
                     parent_waits: 0,
+                    no_body: 0,
+                    outside: 0,
+                    submitted: 0,
+                    awaiting_artifact: 0,
+                    artifact_rebuilds: 0,
+                    awaiting_keys: Vec::new(),
+                    empty_chunks: 0,
+                    empty_keys: Vec::new(),
+                    hole_columns: 0,
+                    hole_keys: Vec::new(),
+                    margin_missing: 0,
+                    stale_builds: 0,
+                    lattice_edge: 0,
+                    artifact_expected: None,
+                    artifact_held: None,
                     lead_m: 0.0,
                     build_rate_per_s: 0.0,
                     eye_speed_mps: 0.0,

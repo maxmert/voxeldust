@@ -163,6 +163,10 @@ pub struct TerrainConfig {
     /// switches for a measurement, never a gate's path.
     pub shadows: bool,
     pub hide_rung: Option<u8>,
+    /// ★ THE CULLING ABLATION (the coast flight's holes, 2026-09-20): `VD_TERRAIN_NO_CULL=1` spawns
+    /// every chunk and its probe twin with the engine's frustum culling OFF, so a hole that
+    /// vanishes under it is a culling box, not a missing mesh. A measurement's switch.
+    pub no_cull: bool,
     /// THE SHADOW'S SHAPE (D8-8's ablation named the sun's shadow as the still stand's wall,
     /// §19.6): how far it reaches (the rung whose switch distance ends it), how many cascades
     /// draw it, and each cascade map's width in pixels. Defaults: the constants below; the
@@ -338,6 +342,7 @@ const SPLAT_ENV: &str = "VD_TERRAIN_SPLATS";
 /// The environment switches of the ablation.
 const SHADOWS_ENV: &str = "VD_TERRAIN_SHADOWS";
 const HIDE_RUNG_ENV: &str = "VD_TERRAIN_HIDE_RUNG";
+const NO_CULL_ENV: &str = "VD_TERRAIN_NO_CULL";
 
 /// THE DEFAULT memory budget of the parent cache. The working set on a flight is every ring's
 /// LEADING EDGE, not one worker's neighbourhood: the pool builds hundreds of parents a second
@@ -369,6 +374,7 @@ impl TerrainConfig {
             hide_rung: std::env::var(HIDE_RUNG_ENV)
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
+            no_cull: std::env::var(NO_CULL_ENV).is_ok_and(|v| v == "1"),
             shadow_reach_rung: env_or(SHADOW_REACH_ENV, SHADOW_REACH_RUNG),
             shadow_cascades: env_or(SHADOW_CASCADES_ENV, SHADOW_CASCADES),
             shadow_map_px: env_or(SHADOW_MAP_ENV, SHADOW_MAP_PX),
@@ -1440,6 +1446,10 @@ struct RealmLadder {
     view: LadderView,
     eye: Option<[f64; 3]>,
     wanted: WantedSet,
+    /// The artifact cache's epoch the last descent read: a change while the view holds a
+    /// provisional span re-runs the descent, so a span read on a stand-in field is read on the
+    /// tiles the moment they land (`LadderView::provisional_spans`).
+    artifact_epoch: Option<u64>,
     /// ★ THE HORIZON AS IT STANDS NOW, AND THE THREE RATES THAT READ IT (ruling F9 item 1): the
     /// pure pace, in the Tier-A library, where every arm of it is a unit test
     /// ([`vd_client::ask_pace::AskPace`]). The render crate only wires it: the descent reads
@@ -2530,6 +2540,8 @@ pub(crate) fn sync_terrain(
             terrain
                 .lane
                 .state_surface(realm, &surface, rbox.charter.as_ref(), &look_of(rbox));
+            // ★ THE ARTIFACT THE REALM STATES (the far-view ship): the lane builds on it alone.
+            terrain.lane.expect_artifact(realm, rbox.artifact);
         }
         // ★ THE ARTIFACT the realm shipped (slice 8c stage C4c), as the client's book holds it
         // this frame: the lane refreshes its pointer when a level or a tile landed.
@@ -2634,6 +2646,8 @@ pub(crate) fn sync_terrain(
         } else {
             0.0
         };
+        let artifact = terrain.lane.artifact(eb.realm).map(Arc::clone);
+        let epoch = artifact.as_ref().map(|a| a.epoch);
         let ladder = terrain.ladders.entry(eb.realm).or_default();
         // THE SAWTOOTH'S PEAK (see `RealmLadder::speed`): the largest reading of the last
         // `speed_hold_s` seconds, which reaches ZERO when the hull stops.
@@ -2675,7 +2689,10 @@ pub(crate) fn sync_terrain(
             (Some(a), Some(b)) => !a.same_as(b),
             (a, b) => a.is_some() != b.is_some(),
         };
-        let wanted_move = moved(ladder.eye, eb.lead) || reach_changed || bound_changed;
+        let field_changed =
+            (ladder.artifact_epoch != epoch) && (ladder.view.provisional_spans() > 0);
+        let wanted_move =
+            moved(ladder.eye, eb.lead) || reach_changed || bound_changed || field_changed;
         let run_descent = wanted_move & !eye_refused;
         work_bound += piece.elapsed();
         // ★ THE DESCENT'S PACE, READ (2026-09-16, the walk-gap measurement): how far the LEAD
@@ -2688,7 +2705,8 @@ pub(crate) fn sync_terrain(
         if run_descent {
             let descent = std::time::Instant::now();
             ladder.view.shadow = shadow;
-            let fresh = ladder.view.wanted(&eb.body, eb.lead);
+            let fresh = ladder.view.wanted(&eb.body, eb.lead, artifact.as_deref());
+            ladder.artifact_epoch = epoch;
             ladder.prev = std::mem::replace(&mut ladder.wanted, fresh);
             ladder.last_descent_s = Some(now_s);
             ladder.eye = Some(eb.lead);
@@ -2974,6 +2992,7 @@ pub(crate) fn sync_terrain(
     let exact_normal_rung = terrain.config.exact_normal_rung;
     let splat_rung = terrain.config.splat_rung;
     let hide_rung = terrain.config.hide_rung;
+    let no_cull = terrain.config.no_cull;
     let shadow_cast = terrain.config.shadow_cast;
     let shadow_cast_rung = terrain.config.shadow_cast_rung;
     let shadow_receive = terrain.config.shadow_receive;
@@ -3099,6 +3118,11 @@ pub(crate) fn sync_terrain(
         if hide_rung.is_some_and(|r| key.rung >= r) {
             commands.entity(entity).insert(Visibility::Hidden);
         }
+        if no_cull {
+            commands
+                .entity(entity)
+                .insert(bevy::camera::visibility::NoFrustumCulling);
+        }
         if !shadow_cast
             || shadow_cast_rung.is_some_and(|r| key.rung >= r)
             || (caster.is_some() && !casts_itself)
@@ -3112,7 +3136,7 @@ pub(crate) fn sync_terrain(
         }
         let twin = probe_materials.as_mut().map(|pm| {
             let probe = terrain.probe_material(pm, realm, PROBE_KIND_TERRAIN, key.rung, &body);
-            commands
+            let twin = commands
                 .spawn((
                     Mesh3d(mesh.clone()),
                     MeshMaterial3d(probe),
@@ -3127,7 +3151,13 @@ pub(crate) fn sync_terrain(
                     RenderLayers::layer(PROBE_LAYER),
                     bevy::light::NotShadowCaster,
                 ))
-                .id()
+                .id();
+            if no_cull {
+                commands
+                    .entity(twin)
+                    .insert(bevy::camera::visibility::NoFrustumCulling);
+            }
+            twin
         });
         let counts = [
             u64::from(ready.geometry.morph_fallbacks),
@@ -3449,6 +3479,38 @@ pub(crate) fn sync_terrain(
             let built = terrain.lane.built();
             let counters = terrain.lane.counters();
             let parents = terrain.lane.parent_stats();
+            // ★ THE HOLE INSTRUMENT: this frame's refusals and empty chunks, named, for this realm.
+            let key_name = |k: ChunkKey| format!("{:?} {} {} {} {}", k.face, k.rung, k.x, k.y, k.z);
+            let awaiting_keys: Vec<String> = terrain
+                .lane
+                .take_awaiting()
+                .into_iter()
+                .filter(|(r, _, _)| r == realm)
+                .map(|(_, k, tiles)| format!("{}: tiles {tiles:?}", key_name(k)))
+                .collect();
+            let empty_keys: Vec<String> = terrain
+                .lane
+                .take_empty()
+                .into_iter()
+                .filter(|(r, _, _)| r == realm)
+                .map(|(_, k, level)| format!("{} @L{level}", key_name(k)))
+                .collect();
+            let (hole_columns, hole_named) = terrain.lane.hole_columns(*realm);
+            let hole_keys: Vec<String> = hole_named
+                .into_iter()
+                .map(|(k, level)| format!("{} @L{level}", key_name(k)))
+                .collect();
+            let lattice_edge = terrain
+                .lane
+                .body(*realm)
+                .and_then(|b| b.macro_lattice())
+                .map_or(0, |l| l.edge);
+            let margin_missing = {
+                let Terrain { lane, ladders, .. } = &*terrain;
+                ladders.get(realm).map_or(0, |l| {
+                    l.wanted.margin_missing(&|k| lane.is_resident(*realm, k)) as u64
+                })
+            };
             let camera_body = camera_rotation.map_or(DQuat::IDENTITY, |c| facing.inverse() * c);
             terrain.stamp = Some(DevTerrainStamp {
                 realm: format!("{realm:?}"),
@@ -3483,6 +3545,21 @@ pub(crate) fn sync_terrain(
                 parent_hits: parents.hits,
                 parent_builds: parents.builds,
                 parent_waits: parents.waits,
+                no_body: counters.no_body,
+                outside: counters.outside,
+                submitted: counters.submitted,
+                awaiting_artifact: counters.awaiting_artifact,
+                artifact_rebuilds: counters.artifact_rebuilds,
+                awaiting_keys,
+                empty_chunks: counters.empty_chunks,
+                empty_keys,
+                hole_columns,
+                hole_keys,
+                margin_missing,
+                stale_builds: counters.stale_builds,
+                lattice_edge,
+                artifact_expected: terrain.lane.expected_artifact(*realm),
+                artifact_held: terrain.lane.artifact(*realm).map(|a| a.head.digest),
                 lead_m,
                 // THE BOUNDED ASK (ruling F9 item 1): the builders' capacity, the eye's speed
                 // through the body under it, and that body's deliverable horizons.

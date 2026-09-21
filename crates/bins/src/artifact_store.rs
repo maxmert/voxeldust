@@ -3,20 +3,30 @@
 //!
 //! The composition root is the one place that links both the generator (which knows what an
 //! artifact is) and the store's row families (which the sim frames as bytes), so the bridge lives
-//! here: an [`Artifact`] becomes one HEAD row, one row per TILE and one PYRAMID row through the
-//! [`Store`] seam, and comes back the same way — REFUSED by name when the head names another world
-//! tag, another version or another lattice, or when a tile is missing: a store that holds half a
-//! planet is not a planet.
+//! here: an [`Artifact`] becomes one HEAD row, one row per TILE, one PYRAMID INDEX row and one row
+//! per PYRAMID PART through the [`Store`] seam, and comes back the same way — REFUSED by name when
+//! the head names another world tag, another version or another lattice, or when a tile or a part
+//! is missing: a store that holds half a planet is not a planet.
+//!
+//! The pyramid is cut into parts of [`PYRAMID_PART_WORDS`] heights, the wire's own cut, because a
+//! store row is one TLV field and a field caps at one mebibyte: the home planet's pyramid is 5.9 MB
+//! (MEASURED in the far-view ship's first flight, 2026-09-20, when the one-row pyramid of artifact
+//! version 2 panicked every big planet's shard as its solve landed).
 //!
 //! **Example.** The home planet's shard boots on a fresh pod. It opens its store, reads the head,
-//! checks the world tag it was solved under against its own, reads 2 166 tiles and the pyramid,
-//! and states its surface within the boot — no solve.
+//! checks the world tag it was solved under against its own, reads 2 166 tiles and the pyramid's
+//! 181 parts, and states its surface within the boot — no solve.
+
+use std::collections::BTreeSet;
 
 use vd_sim::io::Store;
 use vd_sim::stub::built_store::{
-    ArtifactHead, ArtifactTile, artifact_head_key, artifact_pyramid_key, artifact_tile_key,
-    artifact_tile_prefix, decode_artifact_head, decode_artifact_pyramid, decode_artifact_tile,
-    encode_artifact_head, encode_artifact_pyramid, encode_artifact_tile,
+    ArtifactHead, ArtifactPyramidIndex, ArtifactPyramidPart, ArtifactTile, PYRAMID_PART_WORDS,
+    artifact_head_key, artifact_pyramid_key, artifact_pyramid_part_key,
+    artifact_pyramid_part_prefix, artifact_tile_key, artifact_tile_prefix, decode_artifact_head,
+    decode_artifact_pyramid_index, decode_artifact_pyramid_part, decode_artifact_tile,
+    encode_artifact_head, encode_artifact_pyramid_index, encode_artifact_pyramid_part,
+    encode_artifact_tile,
 };
 use vd_terrain::artifact::{Artifact, Row, Tile, TileCache, tile_width};
 use vd_terrain::macro_lattice::MacroLattice;
@@ -66,7 +76,9 @@ pub fn level_of(bytes: &[u8]) -> Option<Vec<i16>> {
     )
 }
 
-/// ★ WRITE the artifact: the head, every tile of every face, the pyramid — staged, then ONE commit.
+/// ★ WRITE the artifact: the head, every tile of every face, the pyramid's parts and its index —
+/// staged, then ONE commit. A part row of an earlier solve that this one does not rewrite is
+/// dropped in the same commit, so the store never holds a level and a half.
 pub fn write_artifact(store: &mut dyn Store, world_tag: u64, artifact: &Artifact) {
     let head = head_of(artifact, world_tag);
     store.put(&artifact_head_key(), &encode_artifact_head(&head).into());
@@ -88,10 +100,37 @@ pub fn write_artifact(store: &mut dyn Store, world_tag: u64, artifact: &Artifact
             }
         }
     }
-    let levels: Vec<Vec<u8>> = artifact.pyramid.iter().map(|l| level_bytes(l)).collect();
+    let mut parts_per_level = Vec::with_capacity(artifact.pyramid.len());
+    let mut written = BTreeSet::new();
+    for (k, level) in artifact.pyramid.iter().enumerate() {
+        let level_no = k as u32 + 1;
+        let bytes = level_bytes(level);
+        let mut parts = 0u32;
+        for (part, chunk) in bytes.chunks(PYRAMID_PART_WORDS * 2).enumerate() {
+            let key = artifact_pyramid_part_key(level_no, part as u32);
+            let row = ArtifactPyramidPart {
+                level: level_no,
+                part: part as u32,
+                bytes: chunk.to_vec(),
+            };
+            store.put(&key, &encode_artifact_pyramid_part(&row).into());
+            written.insert(key);
+            parts += 1;
+        }
+        parts_per_level.push(parts);
+    }
+    for (key, _) in store.scan(&artifact_pyramid_part_prefix()) {
+        if !written.contains(&key) {
+            store.delete(&key);
+        }
+    }
+    let index = ArtifactPyramidIndex {
+        part_words: PYRAMID_PART_WORDS as u32,
+        parts_per_level,
+    };
     store.put(
         &artifact_pyramid_key(),
-        &encode_artifact_pyramid(&levels).into(),
+        &encode_artifact_pyramid_index(&index).into(),
     );
     store.commit();
 }
@@ -101,7 +140,8 @@ pub fn write_artifact(store: &mut dyn Store, world_tag: u64, artifact: &Artifact
 ///
 /// # Errors
 /// The head names another world tag, version or edge; a tile is missing or malformed; the
-/// pyramid is missing or malformed; the digest of what was read is not the head's.
+/// pyramid's index or a part is missing, malformed or under the wrong key; the digest of what was
+/// read is not the head's.
 pub fn read_artifact(
     store: &dyn Store,
     world_tag: u64,
@@ -160,13 +200,32 @@ pub fn read_artifact(
                 .ok_or_else(|| format!("the stored artifact is missing the tile of node {node}"))?,
         );
     }
-    let pyramid_bytes = store
+    let index_bytes = store
         .get(&artifact_pyramid_key())
         .ok_or("the stored artifact has no pyramid")?;
-    let levels = decode_artifact_pyramid(&pyramid_bytes)?;
-    let mut pyramid = Vec::with_capacity(levels.len());
-    for l in &levels {
-        pyramid.push(level_of(l).ok_or("a stored pyramid level is not whole words")?);
+    let index = decode_artifact_pyramid_index(&index_bytes)?;
+    let mut pyramid = Vec::with_capacity(index.parts_per_level.len());
+    for (k, &parts) in index.parts_per_level.iter().enumerate() {
+        let level_no = k as u32 + 1;
+        let mut bytes = Vec::with_capacity(parts as usize * index.part_words as usize * 2);
+        for part in 0..parts {
+            let row = store
+                .get(&artifact_pyramid_part_key(level_no, part))
+                .ok_or_else(|| {
+                    format!(
+                        "the stored artifact is missing part {part} of pyramid level {level_no}"
+                    )
+                })?;
+            let row = decode_artifact_pyramid_part(&row)?;
+            if (row.level, row.part) != (level_no, part) {
+                return Err(format!(
+                    "a stored pyramid part says level {} part {}, its key says level {level_no} part {part}",
+                    row.level, row.part
+                ));
+            }
+            bytes.extend_from_slice(&row.bytes);
+        }
+        pyramid.push(level_of(&bytes).ok_or("a stored pyramid level is not whole words")?);
     }
     let artifact = Artifact {
         edge: head.edge,
@@ -204,7 +263,9 @@ mod tests {
 
     /// The moon's artifact round-trips through an in-memory store byte for byte; an empty store
     /// reads as none; a head under another world tag, version or edge is refused by name; a
-    /// missing tile, a missing pyramid and a tampered row are refused.
+    /// missing tile, a missing pyramid, a missing or misplaced part and a tampered row are
+    /// refused; a level over the field cap is cut into part rows, and a stale part row is dropped
+    /// by the next write.
     #[test]
     fn the_artifact_round_trips_through_the_store_and_refusals_are_named() {
         let (lattice, artifact) = moon_artifact();
@@ -251,6 +312,7 @@ mod tests {
         write_artifact(&mut bad, 7, &artifact);
         let key = artifact_tile_key(0, 0, 0);
         let mut tile = decode_artifact_tile(&bad.get(&key).expect("a tile")).expect("decodes");
+        let tile_ok = tile.clone();
         tile.bytes[0] ^= 1;
         bad.put(&key, &encode_artifact_tile(&tile).into());
         bad.commit();
@@ -259,7 +321,8 @@ mod tests {
                 .expect_err("refused")
                 .contains("digest")
         );
-        // A tile of the wrong length, a malformed head, a version from another build.
+        // A tile of the wrong length, a tile of whole rows but too few, a tile that does not
+        // decode, a malformed head, a version from another build.
         let mut odd = MemStore::default();
         write_artifact(&mut odd, 7, &artifact);
         tile.bytes.push(0);
@@ -270,6 +333,23 @@ mod tests {
                 .expect_err("refused")
                 .contains("whole rows")
         );
+        tile.bytes.truncate(vd_terrain::artifact::ROW_BYTES);
+        odd.put(&key, &encode_artifact_tile(&tile).into());
+        odd.commit();
+        assert!(
+            read_artifact(&odd, 7, &lattice)
+                .expect_err("refused")
+                .contains("holds 1 rows")
+        );
+        odd.put(&key, &b"garbage".to_vec().into());
+        odd.commit();
+        assert!(
+            read_artifact(&odd, 7, &lattice)
+                .expect_err("refused")
+                .contains("tile does not decode")
+        );
+        odd.put(&key, &encode_artifact_tile(&tile_ok).into());
+        odd.commit();
         let mut head = head_of(&artifact, 7);
         head.version += 1;
         odd.put(&artifact_head_key(), &encode_artifact_head(&head).into());
@@ -286,5 +366,86 @@ mod tests {
         assert_eq!(rows_of(&[1, 2, 3]), None);
         assert_eq!(level_of(&[1]), None);
         assert_eq!(level_of(&[1, 0, 255, 255]), Some(vec![1, -1]));
+        // A missing part.
+        let mut torn = MemStore::default();
+        write_artifact(&mut torn, 7, &artifact);
+        let key = artifact_pyramid_part_key(1, 0);
+        let mut part =
+            decode_artifact_pyramid_part(&torn.get(&key).expect("a part")).expect("decodes");
+        torn.delete(&key);
+        torn.commit();
+        assert!(
+            read_artifact(&torn, 7, &lattice)
+                .expect_err("refused")
+                .contains("missing part 0 of pyramid level 1")
+        );
+        // A part under the wrong key, then a part of odd length.
+        part.level = 2;
+        torn.put(&key, &encode_artifact_pyramid_part(&part).into());
+        torn.commit();
+        assert!(
+            read_artifact(&torn, 7, &lattice)
+                .expect_err("refused")
+                .contains("says level 2 part 0")
+        );
+        part.level = 1;
+        part.bytes.push(0);
+        torn.put(&key, &encode_artifact_pyramid_part(&part).into());
+        torn.commit();
+        assert!(
+            read_artifact(&torn, 7, &lattice)
+                .expect_err("refused")
+                .contains("whole words")
+        );
+        torn.put(&key, &b"garbage".to_vec().into());
+        torn.commit();
+        assert!(
+            read_artifact(&torn, 7, &lattice)
+                .expect_err("refused")
+                .contains("pyramid part does not decode")
+        );
+        torn.put(&artifact_pyramid_key(), &b"garbage".to_vec().into());
+        torn.commit();
+        assert!(
+            read_artifact(&torn, 7, &lattice)
+                .expect_err("refused")
+                .contains("pyramid index does not decode")
+        );
+    }
+
+    /// ★ A level over the field cap: 600 000 heights is 1.2 MB, over the one-mebibyte TLV field
+    /// that the one-row pyramid of artifact version 2 broke on the home planet. It is cut into 37
+    /// part rows and round-trips; the next write of a smaller pyramid drops the parts it does not
+    /// rewrite, and the store reads whole again.
+    #[test]
+    fn a_level_over_the_field_cap_is_cut_into_parts_and_stale_parts_are_dropped() {
+        let (lattice, artifact) = moon_artifact();
+        let mut big = artifact.clone();
+        big.pyramid[0] = (0..600_000).map(|i| (i % 1_000) as i16).collect();
+        let mut wide = MemStore::default();
+        write_artifact(&mut wide, 7, &big);
+        let index =
+            decode_artifact_pyramid_index(&wide.get(&artifact_pyramid_key()).expect("an index"))
+                .expect("decodes");
+        assert_eq!(index.part_words as usize, PYRAMID_PART_WORDS);
+        assert_eq!(index.parts_per_level[0], 37);
+        let parts_total: u32 = index.parts_per_level.iter().sum();
+        assert_eq!(
+            wide.scan(&artifact_pyramid_part_prefix()).len(),
+            parts_total as usize
+        );
+        assert_eq!(read_artifact(&wide, 7, &lattice), Ok(Some(big)));
+        // The moon's own pyramid written over it: level 1 shrinks to one part, the other 36 go.
+        write_artifact(&mut wide, 7, &artifact);
+        let index =
+            decode_artifact_pyramid_index(&wide.get(&artifact_pyramid_key()).expect("an index"))
+                .expect("decodes");
+        assert_eq!(index.parts_per_level[0], 1);
+        let parts_total: u32 = index.parts_per_level.iter().sum();
+        assert_eq!(
+            wide.scan(&artifact_pyramid_part_prefix()).len(),
+            parts_total as usize
+        );
+        assert_eq!(read_artifact(&wide, 7, &lattice), Ok(Some(artifact)));
     }
 }

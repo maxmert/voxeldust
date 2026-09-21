@@ -256,6 +256,10 @@ pub(crate) fn drive_windows(
     for (realm, node) in resolves {
         sessions.realm_heads.insert(realm, node);
     }
+    // ★ THE FAR-VIEW SHIP: the realms whose artifact a picture names keep their heads resolved
+    // too, so a want can be addressed — a planet seen from orbit is nobody's lineage ancestor.
+    let drawn_artifacts = super::artifact::drawn_artifacts(&sessions);
+    named.extend(drawn_artifacts.keys().copied());
     sessions
         .realm_heads
         .retain(|realm, _| named.contains(realm));
@@ -361,6 +365,22 @@ pub(crate) fn drive_windows(
                 parents.insert(pair[0]);
             }
         }
+        // ★ THE FAR-VIEW SHIP: the realms whose artifact a picture names and whose head this
+        // gateway has not resolved are polled on the same beat.
+        for realm in drawn_artifacts.keys() {
+            if !sessions.realm_heads.contains_key(realm) {
+                parents.insert(*realm);
+            }
+        }
+        // ★ THE ARTIFACTS: asked once, cached once, served per session (`artifact.rs`).
+        super::artifact::serve_artifacts(
+            &config,
+            &clock,
+            &drawn_artifacts,
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
         for parent in parents {
             push_directory(
                 &mut outbox,

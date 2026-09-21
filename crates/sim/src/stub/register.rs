@@ -110,6 +110,7 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
     world.insert_resource(crate::stub::exterior::RealmStore::default());
     world.insert_resource(crate::stub::artifact_ship::ArtifactSource::default());
     world.insert_resource(crate::stub::artifact_ship::ArtifactShipped::default());
+    world.insert_resource(crate::stub::artifact_ship::ArtifactWants::default());
     world.insert_resource(crate::stub::lineage::LineageOwed::default());
     world.insert_resource(crate::stub::lineage::PendingLineage::default());
     world.insert_resource(RealmRegions::default());
@@ -391,6 +392,7 @@ fn process_inbound(
         ResMut<PendingCrossings>,
         ResMut<PendingInputSlots>,
         ResMut<OpenWindows>,
+        ResMut<crate::stub::artifact_ship::ArtifactWants>,
     ),
     // The ghost-path store (slice F shrank the pair to one: the source-side feed mirror died with
     // the pose feed).
@@ -443,7 +445,7 @@ fn process_inbound(
         _ => false,
     };
     let (mut in_flight, mut progress, mut holds, mut pending_flushes) = crossing;
-    let (mut pending, mut pending_slots, mut open_windows) = pending;
+    let (mut pending, mut pending_slots, mut open_windows, mut artifact_wants) = pending;
     let (mut authority, mut confirmed, mut cohosted) = realm_auth;
     // UNGATED, and first: an expired hold must be reclaimed even on a shard that has lost its lease and
     // is doing nothing else, or the ledger would outlive the thing it describes. Inert at a zero budget.
@@ -477,6 +479,7 @@ fn process_inbound(
                     &mut log,
                     &mut pending_slots,
                     &mut open_windows,
+                    &mut artifact_wants,
                     &mut stats,
                     &mut outbox,
                 );

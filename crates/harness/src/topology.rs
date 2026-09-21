@@ -1154,6 +1154,7 @@ mod tests {
                 boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
                 surface: None,
                 charter: None,
+                artifact: None,
                 // D-WORLD-2: ARMED via the production derivation (`crossing_redrive_env`) — an
                 // unresolved-dest crossing re-drives then aborts locally, never strands forever.
                 request_ttl_ticks: armed_crossing_redrive().0,
@@ -1376,6 +1377,7 @@ mod tests {
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
             surface: None,
             charter: None,
+            artifact: None,
             // D-WORLD-2: ARMED via the production derivation (`crossing_redrive_env`) — an
             // unresolved-dest crossing re-drives then aborts locally, never strands forever.
             request_ttl_ticks: armed_crossing_redrive().0,
@@ -1428,6 +1430,7 @@ mod tests {
             boundary: vd_core::geometry::BoundaryTuning::DEFAULT,
             surface: None,
             charter: None,
+            artifact: None,
             // D-WORLD-2: ARMED via the production derivation (`crossing_redrive_env`) — an
             // unresolved-dest crossing re-drives then aborts locally, never strands forever.
             request_ttl_ticks: armed_crossing_redrive().0,
@@ -1543,6 +1546,7 @@ mod tests {
                     boundary: BoundaryTuning::DEFAULT,
                     surface: None,
                     charter: None,
+                    artifact: None,
                     // D-WORLD-2: ARMED via the production derivation (`crossing_redrive_env`) — an
                     // unresolved-dest crossing re-drives then aborts locally, never strands forever.
                     request_ttl_ticks: armed_crossing_redrive().0,

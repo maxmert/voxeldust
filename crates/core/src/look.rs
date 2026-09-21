@@ -79,6 +79,13 @@ pub const TAG_BODIES: u16 = 5;
 /// Example: the home planet states its gravity in whole mm/s², once, on change; every client that
 /// sees the planet then holds the same integer the planet's own shard holds.
 pub const TAG_CHARTER: u16 = 6;
+/// ★ THE ARTIFACT THIS REALM HOLDS (slice 8c, the far-view ship; SL3: a realm authors how it
+/// looks): the two-word digest of the solved artifact the realm's shard serves, stated beside the
+/// surface once the solve is here. A client that draws the realm at any rung asks its gateway for
+/// the head and the pyramid under this digest and builds NOTHING from the recipe alone; absence of
+/// the tag is absence of the datum (a realm still solving, a hull, a station). Appended: a reader
+/// that knows only the surface skips it.
+pub const TAG_ARTIFACT: u16 = 7;
 
 /// ★ THE BODY CHARTER (ruling V13 L12: about twenty quantised integers, authored once and stored;
 /// the landform arc's `slice_8b_design.md` §4.1) — a round body's physical facts as WHOLE NUMBERS.
@@ -339,16 +346,45 @@ pub fn surface_look_bag(
     surface: &SurfaceStmt,
     charter: Option<&BodyCharter>,
 ) -> Vec<u8> {
+    surface_look_bag_with(outline, luma, surface, charter, None)
+}
+
+/// [`surface_look_bag`] with the realm's ARTIFACT word ([`TAG_ARTIFACT`]) beside the charter: the
+/// digest of the solved artifact the realm's shard serves, or none while it solves.
+#[must_use]
+pub fn surface_look_bag_with(
+    outline: &Boundary,
+    luma: Option<(u8, f64)>,
+    surface: &SurfaceStmt,
+    charter: Option<&BodyCharter>,
+    artifact: Option<[u64; 2]>,
+) -> Vec<u8> {
     let writer = self_look_writer(outline, luma)
         .required(TAG_SURFACE, surface)
         .expect("distinct tag, a frame and one scalar");
-    match charter {
+    let writer = match charter {
         Some(charter) => writer
             .required(TAG_CHARTER, charter)
             .expect("distinct tag, twenty whole numbers"),
         None => writer,
+    };
+    match artifact {
+        Some(digest) => writer
+            .required(TAG_ARTIFACT, &digest)
+            .expect("distinct tag, two words"),
+        None => writer,
     }
     .finish()
+}
+
+/// The ARTIFACT digest a self-look bag states; `None` for a realm that states none (solving, or
+/// no solid surface), a typed refusal for a bag that is not a window body.
+///
+/// # Errors
+/// [`TlvError`] when the blob is not a well-formed window-body bag, or when its `TAG_ARTIFACT`
+/// payload does not decode as two words.
+pub fn artifact_of_bag(bag: &[u8]) -> Result<Option<[u64; 2]>, TlvError> {
+    TlvReader::parse(WINDOW_BODY_SCHEMA, bag)?.optional(TAG_ARTIFACT)
 }
 
 /// The surface a self-look bag states; `None` for a realm that states none (a hull, a station
@@ -637,6 +673,19 @@ mod surface_tests {
             r: 6_370_747.312_696_504,
         };
         let bag = surface_look_bag(&outline, Some((4, 0.823)), &moon(), Some(&charter()));
+        // The artifact word rides beside the charter, or not at all.
+        assert_eq!(artifact_of_bag(&bag), Ok(None));
+        let solved = surface_look_bag_with(
+            &outline,
+            Some((4, 0.823)),
+            &moon(),
+            Some(&charter()),
+            Some([0x1234, 0x5678]),
+        );
+        assert_eq!(artifact_of_bag(&solved), Ok(Some([0x1234, 0x5678])));
+        assert_eq!(surface_of(&solved), surface_of(&bag));
+        assert_eq!(charter_of_bag(&solved), charter_of_bag(&bag));
+        assert!(artifact_of_bag(&[1, 2, 3]).is_err());
         assert_eq!(charter_of_bag(&bag), Ok(Some(charter())));
         assert_eq!(surface_of(&bag), Ok(Some(moon())));
         assert_eq!(look_of(&bag), Ok(outline), "the outline is untouched");

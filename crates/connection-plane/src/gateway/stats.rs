@@ -150,6 +150,21 @@ pub struct GatewayStats {
     pub artifact_parts_relayed: u64,
     /// THE ARTIFACT SHIP: `ArtifactHeld` statements recorded on sessions.
     pub artifact_held_stated: u64,
+    /// ★ THE FAR-VIEW SHIP: wants sent to realms' shards for artifacts the pictures name.
+    pub artifact_wants_sent: u64,
+    /// THE FAR-VIEW SHIP: wants withheld because the realm's head is not resolved yet.
+    pub artifact_wants_unresolved: u64,
+    /// THE FAR-VIEW SHIP: heads and parts cached from shards.
+    pub artifact_parts_cached: u64,
+    /// THE FAR-VIEW SHIP: parts refused — no head, the wrong sender, a shape the head did not
+    /// announce, a duplicate.
+    pub artifact_parts_stray: u64,
+    /// THE FAR-VIEW SHIP: parts served to sessions from the cache.
+    pub artifact_parts_served: u64,
+    /// THE FAR-VIEW SHIP: realms skipped because the session stated it holds their artifact.
+    pub artifact_parts_skipped: u64,
+    /// THE FAR-VIEW SHIP: artifacts forgotten because no session draws their realm any more.
+    pub artifact_caches_evicted: u64,
     /// CATALOGUE PARTS NOT SENT because the client already held that sky (S11). This is the saving,
     /// counted: every skipped part is bytes that did not cross for a galaxy that did not move.
     pub sky_parts_skipped: u64,

@@ -54,8 +54,10 @@ use crate::solve::{MacroSolve, Z_STEPS_PER_M};
 use crate::units::{LENGTH_BITS, STEPS_PER_M};
 
 /// The artifact's own version: part of the world identity with the generator's; a change to a row's
-/// meaning or the pyramid's rule bumps it.
-pub const ARTIFACT_VERSION: u32 = 2;
+/// meaning, the pyramid's rule or the stored rows' cut bumps it. Version 3: the pyramid is stored
+/// in part rows (version 2's one row broke the store's field cap on every big planet, measured in
+/// the far-view ship's first flight, 2026-09-20); a version-2 store re-solves at boot.
+pub const ARTIFACT_VERSION: u32 = 3;
 /// A tile's edge in nodes: 64 × 64 rows of nine bytes is 36 KB — under a second on the lane.
 pub const TILE_EDGE: u32 = 64;
 /// The water level's word for a dry node.
@@ -365,14 +367,118 @@ impl PyramidField {
     #[must_use]
     pub fn level_for(lattice: &MacroLattice, levels: u32, rung: u8) -> u32 {
         let chunk_cells = (crate::chunk::CHUNK_EDGE as u64) << rung;
-        let mut level = 0u32;
-        let mut node_cells = u64::from(lattice.cells_per_node);
-        while level < levels && node_cells * 4 <= chunk_cells {
+        let node_cells = u64::from(lattice.cells_per_node);
+        // The rows, through the tiles, for a chunk narrower than four nodes: the occupant's own
+        // rungs, where the tiles under the boots are shipped.
+        if levels == 0 || node_cells * 4 > chunk_cells {
+            return 0;
+        }
+        // ★ THE FINEST LEVEL WHOSE NODE IS AT LEAST THE CELL (the far-view ship's first flights,
+        // 2026-09-20). The rule before this took the COARSEST level with four nodes across the
+        // chunk, so a rung-14 chunk of 16 km cells read 262 km nodes, every rung read another
+        // level, and the owner saw the coast redraw itself at each rung swap and a globe of blobs
+        // from orbit. A cell can show a node no finer than itself; a coarser node than the cell
+        // throws away what the pyramid holds. Rungs 10 to 14 on the home planet read level 1
+        // (16 km nodes) alike, so a swap between them moves no coast; each rung above climbs one.
+        let cell = 1u64 << rung;
+        let mut level = 1u32;
+        let mut node = node_cells << 1;
+        while level < levels && node < cell {
             level += 1;
-            node_cells <<= 1;
+            node <<= 1;
         }
         level
     }
+}
+
+/// ★ THE RING RULES, ONE HOME (2026-09-20): the distance at which one cell of `rung` stands one
+/// pixel high in the reference view (`cell_m(rung) / pixel`), which is where the client's ladder
+/// hands a rung to the next; and the smooth-sphere horizon from `altitude_m` over a body of
+/// `radius_m`. The client's ladder read these from its own module and the shard had no copy, so
+/// the shard shipped tiles by the occupant's INTEREST SIDE — 76 m for a standing dot, ONE tile —
+/// while the client asked the fine rungs out to 445 km. MEASURED on a 40 s leg from 20 km: one
+/// tile received, 730 chunks wanted under drawn ground and missing, 2.2 million requests refused
+/// for a field not whole, 598 chunks revealed on the way down. Both hosts now read one rule.
+/// `pixel_rad` is the reference view's pixel (the drawable floor), which lives beside the view in
+/// `vd_core` and is passed in: this crate names nothing above the recipe and the leaf.
+#[must_use]
+pub fn switch_m(rung: u8, pixel_rad: f64) -> f64 {
+    f64::from(vd_seed::ladder::cell_m(rung)) / pixel_rad
+}
+
+/// The smooth-sphere horizon of an eye `altitude_m` over a sphere of `radius_m`, in metres.
+#[must_use]
+pub fn horizon_m(radius_m: f64, altitude_m: f64) -> f64 {
+    let h = if altitude_m > 0.0 { altitude_m } else { 0.0 };
+    (2.0 * radius_m * h + h * h).sqrt()
+}
+
+/// ★ HOW FAR THE TILES MUST REACH under an occupant standing `radial_m` from the body's centre:
+/// the finest rung that reads the rows (the tiles) is wanted out to its own switch distance,
+/// bounded by the eye's horizon, and the sixteen-node stencil of the last chunk reaches two nodes
+/// past that. A shard ships the tiles within this of the occupant's direction, so the client's
+/// fine rungs never wait on a tile the shard did not send.
+#[must_use]
+pub fn tile_reach_m(
+    lattice: &MacroLattice,
+    levels: u32,
+    top_rung: u8,
+    body_radius_m: f64,
+    radial_m: f64,
+    pixel_rad: f64,
+) -> f64 {
+    let mut rung = 0u8;
+    while rung < top_rung && PyramidField::level_for(lattice, levels, rung + 1) == 0 {
+        rung += 1;
+    }
+    let altitude_m = radial_m - body_radius_m;
+    let switch = switch_m(rung, pixel_rad);
+    let horizon = horizon_m(body_radius_m, altitude_m);
+    let ring_m = if horizon < switch { horizon } else { switch };
+    ring_m + 2.0 * lattice.node_m()
+}
+
+/// ★ THE TILES WITHIN `radius_m` OF THE UNIT DIRECTION `dir`, the nearest first (2026-09-20, the
+/// one tile path): the face the direction falls on, the node under it, and every tile whose
+/// nodes lie within the reach along that face's axes. The shard answers a want with these; the
+/// gateway serves a session those of them within its own reach — the same function on both
+/// hosts (SL10), so what is asked and what is served can never disagree. A direction with no
+/// length names nothing.
+#[must_use]
+pub fn tiles_within(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64) -> Vec<(u8, u32, u32)> {
+    use vd_seed::bend::{BASIS, face_of, unbend};
+    use vd_seed::ladder::index_of;
+    let face = face_of(dir);
+    let basis = BASIS[face.index() as usize];
+    let axis =
+        |a: [i8; 3]| dir[0] * f64::from(a[0]) + dir[1] * f64::from(a[1]) + dir[2] * f64::from(a[2]);
+    let n = axis(basis.n);
+    if n <= 0.0 {
+        return Vec::new();
+    }
+    let (a, b) = (unbend(axis(basis.u) / n), unbend(axis(basis.v) / n));
+    let edge = lattice.edge;
+    let (i, j) = (index_of(a, edge), index_of(b, edge));
+    let reach = radius_m / lattice.node_m();
+    let reach_nodes = if reach > 1.0 { reach.ceil() as i64 } else { 1 };
+    let lo = |c: i32| (i64::from(c) - reach_nodes).max(0) as u32 / TILE_EDGE;
+    let hi = |c: i32| ((i64::from(c) + reach_nodes).min(i64::from(edge) - 1)) as u32 / TILE_EDGE;
+    let mut out = Vec::new();
+    for ty in lo(j)..=hi(j) {
+        for tx in lo(i)..=hi(i) {
+            out.push((face.index(), tx, ty));
+        }
+    }
+    // The nearest first: by the square of the tile-centre distance to the cell under `dir`.
+    let (ci, cj) = (i64::from(i), i64::from(j));
+    out.sort_by_key(|&(_, tx, ty)| {
+        let (mx, my) = (
+            i64::from(tx * TILE_EDGE + TILE_EDGE / 2),
+            i64::from(ty * TILE_EDGE + TILE_EDGE / 2),
+        );
+        (mx - ci) * (mx - ci) + (my - cj) * (my - cj)
+    });
+    out
 }
 
 /// A tile's width in nodes: `TILE_EDGE`, or what is left of the edge for the last tile.
@@ -439,7 +545,7 @@ pub fn nodes_of_chunk(lattice: &MacroLattice, key: ChunkKey) -> BTreeSet<u32> {
 
 /// ★ THE GOLDEN FIELDS (slice 8c stage C4c; SL10 clause 3): what the world identity's self-check
 /// reads instead of the recipe's own relief — the home artifact's ROWS under the six rung-0 keys
-/// (a few dozen nodes, `SparseZ`) and its COARSEST PYRAMID LEVEL, which the two top-rung keys read
+/// (a few dozen nodes, `SparseZ`) and THE PYRAMID LEVEL THE TOP-RUNG KEYS READ, which the two top-rung keys read
 /// the way the far view does. Both are literals in the build (`home::home_golden_fields`), so every
 /// host measures the same eight chunks through the same read at boot, with no artifact in hand; the
 /// artifact pin proves the literals are the solve's own rows.
@@ -1157,10 +1263,123 @@ mod tests {
         };
         assert_eq!(wet.sea(), Some(-300));
         assert_eq!(fields.field_for(&lattice, 0).map(|f| f.level()), Some(0));
-        assert_eq!(fields.field_for(&lattice, 13).map(|f| f.level()), Some(2));
-        // Rung 10 reads level 1 on the moon, which the golden fields do not hold.
+        assert_eq!(fields.field_for(&lattice, 15).map(|f| f.level()), Some(2));
+        // Rungs 10 to 14 read level 1 on the moon, which the golden fields do not hold.
         assert_eq!(PyramidField::level_for(&lattice, fields.levels, 10), 1);
+        assert_eq!(PyramidField::level_for(&lattice, fields.levels, 14), 1);
         assert!(fields.field_for(&lattice, 10).is_none());
+    }
+
+    /// ★ THE TILE REACH (2026-09-20): the rung-9 switch at the reference pixel is 445 km; a stand
+    /// 20 km over the moon sees a 121 km horizon, so the reach is that horizon plus two nodes; a
+    /// stand 200 km up sees 426 km, still under the switch; a stand at the surface reaches two
+    /// nodes; a negative altitude reads as the surface; with no pyramid every rung reads the rows
+    /// and the top rung's switch bounds the reach. The pixel is the reference view's, as a
+    /// literal (`2 · tan(22.5°) / 720`): this crate's tests keep the float fence too.
+    #[test]
+    fn the_tile_reach_is_the_finest_rows_rung_bounded_by_the_horizon() {
+        let moon = home_moon();
+        let lattice = MacroLattice::of(&moon).expect("a lattice");
+        let r = moon.radius_m();
+        let top = moon.ladder.rungs - 1;
+        let pixel = 0.828_427_124_746_190_1 / 720.0;
+        let switch9 = switch_m(9, pixel);
+        assert!((switch9 - 445_000.0).abs() < 1_000.0, "{switch9}");
+        assert_eq!(horizon_m(r, -5.0), 0.0);
+        let h20 = horizon_m(r, 20_000.0);
+        assert!((h20 - 121_000.0).abs() < 1_000.0, "{h20}");
+        let margin = 2.0 * lattice.node_m();
+        assert_eq!(
+            tile_reach_m(&lattice, 2, top, r, r + 20_000.0, pixel),
+            h20 + margin
+        );
+        let reach200 = tile_reach_m(&lattice, 2, top, r, r + 200_000.0, pixel);
+        assert!(
+            (reach200 - (horizon_m(r, 200_000.0) + margin)).abs() < 1.0e-6,
+            "{reach200}"
+        );
+        assert_eq!(tile_reach_m(&lattice, 2, top, r, r - 1.0, pixel), margin);
+        // Far enough out the switch bounds the reach: a stand 5 000 km up.
+        assert_eq!(
+            tile_reach_m(&lattice, 2, top, r, r + 5.0e6, pixel),
+            switch_m(9, pixel) + margin
+        );
+        // No pyramid: every rung reads the rows; the top rung's switch (7 100 km on the moon)
+        // stands past the 5 300 km horizon, which bounds instead.
+        assert!(switch_m(top, pixel) > horizon_m(r, 5.0e6));
+        assert_eq!(
+            tile_reach_m(&lattice, 0, top, r, r + 5.0e6, pixel),
+            horizon_m(r, 5.0e6) + margin
+        );
+    }
+
+    /// ★ THE TILES WITHIN A REACH (2026-09-21): a direction with no length falls behind every
+    /// face and names no tile; a reach under one node names the one tile the direction stands on;
+    /// a wide reach names a block of tiles on that face, the nearest first.
+    ///
+    /// **Example.** A session over the moon's +Z pole asks the shard what it can see: the tile
+    /// under its feet arrives first, and the ring of tiles around it follows.
+    #[test]
+    fn the_tiles_within_a_reach_come_nearest_first() {
+        use vd_seed::ladder::index_of;
+        let moon = home_moon();
+        let lattice = MacroLattice::of(&moon).expect("a lattice");
+        // A direction with no length: every face axis reads zero, so the face is behind the eye.
+        let nothing = tiles_within(&lattice, [0.0, 0.0, 0.0], 100_000.0);
+        assert_eq!(nothing, Vec::new());
+        // A reach under one node still names the one tile the direction stands on.
+        let dir = [0.0, 0.0, 1.0];
+        let mid = index_of(0.0, lattice.edge);
+        let under = tile_of_node(lattice.edge, lattice.index(Face::PosZ, mid, mid));
+        assert_eq!(
+            tiles_within(&lattice, dir, lattice.node_m() / 4.0),
+            vec![under]
+        );
+        // A reach of two hundred nodes names a block of tiles, all on the face the eye looks at.
+        let wide = tiles_within(&lattice, dir, 200.0 * lattice.node_m());
+        let count = wide.len();
+        assert!(count > 1, "{count}");
+        assert_eq!(wide[0], under);
+        assert_eq!(
+            wide.iter()
+                .filter(|&&(f, _, _)| f != Face::PosZ.index())
+                .count(),
+            0
+        );
+        // The nearest first: the square distance from each tile's centre to the eye's own cell
+        // never falls along the list.
+        let keys: Vec<i64> = wide
+            .iter()
+            .map(|&(_, tx, ty)| {
+                let (mx, my) = (
+                    i64::from(tx * TILE_EDGE + TILE_EDGE / 2),
+                    i64::from(ty * TILE_EDGE + TILE_EDGE / 2),
+                );
+                let c = i64::from(mid);
+                (mx - c) * (mx - c) + (my - c) * (my - c)
+            })
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted);
+    }
+
+    /// ★ A BODY THAT HOLDS WATER WHOSE SOLVE SETTLED NO LEVEL states a DRY artifact (2026-09-21):
+    /// the body's own word is not enough — the state must name a sea as well.
+    ///
+    /// **Example.** The moon's charter names water, but a fresh state holds no settled sea, so the
+    /// artifact the shard ships says DRY and every column reads the body's own level instead.
+    #[test]
+    fn a_water_body_with_no_settled_sea_states_a_dry_artifact() {
+        let moon = home_moon();
+        let lattice = MacroLattice::of(&moon).expect("a lattice");
+        let words = home_moon_solve_words();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        state.sea_z = i32::MIN;
+        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, None);
+        let facies = vec![0u8; state.node_count()];
+        let artifact = Artifact::of(&state, &facies, &climate, true);
+        assert_eq!(artifact.sea(), None);
     }
 
     /// ★ THE PYRAMID AS A FIELD: level 1 over the moon's coarser lattice reads the block means, the
@@ -1175,13 +1394,17 @@ mod tests {
         assert_eq!(level1.z_m.len(), coarse.node_count());
         assert_eq!(PyramidField::of(&artifact, 3), None);
         assert_eq!(PyramidField::of(&artifact, 0), None);
-        // The level climbs while four of its nodes fit the chunk: a chunk at rung 13 is 62 nodes
-        // wide (level 2, the last the moon has); at rung 10 it is 7.75 nodes (level 1, whose node
-        // is two); at rung 9 it is 3.9 nodes (the rows); at rung 11 it is 15.5 (level 2).
-        assert_eq!(PyramidField::level_for(&lattice, 2, 13), 2);
-        assert_eq!(PyramidField::level_for(&lattice, 2, 10), 1);
+        // The rows for a chunk narrower than four nodes (rung 9: 3.9 nodes); from rung 10 the
+        // finest level whose node is at least the cell: level 1 (16 km nodes) from rung 10 to
+        // rung 14 (16 km cells), level 2 at rung 15 (32 km cells), the last the moon has from
+        // there up; no pyramid, no level.
         assert_eq!(PyramidField::level_for(&lattice, 2, 9), 0);
-        assert_eq!(PyramidField::level_for(&lattice, 2, 11), 2);
+        assert_eq!(PyramidField::level_for(&lattice, 2, 10), 1);
+        assert_eq!(PyramidField::level_for(&lattice, 2, 11), 1);
+        assert_eq!(PyramidField::level_for(&lattice, 2, 13), 1);
+        assert_eq!(PyramidField::level_for(&lattice, 2, 14), 1);
+        assert_eq!(PyramidField::level_for(&lattice, 2, 15), 2);
+        assert_eq!(PyramidField::level_for(&lattice, 2, 20), 2);
         assert_eq!(PyramidField::level_for(&lattice, 0, 13), 0);
         // The read through level 1 on the coarser lattice at the cell that is one coarse node.
         let fine_node = lattice.index(Face::PosZ, 20, 30);
@@ -1206,10 +1429,8 @@ mod tests {
                 hi = b;
             }
         }
-        assert!(
-            level_m >= lo - 1.0 && level_m <= hi + 1.0,
-            "{level_m} outside {lo}..{hi}"
-        );
+        assert!(level_m >= lo - 1.0, "{level_m} under {lo}");
+        assert!(level_m <= hi + 1.0, "{level_m} over {hi}");
     }
 
     /// ★ THE NODE AND THE FRACTION: at rung 13 on the moon (a node is 2¹³ cells) cell `i` is node
@@ -1225,11 +1446,8 @@ mod tests {
         let (node, t) = node_and_fraction(&lattice, 0, 0);
         assert_eq!(node, -1);
         let half = 1i64 << (NOISE_BITS - 1);
-        assert!(
-            (t.raw() - half).abs() < (1 << (NOISE_BITS - 12)),
-            "{}",
-            t.raw()
-        );
+        let raw = t.raw();
+        assert!((raw - half).abs() < (1 << (NOISE_BITS - 12)), "{raw}");
         let (node, t) = node_and_fraction(&lattice, 0, 4_096);
         assert_eq!(node, 0);
         assert!(t.raw() < 1 << (NOISE_BITS - 12), "{}", t.raw());

@@ -4036,6 +4036,8 @@ fn freshest_session_confirmed_maxes_over_active_and_selffenced() {
             sky_held: None,
             sky_parts_sent: 0,
             artifact_held: std::collections::BTreeMap::new(),
+            artifact_parts_sent: std::collections::BTreeMap::new(),
+            artifact_tiles_sent: std::collections::BTreeMap::new(),
             client: CLIENT,
             account: AccountId(5),
             fence: Fence(1),
@@ -4123,6 +4125,8 @@ fn one_active_session() -> (GatewaySessions, SessionId, OutboundBox) {
             sky_held: None,
             sky_parts_sent: 0,
             artifact_held: std::collections::BTreeMap::new(),
+            artifact_parts_sent: std::collections::BTreeMap::new(),
+            artifact_tiles_sent: std::collections::BTreeMap::new(),
             client: CLIENT,
             account: AccountId(5),
             fence: Fence(1),
@@ -4381,6 +4385,8 @@ fn sweep_keeps_a_shared_reverse_index_entry_with_a_surviving_subscriber() {
             sky_held: None,
             sky_parts_sent: 0,
             artifact_held: std::collections::BTreeMap::new(),
+            artifact_parts_sent: std::collections::BTreeMap::new(),
+            artifact_tiles_sent: std::collections::BTreeMap::new(),
             client: NodeId(101),
             account: AccountId(6),
             fence: Fence(1),
@@ -5457,6 +5463,8 @@ fn active_session() -> Session {
         sky_held: None,
         sky_parts_sent: 0,
         artifact_held: std::collections::BTreeMap::new(),
+        artifact_parts_sent: std::collections::BTreeMap::new(),
+        artifact_tiles_sent: std::collections::BTreeMap::new(),
         client: CLIENT,
         account: AccountId(5),
         fence: Fence(1),
@@ -10846,6 +10854,8 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
             sky_held: None,
             sky_parts_sent: 0,
             artifact_held: std::collections::BTreeMap::new(),
+            artifact_parts_sent: std::collections::BTreeMap::new(),
+            artifact_tiles_sent: std::collections::BTreeMap::new(),
             client: CLIENT,
             account: AccountId(i as u128),
             fence: Fence(1),
@@ -11768,4 +11778,1146 @@ fn a_shards_bulk_for_named_sessions_is_relayed_as_artifact_parts() {
         },
     )]);
     assert_eq!(rig.world.resource::<GatewayStats>().artifact_held_stated, 1);
+}
+
+/// ★ THE FAR-VIEW SHIP AT THE GATEWAY (slice 8c; SL3 — a realm draws itself, whoever looks): a
+/// drawn realm whose own look bag names an artifact is ASKED FOR once on the beat from the shard
+/// the gateway knows for it; the head and the parts the shard answers with on the realm audience
+/// are CACHED once; the beat SERVES them, paced and each once, to the session that draws the realm
+/// — until the session states it holds them, when the serve is skipped and counted; a realm nobody
+/// draws any more is forgotten with its cache. Stray parts (no head, the wrong sender, a shape the
+/// head did not announce, a duplicate, a tile) are counted and dropped.
+#[test]
+fn the_realm_the_occupant_stands_in_has_its_artifact_wanted_and_served_too() {
+    use vd_wire::channels::BulkMsg;
+    use vd_wire::session_flow::BulkAudience;
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login(); // window 1 = Occupants(System 7) on SHARD: the origin's own window
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().by_session[&sid]
+            .shadow
+            .origin,
+        Some(RealmId::System(7))
+    );
+    let digest = [0xC1u64, 0xD2];
+    // The origin states its OWN look, with its artifact word, on its own window (never relayed:
+    // the realm the occupant stands in is nobody's child row).
+    let bag = vd_core::look::surface_look_bag_with(
+        &vd_core::geometry::Boundary::Shell { r: 1.0e6 },
+        None,
+        &vd_core::look::SurfaceStmt {
+            frame: FrameRef::SystemSpace { system_seed: 7 },
+            generator: 7,
+        },
+        None,
+        Some(digest),
+    );
+    let _ = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::Control,
+        &ShardToGateway::WindowBody {
+            realm_fence: Fence(1),
+            window: WindowId(1),
+            subject: RealmId::System(7),
+            stmt: BodyStmt::SelfLook { bag },
+            authored_at: vd_core::UniverseTick(5),
+        },
+    )]);
+    let drawn: Vec<RealmId> = rig.world.resource::<GatewaySessions>().by_session[&sid]
+        .shadow
+        .drawn_rows()
+        .map(|r| r.realm)
+        .collect();
+    assert!(
+        !drawn.contains(&RealmId::System(7)),
+        "the origin has no composed row: {drawn:?}"
+    );
+    let wants_to = |sent: &[(NodeId, MsgClass, Vec<u8>)], node: NodeId| -> Vec<GatewayToShard> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == node)
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<GatewayToShard>(b) {
+                    Ok(msg @ GatewayToShard::ArtifactWant { .. }) => Some(msg),
+                    _ => None,
+                },
+            )
+            .collect()
+    };
+    let parts_to_client = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> usize {
+        sent.iter()
+            .filter(|(to, _, _)| *to == CLIENT)
+            .filter(|(_, _, b)| {
+                matches!(
+                    postcard::from_bytes::<ServerControlMsg>(b),
+                    Ok(ServerControlMsg::ArtifactPart { .. })
+                )
+            })
+            .count()
+    };
+    // On the beat the origin's head is already resolved (the session's own subscription names
+    // its shard): the want goes to SHARD at once, with no directory poll.
+    set_tick(&mut rig, 25);
+    let sent = rig.tick(vec![]);
+    assert_eq!(
+        wants_to(&sent, SHARD),
+        vec![GatewayToShard::ArtifactWant {
+            realm: RealmId::System(7),
+            digest,
+            view: None,
+        }]
+    );
+    assert_eq!(rig.stats().artifact_wants_unresolved, 0);
+    // The origin's shard answers on the realm audience: a head and one level of one part; the
+    // beat serves both to the session standing in it.
+    let bulk = |msg: &BulkMsg| {
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::BulkFor {
+                realm_fence: Fence(1),
+                audience: BulkAudience::Realm(RealmId::System(7)),
+                bytes: postcard::to_allocvec(msg).expect("encode"),
+            },
+        )
+    };
+    set_tick(&mut rig, 26);
+    let _ = rig.tick(vec![
+        bulk(&BulkMsg::ArtifactHead {
+            realm: RealmId::System(7),
+            world_tag: 9,
+            version: 3,
+            edge: 16,
+            digest,
+            tiles_per_edge: 1,
+            levels: 1,
+            sea_m: 0,
+        }),
+        bulk(&BulkMsg::ArtifactPyramid {
+            realm: RealmId::System(7),
+            level: 1,
+            part: 0,
+            parts: 1,
+            z_m: vec![1],
+        }),
+    ]);
+    assert!(rig.world.resource::<GatewaySessions>().artifacts[&RealmId::System(7)].whole());
+    set_tick(&mut rig, 50);
+    assert_eq!(
+        parts_to_client(&rig.tick(vec![])),
+        2,
+        "the head and the part"
+    );
+    assert_eq!(rig.stats().artifact_parts_served, 2);
+}
+
+#[test]
+fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reach() {
+    use vd_wire::channels::BulkMsg;
+    use vd_wire::session_flow::{ArtifactView, BulkAudience};
+    let mut rig = Rig::new();
+    let (_sid, _) = rig.login(); // window 1 = Occupants(System 7) on SHARD
+    let digest = [0xA1u64, 0xB2];
+    // The planet states a surface, a charter and an artifact: enough for a body with a lattice.
+    let charter = vd_core::look::BodyCharter {
+        gravity_mm_s2: 9_818,
+        bulk_density_kgm3: 5_513,
+        escape_velocity_mps: 11_186,
+        insolation_q12: 4_096,
+        t_eq_mk: 255_000,
+        t_surface_mk: None,
+        bond_albedo_q12: 1_200,
+        mu_q8: None,
+        scale_height_m: None,
+        p_surf_pa: None,
+        tau_vis_q12: None,
+        tau_ir_q12: None,
+        day_s: None,
+        obliquity_cos_q1024: None,
+        water_km3: None,
+        sea_offset_mm: None,
+        elastic_thickness_m: None,
+        ecc_q16: 1_130,
+        year_s: 34_766_100,
+        flags: vd_core::look::CHARTER_FLAG_HAS_AIR | vd_core::look::CHARTER_FLAG_SOLID_SURFACE,
+    };
+    let bag = vd_core::look::surface_look_bag_with(
+        &vd_core::geometry::Boundary::Shell { r: 1.0e6 },
+        None,
+        &vd_core::look::SurfaceStmt {
+            frame: FrameRef::PlanetCentered { planet_seed: 7 },
+            generator: 7,
+        },
+        Some(&charter),
+        Some(digest),
+    );
+    let body =
+        vd_terrain::BodyDefinition::from_seed(7, 1.0e6, vd_terrain::BodyFacts::new(9_818, 5_513))
+            .expect("a body");
+    let lattice = body.macro_lattice().expect("a lattice");
+    let seal = vd_wire::session_flow::seal_relay_statements(&[
+        RelayedStatement::Level {
+            at: vd_core::UniverseTick(5),
+            rows: Vec::new(),
+        },
+        RelayedStatement::Body {
+            subject: RealmId::Planet(7),
+            stmt: BodyStmt::SelfLook { bag },
+            authored_at: vd_core::UniverseTick(5),
+        },
+    ]);
+    let roster_row = vd_wire::channels::RealmSnap {
+        realm: RealmId::Planet(7),
+        frame: FrameRef::PlanetCentered { planet_seed: 7 },
+        pose: vd_core::pose::StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 7 },
+            DVec3::new(30.0, 0.0, 0.0),
+            vd_core::UniverseTick(5),
+        ),
+    };
+    let frame = ShardToGateway::WindowFrame {
+        realm_fence: Fence(1),
+        window: WindowId(1),
+        at: vd_core::UniverseTick(5),
+        hop: None,
+        rows: vec![roster_row],
+    };
+    let _ = rig.tick(vec![
+        wire(SHARD, MsgClass::Control, &frame),
+        wire(SHARD, MsgClass::RealmSnapshot, &frame),
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::WindowRelayed {
+                realm_fence: Fence(1),
+                window: WindowId(1),
+                child: RealmId::Planet(7),
+                child_fence: Fence(9),
+                statements: seal,
+                interior: Vec::new(),
+            },
+        ),
+    ]);
+    let wants_to = |sent: &[(NodeId, MsgClass, Vec<u8>)], node: NodeId| -> Vec<GatewayToShard> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == node)
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<GatewayToShard>(b) {
+                    Ok(msg @ GatewayToShard::ArtifactWant { .. }) => Some(msg),
+                    _ => None,
+                },
+            )
+            .collect()
+    };
+    let parts_to_client = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<Vec<u8>> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == CLIENT)
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<ServerControlMsg>(b) {
+                    Ok(ServerControlMsg::ArtifactPart { bytes }) => Some(bytes),
+                    _ => None,
+                },
+            )
+            .collect()
+    };
+    // The head resolves, the head want goes, the shard answers a head and one level of one part.
+    set_tick(&mut rig, 26);
+    let _ = rig.tick(vec![wire(
+        ORCH,
+        MsgClass::Saga,
+        &realm_head(RealmId::Planet(7), Some(DEST)),
+    )]);
+    set_tick(&mut rig, 50);
+    let sent = rig.tick(vec![]);
+    assert_eq!(
+        wants_to(&sent, DEST),
+        vec![GatewayToShard::ArtifactWant {
+            realm: RealmId::Planet(7),
+            digest,
+            view: None,
+        }]
+    );
+    let bulk = |msg: &BulkMsg| {
+        wire(
+            DEST,
+            MsgClass::Control,
+            &ShardToGateway::BulkFor {
+                realm_fence: Fence(1),
+                audience: BulkAudience::Realm(RealmId::Planet(7)),
+                bytes: postcard::to_allocvec(msg).expect("encode"),
+            },
+        )
+    };
+    set_tick(&mut rig, 51);
+    let _ = rig.tick(vec![
+        bulk(&BulkMsg::ArtifactHead {
+            realm: RealmId::Planet(7),
+            world_tag: 9,
+            version: 3,
+            edge: lattice.edge,
+            digest,
+            tiles_per_edge: lattice.edge.div_ceil(vd_terrain::artifact::TILE_EDGE),
+            levels: 1,
+            sea_m: 0,
+        }),
+        bulk(&BulkMsg::ArtifactPyramid {
+            realm: RealmId::Planet(7),
+            level: 1,
+            part: 0,
+            parts: 1,
+            z_m: vec![1],
+        }),
+    ]);
+    // ★ THE VIEW WANT: on the beat, the session's view of the planet — the eye 30 m from the
+    // planet's centre along −X in the planet's frame (the row stands at +30 m in the picture's
+    // frame) — goes to the planet's shard beside the served parts.
+    set_tick(&mut rig, 75);
+    let sent = rig.tick(vec![]);
+    let views: Vec<ArtifactView> = wants_to(&sent, DEST)
+        .into_iter()
+        .filter_map(|w| match w {
+            GatewayToShard::ArtifactWant { view: Some(v), .. } => Some(v),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(views.len(), 1, "{views:?}");
+    assert!((views[0].radial_m - 30.0).abs() < 1.0e-9, "{views:?}");
+    assert!((views[0].dir[0] + 1.0).abs() < 1.0e-9, "{views:?}");
+    assert_eq!(parts_to_client(&sent).len(), 2, "the head and the part");
+    // The tile the view reaches, as the terrain crate names it for the gateway and the shard.
+    let reach = vd_terrain::artifact::tile_reach_m(
+        &lattice,
+        1,
+        body.ladder().rungs - 1,
+        body.radius_m(),
+        30.0,
+        vd_core::geometry::drawable_theta_min_rad(),
+    );
+    let tiles = vd_terrain::artifact::tiles_within(&lattice, [-1.0, 0.0, 0.0], reach);
+    let (face, tx, ty) = tiles[0];
+    let tile = BulkMsg::ArtifactTile {
+        realm: RealmId::Planet(7),
+        face,
+        tx,
+        ty,
+        rows: vec![7, 7, 7],
+    };
+    // The shard answers the tile; a tile from another node is a stray; the next beat serves
+    // the tile to the session once, and a beat later nothing more.
+    set_tick(&mut rig, 76);
+    let _ = rig.tick(vec![
+        bulk(&tile),
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::BulkFor {
+                realm_fence: Fence(1),
+                audience: BulkAudience::Realm(RealmId::Planet(7)),
+                bytes: postcard::to_allocvec(&tile).expect("encode"),
+            },
+        ),
+    ]);
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().artifacts[&RealmId::Planet(7)]
+            .tiles
+            .len(),
+        1
+    );
+    assert_eq!(rig.stats().artifact_parts_stray, 1);
+    set_tick(&mut rig, 100);
+    let served = parts_to_client(&rig.tick(vec![]));
+    assert_eq!(served.len(), 1, "{served:?}");
+    assert_eq!(
+        postcard::from_bytes::<BulkMsg>(&served[0]).expect("decodes"),
+        tile
+    );
+    set_tick(&mut rig, 125);
+    assert!(parts_to_client(&rig.tick(vec![])).is_empty());
+}
+
+#[test]
+fn a_drawn_realms_artifact_is_wanted_once_cached_once_and_served_per_session() {
+    use vd_wire::channels::BulkMsg;
+    use vd_wire::session_flow::BulkAudience;
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login(); // window 1 = Occupants(System 7) on SHARD
+    let digest = [0xA1u64, 0xB2];
+    // The PLANET's own look, with its artifact word, RELAYED through its parent's window — the
+    // road a realm's look takes to a pilot who sees it from outside (the far view).
+    let bag = vd_core::look::surface_look_bag_with(
+        &vd_core::geometry::Boundary::Shell { r: 1.0e6 },
+        None,
+        &vd_core::look::SurfaceStmt {
+            frame: FrameRef::PlanetCentered { planet_seed: 7 },
+            generator: 7,
+        },
+        None,
+        Some(digest),
+    );
+    let seal = vd_wire::session_flow::seal_relay_statements(&[
+        RelayedStatement::Level {
+            at: vd_core::UniverseTick(5),
+            rows: Vec::new(),
+        },
+        RelayedStatement::Body {
+            subject: RealmId::Planet(7),
+            stmt: BodyStmt::SelfLook { bag },
+            authored_at: vd_core::UniverseTick(5),
+        },
+    ]);
+    let roster_row = vd_wire::channels::RealmSnap {
+        realm: RealmId::Planet(7),
+        frame: FrameRef::PlanetCentered { planet_seed: 7 },
+        pose: vd_core::pose::StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 7 },
+            DVec3::new(30.0, 0.0, 0.0),
+            vd_core::UniverseTick(5),
+        ),
+    };
+    let frame = ShardToGateway::WindowFrame {
+        realm_fence: Fence(1),
+        window: WindowId(1),
+        at: vd_core::UniverseTick(5),
+        hop: None,
+        rows: vec![roster_row],
+    };
+    let _ = rig.tick(vec![
+        wire(SHARD, MsgClass::Control, &frame),
+        wire(SHARD, MsgClass::RealmSnapshot, &frame),
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::WindowRelayed {
+                realm_fence: Fence(1),
+                window: WindowId(1),
+                child: RealmId::Planet(7),
+                child_fence: Fence(9),
+                statements: seal,
+                interior: Vec::new(),
+            },
+        ),
+    ]);
+    let drawn: Vec<RealmId> = rig.world.resource::<GatewaySessions>().by_session[&sid]
+        .shadow
+        .drawn_rows()
+        .map(|r| r.realm)
+        .collect();
+    assert!(drawn.contains(&RealmId::Planet(7)), "{drawn:?}");
+    assert!(
+        rig.world.resource::<GatewaySessions>().windows[&WindowId(1)]
+            .ingest
+            .look_of(RealmId::Planet(7))
+            .is_some(),
+        "the relayed look landed"
+    );
+    let wants_to = |sent: &[(NodeId, MsgClass, Vec<u8>)], node: NodeId| -> Vec<GatewayToShard> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == node)
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<GatewayToShard>(b) {
+                    Ok(msg @ GatewayToShard::ArtifactWant { .. }) => Some(msg),
+                    _ => None,
+                },
+            )
+            .collect()
+    };
+    let head_reads = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> usize {
+        sent.iter()
+            .filter(|(to, _, _)| *to == ORCH)
+            .filter(|(_, _, b)| {
+                matches!(
+                    postcard::from_bytes::<InterShardFlow>(b),
+                    Ok(InterShardFlow::Directory(DirectoryOp::HeadRead {
+                        key: DirectoryKey::Realm(RealmId::Planet(7)),
+                    }))
+                )
+            })
+            .count()
+    };
+    let parts_to_client = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<Vec<u8>> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == CLIENT)
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<ServerControlMsg>(b) {
+                    Ok(ServerControlMsg::ArtifactPart { bytes }) => Some(bytes),
+                    _ => None,
+                },
+            )
+            .collect()
+    };
+    // Off the beat nothing is asked. On the beat the planet's head is not resolved (a planet
+    // seen from outside is nobody's lineage ancestor): the want waits, counted, and the beat's
+    // head poll asks the directory for the planet.
+    set_tick(&mut rig, 24);
+    assert!(wants_to(&rig.tick(vec![]), DEST).is_empty());
+    set_tick(&mut rig, 25);
+    let sent = rig.tick(vec![]);
+    assert!(wants_to(&sent, DEST).is_empty());
+    assert_eq!(rig.stats().artifact_wants_unresolved, 1);
+    assert_eq!(
+        head_reads(&sent),
+        1,
+        "the planet's head is polled on the beat"
+    );
+    // The directory names the planet's shard (off the beat): the next beat sends the want
+    // there, once; a beat later, unanswered, it asks again.
+    set_tick(&mut rig, 26);
+    let _ = rig.tick(vec![wire(
+        ORCH,
+        MsgClass::Saga,
+        &realm_head(RealmId::Planet(7), Some(DEST)),
+    )]);
+    set_tick(&mut rig, 50);
+    let sent = rig.tick(vec![]);
+    assert_eq!(
+        wants_to(&sent, DEST),
+        vec![GatewayToShard::ArtifactWant {
+            realm: RealmId::Planet(7),
+            digest,
+            view: None,
+        }]
+    );
+    assert!(wants_to(&sent, SHARD).is_empty());
+    set_tick(&mut rig, 75);
+    assert_eq!(wants_to(&rig.tick(vec![]), DEST).len(), 1);
+    assert_eq!(rig.stats().artifact_wants_sent, 2);
+    // The planet's shard answers on the realm audience: a head, two levels of one and two parts.
+    // Strays are dropped and counted: a tile before the head, a tile about another realm, a part
+    // before the head, a part from another node, a part past the count, a level past the head's,
+    // a duplicate, a head about another realm. The LAST tile lands after the head and is cached.
+    let bulk = |from: NodeId, msg: &BulkMsg| {
+        wire(
+            from,
+            MsgClass::Control,
+            &ShardToGateway::BulkFor {
+                realm_fence: Fence(1),
+                audience: BulkAudience::Realm(RealmId::Planet(7)),
+                bytes: postcard::to_allocvec(msg).expect("encode"),
+            },
+        )
+    };
+    let head_for = |realm: RealmId| BulkMsg::ArtifactHead {
+        realm,
+        world_tag: 9,
+        version: 2,
+        edge: 16,
+        digest,
+        tiles_per_edge: 1,
+        levels: 2,
+        sea_m: 0,
+    };
+    let head = head_for(RealmId::Planet(7));
+    let part = |level: u32, part: u32, parts: u32| BulkMsg::ArtifactPyramid {
+        realm: RealmId::Planet(7),
+        level,
+        part,
+        parts,
+        z_m: vec![level as i16, part as i16],
+    };
+    let stray_part = |realm: RealmId| BulkMsg::ArtifactPyramid {
+        realm,
+        level: 2,
+        part: 1,
+        parts: 2,
+        z_m: vec![0],
+    };
+    // ★ A TILE IS A STRAY TWICE OVER (2026-09-21): before the realm's head is cached the gateway
+    // holds nothing to put it in, and a tile that names ANOTHER realm than the audience is not
+    // this realm's tile at all. Example: the planet's shard answers a tile while the pilot's
+    // gateway still waits for the head, and a second tile names the neighbour planet — both are
+    // counted and dropped, and no session is served either.
+    let tile_of = |realm: RealmId| BulkMsg::ArtifactTile {
+        realm,
+        face: 0,
+        tx: 0,
+        ty: 0,
+        rows: vec![],
+    };
+    let _ = rig.tick(vec![
+        bulk(DEST, &tile_of(RealmId::Planet(7))),
+        bulk(DEST, &tile_of(RealmId::Planet(9))),
+        bulk(DEST, &part(1, 0, 1)),
+        bulk(DEST, &head),
+        bulk(DEST, &part(2, 0, 2)),
+        bulk(SHARD, &part(2, 1, 2)),
+        bulk(DEST, &part(2, 5, 2)),
+        bulk(DEST, &part(3, 0, 1)),
+        bulk(DEST, &part(0, 0, 1)),
+        bulk(DEST, &part(2, 0, 0)),
+        bulk(DEST, &part(2, 1, 3)),
+        bulk(DEST, &stray_part(RealmId::Planet(9))),
+        bulk(DEST, &part(2, 0, 2)),
+        bulk(DEST, &tile_of(RealmId::Planet(7))),
+        bulk(DEST, &head_for(RealmId::Planet(9))),
+    ]);
+    assert_eq!(
+        rig.stats().artifact_parts_cached,
+        3,
+        "the head, one part and one tile (the one tile path)"
+    );
+    assert_eq!(
+        rig.stats().artifact_parts_stray,
+        12,
+        "ten shapes the head refuses, plus the tile before the head and the tile of another realm"
+    );
+    assert!(
+        !rig.world.resource::<GatewaySessions>().artifacts[&RealmId::Planet(7)].whole(),
+        "level 2 is half here, level 1 not at all"
+    );
+    // Not whole: the beat serves nothing and asks again — the head want once; the session's
+    // VIEW want rides beside it now that the head is cached (the one tile path).
+    set_tick(&mut rig, 100);
+    let sent = rig.tick(vec![]);
+    assert!(parts_to_client(&sent).is_empty());
+    let head_wants = wants_to(&sent, DEST)
+        .iter()
+        .filter(|w| matches!(w, GatewayToShard::ArtifactWant { view: None, .. }))
+        .count();
+    assert_eq!(head_wants, 1);
+    // The last parts land on a beat tick: the cache is whole and the SAME beat serves the head
+    // then the three parts to the session, once; no want.
+    let sent = rig.tick(vec![
+        bulk(DEST, &part(2, 1, 2)),
+        bulk(DEST, &part(1, 0, 1)),
+        bulk(DEST, &head),
+    ]);
+    assert!(rig.world.resource::<GatewaySessions>().artifacts[&RealmId::Planet(7)].whole());
+    assert_eq!(
+        rig.stats().artifact_parts_cached,
+        6,
+        "the same head again is cached, not a new transfer (the tile counted too)"
+    );
+    assert!(
+        !wants_to(&sent, DEST)
+            .iter()
+            .any(|w| matches!(w, GatewayToShard::ArtifactWant { view: None, .. })),
+        "no head want once whole"
+    );
+    let served = parts_to_client(&sent);
+    assert_eq!(served.len(), 4);
+    assert_eq!(
+        postcard::from_bytes::<BulkMsg>(&served[0]).expect("decode"),
+        head
+    );
+    assert_eq!(
+        postcard::from_bytes::<BulkMsg>(&served[1]).expect("decode"),
+        part(2, 0, 2)
+    );
+    assert_eq!(rig.stats().artifact_parts_served, 4);
+    set_tick(&mut rig, 150);
+    assert!(
+        parts_to_client(&rig.tick(vec![])).is_empty(),
+        "each part once"
+    );
+    // The client states it holds the artifact (off the beat): the serve is skipped from then on.
+    set_tick(&mut rig, 151);
+    let _ = rig.tick(vec![wire(
+        CLIENT,
+        MsgClass::Control,
+        &ClientControlMsg::ArtifactHeld {
+            realm: RealmId::Planet(7),
+            digest,
+        },
+    )]);
+    set_tick(&mut rig, 175);
+    let _ = rig.tick(vec![]);
+    assert_eq!(rig.stats().artifact_parts_skipped, 1);
+    // The planet re-states its look at ANOTHER digest (it re-solved): the held cache is at the
+    // old digest, so the next beat wants the new one; the same head from another node is a
+    // new transfer too.
+    let digest2 = [0xC3u64, 0xD4];
+    let bag2 = vd_core::look::surface_look_bag_with(
+        &vd_core::geometry::Boundary::Shell { r: 1.0e6 },
+        None,
+        &vd_core::look::SurfaceStmt {
+            frame: FrameRef::PlanetCentered { planet_seed: 7 },
+            generator: 7,
+        },
+        None,
+        Some(digest2),
+    );
+    set_tick(&mut rig, 176);
+    let _ = rig.tick(vec![
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::WindowRelayed {
+                realm_fence: Fence(1),
+                window: WindowId(1),
+                child: RealmId::Planet(7),
+                child_fence: Fence(10),
+                statements: vd_wire::session_flow::seal_relay_statements(&[
+                    RelayedStatement::Level {
+                        at: vd_core::UniverseTick(6),
+                        rows: Vec::new(),
+                    },
+                    RelayedStatement::Body {
+                        subject: RealmId::Planet(7),
+                        stmt: BodyStmt::SelfLook { bag: bag2 },
+                        authored_at: vd_core::UniverseTick(6),
+                    },
+                ]),
+                interior: Vec::new(),
+            },
+        ),
+        bulk(SHARD, &head),
+    ]);
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().artifacts[&RealmId::Planet(7)].shard,
+        SHARD,
+        "the same head from another node replaced the transfer"
+    );
+    set_tick(&mut rig, 200);
+    let sent = rig.tick(vec![]);
+    assert_eq!(
+        wants_to(&sent, DEST),
+        vec![GatewayToShard::ArtifactWant {
+            realm: RealmId::Planet(7),
+            digest: digest2,
+            view: None,
+        }]
+    );
+    // A head of no levels is cached and never whole.
+    set_tick(&mut rig, 201);
+    let _ = rig.tick(vec![bulk(
+        DEST,
+        &BulkMsg::ArtifactHead {
+            realm: RealmId::Planet(7),
+            world_tag: 9,
+            version: 2,
+            edge: 16,
+            digest: digest2,
+            tiles_per_edge: 1,
+            levels: 0,
+            sea_m: 0,
+        },
+    )]);
+    assert!(!rig.world.resource::<GatewaySessions>().artifacts[&RealmId::Planet(7)].whole());
+    // The realm leaves every picture: the cache and the want are forgotten.
+    rig.world
+        .resource_mut::<GatewaySessions>()
+        .by_session
+        .get_mut(&sid)
+        .expect("the session")
+        .phase = SessionPhase::AwaitingDirectory;
+    set_tick(&mut rig, 225);
+    let _ = rig.tick(vec![]);
+    assert_eq!(rig.stats().artifact_caches_evicted, 1);
+    assert!(rig.world.resource::<GatewaySessions>().artifacts.is_empty());
+}
+
+/// ★ THE WANT WAITS FOR A HEAD (the far-view ship): a realm whose shard this gateway has not
+/// resolved is counted and polled, not guessed at; once resolved the want goes out, once a beat.
+#[test]
+fn a_want_waits_for_the_realms_resolved_head() {
+    let mut world = World::new();
+    world.insert_resource(OutboundBox::default());
+    let config = config();
+    let clock = ClockSample {
+        local_tick: TickId(25),
+        universe_tick: UniverseTick(100),
+        epoch: EpochId(1),
+        synced: true,
+    };
+    let mut sessions = GatewaySessions::default();
+    let mut stats = GatewayStats::default();
+    let mut outbox = OutboundBox::default();
+    let drawn = std::collections::BTreeMap::from([(RealmId::Planet(9), [3u64, 4])]);
+    super::artifact::serve_artifacts(
+        &config,
+        &clock,
+        &drawn,
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(stats.artifact_wants_unresolved, 1);
+    assert!(outbox.0.is_empty());
+    sessions.realm_heads.insert(RealmId::Planet(9), NodeId(77));
+    super::artifact::serve_artifacts(
+        &config,
+        &clock,
+        &drawn,
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(stats.artifact_wants_sent, 1);
+    assert_eq!(outbox.0.len(), 1);
+    assert_eq!(outbox.0[0].0, NodeId(77));
+    // The same beat again: asked recently, not again.
+    super::artifact::serve_artifacts(
+        &config,
+        &clock,
+        &drawn,
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(stats.artifact_wants_sent, 1);
+    let _ = world;
+}
+
+/// ★ A REALM WHOSE SURFACE IS NOT A PLANET'S DRAWS NO TILES (the one tile path): the tile reach is
+/// a BODY's rule, and a body is built from a PLANET-centred surface. A star states its surface in
+/// its own star-centred frame, so the gateway hands the session that draws it the head and the
+/// pyramid's parts and never a tile — even with a tile of that realm in the cache.
+///
+/// **Example.** A pilot in a hull looks at the system's star. The star's look bag carries a
+/// charter and an artifact word, and its shard answers a tile. The gateway serves her the head and
+/// the part alone: the star draws its own surface from its recipe, not from the planet's lattice.
+#[test]
+fn a_drawn_realm_whose_surface_is_not_a_planets_is_served_no_tiles() {
+    use vd_wire::channels::BulkMsg;
+    use vd_wire::session_flow::BulkAudience;
+    let mut rig = Rig::new();
+    let (_sid, _) = rig.login(); // window 1 = Occupants(System 7) on SHARD
+    let digest = [0x51u64, 0x62];
+    // The star states a surface IN ITS OWN STAR-CENTRED FRAME, a charter and an artifact: enough
+    // for a look, never enough for a body.
+    let charter = vd_core::look::BodyCharter {
+        gravity_mm_s2: 9_818,
+        bulk_density_kgm3: 5_513,
+        escape_velocity_mps: 11_186,
+        insolation_q12: 4_096,
+        t_eq_mk: 255_000,
+        t_surface_mk: None,
+        bond_albedo_q12: 1_200,
+        mu_q8: None,
+        scale_height_m: None,
+        p_surf_pa: None,
+        tau_vis_q12: None,
+        tau_ir_q12: None,
+        day_s: None,
+        obliquity_cos_q1024: None,
+        water_km3: None,
+        sea_offset_mm: None,
+        elastic_thickness_m: None,
+        ecc_q16: 1_130,
+        year_s: 34_766_100,
+        flags: vd_core::look::CHARTER_FLAG_HAS_AIR | vd_core::look::CHARTER_FLAG_SOLID_SURFACE,
+    };
+    let bag = vd_core::look::surface_look_bag_with(
+        &vd_core::geometry::Boundary::Shell { r: 1.0e6 },
+        None,
+        &vd_core::look::SurfaceStmt {
+            frame: FrameRef::StarCentered { star_seed: 7 },
+            generator: 7,
+        },
+        Some(&charter),
+        Some(digest),
+    );
+    let seal = vd_wire::session_flow::seal_relay_statements(&[
+        RelayedStatement::Level {
+            at: vd_core::UniverseTick(5),
+            rows: Vec::new(),
+        },
+        RelayedStatement::Body {
+            subject: RealmId::Star(7),
+            stmt: BodyStmt::SelfLook { bag },
+            authored_at: vd_core::UniverseTick(5),
+        },
+    ]);
+    let roster_row = vd_wire::channels::RealmSnap {
+        realm: RealmId::Star(7),
+        frame: FrameRef::StarCentered { star_seed: 7 },
+        pose: vd_core::pose::StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 7 },
+            DVec3::new(30.0, 0.0, 0.0),
+            vd_core::UniverseTick(5),
+        ),
+    };
+    let frame = ShardToGateway::WindowFrame {
+        realm_fence: Fence(1),
+        window: WindowId(1),
+        at: vd_core::UniverseTick(5),
+        hop: None,
+        rows: vec![roster_row],
+    };
+    let _ = rig.tick(vec![
+        wire(SHARD, MsgClass::Control, &frame),
+        wire(SHARD, MsgClass::RealmSnapshot, &frame),
+        wire(
+            SHARD,
+            MsgClass::Control,
+            &ShardToGateway::WindowRelayed {
+                realm_fence: Fence(1),
+                window: WindowId(1),
+                child: RealmId::Star(7),
+                child_fence: Fence(9),
+                statements: seal,
+                interior: Vec::new(),
+            },
+        ),
+    ]);
+    let parts_to_client = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<BulkMsg> {
+        sent.iter()
+            .filter(|(to, _, _)| *to == CLIENT)
+            .filter_map(
+                |(_, _, b)| match postcard::from_bytes::<ServerControlMsg>(b) {
+                    Ok(ServerControlMsg::ArtifactPart { bytes }) => {
+                        Some(postcard::from_bytes::<BulkMsg>(&bytes).expect("a bulk shape"))
+                    }
+                    _ => None,
+                },
+            )
+            .collect()
+    };
+    // The directory names the star's shard; the beat asks for the artifact.
+    set_tick(&mut rig, 26);
+    let _ = rig.tick(vec![wire(
+        ORCH,
+        MsgClass::Saga,
+        &realm_head(RealmId::Star(7), Some(DEST)),
+    )]);
+    set_tick(&mut rig, 50);
+    let _ = rig.tick(vec![]);
+    // The star's shard answers a whole artifact AND a tile.
+    let bulk = |msg: &BulkMsg| {
+        wire(
+            DEST,
+            MsgClass::Control,
+            &ShardToGateway::BulkFor {
+                realm_fence: Fence(1),
+                audience: BulkAudience::Realm(RealmId::Star(7)),
+                bytes: postcard::to_allocvec(msg).expect("encode"),
+            },
+        )
+    };
+    let head = BulkMsg::ArtifactHead {
+        realm: RealmId::Star(7),
+        world_tag: 9,
+        version: 3,
+        edge: 16,
+        digest,
+        tiles_per_edge: 1,
+        levels: 1,
+        sea_m: 0,
+    };
+    let part = BulkMsg::ArtifactPyramid {
+        realm: RealmId::Star(7),
+        level: 1,
+        part: 0,
+        parts: 1,
+        z_m: vec![1],
+    };
+    let tile = BulkMsg::ArtifactTile {
+        realm: RealmId::Star(7),
+        face: 0,
+        tx: 0,
+        ty: 0,
+        rows: vec![7],
+    };
+    set_tick(&mut rig, 51);
+    let _ = rig.tick(vec![bulk(&head), bulk(&part), bulk(&tile)]);
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().artifacts[&RealmId::Star(7)]
+            .tiles
+            .len(),
+        1,
+        "the tile is held for the realm"
+    );
+    // The beat serves the head and the part, and no tile: the surface names no planet.
+    set_tick(&mut rig, 75);
+    let sent = rig.tick(vec![]);
+    assert_eq!(parts_to_client(&sent), vec![head, part]);
+    // The session's VIEW of the star DID leave — so the serve reached the body's own rule and
+    // the star's look bag, and it is the SURFACE that ends the tile path, nothing before it.
+    let views = sent
+        .iter()
+        .filter(|(to, _, _)| *to == DEST)
+        .filter(|(_, _, b)| {
+            matches!(
+                postcard::from_bytes::<GatewayToShard>(b),
+                Ok(GatewayToShard::ArtifactWant { view: Some(_), .. })
+            )
+        })
+        .count();
+    assert_eq!(views, 1);
+}
+
+/// ★ A VIEW OF NO LENGTH, AND A REALM WITH NO LOOK: three ways the tile path says nothing (the one
+/// tile path). A row AT the picture's origin leaves the eye standing on the realm's own centre,
+/// with no direction to look along; a row whose facing arrived non-finite gives a length that is
+/// not a number; and a realm whose look bag no window holds states no body. In all three the beat
+/// serves the head and the pyramid's parts and hands over no tile.
+///
+/// The beat is driven DIRECTLY (no `Rig`), because these three rows are what a shard states, not
+/// what a healthy one states: a diverged shard may put a NaN on the wire (which is why a delivered
+/// pose has a sanitiser at all), and a window closes on the beat its realm's cache goes whole.
+///
+/// **Example.** The pilot's picture holds the star at its centre, a hull whose facing arrived as a
+/// NaN, and a planet whose window the gateway dropped this beat. She is served three pyramids and
+/// no tile.
+#[test]
+fn a_view_of_no_length_or_a_realm_with_no_look_is_served_no_tiles() {
+    use vd_wire::channels::BulkMsg;
+    const CENTRED: RealmId = RealmId::Planet(1);
+    const NAN_FACING: RealmId = RealmId::Planet(2);
+    const NO_LOOK: RealmId = RealmId::Planet(3);
+    let digest = [0x77u64, 0x88];
+    let config = config();
+    let clock = ClockSample {
+        local_tick: TickId(25),
+        universe_tick: UniverseTick(100),
+        epoch: EpochId(1),
+        synced: true,
+    };
+    let mut sessions = GatewaySessions::default();
+    let mut stats = GatewayStats::default();
+    let mut outbox = OutboundBox::default();
+    // Three whole caches, each with a tile, fed the way a shard's own answer feeds them.
+    for realm in [CENTRED, NAN_FACING, NO_LOOK] {
+        for msg in [
+            BulkMsg::ArtifactHead {
+                realm,
+                world_tag: 9,
+                version: 1,
+                edge: 16,
+                digest,
+                tiles_per_edge: 1,
+                levels: 1,
+                sea_m: 0,
+            },
+            BulkMsg::ArtifactPyramid {
+                realm,
+                level: 1,
+                part: 0,
+                parts: 1,
+                z_m: vec![1],
+            },
+            BulkMsg::ArtifactTile {
+                realm,
+                face: 0,
+                tx: 0,
+                ty: 0,
+                rows: vec![3],
+            },
+        ] {
+            super::artifact::cache_artifact_part(
+                DEST,
+                realm,
+                postcard::to_allocvec(&msg).expect("encode"),
+                TickId(25),
+                &mut sessions,
+                &mut stats,
+            );
+        }
+    }
+    // The picture: the star system is the origin, and the three realms are its rows.
+    let at = |pos: DVec3| {
+        StampedPose::at_rest(
+            FrameRef::SystemSpace { system_seed: 7 },
+            pos,
+            UniverseTick(100),
+        )
+    };
+    let mut nan_pose = at(DVec3::new(30.0, 0.0, 0.0));
+    nan_pose.orient = vd_core::glam::DQuat::from_xyzw(f64::NAN, 0.0, 0.0, 1.0);
+    let row = |realm: RealmId, seed: u64, pose: StampedPose| window::ComposedRow {
+        realm,
+        frame: FrameRef::PlanetCentered { planet_seed: seed },
+        pose,
+        stratum: 0,
+        parent: Some(RealmId::System(7)),
+        body: window::BodyTag::Placement,
+    };
+    let fold = window::Composed {
+        at: UniverseTick(100),
+        rows: vec![
+            row(CENTRED, 1, at(DVec3::ZERO)),
+            row(NAN_FACING, 2, nan_pose),
+            row(NO_LOOK, 3, at(DVec3::new(30.0, 0.0, 0.0))),
+        ],
+        fresh_levels: 1,
+        ..window::Composed::default()
+    };
+    let tuning = window::WindowTuning::derive(2, config.tick_hz);
+    let mut session = active_session();
+    let _ = session.shadow.advance(
+        RealmId::System(7),
+        &[RealmId::System(7)],
+        Some(fold),
+        &tuning,
+    );
+    sessions.by_session.insert(SessionId(0xB0B), session);
+    let drawn = BTreeMap::from([(CENTRED, digest), (NAN_FACING, digest), (NO_LOOK, digest)]);
+    super::artifact::serve_artifacts(
+        &config,
+        &clock,
+        &drawn,
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    // ONE view want leaves, for the one realm whose eye has a direction and a length; the centred
+    // row and the NaN row state no view at all.
+    let wants: Vec<GatewayToShard> = outbox
+        .0
+        .iter()
+        .filter_map(|(_, _, b, _)| postcard::from_bytes::<GatewayToShard>(b).ok())
+        .filter(|m| matches!(m, GatewayToShard::ArtifactWant { view: Some(_), .. }))
+        .collect();
+    assert_eq!(wants.len(), 1, "{wants:?}");
+    assert_eq!(
+        wants[0],
+        GatewayToShard::ArtifactWant {
+            realm: NO_LOOK,
+            digest,
+            view: Some(vd_wire::session_flow::ArtifactView {
+                dir: [-1.0, 0.0, 0.0],
+                radial_m: 30.0,
+            }),
+        }
+    );
+    // The serve: a head and a part for each of the three realms, and not one tile — no window
+    // holds a look, so no body states a reach.
+    let served: Vec<BulkMsg> = outbox
+        .0
+        .iter()
+        .filter(|(to, _, _, _)| *to == CLIENT)
+        .filter_map(
+            |(_, _, b, _)| match postcard::from_bytes::<ServerControlMsg>(b) {
+                Ok(ServerControlMsg::ArtifactPart { bytes }) => {
+                    Some(postcard::from_bytes::<BulkMsg>(&bytes).expect("a bulk shape"))
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    assert_eq!(served.len(), 6, "{served:?}");
+    assert_eq!(
+        served
+            .iter()
+            .filter(|m| matches!(m, BulkMsg::ArtifactTile { .. }))
+            .count(),
+        0
+    );
+    assert_eq!(stats.artifact_parts_served, 6);
+}
+
+/// ★ THE PEBBLE HAS NO LATTICE (the one tile path): a body with no macro lattice reaches no tile,
+/// so the gateway asks for none and serves none. The shipped path cannot state such a body — the
+/// divisor rule and `from_seed` read one cell count, so every body a look bag builds HAS a lattice
+/// — which is why the terrain crate states a real body with its lattice stripped for this test.
+///
+/// **Example.** A pilot flies past a five-kilometre rock. The rock states a surface and a charter,
+/// and the gateway names no tile of it: the rock draws itself from its own recipe.
+#[test]
+fn a_body_with_no_macro_lattice_reaches_no_tiles() {
+    let body =
+        vd_terrain::BodyDefinition::from_seed(7, 1.0e6, vd_terrain::BodyFacts::new(9_818, 5_513))
+            .expect("a body");
+    let view = vd_wire::session_flow::ArtifactView {
+        dir: [-1.0, 0.0, 0.0],
+        radial_m: 30.0,
+    };
+    assert_eq!(
+        super::artifact::tiles_in_reach(&body, 1, view).len(),
+        1,
+        "a body WITH a lattice reaches its tile"
+    );
+    assert_eq!(
+        super::artifact::tiles_in_reach(&body.without_macro_lattice(), 1, view),
+        Vec::new()
+    );
 }

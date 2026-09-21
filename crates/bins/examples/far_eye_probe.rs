@@ -110,9 +110,9 @@ fn probe(label: &str, body: &vd_terrain::BodyDefinition) {
     for k in radii {
         let eye = d * radius * k;
         let mut view = vd_client::ladder_view::LadderView::default();
-        let _ = view.wanted(body, eye.to_array());
+        let _ = view.wanted(body, eye.to_array(), None);
         let started = std::time::Instant::now();
-        let set = view.wanted(body, eye.to_array());
+        let set = view.wanted(body, eye.to_array(), None);
         let ms = started.elapsed().as_secs_f64() * 1e3;
         let per_rung: Vec<String> = set
             .per_rung()

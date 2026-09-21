@@ -65,6 +65,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use vd_core::glam::{DVec2, DVec3};
 
+use crate::artifact_book::ArtifactCache;
 use crate::skyline::{DISC_MARGIN, EyeFrame, Skyline, WALL_MAX_HALF_ANGLE};
 use vd_seed::bend::{Face, direction, face_coords, face_of, unbend};
 use vd_seed::ladder::{cell_m, face_param, index_of};
@@ -145,7 +146,7 @@ pub fn pixel_rad() -> f64 {
 /// The distance at which one cell of `rung` stands one pixel high: `cell_m(rung) / pixel_rad`.
 #[must_use]
 pub fn switch_m(rung: u8) -> f64 {
-    f64::from(cell_m(rung)) / pixel_rad()
+    vd_terrain::artifact::switch_m(rung, pixel_rad())
 }
 
 /// ★ THE STEP A HANDOVER MAKES, in metres — ruling T7 rules 2 and 3 both read this ONE number, and
@@ -715,8 +716,7 @@ impl AskBound {
 /// the gate and the reach share.
 #[must_use]
 pub fn horizon_m(radius_m: f64, altitude_m: f64) -> f64 {
-    let h = altitude_m.max(0.0);
-    (2.0 * radius_m * h + h * h).sqrt()
+    vd_terrain::artifact::horizon_m(radius_m, altitude_m)
 }
 
 /// THE EYE'S HEIGHT over the ground it stands on, in metres: the pilot camera lifts the eye by
@@ -1152,6 +1152,17 @@ impl WantedSet {
         self.revealed.iter().filter(|k| !arrived(**k)).count()
     }
 
+    /// ★ THE MARGIN'S GAP (the coast flight's hole instrument, 2026-09-20): the wanted chunks of
+    /// the margin class — outside their rung's own territory, inside the widened ask — that have
+    /// NOT `arrived`; a scan of the set, for an instrument.
+    #[must_use]
+    pub fn margin_missing(&self, arrived: &dyn Fn(ChunkKey) -> bool) -> usize {
+        self.set
+            .iter()
+            .filter(|k| !self.urgent.contains(*k) && !self.revealed.contains(*k) && !arrived(**k))
+            .count()
+    }
+
     /// How many chunks are wanted.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -1230,7 +1241,15 @@ impl WantedSet {
 /// columns; SL9, the refuter's finding), and the wanted set it computes for an eye.
 #[derive(Debug, Default)]
 pub struct LadderView {
-    spans: BTreeMap<Column, (ColumnSpan, u64)>,
+    /// ★ A SPAN IS READ ON THE FIELD THE CHUNK IS BUILT ON (2026-09-20, the owner's coast flight;
+    /// `vd_terrain::digest::surface_column_field`): with an artifact, the column's slices come
+    /// from the artifact's own column read, never from the recipe's relief the artifact replaced
+    /// — MEASURED 2.1 km apart on average at the coast stand, which asked slices with no ground
+    /// in most fine columns and drew the sea sheet through the empty chunks. A span read while
+    /// the rung's own field was not whole for the column (its tiles not here) is PROVISIONAL —
+    /// taken from the finest whole pyramid level, or the recipe — so the column stays wanted and
+    /// the coarser rung stands (ruling F9); it is read again at every descent until the field is.
+    spans: BTreeMap<Column, SpanEntry>,
     generation: u64,
     /// THE KEPT COLUMNS (slice 8 step 4): every column the last descent wanted. A column past
     /// the horizon that was wanted is KEPT while its peak stands within [`KEEP_MARGIN_RAD`] under
@@ -1255,6 +1274,51 @@ pub struct LadderView {
     /// wanted unconditionally, and was built for nothing — 2 chunks missing on 17 of 1 291
     /// samples.
     culled: BTreeSet<Column>,
+}
+
+/// One column's span in the view: the span, the descent that last visited it, and whether it was
+/// read on a stand-in field (see [`LadderView::spans`]).
+#[derive(Clone, Copy, Debug)]
+struct SpanEntry {
+    span: ColumnSpan,
+    generation: u64,
+    provisional: bool,
+}
+
+/// THE SPAN OF A COLUMN ON WHAT THE CLIENT HOLDS: the artifact's field at the column's rung when
+/// it is whole for the column (final), else the finest whole pyramid level (provisional), else
+/// the recipe's own relief (provisional with an artifact, final without one). Returns the span
+/// and whether it is provisional.
+#[must_use]
+pub fn column_span(
+    body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
+    col: Column,
+) -> (ColumnSpan, bool) {
+    let recipe = || vd_terrain::digest::surface_column(body, col.face, col.rung, col.x, col.y);
+    let Some(lattice) = body.macro_lattice() else {
+        return (recipe(), false);
+    };
+    // ★ NO ARTIFACT YET: a body with a macro lattice STATES one (every solved body does), so its
+    // recipe span is a stand-in until the head lands — PROVISIONAL, read again at every descent.
+    // MEASURED before this (the coast flight's hole instrument, 2026-09-20): the first descents
+    // ran before the head arrived, their recipe spans were kept as final, and 1 849 columns held
+    // nothing but empty chunks at the recipe's slices, at rest, in every flight.
+    let Some(artifact) = artifact else {
+        return (recipe(), true);
+    };
+    let on = |field: &dyn vd_terrain::artifact::ZField| {
+        vd_terrain::digest::surface_column_field(body, field, col.face, col.rung, col.x, col.y)
+    };
+    if let Some(field) = artifact.field_at_rung(&lattice, col.rung)
+        && let Some(span) = on(&*field)
+    {
+        return (span, false);
+    }
+    let whole = (1..=artifact.head.levels)
+        .find_map(|k| artifact.level(k))
+        .and_then(|level| on(&**level));
+    (whole.unwrap_or_else(recipe), true)
 }
 
 /// How far inside the horizon a column the skyline culled must lie before the horizon alone
@@ -1425,22 +1489,47 @@ impl Sweep<'_> {
 
 impl LadderView {
     /// The surface span and peak of a column, read once per residency, stamped with this descent.
-    fn span(&mut self, body: &BodyDefinition, col: Column) -> ColumnSpan {
+    fn span(
+        &mut self,
+        body: &BodyDefinition,
+        artifact: Option<&ArtifactCache>,
+        col: Column,
+    ) -> ColumnSpan {
         let generation = self.generation;
-        let entry = self.spans.entry(col).or_insert_with(|| {
-            (
-                vd_terrain::digest::surface_column(body, col.face, col.rung, col.x, col.y),
-                generation,
-            )
-        });
-        entry.1 = generation;
-        entry.0
+        let entry = self
+            .spans
+            .entry(col)
+            .and_modify(|e| {
+                // A provisional span is read again: the tiles may be here now.
+                if e.provisional {
+                    let (span, provisional) = column_span(body, artifact, col);
+                    e.span = span;
+                    e.provisional = provisional;
+                }
+            })
+            .or_insert_with(|| {
+                let (span, provisional) = column_span(body, artifact, col);
+                SpanEntry {
+                    span,
+                    generation,
+                    provisional,
+                }
+            });
+        entry.generation = generation;
+        entry.span
     }
 
     /// How many spans the view holds.
     #[must_use]
     pub fn spans_held(&self) -> usize {
         self.spans.len()
+    }
+
+    /// How many of them are provisional (read on a stand-in field): a renderer re-runs the
+    /// descent when the artifact changes while any is.
+    #[must_use]
+    pub fn provisional_spans(&self) -> usize {
+        self.spans.values().filter(|e| e.provisional).count()
     }
 
     /// THE WANTED SET for an eye at `eye_m` in the body's frame: a DESCENT from the top rung. Every
@@ -1499,7 +1588,12 @@ impl LadderView {
         }
     }
 
-    pub fn wanted(&mut self, body: &BodyDefinition, eye_m: [f64; 3]) -> WantedSet {
+    pub fn wanted(
+        &mut self,
+        body: &BodyDefinition,
+        eye_m: [f64; 3],
+        artifact: Option<&ArtifactCache>,
+    ) -> WantedSet {
         let eye = DVec3::from_array(eye_m);
         let len = eye.length();
         let ladder = *body.ladder();
@@ -1575,7 +1669,7 @@ impl LadderView {
                     far.push(col);
                     continue;
                 }
-                let span = self.span(body, col);
+                let span = self.span(body, artifact, col);
                 // The guaranteed floor of the DRAWN ground: the lowest sample less the bounds the
                 // peak adds (the field's), less a cell (the extractor's mesh stands within a
                 // cell of the field) and the sink its mesh may stand under while a finer rung is
@@ -1605,7 +1699,7 @@ impl LadderView {
                 if geo.near > reach {
                     continue;
                 }
-                let span = self.span(body, col);
+                let span = self.span(body, artifact, col);
                 let margin = if self.kept.contains(&col) {
                     KEEP_MARGIN_RAD
                 } else {
@@ -1693,7 +1787,7 @@ impl LadderView {
                     x: key.x.div_euclid(1 << step),
                     y: key.y.div_euclid(1 << step),
                 };
-                let peak_m = self.span(body, caster).peak_m;
+                let peak_m = self.span(body, artifact, caster).peak_m;
                 let low_m = if low_m == f64::MAX { peak_m } else { low_m };
                 // The caster's own nearest point, never nearer than the eye's height over the
                 // relief (a column wider than the eye is high reads under the eye by the disc).
@@ -1715,7 +1809,7 @@ impl LadderView {
         self.culled = culled;
         // The spans this descent did not visit are dropped.
         let generation = self.generation;
-        self.spans.retain(|_, (_, g)| *g == generation);
+        self.spans.retain(|_, e| e.generation == generation);
         out
     }
 }
@@ -1929,6 +2023,185 @@ mod tests {
     use super::*;
     use vd_core::pose::RealmId;
     use vd_terrain::home::home_planet;
+
+    /// ★ A SPAN IS READ ON THE FIELD THE CHUNK IS BUILT ON (2026-09-20): with a head alone the
+    /// span is the recipe's and provisional; with the pyramid it is the finest whole level's,
+    /// still provisional at a rung that reads the tiles and final at one that reads a level; with
+    /// the tiles it is the tiles' own, final. Without an artifact, or on a body with no macro
+    /// lattice, it is the recipe's, final. The view reads a provisional span again at the next
+    /// descent and keeps a final one.
+    #[test]
+    fn a_span_is_read_on_the_artifacts_field_and_provisional_until_the_tiles_land() {
+        use crate::artifact_book::ArtifactReceiver;
+        use vd_terrain::digest::{surface_column, surface_column_field};
+        use vd_terrain::home::{
+            HOME_MOON_SEED, HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words,
+        };
+        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_wire::channels::BulkMsg;
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate =
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let artifact =
+            vd_terrain::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        let moon = moon.with_sea_m(artifact.sea());
+        let realm = RealmId::Planet(HOME_MOON_SEED);
+        let mut rx = ArtifactReceiver::default();
+        rx.accept(BulkMsg::ArtifactHead {
+            realm,
+            world_tag: 9,
+            version: artifact.version,
+            edge: artifact.edge,
+            digest: artifact.digest(),
+            tiles_per_edge: artifact.tiles_per_edge(),
+            levels: artifact.pyramid.len() as u32,
+            sea_m: artifact.sea_m,
+        });
+        let col = Column {
+            face: Face::PosZ,
+            rung: 3,
+            x: 40,
+            y: 41,
+        };
+        let slices = |s: ColumnSpan| (s.lo, s.hi, s.peak_m);
+        // A head alone: the recipe's span, provisional.
+        let head_only = rx.book().get(realm).cloned().expect("a cache");
+        let (span, provisional) = column_span(&moon, Some(&head_only), col);
+        assert!(provisional);
+        assert_eq!(
+            slices(span),
+            slices(surface_column(&moon, col.face, col.rung, col.x, col.y))
+        );
+        // The pyramid: the finest whole level's span, provisional where the rung reads the tiles.
+        for (k, level) in artifact.pyramid.iter().enumerate().rev() {
+            rx.accept(BulkMsg::ArtifactPyramid {
+                realm,
+                level: k as u32 + 1,
+                part: 0,
+                parts: 1,
+                z_m: level.clone(),
+            });
+        }
+        let pyramid = rx.book().get(realm).cloned().expect("a cache");
+        let (span, provisional) = column_span(&moon, Some(&pyramid), col);
+        assert!(provisional);
+        let level1 = pyramid.level(1).expect("level 1");
+        let expect = surface_column_field(&moon, &**level1, col.face, col.rung, col.x, col.y)
+            .expect("a span");
+        assert_eq!(slices(span), slices(expect));
+        // A rung that reads a level: final.
+        let coarse = Column {
+            face: Face::PosZ,
+            rung: 11,
+            x: 1,
+            y: 1,
+        };
+        assert!(!column_span(&moon, Some(&pyramid), coarse).1);
+        // ★ THE LEVEL THE RUNG READS IS NOT HERE: the head and the coarser levels landed, the
+        // level this rung reads did not. The span falls back to the finest whole level and stays
+        // PROVISIONAL, so the view reads the column again at the next descent.
+        let levels = artifact.pyramid.len() as u32;
+        let deep_rung = (0..=14u8)
+            .find(|r| vd_terrain::artifact::PyramidField::level_for(&lattice, levels, *r) == 1)
+            .expect("a rung that reads level 1");
+        let mut late = ArtifactReceiver::default();
+        late.accept(BulkMsg::ArtifactHead {
+            realm,
+            world_tag: 9,
+            version: artifact.version,
+            edge: artifact.edge,
+            digest: artifact.digest(),
+            tiles_per_edge: artifact.tiles_per_edge(),
+            levels,
+            sea_m: artifact.sea_m,
+        });
+        for (k, level) in artifact
+            .pyramid
+            .iter()
+            .enumerate()
+            .rev()
+            .take(levels as usize - 1)
+        {
+            late.accept(BulkMsg::ArtifactPyramid {
+                realm,
+                level: k as u32 + 1,
+                part: 0,
+                parts: 1,
+                z_m: level.clone(),
+            });
+        }
+        let late = late.book().get(realm).cloned().expect("a cache");
+        assert_eq!(late.level(1), None, "the rung's own level waits");
+        let deep = Column {
+            face: Face::PosZ,
+            rung: deep_rung,
+            x: 1,
+            y: 1,
+        };
+        let (span, provisional) = column_span(&moon, Some(&late), deep);
+        assert!(provisional);
+        let coarser = late.level(2).expect("level 2");
+        let expect = surface_column_field(&moon, &**coarser, deep.face, deep.rung, deep.x, deep.y)
+            .expect("a span");
+        assert_eq!(slices(span), slices(expect));
+        // The tiles, every face's (a descent visits the columns across a seam too): the tiles'
+        // own span, final.
+        for face in Face::ALL {
+            for tx in 0..artifact.tiles_per_edge() {
+                for ty in 0..artifact.tiles_per_edge() {
+                    rx.accept(BulkMsg::ArtifactTile {
+                        realm,
+                        face: face.index(),
+                        tx,
+                        ty,
+                        rows: artifact.tile(face, tx, ty).to_bytes(),
+                    });
+                }
+            }
+        }
+        let whole = rx.book().get(realm).cloned().expect("a cache");
+        let (span, provisional) = column_span(&moon, Some(&whole), col);
+        assert!(!provisional);
+        let expect = surface_column_field(&moon, &artifact, col.face, col.rung, col.x, col.y)
+            .expect("a span");
+        assert_eq!(slices(span), slices(expect));
+        // No artifact yet on a body that will state one: the recipe's, PROVISIONAL; a body with
+        // no macro lattice: the recipe's, final.
+        let (span, provisional) = column_span(&moon, None, col);
+        assert!(provisional);
+        assert_eq!(
+            slices(span),
+            slices(surface_column(&moon, col.face, col.rung, col.x, col.y))
+        );
+        let rock = moon.without_macro_lattice();
+        assert!(!column_span(&rock, Some(&whole), col).1);
+        assert!(!column_span(&rock, None, col).1);
+        // The view: over the column, the pyramid alone leaves provisional spans, the tiles none;
+        // a final span is kept across descents.
+        let n_l = moon.ladder().cells_per_edge(col.rung);
+        let edge = CHUNK_EDGE as i32;
+        let d = DVec3::from_array(direction(
+            col.face,
+            face_param(col.x * edge + edge / 2, n_l),
+            face_param(col.y * edge + edge / 2, n_l),
+        ))
+        .normalize();
+        let eye = (d * (moon.radius_m() + 3_000.0)).to_array();
+        let mut view = LadderView::default();
+        let on_pyramid = view.wanted(&moon, eye, Some(&pyramid));
+        assert!(!on_pyramid.keys.is_empty());
+        assert!(view.provisional_spans() > 0);
+        let on_tiles = view.wanted(&moon, eye, Some(&whole));
+        assert!(!on_tiles.keys.is_empty());
+        assert_eq!(view.provisional_spans(), 0);
+        let held = view.spans_held();
+        view.wanted(&moon, eye, Some(&whole));
+        assert_eq!(view.spans_held(), held);
+    }
 
     /// ★ THE FACTS OF THE 300 km TEST BODY the two ruling-T7 tests below read (slice 8b stage 3).
     /// COMPUTED at 3 000 kg/m³ by `g = (4/3)πGρR`: `g = 0.2516 m/s²`, so 251 mm/s². The body is
@@ -2155,7 +2428,7 @@ mod tests {
         let body = home_planet();
         let r = body.ladder().radius_m();
         let eye = [r + EYE_HEIGHT_M, 0.0, 0.0];
-        let free = LadderView::default().wanted(&body, eye);
+        let free = LadderView::default().wanted(&body, eye, None);
         assert!(free.keys.iter().all(|k| free.casts(*k)));
         assert_eq!(free.casting_count(), free.keys.len());
         let mut view = LadderView::default();
@@ -2165,7 +2438,7 @@ mod tests {
             coarse_step: 2,
         };
         view.shadow = Some(reach);
-        let bounded = view.wanted(&body, eye);
+        let bounded = view.wanted(&body, eye, None);
         let casting = bounded.casting_count();
         assert!(casting > 0);
         assert!(casting < bounded.keys.len());
@@ -2225,7 +2498,7 @@ mod tests {
             tan_i: 8.0,
             ..reach
         });
-        let low_sun = view.wanted(&body, eye);
+        let low_sun = view.wanted(&body, eye, None);
         assert!(low_sun.casting_count() >= casting);
         // The bound: the reach, the peak's shadow over the low ground, the caster's diagonal; a
         // peak under the ground shades nothing (the reach and the diagonal alone), and the
@@ -2255,7 +2528,7 @@ mod tests {
         // is EMPTY and proves nothing — the "no coarser rung to cast for me" arm was never run.
         // From 34 body radii the whole globe IS the top rung, one chunk a face, and every one of
         // them is silent while the same low sun stands.
-        let far_up = view.wanted(&body, [r * 34.0, 0.0, 0.0]);
+        let far_up = view.wanted(&body, [r * 34.0, 0.0, 0.0], None);
         assert_eq!(far_up.keys.len(), 6);
         assert_eq!((far_up.rung_min, far_up.rung_max), (top, top));
         assert_eq!(far_up.casting_count(), 0);
@@ -2275,7 +2548,7 @@ mod tests {
         );
         // NO GROUND WITHIN THE REACH (an eye 60 km up, the reach a few kilometres): nothing to
         // shade, so no chunk asks for a caster.
-        let aloft = view.wanted(&body, [r + 60_000.0, 0.0, 0.0]);
+        let aloft = view.wanted(&body, [r + 60_000.0, 0.0, 0.0], None);
         assert!(!aloft.keys.is_empty());
         assert_eq!(aloft.casting_count(), 0);
         // The same reach within a tenth of the tangent; a different one past it.
@@ -2625,7 +2898,7 @@ mod tests {
             let dir = (up * arc.cos() + east * arc.sin()).normalize();
             let surface = vd_terrain::height::height_m(&body, [dir.x, dir.y, dir.z], 0);
             let eye = (dir * (surface + WALK_ALTITUDE_M)).to_array();
-            let now = view.wanted(&body, eye);
+            let now = view.wanted(&body, eye, None);
             if let Some(before) = prev.as_ref() {
                 born.extend(born_urgent(before, &now).into_iter().map(|k| (step, k)));
             }
@@ -2667,7 +2940,7 @@ mod tests {
             d[2] * (surface + 3.4),
         ];
         let mut view = LadderView::default();
-        let w = view.wanted(&body, eye);
+        let w = view.wanted(&body, eye, None);
         // EVERY CLASS, counted through `class_of`: the urgent ones, the revealed peaks, and the
         // rest of every ring, which is the margin.
         let class_count = |c: BandClass| w.keys.iter().filter(|k| w.class_of(**k) == c).count();
@@ -2701,6 +2974,13 @@ mod tests {
             w.urgent_missing_keys(&|_| false, w.len() + 1).len(),
             w.urgent_count()
         );
+        // THE MARGIN'S GAP: with nothing arrived, every chunk that is neither urgent nor
+        // revealed; with everything arrived, none.
+        assert_eq!(
+            w.margin_missing(&|_| false),
+            w.len() - w.urgent_count() - w.revealed_count()
+        );
+        assert_eq!(w.margin_missing(&|_| true), 0);
         // ONE COLUMN READ FROM ONE EYE: an urgent chunk's column stands inside its rung's
         // territory and inside the horizon, so the same eye's own reading calls it urgent.
         let hot = named[named.len() - 1];
@@ -2736,7 +3016,7 @@ mod tests {
             d[2] * (surface + 3.4),
         ];
         let mut view = LadderView::default();
-        let w = view.wanted(&body, eye);
+        let w = view.wanted(&body, eye, None);
         // Some chunks are urgent and some are not (the margin past every switch), and every
         // urgent chunk is wanted.
         let urgent = w.urgent_count();
@@ -2792,7 +3072,7 @@ mod tests {
             view.kept.len() > emitted.len(),
             "no far column was kept for its clearance"
         );
-        let again = view.wanted(&body, eye);
+        let again = view.wanted(&body, eye, None);
         assert_eq!(again.keys, w.keys);
         assert!(
             !view.culled.is_empty(),
@@ -2800,7 +3080,7 @@ mod tests {
         );
         assert!(view.culled.is_disjoint(&view.kept));
         let step = [eye[0] + 0.4, eye[1] + 0.2, eye[2] - 0.1];
-        let stepped = view.wanted(&body, step);
+        let stepped = view.wanted(&body, step, None);
         let before: BTreeSet<ChunkKey> = w.keys.iter().copied().collect();
         let after: BTreeSet<ChunkKey> = stepped.keys.iter().copied().collect();
         let churn = before.symmetric_difference(&after).count();
@@ -2820,6 +3100,7 @@ mod tests {
                 d[1] * (surface + 12.0),
                 d[2] * (surface + 12.0),
             ],
+            None,
         );
         assert!(raised.len() > w.len());
         assert!(
@@ -2867,8 +3148,8 @@ mod tests {
                 d[2] * (surface + h),
             ]
         };
-        let under = LadderView::default().wanted(&body, at(-10.0));
-        let standing = LadderView::default().wanted(&body, at(EYE_HEIGHT_M));
+        let under = LadderView::default().wanted(&body, at(-10.0), None);
+        let standing = LadderView::default().wanted(&body, at(EYE_HEIGHT_M), None);
         assert!((under.reach_m - standing.reach_m).abs() < 1e-6);
         assert_eq!(under.rung_min, standing.rung_min);
         // The skyline keeps its own truth: from under the ground the far rings are walled off
@@ -2892,7 +3173,7 @@ mod tests {
             d[2] * (surface + 3.4),
         ];
         let mut view = LadderView::default();
-        let w = view.wanted(&body, eye);
+        let w = view.wanted(&body, eye, None);
         // The reach passes the 6.6 km horizon; the rings run from rung 0 to the ring that holds it.
         assert!(w.reach_m > horizon_m(surface, 3.4), "{}", w.reach_m);
         assert_eq!(w.rung_min, 0);
@@ -3071,10 +3352,10 @@ mod tests {
         // The spans are kept for the columns the descent visits — a second call from the same
         // eye reads none anew and holds the same set; at the body's own centre nothing stays.
         let held = view.spans_held();
-        let again = view.wanted(&body, eye);
+        let again = view.wanted(&body, eye, None);
         assert_eq!(again, w);
         assert_eq!(view.spans_held(), held);
-        assert_eq!(view.wanted(&body, [0.0, 0.0, 0.0]).len(), 0);
+        assert_eq!(view.wanted(&body, [0.0, 0.0, 0.0], None).len(), 0);
         assert_eq!(view.spans_held(), 0);
         // Every wanted chunk is in the ladder.
         for k in &w.keys {
@@ -3160,7 +3441,7 @@ mod tests {
         let mut view = LadderView::default();
         // 2 000 km up: the whole visible cap, coarsening outward by the tier rule alone.
         let orbit = [d[0] * (r + 2.0e6), d[1] * (r + 2.0e6), d[2] * (r + 2.0e6)];
-        let w = view.wanted(&body, orbit);
+        let w = view.wanted(&body, orbit, None);
         let top = body.ladder().rungs - 1;
         // ★ RE-MEASURED 2026-09-15 (the extended ladder). The cap spans FOUR rungs — 11 under the
         // nadir out to 14 at the horizon — and the ladder's own top (18, a 262 km cell) is six rungs
@@ -3189,7 +3470,7 @@ mod tests {
             edge_d[1] * (r + 2.0e6),
             edge_d[2] * (r + 2.0e6),
         ];
-        let w_edge = view.wanted(&body, edge_eye);
+        let w_edge = view.wanted(&body, edge_eye, None);
         let edge_dir = [edge_d[0], edge_d[1], edge_d[2]];
         let edge_surface = vd_terrain::height::height_m(&body, edge_dir, 0);
         assert_tiled(
@@ -3201,8 +3482,8 @@ mod tests {
         );
         // At the centre, and at a pose that is no pose: nothing. THREE RADII IS NOT FAR — the
         // globe stands there (`a_far_eye_draws_the_globe_at_every_distance`).
-        assert_eq!(view.wanted(&body, [0.0, 0.0, 0.0]).len(), 0);
-        assert_eq!(view.wanted(&body, [f64::NAN, 0.0, 0.0]).len(), 0);
+        assert_eq!(view.wanted(&body, [0.0, 0.0, 0.0], None).len(), 0);
+        assert_eq!(view.wanted(&body, [f64::NAN, 0.0, 0.0], None).len(), 0);
     }
 
     /// ★ THE FAR EYE DRAWS THE GLOBE AT EVERY DISTANCE — THE CLIENT HAS NO FAR EDGE (owner
@@ -3225,7 +3506,7 @@ mod tests {
         let top = body.ladder().rungs - 1;
         let d = vd_seed::bend::normalize([0.2, 0.9, 0.4]);
         let at = |k: f64| [d[0] * r * k, d[1] * r * k, d[2] * r * k];
-        let set = |k: f64| LadderView::default().wanted(&body, at(k));
+        let set = |k: f64| LadderView::default().wanted(&body, at(k), None);
         // ★ THE COUNT FALLS WITH DISTANCE, and it falls to SIX (the extended ladder, owner
         // 2026-09-15). MEASURED on this direction: 1 128 chunks at 1.5 radii, 432 at 2, 216 at 3,
         // 121 at 5, 61 at 10, 27 at 20, and SIX — the whole globe, one chunk a face — from 34 radii
@@ -3315,16 +3596,22 @@ mod tests {
         let body = home_planet();
         let r = body.ladder().radius_m();
         let d = vd_seed::bend::normalize([0.2, 0.9, 0.4]);
-        let top_only = LadderView::default()
-            .wanted(&body, [d[0] * r * 34.0, d[1] * r * 34.0, d[2] * r * 34.0]);
+        let top_only = LadderView::default().wanted(
+            &body,
+            [d[0] * r * 34.0, d[1] * r * 34.0, d[2] * r * 34.0],
+            None,
+        );
         assert_eq!(top_only.rung_min, body.ladder().rungs - 1);
         assert_eq!(
             top_only.urgent_count(),
             top_only.len(),
             "a top-rung chunk was classed MARGIN"
         );
-        let aloft =
-            LadderView::default().wanted(&body, [d[0] * r * 1.5, d[1] * r * 1.5, d[2] * r * 1.5]);
+        let aloft = LadderView::default().wanted(
+            &body,
+            [d[0] * r * 1.5, d[1] * r * 1.5, d[2] * r * 1.5],
+            None,
+        );
         assert_eq!((aloft.rung_min, aloft.rung_max), (12, 14));
     }
 
@@ -3341,7 +3628,7 @@ mod tests {
             d[1] * (surface + 60_000.0),
             d[2] * (surface + 60_000.0),
         ];
-        let w = LadderView::default().wanted(&body, eye);
+        let w = LadderView::default().wanted(&body, eye, None);
         let faces: BTreeSet<Face> = w.keys.iter().map(|k| k.face).collect();
         assert_eq!(faces.len(), 3, "{faces:?}");
         for k in &w.keys {
@@ -3730,7 +4017,7 @@ mod ask_bound_tests {
         assert_eq!(empty.chunks_per_column(2.0), 2.0);
         let body = home_planet();
         let r = body.ladder().radius_m();
-        let set = LadderView::default().wanted(&body, [r + EYE_HEIGHT_M, 0.0, 0.0]);
+        let set = LadderView::default().wanted(&body, [r + EYE_HEIGHT_M, 0.0, 0.0], None);
         assert!(set.columns() > 0);
         let per = set.chunks_per_column(2.0);
         assert!((1.0..=4.0).contains(&per), "{per}");
@@ -3747,14 +4034,14 @@ mod ask_bound_tests {
         let rungs = body.ladder().rungs;
         let r = body.ladder().radius_m();
         let eye = [r + EYE_HEIGHT_M, 0.0, 0.0];
-        let free = LadderView::default().wanted(&body, eye);
+        let free = LadderView::default().wanted(&body, eye, None);
         let bound = ask_bound(rungs, fast());
         assert!(bound.binds());
         let mut view = LadderView {
             bound: bound.clone(),
             ..LadderView::default()
         };
-        let held = view.wanted(&body, eye);
+        let held = view.wanted(&body, eye, None);
         assert!(!held.is_empty());
         // The bounded ask is the smaller one, and it starts no finer than the free one.
         assert!(held.len() < free.len(), "{} {}", held.len(), free.len());

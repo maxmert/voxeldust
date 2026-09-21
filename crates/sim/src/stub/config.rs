@@ -229,6 +229,13 @@ pub struct StubConfig {
     /// with `surface: Some` is what a test rig produces, and the client refuses that realm's ground
     /// and counts the refusal.
     pub charter: Option<vd_core::look::BodyCharter>,
+    /// ★ THE ARTIFACT THIS REALM STATES ABOUT ITSELF (slice 8c, the far-view ship; SL3): the digest
+    /// of the solved artifact its shard serves, stated in the self-look bag under `TAG_ARTIFACT`
+    /// beside the surface, once per subscriber on change. `None` while the solve runs and for a
+    /// realm with no solid surface; set by the composition root when the artifact is read or lands,
+    /// which re-states the bag on every window. A gateway that draws this realm asks for the
+    /// artifact at this digest and serves every session that draws it.
+    pub artifact: Option<[u64; 2]>,
 }
 
 impl StubConfig {
