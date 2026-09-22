@@ -167,6 +167,10 @@ pub struct TerrainConfig {
     /// every chunk and its probe twin with the engine's frustum culling OFF, so a hole that
     /// vanishes under it is a culling box, not a missing mesh. A measurement's switch.
     pub no_cull: bool,
+    /// ★ THE WATER ABLATION (the owner's feeling, 2026-09-21: "when we draw just the planet it is
+    /// performant, but if water is drawn it becomes slower"): `VD_TERRAIN_WATER=0` spawns no water
+    /// sheet, so the same leg flown twice names the sheet's own cost. A measurement's switch.
+    pub water: bool,
     /// THE SHADOW'S SHAPE (D8-8's ablation named the sun's shadow as the still stand's wall,
     /// §19.6): how far it reaches (the rung whose switch distance ends it), how many cascades
     /// draw it, and each cascade map's width in pixels. Defaults: the constants below; the
@@ -343,6 +347,9 @@ const SPLAT_ENV: &str = "VD_TERRAIN_SPLATS";
 const SHADOWS_ENV: &str = "VD_TERRAIN_SHADOWS";
 const HIDE_RUNG_ENV: &str = "VD_TERRAIN_HIDE_RUNG";
 const NO_CULL_ENV: &str = "VD_TERRAIN_NO_CULL";
+/// How often the artifact mismatch is logged while it lasts, in seconds.
+const ARTIFACT_MISMATCH_LOG_S: f64 = 10.0;
+const WATER_ENV: &str = "VD_TERRAIN_WATER";
 
 /// THE DEFAULT memory budget of the parent cache. The working set on a flight is every ring's
 /// LEADING EDGE, not one worker's neighbourhood: the pool builds hundreds of parents a second
@@ -375,6 +382,7 @@ impl TerrainConfig {
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
             no_cull: std::env::var(NO_CULL_ENV).is_ok_and(|v| v == "1"),
+            water: env_on(WATER_ENV),
             shadow_reach_rung: env_or(SHADOW_REACH_ENV, SHADOW_REACH_RUNG),
             shadow_cascades: env_or(SHADOW_CASCADES_ENV, SHADOW_CASCADES),
             shadow_map_px: env_or(SHADOW_MAP_ENV, SHADOW_MAP_PX),
@@ -1578,6 +1586,12 @@ pub struct Terrain {
     /// went incomplete, LATCHED. A gap lasts one frame and the stamp is polled every forty-five
     /// milliseconds, so the live count misses most of them.
     last_gap: Option<vd_devproto::DevBandGap>,
+    /// ★ THE ARTIFACT MISMATCH, LOGGED (2026-09-21: the owner's window on the belt drew no planet
+    /// for twenty minutes and the client's log held not one line to say why). A realm whose stated
+    /// artifact digest is not the one the client holds is a realm the lane draws NOTHING for; the
+    /// first frame of that state is logged with both words, again every ten seconds while it
+    /// lasts, and its end. The map holds the seconds it began and the last log.
+    artifact_mismatch: BTreeMap<RealmId, (f64, f64)>,
     /// THE FRAMES WITH A GAP: how many frames, since the start, drew with an urgent chunk
     /// missing. A gate reads the difference across a leg and misses no frame, where a poll at 20
     /// Hz sees one frame in three (refutation R4-6).
@@ -1695,6 +1709,7 @@ impl Terrain {
             morph_totals: [0; 3],
             bytes_drawn: 0,
             last_gap: None,
+            artifact_mismatch: BTreeMap::new(),
             urgent_frames: 0,
             frames: 0,
             ladders_forgotten: 0,
@@ -2548,6 +2563,40 @@ pub(crate) fn sync_terrain(
         if let Some(cache) = snap.artifact(realm) {
             terrain.lane.state_artifact(realm, cache);
         }
+        // ★ THE MISMATCH, LOGGED: the realm states a digest the client does not hold — the lane
+        // builds nothing for it until the head lands.
+        let expected = terrain.lane.expected_artifact(realm);
+        let held = terrain.lane.artifact(realm).map(|a| a.head.digest);
+        match (expected, expected == held) {
+            (Some(stated), false) => {
+                let awaiting = terrain.lane.counters().awaiting_artifact;
+                let entry = terrain
+                    .artifact_mismatch
+                    .entry(realm)
+                    .or_insert((now_s, f64::NEG_INFINITY));
+                if now_s - entry.1 >= ARTIFACT_MISMATCH_LOG_S {
+                    tracing::warn!(
+                        %realm,
+                        stated = ?stated,
+                        held = ?held,
+                        for_s = now_s - entry.0,
+                        awaiting,
+                        "ARTIFACT MISMATCH: the realm states an artifact the client does not hold; the lane builds nothing for it",
+                    );
+                    entry.1 = now_s;
+                }
+            }
+            _ => {
+                if let Some((since, _)) = terrain.artifact_mismatch.remove(&realm) {
+                    tracing::info!(
+                        %realm,
+                        held = ?held,
+                        after_s = now_s - since,
+                        "the artifact the realm states is held: the lane builds on it",
+                    );
+                }
+            }
+        }
         if let Some((_, lux)) = rbox.luma
             && brightest.is_none_or(|(b, _)| lux > b)
         {
@@ -2993,6 +3042,7 @@ pub(crate) fn sync_terrain(
     let splat_rung = terrain.config.splat_rung;
     let hide_rung = terrain.config.hide_rung;
     let no_cull = terrain.config.no_cull;
+    let water_on = terrain.config.water;
     let shadow_cast = terrain.config.shadow_cast;
     let shadow_cast_rung = terrain.config.shadow_cast_rung;
     let shadow_receive = terrain.config.shadow_receive;
@@ -3105,7 +3155,7 @@ pub(crate) fn sync_terrain(
             .id();
         // ★ THE WATER SHEET (slice 8c stage C5) rides as the chunk's CHILD: it moves with the
         // chunk's origin, hides with it, and leaves with it; it casts no shadow.
-        if !ready.geometry.water_triangles.is_empty() {
+        if water_on && !ready.geometry.water_triangles.is_empty() {
             let water = terrain.water_material(&mut ground_materials, realm, key.rung, &body);
             let sheet = meshes.add(water_mesh_of(&ready.geometry));
             commands.entity(entity).with_child((
@@ -3488,6 +3538,15 @@ pub(crate) fn sync_terrain(
                 .filter(|(r, _, _)| r == realm)
                 .map(|(_, k, tiles)| format!("{}: tiles {tiles:?}", key_name(k)))
                 .collect();
+            let mut missing_tiles: Vec<(u8, u32, u32, u32)> = terrain
+                .lane
+                .take_missing_hist()
+                .into_iter()
+                .filter(|((r, _, _, _), _)| r == realm)
+                .map(|((_, f, tx, ty), n)| (f, tx, ty, n))
+                .collect();
+            missing_tiles.sort_by(|a, b| b.3.cmp(&a.3));
+            missing_tiles.truncate(16);
             let empty_keys: Vec<String> = terrain
                 .lane
                 .take_empty()
@@ -3551,6 +3610,7 @@ pub(crate) fn sync_terrain(
                 awaiting_artifact: counters.awaiting_artifact,
                 artifact_rebuilds: counters.artifact_rebuilds,
                 awaiting_keys,
+                missing_tiles,
                 empty_chunks: counters.empty_chunks,
                 empty_keys,
                 hole_columns,
@@ -3558,6 +3618,40 @@ pub(crate) fn sync_terrain(
                 margin_missing,
                 stale_builds: counters.stale_builds,
                 lattice_edge,
+                eyes: with_bodies
+                    .iter()
+                    .map(|eb| {
+                        (
+                            format!("{:?}", eb.realm),
+                            DVec3::from_array(eb.eye).length() - eb.body.ladder().radius_m(),
+                        )
+                    })
+                    .collect(),
+                eye_cell: render_eye
+                    .eye_lattice
+                    .map_or([0, 0, 0], |(l, _)| l.cell().to_array()),
+                eye_offset_m: render_eye
+                    .eye_lattice
+                    .map_or([0.0, 0.0, 0.0], |(l, _)| l.offset().to_array()),
+                eye_tier: render_eye
+                    .eye_lattice
+                    .map_or_else(String::new, |(_, t)| format!("{t:?}")),
+                body_branches: with_bodies
+                    .iter()
+                    .filter_map(|eb| {
+                        let rbox = scene.get(eb.realm)?;
+                        let branch = match (render_eye.eye_lattice, snap.sky_anchor_now(now_s)) {
+                            (Some((_, tier)), Some(_)) if rbox.tier != tier => "far",
+                            (Some(_), _) => "lattice",
+                            (None, _) => "flat",
+                        };
+                        Some((
+                            format!("{:?}", eb.realm),
+                            format!("{:?}", rbox.tier),
+                            branch.to_owned(),
+                        ))
+                    })
+                    .collect(),
                 artifact_expected: terrain.lane.expected_artifact(*realm),
                 artifact_held: terrain.lane.artifact(*realm).map(|a| a.head.digest),
                 lead_m,

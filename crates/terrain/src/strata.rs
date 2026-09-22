@@ -35,11 +35,15 @@ pub enum Stratum {
     /// THE REMOVAL (ruling V4): a mined cell holds `Empty`, never `Air`, which is the atmosphere.
     /// Appended in slice 6 at code 18; `is_solid` is false and the registry substance is `void`.
     Empty = 18,
+    /// ★ THE ROCK MAP's two new bedrocks (slice 8d step 2), APPENDED so no code already stored
+    /// moves: slate is the folded belt's own soft rock and marble the basement's.
+    Slate = 19,
+    Marble = 20,
 }
 
 impl Stratum {
     /// Every stratum, for the host's mapping test.
-    pub const ALL: [Stratum; 19] = [
+    pub const ALL: [Stratum; 21] = [
         Stratum::Air,
         Stratum::Water,
         Stratum::Snow,
@@ -59,6 +63,8 @@ impl Stratum {
         Stratum::Quartzite,
         Stratum::Salt,
         Stratum::Empty,
+        Stratum::Slate,
+        Stratum::Marble,
     ];
 
     /// The registry KEY this stratum maps to (`vd_core::registry::SUBSTANCES` names its rows by
@@ -85,6 +91,8 @@ impl Stratum {
             Stratum::Quartzite => "quartzite",
             Stratum::Salt => "salt",
             Stratum::Empty => "void",
+            Stratum::Slate => "slate",
+            Stratum::Marble => "marble",
         }
     }
 
@@ -139,6 +147,169 @@ impl Biome {
 /// that a red BUILD, not a wrong world; `chunk::charter_of` fills the rows in this enum's own order
 /// and `chunk`'s own test measures that each biome reads its own.
 const _: () = assert!(vd_recipe::cell::BIOMES == Biome::ALL.len());
+
+/// ★ THE ROCK PROVINCE of one node (slice 8d step 2; `slice_8d_design.md` §3.5; ruling W4 item 4,
+/// the owner's SL6 approval of the datum). A hillside of flat beds reads as one desert everywhere,
+/// so the beds need a REGION: which crust a node stands on and what the plates did to it. The solve
+/// knows both; the word rides the artifact's node row, because the solve's crust and belt fields are
+/// its own working state and are thrown away.
+///
+/// The province decides WHICH ROCK the beds are drawn from, and nothing else. It is a map of LOOK
+/// (ruling S5-6): no ore is in it, and none ever will be, because a map a seed alone decides is a
+/// map a wiki publishes.
+///
+/// **Example.** A miner digs under the shelf province and cuts shale, then limestone, then
+/// sandstone, bed by bed. A miner digging the same wall in the rift province cuts basalt all the
+/// way down. Neither can read where the copper is, because no copper is in the seed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Province {
+    /// The old dry continent: a shield the plates left standing.
+    CrystallineBasement = 0,
+    /// A collision belt on continental crust: the rock is folded and metamorphosed.
+    FoldedBelt = 1,
+    /// Continental crust under its own sea: the drowned platform.
+    FlatShelf = 2,
+    /// Ground the plates are pulling apart or a floor they are building: new lava.
+    RiftBasalt = 3,
+    /// The still ocean floor and the trench that fills with it.
+    DeepSediment = 4,
+}
+
+/// ★ THE TENSILE STRENGTH OF A ROCK, megapascals (2026-09-22, ruling W7 step 3): the one number
+/// the stream-power erodibility reads about a rock — the cut goes as the INVERSE SQUARE of it
+/// (Sklar & Dietrich 2001, Geology 29: `E ∝ σ_T⁻²`, measured in an abrasion mill on these rocks).
+/// The values are the published typical ones for each rock (Sklar & Dietrich 2001 Table 1; the
+/// Rock Mechanics handbooks' Brazilian-test ranges, their middles). Shale is the softest and is
+/// the reference `K₀` was calibrated on. A rock the cell pass never places (air, water, soil,
+/// snow) answers shale's, so nothing divides by zero and no soil is harder than rock.
+#[must_use]
+pub const fn tensile_strength_mpa(s: Stratum) -> u32 {
+    match s {
+        Stratum::Shale => 3,
+        Stratum::Sandstone => 5,
+        Stratum::Limestone => 6,
+        Stratum::Slate => 8,
+        Stratum::Marble => 7,
+        Stratum::Granite => 10,
+        Stratum::Andesite => 10,
+        Stratum::Basalt => 12,
+        Stratum::Gabbro => 12,
+        Stratum::Quartzite => 15,
+        Stratum::Salt => 2,
+        _ => 3,
+    }
+}
+
+impl Province {
+    /// ★ THE ERODIBILITY OF A PROVINCE as a share of `K₀` in 1/256 (W7 step 3): the inverse
+    /// square of its four rocks' mean tensile strength over shale's ([`tensile_strength_mpa`]),
+    /// so a shield of granite and quartzite cuts about a tenth as fast as a shale shelf. An
+    /// integer, one answer on every host; never over 256.
+    #[must_use]
+    #[allow(
+        clippy::integer_division,
+        reason = "five provinces, once per solve, never a kernel's path: an exact quotient a test states"
+    )]
+    pub fn erodibility_q8(self) -> u32 {
+        let rocks = self.rocks();
+        let mut sum = 0u32;
+        let mut k = 0;
+        while k < rocks.len() {
+            sum += tensile_strength_mpa(rocks[k]);
+            k += 1;
+        }
+        // Shale's strength, squared, times 256, over the mean's square — the mean is `sum / 4`,
+        // so the square of the sum carries 16.
+        let shale = tensile_strength_mpa(Stratum::Shale);
+        let q8 = 256 * 16 * shale * shale / (sum * sum);
+        if q8 > 256 { 256 } else { q8 }
+    }
+
+    pub const ALL: [Province; 5] = [
+        Province::CrystallineBasement,
+        Province::FoldedBelt,
+        Province::FlatShelf,
+        Province::RiftBasalt,
+        Province::DeepSediment,
+    ];
+
+    /// The byte the artifact's row stores.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+
+    /// The province of a code byte; `None` for a byte no province owns (a reader REFUSES, never
+    /// defaults).
+    #[must_use]
+    pub fn from_code(code: u8) -> Option<Province> {
+        Province::ALL.get(usize::from(code)).copied()
+    }
+
+    /// ★ THE FOUR ROCKS OF A PROVINCE, the SOFT pair first and the HARD pair second. THE SEED'S OWN
+    /// IDENTITY CHOICE under ruling T9: which rock a province is made of is a choice like the body's
+    /// tilt, not a physical number, so it is stated here as data and no law computes it. Every name
+    /// is a registry KEY through [`Stratum::registry_key`], never a number typed by hand.
+    ///
+    /// A bed whose hardness passes the bench's cap threshold reads the hard pair, so a cap-rock
+    /// tread stands on a rock that really is harder than the riser under it.
+    ///
+    /// **Example.** The pilot walks up a folded belt. The riser at her knee is quartzite and the
+    /// tread she steps onto is slate, and both run along the whole hillside at one height.
+    #[must_use]
+    pub const fn rocks(self) -> [Stratum; 4] {
+        match self {
+            Province::CrystallineBasement => [
+                Stratum::Slate,
+                Stratum::Marble,
+                Stratum::Granite,
+                Stratum::Quartzite,
+            ],
+            Province::FoldedBelt => [
+                Stratum::Shale,
+                Stratum::Slate,
+                Stratum::Granite,
+                Stratum::Quartzite,
+            ],
+            Province::FlatShelf => [
+                Stratum::Shale,
+                Stratum::Limestone,
+                Stratum::Sandstone,
+                Stratum::Limestone,
+            ],
+            Province::RiftBasalt => [
+                Stratum::Andesite,
+                Stratum::Basalt,
+                Stratum::Basalt,
+                Stratum::Gabbro,
+            ],
+            Province::DeepSediment => [
+                Stratum::Shale,
+                Stratum::Sandstone,
+                Stratum::Sandstone,
+                Stratum::Limestone,
+            ],
+        }
+    }
+}
+
+/// ★ THE PROVINCE A HOST READS WHERE IT HOLDS NO ROW: the basement. A body with no artifact — the
+/// crate's own kernel tests, the card's plan, a chunk whose tile has not arrived — has no plates to
+/// read, so every column stands on the oldest ground the map names. STATED, never guessed.
+pub const DEFAULT_PROVINCE: Province = Province::CrystallineBasement;
+
+/// ★ THE DEFAULT'S CODE IS ZERO, AND THE SHADER COUNTS ON IT. The GPU shell (`vd-recipe-gpu`) may
+/// name nothing above the recipe, so it writes `Gi::ZERO` for a card's province. A default moved off
+/// zero here would make the card read another province's rocks and the drift gate would go red for
+/// a reason nobody could see in the diff. This assertion makes it a red BUILD instead.
+const _: () = assert!(DEFAULT_PROVINCE.code() == 0);
+
+/// ★ THE RECIPE'S PROVINCE ROW COUNT COVERS THIS ENUM. The cell kernel picks a province's row of
+/// rocks by a MASK (`vd_recipe::cell::PROVINCE_MASK`), exactly as it picks a biome's row, so a
+/// sixth province added here without room there would fold onto the basement's row in silence. This
+/// assertion makes that a red BUILD, not a wrong world.
+const _: () = assert!(vd_recipe::cell::PROVINCES >= Province::ALL.len());
 
 /// The body's bedrock kind: one draw from the seed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,7 +420,7 @@ mod tests {
             assert!(codes.insert(s.code()), "{s:?} shares a code");
             assert!(keys.insert(s.registry_key()), "{s:?} shares a key");
         }
-        assert_eq!(codes.len(), 19);
+        assert_eq!(codes.len(), 21);
         assert!(!Stratum::Air.is_solid());
         assert!(!Stratum::Water.is_solid());
         assert!(Stratum::Granite.is_solid());
@@ -257,6 +428,56 @@ mod tests {
             assert!(b.stratum().is_solid());
         }
         assert_eq!(Biome::ALL.len(), 4);
+    }
+
+    /// ★ FAILING FIRST (slice 8d step 2): EVERY PROVINCE HAS ITS OWN CODE, ITS OWN FOUR ROCKS, AND
+    /// EVERY ROCK IS SOLID BEDROCK OF THE REGISTRY. Four statements. (1) The codes are dense and
+    /// distinct, so the row's byte reads back to the province that wrote it. (2) A byte no province
+    /// owns is refused, never defaulted. (3) Every rock is solid and names a registry key. (4) No
+    /// two provinces state the same four rocks, so the map really is a map.
+    /// ★ THE ERODIBILITY BY ROCK (W7 step 3), three statements: shale's own share is the whole
+    /// (256); a shield of granite and quartzite cuts under a third as fast as a shale shelf; every
+    /// province's share stands in `1..=256`, and an unplaced stratum reads shale's strength.
+    #[test]
+    fn the_erodibility_falls_with_the_rocks_tensile_strength() {
+        assert_eq!(
+            tensile_strength_mpa(Stratum::Shale),
+            tensile_strength_mpa(Stratum::Air)
+        );
+        let shelf = Province::FlatShelf.erodibility_q8();
+        let shield = Province::CrystallineBasement.erodibility_q8();
+        assert!(shield * 3 < shelf, "shield {shield} against shelf {shelf}");
+        for p in Province::ALL {
+            let q = p.erodibility_q8();
+            assert!((1..=256).contains(&q), "{p:?}: {q}");
+        }
+        // The shale-only reading: four shales would give exactly 256.
+        let shale = tensile_strength_mpa(Stratum::Shale);
+        assert_eq!(256 * 16 * shale * shale / ((4 * shale) * (4 * shale)), 256);
+    }
+
+    #[test]
+    fn every_province_has_a_code_and_four_solid_rocks() {
+        let mut codes = std::collections::BTreeSet::new();
+        let mut rows = std::collections::BTreeSet::new();
+        for p in Province::ALL {
+            assert!(codes.insert(p.code()), "{p:?} shares a code");
+            assert_eq!(Province::from_code(p.code()), Some(p));
+            let rocks = p.rocks();
+            for r in rocks {
+                assert!(r.is_solid(), "{p:?} states {r:?}");
+                assert!(!r.registry_key().is_empty());
+            }
+            assert!(rows.insert(rocks), "{p:?} shares its rocks");
+        }
+        assert_eq!(codes.len(), 5);
+        assert_eq!(Province::from_code(5), None);
+        assert_eq!(Province::from_code(255), None);
+        assert_eq!(DEFAULT_PROVINCE, Province::CrystallineBasement);
+        // The two rocks the rock map added read their own registry keys.
+        assert_eq!(Stratum::Slate.registry_key(), "slate");
+        assert_eq!(Stratum::Marble.registry_key(), "marble");
+        assert_eq!(Stratum::from_code(20), Some(Stratum::Marble));
     }
 
     #[test]

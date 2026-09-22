@@ -395,3 +395,62 @@ frame before.**
 Owed from the instrument: the far ring's tiles (about 23 rung-9 chunks past the horizon wait forever for a
 tile whose centre stands past the reach; ledgered).
 
+## 13. The morning after (2026-09-21): the water's cost, the far ring, the seam, the lake, the dead node
+
+The owner flew the cured coast ("Looks great now"), asked for a commit, and asked whether the water is what
+makes the picture slow. All five below are code-read causes with a measurement, the same afternoon.
+
+### 13.1 The water sheet's cost — MEASURED, then cut
+
+The coast leg (12 km, a quarter stick, 40 s), one binary, the sheet on and off by `VD_TERRAIN_WATER=0`:
+
+| flight | sheet | frame median | frame p90 | opaque pass | transparent pass |
+|---|---|---|---|---|---|
+| 1789977629 | on | 33.8 ms | 36.5 | 22.5 ms | 7.1 |
+| 1789977810 | off | 24.2 ms | 37.8 | 16.3 ms | 6.7 |
+| 1789978082 | on | 31.1 ms | 33.8 | 19.3 ms | 6.1 |
+| (fourth) | off | the client never connected; no record | | | |
+
+The sheet costs about eight milliseconds of a thirty-millisecond frame, all of it in the opaque pass: the
+sea under EVERY cell (the shore fix of 2026-09-20) put two triangles under every land cell as well, which
+doubled the triangles of every land chunk. The cure keeps a quad only where a corner's ground stands no
+higher than the water plus a HIDE bound — the land's morph step toward the coarser rung, its sink under the
+finer, a cell of placement — beyond which no state of the ladder can show it. The shore keeps one continuous
+surface under it; a hillside builds no sheet. The frame after the cut is owed on the same leg.
+
+### 13.2 The four cures, read in the code
+
+- **The dead node.** A hull learns its parent from its exterior key ("whoever authors my placement"); the
+  reaper of a retired shard revoked its realm keys only, so the dead planet's exterior lease stood, the new
+  planet's genesis grant was refused against it, and the new hull read the corpse. The reaper now revokes a
+  retired shard's exterior keys too (a unit test crashes a shard that holds a realm key and a hull's exterior
+  key: both go, and a fresh planet's grant lands).
+- **The far ring's tiles.** The shard's reach stopped at the smooth horizon; the ladder asks out to the
+  band's outer edge and admits peaks past the horizon. One home for the outer edge and the reach in the
+  terrain crate; the ladder reads its constants from there.
+- **The tiles across a cube edge.** The reach square is walked through the seam table, every node past the
+  edge visited (a stride skipped the partner's far tile — the first test caught it).
+- **The pyramid's water word.** Level k carries a water level per coarse node, the mean of the wet children
+  when at least half are wet; digest, store row (schema 39, artifact version 4), wire (minor 33, a reshape,
+  the floor moves), the client's book, the column read. A highland lake now keeps its level from orbit.
+
+**After the cut (flight 1789980755): 32.2 ms — the cut alone did not pay.** `sheet_cost` on the coast eye's
+wanted set: 33.1 million sheet triangles with the client's hide against 49.6 million with every quad and
+40.1 million of land — an ocean chunk at rung 7 draws 7 688 triangles for a flat surface. **The block sheet
+(flight 1789981503): one quad per 8 × 8 block of one level, 0.59 million sheet triangles, the frame 23.2 ms
+median (p90 24.1, peak 34), the opaque pass 14.0 ms — under the 24.2 ms of no sheet at all.** The shore in
+the frames is continuous.
+
+| flight | sheet | frame median | opaque pass | sheet triangles (coast eye) |
+|---|---|---|---|---|
+| 1789977810 | none | 24.2 ms | 16.3 | 0 |
+| 1789980755 | per cell, hide cut | 32.2 ms | 19.4 | 33.1 M |
+| 1789981503 | per block | **23.2 ms** | **14.0** | 0.59 M |
+
+### 13.3 The dormant-then-return flight (`dormant_return.sh`)
+
+Login (hull beside the spawn), the client gone, 13 realm logs "drained on shutdown" within 30 s, login
+again: the hull stands beside the spawn on the second login and fifteen seconds later, and the orchestrator
+answered "PEER LOCATE UNANSWERED" zero times. The far ring's `awaiting_keys` read empty for the whole coast
+leg (23 chunks waited forever before), hole columns 0, the margin gap 0 to 1.
+

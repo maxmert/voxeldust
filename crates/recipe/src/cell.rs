@@ -31,6 +31,7 @@ use crate::gi::Gi;
 use crate::height::GAP_STEPS_PER_CELL;
 use crate::noise::NOISE_BITS;
 use crate::root::isqrt;
+use crate::terrace::{bed_hardness, bed_of, bed_pick};
 
 /// The fraction bits a LENGTH carries on the recipe's path: the noise's own, so a surface and an
 /// octave sum add without a shift.
@@ -45,6 +46,20 @@ pub const BIOMES: usize = 4;
 /// The mask that picks a biome's row.
 pub const BIOME_MASK: i64 = BIOMES as i64 - 1;
 const _: () = assert!(BIOMES.is_power_of_two());
+
+/// ★ HOW MANY ROCK PROVINCES a body can hold (slice 8d step 2, the rock map). A POWER OF TWO, so a
+/// province picks its row by a MASK and never by a bounds branch — the rule the biome's row already
+/// stands on. The host names the provinces (`vd_terrain::strata::Province`); the recipe only reads a
+/// row of four substance codes.
+pub const PROVINCES: usize = 8;
+/// The mask that picks a province's row.
+pub const PROVINCE_MASK: i64 = PROVINCES as i64 - 1;
+const _: () = assert!(PROVINCES.is_power_of_two());
+
+/// The shift of a province's SOFT pair inside its row: two substance codes, in two bytes.
+pub const ROCK_SOFT: u32 = 0;
+/// The shift of a province's HARD pair inside its row.
+pub const ROCK_HARD: u32 = 16;
 
 /// One byte, as a word.
 const BYTE: Gi = Gi::new(0xFF);
@@ -289,6 +304,19 @@ pub struct CellCharter {
     /// One packed row per biome: the topsoil's code at [`ROW_TOPSOIL`], the subsoil's at
     /// [`ROW_SUBSOIL`], the sediment's at [`ROW_SEDIMENT`] ([`strata_row`] packs one).
     pub strata: [Gi; BIOMES],
+    /// ★ THE BED STACK'S DATUM RADIUS and its spacing's reciprocal (slice 8d step 2), the cap-rock
+    /// bench's own two words: the cell kernel reads THE SAME bed index the bench's shape reads, so a
+    /// riser's rock and the riser stand at one radius.
+    pub bed_datum: Gi,
+    pub bed_spacing_recip: Gi,
+    /// The bench's hardness seed as a word — the body's bench salt. The kernel folds it with the bed
+    /// index for the bed's hardness and for its pick, so nothing about the beds crosses a lane.
+    pub bed_seed: Gi,
+    /// ★ ONE ROW PER PROVINCE ([`province_row`] packs one): the SOFT pair of rocks in the low two
+    /// bytes, the HARD pair in the next two. A row of ZERO states no rocks, and the kernel then
+    /// reads the biome's own sediment byte — which is what a host that has not drawn a rock map
+    /// hands over.
+    pub provinces: [Gi; PROVINCES],
 }
 
 /// One biome's row of the charter's strata table: three substance codes in three bytes.
@@ -297,6 +325,21 @@ pub fn strata_row(topsoil: Gi, subsoil: Gi, sediment: Gi) -> Gi {
     ((topsoil & BYTE) << ROW_TOPSOIL)
         | ((subsoil & BYTE) << ROW_SUBSOIL)
         | ((sediment & BYTE) << ROW_SEDIMENT)
+}
+
+/// ★ ONE PROVINCE'S ROW of the charter's rock map (slice 8d step 2): four substance codes in four
+/// bytes — the two SOFT rocks first, then the two HARD ones. A bed that drew hard reads the hard
+/// pair and a bed that drew soft reads the soft pair, and a second draw picks WHICH of the two.
+///
+/// **Example.** The folded belt's row packs shale and slate as its soft pair and granite and
+/// quartzite as its hard pair. A hard bed of that belt is granite or quartzite along the whole
+/// hillside; the soft bed over it is shale or slate.
+#[must_use]
+pub fn province_row(soft0: Gi, soft1: Gi, hard0: Gi, hard1: Gi) -> Gi {
+    ((soft0 & BYTE) << ROCK_SOFT)
+        | ((soft1 & BYTE) << (ROCK_SOFT + 8))
+        | ((hard0 & BYTE) << ROCK_HARD)
+        | ((hard1 & BYTE) << (ROCK_HARD + 8))
 }
 
 impl CellCharter {
@@ -326,18 +369,76 @@ impl CellCharter {
         self.fluid_at(r, self.sea_radius)
     }
 
-    /// The substance at `depth_m` WHOLE metres under the surface (0 is the surface cell) in a
-    /// biome: the topsoil, then the subsoil, then the sediment, then the bedrock. The biome picks
-    /// its row by a MASK, so no bound is tested and no arm can be missed.
+    /// ★ THE ROCK OF THE BED AT A RADIUS (slice 8d step 2; `slice_8d_design.md` §3.4 and §3.5): the
+    /// bed index at the cell's OWN radius, that bed's hardness, and the province's row.
+    ///
+    /// **Why a radius and not a depth.** A depth band drapes over the hill, so it is soft over hard
+    /// everywhere and no cliff can grow a cap. A bed stands at a FIXED RADIUS, so one rock runs
+    /// along a whole hillside at one height — which is what a tread and a riser are, and it is the
+    /// same index the cap-rock bench pulls the surface with.
+    ///
+    /// A HARD bed (its hardness over the bench's cap threshold, which [`bed_hardness`] reads as a
+    /// share over zero) takes the province's hard pair; a soft one takes its soft pair; a second
+    /// draw picks which of the two. A province row of ZERO states no rocks and answers zero, and the
+    /// caller then reads the biome's own sediment byte.
+    ///
+    /// ★ A STATED READING AT THE DATUM. The datum stands under the deepest SURFACE the body can
+    /// reach, and a veneer cell stands a little under its own surface, so a cell of the very
+    /// lowest column can dip under the datum. There the two-word product truncates toward zero
+    /// instead of flooring, which moves ONE bed boundary by one bed at that depth. It is the same
+    /// answer on every host (one product, one truncation), so it is a reading and not a drift; the
+    /// cure, if the owner ever wants it, is to drop the datum by the veneer's own depth, which
+    /// moves the bench's phase and therefore every picture already judged.
+    ///
+    /// **Example.** A miner digs into a shelf province at 6 341 900 m. The bed there drew soft, so
+    /// she cuts shale; forty metres higher the next bed drew hard and the same wall is sandstone.
     #[must_use]
-    pub fn stratum_code(&self, biome: Gi, depth_m: Gi) -> Gi {
+    pub fn bed_rock(&self, province: Gi, r: Gi) -> Gi {
+        let bed = bed_of(self.bed_datum, self.bed_spacing_recip, r);
+        let seed = self.bed_seed.raw() as u64;
+        let half = if bed_hardness(seed, bed) > Gi::ZERO {
+            ROCK_HARD
+        } else {
+            ROCK_SOFT
+        };
+        let pick = (bed_pick(seed, bed).raw() as u32) << 3;
+        let row = self.provinces[(province & Gi::new(PROVINCE_MASK)).raw() as usize];
+        (row >> (half + pick)) & BYTE
+    }
+
+    /// The substance at `depth_m` WHOLE metres under the surface (0 is the surface cell) in a
+    /// biome: the topsoil, then the subsoil, then THE BED'S OWN ROCK at the cell's radius `r`, then
+    /// the body's bedrock. The biome picks its row by a MASK, so no bound is tested and no arm can
+    /// be missed.
+    ///
+    /// ★ THE THIRD BAND IS THE ROCK MAP'S (slice 8d step 2). It was the body's ONE sediment at every
+    /// depth of the band, over every province; it is now the bed's rock ([`bed_rock`]). The band's
+    /// DEPTH does not move, so the cheap chunk skip that writes a solid column's deep chunks with no
+    /// cell pass keeps writing exactly the bytes the cell pass would. A charter that states no
+    /// province rocks still reads the sediment byte, so a host with no rock map is unchanged.
+    ///
+    /// ★ AN OWED CHANGE, NAMED (`slice_8d_design.md` §3.4): the design wants the SOIL's thickness
+    /// stripped on the SOLVE's slope, so a cell's substance is the same at every rung. Today the
+    /// soil's depths are the body's own whole metres and nothing strips them at all, and the band's
+    /// EXTENT still moves with the surface, which a coarse rung draws with fewer octaves. The BED's
+    /// own rock does not move: it stands at a fixed radius and reads the same at every rung. The
+    /// strip is owed and is not this step's.
+    ///
+    /// [`bed_rock`]: CellCharter::bed_rock
+    #[must_use]
+    pub fn stratum_code(&self, biome: Gi, depth_m: Gi, province: Gi, r: Gi) -> Gi {
         let row = self.strata[(biome & Gi::new(BIOME_MASK)).raw() as usize];
         if depth_m < self.topsoil_m {
             (row >> ROW_TOPSOIL) & BYTE
         } else if depth_m < self.subsoil_end_m {
             (row >> ROW_SUBSOIL) & BYTE
         } else if depth_m < self.strata_end_m {
-            (row >> ROW_SEDIMENT) & BYTE
+            let rock = self.bed_rock(province, r);
+            if rock == Gi::ZERO {
+                (row >> ROW_SEDIMENT) & BYTE
+            } else {
+                rock
+            }
         } else {
             self.bedrock_code
         }
@@ -371,6 +472,10 @@ pub struct CellAt {
     /// ★ The column's water surface radius in gap steps at [`LENGTH_BITS`] (slice 8c stage C5),
     /// or ZERO for a dry column: the host fills it from the artifact's row, or from the body's sea.
     pub water: Gi,
+    /// ★ THE COLUMN'S ROCK PROVINCE (slice 8d step 2), an index into the charter's rock map: the
+    /// host fills it from the artifact's row under the column, or states its default where it holds
+    /// no row.
+    pub province: Gi,
 }
 
 /// ★ THE CELL KERNEL — one cell's substance and gap, as one word.
@@ -396,7 +501,12 @@ pub fn cell_word(charter: &CellCharter, at: &CellAt, value: Gi, tubes: &[Tube]) 
     let mut stratum = if depth <= Gi::ZERO {
         charter.fluid_at(r, at.water)
     } else {
-        charter.stratum_code(at.biome, depth >> (LENGTH_BITS + STEP_SHIFT))
+        charter.stratum_code(
+            at.biome,
+            depth >> (LENGTH_BITS + STEP_SHIFT),
+            at.province,
+            r,
+        )
     };
     if charter.in_band(depth) {
         let p = point_at(at.dir, at.r_steps);
@@ -538,7 +648,30 @@ mod tests {
                 strata_row(Gi::new(2), Gi::new(8), Gi::new(10)),
                 strata_row(Gi::new(7), Gi::new(13), Gi::new(10)),
             ],
+            // Beds 100 gap steps apart from a datum at zero, on a bench seed whose first beds are
+            // named apart below. NO ROCK MAP: every province row is zero, so the third band still
+            // reads the biome's own sediment byte — the arm a host with no rock map takes.
+            bed_datum: Gi::ZERO,
+            bed_spacing_recip: Gi::new(crate::root::recip_pow2(
+                100,
+                crate::terrace::TERRACE_RECIP_BITS,
+            ) as i64),
+            bed_seed: Gi::new(0x5EED),
+            provinces: [Gi::ZERO; PROVINCES],
         }
+    }
+
+    /// The same charter WITH a rock map: province 1 states 20 and 21 as its soft pair and 30 and 31
+    /// as its hard pair, so a test can say which half and which member a bed read.
+    fn charter_with_rocks() -> CellCharter {
+        let mut c = charter();
+        c.provinces[1] = province_row(Gi::new(20), Gi::new(21), Gi::new(30), Gi::new(31));
+        c
+    }
+
+    /// A radius in gap steps at the length format.
+    fn radius(steps: i64) -> Gi {
+        Gi::new(steps) << LENGTH_BITS
     }
 
     #[test]
@@ -710,25 +843,126 @@ mod tests {
         // The strata, in every biome, at every depth the table covers.
         for (biome, topsoil, subsoil) in [(0, 4, 9), (1, 5, 6), (2, 2, 8), (3, 7, 13)] {
             let b = Gi::new(biome);
-            assert_eq!(c.stratum_code(b, Gi::ZERO), Gi::new(topsoil));
-            assert_eq!(c.stratum_code(b, Gi::ONE), Gi::new(topsoil));
-            assert_eq!(c.stratum_code(b, Gi::new(2)), Gi::new(subsoil));
-            assert_eq!(c.stratum_code(b, Gi::new(6)), Gi::new(subsoil));
-            assert_eq!(c.stratum_code(b, Gi::new(7)), Gi::new(10));
-            assert_eq!(c.stratum_code(b, Gi::new(46)), Gi::new(10));
-            assert_eq!(c.stratum_code(b, Gi::new(47)), c.bedrock_code);
-            assert_eq!(c.stratum_code(b, Gi::new(5_000)), c.bedrock_code);
+            let r = radius(2_000);
+            assert_eq!(c.stratum_code(b, Gi::ZERO, Gi::ZERO, r), Gi::new(topsoil));
+            assert_eq!(c.stratum_code(b, Gi::ONE, Gi::ZERO, r), Gi::new(topsoil));
+            assert_eq!(c.stratum_code(b, Gi::new(2), Gi::ZERO, r), Gi::new(subsoil));
+            assert_eq!(c.stratum_code(b, Gi::new(6), Gi::ZERO, r), Gi::new(subsoil));
+            assert_eq!(c.stratum_code(b, Gi::new(7), Gi::ZERO, r), Gi::new(10));
+            assert_eq!(c.stratum_code(b, Gi::new(46), Gi::ZERO, r), Gi::new(10));
+            assert_eq!(c.stratum_code(b, Gi::new(47), Gi::ZERO, r), c.bedrock_code);
+            assert_eq!(
+                c.stratum_code(b, Gi::new(5_000), Gi::ZERO, r),
+                c.bedrock_code
+            );
         }
         // A biome word past the table wraps by the mask, never out of the rows.
         assert_eq!(
-            c.stratum_code(Gi::new(4), Gi::ZERO),
-            c.stratum_code(Gi::ZERO, Gi::ZERO)
+            c.stratum_code(Gi::new(4), Gi::ZERO, Gi::ZERO, radius(2_000)),
+            c.stratum_code(Gi::ZERO, Gi::ZERO, Gi::ZERO, radius(2_000))
         );
         // The cavern's hollow: nothing under the threshold, and the scale above it.
         assert_eq!(c.cavern_hollow_steps(Gi::ZERO), Gi::ZERO);
         assert_eq!(c.cavern_hollow_steps(c.cavern_threshold), Gi::ZERO);
         let over = c.cavern_threshold + (Gi::ONE << (NOISE_BITS - 2));
         assert_eq!(c.cavern_hollow_steps(over), Gi::new(5 * GAP_STEPS_PER_CELL));
+    }
+
+    /// ★ FAILING FIRST (slice 8d step 2): THE PROVINCE ROW PACKS FOUR CODES INTO FOUR BYTES, the
+    /// soft pair under the hard pair, and a code past a byte keeps only its byte.
+    #[test]
+    fn the_province_row_packs_four_codes_into_four_bytes() {
+        let row = province_row(Gi::new(20), Gi::new(21), Gi::new(30), Gi::new(31));
+        assert_eq!((row >> ROCK_SOFT) & BYTE, Gi::new(20));
+        assert_eq!((row >> (ROCK_SOFT + 8)) & BYTE, Gi::new(21));
+        assert_eq!((row >> ROCK_HARD) & BYTE, Gi::new(30));
+        assert_eq!((row >> (ROCK_HARD + 8)) & BYTE, Gi::new(31));
+        assert_eq!(
+            (province_row(Gi::new(0x1FF), Gi::ZERO, Gi::ZERO, Gi::ZERO) >> (ROCK_SOFT + 8)) & BYTE,
+            Gi::ZERO
+        );
+    }
+
+    /// ★ FAILING FIRST (slice 8d step 2): THE BED'S ROCK IS THE SAME ALONG A HILLSIDE AND CHANGES
+    /// WITH THE RADIUS. Five statements, each of which could fail.
+    ///
+    /// 1. Every cell inside one bed's 100 steps reads ONE rock, whatever the column.
+    /// 2. A HARD bed reads the province's hard pair and a SOFT bed its soft pair, and the scan meets
+    ///    both (the even split of the cap threshold says it must).
+    /// 3. The rock is always one of the province's own four.
+    /// 4. A province the charter states NO rocks for answers zero, so the caller falls back.
+    /// 5. A province word past the table wraps by the mask and never out of the rows.
+    #[test]
+    fn the_beds_rock_stands_at_a_fixed_radius_and_reads_its_own_half() {
+        let c = charter_with_rocks();
+        let p = Gi::ONE;
+        let mut hard = 0i32;
+        let mut soft = 0i32;
+        for bed in 0..200i64 {
+            // The reciprocal is FLOORED, so a radius exactly ON a bed top reads one bed low. The
+            // bench's own kernel reads that same index there, so the rock and the tread agree; the
+            // scan samples inside the bed and never on its floor.
+            let first = c.bed_rock(p, radius(bed * 100 + 1));
+            // (1) ONE ROCK OVER THE WHOLE BED.
+            for step in [37i64, 66, 99] {
+                assert_eq!(c.bed_rock(p, radius(bed * 100 + step)), first, "bed {bed}");
+            }
+            // (2) and (3): the half the bed's hardness names, and a member of the province's four.
+            let is_hard = bed_hardness(0x5EED, Gi::new(bed)) > Gi::ZERO;
+            if is_hard {
+                hard += 1;
+                assert!(
+                    (first == Gi::new(30)) | (first == Gi::new(31)),
+                    "bed {bed} drew hard and reads {first:?}"
+                );
+            } else {
+                soft += 1;
+                assert!(
+                    (first == Gi::new(20)) | (first == Gi::new(21)),
+                    "bed {bed} drew soft and reads {first:?}"
+                );
+            }
+        }
+        assert!(hard > 50, "hard beds met: {hard}");
+        assert!(soft > 50, "soft beds met: {soft}");
+        // (4) A PROVINCE WITH NO ROCKS answers zero, at every radius.
+        assert_eq!(c.bed_rock(Gi::ZERO, radius(0)), Gi::ZERO);
+        assert_eq!(c.bed_rock(Gi::ZERO, radius(4_321)), Gi::ZERO);
+        // (5) A province word past the table wraps by the mask.
+        assert_eq!(
+            c.bed_rock(Gi::new(PROVINCES as i64 + 1), radius(4_321)),
+            c.bed_rock(Gi::ONE, radius(4_321))
+        );
+    }
+
+    /// ★ FAILING FIRST (slice 8d step 2): THE THIRD BAND READS THE BED, THE SOIL DOES NOT, AND
+    /// BELOW THE VENEER EVERY CELL IS THE BODY'S BEDROCK. The same column at two depths inside the
+    /// band reads two rocks where the beds differ; the topsoil and the subsoil read the biome's own
+    /// codes whatever the province.
+    #[test]
+    fn the_veneers_third_band_reads_the_bed_and_the_soil_does_not() {
+        let c = charter_with_rocks();
+        let p = Gi::ONE;
+        let r = radius(2_050);
+        let b = Gi::ONE;
+        // The soil is the biome's, province or no province.
+        assert_eq!(c.stratum_code(b, Gi::ZERO, p, r), Gi::new(5));
+        assert_eq!(c.stratum_code(b, Gi::new(3), p, r), Gi::new(6));
+        // The third band is the bed's rock, never the biome's sediment byte (10).
+        let rock = c.stratum_code(b, Gi::new(20), p, r);
+        assert_eq!(rock, c.bed_rock(p, r));
+        assert_ne!(rock, Gi::new(10));
+        // Below the veneer: the body's bedrock, with no lookup at all.
+        assert_eq!(c.stratum_code(b, Gi::new(47), p, r), c.bedrock_code);
+        // A radius one bed higher may read another rock; over a hundred beds it certainly does.
+        let mut seen = std::collections::BTreeSet::new();
+        for bed in 0..100i64 {
+            seen.insert(
+                c.stratum_code(b, Gi::new(20), p, radius(bed * 100 + 50))
+                    .raw(),
+            );
+        }
+        assert_eq!(seen.len(), 4, "all four of the province's rocks appear");
     }
 
     #[test]
@@ -756,6 +990,7 @@ mod tests {
             biome: Gi::new(biome),
             r_steps: Gi::new(r_steps),
             water: c.sea_radius,
+            province: Gi::ZERO,
         };
         // A cell whose centre is 39 steps under a surface at 2 000: rock, gap −39, and at 2 metres
         // of depth (39 steps is 0 whole metres) the topsoil of biome 1.

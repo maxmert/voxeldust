@@ -52,12 +52,24 @@ pub const CHUNK_PYRAMID_SCHEMA: SchemaId = SchemaId(33);
 pub const ARTIFACT_HEAD_SCHEMA: SchemaId = SchemaId(34);
 pub const ARTIFACT_TILE_SCHEMA: SchemaId = SchemaId(35);
 pub const ARTIFACT_PYRAMID_INDEX_SCHEMA: SchemaId = SchemaId(37);
-pub const ARTIFACT_PYRAMID_PART_SCHEMA: SchemaId = SchemaId(38);
+/// Schema 38 (a part of heights alone) is RETIRED with artifact version 3 and never reused: a
+/// part now carries its water words beside the heights (2026-09-21).
+pub const ARTIFACT_PYRAMID_PART_SCHEMA: SchemaId = SchemaId(39);
+/// ★ THE COAST MASK's part rows (2026-09-22, ruling W10): one bit per FINE macro node of the body,
+/// set where the node stands at or under the sea, cut into rows of [`COAST_PART_BYTES`]. The sim
+/// never names the generator: a part is bytes it stores and ships.
+pub const ARTIFACT_COAST_PART_SCHEMA: SchemaId = SchemaId(40);
 
 /// ★ A PYRAMID PART's size in heights: 16 384 words is 32 KB, a tile's weight. The store's part
 /// row and the wire's part are the SAME cut, so a shard ships what it stores, and both stay far
 /// under the TLV field cap the one-row pyramid broke.
 pub const PYRAMID_PART_WORDS: usize = 16_384;
+/// ★ A COAST PART's size in BYTES: 32 KiB of bits — a tile's weight and the pyramid part's, so one
+/// pace carries one shape. The home planet's mask is 1.1 MB, which is 34 parts.
+pub const COAST_PART_BYTES: usize = 32_768;
+// One field a part: under the TLV field cap by construction.
+const _: () = assert!(COAST_PART_BYTES < vd_core::tlv::MAX_FIELD_BYTES);
+// Two fields a part now (the heights and the water words): each under the cap.
 const _: () = assert!(PYRAMID_PART_WORDS * 2 < vd_core::tlv::MAX_FIELD_BYTES);
 
 /// ★ WHY THESE ROWS ARE FRAMED AND THE MOVEMENT LANE IS NOT.
@@ -120,6 +132,8 @@ const ARTIFACT_HEAD: u8 = 4;
 const ARTIFACT_TILE: u8 = 5;
 const ARTIFACT_PYRAMID: u8 = 6;
 const ARTIFACT_PYRAMID_PART: u8 = 7;
+/// The coast mask's parts (2026-09-22, ruling W10). Append-only numbering: 8 is the next free tag.
+const ARTIFACT_COAST_PART: u8 = 8;
 
 /// The artifact rows' tags — their own numbering, one schema each, append-only.
 mod art {
@@ -130,6 +144,8 @@ mod art {
     pub const TILES_PER_EDGE: u16 = 5;
     /// The sea's level, whole metres over the ladder radius (slice 8c stage C5).
     pub const SEA_M: u16 = 6;
+    /// How many coast parts the artifact was cut into (2026-09-22, ruling W10).
+    pub const COAST_PARTS: u16 = 7;
     pub const FACE: u16 = 1;
     pub const TX: u16 = 2;
     pub const TY: u16 = 3;
@@ -141,6 +157,13 @@ mod art {
     pub const LEVEL: u16 = 1;
     pub const PART: u16 = 2;
     pub const PART_BYTES: u16 = 3;
+    /// The part's water words (2026-09-21).
+    pub const PART_WATER: u16 = 4;
+    /// ★ A COAST PART's own fields (2026-09-22, ruling W10): which part of how many, and its bits.
+    /// Its own numbering, because a tag is a schema's own word and this schema is its own.
+    pub const COAST_INDEX: u16 = 1;
+    pub const COAST_COUNT: u16 = 2;
+    pub const COAST_BITS: u16 = 3;
 }
 
 /// The key of the owner-fence row (one per realm store).
@@ -188,6 +211,9 @@ pub struct ArtifactHead {
     /// ★ The sea's level (slice 8c stage C5), whole metres over the ladder radius, or the dry
     /// word (`i16::MIN`) — a word the sim carries and never reads.
     pub sea_m: i16,
+    /// ★ HOW MANY COAST PARTS the artifact was cut into (2026-09-22, ruling W10). A reader that
+    /// finds fewer refuses the store by name: a planet without its coast mask is half a planet.
+    pub coast_parts: u32,
 }
 
 /// One stored tile: its place and its rows' bytes, opaque to the sim.
@@ -196,7 +222,9 @@ pub struct ArtifactTile {
     pub face: u8,
     pub tx: u32,
     pub ty: u32,
-    /// The rows, nine bytes each, row-major from the tile's origin.
+    /// The rows, the generator's own `ROW_BYTES` each (ten since the rock map landed), row-major
+    /// from the tile's origin. OPAQUE here: the sim never names the generator, so a row that grows
+    /// changes nothing in this file.
     pub bytes: Vec<u8>,
 }
 
@@ -217,6 +245,21 @@ pub struct ArtifactPyramidPart {
     pub part: u32,
     /// The heights, two little-endian bytes each.
     pub bytes: Vec<u8>,
+    /// ★ The water words (2026-09-21), two little-endian bytes each, the same count as the heights.
+    /// A store of an earlier artifact version is refused by its head before any part is read.
+    pub water_bytes: Vec<u8>,
+}
+
+/// ★ One part of the COAST MASK (2026-09-22, ruling W10): which part of how many, and its bits.
+/// OPAQUE here: the sim never names the generator, so a mask whose meaning changes changes nothing
+/// in this file.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArtifactCoastPart {
+    pub part: u32,
+    /// How many parts the whole mask was cut into.
+    pub parts: u32,
+    /// The bits, one per fine node, [`COAST_PART_BYTES`] at most.
+    pub bits: Vec<u8>,
 }
 
 /// The key of the artifact's head: the family tag alone.
@@ -263,6 +306,21 @@ pub fn artifact_pyramid_part_prefix() -> Vec<u8> {
     vec![ARTIFACT_PYRAMID_PART]
 }
 
+/// The key of one coast part: the family tag then the part, big-endian so a prefix scan walks the
+/// mask in order.
+#[must_use]
+pub fn artifact_coast_part_key(part: u32) -> Vec<u8> {
+    let mut k = vec![ARTIFACT_COAST_PART];
+    k.extend(part.to_be_bytes());
+    k
+}
+
+/// The prefix that reads every coast part in one scan.
+#[must_use]
+pub fn artifact_coast_part_prefix() -> Vec<u8> {
+    vec![ARTIFACT_COAST_PART]
+}
+
 /// The head, framed.
 #[must_use]
 pub fn encode_artifact_head(head: &ArtifactHead) -> Vec<u8> {
@@ -273,6 +331,7 @@ pub fn encode_artifact_head(head: &ArtifactHead) -> Vec<u8> {
         .and_then(|w| w.required(art::DIGEST, &head.digest))
         .and_then(|w| w.required(art::TILES_PER_EDGE, &head.tiles_per_edge))
         .and_then(|w| w.required(art::SEA_M, &head.sea_m))
+        .and_then(|w| w.required(art::COAST_PARTS, &head.coast_parts))
         .expect("a head's fields are small and encode infallibly")
         .finish()
 }
@@ -307,7 +366,20 @@ pub fn encode_artifact_pyramid_part(part: &ArtifactPyramidPart) -> Vec<u8> {
         .required(art::LEVEL, &part.level)
         .and_then(|w| w.required(art::PART, &part.part))
         .and_then(|w| w.required(art::PART_BYTES, &part.bytes))
+        .and_then(|w| w.required(art::PART_WATER, &part.water_bytes))
         .expect("a part is cut under the field cap and encodes infallibly")
+        .finish()
+}
+
+/// One coast part, framed. The writer cuts a part at [`COAST_PART_BYTES`], under the field cap by
+/// construction.
+#[must_use]
+pub fn encode_artifact_coast_part(part: &ArtifactCoastPart) -> Vec<u8> {
+    TlvWriter::new(ARTIFACT_COAST_PART_SCHEMA)
+        .required(art::COAST_INDEX, &part.part)
+        .and_then(|w| w.required(art::COAST_COUNT, &part.parts))
+        .and_then(|w| w.required(art::COAST_BITS, &part.bits))
+        .expect("a coast part is cut under the field cap and encodes infallibly")
         .finish()
 }
 
@@ -325,6 +397,7 @@ pub fn decode_artifact_head(bytes: &[u8]) -> Result<ArtifactHead, String> {
         digest: field(&r, art::DIGEST, "digest")?,
         tiles_per_edge: field(&r, art::TILES_PER_EDGE, "tiles per edge")?,
         sea_m: field(&r, art::SEA_M, "sea")?,
+        coast_parts: field(&r, art::COAST_PARTS, "coast parts")?,
     })
 }
 
@@ -367,6 +440,21 @@ pub fn decode_artifact_pyramid_part(bytes: &[u8]) -> Result<ArtifactPyramidPart,
         level: field(&r, art::LEVEL, "level")?,
         part: field(&r, art::PART, "part")?,
         bytes: field(&r, art::PART_BYTES, "part bytes")?,
+        water_bytes: field(&r, art::PART_WATER, "part water")?,
+    })
+}
+
+/// A coast part read back, or a named refusal.
+///
+/// # Errors
+/// The bytes are not a coast part this build can read.
+pub fn decode_artifact_coast_part(bytes: &[u8]) -> Result<ArtifactCoastPart, String> {
+    let r = TlvReader::parse(ARTIFACT_COAST_PART_SCHEMA, bytes)
+        .map_err(|e| format!("a stored artifact coast part does not decode: {e}"))?;
+    Ok(ArtifactCoastPart {
+        part: field(&r, art::COAST_INDEX, "part")?,
+        parts: field(&r, art::COAST_COUNT, "coast parts")?,
+        bits: field(&r, art::COAST_BITS, "coast bits")?,
     })
 }
 
@@ -473,12 +561,14 @@ pub fn decode_body(bytes: &[u8]) -> Result<BuiltBody, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactHead, ArtifactPyramidIndex, ArtifactPyramidPart, ArtifactTile, PYRAMID_PART_WORDS,
+        ArtifactCoastPart, ArtifactHead, ArtifactPyramidIndex, ArtifactPyramidPart, ArtifactTile,
+        COAST_PART_BYTES, PYRAMID_PART_WORDS, artifact_coast_part_key, artifact_coast_part_prefix,
         artifact_head_key, artifact_pyramid_key, artifact_pyramid_part_key,
         artifact_pyramid_part_prefix, artifact_tile_key, artifact_tile_prefix,
-        decode_artifact_head, decode_artifact_pyramid_index, decode_artifact_pyramid_part,
-        decode_artifact_tile, encode_artifact_head, encode_artifact_pyramid_index,
-        encode_artifact_pyramid_part, encode_artifact_tile,
+        decode_artifact_coast_part, decode_artifact_head, decode_artifact_pyramid_index,
+        decode_artifact_pyramid_part, decode_artifact_tile, encode_artifact_coast_part,
+        encode_artifact_head, encode_artifact_pyramid_index, encode_artifact_pyramid_part,
+        encode_artifact_tile,
     };
     use super::{
         BERTH_SCHEMA, BODY_SCHEMA, BlockStoreTuning, CHUNK_DELTA_SCHEMA, CHUNK_PYRAMID_SCHEMA,
@@ -508,6 +598,7 @@ mod tests {
             digest: [7, 11],
             tiles_per_edge: 19,
             sea_m: -1_250,
+            coast_parts: 34,
         };
         assert_eq!(
             decode_artifact_head(&encode_artifact_head(&head)),
@@ -535,6 +626,7 @@ mod tests {
             level: 1,
             part: 36,
             bytes: vec![0xAB; PYRAMID_PART_WORDS * 2],
+            water_bytes: vec![0xCD; PYRAMID_PART_WORDS * 2],
         };
         let encoded = encode_artifact_pyramid_part(&part);
         assert!(encoded.len() < vd_core::tlv::MAX_FIELD_BYTES);
@@ -555,6 +647,27 @@ mod tests {
         );
         assert!(artifact_tile_key(3, 2, 18) < artifact_tile_key(3, 3, 0));
         assert!(artifact_tile_key(3, 2, 18) > artifact_tile_key(3, 2, 17));
+        // ★ THE COAST PART (2026-09-22, ruling W10): a part of the store's own cut round-trips,
+        // stays under the field cap, keys in order after the pyramid's parts, and refuses another
+        // schema's bytes by name.
+        let coast = ArtifactCoastPart {
+            part: 33,
+            parts: 34,
+            bits: vec![0xA5; COAST_PART_BYTES],
+        };
+        let coast_bytes = encode_artifact_coast_part(&coast);
+        assert!(coast_bytes.len() < vd_core::tlv::MAX_FIELD_BYTES);
+        assert_eq!(decode_artifact_coast_part(&coast_bytes), Ok(coast));
+        assert_eq!(artifact_coast_part_prefix(), vec![8]);
+        assert_eq!(artifact_coast_part_key(33), vec![8, 0, 0, 0, 33]);
+        assert!(artifact_coast_part_key(1) < artifact_coast_part_key(2));
+        assert!(artifact_coast_part_key(0) > artifact_pyramid_part_key(9, 9));
+        assert!(
+            decode_artifact_coast_part(&encode_artifact_head(&head))
+                .expect_err("another schema")
+                .contains("coast part does not decode")
+        );
+        assert!(decode_artifact_head(&coast_bytes).is_err());
         assert!(decode_artifact_head(b"nonsense").is_err());
         assert!(decode_artifact_tile(&encode_artifact_head(&head)).is_err());
         assert!(

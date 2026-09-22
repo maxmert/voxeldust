@@ -70,7 +70,11 @@ pub const PASSES: u32 = 40;
 /// The climate is recomputed over the relief as it then stands every this many passes (C3).
 pub const CLIMATE_EVERY: u32 = 10;
 /// The flood, the flats and the receivers are recomputed every this many passes.
-pub const FLOOD_EVERY: u32 = 10;
+/// ★ EVERY PASS (2026-09-22, the lake census): at ten, a hollow the uplift, the rebound or the
+/// talus made between two floods was cut by nobody, and the spill of a lake was re-found four times
+/// in five billion years — so the pits GREW from 98 k after the first ten passes to 146 k at the
+/// end. A river breaches a hollow; a flood every pass lets it.
+pub const FLOOD_EVERY: u32 = 1;
 /// The flexural rebound runs every this many passes (C3).
 pub const ISOSTASY_EVERY: u32 = 5;
 /// The talus relaxations after the last sweep (C3).
@@ -262,6 +266,8 @@ pub struct RouteReport {
     pub outlets: usize,
     /// Nodes the flood RAISED — the lake nodes.
     pub raised: usize,
+    /// The pits' volume: every raise summed, in steps (2026-09-22, the lake census).
+    pub pit_steps: u64,
     /// Nodes routed by the flat's distance field rather than by a lower neighbour.
     pub flat: usize,
     /// Nodes the distance field never reached: a defect (gate G-DRAINAGE).
@@ -281,6 +287,11 @@ pub struct SweepReport {
     pub max_cut: i32,
     /// Every cut summed, in steps.
     pub total_cut: u64,
+    /// ★ Lake nodes the sediment FILLED this pass (2026-09-22): the cut of the catchment, carried
+    /// down the tree, laid in the hollow it drains into.
+    pub filled: usize,
+    /// The fill summed over those nodes, in steps.
+    pub total_fill: u64,
 }
 
 /// The whole solve's record, pass by pass.
@@ -376,8 +387,26 @@ pub struct MacroSolve {
     /// ★ THE REMOVAL FIELD: what the sweeps have cut from each node so far, sixteenths — the
     /// sediment budget's input.
     pub removed: Vec<u32>,
-    /// The removal the rebound has not yet answered, sixteenths; consumed by every rebound.
-    pub pending: Vec<u32>,
+    /// The NET removal the rebound has not yet answered, sixteenths, SIGNED (2026-09-22): the cut
+    /// less the sediment laid on the node — a filled basin is a load and sinks, an eroded range is
+    /// lightened and rises. Consumed by every rebound.
+    pub pending: Vec<i32>,
+    /// ★ THIS PASS's cut per node, sixteenths (2026-09-22): the sediment the deposit carries.
+    pub cut_now: Vec<u32>,
+    /// ★ THE ERODIBILITY of each node's rock as a share of `K₀` in 1/256 (W7 step 3), from its
+    /// province ([`crate::strata::Province::erodibility_q8`]); 256 where no province is stated.
+    pub erodibility_q8: Vec<u32>,
+    /// ★ THE PIT under each node AS THE ROUTING FOUND IT, sixteenths (2026-09-22): the flood level
+    /// over the terrain at route time, zero for a node the flood did not raise. The sweep skips a
+    /// node with a pit (a lake does not cut) and the deposit fills up to it — never `z_flood − z`
+    /// read after the sweep, which is every cut node's own cut (MEASURED: the fill equalled the cut
+    /// to a tenth of a percent, pass after pass, and no lake ever drained).
+    pub pit: Vec<u32>,
+    /// ★ THE ROCK PROVINCE of each node (slice 8d step 2), as its code byte: the initial land's own
+    /// reading, carried through the solve untouched. The rivers cut the ground; they do not change
+    /// which crust it is. A state built with no initial land reads
+    /// [`crate::strata::DEFAULT_PROVINCE`] everywhere, because it has no plates to read.
+    pub province: Vec<u8>,
     /// The node directions at [`CACHE_BITS`], read by every chord.
     dir: Vec<[i32; 3]>,
 }
@@ -462,6 +491,10 @@ impl MacroSolve {
             uplift: vec![0; n],
             removed: vec![0; n],
             pending: vec![0; n],
+            cut_now: vec![0; n],
+            pit: vec![0; n],
+            erodibility_q8: vec![256; n],
+            province: vec![crate::strata::DEFAULT_PROVINCE.code(); n],
             dir,
         })
     }
@@ -475,6 +508,15 @@ impl MacroSolve {
         state.z.clone_from(&land.z);
         state.z_flood.clone_from(&land.z);
         state.uplift.clone_from(&land.uplift);
+        state.province.clone_from(&land.province);
+        state.erodibility_q8 = land
+            .province
+            .iter()
+            .map(|&p| {
+                crate::strata::Province::from_code(p)
+                    .map_or(256, crate::strata::Province::erodibility_q8)
+            })
+            .collect();
         state.sea_z = land.sea_z.unwrap_or(i32::MIN);
         Some(state)
     }
@@ -489,7 +531,7 @@ impl MacroSolve {
     /// is measured against.
     #[must_use]
     pub fn bytes_per_node(&self) -> usize {
-        4 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 4 + 4 + 4 + 12
+        4 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 4 + 4 + 4 + 12 + 1
     }
 
     /// ★ THE UPLIFT OF ONE PASS at a node: the age's share that pass carries, as the difference of
@@ -667,7 +709,11 @@ impl MacroSolve {
         }
         drop(heap);
         drop(visited);
-        report.raised = (0..n).filter(|&i| self.z_flood[i] > self.z[i]).count();
+        for i in 0..n {
+            self.pit[i] = (self.z_flood[i] - self.z[i]).max(0) as u32;
+        }
+        report.raised = self.pit.iter().filter(|&&p| p > 0).count();
+        report.pit_steps = self.pit.iter().map(|&p| u64::from(p)).sum();
         // 2. THE RECEIVERS: the steepest lower neighbour on the flooded surface.
         for node in 0..n as u32 {
             let i = node as usize;
@@ -800,7 +846,10 @@ impl MacroSolve {
     /// ★ THE STREAM POWER SWEEP, implicit (Braun & Willett 2013), outlets first:
     /// `z' = (z + c·b) / (1 + c)` with `c = Δt·K·√Q / L` and `b` the receiver's BASE LEVEL —
     /// its water level where it stands under water, its terrain height otherwise, one expression.
-    /// An outlet is left alone; a lake node is skipped, so the hole the flood found stays a lake.
+    /// An outlet is left alone; a lake node is skipped — a lake does not cut — and then the
+    /// SEDIMENT FILLS IT ([`MacroSolve::deposit`], 2026-09-22): what the sweep cut upstream is
+    /// carried down the tree and laid in the hollow it drains into, so a lake fills to its spill
+    /// and becomes a plain, as on Earth, instead of standing for the whole age.
     /// ★ THE UPLIFT FIRST (C3): every node rises by its pass's share of the age's uplift before
     /// the cut, so a range is the balance of the two; `pass` of `passes` says which share.
     pub fn sweep(&mut self, gain: u64, pass: u32, passes: u32) -> SweepReport {
@@ -808,6 +857,7 @@ impl MacroSolve {
         let one = 1i128 << GAIN_BITS;
         for i in 0..self.node_count() {
             self.z[i] += MacroSolve::uplift_step(self.uplift[i], pass, passes);
+            self.cut_now[i] = 0;
         }
         for k in (0..self.order.len()).rev() {
             let node = self.order[k];
@@ -816,12 +866,14 @@ impl MacroSolve {
             if r == NO_NODE {
                 continue;
             }
-            if self.z_flood[i] > self.z[i] {
+            if self.pit[i] > 0 {
                 report.skipped_lake += 1;
                 continue;
             }
             let base = self.z[r as usize].max(self.water_level(r));
-            let c = (u128::from(gain) * u128::from(isqrt(self.discharge[i])))
+            // ★ THE ROCK'S OWN ERODIBILITY (W7 step 3): the gain times the province's share.
+            let c = ((u128::from(gain) * u128::from(self.erodibility_q8[i])) >> 8)
+                * u128::from(isqrt(self.discharge[i]))
                 / u128::from(self.chord[i].max(1));
             let c = c as i128;
             let numerator = (i128::from(self.z[i]) << GAIN_BITS) + c * i128::from(base);
@@ -833,10 +885,62 @@ impl MacroSolve {
                 report.total_cut += cut as u64;
                 self.z[i] -= cut;
                 self.removed[i] = self.removed[i].saturating_add(cut as u32);
-                self.pending[i] = self.pending[i].saturating_add(cut as u32);
+                self.pending[i] = self.pending[i].saturating_add(cut);
+                self.cut_now[i] = cut as u32;
             }
         }
+        let (filled, total_fill) = self.deposit();
+        report.filled = filled;
+        report.total_fill = total_fill;
         report
+    }
+
+    /// ★ THE DEPOSIT (2026-09-22, the lake census: 16 % of the land was lake against Earth's 3.7 %,
+    /// because a hollow the flood found was never filled and never breached). This pass's cut is
+    /// carried down the receiver tree, leaves first, as a VOLUME (steps × area); at a LAKE node
+    /// (its flood level over its terrain) the volume fills the node up to its spill level and the
+    /// rest goes on to the receiver; at an outlet — the sea — what is left sinks (a delta is 8d's
+    /// own later piece). Exact integers, order-free on the tree. Returns the lake nodes filled and
+    /// the fill summed, in steps.
+    ///
+    /// The fill is a LOAD the rebound does not read (the rebound answers removal only); named here,
+    /// UNMEASURED, because a filled lake is a few hundred metres over its own basin and the flexure
+    /// of that stands far under a node's step.
+    ///
+    /// **Example.** A crater bowl 300 m deep sits under a range the rivers cut. Every pass the
+    /// range's cut runs into the bowl; after a few passes the bowl is a plain at the spill level,
+    /// the next flood finds no pit, and the river that fed it now runs across.
+    pub fn deposit(&mut self) -> (usize, u64) {
+        let n = self.node_count();
+        let mut flux = vec![0u128; n];
+        let (mut filled, mut total_fill) = (0usize, 0u64);
+        for k in 0..self.order.len() {
+            let node = self.order[k];
+            let i = node as usize;
+            let area = u128::from(self.area[i].max(1));
+            flux[i] += u128::from(self.cut_now[i]) * area;
+            if self.pit[i] > 0 && flux[i] > 0 {
+                let room = u128::from(self.pit[i]) * area;
+                let laid = flux[i].min(room);
+                let dz = (laid / area) as i32;
+                if dz > 0 {
+                    self.z[i] += dz;
+                    self.pit[i] -= dz as u32;
+                    // A fill is a load the rebound answers with the opposite sign: without it the
+                    // crust rose under mass that never left (MEASURED: the sea floor lifted over
+                    // the sea on 1.4 million nodes and the re-solved sea drowned 99 % of the globe).
+                    self.pending[i] = self.pending[i].saturating_sub(dz);
+                    flux[i] -= u128::from(dz as u32) * area;
+                    filled += 1;
+                    total_fill += dz as u64;
+                }
+            }
+            let r = self.receiver[i];
+            if r != NO_NODE {
+                flux[r as usize] += flux[i];
+            }
+        }
+        (filled, total_fill)
     }
 
     /// The pyramid level whose node is nearest `alpha_m` (the flexural parameter), among the
@@ -873,13 +977,14 @@ impl MacroSolve {
         let coarse = self.lattice.coarser(k).unwrap_or(self.lattice);
         let m = coarse.node_count();
         // 1. Restrict: the mean of each 2^k × 2^k block.
-        let mut field = vec![0u64; m];
+        // The field is SIGNED (2026-09-22): a block whose sediment outweighs its cut sinks.
+        let mut field = vec![0i64; m];
         let mut parent = Vec::with_capacity(n);
         for node in 0..n as u32 {
             let (face, i, j) = self.lattice.split(node);
             let c = coarse.index(face, i >> k, j >> k);
             parent.push(c);
-            field[c as usize] += u64::from(self.pending[node as usize]);
+            field[c as usize] += i64::from(self.pending[node as usize]);
             self.pending[node as usize] = 0;
         }
         for f in &mut field {
@@ -888,30 +993,29 @@ impl MacroSolve {
         // 2. Smooth: the nine-node mean, a stated number of times, through the seam table.
         let mut pass = 0;
         while pass < SMOOTH_PASSES {
-            let mut next = vec![0u64; m];
+            let mut next = vec![0i64; m];
             for c in 0..m as u32 {
                 let mut sum = field[c as usize];
-                let mut count = 1u64;
+                let mut count = 1i64;
                 for nb in coarse.neighbours(c) {
                     if nb != NO_NODE {
                         sum += field[nb as usize];
                         count += 1;
                     }
                 }
-                next[c as usize] = sum / count;
+                next[c as usize] = sum.div_euclid(count);
             }
             field = next;
             pass += 1;
         }
-        // 3. Prolong and lift.
+        // 3. Prolong and lift — or sink, under a load.
         let share = Gf::from_f64(
             crate::land::CONTINENTAL_CRUST_DENSITY_KGM3 / crate::land::MANTLE_DENSITY_KGM3,
         );
         let (mut lifted, mut max_lift) = (0usize, 0i32);
         for node in 0..n {
-            let lift =
-                (Gf::from_i64(field[parent[node] as usize] as i64) * share).to_i64_floor() as i32;
-            if lift > 0 {
+            let lift = (Gf::from_i64(field[parent[node] as usize]) * share).to_i64_floor() as i32;
+            if lift != 0 {
                 self.z[node] += lift;
                 lifted += 1;
                 max_lift = max_lift.max(lift);
@@ -1077,10 +1181,14 @@ impl MacroSolve {
         wet as f64 / all as f64
     }
 
-    /// ★ THE ENVELOPE (03 §4.13): `|z| ≤ relief` at every node, or every height is scaled DOWN
-    /// uniformly by `relief / max|z|` — one fenced division, one floor a node — so the shape is
-    /// kept and the containment band never moves. Returns the greatest `|z|` before, and whether
-    /// the scale was applied.
+    /// ★ THE ENVELOPE (03 §4.13; RE-RULED 2026-09-22, W7 step 3): `|z| ≤ relief` at every node.
+    /// A node over it is CLAMPED to it — the relief law is a strength law, a mountain taller than
+    /// the rock can hold collapses where it stands, and the talus below carries the collapse — so
+    /// the containment band never moves. Before, one tall belt scaled EVERY height on the globe
+    /// down by `relief / max|z|`: MEASURED on the home planet, a belt at 11.9 km under an 8.3 km
+    /// cap scaled the whole planet by 0.69, the basins lost a third of their depth, and the
+    /// re-solved sea drowned the continents the freeboard law had just set at its edge. Returns
+    /// the greatest `|z|` before, and whether any node was clamped.
     pub fn envelope(&mut self, relief: i32) -> (i32, bool) {
         let mut worst = 0i32;
         for &z in &self.z {
@@ -1089,9 +1197,8 @@ impl MacroSolve {
         if worst <= relief {
             return (worst, false);
         }
-        let scale = Gf::from_i64(i64::from(relief)) / Gf::from_i64(i64::from(worst));
         for z in &mut self.z {
-            *z = (Gf::from_i64(i64::from(*z)) * scale).to_i64_floor() as i32;
+            *z = (*z).clamp(-relief, relief);
         }
         (worst, true)
     }
@@ -1215,7 +1322,21 @@ pub fn solve_full(
     let mut climate = None;
     for pass in 0..schedule.passes {
         if since_climate >= schedule.climate_every {
-            let c = crate::climate::climate(body, &lattice, words, &state.z, land.sea_z);
+            // ★ THE RUNNING SEA (2026-09-22, W7 step 2): the sea is re-solved over the field as it
+            // stands at every climate step, so the base level the rivers cut to follows the
+            // inventory over the eroding continents — before, the sea moved once at the end and
+            // the shelf the rivers had graded to the old level came up as a checkerboard of pits.
+            if let Some(sea) = crate::land::sea_level_loaded(&state.z, &state.area, words.water_km3)
+            {
+                state.sea_z = sea;
+            }
+            let c = crate::climate::climate(
+                body,
+                &lattice,
+                words,
+                &state.z,
+                (words.water_km3 > 0).then_some(state.sea_z),
+            );
             state.rain.clone_from(&c.rain_mm_yr);
             climate = Some(c);
             since_climate = 0;
@@ -1239,7 +1360,13 @@ pub fn solve_full(
     // The climate over the final relief, for the talus's angle and the ice's line.
     let climate = match climate {
         Some(c) => c,
-        None => crate::climate::climate(body, &lattice, words, &state.z, land.sea_z),
+        None => crate::climate::climate(
+            body,
+            &lattice,
+            words,
+            &state.z,
+            (words.water_km3 > 0).then_some(state.sea_z),
+        ),
     };
     let tan: Vec<u32> = climate
         .aridity_q8
@@ -1354,7 +1481,7 @@ mod tests {
     }
 
     /// ★ THE DRIVER ON A REAL SMALL BODY OF THE WORLD (06 §3.3): the home moon's whole schedule —
-    /// four routings, forty sweeps; every routing drains every node to an outlet (gate
+    /// forty routings, forty sweeps; every routing drains every node to an outlet (gate
     /// G-DRAINAGE) with no cycle; the sweeps only lower; the relief stays inside the band.
     #[test]
     fn the_home_moon_solves_and_every_node_drains() {
@@ -1363,20 +1490,32 @@ mod tests {
         let (state, report) =
             solve(&moon, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
         assert_eq!(report.sweeps.len(), 40);
-        assert_eq!(report.routes.len(), 4);
+        assert_eq!(report.routes.len(), 40);
         for r in &report.routes {
             assert_eq!((r.undrained, r.cyclic), (0, 0), "{r:?}");
             assert!(r.outlets > 0);
         }
         assert!(report.sweeps[0].lowered > 0);
+        // ★ THE SWEEPS ONLY LOWER, AND THE DEPOSIT ONLY FILLS A HOLLOW TO ITS SPILL (2026-09-22): a
+        // node stands where it started or lower, unless the sediment raised it, and then it stands
+        // at or under the flood level the last routing found.
+        assert!(
+            report.sweeps.iter().any(|s| s.filled > 0),
+            "some hollow filled"
+        );
         for (i, (&a, &b)) in before.z.iter().zip(state.z.iter()).enumerate() {
-            assert!(b <= a, "node {i} rose from {a} to {b}");
+            assert!(
+                b <= a || b <= state.z_flood[i],
+                "node {i} rose from {a} to {b} past its spill {}",
+                state.z_flood[i]
+            );
         }
         let (lo, hi) = state.range();
         let (lo0, hi0) = before.range();
         assert!(lo >= lo0, "the floor fell: {lo0} to {lo}");
         assert!(hi <= hi0, "the ceiling rose: {hi0} to {hi}");
-        assert_eq!(state.bytes_per_node(), 64);
+        // 64 before the rock map; the province's own byte makes 65 (slice 8d step 2).
+        assert_eq!(state.bytes_per_node(), 65);
         assert_eq!(state.node_count(), 27_744);
         // The discharge is conserved: what leaves at the outlets is every node's own rain.
         let total: u64 = (0..state.node_count())
@@ -1401,7 +1540,7 @@ mod tests {
         )
         .expect("a solve");
         assert_eq!(state.sea_z, i32::MIN);
-        assert_eq!(report.routes.len(), 4);
+        assert_eq!(report.routes.len(), 40);
         for r in &report.routes {
             assert!(!r.sea_seeded);
             assert_eq!(
@@ -1500,6 +1639,53 @@ mod tests {
     /// level nearest the flexural parameter, and consumes the pending removal; a rebound with
     /// nothing pending lifts nothing. The mass lifted is the crust's share of the mass cut,
     /// within the block means' floors.
+    /// ★ THE DEPOSIT (W7): on a stated plateau with one pit and one outlet, the pass's cut is laid
+    /// in the pit up to its spill and no further, the rest runs on to the outlet, and a node the
+    /// sweep cut is NOT refilled (the pit is the routing's, never the cut's). Three statements.
+    #[test]
+    fn the_deposit_fills_the_pit_to_its_spill_and_no_cut_node() {
+        let moon = home_moon();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        let n = state.node_count();
+        // A cone: every node stands 100 m plus one metre per node of distance from the outlet,
+        // so every river on it cuts; the pit at ten nodes stands forty metres under its cone.
+        for node in 0..n as u32 {
+            let (face, i, j) = state.lattice.split(node);
+            let d = if face == Face::PosX {
+                (i - 20).abs().max((j - 20).abs())
+            } else {
+                60
+            };
+            state.z[node as usize] = Z_STEPS_PER_M * (100 + d);
+        }
+        state.sea_z = 0;
+        let outlet = state.lattice.index(Face::PosX, 20, 20);
+        let pit = state.lattice.index(Face::PosX, 30, 30);
+        state.z[outlet as usize] = 0;
+        state.z[pit as usize] = Z_STEPS_PER_M * 70;
+        state.route();
+        state.accumulate();
+        // The spill is the downhill neighbour at nine nodes: 109 m; the pit is 39 m deep.
+        assert_eq!(
+            state.pit[pit as usize] as i32,
+            Z_STEPS_PER_M * 39,
+            "the pit's depth"
+        );
+        let report = state.sweep(Schedule::standard(HOME_SYSTEM_AGE_YR).gain(), 0, 1);
+        assert!(report.lowered > 0);
+        assert_eq!(report.filled, 1, "the one pit filled");
+        assert_eq!(
+            state.z[pit as usize],
+            Z_STEPS_PER_M * 109,
+            "filled to its spill and no further"
+        );
+        assert_eq!(state.pit[pit as usize], 0);
+        // A cut node next to the outlet was lowered and stays lowered.
+        let beside = state.lattice.index(Face::PosX, 21, 20);
+        assert!(state.z[beside as usize] < Z_STEPS_PER_M * 101);
+        assert!(state.cut_now[beside as usize] > 0);
+    }
+
     #[test]
     fn the_rebound_lifts_the_crusts_share_of_the_cut() {
         let moon = home_moon();
@@ -1512,7 +1698,7 @@ mod tests {
         state.route();
         state.accumulate();
         state.sweep(Schedule::standard(HOME_SYSTEM_AGE_YR).gain(), 0, 1);
-        let cut: u64 = state.pending.iter().map(|&p| u64::from(p)).sum();
+        let cut: u64 = state.pending.iter().map(|&p| p.max(0) as u64).sum();
         assert!(cut > 0);
         let before = state.z.clone();
         // A parameter of about four nodes: level 2 (32 768 m against 8 192 · 4).
@@ -1684,9 +1870,10 @@ mod tests {
         state.z[icy as usize] = 8 * Z_STEPS_PER_M;
         assert_eq!(state.envelope(relief), (8 * Z_STEPS_PER_M, true));
         assert_eq!(state.z[icy as usize], relief);
+        // The clamp is LOCAL (2026-09-22): a node inside the relief keeps its height.
         assert_eq!(
             state.z[state.lattice.index(Face::PosY, 8, 8) as usize],
-            Z_STEPS_PER_M / 4
+            Z_STEPS_PER_M
         );
     }
 
@@ -1723,7 +1910,7 @@ mod tests {
         );
         assert_eq!(report.rebounds.len(), 8);
         assert_eq!(report.talus.len(), 8);
-        assert_eq!(report.routes.len(), 5);
+        assert_eq!(report.routes.len(), 41);
         assert!(report.routes.iter().all(|r| r.undrained == 0));
         assert!(report.routes.iter().all(|r| r.cyclic == 0));
         assert!(

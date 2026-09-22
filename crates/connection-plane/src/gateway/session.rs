@@ -330,6 +330,14 @@ pub(crate) struct Session {
         vd_core::pose::RealmId,
         std::collections::BTreeSet<(u8, u32, u32)>,
     >,
+    /// ★ A SHARD'S BULK FOR THIS SESSION, HELD UNTIL IT IS ACTIVE (2026-09-22, the on-foot ground):
+    /// the realm's shard holds the occupant's dot — and ships the tiles under it — from the first
+    /// tick of the attach, a tick before this gateway marks the session Active. Those bytes used to
+    /// be DROPPED ("a session that is not active"), the shard had marked them sent, and the fine
+    /// rungs waited for ever (MEASURED: eight of the nine tiles under the pilot's boots lost at
+    /// every login). Held here, bounded by [`crate::gateway::shard::HELD_BULK_CAP`], and delivered
+    /// on the activation, in order.
+    pub(crate) held_bulk: Vec<Vec<u8>>,
     /// RLM 5f-3d — the STANDING home-realm identity of a dynamic session: set once at the committed lease
     /// and NEVER cleared, so it outlives the `AwaitingHomeRealm` phase payload. Two live readers: the
     /// bounded-TTL Close diagnostic (which can fire in `AwaitingAttach`, where the phase payload is gone —

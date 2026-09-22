@@ -3,10 +3,11 @@
 //!
 //! The composition root is the one place that links both the generator (which knows what an
 //! artifact is) and the store's row families (which the sim frames as bytes), so the bridge lives
-//! here: an [`Artifact`] becomes one HEAD row, one row per TILE, one PYRAMID INDEX row and one row
-//! per PYRAMID PART through the [`Store`] seam, and comes back the same way — REFUSED by name when
-//! the head names another world tag, another version or another lattice, or when a tile or a part
-//! is missing: a store that holds half a planet is not a planet.
+//! here: an [`Artifact`] becomes one HEAD row, one row per TILE, one PYRAMID INDEX row, one row
+//! per PYRAMID PART and one row per COAST PART through the [`Store`] seam, and comes back the same
+//! way — REFUSED by name when the head names another world tag, another version or another
+//! lattice, or when a tile, a pyramid part or a coast part is missing: a store that holds half a
+//! planet is not a planet.
 //!
 //! The pyramid is cut into parts of [`PYRAMID_PART_WORDS`] heights, the wire's own cut, because a
 //! store row is one TLV field and a field caps at one mebibyte: the home planet's pyramid is 5.9 MB
@@ -21,14 +22,16 @@ use std::collections::BTreeSet;
 
 use vd_sim::io::Store;
 use vd_sim::stub::built_store::{
-    ArtifactHead, ArtifactPyramidIndex, ArtifactPyramidPart, ArtifactTile, PYRAMID_PART_WORDS,
+    ArtifactCoastPart, ArtifactHead, ArtifactPyramidIndex, ArtifactPyramidPart, ArtifactTile,
+    COAST_PART_BYTES, PYRAMID_PART_WORDS, artifact_coast_part_key, artifact_coast_part_prefix,
     artifact_head_key, artifact_pyramid_key, artifact_pyramid_part_key,
-    artifact_pyramid_part_prefix, artifact_tile_key, artifact_tile_prefix, decode_artifact_head,
-    decode_artifact_pyramid_index, decode_artifact_pyramid_part, decode_artifact_tile,
+    artifact_pyramid_part_prefix, artifact_tile_key, artifact_tile_prefix,
+    decode_artifact_coast_part, decode_artifact_head, decode_artifact_pyramid_index,
+    decode_artifact_pyramid_part, decode_artifact_tile, encode_artifact_coast_part,
     encode_artifact_head, encode_artifact_pyramid_index, encode_artifact_pyramid_part,
     encode_artifact_tile,
 };
-use vd_terrain::artifact::{Artifact, Row, Tile, TileCache, tile_width};
+use vd_terrain::artifact::{Artifact, Row, Tile, TileCache, coast_bytes, tile_width};
 use vd_terrain::macro_lattice::MacroLattice;
 
 /// The head an artifact writes, under `world_tag`.
@@ -41,7 +44,15 @@ pub fn head_of(artifact: &Artifact, world_tag: u64) -> ArtifactHead {
         digest: artifact.digest(),
         tiles_per_edge: artifact.tiles_per_edge(),
         sea_m: artifact.sea_m,
+        coast_parts: coast_parts_of(artifact),
     }
+}
+
+/// ★ HOW MANY COAST PARTS an artifact's mask is cut into (2026-09-22, ruling W10): the store's own
+/// cut, which the wire's own cut shares, so a shard ships what it stores.
+#[must_use]
+pub fn coast_parts_of(artifact: &Artifact) -> u32 {
+    artifact.coast.len().div_ceil(COAST_PART_BYTES) as u32
 }
 
 /// A tile's rows as the store's bytes, nine a row — the wire's framing too (`Tile::to_bytes`).
@@ -105,13 +116,19 @@ pub fn write_artifact(store: &mut dyn Store, world_tag: u64, artifact: &Artifact
     for (k, level) in artifact.pyramid.iter().enumerate() {
         let level_no = k as u32 + 1;
         let bytes = level_bytes(level);
+        // The water words ride in the same cut; a level with fewer of them (none) writes what it
+        // holds, never a part short of heights.
+        let water = level_bytes(artifact.pyramid_water.get(k).map_or(&[][..], Vec::as_slice));
         let mut parts = 0u32;
         for (part, chunk) in bytes.chunks(PYRAMID_PART_WORDS * 2).enumerate() {
+            let start = (part * PYRAMID_PART_WORDS * 2).min(water.len());
+            let end = ((part + 1) * PYRAMID_PART_WORDS * 2).min(water.len());
             let key = artifact_pyramid_part_key(level_no, part as u32);
             let row = ArtifactPyramidPart {
                 level: level_no,
                 part: part as u32,
                 bytes: chunk.to_vec(),
+                water_bytes: water[start..end].to_vec(),
             };
             store.put(&key, &encode_artifact_pyramid_part(&row).into());
             written.insert(key);
@@ -121,6 +138,25 @@ pub fn write_artifact(store: &mut dyn Store, world_tag: u64, artifact: &Artifact
     }
     for (key, _) in store.scan(&artifact_pyramid_part_prefix()) {
         if !written.contains(&key) {
+            store.delete(&key);
+        }
+    }
+    // ★ THE COAST MASK's parts (2026-09-22, ruling W10), cut at the store's own size; a part row
+    // of an earlier solve that this one does not rewrite is dropped in the same commit.
+    let coast_parts = coast_parts_of(artifact);
+    let mut coast_written = BTreeSet::new();
+    for (part, bits) in artifact.coast.chunks(COAST_PART_BYTES).enumerate() {
+        let row = ArtifactCoastPart {
+            part: part as u32,
+            parts: coast_parts,
+            bits: bits.to_vec(),
+        };
+        let key = artifact_coast_part_key(part as u32);
+        store.put(&key, &encode_artifact_coast_part(&row).into());
+        coast_written.insert(key);
+    }
+    for (key, _) in store.scan(&artifact_coast_part_prefix()) {
+        if !coast_written.contains(&key) {
             store.delete(&key);
         }
     }
@@ -140,8 +176,9 @@ pub fn write_artifact(store: &mut dyn Store, world_tag: u64, artifact: &Artifact
 ///
 /// # Errors
 /// The head names another world tag, version or edge; a tile is missing or malformed; the
-/// pyramid's index or a part is missing, malformed or under the wrong key; the digest of what was
-/// read is not the head's.
+/// pyramid's index or a part is missing, malformed or under the wrong key; a coast part is missing
+/// or malformed, or the mask is not the lattice's size; the digest of what was read is not the
+/// head's.
 pub fn read_artifact(
     store: &dyn Store,
     world_tag: u64,
@@ -205,9 +242,11 @@ pub fn read_artifact(
         .ok_or("the stored artifact has no pyramid")?;
     let index = decode_artifact_pyramid_index(&index_bytes)?;
     let mut pyramid = Vec::with_capacity(index.parts_per_level.len());
+    let mut pyramid_water = Vec::with_capacity(index.parts_per_level.len());
     for (k, &parts) in index.parts_per_level.iter().enumerate() {
         let level_no = k as u32 + 1;
         let mut bytes = Vec::with_capacity(parts as usize * index.part_words as usize * 2);
+        let mut water = Vec::with_capacity(bytes.capacity());
         for part in 0..parts {
             let row = store
                 .get(&artifact_pyramid_part_key(level_no, part))
@@ -224,8 +263,35 @@ pub fn read_artifact(
                 ));
             }
             bytes.extend_from_slice(&row.bytes);
+            water.extend_from_slice(&row.water_bytes);
         }
         pyramid.push(level_of(&bytes).ok_or("a stored pyramid level is not whole words")?);
+        pyramid_water
+            .push(level_of(&water).ok_or("a stored pyramid level's water is not whole words")?);
+    }
+    // ★ THE COAST MASK, part by part (2026-09-22, ruling W10): every part the head announced, in
+    // order, and the whole one bit per fine node. A head whose parts are missing or malformed is
+    // refused BY NAME — a planet without its shoreline is half a planet.
+    let mut coast = Vec::with_capacity(coast_bytes(n));
+    for part in 0..head.coast_parts {
+        let row = store
+            .get(&artifact_coast_part_key(part))
+            .ok_or_else(|| format!("the stored artifact is missing coast part {part}"))?;
+        let row = decode_artifact_coast_part(&row)?;
+        if (row.part, row.parts) != (part, head.coast_parts) {
+            return Err(format!(
+                "a stored coast part says part {} of {}, its head says part {part} of {}",
+                row.part, row.parts, head.coast_parts
+            ));
+        }
+        coast.extend_from_slice(&row.bits);
+    }
+    if coast.len() != coast_bytes(n) {
+        return Err(format!(
+            "the stored artifact's coast mask holds {} bytes, the lattice wants {}",
+            coast.len(),
+            coast_bytes(n)
+        ));
     }
     let artifact = Artifact {
         edge: head.edge,
@@ -233,6 +299,8 @@ pub fn read_artifact(
         sea_m: head.sea_m,
         rows,
         pyramid,
+        pyramid_water,
+        coast,
     };
     if artifact.digest() != head.digest {
         return Err("the stored artifact's rows do not digest to its head".to_owned());
@@ -411,6 +479,81 @@ mod tests {
                 .expect_err("refused")
                 .contains("pyramid index does not decode")
         );
+        // ★ THE COAST MASK (2026-09-22, ruling W10): a missing part, a part under the wrong key,
+        // a part that does not decode and a mask of the wrong length are each refused BY NAME.
+        let mut dry = MemStore::default();
+        write_artifact(&mut dry, 7, &artifact);
+        let key = artifact_coast_part_key(0);
+        let mut coast =
+            decode_artifact_coast_part(&dry.get(&key).expect("a part")).expect("decodes");
+        dry.delete(&key);
+        dry.commit();
+        assert!(
+            read_artifact(&dry, 7, &lattice)
+                .expect_err("refused")
+                .contains("missing coast part 0")
+        );
+        coast.part = 1;
+        dry.put(&key, &encode_artifact_coast_part(&coast).into());
+        dry.commit();
+        assert!(
+            read_artifact(&dry, 7, &lattice)
+                .expect_err("refused")
+                .contains("says part 1 of 1")
+        );
+        coast.part = 0;
+        coast.bits.push(0);
+        dry.put(&key, &encode_artifact_coast_part(&coast).into());
+        dry.commit();
+        assert!(
+            read_artifact(&dry, 7, &lattice)
+                .expect_err("refused")
+                .contains("coast mask holds")
+        );
+        dry.put(&key, &b"garbage".to_vec().into());
+        dry.commit();
+        assert!(
+            read_artifact(&dry, 7, &lattice)
+                .expect_err("refused")
+                .contains("coast part does not decode")
+        );
+    }
+
+    /// ★ THE COAST MASK ROUND-TRIPS AND ITS STALE PARTS GO (2026-09-22, ruling W10). A mask over
+    /// the part size is cut into part rows and read back bit for bit; the head states the count;
+    /// the next write of a smaller mask drops the rows it does not rewrite, so the store never
+    /// holds a mask and a half.
+    ///
+    /// **Example.** A shard re-solves its planet after the sea moved. The new mask is shorter than
+    /// the old one; the rows past its end are dropped in the same commit, and the next boot reads
+    /// one whole shoreline.
+    #[test]
+    fn the_coast_mask_is_cut_into_parts_and_stale_parts_are_dropped() {
+        let (lattice, artifact) = moon_artifact();
+        let mut wide = artifact.clone();
+        // Three parts' worth of bits, whatever the lattice wants: the read checks the length, so
+        // the long mask is written and read through its own path and the refusal is asserted.
+        wide.coast = (0..COAST_PART_BYTES * 2 + 7)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let mut store = MemStore::default();
+        write_artifact(&mut store, 7, &wide);
+        let head = decode_artifact_head(&store.get(&artifact_head_key()).expect("a head"))
+            .expect("decodes");
+        assert_eq!(head.coast_parts, 3);
+        assert_eq!(store.scan(&artifact_coast_part_prefix()).len(), 3);
+        assert!(
+            read_artifact(&store, 7, &lattice)
+                .expect_err("the mask is not the lattice's size")
+                .contains("coast mask holds")
+        );
+        // The moon's own mask written over it: one part, and the other two go.
+        write_artifact(&mut store, 7, &artifact);
+        let head = decode_artifact_head(&store.get(&artifact_head_key()).expect("a head"))
+            .expect("decodes");
+        assert_eq!(head.coast_parts, 1);
+        assert_eq!(store.scan(&artifact_coast_part_prefix()).len(), 1);
+        assert_eq!(read_artifact(&store, 7, &lattice), Ok(Some(artifact)));
     }
 
     /// ★ A level over the field cap: 600 000 heights is 1.2 MB, over the one-mebibyte TLV field
@@ -422,6 +565,7 @@ mod tests {
         let (lattice, artifact) = moon_artifact();
         let mut big = artifact.clone();
         big.pyramid[0] = (0..600_000).map(|i| (i % 1_000) as i16).collect();
+        big.pyramid_water[0] = (0..600_000).map(|i| (i % 777) as i16).collect();
         let mut wide = MemStore::default();
         write_artifact(&mut wide, 7, &big);
         let index =

@@ -146,6 +146,8 @@ pub struct GatewayStats {
     /// the gateway's per-session bulk forward exists (slice 10 builds it beside the first producer).
     /// COUNTED, never silently dropped. Expected 0 until slice 10; then retired.
     pub bulk_for_unrouted: u64,
+    /// A shard's bulk for a session held until its activation (2026-09-22).
+    pub bulk_for_held: u64,
     /// ★ THE ARTIFACT SHIP (slice 8c stage C4c): bulk parts relayed to named sessions.
     pub artifact_parts_relayed: u64,
     /// THE ARTIFACT SHIP: `ArtifactHeld` statements recorded on sessions.

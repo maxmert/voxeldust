@@ -481,23 +481,34 @@ impl RlmReconcilerRes {
     /// realm rows per sweep — the running realms, the same order as the ledger walk the sweep already
     /// makes, never a realm's children. A refused revoke (a transfer lock) stands until the next sweep.
     fn reap_retired_heads(&mut self, dir: &mut DirectoryCore) {
-        let retired: Vec<(RealmId, Fence)> = dir
+        // ★ EVERY KEY A RETIRED SHARD HOLDS, not the realm keys alone (the dormant-then-return hull,
+        // MEASURED 2026-09-20 12:35: the tree drained, the window re-spawned it, and the new hull
+        // addressed its parent as the FIRST planet's node for a minute — "PEER LOCATE UNANSWERED").
+        // A hull learns its parent from its EXTERIOR key (`Ship(hull)`): whoever authors its
+        // placement. The dead planet's exterior lease stood, the new planet's grant at genesis was
+        // refused against it, and the hull read the corpse. The reaper now revokes the exterior
+        // keys of a retired shard with its realm keys, so the new parent's grant lands.
+        let retired: Vec<(DirectoryKey, Fence)> = dir
             .entries()
             .filter_map(|(key, record)| match key {
-                DirectoryKey::Realm(rid) if self.spawner.retired(record.authority.node()) => {
-                    Some((*rid, record.fence))
+                DirectoryKey::Realm(_) | DirectoryKey::Ship(_)
+                    if self.spawner.retired(record.authority.node()) =>
+                {
+                    Some((*key, record.fence))
                 }
                 _ => None,
             })
             .collect();
-        for (rid, fence) in retired {
-            let revoked = dir.revoke(DirectoryKey::Realm(rid), fence) == RevokeOutcome::Revoked;
+        for (key, fence) in retired {
+            let revoked = dir.revoke(key, fence) == RevokeOutcome::Revoked;
             self.retired_heads_reaped += u64::from(revoked);
-            // The launch that put this head up is over: drop its minted entry (as a `ForceReap`
+            // The launch that put a realm head up is over: drop its minted entry (as a `ForceReap`
             // does), or the pending-launch guard would hold the re-spawn for a whole launch TTL.
-            self.launches
-                .minted
-                .retain(|path, _| path.realm_id() != Some(rid));
+            if let DirectoryKey::Realm(rid) = key {
+                self.launches
+                    .minted
+                    .retain(|path, _| path.realm_id() != Some(rid));
+            }
         }
     }
 
@@ -1515,6 +1526,15 @@ mod tests {
         assert_eq!(sp.live_nodes(), BTreeSet::from([NodeId(1000)]));
         // The shard registered (its head is up), then the pod died: the process is simply gone.
         grant(&mut d, RealmId::System(7), 1000, 3);
+        // ★ The dead shard also held a hull's EXTERIOR key (it authored the hull's placement): the
+        // dormant-then-return hull read its parent off this record for a minute.
+        let hull = vd_core::EntityId::pack(vd_core::entity_kind::EntityKind::Ship, 1, 1, 0);
+        d.grant(
+            DirectoryKey::Ship(hull),
+            AuthorityRef::Shard(NodeId(1000)),
+            Fence(3),
+            UniverseTick(0),
+        );
         sp.crash(NodeId(1000));
         // Still demanded (the login re-asserts it); the latch stays silent ⇒ the ledger says dead ⇒
         // ForceReap: the stale head is force-revoked this sweep and nothing spawns in the same sweep.
@@ -1531,8 +1551,8 @@ mod tests {
             &BTreeSet::new(),
         );
         assert_eq!(
-            rlm.retired_heads_reaped, 1,
-            "reaped by the launcher's truth, before the kernel"
+            rlm.retired_heads_reaped, 2,
+            "reaped by the launcher's truth, before the kernel: the realm key and the hull's exterior key"
         );
         assert_eq!(
             rlm.force_reaps, 0,
@@ -1541,6 +1561,22 @@ mod tests {
         assert!(
             !head_present(&d, RealmId::System(7)),
             "the dead shard's head is gone"
+        );
+        assert_eq!(
+            d.head(DirectoryKey::Ship(hull)),
+            None,
+            "the dead shard's exterior lease is gone with it"
+        );
+        // The re-spawned planet leases the hull's exterior key at genesis, as every parent does:
+        // GRANTED now, where the dead record refused it.
+        assert_eq!(
+            d.grant(
+                DirectoryKey::Ship(hull),
+                AuthorityRef::Shard(NodeId(1001)),
+                Fence::GENESIS.next(),
+                UniverseTick(100 + cd),
+            ),
+            vd_sim::directory::GrantOutcome::Granted
         );
         assert_eq!(rlm.running_gauge, 0, "the gauge agrees with the decision");
         // Next sweep, past the cooldown: head gone, still demanded ⇒ a FRESH shard (a new id, never

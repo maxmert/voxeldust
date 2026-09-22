@@ -54,6 +54,7 @@ fn main() {
         tiles_per_edge: artifact.tiles_per_edge(),
         levels: artifact.pyramid.len() as u32,
         sea_m: artifact.sea_m,
+        coast_parts: 0,
     });
     for (k, level) in artifact.pyramid.iter().enumerate().rev() {
         rx.accept(BulkMsg::ArtifactPyramid {
@@ -62,6 +63,7 @@ fn main() {
             part: 0,
             parts: 1,
             z_m: level.clone(),
+            water_m: artifact.pyramid_water[k].clone(),
         });
     }
     for face in Face::ALL {

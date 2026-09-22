@@ -32,7 +32,45 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 /// 7 (2026-09-20): the far view's level pick — a rung reads the finest pyramid level whose node is at
 /// least its cell (`PyramidField::level_for`), so every chunk from rung 10 up moved; the recipe's own
 /// relief did not (the chunk golden tables stand).
-pub const GENERATOR_VERSION: u32 = 7;
+/// ★ 8 (2026-09-21): THE PER-COLUMN ROUGHNESS FACTOR READS THE SOLVED FIELD'S OWN SLOPE. The factor
+/// is now the GREATER of the placeholder noise's reading and the macro field's own slope as a share
+/// of the body's first fine octave's slope (`artifact::slope_share`), so a mountain belt the solve
+/// raised keeps its fine octaves whole. Every chunk ON THE ARTIFACT PATH whose share stands over its
+/// noise factor moved; the recipe's own relief — a body with no artifact — did not, so the chunk
+/// golden tables stand and the identity's measured half moves.
+/// ★ 9 (2026-09-21): EACH BED GETS ITS OWN HARDNESS (slice 8d step 1; ruling W1). The cap-rock
+/// bench's body-wide strength became a CEILING: the pull toward a bed top is that top's own drawn
+/// share of it, and half the tops draw soft and pull nothing. EVERY chunk a bed top crosses moved,
+/// so the recipe's own relief moves too and the chunk golden tables move with it.
+/// ★ 10 (2026-09-21): THE ROCK MAP AND THE SUBSTANCE AT A FIXED RADIUS (slice 8d step 2; ruling W4
+/// item 4). Every node row carries a PROVINCE byte, so the artifact's version bumps to 5 and a
+/// version-4 store re-solves. Inside the veneer a cell's substance is no longer the body's one
+/// sediment by depth: it is the rock of the BED at the cell's own radius, drawn from the province's
+/// own four. No surface moved — the shape's arithmetic is untouched — but the SUBSTANCE of every
+/// cell of the veneer's deepest band moved, so every chunk's digest moved and the golden tables move
+/// with it.
+/// ★ 11 (2026-09-21): THE SEA DECIDES THE SHORE (ruling W6). After the bench a column's surface is
+/// held on its GROUND's side of its water by a quarter of the ground's own height over or under it
+/// (`vd_recipe::height::shore`), so the shoreline stands where the solved ground crosses the water
+/// at every rung and a ring swap cannot move it. Every column near a coast whose fine octaves
+/// crossed the water moved; a body with no sea is untouched, so the seed-only golden tables stand
+/// and only the measured identity may move.
+/// ★ 12 (2026-09-22): THE LAKES AND THE CONTINENTS (ruling W7, the owner's three steps). The
+/// flood every pass; the sediment laid in the first hollow downstream (`MacroSolve::deposit`), the
+/// rebound reading the net; the freeboard law (`land::freeboard_factor`: the continental thickness
+/// solved so the sea stands at the crust's shelf quantile, Earth's 29 of 40); the running sea
+/// re-solved at every climate step; the erodibility by the province's rocks' tensile strength;
+/// the envelope a per-node clamp, never a global scale. The SOLVE moved, so the artifact and the
+/// identity's measured half move; the seed-only recipe did not, so the chunk golden tables stand.
+/// ★ 13 (2026-09-22): THE COAST MASK (ruling W10; the owner, from 1 400 km: "during flight the
+/// shores changes again all the time"). The SIDE of the water a column stands on is the fine row's
+/// own word at EVERY rung — one bit per macro node, stored with the artifact and shipped with it —
+/// and no host derives a side from a pyramid level's mean any more (`vd_recipe::height::shore`
+/// takes the side; `artifact::sample_side` reads it). Every column at a rung that reads a level
+/// and whose level mean disagreed with its own row moved; a chunk with no artifact reads the
+/// unknown word and is untouched, so the seed-only golden tables stand and only the measured
+/// identity may move. `ARTIFACT_VERSION` 6 with it: a version-5 store re-solves.
+pub const GENERATOR_VERSION: u32 = 13;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -87,7 +125,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 7,
+            GENERATOR_VERSION, 13,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -121,5 +159,5 @@ mod tests {
         assert_ne!(bare.measured, id.measured);
     }
 
-    const DECLARED_PIN: u64 = 17_976_115_674_562_111_424;
+    const DECLARED_PIN: u64 = 3_618_195_234_959_425_002;
 }

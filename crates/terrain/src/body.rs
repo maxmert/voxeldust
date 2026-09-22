@@ -456,6 +456,11 @@ pub const RADIUS_RECIP_BITS: u32 = 62;
 /// The fraction bits of the CAVERN WAVELENGTH's reciprocal: the lattice point it makes is under 2⁵⁰
 /// at the largest legal body, and the wavelength's own error is then under one part in 2⁴³.
 pub const CAVERN_RECIP_BITS: u32 = 48;
+/// The fraction bits of the SLOPE REFERENCE's reciprocal ([`BodyDefinition::slope_ref_recip`]): the
+/// reference stands at most at the angle of repose (`TALUS_RMS × TAN_REPOSE`, the peak's own solve),
+/// so the reciprocal is at least `2⁵²/0.7·2²⁸ ≈ 2.4 × 10⁷` and the share it makes carries the
+/// noise's own 28 bits with 24 to spare. A two-word product reads it, so nothing wraps.
+pub const SLOPE_RECIP_BITS: u32 = 52;
 /// The tube carvers' region edge, in metres. A POWER OF TWO, so a point's region index is a shift and
 /// not a division (the charter holds the shift).
 pub const TUBE_REGION_M: u32 = 512;
@@ -658,6 +663,12 @@ pub struct BodyDefinition {
     /// ★ THE PER-COLUMN ROUGHNESS FACTOR's words (slice 8a stage 3): the placeholder's slow octave,
     /// the factor's floor, and the index the FINE band begins at. Every column pass reads them.
     pub(crate) roughness: Roughness,
+    /// ★ THE SLOPE REFERENCE (2026-09-21): the macro slope at which a column is FULLY ROUGH, at the
+    /// noise's fraction bits — the first fine octave's own RMS slope. A column whose SOLVED field is
+    /// this steep keeps its fine octaves whole, whatever the placeholder noise says.
+    pub(crate) slope_ref: Gi,
+    /// `floor(2^SLOPE_RECIP_BITS / slope_ref)`: the share's one divide, done once per body.
+    pub(crate) slope_ref_recip: Gi,
     /// ★ THE CAP-ROCK BENCH's words (slice 8a stage 4): the datum radius, the bed spacing and its
     /// two reciprocals. The `strength` member carries rung 0's, and [`BodyDefinition::terrace_at`]
     /// swaps in the rung's own from the row below.
@@ -888,6 +899,21 @@ impl BodyDefinition {
         self.roughness.first_fine.raw() as usize
     }
 
+    /// ★ THE SLOPE REFERENCE, at the noise's fraction bits (2026-09-21): the macro slope at which a
+    /// column is fully rough — the first fine octave's own RMS slope, `S_PEAK · spectrum_base`. The
+    /// instrument prints it; [`crate::artifact::slope_share`] divides by it.
+    #[must_use]
+    pub const fn slope_ref(&self) -> Gi {
+        self.slope_ref
+    }
+
+    /// The slope reference's reciprocal at [`SLOPE_RECIP_BITS`], so a column's share is one two-word
+    /// product and no column divides.
+    #[must_use]
+    pub const fn slope_ref_recip(&self) -> Gi {
+        self.slope_ref_recip
+    }
+
     /// The cell-count reciprocal of a rung: what a direction needs instead of a divide. A rung past
     /// the body's own reads the top rung's.
     #[must_use]
@@ -963,6 +989,26 @@ impl BodyDefinition {
         // already carries, so not one kernel line changes and the card pays nothing for it.
         let first_fine = first_fine_octave(&waves, count);
         let s_peak = spectrum_peak(first_fine, count);
+        // ★ THE SLOPE REFERENCE (2026-09-21, the owner's stand over the belt): the macro slope at
+        // which a column is FULLY ROUGH — the RMS slope of the body's FIRST FINE OCTAVE,
+        // `s(o) = S_PEAK · spectrum_base(o)`, which is the same number `spectrum_amplitude_m`
+        // divides by the wave to get an amplitude (`a = s · λ / τ`, so `s = a · τ / λ`).
+        //
+        // WHY THAT OCTAVE. The first fine octave is the coarsest wave the noise still owns — its
+        // wavelength sits just under a macro node ([`FINE_ABOVE_M`]), which is exactly the scale the
+        // solved field `Z` is measured over. So a solved field as steep as it at the node scale is a
+        // RANGE and keeps its fine octaves whole, and a flat one is a PLAIN. No number is drawn and
+        // none is typed: the reference is the spectrum's own (ruling T9), and both hosts derive it
+        // from the seed, so nothing crosses the wire for it (SL6).
+        //
+        // NO NEW DRAW: `octave_rng` is not read here, so every later draw reads the stream at the
+        // position it read before, and the octave pins below do not move.
+        //
+        // NO GUARD EITHER: every table HAS a fine octave. The loop above halves the wavelength until
+        // it is at or under `SHORT_WAVE_M`, and the compile-time assertion `2 · SHORT_WAVE_M <
+        // FINE_ABOVE_M` proves the last wave stands under the fine threshold — which is what
+        // `spectrum_peak` above already stands on.
+        let slope_ref = share_of(s_peak * spectrum_base(first_fine));
         let mut amplitudes_m = [Gf::ZERO; OCTAVES];
         let mut fine_sum_m = Gf::ZERO;
         let mut o = 0;
@@ -1128,14 +1174,19 @@ impl BodyDefinition {
         //   * the SPACING is DERIVED from the body's own soft bed ([`BEDS_PER_SPACING`]);
         //   * the DATUM stands under the deepest surface the body can reach, so the bed index is
         //     never negative and the reciprocal's truncation IS the floor the kernel needs;
-        //   * the PHASE is the only draw, from the bench's own salt;
+        //   * the PHASE and the HARDNESS SEED are the only draws, from the bench's own salt;
         //   * the STRENGTH is SOLVED from the ladder, below.
+        // ★ THE HARDNESS SEED is a SEED IDENTITY DRAW under ruling T9 — WHICH beds are hard, like
+        // the body's tilt, and no physical number is drawn. It is read per bed inside the kernel
+        // ([`vd_recipe::terrace::bed_hardness`]), so nothing about the beds crosses a lane.
         let mut bench_rng = SplitMix64::new(child_seed(seed, salt::BENCH, 0));
         let spacing_m = BEDS_PER_SPACING * u64::from(strata.sediment_m);
         let spacing_steps = spacing_m as i64 * STEPS_PER_M;
         // The half spacing is EXACT: a metre is 128 gap steps, so the half is a shift.
         let half_spacing_steps = spacing_m as i64 * (STEPS_PER_M >> 1);
         let phase_steps = bench_rng.range_u64(0, spacing_steps as u64) as i64;
+        // Drawn AFTER the phase, so the phase every landed picture stands on does not move.
+        let hardness_seed = bench_rng.next_u64();
         let deepest_steps = Gi::new(rounded(amplitude_sum_m * Gf::from_i64(STEPS_PER_M)) + 1);
         let datum_steps = radius_steps - deepest_steps - Gi::new(phase_steps);
 
@@ -1208,7 +1259,8 @@ impl BodyDefinition {
             spacing_recip: Gi::new(recip_pow2(spacing_steps as u64, TERRACE_RECIP_BITS) as i64),
             half_recip: Gi::new(recip_pow2(half_spacing_steps as u64, TERRACE_RECIP_BITS) as i64),
             strength: strength_at[0],
-            pad: [Gi::ZERO; 3],
+            hardness_seed: Gi::new(hardness_seed as i64),
+            pad: [Gi::ZERO; 2],
         };
 
         // ★ THE BAND IS SIZED ON THE SUM OF DRAWN AMPLITUDES (slice 8a, stage 1, §2.6), not on
@@ -1257,6 +1309,14 @@ impl BodyDefinition {
             alias_at: rung_octaves.alias,
             cells_per_wave_at: rung_octaves.cells_per_wave,
             roughness,
+            slope_ref,
+            // ★ ROUNDED UP BY ONE UNIT, so a column AT the reference is FULLY rough and not two
+            // units short of it: the divide floors, and a share that could never reach one would
+            // leave a sliver of the fine octaves off on every range. The overshoot it buys is one
+            // part in 2⁴⁷ of the share.
+            slope_ref_recip: Gi::new(
+                recip_pow2(slope_ref.raw() as u64, SLOPE_RECIP_BITS) as i64 + 1,
+            ),
             terrace,
             terrace_round,
             strength_at,
@@ -1309,6 +1369,9 @@ impl BodyDefinition {
             radius: self.radius,
             octave_count: Gi::new(self.octaves_at(rung).len() as i64),
             key_face: Gi::new(i64::from(key_face.index())),
+            // ★ THE SEA THE SHORE LAW HOLDS AGAINST (2026-09-21): the body's own, ZERO for none —
+            // never the biome's datum, which is the ladder radius on a dry body.
+            sea_radius: self.sea_radius,
             biome: self.biome_charter(),
             roughness: self.roughness,
             terrace: self.terrace_at(rung),
@@ -1851,6 +1914,66 @@ mod tests {
         }
     }
 
+    /// ★ THE SLOPE REFERENCE IS THE FIRST FINE OCTAVE'S OWN SLOPE (2026-09-21, the owner's stand
+    /// over the belt). The body states one number — the macro slope at which a column is fully rough
+    /// — and the test READS IT BACK OFF THE TABLE: the first fine octave's amplitude times a whole
+    /// turn over its wavelength, which is the slope `spectrum_amplitude_m` divided by. It could fail
+    /// three ways: the reference taken at the wrong octave, the reference taken as an amplitude
+    /// rather than a slope, and a reciprocal that does not invert it.
+    ///
+    /// It also states the CEILING: the reference never stands over the angle of repose, which is
+    /// what keeps the two squares of the share's root under a word (`artifact::slope_share`).
+    ///
+    /// RED before 2026-09-21: `slope_ref` did not exist and a mountain belt read a craton's factor.
+    ///
+    /// **Example.** The home planet's first fine octave is the 25 km wave. Its slope is 0.125, so a
+    /// solved field that climbs 1 000 m across one 8 192 m macro node stands at 0.98 of the
+    /// reference and keeps nearly all of its fine octaves.
+    #[test]
+    fn the_slope_reference_is_the_first_fine_octaves_own_slope() {
+        let m = home();
+        let r = m.radius_m();
+        let live = m.octaves_at(0);
+        let first_fine = m.first_fine();
+        assert_eq!(first_fine, 4, "the home planet's fine band");
+        let lambda = r / octave_frequency(&live[first_fine]);
+        let want = octave_amplitude_m(&live[first_fine]) * std::f64::consts::TAU / lambda;
+        let got = crate::units::share_of_q28(m.slope_ref());
+        assert!(
+            (got - want).abs() < 1.0e-4,
+            "the slope reference {got} against the table's own {want}"
+        );
+        // The ceiling: the peak's solve makes the fine slopes' root sum of squares the tangent of
+        // the angle of repose, so ONE octave's slope can never stand over it.
+        assert!(
+            want <= TALUS_RMS * TAN_REPOSE,
+            "the reference {want} stands over the angle of repose"
+        );
+        // The reciprocal inverts it: reference × reciprocal is one at the reciprocal's own bits.
+        let one = m
+            .slope_ref()
+            .mul_shr(m.slope_ref_recip(), SLOPE_RECIP_BITS - NOISE_BITS);
+        assert!(
+            (crate::units::share_of_q28(one) - 1.0).abs() < 1.0e-6,
+            "the reciprocal does not invert the reference: {one:?}"
+        );
+        // A body whose whole table is FINE still states a reference — its own first octave's.
+        let rock = BodyDefinition::from_seed(5, 3_000.0, ROCK_3KM_FACTS).expect("a rock");
+        assert_eq!(rock.first_fine(), 0, "the rock's whole table is fine");
+        let rock_lambda = rock.radius_m() / octave_frequency(&rock.octaves_at(0)[0]);
+        let rock_want =
+            octave_amplitude_m(&rock.octaves_at(0)[0]) * std::f64::consts::TAU / rock_lambda;
+        let rock_got = crate::units::share_of_q28(rock.slope_ref());
+        // The rock's spectrum is CONSTRAINED (the `lesser` arm above), so its octave stands UNDER
+        // the reference the unconstrained spectrum states; the reference is the spectrum's, never
+        // the shrunken table's.
+        assert!(
+            rock_got > rock_want,
+            "the rock's reference {rock_got} against its constrained octave {rock_want}"
+        );
+        assert!(rock_got > 0.0, "and it is a real slope");
+    }
+
     /// The direction of a face position, through the recipe's own bend: the cell nearest `(a, b)`
     /// of a face at rung 0 (a test names positions, the recipe names cells).
     fn dir(face: Face, a: f64, b: f64) -> [Gi; 3] {
@@ -2079,6 +2202,7 @@ mod tests {
         let mut worst_pull = 0.0f64;
         let mut nearer = 0;
         let mut farther = 0;
+        let mut untouched = 0;
         let mut same_height: Vec<(f64, f64)> = Vec::new();
         let mut i = 0u32;
         while i < 600 {
@@ -2107,6 +2231,7 @@ mod tests {
             assert!(after <= before + 1e-6, "column {i}: {before} -> {after}");
             nearer += i32::from(after < before - 1e-6);
             farther += i32::from(after > before + 1e-6);
+            untouched += i32::from(crate::height::height(&m, d, 0) == raw_q);
             same_height.push((raw, got - raw));
             i += 1;
         }
@@ -2114,7 +2239,18 @@ mod tests {
             worst_pull > pull_bound * 0.5,
             "the pull reaches its bound: {worst_pull} of {pull_bound}"
         );
-        assert!(nearer > 500, "columns pulled toward a bed top: {nearer}");
+        // ★ EACH BED HAS ITS OWN HARDNESS (slice 8d step 1). Before it, every one of the 600
+        // columns was pulled, which is the contour stripe on every slope. Now a real share of them
+        // stand at a SOFT bed top and are not moved by one word, and the rest are pulled toward a
+        // HARD one. Both counts could fail, and the two together are the law.
+        assert!(
+            nearer > 200,
+            "columns pulled toward a hard bed top: {nearer}"
+        );
+        assert!(
+            untouched > 200,
+            "columns standing at a soft bed top, not moved by one word: {untouched}"
+        );
         assert_eq!(farther, 0, "and none pushed away");
         // (5) THE BENCH READS THE RADIUS AND NOTHING ELSE: two columns of the same raw height are
         // moved by the same amount, whatever face they stand on.
@@ -2144,6 +2280,57 @@ mod tests {
         );
     }
 
+    /// ★ FAILING FIRST (slice 8d step 1): ON THE HOME PLANET, HALF THE BED TOPS CAP AND HALF DO
+    /// NOT. The share is the EVEN SPLIT `vd_recipe::terrace::CAP_THRESHOLD` states — an assumption
+    /// named as one, because the reference gives two shares that disagree by a factor of thirty
+    /// (the constant's own note derives both). The tolerance is the draw's own: over a thousand
+    /// beds an even split has a standard deviation of 15.8, so four of them is 63 beds.
+    ///
+    /// Three statements, each of which could fail. (1) The share stands at a half. (2) A soft bed
+    /// top moves a column standing at it by NOTHING — the word comes back unchanged. (3) The
+    /// hardest bed of the thousand reaches the body's whole strength, so the bench did not
+    /// disappear; before this step every one of the thousand pulled at full strength.
+    #[test]
+    fn half_the_home_planets_bed_tops_cap_and_half_pull_nothing() {
+        let m = home();
+        let seed = m.terrace.hardness_seed.raw() as u64;
+        let mut caps = 0i32;
+        let mut hardest = 0.0f64;
+        let mut bed = 0i64;
+        while bed < 1000 {
+            let hardness = vd_recipe::terrace::bed_hardness(seed, vd_recipe::Gi::new(bed));
+            let share = crate::units::share_of_q28(hardness);
+            caps += i32::from(hardness > vd_recipe::Gi::ZERO);
+            if share > hardest {
+                hardest = share;
+            }
+            bed += 1;
+        }
+        // (1) THE EVEN SPLIT, four standard deviations wide.
+        assert!(caps > 437, "the home planet's cap share: {caps} of 1000");
+        assert!(caps < 563, "the home planet's cap share: {caps} of 1000");
+        // (3) AND THE DRAW REACHES THE TOP, so a real bench still stands.
+        assert!(hardest > 0.99, "the hardest of a thousand beds: {hardest}");
+        // (2) A COLUMN A QUARTER OF A BED UNDER A SOFT TOP IS NOT MOVED BY ONE WORD.
+        let spacing_m = m.bed_spacing_m();
+        let datum_m = metres_of_q28(m.terrace.datum);
+        let t = m.terrace_at(0);
+        let mut soft = 0i32;
+        let mut bed = 0i64;
+        while bed < 1000 {
+            let hardness = vd_recipe::terrace::bed_hardness(seed, vd_recipe::Gi::new(bed));
+            let h = crate::units::q28_of_metres(datum_m + ((bed as f64) - 0.25) * spacing_m);
+            let moved = vd_recipe::terrace::terrace(&t, h) != h;
+            assert!(
+                moved == (hardness > vd_recipe::Gi::ZERO),
+                "bed {bed}: moved {moved}, hardness {hardness:?}"
+            );
+            soft += i32::from(!moved);
+            bed += 1;
+        }
+        assert_eq!(soft, 1000 - caps, "every soft top pulled nothing");
+    }
+
     /// ★ FAILING FIRST (slice 8a stage 4): THE BENCH AMPLIFIES BY THE BODY'S OWN LIPSCHITZ WORD, and
     /// that word is the QUINTIC's `1 + (7/9)·q` and NOT `04_detail_rungs.md` §4.5's cubic
     /// `1 + 0.6875·q`. A DENSE SCAN of the terrace's own first difference over four whole beds of
@@ -2152,17 +2339,47 @@ mod tests {
     /// RED if the bound is copied from `04`: the scan measures 1.4358 where the cubic promises
     /// 1.3852, so a bound taken from `04` stands 3.7 % SHORT — and a short bound on the column span
     /// is a chunk missed, which is a hole.
+    ///
+    /// ★ THE SCAN NOW PICKS THE HARDEST BED THE SURFACE CAN REACH (slice 8d step 1). The body's
+    /// word is its CEILING, and only a bed whose hardness is near one reaches it; a scan of four
+    /// beds taken at random reads whatever those four drew, which on the home planet is 1.23 and
+    /// proves nothing about the ceiling. So the test finds the hardest top of the beds the body's
+    /// own relief can stand on and scans THAT one.
     #[test]
     fn the_bench_amplifies_by_the_bodys_own_lipschitz_word_and_not_the_cubics() {
         let m = home();
         let q = m.terrace_strength(0);
         let word = crate::units::share_of_q28(m.lip(0));
         let t = m.terrace_at(0);
-        let base = m.radius_m();
+        let spacing_m = m.bed_spacing_m();
+        let datum_m = metres_of_q28(m.terrace.datum);
+        // The beds the body's own surface can reach: the datum stands under the deepest surface,
+        // so the whole band is twice the drawn amplitude sum plus the bench's own phase.
+        let mut amplitude_sum_m = 0.0;
+        for o in m.octaves_at(0) {
+            amplitude_sum_m += octave_amplitude_m(o);
+        }
+        let beds = ((m.radius_m() + amplitude_sum_m - datum_m) / spacing_m) as i64;
+        let seed = m.terrace.hardness_seed.raw() as u64;
+        let mut hardest = vd_recipe::Gi::ZERO;
+        let mut hardest_bed = 0i64;
+        let mut bed = 0i64;
+        while bed <= beds {
+            let hardness = vd_recipe::terrace::bed_hardness(seed, vd_recipe::Gi::new(bed));
+            if hardness > hardest {
+                hardest = hardness;
+                hardest_bed = bed;
+            }
+            bed += 1;
+        }
+        let share = crate::units::share_of_q28(hardest);
+        assert!(share > 0.9, "the hardest bed of {beds}: {share}");
+        // That bed top's own half spacing on each side: the extreme stands at two thirds of it.
+        let base = datum_m + ((hardest_bed as f64) - 0.5) * spacing_m;
         let step_m = 1.0 / (STEPS_PER_M as f64);
         let mut worst = 0.0f64;
         let mut i = 0i64;
-        while i < 4 * 138 * STEPS_PER_M {
+        while i < 138 * STEPS_PER_M {
             let h = crate::units::q28_of_metres(base + (i as f64) * step_m);
             let next = crate::units::q28_of_metres(base + ((i + 1) as f64) * step_m);
             let a = metres_of_q28(vd_recipe::terrace::terrace(&t, h));
@@ -2173,7 +2390,9 @@ mod tests {
             }
             i += 1;
         }
-        let cubic = 1.0 + 0.6875 * q;
+        // The cubic AT THIS BED'S OWN STRENGTH, so the comparison is the same one `04` makes.
+        let cubic = 1.0 + 0.6875 * q * share;
+        let bed_word = 1.0 + (7.0 / 9.0) * q * share;
         // The scan reads the INTEGER terrace, whose falloff is whole words; the body's own slack
         // says how far that can stand from the real shape at one column, and a secant over one gap
         // step reads twice it (`terrace_slack`, and the derivation at `TERRACE_FADE_ROUND_UNITS`).
@@ -2187,8 +2406,8 @@ mod tests {
             "the cubic's constant {cubic} is BROKEN by {worst}"
         );
         assert!(
-            (worst - word).abs() < 0.01,
-            "the word is tight: {word} against {worst}"
+            (worst - bed_word).abs() < 0.01,
+            "the bed's own word is tight: {bed_word} against {worst}"
         );
         // And the word is what the COLUMN BOUND multiplies by, at every rung.
         let mut rung = 0u8;

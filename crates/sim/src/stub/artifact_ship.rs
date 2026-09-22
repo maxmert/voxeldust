@@ -40,7 +40,7 @@ use super::{Dots, Placements, RealmAuthority, RealmRegions, StubConfig, StubStat
 use crate::io::{Bytes, Durability, MsgClass};
 use crate::runtime::OutboundBox;
 
-/// ★ THE PACE: how many tiles one tick ships to one session — four of 36 KB is 144 KB a tick, 2.9
+/// ★ THE PACE: how many tiles one tick ships to one session — four of 40 KB is 160 KB a tick, 3.2
 /// MB a second at twenty ticks, which a reliable link carries without starving the lane the login
 /// shares (the sky's own lesson, 2026-08-29). A stated pace, never a cap: every tile arrives.
 pub const TILES_PER_TICK: usize = 4;
@@ -53,8 +53,11 @@ pub trait TileSource: Send + Sync {
     fn digest(&self) -> [u64; 2];
     /// The head, encoded as the wire's `BulkMsg::ArtifactHead`.
     fn head(&self) -> Bytes;
-    /// The pyramid's parts in order, each encoded as `BulkMsg::ArtifactPyramid`.
-    fn pyramid_parts(&self) -> Vec<Bytes>;
+    /// ★ THE REALM'S PARTS in order, ONE LIST the sim pages through (2026-09-22, the coast mask):
+    /// the pyramid's parts first, each encoded as `BulkMsg::ArtifactPyramid`, then the coast
+    /// mask's, each encoded as `BulkMsg::ArtifactCoast`. The sim never names a shape: it ships
+    /// the list, paced, and the head says how many of each to expect.
+    fn artifact_parts(&self) -> Vec<Bytes>;
     /// The tiles an occupant standing `radial_m` from the realm's centre along the unit direction
     /// `dir` (in the realm's own frame) needs, in a stated order: at least those within its
     /// interest side `interest_m`, and as far as the source's own reach rule says the fine rungs
@@ -186,7 +189,7 @@ pub(crate) fn emit_artifact(
             done.push(*gateway);
             continue;
         }
-        let parts = parts.get_or_insert_with(|| source.pyramid_parts());
+        let parts = parts.get_or_insert_with(|| source.artifact_parts());
         if !want.head_sent {
             push_bulk(
                 &mut outbox,
@@ -285,7 +288,18 @@ pub(crate) fn emit_artifact(
             continue; // an occupant at the very centre stands under no tile
         }
         let mut sent = 0usize;
-        for tile in source.tiles_under(dir.to_array(), radial.length(), radius_m) {
+        let named = source.tiles_under(dir.to_array(), radial.length(), radius_m);
+        if record.tiles.is_empty() {
+            tracing::info!(
+                session = ?session,
+                gateway = ?dot.gateway,
+                radial_m = radial.length(),
+                interest_m = radius_m,
+                named = named.len(),
+                "the occupant's tiles: the first tick this session is served"
+            );
+        }
+        for tile in named {
             if sent >= TILES_PER_TICK {
                 break;
             }
@@ -303,6 +317,9 @@ pub(crate) fn emit_artifact(
                 bytes,
             );
             record.tiles.insert(tile);
+            if record.tiles.len() <= 16 {
+                tracing::info!(session = ?session, ?tile, sent = record.tiles.len(), "the occupant's tile shipped");
+            }
             stats.artifact_tiles_sent += 1;
             sent += 1;
         }

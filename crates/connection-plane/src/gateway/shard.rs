@@ -115,6 +115,8 @@ pub(crate) fn on_shard_control(
                 let authority = session.hot.route.load().authority;
                 store_route(&session.hot, authority, realm_fence, None);
                 session.phase = SessionPhase::Active { entity };
+                // ★ WHAT THE SHARD SENT WHILE THE SESSION ACTIVATED goes out now (2026-09-22).
+                flush_held_bulk(session, stats, outbox);
                 // THE WINDOW LANE (Slice B): a STATIC login's lineage starts at the attach
                 // frame's realm (a dynamic login already carries its descent's full lineage —
                 // never overwritten here).
@@ -416,7 +418,30 @@ pub(crate) fn on_shard_control(
 /// ★ THE RELAY of one shard's bulk bytes to the sessions it named: each Active session behind this
 /// gateway whose sub on `from` is at or past the shard's fence, and whose negotiated minor knows
 /// the arm, gets the bytes as one `ArtifactPart`; every other name is counted, never guessed at.
-fn relay_bulk(
+/// ★ HOW MANY OF A SHARD'S BULK PARTS A SESSION HOLDS WHILE IT ACTIVATES (2026-09-22): the tiles
+/// under an occupant's boots are at most nine (`tile_reach_m`, measured over 1 158 bodies) and a
+/// beat of pyramid parts is thirty-two; sixty-four holds both with room. Past it the OLDEST is
+/// dropped and counted — a session that never activates is closed by its own TTL, so the hold is
+/// bounded in time as well as in bytes.
+pub(crate) const HELD_BULK_CAP: usize = 64;
+
+/// ★ THE HELD BULK DELIVERED on the session's activation, in the order it arrived.
+pub(crate) fn flush_held_bulk(
+    session: &mut super::session::Session,
+    stats: &mut GatewayStats,
+    outbox: &mut OutboundBox,
+) {
+    for bytes in std::mem::take(&mut session.held_bulk) {
+        push_control(
+            outbox,
+            session.client,
+            &ServerControlMsg::ArtifactPart { bytes },
+        );
+        stats.artifact_parts_relayed += 1;
+    }
+}
+
+pub(crate) fn relay_bulk(
     from: NodeId,
     realm_fence: Fence,
     named: &[SessionId],
@@ -430,12 +455,23 @@ fn relay_bulk(
         return;
     }
     for session_id in named {
-        let Some(session) = sessions.by_session.get(session_id) else {
+        let Some(session) = sessions.by_session.get_mut(session_id) else {
             stats.bulk_for_unrouted += 1;
+            tracing::warn!(
+                ?session_id,
+                ?from,
+                "a shard's bulk names a session this gateway does not hold"
+            );
             continue;
         };
         if !matches!(session.phase, SessionPhase::Active { .. }) {
-            stats.bulk_for_unrouted += 1;
+            // ★ HELD, NOT DROPPED: the shard already counts these bytes as sent.
+            if session.held_bulk.len() >= HELD_BULK_CAP {
+                session.held_bulk.remove(0);
+                stats.bulk_for_unrouted += 1;
+            }
+            session.held_bulk.push(bytes.clone());
+            stats.bulk_for_held += 1;
             continue;
         }
         let stale = session
@@ -446,10 +482,22 @@ fn relay_bulk(
             .is_some_and(|entry| realm_fence.is_stale_against(entry.accepted));
         if stale {
             stats.bulk_for_unrouted += 1;
+            tracing::warn!(
+                ?session_id,
+                ?from,
+                ?realm_fence,
+                "a shard's bulk carries a stale realm fence for the session"
+            );
             continue;
         }
         if session.negotiated_minor < 32 {
             stats.bulk_for_unrouted += 1;
+            tracing::warn!(
+                ?session_id,
+                ?from,
+                minor = session.negotiated_minor,
+                "a shard's bulk for a session under minor 32"
+            );
             continue;
         }
         push_control(

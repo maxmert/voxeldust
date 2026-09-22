@@ -333,7 +333,20 @@ pub const PROTO_MAJOR: u16 = 1;
 /// peer shipped it: the head is one shape from the minor's first day out. THE FAR-VIEW SHIP (the
 /// same day, SL3 — a realm draws itself, whoever looks): `GatewayToShard::ArtifactWant` (disc 8) and
 /// `BulkAudience::Realm` (disc 2), both inside minor 32 for the same reason.
-pub const PROTO_MINOR: u16 = 32;
+/// **33** — THE PYRAMID'S WATER WORD (owner-approved 2026-09-21, the owner's order after the coast flight): a
+/// `BulkMsg::ArtifactPyramid` part carries `water_m` beside `z_m`, one word per height, so a
+/// highland lake keeps its level at every rung of the far view instead of appearing on approach.
+/// A RESHAPE of an arm that minor 32 shipped, so [`PROTO_MINOR_FLOOR`] moves to 33: a minor-32
+/// client is refused, never served parts it would mis-frame.
+/// **34** — THE COAST MASK (owner-approved 2026-09-22, ruling W10; the owner, from 1 400 km: "during
+/// flight the shores changes again all the time"): `BulkMsg::ArtifactHead` carries `coast_parts`,
+/// and a new `BulkMsg::ArtifactCoast` (disc 6) ships the mask's bits in parts of at most 32 KiB.
+/// The mask is one bit per FINE macro node, set where the node stands at or under the sea, so a
+/// client reads the water's SIDE from the fine row's own word at every rung and never from a
+/// pyramid level's mean. A FIELD APPEND to an arm minor 33 shipped, which postcard cannot make
+/// additive, so [`PROTO_MINOR_FLOOR`] moves to 34: a minor-33 client is refused, never served a
+/// head it would mis-frame.
+pub const PROTO_MINOR: u16 = 34;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -358,7 +371,10 @@ pub const PROTO_MINOR: u16 = 32;
 /// reads the bytes after it as though it were there, so the peer cannot be served at all. The
 /// owner's standing posture on this class (ruling D, 2026-08-19) is the loud refusal rather
 /// than a filter: there are no deployed clients to protect.
-pub const PROTO_MINOR_FLOOR: u16 = 24;
+/// **34** (the current floor): the coast mask's `coast_parts` field inside `BulkMsg::ArtifactHead`
+/// — a field append to an arm minor 33 already shipped, which postcard reads positionally, so a
+/// minor-33 peer would decode the head's bytes one field out. The ledger entry above names it.
+pub const PROTO_MINOR_FLOOR: u16 = 34;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtoVersion {
@@ -514,7 +530,7 @@ mod tests {
         // hunting a version generation mismatch when the real answer is "your client is stale".
         assert_eq!(
             ours.refusal_reason(below),
-            "protocol minor below the floor (24): the scene is server-composed from v1.24"
+            "protocol minor below the floor (34): the scene is server-composed from v1.34"
         );
         assert_eq!(
             ours.refusal_reason(ProtoVersion::speaking(PROTO_MAJOR + 1, PROTO_MINOR)),
@@ -591,8 +607,10 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 32,
-            "minor 32 is THE ARTIFACT SHIP (owner ruling 2026-09-19, slice 8c C4c): ArtifactHead (disc 3), \
+            PROTO_MINOR, 34,
+            "minor 34 is THE COAST MASK (owner-approved 2026-09-22, ruling W10): ArtifactHead carries coast_parts and ArtifactCoast (disc 6) ships the mask's bits, a field append, the floor at 34; \
+             minor 33 is THE PYRAMID'S WATER WORD (owner-approved 2026-09-21): ArtifactPyramid carries water_m beside z_m, a reshape, the floor at 33; \
+             minor 32 is THE ARTIFACT SHIP (owner ruling 2026-09-19, slice 8c C4c): ArtifactHead (disc 3), \
              ArtifactPyramid (disc 4), ArtifactTile (disc 5) on BulkMsg, ArtifactPart (disc 19) on \
              ServerControlMsg, ArtifactHeld (disc 8) on ClientControlMsg; \
              minor 31 is THE VOXEL WIRE PLANT (owner-approved 2026-09-07, ruling V8): every voxel shape \
@@ -687,8 +705,12 @@ mod tests {
              minor 2 OwnEntity, minor 1 UniverseRate"
         );
         assert_eq!(
-            PROTO_MINOR_FLOOR, 24,
-            "the floor tracks the last break a peer cannot be served across, and minor 24 IS one \
+            PROTO_MINOR_FLOOR, 34,
+            "the floor tracks the last break a peer cannot be served across, and minor 34 IS one \
+             (owner-approved 2026-09-22, ruling W10): ArtifactHead gained coast_parts in place, so a \
+             minor-33 peer mis-frames every field after the levels — a change of the same kind as \
+             minor 33 (ArtifactPyramid gained water_m) and minor 24, both named in the ledger. \
+             Minor 24 was one of the same kind \
              (owner-approved 2026-09-02, R1/R4): HopRow keeps its bytes and reverses its meaning — \
              the child's placement in the author's frame where the author's frame in the child's \
              used to be — so a peer on either side of the line composes a WRONG picture with no \
@@ -701,7 +723,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.32");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.34");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is

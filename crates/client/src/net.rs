@@ -429,10 +429,15 @@ impl ClientState {
             ServerControlMsg::ArtifactPart { bytes } => {
                 match postcard::from_bytes::<BulkMsg>(&bytes) {
                     Ok(msg) => {
-                        if let ArtifactIngest::PyramidWhole { realm, digest } =
-                            self.artifacts.accept(msg)
-                        {
-                            self.pending_artifact_held.push((realm, digest));
+                        // ★ THE ARTIFACT IS WHOLE when the pyramid AND the coast mask are here
+                        // (2026-09-22, ruling W10): either the last pyramid part or the last coast
+                        // part may be the one that finishes it, so both say so.
+                        match self.artifacts.accept(msg) {
+                            ArtifactIngest::PyramidWhole { realm, digest }
+                            | ArtifactIngest::ArtifactWhole { realm, digest } => {
+                                self.pending_artifact_held.push((realm, digest));
+                            }
+                            _ => {}
                         }
                     }
                     Err(_) => self.decode_errors += 1,
@@ -884,6 +889,8 @@ impl ClientState {
                         pos: sanitize_vec3(self.view.world_pos(&pose)),
                         orient: sanitize_quat(pose.orient),
                         authoritative_sub: sub.0,
+                        cell: pose.cell.to_array(),
+                        frame: format!("{:?}", pose.frame),
                     })
                     .collect()
             })
@@ -911,6 +918,8 @@ impl ClientState {
                 // The parent's photometric datum, verbatim — what a pixel gate sizes the point
                 // sprite's rectangle from, through the SAME Tier-A pair the renderer scales by.
                 luma: b.luma,
+                surface: b.surface.is_some(),
+                tier: format!("{:?}", b.tier),
                 // THE SAME reduction the renderer draws with, through the ONE chokepoint — not a
                 // hand-rolled subtraction. This line used to spell `b.center_offset - origin.offset()`,
                 // which dropped the origin's COARSE half while `DevEntityRow.pos` twenty lines above
@@ -918,6 +927,7 @@ impl ClientState {
                 // a test asserts against: the "player rides its realm" gate reads THIS value, so it was
                 // effectively comparing the client to itself.
                 center: sanitize_vec3(b.draw_center()),
+                cell: b.center.cell().to_array(),
                 // The delivered facing, verbatim (the same four numbers the renderer turns the
                 // row's terrain by).
                 facing: sanitize_quat(vd_core::glam::DQuat::from_xyzw(
@@ -993,6 +1003,24 @@ impl ClientState {
                     .book()
                     .realms()
                     .map(|(r, c)| (format!("{r:?}"), c.whole()))
+                    .collect(),
+                tiles_held: self
+                    .artifacts
+                    .book()
+                    .realms()
+                    .flat_map(|(r, c)| {
+                        c.tile_ids()
+                            .map(move |(f, tx, ty)| (format!("{r:?}"), f, tx, ty))
+                    })
+                    .collect(),
+                // ★ THE COAST MASK, per realm (2026-09-22, ruling W10): a realm is listed once its
+                // mask is whole, so a flight can hold a crawling shoreline against it.
+                coast_held: self
+                    .artifacts
+                    .book()
+                    .realms()
+                    .filter(|(_, c)| c.coast_held())
+                    .map(|(r, _)| format!("{r:?}"))
                     .collect(),
             },
             sky: self
@@ -1548,6 +1576,7 @@ mod tests {
                 tiles_per_edge: artifact.tiles_per_edge(),
                 levels: artifact.pyramid.len() as u32,
                 sea_m: artifact.sea_m,
+                coast_parts: 0,
             }),
         );
         c.step(0.0);
@@ -1566,6 +1595,7 @@ mod tests {
                     part: 0,
                     parts: 1,
                     z_m: level.clone(),
+                    water_m: artifact.pyramid_water[k].clone(),
                 }),
             );
             c.step(0.0);
@@ -3362,6 +3392,7 @@ mod tests {
                     awaiting_artifact: 0,
                     artifact_rebuilds: 0,
                     awaiting_keys: Vec::new(),
+                    missing_tiles: vec![],
                     empty_chunks: 0,
                     empty_keys: Vec::new(),
                     hole_columns: 0,
@@ -3369,6 +3400,11 @@ mod tests {
                     margin_missing: 0,
                     stale_builds: 0,
                     lattice_edge: 0,
+                    eyes: vec![],
+                    eye_cell: [0, 0, 0],
+                    eye_offset_m: [0.0, 0.0, 0.0],
+                    eye_tier: String::new(),
+                    body_branches: vec![],
                     artifact_expected: None,
                     artifact_held: None,
                     lead_m: 0.0,

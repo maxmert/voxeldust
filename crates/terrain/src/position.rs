@@ -192,58 +192,136 @@ pub type WaterSheet = (Vec<[f64; 3]>, Vec<[f64; 3]>, Vec<[u32; 3]>);
 /// points a quad (a level is a quad's, not a column's), in METRES of the body's frame, with each
 /// point's unit radial, and two triangles a quad. Empty for a dry chunk. The client's mesh is the
 /// last step out of it (the floating origin, the single-precision cast).
+/// ★ THE SHEET UNDER THE LAND IS CUT WHERE IT CAN NEVER SHOW (2026-09-21, the owner: *"when we
+/// draw just the planet it is performant, but if water is drawn it becomes slower"* — MEASURED on
+/// the coast leg, two flights of one binary: the frame 33.8 ms with the sheet against 24.2 ms
+/// without, the opaque pass 22.5 ms against 16.3 ms, because the sea under EVERY cell doubled the
+/// triangles of every land chunk). A quad stays only where a corner's ground stands no higher
+/// than the water plus `hide`: the land's own morph toward the coarser rung, its sink under the
+/// finer one and a cell of placement, which is as far as the drawn land can ever move off its
+/// column's surface. Under that bound the sheet still reaches under the shore, so the shore stays
+/// the land's own crossing of one surface (the sea under every cell); past it the sheet is buried
+/// in every state the ladder can draw, and it is not built. A zero `hide` keeps the quads whose
+/// corners are wet; the largest word keeps every quad.
+///
+/// **Example.** A beach chunk at rung 4 keeps its sheet under the strand and forty metres inland,
+/// where the dunes can still morph down to it; a chunk 400 m up a hillside builds none.
+/// ★ THE SHEET IS ONE QUAD PER BLOCK WHERE THE WATER IS ONE LEVEL (2026-09-21, the second half of
+/// the cost): a flat sea needs no quad per cell. MEASURED on the coast eye's wanted set after the
+/// hide cut: 33 million sheet triangles against 40 million of land — an ocean chunk at rung 7 drew
+/// 7 688 triangles for a flat surface. Over each block of [`SHEET_BLOCK`] × [`SHEET_BLOCK`] cells
+/// whose corner columns all hold ONE level (the sea, or one lake) the sheet is ONE quad at that
+/// level, its four points the block's corners; a block whose corners disagree (a lake's edge, a
+/// pond) keeps a quad per cell, so nothing a cell decides is lost. The flat quad stands under the
+/// sphere by its sagitta — 0.3 m at rung 9 for an eight-cell block, 5 m at rung 11 where a cell is
+/// two kilometres — a shore step under a twentieth of a cell at the rungs it reaches.
+pub const SHEET_BLOCK: i32 = 8;
+
 #[must_use]
-pub fn water_sheet(samples: &SampleBox) -> WaterSheet {
-    let mut points = Vec::new();
-    let mut radials = Vec::new();
-    let mut triangles = Vec::new();
+pub fn water_sheet(samples: &SampleBox, hide: Gi) -> WaterSheet {
+    let mut sheet: WaterSheet = (Vec::new(), Vec::new(), Vec::new());
+    let edge = CHUNK_EDGE as i32;
+    // A corner's level: its own water word, or the body's sea under every cell.
+    let level_at = |col: usize| {
+        if samples.water[col] > samples.sea {
+            samples.water[col]
+        } else {
+            samples.sea
+        }
+    };
+    let mut b0 = 0i32;
+    while b0 < edge {
+        let bh = SHEET_BLOCK.min(edge - b0);
+        let mut a0 = 0i32;
+        while a0 < edge {
+            let bw = SHEET_BLOCK.min(edge - a0);
+            // The block's corner columns: one level everywhere, and the lowest ground.
+            let first = level_at(SampleBox::column_index(a0, b0));
+            let mut uniform = true;
+            let mut lowest = samples.surfaces[SampleBox::column_index(a0, b0)];
+            let mut b = b0;
+            while b <= b0 + bh {
+                let mut a = a0;
+                while a <= a0 + bw {
+                    let col = SampleBox::column_index(a, b);
+                    uniform &= level_at(col) == first;
+                    if samples.surfaces[col] < lowest {
+                        lowest = samples.surfaces[col];
+                    }
+                    a += 1;
+                }
+                b += 1;
+            }
+            if uniform {
+                if (first > Gi::ZERO) & (lowest <= first + hide) {
+                    push_quad(
+                        samples,
+                        &mut sheet,
+                        [(a0, b0), (a0 + bw, b0), (a0, b0 + bh), (a0 + bw, b0 + bh)],
+                        first,
+                    );
+                }
+            } else {
+                let mut b = b0;
+                while b < b0 + bh {
+                    let mut a = a0;
+                    while a < a0 + bw {
+                        let corners = [(a, b), (a + 1, b), (a, b + 1), (a + 1, b + 1)];
+                        let mut level = samples.sea;
+                        let mut low = samples.surfaces[SampleBox::column_index(a, b)];
+                        for (ca, cb) in corners {
+                            let col = SampleBox::column_index(ca, cb);
+                            if samples.water[col] > level {
+                                level = samples.water[col];
+                            }
+                            if samples.surfaces[col] < low {
+                                low = samples.surfaces[col];
+                            }
+                        }
+                        if (level > Gi::ZERO) & (low <= level + hide) {
+                            push_quad(samples, &mut sheet, corners, level);
+                        }
+                        a += 1;
+                    }
+                    b += 1;
+                }
+            }
+            a0 += bw;
+        }
+        b0 += bh;
+    }
+    sheet
+}
+
+/// One quad of the sheet: four points at `level` along the named corner columns, their unit
+/// radials, and two triangles.
+fn push_quad(samples: &SampleBox, sheet: &mut WaterSheet, corners: [(i32, i32); 4], level: Gi) {
     let unit = (1u64 << vd_recipe::bend::DIR_BITS) as f64;
     let steps = STEPS_PER_M as f64;
-    let mut b = 0i32;
-    while b < CHUNK_EDGE as i32 {
-        let mut a = 0i32;
-        while a < CHUNK_EDGE as i32 {
-            let corners = [
-                SampleBox::column_index(a, b),
-                SampleBox::column_index(a + 1, b),
-                SampleBox::column_index(a, b + 1),
-                SampleBox::column_index(a + 1, b + 1),
-            ];
-            let mut level = samples.sea;
-            for col in corners {
-                if samples.water[col] > level {
-                    level = samples.water[col];
-                }
-            }
-            if level > Gi::ZERO {
-                let base = points.len() as u32;
-                for col in corners {
-                    let dir = samples.dirs[col];
-                    let p = point_at(dir, level >> vd_recipe::cell::LENGTH_BITS);
-                    points.push([
-                        p[0].raw() as f64 / steps,
-                        p[1].raw() as f64 / steps,
-                        p[2].raw() as f64 / steps,
-                    ]);
-                    radials.push([
-                        dir[0].raw() as f64 / unit,
-                        dir[1].raw() as f64 / unit,
-                        dir[2].raw() as f64 / unit,
-                    ]);
-                }
-                triangles.push([base, base + 1, base + 3]);
-                triangles.push([base, base + 3, base + 2]);
-            }
-            a += 1;
-        }
-        b += 1;
+    let base = sheet.0.len() as u32;
+    for (a, b) in corners {
+        let dir = samples.dirs[SampleBox::column_index(a, b)];
+        let p = point_at(dir, level >> vd_recipe::cell::LENGTH_BITS);
+        sheet.0.push([
+            p[0].raw() as f64 / steps,
+            p[1].raw() as f64 / steps,
+            p[2].raw() as f64 / steps,
+        ]);
+        sheet.1.push([
+            dir[0].raw() as f64 / unit,
+            dir[1].raw() as f64 / unit,
+            dir[2].raw() as f64 / unit,
+        ]);
     }
-    (points, radials, triangles)
+    sheet.2.push([base, base + 1, base + 3]);
+    sheet.2.push([base, base + 3, base + 2]);
 }
 
 #[cfg(test)]
 mod water_sheet_tests {
     use super::*;
+    /// A hide bound past every ground: keeps every quad, as the sheet did before the bound.
+    const KEEP_ALL: Gi = Gi::new(i64::MAX >> 2);
     use crate::chunk::ChunkKey;
     use vd_seed::bend::Face;
 
@@ -262,11 +340,14 @@ mod water_sheet_tests {
         };
         let wet = moon.with_sea_m(Some(3_000));
         let bx = crate::lattice::sample_box(&wet, None, key).expect("a box");
-        let (points, radials, triangles) = water_sheet(&bx);
-        let quads = CHUNK_EDGE * CHUNK_EDGE;
-        assert_eq!(points.len(), quads * 4);
-        assert_eq!(radials.len(), quads * 4);
-        assert_eq!(triangles.len(), quads * 2);
+        let (points, radials, triangles) = water_sheet(&bx, KEEP_ALL);
+        // ★ ONE QUAD PER BLOCK over one flat sea: eight blocks an edge (seven of eight cells and
+        // one of six), never a quad per cell.
+        let blocks = (CHUNK_EDGE.div_ceil(SHEET_BLOCK as usize)).pow(2);
+        assert_eq!(blocks, 64);
+        assert_eq!(points.len(), blocks * 4);
+        assert_eq!(radials.len(), blocks * 4);
+        assert_eq!(triangles.len(), blocks * 2);
         let radius = wet.sea_radius_m();
         for (p, r) in points.iter().zip(&radials) {
             let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
@@ -278,10 +359,10 @@ mod water_sheet_tests {
         assert_eq!(triangles[0], [0, 1, 3]);
         assert_eq!(triangles[1], [0, 3, 2]);
         let dry = crate::lattice::sample_box(&moon, None, key).expect("a box");
-        assert_eq!(water_sheet(&dry).0.len(), 0);
+        assert_eq!(water_sheet(&dry, KEEP_ALL).0.len(), 0);
         let mut one = dry;
         one.water[SampleBox::column_index(0, 0)] = wet.sea_radius;
-        let (points, _, triangles) = water_sheet(&one);
+        let (points, _, triangles) = water_sheet(&one, KEEP_ALL);
         assert_eq!(points.len(), 4);
         assert_eq!(triangles.len(), 2);
         // ★ THE SEA UNDER EVERY CELL: on a body with a sea, columns whose rows are dry (the land)
@@ -291,12 +372,41 @@ mod water_sheet_tests {
         for w in &mut land.water {
             *w = Gi::ZERO;
         }
-        let (points, _, triangles) = water_sheet(&land);
-        assert_eq!(points.len(), quads * 4);
-        assert_eq!(triangles.len(), quads * 2);
+        let (points, _, triangles) = water_sheet(&land, KEEP_ALL);
+        assert_eq!(points.len(), blocks * 4);
+        assert_eq!(triangles.len(), blocks * 2);
+        // ★ THE SHEET IS CUT UNDER THE LAND: with no hide bound only the quads a corner's ground
+        // reaches down to the water survive; with a bound of a hundred metres those within a
+        // hundred metres over it; the land 3 km up the moon keeps none at all. MEASURED here on
+        // the box: the counts fall as the bound tightens and never rise.
+        let hundred = Gi::new(100 * STEPS_PER_M) << vd_recipe::cell::LENGTH_BITS;
+        let at_hundred = water_sheet(&land, hundred).2.len();
+        let at_zero = water_sheet(&land, Gi::ZERO).2.len();
+        assert!(at_hundred <= blocks * 2, "{at_hundred}");
+        assert!(at_zero <= at_hundred, "{at_zero} {at_hundred}");
+        // Some of this box's ground stands under the 3 km sea, so a corner reaches the water and a
+        // quad survives with no bound; a body whose sea stands 20 km under every column keeps
+        // nothing with no bound and every block with the largest one.
+        let sea = wet.sea_radius;
+        let lowest = land
+            .surfaces
+            .iter()
+            .copied()
+            .fold(KEEP_ALL, |m, s| if s < m { s } else { m });
+        assert!(lowest <= sea, "a corner of this box reaches the sea");
+        assert!(at_zero > 0, "{at_zero}");
+        let deep = moon.with_sea_m(Some(-20_000));
+        let mut under = crate::lattice::sample_box(&deep, None, key).expect("a box");
+        for w in &mut under.water {
+            *w = Gi::ZERO;
+        }
+        assert_eq!(water_sheet(&under, Gi::ZERO).2.len(), 0);
+        assert_eq!(water_sheet(&under, KEEP_ALL).2.len(), blocks * 2);
         let lake = wet.sea_radius + (Gi::new(50 * STEPS_PER_M) << vd_recipe::cell::LENGTH_BITS);
         land.water[SampleBox::column_index(0, 0)] = lake;
-        let (points, _, _) = water_sheet(&land);
+        let (points, _, triangles) = water_sheet(&land, KEEP_ALL);
+        // The lake's block keeps a quad per cell (64), the other 63 blocks one each.
+        assert_eq!(triangles.len(), 2 * (64 + 63));
         let len = (points[0][0] * points[0][0]
             + points[0][1] * points[0][1]
             + points[0][2] * points[0][2])

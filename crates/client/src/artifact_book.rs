@@ -41,6 +41,9 @@ pub struct ArtifactHead {
     pub levels: u32,
     /// The sea's level, whole metres over the ladder radius, or `i16::MIN` for a dry body (C5).
     pub sea_m: i16,
+    /// ★ HOW MANY COAST PARTS FOLLOW (2026-09-22, ruling W10): the parts of the realm's coast
+    /// mask. The cache is whole only when every one is here.
+    pub coast_parts: u32,
 }
 
 impl ArtifactHead {
@@ -80,24 +83,51 @@ pub struct ArtifactCache {
     /// Level `k` at index `k − 1`; `None` while its parts assemble.
     pyramid: Vec<Option<Arc<PyramidField>>>,
     tiles: Arc<TileCache>,
+    /// ★ THE COAST MASK (2026-09-22, ruling W10): one bit per FINE macro node, set where the node
+    /// stands at or under the sea; `None` while its parts assemble. Every pyramid level shares it
+    /// by pointer, so a far rung reads the water's side from the fine row's own word and the
+    /// shoreline stands in one place at every rung.
+    coast: Option<Arc<[u8]>>,
     /// Bumped on every accepted change, so a reader tells a changed cache from the one it read.
     pub epoch: u64,
 }
 
 impl ArtifactCache {
+    /// The tiles this cache holds, by id (2026-09-22, the dev state's listing).
+    pub fn tile_ids(&self) -> impl Iterator<Item = (u8, u32, u32)> + '_ {
+        self.tiles.tile_ids()
+    }
+
     fn new(head: ArtifactHead) -> ArtifactCache {
         ArtifactCache {
             head,
             pyramid: vec![None; head.levels as usize],
             tiles: Arc::new(TileCache::new(head.edge)),
+            coast: None,
             epoch: 1,
         }
     }
 
-    /// Whether every pyramid level is here: the far view is whole, and the client says so.
+    /// Whether every pyramid level AND the coast mask are here: the far view is whole, and the
+    /// client says so. A level without the mask draws a shoreline the next rung does not share,
+    /// which is the crawl the owner saw from 1 400 km, so the mask counts.
     #[must_use]
     pub fn whole(&self) -> bool {
-        self.pyramid.iter().all(Option::is_some)
+        self.pyramid.iter().all(Option::is_some) && self.coast_held()
+    }
+
+    /// Whether the coast mask is here. A head that announces NO part has no mask to wait for and
+    /// says yes at once — which no solved body does (every lattice has nodes), so this arm is the
+    /// stated answer for a head that states nothing, never a hole the cache hides.
+    #[must_use]
+    pub fn coast_held(&self) -> bool {
+        self.coast.is_some() || self.head.coast_parts == 0
+    }
+
+    /// The coast mask, to share by pointer; `None` while its parts assemble.
+    #[must_use]
+    pub fn coast(&self) -> Option<&Arc<[u8]>> {
+        self.coast.as_ref()
     }
 
     /// How many levels are here.
@@ -211,6 +241,16 @@ pub enum ArtifactIngest {
     PyramidWhole { realm: RealmId, digest: [u64; 2] },
     /// A tile kept.
     Tile,
+    /// A coast part kept; the mask is not whole yet.
+    CoastPart,
+    /// A coast part that made the mask whole: every level held is rebuilt with it. The pyramid is
+    /// still owed, so the client states nothing yet.
+    CoastWhole,
+    /// ★ A coast part that made the WHOLE ARTIFACT whole — the pyramid was already here (2026-09-22,
+    /// ruling W10). The client states `ArtifactHeld { realm, digest }`, exactly as it does when the
+    /// last pyramid part lands after the mask. The statement waits for BOTH, because the gateway
+    /// stops serving parts the moment it is made.
+    ArtifactWhole { realm: RealmId, digest: [u64; 2] },
     /// A tile parked until its realm's head arrives.
     Parked,
     /// A part or a tile for a realm whose head has not arrived: refused.
@@ -232,6 +272,9 @@ pub struct ArtifactCounters {
     pub levels_whole: u64,
     pub pyramids_whole: u64,
     pub tiles: u64,
+    /// Coast parts kept, and the masks made whole.
+    pub coast_parts: u64,
+    pub coasts_whole: u64,
     /// Tiles parked before their head, and the parked tiles dropped past the bound.
     pub parked: u64,
     pub parked_dropped: u64,
@@ -241,10 +284,17 @@ pub struct ArtifactCounters {
     pub not_artifact: u64,
 }
 
+/// The coast mask's parts, assembling: each part's bits, `None` for one not here.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CoastParts {
+    parts: Vec<Option<Vec<u8>>>,
+}
+
 /// One level's parts, assembling.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct LevelParts {
-    parts: Vec<Option<Vec<i16>>>,
+    /// Each part's heights and its water words (empty for a part that carries none).
+    parts: Vec<Option<(Vec<i16>, Vec<i16>)>>,
 }
 
 /// ★ THE RECEIVER: the shared book, the parts still assembling, the counters.
@@ -252,6 +302,8 @@ struct LevelParts {
 pub struct ArtifactReceiver {
     book: Arc<ArtifactBook>,
     assembling: BTreeMap<(RealmId, u32), LevelParts>,
+    /// The coast masks assembling, per realm (2026-09-22, ruling W10).
+    coasts: BTreeMap<RealmId, CoastParts>,
     /// ★ TILES THAT ARRIVED BEFORE THEIR HEAD (the far-view ship): the tiles come from the
     /// realm's shard on their own lane and the head from the gateway's cache on another, so a
     /// tile may land first. It is PARKED, bounded per realm, and applied when the head lands —
@@ -280,6 +332,7 @@ impl ArtifactReceiver {
             Arc::make_mut(&mut self.book).realms.remove(&realm);
         }
         self.assembling.retain(|(r, _), _| *r != realm);
+        self.coasts.remove(&realm);
         self.parked.remove(&realm);
     }
 
@@ -295,6 +348,7 @@ impl ArtifactReceiver {
                 tiles_per_edge,
                 levels,
                 sea_m,
+                coast_parts,
             } => self.accept_head(
                 realm,
                 ArtifactHead {
@@ -305,6 +359,7 @@ impl ArtifactReceiver {
                     tiles_per_edge,
                     levels,
                     sea_m,
+                    coast_parts,
                 },
             ),
             BulkMsg::ArtifactPyramid {
@@ -313,7 +368,8 @@ impl ArtifactReceiver {
                 part,
                 parts,
                 z_m,
-            } => self.accept_part(realm, level, part, parts, z_m),
+                water_m,
+            } => self.accept_part(realm, level, part, parts, z_m, water_m),
             BulkMsg::ArtifactTile {
                 realm,
                 face,
@@ -321,6 +377,12 @@ impl ArtifactReceiver {
                 ty,
                 rows,
             } => self.accept_tile(realm, face, tx, ty, &rows),
+            BulkMsg::ArtifactCoast {
+                realm,
+                part,
+                parts,
+                bits,
+            } => self.accept_coast(realm, part, parts, bits),
             _ => ArtifactIngest::NotArtifact,
         };
         self.count(result);
@@ -343,6 +405,11 @@ impl ArtifactReceiver {
                 c.pyramids_whole += 1;
             }
             ArtifactIngest::Tile => c.tiles += 1,
+            ArtifactIngest::CoastPart => c.coast_parts += 1,
+            ArtifactIngest::CoastWhole | ArtifactIngest::ArtifactWhole { .. } => {
+                c.coast_parts += 1;
+                c.coasts_whole += 1;
+            }
             ArtifactIngest::Parked => c.parked += 1,
             ArtifactIngest::NoHead => c.no_head += 1,
             ArtifactIngest::Shape => c.shape += 1,
@@ -361,6 +428,7 @@ impl ArtifactReceiver {
             .realms
             .insert(realm, ArtifactCache::new(head));
         self.assembling.retain(|(r, _), _| *r != realm);
+        self.coasts.remove(&realm);
         // The tiles that waited for this head land now, through the same checks.
         for (face, tx, ty, rows) in self.parked.remove(&realm).unwrap_or_default() {
             let landed = self.accept_tile(realm, face, tx, ty, &rows);
@@ -376,12 +444,17 @@ impl ArtifactReceiver {
         part: u32,
         parts: u32,
         z_m: Vec<i16>,
+        water_m: Vec<i16>,
     ) -> ArtifactIngest {
         let Some(cache) = self.book.realms.get(&realm) else {
             return ArtifactIngest::NoHead;
         };
         let head = cache.head;
         if level == 0 || level > head.levels || parts == 0 || part >= parts {
+            return ArtifactIngest::Shape;
+        }
+        // ★ The water words ride beside the heights, one each, or none at all for the whole part.
+        if !water_m.is_empty() && water_m.len() != z_m.len() {
             return ArtifactIngest::Shape;
         }
         if cache.level(level).is_some() {
@@ -397,15 +470,30 @@ impl ArtifactReceiver {
         if slot.parts[part as usize].is_some() {
             return ArtifactIngest::Duplicate;
         }
-        slot.parts[part as usize] = Some(z_m);
+        slot.parts[part as usize] = Some((z_m, water_m));
         if !slot.parts.iter().all(Option::is_some) {
             return ArtifactIngest::Part;
         }
-        // The level is whole: its words must be the coarser lattice's.
-        let words: Vec<i16> = slot.parts.iter().flatten().flatten().copied().collect();
+        // The level is whole: its words must be the coarser lattice's, and its water words all
+        // there or all absent.
+        let words: Vec<i16> = slot
+            .parts
+            .iter()
+            .flatten()
+            .flat_map(|(z, _)| z.iter().copied())
+            .collect();
+        let water: Vec<i16> = slot
+            .parts
+            .iter()
+            .flatten()
+            .flat_map(|(_, w)| w.iter().copied())
+            .collect();
         self.assembling.remove(&(realm, level));
         let coarse_edge = head.edge >> level;
         if (coarse_edge << level) != head.edge || words.len() != 6 * (coarse_edge as usize).pow(2) {
+            return ArtifactIngest::Shape;
+        }
+        if !water.is_empty() && water.len() != words.len() {
             return ArtifactIngest::Shape;
         }
         let book = Arc::make_mut(&mut self.book);
@@ -413,7 +501,15 @@ impl ArtifactReceiver {
             .realms
             .get_mut(&realm)
             .expect("the head was read above");
-        cache.pyramid[level as usize - 1] = Some(Arc::new(PyramidField { level, z_m: words }));
+        // ★ A LEVEL ASSEMBLED AFTER THE MASK TAKES IT AT ASSEMBLY (2026-09-22, ruling W10); a
+        // level assembled BEFORE it is rebuilt when the mask lands ([`ArtifactReceiver::accept_coast`]).
+        let coast = cache.coast.clone();
+        cache.pyramid[level as usize - 1] = Some(Arc::new(PyramidField {
+            level,
+            z_m: words,
+            water_m: water,
+            coast,
+        }));
         cache.epoch += 1;
         if cache.whole() {
             ArtifactIngest::PyramidWhole {
@@ -422,6 +518,79 @@ impl ArtifactReceiver {
             }
         } else {
             ArtifactIngest::LevelWhole
+        }
+    }
+
+    /// ★ ONE COAST PART IN (2026-09-22, ruling W10). The parts assemble into ONE mask of one bit
+    /// per fine node; when it lands, every pyramid level already assembled is REBUILT with it (a
+    /// level is behind an `Arc`, so the rebuild is one small clone of the level's own words and a
+    /// pointer to the shared mask) and the cache's epoch bumps, so the builders see a changed
+    /// cache. A part for a realm with no head is refused; a part of a count the head did not
+    /// announce, or a whole mask that is not the lattice's size, is refused by shape.
+    ///
+    /// **Example.** A pilot in orbit holds the home planet's six levels and its mask arrives last.
+    /// Every level takes the mask at once, the epoch bumps, and the chunks rebuilt after it draw
+    /// the same shoreline the tiles under her boots will draw.
+    fn accept_coast(
+        &mut self,
+        realm: RealmId,
+        part: u32,
+        parts: u32,
+        bits: Vec<u8>,
+    ) -> ArtifactIngest {
+        let Some(cache) = self.book.realms.get(&realm) else {
+            return ArtifactIngest::NoHead;
+        };
+        let head = cache.head;
+        if parts == 0 || parts != head.coast_parts || part >= parts {
+            return ArtifactIngest::Shape;
+        }
+        if cache.coast.is_some() {
+            return ArtifactIngest::Duplicate;
+        }
+        let slot = self.coasts.entry(realm).or_default();
+        if slot.parts.is_empty() {
+            slot.parts = vec![None; parts as usize];
+        }
+        if slot.parts[part as usize].is_some() {
+            return ArtifactIngest::Duplicate;
+        }
+        slot.parts[part as usize] = Some(bits);
+        if !slot.parts.iter().all(Option::is_some) {
+            return ArtifactIngest::CoastPart;
+        }
+        let mask: Vec<u8> = slot
+            .parts
+            .iter()
+            .flatten()
+            .flat_map(|b| b.iter().copied())
+            .collect();
+        self.coasts.remove(&realm);
+        // The whole mask is one bit per node of the body's own lattice, rounded up to bytes.
+        let nodes = 6 * (head.edge as usize).pow(2);
+        if mask.len() != nodes.div_ceil(8) {
+            return ArtifactIngest::Shape;
+        }
+        let mask: Arc<[u8]> = mask.into();
+        let book = Arc::make_mut(&mut self.book);
+        let cache = book
+            .realms
+            .get_mut(&realm)
+            .expect("the head was read above");
+        cache.coast = Some(Arc::clone(&mask));
+        for level in cache.pyramid.iter_mut().flatten() {
+            let mut rebuilt = PyramidField::clone(level);
+            rebuilt.coast = Some(Arc::clone(&mask));
+            *level = Arc::new(rebuilt);
+        }
+        cache.epoch += 1;
+        if cache.whole() {
+            ArtifactIngest::ArtifactWhole {
+                realm,
+                digest: head.digest,
+            }
+        } else {
+            ArtifactIngest::CoastWhole
         }
     }
 
@@ -505,6 +674,48 @@ mod tests {
             tiles_per_edge: artifact.tiles_per_edge(),
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
+            // ★ NO COAST MASK ON THIS HEAD (2026-09-22): the tests around it weigh the pyramid's
+            // own path, and a head that announces no part has none to wait for. The mask's own
+            // statement states a head of one part and ships it.
+            coast_parts: 0,
+        }
+    }
+
+    /// The same head, announcing the moon's mask: one part (27 744 nodes are 3 468 bytes).
+    fn head_with_coast(artifact: &Artifact) -> BulkMsg {
+        match head_of(artifact) {
+            BulkMsg::ArtifactHead {
+                realm,
+                world_tag,
+                version,
+                edge,
+                digest,
+                tiles_per_edge,
+                levels,
+                sea_m,
+                ..
+            } => BulkMsg::ArtifactHead {
+                realm,
+                world_tag,
+                version,
+                edge,
+                digest,
+                tiles_per_edge,
+                levels,
+                sea_m,
+                coast_parts: 1,
+            },
+            other => other,
+        }
+    }
+
+    /// One coast part of the moon's mask, whole.
+    fn coast_of(artifact: &Artifact) -> BulkMsg {
+        BulkMsg::ArtifactCoast {
+            realm: realm(),
+            part: 0,
+            parts: 1,
+            bits: artifact.coast.clone(),
         }
     }
 
@@ -515,7 +726,183 @@ mod tests {
             part,
             parts,
             z_m,
+            water_m: vec![],
         }
+    }
+
+    /// ★ THE COAST MASK AT THE CLIENT (2026-09-22, ruling W10). Six statements, each of which
+    /// could fail:
+    ///
+    /// 1. a coast part for a realm with no head is refused, and a part whose count is not the
+    ///    head's, or past the count, or twice, is refused by shape or as a duplicate;
+    /// 2. a mask whose whole is not one bit per fine node is refused by SHAPE, never kept;
+    /// 3. the parts assemble into the artifact's own mask, bit for bit;
+    /// 4. a level assembled BEFORE the mask is REBUILT with it, and the level's own reader then
+    ///    answers the row's side;
+    /// 5. a level assembled AFTER the mask takes it at assembly;
+    /// 6. the cache is not whole until the mask is here, and the epoch bumps when it lands.
+    ///
+    /// **Example.** A pilot in orbit holds the moon's two levels; its mask lands last, both levels
+    /// take it, and the globe she draws has the shoreline her boots will stand on.
+    #[test]
+    fn the_coast_mask_assembles_rebuilds_the_levels_and_refuses_a_wrong_shape() {
+        let (_moon, _lattice, artifact) = moon();
+        let mut rx = ArtifactReceiver::default();
+        // (1) no head yet.
+        assert_eq!(rx.accept(coast_of(&artifact)), ArtifactIngest::NoHead);
+        rx.accept(head_with_coast(&artifact));
+        // The first level lands BEFORE the mask.
+        assert_eq!(
+            rx.accept(part_of(1, 0, 1, artifact.pyramid[0].clone())),
+            ArtifactIngest::LevelWhole
+        );
+        let book = rx.book();
+        let cache = book.get(realm()).expect("a cache");
+        assert!(!cache.coast_held(), "the mask is not here yet");
+        assert!(!cache.whole(), "a cache without its mask is not whole");
+        assert_eq!(cache.level(1).expect("level 1").coast, None);
+        let epoch = cache.epoch;
+        // (1) the shapes refused: a count the head did not announce, a part past the count.
+        let bad = |part: u32, parts: u32, bits: Vec<u8>| BulkMsg::ArtifactCoast {
+            realm: realm(),
+            part,
+            parts,
+            bits,
+        };
+        assert_eq!(rx.accept(bad(0, 2, vec![0])), ArtifactIngest::Shape);
+        assert_eq!(rx.accept(bad(1, 1, vec![0])), ArtifactIngest::Shape);
+        assert_eq!(rx.accept(bad(0, 0, vec![0])), ArtifactIngest::Shape);
+        // (2) a mask of the wrong size is refused by shape and nothing is kept.
+        assert_eq!(rx.accept(bad(0, 1, vec![0; 7])), ArtifactIngest::Shape);
+        assert!(!rx.book().get(realm()).expect("a cache").coast_held());
+        // (3) (4) (6) the real mask lands: the level held is rebuilt and the cache is whole.
+        assert_eq!(
+            rx.accept(coast_of(&artifact)),
+            ArtifactIngest::CoastWhole,
+            "level 2 is still owed, so the artifact is not whole yet"
+        );
+        let book = rx.book();
+        let cache = book.get(realm()).expect("a cache");
+        assert!(cache.coast_held());
+        assert_eq!(
+            cache.coast().map(|m| m.to_vec()),
+            Some(artifact.coast.clone())
+        );
+        assert!(cache.epoch > epoch, "the epoch bumps when the mask lands");
+        let level_1 = cache.level(1).expect("level 1");
+        assert_eq!(
+            level_1.coast.as_deref().map(<[u8]>::to_vec),
+            Some(artifact.coast.clone())
+        );
+        // The level's own reader now answers the row's side for a fine node.
+        let node = (0..artifact.rows.len() as u32)
+            .find(|&n| artifact.sea_side(n) == Some(true))
+            .unwrap_or(0);
+        assert_eq!(level_1.sea_side(node), artifact.sea_side(node));
+        // A second part of the same mask is a duplicate.
+        assert_eq!(rx.accept(coast_of(&artifact)), ArtifactIngest::Duplicate);
+        assert!(!cache.whole(), "level 2 is still owed");
+        // (5) the level assembled AFTER the mask takes it at assembly, and finishes the artifact.
+        // The LAST PYRAMID part says so here; the other order — the last COAST part finishing it —
+        // is `ArtifactWhole`, which the statement below drives.
+        assert_eq!(
+            rx.accept(part_of(2, 0, 1, artifact.pyramid[1].clone())),
+            ArtifactIngest::PyramidWhole {
+                realm: realm(),
+                digest: artifact.digest(),
+            }
+        );
+        let book = rx.book();
+        let cache = book.get(realm()).expect("a cache");
+        assert!(cache.whole());
+        assert_eq!(
+            cache
+                .level(2)
+                .expect("level 2")
+                .coast
+                .as_deref()
+                .map(<[u8]>::to_vec),
+            Some(artifact.coast.clone())
+        );
+        assert_eq!(rx.counters.coast_parts, 1);
+        assert_eq!(rx.counters.coasts_whole, 1);
+        // A head at ANOTHER digest starts the realm over: the mask goes with it.
+        let mut moved = artifact.clone();
+        moved.sea_m += 1;
+        rx.accept(head_with_coast(&moved));
+        assert!(!rx.book().get(realm()).expect("a cache").coast_held());
+        // ★ THE OTHER ORDER: the pyramid lands first and the LAST COAST PART finishes the
+        // artifact, so the client states it holds the realm then and not before — the gateway
+        // stops serving on that word, so it must wait for the mask.
+        let mut other = ArtifactReceiver::default();
+        other.accept(head_with_coast(&artifact));
+        other.accept(part_of(1, 0, 1, artifact.pyramid[0].clone()));
+        assert_eq!(
+            other.accept(part_of(2, 0, 1, artifact.pyramid[1].clone())),
+            ArtifactIngest::LevelWhole,
+            "every level is here and the mask is not: nothing is stated yet"
+        );
+        assert_eq!(
+            other.accept(coast_of(&artifact)),
+            ArtifactIngest::ArtifactWhole {
+                realm: realm(),
+                digest: artifact.digest(),
+            }
+        );
+        assert!(other.book().get(realm()).expect("a cache").whole());
+        // And forgetting the realm drops the parts still assembling.
+        rx.forget(realm());
+        assert!(rx.book().get(realm()).is_none());
+    }
+
+    /// ★ THE WATER WORDS' SHAPE (2026-09-21): a part whose water words are neither none nor one
+    /// per height is refused, and a level whose parts assemble to water words of another count
+    /// than its heights is refused too — never a level with a word for some nodes and not others.
+    #[test]
+    fn a_part_or_a_level_whose_water_words_do_not_match_its_heights_is_refused() {
+        let mut rx = ArtifactReceiver::default();
+        // A head of a tiny lattice: edge 2, one level of 6 · 1² words.
+        rx.accept(BulkMsg::ArtifactHead {
+            realm: realm(),
+            world_tag: 9,
+            version: 3,
+            edge: 2,
+            digest: [1, 2],
+            tiles_per_edge: 1,
+            levels: 1,
+            sea_m: vd_terrain::artifact::DRY_M,
+            coast_parts: 0,
+        });
+        let wrong = BulkMsg::ArtifactPyramid {
+            realm: realm(),
+            level: 1,
+            part: 0,
+            parts: 1,
+            z_m: vec![1, 2, 3, 4, 5, 6],
+            water_m: vec![7, 8],
+        };
+        assert_eq!(rx.accept(wrong), ArtifactIngest::Shape);
+        // Two parts: the first carries water words, the second none — the level's count is off.
+        let first = BulkMsg::ArtifactPyramid {
+            realm: realm(),
+            level: 1,
+            part: 0,
+            parts: 2,
+            z_m: vec![1, 2, 3],
+            water_m: vec![7, 8, 9],
+        };
+        let second = BulkMsg::ArtifactPyramid {
+            realm: realm(),
+            level: 1,
+            part: 1,
+            parts: 2,
+            z_m: vec![4, 5, 6],
+            water_m: vec![],
+        };
+        assert_eq!(rx.accept(first), ArtifactIngest::Part);
+        assert_eq!(rx.accept(second), ArtifactIngest::Shape);
+        assert_eq!(rx.counters.shape, 2);
+        assert_eq!(rx.book().get(realm()).expect("a head").levels_held(), 0);
     }
 
     fn tile_of(artifact: &Artifact, face: Face, tx: u32, ty: u32) -> BulkMsg {
@@ -703,8 +1090,28 @@ mod tests {
             ArtifactIngest::Shape
         );
         assert_eq!(
-            rx.accept(bad_tile(0, 0, 0, vec![0; 9 * 3])),
+            rx.accept(bad_tile(
+                0,
+                0,
+                0,
+                vec![0; vd_terrain::artifact::ROW_BYTES * 3]
+            )),
             ArtifactIngest::Shape
+        );
+        // ★ A ROW OF NINE BYTES IS REFUSED (slice 8d step 2): the row grew to ten when the rock map
+        // landed, and a whole tile of the OLD row is exactly what an older shard would ship. Nine
+        // and ten share no common multiple under a tile's own count, so the length test alone
+        // catches it and the client keeps the coarser rung standing.
+        let want = (tile_width(artifact.edge, 0) * tile_width(artifact.edge, 0)) as usize;
+        assert_eq!(vd_terrain::artifact::ROW_BYTES, 10);
+        assert_eq!(
+            rx.accept(bad_tile(1, 0, 0, vec![0; want * 9])),
+            ArtifactIngest::Shape
+        );
+        // The same tile at the row's real width is taken.
+        assert_eq!(
+            rx.accept(bad_tile(1, 0, 0, vec![0; want * 10])),
+            ArtifactIngest::Tile
         );
         // A chunk over that tile alone is ready now.
         let mid = ChunkKey {
@@ -741,13 +1148,18 @@ mod tests {
                 parts: 3,
                 levels_whole: 2,
                 pyramids_whole: 1,
-                tiles: 2,
+                // Three: the two the moon's own tiles gave, and the ten-byte tile the row-width
+                // refusal above takes after refusing its nine-byte twin (slice 8d step 2).
+                tiles: 3,
                 parked: PARKED_TILES_MAX as u64 + 2,
                 parked_dropped: 2,
                 no_head: 1,
-                shape: 10,
+                shape: 11,
                 duplicates: PARKED_TILES_MAX as u64 - 1 + 4,
                 not_artifact: 1,
+                // This statement ships no mask: its head announces none (`head_of`).
+                coast_parts: 0,
+                coasts_whole: 0,
             }
         );
         // A new head with another digest starts the realm over — with a part still assembling,
@@ -768,6 +1180,7 @@ mod tests {
                 tiles_per_edge: artifact.tiles_per_edge(),
                 levels,
                 sea_m: artifact.sea_m,
+                coast_parts: 0,
             };
         let mut other_digest = artifact.digest();
         other_digest[0] ^= 1;
@@ -815,6 +1228,7 @@ mod tests {
                 part: 0,
                 parts: 1,
                 z_m: vec![0; 6 * 8 * 8],
+                water_m: vec![],
             }),
             ArtifactIngest::Shape
         );

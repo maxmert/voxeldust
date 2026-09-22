@@ -1729,8 +1729,8 @@ fn minted_hull(seq: u64) -> RealmId {
 /// and a third pilot found the berth blocked — MEASURED 2026-09-11, the crossing never
 /// committed; players collide).
 fn plant_hull(f: &Fixture, planet: RealmId, berth_m: DVec3, seq: u64) -> RealmId {
-    let parent_store = realm_store_path(&f.base, planet);
-    let ship_store = realm_store_path(&f.base, minted_hull(seq));
+    let parent_store = realm_store_path(&vd_bins::realm_store_dir(&f.base), planet);
+    let ship_store = realm_store_path(&vd_bins::realm_store_dir(&f.base), minted_hull(seq));
     let out = Command::new(env!("CARGO_BIN_EXE_vd-build-ship"))
         .args([
             "--parent-store",

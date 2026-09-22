@@ -14,6 +14,38 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
 - `docs/design/owner_decisions_*.md` — ★ THE BINDING RULINGS, and **the NEWEST FILE WINS**. Read the
   newest one BEFORE relaying any plan or design content: these are later than every design doc, and a plan
   agreeing with itself proves nothing. Newest first:
+  - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION
+    8), then 8d. ★ W2 (answers L20): a player's dam never moves the seed's river (no re-solve, the river an
+    endless source); a dug hollow BELOW a connected water's level FILLS to that level as LIVE STATE — a bounded
+    local flood in the owning shard, rows of the block store (slice 9, water = a substance with liquidity).
+    ★ W3 amends T2: waves AND the CURRENT are required (8o; priced first); pressure and draining maybe, later.
+    ★ W4: EVERY 8d ask APPROVED (the Earth-calibrated width law, small streams, one lake mechanism, the
+    PROVINCE WORD on the row (SL6 yes), the override's row by the owner's tool only, the crease decided on
+    8d's cliff pictures). 8d's order: beds' hardness → rock map + fixed-radius substance → rivers → the carve
+    → lakes → the override's read path. ★ W5 step 1 LANDED (each bed's own hardness; GENERATOR_VERSION 9), the
+    cap share HALF is ASSUMED — the owner's number owed. Step 2 LANDED (the province word, ARTIFACT_VERSION 5,
+    GENERATOR_VERSION 10). ★ W6 THE SEA DECIDES THE SHORE (built, GENERATOR_VERSION 11): the fine octaves may
+    not carry a column across its water — after the bench the surface is held on its GROUND's side by a QUARTER
+    of the ground's height (a stated choice, the owner's word owed); a dry row reads the body's sea; MEASURED:
+    the shore's step at a ring swap 234 m/848 m → 0 m. A lake's shore is owed the same law at step 5.
+    ★ W7 (2026-09-22) THE LAKES TRIED: the flood every pass + the deposit (the cut laid in the first hollow
+    downstream) KEPT, pits 137 k → 7 k; FOUND UNDER IT: the old solve eroded a tenth of the age by a stale-
+    flood defect, the true erosion grades every continent to the sea and the re-solved sea DROWNS it (1.4 %
+    land at any age; hard rock 1 %; a cratonic uplift 0.1 %). THE ASK (T9): the basins' depth from the oceanic
+    crust's isostasy, the inventory against that volume, then uplift-over-erodibility for the plains. UNTIL
+    RULED the tree's solve drowns the home planet; the pins are NOT re-recorded; the window runs generator 11.
+    ★ W8 (2026-09-22) THE THREE STEPS BUILT (GENERATOR_VERSION 12, pins re-recorded): the FREEBOARD LAW
+    (Wise 1974: the continental thickness solved so the sea stands at the crust's shelf quantile, Earth's 29 of
+    40) + the running sea + the erodibility by the rocks' tensile strength (Sklar & Dietrich 2001) + the
+    envelope a per-node clamp (the global scale was the drowning's other half). MEASURED: land 8.6 % → 22 %,
+    sea 78 %, pits 170 k → 14 k; the remaining lakes are GLACIAL (the ice line over more than all the land:
+    8e's climate). OWED: the ice line, a delta at the sea, the cratons' transient, the owner's look.
+    ★ W9 (2026-09-22) THE ON-FOOT GROUND: two defects measured and cured — `dev-cluster down` reaped the realm
+    stores (now `realms/<slot>` beside the slot, `vd_bins::realm_store_dir`, ONE place), and the gateway dropped
+    a shard's bulk for a session still activating (now HELD on the session and delivered at activation). A
+    headless ground probe MUST pass `--pilot`. THE FAR-RUNG SHORE measured: the coast steps ~a level node at
+    each pyramid-level swap (11.5 km median at rung 9→10); the cure is a coast MASK (one bit per node, 1.1 MB,
+    shipped with the head) giving the water's SIDE at every rung — an SL6 ask, owed the owner's word.
   - `owner_decisions_2026-09-16_terrain.md` — ★ T9 (2026-09-18) NO PHYSICAL NUMBER IS DRAWN — every physical
     fact (pressure, temperature, water, spin, crust, relief cap) is COMPUTED by a published law with a stated
     calibration body; a draw only for the seed's identity choices, an unrecoverable history (a tilt), or a

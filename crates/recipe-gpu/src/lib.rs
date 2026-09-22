@@ -100,6 +100,9 @@ pub fn cell_field(
                 biome: column.biome,
                 r_steps: layer.r_steps,
                 water: charter.sea_radius,
+                // The card holds no artifact row: every column's rock province is the host's own
+                // stated default, which the charter's first row states (slice 8d step 2).
+                province: Gi::ZERO,
             },
             cavern_at(column, layer, nodes),
             tubes,

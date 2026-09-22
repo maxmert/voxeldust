@@ -22,7 +22,9 @@
 use crate::bend::{DIR_ONE, basis_of, direction, normalise};
 use crate::cell::{Column, LENGTH_BITS, point_at};
 use crate::gi::Gi;
-use crate::height::{BiomeCharter, OCTAVES_CAP, Octave, Roughness, biome_of, relief_of_table_from};
+use crate::height::{
+    BiomeCharter, OCTAVES_CAP, Octave, Roughness, SIDE_UNKNOWN, biome_of, relief_parts_from, shore,
+};
 use crate::noise::value3;
 use crate::terrace::{Terrace, terrace};
 
@@ -56,6 +58,11 @@ pub struct PlanCharter {
     pub octave_count: Gi,
     /// The CHUNK's own face index — the basis a corner phantom's direction stands on.
     pub key_face: Gi,
+    /// ★ THE BODY'S SEA as a radius at the length format, or ZERO for a body with none
+    /// (2026-09-21, the shore law): the water the column pass holds its shore against where the
+    /// host reads no water row — the card, and a chunk with no field. NOT the biome's datum, which
+    /// is the ladder radius on a dry body.
+    pub sea_radius: Gi,
     /// The biome field.
     pub biome: BiomeCharter,
     /// ★ THE PER-COLUMN ROUGHNESS FACTOR's words (slice 8a stage 3): the slow placeholder octave,
@@ -118,7 +125,50 @@ fn corner_axis(n: i32, u: i32, v: i32, i: i32, j: i32) -> Gi {
 /// calls.
 #[must_use]
 pub fn column_surface(charter: &PlanCharter, face: i32, i: i32, j: i32) -> ColumnSurface {
-    column_surface_from(charter, face, i, j, Gi::ZERO, 0)
+    // No artifact here, so no macro field and no slope share: the roughness factor is the noise
+    // placeholder's alone, which is the arithmetic the card has always run. The water is the
+    // body's own sea, as every column of a box with no rows reads it.
+    column_surface_from(charter, face, i, j, &FieldRead::none(charter.sea_radius))
+}
+
+/// ★ WHAT THE HOST READ OFF ITS FIELD FOR ONE COLUMN (2026-09-21): the words the column pass takes
+/// beside the charter and the address. A struct and not four arguments, because the fourth word
+/// made the list a place where a water radius could land in a share's seat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldRead {
+    /// The field's eroded height at the column, at the length format; ZERO with no field.
+    pub z: Gi,
+    /// The first octave summed: the first fine one over a field (the coarse ones `z` replaces are
+    /// left out), zero without a field.
+    pub first: usize,
+    /// The field's own slope at the column as a share of the body's slope reference
+    /// ([`relief_of_table_from`]); ZERO without a field.
+    pub slope_share: Gi,
+    /// The column's water surface as a radius, or ZERO for none: the row's level under an
+    /// artifact, the body's sea without one.
+    pub water: Gi,
+    /// ★ THE SIDE OF THE WATER THE ROW SAID (2026-09-22, the coast mask; ruling W10):
+    /// [`crate::height::SIDE_LAND`] or [`crate::height::SIDE_SEA`] where the host read the
+    /// artifact's coast mask at this column's own FINE node, [`SIDE_UNKNOWN`] where it holds no
+    /// mask. It is the same word at every rung, because it is the same fine node's bit, so the
+    /// shoreline does not move when a ring swaps.
+    pub side: Gi,
+}
+
+impl FieldRead {
+    /// The read of a host with NO field: no `z`, every octave, no share, the water it names — the
+    /// body's own sea — and NO stated side, so the ground's own sign decides the shore. The card
+    /// holds no artifact and reads exactly this.
+    #[must_use]
+    pub const fn none(water: Gi) -> FieldRead {
+        FieldRead {
+            z: Gi::ZERO,
+            first: 0,
+            slope_share: Gi::ZERO,
+            water,
+            side: SIDE_UNKNOWN,
+        }
+    }
 }
 
 /// ★ THE COLUMN PASS WITH THE MACRO FIELD (slice 8c stage C4): the surface is the radius, plus `z`
@@ -126,30 +176,54 @@ pub fn column_surface(charter: &PlanCharter, face: i32, i: i32, j: i32) -> Colum
 /// plus the octaves from `first` on (the coarse ones `Z` replaces are left out), then the bench.
 /// Without an artifact the host passes zero and the first octave, and the column is the recipe's
 /// own coarse relief.
+///
+/// `slope_share` is the macro field's OWN slope at this column, as a share of the body's slope
+/// reference ([`relief_of_table_from`]): the host measures it off the same artifact `z` comes from,
+/// and passes [`Gi::ZERO`] where it holds no field.
+///
+/// ★ The read's `water` is the column's water surface as a radius, or ZERO for none (2026-09-21):
+/// the row's level under an artifact, the body's sea without one. The surface is held on its
+/// ground's side of it by [`crate::height::shore`], AFTER the bench, so the shoreline stands where
+/// the ground without the fine octaves crosses the water — the same place at every rung.
+///
+/// ★ The read's `side` is the water's side the ROW said (2026-09-22, the coast mask): at a pyramid
+/// rung the `z` above is a MEAN of many fine nodes, and a mean crosses the sea in another place
+/// than the fine node does, so the side comes from the fine node's own bit and never from `z`.
 #[must_use]
 pub fn column_surface_from(
     charter: &PlanCharter,
     face: i32,
     i: i32,
     j: i32,
-    z: Gi,
-    first: usize,
+    read: &FieldRead,
 ) -> ColumnSurface {
+    let FieldRead {
+        z,
+        first,
+        slope_share,
+        water,
+        side,
+    } = *read;
     let dir = site_direction(charter, face, i, j);
-    // ★ THE BENCH IS LAST (slice 8a stage 4): the octave sum answers the raw surface, and the
-    // terrace then pulls it toward the nearest bed top. The biome below reads the TERRACED surface,
-    // because the biome reads where the ground actually stands.
-    let h = terrace(
-        &charter.terrace,
-        charter.radius
-            + z
-            + relief_of_table_from(
-                &charter.octaves,
-                first,
-                charter.octave_count.raw() as usize,
-                dir,
-                &charter.roughness,
-            ),
+    // ★ THE GROUND, THEN THE FINE OCTAVES, THEN THE BENCH, THEN THE SHORE. The ground is the radius,
+    // the field's `z` and the coarse octaves the field did not replace (slice 8a stage 4: the
+    // octave sum answers the raw surface and the terrace then pulls it toward the nearest bed top;
+    // 2026-09-21: the shore holds the result on the ground's side of the water). The biome below
+    // reads the FINAL surface, because the biome reads where the ground actually stands.
+    let parts = relief_parts_from(
+        &charter.octaves,
+        first,
+        charter.octave_count.raw() as usize,
+        dir,
+        &charter.roughness,
+        slope_share,
+    );
+    let base = charter.radius + z + parts.coarse;
+    let h = shore(
+        base,
+        water,
+        terrace(&charter.terrace, base + parts.fine),
+        side,
     );
     ColumnSurface {
         dir,
@@ -333,6 +407,8 @@ mod tests {
             radius: Gi::new(1_000_000) << LENGTH_BITS,
             octave_count: Gi::new(2),
             key_face: Gi::new(4),
+            // No sea: the shore law is the identity, and the column tests keep their numbers.
+            sea_radius: Gi::ZERO,
             biome: BiomeCharter {
                 sea_radius: Gi::new(1_000_000) << LENGTH_BITS,
                 highland_above: Gi::new(400) << LENGTH_BITS,

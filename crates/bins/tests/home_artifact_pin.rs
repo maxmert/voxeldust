@@ -12,7 +12,7 @@ use vd_bins::artifact_worker::{SolveJob, run_solve};
 use vd_terrain::home::{home_planet, home_solve_words};
 
 /// The committed digest of the home planet's artifact on this build.
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0xc194_6467_da41_3505, 0x3232_0b11_b552_d9b6];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x1fa6_8f27_d0d1_125b, 0xda53_d30d_7ace_278c];
 
 #[test]
 fn the_home_planets_artifact_digests_to_its_committed_words() {
@@ -85,15 +85,16 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
         artifact.pyramid[fields.top.level as usize - 1],
         "the pinned top level is not the solve's"
     );
-    for (node, (z, water, facies)) in &fields.rows.0 {
+    for (node, (z, water, facies, province)) in &fields.rows.0 {
         let row = artifact.rows[*node as usize];
         assert_eq!(
             (
                 row.z_m,
                 row.water_m,
-                row.receiver_facies >> vd_terrain::artifact::FACIES_SHIFT
+                row.receiver_facies >> vd_terrain::artifact::FACIES_SHIFT,
+                row.province
             ),
-            (*z, *water, *facies),
+            (*z, *water, *facies, *province),
             "pinned row {node} is not the solve's"
         );
     }

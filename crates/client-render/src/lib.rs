@@ -1704,6 +1704,27 @@ fn place_camera(
         direction,
         up,
     };
+    // ★ THE EYE PROBE (2026-09-22, the on-foot ground): once a second, every reading the stand is
+    // built from, so a wrong stand names the reading that made it.
+    static EYE_PROBE_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if eye.swaps > 0
+        && EYE_PROBE_FRAMES
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(60)
+    {
+        tracing::info!(
+            cell = ?own_pose.cell,
+            pos = ?own_pose.pos,
+            tier = ?own_pose.tier,
+            frame = ?own_pose.frame,
+            own_world = ?own_world,
+            eye_pos = ?eye_pos,
+            up = ?up,
+            stand_cell = ?delivered.lattice.cell(),
+            stand_offset = ?delivered.lattice.offset(),
+            "EYE PROBE"
+        );
+    }
     // THE DECISION AND ITS INSTRUMENT, both in Tier-A: this pose's stand, or the one the camera
     // last placed; and how far the eye moved against how far the pilot was delivered.
     let stand = eye.track.place(stated, origin, delivered);

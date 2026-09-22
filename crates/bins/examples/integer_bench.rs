@@ -1026,6 +1026,8 @@ fn why(plan: &vd_terrain::gpu::BoxPlan, index: usize, gpu: &[u32]) -> String {
             biome: column.biome,
             r_steps: layer.r_steps,
             water: plan.charter.sea_radius,
+            // The card holds no artifact row: the stated default province, as the box plan uses.
+            province: vd_recipe::Gi::ZERO,
         },
         value,
         &[],
@@ -1038,6 +1040,8 @@ fn why(plan: &vd_terrain::gpu::BoxPlan, index: usize, gpu: &[u32]) -> String {
             biome: column.biome,
             r_steps: layer.r_steps,
             water: plan.charter.sea_radius,
+            // The card holds no artifact row: the stated default province, as the box plan uses.
+            province: vd_recipe::Gi::ZERO,
         },
         vd_recipe::Gi::ZERO,
         &plan.tubes,

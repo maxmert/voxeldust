@@ -259,6 +259,7 @@ fn main() -> ExitCode {
             BOX_EDGE * BOX_EDGE
         ],
         water: vec![vd_recipe::Gi::ZERO; BOX_EDGE * BOX_EDGE],
+        surfaces: vec![vd_recipe::Gi::ZERO; BOX_EDGE * BOX_EDGE],
         sea: vd_recipe::Gi::ZERO,
     };
     let start = Instant::now();

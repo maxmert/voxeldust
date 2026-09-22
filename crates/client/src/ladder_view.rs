@@ -79,7 +79,9 @@ use vd_terrain::digest::ColumnSpan;
 /// whole. A column moving in switches to the finer rung's full weight at the inner edge, one moving
 /// out to the coarser's at the outer edge, and neither edge flips anything.
 pub const HYSTERESIS_IN: f64 = 0.9;
-pub const HYSTERESIS_OUT: f64 = 1.1;
+/// The outer edge is the terrain crate's word (`ASK_HYSTERESIS_OUT`): the shard and the gateway
+/// ship tiles to the same edge the ladder asks at (2026-09-21, the far ring's tiles).
+pub const HYSTERESIS_OUT: f64 = vd_terrain::artifact::ASK_HYSTERESIS_OUT;
 /// A band that is always passed: a rung 0 has no finer rung to fade in from, the top rung no
 /// coarser one to fade out to. Stated as a band far below or far above every distance so the one
 /// weight formula serves every rung (the shader clamps).
@@ -484,7 +486,7 @@ pub const ASK_BOUND_DESCENT_S: f64 = 0.0;
 /// The derivation reads 0.1696 at today's two tolerances; the number is rounded up to a
 /// seventeen-hundredth so it is a figure a person can hold, and the assertions below fail the
 /// BUILD if either tolerance ever moves past it.
-pub const ASK_BOUND_SLACK: f64 = 0.17;
+pub const ASK_BOUND_SLACK: f64 = vd_terrain::artifact::ASK_SLACK;
 
 // THE DERIVATION, ASSERTED WHERE IT CANNOT ROT: the slack covers the worst simultaneous stand of
 // the two tolerances (the drawn edge inside the asked edge), and it is never less than their sum.
@@ -741,7 +743,7 @@ pub fn floored_altitude_m(altitude_m: f64) -> f64 {
 /// behind the geometric horizon is still wanted.
 #[must_use]
 pub fn reach_m(surface_m: f64, altitude_m: f64, relief_m: f64) -> f64 {
-    horizon_m(surface_m, altitude_m) + horizon_m(surface_m, relief_m)
+    vd_terrain::artifact::reach_m(surface_m, altitude_m, relief_m)
 }
 
 /// The tallest ground the recipe can raise over its radius, in metres: the recipe's own bound.
@@ -2060,6 +2062,7 @@ mod tests {
             tiles_per_edge: artifact.tiles_per_edge(),
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
+            coast_parts: 0,
         });
         let col = Column {
             face: Face::PosZ,
@@ -2084,6 +2087,7 @@ mod tests {
                 part: 0,
                 parts: 1,
                 z_m: level.clone(),
+                water_m: artifact.pyramid_water[k].clone(),
             });
         }
         let pyramid = rx.book().get(realm).cloned().expect("a cache");
@@ -2118,6 +2122,7 @@ mod tests {
             tiles_per_edge: artifact.tiles_per_edge(),
             levels,
             sea_m: artifact.sea_m,
+            coast_parts: 0,
         });
         for (k, level) in artifact
             .pyramid
@@ -2132,6 +2137,7 @@ mod tests {
                 part: 0,
                 parts: 1,
                 z_m: level.clone(),
+                water_m: artifact.pyramid_water[k].clone(),
             });
         }
         let late = late.book().get(realm).cloned().expect("a cache");

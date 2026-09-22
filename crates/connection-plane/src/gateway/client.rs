@@ -143,6 +143,7 @@ pub(crate) fn on_client_control(
                     artifact_held: std::collections::BTreeMap::new(),
                     artifact_parts_sent: std::collections::BTreeMap::new(),
                     artifact_tiles_sent: std::collections::BTreeMap::new(),
+                    held_bulk: Vec::new(),
                     client,
                     account: login.account,
                     fence,

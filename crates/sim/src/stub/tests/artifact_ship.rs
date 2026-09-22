@@ -24,7 +24,7 @@ impl TileSource for Stated {
     fn head(&self) -> crate::io::Bytes {
         crate::io::bytes(vec![0xA0])
     }
-    fn pyramid_parts(&self) -> Vec<crate::io::Bytes> {
+    fn artifact_parts(&self) -> Vec<crate::io::Bytes> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         (0..11u8).map(|k| crate::io::bytes(vec![0xB0, k])).collect()
     }

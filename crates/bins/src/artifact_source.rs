@@ -5,6 +5,9 @@
 //! - the HEAD: one `BulkMsg::ArtifactHead` (the world tag, the version, the edge, the digest);
 //! - the PYRAMID: every level cut into parts of at most [`PYRAMID_PART_WORDS`] heights, each a
 //!   `BulkMsg::ArtifactPyramid`, coarsest level LAST so a client draws from the top down;
+//! - the COAST MASK (2026-09-22, ruling W10): the body's sea bits cut into parts of at most
+//!   [`COAST_PART_BYTES`], each a `BulkMsg::ArtifactCoast`, AFTER the pyramid's parts in the one
+//!   list the sim pages through — the far view stands first, then every rung reads one shoreline;
 //! - the TILES under a direction: the face and the macro cell the direction falls in through the
 //!   bend's inverse, then every tile whose rows lie within the radius on that face (a stated
 //!   limit: tiles across a cube edge from the occupant are owed — the next face's tiles arrive as
@@ -25,6 +28,9 @@ use vd_wire::channels::BulkMsg;
 
 use crate::artifact_store::tile_bytes;
 
+/// A coast part's size in BYTES: the store's own cut (32 KiB of bits), so a shard ships what it
+/// stores.
+pub use vd_sim::stub::built_store::COAST_PART_BYTES;
 /// A pyramid part's size in heights: the store's own cut (16 384 words, 32 KB, a tile's weight),
 /// so a shard ships what it stores.
 pub use vd_sim::stub::built_store::PYRAMID_PART_WORDS;
@@ -37,15 +43,18 @@ pub struct ArtifactTiles {
     pub lattice: MacroLattice,
     /// The body's radius and its ladder's top rung, for the tile reach under an occupant's altitude.
     body_radius_m: f64,
+    /// The tallest ground the recipe raises over the radius: the reach is bounded by how far the
+    /// ground can be seen, peaks included (2026-09-21).
+    relief_m: f64,
     top_rung: u8,
     /// ★ THE DIGEST TAKEN ONCE (the second flight, 2026-09-20): the emitter asks for it every
     /// tick, and hashing the home planet's 85 MB of rows on every ask cost the shard 90 ms a tick
     /// (the water world 47 ms, the moon 0.3 ms — the cost of the artifact's size, five times the
     /// budget on every big planet from the tick its solve landed).
     digest: [u64; 2],
-    /// ★ THE PYRAMID's PARTS ENCODED ONCE (the same flight): the artifact never changes under a
-    /// source, so its 181 parts (5.9 MB on the home planet) are the same bytes on every ask.
-    /// Filled on the first ask.
+    /// ★ THE PARTS ENCODED ONCE (the same flight): the artifact never changes under a source, so
+    /// its 181 pyramid parts (5.9 MB on the home planet) and its 34 coast parts (1.1 MB) are the
+    /// same bytes on every ask. Filled on the first ask.
     parts: std::sync::OnceLock<Vec<Bytes>>,
 }
 
@@ -58,6 +67,7 @@ impl ArtifactTiles {
         artifact: Arc<Artifact>,
         lattice: MacroLattice,
         body_radius_m: f64,
+        relief_m: f64,
         top_rung: u8,
     ) -> ArtifactTiles {
         let digest = artifact.digest();
@@ -67,6 +77,7 @@ impl ArtifactTiles {
             artifact,
             lattice,
             body_radius_m,
+            relief_m,
             top_rung,
             digest,
             parts: std::sync::OnceLock::new(),
@@ -83,17 +94,42 @@ impl ArtifactTiles {
         let mut out = Vec::new();
         for (k, level) in self.artifact.pyramid.iter().enumerate().rev() {
             let parts = level.len().div_ceil(PYRAMID_PART_WORDS).max(1) as u32;
-            for (part, words) in level.chunks(PYRAMID_PART_WORDS).enumerate() {
+            let water = &self.artifact.pyramid_water[k];
+            for (part, (words, water_words)) in level
+                .chunks(PYRAMID_PART_WORDS)
+                .zip(water.chunks(PYRAMID_PART_WORDS))
+                .enumerate()
+            {
                 out.push(encode(&BulkMsg::ArtifactPyramid {
                     realm: self.realm,
                     level: k as u32 + 1,
                     part: part as u32,
                     parts,
                     z_m: words.to_vec(),
+                    water_m: water_words.to_vec(),
                 }));
             }
         }
+        // ★ THE COAST MASK, AFTER THE PYRAMID (2026-09-22, ruling W10): the same list, so the sim
+        // pages through one queue and the gateway caches one arrival order. A client that holds
+        // the mask reads the water's side at every rung from the fine row's own bit.
+        let parts = self.coast_parts();
+        for (part, bits) in self.artifact.coast.chunks(COAST_PART_BYTES).enumerate() {
+            out.push(encode(&BulkMsg::ArtifactCoast {
+                realm: self.realm,
+                part: part as u32,
+                parts,
+                bits: bits.to_vec(),
+            }));
+        }
         out
+    }
+
+    /// How many coast parts this artifact's mask is cut into; ZERO for a body with no mask at all
+    /// (a lattice of no nodes), which no shipped body is.
+    #[must_use]
+    pub fn coast_parts(&self) -> u32 {
+        self.artifact.coast.len().div_ceil(COAST_PART_BYTES) as u32
     }
     /// The tile that holds macro cell `(i, j)` of a face.
     #[must_use]
@@ -118,6 +154,7 @@ pub fn artifact_source_of(
         Arc::clone(artifact),
         lattice,
         body.radius_m(),
+        body.relief_bound_m(0),
         body.ladder().rungs - 1,
     )))
 }
@@ -141,10 +178,11 @@ impl TileSource for ArtifactTiles {
             tiles_per_edge: self.artifact.tiles_per_edge(),
             levels: self.artifact.pyramid.len() as u32,
             sea_m: self.artifact.sea_m,
+            coast_parts: self.coast_parts(),
         })
     }
 
-    fn pyramid_parts(&self) -> Vec<Bytes> {
+    fn artifact_parts(&self) -> Vec<Bytes> {
         self.parts.get_or_init(|| self.encode_parts()).clone()
     }
 
@@ -154,6 +192,7 @@ impl TileSource for ArtifactTiles {
             self.artifact.pyramid.len() as u32,
             self.top_rung,
             self.body_radius_m,
+            self.relief_m,
             radial_m,
             vd_core::geometry::drawable_theta_min_rad(),
         );
@@ -202,6 +241,7 @@ mod tests {
             artifact.clone(),
             moon.macro_lattice().expect("a lattice"),
             moon.radius_m(),
+            moon.relief_bound_m(0),
             moon.ladder().rungs - 1,
         );
         assert_eq!(source.digest(), artifact.digest());
@@ -217,19 +257,32 @@ mod tests {
                 tiles_per_edge: 2,
                 levels: 2,
                 sea_m: artifact.sea_m,
+                coast_parts: source.coast_parts(),
             }
         );
-        let parts = source.pyramid_parts();
+        let parts = source.artifact_parts();
         // The parts are encoded once: a second ask hands back the same bytes.
         assert!(
             source
-                .pyramid_parts()
+                .artifact_parts()
                 .iter()
                 .zip(&parts)
                 .all(|(a, b)| Arc::ptr_eq(a, b))
         );
         // Level 2 (6 · 17² = 1 734 words) is one part; level 1 (6 · 34² = 6 936) is one part.
-        assert_eq!(parts.len(), 2);
+        // ★ THE COAST MASK rides after them (2026-09-22): the moon's 27 744 nodes are 3 468 bytes
+        // of bits, one part, and it is the LAST of the list.
+        assert_eq!(source.coast_parts(), 1);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(
+            postcard::from_bytes::<BulkMsg>(&parts[2]).expect("decodes"),
+            BulkMsg::ArtifactCoast {
+                realm: vd_core::pose::RealmId::Planet(moon.seed()),
+                part: 0,
+                parts: 1,
+                bits: artifact.coast.clone(),
+            }
+        );
         assert_eq!(
             postcard::from_bytes::<BulkMsg>(&parts[0]).expect("decodes"),
             BulkMsg::ArtifactPyramid {
@@ -238,15 +291,24 @@ mod tests {
                 part: 0,
                 parts: 1,
                 z_m: artifact.pyramid[1].clone(),
+                water_m: artifact.pyramid_water[1].clone(),
             }
         );
-        // Under +Z at the face centre (node 34 of 68), 300 km is 37 nodes (8.15 km each): the
-        // four tiles of face +Z, the nearest first; 100 km (13 nodes) stays inside tile 0.
+        // Under +Z at the face centre (node 34 of 68), 250 km is 31 nodes (8.15 km each): the
+        // four tiles of face +Z, the nearest first; 100 km (13 nodes) stays inside tile 0. At
+        // 300 km (37 nodes) the reach crosses the face's edges, and the partner faces' first
+        // tiles come after the four (2026-09-21, the tiles across a cube edge).
         assert_eq!(source.tiles_within([0.0, 0.0, 1.0], 100_000.0).len(), 1);
-        let under = source.tiles_within([0.0, 0.0, 1.0], 300_000.0);
+        let under = source.tiles_within([0.0, 0.0, 1.0], 250_000.0);
         assert_eq!(under.len(), 4);
         assert!(under.iter().all(|&(f, _, _)| f == Face::PosZ.index()));
         assert_eq!(under[0], (Face::PosZ.index(), 0, 0));
+        let across = source.tiles_within([0.0, 0.0, 1.0], 300_000.0);
+        assert!(across.len() > 4, "{across:?}");
+        assert_eq!(across[0], (Face::PosZ.index(), 0, 0));
+        for tile in &under {
+            assert!(across.contains(tile), "{tile:?} not in {across:?}");
+        }
         // A small radius near the corner of the face keeps one tile.
         let corner = source.tiles_within([0.0, 0.0, 1.0], 10.0);
         assert_eq!(corner.len(), 1);
@@ -261,13 +323,26 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(
-            source
-                .tiles_under([0.0, 0.0, 1.0], r + 200_000.0, 10.0)
-                .len(),
-            4
-        );
-        assert_eq!(source.tiles_under([0.0, 0.0, 1.0], r, 300_000.0).len(), 4);
+        // ★ Past the face's edges the reach names the partner faces' tiles too (2026-09-21): the
+        // four tiles of +Z are all there, and the reach is bounded by the ladder's outer edge, so
+        // the count is more than four and less than the whole cube.
+        let per_face = usize::try_from(artifact.tiles_per_edge().pow(2)).expect("small");
+        for (name, tiles) in [
+            (
+                "200 km up",
+                source.tiles_under([0.0, 0.0, 1.0], r + 200_000.0, 10.0),
+            ),
+            (
+                "300 km of interest",
+                source.tiles_under([0.0, 0.0, 1.0], r, 300_000.0),
+            ),
+        ] {
+            assert!(tiles.len() > 4, "{name}: {tiles:?}");
+            assert!(tiles.len() < 6 * per_face, "{name}: {tiles:?}");
+            for tile in &under {
+                assert!(tiles.contains(tile), "{name}: {tile:?} not in {tiles:?}");
+            }
+        }
         // A direction under the face (the far side) names nothing on this face's basis... it names
         // the face it points at, never this one: −Z is its own face.
         let far = source.tiles_within([0.0, 0.0, -1.0], 10.0);

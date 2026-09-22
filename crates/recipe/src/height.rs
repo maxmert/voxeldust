@@ -106,10 +106,15 @@ impl Octave {
 /// `Σ_fine a·m·n = m · Σ_fine a·n` and the sum splits at [`Roughness::first_fine`] and multiplies
 /// ONCE. Sixteen multiplies become one.
 ///
-/// ★ **DOWNWARD ONLY, WHICH IS WHAT LETS 8c SWAP IT.** `m ≤ 1` always, so the ladder's band — sized
-/// on `Σ|a|` at `m = 1` — holds for this placeholder AND for 8c's macro field, which is bounded
-/// above by one in the same way. 8c replaces [`Roughness::octave`] with its own field's gradient,
-/// bumps the generator's version, and moves not one address.
+/// ★ **DOWNWARD ONLY, WHICH IS WHAT LETS THE SOLVE JOIN IT.** `m ≤ 1` always, so the ladder's band
+/// — sized on `Σ|a|` at `m = 1` — holds for this placeholder AND for the macro field's own slope,
+/// which is a share of one in the same way.
+///
+/// ★ **AND THE SOLVED FIELD NOW SPEAKS TOO** (2026-09-21, the owner's stand over the belt). The row
+/// below is unchanged and no address moved: the HOST measures the macro field's own slope at the
+/// column and hands it in as `slope_share`, and the factor is the GREATER of the two
+/// ([`relief_of_table_from`]). So the placeholder still makes a craton smooth where the solve left
+/// the ground level, and a belt the solve raised is rough whatever the placeholder says.
 ///
 /// `repr(C)`: ten words, so a card reads the row the host wrote.
 ///
@@ -119,11 +124,11 @@ impl Octave {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct Roughness {
-    /// ★ THE PLACEHOLDER (`slice_8a_design.md` §1.2): ONE MORE SLOW OCTAVE of the recipe's own
+    /// ★ THE SLOW FIELD (`slice_8a_design.md` §1.2): ONE MORE SLOW OCTAVE of the recipe's own
     /// noise, SMOOTH, of unit amplitude, drawn from its own salt at a continental wavelength — the
-    /// band the biome noises already use. 8c replaces this one member with the macro field's own
-    /// slope and moves no address, because the band is derived at `m = 1` and both fields obey that
-    /// same ceiling.
+    /// band the biome noises already use. It stands beside the macro field's own slope share
+    /// (2026-09-21) rather than under it: the factor is the greater of the two, and the band is
+    /// derived at `m = 1`, which both obey.
     pub octave: Octave,
     /// The factor's FLOOR at [`NOISE_BITS`]: what share of a range's fine slopes a craton keeps.
     pub m_min: Gi,
@@ -246,6 +251,18 @@ pub fn relief_of_table(
 /// the COARSE ones the macro field `Z` replaces, so a column that reads `Z` sums from `first` on.
 /// The roughness factor still multiplies the fine mask's octaves alone. `first` at or past `count`
 /// sums nothing.
+///
+/// ★ **THE SOLVED FIELD'S OWN SLOPE DECIDES TOO** (2026-09-21, the owner's stand over the belt).
+/// `slope_share` is what the HOST measured of the macro field at this column: the magnitude of `Z`'s
+/// gradient over the body's own slope reference, at [`NOISE_BITS`], ONE where the field is as steep
+/// as its first fine octave and ZERO where it is flat. The factor is the GREATER of it and the noise
+/// field's own, so a mountain belt the solve raised is rough even where the placeholder's continental
+/// noise reads a craton. A caller with no artifact — the card's kernel, a body built from its seed
+/// alone — passes [`Gi::ZERO`] and the arithmetic is the one it had before.
+///
+/// **Example.** The pilot stands 16 km over the home planet's highest belt. The solve lifted that
+/// column 8 081 m and its neighbours a kilometre less, so the share reads ONE and the fine octaves
+/// stand at full amplitude: a range, not the rolling sheet the owner photographed.
 #[must_use]
 pub fn relief_of_table_from(
     octaves: &[Octave; OCTAVES_CAP],
@@ -253,14 +270,52 @@ pub fn relief_of_table_from(
     count: usize,
     dir: [Gi; 3],
     rough: &Roughness,
+    slope_share: Gi,
 ) -> Gi {
+    relief_parts_from(octaves, first, count, dir, rough, slope_share).sum()
+}
+
+/// ★ THE TWO HALVES OF A COLUMN'S RELIEF (2026-09-21, the shore law): the COARSE octaves before
+/// the fine mask, summed whole — the ground a solved field's `Z` replaces — and the FINE octaves,
+/// summed and multiplied ONCE by the column's factor. [`shore`] reads the coarse half as the
+/// column's own ground, so the two are named apart; [`relief_of_table_from`] is their sum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReliefParts {
+    /// The coarse octaves' sum, in gap steps at [`NOISE_BITS`]. ZERO for a column that sums from
+    /// the first fine octave on, because a field's `Z` stands in for these.
+    pub coarse: Gi,
+    /// The fine octaves' sum times the factor, in the same unit.
+    pub fine: Gi,
+}
+
+impl ReliefParts {
+    /// The whole relief: the two halves added, which is the one sum the column always was.
+    #[must_use]
+    pub fn sum(self) -> Gi {
+        self.coarse + self.fine
+    }
+}
+
+/// [`relief_of_table_from`], with its two halves kept apart ([`ReliefParts`]). The loop and the
+/// arithmetic are the ones the sum had; only the last addition moved to the caller.
+#[must_use]
+pub fn relief_parts_from(
+    octaves: &[Octave; OCTAVES_CAP],
+    first: usize,
+    count: usize,
+    dir: [Gi; 3],
+    rough: &Roughness,
+    slope_share: Gi,
+) -> ReliefParts {
     let d = sample_direction(dir);
     let n = if count < OCTAVES_CAP {
         count
     } else {
         OCTAVES_CAP
     };
-    let m = factor_of(rough.m_min, roughness_raw(rough, d));
+    // ★ THE GREATER OF THE TWO, BRANCHLESS (`crate::cell::greater`): the noise placeholder's factor
+    // and the solved field's share. The card compiles this line too, and it reads ZERO there.
+    let m = crate::cell::greater(factor_of(rough.m_min, roughness_raw(rough, d)), slope_share);
     let mut whole = Gi::ZERO;
     let mut fine = Gi::ZERO;
     let mut k = first;
@@ -270,7 +325,88 @@ pub fn relief_of_table_from(
         fine += term & octaves[k].fine;
         k += 1;
     }
-    (whole - fine) + fine.mul_shr(m, NOISE_BITS)
+    ReliefParts {
+        coarse: whole - fine,
+        fine: fine.mul_shr(m, NOISE_BITS),
+    }
+}
+
+/// ★ THE SHARE OF ITS OWN GROUND A COLUMN KEEPS AT THE SHORE, as a shift: a quarter. See [`shore`];
+/// the number is a STATED choice, named in `owner_decisions_2026-09-21_water.md` W6 as an ask.
+pub const SHORE_SHIFT: u32 = 2;
+
+/// ★ THE COLUMN'S SIDE OF ITS WATER IS NOT STATED: [`shore`] decides it from the ground itself
+/// (`base >= water`), which is what every host did before the coast mask. The card reads this word,
+/// because a card holds no artifact row.
+pub const SIDE_UNKNOWN: Gi = Gi::new(0);
+/// ★ THE COLUMN STANDS ON LAND, as the row said: the host read a sea word off the artifact's coast
+/// mask and it is clear. See [`shore`] and `owner_decisions_2026-09-21_water.md` W10.
+pub const SIDE_LAND: Gi = Gi::new(1);
+/// ★ THE COLUMN STANDS IN THE WATER, as the row said: the host read a sea word off the artifact's
+/// coast mask and it is set.
+pub const SIDE_SEA: Gi = Gi::new(2);
+
+/// ★ THE SEA DECIDES THE SHORE (2026-09-21; the owner, flying the coast: "the shores are changing
+/// all the time"). The shore is where the ground crosses the water's level. Before this law the
+/// FINE octaves decided that crossing, and a coarser rung keeps fewer of them, so at every ring
+/// swap the crossing moved sideways by the dropped octaves' height over the coast's slope.
+/// MEASURED on the home planet's belt coast (`vd-bins/examples/shore_step`): the crossing moved a
+/// median of 234 m at the 128 m rung and 848 m at the 256 m rung, on lines where the ground itself
+/// moved by under a cell. The land morphs across a swap; the sea does not morph with it; so the one
+/// line the morph could not carry was the shoreline.
+///
+/// THE LAW: the fine octaves may not carry a column across its water, and they may take at most
+/// three quarters of the column's own ground over (or under) the water. `base` is the ground the
+/// column stands on WITHOUT the fine octaves — the solved field, or the coarse octaves on a body
+/// with no field — and it is the same at every rung. `h` is the surface with the fine octaves and
+/// the bench. Where `base` stands over the water the surface stays over it by at least
+/// `|base − water| >> SHORE_SHIFT`; where `base` stands under, under by the same; a column whose
+/// ground stands exactly at the water is land. A column with NO water (`water` ZERO) is untouched.
+/// So the crossing stands where `base` crosses the water, at every rung, and the morph carries it.
+///
+/// What the picture gains: a coastal plain. Beside the shore, a valley the fine octaves would cut
+/// under the sea is floored at a quarter of the ground's height instead, and a fine hill in the
+/// shallows is a bar under the water, never an island the next rung loses. Where the ground stands
+/// high the clamp never binds and the relief is what it was.
+///
+/// The shift is a STATED CHOICE, not a computed one: the physical mechanism (waves plane the coast)
+/// states a band, and a band cannot hold the crossing where a fine octave is taller than it. A
+/// quarter is the smallest power of two that leaves a valley near the coast a floor of its own.
+///
+/// ★ THE COAST MASK DECIDES THE SIDE (2026-09-22; the owner, from 1 400 km: "during flight the
+/// shores changes again all the time"; ruling W10). `side` is the water's side as the ROW said it:
+/// [`SIDE_LAND`] or [`SIDE_SEA`] where the host read the artifact's coast mask at the column's own
+/// fine node, [`SIDE_UNKNOWN`] where it holds no mask (the card, a body with no artifact). Where
+/// the side is stated the ground's own sign does not decide it. MEASURED before the mask
+/// (`vd-bins/examples/shore_step`): a pyramid level's `base` is the MEAN of its children, so the
+/// ground's crossing of the sea moved a median of 11.5 km at the swap from the rows to level 1 and
+/// about 20 km at each level swap above it, and the morph carried the shoreline over that distance
+/// as the ring passed.
+///
+/// **Example.** Along the belt's coast the solved ground rises one metre in fifty. Two kilometres
+/// inland it stands forty metres over the sea; the fine octaves may dig thirty of those, and the
+/// valley's floor stands ten metres over the sea at every rung a descending ship draws. At rung 14
+/// the level's mean puts that same column two metres UNDER the sea; its row says LAND, so the
+/// column still stands over the water and the pilot sees one shoreline all the way down.
+#[must_use]
+pub fn shore(base: Gi, water: Gi, h: Gi, side: Gi) -> Gi {
+    if water == Gi::ZERO {
+        return h;
+    }
+    let g = base - water;
+    let d = h - water;
+    // The row's word where the host read one, the ground's own sign where it did not.
+    let land = if side == SIDE_UNKNOWN {
+        g >= Gi::ZERO
+    } else {
+        side == SIDE_LAND
+    };
+    // The ground's own distance from the water, whichever side the row named it on.
+    let away = if g >= Gi::ZERO { g } else { Gi::ZERO - g };
+    let keep = away >> SHORE_SHIFT;
+    let toward = if land { d } else { Gi::ZERO - d };
+    let held = crate::cell::greater(toward, keep);
+    water + if land { held } else { Gi::ZERO - held }
 }
 
 /// The 40-bit direction shifted to the noise's sample bits.
@@ -499,6 +635,159 @@ mod tests {
         assert_eq!(relief_of_table(&table, 99, dir, &flat), relief(&table, dir));
     }
 
+    /// ★ THE COAST MASK DECIDES THE SIDE (2026-09-22, ruling W10): three statements that could
+    /// each fail. A LAND column whose ground (a pyramid level's mean) stands UNDER the water is
+    /// still held OVER it when the row says land; a SEA column whose mean stands OVER the water is
+    /// held UNDER it when the row says sea; and the unknown word is the old rule, which the card
+    /// reads.
+    ///
+    /// **Example.** At rung 15 one level node covers a whole bay, so its mean stands under the sea
+    /// while the headland inside it is dry. The headland's own row says land, so the headland
+    /// stands out of the water at that rung as it does on foot.
+    #[test]
+    fn the_stated_side_beats_the_grounds_own_sign() {
+        let water = Gi::new(1_000_000);
+        // The mean says SEA (400 under), the row says LAND: the column is held 100 OVER the water.
+        assert_eq!(
+            shore(water - Gi::new(400), water, water - Gi::new(700), SIDE_LAND),
+            water + Gi::new(100)
+        );
+        // The same column, already well over the water: untouched.
+        assert_eq!(
+            shore(water - Gi::new(400), water, water + Gi::new(900), SIDE_LAND),
+            water + Gi::new(900)
+        );
+        // The mean says LAND (400 over), the row says SEA: the column is held 100 UNDER the water.
+        assert_eq!(
+            shore(water + Gi::new(400), water, water + Gi::new(700), SIDE_SEA),
+            water - Gi::new(100)
+        );
+        // The same column, already well under the water: untouched.
+        assert_eq!(
+            shore(water + Gi::new(400), water, water - Gi::new(900), SIDE_SEA),
+            water - Gi::new(900)
+        );
+        // The unknown word is the ground's own sign — the card's rule, unchanged.
+        assert_eq!(
+            shore(
+                water - Gi::new(400),
+                water,
+                water - Gi::new(700),
+                SIDE_UNKNOWN
+            ),
+            water - Gi::new(700)
+        );
+        // A column with no water is untouched whatever the row says.
+        assert_eq!(
+            shore(Gi::new(400), Gi::ZERO, Gi::new(-50), SIDE_SEA),
+            Gi::new(-50)
+        );
+    }
+
+    /// ★ THE SHORE LAW, four statements that could each fail (2026-09-21): a land column the fine
+    /// octaves dug under its water is held over it at a quarter of its ground; a sea column they
+    /// raised over its water is held under it by the same; a column whose surface already stands on
+    /// its ground's side by more than the share is untouched; a column with NO water is untouched
+    /// whatever it does; and a ground exactly at the water is land. Plus the parts: the two halves
+    /// sum to the one relief.
+    #[test]
+    fn the_shore_holds_a_column_on_its_grounds_side_of_the_water() {
+        let water = Gi::new(1_000_000);
+        // Land: the ground 400 over the water, the surface dug 50 under it → held at 100 over.
+        assert_eq!(
+            shore(
+                water + Gi::new(400),
+                water,
+                water - Gi::new(50),
+                SIDE_UNKNOWN
+            ),
+            water + Gi::new(100)
+        );
+        // Land, the surface 100 over exactly (the bound itself) → untouched.
+        assert_eq!(
+            shore(
+                water + Gi::new(400),
+                water,
+                water + Gi::new(100),
+                SIDE_UNKNOWN
+            ),
+            water + Gi::new(100)
+        );
+        // Land, the surface high → untouched.
+        assert_eq!(
+            shore(
+                water + Gi::new(400),
+                water,
+                water + Gi::new(900),
+                SIDE_UNKNOWN
+            ),
+            water + Gi::new(900)
+        );
+        // Sea: the ground 400 under, the surface raised 30 over → held at 100 under.
+        assert_eq!(
+            shore(
+                water - Gi::new(400),
+                water,
+                water + Gi::new(30),
+                SIDE_UNKNOWN
+            ),
+            water - Gi::new(100)
+        );
+        // Sea, the surface deep → untouched.
+        assert_eq!(
+            shore(
+                water - Gi::new(400),
+                water,
+                water - Gi::new(700),
+                SIDE_UNKNOWN
+            ),
+            water - Gi::new(700)
+        );
+        // The ground AT the water is land: the surface may not go under it.
+        assert_eq!(shore(water, water, water - Gi::new(9), SIDE_UNKNOWN), water);
+        assert_eq!(
+            shore(water, water, water + Gi::new(9), SIDE_UNKNOWN),
+            water + Gi::new(9)
+        );
+        // No water: whatever the surface does, it does.
+        assert_eq!(
+            shore(Gi::new(400), Gi::ZERO, Gi::new(-50), SIDE_UNKNOWN),
+            Gi::new(-50)
+        );
+        // The parts sum to the relief, and the coarse half is the octaves before the fine mask.
+        let table = [
+            octave(3, 2.0, 100.0),
+            fine(octave(5, 9.0, 20.0)),
+            fine(octave(7, 17.0, 5.0)),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+            octave(0, 0.0, 0.0),
+        ];
+        let rough = roughness(11, 1.0, Gi::new(1 << NOISE_BITS), 1);
+        let dir = [Gi::new(1 << 39), Gi::new(1 << 38), Gi::new(1 << 37)];
+        let parts = relief_parts_from(&table, 0, 3, dir, &rough, Gi::ZERO);
+        assert_eq!(
+            parts.sum(),
+            relief_of_table_from(&table, 0, 3, dir, &rough, Gi::ZERO)
+        );
+        assert_eq!(parts.coarse, relief(&table[..1], dir));
+        assert_eq!(
+            relief_parts_from(&table, 1, 3, dir, &rough, Gi::ZERO).coarse,
+            Gi::ZERO,
+            "from the first fine octave on there is no coarse half"
+        );
+    }
+
     /// ★ THE FROM-FIRST TABLE FORM CLAMPS ITS COUNT (slice 8c stage C4). A count at or past the
     /// table's size reads the WHOLE table; a `first` at or past that count sums nothing; a `first`
     /// of one drops the first octave's term.
@@ -516,23 +805,89 @@ mod tests {
         let flat = flat_roughness();
         // A count AT the table's size takes the clamp arm and reads the whole table.
         assert_eq!(
-            relief_of_table_from(&table, 0, OCTAVES_CAP, dir, &flat),
+            relief_of_table_from(&table, 0, OCTAVES_CAP, dir, &flat, Gi::ZERO),
             relief(&table, dir)
         );
         // A count PAST the table reads the whole table too.
         assert_eq!(
-            relief_of_table_from(&table, 0, 99, dir, &flat),
+            relief_of_table_from(&table, 0, 99, dir, &flat, Gi::ZERO),
             relief(&table, dir)
         );
         // From the second octave on, the sum drops the first octave's term.
         assert_eq!(
-            relief_of_table_from(&table, 1, OCTAVES_CAP, dir, &flat),
+            relief_of_table_from(&table, 1, OCTAVES_CAP, dir, &flat, Gi::ZERO),
             relief(&table[1..], dir)
         );
         // A first at or past the clamped count sums nothing.
         assert_eq!(
-            relief_of_table_from(&table, OCTAVES_CAP, 99, dir, &flat),
+            relief_of_table_from(&table, OCTAVES_CAP, 99, dir, &flat, Gi::ZERO),
             Gi::ZERO
+        );
+    }
+
+    /// ★ THE FACTOR IS THE GREATER OF THE NOISE'S AND THE SOLVED FIELD'S (2026-09-21, the owner's
+    /// stand over the belt). The test states BOTH arms of the `greater`:
+    ///
+    /// 1. A share UNDER the noise factor changes nothing — the sum is the one the card computes
+    ///    with a share of zero, word for word.
+    /// 2. A share OVER it wins — the fine half is multiplied by the SHARE, not by the noise's own
+    ///    factor, and a share of ONE gives the raw sum the ladder's band is sized on.
+    ///
+    /// RED before 2026-09-21: `relief_of_table_from` took no share, so a belt the solve raised read
+    /// a craton's smoothness and the owner photographed a rolling plain at 16 km.
+    ///
+    /// **Example.** The column under the pilot's boots sits on an orogen the solve lifted 8 km. Its
+    /// slope share reads ONE and its fine octaves stand at full amplitude, whatever the placeholder
+    /// noise says about that part of the globe.
+    #[test]
+    fn the_factor_is_the_greater_of_the_noise_and_the_solved_slope() {
+        // Two COARSE octaves and two FINE ones, so the share touches the fine half alone.
+        let a = octave(1, 15.9259, 8011.2287);
+        let b = octave(2, 31.8518, 4111.0007);
+        let c = fine(octave(3, 63.7036, 2109.6));
+        let d = fine(octave(4, 127.4072, 1082.5));
+        let mut table = [a; OCTAVES_CAP];
+        table[1] = b;
+        table[2] = c;
+        table[3] = d;
+        // A roughness row whose floor is LOW, so the noise factor leaves room over it and under it.
+        let rough = roughness(37, 2.5, M_MIN_Q, 2);
+        let dir = crate::bend::normalise([DIR_ONE, Gi::ONE << (DIR_BITS - 8), Gi::ZERO]);
+        let m = roughness_factor(&rough, dir);
+        assert!(
+            m > M_MIN_Q,
+            "the column's noise factor stands off its floor"
+        );
+        assert!(
+            m < NOISE_ONE,
+            "and under the ceiling, so both arms are real"
+        );
+        let none = relief_of_table_from(&table, 0, 4, dir, &rough, Gi::ZERO);
+        // ARM ONE — a share UNDER the noise factor: the noise factor stands, word for word.
+        assert_eq!(
+            relief_of_table_from(&table, 0, 4, dir, &rough, m >> 1),
+            none,
+            "a flat solved field leaves the noise factor alone"
+        );
+        // ARM TWO — a share OVER it: the SHARE multiplies the fine half.
+        let steep = (m + NOISE_ONE) >> 1;
+        let coarse_sum = relief(&table[..2], dir);
+        let fine_sum = relief(&table[2..4], dir);
+        assert_eq!(
+            relief_of_table_from(&table, 0, 4, dir, &rough, steep),
+            coarse_sum + fine_sum.mul_shr(steep, NOISE_BITS),
+            "a steep solved field wins"
+        );
+        // And a share of ONE is the raw sum — the ceiling the ladder's band is sized at.
+        assert_eq!(
+            relief_of_table_from(&table, 0, 4, dir, &rough, NOISE_ONE),
+            relief(&table[..4], dir),
+            "a share of one keeps every fine octave whole"
+        );
+        // The two arms really part company on this column.
+        assert_ne!(
+            relief_of_table_from(&table, 0, 4, dir, &rough, NOISE_ONE),
+            none
         );
     }
 

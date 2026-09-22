@@ -35,6 +35,10 @@ pub struct DevEntityRow {
     /// learning which node owns it). Retained as a stable diagnostic field (always the inert
     /// `vd_client::view::RENDERED_SUB` = 0) so `vdctl`/process-parity decode the row unchanged.
     pub authoritative_sub: u32,
+    /// ★ THE RAW LATTICE CELL of the render pose and its stated frame (2026-09-22, the on-foot
+    /// ground): the coarse half the flattened `pos` folds in, and the frame the pose came in.
+    pub cell: [i64; 3],
+    pub frame: String,
 }
 
 /// One DRAWN realm box (VU diagnosis): its realm id (canonical `Debug`) and the center it would
@@ -56,6 +60,8 @@ pub struct DevRealmBox {
     /// parent explicitly from the fold that knows it.
     pub parent: Option<String>,
     pub center: [f64; 3],
+    /// The row centre's raw lattice cell (2026-09-22).
+    pub cell: [i64; 3],
     /// The row's facing (x, y, z, w) as the composer delivered it — the rotation between the
     /// realm's own frame and the picture's. A gate that reads a point in the realm's frame (the
     /// picture gate's eye over the recipe, slice 8p) rotates by THIS; it used to assume the identity,
@@ -79,6 +85,12 @@ pub struct DevRealmBox {
     /// SAME Tier-A `marker_look` + `marker_world_radius` pair the renderer scales the sprite by
     /// (window lane Slice D), so the drawn footprint and the asserted rectangle cannot disagree.
     pub luma: Option<(u8, f64)>,
+    /// ★ WHETHER THE ROW CARRIES A SURFACE STATEMENT (2026-09-22, the on-foot ground): the terrain
+    /// lane descends a realm only when its row states a surface; a row without one draws no ground
+    /// whoever stands in it.
+    pub surface: bool,
+    /// The row's tier, as the row states it (the unit its centre is counted in).
+    pub tier: String,
     /// SHAKE DIAGNOSIS — the newest universe tick this realm's pose feed has delivered; `None` for a
     /// box the feed never streamed (it is sitting at its boot placement). Read against
     /// [`DevState::entity_feed_newest_tick`], this is what distinguishes the two candidate causes of a
@@ -154,6 +166,15 @@ pub struct DevArtifacts {
     /// (2026-09-20: the counts alone could not say WHICH planet's head had not come).
     #[serde(default)]
     pub held: Vec<(String, bool)>,
+    /// ★ EVERY TILE THE BOOK HOLDS, per realm as `{:?}` with its `(face, tx, ty)` (2026-09-22, the
+    /// on-foot ground): the list a chunk's missing tiles are held against.
+    #[serde(default)]
+    pub tiles_held: Vec<(String, u8, u32, u32)>,
+    /// ★ THE REALMS WHOSE COAST MASK IS WHOLE, as `{:?}` (2026-09-22, ruling W10): the mask says
+    /// which side of the water each fine node stands on, and every rung reads it, so a flight that
+    /// sees the shoreline crawl can say at once whether the mask was there.
+    #[serde(default)]
+    pub coast_held: Vec<String>,
 }
 
 /// The decoded, delivered client state — wire truth, the agent's diagnosis surface.
@@ -361,15 +382,20 @@ pub(crate) mod tests {
                 pos: [1.0, 2.0, 3.0],
                 orient: [0.0, 0.0, 0.0, 1.0],
                 authoritative_sub: 0,
+                cell: [0, 0, 0],
+                frame: "PlanetCentered".to_owned(),
             }],
             realm_boxes: vec![DevRealmBox {
                 realm: "Planet(7)".to_owned(),
                 parent: Some("System(7)".to_owned()),
                 center: [10.0, 0.0, 0.0],
+                cell: [0, 0, 0],
                 facing: [0.0, 0.0, 0.6, 0.8],
                 extent_m: 4.0,
                 body_kind: "look".to_owned(),
                 luma: None,
+                surface: false,
+                tier: "Fine".to_owned(),
                 newest_tick: Some(100),
                 charter: Some(DevBodyCharter {
                     gravity_mm_s2: 9_818,
@@ -423,6 +449,7 @@ pub(crate) mod tests {
                 awaiting_artifact: 9,
                 artifact_rebuilds: 1,
                 awaiting_keys: vec!["PosX 0 4000 4000 3: tiles [(0, 2, 2)]".to_owned()],
+                missing_tiles: vec![],
                 empty_chunks: 4,
                 empty_keys: vec!["PosX 4 12 9 269".to_owned()],
                 hole_columns: 2,
@@ -430,6 +457,11 @@ pub(crate) mod tests {
                 margin_missing: 5,
                 stale_builds: 3,
                 lattice_edge: 1216,
+                eyes: vec![("Planet(7)".to_owned(), 3.4)],
+                eye_cell: [0, 0, 0],
+                eye_offset_m: [0.0, 0.0, 0.0],
+                eye_tier: "Fine".to_owned(),
+                body_branches: vec![],
                 artifact_expected: Some([0xD1, 0xD2]),
                 artifact_held: None,
                 lead_m: 0.0,
@@ -726,6 +758,10 @@ pub struct DevTerrainStamp {
     /// (capped). A chunk built empty counts as drawn everywhere else, and the sea sheet shows
     /// through it.
     pub awaiting_keys: Vec<String>,
+    /// ★ THE MISSING TILES this frame's awaiting chunks wait for, `(face, tx, ty, chunks)`, the
+    /// most-waited first, capped at sixteen (2026-09-22, the on-foot ground).
+    #[serde(default)]
+    pub missing_tiles: Vec<(u8, u32, u32, u32)>,
     pub empty_chunks: u64,
     pub empty_keys: Vec<String>,
     /// ★ THE HOLE COLUMNS NOW: chunk columns of the realm under the eye whose every resident
@@ -740,6 +776,17 @@ pub struct DevTerrainStamp {
     /// The macro lattice's edge in nodes of the body under the eye as the lane holds it (zero
     /// for a body with none): what the level a rung reads is derived from.
     pub lattice_edge: u32,
+    /// ★ EVERY BODY THE LANE DESCENDS THIS FRAME with the eye's altitude over it, metres
+    /// (2026-09-22): the realm the stamp names is the lowest of these; a realm the pilot stands in
+    /// that is NOT in this list has no body in the lane, and draws nothing.
+    pub eyes: Vec<(String, f64)>,
+    /// ★ THE EYE ON THE LATTICE as the camera placed it this frame (2026-09-22): its cell, its
+    /// offset in metres, its tier; and per drawn body the row's tier and the reduction branch the
+    /// draw centre took (`far`, `lattice`, `flat`).
+    pub eye_cell: [i64; 3],
+    pub eye_offset_m: [f64; 3],
+    pub eye_tier: String,
+    pub body_branches: Vec<(String, String, String)>,
     /// The artifact the body under the eye STATES (the digest off its look bag) and the one the
     /// lane HOLDS for it (the head that arrived) — equal when the lane builds on the field, and
     /// the two words that say which side is missing when it does not.

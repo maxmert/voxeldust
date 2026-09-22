@@ -268,7 +268,7 @@ fn a_peer_below_the_protocol_floor_is_closed_with_the_floor_named() {
     assert_eq!(
         decode_controls(&sent, CLIENT),
         vec![ServerControlMsg::Close {
-            reason: "protocol minor below the floor (24): the scene is server-composed from v1.24"
+            reason: "protocol minor below the floor (34): the scene is server-composed from v1.34"
                 .to_owned()
         }]
     );
@@ -4038,6 +4038,7 @@ fn freshest_session_confirmed_maxes_over_active_and_selffenced() {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            held_bulk: Vec::new(),
             client: CLIENT,
             account: AccountId(5),
             fence: Fence(1),
@@ -4127,6 +4128,7 @@ fn one_active_session() -> (GatewaySessions, SessionId, OutboundBox) {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            held_bulk: Vec::new(),
             client: CLIENT,
             account: AccountId(5),
             fence: Fence(1),
@@ -4387,6 +4389,7 @@ fn sweep_keeps_a_shared_reverse_index_entry_with_a_surviving_subscriber() {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            held_bulk: Vec::new(),
             client: NodeId(101),
             account: AccountId(6),
             fence: Fence(1),
@@ -5465,6 +5468,7 @@ fn active_session() -> Session {
         artifact_held: std::collections::BTreeMap::new(),
         artifact_parts_sent: std::collections::BTreeMap::new(),
         artifact_tiles_sent: std::collections::BTreeMap::new(),
+        held_bulk: Vec::new(),
         client: CLIENT,
         account: AccountId(5),
         fence: Fence(1),
@@ -10856,6 +10860,7 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            held_bulk: Vec::new(),
             client: CLIENT,
             account: AccountId(i as u128),
             fence: Fence(1),
@@ -11726,7 +11731,8 @@ fn a_shards_bulk_for_named_sessions_is_relayed_as_artifact_parts() {
         .get_mut(&sid)
         .expect("the session")
         .negotiated_minor = vd_wire::version::PROTO_MINOR;
-    // A session that is not Active (its phase forced back) is skipped and counted.
+    // A session that is not Active (its phase forced back) is HELD, not dropped (2026-09-22): the
+    // part reaches no client this tick, the hold counts it, and nothing is unrouted.
     let phase = std::mem::replace(
         &mut rig
             .world
@@ -11739,7 +11745,14 @@ fn a_shards_bulk_for_named_sessions_is_relayed_as_artifact_parts() {
     );
     let sent = rig.tick(vec![bulk(Fence(1), BulkAudience::Sessions(vec![sid]))]);
     assert!(parts_to_client(&sent).is_empty());
-    assert_eq!(rig.world.resource::<GatewayStats>().bulk_for_unrouted, 6);
+    assert_eq!(rig.world.resource::<GatewayStats>().bulk_for_unrouted, 5);
+    assert_eq!(rig.world.resource::<GatewayStats>().bulk_for_held, 1);
+    assert_eq!(
+        rig.world.resource::<GatewaySessions>().by_session[&sid]
+            .held_bulk
+            .len(),
+        1
+    );
     rig.world
         .resource_mut::<GatewaySessions>()
         .by_session
@@ -11787,6 +11800,11 @@ fn a_shards_bulk_for_named_sessions_is_relayed_as_artifact_parts() {
 /// — until the session states it holds them, when the serve is skipped and counted; a realm nobody
 /// draws any more is forgotten with its cache. Stray parts (no head, the wrong sender, a shape the
 /// head did not announce, a duplicate, a tile) are counted and dropped.
+///
+/// ★ AND THE COAST MASK COUNTS TOO (2026-09-22, ruling W10): the head announces its parts, and the
+/// cache is NOT whole until every one of them is here — a session served half a mask would draw
+/// half a shoreline. A coast part from another node, of a count the head did not announce, past
+/// the count, or twice, is a stray.
 #[test]
 fn the_realm_the_occupant_stands_in_has_its_artifact_wanted_and_served_too() {
     use vd_wire::channels::BulkMsg;
@@ -11891,6 +11909,7 @@ fn the_realm_the_occupant_stands_in_has_its_artifact_wanted_and_served_too() {
             tiles_per_edge: 1,
             levels: 1,
             sea_m: 0,
+            coast_parts: 2,
         }),
         bulk(&BulkMsg::ArtifactPyramid {
             realm: RealmId::System(7),
@@ -11898,16 +11917,61 @@ fn the_realm_the_occupant_stands_in_has_its_artifact_wanted_and_served_too() {
             part: 0,
             parts: 1,
             z_m: vec![1],
+            water_m: vec![],
         }),
     ]);
-    assert!(rig.world.resource::<GatewaySessions>().artifacts[&RealmId::System(7)].whole());
+    // ★ THE PYRAMID IS HERE AND THE MASK IS NOT: the cache is not whole.
+    assert!(
+        !rig.world.resource::<GatewaySessions>().artifacts[&RealmId::System(7)].whole(),
+        "the coast mask's two parts are still owed"
+    );
+    let coast = |part: u32, parts: u32| BulkMsg::ArtifactCoast {
+        realm: RealmId::System(7),
+        part,
+        parts,
+        bits: vec![0xA5, 0x00],
+    };
+    let strays_before = rig.stats().artifact_parts_stray;
+    set_tick(&mut rig, 27);
+    let _ = rig.tick(vec![
+        // A count the head did not announce, a part past the count, and a part from another node.
+        bulk(&coast(0, 3)),
+        bulk(&coast(2, 2)),
+        wire(
+            DEST,
+            MsgClass::Control,
+            &ShardToGateway::BulkFor {
+                realm_fence: Fence(1),
+                audience: BulkAudience::Realm(RealmId::System(7)),
+                bytes: postcard::to_allocvec(&coast(0, 2)).expect("encode"),
+            },
+        ),
+        bulk(&coast(0, 2)),
+        // The same part twice.
+        bulk(&coast(0, 2)),
+    ]);
+    assert_eq!(
+        rig.stats().artifact_parts_stray - strays_before,
+        4,
+        "a wrong count, a part past the count, another node's part, and a duplicate"
+    );
+    assert!(
+        !rig.world.resource::<GatewaySessions>().artifacts[&RealmId::System(7)].whole(),
+        "one of the mask's two parts is still owed"
+    );
+    set_tick(&mut rig, 28);
+    let _ = rig.tick(vec![bulk(&coast(1, 2))]);
+    assert!(
+        rig.world.resource::<GatewaySessions>().artifacts[&RealmId::System(7)].whole(),
+        "the head, the pyramid and the whole mask"
+    );
     set_tick(&mut rig, 50);
     assert_eq!(
         parts_to_client(&rig.tick(vec![])),
-        2,
-        "the head and the part"
+        4,
+        "the head, the pyramid part and the mask's two parts"
     );
-    assert_eq!(rig.stats().artifact_parts_served, 2);
+    assert_eq!(rig.stats().artifact_parts_served, 4);
 }
 
 #[test]
@@ -12058,6 +12122,7 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
             tiles_per_edge: lattice.edge.div_ceil(vd_terrain::artifact::TILE_EDGE),
             levels: 1,
             sea_m: 0,
+            coast_parts: 0,
         }),
         bulk(&BulkMsg::ArtifactPyramid {
             realm: RealmId::Planet(7),
@@ -12065,6 +12130,7 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
             part: 0,
             parts: 1,
             z_m: vec![1],
+            water_m: vec![],
         }),
     ]);
     // ★ THE VIEW WANT: on the beat, the session's view of the planet — the eye 30 m from the
@@ -12089,6 +12155,7 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
         1,
         body.ladder().rungs - 1,
         body.radius_m(),
+        body.relief_bound_m(0),
         30.0,
         vd_core::geometry::drawable_theta_min_rad(),
     );
@@ -12304,6 +12371,7 @@ fn a_drawn_realms_artifact_is_wanted_once_cached_once_and_served_per_session() {
         tiles_per_edge: 1,
         levels: 2,
         sea_m: 0,
+        coast_parts: 0,
     };
     let head = head_for(RealmId::Planet(7));
     let part = |level: u32, part: u32, parts: u32| BulkMsg::ArtifactPyramid {
@@ -12312,6 +12380,7 @@ fn a_drawn_realms_artifact_is_wanted_once_cached_once_and_served_per_session() {
         part,
         parts,
         z_m: vec![level as i16, part as i16],
+        water_m: vec![],
     };
     let stray_part = |realm: RealmId| BulkMsg::ArtifactPyramid {
         realm,
@@ -12319,6 +12388,7 @@ fn a_drawn_realms_artifact_is_wanted_once_cached_once_and_served_per_session() {
         part: 1,
         parts: 2,
         z_m: vec![0],
+        water_m: vec![],
     };
     // ★ A TILE IS A STRAY TWICE OVER (2026-09-21): before the realm's head is cached the gateway
     // holds nothing to put it in, and a tile that names ANOTHER realm than the audience is not
@@ -12489,6 +12559,7 @@ fn a_drawn_realms_artifact_is_wanted_once_cached_once_and_served_per_session() {
             tiles_per_edge: 1,
             levels: 0,
             sea_m: 0,
+            coast_parts: 0,
         },
     )]);
     assert!(!rig.world.resource::<GatewaySessions>().artifacts[&RealmId::Planet(7)].whole());
@@ -12692,6 +12763,7 @@ fn a_drawn_realm_whose_surface_is_not_a_planets_is_served_no_tiles() {
         tiles_per_edge: 1,
         levels: 1,
         sea_m: 0,
+        coast_parts: 0,
     };
     let part = BulkMsg::ArtifactPyramid {
         realm: RealmId::Star(7),
@@ -12699,6 +12771,7 @@ fn a_drawn_realm_whose_surface_is_not_a_planets_is_served_no_tiles() {
         part: 0,
         parts: 1,
         z_m: vec![1],
+        water_m: vec![],
     };
     let tile = BulkMsg::ArtifactTile {
         realm: RealmId::Star(7),
@@ -12777,6 +12850,7 @@ fn a_view_of_no_length_or_a_realm_with_no_look_is_served_no_tiles() {
                 tiles_per_edge: 1,
                 levels: 1,
                 sea_m: 0,
+                coast_parts: 0,
             },
             BulkMsg::ArtifactPyramid {
                 realm,
@@ -12784,6 +12858,7 @@ fn a_view_of_no_length_or_a_realm_with_no_look_is_served_no_tiles() {
                 part: 0,
                 parts: 1,
                 z_m: vec![1],
+                water_m: vec![],
             },
             BulkMsg::ArtifactTile {
                 realm,
@@ -12920,4 +12995,93 @@ fn a_body_with_no_macro_lattice_reaches_no_tiles() {
         super::artifact::tiles_in_reach(&body.without_macro_lattice(), 1, view),
         Vec::new()
     );
+}
+
+/// ★ A SHARD'S BULK FOR A SESSION THAT IS STILL ACTIVATING IS HELD, NOT DROPPED (2026-09-22, the
+/// on-foot ground). Four statements that could each fail: a bulk for an `AwaitingAttach` session
+/// reaches no outbox and is held, counted; the activation delivers every held part in order;
+/// the hold is bounded at `HELD_BULK_CAP`, the oldest dropped and counted; an Active session's
+/// bulk is relayed at once and holds nothing.
+#[test]
+fn a_shards_bulk_for_an_activating_session_is_held_and_delivered_on_activation() {
+    use super::shard::{HELD_BULK_CAP, flush_held_bulk, relay_bulk};
+    let mut sessions = GatewaySessions::default();
+    let mut session = active_session();
+    session.phase = SessionPhase::AwaitingAttach;
+    session.negotiated_minor = 33;
+    sessions.by_session.insert(SessionId(1), session);
+    let mut stats = GatewayStats::default();
+    let mut outbox = OutboundBox::default();
+    relay_bulk(
+        NodeId(7),
+        Fence(1),
+        &[SessionId(1)],
+        vec![1, 2, 3],
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    relay_bulk(
+        NodeId(7),
+        Fence(1),
+        &[SessionId(1)],
+        vec![4, 5],
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(
+        outbox.0.len(),
+        0,
+        "nothing reaches a session that is not active"
+    );
+    assert_eq!(stats.bulk_for_held, 2);
+    assert_eq!(stats.bulk_for_unrouted, 0);
+    let held = &sessions.by_session[&SessionId(1)].held_bulk;
+    assert_eq!(held, &vec![vec![1, 2, 3], vec![4, 5]], "held in order");
+    // The activation: every held part goes out, in order, and the hold is empty.
+    let session = sessions
+        .by_session
+        .get_mut(&SessionId(1))
+        .expect("the session");
+    session.phase = SessionPhase::Active {
+        entity: EntityId(1),
+    };
+    flush_held_bulk(session, &mut stats, &mut outbox);
+    assert_eq!(outbox.0.len(), 2);
+    assert!(session.held_bulk.is_empty());
+    assert_eq!(stats.artifact_parts_relayed, 2);
+    // Active: relayed at once.
+    relay_bulk(
+        NodeId(7),
+        Fence(1),
+        &[SessionId(1)],
+        vec![9],
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(outbox.0.len(), 3);
+    assert!(sessions.by_session[&SessionId(1)].held_bulk.is_empty());
+    // The bound: the oldest is dropped and counted.
+    let session = sessions
+        .by_session
+        .get_mut(&SessionId(1))
+        .expect("the session");
+    session.phase = SessionPhase::AwaitingAttach;
+    for k in 0..(HELD_BULK_CAP as u8 + 1) {
+        relay_bulk(
+            NodeId(7),
+            Fence(1),
+            &[SessionId(1)],
+            vec![k],
+            &mut sessions,
+            &mut stats,
+            &mut outbox,
+        );
+    }
+    let held = &sessions.by_session[&SessionId(1)].held_bulk;
+    assert_eq!(held.len(), HELD_BULK_CAP);
+    assert_eq!(held[0], vec![1], "the oldest was dropped");
+    assert_eq!(stats.bulk_for_unrouted, 1);
 }

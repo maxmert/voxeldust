@@ -354,7 +354,8 @@ pub fn surface_column_field(
     x: i32,
     y: i32,
 ) -> Option<ColumnSpan> {
-    let lattice = body.macro_lattice()?.coarser(field.level())?;
+    let fine = body.macro_lattice()?;
+    let lattice = fine.coarser(field.level())?;
     let edge = crate::chunk::CHUNK_EDGE as i32;
     let key = ChunkKey {
         face,
@@ -368,8 +369,10 @@ pub fn surface_column_field(
         body,
         field: Some(field),
         lattice: Some(&lattice),
+        fine_lattice: Some(&fine),
         charter: &charter,
         first: body.first_fine(),
+        slope_charter: crate::artifact::slope_charter(body, &lattice, rung),
         key,
         n_cells: body.ladder.cells_per_edge(rung) as i32,
     };
@@ -379,8 +382,8 @@ pub fn surface_column_field(
     while i < COLUMN_SAMPLES_PER_EDGE {
         let mut j = 0;
         while j < COLUMN_SAMPLES_PER_EDGE {
-            let (_, h, _, _, _) = read.column(i * step, j * step)?;
-            heights[(i * COLUMN_SAMPLES_PER_EDGE + j) as usize] = h;
+            heights[(i * COLUMN_SAMPLES_PER_EDGE + j) as usize] =
+                read.column(i * step, j * step)?.h;
             j += 1;
         }
         i += 1;
@@ -925,6 +928,8 @@ mod tests {
         let level_9 = PyramidField {
             level: 9,
             z_m: vec![],
+            water_m: vec![],
+            coast: None,
         };
         assert!(surface_column_field(&moon, &level_9, Face::PosZ, 0, 4_000, 4_000).is_none());
         let torn = TileCache::new(lattice.edge);

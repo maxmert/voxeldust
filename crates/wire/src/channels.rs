@@ -428,6 +428,11 @@ pub enum BulkMsg {
         /// `i16::MIN` for a dry body: the client gives its body this sea with the head. Added
         /// inside minor 32 before any peer shipped it.
         sea_m: i16,
+        /// ★ HOW MANY COAST PARTS FOLLOW (2026-09-22, ruling W10): the parts of
+        /// [`BulkMsg::ArtifactCoast`] that carry the realm's coast mask. A client's cache is
+        /// whole only when every one of them is here. A field APPEND to an arm minor 33 shipped,
+        /// which moved [`crate::version::PROTO_MINOR_FLOOR`] to 34.
+        coast_parts: u32,
     },
     /// ★ ONE PART OF A PYRAMID LEVEL: level `level` (from 1), part `part` of `parts`, the heights in
     /// whole metres in the coarser lattice's node order — the globe from orbit. APPENDED
@@ -438,8 +443,13 @@ pub enum BulkMsg {
         part: u32,
         parts: u32,
         z_m: Vec<i16>,
+        /// ★ The part's WATER WORDS (2026-09-21), one per height in the same order, or EMPTY for a
+        /// level that carries none (the far view then reads the body's sea alone). Added inside
+        /// minor 33 with the version's flag day.
+        water_m: Vec<i16>,
     },
-    /// ★ ONE TILE of node rows (nine bytes a row, row-major from the tile's origin), shipped by the
+    /// ★ ONE TILE of node rows (the generator's own `ROW_BYTES`, row-major from the tile's origin;
+    /// ten since the rock map landed, and the wire names no count of its own), shipped by the
     /// owning realm to an occupant under its interest. APPENDED (discriminant 5, minor 32).
     ArtifactTile {
         realm: RealmId,
@@ -447,6 +457,22 @@ pub enum BulkMsg {
         tx: u32,
         ty: u32,
         rows: Vec<u8>,
+    },
+    /// ★ ONE PART OF THE COAST MASK (2026-09-22, ruling W10; the owner, from 1 400 km: "during
+    /// flight the shores changes again all the time"): `bits` holds part `part` of `parts` of the
+    /// realm's mask — ONE BIT PER FINE MACRO NODE in node order, bit `node % 8` of byte
+    /// `node / 8`, set where the node stands at or under the sea. A part carries at most 32 KiB of
+    /// bits, a tile's weight. The client holds the mask beside the pyramid and every level reads
+    /// the water's SIDE off it, so the shoreline stands in one place at every rung. APPENDED
+    /// (discriminant 6, minor 34).
+    ///
+    /// **Example.** The home planet's mask is 8.9 million bits — 1.1 MB, 34 parts — and it rides
+    /// after the pyramid's parts on the realm audience, once per gateway.
+    ArtifactCoast {
+        realm: RealmId,
+        part: u32,
+        parts: u32,
+        bits: Vec<u8>,
     },
 }
 
@@ -1363,6 +1389,7 @@ mod tests {
                     tiles_per_edge: 19,
                     levels: 6,
                     sea_m: -1_250,
+                    coast_parts: 34,
                 },
                 3,
             ),
@@ -1373,6 +1400,7 @@ mod tests {
                     part: 0,
                     parts: 3,
                     z_m: vec![-5, 7],
+                    water_m: vec![i16::MIN, 3],
                 },
                 4,
             ),
@@ -1385,6 +1413,15 @@ mod tests {
                     rows: vec![9; 9],
                 },
                 5,
+            ),
+            (
+                BulkMsg::ArtifactCoast {
+                    realm: RealmId::Planet(7),
+                    part: 1,
+                    parts: 34,
+                    bits: vec![0b1010_1010, 0x0F],
+                },
+                6,
             ),
         ];
         for (msg, index) in bulk {

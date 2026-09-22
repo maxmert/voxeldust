@@ -27,8 +27,10 @@
 use std::process::ExitCode;
 
 use vd_bins::DEV;
+use vd_bins::artifact_worker::{SolveJob, run_solve};
 use vd_seed::bend::{Face, direction};
-use vd_terrain::height::{height_m, roughness_at};
+use vd_terrain::height::{height_m, roughness_at, roughness_field_at};
+use vd_terrain::home::{home_planet, home_solve_words};
 
 /// Directions per face edge in the sample grid: 6 × 40 × 40 = 9 600 columns.
 const GRID: i32 = 40;
@@ -177,5 +179,82 @@ fn main() -> ExitCode {
     println!(
         "slope_histogram: the arc's band — whole p50 3°–12°, whole p95 25°–40°, the PLAIN's p99 under 5°, the RANGE's p50 28°–34°"
     );
+
+    // ★ THE SAME HISTOGRAM ON THE ARTIFACT PATH (2026-09-21, the owner's stand over the belt).
+    // Everything above reads the RECIPE's own relief, which no player sees on a body that ships an
+    // artifact: there the column's factor is the GREATER of the noise placeholder's and the SOLVED
+    // field's own slope share. `VD_HISTOGRAM_FIELD=1` solves the home planet once (about 70 s) and
+    // prints the factor the ground really has, beside the one above.
+    if std::env::var_os("VD_HISTOGRAM_FIELD").is_some() {
+        let home = home_planet();
+        let started = std::time::Instant::now();
+        let artifact = run_solve(&SolveJob {
+            body: home,
+            words: home_solve_words(),
+        })
+        .expect("the home planet solves");
+        println!(
+            "  the artifact: solved in {:.1} s, slope reference {:.4}",
+            started.elapsed().as_secs_f64(),
+            vd_terrain::units::share_of_q28(home.slope_ref())
+        );
+        let mut buckets = [0usize; BUCKETS];
+        let (mut plain, mut range, mut wins, mut held) = (0usize, 0usize, 0usize, 0usize);
+        let mut rose = 0.0f64;
+        for (d, noise) in &columns {
+            let Some(m) = roughness_field_at(&home, &artifact, *d) else {
+                continue;
+            };
+            held += 1;
+            let b = ((m * BUCKETS as f64) as usize).min(BUCKETS - 1);
+            buckets[b] += 1;
+            plain += usize::from(m <= PLAIN_AT_OR_UNDER);
+            range += usize::from(m >= RANGE_AT_OR_OVER);
+            wins += usize::from(m > *noise);
+            rose += m - *noise;
+        }
+        // ★ THE BELT ITSELF (the owner's stand of 2026-09-21): the highest land node the solve
+        // raised, and the three factors at it — the noise placeholder's, the solved field's share,
+        // and the one the ground uses. A grid of 9 600 columns can miss a belt; this cannot.
+        let lattice = vd_terrain::macro_lattice::MacroLattice::of(&home).expect("a lattice");
+        let unit = (1u64 << vd_recipe::bend::DIR_BITS) as f64;
+        let mut highest = (i16::MIN, 0u32);
+        for (node, row) in artifact.rows.iter().enumerate() {
+            if row.z_m > highest.0 {
+                highest = (row.z_m, node as u32);
+            }
+        }
+        let d = lattice.direction(highest.1);
+        let belt = [
+            d[0].raw() as f64 / unit,
+            d[1].raw() as f64 / unit,
+            d[2].raw() as f64 / unit,
+        ];
+        let len = (belt[0] * belt[0] + belt[1] * belt[1] + belt[2] * belt[2]).sqrt();
+        let belt = [belt[0] / len, belt[1] / len, belt[2] / len];
+        println!(
+            "    THE BELT: the highest land stands {} m over the ladder radius; its noise factor {:.4}, the factor the ground uses {:.4}",
+            highest.0,
+            roughness_at(&home, belt),
+            roughness_field_at(&home, &artifact, belt).expect("the belt's own column")
+        );
+        let n = held as f64;
+        print!("    buckets of a tenth:");
+        for (b, count) in buckets.iter().enumerate() {
+            print!(
+                " [{:.1}) {:.1}%",
+                b as f64 / 10.0,
+                *count as f64 * 100.0 / n
+            );
+        }
+        println!();
+        println!(
+            "    PLAIN {:.1}%；RANGE {:.1}%；the solved slope wins on {:.1}% of {held} columns, and lifts the mean factor by {:.4}",
+            plain as f64 * 100.0 / n,
+            range as f64 * 100.0 / n,
+            wins as f64 * 100.0 / n,
+            rose / n
+        );
+    }
     ExitCode::SUCCESS
 }

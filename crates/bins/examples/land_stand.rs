@@ -26,6 +26,18 @@ fn main() {
     } else {
         DVec3::new(0.0, -1.0, 0.0)
     };
+    let highest = std::env::var("VD_STAND_HIGHEST").is_ok_and(|v| v == "1");
+    // `VD_STAND_SUN="x y z"`: the star's unit direction in the planet's frame (the stamp's
+    // `star.direction_body`); only land under a sun at least fifteen degrees up is a candidate,
+    // because a picture on the night side judges nothing (the belt stand of 2026-09-21 was black).
+    let sun: Option<DVec3> = std::env::var("VD_STAND_SUN").ok().map(|v| {
+        let w: Vec<f64> = v
+            .split_whitespace()
+            .map(|x| x.parse().expect("a sun component"))
+            .collect();
+        DVec3::new(w[0], w[1], w[2]).normalize()
+    });
+    let day_min = 15.0f64.to_radians().sin();
     let body = home_planet();
     let lattice = MacroLattice::of(&body).expect("the home planet has a macro lattice");
     let artifact = run_solve(&SolveJob {
@@ -58,7 +70,16 @@ fn main() {
         {
             continue;
         }
-        let dot = dir_of(node).dot(aim);
+        // `VD_STAND_HIGHEST=1`: the highest land instead of the nearest to the aim — the belt the
+        // solve raised, for the owner's look at the mountains (2026-09-21).
+        if sun.is_some_and(|sun| dir_of(node).dot(sun) < day_min) {
+            continue;
+        }
+        let dot = if highest {
+            f64::from(artifact.rows[node as usize].z_m)
+        } else {
+            dir_of(node).dot(aim)
+        };
         if best.is_none_or(|(b, _)| dot > b) {
             best = Some((dot, node));
         }
@@ -75,7 +96,7 @@ fn main() {
     let pos = d * (body.radius_m() + height_m);
     let berth = pos + right * 40.0;
     println!(
-        "land_stand: node {node} at {:.1}° off the aim, {} m over the ladder radius (sea {sea} m), direction {:.6}, {:.6}, {:.6}",
+        "land_stand: node {node} at {:.1}° off the aim (or the highest, {highest}), {} m over the ladder radius (sea {sea} m), direction {:.6}, {:.6}, {:.6}",
         dot.clamp(-1.0, 1.0).acos().to_degrees(),
         row.z_m,
         d.x,

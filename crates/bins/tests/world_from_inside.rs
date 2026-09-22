@@ -65,8 +65,9 @@ impl Drop for ChildGuard {
 }
 
 struct Fixture {
-    /// The slot's own directory: the trust dir's PARENT, which is where every realm's file lives
-    /// (`common_env` sets `VD_REALM_STORE_DIR` to exactly this).
+    /// The slot's own directory: the trust dir's PARENT. Every realm's file lives BESIDE it, in
+    /// `vd_bins::realm_store_dir(&base)` (`common_env` sets `VD_REALM_STORE_DIR` to exactly that),
+    /// so a restart that reaps the slot keeps the realms' memory.
     base: std::path::PathBuf,
     trust_dir: std::path::PathBuf,
     common: Vec<(&'static str, String)>,
@@ -399,8 +400,8 @@ const BERTH_STANDOFF_M: f64 = 40.0;
 /// Write the hull into the home system's file and its own, where the shards will read them. The
 /// spawn is the home clearing; a berth is measured from the star, so all three axes are stated.
 fn plant_hull(f: &Fixture, home: RealmId, spawn_m: DVec3) -> RealmId {
-    let parent_store = realm_store_path(&f.base, home);
-    let ship_store = realm_store_path(&f.base, minted_hull());
+    let parent_store = realm_store_path(&vd_bins::realm_store_dir(&f.base), home);
+    let ship_store = realm_store_path(&vd_bins::realm_store_dir(&f.base), minted_hull());
     let out = Command::new(env!("CARGO_BIN_EXE_vd-build-ship"))
         .args([
             "--parent-store",

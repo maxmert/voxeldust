@@ -20,6 +20,28 @@
 //! flat and a range is rough out of one table, and the factor never depends on the rung — which is
 //! why the dropped-octave bound below still holds exactly.
 //!
+//! ★ **AND ON A BODY THAT SHIPS AN ARTIFACT THE SOLVED FIELD DECIDES TOO** (2026-09-21): the factor
+//! is the GREATER of that noise field's reading and the macro field's own slope as a share of the
+//! body's slope reference ([`crate::artifact::slope_share`]). The ceiling is still one, so the band
+//! and the dropped-octave bound below are untouched. [`height`] — the recipe's own relief, with no
+//! artifact — reads the noise field alone.
+//!
+//! ★ **AND THE SEA DECIDES THE SHORE** (2026-09-21): after the bench, the surface is held on its
+//! GROUND's side of the column's water — the ground being the radius, the field's `Z` and the coarse
+//! octaves, which every rung shares — by a quarter of the ground's own height over or under it
+//! ([`vd_recipe::height::shore`]). So the shoreline stands where the ground crosses the water at
+//! every rung, and a ring swap cannot move it; before, the dropped octaves moved it by hundreds of
+//! metres on a gentle coast. The clamp is a projection onto one side of the water, which never
+//! widens a difference, so the dropped-octave bound below still holds.
+//!
+//! ★ **AND THE ROW SAYS WHICH SIDE** (2026-09-22, the coast mask; ruling W10): at a PYRAMID rung the
+//! ground above is a LEVEL'S MEAN, and a mean crosses the sea somewhere else than its children do, so
+//! the side comes from the fine node's own sea bit ([`crate::artifact::sample_side`], read on the
+//! body's own macro lattice at every rung) and never from the ground's sign. MEASURED before it: the
+//! crossing moved a median of 11.5 km at the swap from the rows to level 1 and about 20 km at each
+//! level swap above. A host with no mask — the card, a body with no artifact — reads
+//! [`vd_recipe::height::SIDE_UNKNOWN`] and the ground decides, as before.
+//!
 //! **Example.** Along the direction of the pilot's boots the field at rung 3 is the rung-0 hill
 //! without the last three ripples, and the two are never further apart than the dropped amplitudes
 //! promise (the test below measures it on the home planet).
@@ -28,19 +50,36 @@ use crate::body::BodyDefinition;
 use crate::strata::Biome;
 use crate::units::{direction_of_unit, metres_of_q28, q28_of_metres};
 use vd_recipe::Gi;
-use vd_recipe::height::{biome_of as recipe_biome, relief_shaped, roughness_factor};
+use vd_recipe::height::{
+    SIDE_UNKNOWN, biome_of as recipe_biome, relief_parts_from, roughness_factor, shore,
+};
 use vd_recipe::terrace::terrace;
 
 /// The surface's radius along a unit direction at a rung, in GAP STEPS at
 /// [`crate::units::LENGTH_BITS`] fraction bits. `dir` carries the bend's 40 fraction bits.
 #[must_use]
 pub fn height(body: &BodyDefinition, dir: [Gi; 3], rung: u8) -> Gi {
-    // ★ THE BENCH IS LAST (slice 8a stage 4): the octave sum answers the raw surface and the terrace
-    // pulls it toward the nearest bed top. ONE SOURCE — `vd_recipe::terrace::terrace` is the very
-    // function the card's column pass runs, so a picture and a pair of boots stand on one bench.
-    terrace(
-        &body.terrace_at(rung),
-        body.radius + relief_shaped(body.octaves_at(rung), dir, body.roughness()),
+    // ★ THE BENCH, THEN THE SHORE (slice 8a stage 4; 2026-09-21): the octave sum answers the raw
+    // surface, the terrace pulls it toward the nearest bed top, and the shore holds it on the
+    // coarse ground's side of the body's sea. ONE SOURCE — `vd_recipe::terrace::terrace` and
+    // `vd_recipe::height::shore` are the very functions the card's column pass runs, so a picture
+    // and a pair of boots stand on one bench and one shore.
+    let parts = relief_parts_from(
+        body.octave_table(),
+        0,
+        body.octaves_at(rung).len(),
+        dir,
+        body.roughness(),
+        Gi::ZERO,
+    );
+    let base = body.radius + parts.coarse;
+    // No artifact here, so no coast mask: the ground's own sign decides the side, which is the
+    // rule the card runs too.
+    shore(
+        base,
+        body.sea_radius,
+        terrace(&body.terrace_at(rung), base + parts.fine),
+        SIDE_UNKNOWN,
     )
 }
 
@@ -70,23 +109,54 @@ pub fn height_field_m(
     dir: [f64; 3],
     rung: u8,
 ) -> Option<f64> {
-    let lattice = body.macro_lattice()?.coarser(field.level())?;
+    let fine = body.macro_lattice()?;
+    let lattice = fine.coarser(field.level())?;
     let face = vd_seed::bend::face_of(dir);
     let (t, s) = vd_seed::bend::face_coords(face, dir);
     let n0 = body.ladder().cells_per_edge(0);
     let i = vd_seed::ladder::index_of(vd_seed::bend::unbend(t), n0);
     let j = vd_seed::ladder::index_of(vd_seed::bend::unbend(s), n0);
     let z = crate::artifact::sample_z(&lattice, field, face, 0, i, j)?;
-    let relief = vd_recipe::height::relief_of_table_from(
+    // ★ THE SAME SLOPE SHARE THE COLUMN READS (2026-09-21): the morph target and the chunk's own
+    // column must stand at one height, so this reads the field the same way — the central difference
+    // over one macro node at the SAME rung-0 cell the `Z` above came from.
+    let slope_share = crate::artifact::slope_share(
+        &crate::artifact::slope_charter(body, &lattice, 0),
+        &lattice,
+        field,
+        face,
+        0,
+        i,
+        j,
+    )?;
+    // ★ THE SAME WATER THE COLUMN READS (2026-09-21): the nearest row's level through the one
+    // reader, so the morph target and the chunk's own column hold one shore.
+    let (water, _) = crate::artifact::sample_water(body, &lattice, field, face, 0, i, j);
+    // ★ THE SAME SIDE THE COLUMN READS (2026-09-22, the coast mask): the FINE node's own sea bit,
+    // read on the body's own macro lattice whatever level the field stands at, so the morph target
+    // and the chunk's own column stand on one side of one shoreline.
+    let side =
+        crate::artifact::sample_side(&fine, field, face, 0, i, j).map_or(SIDE_UNKNOWN, |sea| {
+            if sea {
+                vd_recipe::height::SIDE_SEA
+            } else {
+                vd_recipe::height::SIDE_LAND
+            }
+        });
+    let parts = relief_parts_from(
         body.octave_table(),
         body.first_fine(),
         body.octaves_at(rung).len(),
         direction_of_unit(dir),
         body.roughness(),
+        slope_share,
     );
-    Some(metres_of_q28(terrace(
-        &body.terrace_at(rung),
-        body.radius + z + relief,
+    let base = body.radius + z + parts.coarse;
+    Some(metres_of_q28(shore(
+        base,
+        water,
+        terrace(&body.terrace_at(rung), base + parts.fine),
+        side,
     )))
 }
 
@@ -94,9 +164,51 @@ pub fn height_field_m(
 /// — the slope histogram's instrument reads it to say which columns are a PLAIN and which a RANGE
 /// (slice 8a stage 3, measurement M-C). The shape is the recipe's own kernel; this crate only names
 /// the answer, so an instrument can never measure a factor the field does not use.
+///
+/// ★ WITH NO FIELD THIS IS HALF THE ANSWER (2026-09-21). A column that reads an artifact takes the
+/// GREATER of this factor and the solved field's own slope share, so an instrument that holds a
+/// field must ask [`roughness_field_at`]; this one answers the noise placeholder's factor alone,
+/// which is what a body with no artifact uses.
 #[must_use]
 pub fn roughness_at(body: &BodyDefinition, dir: [f64; 3]) -> f64 {
     crate::units::share_of_q28(roughness_factor(body.roughness(), direction_of_unit(dir)))
+}
+
+/// ★ THE PER-COLUMN ROUGHNESS FACTOR A COLUMN OF AN ARTIFACT ACTUALLY USES (2026-09-21): the GREATER
+/// of the noise placeholder's factor and the solved field's own slope share at the same column, as a
+/// real number in `[M_MIN, 1]`. The slope histogram reads this where it holds a field, so the
+/// instrument can never print a factor the ground does not have.
+///
+/// `None` where the field holds no row for the column's stencil or its ring — the same refusal the
+/// chunk builder makes (ruling F9).
+///
+/// **Example.** Over the home planet's highest belt the noise placeholder reads 0.31 and the solved
+/// field's share reads 1.00, so the column's real factor is 1.00 and the instrument says RANGE.
+#[must_use]
+pub fn roughness_field_at(
+    body: &BodyDefinition,
+    field: &dyn crate::artifact::ZField,
+    dir: [f64; 3],
+) -> Option<f64> {
+    let lattice = body.macro_lattice()?.coarser(field.level())?;
+    let face = vd_seed::bend::face_of(dir);
+    let (t, s) = vd_seed::bend::face_coords(face, dir);
+    let n0 = body.ladder().cells_per_edge(0);
+    let i = vd_seed::ladder::index_of(vd_seed::bend::unbend(t), n0);
+    let j = vd_seed::ladder::index_of(vd_seed::bend::unbend(s), n0);
+    let share = crate::artifact::slope_share(
+        &crate::artifact::slope_charter(body, &lattice, 0),
+        &lattice,
+        field,
+        face,
+        0,
+        i,
+        j,
+    )?;
+    Some(crate::units::share_of_q28(crate::units::greater(
+        roughness_factor(body.roughness(), direction_of_unit(dir)),
+        share,
+    )))
 }
 
 /// ★ THE CAP-ROCK BENCH as a real number, for a host outside the recipe (slice 8a stage 4): a
@@ -166,6 +278,64 @@ mod tests {
         crate::home::home_planet()
     }
 
+    /// ★ THE MOON WITH A SEA AND ITS OWN COAST MASK, the fixture both shore statements read.
+    ///
+    /// The moon's own words draw NO water, so its rows are dry and its solve sets no sea bit. The
+    /// fixture therefore STATES a sea at the field's own height in the middle of a face and writes
+    /// the mask that sea implies — a node's bit set where its row stands at or under that sea,
+    /// which is exactly what a wet body's own solve writes. So the moon stands in for a coast
+    /// without a second world (SL5): one body, real rows, a stated water line.
+    ///
+    /// Answers `(the moon with its sea, the lattice, the artifact, the face, the row `j`)`.
+    fn moon_with_a_stated_sea() -> (
+        BodyDefinition,
+        crate::macro_lattice::MacroLattice,
+        crate::artifact::Artifact,
+        Face,
+        i32,
+    ) {
+        use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
+        use crate::solve::{Schedule, solve_full};
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let mut artifact =
+            crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        let n0 = moon.ladder().cells_per_edge(0) as i32;
+        let face = Face::PosX;
+        let j = n0 / 2;
+        let sea_m = metres_of_q28(
+            crate::artifact::sample_z(&lattice, &artifact, face, 0, n0 / 2, j).expect("a z"),
+        ) as i32;
+        // `sample_z` answers the field's own `Z` — metres OVER the ladder radius, the unit a row
+        // states — so the stated sea and the rows are already in one unit.
+        let sea_row = sea_m;
+        // The mask the stated sea implies: a node at or under it is sea, as `Artifact::of` writes
+        // it from the solve's own facies on a wet body.
+        for (node, row) in artifact.rows.iter().enumerate() {
+            let bit = 1u8 << (node % 8);
+            if i32::from(row.z_m) <= sea_row {
+                artifact.coast[node / 8] |= bit;
+            } else {
+                artifact.coast[node / 8] &= !bit;
+            }
+        }
+        (moon.with_sea_m(Some(sea_m)), lattice, artifact, face, j)
+    }
+
+    /// The float direction of the rung-0 cell `(i, j)` of a face on this body.
+    fn cell_dir(body: &BodyDefinition, face: Face, i: i32, j: i32) -> [f64; 3] {
+        let d = vd_seed::bend::direction_q(face, i, j, body.inv_n(0));
+        [
+            d[0].raw() as f64 / (1u64 << DIR_BITS) as f64,
+            d[1].raw() as f64 / (1u64 << DIR_BITS) as f64,
+            d[2].raw() as f64 / (1u64 << DIR_BITS) as f64,
+        ]
+    }
+
     /// The direction of a face position, through the recipe's own bend: the cell nearest `(a, b)` of
     /// a face at rung 0 (the test names positions, the recipe names cells).
     fn dir(face: Face, a: f64, b: f64) -> [Gi; 3] {
@@ -226,12 +396,273 @@ mod tests {
         let level_9 = PyramidField {
             level: 9,
             z_m: vec![],
+            water_m: vec![],
+            coast: None,
         };
         assert_eq!(height_field_m(&moon, &level_9, dir, 12), None);
         let rock = moon.without_macro_lattice();
         assert_eq!(height_field_m(&rock, &empty, dir, 0), None);
         // The recipe's own height along the same direction differs from the field's.
         assert!((height_m(&moon, dir, 0) - along).abs() > 0.0);
+        // ★ THE INSTRUMENT READS THE FACTOR THE COLUMN USES (2026-09-21): never under the noise
+        // placeholder's own, never over the ceiling, and it refuses wherever the height does.
+        let with_field = roughness_field_at(&moon, &artifact, dir).expect("a factor");
+        let noise_only = roughness_at(&moon, dir);
+        assert!(
+            with_field >= noise_only,
+            "the field's factor {with_field} stands under the noise's {noise_only}"
+        );
+        assert!(with_field <= 1.0, "over the ceiling: {with_field}");
+        assert_eq!(roughness_field_at(&moon, &empty, dir), None);
+        assert_eq!(roughness_field_at(&moon, &level_9, dir), None);
+        assert_eq!(roughness_field_at(&rock, &empty, dir), None);
+    }
+
+    /// ★ THE SHORELINE STANDS STILL ACROSS THE RUNGS (2026-09-21; the owner, flying the coast:
+    /// "the shores are changing all the time"). Along one line of directions across the moon's
+    /// stated shore, every rung from the metre to the 128 m cell puts each column on the SAME side
+    /// of its water as its own ROW says. Three controls, each of which could fail: the line really
+    /// crosses a shore (columns on both sides); the row's own word decides the side (2026-09-22,
+    /// the coast mask — before it the interpolated ground decided, and a coarse rung's ground is a
+    /// mean); and the clamp really acted somewhere (a column stands exactly at its held bound at
+    /// some rung — without the clamp that bound is nobody's number).
+    ///
+    /// MEASURED before the law, on the home planet's belt coast (`vd-bins/examples/shore_step`):
+    /// the crossing moved a median of 234 m between the 64 m and 128 m rungs.
+    #[test]
+    fn the_shoreline_stands_where_the_ground_crosses_the_water_at_every_rung() {
+        let (moon, lattice, artifact, face, j) = moon_with_a_stated_sea();
+        let n0 = moon.ladder().cells_per_edge(0) as i32;
+        assert_ne!(moon.sea_radius, Gi::ZERO, "the moon states a sea");
+        // ★ THE SIDE IS THE ROW'S OWN WORD (2026-09-22): the nearest fine node's coast bit, which
+        // is the one word every rung reads.
+        let ground_side = |i: i32| -> Option<(bool, Gi, Gi)> {
+            let (water, _) =
+                crate::artifact::sample_water(&moon, &lattice, &artifact, face, 0, i, j);
+            if water == Gi::ZERO {
+                return None;
+            }
+            let sea = crate::artifact::sample_side(&lattice, &artifact, face, 0, i, j)?;
+            let z = crate::artifact::sample_z(&lattice, &artifact, face, 0, i, j)?;
+            Some((!sea, moon.radius + z, water))
+        };
+        let mut i = 64;
+        let first = ground_side(i).expect("a column with water");
+        while i < n0 - 64 && ground_side(i).is_some_and(|(land, _, _)| land == first.0) {
+            i += 64;
+        }
+        assert!(i < n0 - 64, "the moon's middle row crosses a shore");
+        // The sixty-five columns from the last column on the first side to the first column on
+        // the other, at every rung the ladder draws near the ground.
+        let mut lands = 0;
+        let mut seas = 0;
+        let mut at_bound = 0;
+        let mut c = i - 64;
+        while c <= i {
+            let (land, base, water) = ground_side(c).expect("a column with water");
+            lands += i32::from(land);
+            seas += i32::from(!land);
+            let dir = cell_dir(&moon, face, c, j);
+            // The bound the law holds the column at: a quarter of the ground's own distance from
+            // the water, on the side the ROW named.
+            let g = base - water;
+            let away = if g >= Gi::ZERO { g } else { Gi::ZERO - g };
+            let keep = away >> vd_recipe::height::SHORE_SHIFT;
+            let bound_m = metres_of_q28(water + if land { keep } else { Gi::ZERO - keep });
+            let water_m = metres_of_q28(water);
+            let mut rung = 0u8;
+            while rung <= 7 {
+                let h = height_field_m(&moon, &artifact, dir, rung).expect("a height");
+                assert_eq!(
+                    h >= water_m,
+                    land,
+                    "column {c} at rung {rung}: {h} against the water {water_m}, row says land {land}"
+                );
+                at_bound += i32::from((h - bound_m).abs() < 1e-6);
+                rung += 1;
+            }
+            c += 1;
+        }
+        assert!(
+            lands > 0 && seas > 0,
+            "both sides of the shore: {lands} land, {seas} sea"
+        );
+        assert!(at_bound > 0, "the clamp acted on the line at least once");
+    }
+
+    /// ★ A CHUNK'S COLUMN AT A PYRAMID RUNG STANDS ON THE MASK'S SIDE (2026-09-22, ruling W10).
+    /// The chunk builder's own path — `chunk::column_field`, the very call the client's builders
+    /// and the shard's collider make — over a chunk that straddles the moon's stated shore at the
+    /// rung that reads level 1.
+    ///
+    /// Two statements, each of which could fail: (1) EVERY column of the chunk stands on the side
+    /// its own fine row states; (2) the control that makes (1) worth making — the LEVEL'S OWN MEAN
+    /// puts some of those columns on the OTHER side, which is exactly the disagreement the shore
+    /// crawled on. RED before the mask: those columns followed the mean.
+    ///
+    /// **Example.** A hull at 1 400 km draws a chunk of 1 km cells over a bay. The level node under
+    /// it is mostly water, so its mean stands under the sea; the headland's own rows say land, and
+    /// the headland is drawn dry.
+    #[test]
+    fn a_chunk_column_at_a_pyramid_rung_stands_on_the_masks_side() {
+        use crate::artifact::PyramidField;
+        use crate::chunk::{CHUNK_EDGE, column_field};
+        let (moon, lattice, artifact, face, j) = moon_with_a_stated_sea();
+        let n0 = moon.ladder().cells_per_edge(0) as i32;
+        let levels = artifact.pyramid.len() as u32;
+        let mut rung = 0u8;
+        while rung < moon.ladder().rungs && PyramidField::level_for(&lattice, levels, rung) != 1 {
+            rung += 1;
+        }
+        assert!(rung < moon.ladder().rungs, "a rung reads level 1");
+        let level = PyramidField::of(&artifact, 1).expect("level 1");
+        let coarse = lattice.coarser(1).expect("a coarser lattice");
+        // The first rung-0 cell along the middle row where the mask changes its word: the shore.
+        let side_at = |i: i32| crate::artifact::sample_side(&lattice, &artifact, face, 0, i, j);
+        let first = side_at(64).expect("a bit");
+        let mut i = 64;
+        while i < n0 - 64 && side_at(i) == Some(first) {
+            i += 64;
+        }
+        assert!(i < n0 - 64, "the middle row crosses the shore");
+        let x = (i >> rung) / CHUNK_EDGE as i32;
+        let y = (j >> rung) / CHUNK_EDGE as i32;
+        let built = column_field(&moon, Some(&level), face, rung, x, y).expect("the chunk builds");
+        let mut on_the_masks_side = 0;
+        let mut mean_disagrees = 0;
+        for (k, site) in built.sites.iter().enumerate() {
+            let site_face = Face::from_index(site.face).unwrap_or(face);
+            let Some(sea) =
+                crate::artifact::sample_side(&lattice, &artifact, site_face, rung, site.i, site.j)
+            else {
+                continue;
+            };
+            let (_, h, _) = built.columns[k];
+            let water = built.water[k];
+            assert_ne!(water, Gi::ZERO, "the moon states a sea for every column");
+            if sea {
+                assert!(
+                    h <= water,
+                    "column {k}: the row says sea, the surface stands over it"
+                );
+            } else {
+                assert!(
+                    h >= water,
+                    "column {k}: the row says land, the surface stands under it"
+                );
+            }
+            on_the_masks_side += 1;
+            // The control: where does the LEVEL'S OWN mean put this column?
+            let z = crate::artifact::sample_z(&coarse, &level, site_face, rung, site.i, site.j)
+                .expect("a mean");
+            mean_disagrees += i32::from((moon.radius + z >= water) == sea);
+        }
+        assert_eq!(
+            on_the_masks_side,
+            (CHUNK_EDGE * CHUNK_EDGE) as i32,
+            "every column of the chunk was judged"
+        );
+        assert!(
+            mean_disagrees > 0,
+            "the level's mean disagrees with the mask somewhere in this chunk"
+        );
+    }
+
+    /// ★ THE FAR-RUNG SHORE: ONE SHORELINE AT EVERY LEVEL (2026-09-22; the owner, from 1 400 km:
+    /// "during flight the shores changes again all the time"; ruling W10). The instrument's own
+    /// statement, as a unit test on the moon's stated shore.
+    ///
+    /// MEASURED BEFORE the coast mask (`vd-bins/examples/shore_step` on the home planet's belt
+    /// coast, 400 lines of 600 km): the crossing of the sea moved a MEDIAN of 11 536 m at the swap
+    /// from the rows to level 1 (rung 9 → 10), 20 823 m at level 1 → 2 and 19 982 m at level 2 → 3,
+    /// because a level's `Z` is the mean of its children and a mean crosses the sea somewhere else.
+    ///
+    /// The statement, which could fail at any of three places: (1) the line really crosses a shore
+    /// at every level; (2) the crossing moves by AT MOST ONE FINE NODE between the rows and level
+    /// 1, and between level 1 and level 2; (3) every sampled column stands on the side its own
+    /// fine row states, at every level.
+    ///
+    /// **Example.** A hull descends on the belt's coast from 1 400 km. At rung 15 it draws level 3,
+    /// at rung 10 level 1, at rung 5 the rows; the beach under it is the same beach at all three.
+    #[test]
+    fn the_shoreline_stands_within_one_fine_node_at_every_pyramid_level() {
+        use crate::artifact::PyramidField;
+        let (moon, lattice, artifact, face, j) = moon_with_a_stated_sea();
+        let n0 = moon.ladder().cells_per_edge(0) as i32;
+        let levels = artifact.pyramid.len() as u32;
+        assert!(levels >= 2, "the moon's pyramid holds two levels");
+        // The rungs: the finest rung that reads each level, and the TOP rung for a level the
+        // moon's own ladder stops before reaching. The moon has fifteen rungs and its coarsest
+        // reads level 1 (MEASURED), so level 2 is drawn at the top rung — the very read
+        // `PyramidField::of` gives any host, and the swap the home planet makes at rung 14 → 15.
+        let top = moon.ladder().rungs - 1;
+        let rung_for = |want: u32| -> u8 {
+            let mut rung = 0u8;
+            while rung < moon.ladder().rungs {
+                if PyramidField::level_for(&lattice, levels, rung) == want {
+                    return rung;
+                }
+                rung += 1;
+            }
+            top
+        };
+        let fields: Vec<(u8, Box<dyn crate::artifact::ZField>)> = vec![
+            (rung_for(0), Box::new(artifact.clone())),
+            (
+                rung_for(1),
+                Box::new(PyramidField::of(&artifact, 1).expect("level 1")),
+            ),
+            (
+                rung_for(2),
+                Box::new(PyramidField::of(&artifact, 2).expect("level 2")),
+            ),
+        ];
+        let sea_r = metres_of_q28(moon.sea_radius);
+        let step = 64i32;
+        // The first crossing of the sea along the middle row, in metres from the row's start, per
+        // field; and the count of columns whose side disagrees with their own fine row.
+        let mut crossings = Vec::new();
+        let mut disagreements = 0;
+        let mut sampled = 0;
+        for (rung, field) in &fields {
+            let mut crossing: Option<f64> = None;
+            let mut previous: Option<(f64, f64)> = None;
+            let mut i = 64;
+            while i < n0 - 64 {
+                let dir = cell_dir(&moon, face, i, j);
+                let over =
+                    height_field_m(&moon, field.as_ref(), dir, *rung).expect("a height") - sea_r;
+                // (3) the side the row states is the side the column stands on.
+                let sea = crate::artifact::sample_side(&lattice, &artifact, face, 0, i, j)
+                    .expect("a row's own bit");
+                sampled += 1;
+                disagreements += i32::from(if sea { over > 0.0 } else { over < 0.0 });
+                if let Some((x0, v0)) = previous
+                    && crossing.is_none()
+                    && (v0 > 0.0) != (over > 0.0)
+                {
+                    let t = v0 / (v0 - over);
+                    crossing = Some(x0 + t * f64::from(step));
+                }
+                previous = Some((f64::from(i), over));
+                i += step;
+            }
+            crossings.push(crossing.expect("the line crosses the shore at this level"));
+        }
+        assert!(sampled > 0, "the line was walked");
+        assert_eq!(
+            disagreements, 0,
+            "every column stands on the side its own fine row states"
+        );
+        // (2) the crossing moves by at most ONE FINE NODE at each level swap.
+        let node_m = lattice.node_m();
+        for pair in crossings.windows(2) {
+            let step_m = (pair[0] - pair[1]).abs();
+            assert!(
+                step_m <= node_m,
+                "the shore steps {step_m} m at a level swap, over one fine node of {node_m} m"
+            );
+        }
     }
 
     #[test]

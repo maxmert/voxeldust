@@ -38,8 +38,15 @@ fn main() {
         fine_keys += 1;
         for node in nodes_of_chunk(&lattice, key) {
             let r = artifact.rows[node as usize];
-            rows.0
-                .insert(node, (r.z_m, r.water_m, r.receiver_facies >> FACIES_SHIFT));
+            rows.0.insert(
+                node,
+                (
+                    r.z_m,
+                    r.water_m,
+                    r.receiver_facies >> FACIES_SHIFT,
+                    r.province,
+                ),
+            );
         }
     }
     // ★ THE LEVEL THE TOP-RUNG KEYS READ (2026-09-20): the runtime's own pick for the top rung,
@@ -62,7 +69,13 @@ fn main() {
         env!("CARGO_MANIFEST_DIR"),
         "/../terrain/tests/golden_home_z.txt"
     );
-    std::fs::write(path, fields.to_text()).expect("the golden fields' file is written");
+    let text = fields.to_text();
+    std::fs::write(path, &text).expect("the golden fields' file is written");
+    // ★ MEASURE WHAT THE BUILD WILL READ, NOT WHAT THIS PROGRAM HOLDS (2026-09-22, the coast mask):
+    // the build parses this very text, and the text states no water word and no coast mask for its
+    // top level. A word folded from the in-memory fields would carry the artifact's own mask and
+    // differ from every host's — which is exactly what the artifact pin caught.
+    let fields = GoldenFields::parse(&text).expect("the fields just written parse back");
     let measured = golden_self_check(&body, Some(&fields)).expect("the home planet self-checks");
     println!(
         "golden_z_record: {} fine keys, {} rows, top level {} of {} words, written to {path}",

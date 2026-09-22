@@ -49,6 +49,9 @@ pub(crate) struct GatewayArtifact {
     pub(crate) shard: NodeId,
     pub(crate) digest: [u64; 2],
     pub(crate) levels: u32,
+    /// ★ HOW MANY COAST PARTS THE HEAD ANNOUNCED (2026-09-22, ruling W10): the cache is whole only
+    /// when every one of them is here, so a session is never served a shoreline with a hole in it.
+    pub(crate) coast_parts: u32,
     /// The head's bytes: an entry exists only once a head arrived.
     pub(crate) head: Vec<u8>,
     pub(crate) parts: Vec<Vec<u8>>,
@@ -58,20 +61,27 @@ pub(crate) struct GatewayArtifact {
     level_parts: BTreeMap<u32, u32>,
     /// The `(level, part)` pairs held.
     seen: BTreeSet<(u32, u32)>,
+    /// The coast parts held, by index.
+    coast_seen: BTreeSet<u32>,
     /// ★ THE TILES HELD (the one tile path): the shard's answers to the viewers' wants, by tile,
     /// shared by every session that draws the realm.
     pub(crate) tiles: BTreeMap<(u8, u32, u32), Vec<u8>>,
 }
 
 impl GatewayArtifact {
-    /// Whether the head and every part of every level are here.
+    /// Whether the head, every part of every level AND every coast part are here.
     #[must_use]
     pub(crate) fn whole(&self) -> bool {
         let expected: u32 = (1..=self.levels)
             .map(|l| self.level_parts.get(&l).copied().unwrap_or(u32::MAX))
             .fold(0u32, u32::saturating_add);
         // A head of no levels announces nothing and is never whole.
-        self.levels > 0 && expected != u32::MAX && self.seen.len() as u32 == expected
+        self.levels > 0
+            && expected != u32::MAX
+            && self.seen.len() as u32 == expected
+            // ★ THE COAST MASK too (2026-09-22, ruling W10): a client that draws a far rung with
+            // half a mask draws half a shoreline, so the cache is not whole until every part is in.
+            && self.coast_seen.len() as u32 == self.coast_parts
     }
 }
 
@@ -92,6 +102,7 @@ pub(crate) fn cache_artifact_part(
             realm: named,
             digest,
             levels,
+            coast_parts,
             ..
         }) if named == realm => {
             match sessions.artifacts.get_mut(&realm) {
@@ -114,11 +125,13 @@ pub(crate) fn cache_artifact_part(
                             shard: from,
                             digest,
                             levels,
+                            coast_parts,
                             head: bytes,
                             parts: Vec::new(),
                             last_part_at: now,
                             level_parts: BTreeMap::new(),
                             seen: BTreeSet::new(),
+                            coast_seen: BTreeSet::new(),
                             tiles: BTreeMap::new(),
                         },
                     );
@@ -153,6 +166,31 @@ pub(crate) fn cache_artifact_part(
                 return;
             }
             cache.level_parts.insert(level, parts);
+            cache.parts.push(bytes);
+            cache.last_part_at = now;
+            stats.artifact_parts_cached += 1;
+        }
+        // ★ A COAST PART (2026-09-22, ruling W10): the realm's sea bits, held with the head and
+        // served to every session that draws the realm, like a pyramid part. A part for a realm
+        // with no head, from another node, or of a shape the head did not announce is a stray.
+        Ok(BulkMsg::ArtifactCoast {
+            realm: named,
+            part,
+            parts,
+            ..
+        }) if named == realm => {
+            let Some(cache) = sessions.artifacts.get_mut(&realm) else {
+                stats.artifact_parts_stray += 1;
+                return;
+            };
+            if cache.shard != from
+                || parts != cache.coast_parts
+                || part >= parts
+                || !cache.coast_seen.insert(part)
+            {
+                stats.artifact_parts_stray += 1;
+                return;
+            }
             cache.parts.push(bytes);
             cache.last_part_at = now;
             stats.artifact_parts_cached += 1;
@@ -251,6 +289,7 @@ pub(crate) fn tiles_in_reach(
         levels,
         body.ladder().rungs - 1,
         body.radius_m(),
+        body.relief_bound_m(0),
         view.radial_m,
         vd_core::geometry::drawable_theta_min_rad(),
     );

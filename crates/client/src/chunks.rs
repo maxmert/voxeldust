@@ -1269,7 +1269,14 @@ pub fn geometry_from(
             })
             .collect()
     };
-    let (water_vertices, water_radials, water_triangles) = water_sheet(samples, origin_m);
+    // ★ THE HIDE BOUND (2026-09-21): a sheet quad more than this under its corners' ground can
+    // never show — the land morphs toward the coarser rung by at most its step bound, sinks under
+    // the finer one by the sink, and the extractor places it within a cell — so it is not built.
+    // MEASURED before the bound: the sheet under every cell cost ten milliseconds a frame.
+    let hide_m = body.step_bound_m(key.rung)
+        + sink_m(body, key.rung)
+        + f64::from(vd_seed::ladder::cell_m(key.rung));
+    let (water_vertices, water_radials, water_triangles) = water_sheet(samples, origin_m, hide_m);
     let mut geometry = ChunkGeometry {
         key,
         origin_m,
@@ -1311,8 +1318,10 @@ pub type ClientWaterSheet = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[u32; 3]>);
 pub fn water_sheet(
     samples: &vd_terrain::lattice::SampleBox,
     origin_m: [f64; 3],
+    hide_m: f64,
 ) -> ClientWaterSheet {
-    let (points, radials, triangles) = vd_terrain::position::water_sheet(samples);
+    let hide = vd_terrain::units::q28_of_metres(hide_m);
+    let (points, radials, triangles) = vd_terrain::position::water_sheet(samples, hide);
     let vertices = points
         .iter()
         .map(|p| {
@@ -1624,6 +1633,9 @@ pub struct ChunkLane {
     /// ★ THE REQUESTS REFUSED FOR THE ARTIFACT THIS FRAME, NAMED (the coast flight's hole
     /// instrument): drained by the renderer into the stamp each frame, capped.
     awaiting_frame: Vec<Refusal>,
+    /// ★ EVERY MISSING TILE THIS FRAME, counted over every awaiting chunk, uncapped (2026-09-22):
+    /// which tiles the wanted set really waits for, held against the tiles the book holds.
+    missing_hist: BTreeMap<(RealmId, u8, u32, u32), u32>,
     /// ★ THE CHUNKS HARVESTED EMPTY THIS FRAME, NAMED with the field level they were built on:
     /// drained into the stamp, capped.
     empty_frame: Vec<(RealmId, ChunkKey, u32)>,
@@ -1652,6 +1664,7 @@ impl ChunkLane {
             held: BTreeMap::new(),
             counters: ChunkCounters::default(),
             awaiting_frame: Vec::new(),
+            missing_hist: BTreeMap::new(),
             empty_frame: Vec::new(),
             empty_resident: BTreeMap::new(),
             parents: Arc::new(ParentCache::default()),
@@ -1662,6 +1675,11 @@ impl ChunkLane {
     /// [`NAMED_PER_FRAME`]).
     pub fn take_awaiting(&mut self) -> Vec<Refusal> {
         std::mem::take(&mut self.awaiting_frame)
+    }
+
+    /// The missing tiles of this frame's awaiting chunks, each with how many chunks wait on it.
+    pub fn take_missing_hist(&mut self) -> BTreeMap<(RealmId, u8, u32, u32), u32> {
+        std::mem::take(&mut self.missing_hist)
     }
 
     /// The chunks harvested empty since the last take, named with their field level (capped at
@@ -1955,6 +1973,11 @@ impl ChunkLane {
         }
         if field_of(body, artifact.as_deref(), key).is_none() {
             self.counters.awaiting_artifact += 1;
+            if let Some((a, lattice)) = artifact.as_deref().zip(body.macro_lattice()) {
+                for (f, tx, ty) in a.missing_tiles(&lattice, key) {
+                    *self.missing_hist.entry((realm, f, tx, ty)).or_insert(0) += 1;
+                }
+            }
             if self.awaiting_frame.len() < NAMED_PER_FRAME {
                 // ★ THE REFUSAL NAMES THE TILES the stencil still waits for. `field_of` refuses
                 // ONLY when the realm holds an artifact AND the body holds a macro lattice, so
@@ -2303,10 +2326,20 @@ mod tests {
     }
 
     /// ★ THE WATER SHEET ON A CHUNK (C5): a chunk under a stated sea carries a sheet — four
-    /// vertices a quad about the chunk's origin with unit radials — and a dry chunk none.
+    /// vertices a quad about the chunk's origin with unit radials — and a dry chunk none. ★ AND
+    /// THE SHEET IS CUT UNDER THE LAND (2026-09-21): a sea far under the chunk's ground builds no
+    /// quad, because no state of the ladder can ever show one there.
     #[test]
     fn a_chunk_under_the_sea_carries_a_water_sheet() {
-        let wet = home_planet().with_sea_m(Some(0));
+        let far_under = home_planet().with_sea_m(Some(-20_000));
+        let key = surface_key(&far_under, 4, 300, 700);
+        let g =
+            geometry_with(&far_under, None, planet(), key, &ParentCache::default()).expect("built");
+        assert!(
+            g.water_triangles.is_empty(),
+            "the sea 20 km under the ground shows nowhere"
+        );
+        let wet = home_planet().with_sea_m(Some(20_000));
         let key = surface_key(&wet, 4, 300, 700);
         let g = geometry_with(&wet, None, planet(), key, &ParentCache::default()).expect("built");
         assert!(!g.water_triangles.is_empty());
@@ -2382,6 +2415,7 @@ mod tests {
             tiles_per_edge: artifact.tiles_per_edge(),
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
+            coast_parts: 0,
         });
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {
             rx.accept(BulkMsg::ArtifactPyramid {
@@ -2390,6 +2424,7 @@ mod tests {
                 part: 0,
                 parts: 1,
                 z_m: level.clone(),
+                water_m: artifact.pyramid_water[k].clone(),
             });
         }
         let cache = rx.book().get(realm).cloned().expect("a cache");
@@ -2487,6 +2522,7 @@ mod tests {
             tiles_per_edge: artifact.tiles_per_edge(),
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
+            coast_parts: 0,
         });
         for (k, level) in artifact.pyramid.iter().enumerate().rev() {
             rx.accept(BulkMsg::ArtifactPyramid {
@@ -2495,6 +2531,7 @@ mod tests {
                 part: 0,
                 parts: 1,
                 z_m: level.clone(),
+                water_m: artifact.pyramid_water[k].clone(),
             });
         }
         let moon_charter = vd_core::look::BodyCharter {
@@ -2708,6 +2745,7 @@ mod tests {
                 tiles_per_edge: other.tiles_per_edge,
                 levels: other.levels,
                 sea_m: other.sea_m,
+                coast_parts: 0,
             });
             rx2.book().get(realm).cloned().expect("a cache")
         };
@@ -2749,6 +2787,7 @@ mod tests {
             tiles_per_edge: artifact.tiles_per_edge(),
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
+            coast_parts: 0,
         });
         half.accept(BulkMsg::ArtifactPyramid {
             realm,
@@ -2756,6 +2795,7 @@ mod tests {
             part: 0,
             parts: 1,
             z_m: artifact.pyramid[1].clone(),
+            water_m: artifact.pyramid_water[1].clone(),
         });
         let half_cache = half.book().get(realm).cloned().expect("a cache");
         assert!(ParentMesh::build(&body, Some(&half_cache), key(top - 1, 0, 0)).is_none());
@@ -3370,15 +3410,17 @@ mod tests {
                 measured += usize::from(met);
             }
         }
-        // ★ THE ONE RADIAL THAT DOES NOT, RE-MEASURED 2026-09-18 on slice 8b stage 3 (THE RELIEF
-        // LAW): 4 475 of the 4 476 radials stand inside the sink; ONE stands outside it, at 31.29 m.
+        // ★ THE FEW RADIALS THAT DO NOT, RE-MEASURED 2026-09-21 on slice 8d step 1 (EACH BED ITS
+        // OWN HARDNESS): 4 128 of the 4 134 radials stand inside the sink; SIX stand outside it,
+        // the worst at 55.85 m. Half the bed tops stopped pulling, so the ground under this box
+        // moved and more radials slip past the hill into a cave.
         //
-        // The number moves at every stage that moves the ground, and it has moved six times now:
+        // The number moves at every stage that moves the ground, and it has moved seven times now:
         // SIX of 4 142 radials (worst 210.26 m) before the spectrum; NINETEEN of 5 284 (worst
         // 170.28 m) at 8a stage 1; THREE of 3 242 (worst 136.21 m) at stage 2; THIRTEEN of 6 180
         // (worst 128.91 m) at stage 3; FIFTEEN of 5 630 (worst 197.08 m) at stage 4; ONE of 4 476
-        // (worst 31.29 m) here, where the relief law halved the mountains and the caves under this
-        // box with them. The RADIAL COUNT is
+        // (worst 31.29 m) at 8b stage 3, where the relief law halved the mountains and the caves
+        // under this box with them; SIX of 4 134 (worst 55.85 m) here. The RADIAL COUNT is
         // the field's own roughness read back: a
         // smoother column carries more vertices over the parent's cells that answer a radial at
         // all, and the factor lowers the fine half of nine columns in ten.
@@ -3396,11 +3438,11 @@ mod tests {
         // all. Until it is answered this test states the MEASURED residue by name, so it goes red
         // the moment the residue grows.
         assert_eq!(
-            over, 1,
+            over, 6,
             "{over} of {measured} radials outside the sink, the worst {worst:.2} m"
         );
         assert!(
-            worst < 32.0,
+            worst < 56.0,
             "the worst radial stands {worst:.2} m from its field"
         );
         assert!(measured > 1000, "{measured}");
@@ -3653,6 +3695,11 @@ mod tests {
         // band. The mountains halved, so more of this box's ground sits at the depth the caves are
         // carved at.)
         //
+        // (2026-09-21, slice 8d step 1, EACH BED ITS OWN HARDNESS: the box now holds ONE cave
+        // vertex, and it stands 30.49 m under its field — still inside the cave band. Half the bed
+        // tops stopped pulling, so most of this box's ground rose off the depth the caves are
+        // carved at.)
+        //
         // (2026-09-15, the earlier reading: 4 489 of 4 493 on a parent triangle, four fallbacks.
         // Before the crust rule the same box held 8 189 targets and two fell into a CAVE MOUTH in
         // the parent.)
@@ -3663,9 +3710,9 @@ mod tests {
             "{checked} on the parent of {targets}, {fallbacks} fallbacks, {seam} on a seam, {deep} in a cave"
         );
         assert_eq!(seam, 0, "this box holds no seam vertex");
-        assert_eq!(deep, 4, "the cave vertices of this box");
+        assert_eq!(deep, 1, "the cave vertices of this box");
         assert!(
-            (-28.0..=-26.0).contains(&deepest),
+            (-31.0..=-30.0).contains(&deepest),
             "the deepest cave vertex stands {deepest:.2} m under its field"
         );
         // A vertex the two chunks share (the same world position) has the same target.

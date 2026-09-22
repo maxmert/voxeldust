@@ -1386,11 +1386,19 @@ pub fn common_env(trust_dir: &str, p: &DevClusterParams) -> Vec<(&'static str, S
     // The DIRECTORY is common to every node; the FILENAME is the realm's own, built by the shard from
     // its own name. That split is deliberate: one place decides where files live, and one place decides
     // what a realm's file is called, so a writer and a reader cannot disagree about either.
-    let realm_store_dir = std::path::Path::new(trust_dir)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .display()
-        .to_string();
+    // ★ THE REALMS' MEMORY OUTLIVES THE SLOT (2026-09-22, the on-foot ground): `down` reaps the slot's
+    // work directory whole, and the realm stores lived in it — so every restart forgot every planet's
+    // solved artifact, the first login after it re-solved the home planet for 165 s, and no ground
+    // existed for anyone meanwhile (the owner: "no land is loading till I'm boarded"). The stores now
+    // live in a `realms/<slot>` directory BESIDE the work directory, which `down` leaves alone; a
+    // store from another world or generator is refused by its label and re-solved, never misread.
+    let realm_store_dir = realm_store_dir(
+        std::path::Path::new(trust_dir)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    )
+    .display()
+    .to_string();
     let mut env = vec![
         ("VD_TRUST_DIR", trust_dir.to_owned()),
         ("VD_REALM_STORE_DIR", realm_store_dir),
@@ -2531,6 +2539,21 @@ pub fn spawn_anchor_keys() -> &'static [&'static str] {
         // deleted. Absent ⇒ byte-identical child env ⇒ THE plain world.
         "VD_FIXTURE_PLANT",
     ]
+}
+
+/// ★ WHERE THE REALMS' FILES LIVE FOR A SLOT (2026-09-22): a `realms/<slot>` directory BESIDE the
+/// slot's work directory, never inside it — `down` reaps the work directory whole, and a realm's
+/// memory (its solved artifact, its berths) must outlive a restart. ONE place builds it, so the
+/// cluster's environment, a tool writing a berth and a test reading a store cannot disagree.
+#[must_use]
+pub fn realm_store_dir(work: &std::path::Path) -> std::path::PathBuf {
+    let slot_name = work
+        .file_name()
+        .map_or_else(|| "slot".to_owned(), |n| n.to_string_lossy().into_owned());
+    work.parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("realms")
+        .join(slot_name)
 }
 
 /// ★ WHERE ONE REALM'S FILE LIVES (D-MOVE-2) — the ONE place the name is built, so a tool that writes

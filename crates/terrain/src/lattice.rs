@@ -76,6 +76,11 @@ pub struct SampleBox {
     /// ★ The same columns' WATER surface radius (slice 8c stage C5) at [`LENGTH_BITS`], or ZERO
     /// for a dry column — what the client's water sheet stands on.
     pub water: Vec<Gi>,
+    /// ★ THE SAME COLUMNS' GROUND radius at [`LENGTH_BITS`] (2026-09-21, the water sheet's cut):
+    /// what the sheet's builder reads to leave out a quad buried under the land in every state the
+    /// ladder can draw. ZERO where the host holds no height for the column (the card's readback
+    /// carries the directions alone), which keeps the quad.
+    pub surfaces: Vec<Gi>,
     /// ★ THE BODY'S SEA as a radius at [`LENGTH_BITS`], ZERO for a body with none (2026-09-20, the
     /// owner: "the form of the shores is changing all the time"): the sea is ONE surface under
     /// every cell of the body, so the shore is the land's own crossing of it and follows the land's
@@ -257,6 +262,8 @@ pub(crate) struct BoxSetup {
     pub surfaces: Vec<(Gi, Biome)>,
     /// Each column's water surface radius, or ZERO (C5).
     pub water: Vec<Gi>,
+    /// ★ Each column's ROCK PROVINCE (slice 8d step 2), the halo's included.
+    pub province: Vec<Gi>,
     /// The carvers that can reach the box: a SUPERSET of what any one cell's owner keeps, and a
     /// hollow is the exact greatest over the list, so the superset changes no byte.
     pub tubes: Vec<Tube>,
@@ -387,23 +394,39 @@ pub(crate) fn box_setup(
     let mut dirs = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     let mut surfaces: Vec<(Gi, Biome)> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     let mut water: Vec<Gi> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
+    // ★ Every column's ROCK PROVINCE (slice 8d step 2), the halo's included: a halo cell must read
+    // the province its owning chunk reads, or the wall of a mine would change rock at every chunk
+    // edge.
+    let mut province: Vec<Gi> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     // ★ ONE COLUMN PASS (step G2-A): the charter once per box, the column rule per halo column —
     // the core's own rule (2026-09-20: a halo that read the recipe while the core read the
     // artifact cracked every chunk edge).
     let plan_charter = body.plan_charter(rung, key.face);
-    let lattice = match field {
-        Some(f) => Some(body.macro_lattice()?.coarser(f.level())?),
+    // The body's own lattice beside the level's: the halo reads the water's side the core reads
+    // (2026-09-22, the coast mask), and a side comes off the FINE node's own bit.
+    let fine = match field {
+        Some(_) => Some(body.macro_lattice()?),
         None => None,
+    };
+    let lattice = match (field, fine.as_ref()) {
+        (Some(f), Some(l)) => Some(l.coarser(f.level())?),
+        _ => None,
     };
     let read = crate::chunk::ColumnRead {
         body,
         field,
         lattice: lattice.as_ref(),
+        fine_lattice: fine.as_ref(),
         charter: &plan_charter,
         first: if field.is_some() {
             body.first_fine()
         } else {
             0
+        },
+        // The halo reads the core's rule, the slope share included (2026-09-20's cracked edges).
+        slope_charter: match lattice.as_ref() {
+            Some(l) => crate::artifact::slope_charter(body, l, rung),
+            None => crate::artifact::SlopeCharter::NONE,
         },
         key,
         n_cells: body.ladder.cells_per_edge(rung) as i32,
@@ -413,22 +436,19 @@ pub(crate) fn box_setup(
         let mut a = -HALO;
         while a <= edge {
             let core_column = (a >= 0) & (a < edge) & (b >= 0) & (b < edge);
-            let (dir, h, biome, w) = if core_column {
-                let (dir, h, biome) = column.columns[(b as usize) * CHUNK_EDGE + a as usize];
-                (
-                    dir,
-                    h,
-                    biome,
-                    column.water[(b as usize) * CHUNK_EDGE + a as usize],
-                )
+            let (dir, h, biome, w, p) = if core_column {
+                let index = (b as usize) * CHUNK_EDGE + a as usize;
+                let (dir, h, biome) = column.columns[index];
+                (dir, h, biome, column.water[index], column.province[index])
             } else {
                 // A halo column is the neighbour's own column: it reads what the neighbour reads.
-                let (dir, h, biome, w, _) = read.column(a, b)?;
-                (dir, h, biome, w)
+                let got = read.column(a, b)?;
+                (got.dir, got.h, got.biome, got.water, got.province)
             };
             dirs.push(dir);
             surfaces.push((h, biome));
             water.push(w);
+            province.push(p);
             a += 1;
         }
         b += 1;
@@ -453,6 +473,7 @@ pub(crate) fn box_setup(
         dirs,
         surfaces,
         water,
+        province,
         tubes,
         own,
         foreign,
@@ -482,6 +503,7 @@ pub fn sample_box(
         dirs,
         surfaces,
         water,
+        province,
         tubes,
         own,
         foreign,
@@ -531,6 +553,7 @@ pub fn sample_box(
                             biome,
                             r_steps,
                             water: column_water,
+                            province: province[col],
                         },
                         value,
                         &tubes,
@@ -549,6 +572,7 @@ pub fn sample_box(
         sites,
         dirs,
         water,
+        surfaces: surfaces.iter().map(|s| s.0).collect(),
         sea: body.sea_radius,
     })
 }

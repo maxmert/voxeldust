@@ -8860,21 +8860,34 @@ draws itself"):**
   realm's empty chunks stayed in the empty set and read as 717 phantom holes (the empty set is cleared
   with the realm and a hole needs a resident key). LESSON: a counter of chunks built cannot see a chunk
   built empty, and a span kept as final is a decision the instrument must be able to see.
-- 🟥 **THE FAR RING'S TILES ARE NEVER SERVED.** The stamp names, at rest and for the whole leg, the same
-  rung-9 chunks at the edge of the ring (`NegY 9 115–125 131–132 8`, about 23) waiting for tile
-  `(3, 7, 7)`: the gateway's `tiles_within` picks tiles by their CENTRE within the reach, and a chunk
-  whose stencil reaches into a tile whose centre stands past the reach waits forever; they are past the
-  horizon (the revealed class) and the coarser rung stands, so nothing shows, but the ask never ends.
-  WHEN: with the tile path's next pass. WHERE: `terrain/src/artifact.rs::tiles_within` (a tile whose
-  NEAREST node is within the reach), and `tile_reach_m` against the ladder's asked outer edge (the switch
-  distance times the hysteresis and the slack), one number for the shard, the gateway and the ladder.
-- 🟥 **THE WATER SHEET COVERS EVERY PYRAMID COLUMN.** A column read through a pyramid level holds no water
-  word, so it takes the body's sea (`sample_row` → `None` → `body.sea_radius`), and the sheet stands at the
-  sea level over every cell of every far-view chunk; the land shows only where the level's mean height
-  stands above the sea. Right for the ocean, wrong for a lake basin above the sea (a sheet at the sea's
-  level under a highland lake) and for the cost (a sheet quad under every land cell). WHEN: C6, with the
-  pyramid carrying a per-node water word or a land share. WHERE: `terrain/src/chunk.rs` (the C5 column
-  water), `terrain/src/position.rs::water_sheet`.
+- 🟩 **THE FAR RING'S TILES ARE NEVER SERVED — CURED (2026-09-21).** The stamp named, at rest and for the whole
+  coast leg, the same rung-9 chunks past the horizon (`NegY 9 115–125 131–132 8`, about 23) waiting for tile
+  `(3, 7, 7)`: the shard's reach stopped at the smooth horizon while the ladder's skyline admits the peaks past
+  it, and the ladder asks a rung out to the band's outer edge (1.1 of the switch, widened by the ask's slack),
+  not to the switch. ONE HOME NOW: `vd_terrain::artifact::{ASK_HYSTERESIS_OUT, ASK_SLACK, reach_m}` — the
+  ladder reads its `HYSTERESIS_OUT`, `ASK_BOUND_SLACK` and `reach_m` from the terrain crate, and `tile_reach_m`
+  is the ladder's outer edge bounded by how far the ground can be SEEN (the horizon plus the relief's own),
+  plus the stencil's two nodes. The relief is the body's own bound (`relief_bound_m(0)`), one more argument
+  on every caller. ALSO, THE TILES ACROSS A CUBE EDGE (the "seam ring" owed above): `tiles_within` walks the
+  node square through the seam table (`node_at`, the walk `tiles_of_chunk` already makes), so a reach that
+  crosses a face's edge names the partner face's tiles, the nearest first by the angle to the direction — a
+  chunk at the edge no longer waits for a tile nobody sends. Unit tests: the reach at the outer edge, with
+  and without relief, and the tiles across the seam holding every tile `tiles_of_chunk` names for an edge
+  chunk. The stamp's `awaiting_keys` on the coast leg is the judge (owed: the flight after the build).
+- 🟩 **THE WATER SHEET COVERS EVERY PYRAMID COLUMN — THE PYRAMID'S WATER WORD (2026-09-21, the owner's
+  order after the coast flight).** A column read through a pyramid level held no water word, so the far view
+  took the body's sea under every cell and a highland lake vanished from orbit and appeared on approach. Now
+  `Artifact::pyramid_water` carries one word per coarse node beside every level's heights — the mean level of
+  the wet children when at least half of the 2 × 2 block is wet, else DRY (`fold_water`: a lake narrower than
+  the node folds away where it stands under a pixel, as a hill does) — folded in the digest, stored as a
+  second field of the part row (schema 39; 38 retired with `ARTIFACT_VERSION` 4, a version-3 store re-solves),
+  shipped beside the heights in `BulkMsg::ArtifactPyramid::water_m` (a RESHAPE: `PROTO_MINOR` 33 and the
+  floor moves to 33), assembled by the client's book into `PyramidField::water_m` (empty = no words = the
+  sea alone, so a synthetic level in a test still reads the sea), and read by the column through the same
+  `sample_row` the rows use. The sea needs no word (`SampleBox::sea`). The golden top of the identity's
+  self-check carries no water word, so no pin moves for it. Cost: the pyramid's bytes double (about 12 MB on
+  the home planet, once per client per realm, paced). Owed: `HOME_ARTIFACT_DIGEST` re-recorded; the lake seen
+  from orbit on a flight (UNMEASURED by eye until the owner flies a highland lake).
 - 🟩 **THE LINES AT EVERY CHUNK EDGE** (the owner's pictures from 400 km; the pilot-eye captures at 410 km
   and 20 km over land found by `land_stand`: a one-pixel line of sea colour on every chunk edge, wavy with
   the ground, so a real gap of tens of metres and not a rounding crack). CAUSE: a chunk's HALO columns (the
@@ -8886,7 +8899,7 @@ draws itself"):**
   and a pyramid rung. The rung-0 identity chunks moved with their halo, so the golden fields are re-recorded
   once more under `GENERATOR_VERSION` 7 (uncommitted, one bump for the day's two output changes). The
   suspects that were not it: the one-sided edge normal (still one-sided, ledgered below), the skirt.
-- 🟥 **A RE-SPAWNED HULL ADDRESSES ITS PARENT BY THE DEAD NODE (measured 2026-09-20, 12:35–12:37).** The
+- 🟩 **A RE-SPAWNED HULL ADDRESSES ITS PARENT BY THE DEAD NODE (measured 2026-09-20, 12:35–12:37) — CURED 2026-09-21.** The
   capture client left, the whole tree went dormant (every shard "drained on shutdown signal" at 12:35:34),
   and the owner's window a minute later re-spawned it (nodes 1013–1025). The new home planet (1016) read
   its artifact from the store and demanded the hull; the new hull (1018) then addressed its parent as node
@@ -8896,6 +8909,298 @@ draws itself"):**
   directory record inside its lease, or a node id kept in the hull's own store). WHEN: the realm lifecycle,
   before the next dormant-then-return flight; WHERE: the hull's parent link at boot (`shard.rs`, the
   exterior/adoption path), the directory's record at re-spawn. WORKAROUND: a fresh `dev-cluster` boot.
+  THE CAUSE, READ IN THE CODE: a hull learns its parent from its EXTERIOR key (`DirectoryKey::Ship(hull)`,
+  `resolve_exterior_head`: "whoever authors my placement is my parent"). The reaper of a retired shard's heads
+  (`reap_retired_heads`) revoked its REALM keys alone; the dead planet's exterior lease on the hull stood, the
+  new planet's `LeaseGrant` at genesis was refused against it (`grant`: a lower fence is refused), and the new
+  hull read the corpse's node off the standing record. CURED: the reaper revokes the exterior keys a retired
+  shard holds with its realm keys, so the re-spawned parent's grant lands (the unit test: a dead shard's realm
+  key AND its hull's exterior key both go, and the fresh planet's grant at genesis is GRANTED). The parked
+  hull after a drain (flown away, logged out, the tree drained, logged in) stays UNMEASURED — owed with the
+  live dormant-then-return flight of this cure.
+- 🟩 **THE WATER SHEET'S COST (2026-09-21, the owner: *"I have a feeling that when we draw just the planet it is
+  performant, but if water is drawn it becomes slower"*).** MEASURED on the coast leg, three flights of one
+  binary with the sheet on and off (`VD_TERRAIN_WATER=0`, the fourth flight's client never connected and
+  recorded nothing): the frame's median 33.8 and 31.1 ms with the sheet against 24.2 ms without; the opaque
+  pass 22.5 and 19.3 ms against 16.3; the transparent pass unchanged. About eight milliseconds a frame, a
+  third of the frame — the sea under EVERY cell (2026-09-20) put a quad under every land cell too, which
+  doubled the triangles of every land chunk. CURED: `position::water_sheet(samples, hide)` keeps a quad only
+  where a corner's ground stands no higher than the water plus a HIDE bound — the land's own morph toward the
+  coarser rung (`step_bound_m`), its sink under the finer (`sink_m`) and a cell of placement — which is as
+  far as the drawn land can ever move off its column; under that bound the sheet still reaches under the
+  shore (the shore stays one surface's crossing), past it the quad is buried in every state and is not built.
+  The sample box carries the columns' ground for it (`SampleBox::surfaces`; the card's readback holds the
+  directions alone, so a card-built box marks them unknown and keeps every wet quad — the card is a knob).
+  ★ THE CUT ALONE DID NOT PAY, MEASURED: the same leg read 32.2 ms, and the coast eye's wanted set
+  (`examples/sheet_cost.rs`) still held 33 million sheet triangles against 40 million of land, because an
+  OCEAN chunk drew two triangles per cell for a flat surface (7 688 at rung 7). THE SECOND HALF: the sheet is
+  ONE QUAD PER BLOCK of 8 × 8 cells whose corner columns all hold one level (`SHEET_BLOCK`); a block whose
+  corners disagree (a lake's edge) keeps a quad per cell. The flat quad stands under the sphere by its
+  sagitta, 0.3 m at rung 9 and 5 m at rung 11 — under a twentieth of a cell. MEASURED: 0.59 million sheet
+  triangles (from 33 million); the frame's median **23.2 ms with the sheet against 24.2 ms with no sheet at
+  all** and 32.2 before; the opaque pass 14.0 ms; the shore continuous in the frames. The owner's feeling
+  was right, and the cost is gone.
+- 🟥 **THE WINDOW DIES ON THE NIGHT SIDE (measured 2026-09-21, 12:06 and 12:10).** A window opened on a stand
+  where the star stood 38° under the horizon panicked in the renderer four to seven seconds after the scene
+  swap, twice, with the card free: `wgpu_hal::metal: Failed to create counter sample buffer: "Cannot allocate
+  sample buffer"`, then `Error in Surface::present: Validation Error` in `bevy_render::renderer::render_system`.
+  The HEADLESS capture client on the same stand ran on at 21 ms a frame, and the window on a day-side stand
+  (the coast, the day-side belt) ran on. The counter sample buffers are the render diagnostics' timestamp
+  queries (`RenderDiagnosticsPlugin`, read onto the stamp as `passes_ms`); what the night side changes in the
+  window's pass list is UNMEASURED. WHEN: before the owner flies into the night. WHERE: `client-render/src/lib.rs`
+  (the diagnostics plugin as a measurement knob, default off, is the first ablation), the sky and the
+  shadow passes under a star below the horizon. TOOLS: `VD_STAND_HIGHEST=1` and `VD_STAND_SUN="x y z"` on
+  `examples/land_stand.rs` pick the highest land on the day side (the star's direction in the planet's frame
+  is the stamp's `star.direction_body`).
+- 🟨 **THE MOUNTAINS READ SOFT (the owner, 2026-09-21: *"the whole land is almost flat surface with hills"*;
+  agreed order: the roughness factor onto the solve, then 8d).** MEASURED: the solve holds ±8 276 m of relief
+  and belts of +5 183 m, and a stand 18.7 km over the day side's highest land (8 081 m, tundra) shows a rolling
+  sheet with no ridge in the frame (`runs/1789986229__pilot__a0/shots/belt_stand.png`). Two causes read in the
+  code: the solve's node is 8 km, so a belt is a swell hundreds of kilometres wide at about three degrees; and
+  everything narrower than a node comes from 8a's fine octaves, whose per-column roughness factor is a
+  continental NOISE field (20–120 km) that never reads the solve's uplift, so a range gets a plain's smoothness.
+  WHEN: now, one day, before the 8d design. WHERE: `body.rs` (the roughness charter), `recipe/height.rs`
+  (`roughness_factor`), the artifact's row (a per-node uplift or slope word the factor reads). JUDGED by
+  pictures over the belt stand, day side.
+  ★ BUILT (2026-09-21 afternoon): THE ROUGHNESS FACTOR READS THE SOLVED FIELD'S MACRO SLOPE. At a column
+  the host takes the gradient of `Z` by central differences one macro node either way (four more stencil
+  reads a column, cost UNMEASURED), divided by twice the node through an integer reciprocal drawn once per
+  chunk (`SlopeCharter`); the SHARE is `min(1, |∇Z| / slope_ref)` where `slope_ref` is the body's own first
+  fine octave's RMS slope (`S_PEAK · spectrum_base(first_fine)`, 0.1247 on the home planet — derived beside
+  the spectrum, no new draw, no new datum crossing); the FACTOR is the larger of the noise factor and the
+  share (`greater`, branchless; the card's kernel passes zero as it passes z = 0). MEASURED (the
+  `slope_histogram` with `VD_HISTOGRAM_FIELD=1`): the belt's factor 0.53 → 0.88; PLAIN 10.5 % → 5.8 %,
+  RANGE 17.7 % → 31.7 %; the solved slope wins on 28.3 % of columns. `GENERATOR_VERSION` 8, `DECLARED_PIN`
+  re-pinned, the golden fields gained the wider stencil's rows (the identity's measured word unchanged), the
+  artifact digest unchanged. The belt picture (`runs/1789991727__pilot__a0/shots/belt_stand.png`, after the
+  artifact landed) shows broad ridges and basins with lakes in the hollows where the sheet was even — NOT a
+  clean A/B (the earlier picture was taken before the artifact landed); the owner's look is the judge.
+  What stays: the 8 km node (a belt is a 3° swell) and the fine band's 1.5 km bound — peaks and cliffs are
+  8d's carve and strata, and a finer solve is 8c's own next step if the owner wants mountains, not hills.
+- 🟥 **THE PLANET IS DRAWN ON THE RECIPE FOR THE SOLVE'S 85 SECONDS, THEN REBUILT (measured 2026-09-21,
+  12:55–12:57, the window on the belt stand).** On a fresh dev cluster the home planet's shard is demand-spawned
+  at the login and solves for 85 s; the realm states no artifact digest until then, so the lane's "a realm that
+  states an artifact is built on it alone" rule has nothing to hold against and 6 460 chunks are built on the
+  recipe's own relief; when the head lands every one is dropped and 8 409 are rebuilt on the field (the stamp:
+  `expected==held` False for a beat, `rebuilds` +1, `submitted` 6 472 → 14 857). The owner sees the planet
+  change shape 90 s after login — the pop the ruling names ("never the recipe's relief, which would pop away
+  later"). Two roads: (a) a body with a macro lattice WAITS for its artifact (nothing drawn for the solve's 85 s
+  on a wiped store — a black planet at login, worse on a dev cluster, moot in production where the store is
+  solved once); (b) the dev cluster KEEPS the realm stores across `down`/`up` so the solve runs once per
+  machine and the shard reads it at boot (`artifact landed ... millis=81422` becomes a store read). The owner's
+  call; (b) first is the recommendation, then (a) as the law. ★ NOT REPRODUCED: the owner's window on the same
+  stand (10:25–10:45) drew NO planet at all until the hull was boarded, while my window and two headless
+  clients on the same stand drew it; the client's own log holds no artifact line to say why, so the next
+  build WARNS on every artifact refusal (`ArtifactIngest::Shape`/`NoHead`) and names the realm the lane holds
+  against a stated digest, so the next occurrence leaves evidence.
+- 🟨 **8d STEP 1 — THE BEDS' HARDNESS (2026-09-21).** The cap-rock bench drew a tread at every bed with one
+  body-wide strength, so a belt's slopes read as contour lines (the owner's 10 km screenshot). Now each bed
+  top's hardness is a seed identity draw (`vd_recipe::terrace::bed_hardness`), the pull toward the nearer
+  top is scaled by that top's hardness (soft: nothing; the hardest: the whole body strength, a ceiling), the
+  card computes the same word (`terrace_words` packs the bench seed). `GENERATOR_VERSION` 9, `DECLARED_PIN`
+  and `HOME_IDENTITY_MEASURED` re-pinned, both golden tables re-recorded; the artifact digest unchanged.
+  MEASURED: 37 → 11 treads over 5 000 m of raw height, the tread length −74 %; 600 columns: all pulled →
+  263 pulled. OPEN: the cap share is an even split ASSUMED (the reference's band is thirty times finer than
+  this body's bed spacing, so it states no share) — the owner's number is owed (ruling W5); HR5 coverage of
+  the new lines UNMEASURED (the gate waits for the owner's window); the five frozen pictures are stale by
+  design and refreeze on the owner's look.
+- 🟨 **8d STEP 2 — THE ROCK MAP WORD, AND THE SUBSTANCE AT A FIXED RADIUS (2026-09-21; ruling W4 item 4, the
+  owner's SL6 approval).** The artifact's node row grew from nine bytes to ten: the tenth is the node's ROCK
+  PROVINCE (`vd_terrain::strata::Province` — crystalline basement, folded belt, flat shelf, rift basalt, deep
+  sediment), read at the end of the initial land from the crust share, the uplift over the age and the sea the
+  inventory solved for (`land::province_of`), and carried through the solve untouched. `ARTIFACT_VERSION` 5 (a
+  version-4 store re-solves); the pyramid takes NO province word, because the far view draws no rock. Inside the
+  veneer's deepest band a cell's substance is no longer the body's one sediment by depth: it is the rock of the
+  BED at the cell's own radius (`vd_recipe::cell::CellCharter::bed_rock`, the bench's own index), drawn from the
+  province's four — its soft pair where the bed drew soft, its hard pair where it drew hard. `GENERATOR_VERSION`
+  10; `DECLARED_PIN`, `HOME_IDENTITY_MEASURED`, both golden tables, the golden fields and the artifact digest
+  re-recorded. MEASURED: the home artifact 85.76 MB → 94.63 MB (94 632 540 bytes, 8 871 936 nodes).
+  OPEN, each named in the code: (1) the CARD states the DEFAULT province, so its substances differ from the
+  CPU's under an artifact exactly as its heights and its water already do (`gpu-drift` measures the card against
+  the CPU's own box plan, which states the same default, so the gate stays green); (2) the design's owed change
+  — the soil's thickness stripped on the SOLVE's slope, so a cell's substance is the same at every rung — is NOT
+  built, and the veneer's band still moves with the surface a coarse rung draws with fewer octaves (the BED's own
+  rock does not move); (3) a cell of the very lowest column can dip under the bench's datum, where the product
+  truncates toward zero instead of flooring and one bed boundary moves by one bed — the same answer on every
+  host, so a reading and not a drift; (4) HR5 coverage of the new lines UNMEASURED (`coverage-fast` is not run
+  in this session); (5) the frozen pictures are stale by design, and the substance is not painted until 8e.
+- 🟩 **THE SEA DECIDES THE SHORE (2026-09-21 evening; the owner, flying the coast after steps 1 and 2: *"the
+  shores are changing all the time"*; ruling W6).** ROOT CAUSE, MEASURED (`vd-bins/examples/shore_step`: 300
+  lines of 80 km across the belt's coast, the first crossing of the sea per rung): the shoreline is where the
+  ground crosses the sea's level; the FINE octaves decided that crossing, a coarser rung keeps fewer of them,
+  and the sea does not morph with the land — so at every ring swap the crossing moved sideways by the dropped
+  octaves' height over the coast's slope: a median of 70 m at the 64 m rung, 234 m at 128 m, 848 m at 256 m,
+  1 845 m at 512 m (p90 to 6.5 km). The roughness-onto-the-solve change (W1) made it worse by design: the
+  coast's fine octaves stood at full amplitude wherever the solve's slope is steep. THE SECOND HALF of the
+  cause: a LAND node's row carries no water word (`MacroSolve::water_level` says DRY over the sea), so the land
+  node's own columns — which the shore runs through — held no water at all: the sheet stopped dead at the
+  midline between a sea node and a land node, and a valley cut under the sea on the land side was a dry pit.
+  THE LAW (`vd_recipe::height::shore`, ONE SOURCE, the card compiles it): after the bench a column's surface is
+  held on its GROUND's side of its water — the ground being the radius, the field's `Z` and the coarse
+  octaves, which every rung shares — by at least a quarter of the ground's own height over or under the water
+  (`SHORE_SHIFT` 2); a column with no water is untouched; a ground exactly at the water is land. So the
+  shoreline stands where the solved ground crosses the water at every rung, and the morph carries it. And a
+  DRY row's column reads the BODY'S SEA (`artifact::sample_water`, the ONE reader for the chunk's column and
+  the morph's height), so the ground decides the side on both sides of a coast. The card's plan charter grew
+  the body's sea word (`PlanCharter::sea_radius`, twelve head words; the biome's datum is the ladder radius on
+  a dry body and could not serve); the four host-read words of a column became `plan::FieldRead`. MEASURED
+  after: the crossing's step is 0 m at every rung pair on all 33 crossing lines (one 16 m sample step at most,
+  at the 512 m rung); `gpu-drift` 5 979 of 5 979 boxes; the identity's measured half, every golden table and
+  the artifact digest UNCHANGED (the seed-only tables state no sea; the solve is untouched); `GENERATOR_VERSION`
+  11 and `DECLARED_PIN` re-pinned; a unit test walks the moon's shore at rungs 0–7 with a stated sea and asserts
+  the same side at every rung, both sides present, and the clamp active
+  (`the_shoreline_stands_where_the_ground_crosses_the_water_at_every_rung`). OPEN: (1) the QUARTER is a
+  stated choice, not a computed one — the physical mechanism (waves plane the coast) states a band, and a band
+  cannot hold a crossing where a fine octave is taller than it; the owner's word is owed beside the W5 cap
+  share; (2) a LAKE's level still reaches only its own rows, so a lake's shore is cut at the row midline and
+  its land-side columns hold the SEA's level — 8d step 5 (lakes, shores, outlets) owes lakes this law; (3) the
+  pyramid levels (rungs 13 and up) fold `Z` and the water word, so the far view's coast still moves at a LEVEL
+  swap by the fold's smoothing — UNMEASURED, and unseen at the rungs a ship in the air draws; (4) the look near
+  the coast changed (a coastal plain where the octaves would have cut under the sea) and is not judged by the
+  owner yet; (5) HR5 coverage of the new lines UNMEASURED (the gate waits for the window to close).
+- 🟥 **THE LAKES, AND THE DROWNING THEY UNCOVERED (2026-09-22; the owner from 1 448 km: *"It's full of
+  patchy lakes, you never would see anything like this in the real world. Do we have something wrong with
+  our model?"* — *"Yes, let's try it out"*).** MEASURED (`vd-bins/examples/lake_census`): lakes were 16.1 %
+  of the land (Earth 3.7 %, most of it glacial), 24 164 patches, 10 338 of one node; the solve stamps the
+  full five-billion-year crater record (144 967 craters) and the first flood finds 137 173 pits — the pits ARE
+  the craters — and the pits GREW through the solve (98 k → 146 k). THREE DEFECTS FOUND, TWO CURED:
+  (1) 🟩 the flood ran every tenth pass, so a hollow made between floods was cut by nobody → `FLOOD_EVERY` 1;
+  (2) 🟩 the cut was counted per basin and placed nowhere → `MacroSolve::deposit`: this pass's cut is carried
+  down the receiver tree as a volume and laid in the first hollow it meets, up to the spill (`pit`, flagged AT
+  THE ROUTING — a first try read `z_flood − z` after the sweep, which is every cut node's own cut, and the
+  fill equalled the cut to a tenth of a percent, pass after pass); the rebound's `pending` is now SIGNED, a
+  fill a load (without it the sea floor lifted on 1.4 million nodes and 99.6 % of the globe drowned). With
+  both, the pits fall 137 173 → 7 055 over the passes: lakes drain and fill as on Earth.
+  (3) 🟥 **THE STALE FLOOD WAS THE OLD SOLVE'S EROSION BRAKE, AND THE TRUE EROSION DROWNS THE PLANET.** The
+  old sweep skipped every node whose (stale) flood level stood over its terrain — which after the first cut
+  was EVERY cut node — so the rivers ran in passes 0, 10, 20 and 30 only: a tenth of the age. The 10 % land
+  the owner accepted on ask 8 was that accident. With the flood every pass the stream-power rivers grade
+  every continent to the sea within one pass (the base-level wave runs 16 km/Myr at `K₀`; the implicit sweep
+  jumps to the graded state) and the sea re-solved over the flat field covers it: **land 1.43 % at 5 Gyr,
+  1.01 % at 500 Myr, 1.46 % at 100 Myr** (the age is not the lever), **0.97 % with the crystalline rock's
+  erodibility a twentieth of `K₀`** (Stock & Montgomery 1999; the implicit sweep at 125 Myr a pass still grades
+  it), **0.11 % with a 10 m/Myr epeirogeny on continental crust** (Braun 2010; the SHELF rose unbounded under
+  the sea, the basins lost their volume, the fixed inventory drowned the rest). The two experiments are
+  REMOVED from the code; the breach and the deposit STAY. WHAT EARTH DOES: a continent with no uplift grades
+  to base level in any stream-power model; Earth's plains stand at the ratio of a slow uplift to a slow
+  erodibility, on a crust whose FREEBOARD stands over an ocean whose BASINS hold the whole inventory below
+  the shelf edge. Here the solved sea stands at +4 455 m — Earth's dry step, the coincidence the C5 ledger
+  called UNEXPLAINED — which is the continental freeboard itself: the inventory fills the basins to the
+  continents' brim, so a continent graded to the sea is a drowned one. THE LEVER IS THE HYPSOMETRY, not
+  another erosion knob: the ocean floor's isostatic depth against the continental freeboard against the
+  inventory (Earth: 29 % land on 40 % continental crust, 3.8 km mean ocean depth). OWED, the owner's ruling
+  (T9): the law that keeps the continents up — the basins' depth from the oceanic crust's isostasy (L2 has
+  the densities), the inventory checked against the basins' volume, and only then a cratonic uplift-over-
+  erodibility for the plains' height. UNTIL IT LANDS the tree's solve gives a drowned home planet (1.4 %
+  land); the owner's window runs the LAST build (generator 11, the old brake). Also owed: craters younger
+  than the rivers' erasure time only, on a wet body (the pits at route 0 were the craters); the flood every
+  pass costs +40 s a solve (126 s from 85 s). `lake_census` prints the octave table, the per-pass pits, cut
+  and fill, the lakes' patches and a facies map around a direction.
+- 🟩 **W8 — THE THREE STEPS BUILT (2026-09-22; owner: *"Agree with all three steps, please proceed in that
+  order"*; `GENERATOR_VERSION` 12).** Step 1 was already the law (Airy on both crusts). Step 2: `land::freeboard_factor`
+  (Wise 1974) solves the continental thickness so the sea stands at the crust's shelf quantile `1 − 0.29/0.40`
+  (Earth's 29 % land on 40 % crust; `EARTH_LAND_SHARE`; range 0.5–3, clamped and stated at its ends), and the
+  RUNNING SEA is re-solved at every climate step (`solve_full`). Step 3: the erodibility by the province's rocks
+  (`strata::tensile_strength_mpa`, `Province::erodibility_q8`, Sklar & Dietrich 2001's inverse square; the sweep
+  reads `erodibility_q8`); a secular cratonic uplift tried and REMOVED (it lifted the shelf under the sea without
+  bound). FOUND: `MacroSolve::envelope` scaled the WHOLE globe by `relief/max|z|` when one belt passed the cap
+  (0.69 on the home planet), the basins lost a third of their depth and every run drowned — now a per-node
+  clamp. MEASURED (`lake_census`): land 8.6 % → 22.0 % (19.8 dry + 2.1 lake), sea 78.0 %, the pits 170 k → 14 k
+  over the passes, the lakes' share of the land 9.7 % and GLACIAL (the ice line over 2.4 M nodes, more than the
+  land: the climate's word, 8e); the freeboard check −4 m at the initial land; the solve 114 s. Pins re-recorded:
+  `DECLARED_PIN`, `HOME_IDENTITY_MEASURED` 0x7865_be09_2cf4_889b, `HOME_PLANET_SEA_M` 4 114, the ocean share
+  7 822/10 000, `HOME_ARTIFACT_DIGEST`, `golden_home_z.txt`; the chunk golden tables stand (the recipe did not
+  move). OWED: (1) the ice line's extent and the glacial lakes' density (8e's climate; Canada's shield is the
+  calibration at 9 %); (2) a DELTA where the sediment reaches the sea — today it sinks at the outlet, so the
+  eroded volume leaves the field and the running sea falls a little over the age; (3) the cratons' transient at
+  400 passes (the rock's slow cut needs a pass under its own response time; 167 s measured before the envelope
+  fix, no land gained THEN — re-measure); (4) the moon's `the_sweeps_only_lower` statement now allows a fill to
+  the spill; (5) HR5 coverage of the new lines UNMEASURED; (6) the owner's look at the belt, the coast and the
+  new sea level (+4 114 m, was +4 455).
+- 🟩 **THE ON-FOOT GROUND (2026-09-22; the owner: *"no land is loading till I'm not boarded into the hull … If it
+  breaks like today, then you use a separate sims to load/render things for occupants in different Realms"*).**
+  MEASURED with a headless client on foot that never boards: TWO defects, both fixed, and one harness-only third.
+  (1) **A restart forgot every realm's memory.** `dev-cluster down` reaps the slot's work directory whole, and the
+  realm stores (`realm-<realm>.redb`: the solved artifact, the berths) lived in it — so the first login after any
+  restart re-solved the home planet for 165 s and no ground existed for anyone meanwhile; the owner boarded within
+  that wait, so the land seemed to come with the hull (`store_who.sh`: the head PRESENT before `down`, ABSENT after
+  it). NOW `vd_bins::realm_store_dir(work)` = `realms/<slot>` BESIDE the work directory, the ONE place the name is
+  built (`common_env`, the two process tests, the flight scripts); `down` leaves it; a store from another world
+  or generator is refused by its label and re-solved. MEASURED: "armed from the store" 2 s after the spawn, the far
+  rungs drawn 10 s after login. (2) **The gateway dropped the occupant's tiles.** The realm's shard holds the dot
+  from the first tick of the attach and ships the nine tiles under the boots at once (the ONE reach rule,
+  `tile_reach_m` + `tiles_within`, the same the gateway's view path reads) — one tick before the gateway marks the
+  session Active, so `relay_bulk` dropped eight of the nine ("a session that is not active"), the shard had marked
+  them sent, and the fine rungs waited for ever (in a hull the tiles come through the gateway's own per-realm
+  cache, served every beat, so nothing is lost — the fork the owner named). NOW a shard's bulk for a session that
+  is still activating is HELD on the session (`Session::held_bulk`, bounded by `HELD_BULK_CAP` 64, the oldest
+  dropped and counted) and delivered in order on the activation (`flush_held_bulk`); `bulk_for_held` counts it;
+  gate `a_shards_bulk_for_an_activating_session_is_held_and_delivered_on_activation`. MEASURED after: all nine
+  tiles held, rungs 5–11 drawn (8 040 chunks) within a minute of a login after a restart, no missing tile.
+  (3) A HARNESS NOTE, not a defect: a headless `--capture` WITHOUT `--capture-pilot` frames the whole drawn scene
+  for the box gates by design (`frame_scene_camera`), so its eye stands 3.7 × 10¹² m over every body and it wants
+  no ground; a probe of the ground on foot must pass `--pilot` (the avatar's own eye). The window never runs it.
+  Instruments kept: `DevRealmBox::{surface, tier, cell}`, `DevEntityRow::{cell, frame}`, `DevTerrainStamp::{eyes,
+  eye_cell, eye_offset_m, eye_tier, body_branches, missing_tiles}`, `DevArtifacts::tiles_held`, the shard's
+  "occupant's tile shipped" and the gateway's bulk warnings, `examples/{tile_reach_probe, store_head}`.
+- 🟩 **THE FAR-RUNG SHORE (2026-09-22; the owner: *"during flight the shores changes again all the time"*)
+  — CURED by "THE COAST MASK" below, the same day.**
+  MEASURED (`shore_step` over the pyramid rungs the hull flies at): the fine rungs step 0 m at every swap (W6
+  holds), and the coast steps a MEDIAN of 11.5 km (p90 112 km) at the swap from the rows to level 1 (rung 9 → 10),
+  20 km at level 1 → 2 (14 → 15) and level 2 → 3 (15 → 16): a level's `Z` is the mean of its children, so the
+  ground's crossing of the sea moves by about a level node, and the ground's morph carries the shoreline across
+  that distance as the ring passes — the crawl the owner sees from 1 400 km. THE CURE (proposed, an SL6 ask): the
+  SIDE of the water is the fine row's own word at EVERY rung — a coast mask of one bit per node (8.9 M bits, 1.1 MB
+  on the home planet), the rows' sea bit, shipped once with the head; the shore law holds a column on the mask's
+  side whatever the level's mean says; the card, which holds no artifact, reads the side from its own base as
+  today. Then the shoreline is the same line at every rung to within one fine node (8 km), and a lake's shore
+  keeps today's rule until step 5.
+- 🟩 **THE COAST MASK — ONE SHORELINE AT EVERY RUNG (2026-09-22; the owner, from 1 400 km: *"during
+  flight the shores changes again all the time"*; the cure approved: *"Perfect"*; ruling W10).** CLOSES
+  "THE FAR-RUNG SHORE" above. ROOT CAUSE, MEASURED (`shore_step 0.617270 -0.437286 -0.654033 400 300`,
+  400 lines of 600 km over the belt's coast): W6 decides the water's SIDE by the column's own ground, and
+  at a pyramid rung that ground is a LEVEL'S MEAN of its children, so the crossing of the sea moved a
+  median of **11 536 m** (p90 112 km, max 495 km) at the swap from the rows to level 1 (rung 9 → 10),
+  **20 823 m** at level 1 → 2 (14 → 15) and **19 982 m** at level 2 → 3 (15 → 16); the fine swaps stepped
+  0 m throughout (W6 holds). THE LAW (ruling W10): at EVERY rung the side is the FINE row's own sea word,
+  never a level's mean. A side is a BIT and a bit does not fold. BUILT: `Artifact::coast`, one bit per
+  fine node in node order, set where the row's facies carries `FACIES_SEA`, folded into the digest after
+  the pyramid words (`ARTIFACT_VERSION` 6; a version-5 store re-solves); `ZField::sea_side` answered by the
+  artifact, a tile cache, a sparse row and a pyramid level that holds the mask;
+  `artifact::sample_side(fine_lattice, …)`, which reads the BODY'S OWN lattice at every rung;
+  `vd_recipe::height::shore(base, water, h, side)` with `SIDE_UNKNOWN` / `SIDE_LAND` / `SIDE_SEA` — the
+  card passes `SIDE_UNKNOWN` through `FieldRead::none` and its bytes did not move. The mask rides the
+  store (`ArtifactCoastPart`, schema 40, key family 8, 32 KiB a row), the wire
+  (`BulkMsg::ArtifactCoast`, disc 6, and `ArtifactHead.coast_parts` — a field append, so `PROTO_MINOR` 34
+  and the FLOOR 34), the shard's one part list (`TileSource::artifact_parts`: the pyramid's parts then the
+  coast's), the gateway's cache (whole only with every coast part) and the client's book (the mask rebuilds
+  every level already assembled and bumps the epoch; the client states `ArtifactHeld` only once the pyramid
+  AND the mask are here, because the gateway stops serving on that word). SIZE: 1.1 MB on the home planet
+  (8.9 M bits), one part in eighty of the rows, 34 parts. MEASURED AFTER (`shore_step`, the same stand,
+  346 crossing lines): the level swaps fall to a MEDIAN of **7 m** (rows → level 1, p90 44 m), **0 m**
+  (level 1 → 2, p90 39 m) and **0 m** (level 2 → 3, p90 41 m) — every median under one fine node
+  (8 192 m), from 11 536 / 20 823 / 19 982 m. The fine swaps stay sub-cell (median 0–2 m, max 60 m
+  against a 512 m cell). THE TAIL IS NOT ZERO: a few lines still step 272 km and 307 km at the two top
+  swaps, because the instrument takes the FIRST crossing along a line and a coarse level's `Z` can drown
+  or raise a whole shallow lagoon, so the first crossing becomes ANOTHER crossing; the p90 says how few.
+  GATES: `gpu-drift` 5 979 of 5 979; the seed-only chunk tables (`terrain_pin`, `mesh_pin`) UNCHANGED,
+  because a chunk with no artifact reads the unknown word; `GENERATOR_VERSION` 13 and `DECLARED_PIN`
+  re-recorded, `HOME_ARTIFACT_DIGEST` re-recorded (the version and the mask fold into it), and
+  `HOME_IDENTITY_MEASURED` UNCHANGED — the golden fields carry no mask, by the decision the type's own
+  note states. FOUND while re-recording: `golden_z_record` folded the identity from the fields IT HELD,
+  not from the text it wrote, so the artifact's mask reached a word no host could compute; it now parses
+  its own text back before it measures.
+  Statements that could each have failed: the kernel's three sides; the mask equals the rows' own facies
+  bits and one flipped bit moves the digest; `sample_side` reads one fine node at rung 0 and at a coarse
+  rung; a chunk column at a pyramid rung whose LEVEL MEAN disagrees stands on the mask's side (RED before:
+  1 607 columns followed the mean); the shore steps at most one fine node at every level swap; the wire
+  arm, the store row and its named refusals, the gateway's `whole()`, the client's assembly and rebuild.
+  OPEN: (1) the owner's look at the coast from the hull under the mask; (2) the QUARTER of W6 is still a
+  stated choice, not a computed one; (3) a LAKE's shore still keeps today's rule — 8d step 5 owes lakes the
+  same law, and the mask carries only the SEA bit; (4) the mask is shipped WHOLE, never by tile, so a
+  client that draws one face still receives every face's bits — 1.1 MB once per realm, not measured against
+  the beat's budget on a slow link; (5) HR5 coverage of the new lines UNMEASURED (`coverage-fast` is not
+  run in this session).
 - 🟥 **THE EDGE NORMAL IS ONE-SIDED**: `smooth_normals` averages a chunk's own triangles, so a boundary
   vertex's shade comes from one side. Not visible in the 20 km capture after the halo cure at a high sun;
   UNMEASURED at a low sun. WHEN: C6's dusk stand; the whole mesh (`extract_all_edges`) can give both sides.
