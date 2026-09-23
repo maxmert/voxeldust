@@ -35,12 +35,13 @@ fn main() {
     let levels = artifact.pyramid.len() as u32;
     let floor = i64::from(body.ladder().floor_m);
     let edge = i64::from(CHUNK_EDGE as i32);
+    let counts = artifact.coast_counts();
     let q = vd_terrain::VERTEX_QUANTUM;
     for c in a.chunks(4) {
         let face = Face::from_index(c[0] as u8).expect("a face");
         let (rung, x, y) = (c[1] as u8, c[2] as i32, c[3] as i32);
         let level = PyramidField::level_for(&lattice, levels, rung);
-        let pyramid = PyramidField::of(&artifact, level);
+        let pyramid = PyramidField::of(&artifact, level, &counts);
         let field: &dyn ZField = match &pyramid {
             Some(l) => l,
             None => &artifact,

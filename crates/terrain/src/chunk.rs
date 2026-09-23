@@ -54,7 +54,7 @@ use vd_recipe::cell::{
     CellAt, CellCharter, PROVINCES, Tube, above_cell_word, below_cell_word, cell_word, gap_of_word,
     province_row, strata_row, stratum_of_word,
 };
-use vd_recipe::plan::{FieldRead, PlanCharter, column_surface_from};
+use vd_recipe::plan::{FieldRead, PlanCharter, column_surface_at};
 use vd_recipe::root::isqrt;
 
 /// ★ THE ARITHMETIC IS THE RECIPE'S (ruling F7, step G1). A point in the body's frame and the
@@ -348,8 +348,9 @@ impl ColumnRead<'_> {
         // row — a body with no artifact, a pyramid level, a tile not yet here — stands on the
         // STATED default, so the rock is never a guess.
         let mut province = crate::strata::DEFAULT_PROVINCE.code();
-        // ★ THE WATER'S SIDE (2026-09-22, the coast mask): the fine node's own bit, or the unknown
-        // word where this field cannot say, which leaves the ground's own sign to decide.
+        // ★ THE WATER'S SIDE (2026-09-22, the coast mask; the LAKE 2026-09-23, ruling W16): the
+        // cell's own side word — land, sea or lake — or the unknown word where this field cannot
+        // say, which leaves the ground's own sign to decide.
         let mut side = vd_recipe::height::SIDE_UNKNOWN;
         let (z, w, coast) = match (self.field, self.lattice) {
             (Some(f), Some(l)) => {
@@ -362,11 +363,17 @@ impl ColumnRead<'_> {
                 } else {
                     (Face::from_index(site.face).unwrap_or(face), site.i, site.j)
                 };
-                // ★ THE WATER AND THE COAST (C5): the nearest row's level as a radius (the
-                // body's sea where the field holds no water word; ZERO — none — for a dry
-                // row), and the row's coast bit — through the ONE reader the morph's height
-                // reads too (2026-09-21), so the two hold one shore.
-                let (w, coast) = crate::artifact::sample_water(body, l, f, zf, rung, zi, zj);
+                // ★ THE CELL'S SIDE FIRST, then its water (2026-09-23, ruling W16). The FINE
+                // lattice, never the level's: the side is the fine rows' own word, read over the
+                // cell's whole footprint. The water then follows the side — the body's sea for a
+                // sea cell, the row's own level for a lake cell — through the ONE reader the
+                // morph's height reads too, so the two hold one shore and one water.
+                let cell_side = self
+                    .fine_lattice
+                    .and_then(|fine| crate::artifact::sample_side(fine, f, zf, rung, zi, zj));
+                let (w, side_word, coast) =
+                    crate::artifact::column_water(body, l, f, zf, rung, zi, zj, cell_side);
+                side = side_word;
                 // ★ THE SOLVED FIELD'S OWN SLOPE (2026-09-21): the share that says whether this
                 // column stands on a RANGE the solve raised or on a PLAIN it left. The column reads
                 // it off the very field its `Z` comes from, so a chunk and its halo agree by
@@ -375,25 +382,15 @@ impl ColumnRead<'_> {
                     crate::artifact::slope_share(&self.slope_charter, l, f, zf, rung, zi, zj)?;
                 province = crate::artifact::sample_province(l, f, zf, rung, zi, zj)
                     .unwrap_or(crate::strata::DEFAULT_PROVINCE.code());
-                // The FINE lattice, never the level's: the side is the fine row's own word.
-                if let Some(fine) = self.fine_lattice
-                    && let Some(sea) = crate::artifact::sample_side(fine, f, zf, rung, zi, zj)
-                {
-                    side = if sea {
-                        vd_recipe::height::SIDE_SEA
-                    } else {
-                        vd_recipe::height::SIDE_LAND
-                    };
-                }
                 (crate::artifact::sample_z(l, f, zf, rung, zi, zj)?, w, coast)
             }
             _ => (Gi::ZERO, body.sea_radius, false),
         };
-        let surface = column_surface_from(
+        let dir =
+            vd_recipe::plan::site_direction(self.charter, i32::from(site.face), site.i, site.j);
+        let surface = column_surface_at(
             self.charter,
-            i32::from(site.face),
-            site.i,
-            site.j,
+            dir,
             &FieldRead {
                 z,
                 first: self.first,
@@ -1453,6 +1450,7 @@ mod tests {
             z_m: vec![0; lattice.coarser(1).expect("a level").node_count()],
             water_m: vec![],
             coast: None,
+            counts: None,
         };
         let coarse =
             column_field(&moon, Some(&level_1), Face::PosZ, 0, 4_000, 4_000).expect("columns");
@@ -1465,6 +1463,7 @@ mod tests {
             z_m: vec![],
             water_m: vec![],
             coast: None,
+            counts: None,
         };
         assert!(column_field(&moon, Some(&level_9), Face::PosZ, 0, 4_000, 4_000).is_none());
         let torn = crate::artifact::TileCache::new(lattice.edge);
@@ -1783,7 +1782,8 @@ mod tests {
         let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
         let artifact =
             crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
-        let level1 = crate::artifact::PyramidField::of(&artifact, 1).expect("level 1");
+        let level1 = crate::artifact::PyramidField::of(&artifact, 1, &artifact.coast_counts())
+            .expect("level 1");
         let edge = CHUNK_EDGE as i32;
         for (rung, field, x, y) in [
             (3u8, &artifact as &dyn crate::artifact::ZField, 40i32, 41i32),

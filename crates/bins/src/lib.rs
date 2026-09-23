@@ -15,6 +15,9 @@ pub mod artifact_boot;
 pub mod artifact_source;
 pub mod artifact_store;
 pub mod artifact_worker;
+// ★ THE GRID'S SCRATCHES, AS NUMBERS (ruling B2 step 3; gate G-GRID): the cone, the rotation and
+// the long-axis histogram that measure what the square grid does to a river and to a lake.
+pub mod grid_bias;
 pub mod proc_launch;
 
 // The dev-control-only helpers (Tier-B process-gate glue): `flight` is the ONE pilot every cluster

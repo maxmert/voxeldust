@@ -335,7 +335,7 @@ pub(crate) struct Session {
     /// tick of the attach, a tick before this gateway marks the session Active. Those bytes used to
     /// be DROPPED ("a session that is not active"), the shard had marked them sent, and the fine
     /// rungs waited for ever (MEASURED: eight of the nine tiles under the pilot's boots lost at
-    /// every login). Held here, bounded by [`crate::gateway::shard::HELD_BULK_CAP`], and delivered
+    /// every login). Held here, bounded in bytes by [`crate::gateway::shard::HELD_BULK_BYTES_CAP`], and delivered
     /// on the activation, in order.
     pub(crate) held_bulk: Vec<Vec<u8>>,
     /// RLM 5f-3d — the STANDING home-realm identity of a dynamic session: set once at the committed lease

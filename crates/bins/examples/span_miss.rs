@@ -73,9 +73,10 @@ fn main() {
     let rung_hi: u8 = args
         .get(5)
         .map_or(11, |s| s.parse().expect("the last rung"));
+    let counts = artifact.coast_counts();
     for rung in rung_lo..=rung_hi {
         let level = PyramidField::level_for(&lattice, levels, rung);
-        let pyramid = PyramidField::of(&artifact, level);
+        let pyramid = PyramidField::of(&artifact, level, &counts);
         let field: &dyn ZField = match &pyramid {
             Some(p) => p,
             None => &artifact,

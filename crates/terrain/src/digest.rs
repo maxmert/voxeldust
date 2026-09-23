@@ -365,6 +365,7 @@ pub fn surface_column_field(
         z: 0,
     };
     let charter = body.plan_charter(rung, face);
+    let n_cells = body.ladder.cells_per_edge(rung) as i32;
     let read = ColumnRead {
         body,
         field: Some(field),
@@ -374,7 +375,7 @@ pub fn surface_column_field(
         first: body.first_fine(),
         slope_charter: crate::artifact::slope_charter(body, &lattice, rung),
         key,
-        n_cells: body.ladder.cells_per_edge(rung) as i32,
+        n_cells,
     };
     let step = (edge - 1) >> SAMPLE_GAPS_LOG2;
     let mut heights = [Gi::ZERO; COLUMN_SAMPLES];
@@ -889,7 +890,7 @@ mod tests {
         let artifact =
             crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
         let moon = moon.with_sea_m(artifact.sea());
-        let level1 = PyramidField::of(&artifact, 1).expect("level 1");
+        let level1 = PyramidField::of(&artifact, 1, &artifact.coast_counts()).expect("level 1");
         let edge = i64::from(crate::chunk::CHUNK_EDGE as i32);
         let floor = i64::from(moon.ladder.floor_m);
         let mut differ = 0;
@@ -930,6 +931,7 @@ mod tests {
             z_m: vec![],
             water_m: vec![],
             coast: None,
+            counts: None,
         };
         assert!(surface_column_field(&moon, &level_9, Face::PosZ, 0, 4_000, 4_000).is_none());
         let torn = TileCache::new(lattice.edge);

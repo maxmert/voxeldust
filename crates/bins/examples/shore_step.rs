@@ -4,7 +4,14 @@
 //! rung drops move the crossing sideways by their amplitude over the land's slope. Along lines
 //! across the coast near a stand, this prints, per rung pair, how far the crossing moves: the
 //! shore's own step at a ring swap, in metres, which the crossfade slides the eye through.
-//! `cargo run --release -p vd-bins --example shore_step -- [dx dy dz] [lines] [half_length_km]`
+//!
+//! `cargo run --release -p vd-bins --example shore_step -- [dx dy dz] [lines] [half_length_km]
+//! [step_m] [rung_lo] [rung_hi]`
+//!
+//! ★ THE OLD RULE, FOR THE BEFORE NUMBER (2026-09-22, ruling W15): with `VD_SHORE_RULE=old` in the
+//! environment the pyramid levels are built with NO coast counts, so every cell takes the side of
+//! the ONE fine node nearest its centre — the rule ruling W10 shipped and the rule that painted
+//! squares of water on the land from 41 000 km. The same run with the counts is the after number.
 
 use vd_bins::artifact_worker::{SolveJob, run_solve};
 use vd_core::glam::DVec3;
@@ -23,6 +30,11 @@ fn main() {
     };
     let lines = a.get(3).map_or(400, |v| *v as usize);
     let half_km = a.get(4).copied().unwrap_or(60.0);
+    let step_m = a.get(5).copied().unwrap_or(64.0);
+    let rung_lo = a.get(6).map_or(3u8, |v| *v as u8);
+    let rung_hi = a.get(7).map_or(18u8, |v| *v as u8);
+    // The old rule: no counts on any level, so a cell reads its centre node's own bit.
+    let old_rule = std::env::var("VD_SHORE_RULE").is_ok_and(|v| v == "old");
     let body = home_planet();
     let artifact = run_solve(&SolveJob {
         body,
@@ -39,15 +51,15 @@ fn main() {
     };
     let east = aim.cross(seed).normalize();
     let north = east.cross(aim).normalize();
-    let step_m = 64.0;
     let half = half_km * 1000.0;
     let n = (2.0 * half / step_m) as usize;
     // ★ EVERY RUNG A HULL DRAWS (2026-09-22): the fine rungs read the rows, the far rungs read the
     // pyramid's levels as the client's book picks them (`PyramidField::level_for`), so a swap from
     // the rows to level 1 and from level to level is measured like a swap between two fine rungs.
-    let rungs: [u8; 14] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let rungs: Vec<u8> = (rung_lo..=rung_hi).collect();
     let lattice = vd_terrain::macro_lattice::MacroLattice::of(&body).expect("a lattice");
     let levels = artifact.pyramid.len() as u32;
+    let counts = artifact.coast_counts();
     let fields: Vec<Box<dyn vd_terrain::artifact::ZField>> = rungs
         .iter()
         .map(|&r| {
@@ -55,16 +67,35 @@ fn main() {
             if level == 0 {
                 Box::new(artifact.clone()) as Box<dyn vd_terrain::artifact::ZField>
             } else {
-                Box::new(vd_terrain::artifact::PyramidField::of(&artifact, level).expect("a level"))
-                    as Box<dyn vd_terrain::artifact::ZField>
+                let mut field = vd_terrain::artifact::PyramidField::of(&artifact, level, &counts)
+                    .expect("a level");
+                if old_rule {
+                    field.counts = None;
+                }
+                Box::new(field) as Box<dyn vd_terrain::artifact::ZField>
             }
         })
         .collect();
+    println!(
+        "shore_step rule: {}; step {step_m} m; rungs {rung_lo}..{rung_hi}",
+        if old_rule {
+            "OLD (the centre node)"
+        } else {
+            "the footprint's wet fraction"
+        }
+    );
     println!(
         "levels per rung: {:?}",
         rungs
             .iter()
             .map(|&r| vd_terrain::artifact::PyramidField::level_for(&lattice, levels, r))
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "coast level per rung: {:?}",
+        rungs
+            .iter()
+            .map(|&r| vd_terrain::artifact::coast_level(lattice.cells_per_node, r))
             .collect::<Vec<_>>()
     );
     // Per rung pair: the crossings' sideways steps.

@@ -197,6 +197,18 @@ pub fn column_surface_from(
     j: i32,
     read: &FieldRead,
 ) -> ColumnSurface {
+    column_surface_at(charter, site_direction(charter, face, i, j), read)
+}
+
+/// ★ [`column_surface_from`] FROM A DIRECTION ALREADY IN HAND: the same kernel, for a host that has
+/// already computed the column's direction and must not compute it twice. The chunk pass bends each
+/// cell to a direction once and hands the same three words in here.
+///
+/// **Example.** The shard builds a chunk over the belt. It bends each column's cell to a direction
+/// and hands the very same three words to this kernel — never a second bend, and never two
+/// directions for one column.
+#[must_use]
+pub fn column_surface_at(charter: &PlanCharter, dir: [Gi; 3], read: &FieldRead) -> ColumnSurface {
     let FieldRead {
         z,
         first,
@@ -204,7 +216,6 @@ pub fn column_surface_from(
         water,
         side,
     } = *read;
-    let dir = site_direction(charter, face, i, j);
     // ★ THE GROUND, THEN THE FINE OCTAVES, THEN THE BENCH, THEN THE SHORE. The ground is the radius,
     // the field's `z` and the coarse octaves the field did not replace (slice 8a stage 4: the
     // octave sum answers the raw surface and the terrace then pulls it toward the nearest bed top;

@@ -165,6 +165,49 @@ fn main() {
         report.sweeps[0].total_fill,
         report.sweeps[report.sweeps.len() - 1].total_fill
     );
+    // ★ THE LAKES' BUDGET (ruling W11, 2026-09-22): the depression hierarchy over the final field
+    // and every hollow's own water balance. The routing fill decides the receivers and nothing
+    // else, so the numbers below say how many hollows actually hold water.
+    {
+        let l = &report.lakes;
+        let steps = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
+        let land_m2: f64 = (0..n_of(&lattice))
+            .filter(|&i| state.z[i] > state.sea_z)
+            .map(|i| lattice.area_m2(i as u32) as f64)
+            .sum();
+        println!(
+            "\nthe depression hierarchy: {} depressions ({} leaves); {} water bodies — DRY {} ({:.1} %), PARTIAL {} ({:.1} %), SPILLING {} ({:.1} %)",
+            l.depressions,
+            l.leaves,
+            l.bodies,
+            l.dry,
+            l.dry as f64 * 100.0 / l.bodies.max(1) as f64,
+            l.partial,
+            l.partial as f64 * 100.0 / l.bodies.max(1) as f64,
+            l.spilling,
+            l.spilling as f64 * 100.0 / l.bodies.max(1) as f64
+        );
+        println!(
+            "the standing water: {} nodes, {:.3e} km², {:.4e} km³ ({:.3} % of the inventory {:.4e} km³); the lakes' share of the land by AREA {:.2} %",
+            l.lake_nodes,
+            l.lake_area_m2 as f64 / 1.0e6,
+            l.volume_m3 as f64 / 1.0e9,
+            l.volume_m3 as f64 / 1.0e9 * 100.0 / words.water_km3 as f64,
+            words.water_km3 as f64,
+            l.lake_area_m2 as f64 * 100.0 / land_m2.max(1.0)
+        );
+        match report.sea_before_lakes {
+            Some(before) => println!(
+                "THE DOUBLE COUNT: the sea was re-solved over the inventory less the lakes: {:.0} m → {:.0} m",
+                f64::from(before) / steps,
+                f64::from(state.sea_z) / steps
+            ),
+            None => println!(
+                "THE DOUBLE COUNT: the lakes' volume left the sea's level where it stood ({:.0} m) — under the solve's own sixteenth of a metre",
+                f64::from(state.sea_z) / steps
+            ),
+        }
+    }
     println!(
         "\ncraters stamped: {}; routes: {} (every {} of {} passes, plus the final); pits RAISED by each flood (= lake nodes at that route):",
         report.craters,
@@ -189,6 +232,85 @@ fn main() {
     }
     let climate =
         vd_terrain::climate::climate(&body, &lattice, &words, &state.z, Some(state.sea_z));
+    // ★ GATE G-BUZZSAW (ruling B2 step 2; Egholm et al. 2009): no peak on Earth stands more than
+    // about 1 500 m over its LOCAL snowline, under every tectonic style. A free reading over two
+    // fields we already hold — the solved ground and the climate's own equilibrium line.
+    {
+        let steps = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
+        let mut worst = f64::MIN;
+        let mut over = 0usize;
+        let mut land = 0usize;
+        for i in 0..n_of(&lattice) {
+            if state.z[i] <= state.sea_z || climate.ela_z[i] == i32::MAX {
+                continue;
+            }
+            land += 1;
+            let h = (f64::from(state.z[i]) - f64::from(climate.ela_z[i])) / steps;
+            if h > worst {
+                worst = h;
+            }
+            if h > 1_500.0 {
+                over += 1;
+            }
+        }
+        println!(
+            "\nG-BUZZSAW: the highest peak stands {:.0} m over its own snowline; {over} of {land} land nodes stand over 1 500 m of it ({:.3} %) — Egholm 2009: about 1 500 m, everywhere on Earth",
+            worst,
+            over as f64 * 100.0 / land.max(1) as f64
+        );
+        let mut ela: Vec<i32> = (0..n_of(&lattice))
+            .filter(|&i| state.z[i] > state.sea_z && climate.ela_z[i] != i32::MAX)
+            .map(|i| climate.ela_z[i])
+            .collect();
+        ela.sort_unstable();
+        if !ela.is_empty() {
+            println!(
+                "  the snowline over the land: lowest {:.0} m, median {:.0} m, highest {:.0} m (the sea stands at {:.0} m)",
+                f64::from(ela[0]) / steps,
+                f64::from(ela[ela.len() / 2]) / steps,
+                f64::from(ela[ela.len() - 1]) / steps,
+                f64::from(state.sea_z) / steps
+            );
+        }
+    }
+    // ★ GATE G-CRATER (ruling B2 step 2): Earth holds about 190 confirmed impact structures, 43 of
+    // them wider than 20 km, the median 8 km, and 45 % of the record younger than 200 Ma because
+    // the surface renews itself (Earth Impact Database; Osinski et al. 2022).
+    {
+        let record = &report.crater_record;
+        let mut widths: Vec<u32> = record.iter().map(|c| c.diameter_m).collect();
+        let mut ages: Vec<u64> = record.iter().map(|c| c.age_yr).collect();
+        widths.sort_unstable();
+        ages.sort_unstable();
+        let wide = widths.iter().filter(|&&d| d >= 20_000).count();
+        let young = ages.iter().filter(|&&a| a < 200_000_000).count();
+        println!(
+            "G-CRATER: {} craters kept of {} the production function drew; {wide} wider than 20 km; median {:.1} km — Earth: 190 structures, 43 over 20 km, median 8 km",
+            record.len(),
+            vd_terrain::craters::expected_count(&body, &lattice, &words),
+            widths
+                .get(widths.len() / 2)
+                .map_or(0.0, |&d| f64::from(d) / 1_000.0)
+        );
+        println!(
+            "  the age histogram: {young} younger than 200 Ma ({:.0} %), median {:.0} Ma, oldest {:.0} Ma — Earth: 45 % younger than 200 Ma, which is 4.4 % of its history",
+            young as f64 * 100.0 / record.len().max(1) as f64,
+            ages.get(ages.len() / 2).map_or(0.0, |&a| a as f64 / 1.0e6),
+            ages.last().map_or(0.0, |&a| a as f64 / 1.0e6)
+        );
+    }
+    // ★ THE BUDGET'S OWN COST, measured on its own (ruling W11): the depression hierarchy and the
+    // water balance over the whole planet, run once more against the clock, so the price is a
+    // number and not an argument.
+    {
+        let started = std::time::Instant::now();
+        let lakes = vd_terrain::lakes::budget(&state, &climate);
+        println!(
+            "the hierarchy and the budget cost {:.1} s of the solve, and found {} water bodies",
+            started.elapsed().as_secs_f64(),
+            lakes.report.bodies
+        );
+    }
     let artifact =
         vd_terrain::artifact::Artifact::of(&state, &facies_v, &climate, words.water_km3 > 0);
     drop(climate);
@@ -204,6 +326,22 @@ fn main() {
         .filter(|&&f| f & FACIES_LAKE != 0 && f & FACIES_SEA == 0)
         .count();
     let dry = n - sea - lake;
+    // ★ GATE G-ICE (ruling B2 step 2): Earth carries ice on about 10 % of its land today and about
+    // 30 % at a glacial maximum (NSIDC; the literature spreads 25–32 %).
+    {
+        let ice = facies
+            .iter()
+            .filter(|&&f| f & vd_terrain::solve::FACIES_ICE != 0 && f & FACIES_SEA == 0)
+            .count();
+        println!(
+            "\nG-ICE: {ice} nodes under ice, {:.2} % of the land ({} land nodes) — Earth: about 10 % today, about 30 % at a glacial maximum. The solve's own reading: {} nodes under the line, thickest {:.0} m, deepest cut {} steps",
+            ice as f64 * 100.0 / (lake + dry).max(1) as f64,
+            lake + dry,
+            report.ice.0,
+            report.ice.1,
+            report.ice.2
+        );
+    }
     println!(
         "\nnodes {n} of {node_m:.0} m ({node_km2:.1} km²): sea {sea} ({:.2} %), lake {lake} ({:.2} %), dry land {dry} ({:.2} %)",
         sea as f64 * 100.0 / n as f64,
@@ -218,15 +356,16 @@ fn main() {
     // Every lake as a connected patch of lake nodes (the lattice's own ring, seams included).
     let mut seen = vec![false; n];
     let mut sizes: Vec<usize> = Vec::new();
+    let mut patches: Vec<Vec<u32>> = Vec::new();
     for start in 0..n {
         if seen[start] || facies[start] & FACIES_LAKE == 0 || facies[start] & FACIES_SEA != 0 {
             continue;
         }
-        let mut size = 0;
+        let mut patch = Vec::new();
         let mut queue = VecDeque::from([start as u32]);
         seen[start] = true;
         while let Some(node) = queue.pop_front() {
-            size += 1;
+            patch.push(node);
             for m in lattice.neighbours(node) {
                 let mi = m as usize;
                 if m == u32::MAX || mi >= n || seen[mi] {
@@ -238,7 +377,8 @@ fn main() {
                 }
             }
         }
-        sizes.push(size);
+        sizes.push(patch.len());
+        patches.push(patch);
     }
     sizes.sort_unstable();
     if !sizes.is_empty() {
@@ -261,6 +401,60 @@ fn main() {
         println!(
             "  size classes (nodes): 1:{} 2-3:{} 4-7:{} 8-15:{} 16-31:{} 32-63:{} 64+:{}",
             hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7]
+        );
+    }
+
+    // ★ GATE G-GRID (ruling B2 step 3; the report's §3.4 and §6.3): the long-axis histogram of the
+    // lakes and the valleys against the FACE GRID'S OWN four directions. A router with no direction
+    // of its own leaves the four bins equal, so the flatness — the biggest bin over the mean bin —
+    // reads one. A spike at 45° names the tie-break: `steeper()` and the flats both break a tie on
+    // the smaller node index, which is the stencil's own `(−1, −1)` corner.
+    //
+    // A VALLEY is a chain of receivers a real river could cut: a land node whose discharge is at
+    // least a hundred times the rain on its own node, which is the drainage-area threshold a
+    // channel needs, and its long axis is taken over eight receiver steps — one step is one of
+    // eight directions by construction and says nothing, eight steps is a line on the ground.
+    {
+        use vd_bins::grid_bias::{AxisHistogram, patch_axis, trunk_axis};
+        const VALLEY_NODES: u64 = 100;
+        const TRUNK_STEPS: usize = 8;
+        const PATCH_MIN: usize = 4;
+        let mut lake_four = AxisHistogram::new(4);
+        let mut lake_twelve = AxisHistogram::new(12);
+        for patch in patches.iter().filter(|p| p.len() >= PATCH_MIN) {
+            if let Some(axis) = patch_axis(&lattice, patch) {
+                lake_four.add(axis.degrees);
+                lake_twelve.add(axis.degrees);
+            }
+        }
+        let mut valley_four = AxisHistogram::new(4);
+        let mut valley_twelve = AxisHistogram::new(12);
+        for node in 0..n as u32 {
+            let i = node as usize;
+            if state.z[i] <= state.sea_z {
+                continue;
+            }
+            let own = u64::from(state.rain[i]) * state.area[i];
+            if state.discharge[i] < own.saturating_mul(VALLEY_NODES) {
+                continue;
+            }
+            if let Some(axis) = trunk_axis(&lattice, &state.receiver, node, TRUNK_STEPS) {
+                valley_four.add(axis.degrees);
+                valley_twelve.add(axis.degrees);
+            }
+        }
+        println!(
+            "\nG-GRID: the long axes against the face grid (0° and 90° are the stencil's rows, 45° and 135° its diagonals)\n  lakes   ({} patches of {PATCH_MIN}+ nodes): {} | FLATNESS {:.3}\n    {} | flatness {:.3}\n  valleys ({} trunks over {VALLEY_NODES} nodes of drainage): {} | FLATNESS {:.3}\n    {} | flatness {:.3}\n  a router with no direction of its own reads 1.000; a spike at 45° or 135° names the tie-break",
+            lake_four.total(),
+            lake_four.line(),
+            lake_four.flatness(),
+            lake_twelve.line(),
+            lake_twelve.flatness(),
+            valley_four.total(),
+            valley_four.line(),
+            valley_four.flatness(),
+            valley_twelve.line(),
+            valley_twelve.flatness()
         );
     }
 

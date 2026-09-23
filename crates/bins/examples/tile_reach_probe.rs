@@ -18,14 +18,20 @@ fn main() {
     let radial = (eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]).sqrt();
     let dir = [eye[0] / radial, eye[1] / radial, eye[2] / radial];
     let levels = 5;
+    // ★ THE RING IS FLOORED BY THE HANDOVER'S OWN STEP (ruling W17), the shard's very line.
+    let top = body.ladder().rungs - 1;
+    let tile_rung = vd_terrain::artifact::tile_rung(&lattice, levels, top);
+    let step_m = body.step_bound_m(tile_rung)
+        + vd_terrain::artifact::field_step_m(&body, &lattice, levels, tile_rung);
     let reach = vd_terrain::artifact::tile_reach_m(
         &lattice,
         levels,
-        body.ladder().rungs - 1,
+        top,
         body.radius_m(),
         body.relief_bound_m(0),
         radial,
         vd_core::geometry::drawable_theta_min_rad(),
+        step_m,
     );
     let face = vd_seed::bend::face_of(dir);
     let (t, s) = vd_seed::bend::face_coords(face, dir);

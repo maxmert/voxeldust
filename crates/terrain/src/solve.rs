@@ -112,10 +112,31 @@ pub const TAN_REPOSE_WET: f64 = 0.47;
 /// the pooling the design describes, in closed form.
 pub const ICE_YIELD_STRESS_PA: f64 = 1.0e5;
 pub const ICE_DENSITY_KGM3: f64 = 917.0;
-/// The glacial erosion rate at the reference `H · S = 300 m × 0.05` (Hallet, Hunter & Bogen 1996,
-/// calibration: temperate Alpine glaciers, about one millimetre a year), scaled by `H · S`.
-pub const GLACIAL_RATE_M_PER_YR: f64 = 1.0e-3;
-pub const GLACIAL_REFERENCE_HS_M: f64 = 15.0;
+/// ★ EGHOLM'S FIVE NUMBERS (Egholm, Nielsen, Pedersen & Lesemann 2009, *Glacial effects limiting
+/// mountain height*, Nature 460, 884–887, <https://doi.org/10.1038/nature08263>; ruling B2 step 2).
+/// The whole ice law is a mass balance against the ABLATION-SEASON temperature `Ts`, in metres a
+/// year a kelvin — accumulate `−0.1·min(0, Ts)`, ablate `−0.15·max(0, Ts)` at the surface and
+/// `−0.05` at a bed that stands over its melting point — and an erosion law `ė = kₑ·|u_s|` with
+/// the exponent ONE, `kₑ` dimensionless and calibrated by Egholm so the mean glacial erosion stays
+/// under a millimetre a year. Calibration body: Egholm's own Alpine and Andean ranges; the
+/// observational half is that no peak on Earth stands more than about 1 500 m over its snowline.
+///
+/// ★ NO EXTENT IS EVER DRAWN. The balance decides where ice is: a node keeps ice only where the
+/// ice its catchment delivers outlives the ablation there, so *"the snowline acts like a climatic
+/// base level limiting the down-valley extent of glacial erosion"* and a small catchment stalls at
+/// the line on its own.
+pub const ICE_ACCUMULATION_M_YR_K: f64 = 0.1;
+pub const ICE_ABLATION_M_YR_K: f64 = 0.15;
+pub const ICE_BASAL_MELT_M_YR_K: f64 = 0.05;
+pub const GLACIAL_EROSION_K: f64 = 1.0e-4;
+/// ★ THE BED'S OWN TEMPERATURE: Earth's continental mean geothermal flux, W/m² (Pollack, Hurter &
+/// Johnson 1993; Davies 2013 — the calibration body is Earth's continents), the thermal
+/// conductivity of ice, W/(m·K) (Paterson 1994), and the pressure-melting gradient, K a metre of
+/// ice (Paterson 1994, pure ice). COLD-BASED ICE DOES NOT ERODE, so a thin cold cap on a polar
+/// plateau leaves the ground alone and a thick temperate trunk cuts it.
+pub const GEOTHERMAL_FLUX_W_M2: f64 = 0.065;
+pub const ICE_CONDUCTIVITY_W_M_K: f64 = 2.1;
+pub const ICE_PRESSURE_MELT_K_PER_M: f64 = 8.7e-4;
 /// ★ THE GLACIAL EPOCH the cut integrates over, years: an unrecoverable HISTORY of the body (ruling
 /// T9 allows one), stated as Earth's Quaternary — the ice's cut never reads the tick (ruling T3).
 pub const GLACIAL_EPOCH_YR: u64 = 2_600_000;
@@ -308,6 +329,10 @@ pub struct FullReport {
     pub sweeps: Vec<SweepReport>,
     /// The craters stamped at the start.
     pub craters: usize,
+    /// ★ THE RECORD ITSELF (ruling B2 step 2's gate G-CRATER): every kept crater with its node,
+    /// its width and the age of the impact that made it, so the census can count the wide ones and
+    /// read the age histogram the resurfacing law is supposed to skew toward the recent.
+    pub crater_record: Vec<crate::craters::Crater>,
     /// Every rebound: the level, the nodes lifted, the greatest lift.
     pub rebounds: Vec<(u32, usize, i32)>,
     /// Every talus pass: the nodes that shed, the worst excess before it.
@@ -327,7 +352,15 @@ pub struct FullReport {
     /// of the globe's area under it (gate G-SEA's reading); `None` and zero on a dry body.
     pub sea_z: Option<i32>,
     pub ocean_share: f64,
+    /// ★ THE LAKES' BUDGET (ruling W11): what the depression hierarchy and the water budget found.
+    pub lakes: crate::lakes::LakeReport,
+    /// ★ THE SEA BEFORE THE LAKES WERE TAKEN OUT OF THE INVENTORY, sixteenths (ruling W11 step 4);
+    /// `None` on a dry body or where the lakes' volume left the level where it stood.
+    pub sea_before_lakes: Option<i32>,
 }
+
+/// The cubic metres in a cubic kilometre: the lakes' volume against the charter's inventory.
+pub const LAKE_KM3_M3: u128 = 1_000_000_000;
 
 /// A basin must hold this many land nodes to be read by gate G-AGE: a hundred nodes is about
 /// 6 700 km² on the home planet, a river basin and not a gully.
@@ -407,6 +440,12 @@ pub struct MacroSolve {
     /// which crust it is. A state built with no initial land reads
     /// [`crate::strata::DEFAULT_PROVINCE`] everywhere, because it has no plates to read.
     pub province: Vec<u8>,
+    /// ★ THE STANDING WATER at each node, sixteenths, or [`DRY`] (ruling W11, 2026-09-22): the
+    /// level the LAKES' WATER BUDGET settled ([`crate::lakes::budget`]), never the routing flood.
+    /// The flood is a scratch surface that decides the receivers, the flats and the order and
+    /// nothing else; a hollow is a lake only where a finite amount of water stands in it. Empty of
+    /// water until the budget runs at the end of the full solve, so every pass reads a dry field.
+    pub water_z: Vec<i32>,
     /// The node directions at [`CACHE_BITS`], read by every chord.
     dir: Vec<[i32; 3]>,
 }
@@ -495,6 +534,7 @@ impl MacroSolve {
             pit: vec![0; n],
             erodibility_q8: vec![256; n],
             province: vec![crate::strata::DEFAULT_PROVINCE.code(); n],
+            water_z: vec![DRY; n],
             dir,
         })
     }
@@ -531,7 +571,7 @@ impl MacroSolve {
     /// is measured against.
     #[must_use]
     pub fn bytes_per_node(&self) -> usize {
-        4 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 4 + 4 + 4 + 12 + 1
+        4 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 4 + 4 + 4 + 12 + 1 + 4
     }
 
     /// ★ THE UPLIFT OF ONE PASS at a node: the age's share that pass carries, as the difference of
@@ -635,18 +675,45 @@ impl MacroSolve {
         out
     }
 
-    /// The water level at a node: a lake's spill level where the flood raised it, the sea's level
-    /// under the sea, [`DRY`] elsewhere — one expression, no branch on a landform kind.
+    /// ★ THE WATER LEVEL AT A NODE (ruling W11, 2026-09-22): the level the LAKES' BUDGET settled
+    /// where standing water covers the node, the sea's level under the sea, [`DRY`] elsewhere — one
+    /// expression, no branch on a landform kind. It no longer reads the routing flood: a hollow the
+    /// rain cannot fill is a dry basin, not a lake.
+    ///
+    /// **Example.** A pilot follows a river into a hollow in the belt's interior. The hollow's own
+    /// nodes stand metres under the flood's spill, and every one of them says DRY: the river that
+    /// reaches it evaporates, and what she lands on is a salt pan.
     #[must_use]
     pub fn water_level(&self, node: u32) -> i32 {
         let i = node as usize;
-        if self.z_flood[i] > self.z[i] {
-            self.z_flood[i]
+        if self.water_z[i] != DRY {
+            self.water_z[i]
         } else if self.z[i] <= self.sea_z {
             self.sea_z
         } else {
             DRY
         }
+    }
+
+    /// ★ THE SWEEP'S BASE LEVEL at a node: the ROUTING surface — the flood's level where the last
+    /// routing raised the node, the sea's level under the sea, the terrain otherwise, and never
+    /// under the terrain. The stream power law cuts toward the surface the water stands on WHILE
+    /// THE PASSES RUN, which is the routing fill: a node on the rim of a hollow cuts toward the
+    /// hollow's spill, never toward its floor. Separate from [`MacroSolve::water_level`] by ruling
+    /// W11 — the fill decides the receivers and the cut, the budget decides the water — and stated
+    /// here EXACTLY as `water_level` read it before W11, so the field the solve makes did not move
+    /// by one sixteenth (MEASURED: the sea, the ocean share and the chunk tables stand).
+    #[must_use]
+    fn routing_base(&self, node: u32) -> i32 {
+        let i = node as usize;
+        let level = if self.z_flood[i] > self.z[i] {
+            self.z_flood[i]
+        } else if self.z[i] <= self.sea_z {
+            self.sea_z
+        } else {
+            DRY
+        };
+        self.z[i].max(level)
     }
 
     /// The chord between two nodes from the cached directions, whole metres.
@@ -667,7 +734,7 @@ impl MacroSolve {
         //    lowest first, every unvisited neighbour is raised to at least the popped level.
         let mut visited = vec![false; n];
         let mut heap: BinaryHeap<Reverse<(i32, u32)>> = BinaryHeap::new();
-        let mut dist = vec![u32::MAX; n];
+        let mut dist = vec![u64::MAX; n];
         for i in 0..n {
             self.receiver[i] = NO_NODE;
             self.chord[i] = 0;
@@ -740,28 +807,52 @@ impl MacroSolve {
                 dist[i] = 0;
             }
         }
-        // 3. THE FLATS: a breadth-first distance to the nearest routed node over equal flooded
-        //    heights, level by level (a distance depends on no visit order), then the receiver of a
-        //    flat node is its neighbour with the smaller distance, ties to the smaller index.
-        let mut frontier: Vec<u32> = (0..n as u32).filter(|&i| dist[i as usize] == 0).collect();
-        let mut level = 0u32;
-        while !frontier.is_empty() {
-            let mut next = Vec::new();
-            for &node in &frontier {
-                for m in self.lattice.neighbours(node) {
-                    if m == NO_NODE
-                        || dist[m as usize] != u32::MAX
-                        || self.z_flood[m as usize] != self.z_flood[node as usize]
-                    {
-                        continue;
-                    }
-                    dist[m as usize] = level + 1;
-                    next.push(m);
+        // 3. ★ THE FLATS, BY THE DISTANCE IN METRES AND NEVER BY THE HOP COUNT (ruling B2 step 3,
+        //    2026-09-22; Cordonnier, Bovy & Braun 2019 §2.3.2). A filled hollow is a FLAT, and a
+        //    hop count charges the stencil's diagonal — which is √2 of a side — the same one step
+        //    as a row. So the cheapest path across a lake ran on the diagonal, planet-wide, and the
+        //    receiver tree drew the scratches the owner saw. Here the distance to the flat's own
+        //    draining shore is the lattice's OWN CHORD IN WHOLE METRES, summed along the path — a
+        //    shortest path, so it depends on no visit order, and a diagonal step pays its length.
+        //    Cordonnier rank on the straight line to one outlet and say plainly that it *"does not
+        //    yield the perfect path patterns that one would obtain by including obstacles in the
+        //    computation of the Euclidean distance"*; the summed chord IS that obstacle-aware
+        //    distance, and our flats have a whole SHORE of outlets rather than the one node a
+        //    straight line could be measured to.
+        //
+        //    ONLY THE SHORE SEEDS THE WALK. A routed node with no unreached neighbour of its own
+        //    flooded height touches no flat, so seeding every routed node would put eight million
+        //    rows in a heap to no purpose (SL9: a cost that grows with the count is a defect).
+        let mut walk: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
+        for node in 0..n as u32 {
+            if dist[node as usize] != 0 {
+                continue;
+            }
+            let shore = self.lattice.neighbours(node).iter().any(|&m| {
+                m != NO_NODE
+                    && dist[m as usize] == u64::MAX
+                    && self.z_flood[m as usize] == self.z_flood[node as usize]
+            });
+            if shore {
+                walk.push(Reverse((0, node)));
+            }
+        }
+        while let Some(Reverse((d, node))) = walk.pop() {
+            if d > dist[node as usize] {
+                continue;
+            }
+            for m in self.lattice.neighbours(node) {
+                if m == NO_NODE || self.z_flood[m as usize] != self.z_flood[node as usize] {
+                    continue;
+                }
+                let step = d + u64::from(self.chord_m(node, m));
+                if step < dist[m as usize] {
+                    dist[m as usize] = step;
+                    walk.push(Reverse((step, m)));
                 }
             }
-            frontier = next;
-            level += 1;
         }
+        drop(walk);
         let (flat, undrained) = self.assign_flat_receivers(&dist);
         report.flat = flat;
         report.undrained = undrained;
@@ -791,39 +882,53 @@ impl MacroSolve {
         report
     }
 
-    /// ★ THE FLAT'S RECEIVERS from the distance field: a node the distance field reached (a distance
-    /// over zero) takes its neighbour of equal flooded height with the SMALLER distance, ties to the
-    /// smaller index; a node it never reached is counted UNDRAINED (a defect, gate G-DRAINAGE) and
-    /// keeps no receiver. Returns `(flat, undrained)`.
-    fn assign_flat_receivers(&mut self, dist: &[u32]) -> (usize, usize) {
+    /// ★ THE FLAT'S RECEIVERS from the distance field (ruling B2 step 3, 2026-09-22): a node the
+    /// field reached (a distance over zero) takes the neighbour of equal flooded height that stands
+    /// NEAREST THE SHORE THROUGH ITSELF — the smallest `distance + chord`, in whole metres — and on
+    /// an exact tie the smaller index; a node it never reached is counted UNDRAINED (a defect, gate
+    /// G-DRAINAGE) and keeps no receiver. Returns `(flat, undrained)`.
+    ///
+    /// The cost is the one the distance field itself is built of, so the winner's distance is
+    /// exactly this node's own less the chord between them: the distance FALLS along every step and
+    /// the flat's tree can hold no ring. Before this the cost was the HOP COUNT, which charged the
+    /// stencil's diagonal the same as its row and sent every lake's water down one diagonal.
+    ///
+    /// **Example.** A filled hollow on the belt is eight nodes across. Its water used to leave by
+    /// the north-east diagonal whatever the hollow's shape, because eight diagonal hops counted
+    /// eight and eight row hops counted eight. Now the eight diagonal steps cost 92 700 m and the
+    /// eight row steps cost 65 500 m, so the water leaves by the nearest shore, as water does.
+    fn assign_flat_receivers(&mut self, dist: &[u64]) -> (usize, usize) {
         let (mut flat, mut undrained) = (0usize, 0usize);
         for i in 0..self.node_count() {
             if dist[i] == 0 {
                 continue;
             }
-            if dist[i] == u32::MAX {
+            if dist[i] == u64::MAX {
                 undrained += 1;
                 continue;
             }
             flat += 1;
             let node = i as u32;
             let mut best = NO_NODE;
+            let mut best_cost = 0u64;
+            let mut best_chord = 0u32;
             for m in self.lattice.neighbours(node) {
                 if m == NO_NODE
-                    || dist[m as usize] == u32::MAX
+                    || dist[m as usize] == u64::MAX
                     || self.z_flood[m as usize] != self.z_flood[i]
                 {
                     continue;
                 }
-                if best == NO_NODE
-                    || dist[m as usize] < dist[best as usize]
-                    || (dist[m as usize] == dist[best as usize] && m < best)
-                {
+                let chord = self.chord_m(node, m);
+                let cost = dist[m as usize] + u64::from(chord);
+                if best == NO_NODE || cost < best_cost || (cost == best_cost && m < best) {
                     best = m;
+                    best_cost = cost;
+                    best_chord = chord;
                 }
             }
             self.receiver[i] = best;
-            self.chord[i] = self.chord_m(node, best);
+            self.chord[i] = best_chord;
         }
         (flat, undrained)
     }
@@ -870,7 +975,7 @@ impl MacroSolve {
                 report.skipped_lake += 1;
                 continue;
             }
-            let base = self.z[r as usize].max(self.water_level(r));
+            let base = self.routing_base(r);
             // ★ THE ROCK'S OWN ERODIBILITY (W7 step 3): the gain times the province's share.
             let c = ((u128::from(gain) * u128::from(self.erodibility_q8[i])) >> 8)
                 * u128::from(isqrt(self.discharge[i]))
@@ -1083,31 +1188,100 @@ impl MacroSolve {
         (shed, worst)
     }
 
-    /// ★ THE ICE (03 §4.9): above the equilibrium line `ela_z` snow outlives the summer; the
-    /// glacier's thickness follows the perfect-plastic law over the slope to the receiver, capped
-    /// by the height above the line, and the trunk is over-deepened by the glacial erosion law
-    /// over the glacial epoch, at most by the ice's own thickness. A node under water, an outlet
-    /// or a node with no drop to its receiver is not cut. Returns the ice mask, and (the nodes
-    /// under ice, the greatest thickness in metres, the greatest cut in sixteenths).
+    /// ★ THE ICE, AS A MASS BALANCE (ruling B2 step 2; Egholm et al. 2009). Three walks of the
+    /// receiver tree the water already uses, and NO EXTENT IS DRAWN anywhere in them.
     ///
-    /// **Example.** On the home planet a 6 000 m range stands over its snow line: its trunk
-    /// valleys are cut into troughs while the ridges between them stay knife-edged; the moon,
-    /// whose line stands above every node, keeps every crater.
-    pub fn ice(&mut self, ela_z: &[i32], gravity_mm_s2: u32) -> (Vec<bool>, usize, f64, i32) {
+    /// 1. **The balance.** At each node the ablation-season temperature stands `Γ·(ela − z)` from
+    ///    the one the equilibrium line names, so the node gains `0.1·|Ts|` of ice a year above the
+    ///    line and loses `0.15·Ts` below it, less `0.05·T` at a bed the year's own mean keeps over
+    ///    freezing. That balance times the node's area is its own contribution, and the tree
+    ///    carries it downstream: where the sum runs out the glacier ENDS. A node under the sea or
+    ///    under standing water contributes nothing.
+    /// 2. **The distance to the margin**, up the same tree: how far the ice under a node must
+    ///    still travel before it melts.
+    /// 3. **The cut.** The thickness is the LESSER of the two perfect-plastic readings of one
+    ///    yield stress — `τ/(ρ·g·S)` over the slope to the receiver (Nye 1952; Paterson 1994) and
+    ///    `√(2·τ·d/ρ·g)` over the distance to the margin (the plastic ice-sheet profile), so
+    ///    neither a flat divide nor a steep wall gives a silly answer. The ice's own speed is its
+    ///    flux over its cross-section, `u = q/H`, which is greatest where the catchment above the
+    ///    line is greatest — AT THE LINE — so the overdeepening falls at the equilibrium line and
+    ///    below every confluence without anybody placing it (MacGregor et al. 2000). The bed
+    ///    erodes at `kₑ·u` over `years`, at most by its own thickness, and only where the bed
+    ///    stands at its pressure-melting point: `T_bed = T_year + G·H/k_ice` against `T_melt`.
+    ///
+    /// Returns the ice mask, and (the nodes under ice, the greatest thickness in metres, the
+    /// greatest cut in sixteenths).
+    ///
+    /// **Example.** On the home planet a range stands over its summer line: the snow that falls on
+    /// its head runs down one trunk, the trunk keeps ice a hundred kilometres BELOW the line
+    /// because the catchment feeds it, and it cuts its own valley deepest just where the line
+    /// crosses it. The ridge beside it holds a cold thin cap that erodes nothing. The moon, whose
+    /// line stands above every node, keeps every crater.
+    pub fn ice(
+        &mut self,
+        ela_z: &[i32],
+        temperature_dk: &[i16],
+        lapse_mk_km: u32,
+        gravity_mm_s2: u32,
+        years: u64,
+    ) -> (Vec<bool>, usize, f64, i32) {
         let n = self.node_count();
         let mut mask = vec![false; n];
         let (mut under, mut thickest, mut deepest) = (0usize, 0.0f64, 0i32);
         let g = Gf::from_i64(i64::from(gravity_mm_s2)) / Gf::from_i64(1_000);
         let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
-        let rate = Gf::from_f64(GLACIAL_RATE_M_PER_YR) * Gf::from_i64(GLACIAL_EPOCH_YR as i64)
-            / Gf::from_f64(GLACIAL_REFERENCE_HS_M);
-        for node in 0..n as u32 {
-            let i = node as usize;
-            if self.z[i] < ela_z[i] || self.z_flood[i] > self.z[i] || self.z[i] <= self.sea_z {
+        let lapse = Gf::from_i64(i64::from(lapse_mk_km)) / Gf::from_i64(1_000_000);
+        let rho_g = Gf::from_f64(ICE_DENSITY_KGM3) * g;
+        let tau = Gf::from_f64(ICE_YIELD_STRESS_PA);
+        // 1. THE BALANCE, and the flux down the tree the water uses.
+        let mut flux: Vec<Gf> = Vec::with_capacity(n);
+        for i in 0..n {
+            let dry = self.z[i] > self.sea_z && self.z_flood[i] <= self.z[i];
+            let b = if dry {
+                ice_balance_m_yr(self.z[i], ela_z[i], lapse, celsius(temperature_dk[i]))
+            } else {
+                Gf::ZERO
+            };
+            flux.push(b * Gf::from_i64(self.area[i] as i64));
+        }
+        for k in 0..self.order.len() {
+            let node = self.order[k] as usize;
+            // Water is not ice's ground: a trunk that reaches the sea or a lake ends there (a
+            // floating shelf is the ocean's own slice, 8o, and is named as missing here).
+            let dry = self.z[node] > self.sea_z && self.z_flood[node] <= self.z[node];
+            if !dry || flux[node] <= Gf::ZERO {
+                flux[node] = Gf::ZERO;
                 continue;
             }
-            mask[i] = true;
+            mask[node] = true;
             under += 1;
+            let r = self.receiver[node];
+            if r != NO_NODE {
+                flux[r as usize] = flux[r as usize] + flux[node];
+            }
+        }
+        // 2. THE DISTANCE TO THE MARGIN, outlets first (the order, reversed).
+        let mut margin_m = vec![0u32; n];
+        for k in (0..self.order.len()).rev() {
+            let node = self.order[k] as usize;
+            let r = self.receiver[node];
+            if mask[node] {
+                let carried = if r != NO_NODE && mask[r as usize] {
+                    margin_m[r as usize]
+                } else {
+                    0
+                };
+                // The last ice node still holds ice across its OWN width, so the margin stands one
+                // chord out from it and the plastic profile there is a thickness, never a zero.
+                margin_m[node] = carried.saturating_add(self.chord[node].max(1));
+            }
+        }
+        // 3. THE THICKNESS, THE SPEED AND THE CUT.
+        for node in 0..n as u32 {
+            let i = node as usize;
+            if !mask[i] {
+                continue;
+            }
             let r = self.receiver[i];
             if r == NO_NODE {
                 continue;
@@ -1117,15 +1291,29 @@ impl MacroSolve {
                 continue;
             }
             let slope = drop / Gf::from_i64(i64::from(self.chord[i].max(1)));
-            let above = Gf::from_i64(i64::from(self.z[i]) - i64::from(ela_z[i])) / steps;
-            let plastic =
-                Gf::from_f64(ICE_YIELD_STRESS_PA) / (Gf::from_f64(ICE_DENSITY_KGM3) * g * slope);
-            let thickness = plastic.lesser(above);
-            let cut_m = (rate * thickness * slope).lesser(thickness);
-            let cut = (cut_m * steps).to_i64_floor() as i32;
+            let plastic = tau / (rho_g * slope);
+            let sheet = (Gf::TWO * tau * Gf::from_i64(i64::from(margin_m[i])) / rho_g).sqrt();
+            let thickness = plastic.lesser(sheet);
+            if thickness <= Gf::ZERO {
+                continue;
+            }
             if thickness.to_f64() > thickest {
                 thickest = thickness.to_f64();
             }
+            // The bed: the year's own mean, warmed by the geothermal flux through the ice,
+            // against the pressure-melting point the ice's own weight lowers.
+            let bed_c = celsius(temperature_dk[i])
+                + Gf::from_f64(GEOTHERMAL_FLUX_W_M2) * thickness
+                    / Gf::from_f64(ICE_CONDUCTIVITY_W_M_K);
+            let melt_c = -Gf::from_f64(ICE_PRESSURE_MELT_K_PER_M) * thickness;
+            if bed_c < melt_c {
+                continue;
+            }
+            let width = Gf::from_i64(self.area[i].max(1) as i64).sqrt();
+            let speed = flux[i] / (width * thickness);
+            let cut_m = (Gf::from_f64(GLACIAL_EROSION_K) * speed * Gf::from_i64(years as i64))
+                .lesser(thickness);
+            let cut = (cut_m * steps).to_i64_floor() as i32;
             if cut > 0 {
                 self.z[i] -= cut;
                 deepest = deepest.max(cut);
@@ -1146,7 +1334,8 @@ impl MacroSolve {
                 if has_water && self.z[i] <= self.sea_z {
                     f |= FACIES_SEA;
                 }
-                if has_water && self.z_flood[i] > self.z[i] {
+                // ★ A LAKE IS WATER THAT STANDS (ruling W11), never the routing flood's own fill.
+                if has_water && self.water_z[i] > self.z[i] {
                     f |= FACIES_LAKE;
                 }
                 if (i64::from(self.z[i]) - i64::from(self.sea_z)).abs() <= i64::from(band) {
@@ -1210,6 +1399,32 @@ impl MacroSolve {
             .iter()
             .fold((i32::MAX, i32::MIN), |(lo, hi), &z| (lo.min(z), hi.max(z)))
     }
+}
+
+/// A climate row's temperature in degrees celsius.
+#[must_use]
+pub fn celsius(temperature_dk: i16) -> Gf {
+    Gf::from_i64(i64::from(temperature_dk)) / Gf::from_i64(10)
+        - Gf::from_f64(crate::climate::FREEZING_K)
+}
+
+/// ★ THE ICE'S MASS BALANCE at one node, metres a year (Egholm et al. 2009): the ablation-season
+/// temperature stands `Γ·(ela − z)` from the equilibrium line's own, so a node over the line gains
+/// [`ICE_ACCUMULATION_M_YR_K`] a kelvin and a node under it loses [`ICE_ABLATION_M_YR_K`] a
+/// kelvin, less [`ICE_BASAL_MELT_M_YR_K`] a kelvin at a bed the year's mean keeps over freezing.
+///
+/// **Example.** A node 600 m over its line on a 6.3 K/km lapse is 3.8 K colder than the line, so
+/// it gains 0.38 m of ice a year; the valley 1 200 m under the line loses 1.13 m a year, and the
+/// glacier reaches it only while its catchment sends more than that.
+#[must_use]
+pub fn ice_balance_m_yr(z: i32, ela_z: i32, lapse_k_m: Gf, t_year_c: Gf) -> Gf {
+    let over_m =
+        Gf::from_i64(i64::from(z) - i64::from(ela_z)) / Gf::from_i64(i64::from(Z_STEPS_PER_M));
+    let ts = -lapse_k_m * over_m;
+    let accumulation = Gf::from_f64(ICE_ACCUMULATION_M_YR_K) * -ts.lesser(Gf::ZERO);
+    let ablation = Gf::from_f64(ICE_ABLATION_M_YR_K) * ts.greater(Gf::ZERO);
+    let basal = Gf::from_f64(ICE_BASAL_MELT_M_YR_K) * t_year_c.greater(Gf::ZERO);
+    accumulation - ablation - basal
 }
 
 /// ★ THE TANGENT OF REPOSE at an aridity (0 wet .. 255 hyper-arid), in 1/65536: the wet end faded
@@ -1298,10 +1513,25 @@ pub fn solve_full(
     let gravity = body.facts().gravity_mm_s2;
     let mut report = FullReport::default();
     // The craters: the impact record, stamped before the water works.
-    let craters = crate::craters::crater_population(body, &lattice, words);
+    // ★ THE RECORD IS THE SURFACE'S, NOT THE SYSTEM'S (ruling B2 step 2). The production function
+    // is unchanged; the AGE it integrates over is each province's own crater retention age, which
+    // the initial land and the climate over it already state — the plate that carries the ground
+    // and the rain that wears it. A body with no water and no moving plate keeps the whole age,
+    // which is why the airless moon's count cannot move.
+    let pre_climate = crate::climate::climate(body, &lattice, words, &land.z, land.sea_z);
+    let surface = crate::craters::Surface {
+        crust: &land.crust,
+        boundary_m: &land.boundary_m,
+        plate: &land.plate,
+        plates: &land.plates,
+        province: &land.province,
+        rain_mm_yr: &pre_climate.rain_mm_yr,
+    };
+    let craters = crate::craters::crater_population(body, &lattice, words, &surface);
     crate::craters::apply_craters(&mut state.z, &lattice, &craters, gravity);
     report.craters = craters.len();
-    drop(craters);
+    report.crater_record = craters;
+    drop(pre_climate);
     // A crater never breaks the envelope: its bowl and its rim are CLIPPED at the relief (a local
     // rule, so a big basin on a small moon does not scale the whole moon down at the end).
     let relief = envelope_steps(body);
@@ -1320,6 +1550,15 @@ pub fn solve_full(
     let mut since_climate = schedule.climate_every;
     let mut since_rebound = 0;
     let mut climate = None;
+    // ★ A DRY BODY'S LINE stands over every node (03 §4.9), whatever its cold — allocated once.
+    let no_ice: Vec<i32> = if words.water_km3 == 0 {
+        vec![i32::MAX; state.node_count()]
+    } else {
+        Vec::new()
+    };
+    // The epoch's share a pass cuts, and what is left for the last run over the final field.
+    let epoch_step = GLACIAL_EPOCH_YR / u64::from(schedule.passes.max(1));
+    let epoch_left = GLACIAL_EPOCH_YR - epoch_step * u64::from(schedule.passes);
     for pass in 0..schedule.passes {
         if since_climate >= schedule.climate_every {
             // ★ THE RUNNING SEA (2026-09-22, W7 step 2): the sea is re-solved over the field as it
@@ -1350,6 +1589,31 @@ pub fn solve_full(
             since_route = 0;
         }
         since_route += 1;
+        // ★ THE SCREE AND THE ICE, INSIDE THE PASS LOOP (ruling B2 step 2). They ran after the
+        // last sweep and the last deposit before this, so nothing could ever drain or fill what
+        // they cut and the final flood found every hollow they left and called it a lake. Here
+        // they stand between the routing and the sweep, so this pass's rivers answer them at once.
+        // The talus keeps its own total, spread over the passes; the ice cuts the epoch's share.
+        if let Some(c) = climate.as_ref() {
+            if (pass + 1) * schedule.talus_passes / schedule.passes.max(1)
+                > pass * schedule.talus_passes / schedule.passes.max(1)
+            {
+                let tan: Vec<u32> = c.aridity_q8.iter().map(|&a| tan_repose_q16(a)).collect();
+                report.talus.push(state.talus(&tan));
+            }
+            let line: &[i32] = if words.water_km3 == 0 {
+                &no_ice
+            } else {
+                &c.ela_z
+            };
+            let (_, under, thickest, deepest) =
+                state.ice(line, &c.temperature_dk, c.lapse_mk_km, gravity, epoch_step);
+            report.ice.0 = under;
+            if thickest > report.ice.1 {
+                report.ice.1 = thickest;
+            }
+            report.ice.2 = report.ice.2.max(deepest);
+        }
         report.sweeps.push(state.sweep(gain, pass, schedule.passes));
         since_rebound += 1;
         if since_rebound >= schedule.isostasy_every {
@@ -1368,25 +1632,17 @@ pub fn solve_full(
             (words.water_km3 > 0).then_some(state.sea_z),
         ),
     };
+    // The talus relaxations the loop had no passes to hold: a schedule of no passes still sheds
+    // its scree, so the count the schedule states is the count that runs.
     let tan: Vec<u32> = climate
         .aridity_q8
         .iter()
         .map(|&a| tan_repose_q16(a))
         .collect();
-    for _ in 0..schedule.talus_passes {
+    while report.talus.len() < schedule.talus_passes as usize {
         report.talus.push(state.talus(&tan));
     }
     drop(tan);
-    // No water, no ice: a dry body's line stands over every node (03 §4.9), whatever its cold.
-    let no_ice = vec![i32::MAX; state.node_count()];
-    let line: &[i32] = if words.water_km3 == 0 {
-        &no_ice
-    } else {
-        &climate.ela_z
-    };
-    let (ice, under, thickest, deepest) = state.ice(line, gravity);
-    report.ice = (under, thickest, deepest);
-    drop(climate);
     report.envelope = state.envelope(relief);
     // ★ THE SEA, RE-SOLVED over the eroded field (stage C5; the design's §6, ruling T8's cure): the
     // inventory must fit under the level over the field AS IT STANDS, whose isostatic sink the land
@@ -1394,12 +1650,71 @@ pub fn solve_full(
     if let Some(sea) = crate::land::sea_level_loaded(&state.z, &state.area, words.water_km3) {
         state.sea_z = sea;
     }
+    // The final routing, so the receivers, the basins and the facies read the final land.
+    report.routes.push(state.route());
+    // ★ THE ICE'S OWN LAST READING over the final field: the epoch's remainder, which is under one
+    // pass's share and cuts nothing, so this run states the MASK the facies byte carries. A
+    // schedule of no passes spends the whole epoch here instead.
+    let ice_mask = {
+        let line: &[i32] = if words.water_km3 == 0 {
+            &no_ice
+        } else {
+            &climate.ela_z
+        };
+        let (mask, under, thickest, deepest) = state.ice(
+            line,
+            &climate.temperature_dk,
+            climate.lapse_mk_km,
+            gravity,
+            epoch_left,
+        );
+        report.ice.0 = under;
+        if thickest > report.ice.1 {
+            report.ice.1 = thickest;
+        }
+        report.ice.2 = report.ice.2.max(deepest);
+        mask
+    };
+    drop(climate);
+    // ★ THE LAKES (ruling W11, 2026-09-22): the routing flood is a SCRATCH SURFACE, so the standing
+    // water is settled here — the depression hierarchy over the final field, and every hollow's own
+    // water budget against the climate that stands over it. A hollow the rain cannot fill is a dry
+    // basin. The climate is the very one the artifact reads, so a node's rain decides its lake and
+    // its own row alike.
+    if words.water_km3 > 0 {
+        let mut climate = crate::climate::climate(
+            body,
+            &lattice,
+            words,
+            &state.z,
+            (words.water_km3 > 0).then_some(state.sea_z),
+        );
+        let mut lakes = crate::lakes::budget(&state, &climate);
+        // ★ THE DOUBLE COUNT (ruling W11 step 4): the lakes' standing water is part of the body's
+        // one inventory, and the sea spent all of it. Once the levels are known the sea is
+        // re-solved over the inventory LESS the lakes; where that leaves the level where it stood
+        // the sea keeps it and nothing is re-run.
+        let km3 = (lakes.report.volume_m3 / LAKE_KM3_M3) as u64;
+        if km3 > 0 && km3 < words.water_km3 {
+            let left = words.water_km3 - km3;
+            if let Some(sea) = crate::land::sea_level_loaded(&state.z, &state.area, left)
+                && sea != state.sea_z
+            {
+                report.sea_before_lakes = Some(state.sea_z);
+                state.sea_z = sea;
+                report.routes.push(state.route());
+                climate =
+                    crate::climate::climate(body, &lattice, words, &state.z, Some(state.sea_z));
+                lakes = crate::lakes::budget(&state, &climate);
+            }
+        }
+        report.lakes = lakes.report;
+        state.water_z = lakes.water;
+    }
     report.sea_z = (words.water_km3 > 0).then_some(state.sea_z);
     report.ocean_share = state.ocean_share();
-    // The final routing, so the water levels, the basins and the facies read the final land.
-    report.routes.push(state.route());
     report.coast_band = coast_band(words, gravity);
-    let facies = state.facies(&ice, report.coast_band, words.water_km3 > 0);
+    let facies = state.facies(&ice_mask, report.coast_band, words.water_km3 > 0);
     report.integrals = state.hypsometric_integrals(AGE_GATE_MIN_NODES);
     report.deposits = state.sediment_by_basin().len();
     Some((state, facies, report))
@@ -1514,8 +1829,9 @@ mod tests {
         let (lo0, hi0) = before.range();
         assert!(lo >= lo0, "the floor fell: {lo0} to {lo}");
         assert!(hi <= hi0, "the ceiling rose: {hi0} to {hi}");
-        // 64 before the rock map; the province's own byte makes 65 (slice 8d step 2).
-        assert_eq!(state.bytes_per_node(), 65);
+        // 64 before the rock map; the province's own byte makes 65 (slice 8d step 2), and the
+        // lakes' own water word makes 69 (ruling W11).
+        assert_eq!(state.bytes_per_node(), 69);
         assert_eq!(state.node_count(), 27_744);
         // The discharge is conserved: what leaves at the outlets is every node's own rain.
         let total: u64 = (0..state.node_count())
@@ -1759,12 +2075,13 @@ mod tests {
         assert!(worse < worst, "the excess fell: {worst} then {worse}");
     }
 
-    /// ★ THE ICE on a stated range: with the line under a peak the peak's slope to its receiver is
-    /// cut by at most the ice's thickness and the mask marks it; with the line over every node
-    /// (an airless moon) nothing is under ice; a node under the sea or in a lake, an outlet, and
-    /// a node with no drop are never cut.
+    /// ★ THE ICE IS A MASS BALANCE, AND NO EXTENT IS DRAWN (ruling B2 step 2). A line over every
+    /// node leaves no ice at all. A line under one peak gives that peak ice, and the glacier ENDS
+    /// where the ablation below eats what the catchment sends. The sea and a lake are not ice's
+    /// ground. An outlet holds ice and cuts nothing, because it has nowhere to flow. A bed the
+    /// year keeps far under freezing is cold-based and erodes nothing.
     #[test]
-    fn the_ice_cuts_the_trunk_under_the_line_and_never_the_water() {
+    fn the_ice_is_a_mass_balance_and_a_cold_bed_cuts_nothing() {
         let moon = home_moon();
         let mut state = MacroSolve::new(&moon).expect("a state");
         let n = state.node_count();
@@ -1777,59 +2094,98 @@ mod tests {
         let pit = state.lattice.index(Face::NegY, 10, 10);
         state.z[pit as usize] = 50 * Z_STEPS_PER_M;
         state.route();
+        let temperate = vec![2_531i16; n];
+        let lapse = 6_500u32;
+        let untouched = state.clone();
         let no_ice = vec![i32::MAX; n];
-        let (mask, under, thickest, deepest) = state.ice(&no_ice, 330);
+        let (mask, under, thickest, deepest) =
+            state.ice(&no_ice, &temperate, lapse, 330, GLACIAL_EPOCH_YR);
         assert_eq!((under, deepest), (0, 0));
         assert_eq!(thickest, 0.0);
         assert!(mask.iter().all(|&m| !m));
-        // The line at 2 000 m: only the peak stands over it.
+        // The line at 2 000 m: the peak stands 1 000 m over it and gains ice; every neighbour
+        // stands 1 900 m under it and loses more than the peak sends, so the glacier is one node.
         let line = vec![2_000 * Z_STEPS_PER_M; n];
         let before = state.z[peak as usize];
-        let (mask, under, thickest, deepest) = state.ice(&line, 330);
+        let (mask, under, thickest, deepest) =
+            state.ice(&line, &temperate, lapse, 330, GLACIAL_EPOCH_YR);
         assert_eq!(under, 1);
         assert!(mask[peak as usize]);
         assert!(thickest > 0.0);
-        assert!(
-            thickest <= 1_000.0,
-            "capped by the height over the line: {thickest}"
-        );
         assert!(deepest > 0);
-        assert!(before - state.z[peak as usize] == deepest);
+        assert_eq!(before - state.z[peak as usize], deepest);
         assert!(deepest <= (thickest * f64::from(Z_STEPS_PER_M)) as i32 + 1);
-        // The line at the sea: the outlet, the pit (a lake) and the flat plateau (no drop to a
-        // receiver at the same height) are under the line yet not cut.
+        // ★ THE SAME PEAK ON A COLD BED cuts nothing: the year's mean is 70 K under freezing, so
+        // the geothermal flux through the ice cannot bring the bed to its melting point.
+        let mut cold_state = untouched;
+        let frozen = vec![2_000i16; n];
+        let z_before = cold_state.z.clone();
+        let (cold_mask, cold_under, _, cold_cut) =
+            cold_state.ice(&line, &frozen, lapse, 330, GLACIAL_EPOCH_YR);
+        assert_eq!(cold_under, 1);
+        assert!(cold_mask[peak as usize]);
+        assert_eq!(cold_cut, 0);
+        assert_eq!(cold_state.z[peak as usize], z_before[peak as usize]);
+        // The line at the sea: the sea's outlet and the pit (a lake) are not ice's ground; the
+        // flat plateau has ice and cuts nothing, because it has no drop to its receiver.
         let z_before = state.z.clone();
         let low = vec![0; n];
-        let (mask, under, _, _) = state.ice(&low, 330);
+        let (mask, under, _, _) = state.ice(&low, &temperate, lapse, 330, GLACIAL_EPOCH_YR);
         assert!(!mask[outlet as usize]);
         assert!(!mask[pit as usize]);
         assert!(under > 0);
         let flat = state.lattice.index(Face::PosY, 5, 5);
         assert!(mask[flat as usize]);
         assert_eq!(state.z[flat as usize], z_before[flat as usize]);
-        // No sea: the six lowest nodes are outlets, under the line yet never cut (no receiver);
+        // No sea: the lowest nodes are outlets, so they hold ice and cut nothing (no receiver);
         // and a node one metre over the line with a one-sixteenth drop over eight kilometres has
         // a cut that floors to nothing.
         let mut dry = MacroSolve::new(&moon).expect("a state");
         dry.z = vec![Z_STEPS_PER_M * 100; n];
         dry.sea_z = i32::MIN;
         let top = dry.lattice.index(Face::PosZ, 40, 40);
-        let under = dry.lattice.index(Face::PosZ, 41, 40);
+        let below = dry.lattice.index(Face::PosZ, 41, 40);
         dry.z[top as usize] = Z_STEPS_PER_M * 100 + Z_STEPS_PER_M;
-        dry.z[under as usize] = Z_STEPS_PER_M * 100 + Z_STEPS_PER_M - 1;
+        dry.z[below as usize] = Z_STEPS_PER_M * 100 + Z_STEPS_PER_M - 1;
         dry.route();
         let outlet = (0..n)
             .find(|&i| dry.receiver[i] == NO_NODE)
             .expect("an outlet");
         let line = vec![Z_STEPS_PER_M * 100; n];
         let z_before = dry.z.clone();
-        let (mask, _, _, _) = dry.ice(&line, 330);
+        let (mask, _, _, _) = dry.ice(&line, &temperate, lapse, 330, GLACIAL_EPOCH_YR);
         assert!(mask[outlet]);
         assert_eq!(dry.z[outlet], z_before[outlet]);
         assert!(mask[top as usize]);
         assert_eq!(
             dry.z[top as usize], z_before[top as usize],
             "a cut under a sixteenth is no cut"
+        );
+    }
+
+    /// The mass balance itself: a node over its line gains, a node under it loses more per kelvin,
+    /// and a bed the year keeps over freezing melts on top of that.
+    #[test]
+    fn the_mass_balance_gains_over_the_line_and_loses_under_it() {
+        let lapse = Gf::from_f64(0.006_5);
+        let line = 1_000 * Z_STEPS_PER_M;
+        let cold = Gf::from_f64(-10.0);
+        let above = ice_balance_m_yr(line + 600 * Z_STEPS_PER_M, line, lapse, cold);
+        assert!((above.to_f64() - 0.39).abs() < 0.001, "{}", above.to_f64());
+        let on = ice_balance_m_yr(line, line, lapse, cold);
+        assert_eq!(on, Gf::ZERO);
+        let below = ice_balance_m_yr(line - 1_200 * Z_STEPS_PER_M, line, lapse, cold);
+        assert!((below.to_f64() + 1.17).abs() < 0.001, "{}", below.to_f64());
+        // A warm year takes its own share at the bed, on top of the surface's balance.
+        let warm = ice_balance_m_yr(line + 600 * Z_STEPS_PER_M, line, lapse, Gf::from_f64(4.0));
+        assert!(
+            (warm.to_f64() - (above.to_f64() - 0.2)).abs() < 0.001,
+            "{}",
+            warm.to_f64()
+        );
+        assert_eq!(
+            celsius(2_731),
+            Gf::from_f64(273.1) - Gf::from_f64(crate::climate::FREEZING_K)
         );
     }
 
@@ -1852,12 +2208,17 @@ mod tests {
         let mut ice = vec![false; n];
         let icy = state.lattice.index(Face::PosY, 7, 7);
         ice[icy as usize] = true;
+        // ★ THE FILL IS NOT WATER (ruling W11): the flood raised the pit, and until the budget
+        // states a level the node is dry land. The budget's own level makes it a lake.
+        assert!(state.z_flood[pit as usize] > state.z[pit as usize]);
+        assert_eq!(state.facies(&ice, 4, true)[pit as usize], 0);
+        state.water_z[pit as usize] = Z_STEPS_PER_M;
         let facies = state.facies(&ice, 4, true);
         assert_eq!(facies[outlet as usize], FACIES_SEA | FACIES_COAST);
         assert_eq!(facies[pit as usize], FACIES_LAKE);
         assert_eq!(facies[icy as usize], FACIES_ICE);
         assert_eq!(facies[state.lattice.index(Face::PosY, 8, 8) as usize], 0);
-        // A dry body: the same pits are closed basins, never lakes, and there is no sea.
+        // A dry body: the same hollows are closed basins, never lakes, and there is no sea.
         let dry = state.facies(&ice, 4, false);
         assert_eq!(dry[outlet as usize], FACIES_COAST);
         assert_eq!(dry[pit as usize], 0);
@@ -2063,13 +2424,13 @@ mod tests {
         assert_eq!(state.sweep(1 << 30, 0, 1), SweepReport::default());
     }
 
-    /// ★ THE KERNELS ON A STATED NEIGHBOURHOOD (06 §3.3): a plateau one metre over the sea with
-    /// one outlet and one pit. The flood raises the pit to the plateau (a lake with the plateau's
-    /// spill level), the plateau is a flat that drains to the outlet by distance, the lake node is
-    /// skipped by the sweep, its neighbours' base level is the lake's level, and the nodes at the
-    /// outlet are cut.
+    /// ★ THE GATE THE ROUTING FILL USED TO FAIL (ruling W11, 2026-09-22): a plateau one metre over
+    /// the sea with one outlet and one pit. The flood RAISES the pit to the plateau — the scratch
+    /// surface the receivers, the flats and the sweep's base level all read — and the pit's own
+    /// WATER LEVEL is DRY, because no budget ever put water in it. Before W11 `water_level` read
+    /// the fill and this test read `plateau`.
     #[test]
-    fn a_pit_becomes_a_lake_and_a_plateau_drains_by_distance() {
+    fn the_routing_fill_is_not_water() {
         let moon = home_moon();
         let mut state = MacroSolve::new(&moon).expect("a state");
         let n = state.node_count();
@@ -2088,10 +2449,26 @@ mod tests {
         assert_eq!((r.undrained, r.cyclic), (0, 0));
         // Eight nodes touch the outlet and take it by slope; every other node is flat.
         assert_eq!(r.flat, n - 1 - 8);
-        assert_eq!(state.water_level(pit), plateau);
+        // ★ THE FILL IS A SCRATCH SURFACE: it raised the pit to the plateau and the pit's own
+        // water word says DRY. The sweep still reads the fill as its base level.
+        assert_eq!(state.z_flood[pit as usize], plateau);
+        assert_eq!(state.pit[pit as usize] as i32, plateau - plateau / 2);
+        assert_eq!(state.water_level(pit), DRY);
+        assert_eq!(state.routing_base(pit), plateau);
+        assert_eq!(state.facies(&vec![false; n], 0, true)[pit as usize], 0);
         assert_eq!(state.water_level(outlet), 0);
+        assert_eq!(state.routing_base(outlet), 0);
         let dry = state.lattice.index(Face::PosY, 1, 1);
         assert_eq!(state.water_level(dry), DRY);
+        assert_eq!(state.routing_base(dry), plateau);
+        // And a stated lake level makes the same node water again, at the level the budget says.
+        state.water_z[pit as usize] = plateau;
+        assert_eq!(state.water_level(pit), plateau);
+        assert_eq!(
+            state.facies(&vec![false; n], 0, true)[pit as usize],
+            FACIES_LAKE
+        );
+        state.water_z[pit as usize] = DRY;
         for m in state.lattice.neighbours(outlet) {
             assert_eq!(state.receiver[m as usize], outlet);
             assert!(state.chord[m as usize] > 0);
@@ -2134,12 +2511,12 @@ mod tests {
         let mut state = MacroSolve::new(&moon).expect("a state");
         let n = state.node_count();
         state.z_flood = vec![0; n];
-        let mut dist = vec![u32::MAX; n];
+        let mut dist = vec![u64::MAX; n];
         let a = state.lattice.index(Face::PosX, 20, 20);
         let ring = state.lattice.neighbours(a);
-        // One routed neighbour at distance 0, the rest unreached; `a` itself at distance 1.
+        // One routed neighbour at distance 0, the rest unreached; `a` itself a chord away.
         dist[ring[7] as usize] = 0;
-        dist[a as usize] = 1;
+        dist[a as usize] = u64::from(state.chord_m(a, ring[7]));
         let (flat, undrained) = state.assign_flat_receivers(&dist);
         assert_eq!(flat, 1);
         assert_eq!(undrained, n - 2);
@@ -2147,11 +2524,13 @@ mod tests {
         assert_eq!(state.receiver[ring[0] as usize], NO_NODE);
     }
 
-    /// The tie in the flat's receiver choice: two neighbours at one distance keep the smaller index.
-    /// On the plateau every routed neighbour of the outlet is at distance zero, so a flat node
-    /// adjacent to two of them takes the smaller.
+    /// ★ THE FLAT'S RECEIVER TAKES THE NEARER NEIGHBOUR, NOT THE SMALLER INDEX (ruling B2 step 3,
+    /// 2026-09-22). On the plateau every routed neighbour of the outlet stands at distance zero, so
+    /// a flat node touching three of them chose the smallest INDEX before — the stencil's own
+    /// `(-1, -1)` corner, one fixed diagonal planet-wide — and now chooses the one its chord is
+    /// SHORTEST to, which is the row neighbour, because a diagonal is the root of two of a row.
     #[test]
-    fn a_flat_node_between_two_routed_nodes_takes_the_smaller_index() {
+    fn a_flat_node_between_three_routed_nodes_takes_the_nearest_and_never_the_smaller_index() {
         let moon = home_moon();
         let mut state = MacroSolve::new(&moon).expect("a state");
         let n = state.node_count();
@@ -2162,14 +2541,72 @@ mod tests {
         state.route();
         // (12, 10) touches (11, 9), (11, 10) and (11, 11), all routed to the outlet at distance 0.
         let node = state.lattice.index(Face::PosX, 12, 10);
-        let candidates = [
-            state.lattice.index(Face::PosX, 11, 9),
-            state.lattice.index(Face::PosX, 11, 10),
-            state.lattice.index(Face::PosX, 11, 11),
-        ];
-        assert_eq!(
-            state.receiver[node as usize],
-            *candidates.iter().min().expect("three")
+        let row = state.lattice.index(Face::PosX, 11, 10);
+        let diagonal = state.lattice.index(Face::PosX, 11, 9);
+        assert!(diagonal < row, "the diagonal holds the smaller index");
+        assert!(
+            state.chord_m(node, row) < state.chord_m(node, diagonal),
+            "the row is the shorter chord"
         );
+        assert_eq!(state.receiver[node as usize], row);
+        assert_eq!(state.chord[node as usize], state.chord_m(node, row));
+    }
+
+    /// ★ A FIELD WITH NO FLAT ROUTES EXACTLY AS IT DID (ruling B2 step 3): the cure touches the
+    /// flats and nothing else. The cone is a stated field with one low point, so the routing reports
+    /// no flat at all — and every receiver is the steepest lower neighbour, derived here a second
+    /// time and compared.
+    #[test]
+    fn a_field_with_no_flat_keeps_the_steepest_descent_it_always_had() {
+        let moon = home_moon();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        let n = state.node_count();
+        // ★ THE CONE WITHOUT A FLOAT (the fence, SL10 clause 4): the dot of two unit directions
+        // FALLS as the angle between them grows, so the negated dot is already a cone. The shift
+        // brings the product of two 40-bit directions back into a signed word and still leaves
+        // about a thousand million levels — far finer than twenty-eight thousand nodes can tie on.
+        const DOT_SHIFT: u32 = 2 * vd_recipe::bend::DIR_BITS - 30;
+        let raw = |node: u32| -> [i128; 3] {
+            let d = state.lattice.direction(node);
+            [
+                i128::from(d[0].raw()),
+                i128::from(d[1].raw()),
+                i128::from(d[2].raw()),
+            ]
+        };
+        let apex = raw(0);
+        let cone: Vec<i32> = (0..n as u32)
+            .map(|node| {
+                let v = raw(node);
+                let dot = v[0] * apex[0] + v[1] * apex[1] + v[2] * apex[2];
+                -((dot >> DOT_SHIFT) as i32)
+            })
+            .collect();
+        state.z = cone;
+        let report = state.route();
+        assert_eq!(report.flat, 0, "a cone holds no flat");
+        assert_eq!(report.undrained, 0);
+        assert_eq!(report.raised, 0, "and the flood raises nothing");
+        for node in 0..n as u32 {
+            let i = node as usize;
+            if state.receiver[i] == NO_NODE {
+                continue;
+            }
+            let (mut best, mut dz_best, mut l_best) = (NO_NODE, 0i64, 0u32);
+            for m in state.lattice.neighbours(node) {
+                if m == NO_NODE || state.z_flood[m as usize] >= state.z_flood[i] {
+                    continue;
+                }
+                let dz = i64::from(state.z_flood[i]) - i64::from(state.z_flood[m as usize]);
+                let l = state.chord_m(node, m);
+                if best == NO_NODE || steeper(dz, l, m, dz_best, l_best, best) {
+                    best = m;
+                    dz_best = dz;
+                    l_best = l;
+                }
+            }
+            assert_eq!(state.receiver[i], best, "node {node}");
+            assert_eq!(state.chord[i], l_best, "node {node}");
+        }
     }
 }

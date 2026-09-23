@@ -58,7 +58,14 @@ fn main() {
         .map(|entry| PyramidField::level_for(&lattice, levels, self_check_key(&body, *entry).rung))
         .max()
         .expect("eight keys");
-    let top = PyramidField::of(&artifact, top_level).expect("the top-rung keys' level");
+    // The golden top carries no mask and no counts (the text states neither), so the counts the
+    // level is built with are dropped again below: the self-check reads what the TEXT states.
+    let counts = artifact.coast_counts();
+    let top = PyramidField {
+        coast: None,
+        counts: None,
+        ..PyramidField::of(&artifact, top_level, &counts).expect("the top-rung keys' level")
+    };
     let fields = GoldenFields {
         levels,
         sea_m: artifact.sea_m,

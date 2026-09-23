@@ -25,7 +25,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use vd_core::pose::RealmId;
-use vd_terrain::artifact::{PyramidField, Tile, TileCache, ZField, tile_width, tiles_of_chunk};
+use vd_terrain::artifact::{
+    CoastCounts, PyramidField, Tile, TileCache, ZField, tile_width, tiles_of_chunk,
+};
 use vd_terrain::chunk::ChunkKey;
 use vd_terrain::macro_lattice::MacroLattice;
 use vd_wire::channels::BulkMsg;
@@ -88,6 +90,10 @@ pub struct ArtifactCache {
     /// by pointer, so a far rung reads the water's side from the fine row's own word and the
     /// shoreline stands in one place at every rung.
     coast: Option<Arc<[u8]>>,
+    /// ★ THE COAST COUNTS (2026-09-22, ruling W15): the wet-node counts folded from the mask the
+    /// moment the mask is whole, shared by pointer with every level. They are DERIVED, so no byte
+    /// of them crosses the wire: the client folds what the server folds, from one mask.
+    counts: Option<Arc<CoastCounts>>,
     /// Bumped on every accepted change, so a reader tells a changed cache from the one it read.
     pub epoch: u64,
 }
@@ -104,6 +110,7 @@ impl ArtifactCache {
             pyramid: vec![None; head.levels as usize],
             tiles: Arc::new(TileCache::new(head.edge)),
             coast: None,
+            counts: None,
             epoch: 1,
         }
     }
@@ -504,11 +511,13 @@ impl ArtifactReceiver {
         // ★ A LEVEL ASSEMBLED AFTER THE MASK TAKES IT AT ASSEMBLY (2026-09-22, ruling W10); a
         // level assembled BEFORE it is rebuilt when the mask lands ([`ArtifactReceiver::accept_coast`]).
         let coast = cache.coast.clone();
+        let counts = cache.counts.clone();
         cache.pyramid[level as usize - 1] = Some(Arc::new(PyramidField {
             level,
             z_m: words,
             water_m: water,
             coast,
+            counts,
         }));
         cache.epoch += 1;
         if cache.whole() {
@@ -566,9 +575,13 @@ impl ArtifactReceiver {
             .flat_map(|b| b.iter().copied())
             .collect();
         self.coasts.remove(&realm);
-        // The whole mask is one bit per node of the body's own lattice, rounded up to bytes.
+        // ★ THE WHOLE MASK is a SIDE WORD per node of the body's own lattice, rounded up to bytes —
+        // the generator's own `coast_bytes`, never a count this crate spells for itself. MEASURED
+        // before it (2026-09-23, ruling W16 fault B): this line read `nodes.div_ceil(8)`, the mask
+        // widened to two bits a node, and the client REFUSED every realm's mask — four refusals,
+        // no coast held, and every far chunk drew the recipe's own relief instead of the solve's.
         let nodes = 6 * (head.edge as usize).pow(2);
-        if mask.len() != nodes.div_ceil(8) {
+        if mask.len() != vd_terrain::artifact::coast_bytes(nodes) {
             return ArtifactIngest::Shape;
         }
         let mask: Arc<[u8]> = mask.into();
@@ -577,10 +590,16 @@ impl ArtifactReceiver {
             .realms
             .get_mut(&realm)
             .expect("the head was read above");
+        // ★ THE COUNTS ARE FOLDED HERE, ONCE (2026-09-22, ruling W15): the client folds the wet
+        // fractions from the very mask the server folded its own from, so a cell at rung 18 reads
+        // one side on both hosts and no count crosses the wire.
+        let counts = Arc::new(CoastCounts::of(&mask, head.edge));
         cache.coast = Some(Arc::clone(&mask));
+        cache.counts = Some(Arc::clone(&counts));
         for level in cache.pyramid.iter_mut().flatten() {
             let mut rebuilt = PyramidField::clone(level);
             rebuilt.coast = Some(Arc::clone(&mask));
+            rebuilt.counts = Some(Arc::clone(&counts));
             *level = Arc::new(rebuilt);
         }
         cache.epoch += 1;
@@ -796,9 +815,9 @@ mod tests {
         );
         // The level's own reader now answers the row's side for a fine node.
         let node = (0..artifact.rows.len() as u32)
-            .find(|&n| artifact.sea_side(n) == Some(true))
+            .find(|&n| artifact.water_side(n) == Some(vd_terrain::artifact::Side::Sea))
             .unwrap_or(0);
-        assert_eq!(level_1.sea_side(node), artifact.sea_side(node));
+        assert_eq!(level_1.water_side(node), artifact.water_side(node));
         // A second part of the same mask is a duplicate.
         assert_eq!(rx.accept(coast_of(&artifact)), ArtifactIngest::Duplicate);
         assert!(!cache.whole(), "level 2 is still owed");

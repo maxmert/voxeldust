@@ -97,9 +97,10 @@ fn main() {
     println!(
         "rung | column (face x y) | ground at rung m | slice | FIELD span | RECIPE span | field holds | recipe holds"
     );
+    let counts = artifact.coast_counts();
     for rung in 4u8..=9 {
         let level = PyramidField::level_for(&lattice, levels, rung);
-        let pyramid = PyramidField::of(&artifact, level);
+        let pyramid = PyramidField::of(&artifact, level, &counts);
         let field: &dyn ZField = match &pyramid {
             Some(l) => l,
             None => &artifact,

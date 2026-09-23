@@ -374,7 +374,10 @@ pub const SIDE_SEA: Gi = Gi::new(2);
 /// quarter is the smallest power of two that leaves a valley near the coast a floor of its own.
 ///
 /// ★ THE COAST MASK DECIDES THE SIDE (2026-09-22; the owner, from 1 400 km: "during flight the
-/// shores changes again all the time"; ruling W10). `side` is the water's side as the ROW said it:
+/// shores changes again all the time"; ruling W10; and from 41 000 km: the globe "shows squares of
+/// water on the land"; ruling W15, which makes the word the WET FRACTION under the cell's whole
+/// footprint instead of the one node at its centre — this kernel is unchanged, because a side is a
+/// word it is TOLD). `side` is the water's side as the ROW said it:
 /// [`SIDE_LAND`] or [`SIDE_SEA`] where the host read the artifact's coast mask at the column's own
 /// fine node, [`SIDE_UNKNOWN`] where it holds no mask (the card, a body with no artifact). Where
 /// the side is stated the ground's own sign does not decide it. MEASURED before the mask

@@ -96,14 +96,32 @@ pub fn fade_bands(rung: u8, rungs: u8) -> ([f64; 2], [f64; 2]) {
     AskBound::unbounded().fade_bands(rung, rungs)
 }
 
-/// WHERE THE SINK RAMP ENDS for a rung: past its fade-in edge `in_hi` (the finer rung's fade-out
-/// edge, where the finer ends), so that AT the edge the rung still stands one finer cell under
-/// the finer surface. The morph is exact at the finer VERTICES; between them a finer triangle
-/// that spans a coarser crease is the chord under it, by up to a finer cell, and MEASURED with the
-/// ramp ending at the edge the coarser mesh showed through the chord there (dark specks at every
-/// fade-out edge). The ramp runs from `in_lo` (the whole sink) to this end (none), linearly, so the
-/// residual at `in_hi` is one finer cell; past the edge only this rung is drawn and it rises to
-/// its own surface with distance — continuous, never a pop. Rung 0 sinks nowhere: its edge.
+/// ★ WHERE THE SINK RAMP ENDS for a rung: AT its fade-in edge `in_hi` — the finer rung's own
+/// fade-out edge, where the finer rung's last fragment is discarded (2026-09-23, ruling W16 fault
+/// D; the owner, from 3 300 km: *"the moving rings are visible, because for some reason they have
+/// different color"*).
+///
+/// ★ **WHY IT MOVED.** The end used to stand PAST the edge, so that AT the edge the rung still
+/// stood one finer cell under the finer surface — the chord a finer triangle cuts under a coarser
+/// crease, which MEASURED as dark specks at every fade-out edge when the ramp ended at the edge.
+/// But the ramp is linear from `in_lo` to its end, so leaving one finer cell AT the edge put the
+/// end `(in_hi − in_lo) · crease / (sink − crease)` past it — about EIGHTY-SEVEN coarse cells on
+/// the home planet, 347 km of ground at rung 13. Over that whole annulus the rung's drawn surface
+/// stood UNDER its own radius, by up to a finer cell, rising with distance: the ground was tilted
+/// by about two thirds of a degree and lifted through kilometres of air, so its Lambert shade and
+/// its aerial perspective both differed from the ring outside it. That annulus IS the ring the
+/// owner photographed, and the ring is the ladder's own, not the field's.
+///
+/// ★ **THE LAW: A RUNG IS DRAWN AT ITS OWN RADIUS WHEREVER NOTHING COVERS IT.** The sink exists to
+/// hold a coarser mesh UNDER a finer one while both are drawn, and the finer one is drawn only
+/// inside the band, so past the band there is nothing to hide under and the sink is ZERO. Inside
+/// the band the ramp is the one it always was, and the finer rung covers it, so nothing visible
+/// moves there either. Rung 0 sinks nowhere: its edge.
+///
+/// ★ **WHAT THIS GIVES BACK, STATED.** The specks the old end cured stand at the edge again — a
+/// coarse triangle showing through a finer chord in a thin ring, at most one finer cell tall. A
+/// ring of specks one cell wide is a smaller seam than a ring of wrong altitude 347 km wide, and
+/// the picture gate measures both (`vd-bins/examples/ring_step`).
 #[must_use]
 pub fn sink_end_m(body: &BodyDefinition, rung: u8, rungs: u8) -> f64 {
     AskBound::unbounded().sink_end_m(body, rung, rungs)
@@ -166,9 +184,20 @@ pub fn switch_m(rung: u8) -> f64 {
 ///
 /// **Example.** On the home planet the rung 7 → 8 handover drops the 3 125 m crest: 198.8 m against
 /// a 256 m cell of the rung that takes over. The rung 0 → 1 handover drops a 30 cm ripple.
+///
+/// ★ **AND SINCE RULING W17 IT READS THE FIELD AS WELL AS THE OCTAVES** (2026-09-23; the owner,
+/// after W16: *"for some of the far-view rungs the change is still visible"*). The octave table is
+/// exact where both rungs read ONE field — at the home planet's 8 → 9 handover it states 319.4 m
+/// against a measured 318.5 m — and silent where the FIELD ITSELF changes under them. On the home
+/// planet rungs 0 to 9 read the artifact's rows and rungs 10 to 14 read pyramid level 1, whose
+/// node is the mean of four, and the surface moves there by up to 1 442.5 m — 1.41 cells of the
+/// rung that takes over — against the table's 897.7 m. So `field_step_m`
+/// ([`vd_terrain::artifact::field_step_m`]) is ADDED: the field's own slope over the distance from
+/// a parent node's centre to a child node's, which every host already holds. A caller that states
+/// zero gets the ladder every flight before W17 flew.
 #[must_use]
-pub fn handover_step_m(body: &BodyDefinition, rung: u8) -> f64 {
-    body.step_bound_m(rung).max(0.0)
+pub fn handover_step_m(body: &BodyDefinition, rung: u8, field_step_m: f64) -> f64 {
+    body.step_bound_m(rung).max(0.0) + field_step_m.max(0.0)
 }
 
 /// ★ THAT STEP IN PIXELS — the ladder's own tolerance, and the line the judge
@@ -221,9 +250,14 @@ pub fn band_widen(step_m: f64, rung: u8) -> f64 {
 /// bounded ask (ruling F9) may pull a rung's horizon in for deliverability, but never so near that
 /// the handover's step shows — a missing chunk is covered by the next rung, a step over the
 /// tolerance is a seam with nothing under it.
+///
+/// ★ ONE HOME SINCE RULING W17: the rule lives in `vd_terrain::artifact` beside [`switch_m`], so
+/// the shard's tile reach and the client's ring are floored by the very same line. MEASURED before
+/// that: the client pushed rung 9's ring out for its step and waited on tiles the shard's own
+/// reach never sent.
 #[must_use]
 pub fn switch_floor_m(step_m: f64) -> f64 {
-    step_m / (2.0 * pixel_rad())
+    vd_terrain::artifact::switch_floor_m(step_m, pixel_rad())
 }
 
 /// THE TIER RULE: the finest rung whose cell is at least one pixel at distance `d_m`, clamped to the
@@ -508,12 +542,20 @@ impl AskBound {
     /// ★ THE SAME BOUND, HAVING READ A BODY (ruling T7 rules 2 and 3): every rung's handover step
     /// from the body's own octave table, so the floor and the widening are the body's own. A rung
     /// with no coarser neighbour has no handover and no step.
+    ///
+    /// ★ `levels` IS THE ARTIFACT'S OWN PYRAMID COUNT (ruling W17): the handover where the FIELD
+    /// changes level pays the field's own step as well as the octaves'. ZERO — a body with no
+    /// artifact — reads the octave table alone, which is the ladder every flight before W17 flew.
     #[must_use]
-    pub fn for_body(mut self, body: &BodyDefinition, rungs: u8) -> AskBound {
+    pub fn for_body(mut self, body: &BodyDefinition, rungs: u8, levels: u32) -> AskBound {
+        let lattice = body.macro_lattice();
         let mut steps = Vec::with_capacity(usize::from(rungs));
         let mut rung = 0u8;
         while rung + 1 < rungs {
-            steps.push(handover_step_m(body, rung));
+            let field = lattice.as_ref().map_or(0.0, |l| {
+                vd_terrain::artifact::field_step_m(body, l, levels, rung)
+            });
+            steps.push(handover_step_m(body, rung, field));
             rung += 1;
         }
         self.steps_m = steps;
@@ -702,14 +744,10 @@ impl AskBound {
     /// switch distances.
     #[must_use]
     pub fn sink_end_m(&self, body: &BodyDefinition, rung: u8, rungs: u8) -> f64 {
-        let (fade_in, _) = self.fade_bands(rung, rungs);
-        if fade_in[0] == FADE_ALWAYS_IN[0] {
-            return fade_in[1];
-        }
-        let crease = f64::from(cell_m(rung - 1));
-        let sink = crate::chunks::sink_m(body, rung);
-        // sink > crease always: the sink holds a cell of each rung and the gap bound.
-        fade_in[1] + (fade_in[1] - fade_in[0]) * crease / (sink - crease)
+        // ★ 2026-09-23 (ruling W16): the ramp ends AT the edge. The body is read no longer, and it
+        // stays in the signature because every caller holds one and a later law may want it.
+        let _ = body;
+        self.fade_bands(rung, rungs).0[1]
     }
 }
 
@@ -2589,11 +2627,11 @@ mod tests {
     fn the_home_planets_table_leaves_both_the_band_and_the_floor_inert() {
         let body = home_planet();
         let rungs = body.ladder().rungs;
-        let bound = AskBound::unbounded().for_body(&body, rungs);
+        let bound = AskBound::unbounded().for_body(&body, rungs, 0);
         let mut worst = 0.0f64;
         let mut rung = 0u8;
         while rung + 1 < rungs {
-            let step = handover_step_m(&body, rung);
+            let step = handover_step_m(&body, rung, 0.0);
             assert_eq!(bound.step_m(rung), step, "rung {rung}");
             worst = worst.max(step_px(step, rung));
             // Rule 2 is inert: the band is the ladder's own, bit for bit.
@@ -2618,6 +2656,59 @@ mod tests {
         assert!((0.5..1.0).contains(&worst), "the worst pair reads {worst}");
     }
 
+    /// ★ RULE 3 WAKES ON THE HOME PLANET WHERE THE FIELD CHANGES UNDER THE LADDER (2026-09-23,
+    /// ruling W17; the owner, after W16: *"for some of the far-view rungs the change is still
+    /// visible — not for close or very far view"*).
+    ///
+    /// The artifact's ROWS hand the ground to PYRAMID LEVEL 1 at rungs 9 → 10, and a level's node
+    /// is the mean of four. MEASURED through the shipped reader (`vd-bins/examples/rung_swap`,
+    /// 9 600 directions a pair): the surface moves by up to **1 442.5 m there — 1.41 CELLS of the
+    /// rung that takes over, 2.82 PIXELS at the distance the swap happened** — while every other
+    /// pair of the home planet stands inside one cell. The octave table stated 897.7 m, so both
+    /// rules slept. With the field's own step added they wake at that one rung and NOWHERE else.
+    ///
+    /// ★ RED BEFORE W17: every assertion below read the tier rule's own switch distance.
+    #[test]
+    fn the_field_step_wakes_rule_three_at_the_rows_to_level_swap_and_nowhere_else() {
+        let body = home_planet();
+        let rungs = body.ladder().rungs;
+        let lattice = body.macro_lattice().expect("a lattice");
+        let mut levels = 0u32;
+        while lattice.coarser(levels + 1).is_some() {
+            levels += 1;
+        }
+        let bound = AskBound::unbounded().for_body(&body, rungs, levels);
+        let flat = AskBound::unbounded().for_body(&body, rungs, 0);
+        let mut moved = Vec::new();
+        let mut rung = 0u8;
+        while rung + 1 < rungs {
+            let field = vd_terrain::artifact::field_step_m(&body, &lattice, levels, rung);
+            assert_eq!(
+                bound.step_m(rung),
+                handover_step_m(&body, rung, field),
+                "rung {rung}"
+            );
+            if bound.switch_m(rung) != flat.switch_m(rung) {
+                moved.push(rung);
+            }
+            rung += 1;
+        }
+        // ONE rung moves, and it is the swap where the rows hand over to the pyramid.
+        assert_eq!(moved, vec![9]);
+        assert_eq!(bound.switch_m(9), switch_floor_m(bound.step_m(9)));
+        assert!(bound.switch_m(9) > switch_m(9));
+        // The band widens about that switch by the step's own share of a coarse cell, and the
+        // crossing stays where the band's middle is.
+        let ratio = band_widen(bound.step_m(9), 9);
+        assert!(ratio > 1.0, "the measurement that made this test: {ratio}");
+        let (_, out) = bound.fade_bands(9, rungs);
+        let s = bound.switch_m(9);
+        assert!((out[0] + out[1] - 2.0 * s).abs() < 1.0e-6);
+        // And a bound that read no pyramid draws the ladder every flight before W17 flew.
+        assert_eq!(flat.switch_m(9), switch_m(9));
+        assert_eq!(flat.fade_bands(9, rungs), fade_bands(9, rungs));
+    }
+
     /// ★ RULES 2 AND 3 WAKE BY THEMSELVES ON A BODY WHOSE TABLE NEEDS THEM — MEASURED, not
     /// invented: the recipe draws the body of seed 382 at a look radius of 300 km with a rung
     /// 3 → 4 handover of 1.52 cells, over the ladder's own tolerance. No number in this test is
@@ -2632,8 +2723,8 @@ mod tests {
         let body = vd_terrain::BodyDefinition::from_seed(382, 300_000.0, SMALL_BODY_FACTS)
             .expect("a real body");
         let rungs = body.ladder().rungs;
-        let bound = AskBound::unbounded().for_body(&body, rungs);
-        let step = handover_step_m(&body, 3);
+        let bound = AskBound::unbounded().for_body(&body, rungs, 0);
+        let step = handover_step_m(&body, 3, 0.0);
         let ratio = step_px(step, 3);
         assert!(ratio > 1.0, "the measurement that made this test: {ratio}");
         // Rule 2: the band is wider by exactly the ratio, around the same switch distance.
@@ -2666,8 +2757,8 @@ mod tests {
         let body = vd_terrain::BodyDefinition::from_seed(382, 300_000.0, SMALL_BODY_FACTS)
             .expect("a real body");
         let rungs = body.ladder().rungs;
-        let want = AskBound::unbounded().for_body(&body, rungs);
-        let floor = switch_floor_m(handover_step_m(&body, 3));
+        let want = AskBound::unbounded().for_body(&body, rungs, 0);
+        let floor = switch_floor_m(handover_step_m(&body, 3, 0.0));
         // A held bound that has read no body slews toward the one that has, and takes its row.
         let held = AskBound::unbounded().slewed_toward(&want, rungs, 1.0);
         assert_eq!(held.step_m(3), want.step_m(3));
@@ -2677,15 +2768,19 @@ mod tests {
             want.step_m(3)
         );
         // And a bound the builders really bind still never hands over nearer than the floor.
-        let bound = AskBound::from_switches(vec![1.0; usize::from(rungs)]).for_body(&body, rungs);
+        let bound =
+            AskBound::from_switches(vec![1.0; usize::from(rungs)]).for_body(&body, rungs, 0);
         assert_eq!(bound.switch_m(3), floor);
         // Even at rung 0, where the body's own step is under a pixel, the floor outlives an ask of
         // one metre: a step the eye can see is never handed over at arm's length.
-        assert_eq!(bound.switch_m(0), switch_floor_m(handover_step_m(&body, 0)));
+        assert_eq!(
+            bound.switch_m(0),
+            switch_floor_m(handover_step_m(&body, 0, 0.0))
+        );
         assert!(bound.switch_m(0) > 1.0);
         // A slew that lands on the tier rule's own radii keeps the row too.
         let free = AskBound::unbounded()
-            .for_body(&body, rungs)
+            .for_body(&body, rungs, 0)
             .slewed_toward(&want, rungs, 1.0e9);
         assert_eq!(free.step_m(3), want.step_m(3));
         assert_eq!(free.switch_m(3), floor);
@@ -2731,20 +2826,28 @@ mod tests {
         assert!(!in_fade_band(3.4, 13));
     }
 
+    /// ★ THE SINK RAMP ENDS AT THE EDGE, SO NO RUNG IS DRAWN UNDER ITS OWN RADIUS WHERE NOTHING
+    /// COVERS IT (2026-09-23, ruling W16 fault D). The ramp used to end PAST the edge, leaving one
+    /// finer cell of sink AT it, and the residual then decayed over an ANNULUS — MEASURED
+    /// (`vd-bins/examples/ring_sink`): 4 096 m of altitude spread over 284 245 m of eye distance
+    /// at rung 13, which is 7.3 % of the distance that rung is drawn from. That annulus is the
+    /// ring the owner photographed. Two statements, each of which could fail: the end IS the edge
+    /// at every rung, and the sink read at the edge is therefore ZERO.
     #[test]
-    fn the_sink_ramp_ends_past_the_edge_by_one_finer_cell_of_residual() {
+    fn the_sink_ramp_ends_at_the_edge_and_leaves_no_residual() {
         let body = home_planet();
         let rungs = body.ladder().rungs;
         // Rung 0 sinks nowhere: its fade-in edge.
         assert_eq!(sink_end_m(&body, 0, rungs), fade_bands(0, rungs).0[1]);
-        // Rung 1: the ramp from in_lo to the end passes in_hi with one finer cell (1 m) left of
-        // the sink.
-        let (fade_in, _) = fade_bands(1, rungs);
-        let end = sink_end_m(&body, 1, rungs);
-        assert!(end > fade_in[1]);
-        let sink = crate::chunks::sink_m(&body, 1);
-        let at_edge = sink * (end - fade_in[1]) / (end - fade_in[0]);
-        assert!((at_edge - 1.0).abs() < 1e-9, "{at_edge}");
+        for rung in 1..rungs {
+            let (fade_in, _) = fade_bands(rung, rungs);
+            let end = sink_end_m(&body, rung, rungs);
+            assert_eq!(end, fade_in[1], "rung {rung}");
+            // The shader's own arithmetic: `sink · (1 − risen(d))`, linear from `in_lo` to `end`.
+            let sink = crate::chunks::sink_m(&body, rung);
+            let at_edge = sink * (end - fade_in[1]) / (end - fade_in[0]);
+            assert_eq!(at_edge, 0.0, "rung {rung}");
+        }
     }
 
     #[test]
@@ -3902,7 +4005,7 @@ mod ask_bound_tests {
         assert_eq!(top_out, FADE_ALWAYS_OUT);
         // The sink's ramp moves with the band, and rung 0 sinks nowhere.
         assert_eq!(bound.sink_end_m(&body, 0, rungs), FADE_ALWAYS_IN[1]);
-        assert!(bound.sink_end_m(&body, 1, rungs) > in1[1]);
+        assert_eq!(bound.sink_end_m(&body, 1, rungs), in1[1]);
         // The unbounded bound is the free functions, step for step.
         let free = AskBound::unbounded();
         assert_eq!(free.fade_bands(1, rungs), fade_bands(1, rungs));

@@ -45,11 +45,31 @@ use crate::gf::Gf;
 use crate::macro_lattice::{MacroLattice, NO_NODE};
 use crate::solve::{SolveWords, Z_STEPS_PER_M};
 
-/// One crater: the node under its centre and its rim-to-rim diameter in whole metres.
+/// One crater: the node under its centre, its rim-to-rim diameter in whole metres, and the age of
+/// the impact that made it, years before now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Crater {
     pub node: u32,
     pub diameter_m: u32,
+    pub age_yr: u64,
+}
+
+/// ★ WHAT THE RETENTION LAW READS about a surface (ruling B2 step 2): the initial land's own rows
+/// and the climate over them. Nothing here is new data — every row already exists for another
+/// reason, and the craters simply ask them how long this ground has stood.
+pub struct Surface<'a> {
+    /// The crust share, 0 oceanic to 255 continental: only OCEANIC crust is consumed at a trench.
+    pub crust: &'a [u8],
+    /// The distance to the nearest plate boundary, whole metres; `u32::MAX` on a one-plate body.
+    pub boundary_m: &'a [u32],
+    /// The node's plate.
+    pub plate: &'a [u8],
+    /// The plates, whose drift carries the speed share the seed drew.
+    pub plates: &'a [crate::land::Plate],
+    /// The rock province, whose four rocks give the erodibility.
+    pub province: &'a [u8],
+    /// The rain over the node, mm/yr: no rain, no denudation.
+    pub rain_mm_yr: &'a [u32],
 }
 
 // ---- THE LAWS AND THEIR CALIBRATIONS ---------------------------------------------------------
@@ -109,6 +129,34 @@ pub const COMPLEX_PEAK_HEIGHT_SHARE: f64 = 0.1;
 pub const EJECTA_REACH_RADII: f64 = 1.0;
 /// The ejecta thins as this power of the distance from the centre (McGetchin 1973: the cube).
 pub const EJECTA_DECAY_POWER: f64 = 3.0;
+
+/// ★ EARTH'S MEAN PLATE SPEED, mm/yr (the plate-motion models' own mean; calibration body EARTH):
+/// the number the plate's own drift SHARE — a seed identity choice, drawn once per plate — scales
+/// to give a real speed. A patch of ocean floor is made at one boundary and consumed at the next,
+/// so the time it can hold a crater is the distance to that boundary over this speed. Earth's
+/// ocean floor reaches about 200 Myr, which is what a half-ocean of ~10 000 km at 50 mm/yr gives.
+pub const EARTH_MEAN_PLATE_SPEED_MM_YR: f64 = 50.0;
+/// ★ EARTH'S OUTCROP DENUDATION RATE, metres a million years (Portenga & Bierman 2011,
+/// *Understanding Earth's eroding surface with ¹⁰Be*, GSA Today 21(8), 4–10): the mean lowering of
+/// bare bedrock outcrops, measured with cosmogenic beryllium. ★ UNVERIFIED as an opened source in
+/// this session; the figure is the one the research report names as the calibration.
+/// The outcrops the method needs carry quartz, so the calibration's own rock is the CRYSTALLINE
+/// BASEMENT, and every other province scales by its erodibility against that one.
+pub const EARTH_OUTCROP_DENUDATION_M_PER_MYR: f64 = 12.0;
+/// ★ EARTH'S LAND MEAN RAIN, mm/yr: the denudation's other half. A surface no rain falls on loses
+/// nothing, which is why an airless dry moon keeps the whole of its record without anybody
+/// branching on a body kind (HR4).
+///
+/// ★ WHY THE RAIN AND NOT THE RUNOFF. The runoff is the Turc–Pike REMAINDER after the air has
+/// taken what it can, so it collapses toward zero over any semi-arid ground — MEASURED on the home
+/// planet: 374 mm of rain a year over the land left 75 mm of runoff, and the p10 node left 0.3 m
+/// a million years of denudation, which kept craters for four billion years on ground that really
+/// wears. Denudation is chemical as well as mechanical, and the water that does the chemistry is
+/// the water that FALLS. The calibration body is Earth's land, where 750 mm a year of rain goes
+/// with Portenga & Bierman's measured 12 m a million years of outcrop lowering.
+pub const EARTH_LAND_MEAN_RAIN_MM_YR: f64 = 750.0;
+/// The years in a megayear, for the denudation stated in metres a million years.
+const YR_PER_MYR: f64 = 1.0e6;
 
 /// The metres in a kilometre, for the laws stated in kilometres.
 const M_PER_KM: f64 = 1_000.0;
@@ -250,6 +298,121 @@ pub fn profile_m(shape: &Shape, r_m: Gf) -> Gf {
     -shape.depth_m + (shape.depth_m + shape.rim_m) * (x - floor) / (Gf::ONE - floor)
 }
 
+/// ★ THE PLATE CLOCK at a node, years: how long a patch of OCEANIC crust can stand before the
+/// plate carrying it reaches a boundary — the distance to that boundary over the plate's own
+/// speed, which is the drift share the seed drew for that plate times Earth's mean plate speed.
+/// Continental crust is not consumed, and a one-plate body has no boundary to reach, so both
+/// answer `u64::MAX`: no clock at all.
+///
+/// **Example.** A node on the home planet's ocean floor stands 3 000 km from its trench on a plate
+/// drifting at 40 mm a year: it has 75 million years left, and no crater older than that survives
+/// on it. The shield across the sea is continental and keeps whatever the rain leaves it.
+#[must_use]
+pub fn plate_clock_yr(surface: &Surface, node: u32) -> u64 {
+    let i = node as usize;
+    if surface.crust[i] >= 128 {
+        return u64::MAX;
+    }
+    let plate = surface.plates.get(usize::from(surface.plate[i]));
+    let Some(plate) = plate else {
+        return u64::MAX;
+    };
+    let d = plate.drift;
+    let share = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    let speed_mm_yr = share * Gf::from_f64(EARTH_MEAN_PLATE_SPEED_MM_YR);
+    if speed_mm_yr <= Gf::ZERO {
+        return u64::MAX;
+    }
+    let mm = Gf::from_i64(i64::from(surface.boundary_m[i])) * Gf::from_f64(M_PER_KM);
+    (mm / speed_mm_yr).to_i64_floor().max(0) as u64
+}
+
+/// ★ THE DENUDATION RATE at a node, metres a million years: Earth's measured outcrop rate scaled
+/// by the node's own rock (its province's erodibility against the crystalline basement's, which is
+/// the rock the calibration was measured on) and by its own rain against Earth's land mean. A node
+/// no rain falls on loses nothing, whatever its rock.
+#[must_use]
+pub fn denudation_m_per_myr(surface: &Surface, node: u32) -> Gf {
+    let i = node as usize;
+    let Some(province) = crate::strata::Province::from_code(surface.province[i]) else {
+        return Gf::ZERO;
+    };
+    let reference = crate::strata::Province::CrystallineBasement.erodibility_q8();
+    let rock = Gf::from_i64(i64::from(province.erodibility_q8()))
+        / Gf::from_i64(i64::from(reference.max(1)));
+    let water =
+        Gf::from_i64(i64::from(surface.rain_mm_yr[i])) / Gf::from_f64(EARTH_LAND_MEAN_RAIN_MM_YR);
+    Gf::from_f64(EARTH_OUTCROP_DENUDATION_M_PER_MYR) * rock * water
+}
+
+/// ★ THE SURFACE'S CRATER RETENTION AGE at a node for a crater `depth_m` deep, years: the LESSER
+/// of the body's own age, the plate clock, and the time the denudation needs to take the crater's
+/// whole depth away. THE PRODUCTION FUNCTION IS UNTOUCHED — only the age it integrates over moves,
+/// and it moves because the surface itself is new, which is exactly what Earth's record shows: 45 %
+/// of its 190 structures are younger than 200 Ma, 4.4 % of its history, because the ocean floor
+/// resets on a 200 Myr clock and a craton does not.
+///
+/// **Example.** A 20 km crater is 2.5 km deep. On the home planet's shield, eroding at about a
+/// metre a million years, it stands for two billion years. On the shelf, eroding forty times
+/// faster, it is gone in fifty million. On the ocean floor the trench takes the whole surface
+/// first. On the airless moon nothing takes any of it, and the moon's count does not move.
+#[must_use]
+pub fn retention_age_yr(surface: &Surface, node: u32, depth_m: Gf, age_yr: u64) -> u64 {
+    let mut keep = age_yr.min(plate_clock_yr(surface, node));
+    let rate = denudation_m_per_myr(surface, node);
+    if rate > Gf::ZERO {
+        let years = (depth_m / rate * Gf::from_f64(YR_PER_MYR))
+            .to_i64_floor()
+            .max(0) as u64;
+        keep = keep.min(years);
+    }
+    keep
+}
+
+/// ★ THE AGE OF ONE KEPT CRATER, years before now: the formation time `t` at which the production
+/// function has delivered `unit` of the craters a surface of retention age `retention_yr` holds,
+/// `N(t) = unit · N(retention)`. Found by a FIXED number of bisections over the monotone
+/// production function, so the answer is the same on every host and no loop's trips depend on the
+/// data. Where the linear term rules — any surface much younger than the late bombardment's tail —
+/// the answer is flat in time, and the histogram's skew toward the recent comes from the SURFACE,
+/// not from the chronology.
+#[must_use]
+pub fn formation_age_yr(retention_yr: u64, unit: Gf) -> u64 {
+    let target = production_per_km2(retention_yr) * unit;
+    let (mut lo, mut hi) = (0u64, retention_yr);
+    let mut step = 0;
+    while step < AGE_BISECTIONS {
+        let mid = lo + (hi - lo) / 2;
+        if production_per_km2(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        step += 1;
+    }
+    hi
+}
+
+/// The bisections the formation age takes: enough to split a five-billion-year span to the year.
+pub const AGE_BISECTIONS: u32 = 64;
+
+/// ★ THE CANDIDATE COUNT: how many craters the production function alone would stamp on `body`, at
+/// the body's whole age and with no surface renewal at all. The retained record is drawn from
+/// exactly these candidates, so a body whose surface never renews keeps every one of them and its
+/// count cannot move (HR4: one machinery, no branch on a body kind).
+#[must_use]
+pub fn expected_count(body: &BodyDefinition, lattice: &MacroLattice, words: &SolveWords) -> u64 {
+    let mut rng = SplitMix64::new(child_seed(body.seed(), salt::CRATERS, 0));
+    let floor_m = floor_diameter_m(lattice, words.p_surf_pa);
+    let area_km2 = Gf::from_i64(
+        (0..lattice.node_count() as u32)
+            .map(|n| lattice.area_m2(n))
+            .sum::<u64>() as i64,
+    ) / Gf::from_f64(M_PER_KM * M_PER_KM);
+    let expected = density_per_km2(words.age_yr, floor_m) * area_km2;
+    count_of(expected, draw_unit(&mut rng))
+}
+
 /// ★ THE CRATER POPULATION of `body` over `lattice`: the expected count from the laws over the
 /// body's whole area, its size along the size-frequency distribution, its place a draw of a face
 /// and a cell — every draw on the body's own crater stream in a frozen order (a count's fraction,
@@ -259,8 +422,13 @@ pub fn crater_population(
     body: &BodyDefinition,
     lattice: &MacroLattice,
     words: &SolveWords,
+    surface: &Surface,
 ) -> Vec<Crater> {
     let mut rng = SplitMix64::new(child_seed(body.seed(), salt::CRATERS, 0));
+    // ★ THE RETENTION READS ITS OWN STREAM (index 1 of the body's crater salt), so a surface that
+    // renews nothing draws the same faces, the same cells and the same sizes it always drew and
+    // its record is byte for byte the one it had.
+    let mut keep_rng = SplitMix64::new(child_seed(body.seed(), salt::CRATERS, 1));
     let floor_m = floor_diameter_m(lattice, words.p_surf_pa);
     let area_km2 = Gf::from_i64(
         (0..lattice.node_count() as u32)
@@ -271,18 +439,35 @@ pub fn crater_population(
     let count = count_of(expected, draw_unit(&mut rng));
     let radius_m = Gf::from_f64(body.ladder().radius_m());
     let edge = u64::from(lattice.edge);
-    let mut craters: Vec<Crater> = (0..count)
-        .map(|_| {
-            let face = Face::from_index(rng.range_u64(0, 6) as u8).unwrap_or(Face::NegZ);
-            let i = rng.range_u64(0, edge) as i32;
-            let j = rng.range_u64(0, edge) as i32;
-            let diameter = diameter_of(floor_m, draw_unit(&mut rng), radius_m);
-            Crater {
-                node: lattice.index(face, i, j),
-                diameter_m: diameter.floor().to_i64_floor() as u32,
-            }
-        })
-        .collect();
+    let gravity = body.facts().gravity_mm_s2;
+    let mut craters: Vec<Crater> = Vec::new();
+    for _ in 0..count {
+        let face = Face::from_index(rng.range_u64(0, 6) as u8).unwrap_or(Face::NegZ);
+        let i = rng.range_u64(0, edge) as i32;
+        let j = rng.range_u64(0, edge) as i32;
+        let diameter = diameter_of(floor_m, draw_unit(&mut rng), radius_m);
+        let node = lattice.index(face, i, j);
+        // ★ THE SURFACE DECIDES WHETHER THE RECORD KEPT IT. The production function over the
+        // surface's own retention age against the production over the body's whole age is the
+        // share of the candidates this ground still shows.
+        let depth_m = shape_of(diameter, gravity).depth_m;
+        let retention = retention_age_yr(surface, node, depth_m, words.age_yr);
+        let whole = density_per_km2(words.age_yr, diameter);
+        let kept = density_per_km2(retention, diameter);
+        let share = if whole > Gf::ZERO {
+            (kept / whole).clamp(Gf::ZERO, Gf::ONE)
+        } else {
+            Gf::ZERO
+        };
+        if draw_unit(&mut keep_rng) >= share {
+            continue;
+        }
+        craters.push(Crater {
+            node,
+            diameter_m: diameter.floor().to_i64_floor() as u32,
+            age_yr: formation_age_yr(retention, draw_unit(&mut keep_rng)),
+        });
+    }
     craters.sort_by(|a, b| b.diameter_m.cmp(&a.diameter_m).then(a.node.cmp(&b.node)));
     craters
 }
@@ -331,7 +516,7 @@ pub fn apply_craters(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::home::{home_moon, home_moon_solve_words, home_solve_words};
+    use crate::home::{home_moon, home_moon_solve_words};
 
     fn gf(v: f64) -> Gf {
         Gf::from_f64(v)
@@ -450,6 +635,32 @@ mod tests {
         assert!(wall < complex.rim_m.to_f64());
     }
 
+    /// The land and the climate a [`Surface`] reads, for one body under one set of words.
+    fn surface_rows(
+        body: &BodyDefinition,
+        lattice: &MacroLattice,
+        words: &SolveWords,
+    ) -> (crate::land::Land, crate::climate::Climate) {
+        let land = crate::land::initial_land(body, lattice, &words.land());
+        let climate = crate::climate::climate(body, lattice, words, &land.z, land.sea_z);
+        (land, climate)
+    }
+
+    /// A [`Surface`] over the rows [`surface_rows`] built.
+    fn surface_of<'a>(
+        land: &'a crate::land::Land,
+        climate: &'a crate::climate::Climate,
+    ) -> Surface<'a> {
+        Surface {
+            crust: &land.crust,
+            boundary_m: &land.boundary_m,
+            plate: &land.plate,
+            plates: &land.plates,
+            province: &land.province,
+            rain_mm_yr: &climate.rain_mm_yr,
+        }
+    }
+
     /// ★ THE DRIVER ON THE HOME MOON: airless and five billion years old, it collects a few hundred
     /// craters wider than two nodes, largest first, every node valid; applying them changes the
     /// heights only within each crater's reach, the bowl stands under the rim, and the same seed
@@ -459,7 +670,9 @@ mod tests {
         let moon = home_moon();
         let lattice = MacroLattice::of(&moon).expect("a lattice");
         let words = home_moon_solve_words();
-        let craters = crater_population(&moon, &lattice, &words);
+        let (land, clim) = surface_rows(&moon, &lattice, &words);
+        let surface = surface_of(&land, &clim);
+        let craters = crater_population(&moon, &lattice, &words, &surface);
         assert!((100..2_000).contains(&craters.len()), "{}", craters.len());
         for pair in craters.windows(2) {
             assert!(pair[0].diameter_m >= pair[1].diameter_m);
@@ -469,7 +682,10 @@ mod tests {
             assert!(c.diameter_m >= 16_384);
             assert!(f64::from(c.diameter_m) <= moon.ladder().radius_m());
         }
-        assert_eq!(crater_population(&moon, &lattice, &words), craters);
+        assert_eq!(
+            crater_population(&moon, &lattice, &words, &surface),
+            craters
+        );
         // One crater applied alone: the bowl under the rim, nothing changed past its reach.
         let one = craters[craters.len() / 2];
         let mut z = vec![0i32; lattice.node_count()];
@@ -505,18 +721,147 @@ mod tests {
     fn a_thick_air_thins_the_record() {
         let moon = home_moon();
         let lattice = MacroLattice::of(&moon).expect("a lattice");
-        let airless = crater_population(&moon, &lattice, &home_moon_solve_words()).len();
-        let mut earth_air = home_solve_words();
+        let dry_words = home_moon_solve_words();
+        let (land, clim) = surface_rows(&moon, &lattice, &dry_words);
+        let surface = surface_of(&land, &clim);
+        let airless = crater_population(&moon, &lattice, &dry_words, &surface).len();
+        // The SAME dry surface under Earth's pressure: the screening floor alone is read here, so
+        // the record's size is the only thing the air can change.
+        let mut earth_air = home_moon_solve_words();
         earth_air.p_surf_pa = Some(101_325);
-        let under_earth_air = crater_population(&moon, &lattice, &earth_air).len();
+        let under_earth_air = crater_population(&moon, &lattice, &earth_air, &surface).len();
         assert_eq!(under_earth_air, airless);
-        let mut venus_air = home_solve_words();
+        let mut venus_air = home_moon_solve_words();
         venus_air.p_surf_pa = Some(920_000_000);
-        let craters = crater_population(&moon, &lattice, &venus_air);
+        let craters = crater_population(&moon, &lattice, &venus_air, &surface);
         assert!(craters.len() < airless, "{} under {airless}", craters.len());
         let floor = floor_diameter_m(&lattice, venus_air.p_surf_pa).to_f64();
         for c in &craters {
             assert!(f64::from(c.diameter_m) >= floor.floor());
         }
+    }
+
+    /// ★ GATE G-CRATER's LAW, ON TWO BODIES (ruling B2 step 2). The airless dry moon renews
+    /// nothing — no water to wear it, no plate to swallow it — so it keeps EVERY candidate the
+    /// production function drew, and its count cannot move. The same lattice under the home
+    /// planet's air and water keeps a small share of them, because the rain takes the rest. THE
+    /// READING THAT PROVES THE LAW READS RESURFACING AND NOT A BODY KIND (HR4).
+    #[test]
+    fn the_retention_thins_a_wet_record_and_never_the_airless_moons() {
+        let moon = home_moon();
+        let lattice = MacroLattice::of(&moon).expect("a lattice");
+        let dry_words = home_moon_solve_words();
+        let (land, clim) = surface_rows(&moon, &lattice, &dry_words);
+        let dry = surface_of(&land, &clim);
+        let kept = crater_population(&moon, &lattice, &dry_words, &dry);
+        assert_eq!(
+            kept.len() as u64,
+            expected_count(&moon, &lattice, &dry_words),
+            "an airless dry surface keeps every candidate"
+        );
+        let oldest = kept.iter().map(|c| c.age_yr).max().expect("a record");
+        assert!(oldest <= dry_words.age_yr, "{oldest}");
+        assert!(
+            oldest * 2 > dry_words.age_yr,
+            "the moon's record reaches back to the bombardment: {oldest}"
+        );
+        // ★ THE SAME GROUND UNDER EARTH'S OWN LAND MEAN RAIN, and nothing else changed: the rain
+        // takes most of the record away, because a crater is gone once the ground it sits in has
+        // fallen by the crater's own depth.
+        let wet_rain = vec![EARTH_LAND_MEAN_RAIN_MM_YR as u32; lattice.node_count()];
+        let wet = Surface {
+            rain_mm_yr: &wet_rain,
+            ..surface_of(&land, &clim)
+        };
+        let wet_kept = crater_population(&moon, &lattice, &dry_words, &wet);
+        assert!(
+            wet_kept.len() * 10 < kept.len(),
+            "the rain takes most of the record: {} of {}",
+            wet_kept.len(),
+            kept.len()
+        );
+        for c in &wet_kept {
+            assert!(c.age_yr <= dry_words.age_yr);
+        }
+    }
+
+    /// ★ THE TWO CLOCKS, each on its own: the plate's and the rain's. Continental crust is never
+    /// consumed; a plate that does not move never reaches a boundary; a node no water reaches
+    /// loses nothing; a province byte nobody owns answers no denudation rather than a guess.
+    #[test]
+    fn the_retention_reads_the_plate_and_the_rain() {
+        let plates = vec![
+            crate::land::Plate {
+                site: [Gf::ONE, Gf::ZERO, Gf::ZERO],
+                drift: [Gf::ZERO, Gf::HALF, Gf::ZERO],
+                affinity: Gf::ZERO,
+                age: Gf::ZERO,
+                crust_scatter: Gf::ONE,
+            },
+            crate::land::Plate {
+                site: [Gf::ONE, Gf::ZERO, Gf::ZERO],
+                drift: [Gf::ZERO, Gf::ZERO, Gf::ZERO],
+                affinity: Gf::ZERO,
+                age: Gf::ZERO,
+                crust_scatter: Gf::ONE,
+            },
+        ];
+        let crust = [0u8, 255, 0, 0];
+        let boundary_m = [3_000_000u32, 3_000_000, 3_000_000, 3_000_000];
+        let plate = [0u8, 0, 1, 9];
+        let province = [
+            crate::strata::Province::FlatShelf.code(),
+            crate::strata::Province::CrystallineBasement.code(),
+            crate::strata::Province::CrystallineBasement.code(),
+            9,
+        ];
+        let rain_mm_yr = [750u32, 0, 750, 750];
+        let s = Surface {
+            crust: &crust,
+            boundary_m: &boundary_m,
+            plate: &plate,
+            plates: &plates,
+            province: &province,
+            rain_mm_yr: &rain_mm_yr,
+        };
+        // Oceanic crust on a plate drifting at half Earth's mean speed, 3 000 km from its
+        // boundary: 3 000 km at 25 mm a year is 120 million years.
+        assert_eq!(plate_clock_yr(&s, 0), 120_000_000);
+        // Continental crust, a plate that does not move, and a plate nobody named: no clock.
+        assert_eq!(plate_clock_yr(&s, 1), u64::MAX);
+        assert_eq!(plate_clock_yr(&s, 2), u64::MAX);
+        assert_eq!(plate_clock_yr(&s, 3), u64::MAX);
+        // The rain: the shelf wears four times faster than the basement the rate was measured on,
+        // a node no water reaches wears not at all, and an unnamed province answers zero.
+        let shelf = denudation_m_per_myr(&s, 0).to_f64();
+        let shield = denudation_m_per_myr(&s, 2).to_f64();
+        assert!(shelf > shield, "{shelf} over {shield}");
+        assert!(
+            (shield - EARTH_OUTCROP_DENUDATION_M_PER_MYR).abs() < 0.001,
+            "{shield}"
+        );
+        assert_eq!(denudation_m_per_myr(&s, 1), Gf::ZERO);
+        assert_eq!(denudation_m_per_myr(&s, 3), Gf::ZERO);
+        // The retention: the lesser of the body's age, the plate's clock and the rain's.
+        let age = 5_000_000_000u64;
+        assert_eq!(retention_age_yr(&s, 1, Gf::from_f64(1_000.0), age), age);
+        let shield_keeps = retention_age_yr(&s, 2, Gf::from_f64(1_000.0), age);
+        assert_eq!(shield_keeps, 83_333_333);
+        let ocean_keeps = retention_age_yr(&s, 0, Gf::from_f64(100_000.0), age);
+        assert_eq!(ocean_keeps, 120_000_000, "the trench beats the rain");
+    }
+
+    /// The formation age: the production function's own inverse over the retention age, rising
+    /// with the draw, zero at zero and the whole retention at the top.
+    #[test]
+    fn the_formation_age_walks_the_chronology() {
+        let span = 400_000_000u64;
+        assert_eq!(formation_age_yr(span, Gf::ZERO), 0);
+        assert_eq!(formation_age_yr(span, Gf::ONE), span);
+        let half = formation_age_yr(span, Gf::HALF);
+        assert!(half > 0 && half < span, "{half}");
+        let quarter = formation_age_yr(span, Gf::from_f64(0.25));
+        assert!(quarter < half, "{quarter} under {half}");
+        assert_eq!(formation_age_yr(0, Gf::HALF), 0);
     }
 }

@@ -47,6 +47,11 @@ pub struct ArtifactTiles {
     /// ground can be seen, peaks included (2026-09-21).
     relief_m: f64,
     top_rung: u8,
+    /// ★ THE HANDOVER STEP OF THE FINEST TILE-READING RUNG (2026-09-23, ruling W17), taken ONCE:
+    /// the octaves that rung's coarser neighbour drops plus the FIELD's own fold where the two
+    /// read different pyramid levels. The tile ring is floored by it, so the shard ships the
+    /// tiles out to the very distance the client's ladder asks at.
+    step_m: f64,
     /// ★ THE DIGEST TAKEN ONCE (the second flight, 2026-09-20): the emitter asks for it every
     /// tick, and hashing the home planet's 85 MB of rows on every ask cost the shard 90 ms a tick
     /// (the water world 47 ms, the moon 0.3 ms — the cost of the artifact's size, five times the
@@ -61,6 +66,12 @@ pub struct ArtifactTiles {
 impl ArtifactTiles {
     /// A source over `artifact`, the parts not yet encoded.
     #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "seven of the eight are the realm's own address and the body's facts the reach \
+                  reads; the eighth is the handover step the tile ring must cover (ruling W17), \
+                  and each is a fact the caller already holds apart"
+    )]
     pub fn new(
         realm: vd_core::pose::RealmId,
         world_tag: u64,
@@ -69,6 +80,7 @@ impl ArtifactTiles {
         body_radius_m: f64,
         relief_m: f64,
         top_rung: u8,
+        step_m: f64,
     ) -> ArtifactTiles {
         let digest = artifact.digest();
         ArtifactTiles {
@@ -79,6 +91,7 @@ impl ArtifactTiles {
             body_radius_m,
             relief_m,
             top_rung,
+            step_m,
             digest,
             parts: std::sync::OnceLock::new(),
         }
@@ -148,6 +161,12 @@ pub fn artifact_source_of(
     artifact: &Arc<Artifact>,
 ) -> Option<Box<dyn TileSource>> {
     let lattice = body.macro_lattice()?;
+    // ★ THE STEP THE TILE RING IS FLOORED BY (ruling W17), taken once with the source.
+    let levels = artifact.pyramid.len() as u32;
+    let top_rung = body.ladder().rungs - 1;
+    let rung = vd_terrain::artifact::tile_rung(&lattice, levels, top_rung);
+    let step_m =
+        body.step_bound_m(rung) + vd_terrain::artifact::field_step_m(body, &lattice, levels, rung);
     Some(Box::new(ArtifactTiles::new(
         realm,
         world_tag,
@@ -155,7 +174,8 @@ pub fn artifact_source_of(
         lattice,
         body.radius_m(),
         body.relief_bound_m(0),
-        body.ladder().rungs - 1,
+        top_rung,
+        step_m,
     )))
 }
 
@@ -187,6 +207,9 @@ impl TileSource for ArtifactTiles {
     }
 
     fn tiles_under(&self, dir: [f64; 3], radial_m: f64, interest_m: f64) -> Vec<(u8, u32, u32)> {
+        // ★ THE TILES REACH WHERE THE CLIENT ASKS (ruling W17): the finest tile-reading rung's own
+        // handover step floors the ring, and that step carries the FIELD's fold as well as the
+        // octaves the coarser rung drops. Both hosts read one rule.
         let reach_m = vd_terrain::artifact::tile_reach_m(
             &self.lattice,
             self.artifact.pyramid.len() as u32,
@@ -195,6 +218,7 @@ impl TileSource for ArtifactTiles {
             self.relief_m,
             radial_m,
             vd_core::geometry::drawable_theta_min_rad(),
+            self.step_m,
         );
         self.tiles_within(dir, interest_m.max(reach_m))
     }
@@ -243,6 +267,15 @@ mod tests {
             moon.radius_m(),
             moon.relief_bound_m(0),
             moon.ladder().rungs - 1,
+            // ★ THE HANDOVER STEP THE TILE RING IS FLOORED BY (ruling W17), the shipped line's own.
+            {
+                let lattice = moon.macro_lattice().expect("a lattice");
+                let levels = artifact.pyramid.len() as u32;
+                let rung =
+                    vd_terrain::artifact::tile_rung(&lattice, levels, moon.ladder().rungs - 1);
+                moon.step_bound_m(rung)
+                    + vd_terrain::artifact::field_step_m(&moon, &lattice, levels, rung)
+            },
         );
         assert_eq!(source.digest(), artifact.digest());
         let head = postcard::from_bytes::<BulkMsg>(&source.head()).expect("decodes");

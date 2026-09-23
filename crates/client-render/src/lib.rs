@@ -482,6 +482,15 @@ const MORPH_NORMAL_SHADER_LOCATION: u32 = 11;
 const LIGHT_CASTER_SHADER_DEF: &str = "LIGHT_CASTER";
 const LIGHT_CASTER_ENV: &str = "VD_TERRAIN_LIGHT_CASTER";
 
+/// ★ THE UNPACED CLIENT (2026-09-23, the performance measurements): `VD_CLIENT_UNPACED=1` runs
+/// the headless loop as fast as the work allows and the window without vsync, so the stamp's
+/// frame time is the frame's own work. A measurement's switch, never a product setting.
+const UNPACED_ENV: &str = "VD_CLIENT_UNPACED";
+
+fn unpaced() -> bool {
+    std::env::var(UNPACED_ENV).is_ok_and(|v| v == "1")
+}
+
 /// THE GROUND'S VERTEX LAYOUT, for the fade material and the probe alike: the position, the
 /// normal in whichever form the mesh carries (the packed one when the mesh has it, else the
 /// engine's — the renderer packs by rung, `terrain::EXACT_NORMAL_RUNG`), the morph metre and
@@ -850,7 +859,13 @@ pub(crate) struct LadderFade {
     /// THE RUNG'S CELL in metres (x): a splat's width (D8-8's measurement); read under the
     /// `SPLAT` define only. (y): THE CASTER'S SINK in metres, read under `LIGHT_CASTER` only —
     /// a coarse caster stands under the fine drawn ground by the two rungs' bound, so the drawn
-    /// ground never shades itself against a surface that stands above it.
+    /// ground never shades itself against a surface that stands above it. (z): unused — ★ A
+    /// DEPTH TIE-BREAK FOR THE WATER WAS TRIED HERE AND REFUTED (2026-09-23, ruling W18): a scale
+    /// of the water's clip depth by one part in 2²⁰ is a millionth of the DISTANCE along the ray,
+    /// eleven metres at 11 500 km, and at a grazing view it lifted the water over every coastal
+    /// plain lower than that — MEASURED on the 6 376 km stand: the far coast dissolved MORE, not
+    /// less. The near-tie is settled in the sheet's own geometry instead (`position::water_sheet`,
+    /// the buffer's own step), never in the depth.
     #[uniform(100)]
     splat: Vec4,
 }
@@ -1067,6 +1082,13 @@ fn run_windowed(handles: RenderHandles) {
                     primary_window: Some(Window {
                         title: "Voxeldust — dev client".into(),
                         resolution: (WINDOW_W, WINDOW_H).into(),
+                        // The same switch as the headless pace: no vsync, so the frame time
+                        // is the work.
+                        present_mode: if unpaced() {
+                            bevy::window::PresentMode::AutoNoVsync
+                        } else {
+                            bevy::window::PresentMode::AutoVsync
+                        },
                         ..default()
                     }),
                     // First-person: start the pointer LOCKED + hidden so mouse-look gets unbounded
@@ -2839,9 +2861,16 @@ fn run_capture(handles: RenderHandles) {
             MaterialPlugin::<ProbeMaterial>::default(),
         ))
         .add_plugins(ImageCopyPlugin)
-        .add_plugins(ScheduleRunnerPlugin::run_loop(
-            std::time::Duration::from_secs_f64(1.0 / 60.0),
-        ))
+        // ★ THE PACE (2026-09-23, the performance measurements): 60 Hz, so a headless flight
+        // paces like a window; under `VD_CLIENT_UNPACED=1` the loop runs as fast as the work
+        // allows, and the stamp's frame time is then the frame's own WORK and nothing else.
+        // MEASURED before the switch: every stand's frame read 17–23 ms, a mix of the pace's
+        // 16.7 ms and its misses, and the sheet's cost could not be read from it.
+        .add_plugins(ScheduleRunnerPlugin::run_loop(if unpaced() {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_secs_f64(1.0 / 60.0)
+        }))
         // Headless: no window ⇒ no primary egui context; the offscreen camera owns its own.
         .add_systems(PreStartup, disable_primary_egui_context)
         .add_systems(Startup, (setup_capture, gpu_check::gpu_recipe_self_check))

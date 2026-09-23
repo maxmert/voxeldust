@@ -14,6 +14,16 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
 - `docs/design/owner_decisions_*.md` — ★ THE BINDING RULINGS, and **the NEWEST FILE WINS**. Read the
   newest one BEFORE relaying any plan or design content: these are later than every design doc, and a plan
   agreeing with itself proves nothing. Newest first:
+  - `owner_decisions_2026-09-22_believability.md` — ★ B1 STOP AND REACH BELIEVABILITY INSIDE 8d BEFORE 8e
+    (owner: "Agreed"): the order — lakes from a water budget → the summer ice line + the crater age → the flat
+    receivers by distance + the scratch measurement → the river lines, the carve and the floodplain down to
+    the fine rungs (the cure for the dunes) → the lake side word; each step ends with the census's numbers and
+    ONE picture on the three stands (the belt, the coast, a plain); 8e starts on the owner's word. ★ B3 THE
+    GATES as numbers with a body each: G-LAKE-SHARE ≤ 4 % of land, G-LAKE-COUNT, G-BASIN (the inventory
+    balances), G-ICE ~10 % of land, G-BUZZSAW 1 500 m, G-CRATER ~190, G-GRID (no lattice direction),
+    G-HYPSO, G-RIVER, G-LOOK. ★ B5 the home planet's TILT (55°, a seed identity choice) STAYS — a hand-set tilt
+    is a seam, refused; G-ICE tests the LAW on an Earth-like charter, the home planet's 4 % is a reading; the
+    caps question waits for 8e's two-column seasonal balance; the lawful road to caps is the seed search.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION
     8), then 8d. ★ W2 (answers L20): a player's dam never moves the seed's river (no re-solve, the river an
     endless source); a dug hollow BELOW a connected water's level FILLS to that level as LIVE STATE — a bounded
@@ -46,6 +56,42 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     headless ground probe MUST pass `--pilot`. THE FAR-RUNG SHORE measured: the coast steps ~a level node at
     each pyramid-level swap (11.5 km median at rung 9→10); the cure is a coast MASK (one bit per node, 1.1 MB,
     shipped with the head) giving the water's SIDE at every rung — an SL6 ask, owed the owner's word.
+    ★★ W16 (2026-09-23) ONE SHAPE AT EVERY DISTANCE — THE BINDING LAW OF THIS FILE'S NEWEST RULING: at EVERY
+    distance the water and the land are ONE shape from ONE field; a finer rung REFINES a coarser one and never
+    CONTRADICTS it; a RUNG BOUNDARY IS INVISIBLE (no shape change, no water appearing or vanishing, no colour
+    or brightness step). Built (GENERATOR_VERSION 19, ARTIFACT_VERSION 7, PROTO_MINOR unchanged at 34):
+    (A) step 4's DRAWN RIVERS ARE RETIRED — they were the near flicker (190 wet columns flipped at one ring
+    swap, the water's edge jumping 5.4 km); the width law and the meander belt stay for the SOLVE.
+    (B) the coast mask carries a THREE-WAY SIDE (land / sea / LAKE, two bits a node, the count pyramid folding
+    both) — before it NOT ONE column of 300 000 stood under a lake at any rung, because the shore law drained
+    every lake; after it 279 989 do, at every rung. (C) the water SHEET is built on the GROUND'S OWN GRID: a
+    flat block is a CHORD, and its dip (170 km at rung 18) buried the whole globe's sea from rung 17 up — the
+    model read 78.5–79.7 % wet at every rung all along, so "no water" was a DRAWING fault.
+    ★★ W18 (2026-09-23, the owner: *"Not fixed"*, *"It changes still when I'm leaving farer"*) THE WATER IS
+    DRAWN ON THE GROUND'S OWN LATTICE: the sheet was a quad per cell on the corner COLUMNS while the ground
+    is a surface-nets mesh whose vertices sit INSIDE the cells — two lattices, two chords, and MEASURED
+    (`sheet_poke`) 8.7 % of the sea-floor vertices at rung 14 and 7.4 % at rung 18 stood ABOVE the drawn
+    water (by up to 3.8 km): the speckle and the 400 km teeth on the far coast, changing with the rung. Now
+    `position::water_sheet` takes the ground mesh and builds ONE water triangle per ground triangle on the
+    ground vertices' own directions, so the two can cross only at the shore; W16's block is retired; the
+    hide bound stays; the sheet is client-only, no pin moves. MEASURED after: the teeth and the wide speckle
+    gone on the same stands; a shelf then DISSOLVED into dots — MEASURED (`mask_at_pixel`): every column
+    under its water, the mask says sea, yet 84 % of the DRAWN vertices at rung 13 stand a metre over it,
+    because the extractor's gap byte (cell/128, 64 m at rung 13) is coarser than the shore law's depth on a
+    shelf; a depth tie-break and a buffer-step nudge were REFUTED; now a vertex's side is its COLUMNS' word
+    and the water is held one extractor's step off the drawn ground on that side. AND THE WATER MORPHS WITH
+    ITS GROUND: in a crossfade band the ground morphs toward the coarser mesh (at its 2–8 km step) and the
+    water carried a morph of zero — a dot screen over every continent at 118 000 km, the planet's shimmer
+    at 408 000 km; each water vertex now morphs to the same placing rule read from its ground's target.
+    OWED: the owner's look, the frame cost, a water skirt. ★ PERFORMANCE (2026-09-23): the frame numbers were
+    the 60 Hz PACE (headless loop and vsync alike), never the work — `VD_CLIENT_UNPACED=1` measures the work;
+    the sheet's hide bound cut nothing at the far rungs (661 168 sheet triangles = the land's), so the sheet
+    is now cut EXACTLY from each vertex's radius and morph target, and the sea floor no ray reaches under
+    deep water is not drawn (the visible depth = the extractor's step today; 8o replaces it with the water's
+    clarity so shallow water shows its floor); the gateway's held bulk is bounded in BYTES with the NEWEST
+    refused (a bound made right, no loss measured); the twelve chunks that never settle on a still stand are
+    two FAR PLANETS whose artifact has not arrived (a pop-in seam, owed: draw a far body from its coarsest
+    level alone the moment it lands).
   - `owner_decisions_2026-09-16_terrain.md` — ★ T9 (2026-09-18) NO PHYSICAL NUMBER IS DRAWN — every physical
     fact (pressure, temperature, water, spin, crust, relief cap) is COMPUTED by a published law with a stated
     calibration body; a draw only for the seed's identity choices, an unrecoverable history (a tilt), or a

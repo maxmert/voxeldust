@@ -284,6 +284,11 @@ pub(crate) fn tiles_in_reach(
     let Some(lattice) = body.macro_lattice() else {
         return Vec::new();
     };
+    // ★ THE SAME FLOOR THE CLIENT ASKS AT (ruling W17): the finest tile-reading rung's handover
+    // step, octaves and field together.
+    let rung = vd_terrain::artifact::tile_rung(&lattice, levels, body.ladder().rungs - 1);
+    let step_m =
+        body.step_bound_m(rung) + vd_terrain::artifact::field_step_m(body, &lattice, levels, rung);
     let reach_m = vd_terrain::artifact::tile_reach_m(
         &lattice,
         levels,
@@ -292,6 +297,7 @@ pub(crate) fn tiles_in_reach(
         body.relief_bound_m(0),
         view.radial_m,
         vd_core::geometry::drawable_theta_min_rad(),
+        step_m,
     );
     vd_terrain::artifact::tiles_within(&lattice, view.dir, reach_m)
 }

@@ -70,7 +70,108 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 /// and whose level mean disagreed with its own row moved; a chunk with no artifact reads the
 /// unknown word and is untouched, so the seed-only golden tables stand and only the measured
 /// identity may move. `ARTIFACT_VERSION` 6 with it: a version-5 store re-solves.
-pub const GENERATOR_VERSION: u32 = 13;
+/// ★ 14 (2026-09-22): THE ROUTING FILL IS NOT WATER (ruling W11; the report
+/// `docs/investigation/2026-09-22/lakes_and_landscape_models.md` §6.1). The priority flood's
+/// raised surface is a SCRATCH SURFACE: it decides the receivers, the flats, the order and the
+/// sweep's base level, and nothing else. A hollow is a lake only where a finite amount of water
+/// stands in it — the depression hierarchy of Fill–Spill–Merge (Barnes, Callaghan & Wickert 2021)
+/// over the final field, and every hollow's own water balance (Langbein 1961) against the rain and
+/// the potential evaporation the climate already computes. `MacroSolve::water_level` and
+/// `MacroSolve::facies` read the budget's level, so the artifact's `water_m` row, its facies byte
+/// and the pyramid's water words move on every hollow the rain cannot fill. The SHAPE did not move
+/// — no sweep, no deposit, no ice and no envelope changed — so the seed-only chunk tables stand and
+/// only the artifact's own words and the measured identity move.
+/// ★ 15 (2026-09-22): THE SUMMER ICE LINE AND THE CRATER RECORD OF A WET SURFACE (ruling B2 step
+/// 2; the report `docs/investigation/2026-09-22/lakes_and_landscape_models.md` §6.2 and §6.4).
+/// Four laws moved, and every one of them moves the solved field, so the artifact and the
+/// identity's measured half move with it; the seed-only recipe is untouched, so the chunk golden
+/// tables stand.
+/// * THE TEMPERATURE'S DATUM is the body's own MEAN SURFACE — the sea where there is one — and no
+///   longer the LADDER RADIUS, a geometric datum the home planet's sea stands 3.4 km above. The
+///   sea surface read −11 °C and the rain fell to a sixth of Earth's.
+/// * THE AIR OVER WATER stands at the WATER's surface: the abyssal plain read 344 K, asked for
+///   16 160 mm of evaporation a year and was given 6 708 mm of rain.
+/// * THE EQUILIBRIUM LINE IS A SUMMER LINE. The season comes from the charter's own obliquity
+///   through North's insolation expansion and a one-mode seasonal energy balance; the line stands
+///   where the ablation-season temperature falls to the one Ohmura's 70 glaciers name for the
+///   node's own rain. The ICE is Egholm's mass balance carried down the receiver tree, so no
+///   extent is drawn anywhere; the ice and the talus now run INSIDE the pass loop, before every
+///   sweep and every deposit, so the rivers answer what they cut.
+/// * THE CRATER RECORD reads each province's own CRATER RETENTION AGE — the plate that carries the
+///   ground and the rain that wears it — instead of the system's whole age. The home planet keeps
+///   1 610 craters instead of 144 967; the airless moon's count does not move.
+///
+/// ★ 16 (2026-09-22): THE FLAT'S DISTANCE IS IN METRES, NOT IN HOPS (ruling B2 step 3; the report
+/// `docs/investigation/2026-09-22/lakes_and_landscape_models.md` §3.4 and §6.3; Cordonnier, Bovy &
+/// Braun 2019 §2.3.2). The priority flood turns every hollow into a FLAT, and the flat's receivers
+/// were assigned by a breadth-first HOP COUNT, which charges the stencil's diagonal — √2 of a row —
+/// the same one step as a row. So the cheapest way across every lake on the planet ran on one fixed
+/// diagonal, and the receiver tree drew the scratches the owner flew over. The distance is now the
+/// lattice's OWN CHORD IN WHOLE METRES summed along the path, and a flat node takes the neighbour
+/// with the smallest `distance + chord`, ties to the smaller index. MEASURED on the home planet:
+/// the valleys' long-axis flatness against the grid's four directions fell from 2.101 to 1.284 and
+/// the 135° bin from 50 840 of 96 804 trunks to 23 953 of 96 893; on a filled disc the water's
+/// detour out of the flat fell from 1.2406 to 1.0461 and its bearing error from 2.82° to 1.04°.
+/// The receivers move, so the sweep, the deposit, the ice and the lakes move with them: the
+/// artifact and the identity's measured half move. A field with NO flat routes byte for byte as
+/// before (a test that could have failed), so the seed-only chunk tables stand.
+/// ★ 17 (2026-09-22): THE DRAWN DRAINAGE (ruling B2 step 4; the owner, at 100–150 km: the plains
+/// *"look like dunes"*). The fine relief under one macro node was a sum of noise octaves and
+/// NOTHING DRAINED IT, so from the air it read as ripples. Now the solve's own river network —
+/// the receiver slot and the discharge class the row has carried since 2026-09-19 and nothing read
+/// back — is taken DOWN into the fine rungs (`crate::river`): every node's trunk line, four orders
+/// of tributaries under it by Horton 1945's ratios, a channel from Leopold & Maddock 1953's width
+/// law, a floodplain from Leopold & Wolman 1960's meander belt, and a valley half as wide as the
+/// spacing between two streams of one order. A column inside a valley loses its fine octaves (the
+/// roughness factor takes a CEILING, never a second factor) and gains the channel's trench; a
+/// column on a divide keeps them whole. The relief is ARRANGED, never added.
+///
+/// EVERY chunk that reads an artifact and stands within a valley moved, so the artifact path's
+/// chunks and the identity's measured half move. THE SOLVE DID NOT MOVE — not one pass, not one
+/// row — so the artifact's own digest, the sea, the ocean share and the golden `Z` fields stand;
+/// and a chunk with NO artifact reads a ceiling of one and a cut of zero, whose arithmetic is
+/// exactly the one it ran before, so THE SEED-ONLY CHUNK TABLES STAND and the card's own column
+/// pass is untouched (`just gpu-drift` compares like with like).
+/// ★ 18 (2026-09-22): THE COAST MASK GETS A FOOTPRINT (ruling W15; the owner, from 41 000 km: the
+/// globe *"shows squares of water on the land"*, and the same ground flips between water and land
+/// as the rings sweep under a moving hull). Ruling W10 made the water's SIDE a BIT of the fine
+/// row, read at every rung — and read it at the ONE fine node nearest the cell's centre. At rung 18
+/// a cell is 262 km and covers about a thousand fine nodes, so one node in a thousand painted the
+/// whole cell, and each rung sampled another centre node, so a cell flipped at every ring swap.
+/// NOW a cell's side is the WET FRACTION of the fine nodes under its WHOLE FOOTPRINT — wet where
+/// at least half of them are wet, on whole counts (`artifact::CoastCounts`, folded from the mask
+/// by every host and shipped by none, so the artifact's own digest does not move). A parent's
+/// count is the sum of its four children's, so a coarse cell shows the side most of its ground
+/// stands on and the finer rung refines that edge instead of contradicting it. Every column at a
+/// rung whose CELL IS WIDER THAN A MACRO NODE moved; the rungs under that read one node, as they
+/// always did, so a pilot's own ground did not move. A chunk with no artifact reads the unknown
+/// word and is untouched, so the seed-only golden tables stand and the card's bytes do not move.
+/// ★ 19 (2026-09-23): ONE SHAPE AT EVERY DISTANCE (ruling W16; the owner, after flying: *"when I
+/// fly over the water very close, it changes from water to surface and back … when I'm flying away
+/// too far, it also changes … at some point water is not visible at all, just land"*). Three
+/// changes to the shape, in one version:
+///
+/// 1. **STEP 4'S DRAWN RIVERS ARE RETIRED** (version 17's own note above). The stamped trunk and
+///    tributary lines, the valley profile, the channel trench and the per-column river water word
+///    are GONE, and the fine relief is the recipe's octaves under the roughness factor again.
+///    MEASURED as the near flicker (ruling W15 §3): a stream's surface was written only where a
+///    rung drew the valley at FULL strength, so one wet column in sixteen appeared or vanished at
+///    ONE ring swap and the water's edge jumped up to 5.4 km. Every column that stood inside a
+///    drawn valley moves back toward version 16's ground.
+/// 2. **THE COAST MASK CARRIES A THREE-WAY SIDE** — land, sea or LAKE (`ARTIFACT_VERSION` 7).
+///    MEASURED before it (`water_edge_step lake`): not ONE column of 300 000 stood under a lake's
+///    own surface at any rung, because a lake node's bit was clear, the shore law read `SIDE_LAND`
+///    and held every lake column at least a quarter of its ground's height ABOVE its own water.
+///    Every column standing on a lake moves DOWN under its lake.
+/// 3. The water SHEET is no longer a flat eight-cell block where its own chord would dive through
+///    the ground — a DRAWING law, so it moves no column of the field, and it is named here only
+///    because it ships in the same breath.
+///
+/// A chunk with NO artifact reads the unknown side and no drainage, so its arithmetic is the one
+/// the card has always run: the SEED-ONLY golden tables stand and `gpu-drift` compares like with
+/// like. The SOLVE did not move, so the sea, the ocean share and the rows stand; the artifact's own
+/// DIGEST moves, because the mask's bytes double and carry the lake.
+pub const GENERATOR_VERSION: u32 = 19;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -125,7 +226,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 13,
+            GENERATOR_VERSION, 19,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -159,5 +260,5 @@ mod tests {
         assert_ne!(bare.measured, id.measured);
     }
 
-    const DECLARED_PIN: u64 = 3_618_195_234_959_425_002;
+    const DECLARED_PIN: u64 = 11_554_407_130_392_614_244;
 }

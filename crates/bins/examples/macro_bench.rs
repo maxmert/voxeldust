@@ -253,8 +253,20 @@ fn bench_full(label: &str, body: &BodyDefinition, words: &SolveWords) {
         let t = Instant::now();
         let c = vd_terrain::climate::climate(body, &lattice, words, &state.z, Some(state.sea_z));
         let t_climate = t.elapsed();
+        // The crater record reads the surface's own retention age, so the bench builds the rows it
+        // reads — the initial land and the climate over it — outside the clock.
+        let land = initial_land(body, &lattice, &words.land());
+        let pre = vd_terrain::climate::climate(body, &lattice, words, &land.z, land.sea_z);
+        let surface = vd_terrain::craters::Surface {
+            crust: &land.crust,
+            boundary_m: &land.boundary_m,
+            plate: &land.plate,
+            plates: &land.plates,
+            province: &land.province,
+            rain_mm_yr: &pre.rain_mm_yr,
+        };
         let t = Instant::now();
-        let craters = vd_terrain::craters::crater_population(body, &lattice, words);
+        let craters = vd_terrain::craters::crater_population(body, &lattice, words, &surface);
         let t_population = t.elapsed();
         let mut scratch = state.z.clone();
         let t = Instant::now();
@@ -282,7 +294,13 @@ fn bench_full(label: &str, body: &BodyDefinition, words: &SolveWords) {
         ));
         let t_rebound = t.elapsed();
         let t = Instant::now();
-        probe.ice(&c.ela_z, body.facts().gravity_mm_s2);
+        probe.ice(
+            &c.ela_z,
+            &c.temperature_dk,
+            c.lapse_mk_km,
+            body.facts().gravity_mm_s2,
+            vd_terrain::solve::GLACIAL_EPOCH_YR,
+        );
         let t_ice = t.elapsed();
         println!(
             "  phases alone: climate {:.3} s, crater population {:.3} s ({} craters), craters applied {:.3} s, \
@@ -342,7 +360,17 @@ fn bench_trace(label: &str, body: &BodyDefinition, words: &SolveWords) {
         );
     };
     extremes(&state, "the land");
-    let craters = vd_terrain::craters::crater_population(body, &lattice, words);
+    let pre = vd_terrain::climate::climate(body, &lattice, words, &land.z, land.sea_z);
+    let surface = vd_terrain::craters::Surface {
+        crust: &land.crust,
+        boundary_m: &land.boundary_m,
+        plate: &land.plate,
+        plates: &land.plates,
+        province: &land.province,
+        rain_mm_yr: &pre.rain_mm_yr,
+    };
+    let craters = vd_terrain::craters::crater_population(body, &lattice, words, &surface);
+    drop(pre);
     vd_terrain::craters::apply_craters(&mut state.z, &lattice, &craters, gravity);
     let relief = vd_terrain::solve::envelope_steps(body);
     for z in &mut state.z {
@@ -404,7 +432,13 @@ fn bench_trace(label: &str, body: &BodyDefinition, words: &SolveWords) {
             metres(hi)
         );
     }
-    let (_, under, thickest, deepest) = state.ice(&climate.ela_z, gravity);
+    let (_, under, thickest, deepest) = state.ice(
+        &climate.ela_z,
+        &climate.temperature_dk,
+        climate.lapse_mk_km,
+        gravity,
+        vd_terrain::solve::GLACIAL_EPOCH_YR,
+    );
     println!(
         "  trace {label}: ice: {under} nodes, thickest {thickest:.0} m, deepest cut {:.1} m",
         metres(deepest)

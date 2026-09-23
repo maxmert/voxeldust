@@ -418,12 +418,16 @@ pub(crate) fn on_shard_control(
 /// ★ THE RELAY of one shard's bulk bytes to the sessions it named: each Active session behind this
 /// gateway whose sub on `from` is at or past the shard's fence, and whose negotiated minor knows
 /// the arm, gets the bytes as one `ArtifactPart`; every other name is counted, never guessed at.
-/// ★ HOW MANY OF A SHARD'S BULK PARTS A SESSION HOLDS WHILE IT ACTIVATES (2026-09-22): the tiles
-/// under an occupant's boots are at most nine (`tile_reach_m`, measured over 1 158 bodies) and a
-/// beat of pyramid parts is thirty-two; sixty-four holds both with room. Past it the OLDEST is
-/// dropped and counted — a session that never activates is closed by its own TTL, so the hold is
-/// bounded in time as well as in bytes.
-pub(crate) const HELD_BULK_CAP: usize = 64;
+/// ★ HOW MUCH OF A SHARD'S BULK A SESSION HOLDS WHILE IT ACTIVATES, in bytes (2026-09-23;
+/// before it a COUNT of sixty-four parts, the oldest dropped, which would throw away the head and
+/// the coarsest pyramid levels of any planet whose burst outran the activation — a bound made
+/// right on reading, no loss to it measured). The home planet's whole
+/// artifact is about sixteen megabytes (the pyramid's six levels at two words a node, the coast
+/// mask, the tiles under the boots); sixteen of those hold a session that wakes in a system of
+/// many bodies. Past the cap the NEWEST part is refused and counted, so what a session holds is
+/// what arrived first — the heads and the coarse levels, which are what its first frame needs. A
+/// session that never activates is closed by its own TTL, so the hold is bounded in time too.
+pub(crate) const HELD_BULK_BYTES_CAP: usize = 16 * 16 * 1024 * 1024;
 
 /// ★ THE HELD BULK DELIVERED on the session's activation, in the order it arrived.
 pub(crate) fn flush_held_bulk(
@@ -465,10 +469,19 @@ pub(crate) fn relay_bulk(
             continue;
         };
         if !matches!(session.phase, SessionPhase::Active { .. }) {
-            // ★ HELD, NOT DROPPED: the shard already counts these bytes as sent.
-            if session.held_bulk.len() >= HELD_BULK_CAP {
-                session.held_bulk.remove(0);
+            // ★ HELD, NOT DROPPED: the shard already counts these bytes as sent. ★ AND THE HOLD
+            // IS BOUNDED IN BYTES, THE NEWEST REFUSED (2026-09-23): the shard ships a planet's
+            // artifact head first and its coarsest level next, and a count cap that dropped the
+            // OLDEST would throw exactly those away for a session that activates slowly — and no
+            // request lane exists to ask for a lost part. A message that would carry the hold
+            // past its byte cap is refused and counted instead, so what arrived first is what the
+            // session gets. Stated, not measured: no session was seen to lose a part to the old
+            // cap (the twelve urgent chunks that led here were far planets whose artifacts had not
+            // arrived at all, `docs/design/DEFERRED.md`), so this is a bound made right, not a cure.
+            let held: usize = session.held_bulk.iter().map(Vec::len).sum();
+            if held + bytes.len() > HELD_BULK_BYTES_CAP {
                 stats.bulk_for_unrouted += 1;
+                continue;
             }
             session.held_bulk.push(bytes.clone());
             stats.bulk_for_held += 1;

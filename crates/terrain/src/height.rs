@@ -36,11 +36,20 @@
 //!
 //! ★ **AND THE ROW SAYS WHICH SIDE** (2026-09-22, the coast mask; ruling W10): at a PYRAMID rung the
 //! ground above is a LEVEL'S MEAN, and a mean crosses the sea somewhere else than its children do, so
-//! the side comes from the fine node's own sea bit ([`crate::artifact::sample_side`], read on the
+//! the side comes from the ROW's own sea word ([`crate::artifact::sample_side`], read on the
 //! body's own macro lattice at every rung) and never from the ground's sign. MEASURED before it: the
 //! crossing moved a median of 11.5 km at the swap from the rows to level 1 and about 20 km at each
 //! level swap above. A host with no mask — the card, a body with no artifact — reads
 //! [`vd_recipe::height::SIDE_UNKNOWN`] and the ground decides, as before.
+//!
+//! ★ **AND THE WHOLE CELL SAYS IT, NOT ONE NODE** (2026-09-22, the footprint; ruling W15): a cell at
+//! a far rung covers MANY fine nodes — 1 024 of them at rung 18 — so the side is the WET FRACTION
+//! under the cell's whole footprint, wet at a half or more, on counts folded from the mask
+//! ([`crate::artifact::CoastCounts`]). MEASURED before it, over every cell of the globe: 60 cells of
+//! 8 664 at rung 18 stood on the side their own ground does not mostly stand on, and each rung read
+//! another centre node, so the ground flipped at every ring swap. A parent's count is the sum of its
+//! four children's, so a coarse rung never contradicts the rung below it. The morph reads the cell of
+//! ITS OWN RUNG, so the vertex is pulled toward the shoreline that rung really draws.
 //!
 //! **Example.** Along the direction of the pilot's boots the field at rung 3 is the rung-0 hill
 //! without the last three ripples, and the two are never further apart than the dropped amplitudes
@@ -129,25 +138,27 @@ pub fn height_field_m(
         i,
         j,
     )?;
-    // ★ THE SAME WATER THE COLUMN READS (2026-09-21): the nearest row's level through the one
-    // reader, so the morph target and the chunk's own column hold one shore.
-    let (water, _) = crate::artifact::sample_water(body, &lattice, field, face, 0, i, j);
-    // ★ THE SAME SIDE THE COLUMN READS (2026-09-22, the coast mask): the FINE node's own sea bit,
-    // read on the body's own macro lattice whatever level the field stands at, so the morph target
-    // and the chunk's own column stand on one side of one shoreline.
-    let side =
-        crate::artifact::sample_side(&fine, field, face, 0, i, j).map_or(SIDE_UNKNOWN, |sea| {
-            if sea {
-                vd_recipe::height::SIDE_SEA
-            } else {
-                vd_recipe::height::SIDE_LAND
-            }
-        });
+    // ★ THE SAME SIDE THE COLUMN READS (2026-09-22, the coast mask and its footprint; rulings W10
+    // and W15; the LAKE 2026-09-23, ruling W16): the wet FRACTION under THIS RUNG'S OWN CELL, read
+    // on the body's own macro lattice whatever level the field stands at, so the morph target and
+    // the chunk's own column stand on one side of one shoreline. The cell is the rung's, never
+    // rung 0's: a rung-18 cell covers a thousand fine nodes, and a morph that read one of them
+    // would pull the vertex toward a shoreline the chunk does not draw.
+    let cell_i =
+        vd_seed::ladder::index_of(vd_seed::bend::unbend(t), body.ladder().cells_per_edge(rung));
+    let cell_j =
+        vd_seed::ladder::index_of(vd_seed::bend::unbend(s), body.ladder().cells_per_edge(rung));
+    let cell_side = crate::artifact::sample_side(&fine, field, face, rung, cell_i, cell_j);
+    // ★ THE SAME WATER THE COLUMN READS (2026-09-21; the side decides which water, 2026-09-23):
+    // through the one reader, so the morph target and the chunk's own column hold one shore.
+    let (water, side, _) =
+        crate::artifact::column_water(body, &lattice, field, face, 0, i, j, cell_side);
+    let unit = direction_of_unit(dir);
     let parts = relief_parts_from(
         body.octave_table(),
         body.first_fine(),
         body.octaves_at(rung).len(),
-        direction_of_unit(dir),
+        unit,
         body.roughness(),
         slope_share,
     );
@@ -313,14 +324,13 @@ mod tests {
         // `sample_z` answers the field's own `Z` — metres OVER the ladder radius, the unit a row
         // states — so the stated sea and the rows are already in one unit.
         let sea_row = sea_m;
-        // The mask the stated sea implies: a node at or under it is sea, as `Artifact::of` writes
-        // it from the solve's own facies on a wet body.
+        // The mask the stated sea implies: a node at or under it is SEA, as `Artifact::of` writes
+        // it from the solve's own facies on a wet body — a two-bit side word a node (ruling W16).
         for (node, row) in artifact.rows.iter().enumerate() {
-            let bit = 1u8 << (node % 8);
+            let shift = 2 * (node % 4);
+            artifact.coast[node / 4] &= !(3u8 << shift);
             if i32::from(row.z_m) <= sea_row {
-                artifact.coast[node / 8] |= bit;
-            } else {
-                artifact.coast[node / 8] &= !bit;
+                artifact.coast[node / 4] |= 1u8 << shift;
             }
         }
         (moon.with_sea_m(Some(sea_m)), lattice, artifact, face, j)
@@ -389,7 +399,7 @@ mod tests {
         let _ = n0;
         // A coarse rung through a pyramid level answers; a torn cache does not; a level the
         // lattice cannot coarsen to and a body with no macro lattice answer nothing.
-        let level = PyramidField::of(&artifact, 1).expect("level 1");
+        let level = PyramidField::of(&artifact, 1, &artifact.coast_counts()).expect("level 1");
         assert!(height_field_m(&moon, &level, dir, 12).is_some());
         let empty = TileCache::new(lattice.edge);
         assert_eq!(height_field_m(&moon, &empty, dir, 0), None);
@@ -398,6 +408,7 @@ mod tests {
             z_m: vec![],
             water_m: vec![],
             coast: None,
+            counts: None,
         };
         assert_eq!(height_field_m(&moon, &level_9, dir, 12), None);
         let rock = moon.without_macro_lattice();
@@ -437,14 +448,22 @@ mod tests {
         // ★ THE SIDE IS THE ROW'S OWN WORD (2026-09-22): the nearest fine node's coast bit, which
         // is the one word every rung reads.
         let ground_side = |i: i32| -> Option<(bool, Gi, Gi)> {
-            let (water, _) =
-                crate::artifact::sample_water(&moon, &lattice, &artifact, face, 0, i, j);
+            let side = crate::artifact::sample_side(&lattice, &artifact, face, 0, i, j)?;
+            let (water, _, _) = crate::artifact::column_water(
+                &moon,
+                &lattice,
+                &artifact,
+                face,
+                0,
+                i,
+                j,
+                Some(side),
+            );
             if water == Gi::ZERO {
                 return None;
             }
-            let sea = crate::artifact::sample_side(&lattice, &artifact, face, 0, i, j)?;
             let z = crate::artifact::sample_z(&lattice, &artifact, face, 0, i, j)?;
-            Some((!sea, moon.radius + z, water))
+            Some((!side.wet(), moon.radius + z, water))
         };
         let mut i = 64;
         let first = ground_side(i).expect("a column with water");
@@ -515,7 +534,7 @@ mod tests {
             rung += 1;
         }
         assert!(rung < moon.ladder().rungs, "a rung reads level 1");
-        let level = PyramidField::of(&artifact, 1).expect("level 1");
+        let level = PyramidField::of(&artifact, 1, &artifact.coast_counts()).expect("level 1");
         let coarse = lattice.coarser(1).expect("a coarser lattice");
         // The first rung-0 cell along the middle row where the mask changes its word: the shore.
         let side_at = |i: i32| crate::artifact::sample_side(&lattice, &artifact, face, 0, i, j);
@@ -532,11 +551,12 @@ mod tests {
         let mut mean_disagrees = 0;
         for (k, site) in built.sites.iter().enumerate() {
             let site_face = Face::from_index(site.face).unwrap_or(face);
-            let Some(sea) =
+            let Some(side) =
                 crate::artifact::sample_side(&lattice, &artifact, site_face, rung, site.i, site.j)
             else {
                 continue;
             };
+            let sea = side.wet();
             let (_, h, _) = built.columns[k];
             let water = built.water[k];
             assert_ne!(water, Gi::ZERO, "the moon states a sea for every column");
@@ -578,9 +598,11 @@ mod tests {
     /// because a level's `Z` is the mean of its children and a mean crosses the sea somewhere else.
     ///
     /// The statement, which could fail at any of three places: (1) the line really crosses a shore
-    /// at every level; (2) the crossing moves by AT MOST ONE FINE NODE between the rows and level
-    /// 1, and between level 1 and level 2; (3) every sampled column stands on the side its own
-    /// fine row states, at every level.
+    /// at every level; (2) the crossing moves by at most ONE CELL OF THE COARSER RUNG at each
+    /// level swap — one fine node while the cell is no wider than a node, which is every rung a
+    /// pilot walks or flies low over; (3) every sampled column stands on the side THE RULE OF ITS
+    /// OWN RUNG states (2026-09-22, ruling W15: the wet fraction under the cell's footprint, which
+    /// is the fine row's own bit wherever the cell is no wider than a node).
     ///
     /// **Example.** A hull descends on the belt's coast from 1 400 km. At rung 15 it draws level 3,
     /// at rung 10 level 1, at rung 5 the rows; the beach under it is the same beach at all three.
@@ -610,11 +632,15 @@ mod tests {
             (rung_for(0), Box::new(artifact.clone())),
             (
                 rung_for(1),
-                Box::new(PyramidField::of(&artifact, 1).expect("level 1")),
+                Box::new(
+                    PyramidField::of(&artifact, 1, &artifact.coast_counts()).expect("level 1"),
+                ),
             ),
             (
                 rung_for(2),
-                Box::new(PyramidField::of(&artifact, 2).expect("level 2")),
+                Box::new(
+                    PyramidField::of(&artifact, 2, &artifact.coast_counts()).expect("level 2"),
+                ),
             ),
         ];
         let sea_r = metres_of_q28(moon.sea_radius);
@@ -632,9 +658,19 @@ mod tests {
                 let dir = cell_dir(&moon, face, i, j);
                 let over =
                     height_field_m(&moon, field.as_ref(), dir, *rung).expect("a height") - sea_r;
-                // (3) the side the row states is the side the column stands on.
-                let sea = crate::artifact::sample_side(&lattice, &artifact, face, 0, i, j)
-                    .expect("a row's own bit");
+                // (3) the side THIS RUNG'S OWN RULE states is the side the column stands on: the
+                // fine row's bit at a rung whose cell is one node, the footprint's wet fraction
+                // above that.
+                let sea = crate::artifact::sample_side(
+                    &lattice,
+                    field.as_ref(),
+                    face,
+                    *rung,
+                    i >> rung,
+                    j >> rung,
+                )
+                .expect("this rung's own side")
+                .wet();
                 sampled += 1;
                 disagreements += i32::from(if sea { over > 0.0 } else { over < 0.0 });
                 if let Some((x0, v0)) = previous
@@ -647,20 +683,27 @@ mod tests {
                 previous = Some((f64::from(i), over));
                 i += step;
             }
-            crossings.push(crossing.expect("the line crosses the shore at this level"));
+            crossings.push((
+                *rung,
+                crossing.expect("the line crosses the shore at this level"),
+            ));
         }
         assert!(sampled > 0, "the line was walked");
         assert_eq!(
             disagreements, 0,
             "every column stands on the side its own fine row states"
         );
-        // (2) the crossing moves by at most ONE FINE NODE at each level swap.
+        // (2) the crossing moves by at most ONE CELL OF THE COARSER RUNG at each level swap — a
+        // fine node where the cell is no wider than one, which is the whole near ladder.
         let node_m = lattice.node_m();
         for pair in crossings.windows(2) {
-            let step_m = (pair[0] - pair[1]).abs();
+            let step_m = (pair[0].1 - pair[1].1).abs();
+            let cell = f64::from(vd_seed::ladder::cell_m(pair[1].0));
+            let bound = if cell > node_m { cell } else { node_m };
             assert!(
-                step_m <= node_m,
-                "the shore steps {step_m} m at a level swap, over one fine node of {node_m} m"
+                step_m <= bound,
+                "the shore steps {step_m} m at the swap to rung {}, over its own cell of {bound} m",
+                pair[1].0
             );
         }
     }

@@ -2241,7 +2241,6 @@ fn mesh_of(
 /// (the radial: a flat sheet faces up), a morph of zero, the radial, the morph normal — so the
 /// ground's fade shader draws it with the ground's bands.
 fn water_mesh_of(geometry: &vd_client::chunks::ChunkGeometry) -> Mesh {
-    let n = geometry.water_vertices.len();
     let packed: Vec<[i16; 2]> = geometry
         .water_radials
         .iter()
@@ -2258,7 +2257,8 @@ fn water_mesh_of(geometry: &vd_client::chunks::ChunkGeometry) -> Mesh {
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, geometry.water_vertices.clone())
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.water_radials.clone())
-    .with_inserted_attribute(super::ATTRIBUTE_MORPH, vec![0.0f32; n])
+    // ★ THE WATER MORPHS WITH ITS GROUND (ruling W18): the library's own metre per vertex.
+    .with_inserted_attribute(super::ATTRIBUTE_MORPH, geometry.water_morph_m.clone())
     .with_inserted_attribute(super::ATTRIBUTE_RADIAL, geometry.water_radials.clone())
     .with_inserted_attribute(
         super::ATTRIBUTE_MORPH_NORMAL,
@@ -2352,7 +2352,10 @@ pub const EXACT_NORMAL_RUNG: u8 = 9;
 type LightQuery<'w, 's> = Query<
     'w,
     's,
-    &'static mut Transform,
+    (
+        &'static mut Transform,
+        Option<&'static mut DirectionalLight>,
+    ),
     (
         Or<(With<TerrainSun>, With<TerrainFill>)>,
         Without<TerrainChunk>,
@@ -2723,7 +2726,13 @@ pub(crate) fn sync_terrain(
         } else {
             AskBound::unbounded()
         }
-        .for_body(&eb.body, rungs);
+        // ★ THE ARTIFACT'S OWN PYRAMID COUNT (ruling W17): the handover where the FIELD changes
+        // level pays the field's step too, and a realm that shipped no artifact states none.
+        .for_body(
+            &eb.body,
+            rungs,
+            artifact.as_ref().map_or(0, |a| a.head.levels),
+        );
         ladder.pace.slew(&candidate, rungs, hysteresis, frame_s);
         if ladder.pace.take_rebind(rungs, rebind_fraction) {
             rebind.push(eb.realm);
@@ -3327,10 +3336,30 @@ pub(crate) fn sync_terrain(
             let cos_i = (-dir).dot(up).clamp(0.0, 1.0);
             let tan_i = ((1.0 - cos_i * cos_i).sqrt() / cos_i.max(1e-3)).min(SHADOW_BIAS_TAN_CAP);
             terrain.sun_tan_i = Some(tan_i);
+            // ★ NO GROUND WITHIN THE SHADOW'S REACH, NO SHADOW MAP (2026-09-23, the performance
+            // measurements): the cascades cover the ground out to the shadow's reach from the eye
+            // (3.5 km, the second ring), so an eye standing higher over every body's ground than
+            // that reach has NOTHING inside its cascades, and the four shadow passes still walked
+            // every drawn entity — MEASURED at 6 376 km over the belt: 2.6 ms of a 20.2 ms frame,
+            // 2.3 of them the three far cascades, for a map nothing lands in. The map is switched
+            // off there and on again the moment ground can stand inside the reach; on foot and in
+            // the air under 3.5 km nothing changes. The ground's relief stands over the ladder's
+            // floor by the body's own bound, so the test reads the floor's altitude less that.
+            let shadow_reach_m = f64::from(switch_m(terrain.config.shadow_reach_rung) as f32);
+            let ground_within_reach = with_bodies.iter().any(|eb| {
+                let over_floor_m = DVec3::from_array(eb.eye).length() - eb.body.ladder().radius_m();
+                over_floor_m - eb.body.relief_bound_m(0) <= shadow_reach_m
+            });
+            let shadows_now = terrain.config.shadows & ground_within_reach;
             match terrain.sun {
                 Some(sun) => {
-                    if let Ok(mut t) = light_tf.get_mut(sun) {
+                    if let Ok((mut t, light)) = light_tf.get_mut(sun) {
                         *t = transform;
+                        if let Some(mut light) = light
+                            && light.shadows_enabled != shadows_now
+                        {
+                            light.shadows_enabled = shadows_now;
+                        }
                     }
                 }
                 None => {
@@ -3355,7 +3384,7 @@ pub(crate) fn sync_terrain(
                         .spawn((
                             DirectionalLight {
                                 illuminance: lux,
-                                shadows_enabled: terrain.config.shadows,
+                                shadows_enabled: shadows_now,
                                 shadow_normal_bias: DirectionalLight::DEFAULT_SHADOW_NORMAL_BIAS
                                     + tan_i,
                                 ..default()

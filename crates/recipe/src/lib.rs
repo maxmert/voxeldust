@@ -34,6 +34,7 @@
 #![deny(clippy::integer_division)]
 #![deny(clippy::modulo_arithmetic)]
 
+pub mod amplify;
 pub mod bend;
 pub mod cell;
 pub mod gi;

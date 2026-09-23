@@ -8655,9 +8655,13 @@ item below is a stated interim of that core, named here so no picture is judged 
   half-height belt today. WHEN: with C3's craters and ice, or 8f, on the pictures' word.
 - **NO ABYSSAL HILLS, NO RIDGE AXIAL VALLEY** (02 §7.2): the ocean floor is the isostatic plain plus the ridge
   bump. WHEN: 8o's bathymetry look.
-- **THE LAKE DOUBLE COUNT** (02 §7.1): the sea's bisection spends the whole inventory on the sea; the lakes the
-  flood then fills hold water the inventory has already spent. WHEN: C5 — one subtraction, the lakes' volume
-  read off the routing.
+- 🟩 **THE LAKE DOUBLE COUNT** (02 §7.1) — CLOSED 2026-09-22 by ruling W11. The sea's bisection spent the
+  whole inventory on the sea, and the lakes the flood then filled held water the inventory had already
+  spent. Now the lakes' own VOLUME is a number (the budget's `LakeReport::volume_m3`), the solve re-solves
+  the sea over the inventory LESS that volume, and it states which of the two happened. MEASURED on the
+  home planet: 3 288 km³ of standing water against an inventory of 2.736 × 10⁹ km³ — one part in 830 000 —
+  so the sea stands where it stood, 4 114 m, far under the sea solve's own sixteenth of a metre over the
+  ocean's area. A wetter body gets the subtraction and a re-routed field. See the W11 entry below.
 - **THE PER-PLATE CHARACTER IS THE FAR SIDE'S CRUST**: at a boundary the far plate's continental-ness is read
   from its affinity OFFSET's sign, not from the crust share across the boundary (which the node does not hold).
   A stated approximation; the pictures judge it at the coasts where a range should face a trench.
@@ -8803,6 +8807,81 @@ draws itself"):**
   continuous under the land's morph. A lake stands above the sea by its corners' own word. The cost is a
   sheet under land cells too, two triangles a cell; the separate coarse sea sphere per realm (8o) is the
   optimisation when it is measured to matter. UNMEASURED by eye until the owner flies it.
+- 🟩 **THE WATER IS DRAWN ON THE GROUND'S OWN LATTICE (2026-09-23, ruling W18; the owner, from 11 500 km and
+  17 000 km after W16 and W17: *"Not fixed"* — a speckled far coast, a staircase of 400 km teeth, a coast that
+  changed with the rung).** The sheet was a quad per cell (and a block of eight, W16) on the corner COLUMNS'
+  directions; the ground is a surface-nets mesh whose vertices lie INSIDE the cells. Two lattices, two chords:
+  MEASURED (`vd-bins/examples/sheet_poke`, the owner's stands) 0.4 % of the sea-floor vertices under wet cells
+  stood ABOVE the drawn water at rung 13, 8.7 % at rung 14, 8–14 % at rung 15, 5 % at 17 and 7 % at 18, by up
+  to 18 m, 137 m, 1 958 m and 3 765 m. Now `position::water_sheet` takes the chunk's ground mesh and builds one
+  water triangle per ground triangle that reaches down to the water, its points the ground vertices' own
+  positions scaled to the water's radius, at the highest level of the three; the hide bound stays; the block
+  is retired. `the_ground_never_stands_over_the_water_it_is_under` holds the statement that could fail and
+  the retired rule's failure beside it. MEASURED after on the same stands: the teeth and the wide speckle
+  gone; a shelf then DISSOLVED into dots: MEASURED (`mask_at_pixel`) every column there stands under its
+  water and the mask says sea, yet 84 % of the DRAWN vertices at rung 13 stand over a metre above it — the
+  extractor's gap byte is 1/128 of a cell (64 m at rung 13) and the shore law's depth on a shelf is smaller
+  than that step (a depth tie-break and a buffer-step nudge were tried and REFUTED). Now a vertex's side is
+  its columns' word and the water is held one extractor's step off the drawn ground on that side
+  (`position::water_sheet`). Then the owner's far pictures (118 000 km, the middle of rung 17's crossfade
+  band; 408 000 km): the ground morphed toward the coarser mesh, at its 2 km and 8 km steps, under a water
+  with a morph of zero — a dot screen over every continent, gone at the ring swap. Now the water MORPHS WITH
+  ITS GROUND: each water vertex's morph metre is the same placing rule (`position::water_radius`) read from
+  its ground vertex's morph target (`ChunkGeometry::water_morph_m`). OWED: the owner's look; the frame cost
+  against the block's saving; a water skirt at chunk seams (UNMEASURED); HR5 coverage of the new lines.
+- 🟩 **THE FRAME'S OWN WORK, AND THE TWO CUTS (2026-09-23; the owner: *"can we optimize performance in any
+  places?"*, *"Can we achieve 60 fps?"*, *"I want believable water from the space later … for very deep — no"*).**
+  MEASURED first: every stand's frame read 17–23 ms because the headless loop paces at 60 Hz and the window
+  syncs to it, so the number was the pace and its misses, not the work; `VD_CLIENT_UNPACED=1` now runs the
+  loop as fast as the work allows and the window without vsync, and the stamp's frame time is the frame's own
+  work. MEASURED next (`sheet_cost`, 16 952 km): the sheet's 661 168 triangles were the land's 661 168 — the
+  hide bound at rungs 15–16 is 82–164 km and cut nothing. Built: (1) THE EXACT SHEET CUT — a water triangle
+  is built only where one of its ground vertices can stand at or under the water at either end of its morph,
+  within the extractor's step (`vd_client::chunks::water_sheet`); (2) THE DEEP-FLOOR CUT — a ground triangle
+  whose three vertices stand under their water (the columns' word) by more than the water's visible depth at
+  both ends of their morph is not drawn (`floor_triangles`); the visible depth is the extractor's step today
+  and the ocean slice (8o) replaces it with the water's own clarity so shallow water shows its floor. MEASURED
+  after, unpaced, the 11 497 km stand: 61.3 → 51.0 MB of drawn mesh, 1 115 984 → 1 054 770 vertices, the
+  frame 16.6 ms mean and 18.9 ms peak, and the picture identical to the pixel (6 of 667 680 differ, the
+  sky's own). The 16 952 km stand (98 chunks): 21.3 → 17.5 MB, the frame 14.1 ms mean and 16.3 ms peak, 44
+  pixels differ. The 6 376 km stand (433 chunks): 101.4 → 83.4 MB, 1 844 069 → 1 730 549 vertices, the frame
+  20.2 ms mean and 20.8 ms peak, ZERO pixels differ. So two of the three stands held 60 fps and the near one
+  (433 chunks, 1.7 million vertices) read 50 fps. PROFILED by ablation on that stand, unpaced (the owner: *"Profile
+  the 6 376 km stand"*): the water sheet off 16.3 ms (3.9 ms of the 20.2), the shadows off 17.6 ms (2.6 ms),
+  one cascade of four 17.9 ms (the far cascades 2.3 ms), a 1 024 px map 18.7 ms (1.5 ms); what is left with the
+  sheet and the shadows off, about 13.7 ms, is the ground's 1.7 million vertices and the engine's own work for
+  866 entities, which the ablation cannot split. Built on it: (3) COARSE WATER OVER DEEP WATER — where every
+  ground vertex of a block of eight cells is deep (the floor cut's own vertices) nothing stands under the sheet,
+  so the block is one flat quad on its corner columns (`SHEET_BLOCK`, W16's block lawful again exactly there)
+  and the fine triangles whose three vertices all lie in deep blocks are dropped; a fine triangle with a
+  vertex in a shallow block stays, so the fine sheet overlaps the quads by a cell at the deep water's edge and
+  stands over the quad's dipping chord; (4) NO GROUND WITHIN THE SHADOW'S REACH, NO SHADOW MAP — the cascades
+  cover 3.5 km from the eye, so an eye higher over every body's ground than that has nothing inside them and
+  the four shadow passes still walked every entity; the sun's shadow map is off there and on again the moment
+  ground can stand inside the reach; on foot nothing changes. MEASURED after (unpaced, the same stands, the
+  pictures compared pixel by pixel): 11 497 km 16.6 → 15.4 ms mean, 18.9 → 15.7 ms peak, 7 pixels; 16 952 km
+  14.1 → 13.5 ms, 16.3 → 14.8 ms peak, 124 pixels — faint hairlines one pixel wide along the seams between a
+  deep block's quad and the fine sheet, CURED by keeping the fine sheet over every deep block that borders a
+  shallow one (or the chunk's edge), so it overlaps the quad's dipping chord by a whole block; 6 376 km
+  20.2 → 16.5 ms mean, 20.8 → 18.1 ms peak. THE SEAM FIX FLOWN (unpaced, the same stands, against the
+  pictures before the coarse water): 11 497 km 16.2 ms mean, 16.7 ms peak, 0 pixels; 16 952 km 13.8 ms,
+  15.1 ms peak, 0 pixels — the hairlines gone; 6 376 km 17.3 ms, 19.3 ms peak, 0 pixels. The overlap gives
+  back about a millisecond of the coarse water's gain. So against the start of the day's measurements
+  (20.2 ms at the near stand) the near stand reads 17.3 ms mean: 58 fps, with the far stands at 62 and
+  72 fps. OWED for the last 0.6 ms of the near stand's mean and 2.6 ms of its peak: a split of the
+  remaining 13.7 ms between the ground's vertices and the engine's per-entity work, which the ablation
+  cannot give; and the owner's look at the seams from the window.
+- 🟨 **TWELVE CHUNKS THAT NEVER SETTLE ON A STILL STAND = TWO FAR PLANETS WITHOUT THEIR ARTIFACT
+  (2026-09-23).** The stamp counts every realm; on three of nine headless stands twelve chunks stayed urgent
+  for the stand's five minutes — one whole-face chunk per face at the top rung of two far planets whose
+  artifact head had not arrived (the client's held list named three realms against five, 17 pyramid levels
+  against 27–32). Those planets are missing from the sky until their shard boots, solves or reads its store,
+  and ships — minutes — and then they pop in: a seam (SL8) and the far-body cost of ruling W9's whole-artifact
+  shipping. The first suspicion, the gateway's held-bulk COUNT cap dropping the head, was wrong for these
+  stands (the byte-bounded hold changed nothing there) and stays only as a bound made right
+  (`HELD_BULK_BYTES_CAP`: sixteen home-planet artifacts, the NEWEST refused and counted). OWED: the far
+  shards' boot-to-ship time from their own logs; a far body drawn from its coarsest level alone the moment
+  that level lands (coarse before fine), before its tiles and mask; a request lane for a lost part (SL6).
 - 🟩 **THE CAMERA'S UP IS THE SERVER'S (2026-09-20, the owner: *"axes on any move of the occupant are always
   broken; W should move forward where I look, doesn't matter how axis is located in any realm"*).** The server
   turns a body's look about the up it was born with — the delivered facing's own +Y, on a planet the radial
@@ -9133,7 +9212,7 @@ draws itself"):**
   session Active, so `relay_bulk` dropped eight of the nine ("a session that is not active"), the shard had marked
   them sent, and the fine rungs waited for ever (in a hull the tiles come through the gateway's own per-realm
   cache, served every beat, so nothing is lost — the fork the owner named). NOW a shard's bulk for a session that
-  is still activating is HELD on the session (`Session::held_bulk`, bounded by `HELD_BULK_CAP` 64, the oldest
+  is still activating is HELD on the session (`Session::held_bulk`, bounded by `HELD_BULK_BYTES_CAP`, 256 MB, the NEWEST refused since 2026-09-23 — a count cap of 64 that dropped the OLDEST would lose the head and the coarsest levels of a slow activation, a bound made right on reading and no loss to it measured; before that, the oldest
   dropped and counted) and delivered in order on the activation (`flush_held_bulk`); `bulk_for_held` counts it;
   gate `a_shards_bulk_for_an_activating_session_is_held_and_delivered_on_activation`. MEASURED after: all nine
   tiles held, rungs 5–11 drawn (8 040 chunks) within a minute of a login after a restart, no missing tile.
@@ -9201,6 +9280,583 @@ draws itself"):**
   client that draws one face still receives every face's bits — 1.1 MB once per realm, not measured against
   the beat's budget on a slow link; (5) HR5 coverage of the new lines UNMEASURED (`coverage-fast` is not
   run in this session).
+- 🟩 **THE ROUTING FILL IS NOT WATER — A LAKE IS WATER THAT STANDS (2026-09-22; the owner ordered
+  recommendation 1 of `docs/investigation/2026-09-22/lakes_and_landscape_models.md`; ruling W11).** CLOSES
+  "THE LAKE DOUBLE COUNT" above. ROOT CAUSE: `MacroSolve::facies` read `z_flood > z` as water and
+  `water_level` answered the flood's own level, so EVERY closed hollow the priority flood raised was drawn
+  as a lake — MEASURED on the home planet, **188 848 nodes, 51 209 patches, median one node, 9.69 % of the
+  land** against Earth's 3.7 % of the non-glaciated land (Verpoorter et al. 2014) and about 2 000 lakes
+  bigger than one of our 67 km² nodes. Every published model computes that fill and THROWS IT AWAY (Barnes:
+  "an important preconditioning step"; Landlab: "a scratch surface, never to `topographic__elevation`";
+  Cordonnier: filling and carving are "metaphors … without altering elevation values").
+  THE LAW (W11): the fill is a SCRATCH SURFACE that decides the receivers, the flats, the order and the
+  sweep's base level and NOTHING else; a hollow is a lake only where a finite amount of water stands in it;
+  a hollow the rain cannot fill is a dry basin.
+  BUILT: `crates/terrain/src/lakes.rs` — the DEPRESSION HIERARCHY as the merge tree of the field's own
+  sublevel sets (Fill–Spill–Merge, Barnes, Callaghan & Wickert 2021, Earth Surf. Dynam. 9, 105–121; written
+  here from the paper in integers, no reference code copied, `Vec` only, one stated order: lowest first,
+  ties to the smaller index), and the WATER BUDGET on it (Langbein 1961, USGS PP 412): a hollow's SUPPLY is
+  the Turc–Pike runoff `Q = P − P/√(1+(P/PET)²)` over its nodes (Turc 1954; Pike 1964; Budyko 1974;
+  calibration body Earth's catchments — `climate::runoff_mm_yr`), and a node UNDER the water costs
+  `Q + PET − P` (`climate::pet_mm_yr`, Earth's land mean scaled by the Tetens capacity, the aridity byte's
+  own law now named). The water rises until the two balance, capped at the spill; the overflow is the
+  parent's, which is the merge. `MacroSolve::water_z` is the new row; `water_level` and `facies` read it;
+  `MacroSolve::routing_base` keeps the sweep on the fill, stated EXACTLY as `water_level` read it before, so
+  the field did not move. The artifact's `water_m`, its facies byte and the pyramid's `fold_water` follow
+  with no change of their own.
+  ★ A DEFECT FOUND BY MEASUREMENT, recorded because it nearly shipped: the first build took the runoff as
+  `max(0, P − PET)`, which is negative over most of Earth's land and would dry every river — MEASURED,
+  74 657 of 74 682 hollows dry and 31 nodes of 8.87 million wet. The Budyko partition is the published cure.
+  MEASURED AFTER (`lake_census 0.617270 -0.437286 -0.654033 60`): lake nodes **188 848 → 3 169**; the lakes'
+  share of the land **9.69 % → 0.16 %** (Earth's non-glaciated interiors 0.2–0.8 %; the gate asked for under
+  4 %); patches **51 209 → 2 263** (Earth ≈ 2 000 over one node), largest 20 nodes (1 342 km²), by size
+  1:1 737 · 2–3:442 · 4–7:76 · 8–15:7 · 16–31:1; the hierarchy 96 493 depressions over 74 080 leaves, and of
+  74 080 water bodies **DRY 71 817 (96.9 %), PARTIAL 2 261 (3.1 %), SPILLING 2**. THE INVENTORY BALANCES: the
+  standing water is 3 288 km³ of an inventory of 2.736 × 10⁹ km³, one part in 830 000, and re-solving the sea
+  over the inventory LESS the lakes leaves it where it stood (4 114 m) — under the sea solve's own sixteenth
+  of a metre. COST: the hierarchy and the budget **0.2 s** on 8.87 M nodes, timed by themselves; the whole
+  solve 130.3 s against 114 s in W8.
+  THE BELIEVABILITY GATES (ruling B3, the same day): **G-LAKE-SHARE GREEN** (0.16 % against a ceiling of
+  4 %), **G-LAKE-COUNT GREEN on the count** (2 263, order 10³ as Earth's ≈ 2 000; the power-law fit itself
+  is UNMEASURED), **G-BASIN GREEN** (every depression ends dry, partial or spilling by its supply, and the
+  inventory balances). G-ICE, G-BUZZSAW, G-CRATER, G-GRID, G-HYPSO, G-RIVER and G-LOOK belong to the later
+  steps of B2 and are untouched here.
+  GATES: `GENERATOR_VERSION` 13 → 14 and `DECLARED_PIN` re-recorded; `HOME_ARTIFACT_DIGEST` re-recorded (the
+  water words moved); ★ `HOME_PLANET_SEA_M` 4 114, `HOME_PLANET_OCEAN_SHARE_Q4` 7 822 and
+  `HOME_IDENTITY_MEASURED` ALL UNCHANGED, and `terrain_pin` and `mesh_pin` green — the SHAPE did not move by
+  one sixteenth, which is the statement step 1 had to make; `gpu-drift` 5 979 of 5 979. The gate that could
+  fail before and passes after is `solve::tests::the_routing_fill_is_not_water`: the flood raises the pit,
+  the pit's water word says DRY, and the sweep still reads the fill as its base level.
+  Statements that could each have failed: the hierarchy's two pits, their shared saddle, their parent and its
+  own spill on a stated field; the three ends on that field under three stated climates; a body with no sea
+  seeding the root with the six lowest nodes the routing takes; the artifact's rows following `water_level`
+  and a node the flood raised standing DRY in its row; a dry body getting no budget at all.
+  OPEN: (1) the GLACIAL lakes — the summer ice line and the ice inside the pass loop — are recommendation 2
+  of the same report and are NOT built, so 0.16 % stands against Earth's non-glaciated interiors and not
+  against its 3.7 %; (2) the CARVE of a spill (Cordonnier 2019) is not built, so a hollow only drains where
+  the sediment reaches it; (3) a metadepression whose children do not ALL fill holds no water of its own and
+  its rim nodes' runoff is credited to it rather than to the child it would run into — a stated
+  approximation, the saddle cells only; (4) a LAKE's shore still keeps today's rule (the coast mask carries
+  the SEA bit alone), so a lake's edge still folds as a mean at the coarse rungs — the report's §6.5;
+  (5) HR5 coverage of the new lines UNMEASURED (`coverage-fast` is not run in this session).
+- 🟩 **THE SUMMER ICE LINE AND THE CRATER RECORD OF A WET SURFACE (ruling B2 step 2, 2026-09-22;
+  `GENERATOR_VERSION` 15).** Four laws landed, and each one replaces a reading that could not be right.
+  (1) THE TEMPERATURE'S DATUM is the body's own mean surface — the sea where there is one — and not the
+  LADDER RADIUS, a geometric datum the home planet's sea stands 3.4 km above; before it, the sea surface
+  read −11 °C and the land's rain was a sixth of Earth's. (2) THE AIR OVER WATER stands at the WATER's
+  surface, not at the floor under it: the abyssal plain read 344 K, asked for 16 160 mm of evaporation a
+  year and was given 6 708 mm of rain; it now reads 288 K, 1 000 mm and 575 mm. (3) THE EQUILIBRIUM LINE
+  IS A SUMMER LINE: the season comes from the charter's own obliquity through North's insolation
+  expansion `s₁ = 2 sin ε` and a one-mode seasonal energy balance, and the line stands where the
+  ablation-season temperature falls to the one Ohmura, Kasser & Funk 1992 name for the node's own rain
+  (`P = 645 + 296·T + 9·T²`). The ICE is Egholm et al. 2009's mass balance carried down the receiver tree
+  the water already uses, so NO EXTENT IS DRAWN: a glacier ends where the ablation eats what its
+  catchment sends. The ice and the talus now run INSIDE the pass loop, before every sweep and every
+  deposit. (4) THE CRATER RECORD integrates the Neukum production function over each province's own
+  CRATER RETENTION AGE — the plate that carries the ground and the rain that wears it — instead of the
+  system's whole age. MEASURED on the home planet: the ice fell from over 2.4 million nodes (more than
+  all the land) to 78 554, 4.06 % of the land; no peak stands more than 1 322 m over its own snowline
+  (Egholm's 1 500 m); the craters fell from 144 967 to 1 610, and the airless moon's count did not move
+  (a unit test measures both bodies). The solve is 103 s, from 130 s.
+  STILL OWED: (a) the seasonal column is ONE well-mixed ocean-and-land column, so a continental interior
+  really runs hotter in its own summer than the law says and the line it gives is LOW, never high —
+  a two-column seasonal balance is the cure, and 8e's biomes are the place for it; (b) G-ICE reads
+  4.06 % against Earth's 10 %, because the home planet's 55° obliquity gives its poles hot summers and
+  abolishes the polar ice caps — a stated consequence of the charter, and the OWNER'S WORD IS OWED on
+  whether the world wants that tilt; (c) the crater record's median is 33 km against Earth's 8 km and
+  1 419 of the 1 610 are wider than 20 km, because the macro node is 8 192 m and the floor is two nodes:
+  nothing narrower than 16.4 km can be represented at all, and the small end of the record belongs to
+  the third dimension (8f); (d) the age histogram holds 8 % of the record in the last 4 % of the body's
+  history, a two-fold skew toward the recent against Earth's ten-fold, because the home planet's land
+  takes 373 mm of rain a year against Earth's 750 and keeps its cratons older; (e) no floating ice shelf
+  — a trunk that reaches the sea or a lake ends there (8o owns the shelf); (f) the basal melt reads the
+  year's own mean and not the insulated bed, because the bed's temperature needs the thickness and the
+  thickness needs the flux (Egholm iterates; we make one pass); (g) HR5 coverage of the new lines
+  UNMEASURED (`coverage-fast` is not run in this session); (h) Portenga & Bierman 2011's 12 m/Myr and
+  North & Coakley 1979's `s₁ = −0.796` are cited from the research report, UNVERIFIED as sources opened
+  in this session.
+- 🟨 **THE GRID STILL SHOWS IN THE VALLEYS — THE FLAT IS CURED, D8 ITSELF IS NOT (ruling B2 step 3;
+  gate G-GRID; `GENERATOR_VERSION` 16).** WHAT IS DONE: the flat receivers no longer rank on a
+  breadth-first HOP COUNT, which charged the stencil's diagonal — √2 of a row — one step like a row and
+  so sent every filled hollow's water down one fixed diagonal, planet-wide. The distance across a flat
+  is now the lattice's OWN CHORD IN WHOLE METRES summed along the path (`MacroSolve::route` step 3, a
+  Dijkstra seeded from the flat's draining shore only), and a flat node takes the neighbour with the
+  smallest `distance + chord`, ties to the smaller index. Cordonnier, Bovy & Braun 2019 §2.3.2 rank on a
+  straight line to ONE outlet and say plainly it *"does not yield the perfect path patterns that one
+  would obtain by including obstacles in the computation of the Euclidean distance"*; the summed chord IS
+  that obstacle-aware distance, and our flats have a whole SHORE of outlets rather than the one node a
+  straight line could be measured to. MEASURED on the home planet, before → after: the valleys' long-axis
+  flatness against the grid's four directions 2.101 → 1.284, the 135° bin 50 840 of 96 804 trunks →
+  23 953 of 96 893; on a filled disc of 775 nodes the water's detour out of the flat 1.2406 → 1.0461
+  (worst 1.404 → 1.094) and its bearing against the straight line to its own exit 2.82° → 1.04° (worst
+  12.0° → 8.1°). A field with NO flat routes byte for byte as before — a test that could have failed
+  (`a_field_with_no_flat_keeps_the_steepest_descent_it_always_had`), and Tarboton's cone did not move by
+  one digit. WHAT IS NOT DONE: **G-GRID IS STILL RED.** A perfectly flat router reads 1.006 at four bins
+  on 96 893 trunks (95th percentile 1.012, by a twenty-thousand-draw simulation), so 1.284 is far outside
+  the noise. The rest is D8's own fourfold bias, which no flat rule can touch: Tarboton's inward cone
+  stands at 57 768 nodes² (140.3 % of the true upslope area) with the pole at a face's middle and
+  244 239 (275.6 %) near a face corner, Hyväluoma's rotation score falls to 0.032 at 15° and 0.582 at 45°,
+  and the fourfold amplitude stands at 5.64 % and 7.03 % — all four unchanged to the digit by the cure,
+  because a cone holds no flat. WHY IT STOPS HERE (ruling B2 step 3's own branch): the next cure is
+  Hyväluoma's MFD with a cardinal weight `W`, and it is **the owner's word, not ours**. It costs the
+  single-receiver tree — every node would carry up to eight receivers with weights, and the sweep, the
+  deposit, the topological order, the basins, the depression hierarchy and the artifact's own receiver
+  byte all read ONE receiver — and its `W` is a FITTED number (Hyväluoma abandons the geometric
+  interpretation; the optimum runs 2.6 to 8 by flow exponent and by terrain), which ruling T9 calls a
+  defect unless a published law computes it. Rho8 is REFUSED by name: a random tie-break breaks SL10's
+  byte-for-byte gate and Tarboton rejects it on principle. A HEXAGONAL MESH is the only cure that removes
+  the anisotropy instead of tuning it, and it is A NEW WORLD under SL5 — named here, not built. Also
+  owed: the LAKES' histogram is not yet a gate (80 patches of four nodes or more; a perfectly flat router
+  reads a median 1.200 at four bins with a 95th percentile of 1.450, so the measured 1.600 says almost
+  nothing) — it becomes a gate when step 4's rivers raise the lake count; and HR5 coverage of the new
+  lines is UNMEASURED (`coverage-fast` is not run in this session). WHERE: `crates/terrain/src/solve.rs`
+  (`route` step 3, `assign_flat_receivers`), `crates/bins/src/grid_bias.rs` and
+  `crates/bins/examples/grid_bias.rs` (the three instruments), the `G-GRID` line of
+  `crates/bins/examples/lake_census.rs`. WHEN: the owner's word on MFD or on the hexagonal mesh, after
+  ruling B2 step 4's river lines — which may themselves flatten the histogram, because a valley cut by a
+  river has a reason to point where it points.
+- ⬛ **RETIRED 2026-09-23 (ruling W16 fault A; the survey's R4): THE DRAWN DRAINAGE — THE RIVER
+  LINES, THE CARVE AND THE FLOODPLAIN ARE DELETED.** The width law and the meander belt stay for
+  the SOLVE. The entry below is kept as the record of what was built and why it went; the cure and
+  its numbers stand under "THE NEAR FLICKER: STEP 4'S DRAWN RIVERS ARE RETIRED" further down.
+  WHAT IT WAS (ruling B2 step 4; ruling W4 items 1 and 2; `GENERATOR_VERSION` 17): WHAT WAS
+  WRONG: the fine relief under one macro node of 8 192 m was a sum of noise octaves times a roughness
+  factor and NOTHING DRAINED IT, so from 100–150 km it read as ripples — the owner's dunes. The solve
+  has held the river network at the node scale since 2026-09-19 and `slice_8d_design.md` §2 said of
+  the discharge *"built, and nothing reads it back"*. WHAT IS BUILT (`crates/terrain/src/river.rs`,
+  `crates/terrain/src/river/tables.rs`): every node's TRUNK LINE from its own receiver slot, four
+  orders of TRIBUTARIES under it, a CHANNEL from Leopold & Maddock 1953's hydraulic geometry
+  (`w = 3.9·√Q`, `d = 0.4·Q^0.4` at Earth's gravity, the downstream exponents 0.5 and 0.4; gravity
+  from the bed's own shear and NOT from a fit, so a low-gravity moon gets deep narrow rivers — a unit
+  test measures it), a FLOODPLAIN from Leopold & Wolman 1960's meander belt (2.7 times the channel's
+  width, standing at the bankfull surface by the definition of bankfull), and a VALLEY half as wide
+  as the spacing between two streams of one Strahler order (Horton 1945's `Rb = 4` and `RL = 2.3`:
+  `RL/(2·Rb) = 23/80` of the stream's own length). A tributary's discharge is a QUARTER of its
+  parent's, which on a base-two log class with two fraction bits is EIGHT classes down — that
+  subtraction IS the table ruling W4 item 2 asks for, and no discharge is stored anywhere. The
+  junction angle is COMPUTED: Howard 1971's minimum-power law `cos θ = S_trunk/S_trib` with the slope
+  ratio `√Rb = 2` from the solve's own stream-power exponent gives 60°, with a named ±15° scatter.
+  THE KERNEL: two words on `vd_recipe::plan::FieldRead` — a CEILING on the one roughness factor the
+  fine half already carried (never a second factor) and a CUT under the valley's floor — and the
+  shore law then holds the bed under the river's own surface exactly as it holds a sea floor, so the
+  water sheet draws the river with no new machinery. THE GEOMETRY IS A PAIR OF UNIT DIRECTIONS in the
+  body's own frame, so a cube seam is invisible to it. THE CARD CARVES NOTHING: it holds no artifact,
+  reads a ceiling of one and a cut of zero, and its arithmetic is byte for byte the one it ran before.
+  MEASURED, and the SOLVE DID NOT MOVE: `lake_census` reads the field it read before this step —
+  land 21.78 %, sea 78.21 %, the sea at 3 566 m, lakes 0.07 % of the land over 506 patches, G-ICE
+  4.02 %, G-BUZZSAW 1 316 m, G-CRATER 1 610, G-GRID's valleys 1.284 at four bins and 2.903 at twelve.
+  `HOME_ARTIFACT_DIGEST`, `HOME_PLANET_SEA_M` (3 566), `HOME_PLANET_OCEAN_SHARE_Q4` (7 859) and
+  `HOME_IDENTITY_MEASURED` (`0xaef4c19c77ab7dbe`) are UNCHANGED; `terrain_pin` and `mesh_pin` pass on
+  the committed bytes (a body with no artifact reads a ceiling of one, a cut of zero and a wall of
+  zero); `just gpu-drift` is green over 5 979 of 5 979 boxes on an Apple M4 Pro. Only
+  `GENERATOR_VERSION` moves, 16 → 17, and `DECLARED_PIN` with it
+  (3 949 815 249 796 350 007 → 11 998 781 851 654 533 174). ★ G-GRID ASKED OF THE DRAWN LINES —
+  trunk and tributary, 4 137 lines over the three stands — reads 1.222 at four bins and **1.740 at
+  twelve**, against the solve's own receiver trunks at 1.284 and 2.903; the twelve-bin reading is the
+  one that moved, and the cause is Howard's junction angle, which is not a direction the grid has.
+  (The two samples are not one population: the solve's is planet-wide, the drawn one three stands.)
+  ★ THE COST: the gather runs once a box at 18.7–28.7 µs (five to seven nanoseconds a column of the
+  box) and the per-column read costs 102–162 ns; the shipped column pass with the artifact AND the
+  drainage stands at 3 227 µs a chunk, 839 ns a column, of which the drainage is about a fifth. A box
+  holds at most 50 lines of a ceiling of 128; nothing overflowed and nothing was refused.
+  WHAT IS NOT DONE, and it is a NUMBER and not an argument. **G-DRAIN is not green.** A drained land
+  has few closed hollows; the pre-carve field holds NONE deeper than a tenth of a metre at rung 3
+  (the octave spectrum stops at 781 m, so the fine rungs are smooth), and the carved field holds
+  some. SIX causes were found by that gate and cured at their cause, each with its own
+  before-and-after: a drawn stream that STOPPED at its head (0.378 % → 0.243 % of the columns, cured
+  by a taper from Hack's law); a floor that followed the COLUMN's ground instead of the line's own
+  descent (cured by a straight ramp, the tributary's drop from Horton's slope ratio `√Rb = 2`); a
+  damping that RAISED the ground wherever the noise dipped, so one groove was a chain of hollows and
+  bumps (cured by `ReliefParts::carved`, which may only ever lower); the shore law's own quarter,
+  which cut a vertical trench at a channel's edge wherever a line ran through high ground (the coast
+  stand 1 355 hollows → 82, cured by stating the river's surface only where the column really stands
+  in the water and by reading the CARVED ground); ★ the two-rung fade reading the line's WIDEST
+  valley and not the column's own, so a tributary's last few metres cut the fine octaves from whole
+  to nothing inside ONE cell — a slot **313.86 m deep and 8 m across** (the belt 823 hollows → 505,
+  the deepest 313.86 m → 8.12 m); and ★ a valley cut deeper than its own width allows, cured by the
+  solve's own published `TAN_REPOSE_DRY` = 0.70: a valley's floor may stand at most its half-width
+  times the angle of repose under the ground beside it. WHAT REMAINS is named: **a drawn tributary
+  does not follow the ground's own descent.** A trunk does, because the solve chose its receiver by
+  the steepest drop; a tributary takes its direction from Howard's junction angle and the hash, so it
+  crosses the ground rather than draining it. The cure is a stream that READS the field along itself
+  — a per-column artifact read along every line, an order of magnitude past this step's budget — and
+  its home is the slice that gives a box a spatial index. Also owed: the world identity's measured
+  half DOES NOT MOVE, because `GoldenFields::SparseRows` carries no receiver and no discharge, so the
+  self-check's eight chunks carve nothing and the identity no longer proves the carve agrees between
+  the two hosts (two bytes on the golden row and a re-record are owed); the floodplain is the meander
+  BELT and not the whole alluvial valley; a trunk still runs STRAIGHT across its own node
+  (`03_erosion_rivers.md` §6.3's midpoint subdivision is not built); a wet node carries no carve at
+  all, so a river stops at a lake's shore by omission rather than by design (8d step 5 owns it); and
+  HR5 coverage of the new lines is UNMEASURED (`coverage-fast` was not run in this session). WHERE:
+  `crates/terrain/src/river.rs` and `crates/terrain/src/river/tables.rs` (the laws and the gather),
+  `crates/recipe/src/height.rs` and `crates/recipe/src/plan.rs` (the ceiling, `ReliefParts::carved`,
+  `column_surface_at`), `crates/terrain/src/chunk.rs`, `crates/terrain/src/lattice.rs`,
+  `crates/terrain/src/digest.rs` and `crates/terrain/src/height.rs` (the four hosts of the read),
+  `crates/terrain/src/artifact.rs` (`ZField::drain`), `crates/bins/examples/drain_census.rs` (gate
+  G-DRAIN and the drawn lines' own G-GRID). WHEN: the ground-following stream and the golden row's
+  two bytes go with the slice that indexes the box; the rest waits on the owner's look at the two
+  pictures: `runs/1790100310__pilot__a0/shots/belt_stand.png` (the belt at 18.7 km, the owner's own
+  stand) and `runs/1790100647__pilot__a0/shots/river_stand.png` (a river at 1.86 km, nose down). The
+  river picture shows the water DRAWN by the sea's own sheet across a flat floodplain, and one
+  defect in it: the water stops in a rounded cap where the ground climbs past the channel's own
+  depth over the line's ramp, so a river ends in the middle of a plain. That is the first thing the
+  ground-following stream fixes.
+- 🟩 **THE COAST MASK GETS A FOOTPRINT — A CELL TAKES THE SIDE MOST OF ITS GROUND STANDS ON
+  (2026-09-22; the owner, from 41 000 km: the globe *"shows squares of water on the land"* and *"the
+  same ground flips between water and land"* as the rings sweep; *"We need to fix it"*; ruling W15).**
+  Answers the defect left standing by "THE COAST MASK — ONE SHORELINE AT EVERY RUNG" above.
+  ROOT CAUSE, MEASURED (`vd-bins/examples/far_side_probe`, EVERY cell of the globe at rungs 14–18):
+  ruling W10 read the water's side from the ONE fine node nearest a cell's centre. A fine node is
+  8 192 m; a rung-18 cell is 262 144 m and covers 1 024 of them, so one node in a thousand painted
+  the whole cell. **60 of the 8 664 cells at rung 18 stood on a side the ground under them does NOT
+  mostly stand on** — rung 17: 83 of 34 656; rung 16: 208 of 138 624; rung 15: 780 of 554 496; rung
+  14: 2 999 of 2 217 984 — and every one of them stands at a coast, which is where the eye is. Each
+  rung samples ANOTHER centre node, so the same ground changed side at every ring swap. THE LAW
+  (ruling W15): **a cell's side is the WET FRACTION of the fine nodes under its whole footprint, wet
+  where the fraction is at least a half.** A side is a bit and a bit does not fold — but a COUNT
+  folds, and a parent's count is the SUM of its four children's, so a coarse cell shows the side most
+  of its ground stands on and the finer rung refines that edge instead of contradicting it.
+  BUILT: `artifact::CoastCounts` (level `k` holds, per coarse node of `2^k × 2^k` fine nodes a face,
+  how many are wet; the word is `u32` because a level-`k` count reaches `4^k` and a lattice halves at
+  most eleven times — 4 194 304, past a `u16`); `Artifact::coast_counts` folds it once per body on
+  the server and `ArtifactReceiver::accept_coast` folds it on the client from the very mask the
+  server folded its own from — **no count crosses the wire, so the artifact's digest does not move**;
+  `artifact::coast_level` names the footprint's level from the node's own size (zero while a cell is
+  no wider than a node, then one level a doubling), so no rung is typed; `artifact::sample_side` is
+  ONE rule at every rung — `count · 2 ≥ 4^k` on whole counts, a TIE IS WET (stated), and the nearest
+  node's own bit where the footprint is one node, which is every rung a pilot walks or flies low
+  over; `height::height_field_m` (the morph) reads the cell OF ITS OWN RUNG, never rung 0's.
+  THE SEAM: where a footprint reaches past a face edge the cell takes its OWN face's coarse node
+  (the index is held inside the face); a footprint reaches past an edge only by the half node a
+  column's halo overhangs, which is a rendering margin and never a drawn cell. The SEA SHEET needed
+  no change — `position::water_sheet` reads the column's own water and ground and never the mask
+  (read, and stated here as a check that was made).
+  MEASURED AFTER (`far_side_probe`, the same walk): **0 disagreements at every rung from 14 to 18**,
+  and `parent ≠ sum of children` **0** at every rung — the invariant the whole rule rests on, as a
+  number that could have failed. `shore_step` on the belt's coast (400 lines of 600 km, the owner's
+  stand, the same lines under both rules — `VD_SHORE_RULE=old` builds the levels with no counts):
+  the median step falls 21 888 m → **39 m** at 15 → 16 and 10 457 m → **8 473 m** at 14 → 15; the p90
+  at the top swap falls 62 720 m → **39 m** and its max 192 960 m → **128 704 m**; the rungs under 14
+  are identical to the metre under both rules, which is the instrument's own self-check. ★ READ
+  THOSE AGAINST THE COARSER RUNG'S OWN CELL: a side is a bit, so the finest shoreline a rung can draw
+  is its own cell edge (32 768 m at rung 15), and a rung is drawn only from the distance where its
+  cell stands about ONE PIXEL high — every after median is a quarter of a pixel or less. ONE ROW
+  RISES: 13 → 14, median 0 → 1 152 m, because rung 13's cell IS one node and the old rule's rung-14
+  cell read that same node, so the two agreed by accident; the new rung-14 cell states what its four
+  nodes MOSTLY are, at a twelfth of its own cell.
+  GATES: `gpu-drift` 5 979 of 5 979 boxes byte for byte (the card holds no artifact and reads `SIDE_UNKNOWN`; its bytes
+  did not move); the seed-only chunk tables `terrain_pin` (3 of 3) and `mesh_pin` (2 of 2) UNCHANGED;
+  `GENERATOR_VERSION` 17 → 18 with `DECLARED_PIN` re-recorded (11 998 781 851 654 533 174 →
+  2 752 796 325 948 008 293); **`HOME_IDENTITY_MEASURED` and `HOME_ARTIFACT_DIGEST` UNCHANGED** — the
+  golden fields carry no mask and no counts (the type's own note states why) and the counts are
+  derived, so neither pin can move, and both were re-measured to say so.
+  COST: 2 957 613 counts on the home planet, 11.8 MB beside the pyramid's own 11.8 MB of words,
+  folded in 9.9 ms in one walk; a per-level `u8`/`u16` word would cut the bytes to about 3 MB
+  if the memory ever binds.
+  Statements that could each have failed: a coarse cell whose CENTRE node is land but whose footprint
+  is mostly sea reads SEA, and the reverse; a tie reads WET; a fine column still reads its nearest
+  node; the counts' parent equals the sum of its four children on every level of the moon's artifact
+  and over every cell of the home planet; the shore steps at most one cell of the coarser rung at
+  every level swap (`height::tests`).
+  OPEN: (1) the owner's look at the globe from 41 000 km under the footprint — this tree holds NO
+  headless flight to that altitude, so only the belt stand was pictured; (2) a cell's side is still a
+  BIT, so a coarse rung's shoreline is a staircase on its own cell grid; the FRACTION is now a number
+  every host holds, and a later rule could hold the column by it instead of by a bit, which would
+  straighten that staircase — an ask, not a defect; (3) the QUARTER of W6 is still a stated choice;
+  (4) HR5 coverage of the new lines is UNMEASURED (`coverage-fast` is not run in this session).
+- 🟩 **THE SHORE LAW DRAINS EVERY LAKE — CURED 2026-09-23 (found 2026-09-22 while measuring the
+  near flicker for ruling W15; cured under ruling W16 fault B).** MEASURED (`vd-bins/examples/water_edge_step lake`,
+  200 lines of 24 km across the home planet's most enclosed lake node — node 1 150 231, all eight
+  neighbours lake — 16 m steps, 300 000 sample columns a rung): **not ONE column stands under the
+  lake's own surface at any rung from 0 to 9**; the 65 columns of 300 000 that hold any water at all
+  hold a STREAM's surface. ROOT CAUSE, read in the code: `Artifact::of` sets the coast mask's bit
+  from `FACIES_SEA` alone, so a LAKE node answers `sea_side` = false and its column takes
+  `SIDE_LAND`; `vd_recipe::height::shore` then holds that column at least a QUARTER of its ground's
+  own height ABOVE its water — and its water is the lake's own level (`sample_water` reads the wet
+  row). Every lake on the planet is lifted out of itself, at every rung. This has stood since ruling
+  W10 gave every node a stated side: before it, a lake column read `SIDE_UNKNOWN` and its own
+  ground's sign kept it under the water, which is why W10's own entry believed a lake "keeps today's
+  rule". THE CURE, one word: the mask's bit must mean *"this node stands at or under ITS OWN
+  water"* — `FACIES_SEA | FACIES_LAKE` — with `SparseRows::sea_side` widened the same way so both
+  hosts read one rule. COST: every lake's mask bit moves, so the artifact's DIGEST moves and
+  `ARTIFACT_VERSION` bumps 6 → 7 (a stored artifact re-solves); `HOME_ARTIFACT_DIGEST` is
+  re-recorded; the identity moves only if a golden fine key stands on a lake. WHEN: 8d step 5, which
+  rulings W6 and W10 both already owe the lake's shore — and which also owes the lake's EDGE, where a
+  wet row holds the lake's level and its dry neighbour holds the sea's, so the surface jumps by the
+  lake's own height at the line between two macro nodes. NOT TAKEN in the W15 slice: a lake does not
+  FLICKER, it is absent, so the near-flicker question W15 was measured under does not authorise a
+  change to the artifact's own words. The instrument stands (`water_edge_step`), so the number can be
+  re-read the moment the cure lands.
+  ★ **CURED 2026-09-23 (ruling W16 fault B), and the cure is wider than the one word this entry
+  proposed.** A wet bit alone cannot say WHICH water a coarse cell stands under, and a lake's level
+  is anywhere between the sea and a mountain pass, so the mask carries a THREE-WAY SIDE — land, sea
+  or LAKE — two bits per fine node (`artifact::Side`, `artifact::coast_side`,
+  `ZField::water_side`), and the count pyramid folds BOTH counts. `CoastCounts::side` is one rule at
+  every rung: WET where `wet · 2 ≥ 4^k` (ruling W15's own law, untouched), then a LAKE where
+  `lake · 2 ≥ wet`. A tie is wet and a tie between the two waters is a LAKE, both STATED — a lake's
+  level is the higher of the two, so reading it as a lake leaves the ground under water at the
+  cell's own edge instead of over it. ONE reader now names a column's water and its side together
+  (`artifact::column_water`), which `chunk::ColumnRead::column` and `height::height_field_m` both
+  call, so the chunk and the morph can never hold two shores: a SEA cell takes the body's own sea
+  exactly (no fold can move it), a LAKE cell the row's own level, a LAND cell the nearest row's
+  (ruling W6: a land column beside the sea must hold the sea's level, or the fine octaves dig a dry
+  pit under the water beside it). A LAKE cell whose field names no level falls back to LAND —
+  stated, because a guessed level is a drop and a drop is a seam. `sample_water` is DELETED: two
+  readers of one thing is how the chunk and the morph disagree.
+  COST: `ARTIFACT_VERSION` 6 → 7 and the mask's bytes DOUBLE (four nodes a byte, 2.2 MB on the home
+  planet against 1.1 MB), so a version-6 store re-solves and `HOME_ARTIFACT_DIGEST` is re-recorded.
+  The wire's `BulkMsg::ArtifactCoast` arm keeps its SHAPE — the same blob of mask bytes in the same
+  parts — so `PROTO_MINOR` STAYS AT 34: the artifact's own `version` word inside `ArtifactHead`
+  guards the meaning, exactly as `artifact_store`'s open already refuses a version it does not know.
+  MEASURED AFTER (`water_edge_step lake`, the SAME 200 lines of 24 km across node 1 150 231,
+  300 000 sample columns a rung): **279 989 of 300 000 columns stand under their own water at EVERY
+  rung 0 to 9**, against ZERO before; the lake's edge steps a MEDIAN of 0.0 m at every swap from
+  0 → 1 to 8 → 9 (max 0.7 m), and 0 water flips. Over 120 km lines at the COARSE rungs the lake is
+  still there at every one: 147 252 wet columns of 375 000 at rung 9, 146 214 at rungs 10–13,
+  152 668 at 14, 149 431 at 15 and 97 005 at 16 as the lake folds into a cell wider than itself;
+  the edge's median step is 0.6 m at 9 → 10, 0.0 m at every swap to 12 → 13, 0.0 m at 13 → 14,
+  5 364 m at 14 → 15 and 1.5 m at 15 → 16 — every one under the coarser rung's OWN CELL (32 768 m
+  at 14 → 15, so 0.16 of a cell).
+  AND RULING W15'S INVARIANT STILL HOLDS with the lake bit beside the wet one (`far_side_probe`,
+  EVERY cell of the globe at rungs 14 to 18): **0 cells disagree with their own footprint at every
+  rung, and `parent ≠ sum of children` is 0 at every level**; the centre-node rule it replaced
+  disagrees on 3 227 / 826 / 222 / 85 / 62 cells at rungs 14 / 15 / 16 / 17 / 18.
+  STILL OPEN: the lake's EDGE is a staircase on the macro lattice — a wet row holds the lake's level
+  and its dry neighbour the sea's, so the surface jumps at the line between two nodes (ruling W6
+  owes a lake's shore the same law it gave the sea's); and a cell that is mostly lake but whose
+  nearest row is a SEA row reads that row's level, which is UNMEASURED.
+- 🟩 **THE NEAR FLICKER: STEP 4'S DRAWN RIVERS ARE RETIRED (2026-09-23; the owner, after flying:
+  *"when I fly over the water very close, it changes from water to surface and back"*; ruling W16
+  fault A, the survey's R4).** Answers the defect ruling W15 §3 measured and left standing.
+  ROOT CAUSE, MEASURED there (`vd-bins/examples/water_edge_step river`, 200 lines of 6 km across the
+  highest-discharge trunk near the belt stand, 150 000 sample columns a rung): step 4 wrote a
+  stream's surface ONLY where a rung drew the valley at FULL strength (`river.rs`, `rung ==
+  NOISE_ONE`), and the two-rung fade turned that off two rungs before the valley folded away while
+  the channel's trench faded with it — so **190 sample columns of about 3 000 appeared or vanished
+  at the 8 → 9 swap alone** (one wet column in sixteen), the water's edge jumped up to **5.4 km**,
+  and the wet count fell 3 322 → 2 864 from rung 0 to rung 9.
+  THE CURE (ruling W16, the survey's R4 verbatim): **the drawn drainage is DELETED** — the
+  Horton–Strahler tributary synthesis, the 60° junctions, the stamped channel and belt, the valley
+  profile, the per-column river water word, `ZField::drain`, `FieldRead::{fine_ceiling, cut, wall}`
+  and `ReliefParts::{fine_top, carved}`. KEPT: the Leopold & Maddock 1953 hydraulic geometry
+  (`river/tables.rs`, `channel_width_mm`, `channel_depth_mm`) and Leopold & Wolman 1960's meander
+  belt, because the SOLVE still cuts a channel and lays a floodplain; kept with their three law
+  tests (Earth's own rivers, Earth's two anchors, and gravity as no calibration). `drain_census` is
+  RE-POINTED at what remains: ONE height map from the ONE shipped kernel, its closed local minima,
+  their depths, and the shipped column pass's own cost — the before/after pair and the long-axis
+  histogram of the drawn lines are gone with the lines.
+  MEASURED AFTER (`water_edge_step river`, the same stand): **0 sample columns of 100 000 hold a
+  stream's surface at ANY rung 0 to 9, and 0 water flips at every swap.** The stamp is gone, and
+  the instrument is the test that could have failed.
+  AND THE SEA WAS NOT DISTURBED (`water_edge_step coast`, 200 lines of 8 km across the coast node
+  nearest the belt stand, 100 000 columns a rung): **7 518 wet columns at EVERY rung 0 to 9** — the
+  same number at every rung, where ruling W15 read 7 528 at rung 0 against 7 520 at rung 9 — and
+  the edge's step is a median of 0.0 m at every swap up to 6 → 7, 0.8 m at 7 → 8 and **1.5 m at
+  8 → 9**, p90 3.7 m, max 8.2 m, with 0 flips.
+  COST, STATED: the fine relief under 8 km is the recipe's octaves under the roughness factor
+  again, so a plain reads as noise until the survey's R2 lands a solved level under it. That is the
+  survey's own order (R1 → R2 → R4) and the reason this entry is a RETIREMENT and not a cure for
+  the dunes.
+
+- 🟩 **THE SHEET SANK THROUGH THE GROUND AT THE FAR RUNGS (2026-09-23; the owner, flying out: *"at
+  some point water is not visible at all, just land"*; ruling W16 fault C).**
+  MEASURED FIRST, and the measurement decided which half was wrong
+  (`vd-bins/examples/far_water_share`, EVERY chunk of the home planet's globe at rungs 12 to 18,
+  through the shipped `lattice::sample_box`): **the MODEL is whole — the columns standing under
+  their own water are 78.5, 78.5, 78.6, 78.5, 79.7, 79.4 and 79.7 % of the globe at rungs 12 to 18,
+  against the sea's own 78.6 % of the surface.** No rung caps the sheet, no level folds the sea's
+  water to dry (`sample_row`'s `DRY_M` reads the body's sea), and `sample_side` answers at every
+  rung — it holds a cell wider than the top folded level to that level and never says UNKNOWN. So
+  the owner's "no water" is a DRAWING fault, and the number says so.
+  ROOT CAUSE: `position::water_sheet` drew ONE FLAT QUAD per block of `SHEET_BLOCK` = 8 cells at
+  every rung. A flat quad is a CHORD of the water's sphere, so its middle stands `W² / 4R` under
+  that sphere, and the GROUND's own mesh is a quad per CELL, which dips sixty-four times less. The
+  EXTRA dip is 41.7 m at rung 12, 166.7 m at 13, 666.7 m at 14, 2 666.7 m at 15, 10 666.9 m at 16,
+  42 667.5 m at 17 and **170 669.8 m at rung 18** — while the shore law holds the drawn sea floor
+  only `|ground − sea| >> SHORE_SHIFT` under the water, about a kilometre over a four-kilometre
+  abyss. MEASURED: the wet columns whose sheet quad dived through the ground under it were
+  **175 033 at rung 12, 341 748 at 13, 171 023 at 14, 86 234 at 15, 158 587 of 165 391 at 16
+  (95.9 %), ALL 73 284 at rung 17 and ALL 18 379 at rung 18.** From rung 17 up the whole globe's
+  sheet was buried, so the planet drew as bare land — which is exactly what the owner saw.
+  THE LAW (ruling W16): **the sheet is built on the GROUND'S OWN GRID, and a block stands in for
+  that grid only while its EXTRA dip — its own chord's sagitta less one cell's — is smaller than
+  the water's own depth there.** The quad measures its own chord (`position::block_sag`: the four
+  corners' mean point against the level, on integers) against its own depth; where no ground of the
+  block stands under the water the dip can bury nothing and the one quad stands. No rung is named
+  and no number is drawn.
+  MEASURED AFTER: buried columns **0 at every rung, BY CONSTRUCTION** — the quad compares its own
+  chord with its own depth — and
+  `position::water_sheet_tests::a_flat_block_never_dives_through_the_ground_under_it` holds the
+  three statements that could fail: a metre of water under a coarse block splits it, water deeper
+  than the chord keeps one quad a block, and every quad the builder makes stands over the GROUND'S
+  OWN CHORD under it (the two are compared on one grid, never against a sphere neither of them is).
+  COST, the whole globe's sheet at each rung: 1 554 944 triangles at rung 12, 950 436 at 13,
+  389 216 at 14, 154 358 at 15, 190 718 at 16, 156 182 at 17 and 40 176 at 18 — the split costs
+  most where a coast is shallow and nothing where the water is deep.
+
+- 🟩 **THE RINGS HAVE DIFFERENT COLOURS BECAUSE A RUNG IS DRAWN UNDER ITS OWN RADIUS (2026-09-23;
+  the owner, from 3 300 km: *"even when shape do not change from far view the moving rings are
+  visible, because for some reason they have different color"*; ruling W16 fault D).**
+  MEASURED FIRST, in the ladder's own arithmetic (`vd-bins/examples/ring_sink`, every rung of the
+  home planet). A rung's chunk is drawn SUNK along each vertex's radial while the FINER rung still
+  covers it — `ladder_fade.wgsl` subtracts `sink · (1 − risen(d))` — and `risen` ramped LINEARLY
+  from the fade-in band's inner edge to a `sink_end` that stood far PAST the fade-in edge, so that
+  AT the edge the rung still stood ONE FINER CELL under its own surface (the chord a finer triangle
+  cuts under a coarser crease, which had measured as dark specks when the ramp ended at the edge).
+  The consequence is arithmetic and it is the ring: **the residual decays from one finer cell to
+  nothing over an ANNULUS `sink_end − in_hi` wide, and that annulus is 7 to 9 % of the very
+  distance the rung is drawn from at EVERY rung** — at rung 13, 4 096 m of altitude spread over
+  284 245 m (7.26 %); at rung 12, 2 048 m over 141 373 m (7.22 %); at rung 14, 8 192 m over
+  711 981 m (9.09 %); at rung 18, 131 072 m over 11 391 689 m (9.09 %). Over that whole annulus the
+  drawn ground is tilted by about two thirds of a degree and lifted through kilometres of air, so
+  its Lambert shade and its aerial perspective both differ from the ring outside it. The owner's
+  own screenshot draws rungs 12, 13 and 14.
+  THE LAW (ruling W16): **A RUNG IS DRAWN AT ITS OWN RADIUS WHEREVER NOTHING COVERS IT.** The sink
+  exists to hold a coarser mesh UNDER a finer one while both are drawn, and the finer one is drawn
+  only inside the band — so the ramp ends AT the fade-in edge and the sink past it is ZERO.
+  `ladder_view::AskBound::sink_end_m` is now `fade_bands(rung, rungs).0[1]`, one line.
+  MEASURED AFTER (`ring_sink`, the same walk): **the residual at the edge is 0 m and the annulus is
+  0 m at every rung from 1 to 18**, and
+  `ladder_view::tests::the_sink_ramp_ends_at_the_edge_and_leaves_no_residual` holds both statements
+  over every rung.
+  ★ **WHAT THIS GIVES BACK, STATED.** The specks the old end cured stand at the edge again — a
+  coarse triangle showing through a finer chord in a thin ring, at most one finer cell tall. A ring
+  of specks one cell wide is a smaller seam than a ring of wrong altitude 7 % of the screen wide,
+  and both are now measurable in pixels (`vd-bins/examples/ring_step`).
+
+- 🟩 **A NADIR PICTURE AT 3 000 km IS ONE FLAT WASH, AND A 45° NADIR FRAME CANNOT HOLD A RUNG
+  BOUNDARY AT ALL (2026-09-23, found while building the pixel gate of ruling W16 fault D).** Two
+  readings, both from `vd-bins/examples/ring_step` on the four nadir stands over the belt's coast:
+  (1) at 3 000 km the WHOLE frame reads within **1.19 %** of one luminance — the aerial perspective
+  at that range washes the ground to a flat brown, and the owner's own screenshot at 3 300 km is
+  CRISP because it was taken from a hull looking ACROSS the globe, not straight down; (2) a 45°
+  nadir frame at a 300 km stand spans eye distances of **300 to about 360 km**, while the nearest
+  residual annulus of the ladder's own sink stands at **489 to 513 km** — so the frame holds no
+  rung boundary, and the BEFORE and AFTER pictures of fault D's cure give the SAME worst sector step
+  to three decimals at every altitude (1.191 / 2.317 / 10.323 / 15.014 %), the two files differing
+  only in the HUD's own text. WHAT IS OWED: a scripted OBLIQUE stand — the owner's own framing, the
+  ground running from under the nose out to the limb — for which `ring_step` already holds a `rows`
+  mode that reads horizontal bands instead of annuli; and the aerial perspective's own strength at
+  altitude, which is a rendering defect of its own and belongs to 8s. The instruments stand; only
+  the stand and the look are owed.
+  ★ **CURED 2026-09-23 (ruling W17): THE OBLIQUE STAND IS SCRIPTED AND IT JUDGES.**
+  `vd-bins/examples/oblique_stand` picks the land node nearest a stated aim under a stated sun,
+  aims the nose `dip + 7.5°` below the local horizontal so the horizon sits **0.341 of the frame
+  down from its top**, and prints the spawn pose AND the look-at target where the view axis meets
+  the ground — so a flight aims the nose with `vdctl look_at` and never depends on a spawn's facing
+  alone. `scratchpad/flight_oblique.sh` flies one stand; six stands over the belt at 20, 60, 150,
+  400, 1 000 and 2 500 km are recorded below. `ring_step`'s `rows` mode now takes the stand's
+  ALTITUDE and PITCH and turns every row band into the EYE DISTANCE of the ground drawn there and
+  the RUNG the ladder draws at that distance, so a step is judged AT a rung boundary and nowhere
+  else; the frames hold **1 to 3 rung boundaries each**, which is what a nadir frame provably could
+  not do. It also reads the air out: a straight line is fitted to the rows OUTSIDE the crossfade
+  band on each side and both are extrapolated to the band's middle row, because a band near the
+  horizon spans a hundred kilometres of ground and the aerial perspective alone steps **6.3 %**
+  between neighbouring bands there, at no rung boundary at all. **A ring is a gap; haze is a slope,
+  and a slope leaves no gap.**
+  ★ **AND WHAT THE OBLIQUE GATE STILL CANNOT JUDGE, with its number.** The sea is a SECOND MATERIAL
+  (`srgb(0.06, 0.24, 0.42)` against the ground's `srgb(0.55, 0.50, 0.42)`), so a band that falls
+  inside a bay has sea on one side of it and sand on the other: at the 150 km stand aimed along the
+  bearing to the nearest sea the 9 → 10 band read a gap of **84.5 %**, which measures a coastline
+  and not a ladder. The instrument now fits over LAND pixels only and walks its window outward
+  until it finds land, and it reports the WATER'S SHARE on each side beside the gap so a reader can
+  see when the two sides are not comparable — but the HAZE tints far ground blue, so that
+  classifier over-counts water near the horizon (97 % at the 60 km stand's 8 → 9 band, where the
+  frame is plainly mostly land). WHAT IS OWED: a stand aimed INLAND, away from the coast, so the
+  whole frame is one material (`VD_STAND_AWAY=1` computes it and its poses are recorded), and a
+  water classifier that reads the haze out. Until then the oblique gate judges a ring where the
+  frame holds one material, which on the belt's inland stands it does.
+- 🟥 **HR5 COVERAGE OF RULING W16's NEW LINES IS UNMEASURED** (`coverage-fast` and `llvm-cov` were
+  not run in this session, by the slice's own instruction). The new lines are `artifact::Side`,
+  `coast_side`, `coast_word`, `side_of_facies`, `column_water`, the widened `CoastCounts`,
+  `position::block_sag` and the `sink_end_m` line, plus their tests.
+- 🟩 **THE HANDOVER'S STEP KNEW THE OCTAVES AND NOT THE FIELD (2026-09-23; the owner, after flying
+  with ruling W16: *"Now it's way better, but for some of the far-view rungs the change is still
+  visible — not for close or very far view"*; ruling W17).**
+  MEASURED FIRST, through the SHIPPED reader (`vd_terrain::height::height_field_m`, the very
+  function the geomorph calls for a vertex with no parent triangle on its radial), 9 600 directions
+  a rung pair on the solved home planet (`vd-bins/examples/rung_swap`, new). The near rungs read
+  the artifact's ROWS, the far rungs read a PYRAMID LEVEL whose node is the MEAN OF FOUR, and on
+  the home planet the ONE swap a hull pilot can see is rungs 9 → 10, where the rows hand over to
+  level 1. **THE SURFACE MOVES THERE BY UP TO 1 442.5 m — 1.41 CELLS of the rung that takes over,
+  2.82 PIXELS at the 445 km the swap happened at — against the ladder's own tolerance of ONE cell
+  (the judge's line: p99 ≤ 1 px, max ≤ 2 px).** Every other pair of the home planet stands inside
+  it: 0.62 cells at 8 → 9, EXACTLY 0.0 m at 10 → 11, 11 → 12 and 12 → 13 (one level, no fine
+  octave), and 0.19 px or less at every level swap above, which happen at 14 000 km and more.
+  THE CAUSE, in one line: `ladder_view::handover_step_m` read `BodyDefinition::step_bound_m`, the
+  OCTAVE TABLE alone. It is exact where both rungs read ONE field — 319.4 m stated against 318.5 m
+  measured at 8 → 9 — and silent about the level's own fold: **897.7 m stated against 1 442.5 m
+  measured at 9 → 10**. So ruling T7's rule 2 (the band's widening, `897.7 / 1 024 = 0.88` of a
+  cell) and rule 3 (the switch's floor, 390 km inside the tier rule's own 445 km) BOTH answered ONE
+  and slept through the only handover that needed them.
+  ★ FOUR CANDIDATES WERE REFUTED BY MEASUREMENT BEFORE THE FIFTH WAS CURED. (a) THE SHADE: the mean
+  Lambert `max(0, n · l)` over the extracted mesh's own smooth normals, the same ground at the two
+  rungs under a sun 22° up, differs by **0.13 % at 9 → 10** and by at most **1.95 %** at any pair —
+  under the eye's 2 % working threshold, so **Toksvig 2005 is NOT owed on this body**. (b) THE
+  WATER: **0 columns of 9 600 flip side at 9 → 10**, and the sea's own drawn edge across the belt's
+  coast (`water_edge_step sea`, 60 lines of 400 km, 93 720 samples a rung) holds **43 250 wet
+  samples at EVERY rung 8 to 13** with a median edge step of 52.6 m at 9 → 10 (p90 197.6 m, max
+  233.4 m, 0.23 of a rung-10 cell) and **0.0 m at every swap above it**. (c) THE CROSSFADE: there
+  is no alpha and no double draw — a finer chunk's morph target IS the parent chunk's own mesh
+  along each vertex's radial and its morph normal the parent's own shade there, both on ONE weight,
+  so the two rungs coincide at the fade-out edge by construction. (d) THE SINK: **0 of 9 600
+  directions** stand farther apart than the coarser rung's own sink at any pair (2 433.7 m at rung
+  10), so no coarse mesh can show through a finer one; and since W16 the ramp ends AT the edge
+  (`ring_sink`: 0 m residual at every rung).
+  THE LAW (ruling W17): **A HANDOVER'S STEP IS THE STEP THE HANDOVER MAKES — the octaves the
+  coarser rung drops PLUS the field's own fold where the field changes under it.** A fold takes
+  FOUR nodes to ONE, so the coarse level states a height for the CENTRE of a square one node wide
+  while each child stands at `node / (2·√2)` from that centre, and the two differ by the FIELD'S
+  OWN SLOPE over that distance. The body already states that slope (`BodyDefinition::slope_ref`,
+  the first fine octave's own RMS slope, 0.124693 on the home planet) and the lattice states the
+  node, so **every host computes the step from what it already holds: no new word crosses a realm
+  boundary (SL6) and no number is drawn (T9)**. It is a BOUND, measured: the law states 722.3 m at
+  the rows → level-1 swap against a measured field contribution of 544.8 m. (The level's own fold
+  spread over all 8 871 936 fine nodes reads median 0.0 m, p90 63.0 m, p99 292.0 m, max 3 927.0 m —
+  the max is 5.4 times the law and would have pushed the swap out fourfold for one ridge, which is
+  why the law is the fold's geometry and not the globe's worst node.)
+  MEASURED AFTER (`rung_swap`, the same 9 600 directions): the 9 → 10 swap moves from **444 988 m
+  to 703 993 m**, its stated step from **897.7 m to 1 620.0 m**, its worst step on the screen from
+  **2.82 px to 1.78 px** (under the ladder's own line of 2) and its p99 from **0.86 px to 0.55 px**.
+  **ONE rung moves and no other: `vd_client::ladder_view` asserts the moved list is exactly
+  `[9]`.** The tile ring follows the same floor — `switch_floor_m` now lives in
+  `vd_terrain::artifact` beside `switch_m`, and `tile_reach_m` calls it — so a rung whose ring grew
+  never waits on a tile nobody sent.
+  ★ **WHAT IT COSTS, MEASURED ON THE OWNER'S OWN STAND** (the 20 km oblique stand, the same pose
+  before and after): the tiles the pilot holds **51 → 91**, the chunks drawn **7 304 → 8 926**
+  (rung 9's own ring **946 → 2 738**, rung 10's **827 → 657**), the vertices **24.7 M → 32.1 M**,
+  the frame **23.16 ms → 25.12 ms** and its peak **26.18 → 25.98 ms**. The asked tile edge grows
+  from 573 km to 906 km, 2.5 times the area wherever the eye stands high enough for the ask to bind
+  rather than the horizon.
+  ★ **THE PICTURES, THE SAME SIX OBLIQUE STANDS BEFORE AND AFTER** (the owner's framing over the
+  belt, the horizon 0.341 of the frame down, the star 25.7° up):
+  `runs/1790164854__pilot__a0/shots/oblique_20km_before.png` →
+  `runs/1790174782__pilot__a0/shots/oblique_20km_after.png`;
+  `runs/1790164930__…/oblique_60km_before.png` → `runs/1790174858__…/oblique_60km_after.png`;
+  `runs/1790165006__…/oblique_150km_before.png` → `runs/1790175008__…/oblique_150km_after.png`;
+  `runs/1790166125__…/oblique_400km_before.png` → `runs/1790175075__…/oblique_400km_after.png`;
+  `runs/1790172059__…/oblique_1000km_before.png` → `runs/1790175150__…/oblique_1000km_after.png`;
+  `runs/1790172138__…/oblique_2500km_before.png` → `runs/1790175226__…/oblique_2500km_after.png`.
+  `scratchpad/frame_diff.py` reads the pairs: **0.02 / 0.09 / 0.40 / 3.53 / 0.00 / 0.00 %** of
+  pixels differ, and only the 400 km stand moved a row by over one per cent — 18 rows at eye
+  distances **556 677 … 572 645 m**, where the near field used to be a smooth pyramid blob and is
+  now the ROWS' own ground with the recipe's fine octaves. The cure did not repaint the world; it
+  moved ONE ring.
+  ★ **THE MOVING EYE** (`runs/1790175302__pilot__a0/shots/seq0_after.png` and
+  `runs/1790175382__pilot__a1/shots/seq1_after.png`, two stands 40 km apart along one bearing at
+  150 km, framed alike): a rung boundary keeps its SCREEN ROW while the ground slides, and the
+  landscape does the opposite. **Every row changes by under 1.5 % except rows 436 to 484 (eye
+  distances 353 to 389 km), which change by 36.9 to 37.3 % — the bay's near shoreline sliding with
+  the eye.** Not one step stands still at a row; at the 9 → 10 boundary's own row the two frames
+  read 90.79 against 90.79, **0.00 %**.
+  ★ **THE OTHER GATES**: `just gpu-drift` **5 979 of 5 979 boxes byte for byte, 4 of 4 tests**
+  (Apple M4 Pro, Metal); `terrain_pin` 2 of 2, `mesh_pin` 3 of 3 and `home_artifact_pin` 1 of 1 in
+  132.6 s on the ALREADY committed words — **no pin moved**, which is the proof that this slice
+  touched the ladder and the tile reach and no byte of the solve. `cargo test --lib`: vd-terrain
+  207, vd-client 329, vd-connection-plane 264, vd-bins 82. `cargo fmt --all --check` and
+  `cargo clippy --all-targets -- -D warnings` (vd-bins and vd-devproto with
+  `--features dev-control,render`) clean. HR5 coverage of the new lines: **UNMEASURED**, by the
+  slice's own instruction.
 - 🟥 **THE EDGE NORMAL IS ONE-SIDED**: `smooth_normals` averages a chunk's own triangles, so a boundary
   vertex's shade comes from one side. Not visible in the 20 km capture after the halo cure at a high sun;
   UNMEASURED at a low sun. WHEN: C6's dusk stand; the whole mesh (`extract_all_edges`) can give both sides.

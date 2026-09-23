@@ -12150,6 +12150,9 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
     assert!((views[0].dir[0] + 1.0).abs() < 1.0e-9, "{views:?}");
     assert_eq!(parts_to_client(&sent).len(), 2, "the head and the part");
     // The tile the view reaches, as the terrain crate names it for the gateway and the shard.
+    let rung = vd_terrain::artifact::tile_rung(&lattice, 1, body.ladder().rungs - 1);
+    let step_m =
+        body.step_bound_m(rung) + vd_terrain::artifact::field_step_m(&body, &lattice, 1, rung);
     let reach = vd_terrain::artifact::tile_reach_m(
         &lattice,
         1,
@@ -12158,6 +12161,7 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
         body.relief_bound_m(0),
         30.0,
         vd_core::geometry::drawable_theta_min_rad(),
+        step_m,
     );
     let tiles = vd_terrain::artifact::tiles_within(&lattice, [-1.0, 0.0, 0.0], reach);
     let (face, tx, ty) = tiles[0];
@@ -13000,11 +13004,11 @@ fn a_body_with_no_macro_lattice_reaches_no_tiles() {
 /// ★ A SHARD'S BULK FOR A SESSION THAT IS STILL ACTIVATING IS HELD, NOT DROPPED (2026-09-22, the
 /// on-foot ground). Four statements that could each fail: a bulk for an `AwaitingAttach` session
 /// reaches no outbox and is held, counted; the activation delivers every held part in order;
-/// the hold is bounded at `HELD_BULK_CAP`, the oldest dropped and counted; an Active session's
+/// the hold is bounded in bytes at `HELD_BULK_BYTES_CAP`, the newest refused and counted; an Active session's
 /// bulk is relayed at once and holds nothing.
 #[test]
 fn a_shards_bulk_for_an_activating_session_is_held_and_delivered_on_activation() {
-    use super::shard::{HELD_BULK_CAP, flush_held_bulk, relay_bulk};
+    use super::shard::{HELD_BULK_BYTES_CAP, flush_held_bulk, relay_bulk};
     let mut sessions = GatewaySessions::default();
     let mut session = active_session();
     session.phase = SessionPhase::AwaitingAttach;
@@ -13063,25 +13067,27 @@ fn a_shards_bulk_for_an_activating_session_is_held_and_delivered_on_activation()
     );
     assert_eq!(outbox.0.len(), 3);
     assert!(sessions.by_session[&SessionId(1)].held_bulk.is_empty());
-    // The bound: the oldest is dropped and counted.
+    // The bound, in bytes: the part that would carry the hold past the cap is refused and counted,
+    // and what arrived first stays — the head and the coarse levels, never the newest tile.
     let session = sessions
         .by_session
         .get_mut(&SessionId(1))
         .expect("the session");
     session.phase = SessionPhase::AwaitingAttach;
-    for k in 0..(HELD_BULK_CAP as u8 + 1) {
+    let half = HELD_BULK_BYTES_CAP / 2;
+    for k in 1..=3u8 {
         relay_bulk(
             NodeId(7),
             Fence(1),
             &[SessionId(1)],
-            vec![k],
+            vec![k; half + 1],
             &mut sessions,
             &mut stats,
             &mut outbox,
         );
     }
     let held = &sessions.by_session[&SessionId(1)].held_bulk;
-    assert_eq!(held.len(), HELD_BULK_CAP);
-    assert_eq!(held[0], vec![1], "the oldest was dropped");
-    assert_eq!(stats.bulk_for_unrouted, 1);
+    assert_eq!(held.len(), 1, "the second and third parts were refused");
+    assert_eq!(held[0][0], 1, "the first part stays");
+    assert_eq!(stats.bulk_for_unrouted, 2);
 }

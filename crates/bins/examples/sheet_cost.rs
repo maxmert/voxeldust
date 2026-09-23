@@ -95,10 +95,15 @@ fn main() {
         let hide_m = body.step_bound_m(k.rung)
             + sink_m(&body, k.rung)
             + f64::from(vd_seed::ladder::cell_m(k.rung));
-        let land = extract_all_edges(&samples).triangles.len() as u64;
-        let none = water_sheet(&samples, vd_recipe::Gi::ZERO).2.len() as u64;
-        let own = water_sheet(&samples, q28_of_metres(hide_m)).2.len() as u64;
-        let all = water_sheet(&samples, vd_recipe::Gi::new(i64::MAX >> 2))
+        let mesh = extract_all_edges(&samples);
+        let land = mesh.triangles.len() as u64;
+        let none = water_sheet(&body, &samples, &mesh, vd_recipe::Gi::ZERO)
+            .2
+            .len() as u64;
+        let own = water_sheet(&body, &samples, &mesh, q28_of_metres(hide_m))
+            .2
+            .len() as u64;
+        let all = water_sheet(&body, &samples, &mesh, vd_recipe::Gi::new(i64::MAX >> 2))
             .2
             .len() as u64;
         let e = per_rung.entry(k.rung).or_insert([0; 5]);
