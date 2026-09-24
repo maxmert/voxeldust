@@ -10026,3 +10026,70 @@ draws itself"):**
   report does not resolve to a line. WHEN: the next terrain slice's coverage pass, with `MacroSolve::from_land`
   taking the lattice. The older misses outside these files (`rlm.rs`, `directory.rs`, `regions.rs`, `window.rs`,
   `ladder_view.rs`, …) are covered by the integration suites this lib+tests run excludes and are not C5's.
+
+### D-TERRAIN-8 🟥 THE REFERENCE'S DRESSING — what the owner's target picture shows and the believability arc does not give (ruling B6, 2026-09-24)
+The owner's target is the Crimson Desert vista (`01_reference_target.md` §2, `11_reference_trace.md`; the picture
+stays outside the public repo). Ruling B1 puts the SHAPE first; these items make the picture and are owed AFTER the
+owner's G-LOOK, each by the slice named. Owner: *"make sure that we don't forget about those"*. The checklist that
+tracks them against the reference is §9 of `docs/investigation/2026-09-24/terrain_believability_status.md`.
+- **THE SNOW ON THE TOPS.** WHAT: the summer ice line is solved (ruling W12; the ice bit on the row), but no drawn
+  reader reads it; the white seen today comes from the placeholder biome (`recipe/src/height.rs:501-529`). WHERE: the
+  chunk's biome and the client's ground material. WHEN: 8e (the biome reads the ice bit and the snowline).
+- **THE GROUND'S COLOUR AND THE BEACH.** WHAT: every ground pixel is ONE colour, `srgb(0.55, 0.50, 0.42)`
+  (`client-render/src/terrain.rs:1974`, `:2073`); the ground mesh carries no colour attribute; the chunk computes a
+  biome and a beach (`terrain/src/chunk.rs:404-411`) that no pixel reads. ⚠ The beach is an 8 km node square today
+  and will outline every shore square in sand unless it reads a sub-node rule. WHEN: 8e.
+- **THE FOREST AS A MASS.** WHAT: nothing. WHERE: 8e's biome field, ruling V4's art assets (trees and grass are
+  assets blended dynamically, never drawn primitives), the canopy fold (V10 §12, still open). WHEN: 8e + the asset
+  slice.
+- **THE CLIFFS, THE MESAS, THE BEDDED FACES.** WHAT: a height field holds no slope over ~70° and no overhang; the
+  beds' hardness and the cap-rock bench exist (8d W4-1) but draw no face. WHEN: 8f (the third dimension).
+- **THE LONG FAR SHADOWS.** WHAT: the sun's shadow map is OFF when the eye stands more than 3.5 km over the highest
+  ground the body can have, and its cascades reach 3.5 km (`client-render/src/terrain.rs:109`, `:3339-3353`); at
+  100–150 km no ground casts a shadow, so only soft light shows the relief. WHERE: the client renderer (the `perf`
+  tree owns the drawing side). WHEN: when the `perf` tree has room. Owner 2026-09-24: first *"Ideally with long
+  shadows"*, then *"We can go without long shadows for now"* (ruling B6.5 amended): WANTED, not a prerequisite of the
+  believability pictures; each picture is captioned "no far shadow" until it lands.
+- **THE WATER'S LOOK.** WHAT: one colour, `srgb(0.06, 0.24, 0.42)` (`client-render/src/terrain.rs:2034`), no depth,
+  no foam, no shallow floor. WHEN: 8o (ruling W3: the waves and the current required).
+- **THE CLOUDS.** WHAT: none. WHEN: 18's state model, the weather list (ruling T3).
+- Built already, for the record: the blue haze with distance (8s) and the detail to the horizon (the ladder).
+
+### D-TERRAIN-9 🟥 THE BELIEVABILITY DEFECTS FOUND 2026-09-24 — the dunes, the teeth, the water positions (ruling B6)
+Found by the read-only workflow `wf_1780e367-7e9` and each checked by a skeptic against the code. The full list, with
+lines, the plan and its state is `docs/investigation/2026-09-24/terrain_believability_status.md` (a LIVING file,
+updated in the same change as the work, deleted when done). The interims named here so no picture is judged on them:
+- **THE FINE RELIEF IS NOISE UNDER 32 km, not 8 km** (`FINE_ABOVE_M` = 4 × 8 192 m, `terrain/src/body.rs:94-96`), a
+  one-peaked spectrum anchored at the angle of repose, ridged and isotropic, with no drainage. WHEN: B6 step 3 (R2 +
+  R4's second half), then R3.
+- **THE SHORE IS THE NODE SQUARE.** The water's side is the nearest 8 192 m node's word at rungs 0–13
+  (`terrain/src/artifact.rs:1148`) and the shore law holds the ground on it (`recipe/src/height.rs:395-413`); the
+  lake's dry neighbour reads the sea's level (`artifact.rs:1084-1087`). WHEN: B6 step 4, on the R2 ground.
+- **THE LAKE BUDGET FEEDS A HOLLOW FROM ITS OWN BRIM, NOT ITS WATERSHED** (`terrain/src/lakes.rs:209-259`,
+  `:384-390`), a full hollow's overflow is lost (`:264-281`), and the small lakes vanish at the rung 9 → 10 swap
+  (`artifact.rs:1395-1401`, `:1092-1097`) — a breach of W16. WHEN: B6 step 2.
+- 🟩 **NO GATE SAW THE DUNES OR THE TEETH** — CURED 2026-09-24 (B6 step 1): `shipped_drainage` (the spill depth, G-HACK,
+  G-BREACH on the shipped ground), `shore_teeth` (the drawn shore against the ground's waterline), `lake_census`'s new
+  lines (G-HYPSO, G-RIVER, the rung-swap lakes, the inland sea, the watershed what-if) and `reference_stand`; their
+  numbers at generator 19 are in the status file and `docs/investigation/2026-09-24/step1_census_gen19.txt`.
+- **INLAND GROUND UNDER THE SEA'S LEVEL IS SEA** with no path test (`terrain/src/solve.rs:1334-1336`;
+  `terrain/src/lakes.rs:186-197`). MEASURED 2026-09-24: 148 pockets, 3.2 million km², the largest 1.35 million km² and
+  11.8 km deep. WHEN: step 2, on the owner's word (the status file §11 item 3).
+- 🟩 **THE CLIENT READ THE EYE'S GROUND FROM THE RECIPE'S OWN RELIEF, NOT FROM THE ARTIFACT** — found 2026-09-24 on the
+  reference stand (the eye 400 m over the solved ground, the stamp 7 054 m, the finest rung 3) and CURED the same day
+  (committed 2026-09-24): `vd_client::chunks::drawn_surface_m` / `drawn_field_m` over `vd_terrain::height::drawn_height_field_m`
+  (the ground, or the water sheet over a wet column) feed the ladder's descent and probe, the eye's ground truth and the
+  ruler. The status file §3a.
+- 🟥 **THE RULER'S MARCH READS THE WHOLE FIELD PER SAMPLE** (2026-09-24 review): ~3-6 µs a sample by arithmetic, up to
+  ~12-25 ms on a capture frame whose camera moves; UNMEASURED. WHERE: `vd_client::chunks::ruler_on_surface`. WHEN: before
+  the next capture flight that moves the camera — resolve the lattice, the field and the slope charter once per march (a
+  `height_field_m` sibling that takes them) and memo the node words; measure the stamp's work row before and after.
+- 🟥 **THE DRAWN WATER'S DEPTH IS THE EXTRACTOR'S STEP**: `drawn_height_field_m` stands the eye's ground on the sheet
+  wherever the floor lies deeper than one extractor step, because the chunks cut that floor. WHEN: 8o (the water's
+  clarity) moves the visible depth; this seam must follow it.
+- 🟥 **THE PICTURE GATE (`bins/tests/terrain_pictures.rs`) IS STALE SINCE 8c**: it seats its stands over the recipe's
+  own relief and judges against references frozen before the solve (last changed at Step 22). WHERE: that test. WHEN:
+  before the next frozen picture — seat the stands on the solved ground, recompute M8-4 with the artifact, re-freeze
+  under the owner's look.
+
+---

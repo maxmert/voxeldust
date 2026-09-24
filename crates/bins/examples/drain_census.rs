@@ -4,8 +4,13 @@
 //! stream, and a place with nowhere to run is rare. A land shaped by noise alone has a closed
 //! hollow wherever two ripples cross, which is what makes it read as dunes from the air. So the
 //! gate counts, over the FINE rungs and on three stands, how many columns are LOCAL MINIMA — a
-//! column lower than all eight of its neighbours — and how many of those minima stand on a
-//! drainage line.
+//! column lower than all eight of its neighbours by at least a tenth of a metre.
+//!
+//! ★ **ITS BLIND SPOT (2026-09-24, the status file §4).** A minimum here is a step over ONE cell,
+//! so a closed hollow whose floor is wider than a few cells reads as drained: at the floor of a
+//! 3.125 km ripple 199 m tall, two columns 8 m apart differ by 0.026 m, under the floor. The
+//! number that sees a dune field is the SPILL DEPTH of each closed basin, which
+//! `shipped_drainage` measures with a priority flood.
 //!
 //! **ONE KERNEL, THE SHIPPED ONE.** The instrument never holds two generators: it calls the ONE
 //! column kernel (`vd_recipe::plan::column_surface_at`) with the very words a chunk's column pass
@@ -26,25 +31,18 @@
 use std::time::Instant;
 
 use vd_bins::artifact_worker::{SolveJob, run_solve};
-use vd_core::glam::DVec3;
+// ★ THE THREE STANDS AND THE CELL UNDER A STAND live in ONE place (plan step 1, ruling B6), so the
+// shipped-ground instrument measures the very belt, coast and plain this census measures.
+use vd_bins::drainage_gates::{cell_of, pick_stands};
 use vd_recipe::Gi;
 use vd_recipe::plan::{FieldRead, column_surface_at, site_direction};
-use vd_seed::bend::Face;
-use vd_terrain::artifact::Artifact;
 use vd_terrain::chunk::{CHUNK_EDGE, column_field};
 use vd_terrain::home::{home_planet, home_solve_words};
 use vd_terrain::macro_lattice::MacroLattice;
-use vd_terrain::solve::{FACIES_LAKE, FACIES_SEA};
 
 /// How many columns a sampled block holds each way — one chunk's own edge, so the gather the
 /// instrument runs is the gather a chunk runs.
 const BLOCK: i32 = CHUNK_EDGE as i32;
-
-/// One stand's reading.
-struct Stand {
-    name: &'static str,
-    dir: DVec3,
-}
 
 fn main() {
     let a: Vec<f64> = std::env::args()
@@ -190,19 +188,6 @@ fn main() {
     );
 }
 
-/// The `(face, i, j)` cell of a direction at a rung.
-fn cell_of(body: &vd_terrain::BodyDefinition, dir: DVec3, rung: u8) -> (Face, i32, i32) {
-    let d = [dir.x, dir.y, dir.z];
-    let face = vd_seed::bend::face_of(d);
-    let (t, s) = vd_seed::bend::face_coords(face, d);
-    let n = body.ladder().cells_per_edge(rung);
-    (
-        face,
-        vd_seed::ladder::index_of(vd_seed::bend::unbend(t), n),
-        vd_seed::ladder::index_of(vd_seed::bend::unbend(s), n),
-    )
-}
-
 /// How many columns of a square map are lower than all eight of their neighbours.
 fn minima(map: &[i64], n: i32) -> usize {
     let mut count = 0usize;
@@ -304,77 +289,4 @@ fn is_min(map: &[i64], n: i32, i: i32, j: i32) -> bool {
         }
     }
     true
-}
-
-/// ★ THE THREE STANDS (ruling B2): the belt the owner flew, a COAST and a PLAIN, both picked off
-/// the census's own map rather than typed in — the coast is a dry node beside a sea node with the
-/// greatest discharge near it, and the plain is the land node of the flattest neighbourhood far
-/// from any water.
-fn pick_stands(artifact: &Artifact, lattice: &MacroLattice) -> Vec<Stand> {
-    let n = artifact.node_count();
-    let facies: Vec<u8> = artifact
-        .rows
-        .iter()
-        .map(|r| r.receiver_facies >> vd_terrain::artifact::FACIES_SHIFT)
-        .collect();
-    let mut coast = (0u32, 0u8);
-    let mut plain = (0u32, i32::MAX);
-    for node in 0..n as u32 {
-        let f = facies[node as usize];
-        if (f & FACIES_SEA != 0) | (f & FACIES_LAKE != 0) {
-            continue;
-        }
-        let here = artifact.rows[node as usize].z_m;
-        let neigh = lattice.neighbours(node);
-        let wet = neigh
-            .iter()
-            .any(|&m| m != u32::MAX && facies[m as usize] & FACIES_SEA != 0);
-        if wet {
-            let q = artifact.rows[node as usize].discharge_log;
-            if q > coast.1 {
-                coast = (node, q);
-            }
-        } else {
-            let mut spread = 0i32;
-            let mut dry = true;
-            for &m in &neigh {
-                if m == u32::MAX {
-                    dry = false;
-                    break;
-                }
-                let f = facies[m as usize];
-                if (f & FACIES_SEA != 0) | (f & FACIES_LAKE != 0) {
-                    dry = false;
-                    break;
-                }
-                spread += (i32::from(artifact.rows[m as usize].z_m) - i32::from(here)).abs();
-            }
-            // A plain is flat AND standing well over the sea, so it is ground and not a shelf.
-            if dry && here > 200 && spread < plain.1 {
-                plain = (node, spread);
-            }
-        }
-    }
-    let of = |node: u32| -> DVec3 {
-        let d = lattice.direction(node);
-        DVec3::new(d[0].raw() as f64, d[1].raw() as f64, d[2].raw() as f64).normalize()
-    };
-    println!(
-        "the stands: the belt, the coast at node {} (discharge class {}), the plain at node {} (its ring spreads {} steps)",
-        coast.0, coast.1, plain.0, plain.1
-    );
-    vec![
-        Stand {
-            name: "the belt",
-            dir: DVec3::new(0.617_270, -0.437_286, -0.654_033).normalize(),
-        },
-        Stand {
-            name: "the coast",
-            dir: of(coast.0),
-        },
-        Stand {
-            name: "a plain",
-            dir: of(plain.0),
-        },
-    ]
 }

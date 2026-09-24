@@ -79,3 +79,65 @@ search choosing another home by a tilt bound — a reset of every stand, berth a
 **Example.** On this planet a pilot flying north from the belt meets long summers of melt and long dark
 winters of frost, and never a year-round cap. On an Earth-tilted world the same flight meets the ice where
 the summer stops melting it. Both are the one law reading two worlds.
+
+## B6. THE PLAN OF 2026-09-24, THE REFERENCE AS THE VISUAL TARGET, AND THE LIVING STATUS FILE (owner: *"In general I agree with your proposals, but please make sure that visually we are moving towards this target picture"*)
+
+Written after the owner flew the home planet again and named three faults: *"the land look like dunes everywhere"*,
+*"shores are squared like teeth"*, *"water positions for lake and rivers is not believable"*. A read-only workflow
+(`wf_1780e367-7e9`, nine agents, one skeptic per fault) traced all three to one root: the solve knows the ground only
+on nodes 8 192 m apart, and under the node the ground is noise and the water is a whole node square. The findings,
+with their lines of code, are in `docs/investigation/2026-09-24/terrain_believability_status.md`.
+
+1. **THE PLAN, AGREED IN GENERAL.** Inside 8d, in this order: (1) measure first, with no change to the world, and
+   add the census lines that can see the dunes and the teeth; (2) repair the lake budget — each hollow fed from its
+   whole watershed, a full hollow's overflow passed on, the discharge re-accumulated after the final route, a small
+   lake kept at pyramid level 1; (3) the survey's R2 — one eroded level at 1 024 m shipped in the artifact, with the
+   height retargeting and the multi-scale breach, calibrated on Earth through Hack's law — and R4's second half, the
+   noise only below the solved level; (4) one shoreline from one field on the R2 ground, the lake's edge under W6's
+   law; (5) G-GRID again, and the D8 decision only if it is still red; (6) the lakes' outlets, the deltas, and R3;
+   (7) G-LOOK. The numbers each step states (the level, the bytes, the version, the bake) are the recommendation the
+   owner agreed to in general; a step that must depart from one asks first.
+2. **THE REFERENCE PICTURE IS THE VISUAL TARGET.** Every step's report ends with: the three stands' pictures (the
+   belt, the coast, a plain); one picture on a FOURTH stand framed like the reference (an eye ~400 m over its local
+   ground near the belt's range, looking across valleys toward the range 30–60 km away, ~55° of view, a low sun
+   across the view); the skyline numbers on that stand by the rule of `11_reference_trace.md`; and the reference
+   checklist (§9 of the status file) brought up to date. A step that turns a gate green but moves that picture AWAY
+   from the reference says so. The picture itself stays outside the repo (the repo is public and it is a photograph
+   of a commercial game); `01_reference_target.md` §2 and `11_reference_trace.md` hold it as numbers.
+3. **THE DRESSING IS REGISTERED, NOT FORGOTTEN** (owner: *"make sure that we don't forget about those"*). What the
+   reference shows and this arc does not give — the snow on the tops, the ground's colour and the beach, the forest
+   as a mass, the cliffs and mesas and bedded faces, the long far shadows, the water's look, the clouds — is entry
+   D-TERRAIN-8 in `docs/design/DEFERRED.md`, each with the slice that owes it. They start after B1's word, as B1
+   says; the far shadow's timing is still the owner's question (a depth cue that shows the shape, on the `perf`
+   tree's side).
+4. **THE LIVING STATUS FILE** (owner: *"Make sure that we update it with the changes we did, so next read will not
+   mislead. We might also remove it after all is fixed and done"*). `docs/investigation/2026-09-24/
+   terrain_believability_status.md` is updated IN THE SAME CHANGE as any work on its items: the state flipped, each
+   moved number corrected, one line in its change log. When the code and the file disagree, the file is the defect.
+   It is deleted when every step of item 1 is done and the owner gave G-LOOK; the rulings and DEFERRED keep the
+   history.
+
+**Example.** After step 3 a pilot on the reference stand looks across the belt and sees ranked ridges with valleys
+that join, and the skyline count at 0.25° rises from zero toward the reference's 2.5–5.5 per 60°. The report shows
+that picture beside the reference, the new numbers, and the checklist's rows that moved; the status file's plan row
+3 turns ✅ with its commit.
+
+### B6.5 THE OWNER'S TWO ANSWERS (2026-09-24)
+
+1. **The bench is busy** (owner: *"No, it's testing at the moment"*). The `perf` tree measures now, so this tree
+   runs no build, no test and no instrument until it is idle (one measuring bench). Step 1's instruments are
+   WRITTEN meanwhile and built and run when the bench is free.
+2. **The pictures are judged with long shadows** (owner: *"Ideally with long shadows"*). The far shadow moves out
+   of the dressing's "after G-LOOK" into a PREREQUISITE of the judged pictures: the ground at 100–150 km casts its
+   shadow kilometres long, because a shadow shows the shape and paints nothing over it. It is the `perf` tree's
+   work (the drawing side). Until it lands, a picture is still taken at each step and is marked "no far shadow";
+   the reference stand's picture is taken again when the shadow lands.
+
+**Example.** At step 1 the reference stand's "before" picture shows the belt in soft light only, and its caption
+says "no far shadow". When the far shadow lands, the same stand under the same low sun shows each ridge's shadow
+across the next valley, and that picture becomes the "before" the owner judges.
+
+**B6.5 AMENDED, the same day** (owner: *"We can go without long shadows for now"*). The far shadow is NOT a
+prerequisite of the judged pictures. The owner judges the shape as it is drawn today, and each picture's caption still
+says "no far shadow". The far shadow stays registered in D-TERRAIN-8 (the dressing), wanted, for the `perf` tree when it
+has room; it is not dropped.

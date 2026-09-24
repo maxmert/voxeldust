@@ -1,0 +1,336 @@
+# Step 1's census lines, generator 19, artifact 7 — branch game at af21326 + the uncommitted step-1 instruments; run 2026-09-24 15:25-15:43, one job at a time, release builds.
+# Produced by: lake_census, shipped_drainage (rung 7, ~206 km squares), shore_teeth (rungs 0/5/7/9/10/13), reference_stand (default args). Raw logs were in the session scratchpad.
+
+## lake_census
+WORLD generator 19 artifact 7 (vd_terrain::GENERATOR_VERSION, vd_terrain::artifact::ARTIFACT_VERSION)
+CENSUS G-HYPSO-HUMPS 2humps@-9217m,+33m 2humps,the-lower-under-the-sea[ruling-B3-G-HYPSO;rule:land::humps] GREEN
+CENSUS G-HYPSO-AGE 0.484integral 0.35-0.60[Strahler-1952;solve.rs-HI_MATURE] GREEN
+CENSUS G-HYPSO-LAND-OVER-1000M 55.12%of-land no-band-yet[owed:a-cited-Earth-table-in-ruling-B3] NO-BAND
+CENSUS INLAND-SEA 3208808km2/59470nodes/148pockets no-band-yet[owed:the-owner's-word,status-§11-Q3] NO-BAND
+CENSUS G-RIVER-END 0heads-without-an-end 0heads[ruling-B3-G-RIVER] GREEN
+CENSUS G-RIVER-DESCENT 0rising-steps 0steps[ruling-B3-G-RIVER] GREEN
+CENSUS W10-DISCHARGE-TREE 1304002nodes 0nodes[ruling-B6-item-1-step-2:re-accumulate-after-the-final-route] RED
+CENSUS CHECK-RUNG-SWAP 0fold+0unread+0base+0dry+0faces 0[a-measurement-that-cannot-be-trusted-is-not-a-green] GREEN
+CENSUS G-RUNG-LAKE 529nodes/427patches 0[ruling-W16:a-rung-boundary-is-invisible] RED
+CENSUS G-RUNG-LIP 116nodes/3753columns 0[ruling-W16:a-rung-boundary-is-invisible] RED
+CENSUS CHECK-WHATIF 0stale+0foreign+0water+0verdicts 0[the-replica-must-be-the-budget's-own-rule] GREEN
+CENSUS WHATIF-LAKE-SHARE 1.914%of-land no-band-yet[a-what-if,moves-nothing;beside:G-LAKE-SHARE<=4%,W11:0.2-0.8%-dry-interiors] NO-BAND
+CENSUS WHATIF-HOLLOWS-FILLED 2274leaves-DRY→PARTIAL/7687leaves-DRY→SPILLING/360leaves-PARTIAL→SPILLING no-band-yet[a-what-if,moves-nothing] NO-BAND
+
+## shipped_drainage
+CENSUS SHIPPED-PATH-DIFFER:belt 0.0000e0 [0,0](own_check:column_field_equals_RungReader) GREEN
+CENSUS G-HACK-c:belt:shipped 2.6323e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) GREEN
+CENSUS G-HACK-n:belt:shipped 2.2429e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-cells:belt:shipped 4.9847e5 none(a_count) NO-BAND
+CENSUS G-BREACH-m3:belt:shipped 1.0915e8 none(Schott_2024_unit_unverified) NO-BAND
+CENSUS G-SPILL-1m-per100km2:belt:shipped 4.1285e0 none(no_published_band) NO-BAND
+CENSUS G-SPILL-10m-per100km2:belt:shipped 2.8401e0 none(no_published_band) NO-BAND
+CENSUS G-SPILL-100m-per100km2:belt:shipped 5.2102e-1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:belt:shipped 3.5627e1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:belt:shipped 3.5587e1 none(no_published_band) NO-BAND
+CENSUS SPILL-SPLIT:belt:shipped 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+CENSUS G-HACK-c:belt:solve 9.8857e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-n:belt:solve 7.3513e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-cells:belt:solve 2.1726e6 none(a_count) NO-BAND
+CENSUS G-BREACH-m3:belt:solve 3.8706e6 none(Schott_2024_unit_unverified) NO-BAND
+CENSUS G-SPILL-1m-per100km2:belt:solve 4.5306e-2 none(no_published_band) NO-BAND
+CENSUS G-SPILL-10m-per100km2:belt:solve 2.8316e-3 none(no_published_band) NO-BAND
+CENSUS G-SPILL-100m-per100km2:belt:solve 0.0000e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:belt:solve 4.6095e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:belt:solve 3.6526e0 none(no_published_band) NO-BAND
+CENSUS SPILL-SPLIT:belt:solve 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+CENSUS G-BREACH-RATIO:belt 2.8199e1 none(no_published_band) NO-BAND
+CENSUS G-FINE-MEAN-m:belt 2.8704e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-RMS-m:belt 3.2970e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-SLOPE-rms:belt 1.0290e-1 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:belt:shipped 3.2039e0 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:belt:solve 2.8406e1 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:belt:fine 3.1180e0 none(no_published_band) NO-BAND
+CENSUS SHIPPED-PATH-DIFFER:coast 0.0000e0 [0,0](own_check:column_field_equals_RungReader) GREEN
+CENSUS G-HACK-c:coast:shipped 2.4596e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) GREEN
+CENSUS G-HACK-n:coast:shipped 2.0507e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-cells:coast:shipped 4.0042e5 none(a_count) NO-BAND
+CENSUS G-BREACH-m3:coast:shipped 1.2572e8 none(Schott_2024_unit_unverified) NO-BAND
+CENSUS G-SPILL-1m-per100km2:coast:shipped 3.9869e0 none(no_published_band) NO-BAND
+CENSUS G-SPILL-10m-per100km2:coast:shipped 2.5454e0 none(no_published_band) NO-BAND
+CENSUS G-SPILL-100m-per100km2:coast:shipped 5.1313e-1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:coast:shipped 4.1385e1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:coast:shipped 4.1343e1 none(no_published_band) NO-BAND
+CENSUS SPILL-SPLIT:coast:shipped 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+CENSUS G-HACK-c:coast:solve 8.8786e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-n:coast:solve 7.2469e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-cells:coast:solve 1.5811e6 none(a_count) NO-BAND
+CENSUS G-BREACH-m3:coast:solve 2.1177e6 none(Schott_2024_unit_unverified) NO-BAND
+CENSUS G-SPILL-1m-per100km2:coast:solve 2.0255e-1 none(no_published_band) NO-BAND
+CENSUS G-SPILL-10m-per100km2:coast:solve 1.6879e-2 none(no_published_band) NO-BAND
+CENSUS G-SPILL-100m-per100km2:coast:solve 0.0000e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:coast:solve 9.8760e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:coast:solve 9.1032e0 none(no_published_band) NO-BAND
+CENSUS SPILL-SPLIT:coast:solve 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+CENSUS G-BREACH-RATIO:coast 5.9367e1 none(no_published_band) NO-BAND
+CENSUS G-FINE-MEAN-m:coast 2.6657e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-RMS-m:coast 3.1546e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-SLOPE-rms:coast 9.9853e-2 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:coast:shipped 3.2418e0 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:coast:solve 2.2537e1 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:coast:fine 3.1962e0 none(no_published_band) NO-BAND
+CENSUS SHIPPED-PATH-DIFFER:plain 0.0000e0 [0,0](own_check:column_field_equals_RungReader) GREEN
+CENSUS G-HACK-c:plain:shipped 2.9515e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) GREEN
+CENSUS G-HACK-n:plain:shipped 2.5085e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) RED
+CENSUS G-HACK-cells:plain:shipped 1.6933e4 none(a_count) NO-BAND
+CENSUS G-BREACH-m3:plain:shipped 3.4135e7 none(Schott_2024_unit_unverified) NO-BAND
+CENSUS G-SPILL-1m-per100km2:plain:shipped 3.5247e0 none(no_published_band) NO-BAND
+CENSUS G-SPILL-10m-per100km2:plain:shipped 1.9974e0 none(no_published_band) NO-BAND
+CENSUS G-SPILL-100m-per100km2:plain:shipped 3.5247e-1 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:plain:shipped 9.8505e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:plain:shipped 9.8236e0 none(no_published_band) NO-BAND
+CENSUS SPILL-SPLIT:plain:shipped 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+CENSUS G-HACK-c:plain:solve 5.5408e0 [1,6](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) GREEN
+CENSUS G-HACK-n:plain:solve 4.8792e-1 [0.45,0.7](Sassolas-Serrayet_Cattin_Ferry_Godard_2018) GREEN
+CENSUS G-HACK-cells:plain:solve 3.4702e4 none(a_count) NO-BAND
+CENSUS G-BREACH-m3:plain:solve 7.9730e6 none(Schott_2024_unit_unverified) NO-BAND
+CENSUS G-SPILL-1m-per100km2:plain:solve 1.4099e0 none(no_published_band) NO-BAND
+CENSUS G-SPILL-10m-per100km2:plain:solve 0.0000e0 none(no_published_band) NO-BAND
+CENSUS G-SPILL-100m-per100km2:plain:solve 0.0000e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-pct:plain:solve 1.4216e0 none(no_published_band) NO-BAND
+CENSUS G-FILLED-1m-pct:plain:solve 1.3512e0 none(no_published_band) NO-BAND
+CENSUS SPILL-SPLIT:plain:solve 0.0000e0 [0,0](own_check:one_fill_level_a_basin) GREEN
+CENSUS G-BREACH-RATIO:plain 4.2813e0 none(no_published_band) NO-BAND
+CENSUS G-FINE-MEAN-m:plain 3.2445e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-RMS-m:plain 4.2252e2 none(no_published_band) NO-BAND
+CENSUS G-FINE-SLOPE-rms:plain 2.1837e-1 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:plain:shipped 4.1665e0 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:plain:solve 1.3434e1 none(no_published_band) NO-BAND
+CENSUS G-HILL-SPACING-km:plain:fine 3.6100e0 none(no_published_band) NO-BAND
+
+## shore_teeth
+CENSUS G-TEETH-NULLCHECK 1.0126x W13.3=1.012x NO-BAND
+CENSUS G-TEETH-SELFCHECK.coast.r00 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.coast.r00 1048576of1048576cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.coast.r00 510.5m <=0.50col(0.5m) RED
+CENSUS G-TEETH-WALL.sea.coast.r00 13130.55x no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.coast.r00 1024of1024pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.coast.r00 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.sea.coast.r00 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.sea.coast.r00 262144cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.coast.r00 466.6m no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.coast.r00 none <=0.50col(0.5m) NO-BAND
+CENSUS G-TEETH-WALL.lake.coast.r00 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.coast.r00 none no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.coast.r00 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.lake.coast.r00 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.lake.coast.r00 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.coast.r00 none no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.coast.r05 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.coast.r05 1048576of1048576cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.coast.r05 16334.7m <=0.50col(15.3m) RED
+CENSUS G-TEETH-WALL.sea.coast.r05 167.61x no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.coast.r05 1280of1280pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.coast.r05 2.316x <=1.895x RED
+CENSUS G-TEETH-GRID-GROUND.sea.coast.r05 1.250x <=2.000x GREEN
+CENSUS G-TEETH-DISAGREE.sea.coast.r05 62846cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.coast.r05 8702.3m no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.coast.r05 none <=0.50col(15.3m) NO-BAND
+CENSUS G-TEETH-WALL.lake.coast.r05 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.coast.r05 none no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.coast.r05 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.lake.coast.r05 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.lake.coast.r05 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.coast.r05 none no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.coast.r07 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.coast.r07 1048576of1048576cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.coast.r07 65338.7m <=0.50col(61.1m) RED
+CENSUS G-TEETH-WALL.sea.coast.r07 62.15x no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.coast.r07 1469of1472pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.coast.r07 1.933x <=1.438x RED
+CENSUS G-TEETH-GRID-GROUND.sea.coast.r07 1.418x <=1.418x GREEN
+CENSUS G-TEETH-DISAGREE.sea.coast.r07 25482cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.coast.r07 19097.0m no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.coast.r07 none <=0.50col(61.1m) NO-BAND
+CENSUS G-TEETH-WALL.lake.coast.r07 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.coast.r07 none no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.coast.r07 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.lake.coast.r07 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.lake.coast.r07 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.coast.r07 none no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.coast.r09 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.coast.r09 65536of65536cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.coast.r09 65146.9m <=0.50col(244.5m) RED
+CENSUS G-TEETH-WALL.sea.coast.r09 20.33x no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.coast.r09 304of368pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.coast.r09 1.778x <=1.600x RED
+CENSUS G-TEETH-GRID-GROUND.sea.coast.r09 1.600x <=1.700x GREEN
+CENSUS G-TEETH-DISAGREE.sea.coast.r09 1594cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.coast.r09 18649.9m no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.coast.r09 none <=0.50col(244.5m) NO-BAND
+CENSUS G-TEETH-WALL.lake.coast.r09 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.coast.r09 none no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.coast.r09 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.lake.coast.r09 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.lake.coast.r09 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.coast.r09 none no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.coast.r10 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.coast.r10 16384of16384cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.coast.r10 64891.2m <=0.50col(489.0m) RED
+CENSUS G-TEETH-WALL.sea.coast.r10 52.37x no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.coast.r10 166of184pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.coast.r10 1.455x <=1.818x GREEN
+CENSUS G-TEETH-GRID-GROUND.sea.coast.r10 2.000x <=2.000x GREEN
+CENSUS G-TEETH-DISAGREE.sea.coast.r10 826cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.coast.r10 25036.7m no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.coast.r10 none <=0.50col(489.0m) NO-BAND
+CENSUS G-TEETH-WALL.lake.coast.r10 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.coast.r10 none no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.coast.r10 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.lake.coast.r10 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.lake.coast.r10 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.coast.r10 none no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.coast.r13 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.coast.r13 16384of16384cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.coast.r13 81047.1m <=0.50col(3912.4m) RED
+CENSUS G-TEETH-WALL.sea.coast.r13 8.56x no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.coast.r13 111of233pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.coast.r13 2.000x <=1.833x RED
+CENSUS G-TEETH-GRID-GROUND.sea.coast.r13 1.818x <=1.818x GREEN
+CENSUS G-TEETH-DISAGREE.sea.coast.r13 94cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.coast.r13 20437.0m no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.coast.r13 none <=0.50col(3912.4m) NO-BAND
+CENSUS G-TEETH-WALL.lake.coast.r13 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.coast.r13 none no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.coast.r13 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.lake.coast.r13 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.lake.coast.r13 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.coast.r13 none no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.lake.r00 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.lake.r00 1048576of1048576cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.lake.r00 none <=0.50col(0.5m) NO-BAND
+CENSUS G-TEETH-WALL.sea.lake.r00 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.lake.r00 none no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.lake.r00 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.sea.lake.r00 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.sea.lake.r00 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.lake.r00 none no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.lake.r00 498.5m <=0.50col(0.5m) RED
+CENSUS G-TEETH-WALL.lake.lake.r00 174087.27x no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.lake.r00 1024of1024pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.lake.r00 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.lake.lake.r00 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.lake.lake.r00 524288cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.lake.r00 498.5m no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.lake.r05 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.lake.r05 1048576of1048576cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.lake.r05 none <=0.50col(14.6m) NO-BAND
+CENSUS G-TEETH-WALL.sea.lake.r05 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.lake.r05 none no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.lake.r05 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.sea.lake.r05 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.sea.lake.r05 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.lake.r05 none no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.lake.r05 15951.2m <=0.50col(14.6m) RED
+CENSUS G-TEETH-WALL.lake.lake.r05 364.43x no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.lake.r05 1152of1152pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.lake.r05 2.000x <=2.000x GREEN
+CENSUS G-TEETH-GRID-GROUND.lake.lake.r05 2.000x <=2.000x NO-BAND
+CENSUS G-TEETH-DISAGREE.lake.lake.r05 89616cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.lake.r05 3820.2m no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.lake.r07 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.lake.r07 1048576of1048576cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.lake.r07 none <=0.50col(58.4m) NO-BAND
+CENSUS G-TEETH-WALL.sea.lake.r07 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.lake.r07 none no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.lake.r07 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.sea.lake.r07 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.sea.lake.r07 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.lake.r07 none no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.lake.r07 57647.3m <=0.50col(58.4m) RED
+CENSUS G-TEETH-WALL.lake.lake.r07 72.90x no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.lake.r07 1120of1120pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.lake.r07 2.031x <=1.477x RED
+CENSUS G-TEETH-GRID-GROUND.lake.lake.r07 2.034x <=1.492x RED
+CENSUS G-TEETH-DISAGREE.lake.lake.r07 21468cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.lake.r07 3929.3m no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.lake.r09 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.lake.r09 65536of65536cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.lake.r09 none <=0.50col(233.7m) NO-BAND
+CENSUS G-TEETH-WALL.sea.lake.r09 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.lake.r09 none no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.lake.r09 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.sea.lake.r09 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.sea.lake.r09 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.lake.r09 none no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.lake.r09 57530.6m <=0.50col(233.7m) RED
+CENSUS G-TEETH-WALL.lake.lake.r09 10.68x no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.lake.r09 144of280pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.lake.r09 2.118x <=1.647x RED
+CENSUS G-TEETH-GRID-GROUND.lake.lake.r09 1.935x <=1.677x RED
+CENSUS G-TEETH-DISAGREE.lake.lake.r09 1342cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.lake.r09 3742.2m no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.lake.r10 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.lake.r10 16384of16384cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.lake.r10 none <=0.50col(467.5m) NO-BAND
+CENSUS G-TEETH-WALL.sea.lake.r10 none no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.lake.r10 none no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.lake.r10 none no-band NO-BAND
+CENSUS G-TEETH-GRID-GROUND.sea.lake.r10 none no-band NO-BAND
+CENSUS G-TEETH-DISAGREE.sea.lake.r10 0cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.lake.r10 none no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.lake.r10 51880.2m <=0.50col(467.5m) RED
+CENSUS G-TEETH-WALL.lake.lake.r10 13.26x no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.lake.r10 121of148pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.lake.r10 2.222x <=2.000x RED
+CENSUS G-TEETH-GRID-GROUND.lake.lake.r10 2.133x <=2.133x NO-BAND
+CENSUS G-TEETH-DISAGREE.lake.lake.r10 537cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.lake.r10 9480.4m no-band NO-BAND
+CENSUS G-TEETH-SELFCHECK.lake.r13 3844of3844cols =all GREEN
+CENSUS G-TEETH-BASECHECK.lake.r13 16384of16384cols =all GREEN
+CENSUS G-TEETH-OFFSET.sea.lake.r13 57520.7m <=0.50col(3739.9m) RED
+CENSUS G-TEETH-WALL.sea.lake.r13 10.15x no-band NO-BAND
+CENSUS G-TEETH-WALL10.sea.lake.r13 31of59pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.sea.lake.r13 3.200x <=3.200x NO-BAND
+CENSUS G-TEETH-GRID-GROUND.sea.lake.r13 4.000x <=3.000x NO-BAND
+CENSUS G-TEETH-DISAGREE.sea.lake.r13 23cols no-band NO-BAND
+CENSUS G-TEETH-REACH.sea.lake.r13 3992.6m no-band NO-BAND
+CENSUS G-TEETH-OFFSET.lake.lake.r13 401023.7m <=0.50col(3739.9m) RED
+CENSUS G-TEETH-WALL.lake.lake.r13 1.92x no-band NO-BAND
+CENSUS G-TEETH-WALL10.lake.lake.r13 6of38pairs no-band NO-BAND
+CENSUS G-TEETH-GRID.lake.lake.r13 2.000x <=3.000x NO-BAND
+CENSUS G-TEETH-GRID-GROUND.lake.lake.r13 2.000x <=3.000x NO-BAND
+CENSUS G-TEETH-DISAGREE.lake.lake.r13 17cols no-band NO-BAND
+CENSUS G-TEETH-REACH.lake.lake.r13 11977.7m no-band NO-BAND
+
+## reference_stand
+CENSUS G-SKYLINE-SECTOR-B005 2.182 report[4,8.89]breaks/60deg(ruling-T6-ask5:a-report-no-floor;11s4:the-70-run-envelope) NO-BAND
+CENSUS G-SKYLINE-FULL-B005 3.000 report[4,8.89]breaks/60deg(ruling-T6-ask5:a-report-no-floor;11s4:the-70-run-envelope) NO-BAND
+CENSUS G-SKYLINE-SECTOR-B010 1.091 report[2.45,7.89]breaks/60deg(ruling-T6-ask5:a-report-no-floor;11s4:the-70-run-envelope) NO-BAND
+CENSUS G-SKYLINE-FULL-B010 0.167 report[2.45,7.89]breaks/60deg(ruling-T6-ask5:a-report-no-floor;11s4:the-70-run-envelope) NO-BAND
+CENSUS G-SKYLINE-SECTOR-B025 0.000 report[2.45,5.45]breaks/60deg(ruling-T6-ask5:a-report-no-floor;11s4:the-70-run-envelope) NO-BAND
+CENSUS G-SKYLINE-FULL-B025 0.000 report[2.45,5.45]breaks/60deg(ruling-T6-ask5:a-report-no-floor;11s4:the-70-run-envelope) NO-BAND
+CENSUS G-SKYLINE-SECTOR-B050 0.000 report[0,3.33]breaks/60deg(ruling-T6-ask5:a-report-no-floor;11s4:the-70-run-envelope) NO-BAND
+CENSUS G-SKYLINE-FULL-B050 0.000 report[0,3.33]breaks/60deg(ruling-T6-ask5:a-report-no-floor;11s4:the-70-run-envelope) NO-BAND
+CENSUS G-SKYLINE-SECTOR-RISE 0.200 report[0.431,1.067]deg(ruling-T6-ask5:a-report-no-floor;11s4:the-70-run-envelope) NO-BAND
+CENSUS G-SKYLINE-FULL-RISE 0.200 report[0.431,1.067]deg(ruling-T6-ask5:a-report-no-floor;11s4:the-70-run-envelope) NO-BAND
+CENSUS G-REF-RELIEF-30-60KM 1987.725 none-yet-m(01s2:ridges-1500-3000m-tall-unmarked;11-U16e:no-metre-band-rests-on-the-camera-height) NO-BAND
+CENSUS G-REF-DETAIL-TO-HORIZON 0.000 [0,0]samples(01s2+status-s9:detail-to-the-horizon;ruling-F9:the-coarser-rung-stands-in) GREEN
+CENSUS G-REF-SHIPPED-PATH 0.000 [0,0]columns(SL10:one-generator;the-reader-equals-column_field) GREEN
+
+## reference_stand: the pose
+THE POSE: node 8857505 (face NegZ, node 161, 1204); direction 0.631321 -0.422643 -0.650236; the solved node's top 8208 m over the ladder radius; the SHIPPED ground under the eye (rung 0, the 1 m column) 8306.1 m; the eye 400 m over it, at 8706.1 m over the ladder radius
+  the look: bearing 243° in the eye's tangent basis (`vd_bins::skyline::tangent_basis`); the look direction 0.690995 0.687205 0.224222
+  VD_SPAWN_POSES='1000=Planet(4030111653607004909):4009125.5814160844,-2683939.85772981,-4129244.0158153493@0.5638499007050535,0.601221959721387,-0.5608670856416399,0.07767597355379578'
+  from the right: VD_STAND_SUN="-0.504935 0.076557 -0.859755"
+  from the left:  VD_STAND_SUN="0.091558 -0.924489 0.370050"
+
+## lake_census: the inland pockets and the river ends
+THE INLAND SEA (status §6 T7): nodes at or under the sea's level (3566 m) that no path through the lattice's own neighbours (the cube seams included) joins to the OCEAN, the largest such body (3.9395e8 km²)
+  148 pockets, 59470 nodes, 3208808 km²; the facies byte marks every one of them SEA, so the client draws each at the sea's own level. The largest ten:
+      24804 nodes    1351774 km², deepest  11842 m under the sea at node 7938180 — aim -0.168251 -0.567929 -0.805698
+      13706 nodes     702293 km², deepest   9168 m under the sea at node 4475792 — aim 0.291631 -0.704043 -0.647515
+       4869 nodes     267412 km², deepest  10837 m under the sea at node 7573896 — aim -0.558518 0.043374 -0.828358
+       3292 nodes     169727 km², deepest   4456 m under the sea at node 7626796 — aim -0.405462 -0.608300 -0.682328
+       2646 nodes     135969 km², deepest   4807 m under the sea at node 8560692 — aim 0.345535 -0.617188 -0.706884
+       1961 nodes      96481 km², deepest   2375 m under the sea at node 4454528 — aim -0.269915 -0.694276 -0.667178
+       1001 nodes      61701 km², deepest   5330 m under the sea at node 8509065 — aim 0.385577 0.125305 -0.914127
+        917 nodes      60892 km², deepest   8658 m under the sea at node 8226938 — aim 0.099248 0.116028 -0.988275
+       1241 nodes      60441 km², deepest   8186 m under the sea at node 7834694 — aim -0.226575 -0.682952 -0.694435
+        606 nodes      33495 km², deepest   2257 m under the sea at node 7547035 — aim -0.580983 -0.071914 -0.810733
+  the ends, in heads: the ocean 13217, an inland sea pocket 2611, a closed lake 1008, a dry closed basin 21130; DEFECTS: no receiver on land 0, a ring of receivers 0

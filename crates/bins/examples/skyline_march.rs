@@ -12,6 +12,10 @@
 //! the shape in plain 64-bit floats and the world computes it in the recipe's fenced integers. The
 //! spectrum's own table is reprinted beside the computed amplitudes so a mismatch shows.
 //!
+//! ★ THE MARCH AND THE BREAK RULE LIVE IN `vd_bins::skyline` (ruling B6 item 2, 2026-09-24): the
+//! reference stand (`reference_stand`) reads the same rule, so the two instruments cannot drift
+//! apart. They moved there unchanged; this instrument states its own eye height and its own field.
+//!
 //! ```text
 //! cargo run --release -p vd-bins --example skyline_march
 //! ```
@@ -19,21 +23,12 @@
 use std::process::ExitCode;
 
 use vd_bins::DEV;
+use vd_bins::skyline::{BEARINGS, Eye, Fan, Ground, M1B_STEPS, THRESHOLDS_DEG, judge, march};
 use vd_seed::bend::{Face, direction};
 use vd_terrain::height::height_m;
 
 /// The eye's height over its own surface, metres (`01` §6.1).
 const EYE_M: f64 = 373.0;
-/// The march: 50 m steps to 5 km, then 300 m steps to the limit.
-const NEAR_STEP_M: f64 = 50.0;
-const NEAR_LIMIT_M: f64 = 5_000.0;
-const FAR_STEP_M: f64 = 300.0;
-const MARCH_LIMIT_M: f64 = 540_000.0;
-/// Bearings per full turn, and the half-window (in bearings) of the local median.
-const BEARINGS: usize = 360;
-const HALF_WINDOW: usize = 5;
-/// The break thresholds, degrees.
-const THRESHOLDS_DEG: [f64; 4] = [0.05, 0.10, 0.25, 0.50];
 
 /// The four stations (`01` §1.4a): face and face parameters.
 const STATIONS: [(&str, Face, f64, f64); 4] = [
@@ -123,98 +118,26 @@ fn height_with(
     }
 }
 
-fn normalize(v: [f64; 3]) -> [f64; 3] {
-    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    [v[0] / l, v[1] / l, v[2] / l]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-/// The skyline from a station: the largest elevation angle along each bearing, degrees.
+/// The skyline from a station: the largest elevation angle along each bearing, degrees — the ONE
+/// march (`vd_bins::skyline::march`), with the eye `EYE_M` over the field at the station and the
+/// field read ON each marched direction.
 fn skyline(
     body: &vd_terrain::BodyDefinition,
     field: &dyn Fn([f64; 3]) -> f64,
     d: [f64; 3],
 ) -> Vec<f64> {
-    let r = body.ladder().radius_m();
-    let r_c = field(d) + EYE_M;
-    // A tangent basis at the station.
-    let helper = if d[0].abs() < 0.9 {
-        [1.0, 0.0, 0.0]
-    } else {
-        [0.0, 1.0, 0.0]
+    let eye = Eye {
+        dir: d,
+        radius_m: field(d) + EYE_M,
     };
-    let e1 = normalize(cross(d, helper));
-    let e2 = cross(d, e1);
-    let mut out = Vec::with_capacity(BEARINGS);
-    let mut b = 0;
-    while b < BEARINGS {
-        let phi = (b as f64) * std::f64::consts::TAU / (BEARINGS as f64);
-        let (sp, cp) = phi.sin_cos();
-        let t = [
-            e1[0] * cp + e2[0] * sp,
-            e1[1] * cp + e2[1] * sp,
-            e1[2] * cp + e2[2] * sp,
-        ];
-        let mut best = f64::NEG_INFINITY;
-        let mut s = NEAR_STEP_M;
-        while s <= MARCH_LIMIT_M {
-            let theta = s / r;
-            let (st, ct) = theta.sin_cos();
-            let dir = normalize([
-                d[0] * ct + t[0] * st,
-                d[1] * ct + t[1] * st,
-                d[2] * ct + t[2] * st,
-            ]);
-            let r_t = field(dir);
-            let elev = (r_t * ct - r_c).atan2(r_t * st);
-            if elev > best {
-                best = elev;
-            }
-            s += if s < NEAR_LIMIT_M {
-                NEAR_STEP_M
-            } else {
-                FAR_STEP_M
-            };
-        }
-        out.push(best.to_degrees());
-        b += 1;
-    }
-    out
-}
-
-/// The rise of each bearing's skyline over the median of its ±5° window, and the breaks per 60°.
-fn judge(sky: &[f64]) -> (f64, [f64; 4]) {
-    let n = sky.len();
-    let mut largest = f64::NEG_INFINITY;
-    let mut rises = vec![0.0; n];
-    for b in 0..n {
-        let mut window: Vec<f64> = (0..=2 * HALF_WINDOW)
-            .map(|k| sky[(b + n + k - HALF_WINDOW) % n])
-            .collect();
-        window.sort_by(|x, y| x.partial_cmp(y).expect("finite"));
-        let median = window[HALF_WINDOW];
-        rises[b] = sky[b] - median;
-        largest = largest.max(rises[b]);
-    }
-    let mut per_60 = [0.0; 4];
-    for (k, t) in THRESHOLDS_DEG.iter().enumerate() {
-        let mut count = 0;
-        for b in 0..n {
-            let local_max = sky[b] > sky[(b + n - 1) % n] && sky[b] > sky[(b + 1) % n];
-            if local_max && rises[b] > *t {
-                count += 1;
-            }
-        }
-        per_60[k] = f64::from(count) / 6.0;
-    }
-    (largest, per_60)
+    march(
+        &eye,
+        body.ladder().radius_m(),
+        &Fan::full_turn(BEARINGS),
+        &M1B_STEPS,
+        &mut |dir: [f64; 3], _s: f64| Ground::OnRay(field(dir)),
+    )
+    .deg
 }
 
 fn main() -> ExitCode {
@@ -326,7 +249,7 @@ fn main() -> ExitCode {
     println!(
         "skyline_march: {} stations × {BEARINGS} bearings to {} km, three fields, in {:.1} s",
         STATIONS.len(),
-        MARCH_LIMIT_M / 1000.0,
+        M1B_STEPS.limit_m / 1000.0,
         start.elapsed().as_secs_f64()
     );
     ExitCode::SUCCESS

@@ -24,6 +24,18 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     G-HYPSO, G-RIVER, G-LOOK. ★ B5 the home planet's TILT (55°, a seed identity choice) STAYS — a hand-set tilt
     is a seam, refused; G-ICE tests the LAW on an Earth-like charter, the home planet's 4 % is a reading; the
     caps question waits for 8e's two-column seasonal balance; the lawful road to caps is the seed search.
+    ★★ B6 (2026-09-24, owner: "In general I agree … make sure that visually we are moving towards this target
+    picture") — the dunes, the teeth and the water positions have ONE root: the solve knows only 8 192 m nodes,
+    under them the ground is noise to 32 km and the water is a node square. THE PLAN: measure first (gates that
+    can see the dunes and the teeth) → the lake budget from the whole watershed → R2 (one eroded 1 024 m level
+    in the artifact) + the noise only below it → one shoreline from one field on the R2 ground → G-GRID again
+    → outlets, deltas, R3 → G-LOOK. EVERY step also shows a FOURTH stand framed like the reference picture
+    (the Crimson Desert vista, kept outside the public repo) with its skyline numbers. THE DRESSING (snow,
+    ground colour, forest, cliffs, far shadows, water look, clouds) is DEFERRED D-TERRAIN-8, not forgotten;
+    B6.5 (amended): the far shadow is WANTED but not needed to judge the pictures (owner: "We can go without long
+    shadows for now"); each picture is captioned "no far shadow".
+    ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
+    the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION
     8), then 8d. ★ W2 (answers L20): a player's dam never moves the seed's river (no re-solve, the river an
     endless source); a dug hollow BELOW a connected water's level FILLS to that level as LIVE STATE — a bounded

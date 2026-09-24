@@ -15,10 +15,21 @@ pub mod artifact_boot;
 pub mod artifact_source;
 pub mod artifact_store;
 pub mod artifact_worker;
+// ★ THE DRAINAGE GATES, ONE COPY (plan step 1, ruling B6): G-HACK, G-BREACH, the spill census and
+// the three stands, read by the R1 bench, the drain census and the shipped-ground instrument alike.
+pub mod drainage_gates;
 // ★ THE GRID'S SCRATCHES, AS NUMBERS (ruling B2 step 3; gate G-GRID): the cone, the rotation and
 // the long-axis histogram that measure what the square grid does to a river and to a lake.
 pub mod grid_bias;
 pub mod proc_launch;
+// ★ THE SHORE'S GEOMETRY, AS NUMBERS (plan step 1, ruling B6; the owner: "shores are squared like
+// teeth"): the shipped column with the ground base the shore law reads, the zero contour, the
+// window bearings and the flat null the teeth instrument measures with.
+pub mod shore_geometry;
+// ★ THE SKYLINE MARCH AND ITS BREAK RULE, ONCE (01 §6.1; 11 §3; ruling B6 item 2): M1b's four
+// stations and the reference stand read one rule, so our number and the reference's are one
+// instrument.
+pub mod skyline;
 
 // The dev-control-only helpers (Tier-B process-gate glue): `flight` is the ONE pilot every cluster
 // gate flies (rendezvous-and-park + label-asserted crossing legs); `scene_camera` reconstructs the

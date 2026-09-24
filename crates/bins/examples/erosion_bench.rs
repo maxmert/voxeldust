@@ -38,10 +38,13 @@
 //! cargo run --release -p vd-bins --example erosion_bench -- --fine-span 4096 --iters 300
 //! ```
 
-use std::collections::BinaryHeap;
 use std::time::Instant;
 
 use vd_bins::artifact_worker::{SolveJob, run_solve};
+// ★ G-HACK and G-BREACH live in ONE place (plan step 1, ruling B6): the shipped-ground instrument
+// reads the very same two functions, so the bench's numbers and the shipped ground's can be set
+// side by side. `OFF`, `ln` and `exp` came with them, unchanged.
+use vd_bins::drainage_gates::{Heights, OFF, exp, g_breach, g_hack, ln};
 use vd_recipe::Gi;
 use vd_recipe::amplify::{
     A_BITS, D_BITS, H_BITS, K_BITS, NEIGHBOURS, NO_SLOT, Routing, S_BITS, cut, deposit, gather,
@@ -55,19 +58,6 @@ use vd_terrain::artifact::{
 use vd_terrain::home::{home_planet, home_solve_words};
 use vd_terrain::macro_lattice::MacroLattice;
 use vd_terrain::strata::Province;
-
-/// The stencil's eight offsets, in `MacroLattice::STENCIL` order — the same order the operators
-/// index their slots by, so a slot means one thing everywhere.
-const OFF: [(i32, i32); NEIGHBOURS] = [
-    (-1, -1),
-    (0, -1),
-    (1, -1),
-    (-1, 0),
-    (1, 0),
-    (-1, 1),
-    (0, 1),
-    (1, 1),
-];
 
 /// ★ THE STATED EROSION PARAMETERS. The three the reference ships verbatim (`tanThresholdAngle`,
 /// `deposition_strength`, the two `0.1` shares) are its own numbers. The two RATES — the
@@ -1073,10 +1063,20 @@ fn interior(g: &Grid, trim: usize) -> Vec<Gi> {
     out
 }
 
-/// ★ THE TWO BELIEVABILITY NUMBERS on one field.
+/// ★ THE TWO BELIEVABILITY NUMBERS on one field, through the shared gates
+/// (`vd_bins::drainage_gates`): the heights handed over as plain words at `H_BITS`, a metre being
+/// `1 << H_BITS` of them, and no dry mask — every cell of the tile is ground, as it always was here.
 fn report_gates(g: &Grid, when: &str) {
     println!("  {when}:");
-    let (c, n, points) = g_hack(g);
+    let words: Vec<i64> = g.h.iter().map(|v| v.raw()).collect();
+    let field = Heights {
+        w: g.w,
+        cell_m: g.cell_m,
+        h: &words,
+        per_m: f64::from(1 << H_BITS),
+        dry: None,
+    };
+    let (c, n, points) = g_hack(&field);
     let band_c = (1.0..=6.0).contains(&c);
     let band_n = (0.45..=0.7).contains(&n);
     println!(
@@ -1085,217 +1085,10 @@ fn report_gates(g: &Grid, when: &str) {
         if band_n { "INSIDE" } else { "OUTSIDE" },
         if band_c && band_n { "  ✓" } else { "  ✗" }
     );
-    let (breach, pits) = g_breach(g);
+    let (breach, pits) = g_breach(&field);
     println!(
         "    G-BREACH {breach:.3e} m³ a depression, over {pits} depressions (this file's definition; the\n             reference's own units are UNVERIFIED, so the BEFORE/AFTER ratio is the number that can fail)"
     );
-}
-
-/// ★ G-HACK — the Hack's-law fit `L = c·a^n` (Sassolas-Serrayet, Cattin, Ferry & Godard 2018;
-/// Schott et al. 2023 §7.3 validate a terrain exactly this way).
-///
-/// The network is drawn with the STEEPEST-descent receiver (the operators' own tie rule, the lowest
-/// stencil slot), the drainage area `a` accumulated down it in km², and `L` the LONGEST upstream
-/// flow path in km. Both are accumulated in one pass over the cells sorted by height, highest
-/// first, which is the topological order of a descent tree. The fit is an ordinary least squares on
-/// the logarithms over the cells whose basin passes ten cells — below that a "river" is a pixel.
-fn g_hack(g: &Grid) -> (f64, f64, usize) {
-    let cells = g.cells();
-    let cell_km2 = g.cell_m * g.cell_m / 1.0e6;
-    let mut recv = vec![usize::MAX; cells];
-    let mut dist_km = vec![0.0f64; cells];
-    for y in 0..g.w {
-        for x in 0..g.w {
-            let i = y * g.w + x;
-            let (idx, present) = g.stencil(x, y);
-            let mut best = Gi::ZERO;
-            for slot in 0..NEIGHBOURS {
-                if present >> slot & 1 == 0 {
-                    continue;
-                }
-                let drop = g.h[i] - g.h[idx[slot]];
-                if drop > best {
-                    best = drop;
-                    recv[i] = idx[slot];
-                    let diagonal = OFF[slot].0 != 0 && OFF[slot].1 != 0;
-                    dist_km[i] = g.cell_m
-                        * if diagonal {
-                            core::f64::consts::SQRT_2
-                        } else {
-                            1.0
-                        }
-                        / 1_000.0;
-                }
-            }
-        }
-    }
-    let mut order: Vec<u32> = (0..cells as u32).collect();
-    order.sort_unstable_by(|a, b| g.h[*b as usize].cmp(&g.h[*a as usize]));
-    let mut area = vec![cell_km2; cells];
-    let mut length = vec![0.0f64; cells];
-    for i in order {
-        let i = i as usize;
-        let r = recv[i];
-        if r == usize::MAX {
-            continue;
-        }
-        area[r] += area[i];
-        let candidate = length[i] + dist_km[i];
-        if candidate > length[r] {
-            length[r] = candidate;
-        }
-    }
-    // The fit, over the network only.
-    let floor = 10.0 * cell_km2;
-    let (mut sx, mut sy, mut sxx, mut sxy, mut n) = (0.0, 0.0, 0.0, 0.0, 0usize);
-    for i in 0..cells {
-        if area[i] < floor || length[i] <= 0.0 {
-            continue;
-        }
-        let x = ln(area[i]);
-        let y = ln(length[i]);
-        sx += x;
-        sy += y;
-        sxx += x * x;
-        sxy += x * y;
-        n += 1;
-    }
-    if n < 2 {
-        return (0.0, 0.0, n);
-    }
-    let count = n as f64;
-    let slope = (count * sxy - sx * sy) / (count * sxx - sx * sx);
-    let intercept = (sy - slope * sx) / count;
-    (exp(intercept), slope, n)
-}
-
-/// A natural logarithm written out, because the bench's own crate is fenced against `f64::ln` in
-/// the recipe and this file keeps the same discipline for the numbers it reports: the argument is
-/// split into a power of two and a mantissa, and the mantissa's logarithm comes from the
-/// `atanh` series, which converges on `[1, 2)` in a dozen terms.
-fn ln(x: f64) -> f64 {
-    let mut e = 0i32;
-    let mut m = x;
-    while m >= 2.0 {
-        m *= 0.5;
-        e += 1;
-    }
-    while m < 1.0 {
-        m *= 2.0;
-        e -= 1;
-    }
-    let z = (m - 1.0) / (m + 1.0);
-    let z2 = z * z;
-    let mut term = z;
-    let mut sum = 0.0;
-    let mut k = 0;
-    while k < 20 {
-        sum += term / f64::from(2 * k + 1);
-        term *= z2;
-        k += 1;
-    }
-    2.0 * sum + f64::from(e) * core::f64::consts::LN_2
-}
-
-/// `e^x`, by the same discipline: the argument is split into whole powers of two and a remainder
-/// the Taylor series takes.
-fn exp(x: f64) -> f64 {
-    let k = (x / core::f64::consts::LN_2).round();
-    let r = x - k * core::f64::consts::LN_2;
-    let mut term = 1.0f64;
-    let mut sum = 0.0f64;
-    let mut i = 0;
-    while i < 20 {
-        sum += term;
-        i += 1;
-        term *= r / f64::from(i);
-    }
-    let mut out = sum;
-    let mut n = 0.0;
-    while n < k.abs() {
-        out *= if k > 0.0 { 2.0 } else { 0.5 };
-        n += 1.0;
-    }
-    out
-}
-
-/// ★ G-BREACH — a breaching volume, on THE DEFINITION THIS FILE STATES, because Schott et al. 2024
-/// publish the metric's VALUES (their erosion 0.02–4.8 ×10³, procedural noise 1.7–41) but not the
-/// code that computes them, and we could not run theirs.
-///
-/// Ours: a priority flood from the grid's rim (Barnes, Lehman & Mulla 2014) records, for every
-/// cell, the neighbour it was reached from — so every cell holds a path to the rim whose highest
-/// point is the lowest such highest point of any path. A cell is a PIT where every neighbour stands
-/// at or above it. For each pit we walk that recorded path outward and add `max(0, h − h_pit)`
-/// times the cell area: the material a ONE-CELL-WIDE channel at the pit's own level must still
-/// remove for the pit to drain. The answer is the mean over the pits, in cubic metres.
-///
-/// **What this can and cannot say.** The ABSOLUTE number cannot be set beside the paper's, because
-/// their unit is not published — that comparison is UNVERIFIED. The BEFORE/AFTER ratio on the same
-/// field with the same definition is a measurement that can fail, and it is the one reported.
-fn g_breach(g: &Grid) -> (f64, usize) {
-    let cells = g.cells();
-    let area = g.cell_m * g.cell_m;
-    let mut done = vec![false; cells];
-    let mut from = vec![usize::MAX; cells];
-    // The priority flood: the rim first, lowest first, each cell carrying the highest point of the
-    // path that reached it.
-    let mut heap: BinaryHeap<(core::cmp::Reverse<i64>, usize)> = BinaryHeap::new();
-    for y in 0..g.w {
-        for x in 0..g.w {
-            if x == 0 || y == 0 || x == g.w - 1 || y == g.w - 1 {
-                let i = y * g.w + x;
-                done[i] = true;
-                heap.push((core::cmp::Reverse(g.h[i].raw()), i));
-            }
-        }
-    }
-    while let Some((core::cmp::Reverse(spill), i)) = heap.pop() {
-        let (x, y) = (i % g.w, i / g.w);
-        let (idx, present) = g.stencil(x, y);
-        for (slot, j) in idx.iter().copied().enumerate() {
-            if present >> slot & 1 == 0 || done[j] {
-                continue;
-            }
-            done[j] = true;
-            from[j] = i;
-            heap.push((core::cmp::Reverse(g.h[j].raw().max(spill)), j));
-        }
-    }
-    // The pits, and the channel each needs.
-    let mut total = 0.0f64;
-    let mut pits = 0usize;
-    for y in 1..g.w - 1 {
-        for x in 1..g.w - 1 {
-            let i = y * g.w + x;
-            let (idx, present) = g.stencil(x, y);
-            let lowest = (0..NEIGHBOURS)
-                .filter(|slot| present >> slot & 1 == 1)
-                .all(|slot| g.h[idx[slot]] >= g.h[i]);
-            if !lowest {
-                continue;
-            }
-            pits += 1;
-            let pit = g.h[i].raw();
-            let mut c = from[i];
-            let mut volume = 0.0f64;
-            while c != usize::MAX {
-                let over = g.h[c].raw() - pit;
-                if over <= 0 {
-                    break;
-                }
-                volume += f64::from(u32::try_from(over).unwrap_or(u32::MAX))
-                    / f64::from(1 << H_BITS)
-                    * area;
-                c = from[c];
-            }
-            total += volume;
-        }
-    }
-    if pits == 0 {
-        return (0.0, 0);
-    }
-    (total / pits as f64, pits)
 }
 
 /// ★ THE DIFF AGAINST THE REFERENCE. We could NOT run `H-Schott/MultiScaleErosion`: it is a C++
