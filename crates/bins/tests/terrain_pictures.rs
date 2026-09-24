@@ -1114,7 +1114,11 @@ fn take_picture(
         vd_core::glam::DQuat::from_xyzw(row.facing[0], row.facing[1], row.facing[2], row.facing[3])
             .normalize();
     let eye_body = facing.inverse() * (camera.eye - centre);
-    let ground = eye_surface(body, eye_body.to_array()).expect("the eye has a direction");
+    // ⚠ STALE SINCE 8c (2026-09-24, D-TERRAIN-9): this gate seats its stands and reads its truth on the
+    // recipe's own relief (no artifact), while the client's stamp now reads the DRAWN ground — the
+    // solved artifact once the realm holds it. Owed: seat the stands on the solved ground and re-freeze
+    // the references under the owner's look.
+    let ground = eye_surface(body, None, eye_body.to_array()).expect("the eye has a direction");
     assert!(
         (stamp.altitude_m - ground.altitude_m).abs() <= ALTITUDE_TOLERANCE_M,
         "{name}: the stamp's altitude {:.3} m vs the state's {:.3} m",

@@ -769,8 +769,9 @@ pub fn horizon_m(radius_m: f64, altitude_m: f64) -> f64 {
 /// field stood over, the horizon zero and every column past it a skyline candidate.
 pub const EYE_HEIGHT_M: f64 = 1.6;
 
-/// The wanted set's altitude: the eye's height over the recipe's surface under it, never under
-/// the eye's own height ([`EYE_HEIGHT_M`]).
+/// The wanted set's altitude: the eye's height over the DRAWN ground under it
+/// ([`crate::chunks::drawn_surface_m`]: the artifact's field where the realm holds one, the recipe's own
+/// relief where it does not), never under the eye's own height ([`EYE_HEIGHT_M`]).
 #[must_use]
 pub fn floored_altitude_m(altitude_m: f64) -> f64 {
     altitude_m.max(EYE_HEIGHT_M)
@@ -967,12 +968,14 @@ pub struct WantedSet {
     /// while `bounded` — a descent without a shadow reach lets every chunk cast.
     casting: BTreeSet<ChunkKey>,
     bounded: bool,
-    /// THE ALTITUDE THIS DESCENT RAN AT, in metres over the recipe's surface under the eye,
-    /// floored as [`floored_altitude_m`] floors it. The bounded ask reads it (ruling F9 item 1):
-    /// a ring whose slant distance does not reach the ground has no ask at all, and only the
-    /// RECIPE'S surface says where the ground is — the ladder's own radius is its FLOOR, which
-    /// stands kilometres under the recipe, and reading that in its place made every near ring look
-    /// empty and the bound inert (MEASURED, the second bounded flight of 2026-09-13).
+    /// THE ALTITUDE THIS DESCENT RAN AT, in metres over the DRAWN ground under the eye
+    /// ([`crate::chunks::drawn_surface_m`]), floored as [`floored_altitude_m`] floors it. The bounded
+    /// ask reads it (ruling F9 item 1): a ring whose slant distance does not reach the ground has no
+    /// ask at all, and only the drawn ground says where the ground is — the ladder's own radius is its
+    /// FLOOR, which stands kilometres under it, and reading that in its place made every near ring
+    /// look empty and the bound inert (MEASURED, the second bounded flight of 2026-09-13); and the
+    /// recipe's own relief is not the drawn ground either once the realm holds its artifact (MEASURED
+    /// 6.6 km apart on the reference stand, 2026-09-24).
     pub altitude_m: f64,
     /// How far the ladder reaches, in metres, and the rungs it holds.
     pub reach_m: f64,
@@ -1601,7 +1604,13 @@ impl LadderView {
     /// skyline hides reads urgent here while a descent would not want it. The instrument states
     /// that; it is not the band's rule.
     #[must_use]
-    pub fn probe(&self, body: &BodyDefinition, eye_m: [f64; 3], key: ChunkKey) -> BandProbe {
+    pub fn probe(
+        &self,
+        body: &BodyDefinition,
+        artifact: Option<&ArtifactCache>,
+        eye_m: [f64; 3],
+        key: ChunkKey,
+    ) -> BandProbe {
         let eye = DVec3::from_array(eye_m);
         let len = eye.length();
         let ladder = *body.ladder();
@@ -1610,7 +1619,8 @@ impl LadderView {
             return BandProbe::default();
         }
         let d = eye / len;
-        let surface = vd_terrain::height::height_m(body, [d.x, d.y, d.z], 0);
+        // The drawn ground under the eye, the same reading the band's own descent takes.
+        let surface = crate::chunks::drawn_surface_m(body, artifact, [d.x, d.y, d.z]);
         let altitude = floored_altitude_m(len - surface);
         let horizon = horizon_m(surface, altitude);
         let frame = EyeFrame::new(eye);
@@ -1645,9 +1655,13 @@ impl LadderView {
             return WantedSet::default();
         }
         let d = eye / len;
-        let surface = vd_terrain::height::height_m(body, [d.x, d.y, d.z], 0);
-        // THE FLOOR (item 12): an eye under the recipe's surface wants what an eye standing on
-        // it wants.
+        // ★ THE GROUND THE CHUNKS DRAW (2026-09-24): the eye's height, horizon and reach are read
+        // over the artifact's solved ground where the realm holds it, never over the recipe's own
+        // relief the artifact replaced — on the reference stand the two stood 6.6 km apart and the
+        // band drew the ground under the eye three rungs too coarse.
+        let surface = crate::chunks::drawn_surface_m(body, artifact, [d.x, d.y, d.z]);
+        // THE FLOOR (item 12): an eye under the drawn ground wants what an eye standing on it
+        // wants.
         let altitude = floored_altitude_m(len - surface);
         let horizon = horizon_m(surface, altitude);
         let reach = reach_m(surface, altitude, relief_m(body));
@@ -3093,7 +3107,7 @@ mod tests {
         // ONE COLUMN READ FROM ONE EYE: an urgent chunk's column stands inside its rung's
         // territory and inside the horizon, so the same eye's own reading calls it urgent.
         let hot = named[named.len() - 1];
-        let read = view.probe(&body, eye, hot);
+        let read = view.probe(&body, None, eye, hot);
         assert!(read.urgent);
         assert!(read.near_m <= read.horizon_m, "{read:?}");
         assert!(read.near_m < read.territory_m, "{read:?}");
@@ -3104,11 +3118,11 @@ mod tests {
             .iter()
             .find(|k| w.class_of(**k) == BandClass::Revealed)
             .expect("a peak past the horizon");
-        let seen = view.probe(&body, eye, peak);
+        let seen = view.probe(&body, None, eye, peak);
         assert!(!seen.urgent);
         // An eye at the body's own centre has no radial and reads nothing.
         assert_eq!(
-            view.probe(&body, [0.0, 0.0, 0.0], hot),
+            view.probe(&body, None, [0.0, 0.0, 0.0], hot),
             BandProbe::default()
         );
     }

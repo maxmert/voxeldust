@@ -118,6 +118,52 @@ pub fn height_field_m(
     dir: [f64; 3],
     rung: u8,
 ) -> Option<f64> {
+    field_column(body, field, dir, rung).map(|(ground, _)| metres_of_q28(ground))
+}
+
+/// ★ THE SURFACE THE CHUNKS DRAW along a float direction at a rung, with the macro field
+/// (2026-09-24, the client's eye stood on the sea FLOOR): the ground of [`height_field_m`] where it
+/// stands over its water, and the water SHEET's own radius where it stands under it — the level, held
+/// one extractor's step off the ground ([`crate::position::water_radius`], the one rule the built and
+/// the morphed sheet share), because the chunks drop a floor deeper than that step and draw the sheet
+/// in its place. The level is the column's water word or the body's sea, the higher, as the sheet
+/// reads it. A caller that needs the floor itself (a diver, a sonar) reads [`height_field_m`].
+///
+/// **Example.** A hull hangs 20 m over the belt's sea, whose floor lies 6.9 km down: this answers
+/// the sea's own radius, so the eye reads 20 m, not 6.9 km, and the ground under it is drawn at the
+/// rung a 20 m eye asks for.
+#[must_use]
+pub fn drawn_height_field_m(
+    body: &BodyDefinition,
+    field: &dyn crate::artifact::ZField,
+    dir: [f64; 3],
+    rung: u8,
+) -> Option<f64> {
+    field_column(body, field, dir, rung).map(|(ground, water)| {
+        let ground_m = metres_of_q28(ground);
+        let level_m = metres_of_q28(vd_recipe::cell::greater(water, body.sea_radius));
+        if ground_m < level_m {
+            crate::position::water_radius(
+                crate::position::WaterSide::Under,
+                level_m,
+                ground_m,
+                crate::position::water_quantum_m(rung),
+            )
+        } else {
+            ground_m
+        }
+    })
+}
+
+/// The column the field states along a direction at a rung: its surface (the ground, held on its
+/// side of the water by the shore law) and the water radius its side names, both as the recipe's
+/// fixed-point radii. `None` where the field holds no row for the stencil.
+fn field_column(
+    body: &BodyDefinition,
+    field: &dyn crate::artifact::ZField,
+    dir: [f64; 3],
+    rung: u8,
+) -> Option<(Gi, Gi)> {
     let fine = body.macro_lattice()?;
     let lattice = fine.coarser(field.level())?;
     let face = vd_seed::bend::face_of(dir);
@@ -163,12 +209,15 @@ pub fn height_field_m(
         slope_share,
     );
     let base = body.radius + z + parts.coarse;
-    Some(metres_of_q28(shore(
-        base,
+    Some((
+        shore(
+            base,
+            water,
+            terrace(&body.terrace_at(rung), base + parts.fine),
+            side,
+        ),
         water,
-        terrace(&body.terrace_at(rung), base + parts.fine),
-        side,
-    )))
+    ))
 }
 
 /// ★ THE PER-COLUMN ROUGHNESS FACTOR as a real number in `[M_MIN, 1]`, for a host outside the recipe
@@ -359,6 +408,45 @@ mod tests {
     /// ★ THE HEIGHT WITH THE MACRO FIELD (C4c): through the moon's artifact it answers along any
     /// direction, agrees with the column kernel's own surface at a cell centre to a step, reads a
     /// pyramid level at a coarse rung, and answers nothing through a cache missing the tile.
+    /// ★ A ONE-TILE CACHE AT ITS EDGE (2026-09-24, the drawn surface's shared column read): where
+    /// the height's own stencil stands inside the one tile held and the slope's wider stencil reaches
+    /// the tile not held, the field answers NOTHING — neither the ground nor the drawn surface — never
+    /// a height with a slope read off a hole. Walks inward from the tile's edge, one node at a time,
+    /// until the height reads and the slope does not.
+    #[test]
+    fn a_tile_whose_neighbour_is_missing_answers_nothing_at_its_edge() {
+        use crate::artifact::{TILE_EDGE, TileCache};
+        use crate::home::{HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words};
+        use crate::solve::{Schedule, solve_full};
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let artifact =
+            crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        assert!(
+            artifact.tiles_per_edge() >= 2,
+            "the moon's face holds two tiles a side"
+        );
+        let mut one = TileCache::new(lattice.edge);
+        one.apply(artifact.tile(Face::PosX, 0, 0));
+        let cpn = lattice.cells_per_node as i32;
+        let edge = TILE_EDGE as i32;
+        let j = (edge / 2) * cpn + cpn / 2;
+        let found = (1..=8).find(|k| {
+            let i = (edge - k) * cpn + cpn / 2;
+            let z = crate::artifact::sample_z(&lattice, &one, Face::PosX, 0, i, j);
+            let dir = cell_dir(&moon, Face::PosX, i, j);
+            z.is_some() & height_field_m(&moon, &one, dir, 0).is_none()
+        });
+        let k = found.expect("a node whose height reads while its slope does not");
+        let i = (edge - k) * cpn + cpn / 2;
+        let dir = cell_dir(&moon, Face::PosX, i, j);
+        assert_eq!(drawn_height_field_m(&moon, &one, dir, 0), None);
+    }
+
     #[test]
     fn the_height_reads_the_artifacts_field_along_a_direction() {
         use crate::CHUNK_EDGE;
@@ -606,6 +694,49 @@ mod tests {
     ///
     /// **Example.** A hull descends on the belt's coast from 1 400 km. At rung 15 it draws level 3,
     /// at rung 10 level 1, at rung 5 the rows; the beach under it is the same beach at all three.
+    /// ★ THE SURFACE THE CHUNKS DRAW (2026-09-24): along the moon's stated coast, a column whose
+    /// ground stands over the water answers that ground; a column whose ground stands under it
+    /// answers the water sheet's own radius — the level, or the ground one extractor's step up where
+    /// the ground stands nearer the level than that — never the floor the chunks drop. A field that
+    /// holds no row answers nothing, as the ground's own read does.
+    ///
+    /// **Example.** A hull 20 m over the moon's stated sea reads 20 m to the water, not the depth of
+    /// the floor under it.
+    #[test]
+    fn the_drawn_surface_is_the_ground_over_the_water_and_the_sheet_under_it() {
+        let (moon, lattice, artifact, face, j) = moon_with_a_stated_sea();
+        let n0 = moon.ladder().cells_per_edge(0) as i32;
+        let sea_m = metres_of_q28(moon.sea_radius);
+        let rung = 5u8;
+        let q = crate::position::water_quantum_m(rung);
+        let (mut wet, mut dry) = (0u32, 0u32);
+        let mut i = 64;
+        while i < n0 - 64 {
+            let dir = cell_dir(&moon, face, i, j);
+            let ground = height_field_m(&moon, &artifact, dir, rung).expect("a ground");
+            let drawn = drawn_height_field_m(&moon, &artifact, dir, rung).expect("a surface");
+            // Over the water: the ground itself. Under it: the sheet, which never stands under
+            // the sea's level nor under one step over the ground.
+            let under = ground < sea_m;
+            wet += u32::from(under);
+            dry += u32::from(!under);
+            // The higher of the two, written without a branch (the float fence bans `f64::max`).
+            let sheet = 0.5 * (sea_m + ground + q + (sea_m - ground - q).abs());
+            let want = if under { sheet } else { ground };
+            assert!(
+                (drawn - want).abs() < 1e-6,
+                "column {i}: drawn {drawn}, want {want}"
+            );
+            i += 64;
+        }
+        assert!(wet > 0, "the row crosses the stated sea");
+        assert!(dry > 0, "the row crosses dry ground");
+        // A field that holds no row answers nothing.
+        let empty = crate::artifact::TileCache::new(lattice.edge);
+        let dir = cell_dir(&moon, face, n0 / 2, j);
+        assert_eq!(drawn_height_field_m(&moon, &empty, dir, rung), None);
+    }
+
     #[test]
     fn the_shoreline_stands_within_one_fine_node_at_every_pyramid_level() {
         use crate::artifact::PyramidField;

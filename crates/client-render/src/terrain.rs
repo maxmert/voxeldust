@@ -1445,11 +1445,16 @@ struct RulerEntities {
     rung: u8,
 }
 
-/// The last ruler computation's inputs and answer: the march is re-run only when the eye or the
-/// nose moves — a stand recomputes once.
+/// The last ruler computation's inputs and answer: the march is re-run only when one of them moves —
+/// the eye, the nose, the realm, the reach, or the realm's artifact (its head and its epoch, the key
+/// the lane itself holds a field by), because the march reads the drawn ground and the drawn ground
+/// changes when a level or a tile lands (2026-09-24). A still stand recomputes once per field.
 struct RulerCache {
     eye_body: [f64; 3],
     forward_body: [f64; 3],
+    realm: RealmId,
+    reach_m: f64,
+    artifact: Option<(vd_client::artifact_book::ArtifactHead, u64)>,
     ruler: Option<(Ruler, u8)>,
 }
 
@@ -3492,7 +3497,12 @@ pub(crate) fn sync_terrain(
     if let Some((realm, body, eye_body)) = under_eye.as_ref() {
         let (centre, facing) = centres[realm];
         let eye_body = *eye_body;
-        if let Some(ground) = eye_surface(body, eye_body) {
+        // ★ THE DRAWN GROUND (2026-09-24): the stamp, the ruler and the band read the ground the
+        // realm's chunks are built on — its artifact where it holds one — never the recipe's own
+        // relief the artifact replaced.
+        let artifact = terrain.lane.artifact(*realm).cloned();
+        let artifact_key = artifact.as_deref().map(|a| (a.head, a.epoch));
+        if let Some(ground) = eye_surface(body, artifact.as_deref(), eye_body) {
             let rungs = body.ladder().rungs;
             let (reach, rung_min, rung_max) = terrain.ladders.get(realm).map_or((0.0, 0, 0), |l| {
                 (l.wanted.reach_m, l.wanted.rung_min, l.wanted.rung_max)
@@ -3510,27 +3520,47 @@ pub(crate) fn sync_terrain(
             });
             if let (Some(f), true) = (nose, probe_materials.is_some()) {
                 let forward_body = (facing.inverse() * f).to_array();
-                let fresh = terrain
-                    .ruler_cache
-                    .as_ref()
-                    .is_some_and(|c| c.eye_body == eye_body && c.forward_body == forward_body);
+                let fresh = terrain.ruler_cache.as_ref().is_some_and(|c| {
+                    (c.eye_body == eye_body)
+                        & (c.forward_body == forward_body)
+                        & (c.realm == *realm)
+                        & (c.reach_m == reach)
+                        & (c.artifact == artifact_key)
+                });
                 if !fresh {
                     // Two passes: march at the rung under the eye, then at the rung the rule names
                     // for the hit's distance, so the ball stands on the ground that is drawn there.
                     let first_rung = rung_for_distance(ground.altitude_m, rungs);
-                    let first = ruler_on_surface(body, eye_body, forward_body, first_rung, reach);
+                    let first = ruler_on_surface(
+                        body,
+                        artifact.as_deref(),
+                        eye_body,
+                        forward_body,
+                        first_rung,
+                        reach,
+                    );
                     let ruler = first.and_then(|r| {
                         let rung = rung_for_distance(r.distance_m, rungs);
                         let again = if rung == first_rung {
                             Some(r)
                         } else {
-                            ruler_on_surface(body, eye_body, forward_body, rung, reach)
+                            ruler_on_surface(
+                                body,
+                                artifact.as_deref(),
+                                eye_body,
+                                forward_body,
+                                rung,
+                                reach,
+                            )
                         };
                         again.map(|r| (r, rung))
                     });
                     terrain.ruler_cache = Some(RulerCache {
                         eye_body,
                         forward_body,
+                        realm: *realm,
+                        reach_m: reach,
+                        artifact: artifact_key,
                         ruler,
                     });
                 }
@@ -3582,7 +3612,12 @@ pub(crate) fn sync_terrain(
                             .urgent_missing_keys(&|k| lane.is_resident(*realm, k), GAP_KEYS_CAP)
                             .into_iter()
                             .map(|key| {
-                                let probe = l.view.probe(body, eye_body, key);
+                                let probe = l.view.probe(
+                                    body,
+                                    lane.artifact(*realm).map(|a| &**a),
+                                    eye_body,
+                                    key,
+                                );
                                 vd_devproto::DevBandMiss {
                                     key: format!("{key:?}"),
                                     rung: key.rung,

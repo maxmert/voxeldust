@@ -51,7 +51,8 @@ fn main() {
     let cam_up = orient * DVec3::Y;
     let eye = stand + cam_up * vd_client::ladder_view::EYE_HEIGHT_M;
     let fov_y = vd_core::geometry::REFERENCE_VIEW_FOV_Y_RAD;
-    let ground = eye_surface(&body, eye.to_array()).expect("the eye's ground");
+    // A recipe-only instrument: no artifact, so the ground is the recipe's own relief it stood on.
+    let ground = eye_surface(&body, None, eye.to_array()).expect("the eye's ground");
     let horizon = horizon_m(ground.surface_m, ground.altitude_m);
     println!(
         "eye {:.1} m over the recipe, horizon {horizon:.0} m, relief bound {:.0} m",

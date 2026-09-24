@@ -2341,14 +2341,15 @@ pub fn body_frame_point(eye_m: [f64; 3], centre_m: [f64; 3], facing_xyzw: [f64; 
     [p.x, p.y, p.z]
 }
 
-/// THE EYE'S GROUND TRUTH (8p, ruling V14 D8-7): the recipe's surface under a body-frame point, the
-/// point's height over it, and the biome there. The stamp on every judged picture states these,
-/// and the picture gate recomputes them from the state file — two readings of one recipe that must
-/// agree (M8-4). The surface is read at rung 0, the true shape; a drawn rung stands within its own
-/// bound of it. `None` at the body's centre (no direction) or for a non-finite point.
+/// THE EYE'S GROUND TRUTH (8p, ruling V14 D8-7): the DRAWN ground under a body-frame point
+/// ([`drawn_surface_m`]), the point's height over it, and the biome there. The stamp on every judged
+/// picture states these, and the picture gate recomputes them from the state file — two readings of
+/// one recipe that must agree (M8-4). The surface is read at rung 0, the true shape; a drawn rung
+/// stands within its own bound of it. `None` at the body's centre (no direction) or for a non-finite
+/// point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EyeSurface {
-    /// The recipe's surface radius along the point's direction, in metres.
+    /// The drawn ground's radius along the point's direction, in metres.
     pub surface_m: f64,
     /// The point's height over that surface, in metres (negative underground).
     pub altitude_m: f64,
@@ -2361,14 +2362,71 @@ fn positive(x: f64) -> bool {
     x.partial_cmp(&0.0) == Some(std::cmp::Ordering::Greater)
 }
 
+/// ★ THE GROUND THE CHUNKS DRAW, under a direction, at rung 0 (2026-09-24, the believability arc's
+/// reference stand): the eye stood 400 m over the solved ground while the ladder, the stamp and the
+/// ruler all measured it 7 054 m over the recipe's OWN relief — the relief the artifact replaced —
+/// so the ladder drew the ground under the eye at rung 3 instead of rung 0 and stated a horizon
+/// four times too far. The ladder's descent and probe and the eye's ground truth read this:
+/// [`drawn_field_m`] at rung 0 — the ground, or the water sheet over a column under its water.
+///
+/// A realm that states an artifact draws NOTHING until a field answers (the lane waits for the head
+/// and refuses a build whose field is not here). For that window this answers the recipe's own relief
+/// as a STAND-IN, so the ladder still wants a band and never releases the realm's chunks; the ruler
+/// asks [`drawn_field_m`] itself and plants no ball on ground nobody draws.
 #[must_use]
-pub fn eye_surface(body: &BodyDefinition, point_m: [f64; 3]) -> Option<EyeSurface> {
+pub fn drawn_surface_m(
+    body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
+    dir: [f64; 3],
+) -> f64 {
+    drawn_field_m(body, artifact, dir, 0)
+        .unwrap_or_else(|| vd_terrain::height::height_m(body, dir, 0))
+}
+
+/// ★ THE SURFACE DRAWN AT A RUNG, along a direction (2026-09-24): with no artifact (or a body with no
+/// macro lattice) the recipe's own relief at the rung, which is what such a realm's chunks draw; with
+/// one, the field that rung reads, else the finest whole pyramid level the cache holds, each through
+/// [`vd_terrain::height::drawn_height_field_m`] — the ground, or the water sheet where the column
+/// stands under its water. `None` where the realm states an artifact and no field it holds answers:
+/// nothing is drawn there yet.
+#[must_use]
+pub fn drawn_field_m(
+    body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
+    dir: [f64; 3],
+    rung: u8,
+) -> Option<f64> {
+    let recipe = || Some(vd_terrain::height::height_m(body, dir, rung));
+    let Some(artifact) = artifact else {
+        return recipe();
+    };
+    let Some(lattice) = body.macro_lattice() else {
+        return recipe();
+    };
+    let drawn =
+        |field: &dyn ZField| vd_terrain::height::drawn_height_field_m(body, field, dir, rung);
+    artifact
+        .field_at_rung(&lattice, rung)
+        .and_then(|field| drawn(&*field))
+        .or_else(|| {
+            (1..=artifact.head.levels)
+                .filter_map(|k| artifact.level(k))
+                .find_map(|level| drawn(&**level))
+        })
+}
+
+#[must_use]
+pub fn eye_surface(
+    body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
+    point_m: [f64; 3],
+) -> Option<EyeSurface> {
     let len = (point_m[0] * point_m[0] + point_m[1] * point_m[1] + point_m[2] * point_m[2]).sqrt();
     if !positive(len) {
         return None;
     }
     let dir = [point_m[0] / len, point_m[1] / len, point_m[2] / len];
-    let surface = vd_terrain::height::height_m(body, dir, 0);
+    let surface = drawn_surface_m(body, artifact, dir);
     Some(EyeSurface {
         surface_m: surface,
         altitude_m: len - surface,
@@ -2411,8 +2469,11 @@ const RULER_REFINE_STEPS: u32 = 12;
 /// rung — every stand's ray meets ground well inside it, and a ray that does not gets no ruler.
 pub const RULER_MAX_CELLS: f64 = 4096.0;
 
-/// Where the centre ray from `eye_m` along `forward` meets the recipe's surface AT THE DRAWN RUNG
-/// (so the ball rests on the drawn ground, not on a finer shape it is not standing on), marched one
+/// Where the centre ray from `eye_m` along `forward` meets the DRAWN surface AT THE DRAWN RUNG
+/// ([`drawn_field_m`]: the artifact's field at that rung, else its finest level held, the water sheet
+/// over a wet column; the recipe's own relief only for a realm with no artifact) — so the ball rests on
+/// the drawn ground, not on a finer shape it is not standing on, never under the solved ground the
+/// artifact put in the recipe's place, and nowhere a realm draws nothing yet — marched one
 /// cell at a time out to `reach_m` and refined by bisection. `None` when the ray leaves without
 /// touching ground within reach (an eye looking at the sky), for a rung the ladder lacks, or for a
 /// degenerate eye or direction. The ball's radius is the HIT's distance along the ray times
@@ -2420,6 +2481,7 @@ pub const RULER_MAX_CELLS: f64 = 4096.0;
 #[must_use]
 pub fn ruler_on_surface(
     body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
     eye_m: [f64; 3],
     forward: [f64; 3],
     rung: u8,
@@ -2436,7 +2498,7 @@ pub fn ruler_on_surface(
         let p = eye + fwd * t;
         let len = p.length();
         let dir = [p.x / len, p.y / len, p.z / len];
-        len <= vd_terrain::height::height_m(body, dir, rung)
+        drawn_field_m(body, artifact, dir, rung).is_some_and(|h| len <= h)
     };
     // An eye at or under the drawn surface plants nothing: the bracket would close on the eye and
     // the ball would stand at the nose (the refuter's finding 7). The stamp's altitude says why.
@@ -4503,16 +4565,245 @@ mod tests {
             d[1] * (surface + 3.4),
             d[2] * (surface + 3.4),
         ];
-        let read = eye_surface(&body, eye).expect("a direction");
-        assert_eq!(eye_surface(&body, eye), Some(read));
+        let read = eye_surface(&body, None, eye).expect("a direction");
+        assert_eq!(eye_surface(&body, None, eye), Some(read));
         assert!((read.surface_m - surface).abs() < 1e-6, "{read:?}");
         assert!((read.altitude_m - 3.4).abs() < 1e-6, "{read:?}");
         assert_eq!(
             read.biome,
             vd_terrain::height::biome_at(&body, dir, surface)
         );
-        assert_eq!(eye_surface(&body, [0.0, 0.0, 0.0]), None);
-        assert_eq!(eye_surface(&body, [f64::NAN, 0.0, 0.0]), None);
+        assert_eq!(eye_surface(&body, None, [0.0, 0.0, 0.0]), None);
+        assert_eq!(eye_surface(&body, None, [f64::NAN, 0.0, 0.0]), None);
+    }
+
+    /// ★ THE HOME MOON'S ARTIFACT IN THREE AMOUNTS (2026-09-24, the drawn ground): the head alone,
+    /// the head and its pyramid, and all of it with the tiles of one face — the three states a
+    /// realm's cache passes through while its parts land.
+    fn moon_caches() -> (BodyDefinition, [ArtifactCache; 3]) {
+        use crate::artifact_book::ArtifactReceiver;
+        use vd_terrain::home::{
+            HOME_MOON_SEED, HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words,
+        };
+        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_wire::channels::BulkMsg;
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate =
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let artifact =
+            vd_terrain::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        let realm = RealmId::Planet(HOME_MOON_SEED);
+        let mut rx = ArtifactReceiver::default();
+        rx.accept(BulkMsg::ArtifactHead {
+            realm,
+            world_tag: 9,
+            version: artifact.version,
+            edge: artifact.edge,
+            digest: artifact.digest(),
+            tiles_per_edge: artifact.tiles_per_edge(),
+            levels: artifact.pyramid.len() as u32,
+            sea_m: artifact.sea_m,
+            coast_parts: 0,
+        });
+        let head = rx.book().get(realm).cloned().expect("a head");
+        for (k, level) in artifact.pyramid.iter().enumerate().rev() {
+            rx.accept(BulkMsg::ArtifactPyramid {
+                realm,
+                level: k as u32 + 1,
+                part: 0,
+                parts: 1,
+                z_m: level.clone(),
+                water_m: artifact.pyramid_water[k].clone(),
+            });
+        }
+        let pyramid = rx.book().get(realm).cloned().expect("a pyramid");
+        for tx in 0..artifact.tiles_per_edge() {
+            for ty in 0..artifact.tiles_per_edge() {
+                rx.accept(BulkMsg::ArtifactTile {
+                    realm,
+                    face: Face::PosX.index(),
+                    tx,
+                    ty,
+                    rows: artifact.tile(Face::PosX, tx, ty).to_bytes(),
+                });
+            }
+        }
+        let whole = rx.book().get(realm).cloned().expect("the tiles");
+        (moon, [head, pyramid, whole])
+    }
+
+    /// A direction on the face whose tiles land in [`moon_caches`].
+    const MOON_DIR: [f64; 3] = [0.957_826, 0.201_144, -0.124_518];
+
+    #[test]
+    fn the_drawn_surface_reads_the_finest_field_the_cache_holds() {
+        let (moon, [head, pyramid, whole]) = moon_caches();
+        let dir = vd_seed::bend::normalize(MOON_DIR);
+        let recipe = vd_terrain::height::height_m(&moon, dir, 0);
+        let drawn = |field: &dyn ZField, d: [f64; 3]| {
+            vd_terrain::height::drawn_height_field_m(&moon, field, d, 0).expect("a field answers")
+        };
+        let on_tiles = drawn(&**whole.tiles(), dir);
+        let on_level = drawn(&**pyramid.level(1).expect("level 1 landed"), dir);
+        let top = pyramid.head.levels;
+        let on_top = drawn(
+            &**pyramid.level(top).expect("the coarsest level landed"),
+            dir,
+        );
+        // Every reading below discriminates: the tiles, the finest level, the coarsest level and the
+        // recipe stand apart at this direction, so an order read wrongly cannot pass.
+        assert_ne!(on_tiles, on_level);
+        assert_ne!(on_level, on_top);
+        assert_ne!(on_level, recipe);
+        assert_ne!(on_tiles, recipe);
+        // No artifact: the recipe, which such a realm draws. A head alone: no field answers, so
+        // nothing is drawn there — and the eye's reading stands in with the recipe.
+        assert_eq!(drawn_field_m(&moon, None, dir, 0), Some(recipe));
+        assert_eq!(drawn_field_m(&moon, Some(&head), dir, 0), None);
+        assert_eq!(drawn_surface_m(&moon, Some(&head), dir), recipe);
+        // The pyramid alone: its FINEST level. The tiles: ahead of every level.
+        assert_eq!(drawn_surface_m(&moon, Some(&pyramid), dir), on_level);
+        assert_eq!(drawn_surface_m(&moon, Some(&whole), dir), on_tiles);
+        // The opposite face, whose tiles never landed: the finest level there, not the recipe.
+        let other = vd_seed::bend::normalize([-MOON_DIR[0], MOON_DIR[1], MOON_DIR[2]]);
+        let other_level = drawn(&**whole.level(1).expect("level 1 landed"), other);
+        assert_eq!(drawn_surface_m(&moon, Some(&whole), other), other_level);
+        assert_ne!(other_level, vd_terrain::height::height_m(&moon, other, 0));
+        // A body with no macro lattice draws the recipe, artifact or not.
+        let rock = moon.without_macro_lattice();
+        assert_eq!(
+            drawn_field_m(&rock, Some(&whole), dir, 0),
+            Some(vd_terrain::height::height_m(&rock, dir, 0))
+        );
+        // The eye's ground truth stands on the drawn ground.
+        let eye = dir.map(|c| c * (on_tiles + 3.4));
+        let read = eye_surface(&moon, Some(&whole), eye).expect("a direction");
+        assert!((read.surface_m - on_tiles).abs() < 1e-6, "{read:?}");
+        assert!((read.altitude_m - 3.4).abs() < 1e-6, "{read:?}");
+    }
+
+    #[test]
+    fn the_ruler_rests_on_the_drawn_ground_and_plants_nothing_where_nothing_is_drawn() {
+        use vd_core::glam::DVec3;
+        let (moon, [head, pyramid, whole]) = moon_caches();
+        let up = DVec3::from_array(vd_seed::bend::normalize(MOON_DIR));
+        let on_tiles = drawn_surface_m(&moon, Some(&whole), up.to_array());
+        let recipe = drawn_surface_m(&moon, None, up.to_array());
+        // MEASURED here: the recipe's relief stands 3.26 km over the solved ground. So the eye stands
+        // 300 m over the HIGHER of the two, the nose 60° down, and the march runs at rung 2, whose
+        // 4 m cells reach 16 km: the ray meets each ground inside that reach.
+        let rung = 2u8;
+        let eye = (up * (on_tiles.max(recipe) + 300.0)).to_array();
+        let level = up.cross(DVec3::Z).normalize();
+        let tilt = 60.0_f64.to_radians();
+        let nose = (level * tilt.cos() - up * tilt.sin())
+            .normalize()
+            .to_array();
+        let reach = RULER_MAX_CELLS * f64::from(vd_seed::ladder::cell_m(rung));
+        // The ball's foot: two radii under its centre, against a ground read at its own direction
+        // and at the march's own rung.
+        let foot = |r: Ruler, ground: &dyn Fn([f64; 3]) -> f64| {
+            let c = DVec3::from_array(r.centre_m);
+            c.length() - 2.0 * r.radius_m - ground(c.normalize().to_array())
+        };
+        let drawn_at = |cache: &ArtifactCache, d: [f64; 3]| {
+            drawn_field_m(&moon, Some(cache), d, rung).expect("drawn there")
+        };
+        let on = ruler_on_surface(&moon, Some(&whole), eye, nose, rung, reach)
+            .expect("the ray meets the tiles' ground");
+        let on_foot = foot(on, &|d| drawn_at(&whole, d));
+        assert!(
+            on_foot.abs() < 1.0,
+            "the ball's foot stands {on_foot} m off the tiles' ground"
+        );
+        let bare = ruler_on_surface(&moon, None, eye, nose, rung, reach)
+            .expect("the ray meets the recipe's ground");
+        let bare_foot = foot(bare, &|d| vd_terrain::height::height_m(&moon, d, rung));
+        assert!(
+            bare_foot.abs() < 1.0,
+            "the ball's foot stands {bare_foot} m off the recipe"
+        );
+        assert_ne!(on, bare);
+        // A head alone: the realm draws nothing yet, so no ball stands anywhere.
+        assert_eq!(
+            ruler_on_surface(&moon, Some(&head), eye, nose, rung, reach),
+            None
+        );
+        // The pyramid without the tiles: the ball rests on the finest level, as the eye reads it.
+        let lvl = ruler_on_surface(&moon, Some(&pyramid), eye, nose, rung, reach)
+            .expect("the ray meets the level's ground");
+        let lvl_foot = foot(lvl, &|d| drawn_at(&pyramid, d));
+        assert!(
+            lvl_foot.abs() < 1.0,
+            "the ball's foot stands {lvl_foot} m off the level"
+        );
+        assert_ne!(lvl, on);
+    }
+
+    /// ★ THE DEFECT OF 2026-09-24 AT THE LADDER: the descent and the band probe read the eye's height
+    /// over the DRAWN ground — the artifact's where the realm holds one — never over the recipe's own
+    /// relief the artifact replaced.
+    #[test]
+    fn the_ladder_reads_the_eyes_height_over_the_drawn_ground() {
+        use crate::ladder_view::{LadderView, floored_altitude_m, horizon_m};
+        let (moon, [_, _, whole]) = moon_caches();
+        let up = vd_seed::bend::normalize(MOON_DIR);
+        let ground = drawn_surface_m(&moon, Some(&whole), up);
+        let recipe = drawn_surface_m(&moon, None, up);
+        let eye = up.map(|c| c * (ground + 3.4));
+        let with = LadderView::default().wanted(&moon, eye, Some(&whole));
+        let without = LadderView::default().wanted(&moon, eye, None);
+        let want = floored_altitude_m(3.4);
+        assert!((with.altitude_m - want).abs() < 1e-6, "{}", with.altitude_m);
+        let over_recipe = floored_altitude_m(ground + 3.4 - recipe);
+        assert!(
+            (without.altitude_m - over_recipe).abs() < 1e-6,
+            "{}",
+            without.altitude_m
+        );
+        assert_ne!(with.altitude_m, without.altitude_m);
+        let probe = LadderView::default().probe(&moon, Some(&whole), eye, with.keys[0]);
+        assert!(
+            (probe.horizon_m - horizon_m(ground, want)).abs() < 1e-6,
+            "{probe:?}"
+        );
+    }
+
+    /// ★ AND THE RUNG IT DRAWS: on the stand of the moon's first face where the solve raised the
+    /// ground most over the recipe's relief, an eye standing on the solved ground asks rung 0, and the
+    /// recipe's reading of the same eye asks a coarser ring.
+    #[test]
+    fn an_eye_on_the_solved_ground_asks_rung_zero() {
+        use crate::ladder_view::{EYE_HEIGHT_M, LadderView, switch_m};
+        let (moon, [_, _, whole]) = moon_caches();
+        let (gap, stand) = (-8..=8)
+            .flat_map(|a| (-8..=8).map(move |b| (a, b)))
+            .map(|(a, b)| vd_seed::bend::normalize([1.0, f64::from(a) * 0.1, f64::from(b) * 0.1]))
+            .map(|d| {
+                (
+                    drawn_surface_m(&moon, Some(&whole), d) - drawn_surface_m(&moon, None, d),
+                    d,
+                )
+            })
+            .max_by(|x, y| x.0.total_cmp(&y.0))
+            .expect("a stand");
+        assert!(
+            gap > 2.0 * switch_m(0),
+            "the largest raise on PosX is {gap} m"
+        );
+        let on = drawn_surface_m(&moon, Some(&whole), stand);
+        let eye = stand.map(|c| c * (on + EYE_HEIGHT_M));
+        assert_eq!(
+            LadderView::default()
+                .wanted(&moon, eye, Some(&whole))
+                .rung_min,
+            0
+        );
+        assert!(LadderView::default().wanted(&moon, eye, None).rung_min > 0);
     }
 
     #[test]
@@ -4535,10 +4826,10 @@ mod tests {
         // longer reach answer the same 1 113.8 m hit. The ruler is the picture's own size reference,
         // so a hill the eye looks over is exactly the case it must answer.
         let reach_m = 1_200.0;
-        let ruler = ruler_on_surface(&body, eye.to_array(), nose.to_array(), 0, reach_m)
+        let ruler = ruler_on_surface(&body, None, eye.to_array(), nose.to_array(), 0, reach_m)
             .expect("the ray meets the ground");
         assert_eq!(
-            ruler_on_surface(&body, eye.to_array(), nose.to_array(), 0, reach_m),
+            ruler_on_surface(&body, None, eye.to_array(), nose.to_array(), 0, reach_m),
             Some(ruler)
         );
         // The ball hovers one radius clear of the rung-0 surface at its own hit direction: its
@@ -4567,17 +4858,24 @@ mod tests {
         // A ray to the sky meets nothing within reach — and a reach of the whole ladder is cut to
         // the march's own, so the answer comes in thousands of steps, not a half-million.
         assert_eq!(
-            ruler_on_surface(&body, eye.to_array(), up.to_array(), 0, 400.0),
+            ruler_on_surface(&body, None, eye.to_array(), up.to_array(), 0, 400.0),
             None
         );
         assert_eq!(
-            ruler_on_surface(&body, eye.to_array(), up.to_array(), 0, 466_000.0),
+            ruler_on_surface(&body, None, eye.to_array(), up.to_array(), 0, 466_000.0),
             None
         );
         // Straight down from aloft at a coarse rung: the hit is under the eye, one cell's step.
         let aloft = up * (surface + 60_000.0);
-        let down = ruler_on_surface(&body, aloft.to_array(), (-up).to_array(), 9, 400_000.0)
-            .expect("the ground is below");
+        let down = ruler_on_surface(
+            &body,
+            None,
+            aloft.to_array(),
+            (-up).to_array(),
+            9,
+            400_000.0,
+        )
+        .expect("the ground is below");
         assert!(down.radius_m > 256.0, "{down:?}");
         // The centre stands two radii over the rung-9 surface, which lies within the dropped
         // octaves' bound of the rung-0 surface the eye's height was set from.
@@ -4596,7 +4894,7 @@ mod tests {
         // An eye under the drawn surface plants nothing.
         let buried = up * (surface - 5.0);
         assert_eq!(
-            ruler_on_surface(&body, buried.to_array(), nose.to_array(), 0, 400.0),
+            ruler_on_surface(&body, None, buried.to_array(), nose.to_array(), 0, 400.0),
             None
         );
         // The angular size is two degrees, pinned to the trigonometry it names.
@@ -4605,6 +4903,7 @@ mod tests {
         assert_eq!(
             ruler_on_surface(
                 &body,
+                None,
                 eye.to_array(),
                 nose.to_array(),
                 body.ladder().rungs,
@@ -4613,11 +4912,11 @@ mod tests {
             None
         );
         assert_eq!(
-            ruler_on_surface(&body, [0.0, 0.0, 0.0], nose.to_array(), 0, 400.0),
+            ruler_on_surface(&body, None, [0.0, 0.0, 0.0], nose.to_array(), 0, 400.0),
             None
         );
         assert_eq!(
-            ruler_on_surface(&body, eye.to_array(), [0.0, 0.0, 0.0], 0, 400.0),
+            ruler_on_surface(&body, None, eye.to_array(), [0.0, 0.0, 0.0], 0, 400.0),
             None
         );
     }
