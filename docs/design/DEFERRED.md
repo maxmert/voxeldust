@@ -10080,6 +10080,18 @@ updated in the same change as the work, deleted when done). The interims named h
   (committed 2026-09-24): `vd_client::chunks::drawn_surface_m` / `drawn_field_m` over `vd_terrain::height::drawn_height_field_m`
   (the ground, or the water sheet over a wet column) feed the ladder's descent and probe, the eye's ground truth and the
   ruler. The status file §3a.
+- 🟩 **A CLOSED CAVE SHADED AS A CAVE ON THE GROUND** — found 2026-09-24 in the window (the owner: *"the underneath of the
+  first rung is visible"*) and cured: a vertex that morphs onto the coarser field takes the coarser surface's shade there
+  (`vd_client::chunks::field_normal`, the parent's shade nearest the target first). MEASURED: the dark rung-0 pixels at
+  the ring's far edge 18 → 0 on the 494 m stand. The status file §3b.
+- 🟩 **THE CRACKS IN FAST LOW FLIGHT** — found 2026-09-24 in the window and cured: a skirt under a sky-facing edge hangs
+  past the coarser rung's sink (`vd_client::chunks::skirt_drop_m`); MEASURED gaps over the sunk coarser ground 1.50 m /
+  3.37 m / 7.98 m (rungs 0-2) → none. The status file §3c.
+- 🟥 **A CEILING'S SKIRT CAN PIERCE A ROOF THINNER THAN TWO CELLS** (2026-09-24, the owner's editing question): skirts
+  hang into the rock their edge stands on — down under the ground, two cells UP over a ceiling — so a tunnel dug just
+  under the surface could show a skirt through its thin roof. WHERE: `vd_client::chunks::add_skirts`. WHEN: slice 9
+  (editing) — clamp each skirt inside the solid cells of the chunk's own samples. AND a pick must read the shape, never
+  the drawn mesh (a skirt is not ground).
 - 🟥 **THE RULER'S MARCH READS THE WHOLE FIELD PER SAMPLE** (2026-09-24 review): ~3-6 µs a sample by arithmetic, up to
   ~12-25 ms on a capture frame whose camera moves; UNMEASURED. WHERE: `vd_client::chunks::ruler_on_surface`. WHEN: before
   the next capture flight that moves the camera — resolve the lattice, the field and the slope charter once per march (a

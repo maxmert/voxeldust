@@ -1066,6 +1066,61 @@ pub fn parent_keys(body: &BodyDefinition, key: ChunkKey) -> Vec<ChunkKey> {
     out
 }
 
+/// THE PARENT HIT NEAREST A RADIUS along a vertex's radial: over the parents the vertex reads (none
+/// on the face seam, whose vertex reads the field from both faces alike), the radial's crossing
+/// with a parent triangle nearest `near_m`, with the parent's shade there; a tie goes to the lower.
+fn nearest_parent_hit(
+    parent_meshes: &[Arc<ParentMesh>],
+    at_seam: bool,
+    key: ChunkKey,
+    v: [i16; 3],
+    dir: DVec3,
+    near_m: f64,
+) -> Option<(f64, DVec3)> {
+    parent_meshes
+        .iter()
+        .filter(|_| !at_seam)
+        .fold(None, |best: Option<(f64, DVec3)>, pm| {
+            let (a, b) = parent_cell(key, pm.key(), v);
+            let hit = pm.radial_hit(a, b, dir, near_m);
+            match (best, hit) {
+                (Some((b, _)), Some((h, s)))
+                    if ((h - near_m).abs(), h) < ((b - near_m).abs(), b) =>
+                {
+                    Some((h, s))
+                }
+                (None, Some(h)) => Some(h),
+                (b, _) => b,
+            }
+        })
+}
+
+/// THE COARSER FIELD'S OWN NORMAL along a direction at a rung (2026-09-24): the surface's slope read
+/// one coarser cell to each side along two tangents, the normal turned to face out along the
+/// radial. `None` where the field holds no row there (a tile not here).
+fn field_normal(
+    body: &BodyDefinition,
+    artifact: Option<&ArtifactCache>,
+    dir: DVec3,
+    rung: u8,
+) -> Option<DVec3> {
+    let step = f64::from(vd_seed::ladder::cell_m(rung)) / body.radius_m();
+    let t1 = dir.any_orthonormal_vector();
+    let t2 = dir.cross(t1);
+    let at = |d: DVec3| -> Option<DVec3> {
+        let u = d.normalize();
+        coarser_field_m(body, artifact, u.to_array(), rung).map(|h| u * h)
+    };
+    // All four sides read, or none: one combined answer, no early exit per side.
+    at(dir + t1 * step)
+        .zip(at(dir - t1 * step))
+        .zip(at(dir + t2 * step).zip(at(dir - t2 * step)))
+        .map(|((a1, a2), (b1, b2))| {
+            let n = (a1 - a2).cross(b1 - b2).normalize_or_zero();
+            n * n.dot(dir).signum()
+        })
+}
+
 /// The parent's lattice cell `(a, b)` under a finer vertex: the finer chunk's face cell in
 /// quanta, halved (two finer cells to a coarser one), less the parent box's origin — exact in
 /// integers, so a shared vertex reads the same cell from both its chunks.
@@ -1225,26 +1280,11 @@ pub fn geometry_from(
         } else {
             let at_seam = on_seam(*v);
             seam += u32::from(at_seam);
-            let on_mesh = parent_meshes
-                .iter()
-                .filter(|_| !at_seam)
-                .fold(None, |best: Option<(f64, DVec3)>, pm| {
-                    let (a, b) = parent_cell(key, pm.key(), *v);
-                    let hit = pm.radial_hit(a, b, dir, len);
-                    match (best, hit) {
-                        (Some((b, _)), Some((h, s)))
-                            if ((h - len).abs(), h) < ((b - len).abs(), b) =>
-                        {
-                            Some((h, s))
-                        }
-                        (None, Some(h)) => Some(h),
-                        (b, _) => b,
-                    }
-                })
-                // A hit farther than the two surfaces can stand apart is another surface (a
-                // cave under this one): the field, then.
+            // A hit farther than the two surfaces can stand apart is another surface (a cave
+            // under this one): the field, then.
+            let on_mesh = nearest_parent_hit(&parent_meshes, at_seam, key, *v, dir, len)
                 .filter(|(h, _)| (h - len).abs() <= reach_m);
-            shades.push(on_mesh.map(|(_, s)| s));
+            let hit_shade = on_mesh.map(|(_, s)| s);
             let on_mesh = on_mesh.map(|(h, _)| h);
             // The coarser field, read only where no hit stands: the target then, and the
             // judge of what the vertex is — a SURFACE vertex with no parent triangle on its
@@ -1258,6 +1298,25 @@ pub fn geometry_from(
             );
             let missing = on_mesh.is_none() & !at_seam;
             fallbacks += u32::from(missing & ((field - len).abs() <= reach_m));
+            // ★ THE COARSER SHADE AT A FIELD TARGET (2026-09-24; the owner, low over the belt's
+            // highland: "the underneath of the first rung is visible when flying"). A vertex that
+            // morphs onto the coarser FIELD — a cave's own roof, wall or floor, which the coarser
+            // rung does not hold; a steep riser whose coarser surface stands past the reach; a
+            // vertex on the face seam — lands on the coarser ground at the band's far edge, so it
+            // must SHADE like that ground there: the parent triangle the radial meets nearest the
+            // target, else the field's own normal at it. MEASURED before (`ray_speck`, the 494 m
+            // stand): such vertices kept their OWN normals, and the caves of rung 0 (26 m to 62 m
+            // under the ground) closed onto the ground lit −0.70 to +0.02 against the ground's
+            // +0.40, winning the depth test in dark tears along the ring's far edge (950 m, and
+            // rung 1's at 1.9 km). A vertex whose field holds no row keeps its own normal.
+            // (A hit within the reach carries its own shade; the field is read only without one.)
+            let shade = hit_shade.or_else(|| {
+                nearest_parent_hit(&parent_meshes, at_seam, key, *v, dir, field)
+                    .filter(|(h, _)| (h - field).abs() <= reach_m)
+                    .map(|(_, s)| s)
+                    .or_else(|| field_normal(body, artifact, dir, coarser))
+            });
+            shades.push(shade);
             on_mesh.unwrap_or(field)
         };
         // The target as one metre along the radial from the vertex, and the radial itself (step 5).
@@ -1323,8 +1382,9 @@ pub fn geometry_from(
         field_level: NO_FIELD,
         built_on: None,
     };
-    let drop_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
-    add_skirts(&mut geometry, drop_m);
+    let drop_m = skirt_drop_m(body, key.rung);
+    let ceiling_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
+    add_skirts(&mut geometry, drop_m, ceiling_m);
     geometry.bounds = geometry.measure_bounds();
     Some(geometry)
 }
@@ -1552,8 +1612,28 @@ pub fn floor_triangles(
         .collect()
 }
 
-/// How deep a skirt hangs under a chunk's edge, in cells of its rung.
+/// The least a skirt hangs under a chunk's edge, in cells of its rung ([`skirt_drop_m`]).
 pub const SKIRT_CELLS: u32 = 2;
+
+/// ★ HOW DEEP A SKIRT HANGS (2026-09-24; the owner, flying very low at 29 km/s over the belt's
+/// highland: *"I see cracks from time to time, only when I fly veeeery low"* — a long straight dark
+/// line with light bits in it): as deep as the COARSER rung sinks under this one, plus one of this
+/// rung's cells, and never less than [`SKIRT_CELLS`] of them; the top rung, which has no coarser rung,
+/// hangs the least. Where a finer chunk is still building, the coarser rung shows in its place SUNK
+/// under the finer ground by its sink (coarse before fine, SL8), so at the edge of a DRAWN finer chunk
+/// the ground steps down to that sunk stand-in, and the skirt is what closes the step. MEASURED before
+/// (`bins/examples/skirt_gap`, the 494 m eye over the highland): at two cells the skirt bottoms stood
+/// OVER the sunk coarser ground by up to 1.50 m at rung 0, 3.37 m at rung 1, 7.98 m at rung 2 and
+/// 25.36 m at rung 3 — the sink less the skirt, a crack a grazing eye sees into — while 400 to 2 450
+/// wanted chunks stood urgent in the owner's flight. Branchless (HR5).
+#[must_use]
+pub fn skirt_drop_m(body: &BodyDefinition, rung: u8) -> f64 {
+    let rungs = body.ladder().rungs;
+    let cell = f64::from(vd_seed::ladder::cell_m(rung));
+    let coarser = rung.saturating_add(1).min(rungs.saturating_sub(1));
+    let has_coarser = f64::from(u8::from(rung.saturating_add(1) < rungs));
+    (f64::from(SKIRT_CELLS) * cell).max((sink_m(body, coarser) + cell) * has_coarser)
+}
 
 /// THE SKIRTS: a strip hanging `drop_m` radially under every boundary edge of the chunk's mesh —
 /// an edge one triangle alone uses, which is where a neighbour's quads meet this chunk's. Two
@@ -1566,7 +1646,7 @@ pub const SKIRT_CELLS: u32 = 2;
 /// sinks with its edge (its bottom's targets are its top's, dropped the same), so the crack is
 /// covered at every distance. The rounding is the engine's own floating origin at work; the skirt
 /// is the standard cure, two cells deep, under the surface everywhere but in the crack.
-fn add_skirts(g: &mut ChunkGeometry, drop_m: f64) {
+fn add_skirts(g: &mut ChunkGeometry, drop_m: f64, ceiling_m: f64) {
     g.skirt_start = g.vertices.len() as u32;
     // Boundary edges: each edge as an ordered pair (lower index first) with its use count, the
     // triangle's third corner, and the edge's own direction in that triangle.
@@ -1596,12 +1676,25 @@ fn add_skirts(g: &mut ChunkGeometry, drop_m: f64) {
             at(g.vertices[b as usize]),
             at(g.vertices[c as usize]),
         );
-        // A skirt vertex is its top dropped along the radial; its target drops by the same, so
-        // the metre along the radial from the vertex to the target is its top's (step 5).
+        // ★ THE SKIRT HANGS INTO THE ROCK ITS EDGE STANDS ON (2026-09-24; the owner: will the
+        // deeper skirt "not break the future terrain editing?"): `drop_m` DOWN under a surface
+        // that faces the sky — deep enough to meet the sunk coarser rung where a neighbour is
+        // still building — and only `ceiling_m` UP over one that faces the body's centre (a
+        // cave's roof, a dug tunnel's ceiling), so it never hangs into open space as a curtain at a
+        // chunk's border and cannot pierce a roof thicker than that. MEASURED with the deep drop
+        // both ways (`skirt_gap`): ceiling skirts of rungs 2 and 3 rose up to 62 m, through shallow
+        // caves' roofs toward the sky. The side is the edge's own triangle's, read along the radial
+        // at the edge (a wall reads "down").
+        let rise = (pb - pa)
+            .cross(pc - pa)
+            .dot((o + (pa + pb) * 0.5).normalize());
+        let hang = if rise >= 0.0 { drop_m } else { -ceiling_m };
+        // A skirt vertex is its top moved along the radial into that rock; its target moves by the
+        // same, so the metre along the radial from the vertex to the target is its top's (step 5).
         let bottom = |i: u32| -> ([f32; 3], f32) {
             let p = at(g.vertices[i as usize]);
             let dir = (o + p).normalize();
-            let q = p - dir * drop_m;
+            let q = p - dir * hang;
             ([q.x as f32, q.y as f32, q.z as f32], g.morph_m[i as usize])
         };
         let (qa, ma) = bottom(a);
@@ -4005,7 +4098,12 @@ mod tests {
         let mut checked = 0;
         let mut deep = 0u32;
         let mut deepest: f64 = 0.0;
-        for (v, m) in mesh.vertices.iter().zip(gl.morph_targets().iter()) {
+        for (i, (v, m)) in mesh
+            .vertices
+            .iter()
+            .zip(gl.morph_targets().iter())
+            .enumerate()
+        {
             // The exact radial of the vertex (the target's own is rounded through f32).
             let p = vertex_position_m(&body, &samples, *v);
             let dir = DVec3::new(p[0], p[1], p[2]).normalize();
@@ -4026,6 +4124,19 @@ mod tests {
             if !on & ((field - len).abs() > reach) {
                 deep += 1;
                 deepest = deepest.min(len - field);
+                // ★ AND IT SHADES LIKE THE GROUND IT CLOSES ONTO (2026-09-24): its morph normal is
+                // the parent's shade nearest its target within the reach, else the coarser field's
+                // own normal — never the cave wall's own normal, which tore the ring's far edge dark.
+                let expect = nearest_parent_hit(&parents, false, left, *v, dir, r)
+                    .filter(|(h, _)| (h - r).abs() <= reach)
+                    .map(|(_, s)| s)
+                    .or_else(|| field_normal(&body, None, dir, left.rung + 1))
+                    .expect("the recipe answers everywhere");
+                let got = DVec3::from_array(oct_decode(gl.morph_normals[i]).map(f64::from));
+                assert!(
+                    got.dot(expect) > 0.999,
+                    "the cave vertex's shade {got:?} against the ground's {expect:?}"
+                );
             }
         }
         // The extractor's own vertices; the skirts' targets are their tops' dropped.
@@ -4106,7 +4217,7 @@ mod tests {
     }
 
     #[test]
-    fn the_skirts_hang_two_cells_under_every_boundary_edge_facing_outward() {
+    fn the_skirts_reach_the_sunk_coarser_ground_under_every_boundary_edge_facing_outward() {
         let body = home_planet();
         let key = surface_key(&body, 0, 300, 700);
         let samples = sample_box(&body, None, key).expect("in the band");
@@ -4124,25 +4235,39 @@ mod tests {
         assert!(boundary > 100, "{boundary} boundary edges");
         assert_eq!(g.vertices.len(), mesh.vertices.len() + 2 * boundary);
         assert_eq!(g.triangles.len(), mesh.triangles.len() + 2 * boundary);
-        // Every skirt vertex hangs two cells under a top vertex along its radial, keeps its
+        // Every skirt vertex hangs the skirt's drop under a top vertex along its radial — deeper than
+        // the coarser rung sinks under this one, so a missing neighbour leaves no crack — keeps its
         // normal, and its morph target is the top's target dropped the same.
         let o = DVec3::from_array(g.origin_m);
-        let drop = 2.0;
+        let drop = skirt_drop_m(&body, key.rung);
+        assert!(
+            drop > sink_m(&body, key.rung + 1),
+            "{drop} m against the sink"
+        );
+        let ceiling = 2.0 * f64::from(vd_seed::ladder::cell_m(key.rung));
+        assert!(drop >= ceiling);
+        let (mut down, mut up) = (0u32, 0u32);
         let mut i = mesh.vertices.len();
         while i < g.vertices.len() {
             let q = o + DVec3::from(g.vertices[i].map(f64::from));
-            // The top: the vertex of the base mesh at the same radial, two cells up.
+            // The top: the vertex of the base mesh at the same radial — the drop OVER the skirt
+            // vertex under a sky-facing edge, the ceiling's two cells UNDER it over a ceiling's.
+            let hang = |p: DVec3| -> f64 { (p - q).dot(p.normalize()) };
             let top = g.vertices[..mesh.vertices.len()]
                 .iter()
                 .enumerate()
                 .find(|(_, v)| {
                     let p = o + DVec3::from(v.map(f64::from));
-                    (p - q).length() < drop + 0.01
-                        && (p - q).normalize().dot(p.normalize()) > 0.999_999
-                        && ((p - q).length() - drop).abs() < 0.01
+                    let along = (p - q).normalize().dot(p.normalize()).abs() > 0.999_999;
+                    along & (((hang(p) - drop).abs() < 0.01) | ((hang(p) + ceiling).abs() < 0.01))
                 })
                 .map(|(j, _)| j)
                 .expect("a top vertex over the skirt vertex");
+            let p_top = o + DVec3::from(g.vertices[top].map(f64::from));
+            let is_down = hang(p_top) > 0.0;
+            down += u32::from(is_down);
+            up += u32::from(!is_down);
+            let depth = if is_down { drop } else { ceiling };
             assert_eq!(g.normals[i], g.normals[top]);
             let (si, st) = (
                 DVec3::from(g.sink_of(i).map(f64::from)),
@@ -4151,9 +4276,11 @@ mod tests {
             assert!((si - st).length() < 1e-3);
             let mt = o + DVec3::from(g.morph_target(top).map(f64::from));
             let ms = o + DVec3::from(g.morph_target(i).map(f64::from));
-            assert!(((mt - ms).length() - drop).abs() < 0.01);
+            assert!(((mt - ms).length() - depth).abs() < 0.01);
             i += 1;
         }
+        // This box's ground faces the sky: most of its skirts hang down; its caves' roofs rise.
+        assert!(down > up, "{down} down, {up} up");
         // Every skirt triangle faces away from the chunk: its normal points away from the base
         // triangle's third corner (checked through the winding rule the builder applied).
         let mut outward = 0;
@@ -4638,6 +4765,86 @@ mod tests {
 
     /// A direction on the face whose tiles land in [`moon_caches`].
     const MOON_DIR: [f64; 3] = [0.957_826, 0.201_144, -0.124_518];
+
+    #[test]
+    fn the_coarser_fields_normal_faces_out_and_is_absent_where_no_row_answers() {
+        let (moon, [head, _, whole]) = moon_caches();
+        let dir = DVec3::from_array(vd_seed::bend::normalize(MOON_DIR));
+        let n = field_normal(&moon, Some(&whole), dir, 1).expect("the tiles answer");
+        assert!((n.length() - 1.0).abs() < 1e-9, "{n:?}");
+        assert!(n.dot(dir) > 0.0, "the normal faces out: {n:?}");
+        // The recipe's own relief (no artifact) answers too; a head alone answers nothing.
+        assert!(field_normal(&moon, None, dir, 1).is_some());
+        assert_eq!(field_normal(&moon, Some(&head), dir, 1), None);
+    }
+
+    #[test]
+    fn a_skirt_reaches_past_the_coarser_sink_and_the_top_rung_hangs_the_least() {
+        let body = home_planet();
+        let top = body.ladder().rungs - 1;
+        for rung in 0..top {
+            let cell = f64::from(vd_seed::ladder::cell_m(rung));
+            assert_eq!(
+                skirt_drop_m(&body, rung),
+                (2.0 * cell).max(sink_m(&body, rung + 1) + cell)
+            );
+        }
+        assert_eq!(
+            skirt_drop_m(&body, top),
+            2.0 * f64::from(vd_seed::ladder::cell_m(top))
+        );
+    }
+
+    /// ★ A CEILING'S SKIRT HANGS UP INTO THE ROCK (2026-09-24): one triangle whose face turns to the
+    /// body's centre — a cave's roof, a tunnel's ceiling — is all boundary; each of its three edges
+    /// hangs a skirt OUTWARD from the centre, never down into the open space under it; the same
+    /// triangle wound to face the sky hangs its skirts down.
+    #[test]
+    fn a_ceilings_skirt_hangs_up_and_a_grounds_hangs_down() {
+        let skirted = |tri: [u32; 3]| -> ChunkGeometry {
+            let mut g = ChunkGeometry {
+                key: surface_key(&home_planet(), 0, 300, 700),
+                origin_m: [1_000_000.0, 0.0, 0.0],
+                morph_m: vec![0.0; 3],
+                morph_fallbacks: 0,
+                morph_seam: 0,
+                sink_m: 0.0,
+                // A small triangle across the radial +X, a metre on a side.
+                vertices: vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                normals: vec![[1.0, 0.0, 0.0]; 3],
+                packed_normals: vec![[0, 0]; 3],
+                morph_normals: vec![[0, 0]; 3],
+                water_vertices: Vec::new(),
+                water_radials: Vec::new(),
+                water_triangles: Vec::new(),
+                water_morph_m: Vec::new(),
+                radials: vec![[1.0, 0.0, 0.0]; 3],
+                triangles: vec![tri],
+                bounds: ([0.0; 3], [0.0; 3]),
+                skirt_start: 0,
+                field_level: NO_FIELD,
+                built_on: None,
+            };
+            add_skirts(&mut g, 5.0, 2.0);
+            g
+        };
+        // Wound (0, 1, 2) the face turns to +X, the sky: every skirt vertex hangs the drop, 5 m DOWN.
+        let ground = skirted([0, 1, 2]);
+        assert_eq!(ground.vertices.len(), 3 + 2 * 3);
+        assert!(
+            ground.vertices[3..]
+                .iter()
+                .all(|v| (v[0] + 5.0).abs() < 1e-3)
+        );
+        // Wound (0, 2, 1) it turns to the centre, a ceiling: every skirt vertex rises only the
+        // ceiling's 2 m, UP into the rock.
+        let ceiling = skirted([0, 2, 1]);
+        assert!(
+            ceiling.vertices[3..]
+                .iter()
+                .all(|v| (v[0] - 2.0).abs() < 1e-3)
+        );
+    }
 
     #[test]
     fn the_drawn_surface_reads_the_finest_field_the_cache_holds() {

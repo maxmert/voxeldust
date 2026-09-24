@@ -121,6 +121,65 @@ the ground; wherever the solve lowered the ground the error runs the other way.
   rungs it owed; the HEADLESS capture's frame read 45.6 ms against 22.2 ms (the shadow map is on at a true 400 m) — a
   capture frame, not the window's: the window's cost of the finer near rungs is UNMEASURED.
 
+### 3b. THE DARK TEARS AT A RING'S FAR EDGE — CLOSED CAVES SHADED AS CAVES (found and cured 2026-09-24)
+
+The owner, in the window after 3a, low over the belt's highland: *"the underneath of the first rung is visible when
+flying"* — dark torn pieces along a line near the hull. 3a made rungs 0-2 appear there (the ladder had read the eye
+6.6 km too high), and with them a defect the ladder always had at every ring's far edge.
+
+MEASURED, one refutation at a time (the 494 m stand, `pictures`-style capture and probe):
+- not the shadow: the dark rung-0 pixels at the edge stand with the shadows off (17 against 18) and with every chunk
+  casting its own (18);
+- not a skirt or a fold seen from behind: the ground material culls back faces (a hole, never a dark piece);
+- not the ground's own geomorph: over 1.3 million ground vertices per band, no morph over 0.41 m and no shade turn
+  over 3° (`bins/examples/morph_normal_probe.rs`);
+- IT: `bins/examples/ray_speck.rs` casts the capture camera's own ray through the chunks the client builds, placed as
+  the shader places them. At every speck the first kept front face is rung-0 GROUND in the right place (≤ 3 cm) but
+  SHADED 47-75° off the vertical (lit −0.70 to +0.02 against the ground's +0.40), coincident with a correct copy;
+  its corners stand 26-62 m UNDER the ground in the same column: a CAVE's own roof and walls. Rung 1 holds no cave
+  there, so the cave's vertices morph onto the coarser FIELD — the ground — by design, and at the ring's far edge
+  (956 m) the closed cave lay on the ground with its OWN normals and won the depth test in dark tears (and rung 1's
+  at 1.9 km, rung 2's at 3.8 km — the pattern an older note in the code had recorded).
+
+A first cure (close a cave TWO CELLS UNDER the field) was REFUTED by its own test: 100 steep-riser SURFACE vertices of
+the test box also stand past the reach from the field, and it would have dented the ground. THE CURE (committed with
+this file's next change): a vertex that morphs onto the coarser field takes the coarser surface's SHADE there — the
+parent triangle its radial meets nearest the target within the reach, else the coarser field's own normal
+(`vd_client::chunks::field_normal`) — so a closed cave shades like the ground it closes onto; no position moves.
+MEASURED after, same stand, same sun: the dark rung-0 pixels at the far edge 18 → 0 (the 10 dark ground pixels left
+are the ruler ball's own shadow edge, before and after); `ray_speck` on the former specks: lit +0.38 to +0.43.
+Tests: the cave vertex of the morph-target test shades as the ground; the field normal faces out and answers nothing
+for a head alone (vd-client 335 pass, clippy clean). ★ The owner's window test (2026-09-24): *"I don't see it in
+the ring part"* — CONFIRMED.
+
+### 3c. THE CRACKS IN FAST LOW FLIGHT — SKIRTS SHORTER THAN THE COARSER SINK (found and cured 2026-09-24)
+
+The owner, after 3b: *"I see cracks from time to time, only when I fly veeeery low"* — a long straight dark line with
+light bits, at 29 km/s and ~670 m. The window's samples: 400 to 2 450 wanted chunks URGENT at a time in that flight.
+Where a finer chunk is still building, the coarser rung shows in its place SUNK under the finer ground by its sink, so
+at the edge of a drawn finer chunk with a missing neighbour the ground steps down, and only the finer chunk's skirt
+closes the step. MEASURED (`bins/examples/skirt_gap.rs`, the 494 m eye): the skirts hung two cells and the coarser
+rung sank more, so the skirt bottoms stood OVER the sunk coarser ground by up to 1.50 m (rung 0), 3.37 m (1), 7.98 m
+(2), 25.36 m (3) — the sink less the skirt, a crack a grazing eye sees into.
+
+CURED: `vd_client::chunks::skirt_drop_m` — a skirt under a sky-facing edge hangs as deep as the coarser rung's sink
+plus one cell (4.45 m, 9.25 m, 19.63 m, 47.98 m at rungs 0-3), never under two cells; the top rung two cells.
+MEASURED after: 0 skirt bottoms over the sunk coarser ground at rungs 0-2 (worst 0.95 m, 1.88 m, 0.45 m UNDER it).
+
+THE OWNER'S QUESTION — *"not break the future terrain editing?"* — answered and acted on. A skirt is client drawing
+only: the block store, the server's collision and every edit read the shape, and an edit rebuilds its chunk and
+skirts. But a skirt always hung radially DOWN, so under a cave's roof or a dug tunnel's ceiling at a chunk's border it
+hung into open space as a curtain. Now a skirt hangs INTO THE ROCK its edge stands on: the deep drop down under a
+sky-facing surface, only two cells UP over a ceiling. A first form (the deep drop both ways) was REFUTED by measurement:
+ceiling skirts of rungs 2-3 rose up to 62 m toward the sky through shallow caves' roofs. MEASURED after: no skirt vertex
+stands over its own drawn ground at any rung (the highest 4.44 m, 9.23 m, 16.13 m, 9.70 m UNDER it). Tests: the drop's
+law at every rung and the top rung's two cells; a ceiling triangle's skirt rises and a ground's falls; every skirt of a
+built box hangs the drop down or the ceiling's rise up (vd-client 337 pass, clippy clean). OWED for slice 9 (editing):
+a ceiling skirt of two cells can still pierce a roof THINNER than two cells (a tunnel dug just under the ground) —
+the cure is to clamp each skirt inside the solid cells of the chunk's own samples; and a pick (which block a player
+points at) must read the shape, never the drawn mesh, because a skirt is not ground. ★ The owner's window flight
+(2026-09-24): *"Yes, that is fixed"* — CONFIRMED.
+
 **STILL OWED — THE PICTURE GATE IS STALE SINCE 8c.** `bins/tests/terrain_pictures.rs` (last changed at Step 22, before
 the solve) seats its stands over the recipe's relief (`height_m(&body, dir, 0)`) and judges against references frozen
 before the solve; on the solved world a "1.8 m" stand can stand kilometres under the ground. Its M8-4 recompute now
@@ -496,3 +555,6 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-09-24 `af21326` — the four "before" pictures (§8b, `pictures/`); the client's eye-ground defect found and cured (§3a); the picture gate registered stale since 8c.
 - 2026-09-24 `af21326` — the eye-ground cure reworked after its review (the water sheet, one lookup order, the ruler's key, two guards of the defect) and PROVEN in flight on the reference stand (§3a).
 - 2026-09-24 — committed on branch `game` in two commits: the eye-ground cure, then step 1 (the instruments, the numbers, the pictures and these documents).
+- 2026-09-24 — §3b: the dark tears at a ring's far edge measured (closed caves shaded as caves) and cured; two instruments (`morph_normal_probe`, `ray_speck`).
+- 2026-09-24 — §3c: the fast-low-flight cracks measured (skirts shorter than the coarser sink) and cured; skirts hang into the rock their edge stands on (the owner's editing question); `skirt_gap`.
+- 2026-09-24 — the owner's window flights confirm §3b and §3c; committed.
