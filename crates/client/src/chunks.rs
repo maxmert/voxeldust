@@ -1397,7 +1397,17 @@ pub fn water_sheet(
     // level toward its middle, so the fine sheet stands over it wherever the two meet.
     let visible_depth_m = quantum_m;
     let edge = vd_terrain::chunk::CHUNK_EDGE as i32;
-    let block = vd_terrain::position::SHEET_BLOCK;
+    // ★ A BLOCK MAY DIP NO MORE THAN THE EXTRACTOR'S OWN STEP (2026-09-23; the owner, from
+    // 17 900 km: *"on the far distance on the water some blue squares appeared"*). A flat quad is
+    // a chord of the sphere and dips `w² / 8R` under the sea at its middle: 5 km for eight cells
+    // at rung 16, 21 km at rung 17. The floor cut made that dip harmless for the geometry — it
+    // stands over nothing — but not for the AIR: the atmosphere reads the fragment kilometres
+    // deeper in the air, and at a grazing view that is more haze, so every quad-only block drew
+    // lighter than the fine sheet around it, its corners dark at the true level. So the block is
+    // as wide as the rung allows while its chord's dip stays under the extractor's step, the
+    // depth the rung can tell from zero: `n² ≤ R / (16 · cell)`, six cells at rung 13, four at
+    // 14, three at 15, two at 16, and none from rung 17 up, where the fine sheet stands alone.
+    let block = vd_terrain::position::sheet_block_cells(body.radius_m(), key_cell_m(samples));
     let blocks_per_edge = (edge + block - 1) / block;
     let mut block_deep = vec![true; (blocks_per_edge * blocks_per_edge) as usize];
     let mut block_level: Vec<Option<f64>> = vec![None; block_deep.len()];
@@ -1407,6 +1417,9 @@ pub fn water_sheet(
         ((gb / block) * blocks_per_edge + ga / block) as usize
     };
     for (i, v) in mesh.vertices.iter().enumerate() {
+        if block < 2 {
+            break;
+        }
         let b = block_of(v);
         let w = words[i];
         let r = ground_r_m[i];
@@ -1502,6 +1515,11 @@ pub fn water_sheet(
         .map(|r| [r[0] as f32, r[1] as f32, r[2] as f32])
         .collect();
     ((vertices, radials, triangles, morph), words)
+}
+
+/// A box's cell in metres, from its key's rung.
+fn key_cell_m(samples: &vd_terrain::lattice::SampleBox) -> f64 {
+    f64::from(vd_seed::ladder::cell_m(samples.key.rung))
 }
 
 /// ★ THE SEA FLOOR THAT CAN SHOW: the ground triangles kept for the drawn mesh. A triangle is

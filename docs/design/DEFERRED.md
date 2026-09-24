@@ -8868,9 +8868,19 @@ draws itself"):**
   15.1 ms peak, 0 pixels — the hairlines gone; 6 376 km 17.3 ms, 19.3 ms peak, 0 pixels. The overlap gives
   back about a millisecond of the coarse water's gain. So against the start of the day's measurements
   (20.2 ms at the near stand) the near stand reads 17.3 ms mean: 58 fps, with the far stands at 62 and
-  72 fps. OWED for the last 0.6 ms of the near stand's mean and 2.6 ms of its peak: a split of the
-  remaining 13.7 ms between the ground's vertices and the engine's per-entity work, which the ablation
-  cannot give; and the owner's look at the seams from the window.
+  72 fps. THE OWNER'S LOOK (23:38, from 17 900 km and beyond): *"way faster … but in the far distance on
+  the water some blue squares appeared"* — the deep-water quads read through the ATMOSPHERE: a block of
+  eight cells at rung 16 dips 5 km under the sea at its middle, harmless for the geometry (it stands over
+  nothing) but not for the air, which reads the fragment 5 km deeper and at a grazing view draws it hazier,
+  so every quad-only block was a lighter square with dark corners at the true level. THE BOUND: a block may
+  dip no more than the extractor's own step at its rung (`position::sheet_block_cells`: `n² ≤ R / (16 ·
+  cell)` — six cells at rung 13, four at 14, three at 15, two at 16, none from 17), so the far sea is the
+  fine sheet alone and the near rungs keep their blocks. MEASURED after (unpaced, the three stands, against
+  the pictures before any coarse water): 11 497 km 16.0 ms mean, 16.7 ms peak; 16 952 km 14.3 ms, 15.1 ms
+  peak; 6 376 km 17.6 ms mean, 20.9 ms peak (one spike; the seam build read 19.3); every picture identical
+  to the pixel. The owner's own far view of the bounded blocks: owed. OWED for the last of
+  the near stand's peak: a split of the remaining 13.7 ms between the ground's vertices and the engine's
+  per-entity work, which the ablation cannot give.
 - 🟨 **TWELVE CHUNKS THAT NEVER SETTLE ON A STILL STAND = TWO FAR PLANETS WITHOUT THEIR ARTIFACT
   (2026-09-23).** The stamp counts every realm; on three of nine headless stands twelve chunks stayed urgent
   for the stand's five minutes — one whole-face chunk per face at the top rung of two far planets whose

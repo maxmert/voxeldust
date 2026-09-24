@@ -316,6 +316,22 @@ pub enum WaterSide {
 /// and harmless: it stands over nothing.
 pub const SHEET_BLOCK: i32 = 8;
 
+/// ★ HOW WIDE A DEEP-WATER BLOCK MAY BE at a rung, in cells: the widest block up to
+/// [`SHEET_BLOCK`] whose chord dips under the sea by no more than the extractor's own step, the
+/// depth the rung can tell from zero — `(n · cell)² / 8R ≤ cell / 128`, so `n² ≤ R / (16 · cell)`.
+/// ONE where no block passes, and the fine sheet stands alone. MEASURED before the bound (the
+/// owner, from 17 900 km): eight-cell blocks at rung 16 dipped 5 km, and the atmosphere read them
+/// as lighter squares on the far sea. On the home planet: six cells at rung 13, four at 14, two at
+/// 15, two at 16, one from 17.
+#[must_use]
+pub fn sheet_block_cells(radius_m: f64, cell_m: f64) -> i32 {
+    let mut n = 1i32;
+    while n < SHEET_BLOCK && f64::from((n + 1) * (n + 1)) * 16.0 * cell_m <= radius_m {
+        n += 1;
+    }
+    n
+}
+
 /// A column's unit direction in the body's frame, for a host outside the recipe (the deep
 /// water's block corners stand on it).
 #[must_use]
@@ -769,6 +785,33 @@ mod water_sheet_tests {
     /// `vertex_position` makes), and a triangle is not built twice for one level: a hand-made
     /// mesh of two triangles on the box's far corner, over a wet sea, shares its two common
     /// vertices and reads the halo's columns for the clamped group.
+    #[test]
+    fn a_deep_water_block_dips_no_more_than_the_extractor_s_step() {
+        let planet = crate::home::home_planet();
+        let r = planet.radius_m();
+        let cell = |rung: u8| f64::from(vd_seed::ladder::cell_m(rung));
+        // The home planet: six cells at rung 13, four at 14, three at 15, two at 16, one from 17.
+        assert_eq!(sheet_block_cells(r, cell(13)), 6);
+        assert_eq!(sheet_block_cells(r, cell(14)), 4);
+        assert_eq!(sheet_block_cells(r, cell(15)), 3);
+        assert_eq!(sheet_block_cells(r, cell(16)), 2);
+        assert_eq!(sheet_block_cells(r, cell(17)), 1);
+        assert_eq!(sheet_block_cells(r, cell(18)), 1);
+        // A fine rung reaches the cap, and every width passed holds the bound itself.
+        assert_eq!(sheet_block_cells(r, cell(4)), SHEET_BLOCK);
+        // Every block of two cells or more holds the bound itself; a width of one is no block, and
+        // the fine sheet's own cell dips what it dips (5.4 km at rung 19, past the step there).
+        for rung in 0..20u8 {
+            let cells = sheet_block_cells(r, cell(rung));
+            if cells < 2 {
+                continue;
+            }
+            let w = f64::from(cells) * cell(rung);
+            let dip = w * w / (8.0 * r);
+            assert!(dip <= cell(rung) / 128.0 + 1e-9, "rung {rung}: {dip}");
+        }
+    }
+
     #[test]
     fn a_vertex_on_the_last_centre_reads_the_last_group_and_shares_its_water_vertex() {
         let moon = crate::home::home_moon();
