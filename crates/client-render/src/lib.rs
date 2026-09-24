@@ -13,16 +13,47 @@
 //! logic lives in `vd-client-harness` (Tier-A); this crate is the glue, proven by the
 //! human-in-the-loop window + (T6) `G-RENDER-SMOKE`, not by `llvm-cov`.
 
-/// The render plugin with GPU timestamps required (D8-8's frame anatomy): the render
-/// diagnostics record a pass's GPU time only with the timestamp features, which Metal on Apple
-/// silicon offers; without them only the CPU side of a pass is known.
+/// ★ THE RENDER DIAGNOSTICS ARE A MEASUREMENT'S SWITCH (2026-09-24, the window's heat and its
+/// crash): `VD_RENDER_DIAG=1` turns on the engine's per-pass timing and the GPU timestamp features
+/// it needs; by default both are off. MEASURED in the window on the Apple M4 Pro: every pass's GPU
+/// time read ZERO (the engine writes a pass's timestamps INSIDE the pass, which this GPU does not
+/// offer), while the recorder still made a new timestamp set for every frame whose readback had
+/// not returned — and when frames outran the readbacks the driver ran out of counter buffers
+/// ("Failed to create counter sample buffer: Cannot allocate sample buffer"), the device was lost
+/// and the window panicked in `Surface::present`: the owner's night-side crash of 2026-09-23 and
+/// the unpaced window of 2026-09-24, one signature. The frame time (the engine's frame-time
+/// diagnostic) stays on; it needs no GPU query.
+///
+/// Example: the owner flies the window and no counter buffer is ever made; a measurement that
+/// wants the passes' CPU time runs the window with `VD_RENDER_DIAG=1`.
+const RENDER_DIAG_ENV: &str = "VD_RENDER_DIAG";
+
+fn render_diag() -> bool {
+    std::env::var(RENDER_DIAG_ENV).is_ok_and(|v| v == "1")
+}
+
+/// The render plugin, with the GPU timestamp features only under the diagnostics switch (D8-8's
+/// frame anatomy when it is on).
 fn timestamped_render_plugin() -> bevy::render::RenderPlugin {
     let mut settings = bevy::render::settings::WgpuSettings::default();
-    settings.features |=
-        wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    if render_diag() {
+        settings.features |=
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    }
     bevy::render::RenderPlugin {
         render_creation: settings.into(),
         ..Default::default()
+    }
+}
+
+/// The engine's render diagnostics, added only under [`RENDER_DIAG_ENV`].
+struct RenderDiagSwitch;
+
+impl Plugin for RenderDiagSwitch {
+    fn build(&self, app: &mut App) {
+        if render_diag() {
+            app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+        }
     }
 }
 
@@ -216,6 +247,11 @@ pub struct RenderHandles {
     /// The terrain stamp (slice 8p): the renderer writes what it measured about the ground it drew
     /// every frame a body is under the eye (see `DevState::terrain_stamp`).
     pub terrain_stamp: Arc<std::sync::Mutex<Option<vd_devproto::DevTerrainStamp>>>,
+    /// ★ THE STAMP'S PERIOD IN THE WINDOW (2026-09-24, the window's heat): the core thread reads
+    /// the stamp once per step, so the window assembles it once per step (`1 / step_hz` s) and
+    /// not on every frame; the headless capture assembles it on every frame whatever this says,
+    /// because its picture carries its own frame's stamp.
+    pub stamp_period_s: f64,
     /// Liveness flag the core thread flips false when its loop EXITS (gateway Close /
     /// panic). The window emits `AppExit` when it sees false — bidirectional shutdown.
     pub core_alive: Arc<AtomicBool>,
@@ -491,6 +527,140 @@ fn unpaced() -> bool {
     std::env::var(UNPACED_ENV).is_ok_and(|v| v == "1")
 }
 
+/// ★ THE FRAME CAP (2026-09-24, the window's heat; the owner agreed to it as the PLAYER'S setting,
+/// 60 frames a second by default): the window draws no more often than the cap, so a frame whose
+/// work fits the period leaves the GPU idle for the rest of it. `VD_FRAME_CAP=<frames a second>`
+/// sets it (until the settings screen exists) and `0` lifts it; `VD_CLIENT_UNPACED=1` lifts it for a
+/// measurement of the work. MEASURED before it: on the adaptive display the window drew as fast as
+/// the display refreshed — 98 frames a second at 16 954 km with the GPU at 96 % — so every saving
+/// was spent on more frames and none on less heat. Each frame is the same picture; only how many
+/// are drawn in a second changes.
+///
+/// Example: a pilot holds a hull still at 16 954 km; the window draws 60 frames a second and the
+/// GPU rests between them, where it drew 98 and never rested.
+const FRAME_CAP_ENV: &str = "VD_FRAME_CAP";
+/// The player's default (the owner's word): frames a second.
+const FRAME_CAP_DEFAULT_HZ: f64 = 60.0;
+
+/// The cap's period and the next frame's earliest start.
+#[derive(Resource, Debug, Default)]
+struct FrameCap {
+    period: Option<std::time::Duration>,
+    next: Option<std::time::Instant>,
+}
+
+impl FrameCap {
+    fn from_env() -> FrameCap {
+        if unpaced() {
+            return FrameCap::default();
+        }
+        let hz = std::env::var(FRAME_CAP_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(FRAME_CAP_DEFAULT_HZ);
+        FrameCap {
+            period: (hz.is_finite() && hz > 0.0)
+                .then(|| std::time::Duration::from_secs_f64(1.0 / hz)),
+            next: None,
+        }
+    }
+}
+
+/// Holds the frame at its end until the cap's period has run: on time, the cadence steps by one
+/// period; late (a frame longer than the period), it restarts from now and carries no debt, so a
+/// slow frame is never followed by a burst.
+fn cap_frame_rate(mut cap: ResMut<FrameCap>) {
+    let Some(period) = cap.period else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    match cap.next {
+        Some(next) if next > now => {
+            std::thread::sleep(next - now);
+            cap.next = Some(next + period);
+        }
+        _ => cap.next = Some(now + period),
+    }
+}
+
+/// ★ THE WINDOW'S MEASUREMENT SWITCHES (2026-09-24, the window's heat): a window measured while
+/// the owner's machine stays in use. Each is a measurement's switch, never a product setting.
+/// `VD_WINDOW_FREE_CURSOR=1` leaves the pointer free (no lock, no hiding, no grab on a click);
+/// `VD_WINDOW_CONTINUOUS=1` draws every frame while the window has no focus, as it does with the
+/// focus (the engine's own default drops an unfocused window to 60 frames a second);
+/// `VD_WINDOW_SCALE=<f>` draws the window at that scale factor instead of the display's (1 on a
+/// Retina display draws a quarter of the pixels), which splits the pixels' cost from the rest;
+/// `VD_WINDOW_ON_TOP=1` keeps the window above every other, because a covered window is
+/// throttled by the system (MEASURED: a covered stand read 40 frames a second against 58).
+///
+/// Example: the flight script opens the owner's window over the home planet with the cursor free
+/// and the drawing continuous, so the owner can keep typing in another window while the frame it
+/// measures is the frame the pilot sees.
+const FREE_CURSOR_ENV: &str = "VD_WINDOW_FREE_CURSOR";
+const CONTINUOUS_ENV: &str = "VD_WINDOW_CONTINUOUS";
+const WINDOW_SCALE_ENV: &str = "VD_WINDOW_SCALE";
+const ON_TOP_ENV: &str = "VD_WINDOW_ON_TOP";
+
+/// What the window's measurement switches said at startup (ONE struct, read once).
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+struct WindowMeasure {
+    free_cursor: bool,
+    continuous: bool,
+    scale: Option<f32>,
+    on_top: bool,
+}
+
+impl WindowMeasure {
+    fn from_env() -> WindowMeasure {
+        let on = |k: &str| std::env::var(k).is_ok_and(|v| v == "1");
+        WindowMeasure {
+            free_cursor: on(FREE_CURSOR_ENV),
+            continuous: on(CONTINUOUS_ENV),
+            on_top: on(ON_TOP_ENV),
+            scale: std::env::var(WINDOW_SCALE_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|s| s.is_finite() && *s > 0.0),
+        }
+    }
+
+    /// The window's resolution: the stated logical size, at the display's scale unless a
+    /// measurement names another.
+    fn resolution(self) -> bevy::window::WindowResolution {
+        let resolution = bevy::window::WindowResolution::new(WINDOW_W, WINDOW_H);
+        match self.scale {
+            Some(scale) => resolution.with_scale_factor_override(scale),
+            None => resolution,
+        }
+    }
+
+    /// How often the window draws: the engine's game default, or every frame with or without the
+    /// focus under the measurement switch.
+    fn winit_settings(self) -> bevy::winit::WinitSettings {
+        if self.continuous {
+            bevy::winit::WinitSettings {
+                focused_mode: bevy::winit::UpdateMode::Continuous,
+                unfocused_mode: bevy::winit::UpdateMode::Continuous,
+            }
+        } else {
+            bevy::winit::WinitSettings::game()
+        }
+    }
+
+    /// The pointer at startup: locked and hidden for the pilot, free under the measurement switch.
+    fn cursor(self) -> CursorOptions {
+        if self.free_cursor {
+            CursorOptions::default()
+        } else {
+            CursorOptions {
+                grab_mode: CursorGrabMode::Locked,
+                visible: false,
+                ..default()
+            }
+        }
+    }
+}
+
 /// THE GROUND'S VERTEX LAYOUT, for the fade material and the probe alike: the position, the
 /// normal in whichever form the mesh carries (the packed one when the mesh has it, else the
 /// engine's — the renderer packs by rung, `terrain::EXACT_NORMAL_RUNG`), the morph metre and
@@ -551,7 +721,7 @@ struct StarSkyMaterial {
     params: StarSkyParams,
 }
 
-#[derive(ShaderType, Debug, Clone)]
+#[derive(ShaderType, Debug, Clone, PartialEq)]
 struct StarSkyParams {
     /// (Kept for the uniform's shape; the STAR path no longer reads it — a star is sized by its own
     /// flux now, not by the shared presence floor. The floor still governs realm markers.)
@@ -814,8 +984,8 @@ impl ProbeMaterial {
 
     /// THE BANDS REWRITTEN IN PLACE — the probe's own half of [`LadderFade::set_bands`], so what
     /// the probe reads is what the picture shows under the bounded ask too.
-    pub(crate) fn set_bands(&mut self, bands: ([f64; 2], [f64; 2]), sink_end_m: f64) {
-        self.params.bands = fade_uniform(bands, sink_end_m);
+    pub(crate) fn set_bands(&mut self, bands: Vec4) {
+        self.params.bands = bands;
     }
 }
 
@@ -903,8 +1073,8 @@ impl LadderFade {
     /// move when its deliverable horizon moves, and the bands are a uniform — so every drawn chunk
     /// of that rung reads the new ones on the next frame, with no mesh rebuilt and no entity
     /// respawned. The sink's depth and the splat's cell are the rung's own and never move.
-    pub(crate) fn set_bands(&mut self, bands: ([f64; 2], [f64; 2]), sink_end_m: f64) {
-        self.bands = fade_uniform(bands, sink_end_m);
+    pub(crate) fn set_bands(&mut self, bands: Vec4) {
+        self.bands = bands;
     }
 
     /// The same material as a light caster, sunk by `caster_sink_m`.
@@ -1032,7 +1202,13 @@ pub fn run(handles: RenderHandles) {
 /// The windowed app (winit window + egui primary-context HUD + winit input).
 fn run_windowed(handles: RenderHandles) {
     tracing::info!("windowed client starting (Bevy {}x{})", WINDOW_W, WINDOW_H);
+    let measure = WindowMeasure::from_env();
+    if measure != WindowMeasure::default() {
+        tracing::info!(?measure, "the window's measurement switches are set");
+    }
     App::new()
+        .insert_resource(measure)
+        .insert_resource(measure.winit_settings())
         .insert_resource(ClearColor(Color::srgb(
             CLEAR_SRGB[0],
             CLEAR_SRGB[1],
@@ -1067,10 +1243,10 @@ fn run_windowed(handles: RenderHandles) {
         .insert_resource(CaptureView { pilot: false })
         .insert_resource(sky::SkyConfig::from_env())
         .insert_resource(sky::SkyMedia::default())
-        .insert_resource(terrain::Terrain::new(
-            terrain::TerrainConfig::from_env(),
-            handles.world_declared,
-        ))
+        .insert_resource(
+            terrain::Terrain::new(terrain::TerrainConfig::from_env(), handles.world_declared)
+                .with_stamp_period(handles.stamp_period_s),
+        )
         .init_resource::<DotEntities>()
         .init_resource::<RealmBoxEntities>()
         .init_resource::<DrawnSky>() // S11: which sky is on screen, and around which system
@@ -1078,10 +1254,21 @@ fn run_windowed(handles: RenderHandles) {
         .add_plugins(
             DefaultPlugins
                 .set(timestamped_render_plugin())
+                // ★ NO SOUND AND NO GAMEPAD YET (2026-09-24, the window's heat): the audio plugin
+                // kept an output stream mixing silence for the whole session and the gamepad
+                // backend a run-loop thread polled every frame, for a game with neither. They come
+                // back with the first sound or the first gamepad binding.
+                .disable::<bevy::audio::AudioPlugin>()
+                .disable::<bevy::gilrs::GilrsPlugin>()
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Voxeldust — dev client".into(),
-                        resolution: (WINDOW_W, WINDOW_H).into(),
+                        resolution: measure.resolution(),
+                        window_level: if measure.on_top {
+                            bevy::window::WindowLevel::AlwaysOnTop
+                        } else {
+                            bevy::window::WindowLevel::Normal
+                        },
                         // The same switch as the headless pace: no vsync, so the frame time
                         // is the work.
                         present_mode: if unpaced() {
@@ -1094,11 +1281,7 @@ fn run_windowed(handles: RenderHandles) {
                     // First-person: start the pointer LOCKED + hidden so mouse-look gets unbounded
                     // delta and never sticks at the window edge (the AAA FPS baseline). Esc releases
                     // it (click away / close); a click re-grabs — see `cursor_grab`.
-                    primary_cursor_options: Some(CursorOptions {
-                        grab_mode: CursorGrabMode::Locked,
-                        visible: false,
-                        ..default()
-                    }),
+                    primary_cursor_options: Some(measure.cursor()),
                     ..default()
                 }),
         )
@@ -1113,7 +1296,7 @@ fn run_windowed(handles: RenderHandles) {
             // THE FRAME'S ANATOMY (D8-8): the engine's frame-time diagnostic and its render
             // diagnostics (CPU and GPU time per render pass), read onto the terrain stamp.
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
-            bevy::render::diagnostic::RenderDiagnosticsPlugin,
+            RenderDiagSwitch,
             StarSkyShaderPlugin,
             MaterialPlugin::<StarSkyMaterial>::default(),
             // The ground's crossfade material (slice 8 step 3).
@@ -1149,6 +1332,9 @@ fn run_windowed(handles: RenderHandles) {
                 .chain(),
         )
         .add_systems(Update, (input_system, cursor_grab, exit_when_core_stops))
+        // ★ THE FRAME CAP (the player's setting, 60 by default): the frame's last system.
+        .insert_resource(FrameCap::from_env())
+        .add_systems(Last, cap_frame_rate)
         // The HUD draws in the egui pass (NOT Update — the 0.39 multipass idiom).
         .add_systems(EguiPrimaryContextPass, hud_primary)
         .run();
@@ -1566,7 +1752,11 @@ fn cursor_grab(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    measure: Res<WindowMeasure>,
 ) {
+    if measure.free_cursor {
+        return;
+    }
     let mut cursor = cursor.into_inner();
     if keys.just_pressed(KeyCode::Escape) {
         cursor.grab_mode = CursorGrabMode::None;
@@ -1959,10 +2149,12 @@ fn sync_star_sky(
         min_crop_px: tuning.min_crop_px as f32,
         cull_level: tuning.cull_level as f32,
     };
-    if let Some(material) = drawn
-        .material
-        .as_ref()
-        .and_then(|handle| materials.get_mut(handle))
+    // ★ REWRITTEN ONLY WHEN A NUMBER CHANGED (2026-09-24, the window's heat): a rewritten material
+    // makes the engine re-prepare its uniform and re-queue the star cloud, every frame, for the
+    // same four numbers. A resize, a new field of view or a new far plane still rewrites it.
+    if let Some(handle) = drawn.material.as_ref()
+        && materials.get(handle).is_some_and(|m| m.params != params)
+        && let Some(material) = materials.get_mut(handle)
     {
         material.params = params.clone();
     }
@@ -2192,12 +2384,16 @@ fn sync_realm_boxes(
                 if let Ok(mut transform) = box_tf.get_mut(entity)
                     && let Some(prim) = prims.first()
                 {
-                    transform.translation = Vec3::from_array(prim.transform.translation);
-                    transform.scale = Vec3::from_array(prim.transform.scale);
                     // ★ THE FACING ITS PARENT AUTHORED (D-MOVE-2). Without this a hull that turns
                     // shows the same face for ever, and a pilot has no way to see which way the nose
                     // points — which is the whole reason a ship is drawn as a box rather than a dot.
-                    transform.rotation = Quat::from_array(prim.transform.rotation);
+                    // Written only when it changes (2026-09-24): an equal write still marks it.
+                    let placed = Transform {
+                        translation: Vec3::from_array(prim.transform.translation),
+                        rotation: Quat::from_array(prim.transform.rotation),
+                        scale: Vec3::from_array(prim.transform.scale),
+                    };
+                    transform.set_if_neq(placed);
                 }
             }
             // THE HANDOVER, both ways (window lane §2.8): the author changed — a sleeping child
@@ -2627,15 +2823,15 @@ fn draw_hud(ctx: &egui::Context, net: &Net) {
             ui.label(format!("visible:  {}", rendered.len()));
             // THE STAMP (slice 8p): what the renderer measured about the ground it draws — on the
             // picture, so the owner reads the scale off it; in the state, so the gate checks it.
-            let stamp = net
+            // The lines are formatted under the lock, so the stamp itself is never copied for them.
+            let lines = net
                 .terrain_stamp
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(t) = stamp {
-                for line in stamp_lines(&t) {
-                    ui.label(line);
-                }
+                .as_ref()
+                .map(stamp_lines);
+            for line in lines.into_iter().flatten() {
+                ui.label(line);
             }
         });
     // THE OVERLAY'S RECTANGLE goes on the stamp, in pixels: a picture compare leaves it out (its
@@ -2839,7 +3035,10 @@ fn run_capture(handles: RenderHandles) {
                     ..default()
                 })
                 // No window/display server (headless): the runner drives frames instead.
-                .disable::<WinitPlugin>(),
+                .disable::<WinitPlugin>()
+                // No sound and no gamepad yet (see the window's app).
+                .disable::<bevy::audio::AudioPlugin>()
+                .disable::<bevy::gilrs::GilrsPlugin>(),
         )
         .add_plugins(EguiPlugin::default())
         // ★ AFTER `DefaultPlugins`, and that ORDER IS LOAD-BEARING (S11). `embedded_asset!` writes into
@@ -2850,7 +3049,7 @@ fn run_capture(handles: RenderHandles) {
             // THE FRAME'S ANATOMY (D8-8): the engine's frame-time diagnostic and its render
             // diagnostics (CPU and GPU time per render pass), read onto the terrain stamp.
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
-            bevy::render::diagnostic::RenderDiagnosticsPlugin,
+            RenderDiagSwitch,
             StarSkyShaderPlugin,
             MaterialPlugin::<StarSkyMaterial>::default(),
             // The ground's crossfade material (slice 8 step 3).

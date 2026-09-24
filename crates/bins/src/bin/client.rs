@@ -414,6 +414,7 @@ fn run_render(
         camera_mode,
         star_probe,
         terrain_stamp,
+        stamp_period_s: 1.0 / f64::from(step_hz.max(1)),
         core_alive,
         started_at,
         mode,

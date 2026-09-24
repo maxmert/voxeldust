@@ -420,6 +420,12 @@ const WORK_THROUGHPUT: &str = "throughput";
 const WORK_BOUND: &str = "bound";
 const WORK_DESCENT: &str = "descent";
 const WORK_REBIND: &str = "rebind";
+/// ★ THE WINDOW'S HEAT (2026-09-24): the pieces a frame pays whether or not anything moved — the
+/// release-and-request walks over every held and wanted chunk, the stamp's own assembly, and the
+/// placement of every chunk — timed so that a cut of each can be read.
+const WORK_RELEASE: &str = "release";
+const WORK_STAMP: &str = "stamp";
+const WORK_PLACE: &str = "place";
 
 /// ★ HOW LONG A PIECE'S WORST FRAME IS REMEMBERED FOR: one second (review item 8). The peak in
 /// the stamp is a ROLLING one, not the run's own, so a flight reading the stamp can name the worst
@@ -1669,6 +1675,15 @@ pub struct Terrain {
     ruler_cache: Option<RulerCache>,
     /// This frame's stamp, assembled by `sync_terrain`, completed and published by `place_chunks`.
     pub(crate) stamp: Option<DevTerrainStamp>,
+    /// ★ THE STAMP ONCE PER READ (2026-09-24, the window's heat): how often the stamp's full half
+    /// is assembled (zero: every frame, the capture's and the default), when it last was, and
+    /// whether this frame assembled it. MEASURED before: on foot at the berth (9 136 chunks) the
+    /// stamp cost 4.1 ms of every frame's main thread — walks of every wanted key and every empty
+    /// chunk, thousands of names formatted, and three copies — for a reader that takes it 20
+    /// times a second.
+    stamp_period_s: f64,
+    stamp_built_s: f64,
+    stamp_fresh: bool,
 }
 
 impl Terrain {
@@ -1737,7 +1752,28 @@ impl Terrain {
             ruler_assets: None,
             ruler_cache: None,
             stamp: None,
+            stamp_period_s: 0.0,
+            stamp_built_s: f64::NEG_INFINITY,
+            stamp_fresh: false,
         }
+    }
+
+    /// The stamp's period (see [`super::RenderHandles::stamp_period_s`]); zero assembles it on
+    /// every frame.
+    #[must_use]
+    pub fn with_stamp_period(mut self, period_s: f64) -> Terrain {
+        self.stamp_period_s = period_s;
+        self
+    }
+
+    /// Whether this frame assembles the stamp's full half: once per period, on the first frame
+    /// the period has run out (so a reader polling at the period finds one no older than it).
+    fn stamp_due(&mut self, now_s: f64) -> bool {
+        let due = now_s - self.stamp_built_s >= self.stamp_period_s;
+        if due {
+            self.stamp_built_s = now_s;
+        }
+        due
     }
 
     /// ONE PIECE'S WALL TIME THIS FRAME, added to its running total, and offered to its rolling
@@ -1890,23 +1926,36 @@ impl Terrain {
         };
         let bound = ladder.pace.drawn().clone();
         let coarse_step = self.config.shadow_coarse_step;
+        // ★ ONLY THE MATERIALS WHOSE BANDS MOVED (2026-09-24, the window's heat): a rewritten
+        // material makes the engine re-prepare it and re-specialise every chunk that uses it, so a
+        // rung whose bands did not move keeps its material untouched (the same uniform either way).
         for ((_, rung), handle) in self.materials.range((realm, 0u8)..=(realm, u8::MAX)) {
-            if let Some(m) = ground.get_mut(handle) {
-                m.extension.set_bands(
-                    bound.fade_bands(*rung, rungs),
-                    bound.sink_end_m(body, *rung, rungs),
-                );
+            let bands = super::fade_uniform(
+                bound.fade_bands(*rung, rungs),
+                bound.sink_end_m(body, *rung, rungs),
+            );
+            if ground
+                .get(handle)
+                .is_some_and(|m| m.extension.bands != bands)
+                && let Some(m) = ground.get_mut(handle)
+            {
+                m.extension.set_bands(bands);
             }
         }
         // A caster's bands are the DRAWN rung's — the rung it casts for (§24.5) — so they follow
         // the bound at that rung, not at the caster's own.
         for ((_, rung), handle) in self.shadow_materials.range((realm, 0u8)..=(realm, u8::MAX)) {
             let drawn = rung.saturating_sub(coarse_step);
-            if let Some(m) = ground.get_mut(handle) {
-                m.extension.set_bands(
-                    bound.fade_bands(drawn, rungs),
-                    bound.sink_end_m(body, drawn, rungs),
-                );
+            let bands = super::fade_uniform(
+                bound.fade_bands(drawn, rungs),
+                bound.sink_end_m(body, drawn, rungs),
+            );
+            if ground
+                .get(handle)
+                .is_some_and(|m| m.extension.bands != bands)
+                && let Some(m) = ground.get_mut(handle)
+            {
+                m.extension.set_bands(bands);
             }
         }
         if let Some(probes) = probes {
@@ -1917,11 +1966,14 @@ impl Terrain {
                 if *kind != PROBE_KIND_TERRAIN {
                     continue;
                 }
-                if let Some(m) = probes.get_mut(handle) {
-                    m.set_bands(
-                        bound.fade_bands(*rung, rungs),
-                        bound.sink_end_m(body, *rung, rungs),
-                    );
+                let bands = super::fade_uniform(
+                    bound.fade_bands(*rung, rungs),
+                    bound.sink_end_m(body, *rung, rungs),
+                );
+                if probes.get(handle).is_some_and(|m| m.params.bands != bands)
+                    && let Some(m) = probes.get_mut(handle)
+                {
+                    m.set_bands(bands);
                 }
             }
         }
@@ -2913,6 +2965,7 @@ pub(crate) fn sync_terrain(
     // Release what is no longer wanted — with THE HOLD: a chunk stays while a wanted chunk over its
     // footprint is still building (coarse before fine, SL8). Then ask for what is wanted and not
     // held, in the wanted set's own order: the coarsest ring first.
+    let release_started = std::time::Instant::now();
     let held: Vec<(RealmId, ChunkKey)> = terrain.entities.keys().copied().collect();
     // ★ THE BOARDING INSTRUMENT (2026-09-14): how many DRAWN chunks each realm loses this frame.
     let mut released_count: BTreeMap<RealmId, u64> = BTreeMap::new();
@@ -2992,6 +3045,7 @@ pub(crate) fn sync_terrain(
     for (realm, ckey) in unwant {
         terrain.unwant_caster(&mut commands, realm, ckey);
     }
+    terrain.note_work(WORK_RELEASE, release_started.elapsed(), 1, now_s);
     // ★ THE BOARDING INSTRUMENT (2026-09-14): a frame that released a WHOLESALE count of one
     // realm's chunks names itself — the realm, the count, whether the descent ran, the eye in the
     // body's own frame before and after it, the lead offset, the wanted set's size on both sides,
@@ -3410,7 +3464,15 @@ pub(crate) fn sync_terrain(
     //    The stamp is assembled here and completed by `place_chunks` (the nearest and farthest
     //    chunk); the ruler is a ball where the picture's centre ray meets the drawn ground, at the
     //    rung the tier rule names for its distance, only where a probe exists to read it.
-    terrain.stamp = None;
+    let stamp_started = std::time::Instant::now();
+    // ★ THE STAMP ONCE PER READ (2026-09-24): the band's gap, its latch and the ruler stay on
+    // every frame (a flight's gap count is per frame); the rest waits for the period, and between
+    // two assemblies the last stamp stands and is not published again.
+    let stamp_due = terrain.stamp_due(now_s);
+    terrain.stamp_fresh = stamp_due;
+    if stamp_due {
+        terrain.stamp = None;
+    }
     let nose = cam.iter().next().map(|t| {
         let f = t.forward();
         DVec3::new(f64::from(f.x), f64::from(f.y), f64::from(f.z))
@@ -3555,196 +3617,203 @@ pub(crate) fn sync_terrain(
                     lead_m,
                 });
             }
-            let built = terrain.lane.built();
-            let counters = terrain.lane.counters();
-            let parents = terrain.lane.parent_stats();
-            // ★ THE HOLE INSTRUMENT: this frame's refusals and empty chunks, named, for this realm.
-            let key_name = |k: ChunkKey| format!("{:?} {} {} {} {}", k.face, k.rung, k.x, k.y, k.z);
-            let awaiting_keys: Vec<String> = terrain
-                .lane
-                .take_awaiting()
-                .into_iter()
-                .filter(|(r, _, _)| r == realm)
-                .map(|(_, k, tiles)| format!("{}: tiles {tiles:?}", key_name(k)))
-                .collect();
-            let mut missing_tiles: Vec<(u8, u32, u32, u32)> = terrain
-                .lane
-                .take_missing_hist()
-                .into_iter()
-                .filter(|((r, _, _, _), _)| r == realm)
-                .map(|((_, f, tx, ty), n)| (f, tx, ty, n))
-                .collect();
-            missing_tiles.sort_by(|a, b| b.3.cmp(&a.3));
-            missing_tiles.truncate(16);
-            let empty_keys: Vec<String> = terrain
-                .lane
-                .take_empty()
-                .into_iter()
-                .filter(|(r, _, _)| r == realm)
-                .map(|(_, k, level)| format!("{} @L{level}", key_name(k)))
-                .collect();
-            let (hole_columns, hole_named) = terrain.lane.hole_columns(*realm);
-            let hole_keys: Vec<String> = hole_named
-                .into_iter()
-                .map(|(k, level)| format!("{} @L{level}", key_name(k)))
-                .collect();
-            let lattice_edge = terrain
-                .lane
-                .body(*realm)
-                .and_then(|b| b.macro_lattice())
-                .map_or(0, |l| l.edge);
-            let margin_missing = {
-                let Terrain { lane, ladders, .. } = &*terrain;
-                ladders.get(realm).map_or(0, |l| {
-                    l.wanted.margin_missing(&|k| lane.is_resident(*realm, k)) as u64
-                })
-            };
-            let camera_body = camera_rotation.map_or(DQuat::IDENTITY, |c| facing.inverse() * c);
-            terrain.stamp = Some(DevTerrainStamp {
-                realm: format!("{realm:?}"),
-                rung_min,
-                rung_max,
-                eye_body_m: eye_body,
-                camera_body_xyzw: camera_body.to_array(),
-                chunks_per_rung: terrain.drawn_per_rung(),
-                surface_m: ground.surface_m,
-                altitude_m: ground.altitude_m,
-                horizon_m: horizon_m(ground.surface_m, ground.altitude_m),
-                horizon_dip_deg: horizon_dip_rad(ground.surface_m, ground.altitude_m).to_degrees(),
-                drawn_radius_m: reach,
-                chunk_nearest_m: 0.0,
-                chunk_farthest_m: 0.0,
-                chunks_drawn: terrain.entities.len() as u64,
-                chunks_pending: terrain.lane.pending_count() as u64,
-                chunks_urgent: gap,
-                chunks_revealed: gap_revealed,
-                urgent_per_rung: gap_per_rung,
-                urgent_frames: terrain.urgent_frames,
-                frames: terrain.frames,
-                built_chunks: built.chunks,
-                build_nanos: built.nanos,
-                build_peak_nanos: built.peak_nanos,
-                build_peak_key: built
-                    .peak_key
-                    .map_or_else(String::new, |k| format!("{k:?}")),
-                harvested: counters.harvested,
-                harvest_full: counters.harvest_full,
-                harvest_nanos: terrain.harvest_nanos,
-                parent_hits: parents.hits,
-                parent_builds: parents.builds,
-                parent_waits: parents.waits,
-                no_body: counters.no_body,
-                outside: counters.outside,
-                submitted: counters.submitted,
-                awaiting_artifact: counters.awaiting_artifact,
-                artifact_rebuilds: counters.artifact_rebuilds,
-                awaiting_keys,
-                missing_tiles,
-                empty_chunks: counters.empty_chunks,
-                empty_keys,
-                hole_columns,
-                hole_keys,
-                margin_missing,
-                stale_builds: counters.stale_builds,
-                lattice_edge,
-                eyes: with_bodies
-                    .iter()
-                    .map(|eb| {
-                        (
-                            format!("{:?}", eb.realm),
-                            DVec3::from_array(eb.eye).length() - eb.body.ladder().radius_m(),
-                        )
+            if stamp_due {
+                let built = terrain.lane.built();
+                let counters = terrain.lane.counters();
+                let parents = terrain.lane.parent_stats();
+                // ★ THE HOLE INSTRUMENT: this frame's refusals and empty chunks, named, for this realm.
+                let key_name =
+                    |k: ChunkKey| format!("{:?} {} {} {} {}", k.face, k.rung, k.x, k.y, k.z);
+                let awaiting_keys: Vec<String> = terrain
+                    .lane
+                    .take_awaiting()
+                    .into_iter()
+                    .filter(|(r, _, _)| r == realm)
+                    .map(|(_, k, tiles)| format!("{}: tiles {tiles:?}", key_name(k)))
+                    .collect();
+                let mut missing_tiles: Vec<(u8, u32, u32, u32)> = terrain
+                    .lane
+                    .take_missing_hist()
+                    .into_iter()
+                    .filter(|((r, _, _, _), _)| r == realm)
+                    .map(|((_, f, tx, ty), n)| (f, tx, ty, n))
+                    .collect();
+                missing_tiles.sort_by(|a, b| b.3.cmp(&a.3));
+                missing_tiles.truncate(16);
+                let empty_keys: Vec<String> = terrain
+                    .lane
+                    .take_empty()
+                    .into_iter()
+                    .filter(|(r, _, _)| r == realm)
+                    .map(|(_, k, level)| format!("{} @L{level}", key_name(k)))
+                    .collect();
+                let (hole_columns, hole_named) = terrain.lane.hole_columns(*realm);
+                let hole_keys: Vec<String> = hole_named
+                    .into_iter()
+                    .map(|(k, level)| format!("{} @L{level}", key_name(k)))
+                    .collect();
+                let lattice_edge = terrain
+                    .lane
+                    .body(*realm)
+                    .and_then(|b| b.macro_lattice())
+                    .map_or(0, |l| l.edge);
+                let margin_missing = {
+                    let Terrain { lane, ladders, .. } = &*terrain;
+                    ladders.get(realm).map_or(0, |l| {
+                        l.wanted.margin_missing(&|k| lane.is_resident(*realm, k)) as u64
                     })
-                    .collect(),
-                eye_cell: render_eye
-                    .eye_lattice
-                    .map_or([0, 0, 0], |(l, _)| l.cell().to_array()),
-                eye_offset_m: render_eye
-                    .eye_lattice
-                    .map_or([0.0, 0.0, 0.0], |(l, _)| l.offset().to_array()),
-                eye_tier: render_eye
-                    .eye_lattice
-                    .map_or_else(String::new, |(_, t)| format!("{t:?}")),
-                body_branches: with_bodies
-                    .iter()
-                    .filter_map(|eb| {
-                        let rbox = scene.get(eb.realm)?;
-                        let branch = match (render_eye.eye_lattice, snap.sky_anchor_now(now_s)) {
-                            (Some((_, tier)), Some(_)) if rbox.tier != tier => "far",
-                            (Some(_), _) => "lattice",
-                            (None, _) => "flat",
-                        };
-                        Some((
-                            format!("{:?}", eb.realm),
-                            format!("{:?}", rbox.tier),
-                            branch.to_owned(),
-                        ))
-                    })
-                    .collect(),
-                artifact_expected: terrain.lane.expected_artifact(*realm),
-                artifact_held: terrain.lane.artifact(*realm).map(|a| a.head.digest),
-                lead_m,
-                // THE BOUNDED ASK (ruling F9 item 1): the builders' capacity, the eye's speed
-                // through the body under it, and that body's deliverable horizons.
-                build_rate_per_s: terrain.throughput.value(),
-                eye_speed_mps: terrain
-                    .ladders
-                    .get(realm)
-                    .map_or(0.0, |l: &RealmLadder| l.speed_mps),
-                ask_horizon_m: terrain
-                    .ladders
-                    .get(realm)
-                    .map(|l: &RealmLadder| l.view.bound.horizons_m())
-                    .unwrap_or_default(),
-                // ★ THE CARD AS A SECOND BUILDER (ruling F9 item 2): what it built, what its
-                // boxes cost it, and what the frames granted it.
-                card_boxes: card.0,
-                card_nanos: card.1,
-                card_budget_nanos: card.2,
-                card_per_box_ms: card.3,
-                card_boxes_per_frame: card.4,
-                card_capacity_per_s: card.5,
-                card_device_timed: card.6,
-                card_judged: card.7,
-                card_stood_down: card.8,
-                frame_peak_ms: terrain.frame_peak_ms as f32,
-                frame_work_ns: terrain.frame_work(),
-                morph_fallbacks: terrain.morph_totals[0],
-                morph_seam: terrain.morph_totals[1],
-                vertices: terrain.morph_totals[2],
-                bytes_drawn: terrain.bytes_drawn,
-                shadow_casters: terrain.shadow_casters.len() as u64,
-                shadow_bytes: terrain.shadow_bytes,
-                hud_rect_px: [0.0; 4],
-                frame_ms: diagnostics
-                    .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
-                    .and_then(bevy::diagnostic::Diagnostic::smoothed)
-                    .unwrap_or(0.0) as f32,
-                passes_ms: render_passes_ms(&diagnostics),
-                star,
-                biome: format!("{:?}", ground.biome),
-                world: format!("{:#x}", terrain.declared),
-                tick: snap.freshest_tick(),
-                ruler: ruler_now.as_ref().map(|(_, _, _, d)| *d),
-                // ★ THE BOARDING INSTRUMENT (2026-09-14): the forgets, and the scene swap the
-                // view last took (`place_camera` runs before this system, in the same chain).
-                ladders_forgotten: terrain.ladders_forgotten,
-                last_forget: terrain.last_forget.clone(),
-                scene_swaps: render_eye.swaps,
-                swap: render_eye.swap.clone(),
-                band_releases: terrain.band_releases,
-                last_release: terrain.last_release.clone(),
-                eye_foreign_frames: terrain.eye_foreign_frames,
-                // ★ THE CAMERA'S REFUSAL AND THE EYE'S JUMP (2026-09-15): decided in
-                // `place_camera`, which runs before this system in the same chain.
-                eye_refusals: render_eye.track.refusals,
-                eye_jump_m: render_eye.track.jump_max_m,
-                eye_step_m: render_eye.track.step_max_m,
-                last_gap: terrain.last_gap.clone(),
-                sky: None,
-            });
+                };
+                let camera_body = camera_rotation.map_or(DQuat::IDENTITY, |c| facing.inverse() * c);
+                terrain.stamp = Some(DevTerrainStamp {
+                    realm: format!("{realm:?}"),
+                    rung_min,
+                    rung_max,
+                    eye_body_m: eye_body,
+                    camera_body_xyzw: camera_body.to_array(),
+                    chunks_per_rung: terrain.drawn_per_rung(),
+                    surface_m: ground.surface_m,
+                    altitude_m: ground.altitude_m,
+                    horizon_m: horizon_m(ground.surface_m, ground.altitude_m),
+                    horizon_dip_deg: horizon_dip_rad(ground.surface_m, ground.altitude_m)
+                        .to_degrees(),
+                    drawn_radius_m: reach,
+                    chunk_nearest_m: 0.0,
+                    chunk_farthest_m: 0.0,
+                    chunks_drawn: terrain.entities.len() as u64,
+                    chunks_pending: terrain.lane.pending_count() as u64,
+                    chunks_urgent: gap,
+                    chunks_revealed: gap_revealed,
+                    urgent_per_rung: gap_per_rung,
+                    urgent_frames: terrain.urgent_frames,
+                    frames: terrain.frames,
+                    built_chunks: built.chunks,
+                    build_nanos: built.nanos,
+                    build_peak_nanos: built.peak_nanos,
+                    build_peak_key: built
+                        .peak_key
+                        .map_or_else(String::new, |k| format!("{k:?}")),
+                    harvested: counters.harvested,
+                    harvest_full: counters.harvest_full,
+                    harvest_nanos: terrain.harvest_nanos,
+                    parent_hits: parents.hits,
+                    parent_builds: parents.builds,
+                    parent_waits: parents.waits,
+                    no_body: counters.no_body,
+                    outside: counters.outside,
+                    submitted: counters.submitted,
+                    awaiting_artifact: counters.awaiting_artifact,
+                    artifact_rebuilds: counters.artifact_rebuilds,
+                    awaiting_keys,
+                    missing_tiles,
+                    empty_chunks: counters.empty_chunks,
+                    empty_keys,
+                    hole_columns,
+                    hole_keys,
+                    margin_missing,
+                    stale_builds: counters.stale_builds,
+                    lattice_edge,
+                    eyes: with_bodies
+                        .iter()
+                        .map(|eb| {
+                            (
+                                format!("{:?}", eb.realm),
+                                DVec3::from_array(eb.eye).length() - eb.body.ladder().radius_m(),
+                            )
+                        })
+                        .collect(),
+                    eye_cell: render_eye
+                        .eye_lattice
+                        .map_or([0, 0, 0], |(l, _)| l.cell().to_array()),
+                    eye_offset_m: render_eye
+                        .eye_lattice
+                        .map_or([0.0, 0.0, 0.0], |(l, _)| l.offset().to_array()),
+                    eye_tier: render_eye
+                        .eye_lattice
+                        .map_or_else(String::new, |(_, t)| format!("{t:?}")),
+                    body_branches: with_bodies
+                        .iter()
+                        .filter_map(|eb| {
+                            let rbox = scene.get(eb.realm)?;
+                            let branch = match (render_eye.eye_lattice, snap.sky_anchor_now(now_s))
+                            {
+                                (Some((_, tier)), Some(_)) if rbox.tier != tier => "far",
+                                (Some(_), _) => "lattice",
+                                (None, _) => "flat",
+                            };
+                            Some((
+                                format!("{:?}", eb.realm),
+                                format!("{:?}", rbox.tier),
+                                branch.to_owned(),
+                            ))
+                        })
+                        .collect(),
+                    artifact_expected: terrain.lane.expected_artifact(*realm),
+                    artifact_held: terrain.lane.artifact(*realm).map(|a| a.head.digest),
+                    lead_m,
+                    // THE BOUNDED ASK (ruling F9 item 1): the builders' capacity, the eye's speed
+                    // through the body under it, and that body's deliverable horizons.
+                    build_rate_per_s: terrain.throughput.value(),
+                    eye_speed_mps: terrain
+                        .ladders
+                        .get(realm)
+                        .map_or(0.0, |l: &RealmLadder| l.speed_mps),
+                    ask_horizon_m: terrain
+                        .ladders
+                        .get(realm)
+                        .map(|l: &RealmLadder| l.view.bound.horizons_m())
+                        .unwrap_or_default(),
+                    // ★ THE CARD AS A SECOND BUILDER (ruling F9 item 2): what it built, what its
+                    // boxes cost it, and what the frames granted it.
+                    card_boxes: card.0,
+                    card_nanos: card.1,
+                    card_budget_nanos: card.2,
+                    card_per_box_ms: card.3,
+                    card_boxes_per_frame: card.4,
+                    card_capacity_per_s: card.5,
+                    card_device_timed: card.6,
+                    card_judged: card.7,
+                    card_stood_down: card.8,
+                    frame_peak_ms: terrain.frame_peak_ms as f32,
+                    frame_work_ns: terrain.frame_work(),
+                    morph_fallbacks: terrain.morph_totals[0],
+                    morph_seam: terrain.morph_totals[1],
+                    vertices: terrain.morph_totals[2],
+                    bytes_drawn: terrain.bytes_drawn,
+                    shadow_casters: terrain.shadow_casters.len() as u64,
+                    shadow_bytes: terrain.shadow_bytes,
+                    hud_rect_px: [0.0; 4],
+                    frame_ms: diagnostics
+                        .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FRAME_TIME)
+                        .and_then(bevy::diagnostic::Diagnostic::smoothed)
+                        .unwrap_or(0.0) as f32,
+                    passes_ms: render_passes_ms(&diagnostics),
+                    star,
+                    biome: format!("{:?}", ground.biome),
+                    world: format!("{:#x}", terrain.declared),
+                    tick: snap.freshest_tick(),
+                    ruler: ruler_now.as_ref().map(|(_, _, _, d)| *d),
+                    // ★ THE BOARDING INSTRUMENT (2026-09-14): the forgets, and the scene swap the
+                    // view last took (`place_camera` runs before this system, in the same chain).
+                    ladders_forgotten: terrain.ladders_forgotten,
+                    last_forget: terrain.last_forget.clone(),
+                    scene_swaps: render_eye.swaps,
+                    swap: render_eye.swap.clone(),
+                    band_releases: terrain.band_releases,
+                    last_release: terrain.last_release.clone(),
+                    eye_foreign_frames: terrain.eye_foreign_frames,
+                    // ★ THE CAMERA'S REFUSAL AND THE EYE'S JUMP (2026-09-15): decided in
+                    // `place_camera`, which runs before this system in the same chain.
+                    eye_refusals: render_eye.track.refusals,
+                    eye_jump_m: render_eye.track.jump_max_m,
+                    eye_step_m: render_eye.track.step_max_m,
+                    last_gap: terrain.last_gap.clone(),
+                    sky: None,
+                    frame_cost: None,
+                });
+            }
         }
     }
+    terrain.note_work(WORK_STAMP, stamp_started.elapsed(), 1, now_s);
     let realm_under = under_eye
         .as_ref()
         .map(|(realm, _, _)| *realm)
@@ -3868,34 +3937,51 @@ pub struct ChunkOrigin(pub [f64; 3]);
 /// Place every drawn chunk (and its twin) against the eye: `draw_center(row) + facing · origin`, in
 /// f64, narrowed once. Runs after `sync_terrain` so a chunk spawned this frame is placed this frame.
 /// Completes this frame's stamp with the nearest and farthest chunk and publishes it.
+#[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources/queries
 pub(crate) fn place_chunks(
     net: Res<super::Net>,
     render_eye: Res<super::RenderEye>,
     mut terrain: ResMut<Terrain>,
     mut chunks: PlacedChunks,
     mut frame: Local<u32>,
+    window: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut occlusion: bevy::ecs::message::MessageReader<bevy::window::WindowOccluded>,
+    mut occluded: Local<bool>,
 ) {
+    let place_started = std::time::Instant::now();
+    // ★ THE WINDOW'S OWN PIXELS AND FOCUS (2026-09-24): the system reports a hidden window by a
+    // message, so the last word is held.
+    for m in occlusion.read() {
+        *occluded = m.occluded;
+    }
     // THE STAMP STAYS IN THE RESOURCE (slice 8 step 6): the frame's completed stamp is
     // published for the dev-control poll AND kept here, so the extract of this very frame
     // carries it beside the pixels (a captured frame's dump then states the drawn camera of the
     // picture it sits beside). MEASURED with `take()` here: the extract found none, the dump fell
     // back to the poll's stamp of a random later frame, and no recorded pair was ever consecutive
     // in the terrain's own count (0, +2, +3) while the capture frames were.
-    let mut stamp = terrain.stamp.clone();
+    // ★ ONLY A FRESH STAMP IS COMPLETED AND PUBLISHED (2026-09-24): between two assemblies the
+    // last published stamp stands, and nothing is copied.
+    let fresh = terrain.stamp_fresh;
+    let mut stamp = if fresh { terrain.stamp.clone() } else { None };
     // Nothing drawn: nothing to place, and no scene to clone (a flight in open space used to walk
     // every row of the window for no pixel — SL9). The stamp still goes out.
     if chunks.is_empty() {
-        *net.terrain_stamp
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp;
+        if fresh {
+            *net.terrain_stamp
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp;
+        }
         return;
     }
     // THE FRAME'S MOMENT (step 6): the camera's own sample, so the chunks stand where the
     // stamped eye looked from.
     let Some((now_s, snap)) = render_eye.moment.clone() else {
-        *net.terrain_stamp
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp;
+        if fresh {
+            *net.terrain_stamp
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp;
+        }
         return;
     };
     let scene = snap.scene_now(now_s);
@@ -3913,17 +3999,31 @@ pub(crate) fn place_chunks(
     let mut farthest = 0.0_f64;
     let mut placed = 0u32;
     let mut first: Option<(RealmId, [f64; 3], DVec3)> = None;
+    // ★ THE PLACEMENTS WRITTEN AND THE PLACEMENTS MOVED (2026-09-24, the window's heat): a write
+    // marks the chunk changed whatever its value, and the engine then re-sends it to the GPU.
+    let mut placements = 0u64;
+    let mut placements_moved = 0u64;
     for (chunk, origin, twin, caster, mut transform) in &mut chunks {
         if let Some((centre, facing)) = rows.get(&chunk.realm) {
             let o = DVec3::new(origin.0[0], origin.0[1], origin.0[2]);
             let p = *centre + *facing * o;
-            transform.translation = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
-            transform.rotation = Quat::from_xyzw(
+            let translation = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
+            let rotation = Quat::from_xyzw(
                 facing.x as f32,
                 facing.y as f32,
                 facing.z as f32,
                 facing.w as f32,
             );
+            // ★ WRITTEN ONLY WHEN IT CHANGES (2026-09-24, the window's heat): a write through the
+            // component marks it changed whatever the value, and the engine then propagates,
+            // re-extracts and re-uploads the chunk. An equal value is left alone, so the GPU
+            // receives the same bits and a still eye re-sends nothing.
+            placements += 1;
+            if transform.translation != translation || transform.rotation != rotation {
+                placements_moved += 1;
+                transform.translation = translation;
+                transform.rotation = rotation;
+            }
             // The twins ride the same rows but are not counted twice; the casters ride them and
             // are not counted at all (the sun's, not the picture's).
             if twin.is_none() && caster.is_none() {
@@ -3936,14 +4036,26 @@ pub(crate) fn place_chunks(
             }
         }
     }
+    terrain.note_work(WORK_PLACE, place_started.elapsed(), 1, now_s);
     if let Some(t) = &mut stamp {
         t.chunk_nearest_m = if placed > 0 { nearest } else { 0.0 };
         t.chunk_farthest_m = farthest;
+        let w = window.iter().next();
+        t.frame_cost = Some(vd_devproto::DevFrameCost {
+            window_px: w.map_or([0, 0], |w| [w.physical_width(), w.physical_height()]),
+            scale: w.map_or(0.0, Window::scale_factor),
+            focused: w.is_some_and(|w| w.focused),
+            occluded: *occluded,
+            placements,
+            placements_moved,
+        });
     }
-    *net.terrain_stamp
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp.clone();
-    terrain.stamp = stamp;
+    if fresh {
+        *net.terrain_stamp
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = stamp.clone();
+        terrain.stamp = stamp;
+    }
     *frame += 1;
     if frame.is_multiple_of(DIAG_EVERY) {
         for (realm, (centre, facing)) in &rows {

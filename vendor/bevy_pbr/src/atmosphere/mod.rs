@@ -72,7 +72,7 @@ use environment::{
 };
 use resources::{
     prepare_atmosphere_transforms, prepare_atmosphere_uniforms, queue_render_sky_pipelines,
-    AtmosphereTransforms, GpuAtmosphere, RenderSkyBindGroupLayouts,
+    AtmosphereTransforms, GpuAtmosphere, RenderSkyBindGroupLayouts, SkyAirPipeline,
 };
 use tracing::warn;
 
@@ -104,6 +104,8 @@ impl Plugin for AtmospherePlugin {
         embedded_asset!(app, "sky_view_lut.wgsl");
         embedded_asset!(app, "aerial_view_lut.wgsl");
         embedded_asset!(app, "render_sky.wgsl");
+        // VOXELDUST PATCH (the air over a pixel marched once, 2026-09-24).
+        embedded_asset!(app, "sky_air.wgsl");
         embedded_asset!(app, "environment.wgsl");
 
         app.add_plugins((
@@ -144,6 +146,7 @@ impl Plugin for AtmospherePlugin {
         render_app
             .insert_resource(AtmosphereBindGroupLayouts::new())
             .init_resource::<RenderSkyBindGroupLayouts>()
+            .init_resource::<SkyAirPipeline>()
             .init_resource::<AtmosphereSampler>()
             .init_resource::<AtmosphereLutPipelines>()
             .init_resource::<AtmosphereTransforms>()

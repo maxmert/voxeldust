@@ -13,6 +13,8 @@ use bevy_render::{
 
 use crate::{resources::GpuAtmosphere, ViewLightsUniformOffset};
 
+use super::resources::{AtmosphereTextures, SkyAirPipeline};
+
 use super::{
     resources::{
         AtmosphereBindGroups, AtmosphereLutPipelines, AtmosphereTransformsOffset,
@@ -141,20 +143,25 @@ impl ViewNode for AtmosphereLutsNode {
         dispatch_2d(&mut luts_pass, settings.sky_view_lut_size);
 
         // Aerial View LUT
+        //
+        // VOXELDUST PATCH (the tables the raymarch overwrites, 2026-09-24): only the sky pass's
+        // lookup branch reads the aerial table, so under the raymarched mode (1) it is not built.
 
-        luts_pass.set_pipeline(aerial_view_lut_pipeline);
-        luts_pass.set_bind_group(
-            0,
-            &bind_groups.aerial_view_lut,
-            &[
-                atmosphere_uniforms_offset.index(),
-                settings_uniforms_offset.index(),
-                view_uniforms_offset.offset,
-                lights_uniforms_offset.offset,
-            ],
-        );
+        if settings.rendering_method != 1 {
+            luts_pass.set_pipeline(aerial_view_lut_pipeline);
+            luts_pass.set_bind_group(
+                0,
+                &bind_groups.aerial_view_lut,
+                &[
+                    atmosphere_uniforms_offset.index(),
+                    settings_uniforms_offset.index(),
+                    view_uniforms_offset.offset,
+                    lights_uniforms_offset.offset,
+                ],
+            );
 
-        dispatch_2d(&mut luts_pass, settings.aerial_view_lut_size.xy());
+            dispatch_2d(&mut luts_pass, settings.aerial_view_lut_size.xy());
+        }
 
         pass_span.end(&mut luts_pass);
 
@@ -177,6 +184,8 @@ impl ViewNode for RenderSkyNode {
         Read<ViewLightsUniformOffset>,
         Read<RenderSkyPipelineId>,
         Option<Read<MainPassResolutionOverride>>,
+        Read<AtmosphereTextures>,
+        Read<GpuAtmosphereSettings>,
     );
 
     fn run<'w>(
@@ -194,6 +203,8 @@ impl ViewNode for RenderSkyNode {
             lights_uniforms_offset,
             render_sky_pipeline_id,
             resolution_override,
+            textures,
+            settings,
         ): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
@@ -205,6 +216,43 @@ impl ViewNode for RenderSkyNode {
         }; //TODO: warning
 
         let diagnostics = render_context.diagnostic_recorder();
+
+        let offsets = [
+            atmosphere_uniforms_offset.index(),
+            settings_uniforms_offset.index(),
+            atmosphere_transforms_offset.index(),
+            view_uniforms_offset.offset,
+            lights_uniforms_offset.offset,
+        ];
+        // VOXELDUST PATCH (the air over a pixel marched once, 2026-09-24): a multisampled view's
+        // pixels are marched once first (`sky_air.wgsl`); the sky pass reads the result. Both run
+        // or neither: without the march the sky pass would read what the last frame left.
+        if let (Some(air_group), Some((air_light, _))) = (
+            atmosphere_bind_groups.sky_air.as_ref(),
+            textures.sky_air.as_ref(),
+        ) {
+            let Some(air_pipeline) =
+                pipeline_cache.get_compute_pipeline(world.resource::<SkyAirPipeline>().0)
+            else {
+                return Ok(());
+            };
+            // Only the raymarched mode reads it; the lookup mode keeps its tables.
+            if settings.rendering_method == 1 {
+                let size = air_light.texture.size();
+                let mut air_pass =
+                    render_context
+                        .command_encoder()
+                        .begin_compute_pass(&ComputePassDescriptor {
+                            label: Some("sky_air"),
+                            timestamp_writes: None,
+                        });
+                let air_span = diagnostics.pass_span(&mut air_pass, "sky_air");
+                air_pass.set_pipeline(air_pipeline);
+                air_pass.set_bind_group(0, air_group, &offsets);
+                air_pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+                air_span.end(&mut air_pass);
+            }
+        }
 
         let mut render_sky_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("render_sky"),
@@ -222,17 +270,7 @@ impl ViewNode for RenderSkyNode {
         }
 
         render_sky_pass.set_render_pipeline(render_sky_pipeline);
-        render_sky_pass.set_bind_group(
-            0,
-            &atmosphere_bind_groups.render_sky,
-            &[
-                atmosphere_uniforms_offset.index(),
-                settings_uniforms_offset.index(),
-                atmosphere_transforms_offset.index(),
-                view_uniforms_offset.offset,
-                lights_uniforms_offset.offset,
-            ],
-        );
+        render_sky_pass.set_bind_group(0, &atmosphere_bind_groups.render_sky, &offsets);
         render_sky_pass.draw(0..3, 0..1);
 
         pass_span.end(&mut render_sky_pass);

@@ -3450,6 +3450,7 @@ mod tests {
                     eye_step_m: 0.0,
                     last_gap: None,
                     sky: None,
+                    frame_cost: None,
                 }),
             },
         );

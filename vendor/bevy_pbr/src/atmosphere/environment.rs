@@ -18,6 +18,7 @@ use bevy_image::Image;
 use bevy_light::{AtmosphereEnvironmentMapLight, GeneratedEnvironmentMapLight};
 use bevy_math::{Quat, UVec2};
 use bevy_render::{
+    diagnostic::RecordDiagnostics,
     extract_component::{ComponentUniforms, DynamicUniformIndex, ExtractComponent},
     render_asset::RenderAssets,
     render_graph::{Node, NodeRunError, RenderGraphContext},
@@ -299,6 +300,7 @@ impl Node for EnvironmentNode {
             return Ok(());
         };
 
+        let diagnostics = render_context.diagnostic_recorder();
         for (bind_groups, env_map_light) in self.probe_query.iter_manual(world) {
             let mut pass =
                 render_context
@@ -308,6 +310,7 @@ impl Node for EnvironmentNode {
                         timestamp_writes: None,
                     });
 
+            let pass_span = diagnostics.pass_span(&mut pass, "environment_pass");
             pass.set_pipeline(environment_pipeline);
             pass.set_bind_group(
                 0,
@@ -326,6 +329,7 @@ impl Node for EnvironmentNode {
                 env_map_light.size.y / 8,
                 6, // 6 cubemap faces
             );
+            pass_span.end(&mut pass);
         }
 
         Ok(())

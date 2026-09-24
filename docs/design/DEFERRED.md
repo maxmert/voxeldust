@@ -8881,6 +8881,54 @@ draws itself"):**
   to the pixel. The owner's own far view of the bounded blocks: owed. OWED for the last of
   the near stand's peak: a split of the remaining 13.7 ms between the ground's vertices and the engine's
   per-entity work, which the ablation cannot give.
+- 🟩 **THE WINDOW'S OWN FRAME, AND THE SKY MARCHED ONCE PER PIXEL (2026-09-24, the perf tree; the owner: *"my
+  machine fans are at max speed all the time … We need to optimize without breaking quality!"*).**
+  MEASURED FIRST: every earlier frame number was the HEADLESS capture (1284 × 720, a 60 Hz pace, a probe twin of
+  every chunk, two readbacks a frame); the WINDOW had never been measured. The window draws 2560 × 1440 physical
+  pixels at four samples a pixel on the Retina display, on an adaptive refresh with no cap. Its baseline, unpaced,
+  on the owner's stands: 11 499 km 14.6 ms, 16 954 km 10.2 ms, 6 376 km 20.2 ms, the berth on foot (9 136 chunks,
+  32 M vertices) 30.0 ms — the GPU at 87–97 %, the terrain's CPU pieces under 0.3 ms except on foot (the stamp
+  4.1 ms, the release-and-request walk 1.2 ms a frame). THE ABLATIONS (unpaced, the berth / 6 376 km): the
+  lookup sky instead of the raymarch saves 13.8 / 10.2 ms, no sky at all (no HDR, no bloom) 19.5 / 14.7 ms, a
+  quarter of the pixels 15.2 / 11.3 ms, no shadows 0, no water sheet 0 / 3.0 ms, a 32-pixel probe about 1 ms —
+  so the RAYMARCHED SKY, marched once per SAMPLE, was about half of every frame and the 32 M vertices were not
+  the wall. BUILT, each measured by the window bench and judged by a fixed-tick picture gate against a CONTROL
+  run of the baseline (two runs of one binary differ by up to 220 pixels and 22 levels where a far body's
+  artifact lands at a different moment — the 🟨 entry below — so a cut is compared with the control that drew
+  the same world):
+  (1) THE AIR OVER A PIXEL MARCHED ONCE (`vendor/bevy_pbr/PATCH.md`, the fourth change): a compute pass marches
+  each pixel once (all sky, or all ground within one march step) and every sample extends or shortens that march
+  to its own distance by one partial step of the same march. Unpaced: the berth 30.0 → 11.3 ms (33 → 89 frames a
+  second), 6 376 km 20.2 → 13.4 ms, 11 499 km 14.6 → 11.4 ms, 16 954 km 10.2 → 9.5 ms. Pictures: 0 pixels over
+  one level at every stand against the matching control (2 719 – 27 214 pixels by exactly one level). TRIED AND
+  REFUTED ON THE WAY: the open sky alone once per pixel (orbit rays that miss the air already return early; the
+  second draw cost more — 87 → 92 % GPU at 11 499 km); one colour for the whole pixel at the mean distance (16
+  deep-sea pixels moved by up to 26 levels where one sample met the drawn floor under the water); a one-surface
+  test (cured that, lost most of the saving on foot); an optical-depth bound (within the tolerance by
+  construction, but only near the nadir from orbit). (2) THE TABLES THE RAYMARCH OVERWRITES are not read, and
+  the aerial table is not built (the third change; exact). (3) THE WINDOW'S CRASH — "Failed to create counter
+  sample buffer: Cannot allocate sample buffer" → device lost → `Surface::present` panic, the owner's night-side
+  crash of 2026-09-23, reproduced in an unpaced window — is the engine's render diagnostics making a timestamp
+  set for every frame whose readback has not returned; on this GPU they read ZERO for every pass (a pass's
+  timestamps are written inside the pass, which the Apple GPU does not offer). They are now a measurement's
+  switch, `VD_RENDER_DIAG=1`, off by default. (4) THE FRAME CAP (the owner's word: the player's setting, 60 by
+  default; `VD_FRAME_CAP`, `0` lifts it): unpaced frames under the period left the window drawing as fast as the
+  display refreshed (98 frames a second at 16 954 km, the GPU at 96 %), spending every saving on frames. With the
+  cap and the cuts every stand holds 59–61 frames a second, the berth too (it held 32). (5) THE STAMP ONCE PER
+  CORE STEP in the window (every frame in the capture), the per-frame gap count and latch kept; the HUD formats
+  its lines under the lock. (6) Written only on change: chunk placements, realm boxes, the star material, the
+  bands of a rebind. (7) No sound and no gamepad plugins until the game has either. (8) The instruments: the
+  stamp's `frame_cost` row (the window's pixels, focus, occlusion, placements written and moved), the work pieces
+  `release`, `stamp`, `place`, the `environment_pass` span, and the window's measurement switches
+  `VD_WINDOW_FREE_CURSOR`, `VD_WINDOW_CONTINUOUS`, `VD_WINDOW_SCALE`, `VD_WINDOW_ON_TOP` (a covered window is
+  throttled by the system: 40 frames a second against 58).
+  OWED: the owner's look in the window; the stamp's heavy half only while a dev tool reads (on foot about 5–8 %
+  of a core at 20 Hz); the release-and-request walk only when an input changed (1.2 ms a frame on foot; a missed
+  input is a hole, so the gap instruments judge it); the water sheet folded into its ground chunk (3 ms from
+  orbit); HDR and bloom about 5 ms (the owner's look, unchanged); FOUND, UNMEASURED: a band rebind rewrites the
+  ground's and the casters' materials but not the WATER's, so in flight the sea's crossfade can lag its ground;
+  the heat itself (package power needs `powermetrics` with sudo — the GPU's busy share saturates under the
+  clock's own scaling); HR5 over the new lines; the full gate before a merge.
 - 🟨 **TWELVE CHUNKS THAT NEVER SETTLE ON A STILL STAND = TWO FAR PLANETS WITHOUT THEIR ARTIFACT
   (2026-09-23).** The stamp counts every realm; on three of nine headless stands twelve chunks stayed urgent
   for the stand's five minutes — one whole-face chunk per face at the top rung of two far planets whose

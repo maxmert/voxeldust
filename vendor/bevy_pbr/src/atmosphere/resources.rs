@@ -18,6 +18,7 @@ use bevy_ecs::{
 use bevy_image::ToExtents;
 use bevy_math::{Affine3A, Mat4, Vec3, Vec3A};
 use bevy_render::{
+    camera::ExtractedCamera,
     extract_component::ComponentUniforms,
     render_asset::RenderAssets,
     render_resource::{binding_types::*, *},
@@ -42,6 +43,10 @@ pub(crate) struct AtmosphereBindGroupLayouts {
 pub(crate) struct RenderSkyBindGroupLayouts {
     pub render_sky: BindGroupLayoutDescriptor,
     pub render_sky_msaa: BindGroupLayoutDescriptor,
+    /// VOXELDUST PATCH (the air over a pixel marched once, 2026-09-24): the per-pixel march's
+    /// compute layout (`sky_air.wgsl`): the sky's own bindings, the multisampled depth, and the two
+    /// textures it writes.
+    pub sky_air: BindGroupLayoutDescriptor,
     pub fullscreen_shader: FullscreenShader,
     pub fragment_shader: Handle<Shader>,
 }
@@ -215,6 +220,46 @@ impl FromWorld for RenderSkyBindGroupLayouts {
                     (12, sampler(SamplerBindingType::Filtering)),
                     // view depth texture
                     (13, texture_2d_multisampled(TextureSampleType::Depth)),
+                    // VOXELDUST PATCH (the air over a pixel marched once): its result
+                    (14, texture_2d(TextureSampleType::Float { filterable: false })),
+                    (15, texture_2d(TextureSampleType::Float { filterable: false })),
+                ),
+            ),
+        );
+
+        let sky_air = BindGroupLayoutDescriptor::new(
+            "sky_air_bind_group_layout",
+            &BindGroupLayoutEntries::with_indices(
+                ShaderStages::COMPUTE,
+                (
+                    (0, uniform_buffer::<GpuAtmosphere>(true)),
+                    (1, uniform_buffer::<GpuAtmosphereSettings>(true)),
+                    (2, uniform_buffer::<AtmosphereTransform>(true)),
+                    (3, uniform_buffer::<ViewUniform>(true)),
+                    (4, uniform_buffer::<GpuLights>(true)),
+                    (5, texture_2d(TextureSampleType::default())),
+                    (6, texture_2d(TextureSampleType::default())),
+                    (7, sampler(SamplerBindingType::Filtering)),
+                    (8, texture_2d(TextureSampleType::default())),
+                    (9, texture_2d(TextureSampleType::default())),
+                    (10, texture_2d(TextureSampleType::default())),
+                    (11, texture_3d(TextureSampleType::default())),
+                    (12, sampler(SamplerBindingType::Filtering)),
+                    (13, texture_2d_multisampled(TextureSampleType::Depth)),
+                    (
+                        14,
+                        texture_storage_2d(
+                            TextureFormat::Rgba32Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
+                    (
+                        15,
+                        texture_storage_2d(
+                            TextureFormat::Rgba32Float,
+                            StorageTextureAccess::WriteOnly,
+                        ),
+                    ),
                 ),
             ),
         );
@@ -222,6 +267,7 @@ impl FromWorld for RenderSkyBindGroupLayouts {
         Self {
             render_sky,
             render_sky_msaa,
+            sky_air,
             fullscreen_shader: world.resource::<FullscreenShader>().clone(),
             fragment_shader: load_embedded_asset!(world, "render_sky.wgsl"),
         }
@@ -299,6 +345,25 @@ impl FromWorld for AtmosphereLutPipelines {
 
 #[derive(Component)]
 pub(crate) struct RenderSkyPipelineId(pub CachedRenderPipelineId);
+
+/// VOXELDUST PATCH (the air over a pixel marched once, 2026-09-24): the per-pixel march's pipeline.
+#[derive(Resource)]
+pub(crate) struct SkyAirPipeline(pub CachedComputePipelineId);
+
+impl FromWorld for SkyAirPipeline {
+    fn from_world(world: &mut World) -> Self {
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let layouts = world.resource::<RenderSkyBindGroupLayouts>();
+        Self(
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("sky_air_pipeline".into()),
+                layout: vec![layouts.sky_air.clone()],
+                shader: load_embedded_asset!(world, "sky_air.wgsl"),
+                ..default()
+            }),
+        )
+    }
+}
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct RenderSkyPipelineKey {
@@ -392,15 +457,27 @@ pub struct AtmosphereTextures {
     pub multiscattering_lut: CachedTexture,
     pub sky_view_lut: CachedTexture,
     pub aerial_view_lut: CachedTexture,
+    /// VOXELDUST PATCH (the air over a pixel marched once, 2026-09-24): the per-pixel march's
+    /// result for a multisampled view, the view's own size — (in-scattered light, mean distance)
+    /// and (transmittance, the pixel's class).
+    pub sky_air: Option<(CachedTexture, CachedTexture)>,
 }
 
 pub(super) fn prepare_atmosphere_textures(
-    views: Query<(Entity, &GpuAtmosphereSettings), With<ExtractedAtmosphere>>,
+    views: Query<
+        (
+            Entity,
+            &GpuAtmosphereSettings,
+            &Msaa,
+            Option<&ExtractedCamera>,
+        ),
+        With<ExtractedAtmosphere>,
+    >,
     render_device: Res<RenderDevice>,
     mut texture_cache: ResMut<TextureCache>,
     mut commands: Commands,
 ) {
-    for (entity, lut_settings) in &views {
+    for (entity, lut_settings, msaa, camera) in &views {
         let transmittance_lut = texture_cache.get(
             &render_device,
             TextureDescriptor {
@@ -457,12 +534,38 @@ pub(super) fn prepare_atmosphere_textures(
             },
         );
 
+        // VOXELDUST PATCH (the air over a pixel marched once): per multisampled view, its own size.
+        let sky_air = match camera.and_then(|c| c.physical_target_size) {
+            Some(size) if msaa.samples() > 1 && size.x > 0 && size.y > 0 => {
+                let descriptor = |label: &'static str| TextureDescriptor {
+                    label: Some(label),
+                    size: Extent3d {
+                        width: size.x,
+                        height: size.y,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Rgba32Float,
+                    usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                };
+                Some((
+                    texture_cache.get(&render_device, descriptor("sky_air_light")),
+                    texture_cache.get(&render_device, descriptor("sky_air_transmittance")),
+                ))
+            }
+            _ => None,
+        };
+
         commands.entity(entity).insert({
             AtmosphereTextures {
                 transmittance_lut,
                 multiscattering_lut,
                 sky_view_lut,
                 aerial_view_lut,
+                sky_air,
             }
         });
     }
@@ -587,6 +690,9 @@ pub(crate) struct AtmosphereBindGroups {
     pub sky_view_lut: BindGroup,
     pub aerial_view_lut: BindGroup,
     pub render_sky: BindGroup,
+    /// VOXELDUST PATCH (the air over a pixel marched once): the per-pixel march's bind group, for a
+    /// multisampled view.
+    pub sky_air: Option<BindGroup>,
 }
 
 #[derive(Copy, Clone, Debug, thiserror::Error)]
@@ -742,34 +848,85 @@ pub(super) fn prepare_atmosphere_bind_groups(
             )),
         );
 
-        let render_sky = render_device.create_bind_group(
-            "render_sky_bind_group",
-            &pipeline_cache.get_bind_group_layout(if *msaa == Msaa::Off {
-                &render_sky_layouts.render_sky
-            } else {
-                &render_sky_layouts.render_sky_msaa
-            }),
-            &BindGroupEntries::with_indices((
-                // uniforms
-                (0, atmosphere_binding.clone()),
-                (1, settings_binding.clone()),
-                (2, transforms_binding.clone()),
-                (3, view_binding.clone()),
-                (4, lights_binding.clone()),
-                // scattering medium luts and sampler
-                (5, &gpu_medium.density_lut_view),
-                (6, &gpu_medium.scattering_lut_view),
-                (7, medium_sampler.sampler()),
-                // atmosphere luts and sampler
-                (8, &textures.transmittance_lut.default_view),
-                (9, &textures.multiscattering_lut.default_view),
-                (10, &textures.sky_view_lut.default_view),
-                (11, &textures.aerial_view_lut.default_view),
-                (12, &**atmosphere_sampler),
-                // view depth texture
-                (13, view_depth_texture.view()),
-            )),
-        );
+        // VOXELDUST PATCH (the air over a pixel marched once): a multisampled view's sky pass reads
+        // the per-pixel march's result, and the march writes it; a multisampled view whose result
+        // textures are not made yet (its first frame) draws no sky rather than a wrong one.
+        let (render_sky, sky_air) = if *msaa == Msaa::Off {
+            let render_sky = render_device.create_bind_group(
+                "render_sky_bind_group",
+                &pipeline_cache.get_bind_group_layout(&render_sky_layouts.render_sky),
+                &BindGroupEntries::with_indices((
+                    // uniforms
+                    (0, atmosphere_binding.clone()),
+                    (1, settings_binding.clone()),
+                    (2, transforms_binding.clone()),
+                    (3, view_binding.clone()),
+                    (4, lights_binding.clone()),
+                    // scattering medium luts and sampler
+                    (5, &gpu_medium.density_lut_view),
+                    (6, &gpu_medium.scattering_lut_view),
+                    (7, medium_sampler.sampler()),
+                    // atmosphere luts and sampler
+                    (8, &textures.transmittance_lut.default_view),
+                    (9, &textures.multiscattering_lut.default_view),
+                    (10, &textures.sky_view_lut.default_view),
+                    (11, &textures.aerial_view_lut.default_view),
+                    (12, &**atmosphere_sampler),
+                    // view depth texture
+                    (13, view_depth_texture.view()),
+                )),
+            );
+            (render_sky, None)
+        } else {
+            let Some((air_light, air_transmittance)) = textures.sky_air.as_ref() else {
+                continue;
+            };
+            let render_sky = render_device.create_bind_group(
+                "render_sky_bind_group",
+                &pipeline_cache.get_bind_group_layout(&render_sky_layouts.render_sky_msaa),
+                &BindGroupEntries::with_indices((
+                    (0, atmosphere_binding.clone()),
+                    (1, settings_binding.clone()),
+                    (2, transforms_binding.clone()),
+                    (3, view_binding.clone()),
+                    (4, lights_binding.clone()),
+                    (5, &gpu_medium.density_lut_view),
+                    (6, &gpu_medium.scattering_lut_view),
+                    (7, medium_sampler.sampler()),
+                    (8, &textures.transmittance_lut.default_view),
+                    (9, &textures.multiscattering_lut.default_view),
+                    (10, &textures.sky_view_lut.default_view),
+                    (11, &textures.aerial_view_lut.default_view),
+                    (12, &**atmosphere_sampler),
+                    (13, view_depth_texture.view()),
+                    (14, &air_light.default_view),
+                    (15, &air_transmittance.default_view),
+                )),
+            );
+            let sky_air = render_device.create_bind_group(
+                "sky_air_bind_group",
+                &pipeline_cache.get_bind_group_layout(&render_sky_layouts.sky_air),
+                &BindGroupEntries::with_indices((
+                    (0, atmosphere_binding.clone()),
+                    (1, settings_binding.clone()),
+                    (2, transforms_binding.clone()),
+                    (3, view_binding.clone()),
+                    (4, lights_binding.clone()),
+                    (5, &gpu_medium.density_lut_view),
+                    (6, &gpu_medium.scattering_lut_view),
+                    (7, medium_sampler.sampler()),
+                    (8, &textures.transmittance_lut.default_view),
+                    (9, &textures.multiscattering_lut.default_view),
+                    (10, &textures.sky_view_lut.default_view),
+                    (11, &textures.aerial_view_lut.default_view),
+                    (12, &**atmosphere_sampler),
+                    (13, view_depth_texture.view()),
+                    (14, &air_light.default_view),
+                    (15, &air_transmittance.default_view),
+                )),
+            );
+            (render_sky, Some(sky_air))
+        };
 
         commands.entity(entity).insert(AtmosphereBindGroups {
             transmittance_lut,
@@ -777,6 +934,7 @@ pub(super) fn prepare_atmosphere_bind_groups(
             sky_view_lut,
             aerial_view_lut,
             render_sky,
+            sky_air,
         });
     }
 

@@ -546,6 +546,14 @@ pub(crate) mod tests {
                 eye_jump_m: 0.125,
                 eye_step_m: 0.25,
                 sky: None,
+                frame_cost: Some(DevFrameCost {
+                    window_px: [2560, 1440],
+                    scale: 2.0,
+                    focused: true,
+                    occluded: false,
+                    placements: 6460,
+                    placements_moved: 0,
+                }),
                 last_gap: Some(DevBandGap {
                     realm: "Planet(7)".to_owned(),
                     frame: 902,
@@ -929,6 +937,33 @@ pub struct DevTerrainStamp {
     /// Rayleigh coefficient against Bruneton's Earth value. `None` while no body with air is in
     /// the window (an airless stand, or the sky switched off).
     pub sky: Option<DevSkyStamp>,
+    /// ★ THE FRAME'S COST AS THE WINDOW PAYS IT (2026-09-24, the window's heat): the window's
+    /// own pixels and focus, and how many chunk placements this frame wrote and how many of them
+    /// changed a value. Absent in a state from an older client.
+    #[serde(default)]
+    pub frame_cost: Option<DevFrameCost>,
+}
+
+/// ★ THE FRAME'S COST ROW on [`DevTerrainStamp`] (2026-09-24, the window's heat). Every earlier
+/// frame number came from the headless capture (1284 × 720, paced at 60 Hz); this row says what
+/// the window itself draws, so a reading states which picture it measured.
+///
+/// Example: a pilot holds a hull still over the home planet in a Retina window. The row reads
+/// `window_px` 2560 × 1440 at `scale` 2, `focused` true, and `placements` 6 460 with
+/// `placements_moved` 0 — every chunk was written and none moved.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DevFrameCost {
+    /// The window's drawn size in PHYSICAL pixels (zero in the headless capture: no window).
+    pub window_px: [u32; 2],
+    /// The window's scale factor (physical pixels per logical pixel).
+    pub scale: f32,
+    /// Whether the window has the keyboard focus, and whether the system reports it hidden.
+    pub focused: bool,
+    pub occluded: bool,
+    /// The chunk placements written this frame (drawn chunks, casters and twins), and how many
+    /// of them changed the placement's value.
+    pub placements: u64,
+    pub placements_moved: u64,
 }
 
 /// THE SKY'S ROW on [`DevTerrainStamp`] (slice 8s).
