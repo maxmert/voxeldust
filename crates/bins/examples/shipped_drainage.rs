@@ -16,8 +16,9 @@
 //! (about two minutes), as `lake_census` and `erosion_bench` do; never a store, because a store
 //! holds whatever version somebody last flew. The field is the one the chunk builder reads at the
 //! rung (`PyramidField::level_for`: the rows themselves at rungs 0 to 9). Then, on each stand — the
-//! belt, the coast and a plain, picked by `vd_bins::drainage_gates::pick_stands` (the rule
-//! `drain_census` uses), and one more stand along `--dir` when it is stated (the reference stand) —
+//! belt, the coast and a plain, stated by `vd_bins::drainage_gates::pick_stands` (PINNED
+//! directions since review findings 4 and 9 of plan step 2b; `drain_census` reads the same), and
+//! one more stand along `--dir` when it is stated (the reference stand) —
 //! a square of whole chunks at the rung. Three variants of ONE grid:
 //!
 //! 1. **(a) SHIPPED** — the chunk builder's OWN function, `vd_terrain::chunk::column_field`, with the

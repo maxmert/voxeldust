@@ -40,6 +40,8 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     shoreline from one field, sea and lake, on today's ground); THE RIVERS FOLLOW THE WATER (receivers and the
     discharge row follow the budget's water — amends B7 item 2); R2's SLICE 0 FIRST (the bench + a hillshade for the
     owner's look, before any bake service; the coarser ground stands until a bake is done); step 2 committed.
+    ★ B9 (2026-09-25): step 2b committed (generator 21: the rivers follow the budget's water; G-RIVER-DESCENT 0);
+    the lake share 4.828 % kept RED and judged after the shoreline step; the flat directions' lattice lean cured BEFORE R2.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

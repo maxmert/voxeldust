@@ -83,7 +83,16 @@ use crate::units::{LENGTH_BITS, STEPS_PER_M};
 /// OCEAN only, so an inland pocket's rows carry its own budget's water and never the sea's bit;
 /// (4) the coast mask's word 2, unused before, is A POCKET'S DRY FLOOR ([`side_word`],
 /// [`Side::Pocket`]; 2026-09-25) — the mask keeps its two bits a node and its size.
-pub const ARTIFACT_VERSION: u32 = 8;
+/// ★ Version 9 (2026-09-25, plan step 2b; ruling B8 item 2, amending B7 item 2) keeps every byte's
+/// FORMAT and changes two meanings, so a version-8 store re-solves: (1) the RECEIVER SLOT is THE
+/// WATER'S OWN WAY ([`crate::lakes::water_tree`]) — the ground's descent, across a spilling lake to
+/// its spill, over the spill into the side the budget pours into — and "no receiver" is where the
+/// water ENDS: the ocean, a closed lake's water, a dry hollow's pit; (2) the DISCHARGE byte is THE
+/// BUDGET'S OWN WATER — the runoff over those receivers, less at each spill what its spilling lake
+/// hands the air — so a closed body passes nothing on and the row into the sea is the cascade's.
+/// Before it the slot was the routing fill's D8 receiver and the row carried 1 607 km³/yr to the sea
+/// out of hollows the budget held (MEASURED at generator 20).
+pub const ARTIFACT_VERSION: u32 = 9;
 /// A tile's edge in nodes: 64 × 64 rows of ten bytes is 40 KB — under a second on the lane.
 pub const TILE_EDGE: u32 = 64;
 /// The water level's word for a dry node.
@@ -2846,15 +2855,51 @@ mod tests {
         // ★ THE COAST MASK is one bit a node and the moon is dry, so no bit is set (2026-09-22).
         assert_eq!(artifact.coast.len(), coast_bytes(n));
         assert!(artifact.coast.iter().all(|&b| b == 0));
-        // A dry, airless moon: no water anywhere, every outlet an outlet, every row's height the
-        // rounded state.
+        // A dry, airless moon: no water anywhere, every row's height the rounded state. ★ THE
+        // WATER ENDS AT EVERY ROOT AND EVERY PIT (plan step 2b, question 8): the six lowest nodes,
+        // every node with no lower neighbour off the flats, and one middle of every CLOSED flat —
+        // counted here from the heights alone, never from the tree.
         assert!(artifact.rows.iter().all(|r| r.water_m == DRY_M));
         let outlets = artifact
             .rows
             .iter()
             .filter(|r| r.receiver_facies & RECEIVER_NONE != 0)
             .count();
-        assert_eq!(outlets, 6);
+        let mut lowest: Vec<u32> = (0..n as u32).collect();
+        lowest.sort_unstable_by_key(|&v| (state.z[v as usize], v));
+        let mut root = vec![false; n];
+        for &v in lowest.iter().take(crate::solve::OUTLETS_WITHOUT_SEA) {
+            root[v as usize] = true;
+        }
+        let mut seen = vec![false; n];
+        let mut ends = crate::solve::OUTLETS_WITHOUT_SEA;
+        for start in 0..n {
+            if root[start] || seen[start] {
+                continue;
+            }
+            // The node's flat (itself alone where no neighbour shares its height), and whether any
+            // node of it has a lower or a root neighbour.
+            let z0 = state.z[start];
+            let mut stack = vec![start as u32];
+            seen[start] = true;
+            let mut drains = false;
+            while let Some(v) = stack.pop() {
+                for m in state.lattice.neighbours(v) {
+                    if m == NO_NODE {
+                        continue;
+                    }
+                    let mi = m as usize;
+                    drains |= root[mi] || state.z[mi] < z0;
+                    if !root[mi] && state.z[mi] == z0 && !seen[mi] {
+                        seen[mi] = true;
+                        stack.push(m);
+                    }
+                }
+            }
+            ends += usize::from(!drains);
+        }
+        assert_eq!(outlets, ends, "the roots and the pits end the water");
+        assert!(outlets > 6, "the moon's craters hold pits");
         for (i, r) in artifact.rows.iter().enumerate() {
             assert_eq!(r.z_m, metres_i16(state.z[i]));
             // The slot names the receiver among the node's neighbours, or the row says none.

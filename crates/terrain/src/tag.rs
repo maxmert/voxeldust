@@ -203,7 +203,34 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 /// A chunk with NO artifact reads the unknown side and the body's sea, so its arithmetic is the one
 /// the card has always run: the SEED-ONLY golden tables stand and `gpu-drift` compares like with
 /// like. `ARTIFACT_VERSION` moves to 8; `PROTO_MINOR` does not move.
-pub const GENERATOR_VERSION: u32 = 20;
+///
+/// ★ VERSION 21 (2026-09-25, plan step 2b of the believability arc; ruling B8 item 2: *"the shipped
+/// receivers and the discharge row follow the budget's own water"*). The SOLVED GROUND DOES NOT MOVE
+/// (the passes, the talus, the ice and the envelope are untouched: MEASURED 0 of 8 871 936 heights
+/// differ, `artifact_diff`); the WATER does, because the budget now follows the ground's own water:
+///
+/// 1. **THE RECEIVERS AND THE ROW ARE THE WATER'S OWN** (`lakes::water_tree`,
+///    `MacroSolve::follow_the_water`; `ARTIFACT_VERSION` 9). MEASURED before it: 3 430 trunk steps
+///    rose inside hollows the routing filled, and the row carried to the sea 1 607 km³/yr the budget
+///    held. No drawn reader reads these two bytes.
+/// 2. **THE OVERFLOW TAKES THE SADDLE'S STEEPEST OPEN SIDE** (`lakes::open_side`; plan questions 1
+///    and 2): toward the sea it runs down the ground into the lower hollow it reaches first, and at a
+///    saddle of three sides into the steepest side that is not full — the way the saddle node's own
+///    water runs. MEASURED before it: 3 181 pours booked to the sea while the ground led into a lower
+///    hollow, 51 pours into a side that was not the steepest open one.
+/// 3. **A FLAT IS SWEPT FROM ITS DRAINS** (`lakes::flats`; plan question 3; Barnes, Lehman & Mulla
+///    2014): no leaf of zero depth, and a flat's water heads for its nearest drain by the flat step.
+///    MEASURED before it: 8 795 leaves of zero depth held 462.7 km³/yr on flats that drain.
+/// 4. **A NODE AT ITS DEPRESSION'S SPILL HEIGHT COSTS THAT DEPRESSION NOTHING** (the brim): it stands
+///    at the full lake's edge, never under it.
+///
+/// The lakes move, so the water words, the facies, the coast mask, the pyramid's water words and
+/// the lakes' sea fixed point move with them: the sea falls FOUR SIXTEENTHS (MEASURED: 57 453
+/// sixteenths at version 20, 57 449 at version 21, from the same 57 462 before the lakes), a
+/// quarter of a metre, so the sea's whole metre stays 3 591 m and the climate's classes move on
+/// some thousands of nodes. A chunk with NO artifact reads none of these, so the SEED-ONLY golden
+/// tables stand and `gpu-drift` compares like with like. `PROTO_MINOR` does not move.
+pub const GENERATOR_VERSION: u32 = 21;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -258,7 +285,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 20,
+            GENERATOR_VERSION, 21,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -292,5 +319,5 @@ mod tests {
         assert_ne!(bare.measured, id.measured);
     }
 
-    const DECLARED_PIN: u64 = 5_388_269_546_425_232_867;
+    const DECLARED_PIN: u64 = 7_301_160_111_668_162_610;
 }

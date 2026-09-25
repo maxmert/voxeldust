@@ -373,6 +373,9 @@ pub struct FullReport {
     /// review finding 4 of plan step 2): its level was solved over one body and its ocean is
     /// another's.
     pub sea_unsettled: bool,
+    /// ★ THE WATER'S OWN TREE (plan step 2b; ruling B8 item 2): what the shipped receivers found
+    /// and what following them found ([`MacroSolve::follow_the_water`]).
+    pub tree: crate::lakes::TreeReport,
 }
 
 /// ★ WHAT THE LAKES' SEA FIXED POINT DID (plan question 8; review finding 7 of plan step 2).
@@ -488,7 +491,11 @@ pub struct MacroSolve {
     pub z: Vec<i32>,
     /// The routing surface: the terrain with every pit raised to its spill level.
     pub z_flood: Vec<i32>,
-    /// The D8 receiver; [`NO_NODE`] for an outlet.
+    /// The receiver: while the passes run, the ROUTING's D8 receiver on the flooded surface
+    /// ([`NO_NODE`] for an outlet); ★ once the solve ends, THE WATER'S OWN WAY (plan step 2b; ruling
+    /// B8 item 2; [`crate::lakes::water_tree`]) — the ground's descent, across a spilling lake to its
+    /// spill, over the spill into the side the budget pours into, and [`NO_NODE`] where the water
+    /// ENDS: the ocean, a closed lake's water, a dry hollow's pit.
     pub receiver: Vec<u32>,
     /// The chord to the receiver in whole metres; zero for an outlet.
     pub chord: Vec<u32>,
@@ -497,12 +504,20 @@ pub struct MacroSolve {
     /// The rain at the node, mm/yr, in `[P_MIN_MM_YR, P_MAX_MM_YR]`.
     pub rain: Vec<u32>,
     /// The discharge, mm·m²/yr: the rain accumulated downstream while the passes run (the stream
-    /// power law's drainage), and ★ THE RUNOFF accumulated over the FINAL receivers once the solve
-    /// ends ([`MacroSolve::accumulate_runoff`]; 2026-09-24, ruling B7 item 2) — the water that
-    /// reaches a river, and the row the artifact ships.
+    /// power law's drainage), and ★ THE BUDGET'S OWN WATER once the solve ends (plan step 2b; ruling
+    /// B8 item 2, amending B7 item 2; [`MacroSolve::follow_the_water`]) — the runoff accumulated
+    /// over the water's own receivers, less at each spill what its spilling lake hands the air, so a
+    /// hollow that never fills passes nothing on and the row into the sea is the budget's own. The
+    /// row the artifact ships.
     pub discharge: Vec<u64>,
     /// The topological order of the receiver tree, LEAVES FIRST, outlets last.
     pub order: Vec<u32>,
+    /// ★ THE SINKS the shipped row takes off (plan step 2b): at each spill node of a spilling lake,
+    /// the water its lake hands the air, sorted by node; empty while the passes run.
+    pub spill_sinks: Vec<(u32, u64)>,
+    /// ★ THE BODY'S SEED ([`BodyDefinition::seed`]): the flat step's split reads its own stream
+    /// under it (plan step 2b, question 4).
+    pub seed: u64,
     /// ★ THE UPLIFT OVER THE AGE (C2's belts; C3): what each node gains by the end of the age,
     /// sixteenths, applied pass by pass; negative where a trench subsides.
     pub uplift: Vec<i32>,
@@ -586,6 +601,36 @@ pub fn initial_surface(body: &BodyDefinition, lattice: &MacroLattice) -> Vec<i32
         .collect()
 }
 
+/// ★ THE TOPOLOGICAL ORDER of a receiver tree, LEAVES FIRST: a node is emitted once every donor
+/// is; the receiver whose last donor was emitted is pushed. A stack, so the order is a stated one. A
+/// node on a ring of receivers is never emitted, so `n − order.len()` counts the ring.
+///
+/// **Example.** A trunk off the belt's range and its two tributaries: each tributary's head comes
+/// first, then the confluence, then the trunk down to the sea.
+#[must_use]
+pub(crate) fn order_of(receiver: &[u32]) -> Vec<u32> {
+    let n = receiver.len();
+    let mut donors = vec![0u8; n];
+    for &r in receiver {
+        if r != NO_NODE {
+            donors[r as usize] += 1;
+        }
+    }
+    let mut stack: Vec<u32> = (0..n as u32).filter(|&i| donors[i as usize] == 0).collect();
+    let mut order = Vec::with_capacity(n);
+    while let Some(node) = stack.pop() {
+        order.push(node);
+        let r = receiver[node as usize];
+        if r != NO_NODE {
+            donors[r as usize] -= 1;
+            if donors[r as usize] == 0 {
+                stack.push(r);
+            }
+        }
+    }
+    order
+}
+
 /// Whether neighbour `m` (drop `dz_m` over chord `l_m`) is a STEEPER descent than the best so far
 /// (`dz_best` over `l_best`, node `best`): cross-multiplied integers, and on an exact tie the
 /// smaller global index. A total order; no float ratio is ever compared.
@@ -631,6 +676,8 @@ impl MacroSolve {
             province: vec![crate::strata::DEFAULT_PROVINCE.code(); n],
             water_z: vec![DRY; n],
             ocean: vec![false; n],
+            spill_sinks: Vec::new(),
+            seed: body.seed(),
             dir,
         })
     }
@@ -832,6 +879,11 @@ impl MacroSolve {
         self.z[i].max(level)
     }
 
+    /// A node's cached direction at [`CACHE_BITS`] (plan step 2b: the flat step's bearing).
+    pub(crate) fn dir_of(&self, node: u32) -> [i32; 3] {
+        self.dir[node as usize]
+    }
+
     /// The chord between two nodes from the cached directions, whole metres.
     pub(crate) fn chord_m(&self, a: u32, b: u32) -> u32 {
         chord_between(
@@ -981,27 +1033,8 @@ impl MacroSolve {
         report.flat = flat;
         report.undrained = undrained;
         drop(dist);
-        // 4. THE ORDER: leaves first. A node is emitted once every donor is; the receiver whose
-        //    last donor was emitted is pushed. A stack, so the order is a stated one.
-        let mut donors = vec![0u8; n];
-        for i in 0..n {
-            let r = self.receiver[i];
-            if r != NO_NODE {
-                donors[r as usize] += 1;
-            }
-        }
-        let mut stack: Vec<u32> = (0..n as u32).filter(|&i| donors[i as usize] == 0).collect();
-        self.order.clear();
-        while let Some(node) = stack.pop() {
-            self.order.push(node);
-            let r = self.receiver[node as usize];
-            if r != NO_NODE {
-                donors[r as usize] -= 1;
-                if donors[r as usize] == 0 {
-                    stack.push(r);
-                }
-            }
-        }
+        // 4. THE ORDER: leaves first ([`order_of`]).
+        self.order = order_of(&self.receiver);
         report.cyclic = n - self.order.len();
         report
     }
@@ -1072,26 +1105,57 @@ impl MacroSolve {
         }
     }
 
-    /// ★ THE DISCHARGE THE ARTIFACT SHIPS (2026-09-24, ruling B7 item 2: *"the discharge row carries
-    /// the RUNOFF, accumulated over the final receivers"*; status §7 W10): the Turc–Pike runoff on
-    /// every node's own area, accumulated down the receiver tree in the order, leaves first. Called
-    /// ONCE, after the solve's LAST routing, with the climate that stands over the final field, so
-    /// the row and the receivers it ships with are one tree. Exact integer sums: a node carries at
-    /// most `P_MAX_MM_YR · area` a node, and the globe's whole area times that is under `2⁶⁴`.
+    /// ★ THE WATER'S OWN TREE, FOLLOWED (plan step 2b; ruling B8 item 2, amending B7 item 2; status
+    /// §7 W10 and W11). Called ONCE, after the solve's last routing and after its budget: the tree
+    /// ([`crate::lakes::water_tree`], or [`crate::lakes::dry_tree`] on a body with no water) becomes
+    /// the receivers, their chords and their order, and the discharge row becomes THE BUDGET'S OWN
+    /// WATER — the Turc–Pike runoff on every node's own area, accumulated down the tree, leaves
+    /// first, and at each spill node less the water its spilling lakes hand the air (the tree's
+    /// SINKS). So a hollow that never fills passes nothing on (its rivers end in it), a spilling
+    /// hollow passes its inflow less its lake's evaporation, and the row into the sea is the
+    /// cascade's own. Exact integer sums: a node carries at most `P_MAX_MM_YR · area`, and the
+    /// globe's whole area times that is under `2⁶⁴`. Returns the tree's report with the ring and
+    /// shortfall counts, both zero by construction.
     ///
-    /// **Example.** A desert river off a dry range carries the little water its catchment yields,
-    /// and a wet valley's river carries most of its rain: the rain alone made the two alike.
-    pub fn accumulate_runoff(&mut self, runoff: &[u32]) {
+    /// **Example.** A desert river off a dry range ends in a salt pan and carries nothing on; a wet
+    /// valley's river crosses a lake that fills to its sill and leaves it smaller by what the lake
+    /// hands the air. Before this step the row carried both on to the sea.
+    pub fn follow_the_water(
+        &mut self,
+        tree: crate::lakes::WaterTree,
+        runoff: &[u32],
+    ) -> crate::lakes::TreeReport {
+        let n = self.node_count();
+        let mut report = tree.report;
+        self.receiver = tree.receiver;
+        for i in 0..n {
+            let r = self.receiver[i];
+            self.chord[i] = if r == NO_NODE {
+                0
+            } else {
+                self.chord_m(i as u32, r)
+            };
+        }
+        self.order = order_of(&self.receiver);
+        report.cyclic = n - self.order.len();
+        let mut sink = vec![0u64; n];
+        for &(node, water) in &tree.sinks {
+            sink[node as usize] += water;
+        }
         for ((d, &q), &a) in self.discharge.iter_mut().zip(runoff).zip(&self.area) {
             *d = u64::from(q) * a;
         }
         for k in 0..self.order.len() {
             let node = self.order[k] as usize;
+            report.shortfall += usize::from(self.discharge[node] < sink[node]);
+            self.discharge[node] = self.discharge[node].saturating_sub(sink[node]);
             let r = self.receiver[node];
             if r != NO_NODE {
                 self.discharge[r as usize] += self.discharge[node];
             }
         }
+        self.spill_sinks = tree.sinks;
+        report
     }
 
     /// ★ THE STREAM POWER SWEEP, implicit (Braun & Willett 2013), outlets first:
@@ -1843,6 +1907,7 @@ pub fn solve_full(
     // basin. The climate is the very one the artifact reads, so a node's rain decides its lake and
     // its own row alike.
     let mut final_climate = climate;
+    let mut budget = None;
     if words.water_km3 > 0 {
         let mut climate =
             crate::climate::climate(body, &lattice, words, &state.z, Some(state.sea_view()));
@@ -1871,21 +1936,32 @@ pub fn solve_full(
         if state.sea_z != fix.first {
             report.sea_before_lakes = Some(fix.first);
         }
-        report.lakes = lakes.report;
-        state.water_z = lakes.water;
+        report.lakes = lakes.report.clone();
+        state.water_z.clone_from(&lakes.water);
         final_climate = climate;
+        budget = Some(lakes);
     }
-    // ★ THE DISCHARGE THE ARTIFACT SHIPS (2026-09-24, ruling B7 item 2; status §7 W10): the RUNOFF
-    // of the climate over the final field, accumulated over the receivers of the LAST routing. The
-    // passes cut with the rain's drainage; the row that ships is the water that reaches a river.
-    state.accumulate_runoff(&final_climate.runoff_mm_yr);
-    drop(final_climate);
     report.sea_z = (words.water_km3 > 0).then_some(state.sea_z);
     report.ocean_share = state.ocean_share();
     report.coast_band = coast_band(words, gravity);
-    let facies = state.facies(&ice_mask, report.coast_band, words.water_km3 > 0);
+    // ★ GATE G-AGE AND THE SEDIMENT BUDGET READ THE EROSION'S OWN TREE (plan step 2b, question 7):
+    // the basins the rivers cut in, the last routing's, read BEFORE the tree is swapped for the
+    // water's own below.
     report.integrals = state.hypsometric_integrals(AGE_GATE_MIN_NODES);
     report.deposits = state.sediment_by_basin().len();
+    // ★ THE WATER'S OWN TREE AND ITS DISCHARGE (plan step 2b; ruling B8 item 2, amending B7 item 2;
+    // status §7 W10, W11): the shipped receivers follow the budget's water, and the shipped row is
+    // the budget's own — the runoff over those receivers, less what each spilling lake hands the
+    // air at its spill. The passes cut with the rain's drainage (plan question 4, unchanged), and
+    // nothing after this point reads the routing again.
+    let tree = match &budget {
+        Some(lakes) => crate::lakes::water_tree(&state, lakes),
+        None => crate::lakes::dry_tree(&state),
+    };
+    drop(budget);
+    report.tree = state.follow_the_water(tree, &final_climate.runoff_mm_yr);
+    drop(final_climate);
+    let facies = state.facies(&ice_mask, report.coast_band, words.water_km3 > 0);
     Some((state, facies, report))
 }
 
@@ -2891,13 +2967,159 @@ mod tests {
         assert_eq!((fix.solves, fix.converged), (LAKE_SEA_SOLVES, false));
     }
 
-    /// ★ TEST 19 (plan step 2 part 4; ruling B7 item 2; status §7 W10's own guard): THE SHIPPED
-    /// DISCHARGE IS THE RUNOFF OVER THE FINAL TREE. After the full solve on the moon's lattice under
-    /// the home planet's words, the climate over the final field is read again and its runoff is
-    /// accumulated over the state's own receivers and order: it equals the discharge row EXACTLY,
-    /// at every node. Before this step the row was the last pass's RAIN over an older tree.
+    /// The node classes of the water's own tree over a solved state and its budget: a node of a
+    /// spilling lake's hollow, the spill of one, or under a closed lake's water.
+    fn tree_classes(
+        state: &MacroSolve,
+        lakes: &crate::lakes::Lakes,
+    ) -> (Vec<bool>, Vec<bool>, Vec<bool>) {
+        let n = state.node_count();
+        let body = |i: usize| -> u32 {
+            let h = lakes.home[i];
+            if (h == crate::lakes::NO_DEP) | (h == crate::lakes::OCEAN) {
+                crate::lakes::NO_DEP
+            } else {
+                lakes.body_of[h as usize]
+            }
+        };
+        let mut region = vec![false; n];
+        let mut spill = vec![false; n];
+        let mut closed = vec![false; n];
+        for i in 0..n {
+            let b = body(i);
+            let full = (b != crate::lakes::NO_DEP) && lakes.deps[b as usize].full;
+            region[i] = full;
+            closed[i] = !full & (lakes.water[i] != DRY);
+        }
+        for (d, dep) in lakes.deps.iter().enumerate().skip(1) {
+            if (lakes.body_of[d] == d as u32) & dep.full {
+                spill[dep.spill_node as usize] = true;
+            }
+        }
+        (region, spill, closed)
+    }
+
+    /// ★ TEST T10 (plan step 2b; ruling B8 item 2; replaces step 2's test 19): THE SHIPPED ROW IS
+    /// THE BUDGET'S OWN WATER over THE WATER'S OWN TREE. After the full solve on the moon's lattice
+    /// under the home planet's words (a sea over part of the moon), with the budget and the climate
+    /// over the final field read again:
+    ///
+    /// 1. the runoff accumulated again over the shipped receivers, less the stated sinks at their
+    ///    spill nodes, is the discharge row EXACTLY, at every node, and no sink is short;
+    /// 2. the row that reaches the ocean from the land is the cascade's `to_ocean` to the unit;
+    /// 3. the rows at every end on the land plus every sink is the water the budget holds;
+    /// 4. along every receiver the FLOOR (the ground, or the water's surface where water stands)
+    ///    never rises, and no receiver is left out of the order;
+    /// 5. every node that is not a spilling lake's, a spill, or under a closed lake's water takes the
+    ///    budget's own descent on the ground, and every receiver is a neighbour.
+    ///
+    /// Before step 2b the row carried the budget's held water to the sea and the floor rose where
+    /// the routing fill crossed a parent's dry ring.
     #[test]
-    fn the_discharge_is_the_runoff_accumulated_over_the_final_receivers() {
+    fn the_shipped_row_is_the_budgets_own_water_over_the_waters_own_tree() {
+        let moon = home_moon();
+        let words = SolveWords {
+            water_km3: 3_000_000,
+            ..crate::home::home_solve_words()
+        };
+        let (state, _, report) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let n = state.node_count();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let climate =
+            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
+        let lakes = crate::lakes::budget(&state, &climate);
+        assert_eq!(lakes.report, report.lakes, "the budget is the solve's own");
+        assert!(lakes.report.spilling > 0, "a lake spills");
+        assert!(lakes.report.partial > 0, "a lake is closed");
+        // 1. The row again, with the sinks.
+        let mut sink = vec![0u64; n];
+        for &(node, water) in &state.spill_sinks {
+            sink[node as usize] += water;
+        }
+        assert!(!state.spill_sinks.is_empty());
+        let mut again: Vec<u64> = (0..n)
+            .map(|i| u64::from(climate.runoff_mm_yr[i]) * state.area[i])
+            .collect();
+        for &node in &state.order {
+            let i = node as usize;
+            assert!(again[i] >= sink[i], "a sink is short at node {i}");
+            again[i] -= sink[i];
+            let r = state.receiver[i];
+            if r != NO_NODE {
+                again[r as usize] += again[i];
+            }
+        }
+        assert_eq!(again, state.discharge);
+        assert_eq!((report.tree.cyclic, report.tree.shortfall), (0, 0));
+        assert_eq!(report.tree.exit_disagree, 0);
+        // 2. The land's row into the ocean is the cascade's.
+        let (mut to_sea, mut ends) = (0u128, 0u128);
+        for i in 0..n {
+            if state.ocean[i] {
+                continue;
+            }
+            let r = state.receiver[i];
+            if r == NO_NODE {
+                ends += u128::from(state.discharge[i]);
+            } else if state.ocean[r as usize] {
+                to_sea += u128::from(state.discharge[i]);
+            }
+        }
+        assert_eq!(to_sea, lakes.report.to_ocean);
+        // 3. The ends and the sinks hold what the budget holds.
+        let sinks: u128 = state.spill_sinks.iter().map(|&(_, w)| u128::from(w)).sum();
+        assert_eq!(ends + sinks, lakes.report.evaporated_total);
+        // 4. No floor rises, no ring.
+        let floor = |i: usize| -> i32 {
+            let w = state.water_level(i as u32);
+            if w == DRY {
+                state.z[i]
+            } else {
+                state.z[i].max(w)
+            }
+        };
+        let mut steps = 0usize;
+        for i in 0..n {
+            let r = state.receiver[i];
+            if r == NO_NODE {
+                continue;
+            }
+            steps += 1;
+            assert!(
+                floor(r as usize) <= floor(i),
+                "the floor rises from {i} to {r}"
+            );
+            assert!(
+                lattice.neighbours(i as u32).contains(&r),
+                "{r} is no neighbour of {i}"
+            );
+            assert_eq!(state.chord[i], state.chord_m(i as u32, r));
+        }
+        let land = state.ocean.iter().filter(|&&o| !o).count();
+        assert!(steps > land / 2, "{steps} steps over {land} land nodes");
+        assert_eq!(state.order.len(), n);
+        // 5. The dry ground takes the descent.
+        let (region, spill, closed) = tree_classes(&state, &lakes);
+        let mut dry = 0usize;
+        for i in 0..n {
+            if region[i] | spill[i] | closed[i] {
+                continue;
+            }
+            dry += 1;
+            assert_eq!(state.receiver[i], lakes.descent.down[i], "node {i}");
+        }
+        assert!(dry > land / 2, "{dry} dry nodes of {land}");
+        assert!(region.iter().any(|&r| r), "a spilling lake's hollow");
+        assert!(closed.iter().any(|&c| c), "a closed lake");
+    }
+
+    /// ★ TEST T11 (plan step 2b): THE TREE MOVES NO HEIGHT AND NO WATER. The solved state is
+    /// cloned, the water's tree is built and followed again on the clone, and the ground, the fill,
+    /// the pits, the water, the ocean, the sea and the rock are the state's own; the receivers and
+    /// the row come out the same, because the tree is a function of the state and its budget.
+    #[test]
+    fn following_the_water_moves_no_height_and_no_water() {
         let moon = home_moon();
         let words = SolveWords {
             water_km3: 3_000_000,
@@ -2908,27 +3130,39 @@ mod tests {
         let lattice = moon.macro_lattice().expect("a lattice");
         let climate =
             crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
-        let mut again: Vec<u64> = (0..state.node_count())
-            .map(|i| u64::from(climate.runoff_mm_yr[i]) * state.area[i])
-            .collect();
-        for &node in &state.order {
-            let r = state.receiver[node as usize];
-            if r != NO_NODE {
-                again[r as usize] += again[node as usize];
-            }
-        }
-        assert_eq!(again, state.discharge);
-        let rain: u64 = (0..state.node_count())
-            .map(|i| u64::from(climate.rain_mm_yr[i]) * state.area[i])
-            .sum();
-        let out: u64 = (0..state.node_count())
-            .filter(|&i| state.receiver[i] == NO_NODE)
-            .map(|i| state.discharge[i])
-            .sum();
-        assert!(
-            out < rain,
-            "the runoff is a share of the rain: {out} of {rain}"
-        );
+        let lakes = crate::lakes::budget(&state, &climate);
+        let mut again = state.clone();
+        again.receiver = vec![NO_NODE; again.node_count()];
+        again.discharge = vec![0; again.node_count()];
+        let tree = crate::lakes::water_tree(&again, &lakes);
+        let report = again.follow_the_water(tree, &climate.runoff_mm_yr);
+        assert_eq!(report.cyclic, 0);
+        assert_eq!(again.z, state.z);
+        assert_eq!(again.z_flood, state.z_flood);
+        assert_eq!(again.pit, state.pit);
+        assert_eq!(again.water_z, state.water_z);
+        assert_eq!(again.ocean, state.ocean);
+        assert_eq!(again.sea_z, state.sea_z);
+        assert_eq!(again.province, state.province);
+        assert_eq!(again.receiver, state.receiver);
+        assert_eq!(again.discharge, state.discharge);
+        assert_eq!(again.spill_sinks, state.spill_sinks);
+    }
+
+    /// ★ TEST T12 (plan step 2b, question 8): ON A BODY WITH NO WATER THE WATER'S WAY IS THE
+    /// GROUND'S OWN DESCENT, and every root and every pit ends it: the airless moon's receivers are
+    /// the descent's, and its rows carry nothing (no rain, no runoff).
+    #[test]
+    fn a_dry_bodys_receivers_are_the_grounds_descent() {
+        let moon = home_moon();
+        let words = crate::home::home_moon_solve_words();
+        let (state, _, report) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        assert_eq!(state.receiver, crate::lakes::descent(&state).down);
+        assert!(state.spill_sinks.is_empty());
+        assert_eq!(report.tree.cyclic, 0);
+        assert!(state.discharge.iter().all(|&d| d == 0));
+        assert_eq!(state.order.len(), state.node_count());
     }
 
     /// ★ THE UNDRAINED COUNTER on a stated distance field: a node the field never reached is counted

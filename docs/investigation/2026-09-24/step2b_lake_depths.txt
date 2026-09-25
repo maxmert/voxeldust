@@ -1,0 +1,25 @@
+depths saved artifact 8: 67233 lake nodes, 3.8827e6 km²; by area 12.6 % stand under 1 m of water, 28.6 % under 5 m, 39.7 % under 10 m, 70.9 % under 50 m; the area median depth 17 m; the deepest 3954 m
+depths saved artifact 8: 3883 patches; 28.6 % of the lake area lies in patches whose median depth is under 10 m
+    6398 nodes     389349 km², level 4895 m (the sea 3591 m): depth median 10 m, p90 51 m, max 3954 m; 7.8 % of its nodes under 1 m, 48.4 % under 10 m; a node at -0.8963 0.0772 -0.4367
+    5637 nodes     342660 km², level 4895 m (the sea 3591 m): depth median 13 m, p90 41 m, max 52 m; 0.1 % of its nodes under 1 m, 37.9 % under 10 m; a node at -0.8694 -0.2542 -0.4236
+    5011 nodes     286367 km², level 5974 m (the sea 3591 m): depth median 84 m, p90 141 m, max 3332 m; 0.0 % of its nodes under 1 m, 2.6 % under 10 m; a node at -0.4374 -0.8235 -0.3612
+    2361 nodes     146529 km², level 4889 m (the sea 3591 m): depth median 24 m, p90 40 m, max 50 m; 9.5 % of its nodes under 1 m, 36.0 % under 10 m; a node at -0.9165 -0.0266 -0.3992
+    1822 nodes      99906 km², level 5918 m (the sea 3591 m): depth median 21 m, p90 40 m, max 41 m; 0.3 % of its nodes under 1 m, 24.4 % under 10 m; a node at -0.4206 -0.7402 -0.5246
+    1726 nodes      95848 km², level 4866 m (the sea 3591 m): depth median 414 m, p90 1029 m, max 1296 m; 4.5 % of its nodes under 1 m, 11.9 % under 10 m; a node at -0.7607 -0.4104 -0.5029
+    1580 nodes      93590 km², level 5082 m (the sea 3591 m): depth median 25 m, p90 69 m, max 129 m; 3.6 % of its nodes under 1 m, 12.7 % under 10 m; a node at -0.2415 -0.8804 0.4081
+    1554 nodes      91840 km², level 4882 m (the sea 3591 m): depth median 5 m, p90 14 m, max 67 m; 17.4 % of its nodes under 1 m, 81.1 % under 10 m; a node at -0.8496 0.2155 -0.4813
+    1319 nodes      77518 km², level 4888 m (the sea 3591 m): depth median 6 m, p90 17 m, max 19 m; 13.3 % of its nodes under 1 m, 82.9 % under 10 m; a node at -0.8360 -0.3539 -0.4194
+    1260 nodes      69499 km², level 5957 m (the sea 3591 m): depth median 67 m, p90 125 m, max 138 m; 0.0 % of its nodes under 1 m, 2.1 % under 10 m; a node at -0.5415 -0.7832 -0.3056
+artifact_diff: solved in 156.2 s; generator 21 artifact 9; digest [2212741278626078943, 14036724299064320228]
+depths this artifact 9: 93225 lake nodes, 5.3420e6 km²; by area 8.5 % stand under 1 m of water, 24.5 % under 5 m, 35.7 % under 10 m, 66.8 % under 50 m; the area median depth 19 m; the deepest 3956 m
+depths this artifact 9: 3868 patches; 30.4 % of the lake area lies in patches whose median depth is under 10 m
+   12562 nodes     717553 km², level 5983 m (the sea 3591 m): depth median 75 m, p90 141 m, max 3341 m; 0.0 % of its nodes under 1 m, 2.2 % under 10 m; a node at -0.3955 -0.8252 -0.4034
+    8654 nodes     524691 km², level 4897 m (the sea 3591 m): depth median 6 m, p90 48 m, max 3956 m; 10.1 % of its nodes under 1 m, 58.2 % under 10 m; a node at -0.8882 0.0580 -0.4557
+    5401 nodes     328038 km², level 4894 m (the sea 3591 m): depth median 12 m, p90 40 m, max 51 m; 4.8 % of its nodes under 1 m, 35.1 % under 10 m; a node at -0.8694 -0.2542 -0.4236
+    3735 nodes     230744 km², level 4896 m (the sea 3591 m): depth median 10 m, p90 44 m, max 57 m; 6.3 % of its nodes under 1 m, 45.7 % under 10 m; a node at -0.9128 -0.0869 -0.3990
+    4271 nodes     225957 km², level 5109 m (the sea 3591 m): depth median 15 m, p90 152 m, max 204 m; 0.2 % of its nodes under 1 m, 35.4 % under 10 m; a node at 0.7041 0.5576 0.4397
+    2839 nodes     167916 km², level 5094 m (the sea 3591 m): depth median 25 m, p90 79 m, max 185 m; 0.6 % of its nodes under 1 m, 31.6 % under 10 m; a node at -0.2418 -0.8861 0.3955
+    2067 nodes     122128 km², level 4888 m (the sea 3591 m): depth median 10 m, p90 20 m, max 73 m; 7.3 % of its nodes under 1 m, 38.0 % under 10 m; a node at -0.8496 0.2155 -0.4813
+    2070 nodes     115248 km², level 4878 m (the sea 3591 m): depth median 304 m, p90 992 m, max 1308 m; 0.1 % of its nodes under 1 m, 0.7 % under 10 m; a node at -0.7607 -0.4104 -0.5029
+    1726 nodes     100830 km², level 5928 m (the sea 3591 m): depth median 18 m, p90 40 m, max 2601 m; 0.1 % of its nodes under 1 m, 38.8 % under 10 m; a node at -0.1414 -0.8510 -0.5057
+    1495 nodes      87836 km², level 4890 m (the sea 3591 m): depth median 8 m, p90 19 m, max 21 m; 11.8 % of its nodes under 1 m, 57.5 % under 10 m; a node at -0.8360 -0.3539 -0.4194

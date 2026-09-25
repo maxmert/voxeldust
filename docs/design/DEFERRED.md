@@ -7731,6 +7731,7 @@ release, and `-C target-cpu=native`. The other legs have not run:
 | G3 | aarch64 Linux, the k3d image's triple | **RAN 2026-09-08** (`just terrain-legs`, Docker up): the pinned image `rust:1.94.1-slim-bookworm` on `linux/arm64`, 2 592 digests equal, the tampered-table control red. Not the image BUILD itself (that builds the whole workspace); same base image, same triple, same profile | keep it in `terrain-legs`; run the pin inside the image build when the image next builds |
 | G4 | x86-64 Linux | **EMULATED 2026-09-08** (`just terrain-legs` on `linux/amd64` under the Mac's emulation): 2 592 digests equal. A smoke test: it can find a drift and can never prove its absence | a REAL x86-64 machine before SL10 clause 3 is called satisfied (rulings V6 D, V9 S5-5) |
 | G5 | the client binary against the server binary | 🟩 LIVE since slice 7 (2026-09-08): the client links the generator and states both halves of the world identity at login; a mismatch is `WorldRefused` and terminal. The process-tier flight with a SERVED mismatch is still owed (M7-5) | slice 7 landed it; M7-5's process test owed |
+| G6 | ★ THE MACRO SOLVE's ARTIFACT on another host (found 2026-09-25, `docs/investigation/2026-09-25/terrain_models_and_crates_survey.md`) | NEVER RAN: `just terrain-legs` runs the seed-only tables, and those read the solve's rows from the RECORDED text (`crates/terrain/src/home.rs`, `golden_home_z.txt`), so they never solve again; `home_artifact_pin` runs on the Mac's aarch64 macOS only. Yet a shard whose store is empty or of another build SOLVES the artifact again on whatever host it runs (`crates/bins/src/artifact_boot.rs`), and the solve holds fenced `Gf` arithmetic (the climate, the flexure, the craters) beside its integer routing | a leg that runs the whole solve (`home_artifact_pin`) on `linux/arm64` in the pinned image, then on a real x86-64 machine, and compares the digest; the owner declined adding it for now (2026-09-25) — so a re-solve on a pod is UNMEASURED |
 
 **Example.** A player logs in from a Windows x86-64 client. The gateway on the aarch64 pod computed
 the home planet's eight golden chunks at boot. Until G4 runs on a real x86-64 chip, nobody has
@@ -10094,8 +10095,10 @@ updated in the same change as the work, deleted when done). The interims named h
   footprint (ruling W15), and a lake narrower than half the footprint's block folds to land at the swap to the next
   level. MEASURED at generator 20 (`lake_census` G-RUNG-LAKE-LOST): 3 698 of 18 019 lake columns at 14 → 15 and 558 of
   3 910 at 15 → 16 turn to LAND, one cell of the finer rung each (one pixel at the swap distance); 1 319 and 448 columns
-  become lake. WHERE: `terrain/src/artifact.rs` `sample_side`, `CoastCounts::side`. WHEN: with step 4's lake edge,
-  or on the owner's word on the footprint rule for a lake.
+  become lake. ★ MEASURED at generator 21 (step 2b, `step2b_census.txt`; the lakes grew): 4 501 of 25 354 lake columns
+  at 14 → 15 and 745 of 5 649 at 15 → 16 turn to LAND; 1 743 and 544 columns become lake. WHERE:
+  `terrain/src/artifact.rs` `sample_side`, `CoastCounts::side`. WHEN: with step 4's lake edge, or on the owner's word on
+  the footprint rule for a lake.
 - 🟩 **THE FAR VIEW DREW EVERY DRY POCKET AS SEA UNTIL THE COAST MASK LANDED** (review finding 2 of step 2) — CURED
   2026-09-25: a pyramid level is no chunk's field and no rung's field until the mask is held
   (`vd_client::artifact_book::ArtifactCache::field_for`, `field_at_rung`), as `whole()` already stated; the tiles need
@@ -10108,13 +10111,14 @@ updated in the same change as the work, deleted when done). The interims named h
   (`a_reseed_whose_body_loses_the_largest_rule_is_stated_unsettled`). MEASURED on the home planet: no connected solve
   re-seeded, none unsettled. WHERE: `terrain/src/land.rs` `sea_level_connected`. WHEN: the owner's word on a rule for
   such a field (plan question 1) the day a body of THE world reports it.
-- 🟥 **THE SHIPPED RECEIVERS LEAVE A SPILLING LAKE UPHILL** (found 2026-09-24 by `lake_census` G-RIVER-DESCENT, RED
-  at generator 20: 3 430 trunk steps rise, all inside hollows the routing filled, the worst 4 987 m). The receivers
-  are the routing flood's (a scratch surface, ruling W11): they carry a full hollow's river across its parent's dry
-  ring toward the parent's own outlet, while the budget pours that water over the saddle into the sibling. No hollow
-  spilled before step 2, so the walk never went there. WHERE: `terrain/src/solve.rs` `route`, and the receiver byte.
-  WHEN: plan step 2b, before steps 4 and 3 (R2 seeds its rivers from the receivers and the discharge row) — ★ RULED
-  2026-09-25 (B8 item 2): the receivers follow the budget's water (Fill–Spill–Merge's own flow directions).
+- 🟩 **THE SHIPPED RECEIVERS LEAVE A SPILLING LAKE UPHILL** (found 2026-09-24 by `lake_census` G-RIVER-DESCENT, RED
+  at generator 20: 3 430 trunk steps rose, all inside hollows the routing filled, the worst 4 987 m) — CURED 2026-09-25
+  by plan step 2b (ruling B8 item 2; generator 21, artifact 9; NOT committed): the shipped receivers are the water's own
+  way (`terrain/src/lakes.rs` `water_tree`, `terrain/src/solve.rs` `follow_the_water`) — the budget's descent on dry
+  ground, the flat step across a spilling lake to its spill, the spill to the gate of the side the budget pours into
+  (`lakes::open_side`), and an END under a closed lake's water or at a dry hollow's pit. MEASURED (`lake_census`,
+  `docs/investigation/2026-09-24/step2b_census.txt`): G-RIVER-DESCENT 0 by both river rules; CHECK-DRY-FOLLOWS-DESCENT
+  0; CHECK-EXIT-AGREES 0; CHECK-TREE-CYCLIC 0. What it cost is the entry on the lakes' ceiling below.
 - 🟩 **NO GATE SAW THE DUNES OR THE TEETH** — CURED 2026-09-24 (B6 step 1): `shipped_drainage` (the spill depth, G-HACK,
   G-BREACH on the shipped ground), `shore_teeth` (the drawn shore against the ground's waterline), `lake_census`'s new
   lines (G-HYPSO, G-RIVER, the rung-swap lakes, the inland sea, the watershed what-if) and `reference_stand`; their
@@ -10126,15 +10130,75 @@ updated in the same change as the work, deleted when done). The interims named h
   own coast-mask word at every rung (`artifact::Side::Pocket`, 2026-09-25). MEASURED at generator 20: CHECK-OCEAN 0,
   CHECK-POCKET-NOT-SEA 0; 236 pockets, 3.3 million km², by the budget DRY 181, PARTIAL 45, SPILLING 10; G-POCKET-HELD
   0 at rungs 9, 10, 13, 14, 15 and 16.
-- 🟥 **THE DISCHARGE ROW CARRIES WATER OUT OF HOLLOWS THE BUDGET HOLDS** (review finding 3 of step 2; plan question 3).
-  The row is the runoff accumulated over the ROUTING receivers (B7 item 2 read literally, choice A), and the routing
-  fill carries every hollow's water over its rim; the budget holds a hollow's water where the hollow is not full.
-  MEASURED at generator 20 (`lake_census` ROW-OUT-OF-CLOSED-HOLLOWS): the row delivers 5 447.1 km³/yr to the sea, the
-  cascade 3 839.7 — the row carries the 1 607.4 km³/yr the budget holds; 4 544 of 5 322 closed hollows that spill into
-  the sea have a row leaving them, the largest 1 044.8 km³/yr. R2 seeds its rivers from this row (B7 item 2), so step
-  3 would carve a river out of a salt pan. WHERE: `terrain/src/solve.rs` `accumulate_runoff`. WHEN: plan step 2b —
-  ★ RULED 2026-09-25 (B8 item 2): choice B, the row carries the budget's own water; a closed body that never fills
-  passes nothing on.
+- 🟩 **THE DISCHARGE ROW CARRIES WATER OUT OF HOLLOWS THE BUDGET HOLDS** (review finding 3 of step 2; plan question 3)
+  — CURED 2026-09-25 by plan step 2b (ruling B8 item 2, choice B; NOT committed): the row is the budget's own water,
+  the runoff over the water's own receivers less, at each spill node, what its spilling lakes hand the air
+  (`MacroSolve::spill_sinks`). MEASURED at generator 21: the row into the sea 3 851.69 km³/yr = the cascade's
+  `to_ocean` to the unit (was 5 447.1 against 3 839.7); 0 of 2 571 closed hollows that meet the sea have a row leaving
+  them (was 4 544 of 5 322); every closed body's ends sum to what it holds (ROW-HELD 0 of 6 408); W10-DISCHARGE-TREE 0.
+  MEASURED that the tree alone could not do it: over generator 20's own budget the row fell 188.2 km³/yr short of the
+  cascade and 632 closed bodies carried more than they held, so the cascade now pours by the saddle's steepest open side
+  and runs down the ground toward the sea (plan questions 1 and 2, choice A).
+- 🟥 **A HIGH LAKE SEEN FROM 1 000 km IS DRAWN AS STRIPES, NOT ONE WATER SURFACE** (found 2026-09-25 by step 2b's
+  pictures, `docs/investigation/2026-09-24/pictures/highlake_nadir_step2b.png`). Over the largest lake (12 562 nodes,
+  level 5 983 m) the frame shows blue and tan stripes with staircase and dotted diagonal edges; the probe reads rung 11
+  ground (2 048 m cells) over 84 % of the frame. MEASURED: the lake is 75 m deep at its median (`artifact_diff depth`),
+  so it is NOT a sheet laid on a flat; the far rung's ground (the pyramid's block means) stands over the block's lake
+  word in a grid-aligned pattern. Cause UNMEASURED; probably older than step 2b (the lakes of that plateau stood at
+  generator 20 too; not flown then). WHERE: `terrain/src/artifact.rs` `block_water` and the pyramid means,
+  `terrain/src/position.rs` `water_sheet`. WHEN: the shoreline bench (plan step 4, slice 0) — its far-rung lines at
+  rungs 10–13 on this lake.
+- 🟥 **THE FLOOR OF AN INLAND POCKET SHOWS ROWS OF REGULAR BUMPS AND A STRAIGHT WALL** (found 2026-09-25,
+  `pictures/basin2_step2b.png`: 150 km over the second pocket's deepest node). The floor was drawn as sea until step 2,
+  so nobody saw it. Rows of round bumps in lines (a lattice pattern), long straight water strips along grid lines, and
+  a tall straight bright wall. Cause UNMEASURED. WHERE: the solve's deep floors (the deposit, the flats) and the fine
+  octaves over them. WHEN: the shoreline bench stands (a picture and a G-GRID reading on the pocket floor), then R2.
+- 🟥 **THE LAKES STAND OVER THEIR CEILING SINCE STEP 2b** (G-LAKE-SHARE 4.828 % of the land against ruling B3's 4 %;
+  3.510 % at generator 20). The plan's own stop condition. MEASURED attribution (census runs with one change at a time):
+  the water's tree over generator 20's budget 3.510 %; + the saddle's steepest open side and the ground's way toward the
+  sea 4.162 %; + the flats swept from their drains 4.741 %; + the brim (a node at its hollow's spill height costs that
+  hollow nothing) 4.828 %. WHERE: `terrain/src/lakes.rs` `cascade`, `flats`, the brim in `budget`. WHEN: ★ RULED 2026-09-25
+  (B9 item 1): step 2b committed with this RED; the ceiling is read again on the pictures after the shoreline step (plan
+  step 4). The choices were (status §11 item 10: A keep and rule on the ceiling — recommended; B the tree over
+  generator 20's budget, which breaks B8's "the row's sum into the sea equals the cascade's"; C look for a missing law;
+  D, added by the review: questions 1 and 2 without the flat sweep and the brim, MEASURED exact at 4.162 % — the row
+  never needed the flats).
+- 🟥 **THE FLAT STEP READS ONE OF BARNES' TWO FIELDS — AND STEP 2b's FLAT LAW IS NOT MET** (plan step 2b, question
+  4): the step across a spilling lake and a flat of the ground heads for ONE target, the spill or the nearest drain
+  ("toward lower ground", in the lattice's own chord), with Rho8's split; Barnes, Lehman & Mulla 2014's "away from
+  higher ground" is left out. MEASURED on the planet at generator 21 (`lake_census`): G-LAKE-WALK (37 303 six-step
+  walks) mean error 14.07° against test T9's 12° bound — RED since the review fixes (it was printed NO-BAND after it
+  failed; T9 on a round lake holds the bound); exact lattice runs 21.3 % against the rule before the split's 57.4 %;
+  G-GRID-VALLEYS-BY-CLASS the flats 1.470 (they lean to the ROWS) and the spilling lakes 1.553 against ~1.006 — RED
+  since the review fixes (it stated that band and printed NO-BAND). Like for like the flat sweep made G-GRID-VALLEYS
+  worse (1.093 without it, 1.205 with it). The lakes' own straight lines to their spills lean 1.425 (they are node
+  squares, T4); the walks 1.605. Whether Barnes' two combined fields read under 1.05 on node-square flats is
+  UNMEASURED. WHERE: `terrain/src/lakes.rs` `flats`, `flat_step`. WHEN: ★ RULED 2026-09-25
+  (B9 item 2): plan step 2c, BEFORE R2 (step 3) carves any valley; step 2b committed with it RED.
+- 🟩 **THE INSTRUMENTS' COAST AND LAKE STANDS FOLLOWED A ROW WHOSE MEANING A STEP CHANGES** (review findings 4 and 9 of
+  plan step 2b) — CURED 2026-09-25 (NOT committed): `bins/src/drainage_gates.rs` `pick_stands` picked the coast by the
+  greatest discharge class and the plain by the lake bits, and `shore_teeth` took the largest lake; at generator 21 the
+  coast moved (node 4 718 858 → 5 642 175) and the lake (6 398 → 12 562 nodes), so no coast or lake number of
+  `shipped_drainage` and `shore_teeth` compared with generator 20 (and the same at step 2). Now the coast and the plain
+  are PINNED directions (`COAST`, `PLAIN`, generator 20's picks, beside `BELT`), `shore_teeth`'s lake stand is PINNED
+  to generator 20's largest lake's edge (`LAKE_STAND`), and the rule's own picks are printed as a reading
+  (`rule_picks`). Both instruments re-run at generator 21 on the pinned stands (`step2b_census.txt`, "AFTER THE REVIEW
+  FIXES").
+- 🟥 **R2's BENCH SEED READS THE ROW'S NEW MEANING** (plan step 2b): `bins/examples/erosion_bench.rs`
+  `seed_from_discharge` and `seed_inflow_boundary` divide the discharge class by the rain class to seed a tile's catch,
+  and follow the receiver slot at the rim. Since ARTIFACT_VERSION 9 a closed hollow's rim carries nothing out and a
+  spilling lake's spill carries its outflow, never its inflow. The bench has not been re-run on artifact 9. WHERE: that
+  file. WHEN: R2's slice 0 (ruling B8 item 3), before any number of it is read.
+- 🟥 **THE DECLARED TAG HAS NO RECORDER** (found by plan step 2b): `crates/terrain/src/tag.rs`'s `DECLARED_PIN` is
+  re-recorded only by reading its own failing assert (generator 21: 7 301 160 111 668 162 610). WHERE: `tag.rs` tests.
+  WHEN: with the next recorder tool pass (a print mode like `VD_ARTIFACT_RECORD`).
+- 🟥 **TWO TREES IN ONE SOLVE'S REPORT** (plan step 2b, question 7, choice A): gate G-AGE's integrals and the sediment
+  budget read the EROSION'S routing tree (the basins the rivers cut in), read before the swap; every other reader —
+  the shipped slot, the row, the census's rivers — reads the water's own tree. Stated in `solve_full`; the census reads
+  `FullReport::integrals`. WHERE: `terrain/src/solve.rs` `solve_full`. WHEN: R2 (question 4: the passes' own water).
+- 🟥 **STEP 2b's PICTURES ARE OWED**: drawn water moved (77 697 lake levels, 30 574 facies, 11 192 coast-mask bytes,
+  35 116 pyramid water words; `artifact_diff`), so the four stands and the pocket stand are owed a picture on generator
+  21 (the step-2 poses). WHEN: before the owner's word on the lakes' ceiling.
 - 🟩 **THE CLIENT READ THE EYE'S GROUND FROM THE RECIPE'S OWN RELIEF, NOT FROM THE ARTIFACT** — found 2026-09-24 on the
   reference stand (the eye 400 m over the solved ground, the stamp 7 054 m, the finest rung 3) and CURED the same day
   (committed 2026-09-24): `vd_client::chunks::drawn_surface_m` / `drawn_field_m` over `vd_terrain::height::drawn_height_field_m`

@@ -61,12 +61,84 @@ pub fn cell_of(body: &vd_terrain::BodyDefinition, dir: DVec3, rung: u8) -> (Face
     )
 }
 
-/// ★ THE THREE STANDS (ruling B2): the belt the owner flew, a COAST and a PLAIN, both picked off
-/// the census's own map rather than typed in — the coast is a dry node beside a sea node with the
-/// greatest discharge near it, and the plain is the land node of the flattest neighbourhood far
-/// from any water.
+/// The belt the owner flew (ruling B2), pinned since step 1.
+pub const BELT: [f64; 3] = [0.617_270, -0.437_286, -0.654_033];
+
+/// ★ THE COAST STAND, PINNED (review findings 4 and 9 of plan step 2b; ruling B6: every step is
+/// compared on the SAME stands). The direction of node 4 718 858 (face `NegY`, node (778, 232)),
+/// the dry node beside the sea that the rule of [`rule_picks`] picked at generator 20. The rule
+/// reads the discharge class, and step 2b changed that byte's meaning, so at generator 21 the rule
+/// picked node 5 642 175 and every coast number read other ground. A pinned direction moves with no
+/// row.
+///
+/// **Example.** Step 4 moves the sea's shore off the node squares. The coast's teeth before and
+/// after it are read on this same river mouth, never on whichever mouth then carries the most water.
+pub const COAST: [f64; 3] = [0.194_169, -0.868_118, -0.456_804];
+
+/// ★ THE PLAIN STAND, PINNED with the coast: the direction of node 1 219, the plain the rule picked
+/// at generators 20 and 21. The rule reads the lake bits, which a later step can move.
+pub const PLAIN: [f64; 3] = [0.579_815, -0.574_634, -0.577_590];
+
+/// ★ THE THREE STANDS (ruling B2): the belt the owner flew, a COAST and a PLAIN, each PINNED
+/// ([`BELT`], [`COAST`], [`PLAIN`]). The coast and the plain stand at the CENTRE of the node their
+/// pinned direction falls in ([`node_under`]), which is the exact direction the rule stated for
+/// that node at generator 20, so a run today reads the very squares of that run. The rule that
+/// first picked them off the census's own map ([`rule_picks`]) is still read and printed beside
+/// them, so a reader sees where the rule would stand today; it no longer moves a stand.
 #[must_use]
 pub fn pick_stands(artifact: &Artifact, lattice: &MacroLattice) -> Vec<Stand> {
+    let (coast, plain) = rule_picks(artifact, lattice);
+    let dir = |d: [f64; 3]| DVec3::new(d[0], d[1], d[2]).normalize();
+    let of = |node: u32| -> DVec3 {
+        let d = lattice.direction(node);
+        DVec3::new(d[0].raw() as f64, d[1].raw() as f64, d[2].raw() as f64).normalize()
+    };
+    let (coast_node, plain_node) = (
+        node_under(lattice, dir(COAST)),
+        node_under(lattice, dir(PLAIN)),
+    );
+    println!(
+        "the stands (PINNED; review findings 4 and 9 of plan step 2b): the belt, the coast at node {coast_node} (generator 20's pick: 4718858; discharge class today {}), the plain at node {plain_node} (generator 20's pick: 1219); the rule would pick today: the coast at node {} (discharge class {}), the plain at node {} (its ring spreads {} steps)",
+        artifact.rows[coast_node as usize].discharge_log, coast.0, coast.1, plain.0, plain.1
+    );
+    vec![
+        Stand {
+            name: "the belt",
+            dir: dir(BELT),
+        },
+        Stand {
+            name: "the coast",
+            dir: of(coast_node),
+        },
+        Stand {
+            name: "a plain",
+            dir: of(plain_node),
+        },
+    ]
+}
+
+/// The node of `lattice` whose square holds the direction `dir`: the face, the inverse bend and
+/// the index, as [`cell_of`] finds a cell, at the lattice's own edge. A node `k` covers the rung-0
+/// cells `[k · size, (k + 1) · size)` (`MacroLattice::node_of_cell`), so this is the node of the
+/// rung-0 cell under `dir`.
+#[must_use]
+pub fn node_under(lattice: &MacroLattice, dir: DVec3) -> u32 {
+    let d = [dir.x, dir.y, dir.z];
+    let face = vd_seed::bend::face_of(d);
+    let (t, s) = vd_seed::bend::face_coords(face, d);
+    lattice.index(
+        face,
+        vd_seed::ladder::index_of(vd_seed::bend::unbend(t), lattice.edge),
+        vd_seed::ladder::index_of(vd_seed::bend::unbend(s), lattice.edge),
+    )
+}
+
+/// ★ THE RULE THAT FIRST PICKED THE COAST AND THE PLAIN (ruling B2), now a reading: the coast is
+/// a dry node beside a sea node with the greatest discharge class near it, and the plain is the
+/// land node of the flattest neighbourhood far from any water. Returns `(node, class)` for the
+/// coast and `(node, spread)` for the plain.
+#[must_use]
+pub fn rule_picks(artifact: &Artifact, lattice: &MacroLattice) -> ((u32, u8), (u32, i32)) {
     let n = artifact.node_count();
     let facies: Vec<u8> = artifact
         .rows
@@ -111,28 +183,7 @@ pub fn pick_stands(artifact: &Artifact, lattice: &MacroLattice) -> Vec<Stand> {
             }
         }
     }
-    let of = |node: u32| -> DVec3 {
-        let d = lattice.direction(node);
-        DVec3::new(d[0].raw() as f64, d[1].raw() as f64, d[2].raw() as f64).normalize()
-    };
-    println!(
-        "the stands: the belt, the coast at node {} (discharge class {}), the plain at node {} (its ring spreads {} steps)",
-        coast.0, coast.1, plain.0, plain.1
-    );
-    vec![
-        Stand {
-            name: "the belt",
-            dir: DVec3::new(0.617_270, -0.437_286, -0.654_033).normalize(),
-        },
-        Stand {
-            name: "the coast",
-            dir: of(coast.0),
-        },
-        Stand {
-            name: "a plain",
-            dir: of(plain.0),
-        },
-    ]
+    (coast, plain)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────

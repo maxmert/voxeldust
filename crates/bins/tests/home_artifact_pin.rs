@@ -12,7 +12,7 @@ use vd_bins::artifact_worker::{SolveJob, run_solve};
 use vd_terrain::home::{home_planet, home_solve_words};
 
 /// The committed digest of the home planet's artifact on this build.
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x41ee_2203_a990_feb7, 0x7b18_eb06_670f_423c];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x1eb5_3c78_2459_e0df, 0xc2cc_7661_57d2_a0e4];
 
 #[test]
 fn the_home_planets_artifact_digests_to_its_committed_words() {

@@ -491,6 +491,11 @@ pub(crate) mod salt {
     pub const LAND: u64 = 0x5e_ed_0a;
     /// ★ THE CRATERS' stream (slice 8c stage C3): where each impact sits and how large it is.
     pub const CRATERS: u64 = 0x5e_ed_0b;
+    /// ★ THE FLAT STEP's stream (plan step 2b, question 4): the chance with which a step across a
+    /// lake or a flat takes the farther of the two neighbours that bracket its line (Rho8's split,
+    /// a NAMED SCATTER around a computed direction, T9). Read by the solve once per body, never by
+    /// the draw of the body itself, so no draw above it moves.
+    pub const FLOW: u64 = 0x5e_ed_0c;
 }
 
 /// The cave parameters, as the kernels read them.

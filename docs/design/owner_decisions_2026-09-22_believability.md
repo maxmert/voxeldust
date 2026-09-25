@@ -219,3 +219,59 @@ visible by making the lakes exist. The owner's four answers:
 water inside the ground's own hollow at the lake's level — a ragged outline that follows the ground — and the river
 that leaves a full one crosses its lowest rim notch into the next hollow, never back across a dry floor. Then R2's
 bench shows the owner the same ground eroded at 1 km, before anything bakes a planet.
+
+### B8 item 2 BUILT (2026-09-25; plan step 2b; NOT committed — ★ STOPPED on the plan's own stop condition)
+
+`GENERATOR_VERSION` 21, `ARTIFACT_VERSION` 9 (`PROTO_MINOR` unchanged). The census lines are in
+`docs/investigation/2026-09-24/step2b_census.txt`; the living status file §2, §4, §7 W10 and W11, §11 item 10 hold the
+detail.
+
+1. **The shipped receivers follow the budget's water** (`lakes::water_tree`): the budget's descent on dry ground, the
+   flat step across a spilling lake to its spill (Rho8's split, a named scatter, T9), the spill over its saddle into the
+   side the budget pours into, and an END under a closed lake's water or at a dry hollow's pit. MEASURED:
+   G-RIVER-DESCENT 0 (3 430).
+2. **The row is the budget's own water** (`MacroSolve::follow_the_water`): the runoff over those receivers, less at
+   each spill what its lake hands the air. MEASURED: the row into the sea equals the cascade's to the unit (3 851.69
+   km³/yr); 0 of 2 571 closed hollows leak (4 544 of 5 322); every closed body's ends carry what it holds.
+3. **To be exact the budget had to follow the ground** (the plan's questions 1 and 2, choice A): a full hollow's
+   overflow takes the saddle's steepest open side and runs down the ground toward the sea into the lower hollow it
+   reaches (Fill–Spill–Merge's own link). MEASURED: the tree over generator 20's own budget leaves the row 188.2 km³/yr
+   short of the cascade's; with questions 1 and 2 alone (variant V3) the row is exact. Beside them, NOT for the row
+   (corrected by the review, 2026-09-25): a flat is swept from its drains (question 3, choice A — for item 1's flat
+   directions, and it closes 8 795 leaves of zero depth that held 462.7 km³/yr on flats that drain), and one law the
+   plan did not name — a node at its hollow's spill height costs that hollow nothing.
+4. **The solved ground did not move** (0 of 8 871 936 heights; the sea's metre, the ocean share and the identity's
+   measured half unchanged); the water words, the facies and the coast mask moved.
+5. ★ **THE STOP: G-LAKE-SHARE 4.828 %** against the 4 % ceiling (3.510 % at generator 20; the attribution 4.162 % →
+   4.741 % → 4.828 % in status §7 W11). The owner's word is owed before the commit (status §11 item 10: A keep and rule
+   on the ceiling, recommended; B the tree over generator 20's budget; C look for a missing law first; D questions 1
+   and 2 without the flat sweep and the brim, 4.162 %, added by the review).
+6. ★ **THE SECOND STOP, found by the review (2026-09-25): the plan's flat law is NOT met.** The directions over a filled
+   flat and across a spilling lake lean on the lattice: G-GRID-VALLEYS-BY-CLASS the flats 1.470 and the spilling lakes
+   1.553 against ~1.006, G-LAKE-WALK 14.07° against test T9's 12°, both RED (both were printed NO-BAND before the
+   review). Like for like the flat sweep made G-GRID-VALLEYS worse (1.093 without it, 1.205 with it). The owner's word
+   is owed with item 5 (status §11 item 11).
+
+**Example.** The hollow at the foot of the belt's wet range fills and spills east: its river crosses the lake straight
+to the notch, runs down into the dry sibling hollow and ends at that hollow's salt lake. The row at the notch is the
+range's runoff less what the full lake hands the air, and nothing of it reaches the sea.
+
+## B9. STEP 2b's TWO STOPS ANSWERED, AND THE COMMIT (2026-09-25; the owner chose each recommended option)
+
+After step 2b's census, its review and its pictures (status §8b: the four stands as at step 2; two new stands show
+faults hidden until step 2 — the second pocket's floor with regular bump rows and a straight wall, and the high lake
+from 1 000 km drawn as stripes; the lake depths measured, the largest lake 75 m deep at its median):
+
+1. **THE LAKE CEILING: KEEP STEP 2b AND JUDGE LATER** (status §11 item 10, choice A). All of step 2b stays; G-LAKE-SHARE
+   stays RED at 4.828 % against ruling B3's 4 %. The owner judges whether 4.8 % reads too wet on the pictures AFTER the
+   shoreline step (plan step 4), when the lakes are no longer node squares; the ceiling is read again then.
+2. **THE FLAT DIRECTIONS: COMMIT NOW, CURE BEFORE R2** (status §11 item 11, a new choice between A and B). Step 2b is
+   committed with G-GRID-VALLEYS-BY-CLASS (flats 1.470, spilling lakes 1.553) and G-LAKE-WALK (14.07°) RED. The cure
+   (Barnes, Lehman & Mulla's two combined fields, or a target that does not collapse onto one nearest drain) lands
+   BEFORE R2 carves any valley, so no R2 valley follows the lattice; it moves the budget, so G-LAKE-SHARE is read again
+   with it.
+3. **COMMIT STEP 2b** (generator 21, artifact 9) with its census, the lake depths, the seven pictures and the documents.
+
+**Example.** A pilot 150 km over the plain sees the same square lakes as after step 2 — the shoreline step changes
+that. Before R2 cuts the plain's valleys at 1 km, the water across a filled flat stops leaning on the lattice, so R2's
+rivers leave a flat toward its real drain, never along a grid diagonal.

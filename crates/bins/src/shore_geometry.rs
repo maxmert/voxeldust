@@ -26,10 +26,10 @@
 //! 4. **THE FLAT NULL** ([`flat_null_quantile`]). The flatness a line with NO direction of its own
 //!    reads at a given count, by simulation — the method ruling W13.3 used for its 1.006 and 1.012.
 //!    The statistic is `crate::grid_bias::AxisHistogram::flatness`, never a copy of it.
-//! 5. **THE EDGES** ([`sea_edge`], [`lake_edge`]). The coast stand is the one
-//!    `crate::drainage_gates::pick_stands` picks for every instrument; [`sea_edge`] only turns its
-//!    node into the node edge the side word changes on. The lake stand is the edge of the largest
-//!    lake.
+//! 5. **THE EDGES** ([`sea_edge`], [`lake_edge`]). The coast stand is the pinned one
+//!    `crate::drainage_gates::pick_stands` states for every instrument; [`sea_edge`] only turns its
+//!    node into the node edge the side word changes on. [`lake_edge`] finds the edge of the largest
+//!    lake (a reading; `shore_teeth` pins its lake stand, review finding 9 of plan step 2b).
 //!
 //! **Example.** A pilot at 120 km over the belt's coast sees a bank run straight for 8 km, turn 90°,
 //! and run straight again. The shipped column says: this column is LAND by the coast mask, its
@@ -600,7 +600,7 @@ fn first_neighbour(
 }
 
 /// ★ THE COAST EDGE AT ONE NODE: the node, and its first SEA neighbour on the same face by the
-/// facies bit the coast pick reads (`crate::drainage_gates::pick_stands`), so the pick and its edge
+/// facies bit the coast rule reads (`crate::drainage_gates::rule_picks`), so a stand and its edge
 /// agree. The coast itself is NEVER chosen here: the three stands live once, in
 /// `crate::drainage_gates`, and this only turns the stand's node into the node edge the side word
 /// changes on. `None` where the node has no sea neighbour on its own face.

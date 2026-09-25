@@ -88,8 +88,9 @@
 //!
 //! `cargo run --release -p vd-bins --example shore_teeth -- [side_m] [window_m] [max_columns]
 //! [dx dy dz]` — the rungs from `VD_TEETH_RUNGS` (default `0,5,7,9,10,13`). With no direction the
-//! stands are THE COAST (the one `vd_bins::drainage_gates::pick_stands` picks for every instrument)
-//! and THE LARGEST LAKE's edge; each square is centred on the node edge where the side word changes.
+//! stands are THE COAST (the pinned one `vd_bins::drainage_gates::pick_stands` states for every
+//! instrument) and THE LAKE's edge (pinned: the edge the largest lake had at generator 20, review
+//! finding 9 of plan step 2b); each square is centred on the node edge where the side word changes.
 //! The run solves the home planet first (about two minutes, as `lake_census` does).
 //!
 //! **Example.** A pilot at 120 km over the belt's coast draws rung 7, one column every 128 m. The
@@ -115,11 +116,12 @@ use vd_recipe::height::SHORE_SHIFT;
 use vd_recipe::plan::site_direction;
 use vd_seed::bend::Face;
 use vd_terrain::BodyDefinition;
-use vd_terrain::artifact::{Artifact, CoastCounts};
+use vd_terrain::artifact::{Artifact, CoastCounts, FACIES_SHIFT};
 use vd_terrain::chunk::{CHUNK_EDGE, column_field};
 use vd_terrain::home::{home_planet, home_solve_words};
 use vd_terrain::macro_lattice::MacroLattice;
 use vd_terrain::metres_of_q28;
+use vd_terrain::solve::{FACIES_LAKE, FACIES_SEA};
 
 /// The rungs read when `VD_TEETH_RUNGS` states none: the boots (0), the near ground (5), the
 /// owner's 100–150 km view (7 and 9), the first pyramid rung (10), and the last rung whose side is
@@ -273,8 +275,19 @@ fn main() {
     legend();
 }
 
-/// ★ THE TWO STANDS: THE COAST, as `pick_stands` picks it for every instrument, and THE LARGEST
-/// LAKE's edge. Each square is centred on the node edge where the side word changes.
+/// ★ THE LAKE STAND, PINNED (review finding 9 of plan step 2b; ruling B6: every step is compared on
+/// the SAME stands): the edge the largest lake had at generator 20 — its WET node (256, 674) and
+/// the DRY node (257, 674) beside it on face `NegX`. The largest lake grew at generator 21 (6 398 →
+/// 12 562 nodes, in another place), so a stand that follows "the largest" reads other ground at
+/// each step. The largest lake of this run is still found and printed, as a reading.
+///
+/// **Example.** Step 4 draws a lake's edge where the ground crosses its level. The teeth of this
+/// lake's edge are read before and after it, whichever lake is then the largest.
+const LAKE_STAND: (Face, (i32, i32), (i32, i32)) = (Face::NegX, (257, 674), (256, 674));
+
+/// ★ THE TWO STANDS, both PINNED: THE COAST, as `pick_stands` states it for every instrument, and
+/// THE LAKE's edge ([`LAKE_STAND`]). Each square is centred on the node edge where the side word
+/// changes.
 fn node_stands(body: &BodyDefinition, artifact: &Artifact, fine: &MacroLattice) -> Vec<Stand> {
     let mut out = Vec::new();
     let picked = pick_stands(artifact, fine);
@@ -295,12 +308,33 @@ fn node_stands(body: &BodyDefinition, artifact: &Artifact, fine: &MacroLattice) 
         }
         None => println!("the coast: REFUSED — the shared pick names no coast"),
     }
+    let (face, dry, wet) = LAKE_STAND;
+    let edge = NodeEdge {
+        face,
+        dry,
+        wet,
+        discharge: artifact.rows[fine.index(face, dry.0, dry.1) as usize].discharge_log,
+    };
+    let facies = |(i, j): (i32, i32)| {
+        artifact.rows[fine.index(face, i, j) as usize].receiver_facies >> FACIES_SHIFT
+    };
+    let lake_here = (facies(wet) & FACIES_LAKE != 0) & (facies(wet) & FACIES_SEA == 0);
+    let dry_here = facies(dry) & (FACIES_LAKE | FACIES_SEA) == 0;
+    describe(
+        &format!(
+            "the lake (PINNED: generator 20's largest; the wet node is a lake today: {lake_here}, the dry node is dry today: {dry_here})"
+        ),
+        &edge,
+        fine,
+    );
+    out.push(stand_of("lake", &edge, fine));
     match lake_edge(artifact, fine, 1) {
-        Some((edge, size)) => {
-            describe(&format!("the largest lake ({size} nodes)"), &edge, fine);
-            out.push(stand_of("lake", &edge, fine));
-        }
-        None => println!("the lake: REFUSED — the solve left no lake with a dry side"),
+        Some((edge, size)) => describe(
+            &format!("(a reading, not a stand) the largest lake of this run ({size} nodes)"),
+            &edge,
+            fine,
+        ),
+        None => println!("(a reading) the solve left no lake with a dry side"),
     }
     out
 }

@@ -67,7 +67,7 @@ use vd_terrain::artifact::{
 };
 use vd_terrain::climate::Climate;
 use vd_terrain::home::{home_planet, home_solve_words};
-use vd_terrain::lakes::{Descent, Lakes, NO_DEP, OCEAN};
+use vd_terrain::lakes::{Lakes, NO_DEP, OCEAN};
 use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
 use vd_terrain::solve::{DRY, FACIES_LAKE, FACIES_SEA, MacroSolve, Z_STEPS_PER_M};
 use vd_terrain::{BodyDefinition, metres_of_q28};
@@ -272,10 +272,14 @@ fn main() {
             l.lake_area_m2 as f64 * 100.0 / land_m2.max(1.0)
         );
         match report.sea_before_lakes {
+            // ★ In SIXTEENTHS as well (review finding 8 of step 2b): the whole metre hides a shift
+            //   the climate's classes can see.
             Some(before) => println!(
-                "THE DOUBLE COUNT: the sea was re-solved over the inventory less the lakes: {:.0} m → {:.0} m",
+                "THE DOUBLE COUNT: the sea was re-solved over the inventory less the lakes: {:.0} m → {:.0} m ({before} → {} sixteenths, {:+})",
                 f64::from(before) / steps,
-                f64::from(state.sea_z) / steps
+                f64::from(state.sea_z) / steps,
+                state.sea_z,
+                state.sea_z - before
             ),
             None => println!(
                 "THE DOUBLE COUNT: the lakes' volume left the sea's level where it stood ({:.0} m) — under the solve's own sixteenth of a metre",
@@ -544,6 +548,21 @@ fn main() {
         // zero): a flat's receivers run by the distance field, so this separates the flats' lean
         // from the sloped ground's.
         let mut sloped_four = AxisHistogram::new(4);
+        // ★ BY THE WATER'S CLASS (plan step 2b): the area rule's trunks whose start node is DRY
+        // ground off every flat, on a FLAT of the ground (a neighbour of its own height, not the
+        // root), or in a SPILLING lake's hollow (the flat step across the lake).
+        let class = classes(&state, &lakes);
+        let on_ground_flat = |i: usize| -> bool {
+            !is_root(&lakes, i)
+                && lattice.neighbours(i as u32).iter().any(|&m| {
+                    m != NO_NODE
+                        && state.z[m as usize] == state.z[i]
+                        && !is_root(&lakes, m as usize)
+                })
+        };
+        let mut dry_four = AxisHistogram::new(4);
+        let mut flat_four = AxisHistogram::new(4);
+        let mut lake_steps_four = AxisHistogram::new(4);
         for node in 0..n as u32 {
             let i = node as usize;
             if !by_area[i] && !by_rain[i] {
@@ -555,6 +574,11 @@ fn main() {
                     valley_twelve.add(axis.degrees);
                     if state.pit[i] == 0 {
                         sloped_four.add(axis.degrees);
+                    }
+                    match class[i] {
+                        Class::Spilling => lake_steps_four.add(axis.degrees),
+                        Class::Dry if on_ground_flat(i) => flat_four.add(axis.degrees),
+                        _ => dry_four.add(axis.degrees),
                     }
                 }
                 if by_rain[i] {
@@ -573,6 +597,35 @@ fn main() {
             sloped_four.total(),
             sloped_four.line(),
             sloped_four.flatness()
+        );
+        println!(
+            "  G-GRID's valleys by the area rule BY THE WATER'S CLASS (plan step 2b): dry ground off the flats {} trunks: {} | FLATNESS {:.3}; on a flat of the ground {} trunks: {} | FLATNESS {:.3}; across a spilling lake {} trunks: {} | FLATNESS {:.3}",
+            dry_four.total(),
+            dry_four.line(),
+            dry_four.flatness(),
+            flat_four.total(),
+            flat_four.line(),
+            flat_four.flatness(),
+            lake_steps_four.total(),
+            lake_steps_four.line(),
+            lake_steps_four.flatness()
+        );
+        // ★ A REAL VERDICT (review findings 1 and 5 of step 2b): plan step 2b's law is that the
+        //   directions over a filled flat and over a spilling lake do not lean on the lattice, and
+        //   G-GRID reads them. The verdict reads those two classes against the aggregate's own
+        //   tolerance; the dry class is printed beside them, and the aggregate line below reads it.
+        //   The aggregate can read green while each class leans, because the dry ground leans to
+        //   the diagonals and the flats to the rows, and the two cancel in one histogram.
+        census(
+            "G-GRID-VALLEYS-BY-CLASS",
+            &format!(
+                "{:.3}dry/{:.3}flats/{:.3}spilling-lakes",
+                dry_four.flatness(),
+                flat_four.flatness(),
+                lake_steps_four.flatness()
+            ),
+            "~1.006(<=1.05-on-the-flats-and-the-spilling-lakes)[W13.3;plan-step-2b:a-flat's-directions-do-not-lean-on-the-lattice]",
+            Verdict::of(flat_four.flatness() <= 1.05 && lake_steps_four.flatness() <= 1.05),
         );
         census(
             "G-GRID-VALLEYS",
@@ -603,16 +656,18 @@ fn main() {
     // ★ STEP 1 OF THE PLAN (ruling B6, 2026-09-24): THE WATER POSITIONS AS NUMBERS. Each block
     // prints its reading, its band with the band's source, and one CENSUS line. Nothing here moves
     // the world.
-    hypsometry_lines(&state);
+    hypsometry_lines(&state, &report.integrals);
     let ocean = inland_sea_lines(&state, &lakes, &facies, first_land);
     river_lines(&state, &lakes, &facies, &ocean, &by_area, "");
     river_lines(&state, &lakes, &facies, &ocean, &by_rain, ":step1-rule");
-    discharge_tree_lines(&state, &lakes.descent, &climate);
+    discharge_tree_lines(&state, &lakes, &climate, &report.tree);
     // The body WITH ITS SOLVED SEA, as every host that holds the artifact builds it: the shipped
     // column reads its sea radius, and the census's own `body` has none.
     let sea_body = home_planet().with_sea_m(artifact.sea());
     rung_swap_lines(&sea_body, &state.lattice, &artifact, &patches);
     budget_lines(&state, &lakes, &facies);
+    step2b_measure_lines(&state, &lakes);
+    lake_walk_lines(&state, &lakes, radius_m);
     drop(climate);
 
     // The node under the aim: the face's node whose direction is nearest.
@@ -719,7 +774,7 @@ fn census(gate: &str, value: &str, band: &str, verdict: Verdict) {
 /// **Example.** The census reads the belt's range and the abyss in one histogram. A second hump
 /// under the sea says the ocean floors stand where the water's load puts them; one hump says the
 /// planet is one smooth ball of noise, as it was before 8c.
-fn hypsometry_lines(state: &MacroSolve) {
+fn hypsometry_lines(state: &MacroSolve, integrals: &[vd_terrain::solve::BasinIntegral]) {
     // The fixed bin and the span each side of the sea's level, metres; one more bin each side takes
     // everything past the span. The height over the sea that B3's share reads, metres.
     const BIN_M: i64 = 1_000;
@@ -807,10 +862,11 @@ fn hypsometry_lines(state: &MacroSolve) {
     }
     // THE SOLVE'S OWN G-AGE INTEGRALS, which ruling B3 names as G-HYPSO's calibration: the median
     // basin's hypsometric integral against Strahler's maturity band (Strahler 1952; `HI_MATURE`).
-    let integrals = state.hypsometric_integrals(vd_terrain::solve::AGE_GATE_MIN_NODES);
+    // ★ The solve's OWN reading (`FullReport::integrals`, plan step 2b question 7): the basins of
+    // the erosion's own routing tree, read before the solve swapped in the water's tree.
     let (mature_lo, mature_hi) = vd_terrain::solve::HI_MATURE;
     let age_band = format!("{mature_lo:.2}-{mature_hi:.2}[Strahler-1952;solve.rs-HI_MATURE]");
-    match vd_terrain::solve::age_gate(&integrals) {
+    match vd_terrain::solve::age_gate(integrals) {
         Some((median_q8, mature)) => {
             let median = f64::from(median_q8) / 256.0;
             println!(
@@ -1028,48 +1084,94 @@ enum End {
     Ocean,
     /// A node the facies call SEA that is not the ocean: 0 by construction since plan step 2.
     InlandSea,
-    /// A lake with no outlet: the budget stands it under its spill.
+    /// Under a closed lake's water: the budget holds the river there.
     ClosedLake,
-    /// A closed hollow the budget leaves dry.
+    /// A dry hollow's pit: the budget holds the river there as a salt pan.
     DryBasin,
-    /// A land node with no receiver: a defect.
-    NoReceiver,
+    /// An end the budget does not name — no receiver inside a spilling lake's hollow, or on dry
+    /// ground that has a way down: a defect.
+    Defect,
     /// A node on a ring of receivers: a defect.
     Cycle,
 }
 
-/// ★ THE END AT ONE NODE, or [`End::Runs`]. The ocean ends a river. A hollow the routing filled ends
-/// it where the lake budget holds no water in that hollow (a dry basin) or holds a lake under its
-/// spill (a closed lake); where the budget's lake spills, the river runs on over the spill. The
-/// hollow is the one the GROUND leads into: the leaf whose pit ends this node's descent
-/// (`vd_terrain::lakes::Descent`, the budget's own). A pocket under the sea's level is such a
-/// hollow since plan step 2.
+/// The water class of each node in the water's own tree (plan step 2b): what the shipped receiver
+/// of the node is by construction.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+    /// Dry ground: the budget's own descent.
+    Dry,
+    /// A node of a spilling lake's hollow: the flat step toward the lake's spill.
+    Spilling,
+    /// The spill node of a spilling lake: the exit over its saddle.
+    Spill,
+    /// Under a closed lake's water: an end.
+    Closed,
+    /// The ocean (or a root): an end.
+    Ocean,
+}
+
+/// The water body over node `i`, or `NO_DEP`.
+fn body_at(lakes: &Lakes, i: usize) -> u32 {
+    let h = lakes.home[i];
+    if h == NO_DEP || h == OCEAN {
+        NO_DEP
+    } else {
+        lakes.body_of[h as usize]
+    }
+}
+
+/// ★ THE CLASS OF EVERY NODE in the water's own tree, read from the budget alone (never from the
+/// shipped receivers, which the checks compare against it).
+fn classes(state: &MacroSolve, lakes: &Lakes) -> Vec<Class> {
+    let n = state.node_count();
+    let mut out: Vec<Class> = (0..n)
+        .map(|i| {
+            let b = body_at(lakes, i);
+            if state.ocean[i] || is_root(lakes, i) {
+                Class::Ocean
+            } else if b != NO_DEP && lakes.deps[b as usize].full {
+                Class::Spilling
+            } else if lakes.water[i] != DRY {
+                Class::Closed
+            } else {
+                Class::Dry
+            }
+        })
+        .collect();
+    for (d, dep) in lakes.deps.iter().enumerate().skip(1) {
+        if lakes.body_of[d] == d as u32 && dep.full {
+            out[dep.spill_node as usize] = Class::Spill;
+        }
+    }
+    out
+}
+
+/// ★ THE END AT ONE NODE (plan step 2b; ruling B8 item 2), or [`End::Runs`]. A node with a
+/// shipped receiver runs on. A node with none ends the river: at the ocean, under a CLOSED lake's
+/// water (the river ends where it meets the lake), or at a DRY hollow's pit (a salt pan). Any
+/// other end is a defect: no receiver inside a spilling lake's hollow, where the water must cross to
+/// the spill, or on dry ground that has a way down.
 fn end_at(state: &MacroSolve, lakes: &Lakes, facies: &[u8], ocean: &[bool], i: usize) -> End {
+    if state.receiver[i] != NO_NODE {
+        return End::Runs;
+    }
     if ocean[i] {
         return End::Ocean;
     }
     if facies[i] & FACIES_SEA != 0 {
         return End::InlandSea;
     }
-    if state.pit[i] == 0 {
-        return End::Runs;
+    let b = body_at(lakes, i);
+    if b == NO_DEP || lakes.deps[b as usize].full {
+        return End::Defect;
     }
-    let pit = lakes.descent.end[i] as usize;
-    let leaf = lakes.home[pit];
-    if leaf == NO_DEP || leaf == OCEAN {
-        return End::Runs;
-    }
-    let body = lakes.body_of[leaf as usize];
-    if body == NO_DEP {
-        return End::Runs;
-    }
-    let water = &lakes.deps[body as usize];
-    if water.level == DRY {
-        End::DryBasin
-    } else if water.full {
-        End::Runs
-    } else {
+    if lakes.water[i] != DRY {
         End::ClosedLake
+    } else if lakes.descent.down[i] == NO_NODE {
+        End::DryBasin
+    } else {
+        End::Defect
     }
 }
 
@@ -1124,7 +1226,7 @@ fn river_lines(
         end[i] = if term[i] != End::Runs {
             term[i]
         } else if r == NO_NODE {
-            End::NoReceiver
+            End::Defect
         } else {
             end[r as usize]
         };
@@ -1197,15 +1299,7 @@ fn river_lines(
             }
         }
     }
-    let [
-        _,
-        to_ocean,
-        to_pocket,
-        to_lake,
-        to_basin,
-        no_receiver,
-        cycle,
-    ] = ends;
+    let [_, to_ocean, to_pocket, to_lake, to_basin, defect, cycle] = ends;
     let node_km2 = state.lattice.node_m().powi(2) / 1.0e6;
     let rule = if label.is_empty() {
         "whose DRAINAGE AREA over the SHIPPED receivers is at least"
@@ -1217,13 +1311,13 @@ fn river_lines(
         VALLEY_NODES as f64 * node_km2
     );
     println!(
-        "  the ends, in heads: the ocean {to_ocean}, a node the facies call sea that is not the ocean {to_pocket} (0 by construction since plan step 2), a closed lake {to_lake}, a dry closed basin {to_basin}; DEFECTS: no receiver on land {no_receiver}, a ring of receivers {cycle}"
+        "  the ends, in heads: the ocean {to_ocean}, a node the facies call sea that is not the ocean {to_pocket} (0 by construction since plan step 2), a closed lake {to_lake}, a dry closed basin {to_basin}; DEFECTS: an end the budget does not name {defect}, a ring of receivers {cycle}"
     );
     println!(
-        "  (a hollow the routing filled — an inland pocket included — ends a river where the lake budget holds no water in it, a dry basin, or holds a lake under its spill, a closed lake; a spilling lake passes the river on)"
+        "  (since plan step 2b the shipped receivers are the water's own: a river ENDS where it meets a closed lake's water or a dry hollow's pit — an inland pocket included — and crosses a spilling lake to its spill)"
     );
     println!(
-        "  along the trunks: {walked} steps; the GROUND rises on {ground_rises} of them ({hidden} under a water's flat surface); the FLOOR (the ground, or the water's surface where water stands) rises on {floor_rises} steps, {in_fill} of them in a hollow the routing filled"
+        "  along the trunks: {walked} steps; the GROUND rises on {ground_rises} of them ({hidden} under a water's flat surface); the FLOOR (the ground, or the water's surface where water stands) rises on {floor_rises} steps, {in_fill} of them in a hollow the ROUTING filled (a reading of the erosion's scratch surface)"
     );
     if worst_at != NO_NODE {
         let aim = unit(&state.lattice, worst_at);
@@ -1237,9 +1331,9 @@ fn river_lines(
     }
     census(
         &format!("G-RIVER-END{label}"),
-        &format!("{}heads-without-an-end", no_receiver + cycle),
+        &format!("{}heads-without-an-end", defect + cycle),
         "0heads[ruling-B3-G-RIVER]",
-        Verdict::of(no_receiver + cycle == 0),
+        Verdict::of(defect + cycle == 0),
     );
     census(
         &format!("G-RIVER-DESCENT{label}"),
@@ -1257,42 +1351,58 @@ fn river_lines(
     );
 }
 
-/// ★ THE DISCHARGE ROW AGAINST THE TREE IT SHIPS WITH (status §7 W10; ruling B7 item 2). Since
-/// plan step 2 the solve accumulates the RUNOFF over the receivers of its LAST routing
-/// (`MacroSolve::accumulate_runoff`), so the shipped row and the shipped receivers are one tree by
-/// construction. Three readings:
+/// ★ THE DISCHARGE ROW AGAINST THE TREE IT SHIPS WITH (status §7 W10; ruling B7 item 2; since
+/// plan step 2b ruling B8 item 2: the water's own tree and the budget's own water). Four readings:
 ///
-/// 1. The shipped receiver against the steepest lower neighbour on the final GROUND, split by why
-///    they may differ: inside a hollow the routing filled (the fill routes over its flat, by
-///    design), toward a filled hollow (the fill hides the ground's own way, by design), and
-///    elsewhere (a chord that differs by its last metre).
-/// 2. The climate's RUNOFF row accumulated again over the SHIPPED tree, against the shipped row:
-///    the nodes that differ, and those whose SHIPPED byte (the log class) differs.
-/// 3. The nodes where the shipped row FALLS downstream, which no tree can hold.
+/// 1. The shipped receiver against the class the budget names for each node ([`classes`]): every
+///    DRY node must take the budget's own descent (CHECK-DRY-FOLLOWS-DESCENT), every spill of a
+///    spilling lake its exit (CHECK-EXIT-AGREES), and no receiver is left out of the order
+///    (CHECK-TREE-CYCLIC).
+/// 2. The climate's RUNOFF accumulated again over the SHIPPED tree by the same rule — less, at
+///    each spill node, the water its spilling lakes hold (`MacroSolve::spill_sinks`) — against the
+///    shipped row: the nodes that differ, and those whose SHIPPED byte (the log class) differs
+///    (W10-DISCHARGE-TREE).
+/// 3. The nodes where the shipped row FALLS downstream with no sink to take it, which no tree can
+///    hold.
+/// 4. The tree's own counts (`FullReport::tree`).
 ///
-/// **Example.** A river on the coast reaches the sea by a new mouth after the final route. Its row
-/// now names that mouth, and the old mouth carries only the water of its own small catchment.
-fn discharge_tree_lines(state: &MacroSolve, descent: &Descent, climate: &Climate) {
+/// **Example.** A river off the belt's range crosses a spilling lake: its row at the lake's notch
+/// is the range's runoff less what the lake hands the air, and the census's own sum over the same
+/// receivers with the same sink reads the same number.
+fn discharge_tree_lines(
+    state: &MacroSolve,
+    lakes: &Lakes,
+    climate: &Climate,
+    tree: &vd_terrain::lakes::TreeReport,
+) {
     let n = state.node_count();
-    let (mut compared, mut in_fill, mut into_fill, mut elsewhere) =
-        (0usize, 0usize, 0usize, 0usize);
-    for node in 0..n as u32 {
-        let i = node as usize;
-        let d = descent.down[i];
-        if d == NO_NODE || state.z[d as usize] >= state.z[i] {
-            continue;
+    let class = classes(state, lakes);
+    let (mut dry, mut dry_off, mut spills, mut exit_off) = (0usize, 0usize, 0usize, 0usize);
+    let (mut spilling, mut closed, mut ocean) = (0usize, 0usize, 0usize);
+    for (i, &c) in class.iter().enumerate() {
+        match c {
+            Class::Dry => {
+                dry += 1;
+                dry_off += usize::from(state.receiver[i] != lakes.descent.down[i]);
+            }
+            Class::Spill => spills += 1,
+            Class::Spilling => spilling += 1,
+            Class::Closed => {
+                closed += 1;
+                dry_off += usize::from(state.receiver[i] != NO_NODE);
+            }
+            Class::Ocean => ocean += 1,
         }
-        compared += 1;
-        if state.receiver[i] == d {
-            continue;
+    }
+    for (d, dep) in lakes.deps.iter().enumerate().skip(1) {
+        if lakes.body_of[d] == d as u32 && dep.full {
+            exit_off += usize::from(state.receiver[dep.spill_node as usize] != dep.exit);
         }
-        if state.pit[i] > 0 {
-            in_fill += 1;
-        } else if state.pit[d as usize] > 0 {
-            into_fill += 1;
-        } else {
-            elsewhere += 1;
-        }
+    }
+    let cyclic = n - state.order.len();
+    let mut sink = vec![0u64; n];
+    for &(node, water) in &state.spill_sinks {
+        sink[node as usize] += water;
     }
     let mut again: Vec<u64> = climate
         .runoff_mm_yr
@@ -1300,10 +1410,14 @@ fn discharge_tree_lines(state: &MacroSolve, descent: &Descent, climate: &Climate
         .zip(&state.area)
         .map(|(&q, &a)| u64::from(q) * a)
         .collect();
+    let mut short = 0usize;
     for &node in &state.order {
-        let r = state.receiver[node as usize];
+        let i = node as usize;
+        short += usize::from(again[i] < sink[i]);
+        again[i] = again[i].saturating_sub(sink[i]);
+        let r = state.receiver[i];
         if r != NO_NODE {
-            again[r as usize] += again[node as usize];
+            again[r as usize] += again[i];
         }
     }
     let (mut differ, mut class_differ, mut falls) = (0usize, 0usize, 0usize);
@@ -1319,24 +1433,55 @@ fn discharge_tree_lines(state: &MacroSolve, descent: &Descent, climate: &Climate
             class_differ += 1;
         }
         let r = state.receiver[i];
-        if r != NO_NODE && state.discharge[r as usize] < row {
+        if r != NO_NODE && sink[r as usize] == 0 && state.discharge[r as usize] < row {
             falls += 1;
         }
     }
     println!(
-        "\nTHE DISCHARGE ROW AND ITS TREE (status §7 W10; ruling B7 item 2: the row is the RUNOFF over the final receivers)"
+        "\nTHE DISCHARGE ROW AND ITS TREE (status §7 W10, W11; ruling B8 item 2: the budget's own water over the water's own receivers)"
     );
     println!(
-        "  the shipped receiver against the steepest lower neighbour on the final ground: {compared} land nodes have a lower neighbour; the two differ at {in_fill} nodes inside a hollow the routing filled (by design), {into_fill} nodes whose ground leads into a filled hollow (by design), and {elsewhere} nodes elsewhere (a chord's last metre)"
+        "  the classes the budget names: dry ground {dry}, a spilling lake's hollow {spilling}, a spill {spills}, under a closed lake's water {closed}, the ocean or a root {ocean}; dry nodes and closed-lake nodes whose shipped receiver is not the budget's (the descent, or none) {dry_off}; spills that do not point at their exit {exit_off}; nodes left out of the order {cyclic}"
     );
     println!(
-        "  the climate's runoff accumulated again over the shipped tree: {differ} nodes differ (the worst by {worst:.1} times), {class_differ} of them in the SHIPPED byte (the row's log class); the shipped row FALLS downstream at {falls} nodes, which no tree can hold"
+        "  the tree's own counts: {} nodes of spilling lakes' hollows, {} spills, {} closed-lake ends; the flat steps across the lakes: split {}, straight {}, nearest {}; exits that disagree at one saddle {}, rings {}, short sinks {}",
+        tree.region_nodes,
+        tree.spills,
+        tree.lake_ends,
+        tree.split_steps,
+        tree.straight_steps,
+        tree.fallback_steps,
+        tree.exit_disagree,
+        tree.cyclic,
+        tree.shortfall
+    );
+    println!(
+        "  the climate's runoff accumulated again over the shipped tree, less the {} sinks at their spills: {differ} nodes differ (the worst by {worst:.1} times), {class_differ} of them in the SHIPPED byte (the row's log class); {short} sinks short; the shipped row FALLS downstream with no sink at {falls} nodes, which no tree can hold",
+        state.spill_sinks.len()
     );
     census(
         "W10-DISCHARGE-TREE",
         &format!("{class_differ}nodes"),
-        "0nodes[ruling-B7-item-2:the-runoff-over-the-final-receivers]",
+        "0nodes[ruling-B8-item-2:the-budget's-water-over-the-water's-receivers]",
         Verdict::of(class_differ == 0),
+    );
+    census(
+        "CHECK-DRY-FOLLOWS-DESCENT",
+        &format!("{dry_off}nodes"),
+        "0[plan-step-2b:the-dry-ground-takes-the-budget's-descent]",
+        Verdict::of(dry_off == 0),
+    );
+    census(
+        "CHECK-EXIT-AGREES",
+        &format!("{exit_off}spills/{}disagree", tree.exit_disagree),
+        "0[plan-step-2b:a-spill-points-where-the-cascade-pours]",
+        Verdict::of(exit_off == 0 && tree.exit_disagree == 0),
+    );
+    census(
+        "CHECK-TREE-CYCLIC",
+        &format!("{cyclic}nodes/{falls}falls/{short}short"),
+        "0[plan-step-2b:one-tree,no-ring]",
+        Verdict::of(cyclic == 0 && falls == 0 && short == 0),
     );
 }
 
@@ -1991,8 +2136,10 @@ fn budget_lines(state: &MacroSolve, lakes: &Lakes, facies: &[u8]) {
         r.dry, r.partial, r.spilling, leaf_ends[0], leaf_ends[1], leaf_ends[2]
     );
     println!(
-        "  the cascade: {} pours into a sibling across a spill; its walk visited {} rings over {} leaves (the skip over full rings, review finding 6); the books, km³/yr: runoff {:.4} = held and evaporated {:.4} + to the ocean {:.4} + stranded {:.4}",
+        "  the cascade: {} pours into another hollow's side of a saddle, {} into the ocean's side that the ground leads into a lower hollow (plan step 2b, question 1), {} off saddles of three sides or more (question 2); its walk visited {} rings over {} leaves (the skip over full rings, review finding 6); the books, km³/yr: runoff {:.4} = held and evaporated {:.4} + to the ocean {:.4} + stranded {:.4}",
         r.transfers,
+        r.ocean_pours,
+        r.saddle_pours,
         r.cascade_steps,
         leaves,
         km3_yr(r.runoff_total),
@@ -2029,17 +2176,18 @@ fn budget_lines(state: &MacroSolve, lakes: &Lakes, facies: &[u8]) {
             aim.z
         );
     }
-    // ★ THE ROW AGAINST THE BUDGET'S OWN WATER (review finding 3 of plan step 2; plan question 3).
-    // The shipped discharge row is the runoff accumulated over the ROUTING receivers (choice A,
-    // built), and the routing fill carries every hollow's water over its rim; the budget holds a
-    // hollow's water where the hollow is not full. Two readings, no band — the cure is the owner's
-    // word (choice B, the budget's own water; or the receivers of §7 W11):
-    // 1. the row that reaches the OCEAN from the land (at every land node whose shipped receiver is
-    //    an ocean node) against the cascade's own water to the ocean;
-    // 2. THE ROW OUT OF A CLOSED HOLLOW: for every hollow that spills into the sea (its parent is
-    //    the ocean) and is NOT full, the row on every shipped receiver edge that leaves the
-    //    hollow's own nodes. The budget holds all the water that reaches such a hollow, so a row
-    //    that is the budget's water carries 0 there.
+    // ★ THE ROW AGAINST THE BUDGET'S OWN WATER (review finding 3 of plan step 2; plan question 3;
+    // since plan step 2b, ruling B8 item 2: the row IS the budget's own water, so each reading is
+    // a gate with a band of zero):
+    // 1. ROW-SEA: the row that reaches the OCEAN from the land (at every land node whose shipped
+    //    receiver is an ocean node) against the cascade's own water to the ocean — equal to the
+    //    unit;
+    // 2. ROW-OUT-OF-CLOSED-HOLLOWS: for every hollow that spills into the sea (its parent is the
+    //    ocean) and is NOT full, the row on every shipped receiver edge that leaves the hollow's own
+    //    nodes — zero, because the budget holds all the water that reaches such a hollow;
+    // 3. ROW-HELD: for every water body that is not full, the rows at its ENDS (its nodes with no
+    //    receiver) summed, against the water the body holds — equal, body by body; an end inside a
+    //    spilling body is counted apart (a defect).
     let mut row_to_ocean = 0u128;
     for i in 0..n {
         let to = state.receiver[i];
@@ -2088,16 +2236,73 @@ fn budget_lines(state: &MacroSolve, lakes: &Lakes, facies: &[u8]) {
             (worst_row, worst_d) = (out_of[d], d);
         }
     }
+    // The ends of every body.
+    let mut ends_of = vec![0u128; m];
+    let (mut ends_full, mut ends_none) = (0usize, 0usize);
+    for i in 0..n {
+        if state.receiver[i] != NO_NODE || state.ocean[i] {
+            continue;
+        }
+        let b = body_at(lakes, i);
+        if b == NO_DEP {
+            ends_none += 1;
+        } else if deps[b as usize].full {
+            ends_full += 1;
+        } else {
+            ends_of[b as usize] += u128::from(state.discharge[i]);
+        }
+    }
+    let (mut bodies_closed, mut held_off, mut held_off_water) = (0usize, 0usize, 0u128);
+    for d in 1..m {
+        if lakes.body_of[d] != d as u32 || deps[d].full {
+            continue;
+        }
+        bodies_closed += 1;
+        if ends_of[d] != deps[d].held {
+            held_off += 1;
+            held_off_water += ends_of[d].abs_diff(deps[d].held);
+            if held_off <= 5 {
+                let aim = unit(&state.lattice, deps[d].pit);
+                println!(
+                    "    ROW-HELD off: body {d} (pit {} at {:.0} m, spill {:.0} m, level {}), children {:?}, held {} against ends {}; aim {:.6} {:.6} {:.6}",
+                    deps[d].pit,
+                    f64::from(deps[d].pit_z) / steps,
+                    f64::from(deps[d].spill_z) / steps,
+                    if deps[d].level == DRY {
+                        "DRY".to_string()
+                    } else {
+                        format!("{:.1} m", f64::from(deps[d].level) / steps)
+                    },
+                    deps[d].children,
+                    deps[d].held,
+                    ends_of[d],
+                    aim.x,
+                    aim.y,
+                    aim.z
+                );
+            }
+        }
+    }
     println!(
-        "  THE ROW AGAINST THE BUDGET (review finding 3; plan question 3): the discharge row delivers {:.4} km³/yr from the land to the ocean, the cascade {:.4} km³/yr — the row carries {:.4} km³/yr to the sea that the budget holds in its hollows ({:.4} km³/yr held); of the {closed} hollows that spill into the sea and are NOT full (the budget holds all their water), {leaking} have a row leaving them; the largest row out of one is {:.4} km³/yr, out of a {:.0} km² hollow whose own water is {} (a river through a chain of hollows leaves each of them, so the rows out of them sum to {:.1} km³/yr, more than the runoff)",
+        "  THE ROW AGAINST THE BUDGET (review finding 3; ruling B8 item 2): the discharge row delivers {:.4} km³/yr from the land to the ocean, the cascade {:.4} km³/yr (a gap of {:.4} km³/yr; {:.4} km³/yr held); of the {closed} hollows that spill into the sea and are NOT full (the budget holds all their water), {leaking} have a row leaving them; the largest row out of one is {:.4} km³/yr, out of a {:.0} km² hollow whose own water is {} (the rows out of them sum to {:.1} km³/yr)",
         km3_yr(row_to_ocean),
         km3_yr(r.to_ocean),
-        km3_yr(row_to_ocean.saturating_sub(r.to_ocean)),
+        km3_yr(row_to_ocean.abs_diff(r.to_ocean)),
         km3_yr(r.evaporated_total),
         km3_yr(worst_row),
         deps[worst_d].area_m2 as f64 / 1.0e6,
         STATES[state_of(worst_d)],
         km3_yr(closed_row)
+    );
+    println!(
+        "  THE ROW AT THE ENDS (plan step 2b): of {bodies_closed} water bodies that are not full, {held_off} have ends whose rows do not sum to the water they hold (off by {:.4} km³/yr in all); ends inside a spilling body {ends_full}, ends under no body {ends_none}",
+        km3_yr(held_off_water)
+    );
+    census(
+        "ROW-SEA",
+        &format!("{}row-to-ocean/{}budget-to-ocean", row_to_ocean, r.to_ocean),
+        "equal[ruling-B8-item-2:the-row's-sum-into-the-sea-is-the-cascade's]",
+        Verdict::of(row_to_ocean == r.to_ocean),
     );
     census(
         "ROW-OUT-OF-CLOSED-HOLLOWS",
@@ -2106,8 +2311,16 @@ fn budget_lines(state: &MacroSolve, lakes: &Lakes, facies: &[u8]) {
             km3_yr(row_to_ocean),
             km3_yr(r.to_ocean)
         ),
-        "no-band[review-finding-3;plan-question-3-B-the-owner's-word-owed]",
-        Verdict::NoBand,
+        "0-leak[ruling-B8-item-2:a-closed-body-passes-nothing-on]",
+        Verdict::of(leaking == 0 && row_to_ocean == r.to_ocean),
+    );
+    census(
+        "ROW-HELD",
+        &format!(
+            "{held_off}of{bodies_closed}bodies/{ends_full}ends-in-spilling/{ends_none}ends-in-none"
+        ),
+        "0[plan-step-2b:the-ends-of-a-closed-body-carry-what-it-holds]",
+        Verdict::of(held_off == 0 && ends_full == 0 && ends_none == 0),
     );
     census(
         "CHECK-BUDGET-STALE",
@@ -2138,5 +2351,447 @@ fn budget_lines(state: &MacroSolve, lakes: &Lakes, facies: &[u8]) {
         ),
         "no-band[a-reading]",
         Verdict::NoBand,
+    );
+}
+
+/// Whether a node is a ROOT of the budget's hierarchy: the ocean's own component with no way down
+/// (the connected ocean, or the six lowest nodes of a body with no sea).
+fn is_root(lakes: &Lakes, i: usize) -> bool {
+    lakes.home[i] == OCEAN && lakes.descent.down[i] == NO_NODE
+}
+
+/// ★ PLAN STEP 2b, W0 — MEASURE BEFORE THE CASCADE OR THE DESCENT MOVES (ruling B8 item 2). Three
+/// readings the owner reads with the plan's questions 1 to 3; none of them moves the world.
+///
+/// 1. **OCEAN-SIDE-POURS (question 1).** A full hollow whose parent is the ocean hands its overflow
+///    to the sea in the cascade. The ground's own descent from the saddle's ocean-side gate can end
+///    in a lower closed hollow that met the sea earlier; no single receiver can then carry that
+///    overflow through the hollow to the sea. Counted with the water, and split by whether the
+///    hollow it lands in is full.
+/// 2. **SADDLE-SIDES (question 2).** Saddles by their count of sides, the ocean's side included; at
+///    a saddle of three sides or more, the full depressions whose pour today (the sibling the
+///    binary merge paired them with, or the sea) is not the steepest side that is not full.
+/// 3. **GROUND-PLATEAUS (question 3).** Connected nodes of one exact height (not the root): how
+///    many, how many drain and how many are closed; the leaves of zero depth the sweep opens on
+///    them and the water those hold; and the trunks of the budget's own DESCENT tree that run over
+///    a plateau, with their grid lean beside the lean of the trunks off the plateaus.
+///
+/// **Example.** A crater lake on the belt's shoulder spills down its seaward rim into a closed
+/// valley hollow that met the sea over a lower sill. Line 1 counts that crater's overflow: the
+/// cascade books it to the sea, and the ground carries it into the valley.
+fn step2b_measure_lines(state: &MacroSolve, lakes: &Lakes) {
+    use vd_bins::grid_bias::{AxisHistogram, trunk_axis};
+    let n = state.node_count();
+    let deps = &lakes.deps;
+    let km3_yr = |v: u128| v as f64 / 1.0e12;
+    // 1. THE OCEAN SIDE'S POURS.
+    let (mut pours, mut pours_water) = (0usize, 0u128);
+    let (mut into_hollow, mut into_hollow_water) = (0usize, 0u128);
+    let (mut into_closed, mut into_closed_water) = (0usize, 0u128);
+    for d in 1..deps.len() {
+        let dep = &deps[d];
+        if dep.parent != OCEAN || !dep.full || dep.passed == 0 {
+            continue;
+        }
+        pours += 1;
+        pours_water += dep.passed;
+        let saddle = &lakes.saddles[dep.saddle as usize];
+        let ocean_side = saddle
+            .sides
+            .iter()
+            .find(|k| k.root == OCEAN)
+            .expect("a saddle into the ocean has the ocean's side");
+        if ocean_side.entry == OCEAN {
+            continue;
+        }
+        into_hollow += 1;
+        into_hollow_water += dep.passed;
+        let body = lakes.body_of[ocean_side.entry as usize];
+        if body == NO_DEP || !deps[body as usize].full {
+            into_closed += 1;
+            into_closed_water += dep.passed;
+        }
+    }
+    println!(
+        "\nPLAN STEP 2b, W0 (ruling B8 item 2): the three readings before the cascade or the descent moves"
+    );
+    println!(
+        "  M1 OCEAN-SIDE-POURS (question 1): {pours} full hollows pour {:.4} km³/yr into the sea; the ground's descent from the ocean-side gate of {into_hollow} of them ({:.4} km³/yr) ends in a lower hollow that met the sea earlier, {into_closed} of them ({:.4} km³/yr) in one that is NOT full",
+        km3_yr(pours_water),
+        km3_yr(into_hollow_water),
+        km3_yr(into_closed_water)
+    );
+    census(
+        "M1-OCEAN-SIDE-POURS",
+        &format!(
+            "{into_hollow}pours/{:.4}km3/yr-into-a-hollow/{into_closed}/{:.4}km3/yr-into-a-hollow-not-full",
+            km3_yr(into_hollow_water),
+            km3_yr(into_closed_water)
+        ),
+        "no-band[plan-step-2b-question-1]",
+        Verdict::NoBand,
+    );
+    // 2. THE SADDLES' SIDES.
+    let mut by_sides = [0usize; 10];
+    let (mut multi_full, mut differ, mut differ_water) = (0usize, 0usize, 0u128);
+    for saddle in &lakes.saddles {
+        by_sides[saddle.sides.len().min(9)] += 1;
+    }
+    for d in 1..deps.len() {
+        let dep = &deps[d];
+        if dep.saddle == vd_terrain::lakes::NO_SADDLE || !dep.full || dep.passed == 0 {
+            continue;
+        }
+        let saddle = &lakes.saddles[dep.saddle as usize];
+        if saddle.sides.len() < 3 {
+            continue;
+        }
+        // The steepest side that is the ocean or not full, by the final flags.
+        let chosen = saddle
+            .sides
+            .iter()
+            .find(|s| s.root == OCEAN || !deps[s.root as usize].full)
+            .map_or(NO_NODE, |s| s.gate);
+        {
+            multi_full += 1;
+            let today = if dep.parent == OCEAN {
+                saddle
+                    .sides
+                    .iter()
+                    .find(|s| s.root == OCEAN)
+                    .map_or(NO_NODE, |s| s.gate)
+            } else {
+                let kids = deps[dep.parent as usize].children;
+                let sibling = if kids[0] == d as u32 {
+                    kids[1]
+                } else {
+                    kids[0]
+                };
+                deps[sibling as usize].gate
+            };
+            if today != chosen {
+                differ += 1;
+                differ_water += dep.passed;
+            }
+        }
+    }
+    println!(
+        "  M2 SADDLE-SIDES (question 2): saddles by their sides (the ocean's side counted): 2:{} 3:{} 4:{} 5:{} 6:{} 7:{} 8+:{}; at the saddles of three sides or more {multi_full} full depressions pour on, and {differ} of them ({:.4} km³/yr) pour today into a side that is not the steepest side that is the ocean or not full",
+        by_sides[2],
+        by_sides[3],
+        by_sides[4],
+        by_sides[5],
+        by_sides[6],
+        by_sides[7],
+        by_sides[8] + by_sides[9],
+        km3_yr(differ_water)
+    );
+    census(
+        "M2-SADDLE-SIDES",
+        &format!(
+            "{}multi-way-saddles/{differ}pours/{:.4}km3/yr-not-the-steepest-open-side",
+            lakes.saddles.iter().filter(|s| s.sides.len() >= 3).count(),
+            km3_yr(differ_water)
+        ),
+        "no-band[plan-step-2b-question-2]",
+        Verdict::NoBand,
+    );
+    // 3. THE GROUND'S PLATEAUS: connected nodes of one exact height that are not the root.
+    const UNSEEN: u32 = u32::MAX;
+    let mut plateau = vec![UNSEEN; n];
+    let (mut draining, mut draining_nodes, mut closed, mut closed_nodes) =
+        (0usize, 0usize, 0usize, 0usize);
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    let mut members: Vec<u32> = Vec::new();
+    let mut next_id = 0u32;
+    for start in 0..n {
+        if plateau[start] != UNSEEN || is_root(lakes, start) {
+            continue;
+        }
+        let z0 = state.z[start];
+        let has_equal = state
+            .lattice
+            .neighbours(start as u32)
+            .iter()
+            .any(|&m| m != NO_NODE && state.z[m as usize] == z0 && !is_root(lakes, m as usize));
+        if !has_equal {
+            continue;
+        }
+        members.clear();
+        plateau[start] = next_id;
+        queue.push_back(start as u32);
+        let mut drains = false;
+        while let Some(v) = queue.pop_front() {
+            members.push(v);
+            for m in state.lattice.neighbours(v) {
+                if m == NO_NODE {
+                    continue;
+                }
+                let mi = m as usize;
+                if is_root(lakes, mi) || state.z[mi] < z0 {
+                    drains = true;
+                    continue;
+                }
+                if state.z[mi] == z0 && plateau[mi] == UNSEEN {
+                    plateau[mi] = next_id;
+                    queue.push_back(m);
+                }
+            }
+        }
+        next_id += 1;
+        if drains {
+            draining += 1;
+            draining_nodes += members.len();
+        } else {
+            closed += 1;
+            closed_nodes += members.len();
+        }
+    }
+    let (mut flat_leaves, mut flat_leaf_water, mut flat_leaf_wet) = (0usize, 0u128, 0usize);
+    for dep in deps.iter().skip(1) {
+        if dep.children[0] != NO_DEP || dep.pit_z != dep.spill_z {
+            continue;
+        }
+        flat_leaves += 1;
+        flat_leaf_water += dep.held;
+        flat_leaf_wet += usize::from(dep.held > 0);
+    }
+    // The descent tree's drainage area, leaves first: every node after every node that descends
+    // into it, which is the sweep's own order `(height, index)` taken from the top.
+    let mut by_height: Vec<u32> = (0..n as u32).collect();
+    by_height.sort_unstable_by_key(|&v| std::cmp::Reverse((state.z[v as usize], v)));
+    let mut drain = state.area.clone();
+    for &v in &by_height {
+        let d = lakes.descent.down[v as usize];
+        if d != NO_NODE {
+            drain[d as usize] += drain[v as usize];
+        }
+    }
+    drop(by_height);
+    let mut on_flat = AxisHistogram::new(4);
+    let mut off_flat = AxisHistogram::new(4);
+    let (mut trunks, mut trunks_on_flat) = (0usize, 0usize);
+    for v in 0..n as u32 {
+        let i = v as usize;
+        if state.ocean[i] || drain[i] < state.area[i].saturating_mul(VALLEY_NODES) {
+            continue;
+        }
+        trunks += 1;
+        let flat = plateau[i] != UNSEEN;
+        trunks_on_flat += usize::from(flat);
+        if let Some(axis) = trunk_axis(&state.lattice, &lakes.descent.down, v, 8) {
+            if flat {
+                on_flat.add(axis.degrees);
+            } else {
+                off_flat.add(axis.degrees);
+            }
+        }
+    }
+    println!(
+        "  M3 GROUND-PLATEAUS (question 3): {} plateaus of two nodes or more — {draining} drain ({draining_nodes} nodes), {closed} are closed ({closed_nodes} nodes); {flat_leaves} leaves of ZERO depth (pit at the spill's height), {flat_leaf_wet} of them hold water, {:.4} km³/yr in all",
+        draining + closed,
+        km3_yr(flat_leaf_water)
+    );
+    println!(
+        "  the budget's DESCENT tree ({VALLEY_NODES} nodes of drainage area or more): {trunks} trunk nodes, {trunks_on_flat} on a plateau; the grid lean of their 8-step axes ON a plateau: {} | FLATNESS {:.3}; OFF the plateaus: {} | FLATNESS {:.3}",
+        on_flat.line(),
+        on_flat.flatness(),
+        off_flat.line(),
+        off_flat.flatness()
+    );
+    census(
+        "M3-GROUND-PLATEAUS",
+        &format!(
+            "{draining_nodes}draining-nodes/{closed_nodes}closed-nodes/{flat_leaves}zero-depth-leaves/{trunks_on_flat}of{trunks}descent-trunks-on-a-plateau/flatness{:.3}on/{:.3}off",
+            on_flat.flatness(),
+            off_flat.flatness()
+        ),
+        "no-band[plan-step-2b-question-3]",
+        Verdict::NoBand,
+    );
+}
+
+/// ★ THE WALK ACROSS A SPILLING LAKE (plan step 2b, question 4; the planet's own reading of test T9):
+/// from every node of a spilling lake's hollow whose water takes SIX steps inside that hollow (the
+/// spill may be the sixth), on one face, the angle between the six steps' displacement and the
+/// straight line from the start to the lake's spill, and whether all six steps are one lattice
+/// offset (an exact run along a row or a diagonal). Beside it, from the same starts, THE CONTROL:
+/// the rule before the split (the neighbour nearest the spill by the summed chord plus the step,
+/// ties to the smaller index), walked over the census's OWN summed chord from each spill; and the
+/// axes of the straight lines themselves, so a lean of the lakes' shapes is told from a lean of the
+/// step.
+///
+/// **Example.** A lake on the plain spills at a notch 20° off the face's row. From its far shore
+/// the river's six steps mix rows and diagonals and point at the notch, never along the row.
+fn lake_walk_lines(state: &MacroSolve, lakes: &Lakes, radius_m: f64) {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    use vd_bins::grid_bias::{AxisHistogram, pair_axis};
+    const STEPS: usize = 6;
+    struct Tally {
+        walks: usize,
+        runs: usize,
+        errors: Vec<f64>,
+        axes: AxisHistogram,
+    }
+    let n = state.node_count();
+    let class = classes(state, lakes);
+    let lattice = &state.lattice;
+    // The census's own summed chord from each spilling lake's spill over its hollow.
+    let chord = |a: u32, b: u32| -> u64 {
+        ((unit(lattice, a) - unit(lattice, b)).length() * radius_m).floor() as u64
+    };
+    let mut dist = vec![u64::MAX; n];
+    let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
+    for (d, dep) in lakes.deps.iter().enumerate().skip(1) {
+        if lakes.body_of[d] == d as u32 && dep.full {
+            dist[dep.spill_node as usize] = 0;
+            heap.push(Reverse((0, dep.spill_node)));
+        }
+    }
+    while let Some(Reverse((d, u))) = heap.pop() {
+        if d > dist[u as usize] {
+            continue;
+        }
+        let from = if class[u as usize] == Class::Spilling {
+            body_at(lakes, u as usize)
+        } else {
+            NO_DEP
+        };
+        for m in lattice.neighbours(u) {
+            if m == NO_NODE || class[m as usize] != Class::Spilling {
+                continue;
+            }
+            let bm = body_at(lakes, m as usize);
+            let joins = bm == from || (from == NO_DEP && lakes.deps[bm as usize].spill_node == u);
+            let step = d + chord(u, m);
+            if joins && step < dist[m as usize] {
+                dist[m as usize] = step;
+                heap.push(Reverse((step, m)));
+            }
+        }
+    }
+    let control_step = |i: u32, b: u32, spill: u32| -> u32 {
+        let mut best = (u64::MAX, NO_NODE);
+        for m in lattice.neighbours(i) {
+            if m == NO_NODE {
+                continue;
+            }
+            let own = m == spill
+                || (class[m as usize] == Class::Spilling && body_at(lakes, m as usize) == b);
+            if own && dist[m as usize] < dist[i as usize] {
+                best = best.min((dist[m as usize] + chord(i, m), m));
+            }
+        }
+        best.1
+    };
+    // One walk: where it ends and its six offsets, or None where it leaves the hollow or the face.
+    let walk = |start: u32,
+                b: u32,
+                spill: u32,
+                step: &dyn Fn(u32) -> u32|
+     -> Option<(u32, Vec<(i32, i32)>)> {
+        let face = lattice.split(start).0;
+        let mut cur = start;
+        let mut offsets = Vec::with_capacity(STEPS);
+        for k in 0..STEPS {
+            let r = step(cur);
+            let inside = r != NO_NODE
+                && ((r == spill && k == STEPS - 1)
+                    || (r != spill
+                        && class[r as usize] == Class::Spilling
+                        && body_at(lakes, r as usize) == b));
+            if !inside {
+                return None;
+            }
+            let (f, a, c) = lattice.split(cur);
+            let (fr, ar, cr) = lattice.split(r);
+            if f != face || fr != face {
+                return None;
+            }
+            offsets.push((ar - a, cr - c));
+            cur = r;
+        }
+        Some((cur, offsets))
+    };
+    let new_tally = || Tally {
+        walks: 0,
+        runs: 0,
+        errors: Vec::new(),
+        axes: AxisHistogram::new(4),
+    };
+    let (mut shipped, mut control, mut lines) = (new_tally(), new_tally(), AxisHistogram::new(4));
+    let add = |t: &mut Tally, start: u32, spill: u32, end: u32, offsets: &[(i32, i32)]| {
+        let (_, i0, j0) = lattice.split(start);
+        let (_, i1, j1) = lattice.split(end);
+        let (_, si, sj) = lattice.split(spill);
+        let walked = (f64::from(i1 - i0), f64::from(j1 - j0));
+        let line = (f64::from(si - i0), f64::from(sj - j0));
+        let dot = walked.0 * line.0 + walked.1 * line.1;
+        let cross = walked.0 * line.1 - walked.1 * line.0;
+        t.errors.push(cross.atan2(dot).abs().to_degrees());
+        t.walks += 1;
+        t.runs += usize::from(offsets.iter().all(|&o| o == offsets[0]));
+        if let Some(axis) = pair_axis(lattice, start, end) {
+            t.axes.add(axis.degrees);
+        }
+    };
+    for start in 0..n as u32 {
+        if class[start as usize] != Class::Spilling {
+            continue;
+        }
+        let b = body_at(lakes, start as usize);
+        let spill = lakes.deps[b as usize].spill_node;
+        if lattice.split(spill).0 != lattice.split(start).0 {
+            continue;
+        }
+        let shipped_walk = walk(start, b, spill, &|i| state.receiver[i as usize]);
+        let control_walk = walk(start, b, spill, &|i| control_step(i, b, spill));
+        // Both rules from the same starts only.
+        let (Some((e1, o1)), Some((e2, o2))) = (shipped_walk, control_walk) else {
+            continue;
+        };
+        add(&mut shipped, start, spill, e1, &o1);
+        add(&mut control, start, spill, e2, &o2);
+        if let Some(axis) = pair_axis(lattice, start, spill) {
+            lines.add(axis.degrees);
+        }
+    }
+    let summary = |t: &mut Tally| -> (f64, f64, f64) {
+        t.errors.sort_by(f64::total_cmp);
+        let mean = t.errors.iter().sum::<f64>() / t.errors.len().max(1) as f64;
+        let p90 = t
+            .errors
+            .get(t.errors.len() * 9 / 10)
+            .copied()
+            .unwrap_or(0.0);
+        (mean, p90, t.runs as f64 * 100.0 / t.walks.max(1) as f64)
+    };
+    let (mean, p90, run_pct) = summary(&mut shipped);
+    let (c_mean, c_p90, c_run_pct) = summary(&mut control);
+    println!(
+        "\nTHE WALK ACROSS A SPILLING LAKE (plan step 2b, question 4): {} six-step walks from the same starts inside their lake's hollow toward its spill; the bearing error against the straight line to the spill, SHIPPED (the split): mean {mean:.2}°, p90 {p90:.2}°, exact lattice runs {run_pct:.1} %, the walks' axes {} | FLATNESS {:.3}; THE CONTROL (the nearest by the summed chord, the rule before the split): mean {c_mean:.2}°, p90 {c_p90:.2}°, exact runs {c_run_pct:.1} %, axes {} | FLATNESS {:.3}; the straight lines to the spills themselves: {} | FLATNESS {:.3}",
+        shipped.walks,
+        shipped.axes.line(),
+        shipped.axes.flatness(),
+        control.axes.line(),
+        control.axes.flatness(),
+        lines.line(),
+        lines.flatness()
+    );
+    census(
+        "G-LAKE-WALK",
+        &format!(
+            "{mean:.2}deg-mean/{run_pct:.1}%runs/flatness{:.3}/control{c_mean:.2}deg/{c_run_pct:.1}%runs/flatness{:.3}/lines-flatness{:.3}/{}walks",
+            shipped.axes.flatness(),
+            control.axes.flatness(),
+            lines.flatness(),
+            shipped.walks
+        ),
+        // ★ A GATE, NOT A READING (review finding 5 of step 2b): test T9's 12° bound on the mean
+        //   error stays the gate until the owner rules another bound for lakes that are node
+        //   squares (status §11 item 11). A gate is never turned into a reading after it fails.
+        "<=12deg-mean[plan-step-2b-question-4:test-T9's-bound;the-owner's-word-owed-for-node-square-lakes]",
+        Verdict::of(mean <= 12.0),
     );
 }

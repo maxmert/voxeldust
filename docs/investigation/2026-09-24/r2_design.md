@@ -502,6 +502,14 @@ hills settle into valleys. The globe past 890 km does not move by one metre.
    `FieldLadder` must name the rows' 16-node stencil as the one that decides `SIDE_INLAND`, or the word changes at the
    rung where A0 starts. And a basin floor under the sea's level is a CLOSED-BASIN terminal in the breach, never a sea
    terminal (§4.6), so the bake and the shore law read one fact.
+10. **★ Step 2b (ruling B8 item 2; generator 21, artifact 9; built 2026-09-25, NOT committed).** Item 1 is overtaken: the
+   discharge row is THE BUDGET'S OWN WATER over THE WATER'S OWN RECEIVERS — a closed hollow passes nothing on, a
+   spilling lake passes its outflow (its inflow less its lake's evaporation, taken off at its spill), and the row into
+   the sea equals the cascade's (MEASURED). The receiver slot is the water's way (a dry node's descent, a lake's flat
+   step to its spill, a spill over its saddle) and "no receiver" is where the water ENDS (the ocean, a closed lake, a
+   dry pit). The rim inflow must read it so: a rim node whose slot says "none" is an end, not an outlet. The macro cut
+   still reads the rain (item 6 stands), and `erosion_bench`'s seed must be re-read on artifact 9 before slice 0's
+   numbers (DEFERRED "R2's BENCH SEED READS THE ROW'S NEW MEANING").
 
 **Example.** A pocket 2 km under the sea's level in a dry interior is, after step 2, a salt pan with a small lake at
 its bottom. The bake's flood finds its spill, the breach leaves its floor alone, and the sill floor keeps its rim
