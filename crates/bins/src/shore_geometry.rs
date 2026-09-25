@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use vd_core::glam::DVec3;
 use vd_recipe::Gi;
-use vd_recipe::height::{SIDE_LAND, SIDE_SEA, relief_parts_from, shore};
+use vd_recipe::height::{SIDE_INLAND, SIDE_LAND, SIDE_SEA, relief_parts_from, shore};
 use vd_recipe::plan::{FieldRead, PlanCharter, column_surface_at, site_direction};
 use vd_recipe::terrace::terrace;
 use vd_seed::bend::Face;
@@ -87,13 +87,19 @@ impl RungSource<'_> {
 pub struct ShippedColumn {
     /// The column's direction, at the bend's fraction bits.
     pub dir: [Gi; 3],
-    /// The cell's side of the coast mask (`sample_side`): land, the sea, a lake, or `None`.
+    /// The cell's side of the coast mask (`sample_side`): land, the sea, a lake, a pocket's dry
+    /// floor (2026-09-25), or `None`.
     pub side: Option<Side>,
-    /// The side WORD the shore law obeys (`column_water`'s second word): `SIDE_LAND`, `SIDE_SEA`
-    /// or `SIDE_UNKNOWN`. A lake cell whose level folded away reads `SIDE_LAND` here.
+    /// The side WORD the shore law obeys (`column_water`'s side): `SIDE_LAND`, `SIDE_SEA`,
+    /// `SIDE_INLAND` (land with no sea node in its read stencil, 2026-09-24) or `SIDE_UNKNOWN`. A
+    /// lake cell whose level names no lake reads the land rule's word here.
     pub side_word: Gi,
-    /// The water the side names, as a radius: the body's sea, a lake's level, or the nearest row's.
+    /// The water that STANDS over the column, as a radius: the body's sea, a lake's level, the
+    /// nearest row's (no mask), or ZERO for an inland column (2026-09-24, plan step 2 part 3b).
     pub water: Gi,
+    /// ★ The water the shore law HOLDS the column against (`column_water`'s `hold`): the sea for
+    /// every land column, inland ones included, and the standing water for the rest.
+    pub hold: Gi,
     /// ★ THE GROUND BASE the shore law reads: the ladder radius, the solved `Z` and the coarse
     /// octaves the field did not replace — the ground WITHOUT the fine octaves.
     pub base: Gi,
@@ -113,7 +119,7 @@ impl ShippedColumn {
     pub fn drawn_wet(&self) -> Option<bool> {
         if self.side_word == SIDE_SEA {
             Some(true)
-        } else if self.side_word == SIDE_LAND {
+        } else if (self.side_word == SIDE_LAND) | (self.side_word == SIDE_INLAND) {
             Some(false)
         } else {
             None
@@ -126,11 +132,12 @@ impl ShippedColumn {
         self.side == Some(Side::Lake)
     }
 
-    /// ★ THE GROUND'S OWN SIDE: over its water (or at it) by the base alone — the rule the shore law
-    /// runs where no side is stated (`vd_recipe::height::shore`, `g >= 0`).
+    /// ★ THE GROUND'S OWN SIDE: over the water the shore law holds it against (or at it) by the base
+    /// alone — the rule the shore law runs where no side is stated (`vd_recipe::height::shore`,
+    /// `g >= 0`).
     #[must_use]
     pub fn ground_dry(&self) -> bool {
-        self.base >= self.water
+        self.base >= self.hold
     }
 }
 
@@ -197,7 +204,7 @@ impl<'a> RungReader<'a> {
     pub fn column(&self, i: i32, j: i32) -> Option<ShippedColumn> {
         let field = self.source.field();
         let side = sample_side(&self.fine, field, self.face, self.rung, i, j);
-        let (water, side_word, _coast) = column_water(
+        let read = column_water(
             self.body,
             &self.lattice,
             field,
@@ -207,6 +214,7 @@ impl<'a> RungReader<'a> {
             j,
             side,
         );
+        let (water, hold, side_word) = (read.water, read.hold, read.side);
         let share = slope_share(
             &self.slope,
             &self.lattice,
@@ -225,7 +233,7 @@ impl<'a> RungReader<'a> {
                 z,
                 first: self.first,
                 slope_share: share,
-                water,
+                water: hold,
                 side: side_word,
             },
         )
@@ -243,7 +251,7 @@ impl<'a> RungReader<'a> {
         let base = self.charter.radius + z + parts.coarse;
         let again = shore(
             base,
-            water,
+            hold,
             terrace(&self.charter.terrace, base + parts.fine),
             side_word,
         );
@@ -252,6 +260,7 @@ impl<'a> RungReader<'a> {
             side,
             side_word,
             water,
+            hold,
             base,
             surface,
             base_agrees: again == surface,

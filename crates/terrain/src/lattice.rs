@@ -85,7 +85,9 @@ pub struct SampleBox {
     /// owner: "the form of the shores is changing all the time"): the sea is ONE surface under
     /// every cell of the body, so the shore is the land's own crossing of it and follows the land's
     /// morph through every rung; a sheet drawn only where a column was wet grew and shrank with
-    /// the rung's cell, and its edge stepped at every ring swap.
+    /// the rung's cell, and its edge stepped at every ring swap. ★ SINCE 2026-09-24 (plan step 2
+    /// part 3c) the sheet reads each column's OWN water and never raises it to this word: a land
+    /// column beside the sea carries the sea as its own water, and an inland column carries none.
     pub sea: Gi,
 }
 

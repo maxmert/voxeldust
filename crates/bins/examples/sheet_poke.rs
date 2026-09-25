@@ -125,8 +125,8 @@ fn main() {
                 ]
             };
             let level_m = |a: i32, b: i32| -> f64 {
-                let w = samples.water[SampleBox::column_index(a, b)];
-                metres_of_q28(if w > samples.sea { w } else { samples.sea })
+                // The column's OWN water, as the sheet reads it (plan step 2 part 3c).
+                metres_of_q28(samples.water[SampleBox::column_index(a, b)])
             };
             let surface_m = |a: i32, b: i32| -> f64 {
                 metres_of_q28(samples.surfaces[SampleBox::column_index(a, b)])

@@ -7,7 +7,8 @@
 > - **Delete rule.** Delete this file when every step in §8 is done and the owner gave G-LOOK. The rulings
 >   (`docs/design/owner_decisions_*.md`) and `docs/design/DEFERRED.md` (D-TERRAIN-8, D-TERRAIN-9) keep the history.
 > - **Written** 2026-09-24 on branch `game` at `e69ed91`: GENERATOR_VERSION 19 (`crates/terrain/src/tag.rs:174`),
->   ARTIFACT_VERSION 7 (`crates/terrain/src/artifact.rs:77`).
+>   ARTIFACT_VERSION 7 (`crates/terrain/src/artifact.rs:77`). **Updated for step 2** (2026-09-25, on `a985e5c` plus
+>   the uncommitted step-2 change): GENERATOR_VERSION 20, ARTIFACT_VERSION 8, `PROTO_MINOR` unchanged.
 > - **How it was made.** Nine read-only agents (workflow `wf_1780e367-7e9`): five readers, one synthesis, and one
 >   skeptic per complaint who tried to refute each cause from the code. The key lines were then read again by hand.
 >   Nothing was built and nothing was measured for this file.
@@ -50,6 +51,20 @@ that join into drainage, forest over whole hillsides, and one lake in a valley. 
   holds 2.84 closed basins ≥ 10 m deep per 100 km² against the solve's 0.003, with Hack's n = 0.22 (RED); the drawn
   shore stands a median 2.9 km off the ground's own waterline with a median 309 m wall on it; 345 of 506 lakes vanish
   whole at the rung 9 → 10 swap, and 21 130 of 37 966 rivers end in a dry closed basin (§5–§7 "MEASURED").
+- **Step 2 BUILT (2026-09-25, generator 20; ruling B7; the lines in `step2_census_gen20.txt`; NOT committed):** the sea
+  is the CONNECTED ocean and a pocket is a closed basin; every hollow takes its whole watershed and passes its overflow
+  on; the discharge is the runoff over the final receivers; a small lake keeps its level at pyramid level 1. MEASURED:
+  lakes 3.51 % of the land (was 0.068 %), 0 lakes change at the rung 9 → 10 swap (was 427 of 506), 0 lip columns (was
+  3 753), the discharge row agrees with its tree at every node (was 1 304 002 off), 0 pocket nodes drawn as sea (was
+  59 470). NEW REDS it exposed (§4, §7): G-RIVER-DESCENT (3 430 trunk steps rise inside filled hollows), G-GRID worse
+  (1.484 against 1.284) on the filled pockets' flats, G-RUNG-HOLD (19 columns at 9 → 10; 5 after the review fixes),
+  and far-rung lake losses at 14 → 15 and 15 → 16.
+- **Step 2's review fixes (2026-09-25, NOT committed; §7 "MEASURED (step 2's review fixes)"):** a pocket's dry floor is
+  its own side word (the coast mask's word 2), so no pocket floor is lifted into a mesa at any rung (G-POCKET-HELD 0 of
+  60 383 columns); a far chunk waits for the coast mask; a floor under the sea is no beach; the connected sea states
+  an answer that does not balance; the cascade skips full rings; the lakes' sea fixed point has its own tests. The
+  discharge row still carries 1 607 km³/yr to the sea that the budget holds (ROW-OUT-OF-CLOSED-HOLLOWS): the owner's
+  word on question 3 B is owed.
 
 ---
 
@@ -63,11 +78,11 @@ that join into drainage, forest over whole hillsides, and one lake in a valley. 
 | 8c the solve | BUILT (C1–C5): 40 passes on the 8 192 m lattice, 1 216 nodes a face edge, 8 871 936 nodes. C6 (the owner's look) owed. | `terrain/src/solve.rs:1505-1720`; `terrain/src/macro_lattice.rs:48` |
 | 8d W4-1 each bed's hardness | BUILT. The cap share (a half) is ASSUMED (W5). | `recipe/src/terrace.rs:152` |
 | 8d W4-2 the province word | BUILT. The solve reads the erodibility; the column kernel does not. | `terrain/src/land.rs:483`; `terrain/src/strata.rs:214`; `terrain/src/solve.rs:980` |
-| B2-1 the lakes from a budget | BUILT, WITH A DEFECT against its own cited law (§7 W3). | `terrain/src/lakes.rs:177-330` |
+| B2-1 the lakes from a budget | BUILT; ★ the WATERSHED and the CASCADE by plan step 2 (Fill–Spill–Merge; §7 W3, W4 cured, generator 20). The shipped receivers still follow the routing fill, not the cascade (§7 W11). | `terrain/src/lakes.rs` `budget`, `descent`, `cascade` |
 | B2-2 the summer ice line, the crater age | BUILT. No drawn reader reads the ice bit; the snow in the pictures comes from the placeholder biome. | `terrain/src/climate.rs:560`; `terrain/src/craters.rs:360`; `recipe/src/height.rs:501-529` |
 | B2-3 the flats, the scratch instruments | PARTIAL. Flats by summed chord. D8 stays. G-GRID RED. | `terrain/src/solve.rs:784-934`; `bins/src/grid_bias.rs` |
 | B2-4 the river lines, the carve, the floodplain | BUILT, THEN RETIRED (W16.1). The width law has no caller outside its tests. R1 is a bench. R2, R3 NOT built. | `terrain/src/river.rs:1-26`; `recipe/src/amplify.rs:1-6` |
-| B2-5 the lake side word | BUILT (two bits a node). The lake's EDGE law (W6) and the sea's shore off the node squares are OWED. | `terrain/src/artifact.rs:201-281`, `:1134-1159` |
+| B2-5 the lake side word | BUILT (two bits a node); ★ the level-1 word keeps a lone lake (`block_water`, step 2 part 5). The lake's EDGE law (W6) and the sea's shore off the node squares are OWED. | `terrain/src/artifact.rs` `coast_side`, `sample_side`, `block_water` |
 | W18 the water sheet | BUILT (client geometry; it draws what the columns say). | `terrain/src/position.rs:271-499` |
 | 8d the authored override | NOT BUILT. | no code |
 | 8e biome and soil | NOT BUILT. Every ground pixel is ONE colour, `srgb(0.55, 0.50, 0.42)`. | `client-render/src/terrain.rs:1974` |
@@ -192,20 +207,27 @@ and re-freeze the references under the owner's look. Whether it passes today is 
 
 | gate | state | last number |
 |---|---|---|
-| G-LAKE-SHARE | GREEN, but a CEILING only (see W5) | 0.068 % of the land (MEASURED gen 19); the watershed what-if 1.914 % |
-| G-LAKE-COUNT | read, verdict not restated | 506 patches, median 1 node, the largest 87 nodes (MEASURED gen 19); the power-law fit UNMEASURED |
-| G-BASIN | GREEN | 97.5 % of basins end dry, the inventory balances (DOC W13.3) |
-| G-ICE | GREEN as a law test | 11.29 % on the Earth-like charter (DOC W14.5); the home planet reads 4.02 % (MEASURED gen 19) |
-| G-BUZZSAW | GREEN | 1 316 m (MEASURED gen 19) |
-| G-CRATER | GREEN on the count | 1 610 against ~190; the size floor 16.4 km (`terrain/src/craters.rs:104`) |
-| G-GRID | **RED** | 1.284 at 4 bins against 1.006 (MEASURED gen 19) |
-| G-HYPSO | GREEN on two humps and on the age; NO BAND on the share over 1 000 m | humps at −9 217 m and +33 m over the sea; basin integral median 0.484 (Strahler 0.35–0.60); land 21.41 % of the surface, its mean +1 399 m; the sea floor's mean −6 889 m; 55.12 % of the land over 1 000 m (no cited Earth band yet) |
-| G-RIVER | GREEN (every river ends; no trunk rises) | 37 966 heads: the ocean 13 217, an inland pocket 2 611, a closed lake 1 008, **a dry closed basin 21 130** |
+| G-LAKE-SHARE | GREEN, near its CEILING | **3.510 %** of the land (every node that is not the ocean; MEASURED gen 20); 0.068 % at gen 19. The plan predicted 2–3.5 % |
+| G-LAKE-COUNT | read, verdict not restated | **3 883 patches**, median 1 node, p90 10 nodes, the largest 6 398 nodes (429 363 km²) (MEASURED gen 20; 506 at gen 19); the power-law fit UNMEASURED |
+| G-BASIN | GREEN | the water bodies DRY 9 599 (56.5 %), PARTIAL 1 549, SPILLING 5 839; the budget's books EXACT: runoff 5 447.10 km³/yr = held 1 607.37 + to the ocean 3 839.73 + stranded 0 (MEASURED gen 20; DRY 97.5 % and SPILLING 0 at gen 19) |
+| G-ICE | GREEN as a law test | 11.29 % on the Earth-like charter (DOC W14.5); the home planet reads 3.75 % (MEASURED gen 20; 4.02 % at gen 19) |
+| G-BUZZSAW | GREEN | 1 295 m (MEASURED gen 20; 1 316 m at gen 19) |
+| G-CRATER | GREEN on the count | 1 668 (gen 20; 1 610 at gen 19) against ~190; the size floor 16.4 km (`terrain/src/craters.rs:104`) |
+| G-GRID | **RED, WORSE** | valleys **1.484** by the drainage-area rule, 1.522 by the step-1 rule, and **1.306 OUTSIDE every hollow the routing filled** (MEASURED gen 20); 1.284 at gen 19 against 1.006. 193 k of the 269 k trunk nodes now run across FILLED hollows' flats — the pockets the flood now raises — and the flat's distance field leans on the grid. Lakes 1.112 (842 patches) |
+| G-HYPSO | GREEN on two humps and on the age; NO BAND on the share over 1 000 m | humps at −9 242 m and +8 m over the sea; basin integral median **0.590** (Strahler 0.35–0.60: at its top edge); land 21.24 % of the surface, its mean +1 546 m; the sea floor's mean −6 911 m; 63.11 % of the land over 1 000 m (MEASURED gen 20; 0.484, 21.41 %, +1 399 m, 55.12 % at gen 19) |
+| G-RIVER | **RED on DESCENT** (every river ends) | 6 752 heads (drainage-area rule): the ocean 3 513, a closed lake 1 588, a dry closed basin 1 651, a pocket drawn as sea **0**; **3 430 trunk steps RISE, every one inside a hollow the routing filled, the worst 4 987 m** (§7 W11). The step-1 rule: 7 587 heads, 4 467 rising steps (MEASURED gen 20). Gen 19: 37 966 heads, 0 rising steps, 21 130 dry-basin ends |
 | G-LOOK | **RED**, by the owner's word | the flight of 2026-09-24 |
 
 Re-run at generator 19 on 2026-09-24 (step 1); every line is in `step1_census_gen19.txt`. NEW LINES, all RED where
 they can be: W10-DISCHARGE-TREE 1 304 002 nodes; G-RUNG-LAKE 529 nodes / 427 patches; G-RUNG-LIP 3 753 columns on
 116 nodes; the teeth and dunes lines in §5 and §6.
+
+**Re-run at generator 20 on 2026-09-25 (step 2); every line is in `step2_census_gen20.txt`.** GREEN by construction and
+MEASURED so: W10-DISCHARGE-TREE 0; G-RUNG-LAKE 0 nodes / 0 patches / 0 vanished at 9 → 10; G-RUNG-LIP 0; CHECK-OCEAN 0;
+CHECK-POCKET-NOT-SEA 0; CHECK-BUDGET-CONSERVE exact. NEW LINES of step 2: G-RUNG-LAKE-LOST/MIXED/SHIFTED and G-RUNG-HOLD
+at the swaps 9 → 10, 14 → 15 and 15 → 16 (§7 W6); G-RIVER by both river rules; G-GRID-VALLEYS by three river sets.
+NEW LINES of step 2's review fixes (2026-09-25): G-POCKET-HELD and POCKET-MINORITY-HELD at rungs 9, 10, 13, 14, 15
+and 16; ROW-OUT-OF-CLOSED-HOLLOWS; the fixed point's unsettled word; the cascade's walk length.
 
 **THE BLIND SPOTS — CLOSED BY STEP 1 (2026-09-24).** Before step 1 no gate saw the three complaints; `drain_census` at
 generator 19 read 0 closed hollows on all three stands (the deepest 0.02 m), on the very ground the owner calls dunes.
@@ -285,6 +307,10 @@ The hill spacing of the shipped ground, 3.2 km, is the spectrum's peak octave (3
 dry ground lies in closed hollows; n ≈ 0.2 says water never travels far before a hollow stops it. The solve alone reads
 n ≈ 0.73 and c ≈ 9 on the belt and the coast, just over the band: its 8 km network is long and straight (W9).
 
+**Re-read at generator 20 (step 2; `step2_census_gen20.txt`): the dunes did not move, as step 2 never meant them to.**
+Shipped G-HACK n 0.226 (belt), 0.207 (coast), 0.252 (plain), all RED; closed basins ≥ 10 m per 100 km² 2.94, 2.37,
+2.00; the hill spacing 3.2, 3.3, 4.2 km. The cure is step 3 (R2).
+
 **Example.** Under the belt stand, a solved trunk valley is a round trough at least 16 km wide. On its floor stand
 ripples of 25, 12.5, 6.25 and 3.125 km, up to ~500 m tall, all at 35°, with no side valley leading into the trunk.
 From 120 km, in one sand colour and with no shadow, that is a dune sea.
@@ -314,12 +340,21 @@ From 120 km, in one sand colour and with no shadow, that is a dune sea.
   children of four and averages every wet child, sea and lake alike (`artifact.rs:1395-1401`, `:1455-1467`). So a lake
   node alone in its block turns to LAND; a land column in a lake-majority block takes the lake's level and the shore
   law lifts it into a LIP; a block half sea and half lake takes the MEAN of two levels no water has. A second, 16 km
-  staircase with lips stands at ~450–700 km. UNMEASURED.
+  staircase with lips stands at ~450–700 km. ★ CURED BY STEP 2 (generator 20): the word is the HIGHEST lake level of
+  the block's lake nodes, else the sea, else DRY (`artifact::block_water`), and a land column never reads the word —
+  it holds the sea, or no water at all where no node of its read stencil is the sea (`column_water`,
+  `stencil_holds_sea`). MEASURED: 0 lake columns lost, mixed or shifted at 9 → 10, 0 lip columns.
 - **T6. From rung 14 the side is the majority of a 2^(rung−13) block** (`artifact.rs:384-396`). Near one pixel where
   the ladder draws it, but many pixels when the bounded ask pulls a coarse rung near on a fast climb (the W18.5 case).
 - **T7. Inland ground under the sea's level is drawn as sea**, with no test of a path to the ocean
   (`terrain/src/solve.rs:1334-1336`; `terrain/src/lakes.rs:186-197`). It shows as square sea-level pools far from any
-  coast. Count UNMEASURED.
+  coast. ★ CURED BY STEP 2 (generator 20; ruling B7 item 1): the ocean is the largest connected water under the level
+  (`land::ocean_mask`), the sea is solved over it alone (`land::sea_level_connected`), and every facies, water word,
+  flood seed, load and climate read of the sea reads that ocean (`MacroSolve::ocean`). An inland dry column under the
+  sea's level reads `SIDE_INLAND` and the shore law leaves it alone (no mesa); the water sheet and the eye read the
+  column's own water, never raised to the sea. MEASURED: CHECK-POCKET-NOT-SEA 0 of 61 393 pocket nodes. ★ AND (review
+  finding 1, 2026-09-25) a pocket's dry floor is its own coast-mask word, so it is INLAND at every rung even with the
+  sea in its read stencil: G-POCKET-HELD 0 at every rung the census reads (§7).
 - **T8. The water and the ground are one colour each** (`client-render/src/terrain.rs:1974`, `:2034`); the beach bit
   reaches no pixel. So the square edge shows at full contrast. LATENT: the beach is also a node square
   (`terrain/src/chunk.rs:404-411`), and it will outline every tooth in sand the day 8e draws colour.
@@ -334,6 +369,12 @@ From 120 km, in one sand colour and with no shadow, that is a dune sea.
 | sea, rung 9 (125 km) | 2.9 km / 7.9 km | 179 m / 1 051 m / 1 532 m | 8.8 m | 2.4 % | 1.78 RED vs 1.60 |
 | sea, rung 10 (125 km) | 6.2 km / 21.3 km | 213 m / 1 578 m / 2 064 m | 4.1 m | 5.0 % | 1.46 vs 2.00 |
 | lake, rung 7 (120 km) | 3.2 km / 4.1 km | 210 m / 282 m / 425 m | 2.9 m | 2.0 % | 2.03 RED vs 2.03 RED |
+
+**Re-read at generator 20 (step 2):** the coast stand MOVED with the field (`pick_stands` now takes node 4 718 858 on
+face NegY, a steep coast), so its numbers read other ground: at rung 7 the drawn shore stands a median 3.6 km (p90
+10.9 km) off the ground's waterline with a median 1 396 m wall; the drawn shore's grid lean 2.95 against the ground's
+own 2.61. The largest LAKE is now 6 398 nodes: its edge at rung 7 stands a median 3.3 km off its ground's waterline
+with a median 261 m wall, lean 1.97. The teeth are step 4's; step 2 did not touch them.
 
 At rung 0 (1 m columns) the coast's node edge carries a **614 m** wall across one column. The drawn shore leans on the
 grid while the ground's own waterline in the same square does not: the teeth are the node squares, not the land. The
@@ -357,16 +398,25 @@ under it: a bank runs straight for 8 km, turns 90°, and runs straight again (AR
   higher node, including the range that drains into it, books its water to the PARENT or to the ocean
   (`lakes.rs:209-259`, `:343-349`, `:354-380`). So a hollow is full only where the rain beats the evaporation over its
   own brim (`lakes.rs:384-390`). Fill-Spill-Merge, which ruling W11 cites, feeds a hollow from its whole watershed.
-  The module's own example ("takes a river off the range", `lakes.rs:40-41`) contradicts its code.
+  The module's own example ("takes a river off the range", `lakes.rs:40-41`) contradicts its code. ★ CURED BY STEP 2
+  (generator 20): every node's runoff runs down the ground (`lakes::descent`, Fill–Spill–Merge's flow directions) to
+  the leaf whose pit it ends at, or to the ocean. MEASURED: a leaf's watershed supplies a median 11.54 times (p90 74
+  times) the runoff of its own nodes.
 - **W4. A full hollow's overflow is lost** when its parent holds no water (`lakes.rs:264-281`, `:446-452`): a lake
-  spills over its sill and the next basin gets none of it.
+  spills over its sill and the next basin gets none of it. ★ CURED BY STEP 2: `lakes::cascade` passes the overflow over
+  the spill into the sibling (at the leaf its gate descends to), into the parent's own ring, or into the sea.
+  MEASURED: 6 839 pours; the books exact (runoff 5 447.10 km³/yr = held 1 607.37 + the ocean 3 839.73 + stranded 0).
 - **W5. Too few lakes, and the gate cannot see it.** Every pass's deposit fills the valley and ice hollows up to their
   spill (`solve.rs:997`, `:1003-1040`). Lakes cover 0.07 % of the land against the 0.2–0.8 % ruling W11 names for dry
   interiors. G-LAKE-SHARE is a ceiling (≤ 4 %), so it stays green. The reference's valley lake is the glacial kind this
   fill removes.
 - **W6. The small lakes vanish at the rung 9 → 10 swap.** Every lake node that is the only wet node of its level-1
   block turns to LAND at rungs 10–13 (T5), so every lake's outline changes at the swap. That breaks W16's law that a
-  rung boundary is invisible. The ring is ~450–700 km since W17 (UNMEASURED); the count UNMEASURED.
+  rung boundary is invisible. The ring is ~450–700 km since W17 (UNMEASURED); the count UNMEASURED. ★ CURED AT 9 → 10
+  BY STEP 2 (`block_water`): 0 of 67 233 lake columns change there. STILL READ at the level swaps (the side there is the
+  WET MAJORITY of the footprint, ruling W15): at 14 → 15, 3 698 lake columns turn to land, 211 take another lake's
+  level (the largest step 270 m = 0.016 px), 1 319 columns become lake; at 15 → 16, 558, 251 and 448 (MEASURED gen 20).
+  Each such column is one cell of the finer rung, which is one pixel at the swap distance.
 - **W7. The climate.** P/PET = 0.99 × belt × lift (`climate.rs:776`, `:118`, `:161`). The lift reaches 4 on a windward
   slope, but a hollow's floor usually sits in the lee. At generator 14 only 2 hollows spilled (DOC W11); the count at
   16–19 is not stated.
@@ -379,6 +429,18 @@ under it: a bank runs straight for 8 km, turns 90°, and runs straight again (AR
   last sweep (`solve.rs:1098-1124`): a straight scarp, more likely a small dam across a valley. The solve cuts with the
   rain while the budget reads the runoff, and the discharge row is pass 39's rain while the receiver byte comes from
   later routes (`solve.rs:940`, `:1587-1588`, `:1654`, `:1705`). R2 seeds its rivers from that row. UNMEASURED sizes.
+  ★ THE DISCHARGE HALF CURED BY STEP 2 (ruling B7 item 2): the shipped row is the Turc–Pike RUNOFF accumulated over the
+  receivers of the LAST routing (`MacroSolve::accumulate_runoff`). MEASURED: W10-DISCHARGE-TREE 0 nodes. The passes
+  still cut with the rain's drainage (plan question 4).
+- **W11. THE SHIPPED RECEIVERS LEAVE A SPILLING LAKE UPHILL** (found by step 2's census). The receivers are the routing
+  fill's (ruling W11: a scratch surface). The fill raises a whole nested hollow to its OUTER spill, and its flat's
+  receivers carry a full inner hollow's river across the parent's DRY ring toward the parent's own outlet — while the
+  budget pours that water over the inner saddle into the sibling. Before step 2 no hollow spilled, so the walk never
+  went there. MEASURED gen 20: G-RIVER-DESCENT 3 430 rising trunk steps, all inside filled hollows, the worst 4 987 m.
+  The discharge row inherits it (plan question 3: A is built). The cure proposed: the shipped receivers follow the
+  budget's water (Fill–Spill–Merge's own flow directions: steepest descent on dry ground, across a lake's flat to its
+  outlet, over a full lake's spill to the sibling's gate). A change of the receiver byte's meaning: the owner's word
+  before step 3, because R2 seeds its rivers from the receivers.
 
 **MEASURED (step 1, `lake_census`, generator 19).**
 
@@ -396,6 +458,47 @@ under it: a bank runs straight for 8 km, turns 90°, and runs straight again (AR
 - **W10 confirmed:** the shipped discharge row disagrees with the discharge re-accumulated over the shipped receivers
   at 1 304 002 nodes (RED).
 
+**MEASURED (step 2, `lake_census`, generator 20; `step2_census_gen20.txt`).**
+
+- **The lakes:** 67 233 lake nodes, 3.883 × 10⁶ km², 2.19 × 10⁵ km³; 3.51 % of the land; 3 883 patches, the largest
+  6 398 nodes (429 363 km²). The bodies DRY 9 599, PARTIAL 1 549, SPILLING 5 839; the leaves DRY 9 720, PARTIAL 2 532,
+  SPILLING 7 036 of 19 288. The plan's floor from the step-1 what-if was 1.914 %; the cascade added the rest.
+- **The pockets:** 236 pockets, 61 393 nodes, 3.30 million km², 1.52 × 10⁷ km³ under the sea's level; by the budget
+  DRY 181, PARTIAL 45, SPILLING 10. The largest (28 913 nodes, 1.57 million km², 11 867 m deep) is DRY. The FIRST land
+  held 3 pockets of 17 799 nodes (plan question 9). The flood raises them and the deposit fills them only a little:
+  the routing's pit volume at the last route is 8.73 × 10⁹ steps (1.27 × 10⁹ at gen 19).
+- **The sea:** 3 591 m (3 566 m at gen 19, +25 m; the plan's ARITH ≤ ~24 m); the ocean share 78.11 % (78.59 %). The
+  lakes' fixed point: 1 re-solve, then still; no connected solve re-seeded.
+- **The rung swaps:** as W6 above; G-RUNG-HOLD (plan risk R7) RED: 19 dry columns at 9 → 10 whose INLAND/LAND word
+  changes while their ground stands under the sea — the largest surface step 6 090 m = 11.9 px at the swap distance;
+  5 at 14 → 15 (0.32 px), 1 at 15 → 16. ★ After the review fixes: 5 at 9 → 10 (731 m = 1.43 px), 2 at 14 → 15, 3 at
+  15 → 16 (below).
+- **The rivers:** as §4 G-RIVER; the pocket ends are 0 by construction (2 611 at gen 19).
+- **The cost:** the solve 140.6–143.0 s in the census (140.6–151.6 s over six runs; 114.2 s in the gen-19 census: about
+  +25 %, the plan's ARITH +15–20 %); the hierarchy, the descent, the budget and the cascade 0.3 s.
+
+**MEASURED (step 2's review fixes, `lake_census`, generator 20, 2026-09-25; the lines in `step2_census_gen20.txt`).**
+
+- **A pocket's floor is never lifted (review finding 1):** the floor under a pocket read LAND, and where the sea stood in
+  its read stencil (whose reach doubles with the pyramid level) the shore law lifted it a quarter of its depth over the
+  sea. Now a dry node whose row stands under the sea's level is the coast mask's word 2 (`artifact::Side::Pocket`,
+  counted in `CoastCounts`), and it reads INLAND at every rung. G-POCKET-HELD 0 of 60 383 pocket columns at rungs 9,
+  10 and 13; 0 of 15 657, 3 853 and 944 at 14, 15 and 16. A far cell whose footprint holds a pocket's floor as a
+  minority reads LAND by W15, and the law holds 1 of 953 such cells at rung 14, 1 of 801 at 15 and 2 of 457 at 16
+  (the deepest 1 413 m under the sea). G-RUNG-HOLD: 5 columns at 9 → 10 (731 m = 1.43 px; was 19 and 6 090 m), 2 at
+  14 → 15 (was 5), 3 at 15 → 16 (0.106 px; was 1). What stands is a LAND rim column beside both a pocket and the sea.
+- **The row against the budget (review finding 3, plan question 3):** the row delivers 5 447.1 km³/yr from the land
+  to the sea, the cascade 3 839.7 km³/yr: the row carries to the sea the 1 607.4 km³/yr the budget holds in its
+  hollows. Of the 5 322 hollows that spill into the sea and are not full, 4 544 have a row leaving them; the largest
+  row out of one is 1 044.8 km³/yr (ROW-OUT-OF-CLOSED-HOLLOWS). The cure is B (the budget's own water) or the
+  receivers of W11: the owner's word.
+- **The cascade's walk (review finding 6):** 28 098 rings visited over 19 288 leaves, with the skip over full rings.
+- **The sea:** the lakes' fixed point 1 re-solve, converged; no connected solve re-seeded, none unsettled (review
+  finding 4). The artifact's digest moved (the mask's word 2); the sea, the ocean share, the golden fields and the
+  identity did not.
+- **The land (review finding 10):** every line of the census now divides by every node that is not the ocean: the
+  lakes' share by area 3.510 % (the line that divided by `z > sea` read 3.62 %); by node count 3.40 %, labelled.
+
 **Example.** A hollow lies at the foot of the belt's wet range, and the range drains into it by the solve's own
 receivers. The budget counts only the rain under the hollow's brim, so the hollow is a dry pan. A pond stands
 instead where a hollow's own floor is wet; from 150 km the pilot sees it as a square, and past ~450 km not at all.
@@ -407,12 +510,19 @@ instead where a hollow's own floor is wet; from 150 km the pilot sees it as a sq
 Each step ends with the census numbers, the three stands' pictures, and the REFERENCE STAND's picture beside the
 reference (§9). State legend: ⬜ not started · 🟨 in progress · ✅ done (with the commit).
 
+★ **THE ORDER SINCE RULING B8 (2026-09-25): 1 → 2 → 2b → 4 → 3 → 5 → 6 → 7.** The step numbers stay the names every
+other file uses ("step 3" is R2, "step 4" the shoreline); only the order changed. Step 2's pictures showed every small
+lake as an 8 km square, so the edge law (step 4) now comes BEFORE R2 on today's ground, and the rivers follow the
+water (step 2b) before either, because R2 seeds its rivers from them. R2 starts with slice 0 (the bench and a
+hillshade for the owner's look) before any bake service.
+
 | # | step | cures | state |
 |---|---|---|---|
 | 1 | **Measure first, no world change.** The "before" pictures (the three stands + the reference stand). New census lines that can go red: G-HACK and G-BREACH on the SHIPPED ground at rung 7 over ~200 km (the dunes number); a teeth number (the drawn shore's distance to the ground's waterline, the wall height, the shoreline's direction); G-HYPSO and G-RIVER on the final field; the lakes lost at 9 → 10; the inland nodes under the sea's level; the watershed supply against the budget's. The skyline numbers on the reference stand (11_reference_trace's rule). One job at a time: only while the `perf` tree is idle (2026-09-24: it is testing; the instruments are written meanwhile, no build in this tree). | makes each complaint a number | ✅ NUMBERS (generator 19, `step1_census_gen19.txt`) and the "before" PICTURES (`pictures/*_before.png`, §8b), 2026-09-24, committed |
-| 2 | **Repair the lake budget.** Feed each hollow from its whole watershed; pass a full hollow's overflow on; re-accumulate the discharge after the final route; keep a small lake's level at pyramid level 1 (no lake lost at 9 → 10). New GENERATOR_VERSION and pins. Goes BEFORE R2, because R2 seeds its rivers from the discharge row. | water positions (part), W6's rung seam | ⬜ |
-| 3 | **R2: one eroded level at 1 024 m in the artifact**, with the two operators the bench lacked (the height retargeting that holds the macro heights, the multi-scale breach); then R4's second half: the noise only BELOW the solved level. Cost (survey): ~17 core-hours once for the home planet, 512 KB a tile against 40 KB, an artifact version, a lattice over `MACRO_EDGE_CEILING` 2 048. Calibration: Earth, through Hack's law (T9). | the dunes at 100–150 km; valleys that join | ⬜ |
-| 4 | **One shoreline from one field, on the R2 ground.** The sea's shore and the lake's edge from where the ground crosses the water's level, not from a node square; the lake's level held by its dry neighbours (W6's owed law). After R2, because R2's 1 km level gives the coast its bays and headlands (T3). | the teeth (sea and lake) | ⬜ |
+| 2 | **Repair the lake budget.** Feed each hollow from its whole watershed; pass a full hollow's overflow on; re-accumulate the discharge after the final route; keep a small lake's level at pyramid level 1 (no lake lost at 9 → 10). New GENERATOR_VERSION and pins. Goes BEFORE R2, because R2 seeds its rivers from the discharge row. ★ AND (ruling B7) the inland pocket is a closed basin and the sea stands over the connected ocean. | water positions (part), W6's rung seam | ✅ BUILT and MEASURED 2026-09-25 (generator 20, artifact 8, `step2_census_gen20.txt`), pins re-recorded; the PICTURES taken (`pictures/*_step2.png`, §8b: the lakes are there, each one an 8 km square); committed on branch `game` 2026-09-25 (ruling B8 item 4) |
+| 2b | **The rivers follow the water** (ruling B8 item 2; plan question 3 choice B; amends B7 item 2). The shipped receivers and the discharge row follow the budget's own water: a full hollow's river runs over its spill into the sibling (Fill–Spill–Merge's flow directions), and a closed body that never fills passes nothing on. New GENERATOR_VERSION and pins. | G-RIVER-DESCENT (3 430 rising steps at generator 20); the row's 1 607 km³/yr out of held hollows | ⬜ NEXT |
+| 3 | **R2: one eroded level at 1 024 m in the artifact**, with the two operators the bench lacked (the height retargeting that holds the macro heights, the multi-scale breach); then R4's second half: the noise only BELOW the solved level. Cost (survey): ~17 core-hours once for the home planet, 512 KB a tile against 40 KB, an artifact version, a lattice over `MACRO_EDGE_CEILING` 2 048. Calibration: Earth, through Hack's law (T9). | the dunes at 100–150 km; valleys that join | 🟨 DESIGNED (`r2_design.md`, 2026-09-24) with 23 skeptic findings OPEN (§16 of it: 6 HIGH); slice 0, the bench with the owner's look, comes before any service (ruling B8 item 3); AFTER step 4 since B8 |
+| 4 | **One shoreline from one field, on today's ground** (ruling B8 item 1 moved it BEFORE R2; it was "on the R2 ground"). The sea's shore and the lake's edge from where the ground crosses the water's level, not from a node square; the lake's level held by its dry neighbours (W6's owed law); plan question 5 (the dry-land hold) and the far-swap lake losses decided here. The law does not depend on which ground it reads: R2 later gives it the 1 km bays and headlands (T3), and the pictures are judged again then; until R2 a shore may look dune-shaped (stated and accepted, B8). | the teeth (sea and lake); step 2's square lakes | ⬜ after 2b |
 | 5 | **G-GRID again on the R2 field.** The D8 decision (MFD with a weight, or a hexagonal mesh = a new world, SL5) only if still red. | water positions (grid lean) | ⬜ |
 | 6 | **Lakes with outlets and river mouths** (the spill carve, a delta); **R3**: the 1–5 km valleys under the shipped level, derived per fixed patch on both hosts, the card as the builder (a CPU core takes ~330 ns a cell an iteration, DOC R1). | the reference's valley scale | ⬜ |
 | 7 | **G-LOOK.** The owner's word on the three stands and the reference stand. Only then 8e starts (B1). | closes B1 | ⬜ |
@@ -445,6 +555,13 @@ The four instruments then ran one at a time (15:25–15:43); their lines are in 
 instrument's self-check read GREEN (SHIPPED-PATH-DIFFER 0, CHECK-RUNG-SWAP 0, CHECK-WHATIF 0, G-TEETH-SELFCHECK all,
 G-REF-SHIPPED-PATH 0, SPILL-SPLIT 0), so the numbers are the shipped path's.
 
+**CHANGED BY STEP 2 (2026-09-25):** `lake_census`'s watershed WHAT-IF is gone — the budget itself is the watershed
+now, so the replica (`budget_rule`, `fill_level`, `deficit_rate`, CHECK-WHATIF) is deleted and the budget's own lines
+print instead (CHECK-BUDGET-STALE, CHECK-BUDGET-CONSERVE, G-LAKE-SHARE, BUDGET-LEAVES). `terrain_descent` is deleted
+(the census reads `lakes::Descent`). The inland-sea block is an independent CHECK of the solve's ocean (CHECK-OCEAN,
+CHECK-POCKET-NOT-SEA). The rung-swap block reads three swaps and splits G-RUNG-LAKE into LOST, MIXED and SHIFTED, with
+G-RUNG-HOLD beside them. The river set is read by the drainage area and, for comparison, by the step-1 rule.
+
 **Read with care.** `G-HACK-n` can read GREEN on a dune field (radial flow into round troughs gives n ≈ 0.5); only
 `G-HACK-c` under 1 separates it, so read both. The spill-depth, breach and hill-spacing lines have no published band in
 our units: they are READINGS that step 3 (R2) must move, not gates. `G-TEETH-GRID` treats a shoreline's windows as
@@ -470,6 +587,24 @@ and a coast picture from the coast node itself (the frame held only the sea: the
 The red ball is the ruler (slice 8p). The HUD's "over the recipe" and the finest rung 3 at the reference stand are
 the CLIENT DEFECT of §3a, cured the same day.
 
+**AFTER STEP 2 (2026-09-25, generator 20, artifact 8, NOT committed; the same poses, the same settle rule, one cluster
+boot for the four stands and a second boot for the pocket stand, because one slot holds four clients; "no far
+shadow").** The poses are the "before" poses, so the pictures compare the same place. The sun is the same.
+
+| picture | the stand | what it shows, against the "before" picture |
+|---|---|---|
+| `pictures/reference_step2.png` | the reference stand | the same flat tan plain to a flat horizon; the eye now 779 m over the drawn ground (402 m before: the field under the pose moved, the pose did not) |
+| `pictures/belt_step2.png` | the belt | the same dunes; ★ NEW: about fifteen small lakes, EACH ONE A FLAT BLUE SQUARE, one node (8 km) wide, on the dune ground — the node-square edge of T4, which step 2 made visible by making the lakes exist |
+| `pictures/coast300_step2.png` | 300 km inland of the coast stand | the same staircase coast (step 4's work); a few small square lakes near the shore |
+| `pictures/plain_step2.png` | the plain | the same dunes; ★ NEW: about forty square lakes, a chain of them along one grid line, and larger rectangles on the right horizon — the squares are the strongest new feature in the frame |
+| `pictures/pocket_step2.png` | NEW STAND: 150 km over the deepest node of the largest pocket (1.57 million km², 11.9 km under the sea's level, DRY by its budget), nose across the sun (the pose from the census's aim, `scratchpad/pocket_pose.py`, the stand tool's own framing rule) | a dry tan basin floor with a few crater rings, NO sea; at generator 19 the client drew this ground as ocean at the sea's level (59 470 pocket nodes carried the sea's bit) |
+
+**READ.** Step 2 did what it was for: the water budget is right in amount (3.51 % of the land) and no pocket is sea.
+The dunes and the sea's teeth did not move, as planned. But the new lakes are drawn as 8 km squares, so on the belt
+and the plain the pictures now show a NEW visible fault: blue tiles on the dunes. The cure is step 4's law (the lake's
+edge where the ground crosses the lake's level, T4); the plan's order puts step 4 after R2. The owner's word is asked
+on that order.
+
 ---
 
 ## 9. THE REFERENCE TARGET — the checklist every step reports against
@@ -489,11 +624,18 @@ from a lower point toward taller snowy ranges. The owner's look at the picture d
 
 | reading | the reference | ours |
 |---|---|---|
-| breaks at 0.25° | 2.5 – 5.5 | **0** (the reference stand, 55° sector and 360°, generator 19); 0 at M1b |
-| breaks at 0.50° | 0.0 – 3.3 | 0 (generator 19) |
-| largest rise over the ±5° trend | 0.43° – 1.07° | **0.200°** (generator 19); 0.054° – 0.064° at M1b |
-| the skyline's range over the view | 4.87° – 7.49° | **1.21°** (generator 19) |
-| the relief 30–60 km away | ridges 1 500 – 3 000 m tall (01 §2) | 1 988 m (shipped ground, generator 19) |
+| breaks at 0.25° | 2.5 – 5.5 | **0** (the reference stand, 55° sector and 360°, generator 19); 0 at M1b; **0 at generator 20** |
+| breaks at 0.50° | 0.0 – 3.3 | 0 (generator 19); 0 (generator 20) |
+| largest rise over the ±5° trend | 0.43° – 1.07° | **0.200°** (generator 19); 0.054° – 0.064° at M1b; **0.096°** (generator 20) |
+| the skyline's range over the view | 4.87° – 7.49° | **1.21°** (generator 19); **0.90°** (generator 20) |
+| the relief 30–60 km away | ridges 1 500 – 3 000 m tall (01 §2) | 1 988 m (shipped ground, generator 19); 1 612 m (generator 20) |
+
+★ **STEP 2 MOVED THE REFERENCE STAND'S NUMBERS AWAY FROM THE REFERENCE** (ruling B6 item 2 asks each step to say so):
+the pose rule re-picked the stand with the field — node 8 857 509 (4 nodes from generator 19's), the eye 8 327 m over
+the ladder radius, the look at bearing 27° — and its skyline is flatter: the largest rise 0.200° → 0.096°, the range
+1.21° → 0.90°, the relief 30–60 km 1 988 → 1 612 m. Step 2 changed the water, not the relief; the new pose stands on a
+slightly different summit. The spawn line and the sun for the picture are in `step2_census_gen20.txt`. The picture
+itself is OWED (§8b).
 
 **THE FEATURES** (scales from 01 §2):
 
@@ -524,10 +666,14 @@ AWAY from the reference, the step's report says so (ruling B6).
   `body.rs:86-92` says 8 224 m / 32 896 m.
 - W14.3 describes `FieldRead::fine_ceiling` and `cut`; W16.1 deleted them, and the code agrees with W16.1.
 - `river.rs:14-15` and W16.1 say the solve uses the width law; nothing calls it outside its tests.
-- `artifact.rs:1053-1055` says a land column beside a lake takes the lake's level; at rungs 0–9 it takes the sea's.
-- `lakes.rs:40-41` says the northern hollow "takes a river off the range"; the budget gives it only its own brim.
+- ~~`artifact.rs:1053-1055` says a land column beside a lake takes the lake's level~~ — FIXED by step 2: the doc of
+  `column_water` now states the land rule (the sea, or no water inland; never a lake's word).
+- ~~`lakes.rs:40-41` says the northern hollow "takes a river off the range"~~ — TRUE since step 2 (the watershed).
 - ~~`drain_census.rs:3-8` says it counts minima "on a drainage line"~~ — FIXED 2026-09-24 (the header now states its blind spot).
-- W11's "a brim-full lake has no dry catchment left to feed it" describes this code's rule, not Fill-Spill-Merge.
+- W11's "a brim-full lake has no dry catchment left to feed it" describes the gen-19 rule, not Fill-Spill-Merge; since
+  step 2 the code feeds each hollow from its watershed.
+- The step-2 plan said the drainage-area river rule reads "the same river set as at gen 19"; MEASURED it does not (the
+  step-1 rule weighted a node by its own rain): the census prints both.
 - W14.4/W14.6 say the octave spectrum ends at 781 m; the fine octaves reach 48.83 m (781 m is the ridged band's floor).
 
 ---
@@ -536,12 +682,27 @@ AWAY from the reference, the step's report says so (ruling B6).
 
 1. ~~The measuring bench~~ — ANSWERED (B6.5): the `perf` tree is testing; step 1 runs when it is idle.
 2. ~~The pictures~~ — ANSWERED (B6.5, amended): *"We can go without long shadows for now"* — the pictures are judged as drawn, each captioned "no far shadow".
-3. An inland hollow under the sea's level: a lake by its budget, or the sea? MEASURED: 148 pockets, 3.2 million km², the
+3. ~~An inland hollow under the sea's level~~ — ANSWERED (B7): a closed basin by its budget; the sea over the connected ocean. MEASURED: 148 pockets, 3.2 million km², the
    largest 1.35 million km² and 11.8 km deep — enclosed seas, not puddles.
-4. The discharge row: the runoff or the rain?
+4. ~~The discharge row~~ — ANSWERED (B7): the runoff, over the final receivers.
 5. R2's skin: which octaves stay below the solved level and how tall; does the placeholder roughness retire (T9);
    may each octave get its own rotation (every address moves)?
 6. From earlier rulings, still open: the W6 quarter, the W5 cap share, the W17.10 statistic (max or p99).
+7. **Step 2's own questions** (plan §9; each BUILT as the plan recommended unless stated, the owner's word owed):
+   Q1 the ocean = the largest connected water, ties to the smaller index (built); Q2 a pocket's air on its own ground
+   (built); Q3 the discharge row — A, the runoff over the receivers literally, is BUILT (B7's words); B, the budget's
+   own water, is recommended and ties to W11 in §7 (MEASURED after the review fixes: the row carries 1 607 km³/yr to
+   the sea that the budget holds) — ★ ANSWERED B (ruling B8 item 2), built as plan step 2b; Q4 the passes cut with the rain (unchanged); Q5 the dry-land hold (built: near the
+   sea W6's lift, inland only over the sea's level, and a pocket's floor its own word — MEASURED G-RUNG-HOLD 19
+   columns, 5 after the review fixes, §7); Q6 SHIFTED lakes (a one-pixel bound read by the census: 0.016 px); Q7 the
+   coast bit as the storm's reach — NOT built, the coast bit still reads `|z − sea| ≤ band` on every node, a pocket
+   floor near the level included (the beach now reads the HOLD, so a floor under the sea's level is no beach); Q8 the lakes' sea fixed
+   point (built: 1/16 m, at most 4); Q9 the first land's pockets (MEASURED: 3 pockets, 17 799 nodes; the province rule
+   names a dry pocket's continental floor a SHELF, unchanged).
+8. ~~**New by step 2:** should the shipped receivers follow the budget's water (§7 W11)?~~ — ANSWERED (B8 item 2, with
+   question 7's Q3 choice B): yes, before R2, as plan step 2b.
+9. ~~The order of the edges and R2~~ — ANSWERED (B8 item 1): the edges (step 4) before R2. ~~R2's start~~ — ANSWERED
+   (B8 item 3): slice 0, the bench and a hillshade for the owner's look, before any bake service.
 
 ---
 
@@ -558,3 +719,9 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-09-24 — §3b: the dark tears at a ring's far edge measured (closed caves shaded as caves) and cured; two instruments (`morph_normal_probe`, `ray_speck`).
 - 2026-09-24 — §3c: the fast-low-flight cracks measured (skirts shorter than the coarser sink) and cured; skirts hang into the rock their edge stands on (the owner's editing question); `skirt_gap`.
 - 2026-09-24 — the owner's window flights confirm §3b and §3c; committed.
+- 2026-09-24 — ruling B7: the inland pockets are closed basins, the discharge row is the runoff; step 2 built and R2 designed in two tracks.
+- 2026-09-25 — step 2 BUILT (not committed): generator 20, artifact 8; the connected ocean, the watershed and the cascade, the runoff row, the level-1 lake word, the inland column; pins re-recorded; §2, §3, §4, §5, §6 T5 T7, §7 W3 W4 W6 W10 (+ W11 new), §8, §8a, §9, §10, §11 updated from `step2_census_gen20.txt`. Gates MEASURED green: `terrain-pin` (debug, release, native), `artifact-pin`, `charter-pin`, `gpu-drift` (5 979 of 5 979 boxes); coverage of vd-recipe and vd-terrain: 0 misses on the lines step 2 touched, 103 misses elsewhere (the HR5 pass ruling B4 owes); the pictures OWED.
+- 2026-09-24 — R2 designed (`r2_design.md`) and attacked: 23 findings open in its §16; slice 0 (a measured bench and a hillshade for the owner) before any service.
+- 2026-09-25 — step 2's review findings applied (NOT committed): the pocket's own mask word (G-POCKET-HELD 0; G-RUNG-HOLD 19 → 5 at 9 → 10), far chunks wait for the coast mask, the beach reads the hold, the connected sea states an unsettled answer, the lakes' sea fixed point extracted and tested, the cascade's skip over full rings, the instruments read each column's own water, the census's land is every node that is not the ocean, the row-against-the-budget line (question 3 B still owed); DEFERRED D-TERRAIN-9 entries for the far-swap lake losses, the row, the unsettled sea and the far view. The artifact digest re-recorded (the mask's word 2); the sea, the share, the golden fields and the identity unchanged (MEASURED by `golden_z_record`); `artifact-pin` and `terrain-pin` (debug, release, native) green. ★ THE HR5 BASELINE (review finding 12), `coverage_gate.py` over `cargo llvm-cov --branch -p vd-recipe -p vd-terrain` (the `coverage-fast` filters, nightly-2026-06-06): at HEAD `a985e5c` 137 real misses (81 lines, 56 branches; 339 tool rows), every one in vd-terrain — position.rs 34, solve.rs 31, artifact.rs 28, height.rs 11, climate.rs 11, lakes.rs 6, craters.rs 6, land.rs 4, chunk.rs 4, strata.rs 2; with step 2 and its review fixes 113 real misses (65 lines, 48 branches; 284 tool rows) — position.rs 34, artifact.rs 22, solve.rs 13, height.rs 11, climate.rs 11, craters.rs 6, land.rs 5, chunk.rs 5, lakes.rs 4, strata.rs 2. Compared by file and line text: 26 of HEAD's misses gone, 2 new ones, both a short-circuit in test code, removed and MEASURED covered. vd-client's coverage (Tier-A as well) is UNMEASURED.
+- 2026-09-25 — step 2 checked after its review fixes: `cargo clippy --workspace --all-targets -D warnings` clean; `gpu-drift` (5 979 of 5 979 boxes) and `charter-pin` (4 of 4) green again on the fixed tree. The step-2 PICTURES taken on the four "before" poses plus a new pocket stand (§8b): the lakes exist and the pocket is a dry basin, but every small lake draws as an 8 km square (T4); the owner's word asked on moving step 4's edge law before R2.
+- 2026-09-25 — ruling B8 (the owner chose each recommended option): the order becomes 1 → 2 → 2b → 4 → 3 → 5 → 6 → 7 (the edges before R2; the rivers follow the water as step 2b); R2's slice 0 first; step 2 committed as generator 20's checkpoint.

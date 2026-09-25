@@ -10065,16 +10065,76 @@ updated in the same change as the work, deleted when done). The interims named h
 - **THE SHORE IS THE NODE SQUARE.** The water's side is the nearest 8 192 m node's word at rungs 0–13
   (`terrain/src/artifact.rs:1148`) and the shore law holds the ground on it (`recipe/src/height.rs:395-413`); the
   lake's dry neighbour reads the sea's level (`artifact.rs:1084-1087`). WHEN: B6 step 4, on the R2 ground.
-- **THE LAKE BUDGET FEEDS A HOLLOW FROM ITS OWN BRIM, NOT ITS WATERSHED** (`terrain/src/lakes.rs:209-259`,
-  `:384-390`), a full hollow's overflow is lost (`:264-281`), and the small lakes vanish at the rung 9 → 10 swap
-  (`artifact.rs:1395-1401`, `:1092-1097`) — a breach of W16. WHEN: B6 step 2.
+- 🟩 **THE LAKE BUDGET FEEDS A HOLLOW FROM ITS OWN BRIM, NOT ITS WATERSHED**, a full hollow's overflow is lost, and
+  the small lakes vanish at the rung 9 → 10 swap — CURED 2026-09-24 (B6 step 2, ruling B7; `GENERATOR_VERSION` 20,
+  `ARTIFACT_VERSION` 8): every hollow takes the runoff of its whole watershed down the ground (`lakes::descent`), a
+  full hollow's overflow runs over its spill into the sibling or the parent's ring or the sea (`lakes::cascade`,
+  books exact), the discharge row is the runoff over the final receivers, and the level-1 water word is the highest
+  lake of its block (`artifact::block_water`). MEASURED at generator 20: 0 of 67 233 lake columns change at the swap
+  (was 529 nodes; 345 of 506 lakes vanished), lakes 3.51 % of the land (was 0.068 %), W10-DISCHARGE-TREE 0 (was
+  1 304 002). The status file §7.
+- 🟥 **TWO LAKES IN ONE PYRAMID BLOCK: THE LOWER ONE'S SURFACE STEPS AT THE SWAP** (2026-09-24, plan step 2 question
+  6). The block's word is the higher lake's level. MEASURED at generator 20: 0 columns at the swap 9 → 10; 211 columns
+  at 14 → 15 and 251 at 15 → 16, the largest step 270 m = 0.016 px at the swap distance. WHERE:
+  `terrain/src/artifact.rs` `block_water`. WHEN: the owner's word on question 6 (a one-pixel bound, or a lake level
+  per node — an SL6 ask) before step 4's lake edge.
+- 🟥 **A DRY COLUMN'S INLAND/LAND WORD CAN CHANGE AT A LEVEL SWAP WHILE ITS GROUND STANDS UNDER THE SEA** (plan step 2
+  risk R7): the read stencil widens with the field's level. ★ THE POCKET'S FLOOR PART CURED 2026-09-25 (review
+  finding 1 of step 2): a dry node whose row stands under the sea's level is its own side word (the coast mask's word
+  2, `artifact::Side::Pocket`, counted in `CoastCounts`), and it reads INLAND at every rung whatever its stencil holds.
+  MEASURED at generator 20 (`lake_census`): G-POCKET-HELD 0 of 60 383 pocket columns at rungs 9, 10 and 13, 0 at 14,
+  15 and 16; G-RUNG-HOLD 5 columns at 9 → 10 (was 19), the largest step 731 m = 1.43 px (was 6 090 m = 11.9 px); 2 at
+  14 → 15 (was 5); 3 at 15 → 16 (was 1), 0.106 px. WHAT STANDS: a LAND rim column beside BOTH a pocket and the sea,
+  whose stencil holds the sea at one level and not at the next; and a far cell whose footprint holds a pocket's floor
+  as a MINORITY (POCKET-MINORITY-HELD: 1 of 953 cells at rung 14, 1 of 801 at 15, 2 of 457 at 16). WHERE:
+  `terrain/src/artifact.rs` `stencil_holds_sea`, `CoastCounts::side`; `recipe/src/height.rs` `shore`. WHEN: the
+  owner's word on question 5 (the dry-land hold) — before step 4's one shoreline.
+- 🟥 **LAKE COLUMNS TURN TO LAND AT THE LEVEL SWAPS 14 → 15 AND 15 → 16** (found by step 2's census; review finding 11
+  of step 2) — a breach of W16 (a rung boundary is invisible). From rung 14 a cell's side is the WET MAJORITY of its
+  footprint (ruling W15), and a lake narrower than half the footprint's block folds to land at the swap to the next
+  level. MEASURED at generator 20 (`lake_census` G-RUNG-LAKE-LOST): 3 698 of 18 019 lake columns at 14 → 15 and 558 of
+  3 910 at 15 → 16 turn to LAND, one cell of the finer rung each (one pixel at the swap distance); 1 319 and 448 columns
+  become lake. WHERE: `terrain/src/artifact.rs` `sample_side`, `CoastCounts::side`. WHEN: with step 4's lake edge,
+  or on the owner's word on the footprint rule for a lake.
+- 🟩 **THE FAR VIEW DREW EVERY DRY POCKET AS SEA UNTIL THE COAST MASK LANDED** (review finding 2 of step 2) — CURED
+  2026-09-25: a pyramid level is no chunk's field and no rung's field until the mask is held
+  (`vd_client::artifact_book::ArtifactCache::field_for`, `field_at_rung`), as `whole()` already stated; the tiles need
+  no mask. The cost, stated: a far body's first far chunk now waits for the mask as well as the pyramid (the far
+  pop-in seam of W18 stays owed).
+- 🟥 **A CONNECTED SEA WHOSE RE-SEED BODY LOSES THE LARGEST-BODY RULE HAS NO SINGLE-SEED ANSWER** (review finding 4 of
+  step 2): over the first ocean the level floods a larger basin; over that basin the level falls back under its shelf,
+  where the first ocean is larger again. The answer is now STATED (`land::ConnectedSea::settled`, `FullReport::
+  sea_unsettled`, printed by `lake_census`), never silent; a stated field proves it
+  (`a_reseed_whose_body_loses_the_largest_rule_is_stated_unsettled`). MEASURED on the home planet: no connected solve
+  re-seeded, none unsettled. WHERE: `terrain/src/land.rs` `sea_level_connected`. WHEN: the owner's word on a rule for
+  such a field (plan question 1) the day a body of THE world reports it.
+- 🟥 **THE SHIPPED RECEIVERS LEAVE A SPILLING LAKE UPHILL** (found 2026-09-24 by `lake_census` G-RIVER-DESCENT, RED
+  at generator 20: 3 430 trunk steps rise, all inside hollows the routing filled, the worst 4 987 m). The receivers
+  are the routing flood's (a scratch surface, ruling W11): they carry a full hollow's river across its parent's dry
+  ring toward the parent's own outlet, while the budget pours that water over the saddle into the sibling. No hollow
+  spilled before step 2, so the walk never went there. WHERE: `terrain/src/solve.rs` `route`, and the receiver byte.
+  WHEN: plan step 2b, before steps 4 and 3 (R2 seeds its rivers from the receivers and the discharge row) — ★ RULED
+  2026-09-25 (B8 item 2): the receivers follow the budget's water (Fill–Spill–Merge's own flow directions).
 - 🟩 **NO GATE SAW THE DUNES OR THE TEETH** — CURED 2026-09-24 (B6 step 1): `shipped_drainage` (the spill depth, G-HACK,
   G-BREACH on the shipped ground), `shore_teeth` (the drawn shore against the ground's waterline), `lake_census`'s new
   lines (G-HYPSO, G-RIVER, the rung-swap lakes, the inland sea, the watershed what-if) and `reference_stand`; their
   numbers at generator 19 are in the status file and `docs/investigation/2026-09-24/step1_census_gen19.txt`.
-- **INLAND GROUND UNDER THE SEA'S LEVEL IS SEA** with no path test (`terrain/src/solve.rs:1334-1336`;
-  `terrain/src/lakes.rs:186-197`). MEASURED 2026-09-24: 148 pockets, 3.2 million km², the largest 1.35 million km² and
-  11.8 km deep. WHEN: step 2, on the owner's word (the status file §11 item 3).
+- 🟩 **INLAND GROUND UNDER THE SEA'S LEVEL IS SEA** with no path test — CURED 2026-09-24 (B6 step 2, ruling B7 item
+  1): the ocean is the largest connected water under the level (`land::ocean_mask`), the sea's level is solved over it
+  alone (`land::sea_level_connected`), and a pocket is a closed basin by its budget; an inland dry column is left
+  alone under the sea's level (`vd_recipe::height::SIDE_INLAND`) and holds no water, and a pocket's dry floor is its
+  own coast-mask word at every rung (`artifact::Side::Pocket`, 2026-09-25). MEASURED at generator 20: CHECK-OCEAN 0,
+  CHECK-POCKET-NOT-SEA 0; 236 pockets, 3.3 million km², by the budget DRY 181, PARTIAL 45, SPILLING 10; G-POCKET-HELD
+  0 at rungs 9, 10, 13, 14, 15 and 16.
+- 🟥 **THE DISCHARGE ROW CARRIES WATER OUT OF HOLLOWS THE BUDGET HOLDS** (review finding 3 of step 2; plan question 3).
+  The row is the runoff accumulated over the ROUTING receivers (B7 item 2 read literally, choice A), and the routing
+  fill carries every hollow's water over its rim; the budget holds a hollow's water where the hollow is not full.
+  MEASURED at generator 20 (`lake_census` ROW-OUT-OF-CLOSED-HOLLOWS): the row delivers 5 447.1 km³/yr to the sea, the
+  cascade 3 839.7 — the row carries the 1 607.4 km³/yr the budget holds; 4 544 of 5 322 closed hollows that spill into
+  the sea have a row leaving them, the largest 1 044.8 km³/yr. R2 seeds its rivers from this row (B7 item 2), so step
+  3 would carve a river out of a salt pan. WHERE: `terrain/src/solve.rs` `accumulate_runoff`. WHEN: plan step 2b —
+  ★ RULED 2026-09-25 (B8 item 2): choice B, the row carries the budget's own water; a closed body that never fills
+  passes nothing on.
 - 🟩 **THE CLIENT READ THE EYE'S GROUND FROM THE RECIPE'S OWN RELIEF, NOT FROM THE ARTIFACT** — found 2026-09-24 on the
   reference stand (the eye 400 m over the solved ground, the stamp 7 054 m, the finest rung 3) and CURED the same day
   (committed 2026-09-24): `vd_client::chunks::drawn_surface_m` / `drawn_field_m` over `vd_terrain::height::drawn_height_field_m`

@@ -251,12 +251,13 @@ fn bench_full(label: &str, body: &BodyDefinition, words: &SolveWords) {
     {
         let lattice = MacroLattice::of(body).expect("a lattice");
         let t = Instant::now();
-        let c = vd_terrain::climate::climate(body, &lattice, words, &state.z, Some(state.sea_z));
+        let c =
+            vd_terrain::climate::climate(body, &lattice, words, &state.z, Some(state.sea_view()));
         let t_climate = t.elapsed();
         // The crater record reads the surface's own retention age, so the bench builds the rows it
         // reads — the initial land and the climate over it — outside the clock.
         let land = initial_land(body, &lattice, &words.land());
-        let pre = vd_terrain::climate::climate(body, &lattice, words, &land.z, land.sea_z);
+        let pre = vd_terrain::climate::climate(body, &lattice, words, &land.z, land.sea_view());
         let surface = vd_terrain::craters::Surface {
             crust: &land.crust,
             boundary_m: &land.boundary_m,
@@ -360,7 +361,7 @@ fn bench_trace(label: &str, body: &BodyDefinition, words: &SolveWords) {
         );
     };
     extremes(&state, "the land");
-    let pre = vd_terrain::climate::climate(body, &lattice, words, &land.z, land.sea_z);
+    let pre = vd_terrain::climate::climate(body, &lattice, words, &land.z, land.sea_view());
     let surface = vd_terrain::craters::Surface {
         crust: &land.crust,
         boundary_m: &land.boundary_m,
@@ -386,7 +387,11 @@ fn bench_trace(label: &str, body: &BodyDefinition, words: &SolveWords) {
     let mut climate = None;
     for pass in 0..schedule.passes {
         if pass % schedule.climate_every == 0 {
-            let c = vd_terrain::climate::climate(body, &lattice, words, &state.z, land.sea_z);
+            let sea = land.sea_z.map(|level| vd_terrain::climate::SeaView {
+                level,
+                ocean: &state.ocean,
+            });
+            let c = vd_terrain::climate::climate(body, &lattice, words, &state.z, sea);
             state.rain.clone_from(&c.rain_mm_yr);
             climate = Some(c);
             let r = state.route();

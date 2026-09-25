@@ -352,6 +352,10 @@ impl ColumnRead<'_> {
         // cell's own side word — land, sea or lake — or the unknown word where this field cannot
         // say, which leaves the ground's own sign to decide.
         let mut side = vd_recipe::height::SIDE_UNKNOWN;
+        // ★ THE WATER THE SHORE LAW HOLDS THE COLUMN AGAINST, apart from the water that stands over
+        // it (2026-09-24, plan step 2 part 3b): an inland column is held over the sea's level and
+        // no water stands over it.
+        let mut hold = body.sea_radius;
         let (z, w, coast) = match (self.field, self.lattice) {
             (Some(f), Some(l)) => {
                 // A corner phantom names no cell: its `Z` is the key face's corner node,
@@ -371,9 +375,9 @@ impl ColumnRead<'_> {
                 let cell_side = self
                     .fine_lattice
                     .and_then(|fine| crate::artifact::sample_side(fine, f, zf, rung, zi, zj));
-                let (w, side_word, coast) =
-                    crate::artifact::column_water(body, l, f, zf, rung, zi, zj, cell_side);
-                side = side_word;
+                let read = crate::artifact::column_water(body, l, f, zf, rung, zi, zj, cell_side);
+                side = read.side;
+                hold = read.hold;
                 // ★ THE SOLVED FIELD'S OWN SLOPE (2026-09-21): the share that says whether this
                 // column stands on a RANGE the solve raised or on a PLAIN it left. The column reads
                 // it off the very field its `Z` comes from, so a chunk and its halo agree by
@@ -382,7 +386,11 @@ impl ColumnRead<'_> {
                     crate::artifact::slope_share(&self.slope_charter, l, f, zf, rung, zi, zj)?;
                 province = crate::artifact::sample_province(l, f, zf, rung, zi, zj)
                     .unwrap_or(crate::strata::DEFAULT_PROVINCE.code());
-                (crate::artifact::sample_z(l, f, zf, rung, zi, zj)?, w, coast)
+                (
+                    crate::artifact::sample_z(l, f, zf, rung, zi, zj)?,
+                    read.water,
+                    read.coast,
+                )
             }
             _ => (Gi::ZERO, body.sea_radius, false),
         };
@@ -395,7 +403,7 @@ impl ColumnRead<'_> {
                 z,
                 first: self.first,
                 slope_share,
-                water: w,
+                water: hold,
                 side,
             },
         );
@@ -403,8 +411,10 @@ impl ColumnRead<'_> {
         let biome = biome_of_code(surface.biome);
         // ★ THE COAST MARKED (C5): a column in the coast band that stands above its water is
         // a beach — sand over sandstone, the desert's own strata — and the water below it is
-        // where the sheet meets the ground.
-        let biome = if coast & (h >= w) {
+        // where the sheet meets the ground. ★ Above the water the shore law HOLDS it against
+        // (2026-09-25, review finding 5 of plan step 2): an inland column and a pocket's floor hold
+        // the sea's level and have no standing water, so a floor under the sea's level is no beach.
+        let biome = if coast & (h >= hold) {
             Biome::Desert
         } else {
             biome
@@ -1348,11 +1358,94 @@ mod tests {
         assert!(under_sea.cells.iter().all(|c| c.gap == i8::MAX));
     }
 
-    /// ★ THE WATER PER COLUMN (C5): with a field whose nearest rows say "water at this level" and
+    /// ★ A DRY POCKET'S FLOOR IS DRY GROUND WHERE THE SOLVE PUT IT (2026-09-24, ruling B7 item 1;
+    /// plan step 2 part 3b, the cure for finding F1; the POCKET WORD 2026-09-25, review finding 1).
+    /// The rows stand 2 km under the moon's stated sea and are dry (no budget put water there), and
+    /// they state the sea, so each names itself a POCKET's floor. Every column holds ZERO water, its
+    /// surface is the kernel's own ground with NO lift, and the chunk over the floor and under the
+    /// sea's level holds only AIR — AND SO IT STAYS with ONE sea node in every column's stencil: a
+    /// pocket behind a one-node ridge on the coast. The same rows with no sea stated read LAND, the
+    /// word a pocket's floor had before, and with that sea node beside them the land rule lifts
+    /// every column over the sea and the chunk is water: the mesa the pocket word removes.
+    #[test]
+    fn a_dry_pocket_floor_stands_unlifted_under_air() {
+        use crate::artifact::{SparseRows, nodes_of_chunk};
+        let moon = crate::home::home_moon().with_sea_m(Some(-500));
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let key = ChunkKey {
+            face: Face::PosZ,
+            rung: 0,
+            x: 4_000,
+            y: 4_000,
+            z: 0,
+        };
+        let mut floor = SparseRows(Default::default(), -500);
+        for node in nodes_of_chunk(&lattice, key) {
+            floor.0.insert(node, (-2_000, crate::artifact::DRY_M, 0, 0));
+        }
+        let unlifted = |field: &ColumnField| {
+            assert!(field.water.iter().all(|&w| w == Gi::ZERO));
+            assert!(
+                field.columns.iter().all(|c| c.1 < moon.sea_radius),
+                "a column was lifted over the sea"
+            );
+        };
+        let pocket =
+            column_field(&moon, Some(&floor), Face::PosZ, 0, 4_000, 4_000).expect("columns");
+        unlifted(&pocket);
+        // A corner of every column's sixteen-node stencil, never a column's nearest node.
+        let (ni, _) = crate::artifact::node_and_fraction(&lattice, 0, 4_000 * CHUNK_EDGE as i32);
+        let corner = lattice.index(Face::PosZ, ni as i32 - 1, ni as i32 - 1);
+        let mut coast = floor.clone();
+        coast
+            .0
+            .insert(corner, (-2_000, -500, crate::solve::FACIES_SEA, 0));
+        let behind_the_ridge =
+            column_field(&moon, Some(&coast), Face::PosZ, 0, 4_000, 4_000).expect("columns");
+        unlifted(&behind_the_ridge);
+        // The rule before the pocket word: the same rows name LAND with no sea stated.
+        let mut beside = SparseRows(floor.0.clone(), crate::artifact::DRY_M);
+        beside
+            .0
+            .insert(corner, (-2_000, -500, crate::solve::FACIES_SEA, 0));
+        let mesa =
+            column_field(&moon, Some(&beside), Face::PosZ, 0, 4_000, 4_000).expect("columns");
+        assert!(mesa.water.iter().all(|&w| w == moon.sea_radius));
+        assert!(
+            mesa.columns.iter().all(|c| c.1 > moon.sea_radius),
+            "the land rule lifts every column over the sea"
+        );
+        // ★ A POCKET'S FLOOR IN THE COAST BAND IS NO BEACH (review finding 5): the same floor with
+        // the row's coast bit set draws the very biomes it draws without it, because its ground
+        // stands under the sea's level the shore law holds it against.
+        let mut banded = floor.clone();
+        for row in banded.0.values_mut() {
+            row.2 = crate::solve::FACIES_COAST;
+        }
+        let sand =
+            column_field(&moon, Some(&banded), Face::PosZ, 0, 4_000, 4_000).expect("columns");
+        assert_eq!(
+            sand.columns.iter().map(|c| c.2).collect::<Vec<_>>(),
+            pocket.columns.iter().map(|c| c.2).collect::<Vec<_>>(),
+            "a floor under the sea's level took the beach's sand"
+        );
+        // The chunk right over the floor's highest column, still under the sea's level.
+        let highest_m = (pocket.highest >> (LENGTH_BITS + 7)).raw();
+        let z = ((highest_m - i64::from(moon.ladder.floor_m) + 2) / CHUNK_EDGE as i64) as i32 + 1;
+        assert!(corner_radius(&moon, (z + 1) * CHUNK_EDGE as i32, 0) < moon.sea_radius);
+        let dry = generate_in(&moon, &pocket, z).expect("in the band");
+        assert!(dry.cells.iter().all(|c| c.stratum == Stratum::Air));
+        let wet = generate_in(&moon, &mesa, z).expect("in the band");
+        assert!(wet.cells.iter().any(|c| c.stratum != Stratum::Air));
+    }
+
+    /// ★ THE WATER PER COLUMN (C5): with a field whose nearest rows say "a LAKE at this level" and
     /// "coast", a column's water is that level as a radius and its biome is the beach's sand; a
-    /// dry row leaves the column dry whatever the body's sea; a field with no water word (a
-    /// pyramid level) reads the body's sea. A chunk over such water holds water cells above its
-    /// rock, and the box's water column carries the same levels to the sheet.
+    /// dry row far from the sea leaves the column dry ★ (2026-09-24, plan step 2 part 3b: no node
+    /// of its read stencil is the sea, so it is INLAND and holds ZERO) and a dry row with a sea node
+    /// in its stencil holds the sea; a field with no water word (a pyramid level) reads the body's
+    /// sea. A chunk over such water holds water cells above its rock, and the box's water column
+    /// carries the same levels to the sheet.
     #[test]
     fn a_fields_rows_give_each_column_its_water_and_mark_the_coast() {
         use crate::artifact::{DRY_M, SparseRows, ZField, nodes_of_chunk};
@@ -1370,7 +1463,15 @@ mod tests {
         let mut sea = SparseRows::default();
         let mut dry = SparseRows::default();
         for node in nodes_of_chunk(&lattice, key(4_000)) {
-            sea.0.insert(node, (0, 200, crate::solve::FACIES_COAST, 0));
+            sea.0.insert(
+                node,
+                (
+                    0,
+                    200,
+                    crate::solve::FACIES_COAST | crate::solve::FACIES_LAKE,
+                    0,
+                ),
+            );
             dry.0.insert(node, (0, DRY_M, 0, 0));
         }
         let wet = column_field(&moon, Some(&sea), Face::PosZ, 0, 4_000, 4_000).expect("columns");
@@ -1385,7 +1486,7 @@ mod tests {
             f.columns
                 .iter()
                 .zip(&f.water)
-                .filter(|(c, w)| c.1 >= **w && c.2 == Biome::Desert)
+                .filter(|(c, w)| (c.1 >= **w) & (c.2 == Biome::Desert))
                 .count()
         };
         let drowned = |f: &ColumnField| {
@@ -1396,17 +1497,38 @@ mod tests {
                 .count()
         };
         assert_eq!(beaches(&wet) + drowned(&wet), CHUNK_EDGE * CHUNK_EDGE);
-        // ★ A DRY ROW READS THE BODY'S SEA (2026-09-21, the shore law): the shore runs through a
-        // land node's own columns, so every column on a body with a sea holds the sea's level and
-        // the ground decides the side. On a body with NO sea a dry row's column holds no water.
+        // ★ A DRY ROW FAR FROM THE SEA HOLDS NO WATER (2026-09-24, plan step 2 part 3b; the rule
+        // before it: every column on a body with a sea held the sea's level): no node of the
+        // column's read stencil is the sea, so it is INLAND and holds ZERO. A dry row with ONE sea
+        // node in its stencil — a corner of the sixteen, never the column's nearest node, so its
+        // own side stays land — holds the sea's level (ruling W6: the shore runs through a land
+        // node's own columns). On a body with NO sea a dry row's column holds no water.
         let arid = column_field(&moon, Some(&dry), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        assert!(arid.water.iter().all(|&w| w == moon.sea_radius));
+        assert!(arid.water.iter().all(|&w| w == Gi::ZERO));
         assert_ne!(moon.sea_radius, Gi::ZERO, "the fixture's moon states a sea");
+        let mut coastal = dry.clone();
+        let (ni, _) = crate::artifact::node_and_fraction(&lattice, 0, 4_000 * CHUNK_EDGE as i32);
+        let corner = lattice.index(Face::PosZ, ni as i32 - 1, ni as i32 - 1);
+        assert!(
+            coastal.0.contains_key(&corner),
+            "the corner is in the stencil"
+        );
+        coastal
+            .0
+            .insert(corner, (0, -500, crate::solve::FACIES_SEA, 0));
+        let beside =
+            column_field(&moon, Some(&coastal), Face::PosZ, 0, 4_000, 4_000).expect("columns");
+        assert!(beside.water.iter().all(|&w| w == moon.sea_radius));
         let dry_moon = crate::home::home_moon();
         let none =
             column_field(&dry_moon, Some(&dry), Face::PosZ, 0, 4_000, 4_000).expect("columns");
         assert!(none.water.iter().all(|&w| w == Gi::ZERO));
-        // The coast bit over a water that stands UNDER every column: every column is a beach.
+        // The coast bit on a dry row whose own word names a water UNDER every column, 500 m over
+        // the stated sea: every column is a beach. The row's level is never read for a land
+        // column, and an inland one holds no standing water at all (review finding 8: the
+        // statements below read the two waters apart, so a column held against the row's level
+        // would turn them red): no column carries a water, every column stands over the row's
+        // level AND over the sea's, which the shore law holds it against.
         let mut shore = SparseRows::default();
         for node in nodes_of_chunk(&lattice, key(4_000)) {
             shore
@@ -1416,8 +1538,10 @@ mod tests {
         let beach =
             column_field(&moon, Some(&shore), Face::PosZ, 0, 4_000, 4_000).expect("columns");
         assert!(beach.columns.iter().all(|(_, _, b)| *b == Biome::Desert));
-        assert_eq!(beaches(&beach), CHUNK_EDGE * CHUNK_EDGE);
-        assert_eq!(drowned(&beach), 0);
+        assert!(beach.water.iter().all(|&w| w == Gi::ZERO));
+        let row_level = moon.radius + (Gi::new(-3_000 * STEPS_PER_M) << LENGTH_BITS);
+        assert!(beach.columns.iter().all(|c| c.1 > row_level));
+        assert!(beach.columns.iter().all(|c| c.1 >= moon.sea_radius));
         // The coast bit over a water that stands 30 km OVER every column, and the row's own SEA
         // bit with it (2026-09-22, the coast mask: the ROW says which side a column stands on, so
         // a row drowned under 30 km of water carries the sea bit as the solve would write it): no
@@ -1779,7 +1903,8 @@ mod tests {
         let words = home_moon_solve_words();
         let (state, facies, _) =
             solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
-        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let climate =
+            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
             crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
         let level1 = crate::artifact::PyramidField::of(&artifact, 1, &artifact.coast_counts())

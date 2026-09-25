@@ -42,9 +42,12 @@ use vd_recipe::noise::NOISE_BITS;
 use vd_seed::bend::{Face, direction};
 use vd_seed::rng::{SplitMix64, child_seed};
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use crate::body::{BodyDefinition, draw_unit, frequency_of, salt};
 use crate::gf::Gf;
-use crate::macro_lattice::MacroLattice;
+use crate::macro_lattice::{MacroLattice, NO_NODE};
 use crate::solve::Z_STEPS_PER_M;
 use crate::strata::Province;
 
@@ -226,6 +229,26 @@ pub struct Land {
     /// ★ THE FREEBOARD FACTOR the law solved ([`FREEBOARD_FACTOR_RANGE`]): the continental
     /// thickness over the Earth-scaled one. ONE on a body with no water.
     pub freeboard_factor: Gf,
+    /// ★ THE OCEAN (2026-09-24, ruling B7 item 1): whether each node belongs to the CONNECTED
+    /// ocean at the sea's level ([`ocean_mask`]); every node `false` on a body with no water. Only
+    /// these nodes carry the water's load.
+    pub ocean: Vec<bool>,
+    /// The bodies at or under the sea's level that are NOT the ocean on this first land, and their
+    /// nodes: the inland pockets the sea no longer counts (ruling B7 item 1; plan question 9).
+    pub pockets: usize,
+    pub pocket_nodes: usize,
+}
+
+impl Land {
+    /// ★ THE SEA AS THE CLIMATE READS IT: the level and the connected ocean's mask; `None` on a body
+    /// with no water.
+    #[must_use]
+    pub fn sea_view(&self) -> Option<crate::climate::SeaView<'_>> {
+        self.sea_z.map(|level| crate::climate::SeaView {
+            level,
+            ocean: &self.ocean,
+        })
+    }
 }
 
 /// ★ THE PLATE LAW: `round(EARTH_PLATES · (R / T_e) / (R⊕ / T_e⊕))`, at least one, at most
@@ -573,48 +596,25 @@ pub fn area_quantile(values: &[Gf], area: &[u64], share: f64) -> Gf {
     lo + Gf::from_i64(bin as i64) / scale
 }
 
-/// ★ THE SEA OVER THE NODE FIELD, WITH THE LOAD (02 §7.1, §4.2): the level `L`, in sixteenths, at
-/// which the water under it equals the inventory, where a node under the level sinks by the
-/// water's weight — and the deeper column weighs more, so the balance is the fixed point
+/// ★ THE SEA OVER EVERY NODE OF THE FIELD, WITH THE LOAD (02 §7.1, §4.2): the level `L`, in
+/// sixteenths, at which the water under it equals the inventory, where a node under the level sinks
+/// by the water's weight — and the deeper column weighs more, so the balance is the fixed point
 /// `sink = (L − h + sink)·ρ_w/ρ_m`, whose closed form is `sink = (L − h)·ρ_w/(ρ_m − ρ_w)` and the
 /// water column `(L − h)/(1 − ρ_w/ρ_m)`, linear in `L` (Earth's 4 455 m dry step becomes the
 /// 6 476 m loaded one). An integer bisection on the level between the lowest node and the level
-/// that would drown the whole field; `None` for no water.
-#[must_use]
-pub fn sea_level(z_dry: &[i32], area: &[u64], water_km3: u64) -> Option<i32> {
-    sea_level_over(z_dry, area, water_km3, true)
-}
-
-/// ★ THE SEA RE-SOLVED over a LOADED field (slice 8c stage C5): the level that holds the inventory
-/// over a field whose isostatic sink is already in it — the eroded field at the end of the solve —
-/// so the water's own load is not counted twice.
-#[must_use]
-pub fn sea_level_loaded(z: &[i32], area: &[u64], water_km3: u64) -> Option<i32> {
-    sea_level_over(z, area, water_km3, false)
-}
-
+/// that would drown the whole field; `None` for no water. `with_load` false reads a field whose
+/// isostatic sink is already in it (the eroded field at the end of the solve), so the water's own
+/// load is not counted twice.
+///
+/// ★ PRIVATE SINCE 2026-09-24 (ruling B7 item 1): this counts EVERY node under the level as sea,
+/// an inland pocket included. The body's sea is [`sea_level_connected`], which starts here and
+/// then counts the connected ocean only.
 fn sea_level_over(z_dry: &[i32], area: &[u64], water_km3: u64, with_load: bool) -> Option<i32> {
     if water_km3 == 0 {
         return None;
     }
-    let load = if with_load {
-        Gf::ONE / (Gf::ONE - Gf::from_f64(WATER_DENSITY_KGM3 / MANTLE_DENSITY_KGM3))
-    } else {
-        Gf::ONE
-    };
-    // The target in area·sixteenths: the inventory in m³ times the steps a metre, over the load.
-    let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
-    let target_m3_steps = Gf::from_i64(water_km3 as i64) * Gf::from_f64(1.0e9) * steps / load;
-    let target = target_m3_steps.to_f64() as u128;
-    let total_area: u128 = area.iter().map(|&a| u128::from(a)).sum();
-    let (mut lo, mut hi) = (i32::MAX, i32::MIN);
-    for &z in z_dry {
-        lo = lo.min(z);
-        hi = hi.max(z);
-    }
-    let column = (target / total_area.max(1)) as i64 + 1;
-    let mut hi = i64::from(hi) + column;
-    let mut lo = i64::from(lo);
+    let target = sea_target(water_km3, with_load);
+    let (mut lo, mut hi) = sea_bracket(z_dry, area, target);
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
         if water_under(z_dry, area, mid as i32) < target {
@@ -624,6 +624,32 @@ fn sea_level_over(z_dry: &[i32], area: &[u64], water_km3: u64, with_load: bool) 
         }
     }
     Some(hi as i32)
+}
+
+/// The inventory as the bisection's target, in area·sixteenths: the inventory in m³ times the steps
+/// a metre, over the load where the field is dry.
+fn sea_target(water_km3: u64, with_load: bool) -> u128 {
+    let load = if with_load {
+        Gf::ONE / (Gf::ONE - Gf::from_f64(WATER_DENSITY_KGM3 / MANTLE_DENSITY_KGM3))
+    } else {
+        Gf::ONE
+    };
+    let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
+    let target_m3_steps = Gf::from_i64(water_km3 as i64) * Gf::from_f64(1.0e9) * steps / load;
+    target_m3_steps.to_f64() as u128
+}
+
+/// The bisection's first bracket: the lowest node, and the level that would hold the whole target
+/// over the highest node.
+fn sea_bracket(z: &[i32], area: &[u64], target: u128) -> (i64, i64) {
+    let total_area: u128 = area.iter().map(|&a| u128::from(a)).sum();
+    let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+    for &h in z {
+        lo = lo.min(h);
+        hi = hi.max(h);
+    }
+    let column = (target / total_area.max(1)) as i64 + 1;
+    (i64::from(lo), i64::from(hi) + column)
 }
 
 /// The water under a level over the dry field, in area·sixteenths (the load's factor left out:
@@ -636,6 +662,258 @@ fn water_under(z_dry: &[i32], area: &[u64], level: i32) -> u128 {
         }
     }
     sum
+}
+
+/// No body: a node over the level in [`ocean_mask`]'s labels.
+const NO_BODY: u32 = u32::MAX;
+
+/// ★ THE OCEAN'S MASK AT A LEVEL (2026-09-24, ruling B7 item 1; plan step 2 part 3a).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OceanMask {
+    /// Whether each node belongs to the ocean.
+    pub ocean: Vec<bool>,
+    /// The bodies at or under the level that are NOT the ocean: the inland pockets.
+    pub pockets: usize,
+    /// Their nodes.
+    pub pocket_nodes: usize,
+}
+
+/// ★ THE OCEAN IS THE LARGEST CONNECTED WATER UNDER THE LEVEL (2026-09-24, ruling B7 item 1: *"an
+/// inland pocket is a closed basin, not the sea"*; plan question 1). Every node at or under `level`
+/// is labelled by a walk through the lattice's OWN eight neighbours, the cube seams included; the
+/// body with the largest AREA is the ocean, and on an exact tie the body whose lowest node index is
+/// smaller (the census's own rule, `lake_census` `inland_sea_lines`). Every other body is a POCKET:
+/// a closed basin whose water comes from its budget, never from the sea. A level under every node
+/// gives an empty ocean.
+///
+/// **Example.** A crater floor 300 km inland stands 40 m under the sea's level. No path through the
+/// lattice joins it to the ocean, so it is a pocket: the solve's flood raises it like any hollow,
+/// and the lake budget, not the sea, decides whether water stands in it.
+#[must_use]
+pub fn ocean_mask(lattice: &MacroLattice, z: &[i32], area: &[u64], level: i32) -> OceanMask {
+    let n = z.len();
+    let mut label = vec![NO_BODY; n];
+    // Each body's area and node count, in the order its lowest index was met.
+    let mut bodies: Vec<(u128, usize)> = Vec::new();
+    let mut stack: Vec<u32> = Vec::new();
+    for start in 0..n {
+        if (label[start] != NO_BODY) | (z[start] > level) {
+            continue;
+        }
+        let id = bodies.len() as u32;
+        let (mut body_area, mut nodes) = (0u128, 0usize);
+        label[start] = id;
+        stack.push(start as u32);
+        while let Some(v) = stack.pop() {
+            body_area += u128::from(area[v as usize]);
+            nodes += 1;
+            for m in lattice.neighbours(v) {
+                if m == NO_NODE {
+                    continue;
+                }
+                let mi = m as usize;
+                if (label[mi] == NO_BODY) & (z[mi] <= level) {
+                    label[mi] = id;
+                    stack.push(m);
+                }
+            }
+        }
+        bodies.push((body_area, nodes));
+    }
+    // The largest by area; a later body replaces it only when STRICTLY larger, so a tie keeps the
+    // body met first — the one whose lowest index is smaller.
+    let mut ocean = NO_BODY;
+    let mut largest = 0u128;
+    for (k, &(body_area, _)) in bodies.iter().enumerate() {
+        if ocean == NO_BODY || body_area > largest {
+            ocean = k as u32;
+            largest = body_area;
+        }
+    }
+    let ocean_nodes = if ocean == NO_BODY {
+        0
+    } else {
+        bodies[ocean as usize].1
+    };
+    OceanMask {
+        ocean: label
+            .iter()
+            .map(|&b| (b != NO_BODY) & (b == ocean))
+            .collect(),
+        pockets: bodies.len().saturating_sub(1),
+        pocket_nodes: bodies.iter().map(|b| b.1).sum::<usize>() - ocean_nodes,
+    }
+}
+
+/// ★ THE BODY'S SEA OVER THE CONNECTED OCEAN (2026-09-24, ruling B7 item 1; plan step 2 part 3a).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectedSea {
+    /// The level, sixteenths.
+    pub level: i32,
+    /// The ocean's mask at that level.
+    pub mask: OceanMask,
+    /// Whether the first seed's body was not the largest at the level, so the solve seeded again
+    /// once from the body that was (stated, and reported).
+    pub reseeded: bool,
+    /// ★ WHETHER THE ANSWER BALANCES (2026-09-25, review finding 4 of plan step 2): the water the
+    /// level was solved over is exactly the water over the answer's own ocean — every node joined
+    /// to the seed body at the level is the ocean, and no other node is. `false` where the re-seed
+    /// body is no longer the largest at its own level, so the largest-body rule and the inventory
+    /// name two different bodies: the level is the re-seed body's and the mask is another's. No
+    /// single seed balances such a field; the answer is stated and reported, never silent.
+    pub settled: bool,
+}
+
+/// ★ THE SEA OVER THE CONNECTED OCEAN ONLY (2026-09-24, ruling B7 item 1: *"the sea's level is
+/// solved over the CONNECTED ocean only. One law, no special case"*). The inventory fills the ocean;
+/// a pocket under the level that no path joins to the ocean holds none of it.
+///
+/// 1. `L0` = the level over EVERY node ([`sea_level_over`]).
+/// 2. The bodies at `L0` ([`ocean_mask`]). ONE body: `L0` is exact, because the connected volume
+///    and the whole volume are one at `L0` and the connected one is never more under it.
+/// 3. More: a priority flood from the ocean at `L0` gives each node the lowest level at which it
+///    joins that ocean (`reach`), and the level is bisected again over
+///    `V(L) = Σ (L − z)·a` for `reach ≤ L`, `z < L` — monotone in `L`, the same target and load.
+/// 4. The bodies at the answer. Where the seed's body is not the largest there, the flood and the
+///    bisection run ONCE more from the body that is, and the answer says so.
+/// 5. ★ THE CHECK (review finding 4 of plan step 2): the nodes joined to the seed at the answer's
+///    level against the answer's ocean ([`ConnectedSea::settled`]). Where the re-seed body lost the
+///    largest-body rule at its own level, the answer says so and the solve reports it.
+///
+/// `None` for no water.
+///
+/// **Example.** The home planet's inventory stood over 148 pockets and 3.2 million km² of inland
+/// ground under its level (MEASURED at generator 19). Counted as ocean, their volume held the sea
+/// down; over the connected ocean alone the same water stands higher, by the pockets' volume over
+/// the ocean's area.
+#[must_use]
+pub fn sea_level_connected(
+    lattice: &MacroLattice,
+    z: &[i32],
+    area: &[u64],
+    water_km3: u64,
+    with_load: bool,
+) -> Option<ConnectedSea> {
+    let first = sea_level_over(z, area, water_km3, with_load)?;
+    let mask = ocean_mask(lattice, z, area, first);
+    if mask.pockets == 0 {
+        // One body under `L0`: it holds the whole inventory, so the answer balances by itself.
+        return Some(ConnectedSea {
+            level: first,
+            mask,
+            reseeded: false,
+            settled: true,
+        });
+    }
+    let target = sea_target(water_km3, with_load);
+    let (level, reach) = connected_level(lattice, z, area, target, &mask.ocean, first);
+    let at = ocean_mask(lattice, z, area, level);
+    // A node of the first ocean stands in the seed's body at every level over `L0`, so the seed's
+    // body is the largest exactly where the new mask holds it.
+    let seed = mask.ocean.iter().position(|&o| o).unwrap_or(0);
+    if at.ocean[seed] {
+        let settled = joined_is_ocean(&reach, &at.ocean, level);
+        return Some(ConnectedSea {
+            level,
+            mask: at,
+            reseeded: false,
+            settled,
+        });
+    }
+    let (level, reach) = connected_level(lattice, z, area, target, &at.ocean, first);
+    let mask = ocean_mask(lattice, z, area, level);
+    let settled = joined_is_ocean(&reach, &mask.ocean, level);
+    Some(ConnectedSea {
+        level,
+        mask,
+        reseeded: true,
+        settled,
+    })
+}
+
+/// ★ Whether the nodes JOINED to the seed at `level` (`reach ≤ level`) are exactly the `ocean`
+/// (review finding 4 of plan step 2): then the water the bisection counted is the water over the
+/// ocean, and the answer balances.
+fn joined_is_ocean(reach: &[i32], ocean: &[bool], level: i32) -> bool {
+    reach.iter().zip(ocean).all(|(&r, &o)| (r <= level) == o)
+}
+
+/// The level at which the water joined to the `seed` body holds `target`, bisected between one step
+/// under `first` (where even every node holds less) and the level that drowns the whole field; and
+/// the level at which each node joins the seed, which the answer is checked against.
+fn connected_level(
+    lattice: &MacroLattice,
+    z: &[i32],
+    area: &[u64],
+    target: u128,
+    seed: &[bool],
+    first: i32,
+) -> (i32, Vec<i32>) {
+    let reach = reach_from(lattice, z, seed);
+    let (_, mut hi) = sea_bracket(z, area, target);
+    let mut lo = i64::from(first) - 1;
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if water_joined(z, area, &reach, mid as i32) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (hi as i32, reach)
+}
+
+/// ★ THE LEVEL AT WHICH EACH NODE JOINS THE SEED (a priority flood, lowest first, ties to the
+/// smaller index): a seed node's own height, and every other node the least, over the paths to the
+/// seed, of the highest node on the path.
+fn reach_from(lattice: &MacroLattice, z: &[i32], seed: &[bool]) -> Vec<i32> {
+    let n = z.len();
+    let mut reach = vec![i32::MAX; n];
+    let mut heap: BinaryHeap<Reverse<(i32, u32)>> = BinaryHeap::new();
+    for i in 0..n {
+        if seed[i] {
+            reach[i] = z[i];
+            heap.push(Reverse((z[i], i as u32)));
+        }
+    }
+    while let Some(Reverse((level, node))) = heap.pop() {
+        for m in lattice.neighbours(node) {
+            if m == NO_NODE || reach[m as usize] != i32::MAX {
+                continue;
+            }
+            let raised = z[m as usize].max(level);
+            reach[m as usize] = raised;
+            heap.push(Reverse((raised, m)));
+        }
+    }
+    reach
+}
+
+/// The water under a level over the nodes joined to the seed at that level, in area·sixteenths.
+fn water_joined(z: &[i32], area: &[u64], reach: &[i32], level: i32) -> u128 {
+    let mut sum = 0u128;
+    for (k, &h) in z.iter().enumerate() {
+        if (h < level) & (reach[k] <= level) {
+            sum += u128::from(area[k]) * (u128::from((i64::from(level) - i64::from(h)) as u64));
+        }
+    }
+    sum
+}
+
+/// ★ THE SEA'S LOAD ON THE OCEAN ALONE (2026-09-24, ruling B7 item 1): every OCEAN node sinks by
+/// the water's weight ([`loaded_height`]); a pocket under the level carries no sea, so it keeps its
+/// dry height, and a node over the level has nothing to carry.
+///
+/// **Example.** The ocean's floor 4 km under the level sinks about 1.8 km more under its water; a
+/// pocket 200 m under the level in a continent's middle holds no sea and stands where the crust
+/// put it.
+#[must_use]
+pub fn load_ocean(z_dry: &[i32], ocean: &[bool], level: i32) -> Vec<i32> {
+    z_dry
+        .iter()
+        .zip(ocean)
+        .map(|(&h, &wet)| if wet { loaded_height(h, level) } else { h })
+        .collect()
 }
 
 /// The loaded height of a node under the sea: `h − (L − h)·ρ_w/(ρ_m − ρ_w)`, floored to a
@@ -720,7 +998,8 @@ pub fn initial_land_from(
         crust.push((share * Gf::from_f64(255.0) + Gf::HALF).to_i64_floor() as u8);
     }
     let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
-    let freeboard_factor = freeboard_factor(&part_o, &part_c, &crust, &area, words.water_km3);
+    let freeboard_factor =
+        freeboard_factor(lattice, &part_o, &part_c, &crust, &area, words.water_km3);
     let (dry, tallest) = dry_field(&part_o, &part_c, &area, freeboard_factor);
     let room = (relief - tallest).greater(Gf::ZERO);
     // 4. Orogeny: the belts under the room — THE UPLIFT OVER THE AGE, kept beside the land.
@@ -750,10 +1029,21 @@ pub fn initial_land_from(
         .iter()
         .map(|&h| (h * steps).to_i64_floor() as i32)
         .collect();
-    // 5. The sea, with the load.
-    let sea_z = sea_level(&z_dry, &area, words.water_km3);
+    // 5. The sea, with the load — ★ OVER THE CONNECTED OCEAN ONLY (2026-09-24, ruling B7 item 1):
+    //    a pocket under the level that no path joins to the ocean carries neither the sea's water
+    //    nor its load.
+    let sea = sea_level_connected(lattice, &z_dry, &area, words.water_km3, true);
+    let (sea_z, ocean, pockets, pocket_nodes) = match sea {
+        Some(s) => (
+            Some(s.level),
+            s.mask.ocean,
+            s.mask.pockets,
+            s.mask.pocket_nodes,
+        ),
+        None => (None, vec![false; n], 0, 0),
+    };
     let z: Vec<i32> = match sea_z {
-        Some(level) => z_dry.iter().map(|&h| loaded_height(h, level)).collect(),
+        Some(level) => load_ocean(&z_dry, &ocean, level),
         None => z_dry,
     };
     // ★ THE UPLIFT KEEPS THE ENVELOPE ON BOTH SIDES: a trench's subsidence may not carry a node
@@ -792,6 +1082,9 @@ pub fn initial_land_from(
         plates,
         threshold,
         freeboard_factor,
+        ocean,
+        pockets,
+        pocket_nodes,
     }
 }
 
@@ -839,8 +1132,13 @@ pub fn dry_field(part_o: &[Gf], part_c: &[Gf], area: &[u64], factor: Gf) -> (Vec
 /// falls against the platform as the factor grows (a taller platform deepens the basins), so a
 /// bisection finds it; a factor at either end of the range is a water world or a desert world.
 /// ONE on a body with no water (no sea to stand at).
+///
+/// ★ THE SEA HERE IS THE CONNECTED OCEAN'S (2026-09-24, ruling B7 item 1; plan question 9): the
+/// same law the first land and the solve read, so a pocket on the first land holds no sea here
+/// either.
 #[must_use]
 pub fn freeboard_factor(
+    lattice: &MacroLattice,
     part_o: &[Gf],
     part_c: &[Gf],
     crust: &[u8],
@@ -864,7 +1162,8 @@ pub fn freeboard_factor(
             .iter()
             .map(|&h| (h * steps).to_i64_floor() as i32)
             .collect();
-        let sea = sea_level(&z_dry, area, water_km3).unwrap_or(i32::MIN);
+        let sea = sea_level_connected(lattice, &z_dry, area, water_km3, true)
+            .map_or(i32::MIN, |s| s.level);
         let platform_values: Vec<Gf> = continental.iter().map(|&k| dry[k]).collect();
         let platform = (area_quantile(
             &platform_values,
@@ -952,6 +1251,7 @@ pub fn humps(hist: &[u64]) -> Option<(usize, usize, f64)> {
 mod tests {
     use super::*;
     use crate::home::{home_land_words, home_moon, home_moon_land_words, home_planet};
+    use vd_seed::bend::Face;
 
     fn gf(v: f64) -> Gf {
         Gf::from_f64(v)
@@ -1126,16 +1426,246 @@ mod tests {
         // 500 m of water over 10¹² m² = 5 × 10¹⁴ m³ = 500 000 km³; the load lets the column stand
         // 1.454 times taller than the dry gap, so the level stands 500 / 1.454 = 344 m over the
         // dry floor (and 500 m over the loaded one).
-        let level = sea_level(&z, &area, 500_000).expect("a sea");
+        let level = sea_level_over(&z, &area, 500_000, true).expect("a sea");
         let level_m = f64::from(level) / f64::from(Z_STEPS_PER_M);
         assert!((level_m - 343.9).abs() < 1.0, "{level_m}");
         let column_m = f64::from(level - loaded_height(low, level)) / f64::from(Z_STEPS_PER_M);
         assert!((column_m - 500.0).abs() < 1.0, "{column_m}");
-        assert_eq!(sea_level(&z, &area, 0), None);
-        let flooded = sea_level(&z, &area, 10_000_000).expect("a sea");
+        assert_eq!(sea_level_over(&z, &area, 0, true), None);
+        let flooded = sea_level_over(&z, &area, 10_000_000, true).expect("a sea");
         assert!(flooded > high);
         assert!(loaded_height(low, level) < low);
         assert_eq!(loaded_height(high, level), high);
+    }
+
+    /// The moon's lattice and its node areas.
+    fn moon_areas() -> (MacroLattice, Vec<u64>) {
+        let lattice = MacroLattice::of(&home_moon()).expect("a lattice");
+        let area = (0..lattice.node_count() as u32)
+            .map(|k| lattice.area_m2(k))
+            .collect();
+        (lattice, area)
+    }
+
+    /// ★ TEST 13 (plan step 2 part 3a; ruling B7 item 1): THE SEA OVER THE CONNECTED OCEAN. Land at
+    /// 1 000 m everywhere, an ocean of one whole face and a pocket of a hundred nodes on another
+    /// face, both floors at −1 000 m. Over every node the inventory stands at `L0`; over the ocean
+    /// alone it stands at the least level whose water over the ocean's own area holds the whole
+    /// target — higher by the pocket's share, which is the pocket's volume at `L0` over the ocean's
+    /// area within one step. Without the pocket the answer is `L0` itself, on the one-body path.
+    #[test]
+    fn the_connected_sea_stands_over_the_ocean_alone() {
+        let (lattice, area) = moon_areas();
+        let n = lattice.node_count();
+        let land = 1_000 * Z_STEPS_PER_M;
+        let floor = -1_000 * Z_STEPS_PER_M;
+        let mut z = vec![land; n];
+        let (mut ocean_area, mut pocket_area) = (0u128, 0u128);
+        for k in 0..n {
+            let (face, i, j) = lattice.split(k as u32);
+            if face == Face::PosX {
+                z[k] = floor;
+                ocean_area += u128::from(area[k]);
+            } else if face == Face::NegX && (20..30).contains(&i) && (20..30).contains(&j) {
+                z[k] = floor;
+                pocket_area += u128::from(area[k]);
+            }
+        }
+        let water_km3 = 20_000;
+        let target = sea_target(water_km3, false);
+        let first = sea_level_over(&z, &area, water_km3, false).expect("a sea");
+        let sea = sea_level_connected(&lattice, &z, &area, water_km3, false).expect("a sea");
+        assert!(!sea.reseeded);
+        assert!(sea.settled);
+        assert!(holds_within_a_step(&z, &area, &sea, target));
+        assert_eq!((sea.mask.pockets, sea.mask.pocket_nodes), (1, 100));
+        // By hand: the least level `L` with `(L − floor)·A ≥ target`, over the ocean's area alone
+        // and over both.
+        let least = |a: u128| i32::try_from(target.div_ceil(a)).expect("a level") + floor;
+        assert_eq!(first, least(ocean_area + pocket_area));
+        assert_eq!(sea.level, least(ocean_area));
+        let pocket_share = (i64::from(first - floor) * pocket_area as i64) / ocean_area as i64;
+        assert!(
+            (i64::from(sea.level - first) - pocket_share).abs() <= 1,
+            "{} over {first}: the pocket's share is {pocket_share}",
+            sea.level
+        );
+        for k in 0..n {
+            assert_eq!(sea.mask.ocean[k], lattice.split(k as u32).0 == Face::PosX);
+        }
+        // Raise the pocket over the land: one body, and the level is `L0` exactly.
+        let lone: Vec<i32> = (0..n)
+            .map(|k| {
+                if lattice.split(k as u32).0 == Face::PosX {
+                    floor
+                } else {
+                    land
+                }
+            })
+            .collect();
+        let one = sea_level_connected(&lattice, &lone, &area, water_km3, false).expect("a sea");
+        assert_eq!(
+            one.level,
+            sea_level_over(&lone, &area, water_km3, false).expect("a sea")
+        );
+        assert!(one.settled);
+        assert!(holds_within_a_step(&lone, &area, &one, target));
+        assert_eq!((one.mask.pockets, one.mask.pocket_nodes), (0, 0));
+        assert_eq!(sea_level_connected(&lattice, &lone, &area, 0, false), None);
+    }
+
+    /// ★ TEST 14 (plan step 2 part 3a; plan question 1): THE LARGEST BODY IS THE OCEAN, AND A TIE
+    /// GOES TO THE BODY WHOSE LOWEST NODE INDEX IS SMALLER. Two single nodes of one area on two
+    /// faces: the first by index is the ocean. A later body of two nodes is larger and wins. A
+    /// level under every node gives no ocean at all.
+    #[test]
+    fn the_largest_body_is_the_ocean_and_a_tie_takes_the_smaller_index() {
+        let (lattice, area) = moon_areas();
+        let n = lattice.node_count();
+        let mut z = vec![100; n];
+        let a = lattice.index(Face::PosX, 10, 10) as usize;
+        let b = lattice.index(Face::NegX, 10, 10) as usize;
+        assert_eq!(area[a], area[b], "one area on the two faces");
+        assert!(a < b);
+        z[a] = 0;
+        z[b] = 0;
+        let tie = ocean_mask(&lattice, &z, &area, 0);
+        assert!(tie.ocean[a]);
+        assert!(!tie.ocean[b]);
+        assert_eq!((tie.pockets, tie.pocket_nodes), (1, 1));
+        let c = lattice.index(Face::NegX, 11, 10) as usize;
+        z[c] = 0;
+        let larger = ocean_mask(&lattice, &z, &area, 0);
+        assert!(!larger.ocean[a]);
+        assert!(larger.ocean[b]);
+        assert!(larger.ocean[c]);
+        let none = ocean_mask(&lattice, &z, &area, -1);
+        assert!(none.ocean.iter().all(|&o| !o));
+        assert_eq!((none.pockets, none.pocket_nodes), (0, 0));
+        // Every node under the level: one body over the whole sphere, the cube's corners included.
+        let all = ocean_mask(&lattice, &z, &area, i32::MAX);
+        assert!(all.ocean.iter().all(|&o| o));
+    }
+
+    /// ★ TEST 15 (plan step 2 part 3a): THE LOAD FALLS ON THE OCEAN ALONE. An ocean node under the
+    /// level sinks by `loaded_height`; a pocket node under the same level keeps its dry height; a
+    /// node over the level is untouched.
+    #[test]
+    fn the_sea_loads_the_ocean_and_never_a_pocket() {
+        let level = 0;
+        let z_dry = [-1_600, -1_600, 400];
+        let ocean = [true, false, false];
+        let loaded = load_ocean(&z_dry, &ocean, level);
+        assert_eq!(loaded[0], loaded_height(-1_600, level));
+        assert!(loaded[0] < -1_600);
+        assert_eq!(loaded[1], -1_600, "a pocket carries no sea");
+        assert_eq!(loaded[2], 400);
+    }
+
+    /// ★ TEST 16 (plan step 2 part 3a): THE RE-SEED. At `L0` a shallow basin of a hundred nodes is
+    /// the largest body, so it seeds the connected solve; over it alone the water must stand so
+    /// high that a second basin — ten deep nodes and a wide shelf just over `L0` — floods past it.
+    /// The seed's body is then not the largest, so the solve seeds again once from the body that
+    /// is, states it, and its ocean is that body.
+    #[test]
+    fn the_connected_sea_seeds_again_from_the_body_that_is_largest() {
+        let (lattice, area) = moon_areas();
+        let n = lattice.node_count();
+        let mut z = vec![1_000 * Z_STEPS_PER_M; n];
+        let (mut shallow, mut deep) = (Vec::new(), Vec::new());
+        for (k, h) in z.iter_mut().enumerate().take(n) {
+            let (face, i, j) = lattice.split(k as u32);
+            if face == Face::PosX && (10..20).contains(&i) && (10..20).contains(&j) {
+                *h = 0;
+                shallow.push(k);
+            } else if face == Face::NegX && (10..20).contains(&i) && j == 10 {
+                *h = -1_600;
+                deep.push(k);
+            } else if face == Face::NegX && (10..50).contains(&i) && (11..41).contains(&j) {
+                *h = 80;
+            }
+        }
+        let first = sea_level_over(&z, &area, 72, false).expect("a sea");
+        assert!(
+            (0..80).contains(&first),
+            "L0 {first} between the shallow floor and the shelf"
+        );
+        assert!(ocean_mask(&lattice, &z, &area, first).ocean[shallow[0]]);
+        let sea = sea_level_connected(&lattice, &z, &area, 72, false).expect("a sea");
+        assert!(sea.reseeded);
+        assert!(sea.level > 80, "the shelf floods: {}", sea.level);
+        assert!(sea.mask.ocean[deep[0]]);
+        assert!(!sea.mask.ocean[shallow[0]]);
+        assert!(
+            sea.settled,
+            "the re-seed body is the largest at its own level"
+        );
+        assert!(holds_within_a_step(&z, &area, &sea, sea_target(72, false)));
+    }
+
+    /// ★ THE ANSWER'S OCEAN HOLDS THE TARGET, WITHIN ONE STEP: the water over the answer's own ocean
+    /// at its level reaches the target, and one step lower over the same wet area it does not.
+    fn holds_within_a_step(z: &[i32], area: &[u64], sea: &ConnectedSea, target: u128) -> bool {
+        let (mut held, mut wet) = (0u128, 0u128);
+        for k in 0..z.len() {
+            if sea.mask.ocean[k] & (z[k] < sea.level) {
+                let a = u128::from(area[k]);
+                held += a * u128::from((i64::from(sea.level) - i64::from(z[k])) as u64);
+                wet += a;
+            }
+        }
+        (held >= target) & (held - wet < target)
+    }
+
+    /// ★ TEST 16b (review finding 4 of plan step 2): A RE-SEED THAT DOES NOT SETTLE IS SAID. At `L0`
+    /// a basin A of twenty nodes, 1 000 m deep, is the largest body, beside a narrow hole B of ten
+    /// nodes, 10 000 m deep, with a shelf of thirty nodes at 500 m around it. Over A alone the
+    /// water stands at about 4 000 m, where B and its flooded shelf are larger than A, so the solve
+    /// seeds again from B. Over B the target stands UNDER the shelf, where A is the largest body
+    /// again. No single seed balances this field: the answer's level is B's and its ocean is A's,
+    /// and the answer says so — never a silent sea whose ocean holds another volume.
+    #[test]
+    fn a_reseed_whose_body_loses_the_largest_rule_is_stated_unsettled() {
+        let (lattice, area) = moon_areas();
+        let n = lattice.node_count();
+        let m = Z_STEPS_PER_M;
+        let mut z = vec![8_000 * m; n];
+        let (mut a_nodes, mut hole) = (Vec::new(), Vec::new());
+        for (k, h) in z.iter_mut().enumerate().take(n) {
+            let (face, i, j) = lattice.split(k as u32);
+            if face == Face::PosX && (24..44).contains(&i) && j == 34 {
+                *h = -1_000 * m;
+                a_nodes.push(k);
+            } else if face == Face::NegX && (24..34).contains(&i) && j == 34 {
+                *h = -10_000 * m;
+                hole.push(k);
+            } else if face == Face::NegX && (24..54).contains(&i) && j == 35 {
+                *h = 500 * m;
+            }
+        }
+        // The target: the hole alone brim full to the level 0.
+        let water_m3: u128 = hole.iter().map(|&k| u128::from(area[k]) * 10_000).sum();
+        let water_km3 = (water_m3 / 1_000_000_000) as u64;
+        let first = sea_level_over(&z, &area, water_km3, false).expect("a sea");
+        let at_first = ocean_mask(&lattice, &z, &area, first);
+        assert!(at_first.ocean[a_nodes[0]], "A is the largest at L0 {first}");
+        assert_eq!(at_first.pockets, 1);
+        let sea = sea_level_connected(&lattice, &z, &area, water_km3, false).expect("a sea");
+        assert!(sea.reseeded);
+        assert!(
+            (-1_000 * m..500 * m).contains(&sea.level),
+            "over B the level stands under the shelf: {}",
+            sea.level
+        );
+        assert!(sea.mask.ocean[a_nodes[0]], "A is the largest again");
+        assert!(!sea.mask.ocean[hole[0]]);
+        assert!(!sea.settled);
+        assert!(!holds_within_a_step(
+            &z,
+            &area,
+            &sea,
+            sea_target(water_km3, false)
+        ));
     }
 
     /// The hypsometry and the humps on stated curves: two humps with a valley, one hump, an empty
@@ -1448,17 +1978,25 @@ mod tests {
         assert_eq!(held(Province::RiftBasalt), 0, "a rift with no rifting");
         assert!(land.kind.iter().all(|&k| k == Kind::Convergent as u8));
         // THE SHELF: three million cubic kilometres of water stands under every node of
-        // continental crust on this moon — the isostasy floats the continent clear of its own sea —
-        // so no continent is drowned and no platform exists. MEASURED here, node by node.
-        assert_eq!(
-            held(Province::FlatShelf),
-            0,
-            "a shelf with no drowned crust"
-        );
+        // continental crust IN THE OCEAN on this moon — the isostasy floats the continent clear of
+        // its own sea — so the ocean drowns no continent. MEASURED here, node by node.
         let drowned = (0..n)
-            .filter(|&k| (land.crust[k] >= 128) & (land.z[k] < sea))
+            .filter(|&k| (land.crust[k] >= 128) & (land.z[k] < sea) & land.ocean[k])
             .count();
-        assert_eq!(drowned, 0, "continental crust under this moon's sea");
+        assert_eq!(drowned, 0, "continental crust under this moon's ocean");
+        // ★ THE SHELF'S NODES STAND IN A POCKET (2026-09-24, ruling B7 item 1). This moon's dry
+        // field holds a second basin no path joins to the ocean (MEASURED: one pocket, 2 955 nodes).
+        // The sea over the connected ocean stands higher than the sea over every node, and the rule
+        // names a node of continental crust under the level a shelf — here only inside that pocket,
+        // which holds no sea. Whether a dry pocket's continental floor is a shelf is the owner's
+        // open question (plan question 9); the rule itself is unchanged.
+        assert_eq!(land.pockets, 1);
+        assert!(held(Province::FlatShelf) > 0, "{counts:?}");
+        for k in 0..n {
+            if land.province[k] == Province::FlatShelf.code() {
+                assert!(!land.ocean[k], "node {k}: a shelf in the ocean");
+            }
+        }
     }
 
     /// The home planet's land words are the pinned ones.

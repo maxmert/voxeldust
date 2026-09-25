@@ -28,7 +28,8 @@ fn main() {
     );
     let body = home_planet();
     let levels = artifact.pyramid.len() as u32;
-    let mut rows = SparseRows::default();
+    // The rows read the artifact's own sea, so a golden row names a pocket's floor as the mask does.
+    let mut rows = SparseRows(Default::default(), artifact.sea_m);
     let mut fine_keys = 0;
     for entry in GOLDEN_SELF_CHECK_KEYS {
         let key = self_check_key(&body, entry);
@@ -95,12 +96,13 @@ fn main() {
         "golden_z_record: HOME_IDENTITY_MEASURED = {measured:#x}_u64 — commit it in vd_terrain::home"
     );
     // ★ THE SEA AND THE OCEAN SHARE (stage C5, gate G-SEA), the same reading the artifact pin makes,
-    // so one solve records every pin.
+    // so one solve records every pin. ★ The share is the CONNECTED ocean's — the rows' own SEA bit
+    // (2026-09-24, ruling B7 item 1) — never `z ≤ sea`, which counts every inland pocket as ocean.
     let (mut wet, mut all) = (0.0f64, 0.0f64);
     for (node, row) in artifact.rows.iter().enumerate() {
         let area = lattice.area_m2(node as u32) as f64;
         all += area;
-        if artifact.sea().is_some_and(|sea| i32::from(row.z_m) <= sea) {
+        if (row.receiver_facies >> FACIES_SHIFT) & vd_terrain::solve::FACIES_SEA != 0 {
             wet += area;
         }
     }

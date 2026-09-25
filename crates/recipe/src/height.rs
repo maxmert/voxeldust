@@ -345,6 +345,16 @@ pub const SIDE_LAND: Gi = Gi::new(1);
 /// ★ THE COLUMN STANDS IN THE WATER, as the row said: the host read a sea word off the artifact's
 /// coast mask and it is set.
 pub const SIDE_SEA: Gi = Gi::new(2);
+/// ★ THE COLUMN STANDS ON DRY LAND FAR FROM THE SEA (2026-09-24, ruling B7 item 1; plan step 2
+/// part 3b): the row says land, and no node of the column's own read stencil is the sea. Such a
+/// column holds no water of its own. [`shore`] holds it OVER the sea's level like any land column
+/// where its ground stands over that level, and leaves it alone where its ground stands UNDER that
+/// level: that ground is the floor of a closed basin, and no sea stands over it.
+///
+/// **Example.** A pocket in a dry interior stands 2 km under the sea's level, 900 km from the
+/// ocean. Its floor columns read this word, so the shore law does not lift the floor to a quarter
+/// of its depth over the sea, and the pilot sees a basin, never a mesa.
+pub const SIDE_INLAND: Gi = Gi::new(3);
 
 /// ★ THE SEA DECIDES THE SHORE (2026-09-21; the owner, flying the coast: "the shores are changing
 /// all the time"). The shore is where the ground crosses the water's level. Before this law the
@@ -386,6 +396,13 @@ pub const SIDE_SEA: Gi = Gi::new(2);
 /// about 20 km at each level swap above it, and the morph carried the shoreline over that distance
 /// as the ring passed.
 ///
+/// ★ AN INLAND COLUMN UNDER THE SEA'S LEVEL IS LEFT ALONE (2026-09-24, ruling B7 item 1; plan step
+/// 2 part 3b): [`SIDE_INLAND`] acts as [`SIDE_LAND`] where the ground stands at or over the water,
+/// and returns `h` unchanged where the ground stands under it. Before this word such a column read
+/// `SIDE_LAND` and the law lifted a pocket's floor to a quarter of its depth OVER the sea — a mesa
+/// where the solve put a basin. The card reads [`SIDE_UNKNOWN`] only, so its arithmetic does not
+/// change.
+///
 /// **Example.** Along the belt's coast the solved ground rises one metre in fifty. Two kilometres
 /// inland it stands forty metres over the sea; the fine octaves may dig thirty of those, and the
 /// valley's floor stands ten metres over the sea at every rung a descending ship draws. At rung 14
@@ -397,12 +414,16 @@ pub fn shore(base: Gi, water: Gi, h: Gi, side: Gi) -> Gi {
         return h;
     }
     let g = base - water;
+    if side == SIDE_INLAND && g < Gi::ZERO {
+        return h;
+    }
     let d = h - water;
-    // The row's word where the host read one, the ground's own sign where it did not.
+    // The row's word where the host read one, the ground's own sign where it did not. An inland
+    // column over the water's level is land, like any other.
     let land = if side == SIDE_UNKNOWN {
         g >= Gi::ZERO
     } else {
-        side == SIDE_LAND
+        side != SIDE_SEA
     };
     // The ground's own distance from the water, whichever side the row named it on.
     let away = if g >= Gi::ZERO { g } else { Gi::ZERO - g };
@@ -685,6 +706,53 @@ mod tests {
             shore(Gi::new(400), Gi::ZERO, Gi::new(-50), SIDE_SEA),
             Gi::new(-50)
         );
+    }
+
+    /// ★ AN INLAND COLUMN (2026-09-24, ruling B7 item 1; plan step 2 part 3b), both arms. Its ground
+    /// UNDER the water's level: the surface is `h`, untouched — where the LAND word lifted the same
+    /// column 100 OVER the water. Its ground OVER the level: held over it exactly as a land column
+    /// is, and a surface already high is left alone.
+    ///
+    /// **Example.** A dry pocket's floor 400 under the sea's level keeps its own floor 700 under
+    /// it; a plain 400 over the level, which the fine octaves dug 50 under it, stands 100 over it,
+    /// as every land column of the coast does.
+    #[test]
+    fn an_inland_column_under_the_level_is_left_alone_and_over_it_is_land() {
+        let water = Gi::new(1_000_000);
+        assert_eq!(
+            shore(
+                water - Gi::new(400),
+                water,
+                water - Gi::new(700),
+                SIDE_INLAND
+            ),
+            water - Gi::new(700)
+        );
+        assert_eq!(
+            shore(water - Gi::new(400), water, water - Gi::new(700), SIDE_LAND),
+            water + Gi::new(100),
+            "the land word lifts the same column: the mesa this word cures"
+        );
+        assert_eq!(
+            shore(
+                water + Gi::new(400),
+                water,
+                water - Gi::new(50),
+                SIDE_INLAND
+            ),
+            water + Gi::new(100)
+        );
+        assert_eq!(
+            shore(
+                water + Gi::new(400),
+                water,
+                water + Gi::new(900),
+                SIDE_INLAND
+            ),
+            water + Gi::new(900)
+        );
+        // The ground exactly at the level is land, as every word reads it.
+        assert_eq!(shore(water, water, water - Gi::new(9), SIDE_INLAND), water);
     }
 
     /// ★ THE SHORE LAW, four statements that could each fail (2026-09-21): a land column the fine

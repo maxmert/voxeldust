@@ -141,3 +141,81 @@ across the next valley, and that picture becomes the "before" the owner judges.
 prerequisite of the judged pictures. The owner judges the shape as it is drawn today, and each picture's caption still
 says "no far shadow". The far shadow stays registered in D-TERRAIN-8 (the dressing), wanted, for the `perf` tree when it
 has room; it is not dropped.
+
+## B7. STEP 2'S TWO WORDS, AND TWO TRACKS (2026-09-24; owner: *"I agree with your 2 recommendations, if it will lead us to believable terrain. Agree with 2 tracks"*)
+
+1. **An inland pocket is a closed basin, not the sea.** The census (step 1) found 148 pockets under the sea's level with
+   no path to the ocean — 3.2 million km², the largest 1.35 million km² and 11.8 km deep — each drawn as sea at the
+   sea's level. From step 2 on, each is a closed basin like any other: its water from its budget (a lake at its own
+   level where the rain fills it, a partial lake or a dry basin where it does not), and the sea's level is solved over
+   the CONNECTED ocean only. One law, no special case (T9).
+2. **The discharge row carries the RUNOFF**, accumulated over the final receivers — the water that reaches a river,
+   the budget's own water, and the row R2 seeds its rivers from. The rain would make a desert river as large as a wet
+   valley's.
+3. **Two tracks at once:** step 2 is built; R2's detailed design is written meanwhile (read-only work, no load on the
+   bench), so step 3 starts from a reviewed design the day step 2 lands.
+
+**Example.** A hollow at the foot of the belt's wet range, fed by the range's own receivers, fills to its sill and
+spills a river toward the sea; a pocket 2 km under the sea's level in a dry interior stands as a salt pan with a small
+lake at its bottom, at its own level, never as a square of ocean.
+
+### B7 BUILT (2026-09-25; plan step 2; NOT committed — the owner's word owed)
+
+`GENERATOR_VERSION` 20, `ARTIFACT_VERSION` 8 (`PROTO_MINOR` unchanged). The census lines are in
+`docs/investigation/2026-09-24/step2_census_gen20.txt`; the living status file §2, §4, §6, §7 holds the detail.
+
+1. **The inland pocket is a closed basin (item 1).** The ocean is the largest connected water under the sea's level
+   (`land::ocean_mask`); the sea is solved over it alone at the first land, the freeboard, the running sea, the final sea
+   and the lakes' fixed point (`land::sea_level_connected`); only the ocean seeds the flood, carries the sea's load and
+   facies, and warms the climate's air. An inland dry column under the sea's level reads `SIDE_INLAND`, and the shore law
+   leaves it alone. MEASURED: 0 pocket nodes carry the sea's bit (59 470 were drawn as sea); 236 pockets, 3.3 million
+   km², by their budget DRY 181, PARTIAL 45, SPILLING 10; the sea 3 591 m (3 566 m).
+2. **The discharge row carries the runoff (item 2)**, accumulated over the receivers of the last routing. MEASURED:
+   W10-DISCHARGE-TREE 0 (1 304 002).
+3. **The budget of W11 is Fill–Spill–Merge's** (B6 item 1 step 2): each hollow takes its whole watershed down the ground,
+   and a full hollow's overflow runs on to the sibling, the parent's ring or the sea; nothing is lost (the books exact).
+   MEASURED: lakes 3.51 % of the land (0.068 %), 3 883 patches (506), bodies DRY 9 599 / PARTIAL 1 549 / SPILLING 5 839
+   (19 511 / 506 / 0). The small lake keeps its level at pyramid level 1: 0 lakes change at the rung 9 → 10 swap (427 of
+   506), 0 lip columns (3 753).
+4. **What it exposed, MEASURED, for the owner's word:** G-RIVER-DESCENT RED — 3 430 trunk steps rise inside filled
+   hollows, because the shipped receivers follow the routing fill across a parent's dry ring while the budget pours the
+   water into the sibling (proposal: receivers that follow the budget's water, before step 3); G-GRID worse, 1.484
+   against 1.284 (1.306 outside the filled hollows: the new flats over the pockets lean on the grid); G-RUNG-HOLD RED,
+   19 columns at 9 → 10 up to 6 090 m (plan risk R7, question 5); at the level swaps 14 → 15 and 15 → 16, 3 698 and 558
+   lake columns fold away under the wet-majority rule of W15, one pixel each at the swap distance.
+5. **The review of step 2 (2026-09-25; NOT committed):** a pocket's dry floor is its own coast-mask word (word 2), so no
+   floor is lifted into a mesa at any rung — MEASURED G-POCKET-HELD 0 of 60 383 columns, G-RUNG-HOLD 5 columns at
+   9 → 10 up to 731 m (was 19 up to 6 090 m); a far chunk waits for the coast mask; a floor under the sea's level is no
+   beach. STILL FOR THE OWNER'S WORD: the discharge row carries to the sea the 1 607 km³/yr the budget holds
+   (question 3 B), MEASURED by the census's new line ROW-OUT-OF-CLOSED-HOLLOWS.
+
+**Example.** The hollow at the foot of the belt's wet range now fills from the range's own runoff and spills; the
+largest pocket, 11.9 km under the sea's level, is a dry basin at its own depth by its budget, and from 450 km a one-node tarn
+in a pass is still water at its own level.
+
+## B8. AFTER STEP 2: THE EDGES BEFORE R2, THE RIVERS FOLLOW THE WATER, R2's BENCH FIRST (2026-09-25; the owner chose each recommended option)
+
+Step 2's pictures (`docs/investigation/2026-09-24/pictures/*_step2.png`) show the lakes in the right amount, but each
+small lake is a flat blue square one node (8 km) wide — the node-square edge (status file §6 T4) that step 2 made
+visible by making the lakes exist. The owner's four answers:
+
+1. **THE EDGES COME BEFORE R2** (amends B6's order, steps 3 and 4 change places): the next build step is ONE SHORELINE
+   FROM ONE FIELD — the sea's shore and the lake's edge where the ground crosses the water's level, never a node square,
+   the lake's level held by its dry neighbours (W6's owed law) — on today's ground. The law does not depend on which
+   ground it reads; R2 later gives it the 1 km valleys, and the pictures are judged again then. Until R2 the edges
+   follow the fine noise, so a shore may look dune-shaped: stated, accepted.
+2. **THE RIVERS FOLLOW THE WATER** (plan question 3, choice B, and the receivers question; amends B7 item 2): the
+   shipped receivers and the discharge row follow the budget's own water — a full hollow's river runs over its spill
+   into the sibling (Fill–Spill–Merge's flow directions), and a closed body that never fills passes nothing on. BEFORE
+   R2, because R2 seeds its rivers from them. Cures G-RIVER-DESCENT (3 430 rising steps at generator 20) and the 1 607
+   km³/yr the row carries to the sea out of hollows the budget holds (ROW-OUT-OF-CLOSED-HOLLOWS).
+3. **R2's SLICE 0 FIRST**: the measured bench (R1's loop as the control, one change at a time, every number read
+   through the shipped kernel) and a HILLSHADE of the four stand tiles at the owner's 100–150 km view, for the owner's
+   look, BEFORE any bake service. A planet's coarser ground stands until its bake is done; never a temporary ground
+   (T3, `r2_design.md` §16).
+4. **COMMIT STEP 2 NOW** as generator 20's checkpoint; the square lakes stay until the edge step.
+
+**Example.** On the plain stand forty lakes stand as blue tiles on the dunes. After the edge step each one is the
+water inside the ground's own hollow at the lake's level — a ragged outline that follows the ground — and the river
+that leaves a full one crosses its lowest rim notch into the next hollow, never back across a dry floor. Then R2's
+bench shows the owner the same ground eroded at 1 km, before anything bakes a planet.

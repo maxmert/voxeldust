@@ -12,7 +12,7 @@ use vd_bins::artifact_worker::{SolveJob, run_solve};
 use vd_terrain::home::{home_planet, home_solve_words};
 
 /// The committed digest of the home planet's artifact on this build.
-const HOME_ARTIFACT_DIGEST: [u64; 2] = [0xab78_092a_0bc2_e1f0, 0x0727_7e1b_4ba7_b64f];
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x41ee_2203_a990_feb7, 0x7b18_eb06_670f_423c];
 
 #[test]
 fn the_home_planets_artifact_digests_to_its_committed_words() {
@@ -37,7 +37,9 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
     }
     // ★ GATE G-SEA (slice 8c stage C5; ruling T8's cure): the sea's level the solve found over the
     // eroded field, and the share of the globe under it, pinned — read here from the artifact's own
-    // rows, area-weighted by the lattice's node areas.
+    // rows, area-weighted by the lattice's node areas. ★ The share is the CONNECTED ocean's, the
+    // rows' own SEA bit (2026-09-24, ruling B7 item 1), never `z ≤ sea`, which counts every inland
+    // pocket as ocean.
     let lattice = job
         .body
         .macro_lattice()
@@ -47,7 +49,10 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
     for (node, row) in artifact.rows.iter().enumerate() {
         let area = lattice.area_m2(node as u32) as f64;
         all += area;
-        if i32::from(row.z_m) <= sea {
+        if (row.receiver_facies >> vd_terrain::artifact::FACIES_SHIFT)
+            & vd_terrain::solve::FACIES_SEA
+            != 0
+        {
             wet += area;
         }
     }

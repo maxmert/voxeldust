@@ -21,6 +21,12 @@
 //!   so the law's own cost is a number too: one triangle per ground triangle that reaches down to
 //!   the water plus the client's hide bound.
 //!
+//! ★ A COLUMN'S WATER IS ITS OWN (2026-09-25, review finding 9 of plan step 2): the reading takes
+//! `SampleBox::water` exactly as the sheet does (`position::water_sheet_sided`) — the sea, a lake's
+//! level, or ZERO where no water stands (an inland column, a pocket's dry floor) — and never raises
+//! it to the sea. Before, a dry pocket 2 km under the sea's level counted as wet at every rung
+//! while the client drew no water there.
+//!
 //! `cargo run --release -p vd-bins --example far_water_share -- [rung_lo] [rung_hi]`
 
 use std::time::Instant;
@@ -96,7 +102,8 @@ fn main() {
                     for b in 0..CHUNK_EDGE as i32 {
                         for a in 0..CHUNK_EDGE as i32 {
                             let col = vd_terrain::lattice::SampleBox::column_index(a, b);
-                            let water = bx.water[col].max(bx.sea);
+                            // The column's own water, as the sheet reads it.
+                            let water = bx.water[col];
                             let ground = bx.surfaces[col];
                             columns += 1;
                             if water <= ground {

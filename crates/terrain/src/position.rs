@@ -392,11 +392,10 @@ pub fn water_sheet_sided(
     let edge = CHUNK_EDGE as i32;
     let hide_m = metres_of_q28(hide);
     let quantum_m = water_quantum_m(samples.key.rung);
-    // A column's level: its own water word, or the body's sea under every cell.
-    let level_at = |col: usize| -> Gi {
-        let w = samples.water[col];
-        if w > samples.sea { w } else { samples.sea }
-    };
+    // ★ A column's level: its OWN water (2026-09-24, plan step 2 part 3c) — the sea, a lake's
+    // level, or ZERO where no water stands over it. Never raised to the sea: a lake in a pocket
+    // under the sea's level stands at its own level, and a dry pocket builds no sheet.
+    let level_at = |col: usize| -> Gi { samples.water[col] };
     // Each ground vertex: its metres, its radius, its own level — the highest word among its
     // group's four columns (the group as `vertex_position` reads it: the quantum's shift, the last
     // centre's group clamped) — and its side, the columns' word.
@@ -569,13 +568,67 @@ mod water_sheet_tests {
         assert!(points.len() < dry_mesh.vertices.len());
     }
 
-    /// ★ THE SEA UNDER EVERY CELL, THE LAKE ABOVE IT, AND THE CUT UNDER THE LAND: columns whose
-    /// rows are dry still carry the sea's surface under the land; a lake word on one column raises
-    /// the triangles that touch it to the lake and leaves the rest at the sea; with no hide only
-    /// the triangles a wet vertex touches survive, with a hundred metres those within a hundred
-    /// metres over the water, and a sea 20 km under every column keeps nothing with no bound and
-    /// every triangle with the largest one. MEASURED here on the box: the counts fall as the
-    /// bound tightens and never rise.
+    /// ★ TEST 30 (plan step 2 part 3c; ruling B7 item 1): A LAKE UNDER THE SEA'S LEVEL STANDS AT ITS
+    /// OWN LEVEL. A chunk wholly under a stated sea, its every column's water a lake's level half
+    /// way between its highest ground and the sea: every water point stands at the LAKE's radius,
+    /// never raised to the sea's (the rule before this step drew the higher of the two).
+    #[test]
+    fn a_lake_under_the_seas_level_stands_at_its_own_level() {
+        let moon = crate::home::home_moon();
+        let key = ChunkKey {
+            face: Face::PosY,
+            rung: 4,
+            x: 3,
+            y: 3,
+            z: 0,
+        };
+        // The moon's own surface chunk there, and a sea stated 200 m over its highest ground.
+        let key = ChunkKey {
+            z: crate::digest::surface_chunk_z(&moon, key.face, key.rung, key.x, key.y),
+            ..key
+        };
+        let dry = crate::lattice::sample_box(&moon, None, key).expect("a box");
+        let top = |bx: &SampleBox, body: &BodyDefinition| -> f64 {
+            let mut radii: Vec<f64> = extract_all_edges(bx)
+                .vertices
+                .iter()
+                .map(|v| radius(vertex_position_m(body, bx, *v)))
+                .collect();
+            radii.sort_by(f64::total_cmp);
+            radii[radii.len() - 1]
+        };
+        let over = (top(&dry, &moon) - moon.radius_m()) as i32 + 200;
+        let wet = moon.with_sea_m(Some(over));
+        let mut bx = crate::lattice::sample_box(&wet, None, key).expect("a box");
+        let mesh = extract_all_edges(&bx);
+        assert!(!mesh.triangles.is_empty(), "the chunk holds ground");
+        let highest = top(&bx, &wet);
+        let sea_r = wet.sea_radius_m();
+        assert!(highest < sea_r - 2.0, "{highest} under {sea_r}");
+        let lake_m = (0.5 * (highest + sea_r)).floor();
+        let lake = crate::units::q28_of_metres(lake_m);
+        for w in &mut bx.water {
+            *w = lake;
+        }
+        let (points, _, triangles) = water_sheet(&wet, &bx, &mesh, KEEP_ALL);
+        assert_eq!(triangles.len(), mesh.triangles.len());
+        assert!(!points.is_empty());
+        for p in &points {
+            let r = radius(*p);
+            assert!((r - lake_m).abs() < 0.01, "{r} against {lake_m}");
+        }
+    }
+
+    /// ★ THE SEA UNDER EVERY CELL BESIDE IT, THE LAKE ABOVE IT, AND THE CUT UNDER THE LAND: dry
+    /// columns whose water is the sea (a column with no field reads the body's sea, as a land
+    /// column beside the sea does) carry the sea's surface under the land; a lake word on one
+    /// column raises the triangles that touch it to the lake and leaves the rest at the sea; with no
+    /// hide only the triangles a wet vertex touches survive, with a hundred metres those within a
+    /// hundred metres over the water, and a sea 20 km under every column keeps nothing with no bound
+    /// and every triangle with the largest one. MEASURED here on the box: the counts fall as the
+    /// bound tightens and never rise. ★ AND A COLUMN WITH NO WATER OF ITS OWN (ZERO, an inland
+    /// column; 2026-09-24, plan step 2 part 3c) builds no sheet at any bound: the sea is no longer
+    /// raised under it.
     #[test]
     fn the_sea_stands_under_every_cell_and_the_sheet_is_cut_under_the_land() {
         let moon = crate::home::home_moon();
@@ -604,9 +657,7 @@ mod water_sheet_tests {
         let low = radii[radii.len() >> 4];
         let wet = moon.with_sea_m(Some((low - moon.radius_m()) as i32));
         let mut land = crate::lattice::sample_box(&wet, None, key).expect("a box");
-        for w in &mut land.water {
-            *w = Gi::ZERO;
-        }
+        assert!(land.water.iter().all(|&w| w == wet.sea_radius));
         let mesh = extract_all_edges(&land);
         let (_, _, triangles) = water_sheet(&wet, &land, &mesh, KEEP_ALL);
         assert_eq!(triangles.len(), mesh.triangles.len());
@@ -619,15 +670,18 @@ mod water_sheet_tests {
         assert!(at_zero < mesh.triangles.len(), "{at_zero}");
         let deep = moon.with_sea_m(Some(-20_000));
         let mut under = crate::lattice::sample_box(&deep, None, key).expect("a box");
-        for w in &mut under.water {
-            *w = Gi::ZERO;
-        }
         let under_mesh = extract_all_edges(&under);
         assert_eq!(water_sheet(&deep, &under, &under_mesh, Gi::ZERO).2.len(), 0);
         assert_eq!(
             water_sheet(&deep, &under, &under_mesh, KEEP_ALL).2.len(),
             under_mesh.triangles.len()
         );
+        // ★ No water of its own under any column: no sheet, even with every bound (a dry pocket's
+        // floor under the sea's level, 2026-09-24).
+        for w in &mut under.water {
+            *w = Gi::ZERO;
+        }
+        assert_eq!(water_sheet(&deep, &under, &under_mesh, KEEP_ALL).2.len(), 0);
         let lake = wet.sea_radius + (Gi::new(50 * STEPS_PER_M) << vd_recipe::cell::LENGTH_BITS);
         land.water[SampleBox::column_index(0, 0)] = lake;
         let (points, _, triangles) = water_sheet(&wet, &land, &mesh, KEEP_ALL);
@@ -695,7 +749,7 @@ mod water_sheet_tests {
             let (mut under, mut over) = (0, 0);
             for (da, db) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                 let col = SampleBox::column_index(group[0] + da, group[1] + db);
-                let l = bx.water[col].max(bx.sea);
+                let l = bx.water[col];
                 under += u8::from(bx.surfaces[col] < l);
                 over += u8::from(bx.surfaces[col] > l);
             }

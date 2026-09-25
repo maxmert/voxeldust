@@ -151,7 +151,10 @@ pub struct FieldRead {
     /// [`crate::height::SIDE_LAND`] or [`crate::height::SIDE_SEA`] where the host read the
     /// artifact's coast mask at this column's own FINE node, [`SIDE_UNKNOWN`] where it holds no
     /// mask. It is the same word at every rung, because it is the same fine node's bit, so the
-    /// shoreline does not move when a ring swaps.
+    /// shoreline does not move when a ring swaps. [`crate::height::SIDE_INLAND`] where the row
+    /// says land and no node of the column's own read stencil is the sea (2026-09-24, ruling B7):
+    /// a dry column far from the sea, which [`crate::height::shore`] leaves alone under the sea's
+    /// level.
     pub side: Gi,
 }
 

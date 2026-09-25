@@ -28,14 +28,16 @@ const HOME_GOLDEN_Z: &str = include_str!("../tests/golden_home_z.txt");
 /// ★ THE MEASURED HALF OF THE HOME WORLD'S IDENTITY (slice 8c stage C4c): the eight self-check
 /// chunks read through the golden fields, folded. Recorded with the fields; a host that folds another
 /// word has drifted, and its world hello is refused by name.
-pub const HOME_IDENTITY_MEASURED: u64 = 0xaef4_c19c_77ab_7dbe;
+pub const HOME_IDENTITY_MEASURED: u64 = 0x7713_d99c_eda8_63a8;
 
 /// ★ THE HOME PLANET'S SEA (slice 8c stage C5; gate G-SEA): the level the solve finds for the
 /// planet's water inventory over its eroded field, whole metres over the ladder radius, and the
 /// share of the globe under it in 1/10 000. Recorded by the artifact pin; a change is a change of
-/// the solve and is re-recorded on purpose.
-pub const HOME_PLANET_SEA_M: i32 = 3_566;
-pub const HOME_PLANET_OCEAN_SHARE_Q4: u32 = 7_859;
+/// the solve and is re-recorded on purpose. ★ Since generator 20 (ruling B7 item 1) the level is
+/// solved over the CONNECTED ocean and the share is the ocean's own SEA bit, never `z ≤ sea`:
+/// 3 566 m and 7 859 at generator 19, recorded again by `golden_z_record` at generator 20.
+pub const HOME_PLANET_SEA_M: i32 = 3_591;
+pub const HOME_PLANET_OCEAN_SHARE_Q4: u32 = 7_811;
 
 /// The golden fields, parsed from the literal in the build. A torn literal is a defect, not a
 /// refusal: the build carries it, so it panics here and never ships.

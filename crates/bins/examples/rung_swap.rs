@@ -66,8 +66,9 @@ fn wet_at(
     let cell_j =
         vd_seed::ladder::index_of(vd_seed::bend::unbend(s), body.ladder().cells_per_edge(rung));
     let side = vd_terrain::artifact::sample_side(fine, field, face, rung, cell_i, cell_j);
-    let (water, _, _) =
-        vd_terrain::artifact::column_water(body, &lattice, field, face, 0, i, j, side);
+    // The water that STANDS over the column (ZERO for an inland one, plan step 2 part 3b).
+    let water =
+        vd_terrain::artifact::column_water(body, &lattice, field, face, 0, i, j, side).water;
     let ground = height_field_m(body, field, dir, rung)?;
     let water_m = vd_terrain::units::metres_of_q28(water);
     Some((water_m > ground, water_m))

@@ -3,6 +3,13 @@
 //! pixel's ray to the sea's sphere, find the fine node under it, and print the mask's side in a
 //! window around it at level 0 (the fine nodes) and at the count pyramid's levels 1 to 3 — so a
 //! patch of dots in a picture can be read as the mask's own islets or as a drawing fault.
+//!
+//! ★ A COLUMN'S WATER IS ITS OWN (2026-09-25, review finding 9 of plan step 2): the readings take
+//! `SampleBox::water` exactly as the sheet does (`position::water_sheet_sided`) — the sea, a lake's
+//! level, or ZERO where no water stands (an inland column, a pocket's dry floor) — and never raise
+//! it to the sea. A vertex whose four columns hold no water is read against no water, so it counts
+//! over its water, as the sheet draws none there. The mask's glyph `p` is a pocket's dry floor.
+//!
 //! `cargo run --release -p vd-bins --example mask_at_pixel -- ex ey ez qx qy qz qw px py`
 
 use vd_bins::artifact_worker::{SolveJob, run_solve};
@@ -61,6 +68,7 @@ fn main() {
         Some(Side::Land) => 'L',
         Some(Side::Sea) => '.',
         Some(Side::Lake) => 'k',
+        Some(Side::Pocket) => 'p',
         None => '?',
     };
     for level in 0..=3u32 {
@@ -140,13 +148,15 @@ fn main() {
                     continue;
                 }
                 cols += 1;
-                let water = bx.water[col].max(bx.sea);
+                // The column's own water, as the sheet reads it.
+                let water = bx.water[col];
                 if bx.surfaces[col] > water {
                     cols_over += 1;
                     let (fu, fv) = vd_seed::bend::face_coords(face, [dv.x, dv.y, dv.z]);
                     let ni = vd_seed::ladder::index_of(vd_seed::bend::unbend(fu), n);
                     let nj = vd_seed::ladder::index_of(vd_seed::bend::unbend(fv), n);
-                    if coast_side(&artifact.coast, lattice.index(face, ni, nj)) != Some(Side::Land)
+                    if coast_side(&artifact.coast, lattice.index(face, ni, nj))
+                        .is_some_and(Side::wet)
                     {
                         cols_over_sea += 1;
                     }
@@ -175,7 +185,7 @@ fn main() {
             let mut level_r = 0.0f64;
             for (da, db) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                 let col = SampleBox::column_index(group[0] + da, group[1] + db);
-                let w = bx.water[col].max(bx.sea);
+                let w = bx.water[col];
                 level_r = level_r.max(metres_of_q28(w));
             }
             let h = ground_r - level_r;
@@ -195,7 +205,8 @@ fn main() {
             let (fu, fv) = vd_seed::bend::face_coords(face, [d.x, d.y, d.z]);
             let ni = vd_seed::ladder::index_of(vd_seed::bend::unbend(fu), n);
             let nj = vd_seed::ladder::index_of(vd_seed::bend::unbend(fv), n);
-            if coast_side(&artifact.coast, lattice.index(face, ni, nj)) == Some(Side::Land) {
+            // Dry by the mask: land, or a pocket's dry floor.
+            if coast_side(&artifact.coast, lattice.index(face, ni, nj)).is_some_and(|s| !s.wet()) {
                 land_bins[bin] += 1;
             }
         }

@@ -171,7 +171,39 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 /// the card has always run: the SEED-ONLY golden tables stand and `gpu-drift` compares like with
 /// like. The SOLVE did not move, so the sea, the ocean share and the rows stand; the artifact's own
 /// DIGEST moves, because the mask's bytes double and carry the lake.
-pub const GENERATOR_VERSION: u32 = 19;
+///
+/// ★ VERSION 20 (2026-09-24, plan step 2 of the believability arc; ruling B7, the owner: *"I agree
+/// with your 2 recommendations, if it will lead us to believable terrain"*). Five changes, one
+/// version:
+///
+/// 1. **THE SEA IS THE CONNECTED OCEAN.** The largest connected water under the sea's level is the
+///    ocean (`land::ocean_mask`); every other body under it is an inland POCKET, a closed basin.
+///    The sea's level is solved over the ocean alone (`land::sea_level_connected`: the first land,
+///    the freeboard, the running sea, the final sea and the lakes' fixed point); only the ocean
+///    seeds the routing flood, loads the first land, carries the sea's facies and warms the
+///    climate's air. A pocket is raised by the flood, skipped by the sweep and filled by the
+///    deposit like any hollow, so THE WHOLE FIELD MOVES. MEASURED before it at generator 19: 148
+///    pockets, 3.2 million km², drawn as sea at the sea's own level.
+/// 2. **THE LAKE BUDGET FEEDS EVERY HOLLOW FROM ITS WATERSHED AND PASSES EVERY OVERFLOW ON**
+///    (`lakes::budget`, `lakes::cascade`; Fill–Spill–Merge). MEASURED before it: a hollow's
+///    watershed supplied a median 12 times what the budget gave it, and a full hollow's overflow
+///    into a dry parent was lost.
+/// 3. **THE DISCHARGE IS THE RUNOFF over the final receivers** (`MacroSolve::accumulate_runoff`).
+///    MEASURED before it: the shipped row disagreed with its own tree at 1 304 002 nodes.
+/// 4. **A SMALL LAKE KEEPS ITS LEVEL AT PYRAMID LEVEL 1** (`artifact::block_water`), and a dry column
+///    never reads a lake's word. MEASURED before it: 345 of 506 lakes vanished at the rung 9 → 10
+///    swap, and 3 753 dry columns stood as a lip over a lake level.
+/// 5. **AN INLAND COLUMN** (land with no sea node in its own read stencil) holds no water, and the
+///    shore law leaves its ground alone under the sea's level (`vd_recipe::height::SIDE_INLAND`).
+///    ★ And A POCKET'S DRY FLOOR is its own side word (2026-09-25, review finding 1 of step 2: the
+///    coast mask's word 2, `artifact::Side::Pocket`): it reads INLAND at every rung whatever its
+///    stencil holds, so a floor behind a coastal ridge is never lifted into a mesa; and a floor
+///    under the sea's level in the coast band is no beach (review finding 5).
+///
+/// A chunk with NO artifact reads the unknown side and the body's sea, so its arithmetic is the one
+/// the card has always run: the SEED-ONLY golden tables stand and `gpu-drift` compares like with
+/// like. `ARTIFACT_VERSION` moves to 8; `PROTO_MINOR` does not move.
+pub const GENERATOR_VERSION: u32 = 20;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
@@ -226,7 +258,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 19,
+            GENERATOR_VERSION, 20,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -260,5 +292,5 @@ mod tests {
         assert_ne!(bare.measured, id.measured);
     }
 
-    const DECLARED_PIN: u64 = 11_554_407_130_392_614_244;
+    const DECLARED_PIN: u64 = 5_388_269_546_425_232_867;
 }

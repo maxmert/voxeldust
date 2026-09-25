@@ -74,7 +74,16 @@ use crate::units::{LENGTH_BITS, STEPS_PER_M};
 /// surface at any rung, because a lake node's bit was clear, the shore law read `SIDE_LAND` and
 /// held every lake column at least a quarter of its ground's height ABOVE its own water. The shore
 /// law drained every lake on the planet.
-pub const ARTIFACT_VERSION: u32 = 7;
+/// ★ Version 8 (2026-09-24, plan step 2; ruling B7) keeps every byte's FORMAT and changes four
+/// meanings, so a version-7 store re-solves: (1) the DISCHARGE byte is the Turc–Pike RUNOFF
+/// accumulated over the final receivers, no longer the last pass's rain over an older tree (status
+/// §7 W10); (2) the PYRAMID'S WATER WORD holds the HIGHEST LAKE LEVEL of a block wherever the block
+/// holds a lake node, else the sea where it holds a sea node, else DRY — never a two-of-four
+/// majority, never a mean ([`block_water`]; status §6 T5, §7 W6); (3) the SEA is the CONNECTED
+/// OCEAN only, so an inland pocket's rows carry its own budget's water and never the sea's bit;
+/// (4) the coast mask's word 2, unused before, is A POCKET'S DRY FLOOR ([`side_word`],
+/// [`Side::Pocket`]; 2026-09-25) — the mask keeps its two bits a node and its size.
+pub const ARTIFACT_VERSION: u32 = 8;
 /// A tile's edge in nodes: 64 × 64 rows of ten bytes is 40 KB — under a second on the lane.
 pub const TILE_EDGE: u32 = 64;
 /// The water level's word for a dry node.
@@ -190,13 +199,14 @@ pub struct Artifact {
     /// 2 × 2 block below; as many levels as the edge halves to.
     pub pyramid: Vec<Vec<i16>>,
     /// ★ THE PYRAMID'S WATER WORD (2026-09-21, the owner's order after the coast flight): level
-    /// `k` holds one water level per coarse node, the same shape as `pyramid` — the mean level of
-    /// the wet nodes of its 2 × 2 block when at least half of them are wet, else [`DRY_M`]. A far
-    /// column read through a level held no water word before this, so it took the body's sea and a
-    /// highland lake vanished from orbit and appeared on approach — a pop. With the word a lake
-    /// wider than the level's node keeps its level at every rung, and a lake narrower than the node
-    /// folds away where it stands under a pixel. The sea needs no word: it stands under every cell
-    /// (`SampleBox::sea`).
+    /// `k` holds one water level per coarse node, the same shape as `pyramid`. ★ SINCE VERSION 8
+    /// (2026-09-24, plan step 2; ruling W16: a rung boundary is invisible) it is [`block_water`]:
+    /// the HIGHEST lake level among every lake fine node under the block, else the sea's level where
+    /// a sea node stands under it, else [`DRY_M`]. The word before it was the MEAN of the wet
+    /// children where at least two of four were wet, so a lake node alone in its block turned to
+    /// land at the rung 9 → 10 swap — MEASURED at generator 19: 345 of 506 lakes vanished whole
+    /// there — and a block half sea and half lake read a level no water has. Only a LAKE column
+    /// reads the word (`column_water`); the sea is one surface under the whole body.
     pub pyramid_water: Vec<Vec<i16>>,
     /// ★ THE COAST MASK (2026-09-22; the owner, from 1 400 km: "during flight the shores changes
     /// again all the time"; ruling W10; widened 2026-09-23 by ruling W16): A TWO-BIT SIDE WORD PER
@@ -219,14 +229,24 @@ pub fn coast_bytes(nodes: usize) -> usize {
     nodes.div_ceil(4)
 }
 
-/// ★ WHICH SIDE OF WHICH WATER A COLUMN STANDS ON (2026-09-23, ruling W16). Three words, not two:
+/// ★ WHICH SIDE OF WHICH WATER A COLUMN STANDS ON (2026-09-23, ruling W16). Three words for water:
 /// a column over its water is LAND; one under the SEA takes the body's own sea level; one under a
 /// LAKE takes that lake's own level, which stands anywhere between the sea and a mountain pass.
 /// Before this word a lake node read LAND and the shore law lifted it out of its own lake.
 ///
+/// ★ THE FOURTH WORD, THE POCKET (2026-09-25, ruling B7 item 1: *"an inland pocket is a closed
+/// basin, not the sea"*). A DRY node whose ground stands UNDER the sea's level is the floor of a
+/// closed basin that no path joins to the ocean. It is its own word, so every rung reads it from
+/// the node itself — never from a stencil whose width follows the pyramid level — and the shore
+/// law leaves such a column where the solve put it. Before this word a pocket's floor read LAND,
+/// and where the sea stood in the column's read stencil the shore law lifted the floor a quarter
+/// of its depth OVER the sea: a mesa where the solve put a basin, and a different mesa at each
+/// level swap, because the stencil's reach doubles with the level.
+///
 /// **Example.** A pilot flies north from the belt. The shore under her is [`Side::Sea`]; the tarn
 /// in the pass she crosses is [`Side::Lake`] at 2 100 m, and its water stands two kilometres over
-/// the sea she just left.
+/// the sea she just left. Behind a one-node ridge on the coast, a salt pan 2 km under the sea's
+/// level is [`Side::Pocket`]: it stays a pan at every rung, and never rises into a mesa.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     /// The node stands OVER its own water.
@@ -235,21 +255,27 @@ pub enum Side {
     Sea,
     /// The node stands at or under A LAKE, at that lake's own level.
     Lake,
+    /// ★ The node stands DRY and UNDER THE SEA'S LEVEL: the floor of an inland pocket, where no
+    /// water stands (2026-09-25, ruling B7 item 1).
+    Pocket,
 }
 
 impl Side {
-    /// Whether the node stands at or under water at all — the sea and a lake alike.
+    /// Whether the node stands at or under water at all — the sea and a lake alike. A pocket's
+    /// floor is dry.
     #[must_use]
     pub fn wet(self) -> bool {
-        !matches!(self, Side::Land)
+        matches!(self, Side::Sea | Side::Lake)
     }
-    /// The recipe's own side word: a wet node is held UNDER its water, a dry one OVER it.
+    /// The recipe's own side word: a wet node is held UNDER its water, a dry one OVER it, and a
+    /// pocket's floor is [`vd_recipe::height::SIDE_INLAND`], which the shore law leaves alone under
+    /// the sea's level.
     #[must_use]
     pub fn word(self) -> Gi {
-        if self.wet() {
-            vd_recipe::height::SIDE_SEA
-        } else {
-            vd_recipe::height::SIDE_LAND
+        match self {
+            Side::Sea | Side::Lake => vd_recipe::height::SIDE_SEA,
+            Side::Land => vd_recipe::height::SIDE_LAND,
+            Side::Pocket => vd_recipe::height::SIDE_INLAND,
         }
     }
 }
@@ -261,14 +287,42 @@ impl Side {
 pub fn coast_side(mask: &[u8], node: u32) -> Option<Side> {
     let byte = *mask.get(node as usize / 4)?;
     let shift = 2 * (node % 4);
-    Some(match byte >> shift & 3 {
-        0 => Side::Land,
-        1 => Side::Sea,
-        _ => Side::Lake,
-    })
+    Some(side_of_word(byte >> shift & 3))
 }
 
-/// The two bits a node's side takes in the mask: the wet bit, then the lake bit.
+/// The side a two-bit mask word names: 0 land, 1 the sea, 2 a pocket's dry floor, 3 a lake.
+fn side_of_word(word: u8) -> Side {
+    match word {
+        0 => Side::Land,
+        1 => Side::Sea,
+        2 => Side::Pocket,
+        _ => Side::Lake,
+    }
+}
+
+/// ★ THE ONE RULE A NODE'S SIDE WORD IS WRITTEN WITH (2026-09-25, ruling B7 item 1): the facies'
+/// own word ([`coast_word`]: land 0, the sea 1, a lake 3), and 2 — A POCKET'S FLOOR — for a DRY
+/// node whose row stands UNDER the sea's level. The mask is written with it and every row reader
+/// reads with it ([`side_of_row`]), so a host that holds the mask and a host that holds the tile
+/// name one side for one node.
+///
+/// The compare is on the ROW'S OWN WHOLE METRES against the artifact's own sea
+/// ([`Artifact::sea_m`]), strict: a dry node whose metre is under the sea's metre stands under the
+/// level, and since the sea's facies is the CONNECTED ocean, no path joins it to the ocean — it is
+/// a pocket (`land::ocean_mask`). A dry node within the metre of the sea's level reads LAND, which
+/// is the word it had before. A dry body's sea is [`DRY_M`], under every row, so a dry body has no
+/// pocket.
+///
+/// **Example.** The salt pan behind the belt's coast stands at −1 400 m against a sea at 3 591 m,
+/// with no water in it: word 2. The ridge beside it at 3 640 m: word 0.
+#[must_use]
+pub fn side_word(facies: u8, z_m: i16, sea_m: i16) -> u8 {
+    let word = coast_word(facies);
+    if (word == 0) & (z_m < sea_m) { 2 } else { word }
+}
+
+/// The two bits the FACIES alone give a node's side: the wet bit, then the lake bit. The mask's
+/// own word is [`side_word`], which adds the pocket.
 #[must_use]
 pub fn coast_word(facies: u8) -> u8 {
     if facies & crate::solve::FACIES_LAKE != 0 {
@@ -294,8 +348,14 @@ pub fn coast_word(facies: u8) -> u8 {
 ///
 /// ★ THE WORD IS `u32`, AND THAT IS THE BOUND: a level-`k` count is at most `4^k`, and a lattice
 /// halves at most eleven times ([`crate::macro_lattice::MACRO_EDGE_CEILING`] is 2 048 = 2¹¹), so
-/// the largest count a body can hold is 4¹¹ = 4 194 304 — past a `u16`. MEASURED on the home
-/// planet: six levels, 2 957 613 counts, 11.8 MB beside the pyramid's own 11.8 MB of words.
+/// the largest count a body can hold is 4¹¹ = 4 194 304 — past a `u16`. On the home planet: six
+/// levels, 2 957 613 coarse nodes (MEASURED); three words each since the pocket's count joined
+/// (2026-09-25), 35.5 MB (ARITH: 2 957 613 × 12 bytes).
+///
+/// ★ THE POCKET IS COUNTED TOO (2026-09-25, ruling B7 item 1): how many of the block's fine nodes
+/// are a pocket's dry floor ([`Side::Pocket`]), so a far cell names a pocket by the SAME footprint
+/// rule a near cell names its own node — the side is a fact of the ground under the cell at every
+/// rung, never of a stencil whose width follows the level.
 ///
 /// The counts are DERIVED, never shipped: the server folds them from its artifact and the client
 /// folds them from the mask when the mask lands, so no byte crosses the wire and the artifact's
@@ -310,37 +370,40 @@ pub fn coast_word(facies: u8) -> u8 {
 pub struct CoastCounts {
     /// The FINE lattice's edge, the one the mask is indexed on.
     edge: u32,
-    /// `levels[k − 1]` holds `6 · (edge >> k)²` count PAIRS in the coarse lattice's node order:
-    /// how many of the block's fine nodes are WET, and how many of those wet ones are a LAKE.
-    levels: Vec<Vec<(u32, u32)>>,
+    /// `levels[k − 1]` holds `6 · (edge >> k)²` count WORDS in the coarse lattice's node order:
+    /// how many of the block's fine nodes are WET, how many of those wet ones are a LAKE, and how
+    /// many of the DRY ones are a POCKET's floor.
+    levels: Vec<Vec<[u32; 3]>>,
 }
 
 impl CoastCounts {
-    /// ★ THE FOLD, once per body, from the mask alone: level 1 counts the mask's own bits four at a
-    /// time, and each level above sums its four children. The walk is `O(nodes)` over the whole
+    /// ★ THE FOLD, once per body, from the mask alone: level 1 counts the mask's own words four at
+    /// a time, and each level above sums its four children. The walk is `O(nodes)` over the whole
     /// pyramid (11.8 million adds on the home planet), integer, and the same on every host.
     #[must_use]
     pub fn of(mask: &[u8], edge: u32) -> CoastCounts {
-        let mut levels: Vec<Vec<(u32, u32)>> = Vec::new();
+        let mut levels: Vec<Vec<[u32; 3]>> = Vec::new();
         let mut below_edge = edge;
         let mut k = 1u32;
         while let Some(coarse) = halved(edge, k) {
-            let mut level = vec![(0u32, 0u32); 6 * (coarse as usize) * (coarse as usize)];
+            let mut level = vec![[0u32; 3]; 6 * (coarse as usize) * (coarse as usize)];
             for face in 0..6u32 {
                 for j in 0..below_edge {
                     for i in 0..below_edge {
                         let up = ((face * coarse + (j >> 1)) * coarse + (i >> 1)) as usize;
                         let node = ((face * below_edge + j) * below_edge + i) as usize;
-                        let (w, l) = match levels.last() {
+                        let child = match levels.last() {
                             Some(below) => below[node],
                             None => match coast_side(mask, node as u32) {
-                                Some(Side::Sea) => (1, 0),
-                                Some(Side::Lake) => (1, 1),
-                                _ => (0, 0),
+                                Some(Side::Sea) => [1, 0, 0],
+                                Some(Side::Lake) => [1, 1, 0],
+                                Some(Side::Pocket) => [0, 0, 1],
+                                _ => [0, 0, 0],
                             },
                         };
-                        level[up].0 += w;
-                        level[up].1 += l;
+                        level[up][0] += child[0];
+                        level[up][1] += child[1];
+                        level[up][2] += child[2];
                     }
                 }
             }
@@ -357,10 +420,9 @@ impl CoastCounts {
         self.levels.len() as u32
     }
 
-    /// The wet fine nodes under the level-`k` coarse node `(face, ci, cj)`, and how many of those
-    /// are a LAKE; `None` past the levels or past the level's own lattice.
-    #[must_use]
-    pub fn count(&self, k: u32, face: Face, ci: u32, cj: u32) -> Option<(u32, u32)> {
+    /// The three counts under the level-`k` coarse node `(face, ci, cj)`; `None` past the levels or
+    /// past the level's own lattice.
+    fn words(&self, k: u32, face: Face, ci: u32, cj: u32) -> Option<[u32; 3]> {
         let level = self.levels.get(k.checked_sub(1)? as usize)?;
         let edge = halved(self.edge, k)?;
         if ci >= edge || cj >= edge {
@@ -369,6 +431,20 @@ impl CoastCounts {
         level
             .get((((u32::from(face.index()) * edge) + cj) * edge + ci) as usize)
             .copied()
+    }
+
+    /// The wet fine nodes under the level-`k` coarse node `(face, ci, cj)`, and how many of those
+    /// are a LAKE; `None` past the levels or past the level's own lattice.
+    #[must_use]
+    pub fn count(&self, k: u32, face: Face, ci: u32, cj: u32) -> Option<(u32, u32)> {
+        self.words(k, face, ci, cj).map(|w| (w[0], w[1]))
+    }
+
+    /// ★ The fine nodes under the level-`k` coarse node `(face, ci, cj)` that are a POCKET's dry
+    /// floor (2026-09-25, ruling B7 item 1); `None` where [`CoastCounts::count`] is `None`.
+    #[must_use]
+    pub fn pockets(&self, k: u32, face: Face, ci: u32, cj: u32) -> Option<u32> {
+        self.words(k, face, ci, cj).map(|w| w[2])
     }
 
     /// ★ THE SIDE OF ONE COARSE NODE: WET WHERE AT LEAST HALF ITS FINE NODES ARE WET, and then a
@@ -380,11 +456,21 @@ impl CoastCounts {
     /// BETWEEN THE TWO WATERS IS A LAKE, stated (2026-09-23, ruling W16): a cell half lake and half
     /// sea stands at a river's mouth, and a lake's level is the higher of the two, so reading it as
     /// a lake leaves the ground UNDER water at the cell's own edge instead of over it.
+    ///
+    /// ★ A DRY CELL IS A POCKET where at least half of its DRY nodes are a pocket's floor
+    /// (2026-09-25, ruling B7 item 1): `pocket · 2 ≥ 4^k − wet`. A TIE IS A POCKET, stated: a cell
+    /// half basin floor and half rim is left where the solve put it, because a pocket has no water
+    /// line to hold and a lift there raises the half that is a basin into a mesa.
     #[must_use]
     pub fn side(&self, k: u32, face: Face, ci: u32, cj: u32) -> Option<Side> {
-        let (wet, lake) = self.count(k, face, ci, cj)?;
-        if u64::from(wet) * 2 < 1u64 << (2 * k) {
-            return Some(Side::Land);
+        let [wet, lake, pocket] = self.words(k, face, ci, cj)?;
+        let all = 1u64 << (2 * k);
+        if u64::from(wet) * 2 < all {
+            return Some(if u64::from(pocket) * 2 >= all - u64::from(wet) {
+                Side::Pocket
+            } else {
+                Side::Land
+            });
         }
         Some(if lake * 2 >= wet {
             Side::Lake
@@ -524,9 +610,17 @@ impl ZField for Artifact {
 }
 
 /// A few nodes' rows, stated: the golden pin's `(z_m, water_m, facies, province)` for the fine
-/// self-check chunks.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SparseRows(pub BTreeMap<u32, (i16, i16, u8, u8)>);
+/// self-check chunks, and ★ THE BODY'S SEA (`Artifact::sea_m`, [`DRY_M`] for none; 2026-09-25,
+/// ruling B7 item 1), which a row's side word reads to name a pocket's floor ([`side_of_row`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SparseRows(pub BTreeMap<u32, (i16, i16, u8, u8)>, pub i16);
+
+impl Default for SparseRows {
+    /// No rows, and no sea: a dry body's rows name no pocket.
+    fn default() -> SparseRows {
+        SparseRows(BTreeMap::new(), DRY_M)
+    }
+}
 
 impl ZField for SparseRows {
     fn z_m(&self, node: u32) -> Option<i16> {
@@ -538,9 +632,9 @@ impl ZField for SparseRows {
     fn province(&self, node: u32) -> Option<u8> {
         self.0.get(&node).map(|r| r.3)
     }
-    /// The row's own facies word, for a row this field holds; nothing for one it does not.
+    /// The row's own side word, for a row this field holds; nothing for one it does not.
     fn water_side(&self, node: u32) -> Option<Side> {
-        self.0.get(&node).map(|r| side_of_facies(r.2))
+        self.0.get(&node).map(|r| side_of_row(r.2, r.0, self.1))
     }
 }
 
@@ -553,17 +647,31 @@ impl ZField for SparseRows {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TileCache {
     pub edge: u32,
+    /// ★ THE BODY'S SEA (`Artifact::sea_m`, the head's `sea_m`; [`DRY_M`] for none; 2026-09-25,
+    /// ruling B7 item 1): a held row's side word reads it to name a pocket's floor
+    /// ([`side_of_row`]), exactly as the mask was written.
+    pub sea_m: i16,
     tiles: BTreeMap<(u8, u32, u32), std::sync::Arc<[Row]>>,
 }
 
 impl TileCache {
-    /// An empty cache for a lattice of `edge` nodes a side.
+    /// An empty cache for a lattice of `edge` nodes a side, on a body with no sea (see
+    /// [`TileCache::with_sea`]).
     #[must_use]
     pub fn new(edge: u32) -> TileCache {
         TileCache {
             edge,
+            sea_m: DRY_M,
             tiles: BTreeMap::new(),
         }
+    }
+
+    /// The same cache on a body whose sea stands at `sea_m` whole metres ([`DRY_M`] for none): the
+    /// head states it, and a row's side word reads it.
+    #[must_use]
+    pub fn with_sea(mut self, sea_m: i16) -> TileCache {
+        self.sea_m = sea_m;
+        self
     }
 
     /// Keep a tile the realm shipped (a later tile with the same key replaces the earlier).
@@ -627,23 +735,20 @@ impl ZField for TileCache {
     fn province(&self, node: u32) -> Option<u8> {
         self.row(node).map(|r| r.province)
     }
-    /// The held row's own facies word — the very word the mask carries, so a fine rung reading
+    /// The held row's own side word — the very word the mask carries, so a fine rung reading
     /// tiles and a far rung reading the mask name one side for one node.
     fn water_side(&self, node: u32) -> Option<Side> {
         self.row(node)
-            .map(|r| side_of_facies(r.receiver_facies >> FACIES_SHIFT))
+            .map(|r| side_of_row(r.receiver_facies >> FACIES_SHIFT, r.z_m, self.sea_m))
     }
 }
 
-/// ★ A ROW'S OWN SIDE, from its facies bits: the ONE rule the mask is written with, so a host
-/// reading tiles and a host reading the mask can never name two sides for one node.
+/// ★ A ROW'S OWN SIDE, from its facies bits, its own height and the body's sea ([`side_word`]):
+/// the ONE rule the mask is written with, so a host reading tiles and a host reading the mask can
+/// never name two sides for one node.
 #[must_use]
-pub fn side_of_facies(facies: u8) -> Side {
-    match coast_word(facies) {
-        0 => Side::Land,
-        1 => Side::Sea,
-        _ => Side::Lake,
-    }
+pub fn side_of_row(facies: u8, z_m: i16, sea_m: i16) -> Side {
+    side_of_word(side_word(facies, z_m, sea_m))
 }
 
 /// ★ A PYRAMID LEVEL AS A FIELD (the far view, 03 §9): level `k` of the pyramid over the lattice
@@ -1040,6 +1145,25 @@ pub fn sample_row(
     field.water_facies(node_at(lattice, face, ni, nj))
 }
 
+/// ★ WHAT ONE COLUMN'S WATER IS (2026-09-24, plan step 2 part 3b): the water the shore law HOLDS
+/// the column against and the side word it reads, and apart from them the water that STANDS over
+/// the column — which the cells, the sheet and the eye read.
+///
+/// **Example.** A plain 400 km from the sea is held over the sea's level by the shore law like
+/// every land column, so `hold` is the sea; no water stands over it, so `water` is ZERO, and no
+/// cell of it is water and no sheet is drawn over it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnWater {
+    /// The water the shore law holds the column on its side of (the kernel's `FieldRead::water`).
+    pub hold: Gi,
+    /// The side word the shore law reads: `SIDE_LAND`, `SIDE_SEA`, `SIDE_INLAND` or `SIDE_UNKNOWN`.
+    pub side: Gi,
+    /// The water that stands over the column as a radius, or ZERO where none does.
+    pub water: Gi,
+    /// The row's coast bit, which marks a beach.
+    pub coast: bool,
+}
+
 /// ★ THE COLUMN'S WATER AND THE SIDE THE RECIPE READS — ONE READER, FROM THE CELL'S OWN SIDE WORD
 /// (2026-09-23, ruling W16). The chunk's column pass and the morph's height both call this, so
 /// the two can never hold two shores or two water levels for one column.
@@ -1047,20 +1171,35 @@ pub fn sample_row(
 /// * [`Side::Sea`] — the water is the BODY'S OWN SEA, exactly, at every rung. No fold can move it,
 ///   because the sea is one surface under the whole body.
 /// * [`Side::Lake`] — the water is the ROW'S OWN LEVEL, which is that lake's surface. Where the
-///   field states no level for the cell (a pyramid level whose water word folded away) the column
-///   cannot name its water, so it falls back to LAND: a guessed level is a drop, and a drop is a
-///   seam.
-/// * [`Side::Land`] — the water is the NEAREST row's, which is the body's sea for a dry row (ruling
-///   W6: a land column beside the sea must hold the sea's level, or the fine octaves dig a dry pit
-///   under the water beside it), and the neighbouring lake's level for a column beside a lake.
+///   field states no level for the cell (a pyramid level whose water word names no lake there) the
+///   column cannot name its water, so it takes the LAND rule: a guessed level is a drop, and a drop
+///   is a seam.
+/// * [`Side::Land`] — ★ the column NEVER reads the row's water word (2026-09-24, plan step 2 parts
+///   3b and 5; status §6 T5): the shore law holds it over the SEA's level. Where a node of the
+///   column's own read stencil is the SEA ([`stencil_holds_sea`]), the sea stands beside it and is
+///   its water too (ruling W6: a land column beside the sea must hold the sea's level, or the fine
+///   octaves dig a dry pit under the water beside it). Where no node of the stencil is the sea, the
+///   column is INLAND: no water stands over it, and under the sea's level the shore law leaves it
+///   alone (`vd_recipe::height::SIDE_INLAND`) — the floor of a closed basin, never a mesa lifted
+///   over a sea that is not there. MEASURED before this rule at generator 19: 3 753 dry columns on
+///   116 nodes read a level-1 LAKE word at the rung 9 → 10 swap and the shore law raised a lip of
+///   land out of the water.
+/// * [`Side::Pocket`] — ★ A POCKET'S DRY FLOOR (2026-09-25, ruling B7 item 1): INLAND, whatever
+///   the stencil holds. No water stands over it, and the shore law leaves its ground alone under
+///   the sea's level. The side is the node's OWN word (the footprint's at a far rung), so the rule
+///   is the same at every rung. Before the word the floor read LAND, and where a sea node stood in
+///   its stencil — a stencil whose reach in fine nodes doubles with each pyramid level — the shore
+///   law lifted the floor a quarter of its depth OVER the sea: MEASURED at generator 20 before the
+///   word, 19 dry columns at the rung 9 → 10 swap changed their word while their ground stood under
+///   the sea's level, the largest surface step 6 090 m (`lake_census` G-RUNG-HOLD).
 /// * `None` — no mask: the water is the nearest row's and the GROUND's own sign decides the side,
 ///   which is the rule the card runs.
 ///
-/// The third word is the row's COAST bit, which marks a beach.
-///
 /// **Example.** A hull descends over a tarn in a pass. At rung 14 the cell is mostly lake, so the
-/// column takes the tarn's own 2 100 m and stands UNDER it; the ridge beside it is LAND and takes
-/// the sea far below, so nothing holds it down. One reader, two columns, one picture.
+/// column takes the tarn's own 2 100 m and stands UNDER it; the ridge beside it is LAND, its
+/// stencil holds no sea, and nothing holds it down or lifts it. A pocket 2 km under the sea's level
+/// behind a one-node ridge on the coast is a POCKET: its stencil holds the sea, and it still stands
+/// where the solve put it, dry, at every rung.
 #[must_use]
 #[allow(
     clippy::too_many_arguments,
@@ -1076,27 +1215,91 @@ pub fn column_water(
     i: i32,
     j: i32,
     side: Option<Side>,
-) -> (Gi, Gi, bool) {
+) -> ColumnWater {
     let row = sample_row(lattice, field, face, rung, i, j);
     let coast = matches!(row, Some((_, f)) if f & crate::solve::FACIES_COAST != 0);
     let level_of =
         |level: i16| body.radius + (Gi::new(i64::from(level) * STEPS_PER_M) << LENGTH_BITS);
-    let near = match row {
-        Some((DRY_M, _)) | None => body.sea_radius,
-        Some((level, _)) => level_of(level),
+    let sea = body.sea_radius;
+    let stood = |hold: Gi, side: Gi, water: Gi| ColumnWater {
+        hold,
+        side,
+        water,
+        coast,
+    };
+    // THE LAND RULE: the sea's hold, and the sea as the water only where the stencil holds it.
+    let land = || match stencil_holds_sea(lattice, field, face, rung, i, j) {
+        Some(false) => stood(sea, vd_recipe::height::SIDE_INLAND, Gi::ZERO),
+        _ => stood(sea, vd_recipe::height::SIDE_LAND, sea),
     };
     match side {
-        None => (near, vd_recipe::height::SIDE_UNKNOWN, coast),
-        Some(Side::Land) => (near, vd_recipe::height::SIDE_LAND, coast),
-        Some(Side::Sea) => (body.sea_radius, vd_recipe::height::SIDE_SEA, coast),
+        None => {
+            let near = match row {
+                Some((DRY_M, _)) | None => sea,
+                Some((level, _)) => level_of(level),
+            };
+            stood(near, vd_recipe::height::SIDE_UNKNOWN, near)
+        }
+        Some(Side::Land) => land(),
+        Some(Side::Pocket) => stood(sea, vd_recipe::height::SIDE_INLAND, Gi::ZERO),
+        Some(Side::Sea) => stood(sea, vd_recipe::height::SIDE_SEA, sea),
         Some(Side::Lake) => match row {
             Some((level, _)) if level != DRY_M => {
-                (level_of(level), vd_recipe::height::SIDE_SEA, coast)
+                let l = level_of(level);
+                stood(l, vd_recipe::height::SIDE_SEA, l)
             }
-            // The cell is mostly lake and the field names no level for it: LAND, stated.
-            _ => (near, vd_recipe::height::SIDE_LAND, coast),
+            // The cell is mostly lake and the field names no level for it: the land rule, stated.
+            _ => land(),
         },
     }
+}
+
+/// ★ WHETHER THE SEA STANDS IN THE COLUMN'S OWN READ STENCIL (2026-09-24, plan step 2 part 3b):
+/// the sixteen nodes [`sample_z`] gathers for the column, at the FIELD's own level. At level zero a
+/// node is the sea where its own side word says [`Side::Sea`] (the mask, a tile's row, a golden
+/// row); at a pyramid level a node is the sea where any of the fine nodes under it is — its wet
+/// count less its lake count ([`CoastCounts`]). The radius is the reader's own stencil: the nodes
+/// whose heights the column's ground is made of, so a column whose ground a sea node pulls down
+/// stands beside the sea, and no other does — never a distance somebody picked (ruling T9).
+/// `None` where the field cannot say (a node with no side word, a level with no counts).
+///
+/// **Example.** A plain 20 km inland on the belt's coast reads a stencil two nodes wide either way;
+/// one of its sixteen nodes is the sea, so the sea stands beside it and holds it. A plain 300 km
+/// inland reads sixteen land nodes and stands alone. A pocket's floor never asks: its own word
+/// ([`Side::Pocket`]) leaves it alone at every rung.
+#[must_use]
+pub fn stencil_holds_sea(
+    lattice: &MacroLattice,
+    field: &dyn ZField,
+    face: Face,
+    rung: u8,
+    i: i32,
+    j: i32,
+) -> Option<bool> {
+    let (ni, _) = node_and_fraction(lattice, rung, i);
+    let (nj, _) = node_and_fraction(lattice, rung, j);
+    let k = field.level();
+    let counts = if k == 0 {
+        None
+    } else {
+        Some(field.coast_counts()?)
+    };
+    let mut sea = false;
+    for row in 0..4i64 {
+        for col in 0..4i64 {
+            let node = node_at(lattice, face, ni + col - 1, nj + row - 1);
+            sea |= match counts {
+                None => field.water_side(node)? == Side::Sea,
+                // Every node the gather names stands on the level's own lattice, so its count exists.
+                Some(c) => {
+                    let (f, ci, cj) = lattice.split(node);
+                    c.count(k, f, ci as u32, cj as u32)
+                        .is_some_and(|(wet, lake)| wet > lake)
+                }
+            };
+        }
+    }
+    Some(sea)
 }
 
 /// ★ THE SIDE OF THE WATER UNDER A COLUMN — ONE RULE AT EVERY RUNG (2026-09-22, the coast mask
@@ -1325,7 +1528,9 @@ impl GoldenFields {
         Some(GoldenFields {
             levels,
             sea_m,
-            rows: SparseRows(rows),
+            // The rows read the sea the header states, so a golden row names a pocket's floor
+            // by the rule the mask was written with.
+            rows: SparseRows(rows, sea_m),
             top: PyramidField {
                 level: top_level,
                 z_m: top,
@@ -1381,20 +1586,28 @@ pub fn tiles_of_chunk(lattice: &MacroLattice, key: ChunkKey) -> BTreeSet<(u8, u3
     tiles
 }
 
-/// ★ THE WATER FOLD of one coarse node (the pyramid's water word): the mean of its wet children's
-/// levels when at least half of the four are wet, else [`DRY_M`]. Half, because a coarse node
-/// stands for its whole block: a lake that covers less than half of it is narrower than the node
-/// and folds away, as a hill narrower than the node folds into the mean height. The count is one
-/// to four, so the one `div_euclid` is exact on the CPU (the fold runs in the solve, never on the
-/// card).
+/// ★ THE WATER WORD OF ONE PYRAMID BLOCK (2026-09-24, plan step 2 part 5; ruling W16: a rung
+/// boundary is invisible): the HIGHEST lake level among the block's lake nodes where it holds any,
+/// else the sea's level where it holds a sea node, else [`DRY_M`]. `lake_max` is that highest
+/// level ([`DRY_M`] for none), `has_sea` whether a sea node stands under the block. No majority and
+/// no mean: a lake node alone in its block keeps its level at the far rungs, and a block of sea and
+/// lake never reads a level no water has.
 ///
-/// **Example.** A coarse node over a bay: three children wet at 4 455 m and one dry beach — the
-/// word is 4 455 m and the bay stands from orbit. A node over a valley with one pond in four
-/// children — DRY, and the pond appears at the rung whose node it fills.
+/// ★ WHY THE HIGHEST. Only a LAKE column reads this word, and the shore law holds it UNDER its
+/// water by a quarter of its ground's depth. Under a LOWER word the higher lake's floor would be
+/// pushed down under a surface its own water never had; under the higher word no ground is ever
+/// pushed lower than its own lake puts it. Where two lakes share a block, the lower one's surface
+/// steps at the swap and its outline does not (counted, `lake_census` G-RUNG-LAKE SHIFTED).
+///
+/// **Example.** A tarn fills one node of the belt's pass at 2 100 m, and its three neighbours in
+/// the level-1 block are rock. The word is 2 100 m, so from 450 km the tarn is still water at its
+/// own level; before this word it turned to rock at the swap.
 #[must_use]
-pub fn fold_water(wet_sum: i32, wet_count: i32) -> i16 {
-    if wet_count >= 2 {
-        wet_sum.div_euclid(wet_count) as i16
+pub fn block_water(lake_max: i16, has_sea: bool, sea_m: i16) -> i16 {
+    if lake_max != DRY_M {
+        lake_max
+    } else if has_sea {
+        sea_m
     } else {
         DRY_M
     }
@@ -1442,52 +1655,60 @@ impl Artifact {
         }
         let mut pyramid = Vec::new();
         let mut pyramid_water = Vec::new();
+        let sea_m = if has_water && state.sea_z != i32::MIN {
+            metres_i16(state.sea_z)
+        } else {
+            DRY_M
+        };
         let mut below: Vec<i16> = rows.iter().map(|r| r.z_m).collect();
-        let mut below_water: Vec<i16> = rows.iter().map(|r| r.water_m).collect();
+        // ★ THE WATER FOLD (plan step 2 part 5): each fine node's LAKE level (its row's water where
+        // its side is a lake, else DRY) and whether it is the SEA, carried up every level as the
+        // highest lake and "any sea"; each level's word is [`block_water`] of the two.
+        let mut below_lake: Vec<i16> = rows
+            .iter()
+            .zip(facies)
+            .map(|(r, &f)| if coast_word(f) == 3 { r.water_m } else { DRY_M })
+            .collect();
+        let mut below_sea: Vec<bool> = facies.iter().map(|&f| coast_word(f) == 1).collect();
         let mut fine = lattice;
         let mut k = 1;
         while let Some(coarse) = lattice.coarser(k) {
             let mut level = vec![0i32; coarse.node_count()];
-            // The water fold: the wet children's levels summed, and how many were wet.
-            let mut wet_sum = vec![0i32; coarse.node_count()];
-            let mut wet_count = vec![0i32; coarse.node_count()];
+            let mut lake_max = vec![DRY_M; coarse.node_count()];
+            let mut has_sea = vec![false; coarse.node_count()];
             for node in 0..fine.node_count() as u32 {
                 let (face, i, j) = fine.split(node);
                 let up = coarse.index(face, i >> 1, j >> 1) as usize;
                 level[up] += i32::from(below[node as usize]);
-                let w = below_water[node as usize];
-                let wet = i32::from(w != DRY_M);
-                wet_sum[up] += wet * i32::from(w);
-                wet_count[up] += wet;
+                lake_max[up] = lake_max[up].max(below_lake[node as usize]);
+                has_sea[up] |= below_sea[node as usize];
             }
             let means: Vec<i16> = level.iter().map(|&s| s.div_euclid(4) as i16).collect();
-            let waters: Vec<i16> = wet_sum
+            let waters: Vec<i16> = lake_max
                 .iter()
-                .zip(&wet_count)
-                .map(|(&s, &n)| fold_water(s, n))
+                .zip(&has_sea)
+                .map(|(&l, &s)| block_water(l, s, sea_m))
                 .collect();
             below.clone_from(&means);
-            below_water.clone_from(&waters);
+            below_lake = lake_max;
+            below_sea = has_sea;
             pyramid.push(means);
             pyramid_water.push(waters);
             fine = coarse;
             k += 1;
         }
-        // ★ THE COAST MASK (ruling W10, widened by W16): a TWO-BIT SIDE WORD per FINE node — land,
-        // sea or lake. It is the rows' own facies bits and nothing else, so a host that holds the
+        // ★ THE COAST MASK (ruling W10, widened by W16 and by B7): a TWO-BIT SIDE WORD per FINE
+        // node — land, sea, lake or a pocket's dry floor. It is the rows' own facies bits, heights
+        // and the artifact's own sea ([`side_word`]) and nothing else, so a host that holds the
         // mask and a host that holds the tile name the same side for the same node.
         let mut coast = vec![0u8; coast_bytes(n)];
         for (i, &f) in facies.iter().enumerate().take(n) {
-            coast[i / 4] |= coast_word(f) << (2 * (i % 4));
+            coast[i / 4] |= side_word(f, rows[i].z_m, sea_m) << (2 * (i % 4));
         }
         Artifact {
             edge: lattice.edge,
             version: ARTIFACT_VERSION,
-            sea_m: if has_water && state.sea_z != i32::MIN {
-                metres_i16(state.sea_z)
-            } else {
-                DRY_M
-            },
+            sea_m,
             rows,
             pyramid,
             pyramid_water,
@@ -1792,9 +2013,332 @@ mod tests {
         let lattice = MacroLattice::of(&moon).expect("a lattice");
         let (state, facies, _) =
             solve_full(&moon, words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
-        let climate = crate::climate::climate(&moon, &lattice, words, &state.z, Some(state.sea_z));
+        let climate =
+            crate::climate::climate(&moon, &lattice, words, &state.z, Some(state.sea_view()));
         let artifact = Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
         (state, artifact)
+    }
+
+    /// ★ A STATED WET MOON (plan step 2): the moon's lattice flat at 500 m with the sea at 0 over
+    /// every node of face `PosX` (the connected ocean), and the marks each test states: `(face, i,
+    /// j, z_m, level_m)`, a node's height and, where `level_m` is `Some`, the lake the budget
+    /// would put over it. Returns the state and its artifact.
+    fn stated_moon(marks: &[(Face, i32, i32, i32, Option<i32>)]) -> (MacroSolve, Artifact) {
+        let moon = home_moon();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        let n = state.node_count();
+        let m = Z_STEPS_PER_M;
+        state.z = vec![500 * m; n];
+        for k in 0..n {
+            if state.lattice.split(k as u32).0 == Face::PosX {
+                state.z[k] = -1_000 * m;
+            }
+        }
+        for &(face, i, j, z, _) in marks {
+            state.z[state.lattice.index(face, i, j) as usize] = z * m;
+        }
+        state.sea_z = 0;
+        state.route();
+        for &(face, i, j, _, level) in marks {
+            if let Some(level) = level {
+                state.water_z[state.lattice.index(face, i, j) as usize] = level * m;
+            }
+        }
+        let facies = state.facies(&vec![false; n], 0, true);
+        let lattice = state.lattice;
+        let climate = crate::climate::climate(
+            &moon,
+            &lattice,
+            &home_solve_words(),
+            &state.z,
+            Some(state.sea_view()),
+        );
+        let artifact = Artifact::of(&state, &facies, &climate, true);
+        (state, artifact)
+    }
+
+    /// ★ TESTS 22 AND 23 (plan step 2 part 5; status §6 T5, §7 W6; ruling W16): THE LEVEL-1 WATER
+    /// WORD. A lake node ALONE in its block keeps its level (the two-of-four fold turned it to
+    /// land); two lakes in one block give the HIGHER level; a lake among three sea nodes is the
+    /// lake's level, never the mean of the two; a block of sea holds the sea; a dry block is DRY;
+    /// and the lone lake's level climbs to level 2 as well.
+    #[test]
+    fn the_level_one_word_keeps_a_lone_lake_and_takes_the_highest() {
+        assert_eq!(block_water(120, true, 0), 120);
+        assert_eq!(block_water(DRY_M, true, 7), 7);
+        assert_eq!(block_water(DRY_M, false, 7), DRY_M);
+        let (state, artifact) = stated_moon(&[
+            (Face::PosZ, 20, 20, 100, Some(150)),
+            (Face::PosZ, 24, 20, 100, Some(150)),
+            (Face::PosZ, 25, 21, 300, Some(350)),
+            (Face::PosX, 40, 40, 100, Some(150)),
+        ]);
+        let c1 = state.lattice.coarser(1).expect("level 1");
+        let word = |f: Face, i: i32, j: i32| artifact.pyramid_water[0][c1.index(f, i, j) as usize];
+        assert_eq!(word(Face::PosZ, 10, 10), 150, "a lone lake keeps its level");
+        assert_eq!(word(Face::PosZ, 12, 10), 350, "two lakes: the higher");
+        assert_eq!(word(Face::PosZ, 20, 20), DRY_M, "a dry block");
+        assert_eq!(word(Face::PosX, 5, 5), artifact.sea_m, "a block of sea");
+        assert_eq!(
+            word(Face::PosX, 20, 20),
+            150,
+            "a lake among the sea: never a mean"
+        );
+        let c2 = state.lattice.coarser(2).expect("level 2");
+        assert_eq!(
+            artifact.pyramid_water[1][c2.index(Face::PosZ, 5, 5) as usize],
+            150,
+            "the lone lake climbs to level 2"
+        );
+    }
+
+    /// The column's water at cell `(i, j)` of `face` at `rung`, as the chunk builder reads it.
+    fn water_at(
+        artifact: &Artifact,
+        field: &dyn ZField,
+        face: Face,
+        rung: u8,
+        i: i32,
+        j: i32,
+    ) -> ColumnWater {
+        let moon = home_moon().with_sea_m(artifact.sea());
+        let fine = moon.macro_lattice().expect("a lattice");
+        let lattice = fine.coarser(field.level()).expect("the field's lattice");
+        let side = sample_side(&fine, field, face, rung, i, j);
+        column_water(&moon, &lattice, field, face, rung, i, j, side)
+    }
+
+    /// The rung-`rung` cell at the centre of fine node `f` of the moon (a node is 2¹³ cells).
+    fn centre(f: i32, rung: u8) -> i32 {
+        (f * 8_192 + 4_096) >> rung
+    }
+
+    /// ★ TESTS 24 AND 26 (plan step 2 part 3b): THE COLUMN'S WATER, EVERY ROW OF THE TABLE, at the
+    /// rows (rung 9) and at pyramid level 1 (rung 13). A sea column holds and stands under the sea;
+    /// a lake column under its level; a land column with a sea node in its stencil (an island in
+    /// the ocean) holds the sea and has the sea as its water; a land column with none is INLAND and
+    /// holds no water — a dry pocket's floor included; a lake cell whose word names no level takes
+    /// the land rule; a field with no mask keeps today's rule; a level with a mask and no counts
+    /// cannot read the stencil and takes the land word.
+    #[test]
+    fn the_column_water_table_at_the_rows_and_at_level_one() {
+        let (_, artifact) = stated_moon(&[
+            (Face::PosZ, 30, 30, 100, Some(150)),
+            (Face::PosZ, 40, 40, -200, None),
+            (Face::PosX, 30, 30, 100, None),
+        ]);
+        let moon = home_moon().with_sea_m(artifact.sea());
+        let sea = moon.sea_radius;
+        let level_of = |m: i32| moon.radius + (Gi::new(i64::from(m) * STEPS_PER_M) << LENGTH_BITS);
+        let counts = artifact.coast_counts();
+        let level1 = PyramidField::of(&artifact, 1, &counts).expect("level 1");
+        let words = |w: ColumnWater| (w.hold, w.side, w.water);
+        let (sea_w, lake_w, land_w, inland_w) = (
+            vd_recipe::height::SIDE_SEA,
+            vd_recipe::height::SIDE_SEA,
+            vd_recipe::height::SIDE_LAND,
+            vd_recipe::height::SIDE_INLAND,
+        );
+        for (field, rung) in [
+            (&artifact as &dyn ZField, 9u8),
+            (&level1 as &dyn ZField, 13),
+        ] {
+            let at = |face: Face, f: (i32, i32)| {
+                water_at(
+                    &artifact,
+                    field,
+                    face,
+                    rung,
+                    centre(f.0, rung),
+                    centre(f.1, rung),
+                )
+            };
+            assert_eq!(words(at(Face::PosX, (40, 40))), (sea, sea_w, sea));
+            assert_eq!(
+                words(at(Face::PosZ, (30, 30))),
+                (level_of(150), lake_w, level_of(150))
+            );
+            for f in [(40, 40), (50, 50)] {
+                assert_eq!(words(at(Face::PosZ, f)), (sea, inland_w, Gi::ZERO), "{f:?}");
+            }
+            assert_eq!(
+                words(at(Face::PosX, (30, 30))),
+                (sea, land_w, sea),
+                "an island"
+            );
+        }
+        // A LAKE CELL WHOSE WORD NAMES NO LEVEL: the level-1 word stated DRY under the lake node;
+        // the column takes the land rule — here INLAND.
+        let c1 = home_moon()
+            .macro_lattice()
+            .expect("a lattice")
+            .coarser(1)
+            .expect("level 1");
+        let mut no_word = level1.clone();
+        no_word.water_m[c1.index(Face::PosZ, 15, 15) as usize] = DRY_M;
+        let w = water_at(
+            &artifact,
+            &no_word,
+            Face::PosZ,
+            13,
+            centre(30, 13),
+            centre(30, 13),
+        );
+        assert_eq!(words(w), (sea, inland_w, Gi::ZERO));
+        // NO MASK: today's rule — the nearest row's water, the unknown side.
+        let bare = PyramidField {
+            coast: None,
+            counts: None,
+            ..level1.clone()
+        };
+        let unknown = vd_recipe::height::SIDE_UNKNOWN;
+        let u = water_at(
+            &artifact,
+            &bare,
+            Face::PosZ,
+            13,
+            centre(30, 13),
+            centre(30, 13),
+        );
+        assert_eq!(words(u), (level_of(150), unknown, level_of(150)));
+        let v = water_at(
+            &artifact,
+            &bare,
+            Face::PosZ,
+            13,
+            centre(50, 13),
+            centre(50, 13),
+        );
+        assert_eq!(words(v), (sea, unknown, sea));
+        // A MASK AND NO COUNTS at a level: the stencil cannot be read, and a land column takes the
+        // land word with the sea.
+        let blind = PyramidField {
+            counts: None,
+            ..level1
+        };
+        assert_eq!(
+            stencil_holds_sea(&c1, &blind, Face::PosZ, 13, centre(50, 13), centre(50, 13)),
+            None
+        );
+        let t = water_at(
+            &artifact,
+            &blind,
+            Face::PosZ,
+            13,
+            centre(50, 13),
+            centre(50, 13),
+        );
+        assert_eq!(words(t), (sea, land_w, sea));
+        // A tile the rows do not hold: the stencil cannot be read either.
+        let fine = home_moon().macro_lattice().expect("a lattice");
+        let torn = TileCache::new(fine.edge);
+        assert_eq!(stencil_holds_sea(&fine, &torn, Face::PosZ, 0, 0, 0), None);
+    }
+
+    /// ★ A POCKET BEHIND A ONE-NODE RIDGE ON THE COAST (review finding 1 of plan step 2; ruling B7
+    /// item 1; ruling W16). A ring of eight ridge nodes at 500 m stands in the moon's sea and holds
+    /// a dry floor at −200 m, under the sea's level and joined to no ocean. The floor's own read
+    /// stencil HOLDS THE SEA at the rows and at level 1 — the stencil the land rule reads, whose
+    /// reach doubles with the level — and its column is still INLAND with no water at both, by
+    /// the node's own word; the ridge beside it keeps the land rule and the sea. Before the pocket
+    /// word the floor read LAND and took the sea's hold: a mesa at every rung.
+    #[test]
+    fn a_pocket_behind_a_ridge_on_the_coast_is_inland_at_every_rung() {
+        let mut marks = vec![(Face::PosX, 30, 30, -200, None)];
+        for (di, dj) in [
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ] {
+            marks.push((Face::PosX, 30 + di, 30 + dj, 500, None));
+        }
+        let (state, artifact) = stated_moon(&marks);
+        let floor = state.lattice.index(Face::PosX, 30, 30);
+        assert!(!state.ocean[floor as usize], "the ridge closes the pocket");
+        assert_eq!(artifact.water_side(floor), Some(Side::Pocket));
+        let moon = home_moon().with_sea_m(artifact.sea());
+        let sea = moon.sea_radius;
+        let counts = artifact.coast_counts();
+        let level1 = PyramidField::of(&artifact, 1, &counts).expect("level 1");
+        let c1 = state.lattice.coarser(1).expect("level 1");
+        for (field, rung, lattice) in [
+            (&artifact as &dyn ZField, 9u8, state.lattice),
+            (&level1 as &dyn ZField, 13, c1),
+        ] {
+            let (i, j) = (centre(30, rung), centre(30, rung));
+            assert_eq!(
+                stencil_holds_sea(&lattice, field, Face::PosX, rung, i, j),
+                Some(true),
+                "the floor's stencil holds the sea at rung {rung}"
+            );
+            let w = water_at(&artifact, field, Face::PosX, rung, i, j);
+            assert_eq!(
+                (w.hold, w.side, w.water),
+                (sea, vd_recipe::height::SIDE_INLAND, Gi::ZERO),
+                "the floor at rung {rung}"
+            );
+            let ridge = water_at(
+                &artifact,
+                field,
+                Face::PosX,
+                rung,
+                centre(29, rung),
+                centre(30, rung),
+            );
+            assert_eq!(
+                (ridge.hold, ridge.side, ridge.water),
+                (sea, vd_recipe::height::SIDE_LAND, sea),
+                "the ridge at rung {rung}"
+            );
+        }
+    }
+
+    /// ★ TEST 25 (plan step 2 part 5; ruling W16: a rung boundary is invisible): THE RUNG SWAP ON THE
+    /// MOON LOSES NO LAKE AND RAISES NO LIP. A lake node alone in its level-1 block, read at its
+    /// centre cell on the last rung of the rows (9) and the first of level 1 (10): the same water
+    /// and the same side word at both. Every dry node of that block, read at every one of its cells
+    /// on rung 10: the shore law never holds it against the lake's level.
+    #[test]
+    fn the_rung_swap_keeps_the_lone_lake_and_lifts_no_lip() {
+        let (_, artifact) = stated_moon(&[(Face::PosZ, 30, 30, 100, Some(150))]);
+        let counts = artifact.coast_counts();
+        let level1 = PyramidField::of(&artifact, 1, &counts).expect("level 1");
+        let before = water_at(
+            &artifact,
+            &artifact,
+            Face::PosZ,
+            9,
+            centre(30, 9),
+            centre(30, 9),
+        );
+        let after = water_at(
+            &artifact,
+            &level1,
+            Face::PosZ,
+            10,
+            centre(30, 10),
+            centre(30, 10),
+        );
+        assert_eq!(
+            before, after,
+            "the lake is the same water on both sides of the swap"
+        );
+        assert_eq!(after.side, vd_recipe::height::SIDE_SEA);
+        let lake = after.water;
+        for (fi, fj) in [(31, 30), (30, 31), (31, 31)] {
+            for di in 0..8 {
+                for dj in 0..8 {
+                    let w = water_at(&artifact, &level1, Face::PosZ, 10, fi * 8 + di, fj * 8 + dj);
+                    assert_ne!(w.hold, lake, "a lip at ({fi}, {fj})");
+                    assert_eq!(w.side, vd_recipe::height::SIDE_INLAND);
+                }
+            }
+        }
     }
 
     /// ★ THE COAST MASK IS THE ROWS' OWN SIDE WORD (2026-09-22, ruling W10; the LAKE 2026-09-23,
@@ -1825,7 +2369,7 @@ mod tests {
         let mut land = 0usize;
         for node in 0..n as u32 {
             let row = artifact.rows[node as usize];
-            let want = side_of_facies(row.receiver_facies >> FACIES_SHIFT);
+            let want = side_of_row(row.receiver_facies >> FACIES_SHIFT, row.z_m, artifact.sea_m);
             assert_eq!(coast_side(&artifact.coast, node), Some(want), "node {node}");
             assert_eq!(artifact.water_side(node), Some(want));
             sea += usize::from(want.wet());
@@ -1839,7 +2383,7 @@ mod tests {
             .find(|&node| artifact.water_side(node) == Some(Side::Sea))
             .expect("a sea node");
         let (face, tx, ty) = tile_of_node(artifact.edge, node);
-        let mut cache = TileCache::new(artifact.edge);
+        let mut cache = TileCache::new(artifact.edge).with_sea(artifact.sea_m);
         cache.apply(artifact.tile(Face::from_index(face).expect("a face"), tx, ty));
         assert_eq!(cache.water_side(node), Some(Side::Sea));
         // A node whose tile is not here says nothing, and so does a level with no mask.
@@ -1862,26 +2406,130 @@ mod tests {
         flipped.coast[node as usize / 4] ^= 1 << (2 * (node % 4));
         assert_ne!(flipped.digest(), artifact.digest());
         // A sparse row answers from its own facies byte, and answers nothing for a row it lacks.
-        let rows = SparseRows(BTreeMap::from([
-            (7, (0i16, DRY_M, FACIES_SEA, 0u8)),
-            (8, (0, DRY_M, crate::solve::FACIES_COAST, 0)),
-        ]));
+        let rows = SparseRows(
+            BTreeMap::from([
+                (7, (0i16, DRY_M, FACIES_SEA, 0u8)),
+                (8, (0, DRY_M, crate::solve::FACIES_COAST, 0)),
+            ]),
+            DRY_M,
+        );
         assert_eq!(rows.water_side(7), Some(Side::Sea));
         assert_eq!(rows.water_side(8), Some(Side::Land));
         assert_eq!(rows.water_side(9), None);
         // ★ A LAKE ROW STANDS UNDER ITS OWN WATER (ruling W16): before it, the row's word was the
         // sea bit alone, a lake node read LAND, and the shore law lifted every lake column out of
         // its own lake.
-        let lakes = SparseRows(BTreeMap::from([(
-            7,
-            (0i16, 100i16, crate::solve::FACIES_LAKE, 0u8),
-        )]));
+        let lakes = SparseRows(
+            BTreeMap::from([(7, (0i16, 100i16, crate::solve::FACIES_LAKE, 0u8))]),
+            DRY_M,
+        );
         assert_eq!(lakes.water_side(7), Some(Side::Lake));
         assert!(Side::Lake.wet());
         assert!(Side::Sea.wet());
         assert!(!Side::Land.wet());
+        assert!(!Side::Pocket.wet());
         assert_eq!(Side::Lake.word(), vd_recipe::height::SIDE_SEA);
+        assert_eq!(Side::Sea.word(), vd_recipe::height::SIDE_SEA);
         assert_eq!(Side::Land.word(), vd_recipe::height::SIDE_LAND);
+        assert_eq!(Side::Pocket.word(), vd_recipe::height::SIDE_INLAND);
+    }
+
+    /// ★ THE POCKET'S WORD (2026-09-25, ruling B7 item 1; review finding 1 of plan step 2): a DRY
+    /// node whose row stands under the sea's level is word 2, [`Side::Pocket`], and every reader
+    /// names it alike — the mask, a tile's row, a golden row and a pyramid level's footprint. Six
+    /// statements, each of which could fail:
+    ///
+    /// 1. the rule on its own words: dry under the sea is 2; dry at the sea's own metre is 0; a
+    ///    lake and the sea keep their words under the level; a dry body names no pocket;
+    /// 2. the mask a stated wet moon writes holds the pocket at the pocket's own floor node, and a
+    ///    tile and a sparse row read the same side there;
+    /// 3. a sparse row with NO sea (the default) names the same floor LAND;
+    /// 4. the counts hold the pocket, and a parent's pocket count is its children's sum;
+    /// 5. a far cell whose DRY nodes are at least half pocket reads POCKET — a tie too;
+    /// 6. a far cell with fewer reads LAND.
+    ///
+    /// **Example.** The salt pan behind the belt's coast stands 2 km under the sea's level: word 2
+    /// in the mask the pilot's globe reads from orbit, and word 2 in the tile under her boots.
+    #[test]
+    fn a_dry_floor_under_the_sea_is_a_pocket_in_every_reader() {
+        use crate::solve::{FACIES_COAST, FACIES_LAKE};
+        assert_eq!(side_word(0, -1_400, 3_591), 2);
+        assert_eq!(side_word(FACIES_COAST, 3_590, 3_591), 2);
+        assert_eq!(side_word(0, 3_591, 3_591), 0, "the sea's own metre is land");
+        assert_eq!(side_word(FACIES_LAKE, -1_400, 3_591), 3);
+        assert_eq!(side_word(FACIES_SEA, -1_400, 3_591), 1);
+        assert_eq!(
+            side_word(0, i16::MIN + 1, DRY_M),
+            0,
+            "a dry body has no pocket"
+        );
+        assert_eq!(side_of_row(0, -1_400, 3_591), Side::Pocket);
+        // 2. A stated moon: the sea over face PosX at 0, a pocket floor at −200 on face PosZ.
+        let (state, artifact) = stated_moon(&[(Face::PosZ, 40, 40, -200, None)]);
+        let floor = state.lattice.index(Face::PosZ, 40, 40);
+        assert_eq!(coast_side(&artifact.coast, floor), Some(Side::Pocket));
+        assert_eq!(artifact.water_side(floor), Some(Side::Pocket));
+        let (face, tx, ty) = tile_of_node(artifact.edge, floor);
+        let face = Face::from_index(face).expect("a face");
+        let mut cache = TileCache::new(artifact.edge).with_sea(artifact.sea_m);
+        cache.apply(artifact.tile(face, tx, ty));
+        assert_eq!(cache.water_side(floor), Some(Side::Pocket));
+        let row = artifact.rows[floor as usize];
+        let fields = [(
+            floor,
+            (
+                row.z_m,
+                row.water_m,
+                row.receiver_facies >> FACIES_SHIFT,
+                row.province,
+            ),
+        )];
+        let golden = SparseRows(BTreeMap::from(fields), artifact.sea_m);
+        assert_eq!(golden.water_side(floor), Some(Side::Pocket));
+        // 3. The same row with no sea stated is land.
+        let bare = SparseRows(BTreeMap::from(fields), DRY_M);
+        assert_eq!(bare.water_side(floor), Some(Side::Land));
+        assert_eq!(TileCache::new(artifact.edge).sea_m, DRY_M);
+        // 4. The counts: the floor's level-1 block holds one pocket node, its level-2 block too.
+        let counts = artifact.coast_counts();
+        assert_eq!(counts.pockets(1, Face::PosZ, 20, 20), Some(1));
+        assert_eq!(counts.count(1, Face::PosZ, 20, 20), Some((0, 0)));
+        assert_eq!(counts.pockets(2, Face::PosZ, 10, 10), Some(1));
+        assert_eq!(counts.pockets(1, Face::PosZ, 21, 21), Some(0));
+        assert_eq!(counts.pockets(3, Face::PosZ, 0, 0), None);
+        // One pocket node of four dry ones is not half: the block reads LAND.
+        assert_eq!(counts.side(1, Face::PosZ, 20, 20), Some(Side::Land));
+        // 5 and 6. Paint a level-1 block: two pocket floors and two rim nodes is a TIE — POCKET;
+        // three pockets — POCKET; one pocket and one sea of four — LAND (one of three dry).
+        let lattice = state.lattice;
+        let block = [(10, 10), (11, 10), (10, 11), (11, 11)];
+        let paint = |words: [u8; 4]| -> CoastCounts {
+            let mut mask = artifact.coast.clone();
+            for (k, &(i, j)) in block.iter().enumerate() {
+                let node = lattice.index(Face::NegZ, i, j) as usize;
+                let shift = 2 * (node % 4);
+                mask[node / 4] &= !(3u8 << shift);
+                mask[node / 4] |= words[k] << shift;
+            }
+            CoastCounts::of(&mask, artifact.edge)
+        };
+        assert_eq!(
+            paint([2, 2, 0, 0]).side(1, Face::NegZ, 5, 5),
+            Some(Side::Pocket)
+        );
+        assert_eq!(
+            paint([2, 2, 2, 0]).side(1, Face::NegZ, 5, 5),
+            Some(Side::Pocket)
+        );
+        assert_eq!(
+            paint([2, 1, 0, 0]).side(1, Face::NegZ, 5, 5),
+            Some(Side::Land)
+        );
+        assert_eq!(
+            paint([2, 1, 1, 0]).side(1, Face::NegZ, 5, 5),
+            Some(Side::Sea),
+            "a wet majority stays water"
+        );
     }
 
     /// ★ A COARSE CELL TAKES THE SIDE MOST OF ITS GROUND STANDS ON (2026-09-22, ruling W15). The

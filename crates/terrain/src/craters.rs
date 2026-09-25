@@ -642,7 +642,7 @@ mod tests {
         words: &SolveWords,
     ) -> (crate::land::Land, crate::climate::Climate) {
         let land = crate::land::initial_land(body, lattice, &words.land());
-        let climate = crate::climate::climate(body, lattice, words, &land.z, land.sea_z);
+        let climate = crate::climate::climate(body, lattice, words, &land.z, land.sea_view());
         (land, climate)
     }
 

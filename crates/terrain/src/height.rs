@@ -126,8 +126,10 @@ pub fn height_field_m(
 /// stands over its water, and the water SHEET's own radius where it stands under it — the level, held
 /// one extractor's step off the ground ([`crate::position::water_radius`], the one rule the built and
 /// the morphed sheet share), because the chunks drop a floor deeper than that step and draw the sheet
-/// in its place. The level is the column's water word or the body's sea, the higher, as the sheet
-/// reads it. A caller that needs the floor itself (a diver, a sonar) reads [`height_field_m`].
+/// in its place. The level is the column's OWN water, as the sheet reads it (2026-09-24, plan step 2
+/// part 3c: never raised to the sea, so a pocket's lake stands at its own level and a dry pocket
+/// reads its ground). A caller that needs the floor itself (a diver, a sonar) reads
+/// [`height_field_m`].
 ///
 /// **Example.** A hull hangs 20 m over the belt's sea, whose floor lies 6.9 km down: this answers
 /// the sea's own radius, so the eye reads 20 m, not 6.9 km, and the ground under it is drawn at the
@@ -141,7 +143,10 @@ pub fn drawn_height_field_m(
 ) -> Option<f64> {
     field_column(body, field, dir, rung).map(|(ground, water)| {
         let ground_m = metres_of_q28(ground);
-        let level_m = metres_of_q28(vd_recipe::cell::greater(water, body.sea_radius));
+        // ★ THE COLUMN'S OWN WATER, never the higher of it and the sea (2026-09-24, plan step 2
+        // part 3c): a lake in a pocket under the sea's level stands at its own level, and a dry
+        // column (ZERO) reads its ground.
+        let level_m = metres_of_q28(water);
         if ground_m < level_m {
             crate::position::water_radius(
                 crate::position::WaterSide::Under,
@@ -156,8 +161,8 @@ pub fn drawn_height_field_m(
 }
 
 /// The column the field states along a direction at a rung: its surface (the ground, held on its
-/// side of the water by the shore law) and the water radius its side names, both as the recipe's
-/// fixed-point radii. `None` where the field holds no row for the stencil.
+/// side of the water by the shore law) and the water that stands over it (ZERO for none), both as
+/// the recipe's fixed-point radii. `None` where the field holds no row for the stencil.
 fn field_column(
     body: &BodyDefinition,
     field: &dyn crate::artifact::ZField,
@@ -195,10 +200,10 @@ fn field_column(
     let cell_j =
         vd_seed::ladder::index_of(vd_seed::bend::unbend(s), body.ladder().cells_per_edge(rung));
     let cell_side = crate::artifact::sample_side(&fine, field, face, rung, cell_i, cell_j);
-    // ★ THE SAME WATER THE COLUMN READS (2026-09-21; the side decides which water, 2026-09-23):
-    // through the one reader, so the morph target and the chunk's own column hold one shore.
-    let (water, side, _) =
-        crate::artifact::column_water(body, &lattice, field, face, 0, i, j, cell_side);
+    // ★ THE SAME WATER THE COLUMN READS (2026-09-21; the side decides which water, 2026-09-23;
+    // the hold apart from the standing water, 2026-09-24): through the one reader, so the morph
+    // target and the chunk's own column hold one shore.
+    let read = crate::artifact::column_water(body, &lattice, field, face, 0, i, j, cell_side);
     let unit = direction_of_unit(dir);
     let parts = relief_parts_from(
         body.octave_table(),
@@ -212,11 +217,11 @@ fn field_column(
     Some((
         shore(
             base,
-            water,
+            read.hold,
             terrace(&body.terrace_at(rung), base + parts.fine),
-            side,
+            read.side,
         ),
-        water,
+        read.water,
     ))
 }
 
@@ -361,7 +366,8 @@ mod tests {
         let words = home_moon_solve_words();
         let (state, facies, _) =
             solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
-        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let climate =
+            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let mut artifact =
             crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
         let n0 = moon.ladder().cells_per_edge(0) as i32;
@@ -423,7 +429,8 @@ mod tests {
         let words = home_moon_solve_words();
         let (state, facies, _) =
             solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
-        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let climate =
+            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
             crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
         assert!(
@@ -458,7 +465,8 @@ mod tests {
         let words = home_moon_solve_words();
         let (state, facies, _) =
             solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
-        let climate = crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+        let climate =
+            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
             crate::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
         // A cell centre on face +X: the column kernel's surface (with the field) and the height
@@ -537,7 +545,8 @@ mod tests {
         // is the one word every rung reads.
         let ground_side = |i: i32| -> Option<(bool, Gi, Gi)> {
             let side = crate::artifact::sample_side(&lattice, &artifact, face, 0, i, j)?;
-            let (water, _, _) = crate::artifact::column_water(
+            // The water the shore law HOLDS the column against: the sea on both sides of a coast.
+            let water = crate::artifact::column_water(
                 &moon,
                 &lattice,
                 &artifact,
@@ -546,7 +555,8 @@ mod tests {
                 i,
                 j,
                 Some(side),
-            );
+            )
+            .hold;
             if water == Gi::ZERO {
                 return None;
             }
@@ -735,6 +745,68 @@ mod tests {
         let empty = crate::artifact::TileCache::new(lattice.edge);
         let dir = cell_dir(&moon, face, n0 / 2, j);
         assert_eq!(drawn_height_field_m(&moon, &empty, dir, rung), None);
+    }
+
+    /// ★ TEST 31 (plan step 2 part 3c; ruling B7 item 1): THE EYE OVER A DRY POCKET READS ITS
+    /// GROUND. The moon flat at 500 m, the ocean one whole face at −1 000 m under a sea at 0, and a
+    /// pocket of nine nodes 2 000 m under the sea's level on another face, dry. Over the pocket's
+    /// middle the drawn surface is the ground itself, 2 km under the sea — before this step it was
+    /// the sea's own radius, the sheet the client drew over a square of sea. Over the ocean it is
+    /// the sheet.
+    #[test]
+    fn the_eye_over_a_dry_pocket_reads_its_ground() {
+        use crate::home::{home_moon, home_solve_words};
+        use crate::solve::{MacroSolve, Z_STEPS_PER_M};
+        let moon = home_moon();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        let n = state.node_count();
+        let m = Z_STEPS_PER_M;
+        state.z = vec![500 * m; n];
+        for k in 0..n {
+            if state.lattice.split(k as u32).0 == Face::PosX {
+                state.z[k] = -1_000 * m;
+            }
+        }
+        for i in 29..=31 {
+            for j in 29..=31 {
+                state.z[state.lattice.index(Face::PosZ, i, j) as usize] = -2_000 * m;
+            }
+        }
+        state.sea_z = 0;
+        state.route();
+        let facies = state.facies(&vec![false; n], 0, true);
+        let lattice = state.lattice;
+        let climate = crate::climate::climate(
+            &moon,
+            &lattice,
+            &home_solve_words(),
+            &state.z,
+            Some(state.sea_view()),
+        );
+        let artifact = crate::artifact::Artifact::of(&state, &facies, &climate, true);
+        let wet = moon.with_sea_m(artifact.sea());
+        let unit = |node: u32| -> [f64; 3] {
+            let d = lattice.direction(node);
+            [
+                d[0].raw() as f64 / (1u64 << DIR_BITS) as f64,
+                d[1].raw() as f64 / (1u64 << DIR_BITS) as f64,
+                d[2].raw() as f64 / (1u64 << DIR_BITS) as f64,
+            ]
+        };
+        let sea_m = metres_of_q28(wet.sea_radius);
+        let pocket = unit(lattice.index(Face::PosZ, 30, 30));
+        let ground = height_field_m(&wet, &artifact, pocket, 0).expect("a ground");
+        let drawn = drawn_height_field_m(&wet, &artifact, pocket, 0).expect("a surface");
+        assert!(ground < sea_m - 1_000.0, "{ground} against the sea {sea_m}");
+        assert!(
+            (drawn - ground).abs() < 1e-9,
+            "the eye reads {drawn}, the ground {ground}"
+        );
+        let ocean = unit(lattice.index(Face::PosX, 30, 30));
+        let floor = height_field_m(&wet, &artifact, ocean, 0).expect("a floor");
+        let sheet = drawn_height_field_m(&wet, &artifact, ocean, 0).expect("a sheet");
+        assert!(floor < sea_m);
+        assert!((sheet - sea_m).abs() < 1e-6, "{sheet} against {sea_m}");
     }
 
     #[test]

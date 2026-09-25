@@ -121,9 +121,12 @@ fn main() {
                 .unwrap_or(Gi::ZERO);
                 let cell_side =
                     vd_terrain::artifact::sample_side(&lattice, &artifact, face, rung, ci, cj);
-                let (water, side, _) = vd_terrain::artifact::column_water(
+                // The water the shore law HOLDS the column against, and its side word (plan step
+                // 2 part 3b: an inland column holds the sea and stands under no water).
+                let read = vd_terrain::artifact::column_water(
                     &body, &lattice, &artifact, face, rung, ci, cj, cell_side,
                 );
+                let (water, side) = (read.hold, read.side);
                 let t2 = Instant::now();
                 let got = column_surface_at(
                     &charter,

@@ -39,8 +39,15 @@ pub fn run_solve(job: &SolveJob) -> Option<Artifact> {
     let lattice = job.body.macro_lattice()?;
     let (state, facies, _) =
         solve_full(&job.body, &job.words, Schedule::standard(job.words.age_yr))?;
-    let climate =
-        vd_terrain::climate::climate(&job.body, &lattice, &job.words, &state.z, Some(state.sea_z));
+    // ★ THE CLIMATE OVER THE CONNECTED OCEAN (2026-09-24, ruling B7 item 1): the same sea the
+    // solve's own budget read, so the artifact's climate bytes and its lakes agree.
+    let climate = vd_terrain::climate::climate(
+        &job.body,
+        &lattice,
+        &job.words,
+        &state.z,
+        Some(state.sea_view()),
+    );
     Some(Artifact::of(
         &state,
         &facies,

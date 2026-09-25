@@ -207,7 +207,8 @@ pub fn read_artifact(
             head.edge, lattice.edge
         ));
     }
-    let mut cache = TileCache::new(head.edge);
+    // The head's own sea, so a held row names a pocket's floor as the mask does.
+    let mut cache = TileCache::new(head.edge).with_sea(head.sea_m);
     for (_, bytes) in store.scan(&artifact_tile_prefix()) {
         let tile = decode_artifact_tile(&bytes)?;
         let rows = rows_of(&tile.bytes).ok_or("a stored tile's bytes are not whole rows")?;
@@ -322,7 +323,7 @@ mod tests {
         let (state, facies, _) =
             solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
         let climate =
-            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         (
             lattice,
             Artifact::of(&state, &facies, &climate, words.water_km3 > 0),

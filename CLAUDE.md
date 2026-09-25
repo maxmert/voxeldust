@@ -34,6 +34,12 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     ground colour, forest, cliffs, far shadows, water look, clouds) is DEFERRED D-TERRAIN-8, not forgotten;
     B6.5 (amended): the far shadow is WANTED but not needed to judge the pictures (owner: "We can go without long
     shadows for now"); each picture is captioned "no far shadow".
+    ★ B7: an inland pocket under the sea's level is a closed basin by its budget (the sea over the connected ocean
+    only); the discharge row is the runoff over the final receivers; step 2 is built while R2 is designed.
+    ★ B8 (2026-09-25, after step 2's pictures showed every small lake as an 8 km square): THE EDGES BEFORE R2 (one
+    shoreline from one field, sea and lake, on today's ground); THE RIVERS FOLLOW THE WATER (receivers and the
+    discharge row follow the budget's water — amends B7 item 2); R2's SLICE 0 FIRST (the bench + a hillshade for the
+    owner's look, before any bake service; the coarser ground stands until a bake is done); step 2 committed.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

@@ -295,6 +295,11 @@ pub struct RouteReport {
     pub undrained: usize,
     /// Nodes left out of the topological order: a cycle, a defect.
     pub cyclic: usize,
+    /// ★ THE INLAND POCKETS the flood did NOT seed (2026-09-24, ruling B7 item 1): the bodies at or
+    /// under the sea's level that no path joins to the ocean, and their nodes. The flood raises
+    /// each one like any other hollow.
+    pub pockets: usize,
+    pub pocket_nodes: usize,
 }
 
 /// What one stream-power sweep did.
@@ -357,7 +362,88 @@ pub struct FullReport {
     /// ★ THE SEA BEFORE THE LAKES WERE TAKEN OUT OF THE INVENTORY, sixteenths (ruling W11 step 4);
     /// `None` on a dry body or where the lakes' volume left the level where it stood.
     pub sea_before_lakes: Option<i32>,
+    /// ★ THE LAKES' SEA FIXED POINT (2026-09-24, ruling B7 item 1; plan question 8): how many times
+    /// the sea was re-solved over the inventory less the lakes, and whether it then stood still to
+    /// the sixteenth (`false` where the bound [`LAKE_SEA_SOLVES`] stopped it first).
+    pub lake_sea_solves: u32,
+    pub lake_sea_converged: bool,
+    /// Whether any connected sea solve re-seeded from another body (`land::ConnectedSea`).
+    pub sea_reseeded: bool,
+    /// ★ Whether any connected sea solve's answer did NOT balance (`land::ConnectedSea::settled`;
+    /// review finding 4 of plan step 2): its level was solved over one body and its ocean is
+    /// another's.
+    pub sea_unsettled: bool,
 }
+
+/// ★ WHAT THE LAKES' SEA FIXED POINT DID (plan question 8; review finding 7 of plan step 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LakeSea {
+    /// The sea before the first re-solve, sixteenths.
+    pub first: i32,
+    /// How many times the sea was re-solved and the lakes read again.
+    pub solves: u32,
+    /// Whether the sea then stood still to the sixteenth; `false` where the bound stopped it.
+    pub converged: bool,
+    /// Whether a connected sea solve inside it re-seeded, and whether one did not balance.
+    pub reseeded: bool,
+    pub unsettled: bool,
+}
+
+/// ★ THE LAKES' SEA FIXED POINT (ruling W11 step 4; ruling B7 item 1; plan question 8): the lakes'
+/// standing water is part of the body's one inventory, so the sea is re-solved over the inventory
+/// LESS the lakes (`volume_m3`, the lakes the state holds now), and a new sea moves the ocean, the
+/// pockets and the lakes again: `again` routes nothing, it reads the climate and the lakes over the
+/// state as it stands after the new sea's routing and returns their volume. The re-solve repeats
+/// until the sea stands still to the sixteenth, at most `bound` times — numerical resolution, never
+/// physics — and the answer says whether it stood still.
+///
+/// **Example.** A pocket in a dry interior fills with 40 km³ of water. The sea stood over the
+/// whole inventory, so it is re-solved over the inventory less those 40 km³ and falls; the new sea
+/// changes no pocket, the lakes read again hold the same 40 km³, and the second solve stands still.
+pub fn settle_lakes_sea(
+    state: &mut MacroSolve,
+    water_km3: u64,
+    bound: u32,
+    volume_m3: u128,
+    routes: &mut Vec<RouteReport>,
+    again: &mut dyn FnMut(&MacroSolve) -> u128,
+) -> LakeSea {
+    let mut fix = LakeSea {
+        first: state.sea_z,
+        solves: 0,
+        converged: false,
+        reseeded: false,
+        unsettled: false,
+    };
+    let mut volume = volume_m3;
+    for _ in 0..bound {
+        let km3 = (volume / LAKE_KM3_M3) as u64;
+        let left = water_km3.saturating_sub(km3);
+        let lattice = state.lattice;
+        // A lake that held the whole inventory would leave no sea to solve: the level stands.
+        let (level, reseeded, settled) =
+            match crate::land::sea_level_connected(&lattice, &state.z, &state.area, left, false) {
+                Some(sea) => (sea.level, sea.reseeded, sea.settled),
+                None => (state.sea_z, false, true),
+            };
+        fix.reseeded |= reseeded;
+        fix.unsettled |= !settled;
+        fix.converged = level == state.sea_z;
+        if fix.converged {
+            break;
+        }
+        fix.solves += 1;
+        state.sea_z = level;
+        routes.push(state.route());
+        volume = again(state);
+    }
+    fix
+}
+
+/// ★ THE MOST TIMES the sea is re-solved over the inventory less the lakes (plan question 8): a
+/// NUMERICAL RESOLUTION of the fixed point, never a physical number; the report states whether the
+/// sea stood still inside it.
+pub const LAKE_SEA_SOLVES: u32 = 4;
 
 /// The cubic metres in a cubic kilometre: the lakes' volume against the charter's inventory.
 pub const LAKE_KM3_M3: u128 = 1_000_000_000;
@@ -410,7 +496,10 @@ pub struct MacroSolve {
     pub area: Vec<u64>,
     /// The rain at the node, mm/yr, in `[P_MIN_MM_YR, P_MAX_MM_YR]`.
     pub rain: Vec<u32>,
-    /// The discharge: the rain accumulated downstream, mm·m²/yr.
+    /// The discharge, mm·m²/yr: the rain accumulated downstream while the passes run (the stream
+    /// power law's drainage), and ★ THE RUNOFF accumulated over the FINAL receivers once the solve
+    /// ends ([`MacroSolve::accumulate_runoff`]; 2026-09-24, ruling B7 item 2) — the water that
+    /// reaches a river, and the row the artifact ships.
     pub discharge: Vec<u64>,
     /// The topological order of the receiver tree, LEAVES FIRST, outlets last.
     pub order: Vec<u32>,
@@ -446,6 +535,12 @@ pub struct MacroSolve {
     /// nothing else; a hollow is a lake only where a finite amount of water stands in it. Empty of
     /// water until the budget runs at the end of the full solve, so every pass reads a dry field.
     pub water_z: Vec<i32>,
+    /// ★ THE OCEAN (2026-09-24, ruling B7 item 1: *"an inland pocket is a closed basin, not the
+    /// sea"*): whether each node belongs to the CONNECTED ocean at the sea's level — the largest
+    /// connected water under it ([`crate::land::ocean_mask`]). Every [`MacroSolve::route`] labels it
+    /// again at the sea's level over the field as it stands. The sea's facies, the water level, the
+    /// sweep's base level, the budget's root and the climate's sea read THIS bit, never `z ≤ sea`.
+    pub ocean: Vec<bool>,
     /// The node directions at [`CACHE_BITS`], read by every chord.
     dir: Vec<[i32; 3]>,
 }
@@ -535,6 +630,7 @@ impl MacroSolve {
             erodibility_q8: vec![256; n],
             province: vec![crate::strata::DEFAULT_PROVINCE.code(); n],
             water_z: vec![DRY; n],
+            ocean: vec![false; n],
             dir,
         })
     }
@@ -558,7 +654,25 @@ impl MacroSolve {
             })
             .collect();
         state.sea_z = land.sea_z.unwrap_or(i32::MIN);
+        state.ocean.clone_from(&land.ocean);
         Some(state)
+    }
+
+    /// ★ THE SEA AS THE CLIMATE READS IT: this state's level and its connected ocean.
+    #[must_use]
+    pub fn sea_view(&self) -> crate::climate::SeaView<'_> {
+        crate::climate::SeaView {
+            level: self.sea_z,
+            ocean: &self.ocean,
+        }
+    }
+
+    /// ★ THE OCEAN LABELLED AGAIN at the sea's level over the field as it stands (2026-09-24, ruling
+    /// B7 item 1), and the pockets under the level it leaves out.
+    pub fn label_ocean(&mut self) -> (usize, usize) {
+        let mask = crate::land::ocean_mask(&self.lattice, &self.z, &self.area, self.sea_z);
+        self.ocean = mask.ocean;
+        (mask.pockets, mask.pocket_nodes)
     }
 
     /// The nodes.
@@ -571,7 +685,7 @@ impl MacroSolve {
     /// is measured against.
     #[must_use]
     pub fn bytes_per_node(&self) -> usize {
-        4 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 4 + 4 + 4 + 12 + 1 + 4
+        4 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 4 + 4 + 4 + 12 + 1 + 4 + 1
     }
 
     /// ★ THE UPLIFT OF ONE PASS at a node: the age's share that pass carries, as the difference of
@@ -603,8 +717,9 @@ impl MacroSolve {
     }
 
     /// ★ GATE G-AGE's READING: the hypsometric integral of every basin with at least `min_nodes`
-    /// LAND nodes (over the sea), by area — `(mean − min) / (max − min)` in 1/256 — in outlet
-    /// order. A basin whose land is flat (max = min) is left out: it has no integral.
+    /// LAND nodes (every node that is not the connected ocean; 2026-09-24, ruling B7 item 1), by
+    /// area — `(mean − min) / (max − min)` in 1/256 — in outlet order. A basin whose land is flat
+    /// (max = min) is left out: it has no integral.
     #[must_use]
     pub fn hypsometric_integrals(&self, min_nodes: u32) -> Vec<BasinIntegral> {
         let n = self.node_count();
@@ -612,9 +727,7 @@ impl MacroSolve {
         // 1. Land nodes per basin.
         let mut count = vec![0u32; n];
         for i in 0..n {
-            if self.z[i] > self.sea_z {
-                count[basin[i] as usize] += 1;
-            }
+            count[basin[i] as usize] += u32::from(!self.ocean[i]);
         }
         // 2. A dense slot for every basin that qualifies, in outlet order.
         let mut slot = vec![u32::MAX; n];
@@ -630,7 +743,7 @@ impl MacroSolve {
         let (mut sum, mut area) = (vec![0i128; m], vec![0i128; m]);
         for i in 0..n {
             let s = slot[basin[i] as usize];
-            if s == u32::MAX || self.z[i] <= self.sea_z {
+            if (s == u32::MAX) | self.ocean[i] {
                 continue;
             }
             let s = s as usize;
@@ -676,9 +789,10 @@ impl MacroSolve {
     }
 
     /// ★ THE WATER LEVEL AT A NODE (ruling W11, 2026-09-22): the level the LAKES' BUDGET settled
-    /// where standing water covers the node, the sea's level under the sea, [`DRY`] elsewhere — one
-    /// expression, no branch on a landform kind. It no longer reads the routing flood: a hollow the
-    /// rain cannot fill is a dry basin, not a lake.
+    /// where standing water covers the node, the sea's level on the CONNECTED OCEAN (2026-09-24,
+    /// ruling B7 item 1: an inland pocket is a closed basin, and its water is its budget's),
+    /// [`DRY`] elsewhere — one expression, no branch on a landform kind. It no longer reads the
+    /// routing flood: a hollow the rain cannot fill is a dry basin, not a lake.
     ///
     /// **Example.** A pilot follows a river into a hollow in the belt's interior. The hollow's own
     /// nodes stand metres under the flood's spill, and every one of them says DRY: the river that
@@ -688,7 +802,7 @@ impl MacroSolve {
         let i = node as usize;
         if self.water_z[i] != DRY {
             self.water_z[i]
-        } else if self.z[i] <= self.sea_z {
+        } else if self.ocean[i] {
             self.sea_z
         } else {
             DRY
@@ -702,13 +816,15 @@ impl MacroSolve {
     /// hollow's spill, never toward its floor. Separate from [`MacroSolve::water_level`] by ruling
     /// W11 — the fill decides the receivers and the cut, the budget decides the water — and stated
     /// here EXACTLY as `water_level` read it before W11, so the field the solve makes did not move
-    /// by one sixteenth (MEASURED: the sea, the ocean share and the chunk tables stand).
+    /// by one sixteenth (MEASURED: the sea, the ocean share and the chunk tables stand). ★ The sea
+    /// here is the CONNECTED ocean (2026-09-24, ruling B7 item 1): a pocket is raised by the flood
+    /// like any hollow, so its base is its spill.
     #[must_use]
     fn routing_base(&self, node: u32) -> i32 {
         let i = node as usize;
         let level = if self.z_flood[i] > self.z[i] {
             self.z_flood[i]
-        } else if self.z[i] <= self.sea_z {
+        } else if self.ocean[i] {
             self.sea_z
         } else {
             DRY
@@ -717,7 +833,7 @@ impl MacroSolve {
     }
 
     /// The chord between two nodes from the cached directions, whole metres.
-    fn chord_m(&self, a: u32, b: u32) -> u32 {
+    pub(crate) fn chord_m(&self, a: u32, b: u32) -> u32 {
         chord_between(
             self.lattice.radius_m(),
             uncache(self.dir[a as usize]),
@@ -725,11 +841,19 @@ impl MacroSolve {
         )
     }
 
-    /// ★ THE ROUTING: the priority flood, the D8 receivers on the flooded surface, the flats by a
-    /// distance field, and the topological order of the receiver tree.
+    /// ★ THE ROUTING: the ocean labelled at the sea's level, the priority flood, the D8 receivers on
+    /// the flooded surface, the flats by a distance field, and the topological order of the
+    /// receiver tree.
+    ///
+    /// ★ ONLY THE CONNECTED OCEAN SEEDS THE FLOOD (2026-09-24, ruling B7 item 1; plan step 2 part
+    /// 3a). An inland pocket under the sea's level is a closed basin: the flood raises it to its
+    /// spill like any hollow, the sweep skips it, the deposit fills it, and the budget decides its
+    /// water. MEASURED at generator 19: 148 pockets, 59 470 nodes, 3.2 million km² were seeded as
+    /// sea and drawn at the sea's level.
     pub fn route(&mut self) -> RouteReport {
         let n = self.node_count();
         let mut report = RouteReport::default();
+        (report.pockets, report.pocket_nodes) = self.label_ocean();
         // 1. THE PRIORITY FLOOD. The outlets seed a heap keyed by `(height, index)`; popping the
         //    lowest first, every unvisited neighbour is raised to at least the popped level.
         let mut visited = vec![false; n];
@@ -738,7 +862,7 @@ impl MacroSolve {
         for i in 0..n {
             self.receiver[i] = NO_NODE;
             self.chord[i] = 0;
-            if self.z[i] <= self.sea_z {
+            if self.ocean[i] {
                 visited[i] = true;
                 self.z_flood[i] = self.z[i];
                 dist[i] = 0;
@@ -938,6 +1062,28 @@ impl MacroSolve {
     pub fn accumulate(&mut self) {
         for i in 0..self.node_count() {
             self.discharge[i] = u64::from(self.rain[i]) * self.area[i];
+        }
+        for k in 0..self.order.len() {
+            let node = self.order[k] as usize;
+            let r = self.receiver[node];
+            if r != NO_NODE {
+                self.discharge[r as usize] += self.discharge[node];
+            }
+        }
+    }
+
+    /// ★ THE DISCHARGE THE ARTIFACT SHIPS (2026-09-24, ruling B7 item 2: *"the discharge row carries
+    /// the RUNOFF, accumulated over the final receivers"*; status §7 W10): the Turc–Pike runoff on
+    /// every node's own area, accumulated down the receiver tree in the order, leaves first. Called
+    /// ONCE, after the solve's LAST routing, with the climate that stands over the final field, so
+    /// the row and the receivers it ships with are one tree. Exact integer sums: a node carries at
+    /// most `P_MAX_MM_YR · area` a node, and the globe's whole area times that is under `2⁶⁴`.
+    ///
+    /// **Example.** A desert river off a dry range carries the little water its catchment yields,
+    /// and a wet valley's river carries most of its rain: the rain alone made the two alike.
+    pub fn accumulate_runoff(&mut self, runoff: &[u32]) {
+        for ((d, &q), &a) in self.discharge.iter_mut().zip(runoff).zip(&self.area) {
+            *d = u64::from(q) * a;
         }
         for k in 0..self.order.len() {
             let node = self.order[k] as usize;
@@ -1236,7 +1382,7 @@ impl MacroSolve {
         // 1. THE BALANCE, and the flux down the tree the water uses.
         let mut flux: Vec<Gf> = Vec::with_capacity(n);
         for i in 0..n {
-            let dry = self.z[i] > self.sea_z && self.z_flood[i] <= self.z[i];
+            let dry = !self.ocean[i] & (self.z_flood[i] <= self.z[i]);
             let b = if dry {
                 ice_balance_m_yr(self.z[i], ela_z[i], lapse, celsius(temperature_dk[i]))
             } else {
@@ -1248,7 +1394,7 @@ impl MacroSolve {
             let node = self.order[k] as usize;
             // Water is not ice's ground: a trunk that reaches the sea or a lake ends there (a
             // floating shelf is the ocean's own slice, 8o, and is named as missing here).
-            let dry = self.z[node] > self.sea_z && self.z_flood[node] <= self.z[node];
+            let dry = !self.ocean[node] & (self.z_flood[node] <= self.z[node]);
             if !dry || flux[node] <= Gf::ZERO {
                 flux[node] = Gf::ZERO;
                 continue;
@@ -1322,20 +1468,22 @@ impl MacroSolve {
         (mask, under, thickest, deepest)
     }
 
-    /// ★ THE FACIES BYTE of every node: the sea, a lake, the coast (within `band` sixteenths of the
-    /// sea's level), the ice — the bits 8d and 8e read. A body with no water has no sea and no
-    /// lake: the flood's raised pits on a dry moon are closed basins, not lakes.
+    /// ★ THE FACIES BYTE of every node: the sea (the CONNECTED ocean, 2026-09-24, ruling B7 item 1),
+    /// a lake, the coast (within `band` sixteenths of the sea's level), the ice — the bits 8d and 8e
+    /// read. A body with no water has no sea and no lake: the flood's raised pits on a dry moon are
+    /// closed basins, not lakes. An inland pocket is never SEA: it is a lake where its budget put
+    /// water, and dry ground where it did not.
     #[must_use]
     pub fn facies(&self, ice: &[bool], band: i32, has_water: bool) -> Vec<u8> {
         (0..self.node_count() as u32)
             .map(|node| {
                 let i = node as usize;
                 let mut f = 0u8;
-                if has_water && self.z[i] <= self.sea_z {
+                if has_water & self.ocean[i] {
                     f |= FACIES_SEA;
                 }
                 // ★ A LAKE IS WATER THAT STANDS (ruling W11), never the routing flood's own fill.
-                if has_water && self.water_z[i] > self.z[i] {
+                if has_water & (self.water_z[i] > self.z[i]) {
                     f |= FACIES_LAKE;
                 }
                 if (i64::from(self.z[i]) - i64::from(self.sea_z)).abs() <= i64::from(band) {
@@ -1349,8 +1497,9 @@ impl MacroSolve {
             .collect()
     }
 
-    /// ★ THE OCEAN SHARE (stage C5, gate G-SEA): the area under the sea over the globe's area, a
-    /// plain number for the report; zero with no sea.
+    /// ★ THE OCEAN SHARE (stage C5, gate G-SEA): the CONNECTED ocean's area over the globe's area
+    /// (2026-09-24, ruling B7 item 1: a pocket under the level is not the sea), a plain number for
+    /// the report; zero with no sea.
     #[must_use]
     pub fn ocean_share(&self) -> f64 {
         if self.sea_z == i32::MIN {
@@ -1358,11 +1507,9 @@ impl MacroSolve {
         }
         let mut wet = 0u128;
         let mut all = 0u128;
-        for (k, &z) in self.z.iter().enumerate() {
-            all += u128::from(self.area[k]);
-            if z <= self.sea_z {
-                wet += u128::from(self.area[k]);
-            }
+        for (&a, &ocean) in self.area.iter().zip(&self.ocean) {
+            all += u128::from(a);
+            wet += u128::from(a) * u128::from(ocean);
         }
         if all == 0 {
             return 0.0;
@@ -1518,7 +1665,7 @@ pub fn solve_full(
     // the initial land and the climate over it already state — the plate that carries the ground
     // and the rain that wears it. A body with no water and no moving plate keeps the whole age,
     // which is why the airless moon's count cannot move.
-    let pre_climate = crate::climate::climate(body, &lattice, words, &land.z, land.sea_z);
+    let pre_climate = crate::climate::climate(body, &lattice, words, &land.z, land.sea_view());
     let surface = crate::craters::Surface {
         crust: &land.crust,
         boundary_m: &land.boundary_m,
@@ -1565,16 +1712,26 @@ pub fn solve_full(
             // stands at every climate step, so the base level the rivers cut to follows the
             // inventory over the eroding continents — before, the sea moved once at the end and
             // the shelf the rivers had graded to the old level came up as a checkerboard of pits.
-            if let Some(sea) = crate::land::sea_level_loaded(&state.z, &state.area, words.water_km3)
-            {
-                state.sea_z = sea;
+            // ★ OVER THE CONNECTED OCEAN ONLY (2026-09-24, ruling B7 item 1): a pocket under the
+            // level holds none of the inventory, and the climate's sea is the ocean's.
+            if let Some(sea) = crate::land::sea_level_connected(
+                &lattice,
+                &state.z,
+                &state.area,
+                words.water_km3,
+                false,
+            ) {
+                state.sea_z = sea.level;
+                state.ocean = sea.mask.ocean;
+                report.sea_reseeded |= sea.reseeded;
+                report.sea_unsettled |= !sea.settled;
             }
             let c = crate::climate::climate(
                 body,
                 &lattice,
                 words,
                 &state.z,
-                (words.water_km3 > 0).then_some(state.sea_z),
+                (words.water_km3 > 0).then_some(state.sea_view()),
             );
             state.rain.clone_from(&c.rain_mm_yr);
             climate = Some(c);
@@ -1629,7 +1786,7 @@ pub fn solve_full(
             &lattice,
             words,
             &state.z,
-            (words.water_km3 > 0).then_some(state.sea_z),
+            (words.water_km3 > 0).then_some(state.sea_view()),
         ),
     };
     // The talus relaxations the loop had no passes to hold: a schedule of no passes still sheds
@@ -1646,9 +1803,14 @@ pub fn solve_full(
     report.envelope = state.envelope(relief);
     // ★ THE SEA, RE-SOLVED over the eroded field (stage C5; the design's §6, ruling T8's cure): the
     // inventory must fit under the level over the field AS IT STANDS, whose isostatic sink the land
-    // already applied. The final routing, the coast and the facies read this sea.
-    if let Some(sea) = crate::land::sea_level_loaded(&state.z, &state.area, words.water_km3) {
-        state.sea_z = sea;
+    // already applied. The final routing, the coast and the facies read this sea. ★ Over the
+    // CONNECTED ocean (2026-09-24, ruling B7 item 1); the final routing labels the same ocean.
+    if let Some(sea) =
+        crate::land::sea_level_connected(&lattice, &state.z, &state.area, words.water_km3, false)
+    {
+        state.sea_z = sea.level;
+        report.sea_reseeded |= sea.reseeded;
+        report.sea_unsettled |= !sea.settled;
     }
     // The final routing, so the receivers, the basins and the facies read the final land.
     report.routes.push(state.route());
@@ -1675,42 +1837,49 @@ pub fn solve_full(
         report.ice.2 = report.ice.2.max(deepest);
         mask
     };
-    drop(climate);
     // ★ THE LAKES (ruling W11, 2026-09-22): the routing flood is a SCRATCH SURFACE, so the standing
     // water is settled here — the depression hierarchy over the final field, and every hollow's own
     // water budget against the climate that stands over it. A hollow the rain cannot fill is a dry
     // basin. The climate is the very one the artifact reads, so a node's rain decides its lake and
     // its own row alike.
+    let mut final_climate = climate;
     if words.water_km3 > 0 {
-        let mut climate = crate::climate::climate(
-            body,
-            &lattice,
-            words,
-            &state.z,
-            (words.water_km3 > 0).then_some(state.sea_z),
-        );
+        let mut climate =
+            crate::climate::climate(body, &lattice, words, &state.z, Some(state.sea_view()));
         let mut lakes = crate::lakes::budget(&state, &climate);
         // ★ THE DOUBLE COUNT (ruling W11 step 4): the lakes' standing water is part of the body's
         // one inventory, and the sea spent all of it. Once the levels are known the sea is
-        // re-solved over the inventory LESS the lakes; where that leaves the level where it stood
-        // the sea keeps it and nothing is re-run.
-        let km3 = (lakes.report.volume_m3 / LAKE_KM3_M3) as u64;
-        if km3 > 0 && km3 < words.water_km3 {
-            let left = words.water_km3 - km3;
-            if let Some(sea) = crate::land::sea_level_loaded(&state.z, &state.area, left)
-                && sea != state.sea_z
-            {
-                report.sea_before_lakes = Some(state.sea_z);
-                state.sea_z = sea;
-                report.routes.push(state.route());
-                climate =
-                    crate::climate::climate(body, &lattice, words, &state.z, Some(state.sea_z));
-                lakes = crate::lakes::budget(&state, &climate);
-            }
+        // re-solved over the inventory LESS the lakes — ★ A FIXED POINT (2026-09-24, ruling B7
+        // item 1; plan question 8), at most [`LAKE_SEA_SOLVES`] times ([`settle_lakes_sea`]).
+        let volume = lakes.report.volume_m3;
+        let fix = settle_lakes_sea(
+            &mut state,
+            words.water_km3,
+            LAKE_SEA_SOLVES,
+            volume,
+            &mut report.routes,
+            &mut |s: &MacroSolve| {
+                climate = crate::climate::climate(body, &lattice, words, &s.z, Some(s.sea_view()));
+                lakes = crate::lakes::budget(s, &climate);
+                lakes.report.volume_m3
+            },
+        );
+        report.lake_sea_solves = fix.solves;
+        report.lake_sea_converged = fix.converged;
+        report.sea_reseeded |= fix.reseeded;
+        report.sea_unsettled |= fix.unsettled;
+        if state.sea_z != fix.first {
+            report.sea_before_lakes = Some(fix.first);
         }
         report.lakes = lakes.report;
         state.water_z = lakes.water;
+        final_climate = climate;
     }
+    // ★ THE DISCHARGE THE ARTIFACT SHIPS (2026-09-24, ruling B7 item 2; status §7 W10): the RUNOFF
+    // of the climate over the final field, accumulated over the receivers of the LAST routing. The
+    // passes cut with the rain's drainage; the row that ships is the water that reaches a river.
+    state.accumulate_runoff(&final_climate.runoff_mm_yr);
+    drop(final_climate);
     report.sea_z = (words.water_km3 > 0).then_some(state.sea_z);
     report.ocean_share = state.ocean_share();
     report.coast_band = coast_band(words, gravity);
@@ -1829,9 +1998,9 @@ mod tests {
         let (lo0, hi0) = before.range();
         assert!(lo >= lo0, "the floor fell: {lo0} to {lo}");
         assert!(hi <= hi0, "the ceiling rose: {hi0} to {hi}");
-        // 64 before the rock map; the province's own byte makes 65 (slice 8d step 2), and the
-        // lakes' own water word makes 69 (ruling W11).
-        assert_eq!(state.bytes_per_node(), 69);
+        // 64 before the rock map; the province's own byte makes 65 (slice 8d step 2), the lakes'
+        // own water word makes 69 (ruling W11), and the ocean's own bit makes 70 (ruling B7).
+        assert_eq!(state.bytes_per_node(), 70);
         assert_eq!(state.node_count(), 27_744);
         // The discharge is conserved: what leaves at the outlets is every node's own rain.
         let total: u64 = (0..state.node_count())
@@ -2333,11 +2502,14 @@ mod tests {
         let nodes = state.node_count();
         assert!(wet_nodes > 0, "{wet_nodes}");
         assert!(wet_nodes < nodes, "{wet_nodes} of {nodes}");
-        // A dry state reads no share; a sea over every node reads one.
+        // A dry state reads no share; a sea over every node reads one once the routing has labelled
+        // its ocean (2026-09-24, ruling B7: the share is the CONNECTED ocean's).
         let mut dry = MacroSolve::new(&moon).expect("a state");
         dry.sea_z = i32::MIN;
         assert_eq!(dry.ocean_share(), 0.0);
         dry.sea_z = i32::MAX;
+        assert_eq!(dry.ocean_share(), 0.0, "no ocean labelled yet");
+        dry.route();
         assert_eq!(dry.ocean_share(), 1.0);
         dry.z.clear();
         dry.area.clear();
@@ -2500,6 +2672,262 @@ mod tests {
                 .lattice
                 .neighbours(some)
                 .contains(&state.receiver[some as usize])
+        );
+    }
+
+    /// A plateau at 16, nine nodes of sea at 0, and a pocket of two nodes far inland under the sea:
+    /// its pit at −50 and a wall at −20.
+    fn pocket_plateau() -> (MacroSolve, usize, usize) {
+        let moon = home_moon();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        let n = state.node_count();
+        state.z = vec![Z_STEPS_PER_M; n];
+        state.sea_z = 0;
+        for i in 2..=4 {
+            for j in 2..=4 {
+                state.z[state.lattice.index(Face::PosX, i, j) as usize] = 0;
+            }
+        }
+        let q = state.lattice.index(Face::NegZ, 40, 40) as usize;
+        let wall = state.lattice.index(Face::NegZ, 41, 40) as usize;
+        state.z[q] = -50;
+        state.z[wall] = -20;
+        (state, q, wall)
+    }
+
+    /// ★ TESTS 17 AND 18 (plan step 2 part 3a; ruling B7 item 1): THE ROUTING SEEDS THE OCEAN ALONE
+    /// AND RAISES A POCKET LIKE ANY HOLLOW; the water level, the facies and the ocean share leave
+    /// the pocket out. The pocket's nodes are no outlets: each has a receiver, the flood raised
+    /// them to the plateau, and the sweep's base level is that spill. Its water level is DRY (no
+    /// budget put water there), its facies carry no sea, and the share is the ocean's nine nodes.
+    #[test]
+    fn the_routing_seeds_the_ocean_alone_and_raises_a_pocket() {
+        let (mut state, q, wall) = pocket_plateau();
+        let n = state.node_count();
+        let r = state.route();
+        assert!(r.sea_seeded);
+        assert_eq!(r.outlets, 9);
+        assert_eq!((r.pockets, r.pocket_nodes), (1, 2));
+        assert_eq!((r.undrained, r.cyclic), (0, 0));
+        for node in [q, wall] {
+            assert!(!state.ocean[node]);
+            assert_ne!(state.receiver[node], NO_NODE, "a pocket node is no outlet");
+            assert_eq!(state.z_flood[node], Z_STEPS_PER_M, "raised to its spill");
+            assert_eq!(state.water_level(node as u32), DRY);
+            assert_eq!(state.routing_base(node as u32), Z_STEPS_PER_M);
+        }
+        assert_eq!(state.pit[q] as i32, Z_STEPS_PER_M + 50);
+        let facies = state.facies(&vec![false; n], 0, true);
+        assert_eq!(facies[q] & FACIES_SEA, 0);
+        let sea = state.lattice.index(Face::PosX, 3, 3) as usize;
+        assert_eq!(facies[sea] & FACIES_SEA, FACIES_SEA);
+        assert_eq!(state.water_level(sea as u32), 0);
+        let ocean_area: u64 = (0..n)
+            .filter(|&k| state.ocean[k])
+            .map(|k| state.area[k])
+            .sum();
+        let all: u64 = state.area.iter().sum();
+        assert!((state.ocean_share() - ocean_area as f64 / all as f64).abs() < 1e-15);
+        assert_eq!((0..n).filter(|&k| state.ocean[k]).count(), 9);
+        // The pocket is land to the basins' integrals too: its basin counts every node that is not
+        // the ocean, the two under the sea's level included, and its floor is the pocket's.
+        let basins = state.basins();
+        let basin = basins[q];
+        let land = (0..n)
+            .filter(|&k| basins[k] == basin && !state.ocean[k])
+            .count() as u32;
+        let integral = state
+            .hypsometric_integrals(1)
+            .into_iter()
+            .find(|b| b.outlet == basin)
+            .expect("the pocket's basin has an integral");
+        assert_eq!(integral.nodes, land);
+        assert!(
+            integral.integral_q8 > 200,
+            "a plateau over a deep pocket: {integral:?}"
+        );
+        // The ice reads it as no ground for ice: it stands under the flood's fill.
+        let line = vec![i32::MIN; n];
+        let (mask, _, _, _) = state.ice(&line, &vec![2_000; n], 6_500, 330, 0);
+        assert!(!mask[q]);
+        assert!(!mask[sea]);
+    }
+
+    /// ★ THE LAKES' SEA FIXED POINT WITH NO LAKE (plan question 8): a wet body whose ground yields no
+    /// runoff — the airless moon's own words, stated with a sea — holds no lake, so the sea over the
+    /// inventory less the lakes is the sea itself: no re-solve, the fixed point stood still at once,
+    /// and no "sea before the lakes" is reported.
+    #[test]
+    fn a_wet_body_with_no_lake_keeps_its_sea_through_the_fixed_point() {
+        let moon = home_moon();
+        let words = SolveWords {
+            water_km3: 3_000_000,
+            ..crate::home::home_moon_solve_words()
+        };
+        let (state, _, report) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        assert_eq!(report.lakes.volume_m3, 0);
+        assert_eq!(report.lake_sea_solves, 0);
+        assert!(report.lake_sea_converged);
+        assert_eq!(report.sea_before_lakes, None);
+        assert_eq!(report.sea_z, Some(state.sea_z));
+        assert!(!report.sea_reseeded);
+        assert!(!report.sea_unsettled);
+    }
+
+    /// The moon's lattice with a sea over face `PosX` (−1 000 m, the rest at 500 m) and the sea the
+    /// inventory `water_km3` puts over the connected ocean, routed.
+    fn sea_face(water_km3: u64) -> MacroSolve {
+        let moon = home_moon();
+        let mut state = MacroSolve::new(&moon).expect("a state");
+        let n = state.node_count();
+        for k in 0..n {
+            state.z[k] = if state.lattice.split(k as u32).0 == Face::PosX {
+                -1_000 * Z_STEPS_PER_M
+            } else {
+                500 * Z_STEPS_PER_M
+            };
+        }
+        let lattice = state.lattice;
+        state.sea_z =
+            crate::land::sea_level_connected(&lattice, &state.z, &state.area, water_km3, false)
+                .expect("a sea")
+                .level;
+        state.route();
+        state
+    }
+
+    /// ★ THE LAKES' SEA FIXED POINT WITH A LAKE THAT MOVES THE SEA (review finding 7 of plan step
+    /// 2). Four statements, each of which could fail, on the moon's sea face with the lakes' volume
+    /// stated (a pocket's lake in a dry interior holding a tenth of the inventory):
+    ///
+    /// 1. the sea is re-solved ONCE and then stands still: one solve, converged, one more route, the
+    ///    first sea kept, and the final sea exactly the connected sea over the inventory less the
+    ///    lakes — at least one sixteenth under the first;
+    /// 2. a bound of one stops the loop after the sea moved: one solve, NOT converged;
+    /// 3. lakes that hold the whole inventory leave no sea to solve: the level stands, converged,
+    ///    no solve;
+    /// 4. the lakes read again after each new sea are the ones the loop solves against: a volume
+    ///    that grows at each read keeps the sea moving until the bound stops it.
+    #[test]
+    fn the_lakes_sea_fixed_point_re_solves_until_the_sea_stands_still() {
+        let water_km3 = 400_000;
+        let lakes_m3 = u128::from(water_km3 / 10) * LAKE_KM3_M3;
+        let mut state = sea_face(water_km3);
+        let first = state.sea_z;
+        let mut routes = Vec::new();
+        let mut reads = 0u32;
+        let fix = settle_lakes_sea(
+            &mut state,
+            water_km3,
+            LAKE_SEA_SOLVES,
+            lakes_m3,
+            &mut routes,
+            &mut |_| {
+                reads += 1;
+                lakes_m3
+            },
+        );
+        assert_eq!(fix.first, first);
+        assert_eq!((fix.solves, fix.converged), (1, true));
+        assert_eq!((reads, routes.len()), (1, 1));
+        assert!(!fix.reseeded);
+        assert!(!fix.unsettled);
+        let lattice = state.lattice;
+        let want = crate::land::sea_level_connected(
+            &lattice,
+            &state.z,
+            &state.area,
+            water_km3 - water_km3 / 10,
+            false,
+        )
+        .expect("a sea")
+        .level;
+        assert_eq!(state.sea_z, want);
+        assert!(
+            state.sea_z < first,
+            "the sea fell: {first} to {}",
+            state.sea_z
+        );
+        // 2. A bound of one.
+        let mut bounded = sea_face(water_km3);
+        let fix = settle_lakes_sea(
+            &mut bounded,
+            water_km3,
+            1,
+            lakes_m3,
+            &mut Vec::new(),
+            &mut |_| lakes_m3,
+        );
+        assert_eq!((fix.solves, fix.converged), (1, false));
+        assert_eq!(bounded.sea_z, want);
+        // 3. Lakes that hold the whole inventory.
+        let mut drained = sea_face(water_km3);
+        let all = u128::from(water_km3) * LAKE_KM3_M3;
+        let fix = settle_lakes_sea(
+            &mut drained,
+            water_km3,
+            LAKE_SEA_SOLVES,
+            all,
+            &mut Vec::new(),
+            &mut |_| all,
+        );
+        assert_eq!((fix.solves, fix.converged), (0, true));
+        assert_eq!(drained.sea_z, first);
+        // 4. A volume that grows at every read: the sea never stands still inside the bound.
+        let mut growing = sea_face(water_km3);
+        let mut volume = lakes_m3;
+        let fix = settle_lakes_sea(
+            &mut growing,
+            water_km3,
+            LAKE_SEA_SOLVES,
+            lakes_m3,
+            &mut Vec::new(),
+            &mut |_| {
+                volume += lakes_m3;
+                volume
+            },
+        );
+        assert_eq!((fix.solves, fix.converged), (LAKE_SEA_SOLVES, false));
+    }
+
+    /// ★ TEST 19 (plan step 2 part 4; ruling B7 item 2; status §7 W10's own guard): THE SHIPPED
+    /// DISCHARGE IS THE RUNOFF OVER THE FINAL TREE. After the full solve on the moon's lattice under
+    /// the home planet's words, the climate over the final field is read again and its runoff is
+    /// accumulated over the state's own receivers and order: it equals the discharge row EXACTLY,
+    /// at every node. Before this step the row was the last pass's RAIN over an older tree.
+    #[test]
+    fn the_discharge_is_the_runoff_accumulated_over_the_final_receivers() {
+        let moon = home_moon();
+        let words = SolveWords {
+            water_km3: 3_000_000,
+            ..crate::home::home_solve_words()
+        };
+        let (state, _, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let climate =
+            crate::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
+        let mut again: Vec<u64> = (0..state.node_count())
+            .map(|i| u64::from(climate.runoff_mm_yr[i]) * state.area[i])
+            .collect();
+        for &node in &state.order {
+            let r = state.receiver[node as usize];
+            if r != NO_NODE {
+                again[r as usize] += again[node as usize];
+            }
+        }
+        assert_eq!(again, state.discharge);
+        let rain: u64 = (0..state.node_count())
+            .map(|i| u64::from(climate.rain_mm_yr[i]) * state.area[i])
+            .sum();
+        let out: u64 = (0..state.node_count())
+            .filter(|&i| state.receiver[i] == NO_NODE)
+            .map(|i| state.discharge[i])
+            .sum();
+        assert!(
+            out < rain,
+            "the runoff is a share of the rain: {out} of {rain}"
         );
     }
 

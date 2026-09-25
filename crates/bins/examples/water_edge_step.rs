@@ -179,7 +179,8 @@ fn main() {
         let cell_j =
             vd_seed::ladder::index_of(vd_seed::bend::unbend(s), body.ladder().cells_per_edge(rung));
         let cell_side = sample_side(&fine, field, face, rung, cell_i, cell_j);
-        let (water, _, _) = column_water(&body, &lattice, field, face, 0, i, j, cell_side);
+        // The water that STANDS over the column (ZERO for an inland one, plan step 2 part 3b).
+        let water = column_water(&body, &lattice, field, face, 0, i, j, cell_side).water;
         // ★ 2026-09-23 (ruling W16): step 4's drawn lines are RETIRED, so no column holds a
         // stream's own surface any more. A column's water is the row's, and nothing else — which
         // is exactly what the `river` mode must now read: no river water at all.

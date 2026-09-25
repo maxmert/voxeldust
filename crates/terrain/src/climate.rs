@@ -515,21 +515,33 @@ pub fn datum_z(lattice: &MacroLattice, z: &[i32], sea_z: Option<i32>) -> i32 {
     (weighted / (area as i128)) as i32
 }
 
-/// ★ THE WET SHARE of a body's surface: the area under the sea over the whole area, zero where
-/// there is no sea. The season's heat store reads it ([`seasonal_capacity_j_m2_k`]).
+/// ★ THE SEA AS THE CLIMATE READS IT (2026-09-24, ruling B7 item 1): the sea's level and the mask
+/// of the CONNECTED ocean at that level ([`crate::land::ocean_mask`]). An inland pocket under the
+/// level is not in the mask, so its air stands on its own ground and it adds nothing to the wet
+/// share.
+#[derive(Clone, Copy, Debug)]
+pub struct SeaView<'a> {
+    /// The sea's level, sixteenths.
+    pub level: i32,
+    /// Whether each node belongs to the connected ocean.
+    pub ocean: &'a [bool],
+}
+
+/// ★ THE WET SHARE of a body's surface: the OCEAN's area over the whole area, zero where there is
+/// no sea. The season's heat store reads it ([`seasonal_capacity_j_m2_k`]). ★ Only the connected
+/// ocean counts (2026-09-24, ruling B7 item 1): a pocket under the sea's level is dry ground or a
+/// lake, never the sea's heat store.
 #[must_use]
-pub fn wet_share(lattice: &MacroLattice, z: &[i32], sea_z: Option<i32>) -> Gf {
-    let Some(sea) = sea_z else {
+pub fn wet_share(lattice: &MacroLattice, sea: Option<SeaView<'_>>) -> Gf {
+    let Some(sea) = sea else {
         return Gf::ZERO;
     };
     let mut wet = 0u128;
     let mut all = 0u128;
-    for (k, &h) in z.iter().enumerate() {
+    for (k, &ocean) in sea.ocean.iter().enumerate() {
         let a = u128::from(lattice.area_m2(k as u32));
         all += a;
-        if h <= sea {
-            wet += a;
-        }
+        wet += a * u128::from(ocean);
     }
     if all == 0 {
         return Gf::ZERO;
@@ -719,20 +731,29 @@ pub fn climate_laws(body: &BodyDefinition, words: &SolveWords, wet_share: Gf) ->
     }
 }
 
-/// ★ THE CLIMATE over `lattice` for the relief `z` as it stands. `sea_z` IS read, twice: it names
-/// the body's own temperature DATUM ([`datum_z`]) and it gives the wet share the season's heat
-/// store reads. The supply is still a temperature law alone (no fetch, no continental term — a
-/// stated limit of the O(1) form).
+/// ★ THE CLIMATE over `lattice` for the relief `z` as it stands. `sea` IS read, three times: its
+/// level names the body's own temperature DATUM ([`datum_z`]), its ocean gives the wet share the
+/// season's heat store reads, and the air over an OCEAN node stands at the sea's surface. The supply
+/// is still a temperature law alone (no fetch, no continental term — a stated limit of the O(1)
+/// form).
+///
+/// ★ THE AIR OVER A POCKET STANDS ON ITS OWN GROUND (2026-09-24, ruling B7 item 1; plan question
+/// 2): a pocket under the sea's level is not the sea, so its air is the air at its floor, warmer by
+/// the lapse over its depth, as the air over any other closed basin is.
+///
+/// **Example.** A pocket in a dry interior stands 2 km under the sea's level. Its floor reads the
+/// air 2 km under the datum, about 13 K warmer on Earth's lapse, and its evaporation climbs with
+/// that warmth: the basin is a hot salt pan, as the Dead Sea's shore and the Turpan basin are.
 #[must_use]
 pub fn climate(
     body: &BodyDefinition,
     lattice: &MacroLattice,
     words: &SolveWords,
     z: &[i32],
-    sea_z: Option<i32>,
+    sea: Option<SeaView<'_>>,
 ) -> Climate {
-    let datum = datum_z(lattice, z, sea_z);
-    let laws = climate_laws(body, words, wet_share(lattice, z, sea_z));
+    let datum = datum_z(lattice, z, sea.map(|s| s.level));
+    let laws = climate_laws(body, words, wet_share(lattice, sea));
     let n = lattice.node_count();
     let steps = Gf::from_i64(i64::from(Z_STEPS_PER_M));
     let mut out = Climate {
@@ -756,20 +777,14 @@ pub fn climate(
         // node four kilometres down on the abyssal plain carries the sea's air, not air four
         // kilometres' worth of lapse warmer. MEASURED before this line: the sea floor read 344 K,
         // asked for 16 160 mm of evaporation a year and was given 6 708 mm of rain.
-        let air_z = match sea_z {
-            Some(sea) => z[i].max(sea),
-            None => z[i],
-        };
+        let air_z = air_over(z, sea, i);
         let height_m = Gf::from_i64(i64::from(air_z) - i64::from(datum)) / steps;
         let t_k = temperature_k(&laws, sin_lat, height_m);
         let (rain, slot) = if laws.rains {
             let wind = surface_wind(laws.circulation, d);
             let slot = upwind_slot(lattice, node, d, wind);
             let m = lattice.neighbours(node)[usize::from(slot)];
-            let up_z = match sea_z {
-                Some(sea) => z[m as usize].max(sea),
-                None => z[m as usize],
-            };
+            let up_z = air_over(z, sea, m as usize);
             let rise_m = Gf::from_i64(i64::from(air_z) - i64::from(up_z)) / steps;
             let chord = Gf::from_i64(i64::from(lattice.chord_m(node, m).max(1)));
             let (_, from_rising) = cell_position(laws.circulation, sin_lat.abs());
@@ -808,6 +823,16 @@ pub fn climate(
     out
 }
 
+/// ★ THE HEIGHT THE AIR STANDS AT OVER A NODE: the sea's surface over an OCEAN node, never the
+/// floor under it; the node's own ground everywhere else — a pocket under the sea's level included
+/// (2026-09-24, ruling B7 item 1).
+fn air_over(z: &[i32], sea: Option<SeaView<'_>>, i: usize) -> i32 {
+    match sea {
+        Some(s) if s.ocean[i] => z[i].max(s.level),
+        _ => z[i],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,6 +842,15 @@ mod tests {
 
     fn gf(v: f64) -> Gf {
         Gf::from_f64(v)
+    }
+
+    /// The connected ocean of a stated field at a stated level, by the one law
+    /// ([`crate::land::ocean_mask`]).
+    fn ocean_at(lattice: &MacroLattice, z: &[i32], level: i32) -> Vec<bool> {
+        let area: Vec<u64> = (0..lattice.node_count() as u32)
+            .map(|k| lattice.area_m2(k))
+            .collect();
+        crate::land::ocean_mask(lattice, z, &area, level).ocean
     }
 
     /// ★ GATE G-ICE, AS A LAW TEST AND NOT A WORLD READING (ruling B5, 2026-09-22).
@@ -879,7 +913,17 @@ mod tests {
         let z: Vec<i32> = (0..lattice.node_count())
             .map(|i| if is_land(i) { land_z } else { floor_z })
             .collect();
-        let climate = climate(&body, &lattice, &words, &z, Some(0));
+        let ocean = ocean_at(&lattice, &z, 0);
+        let climate = climate(
+            &body,
+            &lattice,
+            &words,
+            &z,
+            Some(SeaView {
+                level: 0,
+                ocean: &ocean,
+            }),
+        );
         let land = (0..lattice.node_count()).filter(|&i| is_land(i)).count();
         let under_ice = (0..lattice.node_count())
             .filter(|&i| is_land(i) && climate.ela_z[i] != i32::MAX && land_z > climate.ela_z[i])
@@ -1167,6 +1211,76 @@ mod tests {
         assert_eq!(STENCIL[0], (-1, -1));
     }
 
+    /// ★ TEST 21 (plan step 2 part 3a; ruling B7 item 1; plan question 2): A POCKET'S AIR STANDS ON
+    /// ITS OWN GROUND, and the wet share counts the ocean alone. The home planet's words on the
+    /// moon's lattice: the sea at 0 over one whole face, a node 2 000 m under it on another face.
+    /// Read as a POCKET (out of the ocean's mask) the node is WARMER than read as the ocean — its
+    /// air stands 2 000 m down, not at the sea's surface — and the wet share is the ocean face's
+    /// alone.
+    #[test]
+    fn a_pockets_air_stands_on_its_own_ground() {
+        let moon = home_moon();
+        let lattice = MacroLattice::of(&moon).expect("a lattice");
+        let words = home_solve_words();
+        let n = lattice.node_count();
+        let mut z = vec![500 * Z_STEPS_PER_M; n];
+        for (k, h) in z.iter_mut().enumerate() {
+            if lattice.split(k as u32).0 == vd_seed::bend::Face::PosX {
+                *h = -3_000 * Z_STEPS_PER_M;
+            }
+        }
+        let pocket = lattice.index(vd_seed::bend::Face::NegZ, 30, 30) as usize;
+        z[pocket] = -2_000 * Z_STEPS_PER_M;
+        let ocean = ocean_at(&lattice, &z, 0);
+        assert!(!ocean[pocket]);
+        let mut drowned = ocean.clone();
+        drowned[pocket] = true;
+        let sea = |mask: &[bool]| {
+            climate(
+                &moon,
+                &lattice,
+                &words,
+                &z,
+                Some(SeaView {
+                    level: 0,
+                    ocean: mask,
+                }),
+            )
+        };
+        let (own, as_sea) = (sea(&ocean), sea(&drowned));
+        let (floor_air, sea_air) = (own.temperature_dk[pocket], as_sea.temperature_dk[pocket]);
+        assert!(floor_air > sea_air, "{floor_air} against {sea_air}");
+        let area = |k: usize| u128::from(lattice.area_m2(k as u32));
+        let face: u128 = (0..n).filter(|&k| ocean[k]).map(area).sum();
+        let all: u128 = (0..n).map(area).sum();
+        assert_eq!(
+            wet_share(
+                &lattice,
+                Some(SeaView {
+                    level: 0,
+                    ocean: &ocean
+                })
+            ),
+            Gf::from_i64(face as i64) / Gf::from_i64(all as i64)
+        );
+        assert!(
+            wet_share(
+                &lattice,
+                Some(SeaView {
+                    level: 0,
+                    ocean: &drowned
+                })
+            ) > wet_share(
+                &lattice,
+                Some(SeaView {
+                    level: 0,
+                    ocean: &ocean
+                })
+            )
+        );
+        assert_eq!(wet_share(&lattice, None), Gf::ZERO);
+    }
+
     /// ★ THE DRIVER ON THE HOME MOON: airless and dry — no rain, no wind, no lapse; the poles
     /// colder than the equator; frozen everywhere the equilibrium profile is under freezing.
     #[test]
@@ -1206,7 +1320,7 @@ mod tests {
         let lattice = MacroLattice::of(&moon).expect("a lattice");
         let words = home_solve_words();
         let land = initial_land(&moon, &lattice, &words.land());
-        let c = climate(&moon, &lattice, &words, &land.z, land.sea_z);
+        let c = climate(&moon, &lattice, &words, &land.z, land.sea_view());
         let n = lattice.node_count();
         assert!(c.rain_mm_yr.iter().all(|&r| r >= P_MIN_MM_YR));
         assert!(c.rain_mm_yr.iter().all(|&r| r <= P_MAX_MM_YR));
@@ -1305,7 +1419,17 @@ mod tests {
         let lattice = MacroLattice::of(&body).expect("a lattice");
         let words = home_solve_words();
         let z = vec![0; lattice.node_count()];
-        let c = climate(&body, &lattice, &words, &z, Some(0));
+        let ocean = ocean_at(&lattice, &z, 0);
+        let c = climate(
+            &body,
+            &lattice,
+            &words,
+            &z,
+            Some(SeaView {
+                level: 0,
+                ocean: &ocean,
+            }),
+        );
         assert_eq!(c.pet_mm_yr.len(), lattice.node_count());
         for i in 0..lattice.node_count() {
             assert!(c.runoff_mm_yr[i] <= c.rain_mm_yr[i]);

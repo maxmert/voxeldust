@@ -14,32 +14,39 @@
 //! 1. **G-HYPSO** (ruling B3): the final field's heights over the sea in fixed bins, the two-hump
 //!    test of gate G-LAND-HYPSOMETRY, the basins' G-AGE integrals against Strahler's band, and the
 //!    land's share over 1 000 m.
-//! 2. **THE INLAND SEA** (status §6 T7): the nodes under the sea's level that no path joins to the
-//!    ocean, and the ten largest pockets with an aim each.
+//! 2. **THE INLAND POCKETS** (status §6 T7; ruling B7 item 1): the nodes under the sea's level that no
+//!    path joins to the ocean — closed basins since plan step 2 — with the census's own labelling
+//!    checked against the solve's ocean (CHECK-OCEAN, CHECK-POCKET-NOT-SEA) and each pocket's end.
 //! 3. **G-RIVER** (ruling B3): every channel head walked down the shipped receivers to its end, and
 //!    every trunk step on which the floor rises. Beside it, THE DISCHARGE ROW AND ITS TREE (status §7
-//!    W10): the row against the receivers it ships with.
-//! 4. **THE LAKES AT THE RUNG SWAP** (ruling W16; status §6 T5, §7 W6): the lake nodes and patches
-//!    whose drawn water changes where the far rungs start to read pyramid level 1, and the dry
-//!    columns the shore law lifts over a lake there (the lip), read on the SHIPPED column.
-//! 5. **THE WATERSHED AGAINST THE BUDGET** (status §7 W3): each hollow's whole watershed supply beside
-//!    the supply the budget used, and the budget's own rule run again over the watershed. A WHAT-IF.
+//!    W10): the row, which carries the RUNOFF since plan step 2, against the receivers it ships with.
+//! 4. **THE LAKES AT THE RUNG SWAPS** (ruling W16; status §6 T5, §7 W6; plan step 2 part 5): the lake
+//!    columns whose drawn water changes at the swaps 9 → 10, 14 → 15 and 15 → 16 (LOST, MIXED,
+//!    SHIFTED), the dry columns the shore law lifts over a lake (the lip), and the dry columns whose
+//!    INLAND/LAND word changes while their ground stands under the sea (the hold), read on the
+//!    SHIPPED column.
+//!    ★ And THE POCKET'S FLOOR (review finding 1 of plan step 2): at each rung, the columns over a
+//!    pocket's dry floor that the shore law holds over the sea (G-POCKET-HELD).
+//! 5. **THE LAKE BUDGET** (status §7 W3, W4; plan step 2 parts 1 and 2): each hollow's watershed
+//!    supply beside the runoff of its own nodes, the three ends, the cascade's pours and its books
+//!    (exact), and G-LAKE-SHARE. Step 1 printed this as a WHAT-IF; since step 2 it is the budget.
+//!    ★ And THE ROW AT THE SPILLS (review finding 3 of plan step 2): the discharge row at each
+//!    hollow's spill against the water the cascade passes on there.
 //!
-//! WHAT IT READS: the solve's final state (the heights, the receivers, the routing fill, the
-//! discharge row, the rain row), the lake budget's own hierarchy (`lakes::budget`, run again over
-//! the same climate), the shipped artifact's rows and its level-1 water word, and THE SHIPPED
-//! COLUMN on each side of the rung swap (`vd_bins::shore_geometry::RungReader`: the chunk builder's
-//! `sample_side`, `column_water`, `sample_z` and the one kernel, on the body with its solved sea).
-//! It never re-implements a column. Every gate prints one `CENSUS <gate> <value> <band> <verdict>`
-//! line with no space inside a field; every self-check prints a `CENSUS CHECK-…` line of the same
-//! shape; and the world's versions head the output, so a reading names its world.
+//! WHAT IT READS: the solve's final state (the heights, the receivers, the routing fill, the ocean,
+//! the discharge row), the lake budget's own hierarchy and descent (`lakes::budget`, run again over
+//! the same climate), the shipped artifact's rows, its level-1 and level-2 water words and its coast
+//! mask, and THE SHIPPED COLUMN on each side of every rung swap (`vd_bins::shore_geometry::RungReader`:
+//! the chunk builder's `sample_side`, `column_water`, `sample_z` and the one kernel, on the body with
+//! its solved sea). It never re-implements a column. Every gate prints one
+//! `CENSUS <gate> <value> <band> <verdict>` line with no space inside a field; every self-check
+//! prints a `CENSUS CHECK-…` line of the same shape; and the world's versions head the output, so a
+//! reading names its world.
 //!
-//! **Example.** A pilot over the belt sees a pond in a hollow from 150 km and loses it from 500 km.
-//! The census names the pond's node: it is the only wet node of its level-1 block, so the fold turns
-//! it to land at the rung 9 → 10 swap, and G-RUNG-LAKE counts it. The same pass walks the river off
-//! the range beside it down the shipped receivers: the river ends in a dry closed basin, because the
-//! budget gives that hollow only the runoff of the ground under its own brim. The what-if gives the
-//! hollow the range's runoff too, and the hollow turns from DRY to SPILLING.
+//! **Example.** A pilot over the belt sees a pond in a hollow from 150 km and, since plan step 2,
+//! still sees it from 500 km: the census reads the pond's column on both sides of the rung 9 → 10
+//! swap and finds the same water. The same pass walks the river off the range beside it down the
+//! shipped receivers into a hollow the range's whole watershed now feeds, and the hollow spills.
 //!
 //! `cargo run --release -p vd-bins --example lake_census -- [dx dy dz] [half_nodes]`
 
@@ -49,19 +56,20 @@ use vd_bins::grid_bias::unit;
 // ★ THE SHIPPED COLUMN, ONE COPY (plan step 1, ruling B6): the chunk builder's own reads in the
 // chunk builder's order, shared with the teeth instrument, so the rung swap is measured on the
 // path the client draws and never on a copy of it.
-use vd_bins::shore_geometry::RungReader;
+use vd_bins::shore_geometry::{RungReader, ShippedColumn};
 use vd_core::glam::DVec3;
-use vd_recipe::height::{AMP_BITS, SIDE_LAND, SIDE_SEA};
+use vd_recipe::Gi;
+use vd_recipe::height::{AMP_BITS, SIDE_INLAND, SIDE_LAND, SIDE_SEA};
 use vd_recipe::noise::NOISE_BITS;
 use vd_terrain::artifact::{
-    Artifact, DRY_M, FACIES_SHIFT, PyramidField, Side, coast_level, coast_side, fold_water,
+    Artifact, DRY_M, FACIES_SHIFT, PyramidField, Side, block_water, coast_level, coast_side,
     log2_class,
 };
 use vd_terrain::climate::Climate;
 use vd_terrain::home::{home_planet, home_solve_words};
-use vd_terrain::lakes::{Lakes, NO_DEP, OCEAN};
+use vd_terrain::lakes::{Descent, Lakes, NO_DEP, OCEAN};
 use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
-use vd_terrain::solve::{DRY, FACIES_LAKE, FACIES_SEA, MacroSolve, Z_STEPS_PER_M, steeper};
+use vd_terrain::solve::{DRY, FACIES_LAKE, FACIES_SEA, MacroSolve, Z_STEPS_PER_M};
 use vd_terrain::{BodyDefinition, metres_of_q28};
 
 /// Earth's lakes: 117 million lakes over 5.0 million km², 3.7 % of the land outside the ice
@@ -71,8 +79,10 @@ use vd_terrain::{BodyDefinition, metres_of_q28};
 const EARTH_LAKE_SHARE_PCT: f64 = 3.7;
 
 /// ★ A RIVER'S DRAINAGE THRESHOLD, in nodes. G-GRID's valleys and G-RIVER's channels read this one
-/// number, so the two gates count one river set: a land node is on a channel where its discharge is
-/// at least this many times the rain on its own node. That is the drainage area a channel needs.
+/// number, so the two gates count one river set: a land node is on a channel where its DRAINAGE
+/// AREA over the shipped receivers is at least this many times its own area. ★ Since plan step 2
+/// the area itself, never the discharge row: the row carries the RUNOFF (ruling B7 item 2), and a
+/// desert river's runoff is a small share of its rain.
 const VALLEY_NODES: u64 = 100;
 
 fn n_of(lattice: &MacroLattice) -> usize {
@@ -123,6 +133,8 @@ fn main() {
     let node_m = lattice.node_m();
     let node_km2 = node_m * node_m / 1.0e6;
     let words = home_solve_words();
+    // The pockets the FIRST land holds, read in the block below (plan question 9).
+    let first_land;
     // ★ STEP 2 OF RULING W7 — THE BASINS AGAINST THE INVENTORY (2026-09-22): over the INITIAL land
     // (the isostasy, the belts' uplift not yet applied), the continental PLATFORM is the
     // area-weighted median of the shield's and the shelf's nodes; the ocean FLOOR the same over the
@@ -139,6 +151,7 @@ fn main() {
                 elastic_thickness_m: words.elastic_thickness_m,
             },
         );
+        first_land = (land.pockets, land.pocket_nodes);
         let steps = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
         let median_of = |pick: &dyn Fn(u8) -> bool| -> Option<f64> {
             let mut rows: Vec<(i32, u64)> = (0..n_of(&lattice))
@@ -230,8 +243,11 @@ fn main() {
     {
         let l = &report.lakes;
         let steps = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
+        // ★ THE LAND IS EVERY NODE THAT IS NOT THE OCEAN (review finding 10 of plan step 2): an
+        // inland pocket under the sea's level is land, and its lakes are in the numerator — the
+        // same land G-LAKE-SHARE divides by.
         let land_m2: f64 = (0..n_of(&lattice))
-            .filter(|&i| state.z[i] > state.sea_z)
+            .filter(|&i| !state.ocean[i])
             .map(|i| lattice.area_m2(i as u32) as f64)
             .sum();
         println!(
@@ -247,7 +263,7 @@ fn main() {
             l.spilling as f64 * 100.0 / l.bodies.max(1) as f64
         );
         println!(
-            "the standing water: {} nodes, {:.3e} km², {:.4e} km³ ({:.3} % of the inventory {:.4e} km³); the lakes' share of the land by AREA {:.2} %",
+            "the standing water: {} nodes, {:.3e} km², {:.4e} km³ ({:.3} % of the inventory {:.4e} km³); the lakes' share of the land (every node that is not the ocean) by AREA {:.3} %",
             l.lake_nodes,
             l.lake_area_m2 as f64 / 1.0e6,
             l.volume_m3 as f64 / 1.0e9,
@@ -266,6 +282,13 @@ fn main() {
                 f64::from(state.sea_z) / steps
             ),
         }
+        println!(
+            "THE LAKES' SEA FIXED POINT (plan question 8): {} re-solves, the sea stood still: {}; a connected sea solve re-seeded from another body: {}; a connected sea solve whose ocean does not hold its own level's water (review finding 4): {}",
+            report.lake_sea_solves,
+            report.lake_sea_converged,
+            report.sea_reseeded,
+            report.sea_unsettled
+        );
     }
     println!(
         "\ncraters stamped: {}; routes: {} (every {} of {} passes, plus the final); pits RAISED by each flood (= lake nodes at that route):",
@@ -289,8 +312,9 @@ fn main() {
             sw.map_or(0, |s| s.total_fill)
         );
     }
+    // ★ THE CLIMATE OVER THE CONNECTED OCEAN, the very one the solve's budget and the artifact read.
     let climate =
-        vd_terrain::climate::climate(&body, &lattice, &words, &state.z, Some(state.sea_z));
+        vd_terrain::climate::climate(&body, &lattice, &words, &state.z, Some(state.sea_view()));
     // ★ GATE G-BUZZSAW (ruling B2 step 2; Egholm et al. 2009): no peak on Earth stands more than
     // about 1 500 m over its LOCAL snowline, under every tectonic style. A free reading over two
     // fields we already hold — the solved ground and the climate's own equilibrium line.
@@ -299,8 +323,9 @@ fn main() {
         let mut worst = f64::MIN;
         let mut over = 0usize;
         let mut land = 0usize;
+        // The land: every node that is not the ocean (review finding 10), a pocket's floor too.
         for i in 0..n_of(&lattice) {
-            if state.z[i] <= state.sea_z || climate.ela_z[i] == i32::MAX {
+            if state.ocean[i] || climate.ela_z[i] == i32::MAX {
                 continue;
             }
             land += 1;
@@ -318,7 +343,7 @@ fn main() {
             over as f64 * 100.0 / land.max(1) as f64
         );
         let mut ela: Vec<i32> = (0..n_of(&lattice))
-            .filter(|&i| state.z[i] > state.sea_z && climate.ela_z[i] != i32::MAX)
+            .filter(|&i| !state.ocean[i] && climate.ela_z[i] != i32::MAX)
             .map(|i| climate.ela_z[i])
             .collect();
         ela.sort_unstable();
@@ -386,6 +411,32 @@ fn main() {
         .filter(|&&f| f & FACIES_LAKE != 0 && f & FACIES_SEA == 0)
         .count();
     let dry = n - sea - lake;
+    // The drainage area of every node over the shipped receivers: the river threshold's word.
+    let drain = drainage_area(&state);
+    // ★ THE RIVER SET TWO WAYS (plan step 2 part 4): by the drainage AREA (the gates' rule since
+    // step 2) and by the STEP-1 RULE — the RAIN accumulated over the shipped receivers at least
+    // `VALLEY_NODES` times the node's own rain — so a change of the field and a change of the rule
+    // can be told apart. MEASURED: the two rules do not read one river set.
+    let by_area: Vec<bool> = (0..n)
+        .map(|i| !state.ocean[i] && drain[i] >= state.area[i].saturating_mul(VALLEY_NODES))
+        .collect();
+    let by_rain: Vec<bool> = {
+        let mut rain: Vec<u64> = (0..n)
+            .map(|i| u64::from(state.rain[i]) * state.area[i])
+            .collect();
+        for &node in &state.order {
+            let r = state.receiver[node as usize];
+            if r != NO_NODE {
+                rain[r as usize] += rain[node as usize];
+            }
+        }
+        (0..n)
+            .map(|i| {
+                let own = u64::from(state.rain[i]) * state.area[i];
+                !state.ocean[i] && rain[i] >= own.saturating_mul(VALLEY_NODES)
+            })
+            .collect()
+    };
     // ★ GATE G-ICE (ruling B2 step 2): Earth carries ice on about 10 % of its land today and about
     // 30 % at a glacial maximum (NSIDC; the literature spreads 25–32 %).
     {
@@ -409,7 +460,7 @@ fn main() {
         dry as f64 * 100.0 / n as f64
     );
     println!(
-        "the lakes' share of the LAND: {:.2} % — Earth {EARTH_LAKE_SHARE_PCT} % (glacial shields included), under 1 % elsewhere",
+        "the lakes' share of the LAND by NODE COUNT (every node that is not the ocean; the share by AREA is G-LAKE-SHARE's, below): {:.2} % — Earth {EARTH_LAKE_SHARE_PCT} % (glacial shields included), under 1 % elsewhere",
         lake as f64 * 100.0 / (lake + dry) as f64
     );
 
@@ -488,20 +539,52 @@ fn main() {
         }
         let mut valley_four = AxisHistogram::new(4);
         let mut valley_twelve = AxisHistogram::new(12);
+        let mut step1_four = AxisHistogram::new(4);
+        // The area rule's trunks OUTSIDE every hollow the routing filled (the node's own pit is
+        // zero): a flat's receivers run by the distance field, so this separates the flats' lean
+        // from the sloped ground's.
+        let mut sloped_four = AxisHistogram::new(4);
         for node in 0..n as u32 {
             let i = node as usize;
-            if state.z[i] <= state.sea_z {
-                continue;
-            }
-            let own = u64::from(state.rain[i]) * state.area[i];
-            if state.discharge[i] < own.saturating_mul(VALLEY_NODES) {
+            if !by_area[i] && !by_rain[i] {
                 continue;
             }
             if let Some(axis) = trunk_axis(&lattice, &state.receiver, node, TRUNK_STEPS) {
-                valley_four.add(axis.degrees);
-                valley_twelve.add(axis.degrees);
+                if by_area[i] {
+                    valley_four.add(axis.degrees);
+                    valley_twelve.add(axis.degrees);
+                    if state.pit[i] == 0 {
+                        sloped_four.add(axis.degrees);
+                    }
+                }
+                if by_rain[i] {
+                    step1_four.add(axis.degrees);
+                }
             }
         }
+        println!(
+            "  G-GRID's valleys by the STEP-1 RULE (the rain over the shipped receivers at least {VALLEY_NODES} times the node's own), for a like-for-like reading against generator 19: {} trunks: {} | FLATNESS {:.3}",
+            step1_four.total(),
+            step1_four.line(),
+            step1_four.flatness()
+        );
+        println!(
+            "  G-GRID's valleys by the area rule OUTSIDE every hollow the routing filled (the node's own pit zero): {} trunks: {} | FLATNESS {:.3}",
+            sloped_four.total(),
+            sloped_four.line(),
+            sloped_four.flatness()
+        );
+        census(
+            "G-GRID-VALLEYS",
+            &format!(
+                "{:.3}area-rule/{:.3}step1-rule/{:.3}outside-filled-hollows",
+                valley_four.flatness(),
+                step1_four.flatness(),
+                sloped_four.flatness()
+            ),
+            "~1.006[W13.3:a-router-with-no-direction-of-its-own]",
+            Verdict::of(valley_four.flatness() <= 1.05),
+        );
         println!(
             "\nG-GRID: the long axes against the face grid (0° and 90° are the stencil's rows, 45° and 135° its diagonals)\n  lakes   ({} patches of {PATCH_MIN}+ nodes): {} | FLATNESS {:.3}\n    {} | flatness {:.3}\n  valleys ({} trunks over {VALLEY_NODES} nodes of drainage): {} | FLATNESS {:.3}\n    {} | flatness {:.3}\n  a router with no direction of its own reads 1.000; a spike at 45° or 135° names the tie-break",
             lake_four.total(),
@@ -521,15 +604,15 @@ fn main() {
     // prints its reading, its band with the band's source, and one CENSUS line. Nothing here moves
     // the world.
     hypsometry_lines(&state);
-    let ocean = inland_sea_lines(&state);
-    let descent = terrain_descent(&state);
-    river_lines(&state, &lakes, &descent, &ocean);
-    discharge_tree_lines(&state, &descent);
+    let ocean = inland_sea_lines(&state, &lakes, &facies, first_land);
+    river_lines(&state, &lakes, &facies, &ocean, &by_area, "");
+    river_lines(&state, &lakes, &facies, &ocean, &by_rain, ":step1-rule");
+    discharge_tree_lines(&state, &lakes.descent, &climate);
     // The body WITH ITS SOLVED SEA, as every host that holds the artifact builds it: the shipped
     // column reads its sea radius, and the census's own `body` has none.
     let sea_body = home_planet().with_sea_m(artifact.sea());
     rung_swap_lines(&sea_body, &state.lattice, &artifact, &patches);
-    watershed_lines(&state, &climate, &lakes, &descent);
+    budget_lines(&state, &lakes, &facies);
     drop(climate);
 
     // The node under the aim: the face's node whose direction is nearest.
@@ -774,21 +857,33 @@ struct Pocket {
     area_m2: u128,
     /// Its deepest node.
     deepest: u32,
+    /// Its volume under the sea's level, m³.
+    volume_m3: u128,
 }
 
-/// ★ THE INLAND SEA (status §6 T7, §7): the facies byte marks EVERY node at or under the sea's level
-/// as sea (`solve.rs` `facies`), and so does the budget's root (`lakes.rs` step 1), with no test of
-/// a path to the ocean. This walks the lattice's own eight neighbours, across the cube seams, from
-/// every such node. The largest connected body by area is the OCEAN; every other body is a POCKET
-/// the client still draws as sea at the sea's own level. No band: whether such a pocket is a lake
-/// by its budget or the sea is the owner's open question (status §11 Q3).
+/// ★ THE INLAND POCKETS (status §6 T7; ruling B7 item 1: *"an inland pocket is a closed basin, not
+/// the sea"*): the census's OWN labelling of every node at or under the sea's level through the
+/// lattice's eight neighbours, the cube seams included. The largest body by area is the OCEAN
+/// (ties to the smaller lowest index, the solve's own rule); every other body is a POCKET.
+///
+/// Since plan step 2 the solve labels the same ocean (`MacroSolve::ocean`), so this is an
+/// INDEPENDENT CHECK: CHECK-OCEAN counts the nodes where the two labellings disagree, and
+/// CHECK-POCKET-NOT-SEA the pocket nodes that still carry the sea's facies bit — both 0 by
+/// construction. It prints how each pocket ends by the budget (the water body over its deepest
+/// node: DRY, PARTIAL or SPILLING), the pockets' volume under the sea's level, and the pockets the
+/// FIRST land already held (plan question 9).
 ///
 /// Returns, for each node, whether it belongs to the ocean.
 ///
 /// **Example.** A crater floor 300 km inland stands 40 m under the sea's level. No path through the
-/// lattice joins it to the ocean, yet the client paints it as a square of sea at the sea's own
-/// level. The census counts it as a pocket and prints its aim, so a pilot can fly to it.
-fn inland_sea_lines(state: &MacroSolve) -> Vec<bool> {
+/// lattice joins it to the ocean, so it is a pocket: the budget decides its water, and the census
+/// says whether it ended a salt pan, a closed lake or a lake with an outlet.
+fn inland_sea_lines(
+    state: &MacroSolve,
+    lakes: &Lakes,
+    facies: &[u8],
+    first_land: (usize, usize),
+) -> Vec<bool> {
     const UNSEEN: u32 = u32::MAX;
     let n = state.node_count();
     let steps = f64::from(Z_STEPS_PER_M);
@@ -805,6 +900,7 @@ fn inland_sea_lines(state: &MacroSolve) -> Vec<bool> {
             nodes: 0,
             area_m2: 0,
             deepest: start,
+            volume_m3: 0,
         };
         body[s] = id;
         queue.push_back(start);
@@ -812,6 +908,9 @@ fn inland_sea_lines(state: &MacroSolve) -> Vec<bool> {
             let vi = v as usize;
             pocket.nodes += 1;
             pocket.area_m2 += u128::from(state.area[vi]);
+            pocket.volume_m3 += u128::from((state.sea_z - state.z[vi]) as u32)
+                * u128::from(state.area[vi])
+                / Z_STEPS_PER_M as u128;
             if state.z[vi] < state.z[pocket.deepest as usize] {
                 pocket.deepest = v;
             }
@@ -828,12 +927,18 @@ fn inland_sea_lines(state: &MacroSolve) -> Vec<bool> {
         }
         pockets.push(pocket);
     }
-    let ocean = pockets
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, p)| p.area_m2)
-        .map_or(UNSEEN, |(k, _)| k as u32);
+    // The largest by area; a tie keeps the body met first (the solve's own rule).
+    let mut ocean = UNSEEN;
+    for (k, p) in pockets.iter().enumerate() {
+        if ocean == UNSEEN || p.area_m2 > pockets[ocean as usize].area_m2 {
+            ocean = k as u32;
+        }
+    }
     let is_ocean: Vec<bool> = body.iter().map(|&b| b != UNSEEN && b == ocean).collect();
+    let ocean_off = (0..n).filter(|&i| is_ocean[i] != state.ocean[i]).count();
+    let sea_bit_off = (0..n)
+        .filter(|&i| !is_ocean[i] && facies[i] & FACIES_SEA != 0)
+        .count();
     let mut inland: Vec<&Pocket> = pockets
         .iter()
         .enumerate()
@@ -843,91 +948,75 @@ fn inland_sea_lines(state: &MacroSolve) -> Vec<bool> {
     inland.sort_by_key(|p| std::cmp::Reverse(p.area_m2));
     let nodes: usize = inland.iter().map(|p| p.nodes).sum();
     let area_km2 = inland.iter().map(|p| p.area_m2).sum::<u128>() as f64 / 1.0e6;
+    let volume_km3 = inland.iter().map(|p| p.volume_m3).sum::<u128>() as f64 / 1.0e9;
     let ocean_km2 = pockets.get(ocean as usize).map_or(0, |p| p.area_m2) as f64 / 1.0e6;
+    // How each pocket ends: the water body the budget stands over its deepest node.
+    let verdict = |p: &Pocket| -> usize {
+        let h = lakes.home[p.deepest as usize];
+        if h == NO_DEP || h == OCEAN {
+            return 3;
+        }
+        let b = lakes.body_of[h as usize];
+        if b == NO_DEP || lakes.deps[b as usize].level == DRY {
+            0
+        } else if lakes.deps[b as usize].full {
+            2
+        } else {
+            1
+        }
+    };
+    let mut ends = [0usize; 4];
+    for p in &inland {
+        ends[verdict(p)] += 1;
+    }
     println!(
-        "\nTHE INLAND SEA (status §6 T7): nodes at or under the sea's level ({:.0} m) that no path through the lattice's own neighbours (the cube seams included) joins to the OCEAN, the largest such body ({ocean_km2:.4e} km²)",
+        "\nTHE INLAND POCKETS (status §6 T7; ruling B7 item 1): nodes at or under the sea's level ({:.0} m) that no path through the lattice's own neighbours (the cube seams included) joins to the OCEAN, the largest such body ({ocean_km2:.4e} km²) — each a CLOSED BASIN since plan step 2",
         f64::from(state.sea_z) / steps
     );
     println!(
-        "  {} pockets, {nodes} nodes, {area_km2:.0} km²; the facies byte marks every one of them SEA, so the client draws each at the sea's own level. The largest ten:",
-        inland.len()
+        "  {} pockets, {nodes} nodes, {area_km2:.0} km², {volume_km3:.4e} km³ under the sea's level; by the budget over each deepest node: DRY {} PARTIAL {} SPILLING {} (the ocean's own root {}); the FIRST land held {} pockets of {} nodes (plan question 9). The largest ten:",
+        inland.len(),
+        ends[0],
+        ends[1],
+        ends[2],
+        ends[3],
+        first_land.0,
+        first_land.1
     );
+    const ENDS: [&str; 4] = ["DRY", "PARTIAL", "SPILLING", "ROOT"];
     for p in inland.iter().take(10) {
         let aim = unit(&state.lattice, p.deepest);
         println!(
-            "    {:>7} nodes {:>10.0} km², deepest {:>6.0} m under the sea at node {} — aim {:.6} {:.6} {:.6}",
+            "    {:>7} nodes {:>10.0} km², deepest {:>6.0} m under the sea at node {} — {} — aim {:.6} {:.6} {:.6}",
             p.nodes,
             p.area_m2 as f64 / 1.0e6,
             f64::from(state.sea_z - state.z[p.deepest as usize]) / steps,
             p.deepest,
+            ENDS[verdict(p)],
             aim.x,
             aim.y,
             aim.z
         );
     }
     census(
-        "INLAND-SEA",
+        "INLAND-POCKETS",
         &format!("{area_km2:.0}km2/{nodes}nodes/{}pockets", inland.len()),
-        "no-band-yet[owed:the-owner's-word,status-§11-Q3]",
+        "no-band[ruling-B7:each-a-closed-basin-by-its-budget]",
         Verdict::NoBand,
     );
+    census(
+        "CHECK-OCEAN",
+        &format!("{ocean_off}nodes"),
+        "0[the-census's-own-labelling-is-the-solve's]",
+        Verdict::of(ocean_off == 0),
+    );
+    census(
+        "CHECK-POCKET-NOT-SEA",
+        &format!("{sea_bit_off}nodes"),
+        "0[ruling-B7:a-pocket-is-never-the-sea]",
+        Verdict::of(sea_bit_off == 0),
+    );
     is_ocean
-}
-
-/// ★ THE WATER'S OWN WAY ON THE GROUND: each node's steepest lower neighbour on the TERRAIN — never
-/// the routing fill — and the node where that descent stops.
-struct Descent {
-    /// The steepest neighbour that stands lower by the budget's own order `(height, index)`, so a
-    /// flat still descends by its index; [`NO_NODE`] at a pit and at or under the sea.
-    down: Vec<u32>,
-    /// Where the descent stops: a pit over the sea, which is the pit of one LEAF of the budget's
-    /// hierarchy, or the first node at or under the sea.
-    end: Vec<u32>,
-}
-
-/// ★ THE DESCENT OVER THE FINAL TERRAIN. "Lower" is the budget's own total order `(height, index)`
-/// (`lakes.rs` step 2), so a descent always ends at a node with no lower neighbour, and that node is
-/// exactly one of the budget's leaf pits; "steepest" is the solve's own comparison (`steeper`) over
-/// the lattice's own chord. The ends are read lowest first, so a node takes its lower neighbour's
-/// end in one pass.
-///
-/// **Example.** Rain on a spur of the belt's range runs down the ground, never down the fill. The
-/// descent follows it into the hollow at the range's foot and stops at the hollow's pit, even where
-/// the routing fill carries the same rain over the hollow's brim to the sea.
-fn terrain_descent(state: &MacroSolve) -> Descent {
-    let n = state.node_count();
-    let lattice = &state.lattice;
-    let z = &state.z;
-    let mut down = vec![NO_NODE; n];
-    for node in 0..n as u32 {
-        let i = node as usize;
-        if z[i] <= state.sea_z {
-            continue;
-        }
-        let mut best = NO_NODE;
-        let (mut dz_best, mut l_best) = (0i64, 0u32);
-        for m in lattice.neighbours(node) {
-            if m == NO_NODE || (z[m as usize], m) >= (z[i], node) {
-                continue;
-            }
-            let dz = i64::from(z[i]) - i64::from(z[m as usize]);
-            let l = lattice.chord_m(node, m);
-            if best == NO_NODE || steeper(dz, l, m, dz_best, l_best, best) {
-                best = m;
-                dz_best = dz;
-                l_best = l;
-            }
-        }
-        down[i] = best;
-    }
-    let mut by_height: Vec<u32> = (0..n as u32).collect();
-    by_height.sort_unstable_by_key(|&v| (z[v as usize], v));
-    let mut end = vec![NO_NODE; n];
-    for &v in &by_height {
-        let d = down[v as usize];
-        end[v as usize] = if d == NO_NODE { v } else { end[d as usize] };
-    }
-    Descent { down, end }
 }
 
 /// Where a river ends, or that it runs on.
@@ -937,7 +1026,7 @@ enum End {
     Runs,
     /// The ocean.
     Ocean,
-    /// A pocket at or under the sea's level that is not the ocean.
+    /// A node the facies call SEA that is not the ocean: 0 by construction since plan step 2.
     InlandSea,
     /// A lake with no outlet: the budget stands it under its spill.
     ClosedLake,
@@ -949,24 +1038,23 @@ enum End {
     Cycle,
 }
 
-/// ★ THE END AT ONE NODE, or [`End::Runs`]. The sea ends a river. A hollow the routing filled ends
+/// ★ THE END AT ONE NODE, or [`End::Runs`]. The ocean ends a river. A hollow the routing filled ends
 /// it where the lake budget holds no water in that hollow (a dry basin) or holds a lake under its
 /// spill (a closed lake); where the budget's lake spills, the river runs on over the spill. The
-/// hollow is the one the GROUND leads into: the leaf whose pit ends this node's descent.
-fn end_at(state: &MacroSolve, lakes: &Lakes, descent: &Descent, ocean: &[bool], i: usize) -> End {
-    if state.z[i] <= state.sea_z && ocean[i] {
+/// hollow is the one the GROUND leads into: the leaf whose pit ends this node's descent
+/// (`vd_terrain::lakes::Descent`, the budget's own). A pocket under the sea's level is such a
+/// hollow since plan step 2.
+fn end_at(state: &MacroSolve, lakes: &Lakes, facies: &[u8], ocean: &[bool], i: usize) -> End {
+    if ocean[i] {
         return End::Ocean;
     }
-    if state.z[i] <= state.sea_z {
+    if facies[i] & FACIES_SEA != 0 {
         return End::InlandSea;
     }
     if state.pit[i] == 0 {
         return End::Runs;
     }
-    let pit = descent.end[i] as usize;
-    if state.z[pit] <= state.sea_z {
-        return End::Runs;
-    }
+    let pit = lakes.descent.end[i] as usize;
     let leaf = lakes.home[pit];
     if leaf == NO_DEP || leaf == OCEAN {
         return End::Runs;
@@ -985,24 +1073,47 @@ fn end_at(state: &MacroSolve, lakes: &Lakes, descent: &Descent, ocean: &[bool], 
     }
 }
 
+/// ★ THE DRAINAGE AREA of every node, m²: its own area and every node's upstream of it, down the
+/// SHIPPED receivers. The river threshold reads it, because the discharge row is the RUNOFF since
+/// plan step 2. ★ The plan said this area rule reads "the same river set as at gen 19"; MEASURED it
+/// does not (the step-1 rule weighted each node by its own rain), so the census prints both.
+fn drainage_area(state: &MacroSolve) -> Vec<u64> {
+    let mut drain = state.area.clone();
+    for &node in &state.order {
+        let r = state.receiver[node as usize];
+        if r != NO_NODE {
+            drain[r as usize] += drain[node as usize];
+        }
+    }
+    drain
+}
+
 /// ★ GATE G-RIVER (ruling B3: every river reaches the sea or a dry basin; a valley's floor descends
-/// monotonically along its trunk). A RIVER is a land node whose SHIPPED discharge row stands at
-/// least [`VALLEY_NODES`] times the rain on its own node — G-GRID's valley threshold, so both gates
-/// read one river set. A CHANNEL HEAD is a river node no river node feeds. Each head's water is
-/// walked down the SHIPPED receivers to its end ([`end_at`]); the ends are counted per head. Each
-/// trunk step is read once: the FLOOR is the ground, or the water's surface where water stands (a
-/// lake's flat surface is a floor that does not rise), and a step on which the floor rises is a
-/// defect. The band is zero on both lines.
+/// monotonically along its trunk). A RIVER is a land node whose DRAINAGE AREA over the shipped
+/// receivers is at least [`VALLEY_NODES`] times its own area — G-GRID's valley threshold, so both
+/// gates read one river set (the rain-weighted threshold of step 1 read the discharge row, which
+/// carries the runoff since plan step 2). A CHANNEL HEAD is a river node no river node feeds. Each
+/// head's water is walked down the SHIPPED receivers to its end ([`end_at`]); the ends are counted
+/// per head. Each trunk step is read once: the FLOOR is the ground, or the water's surface where
+/// water stands (a lake's flat surface is a floor that does not rise), and a step on which the
+/// floor rises is a defect. The band is zero on both lines.
 ///
 /// **Example.** A river off the belt's range enters a hollow the routing filled. The budget holds
 /// no water there, so the river ends in a dry basin, and that end is lawful. If the shipped receiver
 /// instead carries it up out of a filled hollow onto a ridge 40 m higher, the floor rises and
 /// G-RIVER-DESCENT counts the step.
-fn river_lines(state: &MacroSolve, lakes: &Lakes, descent: &Descent, ocean: &[bool]) {
+fn river_lines(
+    state: &MacroSolve,
+    lakes: &Lakes,
+    facies: &[u8],
+    ocean: &[bool],
+    river: &[bool],
+    label: &str,
+) {
     let n = state.node_count();
     let steps = f64::from(Z_STEPS_PER_M);
     let term: Vec<End> = (0..n)
-        .map(|i| end_at(state, lakes, descent, ocean, i))
+        .map(|i| end_at(state, lakes, facies, ocean, i))
         .collect();
     // Each node's end, outlets first: a node's end is its own, or its receiver's. A node the order
     // never reached stands on a ring of receivers.
@@ -1018,13 +1129,7 @@ fn river_lines(state: &MacroSolve, lakes: &Lakes, descent: &Descent, ocean: &[bo
             end[r as usize]
         };
     }
-    // The rivers, and the heads: a head is a river node that no river node feeds.
-    let river: Vec<bool> = (0..n)
-        .map(|i| {
-            let own = u64::from(state.rain[i]) * state.area[i];
-            state.z[i] > state.sea_z && state.discharge[i] >= own.saturating_mul(VALLEY_NODES)
-        })
-        .collect();
+    // The heads: a head is a river node that no river node feeds.
     let mut fed = vec![false; n];
     for node in 0..n as u32 {
         let i = node as usize;
@@ -1102,15 +1207,20 @@ fn river_lines(state: &MacroSolve, lakes: &Lakes, descent: &Descent, ocean: &[bo
         cycle,
     ] = ends;
     let node_km2 = state.lattice.node_m().powi(2) / 1.0e6;
+    let rule = if label.is_empty() {
+        "whose DRAINAGE AREA over the SHIPPED receivers is at least"
+    } else {
+        "(THE STEP-1 RULE, for comparison) whose RAIN over the SHIPPED receivers is at least"
+    };
     println!(
-        "\nG-RIVER (ruling B3): a river is a land node whose SHIPPED discharge row is at least {VALLEY_NODES} times the rain on its own node (G-GRID's valley threshold, about {:.0} km² of drainage); {heads} channel heads, each walked down the SHIPPED receivers to its end",
+        "\nG-RIVER{label} (ruling B3): a river is a land node {rule} {VALLEY_NODES} times its own (G-GRID's valley threshold, about {:.0} km²); {heads} channel heads, each walked down the SHIPPED receivers to its end",
         VALLEY_NODES as f64 * node_km2
     );
     println!(
-        "  the ends, in heads: the ocean {to_ocean}, an inland sea pocket {to_pocket}, a closed lake {to_lake}, a dry closed basin {to_basin}; DEFECTS: no receiver on land {no_receiver}, a ring of receivers {cycle}"
+        "  the ends, in heads: the ocean {to_ocean}, a node the facies call sea that is not the ocean {to_pocket} (0 by construction since plan step 2), a closed lake {to_lake}, a dry closed basin {to_basin}; DEFECTS: no receiver on land {no_receiver}, a ring of receivers {cycle}"
     );
     println!(
-        "  (a hollow the routing filled ends a river where the lake budget holds no water in it, a dry basin, or holds a lake under its spill, a closed lake; a spilling lake passes the river on)"
+        "  (a hollow the routing filled — an inland pocket included — ends a river where the lake budget holds no water in it, a dry basin, or holds a lake under its spill, a closed lake; a spilling lake passes the river on)"
     );
     println!(
         "  along the trunks: {walked} steps; the GROUND rises on {ground_rises} of them ({hidden} under a water's flat surface); the FLOOR (the ground, or the water's surface where water stands) rises on {floor_rises} steps, {in_fill} of them in a hollow the routing filled"
@@ -1126,39 +1236,43 @@ fn river_lines(state: &MacroSolve, lakes: &Lakes, descent: &Descent, ocean: &[bo
         );
     }
     census(
-        "G-RIVER-END",
+        &format!("G-RIVER-END{label}"),
         &format!("{}heads-without-an-end", no_receiver + cycle),
         "0heads[ruling-B3-G-RIVER]",
         Verdict::of(no_receiver + cycle == 0),
     );
     census(
-        "G-RIVER-DESCENT",
+        &format!("G-RIVER-DESCENT{label}"),
         &format!("{floor_rises}rising-steps"),
         "0steps[ruling-B3-G-RIVER]",
         Verdict::of(floor_rises == 0),
     );
+    census(
+        &format!("G-RIVER-ENDS{label}"),
+        &format!(
+            "ocean{to_ocean}/closed-lake{to_lake}/dry-basin{to_basin}/not-ocean-sea{to_pocket}"
+        ),
+        "no-band[a-reading;the-plan's-gen-20-prediction:0-pocket-ends]",
+        Verdict::NoBand,
+    );
 }
 
-/// ★ THE DISCHARGE ROW AGAINST THE TREE IT SHIPS WITH (status §7 W10, a latent defect). The solve
-/// accumulates the discharge at its last pass's routing (`solve.rs` `accumulate` in the pass loop)
-/// and routes again after it (the final route, and again where the lakes re-solve the sea), so the
-/// shipped row and the shipped receivers can come from two different trees. R2 seeds its rivers
-/// from that row. Three readings:
+/// ★ THE DISCHARGE ROW AGAINST THE TREE IT SHIPS WITH (status §7 W10; ruling B7 item 2). Since
+/// plan step 2 the solve accumulates the RUNOFF over the receivers of its LAST routing
+/// (`MacroSolve::accumulate_runoff`), so the shipped row and the shipped receivers are one tree by
+/// construction. Three readings:
 ///
 /// 1. The shipped receiver against the steepest lower neighbour on the final GROUND, split by why
 ///    they may differ: inside a hollow the routing filled (the fill routes over its flat, by
 ///    design), toward a filled hollow (the fill hides the ground's own way, by design), and
-///    elsewhere (a stale receiver, or a chord that differs by its last metre).
-/// 2. The discharge row accumulated again over the SHIPPED tree with the SAME rain row, against the
-///    shipped row: the nodes that differ, and those whose SHIPPED byte (the log class) differs.
+///    elsewhere (a chord that differs by its last metre).
+/// 2. The climate's RUNOFF row accumulated again over the SHIPPED tree, against the shipped row:
+///    the nodes that differ, and those whose SHIPPED byte (the log class) differs.
 /// 3. The nodes where the shipped row FALLS downstream, which no tree can hold.
 ///
-/// The band is zero: ruling B6 item 1, step 2, re-accumulates the discharge after the final route.
-///
-/// **Example.** A river on the coast reaches the sea by a new mouth after the final route, but its
-/// discharge row still names the old tree. The old mouth's node carries the whole river's water in
-/// the shipped byte, and the new mouth carries only its own rain.
-fn discharge_tree_lines(state: &MacroSolve, descent: &Descent) {
+/// **Example.** A river on the coast reaches the sea by a new mouth after the final route. Its row
+/// now names that mouth, and the old mouth carries only the water of its own small catchment.
+fn discharge_tree_lines(state: &MacroSolve, descent: &Descent, climate: &Climate) {
     let n = state.node_count();
     let (mut compared, mut in_fill, mut into_fill, mut elsewhere) =
         (0usize, 0usize, 0usize, 0usize);
@@ -1180,11 +1294,11 @@ fn discharge_tree_lines(state: &MacroSolve, descent: &Descent) {
             elsewhere += 1;
         }
     }
-    let mut again: Vec<u64> = state
-        .rain
+    let mut again: Vec<u64> = climate
+        .runoff_mm_yr
         .iter()
         .zip(&state.area)
-        .map(|(&p, &a)| u64::from(p) * a)
+        .map(|(&q, &a)| u64::from(q) * a)
         .collect();
     for &node in &state.order {
         let r = state.receiver[node as usize];
@@ -1210,62 +1324,190 @@ fn discharge_tree_lines(state: &MacroSolve, descent: &Descent) {
         }
     }
     println!(
-        "\nTHE DISCHARGE ROW AND ITS TREE (status §7 W10: the row is the last pass's accumulation, the receivers come from the routes after it)"
+        "\nTHE DISCHARGE ROW AND ITS TREE (status §7 W10; ruling B7 item 2: the row is the RUNOFF over the final receivers)"
     );
     println!(
-        "  the shipped receiver against the steepest lower neighbour on the final ground: {compared} land nodes have a lower neighbour; the two differ at {in_fill} nodes inside a hollow the routing filled (by design), {into_fill} nodes whose ground leads into a filled hollow (by design), and {elsewhere} nodes elsewhere (a stale receiver, or a chord's last metre)"
+        "  the shipped receiver against the steepest lower neighbour on the final ground: {compared} land nodes have a lower neighbour; the two differ at {in_fill} nodes inside a hollow the routing filled (by design), {into_fill} nodes whose ground leads into a filled hollow (by design), and {elsewhere} nodes elsewhere (a chord's last metre)"
     );
     println!(
-        "  the discharge row accumulated again over the shipped tree with the same rain row: {differ} nodes differ (the worst by {worst:.1} times), {class_differ} of them in the SHIPPED byte (the row's log class); the shipped row FALLS downstream at {falls} nodes, which no tree can hold"
+        "  the climate's runoff accumulated again over the shipped tree: {differ} nodes differ (the worst by {worst:.1} times), {class_differ} of them in the SHIPPED byte (the row's log class); the shipped row FALLS downstream at {falls} nodes, which no tree can hold"
     );
     census(
         "W10-DISCHARGE-TREE",
         &format!("{class_differ}nodes"),
-        "0nodes[ruling-B6-item-1-step-2:re-accumulate-after-the-final-route]",
+        "0nodes[ruling-B7-item-2:the-runoff-over-the-final-receivers]",
         Verdict::of(class_differ == 0),
     );
 }
 
-/// ★ THE LAKES AT THE RUNG SWAP (ruling W16: a rung boundary is invisible; status §6 T5, §7 W6).
-/// The rungs up to the swap read the ROWS, so a lake column takes its own row's level. From the
-/// swap on, a rung reads pyramid level 1 while its SIDE is still the fine node's own mask word, so a
-/// lake column takes the LEVEL-1 WATER WORD (`column_water`, the `Side::Lake` arm): the fold of its
-/// 2 × 2 block (`fold_water`: DRY under two wet children of four, else the mean of EVERY wet child,
-/// the sea and a lake alike), and LAND where the word is DRY.
+/// What one lake column did at a rung swap.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Change {
+    /// The same water at both rungs.
+    Kept,
+    /// Held under water before, over it after: the lake vanished.
+    Lost,
+    /// A lake's level before, the sea's after.
+    Mixed,
+    /// A lake's level before, another lake's after.
+    Shifted,
+}
+
+/// The change of one lake column `a` (the finer rung) against `b` (the coarser rung) at one swap,
+/// or `None` where `a` is not a lake held under its water.
+fn lake_change(a: &ShippedColumn, b: &ShippedColumn, sea: Gi) -> Option<Change> {
+    if a.side_word != SIDE_SEA || a.water == sea {
+        return None;
+    }
+    Some(if b.side_word != SIDE_SEA {
+        Change::Lost
+    } else if b.water == a.water {
+        Change::Kept
+    } else if b.water == sea {
+        Change::Mixed
+    } else {
+        Change::Shifted
+    })
+}
+
+/// Whether a dry column's INLAND/LAND word changed at a swap while its ground base stood under the
+/// sea's level at one of the two rungs: the shore law then lifts it at one rung and leaves it at
+/// the other (plan step 2 risk R7; gate G-RUNG-HOLD).
+fn hold_changed(a: &ShippedColumn, b: &ShippedColumn) -> bool {
+    let dry = |c: &ShippedColumn| (c.side_word == SIDE_LAND) | (c.side_word == SIDE_INLAND);
+    dry(a) && dry(b) && a.side_word != b.side_word && (a.base < a.hold || b.base < b.hold)
+}
+
+/// The tallies of one swap.
+#[derive(Default)]
+struct SwapTally {
+    /// Lake columns read, and each change.
+    lakes: usize,
+    lost: usize,
+    mixed: usize,
+    shifted: usize,
+    /// Columns that are no lake before and a lake after.
+    gained: usize,
+    /// The largest change of level, metres.
+    worst_m: f64,
+    /// Dry columns read for the hold, and those whose hold changed.
+    holds_read: usize,
+    holds: usize,
+    /// The largest change of surface at such a column, metres.
+    hold_step_m: f64,
+    /// Columns the field could not read, and columns whose base does not give the kernel's own
+    /// surface again (a drift alarm).
+    unread: usize,
+    base_off: usize,
+}
+
+impl SwapTally {
+    /// One lake column pair read.
+    fn lake(&mut self, a: &ShippedColumn, b: &ShippedColumn, sea: Gi) -> Option<Change> {
+        self.base_off += usize::from(!a.base_agrees) + usize::from(!b.base_agrees);
+        let c = lake_change(a, b, sea)?;
+        self.lakes += 1;
+        match c {
+            Change::Kept => {}
+            Change::Lost => self.lost += 1,
+            Change::Mixed => self.mixed += 1,
+            Change::Shifted => self.shifted += 1,
+        }
+        if (c == Change::Mixed) | (c == Change::Shifted) {
+            self.worst_m = self.worst_m.max(metres_of_q28(b.water - a.water).abs());
+        }
+        Some(c)
+    }
+
+    /// One dry column pair read for the hold.
+    fn hold(&mut self, a: &ShippedColumn, b: &ShippedColumn) {
+        self.base_off += usize::from(!a.base_agrees) + usize::from(!b.base_agrees);
+        self.holds_read += 1;
+        if hold_changed(a, b) {
+            self.holds += 1;
+            self.hold_step_m = self
+                .hold_step_m
+                .max(metres_of_q28(b.surface - a.surface).abs());
+        }
+    }
+
+    /// The CENSUS lines of the swap from rung `before` to rung `after`, trusted or not. The level
+    /// steps are stated in pixels at the swap distance too: the swap stands where one cell of
+    /// `before` is one pixel high, so a step of `h` metres is `h / cell_m(before)` pixels there.
+    fn lines(&self, before: u8, after: u8, trusted: bool) {
+        let cell = f64::from(vd_seed::ladder::cell_m(before));
+        let px = self.worst_m / cell;
+        let tag = format!("@{before}-{after}");
+        println!(
+            "  the swap {before} → {after}: of {} lake columns, {} turn to LAND, {} take the sea's level, {} take another lake's level; the largest change of level {:.1} m = {px:.3} px at the swap distance (a cell of rung {before} is {cell:.0} m); {} columns are no lake before and a lake after; of {} dry columns read under or beside the sea's level, {} change their INLAND/LAND word, the largest surface step there {:.1} m = {:.3} px; {} unread, {} base alarms",
+            self.lakes,
+            self.lost,
+            self.mixed,
+            self.shifted,
+            self.worst_m,
+            self.gained,
+            self.holds_read,
+            self.holds,
+            self.hold_step_m,
+            self.hold_step_m / cell,
+            self.unread,
+            self.base_off
+        );
+        census(
+            &format!("G-RUNG-LAKE-LOST{tag}"),
+            &format!("{}columns", self.lost),
+            "0[ruling-W16:a-rung-boundary-is-invisible]",
+            Verdict::of(trusted && self.lost == 0),
+        );
+        census(
+            &format!("G-RUNG-LAKE-MIXED{tag}"),
+            &format!("{}columns", self.mixed),
+            "0[ruling-W16;plan-step-2-part-5:never-a-mean-with-the-sea]",
+            Verdict::of(trusted && self.mixed == 0),
+        );
+        census(
+            &format!("G-RUNG-LAKE-SHIFTED{tag}"),
+            &format!("{}columns/{:.3}px", self.shifted, px),
+            "<=1px[plan-question-6:a-proposed-bound,the-owner's-word-owed]",
+            Verdict::of(trusted && px <= 1.0),
+        );
+        census(
+            &format!("G-RUNG-HOLD{tag}"),
+            &format!("{}columns/{:.3}px", self.holds, self.hold_step_m / cell),
+            "0[ruling-W16;plan-step-2-risk-R7]",
+            Verdict::of(trusted && self.holds == 0),
+        );
+    }
+}
+
+/// ★ THE LAKES AT THE RUNG SWAPS (ruling W16: a rung boundary is invisible; status §6 T5, §7 W6;
+/// plan step 2 part 5). Three swaps are read, each on THE SHIPPED COLUMN (`RungReader`, the chunk
+/// builder's own reads and the one kernel), never on a copy of it:
 ///
-/// THE READING IS THE SHIPPED COLUMN, NEVER A COPY OF IT: for every lake node the chunk builder's
-/// own reads ([`RungReader::column`]: `sample_side` on the fine lattice, `column_water`, the slope
-/// share, `sample_z`, the ONE kernel) run at the node's centre cell on the last rung before the swap
-/// and on the first rung after it. Inside one fine node both rungs read one row and one level-1
-/// word, so the centre cell speaks for every cell of the node. A lake node CHANGES where the side
-/// word after the swap is LAND (it turns to land), or where its water radius moves (a mean with the
-/// sea's level, or another lake level). A patch changes where one of its nodes changes.
+/// 1. **ROWS → LEVEL 1 (rung 9 → 10).** Every lake node at its centre cell on both rungs: LOST
+///    (land after), MIXED (the sea's level after), SHIFTED (another lake's level after); the lake
+///    patches that change or vanish whole. THE LIP: every cell of every dry node that shares a
+///    level-1 block with a lake — a dry column the shore law holds against a LAKE's level (0 by
+///    construction since the land rule never reads the level word). THE HOLD (G-RUNG-HOLD): every
+///    dry node whose own row or a neighbour's stands under the sea's level, at its centre cell.
+/// 2. **LEVEL 1 → 2 (rung 14 → 15) and LEVEL 2 → 3 (rung 15 → 16).** Per cell of the coarser rung
+///    whose footprint holds a lake node: each of its four finer cells against it; and per cell
+///    whose level node or a neighbour stands under the sea's level: the hold.
 ///
-/// THE LIP (T5): a DRY column reads the sea before the swap and the level-1 word after it. Where
-/// that word is a lake's level and the column's own ground base stands UNDER it, the shore law
-/// (`vd_recipe::height::shore`) holds the column at least a quarter of that depth OVER the lake: a
-/// wall of land standing out of the water. Every cell of every dry node that shares a level-1 block
-/// with a lake node is read (a sea-only block folds to the sea's own level, and no other block can
-/// move a dry column's water).
-///
-/// The shipped level-1 word is also checked against `fold_water` over the rows, and every column's
-/// ground base against the kernel's own surface; a check that fails turns both gates RED, because a
-/// number the census cannot trust is not a green.
+/// The shipped level-1 word is checked against `artifact::block_water` folded again over the rows
+/// and the coast mask; a check that fails turns every gate RED, because a number the census cannot
+/// trust is not a green.
 ///
 /// **Example.** A tarn fills one node of the belt's pass. At rung 9 its column stands under its own
-/// 2 100 m level. At rung 10 its level-1 block holds one wet child of four, the word is DRY, and the
-/// tarn turns to rock. The ridge node beside a wider lake reads the lake's level at rung 10, its
-/// ground stands 30 m under it, and the shore law raises it 7.5 m over the water: the lip.
+/// 2 100 m level; at rung 10 its level-1 block holds one lake node of four and the word is that
+/// lake's own 2 100 m, so the tarn is the same water on both sides of the swap. Before plan step 2
+/// the word was DRY and the tarn turned to rock.
 fn rung_swap_lines(
     body: &BodyDefinition,
     lattice: &MacroLattice,
     artifact: &Artifact,
     patches: &[Vec<u32>],
 ) {
-    const KEPT: u8 = 0;
-    const LOST: u8 = 1;
-    const MIXED: u8 = 2;
-    const SHIFTED: u8 = 3;
     let levels = artifact.pyramid.len() as u32;
     let mut read = String::new();
     let mut swap_rungs: Vec<u8> = Vec::new();
@@ -1278,7 +1520,7 @@ fn rung_swap_lines(
         }
     }
     println!(
-        "\nTHE LAKES AT THE RUNG SWAP (ruling W16: a rung boundary is invisible; status §6 T5, §7 W6)"
+        "\nTHE LAKES AT THE RUNG SWAPS (ruling W16: a rung boundary is invisible; status §6 T5, §7 W6; plan step 2 part 5)"
     );
     println!(
         "  what each rung reads (the pyramid level of its field / the level of its side's footprint, 0 = the fine node's own word):{read}"
@@ -1289,7 +1531,6 @@ fn rung_swap_lines(
         );
         return;
     };
-    // The rung before the swap must read the rows themselves, or there is no swap to measure.
     let before = first.saturating_sub(1);
     if first == 0 || PyramidField::level_for(lattice, levels, before) != 0 {
         println!(
@@ -1303,35 +1544,32 @@ fn rung_swap_lines(
     };
     let n = lattice.node_count();
     let m = coarse.node_count();
-    // The fold again, over the rows, beside the shipped word; and which level-1 blocks hold a sea
-    // node or a lake node by the SHIPPED side word (the coast mask).
-    let (mut wet_sum, mut wet_count) = (vec![0i32; m], vec![0i32; m]);
-    let (mut has_sea, mut has_lake) = (vec![false; m], vec![false; m]);
+    let sea = body.plan_charter(0, vd_seed::bend::Face::PosX).sea_radius;
+    let sea_m = artifact.sea_m;
+    // The fold again, over the rows and the mask, beside the shipped word; and which level-1
+    // blocks hold a lake node.
+    let (mut lake_max, mut has_sea, mut has_lake) =
+        (vec![DRY_M; m], vec![false; m], vec![false; m]);
     for node in 0..n as u32 {
         let (face, fi, fj) = lattice.split(node);
         let up = coarse.index(face, fi >> 1, fj >> 1) as usize;
-        let w = artifact.rows[node as usize].water_m;
-        if w != DRY_M {
-            wet_sum[up] += i32::from(w);
-            wet_count[up] += 1;
-        }
         match coast_side(&artifact.coast, node) {
             Some(Side::Sea) => has_sea[up] = true,
-            Some(Side::Lake) => has_lake[up] = true,
+            Some(Side::Lake) => {
+                has_lake[up] = true;
+                lake_max[up] = lake_max[up].max(artifact.rows[node as usize].water_m);
+            }
             _ => {}
         }
     }
     let disagree = (0..m)
-        .filter(|&u| fold_water(wet_sum[u], wet_count[u]) != fold[u])
+        .filter(|&u| block_water(lake_max[u], has_sea[u], sea_m) != fold[u])
         .count();
-    drop(wet_sum);
-    drop(wet_count);
-    // ★ THE CELL AT A NODE'S CENTRE on a rung whose cell is no wider than the node: the rung-0
-    // index of the node's centre, `f · cells_per_node + cells_per_node / 2`, shifted down by the
-    // rung. Its column's nearest fine node is `f`, and its nearest level-1 node is `f >> 1`.
+    drop(lake_max);
+    drop(has_sea);
+    // ★ THE CELL AT A NODE'S CENTRE on a rung whose cell is no wider than the node.
     let cpn = i64::from(lattice.cells_per_node);
     let centre = |f: i32, rung: u8| -> i32 { ((i64::from(f) * cpn + cpn / 2) >> rung) as i32 };
-    // The cells of one node on a rung, `[lo, hi)` along one axis; at least the one cell.
     let span = |f: i32, rung: u8| -> (i32, i32) {
         let lo = ((i64::from(f) * cpn) >> rung) as i32;
         let hi = ((i64::from(f + 1) * cpn) >> rung) as i32;
@@ -1339,14 +1577,11 @@ fn rung_swap_lines(
     };
     let counts = artifact.coast_counts();
     let per_face = lattice.edge * lattice.edge;
-    let mut class = vec![KEPT; n];
-    let mut tally = [0usize; 4];
-    let (mut lake_nodes, mut lost_m2, mut worst_m) = (0usize, 0u128, 0.0f64);
+    let mut class = vec![Change::Kept; n];
+    let mut tally = SwapTally::default();
     let (mut lip_checked, mut lip_nodes, mut lip_cols) = (0usize, 0usize, 0usize);
-    let (mut lip_depth_m, mut lip_top_m) = (0.0f64, 0.0f64);
-    // The checks, 0 expected on each.
-    let (mut unread, mut base_off, mut dry_before, mut wrong_reader) =
-        (0usize, 0usize, 0usize, 0usize);
+    let (mut dry_before, mut wrong_reader) = (0usize, 0usize);
+    let z_under = |node: u32| i32::from(artifact.rows[node as usize].z_m) < i32::from(sea_m);
     for f in 0..6u32 {
         let face_first = f * per_face;
         let (face, _, _) = lattice.split(face_first);
@@ -1365,58 +1600,56 @@ fn rung_swap_lines(
             let i = node as usize;
             let (_, fi, fj) = lattice.split(node);
             let up = coarse.index(face, fi >> 1, fj >> 1) as usize;
+            let (ci, cj) = (
+                (centre(fi, before), centre(fj, before)),
+                (centre(fi, first), centre(fj, first)),
+            );
             match coast_side(&artifact.coast, node) {
                 Some(Side::Lake) => {
-                    let (Some(a), Some(b)) = (
-                        near.column(centre(fi, before), centre(fj, before)),
-                        far.column(centre(fi, first), centre(fj, first)),
-                    ) else {
-                        unread += 1;
+                    let (Some(a), Some(b)) = (near.column(ci.0, ci.1), far.column(cj.0, cj.1))
+                    else {
+                        tally.unread += 1;
                         continue;
                     };
-                    base_off += usize::from(!a.base_agrees) + usize::from(!b.base_agrees);
                     dry_before += usize::from(a.side_word != SIDE_SEA);
-                    lake_nodes += 1;
-                    let c = if b.side_word == SIDE_LAND {
-                        LOST
-                    } else if b.water == a.water {
-                        KEPT
-                    } else if has_sea[up] {
-                        MIXED
-                    } else {
-                        SHIFTED
-                    };
-                    if c == LOST {
-                        lost_m2 += u128::from(lattice.area_m2(node));
+                    if let Some(c) = tally.lake(&a, &b, sea) {
+                        class[i] = c;
                     }
-                    if c == MIXED || c == SHIFTED {
-                        worst_m = worst_m.max(metres_of_q28(b.water - a.water).abs());
-                    }
-                    class[i] = c;
-                    tally[c as usize] += 1;
                 }
-                Some(Side::Land) if has_lake[up] => {
-                    let Some(a) = near.column(centre(fi, before), centre(fj, before)) else {
-                        unread += 1;
+                // A pocket's dry floor is a dry node too (review finding 1 of plan step 2).
+                Some(Side::Land | Side::Pocket) => {
+                    // THE HOLD: a dry node whose ground or a neighbour's stands under the sea.
+                    let low = z_under(node)
+                        || lattice
+                            .neighbours(node)
+                            .into_iter()
+                            .any(|nb| nb != NO_NODE && z_under(nb));
+                    if low {
+                        let (Some(a), Some(b)) = (near.column(ci.0, ci.1), far.column(cj.0, cj.1))
+                        else {
+                            tally.unread += 1;
+                            continue;
+                        };
+                        tally.hold(&a, &b);
+                    }
+                    if !has_lake[up] {
                         continue;
-                    };
-                    base_off += usize::from(!a.base_agrees);
+                    }
+                    // THE LIP: every cell of the dry node at the far rung.
                     lip_checked += 1;
                     let (i_lo, i_hi) = span(fi, first);
                     let (j_lo, j_hi) = span(fj, first);
                     let mut lipped = false;
-                    for ci in i_lo..i_hi {
-                        for cj in j_lo..j_hi {
-                            let Some(b) = far.column(ci, cj) else {
-                                unread += 1;
+                    for x in i_lo..i_hi {
+                        for y in j_lo..j_hi {
+                            let Some(b) = far.column(x, y) else {
+                                tally.unread += 1;
                                 continue;
                             };
-                            base_off += usize::from(!b.base_agrees);
-                            if b.side_word == SIDE_LAND && b.water != a.water && b.base < b.water {
+                            tally.base_off += usize::from(!b.base_agrees);
+                            if b.side_word != SIDE_SEA && b.hold != sea && b.base < b.hold {
                                 lip_cols += 1;
                                 lipped = true;
-                                lip_depth_m = lip_depth_m.max(metres_of_q28(b.water - b.base));
-                                lip_top_m = lip_top_m.max(metres_of_q28(b.surface - b.water));
                             }
                         }
                     }
@@ -1428,50 +1661,47 @@ fn rung_swap_lines(
     }
     let (mut changed, mut vanished) = (0usize, 0usize);
     for patch in patches {
-        if patch.iter().any(|&v| class[v as usize] != KEPT) {
+        if patch.iter().any(|&v| class[v as usize] != Change::Kept) {
             changed += 1;
         }
-        if patch.iter().all(|&v| class[v as usize] == LOST) {
+        if patch.iter().all(|&v| class[v as usize] == Change::Lost) {
             vanished += 1;
         }
     }
-    let [kept, lost, mixed, shifted] = tally;
-    let moved = lost + mixed + shifted;
     let cells = span(0, first).1;
-    let trusted = disagree + unread + base_off + dry_before + wrong_reader == 0;
+    let trusted = disagree + tally.unread + tally.base_off + dry_before + wrong_reader == 0;
     println!(
-        "  rungs {first} to {last} draw a lake column's water from level 1 while its side stays the fine node's own word; the swap is rung {before} → {first}"
+        "  rungs {first} to {last} draw a lake column's water from level 1 while its side stays the fine node's own word; the first swap is rung {before} → {first}"
     );
+    tally.lines(before, first, trusted);
     println!(
-        "  THE SHIPPED COLUMN (the chunk builder's reads through `RungReader`) at each lake node's centre cell, rung {before} against rung {first}: of {lake_nodes} lake nodes, {lost} turn to LAND ({:.0} km²); {mixed} take a level mixed with the sea's (their block holds a sea node); {shifted} take another lake level; {kept} keep their own; the largest change of level {worst_m:.1} m",
-        lost_m2 as f64 / 1.0e6
-    );
-    println!(
-        "  of {} lake patches: {changed} change their drawn water at the swap, and {vanished} of them vanish whole",
+        "  of {} lake patches: {changed} change their drawn water at the swap {before} → {first}, and {vanished} of them vanish whole",
         patches.len()
     );
     println!(
-        "  THE LIP (T5): {lip_checked} dry nodes share a level-1 block with a lake; every one of their {cells}×{cells} cells at rung {first} read: {lip_cols} columns on {lip_nodes} nodes stand on ground UNDER the lake level they read after the swap, and the shore law holds them OVER it — that ground stands up to {lip_depth_m:.1} m under the level, and the drawn top up to {lip_top_m:.1} m over it"
+        "  THE LIP (T5): {lip_checked} dry nodes share a level-1 block with a lake; every one of their {cells}×{cells} cells at rung {first} read: {lip_cols} columns on {lip_nodes} nodes are held against a LAKE's level their ground stands under (0 by construction: a land column never reads the level word)"
     );
     println!(
-        "  checks, 0 expected on each: the shipped level-1 word disagrees with `fold_water` over the rows at {disagree} of {m} level-1 nodes; {unread} columns unread; {base_off} columns whose ground base does not give the kernel's own surface again; {dry_before} lake nodes NOT held under water at rung {before}; {wrong_reader} faces whose reader stands on another lattice or level"
+        "  checks, 0 expected on each: the shipped level-1 word disagrees with `block_water` over the rows at {disagree} of {m} level-1 nodes; {} columns unread; {} columns whose ground base does not give the kernel's own surface again; {dry_before} lake nodes NOT held under water at rung {before}; {wrong_reader} faces whose reader stands on another lattice or level",
+        tally.unread, tally.base_off
     );
-    if !trusted {
-        println!("  ★ A CHECK FAILED: THE TWO GATES BELOW ARE NOT TRUSTED, SO THEY READ RED");
-    }
     census(
         "CHECK-RUNG-SWAP",
         &format!(
-            "{disagree}fold+{unread}unread+{base_off}base+{dry_before}dry+{wrong_reader}faces"
+            "{disagree}fold+{}unread+{}base+{dry_before}dry+{wrong_reader}faces",
+            tally.unread, tally.base_off
         ),
         "0[a-measurement-that-cannot-be-trusted-is-not-a-green]",
         Verdict::of(trusted),
     );
     census(
         "G-RUNG-LAKE",
-        &format!("{moved}nodes/{changed}patches"),
-        "0[ruling-W16:a-rung-boundary-is-invisible]",
-        Verdict::of(trusted && moved == 0 && changed == 0),
+        &format!(
+            "{}nodes/{changed}patches/{vanished}vanished",
+            tally.lost + tally.mixed + tally.shifted
+        ),
+        "0-lost-0-vanished[ruling-W16;SHIFTED-read-by-its-own-line]",
+        Verdict::of(trusted && tally.lost == 0 && vanished == 0),
     );
     census(
         "G-RUNG-LIP",
@@ -1479,249 +1709,243 @@ fn rung_swap_lines(
         "0[ruling-W16:a-rung-boundary-is-invisible]",
         Verdict::of(trusted && lip_nodes == 0),
     );
+    // 2. THE LEVEL SWAPS.
+    for (b_rung, a_rung) in [(14u8, 15u8), (15, 16)] {
+        far_swap_lines(body, lattice, artifact, &counts, b_rung, a_rung);
+    }
+    // 3. THE POCKET'S FLOOR AT EACH RUNG.
+    pocket_hold_lines(body, lattice, artifact, &counts);
 }
 
-/// The water that the lake budget's own rule settles over one stated supply per depression.
-struct Fill {
-    /// Each depression's verdict: its water reaches its spill.
-    full: Vec<bool>,
-    /// The water body that covers each depression, or [`NO_DEP`].
-    body_of: Vec<u32>,
-    /// Each body's level, sixteenths, or [`DRY`].
-    level: Vec<i32>,
-    /// The standing water at each node, sixteenths, or [`DRY`].
-    water: Vec<i32>,
-    /// The bodies that end DRY, PARTIAL and SPILLING.
-    ends: [usize; 3],
-}
-
-/// The names of a hollow's three ends, in [`water_state`]'s order.
-const WATER_STATES: [&str; 3] = ["DRY", "PARTIAL", "SPILLING"];
-
-/// A depression's water under a fill, by the body that covers it: 0 DRY, 1 PARTIAL, 2 SPILLING.
-fn water_state(fill: &Fill, d: usize) -> usize {
-    let b = fill.body_of[d];
-    if b == NO_DEP || fill.level[b as usize] == DRY {
-        0
-    } else if fill.full[b as usize] {
-        2
-    } else {
-        1
-    }
-}
-
-/// ★ THE BUDGET'S OWN RULE, REPLICATED OVER ANY SUPPLY (`vd_terrain::lakes::budget`, steps 3 to 6,
-/// `crates/terrain/src/lakes.rs:249-319` and `:396-488`). A depression is FULL where it closed, its
-/// supply is positive, and its supply reaches its deficit; each depression's water body follows by
-/// the budget's descending pass; a full body stands at its spill; a partial body fills over its own
-/// nodes, lowest first, while the supply pays the evaporation; then one level a node. The hierarchy
-/// and every deficit are the budget's own, and only the supply is the caller's. The budget's own
-/// helpers are private, so this is a replica, and the census runs it once over the budget's OWN
-/// supply and counts every node where it disagrees with the budget's own water.
-fn budget_rule(state: &MacroSolve, climate: &Climate, lakes: &Lakes, supply: &[u128]) -> Fill {
-    let deps = &lakes.deps;
-    let m = deps.len();
-    let n = state.node_count();
-    let mut full = vec![false; m];
-    for d in 1..m {
-        full[d] = deps[d].parent != NO_DEP && supply[d] > 0 && supply[d] >= deps[d].deficit;
-    }
-    let mut body_of = vec![NO_DEP; m];
-    for d in (1..m).rev() {
-        let parent = deps[d].parent;
-        let kids = deps[d].children;
-        let kids_full = kids[0] == NO_DEP || (full[kids[0] as usize] && full[kids[1] as usize]);
-        let up = if parent == OCEAN || parent == NO_DEP {
-            NO_DEP
-        } else {
-            body_of[parent as usize]
-        };
-        body_of[d] = if full[d] && up != NO_DEP {
-            up
-        } else if full[d] || kids_full {
-            d as u32
-        } else {
-            NO_DEP
-        };
-    }
-    let mut level = vec![DRY; m];
-    let mut ends = [0usize; 3];
-    let mut slot = vec![NO_DEP; m];
-    let mut partial: Vec<u32> = Vec::new();
-    for d in 1..m {
-        if body_of[d] != d as u32 {
-            continue;
-        }
-        if full[d] {
-            level[d] = deps[d].spill_z;
-            ends[2] += 1;
-        } else {
-            slot[d] = partial.len() as u32;
-            partial.push(d as u32);
-        }
-    }
-    // The nodes of every partial body, by a counting sort: a body's nodes are the nodes whose own
-    // depression it covers.
-    let body_at = |i: usize| -> u32 {
-        let h = lakes.home[i];
-        if h == NO_DEP || h == OCEAN {
-            NO_DEP
-        } else {
-            body_of[h as usize]
-        }
-    };
-    let slot_at = |i: usize| -> u32 {
-        let b = body_at(i);
-        if b == NO_DEP {
-            NO_DEP
-        } else {
-            slot[b as usize]
-        }
-    };
-    let mut counts = vec![0u32; partial.len() + 1];
-    for i in 0..n {
-        let s = slot_at(i);
-        if s != NO_DEP {
-            counts[s as usize + 1] += 1;
-        }
-    }
-    for k in 1..counts.len() {
-        counts[k] += counts[k - 1];
-    }
-    let mut cells = vec![0u32; counts[partial.len()] as usize];
-    let mut at = counts.clone();
-    for i in 0..n {
-        let s = slot_at(i);
-        if s != NO_DEP {
-            cells[at[s as usize] as usize] = i as u32;
-            at[s as usize] += 1;
-        }
-    }
-    drop(at);
-    for (k, &d) in partial.iter().enumerate() {
-        let own = &mut cells[counts[k] as usize..counts[k + 1] as usize];
-        own.sort_unstable_by_key(|&v| (state.z[v as usize], v));
-        let lv = fill_level(state, climate, own, supply[d as usize]);
-        level[d as usize] = lv;
-        ends[usize::from(lv != DRY)] += 1;
-    }
-    let mut water = vec![DRY; n];
-    for (i, w) in water.iter_mut().enumerate() {
-        let b = body_at(i);
-        if b == NO_DEP {
-            continue;
-        }
-        let lv = level[b as usize];
-        if lv != DRY && state.z[i] < lv {
-            *w = lv;
-        }
-    }
-    Fill {
-        full,
-        body_of,
-        level,
-        water,
-        ends,
-    }
-}
-
-/// The budget's closed-lake level (`lakes.rs` `fill_level`), replicated: over nodes sorted lowest
-/// first, the highest step of equal heights whose standing water the supply still pays the
-/// evaporation of, one sixteenth over that step; [`DRY`] where it cannot pay for the first step.
-fn fill_level(state: &MacroSolve, climate: &Climate, own: &[u32], supply: u128) -> i32 {
-    if supply == 0 {
-        return DRY;
-    }
-    let mut level = DRY;
-    let mut paid = 0u128;
-    let mut k = 0usize;
-    while k < own.len() {
-        let step_z = state.z[own[k] as usize];
-        let mut cost = 0u128;
-        let mut end = k;
-        while end < own.len() && state.z[own[end] as usize] == step_z {
-            cost += deficit_rate(state, climate, own[end] as usize);
-            end += 1;
-        }
-        if paid + cost > supply {
-            break;
-        }
-        paid += cost;
-        level = step_z.saturating_add(1);
-        k = end;
-    }
-    level
-}
-
-/// A node's DEFICIT, mm·m²/yr (`lakes.rs` `rates`, its second word): what covering the node with
-/// water costs — the runoff it stops yielding, plus the open surface's evaporation over its rain.
-fn deficit_rate(state: &MacroSolve, climate: &Climate, i: usize) -> u128 {
-    let p = i64::from(climate.rain_mm_yr[i]);
-    let e = i64::from(climate.pet_mm_yr[i]);
-    let q = i64::from(climate.runoff_mm_yr[i]);
-    ((q + e - p).max(0) as u128) * u128::from(state.area[i])
-}
-
-/// ★ THE WATERSHED AGAINST THE BUDGET (status §7 W3) — A WHAT-IF THAT MOVES NOTHING. The budget
-/// feeds each hollow only the runoff of the ground under its own spill (`lakes.rs:209-259`,
-/// `:384-390`): every node over the brim books its water to the parent or to the ocean.
-/// Fill-Spill-Merge, which ruling W11 cites, feeds a hollow from its whole WATERSHED. Here a leaf's
-/// watershed is every node whose descent on the ground ([`Descent`]) ends at the leaf's pit, and a
-/// parent's is its two children's. The census sets each leaf's watershed supply beside the budget's,
-/// then runs the budget's own rule ([`budget_rule`]) over the watershed supply and counts the leaves
-/// that move between DRY, PARTIAL and SPILLING, and the lake share that would follow. The overflow
-/// of a full hollow whose parent holds no water is still lost (W4), and the sea is held where it
-/// stands, so the what-if is a floor under the repaired budget, not the repair.
+/// ★ A POCKET'S FLOOR IS NEVER HELD OVER THE SEA (2026-09-25, review finding 1 of plan step 2;
+/// ruling B7 item 1; ruling W16). At each rung the census reads, every column over a pocket's dry
+/// floor ([`Side::Pocket`]): at a rung whose cell is no wider than a fine node, each pocket node's
+/// centre cell; at a far rung, each cell whose footprint counts a pocket node. A column is HELD
+/// where the shore law reads the LAND word while its ground base stands under the sea's level: the
+/// law lifts that floor a quarter of its depth over the sea, a mesa.
 ///
-/// **Example.** A hollow at the foot of the belt's wet range gets only the runoff under its own
-/// brim, so the budget leaves it a dry pan. Its watershed takes in the whole range face, the supply
-/// rises many times, and under the same rule the hollow fills to its spill and runs out through a
-/// river.
-fn watershed_lines(state: &MacroSolve, climate: &Climate, lakes: &Lakes, descent: &Descent) {
+/// The GATE counts the columns whose OWN side is the pocket — the node's own word at a near rung,
+/// the footprint's majority at a far one — and 0 is its only green. Beside it, a READING: the far
+/// cells whose footprint holds a pocket's floor as a MINORITY, which the footprint rule of W15
+/// names LAND, and how many of those the law holds over the sea.
+///
+/// **Example.** A salt pan lies behind a one-node ridge on the belt's coast, 2 km under the sea's
+/// level. Before the pocket word its floor read LAND with the sea in its stencil, and the census
+/// counted it held at every rung — a mesa over the sea's level; with the word it reads INLAND and
+/// the count is zero.
+fn pocket_hold_lines(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    artifact: &Artifact,
+    counts: &std::sync::Arc<vd_terrain::artifact::CoastCounts>,
+) {
+    println!(
+        "\nTHE POCKET'S FLOOR AT EACH RUNG (review finding 1 of plan step 2; ruling B7 item 1; ruling W16): the columns over a pocket's dry floor the shore law holds over the sea"
+    );
+    let cpn = i64::from(lattice.cells_per_node);
+    let centre = |f: i32, rung: u8| -> i32 { ((i64::from(f) * cpn + cpn / 2) >> rung) as i32 };
+    let per_face = lattice.edge * lattice.edge;
+    let lifted = |c: &ShippedColumn| (c.side_word == SIDE_LAND) & (c.base < c.hold);
+    for rung in [9u8, 10, 13, 14, 15, 16] {
+        let kf = coast_level(lattice.cells_per_node, rung);
+        let edge_r = body.ladder().cells_per_edge(rung);
+        let exact = kf == 0 || lattice.coarser(kf).is_some_and(|c| c.edge == edge_r);
+        if !exact {
+            println!(
+                "  rung {rung}: its footprint (level {kf}) is not one level node a cell: not counted"
+            );
+            continue;
+        }
+        let (mut read, mut held, mut minority, mut minority_held, mut unread) =
+            (0usize, 0usize, 0usize, 0usize, 0usize);
+        let mut deepest_m = 0.0f64;
+        for f in 0..6u32 {
+            let face_first = f * per_face;
+            let (face, _, _) = lattice.split(face_first);
+            let Some(reader) = RungReader::new(body, artifact, counts, face, rung) else {
+                unread += 1;
+                continue;
+            };
+            let mut take = |c: &ShippedColumn, own: bool| {
+                let lift = lifted(c);
+                if lift {
+                    deepest_m = deepest_m.max(metres_of_q28(c.hold - c.base));
+                }
+                if own {
+                    read += 1;
+                    held += usize::from(lift);
+                } else {
+                    minority += 1;
+                    minority_held += usize::from(lift);
+                }
+            };
+            if kf == 0 {
+                for node in face_first..face_first + per_face {
+                    if coast_side(&artifact.coast, node) != Some(Side::Pocket) {
+                        continue;
+                    }
+                    let (_, fi, fj) = lattice.split(node);
+                    match reader.column(centre(fi, rung), centre(fj, rung)) {
+                        Some(c) => take(&c, c.side == Some(Side::Pocket)),
+                        None => unread += 1,
+                    }
+                }
+                continue;
+            }
+            for cj in 0..edge_r {
+                for ci in 0..edge_r {
+                    if counts.pockets(kf, face, ci, cj).unwrap_or(0) == 0 {
+                        continue;
+                    }
+                    match reader.column(ci as i32, cj as i32) {
+                        Some(c) => take(&c, c.side == Some(Side::Pocket)),
+                        None => unread += 1,
+                    }
+                }
+            }
+        }
+        println!(
+            "  rung {rung} (footprint level {kf}): {read} columns whose own side is a pocket's floor, {held} of them held over the sea; {minority} far cells hold a pocket's floor as a minority of their footprint and read another side, {minority_held} of those held over the sea; the deepest floor held stands {deepest_m:.0} m under the sea; {unread} unread"
+        );
+        census(
+            &format!("G-POCKET-HELD@{rung}"),
+            &format!("{held}of{read}columns"),
+            "0[review-finding-1;ruling-B7-item-1:a-pocket's-floor-is-never-lifted-over-the-sea]",
+            Verdict::of(unread == 0 && held == 0),
+        );
+        census(
+            &format!("POCKET-MINORITY-HELD@{rung}"),
+            &format!("{minority_held}of{minority}cells"),
+            "no-band[a-reading:the-footprint-rule-of-W15]",
+            Verdict::NoBand,
+        );
+    }
+}
+
+/// ★ ONE LEVEL SWAP, per cell of the coarser rung `after` (plan step 2 part 5): where the cell's
+/// footprint holds a lake node, each of its four cells of `before` against it; where its level
+/// node or a neighbour stands under the sea's level, the hold. The footprint of a cell of these
+/// rungs IS one level node (the home planet's node is a power of two in cells), which the reader
+/// checks before it counts.
+fn far_swap_lines(
+    body: &BodyDefinition,
+    lattice: &MacroLattice,
+    artifact: &Artifact,
+    counts: &std::sync::Arc<vd_terrain::artifact::CoastCounts>,
+    before: u8,
+    after: u8,
+) {
+    let levels = artifact.pyramid.len() as u32;
+    let ka = PyramidField::level_for(lattice, levels, after);
+    let kb = PyramidField::level_for(lattice, levels, before);
+    let exact = ka == coast_level(lattice.cells_per_node, after)
+        && kb == coast_level(lattice.cells_per_node, before)
+        && ka == kb + 1
+        && ka >= 1;
+    let (Some(level_a), true) = (lattice.coarser(ka), exact) else {
+        println!(
+            "  the swap {before} → {after}: its footprints are not one level node each (level {kb} → {ka}): not counted"
+        );
+        return;
+    };
+    let sea = body.plan_charter(0, vd_seed::bend::Face::PosX).sea_radius;
+    let sea_m = i32::from(artifact.sea_m);
+    let z_level = &artifact.pyramid[ka as usize - 1];
+    let edge_a = body.ladder().cells_per_edge(after) as i32;
+    let mut tally = SwapTally::default();
+    let mut wrong_reader = 0usize;
+    for f in 0..6u32 {
+        let (face, _, _) = lattice.split(f * lattice.edge * lattice.edge);
+        let (Some(near), Some(far)) = (
+            RungReader::new(body, artifact, counts, face, before),
+            RungReader::new(body, artifact, counts, face, after),
+        ) else {
+            wrong_reader += 1;
+            continue;
+        };
+        if near.level != kb || far.level != ka || level_a.edge as i32 != edge_a {
+            wrong_reader += 1;
+            continue;
+        }
+        for cj in 0..edge_a {
+            for ci in 0..edge_a {
+                let node = level_a.index(face, ci, cj);
+                let lake = counts
+                    .count(ka, face, ci as u32, cj as u32)
+                    .is_some_and(|(_, l)| l > 0);
+                let low = i32::from(z_level[node as usize]) < sea_m
+                    || level_a
+                        .neighbours(node)
+                        .into_iter()
+                        .any(|nb| nb != NO_NODE && i32::from(z_level[nb as usize]) < sea_m);
+                if !lake && !low {
+                    continue;
+                }
+                let Some(b) = far.column(ci, cj) else {
+                    tally.unread += 1;
+                    continue;
+                };
+                for (di, dj) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let Some(a) = near.column(2 * ci + di, 2 * cj + dj) else {
+                        tally.unread += 1;
+                        continue;
+                    };
+                    if lake {
+                        let was_lake = tally.lake(&a, &b, sea).is_some();
+                        let is_lake = b.side_word == SIDE_SEA && b.water != sea;
+                        tally.gained += usize::from(!was_lake && is_lake);
+                    }
+                    if low {
+                        tally.hold(&a, &b);
+                    }
+                }
+            }
+        }
+    }
+    let trusted = tally.unread + tally.base_off + wrong_reader == 0;
+    tally.lines(before, after, trusted);
+    census(
+        &format!("CHECK-RUNG-SWAP@{before}-{after}"),
+        &format!(
+            "{}unread+{}base+{wrong_reader}faces",
+            tally.unread, tally.base_off
+        ),
+        "0[a-measurement-that-cannot-be-trusted-is-not-a-green]",
+        Verdict::of(trusted),
+    );
+}
+
+/// ★ THE LAKE BUDGET'S OWN LINES (plan step 2 parts 1 and 2; ruling B7; status §7 W3 and W4): the
+/// census's watershed WHAT-IF of step 1 is now the budget itself. Each leaf's WATERSHED supply
+/// beside the runoff of its own nodes (the budget's rule before step 2), the three ends of the
+/// water bodies and of the leaves, the cascade's transfers and its books, and the lakes' share of
+/// the land.
+///
+/// **Example.** A hollow at the foot of the belt's wet range took only the runoff under its own
+/// brim at generator 19 and stood a dry pan; its watershed takes in the whole range face, and the
+/// line of the ten hollows fed most beyond their brim names it with its aim.
+fn budget_lines(state: &MacroSolve, lakes: &Lakes, facies: &[u8]) {
+    const STATES: [&str; 3] = ["DRY", "PARTIAL", "SPILLING"];
     let n = state.node_count();
     let deps = &lakes.deps;
     let m = deps.len();
     let steps = f64::from(Z_STEPS_PER_M);
+    let r = &lakes.report;
     // The budget run here against the solve's own water: they must be one budget.
     let stale = (0..n)
         .filter(|&i| lakes.water[i] != state.water_z[i])
         .count();
-    // 1. Each leaf's watershed: the runoff of every node whose descent ends at the leaf's pit.
-    let mut shed = vec![0u128; m];
-    let mut foreign = 0usize;
-    for node in 0..n as u32 {
-        let i = node as usize;
-        let pit = descent.end[i];
-        let p = pit as usize;
-        if state.z[p] <= state.sea_z {
-            continue;
+    let state_of = |d: usize| -> usize {
+        let b = lakes.body_of[d];
+        if b == NO_DEP || deps[b as usize].level == DRY {
+            0
+        } else if deps[b as usize].full {
+            2
+        } else {
+            1
         }
-        let leaf = lakes.home[p];
-        if leaf == NO_DEP || leaf == OCEAN || deps[leaf as usize].pit != pit {
-            foreign += 1;
-            continue;
-        }
-        shed[leaf as usize] += u128::from(climate.runoff_mm_yr[i]) * u128::from(state.area[i]);
-    }
-    // 2. A parent's watershed is its two children's: a parent is made after its children, so one
-    //    rising pass settles every chain.
-    for d in 1..m {
-        let kids = deps[d].children;
-        if kids[0] != NO_DEP {
-            shed[d] = shed[kids[0] as usize] + shed[kids[1] as usize];
-        }
-    }
-    // 3. The budget's own rule twice: over its own supply (the replica's check), then over the
-    //    watershed's (the what-if).
-    let own: Vec<u128> = deps.iter().map(|d| d.supply).collect();
-    let replica = budget_rule(state, climate, lakes, &own);
-    let replica_off = (0..n)
-        .filter(|&i| replica.water[i] != lakes.water[i])
-        .count();
-    let full_off = (1..m).filter(|&d| replica.full[d] != deps[d].full).count();
-    let whatif = budget_rule(state, climate, lakes, &shed);
-    // 4. The leaves: their supply against their watershed's, and their end before and after.
-    let mut moves = [[0usize; 3]; 3];
+    };
+    let mut leaf_ends = [0usize; 3];
     let (mut leaves, mut fed_above) = (0usize, 0usize);
     let mut ratio: Vec<f64> = Vec::new();
     let mut gains: Vec<(u128, usize)> = Vec::new();
@@ -1730,92 +1954,59 @@ fn watershed_lines(state: &MacroSolve, climate: &Climate, lakes: &Lakes, descent
             continue;
         }
         leaves += 1;
-        moves[water_state(&replica, d)][water_state(&whatif, d)] += 1;
-        let supply = deps[d].supply;
-        if supply > 0 {
-            ratio.push(shed[d] as f64 / supply as f64);
-        } else if shed[d] > 0 {
+        leaf_ends[state_of(d)] += 1;
+        let (shed, brim) = (deps[d].supply, deps[d].brim_supply);
+        if brim > 0 {
+            ratio.push(shed as f64 / brim as f64);
+        } else if shed > 0 {
             fed_above += 1;
         }
-        gains.push((shed[d].saturating_sub(supply), d));
+        gains.push((shed.saturating_sub(brim), d));
     }
     ratio.sort_by(f64::total_cmp);
     gains.sort_unstable_by_key(|&(g, d)| (std::cmp::Reverse(g), d));
     let pick = |q: usize| ratio.get(ratio.len() * q / 100).copied().unwrap_or(0.0);
-    // 5. The lake share either way, over the land.
-    let (mut land_m2, mut budget_m2, mut whatif_m2, mut whatif_nodes) =
-        (0u128, 0u128, 0u128, 0usize);
-    for node in 0..n as u32 {
-        let i = node as usize;
-        if state.z[i] <= state.sea_z {
+    let (mut land_m2, mut lake_m2) = (0u128, 0u128);
+    for ((&ocean, &area), &f) in state.ocean.iter().zip(&state.area).zip(facies) {
+        if ocean {
             continue;
         }
-        let a = u128::from(state.area[i]);
+        let a = u128::from(area);
         land_m2 += a;
-        if lakes.water[i] != DRY {
-            budget_m2 += a;
-        }
-        if whatif.water[i] != DRY {
-            whatif_m2 += a;
-            whatif_nodes += 1;
-        }
+        lake_m2 += a * u128::from(f & FACIES_LAKE != 0);
     }
-    let budget_pct = budget_m2 as f64 * 100.0 / land_m2.max(1) as f64;
-    let whatif_pct = whatif_m2 as f64 * 100.0 / land_m2.max(1) as f64;
+    let lake_pct = lake_m2 as f64 * 100.0 / land_m2.max(1) as f64;
+    let km3_yr = |v: u128| v as f64 / 1.0e12;
     println!(
-        "\nTHE WATERSHED AGAINST THE BUDGET (status §7 W3) — A WHAT-IF, IT MOVES NOTHING: the budget feeds a hollow only the runoff under its own spill; Fill-Spill-Merge (ruling W11's source) feeds it from its whole watershed, every node whose water runs down the GROUND to the hollow's pit"
+        "\nTHE LAKE BUDGET (plan step 2; ruling B7; status §7 W3, W4): each hollow fed from its whole WATERSHED down the ground, every full hollow's overflow passed on (Fill–Spill–Merge, Barnes, Callaghan & Wickert 2021)"
     );
     println!(
-        "  checks, 0 expected on each: the budget run here and the solve's own water disagree at {stale} nodes; {foreign} nodes descend to a pit that is not its leaf's own; the budget's rule, replicated over its own supply, disagrees with its water at {replica_off} nodes and with its verdicts at {full_off} depressions (the replica's bodies DRY {} PARTIAL {} SPILLING {}, the budget's {} {} {})",
-        replica.ends[0],
-        replica.ends[1],
-        replica.ends[2],
-        lakes.report.dry,
-        lakes.report.partial,
-        lakes.report.spilling
-    );
-    let trusted = stale + foreign + replica_off + full_off == 0;
-    if !trusted {
-        println!("  ★ A CHECK FAILED: THE WHAT-IF BELOW IS NOT TRUSTED");
-    }
-    census(
-        "CHECK-WHATIF",
-        &format!("{stale}stale+{foreign}foreign+{replica_off}water+{full_off}verdicts"),
-        "0[the-replica-must-be-the-budget's-own-rule]",
-        Verdict::of(trusted),
-    );
-    println!(
-        "  {leaves} leaf hollows; the watershed's supply over the budget's: median {:.2} times, p90 {:.2} times, largest {:.1} times; {fed_above} hollows with no supply of their own take water only from above their brim",
+        "  {leaves} leaf hollows; the watershed's supply over the runoff of the hollow's own nodes (the rule before step 2): median {:.2} times, p90 {:.2} times, largest {:.1} times; {fed_above} hollows with no runoff of their own take water only from above their brim",
         pick(50),
         pick(90),
         ratio.last().copied().unwrap_or(0.0)
     );
-    let mut line = String::new();
-    for (a, row) in moves.iter().enumerate() {
-        for (b, &count) in row.iter().enumerate() {
-            line.push_str(&format!(
-                " {}→{} {count};",
-                WATER_STATES[a], WATER_STATES[b]
-            ));
-        }
-    }
     println!(
-        "  the budget's own rule over the watershed's supply (a full hollow's overflow into a dry parent is still lost, W4, so this is a floor under the repair):"
-    );
-    println!("    the leaves, budget → what-if, in hollows:{line}");
-    println!(
-        "    the water bodies: DRY {} PARTIAL {} SPILLING {} (the budget: {} {} {})",
-        whatif.ends[0],
-        whatif.ends[1],
-        whatif.ends[2],
-        lakes.report.dry,
-        lakes.report.partial,
-        lakes.report.spilling
+        "  the water bodies: DRY {} PARTIAL {} SPILLING {}; the leaves by the body over them: DRY {} PARTIAL {} SPILLING {}",
+        r.dry, r.partial, r.spilling, leaf_ends[0], leaf_ends[1], leaf_ends[2]
     );
     println!(
-        "    the lakes would cover {whatif_nodes} nodes, {whatif_pct:.3} % of the land (the budget: {budget_pct:.3} %); G-LAKE-SHARE's ceiling is 4 % (ruling B3), W11 names 0.2 to 0.8 % for dry interiors; the sea stays where it stands"
+        "  the cascade: {} pours into a sibling across a spill; its walk visited {} rings over {} leaves (the skip over full rings, review finding 6); the books, km³/yr: runoff {:.4} = held and evaporated {:.4} + to the ocean {:.4} + stranded {:.4}",
+        r.transfers,
+        r.cascade_steps,
+        leaves,
+        km3_yr(r.runoff_total),
+        km3_yr(r.evaporated_total),
+        km3_yr(r.to_ocean),
+        km3_yr(r.stranded)
     );
-    println!("  the ten hollows the watershed feeds most beyond the budget:");
+    println!(
+        "  the standing water: {} nodes, {:.3e} km², {:.4e} km³; the lakes cover {lake_pct:.3} % of the land (every node that is not the ocean) — G-LAKE-SHARE's ceiling 4 % (Verpoorter et al. 2014), W11 names 0.2 to 0.8 % for dry interiors",
+        r.lake_nodes,
+        r.lake_area_m2 as f64 / 1.0e6,
+        r.volume_m3 as f64 / 1.0e9
+    );
+    println!("  the ten hollows the watershed feeds most beyond their own nodes:");
     for &(_, d) in gains.iter().take(10) {
         let dep = &deps[d];
         let aim = unit(&state.lattice, dep.pit);
@@ -1828,30 +2019,124 @@ fn watershed_lines(state: &MacroSolve, climate: &Climate, lakes: &Lakes, descent
             )
         };
         println!(
-            "    {:>8.0} km², {spill}; the budget's supply {:.4} km³/yr, the watershed's {:.4} km³/yr; {} → {} — aim {:.6} {:.6} {:.6}",
+            "    {:>8.0} km², {spill}; its own nodes' runoff {:.4} km³/yr, its watershed's {:.4} km³/yr; {} — aim {:.6} {:.6} {:.6}",
             dep.area_m2 as f64 / 1.0e6,
-            dep.supply as f64 / 1.0e12,
-            shed[d] as f64 / 1.0e12,
-            WATER_STATES[water_state(&replica, d)],
-            WATER_STATES[water_state(&whatif, d)],
+            km3_yr(dep.brim_supply),
+            km3_yr(dep.supply),
+            STATES[state_of(d)],
             aim.x,
             aim.y,
             aim.z
         );
     }
+    // ★ THE ROW AGAINST THE BUDGET'S OWN WATER (review finding 3 of plan step 2; plan question 3).
+    // The shipped discharge row is the runoff accumulated over the ROUTING receivers (choice A,
+    // built), and the routing fill carries every hollow's water over its rim; the budget holds a
+    // hollow's water where the hollow is not full. Two readings, no band — the cure is the owner's
+    // word (choice B, the budget's own water; or the receivers of §7 W11):
+    // 1. the row that reaches the OCEAN from the land (at every land node whose shipped receiver is
+    //    an ocean node) against the cascade's own water to the ocean;
+    // 2. THE ROW OUT OF A CLOSED HOLLOW: for every hollow that spills into the sea (its parent is
+    //    the ocean) and is NOT full, the row on every shipped receiver edge that leaves the
+    //    hollow's own nodes. The budget holds all the water that reaches such a hollow, so a row
+    //    that is the budget's water carries 0 there.
+    let mut row_to_ocean = 0u128;
+    for i in 0..n {
+        let to = state.receiver[i];
+        if !state.ocean[i] && to != NO_NODE && state.ocean[to as usize] {
+            row_to_ocean += u128::from(state.discharge[i]);
+        }
+    }
+    // The hollow each depression lies in that spills into the sea: a parent is pushed after its
+    // children, so a walk from the last index down meets every parent first.
+    let mut top = vec![NO_DEP; m];
+    for d in (1..m).rev() {
+        let p = deps[d].parent;
+        top[d] = if p == OCEAN || p == NO_DEP {
+            d as u32
+        } else {
+            top[p as usize]
+        };
+    }
+    let top_of = |node: usize| -> u32 {
+        let h = lakes.home[node];
+        if h == OCEAN || h == NO_DEP {
+            NO_DEP
+        } else {
+            top[h as usize]
+        }
+    };
+    let mut out_of = vec![0u128; m];
+    for i in 0..n {
+        let t = top_of(i);
+        let to = state.receiver[i];
+        if t == NO_DEP || to == NO_NODE || top_of(to as usize) == t {
+            continue;
+        }
+        out_of[t as usize] += u128::from(state.discharge[i]);
+    }
+    let (mut closed, mut leaking, mut closed_row, mut worst_row, mut worst_d) =
+        (0usize, 0usize, 0u128, 0u128, 0usize);
+    for d in 1..m {
+        if top[d] != d as u32 || deps[d].parent != OCEAN || deps[d].full {
+            continue;
+        }
+        closed += 1;
+        leaking += usize::from(out_of[d] > 0);
+        closed_row += out_of[d];
+        if out_of[d] > worst_row {
+            (worst_row, worst_d) = (out_of[d], d);
+        }
+    }
+    println!(
+        "  THE ROW AGAINST THE BUDGET (review finding 3; plan question 3): the discharge row delivers {:.4} km³/yr from the land to the ocean, the cascade {:.4} km³/yr — the row carries {:.4} km³/yr to the sea that the budget holds in its hollows ({:.4} km³/yr held); of the {closed} hollows that spill into the sea and are NOT full (the budget holds all their water), {leaking} have a row leaving them; the largest row out of one is {:.4} km³/yr, out of a {:.0} km² hollow whose own water is {} (a river through a chain of hollows leaves each of them, so the rows out of them sum to {:.1} km³/yr, more than the runoff)",
+        km3_yr(row_to_ocean),
+        km3_yr(r.to_ocean),
+        km3_yr(row_to_ocean.saturating_sub(r.to_ocean)),
+        km3_yr(r.evaporated_total),
+        km3_yr(worst_row),
+        deps[worst_d].area_m2 as f64 / 1.0e6,
+        STATES[state_of(worst_d)],
+        km3_yr(closed_row)
+    );
     census(
-        "WHATIF-LAKE-SHARE",
-        &format!("{whatif_pct:.3}%of-land"),
-        "no-band-yet[a-what-if,moves-nothing;beside:G-LAKE-SHARE<=4%,W11:0.2-0.8%-dry-interiors]",
+        "ROW-OUT-OF-CLOSED-HOLLOWS",
+        &format!(
+            "{:.1}km3/yr-row-to-ocean/{:.1}km3/yr-budget/{leaking}-of-{closed}-closed-hollows-leak",
+            km3_yr(row_to_ocean),
+            km3_yr(r.to_ocean)
+        ),
+        "no-band[review-finding-3;plan-question-3-B-the-owner's-word-owed]",
         Verdict::NoBand,
     );
     census(
-        "WHATIF-HOLLOWS-FILLED",
+        "CHECK-BUDGET-STALE",
+        &format!("{stale}nodes"),
+        "0[the-budget-run-here-is-the-solve's-own]",
+        Verdict::of(stale == 0),
+    );
+    census(
+        "CHECK-BUDGET-CONSERVE",
         &format!(
-            "{}leaves-DRY→PARTIAL/{}leaves-DRY→SPILLING/{}leaves-PARTIAL→SPILLING",
-            moves[0][1], moves[0][2], moves[1][2]
+            "{}runoff-{}held-{}ocean-{}stranded",
+            r.runoff_total, r.evaporated_total, r.to_ocean, r.stranded
         ),
-        "no-band-yet[a-what-if,moves-nothing]",
+        "exact[ruling-B7:nothing-is-lost]",
+        Verdict::of(r.runoff_total == r.evaporated_total + r.to_ocean + r.stranded),
+    );
+    census(
+        "G-LAKE-SHARE",
+        &format!("{lake_pct:.3}%of-land"),
+        "<=4%[ruling-B3;Verpoorter-et-al-2014]",
+        Verdict::of(lake_pct <= 4.0),
+    );
+    census(
+        "BUDGET-LEAVES",
+        &format!(
+            "DRY{}/PARTIAL{}/SPILLING{}/transfers{}",
+            leaf_ends[0], leaf_ends[1], leaf_ends[2], r.transfers
+        ),
+        "no-band[a-reading]",
         Verdict::NoBand,
     );
 }

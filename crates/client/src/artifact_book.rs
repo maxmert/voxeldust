@@ -108,7 +108,8 @@ impl ArtifactCache {
         ArtifactCache {
             head,
             pyramid: vec![None; head.levels as usize],
-            tiles: Arc::new(TileCache::new(head.edge)),
+            // The head's own sea, so a held row names a pocket's floor as the mask does.
+            tiles: Arc::new(TileCache::new(head.edge).with_sea(head.sea_m)),
             coast: None,
             counts: None,
             epoch: 1,
@@ -158,6 +159,18 @@ impl ArtifactCache {
     /// ★ THE FIELD A CHUNK READS: the pyramid level its rung stands at (whole, or waiting), or the
     /// tiles when the rung reads the rows themselves — ready only when every tile the chunk's
     /// stencil reads is here. `lattice` is the body's own macro lattice (level zero).
+    ///
+    /// ★ A PYRAMID LEVEL WAITS FOR THE COAST MASK (2026-09-25, review finding 2 of plan step 2;
+    /// ruling W16: a rung boundary is invisible; ruling B7 item 1). A level with no mask names no
+    /// side, so its columns let the ground's own sign decide and take the sea: every dry pocket
+    /// under the sea's level — the largest 1.57 million km² — was drawn as ocean until the mask
+    /// landed, and then turned into a dry basin 11.9 km deep. [`ArtifactCache::whole`] already
+    /// states that the far view is not whole without the mask; the build now obeys it, and the
+    /// coarser rung stands (ruling F9). The tiles need no mask: a row names its own side.
+    ///
+    /// **Example.** A pilot logs in over the home planet. The pyramid lands before the mask; no
+    /// far chunk builds until the mask is here, so the salt pan in the dry interior is first drawn
+    /// as a salt pan, never as a square of sea.
     #[must_use]
     pub fn field_for(&self, lattice: &MacroLattice, key: ChunkKey) -> FieldPick {
         let level = PyramidField::level_for(lattice, self.head.levels, key.rung);
@@ -169,10 +182,16 @@ impl ArtifactCache {
                 FieldPick::Waiting
             };
         }
-        match self.level(level) {
+        match self.masked_level(level) {
             Some(field) => FieldPick::Ready(field.clone() as SharedField),
             None => FieldPick::Waiting,
         }
+    }
+
+    /// Pyramid level `k` where it is whole AND the coast mask is held: the level a chunk and every
+    /// reader of a rung's field may read (review finding 2 of plan step 2).
+    fn masked_level(&self, k: u32) -> Option<&Arc<PyramidField>> {
+        self.level(k).filter(|_| self.coast_held())
     }
 
     /// ★ THE TILES A CHUNK STILL WAITS FOR (the coast flight's hole instrument, 2026-09-20): the
@@ -190,14 +209,15 @@ impl ArtifactCache {
     }
 
     /// The field a RUNG reads along any direction (the geomorph's parent fallback): the level,
-    /// whole or not here; or the tiles, which answer nothing for a node they lack.
+    /// whole with its coast mask or not here (the rule [`ArtifactCache::field_for`] builds with); or
+    /// the tiles, which answer nothing for a node they lack.
     #[must_use]
     pub fn field_at_rung(&self, lattice: &MacroLattice, rung: u8) -> Option<SharedField> {
         let level = PyramidField::level_for(lattice, self.head.levels, rung);
         if level == 0 {
             return Some(self.tiles.clone() as SharedField);
         }
-        self.level(level).map(|f| f.clone() as SharedField)
+        self.masked_level(level).map(|f| f.clone() as SharedField)
     }
 }
 
@@ -674,7 +694,7 @@ mod tests {
         let (state, facies, _) =
             solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
         let climate =
-            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact = Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
         (moon, lattice, artifact)
     }
@@ -759,13 +779,23 @@ mod tests {
     /// 4. a level assembled BEFORE the mask is REBUILT with it, and the level's own reader then
     ///    answers the row's side;
     /// 5. a level assembled AFTER the mask takes it at assembly;
-    /// 6. the cache is not whole until the mask is here, and the epoch bumps when it lands.
+    /// 6. the cache is not whole until the mask is here, and the epoch bumps when it lands;
+    /// 7. ★ a far chunk WAITS for the mask (review finding 2 of plan step 2): a level held without
+    ///    it is no chunk's field and no rung's field, and the same level is both once it lands.
     ///
     /// **Example.** A pilot in orbit holds the moon's two levels; its mask lands last, both levels
-    /// take it, and the globe she draws has the shoreline her boots will stand on.
+    /// take it, and the globe she draws has the shoreline her boots will stand on — and nothing
+    /// of the globe was drawn from a level that had no shoreline at all.
     #[test]
     fn the_coast_mask_assembles_rebuilds_the_levels_and_refuses_a_wrong_shape() {
-        let (_moon, _lattice, artifact) = moon();
+        let (_moon, lattice, artifact) = moon();
+        let far = ChunkKey {
+            face: Face::PosX,
+            rung: 13,
+            x: 0,
+            y: 0,
+            z: 0,
+        };
         let mut rx = ArtifactReceiver::default();
         // (1) no head yet.
         assert_eq!(rx.accept(coast_of(&artifact)), ArtifactIngest::NoHead);
@@ -780,6 +810,9 @@ mod tests {
         assert!(!cache.coast_held(), "the mask is not here yet");
         assert!(!cache.whole(), "a cache without its mask is not whole");
         assert_eq!(cache.level(1).expect("level 1").coast, None);
+        // (7) the level is held, and still no chunk and no rung reads it.
+        assert_eq!(format!("{:?}", cache.field_for(&lattice, far)), "Waiting");
+        assert!(cache.field_at_rung(&lattice, 13).is_none());
         let epoch = cache.epoch;
         // (1) the shapes refused: a count the head did not announce, a part past the count.
         let bad = |part: u32, parts: u32, bits: Vec<u8>| BulkMsg::ArtifactCoast {
@@ -812,6 +845,15 @@ mod tests {
         assert_eq!(
             level_1.coast.as_deref().map(<[u8]>::to_vec),
             Some(artifact.coast.clone())
+        );
+        // (7) with the mask here, the far chunk builds from the level and the rung reads it.
+        assert_eq!(
+            format!("{:?}", cache.field_for(&lattice, far)),
+            "Ready(level 1)"
+        );
+        assert_eq!(
+            cache.field_at_rung(&lattice, 13).expect("level 1").level(),
+            1
         );
         // The level's own reader now answers the row's side for a fine node.
         let node = (0..artifact.rows.len() as u32)

@@ -2851,7 +2851,7 @@ mod tests {
         let (state, facies, _) =
             solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
         let climate =
-            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
             vd_terrain::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
         let realm = RealmId::Planet(HOME_MOON_SEED);
@@ -2958,7 +2958,7 @@ mod tests {
         let (state, facies, _) =
             solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
         let climate =
-            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
             vd_terrain::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
         let realm = RealmId::Planet(HOME_MOON_SEED);
@@ -4720,7 +4720,7 @@ mod tests {
         let (state, facies, _) =
             solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
         let climate =
-            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_z));
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
         let artifact =
             vd_terrain::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
         let realm = RealmId::Planet(HOME_MOON_SEED);
