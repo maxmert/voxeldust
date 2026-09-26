@@ -51,6 +51,11 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     ★ B12 (2026-09-26): the sloped fill (Paola's fans) measured — clean floors, fans kept by a skip bit, the facing halved,
     but giant flat lakes and barely changed pictures (rain-cut vs runoff-fans; 11.9 km-deep pockets); THE BASINS PARKED until
     after R2 (R2 decides the cut's water and measures D∞); NEXT the shore round N2, then R2.
+    ★ B13 (2026-09-26): N2 IS THE SHORE (N1's side + a fade PER OCTAVE over its own reach, faded by every nearby water + a
+    30 m BAND on the node words + the SIDE HOLD); the deciding number passes (1.40 px); the fine octaves' lift measured
+    (571.8 m at share one = N1's flat discs); the 30 m band KEPT (its price: a steep coast's line midway, deep small lakes by
+    their node's footprint); the filled troughs ACCEPTED until R2 and R4; BUILD N2 (the integer shore law, both hosts), THEN
+    FLY all stands against both references; narrow water at the far swaps stays RED for slice 0b (SL6).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

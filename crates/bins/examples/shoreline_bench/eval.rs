@@ -33,8 +33,8 @@ use vd_terrain::artifact::{Side, ZField, column_water};
 use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey, column_field};
 
 /// The rule variants the bench paints (plan §5): today, the pure contour, N1 and O1 with the fold
-/// and without it, and O1 with a quarter-cell clamp.
-pub const NVAR: usize = 7;
+/// and without it, O1 with a quarter-cell clamp, and the second round's N2 (ruling B10 item 1).
+pub const NVAR: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Var {
@@ -45,6 +45,7 @@ pub enum Var {
     O1,
     O1nf,
     O1q,
+    N2,
 }
 
 impl Var {
@@ -56,6 +57,7 @@ impl Var {
         Var::O1,
         Var::O1nf,
         Var::O1q,
+        Var::N2,
     ];
 
     #[must_use]
@@ -68,6 +70,7 @@ impl Var {
             Var::O1 => "O1",
             Var::O1nf => "O1-nofold",
             Var::O1q => "O1q",
+            Var::N2 => "N2",
         }
     }
 
@@ -83,8 +86,9 @@ impl Var {
     }
 }
 
-/// The three point-side families: N1, O1 (κ of O1), O1q (κ of O1q).
-pub const FAMS: usize = 3;
+/// The four point-side families: N1, O1 (κ of O1), O1q (κ of O1q), and N2 (N1's field on the
+/// words held in N2's band; N1's own field where the band is off).
+pub const FAMS: usize = 4;
 
 /// A drawn column's flags.
 pub const WET: u8 = 1;
@@ -212,6 +216,14 @@ pub struct Ctx<'a> {
     pub cpn: u32,
     /// Read R0 alone (W3: the far window; its fold would need a rung-F map over 1 000 km).
     pub r0_only: bool,
+    /// The fine octaves' mean at share one at this rung, metres (N2's lift, times the factor).
+    pub lift_mu: f64,
+    /// The fine octaves' RMS slope at share one at this rung, along one axis (N2's bank).
+    pub slope_mu: f64,
+    /// Each fine octave's reach, metres (N2's ramp per octave).
+    pub octave_reach: [f64; OCTAVES_CAP],
+    /// Each fine octave's RMS height at share one, metres (N2's fade per octave in height).
+    pub octave_rms: [f64; OCTAVES_CAP],
 }
 
 /// Per-thread caches: the fine terms of the nodes, and the rung-F point keys read on demand.
@@ -364,9 +376,18 @@ impl Ctx<'_> {
         let block = site.block(fine);
         let (wa, wb) = (weights_f64(site.ta_q), weights_f64(site.tb_q));
         let (dwa, dwb) = (dweights(site.ta), dweights(site.tb));
+        let ch1 = self.ch.unbanded();
         let cands = candidates(
-            self.nodes, &block, site.ta, site.tb, &wa, &wb, &dwa, &dwb, &self.ch,
+            self.nodes, &block, site.ta, site.tb, &wa, &wb, &dwa, &dwb, &ch1,
         );
+        // N2's candidates: the same waters, their words held in N2's band (N1's where it is off).
+        let cands2 = if self.ch.word_band_m.is_finite() {
+            candidates(
+                self.nodes, &block, site.ta, site.tb, &wa, &wb, &dwa, &dwb, &self.ch,
+            )
+        } else {
+            cands
+        };
         ck.hist[cands.waters.min(5)] += 1;
         ck.over_cap += usize::from(cands.waters > self.ch.cap);
         // D7: the dry column's standing water — the land rule, or none on a pocket's floor.
@@ -397,6 +418,21 @@ impl Ctx<'_> {
             d7,
             sea: self.sea,
             a_r: self.a_r,
+            rho: 0.0,
+            node_m: self.reader.fine.node_m(),
+            rough: unit_of_q(factor_q(&self.reader.charter, c.dir, c.share)),
+            lift: 0.0,
+            slope_mu: 0.0,
+            octave_f: [0.0; OCTAVES_CAP],
+            octave_reach: [0.0; OCTAVES_CAP],
+            octave_rms: [0.0; OCTAVES_CAP],
+        };
+        let ground = Ground {
+            lift: ground.rough * self.lift_mu,
+            slope_mu: self.slope_mu,
+            octave_reach: self.octave_reach,
+            octave_rms: self.octave_rms,
+            ..ground
         };
         // C0.
         let (sc, lc, wc) = contour_c0(&ground, &cands);
@@ -412,7 +448,7 @@ impl Ctx<'_> {
             },
             flags: if c0_wet { WET | SIDE } else { 0 },
         };
-        // The families' fields: N1 reads S; O1 and O1q add the clamped residual.
+        // The families' fields: N1 reads S; O1 and O1q add the clamped residual; N2 reads its own S.
         let mut fields = [[0.0f64; 8]; FAMS];
         let mut binds = [[false; 8]; FAMS];
         let mut rho: Option<[f64; RUNGS_MAX]> = None;
@@ -427,13 +463,17 @@ impl Ctx<'_> {
                     binds[fi][k] = bnd;
                 }
             }
+            for (k, cand) in cands2.as_slice().iter().enumerate() {
+                fields[3][k] = cand.s;
+            }
             rho = Some(r);
         }
         let sea_m = self.nodes.sea_m;
+        let fam_cands = |fi: usize| if fi == 3 { &cands2 } else { &cands };
         let points: [Option<(bool, usize)>; FAMS] =
-            std::array::from_fn(|fi| point_side(&cands, &fields[fi], sea_m));
+            std::array::from_fn(|fi| point_side(fam_cands(fi), &fields[fi], sea_m));
         let keys: [u32; FAMS] = std::array::from_fn(|fi| match points[fi] {
-            Some((true, g)) => cands.list[g].water.key(),
+            Some((true, g)) => fam_cands(fi).list[g].water.key(),
             _ => 0,
         });
         // The fold of the rung-F point sides under this column (rungs over F).
@@ -457,7 +497,7 @@ impl Ctx<'_> {
         };
         // Each family under its side: the point side, or the fold.
         let mut family_out = |fam: usize, family: Family, use_fold: bool| -> Drawn {
-            let mut ext: Cands = cands;
+            let mut ext: Cands = if fam == 3 { cands2 } else { cands };
             let mut fext = fields[fam];
             let mut bext = binds[fam];
             let decision: Option<(bool, usize, f64)> = match (use_fold, folded) {
@@ -470,8 +510,16 @@ impl Ctx<'_> {
                                 None => {
                                     // The fold names a water the column's own block did not keep.
                                     let cand: Cand = candidate_for(
-                                        self.nodes, &block, w, site.ta, site.tb, &wa, &wb, &dwa,
-                                        &dwb, &self.ch,
+                                        self.nodes,
+                                        &block,
+                                        w,
+                                        site.ta,
+                                        site.tb,
+                                        &wa,
+                                        &wb,
+                                        &dwa,
+                                        &dwb,
+                                        if fam == 3 { &self.ch } else { &ch1 },
                                     );
                                     let r = match rho {
                                         Some(r) => r,
@@ -481,7 +529,7 @@ impl Ctx<'_> {
                                             r
                                         }
                                     };
-                                    let (g, bnd) = if fam == 0 {
+                                    let (g, bnd) = if fam == 0 || fam == 3 {
                                         (cand.s, false)
                                     } else {
                                         let kappa = if fam == 1 {
@@ -524,6 +572,19 @@ impl Ctx<'_> {
                     }
                 }
                 Some((wet, gov, g_used)) => {
+                    // N2's texture: the conditioned residual at this rung (nought at or over R1),
+                    // and each fine octave's own part of the fine half (the ramp per octave).
+                    let mut ground = Ground {
+                        rho: rho.map_or(0.0, |r| r[usize::from(self.rung)]),
+                        ..ground
+                    };
+                    if fam == 3 && self.ch.n2_form >= 2 && !wet {
+                        let count = self.octave_counts[usize::from(self.rung)];
+                        let terms = fine_terms(&self.reader.charter, self.first, count, c.dir);
+                        for (slot, t) in ground.octave_f.iter_mut().zip(terms.iter()) {
+                            *slot = metres(*t) * ground.rough;
+                        }
+                    }
                     let fin = finish(
                         family,
                         &ground,
@@ -571,6 +632,7 @@ impl Ctx<'_> {
         let o1 = family_out(1, Family::O1, true);
         let o1nf = family_out(1, Family::O1, false);
         let o1q = family_out(2, Family::O1, true);
+        let n2 = family_out(3, Family::N2, true);
         let slot = cands.waters.min(2);
         ck.whatif_ns[slot].0 += t0.elapsed().as_nanos() as f64;
         ck.whatif_ns[slot].1 += 1;
@@ -582,7 +644,7 @@ impl Ctx<'_> {
                 hold: hold_m.map_or(NAN, |h| h as f32),
                 word,
             },
-            drawn: [r0, c0, n1, n1nf, o1, o1nf, o1q],
+            drawn: [r0, c0, n1, n1nf, o1, o1nf, o1q, n2],
             keys,
             surface_q: c.surface,
             water_q: c.water,

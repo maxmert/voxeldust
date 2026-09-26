@@ -243,6 +243,10 @@ struct World<'a> {
     r1: u8,
     f_rung: u8,
     octave_counts: [usize; RUNGS_MAX],
+    lift_mu: [f64; RUNGS_MAX],
+    slope_mu: [f64; RUNGS_MAX],
+    octave_reach: [f64; vd_recipe::height::OCTAVES_CAP],
+    octave_rms: [f64; vd_recipe::height::OCTAVES_CAP],
     vars: Vec<Var>,
     threads: usize,
 }
@@ -275,6 +279,10 @@ impl World<'_> {
             sea_radius: reader.sea_radius(),
             cpn: fine.cells_per_node,
             r0_only,
+            lift_mu: self.lift_mu[usize::from(rung)],
+            slope_mu: self.slope_mu[usize::from(rung)],
+            octave_reach: self.octave_reach,
+            octave_rms: self.octave_rms,
             reader,
         })
     }
@@ -451,6 +459,153 @@ fn main() {
         body.first_fine(),
         &octave_counts[..usize::from(rungs)]
     ));
+    // N2's lift: the fine octaves' mean at share one, by rung, over 4 096 fine nodes spread over the
+    // sphere (the ridged octaves stand on a positive mean; the smooth ones on nought).
+    let lift_mu = {
+        let charter = body.plan_charter(0, Face::PosX);
+        let first = body.first_fine();
+        let samples = 4_096usize;
+        let stride = (fine.node_count() / samples).max(1);
+        let mut sums = [0.0f64; RUNGS_MAX];
+        for s in 0..samples {
+            let terms = vd_bins::shore_rules::fine_terms(
+                &charter,
+                first,
+                octave_counts[0],
+                fine.direction((s * stride) as u32),
+            );
+            for (r, sum) in sums.iter_mut().enumerate().take(usize::from(rungs)) {
+                *sum += vd_bins::shore_rules::metres(vd_bins::shore_rules::term_sum(
+                    &terms,
+                    first,
+                    octave_counts[r],
+                ));
+            }
+        }
+        sums.map(|x| x / samples as f64)
+    };
+    c.say(format!(
+        "N2's lift: the fine octaves' mean at share one by rung (4 096 fine nodes): {:?} m",
+        lift_mu[..usize::from(rungs)]
+            .iter()
+            .map(|x| (x * 10.0).round() / 10.0)
+            .collect::<Vec<f64>>()
+    ));
+    // N2's bank: the fine octaves' RMS slope at share one, per rung, along one axis at the rung's
+    // own column — the step between two rung-0 columns one rung-r column apart, over 2 048 random
+    // rung-0 sites (a fixed generator: the numbers repeat).
+    let slope_mu = {
+        let charter = body.plan_charter(0, Face::PosX);
+        let first = body.first_fine();
+        let n0 = i64::from(body.ladder().cells_per_edge(0));
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut sq = [0.0f64; RUNGS_MAX];
+        let mut count = [0usize; RUNGS_MAX];
+        let cap = vd_recipe::height::OCTAVES_CAP;
+        let mut oct_h = vec![0.0f64; cap];
+        let mut oct_s = vec![0.0f64; cap];
+        let mut oct_n = 0usize;
+        let fine_sum = |d: [vd_recipe::Gi; 3], k: usize| {
+            vd_bins::shore_rules::metres(vd_bins::shore_rules::term_sum(
+                &vd_bins::shore_rules::fine_terms(&charter, first, k, d),
+                first,
+                k,
+            ))
+        };
+        for _ in 0..2_048 {
+            let face = (next() % 6) as i32;
+            let span = (n0 - 4_096).max(1) as u64;
+            let i = (next() % span) as i32 + 1_024;
+            let j = (next() % span) as i32 + 1_024;
+            let d0 = site_direction(&charter, face, i, j);
+            // Each fine octave's height and its slope over two rung-0 columns (the finest octave's
+            // wave is some fifty of them).
+            {
+                let k = octave_counts[0];
+                let t0 = vd_bins::shore_rules::fine_terms(&charter, first, k, d0);
+                let ti = vd_bins::shore_rules::fine_terms(
+                    &charter,
+                    first,
+                    k,
+                    site_direction(&charter, face, i + 2, j),
+                );
+                let tj = vd_bins::shore_rules::fine_terms(
+                    &charter,
+                    first,
+                    k,
+                    site_direction(&charter, face, i, j + 2),
+                );
+                let h = 2.0 * f64::from(vd_seed::ladder::cell_m(0));
+                for o in first..k.min(cap) {
+                    let (a, b, c2) = (
+                        vd_bins::shore_rules::metres(t0[o]),
+                        vd_bins::shore_rules::metres(ti[o]),
+                        vd_bins::shore_rules::metres(tj[o]),
+                    );
+                    oct_h[o] += a * a;
+                    oct_s[o] += ((b - a) / h).powi(2) + ((c2 - a) / h).powi(2);
+                }
+                oct_n += 1;
+            }
+            for r in 0..usize::from(rungs) {
+                let k = octave_counts[r];
+                if k <= first || r > 11 {
+                    continue;
+                }
+                let step = 1i32 << r;
+                let di = site_direction(&charter, face, i + step, j);
+                let dj = site_direction(&charter, face, i, j + step);
+                let h = f64::from(vd_seed::ladder::cell_m(r as u8));
+                let s0 = fine_sum(d0, k);
+                let gi = (fine_sum(di, k) - s0) / h;
+                let gj = (fine_sum(dj, k) - s0) / h;
+                sq[r] += gi * gi + gj * gj;
+                count[r] += 2;
+            }
+        }
+        let mut out = [0.0f64; RUNGS_MAX];
+        for r in 0..RUNGS_MAX {
+            if count[r] > 0 {
+                out[r] = (sq[r] / count[r] as f64).sqrt();
+            }
+        }
+        let mut reach = [0.0f64; vd_recipe::height::OCTAVES_CAP];
+        let mut rms_of = [0.0f64; vd_recipe::height::OCTAVES_CAP];
+        let mut lines = Vec::new();
+        for o in first..octave_counts[0].min(cap) {
+            let rms_h = (oct_h[o] / oct_n.max(1) as f64).sqrt();
+            let rms_s = (oct_s[o] / (2 * oct_n.max(1)) as f64).sqrt();
+            rms_of[o] = rms_h;
+            if rms_s > 0.0 {
+                reach[o] = vd_bins::shore_rules::FADE_PEAK_SLOPE * rms_h / rms_s;
+            }
+            let lambda = body.radius_m() / vd_terrain::body::octave_frequency(&charter.octaves[o]);
+            lines.push(format!(
+                "octave {o}: wave {:.0} m, RMS height {:.1} m, RMS slope {:.4}, reach {:.0} m",
+                lambda, rms_h, rms_s, reach[o]
+            ));
+        }
+        (out, reach, rms_of, lines)
+    };
+    let (slope_mu, octave_reach, octave_rms, octave_lines) = slope_mu;
+    for l in &octave_lines {
+        c.say(format!(
+            "N2's ramp per octave (share one, 2 048 sites): {l}"
+        ));
+    }
+    c.say(format!(
+        "N2's bank: the fine octaves' RMS slope at share one by rung, one axis at the rung's column (2 048 sites): {:?}",
+        slope_mu[..usize::from(rungs)]
+            .iter()
+            .map(|x| (x * 1_000.0).round() / 1_000.0)
+            .collect::<Vec<f64>>()
+    ));
     let world = World {
         body: &body,
         artifact: &artifact,
@@ -461,6 +616,10 @@ fn main() {
         r1,
         f_rung,
         octave_counts,
+        lift_mu,
+        slope_mu,
+        octave_reach,
+        octave_rms,
         vars: vars.clone(),
         threads: a.threads,
     };
@@ -485,10 +644,12 @@ fn main() {
                                 .map(|v| {
                                     let d = o.drawn[v.idx()];
                                     format!(
-                                        "{}={:.1}{}",
+                                        "{}={:.1}{}/g{:.1}/f{:02x}",
                                         v.name(),
                                         d.s,
-                                        if d.wet() { "w" } else { "" }
+                                        if d.wet() { "w" } else { "" },
+                                        d.g,
+                                        d.flags
                                     )
                                 })
                                 .collect();
@@ -807,7 +968,8 @@ fn run_stand(
             transects.len(),
             t.elapsed().as_secs_f64()
         ));
-        summary.decide = transects::print(c, stand.name, &steps, &w.vars, w.f_rung, w.r1);
+        summary.decide =
+            transects::print(c, stand.name, &steps, &transects, &w.vars, w.f_rung, w.r1);
     } else {
         c.say("   SHORE-STEP: no transect (no water's contour in W2)");
     }
@@ -917,10 +1079,18 @@ fn choice_a(c: &mut Census, summaries: &BTreeMap<String, StandSummary>) {
             })
         };
         let o1 = get(Var::O1);
-        let beside: Vec<String> = [Var::O1nf, Var::O1q, Var::N1, Var::N1nf, Var::C0, Var::R0]
-            .iter()
-            .map(|&v| line(v))
-            .collect();
+        let beside: Vec<String> = [
+            Var::N2,
+            Var::O1nf,
+            Var::O1q,
+            Var::N1,
+            Var::N1nf,
+            Var::C0,
+            Var::R0,
+        ]
+        .iter()
+        .map(|&v| line(v))
+        .collect();
         match o1 {
             Some((m, p, n)) => c.line(
                 "DECIDING-NUMBER.gentle.O1",
@@ -955,7 +1125,7 @@ fn choice_a(c: &mut Census, summaries: &BTreeMap<String, StandSummary>) {
     }
     c.say("\n== THE CHOICE-A TABLE (survey §6.4; the bench recommends nothing) ==");
     for stand in ["gentle", "plain"] {
-        for v in [Var::O1, Var::N1] {
+        for v in [Var::O1, Var::N1, Var::N2] {
             let mine = |prefix: &str| -> Vec<(String, String, String)> {
                 c.all
                     .iter()

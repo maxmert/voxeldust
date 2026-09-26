@@ -1,12 +1,12 @@
-//! ★ THE PANELS (plan §10): for the owner's look, each stand at rungs 3, 7 and 11 under R0, C0, N1
+//! ★ THE PANELS (plan §10): for the owner's look, each stand at rungs 3, 7 and 11 under R0, N1, N2
 //! and O1 side by side — a TOP-DOWN map of the drawn water over a hillshade of the drawn ground,
 //! and an OBLIQUE view (a ray cast over the drawn surface). Written with the workspace's `image`
 //! crate (a dev-dependency of vd-bins; no new library). Each file is captioned in its name and in a
 //! PANEL line of the census ("no far shadow").
 //!
-//! **Example.** `plain_r07_top_R0-C0-N1-O1.png`: four 320-pixel tiles of the plain's 254 km window at
-//! rung 7 — today's forty blue tiles top left, the pure contour top right, N1 bottom left, O1 bottom
-//! right — each a 16-grey cartographic hillshade (light from the north-west, 45° up) with the drawn
+//! **Example.** `plain_r07_top_R0-N1-N2-O1.png`: four 320-pixel tiles of the plain's 254 km window at
+//! rung 7 — today's forty blue tiles top left, N1 top right, N2 bottom left, O1 bottom right (the
+//! first round painted the pure contour where N2 stands now) — each a 16-grey cartographic hillshade (light from the north-west, 45° up) with the drawn
 //! water in the game's flat blue.
 
 use image::{Rgb, RgbImage};
@@ -345,8 +345,8 @@ impl Panels {
             .push((name.to_string(), size, caption.to_string()));
     }
 
-    /// ★ A STAND'S TWO COMPOSITES AT ONE RUNG: the top-down 2 × 2 and the oblique 2 × 2 of R0, C0,
-    /// N1 and O1.
+    /// ★ A STAND'S TWO COMPOSITES AT ONE RUNG: the top-down 2 × 2 and the oblique 2 × 2 of R0, N1,
+    /// N2 and O1 (the second round's order: N2 beside the N1 it keeps the line of).
     #[allow(clippy::too_many_arguments, reason = "the panel's own words")]
     pub fn composites(
         &mut self,
@@ -362,7 +362,7 @@ impl Panels {
         if self.dir.is_none() {
             return;
         }
-        let order = [Var::R0, Var::C0, Var::N1, Var::O1];
+        let order = [Var::R0, Var::N1, Var::N2, Var::O1];
         let srcs: Vec<TileSrc> = order.iter().map(|&v| TileSrc::of(out, v)).collect();
         let km = out.n as f64 * geo.m_col / 1_000.0;
         let mut top = RgbImage::new(2 * TILE, 2 * TILE);
@@ -378,13 +378,13 @@ impl Panels {
         }
         let caption = |view: &str| {
             format!(
-                "stand={stand} rung={} view={view} tiles=[R0,C0/N1,O1] window={window}:{km:.1}km light=az315/alt45 \"no far shadow\"",
+                "stand={stand} rung={} view={view} tiles=[R0,N1/N2,O1] window={window}:{km:.1}km light=az315/alt45 \"no far shadow\"",
                 out.rung
             )
         };
         self.save(
             c,
-            &format!("{stand}_r{:02}{tag}_top_R0-C0-N1-O1.png", out.rung),
+            &format!("{stand}_r{:02}{tag}_top_R0-N1-N2-O1.png", out.rung),
             &top,
             &caption("top"),
         );
@@ -402,7 +402,7 @@ impl Panels {
         }
         self.save(
             c,
-            &format!("{stand}_r{:02}{tag}_oblique_R0-C0-N1-O1.png", out.rung),
+            &format!("{stand}_r{:02}{tag}_oblique_R0-N1-N2-O1.png", out.rung),
             &obl,
             &caption("oblique"),
         );

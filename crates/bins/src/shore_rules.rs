@@ -16,6 +16,14 @@
 //!   inside the presence.
 //! * **O1(κ)** — N1's field plus the ground's own fine residual, each rung's step clamped to κ
 //!   coarser cells laterally (κ = 1 is O1, κ = ¼ is O1q), the hold and the fade on that field.
+//! * **N2** (the second round, ruling B10 item 1) — N1's side and N1's node-scale blend, but the
+//!   ground's fine half is KEPT near the water: each fine octave is scaled down only inside a RAMP
+//!   from the line whose reach comes from that octave's own ground (its RMS height over its RMS
+//!   slope), so the long octaves that lift the land fade over kilometres and the walking-scale
+//!   ones stay to the water's edge (`n2_form=1`: one ramp for the whole fine half). On request its node words are
+//!   held in a band round the water first (`word_band_m`), for the steep coasts' notches. Its
+//!   first form (`n2_form=0`: the conditioned residual bent into the room it has) is kept as a
+//!   refuted control: the 8 km nodes alias the 3–25 km octaves, so that residual is not texture.
 //!
 //! **THE UNITS.** Every height here is METRES over the ladder radius `R`, in `f64` (a what-if), except
 //! where the recipe has a public integer function: the Catmull-Rom weights, the quintic fade and
@@ -41,6 +49,7 @@ use vd_recipe::plan::PlanCharter;
 use vd_recipe::terrace::{Terrace, terrace};
 use vd_seed::bend::Face;
 use vd_terrain::artifact::{Artifact, DRY_M, Side, coast_side, node_and_fraction, node_at};
+use vd_terrain::body::TAN_REPOSE;
 use vd_terrain::macro_lattice::MacroLattice;
 
 /// The noise's fraction as a float scale: `2^28`.
@@ -124,6 +133,40 @@ pub struct NamedChoices {
     pub wall_min_pairs: usize,
     /// The panels' byte budget (the bench refuses to write past it).
     pub panel_budget_bytes: u64,
+    /// ★ N2's BAND on the node words, metres: each mirrored word is held within this far of the
+    /// water's level before the held read (∞ = N1's own words; the steep coasts' notches). 30 m by
+    /// default — a stated choice of the second round, the owner's word owed.
+    pub word_band_m: f64,
+    /// ★ N2's words as a SIGNED DISTANCE (1): each stencil node's word is the level plus the band
+    /// times its distance, in nodes, to the nearest block node of the other side, less a half (a
+    /// wet node under, a dry one over) — so a diagonal staircase of wet nodes reads a straight
+    /// line. Needs a finite band (metres per node of distance).
+    pub word_sdf: bool,
+    /// ★ N2's side field as a SMOOTHED MASK (1): `S = band × Σ w·side / Σ w` over the block's
+    /// nodes, `side` +1 dry and −1 wet for the water, `w = (1 − r²/R²)³` at the distance `r` in
+    /// nodes from the column, `R` = 2 nodes (so a node entering or leaving the block weighs
+    /// nought: no seam on a node line). Needs a finite band.
+    pub word_kernel: bool,
+    /// N2's KNEE: the share of the texture's room it keeps whole before it bends toward the bound.
+    pub n2_theta: f64,
+    /// N2's texture on the side it cannot cross: bounded by the bank from the line (1), or by the
+    /// same room as the side it can cross (0).
+    pub n2_free: bool,
+    /// N2's bank slope: 2 = the fine half's own measured RMS slope at the rung times the column's
+    /// factor (the ground's own slope); 1 = the angle of repose times the factor; 0 = the angle of
+    /// repose alone.
+    pub n2_slope: u8,
+    /// N2's form: 3 = one fade PER OCTAVE in HEIGHT: each octave fades where the column stands
+    /// under `n2_cross_sigma` of that octave's RMS heights over the water (where it could carry
+    /// the column across); 2 = one ramp per octave over its own reach in metres (its RMS height
+    /// over its RMS slope); 1 = one ramp for the whole fine half (its reach from `n2_slope`);
+    /// 0 = the first form's bent residual (a refuted control).
+    pub n2_form: u8,
+    /// N2's form 3: how many of an octave's RMS heights (times the column's factor) the column
+    /// must stand over the water before the octave stands whole.
+    pub n2_cross_sigma: f64,
+    /// N2: a side-dry column with a standing water stands over it by W6's share of its field (1).
+    pub n2_side_holds: bool,
 }
 
 impl Default for NamedChoices {
@@ -150,6 +193,15 @@ impl Default for NamedChoices {
             wall_band_share: 0.001,
             wall_min_pairs: 1_000,
             panel_budget_bytes: 12 * 1024 * 1024,
+            word_band_m: 30.0,
+            word_sdf: false,
+            word_kernel: false,
+            n2_theta: 0.5,
+            n2_free: true,
+            n2_slope: 2,
+            n2_form: 2,
+            n2_cross_sigma: 3.0,
+            n2_side_holds: true,
         }
     }
 }
@@ -190,6 +242,15 @@ impl NamedChoices {
             "wall_band_share" => self.wall_band_share = f()?,
             "wall_min_pairs" => self.wall_min_pairs = f()? as usize,
             "panel_budget_bytes" => self.panel_budget_bytes = f()? as u64,
+            "word_band_m" => self.word_band_m = f()?.max(1.0),
+            "word_sdf" => self.word_sdf = f()? != 0.0,
+            "word_kernel" => self.word_kernel = f()? != 0.0,
+            "n2_theta" => self.n2_theta = f()?.clamp(0.0, 1.0),
+            "n2_free" => self.n2_free = f()? != 0.0,
+            "n2_slope" => self.n2_slope = (f()? as u8).min(2),
+            "n2_form" => self.n2_form = (f()? as u8).min(3),
+            "n2_cross_sigma" => self.n2_cross_sigma = f()?.max(0.0),
+            "n2_side_holds" => self.n2_side_holds = f()? != 0.0,
             _ => return Err(format!("no named choice `{name}`")),
         }
         Ok(())
@@ -273,7 +334,53 @@ impl NamedChoices {
                 "the panels' budget: {} bytes (picture choices, not laws)",
                 self.panel_budget_bytes
             ),
+            format!(
+                "N2's side hold = {} (1: a side-dry column that carries a standing water stands over it by k x |its governing field|; the side decides, the sheet never covers it)",
+                u8::from(self.n2_side_holds)
+            ),
+            format!(
+                "N2's word band = {} m (each mirrored word held within it of the level; inf = N1's words; ruling B10 item 1, the steep coasts' notches; 30 m a stated choice of the second round, the owner's word owed)",
+                self.word_band_m
+            ),
+            format!(
+                "N2's words as a signed distance = {} (1: word = level + band x (the distance in nodes to the nearest block node of the other side - 1/2), signed by the side; 0: the band's clamp)",
+                u8::from(self.word_sdf)
+            ),
+            format!(
+                "N2's side as a smoothed mask = {} (1: S = band x sum w.side / sum w over the block, side +1 dry -1 wet, w = (1 - r^2/4)^3 within 2 nodes of the column; the slope by central differences of 1/64 node)",
+                u8::from(self.word_kernel)
+            ),
+            format!(
+                "N2's form = {} (3 a fade per fine octave in HEIGHT: octave k scaled by the recipe's quintic of |S| over {} x the column's factor x its RMS height at share one; 2 a ramp per fine octave: each octave's term scaled by the recipe's quintic of the first-order distance over its own reach 15/8 x its RMS height / its RMS slope, both measured at share one over the sphere; 1 one ramp for the whole fine half over 15/8 x lift / slope, lift = the column's factor x the fine half's mean at share one at the rung, slope = the bank below; the wet side N1's own in both; 0 the bent residual below, a refuted control)",
+                self.n2_form, self.n2_cross_sigma
+            ),
+            format!(
+                "N2's first form: the conditioned residual rho at the rung, kept whole to {} of its room and bent (tanh) toward the room past it; the room on the side it can cross = the node-scale surface's height over W6's hold, on the other side = {} (the solve's TAN_REPOSE {}{} times the first-order distance to the line); faded in by the presence",
+                self.n2_theta,
+                if self.n2_free {
+                    "the bank"
+                } else {
+                    "the same room"
+                },
+                TAN_REPOSE,
+                match self.n2_slope {
+                    0 => "",
+                    1 => " times the column's roughness factor,",
+                    _ => " (here: the fine half's measured RMS slope at the rung times the factor),",
+                }
+            ),
         ]
+    }
+
+    /// The same choices with N2's word band off: the words N1, O1 and O1q read.
+    #[must_use]
+    pub fn unbanded(&self) -> NamedChoices {
+        NamedChoices {
+            word_band_m: f64::INFINITY,
+            word_sdf: false,
+            word_kernel: false,
+            ..*self
+        }
     }
 }
 
@@ -628,6 +735,10 @@ pub struct Cand {
     pub wet_corner: bool,
     pub near: f64,
     pub near_node: u32,
+    /// The node-sampled distance to the water's line, in nodes: each stencil node's distance to
+    /// the nearest block node of the other side, less a half, read at the column by the plain
+    /// Catmull-Rom (N2's ramps; it cannot blow up where the side field goes flat).
+    pub dist_nodes: f64,
 }
 
 /// The candidates of one column: at most [`NamedChoices::cap`] of them, and how many waters the
@@ -731,22 +842,87 @@ pub fn candidate_for(
     ch: &NamedChoices,
 ) -> Cand {
     let w = b.level_m(nodes.sea_m);
+    let (s_k, g_k) = if ch.word_kernel && ch.word_band_m.is_finite() {
+        let side: [f64; BLOCK] = std::array::from_fn(|k| {
+            if nodes.wet_for(block[k], b) {
+                -1.0
+            } else {
+                1.0
+            }
+        });
+        let at = |x: f64, y: f64| -> f64 {
+            let (mut num, mut den) = (0.0f64, 0.0f64);
+            for (k, sd) in side.iter().enumerate() {
+                let (ki, kj) = ((k % 6) as f64 - 2.0, (k / 6) as f64 - 2.0);
+                let r2 = (ki - x).powi(2) + (kj - y).powi(2);
+                if r2 < 4.0 {
+                    let q = 1.0 - r2 / 4.0;
+                    let wk = q * q * q;
+                    num += wk * sd;
+                    den += wk;
+                }
+            }
+            if den > 0.0 {
+                ch.word_band_m * num / den
+            } else {
+                ch.word_band_m
+            }
+        };
+        let e = 1.0 / 64.0;
+        let gx = (at(ta + e, tb) - at(ta - e, tb)) / (2.0 * e);
+        let gy = (at(ta, tb + e) - at(ta, tb - e)) / (2.0 * e);
+        (Some(at(ta, tb)), gx.hypot(gy))
+    } else {
+        (None, 0.0)
+    };
     // The mirrored words of the sixteen-node stencil (offsets −1..=2).
     let mut zhat = [0.0f64; 16];
+    if ch.word_sdf && ch.word_band_m.is_finite() {
+        // N2's signed distance over the block: each stencil node's distance, in nodes, to the
+        // nearest block node of the other side, less a half.
+        let wet: [bool; BLOCK] = std::array::from_fn(|k| nodes.wet_for(block[k], b));
+        for (s, slot) in zhat.iter_mut().enumerate() {
+            let (oi, oj) = ((s % 4) as i64 - 1, (s / 4) as i64 - 1);
+            let mine = wet[block_index(oi, oj)];
+            let mut best = f64::INFINITY;
+            for (k, &other) in wet.iter().enumerate() {
+                if other != mine {
+                    let (ki, kj) = ((k % 6) as i64 - 2, (k / 6) as i64 - 2);
+                    let dist = ((ki - oi) as f64).hypot((kj - oj) as f64);
+                    best = best.min(dist);
+                }
+            }
+            let sdf = if best.is_finite() { best - 0.5 } else { 3.5 };
+            *slot = if mine {
+                w - ch.word_band_m * sdf
+            } else {
+                w + ch.word_band_m * sdf
+            };
+        }
+    }
     for (s, slot) in zhat.iter_mut().enumerate() {
+        if ch.word_sdf && ch.word_band_m.is_finite() {
+            break;
+        }
         let (oi, oj) = ((s % 4) as i64 - 1, (s / 4) as i64 - 1);
         let n = block[block_index(oi, oj)];
         let z = f64::from(nodes.z_m[n as usize]);
         let corner = (0..=1).contains(&oi) && (0..=1).contains(&oj);
-        *slot = if ch.mirror_all || corner {
+        let word = if ch.mirror_all || corner {
             mirrored(z, nodes.wet_for(n, b), w)
         } else {
             z
         };
+        *slot = word.clamp(w - ch.word_band_m, w + ch.word_band_m);
     }
-    let s = held_read(&zhat, wa, wb, ch.held_both_orders) - w;
-    let (ga, gb) = plain_gradient(&zhat, wa, wb, dwa, dwb);
-    let g = ga.hypot(gb).max(ch.g_min);
+    let (s, g) = match s_k {
+        Some(s) => (s, g_k.max(ch.g_min)),
+        None => {
+            let s = held_read(&zhat, wa, wb, ch.held_both_orders) - w;
+            let (ga, gb) = plain_gradient(&zhat, wa, wb, dwa, dwb);
+            (s, ga.hypot(gb).max(ch.g_min))
+        }
+    };
     // The presence: ω at the four corner nodes, then its bilinear read.
     let omega_at = |ci: i64, cj: i64| -> f64 {
         let mut any = false;
@@ -770,6 +946,25 @@ pub fn candidate_for(
     let wet_corner = [(0, 0), (1, 0), (0, 1), (1, 1)]
         .iter()
         .any(|&(oi, oj)| nodes.wet_for(block[block_index(oi, oj)], b));
+    // The node-sampled distance: each stencil node's distance to the nearest block node of the
+    // other side (the block reaches three nodes past the stencil at most), less a half, signed by
+    // the side, then the plain read at the column.
+    let wet: [bool; BLOCK] = std::array::from_fn(|k| nodes.wet_for(block[k], b));
+    let mut sdf = [0.0f64; 16];
+    for (st, slot) in sdf.iter_mut().enumerate() {
+        let (oi, oj) = ((st % 4) as i64 - 1, (st / 4) as i64 - 1);
+        let mine = wet[block_index(oi, oj)];
+        let mut best = f64::INFINITY;
+        for (k, &other) in wet.iter().enumerate() {
+            if other != mine {
+                let (ki, kj) = ((k % 6) as i64 - 2, (k / 6) as i64 - 2);
+                best = best.min(((ki - oi) as f64).hypot((kj - oj) as f64));
+            }
+        }
+        let d = if best.is_finite() { best - 0.5 } else { 3.5 };
+        *slot = if mine { -d } else { d };
+    }
+    let dist_nodes = plain_read(&sdf, wa, wb).abs();
     Cand {
         water: b,
         w,
@@ -779,6 +974,7 @@ pub fn candidate_for(
         wet_corner,
         near: f64::INFINITY,
         near_node: u32::MAX,
+        dist_nodes,
     }
 }
 
@@ -961,13 +1157,38 @@ pub struct Ground {
     pub sea: Option<f64>,
     /// `A_r`: the relief bound at the rung, metres.
     pub a_r: f64,
+    /// `ρ_r`: the conditioned residual at the rung — the fine half less its node-scale read
+    /// (O1's own [`residuals`]), metres; N2's texture. Nought where no candidate asked for it.
+    pub rho: f64,
+    /// The fine node's size, metres (N2's first-order distance in metres).
+    pub node_m: f64,
+    /// The column's roughness factor `m` (the word the kernel multiplies its fine half by) as a
+    /// float: the fine half's RMS slope is `m × TAN_REPOSE` (N2's bank).
+    pub rough: f64,
+    /// The fine half's MEAN at this column, metres: `m` times the fine octaves' mean at share one
+    /// at the rung (the ridged octaves stand on a positive mean — the lift). N2's ramp reads it.
+    pub lift: f64,
+    /// The fine octaves' own RMS slope at the rung at share one, along one axis at the rung's own
+    /// column (measured over the sphere); times `m` it is the column's texture slope.
+    pub slope_mu: f64,
+    /// Each fine octave's own part of the fine half at this column, metres (its term times `m`;
+    /// nought for an octave the rung does not sum). Their sum is the fine half `f`.
+    pub octave_f: [f64; OCTAVES_CAP],
+    /// Each fine octave's REACH, metres: `15/8` of its RMS height over its RMS slope, both
+    /// measured at share one over the sphere (nought for a coarse octave).
+    pub octave_reach: [f64; OCTAVES_CAP],
+    /// Each fine octave's RMS height at share one, metres, measured over the sphere (nought for a
+    /// coarse octave): times the column's factor, the height it can carry a column by.
+    pub octave_rms: [f64; OCTAVES_CAP],
 }
 
-/// Which surface family a rule belongs to: N1 fades the fine half by `β`; O1 keeps it whole.
+/// Which surface family a rule belongs to: N1 fades the fine half by `β`; O1 keeps it whole; N2
+/// blends the node-scale ground like N1 and keeps the texture, bent ([`n2_surface`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
     N1,
     O1,
+    N2,
 }
 
 /// What [`finish`] answers for one column: the surface `s` and the standing water `l` (metres over
@@ -1001,13 +1222,26 @@ pub fn finish(
     ch: &NamedChoices,
 ) -> Finished {
     let c = &cands.list[gov];
-    let (_, beta) = distance_and_beta(c, g_used);
-    let kept = match family {
-        Family::N1 => (1.0 - beta) * metres(ground.fine_q),
-        Family::O1 => metres(ground.fine_q),
+    let (d, beta) = distance_and_beta(c, g_used);
+    let h1 = if family == Family::N2 && ch.n2_form == 3 && !wet {
+        n2_octave_heights(ground, c, beta, g_used, ch.n2_cross_sigma)
+    } else if family == Family::N2 && ch.n2_form == 2 && !wet {
+        n2_octave_ramps(ground, c, beta, g_used, cands, fields)
+    } else if family == Family::N2 && ch.n2_form == 1 && !wet {
+        n2_ramp(ground, c, d, beta, g_used, ch)
+    } else if family == Family::N2 && ch.n2_form == 0 {
+        n2_surface(ground, c, wet, d, beta, g_used, ch)
+    } else {
+        // N1 and N2's wet side fade the fine half by the blend; O1 keeps it whole.
+        let kept = if family == Family::O1 {
+            metres(ground.fine_q)
+        } else {
+            (1.0 - beta) * metres(ground.fine_q)
+        };
+        let h_far =
+            metres(terrace(terrace_rule, ground.base_q + length_of(kept)) - ground.radius_q);
+        (1.0 - beta) * h_far + beta * (c.w + g_used)
     };
-    let h_far = metres(terrace(terrace_rule, ground.base_q + length_of(kept)) - ground.radius_q);
-    let h1 = (1.0 - beta) * h_far + beta * (c.w + g_used);
     if wet {
         return Finished {
             s: c.w - (c.w - h1).max(ch.k * g_used.abs()),
@@ -1041,11 +1275,231 @@ pub fn finish(
     if !sea_seen && let Some(sea) = ground.sea {
         lb = lb.max(sea + lambda(ground.b - sea, ch.k, ch.big_k));
     }
+    // ★ N2: THE SIDE DECIDES OVER THE STANDING WATER. A column the side calls dry stands over the
+    // sea by W6's share of the sea's own field, relaxed by the relief bound as the sea's presence
+    // thins out (the lake hold's own rule, finding 10) — so the hold has no edge on a node line;
+    // and a column that carries a standing water (D7: the sea in its read stencil) stands over it
+    // in full, so the sheet never covers it, whatever the node-scale ground under it (a banded
+    // line, or a far rung's coarser ground, may stand seaward of that ground's crossing).
+    if family == Family::N2 && ch.n2_side_holds {
+        for (k, b) in cands.as_slice().iter().enumerate() {
+            if b.water == Water::Sea {
+                lb = lb.max(b.w + ch.k * fields[k].abs() - (1.0 - b.omega) * ground.a_r);
+            }
+        }
+        if let Some(l) = ground.d7 {
+            lb = lb.max(l + ch.k * g_used.abs());
+        }
+    }
     Finished {
         s: h1.max(lb),
         l: ground.d7,
         beta,
         ramp: ramp_lb > h1 && ramp_lb >= lb,
+    }
+}
+
+/// ★ N2's BANK SLOPE (`n2_slope`): the fine half's own measured RMS slope at the rung times the
+/// column's factor (2, the ground's own slope), the angle of repose times the factor (1), or the
+/// angle of repose alone (0).
+#[must_use]
+pub fn n2_bank_slope(ground: &Ground, ch: &NamedChoices) -> f64 {
+    match ch.n2_slope {
+        0 => TAN_REPOSE,
+        1 => TAN_REPOSE * ground.rough,
+        _ => ground.slope_mu * ground.rough,
+    }
+}
+
+/// The recipe's quintic fade has its steepest slope, 15/8, at the middle of its span.
+pub const FADE_PEAK_SLOPE: f64 = 1.875;
+
+/// ★ N2's FADE PER OCTAVE IN HEIGHT — ITS SURFACE ON THE DRY SIDE BEFORE THE HOLDS (ruling B10
+/// item 1, the fourth form, the default). "Fade only what can cross", read literally: an octave can
+/// carry a column across the water only where the column stands within a few of that octave's own
+/// heights of the water. So octave `k` is scaled by the recipe's quintic of `|S| / (σ × m × h_k)`
+/// — `|S|` the column's node-scale height over the water, `h_k` the octave's RMS height at share
+/// one, `σ` = `n2_cross_sigma` — and stands whole wherever the column stands higher. The reach
+/// comes from the ground in HEIGHT: on a steep coast `|S|` grows fast and every octave returns
+/// within metres; on a flat plain it grows slowly and the long octaves (which carry the lift) fade
+/// over kilometres, while the walking-scale ones, a metre high, stay to the water's edge.
+///
+/// **Example.** A pond on the plain with a factor of 0.1: the 12.5 km octave (252 m RMS at share
+/// one) stands whole only where the column stands 76 m over the pond; the 98 m octave (0.2 m) is
+/// whole 6 cm over it — so the ripples reach the water and the long swell has gone from the
+/// pond's low shore.
+#[must_use]
+pub fn n2_octave_heights(ground: &Ground, c: &Cand, beta: f64, g_used: f64, sigma: f64) -> f64 {
+    let f = ground.f;
+    let node = (1.0 - beta) * (ground.h_raw - f) + beta * (c.w + g_used);
+    let height = g_used.abs();
+    let mut kept = 0.0f64;
+    for (part, rms) in ground.octave_f.iter().zip(ground.octave_rms.iter()) {
+        let bound = sigma * ground.rough * rms;
+        let phi = if bound > 0.0 {
+            fade_f64((height / bound).min(1.0))
+        } else {
+            1.0
+        };
+        kept += phi * part;
+    }
+    node + f - c.omega * (f - kept)
+}
+
+/// ★ N2's RAMP PER OCTAVE — ITS SURFACE ON THE DRY SIDE BEFORE THE HOLDS (ruling B10 item 1, the
+/// third form). As [`n2_ramp`], but each fine octave climbs from nought at the line
+/// over its OWN reach, `15/8 ×` its RMS height over its RMS slope: the long octaves, which carry
+/// the lift and the big swells, fade over kilometres, and the short ones — the walking-scale
+/// texture — stay whole to within metres of the water. So "fade only what can cross" is read per
+/// octave, and each reach comes from the octave's own ground, never from the node square. A rung
+/// that has dropped an octave draws it nowhere, so the octaves near the line agree at every rung
+/// that keeps them.
+///
+/// **Example.** On the gentle coast the 25 km octave stands some 300 m high on the shore and
+/// fades over about 20 km, at its own gentle slope; the 98 m octave stands a metre high and fades
+/// over its last hundred metres, so a pilot landing on the beach sees ripples to the water's edge.
+///
+/// **THE PRICE, MEASURED** (the census's RAISE-OVER-RAW): fading a long octave toward nought also
+/// fills its troughs — on the gentle coast a lowland 12 km from the sea rises 190 m over the raw
+/// ground. Fading only the parts over nought was tried and refuted: there the node-scale ground
+/// stands under the sea and only the fine half's lift holds the land up, so the land fell flat to
+/// the hold. The long octaves are relief the 8 km solve never saw; R2 and R4 own the cure.
+///
+/// **EVERY NEARBY WATER FADES IT, BY A DISTANCE THAT CANNOT JUMP** (the round's later
+/// measurements): each octave's factor is the PRODUCT over the column's candidate waters of
+/// `1 − Ω_b·(1 − fade(d_b / reach))`, and `d_b` is the water's first-order distance `|S|/|∇S|`
+/// never past its node-sampled distance ([`Cand::dist_nodes`]). The first-order distance alone
+/// blows up where the side field goes flat — the edge of the band's plateau — so there the long
+/// octaves came back within a few hundred metres and stood a 200 m ridge over the raw ground on
+/// the gentle coast; the node-sampled distance grows smoothly there, and the first-order one keeps
+/// the fine half nought on the drawn line.
+#[must_use]
+pub fn n2_octave_ramps(
+    ground: &Ground,
+    c: &Cand,
+    beta: f64,
+    g_used: f64,
+    cands: &Cands,
+    fields: &[f64; 8],
+) -> f64 {
+    let f = ground.f;
+    let node = (1.0 - beta) * (ground.h_raw - f) + beta * (c.w + g_used);
+    let mut kept = 0.0f64;
+    for (part, reach) in ground.octave_f.iter().zip(ground.octave_reach.iter()) {
+        let mut phi = 1.0f64;
+        if *reach > 0.0 {
+            for (k, b) in cands.as_slice().iter().enumerate() {
+                // The first-order distance, never past the node-sampled one: nought on the line,
+                // and no jump where the side field goes flat.
+                let dist = (fields[k].abs() / b.g).min(b.dist_nodes) * ground.node_m;
+                phi *= 1.0 - b.omega * (1.0 - fade_f64((dist / reach).min(1.0)));
+            }
+        }
+        kept += phi * part;
+    }
+    node + kept
+}
+
+/// ★ N2's RAMP — ITS SURFACE ON THE DRY SIDE BEFORE THE HOLDS (ruling B10 item 1, the second
+/// form). The ground WITHOUT its fine half, `h_raw − f`, is blended toward `W + S` by N1's own `β`
+/// (so the surface meets the level exactly on the line); the fine half `f` — its mean, the LIFT,
+/// and its texture together — is then added back scaled by `φ`, the recipe's quintic of the
+/// first-order distance to the line over the REACH `15/8 × lift / slope`. So the fine half climbs
+/// from nought at the line to whole at the reach, and the ramp's steepest slope is the bank's
+/// `slope` ([`n2_bank_slope`]; by default the fine half's own measured RMS slope). The reach
+/// comes from the ground: the fine half's mean over its own slope, whatever the roughness, because
+/// both scale with `m`. The ramp is faded in by the presence `Ω`, so where the candidate thins out
+/// the ground is the raw ground.
+///
+/// **Example.** A pond on the plain: the raw ground 2 km from it stands 35 m of lift over the
+/// node-scale ground. N1 fades that away over a whole node (8 km) and draws a textureless dish;
+/// N2 keeps the ground whole to about 2 km from the pond and ramps it down to the pond's level
+/// in the last 2 km, the dunes on the ramp shrinking with it.
+#[must_use]
+pub fn n2_ramp(
+    ground: &Ground,
+    c: &Cand,
+    d: f64,
+    beta: f64,
+    g_used: f64,
+    ch: &NamedChoices,
+) -> f64 {
+    let f = ground.f;
+    let node = (1.0 - beta) * (ground.h_raw - f) + beta * (c.w + g_used);
+    let slope = n2_bank_slope(ground, ch);
+    let phi = if ground.lift > 0.0 && slope > 0.0 {
+        let reach = FADE_PEAK_SLOPE * ground.lift / slope;
+        fade_f64((d * ground.node_m / reach).min(1.0))
+    } else {
+        1.0
+    };
+    node + (1.0 - c.omega * (1.0 - phi)) * f
+}
+
+/// ★ N2's FIRST FORM, A REFUTED CONTROL (`n2_form=0`). The ground WITHOUT its texture,
+/// `h_raw − ρ`, is blended toward `W + S` by N1's own `β`; the texture `ρ` is then added back,
+/// bent by [`soft_bound`] into the ROOM it has: on the side it can cross, the node-scale surface's
+/// height over W6's hold (`W ± k·|S|`), so it never crosses; on the other side a BANK from the
+/// line (`slope × d × node`), so it meets the line at nought and never stands as a wall. The
+/// bank's slope is the texture's own RMS slope, `m × TAN_REPOSE` (the first run's bank of repose
+/// alone stood walls on the belt, whose ground is far gentler than 35°). The bend is faded in by the presence `Ω`, so where the candidate thins out the texture is
+/// the raw ground's own.
+///
+/// **Example.** A column on the plain stands a quarter node (2 km) from a pond at 1 200 m. N1
+/// draws it as a smooth rise with no texture. Under N2 its 30 m knoll stays: the knoll's hollows
+/// bend before they reach W6's hold over the pond, so they never reach the pond, and its crest may
+/// stand as high as the bank allows at 2 km, so it stands whole.
+#[must_use]
+pub fn n2_surface(
+    ground: &Ground,
+    c: &Cand,
+    wet: bool,
+    d: f64,
+    beta: f64,
+    g_used: f64,
+    ch: &NamedChoices,
+) -> f64 {
+    let rho = ground.rho;
+    let node = (1.0 - beta) * (ground.h_raw - rho) + beta * (c.w + g_used);
+    let slope = n2_bank_slope(ground, ch);
+    let bank = slope * d * ground.node_m;
+    let hold = ch.k * g_used.abs();
+    let (down, up) = if wet {
+        let room = (c.w - hold - node).max(0.0);
+        (if ch.n2_free { bank } else { room }, room)
+    } else {
+        let room = (node - (c.w + hold)).max(0.0);
+        (room, if ch.n2_free { bank } else { room })
+    };
+    let bent = soft_bound(rho, down, up, ch.n2_theta);
+    node + (1.0 - c.omega) * rho + c.omega * bent
+}
+
+/// ★ THE SOFT BOUND: `x` kept whole up to `theta` of its room (`up` over nought, `down` under
+/// it), then bent by a hyperbolic tangent toward the room, which it never passes (a float's
+/// tangent reaches one for a very large `x`, so the room itself is reached there); a room of
+/// nought gives nought. It is continuous and has a continuous slope, so a bent texture shows no
+/// crease where the bend starts.
+#[must_use]
+pub fn soft_bound(x: f64, down: f64, up: f64, theta: f64) -> f64 {
+    let bend = |x: f64, room: f64| -> f64 {
+        if room <= 0.0 {
+            return 0.0;
+        }
+        let knee = theta * room;
+        if x <= knee {
+            return x;
+        }
+        let span = room - knee;
+        if span <= 0.0 {
+            return room;
+        }
+        knee + span * ((x - knee) / span).tanh()
+    };
+    if x >= 0.0 {
+        bend(x, up)
+    } else {
+        -bend(-x, down)
     }
 }
 
@@ -1311,5 +1765,249 @@ mod tests {
         assert_eq!((c.k, c.kappa_o1), (0.5, 0.5));
         assert!(c.set("nothing=1").is_err());
         assert!(!c.describe().is_empty());
+        c.set("word_band_m=30").expect("band");
+        assert_eq!(c.word_band_m, 30.0);
+        assert_eq!(c.unbanded().word_band_m, f64::INFINITY);
+        assert_eq!(c.unbanded().k, 0.5);
+    }
+
+    /// ★ The soft bound keeps a texture whole inside its knee, never passes its room, has no
+    /// crease at the knee, and gives nought for a room of nought.
+    ///
+    /// **Example.** A 10 m knoll 2 km from a pond has 40 m of room: it stands whole. A 60 m knoll
+    /// there bends to under 40 m and never passes the pond's hold.
+    #[test]
+    fn the_soft_bound_bends_and_never_passes_its_room() {
+        assert_eq!(soft_bound(10.0, 40.0, 40.0, 0.5), 10.0);
+        assert_eq!(soft_bound(-10.0, 40.0, 40.0, 0.5), -10.0);
+        let big = soft_bound(60.0, 40.0, 40.0, 0.5);
+        assert!(big > 20.0 && big < 40.0, "{big}");
+        assert!(soft_bound(-1.0e6, 40.0, 5.0, 0.5) >= -40.0);
+        assert!(soft_bound(1.0e6, 40.0, 5.0, 0.5) <= 5.0);
+        assert!(soft_bound(-45.0, 40.0, 5.0, 0.5) > -40.0);
+        assert_eq!(soft_bound(3.0, 40.0, 0.0, 0.5), 0.0);
+        assert_eq!(soft_bound(-3.0, 0.0, 40.0, 0.5), 0.0);
+        // No crease at the knee: the slope on both sides of it is one.
+        let (knee, e) = (20.0, 1.0e-4);
+        let below = (soft_bound(knee, 40.0, 40.0, 0.5) - soft_bound(knee - e, 40.0, 40.0, 0.5)) / e;
+        let above = (soft_bound(knee + e, 40.0, 40.0, 0.5) - soft_bound(knee, 40.0, 40.0, 0.5)) / e;
+        assert!((below - 1.0).abs() < 1.0e-3 && (above - 1.0).abs() < 1.0e-3);
+        // A knee at the whole room is a plain clip.
+        assert_eq!(soft_bound(60.0, 40.0, 40.0, 1.0), 40.0);
+    }
+
+    fn n2_ground(h_raw: f64, rho: f64) -> Ground {
+        Ground {
+            b: h_raw - rho,
+            f: rho,
+            h_raw,
+            base_q: Gi::ZERO,
+            fine_q: Gi::ZERO,
+            radius_q: Gi::ZERO,
+            d7: None,
+            sea: None,
+            a_r: 1_000.0,
+            rho,
+            node_m: 8_192.0,
+            rough: 1.0,
+            lift: 300.0,
+            slope_mu: TAN_REPOSE,
+            octave_f: [0.0; OCTAVES_CAP],
+            octave_reach: [0.0; OCTAVES_CAP],
+            octave_rms: [0.0; OCTAVES_CAP],
+        }
+    }
+
+    fn pond(omega: f64) -> Cand {
+        Cand {
+            water: Water::Lake(1_200),
+            w: 1_200.0,
+            s: 0.0,
+            g: 60.0,
+            omega,
+            wet_corner: false,
+            near: 0.0,
+            near_node: 0,
+            dist_nodes: f64::INFINITY,
+        }
+    }
+
+    /// ★ N2's ramp meets the pond's level on the line, keeps the ground whole past its reach and
+    /// where the pond is absent, and climbs no steeper than its bank in between.
+    ///
+    /// **Example.** A pond with 300 m of lift on its shore: the ground stands at the pond's level on
+    /// the line, whole 804 m out (15/8 × 300 m over the bank of repose), and in between it never
+    /// climbs steeper than the bank plus the node-scale slope.
+    #[test]
+    fn n2_ramp_meets_the_line_and_keeps_the_ground() {
+        let ch = NamedChoices::default();
+        let g = |f: f64| {
+            let mut g = n2_ground(1_600.0 + f, 0.0);
+            g.b = 1_600.0;
+            g.f = f;
+            g
+        };
+        // On the line: the level, whatever the fine half.
+        for f in [-40.0, 0.0, 300.0, 700.0] {
+            assert_eq!(n2_ramp(&g(f), &pond(1.0), 0.0, 1.0, 0.0, &ch), 1_200.0);
+        }
+        // Past the reach (15/8 x 300 / 0.7 = 804 m, under a node): the node part plus the whole
+        // fine half.
+        let far = n2_ramp(&g(300.0), &pond(1.0), 0.2, 0.0, 12.0, &ch);
+        assert!((far - 1_900.0).abs() < 1.0e-9, "{far}");
+        // No presence: the raw ground.
+        let absent = n2_ramp(&g(300.0), &pond(0.0), 0.01, 0.0, 12.0, &ch);
+        assert!((absent - 1_900.0).abs() < 1.0e-9, "{absent}");
+        // In between the fine half climbs no steeper than the bank (per metre, with no node slope).
+        let mut prev = 0.0;
+        let step_m = 4.0;
+        for k in 1..300 {
+            let d = f64::from(k) * step_m / 8_192.0;
+            let s = n2_ramp(&g(300.0), &pond(1.0), d, 0.0, 0.0, &ch) - 1_600.0;
+            if k > 1 {
+                assert!((s - prev) / step_m <= TAN_REPOSE * 1.001, "k {k}");
+            }
+            prev = s;
+        }
+    }
+
+    /// ★ N2's ramp per octave keeps a short octave to near the line and fades a long one far out.
+    ///
+    /// **Example.** A 1 m ripple with a 50 m reach and a 300 m swell with a 20 km reach: 100 m
+    /// from the pond the ripple stands whole and the swell has all but gone; on the line both
+    /// are nought.
+    #[test]
+    fn n2_octave_ramps_keep_the_short_octaves() {
+        let mut g = n2_ground(1_600.0 + 301.0, 0.0);
+        g.b = 1_600.0;
+        g.f = 301.0;
+        g.octave_f[5] = 300.0;
+        g.octave_reach[5] = 20_000.0;
+        g.octave_f[11] = 1.0;
+        g.octave_reach[11] = 50.0;
+        // One candidate, the pond, its field 60 m a node: `dist_m` metres out it reads
+        // 60 × dist_m / 8 192.
+        let one = |omega: f64| {
+            let mut cands = Cands::default();
+            cands.list[0] = pond(omega);
+            cands.len = 1;
+            cands
+        };
+        let fields_at = |dist_m: f64| {
+            let mut f = [0.0f64; 8];
+            f[0] = 60.0 * dist_m / 8_192.0;
+            f
+        };
+        let at = |dist_m: f64| {
+            n2_octave_ramps(&g, &pond(1.0), 0.0, 0.0, &one(1.0), &fields_at(dist_m)) - 1_600.0
+        };
+        assert_eq!(
+            n2_octave_ramps(&g, &pond(1.0), 1.0, 0.0, &one(1.0), &fields_at(0.0)),
+            1_200.0
+        );
+        let near = at(100.0);
+        assert!((near - 1.0).abs() < 0.01, "{near}");
+        let far = at(25_000.0);
+        assert!((far - 301.0).abs() < 1.0e-9, "{far}");
+        // No presence: whole.
+        let absent =
+            n2_octave_ramps(&g, &pond(0.0), 0.0, 0.0, &one(0.0), &fields_at(100.0)) - 1_600.0;
+        assert!((absent - 301.0).abs() < 1.0e-9, "{absent}");
+        // Two ponds, each 1 km off, fade the swell more than one alone: the factor is the product.
+        let mut two = one(1.0);
+        two.list[1] = pond(1.0);
+        two.len = 2;
+        let mut f2 = fields_at(1_000.0);
+        f2[1] = f2[0];
+        let both = n2_octave_ramps(&g, &pond(1.0), 0.0, 0.0, &two, &f2) - 1_600.0;
+        let alone = at(1_000.0);
+        assert!(both < alone, "{both} {alone}");
+    }
+
+    /// ★ N2's fade per octave in height: on the line nought, a short octave whole a few of its
+    /// heights over the water, a long one gone there, both whole high over the water.
+    ///
+    /// **Example.** A 1 m ripple (RMS 0.5 m) and a 300 m swell (RMS 150 m) on a pond's shore with
+    /// the factor one: 10 m over the pond the ripple stands whole and the swell has all but gone;
+    /// 500 m over it both stand whole.
+    #[test]
+    fn n2_octave_heights_fade_what_can_cross() {
+        let mut g = n2_ground(1_600.0 + 301.0, 0.0);
+        g.b = 1_600.0;
+        g.f = 301.0;
+        g.octave_f[5] = 300.0;
+        g.octave_rms[5] = 150.0;
+        g.octave_f[11] = 1.0;
+        g.octave_rms[11] = 0.5;
+        let at = |h: f64| n2_octave_heights(&g, &pond(1.0), 0.0, h, 3.0) - 1_600.0;
+        assert_eq!(n2_octave_heights(&g, &pond(1.0), 1.0, 0.0, 3.0), 1_200.0);
+        // The ripple whole, and the swell all but gone: 3 cm of its 300 m.
+        let low = at(10.0);
+        assert!((low - 1.0).abs() < 0.05, "{low}");
+        let high = at(500.0);
+        assert!((high - 301.0).abs() < 1.0e-9, "{high}");
+    }
+
+    /// ★ N2 keeps the ground whole where the pond is absent, meets the pond's level at the line
+    /// from both sides, and its texture never crosses the water where the pond is present.
+    ///
+    /// **Example.** A column 2 km from a pond on the plain keeps its knolls; a column on the line
+    /// stands at the pond's level whatever its knoll; a column a node inside the pond stays under
+    /// the pond's hold whatever its knoll.
+    #[test]
+    fn n2_keeps_the_texture_and_never_crosses() {
+        let ch = NamedChoices::default();
+        // No presence and no blend: the raw ground, texture and all.
+        let far = n2_surface(
+            &n2_ground(1_530.0, -80.0),
+            &pond(0.0),
+            false,
+            2.0,
+            0.0,
+            120.0,
+            &ch,
+        );
+        assert!((far - 1_530.0).abs() < 1.0e-9, "{far}");
+        // On the line: the level, from the dry side and from the wet side.
+        for rho in [-150.0, -5.0, 0.0, 5.0, 150.0] {
+            let dry = n2_surface(
+                &n2_ground(1_500.0, rho),
+                &pond(1.0),
+                false,
+                0.0,
+                1.0,
+                0.0,
+                &ch,
+            );
+            let wet = n2_surface(
+                &n2_ground(1_500.0, rho),
+                &pond(1.0),
+                true,
+                0.0,
+                1.0,
+                0.0,
+                &ch,
+            );
+            assert_eq!((dry, wet), (1_200.0, 1_200.0), "rho {rho}");
+        }
+        // Never across: a dry column stays over W6's hold, a wet one under it, whatever the texture.
+        let mut state = 7u64;
+        for _ in 0..2_000 {
+            let rho = (rng(&mut state) - 0.5) * 600.0;
+            let d = rng(&mut state);
+            let beta = 1.0 - fade_f64(d);
+            let s_abs = 60.0 * d;
+            let raw = 1_200.0 + (rng(&mut state) - 0.3) * 800.0;
+            let dry = n2_surface(&n2_ground(raw, rho), &pond(1.0), false, d, beta, s_abs, &ch);
+            let wet = n2_surface(&n2_ground(raw, rho), &pond(1.0), true, d, beta, -s_abs, &ch);
+            let node_dry = (1.0 - beta) * (raw - rho) + beta * (1_200.0 + s_abs);
+            if node_dry >= 1_200.0 + ch.k * s_abs {
+                assert!(dry >= 1_200.0 + ch.k * s_abs, "dry {dry} rho {rho} d {d}");
+            }
+            let node_wet = (1.0 - beta) * (raw - rho) + beta * (1_200.0 - s_abs);
+            if node_wet <= 1_200.0 - ch.k * s_abs {
+                assert!(wet <= 1_200.0 - ch.k * s_abs, "wet {wet} rho {rho} d {d}");
+            }
+        }
     }
 }

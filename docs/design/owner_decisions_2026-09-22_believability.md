@@ -353,3 +353,32 @@ resembles. The owner's two answers:
 **Example.** A pilot 150 km over the second pocket still sees today's 45° ridges until R2 lands; the next pictures she is shown
 are the shore's (N2): the plain's lakes as round ponds with their ground's texture to the water, and the steep coast without
 its notched staircase.
+
+## B13. N2 IS THE SHORE; THE 30 m BAND KEPT; BUILD IT, THEN FLY (2026-09-26; the owner chose every recommended option)
+
+The shore round N2 was run in the shoreline bench (status §8e; an instrument, no world change). N2 is N1's side and N1's
+node-scale blend plus four measured changes: a FADE PER OCTAVE (each fine octave climbs from nought at the line over its own
+reach, 15/8 × its RMS height over its RMS slope, measured over the sphere — 38 m for the 49 m wave, 20 km for the 25 km wave),
+faded by EVERY nearby water through a distance that cannot jump; a 30 m BAND on the node words before the held read; and THE
+SIDE HOLD (a side-dry column stands over the sea by W6's share of the sea's own field, relaxed by the sea's presence, and in full
+where it carries the sea as its standing water). The bench found WHY N1 draws flat discs: the ridged fine octaves stand on a
+positive mean of 571.8 m at share one, so the land by every water stands `m × 572` m over the ground the solve placed the water
+against. MEASURED: the deciding number passes (1.40 px, p99 0.35 px, against N1's 8.9 px); the columns whose drawn water
+disagrees with the side fall from N1's 768 to 7; no lake appears or flickers; no wall at rung 7 on the plain, the gentle coast and
+the high lake; the ground keeps a slope of 0.017–0.080 within 1 km of the shore where N1 keeps 0.007–0.089 with flat discs.
+
+The owner's four answers:
+1. **KEEP THE 30 m BAND.** Its stated price: a steep coast's line sits midway between its wet and dry nodes, up to half a node
+   seaward of where the node-scale ground meets the sea (drawn as land at the sea's level there), and a lake deeper than 30 m is
+   drawn by its node's footprint (the plain at rung 9: 16 of N1's 20 lakes).
+2. **ACCEPT THE FILLED TROUGHS UNTIL R2 AND R4.** Fading the long 12–25 km waves toward nought near the water also fills their
+   troughs (p99 81–97 m over the raw ground at rung 7; a lowland 12 km from the gentle coast rises 190 m). R2's 1 km level
+   resolves those waves, and R4 (the noise only under the solved level) removes the lift; then the fade shrinks by itself.
+3. **BUILD N2, THEN FLY.** Step 4 is built: N2 as the integer shore law in the recipe, on the server and on the client (one
+   generator, two hosts, no drift — SL10), re-measured by the bench against its f64 reference; then the flight of ALL stands
+   against BOTH reference pictures. NARROW WATER at the far swaps (an inlet or a lake about one far column wide flickers under
+   the majority fold) stays RED for slice 0b (the per-water fold with a crossing byte — new data, the SL6 question).
+4. **COMMIT THE ROUND** (the bench's N2, the census, the 50 pictures, the status file, the deferred registry).
+
+**Example.** A pilot lands on the gentle coast. Today she sees a blue square; under N1 a smooth grey plate 4 km wide on a
+straight line; under N2 the ground's swells run down to a smooth beach, and the coast stays put as the hull climbs to 1 400 km.

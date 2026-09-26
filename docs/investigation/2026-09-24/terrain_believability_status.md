@@ -627,7 +627,7 @@ instead where a hollow's own floor is wet; from 150 km the pilot sees it as a sq
 Each step ends with the census numbers, the three stands' pictures, and the REFERENCE STAND's picture beside the
 reference (§9). State legend: ⬜ not started · 🟨 in progress · ✅ done (with the commit).
 
-★ **THE ORDER SINCE RULING B12 (2026-09-26): 1 → 2 → 2b → 4 slice 0 (the bench) → the washboard MEASURED and PARKED (§8d: its cause the deposit; the fills and the fans ready in the bench; the basins return after R2) → 4 slice 0 round 2 (N2) → 4 built → the flight of ALL stands against BOTH references → 3 (R2: decides which water drives the cut, measures D∞) → the basins again → 6 → 7.** (Rulings B8–B11 set the earlier orders.)
+★ **THE ORDER SINCE RULING B13 (2026-09-26): 1 → 2 → 2b → 4 slice 0 (the bench) → the washboard MEASURED and PARKED (§8d) → 4 slice 0 round 2 (N2, §8e: DONE, N2 is the shore, the 30 m band kept, the filled troughs accepted until R2/R4) → 4 BUILT (N2 as the integer shore law on both hosts, re-measured by the bench) → the flight of ALL stands against BOTH references → 3 (R2: decides which water drives the cut, measures D∞) → the basins again → 6 → 7; slice 0b (narrow water at the far swaps, SL6) when the owner asks.** (Rulings B8–B12 set the earlier orders.)
 other file uses ("step 3" is R2, "step 4" the shoreline); only the order changed. Step 2's pictures showed every small
 lake as an 8 km square, so the edge law (step 4) now comes BEFORE R2 on today's ground, and the rivers follow the
 water (step 2b) before either, because R2 seeds its rivers from them. R2 starts with slice 0 (the bench and a
@@ -640,7 +640,7 @@ hillshade for the owner's look) before any bake service.
 | 2b | **The rivers follow the water** (ruling B8 item 2; plan question 3 choice B; amends B7 item 2). The shipped receivers and the discharge row follow the budget's own water: a full hollow's river runs over its spill into the sibling (Fill–Spill–Merge's flow directions), and a closed body that never fills passes nothing on. New GENERATOR_VERSION and pins. | G-RIVER-DESCENT (3 430 rising steps at generator 20); the row's 1 607 km³/yr out of held hollows | ✅ BUILT, MEASURED and COMMITTED 2026-09-25 (generator 21, artifact 9, `step2b_census.txt`, `step2b_lake_depths.txt`; pins re-recorded; §7 W10, W11; pictures `pictures/*_step2b.png`, §8b): G-RIVER-DESCENT 0, the row the cascade's to the unit, 0 closed hollows leak. Committed with two REDs by ruling B9: G-LAKE-SHARE 4.828 % (judged after step 4) and the flat law (G-GRID-VALLEYS-BY-CLASS flats 1.470 / spilling lakes 1.553, G-LAKE-WALK 14.07°; cured as step 2c) |
 | 2c | **The flat directions stop leaning on the lattice** (ruling B9 item 2): across a filled flat and a spilling lake the water's direction reads Barnes, Lehman & Mulla's two combined fields (or a target that does not collapse onto one nearest drain), measured one change at a time against V3 and generator 21; G-LAKE-SHARE read again with it. | G-GRID-VALLEYS-BY-CLASS, G-LAKE-WALK | ⬜ BEFORE step 3 (R2 must not carve along a grid diagonal) |
 | 3 | **R2: one eroded level at 1 024 m in the artifact**, with the two operators the bench lacked (the height retargeting that holds the macro heights, the multi-scale breach); then R4's second half: the noise only BELOW the solved level. Cost (survey): ~17 core-hours once for the home planet, 512 KB a tile against 40 KB, an artifact version, a lattice over `MACRO_EDGE_CEILING` 2 048. Calibration: Earth, through Hack's law (T9). | the dunes at 100–150 km; valleys that join | 🟨 DESIGNED (`r2_design.md`, 2026-09-24) with 23 skeptic findings OPEN (§16 of it: 6 HIGH); slice 0, the bench with the owner's look, comes before any service (ruling B8 item 3); AFTER step 4 since B8 |
-| 4 | **One shoreline from one field, on today's ground** (ruling B8 item 1 moved it BEFORE R2; it was "on the R2 ground"). The sea's shore and the lake's edge from where the ground crosses the water's level, not from a node square; the lake's level held by its dry neighbours (W6's owed law); plan question 5 (the dry-land hold) and the far-swap lake losses decided here. The law does not depend on which ground it reads: R2 later gives it the 1 km bays and headlands (T3), and the pictures are judged again then; until R2 a shore may look dune-shaped (stated and accepted, B8). | the teeth (sea and lake); step 2's square lakes | 🟨 SLICE 0 BUILT AND RUN (the shoreline BENCH, §8c, 2026-09-25; no world change): the smooth rule N1 is steady at rungs 0–9 (the shore moves p99 ≤ 1.4 px, walls on 0–2 % of the shore against today's 84–97 %); the rough rule O1 jumps 3–9 px at almost every swap (a W16 breach); EVERY rule, today's too, jumps 8–9 px at the far swaps 9→10 and 10→11 (the bench's second slice, 0b); the lakes and valleys themselves follow the lattice (the washboard, §8c) — the owner's word asked on N1, on the far rungs and on the washboard's cure |
+| 4 | **One shoreline from one field, on today's ground** (ruling B8 item 1 moved it BEFORE R2; it was "on the R2 ground"). The sea's shore and the lake's edge from where the ground crosses the water's level, not from a node square; the lake's level held by its dry neighbours (W6's owed law); plan question 5 (the dry-land hold) and the far-swap lake losses decided here. The law does not depend on which ground it reads: R2 later gives it the 1 km bays and headlands (T3), and the pictures are judged again then; until R2 a shore may look dune-shaped (stated and accepted, B8). | the teeth (sea and lake); step 2's square lakes | 🟨 SLICE 0 BUILT AND RUN (the shoreline BENCH, §8c, 2026-09-25; no world change): the smooth rule N1 is steady at rungs 0–9 (the shore moves p99 ≤ 1.4 px, walls on 0–2 % of the shore against today's 84–97 %); the rough rule O1 jumps 3–9 px at almost every swap (a W16 breach); EVERY rule, today's too, jumps 8–9 px at the far swaps 9→10 and 10→11 (the bench's second slice, 0b); the lakes and valleys themselves follow the lattice (the washboard, §8c). ★ ROUND N2 RUN (§8e, 2026-09-26, NOT committed): N1's side + a fade per octave + a 30 m band + the side hold — the DECIDING NUMBER PASSES (1.40 px / p99 0.35 px), the texture stays to the water, no wall at rung 7 on three of four stands, 7 columns whose drawn water disagrees with the side against N1's 768; its prices: the long waves' troughs filled near the water (p99 81–97 m), and the band moves a steep coast out over deep water (p99 935 m); RED: narrow water at the far swaps (0b), a rounded bump per node on a steep coast; the owner's word asked on the band and on building N2 |
 | 5 | **G-GRID again on the R2 field.** The D8 decision (MFD with a weight, or a hexagonal mesh = a new world, SL5) only if still red. | water positions (grid lean) | ⬜ |
 | 6 | **Lakes with outlets and river mouths** (the spill carve, a delta); **R3**: the 1–5 km valleys under the shipped level, derived per fixed patch on both hosts, the card as the builder (a CPU core takes ~330 ns a cell an iteration, DOC R1). | the reference's valley scale | ⬜ |
 | 7 | **G-LOOK.** The owner's word on the three stands and the reference stand. Only then 8e starts (B1). | closes B1 | ⬜ |
@@ -891,6 +891,99 @@ in its lowest part.
 
 ---
 
+### 8e. THE SHORE ROUND N2 — ruling B10 item 1, ruling B12; ruled by B13 (2026-09-26, generator 21; built, run, committed)
+
+The shoreline bench (§8c) with a fourth rule, **N2**, beside N1 and O1:
+`cargo run --release -p vd-bins --example shoreline_bench -- --artifact-cache <home.art> --census
+docs/investigation/2026-09-26/shoreline_bench_n2_census.txt --panels docs/investigation/2026-09-26/shoreline_bench_n2`
+(294 s; the artifact READ from a scratch file of the pinned generator-21 artifact, digest `1eb53c78…d2a0e4`, so the header
+calls it a development run). Still an INSTRUMENT: no world file changed. CHECK-R0 reads 176 of 176 (today's rule is still the
+shipped column bit for bit). The 50 panels now show **R0 | N1 / N2 | O1**. Two new readings: FINE-SLOPE-NEAR-SHORE (the drawn
+ground's slope within 1 km of the shore against the raw ground's) and RAISE-OVER-RAW (how far a rule stands the dry ground
+over the raw ground within three nodes of the shore).
+
+**WHY N1 DRAWS FLAT DISCS, MEASURED:** the ridged fine octaves stand on a positive mean — **571.8 m at share one** (rungs 0–5;
+513 m at rung 7, 224 m at rung 9, nought from rung 10) — so the land by every water stands `m × 572` m (about 200 m on the
+gentle coast) over the ground the solve placed the water against, and every rule must lose that height near the line. N1 fades
+the whole fine half over one node; that is the flat disc.
+
+**N2 = N1's side and N1's node-scale blend, plus four changes, each measured before it was kept:**
+1. **A FADE PER OCTAVE.** Each fine octave climbs from nought at the line to whole at its OWN reach, 15/8 × its RMS height
+   over its RMS slope (both measured over the sphere at share one): 38 m for the 49 m wave, 308 m for the 391 m wave, 2.9 km for
+   the 3 km wave, 11 km for the 12.5 km wave, 20 km for the 25 km wave. So the long waves, which carry the lift, fade over
+   kilometres at their own gentle slope, and the short octaves stay to within metres of the water.
+2. **EVERY NEARBY WATER FADES IT, BY A DISTANCE THAT CANNOT JUMP.** Each octave's factor is the product over the column's
+   waters, and each water's distance is its first-order distance never past its node-sampled one (each node's distance to the
+   nearest node of the other side). The first-order distance alone blows up where the side field goes flat, and there the long
+   waves came back within a few hundred metres and stood a 200 m ridge (the gentle coast's "dark streak").
+3. **A 30 m BAND** on the node words before the held read (a stated choice; the owner's word owed): the side, not the depth,
+   places the line.
+4. **THE SIDE HOLD.** A column the side calls dry stands over the sea by W6's share of the sea's own field, relaxed by the relief
+   bound as the sea's presence thins (the lake hold's own rule), and in full wherever it carries the sea as its standing water.
+
+**Refuted on the way (each measured, each kept in the bench as a control):** the conditioned residual bent into its room (the
+first plan: the 8 km nodes ALIAS the 3–25 km octaves, so the "residual" is ±400 m of the noise's own waves; bent, it drew a flat
+plain 15 km wide at W6's hold on the gentle coast; `n2_form=0`); ONE ramp for the whole fine half (at the angle of repose a
+1.5 km bank 2–4 × steeper than the ground; at the ground's own measured slope, 0.139, an 8 km ramp as flat as N1 within 1 km of
+the water; `n2_form=1`); a fade per octave in HEIGHT (flat for kilometres on the gentle coast; `n2_form=3`); the governing water
+alone (the V-crease midway); fading only the parts over nought (the land fell flat to the hold — there the node-scale ground
+stands under the sea and only the lift holds the land up); the node words as a signed distance (lean 0.32, the steep coast
+flattened near the water); a smoothed mask (lean 0.09, the straightest coast, but it ERASES lakes of one or two nodes).
+
+**THE NUMBERS (the record census; the same columns under every rule):**
+
+| line | R0 today | N1 | **N2** | O1 |
+|---|---|---|---|---|
+| ★ THE DECIDING NUMBER (gentle coast, the sea, swaps 0 → 1 … 9 → 10; band max ≤ 2 px, p99 ≤ 1 px) | 4.13 / 2.27 px | 8.92 / 7.35 px | **1.40 / 0.35 px — PASSES** | 8.93 / 7.83 px |
+| the gentle coast's sea at 10 → 11 / 11 → 12 / 12 → 13 | 8.4 / 4.5 / 1.4 px | 8.5 / 4.4 / 2.3 px | **0.7** / 4.8 / 2.3 px | 8.6 / 3.4 / 2.0 px |
+| the steep coast's sea at 9 → 10 … 12 → 13 | 7.7 / 8.3 / 2.7 / 2.4 px | 8.5 / 4.6 / 3.5 / 1.4 px | **1.9 / 1.8 / 2.1 / 2.4 px** | 8.5 / 4.6 / 3.5 / 1.4 px |
+| the lakes at 9 → 10 (plain / second pocket / high lake) | 5.5 / 8.1 / 3.8 px | 8.6 / 3.9 / 1.8 px | 8.3 / 7.9 / 1.9 px | 7.7 / 7.6 / 8.1 px |
+| WALL at rung 7 (plain / gentle / high lake / second pocket) | 97 / 99 / 87 / 92 % | 32 / 92 / 126 / 37 pairs | **0 / 0 / 0** / 68 pairs | 883 / 418 / 1 808 / 437 |
+| WALL at rung 3 (six stands with shores) | 100 % | 0 but the belt's 740 | 0 but the belt's 856 (16 %) | 0 but the belt's 1 016 |
+| columns whose drawn water disagrees with the side, all lines | 180 017 | 768 | **7** | 740 |
+| the sea over dry land / perched water / lakes that appear / lakes that flicker | 16 981 / 0 / 5 / 0 | 661 / 34 / 28 / 7 | **11 / 0 / 0 / 0** | 1 164 / 866 / 33 / 28 |
+| the ground's slope within 1 km of the shore at rung 3 (the raw ground's 0.022–0.363) | the raw | 0.007–0.089 (flat) | **0.017–0.080**; the steep coast 0.075 against N1's 0.089 | 0.029–0.190 |
+| the ground raised over the raw within three nodes, p99 (gentle / plain / high lake at rung 7; the steep coast at rung 3) | 0 / 0 / 0; 1 675 m | 6 / 12 / 0 m; 0 | 95 / 81 / 97 m; **935 m** | 0 / 8 / 0 m; 0 |
+| the lakes' outline, pooled at rung 7 (Earth 1.12–1.40) | 1.254 | 1.038 | 1.039 | 1.116 |
+| the steep coast's lattice lean at rung 7 (the pure contour 0.195) | 0.802 | 0.617 | **0.405** | 0.256 |
+
+**THE BAND IS A TRADE (N2 with the 30 m band against N2 with none, same run otherwise):** the band passes the deciding number
+(1.40 against 2.52 px), holds the gentle coast at 10 → 11 (0.66 against 8.46 px) and removes the walls at rung 7 (0 against 35 /
+92 / 126); without it the steep coast is left alone — its line stays where the ground meets the sea (raised p99 17 m at rung 3
+against 935 m, 43 m at rung 7 against 773 m), it keeps more texture near the water (0.134 against 0.075) and its 9 → 10 step is
+smaller (0.62 against 1.90 px). The band moves a steep coast's line out over deep water by up to half a node, and the side hold
+then stands that strip at the sea's level. ★ THE PICTURES FAVOUR THE BAND even there (`coast_r03_top_…`, `coast_r03_oblique_…`,
+and the same views of a run with no band): with no band the sea spreads past its node's square, 60 % of the way to the land node,
+pushed by the height ratio (3 km deep against 2 km high), and the shore shows a flat band and a dark pit; with the band the
+line sits midway, near today's square but rounded, and the land is textured to the water. The raise it reads is that strip —
+land where the raw ground drops under the sea. Which of the two lines is "true" the node data cannot say; the owner's look
+decides.
+
+**WHAT THE PANELS SHOW** (`shoreline_bench_n2/…`, rungs 3, 7 and 11, top and oblique): at rung 3 (a pilot landing) N2's
+ground keeps its texture right up to a smooth shore where N1 shows a flat, textureless band about 4 km wide with straight
+edges (`highlake_r03_top_…`, `gentle_r03_top_…`); from the oblique eye the steep coast is textured hills meeting the water under
+N2 and a flat plate with a dark pit under N1 (`coast_r03_oblique_…`); from 227 km (rung 7) N2's water is N1's round ponds and
+smooth coasts (`plain_r07_top_…`); on the steep coast N2 draws a diagonal of rounded steps where N1 draws the node staircase
+with dark notches (`coast_r07_top_…`, `coast_r07_oblique_…`). A faint straight line runs along some node lines in every rule,
+today's too: the node-scale ground's own interpolation bends there, and a 16-grey hillshade shows it where the texture is weak.
+
+**STILL RED OR OPEN (DEFERRED):** the band's trade on steep coasts (above); the long waves' troughs filled near the water (N2
+stands 95–190 m over the raw ground at p99 in a lowland within their 11–20 km reach — the price of fading toward nought; R2
+and R4 own the cure); a rounded bump at every node on a steep coast; NARROW WATER at a far rung (an inlet or a lake about one
+far column wide flickers under the majority fold: the gentle coast at 11 → 12, the plain's and the pocket's lakes at 9 → 10 —
+slice 0b's per-water fold with a crossing byte, new data, the owner's SL6 question); the band shrinks deep small lakes (the
+plain at rung 9: 16 of N1's 20 bodies); the lakes' outline stays too smooth (1.04: R2's 1 km bays); the lift itself (R4 with
+R2); and the WALKING-SCALE OCTAVES ARE UNDER A METRE (at share one the 391 m, 195 m, 98 m and 49 m waves stand 2.1, 0.7, 0.2 and
+0.1 m RMS against 127 m for the 3 km wave: a pilot on foot sees swells, not texture — the owner's look, not a shore fault).
+
+**Example.** A pilot lands on the gentle coast. Under N1 the last 4 km to the water are a smooth grey plate that ends on a
+straight line. Under N2 the ground's swells run down to the beach — the 25 km swell fades over its 20 km, the 3 km one over its
+last 3 km, the 49 m ripple over its last 38 m — and the coast stays put as the hull climbs to 1 400 km, where N1's coast jumped
+nine pixels at 704 km. The price: a lowland 12 km inland, a trough of the 25 km swell, now stands 190 m higher than the raw
+ground put it.
+
+---
+
 ## 9. THE REFERENCE TARGET — the checklist every step reports against
 
 **THE REFERENCE STAND.** One more stand beside the belt, the coast and the plain, framed like the reference: an eye
@@ -1087,3 +1180,5 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-09-26 — ruling B11: the washboard is the deposit's; a sloped basin fill with a published slope law, measured first; D∞ adopted with it in one world change; the washboard bench committed.
 - 2026-09-26 — the sloped fill (Paola's fans) measured: the skip bit keeps 99.6 % of the fans; the pocket floor clean; the ground's facing halved; but giant flat lakes stay (45 340 nodes, 5.1 %) and the pictures barely change; two model faults found (rain-cut against runoff-fans; 11.9 km-deep pockets); NOT committed.
 - 2026-09-26 — ruling B12: the basins parked until after R2 (R2 decides the cut's water and measures D∞); the shore round N2 next; the fan measurement committed.
+- 2026-09-26 — the shore round N2 (§8e; `shoreline_bench_n2_census.txt`, 50 panels; NOT committed): the lift measured (571.8 m at share one); N2 = N1's side + a fade per octave (every nearby water, a distance that cannot jump) + a 30 m band + the side hold (relaxed by the sea's presence); the deciding number passes (1.40 px); seven other forms refuted and kept or recorded as controls; two new readings (FINE-SLOPE-NEAR-SHORE, RAISE-OVER-RAW) and the band's trade measured against N2 with no band; DEFERRED: three shoreline entries 🟨, six new (narrow water at a far rung, the lift, the walking-scale octaves under a metre, the filled troughs, the band over deep water, the band's lake shrink).
+- 2026-09-26 — ruling B13: N2 is the shore; the 30 m band kept; the filled troughs accepted until R2 and R4; build N2 (step 4), then fly all stands against both references; the round committed.

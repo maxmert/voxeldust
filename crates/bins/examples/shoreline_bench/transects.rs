@@ -350,8 +350,13 @@ fn column_v(
     }))
 }
 
-/// Per water kind, rule and swap: the steps in pixels, the matched and the unmatched counts.
-pub type Steps = BTreeMap<(usize, usize, u8), (Vec<f64>, usize, usize)>;
+/// The worst matched step of one swap: its size in pixels, its transect, and the coarser and the
+/// finer crossing along it (metres from the transect's centre).
+pub type Worst = (f64, usize, f64, f64);
+
+/// Per water kind, rule and swap: the steps in pixels, the matched and the unmatched counts, and
+/// the worst matched step.
+pub type Steps = BTreeMap<(usize, usize, u8), (Vec<f64>, usize, usize, Worst)>;
 
 /// ★ EVERY TRANSECT OF A STAND, over `threads` threads (each with its own column caches): the steps
 /// at every swap for every rule.
@@ -405,13 +410,18 @@ pub fn measure(
                         for v in 0..NVAR {
                             let e = local.entry((tr.kind, v, r as u8)).or_default();
                             for &x in &coarse[v] {
-                                let near = fine[v]
-                                    .iter()
-                                    .map(|&y| (y - x).abs())
-                                    .fold(f64::INFINITY, f64::min);
+                                let (near, y) = fine[v].iter().map(|&y| ((y - x).abs(), y)).fold(
+                                    (f64::INFINITY, f64::NAN),
+                                    |a, b| {
+                                        if b.0 < a.0 { b } else { a }
+                                    },
+                                );
                                 if near <= reach {
                                     e.0.push(near / px);
                                     e.1 += 1;
+                                    if near / px > e.3.0 {
+                                        e.3 = (near / px, k, x, y);
+                                    }
                                 } else {
                                     e.2 += 1;
                                 }
@@ -425,11 +435,14 @@ pub fn measure(
                     }
                 }
                 if let Ok(mut r) = result.lock() {
-                    for (key, (steps, m, u)) in local {
+                    for (key, (steps, m, u, worst)) in local {
                         let e = r.entry(key).or_default();
                         e.0.extend(steps);
                         e.1 += m;
                         e.2 += u;
+                        if worst.0 > e.3.0 {
+                            e.3 = worst;
+                        }
                     }
                 }
             });
@@ -448,6 +461,7 @@ pub fn print(
     c: &mut Census,
     stand: &str,
     steps: &Steps,
+    transects: &[Transect],
     vars: &[Var],
     f_rung: u8,
     last_swap: u8,
@@ -461,7 +475,7 @@ pub fn print(
                 if v.nofold() && r < f_rung {
                     continue;
                 }
-                let Some((s, matched, unmatched)) = steps.get(&(kind, vi, r)) else {
+                let Some((s, matched, unmatched, worst)) = steps.get(&(kind, vi, r)) else {
                     continue;
                 };
                 let p = |q: f64| {
@@ -488,6 +502,15 @@ pub fn print(
                     c.line(&gate, &value, band, "NO-BAND");
                 } else {
                     c.judged(&gate, &value, band, p99 <= 1.0 && max <= 2.0);
+                }
+                // The worst step's own transect, so a failing swap can be probed.
+                if worst.0 > 2.0
+                    && let Some(t) = transects.get(worst.1)
+                {
+                    c.say(format!(
+                        "   worst {gate}: {:.2} px on transect #{} (centre ({:.0}, {:.0}) rung-0 cells, normal ({:.3}, {:.3})): coarser crossing {:.0} m, finer {:.0} m",
+                        worst.0, worst.1, t.c0.0, t.c0.1, t.normal.0, t.normal.1, worst.2, worst.3
+                    ));
                 }
                 if kind == 0 && r < last_swap && max.is_finite() {
                     let e = decide.entry(vi).or_insert((0.0, 0.0, 0));

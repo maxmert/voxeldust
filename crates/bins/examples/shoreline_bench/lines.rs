@@ -569,7 +569,7 @@ pub fn rule_lines(c: &mut Census, lx: &LineCtx, out: &RungOut, pool: &mut Pool) 
                 (v.iter().sum::<f64>() / v.len() as f64).sqrt()
             }
         };
-        if matches!(v, Var::N1 | Var::O1 | Var::O1q) {
+        if matches!(v, Var::N1 | Var::O1 | Var::O1q | Var::N2) {
             c.reading(
                 &lx.gate("HOLD-RAMP", v),
                 &format!("{ramp}cols"),
@@ -609,6 +609,75 @@ pub fn rule_lines(c: &mut Census, lx: &LineCtx, out: &RungOut, pool: &mut Pool) 
                 val(rms(&far), 1, "m")
             ),
             "finding-20",
+        );
+        // FINE-SLOPE-NEAR-SHORE (the second round, ruling B10 item 1): the drawn ground's RMS
+        // slope over dry neighbour pairs within 1 km of the drawn shore, the raw ground's over the
+        // same pairs, and the drawn ground's 2–3 nodes away — a flat disc round a lake reads a
+        // near slope far under the raw one.
+        let (mut s_near, mut raw_near, mut s_far) = (Vec::new(), Vec::new(), Vec::new());
+        for (p, qq, along_j) in pairs(n) {
+            let (Some(a), Some(b)) = (out.cols[p].as_ref(), out.cols[qq].as_ref()) else {
+                continue;
+            };
+            if a.drawn[vi].wet() || b.drawn[vi].wet() {
+                continue;
+            }
+            let dk = dist[p].min(dist[qq]);
+            if dk == u32::MAX {
+                continue;
+            }
+            let m = if along_j { lx.m_j } else { lx.m_i };
+            let dm = f64::from(dk) * lx.m_col;
+            let ds = f64::from(a.drawn[vi].s - b.drawn[vi].s) / m;
+            if dm <= 1_000.0 {
+                s_near.push(ds * ds);
+                let dr = f64::from(a.shared.h_raw - b.shared.h_raw) / m;
+                raw_near.push(dr * dr);
+            } else if dm >= 2.0 * node_cols && dm <= 3.0 * node_cols {
+                s_far.push(ds * ds);
+            }
+        }
+        // RAISE-OVER-RAW (the second round): how far the rule stands the dry ground OVER the raw
+        // ground within three nodes of the drawn shore — a filled lowland reads here.
+        let mut raise: Vec<f64> = Vec::new();
+        for (k, col) in out.cols.iter().enumerate() {
+            let Some(col) = col else { continue };
+            if col.drawn[vi].wet() || dist[k] == u32::MAX {
+                continue;
+            }
+            if f64::from(dist[k]) * lx.m_col <= 3.0 * node_cols {
+                raise.push(f64::from(col.drawn[vi].s - col.shared.h_raw));
+            }
+        }
+        raise.sort_by(f64::total_cmp);
+        let q = |p: f64| {
+            if raise.is_empty() {
+                f64::NAN
+            } else {
+                raise[((raise.len() as f64 * p) as usize).min(raise.len() - 1)]
+            }
+        };
+        c.reading(
+            &lx.gate("RAISE-OVER-RAW", v),
+            &format!(
+                "p50{}/p99{}/max{}/{}cols",
+                val(q(0.5), 1, "m"),
+                val(q(0.99), 1, "m"),
+                val(q(1.0), 1, "m"),
+                raise.len()
+            ),
+            "the-second-round",
+        );
+        c.reading(
+            &lx.gate("FINE-SLOPE-NEAR-SHORE", v),
+            &format!(
+                "{}within1km/{}raw/{}at2-3nodes/{}pairs",
+                val(rms(&s_near), 3, ""),
+                val(rms(&raw_near), 3, ""),
+                val(rms(&s_far), 3, ""),
+                s_near.len()
+            ),
+            "B10-item-1",
         );
         c.reading(
             &lx.gate("G-SHORE-TWO-WATERS", v),

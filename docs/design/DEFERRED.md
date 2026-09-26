@@ -10180,25 +10180,70 @@ updated in the same change as the work, deleted when done). The interims named h
   giant flat lakes (45 340 nodes, share 5.1–5.2 %); two faults further up — the sweep cuts with the rain while the fans read
   the runoff, and closed pockets up to 11.9 km deep and 1.57 million km² — are taken up after R2, on R2's field; R2 decides
   the cut's water and measures D∞. The tools stay in `vd_bins::router_variants` and `crates/bins/examples/router_bench.rs`.
-- 🟥 **EVERY SHORE RULE JUMPS AT THE FAR SWAPS 9 → 10 AND 10 → 11** (found 2026-09-25 by the shoreline bench, status §8c):
+- 🟨 **EVERY SHORE RULE JUMPS AT THE FAR SWAPS 9 → 10 AND 10 → 11** (found 2026-09-25 by the shoreline bench, status §8c):
   on the gentle coast the drawn shore's sideways step reads 8.4 px (today's rule, 10 → 11) and 8.5–8.9 px (N1 and O1, 9 → 10
   and 10 → 11) against a bound of 2 px — rung 10 is the first rung that reads the pyramid (R₁), and the rules' far side is a
-  fold of rung-7 point samples. WHERE: `terrain/src/artifact.rs` (`block_water`, `CoastCounts`, the pyramid), the bench's
-  `far.rs`. WHEN: the bench's second slice (0b: V's crossing byte per mixed edge, R5-DILATED, the far swaps 13 → 18, AREA-NEST,
-  the SL6 sizes) before the shoreline kernel ships (W16: a rung boundary is invisible).
-- 🟥 **N1 FLATTENS THE GROUND AROUND EVERY LAKE, AND KEEPS A SCALLOPED STAIRCASE ON A STEEP COAST** (the shoreline bench's
+  fold of rung-7 point samples. ★ CAUSE MEASURED AND CURED IN THE BENCH (round N2, 2026-09-26, status §8e): at rung 10 N1 draws
+  side-DRY columns under the sea (497 on the coast, 60 on the gentle coast): the dry hold lets a column that stands under the
+  sea's level dig by `K` (a closed basin's rule), and the pyramid's coarser ground stands under the sea there. N2's SIDE HOLD
+  (a side-dry column that carries a standing water stands over it by `k × |its field|`) takes those to 0 and the sea's steps
+  to 0.5 px (9 → 10) and 0.7 px (10 → 11) on the gentle coast, 1.9 / 1.8 px on the steep coast — with no new data. STILL RED:
+  11 → 12 (4.8 px on the gentle coast, every rule) and the lakes' far swaps (the plain 8.3 px at 9 → 10) — the worst transects
+  meet NARROW water (an inlet or a lake about one far column wide) at the transect's end; see "NARROW WATER AT A FAR RUNG".
+  WHERE: `crates/bins/src/shore_rules.rs` (`finish`, the side hold); later the recipe's shore law. WHEN: with step 4 built.
+- 🟨 **N1 FLATTENS THE GROUND AROUND EVERY LAKE, AND KEEPS A SCALLOPED STAIRCASE ON A STEEP COAST** (the shoreline bench's
   panels, 2026-09-25, status §8c): at rung 3 each N1 lake stands in a disc of textureless ground with straight edges on the node
   lines (v2 findings 19 and 23: the fade takes the whole fine relief, and its reach is node-aligned); on the steep coast the
-  smoothed rows still cross the water on the node staircase, a notch at every node. WHERE: `crates/bins/src/shore_rules.rs`.
-  WHEN: the bench's next round (N2), before any kernel form — fade only the lift and the octaves that can carry a column across
-  its water (keep the walking-scale texture), take the fade's reach from the ground or the basin (never the node square), and
-  clamp the node words to a band around the water before the read; each measured on the same eight stands, with the owed
-  readings FINE-RMS-NEAR-SHORE and a wall line on the halo's edge.
-- 🟥 **N1 LEAVES A FEW WALLS WHERE A MIRRORED NODE ENTERS THE READ** (the shoreline bench, status §8c; v2's finding 1): at
+  smoothed rows still cross the water on the node staircase, a notch at every node. ★ MEASURED AND CURED IN THE BENCH (round
+  N2, 2026-09-26, status §8e): N2 keeps N1's side and fades each fine OCTAVE over its own reach (15/8 × its RMS height over its
+  RMS slope, measured over the sphere: 38 m for the 49 m wave, 20 km for the 25 km wave), every nearby water fading it by a
+  distance that cannot jump. Within 1 km of the shore at rung 3 it keeps a slope of 0.017–0.080 against the raw ground's
+  0.022–0.363 (N1: 0.007–0.089; on the steep coast N2 keeps 0.075 against N1's 0.089 — the band's pull), with no new wall.
+  ITS PRICE, a new entry below: the long waves' troughs are filled near the water. The staircase: a 30 m band on the node words lowers the steep coast's lattice lean from 0.62 to 0.41 (the pure contour
+  0.195); a rounded bump stays at every node. STILL OPEN: that bump (a signed distance lowers the lean to 0.32 and a smoothed mask
+  to 0.09, but the mask erases lakes of one or two nodes — both measured, neither kept), and the band's number (the owner's word).
+  WHERE: `crates/bins/src/shore_rules.rs` (`n2_octave_ramps`, the band in `candidate_for`). WHEN: step 4 built.
+- 🟨 **N1 LEAVES A FEW WALLS WHERE A MIRRORED NODE ENTERS THE READ** (the shoreline bench, status §8c; v2's finding 1): at
   rung 7 WALL reads 32 of 5 572 shore pairs on the plain (0.6 %) and 92 of 4 518 on the gentle coast (2.0 %), the worst 3.3 × the
-  ground's own step, G-SIDE-VS-GROUND up to 72–104 m at those pairs (today's rule walls 84–97 % of the pairs). WHERE:
-  `crates/bins/src/shore_rules.rs` (the rule), later the recipe's shore law. WHEN: before N1's kernel form (the ground blended
-  to the side's field wherever a mirrored word is in the stencil, measured on the same stands).
+  ground's own step, G-SIDE-VS-GROUND up to 72–104 m at those pairs (today's rule walls 84–97 % of the pairs). ★ MEASURED IN THE
+  BENCH (round N2, status §8e): with the 30 m band N2 reads 0 walls at rung 7 on the plain, the gentle coast and the high lake
+  (N1: 32, 92, 126); STILL 68 of 5 315 on the second pocket (N1: 37) and 16 % of the belt's shore pairs at rung 3 (N1: 20 %).
+  WHERE: `crates/bins/src/shore_rules.rs` (the rule), later the recipe's shore law. WHEN: step 4 built.
+- 🟥 **NARROW WATER AT A FAR RUNG** (found 2026-09-26 by the shoreline bench's round N2, status §8e): the worst sideways steps
+  left after the side hold (the gentle coast 4.8 px at 11 → 12; the plain's lakes 8.3 px and the second pocket's 7.9 px at
+  9 → 10) all meet water about one far column wide — a sea inlet one node across draws 2 columns wide at rung 11 and 4 at
+  rung 10 under N1, and vanishes under N2's band. A majority fold can only flicker at that width. WHERE: the fold
+  (`crates/bins/src/shore_rules.rs::fold`), later the pyramid (`terrain/src/artifact.rs`). WHEN: the bench's slice 0b — V's
+  per-water fold with a crossing byte per mixed edge, AREA-NEST and the SL6 sizes (new data: the owner's question).
+- 🟥 **THE FINE OCTAVES STAND ON A 572 m LIFT** (measured 2026-09-26 by the shoreline bench, status §8e): the ridged fine
+  octaves' mean at share one is 571.8 m (rungs 0–5; 513 m at rung 7, 224 m at rung 9, nought from rung 10), so the drawn land by
+  every water stands `m × 572` m over the ground the solve placed the water against — 200 m on the gentle coast. Every shore
+  rule must lose that height near the water (N1 a dish one node wide, N2 a ramp per octave). WHERE: the recipe's octave sum
+  (`recipe/src/height.rs`), the body's table (`terrain/src/body.rs`). WHEN: R4's second half with R2 (the noise only under the
+  solved level) — then the shore rule's ramps shrink by themselves.
+- 🟥 **THE WALKING-SCALE OCTAVES ARE UNDER A METRE** (measured 2026-09-26, status §8e): at share one the octaves of 391 m,
+  195 m, 98 m and 49 m waves stand 2.1 m, 0.7 m, 0.2 m and 0.1 m RMS; the 3 km octave stands 127 m and the 12.5 km octave 252 m.
+  So a pilot on foot sees almost no relief under about 800 m — the ground is the long octaves' swells (the "dunes"). WHERE: the
+  fine octaves' table (`terrain/src/body.rs`, the bump at 3.13 km). WHEN: the owner's look at close range after step 4 is
+  built, with R2's 1 km valleys and 8e's soil (not a shore defect).
+- 🟥 **N2 FILLS THE LONG WAVES' TROUGHS NEAR THE WATER** (measured 2026-09-26 by RAISE-OVER-RAW, status §8e): fading the
+  12.5 km and 25 km octaves toward nought within their 11–20 km reach also fills their troughs, so N2 stands the dry ground over
+  the raw ground by 95 m (gentle coast), 81 m (plain), 97 m (high lake) at p99 at rung 7 — a lowland 12 km from the gentle
+  coast rises 190 m. Fading only the parts over nought was measured and refuted (the land fell flat to the hold: there the
+  node-scale ground stands under the sea and only the lift holds the land up). WHERE: `crates/bins/src/shore_rules.rs`
+  (`n2_octave_ramps`). WHEN: R2 (the 1 km level resolves those waves) and R4 (the noise only under the solved level) —
+  ACCEPTED until then (ruling B13 item 2).
+- 🟥 **N2's BAND MOVES A STEEP COAST OUT OVER DEEP WATER** (measured 2026-09-26, status §8e): with the 30 m band the steep
+  coast's line stands up to half a node seaward of where the node-scale ground meets the sea, and the side hold stands that
+  strip at the sea's level: RAISE-OVER-RAW p99 935 m at rung 3 and 773 m at rung 7 (no band: 17 m and 43 m); without the band
+  the gentle coast fails (8.46 px at 10 → 11) and the walls at rung 7 return. RULED (B13 item 1): the 30 m band is KEPT with
+  this price stated; the pictures favour it (with no band the sea spreads past its node's square by the height ratio and the
+  shore shows a flat band and a pit). WHERE: `crates/bins/src/shore_rules.rs` (`candidate_for`, `finish`). WHEN: the owner's
+  look after step 4 is built.
+- 🟥 **N2's BAND SHRINKS DEEP SMALL LAKES** (measured 2026-09-26, status §8e): the 30 m band draws a lake deeper than 30 m
+  by its node's footprint, so on the plain N2 draws 19 of N1's 20 lake bodies at rung 7 and 16 of 20 at rung 9. RULED (B13
+  item 1): accepted as the band's stated price. WHERE: `crates/bins/src/shore_rules.rs` (`candidate_for`). WHEN: the lakes
+  again after R2 (their 1 km outlines).
 - 🟥 **THE SOLVE MAKES CLOSED POCKETS NO EARTH BASIN RESEMBLES** (found 2026-09-26 by the washboard bench's fills, status
   §8d): pockets up to 11.9 km under the sea's level and 1.57 million km² across; any fill of such a hollow makes a vast flat
   floor and a vast shallow lake. WHERE: the first land and the crust's isostasy (`terrain/src/land.rs`), the craters, the
