@@ -167,6 +167,36 @@ pub struct NamedChoices {
     pub n2_cross_sigma: f64,
     /// N2: a side-dry column with a standing water stands over it by W6's share of its field (1).
     pub n2_side_holds: bool,
+    /// N2's reach per octave by the LAW (1): `C_kind × wavelength`, `C_kind` measured once over
+    /// unit octaves of the recipe's own noise; or the per-octave statistic over the table (0).
+    pub n2_reach_law: bool,
+    /// N2's pocket variants (the build design's S0 item 3, Q11): 0 = the record N2; 1 = a
+    /// POCKET-word column is exempt from the sea's side hold; 2 = 1, and the standing water's floor
+    /// only where the SEA governs; 3 = 1, and that floor relaxed by the sea's presence.
+    pub n2_pocket: u8,
+    /// N2's fold names its water by THE ONE RULE (1; the build design's S0 item 4, Q7): a lake when
+    /// the lake samples are at least half of the wet ones, at the highest lake level among them;
+    /// or by the most samples (0, the record).
+    pub n2_fold_rule: bool,
+    /// N2's DEFAULT RULE (1; the build design §1.2 item 9): a slot for a water with no wet node
+    /// in the column's block reads every word as the band's edge over the water, every distance
+    /// 3.5 nodes and no presence, on every host alike; or the rows' own heights (0).
+    pub n2_default_rule: bool,
+    /// N2's WET TIE (1; S0 item 5): a column whose side is wet stands at least one length unit
+    /// under its water, so the sheet's own rule (`s < l`) draws it wet. From rung 14 up a column's
+    /// centre stands at the middle of its node cell, where a straight coast's clamped words read
+    /// `S = 0` exactly and the wet hold is nought; 0 leaves that column drawn dry at its level.
+    pub n2_wet_strict: bool,
+    /// N2's LONE HOLD (1; S0 item 5): a column with no water in its block, whose side is dry,
+    /// stands over its standing water (D7) by `k × band`, as the default rule's slot would; 0
+    /// leaves it to the land rule, which lets a far column's ground stand under the sea it reads.
+    pub n2_lone_holds: bool,
+    /// N2's FOLD KERNEL under the one naming rule (ruling B15 item 1, the far lake flicker): 0 the
+    /// column's own footprint; 1 the TENT, the column and its eight neighbours at its own rung
+    /// weighted 1-2-1 along each axis ([`tent_words`]); 2 the tent only where the column's own
+    /// samples disagree (a column all wet or all dry keeps its own answer); 3 the column's own
+    /// footprint, and a wet column with no wet edge neighbour at its rung is dry (no lone column).
+    pub n2_fold_kernel: u8,
 }
 
 impl Default for NamedChoices {
@@ -202,6 +232,13 @@ impl Default for NamedChoices {
             n2_form: 2,
             n2_cross_sigma: 3.0,
             n2_side_holds: true,
+            n2_reach_law: true,
+            n2_pocket: 2,
+            n2_fold_rule: false,
+            n2_default_rule: true,
+            n2_wet_strict: true,
+            n2_lone_holds: true,
+            n2_fold_kernel: 0,
         }
     }
 }
@@ -251,6 +288,13 @@ impl NamedChoices {
             "n2_form" => self.n2_form = (f()? as u8).min(3),
             "n2_cross_sigma" => self.n2_cross_sigma = f()?.max(0.0),
             "n2_side_holds" => self.n2_side_holds = f()? != 0.0,
+            "n2_reach_law" => self.n2_reach_law = f()? != 0.0,
+            "n2_pocket" => self.n2_pocket = (f()? as u8).min(3),
+            "n2_fold_rule" => self.n2_fold_rule = f()? != 0.0,
+            "n2_default_rule" => self.n2_default_rule = f()? != 0.0,
+            "n2_wet_strict" => self.n2_wet_strict = f()? != 0.0,
+            "n2_lone_holds" => self.n2_lone_holds = f()? != 0.0,
+            "n2_fold_kernel" => self.n2_fold_kernel = (f()? as u8).min(3),
             _ => return Err(format!("no named choice `{name}`")),
         }
         Ok(())
@@ -337,6 +381,34 @@ impl NamedChoices {
             format!(
                 "N2's side hold = {} (1: a side-dry column that carries a standing water stands over it by k x |its governing field|; the side decides, the sheet never covers it)",
                 u8::from(self.n2_side_holds)
+            ),
+            format!(
+                "N2's fold names its water by = {} (1 the one rule: a lake when the lake samples are at least half of the wet ones, at the highest lake level among them — W15.1's lake share, the rule a count pyramid carries to the top rung; 0 the record: the water with the most samples, a tie the higher level; the build design's S0 item 4, Q7)",
+                if self.n2_fold_rule { "the one rule" } else { "the most samples" }
+            ),
+            format!(
+                "N2's default rule = {} (1: a slot for a water with no wet node in the column's block reads every word W + band, every distance 3.5 nodes, no presence — the build design §1.2 item 9, so a host with the shore band and a host with the rows read one word; it fires only where the fold names such a water, from rung 14 up; 0: the rows' own heights)",
+                u8::from(self.n2_default_rule)
+            ),
+            format!(
+                "N2's wet tie = {} (1: a side-wet column stands at least one length unit under its water, so the sheet draws it wet; 0: a column whose side field reads exactly nought stands AT its level and the sheet draws it dry — from rung 14 up a column's centre is its node cell's middle, where a straight coast's clamped words read nought; S0 item 5)",
+                u8::from(self.n2_wet_strict)
+            ),
+            format!(
+                "N2's lone hold = {} (1: a column with no water in its block whose side is dry stands over its standing water by k x band, the default rule's slot; 0: the land rule alone, under which a far column's ground can stand under the sea it reads; S0 item 5)",
+                u8::from(self.n2_lone_holds)
+            ),
+            format!(
+                "N2's fold kernel = {} (under the one naming rule: 0 the column's own footprint; 1 the tent, the column and its eight neighbours at its rung weighted 1-2-1 per axis; 2 the tent only where the column's own samples disagree; 3 the own footprint with no lone wet column; ruling B15 item 1, the far lake flicker)",
+                self.n2_fold_kernel
+            ),
+            format!(
+                "N2's pocket variant = {} (0 the record; 1 a POCKET-word column exempt from the sea's side hold; 2 = 1 and the standing water's floor only where the sea governs; 3 = 1 and that floor relaxed by the sea's presence; the build design's S0 item 3, Q11)",
+                self.n2_pocket
+            ),
+            format!(
+                "N2's reach per octave = {} (1: the law C_kind x wavelength, C_kind measured over unit octaves of the recipe's own noise; 0: 15/8 x RMS height / RMS slope measured over the table's own octaves)",
+                if self.n2_reach_law { "the law" } else { "the statistic" }
             ),
             format!(
                 "N2's word band = {} m (each mirrored word held within it of the level; inf = N1's words; ruling B10 item 1, the steep coasts' notches; 30 m a stated choice of the second round, the owner's word owed)",
@@ -561,6 +633,178 @@ impl NodeSite {
 #[must_use]
 pub const fn block_index(oi: i64, oj: i64) -> usize {
     ((oj + 2) * 6 + (oi + 2)) as usize
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// THE SHORE BAND (ruling B14 item 1; the build design §2.3): the heights a far host needs.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// ★ WHETHER A NODE'S BANDED WORD NEEDS ITS HEIGHT for a water at level `w` (whole metres). Where
+/// this answers no, the mirrored word held within `band` of the level is the band's edge on the
+/// node's side: `w − band` for a node wet for the water, `w + band` for any other node.
+///
+/// **Example.** A land node of the gentle coast 12 m over the sea reads `sea + 12`, so it needs
+/// its height. A sea node 1 m under the sea reads `sea − 1` (not the edge `sea − 30`), so it needs
+/// its height too. A land node 80 m over the sea reads `sea + 30` without its height.
+#[must_use]
+pub fn band_needs(z: i32, wet: bool, w: i32, band: i32) -> bool {
+    if wet {
+        z > w - band
+    } else {
+        z > w - band && z < w + band
+    }
+}
+
+/// ★ THE SHORE BAND (ruling B14 item 1): the fine nodes whose height a host needs when it holds
+/// only the mask, the lake levels and the band. Node `n` joins where it stands in the sixteen-node
+/// stencil of a node cell whose 6 × 6 block holds a node wet for a water `b`, and [`band_needs`]
+/// says yes for `b`. The walk reads every regular node cell a column can name (`−1 ..= edge − 1`
+/// on each axis of each face, each block through the seam table). The corner phantoms' cells,
+/// which reach further from rung 13 up, are the host's exhaustive check (the build's S2).
+#[must_use]
+pub fn shore_band(nodes: &Nodes, fine: &MacroLattice, band_m: f64) -> Vec<bool> {
+    shore_band_by(nodes, fine, band_m, band_needs)
+}
+
+/// [`shore_band`] under another membership rule (the bench's failing control reads S0's first
+/// rule through it).
+#[must_use]
+pub fn shore_band_by(
+    nodes: &Nodes,
+    fine: &MacroLattice,
+    band_m: f64,
+    needs: fn(i32, bool, i32, i32) -> bool,
+) -> Vec<bool> {
+    let band = band_m as i32;
+    let edge = i64::from(fine.edge);
+    let mut in_band = vec![false; nodes.z_m.len()];
+    for face in Face::ALL {
+        for nj in -1..edge {
+            for ni in -1..edge {
+                let block = NodeSite {
+                    face,
+                    ni,
+                    nj,
+                    ta_q: Gi::ZERO,
+                    tb_q: Gi::ZERO,
+                    ta: 0.0,
+                    tb: 0.0,
+                }
+                .block(fine);
+                let mut waters: [Option<Water>; BLOCK] = [None; BLOCK];
+                let mut count = 0usize;
+                for &n in &block {
+                    if let Some(b) = nodes.water_of(n)
+                        && !waters[..count].contains(&Some(b))
+                    {
+                        waters[count] = Some(b);
+                        count += 1;
+                    }
+                }
+                for b in waters[..count].iter().flatten() {
+                    let w = b.level_m(nodes.sea_m).round() as i32;
+                    for oj in -1..=2i64 {
+                        for oi in -1..=2i64 {
+                            let n = block[block_index(oi, oj)];
+                            let z = i32::from(nodes.z_m[n as usize]);
+                            if needs(z, nodes.wet_for(n, *b), w, band) {
+                                in_band[n as usize] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    in_band
+}
+
+/// ★ WHERE A COAST CROSSES THE CUBE'S EDGES (the build design's S0 item 6): the node pairs that
+/// straddle a cube edge with another water on each side (each pair once), per face side, and the
+/// busiest stretch of 32 nodes along one side as `(pairs, face, side, node along the side)`.
+pub struct EdgeCoast {
+    pub pairs: usize,
+    pub per_edge: Vec<(Face, vd_seed::seam::Edge, usize)>,
+    pub best: Option<(usize, Face, vd_seed::seam::Edge, i64)>,
+}
+
+/// ★ THE EDGE COAST of one body's nodes (see [`EdgeCoast`]).
+///
+/// **Example.** Face −Y's `v−` side: node `(t, 0)` is sea and its partner across the cube edge,
+/// `node_at(−Y, t, −1)`, is land, so the coast runs between them: one pair.
+#[must_use]
+pub fn edge_coast(nodes: &Nodes, fine: &MacroLattice) -> EdgeCoast {
+    use vd_seed::seam::Edge;
+    let edge = i64::from(fine.edge);
+    let mut seen: std::collections::BTreeSet<(u32, u32)> = std::collections::BTreeSet::new();
+    let mut best: Option<(usize, Face, Edge, i64)> = None;
+    let mut per_edge = Vec::new();
+    for face in Face::ALL {
+        for side in Edge::ALL {
+            let pair = |t: i64| -> (u32, u32) {
+                let (inside, across) = match side {
+                    Edge::UMinus => ((0, t), (-1, t)),
+                    Edge::UPlus => ((edge - 1, t), (edge, t)),
+                    Edge::VMinus => ((t, 0), (t, -1)),
+                    Edge::VPlus => ((t, edge - 1), (t, edge)),
+                };
+                (
+                    node_at(fine, face, inside.0, inside.1),
+                    node_at(fine, face, across.0, across.1),
+                )
+            };
+            let coast: Vec<bool> = (0..edge)
+                .map(|t| {
+                    let (a, b) = pair(t);
+                    nodes.water_of(a) != nodes.water_of(b)
+                })
+                .collect();
+            let mut here = 0usize;
+            for (t, &x) in coast.iter().enumerate() {
+                if x {
+                    let (a, b) = pair(t as i64);
+                    here += usize::from(seen.insert((a.min(b), a.max(b))));
+                }
+            }
+            let span = 32usize.min(coast.len());
+            let mut run = coast.iter().take(span).filter(|&&x| x).count();
+            for t in span..coast.len() {
+                if run > best.map_or(0, |b| b.0) {
+                    best = Some((run, face, side, (t - span / 2) as i64));
+                }
+                run += usize::from(coast[t]);
+                run -= usize::from(coast[t - span]);
+            }
+            if here > 0 {
+                per_edge.push((face, side, here));
+            }
+        }
+    }
+    EdgeCoast {
+        pairs: seen.len(),
+        per_edge,
+        best,
+    }
+}
+
+/// ★ THE NODES A BAND-HOLDING HOST READS: the rows' arrays with every height outside the band
+/// replaced by the deepest word, `i16::MIN`. The mirror and the band carry that word to the band's
+/// edge on the node's side for every water, which is the word a host that holds only the mask, the
+/// lake levels and the band reads there. So N2 read over these arrays draws what such a host
+/// draws, and CHECK-SHORE-BAND compares it with N2 read over the rows.
+#[must_use]
+pub fn band_held(nodes: &Nodes, in_band: &[bool]) -> Nodes {
+    Nodes {
+        z_m: nodes
+            .z_m
+            .iter()
+            .zip(in_band)
+            .map(|(&z, &held)| if held { z } else { i16::MIN })
+            .collect(),
+        word: nodes.word.clone(),
+        level_m: nodes.level_m.clone(),
+        sea_m: nodes.sea_m,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -842,6 +1086,26 @@ pub fn candidate_for(
     ch: &NamedChoices,
 ) -> Cand {
     let w = b.level_m(nodes.sea_m);
+    // THE DEFAULT RULE (the build design §1.2 item 9): N2's slot for a water with no wet node in
+    // the block reads the band's edge over the water for every word, 3.5 nodes for every distance
+    // and no presence, so a host that holds the shore band and a host that holds the rows read it
+    // alike. Its read: S = +band, g = g_min, Ω = 0.
+    if ch.n2_default_rule
+        && ch.word_band_m.is_finite()
+        && !block.iter().any(|&n| nodes.wet_for(n, b))
+    {
+        return Cand {
+            water: b,
+            w,
+            s: ch.word_band_m,
+            g: ch.g_min,
+            omega: 0.0,
+            wet_corner: false,
+            near: f64::INFINITY,
+            near_node: u32::MAX,
+            dist_nodes: 3.5,
+        };
+    }
     let (s_k, g_k) = if ch.word_kernel && ch.word_band_m.is_finite() {
         let side: [f64; BLOCK] = std::array::from_fn(|k| {
             if nodes.wet_for(block[k], b) {
@@ -1180,6 +1444,8 @@ pub struct Ground {
     /// Each fine octave's RMS height at share one, metres, measured over the sphere (nought for a
     /// coarse octave): times the column's factor, the height it can carry a column by.
     pub octave_rms: [f64; OCTAVES_CAP],
+    /// The column's own coast word (its nearest fine node's): N2's pocket variants read it.
+    pub word: u8,
 }
 
 /// Which surface family a rule belongs to: N1 fades the fine half by `β`; O1 keeps it whole; N2
@@ -1243,8 +1509,14 @@ pub fn finish(
         (1.0 - beta) * h_far + beta * (c.w + g_used)
     };
     if wet {
+        let depth = (c.w - h1).max(ch.k * g_used.abs());
+        let depth = if family == Family::N2 && ch.n2_wet_strict {
+            depth.max(1.0 / RAW_PER_M)
+        } else {
+            depth
+        };
         return Finished {
-            s: c.w - (c.w - h1).max(ch.k * g_used.abs()),
+            s: c.w - depth,
             l: Some(c.w),
             beta,
             ramp: false,
@@ -1282,13 +1554,30 @@ pub fn finish(
     // in full, so the sheet never covers it, whatever the node-scale ground under it (a banded
     // line, or a far rung's coarser ground, may stand seaward of that ground's crossing).
     if family == Family::N2 && ch.n2_side_holds {
+        // The pocket variants (Q11): a POCKET-word column keeps the solve's basin, never the sea's
+        // side hold (variants 1–3).
+        let pocket_exempt = ch.n2_pocket >= 1 && ground.word == WORD_POCKET;
+        let mut omega_sea = 0.0f64;
         for (k, b) in cands.as_slice().iter().enumerate() {
             if b.water == Water::Sea {
-                lb = lb.max(b.w + ch.k * fields[k].abs() - (1.0 - b.omega) * ground.a_r);
+                omega_sea = omega_sea.max(b.omega);
+                if !pocket_exempt {
+                    lb = lb.max(b.w + ch.k * fields[k].abs() - (1.0 - b.omega) * ground.a_r);
+                }
             }
         }
         if let Some(l) = ground.d7 {
-            lb = lb.max(l + ch.k * g_used.abs());
+            match ch.n2_pocket {
+                // The floor only where the sea governs.
+                2 => {
+                    if c.water == Water::Sea {
+                        lb = lb.max(l + ch.k * g_used.abs());
+                    }
+                }
+                // The floor relaxed by the sea's presence, as the sea slot's own hold is.
+                3 => lb = lb.max(l + ch.k * g_used.abs() - (1.0 - omega_sea) * ground.a_r),
+                _ => lb = lb.max(l + ch.k * g_used.abs()),
+            }
         }
     }
     Finished {
@@ -1560,9 +1849,187 @@ pub fn fold(samples: &[u32], sea_m: i16) -> (bool, Option<Water>) {
     (true, Water::of_key(best.0))
 }
 
+/// ★ THE ONE NAMING RULE (the build design's §1.4 item 2, S0 item 4, Q7): wet when the wet samples
+/// are at least half (a tie wet); then a LAKE when the lake samples are at least half of the wet
+/// ones (W15.1's lake share), at the HIGHEST lake level among the lake samples; else the sea. It
+/// reads only a wet count, a lake count and a level maximum, so a count pyramid carries it from
+/// rung 8 to the top rung with one rule — where the record's "most samples" needs a count per
+/// water.
+///
+/// **Example.** A far cell holds 2 048 samples: 700 of the sea, 400 of a lake at 1 200 m and 300 of
+/// a lake at 1 180 m. It is wet (1 400 of 2 048); its lake samples are 700 of the 1 400 wet ones, so
+/// it names a lake, at 1 200 m.
+#[must_use]
+pub fn fold_one_rule(samples: &[u32], sea_m: i16) -> (bool, Option<Water>) {
+    let (mut wet, mut lake) = (0u64, 0u64);
+    let mut top: Option<i16> = None;
+    for &k in samples {
+        match Water::of_key(k) {
+            None => {}
+            Some(Water::Sea) => wet += 1,
+            Some(Water::Lake(l)) => {
+                wet += 1;
+                lake += 1;
+                top = Some(top.map_or(l, |t| t.max(l)));
+            }
+        }
+    }
+    let _ = sea_m;
+    one_rule_counts(samples.len() as u64, wet, lake, top)
+}
+
+/// A column's fold words: its samples, its wet samples, its lake samples and the highest lake
+/// level among them.
+pub type FoldWords = (u64, u64, u64, Option<i16>);
+
+/// ★ THE TENT FOLD'S WORDS (ruling B15 item 1, a candidate cure of the far lake flicker): the words
+/// of a column and its eight neighbours at one rung, `words[b][a]` for the offset `(a − 1, b − 1)`,
+/// weighted 1-2-1 along each axis and summed; a neighbour the host does not hold (`None`) drops out
+/// with its weight. The level is the column's own highest lake level where its own footprint holds
+/// a lake sample, else the neighbours' highest. [`one_rule_counts`] reads the result.
+///
+/// **Example.** A one-column piece of a lake's edge is 64 % wet; its lake-side neighbour and one
+/// corner are 90 % wet, its other three neighbours and three corners 10 %. The tent reads
+/// (4·64 + 2·90 + 6·10 + 1·90 + 3·10) / 16 = 38 % wet, so the piece is not drawn at its own rung
+/// and cannot flicker at the next.
+#[must_use]
+pub fn tent_words(words: &[[Option<FoldWords>; 3]; 3]) -> FoldWords {
+    const W: [u64; 3] = [1, 2, 1];
+    let (mut n, mut wet, mut lake) = (0u64, 0u64, 0u64);
+    let mut top: Option<i16> = None;
+    for (b, row) in words.iter().enumerate() {
+        for (a, cell) in row.iter().enumerate() {
+            if let Some((cn, cw, cl, ct)) = cell {
+                let w = W[a] * W[b];
+                n += w * cn;
+                wet += w * cw;
+                lake += w * cl;
+                if let Some(t) = ct {
+                    top = Some(top.map_or(*t, |x: i16| x.max(*t)));
+                }
+            }
+        }
+    }
+    let own = words[1][1].and_then(|w| w.3);
+    (n, wet, lake, own.or(top))
+}
+
+/// ★ THE KERNEL'S WORDS (ruling B15 item 1): kernel 0 reads the column's own words, kernel 1 the
+/// tent, kernel 2 the tent only where the column's own samples disagree — a column all wet (of one
+/// water) or all dry keeps its own words.
+#[must_use]
+pub fn kernel_words(kernel: u8, words: &[[Option<FoldWords>; 3]; 3]) -> Option<FoldWords> {
+    let own = words[1][1]?;
+    let (n, wet, lake, _) = own;
+    let unanimous = wet == 0 || (wet == n && (lake == 0 || lake == n));
+    Some(match kernel {
+        0 => own,
+        2 if unanimous => own,
+        _ => tent_words(words),
+    })
+}
+
+/// ★ THE FOLD BY KERNEL (ruling B15 item 1): the one naming rule on the words [`kernel_words`]
+/// reads (kernels 0–2), or kernel 3 — the column's own words, and a column that would be wet
+/// with no wet edge neighbour at its rung (by the same rule on the neighbour's own words) is dry.
+/// `None` where the host does not hold the column's own words.
+///
+/// **Example.** At rung 14 a 16 km piece of the 5 882 m lake's edge is 64 % wet, and its four
+/// edge neighbours are 30 %, 20 %, 40 % and 10 % wet: under kernel 3 it is dry, so it cannot hide
+/// at rung 15 and show again at rung 16.
+#[must_use]
+pub fn fold_by_kernel(
+    kernel: u8,
+    words: &[[Option<FoldWords>; 3]; 3],
+) -> Option<(bool, Option<Water>)> {
+    if kernel == 3 {
+        let (n, wet, lake, top) = words[1][1]?;
+        let own = one_rule_counts(n, wet, lake, top);
+        let wet_at = |w: Option<FoldWords>| {
+            w.is_some_and(|(n, wet, lake, top)| one_rule_counts(n, wet, lake, top).0)
+        };
+        let neighbour = wet_at(words[0][1])
+            || wet_at(words[1][0])
+            || wet_at(words[1][2])
+            || wet_at(words[2][1]);
+        return Some(if own.0 && !neighbour {
+            (false, None)
+        } else {
+            own
+        });
+    }
+    let (n, wet, lake, top) = kernel_words(kernel, words)?;
+    Some(one_rule_counts(n, wet, lake, top))
+}
+
+/// The fold words of a list of sample keys.
+#[must_use]
+pub fn words_of(samples: &[u32]) -> FoldWords {
+    let (mut wet, mut lake) = (0u64, 0u64);
+    let mut top: Option<i16> = None;
+    for &k in samples {
+        match Water::of_key(k) {
+            None => {}
+            Some(Water::Sea) => wet += 1,
+            Some(Water::Lake(l)) => {
+                wet += 1;
+                lake += 1;
+                top = Some(top.map_or(l, |t| t.max(l)));
+            }
+        }
+    }
+    (samples.len() as u64, wet, lake, top)
+}
+
+/// ★ THE ONE NAMING RULE ON COUNTS: `n` samples, `wet` of them wet, `lake` of those a lake's, `top`
+/// the highest lake level among the lake samples. A count pyramid sums the three words of the
+/// quarters under a far column and reads this; [`fold_one_rule`] counts the samples and reads it.
+///
+/// **Example.** A rung-16 column over the gentle coast holds 1 048 576 samples: 600 000 wet, 30 000
+/// of a tarn at 3 800 m. It is wet (600 000 of 1 048 576), and the tarn's share of the wet samples
+/// is under half, so it names the sea.
+#[must_use]
+pub fn one_rule_counts(n: u64, wet: u64, lake: u64, top: Option<i16>) -> (bool, Option<Water>) {
+    if wet == 0 || wet * 2 < n {
+        return (false, None);
+    }
+    match top {
+        Some(l) if lake * 2 >= wet => (true, Some(Water::Lake(l))),
+        _ => (true, Some(Water::Sea)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ The one naming rule: a tie wet, the lake share, the highest level; the record's rule
+    /// names the water with the most samples instead.
+    ///
+    /// **Example.** 700 sea, 400 of a lake at 1 200 m, 300 of one at 1 180 m, 648 dry: the one
+    /// rule names the 1 200 m lake (700 lake samples of 1 400 wet); the record names the sea.
+    #[test]
+    fn the_one_rule_names_a_lake_by_its_share_and_its_highest_level() {
+        let (sea, hi, lo) = (
+            Water::Sea.key(),
+            Water::Lake(1_200).key(),
+            Water::Lake(1_180).key(),
+        );
+        let mut s: Vec<u32> = Vec::new();
+        s.extend(std::iter::repeat_n(sea, 700));
+        s.extend(std::iter::repeat_n(hi, 400));
+        s.extend(std::iter::repeat_n(lo, 300));
+        s.extend(std::iter::repeat_n(0, 648));
+        assert_eq!(fold_one_rule(&s, 0), (true, Some(Water::Lake(1_200))));
+        assert_eq!(fold(&s, 0), (true, Some(Water::Sea)));
+        // A tie of wet and dry is wet; fewer lake samples than half the wet ones names the sea.
+        let t = [sea, sea, 0, 0];
+        assert_eq!(fold_one_rule(&t, 0), (true, Some(Water::Sea)));
+        let u = [sea, sea, sea, hi, 0, 0];
+        assert_eq!(fold_one_rule(&u, 0), (true, Some(Water::Sea)));
+        let dry = [0, 0, sea];
+        assert_eq!(fold_one_rule(&dry, 0), (false, None));
+    }
 
     /// A fixed xorshift for the tests' random stencils.
     fn rng(state: &mut u64) -> f64 {
@@ -1771,6 +2238,128 @@ mod tests {
         assert_eq!(c.unbanded().k, 0.5);
     }
 
+    /// ★ The tent weighs a column and its eight neighbours 1-2-1 per axis, drops a neighbour the
+    /// host does not hold, and keeps the column's own lake level; kernel 2 keeps a unanimous
+    /// column's own words.
+    ///
+    /// **Example.** The doc's piece of a lake's edge: 64 % wet, its lake-side neighbour and one
+    /// corner 90 %, the rest 10 % — the tent reads 616 of 1 600 (38.5 %), so the one rule says dry.
+    #[test]
+    fn the_tent_weighs_the_neighbours_and_keeps_a_unanimous_column() {
+        let c = |pct: u64| Some((100u64, pct, 0u64, None));
+        let words = [
+            [c(10), c(10), c(10)],
+            [c(90), c(64), c(10)],
+            [c(90), c(10), c(10)],
+        ];
+        // Weights: the centre 4, the four sides 2, the four corners 1.
+        let (n, wet, lake, top) = tent_words(&words);
+        assert_eq!(
+            (n, wet, lake, top),
+            (1_600, 4 * 64 + 2 * 90 + 6 * 10 + 90 + 3 * 10, 0, None)
+        );
+        assert_eq!(one_rule_counts(n, wet, lake, top), (false, None));
+        // A neighbour the host does not hold drops out with its weight.
+        let mut partial = words;
+        partial[0][0] = None;
+        assert_eq!(tent_words(&partial).0, 1_500);
+        // The level: the column's own where it holds a lake sample, else the neighbours'.
+        let mut lakes = words;
+        lakes[1][1] = Some((100, 80, 80, Some(1_200)));
+        lakes[1][0] = Some((100, 90, 90, Some(1_300)));
+        assert_eq!(tent_words(&lakes).3, Some(1_200));
+        lakes[1][1] = Some((100, 0, 0, None));
+        assert_eq!(tent_words(&lakes).3, Some(1_300));
+        // Kernel 2: a unanimous column keeps its own words; a mixed one reads the tent.
+        let mut all_wet = words;
+        all_wet[1][1] = Some((100, 100, 0, None));
+        assert_eq!(kernel_words(2, &all_wet), Some((100, 100, 0, None)));
+        assert_eq!(kernel_words(2, &words), Some(tent_words(&words)));
+        assert_eq!(kernel_words(0, &words), words[1][1]);
+        assert_eq!(kernel_words(1, &all_wet), Some(tent_words(&all_wet)));
+    }
+
+    /// ★ The band holds exactly the words off its edge: every height from `W − 100` to `W + 100`,
+    /// wet and not, against the mirror and the clamp themselves.
+    ///
+    /// **Example.** A sea node 1 m under the sea reads `sea − 1`, not the edge `sea − 30`, so it
+    /// joins the band (S0's first rule left it out).
+    #[test]
+    fn the_band_holds_exactly_the_words_off_the_edge() {
+        let (w, band) = (1_200i32, 30i32);
+        for z in w - 100..=w + 100 {
+            for wet in [false, true] {
+                let word = mirrored(f64::from(z), wet, f64::from(w))
+                    .clamp(f64::from(w - band), f64::from(w + band));
+                let edge = f64::from(if wet { w - band } else { w + band });
+                assert_eq!(
+                    band_needs(z, wet, w, band),
+                    word != edge,
+                    "z {z}, wet {wet}"
+                );
+            }
+        }
+        assert!(band_needs(w - 1, true, w, band));
+    }
+
+    /// ★ The default rule: a water with no wet node in the column's block reads `S = +band`,
+    /// `g = g_min`, no presence and 3.5 nodes, whatever the rows hold; with the rule off, the rows'
+    /// heights decide.
+    ///
+    /// **Example.** A far column's fold names the sea, but its 6 × 6 block is all land 10 m over
+    /// the sea: under the rule its sea slot reads `+30 m`, not the land's own `+10 m`.
+    #[test]
+    fn a_water_outside_the_block_reads_the_default_rule() {
+        let sea_m = 100i16;
+        let nodes = Nodes {
+            z_m: vec![sea_m + 10; BLOCK],
+            word: vec![WORD_LAND; BLOCK],
+            level_m: vec![DRY_M; BLOCK],
+            sea_m,
+        };
+        let block: [u32; BLOCK] = std::array::from_fn(|k| k as u32);
+        let (wa, wb) = (weights_f64(Gi::ZERO), weights_f64(Gi::ZERO));
+        let (dwa, dwb) = (dweights(0.25), dweights(0.25));
+        let ch = NamedChoices::default();
+        let c = candidate_for(
+            &nodes,
+            &block,
+            Water::Sea,
+            0.25,
+            0.25,
+            &wa,
+            &wb,
+            &dwa,
+            &dwb,
+            &ch,
+        );
+        assert_eq!(
+            (c.s, c.g, c.omega, c.wet_corner, c.dist_nodes),
+            (30.0, ch.g_min, 0.0, false, 3.5)
+        );
+        let off = NamedChoices {
+            n2_default_rule: false,
+            ..ch
+        };
+        let d = candidate_for(
+            &nodes,
+            &block,
+            Water::Sea,
+            0.25,
+            0.25,
+            &wa,
+            &wb,
+            &dwa,
+            &dwb,
+            &off,
+        );
+        assert!(
+            (d.s - 10.0).abs() < 1e-9,
+            "the rows' own +10 m, got {}",
+            d.s
+        );
+    }
+
     /// ★ The soft bound keeps a texture whole inside its knee, never passes its room, has no
     /// crease at the knee, and gives nought for a room of nought.
     ///
@@ -1815,6 +2404,7 @@ mod tests {
             octave_f: [0.0; OCTAVES_CAP],
             octave_reach: [0.0; OCTAVES_CAP],
             octave_rms: [0.0; OCTAVES_CAP],
+            word: WORD_LAND,
         }
     }
 

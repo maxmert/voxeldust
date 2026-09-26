@@ -53,8 +53,11 @@ mod controls;
 mod cost;
 mod eval;
 mod far;
+mod far_window;
 mod lines;
 mod panels;
+mod pyramid;
+mod seam;
 mod stands;
 mod transects;
 
@@ -63,7 +66,7 @@ use std::time::Instant;
 
 use vd_bins::artifact_worker::{SolveJob, run_solve};
 use vd_bins::shore_geometry::{RungReader, unit_of};
-use vd_bins::shore_rules::{NamedChoices, Nodes, RUNGS_MAX};
+use vd_bins::shore_rules::{NamedChoices, Nodes, RUNGS_MAX, band_held, shore_band, shore_band_by};
 use vd_client::artifact_book::{ArtifactCache, ArtifactReceiver, SharedField};
 use vd_core::glam::DVec3;
 use vd_core::pose::RealmId;
@@ -96,6 +99,10 @@ struct Args {
     artifact_cache: Option<String>,
     /// DEVELOPMENT PROBES: `FACE:RUNG:I:J`, each column printed with its parts, then the run stops.
     probes: Vec<String>,
+    /// The far window W4 (S0 item 5): 0 off (`--no-far`), 1 beside W0–W3, 2 alone (`--far-only`).
+    far: u8,
+    /// W-SEAM (S0 item 6): the two windows flush against the busiest coastal cube edge.
+    seam: bool,
 }
 
 fn args() -> Args {
@@ -111,6 +118,8 @@ fn args() -> Args {
         controls: true,
         artifact_cache: None,
         probes: Vec::new(),
+        far: 1,
+        seam: true,
     };
     let list: Vec<String> = std::env::args().skip(1).collect();
     let mut k = 0;
@@ -153,6 +162,13 @@ fn args() -> Args {
             "--no-panels" => no_panels = true,
             "--no-cost" => a.cost = false,
             "--no-controls" => a.controls = false,
+            "--no-far" => a.far = 0,
+            "--far-only" => a.far = 2,
+            "--no-seam" => a.seam = false,
+            "--seam-only" => {
+                a.seam = true;
+                a.far = 3;
+            }
             other => eprintln!("shoreline_bench: an unknown argument `{other}` is ignored"),
         }
         k += 1;
@@ -239,6 +255,12 @@ struct World<'a> {
     counts: &'a std::sync::Arc<CoastCounts>,
     cache: &'a ArtifactCache,
     nodes: &'a Nodes,
+    /// The rows' nodes with every height outside the shore band replaced (`band_held`): what a
+    /// host that holds only the mask, the lake levels and the band reads (CHECK-SHORE-BAND).
+    banded: &'a Nodes,
+    /// The same under S0's first band rule, which left out the wet nodes at `W − 1` and over
+    /// (CHECK-SHORE-BAND-CONTROL: it must draw another N2 somewhere).
+    banded_control: &'a Nodes,
     ch: NamedChoices,
     r1: u8,
     f_rung: u8,
@@ -249,11 +271,27 @@ struct World<'a> {
     octave_rms: [f64; vd_recipe::height::OCTAVES_CAP],
     vars: Vec<Var>,
     threads: usize,
+    far: u8,
 }
 
 impl World<'_> {
     /// ★ THE READ CONTEXT of one rung on one face.
     fn ctx(&self, face: Face, rung: u8, r0_only: bool) -> Option<Ctx<'_>> {
+        self.ctx_over(face, rung, r0_only, self.nodes)
+    }
+
+    /// The read context of one rung over another node store (the band-held nodes).
+    fn ctx_on<'b>(&'b self, face: Face, rung: u8, nodes: &'b Nodes) -> Option<Ctx<'b>> {
+        self.ctx_over(face, rung, false, nodes)
+    }
+
+    fn ctx_over<'b>(
+        &'b self,
+        face: Face,
+        rung: u8,
+        r0_only: bool,
+        nodes: &'b Nodes,
+    ) -> Option<Ctx<'b>> {
         let reader = RungReader::new(self.body, self.artifact, self.counts, face, rung)?;
         let fine = self.body.macro_lattice()?;
         let level = reader.level;
@@ -264,7 +302,7 @@ impl World<'_> {
             .map(|l| l.clone() as SharedField);
         Some(Ctx {
             body: self.body,
-            nodes: self.nodes,
+            nodes,
             cache_field,
             cache_next,
             rung,
@@ -436,6 +474,25 @@ fn main() {
         count_diff == 0,
     );
     let nodes = Nodes::of(&artifact);
+    // THE SHORE BAND (ruling B14 item 1) and the nodes a band-holding host reads.
+    let band_m = ch.word_band_m.min(f64::from(i16::MAX));
+    let in_band = shore_band(&nodes, &fine, band_m);
+    let banded = band_held(&nodes, &in_band);
+    let first_rule: fn(i32, bool, i32, i32) -> bool = |z, wet, w, band| {
+        if wet {
+            z > w - band && z < w - 1
+        } else {
+            z > w - band && z < w + band
+        }
+    };
+    let banded_control = band_held(&nodes, &shore_band_by(&nodes, &fine, band_m, first_rule));
+    c.say(format!(
+        "the shore band: {} of {} nodes hold their height ({} m; `shore_rules::shore_band`); the rest read the band's edge (CHECK-SHORE-BAND on W4)",
+        in_band.iter().filter(|&&b| b).count(),
+        in_band.len(),
+        ch.word_band_m
+    ));
+    drop(in_band);
     phases.push(("cache+nodes".into(), t.elapsed().as_secs_f64()));
     let rungs = body.ladder().rungs;
     let r1 = (0..rungs)
@@ -594,6 +651,45 @@ fn main() {
         (out, reach, rms_of, lines)
     };
     let (slope_mu, octave_reach, octave_rms, octave_lines) = slope_mu;
+    // ★ THE REACH LAW (the build design's S0 item 1, Q2): C_kind = 15/8 x RMS height / (RMS slope x
+    // wavelength), measured over UNIT octaves of the recipe's own noise — not over the table — so both
+    // hosts can state it as two constants; then each fine octave's law reach is C_kind x its wave.
+    let (c_smooth, c_ridged) = (
+        unit_octave_c(&body, vd_recipe::height::OCTAVE_SMOOTH, 1_000.0, 2_048),
+        unit_octave_c(&body, vd_recipe::height::OCTAVE_RIDGED, 1_000.0, 2_048),
+    );
+    let law_reach = {
+        let charter = body.plan_charter(0, Face::PosX);
+        let mut out = [0.0f64; vd_recipe::height::OCTAVES_CAP];
+        for o in body.first_fine()..octave_counts[0].min(vd_recipe::height::OCTAVES_CAP) {
+            let oct = &charter.octaves[o];
+            let lambda = body.radius_m() / vd_terrain::body::octave_frequency(oct);
+            let cc = if oct.kind == vd_recipe::height::OCTAVE_RIDGED {
+                c_ridged
+            } else {
+                c_smooth
+            };
+            out[o] = cc * lambda;
+            c.say(format!(
+                "N2's reach law: octave {o} ({}, wave {lambda:.0} m): the statistic {:.0} m, the law {:.0} m ({:+.1} %), the spectrum's sine law {:.0} m",
+                if oct.kind == vd_recipe::height::OCTAVE_RIDGED { "ridged" } else { "smooth" },
+                octave_reach[o],
+                out[o],
+                100.0 * (out[o] / octave_reach[o].max(1e-9) - 1.0),
+                vd_bins::shore_rules::FADE_PEAK_SLOPE * lambda / std::f64::consts::TAU
+            ));
+        }
+        out
+    };
+    c.say(format!(
+        "N2's reach law: C_smooth {c_smooth:.4}, C_ridged {c_ridged:.4} (15/8 x RMS height / (RMS slope per axis x wave), unit octaves of the recipe's noise, 1 000 m wave, 2 048 seeded sites x 4 seeds); in use: {}",
+        if ch.n2_reach_law { "the law" } else { "the statistic" }
+    ));
+    let octave_reach = if ch.n2_reach_law {
+        law_reach
+    } else {
+        octave_reach
+    };
     for l in &octave_lines {
         c.say(format!(
             "N2's ramp per octave (share one, 2 048 sites): {l}"
@@ -612,6 +708,8 @@ fn main() {
         counts: &counts,
         cache: &cache,
         nodes: &nodes,
+        banded: &banded,
+        banded_control: &banded_control,
         ch,
         r1,
         f_rung,
@@ -622,6 +720,7 @@ fn main() {
         octave_rms,
         vars: vars.clone(),
         threads: a.threads,
+        far: a.far,
     };
 
     if !a.probes.is_empty() {
@@ -692,7 +791,7 @@ fn main() {
     };
     let mut pool: Pool = BTreeMap::new();
     let mut summaries: BTreeMap<String, StandSummary> = BTreeMap::new();
-    for stand in &stand_list {
+    for stand in stand_list.iter().filter(|_| a.far != 3) {
         let t = Instant::now();
         let s = run_stand(&mut c, &world, stand, &bands, &mut panels, &mut pool);
         summaries.insert(stand.name.to_string(), s);
@@ -703,6 +802,13 @@ fn main() {
             t.elapsed().as_secs_f64(),
             peak_rss_mb()
         ));
+    }
+    // W-SEAM (S0 item 6), with its own lake pool so the stands' pooled lines stay the stands'.
+    if a.seam && a.far != 2 {
+        let t = Instant::now();
+        let mut seam_pool: Pool = BTreeMap::new();
+        seam::run(&mut c, &world, &mut seam_pool);
+        phases.push(("seam".into(), t.elapsed().as_secs_f64()));
     }
     c.say("\n== THE POOLED LAKE LINE (every stand) ==");
     lines::pooled_lines(&mut c, &pool);
@@ -787,6 +893,11 @@ fn run_stand(
         "\n==================== THE STAND `{}` ====================",
         stand.name
     ));
+    if w.far == 2 {
+        far_window::run(c, w, stand);
+        c.end_stand();
+        return StandSummary::default();
+    }
     let fine = w.body.macro_lattice().expect("a lattice");
     let wins = stands::windows_of(w.body, stand);
     let mut transects: Vec<transects::Transect> = Vec::new();
@@ -816,6 +927,7 @@ fn run_stand(
             let fold = Fold {
                 map: fold_map.as_ref(),
                 ctx_f: None,
+                pyramid: None,
             };
             let out = eval::eval_window(&ctx, i0, j0, n, &fold, w.threads, true);
             let (m_i, m_j) = metric(&ctx, i0 + n / 2, j0 + n / 2);
@@ -957,19 +1069,29 @@ fn run_stand(
             &transects,
             &ctxs,
             map7_w2.as_ref(),
+            None,
             w2_metric.0,
             w2_metric.1,
             w2_metric.2,
             &w.ch,
             w.threads,
+            false,
         );
         c.say(format!(
             "   SHORE-STEP: {} transects walked in {:.1} s",
             transects.len(),
             t.elapsed().as_secs_f64()
         ));
-        summary.decide =
-            transects::print(c, stand.name, &steps, &transects, &w.vars, w.f_rung, w.r1);
+        summary.decide = transects::print(
+            c,
+            stand.name,
+            &steps,
+            &transects,
+            &w.vars,
+            w.f_rung,
+            w.r1,
+            0..13,
+        );
     } else {
         c.say("   SHORE-STEP: no transect (no water's contour in W2)");
     }
@@ -996,6 +1118,9 @@ fn run_stand(
                 );
             }
         }
+    }
+    if w.far == 1 {
+        far_window::run(c, w, stand);
     }
     c.end_stand();
     summary
@@ -1176,4 +1301,66 @@ fn choice_a(c: &mut Census, summaries: &BTreeMap<String, StandSummary>) {
         }
     }
     let _ = (Window::at, PyramidField::level_for);
+}
+
+/// ★ ONE KIND'S REACH CONSTANT over UNIT octaves of the recipe's own noise (the build design's §4):
+/// `15/8 × RMS height / (RMS slope per axis × wavelength)`, the height and the slope read through the
+/// recipe's own octave sum at share one, at `sites` seeded rung-0 sites on the six faces, the slope
+/// over two rung-0 cells, averaged over four noise seeds. A unit octave's height and slope both scale
+/// with its amplitude, and its slope with one over its wave, so the constant needs one wave only.
+fn unit_octave_c(body: &BodyDefinition, kind: vd_recipe::Gi, lambda_m: f64, sites: usize) -> f64 {
+    use vd_recipe::Gi;
+    use vd_recipe::height::{AMP_BITS, OCTAVE_FINE, OCTAVES_CAP, Octave, relief_parts_from};
+    use vd_recipe::noise::{NOISE_BITS, NOISE_ONE};
+    let charter = body.plan_charter(0, Face::PosX);
+    let n0 = i64::from(body.ladder().cells_per_edge(0));
+    let freq = body.radius_m() / lambda_m;
+    let whole = freq.floor();
+    let (f_int, f_frac) = (
+        Gi::new(whole as i64),
+        Gi::new(((freq - whole) * f64::from(1u32 << NOISE_BITS)).round() as i64),
+    );
+    let h = 2.0 * f64::from(vd_seed::ladder::cell_m(0));
+    let (mut sum_h, mut sum_s, mut n_h, mut n_s) = (0.0f64, 0.0f64, 0usize, 0usize);
+    for salt in 0..4u64 {
+        let unit = Octave {
+            seed: 0x5eed_0f0c_7a5e_0000 ^ salt,
+            frequency_int: f_int,
+            frequency_frac: f_frac,
+            amplitude: Gi::new(1i64 << (7 + 8 + AMP_BITS - 8)),
+            kind,
+            fine: OCTAVE_FINE,
+            pad: [Gi::ZERO; 2],
+        };
+        let mut table = [Octave::smooth(0, Gi::ZERO, Gi::ZERO, Gi::ZERO); OCTAVES_CAP];
+        table[0] = unit;
+        let term = |d: [Gi; 3]| {
+            vd_bins::shore_rules::metres(
+                relief_parts_from(&table, 0, 1, d, &charter.roughness, NOISE_ONE).fine,
+            )
+        };
+        let mut state = 0x243f_6a88_85a3_08d3u64 ^ (salt << 32);
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..sites {
+            let face = (next() % 6) as i32;
+            let span = (n0 - 4_096).max(1) as u64;
+            let i = (next() % span) as i32 + 1_024;
+            let j = (next() % span) as i32 + 1_024;
+            let t0 = term(site_direction(&charter, face, i, j));
+            let ti = term(site_direction(&charter, face, i + 2, j));
+            let tj = term(site_direction(&charter, face, i, j + 2));
+            sum_h += t0 * t0;
+            sum_s += ((ti - t0) / h).powi(2) + ((tj - t0) / h).powi(2);
+            n_h += 1;
+            n_s += 2;
+        }
+    }
+    let rms_h = (sum_h / n_h as f64).sqrt();
+    let rms_s = (sum_s / n_s as f64).sqrt();
+    vd_bins::shore_rules::FADE_PEAK_SLOPE * rms_h / (rms_s * lambda_m)
 }

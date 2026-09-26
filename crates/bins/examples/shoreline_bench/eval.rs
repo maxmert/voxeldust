@@ -18,10 +18,10 @@ use std::time::Instant;
 
 use vd_bins::shore_geometry::{RungReader, ShippedColumn};
 use vd_bins::shore_rules::{
-    Cand, Cands, Family, Ground, NamedChoices, NodeSite, Nodes, RUNGS_MAX, WORD_POCKET, Water,
-    block_index, candidate_for, candidates, contour_c0, dweights, factor_q, fine_terms, finish,
-    finish_alone, fold, metres, o1_field, point_side, residuals, shore_f64, term_sum, unit_of_q,
-    weights_f64, word_of,
+    Cand, Cands, Family, FoldWords, Ground, NamedChoices, NodeSite, Nodes, RUNGS_MAX, WORD_POCKET,
+    Water, block_index, candidate_for, candidates, contour_c0, dweights, factor_q, fine_terms,
+    finish, finish_alone, fold, fold_by_kernel, fold_one_rule, metres, o1_field, point_side,
+    residuals, shore_f64, term_sum, unit_of_q, weights_f64, word_of, words_of,
 };
 use vd_client::artifact_book::SharedField;
 use vd_recipe::Gi;
@@ -31,6 +31,8 @@ use vd_seed::bend::Face;
 use vd_terrain::BodyDefinition;
 use vd_terrain::artifact::{Side, ZField, column_water};
 use vd_terrain::chunk::{CHUNK_EDGE, ChunkKey, column_field};
+
+use crate::pyramid::Pyramid;
 
 /// The rule variants the bench paints (plan §5): today, the pure contour, N1 and O1 with the fold
 /// and without it, O1 with a quarter-cell clamp, and the second round's N2 (ruling B10 item 1).
@@ -165,6 +167,10 @@ pub struct Checks {
     pub hist: [usize; 6],
     /// The what-if's own time per column (ns), by candidate count 0, 1, 2+.
     pub whatif_ns: [(f64, usize); 3],
+    /// FOLD-RULES-DIFFER: the folded columns, and those where the record and the one rule name
+    /// another water on N2's samples.
+    pub fold_cols: usize,
+    pub fold_differ: usize,
 }
 
 impl Checks {
@@ -192,6 +198,8 @@ impl Checks {
             w.0 += ow.0;
             w.1 += ow.1;
         }
+        self.fold_cols += o.fold_cols;
+        self.fold_differ += o.fold_differ;
     }
 }
 
@@ -252,14 +260,33 @@ impl FoldMap {
 }
 
 /// Where the fold's samples come from: a window's map, and a rung-F context for the samples it
-/// does not hold (the transects).
+/// does not hold (the transects); or, for the far window, the sample count pyramid, which folds a
+/// column from its summed words under the one naming rule and never reads a sample.
 #[derive(Clone, Copy)]
 pub struct Fold<'a> {
     pub map: Option<&'a FoldMap>,
     pub ctx_f: Option<&'a Ctx<'a>>,
+    pub pyramid: Option<&'a Pyramid>,
 }
 
 impl Fold<'_> {
+    /// The rung-F point keys of column `(i, j)` of rung F, `None` where no source holds it.
+    fn try_keys(&self, i: i32, j: i32, caches: &mut Caches) -> Option<[u32; FAMS]> {
+        if let Some(k) = self.map.and_then(|m| m.get(i, j)) {
+            return Some(k);
+        }
+        if let Some(k) = caches.point_keys.get(&(i, j)) {
+            return Some(*k);
+        }
+        let c = self.ctx_f?;
+        let mut ck = Checks::default();
+        let k = c
+            .eval(i, j, &Fold::none(), caches, &mut ck)
+            .map_or([0; FAMS], |o| o.keys);
+        caches.point_keys.insert((i, j), k);
+        Some(k)
+    }
+
     /// The rung-F point keys of column `(i, j)` of rung F.
     fn keys(&self, i: i32, j: i32, caches: &mut Caches) -> [u32; FAMS] {
         if let Some(k) = self.map.and_then(|m| m.get(i, j)) {
@@ -284,6 +311,7 @@ impl Fold<'_> {
         Fold {
             map: None,
             ctx_f: None,
+            pyramid: None,
         }
     }
 }
@@ -426,6 +454,7 @@ impl Ctx<'_> {
             octave_f: [0.0; OCTAVES_CAP],
             octave_reach: [0.0; OCTAVES_CAP],
             octave_rms: [0.0; OCTAVES_CAP],
+            word,
         };
         let ground = Ground {
             lift: ground.rough * self.lift_mu,
@@ -477,7 +506,20 @@ impl Ctx<'_> {
             _ => 0,
         });
         // The fold of the rung-F point sides under this column (rungs over F).
-        let folded: Option<[(bool, Option<Water>); FAMS]> = if self.rung > self.f_rung {
+        let folded: Option<[(bool, Option<Water>); FAMS]> = if self.rung > self.f_rung
+            && let Some(p) = fold_src.pyramid
+        {
+            // The far window: N2's fold from the pyramid's summed words (the other families have
+            // no pyramid; the far window draws R0 and N2 alone).
+            let fo = p.fold_kernel(self.ch.n2_fold_kernel, self.rung, i, j);
+            let Some(fo) = fo else {
+                ck.unread += 1;
+                return None;
+            };
+            Some(std::array::from_fn(|fi| {
+                if fi == 3 { fo } else { (false, None) }
+            }))
+        } else if self.rung > self.f_rung {
             let k = u32::from(self.rung - self.f_rung);
             let (fi0, fj0) = (i << k, j << k);
             let side = 1i32 << k;
@@ -491,7 +533,52 @@ impl Ctx<'_> {
                     }
                 }
             }
-            Some(std::array::from_fn(|fi| fold(&samples[fi], sea_m)))
+            // FOLD-RULES-DIFFER (S0 item 4): the record and the one rule on N2's own samples.
+            let (rec, one) = (fold(&samples[3], sea_m), fold_one_rule(&samples[3], sea_m));
+            ck.fold_cols += 1;
+            ck.fold_differ += usize::from(rec != one);
+            // The tent (ruling B15 item 1): the one rule on the 1-2-1 weighted words of the column
+            // and its eight neighbours at this rung.
+            let one = if self.ch.n2_fold_kernel >= 1 {
+                let mut words: [[Option<FoldWords>; 3]; 3] = [[None; 3]; 3];
+                for (b, row) in words.iter_mut().enumerate() {
+                    for (a, cell) in row.iter_mut().enumerate() {
+                        if (a, b) == (1, 1) {
+                            *cell = Some(words_of(&samples[3]));
+                            continue;
+                        }
+                        let (ni, nj) = (fi0 + (a as i32 - 1) * side, fj0 + (b as i32 - 1) * side);
+                        let mut keys: Vec<u32> = Vec::with_capacity((side * side) as usize);
+                        let mut held = true;
+                        'samples: for sj in 0..side {
+                            for si in 0..side {
+                                match fold_src.try_keys(ni + si, nj + sj, caches) {
+                                    Some(kk) => keys.push(kk[3]),
+                                    None => {
+                                        held = false;
+                                        break 'samples;
+                                    }
+                                }
+                            }
+                        }
+                        if held {
+                            *cell = Some(words_of(&keys));
+                        }
+                    }
+                }
+                fold_by_kernel(self.ch.n2_fold_kernel, &words).unwrap_or(one)
+            } else {
+                one
+            };
+            Some(std::array::from_fn(|fi| {
+                if fi == 3 && self.ch.n2_fold_rule {
+                    one
+                } else if fi == 3 {
+                    rec
+                } else {
+                    fold(&samples[fi], sea_m)
+                }
+            }))
         } else {
             None
         };
@@ -563,6 +650,14 @@ impl Ctx<'_> {
             match decision {
                 None => {
                     let (s, l) = finish_alone(&ground, &self.ch);
+                    // N2's LONE HOLD: a column with no water in its block whose side is dry stands
+                    // over its standing water as the default rule's slot would (`S = +band`).
+                    let s = match l {
+                        Some(l) if fam == 3 && self.ch.n2_lone_holds => {
+                            s.max(l + self.ch.k * self.ch.word_band_m)
+                        }
+                        _ => s,
+                    };
                     Drawn {
                         s: s as f32,
                         l: l.map_or(NAN, |l| l as f32),

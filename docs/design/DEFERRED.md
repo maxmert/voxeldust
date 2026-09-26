@@ -10215,12 +10215,41 @@ updated in the same change as the work, deleted when done). The interims named h
   rung 10 under N1, and vanishes under N2's band. A majority fold can only flicker at that width. WHERE: the fold
   (`crates/bins/src/shore_rules.rs::fold`), later the pyramid (`terrain/src/artifact.rs`). WHEN: the bench's slice 0b — V's
   per-water fold with a crossing byte per mixed edge, AREA-NEST and the SL6 sizes (new data: the owner's question).
+  MEASURED AT THE FAR RUNGS TOO (2026-09-26, S0 item 5, the build design §10): under the sample count pyramid and the one
+  naming rule a big lake's ragged edge flickers in one-column fragments across the far swaps — LAKE-FLICKER at rung 14
+  260 of 693 bodies on the steep coast's 8 300 km window and 531 of 1 211 on the high lake's, against today's rule's 53 of
+  714 and 87 of 1 116 (a fragment of the 5 882 m lake is 64 % wet in its 16 km column, 40 % in the 32 km column over it,
+  59 % in the 65 km one over that). The lakes' AREA is steadier under N2 (AREA-NEST −6.9 … +2.2 % against −13.0 … +8.4 %).
+- 🟥 **THE WATER'S BANDS ARE NEVER REBOUND** (found 2026-09-27 by B16's design, verified in the code): `rebind_bands`
+  (`crates/client-render/src/terrain.rs:1921-1985`) rewrites the ground's, the casters' and the probe's materials when the
+  ask bound moves, never the water's (`water_materials`, `:1582`, `:2085`), so after a bound moves the water can fade on
+  another band than its ground; and every band edge jumps 5 % in one frame (`ASK_BOUND_REBIND`,
+  `crates/client/src/ladder_view.rs:360`). WHERE: the client's terrain render. WHEN: slice R1 of the far-water design
+  (`docs/investigation/2026-09-26/far_water_seamless_design.md` §2.7), before the skin.
+- 🟥 **A NEAR SHORE POPS AT A RING'S FRONT** (found 2026-09-27, verified): a water vertex morphs toward the moved ground with
+  its OWN rung's side and level (`crates/client/src/chunks.rs:1418-1429`), and `ParentMesh` holds no water word
+  (`:386-405`), so where two rungs place a shore differently the finer rung's water stays to the front and then pops
+  (N2's measured steps: the sea ≤ 1.46 px; the belt's lakes ≤ 3.29 px; the second pocket's ≤ 4.79 px). WHERE:
+  `crates/client/src/chunks.rs`. WHEN: slice R2 (the water's decision morph) of the far-water design.
+- 🟨 **THE FAR-WATER DESIGN'S STATED RESIDUES** (B16's design §1.4, 2026-09-27): the rim of a grazing view past 86.4°
+  (window margins sized for θ_rim, Q8); the resolution floor (water narrower than 128 m leaves the picture between 56 and
+  111 km, Q5); the lake channel (Λ) waits for the ocean slice 8o; design B's exact nested near line for rungs 0–6 stays an
+  option on the owner's word only (Q4). WHERE: the design note. WHEN: decided with Q1–Q8 after slice K0.
 - 🟥 **THE FINE OCTAVES STAND ON A 572 m LIFT** (measured 2026-09-26 by the shoreline bench, status §8e): the ridged fine
   octaves' mean at share one is 571.8 m (rungs 0–5; 513 m at rung 7, 224 m at rung 9, nought from rung 10), so the drawn land by
   every water stands `m × 572` m over the ground the solve placed the water against — 200 m on the gentle coast. Every shore
   rule must lose that height near the water (N1 a dish one node wide, N2 a ramp per octave). WHERE: the recipe's octave sum
   (`recipe/src/height.rs`), the body's table (`terrain/src/body.rs`). WHEN: R4's second half with R2 (the noise only under the
   solved level) — then the shore rule's ramps shrink by themselves.
+- 🟥 **THE SPECTRUM'S SINE LAW IS NOT WHAT THE NOISE DOES** (measured 2026-09-26 by the N2 build's slice S0, registered
+  by ruling B14 item 2): the spectrum states each fine octave as a sine, `a = s·λ/τ`, anchored so the fine octaves' slopes
+  sum to the angle of repose (`crates/terrain/src/body.rs:50-66`, 79-85: an RMS slope of 0.70), and `slope_ref` (the
+  roughness share's divisor) stands on it. The recipe's noise realizes 0.139 per axis at share one — about a fifth — and a
+  unit octave's reach (15/8 × its RMS height over its RMS slope) is 0.7723 of its wave when smooth and 0.9107 when ridged,
+  against the sine law's 0.298: the 25 km octave's slope reads 0.0128 per axis against its stated 0.125. So the land is
+  about five times gentler than its law states — a cause beside the lift for the owner's "dunes". WHERE: the spectrum's
+  table and its anchor (`terrain/src/body.rs`), `slope_ref`. WHEN: with R2 and 8e (the terrain's look), measured again;
+  N2's reach law states `C_kind` as the realized-over-sine ratio so a spectrum fix reads it too.
 - 🟥 **THE WALKING-SCALE OCTAVES ARE UNDER A METRE** (measured 2026-09-26, status §8e): at share one the octaves of 391 m,
   195 m, 98 m and 49 m waves stand 2.1 m, 0.7 m, 0.2 m and 0.1 m RMS; the 3 km octave stands 127 m and the 12.5 km octave 252 m.
   So a pilot on foot sees almost no relief under about 800 m — the ground is the long octaves' swells (the "dunes"). WHERE: the

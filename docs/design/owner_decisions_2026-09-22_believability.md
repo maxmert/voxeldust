@@ -382,3 +382,88 @@ The owner's four answers:
 
 **Example.** A pilot lands on the gentle coast. Today she sees a blue square; under N1 a smooth grey plate 4 km wide on a
 straight line; under N2 the ground's swells run down to a smooth beach, and the coast stays put as the hull climbs to 1 400 km.
+
+## B14. THE BUILD'S FIRST FOUR QUESTIONS, ANSWERED ON MEASURED NUMBERS (2026-09-26)
+
+Step 4's build design (`docs/investigation/2026-09-26/n2_build_design.md`, written and attacked by workflow
+`wf_b476b3a6-7c8`; 29 review findings answered) found that the near rungs can draw N2 from the rows the client already
+holds, and that from rung R₁ = 10 up the client holds no fine row. Its slice S0 measured the far data first (§10 of it).
+The owner's four answers:
+
+1. **SEND THE SHORE BAND (SL6: YES).** Once, with the planet's head: the height of every fine node within 30 m of a water
+   it is read for, and every lake node's level. MEASURED: 202 431 band nodes, 0.588 MB as a delta-coded list, and 93 225
+   lake nodes, 0.178 MB — about 0.77 MB in all (the coast mask that ships today is 2.2 MB). So every rung reads the same
+   words, and the far swaps the owner saw measured are the swaps that ship.
+2. **THE REACH IS A LAW, AND THE SPECTRUM'S CONFLICT IS REGISTERED.** Each fine octave's reach near water is
+   `C_kind × its wavelength`, with two constants measured over unit octaves of the recipe's own noise: C_smooth =
+   0.7723, C_ridged = 0.9107 (the law against the per-octave statistic: −3.1 % to +3.7 %; with the law every N2 verdict
+   stands and the deciding number reads 1.459 px). THE CONFLICT: the spectrum states each fine octave as a sine at the
+   angle of repose (`body.rs:50-66`: an RMS slope of 0.70), but the noise realizes 0.139 per axis at share one — about a
+   fifth — so its reach is about three times the sine law's. The spectrum's own law bears on the dunes and goes to
+   DEFERRED for R2 and 8e.
+3. **SEND THE FAR FOLD'S COUNTS TOO** (not the recommended option; the owner prefers no empty far globe). MEASURED: 111 089
+   mixed node cells on the home planet; deriving them would leave a far globe without coasts for about 3 s on two workers;
+   shipping their counts costs 0.636 MB more with the head (three 2-byte counts a mixed cell, and the level word the one
+   naming rule needs). W15.1 item 5 ("the counts are derived and never shipped") is AMENDED for the samples' counts.
+4. **KEEP THE POCKET EXEMPTION AS A STATED RULE.** A POCKET-word column is exempt from the sea's side hold, and the
+   standing water's floor applies where the sea governs. MEASURED: on the home planet it changes no line (no pocket lake
+   stands within three nodes of the sea); the variant that relaxes the floor by the sea's presence is REFUTED (at rungs
+   10–12 it put the sea over 84 / 20 / 1 dry columns on the steep coast). N2's pull on the second pocket's floor (up to
+   3.3 km near its lakes) is the 30 m band's price, accepted in B13; the pictures show cleaner lake outlines than N1's.
+
+**Example.** A pilot climbs out of the gentle coast to 1 400 km. Under this ruling her client holds, beside the coast mask,
+0.77 MB of shore heights and lake levels and 0.64 MB of far-fold counts, all sent with the planet's head: at 704 km the
+coast does not move, and the far globe shows its coasts the moment the head's parts land.
+
+**CORRECTION OF TWO MEASURED SIZES (2026-09-26, after this ruling; S0 item 5; the owner's re-confirmation asked).** The
+ruling's numbers were measured by S0's first instrument, and two of them were low. (1) The band's rule left out every node
+wet for a water and one metre (or less) under its level: its word is `W − 1`, not the band's edge. The one definition
+(`shore_rules::band_needs`) holds 217 742 band nodes, **0.631 MB** (was 202 431, 0.588 MB); with the lake levels about
+**0.81 MB** (was 0.77). The bench proves the missing nodes mattered: under the first rule N2 draws another far column in
+1 466–10 476 of 1 397 760 columns per window. (2) The far counts' shipped unit is the NODE SQUARE (a rung-13 column holds a
+quarter of each of four node cells), not the node cell: 192 271 squares, **1.100 MB** (was 111 089 cells, 0.636 MB). With
+the head the planet ships about 1.91 MB beside the 2.2 MB mask.
+
+## B15. S0's LAST QUESTIONS, ANSWERED ON MEASURED NUMBERS (2026-09-26)
+
+Slice S0 of step 4's build design measured items 4, 5 and 6 (`docs/investigation/2026-09-26/n2_build_design.md` §10): the
+one naming rule, the far windows at rungs 13–18 under the sample count pyramid, and the cube's seam and corner. The owner's
+four answers:
+
+1. **CURE THE FAR LAKE FLICKER FIRST** (Q7; NOT the recommended option). MEASURED: the one naming rule changes nothing at
+   rungs 8–13 (0 of 16 748 census lines; the two rules name the same water on all 10 524 872 folded columns), and at rungs
+   13–18 it keeps the water's area steadier than today's rule — but a big lake's ragged edge flickers in one-column fragments
+   (LAKE-FLICKER at rung 14: 260 of 693 bodies against today's 53 of 714). Before S1, the bench measures a fold that does not
+   flicker on nested footprints; the one naming rule is not built until then.
+2. **BOTH FAR CURES JOIN N2** (Q13, Q14). The WET TIE: a column whose side is wet stands at least one length unit under its
+   water (from rung 14 a column's centre is its node cell's middle, where a straight coast reads exactly nought, and a sea
+   column 1 067 m deep was drawn as dry land at the sea's level). The LONE HOLD: a column with no water in its own block
+   whose side is dry stands over its standing water by `k × band`, the default rule's own slot. MEASURED with both: 0–1
+   mismatched columns at every far rung, WATER-STEP 0, 2 of 16 804 near lines moved (one a cure).
+3. **B14 ITEMS 1 AND 3 STAND AT THE CORRECTED SIZES**: the shore band with the lake levels about 0.81 MB, the far counts per
+   NODE SQUARE 1.10 MB; about 1.91 MB with the planet's head, beside the 2.2 MB coast mask.
+4. **THE SMALLER QUESTIONS ACCEPTED AS RECOMMENDED**: Q4 (the three re-worded ruling items: a side is the held field's
+   sign; a far cell's side is its samples' wet share; rungs 8–13 fold samples), Q5 (k = ¼, K = 4), Q6 (F = R₁ − 3), Q8
+   (no side data: the ground's own sign), Q9 (the beach: today's rule on N2's governing water), Q10 (one switch at every
+   rung after the band ships), Q12 (the corner phantom rule until the corner blend; MEASURED: ONE cube corner of the home
+   planet is coastal).
+
+**Example.** A pilot climbs over the high lakes at 5 882 m. Under the one naming rule a piece of the lake's edge shows at
+rung 14, hides at rung 15 and shows again at rung 16 (64 %, 40 % and 59 % of its columns wet). Under this ruling that edge
+is cured on the bench first, and only a fold that holds the edge still across the far swaps goes into the build.
+
+## B16. NO FLICKER AND NO SHAPE CHANGE BETWEEN RUNGS — AT ALL (2026-09-26)
+
+Asked to choose among three measured cures of the far lake flicker (the box, the tent, no lone column; the build design
+§10 "B15 ITEM 1"), the owner answered: *"We need seamless experience - no flicker at all please. We need to find the best
+solution for it. No flicker or changing of the shapes between rungs at all"*.
+
+1. **NONE OF THE THREE FOLDS IS TAKEN.** Each one decides a far column's water by a threshold on counts, and a threshold
+   on nested footprints lets a small feature change at a swap: the box lets one-column fragments show, hide and show; the
+   tent and the lone rule remove the fragments but make water vanish or appear at a swap where every finer column agreed.
+2. **THE BAR IS W16 IN FULL:** at every swap no flicker and no change of the water's or the land's shape. Find THE BEST
+   SOLUTION — the fold alone may not be the place — measure it on the bench against that bar, and bring it to the owner
+   before S1.
+
+**Example.** A pilot climbs over the high lakes from 7 500 km to 60 000 km. Under this ruling the lakes' edges do not
+shimmer at any of the four swaps on the way, and no lake changes its outline when the ring behind it swaps.

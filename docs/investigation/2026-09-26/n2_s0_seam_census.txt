@@ -1,0 +1,990 @@
+# THE SHORELINE BENCH, plan step 4 slice 0 (ruling B8 item 1; survey §6; design §19 WHAT FOLLOWS)
+# written by `cargo run --release -p vd-bins --example shoreline_bench`; 10 threads for the column passes (COST on one); one job on the machine
+WORLD generator 21 (vd_terrain::GENERATOR_VERSION)
+THE NAMED CHOICES (ruling T9: each with its default and its source):
+  - k = 0.25 (W6's quarter; the owner's word owed, design §15 Q3)
+  - K = 4 (D5, 1/k; the owner's word owed, design §15 Q4)
+  - g_min = 1 m per node (D4: the rows' own unit)
+  - the fade = the recipe's quintic over ONE node of the first-order distance (D4: the read's own reach)
+  - the mirror = all sixteen words (finding 1 fix (a); the corners only is the bench's second slice)
+  - the held read = the mean of both pass orders (finding 11)
+  - the governing candidate = the lowest-level wet one; if dry, the least d; a tie goes to the higher level (W15.1)
+  - the candidate cap = 4, the nearest wet node first (finding 23; an overflow is counted, never dropped silently)
+  - F = R1 - 3 (finding 7; D6): the rungs from F up take the wet majority of their rung-F point sides, a tie wet (W15.1 item 4), the water with the most samples (a tie the higher level)
+  - the magnitude at a folded rung = the rung's own |G| of the fold's water at the column's centre, signed by the fold's side (this bench, stated)
+  - O1's clamp: telescoped from R1, c_s = kappa x one cell of rung s+1 in nodes; kappa = 1 (O1), 0.25 (O1q, design §5.6) (survey §6.1, finding 3)
+  - the terrace inside the band = faded with beta (one field at the line)
+  - A_r = body.relief_bound(r) (D5: a charter fact, an over-bound)
+  - a dry column's standing water = today's land rule (D7): the sea where its read stencil holds a sea node, else none; a pocket's floor none
+  - the sheet's level over a column L_c = the highest l over its 3 x 3 columns (water_sheet_sided: a vertex's level is the highest of its four columns)
+  - transects: 256 per water kind (the sea; the lakes pooled) per stand — the plan's 128 give about 128 matched pairs, under the 200 its band is judged on — spacing >= 1000 m along C0's B = W contour at rung 7 in W2; half-length 1 node (sea), 0.5 node (lake); sample step cell(r)/4; the whole transect from rung 5 up, windows of +-8 coarser cells round the coarser rung's crossings under it
+  - the SHORE-STEP match: within 4 coarser cells; beyond that it is a fold event (finding 8)
+  - WALL: Q_r = the p99.9 of the raw ground's neighbour steps in the window; band 0.001 of the shore pairs; judged on >= 1000 pairs (finding 19)
+  - CHECK-R0-F64: the f64 shore against the integer one, max |d| <= 0.001 m
+  - the panels' budget: 12582912 bytes (picture choices, not laws)
+  - N2's side hold = 1 (1: a side-dry column that carries a standing water stands over it by k x |its governing field|; the side decides, the sheet never covers it)
+  - N2's fold names its water by = the one rule (1 the one rule: a lake when the lake samples are at least half of the wet ones, at the highest lake level among them — W15.1's lake share, the rule a count pyramid carries to the top rung; 0 the record: the water with the most samples, a tie the higher level; the build design's S0 item 4, Q7)
+  - N2's default rule = 1 (1: a slot for a water with no wet node in the column's block reads every word W + band, every distance 3.5 nodes, no presence — the build design §1.2 item 9, so a host with the shore band and a host with the rows read one word; it fires only where the fold names such a water, from rung 14 up; 0: the rows' own heights)
+  - N2's wet tie = 1 (1: a side-wet column stands at least one length unit under its water, so the sheet draws it wet; 0: a column whose side field reads exactly nought stands AT its level and the sheet draws it dry — from rung 14 up a column's centre is its node cell's middle, where a straight coast's clamped words read nought; S0 item 5)
+  - N2's lone hold = 1 (1: a column with no water in its block whose side is dry stands over its standing water by k x band, the default rule's slot; 0: the land rule alone, under which a far column's ground can stand under the sea it reads; S0 item 5)
+  - N2's pocket variant = 2 (0 the record; 1 a POCKET-word column exempt from the sea's side hold; 2 = 1 and the standing water's floor only where the sea governs; 3 = 1 and that floor relaxed by the sea's presence; the build design's S0 item 3, Q11)
+  - N2's reach per octave = the law (1: the law C_kind x wavelength, C_kind measured over unit octaves of the recipe's own noise; 0: 15/8 x RMS height / RMS slope measured over the table's own octaves)
+  - N2's word band = 30 m (each mirrored word held within it of the level; inf = N1's words; ruling B10 item 1, the steep coasts' notches; 30 m a stated choice of the second round, the owner's word owed)
+  - N2's words as a signed distance = 0 (1: word = level + band x (the distance in nodes to the nearest block node of the other side - 1/2), signed by the side; 0: the band's clamp)
+  - N2's side as a smoothed mask = 0 (1: S = band x sum w.side / sum w over the block, side +1 dry -1 wet, w = (1 - r^2/4)^3 within 2 nodes of the column; the slope by central differences of 1/64 node)
+  - N2's form = 2 (3 a fade per fine octave in HEIGHT: octave k scaled by the recipe's quintic of |S| over 3 x the column's factor x its RMS height at share one; 2 a ramp per fine octave: each octave's term scaled by the recipe's quintic of the first-order distance over its own reach 15/8 x its RMS height / its RMS slope, both measured at share one over the sphere; 1 one ramp for the whole fine half over 15/8 x lift / slope, lift = the column's factor x the fine half's mean at share one at the rung, slope = the bank below; the wet side N1's own in both; 0 the bent residual below, a refuted control)
+  - N2's first form: the conditioned residual rho at the rung, kept whole to 0.5 of its room and bent (tanh) toward the room past it; the room on the side it can cross = the node-scale surface's height over W6's hold, on the other side = the bank (the solve's TAN_REPOSE 0.7 (here: the fine half's measured RMS slope at the rung times the factor), times the first-order distance to the line); faded in by the presence
+  overrides this run: n2_reach_law=1, n2_pocket=2, n2_fold_rule=1, n2_wet_strict=1, n2_lone_holds=1
+THE RULES: R0, C0, N1, N1-nofold, O1, O1-nofold, O1q, N2
+THE CONTROLS: skipped (--no-controls); the shape gates print NO-BAND for KINK
+# DEVELOPMENT RUN: the artifact was READ from the scratch file Some("/private/tmp/claude-501/-Users-maxim-Projects-my-voxeldust--claude-worktrees-game/bd541c76-eaa9-41bb-9339-bca4b8f9a790/scratchpad/home.art"), not solved; a census run solves
+ARTIFACT version 9 digest 1eb53c782459e0dfc2cc766157d2a0e4; the sea 3591 m over the ladder radius
+CENSUS CHECK-COUNTS 0of6levels-differ 0[plan§2;W15.1-item-5] GREEN
+the shore band: 217742 of 8871936 nodes hold their height (30 m; `shore_rules::shore_band`); the rest read the band's edge (CHECK-SHORE-BAND on W4)
+the body: 19 rungs; the fine lattice 1216 nodes an edge, 8192 rung-0 cells a node (8192 m); 6 pyramid levels; R1 = 10 (the first rung that reads a level); F = 7; the first fine octave 4; the octave counts by rung [14, 13, 12, 11, 10, 10, 9, 8, 7, 6, 4, 3, 2, 1, 1, 1, 1, 1, 1]
+N2's lift: the fine octaves' mean at share one by rung (4 096 fine nodes): [571.8, 571.8, 571.8, 571.8, 571.8, 571.8, 557.9, 513.3, 400.9, 224.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] m
+N2's reach law: octave 4 (smooth, wave 25000 m): the statistic 19926 m, the law 19307 m (-3.1 %), the spectrum's sine law 7460 m
+N2's reach law: octave 5 (ridged, wave 12500 m): the statistic 11360 m, the law 11384 m (+0.2 %), the spectrum's sine law 3730 m
+N2's reach law: octave 6 (ridged, wave 6250 m): the statistic 5767 m, the law 5692 m (-1.3 %), the spectrum's sine law 1865 m
+N2's reach law: octave 7 (ridged, wave 3125 m): the statistic 2865 m, the law 2846 m (-0.7 %), the spectrum's sine law 933 m
+N2's reach law: octave 8 (ridged, wave 1563 m): the statistic 1438 m, the law 1423 m (-1.1 %), the spectrum's sine law 466 m
+N2's reach law: octave 9 (ridged, wave 781 m): the statistic 722 m, the law 711 m (-1.5 %), the spectrum's sine law 233 m
+N2's reach law: octave 10 (smooth, wave 391 m): the statistic 308 m, the law 302 m (-2.0 %), the spectrum's sine law 117 m
+N2's reach law: octave 11 (smooth, wave 195 m): the statistic 145 m, the law 151 m (+3.7 %), the spectrum's sine law 58 m
+N2's reach law: octave 12 (smooth, wave 98 m): the statistic 76 m, the law 75 m (-0.7 %), the spectrum's sine law 29 m
+N2's reach law: octave 13 (smooth, wave 49 m): the statistic 38 m, the law 38 m (-0.0 %), the spectrum's sine law 15 m
+N2's reach law: C_smooth 0.7723, C_ridged 0.9107 (15/8 x RMS height / (RMS slope per axis x wave), unit octaves of the recipe's noise, 1 000 m wave, 2 048 seeded sites x 4 seeds); in use: the law
+N2's ramp per octave (share one, 2 048 sites): octave 4: wave 25000 m, RMS height 136.3 m, RMS slope 0.0128, reach 19926 m
+N2's ramp per octave (share one, 2 048 sites): octave 5: wave 12500 m, RMS height 252.4 m, RMS slope 0.0417, reach 11360 m
+N2's ramp per octave (share one, 2 048 sites): octave 6: wave 6250 m, RMS height 204.2 m, RMS slope 0.0664, reach 5767 m
+N2's ramp per octave (share one, 2 048 sites): octave 7: wave 3125 m, RMS height 127.4 m, RMS slope 0.0834, reach 2865 m
+N2's ramp per octave (share one, 2 048 sites): octave 8: wave 1563 m, RMS height 50.9 m, RMS slope 0.0663, reach 1438 m
+N2's ramp per octave (share one, 2 048 sites): octave 9: wave 781 m, RMS height 16.0 m, RMS slope 0.0416, reach 722 m
+N2's ramp per octave (share one, 2 048 sites): octave 10: wave 391 m, RMS height 2.1 m, RMS slope 0.0128, reach 308 m
+N2's ramp per octave (share one, 2 048 sites): octave 11: wave 195 m, RMS height 0.7 m, RMS slope 0.0085, reach 145 m
+N2's ramp per octave (share one, 2 048 sites): octave 12: wave 98 m, RMS height 0.2 m, RMS slope 0.0058, reach 76 m
+N2's ramp per octave (share one, 2 048 sites): octave 13: wave 49 m, RMS height 0.1 m, RMS slope 0.0043, reach 38 m
+N2's bank: the fine octaves' RMS slope at share one by rung, one axis at the rung's column (2 048 sites): [0.139, 0.139, 0.139, 0.138, 0.137, 0.137, 0.129, 0.113, 0.078, 0.043, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+== THE STANDS (plan §3.1) ==
+  stand belt: W2/W3 on the aim [0.61727, -0.437286, -0.654033]; W1 on the nearest lake node's centre, W0 on its dry edge's middle: the wet node (146, 1205) beside the dry node (147, 1205) on face NegZ, node 8858706, aim 0.627386 -0.437007 -0.644524
+  stand coast: node 4718858 (generator 20's pick 4718858), its sea edge: the wet node (779, 233) beside the dry node (778, 232) on face NegY, node 4720075, aim 0.195428 -0.868486 -0.455565
+  stand plain: node 1219 (pinned: 1219) stands on the face NegY — the aim's own face PosX would pull W2 by 115 km, over a quarter of it, so the face of most lakes among those that meet there: PosX: 0 lake nodes in W2, pulled 115 km; NegY: 3 lake nodes in W2, pulled 127 km; NegZ: 0 lake nodes in W2, pulled 127 km
+  stand plain: W2 on the densest 31-node square of lakes within 75 nodes (600 km) of the aim: 35 lake nodes on face NegZ, centre (32, 1157) nodes (PosX: 4 lake nodes, 72 nodes from the aim; NegY: 4 lake nodes, 21 nodes from the aim; NegZ: 35 lake nodes, 58 nodes from the aim)
+CENSUS PLAIN-LAKES-IN-W2 35nodes/NegZ no-band[the-plain's-W2-rule(amended-plan§3.1)] NO-BAND
+  stand plain: node 1219 (pinned: 1219); W1 on the nearest lake node's centre, W0 on its dry edge's middle: the wet node (32, 1156) beside the dry node (33, 1156) on face NegZ, node 8799008, aim 0.533633 -0.572500 -0.622479
+  stand reference: node 8857509; no lake within W2, so W0/W1 on the node centre
+  stand pocket1: the pocket of node 7901713: 28915 nodes (DOC 28 912), deepest node 7901713 at 11867 m under the sea (DOC 11 866); the rim node 8064719 (207, 552) on face NegZ, 58 hops from the sea; W0/W1 on its edge toward (208, 552)
+CENSUS POCKET1-SIZE 28915nodes/11867m no-band[DOC:28912nodes/11866m] NO-BAND
+  stand gentle: the rule's least coast slope within 1000 km of the belt: 0.01047 over 7 pairs, the dry node (254, 1191) beside the sea node (255, 1191) on face NegZ
+  stand gentle: PINNED (drainage_gates::GENTLE) the dry node (254, 1191) beside the sea node (255, 1191) on face NegZ; its coast slope today 0.01047 over 7 pairs
+CENSUS CHECK-GENTLE-PIN rule(254,1191)/NegZ =pin(254,1191)/NegZ[drainage_gates::GENTLE] GREEN
+    gentle #1: slope 0.01047 (7 pairs), node 8841790 (254, 1191) face NegZ, aim 0.644541 -0.336652 -0.686463
+    gentle #2: slope 0.01117 (10 pairs), node 8840575 (255, 1190) face NegZ, aim 0.643807 -0.336037 -0.687453
+    gentle #3: slope 0.01144 (7 pairs), node 21939 (51, 18) face PosX, aim 0.611347 -0.535169 -0.582965
+    gentle #4: slope 0.01144 (7 pairs), node 23155 (51, 19) face PosX, aim 0.611882 -0.535637 -0.581973
+    gentle #5: slope 0.01150 (7 pairs), node 8838146 (258, 1188) face NegZ, aim 0.642569 -0.333823 -0.689686
+CENSUS G-GENTLE-SLOPE 0.01047 <=0.02[W6;design§7.2] GREEN
+  stand pocket2: the pocket of node 4470928: 12543 nodes (DOC 12 542), deepest node 4470928 (912, 28) face NegY at 8193 m under the sea (DOC 8 193); every window on the deepest node
+CENSUS POCKET2-SIZE 12543nodes/8193m no-band[DOC:12542nodes/8193m] NO-BAND
+  stand highlake: the aim's node 4746309; the lake patch 12562 nodes (DOC 12 562), levels {5983: 12562} (DOC 5 983 m)
+CENSUS CHECK-HIGHLAKE 12562nodes/5983m =12562nodes/5983m[status§8b;DOC] GREEN
+    the edge node 4746309: the wet node (261, 255) beside the dry node (260, 255) on face NegY, node 4746309, aim -0.395463 -0.825174 -0.403357
+
+==================== W-SEAM: face NegY, edge VMinus, node 1097 along it (21 straddling node pairs within 32 nodes; 223 on the globe) ====================
+
+-- W-SEAM rungs 3..=8: WSA on NegY from (1123328, 0), WSB on NegZ (UMinus) from (0, 1123328), 1024 columns a side at rung 3
+CENSUS CHECK-R0.seam.WSA.r03 0of1048576cols/289chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r03 0cols >0[the-card's-side-word-must-differ] NO-BAND
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r03 0of1048576cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r03 65348of65348cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r03 1048576of1048576cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r03 0of1048576cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r03 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r03 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r03 0:0/1:1048576/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r03 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r03 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r03 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r03 max0.00m/p99nonem/0pairs <=0.0312m(half-q_r)[finding-1] GREEN
+CENSUS WALL.seam.WSA.R0.r03 0of0pairs(p50none/p99none/maxnonexQ;Q=2.690m) <=0.001of-pairs,>=1000pairs[finding-19] NO-BAND
+CENSUS WALL-PER-PAIR.seam.WSA.R0.r03 p50none/p99nonexraw no-band[delta/max(raw,q_r)] NO-BAND
+CENSUS G-PERCHED.seam.WSA.R0.r03 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r03 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r03 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r03 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r03 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r03 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r03 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r03 max0.00m/p99nonem/0pairs <=0.0312m(half-q_r)[finding-1] GREEN
+CENSUS WALL.seam.WSA.N2.r03 0of0pairs(p50none/p99none/maxnonexQ;Q=2.690m) <=0.001of-pairs,>=1000pairs[finding-19] NO-BAND
+CENSUS WALL-PER-PAIR.seam.WSA.N2.r03 p50none/p99nonexraw no-band[delta/max(raw,q_r)] NO-BAND
+CENSUS G-PERCHED.seam.WSA.N2.r03 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r03 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r03 363230cols/L41.000 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r03 0.3338 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r03 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r03 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r03 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r03 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r03 0of1048576cols/289chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r03 548871cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r03 0of1048576cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r03 65348of65348cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r03 1048576of1048576cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r03 0of1048576cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r03 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r03 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r03 0:0/1:1048576/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r03 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r03 464cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r03 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r03 max0.00m/p99nonem/0pairs <=0.0312m(half-q_r)[finding-1] GREEN
+CENSUS WALL.seam.WSB.R0.r03 0of0pairs(p50none/p99none/maxnonexQ;Q=2.294m) <=0.001of-pairs,>=1000pairs[finding-19] NO-BAND
+CENSUS WALL-PER-PAIR.seam.WSB.R0.r03 p50none/p99nonexraw no-band[delta/max(raw,q_r)] NO-BAND
+CENSUS G-PERCHED.seam.WSB.R0.r03 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r03 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r03 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r03 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r03 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r03 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r03 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r03 max0.00m/p990.00m/1026pairs <=0.0312m(half-q_r)[finding-1] GREEN
+CENSUS WALL.seam.WSB.N2.r03 0of1026pairs(p500.00/p990.00/max0.00xQ;Q=2.294m) <=0.001of-pairs,>=1000pairs[finding-19] GREEN
+CENSUS WALL-PER-PAIR.seam.WSB.N2.r03 p500.02/p990.16xraw no-band[delta/max(raw,q_r)] NO-BAND
+CENSUS G-PERCHED.seam.WSB.N2.r03 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r03 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r03 956416cols/L40.996 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r03 0.3544 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r03 23.8mwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r03 p50-204.6m/p99-88.1m/max-79.1m/396812cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r03 0.047within1km/0.101raw/noneat2-3nodes/280439pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r03 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 3, along 1123328: edge (1123328, 0) b 6974.4 h_raw 7300.5 word 0 | partner NegZ (0, 1123328) b 6974.4 h_raw 7300.8 word 3 | inward b 6974.4; R0 s 7300.5/6966.4 l NaN/6968.0 key 0/39738; N2 s 7048.4/7049.5 key 0/0
+   seam pair at rung 3, along 1123329: edge (1123329, 0) b 6974.4 h_raw 7301.2 word 0 | partner NegZ (0, 1123329) b 6974.4 h_raw 7301.4 word 3 | inward b 6974.4; R0 s 7301.2/6966.4 l NaN/6968.0 key 0/39738; N2 s 7048.6/7049.7 key 0/0
+CENSUS SEAM-KEY.seam.R0.r03 1024of1024pairs-across/0of1024pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r03 across:p50291.17/p99391.03/max391.76m;inward:p500.68/p991.65/max1.82m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r03 0of1024pairs-across/0of1024pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r03 across:p500.75/p991.50/max1.50m;inward:p500.80/p991.59/max1.63m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r04 0of262144cols/81chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r04 0cols >0[the-card's-side-word-must-differ] NO-BAND
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r04 0of262144cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r04 34596of34596cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r04 262144of262144cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r04 0of262144cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r04 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r04 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r04 0:0/1:262144/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r04 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r04 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r04 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r04 max0.00m/p99nonem/0pairs <=0.0625m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.R0.r04 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r04 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r04 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r04 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r04 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r04 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r04 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r04 max0.00m/p99nonem/0pairs <=0.0625m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r04 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r04 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r04 90878cols/L41.000 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r04 0.3241 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r04 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r04 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r04 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r04 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r04 0of262144cols/81chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r04 137227cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r04 0of262144cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r04 34596of34596cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r04 262144of262144cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r04 0of262144cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r04 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r04 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r04 0:0/1:262144/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r04 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r04 101cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r04 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r04 max0.00m/p99nonem/0pairs <=0.0625m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.R0.r04 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r04 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r04 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r04 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r04 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r04 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r04 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r04 max0.00m/p990.00m/513pairs <=0.0625m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r04 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r04 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r04 239112cols/L40.996 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r04 0.3288 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r04 23.7mwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r04 p50-205.1m/p99-88.0m/max-79.1m/99357cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r04 0.047within1km/0.100raw/noneat2-3nodes/70587pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r04 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 4, along 561664: edge (561664, 0) b 6974.4 h_raw 7301.2 word 0 | partner NegZ (0, 561664) b 6974.4 h_raw 7301.8 word 3 | inward b 6974.4; R0 s 7301.2/6966.4 l NaN/6968.0 key 0/39738; N2 s 7048.8/7050.9 key 0/0
+   seam pair at rung 4, along 561665: edge (561665, 0) b 6974.4 h_raw 7302.7 word 0 | partner NegZ (0, 561665) b 6974.4 h_raw 7303.2 word 3 | inward b 6974.4; R0 s 7302.7/6966.4 l NaN/6968.0 key 0/39738; N2 s 7049.3/7051.5 key 0/0
+CENSUS SEAM-KEY.seam.R0.r04 512of512pairs-across/0of512pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r04 across:p50291.02/p99391.89/max392.86m;inward:p501.46/p993.49/max3.53m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r04 0of512pairs-across/0of512pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r04 across:p501.52/p992.79/max2.83m;inward:p501.65/p993.12/max3.18m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r05 0of65536cols/25chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r05 0cols >0[the-card's-side-word-must-differ] NO-BAND
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r05 0of65536cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r05 19220of19220cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r05 65536of65536cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r05 0of65536cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r05 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r05 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r05 0:0/1:65536/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r05 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r05 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r05 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r05 max0.00m/p99nonem/0pairs <=0.1250m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.R0.r05 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r05 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r05 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r05 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r05 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r05 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r05 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r05 max0.00m/p99nonem/0pairs <=0.1250m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r05 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r05 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r05 22750cols/L40.999 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r05 0.3121 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r05 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r05 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r05 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r05 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r05 0of65536cols/25chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r05 34314cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r05 0of65536cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r05 19220of19220cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r05 65536of65536cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r05 0of65536cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r05 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r05 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r05 0:0/1:65536/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r05 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r05 25cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r05 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r05 max0.00m/p99nonem/0pairs <=0.1250m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.R0.r05 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r05 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r05 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r05 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r05 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r05 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r05 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r05 max0.00m/p990.00m/256pairs <=0.1250m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r05 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r05 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r05 59793cols/L40.996 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r05 0.3147 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r05 24.3mwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r05 p50-205.5m/p99-87.8m/max-79.1m/24832cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r05 0.047within1km/0.099raw/noneat2-3nodes/17885pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r05 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 5, along 280832: edge (280832, 0) b 6974.4 h_raw 7301.5 word 0 | partner NegZ (0, 280832) b 6974.3 h_raw 7302.6 word 3 | inward b 6974.5; R0 s 7301.5/6966.4 l NaN/6968.0 key 0/39738; N2 s 7048.0/7052.3 key 0/0
+   seam pair at rung 5, along 280833: edge (280833, 0) b 6974.4 h_raw 7304.6 word 0 | partner NegZ (0, 280833) b 6974.3 h_raw 7305.6 word 3 | inward b 6974.5; R0 s 7304.6/6966.4 l NaN/6968.0 key 0/39738; N2 s 7049.2/7053.6 key 0/0
+CENSUS SEAM-KEY.seam.R0.r05 256of256pairs-across/0of256pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r05 across:p50290.88/p99392.11/max392.79m;inward:p503.15/p996.86/max7.10m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r05 0of256pairs-across/0of256pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r05 across:p503.05/p995.57/max5.62m;inward:p503.34/p996.22/max6.30m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r06 0of16384cols/9chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r06 0cols >0[the-card's-side-word-must-differ] NO-BAND
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r06 0of16384cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r06 11532of11532cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r06 16384of16384cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r06 0of16384cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r06 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r06 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r06 0:0/1:16384/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r06 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r06 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r06 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r06 max0.00m/p99nonem/0pairs <=0.2500m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.R0.r06 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r06 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r06 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r06 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r06 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r06 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r06 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r06 max0.00m/p99nonem/0pairs <=0.2500m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r06 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r06 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r06 5632cols/L41.000 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r06 0.3036 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r06 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r06 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r06 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r06 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r06 0of16384cols/9chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r06 8580cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r06 0of16384cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r06 11532of11532cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r06 16384of16384cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r06 0of16384cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r06 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r06 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r06 0:0/1:16384/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r06 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r06 6cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r06 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r06 max0.00m/p99nonem/0pairs <=0.2500m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.R0.r06 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r06 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r06 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r06 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r06 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r06 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r06 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r06 max0.00m/p990.00m/129pairs <=0.2500m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r06 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r06 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r06 14940cols/L40.994 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r06 0.3003 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r06 20.2mwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r06 p50-204.8m/p99-87.6m/max-79.2m/6176cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r06 0.042within1km/0.092raw/noneat2-3nodes/4590pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r06 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 6, along 140416: edge (140416, 0) b 6974.4 h_raw 7288.1 word 0 | partner NegZ (0, 140416) b 6974.3 h_raw 7291.2 word 3 | inward b 6974.6; R0 s 7288.1/6966.4 l NaN/6968.0 key 0/39738; N2 s 7031.6/7041.3 key 0/0
+   seam pair at rung 6, along 140417: edge (140417, 0) b 6974.4 h_raw 7293.0 word 0 | partner NegZ (0, 140417) b 6974.3 h_raw 7292.6 word 3 | inward b 6974.6; R0 s 7293.0/6966.4 l NaN/6968.0 key 0/39738; N2 s 7032.5/7041.1 key 0/0
+CENSUS SEAM-KEY.seam.R0.r06 128of128pairs-across/0of128pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r06 across:p50278.30/p99377.88/max378.52m;inward:p505.89/p9912.11/max12.58m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r06 0of128pairs-across/0of128pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r06 across:p506.04/p999.85/max10.02m;inward:p506.85/p9911.19/max11.26m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r07 0of4096cols/4chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r07 0cols >0[the-card's-side-word-must-differ] NO-BAND
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r07 0of4096cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r07 7688of7688cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r07 4096of4096cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r07 0of4096cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r07 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r07 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r07 0:0/1:4096/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r07 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r07 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r07 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r07 max0.00m/p99nonem/0pairs <=0.5000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.R0.r07 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r07 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r07 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r07 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r07 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r07 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r07 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r07 max0.00m/p99nonem/0pairs <=0.5000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r07 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r07 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r07 1408cols/L41.000 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r07 0.2366 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r07 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r07 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r07 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r07 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r07 0of4096cols/4chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r07 2133cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r07 0of4096cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r07 7688of7688cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r07 4096of4096cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r07 0of4096cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r07 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r07 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r07 0:0/1:4096/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r07 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r07 1cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r07 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r07 max0.00m/p99nonem/0pairs <=0.5000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.R0.r07 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r07 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r07 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r07 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r07 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r07 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r07 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r07 max0.01m/p990.01m/64pairs <=0.5000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r07 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r07 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r07 3755cols/L40.995 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r07 0.2652 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r07 9.9mwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r07 p50-198.1m/p99-84.4m/max-74.7m/1536cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r07 0.023within1km/0.078raw/noneat2-3nodes/1143pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r07 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 7, along 70208: edge (70208, 0) b 6974.5 h_raw 7259.4 word 0 | partner NegZ (0, 70208) b 6974.2 h_raw 7260.0 word 3 | inward b 6974.8; R0 s 7259.4/6966.4 l NaN/6968.0 key 0/39738; N2 s 7003.4/7017.9 key 0/0
+   seam pair at rung 7, along 70209: edge (70209, 0) b 6974.5 h_raw 7267.4 word 0 | partner NegZ (0, 70209) b 6974.2 h_raw 7247.1 word 3 | inward b 6974.8; R0 s 7267.4/6966.4 l NaN/6968.0 key 0/39738; N2 s 7005.0/7014.1 key 0/0
+CENSUS SEAM-KEY.seam.R0.r07 64of64pairs-across/0of64pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r07 across:p50234.90/p99341.37/max341.37m;inward:p5012.95/p9926.80/max26.80m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r07 0of64pairs-across/0of64pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r07 across:p508.43/p9916.01/max16.01m;inward:p507.85/p9913.52/max13.52m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r08 0of1024cols/1chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r08 0cols >0[the-card's-side-word-must-differ] NO-BAND
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r08 0of1024cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r08 3844of3844cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r08 1024of1024cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r08 0of1024cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r08 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r08 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r08 0:0/1:1024/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSA.r08 0of1024cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r08 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r08 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r08 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r08 max0.00m/p99nonem/0pairs <=1.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.R0.r08 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r08 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r08 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r08 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r08 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r08 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r08 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r08 max0.00m/p99nonem/0pairs <=1.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r08 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r08 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r08 352cols/L41.000 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r08 0.1633 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r08 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r08 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r08 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r08 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r08 0of1024cols/1chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r08 533cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r08 0of1024cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r08 3844of3844cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r08 1024of1024cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r08 0of1024cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r08 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r08 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r08 0:0/1:1024/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSB.r08 0of1024cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r08 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r08 1cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r08 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r08 max0.00m/p99nonem/0pairs <=1.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.R0.r08 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r08 nonemwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r08 p50nonem/p99nonem/maxnonem/0cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r08 nonewithin1km/noneraw/noneat2-3nodes/0pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r08 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r08 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r08 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r08 max0.01m/p990.01m/32pairs <=1.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r08 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r08 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r08 932cols/L40.961 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r08 0.1259 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r08 2.6mwithin1km/nonemat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r08 p50-164.8m/p99-75.5m/max-71.9m/384cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r08 0.008within1km/0.039raw/noneat2-3nodes/315pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r08 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 8, along 35104: edge (35104, 0) b 6974.6 h_raw 7135.5 word 0 | partner NegZ (0, 35104) b 6974.1 h_raw 7122.1 word 3 | inward b 6975.1; R0 s 7135.5/6966.5 l NaN/6968.0 key 0/39738; N2 s 6976.6/6978.6 key 0/0
+   seam pair at rung 8, along 35105: edge (35105, 0) b 6974.6 h_raw 7137.7 word 0 | partner NegZ (0, 35105) b 6974.1 h_raw 7123.5 word 3 | inward b 6975.1; R0 s 7137.7/6966.5 l NaN/6968.0 key 0/39738; N2 s 6976.5/6978.5 key 0/0
+CENSUS SEAM-KEY.seam.R0.r08 32of32pairs-across/0of32pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r08 across:p50171.26/p99219.99/max219.99m;inward:p5013.90/p9932.60/max32.60m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r08 0of32pairs-across/0of32pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r08 across:p505.83/p997.41/max7.41m;inward:p502.72/p993.83/max3.83m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+
+-- W-SEAM rungs 7..=13: WSA on NegY from (69696, 0), WSB on NegZ (UMinus) from (0, 69696), 1024 columns a side at rung 7
+CENSUS CHECK-R0.seam.WSA.r07 0of1048576cols/289chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r07 59470cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r07 0of1048576cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r07 65348of65348cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r07 1048576of1048576cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r07 0of593920cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r07 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r07 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r07 0:454656/1:593920/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r07 8192cols(side-wet-drawn-dry:8192,of-them-ties:8192/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] RED
+     the first: (70048, 800) s 6707.00 l 6707.00 word 3 B 6707.0; (70049, 800) s 6707.00 l 6707.00 word 3 B 6707.0; (70050, 800) s 6707.00 l 6707.00 word 3 B 6707.0
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r07 13280cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r07 7cols 0[survey§6.2;finding-2] RED
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r07 max216.84m/p99204.37m/1728pairs <=0.5000m(half-q_r)[finding-1] RED
+CENSUS WALL.seam.WSA.R0.r07 1637of2240pairs(p501.92/p9913.80/max14.83xQ;Q=29.291m) <=0.001of-pairs,>=1000pairs[finding-19] RED
+CENSUS WALL-PER-PAIR.seam.WSA.R0.r07 p5033.36/p99282.14xraw no-band[delta/max(raw,q_r)] NO-BAND
+CENSUS G-PERCHED.seam.WSA.R0.r07 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r07 157.8mwithin1km/303.2mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r07 p500.0m/p990.0m/max0.0m/264992cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r07 0.042within1km/0.043raw/0.066at2-3nodes/38988pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r07 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r07 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r07 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r07 max0.02m/p990.01m/2539pairs <=0.5000m(half-q_r)[finding-1] GREEN
+CENSUS WALL.seam.WSA.N2.r07 0of2539pairs(p500.01/p990.02/max0.03xQ;Q=29.291m) <=0.001of-pairs,>=1000pairs[finding-19] GREEN
+CENSUS WALL-PER-PAIR.seam.WSA.N2.r07 p500.06/p990.60xraw no-band[delta/max(raw,q_r)] NO-BAND
+CENSUS G-PERCHED.seam.WSA.N2.r07 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r07 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r07 209973cols/L40.589 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r07 0.3634 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r07 8.5mwithin1km/303.7mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r07 p50-1.4m/p9974.3m/max162.6m/253200cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r07 0.022within1km/0.047raw/0.063at2-3nodes/37674pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r07 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r07 0of1048576cols/289chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r07 42832cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r07 0of1048576cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r07 65348of65348cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r07 1048576of1048576cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r07 0of623616cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r07 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r07 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r07 0:424960/1:472064/2:147456/3:4096/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r07 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r07 20cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r07 63cols 0[survey§6.2;finding-2] RED
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r07 max469.70m/p99436.25m/2560pairs <=0.5000m(half-q_r)[finding-1] RED
+CENSUS WALL.seam.WSB.R0.r07 2409of2560pairs(p507.37/p9924.19/max26.05xQ;Q=36.132m) <=0.001of-pairs,>=1000pairs[finding-19] RED
+CENSUS WALL-PER-PAIR.seam.WSB.R0.r07 p5056.30/p99591.86xraw no-band[delta/max(raw,q_r)] NO-BAND
+CENSUS G-PERCHED.seam.WSB.R0.r07 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r07 345.1mwithin1km/483.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r07 p500.0m/p990.0m/max0.0m/457503cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r07 0.069within1km/0.069raw/0.090at2-3nodes/46503pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r07 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r07 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r07 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r07 max0.02m/p990.01m/3629pairs <=0.5000m(half-q_r)[finding-1] GREEN
+CENSUS WALL.seam.WSB.N2.r07 0of3629pairs(p500.00/p990.02/max0.02xQ;Q=36.132m) <=0.001of-pairs,>=1000pairs[finding-19] GREEN
+CENSUS WALL-PER-PAIR.seam.WSB.N2.r07 p500.02/p990.21xraw no-band[delta/max(raw,q_r)] NO-BAND
+CENSUS G-PERCHED.seam.WSB.N2.r07 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r07 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r07 267734cols/L40.421 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r07 0.6197 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r07 10.8mwithin1km/441.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r07 p50-27.2m/p9956.6m/max165.0m/491845cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r07 0.027within1km/0.069raw/0.087at2-3nodes/57135pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r07 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 7, along 69696: edge (69696, 0) b 6974.2 h_raw 7528.1 word 0 | partner NegZ (0, 69696) b 6973.9 h_raw 7533.7 word 0 | inward b 6974.4; R0 s 7528.1/7533.7 l NaN/NaN key 0/0; N2 s 7363.2/7361.8 key 0/0
+   seam pair at rung 7, along 69697: edge (69697, 0) b 6974.2 h_raw 7518.1 word 0 | partner NegZ (0, 69697) b 6973.9 h_raw 7512.7 word 0 | inward b 6974.5; R0 s 7518.1/7512.7 l NaN/NaN key 0/0; N2 s 7346.4/7336.6 key 0/0
+CENSUS SEAM-KEY.seam.R0.r07 832of1024pairs-across/0of1024pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r07 across:p50193.24/p99725.36/max786.59m;inward:p505.42/p9933.04/max34.23m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r07 0of1024pairs-across/0of1024pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r07 across:p505.22/p9928.03/max32.59m;inward:p504.70/p9926.44/max32.08m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r08 0of262144cols/81chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r08 14867cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r08 0of262144cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r08 34596of34596cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r08 262144of262144cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r08 0of148480cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r08 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r08 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r08 0:113664/1:148480/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSA.r08 0of262144cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r08 2048cols(side-wet-drawn-dry:2048,of-them-ties:2048/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] RED
+     the first: (35024, 400) s 6707.00 l 6707.00 word 3 B 6707.0; (35025, 400) s 6707.00 l 6707.00 word 3 B 6707.0; (35026, 400) s 6707.00 l 6707.00 word 3 B 6707.0
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r08 3257cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r08 18cols 0[survey§6.2;finding-2] RED
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r08 max194.77m/p99169.29m/864pairs <=1.0000m(half-q_r)[finding-1] RED
+CENSUS G-PERCHED.seam.WSA.R0.r08 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r08 126.4mwithin1km/250.2mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r08 p500.0m/p990.0m/max0.0m/66448cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r08 0.028within1km/0.029raw/0.047at2-3nodes/10760pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r08 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r08 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r08 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r08 max0.03m/p990.02m/1267pairs <=1.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r08 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r08 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r08 52494cols/L40.585 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r08 0.2464 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r08 4.2mwithin1km/252.5mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r08 p50-1.2m/p9974.5m/max162.4m/63343cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r08 0.013within1km/0.031raw/0.044at2-3nodes/10210pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r08 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r08 0of262144cols/81chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r08 10749cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r08 0of262144cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r08 34596of34596cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r08 262144of262144cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r08 0of155904cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r08 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r08 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r08 0:106240/1:118016/2:36864/3:1024/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSB.r08 0of262144cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r08 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r08 16cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r08 63cols 0[survey§6.2;finding-2] RED
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r08 max388.98m/p99372.84m/1280pairs <=1.0000m(half-q_r)[finding-1] RED
+CENSUS G-PERCHED.seam.WSB.R0.r08 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r08 287.6mwithin1km/405.1mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r08 p500.0m/p990.0m/max0.0m/114575cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r08 0.044within1km/0.044raw/0.064at2-3nodes/12915pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r08 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r08 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r08 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r08 max0.06m/p990.02m/1822pairs <=1.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r08 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r08 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r08 66988cols/L40.399 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r08 0.5234 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r08 4.1mwithin1km/366.9mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r08 p50-26.2m/p9960.2m/max178.9m/123044cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r08 0.011within1km/0.045raw/0.062at2-3nodes/15917pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r08 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 8, along 34848: edge (34848, 0) b 6974.3 h_raw 7528.3 word 0 | partner NegZ (0, 34848) b 6973.8 h_raw 7517.6 word 0 | inward b 6974.9; R0 s 7528.3/7517.6 l NaN/NaN key 0/0; N2 s 7362.1/7341.7 key 0/0
+   seam pair at rung 8, along 34849: edge (34849, 0) b 6974.4 h_raw 7500.1 word 0 | partner NegZ (0, 34849) b 6973.9 h_raw 7487.9 word 0 | inward b 6975.0; R0 s 7500.1/7487.9 l NaN/NaN key 0/0; N2 s 7326.5/7305.8 key 0/0
+CENSUS SEAM-KEY.seam.R0.r08 416of512pairs-across/0of512pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r08 across:p50132.71/p99592.96/max628.66m;inward:p506.01/p9942.96/max44.45m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r08 0of512pairs-across/0of512pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r08 across:p503.19/p9920.22/max21.40m;inward:p501.84/p9917.09/max18.79m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r09 0of65536cols/25chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r09 3707cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r09 0of65536cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r09 19220of19220cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r09 65536of65536cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r09 0of37120cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r09 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r09 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r09 0:28416/1:37120/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSA.r09 0of65536cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r09 512cols(side-wet-drawn-dry:512,of-them-ties:512/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] RED
+     the first: (17512, 200) s 6707.00 l 6707.00 word 3 B 6707.0; (17513, 200) s 6707.00 l 6707.00 word 3 B 6707.0; (17514, 200) s 6707.00 l 6707.00 word 3 B 6707.0
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r09 803cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r09 36cols 0[survey§6.2;finding-2] RED
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r09 max112.33m/p99101.88m/432pairs <=2.0000m(half-q_r)[finding-1] RED
+CENSUS G-PERCHED.seam.WSA.R0.r09 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r09 69.8mwithin1km/171.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r09 p500.0m/p990.0m/max0.0m/16712cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r09 0.016within1km/0.017raw/0.023at2-3nodes/3186pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r09 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r09 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r09 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r09 max0.02m/p990.02m/630pairs <=2.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r09 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r09 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r09 13163cols/L40.597 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r09 0.1765 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r09 1.5mwithin1km/175.9mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r09 p50-0.6m/p99109.7m/max198.2m/15982cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r09 0.004within1km/0.017raw/0.021at2-3nodes/2979pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r09 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r09 0of65536cols/25chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r09 2670cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r09 0of65536cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r09 19220of19220cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r09 65536of65536cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r09 0of38976cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r09 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r09 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r09 0:26560/1:29504/2:9216/3:256/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSB.r09 0of65536cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r09 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r09 1cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r09 80cols 0[survey§6.2;finding-2] RED
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r09 max292.65m/p99249.41m/640pairs <=2.0000m(half-q_r)[finding-1] RED
+CENSUS G-PERCHED.seam.WSB.R0.r09 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r09 191.3mwithin1km/289.7mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r09 p500.0m/p990.0m/max0.0m/28743cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r09 0.025within1km/0.025raw/0.031at2-3nodes/3873pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r09 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r09 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r09 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r09 max0.02m/p990.02m/908pairs <=2.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r09 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r09 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r09 16738cols/L40.399 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r09 0.3471 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r09 1.4mwithin1km/252.3mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r09 p50-22.3m/p9979.5m/max162.4m/30936cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r09 0.004within1km/0.024raw/0.032at2-3nodes/4807pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r09 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 9, along 17424: edge (17424, 0) b 6974.6 h_raw 7338.8 word 0 | partner NegZ (0, 17424) b 6973.5 h_raw 7328.7 word 0 | inward b 6975.7; R0 s 7338.8/7328.7 l NaN/NaN key 0/0; N2 s 7184.4/7167.5 key 0/0
+   seam pair at rung 9, along 17425: edge (17425, 0) b 6974.8 h_raw 7317.4 word 0 | partner NegZ (0, 17425) b 6973.7 h_raw 7307.0 word 0 | inward b 6976.0; R0 s 7317.4/7307.0 l NaN/NaN key 0/0; N2 s 7152.0/7135.6 key 0/0
+CENSUS SEAM-KEY.seam.R0.r09 208of256pairs-across/0of256pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r09 across:p5068.77/p99442.23/max445.58m;inward:p508.41/p9933.65/max35.18m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r09 0of256pairs-across/0of256pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r09 across:p501.37/p9923.29/max23.38m;inward:p501.07/p9931.01/max31.17m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r10 0of16384cols/9chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r10 1109cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r10 0of16384cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r10 11532of11532cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r10 16384of16384cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r10 0of9280cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r10 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r10 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r10 0:7104/1:9280/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSA.r10 0of16384cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r10 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r10 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r10 11cols 0[survey§6.2;finding-2] RED
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r10 max10.78m/p999.66m/216pairs <=4.0000m(half-q_r)[finding-1] RED
+CENSUS G-PERCHED.seam.WSA.R0.r10 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r10 0.0mwithin1km/0.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r10 p500.0m/p990.0m/max0.0m/4100cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r10 0.001within1km/0.001raw/0.000at2-3nodes/858pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r10 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r10 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r10 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r10 max0.02m/p990.01m/307pairs <=4.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r10 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r10 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r10 3313cols/L40.502 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r10 0.0062 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r10 3.3mwithin1km/0.1mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r10 p500.0m/p994.4m/max5.6m/4050cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r10 0.002within1km/0.001raw/0.000at2-3nodes/980pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r10 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r10 0of16384cols/9chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r10 1087cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r10 0of16384cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r10 11532of11532cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r10 16384of16384cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r10 0of9744cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r10 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r10 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r10 0:6640/1:7376/2:2304/3:64/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSB.r10 0of16384cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r10 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r10 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r10 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r10 max4.07m/p993.26m/320pairs <=4.0000m(half-q_r)[finding-1] RED
+CENSUS G-PERCHED.seam.WSB.R0.r10 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r10 0.0mwithin1km/0.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r10 p500.0m/p990.0m/max0.0m/7235cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r10 0.000within1km/0.000raw/0.000at2-3nodes/1290pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r10 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r10 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r10 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r10 max0.01m/p990.01m/452pairs <=4.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r10 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r10 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r10 4173cols/L40.369 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r10 0.0041 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r10 1.8mwithin1km/0.1mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r10 p500.0m/p992.5m/max3.5m/7390cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r10 0.001within1km/0.000raw/0.000at2-3nodes/1594pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r10 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 10, along 8712: edge (8712, 0) b 6976.3 h_raw 6976.3 word 0 | partner NegZ (0, 8712) b 6975.4 h_raw 6975.4 word 0 | inward b 6977.2; R0 s 6976.3/6975.4 l NaN/NaN key 0/0; N2 s 6976.5/6975.2 key 0/0
+   seam pair at rung 10, along 8713: edge (8713, 0) b 6975.2 h_raw 6975.2 word 0 | partner NegZ (0, 8713) b 6974.2 h_raw 6974.2 word 0 | inward b 6976.1; R0 s 6975.2/6974.2 l NaN/NaN key 0/0; N2 s 6975.8/6974.5 key 0/0
+CENSUS SEAM-KEY.seam.R0.r10 104of128pairs-across/0of128pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r10 across:p508.58/p9914.25/max14.53m;inward:p500.98/p992.87/max2.95m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r10 0of128pairs-across/0of128pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r10 across:p502.04/p995.63/max5.66m;inward:p501.43/p994.22/max4.30m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r11 0of4096cols/4chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r11 277cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r11 0of4096cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r11 7688of7688cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r11 4096of4096cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r11 0of2320cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r11 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r11 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r11 0:1776/1:2320/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSA.r11 0of4096cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r11 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r11 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r11 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r11 max11.14m/p999.65m/108pairs <=8.0000m(half-q_r)[finding-1] RED
+CENSUS G-PERCHED.seam.WSA.R0.r11 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r11 0.0mwithin1km/0.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r11 p500.0m/p990.0m/max0.0m/1050cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r11 0.001within1km/0.001raw/0.000at2-3nodes/212pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r11 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r11 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r11 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r11 max0.14m/p990.08m/134pairs <=8.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r11 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r11 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r11 820cols/L40.288 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r11 0.0050 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r11 3.8mwithin1km/0.1mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r11 p500.0m/p994.6m/max5.7m/1043cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r11 0.001within1km/0.001raw/0.000at2-3nodes/235pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r11 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r11 0of4096cols/4chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r11 271cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r11 0of4096cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r11 7688of7688cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r11 4096of4096cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r11 0of2436cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r11 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r11 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r11 0:1660/1:1844/2:576/3:16/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSB.r11 0of4096cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r11 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r11 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r11 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r11 max3.84m/p993.58m/160pairs <=8.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.R0.r11 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r11 0.0mwithin1km/0.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r11 p500.0m/p990.0m/max0.0m/1833cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r11 0.000within1km/0.000raw/0.000at2-3nodes/319pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r11 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r11 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r11 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r11 max0.12m/p990.12m/223pairs <=8.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r11 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r11 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r11 1054cols/L40.291 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r11 0.0032 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r11 1.7mwithin1km/0.1mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r11 p500.0m/p992.5m/max3.5m/1879cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r11 0.001within1km/0.000raw/0.000at2-3nodes/365pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r11 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 11, along 4356: edge (4356, 0) b 6976.2 h_raw 6976.2 word 0 | partner NegZ (0, 4356) b 6974.3 h_raw 6974.3 word 0 | inward b 6978.0; R0 s 6976.2/6974.3 l NaN/NaN key 0/0; N2 s 6976.5/6974.0 key 0/0
+   seam pair at rung 11, along 4357: edge (4357, 0) b 6974.5 h_raw 6974.5 word 0 | partner NegZ (0, 4357) b 6972.5 h_raw 6972.5 word 0 | inward b 6976.4; R0 s 6974.5/6972.5 l NaN/NaN key 0/0; N2 s 6975.6/6973.4 key 0/0
+CENSUS SEAM-KEY.seam.R0.r11 52of64pairs-across/0of64pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r11 across:p508.95/p9915.50/max15.50m;inward:p501.90/p995.65/max5.65m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r11 0of64pairs-across/0of64pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r11 across:p503.95/p9910.96/max10.96m;inward:p501.63/p993.61/max3.61m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r12 0of1024cols/1chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r12 68cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r12 0of1024cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r12 3844of3844cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r12 1024of1024cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r12 0of580cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r12 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r12 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r12 0:444/1:580/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSA.r12 0of1024cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r12 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r12 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r12 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r12 max11.68m/p9911.68m/54pairs <=16.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.R0.r12 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r12 0.0mwithin1km/0.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r12 p500.0m/p990.0m/max0.0m/275cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r12 0.001within1km/0.001raw/0.001at2-3nodes/104pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r12 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r12 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r12 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r12 max0.93m/p990.93m/67pairs <=16.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r12 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r12 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r12 221cols/L40.433 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r12 0.0023 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r12 2.4mwithin1km/0.1mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r12 p500.0m/p994.3m/max5.1m/268cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r12 0.001within1km/0.001raw/0.001at2-3nodes/104pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r12 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r12 0of1024cols/1chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r12 68cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r12 0of1024cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r12 3844of3844cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r12 1024of1024cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r12 0of609cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r12 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r12 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r12 0:415/1:461/2:144/3:4/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSB.r12 0of1024cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r12 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r12 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r12 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r12 max3.37m/p993.37m/80pairs <=16.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.R0.r12 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r12 0.0mwithin1km/0.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r12 p500.0m/p990.0m/max0.0m/470cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r12 0.000within1km/0.000raw/0.000at2-3nodes/157pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r12 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r12 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r12 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r12 max0.99m/p990.93m/111pairs <=16.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r12 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r12 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r12 257cols/L40.197 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r12 0.0013 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r12 1.7mwithin1km/0.1mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r12 p500.0m/p992.3m/max2.9m/496cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r12 0.000within1km/0.000raw/0.000at2-3nodes/183pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r12 0cells no-band[a-reading] NO-BAND
+   seam pair at rung 12, along 2178: edge (2178, 0) b 6976.2 h_raw 6976.2 word 0 | partner NegZ (0, 2178) b 6972.3 h_raw 6972.3 word 0 | inward b 6979.3; R0 s 6976.2/6972.3 l NaN/NaN key 0/0; N2 s 6976.3/6972.0 key 0/0
+   seam pair at rung 12, along 2179: edge (2179, 0) b 6974.7 h_raw 6974.7 word 0 | partner NegZ (0, 2179) b 6970.6 h_raw 6970.6 word 0 | inward b 6978.1; R0 s 6974.7/6970.6 l NaN/NaN key 0/0; N2 s 6975.1/6971.4 key 0/0
+CENSUS SEAM-KEY.seam.R0.r12 26of32pairs-across/0of32pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r12 across:p509.69/p9917.25/max17.25m;inward:p503.33/p999.52/max9.52m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS SEAM-KEY.seam.N2.r12 1of32pairs-across/0of32pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r12 across:p507.02/p9919.21/max19.21m;inward:p503.05/p996.72/max6.72m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+CENSUS CHECK-R0.seam.WSA.r13 0of256cols/1chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSA.r13 17cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSA.r13 0of256cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSA.r13 3844of3844cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSA.r13 256of256cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSA.r13 0of144cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSA.r13 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSA.r13 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSA.r13 0:112/1:144/2:0/3:0/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSA.r13 0of256cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.R0.r13 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSA.R0.r13 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSA.R0.r13 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.R0.r13 max12.08m/p9912.08m/27pairs <=32.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.R0.r13 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.R0.r13 0.0mwithin1km/0.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.R0.r13 p500.0m/p990.0m/max0.0m/75cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.R0.r13 0.001within1km/0.001raw/0.002at2-3nodes/46pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.R0.r13 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSA.N2.r13 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSA.N2.r13 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSA.N2.r13 max7.65m/p997.65m/27pairs <=32.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSA.N2.r13 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSA.N2.r13 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSA.N2.r13 37cols/L40.087 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSA.N2.r13 0.0009 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSA.N2.r13 1.9mwithin1km/0.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSA.N2.r13 p500.0m/p994.7m/max4.7m/75cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSA.N2.r13 0.000within1km/0.001raw/0.002at2-3nodes/46pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSA.N2.r13 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-R0.seam.WSB.r13 0of256cols/1chunks 0[plan§4.1;the-shipped-path-bit-for-bit] GREEN
+CENSUS CHECK-R0-CONTROL.seam.WSB.r13 19cols >0[the-card's-side-word-must-differ] GREEN
+CENSUS CHECK-CACHE-FIELD.seam.WSB.r13 0of256cols 0[plan§4.1;the-cache's-field] GREEN
+CENSUS CHECK-CACHE-CONTROL.seam.WSB.r13 3844of3844cols >0[the-next-level-must-differ] GREEN
+CENSUS BASECHECK.seam.WSB.r13 256of256cols =all[drift-alarm] GREEN
+CENSUS CHECK-FINE-SPLIT.seam.WSB.r13 0of152cols 0[plan§4.1] GREEN
+CENSUS CHECK-R0-F64.seam.WSB.r13 0.000000m <=0.001m[named] GREEN
+CENSUS CHECK-SHORE-CANDIDATES-OVER-4.seam.WSB.r13 0cols 0[finding-23] GREEN
+CENSUS CANDIDATES-HIST.seam.WSB.r13 0:104/1:115/2:36/3:1/4:0/5+:0 no-band[a-reading] NO-BAND
+CENSUS FOLD-RULES-DIFFER.seam.WSB.r13 0of256cols no-band[N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.R0.r13 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS CHECK-DRAWN-IS-SIDE-CONTROL.seam.WSB.R0.r13 0cols no-band[l:=hold;must-be-RED-on-the-pockets] NO-BAND
+CENSUS G-SEA-OVER-DRY.seam.WSB.R0.r13 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.R0.r13 max2.75m/p992.75m/40pairs <=32.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.R0.r13 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.R0.r13 0.0mwithin1km/0.0mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.R0.r13 p500.0m/p990.0m/max0.0m/123cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.R0.r13 0.000within1km/0.000raw/0.000at2-3nodes/75pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.R0.r13 0cells no-band[a-reading] NO-BAND
+CENSUS CHECK-DRAWN-IS-SIDE.seam.WSB.N2.r13 0cols(side-wet-drawn-dry:0,of-them-ties:0/side-dry-drawn-wet:0) 0[survey§6.2;finding-19] GREEN
+CENSUS G-SEA-OVER-DRY.seam.WSB.N2.r13 0cols 0[survey§6.2;finding-2] GREEN
+CENSUS G-SIDE-VS-GROUND.seam.WSB.N2.r13 max2.67m/p992.67m/40pairs <=32.0000m(half-q_r)[finding-1] GREEN
+CENSUS G-PERCHED.seam.WSB.N2.r13 0bodies/0cols 0[ruling-B7] GREEN
+CENSUS HOLD-RAMP.seam.WSB.N2.r13 0cols no-band[finding-10] NO-BAND
+CENSUS HALO-EXTENT.seam.WSB.N2.r13 57cols/L40.457 no-band[finding-16] NO-BAND
+CENSUS FADE-SLOPE-MAX.seam.WSB.N2.r13 0.0006 no-band[|grad(s-h_raw)|;finding-21] NO-BAND
+CENSUS FINE-RMS-NEAR-SHORE.seam.WSB.N2.r13 1.0mwithin1km/0.1mat2-3nodes no-band[finding-20] NO-BAND
+CENSUS RAISE-OVER-RAW.seam.WSB.N2.r13 p500.0m/p992.2m/max2.5m/123cols no-band[the-second-round] NO-BAND
+CENSUS FINE-SLOPE-NEAR-SHORE.seam.WSB.N2.r13 0.000within1km/0.000raw/0.000at2-3nodes/75pairs no-band[B10-item-1] NO-BAND
+CENSUS G-SHORE-TWO-WATERS.seam.WSB.N2.r13 0cells no-band[a-reading] NO-BAND
+CENSUS SEAM-KEY.seam.R0.r13 13of16pairs-across/0of16pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.R0.r13 across:p5011.09/p9919.84/max19.84m;inward:p505.54/p999.77/max9.77m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+   seam pair at rung 13, along 1089: edge (1089, 0) b 6976.9 h_raw 6976.9 word 0 | partner NegZ (0, 1089) b 6969.2 h_raw 6969.2 word 0 | inward b 6982.4; R0 s 6976.9/6969.0 l NaN/NaN key 0/0; N2 s 6976.9/6969.0 key 0/0
+   seam pair at rung 13, along 1090: edge (1090, 0) b 6977.8 h_raw 6977.8 word 0 | partner NegZ (0, 1090) b 6970.3 h_raw 6970.3 word 0 | inward b 6983.7; R0 s 6977.8/6969.1 l NaN/NaN key 0/0; N2 s 6977.8/6969.1 key 0/0
+   seam pair at rung 13, along 1091: edge (1091, 0) b 6978.3 h_raw 6978.3 word 0 | partner NegZ (0, 1091) b 6971.0 h_raw 6971.0 word 3 | inward b 6984.4; R0 s 6978.3/6967.2 l NaN/6968.0 key 0/39738; N2 s 6978.3/6967.2 key 0/39738
+   seam pair at rung 13, along 1092: edge (1092, 0) b 6978.4 h_raw 6978.4 word 0 | partner NegZ (0, 1092) b 6971.1 h_raw 6971.1 word 3 | inward b 6984.4; R0 s 6978.4/6967.2 l NaN/6968.0 key 0/39738; N2 s 6978.4/6967.2 key 0/39738
+   seam pair at rung 13, along 1093: edge (1093, 0) b 6978.5 h_raw 6978.5 word 0 | partner NegZ (0, 1093) b 6971.2 h_raw 6971.2 word 0 | inward b 6984.3; R0 s 6978.5/6969.1 l NaN/NaN key 0/0; N2 s 6978.5/6969.1 key 0/0
+   seam pair at rung 13, along 1094: edge (1094, 0) b 6978.5 h_raw 6978.5 word 0 | partner NegZ (0, 1094) b 6971.2 h_raw 6971.2 word 3 | inward b 6984.1; R0 s 6978.5/6967.2 l NaN/6968.0 key 0/39738; N2 s 6978.5/6967.2 key 0/39738
+CENSUS SEAM-KEY.seam.N2.r13 13of16pairs-across/0of16pairs-inward no-band[the-edge-column's-drawn-water-against-its-partner-across-the-seam,beside-its-inward-neighbour[S0-item-6]] NO-BAND
+CENSUS SEAM-STEP.seam.N2.r13 across:p5011.20/p9924.93/max24.93m;inward:p505.54/p999.77/max9.77m no-band[the-drawn-surface's-step-across-the-seam-beside-the-step-inward[S0-item-6]] NO-BAND
+
+== THE POOLED LAKE LINE (every stand) ==
+
+== THE DECIDING NUMBER (survey §6.4) ==
+
+== THE CHOICE-A TABLE (survey §6.4; the bench recommends nothing) ==
+  gentle O1: 1 SHORE-STEP NO-BAND(red0/green0/no-band0); 2 CHECK-DRAWN-IS-SIDE NO-BAND(red0/green0/no-band0); 2 G-SEA-OVER-DRY NO-BAND(red0/green0/no-band0); 2 LAKE-APPEAR NO-BAND(red0/green0/no-band0); 2 LAKE-FLICKER NO-BAND(red0/green0/no-band0); 3 WALL-on-CLAMP-BINDS NO-BAND(red0/green0/no-band0); 4 G-SHORE-LATTICE NO-BAND(red0/green0/no-band0); 4 G-COAST-KINK NO-BAND(red0/green0/no-band0); 4 G-LAKE-FRACTAL NO-BAND(red0/green0/no-band0); 4 G-LAKE-DBC NO-BAND(red0/green0/no-band0)
+  gentle N1: 1 SHORE-STEP NO-BAND(red0/green0/no-band0); 2 CHECK-DRAWN-IS-SIDE NO-BAND(red0/green0/no-band0); 2 G-SEA-OVER-DRY NO-BAND(red0/green0/no-band0); 2 LAKE-APPEAR NO-BAND(red0/green0/no-band0); 2 LAKE-FLICKER NO-BAND(red0/green0/no-band0); 3 WALL-on-CLAMP-BINDS NO-BAND(red0/green0/no-band0); 4 G-SHORE-LATTICE NO-BAND(red0/green0/no-band0); 4 G-COAST-KINK NO-BAND(red0/green0/no-band0); 4 G-LAKE-FRACTAL NO-BAND(red0/green0/no-band0); 4 G-LAKE-DBC NO-BAND(red0/green0/no-band0)
+  gentle N2: 1 SHORE-STEP NO-BAND(red0/green0/no-band0); 2 CHECK-DRAWN-IS-SIDE NO-BAND(red0/green0/no-band0); 2 G-SEA-OVER-DRY NO-BAND(red0/green0/no-band0); 2 LAKE-APPEAR NO-BAND(red0/green0/no-band0); 2 LAKE-FLICKER NO-BAND(red0/green0/no-band0); 3 WALL-on-CLAMP-BINDS NO-BAND(red0/green0/no-band0); 4 G-SHORE-LATTICE NO-BAND(red0/green0/no-band0); 4 G-COAST-KINK NO-BAND(red0/green0/no-band0); 4 G-LAKE-FRACTAL NO-BAND(red0/green0/no-band0); 4 G-LAKE-DBC NO-BAND(red0/green0/no-band0)
+  plain O1: 1 SHORE-STEP NO-BAND(red0/green0/no-band0); 2 CHECK-DRAWN-IS-SIDE NO-BAND(red0/green0/no-band0); 2 G-SEA-OVER-DRY NO-BAND(red0/green0/no-band0); 2 LAKE-APPEAR NO-BAND(red0/green0/no-band0); 2 LAKE-FLICKER NO-BAND(red0/green0/no-band0); 3 WALL-on-CLAMP-BINDS NO-BAND(red0/green0/no-band0); 4 G-SHORE-LATTICE NO-BAND(red0/green0/no-band0); 4 G-COAST-KINK NO-BAND(red0/green0/no-band0); 4 G-LAKE-FRACTAL NO-BAND(red0/green0/no-band0); 4 G-LAKE-DBC NO-BAND(red0/green0/no-band0)
+  plain N1: 1 SHORE-STEP NO-BAND(red0/green0/no-band0); 2 CHECK-DRAWN-IS-SIDE NO-BAND(red0/green0/no-band0); 2 G-SEA-OVER-DRY NO-BAND(red0/green0/no-band0); 2 LAKE-APPEAR NO-BAND(red0/green0/no-band0); 2 LAKE-FLICKER NO-BAND(red0/green0/no-band0); 3 WALL-on-CLAMP-BINDS NO-BAND(red0/green0/no-band0); 4 G-SHORE-LATTICE NO-BAND(red0/green0/no-band0); 4 G-COAST-KINK NO-BAND(red0/green0/no-band0); 4 G-LAKE-FRACTAL NO-BAND(red0/green0/no-band0); 4 G-LAKE-DBC NO-BAND(red0/green0/no-band0)
+  plain N2: 1 SHORE-STEP NO-BAND(red0/green0/no-band0); 2 CHECK-DRAWN-IS-SIDE NO-BAND(red0/green0/no-band0); 2 G-SEA-OVER-DRY NO-BAND(red0/green0/no-band0); 2 LAKE-APPEAR NO-BAND(red0/green0/no-band0); 2 LAKE-FLICKER NO-BAND(red0/green0/no-band0); 3 WALL-on-CLAMP-BINDS NO-BAND(red0/green0/no-band0); 4 G-SHORE-LATTICE NO-BAND(red0/green0/no-band0); 4 G-COAST-KINK NO-BAND(red0/green0/no-band0); 4 G-LAKE-FRACTAL NO-BAND(red0/green0/no-band0); 4 G-LAKE-DBC NO-BAND(red0/green0/no-band0)
+
+== THE PANELS ==
+  0 panels, 0 bytes in all (budget 12582912)
+
+== THE PHASES ==
+  controls: 0.0 s
+  solve: 0.0 s
+  cache+nodes: 1.6 s
+  stands: 0.3 s
+  seam: 5.5 s
+  the whole run: 7.6 s; peak resident memory 1520 MB

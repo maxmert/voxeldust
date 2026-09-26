@@ -205,6 +205,13 @@ pub fn check_lines(c: &mut Census, lx: &LineCtx, out: &RungOut, sheet: Option<[u
         ),
         "a-reading",
     );
+    if k.fold_cols > 0 {
+        c.reading(
+            &lx.gate_rung("FOLD-RULES-DIFFER"),
+            &format!("{}of{}cols", k.fold_differ, k.fold_cols),
+            "N2's-own-samples:the-record-(most-samples)-vs-the-one-rule-(lake-share,highest-level)[S0-item-4;Q7]",
+        );
+    }
     if k.unread > 0 {
         c.say(format!(
             "   NOTE: {} columns of the window were not held by the field (the reader answered none)",

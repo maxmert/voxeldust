@@ -1,0 +1,14 @@
+# the artifact READ from Some("/private/tmp/claude-501/-Users-maxim-Projects-my-voxeldust--claude-worktrees-game/bd541c76-eaa9-41bb-9339-bca4b8f9a790/scratchpad/home.art") (a development run; a census run solves)
+ARTIFACT version 9 digest 1eb53c782459e0dfc2cc766157d2a0e4; the sea 3591 m; read in 0.2 s
+the fine lattice: 1216 nodes an edge, 8871936 nodes, 8192 rung-0 cells a node
+the walk: 8886534 node cells (1481089 a face, the seam cells on both faces), 7233010 with a water in their block, in 0.7 s
+CENSUS BAND-NODES 202431 of 8871936 nodes (2.28 %) no-band[S0-item-2;Q1]
+CENSUS BAND-BYTES list0.588MB(deltas0.201MB+heights0.386MB)/bitmap1.444MB/smaller0.588MB no-band[S0-item-2;Q1]
+CENSUS LAKE-NODES 93225 nodes 0.178MB (2 bytes a level; the sea's nodes 6893081) no-band[S0-item-2;Q1]
+CENSUS POCKET-LAKES-NEAR-SEA 0 lake nodes under the sea's level within 3 nodes of a sea node, 0 distinct levels [] no-band[S0-item-3;Q11]
+CENSUS CORNER-MIXED-CELLS 111089 of 8886534 cells (1.25 %) no-band[S0-item-2;Q3]
+CENSUS FAR-FOLD-COST 3564us/mixed-cell (0.87us/sample; 400 cells, 1638400 samples, 749460 wet; the bench's f64 side per sample, one thread; an upper bound: the integer form reads the words once a cell) no-band[S0-item-2;Q3]
+CENSUS FAR-FOLD-COST-RECORD 54us/mixed-cell (0.013us/sample; 1638400 samples, 749460 wet against the per-sample path's 749460; the words once a cell, the held read per sample, f64, one thread) no-band[S0-item-2;Q3]
+CENSUS EMPTY-GLOBE-RECORD 6s-on-one-core/3s-on-two-workers (the 111089 mixed cells x 54us; ARITH from two measured numbers) no-band[S0-item-2;Q3]
+CENSUS FOLD-SHIPPED-BYTES 0.636MB (three 2-byte words a mixed cell: its samples' wet, lake and pocket counts; the design's Q3 alternative) no-band[S0-item-2;Q3]
+CENSUS EMPTY-GLOBE 396s-on-one-core/198s-on-two-workers (the home planet's 111089 mixed cells x 3564us; ARITH from two measured numbers; a hemisphere is about half) no-band[S0-item-2;Q3]

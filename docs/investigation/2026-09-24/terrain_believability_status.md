@@ -982,6 +982,50 @@ last 3 km, the 49 m ripple over its last 38 m — and the coast stays put as the
 nine pixels at 704 km. The price: a lowland 12 km inland, a trough of the 25 km swell, now stands 190 m higher than the raw
 ground put it.
 
+### 8f. STEP 4's S0 — THE BUILD'S MEASUREMENTS (2026-09-26, generator 21; the bench, no world change; NOT committed)
+
+The build design (`docs/investigation/2026-09-26/n2_build_design.md` §10) holds every number; its censuses sit beside it.
+ONE LINE EACH:
+- **Items 1–3** (before ruling B14): the reach law (C_smooth 0.7723, C_ridged 0.9107) keeps every N2 verdict; the far data
+  and the empty globe; the pocket variants. Ruled by B14.
+- **Two sizes corrected after B14:** the band's rule had an off-by-one (a wet node one metre under its water was left out):
+  217 742 band nodes, **0.631 MB** (was 0.588); and the shipped far counts' unit is the NODE SQUARE (a rung-13 column):
+  192 271 squares, **1.100 MB** (was 0.636 MB per mixed cell). With the head: about 1.91 MB beside the 2.2 MB mask.
+- **Item 4, the one naming rule:** 0 of 16 748 lines move at rungs 8–13; the two rules name the same water on all
+  10 524 872 folded columns.
+- **Item 5, the far windows (rungs 13–18, 8 300 km):** the sample count pyramid is EXACT (four checks green, each with a
+  failing control) and N2 over the shore band is N2 over the rows, bit for bit, at every far rung. Two far defects of N2
+  found and cured as named choices (the owner's word owed): THE WET TIE (from rung 14 a column's centre is its node cell's
+  middle, where a straight coast's clamped words read exactly nought — a sea column 1 067 m deep was drawn as dry land at
+  the sea's level) and THE LONE COLUMN (a far column with no water in its block fell back on the land rule and stood under
+  the sea it reads). With both: the far lines against today's rule — WATER-STEP 0 (today's up to 385), the sea over half as
+  many dry columns at rung 13, the wet area steadier; the far shore step RED for both alike (the far coasts change their
+  topology); and the LAKES' EDGES FLICKER MORE under N2 (260 of 693 bodies against 53 of 714 at rung 14) — one-column
+  fragments of big lakes under a majority on nested footprints: the narrow water of B13 item 4, measured at the far rungs.
+  The two cures change 2 of 16 804 near lines (one a cure: the 7 ties of risk 16).
+- **Item 6, the seam and the corner:** 223 node pairs straddle a cube edge with a coast; ONE cube corner is coastal (Q12
+  applies here). On the busiest coastal edge N2 is SEAMLESS (0 pairs differ at rungs 3–11; the step across the edge is the
+  step inward; no red line), while TODAY'S RULE draws its shore ON the seam: a lake at 6 968 m on one face, dry land at
+  7 300 m on the other, a cliff of about 290 m along the cube edge (21 red lines, all today's).
+
+**Example.** A pilot flies along the cube edge north of the steep coast at rung 7 (about 227 km up). Today's shipped rule
+shows a straight cliff about 300 m tall exactly on the edge, a lake below it on one face and dry hills on the other. Under
+N2 the hills run across the edge as they run anywhere else.
+
+**RULING B16 AND ITS DESIGN (2026-09-26/27; `docs/investigation/2026-09-26/far_water_seamless_design.md`, written by
+workflow `wf_34d04e10-b3b`: three maps, three designs, two adversarial reviews; NOT committed).** The owner refused all
+three far folds (*"No flicker or changing of the shapes between rungs at all"*). THE CAUSE: every fold decides a far
+column wet or dry by a threshold on nested counts, and no threshold on nested footprints holds a small piece of water
+still. THE RECOMMENDED DESIGN D (the rung-free skin with the lid): past 111 km a pixel's water colour is the SHARE of
+N2's own 128 m samples under the pixel's footprint, from one integer pyramid that nests exactly, so no rung decides where
+water is and nothing can flicker; nearer than 55.6 km W18's crisp sheet stays and its water decision MORPHS across each
+band (a shore slides once instead of popping); from rung 14 the far surface is "the lid", the mean visible surface, with
+no side, fold or hold; and the renderer's own pops go first (one band buffer that the water reads too — today the water's
+materials are never rebound, `crates/client-render/src/terrain.rs:1921-1985`, verified; the water's culling box; an
+arrival ramp). WHAT REMAINS: sub-pixel water shows as a tint; a near shore slides once per band by N2's own step (the sea
+≤ 1.46 px, lakes up to 3.29 and 4.79 px, MEASURED); the land's relief morphs across each band, as today. NEXT: slice K0,
+the skin bench, then the owner's questions Q1–Q8 on its numbers and panels, before S1.
+
 ---
 
 ## 9. THE REFERENCE TARGET — the checklist every step reports against
@@ -1182,3 +1226,9 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-09-26 — ruling B12: the basins parked until after R2 (R2 decides the cut's water and measures D∞); the shore round N2 next; the fan measurement committed.
 - 2026-09-26 — the shore round N2 (§8e; `shoreline_bench_n2_census.txt`, 50 panels; NOT committed): the lift measured (571.8 m at share one); N2 = N1's side + a fade per octave (every nearby water, a distance that cannot jump) + a 30 m band + the side hold (relaxed by the sea's presence); the deciding number passes (1.40 px); seven other forms refuted and kept or recorded as controls; two new readings (FINE-SLOPE-NEAR-SHORE, RAISE-OVER-RAW) and the band's trade measured against N2 with no band; DEFERRED: three shoreline entries 🟨, six new (narrow water at a far rung, the lift, the walking-scale octaves under a metre, the filled troughs, the band over deep water, the band's lake shrink).
 - 2026-09-26 — ruling B13: N2 is the shore; the 30 m band kept; the filled troughs accepted until R2 and R4; build N2 (step 4), then fly all stands against both references; the round committed.
+- 2026-09-26 — step 4's BUILD DESIGN written by workflow `wf_b476b3a6-7c8` (four maps, a design, three adversarial reviews, 29 findings answered): `docs/investigation/2026-09-26/n2_build_design.md` — the near rungs buildable with no new data; the far rungs need the shore band (Q1, SL6); slices S0–S5; twelve owner questions. S0 items 1–3 MEASURED (§10 of it): the band and the lake levels 0.77 MB in all; the far fold's derivation about 3 s on two workers for the home planet (or 0.64 MB shipped); the reach law C_smooth 0.7723 / C_ridged 0.9107 holds every N2 verdict (the deciding number 1.459 px); the pocket variants change nothing here and variant (iii) is refuted. NOT committed.
+- 2026-09-26 — ruling B14 on those numbers: the shore band ships (SL6 yes); the reach is a law and the spectrum's conflict is registered; the far fold's counts ship too (0.64 MB, no empty far globe); the pocket exemption kept.
+- 2026-09-26 — step 4's S0 items 4–6 MEASURED (§8f; the build design §10): the one naming rule moves no line at rungs 8–13; the far pyramid and the shore band exact at rungs 13–18; two far defects of N2 found with measured cures (the wet tie, the lone column; named choices, the owner's word owed); N2's far lake edges flicker more than today's; N2 seamless at the busiest coastal cube edge where today's rule draws a 290 m cliff; one coastal cube corner; the band's size corrected to 0.631 MB and the far counts' to 1.100 MB (node squares).
+- 2026-09-26 — ruling B15: cure the far lake flicker on the bench BEFORE S1 (the one naming rule waits); the wet tie and the lone hold join N2 (the bench's defaults, with B14's reach law and pocket variant); B14's corrected sizes stand; Q4–Q6, Q8–Q10, Q12 accepted.
+- 2026-09-26 — three far folds measured against the flicker (the build design §10: the tent, the tent where mixed, no lone column); ruling B16: none taken — NO flicker and NO shape change between rungs at all; find the best solution before S1.
+- 2026-09-27 — B16's design written (`far_water_seamless_design.md`, workflow `wf_34d04e10-b3b`): design D, the rung-free skin with the lid; the renderer's water-band rebind defect verified in the code; next slice K0 (the skin bench) before S1.

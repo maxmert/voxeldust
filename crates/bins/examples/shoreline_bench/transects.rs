@@ -23,6 +23,7 @@ use vd_bins::shore_rules::{NodeSite, Nodes, Water};
 
 use crate::census::{Census, val};
 use crate::eval::{Caches, Checks, ColOut, Ctx, Fold, FoldMap, NVAR, RungOut, Var};
+use crate::pyramid::Pyramid;
 
 /// One transect: its centre in rung-0 cells (continuous), its unit normal in metres (along `i`,
 /// `j`), its half-length in metres, and its water kind (0 the sea, 1 the lakes).
@@ -224,6 +225,7 @@ fn walk(
     m_j: f64,
     full_from: u8,
     window_cells: f64,
+    tail_cells: f64,
     caches: &mut [HashMap<(i32, i32), Option<ColOut>>],
     shared: &mut Caches,
 ) -> Vec<Option<Crossings>> {
@@ -238,7 +240,8 @@ fn walk(
         let step = cell / 4.0;
         // The spans of t to sample.
         let spans: Vec<(f64, f64)> = if r as u8 >= full_from || r + 1 >= rungs {
-            vec![(-tr.half_m, tr.half_m)]
+            let tail = tail_cells * f64::from(1u32 << (r + 1));
+            vec![(-tr.half_m - tail, tr.half_m + tail)]
         } else {
             let Some(coarse) = out[r + 1].as_ref() else {
                 continue;
@@ -359,21 +362,29 @@ pub type Worst = (f64, usize, f64, f64);
 pub type Steps = BTreeMap<(usize, usize, u8), (Vec<f64>, usize, usize, Worst)>;
 
 /// ★ EVERY TRANSECT OF A STAND, over `threads` threads (each with its own column caches): the steps
-/// at every swap for every rule.
+/// at every swap for every rule. `tail` (the far window's transects) samples each fully read rung
+/// `match_cells` coarser cells past both ends and matches only the coarser crossings inside the
+/// transect, so a crossing at an end never takes a far finer one for want of its own.
 #[allow(clippy::too_many_arguments, reason = "the stand's own words")]
 pub fn measure(
     transects: &[Transect],
     ctxs: &[Option<Ctx>],
     map7: Option<&FoldMap>,
+    pyramid: Option<&Pyramid>,
     m_i: f64,
     m_j: f64,
     m_col7: f64,
     ch: &vd_bins::shore_rules::NamedChoices,
     threads: usize,
+    tail: bool,
 ) -> Steps {
     let rungs = ctxs.len();
     let ctx_f = ctxs.get(7).and_then(Option::as_ref);
-    let fold = Fold { map: map7, ctx_f };
+    let fold = Fold {
+        map: map7,
+        ctx_f,
+        pyramid,
+    };
     let next = AtomicUsize::new(0);
     let result: Mutex<Steps> = Mutex::new(BTreeMap::new());
     std::thread::scope(|sc| {
@@ -397,6 +408,7 @@ pub fn measure(
                         m_j,
                         ch.full_from,
                         ch.window_cells,
+                        if tail { ch.match_cells } else { 0.0 },
                         &mut caches,
                         &mut shared,
                     );
@@ -410,6 +422,9 @@ pub fn measure(
                         for v in 0..NVAR {
                             let e = local.entry((tr.kind, v, r as u8)).or_default();
                             for &x in &coarse[v] {
+                                if tail && x.abs() > tr.half_m {
+                                    continue;
+                                }
                                 let (near, y) = fine[v].iter().map(|&y| ((y - x).abs(), y)).fold(
                                     (f64::INFINITY, f64::NAN),
                                     |a, b| {
@@ -455,8 +470,10 @@ pub fn measure(
     steps
 }
 
-/// ★ THE SHORE-STEP LINES of one stand; returns, per rule, the largest step at the swaps 0 → 1 to
-/// `last_swap` (the deciding number's own reading) with its p99, over the sea kind.
+/// ★ THE SHORE-STEP LINES of one stand over the swaps `swaps` (`r` is the swap `r → r + 1`);
+/// returns, per rule, the largest step at the swaps 0 → 1 to `last_swap` (the deciding number's
+/// own reading) with its p99, over the sea kind.
+#[allow(clippy::too_many_arguments, reason = "the stand's own words")]
 pub fn print(
     c: &mut Census,
     stand: &str,
@@ -465,13 +482,14 @@ pub fn print(
     vars: &[Var],
     f_rung: u8,
     last_swap: u8,
+    swaps: std::ops::Range<u8>,
 ) -> BTreeMap<usize, (f64, f64, usize)> {
     let mut decide: BTreeMap<usize, (f64, f64, usize)> = BTreeMap::new();
     for kind in 0..2usize {
         let kname = if kind == 0 { "sea" } else { "lake" };
         for &v in vars {
             let vi = v.idx();
-            for r in 0..13u8 {
+            for r in swaps.clone() {
                 if v.nofold() && r < f_rung {
                     continue;
                 }

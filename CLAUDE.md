@@ -56,6 +56,18 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     (571.8 m at share one = N1's flat discs); the 30 m band KEPT (its price: a steep coast's line midway, deep small lakes by
     their node's footprint); the filled troughs ACCEPTED until R2 and R4; BUILD N2 (the integer shore law, both hosts), THEN
     FLY all stands against both references; narrow water at the far swaps stays RED for slice 0b (SL6).
+    ★ B14 (2026-09-26): the build's first four questions on MEASURED numbers — SEND THE SHORE BAND (SL6 yes: 0.77 MB of
+    band heights and lake levels with the head); the REACH IS A LAW (C_smooth 0.7723, C_ridged 0.9107) and the spectrum's
+    conflict is registered (the noise realizes a fifth of the stated slope); SEND THE FAR FOLD'S COUNTS TOO (0.64 MB; no
+    empty far globe; W15.1 item 5 amended); the POCKET EXEMPTION kept as a stated rule. CORRECTED after the ruling by S0
+    item 5: the band 0.81 MB with the lake levels, the counts 1.10 MB per NODE SQUARE (re-confirmed by B15).
+    ★ B15 (2026-09-26): S0 items 4–6 measured — CURE THE FAR LAKE FLICKER FIRST (the one naming rule holds rungs 8–13 but
+    a big lake's ragged edge flickers in one-column fragments at 13–18; the bench measures a non-flickering fold BEFORE
+    S1); the WET TIE and the LONE HOLD join N2; B14's corrected sizes stand; Q4–Q6, Q8–Q10, Q12 accepted as recommended.
+    ★★ B16 (2026-09-26, owner: *"No flicker or changing of the shapes between rungs at all"*): none of the three measured
+    far folds (the box, the tent, no lone column) is taken — each thresholds counts on nested footprints, so a small
+    feature changes at a swap; FIND THE BEST SOLUTION (the fold alone may not be the place), bench it against W16 in full,
+    and bring it before S1.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION
