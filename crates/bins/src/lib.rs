@@ -26,6 +26,12 @@ pub mod proc_launch;
 // teeth"): the shipped column with the ground base the shore law reads, the zero contour, the
 // window bearings and the flat null the teeth instrument measures with.
 pub mod shore_geometry;
+// ★ THE SHORELINE BENCH'S RULES (plan step 4 slice 0, ruling B8 item 1): R0, C0, N1 and O1 as plain
+// functions of one column, the f64 reference slice 1's integer re-measure must match.
+pub mod shore_rules;
+// ★ THE SHORE'S SHAPE, AS NUMBERS (survey §1.6–§2.3): the divider, the four-fold moment, the lakes'
+// loops and the synthetic controls whose answers are known before they read our shore.
+pub mod shore_shape;
 // ★ THE SKYLINE MARCH AND ITS BREAK RULE, ONCE (01 §6.1; 11 §3; ruling B6 item 2): M1b's four
 // stations and the reference stand read one rule, so our number and the reference's are one
 // instrument.

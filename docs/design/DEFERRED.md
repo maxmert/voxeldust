@@ -9474,6 +9474,10 @@ draws itself"):**
   `crates/bins/examples/lake_census.rs`. WHEN: the owner's word on MFD or on the hexagonal mesh, after
   ruling B2 step 4's river lines — which may themselves flatten the histogram, because a valley cut by a
   river has a reason to point where it points.
+  ★ RULED 2026-09-26 (B10 item 2): the shoreline bench showed the washboard (parallel 45° ridges, lakes on the diagonals), so
+  two cures are MEASURED FIRST, before R2 — a seeded Rho8 spread of the drain direction (a named scatter; the SL10 objection
+  does not hold for a seeded hash) and D∞ (Tarboton 1997) — on the grid-bias instruments, G-GRID and the bench's pictures;
+  MFD with a fitted weight and the hexagonal mesh stay refused.
 - ⬛ **RETIRED 2026-09-23 (ruling W16 fault A; the survey's R4): THE DRAWN DRAINAGE — THE RIVER
   LINES, THE CARVE AND THE FLOODPLAIN ARE DELETED.** The width law and the meander belt stay for
   the SOLVE. The entry below is kept as the record of what was built and why it went; the cure and
@@ -10148,11 +10152,40 @@ updated in the same change as the work, deleted when done). The interims named h
   generator 20 too; not flown then). WHERE: `terrain/src/artifact.rs` `block_water` and the pyramid means,
   `terrain/src/position.rs` `water_sheet`. WHEN: the shoreline bench (plan step 4, slice 0) — its far-rung lines at
   rungs 10–13 on this lake.
+  ★ MEASURED 2026-09-25 by the shoreline bench (status §8c): (1) at rungs 7–9, 130 979 / 32 476 / 7 722 lake columns draw as
+  LAND under today's rule, all TIES — the drawn ground stands exactly on the lake's level and the sheet draws only `s < l`
+  (N1 and O1 read 0); (2) at rungs 10–12 no column inside the lake draws dry, but the sheet stands over 7 111 / 2 346 / 283
+  side-dry columns beside it; (3) the panels show the main cause in the GROUND: parallel ridges at 45°, one node apart,
+  cross the lake — D8's washboard (the entry "THE GRID STILL SHOWS IN THE VALLEYS"). WHEN (restated): the ties with the
+  shoreline rule (N1 cures them); the washboard with the routing's cure (the owner's word).
 - 🟥 **THE FLOOR OF AN INLAND POCKET SHOWS ROWS OF REGULAR BUMPS AND A STRAIGHT WALL** (found 2026-09-25,
   `pictures/basin2_step2b.png`: 150 km over the second pocket's deepest node). The floor was drawn as sea until step 2,
   so nobody saw it. Rows of round bumps in lines (a lattice pattern), long straight water strips along grid lines, and
   a tall straight bright wall. Cause UNMEASURED. WHERE: the solve's deep floors (the deposit, the flats) and the fine
   octaves over them. WHEN: the shoreline bench stands (a picture and a G-GRID reading on the pocket floor), then R2.
+  ★ MEASURED 2026-09-25 (the shoreline bench's panel `docs/investigation/2026-09-25/shoreline_bench/pocket2_r07_top_…`): the
+  rows are parallel RIDGES at exactly 45°, one node apart, with regular bumps along each crest — D8's washboard on the smooth
+  floor (Fairfield & Leymarie 1991: parallel channels along the grid's preferred directions on smooth terrain; the entry "THE
+  GRID STILL SHOWS IN THE VALLEYS"). WHEN (restated): the routing's cure, before R2 (the owner's word).
+- 🟥 **EVERY SHORE RULE JUMPS AT THE FAR SWAPS 9 → 10 AND 10 → 11** (found 2026-09-25 by the shoreline bench, status §8c):
+  on the gentle coast the drawn shore's sideways step reads 8.4 px (today's rule, 10 → 11) and 8.5–8.9 px (N1 and O1, 9 → 10
+  and 10 → 11) against a bound of 2 px — rung 10 is the first rung that reads the pyramid (R₁), and the rules' far side is a
+  fold of rung-7 point samples. WHERE: `terrain/src/artifact.rs` (`block_water`, `CoastCounts`, the pyramid), the bench's
+  `far.rs`. WHEN: the bench's second slice (0b: V's crossing byte per mixed edge, R5-DILATED, the far swaps 13 → 18, AREA-NEST,
+  the SL6 sizes) before the shoreline kernel ships (W16: a rung boundary is invisible).
+- 🟥 **N1 FLATTENS THE GROUND AROUND EVERY LAKE, AND KEEPS A SCALLOPED STAIRCASE ON A STEEP COAST** (the shoreline bench's
+  panels, 2026-09-25, status §8c): at rung 3 each N1 lake stands in a disc of textureless ground with straight edges on the node
+  lines (v2 findings 19 and 23: the fade takes the whole fine relief, and its reach is node-aligned); on the steep coast the
+  smoothed rows still cross the water on the node staircase, a notch at every node. WHERE: `crates/bins/src/shore_rules.rs`.
+  WHEN: the bench's next round (N2), before any kernel form — fade only the lift and the octaves that can carry a column across
+  its water (keep the walking-scale texture), take the fade's reach from the ground or the basin (never the node square), and
+  clamp the node words to a band around the water before the read; each measured on the same eight stands, with the owed
+  readings FINE-RMS-NEAR-SHORE and a wall line on the halo's edge.
+- 🟥 **N1 LEAVES A FEW WALLS WHERE A MIRRORED NODE ENTERS THE READ** (the shoreline bench, status §8c; v2's finding 1): at
+  rung 7 WALL reads 32 of 5 572 shore pairs on the plain (0.6 %) and 92 of 4 518 on the gentle coast (2.0 %), the worst 3.3 × the
+  ground's own step, G-SIDE-VS-GROUND up to 72–104 m at those pairs (today's rule walls 84–97 % of the pairs). WHERE:
+  `crates/bins/src/shore_rules.rs` (the rule), later the recipe's shore law. WHEN: before N1's kernel form (the ground blended
+  to the side's field wherever a mirrored word is in the stencil, measured on the same stands).
 - 🟥 **THE LAKES STAND OVER THEIR CEILING SINCE STEP 2b** (G-LAKE-SHARE 4.828 % of the land against ruling B3's 4 %;
   3.510 % at generator 20). The plan's own stop condition. MEASURED attribution (census runs with one change at a time):
   the water's tree over generator 20's budget 3.510 %; + the saddle's steepest open side and the ground's way toward the

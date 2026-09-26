@@ -275,3 +275,37 @@ from 1 000 km drawn as stripes; the lake depths measured, the largest lake 75 m 
 **Example.** A pilot 150 km over the plain sees the same square lakes as after step 2 — the shoreline step changes
 that. Before R2 cuts the plain's valleys at 1 km, the water across a filled flat stops leaning on the lattice, so R2's
 rivers leave a flat toward its real drain, never along a grid diagonal.
+
+## B10. THE SHORELINE BENCH'S VERDICT, THE WASHBOARD, AND THE ORDER (2026-09-26; the owner chose each recommended option)
+
+The shoreline bench (plan step 4 slice 0; status §8c; `docs/investigation/2026-09-25/shoreline_bench*`) measured the drawn
+water of four rules on eight stands, with its self-checks green and no world change:
+- today's rule walls 84–97 % of the shore pairs at rung 7, and draws 130 979 columns of the high lake as land (ties `s = l`);
+- **O1** (the ground's own crossing, a coarser cell from the node-scale line) jumps 3–9 px at almost every swap — a W16 breach;
+- **N1** (the node-scale side as one field) is steady from rung 0 to rung 9 (p99 ≤ 1.4 px), walls 0–2 % of the pairs and draws
+  no false land — but at rung 3 it flattens the ground around every lake into a textureless disc with node-aligned edges, keeps a
+  notched staircase on a steep coast, and, like every rule, jumps about 9 px at the far swaps 9 → 10 and 10 → 11;
+- **THE WASHBOARD**: the lakes and valleys themselves follow the lattice's eight directions (chains of lakes on exact diagonals,
+  parallel 45° ridges one node apart with bumps along their crests, the high lake's stripes) — D8's own bias on smooth ground
+  (Fairfield & Leymarie 1991), which no shore rule cures and R2 would carve along.
+
+The owner's four answers:
+1. **ONE MORE BENCH ROUND FOR THE SHORE (N2)** before any kernel form: keep N1's steady line; keep the ground's walking-scale
+   texture near the water (fade only what can carry a column across it, with a reach from the ground, never the node square);
+   clamp the node words to a band around the water before the read (the steep coast's notches); solve the far swaps (the bench's
+   slice 0b). No game code changes until the numbers and the pictures pass.
+2. **MEASURE TWO CURES FOR THE WASHBOARD BEFORE R2**: (a) a seeded, repeatable spread of each node's drain direction between the
+   two lattice neighbours that bracket its steepest descent (Rho8, Fairfield & Leymarie 1991 — a NAMED scatter under T9, one
+   receiver a node; the earlier refusal "a random tie-break breaks SL10" does not hold for a seeded hash, which step 2b already
+   uses on the flats), and (b) D∞ (Tarboton 1997 — a continuous direction split between two neighbours, no fitted number). Each is
+   measured on the existing grid-bias instruments (Tarboton's cone, Hyväluoma's rotation, the fourfold amplitude, G-GRID) and on
+   the bench's pictures before the owner chooses. The refused cures stay refused: MFD with a fitted weight (T9), a hexagonal
+   mesh (a new world, SL5). Step 2c (the flats) is folded into this work.
+3. **THE ORDER: THE WASHBOARD FIRST, THEN THE SHORE (N2)**, because the washboard's cure moves every lake and valley and the
+   shore bench must judge the final ones; then both are built in the game, and ALL stands are flown and compared with BOTH
+   reference frames (the owner, 2026-09-25: *"After those fixes please make sure that you've also checked all visuals"*).
+4. **COMMIT THE BENCH** (an instrument; no world change).
+
+**Example.** Over the plain a chain of ponds runs north-east, one node wide, straight as a ruler for two hundred kilometres. After
+the washboard's cure the same water finds its own way down the plain, and the ponds lie where the ground's hollows are, not on
+the lattice's diagonal; then N2 draws each pond's edge where its ground meets its water, with the ground's texture to the shore.

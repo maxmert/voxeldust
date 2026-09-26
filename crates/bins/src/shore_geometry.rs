@@ -103,6 +103,19 @@ pub struct ShippedColumn {
     /// ★ THE GROUND BASE the shore law reads: the ladder radius, the solved `Z` and the coarse
     /// octaves the field did not replace — the ground WITHOUT the fine octaves.
     pub base: Gi,
+    /// ★ THE SOLVED `Z` the column read (`sample_z` at the rung's level), in gap steps at the
+    /// length format: `base` less the ladder radius and the coarse octaves (the shoreline bench,
+    /// 2026-09-25).
+    pub z: Gi,
+    /// ★ THE SLOPE SHARE the column read (`slope_share`), at the noise's fraction bits: the
+    /// solved field's own voice in the roughness factor.
+    pub share: Gi,
+    /// ★ THE FINE HALF the kernel added (`relief_parts_from(..).fine`): the fine octaves' sum
+    /// times the column's roughness factor, in the same unit as `base`.
+    pub fine: Gi,
+    /// ★ THE RAW SURFACE: `terrace(base + fine)`, the kernel's surface BEFORE the shore law. The
+    /// shore law turns it into [`ShippedColumn::surface`].
+    pub raw: Gi,
     /// The final surface, from the ONE kernel.
     pub surface: Gi,
     /// Whether the base, the fine half, the bench and the shore law give the kernel's own surface
@@ -196,6 +209,47 @@ impl<'a> RungReader<'a> {
         })
     }
 
+    /// ★ THE READ of `rung` on `face` at a STATED pyramid level (the shoreline bench's one-change
+    /// variant R0b, 2026-09-25): the same read as [`RungReader::new`], but the heights gather on
+    /// `level` (zero: the rows) whatever `PyramidField::level_for` would pick for the rung. The
+    /// side still reads the fine lattice. No shipped path reads a rung at another level: this is
+    /// an instrument's what-if, and [`RungReader::new`] is the shipped read. `None` where the body
+    /// has no lattice or the level does not exist.
+    ///
+    /// **Example.** The high lake seen from 1 000 km draws rung 11 on level 1 (16 km means). The
+    /// bench reads the same rung-11 columns on level 0 (the rows themselves), so the one change
+    /// "the block means" can be tested alone.
+    #[must_use]
+    pub fn with_level(
+        body: &'a BodyDefinition,
+        artifact: &'a Artifact,
+        counts: &Arc<CoastCounts>,
+        face: Face,
+        rung: u8,
+        level: u32,
+    ) -> Option<RungReader<'a>> {
+        let fine = body.macro_lattice()?;
+        let source = if level == 0 {
+            RungSource::Rows(artifact)
+        } else {
+            RungSource::Level(PyramidField::of(artifact, level, counts)?)
+        };
+        let lattice = fine.coarser(source.field().level())?;
+        let slope = slope_charter(body, &lattice, rung);
+        Some(RungReader {
+            body,
+            face,
+            rung,
+            level,
+            source,
+            fine,
+            lattice,
+            charter: body.plan_charter(rung, face),
+            slope,
+            first: body.first_fine(),
+        })
+    }
+
     /// ★ THE COLUMN at cell `(i, j)` of this rung, which must stand ON the face (`0 ≤ i, j <` the
     /// rung's cells an edge): the chunk builder's reads in the chunk builder's order, then the ONE
     /// kernel, then the base the kernel handed the shore law. `None` where the field does not hold
@@ -249,12 +303,8 @@ impl<'a> RungReader<'a> {
             share,
         );
         let base = self.charter.radius + z + parts.coarse;
-        let again = shore(
-            base,
-            hold,
-            terrace(&self.charter.terrace, base + parts.fine),
-            side_word,
-        );
+        let raw = terrace(&self.charter.terrace, base + parts.fine);
+        let again = shore(base, hold, raw, side_word);
         Some(ShippedColumn {
             dir,
             side,
@@ -262,6 +312,10 @@ impl<'a> RungReader<'a> {
             water,
             hold,
             base,
+            z,
+            share,
+            fine: parts.fine,
+            raw,
             surface,
             base_agrees: again == surface,
         })

@@ -627,7 +627,7 @@ instead where a hollow's own floor is wet; from 150 km the pilot sees it as a sq
 Each step ends with the census numbers, the three stands' pictures, and the REFERENCE STAND's picture beside the
 reference (§9). State legend: ⬜ not started · 🟨 in progress · ✅ done (with the commit).
 
-★ **THE ORDER SINCE RULINGS B8 AND B9 (2026-09-25): 1 → 2 → 2b → 4 → 3 → 5 → 6 → 7, with 2c (the flat directions) anywhere BEFORE 3.** The step numbers stay the names every
+★ **THE ORDER SINCE RULING B10 (2026-09-26): 1 → 2 → 2b → 4 slice 0 (the bench) → 5+2c (THE WASHBOARD: seeded Rho8 and D∞ measured, the owner chooses, then built) → 4 slice 0 round 2 (N2) → 4 built → the flight of ALL stands against BOTH references → 3 (R2) → 6 → 7.** (Rulings B8 and B9 set 2b → 4 → 3 with 2c before 3.) The step numbers stay the names every
 other file uses ("step 3" is R2, "step 4" the shoreline); only the order changed. Step 2's pictures showed every small
 lake as an 8 km square, so the edge law (step 4) now comes BEFORE R2 on today's ground, and the rivers follow the
 water (step 2b) before either, because R2 seeds its rivers from them. R2 starts with slice 0 (the bench and a
@@ -640,7 +640,7 @@ hillshade for the owner's look) before any bake service.
 | 2b | **The rivers follow the water** (ruling B8 item 2; plan question 3 choice B; amends B7 item 2). The shipped receivers and the discharge row follow the budget's own water: a full hollow's river runs over its spill into the sibling (Fill–Spill–Merge's flow directions), and a closed body that never fills passes nothing on. New GENERATOR_VERSION and pins. | G-RIVER-DESCENT (3 430 rising steps at generator 20); the row's 1 607 km³/yr out of held hollows | ✅ BUILT, MEASURED and COMMITTED 2026-09-25 (generator 21, artifact 9, `step2b_census.txt`, `step2b_lake_depths.txt`; pins re-recorded; §7 W10, W11; pictures `pictures/*_step2b.png`, §8b): G-RIVER-DESCENT 0, the row the cascade's to the unit, 0 closed hollows leak. Committed with two REDs by ruling B9: G-LAKE-SHARE 4.828 % (judged after step 4) and the flat law (G-GRID-VALLEYS-BY-CLASS flats 1.470 / spilling lakes 1.553, G-LAKE-WALK 14.07°; cured as step 2c) |
 | 2c | **The flat directions stop leaning on the lattice** (ruling B9 item 2): across a filled flat and a spilling lake the water's direction reads Barnes, Lehman & Mulla's two combined fields (or a target that does not collapse onto one nearest drain), measured one change at a time against V3 and generator 21; G-LAKE-SHARE read again with it. | G-GRID-VALLEYS-BY-CLASS, G-LAKE-WALK | ⬜ BEFORE step 3 (R2 must not carve along a grid diagonal) |
 | 3 | **R2: one eroded level at 1 024 m in the artifact**, with the two operators the bench lacked (the height retargeting that holds the macro heights, the multi-scale breach); then R4's second half: the noise only BELOW the solved level. Cost (survey): ~17 core-hours once for the home planet, 512 KB a tile against 40 KB, an artifact version, a lattice over `MACRO_EDGE_CEILING` 2 048. Calibration: Earth, through Hack's law (T9). | the dunes at 100–150 km; valleys that join | 🟨 DESIGNED (`r2_design.md`, 2026-09-24) with 23 skeptic findings OPEN (§16 of it: 6 HIGH); slice 0, the bench with the owner's look, comes before any service (ruling B8 item 3); AFTER step 4 since B8 |
-| 4 | **One shoreline from one field, on today's ground** (ruling B8 item 1 moved it BEFORE R2; it was "on the R2 ground"). The sea's shore and the lake's edge from where the ground crosses the water's level, not from a node square; the lake's level held by its dry neighbours (W6's owed law); plan question 5 (the dry-land hold) and the far-swap lake losses decided here. The law does not depend on which ground it reads: R2 later gives it the 1 km bays and headlands (T3), and the pictures are judged again then; until R2 a shore may look dune-shaped (stated and accepted, B8). | the teeth (sea and lake); step 2's square lakes | 🟨 DESIGNED v1 (`shoreline_design.md`, 2026-09-25) with 23 skeptic findings OPEN (§18: 6 HIGH, one root — inside the taper the fine octaves decide the side, and their spread, 160–270 m at rung 7, is larger than the lakes' mean depth, 56 m); v2 WRITTEN and attacked (24 findings, 6 HIGH, §19 of it): the paper rounds stop; slice 0 becomes a PROTOTYPE BENCH that paints the DRAWN water; the rules to paint, the lines and the deciding number come from `docs/investigation/2026-09-25/shoreline_papers_survey.md` §6 (R0 today, C0 the pure contour, N1, O1, V for the far rungs; the deciding number: O1's largest sideways step on a gentle coast) |
+| 4 | **One shoreline from one field, on today's ground** (ruling B8 item 1 moved it BEFORE R2; it was "on the R2 ground"). The sea's shore and the lake's edge from where the ground crosses the water's level, not from a node square; the lake's level held by its dry neighbours (W6's owed law); plan question 5 (the dry-land hold) and the far-swap lake losses decided here. The law does not depend on which ground it reads: R2 later gives it the 1 km bays and headlands (T3), and the pictures are judged again then; until R2 a shore may look dune-shaped (stated and accepted, B8). | the teeth (sea and lake); step 2's square lakes | 🟨 SLICE 0 BUILT AND RUN (the shoreline BENCH, §8c, 2026-09-25; no world change): the smooth rule N1 is steady at rungs 0–9 (the shore moves p99 ≤ 1.4 px, walls on 0–2 % of the shore against today's 84–97 %); the rough rule O1 jumps 3–9 px at almost every swap (a W16 breach); EVERY rule, today's too, jumps 8–9 px at the far swaps 9→10 and 10→11 (the bench's second slice, 0b); the lakes and valleys themselves follow the lattice (the washboard, §8c) — the owner's word asked on N1, on the far rungs and on the washboard's cure |
 | 5 | **G-GRID again on the R2 field.** The D8 decision (MFD with a weight, or a hexagonal mesh = a new world, SL5) only if still red. | water positions (grid lean) | ⬜ |
 | 6 | **Lakes with outlets and river mouths** (the spill carve, a delta); **R3**: the 1–5 km valleys under the shipped level, derived per fixed patch on both hosts, the card as the builder (a CPU core takes ~330 ns a cell an iteration, DOC R1). | the reference's valley scale | ⬜ |
 | 7 | **G-LOOK.** The owner's word on the three stands and the reference stand. Only then 8e starts (B1). | closes B1 | ⬜ |
@@ -744,6 +744,79 @@ their cause is UNMEASURED — owed to the shoreline bench's far-rung lines (CHEC
 rungs 10–13), with this lake and the second pocket added to the bench's stands.
 ---
 
+### 8c. THE SHORELINE BENCH — plan step 4, slice 0 (2026-09-25, generator 21; built, run, NOT committed)
+
+`cargo run --release -p vd-bins --example shoreline_bench -- --census docs/investigation/2026-09-25/shoreline_bench_census.txt
+--panels docs/investigation/2026-09-25/shoreline_bench` (383 s with a fresh solve; 3.6 GB peak). An INSTRUMENT: no file under
+`crates/terrain`, `crates/recipe`, `crates/seed`, `crates/wire` or `crates/client` changed (`git diff --stat` empty). For each
+candidate rule it computes the DRAWN set — the drawn ground `s` and the drawn water `l` per column, wet by the sheet's own rule
+`s < l` — at rungs 0–13 on eight stands (the belt, the coast, the plain, the reference stand, the largest pocket, a GENTLE coast
+of slope 1/96, the second pocket's floor, the high lake), and paints 50 panels (a top-down hillshade with the drawn water, and an
+oblique view; four tiles each: R0 today | C0 the pure contour / N1 | O1). Built by workflow `wf_b30fd2c2-c03` (its build agent was
+stopped by the stall watch while it waited on a run; the code, 7 800 lines, was finished and checked in the main session).
+
+**THE INSTRUMENT IS TRUE (self-checks, all GREEN):** CHECK-R0 176 of 176 (today's rule equals the shipped column read,
+`vd_terrain::chunk::column_field`, bit for bit), CHECK-R0-F64 176, CHECK-SHEET-COLUMNS 72 of 72 (the column-drawn set equals
+the sheet's own vertices), CHECK-CACHE-FIELD 176; the controls read a line 1.000, a Koch curve 1.27 against 1.262, fractional
+surfaces at H 0.3/0.5/0.7 inside their bands. One stated weakness: CHECK-D-STAIR.KINK is RED — the kink gate cannot see an 8 km
+staircase in a 31-node window, so the grid lean (G-SHORE-LATTICE) carries the staircase instead.
+
+**THE DECIDING NUMBER (survey §6.4), the gentle coast, the shore's sideways step at a swap (band: p99 ≤ 1 px, max ≤ 2 px):**
+
+| rule | swaps 0→1 … 8→9 | 9→10 | 10→11 | reading |
+|---|---|---|---|---|
+| R0 today | p99 1.35–2.27 px, max 2.5–4.1 px | max 2.5 px | **8.4 px** | the node square is steady, its wall is not |
+| N1 the node-scale side, one field | **p50 0.00 px, p99 0.58–1.40 px, max 1.0–2.5 px** | **8.9 px** | **8.5 px** | steady until the pyramid; the far rungs fail |
+| O1 the ground's crossing, a coarser cell from the line | p99 1.9–6.6 px, **max 3.3–8.9 px at nearly every swap** | 8.9 px | 8.6 px | a W16 breach at every rung |
+| C0 the pure contour (control) | max 3.5–8.9 px | 8.8 px | 2.5 px | W6's measured shore creep, as predicted |
+
+By the survey's rule O1 FAILS (its step is not bounded where its clamp binds: 95.5 % of the pairs at rung 7, walls on 416 of
+7 358), so **N1 stays until R2**; and **no rule is steady at 9 → 10 and 10 → 11** — the far rungs read the pyramid, and their
+cure (the far fold, V's crossing byte, the SL6 sizes) is the bench's second slice (0b).
+
+**THE WALLS AT THE SHORE, rung 7 (a step across the drawn shore over 1 ‰ of the ground's own neighbour step):** R0 today walls
+84–97 % of the shore pairs (the teeth; up to 36 × the ground's step on the coast); **N1: 0 of 688 (belt), 0 of 2 943 (coast), 32
+of 5 572 (plain, 0.6 %), 92 of 4 518 (gentle, 2.0 %), the worst 3.3 ×**; O1: 5–16 %, the worst 14.5 ×. N1's remaining walls stand
+where a mirrored node enters the read (v2's finding 1): G-SIDE-VS-GROUND reads p99 0 m on the plain but up to 72–104 m at a few pairs.
+
+**THE LAKES' SHAPE, pooled over the stands at rung 7 (Earth's lakes 1.12–1.40):** R0 1.25 on 38 lakes (squares joined into
+staircases read rough), C0 1.19 on 173, **N1 1.04 on 36 (too smooth: round ponds)**, O1 1.12 on 143. On the plain N1 passes every
+drawn-set line (no water over dry ground, no lake that appears or flickers); on the gentle coast it fails a few at rungs 7–12.
+
+**THE HIGH LAKE'S STRIPES, MEASURED (DEFERRED "A HIGH LAKE SEEN FROM 1 000 km …"):** (1) at rungs 7–9, 130 979 / 32 476 / 7 722
+columns of the lake draw as LAND under today's rule: the drawn ground stands EXACTLY on the lake's level (the shore law holds a
+column with no depth at its level, and the sheet draws only `s < l`) — N1 and O1 read 0 there; (2) at rungs 10–12 no column inside
+the lake draws dry, but the sheet stands over 7 111 / 2 346 / 283 side-dry columns beside it; (3) ★ THE PANELS SHOW THE MAIN CAUSE
+IN THE GROUND ITSELF: parallel ridges at exactly 45° cross the lake and the second pocket's floor, one node apart, with regular bumps
+along each crest — the WASHBOARD of D8 routing on a smooth slope (Fairfield & Leymarie 1991: *"the derived water channels tend to
+flow in parallel lines along preferred directions engendered by the sampling grid orientation"*; `lakes_and_landscape_models.md`
+§3.4; DEFERRED "THE GRID STILL SHOWS IN THE VALLEYS"). No shore rule cures it; R2 would carve its 1 km valleys along it.
+
+**WHAT THE PANELS SHOW THAT THE LINES DO NOT (read in the main session, all eight stands at rung 7, the gentle coast and the
+plain at rung 3, two oblique views):**
+- ★ **N1 FLATTENS THE GROUND AROUND EVERY LAKE AT CLOSE RANGE** (`gentle_r03_top_…`, `plain_r03_top_…`): at rung 3 (32 m
+  cells, a pilot landing on a shore) each N1 lake stands in a wide disc of smooth, textureless ground that ends at STRAIGHT
+  edges on the node lines — v2's findings 19 and 23 (the fade takes the whole fine relief; its reach is node-aligned). No line
+  of slice 0 reads it (FINE-RMS-NEAR-SHORE and the halo's edge are owed readings).
+- ★ **N1 KEEPS A SCALLOPED STAIRCASE ON A STEEP COAST** (`coast_r07_top_…`): where the rows jump kilometres between a shelf
+  node and a deep-sea node, the smoothed field still crosses the water on the node staircase, with a regular notch at every
+  node along the diagonal coast. A candidate cure for the bench's next round: CLAMP the node words to a band around the water
+  before the read, so the side, not the depth, decides the line (a diagonal staircase of pure sides reads a straight line).
+- **O1** keeps the texture but draws thin dark curves on the ground near its shores (`gentle_r03_top_…`), and it jumps at every
+  swap.
+- **The belt and the reference stand hold no structure at all at rung 7** (`belt_r07_top_…`, `reference_r07_top_…`): the
+  dunes, even and valley-less — R2's work; no shore rule touches it.
+
+**THE PANELS TO OPEN FIRST:** `shoreline_bench/plain_r07_top_R0-C0-N1-O1.png` (forty lakes: squares | noise ponds / round ponds |
+ragged ponds; a chain of lakes along one diagonal in every rule), `gentle_r07_top_…` (the staircase coast | bays),
+`pocket2_r07_top_…` (the washboard floor), `highlake_r07_top_…` and `highlake_r11far_top_R0-R0w-R0b.png` (the 45° stripes).
+
+**Example.** From 150 km over the plain, N1 draws round ponds where today's rule draws blue tiles, and the ponds stay put as the
+hull climbs to 700 km; at 704 km every rule's shore jumps about nine pixels. From 1 000 km over the high plateau the stripes are
+the ground's own 45° washboard with lakes between its ridges — a routing fault of the 8 km solve, not of the shore.
+
+---
+
 ## 9. THE REFERENCE TARGET — the checklist every step reports against
 
 **THE REFERENCE STAND.** One more stand beside the belt, the coast and the plain, framed like the reference: an eye
@@ -756,6 +829,24 @@ ladder radius (~4 740 m over the sea), the eye 400 m over it; the look at bearin
 (`VD_STAND_SUN="-0.504935 0.076557 -0.859755"` from the right). The spawn line is in `step1_census_gen19.txt`.
 ⚠ THE RULE PICKS A SUMMIT: the eye stands over its ring by ~700 m and looks DOWN on its range, while the reference looks
 from a lower point toward taller snowy ranges. The owner's look at the picture decides whether the rule changes.
+
+★ **A SECOND REFERENCE FRAME (the owner, 2026-09-25: *"As a reference that we need to get to is the"* picture, with
+*"After those fixes please make sure that you've also checked all visuals"*).** Kept outside the public repo like the
+first (ruling B6); described here so the checklist can read it. A viewpoint on a tall pale rock pillar high over a wide
+valley country, looking across it to a far range under a cloudy sky:
+- **the valleys**: a dense web of branching valleys and ridges at 1–5 km, the slopes dark with forest in patches, the
+  valley floors and the tracks lighter; one winding river corridor and small bright lakes in the far valleys;
+- **the relief**: hills a few hundred metres over their valleys in the middle ground; snowy peaks and a long snowy ridge
+  on the left; a far range with steep ROCK TOWERS and mesa-like blocks on the horizon (8f's third dimension);
+- **the dressing**: conifer forest as a mass with clearings (8e + the art assets), snow on the high ground and on the
+  rock pillar's top (8e), settlements in the valleys (not the terrain arc), cumulus clouds and a hazy far range
+  (the weather plan, the sky's haze);
+- **what it has and we lack today** (the pictures of §8b and the bench's panels of §8c): no branching valleys at 1–5 km
+  (we draw dunes — R2/R3), no river corridor (the drawn rivers are retired, W16 A), the lakes on the grid (squares,
+  and chains along a diagonal — step 4's edge, and the grid lean), no forest, no snow, no rock towers, no clouds.
+
+**Example.** From the first reference's summit the pilot sees ranges; from this one she sees the valley country under
+it — the believability arc owes the valleys (R2, R3) and the water in them (steps 2–4); 8e and 8f owe the rest.
 
 **THE SKYLINE NUMBERS** (11_reference_trace's rule, per 60° of bearing):
 
@@ -916,3 +1007,5 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-09-25 — two surveys (read-only): `docs/investigation/2026-09-25/terrain_models_and_crates_survey.md` (the owner: "ok not to apply any open sourced solutions" — no library adopted; the cross-host solve identity found UNMEASURED) and `shoreline_papers_survey.md` (the coast and lake laws as bench gates; the LOD-continuity methods against the design's findings; §6 the bench's rules, lines and deciding number).
 - 2026-09-25 — step 2b's pictures (§8b): the four stands as at step 2; two NEW stands show faults hidden until step 2 (the second pocket's floor: regular bump rows and a straight wall; the high lake from 1 000 km: stripes, not one water surface); the lake depths measured (`artifact_diff depth`): 35.7 % of the lake area under 10 m, the largest lake a 75 m median — the thin-sheet reading refuted; the far-rung cause owed to the shoreline bench.
 - 2026-09-25 — ruling B9: the lake ceiling kept RED and judged after step 4; the flat directions cured before R2; step 2b committed (generator 21, artifact 9).
+- 2026-09-25 — step 4 slice 0: the shoreline BENCH built and run (§8c; the census and 50 panels in `docs/investigation/2026-09-25/`); N1 steady at rungs 0–9 and nearly wall-free, O1 a W16 breach, every rule red at the far swaps, the washboard (D8) found as the main cause of the stripes and the bump rows; NOT committed.
+- 2026-09-26 — ruling B10: the bench committed; N2 (one more bench round) for the shore; the washboard's two cures (seeded Rho8, D∞) measured before R2 and FIRST; then N2, then both built, then the flight of all stands against both references.

@@ -42,6 +42,9 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     owner's look, before any bake service; the coarser ground stands until a bake is done); step 2 committed.
     ★ B9 (2026-09-25): step 2b committed (generator 21: the rivers follow the budget's water; G-RIVER-DESCENT 0);
     the lake share 4.828 % kept RED and judged after the shoreline step; the flat directions' lattice lean cured BEFORE R2.
+    ★ B10 (2026-09-26): the shoreline BENCH committed (N1 steady at rungs 0–9, O1 a W16 breach, every rule red at the far
+    swaps); ONE MORE BENCH ROUND (N2) before any kernel; the WASHBOARD (D8's eight-direction bias) measured with two cures —
+    seeded Rho8 and D∞ — BEFORE R2, and FIRST (then N2, then build both, then fly all stands against both references).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

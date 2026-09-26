@@ -79,6 +79,37 @@ pub const COAST: [f64; 3] = [0.194_169, -0.868_118, -0.456_804];
 /// at generators 20 and 21. The rule reads the lake bits, which a later step can move.
 pub const PLAIN: [f64; 3] = [0.579_815, -0.574_634, -0.577_590];
 
+/// ★ THE LARGEST POCKET, PINNED (the shoreline bench, plan step 4 slice 0, 2026-09-25): its
+/// deepest node, as `lake_census` printed it at generator 21 (`step2b_census.txt`, "THE INLAND
+/// POCKETS": 28 912 nodes, 1 574 898 km², 11 866 m under the sea, DRY). The pocket is the body of
+/// nodes at or under the sea's level joined to this node through the eight neighbours.
+///
+/// **Example.** The bench stands on this pocket's rim, where the shore law once lifted the floor
+/// into a mesa, and asks whether a rule floods the basin behind the ridge.
+pub const POCKET_1: u32 = 7_901_713;
+
+/// ★ THE SECOND POCKET, PINNED with the first: its deepest node at generator 21 (12 542 nodes,
+/// 642 554 km², 8 193 m under the sea, PARTIAL) — the floor whose picture shows rows of regular
+/// bumps (`pictures/basin2_step2b.png`).
+pub const POCKET_2: u32 = 4_470_928;
+
+/// ★ THE HIGH LAKE, PINNED (the shoreline bench, 2026-09-25): the aim of the step-2b nadir picture
+/// over the largest lake's edge node (12 562 nodes, level 5 983 m over the ladder radius, 2.4 km
+/// over the sea), four digits a component. The bench takes the node under it and then the lake's
+/// edge node nearest it, and checks the lake's size and level (a RED `CHECK-HIGHLAKE` otherwise).
+pub const HIGH_LAKE: [f64; 3] = [-0.3955, -0.8252, -0.4034];
+
+/// ★ THE GENTLE COAST, PINNED (the shoreline bench, 2026-09-25; plan §3.1): the pair the gentle rule
+/// picked on its first run — the least coast slope within 1 000 km of the belt, 0.01047 (1 in 96)
+/// over 7 pairs, the median of the pairs of the dry node's 5 × 5 block — the DRY node (254, 1191)
+/// beside the SEA node (255, 1191) on face `NegZ`. The bench still runs the rule and prints its pick
+/// beside the pin, so a later generator that moves the coast shows it; the stand itself does not
+/// move (ruling B6: every step is compared on the same stands).
+///
+/// **Example.** Step 4's slice 3b reads the sideways step on this same flat coast, never on
+/// whichever coast is the flattest after the next generator.
+pub const GENTLE: (Face, (i32, i32), (i32, i32)) = (Face::NegZ, (254, 1191), (255, 1191));
+
 /// ★ THE THREE STANDS (ruling B2): the belt the owner flew, a COAST and a PLAIN, each PINNED
 /// ([`BELT`], [`COAST`], [`PLAIN`]). The coast and the plain stand at the CENTRE of the node their
 /// pinned direction falls in ([`node_under`]), which is the exact direction the rule stated for
