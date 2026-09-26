@@ -627,7 +627,7 @@ instead where a hollow's own floor is wet; from 150 km the pilot sees it as a sq
 Each step ends with the census numbers, the three stands' pictures, and the REFERENCE STAND's picture beside the
 reference (§9). State legend: ⬜ not started · 🟨 in progress · ✅ done (with the commit).
 
-★ **THE ORDER SINCE RULINGS B10 AND B11 (2026-09-26): 1 → 2 → 2b → 4 slice 0 (the bench) → 5+2c (THE WASHBOARD: measured, §8d; its cause is the DEPOSIT; NEXT a SLOPED basin fill with a published slope law, measured in the bench, then built WITH D∞ in one world change) → 4 slice 0 round 2 (N2) → 4 built → the flight of ALL stands against BOTH references → 3 (R2) → 6 → 7.** (Rulings B8 and B9 set 2b → 4 → 3 with 2c before 3.) The step numbers stay the names every
+★ **THE ORDER SINCE RULING B12 (2026-09-26): 1 → 2 → 2b → 4 slice 0 (the bench) → the washboard MEASURED and PARKED (§8d: its cause the deposit; the fills and the fans ready in the bench; the basins return after R2) → 4 slice 0 round 2 (N2) → 4 built → the flight of ALL stands against BOTH references → 3 (R2: decides which water drives the cut, measures D∞) → the basins again → 6 → 7.** (Rulings B8–B11 set the earlier orders.)
 other file uses ("step 3" is R2, "step 4" the shoreline); only the order changed. Step 2's pictures showed every small
 lake as an 8 km square, so the edge law (step 4) now comes BEFORE R2 on today's ground, and the rivers follow the
 water (step 2b) before either, because R2 seeds its rivers from them. R2 starts with slice 0 (the bench and a
@@ -863,6 +863,24 @@ edges (`highlake_r07_fill.png`), the largest lake grows 12 562 → 43 776 nodes,
 5.04 %, and the planet-wide grid lean WORSENS (valleys 1.281, lakes 1.711; the finest texture's row lean 14 % → 27 %: a level
 plain holds its one-step terraces along the rows). D∞ with the fill reads the same (1.335 / 1.566 / 5.15 %).
 
+**THE SLOPED FILL, MEASURED (ruling B11; the law from a research pass: Paola, Heller & Angevine 1992, eqs. 16–17, the
+braided inlet slope 13.9 × sediment / water; the fan's reach by straight chord from its inlet over its share of the hollow;
+the steady profile ∫ S (1 − A(<r)/A_k) dr; fans may stand over the spill; `paola_fan_offsets`, `basin_fill_shaped`).**
+- **The skip bit is needed**: without it the next sweep grades the fans away — 21–42 % of the volume over the spills survives
+  a pass (the research predicted 1–7 %); with it 99.5–99.7 %.
+- **The pocket floor stays clean** (13.6 m RMS after 40 passes, no 45° line), as with the level fill.
+- **The ground's own facing improves** (the fourfold mode 15.6 % → 7.8 %; the finest texture's 14.4 % → 9.1–9.4 %) — fans
+  spread from their mouths in every direction.
+- **But the lakes still merge into giants** (the largest 45 340 nodes; share 5.1–5.2 %), G-GRID's valleys read 1.253 (fan)
+  and 1.278 (D∞ + fan) against 1.205 today and 1.116 for D∞ alone, and the pictures at rung 7 barely change: the second
+  pocket's window is all lake (the window stands in its flat middle; the fans rise at its rim, outside the frame), and the high
+  lake keeps water blocks with straight edges.
+- ★ **Two model faults the fans expose:** (1) the sweep cuts with the RAIN's discharge (plan question 4) while the fan law
+  reads the RUNOFF, so 5 545 of 12 362 inlets in pass 0 bring sediment and no water and take the scree's tangent (p90 slope
+  0.7); (2) the giant lakes come from the hollows themselves — closed pockets up to 11.9 km deep and 1.57 million km²,
+  which no Earth basin resembles; any fill of such a hollow makes a vast flat floor, and a vast flat floor holds a vast
+  shallow lake.
+
 **READ.** The washboard is a deposit fault, not a routing fault. A cure must lay the sediment the way a real basin fills: from
 where the rivers enter, the floor sloping gently down to the lowest part, which alone keeps the water — never on the inflow's
 straight path (today) and never as one dead-flat level (the level fill). D∞ is a separate, measured gain for the valleys.
@@ -1067,3 +1085,5 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-09-26 — ruling B10: the bench committed; N2 (one more bench round) for the shore; the washboard's two cures (seeded Rho8, D∞) measured before R2 and FIRST; then N2, then both built, then the flight of all stands against both references.
 - 2026-09-26 — the WASHBOARD BENCH (§8d): the copy of the solve proven exact; Rho8 no help, D∞ better valleys (1.205 → 1.116) and cone error, neither touches the washboard; a stage trace finds its cause in the DEPOSIT (one-node lines along the flat's paths from pass 1); the level basin fill removes the ridges (1 004 m → 21 m) but floods whole flat plains; NOT committed.
 - 2026-09-26 — ruling B11: the washboard is the deposit's; a sloped basin fill with a published slope law, measured first; D∞ adopted with it in one world change; the washboard bench committed.
+- 2026-09-26 — the sloped fill (Paola's fans) measured: the skip bit keeps 99.6 % of the fans; the pocket floor clean; the ground's facing halved; but giant flat lakes stay (45 340 nodes, 5.1 %) and the pictures barely change; two model faults found (rain-cut against runoff-fans; 11.9 km-deep pockets); NOT committed.
+- 2026-09-26 — ruling B12: the basins parked until after R2 (R2 decides the cut's water and measures D∞); the shore round N2 next; the fan measurement committed.

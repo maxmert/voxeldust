@@ -48,6 +48,9 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     ★ B11 (2026-09-26): the WASHBOARD is the DEPOSIT's (one-node lines along the flat's paths from pass 1; the washboard
     bench, its solve copy proven exact); a SLOPED basin fill with a published slope law, measured first; D∞ adopted for the
     erosion passes in the same change (the world moves once); the washboard bench committed.
+    ★ B12 (2026-09-26): the sloped fill (Paola's fans) measured — clean floors, fans kept by a skip bit, the facing halved,
+    but giant flat lakes and barely changed pictures (rain-cut vs runoff-fans; 11.9 km-deep pockets); THE BASINS PARKED until
+    after R2 (R2 decides the cut's water and measures D∞); NEXT the shore round N2, then R2.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

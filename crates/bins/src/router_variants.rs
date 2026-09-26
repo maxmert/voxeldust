@@ -32,6 +32,8 @@
 //! drain east instead, and the furrows break up; under D∞ each node sends two thirds of its water
 //! north-east and one third east, and the valley follows 30°.
 
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::f64::consts::{PI, SQRT_2};
 
 use vd_core::glam::DVec3;
@@ -364,6 +366,20 @@ pub fn dinf_sweep(state: &mut MacroSolve, d: &Dinf, gain: u64, pass: u32, passes
 /// `c_k = gain · erodibility · √Q · share_k / chord_k` — so that
 /// `z' = (z + Σ c_k · base_k) / (1 + Σ c_k)`. No deposit: the caller lays the cut.
 pub fn dinf_cut(state: &mut MacroSolve, d: &Dinf, gain: u64, pass: u32, passes: u32) -> Sweep {
+    dinf_cut_skipping(state, d, gain, pass, passes, None)
+}
+
+/// ★ THE CUT, SKIPPING THE DEPOSIT'S NODES: as [`dinf_cut`], but a node `skip` names is left uncut,
+/// as the solve leaves a lake node — the research's cure (a) for a fan the next sweep would grade
+/// back to its spill (its stated limit: a fan never cuts down into itself).
+pub fn dinf_cut_skipping(
+    state: &mut MacroSolve,
+    d: &Dinf,
+    gain: u64,
+    pass: u32,
+    passes: u32,
+    skip: Option<&[bool]>,
+) -> Sweep {
     let mut report = Sweep::default();
     let one = 1i128 << GAIN_BITS;
     for i in 0..state.node_count() {
@@ -372,7 +388,7 @@ pub fn dinf_cut(state: &mut MacroSolve, d: &Dinf, gain: u64, pass: u32, passes: 
     }
     for k in (0..d.order.len()).rev() {
         let i = d.order[k] as usize;
-        if d.r[i][0] == NO_NODE || state.pit[i] > 0 {
+        if d.r[i][0] == NO_NODE || state.pit[i] > 0 || skip.is_some_and(|m| m[i]) {
             continue;
         }
         let cbase = ((u128::from(gain) * u128::from(state.erodibility_q8[i])) >> 8)
@@ -441,9 +457,60 @@ pub struct BasinFill {
 /// outlet down the tree, to the next hollow or the sea. Ruling W7's "the cut is laid in the first
 /// hollow downstream" stands; only how the hollow takes it changes.
 pub fn basin_fill_deposit(state: &mut MacroSolve, d: &Dinf) -> BasinFill {
+    basin_fill_shaped(state, d, &FillOpts::level()).0
+}
+
+/// ★ A SHAPE FOR THE FILL: given the state, one hollow's nodes and where the sediment entered it
+/// (`(node, sediment in steps·m², water in mm·m²/yr)` — the INLETS), the height each node's fill
+/// surface stands OVER the hollow's common base level, in steps (non-negative). All zeros is the
+/// level fill; a published law of the fill's slope (ruling B11) gives the rest.
+pub type FillShape<'a> = &'a dyn Fn(&MacroSolve, &[u32], &[(u32, u128, u128)]) -> Vec<i64>;
+
+/// How a pass fills its hollows.
+pub struct FillOpts<'a> {
+    /// The fill's shape; `None` is the level fill.
+    pub shape: Option<FillShape<'a>>,
+    /// The runoff each node sheds (mm/yr), carried down the links beside the sediment so each
+    /// inlet knows its water; `None` carries no water.
+    pub runoff: Option<&'a [u32]>,
+    /// Hold every node's fill under the spill (the level fill), or let the surface stand over it
+    /// where the shape lifts it (Paola's fans: the base level never over the spill, the fan over it).
+    pub cap_at_spill: bool,
+}
+
+impl FillOpts<'_> {
+    /// The level fill.
+    #[must_use]
+    pub fn level() -> FillOpts<'static> {
+        FillOpts {
+            shape: None,
+            runoff: None,
+            cap_at_spill: true,
+        }
+    }
+}
+
+/// What a pass's fill left for the next pass to read: the nodes it raised, and those it raised OVER
+/// their hollow's spill with that spill (the fans the next sweep may cut).
+#[derive(Clone, Debug, Default)]
+pub struct FillMarks {
+    pub raised: Vec<u32>,
+    pub above: Vec<(u32, i32)>,
+}
+
+/// ★ THE SHAPED BASIN FILL: as [`basin_fill_deposit`], but each hollow fills to the surface
+/// `min(spill, L + g_i)` — `g` the shape's offsets and `L` the one base level the held volume pays
+/// for (a bisection over whole steps) — so a law can make the floor fall from its inflows to its
+/// lowest part. `None` is the level fill, to the integer.
+pub fn basin_fill_shaped(
+    state: &mut MacroSolve,
+    d: &Dinf,
+    opts: &FillOpts,
+) -> (BasinFill, FillMarks) {
     const NONE: u32 = u32::MAX;
     let n = state.node_count();
     let mut report = BasinFill::default();
+    let mut marks = FillMarks::default();
     // 1. The hollows: connected nodes the routing raised (a pit), of one flooded level.
     let mut basin = vec![NONE; n];
     let mut members: Vec<Vec<u32>> = Vec::new();
@@ -474,13 +541,25 @@ pub fn basin_fill_deposit(state: &mut MacroSolve, d: &Dinf) -> BasinFill {
     report.basins = members.len();
     // 2. The cut carried down the links, leaves first; a hollow's node holds what reaches it.
     let mut flux = vec![0u128; n];
+    let mut water = vec![0u128; if opts.runoff.is_some() { n } else { 0 }];
     let mut held = vec![0u128; members.len()];
+    let mut arrivals: Vec<Vec<(u32, u128, u128)>> = vec![Vec::new(); members.len()];
     let mut position = vec![0usize; n];
     for (k, &node) in d.order.iter().enumerate() {
         position[node as usize] = k;
         let i = node as usize;
         flux[i] += u128::from(state.cut_now[i]) * u128::from(state.area[i].max(1));
+        let w_here = match opts.runoff {
+            Some(runoff) => {
+                water[i] += u128::from(runoff[i]) * u128::from(state.area[i].max(1));
+                water[i]
+            }
+            None => 0,
+        };
         if basin[i] != NONE {
+            if flux[i] > 0 {
+                arrivals[basin[i] as usize].push((node, flux[i], w_here));
+            }
             held[basin[i] as usize] += flux[i];
             flux[i] = 0;
             continue;
@@ -491,10 +570,18 @@ pub fn basin_fill_deposit(state: &mut MacroSolve, d: &Dinf) -> BasinFill {
         }
         if r2 == NO_NODE {
             flux[r1 as usize] += flux[i];
+            if opts.runoff.is_some() {
+                water[r1 as usize] += water[i];
+            }
         } else {
             let f2 = (flux[i] * u128::from(d.w2[i])) >> 16;
             flux[r2 as usize] += f2;
             flux[r1 as usize] += flux[i] - f2;
+            if opts.runoff.is_some() {
+                let w2 = (water[i] * u128::from(d.w2[i])) >> 16;
+                water[r2 as usize] += w2;
+                water[r1 as usize] += water[i] - w2;
+            }
         }
         flux[i] = 0;
     }
@@ -523,6 +610,31 @@ pub fn basin_fill_deposit(state: &mut MacroSolve, d: &Dinf) -> BasinFill {
             continue;
         }
         report.fed += 1;
+        if let Some(shape) = opts.shape {
+            let (paid, full) = offset_fill(
+                state,
+                &members[b],
+                &shape(state, &members[b], &arrivals[b]),
+                volume,
+                opts.cap_at_spill,
+                &mut report,
+                &mut marks,
+            );
+            if full && volume > paid && outlet != NO_NODE {
+                report.full += 1;
+                let surplus = volume - paid;
+                let mut at = state.receiver[outlet as usize];
+                while at != NO_NODE {
+                    let a = basin[at as usize];
+                    if a != NONE && a != b as u32 {
+                        held[a as usize] += surplus;
+                        break;
+                    }
+                    at = state.receiver[at as usize];
+                }
+            }
+            continue;
+        }
         let mut nodes = members[b].clone();
         nodes.sort_unstable_by_key(|&v| (state.z[v as usize], v));
         let spill = state.z_flood[nodes[0] as usize];
@@ -564,6 +676,7 @@ pub fn basin_fill_deposit(state: &mut MacroSolve, d: &Dinf) -> BasinFill {
             state.pending[i] = state.pending[i].saturating_sub(dz);
             report.filled += 1;
             report.total_fill += dz as u64;
+            marks.raised.push(v);
         }
         // 4. The surplus of a hollow filled to its spill runs on from its outlet down the tree.
         if full && volume > paid && outlet != NO_NODE {
@@ -580,7 +693,7 @@ pub fn basin_fill_deposit(state: &mut MacroSolve, d: &Dinf) -> BasinFill {
             }
         }
     }
-    report
+    (report, marks)
 }
 
 /// ★ THE DEPOSIT OVER BOTH LINKS: the solve's own deposit (this pass's cut carried down as a volume,
@@ -619,6 +732,217 @@ pub fn dinf_deposit(state: &mut MacroSolve, d: &Dinf) -> (usize, u64) {
         }
     }
     (filled, total_fill)
+}
+
+/// ★ THE OFFSET FILL of one hollow: every node raised to the surface `L + g_i` where it stands under
+/// it — held under the spill when `cap` is set — `L` the largest whole step, never over the spill,
+/// whose cost `Σ a_i · max(0, surface_i − z_i)` the volume pays. Returns the volume laid and
+/// whether the base level reached the spill (the hollow is full).
+#[allow(clippy::too_many_arguments)]
+fn offset_fill(
+    state: &mut MacroSolve,
+    nodes: &[u32],
+    g: &[i64],
+    volume: u128,
+    cap: bool,
+    report: &mut BasinFill,
+    marks: &mut FillMarks,
+) -> (u128, bool) {
+    let spill = i64::from(state.z_flood[nodes[0] as usize]);
+    let surface = |level: i64, gi: i64| -> i64 {
+        if cap {
+            (level + gi).min(spill)
+        } else {
+            level + gi
+        }
+    };
+    let cost = |state: &MacroSolve, level: i64| -> u128 {
+        nodes
+            .iter()
+            .zip(g)
+            .map(|(&v, &gi)| {
+                let i = v as usize;
+                let target = surface(level, gi);
+                let z = i64::from(state.z[i]);
+                if target > z {
+                    (target - z) as u128 * u128::from(state.area[i].max(1))
+                } else {
+                    0
+                }
+            })
+            .sum()
+    };
+    let capacity = cost(state, spill);
+    let (level, paid, full) = if volume >= capacity {
+        (spill, capacity, true)
+    } else {
+        let mut lo = nodes
+            .iter()
+            .zip(g)
+            .map(|(&v, &gi)| i64::from(state.z[v as usize]) - gi)
+            .min()
+            .unwrap_or(spill);
+        let mut hi = spill;
+        // The largest level whose cost the volume pays: cost(lo) is zero, cost(hi) over the volume.
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if cost(state, mid) <= volume {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        (lo, cost(state, lo), false)
+    };
+    for (&v, &gi) in nodes.iter().zip(g) {
+        let i = v as usize;
+        let target = surface(level, gi);
+        let z = i64::from(state.z[i]);
+        if target > z {
+            let dz = (target - z) as i32;
+            state.z[i] += dz;
+            state.pit[i] = state.pit[i].saturating_sub(dz as u32);
+            state.pending[i] = state.pending[i].saturating_sub(dz);
+            report.filled += 1;
+            report.total_fill += dz as u64;
+            marks.raised.push(v);
+            if target > spill {
+                marks.above.push((v, spill as i32));
+            }
+        }
+    }
+    (paid, full)
+}
+
+/// ★ PAOLA, HELLER & ANGEVINE 1992 (Basin Research 4, 73–90): the fill surface of an alluvial basin
+/// obeys one diffusion (eq. 16a), and at an inlet its slope is the sediment load over the
+/// diffusivity (eq. 17a), which for BRAIDED channels makes the slope `(s − 1)/(8 A √c_f)` times the
+/// ratio of the sediment to the water a river brings: `c_f = 0.01` (eq. 7, "typically of order
+/// 0.01"), `s = 2.7` (§2.5), `ε = 0.4` (Parker 1978, measured; eq. 8), `A = (ε/(1 + ε))^{3/2}`
+/// (eq. 10). About 13.9. The calibration body is Earth's gravel-bed rivers; the width, the gravity
+/// and the grain size cancel, so the law holds on every body.
+#[must_use]
+pub fn paola_braided() -> f64 {
+    let (c_f, s, eps) = (0.01f64, 2.7f64, 0.4f64);
+    let a = (eps / (1.0 + eps)).powf(1.5);
+    (s - 1.0) / (8.0 * a * c_f.sqrt())
+}
+
+/// What the fan law found in one pass: every fed inlet's slope, reach and fan top.
+#[derive(Clone, Debug, Default)]
+pub struct Fans {
+    pub inlets: usize,
+    /// Inlets with no water (their slope is the scree's tangent), and inlets whose slope the scree's
+    /// tangent capped.
+    pub dry: usize,
+    pub capped: usize,
+    pub slopes: Vec<f64>,
+    pub reach_m: Vec<f64>,
+    pub top_m: Vec<f64>,
+}
+
+/// ★ THE FAN OFFSETS of one hollow (the research's recommendation, 2026-09-26): each fed inlet `k`
+/// takes the slope `S_k = 13.9 · (sediment / water)` in the solve's own units
+/// (`62.5 · V_k / (Δt · Q_k)`: steps·m² a pass over mm·m²/yr), capped at the scree's tangent; a fan
+/// share `A_k = A_hollow · V_k / ΣV` (uniform aggradation, eq. 16a's steady state); a reach found by
+/// visiting the hollow's nodes best-first by the STRAIGHT chord from the inlet (through the hollow's
+/// own adjacency) until they cover `A_k`; and the steady profile
+/// `Φ_k(d) = ∫_d^R S_k · (1 − A(<r)/A_k) dr`, walked back from the reach. The hollow's offset is the
+/// highest fan at each node (fans that meet leave a crease). Offsets in steps.
+///
+/// **Example.** A river draining a wet range enters the second pocket: its fan falls about nineteen
+/// metres a node from the mouth and flattens toward the pocket's middle, where the lake stays.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn paola_fan_offsets(
+    state: &MacroSolve,
+    nodes: &[u32],
+    inlets: &[(u32, u128, u128)],
+    u: &[DVec3],
+    radius_m: f64,
+    dt_yr: f64,
+    talus_tan: &[f64],
+    fans: &mut Fans,
+) -> Vec<i64> {
+    let k_paola = paola_braided();
+    let index: BTreeMap<u32, usize> = nodes.iter().enumerate().map(|(k, &v)| (v, k)).collect();
+    let area: Vec<f64> = nodes
+        .iter()
+        .map(|&v| state.area[v as usize] as f64)
+        .collect();
+    let a_hollow: f64 = area.iter().sum();
+    let v_sum: f64 = inlets.iter().map(|x| x.1 as f64).sum();
+    let mut phi = vec![0.0f64; nodes.len()];
+    if v_sum <= 0.0 {
+        return vec![0; nodes.len()];
+    }
+    for &(inlet, v, q) in inlets.iter().filter(|x| x.1 > 0) {
+        fans.inlets += 1;
+        let cap = talus_tan[inlet as usize];
+        let slope = if q == 0 {
+            fans.dry += 1;
+            cap
+        } else {
+            let raw = k_paola * 62.5 * v as f64 / (dt_yr * q as f64);
+            if raw > cap {
+                fans.capped += 1;
+                cap
+            } else {
+                raw
+            }
+        };
+        let a_k = a_hollow * v as f64 / v_sum;
+        let Some(&start) = index.get(&inlet) else {
+            continue;
+        };
+        // Best-first by the straight chord from the inlet, through the hollow's own adjacency.
+        let mut heap: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
+        let mut seen = vec![false; nodes.len()];
+        heap.push(Reverse((0, start)));
+        seen[start] = true;
+        let mut visited: Vec<(usize, f64)> = Vec::new();
+        let mut covered = 0.0f64;
+        while let Some(Reverse((dmm, k))) = heap.pop() {
+            visited.push((k, dmm as f64 / 1000.0));
+            covered += area[k];
+            if covered >= a_k {
+                break;
+            }
+            for m in state.lattice.neighbours(nodes[k]) {
+                if m == NO_NODE {
+                    continue;
+                }
+                if let Some(&km) = index.get(&m)
+                    && !seen[km]
+                {
+                    seen[km] = true;
+                    let d = chord_m(u, radius_m, inlet, m);
+                    heap.push(Reverse(((d * 1000.0).round() as u64, km)));
+                }
+            }
+        }
+        // The steady profile, walked back from the reach.
+        let mut cum = Vec::with_capacity(visited.len());
+        let mut acc = 0.0f64;
+        for &(k, _) in &visited {
+            acc += area[k];
+            cum.push(acc);
+        }
+        let mut shape = vec![0.0f64; visited.len()];
+        for j in (0..visited.len().saturating_sub(1)).rev() {
+            let dd = visited[j + 1].1 - visited[j].1;
+            shape[j] = shape[j + 1] + slope * (1.0 - (cum[j] / a_k).min(1.0)) * dd;
+        }
+        for (j, &(k, _)) in visited.iter().enumerate() {
+            if shape[j] > phi[k] {
+                phi[k] = shape[j];
+            }
+        }
+        fans.slopes.push(slope);
+        fans.reach_m.push(visited.last().map_or(0.0, |x| x.1));
+        fans.top_m.push(shape.first().copied().unwrap_or(0.0));
+    }
+    phi.iter().map(|&m| (m * 16.0).round() as i64).collect()
 }
 
 /// ★ THE DOMINANT TREE of a D∞ state: each node's larger link becomes its one receiver, so every
@@ -907,6 +1231,131 @@ mod tests {
                 .sum::<u64>()
         );
         assert!(laid > 0 && area > 0);
+    }
+
+    /// ★ THE SHAPED FILL WITH A ZERO SHAPE IS THE LEVEL FILL, height for height: the bisection over
+    /// the base level and the water-filling find the same largest level the volume pays for. So a
+    /// law's shape changes the fill and nothing else.
+    #[test]
+    fn the_zero_shape_is_the_level_fill() {
+        let (mut state, _, _) = cone();
+        let lattice = state.lattice;
+        let edge = lattice.edge as i32;
+        let bowl = unit(
+            &lattice,
+            lattice.index(vd_seed::bend::Face::PosX, edge / 2 + edge / 8, edge / 2),
+        );
+        for node in 0..state.node_count() {
+            let phi = unit(&lattice, node as u32)
+                .dot(bowl)
+                .clamp(-1.0, 1.0)
+                .acos();
+            if phi < 0.08 {
+                let share = 1.0 - (phi / 0.08) * (phi / 0.08);
+                state.z[node] -= (share * 30_000.0 * 16.0).round() as i32;
+            }
+        }
+        let _ = state.route();
+        state.accumulate();
+        for i in 0..state.node_count() {
+            state.cut_now[i] = u32::from(state.pit[i] == 0);
+        }
+        let d = single_links(&state);
+        let mut shaped = state.clone();
+        let level = basin_fill_deposit(&mut state, &d);
+        let zero = |_: &MacroSolve, nodes: &[u32], _: &[(u32, u128, u128)]| vec![0i64; nodes.len()];
+        let (by_shape, _) = basin_fill_shaped(
+            &mut shaped,
+            &d,
+            &FillOpts {
+                shape: Some(&zero),
+                runoff: None,
+                cap_at_spill: true,
+            },
+        );
+        assert!(level.filled > 0);
+        assert_eq!(shaped.z, state.z);
+        assert_eq!(shaped.pit, state.pit);
+        assert_eq!(by_shape, level);
+    }
+
+    /// ★ PAOLA'S BRAIDED CONSTANT is 13.9 from its published parts (c_f 0.01, s 2.7, ε 0.4).
+    #[test]
+    fn paolas_braided_constant_is_thirteen_point_nine() {
+        let k = paola_braided();
+        assert!((k - 13.91).abs() < 0.01, "the constant {k}");
+    }
+
+    /// ★ A FAN falls from its inlet: the offset is highest at the inlet, never rises away from it
+    /// along the visit, is zero at the reach, and its top stands between three tenths and the whole of
+    /// the slope times the reach (the half disc's closed form reads two thirds; a fan the hollow's
+    /// walls bend reads less).
+    #[test]
+    fn a_fan_falls_from_its_inlet_to_zero_at_its_reach() {
+        let (mut state, _, radius_m) = cone();
+        let lattice = state.lattice;
+        let edge = lattice.edge as i32;
+        let bowl = unit(
+            &lattice,
+            lattice.index(vd_seed::bend::Face::PosX, edge / 2 + edge / 8, edge / 2),
+        );
+        for node in 0..state.node_count() {
+            let phi = unit(&lattice, node as u32)
+                .dot(bowl)
+                .clamp(-1.0, 1.0)
+                .acos();
+            if phi < 0.08 {
+                let share = 1.0 - (phi / 0.08) * (phi / 0.08);
+                state.z[node] -= (share * 30_000.0 * 16.0).round() as i32;
+            }
+        }
+        let _ = state.route();
+        let nodes: Vec<u32> = (0..state.node_count() as u32)
+            .filter(|&v| state.pit[v as usize] > 0)
+            .collect();
+        assert!(nodes.len() > 20, "a hollow of {} nodes", nodes.len());
+        // One inlet on the hollow's edge (the node farthest from the bowl's centre), with a load
+        // and a water that give a slope of about 2e-3 (Paola: 13.9 · 62.5 · V / (Δt · Q)).
+        let far = *nodes
+            .iter()
+            .max_by(|a, b| {
+                let da = unit(&lattice, **a).dot(bowl);
+                let db = unit(&lattice, **b).dot(bowl);
+                db.total_cmp(&da)
+            })
+            .expect("a node");
+        let dt = 1.0e8;
+        let q: u128 = 1_000_000_000_000_000;
+        let want = 2.0e-3;
+        let v = (want * dt * q as f64 / (paola_braided() * 62.5)) as u128;
+        let u = units(&lattice);
+        let talus = vec![1.0; state.node_count()];
+        let mut fans = Fans::default();
+        let g = paola_fan_offsets(
+            &state,
+            &nodes,
+            &[(far, v, q)],
+            &u,
+            radius_m,
+            dt,
+            &talus,
+            &mut fans,
+        );
+        assert_eq!(fans.inlets, 1);
+        assert!(
+            (fans.slopes[0] - want).abs() < 1.0e-6,
+            "the slope {}",
+            fans.slopes[0]
+        );
+        let at_inlet = g[nodes.iter().position(|&x| x == far).expect("the inlet")];
+        assert_eq!(at_inlet, *g.iter().max().expect("offsets"));
+        let top_m = fans.top_m[0];
+        let reach = fans.reach_m[0];
+        assert!(
+            top_m > 0.3 * want * reach && top_m < want * reach,
+            "top {top_m} m, reach {reach} m"
+        );
+        assert!(g.iter().all(|&x| x >= 0));
     }
 
     /// ★ THE FACING reads a furrowed field: ground that rises along the rows reads a strong fourfold

@@ -45,7 +45,8 @@ use vd_bins::grid_bias::{
     AZIMUTHS, AxisHistogram, ConeError, cone_error, cone_z, patch_axis, polar_map, trunk_axis, unit,
 };
 use vd_bins::router_variants::{
-    Dinf, basin_fill_deposit, dinf, dinf_accumulate, dinf_cut, dinf_sweep, dominant, facing, rho8,
+    Dinf, Fans, FillOpts, basin_fill_deposit, basin_fill_shaped, dinf, dinf_accumulate, dinf_cut,
+    dinf_cut_skipping, dinf_sweep, dominant, facing, paola_braided, paola_fan_offsets, rho8,
     single_links, units,
 };
 use vd_terrain::BodyDefinition;
@@ -73,6 +74,12 @@ enum Variant {
     Fill,
     /// D∞'s routing with the basin fill.
     DinfFill,
+    /// D8's routing with Paola's sloped fans and the skip bit (the deposit's nodes stay uncut).
+    Fan,
+    /// The same without the skip bit: how much of a fan the next sweep grades away.
+    FanNoSkip,
+    /// D∞'s routing with Paola's sloped fans and the skip bit — ruling B11's candidate world change.
+    DinfFan,
 }
 
 impl Variant {
@@ -83,6 +90,9 @@ impl Variant {
             Variant::Dinf => "dinf",
             Variant::Fill => "fill",
             Variant::DinfFill => "dinf+fill",
+            Variant::Fan => "fan",
+            Variant::FanNoSkip => "fan-noskip",
+            Variant::DinfFan => "dinf+fan",
         }
     }
 }
@@ -112,13 +122,15 @@ fn cone_stage() {
             state.z = cone_z(&lattice, apex, radius_m, CONE_SLOPE);
             let _ = state.route();
             match v {
-                Variant::D8 | Variant::Fill => state.accumulate(),
+                Variant::D8 | Variant::Fill | Variant::Fan | Variant::FanNoSkip => {
+                    state.accumulate();
+                }
                 Variant::Rho8 => {
                     let seed = state.seed;
                     let _ = rho8(&mut state, &u, radius_m, seed);
                     state.accumulate();
                 }
-                Variant::Dinf | Variant::DinfFill => {
+                Variant::Dinf | Variant::DinfFill | Variant::DinfFan => {
                     let d = dinf(&state, &u, radius_m);
                     dinf_accumulate(&mut state, &d);
                 }
@@ -317,6 +329,7 @@ fn solve_variant(
     let gravity = body.facts().gravity_mm_s2;
     let radius_m = body.radius_m();
     let u = if matches!(v, Variant::D8 | Variant::Fill) {
+        // (the fan variants read chords, so they take the units)
         Vec::new()
     } else {
         units(&lattice)
@@ -363,6 +376,11 @@ fn solve_variant(
     let mut talus_done = 0u32;
     // VARIANT: the two links of the last routing, for D∞'s cut between routings.
     let mut links: Option<Dinf> = None;
+    // VARIANT (fans): the nodes the deposit ever raised (the skip bit), the last pass's fans over
+    // their spills with their volume, and a pass's own span of time.
+    let mut deposited = vec![false; state.node_count()];
+    let mut above: Option<(Vec<(u32, i32)>, f64)> = None;
+    let dt_yr = schedule.age_yr as f64 / f64::from(schedule.passes.max(1));
     for pass in 0..schedule.passes {
         if since_climate >= schedule.climate_every {
             if let Some(sea) = vd_terrain::land::sea_level_connected(
@@ -393,7 +411,7 @@ fn solve_variant(
             // VARIANT 1 AND 2: the drains after the routing, and the accumulation over them.
             match v {
                 Variant::D8 => state.accumulate(),
-                Variant::Fill => {
+                Variant::Fill | Variant::Fan | Variant::FanNoSkip => {
                     state.accumulate();
                     links = Some(single_links(&state));
                 }
@@ -406,7 +424,7 @@ fn solve_variant(
                     ));
                     state.accumulate();
                 }
-                Variant::Dinf | Variant::DinfFill => {
+                Variant::Dinf | Variant::DinfFill | Variant::DinfFan => {
                     let d = dinf(&state, &u, radius_m);
                     let rings = dominant(&mut state, &d);
                     rewrites.push(format!(
@@ -439,6 +457,79 @@ fn solve_variant(
         match (v, links.as_ref()) {
             (Variant::Dinf, Some(d)) => {
                 let _ = dinf_sweep(&mut state, d, gain, pass, schedule.passes);
+            }
+            (Variant::Fan | Variant::FanNoSkip | Variant::DinfFan, Some(d)) => {
+                let skip_on = v != Variant::FanNoSkip;
+                let _ = dinf_cut_skipping(
+                    &mut state,
+                    d,
+                    gain,
+                    pass,
+                    schedule.passes,
+                    skip_on.then_some(deposited.as_slice()),
+                );
+                // CHECK-FILL-SURVIVES: the last pass's fans over their spills, after this cut.
+                if let Some((list, before)) = above.take() {
+                    let after = volume_above(&state, &list);
+                    if pass <= 3 || pass + 1 == schedule.passes {
+                        rewrites.push(format!(
+                            "pass {pass}: basin fill survives the cut: {:.3e} of {:.3e} m³ over the spills ({:.1} %)",
+                            after, before, if before > 0.0 { 100.0 * after / before } else { f64::NAN }
+                        ));
+                    }
+                }
+                let c = climate
+                    .as_ref()
+                    .expect("the climate stands from the first pass");
+                let talus: Vec<f64> = c
+                    .aridity_q8
+                    .iter()
+                    .map(|&a| f64::from(tan_repose_q16(a)) / 65_536.0)
+                    .collect();
+                let fans = std::cell::RefCell::new(Fans::default());
+                let shape = |st: &MacroSolve, nodes: &[u32], inl: &[(u32, u128, u128)]| {
+                    paola_fan_offsets(
+                        st,
+                        nodes,
+                        inl,
+                        &u,
+                        radius_m,
+                        dt_yr,
+                        &talus,
+                        &mut fans.borrow_mut(),
+                    )
+                };
+                let (f, marks) = basin_fill_shaped(
+                    &mut state,
+                    d,
+                    &FillOpts {
+                        shape: Some(&shape),
+                        runoff: Some(&c.runoff_mm_yr),
+                        cap_at_spill: false,
+                    },
+                );
+                for &r in &marks.raised {
+                    deposited[r as usize] = true;
+                }
+                let over = volume_above(&state, &marks.above);
+                above = Some((marks.above, over));
+                if pass < 3 || pass + 1 == schedule.passes {
+                    let fans = fans.borrow();
+                    let mut sl = fans.slopes.clone();
+                    sl.sort_by(f64::total_cmp);
+                    let q = |p: f64| {
+                        sl.get(((sl.len() as f64 - 1.0) * p) as usize)
+                            .copied()
+                            .unwrap_or(f64::NAN)
+                    };
+                    let mut tops = fans.top_m.clone();
+                    tops.sort_by(f64::total_cmp);
+                    rewrites.push(format!(
+                        "pass {pass}: basin fill (fans) {} hollows, {} fed, {} full, {} nodes raised, {} steps; {} inlets ({} dry, {} capped at the scree), slope p10 {:.2e} p50 {:.2e} p90 {:.2e}, fan top p50 {:.0} m max {:.0} m; {:.3e} m³ over the spills",
+                        f.basins, f.fed, f.full, f.filled, f.total_fill, fans.inlets, fans.dry, fans.capped, q(0.1), q(0.5), q(0.9),
+                        tops.get(tops.len() / 2).copied().unwrap_or(f64::NAN), tops.last().copied().unwrap_or(f64::NAN), over
+                    ));
+                }
             }
             (Variant::Fill | Variant::DinfFill, Some(d)) => {
                 let _ = dinf_cut(&mut state, d, gain, pass, schedule.passes);
@@ -554,6 +645,16 @@ fn solve_variant(
         facies,
         rewrites,
     })
+}
+
+/// The volume the listed nodes stand over their spills, in m³ (heights in sixteenths).
+fn volume_above(state: &MacroSolve, list: &[(u32, i32)]) -> f64 {
+    list.iter()
+        .map(|&(v, spill)| {
+            let i = v as usize;
+            f64::from((state.z[i] - spill).max(0)) / 16.0 * state.area[i] as f64
+        })
+        .sum()
 }
 
 /// The artifact exactly as `vd_bins::artifact_worker::run_solve` makes it from a solved state.
@@ -673,6 +774,10 @@ fn planet_stage(
     let words = home_solve_words();
     let schedule = Schedule::standard(words.age_yr);
     println!("== STAGE 2: THE HOME PLANET, variant {} ==", v.name());
+    println!(
+        "  Paola, Heller & Angevine 1992's braided inlet slope over the load-to-water ratio: {:.3}",
+        paola_braided()
+    );
     let t = Instant::now();
     let tracer = trace.map(|(aim, half, dir)| {
         let lattice = body.macro_lattice().expect("a lattice");
@@ -838,7 +943,12 @@ fn main() {
                     Some("dinf") => Variant::Dinf,
                     Some("fill") => Variant::Fill,
                     Some("dinf+fill") => Variant::DinfFill,
-                    other => panic!("--planet d8|rho8|dinf|fill|dinf+fill, not {other:?}"),
+                    Some("fan") => Variant::Fan,
+                    Some("fan-noskip") => Variant::FanNoSkip,
+                    Some("dinf+fan") => Variant::DinfFan,
+                    other => panic!(
+                        "--planet d8|rho8|dinf|fill|dinf+fill|fan|fan-noskip|dinf+fan, not {other:?}"
+                    ),
                 });
             }
             "--write-artifact" => {

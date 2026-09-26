@@ -107,3 +107,70 @@ TRACE 02_pass010: fine texture RMS 67.1 m over 5508 nodes; the slopes' fourfold 
 TRACE 02_pass020: fine texture RMS 38.2 m over 5508 nodes; the slopes' fourfold 86.7 % at phase 1.4° (45° = the diagonals); 02_pass020.png
 TRACE 02_pass040: fine texture RMS 21.0 m over 5508 nodes; the slopes' fourfold 91.8 % at phase 0.1° (45° = the diagonals); 02_pass040.png
 TRACE 03_envelope: fine texture RMS 21.0 m over 5508 nodes; the slopes' fourfold 91.8 % at phase 0.1° (45° = the diagonals); 03_envelope.png
+
+## The sloped fill: Paola, Heller & Angevine 1992's fans (braided constant 13.9), with the skip bit, without it, and with D-infinity
+
+### fan
+the copy solved in 152.6 s
+  pass 0: basin fill (fans) 1300 hollows, 1090 fed, 368 full, 18714 nodes raised, 260894835 steps; 12362 inlets (5545 dry, 16 capped at the scree), slope p10 6.03e-4 p50 8.18e-2 p90 7.00e-1, fan top p50 152 m max 44804 m; 3.444e14 m³ over the spills
+  pass 1: basin fill survives the cut: 3.432e14 of 3.444e14 m³ over the spills (99.6 %)
+  pass 1: basin fill (fans) 8566 hollows, 8404 fed, 6182 full, 44416 nodes raised, 442595320 steps; 33344 inlets (7218 dry, 24 capped at the scree), slope p10 4.68e-4 p50 6.48e-3 p90 6.65e-1, fan top p50 0 m max 37998 m; 3.641e14 m³ over the spills
+  pass 2: basin fill survives the cut: 3.625e14 of 3.641e14 m³ over the spills (99.6 %)
+  pass 2: basin fill (fans) 6237 hollows, 6087 fed, 4092 full, 39217 nodes raised, 331308809 steps; 24820 inlets (7026 dry, 10 capped at the scree), slope p10 2.96e-4 p50 7.12e-3 p90 6.71e-1, fan top p50 0 m max 40421 m; 3.029e14 m³ over the spills
+  pass 3: basin fill survives the cut: 3.016e14 of 3.029e14 m³ over the spills (99.6 %)
+  pass 39: basin fill survives the cut: 7.357e12 of 7.324e12 m³ over the spills (100.5 %)
+  pass 39: basin fill (fans) 14138 hollows, 2128 fed, 421 full, 274703 nodes raised, 34775694 steps; 8901 inlets (992 dry, 0 capped at the scree), slope p10 2.90e-6 p50 8.87e-5 p90 6.38e-1, fan top p50 0 m max 242993 m; 7.175e12 m³ over the spills
+CENSUS G-GRID-VALLEYS.fan 1.253four/2.551twelve/78549trunks ~1.006[W13.3] 0°:19905 45°:16355 90°:24608 135°:17681
+CENSUS G-GRID-LAKES.fan 1.504four/2.362twelve/508patches-of-4+ no-band[a-reading] 0°:191 45°:92 90°:122 135°:103
+CENSUS FACING.fan fourfold7.84%/phase88.2deg/twelve-flatness1.293/1710658nodes no-band[the-ground's-own-slope-direction]
+CENSUS LAKES.fan share5.116%/3473patches/largest45340nodes; sea 57328 steps; ocean share 0.782 no-band[ruling-B9:4.828%-at-generator-21]
+
+### fannoskip
+the copy solved in 151.8 s
+  pass 0: basin fill (fans) 1300 hollows, 1090 fed, 368 full, 18714 nodes raised, 260894835 steps; 12362 inlets (5545 dry, 16 capped at the scree), slope p10 6.03e-4 p50 8.18e-2 p90 7.00e-1, fan top p50 152 m max 44804 m; 3.444e14 m³ over the spills
+  pass 1: basin fill survives the cut: 7.154e13 of 3.444e14 m³ over the spills (20.8 %)
+  pass 1: basin fill (fans) 8566 hollows, 8409 fed, 6220 full, 42649 nodes raised, 503796520 steps; 34081 inlets (7773 dry, 44 capped at the scree), slope p10 4.80e-4 p50 6.87e-3 p90 6.68e-1, fan top p50 0 m max 72130 m; 5.524e14 m³ over the spills
+  pass 2: basin fill survives the cut: 1.146e14 of 5.524e14 m³ over the spills (20.7 %)
+  pass 2: basin fill (fans) 6234 hollows, 6105 fed, 4250 full, 35890 nodes raised, 435294264 steps; 26019 inlets (7876 dry, 44 capped at the scree), slope p10 3.26e-4 p50 8.66e-3 p90 6.79e-1, fan top p50 0 m max 53889 m; 6.112e14 m³ over the spills
+  pass 3: basin fill survives the cut: 1.377e14 of 6.112e14 m³ over the spills (22.5 %)
+  pass 39: basin fill survives the cut: 3.000e14 of 7.179e14 m³ over the spills (41.8 %)
+  pass 39: basin fill (fans) 4079 hollows, 3858 fed, 2890 full, 71366 nodes raised, 256057313 steps; 18663 inlets (3443 dry, 54 capped at the scree), slope p10 6.14e-6 p50 2.92e-4 p90 6.43e-1, fan top p50 0 m max 119357 m; 6.580e14 m³ over the spills
+CENSUS G-GRID-VALLEYS.fan-noskip 1.089four/2.142twelve/106030trunks ~1.006[W13.3] 0°:28218 45°:20793 90°:28156 135°:28863
+CENSUS G-GRID-LAKES.fan-noskip 1.485four/3.010twelve/291patches-of-4+ no-band[a-reading] 0°:108 45°:47 90°:87 135°:49
+CENSUS FACING.fan-noskip fourfold23.74%/phase87.2deg/twelve-flatness1.729/1742994nodes no-band[the-ground's-own-slope-direction]
+CENSUS LAKES.fan-noskip share4.999%/2028patches/largest39483nodes; sea 57460 steps; ocean share 0.781 no-band[ruling-B9:4.828%-at-generator-21]
+
+### dinffan
+the copy solved in 168.2 s
+  pass 0: basin fill (fans) 1300 hollows, 1067 fed, 369 full, 18617 nodes raised, 256808832 steps; 12196 inlets (5211 dry, 135 capped at the scree), slope p10 5.64e-4 p50 7.96e-2 p90 7.00e-1, fan top p50 156 m max 34624 m; 3.351e14 m³ over the spills
+  pass 1: basin fill survives the cut: 3.340e14 of 3.351e14 m³ over the spills (99.7 %)
+  pass 1: basin fill (fans) 8424 hollows, 8272 fed, 6120 full, 42626 nodes raised, 436537822 steps; 33037 inlets (6940 dry, 107 capped at the scree), slope p10 4.56e-4 p50 6.37e-3 p90 6.65e-1, fan top p50 0 m max 35994 m; 3.644e14 m³ over the spills
+  pass 2: basin fill survives the cut: 3.626e14 of 3.644e14 m³ over the spills (99.5 %)
+  pass 2: basin fill (fans) 6065 hollows, 5918 fed, 3971 full, 38284 nodes raised, 326333001 steps; 24207 inlets (6718 dry, 63 capped at the scree), slope p10 3.02e-4 p50 7.42e-3 p90 6.70e-1, fan top p50 0 m max 43360 m; 2.966e14 m³ over the spills
+  pass 3: basin fill survives the cut: 2.957e14 of 2.966e14 m³ over the spills (99.7 %)
+  pass 39: basin fill survives the cut: 6.583e12 of 6.403e12 m³ over the spills (102.8 %)
+  pass 39: basin fill (fans) 14284 hollows, 2159 fed, 439 full, 268400 nodes raised, 33364796 steps; 8753 inlets (830 dry, 6 capped at the scree), slope p10 3.63e-6 p50 1.02e-4 p90 6.44e-2, fan top p50 1 m max 69986 m; 7.364e12 m³ over the spills
+CENSUS G-GRID-VALLEYS.dinf+fan 1.278four/2.599twelve/77294trunks ~1.006[W13.3] 0°:19656 45°:15481 90°:24702 135°:17455
+CENSUS G-GRID-LAKES.dinf+fan 1.439four/2.251twelve/517patches-of-4+ no-band[a-reading] 0°:186 45°:84 90°:135 135°:112
+CENSUS FACING.dinf+fan fourfold7.84%/phase88.2deg/twelve-flatness1.290/1707972nodes no-band[the-ground's-own-slope-direction]
+CENSUS LAKES.dinf+fan share5.224%/3314patches/largest45203nodes; sea 57326 steps; ocean share 0.782 no-band[ruling-B9:4.828%-at-generator-21]
+
+### the artifact readings
+CENSUS FACING-LAND.fan fourfold7.84%/phase88.2deg/twelve-flatness1.304/1605346nodes no-band[the-ground's-own-slope-direction]
+CENSUS FACING-FINE.fan fourfold9.10%/phase89.8deg/twelve-flatness1.260/1746497nodes no-band[the-washboard:one-node-furrows;phase-45=diagonals,0=rows]
+CENSUS LAKE-SHARE-ROWS.fan 5.116% no-band[the-rows'-own-water]
+CENSUS FACING-LAND.dinf+fan fourfold7.84%/phase88.2deg/twelve-flatness1.305/1606100nodes no-band[the-ground's-own-slope-direction]
+CENSUS FACING-FINE.dinf+fan fourfold9.37%/phase0.1deg/twelve-flatness1.271/1744793nodes no-band[the-washboard:one-node-furrows;phase-45=diagonals,0=rows]
+CENSUS LAKE-SHARE-ROWS.dinf+fan 5.224% no-band[the-rows'-own-water]
+
+### the stage trace of the second pocket's floor under the fans
+TRACE: node 4470928 (face NegY, 912, 28), a window of 81 × 81 nodes, pictures in trace_pocket2_fan
+TRACE 00_land: fine texture RMS 3.2 m over 5508 nodes; the slopes' fourfold 79.5 % at phase 12.7° (45° = the diagonals); 00_land.png
+TRACE 01_craters: fine texture RMS 25.4 m over 5508 nodes; the slopes' fourfold 75.0 % at phase 13.4° (45° = the diagonals); 01_craters.png
+TRACE 02_pass001: fine texture RMS 13.3 m over 5508 nodes; the slopes' fourfold 87.9 % at phase 13.3° (45° = the diagonals); 02_pass001.png
+TRACE 02_pass002: fine texture RMS 12.0 m over 5508 nodes; the slopes' fourfold 95.0 % at phase 11.9° (45° = the diagonals); 02_pass002.png
+TRACE 02_pass005: fine texture RMS 97.9 m over 5508 nodes; the slopes' fourfold 85.8 % at phase 3.1° (45° = the diagonals); 02_pass005.png
+TRACE 02_pass010: fine texture RMS 65.1 m over 5508 nodes; the slopes' fourfold 83.9 % at phase 3.2° (45° = the diagonals); 02_pass010.png
+TRACE 02_pass020: fine texture RMS 35.7 m over 5508 nodes; the slopes' fourfold 83.2 % at phase 2.1° (45° = the diagonals); 02_pass020.png
+TRACE 02_pass040: fine texture RMS 13.6 m over 5508 nodes; the slopes' fourfold 83.6 % at phase 2.9° (45° = the diagonals); 02_pass040.png
+TRACE 03_envelope: fine texture RMS 13.6 m over 5508 nodes; the slopes' fourfold 83.6 % at phase 2.9° (45° = the diagonals); 03_envelope.png

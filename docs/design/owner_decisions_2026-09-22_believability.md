@@ -334,3 +334,22 @@ The owner's three answers:
 **Example.** From 150 km over the second pocket a pilot sees today rows of beaded ridges at 45°. After the cure its floor falls
 gently from the streams at its rim to a lake in its lowest part, and the valleys above it run where the ground leads them, not
 along the lattice's eight directions.
+
+## B12. THE BASINS PARKED UNTIL AFTER R2; THE SHORE (N2) AND R2 NEXT (2026-09-26; the owner chose the recommended option)
+
+The sloped fill (ruling B11) was measured (status §8d): Paola, Heller & Angevine 1992's fans with the skip bit keep the pocket
+floor clean (13.6 m RMS, no 45° line), survive the next sweep (99.6 %) and halve the ground's grid facing (15.6 % → 7.8 %);
+but the pictures barely change at rung 7, the lakes merge into giants (45 340 nodes; share 5.1–5.2 %), and two faults further
+up show through: the sweep cuts with the RAIN's discharge while the fan law reads the RUNOFF (5 545 of 12 362 inlets brought
+sediment and no water), and the solve makes closed pockets up to 11.9 km deep and 1.57 million km² that no Earth basin
+resembles. The owner's two answers:
+
+1. **PARK THE BASINS; DO THE SHORE (N2) AND R2 NEXT.** Today's deposit stays in the world for now; the washboard bench, the
+   level fill and the fan law stay ready in `vd_bins::router_variants`. R2's design takes up WHICH WATER DRIVES THE CUT (plan
+   question 4) and measures D∞ inside its own erosion (B11 item 2's adoption moves into R2's world change). The basins —
+   the pocket depths, the fill, the lakes' extent — are taken up again after R2, on R2's field.
+2. **COMMIT THE FAN MEASUREMENT** (an instrument; no world change).
+
+**Example.** A pilot 150 km over the second pocket still sees today's 45° ridges until R2 lands; the next pictures she is shown
+are the shore's (N2): the plain's lakes as round ponds with their ground's texture to the water, and the steep coast without
+its notched staircase.

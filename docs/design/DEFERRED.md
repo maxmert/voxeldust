@@ -10176,6 +10176,10 @@ updated in the same change as the work, deleted when done). The interims named h
   owner's word, before R2.
   ★ RULED 2026-09-26 (B11): the sloped basin fill with a published slope law, measured in the bench first, then built with
   D∞ in the erosion passes as ONE world change.
+  ★ MEASURED AND PARKED 2026-09-26 (B12): the fills (level, and Paola's fans with a skip bit) remove the ridges but make
+  giant flat lakes (45 340 nodes, share 5.1–5.2 %); two faults further up — the sweep cuts with the rain while the fans read
+  the runoff, and closed pockets up to 11.9 km deep and 1.57 million km² — are taken up after R2, on R2's field; R2 decides
+  the cut's water and measures D∞. The tools stay in `vd_bins::router_variants` and `crates/bins/examples/router_bench.rs`.
 - 🟥 **EVERY SHORE RULE JUMPS AT THE FAR SWAPS 9 → 10 AND 10 → 11** (found 2026-09-25 by the shoreline bench, status §8c):
   on the gentle coast the drawn shore's sideways step reads 8.4 px (today's rule, 10 → 11) and 8.5–8.9 px (N1 and O1, 9 → 10
   and 10 → 11) against a bound of 2 px — rung 10 is the first rung that reads the pyramid (R₁), and the rules' far side is a
@@ -10195,6 +10199,13 @@ updated in the same change as the work, deleted when done). The interims named h
   ground's own step, G-SIDE-VS-GROUND up to 72–104 m at those pairs (today's rule walls 84–97 % of the pairs). WHERE:
   `crates/bins/src/shore_rules.rs` (the rule), later the recipe's shore law. WHEN: before N1's kernel form (the ground blended
   to the side's field wherever a mirrored word is in the stencil, measured on the same stands).
+- 🟥 **THE SOLVE MAKES CLOSED POCKETS NO EARTH BASIN RESEMBLES** (found 2026-09-26 by the washboard bench's fills, status
+  §8d): pockets up to 11.9 km under the sea's level and 1.57 million km² across; any fill of such a hollow makes a vast flat
+  floor and a vast shallow lake. WHERE: the first land and the crust's isostasy (`terrain/src/land.rs`), the craters, the
+  deposit. WHEN: after R2 (ruling B12), with the basins.
+- 🟥 **THE SWEEP CUTS WITH THE RAIN, THE WATER THAT FLOWS IS THE RUNOFF** (plan question 4; found sharp by the fan law,
+  2026-09-26): 5 545 of 12 362 inlets in pass 0 brought sediment and no runoff. WHERE: `terrain/src/solve.rs` `accumulate`
+  and `sweep`. WHEN: R2's design (ruling B12).
 - 🟥 **THE LAKES STAND OVER THEIR CEILING SINCE STEP 2b** (G-LAKE-SHARE 4.828 % of the land against ruling B3's 4 %;
   3.510 % at generator 20). The plan's own stop condition. MEASURED attribution (census runs with one change at a time):
   the water's tree over generator 20's budget 3.510 %; + the saddle's steepest open side and the ground's way toward the
