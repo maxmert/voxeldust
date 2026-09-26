@@ -1,0 +1,109 @@
+# The washboard bench (ruling B10 item 2), 2026-09-26, generator 21: `cargo run --release -p vd-bins --example router_bench`. One job at a time, release build.
+# Stage 1: --cone. Stage 2: --planet d8 --check-stock (the control), rho8, dinf, fill, dinf+fill. Then --artifact-readings on each variant's artifact. Then the stage trace of the second pocket's floor (--trace 0.290360 -0.700976 -0.651401 40) under d8 and under fill.
+
+## Stage 1: Tarboton's cone on the home moon
+CENSUS CONE.face-middle.d8 inward:mse57768.5/rel140.32% outward:mse63.2/rel56.47% rotation15:0.032 rotation45:0.582 fourfold:5.64% no-band[Tarboton-1997;Hyvaluoma-2017]
+CENSUS CONE.face-middle.rho8 inward:mse53934.2/rel135.58% outward:mse274.8/rel117.78% rotation15:0.078 rotation45:0.031 fourfold:12.29% no-band[Tarboton-1997;Hyvaluoma-2017]
+CENSUS CONE.face-middle.dinf inward:mse9885.9/rel58.05% outward:mse16.4/rel28.81% rotation15:0.329 rotation45:0.257 fourfold:39.79% no-band[Tarboton-1997;Hyvaluoma-2017]
+CENSUS CONE.near-corner.d8 inward:mse244218.4/rel275.54% outward:mse56.7/rel55.27% rotation15:-0.031 rotation45:-0.025 fourfold:7.03% no-band[Tarboton-1997;Hyvaluoma-2017]
+CENSUS CONE.near-corner.rho8 inward:mse75943.7/rel153.65% outward:mse225.6/rel110.24% rotation15:0.089 rotation45:0.099 fourfold:3.29% no-band[Tarboton-1997;Hyvaluoma-2017]
+CENSUS CONE.near-corner.dinf inward:mse33793.3/rel102.50% outward:mse99.9/rel73.38% rotation15:0.255 rotation45:0.131 fourfold:4.24% no-band[Tarboton-1997;Hyvaluoma-2017]
+
+## Stage 2: the planet, d8
+the copy solved in 140.8 s
+ARTIFACT d8 digest [0x1eb53c782459e0df, 0xc2cc766157d2a0e4]
+CENSUS CHECK-COPY-IS-THE-SOLVE.d8 equal =the-pin[home_artifact_pin,generator-21] GREEN
+CENSUS CHECK-STOCK.d8 0heights/0levels-differ-from-solve_full (143.0 s) GREEN
+CENSUS G-GRID-VALLEYS.d8 1.205four/1.910twelve/97157trunks ~1.006[W13.3] 0°:21442 45°:21372 90°:25067 135°:29276
+CENSUS G-GRID-LAKES.d8 1.128four/2.357twelve/947patches-of-4+ no-band[a-reading] 0°:267 45°:185 90°:253 135°:242
+CENSUS FACING.d8 fourfold15.57%/phase85.8deg/twelve-flatness1.480/1807024nodes no-band[the-ground's-own-slope-direction]
+CENSUS LAKES.d8 share4.828%/3868patches/largest12562nodes; sea 57449 steps; ocean share 0.781 no-band[ruling-B9:4.828%-at-generator-21]
+
+## Stage 2: the planet, rho8
+the copy solved in 146.7 s
+  pass 0: rho8 read 770507 slope nodes, moved 198947, rings 0
+  pass 1: rho8 read 819868 slope nodes, moved 103116, rings 0
+  pass 2: rho8 read 846704 slope nodes, moved 91198, rings 0
+ARTIFACT rho8 digest [0x5d684e4ac08918cb, 0x5eaced1050797f80]
+CENSUS G-GRID-VALLEYS.rho8 1.238four/1.975twelve/93439trunks ~1.006[W13.3] 0°:20963 45°:21575 90°:21990 135°:28911
+CENSUS G-GRID-LAKES.rho8 1.277four/2.800twelve/943patches-of-4+ no-band[a-reading] 0°:282 45°:156 90°:204 135°:301
+CENSUS FACING.rho8 fourfold16.06%/phase86.0deg/twelve-flatness1.495/1810733nodes no-band[the-ground's-own-slope-direction]
+CENSUS LAKES.rho8 share4.772%/3927patches/largest9498nodes; sea 57450 steps; ocean share 0.781 no-band[ruling-B9:4.828%-at-generator-21]
+
+## Stage 2: the planet, dinf
+the copy solved in 160.7 s
+  pass 0: dinf 770507 facet nodes, 484354 split, rings 0 (dominant tree rings 0)
+  pass 1: dinf 825769 facet nodes, 414325 split, rings 0 (dominant tree rings 0)
+  pass 2: dinf 847305 facet nodes, 418359 split, rings 0 (dominant tree rings 0)
+ARTIFACT dinf digest [0x398908c91f1226a2, 0xeb3258a679501181]
+CENSUS G-GRID-VALLEYS.dinf 1.116four/1.882twelve/95259trunks ~1.006[W13.3] 0°:22483 45°:21221 90°:24969 135°:26586
+CENSUS G-GRID-LAKES.dinf 1.242four/2.659twelve/844patches-of-4+ no-band[a-reading] 0°:262 45°:172 90°:192 135°:218
+CENSUS FACING.dinf fourfold15.42%/phase86.0deg/twelve-flatness1.483/1798351nodes no-band[the-ground's-own-slope-direction]
+CENSUS LAKES.dinf share4.966%/3394patches/largest9545nodes; sea 57444 steps; ocean share 0.781 no-band[ruling-B9:4.828%-at-generator-21]
+
+## Stage 2: the planet, fill
+the copy solved in 144.5 s
+  pass 0: basin fill 1300 hollows, 1090 fed, 425 full, 27392 nodes raised, 233291743 steps
+  pass 1: basin fill 8220 hollows, 8065 fed, 6166 full, 51858 nodes raised, 397161843 steps
+  pass 2: basin fill 4235 hollows, 4120 fed, 2608 full, 41308 nodes raised, 292214449 steps
+  pass 39: basin fill 3005 hollows, 2824 fed, 2062 full, 327863 nodes raised, 108195268 steps
+ARTIFACT fill digest [0x74486bbdc538d96e, 0x203325af1fee6081]
+CENSUS G-GRID-VALLEYS.fill 1.281four/2.871twelve/105769trunks ~1.006[W13.3] 0°:27643 45°:19580 90°:33879 135°:24667
+CENSUS G-GRID-LAKES.fill 1.711four/3.733twelve/180patches-of-4+ no-band[a-reading] 0°:77 45°:23 90°:63 135°:17
+CENSUS FACING.fill fourfold27.31%/phase87.3deg/twelve-flatness1.804/1598611nodes no-band[the-ground's-own-slope-direction]
+CENSUS LAKES.fill share5.040%/1764patches/largest43776nodes; sea 57460 steps; ocean share 0.781 no-band[ruling-B9:4.828%-at-generator-21]
+
+## Stage 2: the planet, dinffill
+the copy solved in 160.4 s
+  pass 0: dinf 770507 facet nodes, 484354 split, rings 0 (dominant tree rings 0)
+  pass 1: dinf 822344 facet nodes, 413518 split, rings 0 (dominant tree rings 0)
+  pass 2: dinf 839968 facet nodes, 415680 split, rings 0 (dominant tree rings 0)
+  pass 0: basin fill 1300 hollows, 1067 fed, 425 full, 27293 nodes raised, 230634907 steps
+  pass 1: basin fill 8085 hollows, 7936 fed, 6082 full, 51403 nodes raised, 391198516 steps
+  pass 2: basin fill 4128 hollows, 4008 fed, 2532 full, 40787 nodes raised, 289756849 steps
+  pass 39: basin fill 3112 hollows, 2948 fed, 2069 full, 330016 nodes raised, 111475833 steps
+ARTIFACT dinf+fill digest [0x35775bfbe5325351, 0x622fc5aa7280ab4e]
+CENSUS G-GRID-VALLEYS.dinf+fill 1.335four/3.001twelve/105205trunks ~1.006[W13.3] 0°:27639 45°:19051 90°:35112 135°:23403
+CENSUS G-GRID-LAKES.dinf+fill 1.566four/3.619twelve/189patches-of-4+ no-band[a-reading] 0°:74 45°:25 90°:68 135°:22
+CENSUS FACING.dinf+fill fourfold27.85%/phase87.4deg/twelve-flatness1.844/1598463nodes no-band[the-ground's-own-slope-direction]
+CENSUS LAKES.dinf+fill share5.146%/1652patches/largest43264nodes; sea 57459 steps; ocean share 0.781 no-band[ruling-B9:4.828%-at-generator-21]
+
+## The artifact readings (the land's facing, the FINE texture's facing, the lake share)
+CENSUS FACING-LAND.d8 fourfold15.57%/phase85.8deg/twelve-flatness1.446/1742997nodes no-band[the-ground's-own-slope-direction]
+CENSUS FACING-FINE.d8 fourfold14.41%/phase88.9deg/twelve-flatness1.503/1869649nodes no-band[the-washboard:one-node-furrows;phase-45=diagonals,0=rows]
+CENSUS LAKE-SHARE-ROWS.d8 4.828% no-band[the-rows'-own-water]
+CENSUS FACING-LAND.rho8 fourfold16.05%/phase86.0deg/twelve-flatness1.466/1745305nodes no-band[the-ground's-own-slope-direction]
+CENSUS FACING-FINE.rho8 fourfold13.88%/phase88.6deg/twelve-flatness1.475/1865482nodes no-band[the-washboard:one-node-furrows;phase-45=diagonals,0=rows]
+CENSUS LAKE-SHARE-ROWS.rho8 4.772% no-band[the-rows'-own-water]
+CENSUS FACING-LAND.dinf fourfold15.42%/phase86.0deg/twelve-flatness1.452/1732375nodes no-band[the-ground's-own-slope-direction]
+CENSUS FACING-FINE.dinf fourfold14.20%/phase88.8deg/twelve-flatness1.540/1862104nodes no-band[the-washboard:one-node-furrows;phase-45=diagonals,0=rows]
+CENSUS LAKE-SHARE-ROWS.dinf 4.966% no-band[the-rows'-own-water]
+CENSUS FACING-LAND.fill fourfold27.31%/phase87.3deg/twelve-flatness1.762/1559089nodes no-band[the-ground's-own-slope-direction]
+CENSUS FACING-FINE.fill fourfold26.95%/phase89.1deg/twelve-flatness1.774/1700617nodes no-band[the-washboard:one-node-furrows;phase-45=diagonals,0=rows]
+CENSUS LAKE-SHARE-ROWS.fill 5.040% no-band[the-rows'-own-water]
+CENSUS FACING-LAND.dinf+fill fourfold27.85%/phase87.4deg/twelve-flatness1.805/1559349nodes no-band[the-ground's-own-slope-direction]
+CENSUS FACING-FINE.dinf+fill fourfold26.96%/phase89.1deg/twelve-flatness1.771/1700183nodes no-band[the-washboard:one-node-furrows;phase-45=diagonals,0=rows]
+CENSUS LAKE-SHARE-ROWS.dinf+fill 5.146% no-band[the-rows'-own-water]
+
+## The stage trace of the second pocket's floor, 81 x 81 nodes (d8, then fill)
+TRACE: node 4470928 (face NegY, 912, 28), a window of 81 × 81 nodes, pictures in trace_pocket2
+TRACE 00_land: fine texture RMS 3.2 m over 5508 nodes; the slopes' fourfold 79.5 % at phase 12.7° (45° = the diagonals); 00_land.png
+TRACE 01_craters: fine texture RMS 25.4 m over 5508 nodes; the slopes' fourfold 75.0 % at phase 13.4° (45° = the diagonals); 01_craters.png
+TRACE 02_pass001: fine texture RMS 405.1 m over 5508 nodes; the slopes' fourfold 38.2 % at phase 24.6° (45° = the diagonals); 02_pass001.png
+TRACE 02_pass002: fine texture RMS 617.6 m over 5508 nodes; the slopes' fourfold 41.6 % at phase 35.4° (45° = the diagonals); 02_pass002.png
+TRACE 02_pass005: fine texture RMS 694.8 m over 5508 nodes; the slopes' fourfold 51.8 % at phase 40.9° (45° = the diagonals); 02_pass005.png
+TRACE 02_pass010: fine texture RMS 731.9 m over 5508 nodes; the slopes' fourfold 56.5 % at phase 42.3° (45° = the diagonals); 02_pass010.png
+TRACE 02_pass020: fine texture RMS 872.3 m over 5508 nodes; the slopes' fourfold 65.8 % at phase 43.7° (45° = the diagonals); 02_pass020.png
+TRACE 02_pass040: fine texture RMS 1004.2 m over 5508 nodes; the slopes' fourfold 72.4 % at phase 44.5° (45° = the diagonals); 02_pass040.png
+TRACE 03_envelope: fine texture RMS 1004.2 m over 5508 nodes; the slopes' fourfold 72.4 % at phase 44.5° (45° = the diagonals); 03_envelope.png
+TRACE-EXIT 0
+TRACE: node 4470928 (face NegY, 912, 28), a window of 81 × 81 nodes, pictures in trace_pocket2_fill
+TRACE 00_land: fine texture RMS 3.2 m over 5508 nodes; the slopes' fourfold 79.5 % at phase 12.7° (45° = the diagonals); 00_land.png
+TRACE 01_craters: fine texture RMS 25.4 m over 5508 nodes; the slopes' fourfold 75.0 % at phase 13.4° (45° = the diagonals); 01_craters.png
+TRACE 02_pass001: fine texture RMS 13.3 m over 5508 nodes; the slopes' fourfold 88.3 % at phase 13.3° (45° = the diagonals); 02_pass001.png
+TRACE 02_pass002: fine texture RMS 12.0 m over 5508 nodes; the slopes' fourfold 95.1 % at phase 11.9° (45° = the diagonals); 02_pass002.png
+TRACE 02_pass005: fine texture RMS 101.2 m over 5508 nodes; the slopes' fourfold 86.2 % at phase 2.7° (45° = the diagonals); 02_pass005.png
+TRACE 02_pass010: fine texture RMS 67.1 m over 5508 nodes; the slopes' fourfold 84.1 % at phase 2.7° (45° = the diagonals); 02_pass010.png
+TRACE 02_pass020: fine texture RMS 38.2 m over 5508 nodes; the slopes' fourfold 86.7 % at phase 1.4° (45° = the diagonals); 02_pass020.png
+TRACE 02_pass040: fine texture RMS 21.0 m over 5508 nodes; the slopes' fourfold 91.8 % at phase 0.1° (45° = the diagonals); 02_pass040.png
+TRACE 03_envelope: fine texture RMS 21.0 m over 5508 nodes; the slopes' fourfold 91.8 % at phase 0.1° (45° = the diagonals); 03_envelope.png

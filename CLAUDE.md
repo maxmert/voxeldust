@@ -45,6 +45,9 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     ★ B10 (2026-09-26): the shoreline BENCH committed (N1 steady at rungs 0–9, O1 a W16 breach, every rule red at the far
     swaps); ONE MORE BENCH ROUND (N2) before any kernel; the WASHBOARD (D8's eight-direction bias) measured with two cures —
     seeded Rho8 and D∞ — BEFORE R2, and FIRST (then N2, then build both, then fly all stands against both references).
+    ★ B11 (2026-09-26): the WASHBOARD is the DEPOSIT's (one-node lines along the flat's paths from pass 1; the washboard
+    bench, its solve copy proven exact); a SLOPED basin fill with a published slope law, measured first; D∞ adopted for the
+    erosion passes in the same change (the world moves once); the washboard bench committed.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

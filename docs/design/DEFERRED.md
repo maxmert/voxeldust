@@ -10167,6 +10167,15 @@ updated in the same change as the work, deleted when done). The interims named h
   rows are parallel RIDGES at exactly 45°, one node apart, with regular bumps along each crest — D8's washboard on the smooth
   floor (Fairfield & Leymarie 1991: parallel channels along the grid's preferred directions on smooth terrain; the entry "THE
   GRID STILL SHOWS IN THE VALLEYS"). WHEN (restated): the routing's cure, before R2 (the owner's word).
+  ★★ CAUSE FOUND 2026-09-26 (the washboard bench's stage trace, status §8d): NOT the routing — the DEPOSIT. The fine texture
+  of the pocket floor jumps 25 m → 405 m in the FIRST erosion pass and grows to 1 004 m by pass 40, turning to exactly 45°:
+  the solve fills the first lake node the cut reaches up to its spill, and inside a filled hollow the cut runs along the
+  flat's straight receiver paths, so the sediment lies in one-node lines along them. Seeded Rho8 and D∞ leave it whole; the
+  level basin fill removes it (21 m) but floods whole dead-flat plains. WHERE: `terrain/src/solve.rs` `deposit` (and the flats
+  of `route` step 3). WHEN: a basin fill that slopes from the inflows to the lowest part, measured in the bench, then the
+  owner's word, before R2.
+  ★ RULED 2026-09-26 (B11): the sloped basin fill with a published slope law, measured in the bench first, then built with
+  D∞ in the erosion passes as ONE world change.
 - 🟥 **EVERY SHORE RULE JUMPS AT THE FAR SWAPS 9 → 10 AND 10 → 11** (found 2026-09-25 by the shoreline bench, status §8c):
   on the gentle coast the drawn shore's sideways step reads 8.4 px (today's rule, 10 → 11) and 8.5–8.9 px (N1 and O1, 9 → 10
   and 10 → 11) against a bound of 2 px — rung 10 is the first rung that reads the pyramid (R₁), and the rules' far side is a

@@ -309,3 +309,28 @@ The owner's four answers:
 **Example.** Over the plain a chain of ponds runs north-east, one node wide, straight as a ruler for two hundred kilometres. After
 the washboard's cure the same water finds its own way down the plain, and the ponds lie where the ground's hollows are, not on
 the lattice's diagonal; then N2 draws each pond's edge where its ground meets its water, with the ground's texture to the shore.
+
+## B11. THE WASHBOARD IS THE DEPOSIT'S; A SLOPED BASIN FILL, MEASURED FIRST; D∞ WITH IT (2026-09-26; the owner chose each recommended option)
+
+The washboard bench (status §8d; `docs/investigation/2026-09-26/washboard_bench/`), its copy of the solve proven exact, measured
+B10's two routing cures and found the washboard's cause:
+- seeded Rho8 helps nothing; **D∞ improves the valleys** (Tarboton's cone error four to six times smaller, G-GRID's valleys
+  1.205 → 1.116); neither removes the 45° ridges;
+- a stage trace of the second pocket's floor shows the ridges born in the FIRST erosion pass (the fine texture 25 m → 405 m)
+  and growing to 1 004 m at exactly 45° by pass 40: **the DEPOSIT lays each pass's cut in one-node lines along the flat's
+  straight receiver paths**, because it fills the first lake node the flux reaches up to its spill;
+- a LEVEL basin fill (the hollow fills from its lowest nodes to one level) removes the ridges (21 m) but makes dead-flat plains
+  that flood whole — one lake per basin, straight node-line edges, the largest lake 12 562 → 43 776 nodes, the share 5.0 %.
+
+The owner's three answers:
+1. **A SLOPED BASIN FILL, MEASURED FIRST**: the sediment builds out from where the rivers enter and the floor falls gently to the
+   basin's lowest part, which alone keeps the water — its slope from a PUBLISHED law with a stated calibration (T9, no drawn
+   number), built in the bench and shown on the same basin pictures before any world change. Ruling W7's "the cut is laid in the
+   first hollow downstream" stands; only how the hollow takes it changes.
+2. **D∞ IS ADOPTED FOR THE EROSION PASSES, IN THE SAME CHANGE AS THE DEPOSIT CURE** (the world moves once); the shipped river
+   data keeps one receiver a node (the water's tree of step 2b).
+3. **COMMIT THE WASHBOARD BENCH** (an instrument; no world change).
+
+**Example.** From 150 km over the second pocket a pilot sees today rows of beaded ridges at 45°. After the cure its floor falls
+gently from the streams at its rim to a lake in its lowest part, and the valleys above it run where the ground leads them, not
+along the lattice's eight directions.

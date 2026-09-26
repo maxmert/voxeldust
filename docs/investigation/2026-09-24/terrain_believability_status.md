@@ -627,7 +627,7 @@ instead where a hollow's own floor is wet; from 150 km the pilot sees it as a sq
 Each step ends with the census numbers, the three stands' pictures, and the REFERENCE STAND's picture beside the
 reference (§9). State legend: ⬜ not started · 🟨 in progress · ✅ done (with the commit).
 
-★ **THE ORDER SINCE RULING B10 (2026-09-26): 1 → 2 → 2b → 4 slice 0 (the bench) → 5+2c (THE WASHBOARD: seeded Rho8 and D∞ measured, the owner chooses, then built) → 4 slice 0 round 2 (N2) → 4 built → the flight of ALL stands against BOTH references → 3 (R2) → 6 → 7.** (Rulings B8 and B9 set 2b → 4 → 3 with 2c before 3.) The step numbers stay the names every
+★ **THE ORDER SINCE RULINGS B10 AND B11 (2026-09-26): 1 → 2 → 2b → 4 slice 0 (the bench) → 5+2c (THE WASHBOARD: measured, §8d; its cause is the DEPOSIT; NEXT a SLOPED basin fill with a published slope law, measured in the bench, then built WITH D∞ in one world change) → 4 slice 0 round 2 (N2) → 4 built → the flight of ALL stands against BOTH references → 3 (R2) → 6 → 7.** (Rulings B8 and B9 set 2b → 4 → 3 with 2c before 3.) The step numbers stay the names every
 other file uses ("step 3" is R2, "step 4" the shoreline); only the order changed. Step 2's pictures showed every small
 lake as an 8 km square, so the edge law (step 4) now comes BEFORE R2 on today's ground, and the rivers follow the
 water (step 2b) before either, because R2 seeds its rivers from them. R2 starts with slice 0 (the bench and a
@@ -814,6 +814,62 @@ ragged ponds; a chain of lakes along one diagonal in every rule), `gentle_r07_to
 **Example.** From 150 km over the plain, N1 draws round ponds where today's rule draws blue tiles, and the ponds stay put as the
 hull climbs to 700 km; at 704 km every rule's shore jumps about nine pixels. From 1 000 km over the high plateau the stripes are
 the ground's own 45° washboard with lakes between its ridges — a routing fault of the 8 km solve, not of the shore.
+
+---
+
+### 8d. THE WASHBOARD BENCH — ruling B10 item 2 (2026-09-26, generator 21; built, run, NOT committed)
+
+`cargo run --release -p vd-bins --example router_bench` with `vd_bins::router_variants` — an INSTRUMENT (no world code
+changed). Stage 1 reads Tarboton's cone on the home moon; stage 2 solves the home planet with a LINE-FOR-LINE COPY of
+`solve_full` whose drains, accumulation and (for the two-link and the fill variants) cut and deposit follow the variant; the
+final routing, the lakes, the water's tree and the artifact are the solve's own. Evidence:
+`docs/investigation/2026-09-26/washboard_bench/` (the census, 16 pictures).
+
+**THE INSTRUMENT IS TRUE:** with today's D8 the copy gives the pinned artifact bit for bit (CHECK-COPY-IS-THE-SOLVE equal)
+and 0 of 8 871 936 heights and 0 lake levels differ from `solve_full` (CHECK-STOCK); the copied cut, given the solve's own
+one-receiver tree, equals the solve's sweep height for height (a unit test); the stage-1 D8 row repeats `grid_bias`'s
+numbers of 2026-09-22 to the digit.
+
+**THE TWO ROUTING CURES (B10 item 2), MEASURED:**
+
+| reading | D8 today | Rho8 (seeded spread) | D∞ (two-neighbour split) |
+|---|---|---|---|
+| Tarboton's cone error, inward / outward, face middle (nodes²) | 57 768 / 63 | 53 934 / 275 | **9 886 / 16** |
+| the same near a face corner | 244 218 / 57 | 75 944 / 226 | **33 793 / 100** |
+| G-GRID's valleys (four bins; ~1.006 is no lean) | 1.205 | 1.238 | **1.116** |
+| G-GRID's lakes (four bins) | 1.128 | 1.277 | 1.242 |
+| the lake share | 4.828 % | 4.772 % | 4.966 % |
+| the second pocket's floor (panel) | 45° ridge rows with beads | the same | the same |
+
+★ **NEITHER CURE REMOVES THE WASHBOARD.** Rho8 helps nothing (its one draw a node is frozen over forty passes and adds
+noise); D∞ improves the valleys and the cone error four to six times, but the 45° ridges on the pocket floor stand in both.
+
+★★ **THE WASHBOARD'S CAUSE, FOUND BY A STAGE TRACE** (the second pocket's floor, 81 × 81 nodes, shaded after each stage):
+the fine texture (a node less the mean of its eight neighbours) reads 3 m after the first land, 25 m after the craters,
+**405 m after the FIRST erosion pass**, then 695 / 732 / 872 / 1 004 m after passes 5 / 10 / 20 / 40, its direction turning
+from the regional slope to EXACTLY 45°; the pictures show one-node lines at 45° born in pass 1 and multiplying. A filled
+hollow is never cut (the sweep skips it), so the lines are the DEPOSIT's: the solve carries each pass's cut down the tree and
+fills the FIRST lake node the flux reaches up to its spill — and inside a filled hollow the flux runs along the flat's own
+straight receiver paths, so the sediment lies in one-node lines along those paths, with a bead where each path enters. The
+routing cures change the drains of the SLOPES and keep the flat's paths and the node-by-node deposit, which is why neither
+touched the ridges.
+
+**A THIRD CURE, THE BASIN FILL (measured):** the cut that reaches a filled hollow is held by the whole hollow, which fills from
+its lowest nodes to ONE level, never over its spill, and only a surplus runs on (`basin_fill_deposit`; ruling W7's "the cut
+is laid in the first hollow downstream" kept). The pocket floor's fine texture after 40 passes: **21 m against 1 004 m**, no
+45° line (`trace_pocket2_fill_02_pass040.png`). ★ BUT THE LEVEL FILL MAKES DEAD-FLAT PLAINS, and a dead-flat plain floods
+whole: the second pocket becomes ONE lake across the whole panel, the high lake becomes water blocks with straight node-line
+edges (`highlake_r07_fill.png`), the largest lake grows 12 562 → 43 776 nodes, the lakes 3 868 → 1 764 patches, the lake share
+5.04 %, and the planet-wide grid lean WORSENS (valleys 1.281, lakes 1.711; the finest texture's row lean 14 % → 27 %: a level
+plain holds its one-step terraces along the rows). D∞ with the fill reads the same (1.335 / 1.566 / 5.15 %).
+
+**READ.** The washboard is a deposit fault, not a routing fault. A cure must lay the sediment the way a real basin fills: from
+where the rivers enter, the floor sloping gently down to the lowest part, which alone keeps the water — never on the inflow's
+straight path (today) and never as one dead-flat level (the level fill). D∞ is a separate, measured gain for the valleys.
+
+**Example.** From 150 km over the second pocket a pilot sees today rows of beaded ridges at 45°; with the level fill she sees one
+flat lake to the horizon; the owed cure should show a basin whose floor falls gently from its rim streams to a smaller lake
+in its lowest part.
 
 ---
 
@@ -1009,3 +1065,5 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-09-25 — ruling B9: the lake ceiling kept RED and judged after step 4; the flat directions cured before R2; step 2b committed (generator 21, artifact 9).
 - 2026-09-25 — step 4 slice 0: the shoreline BENCH built and run (§8c; the census and 50 panels in `docs/investigation/2026-09-25/`); N1 steady at rungs 0–9 and nearly wall-free, O1 a W16 breach, every rule red at the far swaps, the washboard (D8) found as the main cause of the stripes and the bump rows; NOT committed.
 - 2026-09-26 — ruling B10: the bench committed; N2 (one more bench round) for the shore; the washboard's two cures (seeded Rho8, D∞) measured before R2 and FIRST; then N2, then both built, then the flight of all stands against both references.
+- 2026-09-26 — the WASHBOARD BENCH (§8d): the copy of the solve proven exact; Rho8 no help, D∞ better valleys (1.205 → 1.116) and cone error, neither touches the washboard; a stage trace finds its cause in the DEPOSIT (one-node lines along the flat's paths from pass 1); the level basin fill removes the ridges (1 004 m → 21 m) but floods whole flat plains; NOT committed.
+- 2026-09-26 — ruling B11: the washboard is the deposit's; a sloped basin fill with a published slope law, measured first; D∞ adopted with it in one world change; the washboard bench committed.

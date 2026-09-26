@@ -11,7 +11,10 @@
 //! This is Tier-B (process glue): exercised by the process-tier parity + smoke
 //! tests, not the coverage gate.
 
+// ★ AN ARTIFACT AS A PLAIN FILE, FOR THE BENCHES (ruling B10 item 2): one reader and one writer, so
+// the washboard bench's variant artifact is the shoreline bench's input.
 pub mod artifact_boot;
+pub mod artifact_file;
 pub mod artifact_source;
 pub mod artifact_store;
 pub mod artifact_worker;
@@ -22,6 +25,10 @@ pub mod drainage_gates;
 // the long-axis histogram that measure what the square grid does to a river and to a lake.
 pub mod grid_bias;
 pub mod proc_launch;
+// ★ THE WASHBOARD'S TWO CURES, AS A WHAT-IF (ruling B10 item 2): the seeded spread of the drain
+// direction (Rho8) and the two-neighbour split (D∞) over a routed state, and the slope-facing reading
+// that sees a 45° washboard in the ground itself.
+pub mod router_variants;
 // ★ THE SHORE'S GEOMETRY, AS NUMBERS (plan step 1, ruling B6; the owner: "shores are squared like
 // teeth"): the shipped column with the ground base the shore law reads, the zero contour, the
 // window bearings and the flat null the teeth instrument measures with.

@@ -179,83 +179,6 @@ fn peak_rss_mb() -> f64 {
     }
 }
 
-/// A development aid: the artifact written as raw little-endian words.
-fn write_artifact(path: &str, a: &Artifact) {
-    let mut b: Vec<u8> = Vec::new();
-    for w in [a.edge, a.version] {
-        b.extend_from_slice(&w.to_le_bytes());
-    }
-    b.extend_from_slice(&a.sea_m.to_le_bytes());
-    let put_len = |b: &mut Vec<u8>, n: usize| b.extend_from_slice(&(n as u64).to_le_bytes());
-    put_len(&mut b, a.rows.len());
-    for r in &a.rows {
-        b.extend_from_slice(&r.to_bytes());
-    }
-    for set in [&a.pyramid, &a.pyramid_water] {
-        put_len(&mut b, set.len());
-        for level in set {
-            put_len(&mut b, level.len());
-            for v in level {
-                b.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-    }
-    put_len(&mut b, a.coast.len());
-    b.extend_from_slice(&a.coast);
-    let _ = std::fs::write(path, b);
-}
-
-/// The development aid's reader; `None` for no file or a short one.
-fn read_artifact(path: &str) -> Option<Artifact> {
-    let b = std::fs::read(path).ok()?;
-    let mut at = 0usize;
-    let mut take = |n: usize| -> Option<&[u8]> {
-        let s = b.get(at..at + n)?;
-        at += n;
-        Some(s)
-    };
-    let u32_of = |s: &[u8]| u32::from_le_bytes([s[0], s[1], s[2], s[3]]);
-    let edge = u32_of(take(4)?);
-    let version = u32_of(take(4)?);
-    let sea = take(2)?;
-    let sea_m = i16::from_le_bytes([sea[0], sea[1]]);
-    let len = |s: &[u8]| u64::from_le_bytes(s.try_into().unwrap_or([0; 8])) as usize;
-    let rows_n = len(take(8)?);
-    let mut rows = Vec::with_capacity(rows_n);
-    for _ in 0..rows_n {
-        let r = take(vd_terrain::artifact::ROW_BYTES)?;
-        rows.push(vd_terrain::artifact::Row::from_bytes(r.try_into().ok()?));
-    }
-    let mut sets: Vec<Vec<Vec<i16>>> = Vec::new();
-    for _ in 0..2 {
-        let levels = len(take(8)?);
-        let mut set = Vec::with_capacity(levels);
-        for _ in 0..levels {
-            let n = len(take(8)?);
-            let raw = take(2 * n)?;
-            set.push(
-                raw.chunks(2)
-                    .map(|p| i16::from_le_bytes([p[0], p[1]]))
-                    .collect(),
-            );
-        }
-        sets.push(set);
-    }
-    let coast_n = len(take(8)?);
-    let coast = take(coast_n)?.to_vec();
-    let pyramid_water = sets.pop()?;
-    let pyramid = sets.pop()?;
-    Some(Artifact {
-        edge,
-        version,
-        sea_m,
-        rows,
-        pyramid,
-        pyramid_water,
-        coast,
-    })
-}
-
 /// ★ THE CLIENT'S CACHE through its own receiver, exactly as `skirt_gap` fills it.
 fn fill_cache(artifact: &Artifact, realm: RealmId) -> ArtifactCache {
     let mut rx = ArtifactReceiver::default();
@@ -450,7 +373,11 @@ fn main() {
 
     // ── THE SOLVE AND THE CACHE ──────────────────────────────────────────────────────────────
     let t = Instant::now();
-    let artifact = match a.artifact_cache.as_deref().and_then(read_artifact) {
+    let artifact = match a
+        .artifact_cache
+        .as_deref()
+        .and_then(vd_bins::artifact_file::read)
+    {
         Some(art) => {
             c.say(format!(
                 "# DEVELOPMENT RUN: the artifact was READ from the scratch file {:?}, not solved; a census run solves",
@@ -465,7 +392,7 @@ fn main() {
             })
             .expect("the home planet solves");
             if let Some(path) = a.artifact_cache.as_deref() {
-                write_artifact(path, &art);
+                let _ = vd_bins::artifact_file::write(path, &art);
             }
             art
         }
