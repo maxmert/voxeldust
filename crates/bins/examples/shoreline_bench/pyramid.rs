@@ -121,6 +121,29 @@ pub struct Pyramid {
     /// The samples one quarter holds.
     pub per_quarter: u64,
     pub quarters: Vec<Quarter>,
+    /// The rung-F samples along a node edge, and half of it.
+    pub per_node: i32,
+    pub half: i32,
+    /// The node cells `[cell0, cell0 + cn)²` the pyramid keyed, each cell's ONE class where it is
+    /// uniform (0 dry, 1 sea, 2 lake), [`MIXED`] where it is not.
+    pub cell0: (i32, i32),
+    pub cn: i32,
+    pub uniform: Vec<u8>,
+    /// A mixed cell's samples' classes, row by row (the far-water design §5.1: levels 7-12 exact).
+    pub mixed_classes: std::collections::HashMap<(i32, i32), Vec<u8>>,
+}
+
+/// A node cell whose samples do not share one class.
+pub const MIXED: u8 = 255;
+
+/// The skin's class of a water key: 0 dry, 1 the sea, 2 a lake.
+#[must_use]
+pub fn class_of(key: u32) -> u8 {
+    match Water::of_key(key) {
+        None => 0,
+        Some(Water::Sea) => 1,
+        Some(Water::Lake(_)) => 2,
+    }
 }
 
 /// What building a pyramid measured.
@@ -149,6 +172,9 @@ struct CellOut {
     keyed: u64,
     checked: bool,
     differ: u64,
+    /// The uniform class, or the mixed cell's samples' classes.
+    class: u8,
+    classes: Option<Vec<u8>>,
 }
 
 impl Pyramid {
@@ -236,18 +262,25 @@ impl Pyramid {
                                 keyed: 0,
                                 checked: false,
                                 differ: 0,
+                                class: MIXED,
+                                classes: None,
                             };
                             if mixed {
+                                let mut classes = vec![0u8; (per_node * per_node) as usize];
                                 for b in 0..per_node {
                                     for a in 0..per_node {
                                         let q = ((b / half) * 2 + a / half) as usize;
-                                        out.quarters[q].add(key(x0 + a, y0 + b));
+                                        let k = key(x0 + a, y0 + b);
+                                        out.quarters[q].add(k);
+                                        classes[(b * per_node + a) as usize] = class_of(k);
                                     }
                                 }
                                 out.keyed = (per_node * per_node) as u64;
+                                out.classes = Some(classes);
                             } else {
                                 let k0 = if waters.is_empty() { 0 } else { key(x0, y0) };
                                 out.keyed = u64::from(!waters.is_empty());
+                                out.class = class_of(k0);
                                 out.quarters = [Quarter::uniform(k0, (half * half) as u32); 4];
                                 if !waters.is_empty()
                                     && water_seen
@@ -272,12 +305,21 @@ impl Pyramid {
             }
         });
         let cells = results.into_inner().unwrap_or_default();
+        let cn = ci1 - ci0 + 1;
+        let mut uniform = vec![0u8; (cn * cn) as usize];
+        let mut mixed_classes = std::collections::HashMap::new();
         let mut quarters = vec![Quarter::default(); (nq * nq) as usize];
         let mut built = Built::default();
         let mut squares: BTreeSet<(i32, i32)> = BTreeSet::new();
         // The node squares of the window: rung-(q_rung + 1) columns [q0 / 2, (q0 + nq) / 2).
         let (s0i, s0j, sn) = (q0.0 / 2, q0.1 / 2, nq / 2);
-        for cell in &cells {
+        for cell in cells {
+            let x = ((cell.nj - cj0) * cn + (cell.ni - ci0)) as usize;
+            uniform[x] = cell.class;
+            if let Some(classes) = cell.classes.clone() {
+                mixed_classes.insert((cell.ni, cell.nj), classes);
+            }
+            let cell = &cell;
             built.cells += 1;
             built.with_water += usize::from(cell.water);
             built.mixed += usize::from(cell.mixed);
@@ -315,6 +357,12 @@ impl Pyramid {
                 nq,
                 per_quarter: (half * half) as u64,
                 quarters,
+                per_node,
+                half,
+                cell0: (ci0, cj0),
+                cn,
+                uniform,
+                mixed_classes,
             },
             built,
         )
@@ -344,6 +392,58 @@ impl Pyramid {
         }
         let n = self.per_quarter * (side as u64) * (side as u64);
         Some((n, wet, lake, (top != i16::MIN).then_some(top)))
+    }
+
+    /// ★ THE CLASS of rung-F sample `(x, y)`: 0 dry, 1 the sea, 2 a lake; `None` outside the cells
+    /// the pyramid keyed.
+    #[must_use]
+    pub fn class_at(&self, x: i64, y: i64) -> Option<u8> {
+        let (pn, h) = (i64::from(self.per_node), i64::from(self.half));
+        let (ni, nj) = ((x - h).div_euclid(pn), (y - h).div_euclid(pn));
+        let (a, b) = (ni - i64::from(self.cell0.0), nj - i64::from(self.cell0.1));
+        let cn = i64::from(self.cn);
+        if !(0..cn).contains(&a) || !(0..cn).contains(&b) {
+            return None;
+        }
+        let u = self.uniform[(b * cn + a) as usize];
+        if u != MIXED {
+            return Some(u);
+        }
+        let classes = self.mixed_classes.get(&(ni as i32, nj as i32))?;
+        let (sa, sb) = (x - h - ni * pn, y - h - nj * pn);
+        Some(classes[(sb * pn + sa) as usize])
+    }
+
+    /// ★ THE SKIN'S WORDS of texel `(i, j)` of level `l` (F ..= the quarter's level): its wet
+    /// samples, its lake samples and its samples, counted from the cells' classes. A texel whose
+    /// cell is uniform is read in one step.
+    #[must_use]
+    pub fn texel(&self, f_rung: u8, l: u8, i: i64, j: i64) -> Option<(u64, u64, u64)> {
+        if l < f_rung || l > self.q_rung {
+            return None;
+        }
+        let side = 1i64 << (l - f_rung);
+        let n = (side * side) as u64;
+        let (x0, y0) = (i << (l - f_rung), j << (l - f_rung));
+        // A texel of these levels lies in one node cell: read a uniform one in one step.
+        let first = self.class_at(x0, y0)?;
+        let (pn, h) = (i64::from(self.per_node), i64::from(self.half));
+        let (ni, nj) = ((x0 - h).div_euclid(pn), (y0 - h).div_euclid(pn));
+        let (a, b) = (ni - i64::from(self.cell0.0), nj - i64::from(self.cell0.1));
+        if self.uniform[(b * i64::from(self.cn) + a) as usize] != MIXED {
+            let wet = if first > 0 { n } else { 0 };
+            let lake = if first == 2 { n } else { 0 };
+            return Some((wet, lake, n));
+        }
+        let (mut wet, mut lake) = (0u64, 0u64);
+        for dy in 0..side {
+            for dx in 0..side {
+                let c = self.class_at(x0 + dx, y0 + dy)?;
+                wet += u64::from(c > 0);
+                lake += u64::from(c == 2);
+            }
+        }
+        Some((wet, lake, n))
     }
 
     /// ★ THE FAR FOLD of column `(i, j)` of rung `rung`: the one naming rule on the summed words.

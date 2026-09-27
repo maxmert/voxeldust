@@ -1,0 +1,3 @@
+MOD 8: water/land edges on a block line 25072 of 120983 = 20.72 % (by chance 12.50 %); the busiest phase 0 with 20.72 %; the mean dry height step across a block line 58.2 m against 44.5 m inside the blocks (454683 and 3252500 dry pairs)
+MOD 16: water/land edges on a block line 18447 of 120983 = 15.25 % (by chance 6.25 %); the busiest phase 0 with 15.25 %; the mean dry height step across a block line 74.3 m against 44.4 m inside the blocks (222879 and 3484304 dry pairs)
+MOD 32: water/land edges on a block line 8787 of 120983 = 7.26 % (by chance 3.12 %); the busiest phase 16 with 7.98 %; the mean dry height step across a block line 74.0 m against 45.4 m inside the blocks (110078 and 3597105 dry pairs)

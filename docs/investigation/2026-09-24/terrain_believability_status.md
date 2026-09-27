@@ -473,6 +473,9 @@ under it: a bank runs straight for 8 km, turns 90°, and runs straight again (AR
   last sweep (`solve.rs:1098-1124`): a straight scarp, more likely a small dam across a valley. The solve cuts with the
   rain while the budget reads the runoff, and the discharge row is pass 39's rain while the receiver byte comes from
   later routes (`solve.rs:940`, `:1587-1588`, `:1654`, `:1705`). R2 seeds its rivers from that row. UNMEASURED sizes.
+  ★ THE BLOCKS' MARK ON THE COAST MEASURED (2026-09-27, `mask_face --edges`, all six faces): 15.25 % of the 120 983
+  water/land edges between two nodes lie on a 16-node block line, against 6.25 % by chance, and the dry ground steps
+  74.3 m across a block line against 44.4 m inside a block — the steep coast's 130 km staircase on the K0 globes.
   ★ THE DISCHARGE HALF CURED BY STEP 2 (ruling B7 item 2): the shipped row is the Turc–Pike RUNOFF accumulated over the
   receivers of the LAST routing (`MacroSolve::accumulate_runoff`). MEASURED: W10-DISCHARGE-TREE 0 nodes. The passes
   still cut with the rain's drainage (plan question 4). ★ AND SINCE STEP 2b (ruling B8 item 2, amending B7 item 2) THE
@@ -1026,6 +1029,28 @@ arrival ramp). WHAT REMAINS: sub-pixel water shows as a tint; a near shore slide
 ≤ 1.46 px, lakes up to 3.29 and 4.79 px, MEASURED); the land's relief morphs across each band, as today. NEXT: slice K0,
 the skin bench, then the owner's questions Q1–Q8 on its numbers and panels, before S1.
 
+**SLICE K0, THE SKIN BENCH (2026-09-27; the design note §9; the bench, no world change; NOT committed).** Every judged line
+is GREEN on the four stands in the design's own form (half-cell windows, a 22-texel margin) ONCE THE SHADER CHOOSES ITS OWN
+LEVEL by the Vulkan specification's rule: the pyramid and the skin exact (SKIN-NEST, SKIN-GRID; AREA-NEST exactly 0 at every
+far swap), 268 of 268 front lines at 0.000 R8 steps from the nadir to 86°, both climbs at 0.000 against the one pyramid
+(today's box fold: 175 and 174 steps), the lid's step at most 0.73 coarser cells, no pocket basin lifted. Under the GL
+extension's rule (a probe one level finer than the pixel) the same windows pulse up to 54 steps at the swaps and need a
+quarter-cell texel: 3.6 times the memory (the new question Q9). THE RIM past 86.4° (the last rows of a low pilot's
+skyline): 88° closes with twice the margin, 89° with four times; the far page past the rim is seamless but erases the near
+coasts. THE MEMORY of the client's own chunk set: at most 17–79 MB of windows per stand (the high lake 79 MB at 150 km),
+plus an 11.3 MB far page. THE LID: today's far land flips its hold with Lambert steps of 4–21 % (Q2's red, MEASURED); the
+lid has none; the interim T~ stands 0.107 px off at rung 14, so Q3 turns to yes (48.9 KB). The crisp sheet hands over to the
+skin with a p99 of 13–19 % (Q5). The patterns on the globes are the world's: the rebound's 16-node blocks (W10, MEASURED
+below), the square lakes (W2), the grid lean (W8).
+
+**RULING B17 (2026-09-27):** Q9 — the skin's shader chooses its own level (the Vulkan rule, its own probes) with the
+design's half-cell windows; Q8 — the rim is sized at 86.4° now and judged in the flight; Q1–Q7 stay open (the owner
+discusses some first); K0 committed.
+
+**Example.** A pilot climbs over the high lakes from 7 500 to 60 000 km. Under the skin the 5 882 m lake's piece reads 71,
+60, 48, 41 and 50 % water on the way — one smooth curve through four swaps. Today's box fold reads 72 % just before the
+14 → 15 swap, 19 % after it, and 100 % after the 15 → 16 swap.
+
 ---
 
 ## 9. THE REFERENCE TARGET — the checklist every step reports against
@@ -1232,3 +1257,5 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-09-26 — ruling B15: cure the far lake flicker on the bench BEFORE S1 (the one naming rule waits); the wet tie and the lone hold join N2 (the bench's defaults, with B14's reach law and pocket variant); B14's corrected sizes stand; Q4–Q6, Q8–Q10, Q12 accepted.
 - 2026-09-26 — three far folds measured against the flicker (the build design §10: the tent, the tent where mixed, no lone column); ruling B16: none taken — NO flicker and NO shape change between rungs at all; find the best solution before S1.
 - 2026-09-27 — B16's design written (`far_water_seamless_design.md`, workflow `wf_34d04e10-b3b`): design D, the rung-free skin with the lid; the renderer's water-band rebind defect verified in the code; next slice K0 (the skin bench) before S1.
+- 2026-09-27 — slice K0 (the skin bench) measured (§8f; the design note §9): every judged line green in the design's form once the shader chooses its level by the Vulkan rule; the GL rule needs quarter-cell windows (Q9, new); the rim (88° at twice the margin, 89° at four times), the memory of the client's own chunk set (17–79 MB), the lid (today's far land's Lambert steps 4–21 %; Q3 turns to yes) and W10's block lines (15 % of the coast against 6 % by chance) measured; NOT committed.
+- 2026-09-27 — ruling B17: the skin's shader chooses its own level (Q9); the rim sized at 86.4° and judged in flight (Q8); Q1–Q7 open for discussion; K0 committed.

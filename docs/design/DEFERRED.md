@@ -10235,6 +10235,15 @@ updated in the same change as the work, deleted when done). The interims named h
   (window margins sized for θ_rim, Q8); the resolution floor (water narrower than 128 m leaves the picture between 56 and
   111 km, Q5); the lake channel (Λ) waits for the ocean slice 8o; design B's exact nested near line for rungs 0–6 stays an
   option on the owner's word only (Q4). WHERE: the design note. WHEN: decided with Q1–Q8 after slice K0.
+  ★ K0 MEASURED (2026-09-27, the design note §9): THE RIM closes with twice the window margin at 88° and four times at 89°
+  (half-cell windows under the Vulkan level rule; the high lake's windows 79 → 122 → 277 MB); no window closes it at 90°;
+  the far page read past the rim is seamless but erases the near coasts (a mean of 34–52 R8 steps from the ideal value at
+  the 6 → 7 front). THE FILTER'S LEVEL RULE is the vendor's (both published sketches say so): under the GL sketch the
+  design's windows pulse up to 54 steps at the swaps and a quarter-cell texel cures it at 3.6 times the memory (283 MB over
+  the high lake); under the Vulkan sketch they are seamless — the shader's own level and probes take the vendor out of the
+  picture (the new Q9). RULED B17 (2026-09-27): the shader's own level with the half-cell windows (Q9); THE RIM STAYS
+  sized at 86.4° and is judged in the flight (Q8) — this entry holds the rim until that flight. WHEN: the flight after S4
+  (the owner's look); Q1–Q7 still open.
 - 🟥 **THE FINE OCTAVES STAND ON A 572 m LIFT** (measured 2026-09-26 by the shoreline bench, status §8e): the ridged fine
   octaves' mean at share one is 571.8 m (rungs 0–5; 513 m at rung 7, 224 m at rung 9, nought from rung 10), so the drawn land by
   every water stands `m × 572` m over the ground the solve placed the water against — 200 m on the gentle coast. Every shore

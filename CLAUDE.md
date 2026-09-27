@@ -67,7 +67,13 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     ★★ B16 (2026-09-26, owner: *"No flicker or changing of the shapes between rungs at all"*): none of the three measured
     far folds (the box, the tent, no lone column) is taken — each thresholds counts on nested footprints, so a small
     feature changes at a swap; FIND THE BEST SOLUTION (the fold alone may not be the place), bench it against W16 in full,
-    and bring it before S1.
+    and bring it before S1. THE ANSWER, design D (`docs/investigation/2026-09-26/far_water_seamless_design.md`): the
+    rung-free SKIN (the far water's colour is the share of N2's samples under the pixel) + the LID from rung 14.
+    ★ B17 (2026-09-27, on slice K0's numbers, the design §9): Q9 THE SHADER CHOOSES THE SKIN'S LEVEL ITSELF (the Vulkan
+    rule, the level of P_max/η, and its own probes) with the design's half-cell windows — MEASURED 0 steps at every front
+    and climb, 17–79 MB of windows, the same picture on every GPU; the GPU's own anisotropic filter is not used for the
+    skin. Q8 THE RIM IS SIZED AT 86.4° NOW and judged in the flight (wider margins only if the flight shows it). Q1–Q7
+    are OPEN: the owner discusses some first. K0 committed.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

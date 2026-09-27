@@ -1,5 +1,10 @@
 # FAR WATER WITH NO SEAM — THE DESIGN FOR RULING B16
 
+**★ SLICE K0 MEASURED (2026-09-27): §9.** Every judged line of the bench is green in the design's own form once the
+shader chooses its own level by the Vulkan rule; under the GL rule the window needs a quarter-cell texel. A new question,
+Q9 (the filter), and Q3's answer turns to yes (§9.9). RULED B17: the shader's own level; the rim at 86.4°, judged in
+flight; Q1–Q7 open.
+
 **What this file is.** A DESIGN. It changes no source file and no world file. It answers ruling B16
 (`docs/design/owner_decisions_2026-09-22_believability.md`, B16): *"We need seamless experience - no flicker at all
 please. We need to find the best solution for it. No flicker or changing of the shapes between rungs at all."* The bar
@@ -55,9 +60,9 @@ reviews. D has four parts:
 4. **THE RENDERER'S OWN POPS, FIRST.** The water fades on its own ground's band. No band edge jumps 5 % in one frame.
    A late chunk ramps in. The water's culling box covers its morph.
 
-**Example.** A pilot climbs over the high lakes from 7 500 km to 60 000 km. Her pixel over the 5 882 m lake's ragged
-piece has the same blue on both sides of every ring. The blue changes only as her pixel grows: about 64 % blue near
-14 000 km, about 40 % near 28 000 km, about 59 % near 57 000 km. It changes at the pace of her climb, never at a ring
+**Example.** A pilot climbs over the high lakes from 7 500 km to 60 000 km. The pilot's pixel over the 5 882 m lake's ragged
+piece has the same blue on both sides of every ring. The blue changes only as that pixel grows: about 64 % blue near
+14 000 km, about 40 % near 28 000 km, about 59 % near 57 000 km. It changes at the pace of the climb, never at a ring
 and never in one frame. The ground under the lake's shore does not rise or drop at a ring either.
 
 ### 1.2 What the owner sees
@@ -85,7 +90,7 @@ and never in one frame. The ground under the lake's shore does not rise or drop 
    260 of 693 lake bodies flicker on the steep coast's far window (MEASURED, `n2_s0_fold_kernels_w4_census.txt`). The prior art
    agrees: *"even perfect per-level thresholds do not prevent geometry disappearing with distance"* (Wyman and
    McGuire 2017). So D draws the tint. The tint changes with the pixel's footprint as the pilot climbs: at the pace of
-   her climb, never at a ring.
+   the climb, never at a ring.
 2. **A coarser rung cannot hold the finer rung's line.** At a swap, a coarser cell is two pixels. So a drawn line must
    move by up to one coarser cell at some swap. Design B bounds that move at 1.41 px with exact nested crossings, and
    its line still moves. D makes each move one slow slide per band. Its size is N2's own step at rungs 0–7, MEASURED
@@ -205,7 +210,7 @@ The water's colour does not move at a swap (§3, P1). Inside the band these thin
 **Example.** A pilot walks along a belt lakeshore and looks across the lake, 0.8–1.0 km away. At one place the rung-0
 shore stands 3 m from the rung-1 shore. Today a point of that 3 m strip stays water until the front (956 m) reaches
 it, then turns tan in one frame, and the front shows as a notch in the far shore. With R2 the strip's water sinks
-under the rising ground between 782 and 956 m, so each of her steps moves it by a step's worth.
+under the rising ground between 782 and 956 m, so each step of the pilot moves it by a step's worth.
 
 ### 2.5 The near/far boundary: the hand-over
 
@@ -686,7 +691,7 @@ black difference image under every swap.
   (θ_rim), the resolution floor, the lake channel for 8o, and B's near line as an option.
 
 **Example.** A pilot flies the build after R1 and R2: today's world, with no ring jump in fast flight and no strip of
-water that pops at a near ring. After S4 she climbs over the high lakes, and no lake's edge changes at a ring.
+water that pops at a near ring. After S4 the pilot climbs over the high lakes, and no lake's edge changes at a ring.
 
 ---
 
@@ -723,3 +728,164 @@ gates, C's Stage 2 or another threshold-free far hold, five page levels, margins
 arrival ramp; B's exact near line only if the near slides show. The feasibility review: C's Stage 1 is the best core
 and B the worst; take A's far page and level floor, fix the margins and the band buffer's Bevy path first, and choose
 the far land's cure on the bench's numbers.
+
+---
+
+## 9. SLICE K0 — WHAT THE BENCH MEASURED (2026-09-27; `vd-bins` only; no world change; NOT committed)
+
+THE BENCH. `crates/bins/examples/shoreline_bench/` gained `pyramid.rs` (the sample count pyramid, with each mixed cell's
+4 096 sample classes), `skin.rs` (the skin pyramid, the window a client cuts, the 8-bit rounding), `skin_lines.rs` (the
+exactness lines), `sampler.rs` (the emulated view and the emulated filter, with both published level rules),
+`front.rs` (the front, rim, climb, hand-over and memory lines), `lid.rs` (the lid's sums) and `globe.rs` (the coverage
+globes and the climb strip); `far_window.rs` runs them on W4 (rungs 13–18, 1 024 node squares, about 8 300 km a side)
+of each stand. The world is generator 21's artifact (version 9). The four stands: the gentle coast, the steep coast, the
+second pocket and the high lake. `crates/bins/examples/mask_face.rs` reads the artifact's coast mask. The censuses sit
+beside this note: `k0_skin_half_cell_census.txt` (the recommended form: half a cell, the Vulkan level rule, with the
+rim's search), `k0_skin_half_cell_gl_census.txt` (the same windows under the GL level rule),
+`k0_skin_quarter_cell_census.txt` (the quarter cell under the GL level rule, with the rim's search),
+`k0_skin_panels_census.txt` (the panels, their captions and the memory prices) and `k0_mask_edges.txt` (W10's block
+lines); the panels in `k0_skin_bench/`.
+
+### 9.1 The judged lines — all GREEN on the four stands, in the recommended form
+
+| line | reads (the steep coast; the other stands alike) | must read | failing control |
+|---|---|---|---|
+| CHECK-PYRAMID-UNIFORM / -BAND / -FOLD | 0 samples / 0 of 4 194 304 quarters / 0 words | 0 | (S0's controls) |
+| SKIN-NEST | 0 of 1 397 760 texels | 0 | +1 on one child → 1 |
+| SKIN-GRID (rung 13, 225 windows) | 0 of 10 546 448 texels | 0 | a window one texel off → 223 145 |
+| SKIN-QUANT-CONTROL (a reading) | mips averaged from rounded children leave the rule at 12 667 of 2 628 880 texels | — | — |
+| AREA-NEST.skin, every swap 12 → 13 … 17 → 18 | exactly 0 (2 839 581 233 wet samples on both sides) | 0 | today's rule's lakes −13.0 … +7.6 %; N2's −30.9 … +1.8 % |
+| SKIN-FRONT, every front 6 → 7 … 17 → 18, nadir to 86° | 268 of 268 lines at 0.000 R8 steps (f64 and 8-bit weights) | 0 / ≤ 1 | the coarser finest level a whole cell: up to 115 steps; a 12-texel margin at 84° and 86°: up to 44; the box fold: 255 |
+| SKIN-TRACK, the high lakes' climb 7 500 → 60 000 km | 0.000 steps on 417 frames, 120 513 pixels | 0 / ≤ 1 | the box fold: 175 steps |
+| SKIN-TRACK, the gentle coast's climb 60 → 1 400 km | 0.000 steps on 632 frames, 182 648 pixels | 0 / ≤ 1 | the box fold: 174 steps |
+| TOP-STEP (the lid), 13 → 14 … 17 → 18 | at most 0.73 coarser cells | ≤ 1 | — |
+| POCKET-BASIN | 0 of 3 045 level-1 nodes lifted (the second pocket: 0 of 10 542) | 0 | the sea's side hold: all of them |
+
+**SKIN-LAKE-PIECE (Q1).** The 5 882 m lake's measured piece under the nadir pixel of the high lakes' climb: the skin reads
+71 → 70 → 67 → 64 → 60 → 55 → 53 → 48 → 43 → 41 → 41 → 45 → 50 % water from 7 500 to 55 000 km, a smooth curve as the
+pixel's footprint takes in more shore; the box fold reads 75 → 84 → 81 → 77 → 72 → **19** (the 14 → 15 swap) → 19 → 20 →
+**100** (the 15 → 16 swap).
+
+### 9.2 ★ THE FILTER'S LEVEL RULE DECIDES THE WINDOW'S FORM
+
+The GPU's anisotropic filter takes N probes along the pixel's long side and reads each probe at a level of detail. The two
+published sketches choose that level differently, and both leave the scheme to the vendor (`EXT_texture_filter_anisotropic`:
+*"The particular scheme for anisotropic texture filtering is implementation dependent"*):
+- THE GL SKETCH reads the level of P_max / N, with N = min(⌈P_max / P_min⌉, 16). A pixel whose footprint is 1.0001 times
+  longer one way takes two probes, each ONE LEVEL FINER than the pixel. (The extension also lets a vendor round N up to a
+  supported rate.)
+- THE VULKAN SKETCH reads the level of P_max / η, with η = min(P_max / P_min, 16) the ratio itself
+  (`λ_base = log2(ρ_max / η)`): a probe is never finer than the pixel's short side.
+
+MEASURED, the design's form (T_L = half a cell, a 22-texel margin, 5 levels):
+- UNDER THE GL RULE the two rungs still agree at every front (268 of 268 green), but the two climbs read **54 and 41
+  steps** against the one pyramid (RED, `k0_skin_half_cell_gl_census.txt`). The worst pixel (7 575 km, rung 13, 82 % into
+  the band): the pixel wants level 12.3; the band's level floor, which must reach the coarser rung's finest level at the
+  front, lifts it to 12.8; so the drawn skin is half a level too soft there, and it softens and then holds as the eye
+  climbs — a slow pulse of the coast's softness at every swap, with no pop. With a QUARTER-CELL finest texel and a
+  52-texel margin the floor never binds: every climb and every front reads 0.000 (`k0_skin_quarter_cell_census.txt`).
+- UNDER THE VULKAN RULE the design's own form reads 0.000 on every climb and all 268 fronts (§9.1).
+
+So: the half-cell window is seamless when the SHADER CHOOSES THE LEVEL ITSELF by the Vulkan rule and takes its own probes
+(an explicit level; one trilinear read per probe), the same on every GPU; the quarter-cell window is seamless under both
+sketches with the GPU's own filter, at about 3.6 times the memory (§9.4). This is the new question Q9.
+
+### 9.3 THE RIM (Q8)
+
+Past θ_rim = 86.4° the 16× sampler saturates. SKIN-RIM reads the fronts at 88° and 89° (40 lines on the four stands) and
+searches the margin (1×–6×) and the levels (5–7) that close each line:
+
+| form | 88° | 89° |
+|---|---|---|
+| half a cell, Vulkan rule (margin 22) | up to 37.9 steps; every line closes with a 44-texel margin (twice) | up to 81.0 steps; every line closes with an 88-texel margin (four times), 5 levels |
+| a quarter cell, GL rule (margin 52) | up to 26.7 steps; every line closes with 78 texels but one (104) | up to 73.8 steps; 5 levels stay open even at 312 texels (3.6–13.6 steps): the filter's level passes the finer window's top level; 6 levels and 156 texels close every line but one (208) |
+
+A pilot sees these incidences only in the last rows of the skyline: a front at distance d stands on the horizon of an eye
+about d² / 2R high (the 9 → 10 front, 490 km: about 19 km up). No window closes the rim at 90°.
+
+SKIN-RIM-PAGE, the cheap way: past θ_rim BOTH rungs read the one far page, which is equal by construction and grows no
+window. Its price, the page against the ideal value at the rim's pixels (the recommended form): at the near fronts the
+page erases the coast (6 → 7: a mean of 34–52 steps, at most 225), at the far fronts it is close (11 → 12: a mean of
+2.5–3.6 steps; 12 → 13: nought). The finer window itself stands up to 81 steps from the ideal at 89°.
+
+### 9.4 THE MEMORY (Q8, Q9)
+
+SKIN-MB-LADDER counts the windows of the client's OWN wanted set (the ladder's descent over the drawn ground) at seven
+heights over each stand (2, 10, 50, 150, 500, 2 000 and 8 000 km): a wanted column of rungs 6–13 whose window holds both
+water and land needs a window; an all-water or all-land window is a constant. One byte a texel, five levels. The largest
+of the seven heights, per stand:
+
+| form (finest texel, margin, level rule) | reaches | the gentle coast | the steep coast | the second pocket | the high lake |
+|---|---|---|---|---|---|
+| ★ half a cell, 22 texels, Vulkan (the design's form) | 86.4° | 16.8 MB | 35.0 MB | 15.8 MB | 78.8 MB |
+| half a cell, 44 texels, Vulkan | 88° | 29.2 MB | 57.8 MB | 27.3 MB | 122.2 MB |
+| half a cell, 88 texels, Vulkan | 89° | 89.1 MB | 145.0 MB | 73.8 MB | 277.0 MB |
+| a quarter cell, 52 texels, GL | 86.4° | 57.7 MB | 125.4 MB | 60.9 MB | 282.5 MB |
+| a quarter cell, 78 texels, GL | 88° | 87.5 MB | 182.6 MB | 89.0 MB | 384.0 MB |
+| a quarter cell, 156 texels, 6 levels, GL | 89° | 322.1 MB | 511.6 MB | 254.8 MB | 958.9 MB |
+
+The largest counts stand 50–500 km up (150 km on most stands): low enough for many rings, high enough for a wide view.
+At 2 km the high lake needs 47 MB in the design's form; at 8 000 km 1 MB (the far page draws nearly everything).
+
+(The gentle coast's stand sits by a face edge: 449–997 of its wanted columns lie on another face and are not counted.)
+The far page, all six faces: 11.3 MB from level 13 (the half-cell form), 45.1 MB from level 12 (the quarter-cell form).
+
+### 9.5 THE HAND-OVER (Q5)
+
+PHI-HANDOVER, a nadir view over the gentle coast from 50 to 120 km: the crisp sheet (4× MSAA of the rung-7 samples) against
+the skin differs by a mean of 0.3–1.0 % water and a p99 of 13–19 % (the design's target: p99 ≤ 50 %), while φ runs 0 → 1
+between 56 and 111 km.
+
+### 9.6 THE LID (Q2, Q3; slice K0b)
+
+On the steep coast's W4, TODAY'S FAR LAND flips its hold and flips back over two swaps: 377 columns at 13 → 14 → 15 (at
+most 3 933 m, 0.48 px, a Lambert step of 20.6 % at a 45° sun), 221 at 14 → 15 → 16 (14.3 %), 197 at 15 → 16 → 17 (8.3 %),
+90 at 16 → 17 → 18 (4.3 %): Q2's expected red, MEASURED (the second pocket alike: 845 columns, 18.3 %). THE LID has no hold
+to flip: its relief rises and falls over two swaps on 6 324 columns at 13 → 14 → 15 against today's surface's 27 145 (at
+most 3 840 m against 4 181 m) — the ordinary change of a mean over a larger footprint, which the morph carries. TOP-STEP at
+most 0.73 coarser cells (GREEN). TOP-APPROX (T~ against the exact lid): p99 47 m and at most 1 750 m = **0.107 px** at
+rung 14, 0.020 px at 15, nought from 17 — just over Q3's bar of a tenth of a pixel at rung 14, at its worst node.
+MIXED-LEVEL-NODES: 25 053 part-wet level-1 nodes on the planet, **48.9 KB** at 2 B (`n2_far_data`).
+
+### 9.7 THE PICTURES (Q1)
+
+`k0_skin_bench/`: the coverage globes at W18's seven altitudes over the steep coast and the high lake (left the skin, right
+today's box fold; flat colour, no light, no air, no far shadow); the high lakes' climb strip (frames 3 % before and after
+each far swap; top row the skin, bottom row the box fold); the far page's raw faces at level 13; the artifact's coast mask of face NegY (`mask_NegY.png`: the sea white, a lake
+grey, a pocket's floor dark red, the land black). WHAT THEY SHOW: under the
+skin a coast is a soft edge about one pixel wide and thin water is a thin tint; under the box every pixel is blue or tan,
+and pieces of the lakes change at the swaps. THE PATTERNS IN BOTH HALVES ARE THE WORLD'S, NOT THE SKIN'S: the steep
+coast's staircase, the rectangular lakes and the diagonal hatching stand in the artifact's own coast mask
+(`mask_face`): the rebound's 16 × 16-node blocks (W10), the lakes as whole node squares (W2), and the grid lean of the
+drainage (W8). W10 MEASURED (`mask_face --edges`, all six faces): 15.25 % of the 120 983 water/land edges between two
+nodes lie on a 16-node block line, against 6.25 % by chance, and the dry ground steps 74.3 m across a block line against
+44.4 m inside a block; the odd 8-node lines hold no excess (5.5 % against 6.25 %), and the 32-node lines' two phases (0 and
+16) share the excess, so the period is the rebound's 16 nodes.
+
+### 9.8 NOT RUN IN K0, AND WHY
+
+- SKIN-SEAM, CORNER-TEXELS: the bench's windows stop at a face's edge; the border through `vd_seed::seam::across` is S2's
+  (a Tier-A test there).
+- SKIN-UNIFORM, SKIN-SQUARE-AGREE: CHECK-PYRAMID-UNIFORM and CHECK-PYRAMID-BAND stand in (both exact, with controls).
+- SKIN-UV-TRI (it needs real chunk meshes: K1), SKIN-FRONT-BOUND, PHI-FRONT, SKIN-IDEAL, SUB-SAMPLE-WATER, GEOM-FLIP,
+  AIR-STEP, SKIN-MS, RECORDS-NEEDED: not built; none of them decides Q1–Q9.
+- LAKE-FLICKER.skin, FOLD-RETURN.skin, LAKE-APPEAR.skin, FAR-NO-THRESHOLD, TOP-NEST: nought by construction (AREA-NEST
+  exactly 0; no threshold on the skin's path; the lid's sums nest).
+- NEAR-SLIDE: S0's SHORE-STEP numbers stand (the sea ≤ 1.46 px, lakes ≤ 3.29 and 4.79 px). NEAR-POP: R2's.
+- TOP-EXACT: it needs the dry word (a yes to Q3).
+
+### 9.9 THE QUESTIONS AFTER K0
+
+Q1–Q8 stand as §7 asks them, with K0's numbers above; Q3's bar is crossed at rung 14 (0.107 px), so its recommended answer
+turns to YES (48.9 KB). One question is new:
+
+| # | the question | the recommended answer | its price |
+|---|---|---|---|
+| Q9 | **THE FILTER.** The skin's shader chooses its own level by the Vulkan rule and takes its own probes (an explicit level, one trilinear read per probe, N = ⌈η⌉ ≤ 16), with the design's half-cell windows? | YES: MEASURED seamless on every front and climb; the design's memory; the same picture on every GPU. | Shader work: N trilinear reads a pixel where the GPU would do the same in fixed function (1–3 at most views, 16 at the rim). The alternative: the GPU's own filter with quarter-cell windows, seamless under both published sketches but 3.6 times the memory (up to 282.5 MB over the high lake, against 78.8 MB) and still the vendor's scheme. |
+
+**Example.** A pilot 150 km over the high lakes looks across the chain of small lakes. Under the recommended form the
+lakes' coasts cost about 79 MB of windows, and every probe of every pixel reads the level the shader chose; a GPU from
+another vendor draws the same colours.
+
+**RULED (B17, 2026-09-27).** Q9: the shader chooses its own level (the Vulkan rule, its own probes) with the half-cell
+windows. Q8: the rim is sized at 86.4° now and judged in the flight. Q1–Q7 stay open: the owner discusses some first.

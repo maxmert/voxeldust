@@ -438,6 +438,30 @@ fn seam_and_corners(
             ),
         );
     }
+    // MIXED-LEVEL-NODES and TOP-BYTES (the far-water design's Q3): the level-1 nodes (2 x 2 fine
+    // nodes) that are part wet and part dry, whose dry fine nodes' mean the lid's exact form needs.
+    let mut part_wet = 0u64;
+    let mut level1 = 0u64;
+    for face in Face::ALL {
+        for cj in 0..edge / 2 {
+            for ci in 0..edge / 2 {
+                level1 += 1;
+                let mut wet = 0;
+                for (da, db) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let n = node_at(fine, face, 2 * ci + da, 2 * cj + db);
+                    wet += usize::from(nodes.water_of(n).is_some());
+                }
+                part_wet += u64::from(wet > 0 && wet < 4);
+            }
+        }
+    }
+    say(
+        out,
+        format!(
+            "CENSUS MIXED-LEVEL-NODES {part_wet} of {level1} level-1 nodes are part wet; TOP-BYTES {:.1}KB at 2 B each (the lid's dry word, the far-water design's Q3) no-band[design-D-Q3]",
+            part_wet as f64 * 2.0 / 1024.0
+        ),
+    );
     let mut coastal: Vec<String> = Vec::new();
     for face in Face::ALL {
         for (ci, cj) in [

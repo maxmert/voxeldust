@@ -197,6 +197,17 @@ pub struct NamedChoices {
     /// samples disagree (a column all wet or all dry keeps its own answer); 3 the column's own
     /// footprint, and a wet column with no wet edge neighbour at its rung is dry (no lone column).
     pub n2_fold_kernel: u8,
+    /// THE SKIN'S WINDOW (the far-water design D, slice K0): a window's finest texel is the rung's
+    /// cell over `2^skin_sub` (1 = half a cell, the design; 2 = a quarter), never finer than one
+    /// rung-F sample; and its margin on each side in finest texels.
+    pub skin_sub: u8,
+    pub skin_margin: i64,
+    /// The levels a window holds (the design: 5).
+    pub skin_levels: u8,
+    /// THE FILTER'S LEVEL RULE (the graphics specs leave it to the vendor): 0 the level of
+    /// `P_max / N` with `N = ⌈P_max / P_min⌉` probes (the GL extension's sketch); 1 the level of
+    /// `P_max / η` with `η = P_max / P_min` itself, capped at 16 (the Vulkan specification's sketch).
+    pub skin_lod: u8,
 }
 
 impl Default for NamedChoices {
@@ -239,6 +250,10 @@ impl Default for NamedChoices {
             n2_wet_strict: true,
             n2_lone_holds: true,
             n2_fold_kernel: 0,
+            skin_sub: 1,
+            skin_margin: 22,
+            skin_levels: 5,
+            skin_lod: 0,
         }
     }
 }
@@ -295,6 +310,10 @@ impl NamedChoices {
             "n2_wet_strict" => self.n2_wet_strict = f()? != 0.0,
             "n2_lone_holds" => self.n2_lone_holds = f()? != 0.0,
             "n2_fold_kernel" => self.n2_fold_kernel = (f()? as u8).min(3),
+            "skin_sub" => self.skin_sub = (f()? as u8).clamp(1, 3),
+            "skin_margin" => self.skin_margin = f()?.max(0.0) as i64,
+            "skin_levels" => self.skin_levels = (f()? as u8).clamp(3, 8),
+            "skin_lod" => self.skin_lod = (f()? as u8).min(1),
             _ => return Err(format!("no named choice `{name}`")),
         }
         Ok(())
@@ -401,6 +420,10 @@ impl NamedChoices {
             format!(
                 "N2's fold kernel = {} (under the one naming rule: 0 the column's own footprint; 1 the tent, the column and its eight neighbours at its rung weighted 1-2-1 per axis; 2 the tent only where the column's own samples disagree; 3 the own footprint with no lone wet column; ruling B15 item 1, the far lake flicker)",
                 self.n2_fold_kernel
+            ),
+            format!(
+                "the skin's window = a cell over 2^{} at its finest, a margin of {} finest texels, {} levels (the far-water design D: 1, 22 and 5); the filter's level rule {} (0 the level of P_max/N, N = ceil(P_max/P_min) probes, the GL extension's sketch; 1 the level of P_max/eta, eta the ratio itself, the Vulkan specification's sketch)",
+                self.skin_sub, self.skin_margin, self.skin_levels, self.skin_lod
             ),
             format!(
                 "N2's pocket variant = {} (0 the record; 1 a POCKET-word column exempt from the sea's side hold; 2 = 1 and the standing water's floor only where the sea governs; 3 = 1 and that floor relaxed by the sea's presence; the build design's S0 item 3, Q11)",

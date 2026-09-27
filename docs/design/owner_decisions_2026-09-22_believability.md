@@ -467,3 +467,27 @@ solution for it. No flicker or changing of the shapes between rungs at all"*.
 
 **Example.** A pilot climbs over the high lakes from 7 500 km to 60 000 km. Under this ruling the lakes' edges do not
 shimmer at any of the four swaps on the way, and no lake changes its outline when the ring behind it swaps.
+
+## B17. THE SKIN'S SHADER CHOOSES ITS OWN LEVEL; THE RIM IS SIZED AT 86.4° AND JUDGED IN FLIGHT (2026-09-27)
+
+Asked on slice K0's numbers (`docs/investigation/2026-09-26/far_water_seamless_design.md` §9; the censuses and panels
+beside it), the owner answered four questions:
+
+1. **Q9 — THE SHADER CHOOSES THE SKIN'S LEVEL ITSELF** (owner: "Shader's own level"). The skin's shader reads each probe at
+   the level of P_max / η — the Vulkan specification's sketch, η the footprint's ratio capped at 16 — and takes its own
+   probes (N = ⌈η⌉ trilinear reads at an explicit level), with the design's half-cell windows (a 22-texel margin, five
+   levels). MEASURED: all 268 front lines and both climbs at 0.000 R8 steps; 17–79 MB of windows per stand over the
+   client's own chunk set, plus an 11.3 MB far page; the same picture on every GPU. The GPU's own anisotropic filter is
+   NOT used for the skin: its level rule is the vendor's, and under the GL extension's sketch the same windows pulse up to
+   54 steps at the swaps (the quarter-cell cure costs 3.6 times the memory).
+2. **Q8 — THE RIM IS SIZED FOR θ_rim = 86.4° NOW AND JUDGED IN THE FLIGHT** (owner: "86.4° now, judge in flight"). The
+   margins stay the design's. Steps of up to 81 at a front can show in the last rows of a low pilot's skyline (88°–89°).
+   Wider margins come only if the flight shows the rim (MEASURED prices at the high lake: 88° at twice the margin,
+   122 MB; 89° at four times, 277 MB; nothing closes 90°).
+3. **Q1–Q7 STAY OPEN** (owner: "Discuss some first"): the owner discusses some of them before answering.
+4. **K0 IS COMMITTED** (owner: "Commit it").
+
+**Example.** A pilot 150 km over the high lakes looks across the chain of small lakes. The skin's shader chooses each
+probe's level itself, so a GPU from any vendor draws the same colours, and the lakes' windows cost about 79 MB. The pilot
+drops to 20 km and looks at the skyline: in its last rows a faint line can show where the 9 → 10 ring meets the next ring;
+the flight decides whether the margins grow.

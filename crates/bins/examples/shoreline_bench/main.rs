@@ -54,10 +54,16 @@ mod cost;
 mod eval;
 mod far;
 mod far_window;
+mod front;
+mod globe;
+mod lid;
 mod lines;
 mod panels;
 mod pyramid;
+mod sampler;
 mod seam;
+mod skin;
+mod skin_lines;
 mod stands;
 mod transects;
 
@@ -103,6 +109,8 @@ struct Args {
     far: u8,
     /// W-SEAM (S0 item 6): the two windows flush against the busiest coastal cube edge.
     seam: bool,
+    /// THE GLOBES (slice K0c): the whole planet's far page and the coverage pictures.
+    globes: bool,
 }
 
 fn args() -> Args {
@@ -120,6 +128,7 @@ fn args() -> Args {
         probes: Vec::new(),
         far: 1,
         seam: true,
+        globes: false,
     };
     let list: Vec<String> = std::env::args().skip(1).collect();
     let mut k = 0;
@@ -165,6 +174,10 @@ fn args() -> Args {
             "--no-far" => a.far = 0,
             "--far-only" => a.far = 2,
             "--no-seam" => a.seam = false,
+            "--globes" => a.globes = true,
+            "--no-rim-search" => {
+                front::RIM_SEARCH.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
             "--seam-only" => {
                 a.seam = true;
                 a.far = 3;
@@ -362,6 +375,8 @@ fn main() {
             Err(e) => eprintln!("shoreline_bench: --choice {pair} refused: {e}"),
         }
     }
+    // The filter's level rule is the sampler's own word for the whole run.
+    sampler::LOD_FORM.store(ch.skin_lod, std::sync::atomic::Ordering::Relaxed);
     let vars: Vec<Var> = if a.rules.is_empty() {
         Var::ALL.to_vec()
     } else {
@@ -810,6 +825,56 @@ fn main() {
         seam::run(&mut c, &world, &mut seam_pool);
         phases.push(("seam".into(), t.elapsed().as_secs_f64()));
     }
+    // THE GLOBES (slice K0c): the planet's far page and W18's seven altitudes, drawn two ways.
+    if a.globes && panels.dir.is_some() {
+        let t = Instant::now();
+        c.say("\n== THE COVERAGE GLOBES (the far-water design D, the owner's look for Q1) ==");
+        let page = globe::build_page(&mut c, &body, &nodes, &ch, f_rung, a.threads);
+        globe::raw_faces(&mut c, &mut panels, &page, 13);
+        let sea_r = body.radius_m() + artifact.sea().map_or(0.0, f64::from);
+        let n0 = f64::from(body.ladder().cells_per_edge(0));
+        for stand in stand_list
+            .iter()
+            .filter(|s| matches!(s.name, "coast" | "highlake"))
+        {
+            let at = globe::direction_of(
+                stand.face,
+                (2.0 * stand.far.0 as f64 + 1.0) / n0 - 1.0,
+                (2.0 * stand.far.1 as f64 + 1.0) / n0 - 1.0,
+            );
+            globe::globes(&mut c, &mut panels, &body, &page, sea_r, at, stand.name);
+        }
+        // THE CLIMB STRIP (the design §5.4 item 3): the 5 882 m lake's piece (rung-14 column
+        // (275, 98) of the coast stand's face), frames 3 % before and after each far swap.
+        if let Some(stand) = stand_list.iter().find(|s| s.name == "coast") {
+            let (x, y) = (
+                (275.0 * 128.0 + 64.0) * 128.0,
+                (98.0 * 128.0 + 64.0) * 128.0,
+            );
+            let at = globe::direction_of(
+                stand.face,
+                (2.0 * x + 1.0) / n0 - 1.0,
+                (2.0 * y + 1.0) / n0 - 1.0,
+            );
+            let mut frames = Vec::new();
+            for l in 13..=15u8 {
+                let front_km = 1.1 * vd_client::ladder_view::switch_m(l) / 1e3;
+                frames.extend([0.97 * front_km, 1.03 * front_km]);
+            }
+            frames.extend([45_000.0, 60_000.0]);
+            globe::climb_strip(
+                &mut c,
+                &mut panels,
+                &body,
+                &page,
+                sea_r,
+                at,
+                "highlakes",
+                &frames,
+            );
+        }
+        phases.push(("globes".into(), t.elapsed().as_secs_f64()));
+    }
     c.say("\n== THE POOLED LAKE LINE (every stand) ==");
     lines::pooled_lines(&mut c, &pool);
 
@@ -1059,6 +1124,22 @@ fn run_stand(
         if wi == 2 {
             map7_w2 = fold_map;
         }
+    }
+    // THE SKIN'S EXACTNESS on W2 (slice K0a): the one pyramid of N2's rung-F samples, and the
+    // windows of rungs 6-11 cut inside it.
+    if let Some(map) = map7_w2.as_ref() {
+        let wet: Vec<u32> = map.keys.iter().map(|k| u32::from(k[3] != 0)).collect();
+        let lake: Vec<u32> = map.keys.iter().map(|k| u32::from(k[3] > 1)).collect();
+        let base = skin::Level {
+            level: w.f_rung,
+            i0: i64::from(map.i0),
+            j0: i64::from(map.j0),
+            n: i64::from(map.n),
+            wet,
+            lake,
+        };
+        let pyr = skin::SkinPyramid::from_base(stand.face, base, 13);
+        skin_lines::exactness(c, &format!("{}.W2", stand.name), &pyr, 6..=11);
     }
     // SHORE-STEP.
     let mut summary = StandSummary::default();

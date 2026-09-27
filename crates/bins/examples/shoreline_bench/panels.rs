@@ -303,7 +303,7 @@ pub struct Panels {
 
 impl Panels {
     /// Saves an image; refused past the budget.
-    fn save(&mut self, c: &mut Census, name: &str, img: &RgbImage, caption: &str) {
+    pub fn save(&mut self, c: &mut Census, name: &str, img: &RgbImage, caption: &str) {
         let Some(dir) = self.dir.as_ref() else { return };
         let path = format!("{dir}/{name}");
         let mut bytes: Vec<u8> = Vec::new();

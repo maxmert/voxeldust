@@ -23,7 +23,9 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use vd_bins::shore_rules::{Water, fold_one_rule};
+use vd_bins::shore_rules::{WORD_POCKET, Water, fold_one_rule, length_of, metres};
+use vd_recipe::terrace::terrace;
+use vd_terrain::artifact::node_at;
 
 use crate::census::{Census, val};
 use crate::eval::{self, Caches, Checks, Fold, NVAR, RungOut, Var};
@@ -176,6 +178,78 @@ pub fn run(c: &mut Census, w: &World, stand: &Stand) {
         q_differ == 0 && built_b.mixed == built.mixed,
     );
     drop(pyr_b);
+    // THE SKIN'S EXACTNESS on W4 (slice K0a): the one pyramid from the quarter records (level 12)
+    // up to the top rung, and the rung-13 windows cut inside it.
+    {
+        let base = crate::skin::Level {
+            level: pyr.q_rung,
+            i0: i64::from(pyr.q0.0),
+            j0: i64::from(pyr.q0.1),
+            n: i64::from(pyr.nq),
+            wet: pyr.quarters.iter().map(|q| q.wet).collect(),
+            lake: pyr.quarters.iter().map(|q| q.lake).collect(),
+        };
+        let skin = crate::skin::SkinPyramid::from_base(win.face, base, FAR_LAST);
+        crate::skin_lines::exactness(c, &format!("{}.W4", stand.name), &skin, 13..=13);
+        // SKIN-FRONT (slice K0c): every front 6 -> 7 ... 17 -> 18 over this window's cells.
+        let sea_r = w.body.radius_m() + w.artifact.sea().map_or(0.0, f64::from);
+        let mut sources = crate::front::Sources::new(
+            w.body,
+            win.face,
+            w.f_rung,
+            &pyr,
+            &skin,
+            w.ch.skin_sub,
+            w.ch.skin_margin,
+            w.ch.skin_levels,
+        );
+        let t = std::time::Instant::now();
+        crate::front::front_lines(c, &format!("{}.W4", stand.name), &mut sources, sea_r, 6);
+        c.say(format!(
+            "   SKIN-FRONT read in {:.1} s",
+            t.elapsed().as_secs_f64()
+        ));
+        // SKIN-TRACK (slice K0c): the design's climbs, each over its own stand's window.
+        let t = std::time::Instant::now();
+        let f_cell = f64::from(1u32 << w.f_rung);
+        let climbs: Vec<crate::front::Climb> = match stand.name {
+            // The 5 882 m lake's measured piece: rung-14 column (275, 98) of this window's face.
+            "coast" => vec![crate::front::Climb {
+                name: "highlakes-piece-7500-60000km",
+                at: (275.0 * 128.0 + 64.0, 98.0 * 128.0 + 64.0),
+                h0: 7.5e6,
+                h1: 6.0e7,
+                half: 16,
+                step: 2,
+            }],
+            "gentle" => vec![crate::front::Climb {
+                name: "gentle-coast-60-1400km",
+                at: (stand.far.0 as f64 / f_cell, stand.far.1 as f64 / f_cell),
+                h0: 6.0e4,
+                h1: 1.4e6,
+                half: 16,
+                step: 2,
+            }],
+            _ => Vec::new(),
+        };
+        for climb in &climbs {
+            crate::front::track_lines(c, &format!("{}.W4", stand.name), &mut sources, sea_r, climb);
+        }
+        if !climbs.is_empty() {
+            c.say(format!(
+                "   SKIN-TRACK read in {:.1} s",
+                t.elapsed().as_secs_f64()
+            ));
+        }
+        // PHI-HANDOVER (Q5) over the gentle coast; SKIN-MB (Q8) on every window.
+        if stand.name == "gentle" {
+            let at = (stand.far.0 as f64 / f_cell, stand.far.1 as f64 / f_cell);
+            crate::front::handover_lines(c, &format!("{}.W4", stand.name), &mut sources, sea_r, at);
+        }
+        crate::front::memory_lines(c, &format!("{}.W4", stand.name), &mut sources);
+        let at = (stand.far.0 as f64 / f_cell, stand.far.1 as f64 / f_cell);
+        crate::front::ladder_memory_lines(c, &format!("{}.W4", stand.name), &sources, w.cache, at);
+    }
     fold_check(
         c,
         w,
@@ -359,6 +433,7 @@ pub fn run(c: &mut Census, w: &World, stand: &Stand) {
     }
     let sea = w.artifact.sea().map_or(f64::NAN, f64::from);
     swap_lines(c, stand.name, &far, &vars, sea);
+    lid_lines(c, w, stand, &win, &far, sea);
     flicker_examples(
         c,
         &cross[Var::N2.idx()],
@@ -715,4 +790,256 @@ fn flicker_examples(
             key_in(keys_r0, r3, a >> 2, b >> 2)
         ));
     }
+}
+
+/// ★ THE LID'S LINES on W4 (slice K0b; the far-water design §5.2 group 6): today's far land under
+/// N2 against the lid built from the rows.
+/// * HOLD-RETURN — columns whose hold (dry, over the sea, its raw ground under it) flips at a swap
+///   and flips back at the next: the land shows, hides and shows; the largest jump in metres, in
+///   pixels at the swap, and the Lambert step at a 45° sun.
+/// * LID-RETURN — the same walk on the lid: a column whose height rises and falls back by more than
+///   the extractor's step at two swaps in a row (the relief's own wobble, beside HOLD-RETURN).
+/// * TOP-STEP — the finer surface against the coarser lid over each coarser column (at 13 → 14 the
+///   finer is N2's rung-13 surface), in coarser cells: the handover's step (T7: at most one).
+/// * TOP-APPROX — the interim lid T~ (the shipped level-1 word for a part-wet node) against the
+///   exact lid, in metres and in pixels at the swap.
+/// * POCKET-BASIN — level nodes all of a pocket's dry floor whose lid stands over their own
+///   terraced mean; control: a lid held over the sea's level.
+/// * MIXED-LEVEL-NODES — the part-wet level-1 nodes of the window (the dry word's rows).
+fn lid_lines(
+    c: &mut Census,
+    w: &World,
+    stand: &Stand,
+    win: &stands::Window,
+    far: &[FarRung],
+    sea: f64,
+) {
+    let fine = w.body.macro_lattice().expect("a lattice");
+    let Some(ctx) = w.ctx(win.face, FAR_FINE, false) else {
+        return;
+    };
+    let charter = ctx.reader.charter;
+    let (i0, j0, n) = win.at(FAR_FINE);
+    let lid = crate::lid::Lid::from_rows(
+        w.nodes,
+        w.artifact,
+        &fine,
+        win.face,
+        (i64::from(i0), i64::from(j0), i64::from(n)),
+        FAR_LAST - FAR_FINE,
+    );
+    let cell = |r: u8| f64::from(vd_seed::ladder::cell_m(r));
+    let n2 = 1usize; // FarRung's second slot is N2.
+    // The drawn surfaces per rung: rung 13 from N2, rungs 14..18 today's N2 and the lid.
+    let height_today = |r: u8, i: i64, j: i64| -> Option<(f64, bool)> {
+        let fr = far.iter().find(|f| f.rung == r)?;
+        let col = fr.at(i as i32, j as i32)?[n2];
+        let held = col.key == 0 && f64::from(col.s) > sea && f64::from(col.h_raw) < sea;
+        Some((f64::from(col.s), held))
+    };
+    let height_lid = |r: u8, i: i64, j: i64| -> Option<f64> {
+        if r == FAR_FINE {
+            height_today(r, i, j).map(|(s, _)| s)
+        } else {
+            lid.height(&charter, r - FAR_FINE, i, j, false)
+        }
+    };
+    let lambert = |jump: f64, width: f64| -> f64 {
+        let tilt = (jump / width).atan();
+        let sun = std::f64::consts::FRAC_PI_4;
+        100.0 * ((sun - tilt).cos() / sun.cos() - 1.0).abs()
+    };
+    // HOLD-RETURN and LID-RETURN, per swap pair r -> r+1 -> r+2.
+    for r in FAR_FINE..FAR_LAST.saturating_sub(1) {
+        let Some(fr) = far.iter().find(|f| f.rung == r) else {
+            continue;
+        };
+        let (mut returns, mut max_jump, mut lid_returns, mut lid_max) =
+            (0usize, 0.0f64, 0usize, 0.0f64);
+        let (mut today_returns, mut today_max) = (0usize, 0.0f64);
+        let q = cell(r + 1) / 128.0;
+        for b in 0..fr.n as i64 {
+            for a in 0..fr.n as i64 {
+                let (i, j) = (i64::from(fr.i0) + a, i64::from(fr.j0) + b);
+                let (Some((s0, h0)), Some((s1, h1)), Some((s2, h2))) = (
+                    height_today(r, i, j),
+                    height_today(r + 1, i >> 1, j >> 1),
+                    height_today(r + 2, i >> 2, j >> 2),
+                ) else {
+                    continue;
+                };
+                if h0 != h1 && h2 == h0 {
+                    returns += 1;
+                    max_jump = max_jump.max((s1 - s0).abs()).max((s2 - s1).abs());
+                }
+                let (e1, e2) = (s1 - s0, s2 - s1);
+                if e1.abs() > q && e2.abs() > q && e1.signum() != e2.signum() {
+                    today_returns += 1;
+                    today_max = today_max.max(e1.abs().min(e2.abs()));
+                }
+                let (Some(t0), Some(t1), Some(t2)) = (
+                    height_lid(r, i, j),
+                    height_lid(r + 1, i >> 1, j >> 1),
+                    height_lid(r + 2, i >> 2, j >> 2),
+                ) else {
+                    continue;
+                };
+                let (d1, d2) = (t1 - t0, t2 - t1);
+                if d1.abs() > q && d2.abs() > q && d1.signum() != d2.signum() {
+                    lid_returns += 1;
+                    lid_max = lid_max.max(d1.abs().min(d2.abs()));
+                }
+            }
+        }
+        let w1 = cell(r + 1);
+        c.reading(
+            &format!(
+                "HOLD-RETURN.{}.W4.N2.r{r:02}-r{:02}-r{:02}",
+                stand.name,
+                r + 1,
+                r + 2
+            ),
+            &format!(
+                "{returns}cols/max{max_jump:.0}m/{:.2}px/lambert{:.1}%",
+                max_jump / cell(r),
+                lambert(max_jump, w1)
+            ),
+            "today's-far-land:the-hold-flips-and-flips-back[design-D-Q2]",
+        );
+        c.reading(
+            &format!("LID-RETURN.{}.W4.r{r:02}-r{:02}-r{:02}", stand.name, r + 1, r + 2),
+            &format!(
+                "{lid_returns}cols/max{lid_max:.0}m(q{q:.0}m);today's-surface:{today_returns}cols/max{today_max:.0}m"
+            ),
+            "the-relief's-up-and-down-over-two-swaps:the-lid-beside-today's-N2[design-D-Q2]",
+        );
+    }
+    // TOP-STEP at every swap 13 -> 14 ... 17 -> 18.
+    for r in FAR_FINE..FAR_LAST {
+        let Some(coarse_level) = lid.level(r + 1 - FAR_FINE) else {
+            continue;
+        };
+        let mut steps: Vec<f64> = Vec::new();
+        for b in 0..coarse_level.n {
+            for a in 0..coarse_level.n {
+                let (ci, cj) = (coarse_level.i0 + a, coarse_level.j0 + b);
+                let Some(tc) = height_lid(r + 1, ci, cj) else {
+                    continue;
+                };
+                for (da, db) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    if let Some(tf) = height_lid(r, 2 * ci + da, 2 * cj + db) {
+                        steps.push((tc - tf).abs() / cell(r + 1));
+                    }
+                }
+            }
+        }
+        steps.sort_by(f64::total_cmp);
+        let q = |p: f64| {
+            steps
+                .get(((steps.len() as f64 * p) as usize).min(steps.len().saturating_sub(1)))
+                .copied()
+                .unwrap_or(f64::NAN)
+        };
+        let max = steps.last().copied().unwrap_or(f64::NAN);
+        c.judged(
+            &format!("TOP-STEP.{}.W4.r{r:02}-r{:02}", stand.name, r + 1),
+            &format!(
+                "p99{:.3}/max{max:.3}coarser-cells/{}pairs",
+                q(0.99),
+                steps.len()
+            ),
+            "max<=1-coarser-cell[T7-rule-2]",
+            max <= 1.0,
+        );
+    }
+    // TOP-APPROX: T~ against T.
+    for k in 1..=(FAR_LAST - FAR_FINE) {
+        let Some(lv) = lid.level(k) else {
+            continue;
+        };
+        let mut diffs: Vec<f64> = Vec::new();
+        let mut mixed = 0usize;
+        for b in 0..lv.n {
+            for a in 0..lv.n {
+                let (i, j) = (lv.i0 + a, lv.j0 + b);
+                mixed += usize::from(lid.mixed(k, i, j) == Some(true));
+                if let (Some(t), Some(tt)) = (
+                    lid.height(&charter, k, i, j, false),
+                    lid.height(&charter, k, i, j, true),
+                ) {
+                    diffs.push((tt - t).abs());
+                }
+            }
+        }
+        diffs.sort_by(f64::total_cmp);
+        let q = |p: f64| {
+            diffs
+                .get(((diffs.len() as f64 * p) as usize).min(diffs.len().saturating_sub(1)))
+                .copied()
+                .unwrap_or(f64::NAN)
+        };
+        let max = diffs.last().copied().unwrap_or(f64::NAN);
+        let r = FAR_FINE + k;
+        c.reading(
+            &format!("TOP-APPROX.{}.W4.r{r:02}", stand.name),
+            &format!(
+                "p99{:.1}m/max{max:.1}m/{:.3}px({}nodes,{mixed}part-wet)",
+                q(0.99),
+                max / cell(r),
+                diffs.len()
+            ),
+            "the-interim-T~-against-the-exact-lid[design-D-Q3]",
+        );
+    }
+    // POCKET-BASIN, and its control.
+    let (mut pocket_nodes, mut lifted, mut control) = (0usize, 0usize, 0usize);
+    if let Some(l1) = lid.level(1) {
+        for b in 0..l1.n {
+            for a in 0..l1.n {
+                let (i, j) = (l1.i0 + a, l1.j0 + b);
+                let all_pocket = [(0, 0), (1, 0), (0, 1), (1, 1)].iter().all(|&(da, db)| {
+                    let node = node_at(&fine, win.face, 2 * i + da, 2 * j + db);
+                    w.nodes.word[node as usize] == WORD_POCKET
+                });
+                if !all_pocket {
+                    continue;
+                }
+                pocket_nodes += 1;
+                let Some(t) = lid.height(&charter, 1, i, j, false) else {
+                    continue;
+                };
+                let mut z = 0i64;
+                for (da, db) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let node = node_at(&fine, win.face, 2 * i + da, 2 * j + db);
+                    z += i64::from(w.nodes.z_m[node as usize]);
+                }
+                let r = charter.radius;
+                let own = metres(terrace(&charter.terrace, r + length_of(z as f64 / 4.0)) - r);
+                lifted += usize::from(t > own + 0.5);
+                control += usize::from(t.max(sea) > own + 0.5);
+            }
+        }
+    }
+    c.judged(
+        &format!("POCKET-BASIN.{}.W4", stand.name),
+        &format!("{lifted}of{pocket_nodes}pocket-level-1-nodes-lifted(control-held-over-the-sea:{control})"),
+        "0,control>0[design-D§2.6;ruling-B7]",
+        lifted == 0 && (pocket_nodes == 0 || control > 0),
+    );
+    let mut part_wet = 0usize;
+    if let Some(l1) = lid.level(1) {
+        for b in 0..l1.n {
+            for a in 0..l1.n {
+                part_wet += usize::from(lid.mixed(1, l1.i0 + a, l1.j0 + b) == Some(true));
+            }
+        }
+    }
+    c.reading(
+        &format!("MIXED-LEVEL-NODES.{}.W4", stand.name),
+        &format!(
+            "{part_wet}part-wet-level-1-nodes/{:.1}KB-at-2B",
+            part_wet as f64 * 2.0 / 1024.0
+        ),
+        "the-dry-word's-rows-in-this-window[design-D-Q3]",
+    );
 }
