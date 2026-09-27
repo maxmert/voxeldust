@@ -491,3 +491,37 @@ beside it), the owner answered four questions:
 probe's level itself, so a GPU from any vendor draws the same colours, and the lakes' windows cost about 79 MB. The pilot
 drops to 20 km and looks at the skyline: in its last rows a faint line can show where the 9 → 10 ring meets the next ring;
 the flight decides whether the margins grow.
+
+## B18. THE LID AND ITS DRY WORD, THE NEAR SLIDES, THE HAND-OVER, SLICE 0b AND THE RAMP (2026-09-27)
+
+The owner first asked for plain explanations (*"Q2 - I don't want anything, that will not be believable experience -
+when we will have long shadows all flat will not cast anything. So I'd have heights at any rung"*; *"Q3 - don't
+understand what that means"*; *"Q4 - … will it be more believable experience?"*; *"Q5 - no jumps or flicker between
+rungs"*; *"Q6 - only if that will not hurt realistic experience"*; *"Q7 - why we have performance degradation?"*). The
+answers were MEASURED where a number was owed (LID-RELIEF, the design §9.6), and the owner then ruled:
+
+1. **Q2 — THE LID, YES.** From rung 14 a far column's height is the mean of what a pilot sees over it. It IS a height at
+   every rung: MEASURED on the four stands, a dry column keeps its own ground (within 6 m at rungs 16–18; where rungs
+   14–15 differ by up to 697 m it is today's rule that moves a dry column near a lake off its ground), and the relief —
+   the mean height step between neighbouring columns, which the light and the far shadows read — is today's within
+   1–3 % at every far rung. Only a column that is part water and part land stands between the two instead of jumping.
+2. **Q3 — THE DRY WORD SHIPS (SL6 yes).** Each part-wet level-1 node's dry-node mean height, 25 053 numbers, 48.9 KB,
+   with the planet's head in the band's arm: the lid stands on the land's own height at a coast (without it: 47 m
+   typical, 1 750 m at the worst node).
+3. **Q4 — R2 NOW; THE SLIDES JUDGED IN THE FLIGHT.** A near shore slides with its ground across each band (at most
+   1.46 px for the sea, 3.29 and 4.79 px for lakes) instead of popping at the front; the exact nested line (design B)
+   is designed only if the flight shows the slides.
+4. **Q5 — THE HAND-OVER BY THE PIXEL'S SIZE, YES** (the owner's condition: no jump or flicker between rungs — met: no
+   rung decides it; MEASURED a p99 change of 13–19 % over the whole 56–111 km band, gradual).
+5. **Q6 — SLICE 0b RETIRES** (the owner's condition: no loss of realism — met: the skin draws narrow water by its share
+   at every distance, AREA-NEST exactly 0 at every far swap); B13 item 3's crossing-byte question is withdrawn.
+6. **Q7 — THE ARRIVAL RAMP IS 0.5 s.** A late chunk (streaming: at 150 km over the plain the client wants 3 846 chunks,
+   a rung-9 chunk takes a median of 11 ms on one thread) enters on its stand-in's state and rises into place over half
+   a second.
+7. **Q1 — THE FAR LOOK, YES** (asked last, on the globes and the climb strip): past 111 km a coast is a soft edge about
+   one pixel wide, and water thinner than a pixel is a pale tint that follows the pixel's size. Design D is ruled whole;
+   NEXT: slice R1 (the renderer's own pops) on the owner's word.
+
+**Example.** A pilot 20 000 km over the steep coast sees the far mountains at their heights, so their long shadows fall
+as the ground's own steps say; the coast's columns blend the sea and the land at their true heights; and when the pilot
+dives, each late chunk rises into place over half a second instead of jumping.

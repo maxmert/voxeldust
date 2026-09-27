@@ -184,6 +184,14 @@ impl Lid {
         Some((lv.sum_w[x] as f64 + dry) / n as f64)
     }
 
+    /// The wet fine nodes under level-`k` node `(i, j)`.
+    #[must_use]
+    pub fn wet_count(&self, k: u8, i: i64, j: i64) -> Option<u32> {
+        let lv = self.level(k)?;
+        let x = lv.idx(i, j)?;
+        Some(lv.n_wet[x])
+    }
+
     /// Whether level-`k` node `(i, j)` is part wet and part dry.
     #[must_use]
     pub fn mixed(&self, k: u8, i: i64, j: i64) -> Option<bool> {

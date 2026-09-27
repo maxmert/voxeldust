@@ -53,6 +53,8 @@ struct FarCol {
     read: bool,
     key: u32,
     s: f32,
+    /// The standing water's level (NaN for none).
+    l: f32,
     h_raw: f32,
     b: f32,
 }
@@ -84,6 +86,7 @@ impl FarRung {
                                 read: true,
                                 key: d.wet_key(),
                                 s: d.s,
+                                l: d.l,
                                 h_raw: o.shared.h_raw,
                                 b: o.shared.b,
                             }
@@ -912,6 +915,100 @@ fn lid_lines(
                 "{lid_returns}cols/max{lid_max:.0}m(q{q:.0}m);today's-surface:{today_returns}cols/max{today_max:.0}m"
             ),
             "the-relief's-up-and-down-over-two-swaps:the-lid-beside-today's-N2[design-D-Q2]",
+        );
+    }
+    // LID-RELIEF (the owner's question on Q2, 2026-09-27: "I'd have heights at any rung"): at every
+    // far rung, the lid against today's far ground on the all-dry columns, and the relief both keep —
+    // the mean height step between neighbouring columns, which the light and the far shadows read.
+    for r in FAR_FINE + 1..=FAR_LAST {
+        let k = r - FAR_FINE;
+        let Some(fr) = far.iter().find(|f| f.rung == r) else {
+            continue;
+        };
+        let (mut dry, mut dry_over, mut dry_max, mut held_max, mut held_n) =
+            (0usize, 0usize, 0.0f64, 0.0f64, 0usize);
+        // [all-dry pairs, pairs with water]: Σ|Δ today|, Σ|Δ lid|, pairs.
+        let mut step = [[0.0f64; 3]; 2];
+        // Today's VISIBLE surface: the water's level where today draws water, else the ground.
+        let at = |i: i64, j: i64| -> Option<(f64, f64, bool, bool)> {
+            let (s, held) = height_today(r, i, j)?;
+            let col = far.iter().find(|f| f.rung == r)?.at(i as i32, j as i32)?[n2];
+            let seen = if col.key != 0 && !col.l.is_nan() {
+                f64::from(col.l)
+            } else {
+                s
+            };
+            let t = lid.height(&charter, k, i, j, false)?;
+            Some((seen, t, lid.wet_count(k, i, j)? == 0, held))
+        };
+        for b in 0..fr.n as i64 {
+            for a in 0..fr.n as i64 {
+                let (i, j) = (i64::from(fr.i0) + a, i64::from(fr.j0) + b);
+                let Some((s0, t0, d0, h0)) = at(i, j) else {
+                    continue;
+                };
+                if d0 {
+                    dry += 1;
+                    let e = (t0 - s0).abs();
+                    if h0 {
+                        held_n += 1;
+                        held_max = held_max.max(e);
+                    } else {
+                        dry_max = dry_max.max(e);
+                        dry_over += usize::from(e > 1.0);
+                    }
+                }
+                for (di, dj) in [(1i64, 0i64), (0, 1)] {
+                    let Some((s1, t1, d1, _)) = at(i + di, j + dj) else {
+                        continue;
+                    };
+                    let slot = usize::from(!(d0 && d1));
+                    step[slot][0] += (s1 - s0).abs();
+                    step[slot][1] += (t1 - t0).abs();
+                    step[slot][2] += 1.0;
+                }
+            }
+        }
+        // The worst all-dry columns, for the reading's own cause.
+        if r <= FAR_FINE + 2 {
+            let mut worst: Vec<(f64, i64, i64)> = Vec::new();
+            for b in 0..fr.n as i64 {
+                for a in 0..fr.n as i64 {
+                    let (i, j) = (i64::from(fr.i0) + a, i64::from(fr.j0) + b);
+                    if let Some((s0, t0, true, _)) = at(i, j) {
+                        worst.push(((t0 - s0).abs(), i, j));
+                    }
+                }
+            }
+            worst.sort_by(|x, y| y.0.total_cmp(&x.0));
+            for &(e, i, j) in worst.iter().take(4) {
+                let Some(col) = fr.at(i as i32, j as i32).map(|c| c[n2]) else {
+                    continue;
+                };
+                let t = lid.height(&charter, k, i, j, false).unwrap_or(f64::NAN);
+                let wet_nb = [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)]
+                    .iter()
+                    .filter(|(di, dj)| lid.wet_count(k, i + di, j + dj).is_some_and(|w| w > 0))
+                    .count();
+                c.say(format!(
+                    "   LID-RELIEF worst dry column r{r} ({i}, {j}): |lid - today| {e:.1} m; today s {:.1} l {:.1} key {} h_raw {:.1} b {:.1}; the lid {t:.1}; {wet_nb} of 4 neighbours hold water",
+                    col.s, col.l, col.key, col.h_raw, col.b
+                ));
+            }
+        }
+        let mean = |k: usize, v: usize| step[k][v] / step[k][2].max(1.0);
+        c.reading(
+            &format!("LID-RELIEF.{}.W4.r{r:02}", stand.name),
+            &format!(
+                "all-dry:{dry}cols,the-lid-minus-today's-far-ground:max{dry_max:.1}m({dry_over}over1m),today-held-over-the-sea:{held_n}cols-max{held_max:.1}m;the-mean-step-between-neighbours-of-the-visible-surface:all-dry-pairs-today{:.1}m/lid{:.1}m({:.0}pairs),pairs-with-water-today{:.1}m/lid{:.1}m({:.0}pairs)",
+                mean(0, 0),
+                mean(0, 1),
+                step[0][2],
+                mean(1, 0),
+                mean(1, 1),
+                step[1][2]
+            ),
+            "the-lid-keeps-the-far-relief[design-D-Q2;the-owner's-question]",
         );
     }
     // TOP-STEP at every swap 13 -> 14 ... 17 -> 18.

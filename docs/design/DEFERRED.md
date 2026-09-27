@@ -10215,6 +10215,9 @@ updated in the same change as the work, deleted when done). The interims named h
   rung 10 under N1, and vanishes under N2's band. A majority fold can only flicker at that width. WHERE: the fold
   (`crates/bins/src/shore_rules.rs::fold`), later the pyramid (`terrain/src/artifact.rs`). WHEN: the bench's slice 0b — V's
   per-water fold with a crossing byte per mixed edge, AREA-NEST and the SL6 sizes (new data: the owner's question).
+  ★ SLICE 0b RETIRED BY RULING B18 (2026-09-27): the far-water skin draws narrow water by its share at every distance
+  (K0 MEASURED: AREA-NEST exactly 0 at every far swap), so no fold decides it; this entry closes when the skin is built
+  (S4).
   MEASURED AT THE FAR RUNGS TOO (2026-09-26, S0 item 5, the build design §10): under the sample count pyramid and the one
   naming rule a big lake's ragged edge flickers in one-column fragments across the far swaps — LAKE-FLICKER at rung 14
   260 of 693 bodies on the steep coast's 8 300 km window and 531 of 1 211 on the high lake's, against today's rule's 53 of
@@ -10242,8 +10245,9 @@ updated in the same change as the work, deleted when done). The interims named h
   design's windows pulse up to 54 steps at the swaps and a quarter-cell texel cures it at 3.6 times the memory (283 MB over
   the high lake); under the Vulkan sketch they are seamless — the shader's own level and probes take the vendor out of the
   picture (the new Q9). RULED B17 (2026-09-27): the shader's own level with the half-cell windows (Q9); THE RIM STAYS
-  sized at 86.4° and is judged in the flight (Q8) — this entry holds the rim until that flight. WHEN: the flight after S4
-  (the owner's look); Q1–Q7 still open.
+  sized at 86.4° and is judged in the flight (Q8) — this entry holds the rim until that flight. RULED B18: the
+  resolution floor accepted with the hand-over (Q5); design B's exact nested near line waits on R2's flight (Q4); the
+  lake channel still waits for 8o. WHEN: the flight after S4 (the owner's look).
 - 🟥 **THE FINE OCTAVES STAND ON A 572 m LIFT** (measured 2026-09-26 by the shoreline bench, status §8e): the ridged fine
   octaves' mean at share one is 571.8 m (rungs 0–5; 513 m at rung 7, 224 m at rung 9, nought from rung 10), so the drawn land by
   every water stands `m × 572` m over the ground the solve placed the water against — 200 m on the gentle coast. Every shore

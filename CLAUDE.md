@@ -72,8 +72,12 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     ★ B17 (2026-09-27, on slice K0's numbers, the design §9): Q9 THE SHADER CHOOSES THE SKIN'S LEVEL ITSELF (the Vulkan
     rule, the level of P_max/η, and its own probes) with the design's half-cell windows — MEASURED 0 steps at every front
     and climb, 17–79 MB of windows, the same picture on every GPU; the GPU's own anisotropic filter is not used for the
-    skin. Q8 THE RIM IS SIZED AT 86.4° NOW and judged in the flight (wider margins only if the flight shows it). Q1–Q7
-    are OPEN: the owner discusses some first. K0 committed.
+    skin. Q8 THE RIM IS SIZED AT 86.4° NOW and judged in the flight (wider margins only if the flight shows it). K0
+    committed. ★ B18 (2026-09-27, after plain answers): Q2 THE LID YES (a height at every rung — MEASURED: dry columns
+    keep their ground, the relief within 1–3 % of today's); Q3 THE DRY WORD SHIPS (SL6 yes, 48.9 KB); Q4 R2 NOW, the
+    near slides judged in the flight; Q5 the hand-over by the pixel's size (no rung decides it); Q6 SLICE 0b RETIRES;
+    Q7 the arrival ramp 0.5 s; Q1 THE FAR LOOK YES (a soft far coast, sub-pixel water a tint). Design D ruled whole;
+    NEXT slice R1 (the renderer's own pops).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

@@ -2,8 +2,8 @@
 
 **★ SLICE K0 MEASURED (2026-09-27): §9.** Every judged line of the bench is green in the design's own form once the
 shader chooses its own level by the Vulkan rule; under the GL rule the window needs a quarter-cell texel. A new question,
-Q9 (the filter), and Q3's answer turns to yes (§9.9). RULED B17: the shader's own level; the rim at 86.4°, judged in
-flight; Q1–Q7 open.
+Q9 (the filter), and Q3's answer turns to yes (§9.9). RULED B17 and B18: the shader's own level; the rim at 86.4°,
+judged in flight; the lid and its dry word; R2 now; the hand-over; slice 0b retired; the ramp 0.5 s; the far look.
 
 **What this file is.** A DESIGN. It changes no source file and no world file. It answers ruling B16
 (`docs/design/owner_decisions_2026-09-22_believability.md`, B16): *"We need seamless experience - no flicker at all
@@ -743,8 +743,8 @@ second pocket and the high lake. `crates/bins/examples/mask_face.rs` reads the a
 beside this note: `k0_skin_half_cell_census.txt` (the recommended form: half a cell, the Vulkan level rule, with the
 rim's search), `k0_skin_half_cell_gl_census.txt` (the same windows under the GL level rule),
 `k0_skin_quarter_cell_census.txt` (the quarter cell under the GL level rule, with the rim's search),
-`k0_skin_panels_census.txt` (the panels, their captions and the memory prices) and `k0_mask_edges.txt` (W10's block
-lines); the panels in `k0_skin_bench/`.
+`k0_skin_panels_census.txt` (the panels, their captions and the memory prices), `k0_lid_relief_census.txt` (the lid's
+heights against today's) and `k0_mask_edges.txt` (W10's block lines); the panels in `k0_skin_bench/`.
 
 ### 9.1 The judged lines — all GREEN on the four stands, in the recommended form
 
@@ -847,6 +847,21 @@ most 0.73 coarser cells (GREEN). TOP-APPROX (T~ against the exact lid): p99 47 m
 rung 14, 0.020 px at 15, nought from 17 — just over Q3's bar of a tenth of a pixel at rung 14, at its worst node.
 MIXED-LEVEL-NODES: 25 053 part-wet level-1 nodes on the planet, **48.9 KB** at 2 B (`n2_far_data`).
 
+**LID-RELIEF — THE LID IS A HEIGHT AT EVERY RUNG** (measured after the owner's word on Q2, *"I'd have heights at any
+rung"*; `k0_lid_relief_census.txt`, the four stands, rungs 14–18):
+- On the all-dry columns of rungs 16–18 the lid equals today's far ground within 6 m (the floored words' rounding).
+- At rungs 14–15, 0.2–5 % of the all-dry columns differ, by up to 697 m. In every column printed it is TODAY's rule that
+  moves a dry column near a lake away from its own ground, and the lid that stays on it: rung-14 column (502, 24) of the
+  steep coast has its ground at 4 505 m, today draws it at 3 935 m, and the lid at 4 505.8 m. Today also lifts a few
+  pocket-floor columns over the sea (up to 1 729 m at rung 18); the lid keeps them as a basin.
+- THE RELIEF — the mean height step between neighbouring columns of the visible surface (the water's level where water
+  is drawn), which the light and the far shadows read — is today's within 1–3 % at every far rung: on dry pairs 70.8 →
+  70.7 m at rung 14 and 367.7 → 367.7 m at rung 18 (the steep coast); on pairs with water 4.7 → 5.0 m and 152.8 →
+  151.0 m.
+
+So the lid flattens nothing: a far mountain keeps its height and its steps at every rung, and only a column that is part
+water and part land stands between the two instead of jumping at each swap.
+
 ### 9.7 THE PICTURES (Q1)
 
 `k0_skin_bench/`: the coverage globes at W18's seven altitudes over the steep coast and the high lake (left the skin, right
@@ -888,4 +903,9 @@ lakes' coasts cost about 79 MB of windows, and every probe of every pixel reads 
 another vendor draws the same colours.
 
 **RULED (B17, 2026-09-27).** Q9: the shader chooses its own level (the Vulkan rule, its own probes) with the half-cell
-windows. Q8: the rim is sized at 86.4° now and judged in the flight. Q1–Q7 stay open: the owner discusses some first.
+windows. Q8: the rim is sized at 86.4° now and judged in the flight.
+
+**RULED (B18, 2026-09-27, after plain answers and LID-RELIEF).** Q2: the lid, yes. Q3: the dry word ships (48.9 KB).
+Q4: R2 now; the slides are judged in the flight, and the exact nested line waits on that. Q5: the hand-over by the
+pixel's size. Q6: slice 0b retires. Q7: the ramp is 0.5 s. Q1: the far look, yes. Design D is ruled whole; next
+slice R1.
