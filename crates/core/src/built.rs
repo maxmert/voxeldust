@@ -19,7 +19,7 @@ use crate::fence::Fence;
 use crate::geometry::Boundary;
 use crate::ids::AccountId;
 use crate::pose::RealmId;
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 use serde::{Deserialize, Serialize};
 
 /// Which design a hull was built from. A shipyard prices from it and a repair rebuilds from it.
@@ -96,6 +96,16 @@ pub struct Berth {
     /// ★ **ONLY WHERE IT STARTS.** A driven child's placement is authored every tick from the pushes it
     /// states, so this is the hull's berth and nothing more.
     pub offset_m: DVec3,
+    /// ★ HOW THE PARENT PARKED IT (2026-09-27): the child's orientation in the parent's own frame at
+    /// the berth — the attitude it starts in, written with the offset and, like the offset, never by a
+    /// tick. A row written before this existed has none, and reads as the parent's own axes, which is
+    /// what every hull was parked in until then.
+    ///
+    /// **Example.** A shipyard parks a hull on a plain 1.4° south of the home planet's equator. Its up
+    /// is the ground's vertical and its nose points along the pilot's heading; without a facing it
+    /// would stand in the planet's axes, rolled about 127° about its nose (MEASURED on the moving-eye
+    /// gate's solved stand), and a yaw would turn it about a nearly horizontal axis.
+    pub facing: DQuat,
     /// The child's box, as the parent holds it — a READING of what the child authored, never a second
     /// opinion. Containment and the interest radius both need it before the child is running.
     pub bound: Boundary,
@@ -123,8 +133,11 @@ pub struct Berth {
 ///
 /// Damage survives, because putting a hull away is a commit.
 ///
-/// Absent for the same reason: velocity, facing, who is aboard, fuel, and which machine runs it. The
-/// last of those is the directory's business, and the directory already forgets it when a realm stops.
+/// Absent for the same reason: velocity, the LIVE facing, who is aboard, fuel, and which machine runs it.
+/// The last of those is the directory's business, and the directory already forgets it when a realm
+/// stops. (A berth's `facing` is not the live one: it is the attitude the hull was parked in, written
+/// when it is built, stored or moved home, exactly like the offset — so a hull that returns to its
+/// berth returns to how it was parked, never to how it last flew.)
 pub const WHY_NO_POSITION: () = ();
 
 #[cfg(test)]
@@ -135,7 +148,7 @@ mod tests {
     use crate::geometry::Boundary;
     use crate::ids::{AccountId, EntityId};
     use crate::pose::RealmId;
-    use glam::DVec3;
+    use glam::{DQuat, DVec3};
 
     fn a_ship() -> RealmId {
         RealmId::Ship(EntityId::pack(EntityKind::Ship, 1, 1, 0))
@@ -176,6 +189,7 @@ mod tests {
         let berth = Berth {
             child: a_ship(),
             offset_m: DVec3::new(1000.0, 0.0, 0.0),
+            facing: DQuat::from_rotation_x(0.5),
             bound: Boundary::Shell { r: 20.0 },
             look: Boundary::Shell { r: 20.0 },
             fence: Fence(1),
@@ -184,6 +198,7 @@ mod tests {
         let back: Berth = postcard::from_bytes(&bytes).expect("a berth decodes");
         assert_eq!(back.child, berth.child);
         assert_eq!(back.offset_m, berth.offset_m);
+        assert_eq!(back.facing, berth.facing);
     }
 
     #[test]

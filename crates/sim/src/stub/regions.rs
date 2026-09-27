@@ -65,6 +65,13 @@ pub struct RealmRegions {
     /// motion crate, which this crate carries no edge to (SL4, `crate_isolation` law) — the same seam
     /// discipline as `sim::io`. EMPTY at walk/static scale, so the writer is byte-identical to FA-1.
     moving: BTreeMap<RealmId, MotionFn>,
+    /// ★ THE ATTITUDES THIS REALM PARKED ITS BUILT CHILDREN IN (2026-09-27): each berth's facing, read
+    /// from this realm's own store at boot ([`Self::with_berthed_facings`]) and written when it adopts
+    /// a child. A child's row starts in it — its static row, and the first state its drive is
+    /// integrated from — and a child with none stands in this realm's own axes, as every child did
+    /// before. Example: a hull parked upright on a plain 1.4° south of the equator yaws about the
+    /// ground's vertical, not about the planet's `+Y`, which stands 127° from it there.
+    facings: BTreeMap<RealmId, DQuat>,
     /// ★ EVERY PARENT'S DIRECT CHILDREN, BY REGION INDEX (2026-08-30) — the inverse of `parent`.
     ///
     /// [`Self::direct_children`] used to FILTER the whole region list. That is a scan of everything to
@@ -325,6 +332,7 @@ impl RealmRegions {
             depths,
             root_realm,
             moving: BTreeMap::new(),
+            facings: BTreeMap::new(),
             ix_of,
             ancestor_chain,
             child_index: ChildIndex::default(),
@@ -384,6 +392,27 @@ impl RealmRegions {
         self.moving = moving;
         self.rebuild_child_index();
         self
+    }
+
+    /// Seed the attitudes this realm parked its built children in (its berths' facings; see the
+    /// field), and author the static rows again with them.
+    #[must_use]
+    pub fn with_berthed_facings(mut self, facings: BTreeMap<RealmId, DQuat>) -> RealmRegions {
+        self.facings = facings;
+        self.rebuild_static_rows();
+        self
+    }
+
+    /// The attitude a child was parked in, in this realm's own frame, or this realm's own axes for a
+    /// child parked with none.
+    #[must_use]
+    pub fn facing_of(&self, child: RealmId) -> DQuat {
+        self.facings.get(&child).copied().unwrap_or(DQuat::IDENTITY)
+    }
+
+    /// Record the attitude an adopted child now stands in: its berth's facing.
+    pub(crate) fn set_facing(&mut self, child: RealmId, facing: DQuat) {
+        self.facings.insert(child, facing);
     }
 
     /// Name the realm this shard hosts, which is what lets the forest be split into "my direct children"
@@ -889,7 +918,7 @@ impl RealmRegions {
                     origin_cell: r.center.in_parents_frame().cell(),
                     origin: r.center.in_parents_frame().offset(),
                     velocity: DVec3::ZERO,
-                    orientation: DQuat::IDENTITY,
+                    orientation: self.facing_of(r.realm),
                     angular_velocity: DVec3::ZERO,
                 },
             ));
@@ -977,7 +1006,7 @@ impl RealmRegions {
                         origin_cell: r.center.in_parents_frame().cell(),
                         origin: r.center.in_parents_frame().offset(),
                         velocity: DVec3::ZERO,
-                        orientation: DQuat::IDENTITY,
+                        orientation: self.facing_of(r.realm),
                         angular_velocity: DVec3::ZERO,
                     },
                 ));
@@ -1311,7 +1340,10 @@ impl RealmRegions {
                 ixs.iter()
                     .map(|&ix| {
                         let r = &self.regions[ix];
-                        (r.frame, placement_row(&self.moving, driven, r, secs))
+                        (
+                            r.frame,
+                            placement_row(&self.moving, driven, r, self.facing_of(r.realm), secs),
+                        )
                     })
                     .collect()
             })
@@ -1320,7 +1352,10 @@ impl RealmRegions {
             if let Some(ix) = self.ix_of.get(child) {
                 let r = &self.regions[*ix];
                 if r.parent == Some(anchor) && !self.moving.contains_key(child) {
-                    overlay.push((r.frame, placement_row(&self.moving, driven, r, secs)));
+                    overlay.push((
+                        r.frame,
+                        placement_row(&self.moving, driven, r, self.facing_of(r.realm), secs),
+                    ));
                 }
             }
         }

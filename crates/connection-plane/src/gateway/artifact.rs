@@ -38,9 +38,88 @@ use vd_wire::session_flow::{ArtifactView, GatewayToShard};
 use super::routing::{push_control, push_to_shard};
 use super::{GatewayConfig, GatewaySessions, GatewayStats, Session, SessionPhase};
 
-/// How many artifact parts one beat may carry to one client: 32 of 32 KB is a megabyte a beat,
-/// the sky's own pace — a pace, never a cap.
-pub(crate) const ARTIFACT_PARTS_PER_BEAT: u32 = 32;
+/// How many artifact bytes one beat may carry to one client, over every realm it draws: a
+/// megabyte a beat (thirty-two parts of 32 KB), the sky's own pace — a pace, never a cap. A beat
+/// sends while any of it is left, so one part larger than what is left still goes, and every beat
+/// with something due sends at least one part.
+///
+/// ★ ONE BUDGET PER CLIENT (2026-09-27, the solved-world walk): the budget was thirty-two parts for
+/// EACH REALM, so a pilot who logged in while the gateway held five planets' whole artifacts was
+/// sent about five megabytes in one half-second beat against the transport's four-megabyte retry
+/// buffer; 452 sends were shed, and three far planets' pyramids were never whole for that pilot.
+pub(crate) const ARTIFACT_BYTES_PER_BEAT: usize = 32 * 32 * 1024;
+
+/// ★ WHAT A SHED DOES TO A SESSION'S SERVE THIS BEAT ([`super::session::ArtifactRedrive`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Redrive {
+    /// No shed is pending: the serve goes on.
+    Idle,
+    /// A shed came within the last beat: nothing goes to this client this beat, so its retry
+    /// buffer drains.
+    Hold,
+    /// A shed came a beat or more ago: send again what the client may lack, then serve.
+    Now,
+}
+
+/// The re-drive's state for a session whose newest shed toward its client came at `shed_at`.
+#[must_use]
+pub(crate) fn redrive_state(shed_at: Option<TickId>, now: TickId, cadence: u64) -> Redrive {
+    match shed_at {
+        None => Redrive::Idle,
+        Some(at) if now.0.saturating_sub(at.0) < cadence => Redrive::Hold,
+        Some(_) => Redrive::Now,
+    }
+}
+
+/// ★ THE SESSION FORGETS A REALM'S ARTIFACT (2026-09-27): what its client stated it holds, how far
+/// it was served, the tiles it was sent and every re-drive record of the realm — sent in the same
+/// pass as the scene delta that tells the client the realm left, which makes the client forget
+/// the same. Example: a far planet leaves a pilot's picture for one tick and comes back; the next
+/// beat serves the pilot its head and pyramid again.
+pub(crate) fn forget_for_session(session: &mut Session, realm: RealmId) {
+    session.artifact_held.remove(&realm);
+    session.artifact_parts_sent.remove(&realm);
+    session.artifact_tiles_sent.remove(&realm);
+    let redrive = &mut session.artifact_redrive;
+    redrive.repass.remove(&realm);
+    redrive.relayed.remove(&realm);
+    redrive.resend.retain(|(named, _)| *named != realm);
+}
+
+/// ★ A SEND TOWARD A NODE WAS SHED (2026-09-27): when the node is a client that holds a session,
+/// that session's re-drive is armed at `now`; a shed toward any other node (a shard, a client with
+/// no session) changes nothing here. Example: the transport sheds a pyramid part toward a pilot's
+/// client, and the next beats hold, then serve that pilot again.
+pub(crate) fn note_send_shed(
+    to: NodeId,
+    now: TickId,
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+) {
+    let named = sessions.by_client.get(&to).copied();
+    let Some(session) = named.and_then(|sid| sessions.by_session.get_mut(&sid)) else {
+        return;
+    };
+    session.artifact_redrive.shed_at = Some(now);
+    stats.client_sends_shed += 1;
+}
+
+/// ★ A TILE'S KEY, read off a shard's bulk (2026-09-27): `Some` when the bytes are one tile of a
+/// realm's artifact — the only shape a shard ships to named sessions — and `None` for anything
+/// else, which is relayed as before and never sent again.
+#[must_use]
+pub(crate) fn tile_key_of(bytes: &[u8]) -> Option<(RealmId, super::session::TileKey)> {
+    match postcard::from_bytes::<BulkMsg>(bytes) {
+        Ok(BulkMsg::ArtifactTile {
+            realm,
+            face,
+            tx,
+            ty,
+            ..
+        }) => Some((realm, (face, tx, ty))),
+        _ => None,
+    }
+}
 
 /// ★ AN ARTIFACT THE GATEWAY HOLDS for the realms its sessions draw: the shard it came from, the
 /// digest, the head's bytes and the pyramid parts' bytes in arrival order, and what makes it whole.
@@ -119,6 +198,19 @@ pub(crate) fn cache_artifact_part(
                         levels,
                         "the artifact's head is cached; the pyramid's parts follow"
                     );
+                    // ★ A NEW DIGEST makes every relayed copy of the realm's tiles stale
+                    // (2026-09-27): a re-drive must never send a tile of the old artifact. The
+                    // first head, or the same one from another node, keeps them — the tiles under
+                    // a pilot's boots often come before the gateway caches the realm's head.
+                    let stale = sessions
+                        .artifacts
+                        .get(&realm)
+                        .is_some_and(|cache| cache.digest != digest);
+                    if stale {
+                        sessions
+                            .relayed_tiles
+                            .retain(|(named, _), _| *named != realm);
+                    }
                     sessions.artifacts.insert(
                         realm,
                         GatewayArtifact {
@@ -138,6 +230,10 @@ pub(crate) fn cache_artifact_part(
                     for session in sessions.by_session.values_mut() {
                         session.artifact_parts_sent.remove(&realm);
                         session.artifact_tiles_sent.remove(&realm);
+                        session.artifact_redrive.repass.remove(&realm);
+                        if stale {
+                            session.artifact_redrive.relayed.remove(&realm);
+                        }
                     }
                 }
             }
@@ -368,7 +464,31 @@ pub(crate) fn serve_artifacts(
         session
             .artifact_tiles_sent
             .retain(|realm, _| drawn.contains_key(realm));
+        session
+            .artifact_redrive
+            .repass
+            .retain(|realm| drawn.contains_key(realm));
+        // ★ THE RELAYED RECORD (2026-09-27) keeps the realms an ACTIVE session draws; a session that
+        // still activates has no picture yet and keeps everything the shard shipped it.
+        if matches!(session.phase, SessionPhase::Active { .. }) {
+            let mine: BTreeSet<RealmId> = drawn_realms(session).collect();
+            let redrive = &mut session.artifact_redrive;
+            redrive.relayed.retain(|realm, _| mine.contains(realm));
+            redrive.resend.retain(|(realm, _)| mine.contains(realm));
+        }
     }
+    // One copy of each relayed tile, kept while some session's record names it.
+    let named: BTreeSet<(RealmId, super::session::TileKey)> = sessions
+        .by_session
+        .values()
+        .flat_map(|s| {
+            s.artifact_redrive
+                .relayed
+                .iter()
+                .flat_map(|(realm, tiles)| tiles.iter().map(move |tile| (*realm, *tile)))
+        })
+        .collect();
+    sessions.relayed_tiles.retain(|key, _| named.contains(key));
     // The wants: a realm whose artifact is not held at the stated digest — or held in part with
     // nothing landing for a beat (a stalled answer) — is asked for, once a beat at most, from the
     // shard the directory names for it; a realm without a resolved head waits for the head poll
@@ -448,16 +568,47 @@ pub(crate) fn serve_artifacts(
         stats.artifact_wants_sent += 1;
     }
     // The serve: each session that draws a realm whose artifact is whole here, and has not stated
-    // it holds it, gets the head then the parts, paced, each once.
+    // it holds it, gets the head then the parts, paced, each once — within ONE budget a beat for the
+    // whole session ([`ARTIFACT_BYTES_PER_BEAT`]), the relayed tiles a re-drive owes first, then each
+    // drawn realm's tiles and parts in the picture's order.
     let GatewaySessions {
         by_session,
         artifacts,
         windows,
+        relayed_tiles,
         ..
     } = sessions;
     for session in by_session.values_mut() {
         if !matches!(session.phase, SessionPhase::Active { .. }) {
             continue;
+        }
+        match redrive_state(session.artifact_redrive.shed_at, clock.local_tick, cadence) {
+            Redrive::Idle => {}
+            Redrive::Hold => {
+                stats.artifact_serves_held += 1;
+                continue;
+            }
+            Redrive::Now => redrive(session, artifacts, stats),
+        }
+        let mut budget = ARTIFACT_BYTES_PER_BEAT;
+        let redrive = &mut session.artifact_redrive;
+        while budget > 0 {
+            let Some(key) = redrive.resend.pop_first() else {
+                break;
+            };
+            // A tile whose copy is gone was forgotten with every record of it: nothing to send.
+            let Some(bytes) = relayed_tiles.get(&key) else {
+                continue;
+            };
+            push_control(
+                outbox,
+                session.client,
+                &ServerControlMsg::ArtifactPart {
+                    bytes: bytes.clone(),
+                },
+            );
+            stats.artifact_tiles_resent += 1;
+            budget = budget.saturating_sub(bytes.len());
         }
         let drawn_here: Vec<RealmId> = drawn_realms(session).collect();
         for realm in drawn_here {
@@ -466,31 +617,23 @@ pub(crate) fn serve_artifacts(
             };
             // ★ THE TILES WITHIN THIS SESSION'S REACH (the one tile path), each once, in the
             // beat's budget beside the parts: the view the gateway composed for the session and
-            // the terrain crate's own reach rule pick them out of the realm's cache.
-            let mut budget = ARTIFACT_PARTS_PER_BEAT;
+            // the terrain crate's own reach rule pick them out of the realm's cache. Example: a
+            // pilot in orbit over the home planet reaches nine tiles; the gateway hands her as
+            // many as the beat's megabyte holds, and the rest the next beat.
             if let Some(view) = session_view(session, realm)
                 && let Some(bag) = windows.values().find_map(|w| w.ingest.look_of(realm))
                 && let Some(body) = body_of_bag(bag)
             {
                 let sent = session.artifact_tiles_sent.entry(realm).or_default();
-                // ★ THE BEAT'S BUDGET IS A TAKE, NOT A TEST (2026-09-21). The pace is the
-                // head's own: at most `ARTIFACT_PARTS_PER_BEAT` tiles a beat. A `budget == 0`
-                // break inside this walk is a branch NO VIEW CAN DRIVE, so it states the pace
-                // as a `take` instead. MEASURED: over 1 158 body radii from 10 km to
-                // 1 000 000 km, four altitudes each and four directions each, the most tiles
-                // one view reaches is NINE, and the budget is thirty-two — the reach is the
-                // rung's switch distance (about 445 km) and a lattice node is about 8 192 m on
-                // every body of THE world, so a view spans at most three tiles of sixty-four
-                // nodes each way. Example: a pilot in orbit over the home planet reaches nine
-                // tiles; the gateway hands her all nine in one beat and still has room for the
-                // pyramid's parts. A finer lattice would make the break live again: restore it.
-                let paced: Vec<_> = tiles_in_reach(&body, cache.levels, view)
+                let due: Vec<_> = tiles_in_reach(&body, cache.levels, view)
                     .into_iter()
                     .filter(|tile| !sent.contains(tile))
                     .filter_map(|tile| cache.tiles.get(&tile).map(|bytes| (tile, bytes)))
-                    .take(budget as usize)
                     .collect();
-                for (tile, bytes) in paced {
+                for (tile, bytes) in due {
+                    if budget == 0 {
+                        break;
+                    }
                     push_control(
                         outbox,
                         session.client,
@@ -500,22 +643,27 @@ pub(crate) fn serve_artifacts(
                     );
                     sent.insert(tile);
                     stats.artifact_parts_served += 1;
-                    budget -= 1;
+                    budget = budget.saturating_sub(bytes.len());
                 }
             }
             if session.artifact_held.get(&realm) == Some(&cache.digest) {
+                session.artifact_redrive.repass.remove(&realm);
                 stats.artifact_parts_skipped += 1;
                 continue;
             }
             let total = 1 + cache.parts.len() as u32;
-            let first = session
+            let mut next = session
                 .artifact_parts_sent
                 .get(&realm)
                 .copied()
                 .unwrap_or(0)
                 .min(total);
-            let last = (first + budget).min(total);
-            if first == 0 {
+            // ★ A PASS OWED BY A RE-DRIVE starts from the head once the pass in flight has ended,
+            // so a pass always reaches its tail.
+            if next == total && session.artifact_redrive.repass.remove(&realm) {
+                next = 0;
+            }
+            if next == 0 && budget > 0 {
                 tracing::info!(
                     realm = %realm,
                     client = ?session.client,
@@ -523,20 +671,62 @@ pub(crate) fn serve_artifacts(
                     "the artifact is served to a session that draws the realm"
                 );
             }
-            for i in first..last {
-                let bytes = if i == 0 {
-                    cache.head.clone()
+            while next < total && budget > 0 {
+                let bytes = if next == 0 {
+                    &cache.head
                 } else {
-                    cache.parts[(i - 1) as usize].clone()
+                    &cache.parts[(next - 1) as usize]
                 };
                 push_control(
                     outbox,
                     session.client,
-                    &ServerControlMsg::ArtifactPart { bytes },
+                    &ServerControlMsg::ArtifactPart {
+                        bytes: bytes.clone(),
+                    },
                 );
                 stats.artifact_parts_served += 1;
+                budget = budget.saturating_sub(bytes.len());
+                next += 1;
             }
-            session.artifact_parts_sent.insert(realm, last);
+            session.artifact_parts_sent.insert(realm, next);
         }
     }
+}
+
+/// ★ THE RE-DRIVE, ONCE (2026-09-27): a shed toward the session's client came a beat or more ago.
+/// Every realm it was served and has not stated whole owes one more pass from the head, every tile
+/// served from a view goes out again, and every tile a shard shipped to it is queued again; the
+/// client drops what it already holds.
+fn redrive(
+    session: &mut Session,
+    artifacts: &BTreeMap<RealmId, GatewayArtifact>,
+    stats: &mut GatewayStats,
+) {
+    let held = &session.artifact_held;
+    let owed: Vec<RealmId> = session
+        .artifact_parts_sent
+        .keys()
+        .filter(|realm| {
+            artifacts
+                .get(realm)
+                .is_none_or(|cache| held.get(realm) != Some(&cache.digest))
+        })
+        .copied()
+        .collect();
+    let redrive = &mut session.artifact_redrive;
+    redrive.shed_at = None;
+    redrive.repass.extend(owed);
+    for (realm, tiles) in &redrive.relayed {
+        redrive
+            .resend
+            .extend(tiles.iter().map(|tile| (*realm, *tile)));
+    }
+    session.artifact_tiles_sent.clear();
+    stats.artifact_redrives += 1;
+    tracing::info!(
+        client = ?session.client,
+        repass = redrive.repass.len(),
+        resend = redrive.resend.len(),
+        "a send toward the client was shed: its artifacts are served again"
+    );
 }

@@ -275,6 +275,35 @@ pub(crate) enum SubState {
     Draining,
 }
 
+/// A tile of a realm's artifact, by its `(face, tx, ty)`.
+pub(crate) type TileKey = (u8, u32, u32);
+
+/// ★ THE ARTIFACT DELIVERY'S RE-DRIVE (2026-09-27, the solved-world walk). The gateway sends each
+/// artifact part and tile to a session once, and the transport may SHED a reliable send when the
+/// client's retry buffer is full — a shed part was never sent again, so a pyramid stayed short for
+/// good (MEASURED: 452 sends shed in four seconds, three far pyramids never whole for that client in
+/// 900 s). A shed toward the client arms this record: the serve holds that client for a beat, then
+/// sends again what the client may lack, and the client drops what it already holds.
+///
+/// **Example.** A pilot logs in behind a gateway that holds five planets' artifacts. A beat's parts
+/// outrun the link and the transport sheds some. The gateway sends that pilot nothing for a beat;
+/// then every planet the pilot has not stated whole gets one more pass from its head, and every
+/// tile the pilot was sent goes out again, paced like the first time.
+#[derive(Debug, Default)]
+pub(crate) struct ArtifactRedrive {
+    /// The tick of the newest shed toward this client, until the serve acts on it.
+    pub(crate) shed_at: Option<vd_core::TickId>,
+    /// The realms whose pass starts again from the head once it ends: those the client had not
+    /// stated whole when the re-drive came.
+    pub(crate) repass: std::collections::BTreeSet<vd_core::pose::RealmId>,
+    /// The tiles a SHARD shipped to this session and the gateway relayed: the ground under the
+    /// occupant, which the gateway serves from no view of its own.
+    pub(crate) relayed:
+        std::collections::BTreeMap<vd_core::pose::RealmId, std::collections::BTreeSet<TileKey>>,
+    /// The relayed tiles to send again, taken in order within the beat's budget.
+    pub(crate) resend: std::collections::BTreeSet<(vd_core::pose::RealmId, TileKey)>,
+}
+
 /// One session's cold record (the hot part is the shared `Arc<SessionHot>`).
 #[derive(Debug)]
 pub(crate) struct Session {
@@ -330,6 +359,9 @@ pub(crate) struct Session {
         vd_core::pose::RealmId,
         std::collections::BTreeSet<(u8, u32, u32)>,
     >,
+    /// ★ THE ARTIFACT DELIVERY'S RE-DRIVE (2026-09-27): what this session is sent again after the
+    /// transport shed a send toward its client ([`ArtifactRedrive`]).
+    pub(crate) artifact_redrive: ArtifactRedrive,
     /// ★ A SHARD'S BULK FOR THIS SESSION, HELD UNTIL IT IS ACTIVE (2026-09-22, the on-foot ground):
     /// the realm's shard holds the occupant's dot — and ships the tiles under it — from the first
     /// tick of the attach, a tick before this gateway marks the session Active. Those bytes used to
@@ -539,6 +571,11 @@ pub struct GatewaySessions {
     pub(crate) artifacts: BTreeMap<RealmId, super::artifact::GatewayArtifact>,
     /// When each realm's artifact was last asked for, so a want goes out once a beat at most.
     pub(crate) artifact_wants: BTreeMap<RealmId, vd_core::TickId>,
+    /// ★ THE TILES A SHARD SHIPPED TO NAMED SESSIONS, one copy per tile (2026-09-27): the bytes the
+    /// re-drive sends again after a shed ([`ArtifactRedrive`]). A tile is kept while some session's
+    /// record names it; an active session's record keeps only the realms it draws, and a record
+    /// ends with its session.
+    pub(crate) relayed_tiles: BTreeMap<(RealmId, TileKey), Vec<u8>>,
 }
 
 /// RLM 5f-3d — ONE realm's pre-Active home bootstrap: the state EVERY session booting into that realm

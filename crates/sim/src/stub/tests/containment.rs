@@ -2856,7 +2856,8 @@ fn a_realm_adopts_an_arriving_exterior_acks_its_promote_and_releases_it_at_the_d
         frame: own_frame,
         pos: LatticePos::from_metres(DVec3::new(300.0, 0.0, 0.0), own_frame.tier()),
         vel: DVec3::new(100.0, 0.0, 0.0),
-        orient: DQuat::IDENTITY,
+        // A hull arriving turned, so the adoption must carry an attitude that is not the axes.
+        orient: DQuat::from_rotation_y(0.6),
         universe_tick: UniverseTick(98),
     };
     let envelope = |transfer: u128| {
@@ -2913,6 +2914,18 @@ fn a_realm_adopts_an_arriving_exterior_acks_its_promote_and_releases_it_at_the_d
     assert_eq!(berth.child, hull);
     assert!((berth.offset_m.x - 310.0).abs() < 1e-6);
     assert_eq!(berth.fence, Fence(7));
+    // ★ AND THE ATTITUDE IT WAS ADOPTED IN (2026-09-27), in the row and in this realm's facings —
+    // the one it is driven from — so a restart re-plants it as it was.
+    assert_eq!(
+        berth.facing,
+        DQuat::from_rotation_y(0.6),
+        "the attitude it arrived in, not the parent's axes"
+    );
+    assert_eq!(berth.facing, held.state.orient);
+    assert_eq!(
+        rig.world.resource::<RealmRegions>().facing_of(hull),
+        held.state.orient
+    );
     let flows = to_orch(&sent);
     assert!(
         flows.contains(&InterShardFlow::Directory(DirectoryOp::HeadRead {

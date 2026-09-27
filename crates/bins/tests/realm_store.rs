@@ -38,6 +38,7 @@ fn a_berth(child: RealmId, x: f64) -> Berth {
     Berth {
         child,
         offset_m: DVec3::new(x, 0.0, 0.0),
+        facing: vd_core::glam::DQuat::IDENTITY,
         bound: Boundary::Shell { r: 20.0 },
         look: Boundary::Shell { r: 20.0 },
         fence: Fence(1),
@@ -198,6 +199,11 @@ fn the_shipyards_stand_in_writes_rows_the_shard_reads() {
         (berths[0].offset_m.x - 1500.0).abs() < 1e-9,
         "at the berth the tool was given"
     );
+    assert_eq!(
+        berths[0].facing,
+        vd_core::glam::DQuat::IDENTITY,
+        "no facing stated: parked in the parent's own axes"
+    );
     assert!(no_body.is_none(), "a parent holds no body of its own here");
 
     // The SHIP's file holds the body, and no berths — it has authored none.
@@ -300,4 +306,56 @@ fn a_hull_written_by_the_tool_is_a_realm_in_the_world_the_shard_boots() {
         plain.len() + 1,
         "exactly one realm added, nothing else moved"
     );
+}
+
+/// ★ THE TOOL PARKS A HULL IN THE ATTITUDE IT IS GIVEN (2026-09-27): four `--berth-facing-*`
+/// numbers land in the berth the shard reads, and four numbers that are not a rotation are refused
+/// by name, never normalised into an attitude nobody stated.
+#[test]
+fn the_shipyards_stand_in_parks_a_hull_in_the_facing_it_is_given() {
+    let dir = std::env::temp_dir().join(format!("vd-build-ship-facing-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temp dir");
+    let parent_store = dir.join("planet.redb");
+    let ship_store = dir.join("ship.redb");
+    let _ = std::fs::remove_file(&parent_store);
+    let _ = std::fs::remove_file(&ship_store);
+    let facing = vd_core::glam::DQuat::from_rotation_x(0.8);
+    let run = |q: [f64; 4]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_vd-build-ship"))
+            .args([
+                "--parent-store",
+                &parent_store.display().to_string(),
+                "--ship-store",
+                &ship_store.display().to_string(),
+                "--owner",
+                "1000",
+                "--berth-facing-x",
+                &q[0].to_string(),
+                "--berth-facing-y",
+                &q[1].to_string(),
+                "--berth-facing-z",
+                &q[2].to_string(),
+                "--berth-facing-w",
+                &q[3].to_string(),
+            ])
+            .output()
+            .expect("the tool runs")
+    };
+    let out = run(facing.to_array());
+    assert!(
+        out.status.success(),
+        "the tool parked a hull: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (berths, _) = vd_bins::read_realm_store(&open(&parent_store)).expect("the parent's rows");
+    assert_eq!(berths.len(), 1);
+    assert!(
+        berths[0].facing.abs_diff_eq(facing, 1e-12),
+        "parked in the facing it was given: {:?}",
+        berths[0].facing
+    );
+    let refused = run([0.0, 0.0, 0.0, 2.0]);
+    assert!(!refused.status.success(), "a length of two is no rotation");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("is not a rotation"));
+    let _ = std::fs::remove_dir_all(&dir);
 }

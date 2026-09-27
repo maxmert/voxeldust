@@ -15,7 +15,14 @@
 //!
 //! ```text
 //! vd-build-ship --parent-store <path> --ship-store <path> --owner <id> --parent <realm>
+//!     [--berth-x-m <m> --berth-y-m <m> --berth-z-m <m>]
+//!     [--berth-facing-x <q> --berth-facing-y <q> --berth-facing-z <q> --berth-facing-w <q>]
 //! ```
+//!
+//! The four `--berth-facing-*` numbers are the hull's orientation in its parent's frame at the berth
+//! (a rotation's `x, y, z, w`), the attitude it is parked in; absent, it stands in the parent's own
+//! axes. Example: a hull parked on a plain 1.4° south of the home planet's equator states the facing
+//! whose up is the ground's vertical, so it stands upright and turns about that vertical.
 use std::process::ExitCode;
 use vd_core::built::{Berth, BlueprintId, BuiltBody, BuiltFacts};
 use vd_core::entity_kind::EntityKind;
@@ -84,6 +91,8 @@ fn run() -> Result<RealmId, String> {
         // ★ WHERE IT STARTS, AND ONLY WHERE IT STARTS. From its first tick the parent authors this
         // hull's placement from the pushes it states, so this offset is its berth and nothing more.
         offset_m: DVec3::new(args.berth_x_m, args.berth_y_m, args.berth_z_m),
+        // ★ AND HOW IT STARTS (2026-09-27): the attitude it is parked in, in the parent's frame.
+        facing: vd_core::glam::DQuat::from_array(args.berth_facing),
         bound,
         look: bound,
         fence: Fence::GENESIS,
@@ -148,6 +157,8 @@ struct Args {
     berth_x_m: f64,
     berth_y_m: f64,
     berth_z_m: f64,
+    /// The attitude the hull is parked in, as `x, y, z, w` (2026-09-27).
+    berth_facing: [f64; 4],
 }
 
 impl Args {
@@ -181,6 +192,8 @@ impl Args {
             berth_x_m: 1_000.0,
             berth_y_m: 0.0,
             berth_z_m: 0.0,
+            // The parent's own axes, as every hull was parked in before a berth had a facing.
+            berth_facing: [0.0, 0.0, 0.0, 1.0],
         };
         let mut it = argv.peekable();
         while let Some(flag) = it.next() {
@@ -200,6 +213,10 @@ impl Args {
                 "--berth-x-m" => a.berth_x_m = num(&value()?, &flag)?,
                 "--berth-y-m" => a.berth_y_m = num(&value()?, &flag)?,
                 "--berth-z-m" => a.berth_z_m = num(&value()?, &flag)?,
+                "--berth-facing-x" => a.berth_facing[0] = num(&value()?, &flag)?,
+                "--berth-facing-y" => a.berth_facing[1] = num(&value()?, &flag)?,
+                "--berth-facing-z" => a.berth_facing[2] = num(&value()?, &flag)?,
+                "--berth-facing-w" => a.berth_facing[3] = num(&value()?, &flag)?,
                 other => return Err(format!("{other} is not a flag this tool knows")),
             }
         }
@@ -209,9 +226,22 @@ impl Args {
         if a.owner == 0 {
             return Err("--owner is required: a built realm belongs to somebody".to_owned());
         }
+        // ★ A FACING IS A ROTATION: four numbers whose length is not one are no attitude at all, and
+        // a stored berth is never normalised into something its writer did not state.
+        let [x, y, z, w] = a.berth_facing;
+        let len = (x * x + y * y + z * z + w * w).sqrt();
+        if !len.is_finite() || (len - 1.0).abs() > FACING_UNIT_TOLERANCE {
+            return Err(format!(
+                "--berth-facing-* {:?} is not a rotation (its length is {len}, not one)",
+                a.berth_facing
+            ));
+        }
         Ok(a)
     }
 }
+
+/// How far a stated facing's length may stand from one: the rounding of four printed decimals.
+const FACING_UNIT_TOLERANCE: f64 = 1.0e-6;
 
 /// One number, or a refusal naming the flag — monomorphic error path (HR5).
 fn num<T: std::str::FromStr>(s: &str, flag: &str) -> Result<T, String> {

@@ -235,11 +235,17 @@ pub(crate) fn adopt_exterior(
         exterior.0.insert(child, fence);
         // The hull must be TOLD it is mine now (slice 3): owed until its facts arrive.
         super::lineage::lineage_owed(child, owed);
+        // ★ THE ATTITUDE IT STANDS IN NOW (2026-09-27), held with this realm's berthed facings —
+        // the same fact the berth row below makes durable.
+        regions.set_facing(child, now_pose.orient);
         // THE BERTH ROW, durable in my own store, so a restart re-plants the hull under ME.
         if let Some(store) = store.0.as_mut() {
             let berth = Berth {
                 child,
                 offset_m: now_pose.pos.delta_m(LatticePos::ORIGIN, tier),
+                // ★ ITS ATTITUDE WHEN ITS HOME CHANGED (2026-09-27), written with its offset: a
+                // restart re-plants the hull as it was adopted, never in this realm's own axes.
+                facing: now_pose.orient,
                 bound: region.shape,
                 look: region.look.unwrap_or(region.shape),
                 fence,

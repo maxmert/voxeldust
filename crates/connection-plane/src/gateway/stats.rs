@@ -167,6 +167,16 @@ pub struct GatewayStats {
     pub artifact_parts_skipped: u64,
     /// THE FAR-VIEW SHIP: artifacts forgotten because no session draws their realm any more.
     pub artifact_caches_evicted: u64,
+    /// ★ THE RE-DRIVE (2026-09-27): reliable sends the transport SHED toward a client that holds a
+    /// session (its retry buffer was full). Each one arms that session's re-drive.
+    pub client_sends_shed: u64,
+    /// THE RE-DRIVE: beats a session's artifact serve was held after a shed, so its buffer drains.
+    pub artifact_serves_held: u64,
+    /// THE RE-DRIVE: re-drives run — a session's unheld realms given one more pass and its tiles
+    /// sent again.
+    pub artifact_redrives: u64,
+    /// THE RE-DRIVE: tiles a shard shipped to a session that the gateway sent again from its copy.
+    pub artifact_tiles_resent: u64,
     /// CATALOGUE PARTS NOT SENT because the client already held that sky (S11). This is the saving,
     /// counted: every skipped part is bytes that did not cross for a galaxy that did not move.
     pub sky_parts_skipped: u64,

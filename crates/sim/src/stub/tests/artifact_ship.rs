@@ -295,3 +295,58 @@ fn the_ship_waits_for_the_realms_authority() {
     assert!(bulks(&sent, &BulkAudience::Sessions(vec![SESSION])).is_empty());
     assert_eq!(rig.world.resource::<StubStats>().artifact_heads_sent, 0);
 }
+
+/// A source whose ground under any occupant is twenty tiles, all held.
+struct Twenty;
+
+impl TileSource for Twenty {
+    fn digest(&self) -> [u64; 2] {
+        DIGEST
+    }
+    fn head(&self) -> crate::io::Bytes {
+        crate::io::bytes(vec![0xA0])
+    }
+    fn artifact_parts(&self) -> Vec<crate::io::Bytes> {
+        Vec::new()
+    }
+    fn tiles_under(&self, _dir: [f64; 3], _radial_m: f64, _interest_m: f64) -> Vec<(u8, u32, u32)> {
+        (0..20).map(|k| (1, k, 0)).collect()
+    }
+    fn tile(&self, face: u8, tx: u32, ty: u32) -> Option<crate::io::Bytes> {
+        Some(crate::io::bytes(vec![0xC1, face, tx as u8, ty as u8]))
+    }
+}
+
+/// ★ MORE THAN SIXTEEN TILES TO ONE SESSION STILL SHIP, EACH ONCE (2026-09-27, an HR5 gap): the log
+/// names only the first sixteen a session is shipped, and every tile past them still goes, four a
+/// tick. Example: a pilot flies low along a coast; the shard ships each new tile under the path,
+/// and its log stops naming them after sixteen.
+#[test]
+fn more_than_sixteen_tiles_to_one_session_still_ship_each_once() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let _ = rig.attach();
+    *rig.world.resource_mut::<ArtifactSource>() = ArtifactSource(Some(Box::new(Twenty)));
+    rig.world
+        .resource_mut::<Dots>()
+        .0
+        .get_mut(&SESSION)
+        .expect("the attached dot")
+        .pose = StampedPose::at_rest(
+        config().frame,
+        DVec3::new(0.0, 0.0, 1_000.0),
+        UniverseTick(5),
+    );
+    let audience = BulkAudience::Sessions(vec![SESSION]);
+    let shipped: usize = (0..6)
+        .map(|_| bulks(&rig.tick(vec![]), &audience).len())
+        .sum();
+    assert_eq!(shipped, 20, "four a tick, every one of the twenty");
+    assert_eq!(
+        rig.world.resource::<ArtifactShipped>().0[&SESSION]
+            .tiles
+            .len(),
+        20
+    );
+    assert_eq!(rig.world.resource::<StubStats>().artifact_tiles_sent, 20);
+}

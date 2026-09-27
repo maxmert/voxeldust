@@ -127,6 +127,7 @@ fn the_galaxy_adopts_a_hull_at_a_cost_that_does_not_grow_with_its_children() {
     let _berth_shape = Berth {
         child: hull_region(galaxy, galaxy_tier).realm,
         offset_m: DVec3::ZERO,
+        facing: vd_core::glam::DQuat::IDENTITY,
         bound: Boundary::Shell { r: 20.0 },
         look: Boundary::Shell { r: 20.0 },
         fence: vd_core::Fence(1),

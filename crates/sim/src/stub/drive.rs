@@ -306,6 +306,7 @@ pub(crate) fn on_child_drive(
     own_realm: vd_core::pose::RealmId,
     integrates_children: bool,
     child_nodes: &std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::ids::NodeId>,
+    parked: glam::DQuat,
     held: &mut DrivenChildren,
     stats: &mut super::StubStats,
 ) {
@@ -326,7 +327,9 @@ pub(crate) fn on_child_drive(
         state: DrivenState {
             pos_m: glam::DVec3::ZERO,
             vel_mps: glam::DVec3::ZERO,
-            orient: glam::DQuat::IDENTITY,
+            // ★ THE ATTITUDE IT WAS PARKED IN (2026-09-27): the first state a child's drive is
+            // integrated from starts where its berth left it, so its yaw turns about its own up.
+            orient: parked,
             spin_radps: glam::DVec3::ZERO,
         },
         drive: ([0; 3], [0; 3]),
@@ -363,6 +366,7 @@ pub(crate) fn on_child_facts(
     own_realm: vd_core::pose::RealmId,
     integrates_children: bool,
     child_nodes: &std::collections::BTreeMap<vd_core::pose::RealmId, vd_core::ids::NodeId>,
+    parked: glam::DQuat,
     held: &mut DrivenChildren,
     stats: &mut super::StubStats,
 ) {
@@ -387,7 +391,9 @@ pub(crate) fn on_child_facts(
         state: DrivenState {
             pos_m: glam::DVec3::ZERO,
             vel_mps: glam::DVec3::ZERO,
-            orient: glam::DQuat::IDENTITY,
+            // ★ THE ATTITUDE IT WAS PARKED IN (2026-09-27): the first state a child's drive is
+            // integrated from starts where its berth left it, so its yaw turns about its own up.
+            orient: parked,
             spin_radps: glam::DVec3::ZERO,
         },
         drive: ([0; 3], [0; 3]),
@@ -1112,6 +1118,42 @@ mod tests {
         }
     }
 
+    /// ★ THE FIRST DRIVEN STATE STARTS AS THE CHILD WAS PARKED (2026-09-27): whichever lane opens
+    /// the child's entry — its facts or its first push — seeds the attitude its berth states, so a
+    /// hull parked upright yaws about its own vertical from its first tick.
+    #[test]
+    fn a_childs_first_driven_state_starts_in_its_parked_attitude() {
+        let parked = glam::DQuat::from_rotation_x(0.7);
+        let (mut by_facts, mut by_drive, mut stats) = (
+            DrivenChildren::default(),
+            DrivenChildren::default(),
+            StubStats::default(),
+        );
+        on_child_facts(
+            some_facts(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            parked,
+            &mut by_facts,
+            &mut stats,
+        );
+        on_child_drive(
+            a_drive(9),
+            SHIP_NODE,
+            parent_realm(),
+            true,
+            &nodes(),
+            parked,
+            &mut by_drive,
+            &mut stats,
+        );
+        let child = ship_coord().lowered();
+        assert_eq!(by_facts.0[&child].state.orient, parked);
+        assert_eq!(by_drive.0[&child].state.orient, parked);
+    }
+
     #[test]
     fn a_childs_drive_is_admitted_and_held() {
         let (mut held, mut stats) = (DrivenChildren::default(), StubStats::default());
@@ -1121,6 +1163,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1139,6 +1182,7 @@ mod tests {
             stranger,
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1157,6 +1201,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1175,6 +1220,7 @@ mod tests {
             parent_realm(),
             false,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1191,6 +1237,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1202,6 +1249,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1222,6 +1270,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1244,6 +1293,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1256,6 +1306,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1273,6 +1324,7 @@ mod tests {
             stranger,
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1283,6 +1335,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1293,6 +1346,7 @@ mod tests {
             parent_realm(),
             false,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1303,6 +1357,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1312,6 +1367,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1331,6 +1387,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1359,6 +1416,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1383,6 +1441,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1416,6 +1475,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1425,6 +1485,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1463,6 +1524,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1472,6 +1534,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1503,6 +1566,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1512,6 +1576,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1553,6 +1618,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1562,6 +1628,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1588,6 +1655,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1597,6 +1665,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1623,6 +1692,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1632,6 +1702,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1664,6 +1735,7 @@ mod tests {
             parent_realm(),
             true,
             &nodes(),
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -1996,6 +2068,7 @@ mod tests {
             parent,
             true,
             &nodes,
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -2017,6 +2090,7 @@ mod tests {
             parent,
             true,
             &nodes,
+            glam::DQuat::IDENTITY,
             &mut held,
             &mut stats,
         );
@@ -2050,6 +2124,7 @@ mod tests {
                 parent,
                 true,
                 &nodes,
+                glam::DQuat::IDENTITY,
                 &mut held,
                 &mut stats,
             );
@@ -2120,6 +2195,7 @@ mod tests {
                 parent,
                 true,
                 &nodes,
+                glam::DQuat::IDENTITY,
                 &mut held,
                 &mut stats,
             );
@@ -2140,6 +2216,7 @@ mod tests {
                 parent,
                 true,
                 &nodes,
+                glam::DQuat::IDENTITY,
                 &mut held,
                 &mut stats,
             );
@@ -2161,6 +2238,7 @@ mod tests {
                     parent,
                     true,
                     &nodes,
+                    glam::DQuat::IDENTITY,
                     &mut held,
                     &mut stats,
                 );

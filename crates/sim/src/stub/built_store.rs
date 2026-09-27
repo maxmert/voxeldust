@@ -113,6 +113,9 @@ mod tags {
     pub const CHILD: u16 = 1;
     /// Where the parent put it.
     pub const OFFSET: u16 = 2;
+    /// ★ How the parent parked it (2026-09-27): OPTIONAL, so a berth written before it reads as the
+    /// parent's own axes, and a reader that predates it skips it.
+    pub const FACING: u16 = 8;
 }
 
 /// The berth family: one row per built child this realm authored a place for.
@@ -487,6 +490,7 @@ pub fn encode_berth(berth: &Berth) -> Vec<u8> {
     TlvWriter::new(BERTH_SCHEMA)
         .required(tags::CHILD, &berth.child)
         .and_then(|w| w.required(tags::OFFSET, &berth.offset_m))
+        .and_then(|w| w.optional(tags::FACING, &berth.facing))
         .and_then(|w| w.required(tags::BOUND, &berth.bound))
         .and_then(|w| w.required(tags::LOOK, &berth.look))
         .and_then(|w| w.required(tags::FENCE, &berth.fence))
@@ -523,6 +527,10 @@ pub fn decode_berth(bytes: &[u8]) -> Result<Berth, String> {
     Ok(Berth {
         child: field(&r, tags::CHILD, "child")?,
         offset_m: field(&r, tags::OFFSET, "offset")?,
+        // ★ ABSENT IN A ROW WRITTEN BEFORE THE FACING EXISTED, and then the parent's own axes — the
+        // attitude every such hull was parked in. That is the old row's meaning, not a default for
+        // a broken one: a facing that is present and does not decode is refused like any field.
+        facing: optional_field(&r, tags::FACING, "facing")?.unwrap_or(glam::DQuat::IDENTITY),
         bound: field(&r, tags::BOUND, "bound")?,
         look: field(&r, tags::LOOK, "look")?,
         fence: field(&r, tags::FENCE, "fence")?,
@@ -538,6 +546,17 @@ fn field<T: serde::de::DeserializeOwned>(
 ) -> Result<T, String> {
     r.required(tag)
         .map_err(|e| format!("a stored row is missing or malformed at {name}: {e}"))
+}
+
+/// One OPTIONAL field: `None` when the writer (an older binary) did not state it, or a refusal naming
+/// it when it is present and does not decode.
+fn optional_field<T: serde::de::DeserializeOwned>(
+    r: &TlvReader<'_>,
+    tag: u16,
+    name: &str,
+) -> Result<Option<T>, String> {
+    r.optional(tag)
+        .map_err(|e| format!("a stored row is malformed at {name}: {e}"))
 }
 
 /// A body read back, or a named refusal. Refused rather than defaulted, for the same reason a berth is.
@@ -689,6 +708,7 @@ mod tests {
         Berth {
             child,
             offset_m: DVec3::new(1000.0, 0.0, 0.0),
+            facing: glam::DQuat::from_rotation_z(0.25),
             bound: Boundary::Shell { r: 20.0 },
             look: Boundary::Shell { r: 20.0 },
             fence: Fence(1),
@@ -718,6 +738,40 @@ mod tests {
         let read = decode_berth(&encode_berth(&berth)).expect("a written berth reads back");
         assert_eq!(read.child, berth.child);
         assert_eq!(read.offset_m, berth.offset_m);
+        assert_eq!(read.facing, berth.facing, "the attitude it was parked in");
+    }
+
+    /// ★ A BERTH WRITTEN BEFORE THE FACING EXISTED (2026-09-27) reads as the parent's own axes — the
+    /// attitude every such hull was parked in — and a facing that is present but does not decode is
+    /// refused by name, never defaulted.
+    #[test]
+    fn an_older_berth_reads_as_the_parents_axes_and_a_broken_facing_is_refused() {
+        let berth = a_berth(ship(1));
+        let older = vd_core::tlv::TlvWriter::new(super::BERTH_SCHEMA)
+            .required(super::tags::CHILD, &berth.child)
+            .and_then(|w| w.required(super::tags::OFFSET, &berth.offset_m))
+            .and_then(|w| w.required(super::tags::BOUND, &berth.bound))
+            .and_then(|w| w.required(super::tags::LOOK, &berth.look))
+            .and_then(|w| w.required(super::tags::FENCE, &berth.fence))
+            .expect("an older berth encodes")
+            .finish();
+        let read = decode_berth(&older).expect("an older berth reads back");
+        assert_eq!(read.facing, glam::DQuat::IDENTITY);
+        assert_eq!(read.offset_m, berth.offset_m);
+        let broken = vd_core::tlv::TlvWriter::new(super::BERTH_SCHEMA)
+            .required(super::tags::CHILD, &berth.child)
+            .and_then(|w| w.required(super::tags::OFFSET, &berth.offset_m))
+            .and_then(|w| w.optional(super::tags::FACING, &[0xFF_u8; 3]))
+            .and_then(|w| w.required(super::tags::BOUND, &berth.bound))
+            .and_then(|w| w.required(super::tags::LOOK, &berth.look))
+            .and_then(|w| w.required(super::tags::FENCE, &berth.fence))
+            .expect("a berth with a broken facing encodes")
+            .finish();
+        assert!(
+            decode_berth(&broken)
+                .expect_err("a broken facing is refused")
+                .contains("facing")
+        );
     }
 
     #[test]

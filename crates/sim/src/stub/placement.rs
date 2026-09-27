@@ -133,6 +133,7 @@ pub(crate) fn placement_row(
     moving: &BTreeMap<RealmId, MotionFn>,
     driven: &crate::stub::drive::DrivenChildren,
     r: &RealmRegion,
+    facing: DQuat,
     secs: f64,
 ) -> FramePlacement {
     if let Some(state) = driven.state_of(r.realm) {
@@ -157,7 +158,9 @@ pub(crate) fn placement_row(
             origin_cell: r.center.in_parents_frame().cell(),
             origin: r.center.in_parents_frame().offset(),
             velocity: DVec3::ZERO,
-            orientation: DQuat::IDENTITY,
+            // ★ THE ATTITUDE IT WAS PARKED IN (2026-09-27): its berth's facing, or this realm's own
+            // axes for a child parked with none.
+            orientation: facing,
             angular_velocity: DVec3::ZERO,
         },
     }

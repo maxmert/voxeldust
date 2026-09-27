@@ -458,8 +458,17 @@ pub(crate) fn relay_bulk(
         stats.bulk_for_unrouted += 1;
         return;
     }
+    // ★ A RELAYED TILE IS RECORDED (2026-09-27): the shard ships each tile to a session once, so a
+    // tile the transport sheds toward the client is sent again from the gateway's own copy by the
+    // session's re-drive (`super::artifact::serve_artifacts`).
+    let tile = super::artifact::tile_key_of(&bytes);
+    let GatewaySessions {
+        by_session,
+        relayed_tiles,
+        ..
+    } = sessions;
     for session_id in named {
-        let Some(session) = sessions.by_session.get_mut(session_id) else {
+        let Some(session) = by_session.get_mut(session_id) else {
             stats.bulk_for_unrouted += 1;
             tracing::warn!(
                 ?session_id,
@@ -485,6 +494,7 @@ pub(crate) fn relay_bulk(
             }
             session.held_bulk.push(bytes.clone());
             stats.bulk_for_held += 1;
+            record_relayed(session, relayed_tiles, tile, &bytes);
             continue;
         }
         let stale = session
@@ -521,5 +531,29 @@ pub(crate) fn relay_bulk(
             },
         );
         stats.artifact_parts_relayed += 1;
+        record_relayed(session, relayed_tiles, tile, &bytes);
     }
+}
+
+/// ★ ONE RELAYED TILE, RECORDED (2026-09-27): the session's record names it and the gateway keeps
+/// the newest copy of its bytes; anything that is not a tile is not recorded.
+fn record_relayed(
+    session: &mut super::session::Session,
+    copies: &mut std::collections::BTreeMap<
+        (vd_core::pose::RealmId, super::session::TileKey),
+        Vec<u8>,
+    >,
+    tile: Option<(vd_core::pose::RealmId, super::session::TileKey)>,
+    bytes: &[u8],
+) {
+    let Some((realm, key)) = tile else {
+        return;
+    };
+    session
+        .artifact_redrive
+        .relayed
+        .entry(realm)
+        .or_default()
+        .insert(key);
+    copies.insert((realm, key), bytes.to_vec());
 }

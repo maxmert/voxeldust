@@ -109,8 +109,12 @@ fn process_gateway_inbound(
                 );
                 continue;
             }
-            // A local shed says nothing about anybody's liveness.
-            Inbound::SendShed { .. } => continue,
+            // A local shed says nothing about anybody's liveness. ★ But toward a CLIENT it says a
+            // part may be lost (2026-09-27): the session's artifact serve re-drives.
+            Inbound::SendShed { to, .. } => {
+                super::artifact::note_send_shed(*to, clock.local_tick, &mut sessions, &mut stats);
+                continue;
+            }
         };
         // Node-class dispatch (FORK 5): orchestrator → routable-shard → client-fallthrough. The orderING
         // (orchestrator first) keeps a shard NodeId from ever colliding with the orchestrator role; node

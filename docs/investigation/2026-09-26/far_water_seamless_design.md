@@ -986,8 +986,16 @@ pixels' floor, and the widest step —
 | the hull, 528 m/s | 2 130, widest 12 | 2 375, widest 14 |
 
 The hull legs are the same within this detector's sampling, which catches an arrival only by chance and cannot tell it
-from a band's motion. Both runs fail the gate's WALK band check the same way (37 frames with up to 6 urgent chunks):
-a regression at HEAD, registered, not R1's.
+from a band's motion. Both runs fail the gate's WALK band check the same way (37 frames with up to 6 urgent chunks).
+★ CORRECTED THE SAME DAY (the walk's band gap, MEASURED; DEFERRED "THE WALK'S BAND GOES INCOMPLETE AGAIN"): that is not
+a regression and not the band's rule. The gate's fixture boots a new world, and each planet's shard solves its
+artifact at its first boot — the home planet in 205 s, the far planets in its window in 77 s, 162 s and 382 s. So in
+BOTH flights the walk ran on the home planet's UNSOLVED ground (the recipe's own relief), the walk's gap was a far
+planet 0.02 px wide whose solve landed 47 s into the walk (its six globe chunks built again), and the home planet's
+solve landed 22 s into the 240 m/s leg, so that leg's numbers hold the whole planet's rebuild. The two clients flew
+the same timeline, so the comparison above stands; the walk's absolute numbers describe the unsolved ground. The gate
+now waits for the window's artifacts before a leg; on the solved world its stands, still seated on the recipe's own
+relief, put the walker's eye 1 453 m under the ground (DEFERRED, the two entries after the walk's).
 
 THE ARRIVALS (R1c; `r1_stream.sh` and `crates/bins/examples/pop_run.rs`): a pilot 148 km over the steep coast logs in,
 and four seconds of consecutive frames are recorded while about a thousand chunks land (both clients at 1 048/1 112

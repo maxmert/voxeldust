@@ -643,6 +643,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     *node
         .world_mut()
         .resource_mut::<vd_sim::stub::RealmRegions>() = vd_sim::stub::RealmRegions::new(regions)
+        // ★ THE ATTITUDES THIS REALM PARKED ITS BUILT CHILDREN IN (2026-09-27): each stored berth's
+        // facing, so a parked hull's row and its first driven state start as it was parked.
+        .with_berthed_facings(stored_berths.iter().map(|b| (b.child, b.facing)).collect())
         .with_moving_children(vd_physics::motion::kepler_motion_fns(moving))
         // THE CHILD INDEX (SL9). Naming the hosted realm is what lets the forest be split into "my own
         // direct children" (which a lookup can answer for) and "everything else" (always evaluated), so

@@ -3642,17 +3642,45 @@ pub(crate) fn sync_terrain(
             // reads of each one's column. A chunk the last set called `absent` was first wanted by
             // this frame's own descent; one it called `urgent` was asked earlier and is late.
             if gap > 0 {
+                // ★ THE GAP'S OWN REALM (2026-09-27, the walk leg's far-planet gap): the count above
+                // sums every body's ladder, so the latch names the realm whose ladder lacks the most
+                // urgent chunks (the body under the eye on a tie) and reads them from THAT body's
+                // own drawn eye. MEASURED before: a far planet 0.02 px wide, whose first solve
+                // landed mid-walk, had its six globe chunks built again (2.0 s until its pyramid's
+                // tiles were here), and they were latched as the home planet's gap with an empty list.
+                let (gap_realm, gap_body, gap_eye) = {
+                    let Terrain { lane, ladders, .. } = &*terrain;
+                    let worst = ladders
+                        .iter()
+                        .map(|(r, l)| {
+                            let n: u64 = l
+                                .wanted
+                                .urgent_missing_per_rung(&|k| lane.is_resident(*r, k))
+                                .iter()
+                                .map(|(_, n)| *n)
+                                .sum();
+                            (n, *r == *realm, *r)
+                        })
+                        .max()
+                        .map_or(*realm, |(_, _, r)| r);
+                    with_bodies
+                        .iter()
+                        .find(|eb| eb.realm == worst)
+                        .map_or((*realm, Arc::clone(body), eye_body), |eb| {
+                            (worst, Arc::clone(&eb.body), eb.eye)
+                        })
+                };
                 let misses: Vec<vd_devproto::DevBandMiss> = {
                     let Terrain { lane, ladders, .. } = &*terrain;
-                    ladders.get(realm).map_or_else(Vec::new, |l| {
+                    ladders.get(&gap_realm).map_or_else(Vec::new, |l| {
                         l.wanted
-                            .urgent_missing_keys(&|k| lane.is_resident(*realm, k), GAP_KEYS_CAP)
+                            .urgent_missing_keys(&|k| lane.is_resident(gap_realm, k), GAP_KEYS_CAP)
                             .into_iter()
                             .map(|key| {
                                 let probe = l.view.probe(
-                                    body,
-                                    lane.artifact(*realm).map(|a| &**a),
-                                    eye_body,
+                                    &gap_body,
+                                    lane.artifact(gap_realm).map(|a| &**a),
+                                    gap_eye,
                                     key,
                                 );
                                 vd_devproto::DevBandMiss {
@@ -3673,12 +3701,12 @@ pub(crate) fn sync_terrain(
                 };
                 let pace = terrain
                     .ladders
-                    .get(realm)
+                    .get(&gap_realm)
                     .map_or((false, 0.0, 0.0), |l: &RealmLadder| {
                         (l.descent_ran, l.drift_m, l.since_descent_s)
                     });
                 terrain.last_gap = Some(vd_devproto::DevBandGap {
-                    realm: format!("{realm:?}"),
+                    realm: format!("{gap_realm:?}"),
                     frame: terrain.frames,
                     urgent: gap,
                     misses,
@@ -3687,6 +3715,8 @@ pub(crate) fn sync_terrain(
                     step_m: EYE_STEP_M,
                     since_descent_s: pace.2,
                     lead_m,
+                    body_radius_m: gap_body.radius_m(),
+                    body_distance_m: DVec3::from_array(gap_eye).length(),
                 });
             }
             if stamp_due {

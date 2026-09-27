@@ -690,6 +690,7 @@ mod built_boot_tests {
         let berth = Berth {
             child: a_ship(),
             offset_m: DVec3::new(1000.0, 0.0, 0.0),
+            facing: vd_core::glam::DQuat::IDENTITY,
             bound: Boundary::Shell { r: 20.0 },
             look: Boundary::Shell { r: 20.0 },
             fence: Fence::GENESIS,
@@ -726,6 +727,7 @@ mod built_boot_tests {
         let berth = Berth {
             child: a_ship(),
             offset_m: DVec3::new(1000.0, 0.0, 0.0),
+            facing: vd_core::glam::DQuat::IDENTITY,
             bound: Boundary::Shell { r: 20.0 },
             look: Boundary::Shell { r: 20.0 },
             fence: Fence::GENESIS,

@@ -9135,6 +9135,14 @@ draws itself"):**
   clients on the same stand drew it; the client's own log holds no artifact line to say why, so the next
   build WARNS on every artifact refusal (`ArtifactIngest::Shape`/`NoHead`) and names the realm the lane holds
   against a stated digest, so the next occurrence leaves evidence.
+  ★ MEASURED AGAIN 2026-09-27 (generator 21, the moving-eye gate's new world, three runs): the home planet's first
+  solve now takes 205 s (not 85 s), and the far planets in its window 77 s, 162 s and 382 s (the moon 0.3 s). A far
+  body's first solve builds its six globe chunks again: the old ones stand until the new ones land 2.0 s after the
+  head, then its shape changes in one frame. The home planet's first solve builds about 8 000 chunks again while the
+  pilot flies, and old and new ground stand side by side until the last one lands. The dev cluster keeps its stores
+  (road (b), ruling W9), so this shows after a generator change or on a planet whose shard never ran; the gate now
+  waits for the window's artifacts (the walk entry, "THE WALK'S BAND GOES INCOMPLETE AGAIN"). Road (a) and the
+  swap's look stay the owner's call.
 - 🟨 **8d STEP 1 — THE BEDS' HARDNESS (2026-09-21).** The cap-rock bench drew a tread at every bed with one
   body-wide strength, so a belt's slopes read as contour lines (the owner's 10 km screenshot). Now each bed
   top's hardness is a seed identity draw (`vd_recipe::terrace::bed_hardness`), the pull toward the nearer
@@ -10377,12 +10385,119 @@ updated in the same change as the work, deleted when done). The interims named h
   under the owner's look.
 
 ---
-- 🟥 **THE WALK'S BAND GOES INCOMPLETE AGAIN** (found 2026-09-27 by slice R1's flights, on HEAD `13d7fdc` and on R1 alike):
-  the moving-eye gate's walk leg (1.4 m/s) reads the band incomplete on 37 frames, up to 6 urgent chunks at the worst
-  sample, the queue at 8–11 pending and the lead at 0.2 m — a shallow queue, so the gate's own text points at the band's
-  rule (the lead, the territory, the skyline), not the build rate. The 2026-09-09 run read it complete (item 4 above).
-  WHERE: `crates/client/src/ladder_view.rs` (the descent), `crates/bins/tests/terrain_moving_eye.rs:1773`. WHEN: before
-  the next slice lands on the moving-eye gate; the regression's commit UNMEASURED.
+- 🟩 **THE WALK'S BAND GOES INCOMPLETE AGAIN** (found 2026-09-27 by slice R1's flights, on HEAD `13d7fdc` and on R1 alike):
+  the moving-eye gate's walk leg (1.4 m/s) read the band incomplete on 37 frames, up to 6 urgent chunks at the worst
+  sample. ★ CAUSE MEASURED THE SAME DAY (three runs): not the band's rule and not a code regression — THE WORLD'S FIRST
+  SOLVES. The gate's fixture boots a new world, and each planet's shard solves its artifact at its first boot: the home
+  planet in 205 s, the far planets in its window in 77 s, 162 s and 382 s, the moon in 0.3 s. The settle waited only for
+  the builds, so the walk flew on the home planet's UNSOLVED ground, and 47.6 s into the walk the far planet
+  Planet(6548333207712198820) — 4 589 km in radius, 408.7 million km away, 0.02 px wide — landed its solve: its head
+  came 1.41 s after the statement, the lane dropped its six globe chunks from its book and built them again 2.0 s later,
+  while the old six still stood on the screen (the gate counts what the lane holds). The same event made the 1.4 m/s
+  leg's 3 899-chunk gap (the home planet's solve landed 27 s into it, about 8 000 chunks built again) and part of the
+  240 m/s leg's peak in R1's flights. The latch had named the home planet with an empty list because the count sums
+  every body's ladder; it now names the realm whose ladder lacks the most, with its radius, distance and width in
+  pixels. CURE (the gate): every settle waits until each surfaced realm in the window holds its artifact whole
+  (`await_window_solved`; 363.9 s on the first settle of a new world). MEASURED AFTER: the walk reads 0 gap frames on
+  1 214 samples, the first-solve rebuild gone — BUT with the eye 1 453 m under the solved ground (the next entry), so
+  the walk's band on the solved ground is UNMEASURED. The flight then found the two 🟥 entries below. ★ MEASURED ON THE
+  SOLVED GROUND (the same day, after both entries below and a third loss were cured; `VD_LEGS=0`): the walk reads 0 gap
+  frames on 1 202 samples, the eye 4 m over the ground at the start and 10 m at the end (the path runs gently downhill),
+  16 001 chunks on screen at the least, the pop detector comparing 15.2 million pixels; the 1.4 m/s hull leg reads 0 gap
+  frames on 1 289 samples (before: 315 frames, the home planet's rebuild). The test passes.
+- 🟩 **THE MOVING-EYE GATE SEATS ITS STANDS ON THE RECIPE'S OWN RELIEF** (found 2026-09-27 by the solved-world walk): the
+  walker, the pilot, the berths and the hull's clearance are read from `height_m(&body, dir, _)` with no artifact. On
+  the solved world the walker's eye stood 1 453 m UNDER the drawn ground for the whole walk (the pop detector compared
+  0 pixels), and in the earlier runs the 1.4 m/s hull leg flew 327 m under it once the home planet's solve had landed.
+  So since the solve (8c) the gate flew the unsolved ground before the home solve and under the ground after it. The
+  cure: seat every stand, and the hull path's clearance, on the solved field (the home planet's artifact solved by the
+  same code, `vd_bins::artifact_worker::run_solve`, before the cluster boots). The pictures gate owes the same
+  (D-TERRAIN-9's note in `terrain_pictures.rs`). WHERE: `crates/bins/tests/terrain_moving_eye.rs` (the stand, the
+  path). WHEN: before the gate is judged again. ★ BUILT THE SAME DAY (owner: "Solve in the test", then "near the
+  equator, the star 35°"): the test solves the home planet itself (153.6 s; the SAME digest its shard states) and reads
+  every stand and the hull path's clearance off the drawn solved surface (the ground, or the water over it). THE
+  STAND MOVED, MEASURED (`examples/equator_stands`, on the cached solve with today's digest): the sun's stand is ocean
+  5 490 m deep, only 2.3 % of the equator is dry and all of it lies on the night side, and the land where the star
+  stands 15° up lies 15.8° south, where a planted hull's nose would point 15.8° off level (a berth has no heading,
+  the next entry). So the stand is the walkable land within a degree of the sun's stand's latitude, on the day side,
+  whose star stands nearest 15° up: 14 380 km east, 1.36° south, the star 35.1° up, a plain 321 m over the sea; the
+  test asserts that the client holds the very artifact the stands were read off. MEASURED in flight: the walker's eye
+  4–10 m over the ground, the hull 754–772 m over it, the digest check green.
+- 🟩 **A BERTH HAS NO HEADING** (found 2026-09-27 by the moving-eye gate's stand): a hull planted by the shipyard's
+  stand-in (`vd-build-ship`) states only its offset, so it starts with its nose along its parent's `−Z`, which is
+  level only on a planet's equator; at 15.8° south it points 15.8° off level, and at a pole straight into the ground.
+  A pilot who boards a hull parked anywhere else meets a hull tilted by the latitude. WHERE: the berth row
+  (`bs::encode_berth`, `crates/bins/src/bin/build-ship.rs`) and the parent's first placement of the child. WHEN: with
+  the shipyard (the builder's hull row), or before a gate needs a level hull off the equator. ★ IT IS THE WHOLE FACING,
+  NOT ONLY THE HEADING (MEASURED 2026-09-27, the full moving-eye gate on the solved stand): a planted hull's up is its
+  parent's `+Y` wherever it stands. At the old equator stand `+Y` was 15° from the local vertical; at the solved stand
+  (14 380 km east) the local vertical is (0.80, −0.60, −0.02), so the hull stands ROLLED about 127° about its level
+  nose. The straight legs do not see it; the turning leg yaws the hull about its own up — there nearly horizontal —
+  by 128.2°, after which the pilot's "up" stick pushes almost sideways, so the descent's climb fell from 1 614 m to
+  686 m, its push down carried the hull 6.7 km under the ground, the fall's read lasted 0 s and the gate failed on
+  "hull descent: no sample" (the departure then climbed out from under the ground). No walkable day-side land lies
+  within 25° of the planet frame's `+Y` (`examples/equator_stands`), so no stand avoids it. WHEN: before the full
+  moving-eye gate can pass on the solved ground. ★ BUILT THE SAME DAY (owner: "Berths get a facing"): `Berth.facing`
+  (`vd_core::built`) is the attitude the parent PARKED the child in — written with the offset when it is built,
+  stored or moved home, never by a tick (the live facing stays absent, `WHY_NO_POSITION`); the stored row carries it
+  as OPTIONAL tag 8, so a row written before reads as the parent's own axes (its old meaning) and a facing that is
+  present but broken is refused by name; the parent holds its berthed facings beside its movers
+  (`RealmRegions::with_berthed_facings`, seeded at the shard's boot from its stored berths, set at an adoption), and
+  a parked child's row, a static child's row and the first state its drive is integrated from all start in it
+  (`placement_row`'s parked arm, the static rows, both drive seeds); an adoption records the attitude the hull
+  arrived in, which also closes a restart seam (a re-planted adopted hull used to stand in its new parent's axes);
+  `vd-build-ship` takes `--berth-facing-x/-y/-z/-w` and refuses four numbers that are not a rotation; the moving-eye
+  gate parks each hull in its pilot's attitude and reads the clearance along the pilot's forward (the stick pushes
+  along the pilot's facing — MEASURED: the 528 m/s leg rose 171 m over the ground in 31 km, not the 740 m a −Z path
+  would). Tests: the row and the older-row reading, the parked, static and adopted rows with a plain forest as the
+  control, both seeds, the adoption (a hull arriving turned), the tool end to end. ★ MEASURED: THE FULL MOVING-EYE GATE
+  PASSES (every leg, 2 292 s): after the turning leg's 76.5° turn the descent climbs to 104 272 m, falls 78 s and 39 s
+  more with 0 gap frames and the sky within its allowance, and is arrested at 6 965 m; the departure reads 0 gap
+  frames over 1 079 s (before: 308, from under the ground). The clearance along the real path finds the ground rising
+  37 m (248 m along `−Z`), so the hull flies 537 m over the stand, and the fast legs' reported peaks rose with the
+  lower flight (240 m/s: 491 urgent chunks; 528 m/s: 2 023; the turn: 1 194).
+- 🟥 **A CHILD SEEN FROM OUTSIDE IS DRAWN IN ITS PARENT'S AXES** (found 2026-09-27 mapping the berth facing): every
+  child row a parent ships for the picture is read back through `pose_of_row` (`crates/sim/src/stub/placement.rs`),
+  which stamps the parent's own axes as the orientation. From inside a hull the world turns right (the hop row is the
+  whole book row); from outside — a walker on the planet looking at a hull, parked in its facing or turning — the
+  hull is drawn unturned. Carrying the row's orientation there would also turn every planet's drawn row by its
+  placement's orientation, so it needs its own measurement first. WHERE: `pose_of_row` and the child rows built on it
+  (`regions.rs` `child_rows_for`/`child_rows`, `window.rs`). WHEN: with the hull's own look, or before a gate watches a
+  hull from outside.
+- 🟩 **THE ARTIFACT SERVE OVERRUNS A CLIENT'S RETRY BUFFER, AND A SHED PART IS NEVER SENT AGAIN** (found 2026-09-27 by the
+  solved-world walk; a PLAYER-FACING defect): the gateway's paced serve grants EACH REALM its own budget of
+  `ARTIFACT_PARTS_PER_BEAT` (32 parts) a beat for each session, while the constant's own text says "a megabyte a beat"
+  to one client. A session that logs in while the gateway holds five whole artifacts gets five pyramids at once (253 +
+  4 + 133 + 711 + 338 parts, about 5 MB a half-second beat, plus tiles) against the transport's 4 MB reliable retry
+  buffer per peer. MEASURED: 452 sends shed in four seconds (`reliable retry buffer FULL … shedding a new 32789-byte
+  send`), none in the three earlier runs (there the solves landed one by one); the gateway skips the transport's
+  `SendShed` notice and its cursor had moved, so the three far planets' pyramids were NEVER whole for that client in
+  900 s (the home planet's and the moon's were). In the game: a second player behind a
+  warm gateway, or a player who logs in again, can lack a far body's shape for good, and a shed TILE is never sent
+  again either. The cure has two halves: ONE budget a beat per session across its realms, as the constant states, and a
+  RE-DRIVE (a shed toward a client, or a pyramid not stated held some beats after its last part, serves again — the
+  client drops a part it holds). WHERE: `crates/connection-plane/src/gateway/artifact.rs` (`serve_artifacts`),
+  `gateway/register.rs` (the skipped notice). WHEN: before the moving-eye gate is judged again (its hull settle waits
+  for it). ★ BUILT THE SAME DAY (owner: "Fix now"): ONE BUDGET a beat per session, in bytes (`ARTIFACT_BYTES_PER_BEAT`,
+  a megabyte, the relayed tiles a re-drive owes first, then each drawn realm's tiles and parts in the picture's order;
+  a part that starts inside the budget still goes); THE RE-DRIVE (`ArtifactRedrive` on the session): a `SendShed`
+  toward a client arms it, the serve holds that client a beat, then every realm not stated whole owes one more pass
+  from the head once its pass in flight ends, the view tiles are served again, and the tiles a shard shipped to that
+  session are sent again from the gateway's one copy (`relayed_tiles`, recorded at the relay, kept while a session's
+  record names it, dropped for a realm whose digest changes). Tests: the budget across three realms (the control: the
+  old rule sends all twelve parts at once), the hold and the re-drive, a pass that reaches its tail first, the paced
+  resend, the shed toward a node with no session, the relay record, the pruning, the stale digest; HR5 100 % on the
+  gateway crate and the dev protocol (two older intake gaps covered too).
+  ★ AND A THIRD LOSS, FOUND BY THE NEXT FLIGHT (2026-09-27): a far planet (Planet(17782101822166660494), 7 343 km,
+  208 million km away) whole at the walker's client left the client's picture for a moment at 255 s into the settle
+  and came back; the client forgets an artifact when a delta removes its realm (`net.rs`), but the session still
+  named it held and its cursor stood at the end, so the serve skipped it for good (unheld after 900 s). CURED: the
+  pass that sends a delta's `removed` also forgets that session's records of those realms
+  (`artifact::forget_for_session`, called in `window_lane.rs`), so a realm that returns is served again from its
+  head; the test's control (the forget switched off) fails on the session still naming the planet held. MEASURED in
+  flight: the pilot's client, logging in behind the warm gateway, holds all five planets' artifacts whole after 45.3 s
+  (before: three never, in 900 s); no send shed on the whole flight. The price: a client that draws five planets now
+  receives them at one megabyte a half-second beat in all, the home planet first (the picture's order).
 - 🟨 **SLICE R1's RESIDUES** (2026-09-27, the far-water design §10.2): (1) a landing chunk whose stand-in is TWO rungs
   coarser starts on the one-coarser surface; (2) a caster-only chunk (the shadow ladder) enters whole; (3) THE WATER
   DECISIONS: a finer chunk that lands with water where its stand-in drew land shows its sea in one frame (MEASURED on the

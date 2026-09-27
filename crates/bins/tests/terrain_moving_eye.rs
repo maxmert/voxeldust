@@ -395,10 +395,11 @@ fn await_active(devctl: u16) -> DevState {
     }
 }
 
-/// Wait until the ladder has landed whole: a first chunk drawn, then nothing pending. The wait
-/// POLLS and prints its time course (MEASURED 2026-09-10: a boarding that never settled — the
-/// lead eye 5 591 km from the drawn one, 238 000 builds in three minutes — left only its last
-/// state behind; the course is what a diagnosis needs).
+/// Wait until the ladder has landed whole: a first chunk drawn, every body in the window drawn from
+/// its own artifact ([`await_window_solved`]), then nothing pending. The wait POLLS and prints its
+/// time course (MEASURED 2026-09-10: a boarding that never settled — the lead eye 5 591 km from the
+/// drawn one, 238 000 builds in three minutes — left only its last state behind; the course is what
+/// a diagnosis needs).
 fn await_settled(devctl: u16, leg: &str) {
     let reply = round_trip(
         devctl,
@@ -415,6 +416,7 @@ fn await_settled(devctl: u16, leg: &str) {
         matches!(reply, DevResponse::State { .. }),
         "{leg}: the terrain never drew a chunk: {reply:?}"
     );
+    await_window_solved(devctl, leg);
     let started = Instant::now();
     let deadline = Duration::from_millis(TERRAIN_WAIT_TICKS * 1_000 / 20);
     let mut printed = 0u64;
@@ -457,6 +459,72 @@ fn await_settled(devctl: u16, leg: &str) {
         std::thread::sleep(Duration::from_millis(SETTLE_POLL_MS));
     }
 }
+
+/// ★ THE LEGS FLY THE SOLVED WORLD (2026-09-27, the walk's band gap): wait until every realm in the
+/// window whose row states a surface holds its artifact's whole pyramid in the client's book.
+///
+/// The fixture boots a new world, and each planet's shard solves its artifact off the tick at its
+/// first boot; until the solve lands the realm states no artifact and the client draws the recipe's
+/// own relief. When it lands, the lane drops every chunk of that realm and builds it again on the
+/// artifact. MEASURED on three flights: the home planet solved in 205 s, the far planets in 77 s,
+/// 162 s and 382 s — so the walk flew on the home planet's UNSOLVED ground, a far planet 0.02 px
+/// wide was rebuilt 47.6 s into the walk (the walk's 37–38 gap frames: six globe chunks for 2.0 s,
+/// their old drawing still standing), and the 1.4 m/s leg's 3 899-chunk gap was the home planet's
+/// whole rebuild, not the builders' rate. Every planet with a surface solves an artifact today; a
+/// surfaced realm that states none by design would hold this wait to its deadline, which names it.
+///
+/// **Example.** The walker logs in on the home planet; its shard is still solving, so the ground is
+/// the recipe's own relief. The wait prints the realms still unsolved every ten seconds; at 205 s
+/// the home planet's artifact lands and the ladder is built again on it; at 382 s the last far
+/// planet's pyramid is whole, and the settle then waits for the builds.
+fn await_window_solved(devctl: u16, leg: &str) {
+    let started = Instant::now();
+    let mut printed = 0u64;
+    loop {
+        let st = poll(devctl);
+        let unsolved: Vec<&str> = st
+            .realm_boxes
+            .iter()
+            .filter(|b| b.surface)
+            .map(|b| b.realm.as_str())
+            .filter(|r| !st.artifacts.held.iter().any(|(h, whole)| h == r && *whole))
+            .collect();
+        if unsolved.is_empty() {
+            let waited = started.elapsed();
+            if waited >= Duration::from_secs(SOLVE_COURSE_S) {
+                eprintln!(
+                    "terrain_moving_eye/{leg}: every surfaced realm in the window holds its \
+                     artifact whole after {:.1} s",
+                    waited.as_secs_f64()
+                );
+            }
+            return;
+        }
+        let secs = started.elapsed().as_secs();
+        if secs / SOLVE_COURSE_S > printed {
+            printed = secs / SOLVE_COURSE_S;
+            eprintln!(
+                "terrain_moving_eye/{leg}: waiting t {secs:4} s for the window's artifacts — \
+                 unsolved or not yet whole {unsolved:?}, the book holds {:?}",
+                st.artifacts.held
+            );
+        }
+        assert!(
+            started.elapsed() < SOLVE_DEADLINE,
+            "{leg}: a surfaced realm never held its artifact whole after {SOLVE_DEADLINE:?}: \
+             {unsolved:?} (the book holds {:?})",
+            st.artifacts.held
+        );
+        std::thread::sleep(Duration::from_millis(SETTLE_POLL_MS));
+    }
+}
+
+/// The artifact wait's deadline: the slowest first solve in the home planet's window MEASURED
+/// 382 s on the development machine (2026-09-27, three runs: a 25 400 km planet 196 million km
+/// away), and this allows it more than twice over.
+const SOLVE_DEADLINE: Duration = Duration::from_secs(900);
+/// How often the artifact wait prints its course, in seconds.
+const SOLVE_COURSE_S: u64 = 10;
 
 /// The settle wait's poll period, and how often it prints its course.
 const SETTLE_POLL_MS: u64 = 250;
@@ -961,14 +1029,24 @@ fn gap_record(t: f64, frames: u64, gap: &vd_devproto::DevBandGap, peak: (u64, &s
             )
         })
         .collect::<Vec<String>>();
+    // ★ THE GAP'S BODY (2026-09-27): its angular width at the drawn eye, in reference pixels, so a
+    // far body drawn as a point reads apart from the ground under the walker.
+    let body_px = if gap.body_distance_m > gap.body_radius_m {
+        2.0 * (gap.body_radius_m / gap.body_distance_m).asin() / vd_client::ladder_view::pixel_rad()
+    } else {
+        f64::INFINITY
+    };
     format!(
         "t {t:6.2} s - THE LATCHED GAP of frame {} (this sample's frame {frames}): {} urgent \
-         missing in {}; the descent {} this frame, the lead eye had drifted {:.3} m of a {:.3} m \
-         step, {:.3} s since the last descent, the lead {:.3} m; the worst single chunk ever \
-         built {:.1} ms ({}); MISSING: {:?}",
+         missing in {} (a body {:.0} m in radius {:.0} m from the eye, {body_px:.2} px wide); \
+         the descent {} this frame, the lead eye had drifted {:.3} m of a {:.3} m step, {:.3} s \
+         since the last descent, the lead {:.3} m; the worst single chunk ever built {:.1} ms \
+         ({}); MISSING: {:?}",
         gap.frame,
         gap.urgent,
         gap.realm,
+        gap.body_radius_m,
+        gap.body_distance_m,
         if gap.descent {
             "RE-CUT the ring"
         } else {
@@ -1704,6 +1782,148 @@ fn stand(d: DVec3, height_m: f64, surface_m: f64, forward: DVec3) -> Stand {
     }
 }
 
+/// ★ THE HOME PLANET SOLVED IN THIS PROCESS (2026-09-27, the solved-world walk): the artifact its
+/// shard solves at its first boot, by the same code (`vd_bins::artifact_worker::run_solve`), and the
+/// body carrying the solved sea — the ground and the water every leg's picture draws once the
+/// artifact is held.
+struct SolvedHome {
+    body: vd_terrain::BodyDefinition,
+    artifact: vd_terrain::artifact::Artifact,
+}
+
+impl SolvedHome {
+    /// The DRAWN surface's radius along a direction at a rung: the ground, or the water sheet over a
+    /// column that stands under its water — the surface the stamp's altitude reads against.
+    fn drawn_m(&self, dir: DVec3, rung: u8) -> f64 {
+        vd_terrain::height::drawn_height_field_m(&self.body, &self.artifact, dir.to_array(), rung)
+            .expect("the solved field covers every direction")
+    }
+
+    /// Whether the column along a direction is dry at rung 0: its drawn surface is its ground.
+    fn dry(&self, dir: DVec3) -> bool {
+        let ground =
+            vd_terrain::height::height_field_m(&self.body, &self.artifact, dir.to_array(), 0)
+                .expect("the solved field covers every direction");
+        self.drawn_m(dir, 0) <= ground
+    }
+}
+
+/// Solve the home planet here, with the same body and words its shard reads.
+fn solve_home(body: &vd_terrain::BodyDefinition) -> SolvedHome {
+    let job = vd_bins::artifact_worker::SolveJob {
+        body: vd_terrain::home::home_planet(),
+        words: vd_terrain::home::home_solve_words(),
+    };
+    assert_eq!(
+        (job.body.seed(), job.body.radius_m().to_bits()),
+        (body.seed(), body.radius_m().to_bits()),
+        "the solve's body is the flight's home planet"
+    );
+    let started = Instant::now();
+    let artifact = vd_bins::artifact_worker::run_solve(&job).expect("the home planet solves");
+    eprintln!(
+        "terrain_moving_eye: the home planet's artifact solved here in {:.1} s (digest {:?}, sea \
+         {:?} m)",
+        started.elapsed().as_secs_f64(),
+        artifact.digest(),
+        artifact.sea()
+    );
+    SolvedHome {
+        body: (*body).with_sea_m(artifact.sea()),
+        artifact,
+    }
+}
+
+/// How far the walker's path is checked, in metres: the leg's read at the foot speed and the speed
+/// polls before it, a quarter over.
+fn walk_path_m() -> f64 {
+    WALK_MPS * (walk_s() + WALK_SETTLE_S) * 1.25
+}
+
+/// The seconds the walk's speed polls take before the read starts, bounded above.
+const WALK_SETTLE_S: f64 = 30.0;
+/// The walkable stand's search: its step along each circle of latitude, the band of latitude it
+/// reads either side of the sun's stand (in tenths of a degree), the lowest star that is still the
+/// day side, how densely it reads the walker's path, and how far the eye stays over the drawn ground
+/// along it.
+const STAND_STEP_M: f64 = 500.0;
+const STAND_LAT_TENTHS: i32 = 10;
+const STAND_DAY_MIN_DEG: f64 = 5.0;
+const WALK_SAMPLE_M: f64 = 5.0;
+const EYE_CLEARANCE_M: f64 = 0.5;
+
+/// ★ A WALKABLE STAND ON THE SOLVED GROUND (2026-09-27, the owner's ruling "near the equator, the
+/// star 35° up"). The solved world is mostly sea and the day side of the equator has no land
+/// (MEASURED with `examples/equator_stands`: 2.3 % of the equator is dry, all of it on the night
+/// side at the flight's start; the sun's stand is ocean 5 490 m deep). The stand is searched in the
+/// band `STAND_LAT_TENTHS` tenths of a degree either side of the sun's stand's latitude, as ruled
+/// when a planted hull still stood in the planet's axes (level only near the equator); since a
+/// berth states its facing the hull stands upright anywhere, and the band stays as ruled — all
+/// round the planet, on the day side: among the stands where the walker's whole path is dry and its
+/// eye stays `EYE_CLEARANCE_M` over the drawn ground, the one whose star stands nearest
+/// `SUN_ELEVATION_DEG` up (the nearer to the sun's stand on a tie). The nose is the sun's rule
+/// there. Returns the direction, the nose and the drawn surface's radius.
+///
+/// **Example.** On the committed world the walker stands 14 380 km east of the sun's stand, 1.36°
+/// south, on a dry plain 321 m over the sea, with the star 35.1° up; the hull is parked there
+/// upright in the pilot's attitude.
+fn walkable_stand(solved: &SolvedHome, sun: DVec3, d0: DVec3, path_m: f64) -> (DVec3, DVec3, f64) {
+    let radius_m = solved.body.radius_m();
+    let steps = (std::f64::consts::TAU * radius_m / STAND_STEP_M) as i64;
+    let samples = (path_m / WALK_SAMPLE_M).ceil() as u64;
+    // (how far the star is from the stated elevation, how far from the sun's stand, the stand)
+    let mut best: Option<(f64, i64, DVec3, DVec3, f64)> = None;
+    for tenth in -STAND_LAT_TENTHS..=STAND_LAT_TENTHS {
+        let lat = (f64::from(tenth) * 0.1).to_radians();
+        for k in 0..steps {
+            let signed = if k < steps / 2 { k } else { k - steps };
+            let phi = signed as f64 * STAND_STEP_M / radius_m;
+            let e = (vd_core::glam::DQuat::from_rotation_z(phi) * d0).normalize();
+            let d = (vd_core::glam::DQuat::from_axis_angle(e.cross(DVec3::Z).normalize(), lat) * e)
+                .normalize();
+            let star_deg = sun.dot(d).asin().to_degrees();
+            if star_deg < STAND_DAY_MIN_DEG || !solved.dry(d) {
+                continue;
+            }
+            let off = (star_deg - SUN_ELEVATION_DEG).abs();
+            let closer = best
+                .as_ref()
+                .is_none_or(|b| off < b.0 || (off == b.0 && signed.abs() < b.1));
+            if !closer {
+                continue;
+            }
+            let toward_sun = (sun - d * sun.dot(d)).normalize();
+            let level = vd_core::glam::DQuat::from_axis_angle(d, SUN_OFF_NOSE_DEG.to_radians())
+                * toward_sun;
+            let h = solved.drawn_m(d, 0);
+            let eye = d * (h + EYE_HEIGHT_M);
+            let clear = (0..=samples).all(|i| {
+                let p = eye + level * (i as f64 * WALK_SAMPLE_M);
+                let q = p.normalize();
+                solved.dry(q) && solved.drawn_m(q, 0) <= p.length() - EYE_CLEARANCE_M
+            });
+            if clear {
+                best = Some((off, signed.abs(), d, level, h));
+            }
+        }
+    }
+    let (_, steps_off, d, level, h) =
+        best.expect("a walkable stand on the day side near the equator");
+    eprintln!(
+        "terrain_moving_eye: the walkable stand {:.1} km round the planet from the sun's stand, \
+         latitude {:.2}°, the star {:.1}° up, the ground {:.0} m over the body's radius and {:.0} m \
+         over the sea; the planet frame's `−Z` stands {:.2}° off level there (the hull is parked \
+         upright, in the pilot's attitude)",
+        steps_off as f64 * STAND_STEP_M / 1000.0,
+        d.z.asin().to_degrees(),
+        sun.dot(d).asin().to_degrees(),
+        h - radius_m,
+        h - radius_m - f64::from(solved.body.sea_m().unwrap_or(0)),
+        (-d.z).asin().to_degrees()
+    );
+    (d, level, h)
+}
+
 fn spawn_entry(account: u64, planet_seed: u64, st: &Stand) -> String {
     format!(
         "{account}=Planet({planet_seed}):{},{},{}@{},{},{},{}",
@@ -1728,7 +1948,13 @@ fn minted_hull(seq: u64) -> RealmId {
 /// it (a diagnosis flight plants one hull per boarding: a boarded hull keeps its pilot's body,
 /// and a third pilot found the berth blocked — MEASURED 2026-09-11, the crossing never
 /// committed; players collide).
-fn plant_hull(f: &Fixture, planet: RealmId, berth_m: DVec3, seq: u64) -> RealmId {
+fn plant_hull(
+    f: &Fixture,
+    planet: RealmId,
+    berth_m: DVec3,
+    facing: vd_core::glam::DQuat,
+    seq: u64,
+) -> RealmId {
     let parent_store = realm_store_path(&vd_bins::realm_store_dir(&f.base), planet);
     let ship_store = realm_store_path(&vd_bins::realm_store_dir(&f.base), minted_hull(seq));
     let out = Command::new(env!("CARGO_BIN_EXE_vd-build-ship"))
@@ -1749,6 +1975,16 @@ fn plant_hull(f: &Fixture, planet: RealmId, berth_m: DVec3, seq: u64) -> RealmId
             &berth_m.y.to_string(),
             "--berth-z-m",
             &berth_m.z.to_string(),
+            // ★ PARKED UPRIGHT (2026-09-27): the pilot's own attitude at this berth — its up the
+            // ground's vertical, its nose the pilot's forward — so the hull yaws about the vertical.
+            "--berth-facing-x",
+            &facing.x.to_string(),
+            "--berth-facing-y",
+            &facing.y.to_string(),
+            "--berth-facing-z",
+            &facing.z.to_string(),
+            "--berth-facing-w",
+            &facing.w.to_string(),
         ])
         .output()
         .expect("the shipyard's stand-in runs");
@@ -1817,32 +2053,34 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     let _tier = vd_bins::cluster_tier();
     let body = vd_bins::home_body(DEV.universe_seed).expect("the home planet");
     let planet = RealmId::Planet(body.seed());
-    // THE STAND, as the picture gate finds it: the day side, on the equator, the star over the
-    // shoulder. The nose points along the ground.
+    // THE STAND: the day side, near the equator (the hull's nose is the planet frame's `−Z`), the
+    // star over the shoulder — on the SOLVED ground, the walkable land whose star stands nearest the
+    // stated elevation (`walkable_stand`). The nose points along the ground.
     let orbit = vd_bins::home_orbit(DEV.universe_seed).expect("the home planet's orbit");
     let sun = -vd_physics::celestial::orbital_state(&orbit, 0.0)
         .position
         .normalize();
     let along = sun.cross(DVec3::Z).normalize();
     let zenith = (90.0_f64 - SUN_ELEVATION_DEG).to_radians();
-    let d = (sun * zenith.cos() + along * zenith.sin()).normalize();
-    let dir = [d.x, d.y, d.z];
-    let h = vd_terrain::height::height_m(&body, dir, 0);
-    let toward_sun = (sun - d * sun.dot(d)).normalize();
-    let ahead =
-        vd_core::glam::DQuat::from_axis_angle(d, SUN_OFF_NOSE_DEG.to_radians()) * toward_sun;
-    let level = ahead;
+    let d0 = (sun * zenith.cos() + along * zenith.sin()).normalize();
+    // ★ ON THE SOLVED GROUND (2026-09-27, the solved-world walk): every leg flies once each
+    // artifact in the window is held (`await_window_solved`), so every stand is read off the home
+    // planet's OWN artifact, solved here by its shard's own solve. MEASURED before: read off the
+    // recipe's own relief, the walker's eye stood 1 453 m under the solved sea for the whole walk,
+    // and the 1.4 m/s hull leg flew 327 m under the solved ground.
+    let solved = solve_home(&body);
+    let (d, level, h) = walkable_stand(&solved, sun, d0, walk_path_m());
     // The walker faces LEVEL: it walks along its nose, and a nose tilted down walks into the
     // ground (MEASURED on the first run: 8° down, under the surface after 13 m, and with the eye
     // under the surface the horizon is zero, no wall is raised, and everything within the reach
     // is wanted — 1 930 chunks pending on a walk).
     let walker = stand(d, EYE_HEIGHT_M, h, level);
-    // THE HULL'S ALTITUDE, FROM THE RECIPE: the hull flies level along the planet frame's `−Z`
-    // (its own nose) for the longest leg's distance, and the ground under that path rises where
-    // it rises; the berth stands `HULL_CLEARANCE_M` over the highest ground along the path, read
-    // from the recipe (MEASURED on the first hull leg at a stated 300 m: the hull flew into rising
-    // ground 12 km on, the eye stood under the surface, and the ladder collapsed to a dozen
-    // chunks). Nothing here states a height; the world does.
+    // THE HULL'S ALTITUDE, FROM THE SOLVED GROUND: the hull flies level along the pilot's forward
+    // for the longest leg's distance, and the drawn surface under that path (the ground, or the
+    // water over it) rises where it rises; the berth stands
+    // `HULL_CLEARANCE_M` over the highest of it along the path (MEASURED on the first hull leg at a
+    // stated 300 m: the hull flew into rising ground 12 km on, the eye stood under the surface,
+    // and the ladder collapsed to a dozen chunks). Nothing here states a height; the world does.
     // The whole flight: both legs at their speeds for their read and their two speed polls, and
     // the two pushes (a push from rest to `v` at the hull's rating covers `v² / 2a`), a fifth
     // over (refutation R4-4: the first form read the probe leg alone, 40 km of a 50 km flight).
@@ -1853,13 +2091,17 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         .map(|v| v * read_s + v * v / (2.0 * push_mps2))
         .sum::<f64>()
         * 1.2;
+    // ★ THE PATH IS THE PILOT'S FORWARD (2026-09-27): a hull's push follows the pilot's facing
+    // (`stub::dot::stick_from_input`), not the hull's nose, and the pilot boards facing `level`.
+    // MEASURED on the solved stand: over 31 km the 528 m/s leg rose 171 m over the ground, where a
+    // path along the planet frame's `−Z` (1.36° over level there) would have climbed about 740 m.
     let mut highest = h;
     let mut s_m = 0.0;
     while s_m <= leg_m {
-        let p = d * h + DVec3::NEG_Z * s_m;
+        let p = d * h + level * s_m;
         let q = p.normalize();
-        let hq = vd_terrain::height::height_m(&body, [q.x, q.y, q.z], 2);
-        highest = highest.max(hq + body.dropped_bound_m(2));
+        let hq = solved.drawn_m(q, 2);
+        highest = highest.max(hq + solved.body.dropped_bound_m(2));
         // Between two samples the surface may stand higher than at either (the bound holds AT a
         // sampled direction): the clearance carries that (refutation R4-30).
         if ((s_m / PATH_SAMPLE_M).round() as u64).is_multiple_of(20) {
@@ -1889,15 +2131,18 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     let mut berths: Vec<DVec3> = Vec::new();
     for b in 0..boardings {
         let db = (d * h + level * (BERTH_SPACING_M * b as f64)).normalize();
-        let hb = vd_terrain::height::height_m(&body, [db.x, db.y, db.z], 0);
+        let hb = solved.drawn_m(db, 0);
         let pb = stand(db, hull_m + (h - hb).max(0.0), hb, level);
         berths.push(pb.offset_m + level * BERTH_STANDOFF_M);
         pilots.push(pb);
     }
     // THE BERTH: the hull's centre `BERTH_STANDOFF_M` ahead of the pilot's stand, level with it,
-    // in the planet's frame. The hull's own nose is the planet frame's `−Z`: at this stand that
-    // is within a degree of level (the stand lies on the equator's plane), so a push flies the
-    // hull along the ground, rising slowly as the ground curves away.
+    // in the planet's frame, PARKED UPRIGHT in the pilot's own attitude (its berth's facing, since
+    // 2026-09-27): its up is the ground's vertical and its nose the pilot's forward, so a push flies
+    // it along the ground, rising slowly as the curve falls away, and a yaw turns it about the
+    // vertical. MEASURED before the facing: planted in the planet's axes it stood rolled about 127°
+    // about its nose here, the turning leg yawed it about a nearly horizontal axis, and the descent
+    // that followed pushed sideways and flew 6.7 km into the ground.
     let berth = pilot.offset_m + level * BERTH_STANDOFF_M;
     let mut spawn_list = vec![spawn_entry(CLIENT_ACCOUNT_BASE, body.seed(), &walker)];
     for (b, pb) in pilots.iter().enumerate() {
@@ -1920,7 +2165,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     let hulls: Vec<RealmId> = berths
         .iter()
         .enumerate()
-        .map(|(b, bm)| plant_hull(&f, planet, *bm, 1 + b as u64))
+        .map(|(b, bm)| plant_hull(&f, planet, *bm, pilots[b].orient, 1 + b as u64))
         .collect();
     let gw_admin = reserve_tcp_addr();
     let a = demand_addrs(gw_admin);
@@ -1947,6 +2192,14 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
             "the walker lands on the planet: {landed:?}"
         );
         await_settled(devctl, "walk");
+        // ★ THE STANDS' ARTIFACT IS THE DRAWN ONE (2026-09-27): the head the client holds for the
+        // ground under the walker is the artifact solved here, which the stands were seated on.
+        let settled = poll(devctl);
+        assert_eq!(
+            settled.terrain_stamp.as_ref().and_then(|s| s.artifact_held),
+            Some(solved.artifact.digest()),
+            "the walker's ground is the artifact the stands were seated on"
+        );
         // THE FOOT SPEED is COMMANDED BY FEEDBACK: the share seeds from the shared parameter and
         // the shard's own speed law scales it; the gate measures the speed the shard gives and
         // corrects the share until the walk is the foot speed (MEASURED on the first run: the

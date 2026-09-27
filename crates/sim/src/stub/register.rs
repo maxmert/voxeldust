@@ -332,6 +332,7 @@ fn took_child_facts(
                 own_realm,
                 integrates,
                 child_nodes,
+                regions.facing_of(child),
                 driven,
                 stats,
             );
@@ -585,12 +586,14 @@ fn process_inbound(
                 // the unreliable up-lane because the next tick restates the whole intent: a lost
                 // datagram is corrected before anybody could read the gap.
                 Ok(InterShardFlow::ChildDrive(cd)) => {
+                    let parked = regions.facing_of(cd.child.lowered());
                     crate::stub::drive::on_child_drive(
                         cd,
                         *from,
                         config.realm,
                         integrates_children(&identity),
                         &child_nodes.0,
+                        parked,
                         &mut driven,
                         &mut stats,
                     );

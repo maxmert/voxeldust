@@ -75,6 +75,12 @@ pub fn gateway_view(
         artifact_parts_served,
         artifact_parts_skipped,
         artifact_caches_evicted,
+        // The re-drive's four counters (2026-09-27) are read on the stats resource; each re-drive
+        // also logs its client and what it sends again.
+        client_sends_shed: _,
+        artifact_serves_held: _,
+        artifact_redrives: _,
+        artifact_tiles_resent: _,
         window_sender_mismatch,
         window_misauthored_body,
         window_unknown_row,
@@ -414,6 +420,10 @@ mod tests {
             artifact_parts_served: 74,
             artifact_parts_skipped: 75,
             artifact_caches_evicted: 76,
+            client_sends_shed: 0,
+            artifact_serves_held: 0,
+            artifact_redrives: 0,
+            artifact_tiles_resent: 0,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);

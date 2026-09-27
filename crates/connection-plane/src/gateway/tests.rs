@@ -2153,11 +2153,24 @@ fn a_node_unreachable_toward_a_client_ends_its_session_but_toward_a_shard_does_n
 #[test]
 fn a_local_send_shed_is_not_a_session_fact() {
     // A shed says the gateway's OWN transport refused a send (a lane's retry buffer is full). It
-    // says nothing about the peer's liveness (R-4d M3), so it neither ends a session nor counts
-    // against one.
+    // says nothing about the peer's liveness (R-4d M3), so it never ends a session. ★ Toward a
+    // CLIENT it arms that session's artifact re-drive (2026-09-27): a part may be lost. Toward a
+    // shard it changes nothing here.
     let mut rig = Rig::new();
     let (sid, _) = rig.login();
     let before = rig.stats();
+    let sent = rig.tick(vec![Inbound::SendShed {
+        to: SHARD,
+        class: MsgClass::Control,
+        undelivered: vd_core::MsgId(8),
+        reason: vd_sim::io::ShedReason::RetryBufferFull,
+    }]);
+    assert!(sent.is_empty());
+    assert_eq!(
+        rig.stats(),
+        before,
+        "a shed toward a shard is not a session's"
+    );
     let sent = rig.tick(vec![Inbound::SendShed {
         to: CLIENT,
         class: MsgClass::Control,
@@ -2166,7 +2179,14 @@ fn a_local_send_shed_is_not_a_session_fact() {
     }]);
     assert!(session_active(&rig, sid));
     assert!(sent.is_empty());
-    assert_eq!(rig.stats(), before);
+    assert_eq!(rig.stats().client_sends_shed, before.client_sends_shed + 1);
+    assert!(
+        rig.world.resource::<GatewaySessions>().by_session[&sid]
+            .artifact_redrive
+            .shed_at
+            .is_some(),
+        "the session's re-drive is armed"
+    );
 }
 
 #[test]
@@ -4038,6 +4058,7 @@ fn freshest_session_confirmed_maxes_over_active_and_selffenced() {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            artifact_redrive: Default::default(),
             held_bulk: Vec::new(),
             client: CLIENT,
             account: AccountId(5),
@@ -4128,6 +4149,7 @@ fn one_active_session() -> (GatewaySessions, SessionId, OutboundBox) {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            artifact_redrive: Default::default(),
             held_bulk: Vec::new(),
             client: CLIENT,
             account: AccountId(5),
@@ -4389,6 +4411,7 @@ fn sweep_keeps_a_shared_reverse_index_entry_with_a_surviving_subscriber() {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            artifact_redrive: Default::default(),
             held_bulk: Vec::new(),
             client: NodeId(101),
             account: AccountId(6),
@@ -5468,6 +5491,7 @@ fn active_session() -> Session {
         artifact_held: std::collections::BTreeMap::new(),
         artifact_parts_sent: std::collections::BTreeMap::new(),
         artifact_tiles_sent: std::collections::BTreeMap::new(),
+        artifact_redrive: Default::default(),
         held_bulk: Vec::new(),
         client: CLIENT,
         account: AccountId(5),
@@ -10860,6 +10884,7 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
             artifact_held: std::collections::BTreeMap::new(),
             artifact_parts_sent: std::collections::BTreeMap::new(),
             artifact_tiles_sent: std::collections::BTreeMap::new(),
+            artifact_redrive: Default::default(),
             held_bulk: Vec::new(),
             client: CLIENT,
             account: AccountId(i as u128),
@@ -11979,7 +12004,7 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
     use vd_wire::channels::BulkMsg;
     use vd_wire::session_flow::{ArtifactView, BulkAudience};
     let mut rig = Rig::new();
-    let (_sid, _) = rig.login(); // window 1 = Occupants(System 7) on SHARD
+    let (sid, _) = rig.login(); // window 1 = Occupants(System 7) on SHARD
     let digest = [0xA1u64, 0xB2];
     // The planet states a surface, a charter and an artifact: enough for a body with a lattice.
     let charter = vd_core::look::BodyCharter {
@@ -12194,14 +12219,35 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
         1
     );
     assert_eq!(rig.stats().artifact_parts_stray, 1);
+    // ★ ONE BUDGET A BEAT (2026-09-27): a relayed tile a re-drive owes goes first, and a copy as
+    // large as the whole beat leaves nothing for the view's tile, which waits a beat.
+    let owed = (RealmId::Planet(7), (9u8, 9u32, 9u32));
+    {
+        let mut sessions = rig.world.resource_mut::<GatewaySessions>();
+        sessions
+            .relayed_tiles
+            .insert(owed, vec![0; super::artifact::ARTIFACT_BYTES_PER_BEAT]);
+        let redrive = &mut sessions
+            .by_session
+            .get_mut(&sid)
+            .expect("the session")
+            .artifact_redrive;
+        redrive.relayed.entry(owed.0).or_default().insert(owed.1);
+        redrive.resend.insert(owed);
+    }
     set_tick(&mut rig, 100);
+    let served = parts_to_client(&rig.tick(vec![]));
+    assert_eq!(served.len(), 1, "the relayed copy alone");
+    assert_eq!(served[0].len(), super::artifact::ARTIFACT_BYTES_PER_BEAT);
+    assert_eq!(rig.stats().artifact_tiles_resent, 1);
+    set_tick(&mut rig, 125);
     let served = parts_to_client(&rig.tick(vec![]));
     assert_eq!(served.len(), 1, "{served:?}");
     assert_eq!(
         postcard::from_bytes::<BulkMsg>(&served[0]).expect("decodes"),
         tile
     );
-    set_tick(&mut rig, 125);
+    set_tick(&mut rig, 150);
     assert!(parts_to_client(&rig.tick(vec![])).is_empty());
 }
 
@@ -13090,4 +13136,778 @@ fn a_shards_bulk_for_an_activating_session_is_held_and_delivered_on_activation()
     assert_eq!(held.len(), 1, "the second and third parts were refused");
     assert_eq!(held[0][0], 1, "the first part stays");
     assert_eq!(stats.bulk_for_unrouted, 2);
+}
+
+// ★ THE ARTIFACT DELIVERY: ONE BUDGET A BEAT PER CLIENT, AND THE RE-DRIVE AFTER A SHED (2026-09-27,
+// the solved-world walk: five whole artifacts served at once overran the client's retry buffer,
+// 452 sends were shed, and three far pyramids were never whole for that client).
+
+/// A whole one-level artifact for `realm`, cached the way a shard's answers land: a head and
+/// `parts` pyramid parts of about `part_bytes` bytes each.
+fn cache_whole(
+    sessions: &mut GatewaySessions,
+    realm: RealmId,
+    digest: [u64; 2],
+    parts: u32,
+    part_bytes: usize,
+) {
+    use vd_wire::channels::BulkMsg;
+    let mut stats = GatewayStats::default();
+    let head = BulkMsg::ArtifactHead {
+        realm,
+        world_tag: 9,
+        version: 2,
+        edge: 16,
+        digest,
+        tiles_per_edge: 1,
+        levels: 1,
+        sea_m: 0,
+        coast_parts: 0,
+    };
+    super::artifact::cache_artifact_part(
+        DEST,
+        realm,
+        postcard::to_allocvec(&head).expect("encode"),
+        TickId(1),
+        sessions,
+        &mut stats,
+    );
+    for part in 0..parts {
+        let msg = BulkMsg::ArtifactPyramid {
+            realm,
+            level: 1,
+            part,
+            parts,
+            z_m: vec![0; part_bytes],
+            water_m: vec![],
+        };
+        super::artifact::cache_artifact_part(
+            DEST,
+            realm,
+            postcard::to_allocvec(&msg).expect("encode"),
+            TickId(1),
+            sessions,
+            &mut stats,
+        );
+    }
+    assert!(sessions.artifacts[&realm].whole());
+}
+
+/// A session whose picture is `origin` and one composed row per realm of `rows`, in that order.
+fn session_drawing(origin: RealmId, rows: &[RealmId]) -> Session {
+    let mut session = active_session();
+    session.shadow.origin = Some(origin);
+    session.shadow.ring.push_back(window::Composed {
+        at: UniverseTick(5),
+        rows: rows
+            .iter()
+            .map(|realm| window::ComposedRow {
+                realm: *realm,
+                frame: FrameRef::PlanetCentered { planet_seed: 7 },
+                pose: StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 7 },
+                    DVec3::new(1.0e9, 0.0, 0.0),
+                    UniverseTick(5),
+                ),
+                stratum: 0,
+                parent: None,
+                body: window::BodyTag::Look,
+            })
+            .collect(),
+        ..Default::default()
+    });
+    session
+}
+
+/// One beat of the serve at `tick`: the parts it sent to the client, decoded.
+fn serve_beat(
+    sessions: &mut GatewaySessions,
+    stats: &mut GatewayStats,
+    drawn: &BTreeMap<RealmId, [u64; 2]>,
+    tick: u64,
+) -> Vec<Vec<u8>> {
+    let clock = ClockSample {
+        local_tick: TickId(tick),
+        universe_tick: UniverseTick(100),
+        epoch: EpochId(1),
+        synced: true,
+    };
+    let mut outbox = OutboundBox::default();
+    super::artifact::serve_artifacts(&config(), &clock, drawn, sessions, stats, &mut outbox);
+    outbox
+        .0
+        .iter()
+        .filter(|(to, _, _, _)| *to == CLIENT)
+        .filter_map(
+            |(_, _, bytes, _)| match postcard::from_bytes::<ServerControlMsg>(bytes) {
+                Ok(ServerControlMsg::ArtifactPart { bytes }) => Some(bytes),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// The realm and part a served artifact message names (`u32::MAX` for the head).
+fn named_part(bytes: &[u8]) -> (RealmId, u32) {
+    use vd_wire::channels::BulkMsg;
+    match postcard::from_bytes::<BulkMsg>(bytes).expect("a bulk message") {
+        BulkMsg::ArtifactHead { realm, .. } => (realm, u32::MAX),
+        BulkMsg::ArtifactPyramid { realm, part, .. } => (realm, part),
+        other => panic!("not a head or a part: {other:?}"),
+    }
+}
+
+/// ★ ONE BUDGET A BEAT FOR THE WHOLE SESSION: three drawn realms, each a head and three parts of
+/// 400 KiB. Each beat sends until the megabyte is used — the last part that starts inside the
+/// budget still goes — so the realms are served one a beat, in the picture's order, and never
+/// three at once. The control is the old rule: each realm its own budget would send all twelve
+/// parts in the first beat.
+#[test]
+fn one_budget_a_beat_serves_the_sessions_realms_in_turn() {
+    let (r0, r1, r2) = (
+        RealmId::Planet(10),
+        RealmId::Planet(11),
+        RealmId::Planet(12),
+    );
+    let mut sessions = GatewaySessions::default();
+    for realm in [r0, r1, r2] {
+        cache_whole(&mut sessions, realm, [1, 2], 3, 400 * 1024);
+    }
+    sessions
+        .by_session
+        .insert(SessionId(1), session_drawing(r0, &[r1, r2]));
+    let drawn = BTreeMap::from([(r0, [1, 2]), (r1, [1, 2]), (r2, [1, 2])]);
+    let mut stats = GatewayStats::default();
+    let beat1: Vec<(RealmId, u32)> = serve_beat(&mut sessions, &mut stats, &drawn, 25)
+        .iter()
+        .map(|b| named_part(b))
+        .collect();
+    assert_eq!(
+        beat1,
+        vec![(r0, u32::MAX), (r0, 0), (r0, 1), (r0, 2)],
+        "the origin's head and parts, the third begun inside the budget"
+    );
+    let beat2: Vec<(RealmId, u32)> = serve_beat(&mut sessions, &mut stats, &drawn, 50)
+        .iter()
+        .map(|b| named_part(b))
+        .collect();
+    assert_eq!(beat2, vec![(r1, u32::MAX), (r1, 0), (r1, 1), (r1, 2)]);
+    let beat3 = serve_beat(&mut sessions, &mut stats, &drawn, 75);
+    assert_eq!(beat3.len(), 4);
+    assert!(serve_beat(&mut sessions, &mut stats, &drawn, 100).is_empty());
+    assert_eq!(stats.artifact_parts_served, 12);
+    let sent = &sessions.by_session[&SessionId(1)].artifact_parts_sent;
+    assert_eq!(sent.values().copied().collect::<Vec<u32>>(), vec![4, 4, 4]);
+}
+
+/// ★ THE RE-DRIVE: a shed toward the client holds its serve for a beat, then every realm it was
+/// served and has not stated whole gets one more pass from the head, the tiles it was served from
+/// a view are forgotten (so they go out again), and every tile a shard shipped to it is sent again
+/// from the gateway's copy — a tile whose copy is gone is skipped. A realm the client states whole
+/// is never served again.
+#[test]
+fn a_shed_holds_the_serve_a_beat_then_serves_again_what_the_client_may_lack() {
+    let (r0, r1, r2) = (
+        RealmId::Planet(10),
+        RealmId::Planet(11),
+        RealmId::Planet(12),
+    );
+    let mut sessions = GatewaySessions::default();
+    cache_whole(&mut sessions, r0, [1, 2], 2, 100);
+    cache_whole(&mut sessions, r1, [3, 4], 1, 100);
+    let mut session = session_drawing(r0, &[r1, r2]);
+    let (t1, t2) = ((0u8, 0u32, 0u32), (0u8, 0u32, 1u32));
+    session
+        .artifact_redrive
+        .relayed
+        .insert(r0, BTreeSet::from([t1, t2]));
+    session
+        .artifact_tiles_sent
+        .insert(r1, BTreeSet::from([(1u8, 2u32, 3u32)]));
+    sessions.by_session.insert(SessionId(1), session);
+    sessions.by_client.insert(CLIENT, SessionId(1));
+    sessions.relayed_tiles.insert((r0, t1), vec![7; 64]);
+    let drawn = BTreeMap::from([(r0, [1, 2]), (r1, [3, 4]), (r2, [5, 6])]);
+    let mut stats = GatewayStats::default();
+    assert_eq!(serve_beat(&mut sessions, &mut stats, &drawn, 25).len(), 5);
+    // r2 was served before (its cache is gone now): a pass is owed to it too.
+    sessions
+        .by_session
+        .get_mut(&SessionId(1))
+        .expect("the session")
+        .artifact_parts_sent
+        .insert(r2, 3);
+    // The client states r1 whole; then a send toward it is shed.
+    sessions
+        .by_session
+        .get_mut(&SessionId(1))
+        .expect("the session")
+        .artifact_held
+        .insert(r1, [3, 4]);
+    super::artifact::note_send_shed(CLIENT, TickId(30), &mut sessions, &mut stats);
+    assert_eq!(stats.client_sends_shed, 1);
+    // Inside the beat after the shed: held, nothing sent.
+    assert!(serve_beat(&mut sessions, &mut stats, &drawn, 50).is_empty());
+    assert_eq!(stats.artifact_serves_held, 1);
+    // A beat later: the re-drive.
+    let sent = serve_beat(&mut sessions, &mut stats, &drawn, 75);
+    assert_eq!(stats.artifact_redrives, 1);
+    assert_eq!(stats.artifact_tiles_resent, 1, "t2's copy is gone");
+    assert_eq!(sent[0], vec![7; 64], "the relayed copy first");
+    let parts: Vec<(RealmId, u32)> = sent[1..].iter().map(|b| named_part(b)).collect();
+    assert_eq!(
+        parts,
+        vec![(r0, u32::MAX), (r0, 0), (r0, 1)],
+        "r0 again from its head; r1 is whole at the client"
+    );
+    let session = &sessions.by_session[&SessionId(1)];
+    assert!(session.artifact_redrive.shed_at.is_none());
+    assert!(session.artifact_tiles_sent.values().all(BTreeSet::is_empty));
+    assert!(
+        session.artifact_redrive.repass.contains(&r2),
+        "r2's pass waits for its cache"
+    );
+    assert!(!session.artifact_redrive.repass.contains(&r1));
+    assert!(serve_beat(&mut sessions, &mut stats, &drawn, 100).is_empty());
+    assert_eq!(
+        stats.artifact_parts_skipped, 2,
+        "r1, whole at the client, on the re-drive's beat and the next (the held beat serves nothing)"
+    );
+}
+
+/// ★ A PASS ALWAYS REACHES ITS TAIL: a re-drive that finds a realm mid-pass lets the pass end, and
+/// only then starts the owed one from the head.
+#[test]
+fn a_pass_owed_by_a_redrive_starts_when_the_pass_in_flight_ends() {
+    let r0 = RealmId::Planet(10);
+    let mut sessions = GatewaySessions::default();
+    cache_whole(&mut sessions, r0, [1, 2], 4, 400 * 1024);
+    sessions
+        .by_session
+        .insert(SessionId(1), session_drawing(r0, &[]));
+    sessions.by_client.insert(CLIENT, SessionId(1));
+    let drawn = BTreeMap::from([(r0, [1, 2])]);
+    let mut stats = GatewayStats::default();
+    let parts = |sent: Vec<Vec<u8>>| -> Vec<u32> { sent.iter().map(|b| named_part(b).1).collect() };
+    assert_eq!(
+        parts(serve_beat(&mut sessions, &mut stats, &drawn, 25)),
+        vec![u32::MAX, 0, 1, 2]
+    );
+    super::artifact::note_send_shed(CLIENT, TickId(30), &mut sessions, &mut stats);
+    assert!(serve_beat(&mut sessions, &mut stats, &drawn, 50).is_empty());
+    assert_eq!(
+        parts(serve_beat(&mut sessions, &mut stats, &drawn, 75)),
+        vec![3],
+        "the pass in flight ends first"
+    );
+    assert_eq!(
+        parts(serve_beat(&mut sessions, &mut stats, &drawn, 100)),
+        vec![u32::MAX, 0, 1, 2],
+        "then the owed pass, from the head"
+    );
+    assert_eq!(
+        parts(serve_beat(&mut sessions, &mut stats, &drawn, 125)),
+        vec![3]
+    );
+    assert!(serve_beat(&mut sessions, &mut stats, &drawn, 150).is_empty());
+}
+
+/// ★ THE RELAYED TILES' RESEND IS PACED: three copies of 800 KiB owed — the first two go in the
+/// first beat (the second begun inside the budget), the third the next beat.
+#[test]
+fn the_relayed_tiles_owed_are_sent_within_the_beats_budget() {
+    let r0 = RealmId::Planet(10);
+    let mut sessions = GatewaySessions::default();
+    let mut session = session_drawing(r0, &[]);
+    let keys = [(0u8, 0u32, 0u32), (0, 0, 1), (0, 0, 2)];
+    for key in keys {
+        session
+            .artifact_redrive
+            .relayed
+            .entry(r0)
+            .or_default()
+            .insert(key);
+        session.artifact_redrive.resend.insert((r0, key));
+        sessions
+            .relayed_tiles
+            .insert((r0, key), vec![1; 800 * 1024]);
+    }
+    sessions.by_session.insert(SessionId(1), session);
+    let drawn = BTreeMap::from([(r0, [1, 2])]);
+    let mut stats = GatewayStats::default();
+    assert_eq!(serve_beat(&mut sessions, &mut stats, &drawn, 25).len(), 2);
+    assert_eq!(serve_beat(&mut sessions, &mut stats, &drawn, 50).len(), 1);
+    assert!(serve_beat(&mut sessions, &mut stats, &drawn, 75).is_empty());
+    assert_eq!(stats.artifact_tiles_resent, 3);
+}
+
+/// ★ A SHED TOWARD A NODE THAT HOLDS NO SESSION changes nothing: an unknown node, and a client
+/// whose index names a session this gateway no longer holds.
+#[test]
+fn a_shed_toward_a_node_with_no_session_arms_nothing() {
+    let mut sessions = GatewaySessions::default();
+    sessions.by_client.insert(NodeId(99), SessionId(2));
+    let mut stats = GatewayStats::default();
+    super::artifact::note_send_shed(NodeId(98), TickId(5), &mut sessions, &mut stats);
+    super::artifact::note_send_shed(NodeId(99), TickId(5), &mut sessions, &mut stats);
+    assert_eq!(stats.client_sends_shed, 0);
+}
+
+/// ★ A TILE'S KEY off a shard's bulk: a tile names its realm and key; a head, and bytes that are
+/// no bulk message at all, name nothing.
+#[test]
+fn only_a_tile_names_a_relayed_key() {
+    use vd_wire::channels::BulkMsg;
+    let tile = BulkMsg::ArtifactTile {
+        realm: RealmId::Planet(7),
+        face: 2,
+        tx: 3,
+        ty: 4,
+        rows: vec![1],
+    };
+    assert_eq!(
+        super::artifact::tile_key_of(&postcard::to_allocvec(&tile).expect("encode")),
+        Some((RealmId::Planet(7), (2, 3, 4)))
+    );
+    let head = BulkMsg::ArtifactHead {
+        realm: RealmId::Planet(7),
+        world_tag: 9,
+        version: 2,
+        edge: 16,
+        digest: [1, 2],
+        tiles_per_edge: 1,
+        levels: 1,
+        sea_m: 0,
+        coast_parts: 0,
+    };
+    assert_eq!(
+        super::artifact::tile_key_of(&postcard::to_allocvec(&head).expect("encode")),
+        None
+    );
+    assert_eq!(super::artifact::tile_key_of(&[0xFF, 0xFF, 0xFF]), None);
+}
+
+/// ★ A RELAYED TILE IS RECORDED: relayed to an active session or held for an activating one, the
+/// session's record names it and the gateway keeps the newest copy; a bulk that is no tile is
+/// relayed unrecorded.
+#[test]
+fn a_relayed_tile_is_recorded_with_its_newest_copy() {
+    use super::shard::relay_bulk;
+    use vd_wire::channels::BulkMsg;
+    let tile = |rows: Vec<u8>| {
+        postcard::to_allocvec(&BulkMsg::ArtifactTile {
+            realm: RealmId::Planet(7),
+            face: 1,
+            tx: 2,
+            ty: 3,
+            rows,
+        })
+        .expect("encode")
+    };
+    let mut sessions = GatewaySessions::default();
+    let mut session = active_session();
+    session.negotiated_minor = 33;
+    sessions.by_session.insert(SessionId(1), session);
+    let mut activating = active_session();
+    activating.phase = SessionPhase::AwaitingAttach;
+    sessions.by_session.insert(SessionId(2), activating);
+    let mut stats = GatewayStats::default();
+    let mut outbox = OutboundBox::default();
+    let key = (RealmId::Planet(7), (1u8, 2u32, 3u32));
+    relay_bulk(
+        NodeId(7),
+        Fence(1),
+        &[SessionId(1)],
+        tile(vec![1]),
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(sessions.relayed_tiles[&key], tile(vec![1]));
+    relay_bulk(
+        NodeId(7),
+        Fence(1),
+        &[SessionId(2)],
+        tile(vec![2]),
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(
+        sessions.relayed_tiles[&key],
+        tile(vec![2]),
+        "the newest copy"
+    );
+    for sid in [SessionId(1), SessionId(2)] {
+        assert_eq!(
+            sessions.by_session[&sid].artifact_redrive.relayed[&key.0],
+            BTreeSet::from([key.1])
+        );
+    }
+    relay_bulk(
+        NodeId(7),
+        Fence(1),
+        &[SessionId(1)],
+        vec![1, 2, 3],
+        &mut sessions,
+        &mut stats,
+        &mut outbox,
+    );
+    assert_eq!(sessions.relayed_tiles.len(), 1);
+    assert_eq!(stats.artifact_parts_relayed, 2);
+    assert_eq!(stats.bulk_for_held, 1);
+}
+
+/// ★ THE RELAYED RECORDS FOLLOW THE PICTURES: an active session keeps the realms it draws, a
+/// session that still activates keeps everything, and the gateway keeps a copy only while some
+/// record names it. An owed pass of a realm no picture names is forgotten.
+#[test]
+fn the_relayed_records_and_copies_follow_the_pictures() {
+    let (r0, r5, r7, r9) = (
+        RealmId::Planet(10),
+        RealmId::Planet(15),
+        RealmId::Planet(17),
+        RealmId::Planet(19),
+    );
+    let (t, u) = ((0u8, 0u32, 0u32), (0u8, 0u32, 1u32));
+    let mut sessions = GatewaySessions::default();
+    let mut active = session_drawing(r0, &[]);
+    active.artifact_redrive.relayed =
+        BTreeMap::from([(r0, BTreeSet::from([t])), (r9, BTreeSet::from([t]))]);
+    active.artifact_redrive.resend = BTreeSet::from([(r0, t), (r9, t)]);
+    active.artifact_redrive.repass = BTreeSet::from([r0, r9]);
+    sessions.by_session.insert(SessionId(1), active);
+    let mut activating = active_session();
+    activating.phase = SessionPhase::AwaitingAttach;
+    activating.artifact_redrive.relayed = BTreeMap::from([(r5, BTreeSet::from([u]))]);
+    sessions.by_session.insert(SessionId(2), activating);
+    for key in [(r0, t), (r9, t), (r5, u), (r7, t)] {
+        sessions.relayed_tiles.insert(key, vec![1]);
+    }
+    let drawn = BTreeMap::from([(r0, [1, 2])]);
+    let mut stats = GatewayStats::default();
+    let _ = serve_beat(&mut sessions, &mut stats, &drawn, 25);
+    let active = &sessions.by_session[&SessionId(1)].artifact_redrive;
+    assert_eq!(active.relayed.keys().copied().collect::<Vec<_>>(), vec![r0]);
+    assert!(active.repass.contains(&r0));
+    assert!(!active.repass.contains(&r9));
+    let activating = &sessions.by_session[&SessionId(2)].artifact_redrive;
+    assert_eq!(
+        activating.relayed.keys().copied().collect::<Vec<_>>(),
+        vec![r5]
+    );
+    assert_eq!(
+        sessions.relayed_tiles.keys().copied().collect::<Vec<_>>(),
+        vec![(r0, t), (r5, u)]
+    );
+    assert_eq!(stats.artifact_tiles_resent, 1, "r0's copy, owed and drawn");
+}
+
+/// ★ A NEW DIGEST MAKES THE RELAYED COPIES STALE: the first head of a realm and the same head from
+/// another node keep what the shard shipped to its sessions; a head at another digest drops the
+/// realm's copies and records, so a re-drive never sends a tile of the old artifact. Every new
+/// transfer forgets an owed pass: it starts from the head anyway.
+#[test]
+fn a_new_digest_drops_the_realms_relayed_copies() {
+    use vd_wire::channels::BulkMsg;
+    let r0 = RealmId::Planet(10);
+    let t = (0u8, 0u32, 0u32);
+    let head = |digest: [u64; 2]| {
+        postcard::to_allocvec(&BulkMsg::ArtifactHead {
+            realm: r0,
+            world_tag: 9,
+            version: 2,
+            edge: 16,
+            digest,
+            tiles_per_edge: 1,
+            levels: 1,
+            sea_m: 0,
+            coast_parts: 0,
+        })
+        .expect("encode")
+    };
+    let mut sessions = GatewaySessions::default();
+    let mut session = active_session();
+    session.artifact_redrive.relayed = BTreeMap::from([(r0, BTreeSet::from([t]))]);
+    session.artifact_redrive.repass = BTreeSet::from([r0]);
+    sessions.by_session.insert(SessionId(1), session);
+    sessions.relayed_tiles.insert((r0, t), vec![1]);
+    let mut stats = GatewayStats::default();
+    let cache = |sessions: &mut GatewaySessions,
+                 from: NodeId,
+                 digest: [u64; 2],
+                 stats: &mut GatewayStats| {
+        super::artifact::cache_artifact_part(from, r0, head(digest), TickId(1), sessions, stats);
+    };
+    cache(&mut sessions, DEST, [1, 2], &mut stats);
+    cache(&mut sessions, SHARD, [1, 2], &mut stats);
+    assert_eq!(
+        sessions.relayed_tiles.len(),
+        1,
+        "the first head and another node keep it"
+    );
+    let redrive = &sessions.by_session[&SessionId(1)].artifact_redrive;
+    assert!(redrive.relayed.contains_key(&r0));
+    assert!(
+        redrive.repass.is_empty(),
+        "a new transfer starts from the head"
+    );
+    cache(&mut sessions, SHARD, [3, 4], &mut stats);
+    assert!(sessions.relayed_tiles.is_empty());
+    assert!(
+        !sessions.by_session[&SessionId(1)]
+            .artifact_redrive
+            .relayed
+            .contains_key(&r0)
+    );
+}
+
+/// ★ TWO WAYS A CACHE IS NOT WHOLE AND ONE STRAY (the far-view ship's intake): a coast part that
+/// comes before its realm's head has no cache to land in and is counted as a stray; a cache that
+/// knows every level's part count but lacks one part is not whole until that part lands.
+#[test]
+fn a_coast_part_before_its_head_is_a_stray_and_a_missing_part_keeps_a_cache_short() {
+    use vd_wire::channels::BulkMsg;
+    let realm = RealmId::Planet(10);
+    let mut sessions = GatewaySessions::default();
+    let mut stats = GatewayStats::default();
+    let encode = |msg: &BulkMsg| postcard::to_allocvec(msg).expect("encode");
+    let coast = BulkMsg::ArtifactCoast {
+        realm,
+        part: 0,
+        parts: 1,
+        bits: vec![1],
+    };
+    super::artifact::cache_artifact_part(
+        DEST,
+        realm,
+        encode(&coast),
+        TickId(1),
+        &mut sessions,
+        &mut stats,
+    );
+    assert_eq!(stats.artifact_parts_stray, 1);
+    assert!(sessions.artifacts.is_empty());
+    // A coast part that names ANOTHER realm than its audience is no part of this realm.
+    let other = BulkMsg::ArtifactCoast {
+        realm: RealmId::Planet(11),
+        part: 0,
+        parts: 1,
+        bits: vec![1],
+    };
+    super::artifact::cache_artifact_part(
+        DEST,
+        realm,
+        encode(&other),
+        TickId(1),
+        &mut sessions,
+        &mut stats,
+    );
+    assert_eq!(stats.artifact_parts_stray, 2);
+    let head = BulkMsg::ArtifactHead {
+        realm,
+        world_tag: 9,
+        version: 2,
+        edge: 16,
+        digest: [1, 2],
+        tiles_per_edge: 1,
+        levels: 1,
+        sea_m: 0,
+        coast_parts: 0,
+    };
+    let part = |part: u32| BulkMsg::ArtifactPyramid {
+        realm,
+        level: 1,
+        part,
+        parts: 2,
+        z_m: vec![1],
+        water_m: vec![],
+    };
+    for msg in [head, part(0)] {
+        super::artifact::cache_artifact_part(
+            DEST,
+            realm,
+            encode(&msg),
+            TickId(1),
+            &mut sessions,
+            &mut stats,
+        );
+    }
+    assert!(
+        !sessions.artifacts[&realm].whole(),
+        "level 1 counts two parts and one is here"
+    );
+    super::artifact::cache_artifact_part(
+        DEST,
+        realm,
+        encode(&part(1)),
+        TickId(1),
+        &mut sessions,
+        &mut stats,
+    );
+    assert!(sessions.artifacts[&realm].whole());
+}
+
+/// ★ WHAT THE CLIENT FORGETS, THE SESSION FORGETS (2026-09-27, the solved-ground walk: a far planet
+/// whole at the client left its picture for a moment and stayed unheld for 900 s). The planet is
+/// served and stated whole; a frame without its row makes the composed delta remove it — the client
+/// forgets the artifact there — so the session forgets what it holds and was sent for it; when the
+/// planet's row returns, the next beat serves its head and part again. The control: before the cure
+/// the session still named the planet held, and the serve skipped it for ever.
+#[test]
+fn a_realm_that_leaves_the_picture_and_returns_is_served_again() {
+    use vd_wire::channels::BulkMsg;
+    use vd_wire::session_flow::BulkAudience;
+    let mut rig = Rig::new();
+    let (sid, _) = rig.login(); // window 1 = Occupants(System 7) on SHARD
+    let digest = [0xA1u64, 0xB2];
+    let bag = vd_core::look::surface_look_bag_with(
+        &vd_core::geometry::Boundary::Shell { r: 1.0e6 },
+        None,
+        &vd_core::look::SurfaceStmt {
+            frame: FrameRef::PlanetCentered { planet_seed: 7 },
+            generator: 7,
+        },
+        None,
+        Some(digest),
+    );
+    let relayed = |at: u64| ShardToGateway::WindowRelayed {
+        realm_fence: Fence(1),
+        window: WindowId(1),
+        child: RealmId::Planet(7),
+        child_fence: Fence(9),
+        statements: vd_wire::session_flow::seal_relay_statements(&[
+            RelayedStatement::Level {
+                at: vd_core::UniverseTick(at),
+                rows: Vec::new(),
+            },
+            RelayedStatement::Body {
+                subject: RealmId::Planet(7),
+                stmt: BodyStmt::SelfLook { bag: bag.clone() },
+                authored_at: vd_core::UniverseTick(at),
+            },
+        ]),
+        interior: Vec::new(),
+    };
+    let frame = |at: u64, with_planet: bool| ShardToGateway::WindowFrame {
+        realm_fence: Fence(1),
+        window: WindowId(1),
+        at: vd_core::UniverseTick(at),
+        hop: None,
+        rows: if with_planet {
+            vec![vd_wire::channels::RealmSnap {
+                realm: RealmId::Planet(7),
+                frame: FrameRef::PlanetCentered { planet_seed: 7 },
+                pose: vd_core::pose::StampedPose::at_rest(
+                    FrameRef::SystemSpace { system_seed: 7 },
+                    DVec3::new(30.0, 0.0, 0.0),
+                    vd_core::UniverseTick(at),
+                ),
+            }]
+        } else {
+            Vec::new()
+        },
+    };
+    let bulk = |msg: &BulkMsg| {
+        wire(
+            DEST,
+            MsgClass::Control,
+            &ShardToGateway::BulkFor {
+                realm_fence: Fence(1),
+                audience: BulkAudience::Realm(RealmId::Planet(7)),
+                bytes: postcard::to_allocvec(msg).expect("encode"),
+            },
+        )
+    };
+    let head = BulkMsg::ArtifactHead {
+        realm: RealmId::Planet(7),
+        world_tag: 9,
+        version: 2,
+        edge: 16,
+        digest,
+        tiles_per_edge: 1,
+        levels: 1,
+        sea_m: 0,
+        coast_parts: 0,
+    };
+    let part = BulkMsg::ArtifactPyramid {
+        realm: RealmId::Planet(7),
+        level: 1,
+        part: 0,
+        parts: 1,
+        z_m: vec![1],
+        water_m: vec![],
+    };
+    let parts_to_client = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> usize {
+        sent.iter()
+            .filter(|(to, _, _)| *to == CLIENT)
+            .filter(|(_, _, b)| {
+                matches!(
+                    postcard::from_bytes::<ServerControlMsg>(b),
+                    Ok(ServerControlMsg::ArtifactPart { .. })
+                )
+            })
+            .count()
+    };
+    let _ = rig.tick(vec![
+        wire(SHARD, MsgClass::Control, &frame(5, true)),
+        wire(SHARD, MsgClass::RealmSnapshot, &frame(5, true)),
+        wire(SHARD, MsgClass::Control, &relayed(5)),
+    ]);
+    // The beat polls the planet's head; the directory names its shard; the next beat asks the
+    // shard, which answers a whole artifact; the beat after serves it.
+    set_tick(&mut rig, 25);
+    let _ = rig.tick(vec![]);
+    set_tick(&mut rig, 26);
+    let _ = rig.tick(vec![wire(
+        ORCH,
+        MsgClass::Saga,
+        &realm_head(RealmId::Planet(7), Some(DEST)),
+    )]);
+    set_tick(&mut rig, 50);
+    let _ = rig.tick(vec![]);
+    set_tick(&mut rig, 51);
+    let _ = rig.tick(vec![bulk(&head), bulk(&part)]);
+    set_tick(&mut rig, 75);
+    assert_eq!(
+        parts_to_client(&rig.tick(vec![])),
+        2,
+        "the head and the part"
+    );
+    set_tick(&mut rig, 76);
+    let _ = rig.tick(vec![wire(
+        CLIENT,
+        MsgClass::Control,
+        &ClientControlMsg::ArtifactHeld {
+            realm: RealmId::Planet(7),
+            digest,
+        },
+    )]);
+    let held = |rig: &Rig| {
+        rig.world.resource::<GatewaySessions>().by_session[&sid]
+            .artifact_held
+            .contains_key(&RealmId::Planet(7))
+    };
+    assert!(held(&rig));
+    // The planet's row is gone from a fresh frame: the delta removes it, and the session forgets.
+    set_tick(&mut rig, 77);
+    let _ = rig.tick(vec![wire(SHARD, MsgClass::RealmSnapshot, &frame(6, false))]);
+    assert!(!held(&rig), "the client forgot it, so the session did");
+    assert!(
+        !rig.world.resource::<GatewaySessions>().by_session[&sid]
+            .artifact_parts_sent
+            .contains_key(&RealmId::Planet(7))
+    );
+    // It returns before the next beat: the beat serves it again.
+    set_tick(&mut rig, 78);
+    let _ = rig.tick(vec![
+        wire(SHARD, MsgClass::RealmSnapshot, &frame(7, true)),
+        wire(SHARD, MsgClass::Control, &relayed(7)),
+    ]);
+    set_tick(&mut rig, 100);
+    assert_eq!(
+        parts_to_client(&rig.tick(vec![])),
+        2,
+        "the head and the part, served again"
+    );
 }

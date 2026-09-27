@@ -572,6 +572,8 @@ pub(crate) mod tests {
                     step_m: 0.5,
                     since_descent_s: 0.36,
                     lead_m: 0.14,
+                    body_radius_m: 6_371_000.0,
+                    body_distance_m: 6_371_002.0,
                 }),
             }),
             sky_anchor: None,
@@ -1003,6 +1005,14 @@ pub struct DevBandGap {
     pub step_m: f64,
     pub since_descent_s: f64,
     pub lead_m: f64,
+    /// ★ THE GAP'S BODY (2026-09-27, the walk leg's far-planet gap): the radius of the body whose
+    /// ladder lacks the chunks and the drawn eye's distance from its centre, metres — so a reader
+    /// can tell a far body drawn as a point from the ground under the walker. Absent (zero) in a
+    /// state from an older client.
+    #[serde(default)]
+    pub body_radius_m: f64,
+    #[serde(default)]
+    pub body_distance_m: f64,
 }
 
 /// ONE MISSING URGENT CHUNK (see [`DevBandGap`]): the chunk, its rung, what the PREVIOUS descent's

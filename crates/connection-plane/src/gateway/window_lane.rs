@@ -714,6 +714,15 @@ pub(crate) fn compose_scenes_pass(
                         .filter(|r| !current.contains_key(r))
                         .copied()
                         .collect();
+                    // ★ WHAT THE CLIENT FORGETS, THE SESSION FORGETS (2026-09-27): a realm that
+                    // leaves the drawn set takes its artifact with it at the client, so this
+                    // session's record of what it holds and was sent for that realm ends too —
+                    // else a realm that leaves and returns between two beats is never served again
+                    // (MEASURED: a far planet whole at the client left its picture for a moment
+                    // and stayed unheld for 900 s).
+                    for realm in &removed {
+                        super::artifact::forget_for_session(session, *realm);
+                    }
                     session.scene_sent = current;
                     push_control(
                         outbox,

@@ -1510,6 +1510,7 @@ fn a_driven_child(push: [i64; 3]) -> crate::stub::drive::DrivenChildren {
         parent,
         true,
         &nodes,
+        DQuat::IDENTITY,
         &mut driven,
         &mut stats,
     );
@@ -1525,6 +1526,7 @@ fn a_driven_child(push: [i64; 3]) -> crate::stub::drive::DrivenChildren {
         parent,
         true,
         &nodes,
+        DQuat::IDENTITY,
         &mut driven,
         &mut stats,
     );
@@ -1650,7 +1652,8 @@ fn the_velocity_a_parent_writes_travels_down_and_never_up() {
 }
 
 /// A child that neither orbits nor is driven still gets a row, and the row is the WHOLE berth its
-/// parent authored — the integer cell anchor with it, not only the remainder.
+/// parent authored — the integer cell anchor with it, not only the remainder — in the attitude it
+/// was parked in (2026-09-27: its berth's facing, never this realm's own axes by default).
 ///
 /// Example: a station the star system placed a kilometre out, that nobody has ever flown. It has no
 /// orbit to ask and no pilot pushing it, so the parent repeats the berth it authored. An earlier form
@@ -1661,10 +1664,12 @@ fn the_velocity_a_parent_writes_travels_down_and_never_up() {
 fn a_child_that_neither_orbits_nor_is_driven_keeps_the_whole_berth_its_parent_authored() {
     let berth = DVec3::new(1_200.5, -37.25, 8.125);
     let r = region(OTHER_REALM, Some(OWN_REALM), berth, 1_000.0);
+    let parked = DQuat::from_rotation_y(0.3);
     let row = placement_row(
         &BTreeMap::new(),
         &crate::stub::drive::DrivenChildren::default(),
         &r,
+        parked,
         12.0,
     );
     assert_eq!(row.origin_cell, r.center.in_parents_frame().cell());
@@ -1675,7 +1680,7 @@ fn a_child_that_neither_orbits_nor_is_driven_keeps_the_whole_berth_its_parent_au
         "the cell anchor rides along — the row is the whole berth, not the remainder"
     );
     assert_eq!(row.velocity, DVec3::ZERO);
-    assert_eq!(row.orientation, DQuat::IDENTITY);
+    assert_eq!(row.orientation, parked, "the attitude it was parked in");
     assert_eq!(row.angular_velocity, DVec3::ZERO);
 }
 
@@ -1739,4 +1744,60 @@ fn a_lineage_statement_about_another_realm_is_refused_on_the_wire_path() {
     assert_eq!(rig.world.resource::<StubStats>().lineage_misrouted, 1);
     assert_eq!(rig.world.resource::<StubStats>().lineage_applied, 0);
     assert_eq!(rig.world.resource::<StubStats>().lineage_held_unattested, 0);
+}
+
+/// ★ A CHILD STANDS IN THE ATTITUDE ITS BERTH PARKED IT IN (2026-09-27): a static child's row and a
+/// parked hull's row carry their berths' facings, an adopted child's facing can be set, and a child
+/// parked with none stands in this realm's own axes. The control: the same forest with no facings
+/// authors both rows in this realm's axes.
+///
+/// **Example.** A hull parked upright on a plain 1.4° south of the home planet's equator: its row
+/// states the ground's vertical as its up, so the pilot aboard turns about that vertical.
+#[test]
+fn a_child_stands_in_the_attitude_its_berth_parked_it_in() {
+    let hull = RealmId::Ship(vd_core::ids::EntityId::pack(
+        vd_core::entity_kind::EntityKind::Ship,
+        1,
+        7,
+        0,
+    ));
+    let still = DQuat::from_rotation_x(0.4);
+    let parked = DQuat::from_rotation_z(-0.9);
+    let forest = || {
+        vec![
+            root_region(),
+            own_region(),
+            child_region(),
+            region(hull, Some(OWN_REALM), DVec3::new(500.0, 0.0, 0.0), 20.0),
+        ]
+    };
+    let plain = RealmRegions::new(forest());
+    let mut berthed = RealmRegions::new(forest())
+        .with_berthed_facings(BTreeMap::from([(OTHER_REALM, still), (hull, parked)]));
+    assert_eq!(berthed.facing_of(OTHER_REALM), still);
+    assert_eq!(
+        berthed.facing_of(RealmId::Planet(99)),
+        DQuat::IDENTITY,
+        "a child parked with none stands in this realm's axes"
+    );
+    let orient_of = |book: &vd_core::placement::PlacementBook, realm: RealmId| {
+        let frame = frame_of(realm);
+        book.rows()
+            .find(|(f, _)| *f == frame)
+            .expect("the child's row")
+            .1
+            .orientation
+    };
+    let none = crate::stub::drive::DrivenChildren::default();
+    let book = berthed.author_book_driven(OWN_REALM, 50.0, UniverseTick(1), &none);
+    assert_eq!(orient_of(&book, OTHER_REALM), still, "a static child's row");
+    assert_eq!(orient_of(&book, hull), parked, "a parked hull's row");
+    let control = plain.author_book_driven(OWN_REALM, 50.0, UniverseTick(1), &none);
+    assert_eq!(orient_of(&control, OTHER_REALM), DQuat::IDENTITY);
+    assert_eq!(orient_of(&control, hull), DQuat::IDENTITY);
+    // An adoption records the attitude the child stands in now.
+    let adopted = DQuat::from_rotation_y(1.1);
+    berthed.set_facing(hull, adopted);
+    let book = berthed.author_book_driven(OWN_REALM, 50.0, UniverseTick(1), &none);
+    assert_eq!(orient_of(&book, hull), adopted);
 }

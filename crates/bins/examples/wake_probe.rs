@@ -10,6 +10,7 @@ fn main() {
             0,
         )),
         offset_m: vd_core::glam::DVec3::new(40.0, 0.0, 10_822_131_358.930_182),
+        facing: vd_core::glam::DQuat::IDENTITY,
         bound: vd_core::geometry::Boundary::Shell { r: 20.0 },
         look: vd_core::geometry::Boundary::Shell { r: 20.0 },
         fence: vd_core::fence::Fence::GENESIS,
