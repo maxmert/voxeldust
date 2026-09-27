@@ -1051,6 +1051,14 @@ dry word ships (48.9 KB, SL6 yes); R2 now, the near slides judged in the flight;
 0b retires; the arrival ramp 0.5 s; Q1 — the far look, yes. Design D is ruled whole; NEXT: slice R1 (the renderer's
 own pops).
 
+**SLICE R1, THE RENDERER'S OWN POPS (2026-09-27; the design note §10; built and measured, NOT committed).** R1a: one band
+table per realm that every terrain material reads, written by the render world every frame — the water now fades on
+its ground's band, and the 5 % band jumps are gone; the stands' pictures and frame cost are unchanged (MEASURED against
+HEAD). R1b: the water sheet carries its own culling box. R1c: a late chunk enters on its stand-in's surface and rises
+over 0.5 s — on a still eye while the rings stream in, the arrival steps past 3 levels fall from 1 040 to 78 pixels;
+the large steps that remain are WATER DECISIONS (a finer chunk lands with sea where its stand-in drew land), which are
+R2's and the skin's. Found by the first ramp test: a top-rung chunk has no stand-in and enters whole.
+
 **Example.** A pilot climbs over the high lakes from 7 500 to 60 000 km. Under the skin the 5 882 m lake's piece reads 71,
 60, 48, 41 and 50 % water on the way — one smooth curve through four swaps. Today's box fold reads 72 % just before the
 14 → 15 swap, 19 % after it, and 100 % after the 15 → 16 swap.
@@ -1264,3 +1272,4 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-09-27 — slice K0 (the skin bench) measured (§8f; the design note §9): every judged line green in the design's form once the shader chooses its level by the Vulkan rule; the GL rule needs quarter-cell windows (Q9, new); the rim (88° at twice the margin, 89° at four times), the memory of the client's own chunk set (17–79 MB), the lid (today's far land's Lambert steps 4–21 %; Q3 turns to yes) and W10's block lines (15 % of the coast against 6 % by chance) measured; NOT committed.
 - 2026-09-27 — ruling B17: the skin's shader chooses its own level (Q9); the rim sized at 86.4° and judged in flight (Q8); Q1–Q7 open for discussion; K0 committed.
 - 2026-09-27 — LID-RELIEF measured (the lid keeps every dry column's ground and today's relief within 1–3 %; where rungs 14–15 differ it is today's rule that moves a dry column near a lake); ruling B18: the lid and its dry word, R2 now, the hand-over, slice 0b retired, the ramp 0.5 s, the far look (Q1); next R1.
+- 2026-09-27 — slice R1 built and measured (§8f; the design note §10): the band table (R1a), the sheet's own box (R1b), the arrival ramp (R1c); arrival pops past 3 levels 1 040 → 78; the water-decision pops left for R2; the walk leg's band gap found failing at HEAD too (registered); NOT committed.

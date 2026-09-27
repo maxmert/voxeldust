@@ -7895,6 +7895,10 @@ rings; what is left is an interim with a named step:
    while a finer chunk builds, the sunk coarser rung shows `sink_m` metres under the surface the
    finer will draw, and the ground rises by that in one frame when it lands, a jump SL8 calls a
    seam → step 6's pop detector names its size; and the skyline's cost per recompute → M8-2.
+   ★ THE ARRIVAL POP ANSWERED BY SLICE R1c (2026-09-27, the far-water design §10, ruling B18 Q7; not committed): a
+   landing chunk starts on its stand-in's drawn surface and rises over half a second (`vd_client::arrival`). MEASURED on
+   a still eye while about a thousand chunks land: boundary pixels past 3 levels 1 040 → 78, past 5 levels 714 → 51.
+   The large steps left are water decisions (the entry below).
 5. **At a band's far edge the coarser mesh may stand over a finer chord by the crease's sagitta**:
    the morph is exact at the finer VERTICES (they lie on the parent mesh), and a finer triangle
    that spans a coarser crease is the chord under it. The sink ramp now ends past the edge, so one
@@ -10229,6 +10233,10 @@ updated in the same change as the work, deleted when done). The interims named h
   another band than its ground; and every band edge jumps 5 % in one frame (`ASK_BOUND_REBIND`,
   `crates/client/src/ladder_view.rs:360`). WHERE: the client's terrain render. WHEN: slice R1 of the far-water design
   (`docs/investigation/2026-09-26/far_water_seamless_design.md` §2.7), before the skin.
+  ★ CURED BY SLICE R1a (built and measured 2026-09-27, the design note §10; flips 🟩 with its commit): every terrain
+  material of a realm — the water's included — reads ONE band table that the render world writes every frame
+  (`vd_client::ladder_view::band_table`; `rebind_bands` and the 5 % rebind are deleted); the stands' pictures and frame
+  cost are unchanged (MEASURED against HEAD `13d7fdc`).
 - 🟥 **A NEAR SHORE POPS AT A RING'S FRONT** (found 2026-09-27, verified): a water vertex morphs toward the moved ground with
   its OWN rung's side and level (`crates/client/src/chunks.rs:1418-1429`), and `ParentMesh` holds no water word
   (`:386-405`), so where two rungs place a shore differently the finer rung's water stays to the front and then pops
@@ -10369,3 +10377,18 @@ updated in the same change as the work, deleted when done). The interims named h
   under the owner's look.
 
 ---
+- 🟥 **THE WALK'S BAND GOES INCOMPLETE AGAIN** (found 2026-09-27 by slice R1's flights, on HEAD `13d7fdc` and on R1 alike):
+  the moving-eye gate's walk leg (1.4 m/s) reads the band incomplete on 37 frames, up to 6 urgent chunks at the worst
+  sample, the queue at 8–11 pending and the lead at 0.2 m — a shallow queue, so the gate's own text points at the band's
+  rule (the lead, the territory, the skyline), not the build rate. The 2026-09-09 run read it complete (item 4 above).
+  WHERE: `crates/client/src/ladder_view.rs` (the descent), `crates/bins/tests/terrain_moving_eye.rs:1773`. WHEN: before
+  the next slice lands on the moving-eye gate; the regression's commit UNMEASURED.
+- 🟨 **SLICE R1's RESIDUES** (2026-09-27, the far-water design §10.2): (1) a landing chunk whose stand-in is TWO rungs
+  coarser starts on the one-coarser surface; (2) a caster-only chunk (the shadow ladder) enters whole; (3) THE WATER
+  DECISIONS: a finer chunk that lands with water where its stand-in drew land shows its sea in one frame (MEASURED on the
+  steep coast at 148 km, `r1_renderer_pops/arrival_water_decision_pop.png`) — R2's decision morph and the skin's (S4);
+  (4) the still pixels past 20 levels while chunks land rose from 22 to 161 (the ramp's own moving silhouettes and any
+  depth tie of a rising chunk with its stand-in, not yet told apart); (5) G-BLINK and G-FRONT as judged gates are owed
+  at S4, where the skin's flicker and fronts exist. WHERE: `crates/client/src/arrival.rs`,
+  `crates/client-render/src/{terrain.rs,ladder_fade.wgsl}`. WHEN: (3) R2 and S4; (1), (2), (4) measured again in R2's
+  flight; (5) S4.

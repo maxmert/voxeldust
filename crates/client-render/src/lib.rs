@@ -946,6 +946,10 @@ impl Plugin for StarSkyShaderPlugin {
 pub(crate) struct ProbeMaterial {
     #[uniform(0)]
     params: ProbeParams,
+    /// ★ THE REALM'S BAND TABLE (the far-water design §10, slice R1a): the same buffer the
+    /// ground's material reads, so the probe fades on the band the picture fades on.
+    #[storage(1, read_only, buffer)]
+    table: Buffer,
 }
 
 #[derive(ShaderType, Debug, Clone)]
@@ -954,52 +958,31 @@ pub(crate) struct ProbeParams {
     code: f32,
     /// One cell of the rung, in metres: the distance channel's unit.
     cell_m: f32,
-    /// The crossfade bands (in_lo, in_hi, out_lo, out_hi), metres from the eye — the same morph,
-    /// sink and far edge the ground's material applies, so the probe reads what the picture
-    /// shows (step 3).
-    bands: Vec4,
-    /// The rung's sink in metres (x), like the ground's material (step 5).
+    /// The rung's sink in metres (x), like the ground's material (step 5); (y) the stand-in's
+    /// sink, where a late chunk's ramp starts (slice R1c); (z) the row of the realm's band table
+    /// this probe reads (the always-passed row for the ruler).
     sink: Vec4,
 }
 
 impl ProbeMaterial {
-    /// The material for one kind at one rung, with its crossfade bands, its sink's end and its
-    /// sink.
+    /// The material for one kind at one rung: its row of the realm's band table, its sink, the
+    /// stand-in's sink and the table itself.
     pub(crate) fn new(
         kind: u8,
         rung: u8,
-        bands: ([f64; 2], [f64; 2]),
-        sink_end_m: f64,
-        sink_m: f64,
+        row: u8,
+        (sink_m, stand_in_sink_m): (f64, f64),
+        table: Buffer,
     ) -> ProbeMaterial {
         ProbeMaterial {
             params: ProbeParams {
                 code: f32::from(vd_client_harness::probe::probe_byte(kind, rung)),
                 cell_m: vd_seed::ladder::cell_m(rung) as f32,
-                bands: fade_uniform(bands, sink_end_m),
-                sink: Vec4::new(sink_m as f32, 0.0, 0.0, 0.0),
+                sink: Vec4::new(sink_m as f32, stand_in_sink_m as f32, f32::from(row), 0.0),
             },
+            table,
         }
     }
-
-    /// THE BANDS REWRITTEN IN PLACE — the probe's own half of [`LadderFade::set_bands`], so what
-    /// the probe reads is what the picture shows under the bounded ask too.
-    pub(crate) fn set_bands(&mut self, bands: Vec4) {
-        self.params.bands = bands;
-    }
-}
-
-/// The bands as the shaders' uniform: (in_lo, sink_end, out_lo, out_hi), narrowed once — the
-/// second slot is where the SINK RAMP ends (`vd_client::ladder_view::sink_end_m`), a little past
-/// the fade-in edge, since the edge itself is what the finer rung's `out_hi` states.
-pub(crate) fn fade_uniform(bands: ([f64; 2], [f64; 2]), sink_end_m: f64) -> Vec4 {
-    let (fade_in, fade_out) = bands;
-    Vec4::new(
-        fade_in[0] as f32,
-        sink_end_m as f32,
-        fade_out[0] as f32,
-        fade_out[1] as f32,
-    )
 }
 
 /// ★ THE CROSSFADE (slice 8 step 3; ruling V14 D8-2, §5): the ground's own lit material, extended
@@ -1007,10 +990,13 @@ pub(crate) fn fade_uniform(bands: ([f64; 2], [f64; 2]), sink_end_m: f64) -> Vec4
 /// fade-out band, THE SINK that drops them under the next finer rung across its fade-in band
 /// (`ladder_fade.wgsl`, the vertex stage; each vertex carries its metre to the coarser surface,
 /// `ATTRIBUTE_MORPH`, and the rung's sink rides the uniform), and THE FAR EDGE where a rung ends (the
-/// fragment stage). One material per rung, carrying that rung's bands from the Tier-A
-/// `fade_bands`. A `StandardMaterial` extension: the light, the shadow and the paint are the
-/// engine's own; the shadow pass runs the same morph and sink (`ladder_fade_prepass.wgsl`), so
-/// the shadows fall from the surface the picture shows.
+/// fragment stage). One material per rung. ★ THE BANDS ARE NOT THE MATERIAL'S (the far-water
+/// design §10, slice R1a): every material of a realm binds that realm's ONE band table, which the
+/// renderer writes every frame (the Tier-A `band_table`), and holds only its row — so a moving
+/// horizon rewrites a buffer and never a material, and the water fades on its ground's band. A
+/// `StandardMaterial` extension: the light, the shadow and the paint are the engine's own; the
+/// shadow pass runs the same morph and sink (`ladder_fade_prepass.wgsl`), so the shadows fall from
+/// the surface the picture shows.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 #[bind_group_data(LadderFadeKey)]
 pub(crate) struct LadderFade {
@@ -1018,12 +1004,12 @@ pub(crate) struct LadderFade {
     /// the shadow pass's vertex stage skips the morph and the sink and sinks the vertex by the
     /// caster's own sink (`splat.y`) instead. A pipeline key, not a uniform.
     light_caster: bool,
-    /// The bands (in_lo, sink_end, out_lo, out_hi), metres from the eye. Slot 100: the base
-    /// material owns the slots below it.
-    #[uniform(100)]
-    bands: Vec4,
     /// THE RUNG'S SINK in metres (x), step 5: a vertex's sink is its own radial (an attribute)
-    /// times this. One number per rung, never rewritten.
+    /// times this. One number per rung, never rewritten. (y): THE STAND-IN'S SINK — the next
+    /// coarser rung's — where a late chunk's arrival ramp starts (slice R1c; nought for a caster,
+    /// which enters whole). (z): THE ROW of the realm's band table this material fades on — its
+    /// own rung's, the drawn rung's for a caster (§24.5). (w): unused. Slot 100: the base
+    /// material owns the slots below it.
     #[uniform(100)]
     sink: Vec4,
     /// THE RUNG'S CELL in metres (x): a splat's width (D8-8's measurement); read under the
@@ -1038,6 +1024,11 @@ pub(crate) struct LadderFade {
     /// the buffer's own step), never in the depth.
     #[uniform(100)]
     splat: Vec4,
+    /// ★ THE REALM'S BAND TABLE (slice R1a): `(clock, rows[])` — one row per rung,
+    /// `(in_lo, sink_end, out_lo, out_hi)` metres from the eye, and one always-passed row; the
+    /// renderer rewrites it in its prepare stage every frame, in step with the placements.
+    #[storage(101, read_only, buffer)]
+    table: Buffer,
 }
 
 /// The fade material's pipeline key: whether its meshes are light casters.
@@ -1055,26 +1046,20 @@ impl From<&LadderFade> for LadderFadeKey {
 }
 
 impl LadderFade {
+    /// The material of one rung: the row of the realm's band table it fades on, its sink and the
+    /// stand-in's, its cell, and the table itself.
     pub(crate) fn new(
-        bands: ([f64; 2], [f64; 2]),
-        sink_end_m: f64,
-        sink_m: f64,
+        row: u8,
+        (sink_m, stand_in_sink_m): (f64, f64),
         cell_m: f64,
+        table: Buffer,
     ) -> LadderFade {
         LadderFade {
             light_caster: false,
-            bands: fade_uniform(bands, sink_end_m),
-            sink: Vec4::new(sink_m as f32, 0.0, 0.0, 0.0),
+            sink: Vec4::new(sink_m as f32, stand_in_sink_m as f32, f32::from(row), 0.0),
             splat: Vec4::new(cell_m as f32, 0.0, 0.0, 0.0),
+            table,
         }
-    }
-
-    /// THE BANDS REWRITTEN IN PLACE (ruling F9 item 1, the bounded ask): a rung's crossfade bands
-    /// move when its deliverable horizon moves, and the bands are a uniform — so every drawn chunk
-    /// of that rung reads the new ones on the next frame, with no mesh rebuilt and no entity
-    /// respawned. The sink's depth and the splat's cell are the rung's own and never move.
-    pub(crate) fn set_bands(&mut self, bands: Vec4) {
-        self.bands = bands;
     }
 
     /// The same material as a light caster, sunk by `caster_sink_m`.
@@ -1117,6 +1102,17 @@ impl Plugin for LadderFadeShaderPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "ladder_fade.wgsl");
         bevy::asset::embedded_asset!(app, "ladder_fade_prepass.wgsl");
+        // ★ THE BAND TABLES (the far-water design §10, slice R1a): extracted after the frame's
+        // main-world systems and written in the render world's prepare stage, so the bands and
+        // the placements the picture draws are the same frame's.
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app
+                .add_systems(ExtractSchedule, terrain::extract_band_tables)
+                .add_systems(
+                    Render,
+                    terrain::write_band_tables.in_set(RenderSystems::PrepareResources),
+                );
+        }
     }
 }
 

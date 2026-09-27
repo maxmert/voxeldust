@@ -22,16 +22,41 @@
 }
 
 struct LadderFade {
-    // The bands: (in_lo, sink_end, out_lo, out_hi), metres from the eye; the sink ramp ends a
-    // little past the fade-in edge, so at the edge one finer cell of sink remains.
-    bands: vec4<f32>,
-    // The rung's sink in metres (x), step 5.
+    // The rung's sink in metres (x), step 5; (z) this material's row of the band table.
     sink: vec4<f32>,
-    // The rung's cell in metres (x): a splat's width (D8-8's measurement).
+    // The rung's cell in metres (x): a splat's width (D8-8's measurement); (y) a caster's sink.
     splat: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> fade: LadderFade;
+
+// ★ THE REALM'S BAND TABLE (the far-water design §10, slice R1a): every rung's crossfade for this
+// realm — one row per rung, (in_lo, sink_end, out_lo, out_hi) metres from the eye, and one row that
+// is always passed — which the renderer rewrites in its prepare stage every frame, in step with
+// the placements. The material holds only its row (`fade.sink.z`), so a moving horizon rewrites
+// this buffer and never a material, and the water fades on its ground's band. `clock` is the
+// arrival ramp's (slice R1c).
+struct BandTable {
+    clock: vec4<u32>,
+    rows: array<vec4<f32>>,
+}
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(101) var<storage, read> table: BandTable;
+
+// This material's row of the table.
+fn bands() -> vec4<f32> {
+    return table.rows[u32(fade.sink.z)];
+}
+
+// ★ THE ARRIVAL RAMP'S WEIGHT (the far-water design §10, slice R1c; `vd_client::arrival::ramp_weight`,
+// step for step): nought in the frame a chunk landed, one half a second later, and one at once for a
+// chunk that entered whole (its tag nought). The age is a wrapping difference of the table's clock and
+// the chunk's stamp, so the clock's wrap moves nothing.
+fn arrival(instance_index: u32) -> f32 {
+    let stamp = mesh_functions::get_tag(instance_index);
+    let age = f32(table.clock.x - stamp) / f32(max(table.clock.y, 1u));
+    return select(clamp(age, 0.0, 1.0), 1.0, stamp == 0u);
+}
 
 struct FadeVertex {
     @builtin(instance_index) instance_index: u32,
@@ -58,11 +83,13 @@ struct FadeVertex {
 }
 
 fn whole(d: f32) -> f32 {
-    return clamp((fade.bands.w - d) / (fade.bands.w - fade.bands.z), 0.0, 1.0);
+    let b = bands();
+    return clamp((b.w - d) / (b.w - b.z), 0.0, 1.0);
 }
 
 fn risen(d: f32) -> f32 {
-    return clamp((d - fade.bands.x) / (fade.bands.y - fade.bands.x), 0.0, 1.0);
+    let b = bands();
+    return clamp((d - b.x) / (b.y - b.x), 0.0, 1.0);
 }
 
 // THE PACKED NORMAL (ruling V18): two signed 16-bit numbers on the octahedron, unfolded to the
@@ -96,10 +123,19 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     // zero at the band's end where it has morphed onto this surface and the caster gives way to the
     // drawn chunk casting itself, unsunk: the shadow's edge moves with the crossfade, never at it.
     let morphed = own.xyz - radial * fade.splat.y * whole(d);
+    // A caster enters whole (slice R1c): the shadow ladder's own chunks carry no ramp.
+    let ramp = 1.0;
 #else
     let coarser = own.xyz + radial * vertex.morph_m;
     let sink = radial * fade.sink.x;
-    let morphed = mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d));
+    // ★ THE ARRIVAL RAMP (slice R1c): the same start and rise as the picture's vertex stage, so a
+    // late chunk's shadow rises with it.
+    let ramp = arrival(vertex.instance_index);
+    let morphed = mix(
+        coarser - radial * fade.sink.y * whole(d),
+        mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d)),
+        ramp,
+    );
 #endif
 #ifdef SPLAT
     // THE SPLAT: the vertex as a camera-facing square one cell wide, spread in view space after
@@ -125,7 +161,7 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     let own_normal = vertex.normal;
 #endif
     // THE SHADE HANDS OVER WITH THE SHAPE (item 20): the same blend as the position's.
-    let local_normal = normalize(mix(oct_decode(vertex.morph_normal), own_normal, whole(d)));
+    let local_normal = normalize(mix(oct_decode(vertex.morph_normal), own_normal, whole(d) * ramp));
     out.world_normal = mesh_functions::mesh_normal_local_to_world(local_normal, vertex.instance_index);
 #endif
 #ifdef MOTION_VECTOR_PREPASS
@@ -147,7 +183,7 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
 #ifdef PREPASS_FRAGMENT
 @fragment
 fn fragment(in: VertexOutput) -> FragmentOutput {
-    if length(in.world_position.xyz) >= fade.bands.w {
+    if length(in.world_position.xyz) >= bands().w {
         discard;
     }
     var out: FragmentOutput;
@@ -162,7 +198,7 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
 #else
 @fragment
 fn fragment(in: VertexOutput) {
-    if length(in.world_position.xyz) >= fade.bands.w {
+    if length(in.world_position.xyz) >= bands().w {
         discard;
     }
 }

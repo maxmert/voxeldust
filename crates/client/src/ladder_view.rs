@@ -127,6 +127,46 @@ pub fn sink_end_m(body: &BodyDefinition, rung: u8, rungs: u8) -> f64 {
     AskBound::unbounded().sink_end_m(body, rung, rungs)
 }
 
+/// ★ ONE ROW OF THE BAND TABLE: a rung's crossfade as the terrain shaders read it —
+/// `(in_lo, sink_end, out_lo, out_hi)`, metres from the eye (`ladder_fade.wgsl`'s `whole` and
+/// `risen`, and the far edge's discard).
+#[must_use]
+pub fn band_row((fade_in, fade_out): ([f64; 2], [f64; 2]), sink_end_m: f64) -> [f32; 4] {
+    [
+        fade_in[0] as f32,
+        sink_end_m as f32,
+        fade_out[0] as f32,
+        fade_out[1] as f32,
+    ]
+}
+
+/// ★ THE BAND TABLE (the far-water design §10, slice R1a): every rung's crossfade under `bound`,
+/// row `r` for rung `r`, and ONE ROW MORE at index `rungs` that is always passed (the ruler's
+/// probe, which is never faded). Every terrain material of a realm — the ground's, the water
+/// sheet's, the caster's and the probe's — reads its row from ONE buffer that the renderer writes
+/// every frame, so a moving horizon rewrites a table and never a material: the water's bands can
+/// no longer lag its ground's (before R1a the water's materials were never rewritten at all).
+///
+/// **Example.** A hull speeds up over the belt and rung 2's horizon slides in. On that frame the
+/// table's row 2 moves, and the rung-2 ground, the rung-2 sheet and the rung-3 caster (which casts
+/// for rung 2) all fade on the new band.
+#[must_use]
+pub fn band_table(bound: &AskBound, body: &BodyDefinition, rungs: u8) -> Vec<[f32; 4]> {
+    let mut rows: Vec<[f32; 4]> = (0..rungs)
+        .map(|rung| {
+            band_row(
+                bound.fade_bands(rung, rungs),
+                bound.sink_end_m(body, rung, rungs),
+            )
+        })
+        .collect();
+    rows.push(band_row(
+        (FADE_ALWAYS_IN, FADE_ALWAYS_OUT),
+        FADE_ALWAYS_IN[1],
+    ));
+    rows
+}
+
 /// Whether a distance lies inside a crossfade band of some rung: where two rungs share the ground.
 #[must_use]
 pub fn in_fade_band(d_m: f64, rungs: u8) -> bool {
@@ -344,21 +384,6 @@ pub const ASK_BOUND_SLEW_PER_S: f64 = 0.25;
 /// horizon from flapping; this is what keeps it from churning once it has arrived.
 pub const ASK_BOUND_HYSTERESIS: f64 = 0.005;
 
-/// ★ HOW FAR A HORIZON MUST MOVE BEFORE THE CROSSFADE'S MATERIALS FOLLOW IT: a twentieth.
-///
-/// The DESCENT follows the horizon every frame — it runs every frame at speed anyway — but the
-/// three material families carry the bands as a UNIFORM, and rewriting a material makes the engine
-/// prepare its bind group again. MEASURED (the third bounded flight, 2026-09-13): the horizon the
-/// measurement asks for wanders about a tenth either side of its own mean from frame to frame (the
-/// build rate reads 182 to 226 chunks a second over one leg), so the materials were rewritten on
-/// nearly every frame of the 528 m/s leg and the frame rate fell from 43.2 to 38.7.
-///
-/// A twentieth is well inside the crossfade band's own width (a fifth of the switch distance).
-/// What makes the difference safe is not that it is small but that [`ASK_BOUND_SLACK`] is derived
-/// from THIS fraction and the descent's bracket together, so the ring the descent asked for covers
-/// the band the picture draws at the worst stand of both.
-pub const ASK_BOUND_REBIND: f64 = 0.05;
-
 /// WHAT THE CLIENT MEASURED about its builders and its own motion, for the bounded ask. Every
 /// number here is a MEASUREMENT the client already holds; nothing is derived from a pose the
 /// client made up (SL10 clause 7: the speed comes from two DELIVERED poses, the same pair the
@@ -482,8 +507,8 @@ pub fn ask_bound(rungs: u8, rate: AskRate) -> AskBound {
 /// of a length a second a tenth is about two fifths of a second.
 ///
 /// The descent's own ask is widened by [`ASK_BOUND_SLACK`] ([`AskBound::with_slack`]) — DERIVED
-/// from this fraction and the materials' own, never equal to this one — so the ring it asked for
-/// covers the bands the picture draws until the next descent.
+/// from this fraction, never equal to it — so the ring it asked for covers the bands the picture
+/// draws until the next descent.
 ///
 /// ★ AND THE DESCENT MAY BE RATE-LIMITED BESIDES ([`ASK_BOUND_DESCENT_S`], zero as shipped), which
 /// would cap the descents a body's bound can force a second whatever the slew or the speed.
@@ -502,31 +527,27 @@ pub const ASK_BOUND_BRACKET: f64 = 0.10;
 /// grow with it.
 pub const ASK_BOUND_DESCENT_S: f64 = 0.0;
 
-/// ★ HOW MUCH WIDER THE DESCENT ASKS THAN THE HORIZON IT RAN ON: about a sixth, DERIVED from the
-/// two tolerances it must cover (review item 3). It is not a taste.
+/// ★ HOW MUCH WIDER THE DESCENT ASKS THAN THE HORIZON IT RAN ON: about a sixth. It must cover the
+/// one tolerance between them; it is not a taste.
 ///
-/// The picture and the descent read the horizon at two different tolerances. The materials follow
-/// the held horizon within [`ASK_BOUND_REBIND`], so the DRAWN base may stand as far out as
-/// `1 / (1 − REBIND)` of the held one. The descent follows within [`ASK_BOUND_BRACKET`], so the
-/// ASKED base may stand as far in as `1 − BRACKET` of it. At the worst of both at once the drawn
-/// base is `1 / ((1 − REBIND)(1 − BRACKET))` — about 1.170 — of the asked base, and every band is
-/// a fixed multiple of its base, so the drawn band's outer edge stands 1.170 times the asked one's
-/// unless the ask is widened by exactly that much.
+/// The picture reads the HELD horizon on every frame (the band table, slice R1a), and the descent
+/// follows it within [`ASK_BOUND_BRACKET`], so the ASKED base may stand as far in as
+/// `1 − BRACKET` of the held one. Every band is a fixed multiple of its base, so the drawn band's
+/// outer edge stands `1 / (1 − BRACKET)` — about 1.111 — times the asked one's unless the ask is
+/// widened by at least that much. A bracket's worth of slack falls short: `(1 − 0.10)(1 + 0.10)`
+/// is 0.99, and the picture could draw a band the descent never asked for.
 ///
-/// A HOLE IS THEREFORE NOT "IMPOSSIBLE BY CONSTRUCTION" BY ITSELF — it is impossible because this
-/// number is derived from the two tolerances and asserted against them below. With the slack at
-/// the bracket alone (a tenth) the drawn edge could reach 1.170 times the asked base against an
-/// asked outer edge of 1.10, and the picture could draw a band the descent never asked for.
-/// The derivation reads 0.1696 at today's two tolerances; the number is rounded up to a
-/// seventeen-hundredth so it is a figure a person can hold, and the assertions below fail the
-/// BUILD if either tolerance ever moves past it.
+/// The number is the terrain crate's (`ASK_SLACK`, 0.17), because the shard and the gateway ship
+/// tiles to the same widened edge. It was derived when the materials still followed the horizon
+/// only within a twentieth (the drawn base up to `1 / 0.95` out as well: 1.170 at worst); with the
+/// band table that second tolerance is gone, and the same slack now covers the bracket with a
+/// margin of 5 %. The assertions below fail the BUILD if the bracket ever moves past it.
 pub const ASK_BOUND_SLACK: f64 = vd_terrain::artifact::ASK_SLACK;
 
-// THE DERIVATION, ASSERTED WHERE IT CANNOT ROT: the slack covers the worst simultaneous stand of
-// the two tolerances (the drawn edge inside the asked edge), and it is never less than their sum.
-const _: () =
-    assert!((1.0 + ASK_BOUND_SLACK) * (1.0 - ASK_BOUND_REBIND) * (1.0 - ASK_BOUND_BRACKET) >= 1.0);
-const _: () = assert!(ASK_BOUND_SLACK >= ASK_BOUND_BRACKET + ASK_BOUND_REBIND);
+// THE DERIVATION, ASSERTED WHERE IT CANNOT ROT: the slack covers the worst stand of the bracket
+// (the drawn edge inside the asked edge), and it is never less than the bracket itself.
+const _: () = assert!((1.0 + ASK_BOUND_SLACK) * (1.0 - ASK_BOUND_BRACKET) >= 1.0);
+const _: () = assert!(ASK_BOUND_SLACK >= ASK_BOUND_BRACKET);
 
 impl AskBound {
     /// The tier rule's own radii: the bound does not bind.
@@ -4029,14 +4050,14 @@ mod ask_bound_tests {
         );
     }
 
-    /// ★ THE DESCENT'S SLACK COVERS THE SLIDE (ruling F9 item 1, the frame bar; review item 2).
+    /// ★ THE DESCENT'S SLACK COVERS THE SLIDE (ruling F9 item 1, the frame bar; review item 2;
+    /// slice R1a).
     ///
-    /// The picture and the descent read the horizon at two tolerances: the materials follow the
-    /// held horizon within [`ASK_BOUND_REBIND`], the descent within [`ASK_BOUND_BRACKET`]. This
-    /// walks THE WORST STAND OF BOTH AT ONCE — a drawn horizon a rebind OUT and an asked horizon a
-    /// bracket IN — and asserts that every band the picture draws lies inside the ring the descent
-    /// asked for. It asserts the guard itself, so the walk cannot go vacuous, and it asserts that
-    /// the bracket ALONE falls short, which is why [`ASK_BOUND_SLACK`] is derived from the two.
+    /// The picture draws the HELD horizon on every frame (the band table); the descent follows it
+    /// within [`ASK_BOUND_BRACKET`]. This walks THE WORST STAND — an asked horizon a bracket IN —
+    /// and asserts that every band the picture draws lies inside the ring the descent asked for.
+    /// It asserts the guard itself, so the walk cannot go vacuous, and it asserts that a slack of
+    /// the bracket ALONE falls short, which is why [`ASK_BOUND_SLACK`] is wider.
     #[test]
     fn the_descents_slack_covers_every_band_the_horizon_may_slide_to() {
         let rungs = 12u8;
@@ -4048,8 +4069,7 @@ mod ask_bound_tests {
         // The slack is not the bound: the same switches read as the same bound.
         let asked = held.clone().with_slack(ASK_BOUND_SLACK);
         assert!(asked.same_as(&held, rungs, 0.0));
-        // THE WORST STAND OF BOTH TOLERANCES AT ONCE, at every rung, built outright instead of
-        // hoping some rate lands there.
+        // THE WORST STAND, at every rung, built outright instead of hoping some rate lands there.
         let scaled = |bound: &AskBound, k: f64| {
             let mut switches = Vec::new();
             let mut rung = 0u8;
@@ -4059,26 +4079,21 @@ mod ask_bound_tests {
             }
             AskBound::from_switches(switches)
         };
-        // A HAIR inside each tolerance, so the guard's own comparison is decided by the
-        // arithmetic and not by the last bit of a double at the exact boundary.
+        // A HAIR inside the tolerance, so the guard's own comparison is decided by the arithmetic
+        // and not by the last bit of a double at the exact boundary.
         let hair = 1.0e-12;
         let worst_asked = scaled(&held, 1.0 - ASK_BOUND_BRACKET + hair).with_slack(ASK_BOUND_SLACK);
-        let worst_drawn = scaled(&held, 1.0 / (1.0 - ASK_BOUND_REBIND) - hair);
-        // THE GUARD ITSELF: these two really are a bracket and a rebind from the held horizon, so
-        // the walk below is a stand the pace can produce and not a pair that never happens.
+        // THE GUARD ITSELF: the asked horizon really is a bracket from the held one, so the walk
+        // below is a stand the pace can produce and not a pair that never happens.
         assert!(
             worst_asked.same_as(&held, rungs, ASK_BOUND_BRACKET),
             "the asked horizon must sit inside the descent's own bracket"
-        );
-        assert!(
-            worst_drawn.same_as(&held, rungs, ASK_BOUND_REBIND),
-            "the drawn horizon must sit inside the materials' own rebind"
         );
         let mut checked = 0u32;
         let mut rung = 0u8;
         while rung < rungs {
             let (ask_in, ask_out) = worst_asked.fade_bands(rung, rungs);
-            let (drawn_in, drawn_out) = worst_drawn.fade_bands(rung, rungs);
+            let (drawn_in, drawn_out) = held.fade_bands(rung, rungs);
             assert!(ask_in[0] <= drawn_in[0], "rung {rung}: the fade-in's start");
             assert!(ask_in[1] >= drawn_in[1], "rung {rung}: the fade-in's end");
             assert!(
@@ -4095,10 +4110,10 @@ mod ask_bound_tests {
         assert_eq!(checked, u32::from(rungs), "every rung must be walked");
         // AND THE BRACKET ALONE FALLS SHORT: the same worst stand asked with a slack of the
         // bracket draws a band outside the ring the descent asked for. This is the defect the
-        // derivation cures, asserted so it cannot come back.
+        // slack cures, asserted so it cannot come back.
         let short = scaled(&held, 1.0 - ASK_BOUND_BRACKET + hair).with_slack(ASK_BOUND_BRACKET);
         let (_, short_out) = short.fade_bands(0, rungs);
-        let (_, drawn_out) = worst_drawn.fade_bands(0, rungs);
+        let (_, drawn_out) = held.fade_bands(0, rungs);
         assert!(
             short_out[1] < drawn_out[1],
             "the bracket alone must fall short of the drawn band"
@@ -4108,6 +4123,54 @@ mod ask_bound_tests {
         assert_eq!(
             exact.fade_bands(2, rungs),
             exact.clone().with_slack(0.0).fade_bands(2, rungs)
+        );
+    }
+
+    /// ★ THE BAND TABLE IS EVERY RUNG'S CROSSFADE (the far-water design §10, slice R1a): row `r`
+    /// is rung `r`'s bands and sink end under the bound, the last row is always passed, and a
+    /// table under another bound differs — so a table the renderer failed to rewrite would show.
+    #[test]
+    fn the_band_table_is_every_rungs_crossfade_under_its_bound() {
+        let body = home_planet();
+        let rungs = body.ladder().rungs;
+        let bound = ask_bound(rungs, fast());
+        assert!(
+            bound.binds(),
+            "the fixture must bind for this to mean anything"
+        );
+        let table = band_table(&bound, &body, rungs);
+        assert_eq!(table.len(), usize::from(rungs) + 1);
+        let mut rung = 0u8;
+        while rung < rungs {
+            let (fade_in, fade_out) = bound.fade_bands(rung, rungs);
+            let row = table[usize::from(rung)];
+            assert_eq!(row[0], fade_in[0] as f32, "rung {rung}: in_lo");
+            assert_eq!(
+                row[1],
+                bound.sink_end_m(&body, rung, rungs) as f32,
+                "rung {rung}: sink_end"
+            );
+            assert_eq!(row[2], fade_out[0] as f32, "rung {rung}: out_lo");
+            assert_eq!(row[3], fade_out[1] as f32, "rung {rung}: out_hi");
+            rung += 1;
+        }
+        // The always-passed row: in far below every distance, out far above it.
+        assert_eq!(
+            table[usize::from(rungs)],
+            [
+                FADE_ALWAYS_IN[0] as f32,
+                FADE_ALWAYS_IN[1] as f32,
+                FADE_ALWAYS_OUT[0] as f32,
+                FADE_ALWAYS_OUT[1] as f32
+            ]
+        );
+        // THE CONTROL: the tier rule's own radii make another table (the bound binds), so a stale
+        // table is visible to this comparison.
+        let free = band_table(&AskBound::unbounded(), &body, rungs);
+        assert_ne!(free, table);
+        assert_eq!(
+            band_row(fade_bands(1, rungs), sink_end_m(&body, 1, rungs)),
+            free[1]
         );
     }
 

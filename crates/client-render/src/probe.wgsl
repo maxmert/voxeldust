@@ -34,13 +34,36 @@ struct ProbeUniform {
     code: f32,
     // One cell of the rung, in metres.
     cell_m: f32,
-    // THE CROSSFADE BANDS (slice 8 step 3): (in_lo, sink_end, out_lo, out_hi), metres from the eye.
-    bands: vec4<f32>,
-    // The rung's sink in metres (x), step 5.
+    // The rung's sink in metres (x), step 5; (z) this probe's row of the band table (the
+    // always-passed row for the ruler).
     sink: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> probe: ProbeUniform;
+
+// ★ THE REALM'S BAND TABLE (slice R1a): the same buffer the ground's material reads, so the probe
+// fades on the band the picture fades on.
+struct BandTable {
+    clock: vec4<u32>,
+    rows: array<vec4<f32>>,
+}
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<storage, read> table: BandTable;
+
+// This probe's row of the table.
+fn bands() -> vec4<f32> {
+    return table.rows[u32(probe.sink.z)];
+}
+
+// ★ THE ARRIVAL RAMP'S WEIGHT (the far-water design §10, slice R1c; `vd_client::arrival::ramp_weight`,
+// step for step): nought in the frame a chunk landed, one half a second later, and one at once for a
+// chunk that entered whole (its tag nought). The age is a wrapping difference of the table's clock and
+// the chunk's stamp, so the clock's wrap moves nothing.
+fn arrival(instance_index: u32) -> f32 {
+    let stamp = mesh_functions::get_tag(instance_index);
+    let age = f32(table.clock.x - stamp) / f32(max(table.clock.y, 1u));
+    return select(clamp(age, 0.0, 1.0), 1.0, stamp == 0u);
+}
 
 struct ProbeVertex {
     @builtin(instance_index) instance_index: u32,
@@ -67,11 +90,13 @@ struct ProbeVertex {
 }
 
 fn whole(d: f32) -> f32 {
-    return clamp((probe.bands.w - d) / (probe.bands.w - probe.bands.z), 0.0, 1.0);
+    let b = bands();
+    return clamp((b.w - d) / (b.w - b.z), 0.0, 1.0);
 }
 
 fn risen(d: f32) -> f32 {
-    return clamp((d - probe.bands.x) / (probe.bands.y - probe.bands.x), 0.0, 1.0);
+    let b = bands();
+    return clamp((d - b.x) / (b.y - b.x), 0.0, 1.0);
 }
 
 // THE PACKED NORMAL (ruling V18): two signed 16-bit numbers on the octahedron, unfolded to the
@@ -97,7 +122,13 @@ fn vertex(vertex: ProbeVertex) -> VertexOutput {
     let radial = normalize(mesh_functions::mesh_normal_local_to_world(vertex.radial, vertex.instance_index));
     let coarser = own.xyz + radial * vertex.morph_m;
     let sink = radial * probe.sink.x;
-    let morphed = mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d));
+    // ★ THE ARRIVAL RAMP (slice R1c): the twin rises as the picture's chunk does.
+    let ramp = arrival(vertex.instance_index);
+    let morphed = mix(
+        coarser - radial * probe.sink.y * whole(d),
+        mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d)),
+        ramp,
+    );
 #ifdef SPLAT
     // THE SPLAT: the vertex as a camera-facing square one cell wide, spread in view space after
     // the morph and the sink, so it faces the eye by construction.
@@ -117,7 +148,7 @@ fn vertex(vertex: ProbeVertex) -> VertexOutput {
     let own_normal = vertex.normal;
 #endif
     // THE SHADE HANDS OVER WITH THE SHAPE (item 20): the same blend as the position's.
-    let local_normal = normalize(mix(oct_decode(vertex.morph_normal), own_normal, whole(d)));
+    let local_normal = normalize(mix(oct_decode(vertex.morph_normal), own_normal, whole(d) * ramp));
     out.world_normal = mesh_functions::mesh_normal_local_to_world(local_normal, vertex.instance_index);
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = vertex.instance_index;
@@ -136,7 +167,7 @@ fn srgb_to_linear(c: f32) -> f32 {
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let d = length(in.world_position.xyz);
-    if d >= probe.bands.w {
+    if d >= bands().w {
         discard;
     }
     let cells = clamp(floor(d / probe.cell_m + 0.5), 0.0, 65535.0);

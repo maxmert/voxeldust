@@ -189,42 +189,39 @@ impl FrameClock {
     }
 }
 
-/// ★ ONE REALM'S HORIZON, AND THE THREE RATES THAT READ IT (ruling F9 item 1, the frame bar).
+/// ★ ONE REALM'S HORIZON, AND THE TWO RATES THAT READ IT (ruling F9 item 1, the frame bar).
 ///
 /// The horizon the measurement asks for wanders frame to frame; the horizon IN FORCE slides toward
-/// it, because a crossfade band that jumps is a pop. Three things then read the horizon in force,
-/// at three rates, and that separation is the whole of the frame-bar cure:
+/// it, because a crossfade band that jumps is a pop. Two things then read the horizon in force,
+/// at two rates, and that separation is the whole of the frame-bar cure:
 ///
-/// - THE HELD HORIZON moves every frame, by the slew.
-/// - THE DRAWN HORIZON — the one the crossfade's materials carry — follows within
-///   [`crate::ladder_view::ASK_BOUND_REBIND`], because rewriting a material makes the engine
-///   prepare its bind group again.
+/// - THE HELD HORIZON moves every frame, by the slew, and THE PICTURE READS IT EVERY FRAME: the
+///   crossfade's bands ride one table per realm ([`crate::ladder_view::band_table`]) that the
+///   renderer writes into one buffer every frame, so no material is rewritten when a horizon
+///   moves (the far-water design §10, slice R1a). Before R1a the materials carried the bands as a
+///   uniform and followed the held horizon only within a twentieth, because a rewritten material
+///   made the engine prepare its bind group again (MEASURED: 43.2 → 38.7 frames a second), and
+///   the water's materials were never rewritten at all.
 /// - THE ASKED HORIZON — the one the DESCENT ran on — follows within
 ///   [`crate::ladder_view::ASK_BOUND_BRACKET`], because the descent is the costliest thing the
 ///   terrain system does on the main thread (MEASURED, §25.7: 9.7 ms a frame, and following the
 ///   horizon every frame took it to 18.1 ms).
 ///
-/// The asked horizon carries [`ASK_BOUND_SLACK`], which is DERIVED from those two tolerances, so
-/// that what the picture draws always lies inside what the descent asked for.
+/// The asked horizon carries [`ASK_BOUND_SLACK`], which covers the bracket, so that what the
+/// picture draws always lies inside what the descent asked for.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AskPace {
     held: AskBound,
-    drawn: AskBound,
     asked: AskBound,
     descent_at_s: Option<f64>,
 }
 
 impl AskPace {
-    /// The horizon in force: what the slew moves, and what the other two follow.
+    /// The horizon in force: what the slew moves, what the picture's band table carries every
+    /// frame, and what the descent follows.
     #[must_use]
     pub fn held(&self) -> &AskBound {
         &self.held
-    }
-
-    /// The horizon the crossfade's materials carry.
-    #[must_use]
-    pub fn drawn(&self) -> &AskBound {
-        &self.drawn
     }
 
     /// The horizon the last descent ran on, with its slack.
@@ -250,17 +247,6 @@ impl AskPace {
         self.held = self.held.slewed_toward(want, rungs, dt_s);
     }
 
-    /// WHETHER THE CROSSFADE'S MATERIALS MUST FOLLOW THE HORIZON NOW — AND THEY DO: a `true`
-    /// answer has already moved the drawn horizon to the held one. It answers `true` only when the
-    /// held horizon has moved `fraction` from the one the materials carry.
-    pub fn take_rebind(&mut self, rungs: u8, fraction: f64) -> bool {
-        if self.drawn.same_as(&self.held, rungs, fraction) {
-            return false;
-        }
-        self.drawn = self.held.clone();
-        true
-    }
-
     /// WHETHER THE DESCENT MUST FOLLOW THE HORIZON NOW — AND IT DOES: a `true` answer has already
     /// moved the asked horizon to the held one, with its slack, and stamped the moment. It answers
     /// `true` only when the held horizon has left the ring the last descent asked for (`bracket`),
@@ -280,8 +266,7 @@ impl AskPace {
 mod tests {
     use super::*;
     use crate::ladder_view::{
-        ASK_BOUND_BRACKET, ASK_BOUND_HYSTERESIS, ASK_BOUND_REBIND, AskRate, EYE_HEIGHT_M,
-        ask_bound, switch_m,
+        ASK_BOUND_BRACKET, ASK_BOUND_HYSTERESIS, AskRate, EYE_HEIGHT_M, ask_bound, switch_m,
     };
 
     /// A rate that binds on the home planet: a hull at 528 m/s over the ground, three workers.
@@ -378,23 +363,26 @@ mod tests {
         assert_eq!(still.held(), &AskBound::unbounded());
     }
 
-    /// ★ THE CURE'S OWN TEST (review item 6): the descent does NOT re-run while the horizon stays
-    /// inside the ring it asked for, and DOES when the horizon leaves it. The materials follow at
-    /// their own, finer, tolerance — so a slide rewrites the bands several times for one descent.
+    /// ★ THE CURE'S OWN TEST (review item 6; slice R1a): the descent does NOT re-run while the
+    /// horizon stays inside the ring it asked for, and DOES when the horizon leaves it. The picture
+    /// follows the held horizon on EVERY frame it moves — its bands ride the band table, which
+    /// costs a buffer write, not a material — so a slide moves the bands on many frames for one
+    /// descent.
     #[test]
-    fn the_descent_waits_for_the_bracket_and_the_materials_do_not() {
+    fn the_descent_waits_for_the_bracket_and_the_band_table_does_not() {
         let want = ask_bound(RUNGS, fast());
         let mut pace = AskPace::default();
         // The first step off the tier rule's radii is a descent: the asked horizon is unbounded.
         pace.slew(&want, RUNGS, ASK_BOUND_HYSTERESIS, 1.0 / 60.0);
         let mut descents = 0u32;
-        let mut rebinds = 0u32;
+        let mut moves = 0u32;
         let mut frames = 0u32;
         let mut t = 0.0f64;
         while t < 30.0 {
+            let before = pace.held().clone();
             pace.slew(&want, RUNGS, ASK_BOUND_HYSTERESIS, 1.0 / 60.0);
             descents += u32::from(pace.take_descent(RUNGS, ASK_BOUND_BRACKET, 0.0, t));
-            rebinds += u32::from(pace.take_rebind(RUNGS, ASK_BOUND_REBIND));
+            moves += u32::from(&before != pace.held());
             frames += 1;
             t += 1.0 / 60.0;
         }
@@ -405,23 +393,24 @@ mod tests {
             "the descent ran {descents} times over {frames} frames"
         );
         assert!(
-            rebinds > descents,
-            "the materials ({rebinds}) must follow more often than the descent ({descents})"
+            moves > 10 * descents,
+            "the picture's bands ({moves} frames) must follow far more often than the descent ({descents})"
         );
-        // Settled, neither runs again.
+        // Settled, neither moves again.
         assert!(
             pace.held().same_as(&want, RUNGS, ASK_BOUND_HYSTERESIS),
             "it never arrived"
         );
+        let settled = pace.held().clone();
         let mut quiet = 0u32;
         let mut u = 0.0f64;
         while u < 4.0 {
             pace.slew(&want, RUNGS, ASK_BOUND_HYSTERESIS, 1.0 / 60.0);
             quiet += u32::from(pace.take_descent(RUNGS, ASK_BOUND_BRACKET, 0.0, 100.0 + u));
-            quiet += u32::from(pace.take_rebind(RUNGS, ASK_BOUND_REBIND));
             u += 1.0 / 60.0;
         }
         assert_eq!(quiet, 0);
+        assert_eq!(&settled, pace.held());
     }
 
     /// ★ THE RATE LIMIT'S OWN ARM (review item 7): a nonzero interval refuses a descent that the
@@ -440,18 +429,17 @@ mod tests {
         assert!(pace.take_descent(RUNGS, ASK_BOUND_BRACKET, 0.5, 10.6));
     }
 
-    /// THE ASKED HORIZON CARRIES THE SLACK, and the drawn one never does: the slack is not part of
-    /// a bound's identity, so the two read as the same bound.
+    /// THE ASKED HORIZON CARRIES THE SLACK, and the held one — the one the picture draws —
+    /// never does: the slack is not part of a bound's identity, so the two read as the same bound.
     #[test]
-    fn the_asked_horizon_carries_the_slack_and_the_drawn_one_does_not() {
+    fn the_asked_horizon_carries_the_slack_and_the_held_one_does_not() {
         let want = ask_bound(RUNGS, fast());
         let mut pace = AskPace::default();
         pace.slew(&want, RUNGS, ASK_BOUND_HYSTERESIS, 1.0);
         assert!(pace.take_descent(RUNGS, ASK_BOUND_BRACKET, 0.0, 1.0));
-        assert!(pace.take_rebind(RUNGS, ASK_BOUND_REBIND));
-        assert!(pace.asked().same_as(pace.drawn(), RUNGS, 0.0));
+        assert!(pace.asked().same_as(pace.held(), RUNGS, 0.0));
         let (_, asked_out) = pace.asked().fade_bands(0, RUNGS);
-        let (_, drawn_out) = pace.drawn().fade_bands(0, RUNGS);
+        let (_, drawn_out) = pace.held().fade_bands(0, RUNGS);
         assert!(asked_out[1] > drawn_out[1], "the asked ring must be wider");
     }
 
@@ -591,16 +579,14 @@ mod tests {
     }
 
     /// A PACE THAT NEVER BINDS reads the tier rule's own radii at every rung, and asks nothing of
-    /// the descent or the materials.
+    /// the descent.
     #[test]
     fn a_covered_ask_moves_nothing() {
         let mut pace = AskPace::default();
         let free = AskBound::unbounded();
         pace.slew(&free, RUNGS, ASK_BOUND_HYSTERESIS, 1.0);
         assert!(!pace.take_descent(RUNGS, ASK_BOUND_BRACKET, 0.0, 1.0));
-        assert!(!pace.take_rebind(RUNGS, ASK_BOUND_REBIND));
         assert_eq!(pace.held().switch_m(0), switch_m(0));
         assert_eq!(pace.asked().switch_m(3), switch_m(3));
-        assert_eq!(pace.drawn().switch_m(5), switch_m(5));
     }
 }

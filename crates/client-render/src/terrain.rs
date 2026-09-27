@@ -46,6 +46,10 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use bevy::camera::visibility::RenderLayers;
+use bevy::ecs::system::SystemParam;
+use bevy::render::Extract;
+use bevy::render::render_resource::{Buffer, BufferDescriptor, BufferUsages};
+use bevy::render::renderer::{RenderDevice, RenderQueue};
 use vd_client::ask_pace::{AskPace, FrameClock, PeakHold, Throughput};
 use vd_client::card_budget::{CARD_BUDGET_FRACTION, CardBudget, clamped_fraction};
 use vd_client::chunks::{
@@ -53,8 +57,8 @@ use vd_client::chunks::{
     geometry_from, geometry_with, oct_encode, ruler_on_surface,
 };
 use vd_client::ladder_view::{
-    AskBound, AskRate, Column, FADE_ALWAYS_IN, FADE_ALWAYS_OUT, LadderView, ShadowReach, WantedSet,
-    rung_for_distance, switch_m,
+    AskBound, AskRate, Column, LadderView, ShadowReach, WantedSet, band_table, rung_for_distance,
+    switch_m,
 };
 use vd_client::realm_scene::{BoxShape, RealmBox, RealmScene};
 use vd_client_harness::probe::{
@@ -224,15 +228,11 @@ pub struct TerrainConfig {
     /// [`vd_client::ladder_view::ASK_BOUND_SLEW_PER_S`], because the crossfade band rides on it
     /// and a jumped band is a pop.
     pub ask_bound_hysteresis: f64,
-    /// HOW FAR A HORIZON MUST MOVE before the crossfade's three material families follow it
-    /// ([`vd_client::ladder_view::ASK_BOUND_REBIND`]). A material rewrite costs the engine a bind
-    /// group, and the horizon wanders.
-    pub ask_bound_rebind: f64,
     /// HOW FAR THE HORIZON MAY SLIDE before the DESCENT follows it
     /// ([`vd_client::ladder_view::ASK_BOUND_BRACKET`]). The descent is the costliest thing on the
     /// main thread, and it asks a ring wider by [`vd_client::ladder_view::ASK_BOUND_SLACK`] —
-    /// DERIVED from this fraction and the materials' own together — so no band it did not cover is
-    /// ever drawn.
+    /// which covers this fraction — so no band it did not cover is ever drawn (the picture's
+    /// bands ride the band table and follow the held horizon every frame, slice R1a).
     pub ask_bound_bracket: f64,
     /// HOW OFTEN THE BOUND MAY FORCE A DESCENT, seconds, per realm
     /// ([`vd_client::ladder_view::ASK_BOUND_DESCENT_S`]). ZERO as shipped — the bracket alone
@@ -397,7 +397,6 @@ impl TerrainConfig {
             ask_bound: env_on(ASK_BOUND_ENV),
             throughput_window_s: THROUGHPUT_WINDOW_S,
             ask_bound_hysteresis: vd_client::ladder_view::ASK_BOUND_HYSTERESIS,
-            ask_bound_rebind: vd_client::ladder_view::ASK_BOUND_REBIND,
             ask_bound_bracket: vd_client::ladder_view::ASK_BOUND_BRACKET,
             ask_bound_descent_s: vd_client::ladder_view::ASK_BOUND_DESCENT_S,
             speed_hold_s: SPEED_HOLD_S,
@@ -415,11 +414,12 @@ impl TerrainConfig {
 
 /// THE FRAME'S WORK, the pieces by name (the frame bar's instrument, ruling F9 item 1): the
 /// builders' throughput read, the bound's own arithmetic (the speed hold, `ask_bound`, the slew
-/// and the two hysteresis tests), the wanted set's DESCENT, and the crossfade materials' rewrite.
+/// and the hysteresis test), the wanted set's DESCENT, and the band tables' fill (slice R1a; it
+/// replaced the crossfade materials' rewrite).
 const WORK_THROUGHPUT: &str = "throughput";
 const WORK_BOUND: &str = "bound";
 const WORK_DESCENT: &str = "descent";
-const WORK_REBIND: &str = "rebind";
+const WORK_BAND_TABLE: &str = "band_table";
 /// ★ THE WINDOW'S HEAT (2026-09-24): the pieces a frame pays whether or not anything moved — the
 /// release-and-request walks over every held and wanted chunk, the stamp's own assembly, and the
 /// placement of every chunk — timed so that a cut of each can be read.
@@ -1469,11 +1469,11 @@ struct RealmLadder {
     /// provisional span re-runs the descent, so a span read on a stand-in field is read on the
     /// tiles the moment they land (`LadderView::provisional_spans`).
     artifact_epoch: Option<u64>,
-    /// ★ THE HORIZON AS IT STANDS NOW, AND THE THREE RATES THAT READ IT (ruling F9 item 1): the
+    /// ★ THE HORIZON AS IT STANDS NOW, AND THE TWO RATES THAT READ IT (ruling F9 item 1): the
     /// pure pace, in the Tier-A library, where every arm of it is a unit test
     /// ([`vd_client::ask_pace::AskPace`]). The render crate only wires it: the descent reads
-    /// `pace.asked()`, the crossfade's materials read `pace.drawn()`, and the slew moves
-    /// `pace.held()` every frame.
+    /// `pace.asked()`, and the slew moves `pace.held()` every frame, which the band table carries
+    /// to every material every frame (slice R1a).
     pace: AskPace,
     /// ★ THE EYE'S SPEED through this body, metres a second, as the bounded ask reads it (ruling
     /// F9 item 1): the LARGEST reading of the last `speed_hold_s` seconds
@@ -1574,8 +1574,15 @@ pub struct Terrain {
     entities: BTreeMap<(RealmId, ChunkKey), Drawn>,
     /// The ladder per realm with a body.
     ladders: BTreeMap<RealmId, RealmLadder>,
-    /// The ground's materials, one per realm and rung with that rung's crossfade bands, built on
-    /// first use.
+    /// ★ THE BAND TABLES (the far-water design §10, slice R1a): per realm, the ONE buffer every
+    /// terrain material of that realm binds, and this frame's bytes, which the render world
+    /// writes into it in its prepare stage.
+    band_tables: BTreeMap<RealmId, BandTableGpu>,
+    /// ★ THIS FRAME'S CLOCK in the arrival ramp's ticks (slice R1c, `vd_client::arrival`): the
+    /// band tables' header carries it, and a chunk that lands this frame is stamped with it.
+    frame_ticks: u32,
+    /// The ground's materials, one per realm and rung, each holding its row of the realm's band
+    /// table, built on first use.
     materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
     /// ★ THE WATER'S materials per realm and rung (slice 8c stage C5): the ground's fade with the
     /// water's own colour, culling nothing.
@@ -1723,6 +1730,8 @@ impl Terrain {
             shadow_casters: BTreeMap::new(),
             shadow_bytes: 0,
             ladders: BTreeMap::new(),
+            band_tables: BTreeMap::new(),
+            frame_ticks: 1,
             materials: BTreeMap::new(),
             water_materials: BTreeMap::new(),
             probe_materials: BTreeMap::new(),
@@ -1914,78 +1923,45 @@ impl Terrain {
         )
     }
 
-    /// ★ THE CROSSFADE FOLLOWS THE BOUND (ruling F9 item 1): a realm whose deliverable horizons
-    /// moved rewrites its own materials in place — the ground's, the probe's and the caster's —
-    /// because all three carry the rung's bands as a uniform read from the same effective switch
-    /// distances the descent asks at. Nothing is rebuilt and nothing is respawned.
-    fn rebind_bands(
+    /// The band tables' header (slice R1c): this frame's clock and the ramp's length, in ticks.
+    fn clock_words(&self) -> [u32; 4] {
+        [self.frame_ticks, vd_client::arrival::ramp_ticks(), 0, 0]
+    }
+
+    /// ★ THE REALM'S BAND TABLE BUFFER (the far-water design §10, slice R1a), made with the realm's
+    /// first material: one `vec4<u32>` clock and one row per rung plus the always-passed row, and
+    /// written at once from the held horizon, so no material ever reads an empty table. Every
+    /// frame after that the table is filled in `sync_terrain` and written by the render world.
+    fn band_buffer(
         &mut self,
         realm: RealmId,
         body: &vd_terrain::BodyDefinition,
-        ground: &mut Assets<GroundMaterial>,
-        probes: Option<&mut Assets<ProbeMaterial>>,
-    ) {
-        let rungs = body.ladder().rungs;
-        let Some(ladder) = self.ladders.get(&realm) else {
-            return;
-        };
-        let bound = ladder.pace.drawn().clone();
-        let coarse_step = self.config.shadow_coarse_step;
-        // ★ ONLY THE MATERIALS WHOSE BANDS MOVED (2026-09-24, the window's heat): a rewritten
-        // material makes the engine re-prepare it and re-specialise every chunk that uses it, so a
-        // rung whose bands did not move keeps its material untouched (the same uniform either way).
-        for ((_, rung), handle) in self.materials.range((realm, 0u8)..=(realm, u8::MAX)) {
-            let bands = super::fade_uniform(
-                bound.fade_bands(*rung, rungs),
-                bound.sink_end_m(body, *rung, rungs),
-            );
-            if ground
-                .get(handle)
-                .is_some_and(|m| m.extension.bands != bands)
-                && let Some(m) = ground.get_mut(handle)
-            {
-                m.extension.set_bands(bands);
-            }
+        gpu: &BandGpu,
+    ) -> Buffer {
+        if let Some(table) = self.band_tables.get(&realm) {
+            return table.buffer.clone();
         }
-        // A caster's bands are the DRAWN rung's — the rung it casts for (§24.5) — so they follow
-        // the bound at that rung, not at the caster's own.
-        for ((_, rung), handle) in self.shadow_materials.range((realm, 0u8)..=(realm, u8::MAX)) {
-            let drawn = rung.saturating_sub(coarse_step);
-            let bands = super::fade_uniform(
-                bound.fade_bands(drawn, rungs),
-                bound.sink_end_m(body, drawn, rungs),
-            );
-            if ground
-                .get(handle)
-                .is_some_and(|m| m.extension.bands != bands)
-                && let Some(m) = ground.get_mut(handle)
-            {
-                m.extension.set_bands(bands);
-            }
-        }
-        if let Some(probes) = probes {
-            for ((_, kind, rung), handle) in self
-                .probe_materials
-                .range((realm, 0u8, 0u8)..=(realm, u8::MAX, u8::MAX))
-            {
-                if *kind != PROBE_KIND_TERRAIN {
-                    continue;
-                }
-                let bands = super::fade_uniform(
-                    bound.fade_bands(*rung, rungs),
-                    bound.sink_end_m(body, *rung, rungs),
-                );
-                if probes.get(handle).is_some_and(|m| m.params.bands != bands)
-                    && let Some(m) = probes.get_mut(handle)
-                {
-                    m.set_bands(bands);
-                }
-            }
-        }
+        let rows = band_table(&self.bound_of(realm), body, body.ladder().rungs);
+        let bytes = band_table_bytes(self.clock_words(), &rows);
+        let buffer = gpu.device.create_buffer(&BufferDescriptor {
+            label: Some("vd band table"),
+            size: bytes.len() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&buffer, 0, &bytes);
+        self.band_tables.insert(
+            realm,
+            BandTableGpu {
+                buffer: buffer.clone(),
+                bytes,
+            },
+        );
+        buffer
     }
 
-    /// The probe material for a kind at a rung, built once: the terrain's carries the rung's
-    /// crossfade bands, the ruler's none (it is never faded).
+    /// The probe material for a kind at a rung, built once: the terrain's reads the rung's row of
+    /// the realm's band table, the ruler's the always-passed row (it is never faded).
     fn probe_material(
         &mut self,
         assets: &mut Assets<ProbeMaterial>,
@@ -1993,39 +1969,42 @@ impl Terrain {
         kind: u8,
         rung: u8,
         body: &vd_terrain::BodyDefinition,
+        gpu: &BandGpu,
     ) -> Handle<ProbeMaterial> {
-        let bound = self.bound_of(realm);
+        let table = self.band_buffer(realm, body, gpu);
         self.probe_materials
             .entry((realm, kind, rung))
             .or_insert_with(|| {
-                let rungs = body.ladder().rungs;
-                let (bands, sink_end, sink) = if kind == PROBE_KIND_TERRAIN {
+                let (row, sink) = if kind == PROBE_KIND_TERRAIN {
                     (
-                        bound.fade_bands(rung, rungs),
-                        bound.sink_end_m(body, rung, rungs),
-                        vd_client::chunks::sink_m(body, rung),
+                        rung,
+                        (
+                            vd_client::chunks::sink_m(body, rung),
+                            vd_client::chunks::stand_in_sink_m(body, rung),
+                        ),
                     )
                 } else {
-                    ((FADE_ALWAYS_IN, FADE_ALWAYS_OUT), FADE_ALWAYS_IN[1], 0.0)
+                    (body.ladder().rungs, (0.0, 0.0))
                 };
-                assets.add(ProbeMaterial::new(kind, rung, bands, sink_end, sink))
+                assets.add(ProbeMaterial::new(kind, rung, row, sink, table))
             })
             .clone()
     }
 
-    /// The ground's material for a realm's rung, built once with the rung's crossfade bands.
+    /// The ground's material for a realm's rung, built once on the rung's row of the realm's band
+    /// table.
     fn ground_material(
         &mut self,
         assets: &mut Assets<GroundMaterial>,
         realm: RealmId,
         rung: u8,
         body: &vd_terrain::BodyDefinition,
+        gpu: &BandGpu,
     ) -> Handle<GroundMaterial> {
-        let bound = self.bound_of(realm);
+        let table = self.band_buffer(realm, body, gpu);
         self.materials
             .entry((realm, rung))
             .or_insert_with(|| {
-                let rungs = body.ladder().rungs;
                 assets.add(GroundMaterial {
                     base: StandardMaterial {
                         base_color: Color::srgb(0.55, 0.50, 0.42),
@@ -2039,22 +2018,25 @@ impl Terrain {
                         ..default()
                     },
                     extension: LadderFade::new(
-                        bound.fade_bands(rung, rungs),
-                        bound.sink_end_m(body, rung, rungs),
-                        vd_client::chunks::sink_m(body, rung),
+                        rung,
+                        (
+                            vd_client::chunks::sink_m(body, rung),
+                            vd_client::chunks::stand_in_sink_m(body, rung),
+                        ),
                         f64::from(vd_seed::ladder::cell_m(rung)),
+                        table,
                     ),
                 })
             })
             .clone()
     }
 
-    /// THE BOUNDED ASK in force for a realm (ruling F9 item 1): the tier rule's own radii while
-    /// the realm has no ladder yet.
+    /// THE BOUNDED ASK in force for a realm (ruling F9 item 1): the held horizon, which the band
+    /// table carries every frame; the tier rule's own radii while the realm has no ladder yet.
     fn bound_of(&self, realm: RealmId) -> AskBound {
         self.ladders
             .get(&realm)
-            .map_or_else(AskBound::unbounded, |l| l.pace.drawn().clone())
+            .map_or_else(AskBound::unbounded, |l| l.pace.held().clone())
     }
 
     /// THE CASTER'S MATERIAL for a realm and rung (the shadow ladder): the rung's own material as
@@ -2080,12 +2062,12 @@ impl Terrain {
         realm: RealmId,
         rung: u8,
         body: &vd_terrain::BodyDefinition,
+        gpu: &BandGpu,
     ) -> Handle<GroundMaterial> {
-        let bound = self.bound_of(realm);
+        let table = self.band_buffer(realm, body, gpu);
         self.water_materials
             .entry((realm, rung))
             .or_insert_with(|| {
-                let rungs = body.ladder().rungs;
                 assets.add(GroundMaterial {
                     base: StandardMaterial {
                         base_color: Color::srgb(0.06, 0.24, 0.42),
@@ -2096,10 +2078,13 @@ impl Terrain {
                         ..default()
                     },
                     extension: LadderFade::new(
-                        bound.fade_bands(rung, rungs),
-                        bound.sink_end_m(body, rung, rungs),
-                        vd_client::chunks::sink_m(body, rung),
+                        rung,
+                        (
+                            vd_client::chunks::sink_m(body, rung),
+                            vd_client::chunks::stand_in_sink_m(body, rung),
+                        ),
                         f64::from(vd_seed::ladder::cell_m(rung)),
+                        table,
                     ),
                 })
             })
@@ -2112,6 +2097,7 @@ impl Terrain {
         realm: RealmId,
         rung: u8,
         body: &vd_terrain::BodyDefinition,
+        gpu: &BandGpu,
     ) -> Handle<GroundMaterial> {
         let bound_m = self.caster_sink_m(body, rung);
         // THE CASTER'S CROSSFADE (2026-09-12): the caster's bands are the DRAWN rung's — the rung it
@@ -2120,11 +2106,10 @@ impl Terrain {
         // before it (the pop detector): the caster left unsunk in one frame at the handover, a step
         // of about 50 levels along the shadow's edge.
         let drawn_rung = rung.saturating_sub(self.config.shadow_coarse_step);
-        let bound = self.bound_of(realm);
+        let table = self.band_buffer(realm, body, gpu);
         self.shadow_materials
             .entry((realm, rung))
             .or_insert_with(|| {
-                let rungs = body.ladder().rungs;
                 assets.add(GroundMaterial {
                     base: StandardMaterial {
                         base_color: Color::srgb(0.55, 0.50, 0.42),
@@ -2135,10 +2120,11 @@ impl Terrain {
                         ..default()
                     },
                     extension: LadderFade::new(
-                        bound.fade_bands(drawn_rung, rungs),
-                        bound.sink_end_m(body, drawn_rung, rungs),
-                        vd_client::chunks::sink_m(body, rung),
+                        drawn_rung,
+                        // A caster enters whole: no ramp, so no stand-in's sink.
+                        (vd_client::chunks::sink_m(body, rung), 0.0),
                         f64::from(vd_seed::ladder::cell_m(rung)),
+                        table,
                     )
                     .into_light_caster(bound_m),
                 })
@@ -2421,6 +2407,13 @@ type LightQuery<'w, 's> = Query<
 >;
 
 /// The picture's camera transform, read for the nose (the stamp's star angles and the ruler's ray).
+/// The key light and the follow camera's exposure, as one system parameter (the terrain system
+/// holds the engine's limit of sixteen).
+type KeyLightQueries<'w, 's> = (
+    Query<'w, 's, Entity, With<super::KeyLight>>,
+    Query<'w, 's, &'static bevy::camera::Exposure, With<super::FollowCam>>,
+);
+
 type CameraQuery<'w, 's> = Query<
     'w,
     's,
@@ -2535,9 +2528,9 @@ pub(crate) fn sync_terrain(
     cam: CameraQuery,
     boxes: Res<super::RealmBoxEntities>,
     mut visibility: Query<&mut Visibility>,
-    key_light: Query<Entity, With<super::KeyLight>>,
-    exposure: Query<&bevy::camera::Exposure, With<super::FollowCam>>,
+    (key_light, exposure): KeyLightQueries,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
+    gpu: BandGpu,
 ) {
     // Every frame this system runs (M8-2a; refutation T-15: counted only under a body before).
     terrain.frames += 1;
@@ -2550,6 +2543,7 @@ pub(crate) fn sync_terrain(
         terrain.stamp = None;
         return;
     };
+    terrain.frame_ticks = vd_client::arrival::clock_ticks(now_s);
     let scene = snap.scene_now(now_s);
     // THE LEAD (slice 8 step 4, the residency band): the scene and the own eye at the LEAD
     // cursor — the freshest delivered moment, one interpolation buffer ahead of what the picture
@@ -2725,12 +2719,10 @@ pub(crate) fn sync_terrain(
     let lead_s = lead_cursor.map_or(0.0, |_| snap.lead_seconds());
     let bound_on = terrain.config.ask_bound;
     let hysteresis = terrain.config.ask_bound_hysteresis;
-    let rebind_fraction = terrain.config.ask_bound_rebind;
     let bracket = terrain.config.ask_bound_bracket;
     let descent_every_s = terrain.config.ask_bound_descent_s;
     let speed_hold_s = terrain.config.speed_hold_s;
     let mut recomputed: Vec<RealmId> = Vec::new();
-    let mut rebind: Vec<RealmId> = Vec::new();
     // ★ THE FASTEST BODY'S OWN EYE, for the card's stand-down rule (the owner's step after
     // Step 15): the eye is inside one realm, and a queue is urgent because THAT realm's ground is
     // on its way to the screen.
@@ -2791,9 +2783,6 @@ pub(crate) fn sync_terrain(
             artifact.as_ref().map_or(0, |a| a.head.levels),
         );
         ladder.pace.slew(&candidate, rungs, hysteresis, frame_s);
-        if ladder.pace.take_rebind(rungs, rebind_fraction) {
-            rebind.push(eb.realm);
-        }
         let bound_changed = ladder
             .pace
             .take_descent(rungs, bracket, descent_every_s, now_s);
@@ -2836,25 +2825,39 @@ pub(crate) fn sync_terrain(
     // sawtooth's held peak, so the pair the rule divides must come from the same reading.
     let workers_per_s = terrain.throughput.workers_value();
     terrain.judge_queue(workers_per_s, fastest_mps, fastest_mps * lead_s);
-    // THE CROSSFADE FOLLOWS THE BOUND: the realm's three material families carry the same
-    // effective switch distances the descent asked at, rewritten in place.
-    let rebinds = rebind.len() as u64;
+    // ★ THE BAND TABLES (the far-water design §10, slice R1a): every realm's crossfade rows under
+    // the HELD horizon, EVERY frame. The render world writes them into each realm's one buffer in
+    // its prepare stage, in step with this frame's placements, so every material of the realm —
+    // the ground's, the water's, the casters', the probes' — fades on this frame's bands, and no
+    // material is rewritten. Before R1a the materials followed the horizon only within a
+    // twentieth, and the water's never.
     let piece = std::time::Instant::now();
-    for realm in &rebind {
-        if let Some(body) = terrain.lane.body(*realm).map(Arc::clone) {
-            terrain.rebind_bands(
-                *realm,
-                &body,
-                &mut ground_materials,
-                probe_materials.as_deref_mut(),
-            );
+    let mut tables = 0u64;
+    let clock = terrain.clock_words();
+    {
+        let Terrain {
+            band_tables,
+            ladders,
+            lane,
+            ..
+        } = &mut *terrain;
+        for (realm, table) in band_tables.iter_mut() {
+            let (Some(ladder), Some(body)) = (ladders.get(realm), lane.body(*realm)) else {
+                // A realm with no ladder this frame keeps its rows; its clock still moves, so a
+                // ramp under way runs on.
+                table.bytes[..16].copy_from_slice(&band_table_bytes(clock, &[])[..16]);
+                continue;
+            };
+            let rows = band_table(ladder.pace.held(), body, body.ladder().rungs);
+            table.bytes = band_table_bytes(clock, &rows);
+            tables += 1;
         }
     }
-    let work_rebind = piece.elapsed();
+    let work_tables = piece.elapsed();
     terrain.note_work(WORK_THROUGHPUT, work_throughput, 1, now_s);
     terrain.note_work(WORK_BOUND, work_bound, 1, now_s);
     terrain.note_work(WORK_DESCENT, work_descent, descents, now_s);
-    terrain.note_work(WORK_REBIND, work_rebind, rebinds, now_s);
+    terrain.note_work(WORK_BAND_TABLE, work_tables, tables, now_s);
     // THE CASTING DELTAS (item 18): a drawn chunk that left the casting set releases its caster;
     // one that entered it asks for its caster.
     let coarse_step = terrain.config.shadow_coarse_step;
@@ -3142,7 +3145,8 @@ pub(crate) fn sync_terrain(
         if !wanted {
             // THE SHADOW LADDER: a coarse caster lands on the shadow layer, for the sun alone,
             // its culling box grown by its own sink (the caster stands under the drawn ground).
-            let material = terrain.shadow_material(&mut ground_materials, realm, key.rung, &body);
+            let material =
+                terrain.shadow_material(&mut ground_materials, realm, key.rung, &body, &gpu);
             let sink_m = terrain.caster_sink_m(&body, key.rung);
             let built = mesh_of(&ready.geometry, false, exact_normal_rung, false);
             let bytes = mesh_bytes(&built);
@@ -3194,7 +3198,7 @@ pub(crate) fn sync_terrain(
             terrain.shadow_bytes -= c.bytes;
         }
         let casts_itself = terrain.shadow_wanted.contains_key(&(realm, key));
-        let material = terrain.ground_material(&mut ground_materials, realm, key.rung, &body);
+        let material = terrain.ground_material(&mut ground_materials, realm, key.rung, &body, &gpu);
         let splat = splat_rung.is_some_and(|r| key.rung >= r);
         let built = mesh_of(&ready.geometry, flat, exact_normal_rung, splat);
         let bytes = mesh_bytes(&built);
@@ -3208,6 +3212,17 @@ pub(crate) fn sync_terrain(
             0.0
         };
         let bounds = moved_bounds(&ready.geometry, margin_m);
+        // ★ THE ARRIVAL STAMP (the far-water design §10, slice R1c; `vd_client::arrival`): a chunk
+        // that lands is stamped with this frame's clock, so it enters on the drawn surface of the
+        // coarser chunk that stood in for it and rises into its own place over half a second
+        // (ruling B18 Q7). A rebuilt key that was already drawn, and a top-rung chunk (no stand-in),
+        // enter whole (nought).
+        let stamp = vd_client::arrival::arrival_stamp(
+            terrain.entities.contains_key(&(realm, key)),
+            key.rung,
+            body.ladder().rungs,
+            terrain.frame_ticks,
+        );
         let entity = commands
             .spawn((
                 Mesh3d(mesh.clone()),
@@ -3219,19 +3234,38 @@ pub(crate) fn sync_terrain(
                 },
                 ChunkOrigin(ready.geometry.origin_m),
                 bounds,
+                bevy::mesh::MeshTag(stamp),
             ))
             .id();
         // ★ THE WATER SHEET (slice 8c stage C5) rides as the chunk's CHILD: it moves with the
-        // chunk's origin, hides with it, and leaves with it; it casts no shadow.
+        // chunk's origin, hides with it, and leaves with it; it casts no shadow. ★ IT CARRIES ITS
+        // OWN BOX (the far-water design §10, slice R1b): the engine would give it a box of the
+        // sheet's rest places, which holds neither its morph nor its sink, so a morphed or sunk
+        // sheet at the screen's edge could be culled while on screen; and the ground's box does
+        // not hold it over deep water, where the floor's triangles are cut.
         if water_on && !ready.geometry.water_triangles.is_empty() {
-            let water = terrain.water_material(&mut ground_materials, realm, key.rung, &body);
+            let water = terrain.water_material(&mut ground_materials, realm, key.rung, &body, &gpu);
             let sheet = meshes.add(water_mesh_of(&ready.geometry));
-            commands.entity(entity).with_child((
-                Mesh3d(sheet),
-                MeshMaterial3d(water),
-                Transform::default(),
-                bevy::light::NotShadowCaster,
-            ));
+            let (lo, hi) = ready.geometry.water_bounds;
+            let sheet_entity = commands
+                .spawn((
+                    Mesh3d(sheet),
+                    MeshMaterial3d(water),
+                    Transform::default(),
+                    bevy::light::NotShadowCaster,
+                    bevy::camera::primitives::Aabb::from_min_max(
+                        Vec3::from_array(lo),
+                        Vec3::from_array(hi),
+                    ),
+                    bevy::mesh::MeshTag(stamp),
+                ))
+                .id();
+            if no_cull {
+                commands
+                    .entity(sheet_entity)
+                    .insert(bevy::camera::visibility::NoFrustumCulling);
+            }
+            commands.entity(entity).add_child(sheet_entity);
         }
         if hide_rung.is_some_and(|r| key.rung >= r) {
             commands.entity(entity).insert(Visibility::Hidden);
@@ -3253,7 +3287,8 @@ pub(crate) fn sync_terrain(
                 .insert(bevy::light::NotShadowReceiver);
         }
         let twin = probe_materials.as_mut().map(|pm| {
-            let probe = terrain.probe_material(pm, realm, PROBE_KIND_TERRAIN, key.rung, &body);
+            let probe =
+                terrain.probe_material(pm, realm, PROBE_KIND_TERRAIN, key.rung, &body, &gpu);
             let twin = commands
                 .spawn((
                     Mesh3d(mesh.clone()),
@@ -3268,6 +3303,8 @@ pub(crate) fn sync_terrain(
                     ProbeTwin,
                     RenderLayers::layer(PROBE_LAYER),
                     bevy::light::NotShadowCaster,
+                    // The twin rises with the picture's chunk, so the probe reads what it shows.
+                    bevy::mesh::MeshTag(stamp),
                 ))
                 .id();
             if no_cull {
@@ -3931,7 +3968,7 @@ pub(crate) fn sync_terrain(
                 .as_mut()
                 .map(|pm| {
                     let body = body_under.as_ref().expect("the ruler stands on a body");
-                    terrain.probe_material(pm, *realm_under, PROBE_KIND_RULER, rung, body)
+                    terrain.probe_material(pm, *realm_under, PROBE_KIND_RULER, rung, body, &gpu)
                 })
                 .expect("the ruler exists only with a probe");
             let ball = commands
@@ -3968,6 +4005,64 @@ pub(crate) fn sync_terrain(
 /// every frame from the row without the lane.
 #[derive(Component)]
 pub struct ChunkOrigin(pub [f64; 3]);
+
+/// ★ ONE REALM'S BAND TABLE ON THE CARD (the far-water design §10, slice R1a): the buffer every
+/// terrain material of the realm binds, and this frame's bytes.
+#[derive(Clone, Debug)]
+pub(crate) struct BandTableGpu {
+    buffer: Buffer,
+    bytes: Vec<u8>,
+}
+
+/// The card's device and queue, for the band tables.
+#[derive(SystemParam)]
+pub(crate) struct BandGpu<'w> {
+    device: Res<'w, RenderDevice>,
+    queue: Res<'w, RenderQueue>,
+}
+
+/// ★ THE BYTES OF A BAND TABLE as the shaders read them (`BandTable` in `ladder_fade.wgsl`): the
+/// clock, one `vec4<u32>` (the arrival ramp's, slice R1c; nought before it), then one `vec4<f32>`
+/// per row, little-endian.
+fn band_table_bytes(clock: [u32; 4], rows: &[[f32; 4]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 * (rows.len() + 1));
+    for word in clock {
+        out.extend_from_slice(&word.to_le_bytes());
+    }
+    for row in rows {
+        for value in row {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    out
+}
+
+/// THE BAND TABLES AS THE RENDER WORLD HOLDS THEM: each realm's buffer and this frame's bytes.
+#[derive(Resource, Default)]
+pub(crate) struct RenderBandTables(Vec<(Buffer, Vec<u8>)>);
+
+/// ★ THE EXTRACT (slice R1a): after every main-world system of the frame, the tables this frame
+/// filled — so the render world writes the bands of the frame whose placements it draws.
+pub(crate) fn extract_band_tables(mut commands: Commands, terrain: Extract<Option<Res<Terrain>>>) {
+    let tables = terrain.as_ref().map_or_else(Vec::new, |t| {
+        t.band_tables
+            .values()
+            .map(|b| (b.buffer.clone(), b.bytes.clone()))
+            .collect()
+    });
+    commands.insert_resource(RenderBandTables(tables));
+}
+
+/// ★ THE WRITE (slice R1a): each realm's table into its buffer, in the render world's prepare
+/// stage, before any bind group or draw of the frame reads it.
+pub(crate) fn write_band_tables(tables: Option<Res<RenderBandTables>>, queue: Res<RenderQueue>) {
+    let Some(tables) = tables else {
+        return;
+    };
+    for (buffer, bytes) in &tables.0 {
+        queue.write_buffer(buffer, 0, bytes);
+    }
+}
 
 /// Place every drawn chunk (and its twin) against the eye: `draw_center(row) + facing · origin`, in
 /// f64, narrowed once. Runs after `sync_terrain` so a chunk spawned this frame is placed this frame.

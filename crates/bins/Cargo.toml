@@ -136,6 +136,11 @@ required-features = ["dev-control"]
 name = "mask_at_pixel"
 required-features = ["dev-control"]
 
+# THE POP DETECTOR over a recorded consecutive sequence (the far-water design §10, slice R1c).
+[[example]]
+name = "pop_run"
+required-features = ["dev-control"]
+
 # THE GPU SPIKE (ruling V17 item 3): the integer hash and a 32-bit shadow of the recipe's noise on
 # the GPU against the CPU, byte for byte, on a thousand chunks' columns.
 [[example]]

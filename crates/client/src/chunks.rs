@@ -76,6 +76,16 @@ pub fn sink_m(body: &BodyDefinition, rung: u8) -> f64 {
         + f64::from(vd_seed::ladder::cell_m(finer))
 }
 
+/// ★ THE STAND-IN'S SINK for a chunk of `rung` (slice R1c): the sink of the rung that stands in
+/// for it while it is late — the next coarser one — or nought at the top rung, which has none and
+/// enters whole ([`crate::arrival::arrival_stamp`]).
+#[must_use]
+pub fn stand_in_sink_m(body: &BodyDefinition, rung: u8) -> f64 {
+    let top = body.ladder().rungs.saturating_sub(1);
+    let has = u8::from(rung < top);
+    f64::from(has) * sink_m(body, rung.saturating_add(1).min(top))
+}
+
 /// A finished chunk: integer vertices turned into floats around a floating origin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChunkGeometry {
@@ -106,6 +116,10 @@ pub struct ChunkGeometry {
     /// shows through a finer one (the dropped octaves cut both ways) and the two are continuous
     /// at the edge, where the finer stands on the coarser. A rung-0 chunk sinks nowhere.
     pub sink_m: f32,
+    /// ★ THE STAND-IN'S SINK (the far-water design §10, slice R1c): the next coarser rung's sink,
+    /// nought at the top rung — where the arrival ramp starts a late chunk
+    /// ([`crate::arrival`]), so the chunk's boxes hold that start too.
+    pub stand_in_sink_m: f32,
     /// Vertices in metres, relative to `origin_m`.
     pub vertices: Vec<[f32; 3]>,
     /// Per-vertex unit normals, derived from the triangles (style, never shape).
@@ -167,6 +181,11 @@ pub struct ChunkGeometry {
     /// P-8: on the main thread it cost two square roots a vertex in the harvest loop). Zero for an
     /// empty geometry.
     pub bounds: ([f32; 3], [f32; 3]),
+    /// ★ THE SHEET'S OWN BOX (the far-water design §10, slice R1b): every place the vertex stage
+    /// can put a water vertex ([`ChunkGeometry::water_drawn_ends`]), built by the worker like
+    /// `bounds`. The ground's box cannot serve: over deep water the floor's triangles are cut and
+    /// its vertices stand far under the sheet. Zero for a dry chunk.
+    pub water_bounds: ([f32; 3], [f32; 3]),
 }
 
 /// The widest angle between a vertex's narrowed radial and the exact one: `f32`'s own rounding,
@@ -224,8 +243,62 @@ impl ChunkGeometry {
         [s.x as f32, s.y as f32, s.z as f32]
     }
 
-    /// The box over every vertex, its morph target and its sunk position, as the worker builds
-    /// it into `bounds`. Zero for an empty geometry.
+    /// ★ THE ARRIVAL RAMP'S DEEPEST START for vertex `i` (slice R1c): its morph target sunk by
+    /// the whole stand-in's sink — where a late chunk's vertex starts when it lands whole.
+    #[must_use]
+    pub fn ramp_start(&self, i: usize) -> [f32; 3] {
+        let t = self.morph_target(i);
+        let s = self.radial(i) * f64::from(self.stand_in_sink_m);
+        [t[0] - s.x as f32, t[1] - s.y as f32, t[2] - s.z as f32]
+    }
+
+    /// ★ THE ENDS OF EVERY PLACE THE VERTEX STAGE CAN PUT WATER VERTEX `i` (slices R1b, R1c):
+    /// its own place, its morph target (its metre along its stored radial), its sunk place (the
+    /// chunk's sink along that radial), and the arrival ramp's deepest start (the target sunk by
+    /// the stand-in's sink). The morph acts in the fade-out band and the sink in the fade-in band,
+    /// which never overlap, and the ramp runs straight from a start between the target and the
+    /// deepest start, so every drawn place lies in the box of these four.
+    #[must_use]
+    pub fn water_drawn_ends(&self, i: usize) -> [[f32; 3]; 4] {
+        let v = self.water_vertices[i];
+        let r = self.water_radials[i];
+        let m = self.water_morph_m[i];
+        let s = self.sink_m;
+        let d = m - self.stand_in_sink_m;
+        [
+            v,
+            [v[0] + r[0] * m, v[1] + r[1] * m, v[2] + r[2] * m],
+            [v[0] - r[0] * s, v[1] - r[1] * s, v[2] - r[2] * s],
+            [v[0] + r[0] * d, v[1] + r[1] * d, v[2] + r[2] * d],
+        ]
+    }
+
+    /// The box over every water vertex's drawn places, as the worker builds it into
+    /// `water_bounds`. Zero for a dry chunk.
+    #[must_use]
+    pub fn measure_water_bounds(&self) -> ([f32; 3], [f32; 3]) {
+        if self.water_vertices.is_empty() {
+            return ([0.0; 3], [0.0; 3]);
+        }
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        let mut i = 0;
+        while i < self.water_vertices.len() {
+            for p in self.water_drawn_ends(i) {
+                let mut k = 0;
+                while k < 3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                    k += 1;
+                }
+            }
+            i += 1;
+        }
+        (lo, hi)
+    }
+
+    /// The box over every vertex, its morph target, its sunk position and its ramp's deepest
+    /// start, as the worker builds it into `bounds`. Zero for an empty geometry.
     #[must_use]
     pub fn measure_bounds(&self) -> ([f32; 3], [f32; 3]) {
         let mut lo = [f32::INFINITY; 3];
@@ -245,6 +318,7 @@ impl ChunkGeometry {
             take(v);
             take(self.morph_target(i));
             take([v[0] - s[0], v[1] - s[1], v[2] - s[2]]);
+            take(self.ramp_start(i));
             i += 1;
         }
         if self.vertices.is_empty() {
@@ -1367,6 +1441,7 @@ pub fn geometry_from(
         morph_fallbacks: fallbacks,
         morph_seam: seam,
         sink_m: sink_len as f32,
+        stand_in_sink_m: stand_in_sink_m(body, key.rung) as f32,
         vertices,
         normals,
         packed_normals,
@@ -1378,6 +1453,7 @@ pub fn geometry_from(
         triangles,
         radials,
         bounds: ([0.0; 3], [0.0; 3]),
+        water_bounds: ([0.0; 3], [0.0; 3]),
         skirt_start: 0,
         field_level: NO_FIELD,
         built_on: None,
@@ -1386,6 +1462,7 @@ pub fn geometry_from(
     let ceiling_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
     add_skirts(&mut geometry, drop_m, ceiling_m);
     geometry.bounds = geometry.measure_bounds();
+    geometry.water_bounds = geometry.measure_water_bounds();
     Some(geometry)
 }
 
@@ -2766,6 +2843,45 @@ mod tests {
         assert!(g.water_triangles.is_empty());
         assert!(g.water_vertices.is_empty());
         assert!(!g.triangles.is_empty(), "the dry ground is drawn whole");
+    }
+
+    /// ★ THE SHEET'S OWN BOX (the far-water design §10, slice R1b): every drawn place of every
+    /// sheet vertex — its own, its morph target, its sunk place — lies in the sheet's box, and
+    /// the worker's box is the measured one. THE CONTROL: under 20 km of sea the ground's box (the
+    /// cut floor's vertices) does not hold the sheet, so a sheet culled by any box but its own can
+    /// vanish while it is on screen. A dry chunk's sheet box is empty.
+    #[test]
+    fn the_sheet_carries_its_own_box_over_every_drawn_place() {
+        let wet = home_planet().with_sea_m(Some(20_000));
+        let key = surface_key(&wet, 4, 300, 700);
+        let g = geometry_with(&wet, None, planet(), key, &ParentCache::default()).expect("built");
+        assert!(!g.water_vertices.is_empty());
+        assert_eq!(g.water_bounds, g.measure_water_bounds());
+        let (lo, hi) = g.water_bounds;
+        let mut i = 0;
+        while i < g.water_vertices.len() {
+            for p in g.water_drawn_ends(i) {
+                let mut k = 0;
+                while k < 3 {
+                    assert!(lo[k] <= p[k]);
+                    assert!(p[k] <= hi[k]);
+                    k += 1;
+                }
+            }
+            i += 1;
+        }
+        // THE CONTROL: the ground's box holds the sheet's box on no axis-aligned reading — the
+        // sheet stands 20 km over the floor's vertices, outside the ground's box.
+        let (glo, ghi) = g.bounds;
+        let held = (0..3).fold(true, |all, k| all & (glo[k] <= lo[k]) & (hi[k] <= ghi[k]));
+        assert!(
+            !held,
+            "the ground's box holds the sheet: the control has no power"
+        );
+        let dry = home_planet();
+        let g = geometry_with(&dry, None, planet(), key, &ParentCache::default()).expect("built");
+        assert_eq!(g.water_bounds, ([0.0; 3], [0.0; 3]));
+        assert_eq!(g.measure_water_bounds(), ([0.0; 3], [0.0; 3]));
     }
 
     /// ★ THE FLOOR CUT, TRIANGLE BY TRIANGLE: a triangle whose three vertices stand under their
@@ -4304,9 +4420,15 @@ mod tests {
         let gap = body.dropped_bound_m(1) - body.dropped_bound_m(0);
         assert!((s1 - (gap + 2.0 + 1.0)).abs() < 1e-9, "{s1}");
         assert!(sink_m(&body, 3) > sink_m(&body, 1));
+        // THE STAND-IN'S SINK (slice R1c): the next coarser rung's sink, nought at the top rung.
+        let top = body.ladder().rungs - 1;
+        assert_eq!(stand_in_sink_m(&body, 0), sink_m(&body, 1));
+        assert_eq!(stand_in_sink_m(&body, top - 1), sink_m(&body, top));
+        assert_eq!(stand_in_sink_m(&body, top), 0.0);
         // On a chunk: rung 0 carries zeros; rung 1 carries its radial times the sink.
         let g0 = geometry_of(&body, surface_key(&body, 0, 300, 700)).expect("rung 0");
         assert_eq!(g0.sink_m, 0.0);
+        assert_eq!(g0.stand_in_sink_m, sink_m(&body, 1) as f32);
         assert!((0..g0.vertices.len()).all(|i| g0.sink_of(i) == [0.0, 0.0, 0.0]));
         let g1 = geometry_of(&body, surface_key(&body, 1, 150, 350)).expect("rung 1");
         assert_eq!(g1.morph_m.len(), g1.vertices.len());
@@ -4412,6 +4534,7 @@ mod tests {
             morph_fallbacks: 0,
             morph_seam: 0,
             sink_m: 0.0,
+            stand_in_sink_m: 0.0,
             vertices: vec![[0.0; 3]; 70_000],
             normals: Vec::new(),
             packed_normals: Vec::new(),
@@ -4423,6 +4546,7 @@ mod tests {
             radials: Vec::new(),
             triangles: vec![[0, 1, 2]],
             bounds: ([0.0; 3], [0.0; 3]),
+            water_bounds: ([0.0; 3], [0.0; 3]),
             skirt_start: 0,
             field_level: NO_FIELD,
             built_on: None,
@@ -4616,6 +4740,9 @@ mod tests {
                     assert!(t[k] <= hi[k]);
                     assert!(lo[k] <= v[k] - s[k]);
                     assert!(v[k] - s[k] <= hi[k]);
+                    let r = g.ramp_start(i);
+                    assert!(lo[k] <= r[k]);
+                    assert!(r[k] <= hi[k]);
                     k += 1;
                 }
             }
@@ -4627,6 +4754,7 @@ mod tests {
             morph_fallbacks: 0,
             morph_seam: 0,
             sink_m: 0.0,
+            stand_in_sink_m: 0.0,
             vertices: Vec::new(),
             normals: Vec::new(),
             packed_normals: Vec::new(),
@@ -4638,6 +4766,7 @@ mod tests {
             radials: Vec::new(),
             triangles: Vec::new(),
             bounds: ([0.0; 3], [0.0; 3]),
+            water_bounds: ([0.0; 3], [0.0; 3]),
             skirt_start: 0,
             field_level: NO_FIELD,
             built_on: None,
@@ -4809,6 +4938,7 @@ mod tests {
                 morph_fallbacks: 0,
                 morph_seam: 0,
                 sink_m: 0.0,
+                stand_in_sink_m: 0.0,
                 // A small triangle across the radial +X, a metre on a side.
                 vertices: vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                 normals: vec![[1.0, 0.0, 0.0]; 3],
@@ -4821,6 +4951,7 @@ mod tests {
                 radials: vec![[1.0, 0.0, 0.0]; 3],
                 triangles: vec![tri],
                 bounds: ([0.0; 3], [0.0; 3]),
+                water_bounds: ([0.0; 3], [0.0; 3]),
                 skirt_start: 0,
                 field_level: NO_FIELD,
                 built_on: None,

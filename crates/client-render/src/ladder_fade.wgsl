@@ -4,8 +4,8 @@
 //
 // Every vertex of a chunk at rung L carries ONE METRE (`morph_m`, step 5): how far along its own
 // radial it stands from the rung L + 1 surface (computed by the client library from the same
-// recipe when the chunk is built); the radial is the vertex's world position less the body's
-// centre (the uniform), and the target is the vertex plus the radial times the metre. Across the
+// recipe when the chunk is built); the radial is the vertex's own unit direction from the body's
+// centre (an attribute, step 5), and the target is the vertex plus the radial times the metre. Across the
 // band `(out_lo, out_hi)` around the rung's switch distance, the vertex slides from its own
 // position to that target, on its own distance from the eye: whole at `out_lo`, on the coarser
 // surface at `out_hi`. At `out_hi` the two surfaces coincide, so the finer ends there (the
@@ -13,7 +13,7 @@
 // everywhere, carries on.
 //
 // THE SINK. Nearer than its own fade-in edge `in_hi` — which is the finer rung's `out_hi`, the same
-// line — the chunk drops along each vertex's radial by the rung's sink (the uniform's `w`: the
+// line — the chunk drops along each vertex's radial by the rung's sink (`fade.sink.x`: the
 // recipe's bound on the gap between the two fields plus a cell of each rung for the extractor's
 // placement), from nothing at `in_hi` to the whole drop at `in_lo`. Under that drop the coarser mesh is certainly below the
 // finer one, so it never shows through where the finer is whole, and where the finer is still
@@ -32,8 +32,9 @@
 // a coarser surface that stands below the sightline (47 holes at 13–15 km). The morph makes the
 // two surfaces the same before the switch; a dither between them then has nothing to hide.
 //
-// The bands are the Tier-A `vd_client::ladder_view::fade_bands`, handed in as a uniform; the
-// hysteresis pair that sizes them lives there too. The probe's own material carries the same
+// The bands are the Tier-A `vd_client::ladder_view::band_table`, one row per rung of the realm's
+// ONE table buffer, rewritten every frame (slice R1a); the hysteresis pair that sizes them lives
+// there too. The probe's own material carries the same
 // morph, sink and far edge (`probe.wgsl`), so what the probe reads is what the picture shows, and
 // the shadow pass the same morph and sink (`ladder_fade_prepass.wgsl`), so the shadows fall from
 // the surface the picture shows. Every distance is read from the render frame's ORIGIN, where the
@@ -50,16 +51,41 @@
 }
 
 struct LadderFade {
-    // The bands: (in_lo, sink_end, out_lo, out_hi), metres from the eye; the sink ramp ends a
-    // little past the fade-in edge, so at the edge one finer cell of sink remains.
-    bands: vec4<f32>,
-    // The rung's sink in metres (x), step 5.
+    // The rung's sink in metres (x), step 5; (z) this material's row of the band table.
     sink: vec4<f32>,
-    // The rung's cell in metres (x): a splat's width (D8-8's measurement).
+    // The rung's cell in metres (x): a splat's width (D8-8's measurement); (y) a caster's sink.
     splat: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> fade: LadderFade;
+
+// ★ THE REALM'S BAND TABLE (the far-water design §10, slice R1a): every rung's crossfade for this
+// realm — one row per rung, (in_lo, sink_end, out_lo, out_hi) metres from the eye, and one row that
+// is always passed — which the renderer rewrites in its prepare stage every frame, in step with
+// the placements. The material holds only its row (`fade.sink.z`), so a moving horizon rewrites
+// this buffer and never a material, and the water fades on its ground's band. `clock` is the
+// arrival ramp's (slice R1c).
+struct BandTable {
+    clock: vec4<u32>,
+    rows: array<vec4<f32>>,
+}
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(101) var<storage, read> table: BandTable;
+
+// This material's row of the table.
+fn bands() -> vec4<f32> {
+    return table.rows[u32(fade.sink.z)];
+}
+
+// ★ THE ARRIVAL RAMP'S WEIGHT (the far-water design §10, slice R1c; `vd_client::arrival::ramp_weight`,
+// step for step): nought in the frame a chunk landed, one half a second later, and one at once for a
+// chunk that entered whole (its tag nought). The age is a wrapping difference of the table's clock and
+// the chunk's stamp, so the clock's wrap moves nothing.
+fn arrival(instance_index: u32) -> f32 {
+    let stamp = mesh_functions::get_tag(instance_index);
+    let age = f32(table.clock.x - stamp) / f32(max(table.clock.y, 1u));
+    return select(clamp(age, 0.0, 1.0), 1.0, stamp == 0u);
+}
 
 struct FadeVertex {
     @builtin(instance_index) instance_index: u32,
@@ -87,13 +113,15 @@ struct FadeVertex {
 
 // How whole the rung is at a distance: one below its fade-out band, zero past it.
 fn whole(d: f32) -> f32 {
-    return clamp((fade.bands.w - d) / (fade.bands.w - fade.bands.z), 0.0, 1.0);
+    let b = bands();
+    return clamp((b.w - d) / (b.w - b.z), 0.0, 1.0);
 }
 
 // How far the rung has risen from under the finer one: zero below its fade-in band, one where
 // the sink ramp ends, a little past the fade-in edge.
 fn risen(d: f32) -> f32 {
-    return clamp((d - fade.bands.x) / (fade.bands.y - fade.bands.x), 0.0, 1.0);
+    let b = bands();
+    return clamp((d - b.x) / (b.y - b.x), 0.0, 1.0);
 }
 
 // THE PACKED NORMAL (ruling V18): two signed 16-bit numbers on the octahedron, unfolded to the
@@ -119,7 +147,16 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     let radial = normalize(mesh_functions::mesh_normal_local_to_world(vertex.radial, vertex.instance_index));
     let coarser = own.xyz + radial * vertex.morph_m;
     let sink = radial * fade.sink.x;
-    let morphed = mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d));
+    // ★ THE ARRIVAL RAMP (slice R1c; `vd_client::arrival::RampVertex::placed`): a chunk that landed
+    // late starts on its stand-in's drawn surface — the coarser surface on its radial, sunk by the
+    // stand-in's sink (`fade.sink.y`) times this rung's wholeness, which IS the stand-in's unrisen
+    // share — and rises into its own place over the ramp; a chunk that entered whole reads a = 1.
+    let ramp = arrival(vertex.instance_index);
+    let morphed = mix(
+        coarser - radial * fade.sink.y * whole(d),
+        mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d)),
+        ramp,
+    );
 #ifdef SPLAT
     // THE SPLAT: the vertex as a camera-facing square one cell wide, spread in view space after
     // the morph and the sink, so it faces the eye by construction.
@@ -138,8 +175,9 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
 #else
     let own_normal = vertex.normal;
 #endif
-    // THE SHADE HANDS OVER WITH THE SHAPE (item 20): the same blend as the position's.
-    let local_normal = normalize(mix(oct_decode(vertex.morph_normal), own_normal, whole(d)));
+    // THE SHADE HANDS OVER WITH THE SHAPE (item 20): the same blend as the position's — and a late
+    // chunk starts on its stand-in's shade, which is its morph normal (slice R1c).
+    let local_normal = normalize(mix(oct_decode(vertex.morph_normal), own_normal, whole(d) * ramp));
     out.world_normal = mesh_functions::mesh_normal_local_to_world(local_normal, vertex.instance_index);
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = vertex.instance_index;
@@ -153,7 +191,7 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
 // coarser rung is never discarded on its near side and stands there.
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
-    if length(in.world_position.xyz) >= fade.bands.w {
+    if length(in.world_position.xyz) >= bands().w {
         discard;
     }
     var pbr_input = pbr_input_from_standard_material(in, is_front);

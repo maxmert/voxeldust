@@ -909,3 +909,106 @@ windows. Q8: the rim is sized at 86.4° now and judged in the flight.
 Q4: R2 now; the slides are judged in the flight, and the exact nested line waits on that. Q5: the hand-over by the
 pixel's size. Q6: slice 0b retires. Q7: the ramp is 0.5 s. Q1: the far look, yes. Design D is ruled whole; next
 slice R1.
+
+---
+
+## 10. SLICE R1 — THE BUILD PLAN (2026-09-27; ruled whole by B17/B18; the owner: "Start R1")
+
+WHAT THE CODE SHOWS (three read-only maps of HEAD `13d7fdc`):
+- One material per (realm, rung) for the ground, the water sheet and the caster: `LadderFade`, a uniform at binding 100
+  with `bands`, `sink` and `splat` (`crates/client-render/src/lib.rs:1014-1041`). The probe has its own
+  (`ProbeMaterial`, the capture app only, `:945-963`). Every chunk of a rung shares its rung's handle.
+- `rebind_bands` rewrites the ground's, the casters' and the probes' materials when the held horizon has moved 5 %
+  (`terrain.rs:1921-1985`; `ask_pace.rs:256-262`), and never the water's (`water_material`, `terrain.rs:2077-2107`).
+- CORRECTION TO §2.7 ITEM 2: the sheet child is not without a box. The engine gives it one from its REST positions
+  (`bevy_camera-0.18.1` `visibility/mod.rs:451-487`), so the box holds neither its morph nor its sink, and the ground's
+  box does not hold the sheet over deep water (`chunks.rs:1362` keeps the vertices of the dropped floor triangles).
+- No storage buffer and no render-world terrain system exist. Pipelined rendering is on, so a table written from the
+  main world could lead the placements by one frame: the table is written in the render world's prepare stage.
+- A LATE CHUNK: the stand-in is the drawn coarser chunk that the release hold keeps (`terrain.rs:2992-2995`). The
+  finer chunk spawns at its own state and rises by w · (s_{L+1} − m) in one frame (0 to 2 · s_{L+1} · w, always a
+  rise), and its shade jumps from its morph normal to its own; the stand-in stays at least that frame.
+- None of §5.3's gates exists as code (G-BLINK, G-FRONT as a judged line, PIXEL-RUNG-INVARIANCE, FRAME-COST); their
+  parts do (the pop detector `crates/client-harness/src/pop.rs`, the `ring_step` example, the stamp's frame fields,
+  `terrain_moving_eye`). `vd-client` and `vd-client-harness` are Tier-A; `vd-client-render` is not.
+
+THE STEPS:
+
+| step | where | what | proof |
+|---|---|---|---|
+| R1a THE BAND BUFFER | `vd-client` (Tier-A), `vd-client-render` | `band_table` (one row per rung: in_lo, sink_end, out_lo, out_hi; a row of FADE_ALWAYS for the ruler's probe; a header for R1c's clock); the drawn horizon follows the held one every frame (the 5 % rebind retires); the materials keep a row index and bind one table buffer per realm (`#[storage(101, read_only, buffer)]`); the main world fills the table after the slew, the render world writes it in its prepare stage; `rebind_bands` retires; the water follows by construction | Tier-A: every row equals `fade_bands` and `sink_end_m` for its rung, a stale bound's table differs; FRAME-COST (unpaced, the stands of 2026-09-24) not worse than today, and a control that writes the table as a `ShaderStorageBuffer` asset |
+| R1b THE WATER'S BOX | `vd-client`, `vd-client-render` | the sheet's own moved box (its points, their morph targets, their sink, R1c's start) on the sheet child | Tier-A: every drawn position of every sheet vertex inside its box; the control: the ground's box misses sheet vertices over deep water |
+| R1c THE ARRIVAL RAMP | `vd-client`, `vd-client-render` | a `MeshTag` arrival stamp (1/1024 s ticks of the client's clock; 0 = whole, for a key drawn the frame before) on the chunk, its sheet and its twin; the table's header carries now and T_ramp = 0.5 s; the material carries s_{L+1}; the vertex stage and a drawn chunk's prepass place P = mix(T − r · s_{L+1} · w, own, a) and blend the normal by a | Tier-A on a CPU copy of the placing formula: at a = 0 the vertex stands on the stand-in's drawn surface, at a = 1 on its own; the control: with no ramp the arrival step is w · (s_{L+1} − m) |
+| R1d THE GATES | `vd-client-harness` (Tier-A), `vd-bins` | G-BLINK beside the pop detector (a rise and a fall of ≥ 2 % inside one band across consecutive frames); G-FRONT as a judged line with an exit code | today's build (HEAD `13d7fdc`) as the control run: the owner's climb, a coast leg and a fast descent, frames consecutive |
+
+RESIDUES, registered when met: a chunk whose stand-in is TWO rungs coarser starts on the one-coarser surface; a
+caster-only entity (the shadow ladder) enters without a ramp; for the frame or two where a is near nought the finer
+chunk and its stand-in can stand in one depth (measured in R1d's flight).
+
+### 10.1 R1a, R1b and R1c BUILT (2026-09-27; NOT committed)
+
+- **R1a THE BAND TABLE.** `vd_client::ladder_view::band_table` (one row per rung and one always-passed row;
+  `the_band_table_is_every_rungs_crossfade_under_its_bound`, with a stale bound's table as the control); the pace keeps
+  two horizons (held, asked) and the 5 % rebind retires — the slack stays the terrain crate's 0.17, which covers the
+  bracket alone with 5 % to spare (`the_descents_slack_covers_every_band_the_horizon_may_slide_to`, with the bracket
+  alone as the control); `LadderFade` and `ProbeMaterial` hold a row and one table buffer per realm
+  (`#[storage(101, read_only, buffer)]`); the main world fills each table after the slew and the render world writes it
+  in its prepare stage (`extract_band_tables`, `write_band_tables`); `rebind_bands` is deleted, so the water now fades
+  on its ground's band. MEASURED on two stands (the steep coast 300 km inland and the big lake; frozen clients from
+  HEAD and from this tree, one account, unpaced): the terrain pictures are the same — outside the readout text only 234
+  and 901 pixels differ, each by one level and spread evenly (lighting and dither between two moments, no ring, no
+  chunk edge) — and the frame cost is the same within noise (the big lake 19.00 ms against 18.99 ms; the coast 15.97 ms
+  against 16.31 ms; the worst frame of a second 20.25/19.89 ms and 17.24/17.29 ms, medians of twelve samples).
+- **R1b THE WATER'S BOX.** `ChunkGeometry::water_bounds` over every drawn place of every sheet vertex
+  (`water_drawn_ends`), built by the worker; the sheet child carries it (and the culling switch) —
+  `the_sheet_carries_its_own_box_over_every_drawn_place`, whose control is the ground's box, which does not hold the
+  sheet over 20 km of sea.
+- **R1c THE ARRIVAL RAMP.** `vd_client::arrival` (the clock in 1/1024 s ticks, the ramp's weight, the stamp rule, and
+  a CPU copy of the placing formula): a late chunk starts on its stand-in's drawn surface and rises over 0.5 s; the
+  stamp rides the engine's `MeshTag` on the chunk, its sheet and its probe twin; the table's header carries the clock;
+  the materials carry the stand-in's sink (`sink.y`); the three shaders place `mix(stand-in, own, a)` and blend the
+  normal by `whole · a`. Tests: the two rungs' bands are one band (`whole_L = 1 − risen_{L+1}` at every distance);
+  the ramp starts on the stand-in's surface and ends on its own place; the control is the old one-frame step
+  `w · (s_{L+1} − m)`, a rise. ★ FOUND BY THE FIRST TEST: a TOP-RUNG chunk has no stand-in, so the formula would start
+  it on its own UNSUNK surface — over the finer rung it lies under inside its fade-in band; the rule is now that a
+  top-rung chunk, like a rebuilt key, enters whole (`arrival_stamp`, tested).
+
+### 10.2 R1 MEASURED (2026-09-27; `r1_renderer_pops/r1_flights.txt`; frozen clients from HEAD `13d7fdc` and this tree)
+
+THE STANDS (R1a; above). THE MOVING FLIGHT (the moving-eye gate's walk, its 240 m/s and 528 m/s hull legs; the pop
+detector judges one pair of consecutive frames every 2 s at every pixel whose rung changed): pixels past the still
+pixels' floor, and the widest step —
+
+| leg | HEAD | R1 |
+|---|---|---|
+| the walk, 1.4 m/s | 282, widest 37 levels | 173, widest 16 levels |
+| the hull, 240 m/s | 744, widest 7 | 700, widest 6 |
+| the hull, 528 m/s | 2 130, widest 12 | 2 375, widest 14 |
+
+The hull legs are the same within this detector's sampling, which catches an arrival only by chance and cannot tell it
+from a band's motion. Both runs fail the gate's WALK band check the same way (37 frames with up to 6 urgent chunks):
+a regression at HEAD, registered, not R1's.
+
+THE ARRIVALS (R1c; `r1_stream.sh` and `crates/bins/examples/pop_run.rs`): a pilot 148 km over the steep coast logs in,
+and four seconds of consecutive frames are recorded while about a thousand chunks land (both clients at 1 048/1 112
+drawn and 3 382/3 324 pending when the recording starts). The eye is still, so every pixel whose rung changes is a
+chunk that landed or left. Boundary pixels past a fixed step:
+
+| step past | HEAD | R1c |
+|---|---|---|
+| 2 levels | 1 227 | 109 |
+| 3 levels | 1 040 | 78 |
+| 5 levels | 714 | 51 |
+| 10 levels | 40 | 31 |
+| 20 levels | 17 | 10 |
+
+★ THE LARGE STEPS THAT REMAIN ARE WATER DECISIONS (`r1_renderer_pops/arrival_water_decision_pop.png`): a rung-10 chunk
+lands with WATER where its rung-11 stand-in drew LAND, and a patch of sea appears in one frame near the horizon. The ramp
+moves the ground's place; it cannot hide a water decision that differs between two rungs — that is R2's decision morph
+and, past 111 km, the skin's. The still pixels past 20 levels rose from 22 to 161: the ramp's own moving silhouettes and
+any depth tie of a rising chunk with its stand-in; the two are not yet told apart (UNMEASURED separately).
+
+NOT BUILT IN R1, AND WHY: G-BLINK and G-FRONT as gates judge the skin's flicker and its fronts, which exist only from S4;
+R1's own targets (a band's jump, the water's lagging band, an arrival) are read by the pop detector above. The design's
+FRAME-COST control (the table as a `ShaderStorageBuffer` asset) was not built: the stands' frame times agree within
+noise, and the old path's cost is on record (a per-frame material rewrite, 43.2 → 38.7 frames a second).
