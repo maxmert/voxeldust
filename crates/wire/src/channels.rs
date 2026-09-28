@@ -718,6 +718,15 @@ pub struct RealmSnapshotDatagram {
 /// largest item in it: a full stamped pose whose cells may sit anywhere in the galaxy.
 const SNAPSHOT_HEADER_BUDGET: usize = 184;
 
+/// The fixed overhead of one [`crate::session_flow::ShardToGateway::WindowFramePart`] (the tag + the
+/// fence + the window + the stamp + the part + the count + the hop row + the rows-vec length prefix)
+/// — a postcard upper bound, pinned by `the_window_frame_part_header_fits_its_budget_at_every_maximum`.
+/// Until minor 35 the window frame was cut under the realm datagram's [`SNAPSHOT_HEADER_BUDGET`], and
+/// nothing measured it against that: MEASURED 2026-09-27, the older frame's widest header is 187
+/// bytes, three over, because a hop to a ship names a 128-bit entity. The part's two numbers make it
+/// 197, so the frame has its own budget.
+const WINDOW_FRAME_HEADER_BUDGET: usize = 197;
+
 /// The conservative datagram budget every shard's snapshot partitioning must stay at
 /// or below: derived from the IPv6 minimum-MTU QUIC datagram floor minus headroom for
 /// the gateway's `sub_id` re-tag and QUIC/UDP overhead. A configured budget above this
@@ -733,7 +742,7 @@ pub const CONSERVATIVE_DATAGRAM_BUDGET: usize = 1200;
 /// catches the impossible case). Greedy, deterministic, O(n) encodes.
 #[must_use]
 pub fn partition_entities(entities: &[EntitySnap], budget_bytes: usize) -> Vec<Vec<EntitySnap>> {
-    partition_rows(entities, budget_bytes)
+    partition_rows(entities, budget_bytes, SNAPSHOT_HEADER_BUDGET)
 }
 
 /// Split a shard's authored REALM placements into datagram-sized chunks — the [`RealmSnapshotDatagram`]
@@ -742,7 +751,19 @@ pub fn partition_entities(entities: &[EntitySnap], budget_bytes: usize) -> Vec<V
 /// moving child ⇒ no realm datagram is ever sent).
 #[must_use]
 pub fn partition_realms(realms: &[RealmSnap], budget_bytes: usize) -> Vec<Vec<RealmSnap>> {
-    partition_rows(realms, budget_bytes)
+    partition_rows(realms, budget_bytes, SNAPSHOT_HEADER_BUDGET)
+}
+
+/// Split a window frame's authored rows into the parts of one tick — [`partition_realms`] under the
+/// window frame part's own header ([`WINDOW_FRAME_HEADER_BUDGET`]), so each part, with its hop and
+/// its place in the tick, encodes within the datagram budget. EMPTY in ⇒ EMPTY out; the shard still
+/// sends one part with no rows, because the stamp itself is what the composer aligns chains on.
+///
+/// Example: the home star system's nine planets at the development budget of 1 100 bytes come out
+/// as two parts, six planets and three.
+#[must_use]
+pub fn partition_window_rows(realms: &[RealmSnap], budget_bytes: usize) -> Vec<Vec<RealmSnap>> {
+    partition_rows(realms, budget_bytes, WINDOW_FRAME_HEADER_BUDGET)
 }
 
 /// THE STAR CATALOGUE, chunked under the carrier's budget (S11) — the THIRD user of the one
@@ -763,14 +784,18 @@ pub fn partition_stars(
     rows: &[vd_core::look::StarRow],
     budget_bytes: usize,
 ) -> Vec<Vec<vd_core::look::StarRow>> {
-    partition_rows(rows, budget_bytes)
+    partition_rows(rows, budget_bytes, SNAPSHOT_HEADER_BUDGET)
 }
 
 /// The shared greedy MTU partitioner for a snapshot row type (`EntitySnap` / `RealmSnap`, DRY). A
 /// BRANCHLESS generic shim (HR5): it maps each row to its encoded size and slices by the chunk ranges
 /// [`chunk_boundaries`] computes — ALL the bin-packing branching lives in that MONOMORPHIC helper, so a
 /// new row-type monomorphization adds ZERO uncovered per-mono branch.
-fn partition_rows<T: Serialize + Copy>(rows: &[T], budget_bytes: usize) -> Vec<Vec<T>> {
+fn partition_rows<T: Serialize + Copy>(
+    rows: &[T],
+    budget_bytes: usize,
+    header: usize,
+) -> Vec<Vec<T>> {
     let sizes: Vec<usize> = rows
         .iter()
         .map(|r| {
@@ -779,7 +804,7 @@ fn partition_rows<T: Serialize + Copy>(rows: &[T], budget_bytes: usize) -> Vec<V
                 .unwrap_or(SNAPSHOT_HEADER_BUDGET)
         })
         .collect();
-    chunk_boundaries(&sizes, budget_bytes, SNAPSHOT_HEADER_BUDGET)
+    chunk_boundaries(&sizes, budget_bytes, header)
         .into_iter()
         .map(|(s, e)| rows[s..e].to_vec())
         .collect()
@@ -1776,5 +1801,77 @@ mod tests {
         }
         assert_eq!(seen, realms.iter().map(|s| s.realm).collect::<Vec<_>>());
         assert_eq!(partition_realms(&realms, 100_000).len(), 1);
+    }
+
+    /// One window frame part with EVERY header field at its widest postcard encoding: maximal
+    /// varints, a hop row whose cell sits at the far corner of the lattice.
+    fn widest_window_part(rows: Vec<RealmSnap>) -> crate::session_flow::ShardToGateway {
+        use vd_core::glam::{DQuat, I64Vec3};
+        crate::session_flow::ShardToGateway::WindowFramePart {
+            realm_fence: Fence(u64::MAX),
+            window: crate::session_flow::WindowId(u64::MAX),
+            at: UniverseTick(u64::MAX),
+            part: u32::MAX,
+            parts: u32::MAX,
+            hop: Some(Box::new(crate::session_flow::HopRow {
+                child: RealmId::Ship(EntityId(u128::MAX)),
+                placement: vd_core::frame::FramePlacement {
+                    origin_cell: I64Vec3::splat(i64::MIN),
+                    origin: DVec3::splat(-1.999_999),
+                    velocity: DVec3::splat(-1.0e300),
+                    orientation: DQuat::from_xyzw(-0.5, -0.5, -0.5, -0.5),
+                    angular_velocity: DVec3::splat(-1.0e300),
+                },
+            })),
+            rows,
+        }
+    }
+
+    #[test]
+    fn the_window_frame_part_header_fits_its_budget_at_every_maximum() {
+        // THE WINDOW FRAME'S HEADER BUDGET IS A MEASUREMENT (minor 35), as the realm datagram's is:
+        // every header field at its widest, no rows, within the constant the partitioner subtracts.
+        // Pinned both ways: the budget holds, and the realm datagram's budget does not, so the
+        // frame's own constant is load-bearing rather than generous.
+        let width = postcard::to_allocvec(&widest_window_part(Vec::new()))
+            .expect("encode")
+            .len();
+        assert!(
+            width <= WINDOW_FRAME_HEADER_BUDGET,
+            "the widest part header is {width} bytes against a budget of {WINDOW_FRAME_HEADER_BUDGET}"
+        );
+        assert!(
+            width > SNAPSHOT_HEADER_BUDGET,
+            "the realm datagram's {SNAPSHOT_HEADER_BUDGET} would hold it ({width} bytes) — the frame's own constant has no reason"
+        );
+    }
+
+    #[test]
+    fn partition_window_rows_keeps_every_part_under_budget_at_the_widest_header() {
+        // Empty in ⇒ empty out (the shard itself sends one part with no rows); a tight budget forces
+        // several parts, each a real window frame part within budget at the widest header, losing no
+        // realm and keeping the rows' order; a roomy budget keeps one part.
+        assert_eq!(
+            partition_window_rows(&[], 1000),
+            Vec::<Vec<RealmSnap>>::new()
+        );
+        let realms: Vec<RealmSnap> = (0u32..40).map(realm_snap).collect();
+        let budget = 400;
+        let parts = partition_window_rows(&realms, budget);
+        assert!(parts.len() > 1, "a 40-realm frame must come out in parts");
+        let mut seen = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            assert!(!part.is_empty(), "no empty part");
+            let encoded = postcard::to_allocvec(&widest_window_part(part.clone()))
+                .expect("encode")
+                .len();
+            assert!(
+                encoded <= budget,
+                "part {i} encodes to {encoded} > budget {budget}"
+            );
+            seen.extend(part.iter().map(|s| s.realm));
+        }
+        assert_eq!(seen, realms.iter().map(|s| s.realm).collect::<Vec<_>>());
+        assert_eq!(partition_window_rows(&realms, 100_000).len(), 1);
     }
 }

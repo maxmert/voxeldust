@@ -656,6 +656,10 @@ struct LegRead {
     step_m: f64,
     gw_forced: (u64, u64),
     gw_deferred: (u64, u64),
+    /// ★ THE WINDOW FRAME'S PARTS over the leg (minor 35): the gateway's counters at the start and
+    /// the end — parts held apart, ticks expired undrawn, parts refused, and the composer passes
+    /// that waited on a part (each one a picture drawn from part of a tick before minor 35).
+    gw_parts: (GatewayParts, GatewayParts),
 }
 
 /// One recorded frame of a pair, read back from the run: its picture, its probe and its stamp.
@@ -890,6 +894,35 @@ fn gateway_swaps(admin: SocketAddr) -> (u64, u64) {
         .unwrap_or((0, 0))
 }
 
+/// ★ THE GATEWAY'S WINDOW-FRAME PART COUNTERS (minor 35, the far planets that blink): the parts it
+/// held apart while their tick arrived, the ticks it let expire undrawn, the parts it refused, and the
+/// composer passes that waited on a part.
+#[derive(Clone, Copy, Debug, Default)]
+struct GatewayParts {
+    held: u64,
+    expired: u64,
+    malformed: u64,
+    awaiting: u64,
+}
+
+fn gateway_parts(admin: SocketAddr) -> GatewayParts {
+    let Some(body) = admin_get_body(admin, "/admin/snapshot", Some(Duration::from_secs(2))) else {
+        return GatewayParts::default();
+    };
+    let Ok(snapshot) = serde_json::from_str::<AdminSnapshot>(&body) else {
+        return GatewayParts::default();
+    };
+    snapshot
+        .gateway
+        .map(|g| GatewayParts {
+            held: g.window_parts_held,
+            expired: g.window_part_ticks_expired,
+            malformed: g.window_parts_malformed,
+            awaiting: g.window_pictures_awaiting_parts,
+        })
+        .unwrap_or_default()
+}
+
 /// ★ THE BOARDING INSTRUMENT, printed whole (2026-09-14): what the gateway's window lane did with
 /// the origin swap, what the client's view took at it, and what the client's terrain forgot.
 fn print_boarding_instrument(tag: &str, st: &DevState, gw: (u64, u64)) {
@@ -1085,6 +1118,7 @@ fn read_band(
     // ★ THE GATEWAY'S ORIGIN-SWAP COUNTERS at the leg's start: a FORCED swap ships a level with
     // the hull alone, which is the suspected cause of the band's rebuild.
     let (forced_start, deferred_start) = gateway_swaps(gw_admin);
+    let parts_start = gateway_parts(gw_admin);
     let memory_start = MemoryRead::of(client_pid);
     let mut next_memory_s = MEMORY_COURSE_S;
     let started = Instant::now();
@@ -1369,6 +1403,7 @@ fn read_band(
     let (forced_end, deferred_end) = gateway_swaps(gw_admin);
     read.gw_forced = (forced_start, forced_end);
     read.gw_deferred = (deferred_start, deferred_end);
+    read.gw_parts = (parts_start, gateway_parts(gw_admin));
     let (judged, skipped, pop, sky) = judge_pairs(&pairs);
     read.sky_pairs = sky.pairs;
     read.sky_widest = sky.widest;
@@ -1568,6 +1603,17 @@ fn read_band(
         read.gw_forced.0,
         read.gw_deferred.1,
         read.gw_deferred.0
+    );
+    let (p0, p1) = read.gw_parts;
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE WINDOW FRAME'S PARTS — over the leg the gateway held {} \
+         parts apart while their tick arrived, built {} pictures from the newest WHOLE tick while \
+         a newer tick waited on a part (before minor 35 each was a picture with that part's realms \
+         missing), let {} ticks expire undrawn and refused {} parts",
+        p1.held.saturating_sub(p0.held),
+        p1.awaiting.saturating_sub(p0.awaiting),
+        p1.expired.saturating_sub(p0.expired),
+        p1.malformed.saturating_sub(p0.malformed)
     );
     eprintln!(
         "terrain_moving_eye/{leg}: THE SKY JUDGE — {} pairs read, the widest step of the air's \
@@ -1842,54 +1888,40 @@ fn walk_path_m() -> f64 {
 
 /// The seconds the walk's speed polls take before the read starts, bounded above.
 const WALK_SETTLE_S: f64 = 30.0;
-/// The walkable stand's search: its step along each circle of latitude, the band of latitude it
-/// reads either side of the sun's stand (in tenths of a degree), the lowest star that is still the
-/// day side, how densely it reads the walker's path, and how far the eye stays over the drawn ground
-/// along it.
+/// The walkable stand's search: its step along the circle where the star stands at the stated
+/// elevation, how densely it reads the walker's path, and how far the eye stays over the drawn
+/// ground along it.
 const STAND_STEP_M: f64 = 500.0;
-const STAND_LAT_TENTHS: i32 = 10;
-const STAND_DAY_MIN_DEG: f64 = 5.0;
 const WALK_SAMPLE_M: f64 = 5.0;
 const EYE_CLEARANCE_M: f64 = 0.5;
 
-/// ★ A WALKABLE STAND ON THE SOLVED GROUND (2026-09-27, the owner's ruling "near the equator, the
-/// star 35° up"). The solved world is mostly sea and the day side of the equator has no land
-/// (MEASURED with `examples/equator_stands`: 2.3 % of the equator is dry, all of it on the night
-/// side at the flight's start; the sun's stand is ocean 5 490 m deep). The stand is searched in the
-/// band `STAND_LAT_TENTHS` tenths of a degree either side of the sun's stand's latitude, as ruled
-/// when a planted hull still stood in the planet's axes (level only near the equator); since a
-/// berth states its facing the hull stands upright anywhere, and the band stays as ruled — all
-/// round the planet, on the day side: among the stands where the walker's whole path is dry and its
-/// eye stays `EYE_CLEARANCE_M` over the drawn ground, the one whose star stands nearest
-/// `SUN_ELEVATION_DEG` up (the nearer to the sun's stand on a tie). The nose is the sun's rule
-/// there. Returns the direction, the nose and the drawn surface's radius.
+/// ★ A WALKABLE STAND ON THE SOLVED GROUND, UNDER A STAR 15° UP (2026-09-27; the owner's ruling "move
+/// the stand to a 15° star", once a berth stated its facing). The solved world is mostly sea — the
+/// sun's stand on the equator is ocean 5 490 m deep, and the day side of the equator has no land
+/// (MEASURED with `examples/equator_stands`) — and a hull now stands upright wherever it is parked,
+/// so the stand is searched along the circle where the star stands `SUN_ELEVATION_DEG` up: the
+/// sun's stand turned about the sun's own direction, `STAND_STEP_M` a step, one way then the other,
+/// to the first stand where the walker's whole path is dry and its eye stays `EYE_CLEARANCE_M` over
+/// the drawn ground. The nose is the sun's rule there. Returns the direction, the nose and the drawn
+/// surface's radius.
 ///
-/// **Example.** On the committed world the walker stands 14 380 km east of the sun's stand, 1.36°
-/// south, on a dry plain 321 m over the sea, with the star 35.1° up; the hull is parked there
-/// upright in the pilot's attitude.
+/// **Example.** On the committed world the walker stands 1 706.5 km along that circle from the
+/// sun's stand, 15.8° south, on dry ground with the star 15° up over the shoulder — the picture
+/// gate's own light — and the hull is parked there upright in the pilot's attitude.
 fn walkable_stand(solved: &SolvedHome, sun: DVec3, d0: DVec3, path_m: f64) -> (DVec3, DVec3, f64) {
     let radius_m = solved.body.radius_m();
-    let steps = (std::f64::consts::TAU * radius_m / STAND_STEP_M) as i64;
+    // The circle's own radius: the sun's stand lies `90° − elevation` from the sun's direction.
+    let ring_m = radius_m * sun.dot(d0).acos().sin();
+    let steps = (std::f64::consts::PI * ring_m / STAND_STEP_M).ceil() as u64;
     let samples = (path_m / WALK_SAMPLE_M).ceil() as u64;
-    // (how far the star is from the stated elevation, how far from the sun's stand, the stand)
-    let mut best: Option<(f64, i64, DVec3, DVec3, f64)> = None;
-    for tenth in -STAND_LAT_TENTHS..=STAND_LAT_TENTHS {
-        let lat = (f64::from(tenth) * 0.1).to_radians();
-        for k in 0..steps {
-            let signed = if k < steps / 2 { k } else { k - steps };
-            let phi = signed as f64 * STAND_STEP_M / radius_m;
-            let e = (vd_core::glam::DQuat::from_rotation_z(phi) * d0).normalize();
-            let d = (vd_core::glam::DQuat::from_axis_angle(e.cross(DVec3::Z).normalize(), lat) * e)
-                .normalize();
-            let star_deg = sun.dot(d).asin().to_degrees();
-            if star_deg < STAND_DAY_MIN_DEG || !solved.dry(d) {
+    for k in 0..=steps {
+        for sign in [1.0_f64, -1.0] {
+            if k == 0 && sign < 0.0 {
                 continue;
             }
-            let off = (star_deg - SUN_ELEVATION_DEG).abs();
-            let closer = best
-                .as_ref()
-                .is_none_or(|b| off < b.0 || (off == b.0 && signed.abs() < b.1));
-            if !closer {
+            let psi = sign * k as f64 * STAND_STEP_M / ring_m;
+            let d = (vd_core::glam::DQuat::from_axis_angle(sun, psi) * d0).normalize();
+            if !solved.dry(d) {
                 continue;
             }
             let toward_sun = (sun - d * sun.dot(d)).normalize();
@@ -1903,25 +1935,27 @@ fn walkable_stand(solved: &SolvedHome, sun: DVec3, d0: DVec3, path_m: f64) -> (D
                 solved.dry(q) && solved.drawn_m(q, 0) <= p.length() - EYE_CLEARANCE_M
             });
             if clear {
-                best = Some((off, signed.abs(), d, level, h));
+                eprintln!(
+                    "terrain_moving_eye: the walkable stand {:.1} km along the circle where the \
+                     star stands {:.1}° up ({} of the sun's stand), latitude {:.2}°, the ground \
+                     {:.0} m over the body's radius and {:.0} m over the sea (the hull parked \
+                     upright, in the pilot's attitude)",
+                    k as f64 * STAND_STEP_M / 1000.0,
+                    sun.dot(d).asin().to_degrees(),
+                    if sign > 0.0 {
+                        "one way"
+                    } else {
+                        "the other way"
+                    },
+                    d.z.asin().to_degrees(),
+                    h - radius_m,
+                    h - radius_m - f64::from(solved.body.sea_m().unwrap_or(0))
+                );
+                return (d, level, h);
             }
         }
     }
-    let (_, steps_off, d, level, h) =
-        best.expect("a walkable stand on the day side near the equator");
-    eprintln!(
-        "terrain_moving_eye: the walkable stand {:.1} km round the planet from the sun's stand, \
-         latitude {:.2}°, the star {:.1}° up, the ground {:.0} m over the body's radius and {:.0} m \
-         over the sea; the planet frame's `−Z` stands {:.2}° off level there (the hull is parked \
-         upright, in the pilot's attitude)",
-        steps_off as f64 * STAND_STEP_M / 1000.0,
-        d.z.asin().to_degrees(),
-        sun.dot(d).asin().to_degrees(),
-        h - radius_m,
-        h - radius_m - f64::from(solved.body.sea_m().unwrap_or(0)),
-        (-d.z).asin().to_degrees()
-    );
-    (d, level, h)
+    panic!("no walkable stand on the circle where the star stands {SUN_ELEVATION_DEG}° up");
 }
 
 fn spawn_entry(account: u64, planet_seed: u64, st: &Stand) -> String {
@@ -2053,9 +2087,9 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     let _tier = vd_bins::cluster_tier();
     let body = vd_bins::home_body(DEV.universe_seed).expect("the home planet");
     let planet = RealmId::Planet(body.seed());
-    // THE STAND: the day side, near the equator (the hull's nose is the planet frame's `−Z`), the
-    // star over the shoulder — on the SOLVED ground, the walkable land whose star stands nearest the
-    // stated elevation (`walkable_stand`). The nose points along the ground.
+    // THE STAND: the day side, the star `SUN_ELEVATION_DEG` up over the shoulder — on the SOLVED
+    // ground, the first walkable land along the circle where the star stands that high
+    // (`walkable_stand`). The nose points along the ground.
     let orbit = vd_bins::home_orbit(DEV.universe_seed).expect("the home planet's orbit");
     let sun = -vd_physics::celestial::orbital_state(&orbit, 0.0)
         .position
@@ -2140,9 +2174,10 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     // in the planet's frame, PARKED UPRIGHT in the pilot's own attitude (its berth's facing, since
     // 2026-09-27): its up is the ground's vertical and its nose the pilot's forward, so a push flies
     // it along the ground, rising slowly as the curve falls away, and a yaw turns it about the
-    // vertical. MEASURED before the facing: planted in the planet's axes it stood rolled about 127°
-    // about its nose here, the turning leg yawed it about a nearly horizontal axis, and the descent
-    // that followed pushed sideways and flew 6.7 km into the ground.
+    // vertical. MEASURED before the facing, at the earlier stand 1.36° south: planted in the
+    // planet's axes it stood rolled about 127° about its nose, the turning leg yawed it about a
+    // nearly horizontal axis, and the descent that followed pushed sideways and flew 6.7 km into
+    // the ground.
     let berth = pilot.offset_m + level * BERTH_STANDOFF_M;
     let mut spawn_list = vec![spawn_entry(CLIENT_ACCOUNT_BASE, body.seed(), &walker)];
     for (b, pb) in pilots.iter().enumerate() {

@@ -78,6 +78,27 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     near slides judged in the flight; Q5 the hand-over by the pixel's size (no rung decides it); Q6 SLICE 0b RETIRES;
     Q7 the arrival ramp 0.5 s; Q1 THE FAR LOOK YES (a soft far coast, sub-pixel water a tint). Design D ruled whole;
     NEXT slice R1 (the renderer's own pops).
+    ★ B19 (2026-09-27, the walk on the solved ground): the gateway's artifact delivery fixed now; the gate solves the
+    home planet itself and stands on solved land (the stand on the circle where the star stands 15° up); a berth
+    states its FACING (optional stored field); a tick's picture only from COMPLETE frames — SL6 YES: the new
+    `ShardToGateway::WindowFramePart` (index 17, minor 35, the floor stays 34) carries the part number and count,
+    the gateway reads the older `WindowFrame` as a whole one-part frame.
+    ★ B20 (2026-09-27, the owner's first look in the window: "quality and speed quite terrible"): MEASURED the observer
+    104 m over the sea near a coast (it keeps its starting radius) — the coast drew a hole under the land, skirts as
+    walls, the land's undersides. THE COAST FIRST: a gate 100 m over the sea looking at the coast that FAILS today,
+    cured until it passes, then the owner looks again; the walk on the ground after. The terrain's core share is HALF
+    (7 of 14; amends F6's quarter).
+    ★★ B21 (2026-09-27, the owner: "you don't build a generic solution, but some parts that you try to fit together"):
+    STOP ADDING TERRAIN RULES; N2 parked. DESIGN THE ONE-VOLUME MODEL FIRST — one volume of material cells per body,
+    generated as a SOLID pass then a FILL pass (sea, lakes, air/vacuum, other substances), edits change the same cells,
+    every distance a copy made by one rule, a shore is where water cells touch ground cells; do NOT connect it to
+    today's special shore/water rules. Multi-agent design with reviews → `docs/investigation/2026-09-27/
+    one_volume_design.md`; the far-coast question (exact vs a small smooth change) goes to the owner with prices.
+    ★★ B22 (2026-09-28, THE NEW ORDER OF WORK): (1) switch OFF the old water and shore rules (no water drawn at all; the
+    dry sea floor shows; the solve's water CALCULATION stays); (2) SPEED, no world change — 60 fps at FULL SCREEN, no
+    stall; (3) THE GROUND with biomes, believable, no flicker at any distance; (4) THE WATER FILL (one-volume, option (b):
+    exact from ~450 km, smooth nearer; measure the smaller hand-over for "no flickers at ANY distance"); (5) THE EDIT
+    SYSTEM as its own step. Q3/Q4/Q6 accepted; Q5 (the hills' average) decided in the ground step.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

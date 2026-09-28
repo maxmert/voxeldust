@@ -355,6 +355,17 @@ pub struct GatewayView {
     /// S11 sky lane — catalogue parts NOT sent because the client already held that sky. This is the
     /// saving, counted: every skipped part is bytes that did not cross for a galaxy that did not move.
     pub sky_parts_skipped: u64,
+    /// THE WINDOW FRAME'S PARTS (minor 35) — parts held apart while the rest of their tick arrives
+    /// (throughput).
+    pub window_parts_held: u64,
+    /// THE WINDOW FRAME'S PARTS — ticks dropped because a part never arrived within the ring's span;
+    /// never drawn (a lossy path reads non-zero).
+    pub window_part_ticks_expired: u64,
+    /// THE WINDOW FRAME'S PARTS, fail-closed — parts that cannot make their tick whole. 0 healthy.
+    pub window_parts_malformed: u64,
+    /// THE WINDOW FRAME'S PARTS — composer passes in which a window's newest tick still missed a
+    /// part: before minor 35, each one a picture with the late part's realms left out.
+    pub window_pictures_awaiting_parts: u64,
     /// Gauge: sessions currently open on this gateway.
     pub sessions_open: u64,
     /// Gauge: demand-spawned home shards on the runtime routable roster — nonzero iff the dynamic-home
@@ -851,6 +862,10 @@ mod tests {
                 sky_requests_sent: 91,
                 sky_held_stated: 92,
                 sky_parts_skipped: 93,
+                window_parts_held: 99,
+                window_part_ticks_expired: 100,
+                window_parts_malformed: 101,
+                window_pictures_awaiting_parts: 102,
                 sessions_open: 24,
                 dynamic_shards: 25,
                 windows_open: 37,

@@ -10456,6 +10456,40 @@ updated in the same change as the work, deleted when done). The interims named h
   frames over 1 079 s (before: 308, from under the ground). The clearance along the real path finds the ground rising
   37 m (248 m along `−Z`), so the hull flies 537 m over the stand, and the fast legs' reported peaks rose with the
   lower flight (240 m/s: 491 urgent chunks; 528 m/s: 2 023; the turn: 1 194).
+- 🟩 **FAR PLANETS BLINK OUT OF THE PICTURE FOR ONE TICK** (found 2026-09-27, the moving-eye gate on the 15° stand): a
+  walker standing still saw two far planets of its own star system leave the composed picture and return again and
+  again — the gateway served the 7 343 km planet's artifact eleven times in five minutes to one idle client, and the
+  25 400 km planet's five times in 90 s; from 20 s into the walk the client's book held nothing whole for either, and
+  the walk read 203 gap frames (their globe chunks waiting for a copy that never completed). The client's realm list,
+  sampled every 2 s, never lost them: each absence is shorter than two seconds. MOST LIKELY MECHANISM (read from the
+  code, not yet confirmed by a trace): the star system ships every orbiting child in each tick's `WindowFrame`, sorted
+  by realm and cut into datagram chunks (`partition_realms`), and the gateway builds the tick's picture as soon as the
+  FIRST chunk of a stamp lands (`connection-plane/src/window.rs`: nothing counts a stamp's chunks); when the last chunk
+  is late or dropped, the realms in it — the largest seeds — are absent from that tick's picture, the delta removes
+  them, and the next stamp adds them back. The two that blink are the two largest planet seeds with an artifact.
+  Each blink makes the client forget the planet's artifact and the gateway serve it again (11 MB and 23 MB). The
+  cure: a frame states its part and its part count and the gateway offers the composer only a complete stamp (a wire
+  change, SL6), or a gateway-only hold on a row missing from a fresh level. WHERE: `sim/src/stub/window.rs`
+  (`emit_realm_frames`), `connection-plane/src/window.rs` (`WindowLevel`, `fresh_prefix`), `gateway/window_lane.rs`.
+  WHEN: the owner's call; it holds the 15° stand's walk red.
+  ★ BUILT THE SAME DAY (owner: "Complete frames only", then SL6 "New trailing arm" — ruling B19): the shard sends
+  `ShardToGateway::WindowFramePart` (index 17, minor 35, the floor stays 34), the window frame plus each part's number
+  and the tick's part count; the rows are cut under the part's OWN header budget (`partition_window_rows`; MEASURED: the
+  older frame's widest header was 187 bytes against the realm datagram's 184 it was cut under — a hop to a ship names
+  a 128-bit entity — and the part's is 197); the gateway holds a tick's parts apart (`WindowIngest::ingest_part`, the
+  rows a lookup by realm: MEASURED 16 000 movers in 3.3 ms against 98.9 ms for the older list) and puts the tick in the
+  ring only whole, so the composer folds the newest WHOLE tick; a tick whose part never lands expires undrawn on the
+  ring's span; the older arm reads as a whole one-part frame. The admin view carries `window_parts_held`,
+  `window_part_ticks_expired`, `window_parts_malformed` and `window_pictures_awaiting_parts`, and the moving-eye gate
+  prints them per leg. Tests: the wire pins, the partition at the widest header, the shard's numbered parts, the ring
+  (whole only, any order, the late part, the refusals, the expiry, the static roster), and the gateway end to end with
+  an observed-failing control (the older arm without the planet makes the delta remove it). ★ MEASURED (the full
+  moving-eye gate on the 15° stand, PASS in 2 227 s): the walk reads 0 gap frames on 1 295 samples (before: 203), the
+  descent and the 1 079 s departure 0; each far planet was served once to each session (before: one planet 21 times to one session);
+  the gateway counted 2 composer passes in which a newer tick waited on its second part — each a picture the older
+  gateway would have drawn without that part's planets — and 0 ticks expired. NOT TRACED: the older flight's first
+  blink (the older gateway logged no removal), so the split part is the measured mechanism that remains, not a traced
+  cause of that flight's first blink.
 - 🟥 **A CHILD SEEN FROM OUTSIDE IS DRAWN IN ITS PARENT'S AXES** (found 2026-09-27 mapping the berth facing): every
   child row a parent ships for the picture is read back through `pose_of_row` (`crates/sim/src/stub/placement.rs`),
   which stamps the parent's own axes as the orientation. From inside a hull the world turns right (the hop row is the

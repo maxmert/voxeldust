@@ -135,11 +135,52 @@ fn merge_static(
 /// never silent — the failure-mode table of §2.6.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ingested {
-    /// Stored (a level newer than, equal to — latest-wins re-delivery — or inside the ring).
+    /// Stored (a level newer than, equal to — latest-wins re-delivery — or inside the ring): the
+    /// tick's last missing part landed, or a part of a tick that is already whole.
     Applied,
+    /// A part of a tick whose other parts are not all here yet (minor 35): held apart, never
+    /// composed, until the tick is whole (`window_parts_held`).
+    Partial,
     /// A frame stamped further behind the ring head than the derived span: refused
     /// (`window_level_refused`) — composing that far back would fold a past nobody else retains.
     BehindRing,
+    /// A part numbered at or past its count, or whose count disagrees with an earlier part of the
+    /// same tick: dropped (`window_parts_malformed`) — no count can make that tick whole.
+    MalformedPart,
+}
+
+/// ONE TICK'S FRAME WHILE ITS PARTS ARRIVE (minor 35, owner-approved 2026-09-27 under SL6 — the far
+/// planets that blink): the count every part of the tick states, the part numbers held so far, the
+/// hop, and the parts' rows keyed by realm. Nothing composes it: it enters the ring only when it
+/// holds every number below the count.
+///
+/// The rows are a LOOKUP by realm (SL9): a tick of many movers comes in many parts, and a list
+/// searched for every arriving row costs the square of the movers every tick. MEASURED 2026-09-27
+/// (release, one window, parts of ten rows): 16 000 movers assemble in 3.3 ms against 98.9 ms for
+/// the list the older chunk merge searched, 4 000 in 1.2 ms against 9.4 ms. Latest-wins per realm,
+/// as everywhere on this lane; the whole level lists them in realm order, the order the shard sends
+/// them in.
+#[derive(Clone, Debug, PartialEq)]
+struct Assembly {
+    parts: u32,
+    held: BTreeSet<u32>,
+    hop: Option<HopRow>,
+    rows: BTreeMap<RealmId, RealmSnap>,
+}
+
+/// Merge a later statement of one stamp into the level held for it: a row already held is replaced
+/// by its newer statement (latest-wins per realm — the re-delivery rule, per row), a row not yet
+/// held is added, and the hop is taken from whichever statement carries it.
+fn merge_into(held: &mut WindowLevel, level: WindowLevel) {
+    if level.hop.is_some() {
+        held.hop = level.hop;
+    }
+    for row in level.rows {
+        match held.rows.iter_mut().find(|r| r.realm == row.realm) {
+            Some(slot) => *slot = row,
+            None => held.rows.push(row),
+        }
+    }
 }
 
 /// Per-window ingest state (§2.6.2 `WindowState`'s data half): the level ring, the latest bodies
@@ -148,8 +189,13 @@ pub enum Ingested {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WindowIngest {
     /// The level ring, ascending by stamp; retention = [`WindowTuning::ring_span_ticks`] behind
-    /// the newest (K = 2 beats + 1, derived).
+    /// the newest (K = 2 beats + 1, derived). ONLY WHOLE TICKS: a tick sent in parts enters it
+    /// when its last part lands (minor 35).
     levels: VecDeque<WindowLevel>,
+    /// The ticks whose parts are still arriving (minor 35), by stamp — held apart from the ring,
+    /// so nothing composes a tick that is missing a part. Retained on the ring's own span; a tick
+    /// that never becomes whole is dropped by [`WindowIngest::expire_parts`].
+    assembling: BTreeMap<UniverseTick, Assembly>,
     /// Latest `SelfLook` per subject (newest `authored_at` wins; only ever self-shipped — the
     /// Slice-A admission already refused everything else).
     look_of: BTreeMap<RealmId, (UniverseTick, Vec<u8>)>,
@@ -197,42 +243,89 @@ pub struct WindowIngest {
 }
 
 impl WindowIngest {
-    /// Ingest one attested `WindowFrame` level, or one CHUNK of one (a frame over the datagram
-    /// budget arrives as several at one stamp, merged here). Latest-wins per row (a re-delivered stamp
-    /// replaces); an out-of-order tick still inside the ring is inserted in stamp order (the
-    /// common-tick fold wants it); a tick behind the ring is refused.
-    pub fn ingest_frame(&mut self, mut level: WindowLevel, tuning: &WindowTuning) -> Ingested {
+    /// Ingest one attested WHOLE level — the older `WindowFrame` arm, which the gateway reads as a
+    /// whole one-part frame: [`WindowIngest::ingest_part`] with part 0 of 1.
+    pub fn ingest_frame(&mut self, level: WindowLevel, tuning: &WindowTuning) -> Ingested {
+        self.ingest_part(level, 0, 1, tuning)
+    }
+
+    /// Ingest one attested part of one tick's frame (minor 35). ★ A TICK ENTERS THE RING ONLY WHOLE
+    /// (owner-approved 2026-09-27 under SL6): a frame over the datagram budget arrives in parts,
+    /// and before the parts named their place the gateway put the first part to land in the ring,
+    /// so the composer built that tick's picture without the rows of a late or lost part — the far
+    /// planets that blink. Now a part waits apart ([`Ingested::Partial`]) until the tick holds every
+    /// number below its count, and the composer meanwhile folds the newest WHOLE tick.
+    ///
+    /// Example: the home star system's tick 900 comes in two parts, and the second one (the three
+    /// largest planets) is late. Tick 900 waits apart; the picture stays on tick 899, with all nine
+    /// planets, until the second part lands.
+    ///
+    /// A part of a tick already whole merges into it, latest-wins per row (the re-delivery rule). An
+    /// out-of-order tick still inside the ring is inserted in stamp order (the common-tick fold wants
+    /// it); a tick behind the ring is refused; a part whose number or count cannot make its tick
+    /// whole is refused.
+    pub fn ingest_part(
+        &mut self,
+        level: WindowLevel,
+        part: u32,
+        parts: u32,
+        tuning: &WindowTuning,
+    ) -> Ingested {
+        if part >= parts {
+            return Ingested::MalformedPart;
+        }
+        if let Ok(i) = self.levels.binary_search_by_key(&level.at, |l| l.at) {
+            merge_into(&mut self.levels[i], level);
+            return Ingested::Applied;
+        }
+        if self
+            .head()
+            .is_some_and(|head| level.at.0 + tuning.ring_span_ticks < head.0)
+        {
+            return Ingested::BehindRing;
+        }
+        let at = level.at;
+        let slot = self.assembling.entry(at).or_insert_with(|| Assembly {
+            parts,
+            held: BTreeSet::new(),
+            hop: None,
+            rows: BTreeMap::new(),
+        });
+        if slot.parts != parts {
+            return Ingested::MalformedPart;
+        }
+        slot.held.insert(part);
+        if level.hop.is_some() {
+            slot.hop = level.hop;
+        }
+        slot.rows
+            .extend(level.rows.into_iter().map(|row| (row.realm, row)));
+        // Every number below the count is held (each is < parts, so the count of numbers is the test).
+        if slot.held.len() < parts as usize {
+            return Ingested::Partial;
+        }
+        let whole = self
+            .assembling
+            .remove(&at)
+            .expect("the tick's assembly was just filled");
+        self.store_whole(
+            WindowLevel {
+                at,
+                hop: whole.hop,
+                rows: whole.rows.into_values().collect(),
+            },
+            tuning,
+        );
+        Ingested::Applied
+    }
+
+    /// Put one whole tick in the ring, in stamp order, and trim the ring to its span.
+    fn store_whole(&mut self, mut level: WindowLevel, tuning: &WindowTuning) {
         // S10: re-unite the two lanes. A realm the frame already states WINS — a mover's live row must
         // never be shadowed by a stale static one, which is the only way the two sets can overlap.
         merge_static(&mut level.rows, &self.static_rows, &self.members, level.at);
-        let head = self.levels.back().map(|l| l.at);
-        let Some(head) = head else {
-            self.levels.push_back(level);
-            return Ingested::Applied;
-        };
-        if level.at.0 + tuning.ring_span_ticks < head.0 {
-            return Ingested::BehindRing;
-        }
-        match self.levels.binary_search_by_key(&level.at, |l| l.at) {
-            // ★ ONE STAMP, MANY CHUNKS (2026-09-02): a frame over the datagram budget arrives as
-            // several, each carrying the hop and a slice of the rows. A row already held at this
-            // stamp is replaced by its newer statement (latest-wins per realm — the re-delivery
-            // rule, now per row), a row not yet held is added, and the hop is taken from whichever
-            // chunk carries it.
-            Ok(i) => {
-                let held = &mut self.levels[i];
-                if level.hop.is_some() {
-                    held.hop = level.hop;
-                }
-                for row in level.rows {
-                    match held.rows.iter_mut().find(|r| r.realm == row.realm) {
-                        Some(slot) => *slot = row,
-                        None => held.rows.push(row),
-                    }
-                }
-            }
-            Err(i) => self.levels.insert(i, level),
-        }
+        let i = self.levels.partition_point(|l| l.at < level.at);
+        self.levels.insert(i, level);
         let new_head = self.levels.back().expect("a level was just stored").at.0;
         while self
             .levels
@@ -241,7 +334,28 @@ impl WindowIngest {
         {
             self.levels.pop_front();
         }
-        Ingested::Applied
+    }
+
+    /// The newest stamp this window heard, whole or in parts — the head both the ring and the
+    /// ticks still assembling are retained against.
+    fn head(&self) -> Option<UniverseTick> {
+        let whole = self.levels.back().map(|l| l.at);
+        let parted = self.assembling.keys().next_back().copied();
+        whole.max(parted)
+    }
+
+    /// Drop every tick that is still missing a part and stands further behind the head than the
+    /// ring's span: a tick that did not become whole in time never will be composed. Returns how many
+    /// were dropped (`window_part_ticks_expired`) — each one is a tick whose picture the gateway
+    /// withheld rather than draw a picture with realms missing.
+    pub fn expire_parts(&mut self, tuning: &WindowTuning) -> u64 {
+        let Some(head) = self.head() else {
+            return 0;
+        };
+        let before = self.assembling.len();
+        self.assembling
+            .retain(|at, _| at.0 + tuning.ring_span_ticks >= head.0);
+        (before - self.assembling.len()) as u64
     }
 
     /// Ingest the author's STATIC roster (slice S10) — stated once on the reliable lane. Stored for
@@ -353,6 +467,14 @@ impl WindowIngest {
     #[must_use]
     pub fn newest(&self) -> Option<UniverseTick> {
         self.levels.back().map(|l| l.at)
+    }
+
+    /// Is the newest tick this window heard still missing a part (minor 35)? Then the composer
+    /// folds an older whole tick this pass; before minor 35 it folded the part, and the missing
+    /// part's realms left the picture (`window_pictures_awaiting_parts`).
+    #[must_use]
+    pub fn awaiting_part(&self) -> bool {
+        self.assembling.keys().next_back().copied() > self.newest()
     }
 
     /// Has this window received at least one attested level? (A `Child(c)` window with a level
@@ -1789,14 +1911,16 @@ mod tests {
         );
     }
 
-    /// ★ ONE STAMP, MANY CHUNKS (2026-09-02). A window frame too wide for one datagram is sent as
-    /// several chunks at the SAME tick. The ring must fold them into one level: a realm a later
-    /// chunk re-states replaces the earlier statement, a realm only the later chunk names is added,
-    /// and the hop is taken from whichever chunk carries it.
+    /// ★ ONE STAMP, MANY STATEMENTS (2026-09-02). A later statement of a tick the ring already holds
+    /// WHOLE — the older `WindowFrame` arm is read as a whole one-part frame, so a second one at the
+    /// same tick is such a statement — folds into that one level: a realm the later statement
+    /// re-states replaces the earlier one, a realm only the later statement names is added, and the
+    /// hop is taken from whichever statement carries it. (Since minor 35 the PARTS of one tick
+    /// assemble apart first: `a_tick_in_parts_enters_the_ring_only_whole`.)
     ///
-    /// The pilot's hull holds two hundred stations. The parent ships them as three chunks at tick
-    /// 12, and only the last one carries where the hull sits in its parent. Lose that hop and the
-    /// whole level refuses to fold, so the pilot sees nothing.
+    /// The pilot's hull holds two hundred stations, and a later statement of tick 12 carries where
+    /// the hull sits in its parent. Lose that hop and the whole level refuses to fold, so the pilot
+    /// sees nothing.
     #[test]
     fn many_chunks_at_one_stamp_fold_into_one_level_and_the_hop_is_taken_from_whichever_carries_it()
     {
@@ -1854,6 +1978,273 @@ mod tests {
             held.rows.iter().any(|r| r.realm == RealmId::Planet(9)),
             "and a realm only the later chunk names is added"
         );
+    }
+
+    /// ★ A TICK IN PARTS ENTERS THE RING ONLY WHOLE (minor 35, owner-approved 2026-09-27 under SL6 —
+    /// the far planets that blink). The home star system sends tick 10 in two parts; until the
+    /// second lands, nothing of tick 10 is composed and the window has no newest tick; when it
+    /// lands, one level holds both parts' rows and the hop.
+    #[test]
+    fn a_tick_in_parts_enters_the_ring_only_whole() {
+        let mut ingest = WindowIngest::default();
+        let t = tuning();
+        let at = UniverseTick(10);
+        let carried = hop(RealmId::System(7), DVec3::new(4.0, 0.0, 0.0), DVec3::ZERO);
+        assert_eq!(
+            ingest.ingest_part(
+                level(
+                    at,
+                    Some(carried),
+                    vec![row(RealmId::Planet(7), planet(), sys(), DVec3::X, at)]
+                ),
+                0,
+                2,
+                &t
+            ),
+            Ingested::Partial
+        );
+        assert_eq!(ingest.newest(), None, "part of a tick is never a tick");
+        assert_eq!(ingest.level_at(at), None);
+        assert_eq!(ingest.ticks().count(), 0);
+        assert!(!ingest.confirmed(), "a part confirms nothing");
+        assert!(!ingest.rosters(RealmId::Planet(7)), "nor vouches a child");
+        assert!(ingest.awaiting_part());
+        // The second part: the other planets. The tick is whole now.
+        assert_eq!(
+            ingest.ingest_part(
+                level(
+                    at,
+                    Some(carried),
+                    vec![
+                        row(RealmId::Planet(8), planet(), sys(), DVec3::Y, at),
+                        row(RealmId::Planet(9), planet(), sys(), DVec3::Z, at),
+                    ]
+                ),
+                1,
+                2,
+                &t
+            ),
+            Ingested::Applied
+        );
+        assert_eq!(ingest.newest(), Some(at));
+        assert!(!ingest.awaiting_part());
+        let whole = ingest.level_at(at).expect("the whole tick");
+        assert_eq!(
+            whole.rows.iter().map(|r| r.realm).collect::<Vec<_>>(),
+            vec![RealmId::Planet(7), RealmId::Planet(8), RealmId::Planet(9)]
+        );
+        assert_eq!(whole.hop.map(|h| h.child), Some(RealmId::System(7)));
+        // The parts may land in any order: tick 11's second part first.
+        let late = UniverseTick(11);
+        assert_eq!(
+            ingest.ingest_part(
+                level(
+                    late,
+                    None,
+                    vec![row(RealmId::Planet(9), planet(), sys(), DVec3::Z, late)]
+                ),
+                1,
+                2,
+                &t
+            ),
+            Ingested::Partial
+        );
+        assert_eq!(
+            ingest.ingest_part(
+                level(
+                    late,
+                    None,
+                    vec![row(RealmId::Planet(7), planet(), sys(), DVec3::X, late)]
+                ),
+                0,
+                2,
+                &t
+            ),
+            Ingested::Applied
+        );
+        assert_eq!(
+            ingest.level_at(late).map(|l| l.rows.len()),
+            Some(2),
+            "both parts, whatever the order"
+        );
+    }
+
+    /// ★ THE BLINK, PINNED (the far planets that blink, 2026-09-27). The star system's tick 900
+    /// comes in two parts, and the second one — the three planets with the largest seeds — is late.
+    /// Before minor 35 the ring took the first part as tick 900, and the picture built from it had
+    /// six planets; the next tick brought the three back. Now the newest WHOLE tick stays 899, with
+    /// all nine, until the late part lands.
+    #[test]
+    fn a_late_part_leaves_the_picture_on_the_last_whole_tick() {
+        let mut ingest = WindowIngest::default();
+        let t = tuning();
+        let planets = |at: UniverseTick, seeds: std::ops::Range<u64>| -> Vec<RealmSnap> {
+            seeds
+                .map(|s| row(RealmId::Planet(s), planet(), sys(), DVec3::X * s as f64, at))
+                .collect()
+        };
+        let before = UniverseTick(899);
+        let now = UniverseTick(900);
+        for (part, seeds) in [(0u32, 1..7), (1, 7..10)] {
+            let _ = ingest.ingest_part(level(before, None, planets(before, seeds)), part, 2, &t);
+        }
+        assert_eq!(
+            ingest.ingest_part(level(now, None, planets(now, 1..7)), 0, 2, &t),
+            Ingested::Partial
+        );
+        // What the composer reads this pass: the newest whole tick, with all nine planets.
+        assert_eq!(ingest.newest(), Some(before));
+        assert_eq!(
+            ingest.level_at(before).map(|l| l.rows.len()),
+            Some(9),
+            "no planet leaves the picture"
+        );
+        assert!(
+            ingest.awaiting_part(),
+            "the pass is counted as one that waits"
+        );
+        assert!(
+            ingest.rosters(RealmId::Planet(9)),
+            "the late planets stay rostered"
+        );
+        // The late part lands: tick 900 is whole with all nine.
+        assert_eq!(
+            ingest.ingest_part(level(now, None, planets(now, 7..10)), 1, 2, &t),
+            Ingested::Applied
+        );
+        assert_eq!(ingest.newest(), Some(now));
+        assert_eq!(ingest.level_at(now).map(|l| l.rows.len()), Some(9));
+    }
+
+    /// A part that cannot make its tick whole is refused, and the tick keeps waiting for the parts
+    /// that can: a number at or past its count, a count of zero, and a count that disagrees with an
+    /// earlier part of the same tick.
+    #[test]
+    fn a_part_that_cannot_make_its_tick_whole_is_refused() {
+        let mut ingest = WindowIngest::default();
+        let t = tuning();
+        let at = UniverseTick(10);
+        let empty = || level(at, None, vec![]);
+        assert_eq!(
+            ingest.ingest_part(empty(), 2, 2, &t),
+            Ingested::MalformedPart
+        );
+        assert_eq!(
+            ingest.ingest_part(empty(), 0, 0, &t),
+            Ingested::MalformedPart
+        );
+        assert!(
+            !ingest.awaiting_part(),
+            "a refused part leaves nothing waiting"
+        );
+        assert_eq!(ingest.ingest_part(empty(), 0, 2, &t), Ingested::Partial);
+        assert_eq!(
+            ingest.ingest_part(empty(), 1, 3, &t),
+            Ingested::MalformedPart,
+            "tick 10 is two parts, not three"
+        );
+        assert_eq!(ingest.newest(), None);
+        assert_eq!(ingest.ingest_part(empty(), 1, 2, &t), Ingested::Applied);
+        assert_eq!(ingest.newest(), Some(at));
+    }
+
+    /// A tick that never becomes whole expires on the ring's own span and is never composed; the
+    /// head the span is read from is the newest stamp heard, whole or in parts; a part behind that
+    /// head's span is refused like a level behind the ring.
+    #[test]
+    fn a_tick_missing_a_part_expires_on_the_ring_span() {
+        let mut ingest = WindowIngest::default();
+        let t = tuning(); // span 5
+        assert_eq!(ingest.expire_parts(&t), 0, "nothing heard, nothing expires");
+        let part0 = |at: u64| level(UniverseTick(at), None, vec![]);
+        // Tick 10 loses its second part for good.
+        assert_eq!(ingest.ingest_part(part0(10), 0, 2, &t), Ingested::Partial);
+        assert_eq!(
+            ingest.expire_parts(&t),
+            0,
+            "inside the span it may still land"
+        );
+        // Whole ticks carry the head to 15: tick 10 is still inside the span (10 + 5 >= 15).
+        for at in 11..=15 {
+            assert_eq!(ingest.ingest_part(part0(at), 0, 1, &t), Ingested::Applied);
+        }
+        assert_eq!(ingest.expire_parts(&t), 0);
+        assert!(!ingest.awaiting_part(), "the newest tick heard is whole");
+        // Head 16: tick 10 falls out of the span and is dropped undrawn.
+        assert_eq!(ingest.ingest_part(part0(16), 0, 1, &t), Ingested::Applied);
+        assert_eq!(ingest.expire_parts(&t), 1);
+        assert_eq!(ingest.expire_parts(&t), 0, "once");
+        assert_eq!(ingest.level_at(UniverseTick(10)), None);
+        // Its late part is now behind the ring.
+        assert_eq!(
+            ingest.ingest_part(part0(10), 1, 2, &t),
+            Ingested::BehindRing
+        );
+        // A tick still in parts moves the head too: a part at 30 puts tick 20 behind the ring.
+        assert_eq!(ingest.ingest_part(part0(30), 0, 2, &t), Ingested::Partial);
+        assert_eq!(
+            ingest.ingest_part(part0(20), 0, 2, &t),
+            Ingested::BehindRing
+        );
+        assert!(ingest.awaiting_part());
+    }
+
+    /// A static roster folds into a tick assembled from parts exactly once, when the tick is whole —
+    /// and a mover a part states wins over the static row of the same realm.
+    #[test]
+    fn a_tick_assembled_from_parts_folds_the_static_roster_when_whole() {
+        let mut ingest = WindowIngest::default();
+        let t = tuning();
+        let stat = row(
+            RealmId::Planet(43),
+            planet(),
+            sys(),
+            DVec3::new(9.0, 0.0, 0.0),
+            T,
+        );
+        let moved = row(RealmId::Planet(44), planet(), sys(), DVec3::X, T);
+        ingest.ingest_static_rows(vec![
+            stat,
+            row(RealmId::Planet(44), planet(), sys(), DVec3::Z, T),
+        ]);
+        let at = UniverseTick(T.0 + 3);
+        assert_eq!(
+            ingest.ingest_part(level(at, None, vec![]), 0, 2, &t),
+            Ingested::Partial
+        );
+        assert_eq!(
+            ingest.ingest_part(
+                level(
+                    at,
+                    None,
+                    vec![RealmSnap {
+                        pose: StampedPose {
+                            universe_tick: at,
+                            ..moved.pose
+                        },
+                        ..moved
+                    }]
+                ),
+                1,
+                2,
+                &t
+            ),
+            Ingested::Applied
+        );
+        let whole = ingest.level_at(at).expect("the whole tick");
+        assert_eq!(whole.rows.len(), 2, "the mover once, the static row once");
+        let mover = whole
+            .rows
+            .iter()
+            .find(|r| r.realm == RealmId::Planet(44))
+            .expect("the mover");
+        assert_eq!(pm(&mover.pose), DVec3::X, "the part's live row wins");
+        let folded = whole
+            .rows
+            .iter()
+            .find(|r| r.realm == RealmId::Planet(43))
+            .expect("the static row");
+        assert_eq!(folded.pose.universe_tick, at, "re-stamped at the tick");
     }
 
     /// The hop for a child sitting at `child_pos` in the author's frame, moving at `child_vel`:

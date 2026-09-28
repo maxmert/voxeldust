@@ -346,7 +346,15 @@ pub const PROTO_MAJOR: u16 = 1;
 /// pyramid level's mean. A FIELD APPEND to an arm minor 33 shipped, which postcard cannot make
 /// additive, so [`PROTO_MINOR_FLOOR`] moves to 34: a minor-33 client is refused, never served a
 /// head it would mis-frame.
-pub const PROTO_MINOR: u16 = 34;
+/// **35** — THE WINDOW FRAME'S PARTS (owner-approved 2026-09-27 under SL6: "a new ShardToGateway arm at
+/// index 17: the same window frame plus its part number and part count"; the far planets that blink): a
+/// new `ShardToGateway::WindowFramePart` (disc 17) carries one part of one tick's window frame with its
+/// part number and the tick's part count, so the gateway builds a tick's picture only from a stamp whose
+/// parts are all here. Before, the gateway built the picture from the first part that landed, and the
+/// planets in a late part left the picture for one tick. APPENDED and mesh-only (one cluster build): no
+/// client-facing message changed, so the floor does not move. The gateway still reads the older
+/// `WindowFrame` (disc 7) as a whole one-part frame.
+pub const PROTO_MINOR: u16 = 35;
 
 /// The OLDEST minor this build will hold a conversation at. Below it, [`ProtoVersion::negotiate`]
 /// refuses outright instead of negotiating down.
@@ -607,8 +615,9 @@ mod tests {
     #[test]
     fn current_is_self_compatible_and_displays() {
         assert_eq!(
-            PROTO_MINOR, 34,
-            "minor 34 is THE COAST MASK (owner-approved 2026-09-22, ruling W10): ArtifactHead carries coast_parts and ArtifactCoast (disc 6) ships the mask's bits, a field append, the floor at 34; \
+            PROTO_MINOR, 35,
+            "minor 35 is THE WINDOW FRAME'S PARTS (owner-approved 2026-09-27 under SL6): WindowFramePart (disc 17) on ShardToGateway, the window frame plus its part number and the tick's part count, so the gateway builds a tick's picture only from a whole stamp; appended and mesh-only, the floor unmoved; \
+             minor 34 is THE COAST MASK (owner-approved 2026-09-22, ruling W10): ArtifactHead carries coast_parts and ArtifactCoast (disc 6) ships the mask's bits, a field append, the floor at 34; \
              minor 33 is THE PYRAMID'S WATER WORD (owner-approved 2026-09-21): ArtifactPyramid carries water_m beside z_m, a reshape, the floor at 33; \
              minor 32 is THE ARTIFACT SHIP (owner ruling 2026-09-19, slice 8c C4c): ArtifactHead (disc 3), \
              ArtifactPyramid (disc 4), ArtifactTile (disc 5) on BulkMsg, ArtifactPart (disc 19) on \
@@ -723,7 +732,7 @@ mod tests {
             ProtoVersion::CURRENT.negotiate(ProtoVersion::CURRENT),
             Some(ProtoVersion::CURRENT)
         );
-        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.34");
+        assert_eq!(ProtoVersion::CURRENT.to_string(), "v1.35");
         // These USED to negotiate (17/16 fully; 8 as the previous floor). They are now refused:
         // the sender-gates-variants rule only covers appended VARIANTS, and minor 18 reshaped
         // payloads in place. This flip IS the proof the floor is live — asserting `Some` here is

@@ -311,24 +311,34 @@ pub(crate) fn emit_window_frames(
                 }
             }
         };
-        // ★ UNDER THE DATAGRAM BUDGET, IN CHUNKS (2026-09-02). This frame rides the unreliable lane,
+        // ★ UNDER THE DATAGRAM BUDGET, IN PARTS (2026-09-02). This frame rides the unreliable lane,
         // and a datagram over the path's budget is dropped by the transport — counted where no gate
         // reads, and said in a log nobody was reading. MEASURED on the home system: nine mover rows
         // plus the hop came to 1,420 bytes against 1,200, so EVERY frame of the hull's window was
         // dropped and the observer chain never had a stamp for the star system. The rows are split
-        // exactly as the entity snapshots are; the hop rides EVERY chunk (one datagram may arrive
-        // without the others) and the gateway merges the chunks of one stamp. A tick with no rows
-        // still sends one frame: the stamp itself is what the composer aligns chains on.
+        // under the part's own header budget; the hop rides EVERY part (one datagram may arrive
+        // without the others). A tick with no rows still sends one part: the stamp itself is what
+        // the composer aligns chains on.
+        //
+        // ★ EACH PART NAMES ITS PLACE (minor 35, owner-approved 2026-09-27 under SL6): its number
+        // and the tick's part count, so the gateway builds a tick's picture only when every part of
+        // the stamp is there. Before, it built the picture from the first part that landed, and
+        // the planets in a late part left the picture for one tick (the home system's three largest
+        // seeds, the second of two parts — `examples/window_parts`).
         let mut chunks =
-            vd_wire::channels::partition_realms(realms, config.snapshot_datagram_budget);
+            vd_wire::channels::partition_window_rows(realms, config.snapshot_datagram_budget);
         if chunks.is_empty() {
             chunks.push(Vec::new());
         }
-        for rows in chunks {
-            let frame = ShardToGateway::WindowFrame {
+        let parts =
+            u32::try_from(chunks.len()).expect("a tick's parts fit a u32: each part holds a row");
+        for (part, rows) in (0u32..).zip(chunks) {
+            let frame = ShardToGateway::WindowFramePart {
                 realm_fence,
                 window: *window,
                 at: clock.universe_tick,
+                part,
+                parts,
                 hop: hop.clone(),
                 rows,
             };

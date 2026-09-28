@@ -142,6 +142,10 @@ pub fn gateway_view(
         window_relay_levels_pruned,
         window_relay_interior_unvouched,
         window_relay_interior_filtered,
+        window_parts_held,
+        window_part_ticks_expired,
+        window_parts_malformed,
+        window_pictures_awaiting_parts,
     } = *stats;
     GatewayView {
         logins_rejected,
@@ -249,6 +253,11 @@ pub fn gateway_view(
         sky_requests_sent,
         sky_held_stated,
         sky_parts_skipped,
+        // THE WINDOW FRAME'S PARTS (minor 35): the flight reads the blink's own numbers here.
+        window_parts_held,
+        window_part_ticks_expired,
+        window_parts_malformed,
+        window_pictures_awaiting_parts,
         sessions_open,
         dynamic_shards,
         windows_open,
@@ -424,6 +433,10 @@ mod tests {
             artifact_serves_held: 0,
             artifact_redrives: 0,
             artifact_tiles_resent: 0,
+            window_parts_held: 99,
+            window_part_ticks_expired: 100,
+            window_parts_malformed: 101,
+            window_pictures_awaiting_parts: 102,
         };
         let view = gateway_view(&stats, 24, 25, 37);
         assert_eq!(view.logins_rejected, 1);
@@ -532,6 +545,10 @@ mod tests {
         assert_eq!(view.sky_parts_skipped, 93);
         assert_eq!(view.window_relay_interior_unvouched, 87);
         assert_eq!(view.window_relay_interior_filtered, 88);
+        assert_eq!(view.window_parts_held, 99);
+        assert_eq!(view.window_part_ticks_expired, 100);
+        assert_eq!(view.window_parts_malformed, 101);
+        assert_eq!(view.window_pictures_awaiting_parts, 102);
         assert_eq!(view.sessions_open, 24);
         assert_eq!(view.dynamic_shards, 25);
         assert_eq!(view.windows_open, 37);

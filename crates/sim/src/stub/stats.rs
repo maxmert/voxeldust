@@ -398,10 +398,10 @@ pub struct StubStats {
     /// post-TTL-prune). The diagnosis surface's "windows_open"; `0` at zero subscribers is the
     /// structural teardown truth (zero sessions ⇒ zero windows).
     pub windows_open: u64,
-    /// EGRESS — `WindowFrame` messages shipped (one per tick per open window; the per-realm
-    /// egress meter the owner-approved design names in §4.5 Topic 1).
+    /// EGRESS — `WindowFramePart` messages shipped (one per part per tick per open window; the
+    /// per-realm egress meter the owner-approved design names in §4.5 Topic 1).
     pub window_frames_sent: u64,
-    /// EGRESS — authored child rows shipped inside `WindowFrame`s (the row-volume meter beside
+    /// EGRESS — authored child rows shipped inside `WindowFramePart`s (the row-volume meter beside
     /// the message meter: rows/tick is O(direct children), bounded by the lattice — §2.13).
     pub window_frame_rows_sent: u64,
     /// EGRESS — `WindowBody` statements shipped (send-on-change + on-open, NEVER per-tick; a

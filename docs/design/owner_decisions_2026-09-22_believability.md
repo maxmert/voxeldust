@@ -525,3 +525,114 @@ answers were MEASURED where a number was owed (LID-RELIEF, the design §9.6), an
 **Example.** A pilot 20 000 km over the steep coast sees the far mountains at their heights, so their long shadows fall
 as the ground's own steps say; the coast's columns blend the sea and the land at their true heights; and when the pilot
 dives, each late chunk rises into place over half a second instead of jumping.
+
+## B19. THE WALK ON THE SOLVED GROUND: THE ARTIFACT DELIVERY, THE STAND, THE BERTH'S FACING AND THE WINDOW FRAME'S PARTS (2026-09-27)
+
+The owner's order was *"The walk's band gap first"*, then R2. The walk's gap was the world's first solves landing in the
+moving-eye gate's legs (DEFERRED "THE WALK'S BAND GOES INCOMPLETE AGAIN"), and the cure found four more defects. Each
+answer below is the owner's choice between measured options:
+
+1. **THE GATEWAY'S ARTIFACT DELIVERY IS FIXED NOW** (owner: "Fix now"): one byte budget a beat per client, a re-drive after
+   a shed send, and a session forgets a realm's artifact records when its scene delta removes the realm.
+2. **THE GATE SOLVES THE HOME PLANET ITSELF** (owner: "Solve in the test") and seats every stand and the hull's clearance
+   on the solved ground.
+3. **THE STAND** (owner: "Near equator, star 35°", then *"Move the stand to a 15° star first"*): the walkable day-side
+   land on the circle where the star stands 15° up.
+4. **A BERTH STATES ITS FACING** (owner: "Berths get a facing"; the commit after the full gate passes): the attitude the
+   parent parked its child in, an optional stored field.
+5. **A TICK'S PICTURE IS BUILT ONLY FROM COMPLETE FRAMES** (owner: "Complete frames only"): the far planets blinked out of
+   the picture because the gateway built a tick's picture from the first part of a two-part window frame.
+6. **SL6 YES — THE WINDOW FRAME'S PARTS** (owner: "New trailing arm"): *"A new ShardToGateway arm at index 17: the same
+   window frame plus its part number and part count; minor 35, the floor stays 34 (additive). The shard sends the new
+   arm; the gateway still reads the old arm as a whole one-part frame. The gateway builds a tick's picture only from a
+   stamp whose parts are all here."* Built as `ShardToGateway::WindowFramePart`; the window frame has its own header
+   budget (MEASURED: the older frame's widest header was 187 bytes against the 184 it was cut under; the part's is 197).
+
+**Example.** A walker on the home planet stands still and looks up. The star system ships its nine planets in two parts
+each tick, and the three largest planets ride the second. When that part is late, the gateway keeps the last whole
+tick's picture, so the three planets stay in the sky and the client never forgets their artifacts.
+
+## B20. THE FIRST LOOK IN THE WINDOW: THE COAST FIRST, AND HALF THE CORES (2026-09-27)
+
+The owner looked in the window at the 15° stand and said: *"The quality and speed is quite terrible at the moment"*, and
+*"I just moved the observer — I haven't even fly in the ship fast"*. MEASURED against the solved ground at the positions of
+the owner's two pictures: the observer stood 104 m over the sea near the coast, the camera 117–135 m over it (the observer
+keeps the radius it started at; nothing holds it to the ground yet). From there the coast drew a hole between the water
+and the land (the sky under the land), the skirts as dark walls with holes, and the land's undersides; a full press of W
+moved the observer at up to about 200 m/s (124 m/s measured over 5 s); the window built its ground on 3 workers of 14
+cores. No gate had looked at a coast from over the sea. The owner ruled:
+
+1. **THE COAST FIRST** (owner: "The coast first"): first a gate that stands about 100 m over the sea and looks at the coast,
+   and that FAILS on today's picture; then the hole and the walls are cured until it passes; then the owner looks again in
+   the window. The observer's walk on the drawn ground comes after.
+2. **THE TERRAIN'S SHARE IS HALF THE CORES** (owner: "Half: 7 of 14"; amends F6's quarter): `worker_share` takes half of
+   the cores, never fewer than two — seven on the owner's Mac, four on an eight-core machine.
+
+**Example.** A walker at the stand presses W and drifts out over the bay, 100 m over the water. Today the coast behind
+the water shows the sky under the land and dark walls; the new gate stands exactly there and counts those pixels, and
+the owner looks again only when it reads zero.
+
+## B21. STOP THE PATCHES: DESIGN THE ONE-VOLUME MODEL FIRST (2026-09-27)
+
+After the first look and the measured 208 m coast wall (B20), the owner said: *"I wonder how all that will work when we
+will edit the terrain using different tools? Even today without any editing we have so many issues."* and *"I feel that
+you don't build a generic solution, but some parts that you try to fit together."* The answer given: yes — the ground and
+the water come from several separate sources today (the 8 km solve, the fine octaves per column, the per-distance copies
+that are means, the sea and lake levels with a sea/land word per 8 km node), and each special rule (the quarter hold,
+the side words, the band, the three sheet cuts, the far skin and lid) moves a disagreement instead of removing it; an
+edit near water would have to satisfy every one of them. The owner asked: *"for the one-volume model - what exactly
+that means? Can we generate terrain, but then 'fill' with water, or air, or other substances? And don't try to
+connect"*, and ruled:
+
+1. **STOP ADDING TERRAIN RULES; N2 IS NOT BUILT** (B13's build is parked, not retired, until the design below is decided).
+2. **DESIGN THE ONE-VOLUME MODEL FIRST:** one volume of cells per body, each cell a material (rock kinds, sand, soil,
+   water, air, vacuum, ice, lava, gas, later blocks) with a fill amount for smooth surfaces; generation in passes — the
+   SOLID pass, then the FILL pass (the sea, each lake to its level, air or vacuum, other substances); edits change the
+   same cells (the one-hop diff, SL10; live water, W2); every distance is a copy made from the same volume by one rule; a
+   shore is where water cells touch ground cells. "Don't try to connect" is read as: do not fit the new model onto
+   today's special shore and water rules; an existing part stays only if it fits unchanged.
+3. **THE METHOD:** a multi-agent design with adversarial reviews (owner: "Multi-agent with reviews"; workflow
+   `wf_a9730eb2-4b9`: three readers, three competing designs — procedural first, stored truth first, learned from shipped
+   games — two adversarial reviewers, one final document, `docs/investigation/2026-09-27/one_volume_design.md`). The far
+   coast question (exact agreement at every distance against a small smooth change) goes to the owner with a price on
+   each side.
+
+**Example.** A player digs a trench from the sea into the land. Today the land's 8 km node keeps its LAND word, the water
+sheet is drawn from the generator's water, and the shore law lifts or sinks the dug ground — no water in the trench. In
+the one-volume model the dug cells become empty, the fill rule runs again on them, the shard moves water in, and a pilot
+50 km up sees a thin line of water because the far copy is made from the same cells.
+
+## B22. THE ONE-VOLUME DESIGN'S ANSWERS AND THE NEW ORDER OF WORK (2026-09-28)
+
+The design (`docs/investigation/2026-09-27/one_volume_design.md`, workflows `wf_a9730eb2-4b9` and `wf_3932de59-28b`)
+went to the owner with its questions. The owner added four requirements while it ran — *"please make sure that we are
+extremely performant!!!"*, *"We can comment out all current special shores and sea models"*, *"while performant we should
+not build seams. Also there should not be jumps or flicker between rungs"*, *"we SHOULD NOT break ground laws and rules of
+course"* — and then ruled, after a discussion of the design and the approach (*"my current machine is very performant,
+and even today the game is slow ... we need to work on optimisations"*; *"should we disable the old water algos, work
+on the terrain (with biomes), fully believable, optimised, and only then work on the filling, as in theory those 2 are
+separate things now and hardly affect each other?"*):
+
+1. **THE ORDER OF WORK** (owner: "Confirm the order"; supersedes B20 item 1's "the coast first"):
+   1. switch off the old water and shore rules (the world changes once: the coast walls go, the dry sea floor shows);
+   2. SPEED — the builder and the main thread, no world change; 60 frames a second at FULL SCREEN, no stall;
+   3. THE GROUND with biomes: believable (the finer erosion level, the valleys, the dunes, the cliffs), fast, and with
+      no flicker at any distance; judged in the window against the reference picture;
+   4. THE WATER FILL: the one-volume water (design option (b)), no flicker at any distance;
+   5. THE EDIT SYSTEM as its own step ("it's not only about the terrain edit").
+   The planet's water CALCULATION (the solve's rivers, sea level and lakes, which shape the ground) stays in the ground
+   work; only the DRAWING of water is off until step 4.
+2. **WHILE THE WATER IS OFF, NO WATER IS DRAWN AT ALL** (owner: "No water at all"): the dry sea floor shows (the sea is
+   78 % of the home planet); coasts are judged after step 4.
+3. **THE FRAME TARGET: 60 FRAMES A SECOND AT FULL SCREEN** (3 456 × 2 234; owner: "60 at full screen"), not at today's
+   window size.
+4. **THE DESIGN'S QUESTIONS:** Q1 THE FAR COAST — option (b), exact from about 450 km out and smooth nearer; Q2 — MEASURE
+   the smaller hand-over, with the goal *"no flickers at ANY distance"*; Q3 still water in hollows and caves — ACCEPTED;
+   Q4 dug holes under W2 — ACCEPTED; Q5 the small hills' average — DECIDED IN THE GROUND STEP (the owner: *"We will need
+   to work on the hills and terrain again, so it might change again"*; the zero-average law was recommended); Q6 the new
+   data — ACCEPTED; Q7 — the trench waits for the edit system, which is its own step. Q8–Q23 stand at their
+   recommendations as defaults, each asked again with its numbers when it is due.
+
+**Example.** A pilot flies over the home planet after step 1: the belt's hills stand as before, the old coast walls are
+gone, and where the sea was the dry sea floor falls away into deep basins; no water is drawn anywhere until step 4 fills
+every open cell under its water's level.

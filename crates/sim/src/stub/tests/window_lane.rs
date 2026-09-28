@@ -1606,6 +1606,104 @@ fn a_child_window_whose_hop_row_is_missing_is_counted_and_said_once_per_beat() {
     assert_eq!(stats.window_hop_missing, 2, "counted every tick");
 }
 
+/// ★ EACH PART NAMES ITS PLACE IN ITS TICK (minor 35, owner-approved 2026-09-27 under SL6, after the
+/// far planets that blink): a frame over the datagram budget goes out in parts numbered from 0, each
+/// with the tick's part count, the tick's one stamp and the hop, each within the budget; together the
+/// parts carry every row once, in the author's order. A tick with no rows still sends part 0 of 1.
+///
+/// Example: forty planets under a 600-byte budget go out in several parts; the gateway can see that
+/// the tick is whole only when it holds every number below the count.
+#[test]
+fn a_frame_over_the_budget_goes_out_in_numbered_parts_each_with_the_hop() {
+    let mut rig = window_rig();
+    let open = GatewayToShard::WindowOpen {
+        window: WindowId(2),
+        scope: WindowScope::Child(OTHER_REALM),
+        static_held: None,
+    };
+    rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &open)]);
+    const BUDGET: usize = 600;
+    rig.world
+        .resource_mut::<StubConfig>()
+        .snapshot_datagram_budget = BUDGET;
+    let at = rig.world.resource::<ClockSample>().universe_tick;
+    let rows: Vec<RealmSnap> = (0u64..40)
+        .map(|i| RealmSnap {
+            realm: RealmId::Planet(1000 + i),
+            frame: FrameRef::PlanetCentered {
+                planet_seed: 1000 + i,
+            },
+            pose: StampedPose::at_rest(frame_of(OWN_REALM), DVec3::new(i as f64, 0.0, 0.0), at),
+        })
+        .collect();
+    let book = rig
+        .world
+        .resource::<RealmRegions>()
+        .author_book(OWN_REALM, 20.0, at);
+    let emit = |rig: &Rig, rows: &[RealmSnap]| {
+        let mut stats = StubStats::default();
+        let mut outbox = crate::runtime::OutboundBox::default();
+        crate::stub::window::emit_window_frames(
+            rig.world.resource::<StubConfig>(),
+            rig.world.resource::<ClockSample>(),
+            Fence(1),
+            rig.world.resource::<RealmRegions>(),
+            &book,
+            rows,
+            rig.world.resource::<OpenWindows>(),
+            &mut stats,
+            &mut outbox,
+        );
+        (stats, outbox)
+    };
+    let (stats, outbox) = emit(&rig, &rows);
+    let parts: Vec<_> = outbox
+        .0
+        .iter()
+        .map(|(_, class, bytes, _)| {
+            assert_eq!(*class, MsgClass::RealmSnapshot);
+            assert!(
+                bytes.len() <= BUDGET,
+                "a part of {} bytes over the budget",
+                bytes.len()
+            );
+            window_frame_place(bytes).expect("the emitter sends window frame parts only")
+        })
+        .collect();
+    assert!(parts.len() > 1, "forty planets do not fit one part");
+    let count = u32::try_from(parts.len()).expect("a handful of parts");
+    let mut carried = Vec::new();
+    for (k, (stamp, part, of, part_rows)) in (0u32..).zip(parts.iter()) {
+        assert_eq!((*stamp, *part, *of), (at, k, count));
+        carried.extend(part_rows.iter().map(|r| r.realm));
+    }
+    assert_eq!(carried, rows.iter().map(|r| r.realm).collect::<Vec<_>>());
+    // Every part carries the hop: one datagram may arrive without the others.
+    for (_, _, bytes, _) in &outbox.0 {
+        let sent = vec![(GATEWAY, MsgClass::RealmSnapshot, bytes.to_vec())];
+        let frames = window_frames(&sent);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].3.map(|h| h.child), Some(OTHER_REALM));
+    }
+    assert_eq!(stats.window_frames_sent, u64::from(count));
+    assert_eq!(stats.window_frame_rows_sent, 40);
+    // A tick with no rows: one part, number 0 of 1.
+    let (_, outbox) = emit(&rig, &[]);
+    assert_eq!(outbox.0.len(), 1);
+    assert_eq!(
+        window_frame_place(&outbox.0[0].2),
+        Some((at, 0, 1, Vec::new()))
+    );
+    // Any other message is not a part.
+    assert_eq!(
+        window_frame_place(
+            &postcard::to_allocvec(&ShardToGateway::SessionDetached { session: SESSION })
+                .expect("encode")
+        ),
+        None
+    );
+}
+
 /// The admitted set of a window may name a realm that left the roster since (a stale verdict) and a
 /// direct child with no look: neither gets a marker, and the emitter never panics on either.
 #[test]
@@ -2834,10 +2932,12 @@ fn measure_the_home_systems_window_frame_size() {
             child: r.realm,
             placement: book.of(r.frame).expect("row"),
         });
-    let frame = ShardToGateway::WindowFrame {
+    let frame = ShardToGateway::WindowFramePart {
         realm_fence: Fence(1),
         window: WindowId(5),
         at: UniverseTick(100),
+        part: 0,
+        parts: 1,
         hop: hop.map(Box::new),
         rows: rows.clone(),
     };

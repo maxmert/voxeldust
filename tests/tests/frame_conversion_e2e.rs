@@ -2018,7 +2018,9 @@ fn own_level_ticks_at_the_gateway_edge(topo: &mut Topology) -> Option<UniverseTi
                     bytes,
                     ..
                 } => match postcard::from_bytes::<vd_wire::session_flow::ShardToGateway>(bytes) {
-                    Ok(vd_wire::session_flow::ShardToGateway::WindowFrame { at, .. }) => Some(at),
+                    Ok(vd_wire::session_flow::ShardToGateway::WindowFramePart { at, .. }) => {
+                        Some(at)
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -2189,8 +2191,10 @@ fn the_authored_world_no_longer_descends_and_each_level_states_only_itself() {
             .find_map(|m| match m {
                 vd_sim::io::Inbound::Wire { bytes, .. } => {
                     match postcard::from_bytes::<vd_wire::session_flow::ShardToGateway>(bytes) {
-                        Ok(vd_wire::session_flow::ShardToGateway::WindowFrame {
-                            at, rows, ..
+                        Ok(vd_wire::session_flow::ShardToGateway::WindowFramePart {
+                            at,
+                            rows,
+                            ..
                         }) => Some((at, rows)),
                         _ => None,
                     }

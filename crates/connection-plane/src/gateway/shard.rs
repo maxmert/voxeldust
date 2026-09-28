@@ -13,7 +13,6 @@ use super::{
     fan_entity_removed, fan_out_of_interest, lineage_apply, on_window_relayed, on_window_row,
     session_target, store_route,
 };
-use crate::window;
 use vd_core::{Fence, NodeId, SessionId};
 use vd_sim::runtime::{ClockSample, OutboundBox};
 use vd_wire::channels::ServerControlMsg;
@@ -311,27 +310,37 @@ pub(crate) fn on_shard_control(
         // The reliable lanes (bodies, membership) arrive here on Control; the per-tick
         // `WindowFrame` datagram arrives via `on_shard_realm_frame` — BOTH run the ONE
         // `on_window_row` rule.
+        ShardToGateway::WindowFramePart {
+            window,
+            at,
+            part,
+            parts,
+            hop,
+            rows,
+            ..
+        } => on_window_row(
+            from,
+            window,
+            WindowRow::part(at, hop, rows, part, parts),
+            config,
+            sessions,
+            stats,
+        ),
+        // The older arm, read as a whole one-part frame (minor 35).
         ShardToGateway::WindowFrame {
             window,
             at,
             hop,
             rows,
             ..
-        } => {
-            let level = window::WindowLevel {
-                at,
-                hop: hop.map(|b| *b),
-                rows,
-            };
-            on_window_row(
-                from,
-                window,
-                WindowRow::Level(level),
-                config,
-                sessions,
-                stats,
-            );
-        }
+        } => on_window_row(
+            from,
+            window,
+            WindowRow::part(at, hop, rows, 0, 1),
+            config,
+            sessions,
+            stats,
+        ),
         // ★ RETIRED (S11, owner ruling 2026-08-27 — "we're passing the Galaxy just once over reliable
         // lane"). No shard states a sky any more: the GATEWAY folds the galaxy at boot and states it
         // once (`window_lane::emit_sky`). A shard folded its sky from the realms IT booted, which made

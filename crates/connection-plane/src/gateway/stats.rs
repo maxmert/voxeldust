@@ -216,6 +216,22 @@ pub struct GatewayStats {
     /// Slice B — a `WindowFrame` stamped further behind its window's ring head than the derived
     /// span (`WindowTuning::ring_span_ticks`): refused, counted, never folded (§2.6.2).
     pub window_level_refused: u64,
+    /// THE WINDOW FRAME'S PARTS (minor 35, owner-approved 2026-09-27 under SL6): a part held apart
+    /// while the rest of its tick arrives. THROUGHPUT — on the home star system's two-part frame,
+    /// about one a tick per window.
+    pub window_parts_held: u64,
+    /// THE WINDOW FRAME'S PARTS: a tick dropped because a part of it never arrived within the ring's
+    /// span. Each one is a tick the gateway never drew; before minor 35 it was drawn with the lost
+    /// part's realms missing (the far planets that blink). A lossy path reads non-zero.
+    pub window_part_ticks_expired: u64,
+    /// THE WINDOW FRAME'S PARTS, fail-closed: a part numbered at or past its count, or whose count
+    /// disagrees with an earlier part of its tick. Dropped, counted. `0` healthy.
+    pub window_parts_malformed: u64,
+    /// THE WINDOW FRAME'S PARTS — THE BLINK, MEASURED: composer passes in which a window's newest
+    /// tick was still missing a part (per window per pass). Before minor 35 each one was a picture
+    /// built from part of a tick, the late part's realms left out; now the pass folds the newest
+    /// whole tick instead.
+    pub window_pictures_awaiting_parts: u64,
     /// Slice B — a `WindowBody` older (by `authored_at`) than the statement already held for its
     /// subject: refused (newest wins on a re-driven lane), counted.
     pub window_body_stale: u64,

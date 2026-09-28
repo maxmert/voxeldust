@@ -1973,8 +1973,10 @@ fn demote_msg(entity: EntityId, new_owner_fence: Fence) -> Inbound {
 
 // ===== THE WINDOW LANE, Slice A (docs/design/window_lane.md §2.9/§4) ======================
 
-/// Every `ShardToGateway::WindowFrame` in the outbox, decoded — `(to, window, at, hop, rows)`.
-/// The `_ => None` arm is exercised by the entity/realm frames + demands riding the same tick.
+/// Every window frame part (`ShardToGateway::WindowFramePart`, the shard's one frame arm since
+/// minor 35) in the outbox, decoded — `(to, window, at, hop, rows)`; the part's place in its tick
+/// is read by [`window_frame_place`]. The `_ => None` arm is exercised by the entity/realm frames +
+/// demands riding the same tick.
 #[allow(clippy::type_complexity)]
 fn window_frames(
     sent: &[(NodeId, MsgClass, Vec<u8>)],
@@ -1988,7 +1990,7 @@ fn window_frames(
     sent.iter()
         .filter_map(
             |(node, _, b)| match postcard::from_bytes::<ShardToGateway>(b) {
-                Ok(ShardToGateway::WindowFrame {
+                Ok(ShardToGateway::WindowFramePart {
                     window,
                     at,
                     hop,
@@ -1999,6 +2001,21 @@ fn window_frames(
             },
         )
         .collect()
+}
+
+/// One window frame part's place in its tick — `(at, part, parts, rows)` — or `None` for any other
+/// message.
+fn window_frame_place(bytes: &[u8]) -> Option<(UniverseTick, u32, u32, Vec<RealmSnap>)> {
+    match postcard::from_bytes::<ShardToGateway>(bytes) {
+        Ok(ShardToGateway::WindowFramePart {
+            at,
+            part,
+            parts,
+            rows,
+            ..
+        }) => Some((at, part, parts, rows)),
+        _ => None,
+    }
 }
 
 /// Every `WindowStaticRows` in the outbox (slice S10) — the reliable lane's static roster.

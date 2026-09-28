@@ -315,6 +315,10 @@ pub enum ShardToGateway {
     /// per tick per open window (its authored rows, built once), and the gateway ATTESTS
     /// fail-closed (unknown window / forged sender dropped + counted) before INGESTING it into
     /// the composer (`window_rows_ingested`) that serves the client's one scene feed.
+    ///
+    /// Since minor 35 the shard sends [`ShardToGateway::WindowFramePart`] instead, which names
+    /// its part and the tick's part count. The gateway still reads this arm, as a whole one-part
+    /// frame.
     WindowFrame {
         realm_fence: Fence,
         /// The subscription id the receiving side minted at [`GatewayToShard::WindowOpen`].
@@ -550,6 +554,39 @@ pub enum ShardToGateway {
         audience: BulkAudience,
         bytes: Vec<u8>,
     },
+    /// ★ ONE PART OF ONE TICK'S WINDOW FRAME (owner-approved 2026-09-27 under SL6, after the far
+    /// planets that blink): the frame of [`ShardToGateway::WindowFrame`], plus this part's number
+    /// and the tick's part count. A frame over the datagram budget goes out in parts, and each part
+    /// names its place in the tick, so the gateway builds a tick's picture only from a stamp whose
+    /// parts are all here. Before, the gateway could not tell a whole stamp from a part of one: it
+    /// built the picture from the first part that landed, and the realms in a late or lost part
+    /// left the picture for that tick and came back on the next one.
+    ///
+    /// Example: the home star system ships its nine planets in two parts, and the three planets
+    /// with the largest seeds ride the second one (part 1, count 2). When that part of a tick is
+    /// late, the gateway keeps the last whole tick's picture, and no planet leaves it.
+    ///
+    /// Carriage, cadence and attestation are the frame's own: one message per part per tick per
+    /// open window, **FireAndForget / Unreliable** (full state, latest-wins), the sender the
+    /// roster head. `part < parts` always, and every part of one tick states the same count; the
+    /// gateway drops and counts a part that breaks either rule. Every part carries the hop.
+    /// APPENDED (discriminant 17, minor 35).
+    WindowFramePart {
+        realm_fence: Fence,
+        /// The subscription id the receiving side minted at [`GatewayToShard::WindowOpen`].
+        window: WindowId,
+        /// The ONE universe-tick stamp for every part of this tick.
+        at: UniverseTick,
+        /// This part's index in the tick: `part < parts`.
+        part: u32,
+        /// How many parts the tick's frame is. The same on every part of one tick.
+        parts: u32,
+        /// As on [`ShardToGateway::WindowFrame`]: the hop row on a [`WindowScope::Child`] window,
+        /// on every part.
+        hop: Option<Box<HopRow>>,
+        /// This part's share of the author's rows, in the author's own frame.
+        rows: Vec<RealmSnap>,
+    },
 }
 
 /// Who a `BulkFor` is for: exactly one of the two, by construction of the type (a row for nobody, or
@@ -591,7 +628,8 @@ impl ShardToGateway {
             | ShardToGateway::StarCatalogue { .. }
             | ShardToGateway::StarSkyAlive { .. }
             | ShardToGateway::EntityOutOfInterest { .. }
-            | ShardToGateway::BulkFor { .. } => None,
+            | ShardToGateway::BulkFor { .. }
+            | ShardToGateway::WindowFramePart { .. } => None,
         }
     }
 
@@ -621,7 +659,8 @@ impl ShardToGateway {
             | ShardToGateway::StarSkyAlive { .. }
             | ShardToGateway::FrameFor { .. }
             | ShardToGateway::EntityOutOfInterest { .. }
-            | ShardToGateway::BulkFor { .. } => None,
+            | ShardToGateway::BulkFor { .. }
+            | ShardToGateway::WindowFramePart { .. } => None,
         }
     }
 }
@@ -1400,6 +1439,16 @@ mod tests {
                 audience: BulkAudience::Sessions(vec![SessionId(1), SessionId(4)]),
                 bytes: vec![7, 7],
             },
+            // The window frame's parts (minor 35): the second part of a two-part tick, with the hop.
+            ShardToGateway::WindowFramePart {
+                realm_fence: Fence(3),
+                window: WindowId(2),
+                at: UniverseTick(100),
+                part: 1,
+                parts: 2,
+                hop: Some(Box::new(hop_row())),
+                rows: vec![window_row()],
+            },
         ]
     }
 
@@ -1507,6 +1556,8 @@ mod tests {
                 ShardToGateway::EntityOutOfInterest { .. } => 15,
                 // The voxel wire plant holds 16 (minor 31) forever.
                 ShardToGateway::BulkFor { .. } => 16,
+                // The window frame's parts hold 17 (minor 35) forever.
+                ShardToGateway::WindowFramePart { .. } => 17,
             }
         }
         fn g2s_index(msg: &GatewayToShard) -> u8 {
@@ -1532,9 +1583,9 @@ mod tests {
             assert_eq!(bytes[0], s2g_index(&msg));
             seen.insert(bytes[0]);
         }
-        assert_eq!(seen.len(), 17);
+        assert_eq!(seen.len(), 18);
         assert_eq!(seen.first().copied(), Some(0));
-        assert_eq!(seen.last().copied(), Some(16));
+        assert_eq!(seen.last().copied(), Some(17));
         let mut seen = std::collections::BTreeSet::new();
         for msg in every_gateway_to_shard_arm() {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
@@ -1544,6 +1595,29 @@ mod tests {
         assert_eq!(seen.len(), 9);
         assert_eq!(seen.first().copied(), Some(0));
         assert_eq!(seen.last().copied(), Some(8));
+    }
+
+    /// THE PART'S PLACE IN ITS TICK rides right after the stamp (minor 35): the tag, the fence, the
+    /// window, the stamp, the part and the count, in that order. Small values encode to one byte
+    /// each, so the leading bytes ARE the fields; a reorder of the arm's fields turns this red while
+    /// every same-build round trip stays green.
+    #[test]
+    fn a_window_frame_part_states_its_place_right_after_its_stamp() {
+        let part = ShardToGateway::WindowFramePart {
+            realm_fence: Fence(3),
+            window: WindowId(2),
+            at: UniverseTick(100),
+            part: 1,
+            parts: 2,
+            hop: None,
+            rows: Vec::new(),
+        };
+        let bytes = postcard::to_allocvec(&part).expect("encode");
+        assert_eq!(bytes, [17, 3, 2, 100, 1, 2, 0, 0]);
+        assert_eq!(
+            postcard::from_bytes::<ShardToGateway>(&bytes).expect("decode"),
+            part
+        );
     }
 
     /// The NESTED positional pins for the window lane's two payload enums — the same

@@ -433,6 +433,11 @@ pub(crate) fn compose_scenes_pass(
         let (looks, relays) = held.ingest.prune_stale(&tuning);
         stats.window_looks_pruned += looks;
         stats.window_relay_levels_pruned += relays;
+        // THE WINDOW FRAME'S PARTS (minor 35): a tick that did not become whole within the ring's
+        // span is dropped undrawn, and a pass whose newest tick still waits on a part is counted —
+        // before minor 35 that pass drew the part alone.
+        stats.window_part_ticks_expired += held.ingest.expire_parts(&tuning);
+        stats.window_pictures_awaiting_parts += u64::from(held.ingest.awaiting_part());
     }
     // Field-split borrows: the window map is read-only here; the sessions are rolled.
     let GatewaySessions {
@@ -1137,7 +1142,13 @@ fn admit_interior_relay(
 /// the Slice-B shape of the one ingest rule (the Slice-A `Option<(RealmId, &BodyStmt)>` grew a
 /// typed row per statement kind when the engine started consuming).
 pub(crate) enum WindowRow {
-    Level(window::WindowLevel),
+    /// One part of one tick's level: `part` of `parts` (minor 35). The older `WindowFrame` arm is
+    /// read as a whole one-part frame, part 0 of 1.
+    Level {
+        level: window::WindowLevel,
+        part: u32,
+        parts: u32,
+    },
     Body {
         subject: RealmId,
         stmt: BodyStmt,
@@ -1150,6 +1161,27 @@ pub(crate) enum WindowRow {
     /// The author's STATIC roster (slice S10) — its direct children that do not move, stated once on
     /// the reliable lane instead of riding every tick's frame.
     StaticRows(Vec<vd_wire::channels::RealmSnap>),
+}
+
+impl WindowRow {
+    /// One part of one tick's level, as a window frame states it: `part` of `parts`, the hop unboxed.
+    pub(crate) fn part(
+        at: UniverseTick,
+        hop: Option<Box<vd_wire::session_flow::HopRow>>,
+        rows: Vec<vd_wire::channels::RealmSnap>,
+        part: u32,
+        parts: u32,
+    ) -> WindowRow {
+        WindowRow::Level {
+            level: window::WindowLevel {
+                at,
+                hop: hop.map(|b| *b),
+                rows,
+            },
+            part,
+            parts,
+        }
+    }
 }
 
 /// THE WINDOW LANE's ingest rule (docs/design/window_lane.md §2.2/§2.6.6), ONE rule for every row
@@ -1192,13 +1224,31 @@ pub(crate) fn on_window_row(
         return;
     }
     match row {
-        WindowRow::Level(level) => match held.ingest.ingest_frame(level, &window_tuning(config)) {
-            window::Ingested::Applied => {
-                stats.window_rows_ingested += 1;
-                drain_parked(held, &window_tuning(config), stats);
+        // ★ A TICK ENTERS THE RING ONLY WHOLE (minor 35): a part of a tick still missing others is
+        // held apart and composes nothing, so a late part can no longer take its realms out of the
+        // picture for a tick.
+        WindowRow::Level { level, part, parts } => {
+            match held
+                .ingest
+                .ingest_part(level, part, parts, &window_tuning(config))
+            {
+                window::Ingested::Applied => {
+                    stats.window_rows_ingested += 1;
+                    drain_parked(held, &window_tuning(config), stats);
+                }
+                window::Ingested::Partial => stats.window_parts_held += 1,
+                window::Ingested::BehindRing => stats.window_level_refused += 1,
+                window::Ingested::MalformedPart => {
+                    stats.window_parts_malformed += 1;
+                    tracing::warn!(
+                        window = window_id.0,
+                        part,
+                        parts,
+                        "a window frame part that cannot make its tick whole dropped (fail-closed)"
+                    );
+                }
             }
-            window::Ingested::BehindRing => stats.window_level_refused += 1,
-        },
+        }
         WindowRow::Body {
             subject,
             stmt,
@@ -1353,27 +1403,37 @@ pub(crate) fn on_shard_realm_frame(
     stats: &mut GatewayStats,
 ) {
     match postcard::from_bytes::<ShardToGateway>(bytes) {
+        Ok(ShardToGateway::WindowFramePart {
+            window,
+            at,
+            part,
+            parts,
+            hop,
+            rows,
+            ..
+        }) => on_window_row(
+            from,
+            window,
+            WindowRow::part(at, hop, rows, part, parts),
+            config,
+            sessions,
+            stats,
+        ),
+        // The older arm, read as a whole one-part frame.
         Ok(ShardToGateway::WindowFrame {
             window,
             at,
             hop,
             rows,
             ..
-        }) => {
-            let level = window::WindowLevel {
-                at,
-                hop: hop.map(|b| *b),
-                rows,
-            };
-            on_window_row(
-                from,
-                window,
-                WindowRow::Level(level),
-                config,
-                sessions,
-                stats,
-            );
-        }
+        }) => on_window_row(
+            from,
+            window,
+            WindowRow::part(at, hop, rows, 0, 1),
+            config,
+            sessions,
+            stats,
+        ),
         // The tombstoned old realm datagram: decodable forever (its discriminant is reserved),
         // produced by nobody, served to nobody — counted so a revived producer is visible.
         Ok(ShardToGateway::RealmFrame { .. }) => stats.old_realm_frames_dropped += 1,

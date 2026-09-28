@@ -159,7 +159,7 @@ pub struct InspectReport {
     /// post-TTL-prune). 0 at zero subscribers — the structural teardown truth.
     pub windows_open: u64,
     /// THE WINDOW LANE (Slice A) — the shard's window egress meters (from `StubStats`):
-    /// `WindowFrame` messages, the authored rows inside them, `WindowBody` statements, and
+    /// `WindowFramePart` messages (one per part), the authored rows inside them, `WindowBody` statements, and
     /// `WindowMembership` verdicts shipped (the §4.5 Topic-1 per-realm egress metering).
     pub window_frames_sent: u64,
     /// See [`Self::window_frames_sent`].

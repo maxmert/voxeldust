@@ -10738,13 +10738,15 @@ fn the_composer_withholds_sessions_with_no_standing_realm_or_window() {
     );
 }
 
-/// The load gate's typed extractor: a `WindowFrame`'s (id, level), `None` for anything else
-/// (both arms driven below — HR5).
-fn window_level_of(msg: ShardToGateway) -> Option<(WindowId, window::WindowLevel)> {
+/// The load gate's typed extractor: a window frame part's (id, level, part, count) — the shape the
+/// shard sends since minor 35 — `None` for anything else (both arms driven below — HR5).
+fn window_level_of(msg: ShardToGateway) -> Option<(WindowId, window::WindowLevel, u32, u32)> {
     match msg {
-        ShardToGateway::WindowFrame {
+        ShardToGateway::WindowFramePart {
             window,
             at,
+            part,
+            parts,
             hop,
             rows,
             ..
@@ -10755,6 +10757,8 @@ fn window_level_of(msg: ShardToGateway) -> Option<(WindowId, window::WindowLevel
                 hop: hop.map(|b| *b),
                 rows,
             },
+            part,
+            parts,
         )),
         _ => None,
     }
@@ -10762,11 +10766,13 @@ fn window_level_of(msg: ShardToGateway) -> Option<(WindowId, window::WindowLevel
 
 #[test]
 fn the_load_gates_extractor_and_the_divergence_verdict_cover_both_arms() {
-    // The extractor: a window frame yields its level; anything else yields None.
-    let level = window_level_of(ShardToGateway::WindowFrame {
+    // The extractor: a window frame part yields its level and its place; anything else yields None.
+    let level = window_level_of(ShardToGateway::WindowFramePart {
         realm_fence: Fence(1),
         window: WindowId(3),
         at: UniverseTick(9),
+        part: 0,
+        parts: 1,
         hop: None,
         rows: Vec::new(),
     });
@@ -10778,7 +10784,9 @@ fn the_load_gates_extractor_and_the_divergence_verdict_cover_both_arms() {
                 at: UniverseTick(9),
                 hop: None,
                 rows: Vec::new(),
-            }
+            },
+            0,
+            1
         ))
     );
     assert_eq!(
@@ -10799,7 +10807,7 @@ fn the_load_gates_extractor_and_the_divergence_verdict_cover_both_arms() {
 
 /// G-COMPOSE-LOAD (window_lane.md §2.6.7; §4.5 Topic 3 — the owner-adopted refinement: gate
 /// the p99, never the mean): BOTH engine sides under a DERIVED load, per tick —
-/// ingest-DECODE (postcard `WindowFrame` levels at MTU-full row counts, one per live window)
+/// ingest-DECODE (postcard `WindowFramePart` levels at MTU-full row counts, one per live window)
 /// AND compose+fan (the shared fold per origin + every session's scene roll). The load
 /// shape is derived, never invented: sessions = the density fixture's N (128 — the
 /// hundreds-in-one-location correctness bound already in gate), chain depth = the design's
@@ -10821,7 +10829,8 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
     let realm_lane_hz = 20u32; // §2.2: the realm-lane tick the budget derives from
     let cfg = config();
 
-    // Rows per level: fill one conservative datagram, exactly as the partitioner bounds it.
+    // Rows per level: fill one conservative datagram, exactly as the window frame's partitioner
+    // bounds a part.
     let candidate: Vec<RealmSnap> = (0..512)
         .map(|i| {
             snap(
@@ -10835,7 +10844,7 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
             )
         })
         .collect();
-    let rows_per_level = vd_wire::channels::partition_realms(
+    let rows_per_level = vd_wire::channels::partition_window_rows(
         &candidate,
         vd_wire::channels::CONSERVATIVE_DATAGRAM_BUDGET,
     )[0]
@@ -10959,10 +10968,12 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
                         ),
                     })),
                 };
-                let msg = ShardToGateway::WindowFrame {
+                let msg = ShardToGateway::WindowFramePart {
                     realm_fence: Fence(1),
                     window: *id,
                     at: UniverseTick(t),
+                    part: 0,
+                    parts: 1,
                     hop,
                     rows,
                 };
@@ -10974,12 +10985,12 @@ fn g_compose_load_p99_ingest_and_fold_under_one_tick() {
         for (_, bytes) in &bytes_per_window {
             let decoded: ShardToGateway =
                 postcard::from_bytes(bytes).expect("the load gate authored these bytes");
-            let (wid, level) =
-                window_level_of(decoded).expect("the load gate authored window frames");
+            let (wid, level, part, parts) =
+                window_level_of(decoded).expect("the load gate authored window frame parts");
             on_window_row(
                 SHARD,
                 wid,
-                WindowRow::Level(level),
+                WindowRow::Level { level, part, parts },
                 &cfg,
                 &mut sessions,
                 &mut stats,
@@ -13910,4 +13921,149 @@ fn a_realm_that_leaves_the_picture_and_returns_is_served_again() {
         2,
         "the head and the part, served again"
     );
+}
+
+/// ★ THE BLINK, THROUGH THE GATEWAY (minor 35, owner-approved 2026-09-27 under SL6). The home star
+/// system sends each tick in two parts; the planet in the second part is late on tick 1001. The
+/// composed picture keeps the planet: no delta removes it, and every per-tick datagram still carries
+/// it, until the late part lands (on the reliable class here, the Control-borne arm). THE CONTROL,
+/// on the same rig: the older arm, read as a whole one-part frame, states tick 1003 without the
+/// planet, and the delta removes it — the very picture the parts now prevent. Then a part that
+/// cannot make its tick whole is dropped and counted, and a tick whose part never lands expires
+/// undrawn on the ring's span.
+#[test]
+fn a_late_part_never_takes_its_planets_out_of_the_picture() {
+    let mut rig = Rig::new();
+    let (_sid, _) = rig.login(); // Occupants window id 1 on SHARD; lineage [System(7)]
+    let w = WindowId(1);
+    let planet = |seed: u64, at: u64| {
+        snap(
+            RealmId::Planet(seed),
+            FrameRef::PlanetCentered { planet_seed: seed },
+            SYS7,
+            seed as f64 * 10.0,
+            at,
+        )
+    };
+    let part = |at: u64, part: u32, seeds: &[u64]| ShardToGateway::WindowFramePart {
+        realm_fence: Fence(1),
+        window: w,
+        at: UniverseTick(at),
+        part,
+        parts: 2,
+        hop: None,
+        rows: seeds.iter().map(|s| planet(*s, at)).collect(),
+    };
+    let outbox_of = |sent: &[(NodeId, MsgClass, Vec<u8>)]| {
+        let mut ob = OutboundBox::default();
+        ob.0.extend(
+            sent.iter()
+                .filter(|(to, class, _)| (*to == CLIENT) & (*class == MsgClass::Control))
+                .map(|(to, class, bytes)| {
+                    (
+                        *to,
+                        *class,
+                        vd_sim::io::bytes(bytes.clone()),
+                        vd_sim::io::Durability::Ephemeral,
+                    )
+                }),
+        );
+        ob
+    };
+    let removed = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<RealmId> {
+        scene_deltas(&outbox_of(sent))
+            .into_iter()
+            .flat_map(|(_, _, removed)| removed)
+            .collect()
+    };
+    let drawn = |sent: &[(NodeId, MsgClass, Vec<u8>)]| -> Vec<Vec<RealmId>> {
+        composed_datagrams(sent, CLIENT)
+            .into_iter()
+            .map(|d| d.realms.iter().map(|r| r.realm).collect())
+            .collect()
+    };
+    // Tick 1000, whole: both parts.
+    let sent = rig.tick(vec![
+        wire(SHARD, MsgClass::RealmSnapshot, &part(1000, 0, &[1, 2])),
+        wire(SHARD, MsgClass::RealmSnapshot, &part(1000, 1, &[9])),
+    ]);
+    let all = vec![RealmId::Planet(1), RealmId::Planet(2), RealmId::Planet(9)];
+    assert_eq!(drawn(&sent), vec![all.clone()]);
+    // Tick 1001: only the first part lands this pass.
+    let sent = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::RealmSnapshot,
+        &part(1001, 0, &[1, 2]),
+    )]);
+    assert_eq!(removed(&sent), Vec::<RealmId>::new(), "no planet leaves");
+    assert!(
+        drawn(&sent).iter().all(|realms| *realms == all),
+        "whatever this pass draws, it draws all three: {:?}",
+        drawn(&sent)
+    );
+    assert_eq!(
+        rig.stats().window_parts_held,
+        2,
+        "tick 1000's first and 1001's"
+    );
+    assert_eq!(rig.stats().window_pictures_awaiting_parts, 1);
+    // The late part lands, on the Control-borne arm: tick 1001 is whole, all three drawn.
+    let sent = rig.tick(vec![wire(SHARD, MsgClass::Control, &part(1001, 1, &[9]))]);
+    assert_eq!(removed(&sent), Vec::<RealmId>::new());
+    assert_eq!(drawn(&sent), vec![all.clone()]);
+    assert_eq!(
+        rig.stats().window_pictures_awaiting_parts,
+        1,
+        "no pass waits now"
+    );
+    // THE CONTROL: the older arm is a whole one-part frame, so a tick stated without the planet is
+    // a tick without it — the delta removes it. This is the picture a part used to make.
+    let sent = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::RealmSnapshot,
+        &ShardToGateway::WindowFrame {
+            realm_fence: Fence(1),
+            window: w,
+            at: UniverseTick(1003),
+            hop: None,
+            rows: vec![planet(1, 1003), planet(2, 1003)],
+        },
+    )]);
+    assert_eq!(
+        removed(&sent),
+        vec![RealmId::Planet(9)],
+        "the detector sees a blink"
+    );
+    // A part that cannot make its tick whole: dropped, counted, nothing composed from it.
+    let malformed = ShardToGateway::WindowFramePart {
+        realm_fence: Fence(1),
+        window: w,
+        at: UniverseTick(1004),
+        part: 1,
+        parts: 1,
+        hop: None,
+        rows: vec![planet(9, 1004)],
+    };
+    let _ = rig.tick(vec![wire(SHARD, MsgClass::RealmSnapshot, &malformed)]);
+    assert_eq!(rig.stats().window_parts_malformed, 1);
+    // A tick whose second part never lands expires undrawn once the ring moves a span past it.
+    let _ = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::RealmSnapshot,
+        &part(1005, 0, &[1, 2]),
+    )]);
+    assert_eq!(rig.stats().window_part_ticks_expired, 0);
+    let span = window_tuning(rig.world.resource::<GatewayConfig>()).ring_span_ticks;
+    let _ = rig.tick(vec![wire(
+        SHARD,
+        MsgClass::RealmSnapshot,
+        &ShardToGateway::WindowFrame {
+            realm_fence: Fence(1),
+            window: w,
+            at: UniverseTick(1005 + span + 1),
+            hop: None,
+            rows: vec![planet(1, 1005 + span + 1)],
+        },
+    )]);
+    assert_eq!(rig.stats().window_part_ticks_expired, 1);
 }
