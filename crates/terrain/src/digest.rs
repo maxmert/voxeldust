@@ -329,10 +329,10 @@ pub fn surface_column(body: &BodyDefinition, face: Face, rung: u8, x: i32, y: i3
 /// stand 2.1 km apart on average and 5.9 km at worst, against a column bound of 0.35 to 1.8 km,
 /// so at rung 4 the asked slices missed the ground somewhere in 87 % of the columns and held none
 /// of it in 5 840 land columns, at rung 6 in 51 %, and from rung 8 up in none. An asked slice with
-/// no ground builds an EMPTY chunk, the flat sea sheet shows through it, and the picture said
-/// "sea" over land — square by square, differently at each rung, so the shore redrew itself at
-/// every swap. This span samples the SAME column read the chunk builder runs (`ColumnRead`), so
-/// the slices asked are the slices the surface stands in, by construction.
+/// no ground built an EMPTY chunk, the flat sea sheet (retired by ruling B22) showed through it,
+/// and the picture said "sea" over land — square by square, differently at each rung, so the shore
+/// redrew itself at every swap. This span samples the SAME column read the chunk builder runs
+/// (`ColumnRead`), so the slices asked are the slices the surface stands in, by construction.
 ///
 /// The bound is the column bound plus THE FIELD'S OWN STEP between neighbouring samples — the
 /// widest height difference between two adjacent samples along either axis: the field is a smooth
@@ -354,8 +354,7 @@ pub fn surface_column_field(
     x: i32,
     y: i32,
 ) -> Option<ColumnSpan> {
-    let fine = body.macro_lattice()?;
-    let lattice = fine.coarser(field.level())?;
+    let lattice = body.macro_lattice()?.coarser(field.level())?;
     let edge = crate::chunk::CHUNK_EDGE as i32;
     let key = ChunkKey {
         face,
@@ -370,7 +369,6 @@ pub fn surface_column_field(
         body,
         field: Some(field),
         lattice: Some(&lattice),
-        fine_lattice: Some(&fine),
         charter: &charter,
         first: body.first_fine(),
         slope_charter: crate::artifact::slope_charter(body, &lattice, rung),
@@ -577,7 +575,7 @@ pub fn golden_self_check(
     // The golden fields need the body's macro lattice; a body with none reads the recipe alone.
     let lattice = fields.and_then(|_| body.macro_lattice());
     // ★ THE SEA THE FIELDS STATE (stage C5) stands on the body for the read, as it does on a host
-    // that holds the artifact: the top-rung keys' columns hold water under it.
+    // that holds the artifact: the biome reads it as its datum (no cell is water since ruling B22).
     let wet;
     let body = match fields {
         Some(f) => {

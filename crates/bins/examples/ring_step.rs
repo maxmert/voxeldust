@@ -76,9 +76,10 @@ fn main() {
         0.2126 * f64::from(p.0[0]) + 0.7152 * f64::from(p.0[1]) + 0.0722 * f64::from(p.0[2])
     };
     // ★ WATER IS NOT LAND, AND THE SHADE OF THE TWO MAY NOT BE AVERAGED (2026-09-23, ruling W17).
-    // The renderer draws the sea `srgb(0.06, 0.24, 0.42)` and the ground `srgb(0.55, 0.50, 0.42)`,
-    // so a pixel is WATER where its blue channel stands over its red one — `coast_line`'s own
-    // rule. MEASURED before this line: at the 150 km stand a bay filled the middle of the frame
+    // The renderer drew the sea `srgb(0.06, 0.24, 0.42)` and the ground `srgb(0.55, 0.50, 0.42)`,
+    // so a pixel is WATER where its blue channel stands over its red one — the rule of the
+    // `coast_line` example. Since ruling B22 (2026-09-28) no water is drawn, so a picture of today
+    // reads no water pixel, and the rule waits for the one-volume fill's water. MEASURED before this line: at the 150 km stand a bay filled the middle of the frame
     // and the trend on one side of the 9 -> 10 band was sea while the other was sand, so the
     // boundary read a gap of 84 %, which measures a coastline and not a ladder. The land's shade
     // and the WATER'S OWN SHARE are therefore read apart, and both are printed.

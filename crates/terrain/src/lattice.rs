@@ -20,7 +20,7 @@
 //! what lets the three chunks compute one corner vertex (`position`).
 //!
 //! **Below the band's floor** the halo is bedrock at the bottom code; **above the band's top** it is
-//! air (or water under the sea) at the top code — what the band was derived to contain.
+//! air at the top code — what the band was derived to contain (no cell is water since ruling B22).
 //!
 //! **Example.** The chunk at the +u edge of face `+X` on the home planet, rung 0: its halo column at
 //! local `a = 62` is face `+Y`'s column `(j, n − 1)` — the same hill face `+Y`'s own chunk computes,
@@ -73,22 +73,6 @@ pub struct SampleBox {
     pub sites: Vec<Site>,
     /// The same columns' unit directions, at the bend's fraction bits.
     pub dirs: Vec<[Gi; 3]>,
-    /// ★ The same columns' WATER surface radius (slice 8c stage C5) at [`LENGTH_BITS`], or ZERO
-    /// for a dry column — what the client's water sheet stands on.
-    pub water: Vec<Gi>,
-    /// ★ THE SAME COLUMNS' GROUND radius at [`LENGTH_BITS`] (2026-09-21, the water sheet's cut):
-    /// what the sheet's builder reads to leave out a quad buried under the land in every state the
-    /// ladder can draw. ZERO where the host holds no height for the column (the card's readback
-    /// carries the directions alone), which keeps the quad.
-    pub surfaces: Vec<Gi>,
-    /// ★ THE BODY'S SEA as a radius at [`LENGTH_BITS`], ZERO for a body with none (2026-09-20, the
-    /// owner: "the form of the shores is changing all the time"): the sea is ONE surface under
-    /// every cell of the body, so the shore is the land's own crossing of it and follows the land's
-    /// morph through every rung; a sheet drawn only where a column was wet grew and shrank with
-    /// the rung's cell, and its edge stepped at every ring swap. ★ SINCE 2026-09-24 (plan step 2
-    /// part 3c) the sheet reads each column's OWN water and never raises it to this word: a land
-    /// column beside the sea carries the sea as its own water, and an inland column carries none.
-    pub sea: Gi,
 }
 
 impl SampleBox {
@@ -262,8 +246,6 @@ pub(crate) struct BoxSetup {
     pub sites: Vec<Site>,
     pub dirs: Vec<[Gi; 3]>,
     pub surfaces: Vec<(Gi, Biome)>,
-    /// Each column's water surface radius, or ZERO (C5).
-    pub water: Vec<Gi>,
     /// ★ Each column's ROCK PROVINCE (slice 8d step 2), the halo's included.
     pub province: Vec<Gi>,
     /// The carvers that can reach the box: a SUPERSET of what any one cell's owner keeps, and a
@@ -395,7 +377,6 @@ pub(crate) fn box_setup(
     // the column pass already run, so no core work is repeated.
     let mut dirs = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     let mut surfaces: Vec<(Gi, Biome)> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
-    let mut water: Vec<Gi> = Vec::with_capacity(BOX_EDGE * BOX_EDGE);
     // ★ Every column's ROCK PROVINCE (slice 8d step 2), the halo's included: a halo cell must read
     // the province its owning chunk reads, or the wall of a mine would change rock at every chunk
     // edge.
@@ -404,21 +385,14 @@ pub(crate) fn box_setup(
     // the core's own rule (2026-09-20: a halo that read the recipe while the core read the
     // artifact cracked every chunk edge).
     let plan_charter = body.plan_charter(rung, key.face);
-    // The body's own lattice beside the level's: the halo reads the water's side the core reads
-    // (2026-09-22, the coast mask), and a side comes off the FINE node's own bit.
-    let fine = match field {
-        Some(_) => Some(body.macro_lattice()?),
+    let lattice = match field {
+        Some(f) => Some(body.macro_lattice()?.coarser(f.level())?),
         None => None,
-    };
-    let lattice = match (field, fine.as_ref()) {
-        (Some(f), Some(l)) => Some(l.coarser(f.level())?),
-        _ => None,
     };
     let read = crate::chunk::ColumnRead {
         body,
         field,
         lattice: lattice.as_ref(),
-        fine_lattice: fine.as_ref(),
         charter: &plan_charter,
         first: if field.is_some() {
             body.first_fine()
@@ -438,18 +412,17 @@ pub(crate) fn box_setup(
         let mut a = -HALO;
         while a <= edge {
             let core_column = (a >= 0) & (a < edge) & (b >= 0) & (b < edge);
-            let (dir, h, biome, w, p) = if core_column {
+            let (dir, h, biome, p) = if core_column {
                 let index = (b as usize) * CHUNK_EDGE + a as usize;
                 let (dir, h, biome) = column.columns[index];
-                (dir, h, biome, column.water[index], column.province[index])
+                (dir, h, biome, column.province[index])
             } else {
                 // A halo column is the neighbour's own column: it reads what the neighbour reads.
                 let got = read.column(a, b)?;
-                (got.dir, got.h, got.biome, got.water, got.province)
+                (got.dir, got.h, got.biome, got.province)
             };
             dirs.push(dir);
             surfaces.push((h, biome));
-            water.push(w);
             province.push(p);
             a += 1;
         }
@@ -474,7 +447,6 @@ pub(crate) fn box_setup(
         sites,
         dirs,
         surfaces,
-        water,
         province,
         tubes,
         own,
@@ -504,7 +476,6 @@ pub fn sample_box(
         sites,
         dirs,
         surfaces,
-        water,
         province,
         tubes,
         own,
@@ -531,17 +502,15 @@ pub fn sample_box(
                     // Below the band's floor: what the below-surface skip writes.
                     below_surface_cell(&charter)
                 } else if k >= band {
-                    // Above the band's top: what the above-surface skip writes. The top stands
-                    // above every surface and above the sea (the room above is derived from the
-                    // relief, and the sea lies within it), so this is air in practice; the rule is
-                    // shared so it cannot drift from the skip's.
-                    above_surface_cell(&charter, r, water[SampleBox::column_index(a, b)])
+                    // Above the band's top: what the above-surface skip writes — air, since no
+                    // column states a water (ruling B22). The rule is shared so it cannot drift
+                    // from the skip's.
+                    above_surface_cell(&charter, r)
                 } else {
                     let col = SampleBox::column_index(a, b);
                     let site = sites[col];
                     let dir = dirs[col];
                     let (h, biome) = surfaces[col];
-                    let column_water = water[col];
                     let value = if carve_caverns & charter.in_band(h - r) {
                         cavern_of(&own, &foreign, site, k)
                     } else {
@@ -554,7 +523,6 @@ pub fn sample_box(
                             h,
                             biome,
                             r_steps,
-                            water: column_water,
                             province: province[col],
                         },
                         value,
@@ -573,9 +541,6 @@ pub fn sample_box(
         cells,
         sites,
         dirs,
-        water,
-        surfaces: surfaces.iter().map(|s| s.0).collect(),
-        sea: body.sea_radius,
     })
 }
 

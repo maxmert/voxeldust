@@ -79,7 +79,10 @@ pub use lattice::{SampleBox, sample_box};
 pub use position::{vertex_position, vertex_position_m};
 pub use seat::seat_eighths;
 pub use strata::{Biome, Stratum};
-pub use tag::{GENERATOR_VERSION, WorldIdentity, declared_world_tag};
+pub use tag::{
+    ARTIFACT_KEY_GENERATION, GENERATOR_VERSION, WorldIdentity, artifact_world_tag,
+    declared_world_tag,
+};
 pub use units::{STEPS_PER_M, metres_of_q28, metres_of_steps};
 
 /// ★ THE LINT CONTROL (SL1 clause 5: a structural fence has a control that is seen failing). Built

@@ -1830,27 +1830,25 @@ fn stand(d: DVec3, height_m: f64, surface_m: f64, forward: DVec3) -> Stand {
 
 /// ★ THE HOME PLANET SOLVED IN THIS PROCESS (2026-09-27, the solved-world walk): the artifact its
 /// shard solves at its first boot, by the same code (`vd_bins::artifact_worker::run_solve`), and the
-/// body carrying the solved sea — the ground and the water every leg's picture draws once the
-/// artifact is held.
+/// body carrying the solved sea — the ground every leg's picture draws once the artifact is held.
 struct SolvedHome {
     body: vd_terrain::BodyDefinition,
     artifact: vd_terrain::artifact::Artifact,
 }
 
 impl SolvedHome {
-    /// The DRAWN surface's radius along a direction at a rung: the ground, or the water sheet over a
-    /// column that stands under its water — the surface the stamp's altitude reads against.
-    fn drawn_m(&self, dir: DVec3, rung: u8) -> f64 {
-        vd_terrain::height::drawn_height_field_m(&self.body, &self.artifact, dir.to_array(), rung)
+    /// The GROUND's radius along a direction at a rung — the drawn surface, and the one the stamp's
+    /// altitude reads against: no water sheet stands over any column since ruling B22 (2026-09-28).
+    fn ground_m(&self, dir: DVec3, rung: u8) -> f64 {
+        vd_terrain::height::height_field_m(&self.body, &self.artifact, dir.to_array(), rung)
             .expect("the solved field covers every direction")
     }
 
-    /// Whether the column along a direction is dry at rung 0: its drawn surface is its ground.
+    /// Whether the column along a direction is dry at rung 0: its ground stands ABOVE the solve's
+    /// sea level. No water is drawn (ruling B22), so a stand on the dry sea floor would be a stand
+    /// the one-volume fill later drowns; the walker stands on land.
     fn dry(&self, dir: DVec3) -> bool {
-        let ground =
-            vd_terrain::height::height_field_m(&self.body, &self.artifact, dir.to_array(), 0)
-                .expect("the solved field covers every direction");
-        self.drawn_m(dir, 0) <= ground
+        self.ground_m(dir, 0) > self.body.sea_radius_m()
     }
 }
 
@@ -1902,8 +1900,8 @@ const EYE_CLEARANCE_M: f64 = 0.5;
 /// so the stand is searched along the circle where the star stands `SUN_ELEVATION_DEG` up: the
 /// sun's stand turned about the sun's own direction, `STAND_STEP_M` a step, one way then the other,
 /// to the first stand where the walker's whole path is dry and its eye stays `EYE_CLEARANCE_M` over
-/// the drawn ground. The nose is the sun's rule there. Returns the direction, the nose and the drawn
-/// surface's radius.
+/// the ground. The nose is the sun's rule there. Returns the direction, the nose and the ground's
+/// radius.
 ///
 /// **Example.** On the committed world the walker stands 1 706.5 km along that circle from the
 /// sun's stand, 15.8° south, on dry ground with the star 15° up over the shoulder — the picture
@@ -1927,12 +1925,12 @@ fn walkable_stand(solved: &SolvedHome, sun: DVec3, d0: DVec3, path_m: f64) -> (D
             let toward_sun = (sun - d * sun.dot(d)).normalize();
             let level = vd_core::glam::DQuat::from_axis_angle(d, SUN_OFF_NOSE_DEG.to_radians())
                 * toward_sun;
-            let h = solved.drawn_m(d, 0);
+            let h = solved.ground_m(d, 0);
             let eye = d * (h + EYE_HEIGHT_M);
             let clear = (0..=samples).all(|i| {
                 let p = eye + level * (i as f64 * WALK_SAMPLE_M);
                 let q = p.normalize();
-                solved.dry(q) && solved.drawn_m(q, 0) <= p.length() - EYE_CLEARANCE_M
+                solved.dry(q) && solved.ground_m(q, 0) <= p.length() - EYE_CLEARANCE_M
             });
             if clear {
                 eprintln!(
@@ -2134,7 +2132,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     while s_m <= leg_m {
         let p = d * h + level * s_m;
         let q = p.normalize();
-        let hq = solved.drawn_m(q, 2);
+        let hq = solved.ground_m(q, 2);
         highest = highest.max(hq + solved.body.dropped_bound_m(2));
         // Between two samples the surface may stand higher than at either (the bound holds AT a
         // sampled direction): the clearance carries that (refutation R4-30).
@@ -2165,7 +2163,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     let mut berths: Vec<DVec3> = Vec::new();
     for b in 0..boardings {
         let db = (d * h + level * (BERTH_SPACING_M * b as f64)).normalize();
-        let hb = solved.drawn_m(db, 0);
+        let hb = solved.ground_m(db, 0);
         let pb = stand(db, hull_m + (h - hb).max(0.0), hb, level);
         berths.push(pb.offset_m + level * BERTH_STANDOFF_M);
         pilots.push(pb);

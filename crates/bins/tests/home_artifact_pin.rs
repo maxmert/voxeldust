@@ -71,6 +71,14 @@ fn the_home_planets_artifact_digests_to_its_committed_words() {
         digest, HOME_ARTIFACT_DIGEST,
         "the home planet's artifact moved: a deliberate change re-records the digest"
     );
+    // ★ THE ARTIFACT'S OWN KEY MOVES WITH THIS DIGEST (ruling B22 step 1): a stored artifact is keyed
+    // by its own generation, not the column rule's, so a new digest here must also bump
+    // `ARTIFACT_KEY_GENERATION`, or every realm opens an artifact of the old solve.
+    assert_eq!(
+        vd_terrain::ARTIFACT_KEY_GENERATION,
+        21,
+        "the artifact's key generation belongs to the digest above: bump both together"
+    );
     assert_eq!(
         sea,
         vd_terrain::home::HOME_PLANET_SEA_M,

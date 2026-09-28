@@ -24,11 +24,11 @@
 //! 1. **(a) SHIPPED** — the chunk builder's OWN function, `vd_terrain::chunk::column_field`, with the
 //!    field: the solve plus the fine octaves the rung keeps. Nothing re-implemented.
 //! 2. **(b) SOLVE ONLY** — the chunk builder's reads through the ONE shared reader
-//!    (`vd_bins::shore_geometry::RungReader`: the side, the water, the slope share and `Z`, in the
-//!    chunk builder's order), into the same kernel (`column_surface_at`), with the first octave set
-//!    at the rung's octave count, so the sum adds nothing (`relief_parts_from` runs its loop from
-//!    `first` to the count; the doc of `relief_of_table_from` states it: "`first` at or past `count`
-//!    sums nothing"). The bench and the shore law still run. ★ Before (b) means anything,
+//!    (`vd_bins::shore_geometry::RungReader`: the slope share and `Z`, in the chunk builder's
+//!    order), into the same kernel (`column_surface_at`), with the first octave set at the rung's
+//!    octave count, so the sum adds nothing (`relief_parts_from` runs its loop from `first` to the
+//!    count; the doc of `relief_of_table_from` states it: "`first` at or past `count` sums
+//!    nothing"). The bench still runs. ★ Before (b) means anything,
 //!    the instrument compares the shared reader's own surface (the shipped first octave) with
 //!    `column_field`, column by column; one differing column is RED, because then (b) is not "the
 //!    shipped ground without its fine octaves".
@@ -37,7 +37,10 @@
 //!
 //! On (a) and on (b): G-HACK and G-BREACH (the R1 bench's own two functions, now
 //! `vd_bins::drainage_gates`), and THE SPILL CENSUS (`drainage_gates::spill_census`): a priority
-//! flood from the square's rim and from every wet column; each closed basin's depth (spill minus
+//! flood from the square's rim and from every wet column — ★ a column whose SHIPPED ground stands
+//! under the solve's sea level (2026-09-28, ruling B22: no water is drawn, so the ground against
+//! the solve's level is the one wet word; a lake's bed is dry ground and an inland pocket under the
+//! sea's level is wet); each closed basin's depth (spill minus
 //! pit, metres), area and volume; the count of basins 1, 10 and 100 m deep or deeper on each
 //! 100 km² of dry ground; the depth histogram; the deepest ten, with a cell and an aim a picture can
 //! be taken at.
@@ -83,8 +86,8 @@
 //! share under the basins 1 m deep or deeper; `G-FILLED-pct` also counts a basin one word deep, so
 //! it can read over zero on drained ground), and G-BREACH near zero —
 //! the only pits left are flat cells, and a flat cell's walk removes nothing. Its streams join into
-//! trunks, so G-HACK reads inside c ∈ [1, 6] and n ∈ [0.45, 0.7]. A lake does not count against it:
-//! a lake column is WET, so it is an outlet and never a basin.
+//! trunks, so G-HACK reads inside c ∈ [1, 6] and n ∈ [0.45, 0.7]. ★ A lake the solve holds counts
+//! as a basin since ruling B22: its bed is dry drawn ground, and the flood fills it.
 //!
 //! **(b) IS NOT A DRAINED FIELD EITHER.** It is a Catmull-Rom read of 8 192 m nodes, so it holds no
 //! valley narrower than about two nodes. The R1 bench read the same kind of bicubic upsample at
@@ -100,9 +103,9 @@
 //!
 //! **Example.** A pilot hangs 120 km over the belt. The instrument reads the rung-7 ground under
 //! her as the chunk builder makes it, one column every 128 m over a square 206 km a side, and
-//! floods it from the rim and from every column the coast mask calls sea or lake. If the fine
-//! octaves make dunes, the flood fills a trough every few kilometres, and `G-SPILL-10m` prints a
-//! number of order ten on each 100 km², while the same square without the fine octaves prints a
+//! floods it from the rim and from every column whose ground stands under the sea's level. If the
+//! fine octaves make dunes, the flood fills a trough every few kilometres, and `G-SPILL-10m` prints
+//! a number of order ten on each 100 km², while the same square without the fine octaves prints a
 //! few. After R2 ships one eroded level, the same line on the same stand must fall toward zero.
 
 use std::sync::Arc;
@@ -120,7 +123,7 @@ use vd_recipe::noise::NOISE_BITS;
 use vd_recipe::plan::{FieldRead, PlanCharter, column_surface_at, site_direction};
 use vd_seed::bend::Face;
 use vd_terrain::BodyDefinition;
-use vd_terrain::artifact::{Artifact, CoastCounts, PyramidField, sample_z, slope_share};
+use vd_terrain::artifact::{Artifact, CoastCounts, PyramidField};
 use vd_terrain::chunk::{CHUNK_EDGE, column_field};
 use vd_terrain::home::{home_planet, home_solve_words};
 use vd_terrain::units::{LENGTH_BITS, STEPS_PER_M};
@@ -380,6 +383,11 @@ fn measure(g: &Ground, aim: &Aim, table: &Table) {
     let (i0, j0) = (x0 * edge, y0 * edge);
     let charter = &reader.charter;
     let w = (g.chunks * edge) as usize;
+    // ★ THE SOLVE'S SEA as a radius (ZERO on a body with none, so no column is wet): the one wet
+    // word since ruling B22.
+    let sea = g.body.sea_m().map_or(Gi::ZERO, |m| {
+        charter.radius + (Gi::new(i64::from(m) * STEPS_PER_M) << LENGTH_BITS)
+    });
 
     // The column spacing ON THE GROUND at the square's middle: the chord between two neighbour
     // columns' directions times the ladder radius. The face bend makes it differ from the rung's
@@ -420,7 +428,7 @@ fn measure(g: &Ground, aim: &Aim, table: &Table) {
     let mut solve = vec![0i64; cells];
     let mut dry = vec![true; cells];
     let mut factor = vec![0i64; cells];
-    let (mut differ, mut water_differ, mut refused, mut unread) = (0usize, 0usize, 0usize, 0usize);
+    let (mut differ, mut refused, mut unread) = (0usize, 0usize, 0usize);
     let mut cy = 0;
     while cy < g.chunks {
         let mut cx = 0;
@@ -438,13 +446,13 @@ fn measure(g: &Ground, aim: &Aim, table: &Table) {
                     let at = (cy * edge + b) as usize * w + (cx * edge + a) as usize;
                     let h = cf.columns[k].1;
                     shipped[at] = (h - charter.radius).raw();
-                    let Some(pair) = read_pair(&reader, x * edge + a, y * edge + b, first_none)
+                    let Some(pair) =
+                        read_pair(&reader, x * edge + a, y * edge + b, first_none, sea)
                     else {
                         unread += 1;
                         continue;
                     };
                     differ += usize::from(pair.shipped != h);
-                    water_differ += usize::from(pair.water != cf.water[k]);
                     solve[at] = (pair.solve - charter.radius).raw();
                     dry[at] = !pair.wet;
                     factor[at] = pair.factor.raw();
@@ -462,12 +470,12 @@ fn measure(g: &Ground, aim: &Aim, table: &Table) {
         return;
     }
     println!(
-        "  THE SHIPPED PATH, CHECKED: `column_field` against the shared reader (`shore_geometry::RungReader`) at the shipped first octave ({}):\n    {differ} of {cells} surfaces and {water_differ} water radii differ (both must be 0, or (b) is not the shipped ground less its octaves)",
+        "  THE SHIPPED PATH, CHECKED: `column_field` against the shared reader (`shore_geometry::RungReader`) at the shipped first octave ({}):\n    {differ} of {cells} surfaces differ (must be 0, or (b) is not the shipped ground less its octaves)",
         reader.first
     );
     census(
         &format!("SHIPPED-PATH-DIFFER:{}", aim.slug),
-        (differ + water_differ) as f64,
+        differ as f64,
         &Band::Range(0.0, 0.0, PATH_CHECK),
     );
 
@@ -475,7 +483,7 @@ fn measure(g: &Ground, aim: &Aim, table: &Table) {
     let per_m = (STEPS_PER_M << LENGTH_BITS) as f64;
     let dry_cells = dry.iter().filter(|&&d| d).count();
     println!(
-        "  the water: {:.2} % of the columns stand under the sea or a lake (the coast mask's side word); {:.0} km² of dry ground",
+        "  the water: {:.2} % of the columns stand under the solve's sea level (the shipped ground; no water is drawn); {:.0} km² of dry ground",
         (cells - dry_cells) as f64 * 100.0 / cells as f64,
         dry_cells as f64 * cell_km2
     );
@@ -547,7 +555,7 @@ fn measure(g: &Ground, aim: &Aim, table: &Table) {
             per_m,
             dry: Some(dry.as_slice()),
         },
-        "(b) SOLVE ONLY — the same reads and kernel, the octave sum empty (the bench and the shore still run)",
+        "(b) SOLVE ONLY — the same reads and kernel, the octave sum empty (the bench still runs)",
         aim.slug,
         "solve",
         &place,
@@ -588,7 +596,7 @@ fn measure(g: &Ground, aim: &Aim, table: &Table) {
         for x in 1..w - 1 {
             let i = y * w + x;
             // The column and its four neighbours on dry ground: a central difference across the
-            // shore would read the shore law's step to the sea floor, not the fine relief.
+            // shore would read the coast's drop to the sea floor, not the fine relief.
             if !(dry[i] & dry[i - 1] & dry[i + 1] & dry[i - w] & dry[i + w]) {
                 continue;
             }
@@ -635,54 +643,35 @@ struct Pair {
     /// The shared reader's surface at the SHIPPED first octave — `column_field` must answer the
     /// same word.
     shipped: Gi,
-    /// The surface with the octave sum EMPTY: the solve, the bench and the shore alone.
+    /// The surface with the octave sum EMPTY: the solve and the bench alone.
     solve: Gi,
-    /// The water radius the column reads (ZERO for none).
-    water: Gi,
-    /// Whether the column stands under its water.
+    /// Whether the column's shipped ground stands under the solve's sea level.
     wet: bool,
     /// The roughness factor the fine octaves are multiplied by, at the noise's fraction bits.
     factor: Gi,
 }
 
 /// ★ ONE COLUMN THROUGH THE SHARED READER (`shore_geometry::RungReader::column`: the chunk
-/// builder's reads in the chunk builder's order, then the ONE kernel), plus the two words that
-/// reader does not return — `Z` and the slope share, read by the same public functions on the same
-/// lattice — so the kernel can run a second time with the octave sum empty. `None` where the field
-/// does not hold the column's stencil (then the chunk builder builds no chunk either).
+/// builder's reads in the chunk builder's order, then the ONE kernel), and the kernel a second time
+/// with the octave sum empty, on the very `Z` and slope share the column read. `None` where the
+/// field does not hold the column's stencil (then the chunk builder builds no chunk either).
 ///
-/// A column is WET where the side word the shore law obeys says so; where no side is stated, the
-/// ground's own sign decides (`ShippedColumn::ground_dry`: the base at or over the water is land),
-/// which is the rule the shore law itself runs (`vd_recipe::height::shore`, `g >= 0`). A body with
-/// no water (the water word ZERO) is dry everywhere by the same rule.
-fn read_pair(reader: &RungReader, i: i32, j: i32, none: usize) -> Option<Pair> {
+/// A column is WET where its shipped ground stands under `sea`, the solve's sea level as a radius
+/// (ruling B22: no water is drawn, so the ground against the solve's level is the one wet word). A
+/// body with no sea (`sea` ZERO) is dry everywhere.
+fn read_pair(reader: &RungReader, i: i32, j: i32, none: usize, sea: Gi) -> Option<Pair> {
     let col = reader.column(i, j)?;
-    let field = reader.source.field();
-    let z = sample_z(&reader.lattice, field, reader.face, reader.rung, i, j)?;
-    let share = slope_share(
-        &reader.slope,
-        &reader.lattice,
-        field,
-        reader.face,
-        reader.rung,
-        i,
-        j,
-    )?;
     // The same read with the octave sum EMPTY: `first` at the rung's count sums nothing.
     let bare = FieldRead {
-        z,
+        z: col.z,
         first: none,
-        slope_share: share,
-        water: col.water,
-        side: col.side_word,
+        slope_share: col.share,
     };
-    let wet = col.drawn_wet().unwrap_or_else(|| !col.ground_dry());
     Some(Pair {
         shipped: col.surface,
         solve: column_surface_at(&reader.charter, col.dir, &bare).h,
-        water: col.water,
-        wet,
-        factor: roughness_factor(&reader.charter.roughness, col.dir).max(share),
+        wet: col.surface < sea,
+        factor: roughness_factor(&reader.charter.roughness, col.dir).max(col.share),
     })
 }
 

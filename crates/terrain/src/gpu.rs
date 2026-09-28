@@ -53,11 +53,11 @@ pub const COLUMN_WORDS: usize = 13;
 pub const TUBE_WORDS: usize = 8;
 /// The 32-bit words of one column's SITE: the face, the two cell indices and one of padding.
 pub const SITE_WORDS: usize = 4;
-/// The words of the PLAN charter: twelve of its own (the body's sea joined 2026-09-21, for the
-/// shore law), then the biome's two octaves and the body's octave table, [`OCTAVE_WORDS`] words
-/// each.
+/// The words of the PLAN charter: eleven of its own (the body's sea left it on 2026-09-28 with
+/// the shore law, ruling B22), then the biome's two octaves and the body's octave table,
+/// [`OCTAVE_WORDS`] words each.
 pub const PLAN_CHARTER_WORDS: usize =
-    12 + (2 + OCTAVES_CAP) * OCTAVE_WORDS + ROUGHNESS_WORDS + TERRACE_WORDS;
+    11 + (2 + OCTAVES_CAP) * OCTAVE_WORDS + ROUGHNESS_WORDS + TERRACE_WORDS;
 /// The words of one octave: SIX of its own (the `fine` mask joined at slice 8a stage 3) and two of
 /// explicit padding, so the row's stride stays 64 bytes. The charter's octave block holds
 /// 1 024 bytes, not 512.
@@ -357,6 +357,8 @@ impl BoxPlan {
         let column = &run.columns[b * edge + a];
         match layer.rule.raw() {
             LAYER_BELOW => below_cell_word(&self.charter),
+            // The shader's own words: the charter's sea, which the host states as ZERO since
+            // ruling B22 (2026-09-28), so a cell over the band's top is air.
             LAYER_ABOVE => above_cell_word(
                 &self.charter,
                 layer.r_steps << LENGTH_BITS,
@@ -369,12 +371,13 @@ impl BoxPlan {
                     h: column.h,
                     biome: column.biome,
                     r_steps: layer.r_steps,
-                    // The card holds no artifact row: every column's water is the body's sea, and
+                    // The card holds no artifact row: every column's water is the charter's sea —
+                    // ZERO since ruling B22 (2026-09-28), so no cell is water on either host — and
                     // every column's rock province is the stated default (slice 8d step 2). So the
                     // card's SUBSTANCES differ from the CPU's under an artifact, exactly as its
-                    // heights and its water already do — the card is a knob, and the CPU path is
-                    // what ships. `gpu-drift` measures the card against THIS function, so the two
-                    // still agree byte for byte.
+                    // heights already do — the card is a knob, and the CPU path is what ships.
+                    // `gpu-drift` measures the card against THIS function, so the two still agree
+                    // byte for byte.
                     water: self.charter.sea_radius,
                     province: Gi::new(i64::from(crate::strata::DEFAULT_PROVINCE.code())),
                 },
@@ -400,12 +403,6 @@ impl BoxPlan {
             cells,
             sites: self.sites.clone(),
             dirs: dirs.to_vec(),
-            // The card's columns read no artifact row: the body's sea stands over every one.
-            water: vec![self.charter.sea_radius; self.sites.len()],
-            // The card reads back the directions alone, never the heights: the sheet's cut keeps
-            // every wet quad of a card-built box (the card is a knob; the CPU path is shipped).
-            surfaces: vec![Gi::ZERO; self.sites.len()],
-            sea: self.charter.sea_radius,
         }
     }
 
@@ -479,7 +476,6 @@ impl BoxPlan {
             p.radius.raw(),
             p.octave_count.raw(),
             p.key_face.raw(),
-            p.sea_radius.raw(),
             b.sea_radius.raw(),
             b.highland_above.raw(),
             b.highland_recip.raw(),
@@ -765,17 +761,16 @@ mod tests {
         let p = plan.plan_charter_words();
         assert_eq!(p[0], plan.plan.seed as i64);
         assert_eq!(p[6], plan.plan.key_face.raw());
-        // ★ THE BODY'S SEA rides the plan charter's head (2026-09-21, the shore law), BEFORE the
-        // biome's datum: on a dry body the first is ZERO and the second the ladder radius, so a
-        // packer that swapped them would hold every column's shore against the radius.
-        assert_eq!(p[7], plan.plan.sea_radius.raw());
-        assert_eq!(p[8], plan.plan.biome.sea_radius.raw());
-        assert_eq!(p[11], plan.plan.biome.highland_shift.raw());
-        assert_eq!(p[12], plan.plan.biome.temperature.seed as i64);
-        // ★ THE ROUGHNESS ROW at its own place: the head's twelve words, the biome's two octaves,
+        // ★ THE BIOME'S DATUM follows the chunk's face at once (2026-09-28, ruling B22: the body's
+        // sea left the head with the shore law). A packer that kept a word for the sea would read
+        // every column's biome one word late on the card.
+        assert_eq!(p[7], plan.plan.biome.sea_radius.raw());
+        assert_eq!(p[10], plan.plan.biome.highland_shift.raw());
+        assert_eq!(p[11], plan.plan.biome.temperature.seed as i64);
+        // ★ THE ROUGHNESS ROW at its own place: the head's eleven words, the biome's two octaves,
         // then the placeholder octave and the factor's two words (slice 8a stage 3). A row whose
         // stride slipped would read the first octave of the table here.
-        let rough_at = 12 + 2 * OCTAVE_WORDS;
+        let rough_at = 11 + 2 * OCTAVE_WORDS;
         assert_eq!(p[rough_at], plan.plan.roughness.octave.seed as i64);
         assert_eq!(
             p[rough_at + 3],

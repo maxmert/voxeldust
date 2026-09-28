@@ -30,12 +30,10 @@ pub mod proc_launch;
 // that sees a 45° washboard in the ground itself.
 pub mod router_variants;
 // ★ THE SHORE'S GEOMETRY, AS NUMBERS (plan step 1, ruling B6; the owner: "shores are squared like
-// teeth"): the shipped column with the ground base the shore law reads, the zero contour, the
-// window bearings and the flat null the teeth instrument measures with.
+// teeth"): the shipped column with its ground base, the zero contour, the window bearings and the
+// flat null. The shore law and its bench left with ruling B22 (2026-09-28); the column is now the
+// plain ground.
 pub mod shore_geometry;
-// ★ THE SHORELINE BENCH'S RULES (plan step 4 slice 0, ruling B8 item 1): R0, C0, N1 and O1 as plain
-// functions of one column, the f64 reference slice 1's integer re-measure must match.
-pub mod shore_rules;
 // ★ THE SHORE'S SHAPE, AS NUMBERS (survey §1.6–§2.3): the divider, the four-fold moment, the lakes'
 // loops and the synthetic controls whose answers are known before they read our shore.
 pub mod shore_shape;

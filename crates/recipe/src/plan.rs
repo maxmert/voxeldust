@@ -22,9 +22,7 @@
 use crate::bend::{DIR_ONE, basis_of, direction, normalise};
 use crate::cell::{Column, LENGTH_BITS, point_at};
 use crate::gi::Gi;
-use crate::height::{
-    BiomeCharter, OCTAVES_CAP, Octave, Roughness, SIDE_UNKNOWN, biome_of, relief_parts_from, shore,
-};
+use crate::height::{BiomeCharter, OCTAVES_CAP, Octave, Roughness, biome_of, relief_parts_from};
 use crate::noise::value3;
 use crate::terrace::{Terrace, terrace};
 
@@ -58,11 +56,6 @@ pub struct PlanCharter {
     pub octave_count: Gi,
     /// The CHUNK's own face index — the basis a corner phantom's direction stands on.
     pub key_face: Gi,
-    /// ★ THE BODY'S SEA as a radius at the length format, or ZERO for a body with none
-    /// (2026-09-21, the shore law): the water the column pass holds its shore against where the
-    /// host reads no water row — the card, and a chunk with no field. NOT the biome's datum, which
-    /// is the ladder radius on a dry body.
-    pub sea_radius: Gi,
     /// The biome field.
     pub biome: BiomeCharter,
     /// ★ THE PER-COLUMN ROUGHNESS FACTOR's words (slice 8a stage 3): the slow placeholder octave,
@@ -126,14 +119,22 @@ fn corner_axis(n: i32, u: i32, v: i32, i: i32, j: i32) -> Gi {
 #[must_use]
 pub fn column_surface(charter: &PlanCharter, face: i32, i: i32, j: i32) -> ColumnSurface {
     // No artifact here, so no macro field and no slope share: the roughness factor is the noise
-    // placeholder's alone, which is the arithmetic the card has always run. The water is the
-    // body's own sea, as every column of a box with no rows reads it.
-    column_surface_from(charter, face, i, j, &FieldRead::none(charter.sea_radius))
+    // placeholder's alone, which is the arithmetic the card has always run.
+    column_surface_from(charter, face, i, j, &FieldRead::none())
 }
 
 /// ★ WHAT THE HOST READ OFF ITS FIELD FOR ONE COLUMN (2026-09-21): the words the column pass takes
-/// beside the charter and the address. A struct and not four arguments, because the fourth word
-/// made the list a place where a water radius could land in a share's seat.
+/// beside the charter and the address. A struct and not three arguments, because two of the words
+/// are `Gi` of two meanings — a height and a share — and a list of them is a place where one lands
+/// in the other's seat.
+///
+/// ★ NO WATER AND NO SIDE (2026-09-28, ruling B22 step 1): the column pass reads the ground alone.
+/// The shore law and the two words it read — the column's water and the side the coast mask
+/// stated — are removed, so the surface is the plain ground at every rung, and the dry sea floor
+/// shows until the one-volume fill step draws the water.
+///
+/// **Example.** A column 20 km off the belt's coast reads its solved `Z`, the first fine octave and
+/// its slope share. Its ground stands 300 m under the sea's level, and the pilot sees that floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FieldRead {
     /// The field's eroded height at the column, at the length format; ZERO with no field.
@@ -142,34 +143,19 @@ pub struct FieldRead {
     /// left out), zero without a field.
     pub first: usize,
     /// The field's own slope at the column as a share of the body's slope reference
-    /// ([`relief_of_table_from`]); ZERO without a field.
+    /// ([`crate::height::relief_of_table_from`]); ZERO without a field.
     pub slope_share: Gi,
-    /// The column's water surface as a radius, or ZERO for none: the row's level under an
-    /// artifact, the body's sea without one.
-    pub water: Gi,
-    /// ★ THE SIDE OF THE WATER THE ROW SAID (2026-09-22, the coast mask; ruling W10):
-    /// [`crate::height::SIDE_LAND`] or [`crate::height::SIDE_SEA`] where the host read the
-    /// artifact's coast mask at this column's own FINE node, [`SIDE_UNKNOWN`] where it holds no
-    /// mask. It is the same word at every rung, because it is the same fine node's bit, so the
-    /// shoreline does not move when a ring swaps. [`crate::height::SIDE_INLAND`] where the row
-    /// says land and no node of the column's own read stencil is the sea (2026-09-24, ruling B7):
-    /// a dry column far from the sea, which [`crate::height::shore`] leaves alone under the sea's
-    /// level.
-    pub side: Gi,
 }
 
 impl FieldRead {
-    /// The read of a host with NO field: no `z`, every octave, no share, the water it names — the
-    /// body's own sea — and NO stated side, so the ground's own sign decides the shore. The card
-    /// holds no artifact and reads exactly this.
+    /// The read of a host with NO field: no `z`, every octave and no share. The card holds no
+    /// artifact and reads exactly this.
     #[must_use]
-    pub const fn none(water: Gi) -> FieldRead {
+    pub const fn none() -> FieldRead {
         FieldRead {
             z: Gi::ZERO,
             first: 0,
             slope_share: Gi::ZERO,
-            water,
-            side: SIDE_UNKNOWN,
         }
     }
 }
@@ -181,17 +167,8 @@ impl FieldRead {
 /// own coarse relief.
 ///
 /// `slope_share` is the macro field's OWN slope at this column, as a share of the body's slope
-/// reference ([`relief_of_table_from`]): the host measures it off the same artifact `z` comes from,
-/// and passes [`Gi::ZERO`] where it holds no field.
-///
-/// ★ The read's `water` is the column's water surface as a radius, or ZERO for none (2026-09-21):
-/// the row's level under an artifact, the body's sea without one. The surface is held on its
-/// ground's side of it by [`crate::height::shore`], AFTER the bench, so the shoreline stands where
-/// the ground without the fine octaves crosses the water — the same place at every rung.
-///
-/// ★ The read's `side` is the water's side the ROW said (2026-09-22, the coast mask): at a pyramid
-/// rung the `z` above is a MEAN of many fine nodes, and a mean crosses the sea in another place
-/// than the fine node does, so the side comes from the fine node's own bit and never from `z`.
+/// reference ([`crate::height::relief_of_table_from`]): the host measures it off the same artifact
+/// `z` comes from, and passes [`Gi::ZERO`] where it holds no field.
 #[must_use]
 pub fn column_surface_from(
     charter: &PlanCharter,
@@ -216,14 +193,11 @@ pub fn column_surface_at(charter: &PlanCharter, dir: [Gi; 3], read: &FieldRead) 
         z,
         first,
         slope_share,
-        water,
-        side,
     } = *read;
-    // ★ THE GROUND, THEN THE FINE OCTAVES, THEN THE BENCH, THEN THE SHORE. The ground is the radius,
-    // the field's `z` and the coarse octaves the field did not replace (slice 8a stage 4: the
-    // octave sum answers the raw surface and the terrace then pulls it toward the nearest bed top;
-    // 2026-09-21: the shore holds the result on the ground's side of the water). The biome below
-    // reads the FINAL surface, because the biome reads where the ground actually stands.
+    // ★ THE GROUND, THEN THE FINE OCTAVES, THEN THE BENCH. The ground is the radius, the field's
+    // `z` and the coarse octaves the field did not replace (slice 8a stage 4: the octave sum
+    // answers the raw surface and the terrace then pulls it toward the nearest bed top). The biome
+    // below reads the FINAL surface, because the biome reads where the ground actually stands.
     let parts = relief_parts_from(
         &charter.octaves,
         first,
@@ -233,12 +207,7 @@ pub fn column_surface_at(charter: &PlanCharter, dir: [Gi; 3], read: &FieldRead) 
         slope_share,
     );
     let base = charter.radius + z + parts.coarse;
-    let h = shore(
-        base,
-        water,
-        terrace(&charter.terrace, base + parts.fine),
-        side,
-    );
+    let h = terrace(&charter.terrace, base + parts.fine);
     ColumnSurface {
         dir,
         h,
@@ -421,8 +390,6 @@ mod tests {
             radius: Gi::new(1_000_000) << LENGTH_BITS,
             octave_count: Gi::new(2),
             key_face: Gi::new(4),
-            // No sea: the shore law is the identity, and the column tests keep their numbers.
-            sea_radius: Gi::ZERO,
             biome: BiomeCharter {
                 sea_radius: Gi::new(1_000_000) << LENGTH_BITS,
                 highland_above: Gi::new(400) << LENGTH_BITS,

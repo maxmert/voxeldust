@@ -45,35 +45,6 @@ use vd_terrain::position::vertex_position_m;
 /// THE BELT the owner flies over, as a unit direction in the planet's frame.
 const BELT: [f64; 3] = [0.617_270, -0.437_286, -0.654_033];
 
-/// Whether a direction's column stands under its own water at a rung, and the water's own radius
-/// in metres — read the way the chunk's column pass and the morph read it (ruling W16 fault B: the
-/// cell's own SIDE through `sample_side`, then the water that side names through `column_water`).
-fn wet_at(
-    body: &vd_terrain::BodyDefinition,
-    fine: &MacroLattice,
-    field: &dyn ZField,
-    dir: [f64; 3],
-    rung: u8,
-) -> Option<(bool, f64)> {
-    let lattice = fine.coarser(field.level())?;
-    let face = vd_seed::bend::face_of(dir);
-    let (t, s) = vd_seed::bend::face_coords(face, dir);
-    let n0 = body.ladder().cells_per_edge(0);
-    let i = vd_seed::ladder::index_of(vd_seed::bend::unbend(t), n0);
-    let j = vd_seed::ladder::index_of(vd_seed::bend::unbend(s), n0);
-    let cell_i =
-        vd_seed::ladder::index_of(vd_seed::bend::unbend(t), body.ladder().cells_per_edge(rung));
-    let cell_j =
-        vd_seed::ladder::index_of(vd_seed::bend::unbend(s), body.ladder().cells_per_edge(rung));
-    let side = vd_terrain::artifact::sample_side(fine, field, face, rung, cell_i, cell_j);
-    // The water that STANDS over the column (ZERO for an inland one, plan step 2 part 3b).
-    let water =
-        vd_terrain::artifact::column_water(body, &lattice, field, face, 0, i, j, side).water;
-    let ground = height_field_m(body, field, dir, rung)?;
-    let water_m = vd_terrain::units::metres_of_q28(water);
-    Some((water_m > ground, water_m))
-}
-
 fn main() {
     let a: Vec<f64> = std::env::args()
         .skip(1)
@@ -219,49 +190,6 @@ fn main() {
             below.clone_from(means);
             fine = coarse;
         }
-    }
-
-    println!("\nTHE WATER — the side and the level the same directions read at the two rungs");
-    println!(
-        "L -> L+1 | wet at L | wet at L+1 | columns that FLIP | as a share % | median level step m | max level step m"
-    );
-    for rung in rung_lo..=rung_hi {
-        let (fine_f, coarse_f) = (field_of(rung), field_of(rung + 1));
-        let (mut wet_l, mut wet_c, mut flips, mut n) = (0u64, 0u64, 0u64, 0u64);
-        let mut level_steps: Vec<f64> = Vec::new();
-        for face in faces {
-            for i in 0..grid {
-                for j in 0..grid {
-                    let a = (2.0 * (f64::from(i) + 0.5) / f64::from(grid)) - 1.0;
-                    let b = (2.0 * (f64::from(j) + 0.5) / f64::from(grid)) - 1.0;
-                    let d = direction(face, a, b);
-                    let Some(w0) = wet_at(&body, &lattice, fine_f.as_ref(), d, rung) else {
-                        continue;
-                    };
-                    let Some(w1) = wet_at(&body, &lattice, coarse_f.as_ref(), d, rung + 1) else {
-                        continue;
-                    };
-                    n += 1;
-                    wet_l += u64::from(w0.0);
-                    wet_c += u64::from(w1.0);
-                    flips += u64::from(w0.0 != w1.0);
-                    if w0.0 && w1.0 {
-                        level_steps.push((w0.1 - w1.1).abs());
-                    }
-                }
-            }
-        }
-        level_steps.sort_by(|x, y| x.partial_cmp(y).expect("finite"));
-        let median = level_steps
-            .get(level_steps.len() / 2)
-            .copied()
-            .unwrap_or(0.0);
-        let max = level_steps.last().copied().unwrap_or(0.0);
-        println!(
-            "{rung:>3} -> {:>3} | {wet_l:>8} | {wet_c:>10} | {flips:>17} | {:>12.3} | {median:>19.1} | {max:>16.1}",
-            rung + 1,
-            flips as f64 * 100.0 / n.max(1) as f64
-        );
     }
 
     println!(

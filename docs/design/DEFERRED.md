@@ -10541,3 +10541,42 @@ updated in the same change as the work, deleted when done). The interims named h
   at S4, where the skin's flicker and fronts exist. WHERE: `crates/client/src/arrival.rs`,
   `crates/client-render/src/{terrain.rs,ladder_fade.wgsl}`. WHEN: (3) R2 and S4; (1), (2), (4) measured again in R2's
   flight; (5) S4.
+- 🟥 **A SHEER WALL'S SKIRT CAN FACE AWAY FROM ITS WALL** (found 2026-09-28 while covering the skirt's two windings,
+  B22 step 1): a skirt strip hangs along the radial from a boundary edge and is wound to face away from its triangle's
+  third corner. On a triangle that stands in the plane of its own radial — a sheer cliff's face — the strip is coplanar
+  with the wall, the side test reads exactly zero, and the winding falls to one side: ARITH on a wall triangle
+  (0,0,0)-(1,0,0)-(0,1,0) across the radial +X, one slanted edge's strip faces the wall's +Z and the other's faces -Z. A
+  strip wound against the eye is culled, so the hairline crack it should cover can show at a sheer wall's chunk border.
+  THE CURE (not built): add the triangle's own facing to the side test (the strip faces away from the third corner AND
+  toward its triangle's face; on ground the first term decides, on a wall the second), then measure with `skirt_gap`
+  and the crack gates. WHERE: `add_skirts` (`crates/client/src/chunks.rs`). WHEN: the ground step of B22 (the cliffs
+  bring sheer walls), or with the one-volume extraction.
+- 🟥 **THE OLD WATER AND SHORE RULES ARE OFF (ruling B22 step 1)** (2026-09-28; the owner: *"We can comment out all
+  current special shores and sea models"*, *"No water at all"*). Step 2 of the same change (above) stopped the client's
+  water sheet and its sea-floor cut; this step removes the rules the drawn water stood on, and the world changes once
+  (`GENERATOR_VERSION` 22). REMOVED (git keeps them): THE SHORE LAW (`vd_recipe::height::shore`, `SHORE_SHIFT`, the four
+  side words), the column's water and side inputs (`FieldRead::water` and `::side`; `PlanCharter::sea_radius`, so the
+  card's plan charter holds eleven words of its own, not twelve), the column-water read (`artifact::column_water` with
+  `ColumnWater`, `stencil_holds_sea`, `sample_side`, `sample_row`, `footprint_level`, `coast_level`, `Side::word`,
+  `ZField::coast_counts`), the beach override, every per-column water vector (`ColumnField::water`,
+  `SampleBox::{water, surfaces, sea}`, `BoxSetup::water`, `CellSite::water`), the drawn surface
+  (`height::drawn_height_field_m`; every caller reads `height_field_m`), the water sheet (`position::water_sheet` and its
+  words), `vd_bins::shore_rules`, the shore and sheet benches (`shoreline_bench`, `shore_teeth`, `water_edge_step`,
+  `far_side_probe`, `mask_at_pixel`, `mask_face`, `n2_far_data`, `sheet_poke`, `sheet_cost`, `far_water_share`,
+  `coast_line`, `shore_step`) and `lake_census`'s drawn-water gates (G-RUNG-LAKE, G-RUNG-LIP, G-RUNG-HOLD,
+  G-POCKET-HELD). The cell charter states NO SEA (`chunk::charter_of`), so the skip, the halo and the card all read air
+  over the ground; the shard ships no coast mask (the head states `coast_parts: 0`) and no pyramid water words (the
+  parts ship `water_m: []`), which the wire, the gateway and the client already read as "none". WHAT STAYS FOR THE FILL
+  STEP: the recipe's cell water slot (`CellCharter::sea_radius`, `water_code`, `fluid_at`, `CellAt::water`,
+  `above_cell_word`'s water, and their tests); the artifact's stored water data — every row's `water_m` and facies,
+  `pyramid_water`, the coast mask with `Side`, `side_word`, `CoastCounts` and the readers `ZField::water_facies` and
+  `water_side` — stored and folded into the digest as before (`ARTIFACT_VERSION` 9, the artifact key generation 21, no
+  realm solves again); the SOLVE itself (the sea's level, the lakes, the rivers: they shape the ground by erosion); the
+  wire's coast and water-word shapes and their receivers. WHAT IT COSTS: the dry sea floor shows (78 % of the home
+  planet) and no coast is judged until the fill (ruling B22 item 2); the D-TERRAIN-9 items that name the shore law, the
+  side word or the stencil hold now describe code that is gone, and the fill's own gates judge the water again; the
+  moving-eye gate and `equator_stands` read DRY as the ground over the solve's sea level. **Example.** A hull descends
+  on the belt's coast: the ground under it is the same at every rung, the old 208 m coast wall is gone, and where the
+  sea stood the dry floor falls away for kilometres; no water shows anywhere. WHERE: `crates/recipe/src/{height,plan}.rs`,
+  `crates/terrain/src/{artifact,chunk,lattice,height,position,gpu,body,tag}.rs`, `crates/bins/src/artifact_source.rs`.
+  WHEN: B22 step 4 (the one-volume water fill) states the water again.

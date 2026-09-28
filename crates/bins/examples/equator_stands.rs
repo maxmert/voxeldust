@@ -3,7 +3,9 @@
 //! walks 157 m along a nose the sun's rule sets; the server holds its eye at one radius, so the
 //! path must be dry and must not rise above the eye. This reads a cached solve of the home planet
 //! (`vd_bins::artifact_file`) and scans the whole equator: where it is dry, how long the dry runs
-//! are, and at each dry stand how far the ground along the path rises over the stand.
+//! are, and at each dry stand how far the ground along the path rises over the stand. ★ DRY is the
+//! ground over the solve's sea level (2026-09-28, ruling B22): no water is drawn, so the scan reads
+//! the drawn ground against the level the solve found.
 //!
 //! ```text
 //! cargo run --release -p vd-bins --example equator_stands -- <home.art> [path_m] [step_m]
@@ -41,15 +43,12 @@ fn main() {
     let ground = |d: DVec3, rung: u8| -> f64 {
         vd_terrain::height::height_field_m(&body, &artifact, d.to_array(), rung).expect("covered")
     };
-    let drawn = |d: DVec3, rung: u8| -> f64 {
-        vd_terrain::height::drawn_height_field_m(&body, &artifact, d.to_array(), rung)
-            .expect("covered")
-    };
-    let dry = |d: DVec3| drawn(d, 0) <= ground(d, 0);
+    // The solve's sea as a radius in metres (zero on a body with none, so every stand is dry).
+    let sea_r = body.sea_radius_m();
+    let dry = |d: DVec3| ground(d, 0) > sea_r;
     println!(
-        "the sun's stand: {:.1}° up, drawn {:.0} m over the radius, ground {:.0} m, dry {}",
+        "the sun's stand: {:.1}° up, the ground {:.0} m over the radius, dry {}",
         sun.dot(d0).asin().to_degrees(),
-        drawn(d0, 0) - radius_m,
         ground(d0, 0) - radius_m,
         dry(d0)
     );
@@ -74,7 +73,7 @@ fn main() {
             }
             let toward_sun = (sun - d * sun.dot(d)).normalize();
             let level = DQuat::from_axis_angle(d, 120.0_f64.to_radians()) * toward_sun;
-            let h = drawn(d, 0);
+            let h = ground(d, 0);
             let eye = d * (h + 1.8);
             let mut rise = f64::NEG_INFINITY;
             let mut wet = false;
@@ -82,7 +81,7 @@ fn main() {
                 let p = eye + level * (i as f64 * 5.0);
                 let q = p.normalize();
                 wet |= !dry(q);
-                rise = rise.max(drawn(q, 0) - (p.length() - 1.8));
+                rise = rise.max(ground(q, 0) - (p.length() - 1.8));
             }
             if !wet {
                 rises.push(rise);
@@ -133,11 +132,11 @@ fn main() {
         }
         let toward_sun = (sun - d * sun.dot(d)).normalize();
         let level = DQuat::from_axis_angle(d, 120.0_f64.to_radians()) * toward_sun;
-        let eye = d * (drawn(d, 0) + 1.8);
+        let eye = d * (ground(d, 0) + 1.8);
         (0..=samples).all(|i| {
             let p = eye + level * (i as f64 * 5.0);
             let q = p.normalize();
-            dry(q) && drawn(q, 0) <= p.length() - 0.5
+            dry(q) && ground(q, 0) <= p.length() - 0.5
         })
     };
     // THE CIRCLE WHERE THE STAR STANDS 15° UP: the sun's stand turned about the sun's axis.
@@ -187,14 +186,14 @@ fn main() {
                 let km = signed as f64 * step_m / 1000.0;
                 let elev = sun.dot(d).asin().to_degrees();
                 if lowest.is_none_or(|(_, _, e, _)| (elev - 15.0).abs() < (e - 15.0).abs()) {
-                    lowest = Some((km, d.z.asin().to_degrees(), elev, drawn(d, 0) - radius_m));
+                    lowest = Some((km, d.z.asin().to_degrees(), elev, ground(d, 0) - radius_m));
                 }
                 if near.is_none_or(|(b, _, _, _)| km.abs() < b.abs()) {
                     near = Some((
                         km,
                         d.z.asin().to_degrees(),
                         sun.dot(d).asin().to_degrees(),
-                        drawn(d, 0) - radius_m,
+                        ground(d, 0) - radius_m,
                     ));
                 }
             }

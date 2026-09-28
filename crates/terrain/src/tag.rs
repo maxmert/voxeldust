@@ -230,13 +230,57 @@ use vd_seed::digest::{FNV_OFFSET, fnv1a_u64};
 /// quarter of a metre, so the sea's whole metre stays 3 591 m and the climate's classes move on
 /// some thousands of nodes. A chunk with NO artifact reads none of these, so the SEED-ONLY golden
 /// tables stand and `gpu-drift` compares like with like. `PROTO_MINOR` does not move.
-pub const GENERATOR_VERSION: u32 = 21;
+///
+/// ★ VERSION 22 (2026-09-28, ruling B22 step 1; the owner: *"We can comment out all current special
+/// shores and sea models"*). THE SHORE LAW AND ITS INPUTS LEAVE THE COLUMN. A column is its plain
+/// ground — the bench over the octave sum, on the solved `Z` where an artifact stands — and no
+/// water word, no coast bit and no side word of the coast mask reaches it; the beach's sand goes
+/// with them. The cell charter states NO SEA, so no cell is water and the dry sea floor shows until
+/// the one-volume fill step. The card's plan charter loses its sea word (eleven words of its own,
+/// not twelve), and the card and the CPU read the same shorter row.
+///
+/// What moved: every column ON THE ARTIFACT PATH whose ground stood near its water (the law held it
+/// on its ground's side), every beach column's biome, and every cell under a water's level (water
+/// to air) — so the identity's measured half moves. What stands: a body with no sea ran the law as
+/// the identity and states no cell water, so the SEED-ONLY golden tables stand and `gpu-drift`
+/// compares like with like; THE SOLVE DID NOT MOVE, so the artifact stays valid under its own key
+/// (`ARTIFACT_KEY_GENERATION` 21) and no realm solves again. `ARTIFACT_VERSION` stays 9 and
+/// `PROTO_MINOR` does not move: the shard ships no coast mask and no pyramid water words, which the
+/// wire already allows.
+pub const GENERATOR_VERSION: u32 = 22;
 
 /// The declared world tag: the recipe's version folded with the universe seed.
 #[must_use]
 pub fn declared_world_tag(universe_seed: u64) -> u64 {
     fnv1a_u64(
         fnv1a_u64(FNV_OFFSET, u64::from(GENERATOR_VERSION)),
+        universe_seed,
+    )
+}
+
+/// ★ THE ARTIFACT'S OWN GENERATION (2026-09-28, ruling B22 step 1). A realm's stored artifact is the
+/// SOLVE's output — the rows, the pyramid, the sea and the lakes — and nothing that a column rule
+/// draws from it. So it is keyed by this generation, not by [`GENERATOR_VERSION`]: a change that
+/// moves only how a column is drawn leaves every stored artifact valid, and no realm solves again at
+/// its first boot (MEASURED 2026-09-27: 205 s for the home planet, 77–382 s for the far planets).
+///
+/// BUMP IT BY HAND whenever the home planet's artifact pin moves (`crates/bins/tests/
+/// home_artifact_pin.rs` asserts this number beside its digest): a moved digest is a changed solve,
+/// and an artifact stored by the old solve must then be refused and solved again. At 21 the key
+/// equals the declared tag of generator 21, so every artifact stored before the split still opens.
+///
+/// **Example.** Generator 22 removes the shore law. The home planet's shard boots, finds its
+/// artifact stored under key generation 21, opens it and ships it at once; the client builds the
+/// chunks again under the new column rule, and nobody waits 205 s for a solve that would change
+/// nothing.
+pub const ARTIFACT_KEY_GENERATION: u32 = 21;
+
+/// The key a realm's stored artifact is written and read under: the artifact's own generation
+/// ([`ARTIFACT_KEY_GENERATION`]) folded with the universe seed.
+#[must_use]
+pub fn artifact_world_tag(universe_seed: u64) -> u64 {
+    fnv1a_u64(
+        fnv1a_u64(FNV_OFFSET, u64::from(ARTIFACT_KEY_GENERATION)),
         universe_seed,
     )
 }
@@ -285,7 +329,7 @@ mod tests {
         assert_ne!(declared_world_tag(2298), declared_world_tag(2299));
         assert_ne!(declared_world_tag(2298), FNV_OFFSET);
         assert_eq!(
-            GENERATOR_VERSION, 21,
+            GENERATOR_VERSION, 22,
             "bump by hand on any output-changing edit, and say so"
         );
         assert_eq!(
@@ -293,6 +337,18 @@ mod tests {
             DECLARED_PIN,
             "the home world's declared tag"
         );
+    }
+
+    /// The artifact's key is its own generation: at 21 it is the key every stored artifact was
+    /// written under (generator 21's declared tag), and it folds the seed like the declared tag.
+    #[test]
+    fn the_artifact_key_is_its_own_generation_folded_with_the_seed() {
+        assert_eq!(
+            ARTIFACT_KEY_GENERATION, 21,
+            "bump by hand when the home planet's artifact pin moves, and say so"
+        );
+        assert_eq!(artifact_world_tag(2298), ARTIFACT_KEY_PIN);
+        assert_ne!(artifact_world_tag(2298), artifact_world_tag(2299));
     }
 
     #[test]
@@ -319,5 +375,9 @@ mod tests {
         assert_ne!(bare.measured, id.measured);
     }
 
-    const DECLARED_PIN: u64 = 7_301_160_111_668_162_610;
+    const DECLARED_PIN: u64 = 11_118_486_825_642_358_705;
+
+    /// The key the home world's artifacts are stored under: generator 21's declared tag, so the
+    /// artifacts written before the key had its own generation still open.
+    const ARTIFACT_KEY_PIN: u64 = 7_301_160_111_668_162_610;
 }

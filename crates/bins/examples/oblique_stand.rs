@@ -10,7 +10,8 @@
 //! **WHAT IT PICKS.** The land node nearest a stated AIM whose eight neighbours are land too (the
 //! `land_stand` rule) and whose sun stands at least `VD_STAND_SUN_MIN_DEG` up, then the nearest SEA
 //! node to it — the nose is aimed along the bearing toward that sea, so a COASTLINE lies on the
-//! frame's own vertical centre line and `coast_line`'s oblique walk can read it.
+//! frame's own vertical centre line (the `coast_line` example read it there; it left with the drawn
+//! water, ruling B22, and the coast is now the ground's drop to the dry sea floor).
 //!
 //! **THE PITCH IS STATED, not drawn.** The horizon of an eye `h` over a body of radius `R` stands
 //! `dip = acos(R / (R + h))` below the local horizontal. The nose is pitched `dip + below` below

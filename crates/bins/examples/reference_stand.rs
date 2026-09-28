@@ -32,15 +32,16 @@
 //! **WHAT IT READS.**
 //! 1. **THE POSE, BY A RULE.** The rule reads the SOLVED field: the artifact's rows, one row for each
 //!    8 192 m node. The search holds the nodes inside 300 km of the belt stand's direction. Each land
-//!    node whose eight neighbours are land gets a score in metres: its height over the mean of the
-//!    ring 20–60 km round it, plus the greatest relief (the highest minus the lowest top) 30–60 km
-//!    away inside one 55° sector of bearing. The best score is the stand. The middle of its sector
-//!    is the look bearing. The eye stands 400 m over the SHIPPED ground at the node's own direction.
+//!    node (dry by the solve and over its sea) whose eight neighbours are land gets a score in
+//!    metres: its height over the mean of the ring 20–60 km round it, plus the greatest relief (the
+//!    highest minus the lowest top) 30–60 km away inside one 55° sector of bearing. The best score
+//!    is the stand. The middle of its sector is the look bearing. The eye stands 400 m over the
+//!    SHIPPED ground at the node's own direction.
 //! 2. **THE SKYLINE.** The ONE march and the ONE break rule (`vd_bins::skyline`) read the SHIPPED
-//!    column (`vd_bins::shore_geometry::RungReader`: the coast mask's side, the water that side
-//!    names, the slope share, the solved `Z`, then the one kernel `column_surface_at`, in the chunk
-//!    builder's order). Each sample reads the rung the client's ladder draws at its distance from
-//!    the eye. The visible top of a column is its ground, or the water over it.
+//!    column (`vd_bins::shore_geometry::RungReader`: the slope share, the solved `Z`, then the one
+//!    kernel `column_surface_at`, in the chunk builder's order). Each sample reads the rung the
+//!    client's ladder draws at its distance from the eye. ★ The visible top of a column is its
+//!    ground (2026-09-28, ruling B22): no water is drawn, and a node's top is its ground too.
 //! 3. **THE FRAMING.** The pitch that puts our skyline where the reference's own skyline stands in
 //!    its frame (the median row of `11` §7's trace), the crop of the client's 45° frame that holds
 //!    the reference's 55°, the sun that is wanted, and the spawn line the picture tools take.
@@ -53,7 +54,7 @@
 //! round it, and the eye stands 400 m over the column the chunk builder draws there. To the
 //! north-east, 30–60 km out, the solve raised a range 2 400 m over the valley in front of it. The
 //! march steps along 360 bearings. Each sample reads the rung its distance asks for (rung 0 under
-//! the boots, rung 7 at 100 km, rung 9 past 222 km), and the coast mask says where the sea stands.
+//! the boots, rung 7 at 100 km, rung 9 past 222 km), and the dry sea floor is ground like any other.
 //! Inside the 55° round the range the rule finds one break at 0.25° in 60°. The reference holds
 //! 2.45 to 5.45, so the line says UNDER, as a report. The detail line reads zero samples and the
 //! shipped-path line reads zero columns, so the number is the shipped ground's own.
@@ -258,9 +259,9 @@ struct Candidate {
 /// The chunk builder's readers, one for each `(rung, face)` asked for, built when first asked.
 type Readers<'a> = BTreeMap<(u8, u8), Option<RungReader<'a>>>;
 
-/// ★ THE SHIPPED COLUMN a direction falls in at a rung: the column's own direction, its ground and
-/// its water as radii in metres from the body's centre (the water is ZERO on a body with none).
-/// `None` where the rung has no field or the field does not hold the column's stencil.
+/// ★ THE SHIPPED COLUMN a direction falls in at a rung: the column's own direction and its ground as
+/// a radius in metres from the body's centre. `None` where the rung has no field or the field does
+/// not hold the column's stencil.
 ///
 /// UNITS: `RungReader::column` answers radii in gap steps at the length format;
 /// `vd_terrain::units::metres_of_q28` divides by `STEPS_PER_M << LENGTH_BITS` (2³⁵), a power of two,
@@ -272,18 +273,14 @@ fn shipped_top<'a>(
     counts: &Arc<CoastCounts>,
     dir: DVec3,
     rung: u8,
-) -> Option<(DVec3, f64, f64)> {
+) -> Option<(DVec3, f64)> {
     let (face, i, j) = cell_of(body, dir, rung);
     let reader = readers
         .entry((rung, face.index()))
         .or_insert_with(|| RungReader::new(body, artifact, counts, face, rung))
         .as_ref()?;
     let col = reader.column(i, j)?;
-    Some((
-        unit_of(col.dir),
-        metres_of_q28(col.surface),
-        metres_of_q28(col.water),
-    ))
+    Some((unit_of(col.dir), metres_of_q28(col.surface)))
 }
 
 fn main() -> ExitCode {
@@ -339,15 +336,9 @@ fn main() -> ExitCode {
 
     // ── 1. THE POSE, BY THE RULE, ON THE SOLVED FIELD ─────────────────────────────────────────────
     let n = fine.node_count();
-    // A node's VISIBLE top in metres over the ladder radius: its ground, or the water over it.
-    let top_of = |node: u32| -> f64 {
-        let r = artifact.rows[node as usize];
-        if r.water_m == DRY_M {
-            f64::from(r.z_m)
-        } else {
-            f64::from(r.z_m.max(r.water_m))
-        }
-    };
+    // A node's VISIBLE top in metres over the ladder radius: its ground (ruling B22: no water is
+    // drawn over it).
+    let top_of = |node: u32| -> f64 { f64::from(artifact.rows[node as usize].z_m) };
     // The `land_stand` rule: dry and over the sea.
     let land = |node: u32| -> bool {
         let r = artifact.rows[node as usize];
@@ -478,14 +469,14 @@ fn main() -> ExitCode {
     let artifact_ref = &artifact;
     let counts_ref = &counts;
     let mut readers: Readers<'_> = BTreeMap::new();
-    let Some((_, foot_ground, foot_water)) =
+    let Some((_, foot_ground)) =
         shipped_top(&mut readers, body_ref, artifact_ref, counts_ref, d, 0)
     else {
         println!("reference_stand: REFUSED — the field holds no rung-0 column under the stand");
         return ExitCode::FAILURE;
     };
     // Radii in metres from the body's centre.
-    let r_f = foot_ground.max(foot_water);
+    let r_f = foot_ground;
     let r_c = r_f + EYE_OVER_GROUND_M;
     let look_rad = (stand.look_deg as f64).to_radians();
     let (e1, e2) = tangent_basis(d.to_array());
@@ -541,10 +532,9 @@ fn main() -> ExitCode {
             // can state is missing.
             let mut read = rung;
             loop {
-                if let Some((cd, g, w)) =
+                if let Some((cd, top)) =
                     shipped_top(&mut readers, body_ref, artifact_ref, counts_ref, dv, read)
                 {
-                    let top = g.max(w);
                     coarser += usize::from(read != rung);
                     if first_dir[usize::from(read)].is_none() {
                         first_dir[usize::from(read)] = Some(dv);
@@ -597,7 +587,7 @@ fn main() -> ExitCode {
     // ── 3b. THE READER AGAINST THE CHUNK BUILDER, ONE CHUNK A RUNG ─────────────────────────────────
     // The reader mirrors the chunk builder's own column (`ColumnRead`, crate-private). Here it is
     // checked against `column_field`, the chunk builder's public door, over the whole chunk that
-    // holds the first column each rung read: every surface and every water radius must be equal.
+    // holds the first column each rung read: every surface must be equal.
     let edge = CHUNK_EDGE as i32;
     let (mut checked, mut differ, mut refused) = (0usize, 0usize, 0usize);
     for (r, first) in first_dir.iter().enumerate() {
@@ -627,9 +617,7 @@ fn main() -> ExitCode {
                 let k = (cb * edge + ca) as usize;
                 checked += 1;
                 differ += match reader.column(i, j) {
-                    Some(col) => {
-                        usize::from((col.surface != cf.columns[k].1) | (col.water != cf.water[k]))
-                    }
+                    Some(col) => usize::from(col.surface != cf.columns[k].1),
                     None => 1,
                 };
             }
@@ -637,7 +625,7 @@ fn main() -> ExitCode {
     }
     println!(
         "  THE SHIPPED PATH, CHECKED: the reader against `vd_terrain::chunk::column_field` on one chunk for each rung the march \
-         read: {checked} columns compared, {differ} differ (surface or water), {refused} chunks the chunk builder refused"
+         read: {checked} columns compared, {differ} differ, {refused} chunks the chunk builder refused"
     );
 
     // ── 4. THE FRAMING, FROM THE REFERENCE'S OWN ROWS ──────────────────────────────────────────────

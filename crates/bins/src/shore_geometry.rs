@@ -2,58 +2,47 @@
 //! `docs/investigation/2026-09-24/terrain_believability_status.md`; the owner, 2026-09-24:
 //! *"shores are squared like teeth"*).
 //!
-//! **WHY IT EXISTS.** No gate saw the teeth (the status file, §4 "THE BLIND SPOTS"). This module is
-//! the shared half of the teeth instrument (`examples/shore_teeth.rs`). It MEASURES the shipped
-//! column and the line the shore draws. It never changes the world.
+//! **WHY IT EXISTS.** No gate saw the teeth (the status file, §4 "THE BLIND SPOTS"). This module
+//! MEASURES the shipped column and the lines a field draws. It never changes the world.
 //!
 //! 1. **THE SHIPPED COLUMN** ([`RungReader`]). The chunk builder's own reads for one column, in the
-//!    chunk builder's order (`vd_terrain::chunk`, `ColumnRead::column`): the cell's SIDE
-//!    (`sample_side`, on the fine lattice), the WATER that side names (`column_water`), the slope
-//!    share, the solved `Z`, and then the ONE kernel (`column_surface_at`). Beside the surface it
-//!    keeps the GROUND BASE the shore law reads (`radius + z + coarse`, the value
-//!    `vd_recipe::plan::column_surface_at` hands to `vd_recipe::height::shore`). The kernel does not
-//!    return the base, so the reader computes it from the kernel's own public parts and then CHECKS
-//!    it in every column: the base, the fine half, the bench and the shore law must give the
-//!    kernel's own surface again ([`ShippedColumn::base_agrees`]). This check runs the kernel's own
-//!    last lines again, so it is a DRIFT ALARM, not an independent proof: it goes false the day the
-//!    kernel builds its surface from another base.
+//!    chunk builder's order (`vd_terrain::chunk`, `ColumnRead::column`): the slope share, the solved
+//!    `Z`, and then the ONE kernel (`column_surface_at`). Beside the surface it keeps the GROUND
+//!    BASE (`radius + z + coarse`) and the fine half. The kernel does not return the base, so the
+//!    reader computes it from the kernel's own public parts and then CHECKS it in every column: the
+//!    base, the fine half and the bench must give the kernel's own surface again
+//!    ([`ShippedColumn::base_agrees`]). This check runs the kernel's own last lines again, so it is
+//!    a DRIFT ALARM, not an independent proof: it goes false the day the kernel builds its surface
+//!    from another base. ★ Since ruling B22 (2026-09-28) the column is the plain ground: the shore
+//!    law is removed, and the side and the water it read are removed with it.
 //! 2. **THE ZERO CONTOUR** ([`zero_contours`]). Marching squares on a square of columns, chained
-//!    into lines. The drawn shoreline is the contour of the side word; the ground's own waterline is
-//!    the contour of `base − water`.
+//!    into lines: the contour of a field's sign, such as the ground's height over the solve's sea.
 //! 3. **THE WINDOW BEARINGS** ([`window_bearings`]). A line cut into windows of one stated length,
 //!    each window's chord as an angle against the face grid, in the face's own cells — the frame
 //!    gate G-GRID states every long axis in (`crate::grid_bias`).
 //! 4. **THE FLAT NULL** ([`flat_null_quantile`]). The flatness a line with NO direction of its own
 //!    reads at a given count, by simulation — the method ruling W13.3 used for its 1.006 and 1.012.
 //!    The statistic is `crate::grid_bias::AxisHistogram::flatness`, never a copy of it.
-//! 5. **THE EDGES** ([`sea_edge`], [`lake_edge`]). The coast stand is the pinned one
-//!    `crate::drainage_gates::pick_stands` states for every instrument; [`sea_edge`] only turns its
-//!    node into the node edge the side word changes on. [`lake_edge`] finds the edge of the largest
-//!    lake (a reading; `shore_teeth` pins its lake stand, review finding 9 of plan step 2b).
 //!
 //! **Example.** A pilot at 120 km over the belt's coast sees a bank run straight for 8 km, turn 90°,
-//! and run straight again. The shipped column says: this column is LAND by the coast mask, its
-//! ground stands 60 m under the sea, and the shore law holds it 15 m over the water. The zero
-//! contour of the side word runs along the node's edge; the zero contour of the ground runs 3 km
-//! offshore of it. The window bearings of the first pile into the 0° and 90° bins; those of the
-//! second spread over all four.
+//! and run straight again. The shipped column says: this column's ground stands 60 m under the
+//! solve's sea, the kernel's surface is that ground, and the base check holds. The zero contour of
+//! the ground over the sea runs along the bank; its window bearings pile into the 0° and 90° bins.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use vd_core::glam::DVec3;
 use vd_recipe::Gi;
-use vd_recipe::height::{SIDE_INLAND, SIDE_LAND, SIDE_SEA, relief_parts_from, shore};
+use vd_recipe::height::relief_parts_from;
 use vd_recipe::plan::{FieldRead, PlanCharter, column_surface_at, site_direction};
 use vd_recipe::terrace::terrace;
 use vd_seed::bend::Face;
 use vd_terrain::BodyDefinition;
 use vd_terrain::artifact::{
-    Artifact, CoastCounts, FACIES_SHIFT, PyramidField, Side, SlopeCharter, ZField, column_water,
-    sample_side, sample_z, slope_charter, slope_share,
+    Artifact, CoastCounts, PyramidField, SlopeCharter, ZField, sample_z, slope_charter, slope_share,
 };
 use vd_terrain::macro_lattice::MacroLattice;
-use vd_terrain::solve::{FACIES_LAKE, FACIES_SEA};
 
 use crate::grid_bias::AxisHistogram;
 
@@ -62,7 +51,7 @@ use crate::grid_bias::AxisHistogram;
 pub enum RungSource<'a> {
     /// Level zero: the artifact's own rows.
     Rows(&'a Artifact),
-    /// Level `k` from one: the pyramid's means, with the body's coast mask and counts.
+    /// Level `k` from one: the pyramid's means.
     Level(PyramidField),
 }
 
@@ -87,25 +76,11 @@ impl RungSource<'_> {
 pub struct ShippedColumn {
     /// The column's direction, at the bend's fraction bits.
     pub dir: [Gi; 3],
-    /// The cell's side of the coast mask (`sample_side`): land, the sea, a lake, a pocket's dry
-    /// floor (2026-09-25), or `None`.
-    pub side: Option<Side>,
-    /// The side WORD the shore law obeys (`column_water`'s side): `SIDE_LAND`, `SIDE_SEA`,
-    /// `SIDE_INLAND` (land with no sea node in its read stencil, 2026-09-24) or `SIDE_UNKNOWN`. A
-    /// lake cell whose level names no lake reads the land rule's word here.
-    pub side_word: Gi,
-    /// The water that STANDS over the column, as a radius: the body's sea, a lake's level, the
-    /// nearest row's (no mask), or ZERO for an inland column (2026-09-24, plan step 2 part 3b).
-    pub water: Gi,
-    /// ★ The water the shore law HOLDS the column against (`column_water`'s `hold`): the sea for
-    /// every land column, inland ones included, and the standing water for the rest.
-    pub hold: Gi,
-    /// ★ THE GROUND BASE the shore law reads: the ladder radius, the solved `Z` and the coarse
-    /// octaves the field did not replace — the ground WITHOUT the fine octaves.
+    /// ★ THE GROUND BASE: the ladder radius, the solved `Z` and the coarse octaves the field did
+    /// not replace — the ground WITHOUT the fine octaves.
     pub base: Gi,
     /// ★ THE SOLVED `Z` the column read (`sample_z` at the rung's level), in gap steps at the
-    /// length format: `base` less the ladder radius and the coarse octaves (the shoreline bench,
-    /// 2026-09-25).
+    /// length format: `base` less the ladder radius and the coarse octaves.
     pub z: Gi,
     /// ★ THE SLOPE SHARE the column read (`slope_share`), at the noise's fraction bits: the
     /// solved field's own voice in the roughness factor.
@@ -113,49 +88,17 @@ pub struct ShippedColumn {
     /// ★ THE FINE HALF the kernel added (`relief_parts_from(..).fine`): the fine octaves' sum
     /// times the column's roughness factor, in the same unit as `base`.
     pub fine: Gi,
-    /// ★ THE RAW SURFACE: `terrace(base + fine)`, the kernel's surface BEFORE the shore law. The
-    /// shore law turns it into [`ShippedColumn::surface`].
-    pub raw: Gi,
-    /// The final surface, from the ONE kernel.
+    /// The surface, from the ONE kernel: `terrace(base + fine)`.
     pub surface: Gi,
-    /// Whether the base, the fine half, the bench and the shore law give the kernel's own surface
-    /// again. A `false` says this reader's base is NOT the kernel's base (the kernel changed), and
-    /// every reading against the base is void. A `true` says only that the kernel still builds its
+    /// Whether the base, the fine half and the bench give the kernel's own surface again. A
+    /// `false` says this reader's base is NOT the kernel's base (the kernel changed), and every
+    /// reading against the base is void. A `true` says only that the kernel still builds its
     /// surface the way this reader repeats it: a drift alarm.
     pub base_agrees: bool,
 }
 
-impl ShippedColumn {
-    /// The side the shore law DRAWS: `Some(true)` for a column held under its water, `Some(false)`
-    /// for one held over it, `None` where no side is stated and the ground's own sign decides.
-    #[must_use]
-    pub fn drawn_wet(&self) -> Option<bool> {
-        if self.side_word == SIDE_SEA {
-            Some(true)
-        } else if (self.side_word == SIDE_LAND) | (self.side_word == SIDE_INLAND) {
-            Some(false)
-        } else {
-            None
-        }
-    }
-
-    /// Whether the column's water is a LAKE (the cell's own mask word), and not the sea.
-    #[must_use]
-    pub fn lake(&self) -> bool {
-        self.side == Some(Side::Lake)
-    }
-
-    /// ★ THE GROUND'S OWN SIDE: over the water the shore law holds it against (or at it) by the base
-    /// alone — the rule the shore law runs where no side is stated (`vd_recipe::height::shore`,
-    /// `g >= 0`).
-    #[must_use]
-    pub fn ground_dry(&self) -> bool {
-        self.base >= self.hold
-    }
-}
-
 /// ★ THE CHUNK BUILDER'S READ OF ONE RUNG ON ONE FACE: the field that rung reads, the lattice the
-/// heights gather on, the fine lattice the side is read on, and the two charters a chunk draws once.
+/// heights gather on, and the two charters a chunk draws once.
 pub struct RungReader<'a> {
     pub body: &'a BodyDefinition,
     pub face: Face,
@@ -163,9 +106,7 @@ pub struct RungReader<'a> {
     /// The pyramid level the rung reads: zero for the rows.
     pub level: u32,
     pub source: RungSource<'a>,
-    /// The body's own (fine) lattice: the side's lattice at every rung.
-    pub fine: MacroLattice,
-    /// The level's lattice: the heights' and the water's lattice.
+    /// The level's lattice: the heights' lattice.
     pub lattice: MacroLattice,
     pub charter: PlanCharter,
     pub slope: SlopeCharter,
@@ -175,8 +116,9 @@ pub struct RungReader<'a> {
 
 impl<'a> RungReader<'a> {
     /// The read of `rung` on `face`, as `vd_terrain::chunk::column_field` sets it up for a chunk of
-    /// that face. `counts` is the body's own coast counts (`Artifact::coast_counts`), folded once.
-    /// `None` where the body has no lattice or the level does not exist.
+    /// that face. `counts` is the body's own coast counts (`Artifact::coast_counts`), folded once,
+    /// which a pyramid level carries as the artifact's stored fold. `None` where the body has no
+    /// lattice or the level does not exist.
     #[must_use]
     pub fn new(
         body: &'a BodyDefinition,
@@ -201,48 +143,6 @@ impl<'a> RungReader<'a> {
             rung,
             level,
             source,
-            fine,
-            lattice,
-            charter: body.plan_charter(rung, face),
-            slope,
-            first: body.first_fine(),
-        })
-    }
-
-    /// ★ THE READ of `rung` on `face` at a STATED pyramid level (the shoreline bench's one-change
-    /// variant R0b, 2026-09-25): the same read as [`RungReader::new`], but the heights gather on
-    /// `level` (zero: the rows) whatever `PyramidField::level_for` would pick for the rung. The
-    /// side still reads the fine lattice. No shipped path reads a rung at another level: this is
-    /// an instrument's what-if, and [`RungReader::new`] is the shipped read. `None` where the body
-    /// has no lattice or the level does not exist.
-    ///
-    /// **Example.** The high lake seen from 1 000 km draws rung 11 on level 1 (16 km means). The
-    /// bench reads the same rung-11 columns on level 0 (the rows themselves), so the one change
-    /// "the block means" can be tested alone.
-    #[must_use]
-    pub fn with_level(
-        body: &'a BodyDefinition,
-        artifact: &'a Artifact,
-        counts: &Arc<CoastCounts>,
-        face: Face,
-        rung: u8,
-        level: u32,
-    ) -> Option<RungReader<'a>> {
-        let fine = body.macro_lattice()?;
-        let source = if level == 0 {
-            RungSource::Rows(artifact)
-        } else {
-            RungSource::Level(PyramidField::of(artifact, level, counts)?)
-        };
-        let lattice = fine.coarser(source.field().level())?;
-        let slope = slope_charter(body, &lattice, rung);
-        Some(RungReader {
-            body,
-            face,
-            rung,
-            level,
-            source,
-            fine,
             lattice,
             charter: body.plan_charter(rung, face),
             slope,
@@ -252,23 +152,11 @@ impl<'a> RungReader<'a> {
 
     /// ★ THE COLUMN at cell `(i, j)` of this rung, which must stand ON the face (`0 ≤ i, j <` the
     /// rung's cells an edge): the chunk builder's reads in the chunk builder's order, then the ONE
-    /// kernel, then the base the kernel handed the shore law. `None` where the field does not hold
+    /// kernel, then the base the kernel built its surface on. `None` where the field does not hold
     /// the column's stencil.
     #[must_use]
     pub fn column(&self, i: i32, j: i32) -> Option<ShippedColumn> {
         let field = self.source.field();
-        let side = sample_side(&self.fine, field, self.face, self.rung, i, j);
-        let read = column_water(
-            self.body,
-            &self.lattice,
-            field,
-            self.face,
-            self.rung,
-            i,
-            j,
-            side,
-        );
-        let (water, hold, side_word) = (read.water, read.hold, read.side);
         let share = slope_share(
             &self.slope,
             &self.lattice,
@@ -287,13 +175,11 @@ impl<'a> RungReader<'a> {
                 z,
                 first: self.first,
                 slope_share: share,
-                water: hold,
-                side: side_word,
             },
         )
         .h;
         // The kernel's own two halves, from the kernel's own public function, with the very words
-        // the kernel read; the base is the ground the kernel hands the shore law.
+        // the kernel read; the base is the ground the kernel adds the fine half to.
         let parts = relief_parts_from(
             &self.charter.octaves,
             self.first,
@@ -303,29 +189,16 @@ impl<'a> RungReader<'a> {
             share,
         );
         let base = self.charter.radius + z + parts.coarse;
-        let raw = terrace(&self.charter.terrace, base + parts.fine);
-        let again = shore(base, hold, raw, side_word);
+        let again = terrace(&self.charter.terrace, base + parts.fine);
         Some(ShippedColumn {
             dir,
-            side,
-            side_word,
-            water,
-            hold,
             base,
             z,
             share,
             fine: parts.fine,
-            raw,
             surface,
             base_agrees: again == surface,
         })
-    }
-
-    /// The body's own sea as a radius (ZERO for a body with none): what the shore law holds a SEA
-    /// column against.
-    #[must_use]
-    pub fn sea_radius(&self) -> Gi {
-        self.charter.sea_radius
     }
 }
 
@@ -589,161 +462,6 @@ pub fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
     }
     let k = ((sorted.len() as f64 * q) as usize).min(sorted.len() - 1);
     sorted[k]
-}
-
-/// ★ ONE NODE EDGE OF THE COAST MASK: a node the mask calls DRY beside a node it calls WET, on one
-/// face. The side word changes at the line between them at every rung from 0 to 13. Where the wet
-/// node is a CORNER neighbour ([`sea_edge`] tries the four sides first), the two nodes share only a
-/// corner, and [`NodeEdge::middle`] is that corner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NodeEdge {
-    pub face: Face,
-    /// The dry node's `(i, j)` on the face.
-    pub dry: (i32, i32),
-    /// The wet node's `(i, j)` on the face: a neighbour of `dry`.
-    pub wet: (i32, i32),
-    /// The dry node's discharge class (`Row::discharge_log`), the coast pick's own score.
-    pub discharge: u8,
-}
-
-impl NodeEdge {
-    /// ★ THE MIDDLE OF THE EDGE in rung-0 cells of the face: the mean of the two nodes' centres. A
-    /// node `k` covers rung-0 cells `[k · size, (k + 1) · size)`, so for two nodes side by side the
-    /// middle stands on the first cell of the higher node, and at every rung `r` the cell index
-    /// `middle >> r` is the first column past the side's change.
-    #[must_use]
-    pub fn middle(&self, cells_per_node: u32) -> (i64, i64) {
-        let size = i64::from(cells_per_node);
-        (
-            (i64::from(self.dry.0) + i64::from(self.wet.0) + 1) * size / 2,
-            (i64::from(self.dry.1) + i64::from(self.wet.1) + 1) * size / 2,
-        )
-    }
-}
-
-/// Whether `(i, j)` stands at least `margin` nodes inside its face.
-fn inside(lattice: &MacroLattice, i: i32, j: i32, margin: i32) -> bool {
-    let last = lattice.edge as i32 - 1 - margin;
-    (margin..=last).contains(&i) && (margin..=last).contains(&j)
-}
-
-/// The first neighbour of `(face, i, j)` ON THE SAME FACE, in the stated order — the four sides
-/// first, then the four corners — for which `wet` holds.
-fn first_neighbour(
-    lattice: &MacroLattice,
-    face: Face,
-    i: i32,
-    j: i32,
-    wet: &dyn Fn(u32) -> bool,
-) -> Option<(i32, i32)> {
-    const ORDER: [(i32, i32); 8] = [
-        (1, 0),
-        (-1, 0),
-        (0, 1),
-        (0, -1),
-        (1, 1),
-        (1, -1),
-        (-1, 1),
-        (-1, -1),
-    ];
-    ORDER
-        .iter()
-        .map(|&(di, dj)| (i + di, j + dj))
-        .filter(|&(ni, nj)| inside(lattice, ni, nj, 0))
-        .find(|&(ni, nj)| wet(lattice.index(face, ni, nj)))
-}
-
-/// ★ THE COAST EDGE AT ONE NODE: the node, and its first SEA neighbour on the same face by the
-/// facies bit the coast rule reads (`crate::drainage_gates::rule_picks`), so a stand and its edge
-/// agree. The coast itself is NEVER chosen here: the three stands live once, in
-/// `crate::drainage_gates`, and this only turns the stand's node into the node edge the side word
-/// changes on. `None` where the node has no sea neighbour on its own face.
-#[must_use]
-pub fn sea_edge(artifact: &Artifact, lattice: &MacroLattice, node: u32) -> Option<NodeEdge> {
-    let facies = |m: u32| artifact.rows[m as usize].receiver_facies >> FACIES_SHIFT;
-    let (face, i, j) = lattice.split(node);
-    let sea = |m: u32| facies(m) & FACIES_SEA != 0;
-    let wet = first_neighbour(lattice, face, i, j, &sea)?;
-    Some(NodeEdge {
-        face,
-        dry: (i, j),
-        wet,
-        discharge: artifact.rows[node as usize].discharge_log,
-    })
-}
-
-/// ★ THE EDGE OF THE LARGEST LAKE: the lake patches as `examples/lake_census.rs` counts them (lake
-/// and not sea by the facies, joined through the eight neighbours), largest first (the first node
-/// breaks a tie); in the first patch that has one, the first node by index that stands `margin`
-/// nodes inside its face with a DRY node (neither sea nor lake) on one of its four sides. Returns
-/// the edge and the patch's size in nodes. `margin` must be at least one, so the four sides stand
-/// on the node's own face.
-#[must_use]
-pub fn lake_edge(
-    artifact: &Artifact,
-    lattice: &MacroLattice,
-    margin: i32,
-) -> Option<(NodeEdge, usize)> {
-    let n = artifact.node_count();
-    let facies = |node: u32| artifact.rows[node as usize].receiver_facies >> FACIES_SHIFT;
-    let is_lake = |node: u32| {
-        let f = facies(node);
-        (f & FACIES_LAKE != 0) & (f & FACIES_SEA == 0)
-    };
-    let is_dry = |node: u32| {
-        let f = facies(node);
-        (f & FACIES_LAKE == 0) & (f & FACIES_SEA == 0)
-    };
-    let mut seen = vec![false; n];
-    let mut patches: Vec<Vec<u32>> = Vec::new();
-    for start in 0..n as u32 {
-        if seen[start as usize] || !is_lake(start) {
-            continue;
-        }
-        seen[start as usize] = true;
-        let mut patch = Vec::new();
-        let mut queue = VecDeque::from([start]);
-        while let Some(node) = queue.pop_front() {
-            patch.push(node);
-            for m in lattice.neighbours(node) {
-                if m == vd_terrain::macro_lattice::NO_NODE || seen[m as usize] || !is_lake(m) {
-                    continue;
-                }
-                seen[m as usize] = true;
-                queue.push_back(m);
-            }
-        }
-        patch.sort_unstable();
-        patches.push(patch);
-    }
-    // Largest first; a tie goes to the patch whose first node is smaller.
-    patches.sort_by(|x, y| y.len().cmp(&x.len()).then(x[0].cmp(&y[0])));
-    for patch in &patches {
-        for &node in patch {
-            let (face, i, j) = lattice.split(node);
-            if !inside(lattice, i, j, margin) {
-                continue;
-            }
-            let sides = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-            let dry = sides
-                .iter()
-                .map(|&(di, dj)| (i + di, j + dj))
-                .find(|&(ni, nj)| is_dry(lattice.index(face, ni, nj)));
-            if let Some(dry) = dry {
-                return Some((
-                    NodeEdge {
-                        face,
-                        dry,
-                        wet: (i, j),
-                        discharge: artifact.rows[lattice.index(face, dry.0, dry.1) as usize]
-                            .discharge_log,
-                    },
-                    patch.len(),
-                ));
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

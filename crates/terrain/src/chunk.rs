@@ -6,8 +6,10 @@
 //! **Two steps, the first shared.** A [`ColumnField`] is the column pass of one chunk column — the
 //! direction, the surface and the biome of each of the `62 × 62` columns, plus the least and the
 //! greatest surface among them. Every chunk of that column along the radial reuses it. The cell pass
-//! then decides, from the column extremes, whether the chunk is wholly air and water, wholly bedrock,
-//! or crossed by the surface or a cave; only the crossed chunk pays per cell.
+//! then decides, from the column extremes, whether the chunk is wholly air, wholly bedrock, or crossed
+//! by the surface or a cave; only the crossed chunk pays per cell. ★ No cell is water since ruling B22
+//! (2026-09-28): the charter states no sea and no column states a water, so the dry sea floor shows
+//! until the one-volume fill step.
 //!
 //! **A skip writes exactly the bytes the cell pass would.** A chunk is skipped as "above" only when
 //! its lowest cell centre is more than one cell above every surface of the column, so every cell's gap
@@ -110,7 +112,7 @@ pub struct ChunkLattice {
 /// How a chunk was produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum How {
-    /// More than a cell above every surface of its column: air and water at the top code.
+    /// More than a cell above every surface of its column: air at the top code.
     AboveSurface,
     /// More than a cell below every surface, stratum and cave of its column: bedrock at the bottom
     /// code.
@@ -129,10 +131,6 @@ pub struct ColumnField {
     /// `62 × 62` entries in packing order `b·62 + a`: the direction at the bend's fraction bits, the
     /// surface radius in gap steps at [`LENGTH_BITS`], the biome.
     pub columns: Vec<([Gi; 3], Gi, Biome)>,
-    /// ★ The same columns' WATER surface radius (slice 8c stage C5) in gap steps at
-    /// [`LENGTH_BITS`], or ZERO for a dry column: the artifact's row under the column (the sea,
-    /// a lake), the body's sea where the field holds no water word, nothing without a sea.
-    pub water: Vec<Gi>,
     /// ★ The same columns' ROCK PROVINCE (slice 8d step 2), as the charter's rock map indexes it:
     /// the nearest artifact row's word, or the stated default where the field holds none.
     pub province: Vec<Gi>,
@@ -201,7 +199,6 @@ pub fn column_field(
         z: 0,
     };
     let mut columns = Vec::with_capacity(CHUNK_EDGE * CHUNK_EDGE);
-    let mut water = Vec::with_capacity(CHUNK_EDGE * CHUNK_EDGE);
     let mut province = Vec::with_capacity(CHUNK_EDGE * CHUNK_EDGE);
     let mut sites = Vec::with_capacity(CHUNK_EDGE * CHUNK_EDGE);
     // The extremes start at the FIRST column's own surface, never at a sentinel (the refuter's
@@ -218,16 +215,9 @@ pub fn column_field(
     // measurements, never a shipped path.
     // The field stands at a pyramid level (zero for the rows): the read gathers on the lattice of
     // that level, so a coarse rung reads the means the client holds from orbit.
-    // ★ THE BODY'S OWN (FINE) LATTICE beside the level's (2026-09-22, the coast mask): the heights
-    // gather on the level's lattice, the water's SIDE on the fine one, because a side is a bit and a
-    // bit does not fold into a mean.
-    let fine = match field {
-        Some(_) => Some(body.macro_lattice()?),
+    let lattice = match field {
+        Some(f) => Some(body.macro_lattice()?.coarser(f.level())?),
         None => None,
-    };
-    let lattice = match (field, fine.as_ref()) {
-        (Some(f), Some(l)) => Some(l.coarser(f.level())?),
-        _ => None,
     };
     let first = if field.is_some() {
         body.first_fine()
@@ -246,7 +236,6 @@ pub fn column_field(
         body,
         field,
         lattice: lattice.as_ref(),
-        fine_lattice: fine.as_ref(),
         charter: &charter,
         first,
         slope_charter,
@@ -266,7 +255,6 @@ pub fn column_field(
                 highest = greater(highest, got.h);
             }
             columns.push((got.dir, got.h, got.biome));
-            water.push(got.water);
             province.push(got.province);
             sites.push(got.site);
             a += 1;
@@ -279,7 +267,6 @@ pub fn column_field(
         x,
         y,
         columns,
-        water,
         province,
         sites,
         lowest,
@@ -288,23 +275,21 @@ pub fn column_field(
 }
 
 /// ★ ONE COLUMN RULE FOR THE CORE AND THE HALO (2026-09-20): what a column's site reads under a
-/// field — its `Z` from the field's stencil, its water and coast from the nearest row, the fine
-/// octaves over it — and, with no field, the recipe's own relief. The halo columns used to read
-/// the recipe's relief while the core read the artifact, so every chunk's boundary quad sloped to
-/// a height its neighbour did not share: a grid of cracks, one per chunk edge, that the owner
-/// photographed from 400 km and the pilot-eye capture measured as a one-pixel line of sea colour
-/// on every edge at 20 km. A column past a face's edge (the halo across a seam, a corner phantom)
-/// reads by the same rule as the core's seam columns.
+/// field — its `Z` from the field's stencil, its slope share and its province, the fine octaves over
+/// it — and, with no field, the recipe's own relief. The halo columns used to read the recipe's
+/// relief while the core read the artifact, so every chunk's boundary quad sloped to a height its
+/// neighbour did not share: a grid of cracks, one per chunk edge, that the owner photographed from
+/// 400 km and the pilot-eye capture measured as a one-pixel line of sea colour on every edge at
+/// 20 km. A column past a face's edge (the halo across a seam, a corner phantom) reads by the same
+/// rule as the core's seam columns.
+///
+/// ★ NO WATER AND NO COAST (2026-09-28, ruling B22 step 1): the row's water words, its coast bit
+/// and the mask's side word reach no column, so a column is its plain ground at every rung.
 pub(crate) struct ColumnRead<'a> {
     pub body: &'a BodyDefinition,
     pub field: Option<&'a dyn crate::artifact::ZField>,
     /// The macro lattice of the field's level, when a field is read.
     pub lattice: Option<&'a MacroLattice>,
-    /// ★ THE BODY'S OWN MACRO LATTICE (level 0), when a field is read (2026-09-22, the coast mask):
-    /// the lattice the water's SIDE is read on at EVERY rung. A level's `Z` is the mean of its
-    /// children and a mean crosses the sea elsewhere than its children do, so the side comes off the
-    /// fine node's own bit and the shoreline stands still when a ring swaps.
-    pub fine_lattice: Option<&'a MacroLattice>,
     pub charter: &'a PlanCharter,
     /// The first fine octave summed over a field (zero without one).
     pub first: usize,
@@ -317,16 +302,14 @@ pub(crate) struct ColumnRead<'a> {
 }
 
 /// What one column's read answers: everything the cell pass needs about the column, and nothing
-/// about the chunk. A STRUCT and not a tuple, because the rock province made it six things, and six
-/// unnamed things at a call site is how a water radius ends up in a province's place.
+/// about the chunk. A STRUCT and not a tuple, because five unnamed things at a call site is how a
+/// radius ends up in a province's place.
 pub(crate) struct ColumnAt {
     /// The column's direction, at the bend's fraction bits.
     pub dir: [Gi; 3],
     /// The surface radius, in gap steps at [`LENGTH_BITS`].
     pub h: Gi,
     pub biome: Biome,
-    /// The water surface radius, or ZERO for a dry column.
-    pub water: Gi,
     /// ★ The ROCK PROVINCE (slice 8d step 2), as the charter's rock map indexes it.
     pub province: Gi,
     pub site: crate::lattice::Site,
@@ -334,9 +317,8 @@ pub(crate) struct ColumnAt {
 
 impl ColumnRead<'_> {
     /// The column at `(a, b)` of the key's chunk, the halo's `−1` and `CHUNK_EDGE` included: its
-    /// direction, surface height, biome, water radius, rock province and site. `None` when the
-    /// field does not hold the column's stencil (the chunk is not built; the coarser rung stands,
-    /// ruling F9).
+    /// direction, surface height, biome, rock province and site. `None` when the field does not
+    /// hold the column's stencil (the chunk is not built; the coarser rung stands, ruling F9).
     pub fn column(&self, a: i32, b: i32) -> Option<ColumnAt> {
         let body = self.body;
         let key = self.key;
@@ -348,15 +330,7 @@ impl ColumnRead<'_> {
         // row — a body with no artifact, a pyramid level, a tile not yet here — stands on the
         // STATED default, so the rock is never a guess.
         let mut province = crate::strata::DEFAULT_PROVINCE.code();
-        // ★ THE WATER'S SIDE (2026-09-22, the coast mask; the LAKE 2026-09-23, ruling W16): the
-        // cell's own side word — land, sea or lake — or the unknown word where this field cannot
-        // say, which leaves the ground's own sign to decide.
-        let mut side = vd_recipe::height::SIDE_UNKNOWN;
-        // ★ THE WATER THE SHORE LAW HOLDS THE COLUMN AGAINST, apart from the water that stands over
-        // it (2026-09-24, plan step 2 part 3b): an inland column is held over the sea's level and
-        // no water stands over it.
-        let mut hold = body.sea_radius;
-        let (z, w, coast) = match (self.field, self.lattice) {
+        let z = match (self.field, self.lattice) {
             (Some(f), Some(l)) => {
                 // A corner phantom names no cell: its `Z` is the key face's corner node,
                 // which the read reaches by the cell the phantom would be on that face.
@@ -367,17 +341,6 @@ impl ColumnRead<'_> {
                 } else {
                     (Face::from_index(site.face).unwrap_or(face), site.i, site.j)
                 };
-                // ★ THE CELL'S SIDE FIRST, then its water (2026-09-23, ruling W16). The FINE
-                // lattice, never the level's: the side is the fine rows' own word, read over the
-                // cell's whole footprint. The water then follows the side — the body's sea for a
-                // sea cell, the row's own level for a lake cell — through the ONE reader the
-                // morph's height reads too, so the two hold one shore and one water.
-                let cell_side = self
-                    .fine_lattice
-                    .and_then(|fine| crate::artifact::sample_side(fine, f, zf, rung, zi, zj));
-                let read = crate::artifact::column_water(body, l, f, zf, rung, zi, zj, cell_side);
-                side = read.side;
-                hold = read.hold;
                 // ★ THE SOLVED FIELD'S OWN SLOPE (2026-09-21): the share that says whether this
                 // column stands on a RANGE the solve raised or on a PLAIN it left. The column reads
                 // it off the very field its `Z` comes from, so a chunk and its halo agree by
@@ -386,13 +349,9 @@ impl ColumnRead<'_> {
                     crate::artifact::slope_share(&self.slope_charter, l, f, zf, rung, zi, zj)?;
                 province = crate::artifact::sample_province(l, f, zf, rung, zi, zj)
                     .unwrap_or(crate::strata::DEFAULT_PROVINCE.code());
-                (
-                    crate::artifact::sample_z(l, f, zf, rung, zi, zj)?,
-                    read.water,
-                    read.coast,
-                )
+                crate::artifact::sample_z(l, f, zf, rung, zi, zj)?
             }
-            _ => (Gi::ZERO, body.sea_radius, false),
+            _ => Gi::ZERO,
         };
         let dir =
             vd_recipe::plan::site_direction(self.charter, i32::from(site.face), site.i, site.j);
@@ -403,27 +362,12 @@ impl ColumnRead<'_> {
                 z,
                 first: self.first,
                 slope_share,
-                water: hold,
-                side,
             },
         );
-        let (dir, h) = (surface.dir, surface.h);
-        let biome = biome_of_code(surface.biome);
-        // ★ THE COAST MARKED (C5): a column in the coast band that stands above its water is
-        // a beach — sand over sandstone, the desert's own strata — and the water below it is
-        // where the sheet meets the ground. ★ Above the water the shore law HOLDS it against
-        // (2026-09-25, review finding 5 of plan step 2): an inland column and a pocket's floor hold
-        // the sea's level and have no standing water, so a floor under the sea's level is no beach.
-        let biome = if coast & (h >= hold) {
-            Biome::Desert
-        } else {
-            biome
-        };
         Some(ColumnAt {
-            dir,
-            h,
-            biome,
-            water: w,
+            dir: surface.dir,
+            h: surface.h,
+            biome: biome_of_code(surface.biome),
             province: Gi::new(i64::from(province)),
             site,
         })
@@ -464,7 +408,11 @@ pub fn charter_of(body: &BodyDefinition, rung: u8, box_edge: usize) -> CellChart
     let bench = body.terrace_at(rung);
     let carve_any = tubes_carve_at(body, rung) | caverns_carve_at(body, rung);
     CellCharter {
-        sea_radius: body.sea_radius,
+        // ★ NO SEA IN ANY CELL (2026-09-28, ruling B22 step 1): the charter states ZERO whatever the
+        // body's solved sea is, so the skip, the halo and the card all read air over the ground and
+        // the dry sea floor shows. The one-volume fill step states the water again; the body's sea
+        // stays the biome's datum.
+        sea_radius: Gi::ZERO,
         cave_min: Gi::new(i64::from(body.caves.min_depth_m) * STEPS_PER_M) << LENGTH_BITS,
         cave_max: Gi::new(i64::from(body.caves.max_depth_m) * STEPS_PER_M) << LENGTH_BITS,
         cavern_threshold: body.caves.cavern_threshold,
@@ -517,10 +465,11 @@ pub fn cell_of_word(word: u32) -> Cell {
     }
 }
 
-/// The cell more than a cell above every surface: the fluid at its radius, at the top code.
+/// The cell more than a cell above every surface: the fluid at its radius, at the top code. No
+/// column states a water since ruling B22, so the fluid is the charter's air.
 #[must_use]
-pub fn above_surface_cell(charter: &CellCharter, r: Gi, water: Gi) -> Cell {
-    cell_of_word(above_cell_word(charter, r, water))
+pub fn above_surface_cell(charter: &CellCharter, r: Gi) -> Cell {
+    cell_of_word(above_cell_word(charter, r, Gi::ZERO))
 }
 
 /// The cell more than a cell below every surface, stratum and cave: bedrock at the bottom code.
@@ -530,8 +479,7 @@ pub fn below_surface_cell(charter: &CellCharter) -> Cell {
 }
 
 /// A chunk filled from one rule per radial layer AND column: the skip's fill (the layer's radius
-/// and the column's water decide a cell above every surface; a cell below every surface is one
-/// rule for all).
+/// decides a cell above every surface; a cell below every surface is one rule for all).
 fn filled(
     key: ChunkKey,
     mut cell: impl FnMut(usize, usize) -> (Stratum, i8),
@@ -576,13 +524,13 @@ pub fn generate_in(body: &BodyDefinition, column: &ColumnField, z: i32) -> Optio
     let r_high = corner_radius(body, k0 + edge, rung);
     let reach = reach_steps(body, rung);
     // Above: the lowest cell CENTRE (r_low + ½ cell) is more than a cell over the highest surface,
-    // so every gap is ≥ 1 and clamps to the top code; air or water by the cell's radius.
+    // so every gap is ≥ 1 and clamps to the top code; the fluid by the cell's radius.
     if r_low - half_cell > column.highest {
         return Some(filled(
             key,
-            |col, c| {
+            |_, c| {
                 let r = cell_radius(body, k0 + c as i32, rung);
-                let cell = above_surface_cell(&charter, r, column.water[col]);
+                let cell = above_surface_cell(&charter, r);
                 (cell.stratum, cell.gap)
             },
             How::AboveSurface,
@@ -737,7 +685,6 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
             let mut a = 0;
             while a < CHUNK_EDGE {
                 let (dir, h, biome) = column.columns[b * CHUNK_EDGE + a];
-                let water = column.water[b * CHUNK_EDGE + a];
                 let province = column.province[b * CHUNK_EDGE + a];
                 let site = column.sites[b * CHUNK_EDGE + a];
                 let k = k0 + c as i32;
@@ -759,7 +706,6 @@ pub fn cell_pass(body: &BodyDefinition, column: &ColumnField, key: ChunkKey) -> 
                         h,
                         biome,
                         r_steps,
-                        water,
                         province,
                     },
                     value,
@@ -959,8 +905,6 @@ pub(crate) struct CellSite {
     pub biome: Biome,
     /// The cell centre's radius in WHOLE gap steps — exact.
     pub r_steps: Gi,
-    /// The column's water surface radius at [`LENGTH_BITS`], or ZERO for a dry column.
-    pub water: Gi,
     /// ★ The column's ROCK PROVINCE (slice 8d step 2), as the charter's rock map indexes it.
     pub province: Gi,
 }
@@ -987,7 +931,9 @@ pub(crate) fn finish_cell(
             h: site.h,
             biome: Gi::new(site.biome as i64),
             r_steps: site.r_steps,
-            water: site.water,
+            // ★ NO COLUMN STATES A WATER (2026-09-28, ruling B22 step 1): every cell over the
+            // ground is air until the one-volume fill step.
+            water: Gi::ZERO,
             province: site.province,
         },
         value,
@@ -1113,20 +1059,19 @@ mod tests {
                     "{p:?} reads {rock:?}, which is not one of its four"
                 );
             }
-            // The fluid rule, on either side of this body's own sea.
-            // The fluid rule, on either side of a stated sea (a seed-built body has none).
+            // ★ THE CHARTER STATES NO SEA (2026-09-28, ruling B22 step 1), whatever the body's
+            // own: a cell under a stated sea's level is air, and the codes still name the two
+            // fluids the one-volume fill step will need.
             let wet = m.with_sea_m(Some(0));
             let charter_wet = charter_of(&wet, 0, CHUNK_EDGE);
+            assert_eq!(charter_wet.sea_radius, Gi::ZERO);
             assert_eq!(
                 charter_wet.fluid_code(wet.sea_radius - Gi::ONE).raw() as u8,
-                Stratum::Water.code()
-            );
-            assert_eq!(
-                charter_wet.fluid_code(wet.sea_radius).raw() as u8,
                 Stratum::Air.code()
             );
             assert_eq!(charter.sea_radius, Gi::ZERO);
             assert_eq!(charter.fluid_code(Gi::ONE).raw() as u8, Stratum::Air.code());
+            assert_eq!(charter.water_code.raw() as u8, Stratum::Water.code());
             // The bedrock the skip writes is the table's own deepest answer.
             assert_eq!(
                 below_surface_cell(&charter).stratum,
@@ -1319,11 +1264,12 @@ mod tests {
             "past the face"
         );
         assert_eq!(column_field(&m, None, Face::PosX, 0, 0, 1 << 20), None);
-        // A chunk above the SEABED but under the SEA: skipped as above every surface, and filled with
-        // water where the cell is under the sea. RE-MEASURED 2026-09-16 on slice 8a stage 2 (the
-        // ridged band): the deepest of 1 000 sampled columns at rung 2 (4 m cells, 248 m chunks)
-        // stands 1 382 m under the sea, more than a chunk and two cells, so the first chunk above its
-        // highest surface that is skipped as "above" still starts under the sea and must hold water.
+        // ★ THE DRY SEA FLOOR SHOWS (2026-09-28, ruling B22 step 1): a chunk above the SEABED but
+        // under the SEA's level is skipped as above every surface and holds only AIR — before the
+        // ruling it held water. RE-MEASURED 2026-09-16 on slice 8a stage 2 (the ridged band): the
+        // deepest of 1 000 sampled columns at rung 2 (4 m cells, 248 m chunks) stands 1 382 m under
+        // the sea, more than a chunk and two cells, so the first chunk above its highest surface
+        // that is skipped as "above" still starts under the sea's level.
         //
         // ★ WHY THE SCAN WIDENED FROM 300 COLUMNS TO 1 000, and it is a MEASUREMENT. Ridged noise is
         // ONE-SIDED, so the ground ROSE where the crests stand while the sea's own draw did not move
@@ -1354,22 +1300,34 @@ mod tests {
         );
         let under_sea = generate_in(&m, &column, z).expect("in the band");
         assert_eq!(under_sea.how, How::AboveSurface);
-        assert!(under_sea.cells.iter().any(|c| c.stratum == Stratum::Water));
+        assert!(under_sea.cells.iter().all(|c| c.stratum == Stratum::Air));
         assert!(under_sea.cells.iter().all(|c| c.gap == i8::MAX));
     }
 
-    /// ★ A DRY POCKET'S FLOOR IS DRY GROUND WHERE THE SOLVE PUT IT (2026-09-24, ruling B7 item 1;
-    /// plan step 2 part 3b, the cure for finding F1; the POCKET WORD 2026-09-25, review finding 1).
-    /// The rows stand 2 km under the moon's stated sea and are dry (no budget put water there), and
-    /// they state the sea, so each names itself a POCKET's floor. Every column holds ZERO water, its
-    /// surface is the kernel's own ground with NO lift, and the chunk over the floor and under the
-    /// sea's level holds only AIR — AND SO IT STAYS with ONE sea node in every column's stencil: a
-    /// pocket behind a one-node ridge on the coast. The same rows with no sea stated read LAND, the
-    /// word a pocket's floor had before, and with that sea node beside them the land rule lifts
-    /// every column over the sea and the chunk is water: the mesa the pocket word removes.
+    /// ★ A FIELD'S WATER WORDS REACH NO COLUMN AND NO CELL (2026-09-28, ruling B22 step 1). Over the
+    /// same heights, dry rows, rows of the sea with the coast bit, rows of a lake 30 km over every
+    /// column, and dry rows with the coast bit give ONE column field: the same surfaces, the same
+    /// biomes and the same provinces. The rows' water, their facies and the mask's side word are
+    /// the solve's data, and nothing reads them until the one-volume fill step. Three controls say
+    /// what the old read did with each, and each could fail:
+    ///
+    /// 1. THE SEA'S ROWS: the shore law held every column of them UNDER the sea; every column
+    ///    stands over it.
+    /// 2. THE COAST BIT: the old read made every column over its water a beach of sand; a column
+    ///    here is no desert.
+    /// 3. THE LAKE'S ROWS: the old read filled the chunk over the ground with the lake; that chunk
+    ///    holds only air.
+    ///
+    /// The same test states the column field's refusals: a level the lattice holds makes a column
+    /// field, and a level the lattice cannot coarsen to, a cache missing the tile and a body with
+    /// no macro lattice make none.
+    ///
+    /// **Example.** A pilot flies over the moon's stated coast: the ground under her is the solve's
+    /// ground and the fine octaves over it, whatever water the rows under it state.
     #[test]
-    fn a_dry_pocket_floor_stands_unlifted_under_air() {
-        use crate::artifact::{SparseRows, nodes_of_chunk};
+    fn a_fields_water_words_reach_no_column_and_no_cell() {
+        use crate::artifact::{DRY_M, PyramidField, SparseRows, TileCache, nodes_of_chunk};
+        use crate::solve::{FACIES_COAST, FACIES_LAKE, FACIES_SEA};
         let moon = crate::home::home_moon().with_sea_m(Some(-500));
         let lattice = moon.macro_lattice().expect("a lattice");
         let key = ChunkKey {
@@ -1379,210 +1337,61 @@ mod tests {
             y: 4_000,
             z: 0,
         };
-        let mut floor = SparseRows(Default::default(), -500);
-        for node in nodes_of_chunk(&lattice, key) {
-            floor.0.insert(node, (-2_000, crate::artifact::DRY_M, 0, 0));
-        }
-        let unlifted = |field: &ColumnField| {
-            assert!(field.water.iter().all(|&w| w == Gi::ZERO));
-            assert!(
-                field.columns.iter().all(|c| c.1 < moon.sea_radius),
-                "a column was lifted over the sea"
-            );
+        let rows = |water: i16, facies: u8| {
+            let mut field = SparseRows(Default::default(), -500);
+            for node in nodes_of_chunk(&lattice, key) {
+                field.0.insert(node, (0, water, facies, 0));
+            }
+            field
         };
-        let pocket =
-            column_field(&moon, Some(&floor), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        unlifted(&pocket);
-        // A corner of every column's sixteen-node stencil, never a column's nearest node.
-        let (ni, _) = crate::artifact::node_and_fraction(&lattice, 0, 4_000 * CHUNK_EDGE as i32);
-        let corner = lattice.index(Face::PosZ, ni as i32 - 1, ni as i32 - 1);
-        let mut coast = floor.clone();
-        coast
-            .0
-            .insert(corner, (-2_000, -500, crate::solve::FACIES_SEA, 0));
-        let behind_the_ridge =
-            column_field(&moon, Some(&coast), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        unlifted(&behind_the_ridge);
-        // The rule before the pocket word: the same rows name LAND with no sea stated.
-        let mut beside = SparseRows(floor.0.clone(), crate::artifact::DRY_M);
-        beside
-            .0
-            .insert(corner, (-2_000, -500, crate::solve::FACIES_SEA, 0));
-        let mesa =
-            column_field(&moon, Some(&beside), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        assert!(mesa.water.iter().all(|&w| w == moon.sea_radius));
-        assert!(
-            mesa.columns.iter().all(|c| c.1 > moon.sea_radius),
-            "the land rule lifts every column over the sea"
-        );
-        // ★ A POCKET'S FLOOR IN THE COAST BAND IS NO BEACH (review finding 5): the same floor with
-        // the row's coast bit set draws the very biomes it draws without it, because its ground
-        // stands under the sea's level the shore law holds it against.
-        let mut banded = floor.clone();
-        for row in banded.0.values_mut() {
-            row.2 = crate::solve::FACIES_COAST;
-        }
-        let sand =
-            column_field(&moon, Some(&banded), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        assert_eq!(
-            sand.columns.iter().map(|c| c.2).collect::<Vec<_>>(),
-            pocket.columns.iter().map(|c| c.2).collect::<Vec<_>>(),
-            "a floor under the sea's level took the beach's sand"
-        );
-        // The chunk right over the floor's highest column, still under the sea's level.
-        let highest_m = (pocket.highest >> (LENGTH_BITS + 7)).raw();
-        let z = ((highest_m - i64::from(moon.ladder.floor_m) + 2) / CHUNK_EDGE as i64) as i32 + 1;
-        assert!(corner_radius(&moon, (z + 1) * CHUNK_EDGE as i32, 0) < moon.sea_radius);
-        let dry = generate_in(&moon, &pocket, z).expect("in the band");
-        assert!(dry.cells.iter().all(|c| c.stratum == Stratum::Air));
-        let wet = generate_in(&moon, &mesa, z).expect("in the band");
-        assert!(wet.cells.iter().any(|c| c.stratum != Stratum::Air));
-    }
-
-    /// ★ THE WATER PER COLUMN (C5): with a field whose nearest rows say "a LAKE at this level" and
-    /// "coast", a column's water is that level as a radius and its biome is the beach's sand; a
-    /// dry row far from the sea leaves the column dry ★ (2026-09-24, plan step 2 part 3b: no node
-    /// of its read stencil is the sea, so it is INLAND and holds ZERO) and a dry row with a sea node
-    /// in its stencil holds the sea; a field with no water word (a pyramid level) reads the body's
-    /// sea. A chunk over such water holds water cells above its rock, and the box's water column
-    /// carries the same levels to the sheet.
-    #[test]
-    fn a_fields_rows_give_each_column_its_water_and_mark_the_coast() {
-        use crate::artifact::{DRY_M, SparseRows, ZField, nodes_of_chunk};
-        let moon = crate::home::home_moon().with_sea_m(Some(-500));
-        let lattice = moon.macro_lattice().expect("a lattice");
-        let key = |x: i32| ChunkKey {
-            face: Face::PosZ,
-            rung: 0,
-            x,
-            y: 4_000,
-            z: 0,
+        let columns = |water: i16, facies: u8| {
+            column_field(
+                &moon,
+                Some(&rows(water, facies)),
+                Face::PosZ,
+                0,
+                4_000,
+                4_000,
+            )
+            .expect("columns")
         };
-        // Three fields over the same nodes: the sea at +200 m with the coast bit, dry rows, and
-        // the pyramid (no water word).
-        let mut sea = SparseRows::default();
-        let mut dry = SparseRows::default();
-        for node in nodes_of_chunk(&lattice, key(4_000)) {
-            sea.0.insert(
-                node,
-                (
-                    0,
-                    200,
-                    crate::solve::FACIES_COAST | crate::solve::FACIES_LAKE,
-                    0,
-                ),
-            );
-            dry.0.insert(node, (0, DRY_M, 0, 0));
-        }
-        let wet = column_field(&moon, Some(&sea), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        let level = moon.radius + (Gi::new(200 * STEPS_PER_M) << LENGTH_BITS);
-        assert!(wet.water.iter().all(|&w| w == level));
-        // The columns stand at the field's zero plus the fine octaves: under 200 m, so the coast
-        // bit marks no beach where the water covers the ground, and sand where it stands above.
-        // ONE count for every field below: a column is a beach when it stands at or over its own
-        // water AND the coast bit gave it sand. The count runs over a water that stands under the
-        // ground and over a water that covers it, so both answers of the first half are read.
-        let beaches = |f: &ColumnField| {
-            f.columns
-                .iter()
-                .zip(&f.water)
-                .filter(|(c, w)| (c.1 >= **w) & (c.2 == Biome::Desert))
-                .count()
-        };
-        let drowned = |f: &ColumnField| {
-            f.columns
-                .iter()
-                .zip(&f.water)
-                .filter(|(c, w)| c.1 < **w)
-                .count()
-        };
-        assert_eq!(beaches(&wet) + drowned(&wet), CHUNK_EDGE * CHUNK_EDGE);
-        // ★ A DRY ROW FAR FROM THE SEA HOLDS NO WATER (2026-09-24, plan step 2 part 3b; the rule
-        // before it: every column on a body with a sea held the sea's level): no node of the
-        // column's read stencil is the sea, so it is INLAND and holds ZERO. A dry row with ONE sea
-        // node in its stencil — a corner of the sixteen, never the column's nearest node, so its
-        // own side stays land — holds the sea's level (ruling W6: the shore runs through a land
-        // node's own columns). On a body with NO sea a dry row's column holds no water.
-        let arid = column_field(&moon, Some(&dry), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        assert!(arid.water.iter().all(|&w| w == Gi::ZERO));
-        assert_ne!(moon.sea_radius, Gi::ZERO, "the fixture's moon states a sea");
-        let mut coastal = dry.clone();
-        let (ni, _) = crate::artifact::node_and_fraction(&lattice, 0, 4_000 * CHUNK_EDGE as i32);
-        let corner = lattice.index(Face::PosZ, ni as i32 - 1, ni as i32 - 1);
-        assert!(
-            coastal.0.contains_key(&corner),
-            "the corner is in the stencil"
-        );
-        coastal
-            .0
-            .insert(corner, (0, -500, crate::solve::FACIES_SEA, 0));
-        let beside =
-            column_field(&moon, Some(&coastal), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        assert!(beside.water.iter().all(|&w| w == moon.sea_radius));
-        let dry_moon = crate::home::home_moon();
-        let none =
-            column_field(&dry_moon, Some(&dry), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        assert!(none.water.iter().all(|&w| w == Gi::ZERO));
-        // The coast bit on a dry row whose own word names a water UNDER every column, 500 m over
-        // the stated sea: every column is a beach. The row's level is never read for a land
-        // column, and an inland one holds no standing water at all (review finding 8: the
-        // statements below read the two waters apart, so a column held against the row's level
-        // would turn them red): no column carries a water, every column stands over the row's
-        // level AND over the sea's, which the shore law holds it against.
-        let mut shore = SparseRows::default();
-        for node in nodes_of_chunk(&lattice, key(4_000)) {
-            shore
-                .0
-                .insert(node, (0, -3_000, crate::solve::FACIES_COAST, 0));
-        }
-        let beach =
-            column_field(&moon, Some(&shore), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        assert!(beach.columns.iter().all(|(_, _, b)| *b == Biome::Desert));
-        assert!(beach.water.iter().all(|&w| w == Gi::ZERO));
-        let row_level = moon.radius + (Gi::new(-3_000 * STEPS_PER_M) << LENGTH_BITS);
-        assert!(beach.columns.iter().all(|c| c.1 > row_level));
-        assert!(beach.columns.iter().all(|c| c.1 >= moon.sea_radius));
-        // The coast bit over a water that stands 30 km OVER every column, and the row's own SEA
-        // bit with it (2026-09-22, the coast mask: the ROW says which side a column stands on, so
-        // a row drowned under 30 km of water carries the sea bit as the solve would write it): no
-        // column is a beach.
-        let mut flood = SparseRows::default();
-        for node in nodes_of_chunk(&lattice, key(4_000)) {
-            flood.0.insert(
-                node,
-                (
-                    0,
-                    30_000,
-                    crate::solve::FACIES_COAST | crate::solve::FACIES_SEA,
-                    0,
-                ),
+        let dry = columns(DRY_M, 0);
+        let lake = columns(30_000, FACIES_LAKE | FACIES_COAST);
+        for (water, facies) in [
+            (-500, FACIES_SEA | FACIES_COAST),
+            (30_000, FACIES_LAKE | FACIES_COAST),
+            (DRY_M, FACIES_COAST),
+        ] {
+            assert_eq!(
+                columns(water, facies),
+                dry,
+                "the rows' water {water} and facies {facies:#x}"
             );
         }
-        let deep = column_field(&moon, Some(&flood), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        assert_eq!(drowned(&deep), CHUNK_EDGE * CHUNK_EDGE);
-        assert_eq!(beaches(&deep), 0);
-        // A column field of the wrong width makes no chunk.
-        let torn_field = ColumnField {
-            columns: Vec::new(),
-            water: Vec::new(),
-            sites: Vec::new(),
-            ..wet.clone()
-        };
-        assert!(generate_in(&moon, &torn_field, 0).is_none());
-        let level_1 = crate::artifact::PyramidField {
+        // 1 and 2: every column stands over the stated sea, and one is no desert.
+        assert!(dry.columns.iter().all(|c| c.1 > moon.sea_radius));
+        assert!(dry.columns.iter().any(|c| c.2 != Biome::Desert));
+        // 3: the chunk right over the highest column, under the lake's level, holds only air.
+        let level = moon.radius + (Gi::new(30_000 * STEPS_PER_M) << LENGTH_BITS);
+        let highest_m = (lake.highest >> (LENGTH_BITS + 7)).raw();
+        let z = ((highest_m - i64::from(moon.ladder.floor_m))
+            / (i64::from(cell_m(0)) * CHUNK_EDGE as i64)) as i32
+            + 1;
+        assert!(corner_radius(&moon, (z + 1) * CHUNK_EDGE as i32, 0) < level);
+        let over = generate_in(&moon, &lake, z).expect("in the band");
+        assert_eq!(over.how, How::AboveSurface);
+        assert!(over.cells.iter().all(|c| c.stratum == Stratum::Air));
+        // The refusals, and one level the lattice holds.
+        let coarse = lattice.coarser(1).expect("a level");
+        let level_1 = PyramidField {
             level: 1,
-            z_m: vec![0; lattice.coarser(1).expect("a level").node_count()],
+            z_m: vec![0; coarse.node_count()],
             water_m: vec![],
             coast: None,
             counts: None,
         };
-        let coarse =
-            column_field(&moon, Some(&level_1), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        assert!(coarse.water.iter().all(|&w| w == moon.sea_radius));
-        assert_eq!(level_1.water_facies(0), None);
-        // A level the lattice cannot coarsen to, a cache missing the tile, and a body with no
-        // macro lattice all make no column field.
-        let level_9 = crate::artifact::PyramidField {
+        assert!(column_field(&moon, Some(&level_1), Face::PosZ, 0, 4_000, 4_000).is_some());
+        let level_9 = PyramidField {
             level: 9,
             z_m: vec![],
             water_m: vec![],
@@ -1590,67 +1399,40 @@ mod tests {
             counts: None,
         };
         assert!(column_field(&moon, Some(&level_9), Face::PosZ, 0, 4_000, 4_000).is_none());
-        let torn = crate::artifact::TileCache::new(lattice.edge);
+        let torn = TileCache::new(lattice.edge);
         assert!(column_field(&moon, Some(&torn), Face::PosZ, 0, 4_000, 4_000).is_none());
         let rock = moon.without_macro_lattice();
         assert!(rock.macro_lattice().is_none());
         assert!(column_field(&rock, Some(&torn), Face::PosZ, 0, 0, 0).is_none());
-        // Under a sea three kilometres up, the chunk right above the highest surface is skipped
-        // as above every surface and filled with WATER from the columns' own level; the box
-        // carries the levels to the sheet.
-        let mut ocean = SparseRows::default();
-        for node in nodes_of_chunk(&lattice, key(4_000)) {
-            // The row stands under three kilometres of water, so its own SEA bit is set — the word
-            // the coast mask carries and every rung reads (2026-09-22).
-            ocean
-                .0
-                .insert(node, (0, 3_000, crate::solve::FACIES_SEA, 0));
-        }
-        let drowned_field =
-            column_field(&moon, Some(&ocean), Face::PosZ, 0, 4_000, 4_000).expect("columns");
-        let highest_m = (drowned_field.highest >> (LENGTH_BITS + 7)).raw();
-        let z_high = ((highest_m - i64::from(moon.ladder.floor_m))
-            / (i64::from(cell_m(0)) * CHUNK_EDGE as i64)) as i32;
-        let under = generate_in(&moon, &drowned_field, z_high + 1).expect("in the band");
-        assert_eq!(under.how, How::AboveSurface);
-        assert!(under.cells.iter().all(|c| c.stratum == Stratum::Water));
-        let bx = crate::lattice::sample_box(&moon, Some(&sea), key(4_000)).expect("a box");
-        assert_eq!(
-            bx.water.len(),
-            crate::lattice::BOX_EDGE * crate::lattice::BOX_EDGE
-        );
-        assert_eq!(
-            bx.water[crate::lattice::SampleBox::column_index(5, 5)],
-            level
-        );
-        // The halo past the core reads the rows too (2026-09-20: one column rule for the core and
-        // the halo — a halo that read the body's sea while the core read the rows cracked the
-        // sheet's edge cells as it cracked the ground).
-        assert_eq!(
-            bx.water[crate::lattice::SampleBox::column_index(-1, 5)],
-            level
-        );
     }
 
+    /// ★ THE DRY SEA FLOOR SHOWS AT A COARSE RUNG TOO (2026-09-28, ruling B22 step 1): the deepest
+    /// sampled column's surface chunk stands under the stated sea's level and holds rock and AIR
+    /// over it, and no cell of it is water. RED before the ruling: that chunk held water over its
+    /// rock.
     #[test]
-    fn a_coarse_rung_evaluates_the_same_surface_with_fewer_octaves_and_water_stands_under_the_sea()
-    {
+    fn a_coarse_rung_evaluates_the_same_surface_and_its_sea_floor_is_dry() {
         let m = home_planet().with_sea_m(Some(0));
         let rung = 3;
         let z = surface_z(&m, Face::PosY, rung, 20, 20);
         let chunk = generate(&m, None, key(Face::PosY, rung, 20, 20, z)).expect("in the ladder");
         assert_eq!(chunk.how, How::Evaluated);
         assert_eq!(chunk.cells.len(), CHUNK_CELLS);
-        // The sea stands where the surface dips under it: the deepest sampled column's surface chunk
-        // holds water and, below the water, rock.
         let (face, x, y, depth) = deepest_sea_column(&m, rung, 300);
-        assert!(depth > Gi::ZERO, "the home planet has a sea");
-        let zs = surface_z(&m, face, rung, x, y);
-        let sea = generate(&m, None, key(face, rung, x, y, zs)).expect("in the ladder");
-        assert!(sea.cells.iter().any(|c| c.stratum == Stratum::Water));
         assert!(
-            sea.cells.iter().any(|c| c.stratum.is_solid()),
-            "the sea floor is rock in the same chunk"
+            depth > Gi::ZERO,
+            "the home planet's ground dips under the stated sea"
+        );
+        let zs = surface_z(&m, face, rung, x, y);
+        let floor = generate(&m, None, key(face, rung, x, y, zs)).expect("in the ladder");
+        assert!(floor.cells.iter().all(|c| c.stratum != Stratum::Water));
+        assert!(
+            floor.cells.iter().any(|c| c.stratum.is_solid()),
+            "the sea floor is rock"
+        );
+        assert!(
+            floor.cells.iter().any(|c| c.stratum == Stratum::Air),
+            "and air stands over it"
         );
     }
 
@@ -1890,7 +1672,7 @@ mod tests {
     /// interpolation is exact on every node.
     /// ★ TWO NEIGHBOURS AGREE ON THEIR SHARED COLUMN UNDER THE ARTIFACT (2026-09-20): the left
     /// chunk's halo column past its edge is the right chunk's own first column — the same height,
-    /// the same water, the same biome — at a fine rung (the rows) and a coarse one (a pyramid
+    /// the same biome, the same direction — at a fine rung (the rows) and a coarse one (a pyramid
     /// level). Before this the halo read the recipe's relief while the core read the artifact,
     /// and every chunk edge was a crack the pilot-eye capture measured from 20 km.
     #[test]
@@ -1932,7 +1714,6 @@ mod tests {
                 let l = SampleBox::column_index(edge, b);
                 let r = SampleBox::column_index(0, b);
                 assert_eq!(left.surfaces[l], right.surfaces[r], "rung {rung} b {b}");
-                assert_eq!(left.water[l], right.water[r], "rung {rung} b {b}");
                 assert_eq!(left.dirs[l], right.dirs[r], "rung {rung} b {b}");
                 b += 1;
             }

@@ -765,8 +765,8 @@ pub struct DevTerrainStamp {
     /// ★ THE HOLE INSTRUMENT (the owner's coast flight, 2026-09-20): the requests refused for the
     /// artifact THIS FRAME, named with the tiles they wait for (`face rung x y z: tiles …`, capped),
     /// the chunks ever harvested with no triangle, and the ones harvested empty this frame, named
-    /// (capped). A chunk built empty counts as drawn everywhere else, and the sea sheet shows
-    /// through it.
+    /// (capped). A chunk built empty counts as drawn everywhere else, and the eye sees through the
+    /// ground there.
     pub awaiting_keys: Vec<String>,
     /// ★ THE MISSING TILES this frame's awaiting chunks wait for, `(face, tx, ty, chunks)`, the
     /// most-waited first, capped at sixteen (2026-09-22, the on-foot ground).

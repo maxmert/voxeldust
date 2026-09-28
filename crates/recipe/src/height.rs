@@ -275,10 +275,13 @@ pub fn relief_of_table_from(
     relief_parts_from(octaves, first, count, dir, rough, slope_share).sum()
 }
 
-/// ★ THE TWO HALVES OF A COLUMN'S RELIEF (2026-09-21, the shore law): the COARSE octaves before
-/// the fine mask, summed whole — the ground a solved field's `Z` replaces — and the FINE octaves,
-/// summed and multiplied ONCE by the column's factor. [`shore`] reads the coarse half as the
-/// column's own ground, so the two are named apart; [`relief_of_table_from`] is their sum.
+/// ★ THE TWO HALVES OF A COLUMN'S RELIEF (2026-09-21): the COARSE octaves before the fine mask,
+/// summed whole — the ground a solved field's `Z` replaces — and the FINE octaves, summed and
+/// multiplied ONCE by the column's factor. The column pass adds the coarse half to its ground and
+/// the fine half after it, so the two are named apart; [`relief_of_table_from`] is their sum.
+///
+/// **Example.** The column under the pilot's boots stands on the solved `Z`. The coarse half is
+/// ZERO there, because `Z` replaces those octaves, and the fine half is the hillside's own ripples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReliefParts {
     /// The coarse octaves' sum, in gap steps at [`NOISE_BITS`]. ZERO for a column that sums from
@@ -329,108 +332,6 @@ pub fn relief_parts_from(
         coarse: whole - fine,
         fine: fine.mul_shr(m, NOISE_BITS),
     }
-}
-
-/// ★ THE SHARE OF ITS OWN GROUND A COLUMN KEEPS AT THE SHORE, as a shift: a quarter. See [`shore`];
-/// the number is a STATED choice, named in `owner_decisions_2026-09-21_water.md` W6 as an ask.
-pub const SHORE_SHIFT: u32 = 2;
-
-/// ★ THE COLUMN'S SIDE OF ITS WATER IS NOT STATED: [`shore`] decides it from the ground itself
-/// (`base >= water`), which is what every host did before the coast mask. The card reads this word,
-/// because a card holds no artifact row.
-pub const SIDE_UNKNOWN: Gi = Gi::new(0);
-/// ★ THE COLUMN STANDS ON LAND, as the row said: the host read a sea word off the artifact's coast
-/// mask and it is clear. See [`shore`] and `owner_decisions_2026-09-21_water.md` W10.
-pub const SIDE_LAND: Gi = Gi::new(1);
-/// ★ THE COLUMN STANDS IN THE WATER, as the row said: the host read a sea word off the artifact's
-/// coast mask and it is set.
-pub const SIDE_SEA: Gi = Gi::new(2);
-/// ★ THE COLUMN STANDS ON DRY LAND FAR FROM THE SEA (2026-09-24, ruling B7 item 1; plan step 2
-/// part 3b): the row says land, and no node of the column's own read stencil is the sea. Such a
-/// column holds no water of its own. [`shore`] holds it OVER the sea's level like any land column
-/// where its ground stands over that level, and leaves it alone where its ground stands UNDER that
-/// level: that ground is the floor of a closed basin, and no sea stands over it.
-///
-/// **Example.** A pocket in a dry interior stands 2 km under the sea's level, 900 km from the
-/// ocean. Its floor columns read this word, so the shore law does not lift the floor to a quarter
-/// of its depth over the sea, and the pilot sees a basin, never a mesa.
-pub const SIDE_INLAND: Gi = Gi::new(3);
-
-/// ★ THE SEA DECIDES THE SHORE (2026-09-21; the owner, flying the coast: "the shores are changing
-/// all the time"). The shore is where the ground crosses the water's level. Before this law the
-/// FINE octaves decided that crossing, and a coarser rung keeps fewer of them, so at every ring
-/// swap the crossing moved sideways by the dropped octaves' height over the coast's slope.
-/// MEASURED on the home planet's belt coast (`vd-bins/examples/shore_step`): the crossing moved a
-/// median of 234 m at the 128 m rung and 848 m at the 256 m rung, on lines where the ground itself
-/// moved by under a cell. The land morphs across a swap; the sea does not morph with it; so the one
-/// line the morph could not carry was the shoreline.
-///
-/// THE LAW: the fine octaves may not carry a column across its water, and they may take at most
-/// three quarters of the column's own ground over (or under) the water. `base` is the ground the
-/// column stands on WITHOUT the fine octaves — the solved field, or the coarse octaves on a body
-/// with no field — and it is the same at every rung. `h` is the surface with the fine octaves and
-/// the bench. Where `base` stands over the water the surface stays over it by at least
-/// `|base − water| >> SHORE_SHIFT`; where `base` stands under, under by the same; a column whose
-/// ground stands exactly at the water is land. A column with NO water (`water` ZERO) is untouched.
-/// So the crossing stands where `base` crosses the water, at every rung, and the morph carries it.
-///
-/// What the picture gains: a coastal plain. Beside the shore, a valley the fine octaves would cut
-/// under the sea is floored at a quarter of the ground's height instead, and a fine hill in the
-/// shallows is a bar under the water, never an island the next rung loses. Where the ground stands
-/// high the clamp never binds and the relief is what it was.
-///
-/// The shift is a STATED CHOICE, not a computed one: the physical mechanism (waves plane the coast)
-/// states a band, and a band cannot hold the crossing where a fine octave is taller than it. A
-/// quarter is the smallest power of two that leaves a valley near the coast a floor of its own.
-///
-/// ★ THE COAST MASK DECIDES THE SIDE (2026-09-22; the owner, from 1 400 km: "during flight the
-/// shores changes again all the time"; ruling W10; and from 41 000 km: the globe "shows squares of
-/// water on the land"; ruling W15, which makes the word the WET FRACTION under the cell's whole
-/// footprint instead of the one node at its centre — this kernel is unchanged, because a side is a
-/// word it is TOLD). `side` is the water's side as the ROW said it:
-/// [`SIDE_LAND`] or [`SIDE_SEA`] where the host read the artifact's coast mask at the column's own
-/// fine node, [`SIDE_UNKNOWN`] where it holds no mask (the card, a body with no artifact). Where
-/// the side is stated the ground's own sign does not decide it. MEASURED before the mask
-/// (`vd-bins/examples/shore_step`): a pyramid level's `base` is the MEAN of its children, so the
-/// ground's crossing of the sea moved a median of 11.5 km at the swap from the rows to level 1 and
-/// about 20 km at each level swap above it, and the morph carried the shoreline over that distance
-/// as the ring passed.
-///
-/// ★ AN INLAND COLUMN UNDER THE SEA'S LEVEL IS LEFT ALONE (2026-09-24, ruling B7 item 1; plan step
-/// 2 part 3b): [`SIDE_INLAND`] acts as [`SIDE_LAND`] where the ground stands at or over the water,
-/// and returns `h` unchanged where the ground stands under it. Before this word such a column read
-/// `SIDE_LAND` and the law lifted a pocket's floor to a quarter of its depth OVER the sea — a mesa
-/// where the solve put a basin. The card reads [`SIDE_UNKNOWN`] only, so its arithmetic does not
-/// change.
-///
-/// **Example.** Along the belt's coast the solved ground rises one metre in fifty. Two kilometres
-/// inland it stands forty metres over the sea; the fine octaves may dig thirty of those, and the
-/// valley's floor stands ten metres over the sea at every rung a descending ship draws. At rung 14
-/// the level's mean puts that same column two metres UNDER the sea; its row says LAND, so the
-/// column still stands over the water and the pilot sees one shoreline all the way down.
-#[must_use]
-pub fn shore(base: Gi, water: Gi, h: Gi, side: Gi) -> Gi {
-    if water == Gi::ZERO {
-        return h;
-    }
-    let g = base - water;
-    if side == SIDE_INLAND && g < Gi::ZERO {
-        return h;
-    }
-    let d = h - water;
-    // The row's word where the host read one, the ground's own sign where it did not. An inland
-    // column over the water's level is land, like any other.
-    let land = if side == SIDE_UNKNOWN {
-        g >= Gi::ZERO
-    } else {
-        side != SIDE_SEA
-    };
-    // The ground's own distance from the water, whichever side the row named it on.
-    let away = if g >= Gi::ZERO { g } else { Gi::ZERO - g };
-    let keep = away >> SHORE_SHIFT;
-    let toward = if land { d } else { Gi::ZERO - d };
-    let held = crate::cell::greater(toward, keep);
-    water + if land { held } else { Gi::ZERO - held }
 }
 
 /// The 40-bit direction shifted to the noise's sample bits.
@@ -659,173 +560,16 @@ mod tests {
         assert_eq!(relief_of_table(&table, 99, dir, &flat), relief(&table, dir));
     }
 
-    /// ★ THE COAST MASK DECIDES THE SIDE (2026-09-22, ruling W10): three statements that could
-    /// each fail. A LAND column whose ground (a pyramid level's mean) stands UNDER the water is
-    /// still held OVER it when the row says land; a SEA column whose mean stands OVER the water is
-    /// held UNDER it when the row says sea; and the unknown word is the old rule, which the card
-    /// reads.
+    /// ★ THE TWO HALVES SUM TO THE ONE RELIEF (2026-09-21): the parts added are the from-first sum
+    /// word for word, the coarse half is the octaves before the fine mask, and a sum that starts at
+    /// the first fine octave has no coarse half. Each statement could fail: a half that dropped an
+    /// octave, a mask read on the wrong half, or a coarse half that a solved field's `Z` does not
+    /// replace.
     ///
-    /// **Example.** At rung 15 one level node covers a whole bay, so its mean stands under the sea
-    /// while the headland inside it is dry. The headland's own row says land, so the headland
-    /// stands out of the water at that rung as it does on foot.
+    /// **Example.** A column that reads the solved `Z` sums from the first fine octave on, so its
+    /// coarse half is ZERO and its whole relief is the fine ripples over the solve.
     #[test]
-    fn the_stated_side_beats_the_grounds_own_sign() {
-        let water = Gi::new(1_000_000);
-        // The mean says SEA (400 under), the row says LAND: the column is held 100 OVER the water.
-        assert_eq!(
-            shore(water - Gi::new(400), water, water - Gi::new(700), SIDE_LAND),
-            water + Gi::new(100)
-        );
-        // The same column, already well over the water: untouched.
-        assert_eq!(
-            shore(water - Gi::new(400), water, water + Gi::new(900), SIDE_LAND),
-            water + Gi::new(900)
-        );
-        // The mean says LAND (400 over), the row says SEA: the column is held 100 UNDER the water.
-        assert_eq!(
-            shore(water + Gi::new(400), water, water + Gi::new(700), SIDE_SEA),
-            water - Gi::new(100)
-        );
-        // The same column, already well under the water: untouched.
-        assert_eq!(
-            shore(water + Gi::new(400), water, water - Gi::new(900), SIDE_SEA),
-            water - Gi::new(900)
-        );
-        // The unknown word is the ground's own sign — the card's rule, unchanged.
-        assert_eq!(
-            shore(
-                water - Gi::new(400),
-                water,
-                water - Gi::new(700),
-                SIDE_UNKNOWN
-            ),
-            water - Gi::new(700)
-        );
-        // A column with no water is untouched whatever the row says.
-        assert_eq!(
-            shore(Gi::new(400), Gi::ZERO, Gi::new(-50), SIDE_SEA),
-            Gi::new(-50)
-        );
-    }
-
-    /// ★ AN INLAND COLUMN (2026-09-24, ruling B7 item 1; plan step 2 part 3b), both arms. Its ground
-    /// UNDER the water's level: the surface is `h`, untouched — where the LAND word lifted the same
-    /// column 100 OVER the water. Its ground OVER the level: held over it exactly as a land column
-    /// is, and a surface already high is left alone.
-    ///
-    /// **Example.** A dry pocket's floor 400 under the sea's level keeps its own floor 700 under
-    /// it; a plain 400 over the level, which the fine octaves dug 50 under it, stands 100 over it,
-    /// as every land column of the coast does.
-    #[test]
-    fn an_inland_column_under_the_level_is_left_alone_and_over_it_is_land() {
-        let water = Gi::new(1_000_000);
-        assert_eq!(
-            shore(
-                water - Gi::new(400),
-                water,
-                water - Gi::new(700),
-                SIDE_INLAND
-            ),
-            water - Gi::new(700)
-        );
-        assert_eq!(
-            shore(water - Gi::new(400), water, water - Gi::new(700), SIDE_LAND),
-            water + Gi::new(100),
-            "the land word lifts the same column: the mesa this word cures"
-        );
-        assert_eq!(
-            shore(
-                water + Gi::new(400),
-                water,
-                water - Gi::new(50),
-                SIDE_INLAND
-            ),
-            water + Gi::new(100)
-        );
-        assert_eq!(
-            shore(
-                water + Gi::new(400),
-                water,
-                water + Gi::new(900),
-                SIDE_INLAND
-            ),
-            water + Gi::new(900)
-        );
-        // The ground exactly at the level is land, as every word reads it.
-        assert_eq!(shore(water, water, water - Gi::new(9), SIDE_INLAND), water);
-    }
-
-    /// ★ THE SHORE LAW, four statements that could each fail (2026-09-21): a land column the fine
-    /// octaves dug under its water is held over it at a quarter of its ground; a sea column they
-    /// raised over its water is held under it by the same; a column whose surface already stands on
-    /// its ground's side by more than the share is untouched; a column with NO water is untouched
-    /// whatever it does; and a ground exactly at the water is land. Plus the parts: the two halves
-    /// sum to the one relief.
-    #[test]
-    fn the_shore_holds_a_column_on_its_grounds_side_of_the_water() {
-        let water = Gi::new(1_000_000);
-        // Land: the ground 400 over the water, the surface dug 50 under it → held at 100 over.
-        assert_eq!(
-            shore(
-                water + Gi::new(400),
-                water,
-                water - Gi::new(50),
-                SIDE_UNKNOWN
-            ),
-            water + Gi::new(100)
-        );
-        // Land, the surface 100 over exactly (the bound itself) → untouched.
-        assert_eq!(
-            shore(
-                water + Gi::new(400),
-                water,
-                water + Gi::new(100),
-                SIDE_UNKNOWN
-            ),
-            water + Gi::new(100)
-        );
-        // Land, the surface high → untouched.
-        assert_eq!(
-            shore(
-                water + Gi::new(400),
-                water,
-                water + Gi::new(900),
-                SIDE_UNKNOWN
-            ),
-            water + Gi::new(900)
-        );
-        // Sea: the ground 400 under, the surface raised 30 over → held at 100 under.
-        assert_eq!(
-            shore(
-                water - Gi::new(400),
-                water,
-                water + Gi::new(30),
-                SIDE_UNKNOWN
-            ),
-            water - Gi::new(100)
-        );
-        // Sea, the surface deep → untouched.
-        assert_eq!(
-            shore(
-                water - Gi::new(400),
-                water,
-                water - Gi::new(700),
-                SIDE_UNKNOWN
-            ),
-            water - Gi::new(700)
-        );
-        // The ground AT the water is land: the surface may not go under it.
-        assert_eq!(shore(water, water, water - Gi::new(9), SIDE_UNKNOWN), water);
-        assert_eq!(
-            shore(water, water, water + Gi::new(9), SIDE_UNKNOWN),
-            water + Gi::new(9)
-        );
-        // No water: whatever the surface does, it does.
-        assert_eq!(
-            shore(Gi::new(400), Gi::ZERO, Gi::new(-50), SIDE_UNKNOWN),
-            Gi::new(-50)
-        );
-        // The parts sum to the relief, and the coarse half is the octaves before the fine mask.
+    fn the_two_halves_sum_to_the_one_relief() {
         let table = [
             octave(3, 2.0, 100.0),
             fine(octave(5, 9.0, 20.0)),

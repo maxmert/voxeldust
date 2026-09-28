@@ -160,17 +160,18 @@ impl ArtifactCache {
     /// tiles when the rung reads the rows themselves — ready only when every tile the chunk's
     /// stencil reads is here. `lattice` is the body's own macro lattice (level zero).
     ///
-    /// ★ A PYRAMID LEVEL WAITS FOR THE COAST MASK (2026-09-25, review finding 2 of plan step 2;
-    /// ruling W16: a rung boundary is invisible; ruling B7 item 1). A level with no mask names no
-    /// side, so its columns let the ground's own sign decide and take the sea: every dry pocket
-    /// under the sea's level — the largest 1.57 million km² — was drawn as ocean until the mask
-    /// landed, and then turned into a dry basin 11.9 km deep. [`ArtifactCache::whole`] already
-    /// states that the far view is not whole without the mask; the build now obeys it, and the
-    /// coarser rung stands (ruling F9). The tiles need no mask: a row names its own side.
+    /// ★ A PYRAMID LEVEL WAITS FOR THE COAST MASK THE HEAD ANNOUNCES (2026-09-25, review finding 2
+    /// of plan step 2; ruling W16: a rung boundary is invisible; ruling B7 item 1). While the shore
+    /// law read the side, a level with no mask let the ground's own sign decide it: every dry
+    /// pocket under the sea's level — the largest 1.57 million km² — was drawn as ocean until the
+    /// mask landed, and then turned into a dry basin 11.9 km deep. [`ArtifactCache::whole`] states
+    /// that the far view is not whole without the mask; the build obeys it, and the coarser rung
+    /// stands (ruling F9). ★ Since ruling B22 (2026-09-28) no column reads the side and the shard
+    /// announces no coast part, so a level is ready the moment its heights are whole.
     ///
-    /// **Example.** A pilot logs in over the home planet. The pyramid lands before the mask; no
-    /// far chunk builds until the mask is here, so the salt pan in the dry interior is first drawn
-    /// as a salt pan, never as a square of sea.
+    /// **Example.** A pilot logs in over the home planet. The head announces no mask, so the far
+    /// chunks build as soon as the pyramid lands, and the salt pan in the dry interior is drawn as
+    /// the dry ground it is.
     #[must_use]
     pub fn field_for(&self, lattice: &MacroLattice, key: ChunkKey) -> FieldPick {
         let level = PyramidField::level_for(lattice, self.head.levels, key.rung);
@@ -704,6 +705,14 @@ mod tests {
     }
 
     fn head_of(artifact: &Artifact) -> BulkMsg {
+        // ★ NO COAST MASK ON THIS HEAD (2026-09-22): the tests around it weigh the pyramid's own
+        // path, and a head that announces no part has none to wait for. The mask's own statements
+        // state a head of one or two parts and ship them.
+        head_with_coast_parts(artifact, 0)
+    }
+
+    /// The moon's head, announcing its mask in `coast_parts` parts.
+    fn head_with_coast_parts(artifact: &Artifact, coast_parts: u32) -> BulkMsg {
         BulkMsg::ArtifactHead {
             realm: realm(),
             world_tag: 9,
@@ -713,39 +722,13 @@ mod tests {
             tiles_per_edge: artifact.tiles_per_edge(),
             levels: artifact.pyramid.len() as u32,
             sea_m: artifact.sea_m,
-            // ★ NO COAST MASK ON THIS HEAD (2026-09-22): the tests around it weigh the pyramid's
-            // own path, and a head that announces no part has none to wait for. The mask's own
-            // statement states a head of one part and ships it.
-            coast_parts: 0,
+            coast_parts,
         }
     }
 
     /// The same head, announcing the moon's mask: one part (27 744 nodes are 3 468 bytes).
     fn head_with_coast(artifact: &Artifact) -> BulkMsg {
-        match head_of(artifact) {
-            BulkMsg::ArtifactHead {
-                realm,
-                world_tag,
-                version,
-                edge,
-                digest,
-                tiles_per_edge,
-                levels,
-                sea_m,
-                ..
-            } => BulkMsg::ArtifactHead {
-                realm,
-                world_tag,
-                version,
-                edge,
-                digest,
-                tiles_per_edge,
-                levels,
-                sea_m,
-                coast_parts: 1,
-            },
-            other => other,
-        }
+        head_with_coast_parts(artifact, 1)
     }
 
     /// One coast part of the moon's mask, whole.
@@ -914,6 +897,48 @@ mod tests {
         // And forgetting the realm drops the parts still assembling.
         rx.forget(realm());
         assert!(rx.book().get(realm()).is_none());
+    }
+
+    /// ★ A MASK IN TWO PARTS (2026-09-28): the first part waits for the second, the same part again
+    /// is a duplicate, and the second part finishes the mask, whose bits are the two parts in
+    /// order.
+    ///
+    /// **Example.** The gateway paces the home planet's mask in 68 parts; a pilot's client holds
+    /// the first 67 apart, drops a part the gateway sent twice, and takes the mask whole only when
+    /// the last one lands.
+    #[test]
+    fn a_mask_in_two_parts_waits_for_both_and_drops_a_part_sent_twice() {
+        let (_moon, _lattice, artifact) = moon();
+        let half = artifact.coast.len() / 2;
+        let part = |part: u32, bits: &[u8]| BulkMsg::ArtifactCoast {
+            realm: realm(),
+            part,
+            parts: 2,
+            bits: bits.to_vec(),
+        };
+        let mut rx = ArtifactReceiver::default();
+        rx.accept(head_with_coast_parts(&artifact, 2));
+        assert_eq!(
+            rx.accept(part(0, &artifact.coast[..half])),
+            ArtifactIngest::CoastPart
+        );
+        assert_eq!(
+            rx.accept(part(0, &artifact.coast[..half])),
+            ArtifactIngest::Duplicate
+        );
+        assert!(!rx.book().get(realm()).expect("a cache").coast_held());
+        assert_eq!(
+            rx.accept(part(1, &artifact.coast[half..])),
+            ArtifactIngest::CoastWhole
+        );
+        let book = rx.book();
+        let cache = book.get(realm()).expect("a cache");
+        assert_eq!(
+            cache.coast().map(|m| m.to_vec()),
+            Some(artifact.coast.clone())
+        );
+        assert_eq!(rx.counters.coast_parts, 2);
+        assert_eq!(rx.counters.coasts_whole, 1);
     }
 
     /// ★ THE WATER WORDS' SHAPE (2026-09-21): a part whose water words are neither none nor one

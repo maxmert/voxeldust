@@ -142,14 +142,13 @@ pub fn band_row((fade_in, fade_out): ([f64; 2], [f64; 2]), sink_end_m: f64) -> [
 
 /// ★ THE BAND TABLE (the far-water design §10, slice R1a): every rung's crossfade under `bound`,
 /// row `r` for rung `r`, and ONE ROW MORE at index `rungs` that is always passed (the ruler's
-/// probe, which is never faded). Every terrain material of a realm — the ground's, the water
-/// sheet's, the caster's and the probe's — reads its row from ONE buffer that the renderer writes
-/// every frame, so a moving horizon rewrites a table and never a material: the water's bands can
-/// no longer lag its ground's (before R1a the water's materials were never rewritten at all).
+/// probe, which is never faded). Every terrain material of a realm — the ground's, the caster's
+/// and the probe's — reads its row from ONE buffer that the renderer writes every frame, so a
+/// moving horizon rewrites a table and never a material.
 ///
 /// **Example.** A hull speeds up over the belt and rung 2's horizon slides in. On that frame the
-/// table's row 2 moves, and the rung-2 ground, the rung-2 sheet and the rung-3 caster (which casts
-/// for rung 2) all fade on the new band.
+/// table's row 2 moves, and the rung-2 ground and the rung-3 caster (which casts for rung 2) both
+/// fade on the new band.
 #[must_use]
 pub fn band_table(bound: &AskBound, body: &BodyDefinition, rungs: u8) -> Vec<[f32; 4]> {
     let mut rows: Vec<[f32; 4]> = (0..rungs)

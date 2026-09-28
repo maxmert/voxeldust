@@ -119,14 +119,7 @@ fn main() {
                     cj,
                 )
                 .unwrap_or(Gi::ZERO);
-                let cell_side =
-                    vd_terrain::artifact::sample_side(&lattice, &artifact, face, rung, ci, cj);
-                // The water the shore law HOLDS the column against, and its side word (plan step
-                // 2 part 3b: an inland column holds the sea and stands under no water).
-                let read = vd_terrain::artifact::column_water(
-                    &body, &lattice, &artifact, face, rung, ci, cj, cell_side,
-                );
-                let (water, side) = (read.hold, read.side);
+                // ★ THE PLAIN GROUND (ruling B22): no water word and no side reach the column.
                 let t2 = Instant::now();
                 let got = column_surface_at(
                     &charter,
@@ -135,8 +128,6 @@ fn main() {
                         z,
                         first: body.first_fine(),
                         slope_share,
-                        water,
-                        side,
                     },
                 );
                 kernel_us += t2.elapsed().as_secs_f64() * 1.0e6;

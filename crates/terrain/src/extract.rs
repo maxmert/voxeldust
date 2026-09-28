@@ -633,9 +633,6 @@ pub(crate) mod tests {
             cells,
             sites,
             dirs,
-            water: vec![Gi::ZERO; BOX_EDGE * BOX_EDGE],
-            surfaces: vec![Gi::ZERO; BOX_EDGE * BOX_EDGE],
-            sea: Gi::ZERO,
         }
     }
 

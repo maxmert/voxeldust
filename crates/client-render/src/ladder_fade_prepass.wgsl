@@ -34,8 +34,7 @@ struct LadderFade {
 // realm — one row per rung, (in_lo, sink_end, out_lo, out_hi) metres from the eye, and one row that
 // is always passed — which the renderer rewrites in its prepare stage every frame, in step with
 // the placements. The material holds only its row (`fade.sink.z`), so a moving horizon rewrites
-// this buffer and never a material, and the water fades on its ground's band. `clock` is the
-// arrival ramp's (slice R1c).
+// this buffer and never a material. `clock` is the arrival ramp's (slice R1c).
 struct BandTable {
     clock: vec4<u32>,
     rows: array<vec4<f32>>,

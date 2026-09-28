@@ -993,10 +993,9 @@ impl ProbeMaterial {
 /// fragment stage). One material per rung. ★ THE BANDS ARE NOT THE MATERIAL'S (the far-water
 /// design §10, slice R1a): every material of a realm binds that realm's ONE band table, which the
 /// renderer writes every frame (the Tier-A `band_table`), and holds only its row — so a moving
-/// horizon rewrites a buffer and never a material, and the water fades on its ground's band. A
-/// `StandardMaterial` extension: the light, the shadow and the paint are the engine's own; the
-/// shadow pass runs the same morph and sink (`ladder_fade_prepass.wgsl`), so the shadows fall from
-/// the surface the picture shows.
+/// horizon rewrites a buffer and never a material. A `StandardMaterial` extension: the light, the
+/// shadow and the paint are the engine's own; the shadow pass runs the same morph and sink
+/// (`ladder_fade_prepass.wgsl`), so the shadows fall from the surface the picture shows.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 #[bind_group_data(LadderFadeKey)]
 pub(crate) struct LadderFade {
@@ -1020,8 +1019,8 @@ pub(crate) struct LadderFade {
     /// of the water's clip depth by one part in 2²⁰ is a millionth of the DISTANCE along the ray,
     /// eleven metres at 11 500 km, and at a grazing view it lifted the water over every coastal
     /// plain lower than that — MEASURED on the 6 376 km stand: the far coast dissolved MORE, not
-    /// less. The near-tie is settled in the sheet's own geometry instead (`position::water_sheet`,
-    /// the buffer's own step), never in the depth.
+    /// less. The water sheet then settled the near-tie in its own geometry, never in the depth;
+    /// ruling B22 removed the sheet.
     #[uniform(100)]
     splat: Vec4,
     /// ★ THE REALM'S BAND TABLE (slice R1a): `(clock, rows[])` — one row per rung,

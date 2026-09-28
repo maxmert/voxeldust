@@ -272,7 +272,12 @@ pub fn tube_hollow_steps(tubes: &[Tube], point_steps: [Gi; 3]) -> Gi {
 #[repr(C)]
 pub struct CellCharter {
     /// The sea's radius, in gap steps at [`LENGTH_BITS`]: a cell that is not rock and stands under
-    /// it is water, over it air.
+    /// it is water, over it air. ★ SINCE RULING B22 (2026-09-28) THE HOST STATES ZERO: no cell is
+    /// water until the one-volume fill step, so every cell over the ground is air. The slot and the
+    /// fluid rule stay for that step.
+    ///
+    /// **Example.** A chunk 300 m over the belt's sea floor and under the sea's level holds only
+    /// air, and the pilot sees the dry floor.
     pub sea_radius: Gi,
     /// The depth band caves live in, in gap steps at [`LENGTH_BITS`] under the surface.
     pub cave_min: Gi,
@@ -350,9 +355,10 @@ impl CellCharter {
     }
 
     /// ★ THE FLUID at a radius under a COLUMN's water surface (slice 8c stage C5): water under
-    /// `water`, the atmosphere over it. A column's water is the artifact's row (the sea's level,
-    /// a lake's spill level) or the body's sea where no row is held, or ZERO for a dry column —
-    /// and a radius is never under zero, so a dry column holds only air above its rock.
+    /// `water`, the atmosphere over it. A column's water is the word its host states, or ZERO for a
+    /// dry column — and a radius is never under zero, so a dry column holds only air above its
+    /// rock. ★ Since ruling B22 (2026-09-28) the host states ZERO for every column; the one-volume
+    /// fill step will state the water here again.
     #[must_use]
     pub fn fluid_at(&self, r: Gi, water: Gi) -> Gi {
         if r < water {
@@ -362,8 +368,9 @@ impl CellCharter {
         }
     }
 
-    /// THE FLUID at a radius under the BODY's sea: what a host fills in for a column with no row
-    /// of its own (the card's plan, the halo above the band).
+    /// THE FLUID at a radius under the charter's own sea: what the card's plan reads for every
+    /// column, because a card holds no row. The host states no sea since ruling B22, so it answers
+    /// air.
     #[must_use]
     pub fn fluid_code(&self, r: Gi) -> Gi {
         self.fluid_at(r, self.sea_radius)
@@ -470,7 +477,8 @@ pub struct CellAt {
     /// The cell centre's radius in WHOLE gap steps — exact.
     pub r_steps: Gi,
     /// ★ The column's water surface radius in gap steps at [`LENGTH_BITS`] (slice 8c stage C5),
-    /// or ZERO for a dry column: the host fills it from the artifact's row, or from the body's sea.
+    /// or ZERO for a dry column. ★ Since ruling B22 (2026-09-28) the host passes ZERO for every
+    /// column, so no cell is water; the slot is the one-volume fill step's.
     pub water: Gi,
     /// ★ THE COLUMN'S ROCK PROVINCE (slice 8d step 2), an index into the charter's rock map: the
     /// host fills it from the artifact's row under the column, or states its default where it holds

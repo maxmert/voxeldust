@@ -171,10 +171,6 @@ pub struct TerrainConfig {
     /// every chunk and its probe twin with the engine's frustum culling OFF, so a hole that
     /// vanishes under it is a culling box, not a missing mesh. A measurement's switch.
     pub no_cull: bool,
-    /// ★ THE WATER ABLATION (the owner's feeling, 2026-09-21: "when we draw just the planet it is
-    /// performant, but if water is drawn it becomes slower"): `VD_TERRAIN_WATER=0` spawns no water
-    /// sheet, so the same leg flown twice names the sheet's own cost. A measurement's switch.
-    pub water: bool,
     /// THE SHADOW'S SHAPE (D8-8's ablation named the sun's shadow as the still stand's wall,
     /// §19.6): how far it reaches (the rung whose switch distance ends it), how many cascades
     /// draw it, and each cascade map's width in pixels. Defaults: the constants below; the
@@ -349,7 +345,6 @@ const HIDE_RUNG_ENV: &str = "VD_TERRAIN_HIDE_RUNG";
 const NO_CULL_ENV: &str = "VD_TERRAIN_NO_CULL";
 /// How often the artifact mismatch is logged while it lasts, in seconds.
 const ARTIFACT_MISMATCH_LOG_S: f64 = 10.0;
-const WATER_ENV: &str = "VD_TERRAIN_WATER";
 
 /// THE DEFAULT memory budget of the parent cache. The working set on a flight is every ring's
 /// LEADING EDGE, not one worker's neighbourhood: the pool builds hundreds of parents a second
@@ -382,7 +377,6 @@ impl TerrainConfig {
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
             no_cull: std::env::var(NO_CULL_ENV).is_ok_and(|v| v == "1"),
-            water: env_on(WATER_ENV),
             shadow_reach_rung: env_or(SHADOW_REACH_ENV, SHADOW_REACH_RUNG),
             shadow_cascades: env_or(SHADOW_CASCADES_ENV, SHADOW_CASCADES),
             shadow_map_px: env_or(SHADOW_MAP_ENV, SHADOW_MAP_PX),
@@ -1584,9 +1578,6 @@ pub struct Terrain {
     /// The ground's materials, one per realm and rung, each holding its row of the realm's band
     /// table, built on first use.
     materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
-    /// ★ THE WATER'S materials per realm and rung (slice 8c stage C5): the ground's fade with the
-    /// water's own colour, culling nothing.
-    water_materials: BTreeMap<(RealmId, u8), Handle<GroundMaterial>>,
     /// The probe materials, one per realm, kind and rung, built on first use.
     probe_materials: BTreeMap<(RealmId, u8, u8), Handle<ProbeMaterial>>,
     /// THE SHADOW LADDER'S state: the light-caster materials per realm and rung; how many
@@ -1733,7 +1724,6 @@ impl Terrain {
             band_tables: BTreeMap::new(),
             frame_ticks: 1,
             materials: BTreeMap::new(),
-            water_materials: BTreeMap::new(),
             probe_materials: BTreeMap::new(),
             morph_totals: [0; 3],
             bytes_drawn: 0,
@@ -2053,44 +2043,6 @@ impl Terrain {
             + f64::from(vd_seed::ladder::cell_m(fine))
     }
 
-    /// ★ THE WATER'S MATERIAL for a realm's rung (slice 8c stage C5): the same crossfade the ground
-    /// rides — so a rung's sheet ends where the finer rung's begins — with the water's own colour
-    /// and no culling (a quad's winding is nobody's promise). The look is the ocean slice's (8o).
-    fn water_material(
-        &mut self,
-        assets: &mut Assets<GroundMaterial>,
-        realm: RealmId,
-        rung: u8,
-        body: &vd_terrain::BodyDefinition,
-        gpu: &BandGpu,
-    ) -> Handle<GroundMaterial> {
-        let table = self.band_buffer(realm, body, gpu);
-        self.water_materials
-            .entry((realm, rung))
-            .or_insert_with(|| {
-                assets.add(GroundMaterial {
-                    base: StandardMaterial {
-                        base_color: Color::srgb(0.06, 0.24, 0.42),
-                        perceptual_roughness: 0.15,
-                        metallic: 0.0,
-                        cull_mode: None,
-                        alpha_mode: AlphaMode::Mask(0.5),
-                        ..default()
-                    },
-                    extension: LadderFade::new(
-                        rung,
-                        (
-                            vd_client::chunks::sink_m(body, rung),
-                            vd_client::chunks::stand_in_sink_m(body, rung),
-                        ),
-                        f64::from(vd_seed::ladder::cell_m(rung)),
-                        table,
-                    ),
-                })
-            })
-            .clone()
-    }
-
     fn shadow_material(
         &mut self,
         assets: &mut Assets<GroundMaterial>,
@@ -2278,36 +2230,6 @@ fn mesh_of(
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.normals.clone());
     }
     mesh
-}
-
-/// ★ THE WATER SHEET'S MESH (slice 8c stage C5): the ground's attributes — a position, a normal
-/// (the radial: a flat sheet faces up), a morph of zero, the radial, the morph normal — so the
-/// ground's fade shader draws it with the ground's bands.
-fn water_mesh_of(geometry: &vd_client::chunks::ChunkGeometry) -> Mesh {
-    let packed: Vec<[i16; 2]> = geometry
-        .water_radials
-        .iter()
-        .map(|r| oct_encode(*r))
-        .collect();
-    let indices: Vec<u32> = geometry
-        .water_triangles
-        .iter()
-        .flat_map(|t| [t[0], t[1], t[2]])
-        .collect();
-    Mesh::new(
-        bevy::mesh::PrimitiveTopology::TriangleList,
-        bevy::asset::RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, geometry.water_vertices.clone())
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, geometry.water_radials.clone())
-    // ★ THE WATER MORPHS WITH ITS GROUND (ruling W18): the library's own metre per vertex.
-    .with_inserted_attribute(super::ATTRIBUTE_MORPH, geometry.water_morph_m.clone())
-    .with_inserted_attribute(super::ATTRIBUTE_RADIAL, geometry.water_radials.clone())
-    .with_inserted_attribute(
-        super::ATTRIBUTE_MORPH_NORMAL,
-        bevy::mesh::VertexAttributeValues::Snorm16x2(packed),
-    )
-    .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
 /// THE SPLAT MESH (D8-8's measurement): every surface vertex four times, with the corner it
@@ -2828,9 +2750,8 @@ pub(crate) fn sync_terrain(
     // ★ THE BAND TABLES (the far-water design §10, slice R1a): every realm's crossfade rows under
     // the HELD horizon, EVERY frame. The render world writes them into each realm's one buffer in
     // its prepare stage, in step with this frame's placements, so every material of the realm —
-    // the ground's, the water's, the casters', the probes' — fades on this frame's bands, and no
-    // material is rewritten. Before R1a the materials followed the horizon only within a
-    // twentieth, and the water's never.
+    // the ground's, the casters', the probes' — fades on this frame's bands, and no material is
+    // rewritten. Before R1a the materials followed the horizon only within a twentieth.
     let piece = std::time::Instant::now();
     let mut tables = 0u64;
     let clock = terrain.clock_words();
@@ -3113,7 +3034,6 @@ pub(crate) fn sync_terrain(
     let splat_rung = terrain.config.splat_rung;
     let hide_rung = terrain.config.hide_rung;
     let no_cull = terrain.config.no_cull;
-    let water_on = terrain.config.water;
     let shadow_cast = terrain.config.shadow_cast;
     let shadow_cast_rung = terrain.config.shadow_cast_rung;
     let shadow_receive = terrain.config.shadow_receive;
@@ -3237,36 +3157,6 @@ pub(crate) fn sync_terrain(
                 bevy::mesh::MeshTag(stamp),
             ))
             .id();
-        // ★ THE WATER SHEET (slice 8c stage C5) rides as the chunk's CHILD: it moves with the
-        // chunk's origin, hides with it, and leaves with it; it casts no shadow. ★ IT CARRIES ITS
-        // OWN BOX (the far-water design §10, slice R1b): the engine would give it a box of the
-        // sheet's rest places, which holds neither its morph nor its sink, so a morphed or sunk
-        // sheet at the screen's edge could be culled while on screen; and the ground's box does
-        // not hold it over deep water, where the floor's triangles are cut.
-        if water_on && !ready.geometry.water_triangles.is_empty() {
-            let water = terrain.water_material(&mut ground_materials, realm, key.rung, &body, &gpu);
-            let sheet = meshes.add(water_mesh_of(&ready.geometry));
-            let (lo, hi) = ready.geometry.water_bounds;
-            let sheet_entity = commands
-                .spawn((
-                    Mesh3d(sheet),
-                    MeshMaterial3d(water),
-                    Transform::default(),
-                    bevy::light::NotShadowCaster,
-                    bevy::camera::primitives::Aabb::from_min_max(
-                        Vec3::from_array(lo),
-                        Vec3::from_array(hi),
-                    ),
-                    bevy::mesh::MeshTag(stamp),
-                ))
-                .id();
-            if no_cull {
-                commands
-                    .entity(sheet_entity)
-                    .insert(bevy::camera::visibility::NoFrustumCulling);
-            }
-            commands.entity(entity).add_child(sheet_entity);
-        }
         if hide_rung.is_some_and(|r| key.rung >= r) {
             commands.entity(entity).insert(Visibility::Hidden);
         }

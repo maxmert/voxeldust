@@ -1374,9 +1374,6 @@ impl BodyDefinition {
             radius: self.radius,
             octave_count: Gi::new(self.octaves_at(rung).len() as i64),
             key_face: Gi::new(i64::from(key_face.index())),
-            // ★ THE SEA THE SHORE LAW HOLDS AGAINST (2026-09-21): the body's own, ZERO for none —
-            // never the biome's datum, which is the ladder radius on a dry body.
-            sea_radius: self.sea_radius,
             biome: self.biome_charter(),
             roughness: self.roughness,
             terrace: self.terrace_at(rung),
@@ -1385,9 +1382,10 @@ impl BodyDefinition {
     }
 
     /// ★ THE SAME BODY WITH ITS SOLVED SEA (slice 8c stage C5): the sea's level in whole metres
-    /// over the ladder radius, as the artifact states it (`Artifact::sea_m`). Read by the cell
-    /// kernel for every column that holds no water row of its own — the far view's pyramid chunks,
-    /// the halo above the band — and by the biome charter. `None` states no sea.
+    /// over the ladder radius, as the artifact states it (`Artifact::sea_m`). The biome charter
+    /// reads it as its datum. ★ Since ruling B22 (2026-09-28) no cell and no column reads it: the
+    /// cell charter states no sea and the shore law is removed, so the dry sea floor shows until
+    /// the one-volume fill step. `None` states no sea.
     #[must_use]
     pub fn with_sea_m(mut self, sea_m: Option<i32>) -> BodyDefinition {
         self.sea_radius = match sea_m {

@@ -5,9 +5,11 @@
 //! - the HEAD: one `BulkMsg::ArtifactHead` (the world tag, the version, the edge, the digest);
 //! - the PYRAMID: every level cut into parts of at most [`PYRAMID_PART_WORDS`] heights, each a
 //!   `BulkMsg::ArtifactPyramid`, coarsest level LAST so a client draws from the top down;
-//! - the COAST MASK (2026-09-22, ruling W10): the body's sea bits cut into parts of at most
-//!   [`COAST_PART_BYTES`], each a `BulkMsg::ArtifactCoast`, AFTER the pyramid's parts in the one
-//!   list the sim pages through — the far view stands first, then every rung reads one shoreline;
+//! - ★ NO COAST MASK AND NO WATER WORDS (2026-09-28, ruling B22 step 1): nothing draws them since
+//!   the shore law and the water sheet are removed, so the head states no coast part and every
+//!   pyramid part ships its heights alone (the wire's own "no water words" form). The artifact
+//!   still HOLDS both — the store keeps them and the digest folds them — for the one-volume fill
+//!   step;
 //! - the TILES under a direction: the face and the macro cell the direction falls in through the
 //!   bend's inverse, then every tile whose rows lie within the radius on that face (a stated
 //!   limit: tiles across a cube edge from the occupant are owed — the next face's tiles arrive as
@@ -28,8 +30,8 @@ use vd_wire::channels::BulkMsg;
 
 use crate::artifact_store::tile_bytes;
 
-/// A coast part's size in BYTES: the store's own cut (32 KiB of bits), so a shard ships what it
-/// stores.
+/// A coast part's size in BYTES: the store's own cut (32 KiB of bits). The shard ships no coast
+/// part since ruling B22; a probe that hands a client the stored mask cuts it at this size.
 pub use vd_sim::stub::built_store::COAST_PART_BYTES;
 /// A pyramid part's size in heights: the store's own cut (16 384 words, 32 KB, a tile's weight),
 /// so a shard ships what it stores.
@@ -58,8 +60,8 @@ pub struct ArtifactTiles {
     /// budget on every big planet from the tick its solve landed).
     digest: [u64; 2],
     /// ★ THE PARTS ENCODED ONCE (the same flight): the artifact never changes under a source, so
-    /// its 181 pyramid parts (5.9 MB on the home planet) and its 34 coast parts (1.1 MB) are the
-    /// same bytes on every ask. Filled on the first ask.
+    /// its 181 pyramid parts (5.9 MB on the home planet when they carried their water words) are
+    /// the same bytes on every ask. Filled on the first ask.
     parts: std::sync::OnceLock<Vec<Bytes>>,
 }
 
@@ -107,42 +109,20 @@ impl ArtifactTiles {
         let mut out = Vec::new();
         for (k, level) in self.artifact.pyramid.iter().enumerate().rev() {
             let parts = level.len().div_ceil(PYRAMID_PART_WORDS).max(1) as u32;
-            let water = &self.artifact.pyramid_water[k];
-            for (part, (words, water_words)) in level
-                .chunks(PYRAMID_PART_WORDS)
-                .zip(water.chunks(PYRAMID_PART_WORDS))
-                .enumerate()
-            {
+            for (part, words) in level.chunks(PYRAMID_PART_WORDS).enumerate() {
                 out.push(encode(&BulkMsg::ArtifactPyramid {
                     realm: self.realm,
                     level: k as u32 + 1,
                     part: part as u32,
                     parts,
                     z_m: words.to_vec(),
-                    water_m: water_words.to_vec(),
+                    // ★ NO WATER WORDS (ruling B22): no column reads them, so the part ships its
+                    // heights alone — the empty form the wire and the client accept.
+                    water_m: Vec::new(),
                 }));
             }
         }
-        // ★ THE COAST MASK, AFTER THE PYRAMID (2026-09-22, ruling W10): the same list, so the sim
-        // pages through one queue and the gateway caches one arrival order. A client that holds
-        // the mask reads the water's side at every rung from the fine row's own bit.
-        let parts = self.coast_parts();
-        for (part, bits) in self.artifact.coast.chunks(COAST_PART_BYTES).enumerate() {
-            out.push(encode(&BulkMsg::ArtifactCoast {
-                realm: self.realm,
-                part: part as u32,
-                parts,
-                bits: bits.to_vec(),
-            }));
-        }
         out
-    }
-
-    /// How many coast parts this artifact's mask is cut into; ZERO for a body with no mask at all
-    /// (a lattice of no nodes), which no shipped body is.
-    #[must_use]
-    pub fn coast_parts(&self) -> u32 {
-        self.artifact.coast.len().div_ceil(COAST_PART_BYTES) as u32
     }
     /// The tile that holds macro cell `(i, j)` of a face.
     #[must_use]
@@ -198,7 +178,9 @@ impl TileSource for ArtifactTiles {
             tiles_per_edge: self.artifact.tiles_per_edge(),
             levels: self.artifact.pyramid.len() as u32,
             sea_m: self.artifact.sea_m,
-            coast_parts: self.coast_parts(),
+            // ★ NO COAST PART FOLLOWS (ruling B22): the gateway and the client read ZERO as "no
+            // mask", and the far view is whole with its pyramid alone.
+            coast_parts: 0,
         })
     }
 
@@ -246,9 +228,10 @@ mod tests {
     use crate::artifact_worker::{SolveJob, run_solve};
     use vd_terrain::home::{home_moon, home_moon_solve_words};
 
-    /// The moon as a source: the head names the artifact, the pyramid comes coarsest first in
-    /// parts, the tiles under a direction are that face's tiles nearest first and every one
-    /// decodes back to its rows, and a tile past the lattice is none.
+    /// The moon as a source: the head names the artifact and announces no coast part, the pyramid
+    /// comes coarsest first in parts with no water words and nothing after it, the tiles under a
+    /// direction are that face's tiles nearest first and every one decodes back to its rows, and a
+    /// tile past the lattice is none.
     #[test]
     fn the_moons_artifact_as_a_source() {
         let moon = home_moon();
@@ -290,7 +273,7 @@ mod tests {
                 tiles_per_edge: 2,
                 levels: 2,
                 sea_m: artifact.sea_m,
-                coast_parts: source.coast_parts(),
+                coast_parts: 0,
             }
         );
         let parts = source.artifact_parts();
@@ -303,19 +286,11 @@ mod tests {
                 .all(|(a, b)| Arc::ptr_eq(a, b))
         );
         // Level 2 (6 · 17² = 1 734 words) is one part; level 1 (6 · 34² = 6 936) is one part.
-        // ★ THE COAST MASK rides after them (2026-09-22): the moon's 27 744 nodes are 3 468 bytes
-        // of bits, one part, and it is the LAST of the list.
-        assert_eq!(source.coast_parts(), 1);
-        assert_eq!(parts.len(), 3);
-        assert_eq!(
-            postcard::from_bytes::<BulkMsg>(&parts[2]).expect("decodes"),
-            BulkMsg::ArtifactCoast {
-                realm: vd_core::pose::RealmId::Planet(moon.seed()),
-                part: 0,
-                parts: 1,
-                bits: artifact.coast.clone(),
-            }
-        );
+        // ★ NOTHING RIDES AFTER THEM (ruling B22): no coast part, and no part carries water words,
+        // while the artifact itself still holds both.
+        assert_eq!(parts.len(), 2);
+        assert!(!artifact.coast.is_empty());
+        assert_eq!(artifact.pyramid_water.len(), 2);
         assert_eq!(
             postcard::from_bytes::<BulkMsg>(&parts[0]).expect("decodes"),
             BulkMsg::ArtifactPyramid {
@@ -324,7 +299,18 @@ mod tests {
                 part: 0,
                 parts: 1,
                 z_m: artifact.pyramid[1].clone(),
-                water_m: artifact.pyramid_water[1].clone(),
+                water_m: Vec::new(),
+            }
+        );
+        assert_eq!(
+            postcard::from_bytes::<BulkMsg>(&parts[1]).expect("decodes"),
+            BulkMsg::ArtifactPyramid {
+                realm: vd_core::pose::RealmId::Planet(moon.seed()),
+                level: 1,
+                part: 0,
+                parts: 1,
+                z_m: artifact.pyramid[0].clone(),
+                water_m: Vec::new(),
             }
         );
         // Under +Z at the face centre (node 34 of 68), 250 km is 31 nodes (8.15 km each): the

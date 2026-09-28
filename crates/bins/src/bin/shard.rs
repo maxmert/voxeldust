@@ -327,7 +327,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Some(body), Some(charter)) if own_solid => Some(
             vd_bins::artifact_boot::ArtifactBoot::begin(
                 realm_store.as_ref().map(|s| s as &dyn vd_sim::io::Store),
-                vd_terrain::declared_world_tag(universe_seed),
+                // The artifact's OWN key (ruling B22 step 1): a column rule's change leaves it valid.
+                vd_terrain::artifact_world_tag(universe_seed),
                 body,
                 &vd_bins::solve_words_of(charter),
                 Box::new(vd_bins::artifact_worker::ThreadedWorker::default()),
@@ -528,7 +529,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         && let Some(artifact) = boot.artifact()
         && let Some(source) = vd_bins::artifact_source::artifact_source_of(
             own_realm,
-            vd_terrain::declared_world_tag(universe_seed),
+            vd_terrain::artifact_world_tag(universe_seed),
             body,
             artifact,
         )
@@ -752,7 +753,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some((artifact, body)) = boot.artifact().zip(own_body.as_ref())
                     && let Some(source) = vd_bins::artifact_source::artifact_source_of(
                         own_realm,
-                        vd_terrain::declared_world_tag(universe_seed),
+                        vd_terrain::artifact_world_tag(universe_seed),
                         body,
                         artifact,
                     )

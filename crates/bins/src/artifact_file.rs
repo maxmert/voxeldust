@@ -1,11 +1,11 @@
 //! ★ AN ARTIFACT AS A PLAIN FILE, FOR THE BENCHES (2026-09-26; the washboard bench, ruling B10 item 2).
 //!
-//! **WHY IT EXISTS.** The shoreline bench paints the drawn water of ONE artifact, and the washboard
-//! bench makes a variant artifact for each routing cure it measures. So one bench must write an
-//! artifact that the other can read, and a slow solve must not run twice for one picture. This is
-//! the one reader and the one writer, moved here from the shoreline bench so that both examples use
-//! the same format. It is a development aid: never a store, never on the wire, and the digest a
-//! reader checks is the artifact's own.
+//! **WHY IT EXISTS.** The washboard bench (`router_bench`) makes a variant artifact for each routing
+//! cure it measures, and a slow solve must not run twice for one reading. So one example writes an
+//! artifact that another can read: `router_bench --artifact-readings` and `equator_stands` read it
+//! today (the shoreline bench that painted it left with the drawn water, ruling B22). This is the one
+//! reader and the one writer. It is a development aid: never a store, never on the wire, and the
+//! digest a reader checks is the artifact's own.
 //!
 //! **THE FORMAT** (little-endian words): the edge and the version (`u32` each), the sea (`i16`), the
 //! row count (`u64`) and every row's bytes; then the pyramid's heights and its water words (each a
@@ -13,8 +13,9 @@
 //! bytes.
 //!
 //! **Example.** The washboard bench solves the home planet with the seeded spread of the drain
-//! direction and writes `rho8.art`; the shoreline bench reads it with `--artifact-cache rho8.art` and
-//! paints the second pocket's floor, so the owner sees the 45° ridges before and after the cure.
+//! direction and writes `rho8.art`; `router_bench --artifact-readings rho8.art rho8` reads it back
+//! and prints the land's facing and its fine texture's facing, so the owner reads the 45° ridges
+//! before and after the cure.
 
 use vd_terrain::artifact::{Artifact, ROW_BYTES, Row};
 

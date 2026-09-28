@@ -26,8 +26,9 @@
 //! receiver steps of the shipped tree) at four and twelve bins; the lakes' long axes (patches of four
 //! nodes or more); ★ THE FACING — the ground's own slope direction over the land, its fourfold mode and
 //! twelve-bin flatness, a reading no router makes; the lake share, the sea and the ocean share.
-//! `--write-artifact <file>` writes the variant's artifact for the shoreline bench
-//! (`--artifact-cache <file>`), which paints its stands.
+//! `--write-artifact <file>` writes the variant's artifact as a plain file (`vd_bins::artifact_file`),
+//! which `--artifact-readings` and `equator_stands` read (the shoreline bench that painted it left
+//! with the drawn water, ruling B22).
 //!
 //! ```text
 //! cargo run --release -p vd-bins --example router_bench -- --cone
@@ -36,8 +37,8 @@
 //!
 //! **Example.** Over the second pocket's floor, D8's furrows run north-east one node apart; the census
 //! line FACING reads a strong fourfold mode at phase 45°. After the cure the same floor's slopes face
-//! every way, the mode falls toward the isotropic reading, and the shoreline bench's panel of that
-//! floor shows hollows where the furrows stood.
+//! every way, the mode falls toward the isotropic reading, and a picture of that floor shows hollows
+//! where the furrows stood.
 
 use std::time::Instant;
 
@@ -852,7 +853,7 @@ fn planet_stage(
     }
 }
 
-/// ★ THE READINGS OF AN ARTIFACT FILE (the shoreline bench's `--artifact-cache` format): the facing of
+/// ★ THE READINGS OF AN ARTIFACT FILE (the plain file of `vd_bins::artifact_file`): the facing of
 /// the land and — ★ THE WASHBOARD'S OWN READING — the facing of the land's FINE texture, each node's
 /// height less the mean of its eight neighbours, so the continents' regional slopes (which the cube's
 /// faces orient) leave the reading and the one-node furrows stay; and the lake share. The heights are

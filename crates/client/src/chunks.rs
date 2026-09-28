@@ -137,23 +137,6 @@ pub struct ChunkGeometry {
     /// the shape. MEASURED without it (§22.2): at 240 m/s 13 % of the pixels at the rung 1→2
     /// handover stepped by up to 48 levels in one frame.
     pub morph_normals: Vec<[i16; 2]>,
-    /// ★ THE WATER SHEET (slice 8c stage C5): a flat surface at the water's level — the sea's, a
-    /// lake's — on the ground's own triangles (ruling W18), in metres relative to `origin_m`, with
-    /// the radial of each vertex; empty for a dry chunk. It rides the same fade as the
-    /// ground (a morph of zero: the sheet is flat at every rung), so the coarser rung's sheet ends
-    /// where the finer's begins. The look — waves, depth, the shore's foam — is the ocean slice's
-    /// (8o); this is the water judged wet.
-    pub water_vertices: Vec<[f32; 3]>,
-    pub water_radials: Vec<[f32; 3]>,
-    pub water_triangles: Vec<[u32; 3]>,
-    /// ★ THE WATER MORPHS WITH ITS GROUND (ruling W18): one metre per water vertex along its
-    /// radial, to where the water stands over the ground vertex's OWN morph target by the same
-    /// rule that placed it (`vd_terrain::position::water_radius`). MEASURED before it (the owner
-    /// at 118 000 km, the middle of rung 17's crossfade band): the land morphed down toward the
-    /// coarser rung's mesh, whose vertices stand at that rung's step of 2 km, under a water that
-    /// stayed put — a dot screen over every continent that vanished at the ring swap; and at
-    /// 408 000 km the whole planet shimmered against rung 20's 8 km step.
-    pub water_morph_m: Vec<f32>,
     /// THE RADIAL of each vertex (step 5): its unit direction from the body's centre in the
     /// realm's frame, narrowed once to `f32` — the shader needs no centre of the body (MEASURED
     /// with a centre uniform instead: a moving eye rewrote every material and the engine
@@ -181,11 +164,6 @@ pub struct ChunkGeometry {
     /// P-8: on the main thread it cost two square roots a vertex in the harvest loop). Zero for an
     /// empty geometry.
     pub bounds: ([f32; 3], [f32; 3]),
-    /// ★ THE SHEET'S OWN BOX (the far-water design §10, slice R1b): every place the vertex stage
-    /// can put a water vertex ([`ChunkGeometry::water_drawn_ends`]), built by the worker like
-    /// `bounds`. The ground's box cannot serve: over deep water the floor's triangles are cut and
-    /// its vertices stand far under the sheet. Zero for a dry chunk.
-    pub water_bounds: ([f32; 3], [f32; 3]),
 }
 
 /// The widest angle between a vertex's narrowed radial and the exact one: `f32`'s own rounding,
@@ -250,51 +228,6 @@ impl ChunkGeometry {
         let t = self.morph_target(i);
         let s = self.radial(i) * f64::from(self.stand_in_sink_m);
         [t[0] - s.x as f32, t[1] - s.y as f32, t[2] - s.z as f32]
-    }
-
-    /// ★ THE ENDS OF EVERY PLACE THE VERTEX STAGE CAN PUT WATER VERTEX `i` (slices R1b, R1c):
-    /// its own place, its morph target (its metre along its stored radial), its sunk place (the
-    /// chunk's sink along that radial), and the arrival ramp's deepest start (the target sunk by
-    /// the stand-in's sink). The morph acts in the fade-out band and the sink in the fade-in band,
-    /// which never overlap, and the ramp runs straight from a start between the target and the
-    /// deepest start, so every drawn place lies in the box of these four.
-    #[must_use]
-    pub fn water_drawn_ends(&self, i: usize) -> [[f32; 3]; 4] {
-        let v = self.water_vertices[i];
-        let r = self.water_radials[i];
-        let m = self.water_morph_m[i];
-        let s = self.sink_m;
-        let d = m - self.stand_in_sink_m;
-        [
-            v,
-            [v[0] + r[0] * m, v[1] + r[1] * m, v[2] + r[2] * m],
-            [v[0] - r[0] * s, v[1] - r[1] * s, v[2] - r[2] * s],
-            [v[0] + r[0] * d, v[1] + r[1] * d, v[2] + r[2] * d],
-        ]
-    }
-
-    /// The box over every water vertex's drawn places, as the worker builds it into
-    /// `water_bounds`. Zero for a dry chunk.
-    #[must_use]
-    pub fn measure_water_bounds(&self) -> ([f32; 3], [f32; 3]) {
-        if self.water_vertices.is_empty() {
-            return ([0.0; 3], [0.0; 3]);
-        }
-        let mut lo = [f32::INFINITY; 3];
-        let mut hi = [f32::NEG_INFINITY; 3];
-        let mut i = 0;
-        while i < self.water_vertices.len() {
-            for p in self.water_drawn_ends(i) {
-                let mut k = 0;
-                while k < 3 {
-                    lo[k] = lo[k].min(p[k]);
-                    hi[k] = hi[k].max(p[k]);
-                    k += 1;
-                }
-            }
-            i += 1;
-        }
-        (lo, hi)
     }
 
     /// The box over every vertex, its morph target, its sunk position and its ramp's deepest
@@ -1301,7 +1234,6 @@ pub fn geometry_from(
     let origin_m = [origin[0], origin[1], origin[2]];
     let mut vertices: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
     let mut morph: Vec<f32> = Vec::with_capacity(mesh.vertices.len());
-    let mut ground_r: Vec<f64> = Vec::with_capacity(mesh.vertices.len());
     let mut radials: Vec<[f32; 3]> = Vec::with_capacity(mesh.vertices.len());
     // The parent's shade at each vertex's target, where a parent triangle was hit (item 20).
     let mut shades: Vec<Option<DVec3>> = Vec::with_capacity(mesh.vertices.len());
@@ -1395,7 +1327,6 @@ pub fn geometry_from(
         };
         // The target as one metre along the radial from the vertex, and the radial itself (step 5).
         morph.push((target_m - len) as f32);
-        ground_r.push(len);
         radials.push([dir.x as f32, dir.y as f32, dir.z as f32]);
     }
     let normals = smooth_normals(&vertices, &mesh.triangles);
@@ -1412,28 +1343,8 @@ pub fn geometry_from(
             })
             .collect()
     };
-    // ★ THE HIDE BOUND (2026-09-21): a sheet triangle whose every vertex's ground stands more than
-    // this over the water can never show — the land morphs toward the coarser rung by at most its
-    // step bound, sinks under the finer one by the sink, and the extractor places it within a
-    // cell — so it is not built. MEASURED before the bound: the sheet under every cell cost ten
-    // milliseconds a frame. ★ THE SHEET RIDES THE GROUND'S OWN TRIANGLES (2026-09-23, ruling W18):
-    // the same mesh, the same vertex directions, so the water and the sea floor can cross only at
-    // the shore.
-    let hide_m = body.step_bound_m(key.rung)
-        + sink_m(body, key.rung)
-        + f64::from(vd_seed::ladder::cell_m(key.rung));
-    let ((water_vertices, water_radials, water_triangles, water_morph_m), words) =
-        water_sheet(body, samples, &mesh, origin_m, hide_m, &morph, &ground_r);
-    // ★ THE SEA FLOOR NO RAY CAN REACH IS NOT BUILT (2026-09-23, the performance measurements;
-    // the owner: *"I want believable water from the space later. So for some we might need to
-    // show the water-floor. For very deep — no."*): a ground triangle whose three vertices stand
-    // under their water at both ends of their morph by more than the water's visible depth is
-    // dropped from the drawn mesh (the normals were read from the whole mesh, so the cut's edge
-    // is shaded as it was). The visible depth is the extractor's own step today, which is the
-    // depth the rung can tell from zero; the ocean slice (8o) replaces it with the water's own
-    // clarity, a property of the water's substance, and the floor shows through shallow water.
-    let visible_depth_m = vd_terrain::position::water_quantum_m(key.rung);
-    let triangles = floor_triangles(&mesh.triangles, &words, &ground_r, &morph, visible_depth_m);
+    // ★ EVERY GROUND TRIANGLE IS DRAWN (2026-09-28, ruling B22): no water is drawn until the
+    // water fill, so no triangle is cut. Example: the belt's sea floor, 6.9 km down, shows dry.
     let mut geometry = ChunkGeometry {
         key,
         origin_m,
@@ -1446,14 +1357,9 @@ pub fn geometry_from(
         normals,
         packed_normals,
         morph_normals,
-        water_vertices,
-        water_radials,
-        water_triangles,
-        water_morph_m,
-        triangles,
+        triangles: mesh.triangles,
         radials,
         bounds: ([0.0; 3], [0.0; 3]),
-        water_bounds: ([0.0; 3], [0.0; 3]),
         skirt_start: 0,
         field_level: NO_FIELD,
         built_on: None,
@@ -1462,231 +1368,7 @@ pub fn geometry_from(
     let ceiling_m = f64::from(SKIRT_CELLS) * f64::from(vd_seed::ladder::cell_m(key.rung));
     add_skirts(&mut geometry, drop_m, ceiling_m);
     geometry.bounds = geometry.measure_bounds();
-    geometry.water_bounds = geometry.measure_water_bounds();
     Some(geometry)
-}
-
-/// ★ THE WATER SHEET's build (slice 8c stage C5; on the ground's own triangles since 2026-09-23,
-/// ruling W18): one water triangle per ground triangle that reaches down to the water, its three
-/// points the ground vertices' own directions at the water's radius, the level the HIGHEST among
-/// the three vertices' columns (a shore triangle reaches under the land, which hides it). Both
-/// windings drawn by a material that culls nothing. Empty for a dry chunk.
-/// The water sheet as the mesh takes it: single-precision vertices about the origin, radials,
-/// triangles, and each vertex's morph metre along its radial (ruling W18: the water morphs with
-/// its ground — the water's target is the same rule read from the ground vertex's own target).
-pub type ClientWaterSheet = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<f32>);
-
-/// `ground_morph_m` and `ground_r_m` are the chunk's ground vertices' morph metres and radii, in
-/// the mesh's vertex order.
-#[must_use]
-pub fn water_sheet(
-    body: &BodyDefinition,
-    samples: &vd_terrain::lattice::SampleBox,
-    mesh: &vd_terrain::extract::ChunkMesh,
-    origin_m: [f64; 3],
-    hide_m: f64,
-    ground_morph_m: &[f32],
-    ground_r_m: &[f64],
-) -> (ClientWaterSheet, Vec<vd_terrain::position::GroundWord>) {
-    let hide = vd_terrain::units::q28_of_metres(hide_m);
-    let ((points, radials, triangles), sources, words) =
-        vd_terrain::position::water_sheet_sided(body, samples, mesh, hide);
-    let quantum_m = vd_terrain::position::water_quantum_m(samples.key.rung);
-    let morph: Vec<f32> = points
-        .iter()
-        .zip(&sources)
-        .map(|(p, s)| {
-            let g = s.ground as usize;
-            let moved_r = ground_r_m[g] + f64::from(ground_morph_m[g]);
-            let target_r =
-                vd_terrain::position::water_radius(s.side, s.level_m, moved_r, quantum_m);
-            let own_r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-            (target_r - own_r) as f32
-        })
-        .collect();
-    // ★ THE EXACT CUT (2026-09-23, the performance measurements): the hide bound above was
-    // written for a quad that did not know where the ground stood, and at rung 16 it is 164 km,
-    // so it cut nothing — MEASURED at 16 952 km, the sheet's 661 168 triangles were the land's
-    // 661 168. The sheet on the ground's own vertices knows each vertex's radius and its morph
-    // target, so a water triangle is built only where one of its ground vertices can stand at or
-    // under the water, at either end of its morph, within the extractor's step.
-    let triangles: Vec<[u32; 3]> = triangles
-        .into_iter()
-        .filter(|t| {
-            t.iter().any(|w| {
-                let s = sources[*w as usize];
-                let g = s.ground as usize;
-                let r = ground_r_m[g];
-                let moved = r + f64::from(ground_morph_m[g]);
-                let lowest = if moved < r { moved } else { r };
-                lowest <= s.level_m + quantum_m
-            })
-        })
-        .collect();
-    // ★ COARSE WATER OVER DEEP WATER (2026-09-23, the performance measurements: the sheet was one
-    // fifth of the frame at 6 376 km). Where every ground vertex of a block of cells is DEEP —
-    // under its water by more than the visible depth at both ends of its morph, the very vertices
-    // the floor cut drops — nothing stands under the sheet, so the block is drawn as ONE flat
-    // quad on its corner columns at the water's radius (`SHEET_BLOCK`), and the fine triangles
-    // whose three vertices all lie in deep blocks are dropped. A fine triangle with a vertex in a
-    // block that is not deep stays, so the fine sheet overlaps the quads by up to a cell at the
-    // deep water's edge and the seam is covered from both sides; the quad's chord dips under the
-    // level toward its middle, so the fine sheet stands over it wherever the two meet.
-    let visible_depth_m = quantum_m;
-    let edge = vd_terrain::chunk::CHUNK_EDGE as i32;
-    // ★ A BLOCK MAY DIP NO MORE THAN THE EXTRACTOR'S OWN STEP (2026-09-23; the owner, from
-    // 17 900 km: *"on the far distance on the water some blue squares appeared"*). A flat quad is
-    // a chord of the sphere and dips `w² / 8R` under the sea at its middle: 5 km for eight cells
-    // at rung 16, 21 km at rung 17. The floor cut made that dip harmless for the geometry — it
-    // stands over nothing — but not for the AIR: the atmosphere reads the fragment kilometres
-    // deeper in the air, and at a grazing view that is more haze, so every quad-only block drew
-    // lighter than the fine sheet around it, its corners dark at the true level. So the block is
-    // as wide as the rung allows while its chord's dip stays under the extractor's step, the
-    // depth the rung can tell from zero: `n² ≤ R / (16 · cell)`, six cells at rung 13, four at
-    // 14, three at 15, two at 16, and none from rung 17 up, where the fine sheet stands alone.
-    let block = vd_terrain::position::sheet_block_cells(body.radius_m(), key_cell_m(samples));
-    let blocks_per_edge = (edge + block - 1) / block;
-    let mut block_deep = vec![true; (blocks_per_edge * blocks_per_edge) as usize];
-    let mut block_level: Vec<Option<f64>> = vec![None; block_deep.len()];
-    let block_of = |v: &[i16; 3]| -> usize {
-        let ga = (i32::from(v[0]) >> vd_terrain::position::WEIGHT_BITS).clamp(0, edge - 1);
-        let gb = (i32::from(v[1]) >> vd_terrain::position::WEIGHT_BITS).clamp(0, edge - 1);
-        ((gb / block) * blocks_per_edge + ga / block) as usize
-    };
-    for (i, v) in mesh.vertices.iter().enumerate() {
-        if block < 2 {
-            break;
-        }
-        let b = block_of(v);
-        let w = words[i];
-        let r = ground_r_m[i];
-        let moved = r + f64::from(ground_morph_m[i]);
-        let highest = if moved > r { moved } else { r };
-        let deep = (w.side == vd_terrain::position::WaterSide::Under)
-            & (highest < w.level_m - visible_depth_m)
-            & (w.level_m > 0.0);
-        block_deep[b] &= deep;
-        match block_level[b] {
-            None => block_level[b] = Some(w.level_m),
-            Some(l) => block_deep[b] &= l == w.level_m,
-        }
-    }
-    // A block no vertex of the mesh reaches holds no deep floor: it is not a block.
-    for (b, level) in block_level.iter().enumerate() {
-        block_deep[b] &= level.is_some();
-    }
-    // ★ THE FINE SHEET KEEPS A WHOLE BLOCK OF OVERLAP: a deep block with a shallow neighbour (or
-    // the chunk's edge, where the neighbour is another chunk's) draws its quad AND keeps its fine
-    // triangles, so the fine sheet always covers the quad's dipping chord out to a block's width
-    // past the deep water's edge. MEASURED with the overlap of one vertex only: faint hairlines
-    // one pixel wide along the seams at 17 000 km (124 of 667 680 pixels).
-    let mut block_coarse = block_deep.clone();
-    for by in 0..blocks_per_edge {
-        for bx in 0..blocks_per_edge {
-            let b = (by * blocks_per_edge + bx) as usize;
-            if !block_deep[b] {
-                continue;
-            }
-            let mut inland = true;
-            for (dx, dy) in [
-                (-1, 0),
-                (1, 0),
-                (0, -1),
-                (0, 1),
-                (-1, -1),
-                (1, -1),
-                (-1, 1),
-                (1, 1),
-            ] {
-                let (nx, ny) = (bx + dx, by + dy);
-                inland &= (nx >= 0) & (ny >= 0) & (nx < blocks_per_edge) & (ny < blocks_per_edge)
-                    && block_deep[(ny * blocks_per_edge + nx) as usize];
-            }
-            block_coarse[b] = inland;
-        }
-    }
-    let mut triangles: Vec<[u32; 3]> = triangles
-        .into_iter()
-        .filter(|t| {
-            !t.iter().all(|w| {
-                let s = sources[*w as usize];
-                block_coarse[block_of(&mesh.vertices[s.ground as usize])]
-            })
-        })
-        .collect();
-    let mut points = points;
-    let mut radials = radials;
-    let mut morph = morph;
-    for by in 0..blocks_per_edge {
-        for bx in 0..blocks_per_edge {
-            let b = (by * blocks_per_edge + bx) as usize;
-            if !block_deep[b] {
-                continue;
-            }
-            let level_m = block_level[b].unwrap_or(0.0);
-            let (a0, b0) = (bx * block, by * block);
-            let (a1, b1) = ((a0 + block).min(edge), (b0 + block).min(edge));
-            let base = points.len() as u32;
-            for (ca, cb) in [(a0, b0), (a1, b0), (a0, b1), (a1, b1)] {
-                let dir = vd_terrain::position::column_dir(samples, ca, cb);
-                points.push([dir[0] * level_m, dir[1] * level_m, dir[2] * level_m]);
-                radials.push(dir);
-                morph.push(0.0);
-            }
-            triangles.push([base, base + 1, base + 3]);
-            triangles.push([base, base + 3, base + 2]);
-        }
-    }
-    let vertices = points
-        .iter()
-        .map(|p| {
-            [
-                (p[0] - origin_m[0]) as f32,
-                (p[1] - origin_m[1]) as f32,
-                (p[2] - origin_m[2]) as f32,
-            ]
-        })
-        .collect();
-    let radials = radials
-        .iter()
-        .map(|r| [r[0] as f32, r[1] as f32, r[2] as f32])
-        .collect();
-    ((vertices, radials, triangles, morph), words)
-}
-
-/// A box's cell in metres, from its key's rung.
-fn key_cell_m(samples: &vd_terrain::lattice::SampleBox) -> f64 {
-    f64::from(vd_seed::ladder::cell_m(samples.key.rung))
-}
-
-/// ★ THE SEA FLOOR THAT CAN SHOW: the ground triangles kept for the drawn mesh. A triangle is
-/// dropped only where every one of its three vertices stands UNDER its water (the columns' word)
-/// by more than `visible_depth_m` at both ends of its morph; every other triangle — land, shore,
-/// a shelf under shallow water, a floor that morphs up toward the water — stays. Nothing here
-/// touches the recipe's shape: a dropped triangle is one no ray reaches under an opaque sea.
-#[must_use]
-pub fn floor_triangles(
-    triangles: &[[u32; 3]],
-    words: &[vd_terrain::position::GroundWord],
-    ground_r_m: &[f64],
-    ground_morph_m: &[f32],
-    visible_depth_m: f64,
-) -> Vec<[u32; 3]> {
-    triangles
-        .iter()
-        .filter(|t| {
-            !t.iter().all(|i| {
-                let g = *i as usize;
-                let w = words[g];
-                let r = ground_r_m[g];
-                let moved = r + f64::from(ground_morph_m[g]);
-                let highest = if moved > r { moved } else { r };
-                (w.side == vd_terrain::position::WaterSide::Under)
-                    & (highest < w.level_m - visible_depth_m)
-            })
-        })
-        .copied()
-        .collect()
 }
 
 /// The least a skirt hangs under a chunk's edge, in cells of its rung ([`skirt_drop_m`]).
@@ -1792,16 +1474,15 @@ fn add_skirts(g: &mut ChunkGeometry, drop_m: f64, ceiling_m: f64) {
         g.morph_normals.push(g.morph_normals[b as usize]);
         // The strip faces away from the triangle's third corner: the winding whose normal points
         // from the edge's middle away from that corner.
+        // The two windings are picked by index (a bool is 0 or 1), so both are one expression. The
+        // first winding is taken when its normal already points away from the third corner; on a
+        // ground triangle the test reads the second, and only a sheer wall's edge reads zero and
+        // takes the first (DEFERRED: a sheer wall's skirt can face away from its wall).
         let n = (pb - pa).cross(at(qb) - pa);
         let away = (pa + pb) * 0.5 - pc;
-        let outward = n.dot(away) >= 0.0;
-        if outward {
-            skirt_tris.push([a, b, b2]);
-            skirt_tris.push([a, b2, a2]);
-        } else {
-            skirt_tris.push([a, b2, b]);
-            skirt_tris.push([a, a2, b2]);
-        }
+        let back = usize::from(n.dot(away) < 0.0);
+        skirt_tris.push([[a, b, b2], [a, b2, b]][back]);
+        skirt_tris.push([[a, b2, a2], [a, a2, b2]][back]);
     }
     g.triangles.extend(skirt_tris);
 }
@@ -1963,7 +1644,7 @@ pub struct ChunkCounters {
     pub artifact_rebuilds: u64,
     /// ★ CHUNKS HARVESTED WITH NO TRIANGLE (the coast flight's hole instrument, 2026-09-20): a
     /// chunk whose asked slice held no ground counts as built and drawn everywhere else, and the
-    /// sea sheet shows through it. Named on the stamp too ([`ChunkLane::take_empty`]).
+    /// eye sees through the ground there. Named on the stamp too ([`ChunkLane::take_empty`]).
     pub empty_chunks: u64,
     /// ★ STALE BUILDS REFUSED (the coast flight, 2026-09-20): a chunk that landed built on
     /// another artifact than the lane holds for its realm — a job the workers were already
@@ -2073,7 +1754,7 @@ impl ChunkLane {
 
     /// ★ THE HOLE COLUMNS of a realm (the coast flight's hole instrument, 2026-09-20): the chunk
     /// columns that hold a resident chunk and NO resident chunk with a triangle — the ground of
-    /// that column is drawn by nobody, and the sea sheet stands where it should be. The count,
+    /// that column is drawn by nobody, and the eye sees a hole where it should be. The count,
     /// and the first [`NAMED_PER_FRAME`] of them by their empty key. A walk of the EMPTY resident
     /// chunks (an instrument's cost, a few thousand at most) with a lookup per neighbouring slice,
     /// never a scan of the whole resident set.
@@ -2356,10 +2037,15 @@ impl ChunkLane {
         }
         if field_of(body, artifact.as_deref(), key).is_none() {
             self.counters.awaiting_artifact += 1;
-            if let Some((a, lattice)) = artifact.as_deref().zip(body.macro_lattice()) {
-                for (f, tx, ty) in a.missing_tiles(&lattice, key) {
-                    *self.missing_hist.entry((realm, f, tx, ty)).or_insert(0) += 1;
-                }
+            // `field_of` refuses only where the realm holds an artifact AND the body a lattice, so
+            // the pair is here; read as an iterator of one, as the refusal below reads it.
+            for (f, tx, ty) in artifact
+                .as_deref()
+                .zip(body.macro_lattice())
+                .into_iter()
+                .flat_map(|(a, lattice)| a.missing_tiles(&lattice, key))
+            {
+                *self.missing_hist.entry((realm, f, tx, ty)).or_insert(0) += 1;
             }
             if self.awaiting_frame.len() < NAMED_PER_FRAME {
                 // ★ THE REFUSAL NAMES THE TILES the stencil still waits for. `field_of` refuses
@@ -2537,7 +2223,9 @@ fn positive(x: f64) -> bool {
 /// ruler all measured it 7 054 m over the recipe's OWN relief — the relief the artifact replaced —
 /// so the ladder drew the ground under the eye at rung 3 instead of rung 0 and stated a horizon
 /// four times too far. The ladder's descent and probe and the eye's ground truth read this:
-/// [`drawn_field_m`] at rung 0 — the ground, or the water sheet over a column under its water.
+/// [`drawn_field_m`] at rung 0, the ground. No water is drawn (ruling B22), so the eye over a sea
+/// reads the sea floor. Example: a hull 20 m over the belt's sea reads about 6.9 km of height, and
+/// the ladder draws the dry floor under it at the rung that height asks for.
 ///
 /// A realm that states an artifact draws NOTHING until a field answers (the lane waits for the head
 /// and refuses a build whose field is not here). For that window this answers the recipe's own relief
@@ -2556,8 +2244,8 @@ pub fn drawn_surface_m(
 /// ★ THE SURFACE DRAWN AT A RUNG, along a direction (2026-09-24): with no artifact (or a body with no
 /// macro lattice) the recipe's own relief at the rung, which is what such a realm's chunks draw; with
 /// one, the field that rung reads, else the finest whole pyramid level the cache holds, each through
-/// [`vd_terrain::height::drawn_height_field_m`] — the ground, or the water sheet where the column
-/// stands under its water. `None` where the realm states an artifact and no field it holds answers:
+/// [`vd_terrain::height::height_field_m`] — the ground the chunks draw, also under a sea (ruling B22:
+/// no water is drawn). `None` where the realm states an artifact and no field it holds answers:
 /// nothing is drawn there yet.
 #[must_use]
 pub fn drawn_field_m(
@@ -2573,8 +2261,7 @@ pub fn drawn_field_m(
     let Some(lattice) = body.macro_lattice() else {
         return recipe();
     };
-    let drawn =
-        |field: &dyn ZField| vd_terrain::height::drawn_height_field_m(body, field, dir, rung);
+    let drawn = |field: &dyn ZField| vd_terrain::height::height_field_m(body, field, dir, rung);
     artifact
         .field_at_rung(&lattice, rung)
         .and_then(|field| drawn(&*field))
@@ -2640,11 +2327,11 @@ const RULER_REFINE_STEPS: u32 = 12;
 pub const RULER_MAX_CELLS: f64 = 4096.0;
 
 /// Where the centre ray from `eye_m` along `forward` meets the DRAWN surface AT THE DRAWN RUNG
-/// ([`drawn_field_m`]: the artifact's field at that rung, else its finest level held, the water sheet
-/// over a wet column; the recipe's own relief only for a realm with no artifact) — so the ball rests on
-/// the drawn ground, not on a finer shape it is not standing on, never under the solved ground the
-/// artifact put in the recipe's place, and nowhere a realm draws nothing yet — marched one
-/// cell at a time out to `reach_m` and refined by bisection. `None` when the ray leaves without
+/// ([`drawn_field_m`]: the artifact's field at that rung, else its finest level held; the recipe's own
+/// relief only for a realm with no artifact) — so the ball rests on the drawn ground, not on a finer
+/// shape it is not standing on, never under the solved ground the artifact put in the recipe's place,
+/// and nowhere a realm draws nothing yet — marched one cell at a time out to `reach_m` and refined by
+/// bisection. `None` when the ray leaves without
 /// touching ground within reach (an eye looking at the sky), for a rung the ladder lacks, or for a
 /// degenerate eye or direction. The ball's radius is the HIT's distance along the ray times
 /// [`RULER_TAN_HALF_ANGLE`], never smaller than half a cell.
@@ -2770,159 +2457,18 @@ mod tests {
         ChunkLane::new(Box::new(InlineWorkers::default()), 77)
     }
 
-    /// ★ THE WATER SHEET ON A CHUNK (C5): a chunk under a stated sea carries a sheet — four
-    /// vertices a quad about the chunk's origin with unit radials — and a dry chunk none. ★ AND
-    /// THE SHEET IS CUT UNDER THE LAND (2026-09-21): a sea far under the chunk's ground builds no
-    /// quad, because no state of the ladder can ever show one there.
+    /// ★ THE SEA FLOOR IS DRAWN (2026-09-28, ruling B22): no water is drawn until the water fill,
+    /// so a chunk under 20 km of sea keeps its ground triangles. THE CONTROL: the floor cut that
+    /// this rule replaces dropped every triangle of this same chunk.
     #[test]
-    fn a_chunk_under_the_sea_carries_a_water_sheet() {
-        let far_under = home_planet().with_sea_m(Some(-20_000));
-        let key = surface_key(&far_under, 4, 300, 700);
-        let g =
-            geometry_with(&far_under, None, planet(), key, &ParentCache::default()).expect("built");
-        assert!(
-            g.water_triangles.is_empty(),
-            "the sea 20 km under the ground shows nowhere"
-        );
+    fn a_chunk_under_the_sea_draws_its_floor() {
         let wet = home_planet().with_sea_m(Some(20_000));
         let key = surface_key(&wet, 4, 300, 700);
         let g = geometry_with(&wet, None, planet(), key, &ParentCache::default()).expect("built");
-        assert!(!g.water_triangles.is_empty());
-        assert_eq!(g.water_vertices.len(), g.water_radials.len());
-        // ★ THE WATER MORPHS WITH ITS GROUND (ruling W18): one finite metre per water vertex; the
-        // top rung morphs to itself, so at this rung every water metre is zero, as the ground's.
-        assert_eq!(g.water_morph_m.len(), g.water_vertices.len());
-        assert!(g.water_morph_m.iter().all(|m| m.is_finite()));
-        if g.morph_m.iter().all(|m| *m == 0.0) {
-            assert!(g.water_morph_m.iter().all(|m| *m == 0.0));
-        }
-        // The ground's own triangles (ruling W18): one water triangle per ground triangle under
-        // the sea, its indices inside the sheet's own vertices. (The drawn ground's own count is
-        // smaller here: the floor under 20 km of water is cut, the sheet over it stays.)
-        for t in &g.water_triangles {
-            for i in t {
-                assert!((*i as usize) < g.water_vertices.len());
-            }
-        }
-        let origin = DVec3::from_array(g.origin_m);
-        for (v, r) in g.water_vertices.iter().zip(&g.water_radials) {
-            let p = origin + DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2]));
-            let len = p.length();
-            assert!((len - wet.sea_radius_m()).abs() < 0.5, "{len}");
-            let rv = DVec3::new(f64::from(r[0]), f64::from(r[1]), f64::from(r[2]));
-            assert!((rv.length() - 1.0).abs() < 1e-5);
-        }
-        // ★ THE SEA FLOOR NO RAY CAN REACH IS NOT BUILT: under 20 km of water every ground
-        // triangle is dropped, and with them the skirts they would have hung.
         assert!(
-            g.triangles.is_empty(),
-            "{} floor triangles under 20 km of sea",
-            g.triangles.len()
+            !g.triangles.is_empty(),
+            "the floor under 20 km of sea is drawn"
         );
-        // ★ AND THE WATER OVER IT IS COARSE: one quad per block of eight cells, sixty-four blocks
-        // over the chunk's sixty-two cells a side, two triangles each; the fine triangles stay
-        // only in the chunk's border blocks (their neighbours across the edge are another chunk's,
-        // so they keep the overlap), and the thirty-six inland blocks drop theirs — under half of
-        // the full sheet of two triangles a cell.
-        let full = 2 * CHUNK_EDGE * CHUNK_EDGE;
-        assert!(
-            g.water_triangles.len() >= 2 * 64 && g.water_triangles.len() < full / 2,
-            "{} of {full}",
-            g.water_triangles.len()
-        );
-        // The quads' own vertices — the last 4 × 64 of the buffer — morph nowhere; the fine
-        // sheet's vertices carry their own metres.
-        let quad_vertices = 4 * 64;
-        let first_quad = g.water_vertices.len() - quad_vertices;
-        assert!(
-            g.water_morph_m[first_quad..].iter().all(|m| *m == 0.0),
-            "a quad's vertex morphs"
-        );
-        let dry = home_planet();
-        let g = geometry_with(&dry, None, planet(), key, &ParentCache::default()).expect("built");
-        assert!(g.water_triangles.is_empty());
-        assert!(g.water_vertices.is_empty());
-        assert!(!g.triangles.is_empty(), "the dry ground is drawn whole");
-    }
-
-    /// ★ THE SHEET'S OWN BOX (the far-water design §10, slice R1b): every drawn place of every
-    /// sheet vertex — its own, its morph target, its sunk place — lies in the sheet's box, and
-    /// the worker's box is the measured one. THE CONTROL: under 20 km of sea the ground's box (the
-    /// cut floor's vertices) does not hold the sheet, so a sheet culled by any box but its own can
-    /// vanish while it is on screen. A dry chunk's sheet box is empty.
-    #[test]
-    fn the_sheet_carries_its_own_box_over_every_drawn_place() {
-        let wet = home_planet().with_sea_m(Some(20_000));
-        let key = surface_key(&wet, 4, 300, 700);
-        let g = geometry_with(&wet, None, planet(), key, &ParentCache::default()).expect("built");
-        assert!(!g.water_vertices.is_empty());
-        assert_eq!(g.water_bounds, g.measure_water_bounds());
-        let (lo, hi) = g.water_bounds;
-        let mut i = 0;
-        while i < g.water_vertices.len() {
-            for p in g.water_drawn_ends(i) {
-                let mut k = 0;
-                while k < 3 {
-                    assert!(lo[k] <= p[k]);
-                    assert!(p[k] <= hi[k]);
-                    k += 1;
-                }
-            }
-            i += 1;
-        }
-        // THE CONTROL: the ground's box holds the sheet's box on no axis-aligned reading — the
-        // sheet stands 20 km over the floor's vertices, outside the ground's box.
-        let (glo, ghi) = g.bounds;
-        let held = (0..3).fold(true, |all, k| all & (glo[k] <= lo[k]) & (hi[k] <= ghi[k]));
-        assert!(
-            !held,
-            "the ground's box holds the sheet: the control has no power"
-        );
-        let dry = home_planet();
-        let g = geometry_with(&dry, None, planet(), key, &ParentCache::default()).expect("built");
-        assert_eq!(g.water_bounds, ([0.0; 3], [0.0; 3]));
-        assert_eq!(g.measure_water_bounds(), ([0.0; 3], [0.0; 3]));
-    }
-
-    /// ★ THE FLOOR CUT, TRIANGLE BY TRIANGLE: a triangle whose three vertices stand under their
-    /// water by more than the visible depth at both ends of their morph is dropped; one with a
-    /// shore vertex (mixed columns) stays; one whose floor morphs up to within the visible depth
-    /// stays; one under shallow water stays.
-    #[test]
-    fn the_floor_under_deep_water_is_cut_and_the_shallow_floor_stays() {
-        use vd_terrain::position::{GroundWord, WaterSide};
-        let level = 1_000.0;
-        let words = [
-            GroundWord {
-                side: WaterSide::Under,
-                level_m: level,
-            },
-            GroundWord {
-                side: WaterSide::Under,
-                level_m: level,
-            },
-            GroundWord {
-                side: WaterSide::Under,
-                level_m: level,
-            },
-            GroundWord {
-                side: WaterSide::Mixed,
-                level_m: level,
-            },
-            GroundWord {
-                side: WaterSide::Under,
-                level_m: level,
-            },
-        ];
-        // 0, 1, 2: 100 m under; 3: a shore vertex; 4: 100 m under but morphing up to 995 m.
-        let ground_r = [900.0, 900.0, 900.0, 1_000.0, 900.0];
-        let morph = [0.0f32, 0.0, 0.0, 0.0, 95.0];
-        let triangles = [[0, 1, 2], [0, 1, 3], [0, 1, 4]];
-        let kept = floor_triangles(&triangles, &words, &ground_r, &morph, 10.0);
-        assert_eq!(kept, vec![[0, 1, 3], [0, 1, 4]]);
-        // A visible depth deeper than the floor keeps everything: shallow water shows its floor.
-        let kept = floor_triangles(&triangles, &words, &ground_r, &morph, 200.0);
-        assert_eq!(kept.len(), 3);
     }
 
     /// ★ THE LANE ON THE ARTIFACT (slice 8c stage C4c, C5): the moon's artifact stated to the lane
@@ -3162,6 +2708,17 @@ mod tests {
             "the tiles the stencil waits for"
         );
         assert!(!named[0].2.is_empty());
+        // The missing tiles are counted once each, by how many waiting chunks read them — the
+        // counts the renderer's gap readout names.
+        let hist = lane.take_missing_hist();
+        assert_eq!(hist.len(), named[0].2.len());
+        assert!(
+            named[0]
+                .2
+                .iter()
+                .all(|(f, tx, ty)| hist.get(&(realm, *f, *tx, *ty)) == Some(&1))
+        );
+        assert!(lane.take_missing_hist().is_empty(), "taken once");
         assert!(
             cache.missing_tiles(&lattice, key(top - 1, 0, 0)).is_empty(),
             "a rung that reads a level waits for no tile"
@@ -3202,7 +2759,7 @@ mod tests {
         assert_eq!(built[0].geometry.key.rung, 0);
         // ★ THE RECIPE'S OWN SLICE BUILDS EMPTY ON THE ARTIFACT (the coast flight, 2026-09-20):
         // `key` asked the slice the recipe's relief stands in, the chunk was built on the field,
-        // and it holds NO triangle — the hole the sea sheet showed through, counted and named now.
+        // and it holds NO triangle — a hole in the drawn ground, counted and named now.
         assert!(built[0].geometry.triangles.is_empty());
         assert_eq!(built[0].geometry.field_level, 0, "built on the rows");
         assert_eq!(built[0].geometry.built_on, Some(artifact.digest()));
@@ -4539,14 +4096,9 @@ mod tests {
             normals: Vec::new(),
             packed_normals: Vec::new(),
             morph_normals: Vec::new(),
-            water_vertices: Vec::new(),
-            water_radials: Vec::new(),
-            water_triangles: Vec::new(),
-            water_morph_m: Vec::new(),
             radials: Vec::new(),
             triangles: vec![[0, 1, 2]],
             bounds: ([0.0; 3], [0.0; 3]),
-            water_bounds: ([0.0; 3], [0.0; 3]),
             skirt_start: 0,
             field_level: NO_FIELD,
             built_on: None,
@@ -4759,14 +4311,9 @@ mod tests {
             normals: Vec::new(),
             packed_normals: Vec::new(),
             morph_normals: Vec::new(),
-            water_vertices: Vec::new(),
-            water_radials: Vec::new(),
-            water_triangles: Vec::new(),
-            water_morph_m: Vec::new(),
             radials: Vec::new(),
             triangles: Vec::new(),
             bounds: ([0.0; 3], [0.0; 3]),
-            water_bounds: ([0.0; 3], [0.0; 3]),
             skirt_start: 0,
             field_level: NO_FIELD,
             built_on: None,
@@ -4944,14 +4491,9 @@ mod tests {
                 normals: vec![[1.0, 0.0, 0.0]; 3],
                 packed_normals: vec![[0, 0]; 3],
                 morph_normals: vec![[0, 0]; 3],
-                water_vertices: Vec::new(),
-                water_radials: Vec::new(),
-                water_triangles: Vec::new(),
-                water_morph_m: Vec::new(),
                 radials: vec![[1.0, 0.0, 0.0]; 3],
                 triangles: vec![tri],
                 bounds: ([0.0; 3], [0.0; 3]),
-                water_bounds: ([0.0; 3], [0.0; 3]),
                 skirt_start: 0,
                 field_level: NO_FIELD,
                 built_on: None,
@@ -4983,7 +4525,7 @@ mod tests {
         let dir = vd_seed::bend::normalize(MOON_DIR);
         let recipe = vd_terrain::height::height_m(&moon, dir, 0);
         let drawn = |field: &dyn ZField, d: [f64; 3]| {
-            vd_terrain::height::drawn_height_field_m(&moon, field, d, 0).expect("a field answers")
+            vd_terrain::height::height_field_m(&moon, field, d, 0).expect("a field answers")
         };
         let on_tiles = drawn(&**whole.tiles(), dir);
         let on_level = drawn(&**pyramid.level(1).expect("level 1 landed"), dir);

@@ -20,13 +20,11 @@
 //! 3. **G-RIVER** (ruling B3): every channel head walked down the shipped receivers to its end, and
 //!    every trunk step on which the floor rises. Beside it, THE DISCHARGE ROW AND ITS TREE (status §7
 //!    W10): the row, which carries the RUNOFF since plan step 2, against the receivers it ships with.
-//! 4. **THE LAKES AT THE RUNG SWAPS** (ruling W16; status §6 T5, §7 W6; plan step 2 part 5): the lake
-//!    columns whose drawn water changes at the swaps 9 → 10, 14 → 15 and 15 → 16 (LOST, MIXED,
-//!    SHIFTED), the dry columns the shore law lifts over a lake (the lip), and the dry columns whose
-//!    INLAND/LAND word changes while their ground stands under the sea (the hold), read on the
-//!    SHIPPED column.
-//!    ★ And THE POCKET'S FLOOR (review finding 1 of plan step 2): at each rung, the columns over a
-//!    pocket's dry floor that the shore law holds over the sea (G-POCKET-HELD).
+//! 4. ★ THE LAKES AT THE RUNG SWAPS (G-RUNG-LAKE, G-RUNG-LIP, G-RUNG-HOLD, G-POCKET-HELD) LEFT WITH
+//!    RULING B22 (2026-09-28): they read the drawn water and the shore law on the shipped column,
+//!    and no water is drawn and no law holds a column any more. The one-volume fill step brings its
+//!    own gates. THE STORED LEVEL-1 WATER WORD stays checked (CHECK-LEVEL1-WORD): it reads the
+//!    solve's own data, which the fill step reads.
 //! 5. **THE LAKE BUDGET** (status §7 W3, W4; plan step 2 parts 1 and 2): each hollow's watershed
 //!    supply beside the runoff of its own nodes, the three ends, the cascade's pours and its books
 //!    (exact), and G-LAKE-SHARE. Step 1 printed this as a WHAT-IF; since step 2 it is the budget.
@@ -35,42 +33,32 @@
 //!
 //! WHAT IT READS: the solve's final state (the heights, the receivers, the routing fill, the ocean,
 //! the discharge row), the lake budget's own hierarchy and descent (`lakes::budget`, run again over
-//! the same climate), the shipped artifact's rows, its level-1 and level-2 water words and its coast
-//! mask, and THE SHIPPED COLUMN on each side of every rung swap (`vd_bins::shore_geometry::RungReader`:
-//! the chunk builder's `sample_side`, `column_water`, `sample_z` and the one kernel, on the body with
-//! its solved sea). It never re-implements a column. Every gate prints one
+//! the same climate), and the shipped artifact's rows. It never re-implements a column. Every gate
+//! prints one
 //! `CENSUS <gate> <value> <band> <verdict>` line with no space inside a field; every self-check
 //! prints a `CENSUS CHECK-…` line of the same shape; and the world's versions head the output, so a
 //! reading names its world.
 //!
-//! **Example.** A pilot over the belt sees a pond in a hollow from 150 km and, since plan step 2,
-//! still sees it from 500 km: the census reads the pond's column on both sides of the rung 9 → 10
-//! swap and finds the same water. The same pass walks the river off the range beside it down the
-//! shipped receivers into a hollow the range's whole watershed now feeds, and the hollow spills.
+//! **Example.** The solve holds a pond in a hollow of the belt. The census counts the pond's nodes
+//! and its budget, and walks the river off the range beside it down the shipped receivers into a
+//! hollow the range's whole watershed now feeds, and the hollow spills.
 //!
 //! `cargo run --release -p vd-bins --example lake_census -- [dx dy dz] [half_nodes]`
 
 use std::collections::VecDeque;
 
 use vd_bins::grid_bias::unit;
-// ★ THE SHIPPED COLUMN, ONE COPY (plan step 1, ruling B6): the chunk builder's own reads in the
-// chunk builder's order, shared with the teeth instrument, so the rung swap is measured on the
-// path the client draws and never on a copy of it.
-use vd_bins::shore_geometry::{RungReader, ShippedColumn};
 use vd_core::glam::DVec3;
-use vd_recipe::Gi;
-use vd_recipe::height::{AMP_BITS, SIDE_INLAND, SIDE_LAND, SIDE_SEA};
+use vd_recipe::height::AMP_BITS;
 use vd_recipe::noise::NOISE_BITS;
 use vd_terrain::artifact::{
-    Artifact, DRY_M, FACIES_SHIFT, PyramidField, Side, block_water, coast_level, coast_side,
-    log2_class,
+    Artifact, DRY_M, FACIES_SHIFT, Side, block_water, coast_side, log2_class,
 };
 use vd_terrain::climate::Climate;
 use vd_terrain::home::{home_planet, home_solve_words};
 use vd_terrain::lakes::{Lakes, NO_DEP, OCEAN};
 use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
 use vd_terrain::solve::{DRY, FACIES_LAKE, FACIES_SEA, MacroSolve, Z_STEPS_PER_M};
-use vd_terrain::{BodyDefinition, metres_of_q28};
 
 /// Earth's lakes: 117 million lakes over 5.0 million km², 3.7 % of the land outside the ice
 /// (Verpoorter, Kutser, Seekell, Tranvik 2014, GRL 41). Most of that area is glacial: the Canadian
@@ -661,10 +649,7 @@ fn main() {
     river_lines(&state, &lakes, &facies, &ocean, &by_area, "");
     river_lines(&state, &lakes, &facies, &ocean, &by_rain, ":step1-rule");
     discharge_tree_lines(&state, &lakes, &climate, &report.tree);
-    // The body WITH ITS SOLVED SEA, as every host that holds the artifact builds it: the shipped
-    // column reads its sea radius, and the census's own `body` has none.
-    let sea_body = home_planet().with_sea_m(artifact.sea());
-    rung_swap_lines(&sea_body, &state.lattice, &artifact, &patches);
+    level_one_word_lines(&state.lattice, &artifact);
     budget_lines(&state, &lakes, &facies);
     step2b_measure_lines(&state, &lakes);
     lake_walk_lines(&state, &lakes, radius_m);
@@ -1485,578 +1470,44 @@ fn discharge_tree_lines(
     );
 }
 
-/// What one lake column did at a rung swap.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Change {
-    /// The same water at both rungs.
-    Kept,
-    /// Held under water before, over it after: the lake vanished.
-    Lost,
-    /// A lake's level before, the sea's after.
-    Mixed,
-    /// A lake's level before, another lake's after.
-    Shifted,
-}
-
-/// The change of one lake column `a` (the finer rung) against `b` (the coarser rung) at one swap,
-/// or `None` where `a` is not a lake held under its water.
-fn lake_change(a: &ShippedColumn, b: &ShippedColumn, sea: Gi) -> Option<Change> {
-    if a.side_word != SIDE_SEA || a.water == sea {
-        return None;
-    }
-    Some(if b.side_word != SIDE_SEA {
-        Change::Lost
-    } else if b.water == a.water {
-        Change::Kept
-    } else if b.water == sea {
-        Change::Mixed
-    } else {
-        Change::Shifted
-    })
-}
-
-/// Whether a dry column's INLAND/LAND word changed at a swap while its ground base stood under the
-/// sea's level at one of the two rungs: the shore law then lifts it at one rung and leaves it at
-/// the other (plan step 2 risk R7; gate G-RUNG-HOLD).
-fn hold_changed(a: &ShippedColumn, b: &ShippedColumn) -> bool {
-    let dry = |c: &ShippedColumn| (c.side_word == SIDE_LAND) | (c.side_word == SIDE_INLAND);
-    dry(a) && dry(b) && a.side_word != b.side_word && (a.base < a.hold || b.base < b.hold)
-}
-
-/// The tallies of one swap.
-#[derive(Default)]
-struct SwapTally {
-    /// Lake columns read, and each change.
-    lakes: usize,
-    lost: usize,
-    mixed: usize,
-    shifted: usize,
-    /// Columns that are no lake before and a lake after.
-    gained: usize,
-    /// The largest change of level, metres.
-    worst_m: f64,
-    /// Dry columns read for the hold, and those whose hold changed.
-    holds_read: usize,
-    holds: usize,
-    /// The largest change of surface at such a column, metres.
-    hold_step_m: f64,
-    /// Columns the field could not read, and columns whose base does not give the kernel's own
-    /// surface again (a drift alarm).
-    unread: usize,
-    base_off: usize,
-}
-
-impl SwapTally {
-    /// One lake column pair read.
-    fn lake(&mut self, a: &ShippedColumn, b: &ShippedColumn, sea: Gi) -> Option<Change> {
-        self.base_off += usize::from(!a.base_agrees) + usize::from(!b.base_agrees);
-        let c = lake_change(a, b, sea)?;
-        self.lakes += 1;
-        match c {
-            Change::Kept => {}
-            Change::Lost => self.lost += 1,
-            Change::Mixed => self.mixed += 1,
-            Change::Shifted => self.shifted += 1,
-        }
-        if (c == Change::Mixed) | (c == Change::Shifted) {
-            self.worst_m = self.worst_m.max(metres_of_q28(b.water - a.water).abs());
-        }
-        Some(c)
-    }
-
-    /// One dry column pair read for the hold.
-    fn hold(&mut self, a: &ShippedColumn, b: &ShippedColumn) {
-        self.base_off += usize::from(!a.base_agrees) + usize::from(!b.base_agrees);
-        self.holds_read += 1;
-        if hold_changed(a, b) {
-            self.holds += 1;
-            self.hold_step_m = self
-                .hold_step_m
-                .max(metres_of_q28(b.surface - a.surface).abs());
-        }
-    }
-
-    /// The CENSUS lines of the swap from rung `before` to rung `after`, trusted or not. The level
-    /// steps are stated in pixels at the swap distance too: the swap stands where one cell of
-    /// `before` is one pixel high, so a step of `h` metres is `h / cell_m(before)` pixels there.
-    fn lines(&self, before: u8, after: u8, trusted: bool) {
-        let cell = f64::from(vd_seed::ladder::cell_m(before));
-        let px = self.worst_m / cell;
-        let tag = format!("@{before}-{after}");
-        println!(
-            "  the swap {before} → {after}: of {} lake columns, {} turn to LAND, {} take the sea's level, {} take another lake's level; the largest change of level {:.1} m = {px:.3} px at the swap distance (a cell of rung {before} is {cell:.0} m); {} columns are no lake before and a lake after; of {} dry columns read under or beside the sea's level, {} change their INLAND/LAND word, the largest surface step there {:.1} m = {:.3} px; {} unread, {} base alarms",
-            self.lakes,
-            self.lost,
-            self.mixed,
-            self.shifted,
-            self.worst_m,
-            self.gained,
-            self.holds_read,
-            self.holds,
-            self.hold_step_m,
-            self.hold_step_m / cell,
-            self.unread,
-            self.base_off
-        );
-        census(
-            &format!("G-RUNG-LAKE-LOST{tag}"),
-            &format!("{}columns", self.lost),
-            "0[ruling-W16:a-rung-boundary-is-invisible]",
-            Verdict::of(trusted && self.lost == 0),
-        );
-        census(
-            &format!("G-RUNG-LAKE-MIXED{tag}"),
-            &format!("{}columns", self.mixed),
-            "0[ruling-W16;plan-step-2-part-5:never-a-mean-with-the-sea]",
-            Verdict::of(trusted && self.mixed == 0),
-        );
-        census(
-            &format!("G-RUNG-LAKE-SHIFTED{tag}"),
-            &format!("{}columns/{:.3}px", self.shifted, px),
-            "<=1px[plan-question-6:a-proposed-bound,the-owner's-word-owed]",
-            Verdict::of(trusted && px <= 1.0),
-        );
-        census(
-            &format!("G-RUNG-HOLD{tag}"),
-            &format!("{}columns/{:.3}px", self.holds, self.hold_step_m / cell),
-            "0[ruling-W16;plan-step-2-risk-R7]",
-            Verdict::of(trusted && self.holds == 0),
-        );
-    }
-}
-
-/// ★ THE LAKES AT THE RUNG SWAPS (ruling W16: a rung boundary is invisible; status §6 T5, §7 W6;
-/// plan step 2 part 5). Three swaps are read, each on THE SHIPPED COLUMN (`RungReader`, the chunk
-/// builder's own reads and the one kernel), never on a copy of it:
+/// ★ THE STORED LEVEL-1 WATER WORD, CHECKED (plan step 2 part 5; kept on 2026-09-28 from the
+/// rung-swap block that ruling B22 removed, because it reads the SOLVE's stored data and no drawn
+/// water): the shipped word `pyramid_water[0]` against `artifact::block_water` folded again over
+/// the rows and the coast mask. Zero is expected, and the one-volume fill step reads this word.
 ///
-/// 1. **ROWS → LEVEL 1 (rung 9 → 10).** Every lake node at its centre cell on both rungs: LOST
-///    (land after), MIXED (the sea's level after), SHIFTED (another lake's level after); the lake
-///    patches that change or vanish whole. THE LIP: every cell of every dry node that shares a
-///    level-1 block with a lake — a dry column the shore law holds against a LAKE's level (0 by
-///    construction since the land rule never reads the level word). THE HOLD (G-RUNG-HOLD): every
-///    dry node whose own row or a neighbour's stands under the sea's level, at its centre cell.
-/// 2. **LEVEL 1 → 2 (rung 14 → 15) and LEVEL 2 → 3 (rung 15 → 16).** Per cell of the coarser rung
-///    whose footprint holds a lake node: each of its four finer cells against it; and per cell
-///    whose level node or a neighbour stands under the sea's level: the hold.
-///
-/// The shipped level-1 word is checked against `artifact::block_water` folded again over the rows
-/// and the coast mask; a check that fails turns every gate RED, because a number the census cannot
-/// trust is not a green.
-///
-/// **Example.** A tarn fills one node of the belt's pass. At rung 9 its column stands under its own
-/// 2 100 m level; at rung 10 its level-1 block holds one lake node of four and the word is that
-/// lake's own 2 100 m, so the tarn is the same water on both sides of the swap. Before plan step 2
-/// the word was DRY and the tarn turned to rock.
-fn rung_swap_lines(
-    body: &BodyDefinition,
-    lattice: &MacroLattice,
-    artifact: &Artifact,
-    patches: &[Vec<u32>],
-) {
-    let levels = artifact.pyramid.len() as u32;
-    let mut read = String::new();
-    let mut swap_rungs: Vec<u8> = Vec::new();
-    for rung in 6u8..=16 {
-        let level = PyramidField::level_for(lattice, levels, rung);
-        let side = coast_level(lattice.cells_per_node, rung);
-        read.push_str(&format!(" {rung}:level{level}/side{side}"));
-        if level == 1 && side == 0 {
-            swap_rungs.push(rung);
-        }
-    }
-    println!(
-        "\nTHE LAKES AT THE RUNG SWAPS (ruling W16: a rung boundary is invisible; status §6 T5, §7 W6; plan step 2 part 5)"
-    );
-    println!(
-        "  what each rung reads (the pyramid level of its field / the level of its side's footprint, 0 = the fine node's own word):{read}"
-    );
-    let (Some(&first), Some(&last)) = (swap_rungs.first(), swap_rungs.last()) else {
-        println!(
-            "  no rung reads its water from level 1 while its side is the fine node's own: nothing to count"
-        );
-        return;
-    };
-    let before = first.saturating_sub(1);
-    if first == 0 || PyramidField::level_for(lattice, levels, before) != 0 {
-        println!(
-            "  rung {before} does not read the rows, so rung {first} is not the swap from the rows: nothing to count"
-        );
-        return;
-    }
+/// **Example.** A tarn fills one node of the belt's pass at 2 100 m and its three neighbours in the
+/// level-1 block are rock: the fold names 2 100 m, and so must the stored word.
+fn level_one_word_lines(lattice: &MacroLattice, artifact: &Artifact) {
     let (Some(coarse), Some(fold)) = (lattice.coarser(1), artifact.pyramid_water.first()) else {
-        println!("  the artifact holds no level 1: nothing to count");
+        println!(
+            "\nTHE STORED LEVEL-1 WATER WORD: the artifact holds no level 1, nothing to check"
+        );
         return;
     };
-    let n = lattice.node_count();
     let m = coarse.node_count();
-    let sea = body.plan_charter(0, vd_seed::bend::Face::PosX).sea_radius;
-    let sea_m = artifact.sea_m;
-    // The fold again, over the rows and the mask, beside the shipped word; and which level-1
-    // blocks hold a lake node.
-    let (mut lake_max, mut has_sea, mut has_lake) =
-        (vec![DRY_M; m], vec![false; m], vec![false; m]);
-    for node in 0..n as u32 {
+    let (mut lake_max, mut has_sea) = (vec![DRY_M; m], vec![false; m]);
+    for node in 0..lattice.node_count() as u32 {
         let (face, fi, fj) = lattice.split(node);
         let up = coarse.index(face, fi >> 1, fj >> 1) as usize;
         match coast_side(&artifact.coast, node) {
             Some(Side::Sea) => has_sea[up] = true,
             Some(Side::Lake) => {
-                has_lake[up] = true;
                 lake_max[up] = lake_max[up].max(artifact.rows[node as usize].water_m);
             }
             _ => {}
         }
     }
     let disagree = (0..m)
-        .filter(|&u| block_water(lake_max[u], has_sea[u], sea_m) != fold[u])
+        .filter(|&u| block_water(lake_max[u], has_sea[u], artifact.sea_m) != fold[u])
         .count();
-    drop(lake_max);
-    drop(has_sea);
-    // ★ THE CELL AT A NODE'S CENTRE on a rung whose cell is no wider than the node.
-    let cpn = i64::from(lattice.cells_per_node);
-    let centre = |f: i32, rung: u8| -> i32 { ((i64::from(f) * cpn + cpn / 2) >> rung) as i32 };
-    let span = |f: i32, rung: u8| -> (i32, i32) {
-        let lo = ((i64::from(f) * cpn) >> rung) as i32;
-        let hi = ((i64::from(f + 1) * cpn) >> rung) as i32;
-        (lo, hi.max(lo + 1))
-    };
-    let counts = artifact.coast_counts();
-    let per_face = lattice.edge * lattice.edge;
-    let mut class = vec![Change::Kept; n];
-    let mut tally = SwapTally::default();
-    let (mut lip_checked, mut lip_nodes, mut lip_cols) = (0usize, 0usize, 0usize);
-    let (mut dry_before, mut wrong_reader) = (0usize, 0usize);
-    let z_under = |node: u32| i32::from(artifact.rows[node as usize].z_m) < i32::from(sea_m);
-    for f in 0..6u32 {
-        let face_first = f * per_face;
-        let (face, _, _) = lattice.split(face_first);
-        let (Some(near), Some(far)) = (
-            RungReader::new(body, artifact, &counts, face, before),
-            RungReader::new(body, artifact, &counts, face, first),
-        ) else {
-            wrong_reader += 1;
-            continue;
-        };
-        if near.fine != *lattice || far.fine != *lattice || near.level != 0 || far.level != 1 {
-            wrong_reader += 1;
-            continue;
-        }
-        for node in face_first..face_first + per_face {
-            let i = node as usize;
-            let (_, fi, fj) = lattice.split(node);
-            let up = coarse.index(face, fi >> 1, fj >> 1) as usize;
-            let (ci, cj) = (
-                (centre(fi, before), centre(fj, before)),
-                (centre(fi, first), centre(fj, first)),
-            );
-            match coast_side(&artifact.coast, node) {
-                Some(Side::Lake) => {
-                    let (Some(a), Some(b)) = (near.column(ci.0, ci.1), far.column(cj.0, cj.1))
-                    else {
-                        tally.unread += 1;
-                        continue;
-                    };
-                    dry_before += usize::from(a.side_word != SIDE_SEA);
-                    if let Some(c) = tally.lake(&a, &b, sea) {
-                        class[i] = c;
-                    }
-                }
-                // A pocket's dry floor is a dry node too (review finding 1 of plan step 2).
-                Some(Side::Land | Side::Pocket) => {
-                    // THE HOLD: a dry node whose ground or a neighbour's stands under the sea.
-                    let low = z_under(node)
-                        || lattice
-                            .neighbours(node)
-                            .into_iter()
-                            .any(|nb| nb != NO_NODE && z_under(nb));
-                    if low {
-                        let (Some(a), Some(b)) = (near.column(ci.0, ci.1), far.column(cj.0, cj.1))
-                        else {
-                            tally.unread += 1;
-                            continue;
-                        };
-                        tally.hold(&a, &b);
-                    }
-                    if !has_lake[up] {
-                        continue;
-                    }
-                    // THE LIP: every cell of the dry node at the far rung.
-                    lip_checked += 1;
-                    let (i_lo, i_hi) = span(fi, first);
-                    let (j_lo, j_hi) = span(fj, first);
-                    let mut lipped = false;
-                    for x in i_lo..i_hi {
-                        for y in j_lo..j_hi {
-                            let Some(b) = far.column(x, y) else {
-                                tally.unread += 1;
-                                continue;
-                            };
-                            tally.base_off += usize::from(!b.base_agrees);
-                            if b.side_word != SIDE_SEA && b.hold != sea && b.base < b.hold {
-                                lip_cols += 1;
-                                lipped = true;
-                            }
-                        }
-                    }
-                    lip_nodes += usize::from(lipped);
-                }
-                _ => {}
-            }
-        }
-    }
-    let (mut changed, mut vanished) = (0usize, 0usize);
-    for patch in patches {
-        if patch.iter().any(|&v| class[v as usize] != Change::Kept) {
-            changed += 1;
-        }
-        if patch.iter().all(|&v| class[v as usize] == Change::Lost) {
-            vanished += 1;
-        }
-    }
-    let cells = span(0, first).1;
-    let trusted = disagree + tally.unread + tally.base_off + dry_before + wrong_reader == 0;
     println!(
-        "  rungs {first} to {last} draw a lake column's water from level 1 while its side stays the fine node's own word; the first swap is rung {before} → {first}"
-    );
-    tally.lines(before, first, trusted);
-    println!(
-        "  of {} lake patches: {changed} change their drawn water at the swap {before} → {first}, and {vanished} of them vanish whole",
-        patches.len()
-    );
-    println!(
-        "  THE LIP (T5): {lip_checked} dry nodes share a level-1 block with a lake; every one of their {cells}×{cells} cells at rung {first} read: {lip_cols} columns on {lip_nodes} nodes are held against a LAKE's level their ground stands under (0 by construction: a land column never reads the level word)"
-    );
-    println!(
-        "  checks, 0 expected on each: the shipped level-1 word disagrees with `block_water` over the rows at {disagree} of {m} level-1 nodes; {} columns unread; {} columns whose ground base does not give the kernel's own surface again; {dry_before} lake nodes NOT held under water at rung {before}; {wrong_reader} faces whose reader stands on another lattice or level",
-        tally.unread, tally.base_off
+        "\nTHE STORED LEVEL-1 WATER WORD: the shipped word disagrees with `block_water` over the rows at {disagree} of {m} level-1 nodes (0 expected)"
     );
     census(
-        "CHECK-RUNG-SWAP",
-        &format!(
-            "{disagree}fold+{}unread+{}base+{dry_before}dry+{wrong_reader}faces",
-            tally.unread, tally.base_off
-        ),
-        "0[a-measurement-that-cannot-be-trusted-is-not-a-green]",
-        Verdict::of(trusted),
-    );
-    census(
-        "G-RUNG-LAKE",
-        &format!(
-            "{}nodes/{changed}patches/{vanished}vanished",
-            tally.lost + tally.mixed + tally.shifted
-        ),
-        "0-lost-0-vanished[ruling-W16;SHIFTED-read-by-its-own-line]",
-        Verdict::of(trusted && tally.lost == 0 && vanished == 0),
-    );
-    census(
-        "G-RUNG-LIP",
-        &format!("{lip_nodes}nodes/{lip_cols}columns"),
-        "0[ruling-W16:a-rung-boundary-is-invisible]",
-        Verdict::of(trusted && lip_nodes == 0),
-    );
-    // 2. THE LEVEL SWAPS.
-    for (b_rung, a_rung) in [(14u8, 15u8), (15, 16)] {
-        far_swap_lines(body, lattice, artifact, &counts, b_rung, a_rung);
-    }
-    // 3. THE POCKET'S FLOOR AT EACH RUNG.
-    pocket_hold_lines(body, lattice, artifact, &counts);
-}
-
-/// ★ A POCKET'S FLOOR IS NEVER HELD OVER THE SEA (2026-09-25, review finding 1 of plan step 2;
-/// ruling B7 item 1; ruling W16). At each rung the census reads, every column over a pocket's dry
-/// floor ([`Side::Pocket`]): at a rung whose cell is no wider than a fine node, each pocket node's
-/// centre cell; at a far rung, each cell whose footprint counts a pocket node. A column is HELD
-/// where the shore law reads the LAND word while its ground base stands under the sea's level: the
-/// law lifts that floor a quarter of its depth over the sea, a mesa.
-///
-/// The GATE counts the columns whose OWN side is the pocket — the node's own word at a near rung,
-/// the footprint's majority at a far one — and 0 is its only green. Beside it, a READING: the far
-/// cells whose footprint holds a pocket's floor as a MINORITY, which the footprint rule of W15
-/// names LAND, and how many of those the law holds over the sea.
-///
-/// **Example.** A salt pan lies behind a one-node ridge on the belt's coast, 2 km under the sea's
-/// level. Before the pocket word its floor read LAND with the sea in its stencil, and the census
-/// counted it held at every rung — a mesa over the sea's level; with the word it reads INLAND and
-/// the count is zero.
-fn pocket_hold_lines(
-    body: &BodyDefinition,
-    lattice: &MacroLattice,
-    artifact: &Artifact,
-    counts: &std::sync::Arc<vd_terrain::artifact::CoastCounts>,
-) {
-    println!(
-        "\nTHE POCKET'S FLOOR AT EACH RUNG (review finding 1 of plan step 2; ruling B7 item 1; ruling W16): the columns over a pocket's dry floor the shore law holds over the sea"
-    );
-    let cpn = i64::from(lattice.cells_per_node);
-    let centre = |f: i32, rung: u8| -> i32 { ((i64::from(f) * cpn + cpn / 2) >> rung) as i32 };
-    let per_face = lattice.edge * lattice.edge;
-    let lifted = |c: &ShippedColumn| (c.side_word == SIDE_LAND) & (c.base < c.hold);
-    for rung in [9u8, 10, 13, 14, 15, 16] {
-        let kf = coast_level(lattice.cells_per_node, rung);
-        let edge_r = body.ladder().cells_per_edge(rung);
-        let exact = kf == 0 || lattice.coarser(kf).is_some_and(|c| c.edge == edge_r);
-        if !exact {
-            println!(
-                "  rung {rung}: its footprint (level {kf}) is not one level node a cell: not counted"
-            );
-            continue;
-        }
-        let (mut read, mut held, mut minority, mut minority_held, mut unread) =
-            (0usize, 0usize, 0usize, 0usize, 0usize);
-        let mut deepest_m = 0.0f64;
-        for f in 0..6u32 {
-            let face_first = f * per_face;
-            let (face, _, _) = lattice.split(face_first);
-            let Some(reader) = RungReader::new(body, artifact, counts, face, rung) else {
-                unread += 1;
-                continue;
-            };
-            let mut take = |c: &ShippedColumn, own: bool| {
-                let lift = lifted(c);
-                if lift {
-                    deepest_m = deepest_m.max(metres_of_q28(c.hold - c.base));
-                }
-                if own {
-                    read += 1;
-                    held += usize::from(lift);
-                } else {
-                    minority += 1;
-                    minority_held += usize::from(lift);
-                }
-            };
-            if kf == 0 {
-                for node in face_first..face_first + per_face {
-                    if coast_side(&artifact.coast, node) != Some(Side::Pocket) {
-                        continue;
-                    }
-                    let (_, fi, fj) = lattice.split(node);
-                    match reader.column(centre(fi, rung), centre(fj, rung)) {
-                        Some(c) => take(&c, c.side == Some(Side::Pocket)),
-                        None => unread += 1,
-                    }
-                }
-                continue;
-            }
-            for cj in 0..edge_r {
-                for ci in 0..edge_r {
-                    if counts.pockets(kf, face, ci, cj).unwrap_or(0) == 0 {
-                        continue;
-                    }
-                    match reader.column(ci as i32, cj as i32) {
-                        Some(c) => take(&c, c.side == Some(Side::Pocket)),
-                        None => unread += 1,
-                    }
-                }
-            }
-        }
-        println!(
-            "  rung {rung} (footprint level {kf}): {read} columns whose own side is a pocket's floor, {held} of them held over the sea; {minority} far cells hold a pocket's floor as a minority of their footprint and read another side, {minority_held} of those held over the sea; the deepest floor held stands {deepest_m:.0} m under the sea; {unread} unread"
-        );
-        census(
-            &format!("G-POCKET-HELD@{rung}"),
-            &format!("{held}of{read}columns"),
-            "0[review-finding-1;ruling-B7-item-1:a-pocket's-floor-is-never-lifted-over-the-sea]",
-            Verdict::of(unread == 0 && held == 0),
-        );
-        census(
-            &format!("POCKET-MINORITY-HELD@{rung}"),
-            &format!("{minority_held}of{minority}cells"),
-            "no-band[a-reading:the-footprint-rule-of-W15]",
-            Verdict::NoBand,
-        );
-    }
-}
-
-/// ★ ONE LEVEL SWAP, per cell of the coarser rung `after` (plan step 2 part 5): where the cell's
-/// footprint holds a lake node, each of its four cells of `before` against it; where its level
-/// node or a neighbour stands under the sea's level, the hold. The footprint of a cell of these
-/// rungs IS one level node (the home planet's node is a power of two in cells), which the reader
-/// checks before it counts.
-fn far_swap_lines(
-    body: &BodyDefinition,
-    lattice: &MacroLattice,
-    artifact: &Artifact,
-    counts: &std::sync::Arc<vd_terrain::artifact::CoastCounts>,
-    before: u8,
-    after: u8,
-) {
-    let levels = artifact.pyramid.len() as u32;
-    let ka = PyramidField::level_for(lattice, levels, after);
-    let kb = PyramidField::level_for(lattice, levels, before);
-    let exact = ka == coast_level(lattice.cells_per_node, after)
-        && kb == coast_level(lattice.cells_per_node, before)
-        && ka == kb + 1
-        && ka >= 1;
-    let (Some(level_a), true) = (lattice.coarser(ka), exact) else {
-        println!(
-            "  the swap {before} → {after}: its footprints are not one level node each (level {kb} → {ka}): not counted"
-        );
-        return;
-    };
-    let sea = body.plan_charter(0, vd_seed::bend::Face::PosX).sea_radius;
-    let sea_m = i32::from(artifact.sea_m);
-    let z_level = &artifact.pyramid[ka as usize - 1];
-    let edge_a = body.ladder().cells_per_edge(after) as i32;
-    let mut tally = SwapTally::default();
-    let mut wrong_reader = 0usize;
-    for f in 0..6u32 {
-        let (face, _, _) = lattice.split(f * lattice.edge * lattice.edge);
-        let (Some(near), Some(far)) = (
-            RungReader::new(body, artifact, counts, face, before),
-            RungReader::new(body, artifact, counts, face, after),
-        ) else {
-            wrong_reader += 1;
-            continue;
-        };
-        if near.level != kb || far.level != ka || level_a.edge as i32 != edge_a {
-            wrong_reader += 1;
-            continue;
-        }
-        for cj in 0..edge_a {
-            for ci in 0..edge_a {
-                let node = level_a.index(face, ci, cj);
-                let lake = counts
-                    .count(ka, face, ci as u32, cj as u32)
-                    .is_some_and(|(_, l)| l > 0);
-                let low = i32::from(z_level[node as usize]) < sea_m
-                    || level_a
-                        .neighbours(node)
-                        .into_iter()
-                        .any(|nb| nb != NO_NODE && i32::from(z_level[nb as usize]) < sea_m);
-                if !lake && !low {
-                    continue;
-                }
-                let Some(b) = far.column(ci, cj) else {
-                    tally.unread += 1;
-                    continue;
-                };
-                for (di, dj) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                    let Some(a) = near.column(2 * ci + di, 2 * cj + dj) else {
-                        tally.unread += 1;
-                        continue;
-                    };
-                    if lake {
-                        let was_lake = tally.lake(&a, &b, sea).is_some();
-                        let is_lake = b.side_word == SIDE_SEA && b.water != sea;
-                        tally.gained += usize::from(!was_lake && is_lake);
-                    }
-                    if low {
-                        tally.hold(&a, &b);
-                    }
-                }
-            }
-        }
-    }
-    let trusted = tally.unread + tally.base_off + wrong_reader == 0;
-    tally.lines(before, after, trusted);
-    census(
-        &format!("CHECK-RUNG-SWAP@{before}-{after}"),
-        &format!(
-            "{}unread+{}base+{wrong_reader}faces",
-            tally.unread, tally.base_off
-        ),
-        "0[a-measurement-that-cannot-be-trusted-is-not-a-green]",
-        Verdict::of(trusted),
+        "CHECK-LEVEL1-WORD",
+        &format!("{disagree}nodes"),
+        "0[plan-step-2-part-5:the-stored-word-is-the-rows-own-fold]",
+        Verdict::of(disagree == 0),
     );
 }
 
