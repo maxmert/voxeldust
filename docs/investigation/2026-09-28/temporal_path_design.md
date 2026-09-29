@@ -149,6 +149,12 @@ sealing, 12 samples a mode, the median GPU time of the frame (`DEFERRED.md:10727
 | A7 | A1 with the lookup air / without bloom / without shadows / without the shadow read | 22.54 / 27.62 / 28.10 / 28.34 | MEASURED |
 | A8 | A1 with four times the draws (each part holds only its own vertices) | 37.12 | MEASURED |
 
+★ PROVISIONAL (2026-09-29, T0): the GPU clock that measured this table read an old stamp in about three frames of four
+(its query resolve ran before the frame's last stamp was written; cured by resolving each slot three frames later).
+Counted by the distinct readings in each mode's 12 samples, A1, A2, A3, A5 and three of A7's four rest on 1–4 real
+readings each; A4, A6, A8 and A7's "without shadows" were fresh. T0 measures the whole table again with the cured
+clock (DEFERRED "THE SPEED STEP", the T0 block), and §2.2 and §10 are read again from those numbers.
+
 ### 2.2 The pieces
 
 | Piece | ms | Arithmetic | Tag |
@@ -1104,6 +1110,11 @@ MetalFX); the sharpen strength; the shadow filter; each T5 step.
   - over about 13.3 ms, the middle misses 16.7 ms even with the cheaper air, and D8 moves toward the floor (0.33);
   - over about 15.1 ms, even the lowest add-on with the best cheaper air misses, and §10 gets a new plan before T1.
   Each measured millisecond of V (T1) and W (M-2b) lowers every threshold by one millisecond.
+  ★ MEASURED (2026-09-29, the clean rerun; DEFERRED "THE SPEED STEP"): the span at 0.5 reads 12.7 ms (the fit 9.4 +
+  13.0·s² ms), W ≈ 0.1 ms, V ≈ 0.7 ms (not proven: a restart alone moves the span by up to 1.4 ms). BUT THE SPAN IS NOT
+  THE FRAME'S COST WHEN FRAMES OVERLAP on the GPU (bloom off: a 54.9 ms span at a 32.3 ms frame), and by the frame
+  interval the window already holds 60 frames a second at 0.75; below 0.5 the client's CPU is the limit. This rule is
+  read on a cost measure that frames cannot overlap before T4 decides the scale.
 - **M-2b:** G2's full-size targets, priced BEFORE T3 builds them: the measurement pass clears and stores four display-size
   textures of G2's formats (Rgba32Uint, R8Uint, Depth16Unorm, Rg16Float: 23 bytes a pixel), with the viewport at the render
   rectangle, at 1.0 and 0.5. It prices row W of §10.2 (its ceiling: about 0.47 ms at 0.5). If W reads high, the cure is an

@@ -17,7 +17,8 @@
 #import bevy_pbr::{
     mesh_functions,
     mesh_view_bindings::view,
-    prepass_io::{VertexOutput, FragmentOutput},
+    prepass_bindings,
+    prepass_io::FragmentOutput,
     view_transformations::position_world_to_clip,
 }
 
@@ -34,27 +35,76 @@ struct LadderFade {
 // realm — one row per rung, (in_lo, sink_end, out_lo, out_hi) metres from the eye, and one row that
 // is always passed — which the renderer rewrites in its prepare stage every frame, in step with
 // the placements. The material holds only its row (`fade.sink.z`), so a moving horizon rewrites
-// this buffer and never a material. `clock` is the arrival ramp's (slice R1c).
+// this buffer and never a material. `clock` is the arrival ramp's (slice R1c): this frame's clock (x)
+// and the ramp's ticks (y); (z) LAST frame's clock and (w) the count of rows (the temporal path's T1).
+// `step` is the realm's step from this frame's render space to last frame's (T1, a 3 × 4 matrix by
+// rows), and `rows` holds this frame's rows and then LAST frame's, the same count.
 struct BandTable {
     clock: vec4<u32>,
+    step: array<vec4<f32>, 3>,
     rows: array<vec4<f32>>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var<storage, read> table: BandTable;
+
+// THE CENSUS'S DEPTH STEP: a thousandth of the depth (2⁻¹⁰), far above the depth buffer's own
+// rounding (a 32-bit float keeps 2⁻²³) and far below any visible shift.
+const CENSUS_DEPTH_STEP: f32 = 0.0009765625;
+
+// THE MOTION CENSUS'S SENTINEL (T1; `vd_client_harness::motion_census::MOTION_SENTINEL`, the value the
+// renderer clears the motion target to): the largest finite half float. Only the census's control
+// writes it here.
+const MOTION_SENTINEL: f32 = 65504.0;
 
 // This material's row of the table.
 fn bands() -> vec4<f32> {
     return table.rows[u32(fade.sink.z)];
 }
 
+// This material's row of LAST frame's table (T1): last frame's rows follow this frame's.
+fn last_bands() -> vec4<f32> {
+    return table.rows[table.clock.w + u32(fade.sink.z)];
+}
+
+// ★ THE REALM'S STEP (the temporal path's T1; `vd_client::motion::RealmStep`, step for step): a point
+// drawn at `y` this frame stood at `step_point(y)` last frame, and a direction turns by
+// `step_turn(v)`.
+fn step_point(y: vec3<f32>) -> vec3<f32> {
+    return step_turn(y) + vec3<f32>(table.step[0].w, table.step[1].w, table.step[2].w);
+}
+
+fn step_turn(v: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        dot(table.step[0].xyz, v),
+        dot(table.step[1].xyz, v),
+        dot(table.step[2].xyz, v),
+    );
+}
+
+// THE TAG's parts (`vd_client::arrival::RAMP_FLAG` and `CLOCK_MASK`): the clock of the frame the chunk
+// appeared in, 31 bits, and the flag of a chunk that rises from its stand-in (without it, whole).
+const RAMP_FLAG: u32 = 0x80000000u;
+const CLOCK_MASK: u32 = 0x7fffffffu;
+
 // ★ THE ARRIVAL RAMP'S WEIGHT (the far-water design §10, slice R1c; `vd_client::arrival::ramp_weight`,
 // step for step): nought in the frame a chunk landed, one half a second later, and one at once for a
-// chunk that entered whole (its tag nought). The age is a wrapping difference of the table's clock and
-// the chunk's stamp, so the clock's wrap moves nothing.
+// chunk that entered whole (its tag without the ramp's flag). The age is a wrapping 31-bit difference of
+// the table's clock and the tag's clock, so the clock's wrap moves nothing.
 fn arrival(instance_index: u32) -> f32 {
-    let stamp = mesh_functions::get_tag(instance_index);
-    let age = f32(table.clock.x - stamp) / f32(max(table.clock.y, 1u));
-    return select(clamp(age, 0.0, 1.0), 1.0, stamp == 0u);
+    let tag = mesh_functions::get_tag(instance_index);
+    let age = f32((table.clock.x - (tag & CLOCK_MASK)) & CLOCK_MASK) / f32(max(table.clock.y, 1u));
+    return select(1.0, clamp(age, 0.0, 1.0), (tag & RAMP_FLAG) != 0u);
+}
+
+// ★ THE RAMP'S WEIGHT AT LAST FRAME'S CLOCK (T1; `vd_client::motion::previous_ramp_weight`, step for
+// step): the age read SIGNED, so a chunk that landed after last frame's clock reads nought, its
+// stand-in's surface — where it stood. Read wrapping (as `arrival` reads it) that age is about 2³²
+// ticks and would read one: the vertex would seem to jump from its own place.
+fn last_arrival(instance_index: u32) -> f32 {
+    let tag = mesh_functions::get_tag(instance_index);
+    let diff = (table.clock.z - (tag & CLOCK_MASK)) & CLOCK_MASK;
+    let age = f32(bitcast<i32>(diff << 1u) >> 1u) / f32(max(table.clock.y, 1u));
+    return select(1.0, clamp(age, 0.0, 1.0), (tag & RAMP_FLAG) != 0u);
 }
 
 struct FadeVertex {
@@ -81,13 +131,44 @@ struct FadeVertex {
 #endif
 }
 
+// ★ THE STAGE'S OUTPUT: the engine's prepass output (`bevy_pbr`'s `prepass_io.wgsl`, the same
+// locations) with its previous place cut to the smallest EXACT one (the temporal path's §5.2): last
+// frame's clip x, y and w, three numbers in place of the engine's four-number world place. The clip
+// place is linear in the world place, so it interpolates across the triangle as the world place does,
+// and the fragment divides by w; without w the motion would bend across a large triangle, and the
+// depth is not needed. The motion's output goes through memory for every drawn vertex, and the
+// vertices do not shrink with the render scale, so each number counts.
+struct FadeOutput {
+    @builtin(position) position: vec4<f32>,
+#ifdef NORMAL_PREPASS_OR_DEFERRED_PREPASS
+    @location(2) world_normal: vec3<f32>,
+#endif
+    @location(4) world_position: vec4<f32>,
+#ifdef MOTION_VECTOR_PREPASS
+    @location(5) previous_clip: vec3<f32>,
+#endif
+#ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
+    @location(6) unclipped_depth: f32,
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    @location(7) instance_index: u32,
+#endif
+}
+
 fn whole(d: f32) -> f32 {
-    let b = bands();
-    return clamp((b.w - d) / (b.w - b.z), 0.0, 1.0);
+    return whole_in(bands(), d);
 }
 
 fn risen(d: f32) -> f32 {
-    let b = bands();
+    return risen_in(bands(), d);
+}
+
+// The wholeness and the rise under a given band row (this frame's or last frame's).
+fn whole_in(b: vec4<f32>, d: f32) -> f32 {
+    return clamp((b.w - d) / (b.w - b.z), 0.0, 1.0);
+}
+
+fn risen_in(b: vec4<f32>, d: f32) -> f32 {
     return clamp((d - b.x) / (b.y - b.x), 0.0, 1.0);
 }
 
@@ -102,8 +183,8 @@ fn oct_decode(e: vec2<f32>) -> vec3<f32> {
 }
 
 @vertex
-fn vertex(vertex: FadeVertex) -> VertexOutput {
-    var out: VertexOutput;
+fn vertex(vertex: FadeVertex) -> FadeOutput {
+    var out: FadeOutput;
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     let own = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
     let d = length(own.xyz);
@@ -149,6 +230,11 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     out.world_position = vec4<f32>(morphed, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
 #endif
+    // THE PICTURE CENSUS'S CONTROL (the temporal path's T0; `TerrainConfig::census_control_rung`): the
+    // control rung stands one depth step nearer here than in the main pass (reverse depth: nearer is
+    // larger), so the main pass's depth test leaves its pixels unwritten and the census must count
+    // them. `fade.sink.w` is nought on every other rung, so this multiplies by one.
+    out.position.z = out.position.z * (1.0 + fade.sink.w * CENSUS_DEPTH_STEP);
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
     out.unclipped_depth = out.position.z;
     out.position.z = min(out.position.z, 1.0);
@@ -164,11 +250,51 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
     out.world_normal = mesh_functions::mesh_normal_local_to_world(local_normal, vertex.instance_index);
 #endif
 #ifdef MOTION_VECTOR_PREPASS
-    // The same morph under last frame's placement: the ground itself does not move, so last
-    // frame's own position carries this frame's displacement.
+    // ★ THE PREVIOUS PLACE (the temporal path's T1; `vd_client::motion::previous_placed`, step for
+    // step): the vertex's own place and its radial carried into last frame's render space by its
+    // realm's step, and placed there by the same rule as `morphed` above, on LAST frame's band row
+    // and ramp weight. The eye stands at the origin in both frames, so the distance is the carried
+    // place's length. The engine's previous transform is not read: a chunk spawned this frame has
+    // none (the engine reads its place now, a still pixel under a moving eye), and a chunk's own
+    // morph and ramp move it inside the realm, which no transform carries.
+#ifdef MOTION_CONTROL_ENGINE
+    // ★ THE DESIGN'S CONTROL 1 (T1, `VD_MOTION_CONTROL=engine`): TODAY'S FORMULA — last frame's
+    // placement from the engine's previous transform, moved by THIS frame's displacement. The motion
+    // truth gate must FAIL it on the rows of chunks spawned in the frame, which hold no previous
+    // transform in the engine. A measurement's switch; never the picture's path.
     let previous_from_local = mesh_functions::get_previous_world_from_local(vertex.instance_index);
     let previous_own = mesh_functions::mesh_position_local_to_world(previous_from_local, vec4<f32>(vertex.position, 1.0));
-    out.previous_world_position = vec4<f32>(previous_own.xyz + (morphed - own.xyz), 1.0);
+    let last_world = previous_own.xyz + (out.world_position.xyz - own.xyz);
+#else
+    let last_own = step_point(own.xyz);
+    let last_radial = step_turn(radial);
+    let last_d = length(last_own);
+    let last_b = last_bands();
+#ifdef LIGHT_CASTER
+    let last_placed = last_own - last_radial * fade.splat.y * whole_in(last_b, last_d);
+#else
+    let last_coarser = last_own + last_radial * vertex.morph_m;
+    let last_placed = mix(
+        last_coarser - last_radial * fade.sink.y * whole_in(last_b, last_d),
+        mix(last_coarser, last_own, whole_in(last_b, last_d))
+            - last_radial * fade.sink.x * (1.0 - risen_in(last_b, last_d)),
+        last_arrival(vertex.instance_index),
+    );
+#endif
+#ifdef SPLAT
+    // The splat's corner: last frame's square faced last frame's eye, so its offset is the corner
+    // spread in last frame's view space and turned back into the world (a rigid view: the inverse
+    // of its turn is its transpose).
+    let last_view = prepass_bindings::previous_view_uniforms.view_from_world;
+    let last_turn = mat3x3<f32>(last_view[0].xyz, last_view[1].xyz, last_view[2].xyz);
+    let last_corner = transpose(last_turn) * vec3<f32>(vertex.corner * fade.splat.x, 0.0);
+    let last_world = last_placed + last_corner;
+#else
+    let last_world = last_placed;
+#endif
+#endif
+    let last_clip = prepass_bindings::previous_view_uniforms.clip_from_world * vec4<f32>(last_world, 1.0);
+    out.previous_clip = last_clip.xyw;
 #endif
 #ifdef VERTEX_OUTPUT_INSTANCE_INDEX
     out.instance_index = vertex.instance_index;
@@ -181,7 +307,7 @@ fn vertex(vertex: FadeVertex) -> VertexOutput {
 // own alpha-mask prepass does, and only the discard matters.
 #ifdef PREPASS_FRAGMENT
 @fragment
-fn fragment(in: VertexOutput) -> FragmentOutput {
+fn fragment(in: FadeOutput) -> FragmentOutput {
     if length(in.world_position.xyz) >= bands().w {
         discard;
     }
@@ -192,11 +318,24 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
     out.frag_depth = in.unclipped_depth;
 #endif
+#ifdef MOTION_VECTOR_PREPASS
+    // ★ THE MOTION (T1): the engine's own rule, step for step (`bevy_pbr`'s `prepass.wgsl`): this
+    // frame's unjittered clip place less last frame's clip place (carried from the vertex stage as
+    // x, y and w), in the texture's half units with its V downward.
+    let clip_position_t = view.unjittered_clip_from_world * in.world_position;
+    let clip_position = clip_position_t.xy / clip_position_t.w;
+    let previous_clip_position = in.previous_clip.xy / in.previous_clip.z;
+    let motion = (clip_position - previous_clip_position) * vec2<f32>(0.5, -0.5);
+    // THE MOTION CENSUS'S CONTROL (T1): the census's control rung writes the sentinel as its motion,
+    // so the motion census must count its pixels as uncovered. `fade.sink.w` is nought on every
+    // other rung, and the select keeps their motion exactly.
+    out.motion_vector = select(motion, vec2<f32>(MOTION_SENTINEL), fade.sink.w > 0.5);
+#endif
     return out;
 }
 #else
 @fragment
-fn fragment(in: VertexOutput) {
+fn fragment(in: FadeOutput) {
     if length(in.world_position.xyz) >= bands().w {
         discard;
     }

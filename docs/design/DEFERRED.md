@@ -10451,6 +10451,12 @@ updated in the same change as the work, deleted when done). The interims named h
   own relief and judges against references frozen before the solve (last changed at Step 22). WHERE: that test. WHEN:
   before the next frozen picture — seat the stands on the solved ground, recompute M8-4 with the artifact, re-freeze
   under the owner's look.
+  MEASURED (2026-09-29, flown on the temporal path's T1 build): red as registered — every stand flown differs from its
+  frozen picture past the tolerance (the ground 666 922 pixels, the widest step 74; the hill 680 479, 51; aloft
+  585 364, 19; orbit 429 796, 21: the ground's shape and shade changed, the scene the same), and the seam stand stops
+  the flight at the eye's rung check (the finest rung on screen 3 against the rule's 2 at the eye's height), the stand
+  seated over the recipe's relief. The run's owner pictures were restored from HEAD; T1's "no picture change" is
+  shown by an A/B of the two builds at the owner's stand instead.
 
 ---
 - 🟩 **THE WALK'S BAND GOES INCOMPLETE AGAIN** (found 2026-09-27 by slice R1's flights, on HEAD `13d7fdc` and on R1 alike):
@@ -10785,9 +10791,221 @@ updated in the same change as the work, deleted when done). The interims named h
   the client binary; the tests of vd-client (345) and vd-client-render (9); vd-client's coverage at 100 % (its three
   sealed-box tests' cave arms went branch-free or retired); the moving-eye gate's walk and hull legs headless. NOT run:
   the whole-workspace suite and the process-tier gates (no other crate changed).
+  ★ T0 OF THE TEMPORAL PATH (2026-09-29, IN PROGRESS; the design's §11 T0): no picture change, no product change.
+  BUILT:
+  - THE MEASUREMENT SWITCHES (`client-render/src/measure.rs`), none a product setting: `VD_RENDER_SCALE=<s>` (the
+    engine's own main-pass override; the post passes stay at the display size, so only the GPU clock is read);
+    `VD_PREPASS=1` (route G3: the engine's depth and motion prepass on the picture camera, MSAA off); `VD_STARS=0`;
+    `VD_CLEAR_SENTINEL=1` (the picture clears to the census's sentinel, PURE CYAN, named once in
+    `vd_client_harness::picture_census::SENTINEL_RGB8` — the harness's pure magenta is the shader-failure colour
+    and stays free, so a census run keeps its "zero magenta" check); `VD_PRICE_G2_TARGETS=1` (M-2b); the census's
+    control `VD_CENSUS_CONTROL_RUNG=<r>` (the prepass draws rung r one depth step, 2⁻¹⁰, nearer than the main pass;
+    the same prepass shader draws the shadow maps, so the rung's shadow depth moves by that step too, in control
+    flights only); and THE ADAPTER REPORT, MEASURED on the M4 Pro under Metal: shader f16, texture atomics, 64-bit
+    texture atomics, and read-write storage for R32Uint, R32Float, Rgba16Float and Rgba32Float.
+  - THE SIX METERS (`vd-client-harness`: `edge`, `flicker`, `stars`, `ghost`, `sharp`, `picture_census`): pure,
+    Tier-A, each with its synthetic control and mutation checks (a seven-agent workflow). Its adversarial review
+    found six defects; the ghost rig's two and the edge meter's are cured (the rig states its scene, reads a smear's
+    run and a detached copy's farthest pixel apart, calls a foreign pixel behind the box unreadable, never a trail,
+    and reads a fade-in against a stated settled colour; the edge meter states that it reads one size only); the
+    star census's three are in work (a verdict against a STATED REFERENCE, today's picture, never the run's own first
+    frame; a lit moon is not a star; a short later frame is refused, never a panic).
+  - THE PICTURE CENSUS FLIGHT (`just picture-census`; its control `just picture-census-control rung=<r>`): the
+    picture gate's stands as a census-only flight (no look judged, the owner's pictures untouched, the handover
+    skipped); each stand's judged pixels and holes BY RUNG; every stand's verdict judged together at the end.
+    ★ M-3's HOLES, MEASURED (2026-09-29, both flights green): THE CENSUS READS ITS CONTROL — rung 3 drawn one depth
+    step nearer in the prepass counts 33 812 holes of the hill stand's 35 046 judged rung-3 pixels (and 151 on rung 2
+    beside it, where the finer rung slides over the coarser) and 118 672 of the seam stand's 118 672 (one blob); the
+    other seven stands show no rung 3 and read 0; the numbers repeat exactly over four flights. THEN ROUTE G3 (the
+    engine's depth and motion prepass on the picture camera, MSAA off) MAKES NO HOLE: 0 on all nine stands, over
+    5 037 000 judged ground pixels on rungs 0–17 (ground 652 240, hill 734 772, aloft 578 764, orbit 458 574, seam
+    574 075, far 19 099, cave 695 380, dusk 406 919, high 917 108). G-PICTURE-HOLES at T0: 0. So T1 may carry the
+    motion on route G3 (the design's §4.5: M-3 decides the route only after its census reads its control).
+    ★ THE PICTURE GATE'S SETTLE WAS FALSE, CURED (found by the census flights): "nothing pending" also held while the
+    body under the eye stated data that a new capture client did not hold yet — its lane built nothing, and the
+    hill stand "filled in 0.0 s" with 18 chunks drawn (11 917 at its capture), so the ladder's minimum failed on a
+    stand that held the ladder. The settle now needs two readings a second apart with nothing pending, the same
+    chunk count, and the body building on what it states (the stamp's `artifact_expected == artifact_held`, both
+    none on a body not solved yet). Two nearer rules were MEASURED wrong on the way: "no refused request" never
+    settles the seam stand (12 requests for two far planets' data refused on every frame — the owed far-planet
+    pop-in), and "the home planet's data whole" never settles the ground stand, captured before the planet's first
+    solve on a fresh fixture.
+  - THE PER-PASS CLOCK (`VD_GPU_CLOCK=passes`): a stamp pass after each working node of the cameras' graph, as
+    `render/gpu_pass_c<order>_<node>` and their sum `render/gpu_pass_sum`. MEASURED twice before it held: a chain of
+    the nodes built in the plugin's `finish` HUNG the capture at its first frame (a later plugin's edge closed a cycle,
+    and the engine's graph runner re-queues a node forever); built in the plugin's `cleanup` it was NEVER built (the
+    pipelined renderer moves the render world onto its thread first). It is now built once in the render world's
+    first frame and checked for a cycle there. Its numbers for a node that writes only depth, shadow maps or buffers
+    are approximate (the price by absence stays the judge). Headless at the owner's stand (the capture, 1 284 × 720):
+    the per-pass sum 23.64 ms stands within the frame's span 23.95 ms (T0's check); the stamps themselves cost the
+    frame about 3.4 ms there (each stamp makes the GPU finish the passes before it), so a per-pass run is never the
+    frame's total.
+  - ★ THE GPU CLOCK WAS STALE IN THE WINDOW (found 2026-09-29 in the T0 window session, CURED): the window never
+    polled the GPU device, so a readback's callback ran only when the driver happened to maintain the device; the
+    clock's four slots stayed out, and one reading stood for seconds. MEASURED by the count of distinct values in a
+    mode's 12 samples: the session's control read ONE value in all 12; this morning's benches read 2 distinct values
+    for A1 (32.25 ms), 3 for A2 (21.75), 1 for A3 (15.12), 4 for A5 (10.16), 2 / 1 / 2 for A7's lookup air / no
+    bloom / no shadow read (22.54 / 27.62 / 28.34), and 3 for the casting off (34.28); A4 (13.27), A6, A8 and A7's
+    no shadows (28.10) were fresh (10–12 distinct). The stale ones are real GPU readings, but each rests on 1–4
+    readings, not on a median of 12. The cure: the clock polls the device once a frame without blocking (the
+    headless capture always did, for its own picture copies, which is why the headless readings were fresh); the
+    bench table now counts the distinct readings and marks a stale mode. The baseline is measured again beside
+    T0's modes (the owner: "All 21 modes").
+  - ★ THE 21-MODE WINDOW SESSION (2026-09-29, 14:08–14:50, full screen 3 456 × 2 168 on foot at the owner's stand,
+    12 samples a mode, the GPU clock's median): 17 of 21 modes FRESH (7–12 distinct readings), 4 STALE even with the
+    device poll (A1 30.51 ms: 2 distinct; A2 24.38: 2; stars off 21.78: 1; the G2 pricing at s = 1 22.91: 6) — so the
+    poll was not the whole cure (see the next item). FRESH, MSAA off with the raymarched air: s = 0.75 18.62 ms,
+    0.67 16.59, 0.5 13.92, 0.33 10.90 — THE MODEL'S FIRST TEST (M-2): the four fit frame(s) ≈ 9.4 + 16.5·s² ms
+    within 0.43 ms at every point; the design predicted 12.3–12.9 ms at 0.5 and it reads 13.92, over its 13.3 ms
+    threshold (13.03 once W below lowers it), under 15.1: BY THE DESIGN'S OWN RULE D8 MOVES TOWARD THE FLOOR, 0.33
+    (the floor law's 720 ÷ 2 168 = 0.332) — the owner rules D8. M-2b: the G2 targets priced at 0.5 read 14.19 against
+    13.92, so W ≈ 0.27 ms (the design's ceiling 0.47). The prepass on (route G3) at s = 1: 24.42; the light probe at
+    64 px at s = 1: 18.78 (against about 25 for A2 from the fit: possibly a large price, UNMEASURED until A2 reads
+    fresh). THE BASELINE AGAIN: A3 16.24, A4 13.50 (the morning's fresh 13.27 agrees), A5 10.45, A7 lookup air 25.12 /
+    no bloom 31.45 / no shadows 29.90 / no shadow read 30.93, the casting off 33.79. THE PER-PASS CLOCK at full screen
+    (fresh; its stamps add their own cost, so the RATIOS are the evidence): the ground's main pass 12.75 ms at s = 1
+    and 8.76 at 0.5 (ratio 0.69 — about 7.4 ms of vertex work that the render scale does not touch, 5.3 ms of pixel
+    work), the air 7.59 → 1.95 (0.26, exactly s²), the shadow casting 1.84 → 1.82 (fixed), bloom 0.71 → 1.26 (it
+    grows: owed a look).
+  - ★★ THE CLOCK'S TRUE DEFECT, FOUND AND CURED (2026-09-29, after the session): a health line (readings,
+    pairs out of order, failed and stuck mappings, frames with no free slot, and the raw ticks of the last bad and
+    good pair) MEASURED headless about 50 good readings and about 138 pairs OUT OF ORDER in every 5 s, no failed or
+    stuck mapping, no skipped frame. The raw ticks named the stamp: frame 2762's END stood 82 ms before its BEGIN and
+    equalled frame 2758's end — the same slot four frames before. The query resolve ran in the frame's own end
+    node, and its copy is not ordered after the end pass's timestamp write (no tracked resource joins them), so it
+    often copied the slot before the stamp was written. THE CURE: a slot is resolved THREE FRAMES after its frame
+    (eight slots). MEASURED after: about 200 readings in every 5 s (one a frame), none out of order. Two guesses were
+    measured and REFUTED on the way — the device poll alone (the session's four stale modes) and a one-pixel draw in
+    each stamp pass (the count unchanged; not kept); the poll stays, because nothing else polls the device in the
+    window. CONSEQUENCE: every GPU-clock number of the morning and of the 21-mode session came from a clock that
+    delivered about one frame in four in the headless capture and, in the window, sometimes none for a minute; a
+    missing begin stamp also made spans four frames long (the 57 ms and 104 ms maxima). THE NUMBERS ABOVE ARE
+    PROVISIONAL until the session is flown again with the cured clock (binaries `bin_fs21`, the same 21 modes; the
+    owner stops Docker first).
+  - ★ THE SESSION AGAIN WITH THE CURED CLOCK (2026-09-29, 16:05–16:46, `bin_fs21`, the same 21 modes, full screen on
+    foot at the owner's stand): EVERY mode FRESH (11–12 distinct readings of 12). BUT THE MACHINE WAS NOT QUIET: from
+    16:10:30 the window was hidden in most modes, and in that very second the MSAA-off mode's GPU span stepped from
+    21.9 ms to 27.9 ms; the bloom-off mode read 52–64 ms (twice the default's 30.9) with the GPU 100 % busy and the
+    window's own frame at 30–37 ms, so the GPU span held gaps of other work. The per-pass times stayed steady while the
+    span grew (the half-size run: its air pass 1.95 ms in all 12 samples while its span ran 14.8–20.3 ms), so ANOTHER
+    CLIENT OF THE GPU puts gaps between our passes; the hidden flag alone does not mark it (the shadow-receive mode
+    read 27.9 ms both hidden and seen). CLEAN (window seen, span steady): the default (MSAA 4, raymarched air)
+    30.88 ms; MSAA off 21.93 ms (its 5 seen samples; MSAA costs about 9 ms at full screen); the lookup air with MSAA off
+    15.09 ms and with MSAA 22.43 ms (the raymarched air costs 6.8–8.5 ms); the shadow read off 27.94 ms. THE PER-PASS
+    CLOCK, MSAA off, seen at s = 1: the ground's main pass 12.99 ms, the air 7.59, the shadow casting 1.83, bloom 0.65
+    (the sum 24.70 within the span 24.80); at s = 0.5 (hidden, the passes steady): the ground 8.44 ms (so about
+    6.9 ms of the ground's pass does not shrink with the render scale: the vertex work; about 6.1 ms is per pixel),
+    the air 1.95 (exactly s²), the shadow casting 1.83 (fixed), bloom 1.10 (it GROWS as the scale falls: owed a look).
+    NOT CLEAN, so NOT USED: the render-scale ladder (M-2's fit), the G2 pricing (M-2b), the prepass (M-3's price), the
+    stars off, the light probe at 64 px, the no-bloom and no-shadow rows (M-4). THE RERUN IS OWED with the window in
+    front and no other GPU client, and a reference mode flown between the others, so that a drift shows (the owner
+    chooses the time).
+  - ★★ THE RERUN, CLEAN (2026-09-29, 16:58–17:36, the owner away from the machine, today's T1 binaries `bin_fs22`, 24 modes
+    of 8 samples, the window SEEN in every sample, a reference mode flown between the others). THE REFERENCE (MSAA off,
+    the raymarched air, s = 1) read 22.23, 22.23, 23.34, 22.21, 20.82 and 22.11 ms: the same drawn ground in every run
+    (14 261 chunks, 44.4 M vertices, 670 casters), so a RESTART alone moves the span by up to 1.4 ms, and a difference
+    under that between two single runs is not proven. THE SCALE LADDER (the span): 22.2 / 17.0 / 15.5 / 12.7 / 10.5 ms
+    at s = 1 / 0.75 / 0.67 / 0.5 / 0.33, fit frame(s) = 9.4 + 13.0·s² ms. W (M-2b): 0.0 ms at s = 1, 0.1 ms at 0.5 (the
+    design's ceiling 0.47). THE PREPASS: the depth prepass alone 23.7 ms, with the motion 24.4 ms, so V ≈ 0.7 ms (inside
+    the run spread: NOT proven; it needs the two modes flown in turn several times). Stars off 22.0 (nothing measurable).
+    The light probe at 64 px 20.2 ms (about 2 ms under the reference; its look is the owner's). The default (MSAA 4)
+    30.9–32.9 ms; shadows off 27.1; the shadow casting off 30.5 (nothing: the cost is in the receiving).
+    ★★ THE SPAN IS NOT A FRAME'S COST WHEN FRAMES OVERLAP (MEASURED in the same rerun): with bloom off the span read
+    54.9 ms while the frame came every 32.3 ms (the default's 33.1); the lookup air with bloom and shadows off read a
+    17.3 ms span at a 12.0 ms frame; the fifth reference read a 20.8 ms span at mostly 16.7 ms frames. The GPU starts
+    the next frame before the last one ends, and the span then covers parts of two. THE FRAME INTERVAL (the window's
+    own, on 8.33 ms display steps; the mean of 8 samples) tells the rate: s = 1 → 40–60 frames a second (a mean of
+    21–25 ms); s = 0.75 → 60 (17.7); s = 0.67 → 60 (16.5); s = 0.5 → 15.9 with the client's CPU at 107 %; s = 0.33 →
+    12.4 with the CPU at 121 % — BELOW HALF SIZE THE CLIENT'S CPU IS THE LIMIT. By the design's own rule (M-2 on the span
+    at 0.5: 12.7 ms against 12.5 / 13.3 / 15.1 lowered by V + W ≈ 0.8 ms to 11.7 / 12.5 / 14.3) the reading stands just
+    over 12.5, where D8 moves toward the floor; by the frame interval the window holds 60 frames a second at 0.75 before
+    any reconstruction. The design's M-2 assumed the span is the cost: OWED, a cost measure that frames cannot overlap
+    (the per-pass sum, or the GPU's busy time a frame), before T4 decides the scale; D8 stays the owner's.
+  OWED BY T2 (the design's §12.1): the edge, sharpness and flicker meters read one size only; each needs a probe of
+  its own size read under each display pixel, and bands in render pixels, with a control at 0.5.
+  - ★ T1 — THE MOTION (2026-09-29; BUILT AND FLOWN, the gates green and their controls red as they must be, not
+    committed; the design's §5 and §11 T1). THE PICTURE UNCHANGED, MEASURED by an A/B at the owner's stand (the pre-T1
+    and the T1 builds: 41 pixels one level apart outside the overlay, two seconds of the world's clock between the two
+    runs; the probes' ground identical in every pixel):
+    1. THE RULE, Tier-A (`vd_client::motion`): the realm's step `S = P(last) · P(now)⁻¹` from the two drawn
+       placements (f64, narrowed once), the previous placed vertex at last frame's band row and clock, the ramp's
+       weight read SIGNED (a chunk that landed after last frame's clock stood on its stand-in). Eight tests: the step
+       carries a realm's points and radials, a swap (a 90° turn of the axes), the identity for a new or still realm,
+       the millimetre after narrowing, the signed age at the wrap, the landing identity, a band slide, and THE CONTROL
+       (the design's control 2): today's formula fails the ramp, the band slide and the landing.
+    2. THE BAND TABLE carries last frame's rows and clock and the realm's step (a 3 × 4 matrix) in its header; the three
+       ground shaders read one layout; the placement writes the step after the fill; a unit test states the layout.
+    3. THE GROUND'S PREPASS places each vertex again at last frame's state (its own place and radial carried by the
+       step, last frame's row, the signed ramp) and hands the fragment last frame's clip x, y and w (three numbers, the
+       smallest exact output); the fragment writes the motion by the engine's own formula. Route G3 (M-3: 0 holes).
+    4. THE MARKER-TO-BODY HANDOVER keeps ONE entity (its new body's mesh, material and placement go on the same entity),
+       so the engine keeps its previous placement across the handover's frame.
+    5. THE MOTION SENTINEL: every view's motion target clears to 65 504 (the largest finite half float), a motion no
+       surface writes.
+    6. THE READBACK: under the motion prepass the headless capture copies the picture camera's motion and depth after
+       the frame's own passes, into the frame's own command stream, and writes `<stem>.motion.bin` beside the picture
+       (`vd_client_harness::motion_census`).
+    7. THE PROBE'S MOVING MARK: the fourth byte is 128 where the surface moves against its body in the frame (inside a
+       band's morph or sink, now or last frame, or a ramp weight that changed), 255 elsewhere.
+    GATES: G-MOTION-COVERAGE rides the census flight (`just picture-census`: no pixel that holds a depth keeps the
+    sentinel), and its control rides the census control (the control rung writes the sentinel as its motion, so the
+    census must count its pixels); the G-MOTION-TRUTH judge (`motion_truth`: the still ground's residual against the
+    pop detector's reprojection, where the reference's own miss stays under 0.02 px) with its unit control (the design's
+    control 3: a motion 0.2 px off fails). The motion's price (row V): `VD_PREPASS=depth` against `VD_PREPASS=1`.
+    ★ FLOWN (2026-09-29): THE CENSUS FLIGHT green on all nine stands — G-PICTURE-HOLES 0 AND G-MOTION-COVERAGE 0 (for
+    example the hill: 0 of 741 666 pixels that hold a depth keep the sentinel, and all 182 814 empty pixels keep it); ITS
+    CONTROL green (rung 3 one depth step nearer and writing the sentinel: the hill 33 812 holes and 35 266 pixels
+    without motion, the seam 118 672 and 119 827; the other stands show no rung 3). THE TURNING FLIGHT under the motion
+    prepass green: G-MOTION-TRUTH on the walk 0.015 px at 99.9 % of 10 582 196 still ground pixels (the worst 0.312 px),
+    on the turn 0.024 px at 99.9 % of 10 248 024 (the worst 0.117 px).
+    ★★ THE CAPTURE WAS ONE FRAME LATE, MEASURED AND CURED (2026-09-29): the picture and probe copies were submitted from
+    their own encoder DURING the graph's run, so the queue ran them BEFORE the frame's own passes, and every capture —
+    picture and probe — showed the frame BEFORE its stamp (the headless example's pattern, since slice 3). MEASURED on
+    the turning leg's 30 pairs of consecutive frames: the second frame's probe missed its OWN frame's depth (copied in
+    the frame's own stream, T1) by 25–121 ground pixels along every ridge, and matched the FIRST frame's depth EXACTLY
+    (0 ground pixels off in all 30 pairs; the rest are far bodies drawn as points, which the probe does not draw). THE
+    CURE: the copies are recorded into the frame's own encoder after the camera driver. CONSEQUENCE for the gates flown
+    before: a pair's pixels were the two frames before its two stamps — on steady motion the reprojection's error
+    cancels, on a changing motion (a turn's start, a boarding) it did not; the pop detector and the pictures gate are
+    flown again on the cure.
+    VERIFIED ON THE CURE (the turn flown again): each probe matches its OWN frame's depth exactly (0 pixels off over
+    all 30 pairs) and misses the frame before by 3 867; the walk's worst motion residual fell from 0.312 px to 0.022 px
+    and its 8 ground pixels "without motion" to 0 (both the late probe); the turn's truth 0.037 px at 99.9 % of
+    10 707 475 still pixels (the worst 0.041 px, was 0.117); the pop detector's floor on the turn fell from 8 levels to 2
+    and its pixels past the floor from 3 148 to 358.
+    THE FAST LEGS on the cure: G-MOTION-TRUTH 0.008 px at 99.9 % of 8.2 M still pixels at 240 m/s (the worst 0.022),
+    0.001 px at 528 m/s (7.5 M, the worst 0.001), the walk 0.014 px.
+    ★ THE DESIGN'S CONTROL 1, MEASURED (2026-09-29, `just motion-truth-control 1`: the prepass writes TODAY'S formula,
+    the engine's previous transform moved by this frame's displacement): at 240 m/s it put up to 1.5, 5.1 and 8.7 px on
+    still pixels in three flights, while the rule's worst on the same leg was 0.022 px — but the leg's POOLED 99.9 %
+    share hid it in two flights of three (0.004 and 0.010 px), and failed only the third (1.0 px). WHERE (a script that
+    reproduces the gate's worst pixel exactly, 8.651 px): every error sat in the picture's bottom 11–42 rows on the near
+    ground (rung 2), in two pairs of thirty — chunks in their first VISIBLE frame at the frustum's edge, for which the
+    engine keeps no previous transform (its preprocessing reads last frame's instance, and a culled one has none). NOT
+    new entities: THE NEW MARK found none. So the gate judges EVERY PAIR ALONE as well as the leg (a frame whose motion
+    is wrong is a defect however few frames share it), and lists the pairs that fail.
+    ★ THE ARRIVAL TAG CARRIES EVERY CHUNK'S SPAWN CLOCK (so the probe can mark the design's new-chunk rows): 31 bits of
+    the clock of the frame the chunk appeared in, and a flag for a chunk that rises from its stand-in; without it the
+    chunk enters whole; an untagged mesh (nought) is whole and never new (the clock never reads nought). The ramp's
+    weights are unchanged (the Tier-A tests and the three shaders on one rule); the probe's fourth byte carries two bits:
+    128 clear = moving against its body, 64 clear = new in the frame (landing or rebuilt), judged apart by the truth.
+    ★ THE PER-PAIR GATE, BOTH WAYS (2026-09-29): the control FAILS it — the 240 m/s leg's first three pairs each read
+    1.001 px at 99.9 % (the worst 2.3–8.2 px), the leg red with "THE MOTION IS NOT TRUE"; the rule PASSES it on the same
+    legs — the walk 0.015 px (the worst 0.022), 240 m/s 0.006 px (0.014), 528 m/s 0.001 px (0.001), no pair red.
+    HR5 (2026-09-29): vd-client and vd-client-harness at 100 % region and branch (one real miss found, an assertion's
+    message that ran only on failure, cured). Lints clean in every feature set flown.
+    OWED AFTER T1 (each named with its slice): a pair ON a boarding's swap frame (the gate refuses a pair across an
+    origin change; the hull legs fly boarded, so the ground's step is judged from the hull's frame; the crossing frame
+    is G-CROSSING's, T2); row V PROVEN in the window (the single-run 0.7 ms sits inside the 1.4 ms restart spread: the
+    depth prepass and the motion flown in turn several times); a new dot's spawn stamp and its first-frame mark, and the
+    first VISIBLE frame of any mesh, for T2's reactive mask, their only reader. **Example.** A hull at 528 m/s over the
+    belt: a rung-9 chunk lands late beside it; the engine's own rule gives the chunk no previous place (about 23 display
+    pixels of wrong motion for one frame); the rule gives it the planet's own step and its stand-in's surface, so it
+    enters the history with no mark.
   OWED: the owner's look decisions the split prices;
   the release-and-request walk on change only, and its diff from the builder (B-MAIN ≤ 1 ms); the builders (E1 the
   parent sub-box and the waits, E6 the geometry without maps, E10 the pools, E2–E5): B-RATE at 240 m/s; a land leg for
   the moving-eye gate; the owner's window flight before any commit. **Example.** A pilot at 240 m/s over the plain:
-  before, her main thread spent 14.7 ms of every frame choosing the ground and the worst frame took 52 ms for it;
-  now the choice runs on a builder and costs her frame 0.2 ms, and the band is exactly as whole as before.
+  before, the client's main thread spent 14.7 ms of every frame choosing the ground and the worst frame took 52 ms
+  for it; now the choice runs on a builder and costs the pilot's frame 0.2 ms, and the band is exactly as whole as
+  before.

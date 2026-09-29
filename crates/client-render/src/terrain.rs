@@ -60,6 +60,7 @@ use vd_client::ladder_view::{
     AskBound, AskRate, Column, LadderView, ShadowReach, WantedSet, band_table, rung_for_distance,
     switch_m,
 };
+use vd_client::motion::{DrawnPlacement, RealmStep};
 use vd_client::realm_scene::{BoxShape, RealmBox, RealmScene};
 use vd_client_harness::probe::{
     PROBE_KIND_RULER, PROBE_KIND_TERRAIN, horizon_dip_rad, horizon_m, star_angles,
@@ -187,6 +188,15 @@ pub struct TerrainConfig {
     /// surface they morph to — a cave's floor, walls and roof, an overhang's underside — and logs
     /// the counts every ten seconds. A measurement's switch.
     pub covered: bool,
+    /// ★ THE PICTURE CENSUS'S CONTROL (the temporal path's T0, `docs/investigation/2026-09-28/
+    /// temporal_path_design.md` §11: "one chunk drawn in the prepass one depth step nearer than in the
+    /// main pass must count holes"): `VD_CENSUS_CONTROL_RUNG=<r>` draws rung `r` one depth step nearer
+    /// in the prepass (`ladder_fade_prepass.wgsl`, `CENSUS_DEPTH_STEP`), so under `VD_PREPASS=1` the main
+    /// pass's depth test leaves that rung's pixels unwritten and the census must count them. The same
+    /// rung writes the motion census's sentinel as its motion (T1), so the motion census must count
+    /// its pixels as holding a depth with no motion. A measurement's switch; a whole rung stands for
+    /// the design's one chunk.
+    pub census_control_rung: Option<u8>,
     /// THE SHADOW'S SHAPE (D8-8's ablation named the sun's shadow as the still stand's wall,
     /// §19.6): how far it reaches (the rung whose switch distance ends it), how many cascades
     /// draw it, and each cascade map's width in pixels. Defaults: the constants below; the
@@ -362,6 +372,7 @@ const NO_CULL_ENV: &str = "VD_TERRAIN_NO_CULL";
 const SPLIT_DRAWS_ENV: &str = "VD_TERRAIN_SPLIT_DRAWS";
 const THIN_ENV: &str = "VD_TERRAIN_THIN";
 const COVERED_ENV: &str = "VD_TERRAIN_COVERED";
+const CENSUS_CONTROL_ENV: &str = "VD_CENSUS_CONTROL_RUNG";
 /// How far under its coarser surface a vertex must stand to count as covered, in its rung's cells:
 /// four — the sink and the skirt's drop reach at most about two.
 const COVERED_CELLS: f32 = 4.0;
@@ -404,6 +415,9 @@ impl TerrainConfig {
             split_draws: env_or(SPLIT_DRAWS_ENV, 1usize).max(1),
             thin: env_or(THIN_ENV, 1usize).max(1),
             covered: std::env::var(COVERED_ENV).is_ok_and(|v| v == "1"),
+            census_control_rung: std::env::var(CENSUS_CONTROL_ENV)
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok()),
             shadow_reach_rung: env_or(SHADOW_REACH_ENV, SHADOW_REACH_RUNG),
             shadow_cascades: env_or(SHADOW_CASCADES_ENV, SHADOW_CASCADES),
             shadow_map_px: env_or(SHADOW_MAP_ENV, SHADOW_MAP_PX),
@@ -1811,6 +1825,10 @@ pub struct Terrain {
     /// terrain material of that realm binds, and this frame's bytes, which the render world
     /// writes into it in its prepare stage.
     band_tables: BTreeMap<RealmId, BandTableGpu>,
+    /// ★ LAST FRAME'S DRAWN PLACEMENT OF EACH REALM (the temporal path's T1, `vd_client::motion`):
+    /// the realm's step this frame is `P(last) · P(now)⁻¹`, and a realm absent last frame steps by
+    /// nothing.
+    last_placements: BTreeMap<RealmId, (DVec3, DQuat)>,
     /// ★ THIS FRAME'S CLOCK in the arrival ramp's ticks (slice R1c, `vd_client::arrival`): the
     /// band tables' header carries it, and a chunk that lands this frame is stamped with it.
     frame_ticks: u32,
@@ -1975,6 +1993,7 @@ impl Terrain {
             shadow_bytes: 0,
             ladders: BTreeMap::new(),
             band_tables: BTreeMap::new(),
+            last_placements: BTreeMap::new(),
             frame_ticks: 1,
             materials: BTreeMap::new(),
             probe_materials: BTreeMap::new(),
@@ -2196,9 +2215,11 @@ impl Terrain {
     }
 
     /// ★ THE REALM'S BAND TABLE BUFFER (the far-water design §10, slice R1a), made with the realm's
-    /// first material: one `vec4<u32>` clock and one row per rung plus the always-passed row, and
-    /// written at once from the held horizon, so no material ever reads an empty table. Every
-    /// frame after that the table is filled in `sync_terrain` and written by the render world.
+    /// first material: one `vec4<u32>` clock, the realm's step (T1), and one row per rung plus the
+    /// always-passed row, twice (this frame's and last frame's; [`band_table_bytes`]), and written at
+    /// once from the held horizon, so no material ever reads an empty table. Every frame after that
+    /// the table is filled in `sync_terrain`, its step written in `place_chunks`, and the whole
+    /// written by the render world.
     fn band_buffer(
         &mut self,
         realm: RealmId,
@@ -2209,19 +2230,19 @@ impl Terrain {
             return table.buffer.clone();
         }
         let rows = band_table(&self.bound_of(realm), body, body.ladder().rungs);
-        let bytes = band_table_bytes(self.clock_words(), &rows);
+        let words = BandTableWords::new(self.clock_words(), rows);
         let buffer = gpu.device.create_buffer(&BufferDescriptor {
             label: Some("vd band table"),
-            size: bytes.len() as u64,
+            size: words.bytes.len() as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        gpu.queue.write_buffer(&buffer, 0, &bytes);
+        gpu.queue.write_buffer(&buffer, 0, &words.bytes);
         self.band_tables.insert(
             realm,
             BandTableGpu {
                 buffer: buffer.clone(),
-                bytes,
+                words,
             },
         );
         buffer
@@ -2292,7 +2313,8 @@ impl Terrain {
                         ),
                         f64::from(vd_seed::ladder::cell_m(rung)),
                         table,
-                    ),
+                    )
+                    .with_census_step(self.config.census_control_rung == Some(rung)),
                 })
             })
             .clone()
@@ -3158,11 +3180,14 @@ pub(crate) fn sync_terrain(
             let (Some(ladder), Some(body)) = (ladders.get(realm), lane.body(*realm)) else {
                 // A realm with no ladder this frame keeps its rows; its clock still moves, so a
                 // ramp under way runs on.
-                table.bytes[..16].copy_from_slice(&band_table_bytes(clock, &[])[..16]);
+                let rows = table.words.rows.clone();
+                table.words.fill(clock, rows);
                 continue;
             };
-            let rows = band_table(ladder.pace.held(), body, body.ladder().rungs);
-            table.bytes = band_table_bytes(clock, &rows);
+            table.words.fill(
+                clock,
+                band_table(ladder.pace.held(), body, body.ladder().rungs),
+            );
             tables += 1;
         }
     }
@@ -4410,12 +4435,68 @@ pub(crate) fn sync_terrain(
 pub struct ChunkOrigin(pub [f64; 3]);
 
 /// ★ ONE REALM'S BAND TABLE ON THE CARD (the far-water design §10, slice R1a): the buffer every
-/// terrain material of the realm binds, and this frame's bytes.
+/// terrain material of the realm binds, and this frame's words.
 #[derive(Clone, Debug)]
 pub(crate) struct BandTableGpu {
     buffer: Buffer,
-    bytes: Vec<u8>,
+    words: BandTableWords,
 }
+
+/// ★ ONE REALM'S BAND TABLE AS BYTES: this frame's bytes, and this frame's rows and clock, which the
+/// next frame's table carries as LAST frame's (the temporal path's T1: a vertex's previous place
+/// reads last frame's band and ramp).
+#[derive(Clone, Debug)]
+struct BandTableWords {
+    bytes: Vec<u8>,
+    rows: Vec<[f32; 4]>,
+    clock: u32,
+}
+
+impl BandTableWords {
+    /// A realm's first table: no last frame, so last frame's rows and clock are this frame's, and
+    /// the step is the identity.
+    fn new(clock: [u32; 4], rows: Vec<[f32; 4]>) -> Self {
+        let bytes = band_table_bytes(
+            [clock[0], clock[1], clock[0]],
+            RealmStep::IDENTITY.rows(),
+            &rows,
+            &rows,
+        );
+        BandTableWords {
+            bytes,
+            rows,
+            clock: clock[0],
+        }
+    }
+
+    /// ★ THIS FRAME'S TABLE: this frame's clock and rows, and the frame before's as last frame's.
+    /// The realm's step is the identity until the placement writes it later in the frame
+    /// ([`BandTableWords::set_step`]).
+    fn fill(&mut self, clock: [u32; 4], rows: Vec<[f32; 4]>) {
+        let last_rows = std::mem::replace(&mut self.rows, rows);
+        let last_clock = std::mem::replace(&mut self.clock, clock[0]);
+        self.bytes = band_table_bytes(
+            [clock[0], clock[1], last_clock],
+            RealmStep::IDENTITY.rows(),
+            &self.rows,
+            &last_rows,
+        );
+    }
+
+    /// ★ THE REALM'S STEP (T1), written by the placement once it knows this frame's placement.
+    fn set_step(&mut self, step: [[f32; 4]; 3]) {
+        let mut at = BAND_TABLE_STEP_AT;
+        for row in step {
+            for value in row {
+                self.bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                at += 4;
+            }
+        }
+    }
+}
+
+/// Where the realm's step starts in a band table's bytes: after the clock's four words.
+const BAND_TABLE_STEP_AT: usize = 16;
 
 /// The card's device and queue, for the band tables.
 #[derive(SystemParam)]
@@ -4424,15 +4505,30 @@ pub(crate) struct BandGpu<'w> {
     queue: Res<'w, RenderQueue>,
 }
 
-/// ★ THE BYTES OF A BAND TABLE as the shaders read them (`BandTable` in `ladder_fade.wgsl`): the
-/// clock, one `vec4<u32>` (the arrival ramp's, slice R1c; nought before it), then one `vec4<f32>`
-/// per row, little-endian.
-fn band_table_bytes(clock: [u32; 4], rows: &[[f32; 4]]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16 * (rows.len() + 1));
-    for word in clock {
+/// ★ THE BYTES OF A BAND TABLE as the three ground shaders read them (`BandTable` in
+/// `ladder_fade.wgsl`, `ladder_fade_prepass.wgsl` and `probe.wgsl`, one layout), little-endian:
+/// - the clock, one `vec4<u32>`: this frame's clock and the ramp's ticks (slice R1c), LAST frame's
+///   clock, and the count of rows (T1);
+/// - the realm's step, three `vec4<f32>` rows of a 3 × 4 matrix (T1, `vd_client::motion`);
+/// - this frame's rows, one `vec4<f32>` each, then LAST frame's rows (the same count; this frame's
+///   again when the count changed, so no row is read past the table).
+fn band_table_bytes(
+    clock: [u32; 3],
+    step: [[f32; 4]; 3],
+    rows: &[[f32; 4]],
+    last_rows: &[[f32; 4]],
+) -> Vec<u8> {
+    let last = if last_rows.len() == rows.len() {
+        last_rows
+    } else {
+        rows
+    };
+    let count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    let mut out = Vec::with_capacity(BAND_TABLE_STEP_AT + 48 + 32 * rows.len());
+    for word in [clock[0], clock[1], clock[2], count] {
         out.extend_from_slice(&word.to_le_bytes());
     }
-    for row in rows {
+    for row in step.iter().chain(rows).chain(last) {
         for value in row {
             out.extend_from_slice(&value.to_le_bytes());
         }
@@ -4450,7 +4546,7 @@ pub(crate) fn extract_band_tables(mut commands: Commands, terrain: Extract<Optio
     let tables = terrain.as_ref().map_or_else(Vec::new, |t| {
         t.band_tables
             .values()
-            .map(|b| (b.buffer.clone(), b.bytes.clone()))
+            .map(|b| (b.buffer.clone(), b.words.bytes.clone()))
             .collect()
     });
     commands.insert_resource(RenderBandTables(tables));
@@ -4498,8 +4594,10 @@ pub(crate) fn place_chunks(
     let fresh = terrain.stamp_fresh;
     let mut stamp = if fresh { terrain.stamp.clone() } else { None };
     // Nothing drawn: nothing to place, and no scene to clone (a flight in open space used to walk
-    // every row of the window for no pixel — SL9). The stamp still goes out.
+    // every row of the window for no pixel — SL9). The stamp still goes out. No realm is drawn, so
+    // none has a placement for the next frame's step (T1).
     if chunks.is_empty() {
+        terrain.last_placements.clear();
         if fresh {
             *net.terrain_stamp
                 .lock()
@@ -4527,6 +4625,31 @@ pub(crate) fn place_chunks(
                 facing_of(rbox),
             ),
         );
+    }
+    // ★ THE REALMS' STEPS (the temporal path's T1, `vd_client::motion`): each drawn ground's step
+    // from this frame's render space to last frame's, from the two placements the window drew, into
+    // its realm's band table (the fill wrote the identity earlier this frame, which stands for a
+    // realm the window did not draw last frame). Only the realms with a table: no other realm draws
+    // a ground, and the walk stays within the bodies drawn (SL9).
+    {
+        let Terrain {
+            band_tables,
+            last_placements,
+            ..
+        } = &mut *terrain;
+        let mut drawn = BTreeMap::new();
+        for (realm, table) in band_tables.iter_mut() {
+            let Some(&(centre, facing)) = rows.get(realm) else {
+                continue;
+            };
+            let now = DrawnPlacement { centre, facing };
+            let last = last_placements
+                .get(realm)
+                .map(|&(centre, facing)| DrawnPlacement { centre, facing });
+            table.words.set_step(RealmStep::between(last, now).rows());
+            drawn.insert(*realm, (centre, facing));
+        }
+        *last_placements = drawn;
     }
     let mut nearest = f64::INFINITY;
     let mut farthest = 0.0_f64;
@@ -4630,6 +4753,83 @@ pub(crate) const DIAG_EVERY: u32 = 60;
 pub const fn worker_share(cores: usize) -> usize {
     let half = cores / 2;
     if half < 2 { 2 } else { half }
+}
+
+#[cfg(test)]
+mod band_table_tests {
+    use super::*;
+
+    fn word(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+    }
+
+    fn value(bytes: &[u8], at: usize) -> f32 {
+        f32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+    }
+
+    /// The row `index` of the table's rows (this frame's from 0, last frame's from the count).
+    fn row(bytes: &[u8], index: usize) -> [f32; 4] {
+        let at = BAND_TABLE_STEP_AT + 48 + 16 * index;
+        [0, 4, 8, 12].map(|k| value(bytes, at + k))
+    }
+
+    fn step(bytes: &[u8]) -> [[f32; 4]; 3] {
+        [0, 1, 2].map(|r| [0, 1, 2, 3].map(|k| value(bytes, BAND_TABLE_STEP_AT + 16 * r + 4 * k)))
+    }
+
+    /// ★ THE TABLE CARRIES LAST FRAME (the temporal path's T1): the header states this frame's
+    /// clock, the ramp, last frame's clock and the count of rows; the step stands after it; this
+    /// frame's rows follow, then last frame's. A realm's first table has no last frame, so its last
+    /// frame is this one; a fill moves this frame's rows and clock to last frame's; the placement
+    /// writes the step; and a table whose count of rows changes reads this frame's rows twice, so no
+    /// shader reads past the buffer.
+    ///
+    /// **Example.** The hull flies over the belt. In frame 2 the table of the home planet states
+    /// frame 1's rows as last frame's, so a rung-9 chunk's previous place fades on the band it
+    /// faded on then, and the planet's step carries it to where the eye saw it.
+    #[test]
+    fn the_band_table_carries_last_frames_rows_clock_and_the_realms_step() {
+        let first = vec![[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]];
+        let second = vec![[9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]];
+        let mut table = BandTableWords::new([100, 512, 0, 0], first.clone());
+        let b = &table.bytes;
+        assert_eq!(b.len(), BAND_TABLE_STEP_AT + 48 + 16 * 4);
+        assert_eq!([0, 4, 8, 12].map(|at| word(b, at)), [100, 512, 100, 2]);
+        assert_eq!(step(b), RealmStep::IDENTITY.rows());
+        assert_eq!(
+            [0, 1, 2, 3].map(|i| row(b, i)),
+            [first[0], first[1], first[0], first[1]]
+        );
+
+        table.fill([117, 512, 0, 0], second.clone());
+        let b = &table.bytes;
+        assert_eq!([0, 4, 8, 12].map(|at| word(b, at)), [117, 512, 100, 2]);
+        assert_eq!(step(b), RealmStep::IDENTITY.rows());
+        assert_eq!(
+            [0, 1, 2, 3].map(|i| row(b, i)),
+            [second[0], second[1], first[0], first[1]]
+        );
+
+        let moved = RealmStep {
+            rotation: DQuat::from_rotation_z(0.25),
+            translation: DVec3::new(3.0, -4.0, 5.0),
+        }
+        .rows();
+        table.set_step(moved);
+        assert_eq!(step(&table.bytes), moved);
+        assert_eq!(
+            [0, 1, 2, 3].map(|i| row(&table.bytes, i)),
+            [second[0], second[1], first[0], first[1]],
+            "the step leaves the rows alone"
+        );
+
+        let three = vec![[0.5; 4], [1.5; 4], [2.5; 4]];
+        table.fill([134, 512, 0, 0], three.clone());
+        let b = &table.bytes;
+        assert_eq!([0, 4, 8, 12].map(|at| word(b, at)), [134, 512, 117, 3]);
+        assert_eq!(b.len(), BAND_TABLE_STEP_AT + 48 + 16 * 6);
+        assert_eq!((3..6).map(|i| row(b, i)).collect::<Vec<_>>(), three);
+    }
 }
 
 #[cfg(test)]

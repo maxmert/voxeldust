@@ -16,8 +16,17 @@
 //! ```text
 //!   R byte:  kind << 5 | rung        kind 0 = nothing, 1 = terrain, 2 = the ruler; rung 0..31
 //!   G, B:    distance from the eye in CELLS of that rung, big-endian u16 (0..65 535 cells)
-//!   A:       255
+//!   A:       two marks as bits on 255 (the temporal path's T1 item 7): 128 clear where the surface
+//!            MOVES against its body in the frame, 64 clear where its chunk is NEW in the frame
 //! ```
+//!
+//! **The marks** ([`probe_alpha`]): the probe marks a pixel whose surface moves against its body in the
+//! frame ([`probe_moving`]: inside a band's morph or sink in this frame or the last, or under a ramp
+//! weight that changed since the last frame), and a pixel whose chunk appeared in this very frame,
+//! landing or rebuilt ([`probe_new`]: its tag's clock is the frame's, `vd_client::arrival::appeared_at`).
+//! The motion truth gate judges only the ground that holds still against its body, and the new
+//! chunks' still ground apart (the design's new-chunk rows: the engine gives a new entity no previous
+//! place); the moving ground is the Tier-A rule's (`vd_client::motion`).
 //!
 //! A metre-cell rung reaches 65 km; a 512 m rung reaches 33 000 km. One cell is the ladder's own
 //! unit, so the same two bytes serve every rung.
@@ -44,6 +53,30 @@ pub const PROBE_RUNG_BITS: u8 = 5;
 const PROBE_RUNG_MASK: u8 = (1 << PROBE_RUNG_BITS) - 1;
 /// The widest distance the two bytes state, in cells.
 pub const PROBE_MAX_CELLS: u16 = u16::MAX;
+/// The fourth byte's bit that is SET while the surface holds still against its body (T1 item 7).
+pub const PROBE_BIT_STILL: u8 = 0x80;
+/// The fourth byte's bit that is SET while the pixel's chunk was drawn before this frame (clear: new).
+pub const PROBE_BIT_OLD: u8 = 0x40;
+/// The fourth byte of a still pixel of a chunk drawn before this frame (and of the clear).
+pub const PROBE_ALPHA_STILL: u8 = 255;
+
+/// ★ THE FOURTH BYTE for the two marks: the shader's arithmetic (`probe.wgsl`), in Rust.
+#[must_use]
+pub const fn probe_alpha(moving: bool, new: bool) -> u8 {
+    PROBE_ALPHA_STILL - PROBE_BIT_STILL * (moving as u8) - PROBE_BIT_OLD * (new as u8)
+}
+
+/// Whether a probe pixel's surface moves against its body in the frame.
+#[must_use]
+pub const fn probe_moving(alpha: u8) -> bool {
+    alpha & PROBE_BIT_STILL == 0
+}
+
+/// Whether a probe pixel's chunk is new in this very frame (it landed or was rebuilt).
+#[must_use]
+pub const fn probe_new(alpha: u8) -> bool {
+    alpha & PROBE_BIT_OLD == 0
+}
 
 /// The R byte for a kind and a rung: the renderer's uniform, the gate's expectation.
 #[must_use]
@@ -254,6 +287,30 @@ pub fn star_angles(star: DVec3, up: DVec3, forward: DVec3) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ THE MARKS (T1 item 7): each of the four bytes reads back its two marks, and the clear's byte
+    /// reads still and old.
+    #[test]
+    fn the_fourth_byte_carries_the_moving_and_the_new_marks() {
+        assert_eq!(
+            [(false, false), (true, false), (false, true), (true, true)]
+                .map(|(m, l)| probe_alpha(m, l)),
+            [255, 127, 191, 63]
+        );
+        for moving in [false, true] {
+            for new in [false, true] {
+                let alpha = probe_alpha(moving, new);
+                assert_eq!((probe_moving(alpha), probe_new(alpha)), (moving, new));
+            }
+        }
+        assert_eq!(
+            (
+                probe_moving(PROBE_ALPHA_STILL),
+                probe_new(PROBE_ALPHA_STILL)
+            ),
+            (false, false)
+        );
+    }
 
     #[test]
     fn the_probe_codec_round_trips_every_kind_rung_and_distance_edge() {

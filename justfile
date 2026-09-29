@@ -307,6 +307,32 @@ terrain-pictures:
 terrain-pictures-card:
     VD_TERRAIN_GPU=1 cargo test --release -p vd-bins --features dev-control,render --test terrain_pictures -- --nocapture --test-threads=1
 
+# ★ THE PICTURE CENSUS (the temporal path's slice T0 item 2 and M-3; G-PICTURE-HOLES): the picture
+# gate's stands as a census flight — the picture clears to the census's sentinel (pure cyan), the air
+# and the star cloud are off, and the engine's depth and motion prepass runs on the picture camera
+# (route G3). A ground pixel of the probe that keeps the sentinel in the picture is a hole of the
+# picture camera's own depth test, which the probe cannot see; every stand must read zero. No look is
+# judged and the owner's pictures stay untouched. GPU-required, LOCAL, RELEASE.
+picture-census:
+    VD_CLEAR_SENTINEL=1 VD_SKY=0 VD_STARS=0 VD_PREPASS=1 cargo test --release -p vd-bins --features dev-control,render --test terrain_pictures -- --nocapture --test-threads=1
+
+# THE CENSUS'S CONTROL: the same flight with the chunks of one rung drawn one depth step nearer in the
+# prepass than in the main pass. Every stand that shows the rung must count holes on it, and one stand
+# at least must show it; otherwise the census's zero proves nothing. `rung` names the rung.
+picture-census-control rung="3":
+    VD_CENSUS_CONTROL_RUNG={{rung}} VD_CLEAR_SENTINEL=1 VD_SKY=0 VD_STARS=0 VD_PREPASS=1 cargo test --release -p vd-bins --features dev-control,render --test terrain_pictures -- --nocapture --test-threads=1
+
+# THE MOTION TRUTH (the temporal path's T1, G-MOTION-TRUTH): the moving-eye gate's legs under the motion
+# prepass, so every recorded pair carries its motion, and every leg's still ground must meet the target.
+# `legs` picks the legs as the gate's own knob does (for example "turn" or "0,1,2"); empty flies them all.
+motion-truth legs="":
+    VD_PREPASS=1 {{ if legs != "" { "VD_LEGS=" + legs } else { "" } }} cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye -- --nocapture --test-threads=1
+
+# THE MOTION TRUTH'S CONTROL (the design's control 1): the same flight with TODAY'S motion formula in the
+# ground's prepass, which must FAIL the gate on the rows of the chunks that land in a frame.
+motion-truth-control legs="":
+    VD_MOTION_CONTROL=engine VD_PREPASS=1 {{ if legs != "" { "VD_LEGS=" + legs } else { "" } }} cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye -- --nocapture --test-threads=1
+
 # THE BOARDING STORM (D-TERRAIN-5 item 15): ten pilots board ten hulls, each fresh, each settling
 # before the next; the legs fly on the last. The count of saga starts against boardings is the
 # number to read (a refused first attempt is one extra start per boarding).

@@ -4,7 +4,9 @@
 //
 //   R byte:  kind << 5 | rung        (the uniform's `code`, built by `vd_client_harness::probe::probe_byte`)
 //   G, B:    the distance from the eye in CELLS of the rung, big-endian u16
-//   A:       255
+//   A:       two marks as bits on 255 (the temporal path's T1 item 7,
+//            `vd_client_harness::probe::probe_alpha`): 128 clear where the surface MOVES against its
+//            body in the frame, 64 clear where its chunk is NEW in the frame (landed or rebuilt)
 //
 // ★ THE BYTES ARE EXACT THROUGH AN sRGB TARGET. The picture's target is 8-bit sRGB, and the engine
 // encodes a linear fragment value on store and decodes it on the blit to the output, then encodes it
@@ -25,7 +27,6 @@
 #import bevy_pbr::{
     mesh_functions,
     mesh_view_bindings::view,
-    forward_io::VertexOutput,
     view_transformations::position_world_to_clip,
 }
 
@@ -42,9 +43,11 @@ struct ProbeUniform {
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> probe: ProbeUniform;
 
 // ★ THE REALM'S BAND TABLE (slice R1a): the same buffer the ground's material reads, so the probe
-// fades on the band the picture fades on.
+// fades on the band the picture fades on. One layout with `ladder_fade.wgsl` (its comment says what
+// each part holds); the probe reads this frame's rows alone.
 struct BandTable {
     clock: vec4<u32>,
+    step: array<vec4<f32>, 3>,
     rows: array<vec4<f32>>,
 }
 
@@ -55,16 +58,66 @@ fn bands() -> vec4<f32> {
     return table.rows[u32(probe.sink.z)];
 }
 
-// ★ THE ARRIVAL RAMP'S WEIGHT (the far-water design §10, slice R1c; `vd_client::arrival::ramp_weight`,
-// step for step): nought in the frame a chunk landed, one half a second later, and one at once for a
-// chunk that entered whole (its tag nought). The age is a wrapping difference of the table's clock and
-// the chunk's stamp, so the clock's wrap moves nothing.
-fn arrival(instance_index: u32) -> f32 {
-    let stamp = mesh_functions::get_tag(instance_index);
-    let age = f32(table.clock.x - stamp) / f32(max(table.clock.y, 1u));
-    return select(clamp(age, 0.0, 1.0), 1.0, stamp == 0u);
+// This probe's row of LAST frame's table (T1): last frame's rows follow this frame's.
+fn last_bands() -> vec4<f32> {
+    return table.rows[table.clock.w + u32(probe.sink.z)];
 }
 
+// THE REALM'S STEP (T1; `vd_client::motion::RealmStep`): where a point drawn at `y` this frame stood
+// last frame.
+fn step_point(y: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        dot(table.step[0].xyz, y) + table.step[0].w,
+        dot(table.step[1].xyz, y) + table.step[1].w,
+        dot(table.step[2].xyz, y) + table.step[2].w,
+    );
+}
+
+// THE TAG's parts (`vd_client::arrival::RAMP_FLAG` and `CLOCK_MASK`): the clock of the frame the chunk
+// appeared in, 31 bits, and the flag of a chunk that rises from its stand-in (without it, whole).
+const RAMP_FLAG: u32 = 0x80000000u;
+const CLOCK_MASK: u32 = 0x7fffffffu;
+
+// ★ THE ARRIVAL RAMP'S WEIGHT (the far-water design §10, slice R1c; `vd_client::arrival::ramp_weight`,
+// step for step): nought in the frame a chunk landed, one half a second later, and one at once for a
+// chunk that entered whole (its tag without the ramp's flag). The age is a wrapping 31-bit difference of
+// the table's clock and the tag's clock, so the clock's wrap moves nothing.
+fn arrival(instance_index: u32) -> f32 {
+    let tag = mesh_functions::get_tag(instance_index);
+    let age = f32((table.clock.x - (tag & CLOCK_MASK)) & CLOCK_MASK) / f32(max(table.clock.y, 1u));
+    return select(1.0, clamp(age, 0.0, 1.0), (tag & RAMP_FLAG) != 0u);
+}
+
+// THE RAMP'S WEIGHT AT LAST FRAME'S CLOCK, the age read SIGNED (T1;
+// `vd_client::motion::previous_ramp_weight`): a chunk that landed after last frame's clock reads
+// nought, where it stood.
+fn last_arrival(instance_index: u32) -> f32 {
+    let tag = mesh_functions::get_tag(instance_index);
+    let diff = (table.clock.z - (tag & CLOCK_MASK)) & CLOCK_MASK;
+    let age = f32(bitcast<i32>(diff << 1u) >> 1u) / f32(max(table.clock.y, 1u));
+    return select(1.0, clamp(age, 0.0, 1.0), (tag & RAMP_FLAG) != 0u);
+}
+
+// THE FOURTH BYTE'S BITS (`vd_client_harness::probe::PROBE_BIT_STILL` and `PROBE_BIT_OLD`): each is set
+// on 255 and cleared by its mark.
+const BIT_STILL: f32 = 128.0;
+const BIT_OLD: f32 = 64.0;
+
+// The probe's stage output: the drawn place (for the far edge and the distance) and the two marks.
+struct ProbeOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_position: vec4<f32>,
+    @location(1) moving: f32,
+    @location(2) fresh: f32,
+}
+
+// Whether a crossfade's weight stands strictly inside its band.
+fn inside(t: f32) -> bool {
+    return (t > 0.0) && (t < 1.0);
+}
+
+// The ground's vertex layout, whole (`ground_vertex_layout`); the probe draws no shade, so it reads no
+// normal.
 struct ProbeVertex {
     @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
@@ -90,28 +143,25 @@ struct ProbeVertex {
 }
 
 fn whole(d: f32) -> f32 {
-    let b = bands();
-    return clamp((b.w - d) / (b.w - b.z), 0.0, 1.0);
+    return whole_in(bands(), d);
 }
 
 fn risen(d: f32) -> f32 {
-    let b = bands();
+    return risen_in(bands(), d);
+}
+
+// The wholeness and the rise under a given band row (this frame's or last frame's).
+fn whole_in(b: vec4<f32>, d: f32) -> f32 {
+    return clamp((b.w - d) / (b.w - b.z), 0.0, 1.0);
+}
+
+fn risen_in(b: vec4<f32>, d: f32) -> f32 {
     return clamp((d - b.x) / (b.y - b.x), 0.0, 1.0);
 }
 
-// THE PACKED NORMAL (ruling V18): two signed 16-bit numbers on the octahedron, unfolded to the
-// unit normal — the library's `oct_decode`, step for step.
-fn oct_decode(e: vec2<f32>) -> vec3<f32> {
-    var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
-    let t = clamp(-n.z, 0.0, 1.0);
-    n.x = n.x + select(t, -t, n.x >= 0.0);
-    n.y = n.y + select(t, -t, n.y >= 0.0);
-    return normalize(n);
-}
-
 @vertex
-fn vertex(vertex: ProbeVertex) -> VertexOutput {
-    var out: VertexOutput;
+fn vertex(vertex: ProbeVertex) -> ProbeOutput {
+    var out: ProbeOutput;
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     let own = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(vertex.position, 1.0));
     let d = length(own.xyz);
@@ -142,17 +192,21 @@ fn vertex(vertex: ProbeVertex) -> VertexOutput {
     out.world_position = vec4<f32>(morphed, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
 #endif
-#ifdef OCT_NORMAL
-    let own_normal = oct_decode(vertex.oct_normal);
-#else
-    let own_normal = vertex.normal;
-#endif
-    // THE SHADE HANDS OVER WITH THE SHAPE (item 20): the same blend as the position's.
-    let local_normal = normalize(mix(oct_decode(vertex.morph_normal), own_normal, whole(d) * ramp));
-    out.world_normal = mesh_functions::mesh_normal_local_to_world(local_normal, vertex.instance_index);
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
-    out.instance_index = vertex.instance_index;
-#endif
+    // ★ THE MOVING MARK (the temporal path's T1 item 7): the surface moves against its body this
+    // frame when the vertex stands inside a band's morph or sink in this frame or the last (at last
+    // frame's row and at its distance then, carried by the realm's step), or when its ramp weight
+    // changed since last frame. The motion truth gate judges only the ground that holds still
+    // against its body; the moving ground is judged by the Tier-A rule (`vd_client::motion`).
+    let last_d = length(step_point(own.xyz));
+    let last_b = last_bands();
+    let moving = inside(whole(d)) || inside(risen(d)) || inside(whole_in(last_b, last_d))
+        || inside(risen_in(last_b, last_d)) || (ramp != last_arrival(vertex.instance_index));
+    out.moving = select(0.0, 1.0, moving);
+    // ★ THE NEW MARK: the chunk appeared in this very frame, landing or rebuilt (its tag's clock is the
+    // table's clock; `vd_client::arrival::appeared_at`), the design's new-chunk rows, which the motion
+    // truth judges apart. An untagged mesh (nought) is never new: the clock never reads nought.
+    let tag = mesh_functions::get_tag(vertex.instance_index);
+    out.fresh = select(0.0, 1.0, (tag & CLOCK_MASK) == table.clock.x);
     return out;
 }
 
@@ -165,7 +219,7 @@ fn srgb_to_linear(c: f32) -> f32 {
 }
 
 @fragment
-fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fragment(in: ProbeOutput) -> @location(0) vec4<f32> {
     let d = length(in.world_position.xyz);
     if d >= bands().w {
         discard;
@@ -174,10 +228,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let q = u32(cells);
     let hi = f32(q >> 8u) / 255.0;
     let lo = f32(q & 255u) / 255.0;
+    // The fourth byte is linear in an sRGB target, so it stores `round(255 · a)` exactly. A pixel is
+    // moving when any vertex of its triangle is.
+    let byte = 255.0 - BIT_STILL * select(0.0, 1.0, in.moving > 0.0)
+        - BIT_OLD * select(0.0, 1.0, in.fresh > 0.0);
     return vec4<f32>(
         srgb_to_linear(probe.code / 255.0),
         srgb_to_linear(hi),
         srgb_to_linear(lo),
-        1.0,
+        byte / 255.0,
     );
 }

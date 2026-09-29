@@ -63,9 +63,14 @@ struct LadderFade {
 // realm — one row per rung, (in_lo, sink_end, out_lo, out_hi) metres from the eye, and one row that
 // is always passed — which the renderer rewrites in its prepare stage every frame, in step with
 // the placements. The material holds only its row (`fade.sink.z`), so a moving horizon rewrites
-// this buffer and never a material. `clock` is the arrival ramp's (slice R1c).
+// this buffer and never a material. `clock` is the arrival ramp's (slice R1c): this frame's clock (x)
+// and the ramp's ticks (y); (z) LAST frame's clock and (w) the count of rows (the temporal path's T1).
+// `step` is the realm's step from this frame's render space to last frame's (T1, a 3 × 4 matrix by
+// rows), and `rows` holds this frame's rows and then LAST frame's, the same count: the motion
+// prepass reads them (`ladder_fade_prepass.wgsl`); this stage reads this frame's alone.
 struct BandTable {
     clock: vec4<u32>,
+    step: array<vec4<f32>, 3>,
     rows: array<vec4<f32>>,
 }
 
@@ -76,14 +81,19 @@ fn bands() -> vec4<f32> {
     return table.rows[u32(fade.sink.z)];
 }
 
+// THE TAG's parts (`vd_client::arrival::RAMP_FLAG` and `CLOCK_MASK`): the clock of the frame the chunk
+// appeared in, 31 bits, and the flag of a chunk that rises from its stand-in (without it, whole).
+const RAMP_FLAG: u32 = 0x80000000u;
+const CLOCK_MASK: u32 = 0x7fffffffu;
+
 // ★ THE ARRIVAL RAMP'S WEIGHT (the far-water design §10, slice R1c; `vd_client::arrival::ramp_weight`,
 // step for step): nought in the frame a chunk landed, one half a second later, and one at once for a
-// chunk that entered whole (its tag nought). The age is a wrapping difference of the table's clock and
-// the chunk's stamp, so the clock's wrap moves nothing.
+// chunk that entered whole (its tag without the ramp's flag). The age is a wrapping 31-bit difference of
+// the table's clock and the tag's clock, so the clock's wrap moves nothing.
 fn arrival(instance_index: u32) -> f32 {
-    let stamp = mesh_functions::get_tag(instance_index);
-    let age = f32(table.clock.x - stamp) / f32(max(table.clock.y, 1u));
-    return select(clamp(age, 0.0, 1.0), 1.0, stamp == 0u);
+    let tag = mesh_functions::get_tag(instance_index);
+    let age = f32((table.clock.x - (tag & CLOCK_MASK)) & CLOCK_MASK) / f32(max(table.clock.y, 1u));
+    return select(1.0, clamp(age, 0.0, 1.0), (tag & RAMP_FLAG) != 0u);
 }
 
 struct FadeVertex {

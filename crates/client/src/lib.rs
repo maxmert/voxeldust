@@ -23,6 +23,7 @@ pub mod chunks;
 pub mod input;
 pub mod interp;
 pub mod ladder_view;
+pub mod motion;
 pub mod net;
 pub mod realm_scene;
 pub mod realm_view;

@@ -86,10 +86,10 @@ use bevy::render::render_graph::{
     self, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
 };
 use bevy::render::render_resource::{
-    Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, MapMode, PollType,
-    TexelCopyBufferInfo, TexelCopyBufferLayout, TextureFormat, TextureUsages,
+    Buffer, BufferDescriptor, BufferUsages, Extent3d, MapMode, PollType, TexelCopyBufferInfo,
+    TexelCopyBufferLayout, TextureFormat, TextureUsages,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
+use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 use bevy::window::{CursorGrabMode, CursorOptions, ExitCondition, PrimaryWindow};
 use bevy::winit::WinitPlugin;
@@ -105,7 +105,7 @@ use vd_client::realm_scene::{
 };
 use vd_client::render_snapshot::RenderSnapshot;
 use vd_client_harness::camera::FollowCamera;
-use vd_client_harness::capture::{capture_rel_path, probe_rel_for};
+use vd_client_harness::capture::{capture_rel_path, motion_rel_for, probe_rel_for};
 use vd_client_harness::input_map::{self, MovementKeys, mouse_look};
 use vd_client_harness::manifest::CaptureKind;
 use vd_core::EntityId;
@@ -465,8 +465,12 @@ struct DotEntities(BTreeMap<EntityId, Entity>);
 ///
 /// The stored [`BodyKind`] is what makes THE HANDOVER (window lane §2.8) mechanical: a realm whose
 /// bag flips marker⇒self-look (it woke and states its own outline) or self-look⇒marker (it tore
-/// down and its parent's ever-present point of light resumes) despawns and respawns IN THE SAME
-/// FRAME, so exactly one of {marker, body} is ever on screen — never zero, never both.
+/// down and its parent's ever-present point of light resumes) takes the other body IN THE SAME
+/// FRAME, so exactly one of {marker, body} is ever on screen — never zero, never both. ★ ONE ENTITY
+/// (the temporal path's T1 item 4): the handover puts the new body's mesh, material and placement
+/// on the SAME entity, so the engine keeps the entity's previous placement and the realm's own motion
+/// reaches the motion target in the handover's frame (a new entity has none, and its first frame
+/// would read the eye's motion alone).
 #[derive(Resource, Default)]
 struct RealmBoxEntities(BTreeMap<RealmId, (Entity, BodyKind)>);
 
@@ -529,6 +533,12 @@ pub(crate) const ATTRIBUTE_MORPH_NORMAL: MeshVertexAttribute =
 const MORPH_NORMAL_SHADER_LOCATION: u32 = 11;
 const LIGHT_CASTER_SHADER_DEF: &str = "LIGHT_CASTER";
 const LIGHT_CASTER_ENV: &str = "VD_TERRAIN_LIGHT_CASTER";
+/// ★ THE MOTION'S CONTROL (the temporal path's T1, the design's control 1): `VD_MOTION_CONTROL=engine`
+/// makes the ground's prepass write TODAY'S motion formula (the engine's previous transform moved by
+/// this frame's displacement), which the motion truth gate must fail on the rows of new chunks. A
+/// measurement's switch, read once per pipeline, as the caster's is.
+const MOTION_CONTROL_SHADER_DEF: &str = "MOTION_CONTROL_ENGINE";
+const MOTION_CONTROL_ENV: &str = "VD_MOTION_CONTROL";
 
 /// ★ THE UNPACED CLIENT (2026-09-23, the performance measurements): `VD_CLIENT_UNPACED=1` runs
 /// the headless loop as fast as the work allows and the window without vsync, so the stamp's
@@ -769,6 +779,12 @@ fn ground_vertex_layout(
             .shader_defs
             .push(LIGHT_CASTER_SHADER_DEF.into());
     }
+    if std::env::var(MOTION_CONTROL_ENV).as_deref() == Ok("engine") {
+        descriptor
+            .vertex
+            .shader_defs
+            .push(MOTION_CONTROL_SHADER_DEF.into());
+    }
     descriptor.vertex.buffers = vec![layout.0.get_layout(&attributes)?];
     Ok(())
 }
@@ -985,6 +1001,8 @@ struct RenderEye {
 
 pub mod gpu_check;
 mod gpu_clock;
+mod measure;
+mod motion_capture;
 /// Run the client renderer. BLOCKS until exit; the bin MUST call this on the MAIN thread
 /// (winit/the runner need it) with the core loop on a separate thread. Dispatches on the
 /// mode: a real window (human) or headless offscreen capture (the agent's eyes).
@@ -1075,8 +1093,9 @@ pub(crate) struct LadderFade {
     /// times this. One number per rung, never rewritten. (y): THE STAND-IN'S SINK — the next
     /// coarser rung's — where a late chunk's arrival ramp starts (slice R1c; nought for a caster,
     /// which enters whole). (z): THE ROW of the realm's band table this material fades on — its
-    /// own rung's, the drawn rung's for a caster (§24.5). (w): unused. Slot 100: the base
-    /// material owns the slots below it.
+    /// own rung's, the drawn rung's for a caster (§24.5). (w): THE PICTURE CENSUS'S CONTROL, one on the
+    /// control rung and nought elsewhere (`with_census_step`). Slot 100: the base material owns the
+    /// slots below it.
     #[uniform(100)]
     sink: Vec4,
     /// THE RUNG'S CELL in metres (x): a splat's width (D8-8's measurement); read under the
@@ -1127,6 +1146,14 @@ impl LadderFade {
             splat: Vec4::new(cell_m as f32, 0.0, 0.0, 0.0),
             table,
         }
+    }
+
+    /// The same material with THE PICTURE CENSUS'S CONTROL on (`terrain::TerrainConfig::
+    /// census_control_rung`): its prepass stands one depth step nearer than its main pass. `sink.w`
+    /// holds the switch (one or nought); every other material keeps nought.
+    pub(crate) fn with_census_step(mut self, on: bool) -> LadderFade {
+        self.sink.w = f32::from(u8::from(on));
+        self
     }
 
     /// The same material as a light caster, sunk by `caster_sink_m`.
@@ -1215,9 +1242,11 @@ pub(crate) const PROBE_LAYER: usize = 1;
 /// layer and the camera does not, so a caster chunk two rungs coarser than the drawn one throws
 /// the shadow and never appears in the picture.
 pub(crate) const SHADOW_LAYER: usize = 2;
-/// The two readback copiers' slots: the picture and the probe.
+/// The readback copiers' slots: the picture, the probe, and the motion with its depth (T1, under
+/// the motion prepass; `motion_capture`).
 const COPIER_MAIN: u8 = 0;
 const COPIER_PROBE: u8 = 1;
+const COPIER_MOTION: u8 = 2;
 
 /// The probe camera: follows the picture's camera exactly (transform and projection, copied every
 /// frame after the planes are derived), draws only [`PROBE_LAYER`], no tonemapping, no dither, no
@@ -1269,14 +1298,11 @@ fn run_windowed(handles: RenderHandles) {
     if measure != WindowMeasure::default() {
         tracing::info!(?measure, "the window's measurement switches are set");
     }
+    let render_measure = measure::RenderMeasure::from_env();
     App::new()
         .insert_resource(measure)
         .insert_resource(measure.winit_settings())
-        .insert_resource(ClearColor(Color::srgb(
-            CLEAR_SRGB[0],
-            CLEAR_SRGB[1],
-            CLEAR_SRGB[2],
-        )))
+        .insert_resource(render_measure.clear_color(CLEAR_SRGB))
         .insert_resource(Net {
             snapshot: handles.snapshot,
             input: handles.input,
@@ -1362,11 +1388,14 @@ fn run_windowed(handles: RenderHandles) {
             // diagnostics (CPU and GPU time per render pass), read onto the terrain stamp.
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
             RenderDiagSwitch,
+            measure::RenderMeasurePlugin(render_measure),
             StarSkyShaderPlugin,
             MaterialPlugin::<StarSkyMaterial>::default(),
             // The ground's crossfade material (slice 8 step 3).
             LadderFadeShaderPlugin,
             MaterialPlugin::<GroundMaterial>::default(),
+            // T1: the motion target's sentinel (a window has no capture to read it back into).
+            motion_capture::MotionCapturePlugin { readback: false },
         ))
         .add_systems(Startup, (setup_scene, gpu_check::gpu_recipe_self_check))
         .add_systems(
@@ -1412,6 +1441,7 @@ fn setup_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
     sky_config: Res<sky::SkyConfig>,
     measure: Res<WindowMeasure>,
+    render_measure: Res<measure::RenderMeasure>,
 ) {
     // First-person follow camera — ORIENTED each frame by `place_camera` and always AT THE RENDER
     // ORIGIN (S5's camera-relative flatten). Its near/far are rewritten every frame by
@@ -1435,6 +1465,14 @@ fn setup_scene(
     if measure.direct_draws {
         cam.insert(bevy::render::view::NoIndirectDrawing);
         tracing::info!("VD_WINDOW_DIRECT_DRAWS=1 — one plain draw per chunk for this run");
+    }
+    // THE TEMPORAL PATH'S T0 (`measure`): the engine's depth and motion prepass, MSAA off — after
+    // the MSAA switch, so the prepass's own sampling wins.
+    if let Some(prepass) = render_measure.prepass_bundle() {
+        cam.insert(prepass);
+    }
+    if let Some(motion) = render_measure.motion_prepass() {
+        cam.insert(motion);
     }
     // ★ BLOOM IS OFF, AND ONE ENV VAR AWAY (owner, 2026-08-29: "skip bloom, but keep the possibility
     // to quickly enable for a test").
@@ -2194,7 +2232,13 @@ fn sync_star_sky(
     camera: Single<(&Camera, &Projection), With<FollowCam>>,
     mut clouds: Query<&mut Transform, With<StarPointMarker>>,
     mut commands: Commands,
+    render_measure: Res<measure::RenderMeasure>,
 ) {
+    // THE TEMPORAL PATH'S T0 (`measure`, `VD_STARS=0`): no star cloud is built — M-4 prices it, and
+    // the picture census wants no star on its sky.
+    if !render_measure.stars {
+        return;
+    }
     // THE UNIFORMS ARE REFRESHED EVERY FRAME, because the size floor is measured in PIXELS and the
     // camera can change: a window resize moves `viewport_h_px`, and the projection owns the field of
     // view. The star DATA is not touched here — only these four numbers.
@@ -2480,21 +2524,20 @@ fn sync_realm_boxes(
             }
             // THE HANDOVER, both ways (window lane §2.8): the author changed — a sleeping child
             // woke and now states its own outline, or a departed one's look was pruned and its
-            // parent's ever-present point of light resumed. Despawn and respawn IN THIS FRAME, so
-            // the swap is atomic on screen: never zero drawn, never both.
-            Some(&(entity, _)) => {
-                commands.entity(entity).despawn();
-                spawn_body(
-                    realm,
-                    rbox,
-                    &prims,
-                    &markers,
-                    &mut meshes,
-                    &mut materials,
-                    &mut commands,
-                    &mut boxes,
-                );
-            }
+            // parent's ever-present point of light resumed. The new body goes on the SAME entity IN
+            // THIS FRAME, so the swap is atomic on screen (never zero drawn, never both) and the
+            // entity keeps its previous placement (T1).
+            Some(&(entity, _)) => spawn_body(
+                realm,
+                rbox,
+                &prims,
+                &markers,
+                &mut meshes,
+                &mut materials,
+                &mut commands,
+                &mut boxes,
+                Some(entity),
+            ),
             // New body: build it once and spawn it.
             None => spawn_body(
                 realm,
@@ -2505,6 +2548,7 @@ fn sync_realm_boxes(
                 &mut materials,
                 &mut commands,
                 &mut boxes,
+                None,
             ),
         }
     }
@@ -2563,9 +2607,21 @@ fn marker_prims(rbox: &RealmBox, draw_center: DVec3, view: Option<(f64, f64)>) -
     }]
 }
 
-/// Spawn one realm's body and record WHICH lawful author drew it. A marker reuses the SHARED point
-/// sprite mesh + its spectral-class material (no mesh build, no material allocation — §2.14's
-/// tier-0 rung); an outline builds its own translucent volume.
+/// The components of one realm's drawn body: its mesh, its material, its placement, no shadow, and
+/// the realm-box mark. Both authors' bodies carry the same components, so a handover replaces
+/// every one of them on the entity.
+type BodyBundle = (
+    Mesh3d,
+    MeshMaterial3d<StandardMaterial>,
+    Transform,
+    bevy::light::NotShadowCaster,
+    RealmBoxMarker,
+);
+
+/// Spawn one realm's body — or, at a handover, put it on the realm's `existing` entity — and record
+/// WHICH lawful author drew it. A marker reuses the SHARED point sprite mesh + its spectral-class
+/// material (no mesh build, no material allocation — §2.14's tier-0 rung); an outline builds its
+/// own translucent volume. A body that lowers to nothing leaves nothing drawn for the realm.
 #[allow(clippy::too_many_arguments)]
 fn spawn_body(
     realm: RealmId,
@@ -2576,41 +2632,46 @@ fn spawn_body(
     materials: &mut Assets<StandardMaterial>,
     commands: &mut Commands,
     boxes: &mut RealmBoxEntities,
+    existing: Option<Entity>,
 ) {
-    let spawned = match rbox.body {
-        BodyKind::Look => spawn_realm_box(prims, rbox.luma.is_some(), meshes, materials, commands),
-        BodyKind::Marker => spawn_marker(prims, rbox, markers, commands),
+    let body = match rbox.body {
+        BodyKind::Look => realm_box_body(prims, rbox.luma.is_some(), meshes, materials),
+        BodyKind::Marker => marker_body(prims, rbox, markers),
     };
-    if let Some(entity) = spawned {
-        boxes.0.insert(realm, (entity, rbox.body));
-    }
+    let Some(body) = body else {
+        if let Some(entity) = existing {
+            commands.entity(entity).despawn();
+            boxes.0.remove(&realm);
+        }
+        return;
+    };
+    let entity = match existing {
+        Some(entity) => {
+            commands.entity(entity).insert(body);
+            entity
+        }
+        None => commands.spawn(body).id(),
+    };
+    boxes.0.insert(realm, (entity, rbox.body));
 }
 
-/// Spawn one MARKER point sprite from the shared assets. Returns `None` if the marker lowered to no
-/// prim (defensive — `marker_prims` always emits exactly one).
-fn spawn_marker(
-    prims: &[MeshPrim],
-    rbox: &RealmBox,
-    markers: &MarkerAssets,
-    commands: &mut Commands,
-) -> Option<Entity> {
+/// One MARKER point sprite from the shared assets. Returns `None` if the marker lowered to no prim
+/// (defensive — `marker_prims` always emits exactly one).
+fn marker_body(prims: &[MeshPrim], rbox: &RealmBox, markers: &MarkerAssets) -> Option<BodyBundle> {
     let prim = prims.first()?;
     let (class_code, _) = rbox.luma.unwrap_or_default();
     let material = markers
         .class
         .get(usize::from(class_code))
         .or_else(|| markers.class.last())?;
-    let entity = commands
-        .spawn((
-            Mesh3d(markers.mesh.clone()),
-            MeshMaterial3d(material.clone()),
-            Transform::from_translation(Vec3::from_array(prim.transform.translation))
-                .with_scale(Vec3::from_array(prim.transform.scale)),
-            bevy::light::NotShadowCaster,
-            RealmBoxMarker,
-        ))
-        .id();
-    Some(entity)
+    Some((
+        Mesh3d(markers.mesh.clone()),
+        MeshMaterial3d(material.clone()),
+        Transform::from_translation(Vec3::from_array(prim.transform.translation))
+            .with_scale(Vec3::from_array(prim.transform.scale)),
+        bevy::light::NotShadowCaster,
+        RealmBoxMarker,
+    ))
 }
 
 /// Frame the OFFSCREEN capture camera on the whole realm-box scene (capture-only, V3): when a
@@ -2680,7 +2741,7 @@ fn frame_scene_camera(
     }
 }
 
-/// Spawn one realm box from its lowered [`MeshPrim`]s (today exactly one per box): a Bevy `Mesh`
+/// One realm box's body from its lowered [`MeshPrim`]s (today exactly one per box): a Bevy `Mesh`
 /// built from the prim VERTICES + a TRANSLUCENT [`StandardMaterial`] (`AlphaMode::Blend`,
 /// DOUBLE-SIDED (`cull_mode: None`) so the shell renders from BOTH sides, `unlit` so the color is
 /// legible regardless of lighting). Double-sided is the seamless mandate ("the moon does NOT
@@ -2697,13 +2758,12 @@ fn frame_scene_camera(
 /// draws on top of its own point). Decided by data presence — the self-look carries `TAG_LUMA` —
 /// never by kind. Example: the star of System 7 draws as a solid disc and its sky point is behind
 /// it; System 7's own shell around the pilot stays translucent.
-fn spawn_realm_box(
+fn realm_box_body(
     prims: &[MeshPrim],
     lit: bool,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    commands: &mut Commands,
-) -> Option<Entity> {
+) -> Option<BodyBundle> {
     let prim = prims.first()?;
     let mesh = meshes.add(mesh_from_prim(prim));
     let [r, g, b, a] = prim.color_rgba;
@@ -2719,21 +2779,18 @@ fn spawn_realm_box(
         unlit: true,
         ..default()
     });
-    let entity = commands
-        .spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            Transform::from_translation(Vec3::from_array(prim.transform.translation))
-                .with_scale(Vec3::from_array(prim.transform.scale)),
-            // AN OUTLINE CASTS NO SHADOW (M8-L, MEASURED 2026-09-09): the star system's look shell
-            // is a translucent sphere AROUND the star, so the sun's light crossed it on the way to
-            // every planet and the whole ground stood in the shell's shadow. Outlines and sprites
-            // are drawings of a realm's reach, not bodies.
-            bevy::light::NotShadowCaster,
-            RealmBoxMarker,
-        ))
-        .id();
-    Some(entity)
+    Some((
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(Vec3::from_array(prim.transform.translation))
+            .with_scale(Vec3::from_array(prim.transform.scale)),
+        // AN OUTLINE CASTS NO SHADOW (M8-L, MEASURED 2026-09-09): the star system's look shell
+        // is a translucent sphere AROUND the star, so the sun's light crossed it on the way to
+        // every planet and the whole ground stood in the shell's shadow. Outlines and sprites
+        // are drawings of a realm's reach, not bodies.
+        bevy::light::NotShadowCaster,
+        RealmBoxMarker,
+    ))
 }
 
 /// Build a Bevy `Mesh` from a [`MeshPrim`]'s vertex buffer — a non-indexed triangle list of
@@ -3044,7 +3101,7 @@ type Readback = (u8, u64, Option<Arc<vd_devproto::DevTerrainStamp>>, Vec<u8>);
 /// was served last — two consecutive frames of one pair — while the drain runs a frame or two
 /// behind.
 type Readbacks =
-    [std::collections::VecDeque<(u64, Option<Arc<vd_devproto::DevTerrainStamp>>, Vec<u8>)>; 2];
+    [std::collections::VecDeque<(u64, Option<Arc<vd_devproto::DevTerrainStamp>>, Vec<u8>)>; 3];
 /// How many frames' readbacks each slot keeps: past the drain's own lag and one PNG's encode.
 const READBACK_RING: usize = 8;
 #[derive(Resource, Deref)]
@@ -3059,12 +3116,9 @@ fn run_capture(handles: RenderHandles) {
     let captures = handles
         .captures
         .expect("Capture mode requires a capture channel");
+    let render_measure = measure::RenderMeasure::from_env();
     App::new()
-        .insert_resource(ClearColor(Color::srgb(
-            CLEAR_SRGB[0],
-            CLEAR_SRGB[1],
-            CLEAR_SRGB[2],
-        )))
+        .insert_resource(render_measure.clear_color(CLEAR_SRGB))
         .insert_resource(Net {
             snapshot: handles.snapshot,
             input: handles.input,
@@ -3134,6 +3188,7 @@ fn run_capture(handles: RenderHandles) {
             // diagnostics (CPU and GPU time per render pass), read onto the terrain stamp.
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
             RenderDiagSwitch,
+            measure::RenderMeasurePlugin(render_measure),
             StarSkyShaderPlugin,
             MaterialPlugin::<StarSkyMaterial>::default(),
             // The ground's crossfade material (slice 8 step 3).
@@ -3144,6 +3199,10 @@ fn run_capture(handles: RenderHandles) {
             MaterialPlugin::<ProbeMaterial>::default(),
         ))
         .add_plugins(ImageCopyPlugin)
+        // T1: the motion target's sentinel and, under the motion prepass, its readback.
+        .add_plugins(motion_capture::MotionCapturePlugin {
+            readback: render_measure.motion_prepass().is_some(),
+        })
         // ★ THE PACE (2026-09-23, the performance measurements): 60 Hz, so a headless flight
         // paces like a window; under `VD_CLIENT_UNPACED=1` the loop runs as fast as the work
         // allows, and the stamp's frame time is then the frame's own WORK and nothing else.
@@ -3210,6 +3269,7 @@ fn setup_capture(
     mut images: ResMut<Assets<Image>>,
     render_device: Res<RenderDevice>,
     sky_config: Res<sky::SkyConfig>,
+    render_measure: Res<measure::RenderMeasure>,
 ) {
     let size = Extent3d {
         width: CAPTURE_W,
@@ -3277,6 +3337,13 @@ fn setup_capture(
             FollowCam,
         ))
         .id();
+    // THE TEMPORAL PATH'S T0 (`measure`): the picture census runs here, on the picture's own camera.
+    if let Some(prepass) = render_measure.prepass_bundle() {
+        commands.entity(picture_cam).insert(prepass);
+    }
+    if let Some(motion) = render_measure.motion_prepass() {
+        commands.entity(picture_cam).insert(motion);
+    }
     // ★ THE SKY NEEDS HDR (slice 8s): the same pair the window's camera gets, and the dome as the
     // ambient light instead of the engine's grey. The probe camera never gets the sky.
     if sky_config.enabled {
@@ -3314,6 +3381,7 @@ fn serve_captures(
     probe_target: Option<Res<ProbeTargetImage>>,
     images: Res<Assets<Image>>,
     net: Res<Net>,
+    render_measure: Res<measure::RenderMeasure>,
     mut latest: Local<Readbacks>,
     mut pending: Local<Option<(CaptureJob, u64)>>,
     mut served_at: Local<Option<u64>>,
@@ -3383,6 +3451,18 @@ fn serve_captures(
         },
         None => None,
     };
+    // THE MOTION of the SAME frame under the motion prepass (T1): the motion target and the depth,
+    // read back after the frame's own passes (`motion_capture`); an empty readback writes no file.
+    let motion_bytes = match render_measure.motion_prepass() {
+        Some(_) => match latest[usize::from(COPIER_MOTION)]
+            .iter()
+            .find(|(f, _, _)| *f == frame)
+        {
+            Some((_, _, data)) => Some(data.clone()),
+            None => return,
+        },
+        None => None,
+    };
     let Some((job, _)) = pending.take() else {
         return;
     };
@@ -3425,14 +3505,20 @@ fn serve_captures(
         .as_ref()
         .and_then(|p| images.get(&p.0).cloned());
     let probe_path = cfg.runs_dir.join(probe_rel_for(&rel));
+    let motion_path = cfg.runs_dir.join(motion_rel_for(&rel));
     std::thread::spawn(move || {
-        let written = write_capture_png(&path, picture.as_ref(), &bytes).and_then(|()| {
-            match probe_bytes {
-                // The probe beside the picture — the Tier-A pairing rule names its path.
-                Some(data) => write_capture_png(&probe_path, probe_image.as_ref(), &data),
+        let written = write_capture_png(&path, picture.as_ref(), &bytes)
+            .and_then(|()| {
+                match probe_bytes {
+                    // The probe beside the picture — the Tier-A pairing rule names its path.
+                    Some(data) => write_capture_png(&probe_path, probe_image.as_ref(), &data),
+                    None => Ok(()),
+                }
+            })
+            .and_then(|()| match motion_bytes {
+                Some(data) => write_motion_file(&motion_path, &data),
                 None => Ok(()),
-            }
-        });
+            });
         let result = written.map(|()| result);
         match &result {
             Ok(r) => tracing::info!(path = %r.path, "capture written"),
@@ -3440,6 +3526,25 @@ fn serve_captures(
         }
         let _ = job.reply.send(result);
     });
+}
+
+/// ★ THE MOTION FILE (T1): the copier's padded motion and depth, written as the motion census reads
+/// them. The motion target is the picture camera's own, so its size is the picture's. An empty
+/// readback (no copy this frame) writes nothing, and the gate names the missing file.
+fn write_motion_file(path: &std::path::Path, raw: &[u8]) -> Result<(), String> {
+    use vd_client_harness::motion_census::{MOTION_TEXEL_BYTES, MotionPicture};
+    if raw.is_empty() {
+        tracing::warn!(path = %path.display(), "no motion was copied for this frame");
+        return Ok(());
+    }
+    let padded_row =
+        RenderDevice::align_copy_bytes_per_row(CAPTURE_W as usize * MOTION_TEXEL_BYTES);
+    let picture = MotionPicture::from_padded(CAPTURE_W, CAPTURE_H, padded_row, raw)
+        .ok_or_else(|| "the motion readback does not hold the picture's size".to_owned())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, picture.to_bytes()).map_err(|e| e.to_string())
 }
 
 /// Strip the 256-byte row padding from the raw readback bytes and encode a PNG to `path`; the
@@ -3596,9 +3701,6 @@ impl render_graph::Node for ImageCopyDriver {
             let Some(src_image) = gpu_images.get(&image_copier.src_image) else {
                 continue;
             };
-            let mut encoder = render_context
-                .render_device()
-                .create_command_encoder(&CommandEncoderDescriptor::default());
             let block_dimensions = src_image.texture_format.block_dimensions();
             let Some(block_size) = src_image.texture_format.block_copy_size(None) else {
                 continue;
@@ -3610,7 +3712,15 @@ impl render_graph::Node for ImageCopyDriver {
             else {
                 continue;
             };
-            encoder.copy_texture_to_buffer(
+            // ★ THE COPY RIDES THE FRAME'S OWN COMMANDS (2026-09-29, the temporal path's T1): it is
+            // recorded into the graph's own encoder, after the camera driver, so the queue runs it
+            // after this frame's passes and it copies THIS frame's pixels. The headless example's own
+            // encoder, submitted at once, ran BEFORE the frame's passes, so every capture held the
+            // frame before its stamp. MEASURED on the turning leg (2026-09-29): in all 30
+            // pairs of consecutive frames, the SECOND frame's probe matched the FIRST frame's depth
+            // exactly (0 ground pixels off; the depth copied in the frame's own stream, T1), and
+            // missed its own frame's depth by 25–121 ground pixels along every ridge.
+            render_context.command_encoder().copy_texture_to_buffer(
                 src_image.texture.as_image_copy(),
                 TexelCopyBufferInfo {
                     buffer: &image_copier.buffer,
@@ -3622,10 +3732,6 @@ impl render_graph::Node for ImageCopyDriver {
                 },
                 src_image.size,
             );
-            let Some(render_queue) = world.get_resource::<RenderQueue>() else {
-                continue;
-            };
-            render_queue.submit(std::iter::once(encoder.finish()));
         }
         Ok(())
     }

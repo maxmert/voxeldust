@@ -48,8 +48,11 @@ use vd_bins::{
     dev_auth_pubkey_hex, dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows,
     orchestrator_env, realm_store_path, reap_forked, reserve_tcp_addr, reserve_udp_addr,
 };
-use vd_client_harness::capture::{capture_rel_path, probe_rel_for, state_rel_for};
+use vd_client_harness::capture::{capture_rel_path, motion_rel_for, probe_rel_for, state_rel_for};
 use vd_client_harness::manifest::CaptureKind;
+use vd_client_harness::motion_census::{
+    MotionPicture, TRUTH_RESIDUAL_PX, TRUTH_SHARE, TruthFrame, TruthRead, motion_truth,
+};
 use vd_client_harness::pop::{Frame, PairRead, frame_camera, judge_pair, sum_reads};
 use vd_core::EntityId;
 use vd_core::entity_kind::EntityKind;
@@ -620,6 +623,17 @@ struct LegRead {
     pop_pairs: u64,
     pop_skipped: u64,
     pop: PairRead,
+    /// ★ THE MOTION TRUTH across the leg's pairs (the temporal path's T1, G-MOTION-TRUTH): the pairs
+    /// whose second frame carried its motion (a flight under the motion prepass), and the still
+    /// ground's residual against the pop detector's reprojection, summed.
+    motion_pairs: u64,
+    motion: TruthRead,
+    /// ★ THE PAIRS WHOSE OWN MOTION IS NOT TRUE: each pair is judged alone as well, because a frame
+    /// whose motion is wrong is a defect however few frames share it. MEASURED (2026-09-29, the
+    /// design's control 1 at 240 m/s): the engine's own rule put up to 8.7 px on the chunks that came
+    /// into view at the picture's bottom edge in two pairs, which the leg's pooled share hid in two
+    /// flights of three.
+    motion_untrue_pairs: Vec<String>,
     /// ★ THE SKY JUDGE across the leg's pairs (S7): the pairs read, the widest channel step over
     /// the sky's pixels, how many pairs stepped past the law's allowance, and the largest
     /// allowance the law gave (the eye's largest step between two frames).
@@ -662,12 +676,14 @@ struct LegRead {
     gw_parts: (GatewayParts, GatewayParts),
 }
 
-/// One recorded frame of a pair, read back from the run: its picture, its probe and its stamp.
+/// One recorded frame of a pair, read back from the run: its picture, its probe, its stamp, and
+/// its motion when the flight drew one (T1).
 struct PairFrame {
     rgba: image::RgbaImage,
     probe: image::RgbaImage,
     stamp: vd_devproto::DevTerrainStamp,
     capture_frame: Option<u64>,
+    motion: Option<MotionPicture>,
 }
 
 fn pair_frame(run: &Path, label: &str, index: u32) -> Option<PairFrame> {
@@ -676,11 +692,15 @@ fn pair_frame(run: &Path, label: &str, index: u32) -> Option<PairFrame> {
     let probe = image::open(run.join(probe_rel_for(&rel))).ok()?.to_rgba8();
     let state: DevState =
         serde_json::from_str(&std::fs::read_to_string(run.join(state_rel_for(&rel))).ok()?).ok()?;
+    let motion = std::fs::read(run.join(motion_rel_for(&rel)))
+        .ok()
+        .and_then(|bytes| MotionPicture::from_bytes(&bytes).ok());
     Some(PairFrame {
         rgba,
         probe,
         capture_frame: state.capture_frame,
         stamp: state.terrain_stamp?,
+        motion,
     })
 }
 
@@ -786,11 +806,16 @@ struct SkyRead {
     allowed_max: f64,
 }
 
-fn judge_pairs(pairs: &[(PathBuf, String)]) -> (u64, u64, PairRead, SkyRead) {
+/// The pairs judged, the pairs left out, the pop detector's sum, the sky judge, and the motion truth
+/// (the pairs that carried a motion, and their sum).
+type PairsRead = (u64, u64, PairRead, SkyRead, (u64, TruthRead, Vec<String>));
+
+fn judge_pairs(pairs: &[(PathBuf, String)]) -> PairsRead {
     let cell = |rung: u8| f64::from(vd_seed::ladder::cell_m(rung));
     let mut reads = Vec::new();
     let mut sky = SkyRead::default();
     let mut skipped = 0u64;
+    let mut truth = (0u64, TruthRead::default(), Vec::new());
     for (run, label) in pairs {
         let (Some(a), Some(b)) = (pair_frame(run, label, 0), pair_frame(run, label, 1)) else {
             skipped += 1;
@@ -824,6 +849,29 @@ fn judge_pairs(pairs: &[(PathBuf, String)]) -> (u64, u64, PairRead, SkyRead) {
         let (w, h) = (w as usize, h as usize);
         let (fa, fb) = (frame_of(&a, w, h), frame_of(&b, w, h));
         reads.push(judge_pair(&fa, &fb, &cell));
+        // ★ THE MOTION TRUTH (T1): the second frame's still ground against the reference through
+        // the first frame's camera.
+        if let Some(motion) = &b.motion {
+            let now = TruthFrame {
+                probe: b.probe.as_raw(),
+                motion,
+                camera: fb.camera,
+            };
+            let pair = motion_truth(&fa.camera, &now, &cell);
+            if !pair.meets_target() {
+                truth.2.push(format!(
+                    "{label}: {:.3} px under which {TRUTH_SHARE} of {} still pixels stand (the \
+                     worst {:.3} px), {:.3} px for {} new-chunk pixels",
+                    pair.still.at(TRUTH_SHARE),
+                    pair.still.judged,
+                    pair.still.worst_px,
+                    pair.new_rows.at(TRUTH_SHARE),
+                    pair.new_rows.judged
+                ));
+            }
+            truth.0 += 1;
+            truth.1 = truth.1.plus(&pair);
+        }
         if let Some((step, allowed)) = judge_sky_pair(&a, &b, w, h) {
             sky.pairs += 1;
             sky.widest = sky.widest.max(step);
@@ -837,7 +885,7 @@ fn judge_pairs(pairs: &[(PathBuf, String)]) -> (u64, u64, PairRead, SkyRead) {
             }
         }
     }
-    (reads.len() as u64, skipped, sum_reads(&reads), sky)
+    (reads.len() as u64, skipped, sum_reads(&reads), sky, truth)
 }
 
 /// Which hull legs this flight runs (`VD_LEGS`): the indices into [`HULL_LEG_MPS`], and whether the
@@ -1404,7 +1452,10 @@ fn read_band(
     read.gw_forced = (forced_start, forced_end);
     read.gw_deferred = (deferred_start, deferred_end);
     read.gw_parts = (parts_start, gateway_parts(gw_admin));
-    let (judged, skipped, pop, sky) = judge_pairs(&pairs);
+    let (judged, skipped, pop, sky, (motion_pairs, motion, untrue_pairs)) = judge_pairs(&pairs);
+    read.motion_pairs = motion_pairs;
+    read.motion = motion;
+    read.motion_untrue_pairs = untrue_pairs;
     read.sky_pairs = sky.pairs;
     read.sky_widest = sky.widest;
     read.sky_over = sky.over;
@@ -1641,6 +1692,33 @@ fn read_band(
             .map(|b| (b.finer, b.crossed, b.over_floor, b.widest))
             .collect::<Vec<_>>()
     );
+    if read.motion_pairs > 0 {
+        let m = &read.motion;
+        eprintln!(
+            "terrain_moving_eye/{leg}: THE MOTION TRUTH — {} pairs, {} still ground pixels judged: \
+             {:.3} px under which {TRUTH_SHARE} of them stand (the target {TRUTH_RESIDUAL_PX} px), \
+             the worst {:.3} px; THE NEW CHUNKS' still pixels: {} judged, {:.3} px under which \
+             {TRUTH_SHARE} of them stand, the worst {:.3} px ({} of their pixels moving); left out: \
+             {} moving, {} nearer than the reference's limit (which reached {:.0} m), {} behind the \
+             last eye, {} with no motion written",
+            read.motion_pairs,
+            m.still.judged,
+            m.still.at(TRUTH_SHARE),
+            m.still.worst_px,
+            m.new_rows.judged,
+            m.new_rows.at(TRUTH_SHARE),
+            m.new_rows.worst_px,
+            m.new_moving,
+            m.moving,
+            m.near,
+            m.limit_m,
+            m.behind,
+            m.uncovered
+        );
+        for pair in &read.motion_untrue_pairs {
+            eprintln!("terrain_moving_eye/{leg}: A PAIR'S MOTION IS NOT TRUE — {pair}");
+        }
+    }
     read
 }
 
@@ -2635,6 +2713,35 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         report_leg(leg, read);
     }
     assert_band_complete("walk", &walk);
+    // ★ G-MOTION-TRUTH (the temporal path's T1): on every leg that recorded the motion (a flight under
+    // the motion prepass), the still ground's residual meets the proposed target over the leg AND in
+    // every pair alone. A flight without the motion reads nothing here.
+    let untrue: Vec<String> = std::iter::once(("walk", &walk))
+        .chain(reads.iter().map(|(leg, read)| (leg.as_str(), read)))
+        .filter(|(_, read)| read.motion_pairs > 0)
+        .flat_map(|(leg, read)| {
+            let pooled = (!read.motion.meets_target()).then(|| {
+                format!(
+                    "{leg}: {:.3} px under which {TRUTH_SHARE} of {} still ground pixels stand, \
+                     and {:.3} px for {} still pixels of chunks new in their frame",
+                    read.motion.still.at(TRUTH_SHARE),
+                    read.motion.still.judged,
+                    read.motion.new_rows.at(TRUTH_SHARE),
+                    read.motion.new_rows.judged
+                )
+            });
+            pooled.into_iter().chain(
+                read.motion_untrue_pairs
+                    .iter()
+                    .map(move |pair| format!("{leg}, the pair {pair}")),
+            )
+        })
+        .collect();
+    assert!(
+        untrue.is_empty(),
+        "THE MOTION IS NOT TRUE (G-MOTION-TRUTH, the target {TRUTH_RESIDUAL_PX} px): {}",
+        untrue.join("; ")
+    );
     eprintln!(
         "terrain_moving_eye: THE BAND HELD on every frame of the walk — {walk:?}; the hull \
          legs read {reads:?}"

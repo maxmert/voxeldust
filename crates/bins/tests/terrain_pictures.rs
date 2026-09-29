@@ -53,7 +53,9 @@ use vd_bins::{
 use vd_client::chunks::eye_surface;
 use vd_client::ladder_view::{in_fade_band, rung_for_distance};
 use vd_client_harness::assert::magenta_pixel_count;
-use vd_client_harness::capture::{probe_rel_for, state_rel_for};
+use vd_client_harness::capture::{motion_rel_for, probe_rel_for, state_rel_for};
+use vd_client_harness::motion_census::MotionPicture;
+use vd_client_harness::picture_census::{CensusFrame, PROBE_RUNGS, SENTINEL_RGB8, picture_census};
 use vd_client_harness::probe::{
     PROBE_KIND_NONE, PROBE_KIND_RULER, PROBE_KIND_TERRAIN, decode_probe, equivalent_radius_px,
     ground_holes, horizon_m, probe_blob, probe_share_in_rows,
@@ -213,6 +215,258 @@ const PICTURE_FREEZE_ENV: &str = "VD_PICTURE_FREEZE";
 /// AN ABLATION FLIGHT (D8-8): with this set the census prints and the stand ends — no picture
 /// judgement, no compare, the owner's pictures untouched. Never set by a gate.
 const PICTURE_CENSUS_ONLY_ENV: &str = "VD_PICTURE_CENSUS_ONLY";
+/// ★ THE PICTURE CENSUS FLIGHT (the temporal path's T0 item 2 and M-3; G-PICTURE-HOLES). With the
+/// renderer's sentinel switch set, every stand's picture keeps the census's sentinel (pure cyan)
+/// wherever no geometry wrote a colour, and the flight reads the PICTURE CAMERA's own holes: the
+/// holes that the probe cannot see, for example a hole of the main pass's depth test against the
+/// prepass. The sky shows the sentinel, so a census flight judges no look. It is census-only, and
+/// the owner's pictures stay untouched. `just picture-census` sets the switches; the picture gate
+/// never sets them.
+const SENTINEL_ENV: &str = "VD_CLEAR_SENTINEL";
+/// THE CENSUS'S CONTROL (the design's): the rung whose chunks the prepass draws one depth step
+/// nearer than the main pass does (the terrain's own switch). With it set, a stand that shows the
+/// rung must count holes on it, or the flight's zero proves nothing. `just picture-census-control`.
+const CENSUS_CONTROL_RUNG_ENV: &str = "VD_CENSUS_CONTROL_RUNG";
+/// The stands whose census read the control's holes on the control's rung.
+static CONTROL_READ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The stands whose census failed, judged together at the flight's end, so that one flight reads
+/// every stand (M-3 wants the whole table).
+static CENSUS_FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// ★ THE MOTION PREPASS (the temporal path's T1): the renderer's switch. Under it every capture
+/// writes its motion and depth beside the picture, and a census flight also reads the motion census
+/// (G-MOTION-COVERAGE: no pixel that holds a depth keeps the motion sentinel).
+const PREPASS_ENV: &str = "VD_PREPASS";
+/// The stands whose motion census counted the control's pixels (the control writes the sentinel).
+static MOTION_CONTROL_READ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The stands whose motion census failed, judged together at the flight's end.
+static MOTION_FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether the ground writes its motion in this flight: the motion prepass is on.
+fn motion_flight() -> bool {
+    std::env::var(PREPASS_ENV).is_ok_and(|v| v.trim() == "1")
+}
+
+/// Whether this flight is a picture census: the renderer's sentinel switch is set.
+fn census_flight() -> bool {
+    std::env::var(SENTINEL_ENV).is_ok_and(|v| v.trim() == "1")
+}
+
+/// Whether the stands skip every look judgement: an ablation flight, or a census flight (whose sky
+/// is the sentinel).
+fn census_only() -> bool {
+    std::env::var_os(PICTURE_CENSUS_ONLY_ENV).is_some() || census_flight()
+}
+
+/// The control's rung, when the control is set.
+fn census_control_rung() -> Option<usize> {
+    std::env::var(CENSUS_CONTROL_RUNG_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+}
+
+/// A table by rung as `rung:count` pairs, with the empty rungs left out.
+fn by_rung(table: &[u64; PROBE_RUNGS]) -> String {
+    table
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n > 0)
+        .map(|(rung, n)| format!("{rung}:{n}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// THE STAND IS STILL: after the pending count reads zero, two readings a second apart must agree.
+/// Both read nothing pending and the same count of chunks drawn, and in both the body under the eye
+/// builds on what it states: the data it states is the data the lane holds (both none while the
+/// body is not solved yet, when the lane builds on the recipe's own ground).
+/// - MEASURED (2026-09-29, the picture census's control flight): a new capture client read "nothing
+///   pending" with 18 chunks drawn, because the home planet stated data that the client did not hold
+///   yet, so its lane built nothing for the planet (the hill stand "filled in 0.0 s"). The capture at
+///   its tick then drew 11 917 chunks, but the stand's count read 18, and the ladder's minimum failed
+///   on a stand that held the ladder.
+/// - MEASURED (the next two flights): a rule that waits for no refused request at all never settles on
+///   the seam stand, whose 12 requests for two far planets' data are refused on every frame (the owed
+///   far-planet pop-in, DEFERRED); and a rule that waits for the home planet's data never settles on
+///   the ground stand, captured before the planet's first solve (about 205 s on a fresh fixture).
+const STILL_POLL_MS: u64 = 1_000;
+
+/// Waits until the stand holds still ([`STILL_POLL_MS`]), and returns the chunks it draws then.
+fn await_still(devctl: u16, name: &str) -> u64 {
+    let deadline = Instant::now() + Duration::from_millis(TERRAIN_WAIT_TICKS * 1_000 / 20);
+    let mut previous: Option<u64> = None;
+    loop {
+        let st = vd_bins::pixel::poll(devctl);
+        let stamp = st
+            .terrain_stamp
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name}: no terrain stamp while the stand settles"));
+        let builds_on_stated = stamp.artifact_expected == stamp.artifact_held;
+        let quiet = (stamp.chunks_pending == 0) & builds_on_stated;
+        if quiet & (previous == Some(st.terrain_chunks_drawn)) {
+            return st.terrain_chunks_drawn;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{name}: the stand never held still: {} pending, the body states {:?} and the lane \
+             holds {:?}, {} drawn",
+            stamp.chunks_pending,
+            stamp.artifact_expected,
+            stamp.artifact_held,
+            st.terrain_chunks_drawn
+        );
+        previous = quiet.then_some(st.terrain_chunks_drawn);
+        std::thread::sleep(Duration::from_millis(STILL_POLL_MS));
+    }
+}
+
+/// ★ THE MOTION CENSUS OF ONE STAND (T1, G-MOTION-COVERAGE), and its verdict:
+/// - the motion file beside the picture reads, at the picture's size;
+/// - some pixel holds a depth (a census that sees no surface proves nothing);
+/// - where a pixel holds no depth, the sentinel shows (else the stated sentinel is not the stored
+///   clear value, and a zero is empty);
+/// - without the control, NO pixel that holds a depth keeps the sentinel;
+/// - with the control, the control's rung writes the sentinel, and a stand counts such pixels.
+///
+/// Example: on the hill stand every ground pixel holds a depth and the ground's prepass writes its
+/// motion; a lit body drawn by a material with no prepass would keep the sentinel over its depth, and
+/// the verdict would count its pixels.
+fn motion_verdict(name: &str, path: &Path, w: usize, h: usize) {
+    let bytes = std::fs::read(path)
+        .unwrap_or_else(|e| panic!("{name}: read the motion file {}: {e}", path.display()));
+    let picture = MotionPicture::from_bytes(&bytes)
+        .unwrap_or_else(|e| panic!("{name}: the motion file does not read: {e:?}"));
+    assert_eq!(
+        (picture.width as usize, picture.height as usize),
+        (w, h),
+        "{name}: the motion is the picture's size"
+    );
+    let read = picture.census();
+    let empty = (w * h) as u64 - read.held;
+    eprintln!(
+        "terrain_pictures/{name}: MOTION CENSUS — {} of {} pixels that hold a depth keep the \
+         sentinel (the first at {:?}); {} of {empty} pixels without a depth keep it",
+        read.uncovered, read.held, read.first_uncovered, read.sentinel_sky
+    );
+    assert!(
+        read.held > 0,
+        "{name}: no pixel holds a depth, so the motion census proves nothing"
+    );
+    assert!(
+        (empty == 0) | (read.sentinel_sky > 0),
+        "{name}: none of {empty} pixels without a depth keeps the motion sentinel: the motion \
+         target did not clear to it"
+    );
+    let failure = match census_control_rung() {
+        None => (read.uncovered > 0).then(|| {
+            format!(
+                "{name}: A DRAWN THING WROTE NO MOTION — {} pixels hold a depth and keep the \
+                 motion sentinel (the first at {:?})",
+                read.uncovered, read.first_uncovered
+            )
+        }),
+        Some(rung) => {
+            if read.uncovered > 0 {
+                MOTION_CONTROL_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            eprintln!(
+                "terrain_pictures/{name}: THE MOTION CONTROL — rung {rung} writes the sentinel: {} \
+                 pixels counted",
+                read.uncovered
+            );
+            None
+        }
+    };
+    if let Some(failure) = failure {
+        eprintln!("terrain_pictures/{failure}");
+        MOTION_FAILED
+            .lock()
+            .expect("the motion verdicts")
+            .push(failure);
+    }
+}
+
+/// THE PICTURE CENSUS OF ONE STAND, and its verdict (the two preconditions at once; the holes and
+/// the control at the flight's end):
+/// - the census judged ground pixels (a census that judges none proves nothing);
+/// - where the stand shows sky, the sky shows the sentinel (else the stated sentinel is not the
+///   stored clear colour, and a zero is empty);
+/// - without the control, NO HOLE: the target of G-PICTURE-HOLES;
+/// - with the control, a stand that judges pixels of the control's rung counts holes on it.
+///
+/// Example: on the ground stand the pilot looks along the home planet's surface at a cyan sky. With
+/// the prepass on, a rung whose chunks the main pass refuses shows cyan patches on the ground, and
+/// the verdict names the rung.
+fn census_verdict(name: &str, rgba: &[u8], probe: &[u8], w: usize, h: usize) {
+    let frame = CensusFrame {
+        rgba,
+        probe,
+        width: w,
+        height: h,
+    };
+    let read = picture_census(&frame, SENTINEL_RGB8).unwrap_or_else(|| {
+        panic!("{name}: the census reads one picture and one probe of one size")
+    });
+    eprintln!(
+        "terrain_pictures/{name}: PICTURE CENSUS — {} holes in {} blobs over {} judged ground \
+         pixels (judged by rung [{}], holes by rung [{}]); the largest blob {:?}; the first holes \
+         {:?}; {} sentinel pixels on a silhouette's edge; {} of {} sky pixels show the sentinel",
+        read.holes,
+        read.blobs,
+        read.interior,
+        by_rung(&read.interior_by_rung),
+        by_rung(&read.holes_by_rung),
+        read.largest,
+        read.first_holes,
+        read.edge_sentinel,
+        read.sky_sentinel,
+        read.sky
+    );
+    assert!(
+        read.interior > 0,
+        "{name}: the census judged no ground pixel, so its count proves nothing"
+    );
+    assert!(
+        (read.sky == 0) | (read.sky_sentinel > 0),
+        "{name}: none of {} sky pixels shows the sentinel {SENTINEL_RGB8:?}: the picture did not \
+         clear to it (set {SENTINEL_ENV}=1 and VD_SKY=0)",
+        read.sky
+    );
+    let failure = match census_control_rung() {
+        None => (read.holes > 0).then(|| {
+            format!(
+                "{name}: THE PICTURE CAMERA HAS HOLES — {} ground pixels keep the sentinel where \
+                 the probe draws ground (by rung [{}])",
+                read.holes,
+                by_rung(&read.holes_by_rung)
+            )
+        }),
+        Some(rung) => {
+            let judged = read.interior_by_rung.get(rung).copied().unwrap_or(0);
+            let holes = read.holes_by_rung.get(rung).copied().unwrap_or(0);
+            eprintln!(
+                "terrain_pictures/{name}: THE CONTROL — rung {rung}: {holes} holes of {judged} \
+                 judged pixels"
+            );
+            if (judged > 0) & (holes > 0) {
+                CONTROL_READ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            ((judged > 0) & (holes == 0)).then(|| {
+                format!(
+                    "{name}: THE CONTROL FAILS — the prepass drew rung {rung} one depth step \
+                     nearer, and the census counts no hole among its {judged} judged pixels"
+                )
+            })
+        }
+    };
+    if let Some(failure) = failure {
+        eprintln!("terrain_pictures/{failure}");
+        CENSUS_FAILED
+            .lock()
+            .expect("the census verdicts")
+            .push(failure);
+    }
+}
 /// The GPU's busy share: readings and their spacing.
 const GPU_SAMPLES: u32 = 10;
 const GPU_SAMPLE_GAP_MS: u64 = 200;
@@ -669,8 +923,8 @@ fn take_picture(
         matches!(settled, DevResponse::State { .. }),
         "{name}: the terrain never settled: {settled:?}"
     );
+    let last = await_still(devctl, name);
     let fill_s = fill_started.elapsed().as_secs_f64();
-    let last = vd_bins::pixel::poll(devctl).terrain_chunks_drawn;
     // THE FRAME RATE on the still stand (M8-2): the renderer's own frame counter over a timed
     // interval, read from the stamp.
     let frames_at = |devctl: u16| {
@@ -800,11 +1054,17 @@ fn take_picture(
              over {GPU_SAMPLES} readings"
         );
     }
-    if std::env::var_os(PICTURE_CENSUS_ONLY_ENV).is_some() {
+    if census_only() {
         eprintln!(
             "terrain_pictures/{name}: CENSUS ONLY — the picture's judgements and the compare are \
-             skipped (an ablation flight)"
+             skipped (an ablation flight or a picture census)"
         );
+        if census_flight() {
+            census_verdict(name, &rgba, &probe, w, h);
+            if motion_flight() {
+                motion_verdict(name, &f.cwd.join(motion_rel_for(&rel)), w, h);
+            }
+        }
         return (last, 0.0);
     }
     // WHERE THE FOOTPRINT GOES: the tool's largest categories (the GPU's buffers on unified
@@ -1591,8 +1851,8 @@ fn take_far_picture(
         matches!(settled, DevResponse::State { .. }),
         "{name}: the terrain never settled: {settled:?}"
     );
+    let last = await_still(devctl, name);
     let fill_s = fill_started.elapsed().as_secs_f64();
-    let last = vd_bins::pixel::poll(devctl).terrain_chunks_drawn;
     let capture_tick = CAPTURE_TICK_GRID * (pic.agent_index + 1);
     while vd_bins::pixel::poll(devctl).universe_tick.unwrap_or(0) + CAPTURE_ASK_AHEAD_TICKS
         < capture_tick
@@ -1630,6 +1890,17 @@ fn take_far_picture(
         .clone()
         .unwrap_or_else(|| panic!("{name}: the stamp is on the state file"));
     eprintln!("terrain_pictures/{name}: stamp {stamp:?}");
+    // A census flight judges no look and never writes the owner's pictures (the frozen stands'
+    // rule): the census, then the stand ends.
+    if census_only() {
+        if census_flight() {
+            census_verdict(name, &rgba, &probe, w, h);
+            if motion_flight() {
+                motion_verdict(name, &f.cwd.join(motion_rel_for(&rel)), w, h);
+            }
+        }
+        return last;
+    }
     // 1. THE GLOBE IS DRAWN, AND IT IS THE RECIPE'S OWN: the probe's terrain pixels as an
     //    equivalent disc, against the radius the stand was built for.
     let terrain = probe_blob(&probe, w, PROBE_KIND_TERRAIN);
@@ -1650,7 +1921,9 @@ fn take_far_picture(
     //    is not.
     let holes = ground_holes(&probe, w, h);
     eprintln!(
-        "terrain_pictures/{name}: {} hole pixels under drawn ground, {} in blocks (REPORTED: at          this stand the sky under the globe reads as a hole, so the count is a reading, never a          verdict)",
+        "terrain_pictures/{name}: {} hole pixels under drawn ground, {} in blocks (REPORTED: at \
+         this stand the sky under the globe reads as a hole, so the count is a reading, never a \
+         verdict)",
         holes.pixels, holes.blocks
     );
     // 3. THE REFERENCE. ★ ACCEPTED (the owner's word, 2026-09-19: "freeze all the sky pictures"):
@@ -2348,7 +2621,8 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     // ★ THE HANDOVER (S6): the two pictures a handover flips between, from one stand, one tick
     // apart on the grid; their difference below the HUD is what the flip costs. A candidate:
     // reported, never red — past one channel step the second pass is owed (D-TERRAIN-6).
-    if let Some(h) = &handover {
+    // A census flight skips the handover: its two pictures go to the owner's candidate folder.
+    if let Some(h) = handover.as_ref().filter(|_| !census_only()) {
         let png_a = take_handover_picture(
             &f,
             a.gateway,
@@ -2450,6 +2724,46 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
          {orbit_chunks} chunks ({orbit_share:.3}), seam {seam_chunks} chunks ({seam_share:.3}), \
          far {far_chunks} chunks (a candidate stand, reported and never red)"
     );
+    // THE PICTURE CENSUS'S VERDICTS, every stand's together.
+    let census_failed = CENSUS_FAILED.lock().expect("the census verdicts");
+    assert!(
+        census_failed.is_empty(),
+        "THE PICTURE CENSUS FAILED on {} stand(s) (G-PICTURE-HOLES):\n{}",
+        census_failed.len(),
+        census_failed.join("\n")
+    );
+    drop(census_failed);
+    // THE MOTION CENSUS'S VERDICTS (T1, G-MOTION-COVERAGE), every stand's together, and its control.
+    let motion_failed = MOTION_FAILED.lock().expect("the motion verdicts");
+    assert!(
+        motion_failed.is_empty(),
+        "THE MOTION CENSUS FAILED on {} stand(s) (G-MOTION-COVERAGE):\n{}",
+        motion_failed.len(),
+        motion_failed.join("\n")
+    );
+    drop(motion_failed);
+    if let Some(rung) = census_control_rung().filter(|_| census_flight() & motion_flight()) {
+        let read = MOTION_CONTROL_READ.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "terrain_pictures: THE MOTION CONTROL — {read} stands counted rung {rung}'s pixels"
+        );
+        assert!(
+            read > 0,
+            "THE MOTION CONTROL WAS NOT READ: rung {rung} wrote the sentinel, and no stand's motion \
+             census counted a pixel"
+        );
+    }
+    // THE CENSUS'S CONTROL WAS READ: a control flight in which no stand showed the control's rung
+    // proves nothing, so it is red.
+    if let Some(rung) = census_control_rung().filter(|_| census_flight()) {
+        let read = CONTROL_READ.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("terrain_pictures: THE CONTROL — {read} stands counted holes on rung {rung}");
+        assert!(
+            read > 0,
+            "THE CONTROL WAS NOT READ: no stand judged a pixel of rung {rung}; choose a rung that \
+             the stands draw"
+        );
+    }
     let past = PAST_TOLERANCE.lock().expect("the verdicts");
     assert!(
         past.is_empty(),

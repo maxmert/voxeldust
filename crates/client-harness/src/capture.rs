@@ -102,6 +102,15 @@ pub fn probe_rel_for(rel_path: &str) -> String {
     format!("{stem}.probe.png")
 }
 
+/// THE MOTION BESIDE THE PICTURE (the temporal path's T1): `shots/foo.png` → `shots/foo.motion.bin`,
+/// the picture camera's motion target and depth ([`crate::motion_census::MotionPicture`]), by the
+/// probe's rule.
+#[must_use]
+pub fn motion_rel_for(rel_path: &str) -> String {
+    let stem = rel_path.strip_suffix(".png").unwrap_or(rel_path);
+    format!("{stem}.motion.bin")
+}
+
 /// Sanitize an agent-supplied name into a single SAFE path component: `[A-Za-z0-9_-]`
 /// kept, everything else (slashes, dots, spaces, …) mapped to `_`, and an empty result
 /// becomes `"capture"`. The ONE filename rule for everything an agent names on disk
@@ -270,6 +279,12 @@ mod tests {
             "runs/x/shots/ground.probe.png"
         );
         assert_eq!(probe_rel_for("weird"), "weird.probe.png");
+    }
+
+    #[test]
+    fn the_motion_sits_beside_its_picture() {
+        assert_eq!(motion_rel_for("shots/hero.png"), "shots/hero.motion.bin");
+        assert_eq!(motion_rel_for("weird"), "weird.motion.bin");
     }
 
     #[test]
