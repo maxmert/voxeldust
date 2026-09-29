@@ -223,6 +223,9 @@ and re-freeze the references under the owner's look. Whether it passes today is 
 
 ## 4. The gates of ruling B3
 
+★ **RULING B23 (2026-09-28): NO CAPS.** Every band in this table is now a READING that each step prints; a reading
+outside its band is reported and never stops a step by itself. The owner's look (G-LOOK) is the judge.
+
 | gate | state | last number |
 |---|---|---|
 | G-LAKE-SHARE | **RED since step 2b** (the owner's word owed, §11 item 10) | **4.828 %** of the land (every node that is not the ocean; MEASURED gen 21); 3.510 % at gen 20, 0.068 % at gen 19. The attribution, MEASURED by census runs with one change at a time (§7 W11): the water's tree over gen 20's own budget 3.510 %; + the cascade's steepest open side 4.162 %; + the flats swept from their drains 4.741 %; + the brim 4.828 % |
@@ -1096,6 +1099,27 @@ valley country, looking across it to a far range under a cloudy sky:
 **Example.** From the first reference's summit the pilot sees ranges; from this one she sees the valley country under
 it — the believability arc owes the valleys (R2, R3) and the water in them (steps 2–4); 8e and 8f owe the rest.
 
+★ **THE THIRD REFERENCE FRAME (the owner, 2026-09-28, ruling B23: *"this is the reference"*, with *"We need it very
+believable, but fully generated, not custom built, as all those laws should be applied to other planets and moons"*).**
+Kept outside the public repo like the first two (`/Users/maxim/Downloads/Everything-we-Know-About-Crimson-Desert-Featured.webp`).
+An eye a little over a forested hill looks across a green valley country to far ranges under a blue sky with cumulus.
+The distances are ESTIMATED from the picture, not measured:
+- **near (to ~2 km)**: forest as dense masses with clearings; grass slopes with pale boulders and bare rock where the
+  soil is thin; a small pond; tracks; fields in rows along the contours, a castle gate, a village and a white walled town
+  (built things, not terrain: players build them);
+- **middle (~2–20 km)**: rolling forested hills a few hundred metres over their valleys; RED-BED BADLANDS — mesas, buttes
+  and tall thin rock pillars with near-vertical faces; a dark, jagged rocky ridge with forest on its lower slopes;
+- **far (~20–60 km)**: a snow-covered alpine range with sharp peaks (left); a hazy blue range with a steep-sided massif
+  (right); the haze grows with distance;
+- **what it teaches**: four ground provinces stand within one view — a humid forested lowland, red layered rock cut into
+  towers, a dark crystalline ridge, and an alpine range over the snow line. So the provinces, the rock beds and the
+  climate must change on a scale of tens of kilometres, and the laws (not a painter) must make each of them;
+- **what it has and we lack today**: forest and grass, rock colours by rock kind, bare rock where the soil is thin, the
+  rock pillars and mesas (8f), the snow on the high range (8e reads the ice bit), the pond (the water fill), the clouds.
+
+**Example.** The picture's red pillars come from a hard cap over soft beds, cut by water; the same law rounds the granite
+hill under the eye, and on an airless moon it makes no pillars at all. That is the test ruling B23 sets for every law.
+
 **THE SKYLINE NUMBERS** (11_reference_trace's rule, per 60° of bearing):
 
 | reading | the reference | ours |
@@ -1278,3 +1302,8 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-09-27 — rulings B20 and B21: the owner's first look in the window; MEASURED a 208 m wall on the coast (the shore law lifts a LAND-word column whose ground stands 417 m under the sea by a quarter of that depth, beside a SEA-word column held down by the same; the fine surface is 35 m under the sea on both sides); the terrain's core share is half; THE ARC IS PAUSED: no new terrain rules, N2 parked, the ONE-VOLUME MODEL designed first (workflow `wf_a9730eb2-4b9`, `docs/investigation/2026-09-27/one_volume_design.md`).
 - 2026-09-28 — the one-volume design written (`docs/investigation/2026-09-27/one_volume_design.md`, two workflow runs: three designs, three reviews, 29 + second-round findings answered; performance budgets, the no-seam mechanisms and gates, the full laws table); ruling B22: THE NEW ORDER — (1) the old water and shore rules OFF (no water drawn), (2) speed with no world change (60 fps at full screen), (3) the ground with biomes, (4) the one-volume water fill (option (b)), (5) the edit system; this file's steps 3–7 now run inside (3) and (4).
 - 2026-09-28 — ruling B22 step 1 BUILT (generator 22; NOT committed): the old water and shore rules are OFF — the client draws no water sheet and cuts no sea floor, and the shore law leaves the column with its inputs (the side word, the column's water, the stencil hold, the coast bit's beach); the cell charter states no sea, so no cell is water; the column is the plain ground at every rung and the dry sea floor shows; the shard ships no coast mask and no pyramid water words; the solve, the artifact (digest unchanged, key generation 21, no re-solve) and its stored water data stand for the fill; the shore and sheet benches and `lake_census`'s rung-swap gates are deleted; the identity's measured half re-recorded (`0xb6f9_2217_376b_80de`), the golden fields unchanged; the items of §6 and §7 that name the shore law now describe code that is gone (DEFERRED "THE OLD WATER AND SHORE RULES ARE OFF").
+- 2026-09-28 — ruling B23: NO CAPS (§4: every band is a reading, never a stop; the clamps and ceilings inside the operators are listed by the ground step's design and go, or their law replaces them), THE THIRD REFERENCE FRAME (§9), and FULLY GENERATED laws judged on the home planet and on other real bodies (a planet, a moon); B22 step 1 committed as `ba2496b`; the owner flew the dry world with a re-rated test hull ("All works great (rungs and flying)").
+- 2026-09-28 — ruling B22 step 2 (SPEED) in progress, NOT committed (DEFERRED "THE SPEED STEP"): the descent on a builder, the stamp's heavy half only while a dev tool reads, the re-request that leaves the queue alone, the sealed hollows drawn as rock (the owner's cave question: 167 M → 81 M triangles on foot; the walk 23.7 → 37.3 frames a second headless; graphics memory 4.9 → 2.5–2.9 GB). MEASURED on the full-screen window: its frame time moves in whole 120 Hz steps (25.0 / 33.3 / 41.7 ms), and four times the draws cost nothing measurable with the looks off — the draw batches are not the lever; the four looks cost about 20 ms of the on-foot frame. The GPU's own clock (second design, two passes of its own) PROVED headless, then in the window: on foot at full screen the GPU works 32.25 ms a frame — the raymarched sky 9.7, MSAA 4× 10.5, bloom 4.6, shadows 4.2 (overlapping; 19 ms together), the ground and the rest 13.27 ms, the draws about 1.6 ms. The owner stopped the draw batches ("Clock, then the looks").
+- 2026-09-29 — THE TEMPORAL PATH DESIGNED (not built; the owner: probably not right away): `docs/investigation/2026-09-28/temporal_path_design.md` — a smaller drawn picture rebuilt over frames (our own reconstruction on FSR 2.2's structure), motion for every drawn thing, MSAA retired only after the owner's edge look; decisions D1–D4 asked. The speed slice's checks pass (lints in every feature set, tests, vd-client coverage 100 %); the owner's flight and word owed before the commit.
+- 2026-09-29 — ruling B24: BUILD THE TEMPORAL PATH (D1 yes; D2–D4 as the design recommends: T0 measure → T1 motion → T2 the first picture at the sizes that ship → T3 the one geometry pass after the edge look). T0 starts.
+- 2026-09-29 — the speed slice FLOWN by the owner ("All worked") and committed; the axes report measured (on foot the axes hold; the hull's rows drop a child's orientation — DEFERRED D-MOVE-2, owed); T0 of the temporal path next.

@@ -4985,6 +4985,71 @@ decide whether to re-send. That fingerprint IS S10 mechanism 2. The walk that fi
   - The server side already converted a facing at a crossing and derived yaw/pitch from it on
     arrival (`saga_arms.rs`, the walker's earlier fix); this round reused it, changed nothing there.
 
+- **STATUS 2026-09-28 — "W/S doesn't work in the Hull or as an occupant"** (the owner, after a window
+  flight at the home planet's pilot stand, with a hull berthed forty metres behind the stand). MEASURED
+  from the window's log and the planet's hand-off line. The force path is NOT at fault: the hull turned
+  the stick into a push, sent it up, and the planet integrated it (the owner's reminder the same hour:
+  *"to test we just pass forces, position is not calculated by hull"*). Three things came together:
+  1. **The hull's rating did not match the ladder.** The window starts in the NORMAL ladder, which asks
+     for 1e-13 to 1e-5 of the body's rating — sized for the star-system test hull (9e12 m/s²,
+     `examples/berth_hull.rs`). The session berthed the flight gate's hull (98.1 m/s²). Example: at
+     normal tier 10 the hull asks the planet for 0.001 m/s², and after sixty seconds it has moved 1.8 m,
+     less than its own width; at normal tiers 4 to 6 the push rounds to zero on the drive grid.
+  2. **On foot, `W`/`S`/`Space`/`Ctrl` walk at the ladder's fraction.** The walk commands
+     `t · v_foot · (v_cap/v_foot)^t`; at normal tier 10, `t` = 1e-5 and `v_foot` = 500 m/s, so the
+     occupant walks five millimetres a second.
+  3. **On foot, `A`/`D` are not throttled** (they are the hull's turn, which must run at the full rate),
+     so the sidestep asks `t` = 1: the realm's ceiling, 509 m/s from the first tick and rising by the
+     ramp. MEASURED: one tap moved the occupant 29.7 m forward and 4.2 m left in less than a second,
+     into the berthed hull, which boarded them (the planet's `HAND-OFF DOWN` line names the occupant at
+     (−5 938 209.16, −1 425 826.53, −1 724 730.61), thirty metres from the stand). The "fast observer" of
+     the first window flight on 2026-09-27 was the same sidestep.
+  Traps 1 and 2 are the two "not defects" of 2026-09-20 (the camera's-up entry); they came back because
+  the session berthed the gate's hull instead of the test hull. **INTERIM, no code: `X`** swaps to the
+  warp ladder (1e-5 to 1 of the rating), which fits both bodies at once — on foot tier 5 ≈ 0.8 m/s,
+  tier 6 ≈ 3 m/s, tier 7 ≈ 11 m/s, tier 8 ≈ 39 m/s; in the 98.1 m/s² hull tier 6 ≈ 0.6 m/s², tier 8 ≈
+  7.6 m/s², tier 10 = 98 m/s² (the gate's own full stick). On foot, `A`/`D` stay a 500 m/s jump.
+  FLOWN the same day (the owner: *"All works great (rungs and flying), but the throttle started to work
+  only on max tier + warp, and was super slow"*): ten gravities is too slow to judge the rungs over a
+  planet, so the owner's hull was RE-RATED IN PLACE as the test hull (9e12 m/s², 3 rad/s²; the planet
+  re-plants a hull at its berth row on every boot, so the berth and the facing stayed). The normal
+  ladder then flies it at every tier: tier 3 ≈ 54 m/s², tier 4 ≈ 420, tier 5 ≈ 3 200, tier 6 ≈ 25 000.
+  FLOWN on the re-rated hull (the owner: *"Perfect, works!"*): tiers 5 to 9 in the normal ladder, the hull
+  up to about 24 km over the ground within a minute, the planet's tick at about 0.1 ms throughout.
+  **THE CURE is the suit** (`owner_decisions_2026-09-05_suit.md`, deferred by the owner until after
+  blocks and terrain): the character's stick becomes a fraction of the suit's own rating, like the
+  hull's, so ONE meaning of the stick replaces the two laws that read it today (the walk's geometric
+  speed and the hull's linear push).
+- **STATUS 2026-09-29 — "the axes were broken - w do not point in front of the camera anymore"** (the
+  owner, flying the speed step's build; also *"In the first person view it also moved wrong way"*, *"And
+  it also happened in occupant mode"*). MEASURED, headless and with a read-only recorder beside the owner's
+  window (twice a second: the server's facing, the window camera, the realms' rows):
+  1. **ON FOOT THE AXES HOLD.** Headless: a 0.5 rad look turned the body exactly about the local vertical
+     (0.00°), and `W` then moved it exactly along the new facing (0.0°); 200 looks of 0.01 rad arrived as
+     2.0000 rad (nothing lost on the lane). In the window: the camera and the body agree within ~1° whenever
+     the mouse rests, and `W` moved the owner 10 m a sample at 0.01°. WHILE the mouse turns, the camera
+     leads the body by up to ~20° for 100–150 ms (the local view turns at once; the body follows through
+     the lane and the interpolation buffer — no client-side prediction, by the law), so a `W` pressed in
+     mid-turn goes a little behind the view.
+  2. **THE OWNER'S HULL LEFT THE PLANET.** Hull 7 was flown out of the planet's bound and adopted by the
+     star system, which now re-plants it under ITSELF at every boot (`exterior.rs`: the adopting realm
+     writes the berth row). A restart cannot bring it back; hull 8 (`--seq 8`, the 9e12 test rating) was
+     berthed at the same place, 40 m ahead of the gate's stand, UPRIGHT (the pilot's own attitude, as the
+     gate berths — hull 7's re-rate of 2026-09-28 had written the tool's default identity facing, a hull
+     lying 103° off the local vertical). The owner flew hull 8: *"All worked"*.
+  3. ★ **A CHILD'S ORIENTATION IS DROPPED FROM THE WINDOW'S ROWS** — `sim/src/stub/placement.rs`
+     `pose_of_row` writes `orient: DQuat::IDENTITY`, so every `RealmSnap` a realm ships for the windows
+     (`regions.rs` `snaps_for`) states each child's facing as the identity, while the placement itself
+     carries the berth facing and every turn (`placement_row`: `state.orient`, the berth's `facing`).
+     MEASURED: hull 8's row read `[0, 0, 0, 1]` in the owner's window while its berth facing was the
+     pilot's upright attitude. The view from INSIDE the hull is right — the gateway folds the parent through
+     the child's HOP, which keeps the orientation (MEASURED: the planet's facing in the hull's picture read
+     exactly the inverse of the berth facing) — but a hull seen from OUTSIDE is drawn unturned. The orbit
+     motions state the identity (`FramePlacement::moving`), so carrying `at.orientation` in `pose_of_row`
+     changes the hulls alone. OWED: that one line with a test that fails today, and a picture from a
+     second observer. Also owed: the berth tool's default facing (identity) should be the stand's upright
+     attitude, or refused without one.
+
 ### D-MOVE-5 🟥 A SIZE IS A PLAIN DECIMAL WHILE A POSITION IS ON A RULER — raised 2026-09-01 by the owner
 
 - **THE OBSERVATION (owner, 2026-09-01).** Reviewing why a built-realm record cannot promise total
@@ -8601,10 +8666,13 @@ Design: `docs/investigation/2026-09-08/landforms/slice_8s_design.md`; the owner'
 - **THE PATCHED ENGINE CRATE (`vendor/bevy_pbr/PATCH.md`).** A verbatim `bevy_pbr` 0.18.1 with the planet centre STATED
   (`Atmosphere::planet_center`) instead of fixed under the world origin. MISSING: the upstream pull request. WHEN: the patch
   dies at the Bevy upgrade gate (0.19) — either upstream carries the change by then or the copy is re-based once.
-- **TEMPORAL ANTI-ALIAS FOR THE FLIGHT.** The sky pass flattens a multisampled edge (one depth sample a pixel), so the
-  picture cameras run `Msaa::Off` + SMAA (owner's look, 2026-09-19: "the pixel edge of the terrain and the atmosphere").
-  SMAA is per-frame; TAA would be the flight's answer but is temporal (the picture gates compare frames) and the star
-  sprites carry no motion vectors (a custom vertex path). WHEN: the look after the freeze, with the motion vectors.
+- **TEMPORAL ANTI-ALIAS FOR THE FLIGHT.** ~~The sky pass flattens a multisampled edge (one depth sample a pixel), so the
+  picture cameras run `Msaa::Off` + SMAA~~ — ★ CORRECTED 2026-09-29 (the temporal-path design's review read the code): the
+  SMAA stage was taken out the same week — SMAA blended a third of the horizon's columns — and the vendored sky pass now
+  composites PER SAMPLE (`vendor/bevy_pbr/PATCH.md`, the second change), so the window runs the engine's multisampling
+  (4 samples) as its anti-alias; the headless picture cameras run `Msaa::Off`. The temporal answer is now DESIGNED:
+  `docs/investigation/2026-09-28/temporal_path_design.md` (motion for every drawn thing, the star sprites drawn after the
+  reconstruction, sharp; awaiting the owner's ruling). WHEN: by that design's slices, on the owner's word.
 - **THE CONTROL KNOB `VD_SKY_FLAT`.** A measurement knob that reproduces upstream's flat centre for G-SKY-CONTROL. It is
   never a mode anybody flies; it leaves with the patch.
 
@@ -10580,3 +10648,146 @@ updated in the same change as the work, deleted when done). The interims named h
   sea stood the dry floor falls away for kilometres; no water shows anywhere. WHERE: `crates/recipe/src/{height,plan}.rs`,
   `crates/terrain/src/{artifact,chunk,lattice,height,position,gpu,body,tag}.rs`, `crates/bins/src/artifact_source.rs`.
   WHEN: B22 step 4 (the one-volume water fill) states the water again.
+- 🟨 **THE SPEED STEP (ruling B22 step 2: 60 frames a second at FULL SCREEN, no stall, no world change)** (2026-09-28;
+  the owner: *"yes, start step 2"*). MEASURED FIRST, the moving-eye gate's walk, 240 m/s and 528 m/s legs, headless, 7
+  workers (`VD_LEGS=1,2`; the flight path now runs over the DRY SEA FLOOR 8 km under the stand, so the legs ask less
+  fine ground than a low flight over land would — a land leg is owed). The terrain's work on the MAIN thread, a frame
+  on average (worst frame): the DESCENT 2.07 (21.8) / 14.75 (52.3) / 8.30 (19.6) ms — it ran about 3.5 times a frame,
+  because every far planet moves on its orbit and asks its own; the release-and-request walk 1.76 / 1.59 / 0.92 ms;
+  the stamp 7.70 / 7.27 / 5.59 ms (the capture assembles it every frame, with the ruler's two marches, which only the
+  capture runs); the placement 0.10–0.19 ms. The headless frame rate 23.7 / 28.9 / 43.7 frames a second, the worst
+  frame 110 / 173 / 40 ms. At 240 m/s the band went incomplete on 331 frames (1 011 urgent chunks at the worst): the
+  builders made 194 chunks a second at 31.7 ms of wall time each, the parent waits included (7 106 parent builds and
+  3 237 waits for about 11 700 chunks).
+  BUILT (NOT committed; each measured by the same legs, one change at a time):
+  (1) THE DESCENT ON A BUILDER (the one-volume design's lever E8(a); `client-render/src/terrain.rs`: `DescentJob`,
+  `DescentSeam`, `next_work`, `ViewSlot`): the view — its spans, kept and culled columns — goes to a worker WITH the
+  job and comes back with the wanted set; a worker takes a waiting descent before any chunk; at most one descent of a
+  realm is away (the view is its token); the main thread keeps the set in force until the answer lands, and judges
+  the move again the frame it lands. MEASURED: the main thread's descent 2.07 → 0.04, 14.75 → 0.20, 8.30 → 0.07 ms
+  a frame (worst 52.3 → 2.3 ms at 240 m/s); the headless frame rate 23.7 → 23.6, 28.9 → 37.6, 43.7 → 51.5; the band
+  as before (the same throughput wall at 240 m/s, no new gap); the pop detector within its run-to-run spread. ★ THE
+  WAIT IS BOUNDED BY THE SLACK: the held horizon slides at most 0.2678 of itself a second and the descent follows
+  within the bracket (a tenth), so the slack's 14.5 % leaves 4.5 %: an answer may land up to 0.168 s after its send
+  (`DESCENT_WAIT_BOUND_S` = 0.15). MEASURED worst wait 21.6 / 125.7 / 26.6 ms — at 240 m/s within 25 ms of the bound;
+  a worker on an efficiency core runs a cold descent slower than the main thread did (the design's question 14: may
+  the builders ask for the fast cores).
+  (2) THE STAMP'S HEAVY HALF ONLY WHILE A DEV TOOL READS (lever E8(d)): the dev-control listener counts its state
+  reads (`Handles::stamp_reads`); the window assembles the band's gap walks, the named lists and the hole instrument
+  only within `STAMP_READER_WINDOW_S` (0.25 s) of a read; the panel's summary (the ground, the rungs, the counts, the
+  star, the ruler) whatever it says; the capture every frame (`Terrain::with_reader_always`). The lane's lists are
+  taken on every assembly, so they never grow. MEASURED (the capture, read always): the gap walks 0.36–0.61 ms and the
+  rest of the stamp 5.05–7.13 ms a frame, named apart (`stamp_gap`, `stamp`); the window's own saving is the
+  full-screen bench's to measure.
+  (3) A RE-REQUEST AT THE SAME PRIORITY LEAVES THE QUEUE ALONE (`vd_client::chunks::ChunkLane::request`: the pending
+  map holds each job's last priority): the engine asks for every wanted chunk not yet resident on every frame, and
+  each ask of a waiting job was a lock of the workers' queue and a move inside it (up to 2 395 waiting jobs at
+  240 m/s). The walk is timed in two pieces now, `release` 0.43–1.00 ms and `request` 0.53–1.00 ms a frame.
+  (4) THE FULL-SCREEN BENCH'S SWITCHES (`VD_WINDOW_FULLSCREEN`, `VD_WINDOW_MSAA`, `VD_WINDOW_BLOOM`): measurement
+  switches, none a product setting.
+  ★ THE FULL-SCREEN WINDOW, MEASURED (2026-09-28, the owner's word; release binaries with (1)–(3), the window full
+  screen over the owner's display, 3 456 × 2 168 pixels drawn, still stands, 12 samples a mode): paced (the owner's
+  experience) ON FOOT 26.7 frames a second, 6 374 km 40.8, 11 497 km 58.4, 16 952 km 58.3; the unpaced work 37.5 /
+  20.6 / 16.9–18.2 (the window's height changed between runs there: noisy) / 13.1 ms. Priced by absence: the
+  raymarched sky 4.7 / 3.7 / — / 2.8 ms, the multisampling 4.6 / 3.9 / — / 3.1 ms, the bloom 4.2 / 0.2 / — / 1.6 ms.
+  On foot 14 261 chunks drawn, 91.7 MILLION vertices resident (32 M at the berth on 2026-09-24, with the water drawn:
+  the dry sea floor now fills the view — the water fill of step 4 covers it again), the GPU at 100 %; about 24 ms of
+  the on-foot frame is none of the three. THE MAIN THREAD IN THE WINDOW (the dev tool reading every 5 s): the stamp
+  0.12 ms and its gap walks 0.04 ms a frame (the capture's 7.7 ms is its own), the descent 0.006 ms, the release
+  1.3 ms and the request 1.4 ms — the walk is now the main thread's largest terrain piece.
+  ★ THE ON-FOOT SPLIT (the owner's word; the same stand, full screen): all four looks off together (the sky's lookup
+  mode, no multisampling, no bloom, no shadows) 33.9 → 16.4 ms, the shadows alone 0.7 ms; a window of HALF the
+  pixels (2 560 × 1 440) 33.5 → 33.1 ms — the frame is NOT the pixels'; each chunk drawn as FOUR meshes (the same
+  triangles, `VD_TERRAIN_SPLIT_DRAWS=4`) 33.5 → 50.1 ms — the DRAWS cost; a quarter of the triangles with the
+  looks off (`VD_TERRAIN_THIN=4`) 16.4 → 11.7 ms — the triangles cost (with the looks on the thinned holes let the
+  dearer sky through, so that pair is not read). ~~THE FRAME IS GEOMETRY-BOUND: the draws and the triangles~~ —
+  ★ CORRECTED THE SAME DAY (below, "the window's steps" and (6)): that split gave EVERY part a copy of all the chunk's
+  vertices (four times the vertex memory), and the window's frame time moves in whole display refreshes, so neither
+  the +16.6 ms nor any difference under 8.33 ms in these tables is a measured cost of the draws.
+  (5) ★ THE SEALED HOLLOWS ARE DRAWN AS ROCK (the owner's question, 2026-09-28: *"do we need to render what's
+  underneath the surface? … there are no caves entrances visible … can it save us some compute?"*;
+  `vd_client::chunks::sealed_hollows`). The recipe carves caverns and tubes only in a band at least the body's drawn
+  minimum (8–30 m) under each column's own surface, so every hollow has rock over it and no entrance; its walls were
+  meshed and drawn like the ground. MEASURED at the owner's stand (`VD_TERRAIN_COVERED=1`, the triangles whose three
+  vertices stand more than four cells under the surface they morph to): 67.8 M of 167 M harvested triangles (41 %),
+  86 % at rung 2. BUILT: the drawn mesh — the chunk's and its parents' — reads its box with every hollow cell under
+  a rock cell of its own column as rock (gap −1, the stratum over it); the world keeps its caves (the recipe's cells,
+  the server's collision, `mesh_pin`'s raw extraction are unchanged). MEASURED after: 167 M → 81 M triangles (rung 0
+  −55 %, rung 1 −71 %, rung 2 −82 %, rung 3 −7 %); the cave residue of
+  `the_parent_mesh_stands_within_the_sink_of_its_field_on_every_radial` 6 of 4 134 radials (the worst 55.85 m) →
+  0 of 2 744 (the worst 4.14 m) — the owner's owed call "whether a morph target should follow its parent into a
+  cave at all" is answered by construction: no drawn cave remains to follow into; the loading flash of cave walls
+  under a finer chunk still building goes with them. STILL COVERED: 7 % (5.8 M), the roofless hollows (a hollow whose
+  roof is in the chunk above, beyond the box: kept, sealed all the same) and the skirts' own drop. OWED: the
+  column's own surface read (a hollow under the column's surface, whatever box holds its roof) — the rest of the
+  roofless share; A SYNTHETIC TEST OF A CAVE VERTEX'S MORPH SHADE (the parent's shade nearest its target, else the
+  coarser field's): the sealed test boxes hold no cave vertex, so `the_morph_targets_stand_on_the_parent_mesh…` no
+  longer reaches that rule (its per-vertex check retired with the caves; the rule still serves the roofless residue
+  and 8f's overhangs), and the three tests' cave arms went branch-free or retired for HR5 (the coverage run of
+  2026-09-28 read them as the crate's only misses); ★ THE RULE IS EXACT ONLY WHILE THE GROUND IS A HEIGHT FIELD WITH SEALED HOLLOWS: 8f's overhangs and
+  the edit system's dug openings need the hollow's reach to the open air instead (a flood from the sky), or a dug
+  cave stays drawn as rock. MEASURED in the moving-eye gate (headless, `VD_LEGS=1,2`, before → after the sealing):
+  the walk 23.7 → 37.3 frames a second (worst frame 106.5 → 66.7 ms); at 240 m/s the band incomplete on 380 → 52
+  frames (840 → 17 urgent chunks at the worst, the queue's peak 2 250 → 179 — the builders make fewer triangles:
+  31 → 17 ms of wall time a chunk); 528 m/s held in both; the graphics memory 4.9–5.1 → 2.5–2.9 GB; the pop detector
+  on the walk 865 → 467 pixels past its floor.
+  ★ THE WINDOW'S STEPS (MEASURED 2026-09-28, the second full-screen bench): with the frame loop unpaced, EVERY sample
+  of the on-foot stand stood at 25.0, 33.3 or 41.7 ms (the peaks at 41.7 and 50.0) — whole steps of the owner's
+  120 Hz display (8.33 ms). The frame time therefore reads the next step above the work: the stand reads 33.3 ms
+  whether its GPU works 26 or 33 ms, and a difference smaller than one step is not measured by it. The looks-off
+  stand (13.7 ms) reads between steps. **Example.** A pilot's frame that grows by 1 ms can read 8.33 ms slower, or
+  not slower at all, by where it stood inside its step.
+  (6) THE DRAW COUNT MEASURED CLEANLY (`geometry_part`: a split part now holds ONLY the vertices its triangles use —
+  the same triangles and nearly the same vertex memory, four times the draws; `VD_WINDOW_DIRECT_DRAWS=1`: the engine
+  records one plain draw per chunk in place of its indirect draws). MEASURED on foot, full screen, 12 samples a mode:
+  the looks OFF 13.65 ms (median; 12.05–14.63) → four times the draws 12.36 ms (11.81–14.37) — ★ three times more draws
+  cost NOTHING measurable on this GPU; the looks on 33.2 → 41.2 ms, one display step, which the steps above do not
+  resolve (the GPU's load 99.5 → 86 %, the client's CPU 48 → 56 %); the direct draws 33.2 ms, no step. ⇒ THE DRAW
+  BATCHES (E14) are NOT the full-screen frame's lever: their saving is at most a few milliseconds and not measured
+  above nought. What IS measured: the four looks together cost about 20 ms of the on-foot frame (33.2 → 13.65 ms),
+  and the ground with the looks off about 13.7 ms.
+  (7) THE GPU'S OWN CLOCK — FIRST TRY REFUTED (`client-render/src/gpu_clock.rs`, `VD_GPU_CLOCK=1`, off by default): two
+  timestamps a frame written OUTSIDE any pass, around the cameras. MEASURED in one window: the frame 275 ms and every
+  reading nought. The Metal backend takes a timestamp written outside a pass at the start of the NEXT encoder, so the
+  second stamp fell on the start of the very copy that read it; the stall is not yet explained. The bench was stopped
+  at its first stand. ★ THE SECOND DESIGN WORKS: the stamps are taken by two empty passes of the clock's own — the
+  first before every node of the frame's graph (on the clock's one-pixel picture), the second after every node, a
+  load-and-store of each camera's OUTPUT picture, which the GPU cannot run before the last pass that wrote it. PROVED
+  HEADLESS first (the capture client, no window): the frame 23.4 / 25.0 ms with the clock, 24.7 ms without it (the
+  run-to-run spread); the span 19.3–20.7 ms of a frame whose main thread is the slower part there. (A stamp request
+  that names no stamp is refused by the device — MEASURED, the capture's second camera; such a pass asks for none.)
+  ★ THE FULL-SCREEN FRAME ON THE GPU'S OWN CLOCK (the owner's word; on foot, 3 456 × 2 168, 12 samples a mode, the GPU
+  time of the frame, median): all looks on 32.25 ms (the window reads 33.3, one step above); four times the draws
+  37.12 (⇒ today's 14 261 draws about 1.6 ms); the sky's lookup mode in place of the raymarch 22.54 (⇒ the raymarched
+  sky 9.7 ms); no multisampling 21.75 (⇒ MSAA 4× 10.5 ms); no bloom 27.62 (⇒ 4.6 ms); no shadows 28.10 (⇒ 4.2 ms, NOT the
+  0.7 ms the stepped frame time read); all four looks off 13.27 ms — THE GROUND AND THE REST. The four pieces sum to
+  29 ms against 19 ms together: they overlap (under multisampling the sky runs once per SAMPLE). 60 frames a second
+  needs 16.7 ms: 15.6 ms to find. ★ THE SPLIT (the owner's word; the same stand and clock): the looks off with half
+  the triangles 11.24 ms and a quarter 9.45 (⇒ the ground's triangles about 5 ms at full screen); the looks off at
+  2 560 × 1 440 (49 % of the pixels) 10.16 (⇒ the ground's pixels — its light, the lookup sky, the post passes —
+  about 6 ms); no multisampling with the lookup sky 15.12 (⇒ the raymarched sky once per PIXEL 6.6 ms, MSAA 4× on
+  the ground 7.4 ms, the sky's per-SAMPLE extra 3.1 ms); no shadow READ by the ground 28.34 (⇒ the receiving 3.9 ms,
+  the casting the rest of 4.2); no shadow CAST 34.28 — NOT READ: that window lost the focus. ⇒ THE FULL-SCREEN
+  FRAME IS THE PIXELS': the sky, the samples, the bloom and the shadow reads are each paid 7.5 million times a frame.
+  **Example.** On foot the ground's 81 M triangles cost the GPU about 5 ms, while the sky alone costs 9.7 ms: a
+  cheaper sky helps the pilot's frame twice as much as half the triangles.
+  ★ THE TEMPORAL PATH IS DESIGNED (2026-09-29, the owner: *"Design the temporal path"*; a nine-agent workflow: three
+  research reports, two drafts, one synthesis, two adversarial reviews whose 18 findings all held, one revision):
+  `docs/investigation/2026-09-28/temporal_path_design.md` — the picture drawn at a smaller size and rebuilt to full size
+  from this frame and the frames before it (our own reconstruction on FSR 2.2's published structure, MIT), motion for
+  every drawn thing, the stars and the sun drawn sharp after it, MSAA retired only after the owner's edge look; the
+  estimate at half size about 16.0–16.8 ms (likely, NOT assured), at full size 24–28 ms (no). DECISIONS D1–D4 asked;
+  NOT BUILT — the owner: *"Most likely we will not implement this written design right away."*
+  ★ RULING B24 (2026-09-29, the owner: *"Ok, let's build temporal pass now."*): BUILD IT, slice by slice from T0.
+  ★ FLOWN AND COMMITTED (2026-09-29): the owner flew items (1)–(5) in the window (the upright hull 8, see
+  D-MOVE-2's status of 2026-09-29) and ruled *"All worked, lets commit what we have and continue with the temporal
+  pass"*. Checked before the commit: formatting; the lints of vd-client, vd-client-render and every feature set of
+  the client binary; the tests of vd-client (345) and vd-client-render (9); vd-client's coverage at 100 % (its three
+  sealed-box tests' cave arms went branch-free or retired); the moving-eye gate's walk and hull legs headless. NOT run:
+  the whole-workspace suite and the process-tier gates (no other crate changed).
+  OWED: the owner's look decisions the split prices;
+  the release-and-request walk on change only, and its diff from the builder (B-MAIN ≤ 1 ms); the builders (E1 the
+  parent sub-box and the waits, E6 the geometry without maps, E10 the pools, E2–E5): B-RATE at 240 m/s; a land leg for
+  the moving-eye gate; the owner's window flight before any commit. **Example.** A pilot at 240 m/s over the plain:
+  before, her main thread spent 14.7 ms of every frame choosing the ground and the worst frame took 52 ms for it;
+  now the choice runs on a builder and costs her frame 0.2 ms, and the band is exactly as whole as before.

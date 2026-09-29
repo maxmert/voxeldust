@@ -636,3 +636,55 @@ separate things now and hardly affect each other?"*):
 **Example.** A pilot flies over the home planet after step 1: the belt's hills stand as before, the old coast walls are
 gone, and where the sea was the dry sea floor falls away into deep basins; no water is drawn anywhere until step 4 fills
 every open cell under its water's level.
+
+## B23. NO CAPS, THE THIRD REFERENCE PICTURE, AND LAWS THAT HOLD ON EVERY BODY (2026-09-28)
+
+After the plan for step 3 (the ground: the small hills' average, the flat directions, the finer eroded level R2, the
+1–5 km valleys R3, the biomes, the cliffs, the owner's look) the owner said: *"Ideally we don't do any caps and see
+what's happening, this is the reference [a picture] We need it very believable, but fully generated, not custom built,
+as all those laws should be applied to other planets and moons"*. Read as:
+
+1. **NO CAPS: THE LAWS DECIDE, AND WE LOOK.** Nothing limits what the laws produce in order to reach a look.
+   - The gates' bands (B3: G-LAKE-SHARE's 4 %, G-ICE's ~10 %, G-CRATER's ~190, G-BUZZSAW's 1 500 m) become READINGS that
+     every step prints. A reading outside its band is reported, and it never stops a step by itself.
+   - Every clamp, ceiling and floor inside an operator (for example R2's carve ceiling and its clamped stream power, the
+     placeholder roughness) is listed by the ground step's design. Each one goes, or the law it stood in for replaces it
+     (T9: a band that stands in for a missing law is a defect).
+   - A limit that IS a law stays, named with its law and its calibration body: the angle of repose, the height that a
+     crust can hold under its gravity, the stability bound of a time step.
+   - The polar and snow caps come only from the climate law (B5); nobody sets a cap by hand.
+   - The judge is the owner's look (G-LOOK) on the pictures and in the window.
+2. **THE THIRD REFERENCE PICTURE.** It is kept outside the public repo like the first two
+   (`/Users/maxim/Downloads/Everything-we-Know-About-Crimson-Desert-Featured.webp`, a photograph of a commercial game) and
+   described in words in the living status file §9.
+3. **FULLY GENERATED, NOT CUSTOM BUILT.** Every landform comes from the generator's laws, from the seed and the body's
+   charter. Nothing is placed by hand, and nothing is tuned for one planet. The same laws make every planet and moon, so
+   each ground step is judged on the home planet AND on other real bodies of THE world (another planet, a moon), never on a
+   test-only variant (SL5). The towns, castles and fields in the picture are not terrain: players build them.
+
+**Example.** Nobody models the picture's red rock towers. A layered sandstone with a hard cap over soft beds erodes into
+mesas, buttes and pillars by the same law that rounds a granite hill. On an airless moon the same code makes no towers,
+because no water or wind cuts its rock, and its craters stay sharp.
+
+## B24. BUILD THE TEMPORAL PATH (2026-09-29)
+
+The full-screen frame on the GPU's own clock is 32.25 ms on foot, and it is paid per pixel (DEFERRED "THE SPEED STEP").
+The owner asked whether one-pass MSAA suits a Star-Citizen-like game ("everything will be way more complex, with
+constructions, clouds, weather, hundreds of players"), took the answer (no: temporal reconstruction is the foundation),
+chose *"Design the temporal path"*, asked whether the CPU cores can help and whether weather, clouds, water and waves need
+the path (answered: the CPU helps in its own lane — deciding what the GPU must not draw, building, simulating — and those
+features enter through the design's contract, §4.6), and then ruled: *"Ok, let's build temporal pass now."* Read as:
+
+1. **D1 YES: BUILD THE TEMPORAL PATH** by `docs/investigation/2026-09-28/temporal_path_design.md`. MSAA stays the default
+   until the owner's edge look (D5); the retirement of MSAA is D14.
+2. **D2, D3 AND D4 AS THE DESIGN RECOMMENDS** (the owner read them with their recommendations and gave the word to build;
+   each stays open to the owner's change): the order T0 (measure, no pixel change) → T1 (the motion) → T2 (the first
+   picture, at the sizes that ship) → T3 (the one geometry pass, only after D5 = yes); our own reconstruction on FSR 2.2's
+   published structure (MIT), which runs on every GPU, with Apple's scaler only as a later challenger and only on D12
+   (its new library); the ground in one pass that writes its surface, its depth and its motion, at T3.
+3. **EVERY LOOK STAYS THE OWNER'S** (D5–D16), each judged on pictures at its slice; a window opens only with the owner's
+   word at that moment.
+
+**Example.** A pilot on foot sees no change after T0 and T1: T0 adds the clocks and the meters, T1 gives every drawn thing
+its motion behind a switch. The first picture change comes at T2, where the owner compares the rebuilt horizon at full,
+two-thirds and half size against today's MSAA edge before anything larger is built.

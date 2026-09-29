@@ -154,6 +154,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // forever in a headless client.
     let terrain_stamp: Arc<std::sync::Mutex<Option<vd_devproto::DevTerrainStamp>>> =
         Arc::new(std::sync::Mutex::new(None));
+    // ★ THE STAMP'S READERS (ruling B22 step 2): the dev-control listener adds one on every read
+    // of the state; the window assembles the stamp's heavy half only while reads come. Only a
+    // build with a listener or a renderer holds it.
+    #[cfg(any(feature = "dev-control", feature = "render"))]
+    let stamp_reads = Arc::new(AtomicU64::new(0));
     let (command_tx, command_rx) = sync_channel::<InputAction>(COMMAND_MAILBOX_CAP);
     // The capture seam (Capture mode): the dev-control screenshot handler → the Bevy
     // render thread. Created in any dev-control+render build; only WIRED into the
@@ -192,6 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 published: published.clone(),
                 step_seq: step_seq.clone(),
                 dropped: dropped.clone(),
+                stamp_reads: stamp_reads.clone(),
                 allow_mutating: args.allow_dev_control,
                 // Wire the capture sender only in `--capture` mode; otherwise `Screenshot`/
                 // `Record` are `Unsupported` (windowed/headless have no offscreen readback).
@@ -247,6 +253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             camera_mode,
             star_probe,
             terrain_stamp,
+            stamp_reads.clone(),
             started_at,
             args.step_hz,
             vd_client_render::RenderMode::Windowed,
@@ -288,6 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             camera_mode,
             star_probe,
             terrain_stamp,
+            stamp_reads.clone(),
             started_at,
             args.step_hz,
             vd_client_render::RenderMode::Capture,
@@ -345,6 +353,7 @@ fn run_render(
     camera_mode: Arc<std::sync::atomic::AtomicU8>,
     star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
     terrain_stamp: Arc<std::sync::Mutex<Option<vd_devproto::DevTerrainStamp>>>,
+    stamp_reads: Arc<AtomicU64>,
     started_at: Instant,
     step_hz: u32,
     mode: vd_client_render::RenderMode,
@@ -414,6 +423,7 @@ fn run_render(
         camera_mode,
         star_probe,
         terrain_stamp,
+        stamp_reads,
         stamp_period_s: 1.0 / f64::from(step_hz.max(1)),
         core_alive,
         started_at,
@@ -809,6 +819,8 @@ mod dev_control {
         pub published: Arc<ArcSwap<DevState>>,
         pub step_seq: Arc<AtomicU64>,
         pub dropped: Arc<AtomicU64>,
+        /// Every read of the state adds one: the renderer's sign that a tool reads its stamp.
+        pub stamp_reads: Arc<AtomicU64>,
         pub allow_mutating: bool,
         /// The capture seam (Capture mode only): the screenshot/record handlers send jobs to
         /// the Bevy render thread. `None` in windowed/headless modes (then `Screenshot`/
@@ -980,6 +992,7 @@ mod dev_control {
     }
 
     fn current(handles: &Handles) -> DevState {
+        handles.stamp_reads.fetch_add(1, Ordering::Relaxed);
         handles.published.load().as_ref().clone()
     }
 

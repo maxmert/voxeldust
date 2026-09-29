@@ -33,10 +33,10 @@ fn render_diag() -> bool {
 }
 
 /// The render plugin, with the GPU timestamp features only under the diagnostics switch (D8-8's
-/// frame anatomy when it is on).
+/// frame anatomy when it is on) or the GPU clock's (`gpu_clock`).
 fn timestamped_render_plugin() -> bevy::render::RenderPlugin {
     let mut settings = bevy::render::settings::WgpuSettings::default();
-    if render_diag() {
+    if render_diag() || gpu_clock::gpu_clock() {
         settings.features |=
             wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
     }
@@ -46,13 +46,17 @@ fn timestamped_render_plugin() -> bevy::render::RenderPlugin {
     }
 }
 
-/// The engine's render diagnostics, added only under [`RENDER_DIAG_ENV`].
+/// The engine's render diagnostics, added only under [`RENDER_DIAG_ENV`]; the GPU's own clock,
+/// only under its switch (`gpu_clock::GPU_CLOCK_ENV`).
 struct RenderDiagSwitch;
 
 impl Plugin for RenderDiagSwitch {
     fn build(&self, app: &mut App) {
         if render_diag() {
             app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+        }
+        if gpu_clock::gpu_clock() {
+            app.add_plugins(gpu_clock::GpuClockPlugin);
         }
     }
 }
@@ -247,6 +251,12 @@ pub struct RenderHandles {
     /// The terrain stamp (slice 8p): the renderer writes what it measured about the ground it drew
     /// every frame a body is under the eye (see `DevState::terrain_stamp`).
     pub terrain_stamp: Arc<std::sync::Mutex<Option<vd_devproto::DevTerrainStamp>>>,
+    /// ★ THE STAMP'S READERS (ruling B22 step 2, the design's lever E8(d)): the dev-control
+    /// listener adds one on every read of the state. The window assembles the stamp's heavy half —
+    /// the band's gap walks and the named lists — only while a reader came within
+    /// `terrain::STAMP_READER_WINDOW_S`; the panel's summary is assembled whatever it says. The
+    /// headless capture assembles all of it on every frame, because its pictures carry their stamp.
+    pub stamp_reads: Arc<AtomicU64>,
     /// ★ THE STAMP'S PERIOD IN THE WINDOW (2026-09-24, the window's heat): the core thread reads
     /// the stamp once per step, so the window assembles it once per step (`1 / step_hz` s) and
     /// not on every frame; the headless capture assembles it on every frame whatever this says,
@@ -296,6 +306,8 @@ struct Net {
     camera_mode: Arc<std::sync::atomic::AtomicU8>,
     star_probe: Arc<std::sync::Mutex<Vec<vd_devproto::DevStarProbe>>>,
     terrain_stamp: Arc<std::sync::Mutex<Option<vd_devproto::DevTerrainStamp>>>,
+    /// The dev-control listener's reads of the state (see [`RenderHandles::stamp_reads`]).
+    stamp_reads: Arc<AtomicU64>,
     core_alive: Arc<AtomicBool>,
     started_at: Instant,
 }
@@ -600,14 +612,44 @@ const FREE_CURSOR_ENV: &str = "VD_WINDOW_FREE_CURSOR";
 const CONTINUOUS_ENV: &str = "VD_WINDOW_CONTINUOUS";
 const WINDOW_SCALE_ENV: &str = "VD_WINDOW_SCALE";
 const ON_TOP_ENV: &str = "VD_WINDOW_ON_TOP";
+/// ★ THE FULL-SCREEN BENCH'S SWITCHES (ruling B22 step 2: 60 frames a second at FULL SCREEN,
+/// 3 456 × 2 234 on the owner's display): `VD_WINDOW_FULLSCREEN=1` opens the window borderless over
+/// the whole primary display; `VD_WINDOW_MSAA=<1|2|4|8>` states the camera's samples a pixel (the
+/// engine's default is 4); `VD_WINDOW_BLOOM=0` leaves the bloom off while the sky keeps its HDR;
+/// `VD_WINDOW_DIRECT_DRAWS=1` has the engine record one plain draw per chunk in place of its
+/// indirect draws (which the Metal backend unrolls into one indirect draw per chunk anyway).
+/// Each prices one piece of the full-screen frame by its absence; none is a product setting.
+const FULLSCREEN_ENV: &str = "VD_WINDOW_FULLSCREEN";
+const MSAA_ENV: &str = "VD_WINDOW_MSAA";
+const BLOOM_ENV: &str = "VD_WINDOW_BLOOM";
+const DIRECT_DRAWS_ENV: &str = "VD_WINDOW_DIRECT_DRAWS";
 
 /// What the window's measurement switches said at startup (ONE struct, read once).
-#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
 struct WindowMeasure {
     free_cursor: bool,
     continuous: bool,
     scale: Option<f32>,
     on_top: bool,
+    fullscreen: bool,
+    msaa: Option<Msaa>,
+    bloom: bool,
+    direct_draws: bool,
+}
+
+impl Default for WindowMeasure {
+    fn default() -> WindowMeasure {
+        WindowMeasure {
+            free_cursor: false,
+            continuous: false,
+            scale: None,
+            on_top: false,
+            fullscreen: false,
+            msaa: None,
+            bloom: true,
+            direct_draws: false,
+        }
+    }
 }
 
 impl WindowMeasure {
@@ -621,6 +663,20 @@ impl WindowMeasure {
                 .ok()
                 .and_then(|v| v.trim().parse::<f32>().ok())
                 .filter(|s| s.is_finite() && *s > 0.0),
+            fullscreen: on(FULLSCREEN_ENV),
+            msaa: std::env::var(MSAA_ENV).ok().and_then(|v| msaa_of(v.trim())),
+            bloom: std::env::var(BLOOM_ENV).map_or(true, |v| v != "0"),
+            direct_draws: on(DIRECT_DRAWS_ENV),
+        }
+    }
+
+    /// The window's mode: borderless over the whole primary display under the full-screen switch,
+    /// else a window.
+    fn mode(self) -> bevy::window::WindowMode {
+        if self.fullscreen {
+            bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Primary)
+        } else {
+            bevy::window::WindowMode::Windowed
         }
     }
 
@@ -658,6 +714,17 @@ impl WindowMeasure {
                 ..default()
             }
         }
+    }
+}
+
+/// The samples a pixel a measurement names: 1 (off), 2, 4 or 8; anything else names none.
+fn msaa_of(word: &str) -> Option<Msaa> {
+    match word {
+        "1" => Some(Msaa::Off),
+        "2" => Some(Msaa::Sample2),
+        "4" => Some(Msaa::Sample4),
+        "8" => Some(Msaa::Sample8),
+        _ => None,
     }
 }
 
@@ -917,6 +984,7 @@ struct RenderEye {
 }
 
 pub mod gpu_check;
+mod gpu_clock;
 /// Run the client renderer. BLOCKS until exit; the bin MUST call this on the MAIN thread
 /// (winit/the runner need it) with the core loop on a separate thread. Dispatches on the
 /// mode: a real window (human) or headless offscreen capture (the agent's eyes).
@@ -1219,6 +1287,7 @@ fn run_windowed(handles: RenderHandles) {
             camera_mode: handles.camera_mode,
             star_probe: handles.star_probe,
             terrain_stamp: handles.terrain_stamp,
+            stamp_reads: handles.stamp_reads,
             core_alive: handles.core_alive,
             started_at: handles.started_at,
         })
@@ -1259,6 +1328,7 @@ fn run_windowed(handles: RenderHandles) {
                     primary_window: Some(Window {
                         title: "Voxeldust — dev client".into(),
                         resolution: measure.resolution(),
+                        mode: measure.mode(),
                         window_level: if measure.on_top {
                             bevy::window::WindowLevel::AlwaysOnTop
                         } else {
@@ -1341,6 +1411,7 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     sky_config: Res<sky::SkyConfig>,
+    measure: Res<WindowMeasure>,
 ) {
     // First-person follow camera — ORIENTED each frame by `place_camera` and always AT THE RENDER
     // ORIGIN (S5's camera-relative flatten). Its near/far are rewritten every frame by
@@ -1352,6 +1423,19 @@ fn setup_scene(
         Transform::from_translation(Vec3::ZERO).looking_at(Vec3::NEG_Z, Vec3::Y),
         FollowCam,
     ));
+    // THE FULL-SCREEN BENCH (ruling B22 step 2): a measurement may state the samples a pixel.
+    if let Some(msaa) = measure.msaa {
+        cam.insert(msaa);
+        tracing::info!(
+            ?msaa,
+            "VD_WINDOW_MSAA — the camera's samples a pixel for this run"
+        );
+    }
+    // The engine reads this switch only at the camera's spawn; the sun's shadow views follow it.
+    if measure.direct_draws {
+        cam.insert(bevy::render::view::NoIndirectDrawing);
+        tracing::info!("VD_WINDOW_DIRECT_DRAWS=1 — one plain draw per chunk for this run");
+    }
     // ★ BLOOM IS OFF, AND ONE ENV VAR AWAY (owner, 2026-08-29: "skip bloom, but keep the possibility
     // to quickly enable for a test").
     //
@@ -1374,16 +1458,19 @@ fn setup_scene(
     // picture's brightness range is the sky's. Bloom with it, judged on the pictures (ask 3). The
     // engine's default grey ambient is a magic light: with the sky on, the dome lights the shadows.
     if sky_config.enabled {
-        cam.insert((
-            bevy::post_process::bloom::Bloom::NATURAL,
-            bevy::render::view::Hdr,
-            // ★ THE EDGE (owner's look, 2026-09-19): upstream's sky pass read ONE depth sample a
-            // pixel and wrote one colour, so the multisampled terrain edge flattened into a stair —
-            // MEASURED on the ground stand's horizon (no crossing pixel blended) and the far stand's
-            // limb. SMAA in its place blended a third of the columns; the cure is in the vendored
-            // pass itself, which now composites PER SAMPLE (`vendor/bevy_pbr/PATCH.md`), so the
-            // engine's multisampling is the anti-alias again, as before the sky.
-        ));
+        // ★ THE EDGE (owner's look, 2026-09-19): upstream's sky pass read ONE depth sample a
+        // pixel and wrote one colour, so the multisampled terrain edge flattened into a stair —
+        // MEASURED on the ground stand's horizon (no crossing pixel blended) and the far stand's
+        // limb. SMAA in its place blended a third of the columns; the cure is in the vendored
+        // pass itself, which now composites PER SAMPLE (`vendor/bevy_pbr/PATCH.md`), so the
+        // engine's multisampling is the anti-alias again, as before the sky.
+        cam.insert(bevy::render::view::Hdr);
+        // The bloom stays on unless the full-screen bench prices it by its absence.
+        if measure.bloom {
+            cam.insert(bevy::post_process::bloom::Bloom::NATURAL);
+        } else {
+            tracing::info!("VD_WINDOW_BLOOM=0 — no bloom for this run (the sky keeps its HDR)");
+        }
         commands.insert_resource(bevy::light::GlobalAmbientLight::NONE);
     }
     setup_world(&mut commands, &mut meshes, &mut materials);
@@ -2988,6 +3075,7 @@ fn run_capture(handles: RenderHandles) {
             camera_mode: handles.camera_mode,
             star_probe: handles.star_probe,
             terrain_stamp: handles.terrain_stamp,
+            stamp_reads: handles.stamp_reads,
             core_alive: handles.core_alive,
             started_at: handles.started_at,
         })
@@ -3007,10 +3095,11 @@ fn run_capture(handles: RenderHandles) {
         })
         .insert_resource(sky::SkyConfig::from_env())
         .insert_resource(sky::SkyMedia::default())
-        .insert_resource(terrain::Terrain::new(
-            terrain::TerrainConfig::from_env(),
-            handles.world_declared,
-        ))
+        .insert_resource(
+            terrain::Terrain::new(terrain::TerrainConfig::from_env(), handles.world_declared)
+                // The capture's pictures carry their stamp: every frame is read.
+                .with_reader_always(),
+        )
         .insert_resource(CaptureChannel(captures))
         .insert_resource(CaptureCfg {
             runs_dir: handles.runs_dir,

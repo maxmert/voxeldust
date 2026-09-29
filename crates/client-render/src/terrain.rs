@@ -41,7 +41,7 @@ use std::sync::Arc;
 const RULER_BALL_SUBDIVISIONS: u32 = 7;
 
 use bevy::prelude::*;
-use crossbeam_channel::{Receiver, bounded};
+use crossbeam_channel::{Receiver, bounded, unbounded};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
@@ -171,6 +171,22 @@ pub struct TerrainConfig {
     /// every chunk and its probe twin with the engine's frustum culling OFF, so a hole that
     /// vanishes under it is a culling box, not a missing mesh. A measurement's switch.
     pub no_cull: bool,
+    /// ★ THE DRAW-COUNT ABLATIONS (ruling B22 step 2, before the draw batches are built):
+    /// `VD_TERRAIN_SPLIT_DRAWS=<n>` draws every drawn chunk as `n` meshes, each with an `n`-th of
+    /// its triangles and only the vertices they use (the same triangles and nearly the same
+    /// vertex memory, `n` times the draws — `geometry_part`); `VD_TERRAIN_THIN=<n>` keeps every
+    /// `n`-th triangle of every drawn chunk (the same draws, an `n`-th of the triangles — holes in
+    /// the picture). Together they tell a frame that pays for its draws from one that pays for its
+    /// vertices. Measurement switches, never a product setting; `1` (the default) is the shipped
+    /// drawing.
+    pub split_draws: usize,
+    pub thin: usize,
+    /// ★ THE COVERED SHARE (`VD_TERRAIN_COVERED=1`, the owner's question of 2026-09-28: *"do we
+    /// need to render what's underneath the surface?"*): the harvest counts, per rung, the drawn
+    /// triangles whose three vertices all stand more than [`COVERED_CELLS`] cells under the coarser
+    /// surface they morph to — a cave's floor, walls and roof, an overhang's underside — and logs
+    /// the counts every ten seconds. A measurement's switch.
+    pub covered: bool,
     /// THE SHADOW'S SHAPE (D8-8's ablation named the sun's shadow as the still stand's wall,
     /// §19.6): how far it reaches (the rung whose switch distance ends it), how many cascades
     /// draw it, and each cascade map's width in pixels. Defaults: the constants below; the
@@ -343,6 +359,14 @@ const SPLAT_ENV: &str = "VD_TERRAIN_SPLATS";
 const SHADOWS_ENV: &str = "VD_TERRAIN_SHADOWS";
 const HIDE_RUNG_ENV: &str = "VD_TERRAIN_HIDE_RUNG";
 const NO_CULL_ENV: &str = "VD_TERRAIN_NO_CULL";
+const SPLIT_DRAWS_ENV: &str = "VD_TERRAIN_SPLIT_DRAWS";
+const THIN_ENV: &str = "VD_TERRAIN_THIN";
+const COVERED_ENV: &str = "VD_TERRAIN_COVERED";
+/// How far under its coarser surface a vertex must stand to count as covered, in its rung's cells:
+/// four — the sink and the skirt's drop reach at most about two.
+const COVERED_CELLS: f32 = 4.0;
+/// How often the covered share is logged, in seconds.
+const COVERED_LOG_S: f64 = 10.0;
 /// How often the artifact mismatch is logged while it lasts, in seconds.
 const ARTIFACT_MISMATCH_LOG_S: f64 = 10.0;
 
@@ -377,6 +401,9 @@ impl TerrainConfig {
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
             no_cull: std::env::var(NO_CULL_ENV).is_ok_and(|v| v == "1"),
+            split_draws: env_or(SPLIT_DRAWS_ENV, 1usize).max(1),
+            thin: env_or(THIN_ENV, 1usize).max(1),
+            covered: std::env::var(COVERED_ENV).is_ok_and(|v| v == "1"),
             shadow_reach_rung: env_or(SHADOW_REACH_ENV, SHADOW_REACH_RUNG),
             shadow_cascades: env_or(SHADOW_CASCADES_ENV, SHADOW_CASCADES),
             shadow_map_px: env_or(SHADOW_MAP_ENV, SHADOW_MAP_PX),
@@ -413,6 +440,11 @@ impl TerrainConfig {
 const WORK_THROUGHPUT: &str = "throughput";
 const WORK_BOUND: &str = "bound";
 const WORK_DESCENT: &str = "descent";
+/// ★ THE DESCENT ON A BUILDER (ruling B22 step 2): the main thread's own piece above is now the
+/// send and the landing alone; these two are NOT the frame's work — the builders' time on the
+/// descents that landed, and the worst wait from a send to its answer.
+const WORK_DESCENT_BUILDER: &str = "descent_builder";
+const WORK_DESCENT_WAIT: &str = "descent_wait";
 const WORK_BAND_TABLE: &str = "band_table";
 /// ★ THE WINDOW'S HEAT (2026-09-24): the pieces a frame pays whether or not anything moved — the
 /// release-and-request walks over every held and wanted chunk, the stamp's own assembly, and the
@@ -420,6 +452,21 @@ const WORK_BAND_TABLE: &str = "band_table";
 const WORK_RELEASE: &str = "release";
 const WORK_STAMP: &str = "stamp";
 const WORK_PLACE: &str = "place";
+/// ★ THE STAMP'S GAP WALKS (ruling B22 step 2): the per-frame walks over every wanted key that
+/// count the band's missing chunks, named apart from the stamp's own assembly.
+const WORK_STAMP_GAP: &str = "stamp_gap";
+/// ★ THE REQUEST PASS (ruling B22 step 2): every wanted chunk not yet resident asked again at its
+/// priority, every frame — named apart from the release passes.
+const WORK_REQUEST: &str = "request";
+
+/// ★ HOW LONG A DEV TOOL'S READ KEEPS THE STAMP'S HEAVY HALF ON, in seconds: a quarter of one
+/// (ruling B22 step 2, the design's lever E8(d)). The heavy half — the band's gap walks over every
+/// wanted key of every body, the named lists and the hole instrument — MEASURED 5.6–7.7 ms a frame
+/// on the moving-eye legs; only a dev tool reads it. A tool that polls faster than the window
+/// (the moving-eye flight reads every 40 ms) keeps it on for good; a bench that samples every five
+/// seconds turns it on for a twentieth of the time; a window nobody reads pays for the panel's
+/// summary alone.
+pub const STAMP_READER_WINDOW_S: f64 = 0.25;
 
 /// ★ HOW LONG A PIECE'S WORST FRAME IS REMEMBERED FOR: one second (review item 8). The peak in
 /// the stamp is a ROLLING one, not the run's own, so a flight reading the stamp can name the worst
@@ -473,16 +520,152 @@ pub struct ThreadedWorkers {
     /// ★ THE CARD'S SEAM (ruling F9 item 2): the same queue and the same done channel, kept for
     /// the moment the renderer's own device exists.
     card: CardSeam,
+    /// ★ THE DESCENTS' SEAM (ruling B22 step 2): the same queue, taken first, and the answers'
+    /// own channel.
+    descent: DescentSeam,
 }
 
-/// The queue: jobs by (priority, arrival), an index from the chunk to its place, and the close
-/// flag the workers leave on.
+/// The queue: jobs by (priority, arrival), an index from the chunk to its place, the descents that
+/// wait for a worker (taken before any chunk), and the close flag the workers leave on.
 #[derive(Default)]
 struct JobQueue {
     jobs: BTreeMap<(u32, u64), ChunkJob>,
     index: BTreeMap<(RealmId, ChunkKey), (u32, u64)>,
     seq: u64,
+    descents: std::collections::VecDeque<DescentJob>,
     closed: bool,
+}
+
+/// ★ THE DESCENT ON A BUILDER (ruling B22 step 2; the one-volume design's lever E8(a)). The wanted
+/// set's descent was the costliest thing on the main thread: MEASURED 3–5 ms a run, 7.7 ms a frame
+/// and a worst frame of 33.4 ms at 528 m/s (the design §10A.1.2). The view — its spans, its kept
+/// and culled columns — moves to a builder WITH the job and comes back with the answer, so nothing
+/// is shared and nothing is locked but the queue. At most one descent per realm is away at a time:
+/// the view is its token. The main thread keeps the last answer until the new one lands; the
+/// descent's slack covers the wait (see [`DESCENT_WAIT_BOUND_S`]).
+///
+/// Example: a pilot at 528 m/s moves the lead eye half a metre every frame. The frame sends the view
+/// away and draws on; a builder runs the descent in 4 ms and the next frame takes the new set.
+struct DescentJob {
+    realm: RealmId,
+    /// The dispatch's own number: an answer is applied only to the ladder that awaits it.
+    seq: u64,
+    view: LadderView,
+    body: Arc<vd_terrain::BodyDefinition>,
+    eye: [f64; 3],
+    artifact: Option<Arc<vd_client::artifact_book::ArtifactCache>>,
+    epoch: Option<u64>,
+    sent: std::time::Instant,
+}
+
+/// A descent's answer: the view back home, the eye and the artifact epoch it read, the wanted set,
+/// how many spans it left provisional, how long it waited for a worker and how long it ran. A
+/// descent that PANICKED on the builder comes back `failed`, with a fresh view and no set.
+struct DescentDone {
+    realm: RealmId,
+    seq: u64,
+    view: LadderView,
+    eye: [f64; 3],
+    epoch: Option<u64>,
+    wanted: WantedSet,
+    provisional: usize,
+    waited: std::time::Duration,
+    ran: std::time::Duration,
+    failed: bool,
+}
+
+/// ★ HOW LATE A DESCENT'S ANSWER MAY LAND before the picture could draw a band nobody asked for, in
+/// seconds: 0.15. DERIVED, not chosen. The held horizon slides at most 0.2678 of itself a second
+/// (`vd_client::ask_pace::AskPace::slew`), the descent follows it within the bracket (a tenth), and
+/// the slack covers `1 − 1/1.17` = 14.5 % of the horizon; the wait may therefore spend
+/// `14.5 − 10 = 4.5 %`, which is `0.045 / 0.2678` = 0.168 s. The bound is stated a little under it;
+/// the stamp reports the worst wait of each second, and a flight reads it against this bound.
+pub const DESCENT_WAIT_BOUND_S: f64 = 0.15;
+
+/// THE RENDERER'S HANDLE ON THE DESCENTS: the queue the workers take them from, and the channel
+/// their answers come back on.
+#[derive(Clone)]
+pub struct DescentSeam {
+    queue: Arc<(Mutex<JobQueue>, std::sync::Condvar)>,
+    done: Receiver<DescentDone>,
+}
+
+impl DescentSeam {
+    /// Send one descent to the workers; every waiter is woken, because the card waits on the same
+    /// queue and a single wake could land on it.
+    fn submit(&self, job: DescentJob) {
+        let (lock, cvar) = &*self.queue;
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .descents
+            .push_back(job);
+        cvar.notify_all();
+    }
+
+    /// Every answer that has landed.
+    fn drain(&self, out: &mut Vec<DescentDone>) {
+        while let Ok(done) = self.done.try_recv() {
+            out.push(done);
+        }
+    }
+}
+
+/// ONE DESCENT, RUN ON A BUILDER: the view walks the ladder for the eye and goes back with the set.
+/// A panic is caught and reported, so a failed descent costs a fresh view, never a builder or the
+/// ladder's token.
+fn run_descent(job: DescentJob) -> DescentDone {
+    let waited = job.sent.elapsed();
+    let started = std::time::Instant::now();
+    let DescentJob {
+        realm,
+        seq,
+        mut view,
+        body,
+        eye,
+        artifact,
+        epoch,
+        ..
+    } = job;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let wanted = view.wanted(&body, eye, artifact.as_deref());
+        let provisional = view.provisional_spans();
+        (view, wanted, provisional)
+    }));
+    let (view, wanted, provisional, failed) = match outcome {
+        Ok((view, wanted, provisional)) => (view, wanted, provisional, false),
+        Err(_) => (LadderView::default(), WantedSet::default(), 0, true),
+    };
+    DescentDone {
+        realm,
+        seq,
+        view,
+        eye,
+        epoch,
+        wanted,
+        provisional,
+        waited,
+        ran: started.elapsed(),
+        failed,
+    }
+}
+
+/// WHERE A LADDER'S VIEW IS: home on the main thread, or away on a builder with a descent.
+#[derive(Debug)]
+enum ViewSlot {
+    Home(LadderView),
+    Away,
+}
+
+impl Default for ViewSlot {
+    fn default() -> ViewSlot {
+        ViewSlot::Home(LadderView::default())
+    }
+}
+
+/// What a CPU worker takes next: a descent, or a chunk.
+enum Work {
+    Descent(Box<DescentJob>),
+    Chunk(ChunkJob),
 }
 
 impl JobQueue {
@@ -518,6 +701,9 @@ impl ThreadedWorkers {
         let queue: Arc<(Mutex<JobQueue>, std::sync::Condvar)> =
             Arc::new((Mutex::new(JobQueue::default()), std::sync::Condvar::new()));
         let (done_tx, done) = bounded::<ChunkReady>(done_bound.max(1));
+        // The descents' answers: at most one per realm is ever away, so the channel is bounded by
+        // the realms in the window and needs no bound of its own.
+        let (descent_tx, descent_done) = unbounded::<DescentDone>();
         let built = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let build_nanos = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let build_peak: Arc<Mutex<(u64, Option<ChunkKey>)>> = Arc::new(Mutex::new((0, None)));
@@ -525,6 +711,7 @@ impl ThreadedWorkers {
         while n < threads.max(1) {
             let queue = Arc::clone(&queue);
             let tx = done_tx.clone();
+            let descent_tx = descent_tx.clone();
             let built_by_me = Arc::clone(&built);
             let nanos_by_me = Arc::clone(&build_nanos);
             let peak_by_me = Arc::clone(&build_peak);
@@ -532,11 +719,18 @@ impl ThreadedWorkers {
                 .name(format!("terrain-worker-{n}"))
                 .spawn(move || {
                     loop {
-                        // Take the first job by priority; wait while the queue is empty; leave
-                        // as soon as it is closed (refutation T-29: a close builds nothing more).
-                        // ONE rule, for the CPU workers and for the card alike (ruling F9 item 2).
-                        let Some(job) = next_job(&queue) else {
-                            return;
+                        // Take a waiting descent first, else the first job by priority; wait
+                        // while both are empty; leave as soon as the queue is closed (refutation
+                        // T-29: a close builds nothing more). The card takes chunks alone, by the
+                        // same priority order (ruling F9 item 2).
+                        let job = match next_work(&queue) {
+                            None => return,
+                            Some(Work::Descent(descent)) => {
+                                // The renderer may be gone at a close; the answer then has no reader.
+                                let _ = descent_tx.send(run_descent(*descent));
+                                continue;
+                            }
+                            Some(Work::Chunk(job)) => job,
                         };
                         let started = std::time::Instant::now();
                         let geometry = geometry_with(
@@ -574,6 +768,10 @@ impl ThreadedWorkers {
                 done: done_tx,
                 meter: Arc::new(CardMeter::default()),
             },
+            descent: DescentSeam {
+                queue: Arc::clone(&queue),
+                done: descent_done,
+            },
             queue,
             done,
             built,
@@ -587,6 +785,13 @@ impl ThreadedWorkers {
     #[must_use]
     pub fn card_seam(&self) -> CardSeam {
         self.card.clone()
+    }
+
+    /// ★ THE DESCENTS' SEAM ON THESE WORKERS (ruling B22 step 2): the terrain keeps it and sends
+    /// each realm's descent through it.
+    #[must_use]
+    pub fn descent_seam(&self) -> DescentSeam {
+        self.descent.clone()
     }
 
     /// How many jobs wait in the queue.
@@ -610,6 +815,7 @@ impl Drop for ThreadedWorkers {
             q.closed = true;
             q.jobs.clear();
             q.index.clear();
+            q.descents.clear();
         }
         cvar.notify_all();
         // The card waits on its own grant, never on the queue, so it is closed by its own flag.
@@ -1297,10 +1503,31 @@ fn dirs_of(bytes: &[u8]) -> Vec<[vd_recipe::Gi; 3]> {
         .collect()
 }
 
-/// The first job of the queue by priority, waiting while the queue is empty; `None` once the
-/// workers close. The card and the CPU workers take from this one queue by this one rule.
-fn next_job(jobs: &Arc<(Mutex<JobQueue>, std::sync::Condvar)>) -> Option<ChunkJob> {
-    take_job(jobs, 0)
+/// ★ THE NEXT WORK FOR A CPU WORKER (ruling B22 step 2): a waiting DESCENT first — its answer is
+/// the ring the picture reads, so it never waits behind the ground it will ask for — then the first
+/// chunk by priority, by the card's own rule with no skip; waiting while both are empty; `None` once
+/// the workers close.
+fn next_work(jobs: &Arc<(Mutex<JobQueue>, std::sync::Condvar)>) -> Option<Work> {
+    let (lock, cvar) = &**jobs;
+    let mut q = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    loop {
+        if q.closed {
+            return None;
+        }
+        if let Some(descent) = q.descents.pop_front() {
+            return Some(Work::Descent(Box::new(descent)));
+        }
+        if let Some(slot) = q.jobs.keys().next().copied() {
+            let job = q.jobs.remove(&slot).expect("the slot was just read");
+            q.index.remove(&(job.realm, job.key));
+            return Some(Work::Chunk(job));
+        }
+        q = cvar
+            .wait(q)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
 }
 
 /// ★ THE CARD'S OWN TAKE (review item 9): the same queue and the same order, but the card leaves
@@ -1456,7 +1683,19 @@ struct RulerCache {
 /// that wanted set.
 #[derive(Default)]
 struct RealmLadder {
-    view: LadderView,
+    /// ★ THE VIEW, HOME OR AWAY ON A BUILDER (ruling B22 step 2): a descent takes it along and
+    /// brings it back with the set, so at most one descent of this realm is ever away.
+    view: ViewSlot,
+    /// The dispatch whose answer this ladder awaits, and when it was sent: an answer with another
+    /// number (a forgotten ladder's) is dropped.
+    awaiting: Option<u64>,
+    /// The bound, the shadow's reach and the provisional count of the descent LAST APPLIED — what
+    /// the probe, the stamp and the next move test read while the view is away.
+    bound_applied: AskBound,
+    shadow_sent: Option<ShadowReach>,
+    provisional: usize,
+    /// A bound change the pace took while a descent was away: the next dispatch carries it.
+    bound_dirty: bool,
     eye: Option<[f64; 3]>,
     wanted: WantedSet,
     /// The artifact cache's epoch the last descent read: a change while the view holds a
@@ -1639,6 +1878,10 @@ pub struct Terrain {
     /// builder is running at all, so a client with no trusted card grants nothing.
     card: CardSeam,
     card_attached: bool,
+    /// ★ THE DESCENTS ON THE BUILDERS (ruling B22 step 2): the seam each realm's descent goes out
+    /// through and comes back on, and the last dispatch's number.
+    descents: DescentSeam,
+    descent_seq: u64,
     /// THE WORST SINGLE FRAME of the last [`WORK_PEAK_S`] seconds: the terrain system times the
     /// gap between its own runs, which is the frame itself. The engine's own frame-time diagnostic
     /// is a SMOOTHED mean and hides one long frame; a second builder on the renderer's own device
@@ -1687,6 +1930,15 @@ pub struct Terrain {
     stamp_period_s: f64,
     stamp_built_s: f64,
     stamp_fresh: bool,
+    /// ★ THE STAMP'S READER (ruling B22 step 2, lever E8(d)): whether every frame is read (the
+    /// capture), the listener's read count this renderer last saw, and when it saw it change.
+    stamp_always: bool,
+    stamp_reads_seen: u64,
+    stamp_read_s: f64,
+    /// THE COVERED SHARE's counts per rung since the last log: (covered triangles, triangles), and
+    /// when it was last logged (`TerrainConfig::covered`).
+    covered: BTreeMap<u8, (u64, u64)>,
+    covered_logged_s: f64,
 }
 
 impl Terrain {
@@ -1704,6 +1956,7 @@ impl Terrain {
         let threaded =
             ThreadedWorkers::start(threads, config.harvest_per_frame * DONE_QUEUE_FRAMES);
         let card = threaded.card_seam();
+        let descents = threaded.descent_seam();
         let workers: Box<dyn ChunkWorkers> = Box::new(threaded);
         let lane = ChunkLane::new(workers, declared);
         // The parent cache holds what the memory budget allows, in the meshes' own bytes, never
@@ -1740,6 +1993,8 @@ impl Terrain {
             throughput: Throughput::default(),
             card,
             card_attached: false,
+            descents,
+            descent_seq: 0,
             frame_peak: PeakHold::default(),
             frame_peak_ms: 0.0,
             frame_meter: Arc::new(FrameMeter::default()),
@@ -1759,7 +2014,29 @@ impl Terrain {
             stamp_period_s: 0.0,
             stamp_built_s: f64::NEG_INFINITY,
             stamp_fresh: false,
+            stamp_always: false,
+            stamp_reads_seen: 0,
+            stamp_read_s: f64::NEG_INFINITY,
+            covered: BTreeMap::new(),
+            covered_logged_s: 0.0,
         }
+    }
+
+    /// Every frame's stamp is read (the capture): the heavy half is assembled on every frame.
+    #[must_use]
+    pub fn with_reader_always(mut self) -> Terrain {
+        self.stamp_always = true;
+        self
+    }
+
+    /// ★ IS A DEV TOOL READING THE STAMP NOW (ruling B22 step 2, lever E8(d))? Yes for the capture;
+    /// else yes while the listener's read count changed within [`STAMP_READER_WINDOW_S`].
+    fn stamp_reader(&mut self, reads: u64, now_s: f64) -> bool {
+        if reads != self.stamp_reads_seen {
+            self.stamp_reads_seen = reads;
+            self.stamp_read_s = now_s;
+        }
+        self.stamp_always | (now_s - self.stamp_read_s < STAMP_READER_WINDOW_S)
     }
 
     /// The stamp's period (see [`super::RenderHandles::stamp_period_s`]); zero assembles it on
@@ -2167,6 +2444,61 @@ fn packed_indices(geometry: &vd_client::chunks::ChunkGeometry) -> bevy::mesh::In
         bevy::mesh::Indices::U16(flat.map(|i| i as u16).collect())
     } else {
         bevy::mesh::Indices::U32(flat.collect())
+    }
+}
+
+/// ★ ONE PART OF A CHUNK for the draw-count ablations (ruling B22 step 2): the `part`-th of
+/// `parts` contiguous ranges of the triangle list, keeping every `thin`-th triangle, with ONLY the
+/// vertices those triangles use. `(0, 1, 1)` is the whole chunk, the shipped drawing.
+/// ★ COMPACT (2026-09-28): the first split gave every part a copy of ALL the chunk's vertices, so
+/// four parts held four times the vertex memory and the split's cost could not be read as the
+/// draws' alone. The skirt's start is not kept (the ablation never splats).
+fn geometry_part(
+    geometry: &vd_client::chunks::ChunkGeometry,
+    part: usize,
+    parts: usize,
+    thin: usize,
+) -> vd_client::chunks::ChunkGeometry {
+    fn pick<T: Copy>(from: &[T], kept: &[usize]) -> Vec<T> {
+        kept.iter().map(|&i| from[i]).collect()
+    }
+    let len = geometry.triangles.len();
+    let per = len.div_ceil(parts.max(1));
+    let (from, to) = ((part * per).min(len), ((part + 1) * per).min(len));
+    let mut slot = vec![u32::MAX; geometry.vertices.len()];
+    let mut kept: Vec<usize> = Vec::new();
+    let triangles: Vec<[u32; 3]> = geometry.triangles[from..to]
+        .iter()
+        .step_by(thin.max(1))
+        .map(|t| {
+            t.map(|v| {
+                let s = &mut slot[v as usize];
+                if *s == u32::MAX {
+                    *s = kept.len() as u32;
+                    kept.push(v as usize);
+                }
+                *s
+            })
+        })
+        .collect();
+    vd_client::chunks::ChunkGeometry {
+        key: geometry.key,
+        origin_m: geometry.origin_m,
+        morph_m: pick(&geometry.morph_m, &kept),
+        morph_fallbacks: geometry.morph_fallbacks,
+        morph_seam: geometry.morph_seam,
+        sink_m: geometry.sink_m,
+        stand_in_sink_m: geometry.stand_in_sink_m,
+        vertices: pick(&geometry.vertices, &kept),
+        normals: pick(&geometry.normals, &kept),
+        packed_normals: pick(&geometry.packed_normals, &kept),
+        morph_normals: pick(&geometry.morph_normals, &kept),
+        radials: pick(&geometry.radials, &kept),
+        triangles,
+        skirt_start: kept.len() as u32,
+        field_level: geometry.field_level,
+        built_on: geometry.built_on,
+        bounds: geometry.bounds,
     }
 }
 
@@ -2661,6 +2993,52 @@ pub(crate) fn sync_terrain(
         .iter()
         .map(|(r, l)| (*r, (l.eye, l.wanted.keys.len() as u64)))
         .collect();
+    // ★ THE DESCENTS THAT LANDED (ruling B22 step 2): each answer goes back to the ladder that
+    // awaits it — the view home, the set in force — BEFORE this frame judges any move, so a ladder
+    // whose descent landed may send the next one at once. The builders' own time and the worst
+    // wait (from the send to the answer) are named apart from the frame's work.
+    let landing = std::time::Instant::now();
+    let mut landed: Vec<DescentDone> = Vec::new();
+    terrain.descents.drain(&mut landed);
+    let mut descent_builder = std::time::Duration::ZERO;
+    let mut descent_wait = std::time::Duration::ZERO;
+    let mut descents_landed = 0u64;
+    for done in landed {
+        let Some(ladder) = terrain.ladders.get_mut(&done.realm) else {
+            // The realm left the window while its descent was away: the view leaves with it.
+            continue;
+        };
+        if ladder.awaiting != Some(done.seq) {
+            // A forgotten ladder's answer, for a ladder that came back since.
+            continue;
+        }
+        ladder.awaiting = None;
+        descent_builder += done.ran;
+        descent_wait = descent_wait.max(done.waited + done.ran);
+        descents_landed += 1;
+        if done.failed {
+            tracing::error!(
+                realm = ?done.realm,
+                "a descent panicked on a builder: the view starts afresh and the set in force stands"
+            );
+            ladder.view = ViewSlot::Home(done.view);
+            // No eye: the next frame sends a descent whatever the eye did.
+            ladder.eye = None;
+            continue;
+        }
+        ladder.bound_applied = done.view.bound.clone();
+        ladder.provisional = done.provisional;
+        ladder.view = ViewSlot::Home(done.view);
+        ladder.artifact_epoch = done.epoch;
+        ladder.prev = std::mem::replace(&mut ladder.wanted, done.wanted);
+        ladder.last_descent_s = Some(now_s);
+        ladder.eye = Some(done.eye);
+        recomputed.push(done.realm);
+        descents += 1;
+    }
+    work_descent += landing.elapsed();
+    let mut descent_seq = terrain.descent_seq;
+    let mut to_send: Vec<DescentJob> = Vec::new();
     for eb in &with_bodies {
         let piece = std::time::Instant::now();
         let rungs = eb.body.ladder().rungs;
@@ -2705,20 +3083,17 @@ pub(crate) fn sync_terrain(
             artifact.as_ref().map_or(0, |a| a.head.levels),
         );
         ladder.pace.slew(&candidate, rungs, hysteresis, frame_s);
-        let bound_changed = ladder
+        // A bound the pace takes while the view is away is not lost: the next send carries it.
+        ladder.bound_dirty |= ladder
             .pace
             .take_descent(rungs, bracket, descent_every_s, now_s);
-        if bound_changed {
-            ladder.view.bound = ladder.pace.asked().clone();
-        }
-        let reach_changed = match (ladder.view.shadow, shadow) {
+        let reach_changed = match (ladder.shadow_sent, shadow) {
             (Some(a), Some(b)) => !a.same_as(b),
             (a, b) => a.is_some() != b.is_some(),
         };
-        let field_changed =
-            (ladder.artifact_epoch != epoch) && (ladder.view.provisional_spans() > 0);
+        let field_changed = (ladder.artifact_epoch != epoch) && (ladder.provisional > 0);
         let wanted_move =
-            moved(ladder.eye, eb.lead) || reach_changed || bound_changed || field_changed;
+            moved(ladder.eye, eb.lead) || reach_changed || ladder.bound_dirty || field_changed;
         let run_descent = wanted_move & !eye_refused;
         work_bound += piece.elapsed();
         // ★ THE DESCENT'S PACE, READ (2026-09-16, the walk-gap measurement): how far the LEAD
@@ -2727,19 +3102,36 @@ pub(crate) fn sync_terrain(
             (DVec3::from_array(last) - DVec3::from_array(eb.lead)).length()
         });
         ladder.since_descent_s = ladder.last_descent_s.map_or(0.0, |t| now_s - t);
-        ladder.descent_ran = run_descent;
-        if run_descent {
-            let descent = std::time::Instant::now();
-            ladder.view.shadow = shadow;
-            let fresh = ladder.view.wanted(&eb.body, eb.lead, artifact.as_deref());
-            ladder.artifact_epoch = epoch;
-            ladder.prev = std::mem::replace(&mut ladder.wanted, fresh);
-            ladder.last_descent_s = Some(now_s);
-            ladder.eye = Some(eb.lead);
-            recomputed.push(eb.realm);
-            work_descent += descent.elapsed();
-            descents += 1;
+        ladder.descent_ran = recomputed.contains(&eb.realm);
+        // ★ THE SEND (ruling B22 step 2): the view goes to a builder with this frame's eye, bound
+        // and shadow; a view already away is not sent twice, and the move is judged again the
+        // frame its answer lands.
+        if run_descent
+            && let ViewSlot::Home(mut view) = std::mem::replace(&mut ladder.view, ViewSlot::Away)
+        {
+            let sending = std::time::Instant::now();
+            view.shadow = shadow;
+            view.bound = ladder.pace.asked().clone();
+            ladder.shadow_sent = shadow;
+            ladder.bound_dirty = false;
+            descent_seq += 1;
+            ladder.awaiting = Some(descent_seq);
+            to_send.push(DescentJob {
+                realm: eb.realm,
+                seq: descent_seq,
+                view,
+                body: Arc::clone(&eb.body),
+                eye: eb.lead,
+                artifact,
+                epoch,
+                sent: sending,
+            });
+            work_descent += sending.elapsed();
         }
+    }
+    terrain.descent_seq = descent_seq;
+    for job in to_send {
+        terrain.descents.submit(job);
     }
     // ★ THE CARD'S STAND-DOWN RULE (the owner's step after Step 15): the frame judges whether the
     // queue is deep enough to want a second builder at all. THE LEAD IS THE HELD SPEED'S OWN — the
@@ -2778,6 +3170,15 @@ pub(crate) fn sync_terrain(
     terrain.note_work(WORK_THROUGHPUT, work_throughput, 1, now_s);
     terrain.note_work(WORK_BOUND, work_bound, 1, now_s);
     terrain.note_work(WORK_DESCENT, work_descent, descents, now_s);
+    // Not the frame's own work: the builders' time on the descents that landed, and the worst
+    // wait from a send to its answer, read against [`DESCENT_WAIT_BOUND_S`].
+    terrain.note_work(
+        WORK_DESCENT_BUILDER,
+        descent_builder,
+        descents_landed,
+        now_s,
+    );
+    terrain.note_work(WORK_DESCENT_WAIT, descent_wait, descents_landed, now_s);
     terrain.note_work(WORK_BAND_TABLE, work_tables, tables, now_s);
     // THE CASTING DELTAS (item 18): a drawn chunk that left the casting set releases its caster;
     // one that entered it asks for its caster.
@@ -2962,6 +3363,9 @@ pub(crate) fn sync_terrain(
         }
         // Every wanted chunk not yet resident is asked for at its priority — a job already
         // waiting moves to this frame's priority (the eye moved; its class may have changed).
+        // ★ TIMED APART (ruling B22 step 2): the request pass is named `request`, the release
+        // passes above `release`.
+        let requesting = std::time::Instant::now();
         for (realm, ladder) in ladders.iter() {
             for (index, key) in ladder.wanted.keys.iter().enumerate() {
                 if !lane.is_resident(*realm, *key) {
@@ -2969,12 +3373,19 @@ pub(crate) fn sync_terrain(
                 }
             }
         }
-        unwant
+        (unwant, requesting.elapsed())
     };
+    let (unwant, work_request) = unwant;
     for (realm, ckey) in unwant {
         terrain.unwant_caster(&mut commands, realm, ckey);
     }
-    terrain.note_work(WORK_RELEASE, release_started.elapsed(), 1, now_s);
+    terrain.note_work(
+        WORK_RELEASE,
+        release_started.elapsed() - work_request,
+        1,
+        now_s,
+    );
+    terrain.note_work(WORK_REQUEST, work_request, 1, now_s);
     // ★ THE BOARDING INSTRUMENT (2026-09-14): a frame that released a WHOLESALE count of one
     // realm's chunks names itself — the realm, the count, whether the descent ran, the eye in the
     // body's own frame before and after it, the lead offset, the wanted set's size on both sides,
@@ -3041,6 +3452,8 @@ pub(crate) fn sync_terrain(
     let coarse_from = terrain.config.shadow_coarse_from_rung;
     let harvest_cap = terrain.config.harvest_per_frame;
     let harvest_bytes = terrain.config.harvest_bytes_per_frame;
+    let split_draws = terrain.config.split_draws;
+    let thin = terrain.config.thin;
     // THE UPLOAD's cost on the main thread (M8-2a): the mesh conversion, the asset, the entity —
     // per harvested chunk, so the harvest's own wall is named in milliseconds.
     let harvest_started = std::time::Instant::now();
@@ -3120,9 +3533,33 @@ pub(crate) fn sync_terrain(
         let casts_itself = terrain.shadow_wanted.contains_key(&(realm, key));
         let material = terrain.ground_material(&mut ground_materials, realm, key.rung, &body, &gpu);
         let splat = splat_rung.is_some_and(|r| key.rung >= r);
-        let built = mesh_of(&ready.geometry, flat, exact_normal_rung, splat);
+        // THE DRAW-COUNT ABLATIONS (measurement switches; see `TerrainConfig::split_draws`).
+        let ablate = (split_draws > 1 || thin > 1) && !flat && !splat;
+        let part_of = |part: usize| {
+            let piece = geometry_part(&ready.geometry, part, split_draws, thin);
+            mesh_of(&piece, false, exact_normal_rung, false)
+        };
+        let built = if ablate {
+            part_of(0)
+        } else {
+            mesh_of(&ready.geometry, flat, exact_normal_rung, splat)
+        };
         let bytes = mesh_bytes(&built);
         let mesh = meshes.add(built);
+        let part_material = material.clone();
+        if terrain.config.covered {
+            let g = &ready.geometry;
+            let deep = COVERED_CELLS * vd_seed::ladder::cell_m(key.rung) as f32;
+            let under = |i: u32| g.morph_m[i as usize] > deep;
+            let covered = g
+                .triangles
+                .iter()
+                .filter(|t| under(t[0]) & under(t[1]) & under(t[2]))
+                .count() as u64;
+            let entry = terrain.covered.entry(key.rung).or_insert((0, 0));
+            entry.0 += covered;
+            entry.1 += g.triangles.len() as u64;
+        }
         // THE BOUNDS the engine culls by, grown to where the vertex stage can move a vertex: its
         // morph target and its whole sink (the engine reads the box from the positions alone).
         // A splat reaches one cell past its vertex on the screen's plane.
@@ -3175,6 +3612,19 @@ pub(crate) fn sync_terrain(
             commands
                 .entity(entity)
                 .insert(bevy::light::NotShadowReceiver);
+        }
+        // The other parts of a split chunk ride on it as children: placed with it, despawned with it.
+        if ablate {
+            for part in 1..split_draws {
+                commands.spawn((
+                    Mesh3d(meshes.add(part_of(part))),
+                    MeshMaterial3d(part_material.clone()),
+                    Transform::default(),
+                    bounds,
+                    bevy::mesh::MeshTag(stamp),
+                    ChildOf(entity),
+                ));
+            }
         }
         let twin = probe_materials.as_mut().map(|pm| {
             let probe =
@@ -3243,6 +3693,22 @@ pub(crate) fn sync_terrain(
         }
     }
     terrain.harvest_nanos += harvest_started.elapsed().as_nanos() as u64;
+    // THE COVERED SHARE, logged (the owner's question of 2026-09-28; `TerrainConfig::covered`):
+    // every triangle harvested since the start, by rung, and the share under the ground.
+    if terrain.config.covered && now_s - terrain.covered_logged_s >= COVERED_LOG_S {
+        terrain.covered_logged_s = now_s;
+        let (covered, all) = terrain
+            .covered
+            .values()
+            .fold((0u64, 0u64), |(c, a), (dc, da)| (c + dc, a + da));
+        tracing::info!(
+            covered,
+            all,
+            share = covered as f64 / all.max(1) as f64,
+            per_rung = ?terrain.covered,
+            "THE COVERED SHARE: the harvested triangles under the ground's own surface (caves, overhangs)"
+        );
+    }
     // 4. Every chunk rides its row: transform = draw_center + facing · origin, in f64, narrowed once
     //    (`place_chunks`, below, which runs after the spawn commands apply). The count on screen goes
     //    to the diagnosis surface.
@@ -3402,6 +3868,12 @@ pub(crate) fn sync_terrain(
     // two assemblies the last stamp stands and is not published again.
     let stamp_due = terrain.stamp_due(now_s);
     terrain.stamp_fresh = stamp_due;
+    // ★ THE HEAVY HALF ONLY WHILE A DEV TOOL READS (ruling B22 step 2, lever E8(d)).
+    let reader = terrain.stamp_reader(
+        net.stamp_reads.load(std::sync::atomic::Ordering::Relaxed),
+        now_s,
+    );
+    let mut stamp_gap = std::time::Duration::ZERO;
     if stamp_due {
         terrain.stamp = None;
     }
@@ -3510,7 +3982,10 @@ pub(crate) fn sync_terrain(
             // THE BAND'S GAP, once per frame: the urgent chunks not yet harvested, by rung and in
             // all (a chunk harvested this frame is spawned at the schedule's end and draws next
             // frame: the gap reads one frame early, never late).
-            let (gap_per_rung, gap_revealed) = {
+            let gap_started = std::time::Instant::now();
+            let (gap_per_rung, gap_revealed) = if !reader {
+                (Vec::new(), 0)
+            } else {
                 let Terrain { lane, ladders, .. } = &*terrain;
                 let mut counts: BTreeMap<u8, u64> = BTreeMap::new();
                 let mut revealed = 0;
@@ -3567,7 +4042,8 @@ pub(crate) fn sync_terrain(
                             .urgent_missing_keys(&|k| lane.is_resident(gap_realm, k), GAP_KEYS_CAP)
                             .into_iter()
                             .map(|key| {
-                                let probe = l.view.probe(
+                                // The bound the set in force was asked under: the view may be away.
+                                let probe = l.bound_applied.probe(
                                     &gap_body,
                                     lane.artifact(gap_realm).map(|a| &**a),
                                     gap_eye,
@@ -3609,6 +4085,7 @@ pub(crate) fn sync_terrain(
                     body_distance_m: DVec3::from_array(gap_eye).length(),
                 });
             }
+            stamp_gap = gap_started.elapsed();
             if stamp_due {
                 let built = terrain.lane.built();
                 let counters = terrain.lane.counters();
@@ -3616,30 +4093,33 @@ pub(crate) fn sync_terrain(
                 // ★ THE HOLE INSTRUMENT: this frame's refusals and empty chunks, named, for this realm.
                 let key_name =
                     |k: ChunkKey| format!("{:?} {} {} {} {}", k.face, k.rung, k.x, k.y, k.z);
-                let awaiting_keys: Vec<String> = terrain
-                    .lane
-                    .take_awaiting()
+                // The lane's lists are TAKEN whether or not a tool reads them, so they never grow;
+                // they are named only while one does.
+                let awaiting = terrain.lane.take_awaiting();
+                let missing_hist = terrain.lane.take_missing_hist();
+                let empty = terrain.lane.take_empty();
+                let awaiting_keys: Vec<String> = awaiting
                     .into_iter()
-                    .filter(|(r, _, _)| r == realm)
+                    .filter(|(r, _, _)| reader & (r == realm))
                     .map(|(_, k, tiles)| format!("{}: tiles {tiles:?}", key_name(k)))
                     .collect();
-                let mut missing_tiles: Vec<(u8, u32, u32, u32)> = terrain
-                    .lane
-                    .take_missing_hist()
+                let mut missing_tiles: Vec<(u8, u32, u32, u32)> = missing_hist
                     .into_iter()
-                    .filter(|((r, _, _, _), _)| r == realm)
+                    .filter(|((r, _, _, _), _)| reader & (r == realm))
                     .map(|((_, f, tx, ty), n)| (f, tx, ty, n))
                     .collect();
                 missing_tiles.sort_by(|a, b| b.3.cmp(&a.3));
                 missing_tiles.truncate(16);
-                let empty_keys: Vec<String> = terrain
-                    .lane
-                    .take_empty()
+                let empty_keys: Vec<String> = empty
                     .into_iter()
-                    .filter(|(r, _, _)| r == realm)
+                    .filter(|(r, _, _)| reader & (r == realm))
                     .map(|(_, k, level)| format!("{} @L{level}", key_name(k)))
                     .collect();
-                let (hole_columns, hole_named) = terrain.lane.hole_columns(*realm);
+                let (hole_columns, hole_named) = if reader {
+                    terrain.lane.hole_columns(*realm)
+                } else {
+                    (0, Vec::new())
+                };
                 let hole_keys: Vec<String> = hole_named
                     .into_iter()
                     .map(|(k, level)| format!("{} @L{level}", key_name(k)))
@@ -3649,11 +4129,13 @@ pub(crate) fn sync_terrain(
                     .body(*realm)
                     .and_then(|b| b.macro_lattice())
                     .map_or(0, |l| l.edge);
-                let margin_missing = {
+                let margin_missing = if reader {
                     let Terrain { lane, ladders, .. } = &*terrain;
                     ladders.get(realm).map_or(0, |l| {
                         l.wanted.margin_missing(&|k| lane.is_resident(*realm, k)) as u64
                     })
+                } else {
+                    0
                 };
                 let camera_body = camera_rotation.map_or(DQuat::IDENTITY, |c| facing.inverse() * c);
                 terrain.stamp = Some(DevTerrainStamp {
@@ -3752,7 +4234,7 @@ pub(crate) fn sync_terrain(
                     ask_horizon_m: terrain
                         .ladders
                         .get(realm)
-                        .map(|l: &RealmLadder| l.view.bound.horizons_m())
+                        .map(|l: &RealmLadder| l.bound_applied.horizons_m())
                         .unwrap_or_default(),
                     // ★ THE CARD AS A SECOND BUILDER (ruling F9 item 2): what it built, what its
                     // boxes cost it, and what the frames granted it.
@@ -3805,7 +4287,8 @@ pub(crate) fn sync_terrain(
             }
         }
     }
-    terrain.note_work(WORK_STAMP, stamp_started.elapsed(), 1, now_s);
+    terrain.note_work(WORK_STAMP, stamp_started.elapsed() - stamp_gap, 1, now_s);
+    terrain.note_work(WORK_STAMP_GAP, stamp_gap, u64::from(reader), now_s);
     let realm_under = under_eye
         .as_ref()
         .map(|(realm, _, _)| *realm)
@@ -4253,6 +4736,77 @@ mod worker_tests {
         workers.submit(job(&body, 8, 2));
         assert!(workers.waiting() <= 1);
         // The drop closes the queue with jobs waiting: no hang.
+        drop(workers);
+    }
+
+    /// A descent for the home planet's eye 2 km over +X, with a fresh view.
+    fn descent(body: &Arc<vd_terrain::BodyDefinition>, seq: u64) -> DescentJob {
+        DescentJob {
+            realm: RealmId::Planet(body.seed()),
+            seq,
+            view: LadderView::default(),
+            body: Arc::clone(body),
+            eye: [body.ladder().radius_m() + 2_000.0, 0.0, 0.0],
+            artifact: None,
+            epoch: None,
+            sent: std::time::Instant::now(),
+        }
+    }
+
+    /// ★ THE DESCENT GOES FIRST (ruling B22 step 2): a descent that joins the queue AFTER two chunks
+    /// is the first work a worker takes, and the chunks follow by their own priority; a closed
+    /// queue gives nothing.
+    #[test]
+    fn a_waiting_descent_is_taken_before_any_waiting_chunk() {
+        let body = Arc::new(vd_terrain::home::home_planet());
+        let queue: Arc<(Mutex<JobQueue>, std::sync::Condvar)> =
+            Arc::new((Mutex::new(JobQueue::default()), std::sync::Condvar::new()));
+        {
+            let mut q = queue.0.lock().expect("the queue");
+            q.place(job(&body, 3, 2));
+            q.place(job(&body, 2, 1));
+            q.descents.push_back(descent(&body, 1));
+        }
+        let taken: Vec<String> = (0..3)
+            .map(|_| match next_work(&queue) {
+                Some(Work::Descent(d)) => format!("descent {}", d.seq),
+                Some(Work::Chunk(c)) => format!("chunk {}", c.key.x),
+                None => "closed".to_owned(),
+            })
+            .collect();
+        assert_eq!(taken, ["descent 1", "chunk 2", "chunk 3"]);
+        queue.0.lock().expect("the queue").closed = true;
+        assert!(next_work(&queue).is_none());
+    }
+
+    /// ★ A DESCENT ON A BUILDER ANSWERS AS THE MAIN THREAD WOULD (ruling B22 step 2): the answer
+    /// carries its realm, its number and its eye, the view comes home, and the wanted set and the
+    /// provisional count equal those of the same descent run in place.
+    #[test]
+    fn a_descent_on_a_builder_answers_as_the_main_thread_would() {
+        let body = Arc::new(vd_terrain::home::home_planet());
+        let workers = ThreadedWorkers::start(1, HARVEST_PER_FRAME * DONE_QUEUE_FRAMES);
+        let seam = workers.descent_seam();
+        let sent = descent(&body, 7);
+        let eye = sent.eye;
+        seam.submit(sent);
+        let mut landed = Vec::new();
+        let started = std::time::Instant::now();
+        while landed.is_empty() && started.elapsed() < std::time::Duration::from_secs(120) {
+            seam.drain(&mut landed);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let done = landed.pop().expect("the descent answers");
+        assert_eq!(done.realm, RealmId::Planet(body.seed()));
+        assert_eq!(done.seq, 7);
+        assert_eq!(done.eye, eye);
+        assert!(!done.failed);
+        let mut view = LadderView::default();
+        let in_place = view.wanted(&body, eye, None);
+        assert!(!in_place.keys.is_empty());
+        assert_eq!(done.wanted.keys, in_place.keys);
+        assert_eq!(done.provisional, view.provisional_spans());
+        assert_eq!(done.view.spans_held(), view.spans_held());
         drop(workers);
     }
 }

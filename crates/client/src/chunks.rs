@@ -484,6 +484,8 @@ impl ParentMesh {
     ) -> Option<ParentMesh> {
         let field = field_of(body, artifact, key)?;
         let samples = sample_box(body, field.as_deref().map(|f| f as &dyn ZField), key)?;
+        // The parent's surface with its sealed hollows as rock, as the drawn chunk reads its own.
+        let samples = sealed_hollows(body, &samples).unwrap_or(samples);
         let mesh = extract_all_edges(&samples);
         let q = i32::from(vd_terrain::VERTEX_QUANTUM as i16);
         let cell_of = |v: [i16; 3]| -> (i32, i32) {
@@ -1193,6 +1195,89 @@ fn coarser_field_m(
     vd_terrain::height::height_field_m(body, &*field, dir, rung)
 }
 
+/// ★ THE SEALED HOLLOWS ARE DRAWN AS ROCK (ruling B22 step 2; the owner, 2026-09-28: *"do we need
+/// to render what's underneath the surface? … there are no caves entrances visible"*).
+///
+/// The recipe carves its caverns and tubes only in a depth band under each column's own surface,
+/// never shallower than the body's drawn minimum (8 to 30 m, `vd_terrain::body::Caves`), so every
+/// hollow has rock over it and no entrance. From any eye outside the rock its walls are never seen,
+/// yet they were meshed and drawn like the ground: MEASURED at the owner's stand (the covered share,
+/// `VD_TERRAIN_COVERED=1`), 41 % of all the ground's triangles, 86 % at rung 2 — and the builders'
+/// dearest vertices, because a cave vertex meets no parent triangle and reads the coarser field five
+/// times. So the DRAWN mesh takes a hollow cell with rock over it in its own column as rock. The
+/// world keeps its caves: the cells the server holds and collides against are the recipe's, and
+/// only the copy the extractor reads here is sealed.
+///
+/// The test is exact for today's ground — a height field with hollows in a band under it, no
+/// overhang — and errs only toward drawing: a hollow whose roof lies in the chunk above, beyond
+/// the box, keeps its walls (they are sealed all the same, and hidden). Overhangs (8f) and a dug
+/// opening (the edit system) will need the hollow's reach to the open air instead
+/// (`docs/design/DEFERRED.md`, the speed step).
+///
+/// Example. Twelve metres under the belt's plain a tube four metres wide runs through a rung-2
+/// chunk. The box sees rock over each of its cells, so the extractor meets no surface there and
+/// the chunk is built and drawn as the plain alone; the shard's own cells still hold the tube.
+#[must_use]
+pub fn sealed_hollows(
+    body: &BodyDefinition,
+    samples: &vd_terrain::lattice::SampleBox,
+) -> Option<vd_terrain::lattice::SampleBox> {
+    let rung = samples.key.rung;
+    let carves = vd_terrain::carve::tubes_carve_at(body, rung)
+        | vd_terrain::carve::caverns_carve_at(body, rung);
+    let hollow = carves & has_sealed_hollow(samples);
+    hollow.then(|| {
+        let mut sealed = samples.clone();
+        seal_hollows(&mut sealed);
+        sealed
+    })
+}
+
+/// The box's columns, each from its top cell down: `(a, b)` over the box's cells, halo included.
+const BOX_LO: i32 = -vd_terrain::lattice::HALO;
+const BOX_HI: i32 = CHUNK_EDGE as i32;
+
+/// Whether some column of the box holds a hollow cell (air) under a rock cell of its own.
+fn has_sealed_hollow(samples: &vd_terrain::lattice::SampleBox) -> bool {
+    use vd_terrain::lattice::SampleBox;
+    (BOX_LO..=BOX_HI).any(|b| {
+        (BOX_LO..=BOX_HI).any(|a| {
+            let mut rock_over = false;
+            (BOX_LO..=BOX_HI).rev().any(|c| {
+                let air = samples.cells[SampleBox::index(a, b, c)].gap >= 0;
+                let sealed = air & rock_over;
+                rock_over |= !air;
+                sealed
+            })
+        })
+    })
+}
+
+/// Every hollow cell under a rock cell of its own column becomes rock just inside the surface
+/// (gap −1), of the stratum over it.
+fn seal_hollows(samples: &mut vd_terrain::lattice::SampleBox) {
+    use vd_terrain::lattice::SampleBox;
+    for b in BOX_LO..=BOX_HI {
+        for a in BOX_LO..=BOX_HI {
+            let mut rock: Option<vd_terrain::chunk::Cell> = None;
+            for c in (BOX_LO..=BOX_HI).rev() {
+                let i = SampleBox::index(a, b, c);
+                let cell = samples.cells[i];
+                match (cell.gap >= 0, rock) {
+                    (true, Some(over)) => {
+                        samples.cells[i] = vd_terrain::chunk::Cell {
+                            stratum: over.stratum,
+                            gap: -1,
+                        };
+                    }
+                    (false, _) => rock = Some(cell),
+                    (true, None) => {}
+                }
+            }
+        }
+    }
+}
+
 /// [`geometry_of`] with the lane's parent cache, for the chunk of `realm`.
 ///
 /// A chunk's build is TWO STEPS, and this is the pair run together: the SAMPLE step
@@ -1228,6 +1313,9 @@ pub fn geometry_from(
     samples: &vd_terrain::lattice::SampleBox,
     parents: &ParentCache,
 ) -> Option<ChunkGeometry> {
+    // The drawn mesh reads the box with its sealed hollows as rock (see [`sealed_hollows`]).
+    let sealed = sealed_hollows(body, samples);
+    let samples = sealed.as_ref().unwrap_or(samples);
     let mesh = extract(samples);
     let half = (CHUNK_EDGE / 2) as i16 * vd_terrain::VERTEX_QUANTUM as i16;
     let origin = vertex_position_m(body, samples, [half, half, half]);
@@ -1690,7 +1778,9 @@ pub struct ChunkLane {
     /// digest is not here WAITS (counted), and the recipe's own relief is never drawn for it.
     expected: BTreeMap<RealmId, [u64; 2]>,
     resident: BTreeSet<(RealmId, ChunkKey)>,
-    pending: BTreeSet<(RealmId, ChunkKey)>,
+    /// Every chunk still building, with the priority it was last asked at (ruling B22 step 2: a
+    /// re-request at the same priority leaves the workers' queue alone).
+    pending: BTreeMap<(RealmId, ChunkKey), u32>,
     /// Resident plus pending chunks per realm, so a release is a lookup, not a scan (SL9).
     held: BTreeMap<RealmId, usize>,
     counters: ChunkCounters,
@@ -1724,7 +1814,7 @@ impl ChunkLane {
             artifacts: BTreeMap::new(),
             expected: BTreeMap::new(),
             resident: BTreeSet::new(),
-            pending: BTreeSet::new(),
+            pending: BTreeMap::new(),
             held: BTreeMap::new(),
             counters: ChunkCounters::default(),
             awaiting_frame: Vec::new(),
@@ -1940,7 +2030,7 @@ impl ChunkLane {
         self.empty_resident.retain(|(r, _), _| *r != realm);
         let pending: Vec<ChunkKey> = self
             .pending
-            .iter()
+            .keys()
             .filter(|(r, _)| *r == realm)
             .map(|(_, k)| *k)
             .collect();
@@ -1992,7 +2082,7 @@ impl ChunkLane {
     /// Whether the lane holds or is building a chunk.
     #[must_use]
     pub fn holds(&self, realm: RealmId, key: ChunkKey) -> bool {
-        self.resident.contains(&(realm, key)) | self.pending.contains(&(realm, key))
+        self.resident.contains(&(realm, key)) | self.pending.contains_key(&(realm, key))
     }
 
     /// The parent cache the workers share (the engine sizes it to its workers).
@@ -2016,8 +2106,15 @@ impl ChunkLane {
         if self.resident.contains(&(realm, key)) {
             return;
         }
-        if self.pending.contains(&(realm, key)) {
-            self.workers.reprioritise(realm, key, priority);
+        // ★ A RE-REQUEST RE-KEYS A WAITING JOB ONLY WHEN ITS PRIORITY CHANGED (ruling B22 step 2).
+        // The engine asks for every wanted chunk not yet resident on every frame, and a re-key is a
+        // lock of the workers' queue and a move inside it: MEASURED up to 2 395 waiting jobs at
+        // 240 m/s, re-keyed on every frame whether or not a descent had moved their places.
+        if let Some(asked) = self.pending.get_mut(&(realm, key)) {
+            if *asked != priority {
+                *asked = priority;
+                self.workers.reprioritise(realm, key, priority);
+            }
             return;
         }
         // ★ THE ARTIFACT'S FIELD MUST BE WHOLE FOR THIS CHUNK (slice 8c stage C4c): a chunk whose
@@ -2063,7 +2160,7 @@ impl ChunkLane {
             }
             return;
         }
-        self.pending.insert((realm, key));
+        self.pending.insert((realm, key), priority);
         *self.held.entry(realm).or_insert(0) += 1;
         self.counters.submitted += 1;
         self.workers.submit(ChunkJob {
@@ -2100,7 +2197,11 @@ impl ChunkLane {
         }
         self.counters.harvest_full +=
             u64::from((max > 0) & ((out.len() == max) | (bytes >= budget_bytes)));
-        out.retain(|ready| self.pending.remove(&(ready.realm, ready.geometry.key)));
+        out.retain(|ready| {
+            self.pending
+                .remove(&(ready.realm, ready.geometry.key))
+                .is_some()
+        });
         // ★ A STALE BUILD IS REFUSED: built on another artifact than the realm's now (the recipe's
         // relief before the head, or an older head). Its pending entry is gone with the retain
         // above, so the next request submits it again, on the field.
@@ -2144,7 +2245,7 @@ impl ChunkLane {
     pub fn release(&mut self, realm: RealmId, key: ChunkKey) {
         let was_resident = self.resident.remove(&(realm, key));
         self.empty_resident.remove(&(realm, key));
-        let was_pending = self.pending.remove(&(realm, key));
+        let was_pending = self.pending.remove(&(realm, key)).is_some();
         if was_pending {
             self.workers.cancel(realm, key);
         }
@@ -2162,7 +2263,7 @@ impl ChunkLane {
     /// every stale job in the workers' queue and `pending` never drained).
     #[must_use]
     pub fn pending_all(&self) -> Vec<(RealmId, ChunkKey)> {
-        self.pending.iter().copied().collect()
+        self.pending.keys().copied().collect()
     }
 
     /// The chunks the lane holds for a realm.
@@ -3119,6 +3220,155 @@ mod tests {
         assert_eq!(lane.counters().no_charter, 1);
     }
 
+    /// A synthetic box of rung `rung`: rock (gap −20) under the layer `ground`, air (gap 20) over
+    /// it, every column alike.
+    fn layered_box(rung: u8, ground: i32) -> vd_terrain::lattice::SampleBox {
+        use vd_terrain::lattice::{BOX_CELLS, BOX_EDGE, SampleBox, Site};
+        let mut cells = vec![
+            vd_terrain::chunk::Cell {
+                stratum: vd_terrain::strata::Stratum::Air,
+                gap: 20,
+            };
+            BOX_CELLS
+        ];
+        for c in BOX_LO..=BOX_HI {
+            for b in BOX_LO..=BOX_HI {
+                for a in BOX_LO..=BOX_HI {
+                    if c < ground {
+                        cells[SampleBox::index(a, b, c)] = vd_terrain::chunk::Cell {
+                            stratum: vd_terrain::strata::Stratum::Granite,
+                            gap: -20,
+                        };
+                    }
+                }
+            }
+        }
+        SampleBox {
+            key: ChunkKey {
+                face: Face::PosX,
+                rung,
+                x: 0,
+                y: 0,
+                z: 0,
+            },
+            cells,
+            sites: vec![
+                Site {
+                    face: 0,
+                    i: 0,
+                    j: 0
+                };
+                BOX_EDGE * BOX_EDGE
+            ],
+            dirs: vec![Default::default(); BOX_EDGE * BOX_EDGE],
+        }
+    }
+
+    /// ★ THE SEALED HOLLOWS ARE DRAWN AS ROCK (ruling B22 step 2): a pocket of air under rock in
+    /// its own column becomes rock of the stratum over it; the open air over the ground stays; a
+    /// hollow at the box's top, whose roof would be in the chunk above, stays; a box with no
+    /// hollow, and a rung that carves nothing, give no copy.
+    #[test]
+    fn a_sealed_hollow_is_drawn_as_rock_and_the_open_air_is_kept() {
+        use vd_terrain::lattice::SampleBox;
+        let body = home_planet();
+        // A ground at layer 40 with a pocket at layers 10–12 under columns (5..=7, 5..=7).
+        let mut samples = layered_box(0, 40);
+        for c in 10..=12 {
+            for b in 5..=7 {
+                for a in 5..=7 {
+                    samples.cells[SampleBox::index(a, b, c)].gap = 30;
+                }
+            }
+        }
+        assert!(has_sealed_hollow(&samples));
+        let sealed = sealed_hollows(&body, &samples).expect("rung 0 carves, and it holds a hollow");
+        assert!(!has_sealed_hollow(&sealed));
+        let pocket = sealed.cells[SampleBox::index(6, 6, 11)];
+        assert_eq!(pocket.gap, -1);
+        assert_eq!(pocket.stratum, vd_terrain::strata::Stratum::Granite);
+        // The open air over the ground and the rock itself are as they were.
+        assert_eq!(sealed.cells[SampleBox::index(6, 6, 50)].gap, 20);
+        assert_eq!(sealed.cells[SampleBox::index(6, 6, 30)].gap, -20);
+        // Every cell outside the pocket is untouched.
+        let changed = samples
+            .cells
+            .iter()
+            .zip(sealed.cells.iter())
+            .filter(|(before, after)| before != after)
+            .count();
+        assert_eq!(changed, 27);
+        // A box with no hollow gives no copy; a hollow at the box's top with its roof beyond the
+        // box is not sealed here.
+        let ground_only = layered_box(0, 40);
+        assert!(sealed_hollows(&body, &ground_only).is_none());
+        let mut roofless = layered_box(0, BOX_HI + 1);
+        roofless.cells[SampleBox::index(3, 3, BOX_HI)].gap = 5;
+        assert!(!has_sealed_hollow(&roofless));
+        // A rung too coarse to carve gives no copy, whatever its cells hold.
+        let coarse_rung = (0..body.ladder().rungs)
+            .find(|r| {
+                !vd_terrain::carve::tubes_carve_at(&body, *r)
+                    & !vd_terrain::carve::caverns_carve_at(&body, *r)
+            })
+            .expect("a rung that carves nothing");
+        let mut coarse = layered_box(coarse_rung, 40);
+        coarse.cells[SampleBox::index(6, 6, 11)].gap = 30;
+        assert!(has_sealed_hollow(&coarse));
+        assert!(sealed_hollows(&body, &coarse).is_none());
+    }
+
+    /// ★ A RE-REQUEST AT THE SAME PRIORITY LEAVES THE QUEUE ALONE (ruling B22 step 2): the
+    /// engine asks for every wanted chunk not yet resident on every frame; the lane re-keys a
+    /// waiting job only when its priority changed.
+    #[test]
+    fn a_re_request_at_the_same_priority_does_not_touch_the_queue() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        /// Workers that keep every job waiting and count the re-keys.
+        struct Counting(InlineWorkers, Arc<AtomicU64>);
+        impl ChunkWorkers for Counting {
+            fn submit(&mut self, _job: ChunkJob) {}
+            fn drain(&mut self, out: &mut Vec<ChunkReady>, max: usize) {
+                self.0.drain(out, max);
+            }
+            fn cancel(&mut self, _realm: RealmId, _key: ChunkKey) {}
+            fn reprioritise(&mut self, _realm: RealmId, _key: ChunkKey, _priority: u32) {
+                self.1.fetch_add(1, Ordering::Relaxed);
+            }
+            fn built(&self) -> BuildCount {
+                self.0.built()
+            }
+        }
+        let rekeys = Arc::new(AtomicU64::new(0));
+        let mut lane = ChunkLane::new(
+            Box::new(Counting(InlineWorkers::default(), Arc::clone(&rekeys))),
+            77,
+        );
+        lane.state_surface(planet(), &surface(77), Some(&charter()), &look());
+        let k0 = surface_key(&home_planet(), 0, 300, 700);
+        lane.request(planet(), k0, 5);
+        lane.request(planet(), k0, 5);
+        lane.request(planet(), k0, 5);
+        assert_eq!(
+            rekeys.load(Ordering::Relaxed),
+            0,
+            "the same priority: no re-key"
+        );
+        lane.request(planet(), k0, 4);
+        assert_eq!(
+            rekeys.load(Ordering::Relaxed),
+            1,
+            "a new priority: one re-key"
+        );
+        lane.request(planet(), k0, 4);
+        assert_eq!(rekeys.load(Ordering::Relaxed), 1);
+        assert_eq!(lane.pending_count(), 1);
+        assert!(lane.poll(8).is_empty(), "nothing was built");
+        assert_eq!(lane.built().chunks, 0);
+        lane.release(planet(), k0);
+        assert_eq!(lane.pending_count(), 0);
+    }
+
     #[test]
     fn the_lane_builds_holds_and_releases_chunks_of_every_rung() {
         let mut lane = lane();
@@ -3259,6 +3509,8 @@ mod tests {
         let key = surface_key(&body, 0, 300, 700);
         let g = geometry_of(&body, key).expect("in the band");
         let samples = sample_box(&body, None, key).expect("in the band");
+        // The box the drawn mesh reads: its sealed hollows as rock (`sealed_hollows`).
+        let samples = sealed_hollows(&body, &samples).unwrap_or(samples);
         let mesh = extract(&samples);
         assert_eq!(&g.triangles[..mesh.triangles.len()], &mesh.triangles[..]);
         assert!(g.vertices.len() >= mesh.vertices.len());
@@ -3488,7 +3740,6 @@ mod tests {
         let mut worst: f64 = 0.0;
         let mut measured = 0;
         let mut over = 0usize;
-        let mut outside: Vec<f64> = Vec::new();
         for (x, y) in [(300, 700), (301, 700), (150, 350), (2506, 1781)] {
             let rung = if x > 1000 {
                 5
@@ -3500,6 +3751,8 @@ mod tests {
             let key = surface_key(&body, rung, x, y);
             let coarser = rung + 1;
             let samples = sample_box(&body, None, key).expect("in the band");
+            // The box the drawn mesh reads: its sealed hollows as rock (`sealed_hollows`).
+            let samples = sealed_hollows(&body, &samples).unwrap_or(samples);
             let mesh = extract(&samples);
             let parents: Vec<Arc<ParentMesh>> = parent_keys(&body, key)
                 .into_iter()
@@ -3526,9 +3779,6 @@ mod tests {
                 let cells = f64::from(vd_seed::ladder::cell_m(coarser))
                     + f64::from(vd_seed::ladder::cell_m(rung));
                 over += usize::from(gap > cells);
-                if gap > cells {
-                    outside.push(hit.unwrap_or(field) - field);
-                }
                 worst = worst.max(gap);
                 measured += usize::from(met);
             }
@@ -3548,40 +3798,27 @@ mod tests {
         // smoother column carries more vertices over the parent's cells that answer a radial at
         // all, and the factor lowers the fine half of nine columns in ten.
         //
-        // ★ THE RESIDUE IS THE SAME CLASS, and it is MEASURED, not argued — the two discriminators
-        // are ASSERTED below and each could fail:
-        //   1. EVERY ONE of the hits stands BELOW its field. The fifteen signed gaps are all
-        //      negative, the deepest −197.08 m. A misplaced parent mesh would stand on
-        //      both sides of the field and at the CELL's own scale (3 m at rung 0, 6 m at rung 1).
-        //   2. Every gap sits inside the body's own CAVE BAND (8 m to 370 m under the surface).
-        // So the radial slips past the hill into a cave and reports the cave's depth, not the
-        // extractor's placement. The sink is a claim about the SURFACE, and a cave is not the surface.
+        // THE RESIDUE WAS ONE CLASS, MEASURED while it lasted: every outside hit stood BELOW its field
+        // and inside the body's own CAVE BAND (8 m to 370 m under the surface) — the radial slipped
+        // past the hill into a cave and reported the cave's depth, never a misplaced parent mesh.
         //
         // ⚠ OWED, THE OWNER'S CALL: whether a morph target should follow its parent into a cave at
-        // all. Until it is answered this test states the MEASURED residue by name, so it goes red
-        // the moment the residue grows.
+        // all. ★ ANSWERED BY THE SEALED HOLLOWS (2026-09-28, ruling B22 step 2): the drawn meshes —
+        // the chunk's and its parents' — read their boxes with the caves as rock, so no radial can
+        // meet a cave. MEASURED: 0 of 2 744 radials outside the sink, the worst 4.14 m (before: 6 of
+        // 4 134, the worst 55.85 m, every one in a cave); the radials are fewer because the caves'
+        // own vertices are gone. With no residue left, the two cave discriminators that explained it
+        // (below the field, inside the cave band) retire: `over` is nought, so each would read an
+        // empty list.
         assert_eq!(
-            over, 6,
+            over, 0,
             "{over} of {measured} radials outside the sink, the worst {worst:.2} m"
         );
         assert!(
-            worst < 56.0,
+            worst < 5.0,
             "the worst radial stands {worst:.2} m from its field"
         );
         assert!(measured > 1000, "{measured}");
-        // The two discriminators, as assertions: the residue is a radial in a CAVE, never a mesh in
-        // the wrong place.
-        let mut below = 0;
-        let mut in_band = 0;
-        for gap in &outside {
-            below += usize::from(*gap < 0.0);
-            in_band += usize::from((gap.abs() >= 8.0) & (gap.abs() <= 370.0));
-        }
-        assert_eq!(
-            below, over,
-            "every residue stands BELOW its field: {outside:?}"
-        );
-        assert_eq!(in_band, over, "and inside the cave band: {outside:?}");
     }
 
     #[test]
@@ -3594,6 +3831,8 @@ mod tests {
         // Every vertex of the parent's own mesh is met by its own radial, at its own radius,
         // within the cell it lies in (a vertex is on its triangles).
         let samples = sample_box(&body, None, key).expect("in the band");
+        // The box the drawn mesh reads: its sealed hollows as rock (`sealed_hollows`).
+        let samples = sealed_hollows(&body, &samples).unwrap_or(samples);
         let mesh = extract_all_edges(&samples);
         let q = i32::from(vd_terrain::VERTEX_QUANTUM as i16);
         let mut met = 0;
@@ -3766,17 +4005,13 @@ mod tests {
             .filter_map(|p| cache.get(planet(), &body, None, p))
             .collect();
         let samples = sample_box(&body, None, left).expect("in the band");
+        // The box the drawn mesh reads: its sealed hollows as rock (`sealed_hollows`).
+        let samples = sealed_hollows(&body, &samples).unwrap_or(samples);
         let mesh = extract(&samples);
         let o = DVec3::from_array(gl.origin_m);
         let mut checked = 0;
         let mut deep = 0u32;
-        let mut deepest: f64 = 0.0;
-        for (i, (v, m)) in mesh
-            .vertices
-            .iter()
-            .zip(gl.morph_targets().iter())
-            .enumerate()
-        {
+        for (v, m) in mesh.vertices.iter().zip(gl.morph_targets().iter()) {
             // The exact radial of the vertex (the target's own is rounded through f32).
             let p = vertex_position_m(&body, &samples, *v);
             let dir = DVec3::new(p[0], p[1], p[2]).normalize();
@@ -3790,27 +4025,14 @@ mod tests {
             checked += u32::from(on);
             // ★ A VERTEX IN A CAVE READS THE FIELD BY RULE, and the builder does not count it as a
             // fallback (`missing & ((field − len).abs() <= reach_m)`). The test names the same rule
-            // through the same function, so the two can never drift apart.
+            // through the same function, so the two can never drift apart. Counted branch-free: the
+            // sealed box holds none (below), so the old per-vertex check of a cave vertex's SHADE
+            // (the parent's shade nearest its target, else the coarser field's) has no vertex here —
+            // a synthetic test of that rule is owed (DEFERRED, THE SPEED STEP (5)).
             let len = DVec3::new(p[0], p[1], p[2]).length();
             let field = vd_terrain::height::height_m(&body, [dir.x, dir.y, dir.z], left.rung + 1);
             let reach = sink_m(&body, left.rung + 1);
-            if !on & ((field - len).abs() > reach) {
-                deep += 1;
-                deepest = deepest.min(len - field);
-                // ★ AND IT SHADES LIKE THE GROUND IT CLOSES ONTO (2026-09-24): its morph normal is
-                // the parent's shade nearest its target within the reach, else the coarser field's
-                // own normal — never the cave wall's own normal, which tore the ring's far edge dark.
-                let expect = nearest_parent_hit(&parents, false, left, *v, dir, r)
-                    .filter(|(h, _)| (h - r).abs() <= reach)
-                    .map(|(_, s)| s)
-                    .or_else(|| field_normal(&body, None, dir, left.rung + 1))
-                    .expect("the recipe answers everywhere");
-                let got = DVec3::from_array(oct_decode(gl.morph_normals[i]).map(f64::from));
-                assert!(
-                    got.dot(expect) > 0.999,
-                    "the cave vertex's shade {got:?} against the ground's {expect:?}"
-                );
-            }
+            deep += u32::from(!on & ((field - len).abs() > reach));
         }
         // The extractor's own vertices; the skirts' targets are their tops' dropped.
         let targets = mesh.vertices.len() as u32;
@@ -3844,6 +4066,11 @@ mod tests {
         // (2026-09-15, the earlier reading: 4 489 of 4 493 on a parent triangle, four fallbacks.
         // Before the crust rule the same box held 8 189 targets and two fell into a CAVE MOUTH in
         // the parent.)
+        //
+        // ★ (2026-09-28, ruling B22 step 2, THE SEALED HOLLOWS ARE DRAWN AS ROCK: the drawn mesh
+        // reads this box with its caves as rock, so the box holds NO cave vertex; the one of step 1,
+        // 30.49 m under its field, is gone with its cave, and no target can follow a parent into a
+        // cave any more.)
         let seam = gl.morph_seam;
         assert_eq!(
             checked + fallbacks + seam + deep,
@@ -3851,11 +4078,7 @@ mod tests {
             "{checked} on the parent of {targets}, {fallbacks} fallbacks, {seam} on a seam, {deep} in a cave"
         );
         assert_eq!(seam, 0, "this box holds no seam vertex");
-        assert_eq!(deep, 1, "the cave vertices of this box");
-        assert!(
-            (-31.0..=-30.0).contains(&deepest),
-            "the deepest cave vertex stands {deepest:.2} m under its field"
-        );
+        assert_eq!(deep, 0, "the drawn box holds no cave vertex");
         // A vertex the two chunks share (the same world position) has the same target.
         let ol = DVec3::from_array(gl.origin_m);
         let or = DVec3::from_array(gr.origin_m);
@@ -3894,6 +4117,8 @@ mod tests {
         let body = home_planet();
         let key = surface_key(&body, 0, 300, 700);
         let samples = sample_box(&body, None, key).expect("in the band");
+        // The box the drawn mesh reads: its sealed hollows as rock (`sealed_hollows`).
+        let samples = sealed_hollows(&body, &samples).unwrap_or(samples);
         let mesh = extract(&samples);
         let g = geometry_of(&body, key).expect("the chunk");
         // The boundary edges of the extractor's mesh, by a count of their uses.
@@ -3940,7 +4165,8 @@ mod tests {
             let is_down = hang(p_top) > 0.0;
             down += u32::from(is_down);
             up += u32::from(!is_down);
-            let depth = if is_down { drop } else { ceiling };
+            // Every skirt of this sealed box hangs DOWN (below), so its depth is the drop.
+            let depth = drop;
             assert_eq!(g.normals[i], g.normals[top]);
             let (si, st) = (
                 DVec3::from(g.sink_of(i).map(f64::from)),
@@ -3952,8 +4178,11 @@ mod tests {
             assert!(((mt - ms).length() - depth).abs() < 0.01);
             i += 1;
         }
-        // This box's ground faces the sky: most of its skirts hang down; its caves' roofs rise.
-        assert!(down > up, "{down} down, {up} up");
+        // This box's ground faces the sky and its hollows are sealed (`sealed_hollows`), so it holds
+        // no cave roof: every skirt hangs down. (Before the sealing its caves' roofs rose; the
+        // ceiling's own rule is `a_ceilings_skirt_hangs_up_and_a_grounds_hangs_down`.)
+        assert!(down > 0, "{down} down");
+        assert_eq!(up, 0, "{down} down, {up} up");
         // Every skirt triangle faces away from the chunk: its normal points away from the base
         // triangle's third corner (checked through the winding rule the builder applied).
         let mut outward = 0;

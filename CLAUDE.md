@@ -99,6 +99,16 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     stall; (3) THE GROUND with biomes, believable, no flicker at any distance; (4) THE WATER FILL (one-volume, option (b):
     exact from ~450 km, smooth nearer; measure the smaller hand-over for "no flickers at ANY distance"); (5) THE EDIT
     SYSTEM as its own step. Q3/Q4/Q6 accepted; Q5 (the hills' average) decided in the ground step.
+    ★★ B23 (2026-09-28, owner: "Ideally we don't do any caps and see what's happening … fully generated, not custom
+    built, as all those laws should be applied to other planets and moons"): NO CAPS — the gates' bands are READINGS,
+    never stops; every clamp/ceiling inside an operator goes or is replaced by its law (a limit that IS a law stays,
+    named with its calibration body); the caps of ice come only from the climate law; the owner's look judges. THE
+    THIRD REFERENCE PICTURE (outside the repo; status §9). FULLY GENERATED: no hand placement, no per-planet tuning;
+    each ground step judged on the home planet AND other real bodies (a planet, a moon), never a test-only variant.
+    ★★ B24 (2026-09-29, owner: "Ok, let's build temporal pass now."): D1 YES — BUILD THE TEMPORAL PATH by
+    `docs/investigation/2026-09-28/temporal_path_design.md`; D2–D4 as the design recommends (T0 measure → T1 motion → T2
+    the first picture at the sizes that ship → T3 the one geometry pass only after the edge look D5; our own
+    reconstruction on FSR 2.2's structure, MetalFX only on D12); MSAA stays the default until D5/D14; every look the owner's.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

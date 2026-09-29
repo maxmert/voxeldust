@@ -1550,6 +1550,46 @@ impl Sweep<'_> {
     }
 }
 
+impl AskBound {
+    /// ★ ONE CHUNK READ FROM ONE EYE UNDER THIS BOUND (see [`LadderView::probe`]). It reads the
+    /// bound alone and no span, so a renderer whose view is away on a builder with a descent (ruling
+    /// B22 step 2) probes with the bound of the descent it last applied.
+    #[must_use]
+    pub fn probe(
+        &self,
+        body: &BodyDefinition,
+        artifact: Option<&ArtifactCache>,
+        eye_m: [f64; 3],
+        key: ChunkKey,
+    ) -> BandProbe {
+        let eye = DVec3::from_array(eye_m);
+        let len = eye.length();
+        let ladder = *body.ladder();
+        if len.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            // An eye at the body's own centre has no radial: the descent wants nothing there.
+            return BandProbe::default();
+        }
+        let d = eye / len;
+        // The drawn ground under the eye, the same reading the band's own descent takes.
+        let surface = crate::chunks::drawn_surface_m(body, artifact, [d.x, d.y, d.z]);
+        let altitude = floored_altitude_m(len - surface);
+        let horizon = horizon_m(surface, altitude);
+        let frame = EyeFrame::new(eye);
+        let col = Column::of(key);
+        let geo = column_geometry(&ladder, &frame, eye, col, surface);
+        let (fade_in, _) = self.fade_bands(col.rung, ladder.rungs);
+        let territory = self.territory_m(col.rung, ladder.rungs);
+        let inside = (geo.near < territory) & (geo.far > fade_in[1]);
+        BandProbe {
+            near_m: geo.near,
+            far_m: geo.far,
+            territory_m: territory,
+            horizon_m: horizon,
+            urgent: inside & (geo.near <= horizon),
+        }
+    }
+}
+
 impl LadderView {
     /// The surface span and peak of a column, read once per residency, stamped with this descent.
     fn span(
@@ -1631,31 +1671,7 @@ impl LadderView {
         eye_m: [f64; 3],
         key: ChunkKey,
     ) -> BandProbe {
-        let eye = DVec3::from_array(eye_m);
-        let len = eye.length();
-        let ladder = *body.ladder();
-        if len.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
-            // An eye at the body's own centre has no radial: the descent wants nothing there.
-            return BandProbe::default();
-        }
-        let d = eye / len;
-        // The drawn ground under the eye, the same reading the band's own descent takes.
-        let surface = crate::chunks::drawn_surface_m(body, artifact, [d.x, d.y, d.z]);
-        let altitude = floored_altitude_m(len - surface);
-        let horizon = horizon_m(surface, altitude);
-        let frame = EyeFrame::new(eye);
-        let col = Column::of(key);
-        let geo = column_geometry(&ladder, &frame, eye, col, surface);
-        let (fade_in, _) = self.bound.fade_bands(col.rung, ladder.rungs);
-        let territory = self.bound.territory_m(col.rung, ladder.rungs);
-        let inside = (geo.near < territory) & (geo.far > fade_in[1]);
-        BandProbe {
-            near_m: geo.near,
-            far_m: geo.far,
-            territory_m: territory,
-            horizon_m: horizon,
-            urgent: inside & (geo.near <= horizon),
-        }
+        self.bound.probe(body, artifact, eye_m, key)
     }
 
     pub fn wanted(
