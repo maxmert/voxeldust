@@ -554,6 +554,12 @@ pub(crate) mod tests {
                     placements: 6460,
                     placements_moved: 0,
                 }),
+                reconstruction: Some(DevReconstruction {
+                    jitter_px: [0.25, -0.125],
+                    render_px: [1284, 720],
+                    display_px: [2568, 1440],
+                    resets: [1, 0, 0, 0],
+                }),
                 last_gap: Some(DevBandGap {
                     realm: "Planet(7)".to_owned(),
                     frame: 902,
@@ -660,6 +666,10 @@ pub(crate) mod tests {
         assert!(json.contains("\"eye_refusals\":2"));
         assert!(json.contains("\"eye_jump_m\":0.125"));
         assert!(json.contains("\"eye_step_m\":0.25"));
+        // ★ THE RECONSTRUCTION'S ROW rides the stamp (the temporal path's T2).
+        assert!(json.contains("\"jitter_px\":[0.25,-0.125]"));
+        assert!(json.contains("\"display_px\":[2568,1440]"));
+        assert!(json.contains("\"resets\":[1,0,0,0]"));
         assert!(json.contains("\"transfer\":{\"kind\":\"none\"}"));
         // The three row-drop honesty counters ride the surface (audit :304 — a wrongly-armed
         // resurrect guard must be VISIBLE to `vdctl state`), each with its distinct sample value.
@@ -944,6 +954,32 @@ pub struct DevTerrainStamp {
     /// changed a value. Absent in a state from an older client.
     #[serde(default)]
     pub frame_cost: Option<DevFrameCost>,
+    /// ★ THE RECONSTRUCTION'S ROW (the temporal path's T2): the frame's jitter, its two picture sizes
+    /// and the history's restarts — written by the headless capture onto the frame's own stamp. Absent
+    /// without the reconstruction, and in a state from an older client.
+    #[serde(default)]
+    pub reconstruction: Option<DevReconstruction>,
+}
+
+/// ★ THE RECONSTRUCTION'S ROW on [`DevTerrainStamp`] (the temporal path's T2; the design §12.3): what
+/// the frame's render picture sampled and how often the history restarted — what the gates need to
+/// reproject a jittered picture exactly and to count G-RESET.
+///
+/// Example: the hull flies the 240 m/s leg under `VD_TEMPORAL=1 VD_RENDER_SCALE=0.5`; frame 1 706's row
+/// reads the jitter `[0.25, -0.1667]` (render pixel `i` sampled the scene at `i + 0.5 + jitter`), the
+/// render picture 1 284 × 720, the display picture 2 568 × 1 440, and the resets `[1, 0, 0, 0]` — the
+/// first frame's, and none on the leg.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DevReconstruction {
+    /// The projection's offset of the frame's render picture, in render pixels.
+    pub jitter_px: [f32; 2],
+    /// The render picture's size (the grid the main passes draw).
+    pub render_px: [u32; 2],
+    /// The display picture's size (the reconstruction's output).
+    pub display_px: [u32; 2],
+    /// The history's restarts by cause since the client's start: the first frame, a lost device, a
+    /// new display size, a tool's jump.
+    pub resets: [u64; 4],
 }
 
 /// ★ THE FRAME'S COST ROW on [`DevTerrainStamp`] (2026-09-24, the window's heat). Every earlier

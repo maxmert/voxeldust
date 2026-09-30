@@ -582,7 +582,7 @@ fn air_table() {
             return;
         };
         let radius = body.ladder().radius_m();
-        match vd_client::sky::sky_terms(&charter, radius) {
+        match vd_client::sky::sky_terms(&charter, radius, body.relief_bound_m(0)) {
             Some(terms) => {
                 println!(
                     "{realm:?}\t{role}\tAIR\t{radius:.0}\t{:.0}\t{}\t({:.0}, {:.0}, {:.0})",

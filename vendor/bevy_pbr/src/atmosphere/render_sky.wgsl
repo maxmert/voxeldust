@@ -1,15 +1,15 @@
 enable dual_source_blending;
 
 #import bevy_pbr::atmosphere::{
-    bindings::{view, settings},
+    bindings::{view, settings, atmosphere},
     functions::{
         sample_transmittance_lut, sample_transmittance_lut_segment,
         sample_sky_view_lut, direction_world_to_atmosphere,
         uv_to_ray_direction, uv_to_ndc, sample_aerial_view_lut,
         sample_sun_radiance, ndc_to_camera_dist, raymarch_atmosphere, 
-        get_view_position, max_atmosphere_distance, get_raymarch_segment,
-        sample_density_lut, sample_local_inscattering,
-        ABSORPTION_DENSITY, SCATTERING_DENSITY, MIN_EXTINCTION
+        get_view_position, pixel_sky_distance, get_depth_segment,
+        sample_density_lut, get_eye_position, below_growth, sample_pixel_inscattering,
+        ABSORPTION_DENSITY, SCATTERING_DENSITY, MIN_EXTINCTION, RAY_PIXEL_SKY, RAY_TO_SURFACE
     },
 };
 
@@ -64,6 +64,11 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
     let r = length(world_pos);
     let up = normalize(world_pos);
     let mu = dot(ray_dir_ws, up);
+    // VOXELDUST PATCH (the air under its ground, 2026-09-30): the march starts at the TRUE eye, which
+    // may stand under the ground sphere (over a dry sea floor); the tables' reads keep the lifted one.
+    let eye_pos = get_eye_position();
+    let eye_r = length(eye_pos);
+    let eye_mu = dot(ray_dir_ws, normalize(eye_pos));
     let max_samples = settings.sky_max_samples;
     let should_raymarch = settings.rendering_method == 1u;
 
@@ -91,8 +96,8 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
                 inscattering = air_l.rgb;
                 transmittance = air_t.rgb;
             } else {
-                let t_max = max_atmosphere_distance(r, mu);
-                let result = raymarch_atmosphere(world_pos, ray_dir_ws, t_max, max_samples, in.uv, true);
+                let t_max = pixel_sky_distance(eye_r, eye_mu);
+                let result = raymarch_atmosphere(eye_pos, ray_dir_ws, t_max, max_samples, in.uv, RAY_PIXEL_SKY);
                 inscattering = result.inscattering;
                 transmittance = result.transmittance;
             }
@@ -101,31 +106,37 @@ fn main(in: FullscreenVertexOutput) -> RenderSkyOutput {
             transmittance = sample_transmittance_lut(r, mu);
             inscattering = sample_sky_view_lut(r, ray_dir_as);
         }
-        inscattering += sun_radiance * transmittance;
+        // VOXELDUST PATCH (the points pass, 2026-09-29): under the temporal path the points pass draws the
+        // disc after the reconstruction, at the display size; the sky pass adds it only where it is asked to.
+        if settings.sun_disk_on_sky != 0u {
+            inscattering += sun_radiance * transmittance;
+        }
     } else {
         let t = ndc_to_camera_dist(vec3(uv_to_ndc(in.uv), depth));
         if should_raymarch {
             if air_class == AIR_GROUND {
                 // ONE PARTIAL STEP from the pixel's mean distance to this sample's own, inside the
-                // air's segment exactly as the march clips it.
-                let segment = get_raymarch_segment(r, mu);
+                // air's segment exactly as the march clips it (a ray to a drawn surface: the ground
+                // sphere never ends it).
+                let segment = get_depth_segment(eye_r, eye_mu);
                 let seg_end = max(segment.start, segment.end);
                 let t_from = clamp(air_l.w, segment.start, seg_end);
                 let t_to = clamp(t, segment.start, seg_end);
                 let delta = t_to - t_from;
-                let mid = world_pos + ray_dir_ws * (0.5 * (t_from + t_to));
+                let mid = eye_pos + ray_dir_ws * (0.5 * (t_from + t_to));
                 let local_r = length(mid);
                 let absorption = sample_density_lut(local_r, ABSORPTION_DENSITY);
-                let scattering = sample_density_lut(local_r, SCATTERING_DENSITY);
+                let growth = below_growth(atmosphere, local_r);
+                let scattering = sample_density_lut(local_r, SCATTERING_DENSITY) + growth;
                 let extinction = absorption + scattering;
                 let step_transmittance = exp(-extinction * delta);
-                let local_light = sample_local_inscattering(scattering, ray_dir_ws, mid);
+                let local_light = sample_pixel_inscattering(scattering, growth, ray_dir_ws, mid);
                 inscattering = air_l.rgb
                     + air_t.rgb * (local_light - local_light * step_transmittance)
                         / max(extinction, MIN_EXTINCTION);
                 transmittance = air_t.rgb * step_transmittance;
             } else {
-                let result = raymarch_atmosphere(world_pos, ray_dir_ws, t, max_samples, in.uv, false);
+                let result = raymarch_atmosphere(eye_pos, ray_dir_ws, t, max_samples, in.uv, RAY_TO_SURFACE);
                 inscattering = result.inscattering;
                 transmittance = result.transmittance;
             }

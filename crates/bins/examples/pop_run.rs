@@ -16,15 +16,17 @@
 
 use std::path::{Path, PathBuf};
 
-use vd_client_harness::capture::{capture_rel_path, probe_rel_for, state_rel_for};
+use vd_client_harness::capture::{capture_rel_path, probe_rel_for, render_rel_for, state_rel_for};
 use vd_client_harness::manifest::CaptureKind;
 use vd_client_harness::pop::{Frame, frame_camera, judge_pair, over_floor, sum_reads};
 use vd_devproto::DevState;
 
-/// One recorded frame: the picture, the probe and the frame's stamp.
+/// One recorded frame: the picture, the probe, the frame's stamp, and under the reconstruction (the
+/// temporal path's T2) the render picture before the history, which the seam law reads.
 struct Recorded {
     rgba: image::RgbaImage,
     probe: image::RgbaImage,
+    render: Option<image::RgbaImage>,
     stamp: vd_devproto::DevTerrainStamp,
 }
 
@@ -34,18 +36,23 @@ fn load(run: &Path, label: &str, index: u32) -> Option<Recorded> {
     let probe = image::open(run.join(probe_rel_for(&rel))).ok()?.to_rgba8();
     let state: DevState =
         serde_json::from_str(&std::fs::read_to_string(run.join(state_rel_for(&rel))).ok()?).ok()?;
+    let render = image::open(run.join(render_rel_for(&rel)))
+        .ok()
+        .map(|i| i.to_rgba8());
     Some(Recorded {
         rgba,
         probe,
+        render,
         stamp: state.terrain_stamp?,
     })
 }
 
 fn frame(f: &Recorded) -> Frame<'_> {
-    let (w, h) = f.rgba.dimensions();
+    // The probe's grid: the render picture's (under an up-scale the display picture is larger).
+    let (w, h) = f.probe.dimensions();
     let (w, h) = (w as usize, h as usize);
     Frame {
-        rgba: f.rgba.as_raw(),
+        rgba: f.render.as_ref().map_or(f.rgba.as_raw(), |r| r.as_raw()),
         probe: f.probe.as_raw(),
         width: w,
         height: h,
@@ -54,6 +61,10 @@ fn frame(f: &Recorded) -> Frame<'_> {
             let r = f.stamp.hud_rect_px.map(f64::from);
             ((r[2] > r[0]) & (r[3] > r[1])).then_some(r)
         },
+        jitter_px: f
+            .stamp
+            .reconstruction
+            .map_or([0.0; 2], |r| r.jitter_px.map(f64::from)),
     }
 }
 

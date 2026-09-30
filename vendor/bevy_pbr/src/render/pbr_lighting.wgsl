@@ -3,7 +3,7 @@
 #import bevy_pbr::{
     mesh_view_types::POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
     mesh_view_bindings as view_bindings,
-    atmosphere::functions::{calculate_visible_sun_ratio, clamp_to_surface},
+    atmosphere::functions::{calculate_visible_sun_ratio, clamp_to_surface, below_transmittance},
     atmosphere::bruneton_functions::transmittance_lut_r_mu_to_uv,
 }
 #import bevy_render::maths::PI
@@ -916,7 +916,10 @@ color *= (*light).color.rgb * texture_sample;
     let mu_light = dot(L, local_up);
 
     // Sample atmosphere
-    let transmittance = sample_transmittance_lut(r, mu_light);
+    // VOXELDUST PATCH (the air under its ground, 2026-09-30): a ground under the sphere (a dry sea
+    // floor) takes the light the sphere takes above it, through the air between the two.
+    let transmittance = sample_transmittance_lut(r, mu_light)
+        * below_transmittance(atmosphere, length(P_as), dot(L, normalize(P_as)));
     let sun_visibility = calculate_visible_sun_ratio(atmosphere, r, mu_light, (*light).sun_disk_angular_size);
     
     // Apply atmospheric effects

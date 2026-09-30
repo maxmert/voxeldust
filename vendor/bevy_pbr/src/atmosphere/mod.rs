@@ -36,6 +36,9 @@
 mod environment;
 mod node;
 pub mod resources;
+// VOXELDUST PATCH (the points pass, 2026-09-29): the air's graph labels, so a pass can stand after the sky
+// (the temporal path's reactive mask copies the picture after the sky, before the transparent pass).
+pub use node::AtmosphereNode;
 
 use bevy_app::{App, Plugin, Update};
 use bevy_asset::{embedded_asset, AssetId, Handle};
@@ -82,7 +85,7 @@ use crate::{
 };
 
 use self::{
-    node::{AtmosphereLutsNode, AtmosphereNode, RenderSkyNode},
+    node::{AtmosphereLutsNode, RenderSkyNode},
     resources::{
         prepare_atmosphere_bind_groups, prepare_atmosphere_textures, AtmosphereBindGroupLayouts,
         AtmosphereLutPipelines, AtmosphereSampler,
@@ -240,6 +243,47 @@ pub struct Atmosphere {
     ///
     /// units: m
     pub planet_center: Vec3,
+
+    /// VOXELDUST PATCH (the air under its ground, 2026-09-30): how the medium continues UNDER the
+    /// `bottom_radius` sphere, where a drawn ground or the eye stands lower than the sphere (a dry
+    /// sea floor, a basin). Upstream lifts such an eye onto the sphere and ends every ray at it, so
+    /// the ground under the sphere takes no air at all. [`Self::earthlike`] states no growth.
+    pub below: AtmosphereBelow,
+}
+
+/// VOXELDUST PATCH (the air under its ground, 2026-09-30): the medium under the `bottom_radius`
+/// sphere. There every term holds its value at the sphere, and ONE term keeps growing by its own
+/// exponential law (the molecules, by the pressure law): its density at depth `d` under the sphere is
+/// `scattering · (e^(d / scale_height) − 1)` MORE than at the sphere, scattering with the Rayleigh
+/// phase. The ray march reads the held value from the medium's own table and adds the growth; the
+/// sunlight under the sphere crosses `extinction` (the whole medium's, at the sphere) plus the growth.
+///
+/// Example: an eye 2 km over a dry sea floor 6 km under the sea's sphere marches its air from the eye
+/// itself, and the blue air it crosses there is `e^(4 km / H)` times the sea level's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AtmosphereBelow {
+    /// The growing term's scattering at the sphere, per metre (RGB).
+    pub scattering: Vec3,
+    /// The growing term's scale height, metres (positive).
+    pub scale_height: f32,
+    /// The whole medium's extinction (absorption and scattering) at the sphere, per metre (RGB).
+    pub extinction: Vec3,
+    /// THE FLOOR, metres from the centre: no drawn ground stands lower. A pixel's sky ray (no drawn
+    /// surface) runs through the medium under the sphere and ends only here, under a hole in the
+    /// drawn ground, so the growth is never read deeper.
+    pub floor_radius: f32,
+}
+
+impl Default for AtmosphereBelow {
+    /// No growth and a clear medium under the sphere: upstream scenes never stand under it.
+    fn default() -> Self {
+        Self {
+            scattering: Vec3::ZERO,
+            scale_height: 1.0,
+            extinction: Vec3::ZERO,
+            floor_radius: 0.0,
+        }
+    }
 }
 
 impl Atmosphere {
@@ -253,6 +297,7 @@ impl Atmosphere {
             ground_albedo: EARTH_ALBEDO,
             medium,
             planet_center: Vec3::new(0.0, -EARTH_BOTTOM_RADIUS, 0.0),
+            below: AtmosphereBelow::default(),
         }
     }
 }
@@ -271,6 +316,7 @@ impl ExtractComponent for Atmosphere {
             ground_albedo: item.ground_albedo,
             medium: item.medium.id(),
             planet_center: item.planet_center,
+            below: item.below,
         })
     }
 }
@@ -285,6 +331,8 @@ pub struct ExtractedAtmosphere {
     pub medium: AssetId<ScatteringMedium>,
     /// VOXELDUST PATCH (planet centre).
     pub planet_center: Vec3,
+    /// VOXELDUST PATCH (the air under its ground).
+    pub below: AtmosphereBelow,
 }
 
 /// This component controls the resolution of the atmosphere LUTs, and
@@ -358,6 +406,11 @@ pub struct AtmosphereSettings {
 
     /// The rendering method to use for the atmosphere.
     pub rendering_method: AtmosphereMode,
+
+    /// VOXELDUST PATCH (the points pass, 2026-09-29): whether the sky pass adds the sun's disc on sky
+    /// pixels. True upstream; false under the temporal path, where the points pass draws the disc
+    /// after the reconstruction, at the display size (the temporal path design §7.7).
+    pub sun_disk_on_sky: bool,
 }
 
 impl Default for AtmosphereSettings {
@@ -376,6 +429,7 @@ impl Default for AtmosphereSettings {
             scene_units_to_m: 1.0,
             sky_max_samples: 16,
             rendering_method: AtmosphereMode::LookupTexture,
+            sun_disk_on_sky: true,
         }
     }
 }
@@ -396,6 +450,8 @@ pub struct GpuAtmosphereSettings {
     pub scene_units_to_m: f32,
     pub sky_max_samples: u32,
     pub rendering_method: u32,
+    /// VOXELDUST PATCH (the points pass): `AtmosphereSettings::sun_disk_on_sky`, one or nought.
+    pub sun_disk_on_sky: u32,
 }
 
 impl Default for GpuAtmosphereSettings {
@@ -420,6 +476,7 @@ impl From<AtmosphereSettings> for GpuAtmosphereSettings {
             scene_units_to_m: s.scene_units_to_m,
             sky_max_samples: s.sky_max_samples,
             rendering_method: s.rendering_method as u32,
+            sun_disk_on_sky: u32::from(s.sun_disk_on_sky),
         }
     }
 }

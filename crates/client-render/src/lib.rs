@@ -495,7 +495,7 @@ const STAR_PROBE_COUNT: usize = 48;
 ///
 /// The position holds the star's CENTRE, repeated for all four corners, so Bevy still computes a
 /// correct bounding box for the cloud. The corner sign is what the vertex shader expands.
-const ATTRIBUTE_STAR_CORNER: MeshVertexAttribute =
+pub(crate) const ATTRIBUTE_STAR_CORNER: MeshVertexAttribute =
     MeshVertexAttribute::new("StarCorner", 0x5741_0001, VertexFormat::Float32x2);
 /// THE MORPH METRE of a ground vertex (slice 8 step 3, packed in step 5): how far along its own
 /// radial the vertex stands from the next coarser rung's surface, one `f32` — shader location 8,
@@ -788,9 +788,9 @@ fn ground_vertex_layout(
     descriptor.vertex.buffers = vec![layout.0.get_layout(&attributes)?];
     Ok(())
 }
-const ATTRIBUTE_STAR_COLOR: MeshVertexAttribute =
+pub(crate) const ATTRIBUTE_STAR_COLOR: MeshVertexAttribute =
     MeshVertexAttribute::new("StarColor", 0x5741_0002, VertexFormat::Float32x4);
-const ATTRIBUTE_STAR_BASE_R: MeshVertexAttribute =
+pub(crate) const ATTRIBUTE_STAR_BASE_R: MeshVertexAttribute =
     MeshVertexAttribute::new("StarBaseRadius", 0x5741_0003, VertexFormat::Float32);
 
 /// THE STAR SPRITE MATERIAL (S11): the apparent-size floor's constants, and nothing else.
@@ -805,7 +805,7 @@ struct StarSkyMaterial {
 }
 
 #[derive(ShaderType, Debug, Clone, PartialEq)]
-struct StarSkyParams {
+pub(crate) struct StarSkyParams {
     /// (Kept for the uniform's shape; the STAR path no longer reads it — a star is sized by its own
     /// flux now, not by the shared presence floor. The floor still governs realm markers.)
     min_apparent_radius_px: f32,
@@ -1003,6 +1003,9 @@ pub mod gpu_check;
 mod gpu_clock;
 mod measure;
 mod motion_capture;
+mod points;
+mod reconstruction;
+mod render_picture;
 /// Run the client renderer. BLOCKS until exit; the bin MUST call this on the MAIN thread
 /// (winit/the runner need it) with the core loop on a separate thread. Dispatches on the
 /// mode: a real window (human) or headless offscreen capture (the agent's eyes).
@@ -1018,6 +1021,8 @@ struct StarSkyShaderPlugin;
 
 impl Plugin for StarSkyShaderPlugin {
     fn build(&self, app: &mut App) {
+        // The law's one module, importable by the star material and by the points pass (T2).
+        bevy::shader::load_shader_library!(app, "star_law.wgsl");
         bevy::asset::embedded_asset!(app, "star_sky.wgsl");
     }
 }
@@ -1242,11 +1247,13 @@ pub(crate) const PROBE_LAYER: usize = 1;
 /// layer and the camera does not, so a caster chunk two rungs coarser than the drawn one throws
 /// the shadow and never appears in the picture.
 pub(crate) const SHADOW_LAYER: usize = 2;
-/// The readback copiers' slots: the picture, the probe, and the motion with its depth (T1, under
-/// the motion prepass; `motion_capture`).
+/// The readback copiers' slots: the picture, the probe, the motion with its depth (T1, under the
+/// motion prepass; `motion_capture`), and the render picture before the history (T2, under the
+/// reconstruction; `render_picture`).
 const COPIER_MAIN: u8 = 0;
 const COPIER_PROBE: u8 = 1;
 const COPIER_MOTION: u8 = 2;
+const COPIER_RENDER: u8 = 3;
 
 /// The probe camera: follows the picture's camera exactly (transform and projection, copied every
 /// frame after the planes are derived), draws only [`PROBE_LAYER`], no tonemapping, no dither, no
@@ -1396,6 +1403,9 @@ fn run_windowed(handles: RenderHandles) {
             MaterialPlugin::<GroundMaterial>::default(),
             // T1: the motion target's sentinel (a window has no capture to read it back into).
             motion_capture::MotionCapturePlugin { readback: false },
+            // T2: the reconstruction (it acts only on a camera the switch marks), then the points pass.
+            reconstruction::ReconstructionPlugin,
+            points::PointsPlugin,
         ))
         .add_systems(Startup, (setup_scene, gpu_check::gpu_recipe_self_check))
         .add_systems(
@@ -1473,6 +1483,9 @@ fn setup_scene(
     }
     if let Some(motion) = render_measure.motion_prepass() {
         cam.insert(motion);
+    }
+    if let Some(reconstruction) = render_measure.reconstruction_bundle() {
+        cam.insert(reconstruction);
     }
     // ★ BLOOM IS OFF, AND ONE ENV VAR AWAY (owner, 2026-08-29: "skip bloom, but keep the possibility
     // to quickly enable for a test").
@@ -2230,7 +2243,7 @@ fn sync_star_sky(
     // "held and never drawn" without a line to say why (the instrument below now says). The probe
     // camera is not the picture; the cloud reads the picture's own camera.
     camera: Single<(&Camera, &Projection), With<FollowCam>>,
-    mut clouds: Query<&mut Transform, With<StarPointMarker>>,
+    mut clouds: Query<(&mut Transform, Option<&mut points::PointsCloud>), With<StarPointMarker>>,
     mut commands: Commands,
     render_measure: Res<measure::RenderMeasure>,
 ) {
@@ -2283,6 +2296,14 @@ fn sync_star_sky(
         && let Some(material) = materials.get_mut(handle)
     {
         material.params = params.clone();
+    }
+    // The points pass's copy of the law (the temporal path, T2), refreshed with the material's.
+    for (_, cloud) in &mut clouds {
+        if let Some(mut cloud) = cloud
+            && cloud.0 != params
+        {
+            cloud.0 = params.clone();
+        }
     }
 
     let snap = net.snapshot.load();
@@ -2358,7 +2379,9 @@ fn sync_star_sky(
             mesh.insert_attribute(ATTRIBUTE_STAR_COLOR, cloud.colors.clone());
             mesh.insert_attribute(ATTRIBUTE_STAR_BASE_R, cloud.base_radius_m.clone());
             mesh.insert_indices(bevy::mesh::Indices::U32(cloud.indices.clone()));
-            let material = materials.add(StarSkyMaterial { params });
+            let material = materials.add(StarSkyMaterial {
+                params: params.clone(),
+            });
             let (translation, rotation) =
                 vd_client::render_snapshot::sky_cloud_transform(reference, &anchor, eye.eye);
             drawn.cloud = Some(
@@ -2384,6 +2407,17 @@ fn sync_star_sky(
                     ))
                     .id(),
             );
+            // ★ THE TEMPORAL PATH (T2, the design §7.7): the cloud leaves the main passes (its own layer,
+            // which no camera draws) and the points pass draws it after the reconstruction, at the
+            // display size, by the same law.
+            if let Some(entity) = drawn.cloud
+                && render_measure.temporal
+            {
+                commands.entity(entity).insert((
+                    points::PointsCloud(params),
+                    RenderLayers::layer(points::POINTS_LAYER),
+                ));
+            }
             drawn.material = Some(material);
             drawn.shown = Some((sky.generation, reference));
             // The probe's subjects: the brightest stars by the same law the shader mirrors, at the
@@ -2417,7 +2451,7 @@ fn sync_star_sky(
     // parallax — nothing draws it on purpose.
     let (translation, rotation) =
         vd_client::render_snapshot::sky_cloud_transform(reference, &anchor, eye.eye);
-    for mut transform in &mut clouds {
+    for (mut transform, _) in &mut clouds {
         transform.translation = translation.as_vec3();
         transform.rotation = rotation.as_quat();
     }
@@ -3101,7 +3135,7 @@ type Readback = (u8, u64, Option<Arc<vd_devproto::DevTerrainStamp>>, Vec<u8>);
 /// was served last — two consecutive frames of one pair — while the drain runs a frame or two
 /// behind.
 type Readbacks =
-    [std::collections::VecDeque<(u64, Option<Arc<vd_devproto::DevTerrainStamp>>, Vec<u8>)>; 3];
+    [std::collections::VecDeque<(u64, Option<Arc<vd_devproto::DevTerrainStamp>>, Vec<u8>)>; 4];
 /// How many frames' readbacks each slot keeps: past the drain's own lag and one PNG's encode.
 const READBACK_RING: usize = 8;
 #[derive(Resource, Deref)]
@@ -3203,6 +3237,11 @@ fn run_capture(handles: RenderHandles) {
         .add_plugins(motion_capture::MotionCapturePlugin {
             readback: render_measure.motion_prepass().is_some(),
         })
+        .add_plugins((
+            reconstruction::ReconstructionPlugin,
+            points::PointsPlugin,
+            render_picture::RenderPicturePlugin,
+        ))
         // ★ THE PACE (2026-09-23, the performance measurements): 60 Hz, so a headless flight
         // paces like a window; under `VD_CLIENT_UNPACED=1` the loop runs as fast as the work
         // allows, and the stamp's frame time is then the frame's own WORK and nothing else.
@@ -3271,13 +3310,20 @@ fn setup_capture(
     sky_config: Res<sky::SkyConfig>,
     render_measure: Res<measure::RenderMeasure>,
 ) {
+    // ★ THE CAPTURE KEEPS ITS GRID (the temporal path's T2; the design §12.1): the render picture is
+    // the reference view, and under the reconstruction with a render scale the DISPLAY picture grows to
+    // that grid ÷ s. The probe takes the picture's path exactly — a display-size target whose top-left
+    // grid its main pass draws, the same projection (the display's shape) and the same jitter — and
+    // its file keeps the grid, the render picture's meter.
+    let grid = UVec2::new(CAPTURE_W, CAPTURE_H);
+    let display = render_measure.capture_display(grid);
     let size = Extent3d {
-        width: CAPTURE_W,
-        height: CAPTURE_H,
+        width: display.x,
+        height: display.y,
         ..default()
     };
     let mut image =
-        Image::new_target_texture(CAPTURE_W, CAPTURE_H, TextureFormat::bevy_default(), None);
+        Image::new_target_texture(display.x, display.y, TextureFormat::bevy_default(), None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let handle = images.add(image);
     commands.insert_resource(RenderTargetImage(handle.clone()));
@@ -3291,7 +3337,7 @@ fn setup_capture(
     // camera that sees only the probe layer. sRGB like the picture: the probe material emits the
     // linear value whose stored byte is exact (see `probe.wgsl`).
     let mut probe_image =
-        Image::new_target_texture(CAPTURE_W, CAPTURE_H, TextureFormat::bevy_default(), None);
+        Image::new_target_texture(display.x, display.y, TextureFormat::bevy_default(), None);
     probe_image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let probe_handle = images.add(probe_image);
     commands.insert_resource(ProbeTargetImage(probe_handle.clone()));
@@ -3301,24 +3347,54 @@ fn setup_capture(
         &render_device,
         COPIER_PROBE,
     ));
-    commands.spawn((
-        Camera3d::default(),
-        Camera {
-            // Drawn before the picture's camera (a distinct order silences the ambiguity warning);
-            // black is the probe's "nothing drew this pixel".
-            order: -1,
-            clear_color: ClearColorConfig::Custom(Color::BLACK),
-            ..default()
-        },
-        Projection::Perspective(PerspectiveProjection::default()),
-        Transform::from_translation(Vec3::ZERO).looking_at(Vec3::NEG_Z, Vec3::Y),
-        RenderTarget::Image(probe_handle.into()),
-        RenderLayers::layer(PROBE_LAYER),
-        Tonemapping::None,
-        DebandDither::Disabled,
-        Msaa::Off,
-        ProbeCam,
-    ));
+    let probe_cam = commands
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                // Drawn before the picture's camera (a distinct order silences the ambiguity warning);
+                // black is the probe's "nothing drew this pixel".
+                order: -1,
+                clear_color: ClearColorConfig::Custom(Color::BLACK),
+                ..default()
+            },
+            Projection::Perspective(PerspectiveProjection::default()),
+            Transform::from_translation(Vec3::ZERO).looking_at(Vec3::NEG_Z, Vec3::Y),
+            RenderTarget::Image(probe_handle.into()),
+            RenderLayers::layer(PROBE_LAYER),
+            Tonemapping::None,
+            DebandDither::Disabled,
+            Msaa::Off,
+            ProbeCam,
+        ))
+        .id();
+    // ★ THE RENDER PICTURE FOR THE GATES (the temporal path's T2, §12.3): under the reconstruction the
+    // frame's jittered picture before the history, through the gate's tone map, on the render grid beside
+    // the probe, with a copier of its own.
+    if render_measure.temporal {
+        let mut render_image =
+            Image::new_target_texture(CAPTURE_W, CAPTURE_H, TextureFormat::bevy_default(), None);
+        render_image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+        let render_handle = images.add(render_image);
+        commands.insert_resource(render_picture::RenderPictureImage(render_handle.clone()));
+        commands.spawn(ImageCopier::new(
+            render_handle,
+            Extent3d {
+                width: CAPTURE_W,
+                height: CAPTURE_H,
+                ..default()
+            },
+            &render_device,
+            COPIER_RENDER,
+        ));
+    }
+    // Under the reconstruction the probe samples the render picture's points: the same jitter, and
+    // under an up-scale the same drawn grid.
+    if let Some(jitter) = render_measure.probe_jitter_bundle() {
+        commands.entity(probe_cam).insert(jitter);
+    }
+    if display != grid {
+        commands.entity(probe_cam).insert(measure::RenderGrid(grid));
+    }
     let picture_cam = commands
         .spawn((
             Camera3d::default(),
@@ -3343,6 +3419,14 @@ fn setup_capture(
     }
     if let Some(motion) = render_measure.motion_prepass() {
         commands.entity(picture_cam).insert(motion);
+    }
+    if let Some(reconstruction) = render_measure.reconstruction_bundle() {
+        commands.entity(picture_cam).insert(reconstruction);
+    }
+    if display != grid {
+        commands
+            .entity(picture_cam)
+            .insert(measure::RenderGrid(grid));
     }
     // ★ THE SKY NEEDS HDR (slice 8s): the same pair the window's camera gets, and the dome as the
     // ambient light instead of the engine's grey. The probe camera never gets the sky.
@@ -3379,6 +3463,7 @@ fn serve_captures(
     receiver: Res<MainWorldReceiver>,
     target: Res<RenderTargetImage>,
     probe_target: Option<Res<ProbeTargetImage>>,
+    render_target: Option<Res<render_picture::RenderPictureImage>>,
     images: Res<Assets<Image>>,
     net: Res<Net>,
     render_measure: Res<measure::RenderMeasure>,
@@ -3463,6 +3548,17 @@ fn serve_captures(
         },
         None => None,
     };
+    // THE RENDER PICTURE of the SAME frame under the reconstruction (T2): the gates' seam reading.
+    let render_bytes = match &render_target {
+        Some(_) => match latest[usize::from(COPIER_RENDER)]
+            .iter()
+            .find(|(f, _, _)| *f == frame)
+        {
+            Some((_, _, data)) => Some(data.clone()),
+            None => return,
+        },
+        None => None,
+    };
     let Some((job, _)) = pending.take() else {
         return;
     };
@@ -3504,19 +3600,41 @@ fn serve_captures(
     let probe_image = probe_target
         .as_ref()
         .and_then(|p| images.get(&p.0).cloned());
+    let render_image = render_target
+        .as_ref()
+        .and_then(|r| images.get(&r.0).cloned());
     let probe_path = cfg.runs_dir.join(probe_rel_for(&rel));
     let motion_path = cfg.runs_dir.join(motion_rel_for(&rel));
+    let render_path = cfg
+        .runs_dir
+        .join(vd_client_harness::capture::render_rel_for(&rel));
+    // The motion target is the picture camera's own: the picture's (display) size.
+    let copied = picture.as_ref().map(|p| p.texture_descriptor.size);
     std::thread::spawn(move || {
-        let written = write_capture_png(&path, picture.as_ref(), &bytes)
+        let written = write_capture_png(&path, picture.as_ref(), &bytes, true, None)
             .and_then(|()| {
                 match probe_bytes {
-                    // The probe beside the picture — the Tier-A pairing rule names its path.
-                    Some(data) => write_capture_png(&probe_path, probe_image.as_ref(), &data),
+                    // The probe beside the picture — the Tier-A pairing rule names its path — on the
+                    // render grid (its top-left, all of it without an up-scale).
+                    Some(data) => write_capture_png(
+                        &probe_path,
+                        probe_image.as_ref(),
+                        &data,
+                        false,
+                        Some(UVec2::new(CAPTURE_W, CAPTURE_H)),
+                    ),
                     None => Ok(()),
                 }
             })
-            .and_then(|()| match motion_bytes {
-                Some(data) => write_motion_file(&motion_path, &data),
+            .and_then(|()| match (motion_bytes, copied) {
+                (Some(data), Some(copied)) => write_motion_file(&motion_path, &data, copied),
+                _ => Ok(()),
+            })
+            .and_then(|()| match render_bytes {
+                // The render picture beside the picture (T2), by the same pairing rule.
+                Some(data) => {
+                    write_capture_png(&render_path, render_image.as_ref(), &data, false, None)
+                }
                 None => Ok(()),
             });
         let result = written.map(|()| result);
@@ -3529,18 +3647,21 @@ fn serve_captures(
 }
 
 /// ★ THE MOTION FILE (T1): the copier's padded motion and depth, written as the motion census reads
-/// them. The motion target is the picture camera's own, so its size is the picture's. An empty
-/// readback (no copy this frame) writes nothing, and the gate names the missing file.
-fn write_motion_file(path: &std::path::Path, raw: &[u8]) -> Result<(), String> {
+/// them. The motion target is the picture camera's own, `copied` in size (the display picture's);
+/// the file keeps the RENDER grid, its top-left 1 284 × 720 (the design §12.1), which is all of it
+/// without an up-scale. An empty readback (no copy this frame) writes nothing, and the gate names the
+/// missing file.
+fn write_motion_file(path: &std::path::Path, raw: &[u8], copied: Extent3d) -> Result<(), String> {
     use vd_client_harness::motion_census::{MOTION_TEXEL_BYTES, MotionPicture};
     if raw.is_empty() {
         tracing::warn!(path = %path.display(), "no motion was copied for this frame");
         return Ok(());
     }
     let padded_row =
-        RenderDevice::align_copy_bytes_per_row(CAPTURE_W as usize * MOTION_TEXEL_BYTES);
-    let picture = MotionPicture::from_padded(CAPTURE_W, CAPTURE_H, padded_row, raw)
-        .ok_or_else(|| "the motion readback does not hold the picture's size".to_owned())?;
+        RenderDevice::align_copy_bytes_per_row(copied.width as usize * MOTION_TEXEL_BYTES);
+    let picture =
+        MotionPicture::from_padded_window(CAPTURE_W, CAPTURE_H, copied.height, padded_row, raw)
+            .ok_or_else(|| "the motion readback does not hold the render grid".to_owned())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -3548,11 +3669,19 @@ fn write_motion_file(path: &std::path::Path, raw: &[u8]) -> Result<(), String> {
 }
 
 /// Strip the 256-byte row padding from the raw readback bytes and encode a PNG to `path`; the
-/// image is the offscreen target's own (its format names the pixel size), cloned for the thread.
+/// image is the offscreen target's own (its format and its size name the rows), cloned for the thread.
+/// With `keep`, only the image's top-left `keep` rectangle is written (the probe's render grid).
+///
+/// ★ G-ALPHA (the temporal path's T2; the design §7.7 and §12.1) when `check_alpha`: every pixel of
+/// the display picture must be opaque, because the saved PNG keeps all four channels and a sky pixel
+/// with alpha nought would show the viewer's background in the owner's pictures. A picture that fails
+/// is still written, and the log names the count.
 fn write_capture_png(
     path: &std::path::Path,
     img: Option<&Image>,
     raw: &[u8],
+    check_alpha: bool,
+    keep: Option<UVec2>,
 ) -> Result<(), String> {
     let img = img.ok_or("offscreen image missing")?;
     let pixel_size = img
@@ -3560,21 +3689,37 @@ fn write_capture_png(
         .format
         .pixel_size()
         .map_err(|e| e.to_string())?;
-    let row_bytes = CAPTURE_W as usize * pixel_size;
-    let aligned = RenderDevice::align_copy_bytes_per_row(row_bytes);
-    let unpadded: Vec<u8> = if row_bytes == aligned {
+    let size = img.texture_descriptor.size;
+    let kept = keep.map_or(UVec2::new(size.width, size.height), |k| {
+        k.min(UVec2::new(size.width, size.height))
+    });
+    let copied_row = size.width as usize * pixel_size;
+    let row_bytes = kept.x as usize * pixel_size;
+    let aligned = RenderDevice::align_copy_bytes_per_row(copied_row);
+    let unpadded: Vec<u8> = if (row_bytes == aligned) & (kept.y == size.height) {
         raw.to_vec()
     } else {
         raw.chunks(aligned)
-            .take(CAPTURE_H as usize)
+            .take(kept.y as usize)
             .flat_map(|row| &row[..row_bytes.min(row.len())])
             .copied()
             .collect()
     };
+    if check_alpha && pixel_size == 4 {
+        let clear = unpadded.chunks_exact(4).filter(|p| p[3] != u8::MAX).count();
+        if clear > 0 {
+            tracing::warn!(path = %path.display(), pixels = clear, "G-ALPHA: pixels of the display picture are not opaque");
+        }
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let mut copy = img.clone();
+    copy.texture_descriptor.size = Extent3d {
+        width: kept.x,
+        height: kept.y,
+        ..default()
+    };
     copy.data = Some(unpadded);
     let dynamic = copy.try_into_dynamic().map_err(|e| e.to_string())?;
     dynamic.to_rgba8().save(path).map_err(|e| e.to_string())?;
@@ -3617,7 +3762,7 @@ struct ImageCopier {
     buffer: Buffer,
     enabled: Arc<AtomicBool>,
     src_image: Handle<Image>,
-    /// Which readback this is: `COPIER_MAIN` or `COPIER_PROBE`.
+    /// Which readback this is: `COPIER_MAIN`, `COPIER_PROBE` or `COPIER_RENDER`.
     slot: u8,
 }
 
@@ -3741,7 +3886,18 @@ fn receive_image_from_buffer(
     image_copiers: Res<ImageCopiers>,
     render_device: Res<RenderDevice>,
     sender: Res<RenderWorldSender>,
+    readout: Option<Res<reconstruction::ReconstructionReadout>>,
 ) {
+    // THE FRAME'S RECONSTRUCTION ROW (the temporal path's T2) rides the frame's own stamp: the jitter
+    // this very frame's render picture sampled, its sizes and the history's restarts (the gates, §12.3).
+    let stamp = match (image_copiers.stamp.clone(), readout.and_then(|r| r.0)) {
+        (Some(stamp), Some(row)) => {
+            let mut with_row = (*stamp).clone();
+            with_row.reconstruction = Some(row);
+            Some(Arc::new(with_row))
+        }
+        (stamp, _) => stamp,
+    };
     for image_copier in image_copiers.copiers.iter() {
         if !image_copier.enabled() {
             continue;
@@ -3760,7 +3916,7 @@ fn receive_image_from_buffer(
         let _ = sender.send((
             image_copier.slot,
             image_copiers.frame,
-            image_copiers.stamp.clone(),
+            stamp.clone(),
             buffer_slice.get_mapped_range().to_vec(),
         ));
         image_copier.buffer.unmap();

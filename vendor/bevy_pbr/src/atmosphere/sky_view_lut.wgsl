@@ -2,7 +2,7 @@
     atmosphere::{
         bindings::settings,
         functions::{
-            get_view_position, raymarch_atmosphere,
+            get_view_position, raymarch_atmosphere, RAY_TABLE_SKY,
             max_atmosphere_distance, direction_atmosphere_to_world,
             sky_view_lut_uv_to_zenith_azimuth, zenith_azimuth_to_ray_dir,
         },
@@ -34,7 +34,7 @@ fn main(@builtin(global_invocation_id) idx: vec3<u32>) {
     let mu = dot(ray_dir_ws, up);
     let t_max = max_atmosphere_distance(r, mu);
 
-    let result = raymarch_atmosphere(world_pos, ray_dir_ws, t_max, settings.sky_view_lut_samples, uv, true);
+    let result = raymarch_atmosphere(world_pos, ray_dir_ws, t_max, settings.sky_view_lut_samples, uv, RAY_TABLE_SKY);
 
     textureStore(sky_view_lut_out, idx.xy, vec4(result.inscattering, 1.0));
 }

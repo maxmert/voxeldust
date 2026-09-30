@@ -20,6 +20,15 @@
 //! - `VD_CLEAR_SENTINEL=1`: the picture clears to the census's sentinel (pure cyan,
 //!   `vd_client_harness::picture_census::SENTINEL_RGB8`), a colour no lit ground can take, so a pixel
 //!   that no geometry wrote keeps it (the picture census; run it with `VD_SKY=0`).
+//! - `VD_TEMPORAL=1` (T2): THE RECONSTRUCTION — the picture camera draws a jittered render picture
+//!   through the depth and motion prepass, MSAA off, and `reconstruction` rebuilds the display picture
+//!   from it and its history; with `VD_RENDER_SCALE` the render picture is smaller than the display
+//!   (held by the floor law) and the reconstruction up-scales it, so the picture fills the window.
+//!   ★ THE CAPTURE KEEPS ITS GRID (the design §12.1): under both switches the headless capture's
+//!   render picture stays the reference view (1 284 × 720) and its display picture grows to that
+//!   grid ÷ s ([`RenderMeasure::capture_display`], [`RenderGrid`]).
+//! - `VD_SHARPEN=<0..1>` (T2, the owner's look at D7): the sharpen's strength after the tone map under
+//!   the reconstruction; 0 turns it off; unset, the settings' PROPOSED strength.
 //! - `VD_PRICE_G2_TARGETS=1`: one pass a frame clears and stores four display-size textures in the
 //!   deferred route's formats, its viewport at the drawn rectangle — row W of the design's budget,
 //!   priced before T3 builds the route (M-2b).
@@ -46,6 +55,8 @@ const PREPASS_ENV: &str = "VD_PREPASS";
 const STARS_ENV: &str = "VD_STARS";
 const SENTINEL_ENV: &str = "VD_CLEAR_SENTINEL";
 const PRICE_G2_ENV: &str = "VD_PRICE_G2_TARGETS";
+const TEMPORAL_ENV: &str = "VD_TEMPORAL";
+const SHARPEN_ENV: &str = "VD_SHARPEN";
 
 /// What the measurement switches said at startup (ONE struct, read once).
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
@@ -56,6 +67,12 @@ pub(crate) struct RenderMeasure {
     pub stars: bool,
     pub sentinel: bool,
     pub price_g2_targets: bool,
+    /// ★ THE RECONSTRUCTION (T2, `VD_TEMPORAL=1`): the picture camera draws a jittered render
+    /// picture through the depth and motion prepass, MSAA off, at the render scale held by the floor
+    /// law, and `reconstruction` rebuilds the display picture from it.
+    pub temporal: bool,
+    /// The sharpen's strength under the reconstruction (`VD_SHARPEN`; the owner's D7).
+    pub sharpen: f32,
 }
 
 impl Default for RenderMeasure {
@@ -66,6 +83,8 @@ impl Default for RenderMeasure {
             stars: true,
             sentinel: false,
             price_g2_targets: false,
+            temporal: false,
+            sharpen: vd_client::reconstruction::ReconstructionSettings::PROPOSED.sharpen as f32,
         }
     }
 }
@@ -82,19 +101,44 @@ impl RenderMeasure {
             stars: std::env::var(STARS_ENV).map_or(true, |v| v.trim() != "0"),
             sentinel: on(SENTINEL_ENV),
             price_g2_targets: on(PRICE_G2_ENV),
+            temporal: on(TEMPORAL_ENV),
+            sharpen: std::env::var(SHARPEN_ENV)
+                .ok()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|s| (0.0..=1.0).contains(s))
+                .unwrap_or(RenderMeasure::default().sharpen),
+        }
+    }
+
+    /// ★ THE CAPTURE'S DISPLAY SIZE for its render grid (the design §12.1): the grid ÷ s under the
+    /// reconstruction with a render scale (`vd_client::reconstruction::display_size`), else the grid.
+    pub(crate) fn capture_display(self, grid: UVec2) -> UVec2 {
+        match (self.temporal, self.render_scale) {
+            (true, Some(s)) => UVec2::from_array(vd_client::reconstruction::display_size(
+                grid.to_array(),
+                f64::from(s),
+            )),
+            _ => grid,
         }
     }
 
     /// The picture's clear colour: the census's sentinel under its switch (named once, in the
     /// census's own module, so the renderer and the gate cannot state two colours), else the
-    /// caller's own.
+    /// caller's own. ★ Under the reconstruction its alpha is NOUGHT (the design §7.7, change one): the
+    /// sky share of a render pixel is one less its alpha, so the clear's alpha must say "all sky"; the
+    /// reconstruction writes the display picture's alpha one again (change two).
     pub(crate) fn clear_color(self, own_srgb: [f32; 3]) -> ClearColor {
-        ClearColor(if self.sentinel {
+        let color = if self.sentinel {
             let [r, g, b] = vd_client_harness::picture_census::SENTINEL_RGB8;
             Color::srgb_u8(r, g, b)
         } else {
             let [r, g, b] = own_srgb;
             Color::srgb(r, g, b)
+        };
+        ClearColor(if self.temporal {
+            color.with_alpha(0.0)
+        } else {
+            color
         })
     }
 
@@ -104,7 +148,7 @@ impl RenderMeasure {
     pub(crate) fn prepass_bundle(
         self,
     ) -> Option<(bevy::core_pipeline::prepass::DepthPrepass, Msaa)> {
-        (self.prepass != Prepass::Off)
+        (self.temporal || self.prepass != Prepass::Off)
             .then_some((bevy::core_pipeline::prepass::DepthPrepass, Msaa::Off))
     }
 
@@ -112,10 +156,49 @@ impl RenderMeasure {
     pub(crate) fn motion_prepass(
         self,
     ) -> Option<bevy::core_pipeline::prepass::MotionVectorPrepass> {
-        (self.prepass == Prepass::Motion)
+        (self.temporal || self.prepass == Prepass::Motion)
             .then_some(bevy::core_pipeline::prepass::MotionVectorPrepass)
     }
+
+    /// The picture camera's reconstruction under `VD_TEMPORAL=1`: its jitter, its mark, and the sharpen
+    /// after the tone map (the engine's contrast-adaptive sharpening at `VD_SHARPEN`'s strength; the
+    /// owner's D7).
+    pub(crate) fn reconstruction_bundle(
+        self,
+    ) -> Option<(
+        bevy::render::camera::TemporalJitter,
+        crate::reconstruction::ReconstructionCamera,
+        bevy::anti_alias::contrast_adaptive_sharpening::ContrastAdaptiveSharpening,
+    )> {
+        self.temporal.then_some((
+            bevy::render::camera::TemporalJitter::default(),
+            crate::reconstruction::ReconstructionCamera,
+            bevy::anti_alias::contrast_adaptive_sharpening::ContrastAdaptiveSharpening {
+                enabled: self.sharpen > 0.0,
+                sharpening_strength: self.sharpen,
+                denoise: false,
+            },
+        ))
+    }
+
+    /// The probe camera's jitter under `VD_TEMPORAL=1`: it takes the picture's (the design §12.1).
+    pub(crate) fn probe_jitter_bundle(
+        self,
+    ) -> Option<(
+        bevy::render::camera::TemporalJitter,
+        crate::reconstruction::JitterFollower,
+    )> {
+        self.temporal.then_some((
+            bevy::render::camera::TemporalJitter::default(),
+            crate::reconstruction::JitterFollower,
+        ))
+    }
 }
+
+/// ★ A CAMERA'S FIXED RENDER GRID (the capture, the design §12.1): its main passes draw exactly this
+/// top-left rectangle of its display-size targets, whatever the scale's rounding.
+#[derive(Component, Clone, Copy, bevy::render::extract_component::ExtractComponent)]
+pub(crate) struct RenderGrid(pub UVec2);
 
 /// ★ WHICH PREPASS the picture's camera draws (`VD_PREPASS`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,7 +234,9 @@ impl Plugin for RenderMeasurePlugin {
                 "the temporal path's measurement switches are set (T0)"
             );
         }
-        app.insert_resource(measure);
+        app.insert_resource(measure).add_plugins(
+            bevy::render::extract_component::ExtractComponentPlugin::<RenderGrid>::default(),
+        );
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -178,23 +263,38 @@ impl Plugin for RenderMeasurePlugin {
 }
 
 /// ★ THE RENDER SCALE: every picture camera's main passes draw `s` of each side (the probe camera,
-/// order −1, keeps its own size: it is a meter's picture, not the frame's).
+/// order −1, keeps its own size: it is a meter's picture, not the frame's); a camera with a fixed
+/// render grid (the capture's picture and its probe) draws exactly that grid.
 fn apply_render_scale(
     mut commands: Commands,
     measure: Res<RenderMeasure>,
-    views: Query<(Entity, &ExtractedCamera)>,
+    views: Query<(Entity, &ExtractedCamera, Option<&RenderGrid>)>,
 ) {
     let Some(s) = measure.render_scale else {
         return;
     };
-    for (entity, camera) in &views {
+    for (entity, camera, grid) in &views {
         let Some(size) = camera.physical_viewport_size else {
             continue;
         };
+        // A fixed grid first: the capture's probe takes its picture's path exactly (the design §12.1).
+        if let Some(grid) = grid {
+            commands
+                .entity(entity)
+                .insert(MainPassResolutionOverride(grid.0));
+            continue;
+        }
         if camera.order < 0 {
             continue;
         }
-        let side = |n: u32| ((n as f32 * s).round() as u32).max(1);
+        // Under the reconstruction the scale is held by the floor law (`vd_client::reconstruction`):
+        // one render pixel never covers more than one pixel of the reference view.
+        let scale = if measure.temporal {
+            vd_client::reconstruction::lawful_scale(f64::from(s), size.y) as f32
+        } else {
+            s
+        };
+        let side = |n: u32| ((n as f32 * scale).round() as u32).max(1);
         commands
             .entity(entity)
             .insert(MainPassResolutionOverride(UVec2::new(

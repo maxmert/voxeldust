@@ -270,7 +270,14 @@ render-crossing-smoke:
 # planet's ground and two hull legs over it (a berthed hull, boarded, pushed), the band's gap read
 # every frame — GPU-required, LOCAL. Runs RELEASE (the debug client cannot build a ring in time).
 terrain-moving-eye:
-    cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye -- --nocapture --test-threads=1
+    cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye the_band_stays_complete -- --nocapture --test-threads=1
+
+# ★ G-AIR-UNDER (ruling B25, 2026-09-30): THE AIR REACHES EVERY GROUND — an eye 2 km over the solved
+# floor deep under the sea nearest the coast stand, under the air's ground sphere, looking back at the
+# coast, on the multisampled and on the temporal path: the air's sphere is the solve's sea, and the
+# ground's colour steps no more across the eye's level than anywhere else. GPU-required, LOCAL.
+air-under:
+    cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye the_air_reaches -- --nocapture --test-threads=1
 
 # ★ THE CARD'S SEAM (ruling F9 item 2, step 1): one capture client; half way through it a WORKER
 # THREAD starts dispatching the recipe's box chain on the RENDERER'S OWN device and waiting for it.
@@ -326,18 +333,18 @@ picture-census-control rung="3":
 # prepass, so every recorded pair carries its motion, and every leg's still ground must meet the target.
 # `legs` picks the legs as the gate's own knob does (for example "turn" or "0,1,2"); empty flies them all.
 motion-truth legs="":
-    VD_PREPASS=1 {{ if legs != "" { "VD_LEGS=" + legs } else { "" } }} cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye -- --nocapture --test-threads=1
+    VD_PREPASS=1 {{ if legs != "" { "VD_LEGS=" + legs } else { "" } }} cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye the_band_stays_complete -- --nocapture --test-threads=1
 
 # THE MOTION TRUTH'S CONTROL (the design's control 1): the same flight with TODAY'S motion formula in the
 # ground's prepass, which must FAIL the gate on the rows of the chunks that land in a frame.
 motion-truth-control legs="":
-    VD_MOTION_CONTROL=engine VD_PREPASS=1 {{ if legs != "" { "VD_LEGS=" + legs } else { "" } }} cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye -- --nocapture --test-threads=1
+    VD_MOTION_CONTROL=engine VD_PREPASS=1 {{ if legs != "" { "VD_LEGS=" + legs } else { "" } }} cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye the_band_stays_complete -- --nocapture --test-threads=1
 
 # THE BOARDING STORM (D-TERRAIN-5 item 15): ten pilots board ten hulls, each fresh, each settling
 # before the next; the legs fly on the last. The count of saga starts against boardings is the
 # number to read (a refused first attempt is one extra start per boarding).
 boarding-storm:
-    VD_BOARDINGS=10 cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye -- --nocapture --test-threads=1
+    VD_BOARDINGS=10 cargo test --release -p vd-bins --features dev-control,render --test terrain_moving_eye the_band_stays_complete -- --nocapture --test-threads=1
 
 # THE FLIGHTS — the slice 8 foundation's own guard against regression (2026-09-12): the picture
 # gate, the moving eye and the boarding storm, on release binaries, one after the other (never two

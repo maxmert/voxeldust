@@ -29,11 +29,17 @@ pub const EARTH_RAYLEIGH_550_PER_M: f64 = 13.558e-6;
 /// so the shell ends by the format's own quantum, never by a typed kilometre count. `16 · ln 2`.
 pub const SHELL_TOP_SCALE_HEIGHTS: f64 = 11.090_354_888_959_125;
 
-/// ★ THE AEROSOL PLACEHOLDER (design §4.3, owner 2026-09-18, ledgered): Bevy's Earth aerosol term
-/// (Bruneton's calibration) — scaled by the surface number density and the scale height. Its only
-/// inputs are charter words; the SOURCE law (dust from aridity, salt from the sea, ash) is 8c/8e/8o's.
-pub const EARTH_MIE_SCATTERING_PER_M: f64 = 0.444e-6;
-pub const EARTH_MIE_ABSORPTION_PER_M: f64 = 3.996e-6;
+/// ★ THE AEROSOL PLACEHOLDER (design §4.3, owner 2026-09-18, ledgered): Earth's aerosol term
+/// (Bruneton's calibration, as Hillaire 2020 and Bevy 0.16's `Atmosphere::EARTH` state it) — scaled by
+/// the surface number density and the scale height. Its only inputs are charter words; the SOURCE law
+/// (dust from aridity, salt from the sea, ash) is 8c/8e/8o's.
+///
+/// ★ THE HAZE SCATTERS (ruling B25 law 4, 2026-09-30): of the haze's extinction, 3.996 parts in 4.440
+/// SCATTER (its single-scattering albedo, 0.9) and the rest absorbs. MEASURED: Bevy 0.18.1's own Earth
+/// medium (`medium.rs`) swaps the two words, and this placeholder copied the swap — so the haze absorbed
+/// nine tenths of the light it met and darkened the far ground where it should pale it.
+pub const EARTH_MIE_SCATTERING_PER_M: f64 = 3.996e-6;
+pub const EARTH_MIE_ABSORPTION_PER_M: f64 = 0.444e-6;
 pub const EARTH_MIE_ASYMMETRY: f64 = 0.8;
 /// The aerosol's scale height on Earth, m (the boundary layer's), scaled by `H / H⊕`.
 pub const EARTH_MIE_SCALE_HEIGHT_M: f64 = 1_200.0;
@@ -79,10 +85,38 @@ pub struct Term {
     pub phase: Phase,
 }
 
+/// ★ THE AIR UNDER ITS GROUND (ruling B25 law 2, 2026-09-30): how the air continues under the ground
+/// sphere, where a drawn ground or the eye stands lower (a dry sea floor, a basin). The engine's
+/// tables cover the shell from the sphere up; under it every term HOLDS its value at the sphere and
+/// the molecules keep growing by the pressure law, `e^(depth / H)` — no cap. The haze holds (it is the
+/// ledgered placeholder: a haze born at the ground has no law under the sea yet), and the ozone is
+/// nought there.
+///
+/// Example: over a dry sea floor 7.7 km under the home planet's sea, the blue air at the floor is
+/// `e^(7 727 / 7 160)` ≈ 2.9 times the sea level's, and the haze the sea level's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Below {
+    /// The growing term's (the molecules') scattering at the sphere, per metre.
+    pub scattering_per_m: [f64; 3],
+    /// Its scale height, metres: the charter's own.
+    pub scale_height_m: f64,
+    /// The whole air's extinction (every term's scattering and absorption) at the sphere, per metre.
+    pub extinction_per_m: [f64; 3],
+    /// ★ THE FLOOR, m from the centre: the ladder's datum less the body's relief bound — no ground of
+    /// the body stands lower, at any rung. A pixel's SKY ray (no drawn surface) runs through the air
+    /// under the sea's level and ends only here, where it would enter the rock under a hole in the
+    /// drawn ground; the growth never runs deeper than this.
+    pub floor_radius_m: f64,
+}
+
 /// A body's air, as the volume reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SkyTerms {
-    /// The ground's radius, m (the ladder's datum).
+    /// ★ THE AIR'S GROUND, m from the centre (ruling B25 law 1): the SEA LEVEL where the charter states
+    /// a sea — the air rests on the sea, and the charter's words (its pressure is the air's weight,
+    /// calibrated on Earth's at its sea level) hold there — else the ladder's datum. It is also the
+    /// planet's shadow in the air (law 3): the sun sets for the air over the coast behind the sea's
+    /// own horizon.
     pub bottom_radius_m: f64,
     /// The shell's top, m from the centre.
     pub top_radius_m: f64,
@@ -91,8 +125,19 @@ pub struct SkyTerms {
     pub rayleigh: Term,
     pub mie: Term,
     pub ozone: Option<Term>,
+    /// The air under the ground sphere.
+    pub below: Below,
     /// `τ_vis / H` at 550 nm, m⁻¹ — printed as a ratio against [`EARTH_RAYLEIGH_550_PER_M`].
     pub rayleigh_550_per_m: f64,
+}
+
+/// A term's density at the ground sphere (`p = 1`), by the engine's own falloff shapes: one for an
+/// exponential, the tent's height there for a layer.
+fn at_ground(f: Falloff) -> f64 {
+    match f {
+        Falloff::Exponential { .. } => 1.0,
+        Falloff::Tent { center, width } => (1.0 - (1.0 - center).abs() / (0.5 * width)).max(0.0),
+    }
 }
 
 /// The words the air's laws read, widened once.
@@ -143,16 +188,26 @@ fn ozone_term(w: &AirWords, density_ratio: f64, height_ratio: f64, shell_m: f64)
     })
 }
 
-/// THE AIR OF ONE BODY from its charter and its ground radius; `None` for a body without air, or
-/// with air and a missing word.
+/// THE AIR OF ONE BODY from its charter, its ladder's datum radius and its relief bound (the most its
+/// surface falls under the datum, at any rung); `None` for a body without air, or with air and a
+/// missing word. The air's ground is the charter's sea where it states one (the owning realm writes
+/// the solved sea into its charter), else the datum; the air's floor stands the relief under the datum.
+///
+/// Example: the home planet's charter states its sea 3 591 m over the datum, so its air's words hold
+/// at 6 345 261 m from the centre, and the coast's haze is the charter's own — not the 3 % a ground at
+/// the datum left it (MEASURED 2026-09-30).
 #[must_use]
-pub fn sky_terms(charter: &BodyCharter, radius_m: f64) -> Option<SkyTerms> {
+pub fn sky_terms(charter: &BodyCharter, radius_m: f64, relief_m: f64) -> Option<SkyTerms> {
     if charter.flags & CHARTER_FLAG_HAS_AIR == 0 {
         return None;
     }
     let w = air_words(charter)?;
+    let ground_m = radius_m
+        + charter
+            .sea_offset_mm
+            .map_or(0.0, |mm| f64::from(mm) / 1000.0);
     let shell_m = w.scale_height_m * SHELL_TOP_SCALE_HEIGHTS;
-    let top_radius_m = radius_m + shell_m;
+    let top_radius_m = ground_m + shell_m;
     // Rayleigh, exact by construction: the zenith optical depth equals the charter's own word.
     let rayleigh_550_per_m = w.tau_vis / w.scale_height_m;
     let rayleigh = Term {
@@ -183,13 +238,30 @@ pub fn sky_terms(charter: &BodyCharter, radius_m: f64) -> Option<SkyTerms> {
     } else {
         None
     };
+    let mut extinction_per_m = [0.0; 3];
+    for t in [Some(&rayleigh), Some(&mie), ozone.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        let share = at_ground(t.falloff);
+        for (ch, e) in extinction_per_m.iter_mut().enumerate() {
+            *e += (t.scattering_per_m[ch] + t.absorption_per_m[ch]) * share;
+        }
+    }
+    let below = Below {
+        scattering_per_m: rayleigh.scattering_per_m,
+        scale_height_m: w.scale_height_m,
+        extinction_per_m,
+        floor_radius_m: radius_m - relief_m,
+    };
     Some(SkyTerms {
-        bottom_radius_m: radius_m,
+        bottom_radius_m: ground_m,
         top_radius_m,
         ground_albedo: f64::from(charter.bond_albedo_q12) / Q12,
         rayleigh,
         mie,
         ozone,
+        below,
         rayleigh_550_per_m,
     })
 }
@@ -249,6 +321,8 @@ mod tests {
     }
 
     const R_M: f64 = 6.371e6;
+    /// A relief bound of the home planet's order (its finest nodes span ±8 276 m of the datum).
+    const RELIEF_M: f64 = 9_500.0;
 
     /// The exponential share of a falloff, or `None` for a layer — a `match` whose both arms the
     /// tests walk (a `let … else { panic!() }` leaves an arm nobody walks, HR5).
@@ -271,29 +345,29 @@ mod tests {
     fn an_airless_body_has_no_sky() {
         let mut c = earth_like();
         c.flags &= !CHARTER_FLAG_HAS_AIR;
-        assert_eq!(sky_terms(&c, R_M), None);
+        assert_eq!(sky_terms(&c, R_M, RELIEF_M), None);
     }
 
     #[test]
     fn a_charter_with_air_and_a_missing_word_is_refused() {
         let mut no_h = earth_like();
         no_h.scale_height_m = None;
-        assert_eq!(sky_terms(&no_h, R_M), None);
+        assert_eq!(sky_terms(&no_h, R_M, RELIEF_M), None);
         let mut no_p = earth_like();
         no_p.p_surf_pa = None;
-        assert_eq!(sky_terms(&no_p, R_M), None);
+        assert_eq!(sky_terms(&no_p, R_M, RELIEF_M), None);
         let mut no_tau = earth_like();
         no_tau.tau_vis_q12 = None;
-        assert_eq!(sky_terms(&no_tau, R_M), None);
+        assert_eq!(sky_terms(&no_tau, R_M, RELIEF_M), None);
         let mut no_t = earth_like();
         no_t.t_surface_mk = None;
-        assert_eq!(sky_terms(&no_t, R_M), None);
+        assert_eq!(sky_terms(&no_t, R_M, RELIEF_M), None);
     }
 
     #[test]
     fn rayleigh_is_the_charters_depth_over_its_scale_height_and_follows_the_fourth_power() {
         let c = earth_like();
-        let s = sky_terms(&c, R_M).expect("air");
+        let s = sky_terms(&c, R_M, RELIEF_M).expect("air");
         let h = f64::from(c.scale_height_m.expect("h"));
         let tau = f64::from(c.tau_vis_q12.expect("tau")) / 4096.0;
         assert!((s.rayleigh_550_per_m - tau / h).abs() < 1e-18);
@@ -312,7 +386,7 @@ mod tests {
     #[test]
     fn the_shell_ends_at_the_half_float_quantum_and_the_falloff_is_the_scale_height() {
         let c = earth_like();
-        let s = sky_terms(&c, R_M).expect("air");
+        let s = sky_terms(&c, R_M, RELIEF_M).expect("air");
         let h = f64::from(c.scale_height_m.expect("h"));
         let shell = s.top_radius_m - s.bottom_radius_m;
         assert!((shell - h * 16.0 * std::f64::consts::LN_2).abs() < 1e-6);
@@ -325,7 +399,7 @@ mod tests {
     #[test]
     fn at_earths_words_the_placeholder_terms_are_bruneton_s_exactly() {
         let c = earth_like();
-        let s = sky_terms(&c, R_M).expect("air");
+        let s = sky_terms(&c, R_M, RELIEF_M).expect("air");
         let h = f64::from(c.scale_height_m.expect("h"));
         let shell = s.top_radius_m - s.bottom_radius_m;
         // The density ratio is 1 at Earth's pressure and temperature; the height ratio is 1 up to
@@ -370,20 +444,98 @@ mod tests {
     fn a_body_without_a_sea_has_no_ozone_and_a_thin_air_has_no_layer_to_place() {
         let mut dry = earth_like();
         dry.flags &= !CHARTER_FLAG_HAS_SEA;
-        assert_eq!(sky_terms(&dry, R_M).expect("air").ozone, None);
+        assert_eq!(sky_terms(&dry, R_M, RELIEF_M).expect("air").ozone, None);
         // A sea under an air thinner than the 25 hPa level: the layer's centre would be underground.
         let mut thin = earth_like();
         thin.p_surf_pa = Some(1_239);
-        assert_eq!(sky_terms(&thin, R_M).expect("air").ozone, None);
+        assert_eq!(sky_terms(&thin, R_M, RELIEF_M).expect("air").ozone, None);
     }
 
     #[test]
     fn a_thinner_air_scales_the_placeholder_terms_by_its_surface_density() {
         let mut thin = earth_like();
         thin.p_surf_pa = Some(50_662);
-        let s = sky_terms(&thin, R_M).expect("air");
+        let s = sky_terms(&thin, R_M, RELIEF_M).expect("air");
         let ratio = s.mie.scattering_per_m[1] / EARTH_MIE_SCATTERING_PER_M;
         assert!((ratio - 50_662.0 / 101_325.0).abs() < 1e-12, "{ratio}");
+    }
+
+    /// ★ RULING B25 LAW 1: the air rests on the sea. The home planet's charter states its sea 3 591 m over
+    /// the datum; the air's ground and its whole shell stand there. A charter with no sea keeps the datum.
+    #[test]
+    fn the_air_rests_on_the_sea_and_a_dry_body_on_its_datum() {
+        let mut wet = earth_like();
+        wet.sea_offset_mm = Some(3_591_000);
+        let s = sky_terms(&wet, R_M, RELIEF_M).expect("air");
+        assert!((s.bottom_radius_m - (R_M + 3_591.0)).abs() < 1e-6);
+        let h = f64::from(wet.scale_height_m.expect("h"));
+        assert!((s.top_radius_m - s.bottom_radius_m - h * SHELL_TOP_SCALE_HEIGHTS).abs() < 1e-6);
+        // The terms are the charter's own at that ground: the same as a sea at the datum.
+        let at_datum = sky_terms(&earth_like(), R_M, RELIEF_M).expect("air");
+        assert_eq!(s.rayleigh, at_datum.rayleigh);
+        assert_eq!(s.mie, at_datum.mie);
+        assert_eq!(s.below, at_datum.below);
+        let mut dry = earth_like();
+        dry.sea_offset_mm = None;
+        dry.flags &= !CHARTER_FLAG_HAS_SEA;
+        assert_eq!(
+            sky_terms(&dry, R_M, RELIEF_M).expect("air").bottom_radius_m,
+            R_M
+        );
+    }
+
+    /// ★ RULING B25 LAW 4: the haze scatters nine tenths of its extinction (Bruneton's calibration).
+    #[test]
+    fn the_haze_scatters_nine_tenths_of_its_extinction() {
+        let albedo =
+            EARTH_MIE_SCATTERING_PER_M / (EARTH_MIE_SCATTERING_PER_M + EARTH_MIE_ABSORPTION_PER_M);
+        assert!((albedo - 0.9).abs() < 1e-3, "{albedo}");
+        let s = sky_terms(&earth_like(), R_M, RELIEF_M).expect("air");
+        assert!(s.mie.scattering_per_m[1] > s.mie.absorption_per_m[1]);
+    }
+
+    /// ★ RULING B25 LAW 2: under the ground sphere the molecules grow by their own scale height, and the
+    /// extinction held at the sphere is every term's there — the ozone's layer contributes only where
+    /// its tent reaches the ground.
+    #[test]
+    fn the_air_under_its_ground_grows_by_the_pressure_law() {
+        let c = earth_like();
+        let s = sky_terms(&c, R_M, RELIEF_M).expect("air");
+        assert_eq!(s.below.scattering_per_m, s.rayleigh.scattering_per_m);
+        assert_eq!(
+            s.below.scale_height_m,
+            f64::from(c.scale_height_m.expect("h"))
+        );
+        // The floor: the relief under the datum, wherever the sea stands.
+        assert_eq!(s.below.floor_radius_m, R_M - RELIEF_M);
+        let ozone = s.ozone.expect("an earth-like body has an ozone layer");
+        assert_eq!(
+            at_ground(ozone.falloff),
+            0.0,
+            "the layer stands far over the ground"
+        );
+        for ch in 0..3 {
+            let held = s.rayleigh.scattering_per_m[ch]
+                + s.mie.scattering_per_m[ch]
+                + s.mie.absorption_per_m[ch];
+            assert!((s.below.extinction_per_m[ch] - held).abs() < 1e-18);
+        }
+    }
+
+    /// The density at the ground by the engine's shapes: one for an exponential, the tent's height there.
+    #[test]
+    fn a_term_at_the_ground_reads_the_engines_own_shape() {
+        assert_eq!(at_ground(Falloff::Exponential { scale_share: 0.1 }), 1.0);
+        let reaching = at_ground(Falloff::Tent {
+            center: 0.99,
+            width: 0.1,
+        });
+        assert!((reaching - 0.8).abs() < 1e-12, "{reaching}");
+        let far = at_ground(Falloff::Tent {
+            center: 0.5,
+            width: 0.2,
+        });
+        assert_eq!(far, 0.0);
     }
 
     #[test]

@@ -56,7 +56,43 @@ transmittance is what the partial step restores; (b) a one-surface test (affine 
 the saving on foot; (c) an optical-depth bound between the samples kept the tolerance by construction but only near
 the nadir from orbit.
 
-**Owed:** the upstream pull request (all four changes); the patch dies at the Bevy upgrade gate (0.19).
+**The fifth change (2026-09-29, the points pass of the temporal path's T2):** `atmosphere/mod.rs`,
+`atmosphere/types.wgsl`, `atmosphere/render_sky.wgsl` — a setting `AtmosphereSettings::sun_disk_on_sky` (true
+by default, upstream's behaviour) says whether the sky pass adds the sun's disc on sky pixels. Under the temporal
+path the game sets it false: the reconstruction draws a jittered render picture smaller than the display, the
+disc's edge would crawl with the jitter, and the points pass draws the disc after the reconstruction at the
+display size instead, by the same disc law (`sample_sun_radiance`), times the transmittance table and the sky
+share (the temporal path design §7.7, "difference 2"). `atmosphere/mod.rs` also makes the air's graph labels
+(`AtmosphereNode`) public, so the temporal path's reactive mask can copy the picture after the sky pass and before
+the transparent pass (the design §4.2 step 3).
+
+**The sixth change (2026-09-30, the air under its ground; ruling B25):** `atmosphere/mod.rs`,
+`atmosphere/resources.rs`, `atmosphere/types.wgsl`, `atmosphere/functions.wgsl`, `atmosphere/render_sky.wgsl`,
+`atmosphere/sky_air.wgsl`, `render/pbr_lighting.wgsl` (every hunk marked `VOXELDUST PATCH (the air under its
+ground)`). Upstream lifts an eye under the ground sphere onto it (`clamp_to_surface`) and ends every ray at the
+sphere, so a ray under the eye's level met the sphere at once and took no air. MEASURED (2026-09-30, the owner low
+over the dry sea floor): an eye 2 135 m under the sphere drew a hard line at its own level — the ground above it
+hazed, the ground under it bare. The change:
+- the component states the air UNDER the sphere (`AtmosphereBelow`, three uniform words): every term holds its
+  value at the sphere (the medium's table clamps to its edge) and ONE term grows by its exponential law (the
+  game's molecules, by the pressure law); the default states no growth and a clear medium;
+- the per-pixel march starts at the TRUE eye (`get_eye_position`; the tables' reads keep the lifted
+  `get_view_position`), and `raymarch_atmosphere` names its ray (`RAY_TABLE_SKY`, upstream's sky ray of the
+  tables' builders; `RAY_TO_SURFACE`; `RAY_PIXEL_SKY`): a pixel's ray is never ended by the sphere
+  (`get_depth_segment`) — a ray to a drawn surface ends at its depth, a sky ray where it leaves the air or at
+  the FLOOR sphere (`AtmosphereBelow::floor_radius`: no drawn ground stands lower), which reflects the
+  sunlight as upstream's ground did. MEASURED (the owner's coast stand): a sky ray ended at the sea's sphere
+  drew that sphere's plain ground between the sea's horizon and the far dry floor's (0.3° to 2.8° under the
+  eye's level), a dark band from brightness 128 down to 99;
+- a sample under the sphere adds the growth (Rayleigh phase) and takes the sunlight the sphere takes above it
+  through the air between (`below_transmittance`: the held extinction plus the growth's integral straight up,
+  times the chord over the depth in a cancellation-free form); the ground's own sunlight (`pbr_lighting.wgsl`)
+  takes the same factor.
+The tables' builders keep upstream's code (their rays run a fixed distance deep into the planet, where a growth
+would overflow). Behaviour for upstream users: an eye and a surface over the sphere read exactly upstream's
+values.
+
+**Owed:** the upstream pull request (all six changes); the patch dies at the Bevy upgrade gate (0.19).
 
 **Known upstream limit kept:** `write_atmosphere_buffer` takes `.single()` over cameras with an
 atmosphere, so the ground term is written for ONE atmosphere camera at a time.

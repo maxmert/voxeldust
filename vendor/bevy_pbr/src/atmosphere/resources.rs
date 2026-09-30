@@ -584,6 +584,11 @@ pub struct GpuAtmosphere {
     pub top_radius: f32,
     /// VOXELDUST PATCH (planet centre): the planet's centre in the camera's world, in metres.
     pub planet_center: Vec3,
+    /// VOXELDUST PATCH (the air under its ground): [`super::AtmosphereBelow`], flat.
+    pub below_scattering: Vec3,
+    pub below_scale_height: f32,
+    pub below_extinction: Vec3,
+    pub below_floor_radius: f32,
 }
 
 pub fn prepare_atmosphere_uniforms(
@@ -596,6 +601,10 @@ pub fn prepare_atmosphere_uniforms(
             bottom_radius: atmosphere.bottom_radius,
             top_radius: atmosphere.top_radius,
             planet_center: atmosphere.planet_center,
+            below_scattering: atmosphere.below.scattering,
+            below_scale_height: atmosphere.below.scale_height,
+            below_extinction: atmosphere.below.extinction,
+            below_floor_radius: atmosphere.below.floor_radius,
         });
     }
     Ok(())
@@ -956,6 +965,10 @@ pub fn init_atmosphere_buffer(mut commands: Commands) {
                 bottom_radius: 0.0,
                 top_radius: 0.0,
                 planet_center: Vec3::ZERO,
+                below_scattering: Vec3::ZERO,
+                below_scale_height: 1.0,
+                below_extinction: Vec3::ZERO,
+                below_floor_radius: 0.0,
             },
             settings: GpuAtmosphereSettings::default(),
         }),

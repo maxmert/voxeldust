@@ -8663,9 +8663,36 @@ Design: `docs/investigation/2026-09-08/landforms/slice_8s_design.md`; the owner'
   frame pair (0.018 above 38 km), 0 pairs past the law; on the walk 0.001. The DUSK stand (the star 2° under the
   horizon) and the HIGH stand (three shell heights, 238 km) are candidates in the docs picture folder. STILL OWED: the
   last 6.5 km in motion (the arrest's floor on this hull) — the ground stands and the walk cover it standing still.
+- **THE AIR UNDER ITS GROUND (ruling B25, 2026-09-30).** 🟧 BUILT: the air's ground sphere is the SEA the realm states in
+  its charter (the datum on a dry body), so the charter's words hold at the sea level and the planet's shadow in the air is
+  the sea's horizon; the per-pixel march runs from the TRUE eye to its drawn ground, under the sphere where that ground
+  stands (a dry sea floor, a basin), and a pixel's sky ray runs under the sphere too, ending only where it leaves the air
+  or at the FLOOR (the datum less the body's relief bound: no ground stands lower); under the sphere the molecules grow by the pressure law (no cap) and every other term
+  holds its value at the sphere; a sample's sunlight under the sphere crosses the air between it and the sphere (the held
+  extinction plus the growth's integral straight up, times the chord over the depth — a flat-slab reading of the depth
+  along a curved chord), and the ground's own sunlight takes the same factor; the haze scatters 0.9 (the swap of Bevy
+  0.18.1's Earth medium, copied into the placeholder, is cured). A realm's air is built again when its charter changes (a
+  first solve states the sea) — once, while a world is first generated. STATED INTERIMS: (a) THE HAZE UNDER THE SEA holds
+  its sea-level value — the placeholder has no law under the sea; the source law (above) replaces it; (b) THE SKY LIGHT for
+  an eye under the sphere (the environment map, the sky-view table, the multiple scattering) is the light over the sea
+  level above the eye — the engine's tables cover the shell from the sphere up; (c) the SUN DISC's and the STARS'
+  visibility for an eye under the sphere is its own local level (the basin's walls are drawn ground and hide what they
+  hide); (d) the lookup mode (`VD_SKY_MODE=lut`, a measurement knob) keeps upstream's lifted eye. WHEN (a)–(c): the
+  one-volume air (ruling B21/B22) states the air per cell, and the water fill (B22 step 4) puts most of today's dry sea
+  floor under water, where the water's look replaces the air's. THE GATE G-AIR-UNDER (`just air-under`; the second test
+  of `bins/tests/terrain_moving_eye.rs`): the home planet solved in the gate's process, the nearest lit floor at least
+  4 km under the sea nearest the flight's coast stand (`vd_bins::air_stand`, shared with
+  `examples/air_ground_stand.rs`), an eye 2 km over it (under the air's sphere) looking back at the coast, on the
+  multisampled and on the temporal path; it asserts the air's sphere is the solve's sea to a metre, the eye stands under
+  it, and the ground's colour steps no more across the eye's level row than between any other two neighbouring eight-row
+  bands (`vd_client_harness::air_line`; MEASURED before the cure 28.8 levels against 6.9; on the gate's own stand, the
+  eye 2 019 m under the sphere, 0.8 against 4.0 and 4.2). A control eye over the sphere was tried and taken out: 2 km
+  over the sea its level row saw only sky, so it could judge nothing.
 - **THE PATCHED ENGINE CRATE (`vendor/bevy_pbr/PATCH.md`).** A verbatim `bevy_pbr` 0.18.1 with the planet centre STATED
-  (`Atmosphere::planet_center`) instead of fixed under the world origin. MISSING: the upstream pull request. WHEN: the patch
-  dies at the Bevy upgrade gate (0.19) — either upstream carries the change by then or the copy is re-based once.
+  (`Atmosphere::planet_center`) instead of fixed under the world origin, and five later changes (the per-sample sky, the
+  tables the march overwrote, the air marched once a pixel, the points pass, the air under its ground). MISSING: the
+  upstream pull request. WHEN: the patch dies at the Bevy upgrade gate (0.19) — either upstream carries the change by then
+  or the copy is re-based once.
 - **TEMPORAL ANTI-ALIAS FOR THE FLIGHT.** ~~The sky pass flattens a multisampled edge (one depth sample a pixel), so the
   picture cameras run `Msaa::Off` + SMAA~~ — ★ CORRECTED 2026-09-29 (the temporal-path design's review read the code): the
   SMAA stage was taken out the same week — SMAA blended a third of the horizon's columns — and the vendored sky pass now
@@ -11002,6 +11029,108 @@ updated in the same change as the work, deleted when done). The interims named h
     belt: a rung-9 chunk lands late beside it; the engine's own rule gives the chunk no previous place (about 23 display
     pixels of wrong motion for one frame); the rule gives it the planet's own step and its stand-in's surface, so it
     enters the history with no mark.
+  - ★ T2 — THE RECONSTRUCTION AND ITS UP-SCALE (2026-09-29; IN PROGRESS, not committed; the design's §4.2–§4.4, §6.3,
+    §7.7, §11 T2 and §12.1). Behind the switch `VD_TEMPORAL=1`, with the render scale `VD_RENDER_SCALE` and the
+    sharpen's strength `VD_SHARPEN`; MSAA stays the default. BUILT:
+    1. THE RULES, Tier-A (`vd_client::reconstruction`, 22 tests): the one settings struct (every constant PROPOSED with
+       its basis); the jitter (Halton (2, 3), ⌈8 ÷ s²⌉ phases, never null, its own clock) AND ITS SIGN — render pixel
+       `i` samples the scene at `i + 0.5 + jitter`, because the engine draws a point at its place LESS the projection
+       offset (a test of the engine's own projection in `vd_client_render` proves it and turns red if an upgrade flips
+       it; FSR 2 states the same geometry with the opposite sign); the floor law; the filter's narrowing by 1 ÷ s (FSR
+       2's kernel weight, capped at 1.99); the capture's display size (the render grid ÷ s, whose render size is the
+       grid again at every scale); the reset's causes; the new frame's weight and its floor by motion; Lanczos-2; the
+       tone weight; YCoCg and the clip; the depth test (the view depth, the field's corner factor, the separation and
+       its power, the bilinear footprint, the clip, the count); the reactive value.
+    2. THE PASS (`vd_client_render::reconstruction`, `reconstruction.wgsl`), after the main passes and before bloom: the
+       3 × 3 gather by Lanczos-2 at the jittered sample points, the tone weight, the history by Catmull-Rom clipped in
+       YCoCg, the count and its floor, the display alpha one, the sky share in the history's fourth channel.
+    3. THE DEPTH TEST (§4.2 steps 1.3 and 2): a compute pass rebuilds last frame's nearest depth (each render pixel's
+       dilated depth written at its last-frame place with an atomic maximum; cleared each frame); the pass lowers the
+       count of a pixel that a nearer surface hid in the last frame (FSR 2.2's `ComputeDepthClip`).
+    4. THE REACTIVE MASK (§4.2 step 3): a copy of the render picture after the sky and before the transparent pass; a
+       pixel the transparent pass changed takes mostly the new frame, and its colour box shrinks (FSR 2's automatic
+       mask, its sample's defaults PROPOSED).
+    5. THE SKY'S MOTION (§6.3): a sky pixel reprojects through the two views turned by the air body's rotation step,
+       from the realms' steps of T1 (the identity where the air's body had no placement last frame).
+    6. THE POINTS PASS (§7.7; `points.rs`, `points.wgsl`): the star cloud leaves the main passes (its own render layer)
+       and the sun's disc leaves the sky pass (the vendored fifth change, `AtmosphereSettings::sun_disk_on_sky`); both
+       are drawn after the reconstruction at the display size, dimmed by the air's transmittance table and by the sky
+       share; the clear alpha is nought (change one), the display alpha one (change two). THE STAR LAW IS ONE MODULE
+       (`star_law.wgsl`) for the sky's own material and for this pass (the switch-off picture unchanged: only the
+       overlay's changing numbers differ, as between two runs of one build).
+       ★ TODAY'S SPRITE, EXACTLY (MEASURED): today's stars are drawn with four samples a pixel (the colour shaded at the
+       pixel's centre, times the covered share). A draw without them counted a faint star 8 % brighter (a model of the
+       law's constants: 0.922 against 0.997 of the law's exact light at the one-pixel crop; per star +7.7 % on 140 faint
+       stars). The pass draws the sprite grown by half a pixel and counts the same four samples: per star against
+       today's picture 0.984 (140 faint), 1.002 (44), 1.028 (15), 0.981 (4 bright), the sharpen's ring counted.
+    7. THE CAPTURE ON THE SAME PATH (§12.1): the render grid stays 1 284 × 720 and the display picture grows to the grid ÷ s
+       (2 568 × 1 440 at one half, 1 926 × 1 080 at two thirds); the probe takes the picture's path exactly (a
+       display-size target, the same drawn grid, the same projection and jitter) and its file keeps the grid; the
+       motion file keeps the grid; G-ALPHA is checked on every written picture (a warning names the count).
+    8. THE SHARPEN: the engine's contrast-adaptive sharpening after the tone map, at `VD_SHARPEN` (PROPOSED 0.5).
+    9. THE GATES' PIECES (§12.3): under the reconstruction the capture also writes each frame's RENDER picture before
+       the history (`<stem>.render.png`, the render grid, through the gate's tone map `c ÷ (1 + max c)`), and each
+       frame's stamp carries THE RECONSTRUCTION'S ROW (`DevReconstruction`: the jitter the frame sampled, the render
+       and display sizes, the history's restarts by cause — G-RESET's count), written by the render world onto the
+       frame's own stamp. The seam gate (`pop::judge_pair`) and the motion truth unproject each pixel at its SAMPLE
+       POINT and the seam gate matches the other frame's NEAREST SAMPLE (one rule, `vd_client::reconstruction::
+       {sample_point, nearest_sample}`); the moving-eye gate and the offline `pop_run` read the render picture for the
+       seam law, on the probe's grid; the sky judge reads no pair where the display picture is larger than the probe
+       (its display reading is owed).
+    MEASURED (headless at the owner's stand):
+    - ★ THE RECONSTRUCTION'S OWN COST, THE FIRST GATE: 0.284 ms at 0.92 M display pixels, 0.632 at 2.08 M, 1.097 at
+      3.70 M (within 1 % over 8 samples each): 0.30 ns a display pixel, so about 2.2 ms at the owner's 7.5 M with the
+      clock's own load and store, about 1.8 ms without — under the gate's 2.5 ms (the window's reading owed). The
+      sharpen 0.10–0.12 ms. Route G3's price in the same bench: the prepass 4.5 ms (44 M ground vertices drawn twice),
+      the main pass 5.2 ms without MSAA against 8.8 ms with it; T3 removes the prepass.
+    - THE PICTURE at one: the same colours (the means within 0.2 levels), every pixel opaque, one reset (the first
+      frame); the ground's detail 0.923 of today's without the sharpen and 1.276 with it at 0.5 (the jitter's sign
+      fixed: +1 % only; the softness is the filter's over the jitter, as FSR 2's, which ships its sharpen for it). At one
+      half and two thirds: the same horizon, ridges and colours, softer, every pixel opaque.
+    - THE DEPTH TEST at a still stand changes nothing (0.08 % of the pixels over two levels: the run-to-run noise);
+      the reactive mask neither (0.05 %; a wrong copy would have marked every pixel and stopped the history).
+    - ★ THE STARS, STAR BY STAR (a 7 × 7 window's light above its rim, the sharpen's ring counted), against today's
+      picture: THE DRAW IS EXACT — with the air's table on both paths and the sharpen off, 0.981 (172 faint), 0.990
+      (42), 1.001 (22), 1.001 (4 bright). TWO DIFFERENCES REMAIN, both the owner's: (1) THE AIR'S TWO TRANSMITTANCES
+      DIFFER BY 5–8 % (the design assumed 1 %): in the marched air (today's default) the points pass reads 0.926, 0.922,
+      0.952, 0.957 with the sharpen off — the sky pass's 16-step march gives its first step 0.3 of a step's length,
+      where the thick air near the ground sits, so today's stars stand about 6 % too bright against the table's 40
+      samples; (2) THE SHARPEN ADDS 6–8 % to a star (its peak and ring): at 0.5 the band reads 0.990, 1.000, 1.029,
+      0.982. D6 decides the table (the more exact light, the stars about 6 % dimmer than today) or a march per star
+      like the sky pass (today's light exactly); D7 the sharpen's strength (it also brightens the stars).
+    - IN MOTION (the moving-eye gate flown under the switch at one: the walk, the turn, 240 m/s): green; the motion
+      truth 0.015, 0.018 and 0.008 px at 99.9 % (the jitter does not disturb it: the probe and the picture share it);
+      the sky judge's widest step 0.2 levels on the turn; the recorded frames show no trail behind the ridges and no
+      ghost of the stars; the band's gaps at 240 m/s (64 frames) within the range the switch-off flights report.
+    - AT ONE HALF (the moving-eye gate flown under `VD_TEMPORAL=1 VD_RENDER_SCALE=0.5`: the walk and the turn): green;
+      every recorded frame wrote the display picture (2 568 × 1 440), the render picture and the probe (1 284 × 720) and
+      the motion file on the grid, and its stamp's row. ★ G-RESET = 0 ON THE PLAYER'S PATH, MEASURED: every frame of
+      both legs reads the resets (1, 0, 0, 0) — each client's first frame alone; the boarding and two scene swaps did
+      not restart the history. The jitter walked 23 and 29 of the 32 phases over the pairs. The motion truth at the
+      frames' jitter: 0.015 px (the walk) and 0.038 px (the turn) at 99.9 %. The seam law on the RENDER picture at its
+      jitter: the walk's floor 2 levels, 5 101 pixels past it (the widest 70); the turn's floor 3, 1 099 past it (the
+      switch-off turn of T1 read 358) — the jitter moves the edges between frames, and the gate's pass rule with its
+      known-pop control is the gates' step. The sky judge read no pair (its display reading owed).
+      ★ WHERE THOSE STEPS STAND (MEASURED on one walk pair, a script that judges as `judge_pair` does): 168 pixels
+      past the floor (the widest 61 levels), all on the SILHOUETTE of the near dunes (rung 1) against the far hazy land
+      (rungs 8–9) — the render picture's aliased stair edge, which the jitter moves between the frames; none inside a
+      surface. So the gates' pass rule on the render picture judges the OCCLUSION EDGES apart (a neighbour farther by
+      more than the depth test's separation), and the known-pop control (`VD_POP_CONTROL_RUNG=<r>`, built: that rung's
+      chunks land whole) must still read at its rung's boundary inside a surface.
+    - HR5 (2026-09-30): vd-client, vd-client-harness and vd-devproto at 100 % of lines and branch sides (the first
+      run found one test's `assert!(a && b)`, split).
+    OWED IN T2: the gates on the path (the pop detector's known-pop control on the render picture, and its reading on
+    the display picture through a probe read under each display pixel; the sky judge's display reading and its lag
+    reading; G-STARS by the census; G-CROSSING; G-DETERMINISM on a converged still; G-NO-STALL; G-ALPHA in the harness;
+    G-RESET asserted on every leg from the stamp's count (measured 0 at one half, not yet asserted); the T0 meters read
+    at two sizes); the moving legs (the depth test and the reactive mask judged in
+    motion); a tool's jump as a reset (no tool teleports the eye on the path today: the stands start at login, the
+    first frame's reset, and the scene-fitted camera flies no gate under the switch); the window's cost reading; THE OWNER'S LOOK in a window (asked first): D5 the edge at 1.0, 0.67 and 0.5, still and
+    turning; D6 the sky's points, with a choice — today's sprite, or the law's exact light over each pixel (8 % more
+    light in the milky band, and a star's light no longer changes as it crosses a pixel); a first look at D7 (the
+    sharpen's strength). **Example.** The owner stands on the belt at dusk with `VD_TEMPORAL=1 VD_RENDER_SCALE=0.5`:
+    the ground draws 1 728 × 1 084 jittered pixels and the reconstruction writes 3 456 × 2 168; the stars and the sun are
+    today's, drawn after it; when the owner walks past a rock, the valley behind it shows no smear of the rock.
   OWED: the owner's look decisions the split prices;
   the release-and-request walk on change only, and its diff from the builder (B-MAIN ≤ 1 ms); the builders (E1 the
   parent sub-box and the waits, E6 the geometry without maps, E10 the pools, E2–E5): B-RATE at 240 m/s; a land leg for

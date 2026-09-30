@@ -35,6 +35,7 @@
 //! - [`motion_census`] — the motion census (the temporal path's slice T1, G-MOTION-COVERAGE): the
 //!   captured motion target and depth, and the pixels that hold a depth yet keep the motion sentinel.
 
+pub mod air_line;
 pub mod assert;
 pub mod camera;
 pub mod capture;

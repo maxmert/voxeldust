@@ -18,8 +18,8 @@ use std::collections::BTreeMap;
 
 use bevy::light::{AtmosphereEnvironmentMapLight, SunDisk};
 use bevy::pbr::{
-    Atmosphere, AtmosphereMode, AtmosphereSettings, Falloff, PhaseFunction, ScatteringMedium,
-    ScatteringTerm,
+    Atmosphere, AtmosphereBelow, AtmosphereMode, AtmosphereSettings, Falloff, PhaseFunction,
+    ScatteringMedium, ScatteringTerm,
 };
 use bevy::prelude::*;
 use vd_client::sky as laws;
@@ -75,25 +75,44 @@ impl SkyConfig {
     }
 }
 
-/// One medium asset per body (a charter is fixed for a realm's life).
+/// One medium asset per body, with the air it was built from. A realm's charter changes when its first
+/// solve lands and it states its sea (the air then rests on the sea, ruling B25), so a medium whose air
+/// differs from the body's air now is built again, and the camera takes the new air.
 #[derive(Resource, Default)]
 pub struct SkyMedia {
-    by_realm: BTreeMap<RealmId, Handle<ScatteringMedium>>,
+    by_realm: BTreeMap<RealmId, (laws::SkyTerms, Handle<ScatteringMedium>)>,
 }
 
 /// A body in the window with a charter, as `sync_terrain` lists it every frame: its centre in the
-/// render frame (metres, the eye at the origin), its ground radius and its charter.
+/// render frame (metres, the eye at the origin), its ladder's datum radius, its relief bound (the most
+/// its surface falls under the datum) and its charter.
 #[derive(Clone, Debug)]
 pub(crate) struct SkyBody {
     pub realm: RealmId,
     pub centre: DVec3,
     pub radius_m: f64,
+    pub relief_m: f64,
     pub charter: BodyCharter,
+}
+
+/// A law's RGB triple, narrowed to the engine's `f32`.
+fn narrow(v: [f64; 3]) -> Vec3 {
+    Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32)
+}
+
+/// The engine's air under its ground from the law's (the vendored "air under its ground"): a
+/// narrowing to `f32` and nothing else.
+fn below_of(b: &laws::Below) -> AtmosphereBelow {
+    AtmosphereBelow {
+        scattering: narrow(b.scattering_per_m),
+        scale_height: b.scale_height_m as f32,
+        extinction: narrow(b.extinction_per_m),
+        floor_radius: b.floor_radius_m as f32,
+    }
 }
 
 /// The engine's term from the law's term: a narrowing to `f32` and nothing else.
 fn term_of(t: &laws::Term) -> ScatteringTerm {
-    let narrow = |v: [f64; 3]| Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32);
     ScatteringTerm {
         absorption: narrow(t.absorption_per_m),
         scattering: narrow(t.scattering_per_m),
@@ -133,7 +152,7 @@ fn medium_of(terms: &laws::SkyTerms, realm: RealmId) -> ScatteringMedium {
 fn pick(bodies: &[SkyBody], hold: Option<u64>) -> Option<(&SkyBody, laws::SkyTerms)> {
     let airy: Vec<(&SkyBody, laws::SkyTerms)> = bodies
         .iter()
-        .filter_map(|b| laws::sky_terms(&b.charter, b.radius_m).map(|t| (b, t)))
+        .filter_map(|b| laws::sky_terms(&b.charter, b.radius_m, b.relief_m).map(|t| (b, t)))
         .collect();
     if let Some(seed) = hold
         && let Some(held) = airy.iter().find(|(b, _)| b.realm == RealmId::Planet(seed))
@@ -168,6 +187,7 @@ pub(crate) fn sync_sky(
     mut assets: ResMut<Assets<ScatteringMedium>>,
     mut cams: SkyCameras,
     mut commands: Commands,
+    render_measure: Res<crate::measure::RenderMeasure>,
 ) {
     if !config.enabled {
         return;
@@ -198,12 +218,15 @@ pub(crate) fn sync_sky(
             body.centre.z as f32,
         )
     };
-    let medium = media
-        .by_realm
-        .entry(body.realm)
-        .or_insert_with(|| assets.add(medium_of(&terms, body.realm)))
-        .clone();
-    let same_body = terrain.sky_realm == Some(body.realm);
+    let (medium, rebuilt) = match media.by_realm.get(&body.realm) {
+        Some((held, handle)) if *held == terms => (handle.clone(), false),
+        _ => {
+            let handle = assets.add(medium_of(&terms, body.realm));
+            media.by_realm.insert(body.realm, (terms, handle.clone()));
+            (handle, true)
+        }
+    };
+    let same_body = terrain.sky_realm == Some(body.realm) && !rebuilt;
     // ★ THE LOOKUP MODE'S REACH (design §6, S5): the engine's table of the air in front of the
     // ground covers a fixed distance (32 km by default) and repeats its last value beyond it, so
     // it is set PER FRAME to the drawn radius — the table reaches as far as the drawn ground. The
@@ -227,6 +250,7 @@ pub(crate) fn sync_sky(
                         ground_albedo: Vec3::splat(terms.ground_albedo as f32),
                         medium: medium.clone(),
                         planet_center,
+                        below: below_of(&terms.below),
                     },
                     AtmosphereSettings {
                         rendering_method: if config.raymarched {
@@ -235,6 +259,9 @@ pub(crate) fn sync_sky(
                             AtmosphereMode::LookupTexture
                         },
                         aerial_view_lut_max_distance: lut_far_m,
+                        // THE TEMPORAL PATH (T2): the points pass draws the sun's disc after the
+                        // reconstruction, so the sky pass adds none (the vendored fifth change).
+                        sun_disk_on_sky: !render_measure.temporal,
                         ..default()
                     },
                     AtmosphereEnvironmentMapLight {

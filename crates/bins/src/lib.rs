@@ -11,6 +11,9 @@
 //! This is Tier-B (process glue): exercised by the process-tier parity + smoke
 //! tests, not the coverage gate.
 
+// ★ THE AIR'S STANDS OVER A DRY SEA FLOOR (ruling B25; gate G-AIR-UNDER): the nearest deep, lit floor
+// and a stand's facing back toward the coast, read by the stand example and the gate alike.
+pub mod air_stand;
 // ★ AN ARTIFACT AS A PLAIN FILE, FOR THE BENCHES (ruling B10 item 2): one reader and one writer, so
 // the washboard bench's variant artifact is the shoreline bench's input.
 pub mod artifact_boot;

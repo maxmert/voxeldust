@@ -111,6 +111,15 @@ pub fn motion_rel_for(rel_path: &str) -> String {
     format!("{stem}.motion.bin")
 }
 
+/// THE RENDER PICTURE BESIDE THE PICTURE (the temporal path's T2): `shots/foo.png` →
+/// `shots/foo.render.png`, the frame's jittered picture before the history on the render grid — the seam
+/// gate's reading (the design §12.3), by the probe's rule.
+#[must_use]
+pub fn render_rel_for(rel_path: &str) -> String {
+    let stem = rel_path.strip_suffix(".png").unwrap_or(rel_path);
+    format!("{stem}.render.png")
+}
+
 /// Sanitize an agent-supplied name into a single SAFE path component: `[A-Za-z0-9_-]`
 /// kept, everything else (slashes, dots, spaces, …) mapped to `_`, and an empty result
 /// becomes `"capture"`. The ONE filename rule for everything an agent names on disk
@@ -285,6 +294,8 @@ mod tests {
     fn the_motion_sits_beside_its_picture() {
         assert_eq!(motion_rel_for("shots/hero.png"), "shots/hero.motion.bin");
         assert_eq!(motion_rel_for("weird"), "weird.motion.bin");
+        assert_eq!(render_rel_for("shots/hero.png"), "shots/hero.render.png");
+        assert_eq!(render_rel_for("weird"), "weird.render.png");
     }
 
     #[test]

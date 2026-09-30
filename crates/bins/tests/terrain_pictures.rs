@@ -2171,7 +2171,11 @@ fn handover_stand(tick: u64) -> Option<Handover> {
         else {
             continue;
         };
-        let Some(terms) = vd_client::sky::sky_terms(&charter, planet.ladder().radius_m()) else {
+        let Some(terms) = vd_client::sky::sky_terms(
+            &charter,
+            planet.ladder().radius_m(),
+            planet.relief_bound_m(0),
+        ) else {
             continue;
         };
         let Some((_, elements)) = movers.iter().find(|(realm, _)| *realm == r.realm) else {
@@ -2328,8 +2332,9 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             vd_core::pose::RealmId::Planet(body.seed()),
         )
         .expect("the home planet states a charter");
-        let terms = vd_client::sky::sky_terms(&charter, body.ladder().radius_m())
-            .expect("the home planet has air");
+        let terms =
+            vd_client::sky::sky_terms(&charter, body.ladder().radius_m(), body.relief_bound_m(0))
+                .expect("the home planet has air");
         terms.top_radius_m - terms.bottom_radius_m
     };
     let high_m = HIGH_SHELLS * shell_m;

@@ -16,7 +16,7 @@
     bindings::settings,
     functions::{
         uv_to_ray_direction, uv_to_ndc, ndc_to_camera_dist, raymarch_atmosphere,
-        get_view_position, max_atmosphere_distance, get_raymarch_segment
+        get_eye_position, pixel_sky_distance, get_depth_segment, RAY_PIXEL_SKY, RAY_TO_SURFACE
     },
 };
 
@@ -39,7 +39,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // The pixel's centre, as the full-screen triangle hands it to the fragment.
     let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(size);
     let ray_dir = uv_to_ray_direction(uv);
-    let world_pos = get_view_position();
+    // VOXELDUST PATCH (the air under its ground, 2026-09-30): the march starts at the TRUE eye.
+    let world_pos = get_eye_position();
     let r = length(world_pos);
     let mu = dot(ray_dir, normalize(world_pos));
     let max_samples = settings.sky_max_samples;
@@ -65,16 +66,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var light = vec4(0.0);
     var transmittance = vec4(1.0, 1.0, 1.0, AIR_PER_SAMPLE);
     if sky == samples {
-        let result = raymarch_atmosphere(world_pos, ray_dir, max_atmosphere_distance(r, mu), max_samples, uv, true);
+        let result = raymarch_atmosphere(world_pos, ray_dir, pixel_sky_distance(r, mu), max_samples, uv, RAY_PIXEL_SKY);
         light = vec4(result.inscattering, 0.0);
         transmittance = vec4(result.transmittance, AIR_SKY);
     } else if sky == 0 {
-        let segment = get_raymarch_segment(r, mu);
+        let segment = get_depth_segment(r, mu);
         let air_m = min(segment.end, t_far) - segment.start;
         let steps = mix(1.0, f32(max_samples), saturate(t_far * 0.01));
         if air_m <= 0.0 || (t_far - t_near) * steps <= air_m {
             let t_mean = t_sum / f32(samples);
-            let result = raymarch_atmosphere(world_pos, ray_dir, t_mean, max_samples, uv, false);
+            let result = raymarch_atmosphere(world_pos, ray_dir, t_mean, max_samples, uv, RAY_TO_SURFACE);
             light = vec4(result.inscattering, t_mean);
             transmittance = vec4(result.transmittance, AIR_GROUND);
         }

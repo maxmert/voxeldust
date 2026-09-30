@@ -5,44 +5,18 @@
 // and flickers as it crosses pixel boundaries; and it shrinks with distance, which is backwards — a
 // real star is a point source, so distance dims it rather than shrinking it.
 //
-// ★ EVERY CONSTANT ARRIVES AS A UNIFORM. Nothing here is a literal from the size law. The apparent-size
-// floor lives in Tier-A (`vd_client_harness::camera::marker_world_radius`) and is shared with the pixel
-// gates; a second copy typed into this file would let the GPU draw one rectangle while the gate asserts
-// another, and both would look right on their own.
-//
-// ★ THIS SHADER DOES NOT CHOOSE A BRIGHTNESS FALLOFF. Brightness is a live owner knob with an undecided
-// curve (D-WINDOW-3). Size carries luminosity, through the square-root convention that Tier-A already
-// owns. Inventing a distance-brightness law here would be a decision taken by accident.
+// ★ EVERY CONSTANT ARRIVES AS A UNIFORM, AND THE LAW IS ONE MODULE (`star_law.wgsl`): the size, the crop and
+// the profile are shared with the points pass (`points.wgsl`, the temporal path's T2), so the star cloud's
+// two draws cannot disagree. Nothing here is a literal from the size law; the apparent-size floor lives in
+// Tier-A (`vd_client_harness::camera::marker_world_radius`) and is shared with the pixel gates.
 
 #import bevy_pbr::mesh_functions
 #import bevy_render::view::View
+#import vd_client_render::star_law::{
+    StarSkyUniform, one_pixel_world_m, star_amplitude, star_crop_px, star_profile,
+}
 
 @group(0) @binding(0) var<uniform> view: View;
-
-struct StarSkyUniform {
-    // The apparent-size floor, in pixels, from DOT_MIN_APPARENT_RADIUS_PX.
-    min_apparent_radius_px: f32,
-    // tan(fov_y / 2) — half the vertical field of view.
-    tan_half_fov: f32,
-    // The viewport height in rows.
-    viewport_h_px: f32,
-    // WHERE THE SKY SITS IN DEPTH, in metres — just inside the camera's far plane. See the vertex
-    // stage: the star's true DIRECTION is kept, and only its depth slot is fixed.
-    sky_radius_m: f32,
-    // ★ THE POINT-SOURCE LAW'S OWN NUMBERS (2026-08-29), every one read from Tier-A's `StarTuning` at
-    // bind time. Nothing here is typed as a literal: the law lives in `vd_client::realm_scene`, is
-    // unit-tested there, and this stage is its transliteration — the same discipline
-    // `one_pixel_world_m` already follows.
-    // √(flux gain): applied BEFORE the square so `(base·√gain/d)²` never underflows f32 (see the
-    // Rust side). The law is the same `L/d²` up to the exposure; only the arithmetic order moved.
-    flux_gain_sqrt: f32,
-    response_exponent: f32,
-    halo_sigma_px: f32,
-    halo_weight: f32,
-    core_sigma_px: f32,
-    min_crop_px: f32,
-    cull_level: f32,
-};
 
 // ★ THE MATERIAL BIND GROUP, BY BEVY'S OWN SUBSTITUTION — never a literal index.
 //
@@ -72,12 +46,6 @@ struct VertexOut {
     // unit its widths are stated in.
     @location(3) crop_px: f32,
 };
-
-// THE WORLD SIZE OF ONE PIXEL at a view distance — a transliteration of Tier-A's `one_pixel_world_m`.
-// A subject at or behind the eye has no forward extent, so the distance floors at zero.
-fn one_pixel_world_m(dist_m: f32) -> f32 {
-    return 2.0 * max(dist_m, 0.0) * star.tan_half_fov / star.viewport_h_px;
-}
 
 @vertex
 fn vertex(in: VertexIn) -> VertexOut {
@@ -116,50 +84,16 @@ fn vertex(in: VertexIn) -> VertexOut {
     let dir = normalize(view_pos.xyz);
     let placed = dir * star.sky_radius_m;
 
-    // ★ THE FLUX, FROM WHAT THE VERTEX ALREADY CARRIES (2026-08-29). `base_radius_m` is
-    // `POINT_SOURCE_BASE_RADIUS_M · sqrt(L)`, so `(base/d)^2` IS `L/d^2` — the inverse-square law,
-    // with no new attribute and no wire change.
-    //
-    // This REPLACES the shared 3-pixel apparent-size floor, which clamped every star to the same
-    // size. MEASURED: at a typical neighbour distance that floor was worth 4.1e14 m against a
-    // sun-like star's 0.5 m — it won by 8e14, for every star, always. Luminosity was drawn from the
-    // seed, carried across the wire, and then discarded at the last step.
-    // ★ SCALED BEFORE THE SQUARE (2026-09-07): `base/d` is ~1e-19 for a faint far star and its
-    // square is below f32's smallest normal, which the GPU flushes to zero — the star vanished.
-    // With √gain folded in first the term is ~1e-2..1e3 and the square is exact.
-    let s = in.base_radius_m * star.flux_gain_sqrt / max(dist_m, 1.0);
-    let flux = s * s;
-    // ★ COMPRESSED, BECAUSE SIGHT IS. Linear flux made near stars into saturated white balls 19 px
-    // across — a galaxy's flux range is a million to one and a screen's is 255. Eyes, film and star
-    // charts are all logarithmic; stellar MAGNITUDE is exactly this compression, and a small power
-    // is the same curve in closed form.
-    let amplitude = pow(flux, star.response_exponent);
-
-    // ★ CROP, NEVER SCALE — the idea from `godot-starlight` (Tiffany Bennett, MIT). One fixed profile
-    // for every star, cut where its wings fade below what a screen can show:
-    //     A·w·exp(-r^2 / 2σ^2) = cull   ⇒   r = σ·sqrt(2·ln(A·w/cull))
-    // A bright star's quad is large because its faint outskirts stay visible further out, not because
-    // its core is wider. That is what a star IS, and it is also why this costs less than today: the
-    // faint majority draw SMALLER than the 3 pixels they all take now.
-    let ratio = amplitude * star.halo_weight / star.cull_level;
-    var crop_px = 0.0;
-    if (ratio > 1.0) {
-        crop_px = star.halo_sigma_px * sqrt(2.0 * log(ratio));
-    }
-    // NEVER SMALLER THAN THIS. A quad under a pixel misses the pixel centre and BLINKS as the camera
-    // turns — the failure Stellarium and Celestia both name. A star fades out; it never flickers out.
-    crop_px = max(crop_px, star.min_crop_px);
-
-    // CULLED ON BRIGHTNESS, NEVER ON SIZE: collapse the quad so it rasterises nothing. A star leaves
-    // the sky because it faded, which is continuous, and not because it got small, which pops.
-    if (amplitude <= star.cull_level) {
-        crop_px = 0.0;
-    }
+    // ★ THE AMPLITUDE AND THE CROP, by the law (`star_law.wgsl`): the inverse-square flux from what the
+    // vertex already carries, compressed as sight is, and the sprite cut where its wings fade below what
+    // a screen can show — never under the minimum crop, and culled on brightness, never on size.
+    let amplitude = star_amplitude(star, in.base_radius_m, dist_m);
+    let crop_px = star_crop_px(star, amplitude);
 
     // THE SPRITE AT ITS PLACED DEPTH. `crop_px` is a size in PIXELS, so it converts through one
     // pixel's world size AT THE DEPTH THE SPRITE IS DRAWN — not at the star's true distance, which
     // would balloon a far star to the size it would have had if it were close.
-    let placed_radius_m = crop_px * one_pixel_world_m(star.sky_radius_m);
+    let placed_radius_m = crop_px * one_pixel_world_m(star, star.sky_radius_m);
 
     // BILLBOARD IN VIEW SPACE. Offsetting after the view transform makes the quad face the camera by
     // construction — there is no orientation to get wrong, and no branch.
@@ -174,25 +108,15 @@ fn vertex(in: VertexIn) -> VertexOut {
 
 @fragment
 fn fragment(in: VertexOut) -> @location(0) vec4<f32> {
-    // ★ A STAR IS A PEAK WITH WINGS, NOT A FILLED DISC (2026-08-29).
-    //
-    // This stage used to return `alpha = 1.0` across the whole interior with a one-pixel soft rim —
-    // a flat plate of uniform colour, which is the definition of a dot. Together with the size floor
-    // that clamped every star to 3 pixels, that is exactly what the owner saw: 233 220 identical
-    // pieces of confetti.
-    //
-    // What you actually see when you look at a star is your own eye's blur — a bright narrow CORE
-    // inside a wide faint HALO. Both widths are properties of the eye, so they are the same for every
-    // star; only the amplitude differs. Two Gaussians are the standard model and are enough.
+    // ★ A STAR IS A PEAK WITH WINGS, NOT A FILLED DISC (2026-08-29; the profile is the law's,
+    // `star_law.wgsl`). This stage used to return `alpha = 1.0` across the whole interior with a one-pixel
+    // soft rim — a flat plate, which together with the old 3-pixel floor is exactly what the owner saw:
+    // 233 220 identical pieces of confetti.
     //
     // `in.corner` runs -1..1 across the quad, and the quad was cropped to `crop_px` — so the radius in
     // PIXELS is the corner times that crop, which is what the profile's sigmas are measured in.
     let r_px = length(in.corner) * (in.crop_px);
-    let core = exp(-0.5 * (r_px * r_px) / (star.core_sigma_px * star.core_sigma_px));
-    let halo = exp(-0.5 * (r_px * r_px) / (star.halo_sigma_px * star.halo_sigma_px));
-    let profile = core + star.halo_weight * halo;
-
-    let intensity = in.amplitude * profile;
+    let intensity = in.amplitude * star_profile(star, r_px);
     if (intensity <= star.cull_level) {
         // Below one visible step. Discarding here rather than drawing near-black keeps the overdraw
         // down, which matters at a quarter of a million sprites.

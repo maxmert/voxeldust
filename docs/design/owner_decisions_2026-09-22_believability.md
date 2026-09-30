@@ -688,3 +688,45 @@ features enter through the design's contract, §4.6), and then ruled: *"Ok, let'
 **Example.** A pilot on foot sees no change after T0 and T1: T0 adds the clocks and the meters, T1 gives every drawn thing
 its motion behind a switch. The first picture change comes at T2, where the owner compares the rebuilt horizon at full,
 two-thirds and half size against today's MSAA edge before anything larger is built.
+
+## B25. THE AIR RESTS ON THE SEA AND REACHES EVERY GROUND (2026-09-30)
+
+The owner flew the hull low over the dry sea floor and saw the haze vanish (*"something is wrong with the athmosphere
+level … Not sure if it's normal behaviour"*). MEASURED (2026-09-30, headless, `examples/air_ground_stand.rs`): the air
+model's ground was one sphere at the ladder's datum; the solve's sea stands 3 591 m over it and the dry sea floor reaches
+8 276 m under it (7.7 km under the sea only 20 km from the owner's stand). An eye under that sphere was lifted onto it,
+and every ray under the eye's level ended there: at 2 135 m under the sphere the picture showed a hard line at the eye's
+level, the ground over it hazed (RGB 71, 65, 68) and the ground under it bare (62, 50, 36); 2 002 m over the sphere on the
+same line of sight the haze was even. The temporal path on and off gave the same numbers. Two more defects of the same law
+were measured: the air's words held at the datum, so over the sea and the owner's coast the blue air was 61 % and the haze
+3 % of the charter's words; and the haze's scattering and absorption were swapped (Bevy 0.18.1's own Earth medium swaps
+them; Bevy 0.16.1's `Atmosphere::EARTH` and Bruneton's calibration scatter 3.996 parts in 4.440). The owner approved all
+four laws and chose to build them before the rest of T2:
+
+1. **THE AIR RESTS ON THE SEA.** The charter's surface words (its pressure is the air's weight, calibrated on Earth's at
+   its sea level) hold at the SEA LEVEL on a body with a sea — the level the owning realm states in its charter — and at
+   the ladder's datum on a dry body.
+2. **THE AIR REACHES EVERY GROUND.** No eye and no drawn ground is ever under the air. The molecules grow denser lower
+   down by the pressure law, with no cap; under the sea level the haze keeps its sea-level value (the haze is the ledgered
+   placeholder, and its source law is 8c/8e/8o's).
+3. **THE PLANET'S SHADOW IN THE AIR IS THE SEA'S HORIZON:** the air over the coast goes dark when the sun sets behind the
+   sea (before, the sphere 3.6 km lower kept it lit until the sun stood 1.9° under the sea's horizon).
+4. **THE HAZE SCATTERS** as the published calibration says: nine tenths of its extinction scatters, one tenth absorbs.
+
+**BUILT AS (2026-09-30):** the law (`vd_client::sky`) puts the air's ground sphere at the charter's sea (laws 1 and 3 in
+one number) and states the air under it; the vendored air (`vendor/bevy_pbr/PATCH.md`, the sixth change) marches each
+pixel from the TRUE eye to its drawn ground, under the sphere where the ground stands there, with the molecules grown by
+the pressure law and the haze held; a pixel's SKY ray also runs under the sphere and ends only where it leaves the air or
+at the FLOOR (the datum less the body's relief bound: no ground stands lower). MEASURED on the way: a sky ray still ended
+at the sea's sphere drew that sphere's plain ground between the sea's horizon and the far dry floor's (0.3° to 2.8° under
+the eye's level at the owner's stand), a dark band from brightness 128 down to 99; with the sky ray through the air the
+rows run 128.5 → 126.5 → 126.7 from the sky into the far floor, and the two drawing paths agree within 0.2 levels. Law 2's first wording moved the model's ground sphere down to the ladder's floor; it
+was not built so. MEASURED: the home planet's ladder floor stands 262 144 m under the datum (one whole top-rung cell), where
+the pressure law gives the air `e^37` times the sea level's density — no table holds it. A sphere at the LOWEST GROUND
+instead (the finest node, 11 867 m under the sea) would put air inside the rock into the engine's light tables, with an
+optical depth of 0.43 (green) and 1.04 (blue) between the sea level and that sphere, and that air would light the sky
+from below. UNMEASURED: neither form was drawn.
+
+**Example.** The hull hangs 2 km over the dry sea floor, 20 km off the owner's coast. Before: a hard line at the eye's
+level, bare ground under it. After: the far floor and the rising coast take the haze of every metre of air between, and
+the coast's air is the charter's own, so ridges 50 km off wear a pale veil.

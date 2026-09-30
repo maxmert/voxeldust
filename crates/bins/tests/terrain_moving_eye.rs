@@ -48,7 +48,9 @@ use vd_bins::{
     dev_auth_pubkey_hex, dev_auth_signing_key_hex, dev_roundtrip, gateway_env, launch_rows,
     orchestrator_env, realm_store_path, reap_forked, reserve_tcp_addr, reserve_udp_addr,
 };
-use vd_client_harness::capture::{capture_rel_path, motion_rel_for, probe_rel_for, state_rel_for};
+use vd_client_harness::capture::{
+    capture_rel_path, motion_rel_for, probe_rel_for, render_rel_for, state_rel_for,
+};
 use vd_client_harness::manifest::CaptureKind;
 use vd_client_harness::motion_census::{
     MotionPicture, TRUTH_RESIDUAL_PX, TRUTH_SHARE, TruthFrame, TruthRead, motion_truth,
@@ -307,9 +309,33 @@ fn spawn_capture_client(
     quic_port: u16,
     devctl_port: u16,
 ) -> Child {
+    spawn_capture_client_on(f, gateway, name, agent_index, quic_port, devctl_port, None)
+}
+
+/// ★ THE CAPTURE CLIENT ON A STATED PICTURE PATH (G-AIR-UNDER, 2026-09-30): `Some(true)` draws the
+/// temporal path (`VD_TEMPORAL=1`), `Some(false)` today's multisampled path whatever the gate's own
+/// environment says, `None` inherits it (every flight leg).
+fn spawn_capture_client_on(
+    f: &Fixture,
+    gateway: SocketAddr,
+    name: &str,
+    agent_index: u64,
+    quic_port: u16,
+    devctl_port: u16,
+    temporal: Option<bool>,
+) -> Child {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_client"));
     for (k, v) in &f.common {
         cmd.env(k, v);
+    }
+    match temporal {
+        Some(true) => {
+            cmd.env("VD_TEMPORAL", "1");
+        }
+        Some(false) => {
+            cmd.env_remove("VD_TEMPORAL");
+        }
+        None => {}
     }
     cmd.env("VD_AUTH_SIGNING_KEY", dev_auth_signing_key_hex());
     // THE INSTRUMENT RUNS AT THE WHOLE MACHINE (ruling F6): the game's default is a share of the
@@ -676,11 +702,13 @@ struct LegRead {
     gw_parts: (GatewayParts, GatewayParts),
 }
 
-/// One recorded frame of a pair, read back from the run: its picture, its probe, its stamp, and
-/// its motion when the flight drew one (T1).
+/// One recorded frame of a pair, read back from the run: its picture, its probe, its stamp, its
+/// motion when the flight drew one (T1), and its render picture before the history when the flight
+/// ran the reconstruction (T2).
 struct PairFrame {
     rgba: image::RgbaImage,
     probe: image::RgbaImage,
+    render: Option<image::RgbaImage>,
     stamp: vd_devproto::DevTerrainStamp,
     capture_frame: Option<u64>,
     motion: Option<MotionPicture>,
@@ -695,19 +723,25 @@ fn pair_frame(run: &Path, label: &str, index: u32) -> Option<PairFrame> {
     let motion = std::fs::read(run.join(motion_rel_for(&rel)))
         .ok()
         .and_then(|bytes| MotionPicture::from_bytes(&bytes).ok());
+    let render = image::open(run.join(render_rel_for(&rel)))
+        .ok()
+        .map(|i| i.to_rgba8());
     Some(PairFrame {
         rgba,
         probe,
+        render,
         capture_frame: state.capture_frame,
         stamp: state.terrain_stamp?,
         motion,
     })
 }
 
-/// A recorded frame as the detector reads it: its bytes and the camera its stamp states.
+/// A recorded frame as the detector reads it: its bytes and the camera its stamp states. ★ Under the
+/// reconstruction (T2, the design §12.3) the seam law reads the RENDER picture before the history, on
+/// the probe's grid, at the frame's own jitter — so the history can never hide a pop from it.
 fn frame_of(f: &PairFrame, w: usize, h: usize) -> Frame<'_> {
     Frame {
-        rgba: f.rgba.as_raw(),
+        rgba: f.render.as_ref().map_or(f.rgba.as_raw(), |r| r.as_raw()),
         probe: f.probe.as_raw(),
         width: w,
         height: h,
@@ -718,6 +752,10 @@ fn frame_of(f: &PairFrame, w: usize, h: usize) -> Frame<'_> {
             let r = f.stamp.hud_rect_px.map(f64::from);
             ((r[2] > r[0]) & (r[3] > r[1])).then_some(r)
         },
+        jitter_px: f
+            .stamp
+            .reconstruction
+            .map_or([0.0; 2], |r| r.jitter_px.map(f64::from)),
     }
 }
 
@@ -736,6 +774,12 @@ fn frame_of(f: &PairFrame, w: usize, h: usize) -> Frame<'_> {
 /// leaves the mean where it was. `None` where a frame has no sky row (no body with air under the
 /// eye) or the region is empty.
 fn judge_sky_pair(a: &PairFrame, b: &PairFrame, w: usize, h: usize) -> Option<(f64, f64)> {
+    // The judge reads the picture through the probe pixel by pixel: under an up-scale (T2) the display
+    // picture is larger than the probe, and its own reading is owed (the design §12.3); no pair is read.
+    let same = |f: &PairFrame| f.rgba.dimensions() == f.probe.dimensions();
+    if !(same(a) & same(b)) {
+        return None;
+    }
     let sky = a.stamp.sky.as_ref()?;
     let scale_height_m = (sky.top_m - sky.bottom_m) / vd_client::sky::SHELL_TOP_SCALE_HEIGHTS;
     let (ea, eb) = (
@@ -845,7 +889,8 @@ fn judge_pairs(pairs: &[(PathBuf, String)]) -> PairsRead {
             );
             continue;
         }
-        let (w, h) = a.rgba.dimensions();
+        // The probe's grid: the render picture's (under an up-scale the display picture is larger).
+        let (w, h) = a.probe.dimensions();
         let (w, h) = (w as usize, h as usize);
         let (fa, fb) = (frame_of(&a, w, h), frame_of(&b, w, h));
         reads.push(judge_pair(&fa, &fb, &cell));
@@ -856,6 +901,7 @@ fn judge_pairs(pairs: &[(PathBuf, String)]) -> PairsRead {
                 probe: b.probe.as_raw(),
                 motion,
                 camera: fb.camera,
+                jitter_px: fb.jitter_px,
             };
             let pair = motion_truth(&fa.camera, &now, &cell);
             if !pair.meets_target() {
@@ -2840,4 +2886,225 @@ fn measure_speed_of_walker(devctl: u16) -> f64 {
         .expect("the walker's own row")
         .0;
     (p1 - p0).length() / dt
+}
+
+// ------------------------------------------------------------------------------------------------
+// ★ G-AIR-UNDER (ruling B25, 2026-09-30): THE AIR REACHES EVERY GROUND.
+// ------------------------------------------------------------------------------------------------
+
+/// The deep floor the air gate stands over lies at least this far under the sea, metres.
+const AIR_FLOOR_UNDER_M: f64 = 4_000.0;
+/// The two eyes stand this high: over the floor (under the air's ground sphere, the sea) and over
+/// the sea (the control), metres.
+const AIR_EYE_OVER_M: f64 = 2_000.0;
+/// The least star elevation at the floor, degrees: the air shows its haze only where it is lit.
+const AIR_MIN_SUN_DEG: f64 = 10.0;
+/// The stand looks back at the coast this far under the level, degrees: the eye's level row then
+/// stands in the frame's upper half, over the rising ground, with ground on both sides of it.
+const AIR_PITCH_DEG: f64 = 2.0;
+/// The judge's bands (`vd_client_harness::air_line`): eight rows average the dunes' shading and stay
+/// thin against the air's own slope; ten bands each side read 160 rows round the level.
+const AIR_BAND_ROWS: usize = 8;
+const AIR_BANDS_EACH_SIDE: usize = 10;
+
+/// ★ THE ROW UNDER THE EYE'S LEVEL at the picture's centre column: the first row whose ray points
+/// under the local level (perpendicular to the radial from the body's centre).
+fn level_row(state: &DevState, planet: RealmId, w: usize, h: usize) -> usize {
+    let camera = vd_bins::pixel::pilot_camera(state, w, h);
+    let radial = (camera.eye - planet_centre(state, planet)).normalize();
+    let (_, cam_up, back) = camera.basis();
+    let tan_half = (camera.fov_y * 0.5).tan();
+    (0..h)
+        .find(|&y| {
+            let ndc_y = 1.0 - (y as f64 + 0.5) / h as f64 * 2.0;
+            (-back + cam_up * (ndc_y * tan_half)).dot(radial) < 0.0
+        })
+        .expect("the level row stands in the frame")
+}
+
+/// One air stand's picture: the capture client on its path, the settle on the solved ground, one
+/// picture, and the judge at the eye's level. Returns the stamp's sky row and the reading.
+fn air_picture(
+    f: &Fixture,
+    gateway: SocketAddr,
+    planet: RealmId,
+    name: &str,
+    agent: u64,
+    temporal: bool,
+) -> (
+    vd_devproto::state::DevSkyStamp,
+    vd_client_harness::air_line::LevelStep,
+) {
+    let client_quic = reserve_udp_addr();
+    let devctl = reserve_tcp_addr().port();
+    let mut client = ChildGuard(spawn_capture_client_on(
+        f,
+        gateway,
+        name,
+        agent,
+        client_quic.port(),
+        devctl,
+        Some(temporal),
+    ));
+    await_listener(devctl, &mut client.0);
+    let landed = await_active(devctl);
+    assert_eq!(
+        landed.location.as_deref(),
+        Some(label_of(planet).as_str()),
+        "{name}: the eye stands on the planet: {landed:?}"
+    );
+    await_window_solved(devctl, name);
+    await_settled(devctl, name);
+    let shot = round_trip(
+        devctl,
+        &DevRequest::Screenshot {
+            at_tick: None,
+            label: Some(name.to_owned()),
+        },
+    );
+    let rel = match shot {
+        DevResponse::Captured { path, .. } => path,
+        other => panic!("{name}: the screenshot was not captured: {other:?}"),
+    };
+    // Under the temporal path the probe stands on the RENDER grid beside the render picture; the
+    // multisampled picture and its probe share one grid.
+    let picture_rel = if temporal {
+        render_rel_for(&rel)
+    } else {
+        rel.clone()
+    };
+    let picture = image::open(f.cwd.join(&picture_rel))
+        .unwrap_or_else(|e| panic!("{name}: open {picture_rel}: {e}"))
+        .to_rgba8();
+    let probe = image::open(f.cwd.join(probe_rel_for(&rel)))
+        .unwrap_or_else(|e| panic!("{name}: open the probe: {e}"))
+        .to_rgba8();
+    let (w, h) = (picture.width() as usize, picture.height() as usize);
+    assert_eq!(
+        (probe.width() as usize, probe.height() as usize),
+        (w, h),
+        "{name}: the probe is the picture's grid"
+    );
+    let run_dir = f
+        .cwd
+        .join(&rel)
+        .parent()
+        .and_then(Path::parent)
+        .expect("shots/<name>.png sits in a run dir")
+        .to_path_buf();
+    let state: DevState = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join(state_rel_for(&rel)))
+            .unwrap_or_else(|e| panic!("{name}: read the state file: {e}")),
+    )
+    .expect("the state file decodes");
+    let sky = state
+        .terrain_stamp
+        .as_ref()
+        .and_then(|s| s.sky.clone())
+        .unwrap_or_else(|| panic!("{name}: the stamp states the air"));
+    let row = level_row(&state, planet, w, h);
+    let step = vd_client_harness::air_line::level_step(
+        picture.as_raw(),
+        probe.as_raw(),
+        w,
+        h,
+        row,
+        AIR_BAND_ROWS,
+        AIR_BANDS_EACH_SIDE,
+    )
+    .unwrap_or_else(|| panic!("{name}: no ground on both sides of the level row {row}"));
+    eprintln!(
+        "terrain_moving_eye/{name}: the eye {:+.0} m over the air's ground sphere; the level row \
+         {row}; the step at the level {:.1} levels, the largest elsewhere {:.1} ({} pairs)",
+        sky.eye_r_m - sky.bottom_m,
+        step.at_level,
+        step.largest_elsewhere,
+        step.pairs_elsewhere
+    );
+    (sky, step)
+}
+
+/// ★ G-AIR-UNDER (ruling B25, 2026-09-30): the owner flew low over the dry sea floor and the haze
+/// vanished under the eye's level. The gate stands an eye [`AIR_EYE_OVER_M`] over the solved floor
+/// at least [`AIR_FLOOR_UNDER_M`] under the sea nearest the flight's walkable coast stand
+/// (`vd_bins::air_stand`), UNDER the air's ground sphere, looking back at the rising coast. On each
+/// path (today's multisampled one and the temporal one) it asserts:
+/// 1. THE AIR RESTS ON THE SEA: the stamp's air ground sphere is the solve's sea, to a metre (law 1);
+/// 2. the stand tests what it claims: the eye stands under the sphere;
+/// 3. NO LINE AT THE EYE'S LEVEL: the ground's colour steps no more across the level row than
+///    between any other two neighbouring bands (`vd_client_harness::air_line`).
+///
+/// MEASURED before the cure (the eye 2 135 m under the old sphere, eight-row bands): 28.8 levels at
+/// the level against 6.9 elsewhere; after it, on the gate's own stand (the eye 2 019 m under the
+/// sphere): 0.8 against 4.0 (multisampled) and 4.2 (temporal). A control eye OVER the sphere was
+/// tried and taken out: 2 km over the sea its level row saw only sky (the coast stands about 100 m
+/// over the sea there), so it could judge nothing; the judge's reading of plain ground is its own
+/// tests' and the passing pictures'.
+#[test]
+fn the_air_reaches_every_ground_under_the_sea() {
+    refuse_stray_fixtures();
+    let _tier = vd_bins::cluster_tier();
+    let body = vd_bins::home_body(DEV.universe_seed).expect("the home planet");
+    let planet = RealmId::Planet(body.seed());
+    let orbit = vd_bins::home_orbit(DEV.universe_seed).expect("the home planet's orbit");
+    let sun = -vd_physics::celestial::orbital_state(&orbit, 0.0)
+        .position
+        .normalize();
+    let along = sun.cross(DVec3::Z).normalize();
+    let zenith = (90.0_f64 - SUN_ELEVATION_DEG).to_radians();
+    let d0 = (sun * zenith.cos() + along * zenith.sin()).normalize();
+    let solved = solve_home(&body);
+    let sea = solved.body.sea_radius_m();
+    assert!(sea > 0.0, "the home planet's solve states a sea");
+    let search = vd_bins::air_stand::FloorSearch {
+        sphere_m: sea,
+        depth_m: AIR_FLOOR_UNDER_M,
+        min_sun_deg: AIR_MIN_SUN_DEG,
+        bearings: 72,
+        step_m: 2_000.0,
+        reach_m: 3_000_000.0,
+    };
+    // FROM THE COAST: the search starts at the flight's own walkable stand on land, so the floor's
+    // eyes look back at the rising coast and the ground stands on both sides of their level row.
+    // MEASURED on the first run: started over the open ocean where the star stands 15° up, the stand
+    // looked back across a wide flat basin, and the rows round its level were all sky.
+    let (coast, _, _) = walkable_stand(&solved, sun, d0, walk_path_m());
+    let floor = vd_bins::air_stand::nearest_floor(&|d| solved.ground_m(d, 0), coast, sun, &search)
+        .expect("a lit floor deep under the sea lies within the reach");
+    let nose = vd_bins::air_stand::facing(floor.dir, floor.back, AIR_PITCH_DEG) * DVec3::NEG_Z;
+    let under = stand(floor.dir, AIR_EYE_OVER_M, floor.ground_m, nose);
+    eprintln!(
+        "terrain_moving_eye/air: the floor {:.0} m under the sea, {:.1} km from the stand, the star \
+         {:.1}° up",
+        sea - floor.ground_m,
+        floor.along_m / 1000.0,
+        sun.dot(floor.dir).asin().to_degrees()
+    );
+    let spawn_poses = spawn_entry(CLIENT_ACCOUNT_BASE, body.seed(), &under);
+    let f = fixture();
+    let gw_admin = reserve_tcp_addr();
+    let a = demand_addrs(gw_admin);
+    let _reaper = ForkedReaper(f.launch_path.clone());
+    let _cluster = boot_demand_cluster(&f, &a, &DEV, &spawn_poses);
+    for (name, temporal) in [("air-under-msaa", false), ("air-under-temporal", true)] {
+        let (sky, step) = air_picture(&f, a.gateway, planet, name, 0, temporal);
+        assert!(
+            (sky.bottom_m - sea).abs() <= 1.0,
+            "{name}: the air's ground sphere {:.1} m is the solve's sea {sea:.1} m (law 1)",
+            sky.bottom_m
+        );
+        assert!(
+            sky.eye_r_m < sky.bottom_m,
+            "{name}: the eye stands under the air's ground sphere ({:.0} m against {:.0} m)",
+            sky.eye_r_m,
+            sky.bottom_m
+        );
+        assert!(
+            step.passes(),
+            "{name}: a LINE at the eye's level: the ground steps {:.1} levels across the level row \
+             against {:.1} at most elsewhere",
+            step.at_level,
+            step.largest_elsewhere
+        );
+    }
 }

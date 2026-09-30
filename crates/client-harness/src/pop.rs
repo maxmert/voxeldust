@@ -46,6 +46,8 @@ use std::collections::BTreeMap;
 
 use vd_core::glam::{DQuat, DVec3};
 
+use vd_client::reconstruction::{nearest_sample, sample_point};
+
 use crate::camera::{CaptureCamera, FIT_FOV_Y};
 use crate::probe::{PROBE_KIND_TERRAIN, decode_probe};
 
@@ -84,6 +86,9 @@ pub struct Frame<'a> {
     /// THE OVERLAY'S RECTANGLE (left, top, right, bottom, pixels), the stamp's `hud_rect_px`:
     /// nothing under it is judged or matched — its readouts are not the ground.
     pub hud: Option<[f64; 4]>,
+    /// THE FRAME'S JITTER (the temporal path's T2; the stamp's reconstruction row): pixel `i` sampled
+    /// the scene at `i + 0.5 + jitter`. Nought without the reconstruction.
+    pub jitter_px: [f64; 2],
 }
 
 impl Frame<'_> {
@@ -328,14 +333,19 @@ pub fn judge_pair(before: &Frame<'_>, after: &Frame<'_>, cell_m: &dyn Fn(u8) -> 
                 x += 1;
                 continue;
             }
-            let point = after.camera.unproject(x as f64 + 0.5, y as f64 + 0.5, d);
+            // ★ THE SAMPLE POINTS (the temporal path's T2): the second frame's pixel sampled the scene at
+            // its jittered point; the first frame's pixel whose sample stands nearest the reprojected
+            // place is the match's centre (`vd_client::reconstruction`, one rule for both).
+            let [sx, sy] = sample_point([x as i64, y as i64], after.jitter_px);
+            let point = after.camera.unproject(sx, sy, d);
             let q = before.camera.project_point(point);
             let hit = q.and_then(|q| {
-                let inside = (q.x >= 0.0)
-                    & (q.y >= 0.0)
-                    & (q.x < before.width as f64)
-                    & (q.y < before.height as f64);
-                inside.then_some((q.x as usize, q.y as usize))
+                let [qx, qy] = nearest_sample([q.x, q.y], before.jitter_px);
+                let inside = (qx >= 0)
+                    & (qy >= 0)
+                    & (qx < before.width as i64)
+                    & (qy < before.height as i64);
+                inside.then_some((qx as usize, qy as usize))
             });
             let matched =
                 hit.and_then(|(qx, qy)| best_match(before, after.rgba, i, qx, qy, pb.rung));
@@ -441,6 +451,7 @@ mod tests {
             height: h,
             camera,
             hud: None,
+            jitter_px: [0.0; 2],
         }
     }
 
@@ -645,6 +656,24 @@ mod tests {
         let read = judge_pair(&ground, &d, &cell);
         assert!(read.off_frame > 0, "{read:?}");
         assert!(read.compared > 0, "{read:?}");
+    }
+
+    /// ★ THE JITTER (the temporal path's T2): a frame one pixel wide, from a still eye — unjittered, the
+    /// second frame's pixel lands on the first's; with the second frame's sample at 0.8 and the first's
+    /// at 0.2, the nearest sample of the first frame to 0.8 lies one pixel on, outside the frame.
+    #[test]
+    fn the_jitter_moves_the_sample_points_of_both_frames() {
+        let (w, h) = (1, 1);
+        let (rgba, probe, cam) = painted(w, h, 2, 500, 100, still_camera(w, h));
+        let a = frame(&rgba, &probe, w, h, cam);
+        let b = frame(&rgba, &probe, w, h, still_camera(w, h));
+        assert_eq!(judge_pair(&a, &b, &cell).compared, 1);
+        let mut a_jittered = frame(&rgba, &probe, w, h, cam);
+        a_jittered.jitter_px = [-0.3, 0.0];
+        let mut b_jittered = frame(&rgba, &probe, w, h, still_camera(w, h));
+        b_jittered.jitter_px = [0.3, 0.0];
+        let read = judge_pair(&a_jittered, &b_jittered, &cell);
+        assert_eq!((read.compared, read.off_frame), (0, 1));
     }
 
     /// THE OVERLAY IS NOT THE GROUND: pixels under the second frame's rectangle are not judged,

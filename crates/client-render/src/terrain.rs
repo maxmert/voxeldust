@@ -197,6 +197,13 @@ pub struct TerrainConfig {
     /// its pixels as holding a depth with no motion. A measurement's switch; a whole rung stands for
     /// the design's one chunk.
     pub census_control_rung: Option<u8>,
+    /// ★ THE SEAM GATE'S KNOWN POP (the temporal path's T2, `docs/investigation/2026-09-28/
+    /// temporal_path_design.md` §12.3: "a known pop (one rung's chunks forced to enter whole) must fail
+    /// both"): `VD_POP_CONTROL_RUNG=<r>` lands every chunk of rung `r` WHOLE — no rise from its
+    /// stand-in's surface — so the seam gate must read the pops at that rung's boundary, on the render
+    /// picture and on the display picture. A measurement's switch; the arrival clock is kept, so the
+    /// probe still marks the chunk new.
+    pub pop_control_rung: Option<u8>,
     /// THE SHADOW'S SHAPE (D8-8's ablation named the sun's shadow as the still stand's wall,
     /// §19.6): how far it reaches (the rung whose switch distance ends it), how many cascades
     /// draw it, and each cascade map's width in pixels. Defaults: the constants below; the
@@ -373,6 +380,7 @@ const SPLIT_DRAWS_ENV: &str = "VD_TERRAIN_SPLIT_DRAWS";
 const THIN_ENV: &str = "VD_TERRAIN_THIN";
 const COVERED_ENV: &str = "VD_TERRAIN_COVERED";
 const CENSUS_CONTROL_ENV: &str = "VD_CENSUS_CONTROL_RUNG";
+const POP_CONTROL_ENV: &str = "VD_POP_CONTROL_RUNG";
 /// How far under its coarser surface a vertex must stand to count as covered, in its rung's cells:
 /// four — the sink and the skirt's drop reach at most about two.
 const COVERED_CELLS: f32 = 4.0;
@@ -416,6 +424,9 @@ impl TerrainConfig {
             thin: env_or(THIN_ENV, 1usize).max(1),
             covered: std::env::var(COVERED_ENV).is_ok_and(|v| v == "1"),
             census_control_rung: std::env::var(CENSUS_CONTROL_ENV)
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok()),
+            pop_control_rung: std::env::var(POP_CONTROL_ENV)
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
             shadow_reach_rung: env_or(SHADOW_REACH_ENV, SHADOW_REACH_RUNG),
@@ -2974,6 +2985,7 @@ pub(crate) fn sync_terrain(
                 realm: eb.realm,
                 centre: *centre,
                 radius_m: eb.body.ladder().radius_m(),
+                relief_m: eb.body.relief_bound_m(0),
                 charter,
             })
         })
@@ -3599,8 +3611,11 @@ pub(crate) fn sync_terrain(
         // coarser chunk that stood in for it and rises into its own place over half a second
         // (ruling B18 Q7). A rebuilt key that was already drawn, and a top-rung chunk (no stand-in),
         // enter whole (nought).
+        // The seam gate's known pop (`pop_control_rung`): that rung's chunks land whole, as a rebuilt key does.
+        let whole = terrain.entities.contains_key(&(realm, key))
+            | (terrain.config.pop_control_rung == Some(key.rung));
         let stamp = vd_client::arrival::arrival_stamp(
-            terrain.entities.contains_key(&(realm, key)),
+            whole,
             key.rung,
             body.ladder().rungs,
             terrain.frame_ticks,
@@ -4308,6 +4323,7 @@ pub(crate) fn sync_terrain(
                     last_gap: terrain.last_gap.clone(),
                     sky: None,
                     frame_cost: None,
+                    reconstruction: None,
                 });
             }
         }
@@ -4576,8 +4592,13 @@ pub(crate) fn place_chunks(
     window: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut occlusion: bevy::ecs::message::MessageReader<bevy::window::WindowOccluded>,
     mut occluded: Local<bool>,
+    mut sky_turn: ResMut<crate::reconstruction::SkyTurn>,
 ) {
     let place_started = std::time::Instant::now();
+    // THE AIR'S ROTATION STEP (the temporal path's T2, the design §6.3): the identity unless the air's
+    // body is drawn in both frames (set with the realms' steps below; every early return keeps it).
+    let mut turn = DQuat::IDENTITY;
+    sky_turn.0 = Quat::IDENTITY;
     // ★ THE WINDOW'S OWN PIXELS AND FOCUS (2026-09-24): the system reports a hidden window by a
     // message, so the last word is held.
     for m in occlusion.read() {
@@ -4635,6 +4656,7 @@ pub(crate) fn place_chunks(
         let Terrain {
             band_tables,
             last_placements,
+            sky_realm,
             ..
         } = &mut *terrain;
         let mut drawn = BTreeMap::new();
@@ -4646,11 +4668,16 @@ pub(crate) fn place_chunks(
             let last = last_placements
                 .get(realm)
                 .map(|&(centre, facing)| DrawnPlacement { centre, facing });
-            table.words.set_step(RealmStep::between(last, now).rows());
+            let step = RealmStep::between(last, now);
+            table.words.set_step(step.rows());
+            if *sky_realm == Some(*realm) {
+                turn = step.rotation;
+            }
             drawn.insert(*realm, (centre, facing));
         }
         *last_placements = drawn;
     }
+    sky_turn.0 = turn.as_quat();
     let mut nearest = f64::INFINITY;
     let mut farthest = 0.0_f64;
     let mut placed = 0u32;

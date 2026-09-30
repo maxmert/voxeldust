@@ -232,6 +232,79 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
     return inscattering;
 }
 
+// ★ THE AIR UNDER ITS GROUND (VOXELDUST PATCH, 2026-09-30; `AtmosphereBelow` in `mod.rs`). The tables
+// cover the shell from the ground sphere up; a drawn ground (a dry sea floor, a basin) and the eye may
+// stand under the sphere, and the air reaches them. There every term holds its value at the sphere (the
+// medium's table clamps to its edge) and ONE term grows by its exponential law (the molecules, by the
+// pressure law). Only the per-pixel march reads these (`raymarch_atmosphere`, the sky pass's partial
+// step, the points pass, the ground's sunlight): the tables' builders keep upstream's code, since their
+// rays run a fixed distance deep into the planet.
+//
+// Example: a pixel of dry sea floor 6 km under the sea, seen from 2 km over it, marches from the eye to
+// the floor; at 5 km under the sphere the blue air there is `e^(5 km / H)` times the sea level's.
+
+// The growing term's extra scattering at radius `r`: nought at and over the sphere.
+fn below_growth(atm: Atmosphere, r: f32) -> vec3<f32> {
+    if r >= atm.bottom_radius {
+        return vec3(0.0);
+    }
+    let depth = atm.bottom_radius - r;
+    return atm.below_scattering * (exp(depth / atm.below_scale_height) - 1.0);
+}
+
+// The transmittance from radius `r` UP TO THE SPHERE along a direction at cosine `mu` to the local up:
+// the air straight up (the held extinction over the depth plus the growth's integral) times the
+// chord's length over the depth, the chord in the form free of cancellation (the depth divides out:
+// `(b + r) / (r μ + √(r² μ² + d (b + r)))`, which is `1 / μ` on a flat ground). One at and over the
+// sphere; nought for a direction at or under the local level (the ground hides it).
+fn below_transmittance(atm: Atmosphere, r: f32, mu: f32) -> vec3<f32> {
+    if r >= atm.bottom_radius {
+        return vec3(1.0);
+    }
+    if mu <= 0.0 {
+        return vec3(0.0);
+    }
+    let b = atm.bottom_radius;
+    let depth = b - r;
+    let h = atm.below_scale_height;
+    let chord_per_depth = (b + r) / (r * mu + sqrt(r * r * mu * mu + depth * (b + r)));
+    let straight_up = atm.below_extinction * depth
+        + atm.below_scattering * (h * (exp(depth / h) - 1.0) - depth);
+    return exp(-straight_up * chord_per_depth);
+}
+
+// The per-pixel march's local in-scattering at a sample that may stand under the sphere: exactly
+// `sample_local_inscattering` over the sphere; under it, the growing term's growth (`growth`, already
+// in `local_scattering`) scatters with the Rayleigh phase, and the sunlight crosses the air between the
+// sample and the sphere. A sun under the sample's own level is hidden (`ray_intersects_ground` under the
+// sphere is the local level).
+fn sample_pixel_inscattering(
+    local_scattering: vec3<f32>,
+    growth: vec3<f32>,
+    ray_dir: vec3<f32>,
+    world_pos: vec3<f32>,
+) -> vec3<f32> {
+    let local_r = length(world_pos);
+    let local_up = normalize(world_pos);
+    var inscattering = vec3(0.0);
+    for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
+        let light = &lights.directional_lights[light_i];
+        let mu_light = dot((*light).direction_to_light, local_up);
+        let neg_LdotV = dot((*light).direction_to_light, ray_dir);
+        let transmittance_to_light = sample_transmittance_lut(local_r, mu_light)
+            * below_transmittance(atmosphere, local_r, mu_light);
+        let shadow_factor = transmittance_to_light * f32(!ray_intersects_ground(local_r, mu_light));
+        // The medium's Rayleigh phase (`medium.rs`), for the growing term.
+        let scattering_coeff = sample_scattering_lut(local_r, neg_LdotV)
+            + growth * FRAC_3_16_PI * (1.0 + neg_LdotV * neg_LdotV);
+        let scattering_factor = shadow_factor * scattering_coeff;
+        let psi_ms = sample_multiscattering_lut(local_r, mu_light);
+        let multiscattering_factor = psi_ms * local_scattering;
+        inscattering += (*light).color.rgb * (scattering_factor + multiscattering_factor);
+    }
+    return inscattering;
+}
+
 fn sample_sun_radiance(ray_dir_ws: vec3<f32>) -> vec3<f32> {
     let view_pos = get_view_position();
     let r = length(view_pos);
@@ -301,9 +374,16 @@ fn max_atmosphere_distance(r: f32, mu: f32) -> f32 {
 
 /// Returns the observer's position in the atmosphere
 fn get_view_position() -> vec3<f32> {
+    return clamp_to_surface(atmosphere, get_eye_position());
+}
+
+/// VOXELDUST PATCH (the air under its ground, 2026-09-30): the eye's TRUE position in the atmosphere,
+/// never lifted onto the ground sphere. The per-pixel march starts here: an eye under the sphere (over
+/// a dry sea floor) stands in air, and its rays cross that air. The tables' reads keep the lifted
+/// `get_view_position`, whose radius their parameters need.
+fn get_eye_position() -> vec3<f32> {
     // VOXELDUST PATCH (planet centre): centre-relative, from the stated centre, never the origin.
-    var world_pos = view.world_position * settings.scene_units_to_m - atmosphere.planet_center;
-    return clamp_to_surface(atmosphere, world_pos);
+    return view.world_position * settings.scene_units_to_m - atmosphere.planet_center;
 }
 
 // In ATMOSPHERE SPACE the eye stands at (0, r, 0) by construction (see sky_view_lut.wgsl), so the
@@ -389,6 +469,42 @@ struct RaymarchSegment {
     end: f32,
 }
 
+// VOXELDUST PATCH (the air under its ground, 2026-09-30): WHICH RAY `raymarch_atmosphere` marches.
+// Upstream's `ground: bool` said only "a sky ray" (true) or "a ray to a drawn surface" (false).
+// The tables' sky ray (upstream's): the ground sphere ends it and reflects the sunlight.
+const RAY_TABLE_SKY: u32 = 0u;
+// A pixel's ray to a drawn surface: its depth ends it (the caller's `t_max`); the ground sphere does not.
+const RAY_TO_SURFACE: u32 = 1u;
+// A pixel's sky ray (no drawn surface): through the air under the ground sphere, to where it leaves the
+// air or to the FLOOR sphere (`pixel_sky_distance`), which reflects the sunlight as upstream's ground did.
+const RAY_PIXEL_SKY: u32 = 2u;
+
+// Whether a ray meets the FLOOR sphere (`below_floor_radius`), and how far off.
+fn ray_meets_floor(r: f32, mu: f32) -> bool {
+    let floor = atmosphere.below_floor_radius;
+    return mu < 0.0 && r * r * (mu * mu - 1.0) + floor * floor >= 0.0;
+}
+
+fn distance_to_floor(r: f32, mu: f32) -> f32 {
+    let floor = atmosphere.below_floor_radius;
+    return max(-r * mu - sqrt(max(r * r * (mu * mu - 1.0) + floor * floor, 0.0)), 0.0);
+}
+
+/// VOXELDUST PATCH (the air under its ground, 2026-09-30): how far a pixel's SKY ray runs — to where it
+/// leaves the air, or to the FLOOR sphere, where it meets the rock under a hole in the drawn ground.
+/// The ground sphere does not end it: over a dry basin, a ray just over the far floor's horizon dips
+/// under the sea's level through air. MEASURED (the owner's coast stand, 2026-09-30): ended at the sea's
+/// sphere, the rows between the sea's horizon and the far floor's (0.3° to 2.8° under the eye's level)
+/// drew the sphere's plain ground, a dark band from brightness 128 down to 99 between the sky and the
+/// hazed floor.
+fn pixel_sky_distance(r: f32, mu: f32) -> f32 {
+    return select(
+        distance_to_top_atmosphere_boundary(atmosphere, r, mu),
+        distance_to_floor(r, mu),
+        ray_meets_floor(r, mu),
+    );
+}
+
 fn get_raymarch_segment(r: f32, mu: f32) -> RaymarchSegment {
     // Get both intersection points with atmosphere
     let atmosphere_intersections = ray_sphere_intersect(r, mu, atmosphere.top_radius);
@@ -418,6 +534,26 @@ fn get_raymarch_segment(r: f32, mu: f32) -> RaymarchSegment {
     return segment;
 }
 
+/// VOXELDUST PATCH (the air under its ground, 2026-09-30): the segment of a ray that ends ON A DRAWN
+/// SURFACE (its depth ends it): from the eye (in the air, over or under the sphere) or from where it
+/// enters the air, to where it leaves the air. The ground sphere never ends it: the drawn ground may
+/// stand under the sphere, and the air reaches it.
+fn get_depth_segment(r: f32, mu: f32) -> RaymarchSegment {
+    let atmosphere_intersections = ray_sphere_intersect(r, mu, atmosphere.top_radius);
+    var segment: RaymarchSegment;
+    if r < atmosphere.top_radius {
+        segment.start = 0.0;
+        segment.end = atmosphere_intersections.y;
+    } else {
+        if atmosphere_intersections.x < 0.0 {
+            return segment;
+        }
+        segment.start = atmosphere_intersections.x;
+        segment.end = atmosphere_intersections.y;
+    }
+    return segment;
+}
+
 struct RaymarchResult {
     inscattering: vec3<f32>,
     transmittance: vec3<f32>,
@@ -429,7 +565,7 @@ fn raymarch_atmosphere(
     t_max: f32,
     max_samples: u32,
     uv: vec2<f32>,
-    ground: bool
+    ray: u32,
 ) -> RaymarchResult {
     let r = length(pos);
     let up = normalize(pos);
@@ -438,7 +574,12 @@ fn raymarch_atmosphere(
     // Optimization: Reduce sample count at close proximity to the scene
     let sample_count = mix(1.0, f32(max_samples), saturate(t_max * 0.01));
 
-    let segment = get_raymarch_segment(r, mu);
+    // VOXELDUST PATCH (the air under its ground): only the tables' sky ray is ended by the ground
+    // sphere; a pixel's ray runs through the air under it (its depth or its floor ends it, `t_max`).
+    var segment = get_raymarch_segment(r, mu);
+    if ray != RAY_TABLE_SKY {
+        segment = get_depth_segment(r, mu);
+    }
     let t_start = segment.start;
     var t_end = segment.end;
 
@@ -467,15 +608,18 @@ fn raymarch_atmosphere(
         let local_up = normalize(sample_pos);
 
         let absorption = sample_density_lut(local_r, ABSORPTION_DENSITY);
-        let scattering = sample_density_lut(local_r, SCATTERING_DENSITY);
+        // VOXELDUST PATCH (the air under its ground): the growing term's growth under the sphere.
+        let growth = below_growth(atmosphere, local_r);
+        let scattering = sample_density_lut(local_r, SCATTERING_DENSITY) + growth;
         let extinction = absorption + scattering;
 
         let sample_optical_depth = extinction * dt_i;
         optical_depth += sample_optical_depth;
         let sample_transmittance = exp(-sample_optical_depth);
 
-        let inscattering = sample_local_inscattering(
+        let inscattering = sample_pixel_inscattering(
             scattering,
+            growth,
             ray_dir,
             sample_pos
         );
@@ -490,7 +634,12 @@ fn raymarch_atmosphere(
     }
 
     // include reflected luminance from planet ground 
-    if ground && ray_intersects_ground(r, mu) {
+    // VOXELDUST PATCH (the air under its ground): the tables' sky ray reflects off the ground sphere
+    // (upstream), a pixel's sky ray off the floor sphere, and the sunlight there crosses the air
+    // between the floor and the ground sphere.
+    let reflects = (ray == RAY_TABLE_SKY && ray_intersects_ground(r, mu))
+        || (ray == RAY_PIXEL_SKY && ray_meets_floor(r, mu));
+    if reflects {
         for (var light_i: u32 = 0u; light_i < lights.n_directional_lights; light_i++) {
             let light = &lights.directional_lights[light_i];
             let light_dir = (*light).direction_to_light;
@@ -500,7 +649,8 @@ fn raymarch_atmosphere(
             let sphere_point = pos + ray_dir * t_end;
             let sphere_normal = normalize(sphere_point);
             let mu_light = dot(light_dir, sphere_normal);
-            let transmittance_to_light = sample_transmittance_lut(0.0, mu_light);
+            let transmittance_to_light = sample_transmittance_lut(0.0, mu_light)
+                * below_transmittance(atmosphere, length(sphere_point), mu_light);
             let light_luminance = transmittance_to_light * max(mu_light, 0.0) * light_color;
             // Normalized Lambert BRDF
             let ground_luminance = transmittance_to_ground * atmosphere.ground_albedo / PI;

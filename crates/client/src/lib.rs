@@ -27,6 +27,7 @@ pub mod motion;
 pub mod net;
 pub mod realm_scene;
 pub mod realm_view;
+pub mod reconstruction;
 pub mod render_clock;
 pub mod render_snapshot;
 pub mod sky;

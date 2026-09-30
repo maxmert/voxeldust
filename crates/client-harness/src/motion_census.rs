@@ -116,14 +116,33 @@ impl MotionPicture {
     /// hold both parts.
     #[must_use]
     pub fn from_padded(width: u32, height: u32, padded_row: usize, raw: &[u8]) -> Option<Self> {
+        Self::from_padded_window(width, height, height, padded_row, raw)
+    }
+
+    /// ★ THE RENDER GRID'S WINDOW (the temporal path's T2; the design §12.1): the top-left `width` ×
+    /// `height` pixels of a copy `copied_rows` tall. Under an up-scale the picture camera's targets
+    /// hold the DISPLAY size and the drawn picture fills their top-left render rectangle, so the
+    /// capture copies the whole targets and keeps the render grid. `None` when a row cannot hold the
+    /// width, the window is taller than the copy, or the buffer cannot hold both parts.
+    #[must_use]
+    pub fn from_padded_window(
+        width: u32,
+        height: u32,
+        copied_rows: u32,
+        padded_row: usize,
+        raw: &[u8],
+    ) -> Option<Self> {
         let w = width as usize;
         let h = height as usize;
-        let fits = (w * MOTION_TEXEL_BYTES <= padded_row) & (2 * padded_row * h <= raw.len());
+        let rows = copied_rows as usize;
+        let fits = (w * MOTION_TEXEL_BYTES <= padded_row)
+            & (h <= rows)
+            & (2 * padded_row * rows <= raw.len());
         if !fits {
             return None;
         }
         let texel = |part: usize, x: usize, y: usize| -> [u8; 4] {
-            let at = part * padded_row * h + y * padded_row + x * MOTION_TEXEL_BYTES;
+            let at = part * padded_row * rows + y * padded_row + x * MOTION_TEXEL_BYTES;
             [raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]
         };
         let pixels = || (0..h).flat_map(move |y| (0..w).map(move |x| (x, y)));
@@ -214,6 +233,10 @@ pub struct TruthFrame<'a> {
     pub probe: &'a [u8],
     pub motion: &'a MotionPicture,
     pub camera: CaptureCamera,
+    /// THE FRAME'S JITTER (the temporal path's T2; the stamp's reconstruction row): render pixel `i`
+    /// sampled the scene at `i + 0.5 + jitter`, so the reference unprojects that point. Nought without
+    /// the reconstruction.
+    pub jitter_px: [f64; 2],
 }
 
 /// ★ A SET OF RESIDUALS: the pixels judged, their residuals in bins of [`TRUTH_BIN_PX`] (the last bin
@@ -366,7 +389,10 @@ pub fn motion_truth(
         if moving | kept | near {
             continue;
         }
-        let (x, y) = ((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
+        let [x, y] = vd_client::reconstruction::sample_point(
+            [(i % w) as i64, (i / w) as i64],
+            now.jitter_px,
+        );
         let Some(reference) = last_camera.project_point(now.camera.unproject(x, y, d)) else {
             read.behind += 1;
             continue;
@@ -531,12 +557,21 @@ mod tests {
     /// 50 m ahead. The probe states each pixel's distance to the wall in millimetres; the motion
     /// names the previous place the reference names, as half floats, moved by `shift_px`.
     fn fixture(shift_px: f64) -> (CaptureCamera, Vec<u8>, MotionPicture) {
+        fixture_at(shift_px, [0.0; 2])
+    }
+
+    /// The fixture drawn with a jitter: each pixel's probe and motion are the surface's at its sample
+    /// point `i + 0.5 + jitter` (the temporal path's T2).
+    fn fixture_at(shift_px: f64, jitter: [f64; 2]) -> (CaptureCamera, Vec<u8>, MotionPicture) {
         let now = camera(DVec3::ZERO, DVec3::NEG_Z);
         let last = camera(DVec3::new(-1.0, 0.0, 0.0), DVec3::NEG_Z);
         let mut probe = Vec::with_capacity(W * H * 4);
         let mut motion = Vec::with_capacity(W * H);
         for i in 0..W * H {
-            let (x, y) = ((i % W) as f64 + 0.5, (i / W) as f64 + 0.5);
+            let (x, y) = (
+                (i % W) as f64 + 0.5 + jitter[0],
+                (i / W) as f64 + 0.5 + jitter[1],
+            );
             let ray = now.unproject(x, y, 1.0);
             let cells = (50.0 / -ray.z / CELL_M).round() as u16;
             let [r, g, b] = crate::probe::encode_probe(crate::probe::ProbePixel {
@@ -571,6 +606,7 @@ mod tests {
             probe: &probe,
             motion: &picture,
             camera: camera(DVec3::ZERO, DVec3::NEG_Z),
+            jitter_px: [0.0; 2],
         };
         let read = motion_truth(&last, &now, &|_| CELL_M);
         assert_eq!(read.still.judged, (W * H) as u64);
@@ -581,10 +617,28 @@ mod tests {
             probe: &probe,
             motion: &shifted,
             camera: camera(DVec3::ZERO, DVec3::NEG_Z),
+            jitter_px: [0.0; 2],
         };
         let off = motion_truth(&last, &now, &|_| CELL_M);
         assert!(!off.meets_target());
         assert!((off.still.at(TRUTH_SHARE) - 0.2).abs() < 0.01);
+    }
+
+    /// ★ A JITTERED FRAME (the temporal path's T2): the probe and the motion drawn at the sample points
+    /// `i + 0.5 + jitter`, judged at the frame's jitter, meet the target as tightly as an unjittered one.
+    #[test]
+    fn a_jittered_frame_is_judged_at_its_sample_points() {
+        let jitter = [0.375, -0.25];
+        let (last, probe, picture) = fixture_at(0.0, jitter);
+        let now = TruthFrame {
+            probe: &probe,
+            motion: &picture,
+            camera: camera(DVec3::ZERO, DVec3::NEG_Z),
+            jitter_px: jitter,
+        };
+        let read = motion_truth(&last, &now, &|_| CELL_M);
+        assert_eq!(read.still.judged, (W * H) as u64);
+        assert!(read.still.worst_px < 0.01, "{}", read.still.worst_px);
     }
 
     /// The pixels the truth leaves out, each counted apart: the moving ground (a new chunk's
@@ -606,6 +660,7 @@ mod tests {
             probe: &probe,
             motion: &picture,
             camera: camera(DVec3::ZERO, DVec3::NEG_Z),
+            jitter_px: [0.0; 2],
         };
         let read = motion_truth(&last, &now, &|_| CELL_M);
         assert_eq!(
@@ -637,6 +692,7 @@ mod tests {
             probe: &probe,
             motion: &picture,
             camera: camera(DVec3::ZERO, DVec3::NEG_Z),
+            jitter_px: [0.0; 2],
         };
         let read = motion_truth(&last, &now, &|_| CELL_M);
         assert!(read.still.meets_target());
@@ -658,12 +714,14 @@ mod tests {
             probe: &probe[4..],
             motion: &picture,
             camera: camera(DVec3::ZERO, DVec3::NEG_Z),
+            jitter_px: [0.0; 2],
         };
         assert_eq!(motion_truth(&last, &now, &|_| CELL_M), TruthRead::default());
         let now = TruthFrame {
             probe: &probe,
             motion: &picture,
             camera: camera(DVec3::ZERO, DVec3::NEG_Z),
+            jitter_px: [0.0; 2],
         };
         let one = motion_truth(&last, &now, &|_| CELL_M);
         let two = one.plus(&one);
@@ -690,7 +748,24 @@ mod tests {
             let at = 2 * padded_row + (i / 3) * padded_row + (i % 3) * 4;
             raw[at..at + 4].copy_from_slice(&d.to_le_bytes());
         }
-        assert_eq!(MotionPicture::from_padded(3, 2, padded_row, &raw), Some(p));
+        assert_eq!(
+            MotionPicture::from_padded(3, 2, padded_row, &raw),
+            Some(p.clone())
+        );
+        // ★ THE WINDOW: the top-left 2 × 1 of the 3 × 2 copy; a window taller than the copy is refused.
+        assert_eq!(
+            MotionPicture::from_padded_window(2, 1, 2, padded_row, &raw),
+            Some(MotionPicture {
+                width: 2,
+                height: 1,
+                motion: p.motion[..2].to_vec(),
+                depth: p.depth[..2].to_vec(),
+            })
+        );
+        assert_eq!(
+            MotionPicture::from_padded_window(3, 3, 2, padded_row, &raw),
+            None
+        );
         assert_eq!(MotionPicture::from_padded(3, 2, 11, &raw), None);
         assert_eq!(
             MotionPicture::from_padded(3, 2, padded_row, &raw[1..]),

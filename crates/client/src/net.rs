@@ -3451,6 +3451,7 @@ mod tests {
                     last_gap: None,
                     sky: None,
                     frame_cost: None,
+                    reconstruction: None,
                 }),
             },
         );

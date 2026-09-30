@@ -109,6 +109,12 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     `docs/investigation/2026-09-28/temporal_path_design.md`; D2–D4 as the design recommends (T0 measure → T1 motion → T2
     the first picture at the sizes that ship → T3 the one geometry pass only after the edge look D5; our own
     reconstruction on FSR 2.2's structure, MetalFX only on D12); MSAA stays the default until D5/D14; every look the owner's.
+    ★★ B25 (2026-09-30, the owner low over the dry sea floor: the haze vanished; all four laws approved, built before the
+    rest of T2): (1) THE AIR RESTS ON THE SEA — the charter's words hold at the sea level the realm states (the datum on
+    a dry body); (2) THE AIR REACHES EVERY GROUND — no eye and no drawn ground under the air; the molecules grow by the
+    pressure law with no cap, the haze holds its sea-level value under the sea; (3) the planet's shadow in the air is the
+    sea's horizon; (4) THE HAZE SCATTERS 0.9 (Bevy 0.18.1's Earth medium swaps scattering and absorption). Built as the
+    air's sphere at the sea + the per-pixel march from the TRUE eye to its ground (vendored sixth change).
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION
