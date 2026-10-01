@@ -42,6 +42,7 @@
 //! radius 1.03 m at 29.2 m covers 30.55 px of radius — its projection through the pilot camera is
 //! 30.65 px.
 
+use vd_client::reconstruction::nearest_sample;
 use vd_core::glam::DVec3;
 
 /// The probe's kind codes: what drew a pixel.
@@ -127,6 +128,38 @@ pub struct ProbeBlob {
     /// The nearest and farthest distance in cells (0 and 0 when empty).
     pub cells_min: u16,
     pub cells_max: u16,
+}
+
+/// ★ THE PROBE UNDER A DISPLAY PICTURE (the temporal path's T2; the design §12.3): the capture's probe
+/// stands on the RENDER grid (`render`), and the reconstruction writes a larger DISPLAY picture
+/// (`display`, the grid over the render scale). A display pixel's probe is the render pixel whose
+/// jittered SAMPLE stands nearest the display pixel's centre (`nearest_sample`, the gates' one rule),
+/// held to the grid at its edges: its kind, rung and distance stand under the display pixel.
+///
+/// Example: at one half the display pixel (101, 40) centres at render (50.75, 20.25); at the jitter
+/// (−0.3, 0.1) the nearest sample is the render pixel (51, 20).
+#[must_use]
+pub fn display_probe(
+    probe: &[u8],
+    render: [usize; 2],
+    display: [usize; 2],
+    jitter_px: [f64; 2],
+) -> Vec<u8> {
+    let [rw, rh] = render;
+    let [dw, dh] = display;
+    let (sx, sy) = (rw as f64 / dw as f64, rh as f64 / dh as f64);
+    let mut out = Vec::with_capacity(dw * dh * 4);
+    for y in 0..dh {
+        for x in 0..dw {
+            let centre = [(x as f64 + 0.5) * sx, (y as f64 + 0.5) * sy];
+            let [qx, qy] = nearest_sample(centre, jitter_px);
+            let qx = qx.clamp(0, rw as i64 - 1) as usize;
+            let qy = qy.clamp(0, rh as i64 - 1) as usize;
+            let j = (qy * rw + qx) * 4;
+            out.extend_from_slice(&probe[j..j + 4]);
+        }
+    }
+    out
 }
 
 /// Read every pixel of `kind` in an RGBA8 probe of `width` columns.
@@ -287,6 +320,54 @@ pub fn star_angles(star: DVec3, up: DVec3, forward: DVec3) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A probe of `w × h` whose pixel `i` carries `i` in its distance bytes (kind terrain, rung 0).
+    fn numbered(w: usize, h: usize) -> Vec<u8> {
+        (0..w * h)
+            .flat_map(|i| {
+                let p = encode_probe(ProbePixel {
+                    kind: PROBE_KIND_TERRAIN,
+                    rung: 0,
+                    cells: i as u16,
+                });
+                [p[0], p[1], p[2], 255]
+            })
+            .collect()
+    }
+
+    fn cells_at(probe: &[u8], w: usize, x: usize, y: usize) -> u16 {
+        let j = (y * w + x) * 4;
+        decode_probe([probe[j], probe[j + 1], probe[j + 2]]).cells
+    }
+
+    /// At one the display probe is the probe; at one half each render pixel stands under its 2 × 2 display
+    /// pixels; a jitter moves the nearest sample, and the grid's edge holds it.
+    #[test]
+    fn the_display_probe_reads_the_nearest_sample_under_each_display_pixel() {
+        let (w, h) = (4, 3);
+        let probe = numbered(w, h);
+        assert_eq!(display_probe(&probe, [w, h], [w, h], [0.0, 0.0]), probe);
+        let half = display_probe(&probe, [w, h], [2 * w, 2 * h], [0.0, 0.0]);
+        assert_eq!(half.len(), 4 * w * h * 4);
+        for (x, y) in [(0, 0), (1, 1), (3, 2), (7, 5), (4, 3)] {
+            assert_eq!(
+                cells_at(&half, 2 * w, x, y),
+                (y / 2 * w + x / 2) as u16,
+                "({x}, {y})"
+            );
+        }
+        // A jitter of +0.4 samples render pixel `i` at `i + 0.9`: the display pixel (0, 0) centres at render
+        // 0.25, nearest the sample of pixel −1 (at −0.1) — held to the grid's edge, pixel 0; the display pixel
+        // (3, 0) at 1.75 finds pixel 1 (at 1.9), and the display pixel (2, 0) at 1.25 finds pixel 0 (at 0.9).
+        let shifted = display_probe(&probe, [w, h], [2 * w, 2 * h], [0.4, 0.0]);
+        assert_eq!(cells_at(&shifted, 2 * w, 0, 0), 0);
+        assert_eq!(cells_at(&shifted, 2 * w, 3, 0), 1);
+        assert_eq!(cells_at(&shifted, 2 * w, 2, 0), 0);
+        // A jitter of −0.4 at the far edge: the display pixel (7, 5) centres at render (3.75, 2.75), nearest the
+        // sample of pixel (4, 3) — held to (3, 2).
+        let back = display_probe(&probe, [w, h], [2 * w, 2 * h], [-0.4, -0.4]);
+        assert_eq!(cells_at(&back, 2 * w, 7, 5), (2 * w + 3) as u16);
+    }
 
     /// ★ THE MARKS (T1 item 7): each of the four bytes reads back its two marks, and the clear's byte
     /// reads still and old.

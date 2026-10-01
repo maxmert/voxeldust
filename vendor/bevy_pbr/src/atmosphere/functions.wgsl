@@ -235,13 +235,15 @@ fn sample_local_inscattering(local_scattering: vec3<f32>, ray_dir: vec3<f32>, wo
 // ★ THE AIR UNDER ITS GROUND (VOXELDUST PATCH, 2026-09-30; `AtmosphereBelow` in `mod.rs`). The tables
 // cover the shell from the ground sphere up; a drawn ground (a dry sea floor, a basin) and the eye may
 // stand under the sphere, and the air reaches them. There every term holds its value at the sphere (the
-// medium's table clamps to its edge) and ONE term grows by its exponential law (the molecules, by the
-// pressure law). Only the per-pixel march reads these (`raymarch_atmosphere`, the sky pass's partial
+// medium's table clamps to its edge) and ONE term may grow by its exponential law at the coefficient the
+// client's law states (`below_scattering`; NOUGHT since the game's ruling B26: no term grows under the
+// sea's level). Only the per-pixel march reads these (`raymarch_atmosphere`, the sky pass's partial
 // step, the points pass, the ground's sunlight): the tables' builders keep upstream's code, since their
 // rays run a fixed distance deep into the planet.
 //
 // Example: a pixel of dry sea floor 6 km under the sea, seen from 2 km over it, marches from the eye to
-// the floor; at 5 km under the sphere the blue air there is `e^(5 km / H)` times the sea level's.
+// the floor through air at the sea level's density (with a growing coefficient `c`, the blue air 5 km
+// under the sphere would add `c · (e^(5 km / H) − 1)`).
 
 // The growing term's extra scattering at radius `r`: nought at and over the sphere.
 fn below_growth(atm: Atmosphere, r: f32) -> vec3<f32> {
@@ -332,7 +334,14 @@ fn calculate_visible_sun_ratio(atmosphere: Atmosphere, r: f32, mu: f32, sun_angu
     let bottom_radius = atmosphere.bottom_radius;
     // Calculate the angle between horizon and sun center
     // Invert the horizon angle calculation to fix shading direction
-    let horizon_cos = -sqrt(1.0 - (bottom_radius * bottom_radius) / (r * r));
+    // VOXELDUST PATCH (the sun at the sphere, 2026-10-01): the root's argument held at nought. A ground
+    // under the sphere is lifted to it (`clamp_to_surface`, 1 m over it), and at a planet's radius a
+    // 32-bit length carries half a metre of rounding a coordinate, so the lifted radius can read UNDER
+    // the sphere: the argument then went negative, the root NaN, and the fragment took no sunlight at
+    // all. MEASURED (the walk's stand, the dunes 2-3 km off under the sea's level, ruling B25's sphere):
+    // 541 such fragments in 8 frames with the sun's shadow on and the same 541 with it off, every one
+    // under the sphere, each the haze alone. At the sphere the horizon is the local level (nought).
+    let horizon_cos = -sqrt(max(1.0 - (bottom_radius * bottom_radius) / (r * r), 0.0));
     let horizon_angle = fast_acos_4(horizon_cos);
     let sun_zenith_angle = fast_acos_4(mu);
     

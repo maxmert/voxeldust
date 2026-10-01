@@ -12,11 +12,14 @@
 //! reads the luma of each sky pixel ([`luma_level`]) and its local sky background: the median luma
 //! of the sky pixels in a window around the pixel ([`BACKGROUND_WINDOW_RADIUS_PX`]). A pixel is a
 //! star pixel when its luma stands [`STAR_THRESHOLD_LEVELS`] or more over that background. Star
-//! pixels that touch, also at a corner, make one blob. A blob is a star when three rules hold:
+//! pixels that touch, also at a corner, make one blob. ★ A blob splits at its peaks: a peak that
+//! stands [`PEAK_SPLIT_LEVELS`] or more over its pass (the lowest pixel on the best path to a
+//! brighter peak) is its own star, so two stars whose wings touch stay two stars. A blob with one
+//! peak is one part. A part is a star when three rules hold:
 //! - its area is [`STAR_MAX_AREA_PX`] or less, so the sun disc in the owner's window is not a star;
 //! - its white core is [`STAR_MAX_WHITE_PX`] or less, so a small sun disc is not a star;
 //! - its flat top is [`STAR_MAX_FLAT_PX`] or less, so a lit moon is not a star. The flat top is the
-//!   set of pixels under the top level whose light is [`FLAT_TOP_SHARE`] of the blob's peak light
+//!   set of pixels under the top level whose light is [`FLAT_TOP_SHARE`] of the part's peak light
 //!   or more.
 //!
 //! For each star the meter records the centroid, the peak, the area and the light. The light is the
@@ -27,15 +30,20 @@
 //! at the same stand, at the same ticks and through the same cameras (the "before" row, M-6). The
 //! census reads each reference frame once ([`StarReference::of`]). The reference stars of a frame
 //! are its stars that peak [`CENSUS_PEAK_LEVELS`] or more over their background and stand on open
-//! sky, [`STAR_MAX_RADIUS_PX`] or more inside the frame.
+//! sky, [`STAR_MAX_RADIUS_PX`] or more inside the frame, and as far from every other star of the
+//! frame: a crowded star is no reference star, because two runs that turn place it on two
+//! sub-pixel places, and close peaks then split and merge differently ([`crowded`]).
 //!
 //! **One shape for a still stand and a turn.** [`StarCensus::add`] reads one candidate frame
 //! against one reference frame. So the caller reads a run one frame at a time, and the 64 display
 //! pictures of a run do not have to stay in memory at the same time:
 //! - at a still stand, one reference frame serves every candidate frame;
-//! - in a turn, reference frame k serves candidate frame k (today's run at the same ticks).
+//! - in a turn, reference frame k serves candidate frame k (today's run at the same ticks);
+//! - ★ in a turn of two runs, today's frame of the NEAREST CAMERA serves each candidate frame
+//!   ([`nearest_frame`]): two runs cannot turn through the same cameras, because the pilot's look
+//!   reaches the server at its own ticks.
 //!
-//! [`star_census`] reads whole runs in either shape.
+//! [`star_census`] reads whole runs in the first two shapes.
 //!
 //! **The check of a frame.** The census puts each reference star at its place in the candidate
 //! frame. A star is at infinity, so the census turns the star's DIRECTION from the reference camera
@@ -44,7 +52,14 @@
 //! within [`MATCH_RADIUS_PX`] of the place answers for the reference star. One star of the
 //! candidate answers for one reference star only, the nearest pair first. So each reference star
 //! gets one sighting: present; missing (the candidate shows open sky and no star); hidden (the
-//! candidate's ground or overlay covers the place); or out of view. The EXTRA stars of the
+//! candidate's ground covers the place); under the overlay; or out of view. A star out of view is NO
+//! CHECK: the candidate's camera does not look at it, so the frame says nothing of it. Through one
+//! camera that never happens; through today's frame of the nearest camera in a turn, a star at the
+//! frame's edge stands in one view and out of the other. A star under the candidate's overlay, or
+//! within [`STAR_MAX_RADIUS_PX`] of it, is no check either: the overlay is no part of the world's
+//! picture, its readouts change its rectangle from frame to frame, and it cuts the light of a star
+//! at its edge. A frame that looks at none of its reference's
+//! stars is refused, so a wrong camera never passes by its silence. The EXTRA stars of the
 //! candidate are its stars that peak [`CENSUS_PEAK_LEVELS`] or more on open sky and answer for no
 //! star of the reference: for example a new blink, or a smear that splits a star.
 //!
@@ -59,7 +74,8 @@
 //! each reference star is present in each candidate frame, and the light of each frame changes by
 //! [`LIGHT_CHANGE_TARGET`] or less, over [`CENSUS_FRAMES`] frames. A verdict on missing data is
 //! never a pass. So the verdict refuses a run with an unreadable frame, a run of fewer frames, a
-//! run with no reference star, and a run read against its own frame 0. The extra stars do not
+//! run with a frame that looks at none of its reference's stars, a run with no reference star, and
+//! a run read against its own frame 0. The extra stars do not
 //! change the verdict, because §12.4 names only the lost stars and the light. The census reports
 //! them.
 //!
@@ -99,6 +115,24 @@ pub const CENSUS_FRAMES: usize = 64;
 /// own noise: the 8-bit rounding and the tonemapper's dither move a sky pixel by about one level.
 pub const STAR_THRESHOLD_LEVELS: u8 = 4;
 
+/// ★ A SECOND PEAK IS A SECOND STAR (2026-10-01, G-STARS at the solved dusk stand): inside one blob,
+/// a peak is its own star when it stands this many levels or more over its PASS — the lowest pixel
+/// on the best path that joins it to a brighter peak. It is the rule of a star pixel
+/// ([`STAR_THRESHOLD_LEVELS`]), read with the pass as the background: a peak with a rise of 4 levels
+/// over the pass makes its own blob over a sky at the pass's level. A smaller rise is a bump of the
+/// brighter star, for example the tonemapper's dither on a wing (about one level). MEASURED first, in
+/// the turning census of the dusk stand (one frame, 450 reference stars): the matched stars stood at
+/// a median offset of (0.00, 0.00) px from their predicted places, so the cameras are exact; 41 of
+/// the 44 lost stars had a candidate star 1.5–5 px away, scattered in every direction (the mean
+/// direction's length 0.03–0.18 over four frames), where a random place of that sky has a star
+/// within 6 px about one time in twelve. Two stars whose wings touch at the threshold made one blob
+/// in one picture and two in the other, and the one blob's centroid answered for one of them only.
+/// Example: at the dusk stand a star of peak 107 hangs 4 px under a star of peak 136 over a sky of
+/// 18. The temporal path's softer wing joins them through two pixels at 22 and 23, so one blob holds
+/// both, and its pass is at 22. The lower star stands 85 levels over its pass, so it stays its own
+/// star, at its own place, as in today's picture.
+pub const PEAK_SPLIT_LEVELS: u8 = STAR_THRESHOLD_LEVELS;
+
 /// How far a star must peak over its background, in 8-bit luma levels, to be a reference star (and,
 /// in a candidate frame, an extra star). The basis: the dimmest star that the star law draws on a
 /// black sky. The law culls a star at 0.003 of full scale in linear light
@@ -117,7 +151,8 @@ pub const BACKGROUND_WINDOW_RADIUS_PX: usize = 15;
 /// where its halo fades under the cull, r = σ_halo · √(2 · ln(A · w_halo ÷ cull)). The radius grows
 /// only with the root of the logarithm of the amplitude A: 4.9 px for the nearest neighbour (A ≈
 /// 11) and 9.08 px for A = 1 000 000. A reference star also stands this far inside the frame, so
-/// the frame's edge cuts none of its light.
+/// the frame's edge cuts none of its light, and this far from every other star of its frame, so no
+/// other star's light falls on its place ([`StarReference::crowded`]).
 pub const STAR_MAX_RADIUS_PX: f64 = 9.0;
 
 /// The largest area of a star, in pixels: a disc of [`STAR_MAX_RADIUS_PX`] (π · 9² = 254.5). A
@@ -270,6 +305,15 @@ impl StarFrame<'_> {
         (kind == PROBE_KIND_NONE) & !self.under_overlay(x, y)
     }
 
+    /// ★ Whether the place `(x, y)` stands within `reach` of the overlay's rectangle grown by
+    /// [`HUD_MARGIN_PX`]: a star there has pixels under the overlay, which cuts its light.
+    fn near_overlay(&self, x: f64, y: f64, reach: f64) -> bool {
+        self.hud.is_some_and(|r| {
+            let m = HUD_MARGIN_PX + reach;
+            (x >= r[0] - m) & (y >= r[1] - m) & (x <= r[2] + m) & (y <= r[3] + m)
+        })
+    }
+
     /// Whether the overlay's rectangle, grown by [`HUD_MARGIN_PX`], covers the pixel `(x, y)`.
     fn under_overlay(&self, x: usize, y: usize) -> bool {
         self.hud.is_some_and(|r| {
@@ -301,15 +345,16 @@ pub struct Star {
 /// What one frame shows: its stars, and the blobs that are not stars.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FrameStars {
-    /// The stars, in the order of their first pixel, row after row.
+    /// The stars, blob after blob in the order of each blob's first pixel (row after row); the stars
+    /// of one blob in the order of their own first pixel.
     pub stars: Vec<Star>,
-    /// The blobs larger than [`STAR_MAX_AREA_PX`]: for example the sun disc in a large picture, a
-    /// moon.
+    /// The parts of blobs ([`PEAK_SPLIT_LEVELS`]) larger than [`STAR_MAX_AREA_PX`]: for example the
+    /// sun disc in a large picture, a moon.
     pub too_large: u64,
-    /// The other blobs with a white core larger than [`STAR_MAX_WHITE_PX`]: for example the sun
+    /// The other parts with a white core larger than [`STAR_MAX_WHITE_PX`]: for example the sun
     /// disc in a small picture.
     pub too_white: u64,
-    /// The other blobs with a flat top larger than [`STAR_MAX_FLAT_PX`]: for example a lit moon
+    /// The other parts with a flat top larger than [`STAR_MAX_FLAT_PX`]: for example a lit moon
     /// that is not white.
     pub too_flat: u64,
     /// The sky pixels of the frame. A frame with no sky shows no star and proves nothing.
@@ -464,24 +509,130 @@ impl Blob {
 }
 
 /// THE FLAT TOP of a blob: how many of its pixels stand under the top level with a light over their
-/// background of [`FLAT_TOP_SHARE`] of the blob's peak light or more. `members` holds each pixel's
-/// level and its background. The white pixels are the white core's, so the flat top leaves them
-/// out: a small sun disc is white over its face, and [`STAR_MAX_WHITE_PX`] judges it.
-fn flat_top(members: &[(u8, u8)], light: &[f64; 256]) -> u64 {
-    let over = |&(level, background): &(u8, u8)| {
-        light[usize::from(level)] - light[usize::from(background)]
-    };
+/// background of [`FLAT_TOP_SHARE`] of the blob's peak light or more. The white pixels are the white
+/// core's, so the flat top leaves them out: a small sun disc is white over its face, and
+/// [`STAR_MAX_WHITE_PX`] judges it.
+fn flat_top(members: &[Member], light: &[f64; 256]) -> u64 {
+    let over = |m: &Member| light[usize::from(m.level)] - light[usize::from(m.background)];
     let peak = members.iter().map(over).fold(0.0, f64::max);
     members
         .iter()
-        .filter(|&m| (m.0 < u8::MAX) & (over(m) >= FLAT_TOP_SHARE * peak))
+        .filter(|&m| (m.level < u8::MAX) & (over(m) >= FLAT_TOP_SHARE * peak))
         .count() as u64
 }
 
+/// One pixel of a blob: its index in the frame (row after row), its luma level and its background.
+#[derive(Clone, Copy, Debug)]
+struct Member {
+    index: usize,
+    level: u8,
+    background: u8,
+}
+
+/// The empty mark of [`split`]'s tables: a pixel not flooded yet, a peak that joined no other.
+const NONE: usize = usize::MAX;
+
+/// The eight neighbours of a pixel, also at a corner.
+const NEIGHBOURS: [(i64, i64); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
+/// The peak that heads a pixel's flood: follows the flood's links up, and halves the path on the way.
+fn flood_root(flood: &mut [usize], mut s: usize) -> usize {
+    while flood[s] != s {
+        flood[s] = flood[flood[s]];
+        s = flood[s];
+    }
+    s
+}
+
+/// ★ THE STARS OF ONE BLOB ([`PEAK_SPLIT_LEVELS`]): the blob's pixels, split into one part for each
+/// peak that stands [`PEAK_SPLIT_LEVELS`] or more over its pass. The pixels flood the blob from the
+/// brightest down (the first pixel first among equal levels): a pixel with no flooded neighbour starts
+/// a peak; a pixel that touches two floods is their pass, and the flood of the lower peak (the later
+/// one among equals) joins the higher one's; a lower peak that stands under [`PEAK_SPLIT_LEVELS`] over
+/// that pass is no star of its own, and its pixels are the higher peak's. Each pixel takes the peak of
+/// its brightest flooded neighbour (the first among equals). The parts come in the order of their
+/// first pixel, and each part keeps the blob's own order of its pixels — so a blob with one peak is
+/// one part, the same pixels in the same order, and its star is the whole blob's to the last bit.
+/// `w` is the frame's width.
+fn split(members: &[Member], w: usize) -> Vec<Vec<Member>> {
+    let n = members.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&s| (std::cmp::Reverse(members[s].level), members[s].index));
+    let mut rank = vec![0usize; n];
+    for (k, &s) in order.iter().enumerate() {
+        rank[s] = k;
+    }
+    let slot: BTreeMap<usize, usize> = members
+        .iter()
+        .enumerate()
+        .map(|(s, m)| (m.index, s))
+        .collect();
+    let mut flood = vec![NONE; n];
+    let mut owner = vec![NONE; n];
+    let mut joins = vec![NONE; n];
+    for &s in &order {
+        let (x, y) = ((members[s].index % w) as i64, (members[s].index / w) as i64);
+        let flooded: Vec<usize> = NEIGHBOURS
+            .iter()
+            .filter_map(|&(dx, dy)| {
+                let (nx, ny) = (x + dx, y + dy);
+                ((nx >= 0) & (ny >= 0) & (nx < w as i64))
+                    .then(|| slot.get(&(ny as usize * w + nx as usize)).copied())
+                    .flatten()
+            })
+            .filter(|&t| flood[t] != NONE)
+            .collect();
+        // THE PIXEL'S PEAK: its brightest flooded neighbour's; a pixel with none starts its own.
+        owner[s] = flooded
+            .iter()
+            .copied()
+            .min_by_key(|&t| rank[t])
+            .map_or(s, |t| owner[t]);
+        // THE PASS: the floods the pixel touches join the flood of the highest peak among them.
+        let mut roots: Vec<usize> = flooded.iter().map(|&t| flood_root(&mut flood, t)).collect();
+        roots.sort_by_key(|&r| rank[r]);
+        roots.dedup();
+        let top = roots.first().copied().unwrap_or(s);
+        flood[s] = top;
+        for &r in roots.iter().skip(1) {
+            flood[r] = top;
+            joins[r] = if members[r].level - members[s].level >= PEAK_SPLIT_LEVELS {
+                NONE
+            } else {
+                top
+            };
+        }
+    }
+    // THE PARTS: each pixel's peak, followed through the peaks that joined a higher one.
+    let star_of = |mut p: usize| {
+        while joins[p] != NONE {
+            p = joins[p];
+        }
+        p
+    };
+    let mut parts: BTreeMap<usize, Vec<Member>> = BTreeMap::new();
+    for (s, m) in members.iter().enumerate() {
+        parts.entry(star_of(owner[s])).or_default().push(*m);
+    }
+    let mut parts: Vec<Vec<Member>> = parts.into_values().collect();
+    parts.sort_by_key(|part| part.iter().map(|m| m.index).min());
+    parts
+}
+
 /// THE STARS OF ONE FRAME: the star pixels over their sky background, grouped into 8-connected
-/// blobs; the blobs over [`STAR_MAX_AREA_PX`], [`STAR_MAX_WHITE_PX`] or [`STAR_MAX_FLAT_PX`] are
-/// counted and are not stars. A frame whose bytes are not one picture and one probe of their stated
-/// sizes shows nothing, and so does a frame whose camera has another viewport.
+/// blobs; each blob split at its peaks ([`PEAK_SPLIT_LEVELS`]); the parts over [`STAR_MAX_AREA_PX`],
+/// [`STAR_MAX_WHITE_PX`] or [`STAR_MAX_FLAT_PX`] are counted and are not stars. A frame whose bytes
+/// are not one picture and one probe of their stated sizes shows nothing, and so does a frame whose
+/// camera has another viewport.
 #[must_use]
 pub fn stars_in(frame: &StarFrame<'_>) -> FrameStars {
     let mut read = FrameStars::default();
@@ -515,11 +666,13 @@ pub fn stars_in(frame: &StarFrame<'_>) -> FrameStars {
         lit[start] = false;
         stack.push(start);
         members.clear();
-        let mut blob = Blob::default();
         while let Some(i) = stack.pop() {
             let (x, y) = (i % w, i / w);
-            blob.add(x, y, level[i], background[i], &light);
-            members.push((level[i], background[i]));
+            members.push(Member {
+                index: i,
+                level: level[i],
+                background: background[i],
+            });
             for dy in -1i64..=1 {
                 for dx in -1i64..=1 {
                     let (nx, ny) = (x as i64 + dx, y as i64 + dy);
@@ -534,16 +687,22 @@ pub fn stars_in(frame: &StarFrame<'_>) -> FrameStars {
                 }
             }
         }
-        let large = blob.area > STAR_MAX_AREA_PX;
-        let white = !large & (blob.white > STAR_MAX_WHITE_PX);
-        let flat = !large & !white & (flat_top(&members, &light) > STAR_MAX_FLAT_PX);
-        read.too_large += u64::from(large);
-        read.too_white += u64::from(white);
-        read.too_flat += u64::from(flat);
-        if large | white | flat {
-            continue;
+        for part in split(&members, w) {
+            let mut blob = Blob::default();
+            for m in &part {
+                blob.add(m.index % w, m.index / w, m.level, m.background, &light);
+            }
+            let large = blob.area > STAR_MAX_AREA_PX;
+            let white = !large & (blob.white > STAR_MAX_WHITE_PX);
+            let flat = !large & !white & (flat_top(&part, &light) > STAR_MAX_FLAT_PX);
+            read.too_large += u64::from(large);
+            read.too_white += u64::from(white);
+            read.too_flat += u64::from(flat);
+            if large | white | flat {
+                continue;
+            }
+            read.stars.push(blob.star());
         }
-        read.stars.push(blob.star());
     }
     read
 }
@@ -555,11 +714,20 @@ pub enum Sighting {
     Present(usize),
     /// The frame shows open sky at the place, and no star of the frame answers for it.
     Missing,
-    /// The ground or the overlay of the frame covers the place, and no star of the frame answers
-    /// for it.
+    /// The ground of the frame covers the place, and no star of the frame answers for it.
     Hidden,
+    /// ★ The place stands under the frame's overlay, or within [`STAR_MAX_RADIUS_PX`] of it (2026-10-01).
+    /// It is NO CHECK, also where a star answers: the overlay is no part of the world's picture, its
+    /// readouts change its rectangle from frame to frame, and it hides the star's pixels under it, so
+    /// the frame says nothing of the star or of its light ([`Sighting::is_check`]) — the same reach the
+    /// frame's own edge keeps. MEASURED at the solved dusk stand: the turning census's "hidden" losses
+    /// were stars under the lower edge of a candidate's overlay that today's shorter readout left on
+    /// the sky; and the worst frame's light (−76 %) was one star 0.3 px past the overlay's right edge,
+    /// whose pixels under it the frame did not count.
+    Overlaid,
     /// The place is off the frame (or nearer to its edge than [`STAR_MAX_RADIUS_PX`]) or behind the
-    /// camera.
+    /// camera. It is NO CHECK: the frame's camera does not look at the star, so the frame says
+    /// nothing of it ([`Sighting::is_check`]).
     OutOfView,
 }
 
@@ -569,6 +737,17 @@ impl Sighting {
     pub fn is_present(&self) -> bool {
         matches!(self, Sighting::Present(_))
     }
+
+    /// ★ WHETHER THE SIGHTING CHECKS THE STAR: the frame's camera looks at its place, and the frame
+    /// shows the world there (present, missing or hidden). A star out of view is no check. Through
+    /// one camera on both sides it never happens; in a turn, today's frame of the nearest camera
+    /// ([`nearest_frame`]) looks a little past the candidate's, so a star at the frame's edge stands
+    /// in one view and out of the other. A star under the frame's overlay is no check either
+    /// ([`Sighting::Overlaid`]).
+    #[must_use]
+    pub fn is_check(&self) -> bool {
+        !matches!(self, Sighting::OutOfView | Sighting::Overlaid)
+    }
 }
 
 /// A reference star that a candidate frame does not show: the frame, the star (its index among that
@@ -577,7 +756,7 @@ impl Sighting {
 pub struct MissingEvent {
     pub frame: usize,
     pub star: usize,
-    /// [`Sighting::Missing`], [`Sighting::Hidden`] or [`Sighting::OutOfView`].
+    /// [`Sighting::Missing`] or [`Sighting::Hidden`].
     pub sighting: Sighting,
 }
 
@@ -585,8 +764,10 @@ pub struct MissingEvent {
 enum Place {
     /// Off the frame (or nearer to its edge than [`STAR_MAX_RADIUS_PX`]), or behind the camera.
     Out,
-    /// In the frame, but the ground or the overlay covers the place.
+    /// In the frame, but the ground covers the place.
     Covered(ScreenPos),
+    /// In the frame, but under the overlay or within [`STAR_MAX_RADIUS_PX`] of it.
+    Overlaid(ScreenPos),
     /// On the sky of the frame.
     Open(ScreenPos),
 }
@@ -599,12 +780,13 @@ impl Place {
     fn spot(&self) -> Option<ScreenPos> {
         match self {
             Place::Out => None,
-            Place::Covered(p) | Place::Open(p) => Some(*p),
+            Place::Covered(p) | Place::Overlaid(p) | Place::Open(p) => Some(*p),
         }
     }
 }
 
-/// Where the place `at` of a star stands in a frame: out of view, covered, or on open sky.
+/// Where the place `at` of a star stands in a frame: out of view, under the overlay, covered by the
+/// ground, or on open sky.
 fn place(frame: &StarFrame<'_>, at: Option<ScreenPos>) -> Place {
     let Some(p) = at else {
         return Place::Out;
@@ -616,6 +798,9 @@ fn place(frame: &StarFrame<'_>, at: Option<ScreenPos>) -> Place {
         & (p.y <= frame.height as f64 - m);
     if !inside {
         return Place::Out;
+    }
+    if frame.near_overlay(p.x, p.y, STAR_MAX_RADIUS_PX) {
+        return Place::Overlaid(p);
     }
     if frame.is_sky(p.x as usize, p.y as usize) {
         Place::Open(p)
@@ -649,7 +834,7 @@ fn join(frame: &StarFrame<'_>, star: &Star) -> Join {
         }),
     ) {
         Place::Open(_) => Join::Yes,
-        Place::Out | Place::Covered(_) => Join::Edge,
+        Place::Out | Place::Covered(_) | Place::Overlaid(_) => Join::Edge,
     }
 }
 
@@ -749,11 +934,30 @@ fn assign(
 /// frame shows at its place.
 fn sighting(answer: Option<usize>, at: &Place) -> Sighting {
     match (answer, at) {
+        (_, Place::Overlaid(_)) => Sighting::Overlaid,
         (Some(j), _) => Sighting::Present(j),
         (None, Place::Out) => Sighting::OutOfView,
         (None, Place::Covered(_)) => Sighting::Hidden,
         (None, Place::Open(_)) => Sighting::Missing,
     }
+}
+
+/// ★ A CROWDED STAR (2026-10-01, G-STARS at the solved dusk stand): another star of its frame stands
+/// nearer than [`STAR_MAX_RADIUS_PX`], the widest star's radius, so that star's light can fall on its
+/// place. A crowded star is no reference star. MEASURED: two runs never turn through the same cameras,
+/// so each star falls on a new sub-pixel place, and in a crowded patch close peaks split and merge
+/// differently from picture to picture ([`PEAK_SPLIT_LEVELS`]). In the turning census of the dusk
+/// stand (64 frames, 9 185 checks) the lost share fell with the distance of the nearest other star:
+/// 30 % under 2 px, 7 % at 2–3 px, 1.3 % at 3–4 px, 0.4 % at 4–6 px (each of those nine in a cluster
+/// of 3–5 stars within 6 px), and 0 of 1 806 at 6 px and over. Example: in the milky band over the
+/// belt, a star of peak 35 with three stars within 6 px is crowded; a star of peak 33 alone in a
+/// clear patch is a reference star.
+fn crowded(stars: &[Star], i: usize) -> bool {
+    let s = stars[i];
+    stars.iter().enumerate().any(|(j, o)| {
+        (j != i)
+            & ((o.x - s.x).powi(2) + (o.y - s.y).powi(2) < STAR_MAX_RADIUS_PX * STAR_MAX_RADIUS_PX)
+    })
 }
 
 /// THE REFERENCE of one frame: TODAY'S picture at the stand, read once. Example: at a still stand
@@ -765,13 +969,16 @@ pub struct StarReference {
     pub read: FrameStars,
     /// The reference stars, as indices into `read.stars`: the stars that peak
     /// [`CENSUS_PEAK_LEVELS`] or more over their background and stand on open sky,
-    /// [`STAR_MAX_RADIUS_PX`] or more inside the frame.
+    /// [`STAR_MAX_RADIUS_PX`] or more inside the frame and from every other star of the frame.
     pub checked: Vec<usize>,
     /// The stars left out for a peak under [`CENSUS_PEAK_LEVELS`].
     pub faint: usize,
     /// The stars left out for a place nearer to the frame's edge than [`STAR_MAX_RADIUS_PX`], or
     /// off the sky.
     pub edge: usize,
+    /// ★ The stars left out for another star of the frame nearer than [`STAR_MAX_RADIUS_PX`]: a
+    /// crowded star ([`crowded`]).
+    pub crowded: usize,
     /// Whether the frame could be read. An unreadable reference names no star, and each candidate
     /// frame read against it is unreadable too.
     pub readable: bool,
@@ -793,6 +1000,7 @@ impl StarReference {
             match join(frame, star) {
                 Join::Faint => reference.faint += 1,
                 Join::Edge => reference.edge += 1,
+                Join::Yes if crowded(&reference.read.stars, j) => reference.crowded += 1,
                 Join::Yes => reference.checked.push(j),
             }
         }
@@ -816,6 +1024,11 @@ pub struct FrameComparison {
     /// and answer for no star of the reference frame. The faint stars of the reference and the
     /// stars at its edge answer too, so a star that the reference shows is never an extra.
     pub extra: usize,
+    /// ★ Whether the frame's camera looks away from its reference's picture: the centre of its view
+    /// stands outside the reference frame, or behind its camera ([`StarRefusal::LooksAway`]). A
+    /// frame of a turn whose few stars all sat at the reference's edge leaves them out of view by
+    /// the pairing's own small turn; it looks into the reference's picture, and is not one of these.
+    pub looks_away: bool,
 }
 
 impl FrameComparison {
@@ -887,8 +1100,24 @@ fn compare(reference: &StarReference, frame: &StarFrame<'_>) -> FrameComparison 
             .map(|(answer, at)| sighting(*answer, at))
             .collect(),
         extra,
+        looks_away: looks_away(from, to),
         read,
     }
+}
+
+/// ★ Whether the camera `to` looks away from the picture of the camera `from`: the centre of its
+/// view projects outside that picture, or behind its camera. Without both cameras the two frames
+/// share one view. Example: a candidate frame stamped with the camera of the turn's far side looks
+/// away; a frame 5° off its partner's camera looks into its picture.
+fn looks_away(from: Option<&CaptureCamera>, to: Option<&CaptureCamera>) -> bool {
+    let (Some(a), Some(b)) = (from, to) else {
+        return false;
+    };
+    at_origin(a)
+        .project_point(b.target - b.eye)
+        .is_none_or(|c| {
+            (c.x < 0.0) | (c.y < 0.0) | (c.x > a.width as f64) | (c.y > a.height as f64)
+        })
 }
 
 /// THE VERDICT of a census against the design's proposed target (§12.4; the owner rules it).
@@ -906,8 +1135,8 @@ pub enum StarVerdict {
 /// Why a candidate run misses the target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StarFault {
-    /// A candidate frame does not show a reference star: it is missing, hidden or out of view there
-    /// ([`StarCensus::missing_events`]).
+    /// A candidate frame does not show a reference star that its camera looks at: it is missing or
+    /// hidden there ([`StarCensus::missing_events`]).
     StarLost,
     /// In a frame, the light of the reference stars changes by more than [`LIGHT_CHANGE_TARGET`].
     LightChanged,
@@ -923,7 +1152,13 @@ pub enum StarRefusal {
     Unreadable,
     /// The run has fewer than [`CENSUS_FRAMES`] frames.
     TooFewFrames,
-    /// The reference shows no star to check.
+    /// A candidate frame checks none of its reference frame's stars, and its camera looks away from
+    /// the reference's picture (the centre of its view stands outside it). Example: a candidate frame
+    /// whose stamped camera looks back along the turn. The frame checks nothing, and a wrong camera
+    /// must never pass by its silence.
+    LooksAway,
+    /// The run checks no star: the reference shows none, or every one stands out of its candidate
+    /// frame's view or under its overlay.
     NoStars,
 }
 
@@ -973,10 +1208,48 @@ impl StarCensus {
         self.frames.iter().filter(|f| !f.readable).count()
     }
 
-    /// The checks of the run: one for each reference star in each candidate frame.
+    /// The checks of the run: one for each reference star in each candidate frame whose camera looks
+    /// at it ([`Sighting::is_check`]).
     #[must_use]
     pub fn checks(&self) -> usize {
-        self.frames.iter().map(|f| f.sightings.len()).sum()
+        self.frames
+            .iter()
+            .flat_map(|f| &f.sightings)
+            .filter(|s| s.is_check())
+            .count()
+    }
+
+    /// The reference stars out of their candidate frame's view, over the run: no checks.
+    #[must_use]
+    pub fn out_of_view(&self) -> usize {
+        self.frames
+            .iter()
+            .flat_map(|f| &f.sightings)
+            .filter(|s| matches!(s, Sighting::OutOfView))
+            .count()
+    }
+
+    /// The reference stars under their candidate frame's overlay, over the run: no checks
+    /// ([`Sighting::Overlaid`]).
+    #[must_use]
+    pub fn overlaid(&self) -> usize {
+        self.frames
+            .iter()
+            .flat_map(|f| &f.sightings)
+            .filter(|s| matches!(s, Sighting::Overlaid))
+            .count()
+    }
+
+    /// The frames that check none of their reference's stars and whose camera looks away from the
+    /// reference's picture ([`FrameComparison::looks_away`], [`StarRefusal::LooksAway`]). A frame
+    /// whose stars stand under its overlay, or whose few edge stars the pairing's small turn carries
+    /// out of view, looks into the reference's picture and checks nothing; it is not one of these.
+    #[must_use]
+    pub fn looking_away(&self) -> usize {
+        self.frames
+            .iter()
+            .filter(|f| f.looks_away & !f.sightings.iter().any(Sighting::is_check))
+            .count()
     }
 
     /// The checks that found the reference star present.
@@ -995,7 +1268,7 @@ impl StarCensus {
         let mut events = Vec::new();
         for (frame, comparison) in self.frames.iter().enumerate() {
             for (star, sighting) in comparison.sightings.iter().enumerate() {
-                if !sighting.is_present() {
+                if sighting.is_check() & !sighting.is_present() {
                     events.push(MissingEvent {
                         frame,
                         star,
@@ -1047,9 +1320,9 @@ impl StarCensus {
     }
 
     /// THE VERDICT against the design's proposed target (§12.4). The refusals come first: a run
-    /// read against itself, an unreadable frame, fewer than [`CENSUS_FRAMES`] frames, and no
-    /// reference star. Then a lost star fails the run, and then a light change of more than
-    /// [`LIGHT_CHANGE_TARGET`] in a frame.
+    /// read against itself, an unreadable frame, fewer than [`CENSUS_FRAMES`] frames, a frame whose
+    /// camera looks at none of its reference's stars, and a run that checks no star. Then a lost star fails
+    /// the run, and then a light change of more than [`LIGHT_CHANGE_TARGET`] in a frame.
     #[must_use]
     pub fn verdict(&self) -> StarVerdict {
         if self.own.is_some() {
@@ -1060,6 +1333,9 @@ impl StarCensus {
         }
         if self.frames.len() < CENSUS_FRAMES {
             return StarVerdict::Refused(StarRefusal::TooFewFrames);
+        }
+        if self.looking_away() > 0 {
+            return StarVerdict::Refused(StarRefusal::LooksAway);
         }
         if self.checks() == 0 {
             return StarVerdict::Refused(StarRefusal::NoStars);
@@ -1072,6 +1348,34 @@ impl StarCensus {
         }
         StarVerdict::Pass
     }
+}
+
+/// THE TURN BETWEEN TWO CAMERAS, radians: the angle of the rotation that carries one camera's basis
+/// onto the other's, whatever their eyes. A star is at infinity, so this angle alone moves it.
+#[must_use]
+pub fn turn_between(a: &CaptureCamera, b: &CaptureCamera) -> f64 {
+    let (ra, ua, ba) = a.basis();
+    let (rb, ub, bb) = b.basis();
+    let trace = ra.dot(rb) + ua.dot(ub) + ba.dot(bb);
+    ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos()
+}
+
+/// ★ THE PAIRING OF A TURN: the frame of today's run whose camera turns least from a candidate
+/// frame's `camera`, and that turn in radians (the first such frame on a tie); `None` for no frame.
+/// Two runs cannot turn through the same cameras: the pilot's look reaches the server at its own
+/// ticks. So each candidate frame reads today's frame that looked most nearly where it looks, and
+/// the census turns each star from the one camera to the other ([`Sighting::is_check`]).
+///
+/// Example: the pilot turns 90° a second at the dusk stand and the window draws 40 frames a second,
+/// so today's frames stand 2.25° apart. A candidate frame's camera stands at most half of that from
+/// its partner's: 1.1°, about 18 pixels at the capture's 0.0625° a pixel.
+#[must_use]
+pub fn nearest_frame(cameras: &[CaptureCamera], camera: &CaptureCamera) -> Option<(usize, f64)> {
+    cameras
+        .iter()
+        .map(|c| turn_between(c, camera))
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
 }
 
 /// THE CENSUS of a whole candidate run against today's picture. One reference frame serves each
@@ -1229,8 +1533,40 @@ mod tests {
         assert!((s.light - light).abs() < 1e-12, "{s:?} against {light}");
     }
 
+    /// A pixel of a blob at `level` over `background`, for the flat top's own count.
+    fn member(level: u8, background: u8) -> Member {
+        Member {
+            index: 0,
+            level,
+            background,
+        }
+    }
+
+    /// The pixels of [`plus`], as `(x, y, level)`.
+    fn plus_pixels(x: usize, y: usize, peak: u8, arm: u8) -> Vec<(usize, usize, u8)> {
+        vec![
+            (x, y, peak),
+            (x - 1, y, arm),
+            (x + 1, y, arm),
+            (x, y - 1, arm),
+            (x, y + 1, arm),
+        ]
+    }
+
+    /// The star the pixels `px` (`(x, y, level)` over the sky) make: its centroid and its light.
+    fn expected_star(px: &[(usize, usize, u8)]) -> ((f64, f64), f64) {
+        let light: f64 = px.iter().map(|p| over_sky(p.2)).sum();
+        let moment = |at: fn(&(usize, usize, u8)) -> usize| {
+            px.iter()
+                .map(|p| over_sky(p.2) * (at(p) as f64 + 0.5))
+                .sum::<f64>()
+                / light
+        };
+        ((moment(|p| p.0), moment(|p| p.1)), light)
+    }
+
     /// Each reference star's sightings over the frames, as letters: P present, M missing, H hidden,
-    /// O out of view, U an unreadable frame. The reference is the same in each frame (a still
+    /// O out of view, V under the overlay, U an unreadable frame. The reference is the same in each frame (a still
     /// stand, or the run's own reading), so star `i` is the same star in each frame.
     fn codes(census: &StarCensus) -> Vec<String> {
         let stars = census.frames.first().map_or(0, |f| f.sightings.len());
@@ -1244,6 +1580,7 @@ mod tests {
                         Some(Sighting::Missing) => 'M',
                         Some(Sighting::Hidden) => 'H',
                         Some(Sighting::OutOfView) => 'O',
+                        Some(Sighting::Overlaid) => 'V',
                         None => 'U',
                     })
                     .collect()
@@ -1471,7 +1808,8 @@ mod tests {
     /// fails, and the event names the frame.
     #[test]
     fn a_turning_run_is_compared_frame_by_frame() {
-        let (w, h) = (96, 64);
+        // 192 × 128: the band's stars stand 16 px apart or more, clear of each other ([`crowded`]).
+        let (w, h) = (192, 128);
         // A band of stars all along the turn: one each 3° of azimuth from -30° to 147°, at three
         // elevations.
         let dirs: Vec<DVec3> = (0..60)
@@ -1505,9 +1843,10 @@ mod tests {
                 cams[0].unproject(s.x, s.y, 1.0) - cams[0].eye
             })
             .collect();
-        assert_eq!(seen.len(), 17);
+        // Azimuths −27° to 27° stand clear of the frame's edge (9 px, 3.2° at this size).
+        assert_eq!(seen.len(), 19);
         assert_eq!(sky_of(&cams[63], &seen), grey(w, h, SKY));
-        assert_eq!(StarReference::of(&today_run[63]).checked.len(), 17);
+        assert_eq!(StarReference::of(&today_run[63]).checked.len(), 19);
         // Today's run against itself, frame k against frame k: every star present.
         let same = star_census(&today_run, &today_run);
         assert_eq!(same.checks(), same.present());
@@ -1527,6 +1866,160 @@ mod tests {
         assert!((star.x - place.x).abs() < 1.0, "{star:?} {place:?}");
         assert!((star.y - place.y).abs() < 1.0, "{star:?} {place:?}");
         assert_eq!(census.verdict(), StarVerdict::Fail(StarFault::StarLost));
+    }
+
+    /// ★ CONTROL (f): A TURN OF TWO RUNS, paired by the nearest camera. Today turns 4° a frame; the
+    /// candidate turns through cameras 1.9° past today's, as a second run's look does. Each
+    /// candidate frame pairs with today's frame k (1.9° off); the stars at the frames' edges stand
+    /// in one view and out of the other and are no checks; an identical sky passes. A star lost in
+    /// frame 20 alone fails, and the event names the frame.
+    #[test]
+    fn a_turn_of_two_runs_pairs_each_frame_with_the_nearest_camera() {
+        // 192 × 128: the band's stars stand 16 px apart or more, clear of each other ([`crowded`]).
+        let (w, h) = (192, 128);
+        // A band of stars all along the turn: one each 3° of azimuth from -30° to 297°, at three
+        // elevations.
+        let dirs: Vec<DVec3> = (0..110)
+            .map(|i| direction(3.0 * f64::from(i) - 30.0, [4.0, 9.0, 14.0][i as usize % 3]))
+            .collect();
+        let today_cams: Vec<CaptureCamera> = (0..CENSUS_FRAMES)
+            .map(|k| yawed(4.0 * k as f64, 0.0, w, h))
+            .collect();
+        let cams: Vec<CaptureCamera> = (0..CENSUS_FRAMES)
+            .map(|k| yawed(4.0 * k as f64 + 1.9, 0.0, w, h))
+            .collect();
+        let open = probe_of(w, h, h);
+        let today: Vec<Vec<u8>> = today_cams.iter().map(|c| sky_of(c, &dirs)).collect();
+        let candidate: Vec<Vec<u8>> = cams.iter().map(|c| sky_of(c, &dirs)).collect();
+        let mut lossy = candidate.clone();
+        // A star of frame 20 near the middle of its view: azimuth 81° (index 37).
+        let lost = cams[20]
+            .project_point(cams[20].eye + dirs[37])
+            .expect("ahead");
+        assert!((lost.x - 96.0).abs() < 40.0, "{lost:?}");
+        let others: Vec<DVec3> = [&dirs[..37], &dirs[38..]].concat();
+        lossy[20] = sky_of(&cams[20], &others);
+        let references: Vec<StarReference> = turn_frames(&today, &open, &today_cams)
+            .iter()
+            .map(StarReference::of)
+            .collect();
+        let census_of = |pictures: &[Vec<u8>]| {
+            let mut census = StarCensus::default();
+            for (k, f) in turn_frames(pictures, &open, &cams).iter().enumerate() {
+                let (r, turn) = nearest_frame(&today_cams, &cams[k]).expect("today's run");
+                assert_eq!(r, k);
+                assert!((turn.to_degrees() - 1.9).abs() < 1e-9, "{turn}");
+                census.add(&references[r], f);
+            }
+            census
+        };
+        let same = census_of(&candidate);
+        assert!(same.out_of_view() > 0, "the edges: {}", same.out_of_view());
+        assert_eq!(same.checks(), same.present());
+        assert_eq!(same.looking_away(), 0);
+        assert_eq!(same.verdict(), StarVerdict::Pass);
+        let census = census_of(&lossy);
+        assert_eq!(
+            census.missing_events(),
+            vec![MissingEvent {
+                frame: 20,
+                star: census.frames[20]
+                    .sightings
+                    .iter()
+                    .position(|s| *s == Sighting::Missing)
+                    .expect("the lost star"),
+                sighting: Sighting::Missing
+            }]
+        );
+        assert_eq!(census.verdict(), StarVerdict::Fail(StarFault::StarLost));
+    }
+
+    /// ★ A FRAME THAT LOOKS AWAY: a candidate frame whose camera looks back along the turn looks at
+    /// none of its reference's stars; the census refuses the run, because a wrong camera must never
+    /// pass by its silence.
+    #[test]
+    fn a_frame_that_looks_at_none_of_its_reference_s_stars_is_refused() {
+        // 192 × 128: the stars stand 16 px apart or more, clear of each other ([`crowded`]).
+        let (w, h) = (192, 128);
+        let dirs: Vec<DVec3> = (0..20)
+            .map(|i| direction(3.0 * f64::from(i) - 30.0, [4.0, 9.0][i as usize % 2]))
+            .collect();
+        let ahead = yawed(0.0, 0.0, w, h);
+        let back = yawed(180.0, 0.0, w, h);
+        let open = probe_of(w, h, h);
+        let today = sky_of(&ahead, &dirs);
+        let reference = StarReference::of(&StarFrame {
+            camera: Some(ahead),
+            ..frame(&today, &open, w, h)
+        });
+        assert!(!reference.checked.is_empty());
+        let mut census = StarCensus::default();
+        for k in 0..CENSUS_FRAMES {
+            let camera = if k == 7 { back } else { ahead };
+            census.add(
+                &reference,
+                &StarFrame {
+                    camera: Some(camera),
+                    ..frame(&today, &open, w, h)
+                },
+            );
+        }
+        assert_eq!(census.looking_away(), 1);
+        assert_eq!(census.missing_events(), Vec::new());
+        assert_eq!(
+            census.verdict(),
+            StarVerdict::Refused(StarRefusal::LooksAway)
+        );
+    }
+
+    /// ★ A FRAME WHOSE EDGE STAR LEAVES BY THE PAIRING'S SMALL TURN looks into its reference's
+    /// picture: it checks nothing, and it is not refused for looking away. Today's frame holds one
+    /// clear star 12 px inside its right edge; the candidate's camera stands 4° to the left (11 px at
+    /// this size), the star leaves its view, and a run of such frames checks no star.
+    #[test]
+    fn a_frame_whose_edge_star_leaves_by_a_small_turn_does_not_look_away() {
+        let (w, h) = (192, 128);
+        let ahead = yawed(0.0, 0.0, w, h);
+        let turned = yawed(4.0, 0.0, w, h);
+        let open = probe_of(w, h, h);
+        let dir = ahead.unproject(w as f64 - 11.5, 40.5, 1.0) - ahead.eye;
+        let today = sky_of(&ahead, &[dir]);
+        let reference = StarReference::of(&StarFrame {
+            camera: Some(ahead),
+            ..frame(&today, &open, w, h)
+        });
+        assert_eq!(reference.checked.len(), 1);
+        let later = sky_of(&turned, &[dir]);
+        let mut census = StarCensus::default();
+        for _ in 0..CENSUS_FRAMES {
+            census.add(
+                &reference,
+                &StarFrame {
+                    camera: Some(turned),
+                    ..frame(&later, &open, w, h)
+                },
+            );
+        }
+        assert_eq!(census.frames[0].sightings, vec![Sighting::OutOfView]);
+        assert!(!census.frames[0].looks_away);
+        assert_eq!((census.checks(), census.looking_away()), (0, 0));
+        assert_eq!(census.verdict(), StarVerdict::Refused(StarRefusal::NoStars));
+    }
+
+    /// The turn between two cameras is the angle of their orientations alone; the nearest frame is
+    /// the first of equals, and no frame pairs with nothing.
+    #[test]
+    fn the_turn_between_two_cameras_ignores_the_eye() {
+        let (w, h) = (96, 64);
+        let a = yawed(0.0, 0.0, w, h);
+        let b = yawed(30.0, 5_000.0, w, h);
+        assert!((turn_between(&a, &b).to_degrees() - 30.0).abs() < 1e-9);
+        assert!(turn_between(&a, &a).abs() < 1e-6);
+        let cams = [yawed(10.0, 0.0, w, h), yawed(-10.0, 0.0, w, h)];
+        let (index, turn) = nearest_frame(&cams, &a).expect("two frames");
+        assert_eq!(index, 0);
+        assert!((turn.to_degrees() - 10.0).abs() < 1e-9);
+        assert_eq!(nearest_frame(&[], &a), None);
     }
 
     /// CONTROL (e): the census counts the candidate's extra stars. A new bright star on open sky is
@@ -1597,6 +2090,25 @@ mod tests {
         let events = census.missing_events();
         let missing = events.iter().filter(|e| e.sighting == Sighting::Missing);
         assert_eq!(missing.count(), 0);
+        // The six stars out of view are no checks and no events; the two set stars are hidden.
+        assert_eq!((census.checks(), census.out_of_view()), (19, 6));
+        assert_eq!(
+            events,
+            vec![
+                MissingEvent {
+                    frame: 4,
+                    star: 3,
+                    sighting: Sighting::Hidden
+                },
+                MissingEvent {
+                    frame: 4,
+                    star: 4,
+                    sighting: Sighting::Hidden
+                },
+            ]
+        );
+        // Frame 3 looks back: it looks at none of frame 0's stars.
+        assert_eq!(census.looking_away(), 1);
         assert_eq!(census.verdict(), StarVerdict::Refused(StarRefusal::OwnRun));
         // The eye's travel does not move a star; a star behind the eye has no place.
         let travelled = predict(30.5, 30.5, Some(&c0), Some(&cams[1])).expect("in front");
@@ -1645,6 +2157,59 @@ mod tests {
         );
         assert_eq!(census.missing_events().len(), CENSUS_FRAMES);
         assert_eq!(census.verdict(), StarVerdict::Fail(StarFault::StarLost));
+    }
+
+    /// ★ A PLACE UNDER THE CANDIDATE'S OVERLAY IS NO CHECK ([`Sighting::Overlaid`]; the dusk stand's
+    /// case): today's overlay, grown by its margin and the widest star's radius, ends 3 px over a
+    /// star; the candidate's readout is one line longer, and its reach covers the star. RED before: the
+    /// star was hidden, a lost star in every frame. The other star, clear of both rectangles, is present; and a candidate whose
+    /// overlay covers every reference star still looks at them (none is out of its view), checks
+    /// nothing, and the verdict refuses a run of such frames: it checks no star.
+    #[test]
+    fn a_place_under_the_candidate_s_overlay_is_no_check() {
+        let (w, h) = (64, 48);
+        let open = probe_of(w, h, h);
+        let mut sky = grey(w, h, SKY);
+        paint(&mut sky, w, 30, 26, BRIGHT);
+        paint(&mut sky, w, 52, 34, BRIGHT);
+        let today = StarFrame {
+            hud: Some([20.0, 4.0, 36.0, 12.0]),
+            ..frame(&sky, &open, w, h)
+        };
+        let reference = StarReference::of(&today);
+        assert_eq!(reference.checked.len(), 2);
+        let longer = StarFrame {
+            hud: Some([20.0, 4.0, 36.0, 20.0]),
+            ..frame(&sky, &open, w, h)
+        };
+        let mut census = StarCensus::default();
+        for _ in 0..CENSUS_FRAMES {
+            census.add(&reference, &longer);
+        }
+        // The candidate shows the first star on its sky (its pixels clear the overlay itself), and
+        // answers for it; within the overlay's reach it is still no check.
+        assert_eq!(
+            census.frames[0].sightings,
+            vec![Sighting::Overlaid, Sighting::Present(1)]
+        );
+        assert_eq!(census.extra(), 0);
+        assert_eq!(
+            (census.checks(), census.overlaid(), census.out_of_view()),
+            (CENSUS_FRAMES, CENSUS_FRAMES, 0)
+        );
+        assert_eq!(census.missing_events(), Vec::new());
+        assert_eq!(codes(&census)[0], "V".repeat(CENSUS_FRAMES));
+        assert_eq!(census.verdict(), StarVerdict::Pass);
+        let over_both = StarFrame {
+            hud: Some([20.0, 4.0, 44.0, 34.0]),
+            ..frame(&sky, &open, w, h)
+        };
+        let mut census = StarCensus::default();
+        for _ in 0..CENSUS_FRAMES {
+            census.add(&reference, &over_both);
+        }
+        assert_eq!((census.checks(), census.looking_away()), (0, 0));
+        assert_eq!(census.verdict(), StarVerdict::Refused(StarRefusal::NoStars));
     }
 
     /// CONTROL: the sun is not a star. The sun disc in the owner's window is larger than the widest
@@ -1699,16 +2264,16 @@ mod tests {
         assert_eq!(read.stars, Vec::new());
         // The flat tops themselves: the flat disc's and the lit sphere's.
         let light = linear_table();
-        let flat: Vec<(u8, u8)> = vec![(220, SKY); 54];
+        let flat = vec![member(220, SKY); 54];
         assert_eq!(flat_top(&flat, &light), 54);
         let mut shaded = Vec::new();
         for y in 24..38 {
             for x in 54..68 {
                 let level = luma_level([rgba[(y * w + x) * 4]; 3]);
-                shaded.push((level, SKY));
+                shaded.push(member(level, SKY));
             }
         }
-        shaded.retain(|m| m.0 >= SKY + STAR_THRESHOLD_LEVELS);
+        shaded.retain(|m| m.level >= SKY + STAR_THRESHOLD_LEVELS);
         assert_eq!(shaded.len(), 57);
         assert_eq!(flat_top(&shaded, &light), 45);
     }
@@ -1783,11 +2348,11 @@ mod tests {
                 let r2 = (x as f64 + 0.5 - at.0).powi(2) + (y as f64 + 0.5 - at.1).powi(2);
                 let level = luma_level(law_pixel(law_intensity(law, a, r2), colour));
                 if level >= SKY + STAR_THRESHOLD_LEVELS {
-                    members.push((level, SKY));
+                    members.push(member(level, SKY));
                 }
             }
         }
-        let white = members.iter().filter(|m| m.0 == u8::MAX).count() as u64;
+        let white = members.iter().filter(|m| m.level == u8::MAX).count() as u64;
         (flat_top(&members, &linear_table()), white)
     }
 
@@ -1970,6 +2535,71 @@ mod tests {
         assert!((read.light() - total - over_sky(180)).abs() < 1e-12);
     }
 
+    /// ★ TWO STARS WHOSE WINGS TOUCH STAY TWO STARS ([`PEAK_SPLIT_LEVELS`]; the dusk stand's case): a
+    /// star of peak 136 over a star of peak 107, 6 px apart. Today's picture keeps their wings apart;
+    /// the candidate's softer wing joins them through three pixels (22, 20, 22), so one blob holds
+    /// both. RED before: that blob was one star at (20.5, 12.83), 2.33 px from the upper star's place
+    /// and 3.67 px from the lower star's. Now the blob splits at its pass (the 20): each star keeps its
+    /// own pixels; the upper star takes the pass and the wing pixel it floods first, the lower star its
+    /// own wing pixel. Today's picture names the same two stars, and 6 px apart both are crowded, so
+    /// the census checks neither ([`crowded`]).
+    #[test]
+    fn two_stars_whose_wings_touch_stay_two_stars() {
+        let (w, h) = (48, 32);
+        let open = probe_of(w, h, h);
+        let mut today = grey(w, h, SKY);
+        plus(&mut today, w, 20, 10, 136, 60);
+        plus(&mut today, w, 20, 16, 107, 50);
+        let mut joined = today.clone();
+        paint(&mut joined, w, 20, 12, 22);
+        paint(&mut joined, w, 20, 13, 20);
+        paint(&mut joined, w, 20, 14, 22);
+        let read = stars_in(&frame(&joined, &open, w, h));
+        assert_eq!(read.stars.len(), 2);
+        let mut upper = plus_pixels(20, 10, 136, 60);
+        upper.extend([(20, 12, 22), (20, 13, 20)]);
+        let (at, light) = expected_star(&upper);
+        assert_star(&read.stars[0], at, 136, SKY, light, 7);
+        let mut lower = plus_pixels(20, 16, 107, 50);
+        lower.push((20, 14, 22));
+        let (at, light) = expected_star(&lower);
+        assert_star(&read.stars[1], at, 107, SKY, light, 6);
+        // Today's picture names the same two stars; 6 px apart, both are crowded ([`crowded`]).
+        let reference = StarReference::of(&frame(&today, &open, w, h));
+        assert_eq!(reference.read.stars.len(), 2);
+        assert_eq!((reference.checked.len(), reference.crowded), (0, 2));
+    }
+
+    /// A BUMP IS NO STAR, AND THE SPLIT'S BOUND IS EXACT: a star of peak 136 with a wing of two
+    /// pixels under it, 24 and then a bump. A bump of 26 stands 2 levels over its pass (the 24), so
+    /// the blob is one star, the whole blob's to the last bit; a bump one level under
+    /// [`PEAK_SPLIT_LEVELS`] over the pass is the star's too, and a bump at the bound is a star of its
+    /// own.
+    #[test]
+    fn a_bump_under_the_split_levels_stays_one_star() {
+        let (w, h) = (48, 32);
+        let open = probe_of(w, h, h);
+        let picture = |bump: u8| {
+            let mut rgba = grey(w, h, SKY);
+            plus(&mut rgba, w, 20, 10, 136, 60);
+            paint(&mut rgba, w, 20, 12, 24);
+            paint(&mut rgba, w, 20, 13, bump);
+            rgba
+        };
+        let stars = |bump: u8| stars_in(&frame(&picture(bump), &open, w, h)).stars;
+        let one = stars(26);
+        assert_eq!(one.len(), 1);
+        let mut whole = plus_pixels(20, 10, 136, 60);
+        whole.extend([(20, 12, 24), (20, 13, 26)]);
+        let (at, light) = expected_star(&whole);
+        assert_star(&one[0], at, 136, SKY, light, 7);
+        assert_eq!(stars(24 + PEAK_SPLIT_LEVELS - 1).len(), 1);
+        let two = stars(24 + PEAK_SPLIT_LEVELS);
+        assert_eq!(two.len(), 2);
+        let bump = 24 + PEAK_SPLIT_LEVELS;
+        assert_star(&two[1], (20.5, 13.5), bump, SKY, over_sky(bump), 1);
+    }
+
     #[test]
     fn the_background_is_the_median_of_the_sky_in_the_window() {
         // 40 × 24: the sky at 10 on the left half and at 60 on the right half; the ground (250,
@@ -2023,18 +2653,45 @@ mod tests {
         assert_eq!(window.median(), 90);
     }
 
-    /// One star of a frame answers for one reference star, the nearest pair first; a star in a cell
-    /// around the place but past the radius answers for none.
+    /// One star of a frame answers for one place, the nearest pair first; a star in a cell around
+    /// the place but past the radius answers for none ([`assign`]). The census reads it so: a clear
+    /// reference star takes the nearest candidate star, and the others are extras.
     #[test]
     fn one_star_answers_for_one_reference_star() {
+        let at = |x: f64, y: f64| ScreenPos { x, y };
+        let star = |x: f64, y: f64| Star {
+            x,
+            y,
+            peak: BRIGHT,
+            background: SKY,
+            light: over_sky(BRIGHT),
+            area: 1,
+        };
+        // (21.5, 20.5) stands 1 px from the first place and 1.41 px from the second; (40.5, 30.5)
+        // and (42.5, 31.5) stand 1 px and 1.41 px from the third; (39.5, 32.5) stands 2.83 px from it.
+        let stars = [
+            star(21.5, 20.5),
+            star(40.5, 30.5),
+            star(42.5, 31.5),
+            star(39.5, 32.5),
+        ];
+        let spots = [
+            Some(at(20.5, 20.5)),
+            Some(at(22.5, 21.5)),
+            Some(at(41.5, 30.5)),
+            None,
+        ];
+        let mut taken = vec![false; stars.len()];
+        let answers = assign(&spots, &grid_of(&stars), &stars, &mut taken);
+        assert_eq!(answers, vec![Some(0), None, Some(1), None]);
+        assert_eq!(taken, vec![true, true, false, false]);
+        // The census on two clear reference stars.
         let (w, h) = (64, 48);
         let open = probe_of(w, h, h);
         let mut first = grey(w, h, SKY);
-        for (x, y) in [(20, 20), (22, 21), (41, 30)] {
+        for (x, y) in [(20, 20), (41, 30)] {
             paint(&mut first, w, x, y, BRIGHT);
         }
-        // (21, 20) stands 1 px from the first reference star and 1.41 px from the second; (40, 30)
-        // and (42, 31) stand 1 px and 1.41 px from the third; (39, 32) stands 2.83 px from it.
         let mut later = grey(w, h, SKY);
         for (x, y) in [(21, 20), (40, 30), (42, 31), (39, 32)] {
             paint(&mut later, w, x, y, BRIGHT);
@@ -2042,22 +2699,33 @@ mod tests {
         let census = star_census(&[frame(&first, &open, w, h)], &[frame(&later, &open, w, h)]);
         assert_eq!(
             census.frames[0].sightings,
-            vec![
-                Sighting::Present(0),
-                Sighting::Missing,
-                Sighting::Present(1)
-            ]
+            vec![Sighting::Present(0), Sighting::Present(1)]
         );
-        assert_eq!(
-            census.missing_events(),
-            vec![MissingEvent {
-                frame: 0,
-                star: 1,
-                sighting: Sighting::Missing,
-            }]
-        );
+        assert_eq!(census.missing_events(), Vec::new());
         // (42, 31) and (39, 32) answer for no reference star: two extra stars.
         assert_eq!(census.extra(), 2);
+    }
+
+    /// ★ A CROWDED STAR IS NO REFERENCE STAR ([`crowded`]): two stars 8 px apart are both crowded, and
+    /// at 9 px — the widest star's radius — both are reference stars; a faint star crowds a bright
+    /// one too, for its light falls on the bright star's place all the same.
+    #[test]
+    fn a_crowded_star_is_no_reference_star() {
+        let (w, h) = (64, 48);
+        let open = probe_of(w, h, h);
+        let reference_of = |pixels: &[(usize, usize, u8)]| {
+            let mut rgba = grey(w, h, SKY);
+            for &(x, y, level) in pixels {
+                paint(&mut rgba, w, x, y, level);
+            }
+            StarReference::of(&frame(&rgba, &open, w, h))
+        };
+        let near = reference_of(&[(20, 20, BRIGHT), (28, 20, BRIGHT)]);
+        assert_eq!((near.checked.len(), near.crowded), (0, 2));
+        let clear = reference_of(&[(20, 20, BRIGHT), (29, 20, BRIGHT)]);
+        assert_eq!((clear.checked.len(), clear.crowded), (2, 0));
+        let faint = reference_of(&[(20, 20, BRIGHT), (25, 20, SKY + CENSUS_PEAK_LEVELS - 1)]);
+        assert_eq!((faint.checked.len(), faint.crowded, faint.faint), (0, 1, 1));
     }
 
     #[test]

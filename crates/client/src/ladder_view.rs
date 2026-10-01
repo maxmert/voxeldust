@@ -779,23 +779,13 @@ pub fn horizon_m(radius_m: f64, altitude_m: f64) -> f64 {
     vd_terrain::artifact::horizon_m(radius_m, altitude_m)
 }
 
-/// THE EYE'S HEIGHT over the ground it stands on, in metres: the pilot camera lifts the eye by
-/// this over the avatar's feet (the harness's own offset reads it from here), and it is THE FLOOR
-/// of the WANTED SET's altitude (slice 8 step 6, D-TERRAIN-5 item 12): an eye that the recipe's
-/// surface stands above — in a dip the mesh cuts under the field, in a cave, for the frame of a
-/// hard landing — wants what an eye standing on that surface wants, never a zero horizon's set.
-/// The stamp still states the eye's true altitude and its own horizon, unfloored.
-/// MEASURED before the floor (M8-1's first run): 1 930 chunks wanted on a walk from an eye the
-/// field stood over, the horizon zero and every column past it a skyline candidate.
-pub const EYE_HEIGHT_M: f64 = 1.6;
-
-/// The wanted set's altitude: the eye's height over the DRAWN ground under it
-/// ([`crate::chunks::drawn_surface_m`]: the artifact's field where the realm holds one, the recipe's own
-/// relief where it does not), never under the eye's own height ([`EYE_HEIGHT_M`]).
-#[must_use]
-pub fn floored_altitude_m(altitude_m: f64) -> f64 {
-    altitude_m.max(EYE_HEIGHT_M)
-}
+/// THE EYE'S HEIGHT and THE FLOOR of the wanted set's altitude, from their one home in the terrain
+/// crate (2026-10-01): the shard's tile reach reads the same floor, so the ring it ships and the
+/// ring this ladder asks are one rule. The wanted set's altitude is the eye's height over the DRAWN
+/// ground under it ([`crate::chunks::drawn_surface_m`]: the artifact's field where the realm holds
+/// one, the recipe's own relief where it does not), never under the eye's own height. The stamp
+/// still states the eye's true altitude and its own horizon, unfloored.
+pub use vd_terrain::artifact::{EYE_HEIGHT_M, floored_altitude_m};
 
 /// THE REACH of the ladder from an eye `altitude_m` over a surface of `surface_m`: its own horizon
 /// plus the horizon of the tallest ground the recipe can raise (`relief_m`), so a peak standing

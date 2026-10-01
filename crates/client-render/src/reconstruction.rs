@@ -88,6 +88,15 @@ pub(crate) struct ReconstructionCamera;
 #[derive(Resource, Clone, Copy, Default, bevy::render::extract_resource::ExtractResource)]
 pub(crate) struct SkyTurn(pub(crate) Quat);
 
+/// ★ THE TOOL'S RESET (the design §6.1 row 4 and §12.2, the converged still): a count the capture
+/// raises to restart every reconstructed view's history once. A view whose seen count is older restarts
+/// at its next frame, counted as a tool's jump — apart from the player's path (G-RESET's fourth slot).
+///
+/// **Example.** A gate asks for a converged still at the belt stand: the capture raises the count to 1,
+/// the picture camera's history restarts, and 64 frames later the capture takes the cycle's first frame.
+#[derive(Resource, Clone, Copy, Default, bevy::render::extract_resource::ExtractResource)]
+pub(crate) struct ToolReset(pub(crate) u64);
+
 /// ★ THE PICTURE'S RECONSTRUCTION ROW for the capture's stamp (the gates, the design §12.3): the frame's
 /// jitter (to reproject a jittered picture exactly), the two sizes, and the history's restarts by cause
 /// (G-RESET) — written each frame for the first reconstructed view (the capture holds one picture camera),
@@ -107,11 +116,14 @@ pub(crate) struct ReconstructionPlugin;
 impl Plugin for ReconstructionPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "reconstruction.wgsl");
-        app.init_resource::<SkyTurn>().add_plugins((
-            ExtractComponentPlugin::<ReconstructionCamera>::default(),
-            ExtractComponentPlugin::<JitterFollower>::default(),
-            bevy::render::extract_resource::ExtractResourcePlugin::<SkyTurn>::default(),
-        ));
+        app.init_resource::<SkyTurn>()
+            .init_resource::<ToolReset>()
+            .add_plugins((
+                ExtractComponentPlugin::<ReconstructionCamera>::default(),
+                ExtractComponentPlugin::<JitterFollower>::default(),
+                bevy::render::extract_resource::ExtractResourcePlugin::<SkyTurn>::default(),
+                bevy::render::extract_resource::ExtractResourcePlugin::<ToolReset>::default(),
+            ));
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
@@ -240,6 +252,8 @@ struct ViewState {
     history_size: UVec2,
     frames: u64,
     resets: [u64; 4],
+    /// The tool's reset count this view last saw ([`ToolReset`]).
+    tool_resets: u64,
     uniform: UniformBuffer<ReconstructionUniform>,
     rebuilt: Option<(Buffer, UVec2)>,
 }
@@ -252,6 +266,7 @@ impl ViewState {
             history_size: UVec2::ZERO,
             frames: 0,
             resets: [0; 4],
+            tool_resets: 0,
             uniform: UniformBuffer::default(),
             rebuilt: None,
         }
@@ -307,6 +322,7 @@ fn jitter_views(
         (With<JitterFollower>, Without<ReconstructionCamera>),
     >,
     sky_turn: Option<Res<SkyTurn>>,
+    tool_reset: Option<Res<ToolReset>>,
     mut readout: ResMut<ReconstructionReadout>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -321,13 +337,15 @@ fn jitter_views(
         };
         let render = resolution.map_or(display, |r| r.0);
         let st = state.0.entry(entity).or_insert_with(ViewState::new);
+        let tool = tool_reset.as_ref().map_or(0, |t| t.0);
         let cause = reset_cause(
             st.has_history,
             false,
             display.to_array(),
             st.history_size.to_array(),
-            false,
+            tool > st.tool_resets,
         );
+        st.tool_resets = tool;
         if let Some(cause) = cause {
             st.resets[cause_slot(cause)] += 1;
             tracing::info!(?cause, resets = ?st.resets, "the reconstruction's history restarts");
@@ -342,6 +360,8 @@ fn jitter_views(
             render_px: render.to_array(),
             display_px: display.to_array(),
             resets: st.resets,
+            clock: phase,
+            phases: jitter_phases(scale),
         });
         if st.rebuilt.as_ref().is_none_or(|(_, size)| *size != render) {
             let buffer = device.create_buffer(&BufferDescriptor {

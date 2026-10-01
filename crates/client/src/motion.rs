@@ -30,7 +30,7 @@
 
 use vd_core::glam::{DMat3, DQuat, DVec3};
 
-use crate::arrival::{CLOCK_MASK, RampVertex, tag_clock, tag_ramps};
+use crate::arrival::{CLOCK_MASK, RampVertex, tag_clock, tag_covered, tag_ramps, tag_stand_in};
 
 /// A realm's placement as the window drew it: `P(x) = centre + facing · x`, in render space (the
 /// eye at the origin).
@@ -101,18 +101,33 @@ impl RealmStep {
     }
 }
 
-/// ★ THE RAMP'S WEIGHT AT LAST FRAME'S CLOCK, the age read SIGNED: a tag newer than the clock (a
-/// chunk that landed after it) reads 0, its stand-in's surface; a tag without the ramp's flag (a
-/// chunk that entered whole) reads 1. Otherwise the age over the ramp, clamped to `[0, 1]`, as
-/// [`crate::arrival::ramp_weight`] reads it. The signed read of the 31-bit difference holds across
-/// the clock's wrap, for any age under half the clock's range (2³⁰ ticks, 12 days).
+/// The tag's age at last frame's clock over the ramp, clamped to `[0, 1]`, READ SIGNED: a tag newer
+/// than the clock reads 0. The signed read of the 28-bit difference holds across the clock's wrap,
+/// for any age under half the clock's range (2²⁷ ticks, a day and a half).
+#[must_use]
+pub fn previous_age(clock: u32, tag: u32, ramp: u32) -> f64 {
+    let diff = clock.wrapping_sub(tag_clock(tag)) & CLOCK_MASK;
+    let signed = (diff << 4).cast_signed() >> 4;
+    (f64::from(signed) / f64::from(ramp.max(1))).clamp(0.0, 1.0)
+}
+
+/// ★ THE RAMP'S WEIGHT AT LAST FRAME'S CLOCK, the age read SIGNED ([`previous_age`]): a tag newer
+/// than the clock (a chunk that landed after it) reads 0, its stand-in's surface; a tag without the
+/// ramp's flag (a chunk that entered whole) reads 1. Otherwise the age over the ramp, as
+/// [`crate::arrival::ramp_weight`] reads it.
 #[must_use]
 pub fn previous_ramp_weight(clock: u32, tag: u32, ramp: u32) -> f64 {
-    let diff = clock.wrapping_sub(tag_clock(tag)) & CLOCK_MASK;
-    let signed = (diff << 1).cast_signed() >> 1;
-    let age = f64::from(signed) / f64::from(ramp.max(1));
     let ramps = u8::from(tag_ramps(tag));
-    f64::from(1 - ramps) + f64::from(ramps) * age.clamp(0.0, 1.0)
+    f64::from(1 - ramps) + f64::from(ramps) * previous_age(clock, tag, ramp)
+}
+
+/// ★ THE SINK'S WEIGHT AT LAST FRAME'S CLOCK ([`crate::arrival::sink_weight`], the age read SIGNED):
+/// a stand-in covered after that clock read nought there — it still stood at its own height.
+#[must_use]
+pub fn previous_sink_weight(clock: u32, tag: u32, ramp: u32) -> f64 {
+    let stand_in = u8::from(tag_stand_in(tag));
+    let covered = u8::from(tag_covered(tag));
+    f64::from(1 - stand_in) + f64::from(stand_in * covered) * previous_age(clock, tag, ramp)
 }
 
 /// ★ THE PREVIOUS PLACED VERTEX (§5.2): the vertex's own place and its radial carried into last
@@ -174,6 +189,8 @@ mod tests {
             morph_m: 25.0,
             sink_m: 40.0,
             stand_in_sink_m: 90.0,
+            sink_weight: 1.0,
+            start_share: 1.0,
         }
     }
 
@@ -284,6 +301,22 @@ mod tests {
         assert_eq!(previous_ramp_weight(CLOCK_MASK - 5, t(10), ramp), 0.0);
         // A ramp of nought ticks is a ramp of one: no division by nought.
         assert_eq!(previous_ramp_weight(5_001, t(5_000), 0), 1.0);
+    }
+
+    /// ★ THE SINK'S WEIGHT LAST FRAME (the own-height stand-in): a stand-in covered after last frame's
+    /// clock still stood at its own height then; one covered half a ramp before stood half sunk; a
+    /// chunk of its own ring reads one; an uncovered stand-in nought.
+    #[test]
+    fn a_stand_in_covered_this_frame_stood_at_its_own_height_last_frame() {
+        use crate::arrival::{STAND_IN_FLAG, covered_stamp};
+        let ramp = ramp_ticks();
+        assert_eq!(previous_sink_weight(5_000, covered_stamp(5_017), ramp), 0.0);
+        assert_eq!(previous_sink_weight(5_256, covered_stamp(5_000), ramp), 0.5);
+        assert_eq!(previous_sink_weight(5_000, RAMP_FLAG | 4_000, ramp), 1.0);
+        assert_eq!(
+            previous_sink_weight(5_000, STAND_IN_FLAG | 4_000, ramp),
+            0.0
+        );
     }
 
     /// ★ THE LANDING IDENTITY: a chunk that lands this frame stood on its stand-in's surface last

@@ -85,18 +85,23 @@ pub struct Term {
     pub phase: Phase,
 }
 
-/// ★ THE AIR UNDER ITS GROUND (ruling B25 law 2, 2026-09-30): how the air continues under the ground
-/// sphere, where a drawn ground or the eye stands lower (a dry sea floor, a basin). The engine's
-/// tables cover the shell from the sphere up; under it every term HOLDS its value at the sphere and
-/// the molecules keep growing by the pressure law, `e^(depth / H)` — no cap. The haze holds (it is the
-/// ledgered placeholder: a haze born at the ground has no law under the sea yet), and the ozone is
-/// nought there.
+/// ★ THE AIR UNDER ITS GROUND (ruling B25 law 2, amended by ruling B26, 2026-09-30): how the air
+/// continues under the ground sphere, where a drawn ground or the eye stands lower (a dry sea floor, a
+/// basin). The engine's tables cover the shell from the sphere up; under it EVERY TERM HOLDS its value
+/// at the sphere — the molecules too (B26, the owner, from 7 800 km over the dry sea floors: "the
+/// athmosphere in low places might destroy the whole look. Can we not increse dencity below the sea
+/// level?"). MEASURED before (B25's growth by the pressure law, `e^(depth / H)`, no cap): over a basin 7
+/// km deep the air under the sea's level held 1.6 times the whole atmosphere's column, and every dry
+/// basin read white-blue from orbit. The growing term's coefficient ([`Below::scattering_per_m`]) is
+/// nought; the vertex of the march that adds it stays, so the law alone decides. The ozone is nought
+/// there.
 ///
-/// Example: over a dry sea floor 7.7 km under the home planet's sea, the blue air at the floor is
-/// `e^(7 727 / 7 160)` ≈ 2.9 times the sea level's, and the haze the sea level's.
+/// Example: over a dry sea floor 7.7 km under the home planet's sea, the air at the floor is the sea
+/// level's, molecules and haze alike.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Below {
-    /// The growing term's (the molecules') scattering at the sphere, per metre.
+    /// The growing term's scattering at the sphere, per metre: NOUGHT since ruling B26 (every term
+    /// holds its sea-level value under the sea).
     pub scattering_per_m: [f64; 3],
     /// Its scale height, metres: the charter's own.
     pub scale_height_m: f64,
@@ -248,8 +253,9 @@ pub fn sky_terms(charter: &BodyCharter, radius_m: f64, relief_m: f64) -> Option<
             *e += (t.scattering_per_m[ch] + t.absorption_per_m[ch]) * share;
         }
     }
+    // ★ RULING B26: no term grows under the sea's level — the molecules hold, as the haze does.
     let below = Below {
-        scattering_per_m: rayleigh.scattering_per_m,
+        scattering_per_m: [0.0; 3],
         scale_height_m: w.scale_height_m,
         extinction_per_m,
         floor_radius_m: radius_m - relief_m,
@@ -494,14 +500,14 @@ mod tests {
         assert!(s.mie.scattering_per_m[1] > s.mie.absorption_per_m[1]);
     }
 
-    /// ★ RULING B25 LAW 2: under the ground sphere the molecules grow by their own scale height, and the
-    /// extinction held at the sphere is every term's there — the ozone's layer contributes only where
-    /// its tent reaches the ground.
+    /// ★ RULING B25 LAW 2 AS B26 AMENDS IT: under the ground sphere no term grows — the molecules hold
+    /// their sea-level value as the haze does — and the extinction held at the sphere is every term's
+    /// there; the ozone's layer contributes only where its tent reaches the ground.
     #[test]
-    fn the_air_under_its_ground_grows_by_the_pressure_law() {
+    fn the_air_under_its_ground_holds_its_sea_level_density() {
         let c = earth_like();
         let s = sky_terms(&c, R_M, RELIEF_M).expect("air");
-        assert_eq!(s.below.scattering_per_m, s.rayleigh.scattering_per_m);
+        assert_eq!(s.below.scattering_per_m, [0.0; 3]);
         assert_eq!(
             s.below.scale_height_m,
             f64::from(c.scale_height_m.expect("h"))

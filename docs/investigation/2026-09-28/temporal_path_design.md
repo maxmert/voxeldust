@@ -357,6 +357,12 @@ runs at the render size except the last one.
    2. It reads the history at the pixel minus the motion with a sharp filter (Catmull-Rom).
    3. It clips the history into the colour box of the new samples' neighbourhood (the mean ± a multiple of the deviation,
       in YCoCg). The reactive mask shrinks the box.
+      ★ AMENDED (2026-10-01, ruling B28 item 3, MEASURED; built for the owner's look): the history is CLAMPED axis by
+      axis into the box, cut to the samples' own range — FSR 2.2's `RectifyHistory` — and never moved along the ray to
+      the box's centre (the first build's Playdead clip). On a slope the ray's move carried two near colours apart, and
+      at a weight of 1/64 a world a few ticks away drew the hill's dunes 7 levels off (G-DETERMINISM); the clamp is the
+      box's nearest point, two colours never move apart, and the shader's replay on the captured frames ends within one
+      level (DEFERRED, the T2 block: the amplifier).
    4. It blends. The new frame's weight is 1/n, where n counts the pixel's samples. n starts again at 1 after a
       disocclusion or off the screen. n rises to a floor that changes smoothly with the motion: PROPOSED 1/64 below a
       hundredth of a pixel a frame, rising to 1/16 at one pixel a frame or more (D9). **Motion alone never restarts n.**

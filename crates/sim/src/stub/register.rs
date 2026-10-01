@@ -180,7 +180,10 @@ pub fn register_stub_shard(world: &mut World, schedule: &mut Schedule, config: S
             // a pre-sync clock must not author placements (D-Finding-1, same gate as every author).
             author_placements.run_if(has_synced),
             request_pending_grants,
-            process_inbound,
+            // ★ THE HELD STICK WALKS EVERY TICK (2026-10-01): right after this tick's inbound, so an input
+            // that arrived this tick moves its walker this tick; nested to stay within the chain's
+            // arity (the same total order).
+            (process_inbound, crate::stub::dot::walk_held_sticks).chain(),
             // D-MOVE-2 — a self-driven realm states its push AFTER this tick's inbound, so a stick that
             // arrived this tick is the one that travels. Placed here rather than at the head for that
             // reason: at the head it would always send yesterday's stick, adding a tick of lag to every
@@ -278,10 +281,6 @@ type VuAoiInbound<'w> = (
     // Look horizon slice 4 — the CHILD-side interest holder the `RealmInterest` receive writes.
     ResMut<'w, InterestHeld>,
     ResMut<'w, crate::stub::drive::DrivenChildren>,
-    // ★ AT THE CONTROLS (owner ruling 2026-09-01). The input path needs ONE fact it did not hold:
-    // does this realm fly on an occupant's stick? A realm with engines and a body does; every other
-    // realm does not. Read-only here — the boot plants it, nothing else writes it.
-    Res<'w, crate::stub::drive::OwnBody>,
     // The ruler switch, slice 0 — the exterior leases this realm holds for its built children,
     // written by the `Ship` head reply arm.
     ResMut<'w, crate::stub::realm_head::ExteriorAuthority>,
@@ -421,7 +420,6 @@ fn process_inbound(
         mut relay_held,
         mut interest_held,
         mut driven,
-        own_body,
         mut exterior,
         mut store,
         mut stated,
@@ -430,21 +428,6 @@ fn process_inbound(
         mut pending_lineage,
         (mut aoi_rows, mut interest_latch, mut in_band, mut luma),
     ) = vu_aoi;
-    // ★ WHY A PILOT'S BODY STOPS WALKING (owner ruling 2026-09-01). ONE key made TWO things move:
-    // it walked the player AND it pushed the ship, so the player left a 40 m hull in a fifth of a
-    // second and the ship flew off without them. MEASURED live: the body moved 568 m in 3 s while
-    // the hull burned 96 km the other way.
-    //
-    // A pilot at the controls does not also walk. Properly a SEAT says who is flying; a seat needs
-    // blocks, which do not exist yet. So the interim rule is the one the drive producer already
-    // uses — a realm that flies on an occupant's stick parks that occupant's body — and it is stated
-    // as a CAPABILITY plus a stored body, never as a test of what kind of realm this is (HR3/SL4).
-    let flies_on_a_stick = match identity.kind {
-        crate::capability::NodeKind::Shard(profile) => {
-            profile.self_driven() && own_body.0.is_some()
-        }
-        _ => false,
-    };
     let (mut in_flight, mut progress, mut holds, mut pending_flushes) = crossing;
     let (mut pending, mut pending_slots, mut open_windows, mut artifact_wants) = pending;
     let (mut authority, mut confirmed, mut cohosted) = realm_auth;
@@ -467,9 +450,6 @@ fn process_inbound(
                     identity: &identity,
                     clock: &clock,
                     realm_fence: authority.0,
-                    regions: &regions,
-                    placements: &placements.0,
-                    flies_on_a_stick,
                 };
                 on_gateway_msg(
                     bytes,

@@ -81,30 +81,60 @@ fn step_turn(v: vec3<f32>) -> vec3<f32> {
     );
 }
 
-// THE TAG's parts (`vd_client::arrival::RAMP_FLAG` and `CLOCK_MASK`): the clock of the frame the chunk
-// appeared in, 31 bits, and the flag of a chunk that rises from its stand-in (without it, whole).
+// THE TAG's parts (`vd_client::arrival`): the clock of the frame the chunk appeared in, 28 bits; the
+// flag of a chunk that rises from its stand-in (without it, whole); ★ the own-height stand-in's three
+// flags (2026-09-30): the chunk's stand-in stands at its own height (its ramp starts on the coarser
+// surface itself), the chunk is drawn as a stand-in (it stands at its own height), and the stand-in is
+// covered (its finer ground has all arrived: it sinks over the ramp from its clock).
 const RAMP_FLAG: u32 = 0x80000000u;
-const CLOCK_MASK: u32 = 0x7fffffffu;
+const OWN_HEIGHT_FLAG: u32 = 0x40000000u;
+const STAND_IN_FLAG: u32 = 0x20000000u;
+const COVERED_FLAG: u32 = 0x10000000u;
+const CLOCK_MASK: u32 = 0x0fffffffu;
+
+// The tag's age at this frame's clock over the ramp (`vd_client::arrival::ramp_age`): a wrapping 28-bit
+// difference, so the clock's wrap moves nothing.
+fn age_now(tag: u32) -> f32 {
+    let age = f32((table.clock.x - (tag & CLOCK_MASK)) & CLOCK_MASK) / f32(max(table.clock.y, 1u));
+    return clamp(age, 0.0, 1.0);
+}
+
+// ★ The tag's age at LAST frame's clock (T1; `vd_client::motion::previous_age`): read SIGNED, so a tag
+// newer than last frame's clock reads nought — where the chunk stood. Read wrapping, that age would be
+// about 2²⁸ ticks and read one: the vertex would seem to jump.
+fn age_last(tag: u32) -> f32 {
+    let diff = (table.clock.z - (tag & CLOCK_MASK)) & CLOCK_MASK;
+    let age = f32(bitcast<i32>(diff << 4u) >> 4u) / f32(max(table.clock.y, 1u));
+    return clamp(age, 0.0, 1.0);
+}
 
 // ★ THE ARRIVAL RAMP'S WEIGHT (the far-water design §10, slice R1c; `vd_client::arrival::ramp_weight`,
 // step for step): nought in the frame a chunk landed, one half a second later, and one at once for a
-// chunk that entered whole (its tag without the ramp's flag). The age is a wrapping 31-bit difference of
-// the table's clock and the tag's clock, so the clock's wrap moves nothing.
+// chunk that entered whole (its tag without the ramp's flag).
 fn arrival(instance_index: u32) -> f32 {
     let tag = mesh_functions::get_tag(instance_index);
-    let age = f32((table.clock.x - (tag & CLOCK_MASK)) & CLOCK_MASK) / f32(max(table.clock.y, 1u));
-    return select(1.0, clamp(age, 0.0, 1.0), (tag & RAMP_FLAG) != 0u);
+    return select(1.0, age_now(tag), (tag & RAMP_FLAG) != 0u);
 }
 
 // ★ THE RAMP'S WEIGHT AT LAST FRAME'S CLOCK (T1; `vd_client::motion::previous_ramp_weight`, step for
-// step): the age read SIGNED, so a chunk that landed after last frame's clock reads nought, its
-// stand-in's surface — where it stood. Read wrapping (as `arrival` reads it) that age is about 2³²
-// ticks and would read one: the vertex would seem to jump from its own place.
+// step): a chunk that landed after last frame's clock reads nought, its stand-in's surface.
 fn last_arrival(instance_index: u32) -> f32 {
     let tag = mesh_functions::get_tag(instance_index);
-    let diff = (table.clock.z - (tag & CLOCK_MASK)) & CLOCK_MASK;
-    let age = f32(bitcast<i32>(diff << 1u) >> 1u) / f32(max(table.clock.y, 1u));
-    return select(1.0, clamp(age, 0.0, 1.0), (tag & RAMP_FLAG) != 0u);
+    return select(1.0, age_last(tag), (tag & RAMP_FLAG) != 0u);
+}
+
+// ★ THE SINK'S WEIGHT (`vd_client::arrival::sink_weight`, step for step): one for a chunk of its own
+// ring, nought for a stand-in at its own height, and for a covered stand-in its age over the ramp — at
+// this frame's clock, and at last frame's (`vd_client::motion::previous_sink_weight`).
+fn sink_weight_of(tag: u32, age: f32) -> f32 {
+    let covered = select(0.0, age, (tag & COVERED_FLAG) != 0u);
+    return select(1.0, covered, (tag & STAND_IN_FLAG) != 0u);
+}
+
+// ★ THE SHARE OF THE STAND-IN'S SINK a ramp starts under (`vd_client::arrival::start_sink_share`):
+// nought when the stand-in stands at its own height.
+fn start_share(tag: u32) -> f32 {
+    return select(1.0, 0.0, (tag & OWN_HEIGHT_FLAG) != 0u);
 }
 
 struct FadeVertex {
@@ -208,12 +238,13 @@ fn vertex(vertex: FadeVertex) -> FadeOutput {
 #else
     let coarser = own.xyz + radial * vertex.morph_m;
     let sink = radial * fade.sink.x;
-    // ★ THE ARRIVAL RAMP (slice R1c): the same start and rise as the picture's vertex stage, so a
-    // late chunk's shadow rises with it.
+    // ★ THE ARRIVAL RAMP (slice R1c) and THE OWN-HEIGHT STAND-IN: the same start and rise and the same
+    // sink's weight as the picture's vertex stage, so a late chunk's shadow rises with it.
+    let tag = mesh_functions::get_tag(vertex.instance_index);
     let ramp = arrival(vertex.instance_index);
     let morphed = mix(
-        coarser - radial * fade.sink.y * whole(d),
-        mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d)),
+        coarser - radial * fade.sink.y * whole(d) * start_share(tag),
+        mix(coarser, own.xyz, whole(d)) - sink * (1.0 - risen(d)) * sink_weight_of(tag, age_now(tag)),
         ramp,
     );
 #endif
@@ -274,10 +305,12 @@ fn vertex(vertex: FadeVertex) -> FadeOutput {
     let last_placed = last_own - last_radial * fade.splat.y * whole_in(last_b, last_d);
 #else
     let last_coarser = last_own + last_radial * vertex.morph_m;
+    let last_tag = mesh_functions::get_tag(vertex.instance_index);
     let last_placed = mix(
-        last_coarser - last_radial * fade.sink.y * whole_in(last_b, last_d),
+        last_coarser - last_radial * fade.sink.y * whole_in(last_b, last_d) * start_share(last_tag),
         mix(last_coarser, last_own, whole_in(last_b, last_d))
-            - last_radial * fade.sink.x * (1.0 - risen_in(last_b, last_d)),
+            - last_radial * fade.sink.x * (1.0 - risen_in(last_b, last_d))
+                * sink_weight_of(last_tag, age_last(last_tag)),
         last_arrival(vertex.instance_index),
     );
 #endif

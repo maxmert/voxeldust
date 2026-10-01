@@ -180,6 +180,17 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
             }
             Ok(DevRequest::Screenshot { at_tick, label })
         }
+        "still" => {
+            // still [label] — a CONVERGED still (the temporal path's T2): the client restarts its
+            // picture's history once and captures the first frame of a whole jitter cycle past it.
+            match rest {
+                [] => Ok(DevRequest::ScreenshotStill { label: None }),
+                [label] => Ok(DevRequest::ScreenshotStill {
+                    label: Some(label.clone()),
+                }),
+                _ => Err("still: at most one label".to_owned()),
+            }
+        }
         "record" => {
             // record [--fps <N>] [--secs <D>] [--consecutive] [label] — a reduced-rate frame
             // sequence (Capture-mode client). The client paces + clamps; defaults fill in the
@@ -221,6 +232,7 @@ fn parse_command(args: &[String]) -> Result<DevRequest, String> {
                 secs,
                 label,
                 consecutive,
+                around_swap: None,
             })
         }
         "walk_to" => {

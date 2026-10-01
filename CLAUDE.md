@@ -115,6 +115,28 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     pressure law with no cap, the haze holds its sea-level value under the sea; (3) the planet's shadow in the air is the
     sea's horizon; (4) THE HAZE SCATTERS 0.9 (Bevy 0.18.1's Earth medium swaps scattering and absorption). Built as the
     air's sphere at the sea + the per-pixel march from the TRUE eye to its ground (vendored sixth change).
+    ★ B26 (2026-09-30, the owner from orbit: "Can we not increse dencity below the sea level?"): AMENDS B25 law 2 — under
+    the sea level EVERY term holds its sea-level value (no growth). MEASURED: the dry basins stay pale (0–5 levels less),
+    since a 7 km basin holds about the whole column's air even at sea-level density; the cure is the water fill (B22 (4)).
+    ★ B27 (2026-10-01, owner: "Yes, as it stands"; "1,2 first please, then rest of T2 gates"): THE EYE'S RULE IS THE SEAM
+    LAW of the flight gate (the display picture under the engine's dither; a pop = the jump between two still sides, four
+    frames a pair; patches beyond the 8-bit rounding + windows ≥ 1°; Blackwell/Crumey thresholds, the 45° seat, 200 cd/m²,
+    seen at level 1); every flight leg must hold no pop the eye sees, the landing is reported; the level rule retires as a
+    law. ORDER: the walk's stepping eye, then the flickering crack (cause, then cure), then the rest of T2's gates.
+    ★ B28 (2026-10-01, three answers "Cure it now", "Wait for the solve", "Find the amplifier"): THE TILE REACH CURED
+    NOW (one rule, W17: the shard reads the eye's height over the solved ground its artifact holds, as the client does;
+    the gateway, which relays tiles undecoded, serves the whole tile ring; the tile square counts the nodes' own chords);
+    THE PICTURE GATE WAITS FOR THE SOLVE (every stand on the solved ground, as B19; the four references change only on
+    the owner's acceptance); G-DETERMINISM: find why the history turns a world a few ticks apart into 4-level steps.
+    ★ B29 (2026-10-01): THE SOLVED PICTURES ACCEPTED AND FROZEN (owner: "Accept and freeze"; all stands, the default
+    path); THE AMPLIFIER FOUND — the history's clip toward the box's centre carried near colours apart (the hill 7
+    levels); the owner asked for "the most robust and production ready solution": FSR 2.2's rectification (a clamp
+    into the box cut to the samples' range, 16-bit history kept) BUILT for the owner's look; the terrain crate's 52
+    older coverage misses close inside each believability change (the owner's word owed); the window asked again.
+    THE LOOK GIVEN (scale 1.0 "Good"; flying at 0.67 "All good!").
+    ★ B30 (2026-10-01): ONE COMMIT NOW of B28 + B29 on `game`, no push ("Commit now"); the timing readings (the
+    window's cost, G-NO-STALL) with Docker stopped, the window on the owner's word; G-GHOST and the V switch's
+    crossing reading MOVE TO T4 ("Yes, move them"); the boarding's and the departure's crossings stay in T2.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

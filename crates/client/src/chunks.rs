@@ -2132,31 +2132,43 @@ impl ChunkLane {
             }
             return;
         }
-        if field_of(body, artifact.as_deref(), key).is_none() {
+        // ★ AND THE FIELDS ITS PARENTS READ (2026-10-01, the picture gate on the solved ground): a
+        // build reads its parents' meshes for the geomorph's targets, and a parent whose field is not
+        // whole builds nothing — so a chunk built then morphs every vertex onto the coarser field,
+        // or onto nothing where that row is missing too, and keeps it: nothing rebuilds it when the
+        // tile lands. MEASURED at the solved ground stand: 997 459 of 36.1 million vertices fell back
+        // in the live landing, 69 513 of 32.5 million with every part held (`examples/fallback_probe`).
+        // A parent always stands inside the coarser ring, so its tiles lie within the reach.
+        let reads = std::iter::once(key).chain(parent_keys(body, key));
+        let waiting: Vec<ChunkKey> = reads
+            .filter(|k| field_of(body, artifact.as_deref(), *k).is_none())
+            .collect();
+        if !waiting.is_empty() {
             self.counters.awaiting_artifact += 1;
             // `field_of` refuses only where the realm holds an artifact AND the body a lattice, so
-            // the pair is here; read as an iterator of one, as the refusal below reads it.
-            for (f, tx, ty) in artifact
+            // the pair is here; read as an iterator of one, as the refusal below reads it. Each
+            // tile is named once, whichever of the chunk and its parents waits on it.
+            let missing: BTreeSet<(u8, u32, u32)> = artifact
                 .as_deref()
                 .zip(body.macro_lattice())
                 .into_iter()
-                .flat_map(|(a, lattice)| a.missing_tiles(&lattice, key))
-            {
-                *self.missing_hist.entry((realm, f, tx, ty)).or_insert(0) += 1;
+                .flat_map(|(a, lattice)| {
+                    waiting
+                        .iter()
+                        .flat_map(|k| a.missing_tiles(&lattice, *k))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            for (f, tx, ty) in &missing {
+                *self.missing_hist.entry((realm, *f, *tx, *ty)).or_insert(0) += 1;
             }
             if self.awaiting_frame.len() < NAMED_PER_FRAME {
-                // ★ THE REFUSAL NAMES THE TILES the stencil still waits for. `field_of` refuses
-                // ONLY when the realm holds an artifact AND the body holds a macro lattice, so
-                // both are here. The lane reads the pair as an iterator of one: a second arm
-                // would say the pair can be absent, it cannot, and HR5 could not measure it.
-                // Example: the home moon's chunk at rung 0 names the artifact tiles under it.
-                let missing: Vec<(u8, u32, u32)> = artifact
-                    .as_deref()
-                    .zip(body.macro_lattice())
-                    .into_iter()
-                    .flat_map(|(a, lattice)| a.missing_tiles(&lattice, key))
-                    .collect();
-                self.awaiting_frame.push((realm, key, missing));
+                // ★ THE REFUSAL NAMES THE TILES the stencils still wait for — the chunk's own and its
+                // parents'. `field_of` refuses ONLY when the realm holds an artifact AND the body
+                // holds a macro lattice, so both are here. Example: the home moon's chunk at rung 0
+                // names the artifact tiles under it.
+                self.awaiting_frame
+                    .push((realm, key, missing.into_iter().collect()));
             }
             return;
         }
@@ -2704,6 +2716,150 @@ mod tests {
         // The held count is one chunk: a release empties the realm.
         lane.release(realm, key);
         assert_eq!(lane.resident(realm), vec![]);
+    }
+
+    /// ★ A CHUNK WAITS FOR THE TILES ITS PARENTS READ (2026-10-01, the picture gate on the solved
+    /// ground): on the moon, a rung-0 chunk whose own stencil reads tile (0, 0) of +X while one of
+    /// its parents' reads tile (1, 0) too. With tile (0, 0) alone it is refused, NAMED with its
+    /// parent's tile; once that tile lands it builds, its morph targets on its parents' meshes. RED
+    /// before: the chunk built with no parent mesh, and every vertex fell back to the field.
+    #[test]
+    fn a_chunk_waits_for_the_tiles_its_parents_read() {
+        use crate::artifact_book::ArtifactReceiver;
+        use vd_terrain::home::{
+            HOME_MOON_BULK_DENSITY_KGM3, HOME_MOON_GRAVITY_MM_S2, HOME_MOON_RADIUS_BITS,
+            HOME_MOON_SEED, HOME_SYSTEM_AGE_YR, home_moon, home_moon_solve_words,
+        };
+        use vd_terrain::solve::{Schedule, solve_full};
+        use vd_wire::channels::BulkMsg;
+        let moon = home_moon();
+        let lattice = moon.macro_lattice().expect("a lattice");
+        let words = home_moon_solve_words();
+        let (state, facies, _) =
+            solve_full(&moon, &words, Schedule::standard(HOME_SYSTEM_AGE_YR)).expect("a solve");
+        let climate =
+            vd_terrain::climate::climate(&moon, &lattice, &words, &state.z, Some(state.sea_view()));
+        let artifact =
+            vd_terrain::artifact::Artifact::of(&state, &facies, &climate, words.water_km3 > 0);
+        let realm = RealmId::Planet(HOME_MOON_SEED);
+        let mut rx = ArtifactReceiver::default();
+        rx.accept(BulkMsg::ArtifactHead {
+            realm,
+            world_tag: 9,
+            version: artifact.version,
+            edge: artifact.edge,
+            digest: artifact.digest(),
+            tiles_per_edge: artifact.tiles_per_edge(),
+            levels: artifact.pyramid.len() as u32,
+            sea_m: artifact.sea_m,
+            coast_parts: 0,
+        });
+        for (k, level) in artifact.pyramid.iter().enumerate().rev() {
+            rx.accept(BulkMsg::ArtifactPyramid {
+                realm,
+                level: k as u32 + 1,
+                part: 0,
+                parts: 1,
+                z_m: level.clone(),
+                water_m: artifact.pyramid_water[k].clone(),
+            });
+        }
+        let tile = |tx: u32, ty: u32| BulkMsg::ArtifactTile {
+            realm,
+            face: Face::PosX.index(),
+            tx,
+            ty,
+            rows: artifact.tile(Face::PosX, tx, ty).to_bytes(),
+        };
+        rx.accept(tile(0, 0));
+        let moon_charter = vd_core::look::BodyCharter {
+            gravity_mm_s2: HOME_MOON_GRAVITY_MM_S2,
+            bulk_density_kgm3: HOME_MOON_BULK_DENSITY_KGM3,
+            ..charter()
+        };
+        let surface = SurfaceStmt {
+            frame: FrameRef::PlanetCentered {
+                planet_seed: HOME_MOON_SEED,
+            },
+            generator: 77,
+        };
+        let look = Boundary::Shell {
+            r: f64::from_bits(HOME_MOON_RADIUS_BITS),
+        };
+        let mut lane = lane();
+        lane.state_surface(realm, &surface, Some(&moon_charter), &look);
+        let cache = rx.book().get(realm).cloned().expect("a cache");
+        lane.state_artifact(realm, &cache);
+        let body = *lane.body(realm).expect("a body").as_ref();
+        let own = (Face::PosX.index(), 0, 0);
+        let next = (Face::PosX.index(), 1, 0);
+        // The column: rung 0, a third of the face up, the first along +u whose own stencil reads
+        // tile (0, 0) alone while a parent's reads tile (1, 0) as well; its slices on the field.
+        let y = (lattice.edge as i32 / 3) * lattice.cells_per_node as i32 / CHUNK_EDGE as i32;
+        let at = |x: i32, z: i32| ChunkKey {
+            face: Face::PosX,
+            rung: 0,
+            x,
+            y,
+            z,
+        };
+        let x = (0..body.ladder().cells_per_edge(0) as i32 / CHUNK_EDGE as i32)
+            .find(|x| {
+                let mine = vd_terrain::artifact::tiles_of_chunk(&lattice, at(*x, 0));
+                (mine.len() == 1)
+                    & mine.contains(&own)
+                    & parent_keys(&body, at(*x, 0))
+                        .iter()
+                        .any(|p| vd_terrain::artifact::tiles_of_chunk(&lattice, *p).contains(&next))
+            })
+            .expect("a column at the tile's edge");
+        let (span, _) = crate::ladder_view::column_span(
+            &body,
+            Some(&cache),
+            crate::ladder_view::Column {
+                face: Face::PosX,
+                rung: 0,
+                x,
+                y,
+            },
+        );
+        let slices: Vec<ChunkKey> = (span.lo..=span.hi).map(|z| at(x, z)).collect();
+        for k in &slices {
+            lane.request(realm, *k, 0);
+        }
+        assert_eq!(lane.counters().awaiting_artifact, slices.len() as u64);
+        assert!(lane.poll(64).is_empty());
+        let named = lane.take_awaiting();
+        assert_eq!(named.len(), slices.len().min(NAMED_PER_FRAME));
+        assert!(
+            named.iter().all(|n| n.2 == vec![next]),
+            "the parent's tile, never the chunk's own: {named:?}"
+        );
+        // The parent's tile lands: the same requests build, on their parents' meshes.
+        rx.accept(tile(1, 0));
+        let cache = rx.book().get(realm).cloned().expect("a cache");
+        lane.state_artifact(realm, &cache);
+        for k in &slices {
+            lane.request(realm, *k, 0);
+        }
+        assert_eq!(lane.counters().awaiting_artifact, slices.len() as u64);
+        let mut built = Vec::new();
+        while built.len() < slices.len() {
+            let more = lane.poll(64);
+            assert!(!more.is_empty(), "every slice builds");
+            built.extend(more);
+        }
+        let (fallbacks, vertices) = built.iter().fold((0u64, 0u64), |(f, v), b| {
+            (
+                f + u64::from(b.geometry.morph_fallbacks),
+                v + b.geometry.vertices.len() as u64,
+            )
+        });
+        assert!(vertices > 0, "the column holds ground");
+        assert!(
+            fallbacks * 100 <= vertices,
+            "{fallbacks} of {vertices} fell back"
+        );
     }
 
     #[test]

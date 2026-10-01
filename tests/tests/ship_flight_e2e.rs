@@ -168,6 +168,7 @@ fn pilot() -> vd_sim::stub::Dot {
         vd_core::pose::LatticePos::at(vd_core::glam::I64Vec3::ZERO, vd_core::glam::DVec3::ZERO);
     vd_sim::stub::Dot {
         last_stick: None,
+        walk_stick: None,
         entity: vd_core::ids::EntityId::pack(vd_core::entity_kind::EntityKind::Player, 1, 1, 0),
         account: vd_core::ids::AccountId(1),
         session_fence: Fence(1),

@@ -5,8 +5,8 @@
 // starts again), the de-ringing (the colour clamped into the samples' range), the frame's EARNED weight (the
 // sum of its samples' weights; a display pixel between samples earns little and keeps its history), the count
 // of earned weight capped by motion (MOTION ALONE NEVER RESTARTS THE COUNT), the tone weight (Karis 2014), and
-// the colour box's clip in YCoCg.
-// Adapted from Bevy's TAA (MIT; its history filter, its reversible tone map) and Playdead's (MIT; the clip).
+// the history's rectification into the colour box in YCoCg (FSR 2.2's `RectifyHistory`: a clamp, axis by axis).
+// Adapted from Bevy's TAA (MIT; its history filter, its reversible tone map).
 //
 // The render picture sits in the top-left `render_size` rectangle of full-size textures (the engine's own
 // resolution override); render pixel `i` samples the scene at `i + 0.5 + jitter`, in render pixels (the
@@ -148,11 +148,15 @@ fn weight_floor(motion_px: f32) -> f32 {
     return mix(params.still_floor, params.moving_floor, t);
 }
 
-// THE HISTORY'S CLIP (`vd_client::reconstruction::clip_to_box`): onto the box's face, toward its centre.
-fn clip_to_box(history: vec3<f32>, centre: vec3<f32>, extent: vec3<f32>) -> vec3<f32> {
-    let d = history - centre;
-    let reach = max3(abs(d) / max(extent, vec3<f32>(1.0e-7)));
-    return centre + d / max(reach, 1.0);
+// ★ THE HISTORY'S RECTIFICATION (FSR 2.2's `RectifyHistory`; `vd_client::reconstruction::rectify`): the history
+// clamped, axis by axis in YCoCg, into the box of `centre ± extent` cut to the samples' own range — the box's
+// nearest point, which never carries two colours apart. The clip toward the centre it replaces (2026-10-01,
+// ruling B28 item 3) carried them apart on a slope, and a world a few ticks away drew the hill's dunes 7 levels
+// off. A box that rounding inverts takes its upper bound.
+fn rectify(history: vec3<f32>, centre: vec3<f32>, extent: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {
+    let lower = max(centre - extent, lo);
+    let upper = min(centre + extent, hi);
+    return min(max(history, lower), upper);
 }
 
 // ★ THE MOTION of the surface at render pixel `at` (depth `z`), in UV units: the prepass's; where no surface
@@ -298,6 +302,9 @@ fn fragment(in: FullscreenVertexOutput) -> Output {
     var hi = vec3<f32>(0.0);
     var m1 = vec3<f32>(0.0);
     var m2 = vec3<f32>(0.0);
+    // The samples' own range in YCoCg: the rectification box's cut.
+    var ylo = vec3<f32>(3.0e38);
+    var yhi = vec3<f32>(-3.0e38);
     var closest_depth = 0.0;
     var closest = clamp(nearest, vec2<i32>(0), last);
     // ★ THE REACTIVE VALUE, the largest of the 3 × 3 (FSR 2 dilates its mask the same way).
@@ -320,6 +327,8 @@ fn fragment(in: FullscreenVertexOutput) -> Output {
             let y = to_ycocg(tone);
             m1 += y;
             m2 += y * y;
+            ylo = min(ylo, y);
+            yhi = max(yhi, y);
             let before = tonemap(max(textureLoad(opaque_tex, q, 0).rgb, vec3<f32>(0.0)));
             let change = max3(abs(tone - before)) * params.reactive_scale;
             reactive = max(reactive, select(0.0, params.reactive_value, change >= params.reactive_threshold));
@@ -379,11 +388,11 @@ fn fragment(in: FullscreenVertexOutput) -> Output {
     let n = min(kept + earned, 1.0 / weight_floor(motion_px));
     let weight = select(1.0, saturate(earned / n), n > 0.0);
 
-    // ★ THE HISTORY, CLIPPED into the box of the new samples (the mean ± the settings' deviations, in YCoCg); the
-    // reactive value shrinks the box.
+    // ★ THE HISTORY, RECTIFIED into the box of the new samples (the mean ± the settings' deviations, cut to the
+    // samples' own range, in YCoCg); the reactive value shrinks the box.
     let history = history_at(history_uv);
     let extent = deviation * params.box_deviations * (1.0 - reactive);
-    let clipped = from_ycocg(clip_to_box(to_ycocg(history.rgb), mean, extent));
+    let clipped = from_ycocg(rectify(to_ycocg(history.rgb), mean, extent, ylo, yhi));
 
     let rgb = mix(max(clipped, vec3<f32>(0.0)), current, weight);
     // ★ A SHARE IS A SHARE, IN [0, 1]: the history's sharp filter dips under nought and rises over one at a

@@ -3,7 +3,7 @@
 //! reconstruction's shaders transliterate, step for step — the jitter's phases and its clock, the
 //! floor law of the render scale, the reset's causes, the sample filter and its narrowing per pixel,
 //! the upsample with its de-ringing, the count of earned weight and its cap by motion, the tone
-//! weight, the colour box that clips the history, the depth test that finds a surface hidden in the
+//! weight, the colour box that rectifies the history, the depth test that finds a surface hidden in the
 //! last frame, and the reactive mask that finds a pixel the transparent pass changed.
 //!
 //! ★ THE UPSAMPLE (FSR 2.2's `ComputeUpsampledColorAndWeight`, MEASURED needed on 2026-09-30): a
@@ -46,8 +46,9 @@ pub struct ReconstructionSettings {
     pub still_motion_px: f64,
     /// The motion from which the moving floor holds, in render pixels a frame (PROPOSED 1.0).
     pub moving_motion_px: f64,
-    /// The history's colour box: the new samples' mean ± this many deviations, in YCoCg (FSR 2's clip;
-    /// PROPOSED 1.25, the owner's look at D7).
+    /// The history's colour box: the new samples' mean ± this many deviations, in YCoCg, cut to the
+    /// samples' own range (FSR 2.2's rectification box, [`rectify`]; PROPOSED 1.25, the owner's look at
+    /// D7).
     pub box_deviations: f64,
     /// The sharpen after the tone map (the design's stage 11): the engine's contrast-adaptive
     /// sharpening strength in `[0, 1]` (PROPOSED 0.5 for the first look; the owner's D7). FSR 2 ships
@@ -176,6 +177,20 @@ impl JitterClock {
         self.phase = u32::from(!reset) * self.phase.wrapping_add(1);
         self.phase
     }
+}
+
+/// ★ THE CONVERGED STILL (the design §12.2): after a reset, the history's count reaches its cap
+/// (`1 ÷ still_floor`, a frame a pixel at most) only after that many frames; a converged still is
+/// taken at the first frame of a whole jitter cycle at or past it, so two captures of one stand read
+/// the same history and the same phase (DERIVED: 64 frames at 8 phases and at 32).
+///
+/// **Example.** At one half (32 phases, a floor of 1/64) the capture resets, waits 64 frames (two
+/// whole cycles) and takes the 65th, whose phase is the cycle's first.
+#[must_use]
+pub fn converged_frames(phases: u32, settings: &ReconstructionSettings) -> u32 {
+    let cap = (1.0 / settings.still_floor).ceil() as u32;
+    let phases = phases.max(1);
+    cap.div_ceil(phases) * phases
 }
 
 /// ★ THE NEAREST SAMPLE to a point `at` of the render grid (the gather's centre, the design §4.2
@@ -516,18 +531,37 @@ pub fn ycocg_to_rgb(ycocg: [f64; 3]) -> [f64; 3] {
     [y + co - cg, y + cg, y - co - cg]
 }
 
-/// ★ THE HISTORY'S CLIP (the design §4.2 step 4.3): the history, if it stands outside the box of
-/// `centre ± extent` (each axis), moved along the line toward the centre onto the box's face; inside
-/// the box it stays. A box of nought on an axis holds only its centre on that axis.
+/// ★ THE HISTORY'S RECTIFICATION (the design §4.2 step 4.3, as FSR 2.2's `RectifyHistory`,
+/// `ffx_fsr2_accumulate.h`, 2026-10-01): the history clamped, axis by axis in YCoCg, into the box of
+/// `centre ± extent` cut to the samples' own range `lo..=hi` — the box's NEAREST point, so two
+/// colours never move apart (the clamp onto an axis-aligned box is non-expansive on every axis). The
+/// bounds follow the shader's `min(max(h, lower), upper)`: a box that rounding inverts takes its upper
+/// bound, and nothing panics.
+///
+/// ★ WHY NOT THE CLIP TOWARD THE CENTRE (Playdead 2016, the first build): it moves the history along
+/// the ray to the box's centre, and on a box (not a ball) that move can carry two near colours apart.
+/// With a new frame's weight of 1/64 nothing pulled them back faster than the jitter's eight boxes
+/// pushed, so any difference grew until the box's size bounded it. MEASURED (2026-10-01, ruling B28
+/// item 3: the shader's blend replayed on the solved ground stand's captured frames): two inputs
+/// 1e-5 apart ended 4–7 levels apart under the clip and the 16-bit history (the picture gate's own
+/// G-DETERMINISM: the ground 4, the hill 7), 1.77e-3 apart in tone even with a 32-bit history (177
+/// times the input); under this rectification within one level, and the picture at one jitter phase
+/// repeats exactly every cycle (0 pixels moved, about 190 a cycle under the clip). Example: on the
+/// hill stand's dune slope, a history a hair outside its pixel's box lands on the box's nearest face
+/// in both of two flights, and the two flights draw the slope alike.
 #[must_use]
-pub fn clip_to_box(history: [f64; 3], centre: [f64; 3], extent: [f64; 3]) -> [f64; 3] {
-    let d = [0, 1, 2].map(|i| history[i] - centre[i]);
-    let reach = [0, 1, 2]
-        .map(|i| d[i].abs() / extent[i].max(f64::MIN_POSITIVE))
-        .into_iter()
-        .fold(0.0_f64, f64::max);
-    let scale = 1.0 / reach.max(1.0);
-    [0, 1, 2].map(|i| centre[i] + d[i] * scale)
+pub fn rectify(
+    history: [f64; 3],
+    centre: [f64; 3],
+    extent: [f64; 3],
+    lo: [f64; 3],
+    hi: [f64; 3],
+) -> [f64; 3] {
+    [0, 1, 2].map(|i| {
+        let lower = (centre[i] - extent[i]).max(lo[i]);
+        let upper = (centre[i] + extent[i]).min(hi[i]);
+        history[i].max(lower).min(upper)
+    })
 }
 
 #[cfg(test)]
@@ -592,6 +626,19 @@ mod tests {
     }
 
     /// ★ THE CLOCK: one more a frame, nought on a reset; two captures from a reset see one sequence.
+    /// Whole cycles at or past the cap: 64 at 8 and at 32 phases, 72 at 18, 75 at 15, the cap alone
+    /// at one phase; a phase count of nought reads as one.
+    #[test]
+    fn a_converged_still_waits_whole_cycles_past_the_count_cap() {
+        let s = ReconstructionSettings::PROPOSED;
+        assert_eq!(converged_frames(8, &s), 64);
+        assert_eq!(converged_frames(32, &s), 64);
+        assert_eq!(converged_frames(18, &s), 72);
+        assert_eq!(converged_frames(15, &s), 75);
+        assert_eq!(converged_frames(1, &s), 64);
+        assert_eq!(converged_frames(0, &s), 64);
+    }
+
     #[test]
     fn the_jitter_clock_counts_from_nought_at_each_reset() {
         let mut clock = JitterClock::default();
@@ -965,21 +1012,87 @@ mod tests {
         assert_eq!(rgb_to_ycocg([1.0, 1.0, 1.0]), [1.0, 0.0, 0.0]);
     }
 
-    /// ★ THE CLIP: a history inside the box stays; outside it moves toward the centre onto the box's
-    /// face; a box of nought on an axis pulls the history to the centre on that axis's reach.
+    /// ★ THE RECTIFICATION: a history inside the box stays; outside it is clamped axis by axis onto
+    /// the box (two axes out move independently); the box is cut to the samples' own range; a box of
+    /// nought on an axis holds only its centre there; a box that rounding inverts takes its upper bound.
     #[test]
-    fn the_history_clips_toward_the_centre_onto_the_box() {
+    fn the_history_is_clamped_into_the_box_cut_to_the_samples_range() {
         let c = [0.5, 0.0, 0.0];
         let e = [0.1, 0.05, 0.05];
-        assert_eq!(clip_to_box([0.55, 0.01, -0.02], c, e), [0.55, 0.01, -0.02]);
-        let out = clip_to_box([0.9, 0.0, 0.0], c, e);
+        let wide = ([-1.0; 3], [1.0; 3]);
+        let r = |h: [f64; 3], e: [f64; 3], (lo, hi): ([f64; 3], [f64; 3])| rectify(h, c, e, lo, hi);
+        assert_eq!(r([0.55, 0.01, -0.02], e, wide), [0.55, 0.01, -0.02]);
+        let out = r([0.9, 0.0, 0.0], e, wide);
         assert!(close(out[0], 0.6, 1e-12), "{out:?}");
-        // Two axes out: the farthest reach decides, and the direction is kept.
-        let both = clip_to_box([0.7, 0.2, 0.0], c, e);
+        // Two axes out: each clamped on its own axis.
+        let both = r([0.7, 0.2, 0.0], e, wide);
+        assert!(close(both[0], 0.6, 1e-12), "{both:?}");
         assert!(close(both[1], 0.05, 1e-12), "{both:?}");
-        assert!(close(both[0], 0.55, 1e-12), "{both:?}");
+        // The samples' own range cuts the box: the deviations reach 0.6, the samples only 0.55.
+        let cut = r([0.9, 0.0, 0.0], e, ([0.45, -1.0, -1.0], [0.55, 1.0, 1.0]));
+        assert!(close(cut[0], 0.55, 1e-12), "{cut:?}");
         // A flat box: only the centre on that axis.
-        let flat = clip_to_box([0.5, 0.3, 0.0], c, [0.1, 0.0, 0.1]);
-        assert!(close(flat[1], 0.0, 1e-9), "{flat:?}");
+        let flat = r([0.5, 0.3, 0.0], [0.1, 0.0, 0.1], wide);
+        assert_eq!(flat[1], 0.0);
+        // A box inverted by rounding (the range just under the centre): the upper bound.
+        let inverted = rectify([0.7; 3], [0.5; 3], [0.0; 3], [0.5 + 1e-9; 3], [0.5; 3]);
+        assert_eq!(inverted, [0.5; 3]);
+    }
+
+    /// ★ TWO COLOURS NEVER MOVE APART (ruling B28 item 3, the amplifier's cure): over many pairs of
+    /// histories and many boxes, the rectification carries no two colours farther apart on any axis.
+    /// CONTROL: the clip toward the centre, the first build's rule, fails the same reading — near a
+    /// corner of a flat box, two histories that differ only on the narrow axis land 0.048 apart on the
+    /// wide one.
+    #[test]
+    fn the_rectification_never_carries_two_colours_apart() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        let mut worst = 0.0_f64;
+        for _ in 0..20_000 {
+            let centre = [next(), next(), next()];
+            let extent = [next().abs(), next().abs() * 0.1, next().abs()];
+            let lo = [0, 1, 2].map(|i| centre[i] - next().abs());
+            let hi = [0, 1, 2].map(|i| centre[i] + next().abs());
+            let a = [next() * 2.0, next() * 2.0, next() * 2.0];
+            let b = [0, 1, 2].map(|i| a[i] + next() * 0.01);
+            let (ra, rb) = (
+                rectify(a, centre, extent, lo, hi),
+                rectify(b, centre, extent, lo, hi),
+            );
+            for i in 0..3 {
+                worst = worst.max((ra[i] - rb[i]).abs() - (a[i] - b[i]).abs());
+            }
+        }
+        assert!(worst <= 1e-12, "a pair moved apart by {worst}");
+        // The control: the clip toward the centre on a box of (1, 0.1), two histories (2, 0.21) and
+        // (2, 0.19) that differ only on the narrow axis.
+        let clip = |h: [f64; 2]| {
+            let reach = (h[0].abs() / 1.0).max(h[1].abs() / 0.1).max(1.0);
+            [h[0] / reach, h[1] / reach]
+        };
+        let (ca, cb) = (clip([2.0, 0.21]), clip([2.0, 0.19]));
+        let gap = (ca[0] - cb[0]).abs();
+        assert!(gap > 0.04, "the clip carried them {gap} apart");
+        let wide = rectify(
+            [2.0, 0.21, 0.0],
+            [0.0; 3],
+            [1.0, 0.1, 1.0],
+            [-9.0; 3],
+            [9.0; 3],
+        );
+        let narrow = rectify(
+            [2.0, 0.19, 0.0],
+            [0.0; 3],
+            [1.0, 0.1, 1.0],
+            [-9.0; 3],
+            [9.0; 3],
+        );
+        assert_eq!(wide[0], narrow[0]);
     }
 }

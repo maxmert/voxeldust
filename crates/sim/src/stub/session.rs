@@ -10,8 +10,8 @@
 //! directory round-trip that makes a grant real (`realm_head`).
 
 use super::{
-    DiscardReason, Dot, Dots, EntityMint, InputLog, OpenWindows, RealmRegions, StubConfig,
-    StubStats, apply_input, mint_entity, on_window_close, on_window_open,
+    DiscardReason, Dot, Dots, EntityMint, InputLog, OpenWindows, StubConfig, StubStats,
+    apply_input, mint_entity, on_window_close, on_window_open,
 };
 use crate::authority::{Authority, AuthorityCmd};
 use crate::io::{Durability, MsgClass};
@@ -20,7 +20,6 @@ use bevy_ecs::prelude::Resource;
 use std::collections::BTreeMap;
 use vd_core::glam::DVec3;
 use vd_core::kinematics::{self};
-use vd_core::placement::PlacementLedger;
 use vd_core::pose::{LatticePos, StampedPose};
 use vd_core::{AccountId, EntityId, Fence, NodeId, SessionId, UniverseTick};
 use vd_wire::intershard::InterShardFlow;
@@ -54,15 +53,6 @@ pub(crate) struct GatewayMsgCtx<'a> {
     pub(crate) identity: &'a NodeIdentity,
     pub(crate) clock: &'a ClockSample,
     pub(crate) realm_fence: Option<Fence>,
-    /// The speed law's read-only inputs (S3): the region forest and the authored placement ledger
-    /// the input integrator's governor reads — the SAME stores every other consumer reads.
-    pub(crate) regions: &'a RealmRegions,
-    pub(crate) placements: &'a PlacementLedger,
-    /// ★ DOES THIS REALM FLY ON AN OCCUPANT'S STICK? A hull with engines and a stored body does.
-    /// An occupant of such a realm is AT THE CONTROLS: its stick becomes the realm's push, and its
-    /// own body does not also walk. Derived at the one call site from the capability plus the stored
-    /// body — never from what kind of realm this is (HR3/SL4).
-    pub(crate) flies_on_a_stick: bool,
 }
 
 /// Resolve the BIRTH pose for a login-admitted avatar — THE one admit-pose seam (HR3): every login births
@@ -166,6 +156,7 @@ pub(crate) fn on_gateway_msg(
                     resolve_spawn_pose(ctx.config, account, spawn, ctx.clock.universe_tick, stats);
                 Dot {
                     last_stick: None,
+                    walk_stick: None,
                     entity,
                     account,
                     session_fence: fence,
@@ -233,18 +224,7 @@ pub(crate) fn on_gateway_msg(
             fence,
             input_bytes,
         } => {
-            apply_input(
-                ctx.config,
-                ctx.clock,
-                ctx.regions,
-                ctx.placements,
-                ctx.flies_on_a_stick,
-                dots,
-                log,
-                session,
-                fence,
-                &input_bytes,
-            );
+            apply_input(dots, log, session, fence, &input_bytes);
         }
         GatewayToShard::DetachSession { session, fence } => {
             match dots.0.get_mut(&session) {
@@ -402,6 +382,7 @@ fn adopt_input_slot(
     };
     let dot = dots.0.entry(session).or_insert_with(|| Dot {
         last_stick: None,
+        walk_stick: None,
         entity: subject_entity, // 1c.8 ADOPT: the transferred subject id, not a fresh mint
         account,
         session_fence: fence,

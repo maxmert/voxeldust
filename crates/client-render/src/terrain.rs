@@ -197,13 +197,6 @@ pub struct TerrainConfig {
     /// its pixels as holding a depth with no motion. A measurement's switch; a whole rung stands for
     /// the design's one chunk.
     pub census_control_rung: Option<u8>,
-    /// ★ THE SEAM GATE'S KNOWN POP (the temporal path's T2, `docs/investigation/2026-09-28/
-    /// temporal_path_design.md` §12.3: "a known pop (one rung's chunks forced to enter whole) must fail
-    /// both"): `VD_POP_CONTROL_RUNG=<r>` lands every chunk of rung `r` WHOLE — no rise from its
-    /// stand-in's surface — so the seam gate must read the pops at that rung's boundary, on the render
-    /// picture and on the display picture. A measurement's switch; the arrival clock is kept, so the
-    /// probe still marks the chunk new.
-    pub pop_control_rung: Option<u8>,
     /// THE SHADOW'S SHAPE (D8-8's ablation named the sun's shadow as the still stand's wall,
     /// §19.6): how far it reaches (the rung whose switch distance ends it), how many cascades
     /// draw it, and each cascade map's width in pixels. Defaults: the constants below; the
@@ -380,7 +373,6 @@ const SPLIT_DRAWS_ENV: &str = "VD_TERRAIN_SPLIT_DRAWS";
 const THIN_ENV: &str = "VD_TERRAIN_THIN";
 const COVERED_ENV: &str = "VD_TERRAIN_COVERED";
 const CENSUS_CONTROL_ENV: &str = "VD_CENSUS_CONTROL_RUNG";
-const POP_CONTROL_ENV: &str = "VD_POP_CONTROL_RUNG";
 /// How far under its coarser surface a vertex must stand to count as covered, in its rung's cells:
 /// four — the sink and the skirt's drop reach at most about two.
 const COVERED_CELLS: f32 = 4.0;
@@ -424,9 +416,6 @@ impl TerrainConfig {
             thin: env_or(THIN_ENV, 1usize).max(1),
             covered: std::env::var(COVERED_ENV).is_ok_and(|v| v == "1"),
             census_control_rung: std::env::var(CENSUS_CONTROL_ENV)
-                .ok()
-                .and_then(|v| v.parse::<u8>().ok()),
-            pop_control_rung: std::env::var(POP_CONTROL_ENV)
                 .ok()
                 .and_then(|v| v.parse::<u8>().ok()),
             shadow_reach_rung: env_or(SHADOW_REACH_ENV, SHADOW_REACH_RUNG),
@@ -1761,6 +1750,13 @@ struct RealmLadder {
     drift_m: f64,
     since_descent_s: f64,
     descent_ran: bool,
+    /// ★ LANDED (2026-09-30; `vd_client::stand_in`): whether every chunk of this ladder's wanted set
+    /// has once been resident. Until then the ladder lands from nothing — a login, a forgotten
+    /// ladder asked again — and the stand-in rule holds each chunk back until drawn ground stands
+    /// under it; from then on the release hold keeps the ground as the eye moves, and every chunk is
+    /// asked for at once, as before (MEASURED with the rule always on: a walk's revealed peaks waited
+    /// on their stand-ins, 1 365 frames with a gap where the walk had none).
+    landed: bool,
 }
 
 /// One drawn chunk: its entity, its probe twin in Capture mode, and its morph counts (targets
@@ -1773,6 +1769,9 @@ struct Drawn {
     bytes: u64,
     /// The coarse caster this chunk asked for (the shadow ladder), released with it.
     caster: Option<ChunkKey>,
+    /// ★ ITS TAG (`vd_client::arrival`; the entity's and its twin's `MeshTag`): its clock and its
+    /// flags — a stand-in's, which the cover switch rewrites.
+    tag: u32,
 }
 
 /// A coarse caster on the shadow layer (the shadow ladder): its entity and its bytes.
@@ -1855,6 +1854,19 @@ pub struct Terrain {
     shadow_wanted: BTreeMap<(RealmId, ChunkKey), u32>,
     shadow_casters: BTreeMap<(RealmId, ChunkKey), Caster>,
     shadow_bytes: u64,
+    /// ★ THE STAND-INS (2026-09-30; `vd_client::stand_in`): the chunks the last request pass asked for
+    /// in the place of wanted chunks that stood over no drawn ground; a pending one is not withdrawn
+    /// and a landed one is drawn, though no ring wants it. The release hold lets a drawn one go.
+    stand_ins: BTreeSet<(RealmId, ChunkKey)>,
+    /// The stand-in columns' keys, read once per column on a whole artifact (a provisional span is
+    /// read again); a realm's entries leave when its ladder or its artifact changes.
+    stand_in_keys: BTreeMap<(RealmId, vd_client::ladder_view::Column), Vec<ChunkKey>>,
+    /// How many wanted chunks the last request pass held back for their stand-ins: the stamp counts
+    /// them as pending (a settle waits for them).
+    awaiting_stand_in: u64,
+    /// ★ THE DRAWN STAND-INS (the own-height stand-in): the drawn chunks tagged as stand-ins, so the
+    /// cover switch reads them in a walk of their own, never of the drawn set.
+    drawn_stand_ins: BTreeSet<(RealmId, ChunkKey)>,
     /// The drawn chunks' morph counts, summed: fallbacks to the field, seam vertices, vertices.
     morph_totals: [u64; 3],
     /// The drawn chunks' mesh bytes, summed (M8-2's census).
@@ -2000,6 +2012,10 @@ impl Terrain {
             entities: BTreeMap::new(),
             shadow_materials: BTreeMap::new(),
             shadow_wanted: BTreeMap::new(),
+            stand_ins: BTreeSet::new(),
+            stand_in_keys: BTreeMap::new(),
+            awaiting_stand_in: 0,
+            drawn_stand_ins: BTreeSet::new(),
             shadow_casters: BTreeMap::new(),
             shadow_bytes: 0,
             ladders: BTreeMap::new(),
@@ -3346,17 +3362,35 @@ pub(crate) fn sync_terrain(
             shadow_wanted,
             shadow_casters,
             shadow_bytes,
+            stand_ins,
+            stand_in_keys,
+            awaiting_stand_in,
+            drawn_stand_ins,
+            frame_ticks,
             ..
         } = &mut *terrain;
+        let now_ticks = *frame_ticks;
         let mut unwant: Vec<(RealmId, ChunkKey)> = Vec::new();
         for (realm, key) in held {
             let wanted = ladders.get(&realm).map(|l| &l.wanted);
-            let keep = wanted.is_some_and(|w| {
-                w.contains(key)
-                    || w.overlapping_missing(Column::of(key), &|k| lane.is_resident(realm, k))
+            // ★ A STAND-IN STAYS until it has sunk under its finer ground: uncovered, or covered and
+            // still within its sink's ramp (`vd_client::stand_in`).
+            let sinking = entities.get(&(realm, key)).is_some_and(|d| {
+                vd_client::arrival::tag_stand_in(d.tag)
+                    & (vd_client::arrival::sink_weight(
+                        now_ticks,
+                        d.tag,
+                        vd_client::arrival::ramp_ticks(),
+                    ) < 1.0)
             });
+            let keep = sinking
+                || wanted.is_some_and(|w| {
+                    w.contains(key)
+                        || w.overlapping_missing(Column::of(key), &|k| lane.is_resident(realm, k))
+                });
             if !keep {
                 lane.release(realm, key);
+                drawn_stand_ins.remove(&(realm, key));
                 if let Some(drawn) = entities.remove(&(realm, key)) {
                     *released_count.entry(realm).or_default() += 1;
                     commands.entity(drawn.entity).despawn();
@@ -3388,12 +3422,37 @@ pub(crate) fn sync_terrain(
                 }
             }
         }
+        // ★ THE COVER SWITCH (the own-height stand-in): a drawn stand-in whose own arrival is done and
+        // over whose footprint every wanted finer chunk has arrived is COVERED from this frame: it sinks
+        // under that ground over the ramp, and then the release hold lets it go.
+        for (realm, key) in drawn_stand_ins.iter() {
+            let Some(drawn) = entities.get_mut(&(*realm, *key)) else {
+                continue;
+            };
+            let ramp = vd_client::arrival::ramp_ticks();
+            let settled = vd_client::arrival::ramp_weight(now_ticks, drawn.tag, ramp) >= 1.0;
+            let covered = vd_client::arrival::tag_covered(drawn.tag);
+            let arrived = ladders.get(realm).is_none_or(|l| {
+                !l.wanted
+                    .overlapping_missing(Column::of(*key), &|k| lane.is_resident(*realm, k))
+            });
+            if settled & !covered & arrived {
+                drawn.tag = vd_client::arrival::covered_stamp(now_ticks);
+                commands
+                    .entity(drawn.entity)
+                    .insert(bevy::mesh::MeshTag(drawn.tag));
+                if let Some(twin) = drawn.twin {
+                    commands.entity(twin).insert(bevy::mesh::MeshTag(drawn.tag));
+                }
+            }
+        }
         // A chunk still BUILDING that is no longer wanted is withdrawn from the workers (nothing is
         // drawn for it, so no hold): a moving eye leaves no stale job in the queue. A coarse
         // caster still wanted is not.
         for (realm, key) in lane.pending_all() {
             let wanted = ladders.get(&realm).is_some_and(|l| l.wanted.contains(key))
-                || shadow_wanted.contains_key(&(realm, key));
+                || shadow_wanted.contains_key(&(realm, key))
+                || stand_ins.contains(&(realm, key));
             if !wanted {
                 lane.release(realm, key);
             }
@@ -3402,11 +3461,90 @@ pub(crate) fn sync_terrain(
         // waiting moves to this frame's priority (the eye moved; its class may have changed).
         // ★ TIMED APART (ruling B22 step 2): the request pass is named `request`, the release
         // passes above `release`.
+        // ★ THE STAND-IN (2026-09-30; `vd_client::stand_in`): a wanted chunk is asked for only over
+        // DRAWN GROUND — its next-rung column drawn, or a finer one inside it; until then the nearest
+        // column up the ladder that stands over drawn ground is asked for in its place, and it waits.
+        // MEASURED before (the pilot's login): two landings in three rose over a hole.
         let requesting = std::time::Instant::now();
-        for (realm, ladder) in ladders.iter() {
+        let mut asked: BTreeSet<(RealmId, vd_client::ladder_view::Column)> = BTreeSet::new();
+        *awaiting_stand_in = 0;
+        for (realm, ladder) in ladders.iter_mut() {
+            let Some(rungs) = lane.body(*realm).map(|b| b.ladder().rungs) else {
+                continue;
+            };
+            // Ground stands in a column once a chunk of it is DRAWN — or, on a final span, once every
+            // slice of it is resident (built empty: a stand-in whose slices hold no surface must not
+            // hold the finer ground forever). A provisional span (the artifact not yet whole) may
+            // name the wrong slices, so its empty chunks ground nothing: MEASURED with residency
+            // alone, a rung-11 chunk landed 16 km in front of the drawn ground 0.6 s into a login.
+            let ground_cols: BTreeSet<vd_client::ladder_view::Column> = if ladder.landed {
+                BTreeSet::new()
+            } else {
+                // A stand-in grounds its finer ground once its own rise is done (so a chunk landing on it
+                // starts on the surface it stands at) and while it is not covered (it is going).
+                let drawn = entities
+                    .iter()
+                    .filter(|((r, _), d)| {
+                        let stand_in = vd_client::arrival::tag_stand_in(d.tag);
+                        let rising = vd_client::arrival::ramp_weight(
+                            now_ticks,
+                            d.tag,
+                            vd_client::arrival::ramp_ticks(),
+                        ) < 1.0;
+                        (r == realm)
+                            & !(stand_in & (rising | vd_client::arrival::tag_covered(d.tag)))
+                    })
+                    .map(|((_, k), _)| vd_client::ladder_view::Column::of(*k));
+                let settled = stand_in_keys
+                    .iter()
+                    .filter(|((r, _), keys)| {
+                        (r == realm) & keys.iter().all(|k| lane.is_resident(*realm, *k))
+                    })
+                    .map(|((_, c), _)| *c);
+                drawn.chain(settled).collect()
+            };
+            let grounded = |c: vd_client::ladder_view::Column| ground_cols.contains(&c);
+            let mut whole = !ladder.wanted.keys.is_empty();
             for (index, key) in ladder.wanted.keys.iter().enumerate() {
                 if !lane.is_resident(*realm, *key) {
-                    lane.request(*realm, *key, ladder.wanted.priority_of(index, *key));
+                    whole = false;
+                    let stand_in = (!ladder.landed)
+                        .then(|| vd_client::stand_in::stand_in_for(&grounded, *key, rungs))
+                        .flatten();
+                    match stand_in {
+                        None => lane.request(*realm, *key, ladder.wanted.priority_of(index, *key)),
+                        Some(col) => {
+                            *awaiting_stand_in += 1;
+                            asked.insert((*realm, col));
+                        }
+                    }
+                }
+            }
+            ladder.landed |= whole;
+        }
+        // The stand-ins: every slice of each column asked for, before the ground it stands in for.
+        stand_in_keys.retain(|(realm, _), _| ladders.contains_key(realm));
+        stand_ins.clear();
+        for (realm, col) in asked {
+            let keys = match stand_in_keys.get(&(realm, col)) {
+                Some(keys) => keys.clone(),
+                None => {
+                    let Some(body) = lane.body(realm).map(Arc::clone) else {
+                        continue;
+                    };
+                    let artifact = lane.artifact(realm).map(Arc::clone);
+                    let (keys, provisional) =
+                        vd_client::stand_in::column_keys(&body, artifact.as_deref(), col);
+                    if !provisional {
+                        stand_in_keys.insert((realm, col), keys.clone());
+                    }
+                    keys
+                }
+            };
+            for key in keys {
+                stand_ins.insert((realm, key));
+                if !lane.is_resident(realm, key) {
+                    lane.request(realm, key, vd_client::stand_in::stand_in_priority(key));
                 }
             }
         }
@@ -3494,6 +3632,10 @@ pub(crate) fn sync_terrain(
     // THE UPLOAD's cost on the main thread (M8-2a): the mesh conversion, the asset, the entity —
     // per harvested chunk, so the harvest's own wall is named in milliseconds.
     let harvest_started = std::time::Instant::now();
+    // ★ THE LANDING'S STAND-IN, MEASURED (2026-09-30; the login's stream-in pops, DEFERRED's T2 block): per
+    // rung, the chunks that landed this frame rising with a next-rung chunk drawn, rising with NONE drawn
+    // (their drawn stand-in is coarser still), entering whole, and the morph fallbacks of the second kind.
+    let mut landing_census: BTreeMap<u8, [u64; 4]> = BTreeMap::new();
     for ready in terrain.lane.poll_within(harvest_cap, harvest_bytes) {
         let realm = ready.realm;
         let key = ready.geometry.key;
@@ -3502,7 +3644,9 @@ pub(crate) fn sync_terrain(
             .get(&realm)
             .is_some_and(|l| l.wanted.contains(key));
         let caster_wanted = terrain.shadow_wanted.contains_key(&(realm, key));
-        if !wanted && !caster_wanted {
+        // ★ A STAND-IN (`vd_client::stand_in`) is drawn like a wanted chunk though no ring wants it.
+        let stand_in = terrain.stand_ins.contains(&(realm, key));
+        if !wanted && !caster_wanted && !stand_in {
             terrain.lane.release(realm, key);
             continue;
         }
@@ -3512,7 +3656,7 @@ pub(crate) fn sync_terrain(
             terrain.shadow_wanted.remove(&(realm, key));
             continue;
         };
-        if !wanted {
+        if !wanted && !stand_in {
             // THE SHADOW LADDER: a coarse caster lands on the shadow layer, for the sun alone,
             // its culling box grown by its own sink (the caster stands under the drawn ground).
             let material =
@@ -3611,19 +3755,42 @@ pub(crate) fn sync_terrain(
         // coarser chunk that stood in for it and rises into its own place over half a second
         // (ruling B18 Q7). A rebuilt key that was already drawn, and a top-rung chunk (no stand-in),
         // enter whole (nought).
-        // The seam gate's known pop (`pop_control_rung`): that rung's chunks land whole, as a rebuilt key does.
-        let whole = terrain.entities.contains_key(&(realm, key))
-            | (terrain.config.pop_control_rung == Some(key.rung));
-        let stamp = vd_client::arrival::arrival_stamp(
+        let whole = terrain.entities.contains_key(&(realm, key));
+        // ★ THE OWN-HEIGHT STAND-IN: drawn as a stand-in (asked for as one, no ring wants it), and
+        // rising from one that stands at its own height (a next-rung chunk under it, drawn as an
+        // uncovered stand-in).
+        let drawn_as_stand_in = !wanted & stand_in;
+        let parents = vd_client::chunks::parent_keys(&body, key);
+        let own_height = parents.iter().any(|p| {
+            terrain.entities.get(&(realm, *p)).is_some_and(|d| {
+                vd_client::arrival::tag_stand_in(d.tag) & !vd_client::arrival::tag_covered(d.tag)
+            })
+        });
+        let next_drawn = parents
+            .iter()
+            .any(|p| terrain.entities.contains_key(&(realm, *p)));
+        let row = landing_census.entry(key.rung).or_insert([0; 4]);
+        let orphan = !whole & !parents.is_empty() & !next_drawn;
+        row[0] += u64::from(!whole & next_drawn);
+        row[1] += u64::from(orphan);
+        row[2] += u64::from(whole);
+        row[3] += u64::from(ready.geometry.morph_fallbacks) * u64::from(orphan);
+        let stamp = vd_client::arrival::landing_stamp(
             whole,
-            key.rung,
-            body.ladder().rungs,
+            (key.rung, body.ladder().rungs),
             terrain.frame_ticks,
+            own_height,
+            drawn_as_stand_in,
         );
+        if drawn_as_stand_in {
+            terrain.drawn_stand_ins.insert((realm, key));
+        } else {
+            terrain.drawn_stand_ins.remove(&(realm, key));
+        }
         let entity = commands
             .spawn((
                 Mesh3d(mesh.clone()),
-                MeshMaterial3d(material),
+                MeshMaterial3d(material.clone()),
                 Transform::default(),
                 TerrainChunk {
                     realm,
@@ -3713,6 +3880,7 @@ pub(crate) fn sync_terrain(
                 counts,
                 bytes,
                 caster,
+                tag: stamp,
             },
         ) {
             // A key drawn twice (refutation of the ladder, finding 2): the old entity, its twin,
@@ -3733,6 +3901,14 @@ pub(crate) fn sync_terrain(
         }
     }
     terrain.harvest_nanos += harvest_started.elapsed().as_nanos() as u64;
+    if landing_census.values().any(|row| row[1] > 0) {
+        tracing::info!(
+            frame = terrain.frame_ticks,
+            census = ?landing_census,
+            "THE LANDING'S STAND-IN — per rung: [rose over a drawn next rung, rose with NO next-rung chunk \
+             drawn, entered whole, the morph fallbacks of the second kind]"
+        );
+    }
     // THE COVERED SHARE, logged (the owner's question of 2026-09-28; `TerrainConfig::covered`):
     // every triangle harvested since the start, by rung, and the share under the ground.
     if terrain.config.covered && now_s - terrain.covered_logged_s >= COVERED_LOG_S {
@@ -4194,7 +4370,8 @@ pub(crate) fn sync_terrain(
                     chunk_nearest_m: 0.0,
                     chunk_farthest_m: 0.0,
                     chunks_drawn: terrain.entities.len() as u64,
-                    chunks_pending: terrain.lane.pending_count() as u64,
+                    // Pending: building, or held back for a stand-in (`vd_client::stand_in`).
+                    chunks_pending: terrain.lane.pending_count() as u64 + terrain.awaiting_stand_in,
                     chunks_urgent: gap,
                     chunks_revealed: gap_revealed,
                     urgent_per_rung: gap_per_rung,

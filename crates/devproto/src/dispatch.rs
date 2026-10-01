@@ -43,6 +43,12 @@ pub enum DevRequest {
         at_tick: Option<u64>,
         label: Option<String>,
     },
+    /// ★ A CONVERGED STILL (the temporal path's T2; the design §12.2): the client restarts its picture's
+    /// history once (a tool's reset, counted apart from the player's path) and captures the first frame
+    /// of a whole jitter cycle once the history's count reached its cap — so two captures of one stand
+    /// read one history and one phase (G-DETERMINISM, the exact pictures). Without the reconstruction it
+    /// is the next frame. Reply: [`DevResponse::Captured`].
+    ScreenshotStill { label: Option<String> },
     /// Record a reduced-rate frame sequence for `secs` at `fps` (HR6). `label` is the
     /// agent's optional name for the recording. Reply: [`DevResponse::Recorded`].
     ///
@@ -56,6 +62,14 @@ pub enum DevRequest {
         label: Option<String>,
         #[serde(default)]
         consecutive: bool,
+        /// ★ AROUND THE NEXT SCENE SWAP (G-CROSSING, the temporal path's T2; 2026-10-01): the record waits
+        /// for the client's next scene swap — a boarding, a departure: its stamp's swap count past the one
+        /// at the request — and starts this many frames BEFORE it (from the renderer's readback ring),
+        /// consecutive from there. `None` (the serde default, every earlier caller) starts at once.
+        /// Example: a gate asks for 16 frames with 4 before the swap while its pilot walks into a hull; the
+        /// record holds the boarding's swap frame as its fifth.
+        #[serde(default)]
+        around_swap: Option<u32>,
     },
     /// Closed-loop: drive the own entity toward a world `target` (within
     /// `arrive_epsilon`) for up to `max_ticks`. Reply: `State` (arrived) / `Timeout`.
@@ -118,6 +132,7 @@ impl DevRequest {
             DevRequest::State
             | DevRequest::WaitUntil { .. }
             | DevRequest::Screenshot { .. }
+            | DevRequest::ScreenshotStill { .. }
             | DevRequest::Record { .. }
             | DevRequest::WalkTo { .. }
             | DevRequest::LookAt { .. } => None,
@@ -138,6 +153,7 @@ impl DevRequest {
             | DevRequest::State
             | DevRequest::WaitUntil { .. }
             | DevRequest::Screenshot { .. }
+            | DevRequest::ScreenshotStill { .. }
             | DevRequest::Record { .. }
             | DevRequest::WalkTo { .. }
             | DevRequest::LookAt { .. } => false,
@@ -346,17 +362,29 @@ mod tests {
                 at_tick: None,
                 label: None,
             },
+            DevRequest::ScreenshotStill {
+                label: Some("still".to_owned()),
+            },
             DevRequest::Record {
                 fps: 15,
                 secs: 2.0,
                 label: None,
                 consecutive: false,
+                around_swap: None,
             },
             DevRequest::Record {
                 fps: 60,
                 secs: 0.05,
                 label: Some("pair".to_owned()),
                 consecutive: true,
+                around_swap: None,
+            },
+            DevRequest::Record {
+                fps: 60,
+                secs: 0.27,
+                label: Some("crossing".to_owned()),
+                consecutive: true,
+                around_swap: Some(4),
             },
             DevRequest::WalkTo {
                 target: [1.0, 2.0, 3.0],

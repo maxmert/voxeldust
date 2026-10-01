@@ -11029,7 +11029,7 @@ updated in the same change as the work, deleted when done). The interims named h
     belt: a rung-9 chunk lands late beside it; the engine's own rule gives the chunk no previous place (about 23 display
     pixels of wrong motion for one frame); the rule gives it the planet's own step and its stand-in's surface, so it
     enters the history with no mark.
-  - ★ T2 — THE RECONSTRUCTION AND ITS UP-SCALE (2026-09-29; IN PROGRESS, not committed; the design's §4.2–§4.4, §6.3,
+  - ★ T2 — THE RECONSTRUCTION AND ITS UP-SCALE (2026-09-29; IN PROGRESS; the first build committed 2026-09-30; the design's §4.2–§4.4, §6.3,
     §7.7, §11 T2 and §12.1). Behind the switch `VD_TEMPORAL=1`, with the render scale `VD_RENDER_SCALE` and the
     sharpen's strength `VD_SHARPEN`; MSAA stays the default. BUILT:
     1. THE RULES, Tier-A (`vd_client::reconstruction`, 22 tests): the one settings struct (every constant PROPOSED with
@@ -11119,14 +11119,496 @@ updated in the same change as the work, deleted when done). The interims named h
       chunks land whole) must still read at its rung's boundary inside a surface.
     - HR5 (2026-09-30): vd-client, vd-client-harness and vd-devproto at 100 % of lines and branch sides (the first
       run found one test's `assert!(a && b)`, split).
-    OWED IN T2: the gates on the path (the pop detector's known-pop control on the render picture, and its reading on
-    the display picture through a probe read under each display pixel; the sky judge's display reading and its lag
-    reading; G-STARS by the census; G-CROSSING; G-DETERMINISM on a converged still; G-NO-STALL; G-ALPHA in the harness;
-    G-RESET asserted on every leg from the stamp's count (measured 0 at one half, not yet asserted); the T0 meters read
-    at two sizes); the moving legs (the depth test and the reactive mask judged in
+    - ★ THE GATES, BATCH 1 (2026-09-30; Docker ran during these flights, so no timing number from them is kept):
+      G-ALPHA AND G-RESET ASSERTED on every leg the reconstruction draws (the walk, the landing, the turn, 240 and 528
+      m/s): green at one and at one half. THE POP DETECTOR READS BOTH PICTURES: the render picture before the history
+      (the seam law) and the DISPLAY picture through the probe's nearest sample under each display pixel
+      (`probe::display_probe`); the offline reader `examples/pop_legs` pools a flight's kept pairs per leg, maps any pair
+      (`POP_LEGS_MAP`) and lists the widest steps (`POP_LEGS_WIDE`), on the gate's own judge (`pop::judge_pair_mapped`).
+      Three changes to the judge, each MEASURED on the recorded pairs:
+      1. THE SILHOUETTES ARE A BAND IN BOTH FRAMES: a pixel within the frame's reach of a 3 × 3 that crosses a silhouette
+         (another kind, or ground apart by the depth test's separation, on the RENDER grid) — in the second frame, or at
+         its place in the first — is read apart; the reach is one pixel in the render picture and two render pixels in
+         the display picture (its gather's 3 × 3 and its dilated motion, `pop::display_edge_reach_px`). MEASURED before:
+         at 240 m/s the display picture's rung-2 border read 11–18 % of its pixels past the floor, all along a near
+         dune's crest that slid over the far basin (the pair's map).
+      2. GROUND THE FIRST FRAME DID NOT SHOW is not compared (`off_frame`): a nearer surface stood at its place by more
+         than the separation — the reconstruction's own depth test. MEASURED before: a near ridge 3.7 km off sank out of
+         the bottom rows at 240 m/s, and the far ground 24.5 km behind it stepped 32–41 levels.
+      3. THE SEAM LAW'S RULE, PROPOSED (`pop::SEAM_RULE`; the owner rules the numbers): a boundary passes while its
+         pixels past the floor number at most 1 % of its crossed pixels plus one a pair. ASSERTED LAST in the flight (every
+         other gate reads first) on the walk and on the landing; the hull legs report it. On the walk, the turn, 240 and
+         528 m/s at one and at one half the fullest boundary used a fifth of its allowance (the walk's rung 2), the
+         display picture at most 6 pixels past the floor a leg.
+      ★ THE KNOWN POP, MEASURED: `VD_POP_CONTROL_RUNG` (the rung's chunks land whole) READ NOTHING on the legs (rung 4
+      and rung 2, the walk and 240 m/s: the borders read as in the passing flights) — a chunk that lands on time lands
+      in its crossfade band, already on the coarser surface it replaces, and the bounded ask keeps the legs' landings
+      on time. A TRIAL with the crossfade removed as well read nothing either (the rung-2 border stood 3.8 km off under
+      the new haze; the control's picture and a passing flight's show the same grey there); the trial is not kept. So
+      the flight reads THE LANDING: the first pilot's login while the ladder streams in, a pair every half second from
+      the first chunk drawn until nothing is pending (36 pairs over 25.6 s). With the control at rung 1 the landing's
+      rung 1 read as without it (23 against 30 pixels past the floor of about 25 000–29 000): a rung-1 chunk on the
+      dunes rises a few metres 1–2 km off, under a pixel's shift and under the floor. THE DESIGN'S CONTROL MAKES NO
+      VISIBLE POP AT THE FLIGHT'S STANDS. ★ THE OWNER'S CONTROL (2026-09-30: "Flash at landing"), BUILT: the control
+      rung's chunks are drawn in a strong red for the one frame they land (`terrain::LandingFlash`). MEASURED at rung
+      2: the landing breaks the seam law on BOTH pictures (2 920 render pixels past the floor of 41 705, the widest 79
+      levels; 1 677 display pixels of 39 996, the widest 83); the walk and 240 m/s catch no rung-2 landing in their
+      sampled pairs.
+      ★★ A DEFECT THE LANDING FOUND (2026-09-30): THE LOGIN'S STREAM-IN POPS. With no control the landing breaks the
+      seam law on both pictures: at rung 2 in one flight (3 046 render pixels past the floor of 62 982, the widest 91
+      levels; 1 952 display pixels, the widest 52), at rungs 3 and 4 in the next (1 682 and 1 811; 865 and 1 099). The
+      pair's map and pictures: a dune 3.3 km off appears NEW in one frame (the probe's new mark) where the frame before
+      showed the ground 6.6 km behind it through a hole in the near ridge; for the first ten seconds the coarse ground
+      stands in broken strips, and a field of blocks (rung-2 chunks 1.7–2 km off, still rising) covers the near
+      ground. ★ THE CAUSE, MEASURED (the renderer's landing census, one line a frame): every rung's ring covers only
+      its own band of distance, so no coarser rung is drawn under a finer ring's ground; as the eye moves the release
+      hold keeps the old chunks until the new ones land, but at a login nothing is drawn, so until a finer chunk lands
+      its ground is a HOLE, and the landing fills it in one frame — two landings in three at every rung 0–8 rose with
+      no next-rung chunk drawn under them. ★ THE CURE, BUILT (the owner: "Cause and cure now"; `vd_client::stand_in`):
+      while a ladder lands from nothing (until its wanted set has once been whole), a wanted chunk is asked for only
+      over DRAWN ground — its next-rung column drawn, or a finer column inside it — and until then the nearest column
+      up the ladder that stands over drawn ground is asked for in its place, as a STAND-IN; the release hold lets a
+      stand-in go when every wanted chunk over it has arrived; a landed ladder asks as before (MEASURED with the rule
+      always on: a walk's revealed peaks waited on their stand-ins, 1 365 frames with a gap). MEASURED after, on the
+      pilot's login: no hole, no block; rungs 1–3 read 22–67 pixels past the floor of 15 000–59 000; the walk's band
+      whole (0 gap frames). ★ WHAT STAYS: a stand-in stands SUNK by its rung's sink (121 m at rung 6, 583 m at rung 8,
+      1 087 m at rung 9), because the band table sinks a rung wherever a finer ring should stand, so at a login the
+      near ground first stands low and RISES in steps as the finer rungs land — one pair a login breaks the seam law
+      at one coarse border (rung 6: 3 619 render pixels, 1 625 display pixels; the near ridge's crest rose four
+      pixels in one frame). ★ THE OWN-HEIGHT STAND-IN, BUILT (the owner: "Own height" — the ring-sink law, "a rung is
+      drawn at its own radius wherever nothing covers it"): the chunk's tag carries three more flags
+      (`vd_client::arrival::{OWN_HEIGHT_FLAG, STAND_IN_FLAG, COVERED_FLAG}`, the clock now 28 bits): a stand-in stands
+      unsunk; a finer chunk that lands on it starts on its surface and grows into its own shape over the ramp; when
+      its own rise is done and every wanted chunk over its footprint has arrived it is COVERED and sinks under that
+      ground over the ramp, and only then does the release hold let it go (the three ground shaders, the motion rule
+      `vd_client::motion::previous_sink_weight` and the probe's moving mark read the same words). MEASURED (every leg
+      flown): the walk's band whole; the legs' display picture at most one pixel past the floor (240, 528 m/s, the
+      turn); G-ALPHA, G-RESET, the motion truth and the sky judge green; the LOGIN's display picture's widest step 10
+      levels where it was 52–58, no hole, no sunk ground (the pictures: the near dunes stand at their coarse height from
+      their first frame and refine in place). ★ WHAT STAYS: while the detail grows in over its 0.5 s ramps the near
+      ground's shade moves by 2–7 display levels a frame over patches of 0.5°–2° (the largest 7 931 square arcminutes
+      at a mean of 5 levels), which the proposed rule still names at one or two coarse borders a login. ★ THE OWNER'S
+      WORD (2026-09-30): "It's ok to have any sequence after login (we can have the loading screen before all meshes
+      are loaded). But this is not an option during flight - whole experience should be extremely believable and
+      seamless" — so the seam law is ASSERTED on every flight leg (the walk and the hull's legs) and REPORTED on the
+      landing; a LOADING SCREEN until the login's band is whole is the owner's allowed option (not built); and the
+      rule is to judge the display picture BY PATCHES AS THE EYE SEES THEM ("Patches by eye": a patch's angular size
+      and its step against the published detection thresholds; the research is under way).
+      A FINDING: on foot the RENDER picture holds 50–100 single dark pixels a frame (16, 25, 37 against the ground's 95,
+      79, 63) scattered over the ground 1–2.5 km off, a new set each frame; the display picture shows none (the history
+      averages them); the detector reads the few that fall on a rung border (15–20 a leg, up to 88 levels). Not yet
+      measured: the sun's shadow's part (the walk with the shadow off).
+      THE CONVERGED STILL BUILT (`vdctl still`, `DevRequest::ScreenshotStill`): the capture raises the tool's reset
+      (the history restarts once, counted apart from the player's path), waits `reconstruction::converged_frames` (64
+      at 8 and at 32 phases) and serves the first frame of a whole jitter cycle; used for the air's pictures (B25, B26).
+    - ★ THE EYE'S RULE (2026-10-01; the owner: "I need realistic experience, not sure that common rule for all
+      distances will work here" → "Patches by eye"), BUILT AS A READING (`vd_client_harness::eye`, the reader
+      `examples/pop_legs` with `POP_LEGS_EYE=1`), NOT YET THE GATE'S LAW — the owner rules it on the readings below. A
+      change of the DISPLAY picture is judged as the eye meets it: its luminance on a stated display (sRGB, white
+      200 cd/m², black a thousandth), at the natural seat (the picture's field fills the same angle on the eye: 3.75′ a
+      pixel at 720 rows), in PATCHES of one class and one sign, against the eye's published thresholds (Blackwell 1946
+      as fitted by Crumey 2014, MNRAS 442: Riccò's summing under his area, the Weber contrast over it, the field's own
+      luminance adapting the eye over half a degree); visibility level = contrast / (temporal factor × threshold), seen
+      at one. Five things the readings forced, each MEASURED on the kept flights (the 240 m/s leg's display picture):
+      1. THE LIGHT BETWEEN THE SAMPLES: against the nearest sample alone a smooth slope that slid part of a pixel read
+         one level darker over a whole dune — 29 131 "seen" patches of still ground; read between the first frame's
+         samples, 7 084.
+      2. A POP HOLDS, A FLICKER DOES NOT: each pair now records FOUR frames (`POP_PAIR_FRAMES` in the gate; the judges
+         still read the first two), and the eye's step is the middle two with a frame on each side: 1 172 with one frame
+         after the step (a dip of the lone frame before reads as a held step), 77 with a frame on each side.
+      3. A POP IS A JUMP, NOT A DRIFT (`eye::jump_of`): the held part less the ground's own change within each side —
+         a steady morph, and a stated distance half a cell off (its misreading grows with each frame of travel), both
+         read "held"; with the jump, 11.
+      4. THE ENGINE'S SCREEN DITHER (Bevy 0.18's `DebandDither::Enabled`, every 3D camera's default, the game's kept):
+         a pattern fixed on the screen, so a walker's eye that stood still one frame and then moved three frames' worth
+         made a side of the step two identical frames and the dither passed the jump test by chance (the walk: 753
+         "seen" patches, 680 of them in the 10 pairs with a repeated eye, 540 in the two whose both sides repeat). The display picture is now read under the dither (the ground's step to
+         its neighbour 0.9 of a level, 0.55 under it; the render picture holds none), and a patch counts only what the
+         eight bits PROVE, beyond one code's rounding band.
+      5. A FAINT POP OVER A WIDE FIELD: a coherent change under one code is judged by WINDOWS at least a degree wide on
+         the whole change, where the rounding averages out (`eye::WIDE_WINDOW_ARCMIN`, `eye::pops`).
+      THE READING (the four-frame flight of 2026-10-01, the display picture; Docker ran, no timing number kept): steps
+      holding a pop the eye sees — 240 m/s 1 of 30 (two pixels on the picture's last row, level 1.15), 528 m/s 0 of 30,
+      the turn 0 of 30, the walk 0 of 30; THE LANDING 11 of 33 (395 pops, the strongest a degree-wide window of the near
+      rung-0 border at level 95, 32 % contrast — the login the owner lets hide behind a loading screen). The render
+      picture (before the history, which the player never sees) reads a few one-pixel pops at the frame's own edges.
+      FINDINGS on the way: (a) A CRACK THAT FLICKERS on the walk: one frame of four holds a single dark pixel on the
+      ground (56, 48, 41 against 73, 62, 49), read as a flicker at level 7 (and 11.6 in an earlier flight); (b) THE
+      WALK'S EYE MOVES IN STEPS: at 1.4 m/s the drawn eye stays in one place while the render cursor advances up to 5
+      ticks, then moves 4–7 cm at once (12 of the walk's 90 frame steps are nought; the hull's fast legs move every
+      frame, 270 of 270) — a stepping the window may show at walking speed; not yet measured there, because a capture's
+      own work spaces its frames 2–5 ticks apart (at 240 m/s the eye's step between captured frames runs from 1.3 m to
+      33 m); (c) the silhouettes flicker by up to 50 levels on the walk (read apart as edges, the
+      reconstruction's edge look, D5).
+    - ★ RULING B27 (2026-10-01, the owner: "Yes, as it stands"): the eye's rule IS the seam law — the gate reads each
+      pair's four frames on the display picture (`eye::read_step`, one reader for the gate and `examples/pop_legs`)
+      and asserts NO pop the eye sees on every flight leg; the landing is reported; the level rule stays a reading.
+    - ★ NO TEST SEAM INSIDE THE GAME (the owner, 2026-10-01: "Please make sure that we don't build any seams inside
+      the game to support the tests"): the known-pop control is DELETED from the renderer — `VD_POP_CONTROL_RUNG`
+      (the committed switch that landed one rung's chunks whole, and this batch's one-frame red flash). The eye's rule
+      proves it sees a pop on its own frames (its tests), and the login's own pops are read on every flight. STILL IN
+      THE RENDERER, committed earlier, each a measurement's switch: `VD_CENSUS_CONTROL_RUNG` (the motion census's
+      control), `VD_TERRAIN_NO_CULL`, `VD_TERRAIN_SPLIT_DRAWS`, `VD_TERRAIN_THIN`, `VD_TERRAIN_COVERED`, the shadow's
+      `VD_TERRAIN_SHADOW_REACH_RUNG` and its siblings — listed for the owner's word.
+    - ★★ THE WALK'S STEPPING EYE, CAUSE AND CURE (ruling B27 item 2, first). MEASURED: the shard walked a player ONCE
+      PER INPUT (`stub::dot::apply_input` called the walk, a tick's step each), while a player's continuity between
+      inputs is frozen (`PLAYER_DEF`), so the body moved only when an input arrived — the client states its stick 20
+      times a second (`DEFAULT_STEP_HZ`), the shard ticks 50 — and stood still between: the drawn eye stood for up to
+      5 ticks, then moved 4–7 cm at once (one input's step at 1.4 m/s is 7 cm); a hull's pilot, whose stick the drive
+      reads every tick, moved every frame. CURE, BUILT (`stub::dot::walk_held_sticks`): an input sets the stick the
+      walker HOLDS (`Dot::walk_stick`; the look still turns at once); every tick each walker the shard simulates walks
+      one step on it until a newer input replaces it — the rule the pilot's stick already followed; an arrival drops
+      the held stick (`Dot::adopt_pose`), a departing walker stands, and a realm that flies on its occupant's stick
+      walks nobody (`stub::dot::flies_on_a_stick`, one helper for both). No switch, no test path: the game's one
+      rule. TESTED: every `vd-sim` test (the walk at one input a tick is unchanged); new: a held stick walks every
+      tick, two inputs in one tick walk one step, a departing walker stands, an arrival drops the stick. THE WHOLE
+      DETERMINISTIC SUITE (`cargo test --workspace --no-fail-fast`, 2026-10-01): 111 binaries green; the reds are the
+      registered pre-existing ones (the dual-shard crossing smoke's wake band, the flight table ×2, the frame
+      conversion ×2) plus two this run explained: the snapshot latency gate red under the machine's load and green
+      alone (10.5 s), and `process_parity`, whose test client walked by its key and "stood" by going SILENT — the
+      shipped client states its stick every step, nought to stand (`vd_client::net`), so the test's clients now do
+      the same, and the walker no longer walks on a held stick out of its bystander's sight (green, release). The
+      walk's speed is the configured one now: the dev foot speed of 500 m/s at a full stick, where 20 inputs a
+      second on a 50 Hz shard gave 40 % of it. OWED: the flight that shows the walk's eye moving every frame, and
+      the window's look; a client that goes silent instead of stating nought leaves its walker walking until its
+      session closes (as a silent pilot's hull pushes today) — a bound on a silent stick is the owner's word.
+    - ★★ THE WALK'S "CRACK" — THE DARK SPECKS, CAUSE AND CURE (ruling B27 item 2). MEASURED: every one of the walk's
+      10 185 dark specks in 120 raw frames (85 a frame) is the GROUND ITSELF at its own distance (the probe: terrain,
+      the neighbours' distance) — no crack to the sky or to far ground; the same 541 specks in 8 frames with the sun's
+      shadow on and with it off; still there without any depth prepass (336 in 8 frames, then half-dark pixels under
+      4× multisampling); the client's own geometry (`examples/ray_speck`) meets SUNLIT ground at the very samples
+      (lit +0.37 to +0.50); the packed normals return within 0.0006 rad over 20 million around the stand's up. Two
+      readings named the cause: each speck's colour is the haze alone over 1.4–3 km (the ground gave no light), and
+      every speck stands UNDER the sea's sphere (2.7–163 m under it; none of the 18 % of the ground over it ever
+      specks). The engine lifts a ground under the sphere onto it (`clamp_to_surface`, one metre over) and its sun
+      test takes `sqrt(1 − b²/r²)`: at a planet's radius a 32-bit length rounds by half a metre, the lifted radius
+      can read under the sphere, the root's argument goes negative, NaN, and the fragment takes no sunlight. Ruling
+      B25 put the sphere at the sea, so the dry sea floors met it. CURE, BUILT: the vendored engine's SEVENTH change
+      (`atmosphere/functions.wgsl`, `calculate_visible_sun_ratio`): the argument held at nought (at the sphere the
+      horizon is the local level). MEASURED after, the same stand and settings: 0 specks in 8 frames (541 before).
+      The walk's one pop the eye saw in the first B27 flight (pop-walk-006, two pixels at the picture's left edge,
+      level 5.1) was one of these specks carried into the display by the history.
+    - ★ G-DETERMINISM, MEASURED (2026-10-01; the picture gate flown twice into a stated scratch folder,
+      `VD_PICTURE_EXACT_DIR`, the owner's pictures untouched; the compare is `vd_client_harness::exact`, its control —
+      one level at one pixel shows — its own test): content pixels that differ between two runs, the widest step:
+      | stand | the temporal path (converged stills) | the control (the switch off) |
+      | ground | 265 of 658 754, 1 | 26 of 658 951, 1 |
+      | hill | 816 of 681 808, **2** | 36 of 681 818, 1 |
+      | aloft | 4 710 of 585 176, **4** (46 pixels at 2–4) | 0 of 585 364, 0 |
+      | orbit | 641 of 464 459, 1 | 13 of 464 687, 1 |
+      So the target (one level) FAILS on two stands under the path. THE CAUSE IS THE HISTORY: the single render frames of
+      the same two stills (one jitter phase, before the history) agree — 0, 43, 21 and 11 pixels, one level at most —
+      and the changed pixels of the stills are scattered single points over the far ground, not edges. A still blends
+      about 64 frames drawn ~90 ticks after the capture tick at the client's own pace, so the two runs blend worlds a
+      few ticks apart (the stills landed 3 ticks apart on hill and aloft, on the same tick on ground and orbit). The
+      owner's decision is owed (the method: a still tied to a stated tick, the reading on the render frame, or the
+      target).
+    - ★ THE SEAM STAND IS A RACE WITH THE FIRST SOLVE, AND IT SHOWED A DEFECT (2026-10-01). MEASURED: in a fresh
+      fixture the home planet's first solve lands 227 s after boot (`the artifact landed … millis=226621`), so the
+      ground, hill, aloft and orbit stands judge the RECIPE's ground (their stamps: no artifact stated, none held),
+      and the seam stand meets the solve by chance — on 2026-09-30 its data came 5 s after the landing (green); today
+      after the ground settled (the temporal runs: 1 938 hole pixels, 1 103 in blocks, both runs alike) or after the
+      capture (green), or late enough to miss the capture tick (the control's first run). THE DEFECT under it: the
+      shard ships an occupant the tiles within `tile_reach_m` over the eye's height above the body's RADIUS
+      (`artifact_source.rs`), while the client's ladder reads the eye's height over the SOLVED ground since 2026-09-24
+      (`ladder_view.rs`, `drawn_surface_m`). At the seam spot the solved ground stands 3 283 m under the eye and the
+      recipe's 1.8 m: the shard named 6 tiles, the client's chunks waited for 8 more (`missing_tiles`), the recipe-built
+      chunks near the eye stayed under the release hold, and the sky showed through a 3 km step for as long as the
+      pilot stood there. Ruling W17's own law (one reach rule, both hosts) is broken; the gateway's view path
+      (`tiles_in_reach`) reads the radius too. ★ CURED (ruling B28, "Cure it now"), TWO CAUSES MEASURED with the
+      client's own descent on the solved artifact at the seam eye (`examples/seam_tiles`): (1) THE GROUND — the shard's
+      `tile_reach_m` now reads the eye's height over the ground its artifact states under the occupant
+      (`ArtifactTiles::ground_m`, `height_field_m` at rung 0, the client's ground), floored at the eye's height as the
+      client floors it (`EYE_HEIGHT_M`, `floored_altitude_m`: one home in `vd_terrain::artifact` now); the gateway, which
+      relays tiles undecoded and cannot read the ground, serves within the WHOLE tile ring (`tile_ring_m`), which holds
+      the reach over any ground. MEASURED at the seam eye: the reach 463.6 → 562.9 km, 6 → 12 tiles. (2) THE SQUARE —
+      `tiles_within` sized its node square by the lattice's MEAN node (8 192 m), while a cube's edge spans 70.5° of arc
+      where a face's middle axis spans 90°, so a node along the seam is about a fifth shorter: a rung-9 chunk 491 km off
+      still read two tiles past the square. The square now counts the nodes' own chords along each axis
+      (`nodes_within`, a binary search). Its test stands at the seam eye on the home planet's lattice and is RED on the
+      old square. MEASURED after both, the client's own descent at the seam eye: its chunks read 11 tiles, the shard
+      names 16, and none the client reads is missing (5 more named than read: the price of the whole square). The
+      gate's wait for the solve: ruling B28 item 2.
+    - ★ THE PICTURE GATE ON THE SOLVED GROUND (ruling B28 item 2), BUILT: the gate solves the home planet itself
+      (`vd_bins::solved`, now shared with the moving-eye gate: 167 s in the gate's process), the stands that share
+      the star's light stand on the first DRY land along their circle (ruling B19 item 3's rule: the ground stand
+      1 705 km along the 15° circle, 11 m over the sea; the dusk stand 1 629 km along its circle, 129 m over it),
+      every height reads the solved ground, the seam's edge search prefers dry points, and every stand settles only
+      once the window holds every artifact whole (`vd_bins::pixel::await_window_solved`, shared). The capture grid
+      starts after a base of 540 s at the world's own rate. MEASURED on the first try: the base was sized at 20
+      ticks a second (the gate's day length and the grid's prose assumed 20), the world ticks 50 (`DEV.tick_hz`),
+      and the window's slowest far planet held its artifact whole only after 368.6 s, so the ground stand settled
+      at tick 18 766 against its capture tick 9 600 (red); the day length reads `DEV.tick_hz` now. 🟩 THE NEW
+      PICTURES ACCEPTED AND FROZEN (ruling B29 item 1, 2026-10-01 16:00–16:08: every stand on the default path into
+      the owner's folder, the far stand's reference with them; the freeze flight passed every other check).
+    - ★ THE GEOMORPH ON THE SOLVED GROUND (2026-10-01, found by the picture gate's first solved stand): the ground
+      stand broke the gate's morph bound — 997 459 of 36.1 million vertices took their morph target from the field
+      (2.8 %; the bound 1 %; 6 353 on the recipe's ground before). MEASURED with every part held
+      (`examples/fallback_probe`: the client's own build with one parent cache at that eye): 69 513 of 32.5 million
+      (0.21 %). So the LANDING'S ORDER left them: a chunk built while a tile its parents read was missing found no
+      parent mesh (a parent whose field is not whole builds nothing), morphed every vertex onto the field — or onto
+      nothing where that row was missing too — and kept it, for nothing rebuilds it when the tile lands. CURE: the
+      lane queues a chunk only when its own field AND its parents' fields are whole (ruling F9's wait, applied to
+      every field a build reads), and names the tiles its parents wait on; a parent stands inside the coarser ring,
+      so its tiles lie within the reach. Its test (`a_chunk_waits_for_the_tiles_its_parents_read`: the moon, a
+      column at a tile's edge) is RED on the old rule (no refusal where three were due). MEASURED in the live flight
+      after it: the ground stand 83 351 of 36.1 million (0.23 %), the offline build's share. The moving-eye gate's
+      landing must be flown again on it.
+    - THE PICTURE GATE'S OWN TRUTH ON THE SOLVED GROUND (D-TERRAIN-9's stale truth, cured with ruling B28 item 2):
+      the stand's altitude, surface and biome are read through the client's own `eye_surface` over the gate's own
+      solve handed whole to the client's receiver (`vd_bins::solved::SolvedHome::client_cache`). MEASURED before:
+      the stamp's 3.492 m over the solved ground against the recipe's 818.682 m. The seam's edge search ranks a
+      point in the light's band first and a dry point inside the band next: no edge point is dry with the star 12–18°
+      up on the solved world, and ranked dry first the stand took the star 33.5° up, which the light rule refuses.
+      ★ THE PAINT RULE BY DISTANCE: under one scale height the gate asked every ground pixel to read WARM (the
+      desert's tan); its own reason — the ray to the ground crosses little air — holds only for a path shorter than
+      one scale height, for a level path of one scale height at the ground crosses as much air as the whole column
+      over it. MEASURED at the solved hill stand (300 m over a coast, a plain to the horizon): warm 0.996 within
+      5 km, 0.139 at 10–20 km, 0.000 past 20 km, the far ground's mean (100, 107, 118), the air's blue; the old rule
+      read 0.746 and stopped the gate. Now the ground nearer than one scale height (the probe's own distance;
+      the scale height off the stamp's sky row) must read warm, the ground past it lit; a picture the old rule
+      passed still passes. THE STILL STANDS' "BEFORE" ROW (the switch off, `VD_PICTURE_STILL_FRAMES=72`): the
+      ground stand changes no pixel by more than one level from frame to frame (870 single-level changes in
+      41.1 million pixel pairs); the hill stand 12 pixels past one level, the widest 6. UNDER THE TEMPORAL PATH (the
+      ground stand, 72 consecutive frames, 2026-10-01): the sky and the ground within one level on 100.000 % of the
+      pairs (the ground's largest step 2), the edges 99.978 % within one level and 99.997 % within two (the largest
+      3) — the design's G-FLICKER target (99.9 % of the content within one level, the edges within two) holds there;
+      the wander one jitter cycle on 140 433 pixel pairs by one level and 226 by more, of 37.1 million (the widest 3).
+      The other stands' still readings are owed (a flight of their own, see the consecutive record's price).
+    - ★ G-DETERMINISM'S AMPLIFIER (ruling B28 item 3), FIRST READINGS: three suspects REFUTED by simulation of the
+      blend (`scratchpad box_ema.py`, `f16_ema.py`): the 16-bit history (both precisions part 0.06–0.07 % of the
+      pixels by one level for a world 1e-5 apart), the colour box's clip (0.04–0.06 %), and the motion at a still
+      stand (at most 0.00026 px, the same in both runs, MEASURED off the stills' motion files). Both runs blended
+      exactly 64 frames from the reset (clock 64, the cycle's first phase). THE WANDER, FIRST READING (the solved
+      hill stand, a content pixel against itself one jitter cycle on, `VD_PICTURE_STILL_FRAMES`): under the
+      temporal path 12 038 of 0.68 million pixels moved one level and 80 more than one (the widest 8) in one
+      cycle; with the path off 2 084 and 36 of 48.4 million (the widest 6) — the converged display WANDERS at a
+      still stand, so two stills of two runs are two moments of the wander. Under the reconstruction a
+      consecutive record ends at the capture's readback ring (8 frames of 72), so the wander now reads a paced
+      record paired by each frame's own jitter phase, its two halves apart (does it fall as the history
+      converges, or hold?).
+    - ★ G-DETERMINISM ON THE SOLVED STANDS (2026-10-01; the temporal path against its own stills frozen on the
+      solved ground in a stated scratch folder, every stand at its own capture tick, no still records): content
+      pixels that differ, the widest step — ground 599 of 578 756, **4**; hill 1 900 of 680 739, **7**; aloft 184 of
+      576 510, 1; orbit 178 of 463 443, 1; seam 1 113 of 676 201, 1. Three of five meet the target; the two stands
+      richest in dunes and slopes fail.
+    - ★★ G-DETERMINISM'S AMPLIFIER, FOUND (ruling B28 item 3; 2026-10-01): THE HISTORY'S CLIP TOWARD THE BOX'S
+      CENTRE. THE CHAIN OF READINGS (the solved ground stand, 72 consecutive frames under the temporal path):
+      (1) the paced wander HOLDS — the first half of 12 s 100 301 pixel pairs moved at one phase, 598 by more than one
+      level, the widest 4; the second half 118 624, 355, 4; (2) at one phase one cycle on, the RENDER picture (before
+      the history) changes at 1 659 pixel pairs of 37 million (1 656 of them one level) and the DISPLAY at 143 710 —
+      the input holds and the history moves; (3) the wander sits on slopes of brightness: 1.5–2.3 % of the pixels
+      under one level a pixel move, 24 % at 1–2 levels a pixel, 71 % at 8 and over; (4) REFUTED: an eye drift (every
+      stamp's eye and camera identical, 0 m, 0 px), the motion (at most 0.0003 px and identical every cycle), the
+      render's sample flips (only 11.5 % of the moving display pixels within 2 px of one), the 16-bit history alone
+      and its count's ramp after the still's reset (per-pixel simulations: two worlds 1e-5 apart end within 0.11
+      level). (5) THE REPLAY (`scratchpad replay.py`: the shader's blend at render scale one — the nine samples by
+      Lanczos-2 with each frame's own jitter, the clamp into the samples' range, the YCoCg box of 1.25 deviations,
+      the count capped at 64, the 16-bit store — driven by the captured render pictures, the reactive value and the
+      depth test nought): with an EXACTLY repeating input the replay wanders too (about 190 pixels a cycle at one
+      phase after 768 frames), and two inputs 1e-5 apart end, at clock 64 / 128 / 512: the 16-bit store and the clip
+      (today) 4 / 7 / 5 levels apart — the flight's own numbers; a 32-bit store and the clip 1 / 1 / 1; the clip off
+      3; a 16-bit NORMALIZED store and the clip 13 / 10 / 16 (finer steps, worse); a still floor of 1/32 or 1/16 with
+      the clip 5 and 3–4; A MIN/MAX CLAMP into the same box with today's 16-bit store 1 / 1 / 1 (0 pixels by two or
+      more). THE MECHANISM: the clip moves the history along the ray to the box's centre; on a box (not a ball) that
+      move can carry two near colours farther apart, and with the frame's weight at 1/64 nothing pulls them back
+      faster than the jitter's eight boxes push — so any difference (a world a few ticks apart, a 16-bit rounding)
+      grows until the box's own size bounds it, which on a slope is several levels. A clamp onto the box is the
+      nearest point of the box and never carries two colours apart, so the history settles. OWED, THE OWNER'S
+      CHOICE: the clamp (no memory price; Playdead 2016 prefers the clip because a clamp can shift a colour off the
+      line to the box's centre — a look question at the box's corners, for the owner's eye), or a 32-bit history
+      with the clip (twice the history's memory and reads, a filterable 32-bit format). THE LONG REPLAY (32 bits, the
+      clip, to clock 2 048): the two runs' largest tone gap holds at 1.77e-3 from clock 256 to 2 048 — bounded, but
+      177 times the inputs' 1e-5. So the clip AMPLIFIES a difference about 177-fold on a slope; the 16-bit rounding
+      (about 1e-4 a frame) is a source that never stops, hence 4–7 levels; a 32-bit store removes that source but
+      keeps the amplifier for a real difference of the input (a world a few ticks apart flips a render pixel by a
+      level, 4e-3 in tone). The clamp amplifies nothing. RECOMMENDED: the clamp, judged by the owner's eye at the
+      hill stand, still and turning.
+    - ★★ THE CURE BUILT AND FLOWN (ruling B29 item 2, the owner's "most robust and production ready solution";
+      2026-10-01): FSR 2.2's `RectifyHistory` — the history clamped axis by axis in YCoCg into the deviation box cut to
+      the nine samples' own range, the 16-bit history kept (`reconstruction.wgsl` `rectify`; its twin
+      `vd_client::reconstruction::rectify` with a test that no pair of colours moves apart over 20 000 pairs and boxes,
+      and a control in which the old clip carries two colours 0.048 apart). The replay of FSR 2.2's whole box: within
+      one level at every clock, the phase repeats exactly (0 pixels a cycle). G-DETERMINISM, MEASURED (two flights under
+      the temporal path, the second against the first's stills): ground 642 pixels, the widest **1** (4 before); hill
+      354, **1** (7 and 1 900 before); aloft 224, 1; orbit 172, 1; seam 622, 1 — the gate PASSES on every stand. THE
+      LOOK'S CHANGE, the clip's stills against the clamp's (content outside the overlay; both flights' own wander in
+      it): ground 32 762 pixels differ, 16 by four levels or more, the widest 16; hill 76 491, 386, 14; aloft 31 019,
+      12, 22; orbit 19 294, 0, 2; seam 54 374, 134, 25 (`docs/investigation/2026-10-01/history_rectify/
+      hill_clip_vs_clamp.png`). 🟩 THE OWNER'S LOOK GIVEN (2026-10-01, the window at the hill stand: scale 1.0 "Good";
+      flying a test hull at 0.67: "All good!"); HR5 for the twin: vd-client PASS (393 tests, 0 real misses).
+    - ★ G-STARS' FLIGHT, BUILT (`VD_PICTURE_STARS` with a stated folder): the dusk stand records the sky still and
+      turning at 90° a second (a second control connection streams the look while the first records), keeps the
+      frames under `stars/today` or `stars/candidate`, and a run under the temporal path reads the census against
+      today's — the still against today's first frame, the turn paired by the nearest camera. Under the
+      reconstruction a consecutive record ends at the capture's readback ring (8–11 frames of 96), so both runs
+      record PACED frames (96 over 4 s), and a stars-only flight (`VD_PICTURE_STARS_ONLY=1`) flies the dusk stand
+      alone (9–10 minutes a run). FIRST READINGS (the solved dusk stand, 2026-10-01): STILL — today's frame names
+      only 2 reference stars (the stand faces the glow); both present in 64 of 64 frames; the light −2.1 % in every
+      frame (past the 1 % target: the two air transmittances, the owner's D6). TURNING — 6 458 of 7 229 checks
+      present (89 %), 771 lost, 995 extra, the light −4.5 % pooled; today's paced frames stand 10.7° apart (the
+      client draws about 9 frames a second while it records). One pair under the lens (`examples/stars_probe`,
+      the census's own code): of 450 reference stars 44 lost, all on open sky, and 41 of them have a candidate star
+      1.5–5 px away, in one dense patch of the sky — neighbouring stars merge into one blob in one picture and not in
+      the other; the "hidden" losses there are stars at the overlay's lower edge, whose rectangle differs from frame
+      to frame. So the turning losses are mostly the census's own method in a dense field; a reading that tells a
+      lost star from a split blob is owed before the turning verdict means anything.
+    - ★ THE STAR CENSUS PAIRS A TURN BY THE NEAREST CAMERA (2026-10-01; `vd_client_harness::stars`): two runs cannot
+      turn through the same cameras (the pilot's look reaches the server at its own ticks), so each candidate frame
+      reads today's frame of the nearest camera (`nearest_frame`, `turn_between`); a reference star out of the
+      candidate's view is NO CHECK (`Sighting::is_check`), and a frame that looks at none of its reference's stars is
+      refused (`StarRefusal::LooksAway`). Its controls: a turn of two runs 1.9° apart passes an identical sky and names
+      the frame of a lost star; a frame looking back is refused. The flight that reads G-STARS is owed.
+    - ★ THE STAR CENSUS'S METHOD, FOUR CURES (2026-10-01; `vd_client_harness::stars`: `PEAK_SPLIT_LEVELS`,
+      `crowded`, `Sighting::Overlaid`, `FrameComparison::looks_away`; the census's method, never the game).
+      MEASURED first, the kept turn of the solved dusk stand under the probe (`examples/stars_probe`, which now prints
+      each place's offset to its nearest candidate star): in four dense frames (432–452 reference stars) the matched
+      stars stand at a median offset of (0.00, 0.00) px — the cameras are exact — and the lost stars' nearest
+      candidate stars stand 1.5–5 px away in every direction (the mean direction's length 0.03–0.18), where a random
+      place of that sky has a star within 6 px about one time in twelve. Under the lens: in the candidate a star of
+      peak 107 hangs 4 px under one of peak 136, joined through wing pixels at 22 and 23 over a sky of 18 (19 in
+      today's picture), so one blob held both and its centroid answered for one; a double star both pictures merged
+      had two centroids 1.7 px apart. CURES: (1) a blob splits at each peak that stands 4 levels or more over its pass
+      (the lowest pixel on the best path to a brighter peak — the star pixel's own rule, with the pass as the
+      background), and the three star rules judge each part; a blob with one peak reads as before, to the last bit.
+      (2) A CROWDED STAR IS NO REFERENCE STAR: another star of its frame nearer than 9 px (the widest star's radius,
+      the reach the frame's edge already keeps). MEASURED after the split, the turn's 9 185 checks by the nearest
+      other star of today's frame: lost 30 % under 2 px, 7 % at 2–3, 1.3 % at 3–4, 0.4 % at 4–6 (each of those nine
+      in a cluster of 3–5 stars within 6 px), 0 of 1 806 at 6 px and over — two runs never turn through the same
+      cameras, every star falls on a new sub-pixel place, and close faint peaks split and merge differently.
+      (3) A place under the candidate's overlay, or within 9 px of it, is no check, also where a star answers (the
+      overlay's readouts change its rectangle, it is no part of the world's picture, and it hides a star's pixels
+      at its edge: the worst frame's light, −76 %, was one star 0.3 px past the overlay's right edge). (4) A frame
+      LOOKS AWAY (refused) only when it checks nothing AND the centre of its view stands outside its reference's
+      picture: a frame whose two edge stars the pairing's own turn (up to half of today's 10.7° step) carried out
+      of view looks into its reference's picture and was refused before. Tests: the split's and the overlay's are
+      RED on the old census (one star where two were due, at the bound too; a hidden star in every frame); a
+      crowded pair, a star clear at exactly 9 px, the small turn's frame not refused, and the turning tests on a
+      clear band (192 × 128). RE-READ of the kept frames (the same pictures, the census alone changed): STILL 128
+      checks, 128 present, the light −2.09 % in every frame; TURNING 923 checks on clear stars, 923 PRESENT, 0 LOST
+      (771 of 7 229 before), the light −3.72 % pooled, −10.1 % to +4.5 % (the median −3.4 %) in the 19 frames of 20
+      checks or more, −22 % in the worst (one faint star: a faint star's light moves by up to about a fifth with
+      its sub-pixel place, for the census counts only pixels 4 levels over the sky). THE VERDICT: the temporal path
+      loses no star; G-STARS fails on the light alone — the owner's D6 (the two air transmittances; whether the
+      extra −1.6 % of the turn is the transmittance's change with the elevation or the census's own place noise is
+      UNMEASURED).
+    - ★ THE CONSECUTIVE RECORD UNDER THE RECONSTRUCTION (2026-10-01; the capture harness, `CaptureJob::written`):
+      a consecutive record asked for each next frame only after the last one's files existed, and under the
+      reconstruction a frame writes four (the display picture, the probe, the render picture, the motion) — longer
+      than the eight frames the readback ring holds, so every consecutive record ended after 8–11 frames and the
+      still stands, the wander and the stars fell back on paced records. CURE (harness only, no game path): a
+      consecutive frame is answered the moment it is served, its files follow on their own threads, and the
+      record answers once every served frame's files exist. MEASURED after (the solved ground stand under the
+      temporal path, 2026-10-01): 72 of 72 consecutive frames (8–11 before). ITS PRICE, MEASURED: the ground stand's
+      72-frame still and its 12 s paced wander took that stand past the capture grid's next slot, and the hill
+      stand settled at tick 33 002 against its capture tick 31 800 (red). So a still-record flight flies apart from
+      a compare flight: the compare at the exact ticks with no still records; the still records on a coarser grid
+      (owed: the grid's factor for still records, as a look measurement has its own).
+    - ★ THE MOVING-EYE FLIGHT ON B28's CURES (2026-10-01, `VD_TEMPORAL=1 VD_LEGS=1,2,turn`, the solved home planet;
+      Docker ran, no timing number kept): PASSED. The eye's rule (B27) holds on every leg: 0 steps of 30 hold a pop
+      the eye sees on the walk, at 240 m/s (1 of 30 before: two pixels on the picture's last row), at 528 m/s and in
+      the turn; the display picture's widest step 1 level on each leg; the motion truth within its target on each
+      (0.035 px the worst, the turn); the band whole; G-RESET and G-ALPHA clean. THE LANDING (reported, never
+      judged): 10 steps of 40 hold a pop the eye sees, 198 pops, the strongest level 21.7 (the B27 flight: 11 of 33,
+      395, level 95) — the login's stream-in, the owner's loading-screen choice.
+    - ★ G-CROSSING'S CAPTURE, BUILT (2026-10-01; the capture harness and the moving-eye gate, no game path): a
+      record may wait for the client's next SCENE SWAP (`DevRequest::Record`'s `around_swap`: the stamp's swap
+      count past the one at the request — a boarding, a departure) and start a stated number of frames before it,
+      from the readback ring a pending job keeps whole (`CaptureJob::after_swap`), consecutive from there. The gate
+      asks for 16 frames, 4 before the first boarding's swap, on a second control connection while the first walks
+      the pilot aboard, and reads each pair's mean display step (the widest channel, outside the overlay), the
+      share past 3 levels, the swap pair against the widest pair beside it (two each side), and the history's
+      restarts on every frame (`read_crossing`; REPORTED, the owner rules the target). 🟥 THE BOARDING'S READING
+      (2026-10-01, `VD_TEMPORAL=1 VD_LEGS=0`: the walk, the boarding and the 1.4 m/s leg; Docker stopped): 16 frames
+      held, each pair one picture's next frame; the swap pair (frames 2 990 → 2 991) steps 20.108 levels at the
+      mean with 0.99977 of the pixels past 3 levels, against 2.143 at the widest pair beside it — THE SWAP SHOWS:
+      the whole picture changes in one frame. The history did not restart (its counters [1, 0, 0, 0] on all 16
+      frames: the login's first frame only); the eye moved 0.088 m at the most in one frame; at the swap the view
+      took the delivered facing (yaw and pitch 1.1 × 10⁻¹⁶ in the hull's frame). CAUSE: owed — the flight kept no
+      frames; it flies again with its run kept, and its stamps and pictures name the cause (a turned view, or a
+      picture term that changes with the origin). NOT YET: the departure's swap (the `up` leg). The view switch
+      (V) moved to T4 (the cut below).
+    - 🟥 THE WAVES IN FLIGHT (2026-10-01, the owner from the window, flying hull 10 low and fast over the hill
+      stand: "On the flight rungs adjusting height all the time, and because of that it looks like waves").
+      MEASURED from the window client's own arrival census (130 s after the boarding): late arrivals in almost every
+      frame — rung 3: 2 854 rose over a drawn coarser chunk and 238 with none drawn; rung 4: 9 729 and 1 185; rung 5:
+      6 266 and 3 145; rung 6: 3 101 and 1 770; rung 7: 793 and 485 — about 230 a second, each rising over the
+      arrival ramp's half second (ruling B18 Q7) from its stand-in to its own shape, so the ground ahead keeps
+      lifting and settling. The gate's legs never see it: its hull flies level 500 m up, and at 528 m/s the moving
+      ground slides at most 0.013 px a frame (its bands 25 km and farther; `examples/morph_motion` on the kept legs),
+      at 240 m/s up to 0.2 px (p99) at 3–8 km. CAUSE: at the owner's speed the builders deliver the ground after it
+      shows, and the ramp turns each late chunk's pop into a slow rise. OWED (the terrain step, after T2, on the
+      owner's word): a gate that flies low and fast; build ahead along the motion; an ask bounded early enough that
+      the near ground stays on built chunks and changes by the distance blend alone. **Example.** The pilot crosses
+      the dunes 50 m up at a few kilometres a second: today each dune ahead rises out of the smoother ground under
+      it over half a second, row after row; with the ground built ahead, the dunes stand at their own height before
+      they come into view.
+    - THE CUT OF T2, ACCEPTED (2026-10-01; proposed on the owner's "finish T2 please as soon as possible"; the
+      owner: "Yes, move them"): G-GHOST waits for T4
+      with D9 (its bound is D9's, which the design itself defers to T4 at the frame rate that ships; its rig's
+      cleared scene needs the renderer's measurement switches the owner has not ruled — a reading against the sky
+      ahead of the hull needs none, and is the T4 plan); the view switch's G-CROSSING reading likewise; the
+      instruments at the scales 0.67 and 0.5 fly as report-only look measurements on the coarser grid; the window's
+      own cost reading and G-NO-STALL need the window with Docker stopped.
+    - ★ THE SKY'S LAG, THE SKY JUDGE'S SECOND READING (the design §6.3, §12.3; built 2026-10-01 in the moving-eye
+      gate): each frame's display picture against its own render picture (the frame before the history, which
+      holds no trail) over the sky region — the signed mean step and the mean absolute step, by leg. A trail of
+      the air's glow (about 0.23 display pixels a frame at 528 m/s, the rotation-only reprojection) shows as a step
+      that moves away from the walk's on the fast leg. Read, never judged (the owner rules a target). READING (the
+      moving-eye flight of 2026-10-01 under the temporal path, legs walk, 240, 528 and the turn): the signed step
+      +6.98 levels on the walk, +7.35 the landing, +6.14 at 240 m/s, +6.12 at 528 m/s (+6.06 to +6.17 over its 60
+      frames), +7.20 the turn. THE LEVEL IS NOT A LAG: the render picture goes through the gate's reversible tone map
+      (`c ÷ (1 + max c)`, `render_picture.wgsl`), the display through the game's tone mapper, so the two differ by
+      6–7 levels whatever the speed. In level flight the air looks the same at every place at one height (the sky
+      judge's air step 0.005 levels a pair at 528 m/s), so a level leg cannot show a trail; none grows there (the
+      528 m/s leg holds its value within 0.11 levels). OWED: the reading on the DESCENT and the CLIMB (`VD_LEGS=down,
+      up`), where the air changes every frame, with one tone map on both sides — the curve between the two maps
+      fitted on still frames, the lag read as what stays off that curve in the fall.
+    - HR5 FOR RULING B28's CHANGES (2026-10-01; `cargo llvm-cov --branch`, one crate at a time, read by
+      `scripts/coverage_gate.py`): vd-connection-plane PASS (0 real misses); vd-client PASS (392 tests, 0 real
+      misses); vd-client-harness PASS after the census change (275 tests, 0 real misses). 🟥 vd-terrain FAIL — 52 real misses (28 lines, 24 branch sides), NONE on a
+      line of this change (`git blame`: every one on a line of the believability arc, 2026-09-21 … 09-29, whose
+      entries above register "HR5 UNMEASURED"). By kind: assertion messages and short-circuit sides inside tests
+      (`artifact.rs` 2782; `climate.rs` 929, 936, 949–952, 1097; `craters.rs` 780–781, 862; `land.rs` 1860;
+      `solve.rs` 2068–2070, 2429; `chunk.rs` 1512–1519, a test whose band never meets a hard bed); guard arms no test
+      reaches (`artifact.rs` 954, a field step with no coarser level; `climate.rs` 512–513 and 546–547, an empty
+      area; `craters.rs` 457–460, a zero density; `lakes.rs` 847, 879, 1203, 1257, the flood's guards; `land.rs`
+      1153–1154, a body with no continental crust; `solve.rs` 1507–1508, an ice sheet of no thickness, 1807 and
+      1986, a pass that does not route, 1818, the ice without a climate, 1833–1835 and 1898–1899, the thickest ice
+      record; `strata.rs` 199, the salt's strength, 226, the shale share's cap); and two readers only the client
+      calls (`artifact.rs` 664–666 `TileCache::tile_ids`, 708–710 its `province`). OWED: a coverage pass of vd-terrain
+      (tests only; a guard no test can reach is made branch-free value for value, by HR5's rules), before the next
+      terrain slice. **Example.** A body whose crust is oceanic in every column (no column at the continental mark)
+      reaches the freeboard law's empty arm (`land.rs` 1153); no test builds such a body today.
+    - THE WORKSPACE TESTS BEFORE THE COMMIT OF B26–B30 (2026-10-01; `cargo test --workspace --no-fail-fast`, the
+      debug build): every target passes except four, and each red is older than this work — the dual-shard test and
+      the staleness test MEASURED identical on the previous commit (273e47f, run from an export of its tree; the
+      staleness run's own log shows the sim, node, gateway, harness and test crates compiled from that tree's files),
+      the other two failing with the messages registered on 2026-09-02. A LESSON of the method: an export that shares
+      this tree's build folder mixes the two trees' crates (the export's files carry the older commit time, so cargo
+      may take this tree's build of a crate as current) — a comparison builds in its own folder, or its log's
+      `Compiling` lines prove which files built. `dual_cluster_crossing_smoke` — its world check: the ring sibling's wake radius
+      reaches 3.962 × 10¹⁴ m past the sibling's own distance from home (the red registered on 2026-09-02 was the
+      no-cruise leg); `flight_table` — both tests, as registered (a leg with no cruise; a boundary count pinned at 51);
+      `frame_conversion_e2e` — `no_level_of_the_chain_can_place_itself…`, as registered, and
+      `the_picture_does_not_compound_staleness_per_level_under_a_lossy_link`, whose own control fails: with half the
+      attempts dropped on every leg of the chain, the gateway edge takes news on 0.99 of the ticks, as on the clean
+      arm, so the induced loss never reaches the lane (the skew cap's test stopped after some minutes, as in the
+      earlier pass); `home_artifact_pin` — stopped in the debug build (a release gate by its own note) and PASSED in
+      release (the digest unchanged; the sea 3 591 m over the ladder's radius, 78.11 % ocean). The format check and
+      every lint of `just lint` and `just lint-combos` pass. OWED: each red's cause, outside T2. **Example.** The
+      staleness test drops half of the attempts on every leg from the star down to the client, and the gateway still
+      sees a newer picture of the area on 198 ticks of 200, as on the clean arm; why the drop misses the lane is not
+      yet measured.
+    OWED IN T2: the login's rise (the owner's decision above); the sky judge's
+    lag reading on the descent and the climb (one tone map on both sides); G-STARS' light (the owner's D6 — no star
+    is lost); G-CROSSING (the swap frame's picture before and after a boarding — 🟥 it shows today, its cause
+    owed — and a departure; the boarding's G-RESET holds; the V switch's reading moved to T4); the converged stills
+    again on the cured history, as still records on a grid of their own; G-NO-STALL; the T0 meters read
+    at two sizes; the moving legs (the depth test and the reactive mask judged in
     motion); a tool's jump as a reset (no tool teleports the eye on the path today: the stands start at login, the
-    first frame's reset, and the scene-fitted camera flies no gate under the switch); the window's cost reading; THE OWNER'S LOOK in a window (asked first): D5 the edge at 1.0, 0.67 and 0.5, still and
-    turning; D6 the sky's points, with a choice — today's sprite, or the law's exact light over each pixel (8 % more
+    first frame's reset, and the scene-fitted camera flies no gate under the switch); the window's cost reading; THE OWNER'S LOOK in a window (asked first): D5 the edge at 0.5, still and turning (1.0 and 0.67
+    given on 2026-10-01: "Good", "All good!"); D6 the sky's points, with a choice — today's sprite, or the law's exact light over each pixel (8 % more
     light in the milky band, and a star's light no longer changes as it crosses a pixel); a first look at D7 (the
     sharpen's strength). **Example.** The owner stands on the belt at dusk with `VD_TEMPORAL=1 VD_RENDER_SCALE=0.5`:
     the ground draws 1 728 × 1 084 jittered pixels and the reconstruction writes 3 456 × 2 168; the stars and the sun are

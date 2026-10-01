@@ -137,6 +137,21 @@ required-features = ["dev-control"]
 name = "pop_run"
 required-features = ["dev-control"]
 
+# THE POP DETECTOR AND THE EYE'S RULE over a moving-eye flight's kept pairs, pooled per leg (the
+# temporal path's T2; ruling B27).
+[[example]]
+name = "pop_legs"
+required-features = ["dev-control"]
+
+# The star census on one kept pair (G-STARS): reads the harness's census.
+[[example]]
+name = "stars_probe"
+required-features = ["dev-control"]
+
+[[example]]
+name = "morph_motion"
+required-features = ["dev-control"]
+
 # THE GPU SPIKE (ruling V17 item 3): the integer hash and a 32-bit shadow of the recipe's noise on
 # the GPU against the CPU, byte for byte, on a thousand chunks' columns.
 [[example]]

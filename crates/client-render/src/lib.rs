@@ -192,9 +192,29 @@ pub struct CaptureJob {
     /// after the request. An exact frame the ring no longer holds is refused (an `Err`), never
     /// stood in for by a later one.
     pub exact_frame: Option<u64>,
+    /// ★ A CONVERGED STILL (the temporal path's T2; the design §12.2): the capture restarts every
+    /// reconstructed view's history once (the tool's reset) and serves the first frame of a whole
+    /// jitter cycle at or past the history's count cap (`vd_client::reconstruction::converged_frames`),
+    /// so two captures of one stand read one history and one phase. Without the reconstruction it is
+    /// the freshest frame, as any job.
+    pub converge: bool,
+    /// ★ THE FILES' OWN ANSWER (2026-10-01, the consecutive record under the reconstruction): with a
+    /// sender here the render thread answers [`Self::reply`] the moment it serves the frame (its bytes
+    /// taken), and sends the files' outcome here once they exist — so a consecutive record asks for its
+    /// next frame at once, and the readback ring never runs past it. MEASURED before: under the
+    /// reconstruction a frame wrote four files (the display picture, the probe, the render picture and
+    /// the motion) before its answer, longer than the eight frames the ring holds, so every consecutive
+    /// record ended after 8–11 frames. `None` answers once the files exist, as before.
+    pub written: Option<Sender<Result<(), String>>>,
+    /// ★ AROUND THE NEXT SCENE SWAP (G-CROSSING, the temporal path's T2; 2026-10-01): `(count, before)` —
+    /// serve the frame `before` frames ahead of the first frame whose stamp counts more scene swaps than
+    /// `count` (a boarding, a departure), from the readback ring, which a pending job keeps whole. The record
+    /// goes on from it frame by frame, so the swap frame stands `before` frames into it. `None`: as any job.
+    pub after_swap: Option<(u64, u64)>,
 }
 
 /// The result of a served capture.
+#[derive(Clone)]
 pub struct CaptureResult {
     /// The written PNG path (cwd-relative — `runs/<run>/shots/foo.png`): what `vdctl`
     /// reports so an agent can open it directly.
@@ -3445,6 +3465,55 @@ fn hud_offscreen(mut ctx: Single<&mut EguiContext, Without<PrimaryEguiContext>>,
     draw_hud(ctx.get_mut(), &net);
 }
 
+/// ★ WHETHER FRAME `frame` SERVES A CONVERGED STILL asked at frame `asked_at` (the design §12.2): drawn at
+/// least the converged count of frames after the tool's reset, which the ask raised, at the first phase of
+/// a jitter cycle — so every run serves the same clock; any frame after the ask where the reconstruction
+/// does not run.
+fn converged_frame(
+    frame: u64,
+    asked_at: u64,
+    reconstruction: Option<vd_devproto::DevReconstruction>,
+) -> bool {
+    match reconstruction {
+        None => frame >= asked_at,
+        Some(r) => {
+            let needed = vd_client::reconstruction::converged_frames(
+                r.phases,
+                &vd_client::reconstruction::ReconstructionSettings::PROPOSED,
+            );
+            (frame >= asked_at + u64::from(needed))
+                & (r.clock >= needed)
+                & r.clock.is_multiple_of(r.phases.max(1))
+        }
+    }
+}
+
+#[cfg(test)]
+mod converged_still_tests {
+    /// ★ THE CONVERGED STILL'S FRAME (T2, the design §12.2): 64 frames past the reset at the cycle's first
+    /// phase; not before the count, not off the phase, not a frame older than the ask; without the
+    /// reconstruction any frame after the ask.
+    #[test]
+    fn a_converged_still_is_served_at_the_first_phase_past_the_count() {
+        let row = |clock: u32, phases: u32| {
+            Some(vd_devproto::DevReconstruction {
+                clock,
+                phases,
+                ..Default::default()
+            })
+        };
+        assert!(super::converged_frame(1064, 1000, row(64, 8)));
+        assert!(super::converged_frame(1100, 1000, row(64, 32)));
+        // Off the cycle's first phase, short of the count, or too soon after the ask.
+        assert!(!super::converged_frame(1065, 1000, row(65, 8)));
+        assert!(!super::converged_frame(1064, 1000, row(56, 8)));
+        assert!(!super::converged_frame(1063, 1000, row(64, 8)));
+        // No reconstruction: any frame at or after the ask.
+        assert!(super::converged_frame(1000, 1000, None));
+        assert!(!super::converged_frame(999, 1000, None));
+    }
+}
+
 /// Serve at most one capture per frame: keep the freshest readback of the picture AND of the probe
 /// (slice 8p — paired by the frame stamp the copier carries, so both PNGs show one frame), and once
 /// a job is pending AND a pair RENDERED AFTER THE REQUEST exists, strip the row-padding, write the
@@ -3470,6 +3539,7 @@ fn serve_captures(
     mut latest: Local<Readbacks>,
     mut pending: Local<Option<(CaptureJob, u64)>>,
     mut served_at: Local<Option<u64>>,
+    mut tool_reset: ResMut<reconstruction::ToolReset>,
 ) {
     cfg.frame += 1;
     // THE RING IS KEPT ONLY AROUND A CAPTURE: while a job is pending, or within a ring's worth of
@@ -3493,6 +3563,8 @@ fn serve_captures(
     if pending.is_none()
         && let Ok(job) = chan.0.try_recv()
     {
+        // ★ THE CONVERGED STILL (the design §12.2): the history restarts once, now (the tool's reset).
+        tool_reset.0 += u64::from(job.converge);
         *pending = Some((job, u64::from(cfg.frame)));
     }
     let Some((job_ref, asked_at)) = pending.as_ref() else {
@@ -3519,6 +3591,22 @@ fn serve_captures(
             }
             None => None,
         },
+        None if job_ref.converge => main
+            .iter()
+            .find(|(f, stamp, _)| {
+                converged_frame(*f, *asked_at, stamp.as_ref().and_then(|s| s.reconstruction))
+            })
+            .cloned(),
+        // ★ AROUND THE NEXT SCENE SWAP: the first frame past the stated swap count, less the frames
+        // before it the job asks for (the oldest the ring still holds, if the ring is shorter).
+        None if job_ref.after_swap.is_some() => job_ref.after_swap.and_then(|(count, before)| {
+            let swap = main
+                .iter()
+                .find(|(_, stamp, _)| stamp.as_ref().is_some_and(|s| s.scene_swaps > count))?
+                .0;
+            let start = swap.saturating_sub(before);
+            main.iter().find(|(f, _, _)| *f >= start).cloned()
+        }),
         None => main.back().filter(|(f, _, _)| *f >= *asked_at).cloned(),
     };
     let Some((frame, stamp, bytes)) = served else {
@@ -3610,6 +3698,16 @@ fn serve_captures(
         .join(vd_client_harness::capture::render_rel_for(&rel));
     // The motion target is the picture camera's own: the picture's (display) size.
     let copied = picture.as_ref().map(|p| p.texture_descriptor.size);
+    // ★ THE EARLY ANSWER (`CaptureJob::written`): the frame is served, so a consecutive record may ask
+    // for the next one now; the files' outcome follows on the job's own sender.
+    let CaptureJob {
+        reply,
+        written: files_done,
+        ..
+    } = job;
+    if files_done.is_some() {
+        let _ = reply.send(Ok(result.clone()));
+    }
     std::thread::spawn(move || {
         let written = write_capture_png(&path, picture.as_ref(), &bytes, true, None)
             .and_then(|()| {
@@ -3637,12 +3735,18 @@ fn serve_captures(
                 }
                 None => Ok(()),
             });
-        let result = written.map(|()| result);
-        match &result {
-            Ok(r) => tracing::info!(path = %r.path, "capture written"),
+        match &written {
+            Ok(()) => tracing::info!(path = %result.path, "capture written"),
             Err(e) => tracing::warn!(error = %e, "capture failed"),
         }
-        let _ = job.reply.send(result);
+        match files_done {
+            Some(done) => {
+                let _ = done.send(written);
+            }
+            None => {
+                let _ = reply.send(written.map(|()| result));
+            }
+        }
     });
 }
 

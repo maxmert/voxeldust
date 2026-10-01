@@ -46,7 +46,9 @@ use std::collections::BTreeMap;
 
 use vd_core::glam::{DQuat, DVec3};
 
-use vd_client::reconstruction::{nearest_sample, sample_point};
+use vd_client::reconstruction::{
+    ReconstructionSettings, corner_factor, depth_separation, nearest_sample, sample_point,
+};
 
 use crate::camera::{CaptureCamera, FIT_FOV_Y};
 use crate::probe::{PROBE_KIND_TERRAIN, decode_probe};
@@ -89,6 +91,20 @@ pub struct Frame<'a> {
     /// THE FRAME'S JITTER (the temporal path's T2; the stamp's reconstruction row): pixel `i` sampled
     /// the scene at `i + 0.5 + jitter`. Nought without the reconstruction.
     pub jitter_px: [f64; 2],
+    /// ★ THE OCCLUSION EDGES, JUDGED APART (the temporal path's T2; the design §12.3): the depth test's
+    /// separation per metre of distance (`vd_client::reconstruction::depth_separation`, on the RENDER
+    /// grid, where the depth test runs). A pixel whose 3 × 3 neighbourhood holds another kind (the sky,
+    /// the ruler) or ground farther apart than this share of the farther distance stands on a
+    /// SILHOUETTE, and so does every pixel within the frame's [`Frame::edge_reach_px`] of one, in
+    /// EITHER frame of the pair (the second frame's own place, and the first frame's place the pixel
+    /// reprojects to: a silhouette that moved between the two); its step goes to [`PairRead::edges`]
+    /// and is neither still nor a boundary. Nought judges no edge apart (a picture without the
+    /// reconstruction).
+    pub edge_separation_per_m: f64,
+    /// ★ HOW FAR A SILHOUETTE REACHES in this frame's pixels: one for the render picture (the 3 × 3
+    /// itself), [`display_edge_reach_px`] for the display picture, whose pixel gathers render samples
+    /// around its nearest one and reads its history along a dilated motion.
+    pub edge_reach_px: usize,
 }
 
 impl Frame<'_> {
@@ -138,6 +154,39 @@ pub fn frame_camera(
 #[must_use]
 pub fn near_limit_m(cell_m: f64, travel_m: f64, focal_px: f64) -> f64 {
     (focal_px * travel_m * cell_m * 0.5 / NEAR_LIMIT_PX).sqrt()
+}
+
+/// ★ THE OCCLUSION EDGE'S SEPARATION for a capture frame of `width × height` (T2): the reconstruction's own
+/// depth test (`depth_separation` at the proposed settings), with the corner factor of the capture camera's
+/// field ([`FIT_FOV_Y`] over the frame's aspect) — one rule for the history and the gates.
+///
+/// Example: the reference view (1 284 × 720, 45°) separates 0.0264 of the farther distance: a rock 40 m
+/// away in front of a valley 3 km away is an edge (a gap of 2 960 m against 79 m).
+#[must_use]
+pub fn edge_separation_per_m(width: usize, height: usize) -> f64 {
+    let y_scale = 1.0 / (FIT_FOV_Y * 0.5).tan();
+    let x_scale = y_scale * height as f64 / width as f64;
+    depth_separation(
+        [width as u32, height as u32],
+        corner_factor(x_scale, y_scale),
+        &ReconstructionSettings::PROPOSED,
+    )
+}
+
+/// THE RENDER PICTURE'S SILHOUETTE REACH in its own pixels: the 3 × 3 itself (a render pixel is one
+/// sample; nothing gathers its neighbours).
+pub const RENDER_EDGE_REACH_PX: usize = 1;
+
+/// ★ THE DISPLAY PICTURE'S SILHOUETTE REACH in display pixels (T2; the design §4.2): a display pixel
+/// gathers the 3 × 3 render samples around its nearest one (step 4.1), and reads its history along the
+/// motion of the nearest surface of THEIR 3 × 3 (the dilated motion, step 1.2) — render samples two
+/// render pixels either way, in display pixels (rounded up).
+///
+/// Example: at one half the display picture of 2 568 × 1 440 over a render picture of 1 284 × 720 reads
+/// four display pixels either way of a near dune's crest as its silhouette; at one, two.
+#[must_use]
+pub fn display_edge_reach_px(render_width: usize, display_width: usize) -> usize {
+    (2 * display_width).div_ceil(render_width.max(1))
 }
 
 /// The focal length in pixels of a frame: half its height over the tangent of half the field.
@@ -192,7 +241,9 @@ pub struct PairRead {
     pub compared: u64,
     /// Terrain pixels nearer than the near limit, left out.
     pub near_skipped: u64,
-    /// Terrain pixels whose ground fell outside the first frame, or on no terrain there.
+    /// Terrain pixels whose ground fell outside the first frame, or on no terrain there, or — under
+    /// the separation ([`Frame::edge_separation_per_m`]) — behind a nearer surface there: ground the
+    /// first frame did not show (a disocclusion, the reconstruction's own depth test).
     pub off_frame: u64,
     /// The widest near limit any pair applied, in metres (the finest rung's is the smallest; a
     /// spinning parent's chord raises it into the picture).
@@ -202,6 +253,35 @@ pub struct PairRead {
     pub flipped: StepHist,
     /// The boundary pixels' steps per boundary, keyed by the finer rung.
     pub boundaries: BTreeMap<u8, StepHist>,
+    /// ★ The steps of the pixels on an occlusion edge ([`Frame::edge_separation_per_m`]): a jittered
+    /// render picture draws a silhouette as a stair that moves between two frames, so these steps
+    /// are read apart from the seam law.
+    pub edges: StepHist,
+}
+
+/// ★ HOW THE JUDGE READ ONE PIXEL of the second frame: the histogram its step went to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PixelClass {
+    /// No other rung in its neighbourhood: its step belongs to the picture's noise (the floor).
+    Still,
+    /// On an occlusion edge ([`Frame::edge_separation_per_m`]): read apart.
+    Edge,
+    /// Another rung in its neighbourhood: the boundary keyed by the finer of the two rungs.
+    Boundary(u8),
+}
+
+/// One compared pixel as the judge read it: its place in the second frame, its step, its class, the
+/// first frame's pixel it matched best (`y · width + x` there) — the pixel its step was read against —
+/// and the place its ground reprojected to in the first frame's SAMPLE GRID (the first frame's pixel
+/// `(i, j)` sampled at `(i, j)`; between them, the ground lies between their samples).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PixelRead {
+    pub x: usize,
+    pub y: usize,
+    pub step: u8,
+    pub class: PixelClass,
+    pub matched: usize,
+    pub place: [f64; 2],
 }
 
 impl Default for PairRead {
@@ -214,6 +294,7 @@ impl Default for PairRead {
             still: empty_hist(),
             flipped: empty_hist(),
             boundaries: BTreeMap::new(),
+            edges: empty_hist(),
         }
     }
 }
@@ -243,6 +324,25 @@ impl PairRead {
         widest_of(&self.flipped)
     }
 
+    /// How many pixels stood on an occlusion edge, and the widest step among them.
+    #[must_use]
+    pub fn edge_read(&self) -> (u64, u8) {
+        (self.edges.iter().sum(), widest_of(&self.edges))
+    }
+
+    /// Counts one compared pixel's step in the histogram of its class.
+    fn count(&mut self, class: PixelClass, step: u8) {
+        let s = usize::from(step);
+        match class {
+            PixelClass::Still => self.still[s] += 1,
+            PixelClass::Edge => self.edges[s] += 1,
+            PixelClass::Boundary(finer) => {
+                self.flipped[s] += 1;
+                self.boundaries.entry(finer).or_insert_with(empty_hist)[s] += 1;
+            }
+        }
+    }
+
     /// The reading per boundary, finest first, against the one floor.
     #[must_use]
     pub fn boundary_reads(&self) -> Vec<BoundaryRead> {
@@ -261,9 +361,10 @@ impl PairRead {
 
 /// THE BEST MATCH of the second frame's pixel `i` (a byte offset) among the first frame's
 /// terrain pixels around `(qx, qy)`, and whether any of them was drawn by another rung than
-/// `rung`: the smallest widest-channel step over the [`NEIGHBOURHOOD`] (the centre included),
-/// and the finest rung a differing neighbour was drawn at. `None` when no terrain pixel stands
-/// in the neighbourhood (sky, or the frame's edge).
+/// `rung`: the smallest widest-channel step over the [`NEIGHBOURHOOD`] (the centre included), the
+/// first frame's pixel that holds it (`y · width + x`; the first in reading order among equals), and
+/// the finest rung a differing neighbour was drawn at. `None` when no terrain pixel stands in the
+/// neighbourhood (sky, or the frame's edge).
 fn best_match(
     before: &Frame<'_>,
     after_rgba: &[u8],
@@ -271,8 +372,8 @@ fn best_match(
     qx: usize,
     qy: usize,
     rung: u8,
-) -> Option<(u8, Option<u8>)> {
-    let mut best: Option<u8> = None;
+) -> Option<(u8, usize, Option<u8>)> {
+    let mut best: Option<(u8, usize)> = None;
     let mut other_rung: Option<u8> = None;
     let mut dy = -NEIGHBOURHOOD;
     while dy <= NEIGHBOURHOOD {
@@ -289,7 +390,9 @@ fn best_match(
                         .map(|k| after_rgba[i + k].abs_diff(before.rgba[j + k]))
                         .max()
                         .unwrap_or(0);
-                    best = Some(best.map_or(step, |b| b.min(step)));
+                    if best.is_none_or(|(b, _)| step < b) {
+                        best = Some((step, j / 4));
+                    }
                     if pa.rung != rung {
                         other_rung = Some(other_rung.map_or(pa.rung, |r| r.min(pa.rung)));
                     }
@@ -299,7 +402,101 @@ fn best_match(
         }
         dy += 1;
     }
-    best.map(|b| (b, other_rung))
+    best.map(|(b, at)| (b, at, other_rung))
+}
+
+/// ★ WHETHER THE PIXEL AT `(x, y)` STANDS ON A SILHOUETTE of `frame`: a neighbour of its 3 × 3 (inside
+/// the frame, off the overlay) of another kind, or — both ground — whose distance differs from the
+/// pixel's own by more than the frame's separation times the farther of the two.
+fn silhouette(frame: &Frame<'_>, x: usize, y: usize, cell_m: &dyn Fn(u8) -> f64) -> bool {
+    let i = (y * frame.width + x) * 4;
+    let p = decode_probe([frame.probe[i], frame.probe[i + 1], frame.probe[i + 2]]);
+    let d = cell_m(p.rung) * f64::from(p.cells);
+    let mut dy = -NEIGHBOURHOOD;
+    while dy <= NEIGHBOURHOOD {
+        let mut dx = -NEIGHBOURHOOD;
+        while dx <= NEIGHBOURHOOD {
+            let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+            let inside =
+                (nx >= 0) & (ny >= 0) & (nx < frame.width as i64) & (ny < frame.height as i64);
+            if inside & !frame.under_overlay(nx as usize, ny as usize) {
+                let j = (ny as usize * frame.width + nx as usize) * 4;
+                let n = decode_probe([frame.probe[j], frame.probe[j + 1], frame.probe[j + 2]]);
+                let dn = cell_m(n.rung) * f64::from(n.cells);
+                let ground = (n.kind == PROBE_KIND_TERRAIN) & (p.kind == PROBE_KIND_TERRAIN);
+                let apart = ground & ((dn - d).abs() > frame.edge_separation_per_m * dn.max(d));
+                if (n.kind != p.kind) | apart {
+                    return true;
+                }
+            }
+            dx += 1;
+        }
+        dy += 1;
+    }
+    false
+}
+
+/// ★ WHETHER THE GROUND AT `point` WAS HIDDEN IN THE FIRST FRAME (T2; the reconstruction's own depth
+/// test, the design §4.2 step 2): the first frame's pixel `(qx, qy)` shows ground NEARER than the
+/// point by more than the separation times the farther of the two — ground a near crest covered, which
+/// no pixel of the first frame showed. Nought separation tests nothing.
+///
+/// Example: the hull flies at 240 m/s and a near ridge 3.7 km off sinks out of the picture's bottom
+/// rows; the far ground 24.5 km off that it covered shows in the second frame, where the first frame
+/// showed the ridge — hidden there, so it is not compared.
+fn disoccluded(
+    before: &Frame<'_>,
+    point: DVec3,
+    (qx, qy): (usize, usize),
+    cell_m: &dyn Fn(u8) -> f64,
+) -> bool {
+    let j = (qy * before.width + qx) * 4;
+    let pa = decode_probe([before.probe[j], before.probe[j + 1], before.probe[j + 2]]);
+    let da = cell_m(pa.rung) * f64::from(pa.cells);
+    let dp = (point - before.camera.eye).length();
+    let sep = before.edge_separation_per_m;
+    (sep > 0.0) & (pa.kind == PROBE_KIND_TERRAIN) & (dp - da > sep * dp.max(da))
+}
+
+/// Every pixel within `k` of a set pixel of `on` (a `w × h` grid), in both directions: the square
+/// `2k + 1` wide around each; `k` nought copies the grid.
+fn dilate(on: &[bool], w: usize, h: usize, k: usize) -> Vec<bool> {
+    let mut wide = vec![false; w * h];
+    for i in (0..on.len()).filter(|&i| on[i]) {
+        let (x, y) = (i % w, i / w);
+        for xx in x.saturating_sub(k)..(x + k + 1).min(w) {
+            wide[y * w + xx] = true;
+        }
+    }
+    let mut tall = vec![false; w * h];
+    for i in (0..wide.len()).filter(|&i| wide[i]) {
+        let (x, y) = (i % w, i / w);
+        for yy in y.saturating_sub(k)..(y + k + 1).min(h) {
+            tall[yy * w + x] = true;
+        }
+    }
+    tall
+}
+
+/// ★ THE SILHOUETTE BAND of a frame: every pixel within [`Frame::edge_reach_px`] of a pixel whose 3 × 3
+/// crosses a silhouette ([`silhouette`]); all clear without the separation (nothing is read apart).
+fn silhouette_band(frame: &Frame<'_>, cell_m: &dyn Fn(u8) -> f64) -> Vec<bool> {
+    let judged = usize::from(frame.edge_separation_per_m > 0.0);
+    let w = frame.width;
+    let on: Vec<bool> = (0..frame.width * frame.height * judged)
+        .map(|i| silhouette(frame, i % w, i / w, cell_m))
+        .collect();
+    dilate(
+        &on,
+        w,
+        on.len() / w.max(1),
+        frame.edge_reach_px.saturating_sub(1),
+    )
+}
+
+/// Whether pixel `i` lies in a band (a band left empty holds no pixel).
+fn in_band(band: &[bool], i: usize) -> bool {
+    band.get(i).copied().unwrap_or(false)
 }
 
 /// THE JUDGE of a pair: the second frame's terrain pixels reprojected into the first; the rung
@@ -308,10 +505,29 @@ fn best_match(
 /// reads nothing.
 #[must_use]
 pub fn judge_pair(before: &Frame<'_>, after: &Frame<'_>, cell_m: &dyn Fn(u8) -> f64) -> PairRead {
+    judge_pair_mapped(before, after, cell_m, &mut |_| {})
+}
+
+/// ★ THE JUDGE, PIXEL BY PIXEL: [`judge_pair`], and every compared pixel handed to `on_pixel` as it is
+/// counted — one judge for the gate and for a diagnostic that maps where a leg's steps stand.
+///
+/// Example: a map of the 240 m/s leg's first pair paints each boundary pixel past the floor red over the
+/// picture, and the red lies along the rung-2 band under the hull.
+#[must_use]
+pub fn judge_pair_mapped(
+    before: &Frame<'_>,
+    after: &Frame<'_>,
+    cell_m: &dyn Fn(u8) -> f64,
+    on_pixel: &mut dyn FnMut(PixelRead),
+) -> PairRead {
     let mut read = PairRead::default();
     if !(before.well_formed() & after.well_formed()) {
         return read;
     }
+    let (band_before, band_after) = (
+        silhouette_band(before, cell_m),
+        silhouette_band(after, cell_m),
+    );
     let travel = (after.camera.eye - before.camera.eye).length();
     let focal = focal_px(after.height, after.camera.fov_y);
     let mut y = 0usize;
@@ -339,31 +555,46 @@ pub fn judge_pair(before: &Frame<'_>, after: &Frame<'_>, cell_m: &dyn Fn(u8) -> 
             let [sx, sy] = sample_point([x as i64, y as i64], after.jitter_px);
             let point = after.camera.unproject(sx, sy, d);
             let q = before.camera.project_point(point);
-            let hit = q.and_then(|q| {
-                let [qx, qy] = nearest_sample([q.x, q.y], before.jitter_px);
-                let inside = (qx >= 0)
-                    & (qy >= 0)
-                    & (qx < before.width as i64)
-                    & (qy < before.height as i64);
-                inside.then_some((qx as usize, qy as usize))
+            let place = q.map_or([0.0; 2], |q| {
+                [
+                    q.x - 0.5 - before.jitter_px[0],
+                    q.y - 0.5 - before.jitter_px[1],
+                ]
             });
-            let matched =
-                hit.and_then(|(qx, qy)| best_match(before, after.rgba, i, qx, qy, pb.rung));
-            let Some((step, other)) = matched else {
+            let hit = q
+                .and_then(|q| {
+                    let [qx, qy] = nearest_sample([q.x, q.y], before.jitter_px);
+                    let inside = (qx >= 0)
+                        & (qy >= 0)
+                        & (qx < before.width as i64)
+                        & (qy < before.height as i64);
+                    inside.then_some((qx as usize, qy as usize))
+                })
+                .filter(|&q| !disoccluded(before, point, q, cell_m));
+            let matched = hit.and_then(|(qx, qy)| {
+                best_match(before, after.rgba, i, qx, qy, pb.rung)
+                    .map(|m| (m, qy * before.width + qx))
+            });
+            let Some(((step, at, other), q)) = matched else {
                 read.off_frame += 1;
                 x += 1;
                 continue;
             };
             read.compared += 1;
-            match other {
-                None => read.still[usize::from(step)] += 1,
-                Some(other_rung) => {
-                    read.flipped[usize::from(step)] += 1;
-                    read.boundaries
-                        .entry(pb.rung.min(other_rung))
-                        .or_insert_with(empty_hist)[usize::from(step)] += 1;
-                }
-            }
+            let class = if in_band(&band_after, y * after.width + x) | in_band(&band_before, q) {
+                PixelClass::Edge
+            } else {
+                other.map_or(PixelClass::Still, |o| PixelClass::Boundary(pb.rung.min(o)))
+            };
+            read.count(class, step);
+            on_pixel(PixelRead {
+                x,
+                y,
+                step,
+                class,
+                matched: at,
+                place,
+            });
             x += 1;
         }
         y += 1;
@@ -379,6 +610,45 @@ fn add_hist(into: &mut [u64; 256], from: &[u64; 256]) {
     }
 }
 
+/// ★ THE LEVEL RULE (the temporal path's T2; a READING since ruling B27 made the eye's rule,
+/// `crate::eye`, the seam law): a boundary of a leg holds while the pixels that crossed it AND stepped
+/// past the floor number at most `share` of the pixels that crossed it, plus `per_pair` for each pair
+/// the leg judged. The floor already stands at
+/// the still pixels' 99.9 % point, so a thousandth of any pixels steps past it by the picture's own
+/// noise; the per-pair term forgives a lone speckle of the ground's own (a still pixel shows one as
+/// often), never a line of them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeamRule {
+    pub share: f64,
+    pub per_pair: u64,
+}
+
+/// ★ THE LEVEL RULE'S NUMBERS: one hundredth of the crossed pixels plus one a pair. MEASURED on the passing
+/// flights of 2026-09-30 (the walk, a turn, 240 and 528 m/s, at one and at one half, both pictures): the
+/// fullest boundary used a fifth of this allowance (the walk's rung 2, 49 of 21 647 crossed, 45 of them
+/// one level past the floor).
+pub const SEAM_RULE: SeamRule = SeamRule {
+    share: 0.01,
+    per_pair: 1,
+};
+
+impl SeamRule {
+    /// The allowance of a boundary that `crossed` pixels crossed over `pairs` pairs.
+    #[must_use]
+    pub fn allowance(&self, crossed: u64, pairs: u64) -> f64 {
+        self.share * crossed as f64 + (self.per_pair * pairs) as f64
+    }
+
+    /// The boundaries of a leg's pooled reading over `pairs` pairs that break the rule, finest first.
+    #[must_use]
+    pub fn breaches(&self, read: &PairRead, pairs: u64) -> Vec<BoundaryRead> {
+        read.boundary_reads()
+            .into_iter()
+            .filter(|b| b.over_floor as f64 > self.allowance(b.crossed, pairs))
+            .collect()
+    }
+}
+
 /// The sum of many pairs' readings: the counts add, the histograms pool, the near limit takes
 /// the widest.
 #[must_use]
@@ -391,6 +661,7 @@ pub fn sum_reads(reads: &[PairRead]) -> PairRead {
         total.near_limit_m = total.near_limit_m.max(r.near_limit_m);
         add_hist(&mut total.still, &r.still);
         add_hist(&mut total.flipped, &r.flipped);
+        add_hist(&mut total.edges, &r.edges);
         for (finer, hist) in &r.boundaries {
             add_hist(
                 total.boundaries.entry(*finer).or_insert_with(empty_hist),
@@ -452,6 +723,8 @@ mod tests {
             camera,
             hud: None,
             jitter_px: [0.0; 2],
+            edge_separation_per_m: 0.0,
+            edge_reach_px: 1,
         }
     }
 
@@ -485,6 +758,16 @@ mod tests {
             assert!((back.x - px).abs() < 1e-9, "({x}, {y}) x");
             assert!((back.y - py).abs() < 1e-9, "({x}, {y}) y");
         }
+    }
+
+    /// The reference view's separation: `Ksep × Kfov × the diagonal`, 0.0264 of the farther distance.
+    #[test]
+    fn the_edge_separation_is_the_depth_tests_own() {
+        let s = edge_separation_per_m(1284, 720);
+        assert!((s - 0.0264).abs() < 0.0005, "{s}");
+        // Twice the grid, twice the separation per metre (the diagonal doubles; the corner factor holds).
+        let s2 = edge_separation_per_m(2568, 1440);
+        assert!((s2 - 2.0 * s).abs() < 1e-12, "{s2}");
     }
 
     #[test]
@@ -543,6 +826,196 @@ mod tests {
         assert!(read.boundary_reads().is_empty());
     }
 
+    /// ★ THE OCCLUSION EDGE (T2): a near ridge (the left half, 200 m) in front of far ground (the right half,
+    /// 2 000 m). With the depth test's separation the pixels beside the gap, and the pixels beside the sky,
+    /// read apart; the rest stay still. Without it (nought, a picture without the reconstruction) nothing is
+    /// judged apart. Under the overlay a neighbour is not read.
+    #[test]
+    fn a_silhouette_is_read_apart_from_the_seam_law() {
+        let (w, h) = (8, 4);
+        let (mut rgba, mut probe, cam) = painted(w, h, 2, 500, 120, still_camera(w, h));
+        let near = encode_probe(ProbePixel {
+            kind: PROBE_KIND_TERRAIN,
+            rung: 2,
+            cells: 50,
+        });
+        for y in 0..h {
+            for x in 0..4 {
+                let i = (y * w + x) * 4;
+                probe[i..i + 3].copy_from_slice(&near);
+                rgba[i..i + 3].copy_from_slice(&[60, 60, 60]);
+            }
+        }
+        // The top-right pixel is sky.
+        let sky = encode_probe(ProbePixel {
+            kind: 0,
+            rung: 0,
+            cells: 0,
+        });
+        let top_right = (w - 1) * 4;
+        probe[top_right..top_right + 3].copy_from_slice(&sky);
+        let a = Frame {
+            edge_separation_per_m: 0.0264,
+            ..frame(&rgba, &probe, w, h, cam)
+        };
+        let b = Frame {
+            edge_separation_per_m: 0.0264,
+            ..frame(&rgba, &probe, w, h, still_camera(w, h))
+        };
+        let read = judge_pair(&a, &b, &cell);
+        // Columns 3 and 4 hold the gap (8 pixels); (6, 0), (6, 1) and (7, 1) border the sky at (7, 0): 11
+        // pixels read apart, every one of them unchanged.
+        let (edges, widest) = read.edge_read();
+        assert_eq!((edges, widest), (11, 0));
+        assert_eq!(read.compared, (w * h - 1) as u64);
+        assert_eq!(read.still.iter().sum::<u64>(), read.compared - edges);
+        // Without the separation the same pair judges no edge apart.
+        let a0 = frame(&rgba, &probe, w, h, still_camera(w, h));
+        let b0 = frame(&rgba, &probe, w, h, still_camera(w, h));
+        let read0 = judge_pair(&a0, &b0, &cell);
+        assert_eq!(read0.edge_read(), (0, 0));
+        // Under the overlay a neighbour is not read: an overlay over the near half hides the gap from the
+        // far pixels of column 4, which read still again.
+        let hud = Some([0.0 - HUD_MARGIN_PX, 0.0, 4.0 - HUD_MARGIN_PX - 0.5, 4.0]);
+        let ah = Frame {
+            hud,
+            ..Frame {
+                edge_separation_per_m: 0.0264,
+                ..frame(&rgba, &probe, w, h, still_camera(w, h))
+            }
+        };
+        let bh = Frame {
+            hud,
+            ..Frame {
+                edge_separation_per_m: 0.0264,
+                ..frame(&rgba, &probe, w, h, still_camera(w, h))
+            }
+        };
+        let readh = judge_pair(&ah, &bh, &cell);
+        assert!(readh.edge_read().0 < edges, "{:?}", readh.edge_read());
+        // The pooled read keeps the edges.
+        let total = sum_reads(&[read.clone(), read]);
+        assert_eq!(total.edge_read(), (22, 0));
+    }
+
+    /// ★ THE DISPLAY PICTURE'S REACH: two render pixels either way, in display pixels, rounded up.
+    #[test]
+    fn the_display_reach_is_two_render_pixels_in_display_pixels() {
+        assert_eq!(display_edge_reach_px(1284, 1284), 2);
+        assert_eq!(display_edge_reach_px(1284, 2568), 4);
+        assert_eq!(display_edge_reach_px(1284, 1926), 3);
+        assert_eq!(display_edge_reach_px(0, 8), 16);
+    }
+
+    /// The square around each set pixel; nought copies the grid; the grid's edge holds it.
+    #[test]
+    fn a_band_grows_by_its_reach_and_stops_at_the_grid() {
+        let (w, h) = (5, 4);
+        let mut on = vec![false; w * h];
+        on[w + 1] = true;
+        assert_eq!(dilate(&on, w, h, 0), on);
+        let grown = dilate(&on, w, h, 1);
+        let set: Vec<(usize, usize)> = (0..w * h)
+            .filter(|&i| grown[i])
+            .map(|i| (i % w, i / w))
+            .collect();
+        assert_eq!(
+            set,
+            vec![
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (0, 1),
+                (1, 1),
+                (2, 1),
+                (0, 2),
+                (1, 2),
+                (2, 2)
+            ]
+        );
+        assert!(dilate(&on, w, h, 9).iter().all(|&b| b));
+        assert!(!in_band(&[], 3));
+        assert!(in_band(&grown, w));
+    }
+
+    /// ★ THE BAND IN BOTH FRAMES AND ITS REACH: a rock 200 m off at the corner (0, 0) in front of ground
+    /// 2 000 m off, in the FIRST frame only (a silhouette that moved away). The corner's own ground was
+    /// hidden there (off the frame); the second frame's pixels whose places in the first frame lie in its
+    /// band read apart, and a reach of two widens that band.
+    #[test]
+    fn a_silhouette_that_moved_is_read_apart_where_it_stood_and_the_reach_widens_it() {
+        let (w, h) = (6, 4);
+        let (rgba, probe, _) = painted(w, h, 2, 500, 120, still_camera(w, h));
+        let mut rock = probe.clone();
+        rock[..3].copy_from_slice(&encode_probe(ProbePixel {
+            kind: PROBE_KIND_TERRAIN,
+            rung: 2,
+            cells: 50,
+        }));
+        let judged = |reach: usize| {
+            let before = Frame {
+                edge_separation_per_m: 0.0264,
+                edge_reach_px: reach,
+                ..frame(&rgba, &rock, w, h, still_camera(w, h))
+            };
+            let after = Frame {
+                edge_separation_per_m: 0.0264,
+                edge_reach_px: reach,
+                ..frame(&rgba, &probe, w, h, still_camera(w, h))
+            };
+            let mut edges = Vec::new();
+            let read = judge_pair_mapped(&before, &after, &cell, &mut |p| {
+                if p.class == PixelClass::Edge {
+                    edges.push((p.x, p.y));
+                }
+            });
+            (read, edges)
+        };
+        let (read, edges) = judged(1);
+        assert_eq!(edges, vec![(1, 0), (0, 1), (1, 1)]);
+        assert_eq!((read.edge_read(), read.off_frame), ((3, 0), 1));
+        let (_, wide) = judged(2);
+        assert_eq!(wide.len(), 8, "{wide:?}");
+        assert!(wide.contains(&(2, 2)));
+    }
+
+    /// ★ A DISOCCLUSION IS NOT COMPARED: a rock 200 m off covers pixel (2, 1) in the first frame and is
+    /// gone in the second, where the ground 2 000 m off shows. Under the separation that pixel's ground
+    /// was hidden in the first frame and counts off the frame; without it the pair compares the ground
+    /// with the rock.
+    #[test]
+    fn ground_the_first_frame_did_not_show_is_not_compared() {
+        let (w, h) = (6, 4);
+        let (rgba, probe, _) = painted(w, h, 2, 500, 120, still_camera(w, h));
+        let mut rock = probe.clone();
+        let mut dark = rgba.clone();
+        let at = (w + 2) * 4;
+        rock[at..at + 3].copy_from_slice(&encode_probe(ProbePixel {
+            kind: PROBE_KIND_TERRAIN,
+            rung: 2,
+            cells: 50,
+        }));
+        dark[at..at + 3].copy_from_slice(&[20, 20, 20]);
+        let pair = |sep: f64| {
+            let before = Frame {
+                edge_separation_per_m: sep,
+                ..frame(&dark, &rock, w, h, still_camera(w, h))
+            };
+            let after = Frame {
+                edge_separation_per_m: sep,
+                ..frame(&rgba, &probe, w, h, still_camera(w, h))
+            };
+            judge_pair(&before, &after, &cell)
+        };
+        let hidden = pair(0.0264);
+        assert_eq!((hidden.compared, hidden.off_frame), ((w * h - 1) as u64, 1));
+        let plain = pair(0.0);
+        assert_eq!((plain.compared, plain.off_frame), ((w * h) as u64, 0));
+        // Without the separation the rock's pixel is judged, and (its 3 × 3 all ground but the rock) it
+        // matches the ground beside it: nothing past a still frame's floor.
+        assert_eq!(plain.widest(), 0);
+    }
+
     /// A boundary moved: two pixels of the top row changed rung; they and every pixel whose
     /// neighbourhood holds them are boundary pixels; one of the two stepped 30 levels.
     #[test]
@@ -590,6 +1063,77 @@ mod tests {
         assert_eq!(read.boundary_reads()[0].finer, 2);
     }
 
+    /// ★ THE MAPPED JUDGE: every compared pixel reaches the map once, in the class whose histogram
+    /// counted it — the boundary pair of the test above at (3, 0) and (4, 0), the 30-level step at (4, 0).
+    #[test]
+    fn the_mapped_judge_hands_every_compared_pixel_to_its_map() {
+        let (w, h) = (6, 4);
+        let (rgba_a, probe_a, cam_a) = painted(w, h, 2, 500, 120, still_camera(w, h));
+        let (mut rgba_b, mut probe_b, cam_b) = painted(w, h, 2, 500, 120, still_camera(w, h));
+        for x in [3usize, 4] {
+            let p = encode_probe(ProbePixel {
+                kind: PROBE_KIND_TERRAIN,
+                rung: 3,
+                cells: 250,
+            });
+            probe_b[x * 4..x * 4 + 3].copy_from_slice(&p);
+        }
+        rgba_b[4 * 4] = 90;
+        let a = frame(&rgba_a, &probe_a, w, h, cam_a);
+        let b = frame(&rgba_b, &probe_b, w, h, cam_b);
+        let mut map = Vec::new();
+        let read = judge_pair_mapped(&a, &b, &cell, &mut |p| map.push(p));
+        assert_eq!(read, judge_pair(&a, &b, &cell));
+        assert_eq!(map.len() as u64, read.compared);
+        let boundary: Vec<PixelRead> = map
+            .iter()
+            .copied()
+            .filter(|p| p.class != PixelClass::Still)
+            .collect();
+        let bare: Vec<(usize, usize, u8, PixelClass, usize)> = boundary
+            .iter()
+            .map(|p| (p.x, p.y, p.step, p.class, p.matched))
+            .collect();
+        assert_eq!(
+            bare,
+            vec![
+                (3, 0, 0, PixelClass::Boundary(2), 2),
+                (4, 0, 30, PixelClass::Boundary(2), 3),
+            ]
+        );
+        // A still eye: the ground reprojects onto its own sample, pixel (x, 0) at (x, 0) of the grid.
+        for p in &boundary {
+            assert!((p.place[0] - p.x as f64).abs() < 1e-9);
+            assert!((p.place[1] - p.y as f64).abs() < 1e-9);
+        }
+        // An occlusion edge reaches the map as an edge: a rock 200 m off at the corner (0, 0) in front of
+        // ground 2 000 m off; the rock and its three neighbours stand on the silhouette.
+        let mut rock = probe_a.clone();
+        rock[..3].copy_from_slice(&encode_probe(ProbePixel {
+            kind: PROBE_KIND_TERRAIN,
+            rung: 2,
+            cells: 50,
+        }));
+        let (sa, sb) = (
+            Frame {
+                edge_separation_per_m: 0.0264,
+                ..frame(&rgba_a, &rock, w, h, still_camera(w, h))
+            },
+            Frame {
+                edge_separation_per_m: 0.0264,
+                ..frame(&rgba_a, &rock, w, h, still_camera(w, h))
+            },
+        );
+        let mut edges = Vec::new();
+        let read = judge_pair_mapped(&sa, &sb, &cell, &mut |p| {
+            if p.class == PixelClass::Edge {
+                edges.push((p.x, p.y));
+            }
+        });
+        assert_eq!(edges, vec![(0, 0), (1, 0), (0, 1), (1, 1)]);
+        assert_eq!(read.edge_read(), (4, 0));
+    }
+
     /// A shading edge that slid one pixel between the frames reads zero through the
     /// neighbourhood; a pixel darker than every neighbour reads its own step; a corner pixel has
     /// fewer neighbours and still reads.
@@ -611,8 +1155,9 @@ mod tests {
         assert_eq!(read.compared, (w * h) as u64);
         // 23 still pixels at zero, one (the corner) at 50: the floor is that step.
         assert_eq!(read.floor(), 50);
-        assert_eq!(best_match(&a, &rgba_b, 0, 0, 0, 2), Some((50, None)));
-        assert_eq!(best_match(&a, &rgba_b, 3 * 4, 3, 0, 2), Some((0, None)));
+        assert_eq!(best_match(&a, &rgba_b, 0, 0, 0, 2), Some((50, 0, None)));
+        // The slid bright column: the best match is the first frame's (2, 0), a pixel to the left.
+        assert_eq!(best_match(&a, &rgba_b, 3 * 4, 3, 0, 2), Some((0, 2, None)));
     }
 
     /// An eye that travelled: the near pixels are skipped and the limit reported; a frame turned
@@ -728,6 +1273,32 @@ mod tests {
         let none = frame(&rgba, &sky, w, h, still_camera(w, h));
         let read = judge_pair(&full, &none, &cell);
         assert_eq!(read.compared, 0);
+    }
+
+    /// ★ THE SEAM RULE: a boundary passes at its allowance and breaks one pixel past it; the allowance
+    /// grows with the crossed pixels and with the pairs.
+    #[test]
+    fn the_seam_rule_names_the_boundaries_past_their_allowance() {
+        let mut read = PairRead {
+            still: hist_with(&[(0, 100_000)]),
+            ..PairRead::default()
+        };
+        // Rung 2: 1 000 crossed, 12 past the floor (nought); rung 5: 1 000 crossed, 13 past it.
+        read.boundaries.insert(2, hist_with(&[(0, 988), (30, 12)]));
+        read.boundaries.insert(5, hist_with(&[(0, 987), (30, 13)]));
+        assert_eq!(SEAM_RULE.allowance(1_000, 2), 12.0);
+        let bad = SEAM_RULE.breaches(&read, 2);
+        assert_eq!(
+            bad,
+            vec![BoundaryRead {
+                finer: 5,
+                crossed: 1_000,
+                over_floor: 13,
+                widest: 30
+            }]
+        );
+        assert!(SEAM_RULE.breaches(&read, 3).is_empty());
+        assert!(SEAM_RULE.breaches(&PairRead::default(), 0).is_empty());
     }
 
     /// The sum pools the histograms: one floor for the leg, one count past it, one widest —

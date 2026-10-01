@@ -32,6 +32,10 @@
 //! - [`picture_census`] — the picture census (the speed step's slice T0, G-PICTURE-HOLES): the
 //!   ground pixels of the probe that keep the sentinel clear colour in the picture, which are the
 //!   holes of the picture camera's own depth test that the probe cannot see.
+//! - [`exact`] — the exact picture's compare (ruling V18; G-DETERMINISM): two pictures of one stand
+//!   on their content only, the differing count and the widest step.
+//! - [`eye`] — the eye's rule (the temporal path's T2, "Patches by eye"): a change between two frames
+//!   judged by its size on the eye and its contrast against the eye's published thresholds.
 //! - [`motion_census`] — the motion census (the temporal path's slice T1, G-MOTION-COVERAGE): the
 //!   captured motion target and depth, and the pixels that hold a depth yet keep the motion sentinel.
 
@@ -40,6 +44,8 @@ pub mod assert;
 pub mod camera;
 pub mod capture;
 pub mod edge;
+pub mod exact;
+pub mod eye;
 pub mod flicker;
 pub mod ghost;
 pub mod input_map;

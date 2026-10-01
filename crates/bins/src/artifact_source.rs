@@ -43,8 +43,11 @@ pub struct ArtifactTiles {
     pub world_tag: u64,
     pub artifact: Arc<Artifact>,
     pub lattice: MacroLattice,
-    /// The body's radius and its ladder's top rung, for the tile reach under an occupant's altitude.
-    body_radius_m: f64,
+    /// ★ THE BODY, for the GROUND under an occupant (2026-10-01): the tile reach reads the eye's
+    /// height over the ground this artifact states under it — the client's own ground — never over
+    /// the radius. MEASURED before (the picture gate's seam stand): over the radius the shard named
+    /// 6 tiles, and the client's chunks waited on 8 more for as long as the pilot stood there.
+    body: vd_terrain::BodyDefinition,
     /// The tallest ground the recipe raises over the radius: the reach is bounded by how far the
     /// ground can be seen, peaks included (2026-09-21).
     relief_m: f64,
@@ -70,7 +73,7 @@ impl ArtifactTiles {
     #[must_use]
     #[allow(
         clippy::too_many_arguments,
-        reason = "seven of the eight are the realm's own address and the body's facts the reach \
+        reason = "seven of the eight are the realm's own address, its body and the facts the reach \
                   reads; the eighth is the handover step the tile ring must cover (ruling W17), \
                   and each is a fact the caller already holds apart"
     )]
@@ -79,7 +82,7 @@ impl ArtifactTiles {
         world_tag: u64,
         artifact: Arc<Artifact>,
         lattice: MacroLattice,
-        body_radius_m: f64,
+        body: vd_terrain::BodyDefinition,
         relief_m: f64,
         top_rung: u8,
         step_m: f64,
@@ -90,13 +93,23 @@ impl ArtifactTiles {
             world_tag,
             artifact,
             lattice,
-            body_radius_m,
+            body,
             relief_m,
             top_rung,
             step_m,
             digest,
             parts: std::sync::OnceLock::new(),
         }
+    }
+
+    /// ★ THE GROUND UNDER A DIRECTION as this artifact states it, in metres from the centre: the
+    /// rows' own field through the terrain crate's height (`height_field_m` at rung 0), the very
+    /// ground the client's ladder reads its altitude over (`vd_client::chunks::drawn_surface_m`
+    /// with the tile under the eye held). `None` only for a direction whose stencil the rows do not
+    /// hold.
+    #[must_use]
+    pub fn ground_m(&self, dir: [f64; 3]) -> Option<f64> {
+        vd_terrain::height::height_field_m(&self.body, &*self.artifact, dir, 0)
     }
 
     /// The tiles whose nodes lie within `radius_m` of the unit direction `dir`, the nearest first:
@@ -152,7 +165,7 @@ pub fn artifact_source_of(
         world_tag,
         Arc::clone(artifact),
         lattice,
-        body.radius_m(),
+        *body,
         body.relief_bound_m(0),
         top_rung,
         step_m,
@@ -191,17 +204,30 @@ impl TileSource for ArtifactTiles {
     fn tiles_under(&self, dir: [f64; 3], radial_m: f64, interest_m: f64) -> Vec<(u8, u32, u32)> {
         // ★ THE TILES REACH WHERE THE CLIENT ASKS (ruling W17): the finest tile-reading rung's own
         // handover step floors the ring, and that step carries the FIELD's fold as well as the
-        // octaves the coarser rung drops. Both hosts read one rule.
-        let reach_m = vd_terrain::artifact::tile_reach_m(
-            &self.lattice,
-            self.artifact.pyramid.len() as u32,
-            self.top_rung,
-            self.body_radius_m,
-            self.relief_m,
-            radial_m,
-            vd_core::geometry::drawable_theta_min_rad(),
-            self.step_m,
-        );
+        // octaves the coarser rung drops; the horizon is read from the eye's height over the ground
+        // this artifact states under it (2026-10-01), the client's own. Both hosts read one rule.
+        // A direction whose stencil the rows do not hold takes the whole ring, never a short one.
+        let levels = self.artifact.pyramid.len() as u32;
+        let pixel_rad = vd_core::geometry::drawable_theta_min_rad();
+        let reach_m = match self.ground_m(dir) {
+            Some(ground_m) => vd_terrain::artifact::tile_reach_m(
+                &self.lattice,
+                levels,
+                self.top_rung,
+                ground_m,
+                self.relief_m,
+                radial_m,
+                pixel_rad,
+                self.step_m,
+            ),
+            None => vd_terrain::artifact::tile_ring_m(
+                &self.lattice,
+                levels,
+                self.top_rung,
+                pixel_rad,
+                self.step_m,
+            ),
+        };
         self.tiles_within(dir, interest_m.max(reach_m))
     }
 
@@ -247,7 +273,7 @@ mod tests {
             5,
             artifact.clone(),
             moon.macro_lattice().expect("a lattice"),
-            moon.radius_m(),
+            moon,
             moon.relief_bound_m(0),
             moon.ladder().rungs - 1,
             // ★ THE HANDOVER STEP THE TILE RING IS FLOORED BY (ruling W17), the shipped line's own.
@@ -336,6 +362,30 @@ mod tests {
         // 445 km bounds nothing, so all four tiles of the face come, and the interest side wins
         // when it is the larger.
         let r = moon.radius_m();
+        // ★ OVER THE GROUND THE ARTIFACT STATES (2026-10-01): the reach reads the eye's height over
+        // the rows' own ground under it, the client's ground, never over the radius.
+        let pole = [0.0, 0.0, 1.0];
+        let ground = source.ground_m(pole).expect("the rows hold the pole");
+        assert_eq!(
+            Some(ground),
+            vd_terrain::height::height_field_m(&moon, &*artifact, pole, 0)
+        );
+        let levels = artifact.pyramid.len() as u32;
+        let pixel = vd_core::geometry::drawable_theta_min_rad();
+        let reach = vd_terrain::artifact::tile_reach_m(
+            &moon.macro_lattice().expect("a lattice"),
+            levels,
+            moon.ladder().rungs - 1,
+            ground,
+            moon.relief_bound_m(0),
+            r + 20_000.0,
+            pixel,
+            source.step_m,
+        );
+        assert_eq!(
+            source.tiles_under(pole, r + 20_000.0, 10.0),
+            source.tiles_within(pole, reach)
+        );
         assert_eq!(
             source
                 .tiles_under([0.0, 0.0, 1.0], r + 20_000.0, 10.0)

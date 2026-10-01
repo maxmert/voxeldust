@@ -39,6 +39,12 @@ pub struct Dot {
     /// holds. `None` until a first input arrives, which is why a realm holding a silent pilot pushes
     /// nothing rather than pushing zero.
     pub last_stick: Option<(glam::DVec3, [f32; 3])>,
+    /// ★ THE STICK THIS WALKER HOLDS (2026-10-01, ruling B27's first item): the movement axes of the
+    /// newest input applied, held until a newer input replaces it — every tick the walker walks one
+    /// step on it ([`walk_held_sticks`]), the rule a pilot's stick already follows (the drive reads
+    /// [`Dot::last_stick`] every tick). `None` until a first input arrives, and again at an arrival
+    /// ([`Dot::adopt_pose`]: a new realm hears the next input before it walks anybody).
+    pub walk_stick: Option<[f32; 3]>,
     pub entity: EntityId,
     pub account: AccountId,
     /// The Session-key fence the owning gateway holds; stale input is dropped.
@@ -243,13 +249,7 @@ pub(crate) fn mint_entity(mint: &mut EntityMint, node: NodeId) -> EntityId {
 
 /// The input path: fence gate → decode → seq gate → integrate. Every outcome lands
 /// in the [`InputLog`].
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_input(
-    config: &StubConfig,
-    clock: &ClockSample,
-    regions: &RealmRegions,
-    placements: &PlacementLedger,
-    flies_on_a_stick: bool,
     dots: &mut Dots,
     log: &mut InputLog,
     session: SessionId,
@@ -307,22 +307,66 @@ pub(crate) fn apply_input(
     // The pilot's own frame stick, kept for the realm's drive producer. Built here, once, AFTER the
     // facing moved, so the push follows where the pilot looks this very tick.
     dot.last_stick = Some(stick_from_input(&input, dot.pose.orient));
-    // ★ A PILOT AT THE CONTROLS DOES NOT ALSO WALK (owner ruling 2026-09-01). The stick above is
-    // kept either way — it is what the realm flies on. What is withheld is the occupant's OWN
-    // movement: in a realm that flies on a stick, the hands move the hull, not the feet.
-    //
-    // MEASURED, and it is why this exists: with both live, one key walked the body 568 m in 3 s
-    // while the same key burned the hull 96 km the other way. The body left the 40 m hull in a
-    // fifth of a second and the containment scan correctly handed it back to the star system.
-    // Nothing was broken — the player simply walked out of their own ship.
-    //
-    // A SEAT replaces this: sitting names ONE pilot and parks ONE body, and a passenger keeps their
-    // legs. A seat needs blocks. Until then every occupant of a flying hull is at the controls,
-    // which is the same interim rule the drive producer already uses to pick the stick.
-    if !flies_on_a_stick {
-        walk(dot, &input, config, clock, regions, placements);
-    }
+    // ★ THE FEET FOLLOW THE HELD STICK, ONE STEP A TICK (2026-10-01; [`walk_held_sticks`]): the input
+    // states what the player holds; the shard's own tick moves the body.
+    dot.walk_stick = Some(input.movement);
     log.record_applied(session, input.seq);
+}
+
+/// ★ DOES THIS REALM FLY ON AN OCCUPANT'S STICK? (owner ruling 2026-09-01) A hull with engines and a
+/// stored body does: an occupant of such a realm is AT THE CONTROLS — its stick becomes the realm's
+/// push — and its own body does not also walk. Stated as a CAPABILITY plus a stored body, never as a
+/// test of what kind of realm this is (HR3/SL4).
+///
+/// MEASURED, and it is why the rule exists: with both live, one key walked the body 568 m in 3 s while
+/// the same key burned the hull 96 km the other way — the player walked out of their own ship. A SEAT
+/// replaces this: sitting names ONE pilot and parks ONE body, and a passenger keeps their legs. A seat
+/// needs blocks; until then every occupant of a flying hull is at the controls, the same interim rule
+/// the drive producer already uses to pick the stick.
+pub(crate) fn flies_on_a_stick(
+    identity: &crate::runtime::NodeIdentity,
+    own_body: &crate::stub::drive::OwnBody,
+) -> bool {
+    match identity.kind {
+        crate::capability::NodeKind::Shard(profile) => {
+            profile.self_driven() && own_body.0.is_some()
+        }
+        _ => false,
+    }
+}
+
+/// ★ THE HELD STICK WALKS EVERY TICK (2026-10-01; ruling B27's first item, "the walk's stepping eye").
+/// MEASURED before (the moving-eye flight's four-frame pairs): the walk ran once per INPUT, a tick's
+/// step each, so a walker moved only when an input arrived — the client sends 20 a second, the shard
+/// ticks 50 — and stood still between them: the drawn eye stood for up to 5 ticks and then moved 4–7 cm
+/// at once, while a hull's pilot, whose stick the drive reads every tick, moved every frame. Now each
+/// walker the shard simulates (not departing) walks one step a tick on the stick it holds
+/// ([`Dot::walk_stick`]); a realm that flies on its occupant's stick walks nobody.
+///
+/// Example: a player holds W on the dunes. The client states "W held" 20 times a second; the shard
+/// moves the body 2.8 cm on each of its 50 ticks a second, so the eye glides at 1.4 m/s instead of
+/// standing for two ticks and jumping 7 cm on the third.
+pub(crate) fn walk_held_sticks(
+    config: bevy_ecs::prelude::Res<StubConfig>,
+    identity: bevy_ecs::prelude::Res<crate::runtime::NodeIdentity>,
+    clock: bevy_ecs::prelude::Res<ClockSample>,
+    regions: bevy_ecs::prelude::Res<RealmRegions>,
+    placements: bevy_ecs::prelude::Res<crate::stub::Placements>,
+    own_body: bevy_ecs::prelude::Res<crate::stub::drive::OwnBody>,
+    mut dots: bevy_ecs::prelude::ResMut<Dots>,
+) {
+    if flies_on_a_stick(&identity, &own_body) {
+        return;
+    }
+    for dot in dots
+        .0
+        .values_mut()
+        .filter(|d| d.authority.simulates() & !d.departing)
+    {
+        if let Some(stick) = dot.walk_stick {
+            walk(dot, stick, &config, &clock, &regions, &placements.0);
+        }
+    }
 }
 
 /// THE APPROACH GOVERNOR's answer for one subject (§4.2(c), ★OQ-2 owner-ruled universal): the
@@ -450,7 +494,7 @@ pub(crate) fn governed_ceiling_in_book(
 /// governor's falling ceiling, not a ramp state.
 fn walk(
     dot: &mut Dot,
-    input: &InputDatagram,
+    movement: [f32; 3],
     config: &StubConfig,
     clock: &ClockSample,
     regions: &RealmRegions,
@@ -458,7 +502,7 @@ fn walk(
 ) {
     // The movement-axis map is the ONE shared input convention (vd_core::kinematics) —
     // the client's nav/camera invert the SAME definition (no hand-re-encoded drift).
-    let axes = kinematics::local_axes_from_movement(input.movement);
+    let axes = kinematics::local_axes_from_movement(movement);
     let tuning = flight_tuning(config);
     // `None` (no stated ceiling) maps to the foot speed HERE: the throttle's pre-law commanded
     // speed never exceeded it, and `min(v_foot, ramp) == v_foot` exactly (the ramp floor sits
@@ -542,6 +586,8 @@ impl Dot {
         self.yaw = yaw;
         self.pitch = pitch;
         self.prev_offset = pose.pos;
+        // A stick held before the arrival is a statement about the realm left behind.
+        self.walk_stick = None;
     }
 }
 
@@ -638,6 +684,7 @@ mod stick_tests {
         let (yaw, pitch_born) = kinematics::yaw_pitch_in_frame(up, born);
         let mut dot = Dot {
             last_stick: None,
+            walk_stick: None,
             entity: EntityId::pack(vd_core::entity_kind::EntityKind::Player, 1, 1, 1),
             account: AccountId(1),
             session_fence: Fence(1),

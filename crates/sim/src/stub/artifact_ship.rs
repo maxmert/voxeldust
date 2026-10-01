@@ -61,7 +61,9 @@ pub trait TileSource: Send + Sync {
     /// The tiles an occupant standing `radial_m` from the realm's centre along the unit direction
     /// `dir` (in the realm's own frame) needs, in a stated order: at least those within its
     /// interest side `interest_m`, and as far as the source's own reach rule says the fine rungs
-    /// read (2026-09-20: the interest side alone shipped one tile under a standing dot).
+    /// read (2026-09-20: the interest side alone shipped one tile under a standing dot) — the
+    /// eye's height read over the ground the source's artifact states under it, the client's own
+    /// ground (2026-10-01; over the radius, a pilot over a deep floor waited on tiles never sent).
     fn tiles_under(&self, dir: [f64; 3], radial_m: f64, interest_m: f64) -> Vec<(u8, u32, u32)>;
     /// One tile, encoded as `BulkMsg::ArtifactTile`; `None` past the lattice.
     fn tile(&self, face: u8, tx: u32, ty: u32) -> Option<Bytes>;

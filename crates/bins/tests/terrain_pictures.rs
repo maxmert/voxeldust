@@ -54,6 +54,7 @@ use vd_client::chunks::eye_surface;
 use vd_client::ladder_view::{in_fade_band, rung_for_distance};
 use vd_client_harness::assert::magenta_pixel_count;
 use vd_client_harness::capture::{motion_rel_for, probe_rel_for, state_rel_for};
+use vd_client_harness::exact::{ContentRead, compare_content, difference_image};
 use vd_client_harness::motion_census::MotionPicture;
 use vd_client_harness::picture_census::{CensusFrame, PROBE_RUNGS, SENTINEL_RGB8, picture_census};
 use vd_client_harness::probe::{
@@ -78,7 +79,7 @@ const ORBIT_M: f64 = 2_000_000.0;
 /// ★ THE HANDOVER'S TWO PILOTS (S6): the agents after the cave stand; both capture on the grid, one
 /// step apart, and the bodies' places are read at the tick between their two captures.
 const HANDOVER_AGENT_A: u64 = 7;
-const HANDOVER_TICK: u64 = CAPTURE_TICK_GRID * (HANDOVER_AGENT_A + 1) + CAPTURE_TICK_GRID / 2;
+const HANDOVER_TICK: u64 = capture_tick_of(HANDOVER_AGENT_A) + CAPTURE_TICK_GRID / 2;
 /// The HUD's rows at the top of a picture (its readouts differ between two pilots by design).
 const HUD_ROWS: usize = 200;
 /// ★ THE DUSK STAND (slice 8s S7, design §9): the eye on the ground with the star this far UNDER
@@ -136,9 +137,9 @@ const FAR_FRAME_SHARE: f64 = 0.25;
 /// has not looked at this stand yet. When the owner accepts it, the picture moves to `exact/` and
 /// the stand joins the five frozen ones.
 const CANDIDATE_DIR: &str = "candidate";
-/// A day of universe ticks at the dev cluster's rate: the bound on how far from the clock's genesis
-/// a picture may be taken while its day side is computed at genesis.
-const TICKS_PER_DAY: u64 = 86_400 * 20;
+/// A day of universe ticks at the dev cluster's rate (`DEV.tick_hz`): the bound on how far from the
+/// clock's genesis a picture may be taken while its day side is computed at genesis.
+const TICKS_PER_DAY: u64 = 86_400 * DEV.tick_hz as u64;
 /// The login and the terrain's arrival, in client ticks (20 Hz): a planet shard must boot and the
 /// workers must build the ladder — MEASURED about 4 300 chunks from the ground at 4 ms each on one
 /// thread, so a few seconds on every core; the wait allows a slow machine three minutes.
@@ -203,6 +204,663 @@ const LOOK_TICK_FACTOR: u64 = 3;
 /// Whether this stand freezes on this run: `VD_PICTURE_FREEZE` empty or `1` freezes every stand; a
 /// comma-separated list of names freezes those alone — a new stand's first reference, while the
 /// others' look stays the owner's to accept.
+/// ★ THE TEMPORAL PATH (`VD_TEMPORAL=1`, the client's own switch, which the gate's environment hands
+/// it): each stand's picture is then a CONVERGED STILL (the design §12.2, `DevRequest::ScreenshotStill`)
+/// taken once the world has reached the stand's capture tick — the history restarted once and the first
+/// frame of a whole jitter cycle served — so two flights of one stand compare (G-DETERMINISM).
+fn temporal() -> bool {
+    std::env::var("VD_TEMPORAL").is_ok_and(|v| v == "1")
+}
+
+/// ★ THE REFERENCES' FOLDER FOR A RUN (G-DETERMINISM, 2026-10-01): `VD_PICTURE_EXACT_DIR` states a
+/// folder outside the owner's for a determinism run — the stills are frozen there and compared there,
+/// and the run's pictures stay beside it, so the owner's pictures and references are never touched;
+/// without it, the owner's folder: the exact references (`exact/`), and under the temporal path their
+/// converged stills (`exact_temporal/`, frozen only on the owner's acceptance, the design's D13).
+const PICTURE_EXACT_DIR_ENV: &str = "VD_PICTURE_EXACT_DIR";
+
+/// ★ THE STILL STAND'S RECORD (G-FLICKER, the temporal path's T2; ruling B28 item 3), a measurement
+/// flight's switch in the harness, never the game's: with `VD_PICTURE_STILL_FRAMES=<n>` a judged stand
+/// records `n` consecutive frames after its picture and reads them twice — THE FLICKER METER (each
+/// pixel's step from one frame to the next, by region: `vd_client_harness::flicker`) and THE WANDER
+/// (each content pixel's step between two frames one jitter cycle apart: the same phase, so a
+/// converged history holds it still; a history that wanders makes two stills of two runs two
+/// snapshots of the wander). Without the reconstruction a cycle is one frame.
+///
+/// ★ THE WANDER READS A PACED RECORD (2026-10-01): under the reconstruction a consecutive record ends
+/// at the capture's readback ring (MEASURED: 8 frames of the 72 asked — each frame writes its render
+/// picture, its probe and its motion beside the display picture), so the wander reads a PACED record
+/// ([`STILL_PACED_FPS`] for [`STILL_PACED_S`]) and pairs each frame with the next frame of the SAME
+/// jitter phase, by each frame's own stamp; the first and the second half are read apart, so a history
+/// still converging shows as a wander that falls.
+const PICTURE_STILL_FRAMES_ENV: &str = "VD_PICTURE_STILL_FRAMES";
+/// The paced record's rate and length for the wander.
+const STILL_PACED_FPS: u32 = 10;
+const STILL_PACED_S: f64 = 12.0;
+
+/// The frames a still stand records, when the switch names two or more.
+fn still_frames() -> Option<u32> {
+    std::env::var(PICTURE_STILL_FRAMES_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|n| *n >= 2)
+}
+
+/// The run-relative path of frame `k` of a recorded still.
+fn still_rel(label: &str, k: u32) -> String {
+    vd_client_harness::capture::capture_rel_path(
+        vd_client_harness::manifest::CaptureKind::Frame,
+        &format!("{label}-{k:04}"),
+    )
+}
+
+/// One recorded frame of a still: its display picture and its probe.
+fn still_frame(run: &Path, label: &str, k: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+    let rel = still_rel(label, k);
+    let rgba = image::open(run.join(&rel)).ok()?.to_rgba8().into_raw();
+    let probe = image::open(run.join(probe_rel_for(&rel)))
+        .ok()?
+        .to_rgba8()
+        .into_raw();
+    Some((rgba, probe))
+}
+
+/// ★ RECORD AND READ A STILL STAND ([`PICTURE_STILL_FRAMES_ENV`]): the flicker meter by region and
+/// the wander, printed; nothing judged (the owner rules G-FLICKER's targets).
+fn read_still_stand(devctl: u16, name: &str, cwd: &Path, frames: u32, w: usize, h: usize) {
+    use vd_client_harness::flicker::{Region, StillFrame, StillStand, read_pair, sum_reads};
+    let label = format!("{name}-still");
+    let reply = round_trip(
+        devctl,
+        &DevRequest::Record {
+            fps: 60,
+            secs: f64::from(frames) / 60.0,
+            label: Some(label.clone()),
+            consecutive: true,
+            around_swap: None,
+        },
+    );
+    let DevResponse::Recorded { path, frames: got } = reply else {
+        eprintln!("terrain_pictures/{name}: THE STILL was not recorded: {reply:?}");
+        return;
+    };
+    let run = if Path::new(&path).is_absolute() {
+        PathBuf::from(&path)
+    } else {
+        cwd.join(&path)
+    };
+    let got = u32::try_from(got).unwrap_or(0);
+    // The overlay's rectangle, the union over the frames (its readouts change every frame), and the
+    // jitter's cycle off the first frame's reconstruction row.
+    let mut hud: Option<[f64; 4]> = None;
+    let mut phases = 1u32;
+    for k in 0..got {
+        let Some(stamp) = std::fs::read_to_string(run.join(state_rel_for(&still_rel(&label, k))))
+            .ok()
+            .and_then(|t| serde_json::from_str::<DevState>(&t).ok())
+            .and_then(|st| st.terrain_stamp)
+        else {
+            continue;
+        };
+        if k == 0 {
+            phases = stamp.reconstruction.map_or(1, |r| r.phases.max(1));
+        }
+        let r = stamp.hud_rect_px.map(f64::from);
+        if (r[2] > r[0]) & (r[3] > r[1]) {
+            hud = Some(hud.map_or(r, |u| {
+                [
+                    u[0].min(r[0]),
+                    u[1].min(r[1]),
+                    u[2].max(r[2]),
+                    u[3].max(r[3]),
+                ]
+            }));
+        }
+    }
+    let stand = StillStand {
+        width: w,
+        height: h,
+        stars: None,
+        shadow_edges: None,
+        hud,
+    };
+    let margin = f64::from(HUD_MARGIN_PX);
+    let content = |probe: &[u8], i: usize| {
+        let (x, y) = ((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
+        let under = hud.is_some_and(|r| {
+            (x >= r[0] - margin)
+                & (y >= r[1] - margin)
+                & (x <= r[2] + margin)
+                & (y <= r[3] + margin)
+        });
+        let kind = decode_probe([probe[i * 4], probe[i * 4 + 1], probe[i * 4 + 2]]).kind;
+        !under & (kind != PROBE_KIND_NONE)
+    };
+    let mut reads = Vec::new();
+    let mut ring: std::collections::VecDeque<(Vec<u8>, Vec<u8>)> =
+        std::collections::VecDeque::new();
+    let mut wander = [0u64; 256];
+    let mut read_frames = 0u32;
+    for k in 0..got {
+        let Some((rgba, probe)) = still_frame(&run, &label, k) else {
+            continue;
+        };
+        if (rgba.len() != w * h * 4) | (probe.len() != w * h * 4) {
+            eprintln!("terrain_pictures/{name}: THE STILL's frame {k} is not the picture's size");
+            continue;
+        }
+        read_frames += 1;
+        if let Some((prev_rgba, prev_probe)) = ring.back() {
+            reads.push(read_pair(
+                &stand,
+                &StillFrame {
+                    rgba: prev_rgba,
+                    probe: prev_probe,
+                },
+                &StillFrame {
+                    rgba: &rgba,
+                    probe: &probe,
+                },
+            ));
+        }
+        if ring.len() == phases as usize {
+            let (old_rgba, old_probe) = &ring[0];
+            for i in 0..w * h {
+                if content(old_probe, i) & content(&probe, i) {
+                    let step = (0..3)
+                        .map(|c| old_rgba[i * 4 + c].abs_diff(rgba[i * 4 + c]))
+                        .max()
+                        .unwrap_or(0);
+                    wander[usize::from(step)] += 1;
+                }
+            }
+            ring.pop_front();
+        }
+        ring.push_back((rgba, probe));
+    }
+    let flicker = sum_reads(&reads);
+    eprintln!(
+        "terrain_pictures/{name}: THE STILL — {read_frames} of {got} frames read, {} pairs, a \
+         jitter cycle of {phases}",
+        flicker.pairs
+    );
+    for region in Region::ALL {
+        let r = flicker.region(region);
+        if r.counts() == 0 {
+            continue;
+        }
+        eprintln!(
+            "terrain_pictures/{name}: THE STILL's flicker, {region:?}: {} counts, within one level \
+             {:.5}, within two {:.5}, the largest step {}",
+            r.counts(),
+            r.share_within(1).unwrap_or(0.0),
+            r.share_within(2).unwrap_or(0.0),
+            r.largest()
+        );
+    }
+    let compared: u64 = wander.iter().sum();
+    let widest = wander.iter().rposition(|&c| c > 0).unwrap_or(0);
+    let past_one: u64 = wander[2..].iter().sum();
+    eprintln!(
+        "terrain_pictures/{name}: THE STILL's wander (a content pixel against itself one cycle on): \
+         {compared} pixel pairs, {past_one} past one level, the widest {widest}, by step {:?}",
+        &wander[1..=widest.max(1)]
+    );
+    read_paced_wander(devctl, name, cwd, w, h, hud);
+}
+
+/// ★ THE WANDER BY PHASE ([`PICTURE_STILL_FRAMES_ENV`]): a paced record, each frame against the next
+/// frame of its own jitter phase (the stamp's clock), content pixels only; the first and the second
+/// half of the record apart.
+fn read_paced_wander(
+    devctl: u16,
+    name: &str,
+    cwd: &Path,
+    w: usize,
+    h: usize,
+    hud: Option<[f64; 4]>,
+) {
+    let label = format!("{name}-wander");
+    let reply = round_trip(
+        devctl,
+        &DevRequest::Record {
+            fps: STILL_PACED_FPS,
+            secs: STILL_PACED_S,
+            label: Some(label.clone()),
+            consecutive: false,
+            around_swap: None,
+        },
+    );
+    let DevResponse::Recorded { path, frames: got } = reply else {
+        eprintln!("terrain_pictures/{name}: THE WANDER was not recorded: {reply:?}");
+        return;
+    };
+    let run = if Path::new(&path).is_absolute() {
+        PathBuf::from(&path)
+    } else {
+        cwd.join(&path)
+    };
+    let got = u32::try_from(got).unwrap_or(0);
+    let margin = f64::from(HUD_MARGIN_PX);
+    let content = |probe: &[u8], i: usize| {
+        let (x, y) = ((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
+        let under = hud.is_some_and(|r| {
+            (x >= r[0] - margin)
+                & (y >= r[1] - margin)
+                & (x <= r[2] + margin)
+                & (y <= r[3] + margin)
+        });
+        let kind = decode_probe([probe[i * 4], probe[i * 4 + 1], probe[i * 4 + 2]]).kind;
+        !under & (kind != PROBE_KIND_NONE)
+    };
+    // The last frame read of each phase, and the wander of each half of the record.
+    let mut last: std::collections::BTreeMap<u32, (Vec<u8>, Vec<u8>, u64)> =
+        std::collections::BTreeMap::new();
+    let mut halves = [[0u64; 256], [0u64; 256]];
+    let mut phases_seen = std::collections::BTreeSet::new();
+    let mut frames_read = 0u32;
+    for k in 0..got {
+        let rel = still_rel(&label, k);
+        let Some(stamp) = std::fs::read_to_string(run.join(state_rel_for(&rel)))
+            .ok()
+            .and_then(|t| serde_json::from_str::<DevState>(&t).ok())
+            .and_then(|st| st.terrain_stamp)
+        else {
+            continue;
+        };
+        let phase = stamp
+            .reconstruction
+            .map_or(0, |r| r.clock % r.phases.max(1));
+        let Some((rgba, probe)) = still_frame(&run, &label, k) else {
+            continue;
+        };
+        if (rgba.len() != w * h * 4) | (probe.len() != w * h * 4) {
+            continue;
+        }
+        frames_read += 1;
+        phases_seen.insert(phase);
+        let half = usize::from(2 * k >= got);
+        if let Some((old_rgba, old_probe, old_frame)) = last.get(&phase)
+            && *old_frame != stamp.frames
+        {
+            for i in 0..w * h {
+                if content(old_probe, i) & content(&probe, i) {
+                    let step = (0..3)
+                        .map(|c| old_rgba[i * 4 + c].abs_diff(rgba[i * 4 + c]))
+                        .max()
+                        .unwrap_or(0);
+                    halves[half][usize::from(step)] += 1;
+                }
+            }
+        }
+        last.insert(phase, (rgba, probe, stamp.frames));
+    }
+    for (which, hist) in ["first", "second"].iter().zip(&halves) {
+        let compared: u64 = hist.iter().sum();
+        let widest = hist.iter().rposition(|&c| c > 0).unwrap_or(0);
+        let past_one: u64 = hist[2..].iter().sum();
+        let moved: u64 = hist[1..].iter().sum();
+        eprintln!(
+            "terrain_pictures/{name}: THE WANDER by phase, the {which} half ({frames_read} of {got} \
+             paced frames, {} phases): {compared} pixel pairs, {moved} moved, {past_one} past one \
+             level, the widest {widest}, by step {:?}",
+            phases_seen.len(),
+            &hist[1..=widest.max(1)]
+        );
+    }
+}
+
+/// ★ G-STARS (the temporal path's T2; the design §12.4; `vd_client_harness::stars`), a measurement
+/// flight's switch in the harness, never the game's: with `VD_PICTURE_STARS=1` and a stated folder
+/// (`VD_PICTURE_EXACT_DIR`, so the owner's folder is never written) the dusk stand records the sky
+/// STILL and TURNING (a second control connection streams the pilot's look at
+/// [`STARS_TURN_RAD_S`] while the first records) and keeps the frames under
+/// `<folder>/stars/today` — or, under the temporal path, `<folder>/stars/candidate`, and then reads
+/// the census against today's: every reference star present in [`CENSUS_FRAMES`] frames, the light
+/// within the target. A still reads every candidate frame against today's first; a turn pairs each
+/// candidate frame with today's frame of the nearest camera (`stars::nearest_frame`).
+const PICTURE_STARS_ENV: &str = "VD_PICTURE_STARS";
+/// The stand the census flies: the star 2° under the horizon, the sky full of stars.
+const STARS_STAND: &str = "dusk";
+/// The frames each record takes: more than the census reads, so a turn pairs every one it reads.
+/// ★ PACED (2026-10-01): under the reconstruction a consecutive record ends at the capture's readback
+/// ring (MEASURED: 8 frames of 72), so both runs record [`STARS_FRAMES`] paced frames over
+/// [`STARS_RECORD_S`] — a whole turn at [`STARS_TURN_RAD_S`], so every candidate frame finds today's
+/// frame of a near camera.
+const STARS_FRAMES: u32 = 96;
+const STARS_RECORD_S: f64 = 4.0;
+/// The turn's rate, radians a second: the design's picture P2, a quarter turn a second.
+const STARS_TURN_RAD_S: f64 = std::f64::consts::FRAC_PI_2;
+/// How often the look is streamed, and how long the turn runs before the record starts (the
+/// server's ticks and the client's interpolation buffer bring the drawn view to the rate).
+const STARS_LOOK_PERIOD: Duration = Duration::from_millis(10);
+const STARS_TURN_LEAD: Duration = Duration::from_secs(1);
+/// A candidate frame pairs with today's only within this many of today's own steps between
+/// frames: past it today's run never looked there, and the frame is left out (and counted).
+const STARS_PAIR_STEPS: f64 = 1.0;
+
+fn stars_flight() -> bool {
+    std::env::var(PICTURE_STARS_ENV).is_ok_and(|v| v.trim() == "1") || stars_only()
+}
+
+/// ★ THE STARS-ONLY FLIGHT (`VD_PICTURE_STARS_ONLY=1`): the dusk stand alone, its sky recorded as soon
+/// as it settles, no picture judged — the census's two runs in about ten minutes each.
+const PICTURE_STARS_ONLY_ENV: &str = "VD_PICTURE_STARS_ONLY";
+
+fn stars_only() -> bool {
+    std::env::var(PICTURE_STARS_ONLY_ENV).is_ok_and(|v| v.trim() == "1")
+}
+
+/// Record `frames` paced frames over [`STARS_RECORD_S`] under `label`: the run folder and the frames
+/// it holds.
+fn record_frames(devctl: u16, cwd: &Path, label: &str, frames: u32) -> Option<(PathBuf, u32)> {
+    let reply = round_trip(
+        devctl,
+        &DevRequest::Record {
+            fps: (f64::from(frames) / STARS_RECORD_S).round() as u32,
+            secs: STARS_RECORD_S,
+            label: Some(label.to_owned()),
+            consecutive: false,
+            around_swap: None,
+        },
+    );
+    let DevResponse::Recorded { path, frames: got } = reply else {
+        eprintln!("terrain_pictures: THE STARS' record {label} failed: {reply:?}");
+        return None;
+    };
+    let run = if Path::new(&path).is_absolute() {
+        PathBuf::from(&path)
+    } else {
+        cwd.join(&path)
+    };
+    Some((run, u32::try_from(got).unwrap_or(0)))
+}
+
+/// Keep a record's frames under `dest`: `NNNN.png`, `NNNN.probe.png`, `NNNN.json`. The count kept.
+fn keep_frames(run: &Path, label: &str, got: u32, dest: &Path) -> u32 {
+    std::fs::create_dir_all(dest).expect("the stars' folder");
+    let mut kept = 0u32;
+    for k in 0..got {
+        let rel = still_rel(label, k);
+        let copied = std::fs::copy(run.join(&rel), dest.join(format!("{k:04}.png"))).is_ok()
+            & std::fs::copy(
+                run.join(probe_rel_for(&rel)),
+                dest.join(format!("{k:04}.probe.png")),
+            )
+            .is_ok()
+            & std::fs::copy(
+                run.join(state_rel_for(&rel)),
+                dest.join(format!("{k:04}.json")),
+            )
+            .is_ok();
+        kept += u32::from(copied);
+    }
+    kept
+}
+
+/// One kept frame: its picture, its probe and the stamp's camera and overlay.
+struct StarFile {
+    rgba: Vec<u8>,
+    width: usize,
+    height: usize,
+    probe: Vec<u8>,
+    probe_width: usize,
+    probe_height: usize,
+    camera: vd_client_harness::camera::CaptureCamera,
+    hud: Option<[f64; 4]>,
+}
+
+impl StarFile {
+    fn open(dir: &Path, k: u32) -> Option<StarFile> {
+        let pic = image::open(dir.join(format!("{k:04}.png")))
+            .ok()?
+            .to_rgba8();
+        let probe = image::open(dir.join(format!("{k:04}.probe.png")))
+            .ok()?
+            .to_rgba8();
+        let state: DevState =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{k:04}.json"))).ok()?)
+                .ok()?;
+        let stamp = state.terrain_stamp?;
+        let (width, height) = (pic.width() as usize, pic.height() as usize);
+        let r = stamp.hud_rect_px.map(f64::from);
+        Some(StarFile {
+            camera: vd_client_harness::pop::frame_camera(
+                stamp.eye_body_m,
+                stamp.camera_body_xyzw,
+                width,
+                height,
+            ),
+            hud: ((r[2] > r[0]) & (r[3] > r[1])).then_some(r),
+            probe_width: probe.width() as usize,
+            probe_height: probe.height() as usize,
+            width,
+            height,
+            rgba: pic.into_raw(),
+            probe: probe.into_raw(),
+        })
+    }
+
+    fn frame(&self) -> vd_client_harness::stars::StarFrame<'_> {
+        vd_client_harness::stars::StarFrame {
+            rgba: &self.rgba,
+            width: self.width,
+            height: self.height,
+            probe: &self.probe,
+            probe_width: self.probe_width,
+            probe_height: self.probe_height,
+            hud: self.hud,
+            camera: Some(self.camera),
+        }
+    }
+}
+
+/// Print a census's reading under `what`.
+fn print_census(name: &str, what: &str, census: &vd_client_harness::stars::StarCensus) {
+    let events = census.missing_events();
+    eprintln!(
+        "terrain_pictures/{name}: THE STARS, {what} — {} frames, {} checks, {} present, {} out of \
+         view and {} under the overlay (no check), {} lost; the light: the worst frame {:+.4}, \
+         pooled {:+.4} (target {}); {} extra stars; THE VERDICT {:?}",
+        census.frame_count(),
+        census.checks(),
+        census.present(),
+        census.out_of_view(),
+        census.overlaid(),
+        events.len(),
+        census
+            .frames
+            .iter()
+            .map(vd_client_harness::stars::FrameComparison::light_change)
+            .fold(0.0_f64, |a, b| if b.abs() > a.abs() { b } else { a }),
+        census.light_change(),
+        vd_client_harness::stars::LIGHT_CHANGE_TARGET,
+        census.extra(),
+        census.verdict()
+    );
+    for e in events.iter().take(8) {
+        eprintln!(
+            "terrain_pictures/{name}: THE STARS, {what} — lost: frame {}, star {}, {:?}",
+            e.frame, e.star, e.sighting
+        );
+    }
+}
+
+/// ★ RECORD THE SKY AND, UNDER THE TEMPORAL PATH, READ THE CENSUS ([`PICTURE_STARS_ENV`]).
+fn read_star_stand(devctl: u16, name: &str, cwd: &Path) {
+    use vd_client_harness::stars::{
+        CENSUS_FRAMES, StarCensus, StarReference, nearest_frame, turn_between,
+    };
+    let Some(stated) = std::env::var_os(PICTURE_EXACT_DIR_ENV) else {
+        eprintln!(
+            "terrain_pictures/{name}: THE STARS need a stated folder ({PICTURE_EXACT_DIR_ENV}); \
+             nothing recorded"
+        );
+        return;
+    };
+    let mode = if temporal() { "candidate" } else { "today" };
+    let base = PathBuf::from(stated).join("stars").join(mode);
+    let still_label = format!("{name}-stars-still");
+    if let Some((run, got)) = record_frames(devctl, cwd, &still_label, STARS_FRAMES) {
+        let kept = keep_frames(&run, &still_label, got, &base.join("still"));
+        eprintln!(
+            "terrain_pictures/{name}: THE STARS, still — {kept} of {got} frames kept ({mode})"
+        );
+    }
+    // THE TURN: a second connection streams the look while the first records.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let looker = {
+        let stop = std::sync::Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut last = Instant::now();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(STARS_LOOK_PERIOD);
+                let now = Instant::now();
+                let dt = now.duration_since(last).as_secs_f64();
+                last = now;
+                let _ = dev_roundtrip(
+                    devctl,
+                    &DevRequest::Look {
+                        delta: [(STARS_TURN_RAD_S * dt) as f32, 0.0],
+                    },
+                );
+            }
+        })
+    };
+    std::thread::sleep(STARS_TURN_LEAD);
+    let turn_label = format!("{name}-stars-turn");
+    let turned = record_frames(devctl, cwd, &turn_label, STARS_FRAMES);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = looker.join();
+    if let Some((run, got)) = turned {
+        let kept = keep_frames(&run, &turn_label, got, &base.join("turn"));
+        eprintln!(
+            "terrain_pictures/{name}: THE STARS, turning — {kept} of {got} frames kept ({mode})"
+        );
+    }
+    if !temporal() {
+        return;
+    }
+    let today = base.with_file_name("today");
+    // STILL: today's first frame names the stars; every candidate frame is read against it.
+    if let Some(reference) = StarFile::open(&today.join("still"), 0) {
+        let reference = StarReference::of(&reference.frame());
+        let mut census = StarCensus::default();
+        let mut k = 0u32;
+        while census.frame_count() < CENSUS_FRAMES {
+            let Some(file) = StarFile::open(&base.join("still"), k) else {
+                break;
+            };
+            census.add(&reference, &file.frame());
+            k += 1;
+        }
+        eprintln!(
+            "terrain_pictures/{name}: THE STARS, still — today's frame names {} reference stars \
+             ({} faint, {} at the edge)",
+            reference.checked.len(),
+            reference.faint,
+            reference.edge
+        );
+        print_census(name, "still", &census);
+    } else {
+        eprintln!(
+            "terrain_pictures/{name}: THE STARS, still — no frame of today's under {}",
+            today.display()
+        );
+    }
+    // TURNING: each candidate frame against today's frame of the nearest camera.
+    let mut todays: Vec<(vd_client_harness::camera::CaptureCamera, StarReference)> = Vec::new();
+    let mut k = 0u32;
+    while let Some(file) = StarFile::open(&today.join("turn"), k) {
+        todays.push((file.camera, StarReference::of(&file.frame())));
+        k += 1;
+    }
+    if todays.len() < 2 {
+        eprintln!(
+            "terrain_pictures/{name}: THE STARS, turning — today's turn holds {} frames",
+            todays.len()
+        );
+        return;
+    }
+    let cameras: Vec<_> = todays.iter().map(|(c, _)| *c).collect();
+    let mut steps: Vec<f64> = cameras
+        .windows(2)
+        .map(|p| turn_between(&p[0], &p[1]))
+        .collect();
+    steps.sort_by(f64::total_cmp);
+    let step = steps[steps.len() / 2];
+    let mut census = StarCensus::default();
+    let (mut k, mut unpaired) = (0u32, 0u32);
+    let mut widest_pair = 0.0_f64;
+    while census.frame_count() < CENSUS_FRAMES {
+        let Some(file) = StarFile::open(&base.join("turn"), k) else {
+            break;
+        };
+        k += 1;
+        let Some((r, turn)) = nearest_frame(&cameras, &file.camera) else {
+            break;
+        };
+        if turn > STARS_PAIR_STEPS * step {
+            unpaired += 1;
+            continue;
+        }
+        widest_pair = widest_pair.max(turn);
+        census.add(&todays[r].1, &file.frame());
+    }
+    eprintln!(
+        "terrain_pictures/{name}: THE STARS, turning — today's frames {:.2}° apart (the median \
+         step), {unpaired} candidate frames past one step from any of today's left out, the widest \
+         pair {:.2}°",
+        step.to_degrees(),
+        widest_pair.to_degrees()
+    );
+    print_census(name, "turning", &census);
+}
+
+/// The folder the run's pictures go to and the folder its references live in.
+fn picture_dirs() -> (PathBuf, PathBuf) {
+    match std::env::var_os(PICTURE_EXACT_DIR_ENV) {
+        Some(stated) => {
+            let exact = PathBuf::from(stated);
+            (exact.join("run"), exact)
+        }
+        None => {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(PICTURE_DIR);
+            let exact = dir.join(if temporal() {
+                EXACT_TEMPORAL_DIR
+            } else {
+                EXACT_DIR
+            });
+            (dir, exact)
+        }
+    }
+}
+
+/// ★ ONE PICTURE OF A STAND AT ITS CAPTURE TICK, the run-relative path of the PNG: under the temporal
+/// path a converged still taken once the world has reached the tick ([`temporal`]), else the frame at
+/// the tick.
+fn capture_at(devctl: u16, name: &str, capture_tick: u64) -> String {
+    let ask = if temporal() {
+        while vd_bins::pixel::poll(devctl).universe_tick.unwrap_or(0) < capture_tick {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        DevRequest::ScreenshotStill {
+            label: Some(name.to_owned()),
+        }
+    } else {
+        DevRequest::Screenshot {
+            at_tick: Some(capture_tick),
+            label: Some(name.to_owned()),
+        }
+    };
+    match round_trip(devctl, &ask) {
+        DevResponse::Captured { path, .. } => path,
+        other => panic!("{name}: screenshot was not captured (GPU precondition?): {other:?}"),
+    }
+}
+
 fn freeze_wanted(name: &str) -> bool {
     std::env::var(PICTURE_FREEZE_ENV)
         .is_ok_and(|v| v.is_empty() || v == "1" || v.split(',').any(|s| s.trim() == name))
@@ -483,6 +1141,8 @@ static PAST_TOLERANCE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec
 /// The exact pictures' directory beside the owner's: frozen from an exact flight, never
 /// overwritten by a run, the reference every compare reads when it exists.
 const EXACT_DIR: &str = "exact";
+/// The exact pictures' converged stills under the temporal path (the design's D13).
+const EXACT_TEMPORAL_DIR: &str = "exact_temporal";
 /// THE CAPTURE TICK: a stand's picture is taken at a CONSTANT universe tick — this many ticks per
 /// stand, in the stands' order — so two flights of one stand capture the SAME moment of the world
 /// (the star at the same angle) and their pixels compare. MEASURED before this: two flights of one
@@ -495,6 +1155,22 @@ const EXACT_DIR: &str = "exact";
 /// Two minutes of ticks a stand: twice the measured landing-plus-settle, the same margin of two the
 /// first sizing carried (60 s over 12 s was five). A stand that settles past it is still a red gate.
 const CAPTURE_TICK_GRID: u64 = 2_400;
+/// ★ THE SOLVED WORLD'S BASE (2026-10-01, the owner: "Wait for the solve"): every stand captures on
+/// the SOLVED ground, so the grid starts after the world's first solves. MEASURED in the gate's own
+/// world (2026-10-01): its planets solve at their first boot in 0.3, 85–112, 167–194 and 221–227 s
+/// (the home planet), and the first stand's window held every artifact whole only after 368.6 s (the
+/// slowest far planet; 382 s in the moving-eye gate's window), all from the first login 6 s after
+/// boot; before this the ground, hill, aloft and orbit stands were judged on the recipe's ground
+/// while the home planet's solve landed in the fifth. The base is 540 s at the world's own tick rate
+/// (`DEV.tick_hz`, 50 a second); every stand captures this much later than before, on the same tick
+/// in every run.
+const SOLVED_BASE_S: u64 = 540;
+const SOLVED_BASE_TICKS: u64 = SOLVED_BASE_S * DEV.tick_hz as u64;
+
+/// A stand's capture tick: the solved world's base, then the grid in the stands' order.
+const fn capture_tick_of(agent_index: u64) -> u64 {
+    SOLVED_BASE_TICKS + CAPTURE_TICK_GRID * (agent_index + 1)
+}
 /// How far the overlay's rectangle grows on every side before the compare leaves it out: the
 /// glyphs' antialiasing.
 const HUD_MARGIN_PX: f32 = 2.0;
@@ -838,6 +1514,7 @@ fn take_picture(
     f: &Fixture,
     gateway: SocketAddr,
     body: &vd_terrain::BodyDefinition,
+    drawn: &vd_client::artifact_book::ArtifactCache,
     planet: vd_core::pose::RealmId,
     pic: &Picture,
 ) -> (u64, f64) {
@@ -889,9 +1566,7 @@ fn take_picture(
         "{name}: the clock is not near its genesis: {:?}",
         landed.universe_tick
     );
-    // The terrain arrives: the instrument, never a sleep. The fill is timed from here to the
-    // settle (M8-2's census).
-    let fill_started = Instant::now();
+    // The terrain arrives: the instrument, never a sleep.
     let live = round_trip(
         devctl,
         &DevRequest::WaitUntil {
@@ -907,6 +1582,11 @@ fn take_picture(
         matches!(live, DevResponse::State { .. }),
         "{name}: terrain never reached the screen: {live:?}"
     );
+    // ★ ON THE SOLVED GROUND (2026-10-01, the owner: "Wait for the solve"): the stand settles only
+    // once every surfaced realm in the window holds its artifact whole, and the fill is timed from
+    // there (the ground the players see, built on the artifact).
+    vd_bins::pixel::await_window_solved(devctl, &format!("terrain_pictures/{name}"));
+    let fill_started = Instant::now();
     // The whole wanted set lands: nothing is still building. An instrument, never a sleep.
     let settled = round_trip(
         devctl,
@@ -943,8 +1623,8 @@ fn take_picture(
     // of every vertex, settles the ground stand at tick 1 734 to 2 847 against 710 for the mesh),
     // and its reference is an exact flight on the SAME coarser grid, never the gate's pictures.
     let look = std::env::var_os(PICTURE_REPORT_ONLY_ENV).is_some();
-    let capture_tick =
-        CAPTURE_TICK_GRID * (pic.agent_index + 1) * if look { LOOK_TICK_FACTOR } else { 1 };
+    let capture_tick = SOLVED_BASE_TICKS
+        + CAPTURE_TICK_GRID * (pic.agent_index + 1) * if look { LOOK_TICK_FACTOR } else { 1 };
     eprintln!(
         "terrain_pictures/{name}: settled at tick {settled_tick}; the capture waits for tick \
          {capture_tick}"
@@ -972,19 +1652,13 @@ fn take_picture(
     {
         std::thread::sleep(Duration::from_millis(250));
     }
-    let shot = round_trip(
-        devctl,
-        &DevRequest::Screenshot {
-            at_tick: Some(capture_tick),
-            label: Some(name.to_owned()),
-        },
-    );
-    let rel = match shot {
-        DevResponse::Captured { path, .. } => path,
-        other => panic!("{name}: screenshot was not captured (GPU precondition?): {other:?}"),
-    };
+    let rel = capture_at(devctl, name, capture_tick);
     let png = f.cwd.join(&rel);
     let (rgba, w, h) = open_rgba(&png);
+    // ★ THE STILL STAND'S RECORD (G-FLICKER; a measurement flight's switch): the frames after the picture.
+    if let Some(frames) = still_frames() {
+        read_still_stand(devctl, name, &f.cwd, frames, w, h);
+    }
     assert_eq!(magenta_pixel_count(&rgba), 0, "{name}: zero magenta");
     // THE PROBE beside the picture, the same size.
     let probe_png = f.cwd.join(probe_rel_for(&rel));
@@ -1342,7 +2016,30 @@ fn take_picture(
              {day_lit:.3}, {night_n} night pixels lit {night_lit:.3}"
         );
     }
-    let ground_paint = if veiled { day_lit } else { warm_share };
+    // ★ THE NEAR GROUND KEEPS ITS PAINT, THE FAR GROUND IS VEILED (2026-10-01, the solved stands): the
+    // warm rule's own reason — the ray to the ground crosses little of the air — holds only for a path
+    // shorter than one scale height, for a level path of one scale height at the ground crosses as
+    // much air as the whole column over it. So under one scale height the gate asks for WARM ground
+    // nearer than one scale height (the probe's own distance) and LIT ground past it. MEASURED at the
+    // solved hill stand (the eye 300 m over a coast, a plain to the horizon): warm 0.996 within 5 km,
+    // 0.139 at 10–20 km, 0.000 past 20 km, the far ground's mean (100, 107, 118) — the air's blue.
+    let scale_height_m = stamp.sky.as_ref().map_or(f64::INFINITY, |sky| {
+        (sky.top_m - sky.bottom_m) / vd_client::sky::SHELL_TOP_SCALE_HEIGHTS
+    });
+    let near = |i: usize| -> bool {
+        let p = decode_probe([probe[i * 4], probe[i * 4 + 1], probe[i * 4 + 2]]);
+        f64::from(p.cells) * f64::from(vd_seed::ladder::cell_m(p.rung)) < scale_height_m
+    };
+    let (near_warm, near_n) = paint_share_where(&rgba, &probe, PROBE_KIND_TERRAIN, warm, &near);
+    let (far_lit, far_n) = paint_share_where(&rgba, &probe, PROBE_KIND_TERRAIN, lit, &|i| !near(i));
+    let held_paint =
+        (near_warm * near_n as f64 + far_lit * far_n as f64) / (near_n + far_n).max(1) as f64;
+    if !veiled {
+        eprintln!(
+            "terrain_pictures/{name}: the paint by distance — {near_n} pixels nearer than one scale              height ({scale_height_m:.0} m) warm {near_warm:.3}, {far_n} past it lit {far_lit:.3}"
+        );
+    }
+    let ground_paint = if veiled { day_lit } else { held_paint };
     // The ball through the same air: its sunlit red is veiled with the ground (MEASURED at the
     // aloft stand, the ball 251 km off: the twice-red share 0.579 against the law's 0.767), so
     // above one scale height the ball must be LIT and its sunlit share is reported.
@@ -1374,11 +2071,11 @@ fn take_picture(
         vd_core::glam::DQuat::from_xyzw(row.facing[0], row.facing[1], row.facing[2], row.facing[3])
             .normalize();
     let eye_body = facing.inverse() * (camera.eye - centre);
-    // ⚠ STALE SINCE 8c (2026-09-24, D-TERRAIN-9): this gate seats its stands and reads its truth on the
-    // recipe's own relief (no artifact), while the client's stamp now reads the DRAWN ground — the
-    // solved artifact once the realm holds it. Owed: seat the stands on the solved ground and re-freeze
-    // the references under the owner's look.
-    let ground = eye_surface(body, None, eye_body.to_array()).expect("the eye has a direction");
+    // ★ ON THE SOLVED GROUND (2026-10-01, ruling B28 item 2; it was D-TERRAIN-9's stale truth): the
+    // stand reads the client's own drawn ground — the solved artifact's whole cache, the gate's own
+    // solve handed to the client's receiver — as the client's stamp does.
+    let ground =
+        eye_surface(body, Some(drawn), eye_body.to_array()).expect("the eye has a direction");
     assert!(
         (stamp.altitude_m - ground.altitude_m).abs() <= ALTITUDE_TOLERANCE_M,
         "{name}: the stamp's altitude {:.3} m vs the state's {:.3} m",
@@ -1558,9 +2255,7 @@ fn take_picture(
         k += 1;
     }
     // For the owner: beside the slice document, the picture and its probe.
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(PICTURE_DIR);
+    let (dir, exact) = picture_dirs();
     std::fs::create_dir_all(&dir).expect("the picture directory");
     let dest = dir.join(format!("{name}.png"));
     // THE PICTURE AGAINST THE EXACT ONE (ruling V18: a packing may move no content pixel by
@@ -1573,7 +2268,6 @@ fn take_picture(
     // EVERY STAND HAS A FROZEN EXACT PICTURE (refutation N-10: a compare against the previous
     // run's picture would let two lossy steps ratchet one level each). A new stand freezes its
     // exact picture first — a missing reference is a red gate, never a skipped compare.
-    let exact = dir.join(EXACT_DIR);
     let reference = exact.join(format!("{name}.png"));
     let reference_probe = exact.join(format!("{name}.probe.png"));
     let reference_hud = exact.join(format!("{name}.hud.json"));
@@ -1641,33 +2335,13 @@ fn take_picture(
                  is left out of the compare",
                 hud[0], hud[1], hud[2], hud[3]
             );
-            let mut differing = 0usize;
-            let mut content = 0usize;
-            let mut widest = 0u8;
-            for (i, (((a, b), pa), pb)) in before
-                .chunks_exact(4)
-                .zip(rgba.chunks_exact(4))
-                .zip(before_probe.chunks_exact(4))
-                .zip(probe.chunks_exact(4))
-                .enumerate()
-            {
-                let (x, y) = ((i % w) as f32, (i / w) as f32);
-                let under_hud = x >= hud[0] && x <= hud[2] && y >= hud[1] && y <= hud[3];
-                let drawn = decode_probe([pa[0], pa[1], pa[2]]).kind != PROBE_KIND_NONE
-                    || decode_probe([pb[0], pb[1], pb[2]]).kind != PROBE_KIND_NONE;
-                if !drawn || under_hud {
-                    continue;
-                }
-                content += 1;
-                let step = a
-                    .iter()
-                    .zip(b.iter())
-                    .map(|(x, y)| x.abs_diff(*y))
-                    .max()
-                    .unwrap_or(0);
-                differing += usize::from(step > 0);
-                widest = widest.max(step);
-            }
+            // THE COMPARE (`vd_client_harness::exact`, one rule for every stand; its control — a one-level
+            // change at one pixel shows — is that module's own test).
+            let ContentRead {
+                content,
+                differing,
+                widest,
+            } = compare_content(&before, &rgba, &before_probe, &probe, w, hud);
             eprintln!(
                 "terrain_pictures/{name}: against the picture on disk — {differing} of {content} \
                  content pixels differ (the probe's terrain and ruler), the widest channel step \
@@ -1685,29 +2359,7 @@ fn take_picture(
                 std::fs::copy(&reference, &keep).expect("keep the reference picture");
                 std::fs::copy(&png, kept_dir.join(format!("{name}.after.png")))
                     .expect("keep the new picture");
-                let mut diff = vec![0u8; before.len()];
-                for (i, ((((a, b), pa), pb), d)) in before
-                    .chunks_exact(4)
-                    .zip(rgba.chunks_exact(4))
-                    .zip(before_probe.chunks_exact(4))
-                    .zip(probe.chunks_exact(4))
-                    .zip(diff.chunks_exact_mut(4))
-                    .enumerate()
-                {
-                    let (x, y) = ((i % w) as f32, (i / w) as f32);
-                    let under_hud = x >= hud[0] && x <= hud[2] && y >= hud[1] && y <= hud[3];
-                    let drawn = !under_hud
-                        && (decode_probe([pa[0], pa[1], pa[2]]).kind != PROBE_KIND_NONE
-                            || decode_probe([pb[0], pb[1], pb[2]]).kind != PROBE_KIND_NONE);
-                    let step = a
-                        .iter()
-                        .zip(b.iter())
-                        .map(|(x, y)| x.abs_diff(*y))
-                        .max()
-                        .unwrap_or(0);
-                    let v = if drawn && step > 0 { 255 } else { 0 };
-                    d.copy_from_slice(&[v, v, v, 255]);
-                }
+                let diff = difference_image(&before, &rgba, &before_probe, &probe, w, hud);
                 let diff_path = kept_dir.join(format!("{name}.diff.png"));
                 image::save_buffer(
                     &diff_path,
@@ -1836,6 +2488,8 @@ fn take_far_picture(
          is back: {live:?}",
         far_distance_m(body.ladder().radius_m()) / body.ladder().radius_m()
     );
+    // ★ ON THE SOLVED GROUND (2026-10-01): every surfaced realm in the window holds its artifact.
+    vd_bins::pixel::await_window_solved(devctl, &format!("terrain_pictures/{name}"));
     let settled = round_trip(
         devctl,
         &DevRequest::WaitUntil {
@@ -1853,23 +2507,21 @@ fn take_far_picture(
     );
     let last = await_still(devctl, name);
     let fill_s = fill_started.elapsed().as_secs_f64();
-    let capture_tick = CAPTURE_TICK_GRID * (pic.agent_index + 1);
+    // ★ G-STARS (a measurement flight's switch): the sky still and turning at the dusk stand, as soon
+    // as the stand settles — the stars need no grid tick — and a stars-only flight ends the stand here.
+    if stars_flight() && name == STARS_STAND {
+        read_star_stand(devctl, name, &f.cwd);
+        if stars_only() {
+            return last;
+        }
+    }
+    let capture_tick = capture_tick_of(pic.agent_index);
     while vd_bins::pixel::poll(devctl).universe_tick.unwrap_or(0) + CAPTURE_ASK_AHEAD_TICKS
         < capture_tick
     {
         std::thread::sleep(Duration::from_millis(250));
     }
-    let shot = round_trip(
-        devctl,
-        &DevRequest::Screenshot {
-            at_tick: Some(capture_tick),
-            label: Some(name.to_owned()),
-        },
-    );
-    let rel = match shot {
-        DevResponse::Captured { path, .. } => path,
-        other => panic!("{name}: screenshot was not captured: {other:?}"),
-    };
+    let rel = capture_at(devctl, name, capture_tick);
     let png = f.cwd.join(&rel);
     let (rgba, w, h) = open_rgba(&png);
     assert_eq!(magenta_pixel_count(&rgba), 0, "{name}: zero magenta");
@@ -1932,10 +2584,7 @@ fn take_far_picture(
     //    masked, and a step past it is RED (a report under the look knob, like every frozen stand);
     //    the freeze knob writes it like any other. Without one, the candidate path stays: written
     //    once, compared and REPORTED after.
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(PICTURE_DIR);
-    let exact_dir = dir.join(EXACT_DIR);
+    let (dir, exact_dir) = picture_dirs();
     let exact = exact_dir.join(format!("{name}.png"));
     let exact_probe = exact_dir.join(format!("{name}.probe.png"));
     let candidate_dir = dir.join(CANDIDATE_DIR);
@@ -2234,23 +2883,13 @@ fn take_handover_picture(f: &Fixture, gateway: SocketAddr, pic: &Picture) -> Pat
         "terrain_pictures/{name}: landed in {:?}, universe tick {:?}",
         landed.location, landed.universe_tick
     );
-    let capture_tick = CAPTURE_TICK_GRID * (pic.agent_index + 1);
+    let capture_tick = capture_tick_of(pic.agent_index);
     while vd_bins::pixel::poll(devctl).universe_tick.unwrap_or(0) + CAPTURE_ASK_AHEAD_TICKS
         < capture_tick
     {
         std::thread::sleep(Duration::from_millis(250));
     }
-    let shot = round_trip(
-        devctl,
-        &DevRequest::Screenshot {
-            at_tick: Some(capture_tick),
-            label: Some(name.to_owned()),
-        },
-    );
-    let rel = match shot {
-        DevResponse::Captured { path, .. } => path,
-        other => panic!("{name}: screenshot was not captured: {other:?}"),
-    };
+    let rel = capture_at(devctl, name, capture_tick);
     let png = f.cwd.join(&rel);
     let run_dir = png
         .parent()
@@ -2296,29 +2935,48 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let sun = -vd_physics::celestial::orbital_state(&orbit, 0.0)
         .position
         .normalize();
-    // THE SPOT: on the radial where the star stands `SUN_ELEVATION_DEG` over the horizon, in the
-    // orbit's plane (the planet's equator: the pole is `+Z`).
+    // ★ ON THE SOLVED GROUND (2026-10-01, the owner: "Wait for the solve"; ruling B19 items 2 and 3):
+    // the gate solves the home planet itself, by its shard's own code, and seats every stand on the
+    // solved ground; the stands that share the star's light stand on the first dry land along their
+    // circle, as the moving-eye gate's stand does. MEASURED before: in a new world the planet's first
+    // solve lands 227 s after boot, so the ground, hill, aloft and orbit stands were judged on the
+    // recipe's ground, and the seam stand met the solve by chance.
+    let solved = vd_bins::solved::solve_home(&body, "terrain_pictures");
+    let drawn = solved.client_cache(planet);
+    // THE SPOT: on the circle where the star stands `SUN_ELEVATION_DEG` over the horizon — from the
+    // orbit's plane (the planet's equator: the pole is `+Z`) to the first dry land along it.
     let along = sun.cross(DVec3::Z).normalize();
     let zenith = (90.0_f64 - SUN_ELEVATION_DEG).to_radians();
-    let d = (sun * zenith.cos() + along * zenith.sin()).normalize();
-    let dir = [d.x, d.y, d.z];
-    let h = vd_terrain::height::height_m(&body, dir, 0);
+    let d0 = (sun * zenith.cos() + along * zenith.sin()).normalize();
     // The nose: the star's azimuth turned `SUN_OFF_NOSE_DEG` about the radial (the light comes over
     // the camera's shoulder), tilted below level by the picture's angle.
-    let toward_sun = (sun - d * sun.dot(d)).normalize();
-    let ahead =
-        vd_core::glam::DQuat::from_axis_angle(d, SUN_OFF_NOSE_DEG.to_radians()) * toward_sun;
+    let (d, ahead, h) = vd_bins::solved::walkable_stand(
+        &solved,
+        sun,
+        d0,
+        0.0,
+        EYE_HEIGHT_M,
+        SUN_OFF_NOSE_DEG,
+        "terrain_pictures/ground",
+    );
     let nose = |tilt_deg: f64| {
         let t = tilt_deg.to_radians();
         (ahead * t.cos() - d * t.sin()).normalize()
     };
     let ground = stand(d, EYE_HEIGHT_M, h, nose(GROUND_TILT_DEG));
-    // ★ THE DUSK STAND (S7): the radial where the star stands `DUSK_BELOW_DEG` UNDER the horizon,
-    // the nose on the star's azimuth, level.
+    // ★ THE DUSK STAND (S7): on the circle where the star stands `DUSK_BELOW_DEG` UNDER the horizon,
+    // the first dry land along it, the nose on the star's azimuth, level.
     let zenith_dusk = (90.0_f64 + DUSK_BELOW_DEG).to_radians();
-    let d_dusk = (sun * zenith_dusk.cos() + along * zenith_dusk.sin()).normalize();
-    let h_dusk = vd_terrain::height::height_m(&body, [d_dusk.x, d_dusk.y, d_dusk.z], 0);
-    let nose_dusk = (sun - d_dusk * sun.dot(d_dusk)).normalize();
+    let d_dusk0 = (sun * zenith_dusk.cos() + along * zenith_dusk.sin()).normalize();
+    let (d_dusk, nose_dusk, h_dusk) = vd_bins::solved::walkable_stand(
+        &solved,
+        sun,
+        d_dusk0,
+        0.0,
+        EYE_HEIGHT_M,
+        0.0,
+        "terrain_pictures/dusk",
+    );
     let dusk = stand(d_dusk, EYE_HEIGHT_M, h_dusk, nose_dusk);
     // ★ THE HIGH STAND (S7): `HIGH_SHELLS` shell heights up, the orbit stand's tilt.
     let shell_m = {
@@ -2358,7 +3016,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let cave_a = -1.0 + 2.0 * (f64::from(cave_x) * cave_edge + cave_edge / 2.0) / cave_n;
     let cave_b = -1.0 + 2.0 * (f64::from(cave_y) * cave_edge + cave_edge / 2.0) / cave_n;
     let d_cave = DVec3::from_array(vd_seed::bend::direction(cave_face, cave_a, cave_b));
-    let h_cave = vd_terrain::height::height_m(&body, [d_cave.x, d_cave.y, d_cave.z], 0);
+    let h_cave = solved.ground_m(d_cave, 0);
     let toward_sun_cave = (sun - d_cave * sun.dot(d_cave)).normalize();
     let ahead_cave = vd_core::glam::DQuat::from_axis_angle(d_cave, SUN_OFF_NOSE_DEG.to_radians())
         * toward_sun_cave;
@@ -2377,7 +3035,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
         far_m / body.ladder().radius_m(),
         far_m - h,
     );
-    let height_at = |p: DVec3| vd_terrain::height::height_m(&body, [p.x, p.y, p.z], 0);
+    let height_at = |p: DVec3| solved.ground_m(p, 0);
     // THE SEAM: the point on the cube's twelve edges (every face's four), looking along the edge
     // one way or the other, where the star stands INSIDE the gate's elevation band and nearest
     // `SUN_OFF_NOSE_DEG` off the nose (the light over the shoulder, as every stand has it); where
@@ -2416,15 +3074,22 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
             let mut i = 0;
             while i <= SEAM_STEPS {
                 for sign in [1.0, -1.0] {
-                    let (_, _, elevation, off_nose) = seam_nose(face, edge, i, sign);
+                    let (p, _, elevation, off_nose) = seam_nose(face, edge, i, sign);
                     let off_miss = (off_nose - SUN_OFF_NOSE_DEG).abs();
                     // Inside the band the off-nose miss alone; outside it, a full turn's worth
-                    // more plus the elevation's miss, so any in-band point wins.
-                    let miss = if in_band(elevation) {
-                        off_miss
-                    } else {
-                        360.0 + (elevation - SUN_ELEVATION_DEG).abs() + off_miss
-                    };
+                    // more plus the elevation's miss, so any in-band point wins. ★ A point under
+                    // the solved sea (2026-10-01, the stands on dry land) pays half a turn more, so
+                    // a dry point wins inside the band and any point in the band still wins over
+                    // one outside it. MEASURED: no edge point is dry with the star in the band on
+                    // the solved world; ranked dry first, the stand took the star 33.5° up, which
+                    // the gate's light rule refuses.
+                    let wet = if solved.dry(p) { 0.0 } else { 180.0 };
+                    let miss = wet
+                        + if in_band(elevation) {
+                            off_miss
+                        } else {
+                            360.0 + (elevation - SUN_ELEVATION_DEG).abs() + off_miss
+                        };
                     if miss < seam.0 {
                         seam = (miss, face, edge, i, sign);
                     }
@@ -2510,10 +3175,29 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let _reaper = ForkedReaper(f.launch_path.clone());
     let _cluster = boot_demand_cluster(&f, &a, &DEV, &spawn_poses);
 
+    // ★ THE STARS-ONLY FLIGHT (G-STARS): the dusk stand alone, its sky recorded as soon as it settles.
+    if stars_only() {
+        let _ = take_far_picture(
+            &f,
+            a.gateway,
+            &body,
+            &Picture {
+                name: STARS_STAND,
+                agent_index: DUSK_AGENT,
+                tilt_deg: 0.0,
+                band: (0.0, 1.0),
+                min_share: 0.0,
+                off_nose_band: (0.0, 180.0),
+                pick: None,
+            },
+        );
+        return;
+    }
     let (ground_chunks, ground_share) = take_picture(
         &f,
         a.gateway,
-        &body,
+        &solved.body,
+        &drawn,
         planet,
         &Picture {
             name: "ground",
@@ -2528,7 +3212,8 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let (hill_chunks, hill_share) = take_picture(
         &f,
         a.gateway,
-        &body,
+        &solved.body,
+        &drawn,
         planet,
         &Picture {
             name: "hill",
@@ -2543,7 +3228,8 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let (aloft_chunks, aloft_share) = take_picture(
         &f,
         a.gateway,
-        &body,
+        &solved.body,
+        &drawn,
         planet,
         &Picture {
             name: "aloft",
@@ -2558,7 +3244,8 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let (orbit_chunks, orbit_share) = take_picture(
         &f,
         a.gateway,
-        &body,
+        &solved.body,
+        &drawn,
         planet,
         &Picture {
             name: "orbit",
@@ -2576,7 +3263,8 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
     let (seam_chunks, seam_share) = take_picture(
         &f,
         a.gateway,
-        &body,
+        &solved.body,
+        &drawn,
         planet,
         &Picture {
             name: "seam",
@@ -2682,10 +3370,7 @@ fn the_home_planet_is_seen_from_the_ground_and_from_aloft() {
                 "a pop; the second pass for the far body is owed (D-TERRAIN-6)"
             }
         );
-        let kept = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(PICTURE_DIR)
-            .join("candidate");
+        let kept = picture_dirs().0.join(CANDIDATE_DIR);
         std::fs::create_dir_all(&kept).ok();
         std::fs::copy(&png_a, kept.join("handover_a.png")).ok();
         std::fs::copy(&png_b, kept.join("handover_b.png")).ok();

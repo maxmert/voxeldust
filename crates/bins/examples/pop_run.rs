@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use vd_client_harness::capture::{capture_rel_path, probe_rel_for, render_rel_for, state_rel_for};
 use vd_client_harness::manifest::CaptureKind;
 use vd_client_harness::pop::{Frame, frame_camera, judge_pair, over_floor, sum_reads};
+use vd_client_harness::probe::display_probe;
 use vd_devproto::DevState;
 
 /// One recorded frame: the picture, the probe, the frame's stamp, and under the reconstruction (the
@@ -65,6 +66,50 @@ fn frame(f: &Recorded) -> Frame<'_> {
             .stamp
             .reconstruction
             .map_or([0.0; 2], |r| r.jitter_px.map(f64::from)),
+        // ★ THE OCCLUSION EDGES APART (T2), as the moving-eye gate reads them.
+        edge_separation_per_m: if f.stamp.reconstruction.is_some() {
+            vd_client_harness::pop::edge_separation_per_m(w, h)
+        } else {
+            0.0
+        },
+        edge_reach_px: vd_client_harness::pop::RENDER_EDGE_REACH_PX,
+    }
+}
+
+/// ★ THE DISPLAY PICTURE (T2): the reconstruction's output with the probe under each display pixel,
+/// through the unjittered camera, its silhouettes judged apart — as the moving-eye gate reads it.
+fn display(f: &Recorded) -> (Vec<u8>, usize, usize) {
+    let (dw, dh) = f.rgba.dimensions();
+    let (pw, ph) = f.probe.dimensions();
+    let jitter = f
+        .stamp
+        .reconstruction
+        .map_or([0.0; 2], |r| r.jitter_px.map(f64::from));
+    let probe = display_probe(
+        f.probe.as_raw(),
+        [pw as usize, ph as usize],
+        [dw as usize, dh as usize],
+        jitter,
+    );
+    (probe, dw as usize, dh as usize)
+}
+
+fn display_frame<'a>(f: &'a Recorded, probe: &'a [u8], w: usize, h: usize) -> Frame<'a> {
+    let (rw, rh) = f.probe.dimensions();
+    let (rw, rh) = (rw as usize, rh as usize);
+    Frame {
+        rgba: f.rgba.as_raw(),
+        probe,
+        width: w,
+        height: h,
+        camera: frame_camera(f.stamp.eye_body_m, f.stamp.camera_body_xyzw, w, h),
+        hud: {
+            let r = f.stamp.hud_rect_px.map(f64::from);
+            ((r[2] > r[0]) & (r[3] > r[1])).then_some(r)
+        },
+        jitter_px: [0.0; 2],
+        edge_separation_per_m: vd_client_harness::pop::edge_separation_per_m(rw, rh),
+        edge_reach_px: vd_client_harness::pop::display_edge_reach_px(rw, w),
     }
 }
 
@@ -77,6 +122,7 @@ fn main() {
     let run = PathBuf::from(run);
     let cell = |rung: u8| f64::from(vd_seed::ladder::cell_m(rung));
     let mut reads = Vec::new();
+    let mut displays = Vec::new();
     let (mut skipped, mut judged) = (0u64, 0u64);
     let mut before = load(&run, label, 0);
     let mut index = 1u32;
@@ -101,6 +147,14 @@ fn main() {
                     );
                 }
                 reads.push(read);
+                if a.render.is_some() & after.render.is_some() {
+                    let ((pa, w, h), (pb, _, _)) = (display(a), display(&after));
+                    displays.push(judge_pair(
+                        &display_frame(a, &pa, w, h),
+                        &display_frame(&after, &pb, w, h),
+                        &cell,
+                    ));
+                }
                 judged += 1;
             } else {
                 skipped += 1;
@@ -110,6 +164,26 @@ fn main() {
         index += 1;
     }
     let sum = sum_reads(&reads);
+    let (edges, edge_widest) = sum.edge_read();
+    println!(
+        "POP-RUN-EDGES {label}: {edges} silhouette pixels read apart, the widest {edge_widest} levels"
+    );
+    if !displays.is_empty() {
+        let d = sum_reads(&displays);
+        println!(
+            "POP-RUN-DISPLAY {label}: {} pairs, {} pixels compared, {} crossed a rung boundary, the floor at {} levels, {} past the floor, the widest {} levels; per boundary (finer rung, crossed, past the floor, widest) {:?}",
+            displays.len(),
+            d.compared,
+            d.crossed(),
+            d.floor(),
+            d.over_floor(),
+            d.widest(),
+            d.boundary_reads()
+                .iter()
+                .map(|b| (b.finer, b.crossed, b.over_floor, b.widest))
+                .collect::<Vec<_>>()
+        );
+    }
     // Against FIXED thresholds too: a ramping chunk's pixels change a little each frame, which
     // lifts the still pixels' floor, so two runs are compared at the same levels as well.
     let fixed: Vec<(u8, u64, u64)> = [2u8, 3, 5, 10, 20]

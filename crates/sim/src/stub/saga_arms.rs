@@ -573,6 +573,7 @@ fn re_home_apply(
             session,
             Dot {
                 last_stick: None,
+                walk_stick: None,
                 entity,
                 account: AccountId(0), // orphan: no client account until the session re-homes (D-37/D-36)
                 session_fence: Fence::GENESIS,

@@ -220,6 +220,7 @@ fn pilot() -> vd_sim::stub::Dot {
     let pos = LatticePos::at(vd_core::glam::I64Vec3::ZERO, DVec3::ZERO);
     vd_sim::stub::Dot {
         last_stick: Some((DVec3::new(0.0, 0.0, -1.0), [0.0, 0.0, 0.0])),
+        walk_stick: None,
         entity: vd_core::ids::EntityId::pack(vd_core::entity_kind::EntityKind::Player, 1, 1, 0),
         account: AccountId(1),
         session_fence: Fence(1),

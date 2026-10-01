@@ -959,31 +959,39 @@ pub fn field_step_m(
     step
 }
 
-/// ★ HOW FAR THE TILES MUST REACH under an occupant standing `radial_m` from the body's centre:
-/// the finest rung that reads the rows (the tiles) is wanted out to the ladder's OUTER EDGE for it
-/// (`ASK_HYSTERESIS_OUT` and `ASK_SLACK` over its switch distance), bounded by how far the ground
-/// can be seen ([`reach_m`]: the horizon plus the relief's own), and the sixteen-node stencil of the
-/// last chunk reaches two nodes past that. A shard ships the tiles within this of the occupant's
-/// direction, so the client's fine rungs never wait on a tile the shard did not send.
+/// ★ THE EYE'S HEIGHT over the ground it stands on, in metres, ONE HOME (2026-10-01; it lived in
+/// the client's ladder until the tile reach needed it on the shard): the pilot camera lifts the eye
+/// by this over the avatar's feet (the harness's own offset reads it), and it is THE FLOOR of the
+/// eye's altitude wherever a ring is read from it (slice 8 step 6, D-TERRAIN-5 item 12): an eye
+/// that the drawn ground stands above — in a dip the mesh cuts under the field, in a cave, for the
+/// frame of a hard landing — wants what an eye standing on that ground wants, never a zero
+/// horizon's set. MEASURED before the floor (M8-1's first run): 1 930 chunks wanted on a walk from
+/// an eye the field stood over, the horizon zero and every column past it a skyline candidate.
+pub const EYE_HEIGHT_M: f64 = 1.6;
+
+/// The altitude a ring is read from: the eye's height over the ground under it, never under the
+/// eye's own height ([`EYE_HEIGHT_M`]). One rule for the client's ladder and the shard's tiles.
 #[must_use]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "six of the eight name the body and its lattice, and the last two are the reference \
-              view's pixel and the handover step the ring must cover; a struct here would be a \
-              second home for numbers the callers already hold apart"
-)]
-pub fn tile_reach_m(
+pub fn floored_altitude_m(altitude_m: f64) -> f64 {
+    // The comparison is written out: `f64::max` is disallowed here (SL10 clause 4).
+    if altitude_m > EYE_HEIGHT_M {
+        altitude_m
+    } else {
+        EYE_HEIGHT_M
+    }
+}
+
+/// The finest tile-reading rung's ask ring before the stencil's margin: the tier rule's own switch
+/// distance, never nearer than the floor the handover's own step sets, at the band's outer edge
+/// with the ask's slack.
+fn asked_ring_m(
     lattice: &MacroLattice,
     levels: u32,
     top_rung: u8,
-    body_radius_m: f64,
-    relief_m: f64,
-    radial_m: f64,
     pixel_rad: f64,
     step_m: f64,
 ) -> f64 {
     let rung = tile_rung(lattice, levels, top_rung);
-    let altitude_m = radial_m - body_radius_m;
     // ★ THE RING IS THE ONE THE CLIENT ASKS AT (ruling W17): the tier rule's own switch distance,
     // never nearer than the floor the handover's own step sets. `step_m` is that step — the
     // octaves the coarser rung drops plus [`field_step_m`] where the field changes under them —
@@ -992,8 +1000,62 @@ pub fn tile_reach_m(
     let floor = switch_floor_m(step_m, pixel_rad);
     // The comparison is written out: `f64::max` is disallowed here (SL10 clause 4).
     let at = if floor > tier { floor } else { tier };
-    let asked = at * ASK_HYSTERESIS_OUT * (1.0 + ASK_SLACK);
-    let seen = reach_m(body_radius_m, altitude_m, relief_m);
+    at * ASK_HYSTERESIS_OUT * (1.0 + ASK_SLACK)
+}
+
+/// ★ THE WHOLE TILE RING, NO HORIZON (2026-10-01): the finest tile-reading rung's ask ring and the
+/// stencil's two nodes — the farthest the tiles of ANY eye can reach, whatever ground it stands
+/// over. A host that cannot read the ground under the eye serves within this: the gateway relays
+/// the tiles undecoded, so it serves a session every cached tile within this ring, which holds every
+/// tile [`tile_reach_m`] names over any ground. **Example.** A hull pilot flies low over the dry sea
+/// floor of the home planet: the gateway serves the tiles out to the rung-9 ring, a little past the
+/// distance the pilot's own horizon over that floor asks.
+#[must_use]
+pub fn tile_ring_m(
+    lattice: &MacroLattice,
+    levels: u32,
+    top_rung: u8,
+    pixel_rad: f64,
+    step_m: f64,
+) -> f64 {
+    asked_ring_m(lattice, levels, top_rung, pixel_rad, step_m) + 2.0 * lattice.node_m()
+}
+
+/// ★ HOW FAR THE TILES MUST REACH under an eye standing `radial_m` from the body's centre over
+/// ground at `ground_m` from the centre (the radius of the drawn ground along the eye's direction):
+/// the finest rung that reads the rows (the tiles) is wanted out to the ladder's OUTER EDGE for it
+/// (`ASK_HYSTERESIS_OUT` and `ASK_SLACK` over its switch distance), bounded by how far the ground
+/// can be seen ([`reach_m`]: the horizon from the eye's floored height over that ground, plus the
+/// relief's own), and the sixteen-node stencil of the last chunk reaches two nodes past that. A
+/// shard ships the tiles within this of the occupant's direction, so the client's fine rungs never
+/// wait on a tile the shard did not send.
+///
+/// ★ OVER THE GROUND THE CLIENT READS (2026-10-01): since 2026-09-24 the client's ladder reads the
+/// eye's height over the SOLVED ground under it (`vd_client::chunks::drawn_surface_m`), and this
+/// read it over the body's radius, so the two rings parted wherever the solved ground stands far
+/// from the radius. MEASURED at the picture gate's seam stand: the eye 863 m over the radius and
+/// 3 283 m over the dry sea floor; the shard named 6 tiles, the client's chunks waited on 8 more for
+/// as long as the pilot stood there, and the sky showed through a 3 km step. The shard now states
+/// the ground its artifact holds under the occupant, the client's very ground.
+#[must_use]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "six of the eight name the body, its lattice and the eye over its ground, and the last \
+              two are the reference view's pixel and the handover step the ring must cover; a \
+              struct here would be a second home for numbers the callers already hold apart"
+)]
+pub fn tile_reach_m(
+    lattice: &MacroLattice,
+    levels: u32,
+    top_rung: u8,
+    ground_m: f64,
+    relief_m: f64,
+    radial_m: f64,
+    pixel_rad: f64,
+    step_m: f64,
+) -> f64 {
+    let asked = asked_ring_m(lattice, levels, top_rung, pixel_rad, step_m);
+    let seen = reach_m(ground_m, floored_altitude_m(radial_m - ground_m), relief_m);
     let ring_m = if seen < asked { seen } else { asked };
     ring_m + 2.0 * lattice.node_m()
 }
@@ -1027,13 +1089,13 @@ pub fn tiles_within(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64) -> Vec
     let (a, b) = (unbend(axis(basis.u) / n), unbend(axis(basis.v) / n));
     let edge = lattice.edge;
     let (i, j) = (index_of(a, edge), index_of(b, edge));
-    let reach = radius_m / lattice.node_m();
-    let reach_nodes = if reach > 1.0 { reach.ceil() as i64 } else { 1 };
-    // Past a whole face the square wraps onto the far side of the cube: the walk stops one face
-    // short of it, which is every tile of the six faces the direction can see.
-    let reach_nodes = reach_nodes.min(i64::from(edge));
-    let (i_lo, i_hi) = (i64::from(i) - reach_nodes, i64::from(i) + reach_nodes);
-    let (j_lo, j_hi) = (i64::from(j) - reach_nodes, i64::from(j) + reach_nodes);
+    // ★ THE SQUARE BY THE NODES' TRUE SIZE (2026-10-01): each side reaches as many nodes as the
+    // reach spans along that axis, by the chord of the nodes themselves ([`nodes_within`]) — never
+    // by the lattice's mean node. Past a whole face the square wraps onto the far side of the cube:
+    // a side stops one face short of it, which is every tile of the six faces the direction sees.
+    let side = |di: i64, dj: i64| nodes_within(lattice, face, i, j, (di, dj), radius_m);
+    let (i_lo, i_hi) = (i64::from(i) - side(-1, 0), i64::from(i) + side(1, 0));
+    let (j_lo, j_hi) = (i64::from(j) - side(0, -1), i64::from(j) + side(0, 1));
     // The walk along an axis: INSIDE the face a stride of one tile plus the last node never
     // skips a tile; PAST the face's edge the seam table runs the partner's coordinate the other
     // way, from its far tile inward, so every node past the edge is visited (at most the reach,
@@ -1081,6 +1143,64 @@ pub fn tiles_within(lattice: &MacroLattice, dir: [f64; 3], radius_m: f64) -> Vec
     };
     out.sort_by(|p, q| away(p).total_cmp(&away(q)));
     out
+}
+
+/// ★ HOW MANY NODES ALONG ONE AXIS A REACH SPANS from node `(i, j)` of `face`, stepping `step` — through
+/// the seam table past the face's edge: the first count whose node stands farther than `radius_m`
+/// from the start, by the chord between the two nodes' directions over the ladder radius; at least
+/// one, and never past a whole face. Along one axis the chord grows with the count, so a binary
+/// search finds it in a dozen steps.
+///
+/// ★ MEASURED before (2026-10-01, the picture gate's seam stand): the square was sized by the
+/// lattice's MEAN node (8 192 m on the home planet), while a cube's edge spans 70.5° of arc where a
+/// face's middle axis spans 90°, so a node along the edge is about a fifth shorter; the square fell
+/// short along the seam, and a rung-9 chunk 491 km off read two tiles the shard never named, for as
+/// long as the eye stood there.
+fn nodes_within(
+    lattice: &MacroLattice,
+    face: Face,
+    i: i32,
+    j: i32,
+    step: (i64, i64),
+    radius_m: f64,
+) -> i64 {
+    let unit = (1u64 << vd_recipe::bend::DIR_BITS) as f64;
+    let at = |k: i64| -> [f64; 3] {
+        let d = lattice.direction(node_at(
+            lattice,
+            face,
+            i64::from(i) + step.0 * k,
+            i64::from(j) + step.1 * k,
+        ));
+        [
+            d[0].raw() as f64 / unit,
+            d[1].raw() as f64 / unit,
+            d[2].raw() as f64 / unit,
+        ]
+    };
+    let from = at(0);
+    let radius = lattice.radius_m().to_f64();
+    let beyond = |k: i64| -> bool {
+        let to = at(k);
+        let (x, y, z) = (from[0] - to[0], from[1] - to[1], from[2] - to[2]);
+        (x * x + y * y + z * z).sqrt() * radius > radius_m
+    };
+    let edge = i64::from(lattice.edge);
+    if !beyond(edge) {
+        return edge;
+    }
+    // The start stands within any reach and the face's length past it does not: the first count
+    // past the reach lies between them.
+    let (mut within, mut past) = (0i64, edge);
+    while past - within > 1 {
+        let mid = (within + past) / 2;
+        if beyond(mid) {
+            past = mid;
+        } else {
+            within = mid;
+        }
+    }
+    past
 }
 
 /// A tile's width in nodes: `TILE_EDGE`, or what is left of the edge for the last tile.
@@ -2584,9 +2704,10 @@ mod tests {
             (reach200 - (horizon_m(r, 200_000.0) + margin)).abs() < 1.0e-6,
             "{reach200}"
         );
+        // An eye under its ground reads from the eye's height over it, as the client's ladder does.
         assert_eq!(
             tile_reach_m(&lattice, 2, top, r, relief, r - 1.0, pixel, 0.0),
-            margin
+            horizon_m(r, EYE_HEIGHT_M) + margin
         );
         // Far enough out the ladder's OUTER EDGE bounds the reach: the switch distance times the
         // band's hysteresis and the ask's slack, a stand 5 000 km up.
@@ -2689,6 +2810,112 @@ mod tests {
         );
     }
 
+    /// ★ THE TILE REACH READS THE EYE OVER THE GROUND IT STANDS ON (2026-10-01), the client's own
+    /// ground: at the picture gate's seam stand the eye stands 863 m over the home planet's radius
+    /// and 3 283 m over the dry sea floor (MEASURED), and the reach over the floor is the client's
+    /// ring — longer than the one over the radius, which named 6 tiles while the client's chunks
+    /// waited on 8 more.
+    /// The whole ring holds the reach over any ground, so a host that cannot read the ground serves
+    /// within it and never falls short.
+    #[test]
+    fn the_tile_reach_reads_the_eye_over_the_ground_it_stands_on() {
+        let body = crate::home::home_planet();
+        let lattice = MacroLattice::of(&body).expect("a lattice");
+        let top = body.ladder.rungs - 1;
+        let pixel = 0.828_427_124_746_190_1 / 720.0;
+        let mut levels = 0u32;
+        while lattice.coarser(levels + 1).is_some() {
+            levels += 1;
+        }
+        let rung = tile_rung(&lattice, levels, top);
+        let step = body.step_bound_m(rung) + field_step_m(&body, &lattice, levels, rung);
+        let r = body.radius_m();
+        let relief = body.relief_bound_m(0);
+        let margin = 2.0 * lattice.node_m();
+        let eye = r + 863.0;
+        let floor = eye - 3_283.0;
+        let over_radius = tile_reach_m(&lattice, levels, top, r, relief, eye, pixel, step);
+        let over_floor = tile_reach_m(&lattice, levels, top, floor, relief, eye, pixel, step);
+        assert!(
+            over_floor > over_radius + 50_000.0,
+            "{over_floor} against {over_radius}"
+        );
+        assert_eq!(over_floor, reach_m(floor, 3_283.0, relief) + margin);
+        // The whole ring holds every reach: any ground from the relief's floor to its top, from
+        // an eye on the ground to one in high orbit.
+        let ring = tile_ring_m(&lattice, levels, top, pixel, step);
+        for k in 0..=8 {
+            let ground = r - relief + 2.0 * relief * f64::from(k) / 8.0;
+            for lift in [0.0, 1_000.0, 20_000.0, 2.0e6] {
+                let reach = tile_reach_m(
+                    &lattice,
+                    levels,
+                    top,
+                    ground,
+                    relief,
+                    ground + lift,
+                    pixel,
+                    step,
+                );
+                assert!(reach <= ring, "{reach} past {ring} over {ground} at {lift}");
+            }
+        }
+        // High enough, the reach IS the ring: the horizon no longer binds.
+        assert_eq!(
+            tile_reach_m(&lattice, levels, top, r, relief, r + 2.0e6, pixel, step),
+            ring
+        );
+        // The floor: an eye over its ground keeps its height; one at or under it reads the eye's.
+        assert_eq!(floored_altitude_m(300.0), 300.0);
+        assert_eq!(floored_altitude_m(0.0), EYE_HEIGHT_M);
+        assert_eq!(floored_altitude_m(-10.0), EYE_HEIGHT_M);
+    }
+
+    /// ★ EVERY NODE WITHIN THE REACH LIES IN A NAMED TILE, ALONG A CUBE'S EDGE TOO (2026-10-01): at the
+    /// picture gate's seam stand — the eye over the home planet's +X face at node (270, 0), on the
+    /// edge it shares with −Z, and the reach the client's ring over the solved floor (562 921 m),
+    /// both MEASURED — every node of the two faces in the band along that edge whose chord from the
+    /// eye's node is within the reach stands in a named tile, among them the two tiles the client's
+    /// rung-9 chunk 491 km off read. RED before the square counted the nodes' own chords: by the
+    /// lattice's mean node it stopped at node 201 and named neither (0, 2, 0) nor (5, 2, 18).
+    #[test]
+    fn every_node_within_the_reach_lies_in_a_named_tile() {
+        let body = crate::home::home_planet();
+        let lattice = MacroLattice::of(&body).expect("a lattice");
+        let eye_m: [f64; 3] = [
+            4_260_506.578_995_488,
+            -1_980_883.400_220_961,
+            -4_260_506.578_995_488,
+        ];
+        let len = (eye_m[0] * eye_m[0] + eye_m[1] * eye_m[1] + eye_m[2] * eye_m[2]).sqrt();
+        let dir = [eye_m[0] / len, eye_m[1] / len, eye_m[2] / len];
+        let reach = 562_921.0;
+        let named: BTreeSet<(u8, u32, u32)> =
+            tiles_within(&lattice, dir, reach).into_iter().collect();
+        assert!(named.contains(&(0, 2, 0)), "{named:?}");
+        assert!(named.contains(&(5, 2, 18)), "{named:?}");
+        let e = lattice.edge as i32;
+        let eye = lattice.index(Face::PosX, 270, 0);
+        let band = 150;
+        let mut checked = 0usize;
+        for (face, js) in [(Face::PosX, 0..band), (Face::NegZ, e - band..e)] {
+            for j in js {
+                for i in 0..e {
+                    let node = lattice.index(face, i, j);
+                    if f64::from(lattice.chord_m(eye, node)) <= reach {
+                        checked += 1;
+                        let tile = tile_of_node(lattice.edge, node);
+                        assert!(
+                            named.contains(&tile),
+                            "node ({face:?}, {i}, {j}) in {tile:?} not named in {named:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(checked > 5_000, "{checked}");
+    }
+
     /// ★ THE TILES WITHIN A REACH (2026-09-21): a direction with no length falls behind every
     /// face and names no tile; a reach under one node names the one tile the direction stands on;
     /// a wide reach names a block of tiles on that face, the nearest first.
@@ -2711,9 +2938,16 @@ mod tests {
             tiles_within(&lattice, dir, lattice.node_m() / 4.0),
             vec![under]
         );
-        // A reach of half a face less a node names a block of tiles on the face the eye looks at,
-        // and no other: the square stays inside the face (the moon's face is 68 nodes, two tiles).
-        let quarter = f64::from(lattice.edge / 2 - 1) * lattice.node_m();
+        // A reach of the chord from the centre node to the node two before the face's edge names a
+        // block of tiles on the face the eye looks at, and no other: the square stays inside the
+        // face (the moon's face is 68 nodes, two tiles). The square counts the nodes' own chords
+        // (2026-10-01), so the reach is a chord too: an arc of half a face is 2.5 % longer than its
+        // chord, and the square would cross the edge by a node.
+        let edge_i = lattice.edge as i32;
+        let quarter = f64::from(lattice.chord_m(
+            lattice.index(Face::PosZ, mid, mid),
+            lattice.index(Face::PosZ, edge_i - 3, mid),
+        ));
         let wide = tiles_within(&lattice, dir, quarter);
         let count = wide.len();
         assert!(count > 1, "{count}");

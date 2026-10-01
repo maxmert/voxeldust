@@ -44,6 +44,9 @@ pub mod shore_shape;
 // stations and the reference stand read one rule, so our number and the reference's are one
 // instrument.
 pub mod skyline;
+// ★ THE HOME PLANET SOLVED IN THE GATE'S OWN PROCESS (ruling B19 item 2): the solved ground the
+// moving-eye gate and the picture gate seat their stands on, and the dry stand under the gate's star.
+pub mod solved;
 
 // The dev-control-only helpers (Tier-B process-gate glue): `flight` is the ONE pilot every cluster
 // gate flies (rendezvous-and-park + label-asserted crossing legs); `scene_camera` reconstructs the

@@ -726,6 +726,18 @@ mod dev_control {
     #[cfg(feature = "render")]
     const CAPTURE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
+    /// The reply timeout for a CONVERGED STILL (T2, the design §12.2): the capture waits 64 frames or
+    /// more past the history's reset; the bound holds them at about two frames a second (a stated bound
+    /// for a client still building its ground, not a measured rate).
+    #[cfg(feature = "render")]
+    const CAPTURE_STILL_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// ★ THE WAIT FOR A SCENE SWAP (G-CROSSING; `DevRequest::Record`'s `around_swap`): a pilot walks into a
+    /// hull at the foot speed, and the moving-eye gate gives that boarding 300 s; the record waits as long
+    /// for the swap's first frame, the dev connection's own read bound (a stated bound, not a measured rate).
+    #[cfg(feature = "render")]
+    const CAPTURE_SWAP_TIMEOUT: Duration = vd_bins::DEVCTL_READ_TIMEOUT;
+
     /// Record-sequence safety bounds: a fat-fingered `--secs 1e9` or `--fps 100000` is
     /// clamped, never allowed to run unbounded. 3600 frames = 60 s at 60 fps — ample for a
     /// transition clip; the agent can issue another `record` to continue.
@@ -933,6 +945,12 @@ mod dev_control {
                         None => return Ok(()), // socket closed mid-wait
                     }
                 }
+                // ★ A CONVERGED STILL (T2, the design §12.2): the history restarts once and the
+                // capture waits whole jitter cycles before it serves the frame.
+                #[cfg(feature = "render")]
+                Ok(DevRequest::ScreenshotStill { label }) if handles.captures.is_some() => {
+                    screenshot_still(&handles, label).await
+                }
                 // Record (Capture mode): a frame SEQUENCE — paced here (off the reactor) and
                 // cancellable on EOF, like Screenshot/WaitUntil; handled in serve_conn for
                 // the same reason. Otherwise → Unsupported in dispatch_immediate.
@@ -942,8 +960,19 @@ mod dev_control {
                     secs,
                     label,
                     consecutive,
+                    around_swap,
                 }) if handles.captures.is_some() => {
-                    match record(&handles, &mut framer, fps, secs, label, consecutive).await {
+                    match record(
+                        &handles,
+                        &mut framer,
+                        fps,
+                        secs,
+                        label,
+                        consecutive,
+                        around_swap,
+                    )
+                    .await
+                    {
                         Some(response) => response,
                         None => return Ok(()), // socket closed mid-record
                     }
@@ -984,7 +1013,9 @@ mod dev_control {
             // Decodable but not wired in this build (capture needs `--features render` +
             // Capture mode): an HONEST `Unsupported`, NOT `BadRequest` (reserved for
             // malformed input). Reached when `captures` is None (headless/windowed).
-            DevRequest::Screenshot { .. } | DevRequest::Record { .. } => DevResponse::Error {
+            DevRequest::Screenshot { .. }
+            | DevRequest::ScreenshotStill { .. }
+            | DevRequest::Record { .. } => DevResponse::Error {
                 error: DevError::Unsupported,
             },
             input => apply(handles, input),
@@ -1239,6 +1270,34 @@ mod dev_control {
         .await
     }
 
+    /// ★ A CONVERGED STILL (T2, the design §12.2): one capture whose job restarts the history once and
+    /// serves the first frame of a whole jitter cycle past the count's cap; persisted and answered as a
+    /// screenshot.
+    #[cfg(feature = "render")]
+    async fn screenshot_still(handles: &Handles, label: Option<String>) -> DevResponse {
+        match capture_one(
+            handles,
+            CaptureKind::Screenshot,
+            label,
+            None,
+            true,
+            None,
+            None,
+        )
+        .await
+        {
+            Some(Ok(result)) => {
+                let tick = result.freshest_tick;
+                let path = result.path.clone();
+                persist_capture(handles, CaptureKind::Screenshot, result, None, true).await;
+                DevResponse::Captured { path, tick }
+            }
+            _ => DevResponse::Error {
+                error: DevError::Busy,
+            },
+        }
+    }
+
     /// Serve a `Screenshot` (Capture mode): optionally wait for the universe tick to reach
     /// `at_tick` (reusing the wait-until machinery — cancellable on EOF), capture one frame,
     /// record it in the run manifest (PNG path + aligned state + tick), and reply with the
@@ -1271,7 +1330,17 @@ mod dev_control {
                 other => return other,                // Timeout / closed / EOF (None)
             }
         }
-        match capture_one(handles, CaptureKind::Screenshot, label, None).await {
+        match capture_one(
+            handles,
+            CaptureKind::Screenshot,
+            label,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        {
             Some(Ok(result)) => {
                 // The render-sampled tick (the captured frame's), not a post-roundtrip poll.
                 let tick = result.freshest_tick;
@@ -1300,6 +1369,7 @@ mod dev_control {
         secs: f64,
         label: Option<String>,
         consecutive: bool,
+        around_swap: Option<u32>,
     ) -> Option<DevResponse> {
         if handles.captures.is_none() {
             return Some(DevResponse::Error {
@@ -1319,13 +1389,41 @@ mod dev_control {
         // CONSECUTIVE (slice 8 step 6): each frame after the first is asked for by its exact
         // index, the last served frame plus one; a frame the ring has dropped ends the sequence.
         let mut exact_frame: Option<u64> = None;
+        // ★ THE FILES FOLLOW (2026-10-01, `CaptureJob::written`): a consecutive frame is answered
+        // when it is served, so the next one is asked for at once; its files' outcomes arrive here,
+        // and the record answers only once every served frame's files exist.
+        let (files_tx, files_rx) = crossbeam_channel::unbounded();
+        let mut served = 0u64;
+        // ★ AROUND THE NEXT SCENE SWAP (G-CROSSING): the first frame waits for the client's next scene
+        // swap past the count it states now, and starts `before` frames ahead of it.
+        let mut swap_wait = around_swap.map(|before| {
+            let count = current(handles)
+                .terrain_stamp
+                .map_or(0, |stamp| stamp.scene_swaps);
+            (count, u64::from(before))
+        });
         for i in 0..plan.frames {
             let label = Some(format!("{base}-{i:04}"));
-            match capture_one(handles, CaptureKind::Frame, label, exact_frame).await {
+            let files = consecutive.then(|| files_tx.clone());
+            match capture_one(
+                handles,
+                CaptureKind::Frame,
+                label,
+                exact_frame,
+                false,
+                files,
+                swap_wait.take(),
+            )
+            .await
+            {
                 Some(Ok(result)) => {
                     exact_frame = consecutive.then_some(result.frame + 1);
                     persist_capture(handles, CaptureKind::Frame, result, None, false).await;
-                    written += 1;
+                    if consecutive {
+                        served += 1;
+                    } else {
+                        written += 1;
+                    }
                 }
                 // Render thread gone / timed out / the exact frame gone: stop, return what we
                 // captured so far.
@@ -1350,6 +1448,19 @@ mod dev_control {
                 }
             }
         }
+        // Every served frame's files, before the answer: a frame whose files failed is not counted.
+        drop(files_tx);
+        if served > 0 {
+            let outcomes = tokio::task::spawn_blocking(move || {
+                (0..served)
+                    .map_while(|_| files_rx.recv_timeout(CAPTURE_REPLY_TIMEOUT).ok())
+                    .filter(Result::is_ok)
+                    .count() as u64
+            })
+            .await
+            .unwrap_or(0);
+            written += outcomes;
+        }
         flush_manifest_blocking(handles).await;
         let path = handles
             .runs_dir
@@ -1365,7 +1476,8 @@ mod dev_control {
     /// Send ONE capture job to the render thread and await its reply off the reactor (a
     /// bounded blocking recv via `spawn_blocking`, so it never stalls the runtime or hangs).
     /// `None` ⇒ no capture channel (not Capture mode); `Some(Err)` ⇒ render thread gone or
-    /// timed out; `Some(Ok)` ⇒ the written PNG. The ONE place a `CaptureJob` is sent —
+    /// timed out; `Some(Ok)` ⇒ the written PNG — or, with `written`, the served frame, whose files'
+    /// outcome follows on that sender (`CaptureJob::written`). The ONE place a `CaptureJob` is sent —
     /// shared by `screenshot` and `record`.
     #[cfg(feature = "render")]
     async fn capture_one(
@@ -1373,6 +1485,9 @@ mod dev_control {
         kind: CaptureKind,
         label: Option<String>,
         exact_frame: Option<u64>,
+        converge: bool,
+        written: Option<crossbeam_channel::Sender<Result<(), String>>>,
+        after_swap: Option<(u64, u64)>,
     ) -> Option<Result<vd_client_render::CaptureResult, ()>> {
         let captures = handles.captures.as_ref()?;
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
@@ -1382,14 +1497,22 @@ mod dev_control {
                 label,
                 reply: reply_tx,
                 exact_frame,
+                converge,
+                written,
+                after_swap,
             })
             .is_err()
         {
             return Some(Err(())); // the render thread/app exited
         }
-        match tokio::task::spawn_blocking(move || reply_rx.recv_timeout(CAPTURE_REPLY_TIMEOUT))
-            .await
-        {
+        // A converged still waits whole jitter cycles past the reset, and a scene swap a boarding's walk:
+        // each its own, longer bound.
+        let timeout = match (converge, after_swap.is_some()) {
+            (_, true) => CAPTURE_SWAP_TIMEOUT,
+            (true, false) => CAPTURE_STILL_TIMEOUT,
+            (false, false) => CAPTURE_REPLY_TIMEOUT,
+        };
+        match tokio::task::spawn_blocking(move || reply_rx.recv_timeout(timeout)).await {
             Ok(Ok(Ok(result))) => Some(Ok(result)),
             _ => Some(Err(())),
         }

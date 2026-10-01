@@ -730,3 +730,107 @@ from below. UNMEASURED: neither form was drawn.
 **Example.** The hull hangs 2 km over the dry sea floor, 20 km off the owner's coast. Before: a hard line at the eye's
 level, bare ground under it. After: the far floor and the rising coast take the haze of every metre of air between, and
 the coast's air is the charter's own, so ridges 50 km off wear a pale veil.
+
+## B26. NO TERM GROWS UNDER THE SEA'S LEVEL (2026-09-30)
+
+The owner, from 7 800 km over the home planet with the water off (B22), the dry sea floors washed pale: *"That how it looks
+from above - the athmosphere in low places might destroy the whole look. Can we not increse dencity below the sea
+level?"* — this AMENDS B25 law 2: under the sea level EVERY term of the air HOLDS its sea-level value (the molecules no
+longer grow by the pressure law; the haze held already). Laws 1, 3 and 4 and law 2's reach (no eye and no drawn ground is
+under the air) stand.
+
+**BUILT AS (2026-09-30):** the law's growing coefficient (`vd_client::sky::Below::scattering_per_m`) is nought; the
+vendored march keeps its form (the sixth change states the coefficient the game gives).
+
+**MEASURED (the same pose and light, 7 793 km over the ground, headless):** the basins moved 0–5 levels (one basin
+(102, 112, 136) → (99, 107, 131), another unchanged), the land not at all — the basins STAY pale, because a dry basin 7 km
+deep holds about as much air as the whole column over the sea level even at the sea level's density (the molecules'
+optical depth about 0.09 under the sea against about 0.1 over it, the haze's about 0.03 against 0.005), so from orbit a
+basin looks through about twice the air the land does. The planned cure is the water fill (B22 step 4): the basins hold
+water, and the air ends on the sea's surface.
+
+**Example.** The pilot hangs 7 800 km over the dry ocean east of the dunes: the basin's floor is a little less blue than
+before, still paler than the tan land beside it, until the water fill puts the sea back.
+
+## B27. THE EYE'S RULE IS THE SEAM LAW; THE WALK'S STEPS AND THE CRACK FIRST (2026-10-01)
+
+The owner, on the eye's reading of the four-frame flight (DEFERRED, the T2 block): *"Yes, as it stands"* — and for what
+comes next: *"1,2 first please, then rest of T2 gates"*.
+
+1. **THE EYE'S RULE IS THE SEAM LAW of the flight gate, AS IT STANDS** (`vd_client_harness::eye`): the DISPLAY picture,
+   read under the engine's screen dither; a pop is the JUMP between two still sides of a step (four frames a pair, the
+   step the middle two); a compact pop counts beyond the eight-bit rounding as a PATCH, a faint wide pop as a WINDOW at
+   least a degree wide; judged against Blackwell's thresholds as Crumey fitted them, at the natural seat (the picture
+   fills the camera's 45° on the eye), on the reference display (white 200 cd/m², black 0.2 cd/m²), SEEN at level one.
+   Every flight leg — the walk, 240 m/s, 528 m/s, the turn — must hold NO pop the eye sees; the landing (the login,
+   which may hide behind a loading screen) is REPORTED. The level rule (one hundredth of a border's pixels plus one a
+   pair past the floor) retires as a law; its numbers stay as readings.
+2. **THE ORDER:** (1) the walk's stepping eye (at 1.4 m/s the drawn eye stands still for up to 5 ticks, then moves
+   4–7 cm at once) and (2) the flickering crack (a single dark pixel on the ground for a frame or two) — each measured
+   to its cause, then cured; THEN the rest of T2's gates.
+
+**Example.** The hull flies at 240 m/s over the dunes and a rung-2 band under it steps two levels brighter and stays: a
+patch of 0.15 square degrees at 3 % on a 40 cd/m² field, level ten — the gate goes red and names the rung. A lone
+pixel one level darker for one frame stays under the rounding and is no pop.
+
+
+## B28. THE TILE REACH CURED NOW; THE PICTURE GATE WAITS FOR THE SOLVE; FIND THE HISTORY'S AMPLIFIER (2026-10-01)
+
+Three findings of the T2 gates' first run (DEFERRED, the T2 block: G-DETERMINISM and the seam stand), each answered with
+the recommended option:
+
+1. **THE TILE REACH IS CURED NOW, BEFORE THE REST OF T2** (owner: "Cure it now"). The shard and the gateway measured the
+   pilot's height over the planet's RADIUS, the client's ladder over the SOLVED ground (since 2026-09-24); at the picture
+   gate's seam stand the client waited for tiles the shard never sent, and a 3 km step with sky in it stood while the pilot
+   stood there. One reach rule on both hosts (ruling W17), from the artifact each one holds; no new data crosses. (Built:
+   the shard reads the ground its artifact states; the gateway, which relays tiles undecoded, serves the whole ring.)
+2. **THE PICTURE GATE WAITS FOR THE SOLVE** (owner: "Wait for the solve"): every stand shows the solved ground, as the
+   moving-eye gate does (ruling B19 items 2 and 3). The four exact references change; the new pictures come to the owner
+   beside the old ones, and nothing is frozen before the owner accepts them.
+3. **G-DETERMINISM: FIND THE AMPLIFIER** (owner: "Find the amplifier"): why a world a few ticks apart moves a converged
+   pixel by up to 4 levels while the single frames agree within one; a still scene should not amplify so small a change.
+
+**Example.** The pilot stands on a cube's edge, 3 283 m over the dry sea floor. The shard names the tiles out to the
+ring the client asks from that floor, and the ground under the far chunks builds; the picture gate takes that picture
+only once the planet's artifact is held, so the stand shows the solved world the players see.
+
+## B29. THE SOLVED PICTURES ACCEPTED; THE AMPLIFIER'S MOST ROBUST CURE; THE WINDOW ASKED AGAIN (2026-10-01)
+
+The owner's answers to the four questions of B28's report:
+
+1. **THE SOLVED-GROUND PICTURES ARE ACCEPTED AND FROZEN** (owner: "Accept and freeze"). The picture gate on the solved
+   ground, the default path (the temporal path off), froze every stand into the owner's folder
+   (`docs/investigation/2026-09-07/pictures/exact/`, 2026-10-01 16:00–16:08), the far stand's reference with them.
+   The recipe-ground references of 2026-09-24 are retired.
+2. **THE AMPLIFIER'S CURE: "the most robust and production ready solution"** (owner's question). The answer, MEASURED
+   by the shader's replay on the captured frames: FSR 2.2's own history rectification — the history CLAMPED axis by
+   axis in YCoCg into the deviation box cut to the samples' own range (`RectifyHistory`), the 16-bit history kept (FSR
+   2.2 ships it). It is the box's nearest point, so two colours never move apart; two inputs 1e-5 apart end within one
+   level at every clock, and the picture at one jitter phase repeats exactly every cycle. The 32-bit history only
+   removes one source (the rounding) and keeps the clip's 177-fold growth of any real input difference. BUILT, and
+   MEASURED in two flights: every stand within one level (the hill 7 → 1). THE OWNER'S LOOK GIVEN (2026-10-01, the
+   window at the hill stand: scale 1.0 "Good", then flying hull 10 and hull 11 at 0.67: "All good!").
+3. **THE TERRAIN CRATE'S COVERAGE** (owner: "We will work on the terrain believability now, do you recommend to write
+   those tests still?"): answered — not as a separate pass now; each believability change leaves the files it touches
+   at 100 % in the same change, and what remains closes when the arc ends. The owner's word stands owed.
+4. **THE WINDOW** (owner: "Ask me then"): the looks D5, D6 and D7 are asked again when the cure stands.
+
+**Example.** The pilot stands on the hill at dusk. Before the cure, two flights a few ticks apart drew the dune's sunlit
+slope up to 7 levels apart, because the history drifted along its colour box; with the clamp the history sits at the
+box's nearest point in both flights, and the two pictures of the slope agree within one level.
+
+## B30. ONE COMMIT NOW; THE TIMING WITH DOCKER STOPPED; G-GHOST AND THE VIEW SWITCH'S CROSSING MOVE TO T4 (2026-10-01)
+
+The owner's answers to the three questions after the look of B29:
+
+1. **ONE COMMIT NOW** (owner: "Commit now"): the work of B28 and B29 lands as one commit on the `game` branch, with no
+   push. T2's last flights follow in a later commit.
+2. **THE TIMING READINGS** (owner: "Docker stopped"): the window's own cost reading and G-NO-STALL are measured while
+   Docker is stopped. The window opens only on the owner's word at that moment.
+3. **THE CUT OF T2** (owner: "Yes, move them"): G-GHOST waits for T4 with D9, because its bound is D9's; the crossing
+   reading of the view switch (V, the chase camera) moves to T4 too. The crossing readings of a boarding and of a
+   departure stay in T2.
+
+**Example.** The pilot walks into hull 11 on the hill and takes the hull's frame: T2 reads the frames before and after
+that swap. The pilot then presses V and the camera moves back behind the hull: T4 reads that switch, at the frame rate
+that ships.

@@ -2799,6 +2799,7 @@ fn measure_the_galaxy_shards_tick_against_its_census() {
         SESSION,
         Dot {
             last_stick: None,
+            walk_stick: None,
             entity: player(7),
             account: AccountId(1),
             session_fence: Fence(1),

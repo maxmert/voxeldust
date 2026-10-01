@@ -251,6 +251,82 @@ pub fn straddle(
     }
 }
 
+/// ★ THE GATE SEES THE SOLVED WORLD (2026-09-27, the walk's band gap; shared with the picture gate
+/// since 2026-10-01, the owner: "Wait for the solve"): wait until every realm in the window whose
+/// row states a surface holds its artifact's whole pyramid in the client's book.
+///
+/// A gate boots a new world, and each planet's shard solves its artifact off the tick at its first
+/// boot; until the solve lands the realm states no artifact and the client draws the recipe's own
+/// relief. When it lands, the lane drops every chunk of that realm and builds it again on the
+/// artifact. MEASURED on three flights: the home planet solved in 205 s, the far planets in 77 s,
+/// 162 s and 382 s — so the walk flew on the home planet's UNSOLVED ground; and on 2026-10-01 the
+/// picture gate's first four stands were judged on the recipe's ground, the solve landing (227 s)
+/// in the fifth. Every planet with a surface solves an artifact today; a surfaced realm that states
+/// none by design would hold this wait to its deadline, which names it.
+///
+/// **Example.** The walker logs in on the home planet; its shard is still solving, so the ground is
+/// the recipe's own relief. The wait prints the realms still unsolved every ten seconds; at 205 s
+/// the home planet's artifact lands and the ladder is built again on it; at 382 s the last far
+/// planet's pyramid is whole, and the settle then waits for the builds.
+///
+/// # Panics
+/// If a surfaced realm does not hold its artifact whole within [`SOLVE_DEADLINE`].
+pub fn await_window_solved(devctl: u16, label: &str) {
+    let started = std::time::Instant::now();
+    let mut printed = 0u64;
+    loop {
+        let st = poll(devctl);
+        let unsolved = unsolved_realms(&st);
+        if unsolved.is_empty() {
+            let waited = started.elapsed();
+            if waited >= Duration::from_secs(SOLVE_COURSE_S) {
+                eprintln!(
+                    "{label}: every surfaced realm in the window holds its artifact whole after \
+                     {:.1} s",
+                    waited.as_secs_f64()
+                );
+            }
+            return;
+        }
+        let secs = started.elapsed().as_secs();
+        if secs / SOLVE_COURSE_S > printed {
+            printed = secs / SOLVE_COURSE_S;
+            eprintln!(
+                "{label}: waiting t {secs:4} s for the window's artifacts — unsolved or not yet \
+                 whole {unsolved:?}, the book holds {:?}",
+                st.artifacts.held
+            );
+        }
+        assert!(
+            started.elapsed() < SOLVE_DEADLINE,
+            "{label}: a surfaced realm never held its artifact whole after {SOLVE_DEADLINE:?}: \
+             {unsolved:?} (the book holds {:?})",
+            st.artifacts.held
+        );
+        std::thread::sleep(SOLVE_POLL);
+    }
+}
+
+/// The surfaced realms in the window whose artifact the client's book does not hold whole.
+#[must_use]
+pub fn unsolved_realms(st: &DevState) -> Vec<&str> {
+    st.realm_boxes
+        .iter()
+        .filter(|b| b.surface)
+        .map(|b| b.realm.as_str())
+        .filter(|r| !st.artifacts.held.iter().any(|(h, whole)| h == r && *whole))
+        .collect()
+}
+
+/// The artifact wait's deadline: the slowest first solve in the home planet's window MEASURED
+/// 382 s on the development machine (2026-09-27, three runs: a 25 400 km planet 196 million km
+/// away), and this allows it more than twice over.
+pub const SOLVE_DEADLINE: Duration = Duration::from_secs(900);
+/// How often the artifact wait prints its course, in seconds.
+pub const SOLVE_COURSE_S: u64 = 10;
+/// The artifact wait's poll period.
+pub const SOLVE_POLL: Duration = Duration::from_millis(250);
+
 /// One `DevState` poll, panicking on a dead listener (a gate precondition, never a soft skip).
 ///
 /// # Panics

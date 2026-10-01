@@ -595,6 +595,7 @@ fn ledger_at(regions: &RealmRegions, tick_hz: f64, tick: UniverseTick) -> Placem
 fn slice6_dot(entity: EntityId, frame: FrameRef, authority: Authority) -> Dot {
     Dot {
         last_stick: None,
+        walk_stick: None,
         entity,
         account: AccountId(1),
         session_fence: Fence(1),
@@ -961,6 +962,7 @@ fn insert_owned_dot(rig: &mut Rig, session: SessionId, entity: EntityId, offset:
         session,
         Dot {
             last_stick: None,
+            walk_stick: None,
             entity,
             account: AccountId(1),
             session_fence: Fence(1),
@@ -1426,6 +1428,7 @@ fn insert_owned_dot_framed(
         session,
         Dot {
             last_stick: None,
+            walk_stick: None,
             entity,
             account: AccountId(1),
             session_fence: Fence(1),

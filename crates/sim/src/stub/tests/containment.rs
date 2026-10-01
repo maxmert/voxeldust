@@ -1231,6 +1231,7 @@ fn slice4a_nonzero_cell_is_carried_unchanged_and_the_offset_crossing_still_fires
         TRIG_SESSION,
         Dot {
             last_stick: None,
+            walk_stick: None,
             entity,
             account: AccountId(1),
             session_fence: Fence(1),

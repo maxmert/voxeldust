@@ -12185,21 +12185,18 @@ fn a_viewers_tiles_are_wanted_by_its_view_cached_once_and_served_within_its_reac
     assert!((views[0].radial_m - 30.0).abs() < 1.0e-9, "{views:?}");
     assert!((views[0].dir[0] + 1.0).abs() < 1.0e-9, "{views:?}");
     assert_eq!(parts_to_client(&sent).len(), 2, "the head and the part");
-    // The tile the view reaches, as the terrain crate names it for the gateway and the shard.
+    // The tile the view reaches, as the terrain crate names it for the gateway: the whole ring.
     let rung = vd_terrain::artifact::tile_rung(&lattice, 1, body.ladder().rungs - 1);
     let step_m =
         body.step_bound_m(rung) + vd_terrain::artifact::field_step_m(&body, &lattice, 1, rung);
-    let reach = vd_terrain::artifact::tile_reach_m(
+    let ring = vd_terrain::artifact::tile_ring_m(
         &lattice,
         1,
         body.ladder().rungs - 1,
-        body.radius_m(),
-        body.relief_bound_m(0),
-        30.0,
         vd_core::geometry::drawable_theta_min_rad(),
         step_m,
     );
-    let tiles = vd_terrain::artifact::tiles_within(&lattice, [-1.0, 0.0, 0.0], reach);
+    let tiles = vd_terrain::artifact::tiles_within(&lattice, [-1.0, 0.0, 0.0], ring);
     let (face, tx, ty) = tiles[0];
     let tile = BulkMsg::ArtifactTile {
         realm: RealmId::Planet(7),
@@ -13047,11 +13044,25 @@ fn a_body_with_no_macro_lattice_reaches_no_tiles() {
         dir: [-1.0, 0.0, 0.0],
         radial_m: 30.0,
     };
-    assert_eq!(
-        super::artifact::tiles_in_reach(&body, 1, view).len(),
+    // A body WITH a lattice reaches the tiles of its whole ring (21 here), as the terrain crate
+    // names them.
+    let lattice = body.macro_lattice().expect("a lattice");
+    let rung = vd_terrain::artifact::tile_rung(&lattice, 1, body.ladder().rungs - 1);
+    let step_m =
+        body.step_bound_m(rung) + vd_terrain::artifact::field_step_m(&body, &lattice, 1, rung);
+    let ring = vd_terrain::artifact::tile_ring_m(
+        &lattice,
         1,
-        "a body WITH a lattice reaches its tile"
+        body.ladder().rungs - 1,
+        vd_core::geometry::drawable_theta_min_rad(),
+        step_m,
     );
+    let reached = super::artifact::tiles_in_reach(&body, 1, view);
+    assert_eq!(
+        reached,
+        vd_terrain::artifact::tiles_within(&lattice, view.dir, ring)
+    );
+    assert_eq!(reached.len(), 21);
     assert_eq!(
         super::artifact::tiles_in_reach(&body.without_macro_lattice(), 1, view),
         Vec::new()

@@ -147,8 +147,8 @@ impl ProcessClient {
             .is_ok()
     }
 
-    /// One client tick: drain, decode (asserting the single-peer invariant),
-    /// optionally walk.
+    /// One client tick: drain, decode (asserting the single-peer invariant), and state the stick
+    /// held — forward to walk, nought to stand.
     fn step(&mut self, walk: bool) {
         for msg in self.transport.drain_inbound() {
             match msg {
@@ -190,13 +190,17 @@ impl ProcessClient {
             }
         }
         self.tick += 1;
-        if walk && !self.held_subs.is_empty() {
+        // ★ A CLIENT STATES ITS STICK EVERY STEP, AS THE SHIPPED CLIENT DOES (`vd_client::net`, the
+        // active phase): nought to stand. The shard walks a walker one step a tick on the stick it
+        // holds (2026-10-01, `stub::dot::walk_held_sticks`), so a client that went silent instead of
+        // stating "nought" would leave its walker walking.
+        if !self.held_subs.is_empty() {
             self.next_seq += 1;
             let input = InputDatagram {
                 seq: self.next_seq,
                 is_cut_marker: false,
                 client_tick: TickId(self.tick),
-                movement: [1.0, 0.0, 0.0],
+                movement: if walk { [1.0, 0.0, 0.0] } else { [0.0; 3] },
                 look: [0.0, 0.0],
                 action_bits: 0,
             };
@@ -490,8 +494,9 @@ fn p1_parity_real_binaries_over_quic() {
     // kilometres away by the time the sky had arrived, and a shard ships an occupant only to the
     // observers that can still draw it — so the idle dot was told the walker had left its
     // interest, evicted it, and this loop waited for a second pose that could never come. Now the
-    // walker steps until it has measurably moved and then stands, inside the idle dot's reach, and
-    // the parity claim is made about two dots that can see each other.
+    // walker steps until it has measurably moved and then stands (it states a nought stick, as the
+    // shipped client does), inside the idle dot's reach, and the parity claim is made about two dots
+    // that can see each other.
     let mut walker_moved = false;
     loop {
         walker.step(!walker_moved);

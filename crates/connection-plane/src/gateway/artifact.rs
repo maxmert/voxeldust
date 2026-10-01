@@ -363,7 +363,15 @@ fn body_of_bag(bag: &[u8]) -> Option<vd_terrain::BodyDefinition> {
     )
 }
 
-/// The tiles a view reaches on a body, by the terrain crate's own rule (the shard's rule too).
+/// The tiles a view reaches on a body, by the terrain crate's own rule: THE WHOLE TILE RING
+/// (`vd_terrain::artifact::tile_ring_m`), the finest tile-reading rung's ask ring with no horizon.
+///
+/// ★ THE WHOLE RING, NEVER THE HORIZON (2026-10-01): the client's ladder reads its horizon over the
+/// SOLVED ground under the eye, and the gateway relays the tiles undecoded, so it cannot read that
+/// ground. A horizon read over the radius stood short of the client's wherever the solved ground lay
+/// far under it — MEASURED on the shard's own copy of the rule at the picture gate's seam stand: 6
+/// tiles named, 8 more waited on. The whole ring holds every reach over any ground, so a session is
+/// served every cached tile it can ask; the shard, which holds the ground, ships the exact set.
 ///
 /// ★ `pub(crate)` FOR THE PEBBLE (2026-09-21). A body the bag's charter builds always HAS a macro
 /// lattice, because the divisor rule and `BodyDefinition::from_seed` read the same cell count: the
@@ -385,17 +393,14 @@ pub(crate) fn tiles_in_reach(
     let rung = vd_terrain::artifact::tile_rung(&lattice, levels, body.ladder().rungs - 1);
     let step_m =
         body.step_bound_m(rung) + vd_terrain::artifact::field_step_m(body, &lattice, levels, rung);
-    let reach_m = vd_terrain::artifact::tile_reach_m(
+    let ring_m = vd_terrain::artifact::tile_ring_m(
         &lattice,
         levels,
         body.ladder().rungs - 1,
-        body.radius_m(),
-        body.relief_bound_m(0),
-        view.radial_m,
         vd_core::geometry::drawable_theta_min_rad(),
         step_m,
     );
-    vd_terrain::artifact::tiles_within(&lattice, view.dir, reach_m)
+    vd_terrain::artifact::tiles_within(&lattice, view.dir, ring_m)
 }
 
 /// ★ THE ARTIFACTS THE PICTURES NAME: for every Active session's drawn realms, the digest the

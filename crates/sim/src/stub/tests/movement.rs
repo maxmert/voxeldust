@@ -29,6 +29,88 @@ fn applied_input_moves_the_dot_and_is_logged() {
     assert!((dot.pose.vel.z + 2.0).abs() < 1e-12);
 }
 
+/// ★ THE HELD STICK WALKS EVERY TICK (2026-10-01; ruling B27's first item). An input sets the stick;
+/// every tick after it the walker walks one step on it, with no newer input — the client states its
+/// stick 20 times a second and the shard ticks 50, so a walk that moved only on an input arrival stood
+/// still between them. A zero stick holds the walker still.
+#[test]
+fn a_held_stick_walks_a_step_every_tick_until_a_newer_input() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let _ = rig.attach();
+    let step = 2.0 * 0.05; // speed · dt
+    let _ = rig.tick(vec![input_msg(1, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
+    let _ = rig.tick(vec![]);
+    let _ = rig.tick(vec![]);
+    let dot = rig.world.resource::<Dots>().0[&SESSION];
+    assert!(
+        (total_m(&dot.pose.pos).z + 3.0 * step).abs() < 1e-12,
+        "three ticks, three steps, one input"
+    );
+    assert_eq!(dot.walk_stick, Some([1.0, 0.0, 0.0]));
+    let _ = rig.tick(vec![input_msg(2, Fence(1), [0.0, 0.0, 0.0], [0.0, 0.0])]);
+    let _ = rig.tick(vec![]);
+    let dot = rig.world.resource::<Dots>().0[&SESSION];
+    assert!(
+        (total_m(&dot.pose.pos).z + 3.0 * step).abs() < 1e-12,
+        "a zero stick stands"
+    );
+    assert_eq!(dot.pose.vel, DVec3::ZERO);
+}
+
+/// ★ THE TICK IS THE WALK'S CLOCK, NOT THE INPUT COUNT: two inputs that arrive in one tick walk one
+/// step (before, each input walked a step, so a burst of inputs was a jump).
+#[test]
+fn two_inputs_in_one_tick_walk_one_step() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let _ = rig.attach();
+    let _ = rig.tick(vec![
+        input_msg(1, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0]),
+        input_msg(2, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0]),
+    ]);
+    let dot = rig.world.resource::<Dots>().0[&SESSION];
+    assert!((total_m(&dot.pose.pos).z + 2.0 * 0.05).abs() < 1e-12);
+    assert_eq!(
+        rig.world.resource::<InputLog>().applied(),
+        vec![(SESSION, 1), (SESSION, 2)]
+    );
+}
+
+/// A walker held for release (departing) stands on its held stick; an arrival drops the stick, so the
+/// new realm walks nobody until the next input states one.
+#[test]
+fn a_departing_walker_stands_and_an_arrival_drops_the_held_stick() {
+    let mut rig = Rig::new();
+    rig.grant_realm();
+    let _ = rig.attach();
+    let _ = rig.tick(vec![input_msg(1, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
+    // An arrival: the pose is adopted whole, the stick with the realm left behind is dropped.
+    let pose = rig.world.resource::<Dots>().0[&SESSION].pose;
+    rig.world
+        .resource_mut::<Dots>()
+        .0
+        .get_mut(&SESSION)
+        .expect("the walker")
+        .adopt_pose(pose);
+    let _ = rig.tick(vec![]);
+    let dot = rig.world.resource::<Dots>().0[&SESSION];
+    assert_eq!(dot.walk_stick, None);
+    assert_eq!(dot.pose.pos, pose.pos, "no stick, no step");
+    // A new stick walks again; then the detach holds the walker for release, standing.
+    let _ = rig.tick(vec![input_msg(2, Fence(1), [1.0, 0.0, 0.0], [0.0, 0.0])]);
+    let detach = GatewayToShard::DetachSession {
+        session: SESSION,
+        fence: Fence(1),
+    };
+    let _ = rig.tick(vec![wire_msg(GATEWAY, MsgClass::Control, &detach)]);
+    let held = rig.world.resource::<Dots>().0[&SESSION];
+    assert!(held.departing);
+    let _ = rig.tick(vec![]);
+    let after = rig.world.resource::<Dots>().0[&SESSION];
+    assert_eq!(after.pose.pos, held.pose.pos, "a departing walker stands");
+}
+
 #[test]
 fn yaw_rotates_the_heading() {
     let mut rig = Rig::new();
@@ -749,6 +831,7 @@ fn a_large_world_partitions_into_multiple_under_budget_frames() {
                 SessionId(u128::from(n) + 1),
                 Dot {
                     last_stick: None,
+                    walk_stick: None,
                     entity: EntityId::pack(EntityKind::Player, 10, n, n as u32),
                     account: AccountId(n as u128),
                     session_fence: Fence(1),

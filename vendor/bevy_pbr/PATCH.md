@@ -74,8 +74,9 @@ sphere, so a ray under the eye's level met the sphere at once and took no air. M
 over the dry sea floor): an eye 2 135 m under the sphere drew a hard line at its own level — the ground above it
 hazed, the ground under it bare. The change:
 - the component states the air UNDER the sphere (`AtmosphereBelow`, three uniform words): every term holds its
-  value at the sphere (the medium's table clamps to its edge) and ONE term grows by its exponential law (the
-  game's molecules, by the pressure law); the default states no growth and a clear medium;
+  value at the sphere (the medium's table clamps to its edge) and ONE term may grow by its exponential law at
+  the coefficient the game states (the game's molecules by the pressure law under ruling B25; NOUGHT since its
+  ruling B26 — no term grows under the sea's level); the default states no growth and a clear medium;
 - the per-pixel march starts at the TRUE eye (`get_eye_position`; the tables' reads keep the lifted
   `get_view_position`), and `raymarch_atmosphere` names its ray (`RAY_TABLE_SKY`, upstream's sky ray of the
   tables' builders; `RAY_TO_SURFACE`; `RAY_PIXEL_SKY`): a pixel's ray is never ended by the sphere
@@ -92,7 +93,16 @@ The tables' builders keep upstream's code (their rays run a fixed distance deep 
 would overflow). Behaviour for upstream users: an eye and a surface over the sphere read exactly upstream's
 values.
 
-**Owed:** the upstream pull request (all six changes); the patch dies at the Bevy upgrade gate (0.19).
+**The seventh change (2026-10-01, the sun at the sphere):** `atmosphere/functions.wgsl`,
+`calculate_visible_sun_ratio` (marked `VOXELDUST PATCH (the sun at the sphere)`): the horizon's root takes its
+argument held at nought. A ground under the sphere is lifted onto it (`clamp_to_surface`, one metre over), and at
+a planet's radius a 32-bit length rounds by half a metre a coordinate, so the lifted radius can read under the
+sphere; the root's argument went negative, the root NaN, and the fragment took no sunlight — a dark speck of
+haze alone. MEASURED (the walk's stand, dunes 2–3 km off under the sea's level): 541 specks in 8 frames with the
+sun's shadow on and 541 with it off, every one under the sphere. At the sphere the horizon is the local level.
+Behaviour for upstream users: a surface over the sphere reads exactly upstream's value.
+
+**Owed:** the upstream pull request (all seven changes); the patch dies at the Bevy upgrade gate (0.19).
 
 **Known upstream limit kept:** `write_atmosphere_buffer` takes `.single()` over cameras with an
 atmosphere, so the ground term is written for ONE atmosphere camera at a time.

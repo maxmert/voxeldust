@@ -32,6 +32,7 @@ pub mod render_clock;
 pub mod render_snapshot;
 pub mod sky;
 pub mod skyline;
+pub mod stand_in;
 pub mod star_sky;
 pub mod tuning;
 pub mod view;

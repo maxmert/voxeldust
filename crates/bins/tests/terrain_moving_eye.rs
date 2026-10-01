@@ -51,11 +51,16 @@ use vd_bins::{
 use vd_client_harness::capture::{
     capture_rel_path, motion_rel_for, probe_rel_for, render_rel_for, state_rel_for,
 };
+use vd_client_harness::eye;
 use vd_client_harness::manifest::CaptureKind;
 use vd_client_harness::motion_census::{
     MotionPicture, TRUTH_RESIDUAL_PX, TRUTH_SHARE, TruthFrame, TruthRead, motion_truth,
 };
-use vd_client_harness::pop::{Frame, PairRead, frame_camera, judge_pair, sum_reads};
+use vd_client_harness::pop::{
+    BoundaryRead, Frame, PairRead, RENDER_EDGE_REACH_PX, SEAM_RULE, display_edge_reach_px,
+    edge_separation_per_m, frame_camera, judge_pair, sum_reads,
+};
+use vd_client_harness::probe::display_probe;
 use vd_core::EntityId;
 use vd_core::entity_kind::EntityKind;
 use vd_core::glam::DVec3;
@@ -102,12 +107,30 @@ const SAMPLE_MS: u64 = 40;
 /// client's own rate.
 const POP_PAIR_EVERY_S: f64 = 2.0;
 const POP_PAIR_FPS: u32 = 60;
+/// ★ THE FRAMES A PAIR RECORDS (2026-10-01, the eye's rule, "Patches by eye"): the pair's two, and the
+/// two frames after them. The eye's reading (`vd_client_harness::eye`) judges the step between the middle
+/// two with a frame on each side: a pop HOLDS its new state after the step and stood still before it, a
+/// flicker does not — and with a lone frame on one side, a flicker of that frame reads as a held step (a
+/// dip in the lone frame before the step differs from both frames after it alike). The other judges read
+/// the first two.
+const POP_PAIR_FRAMES: u32 = 4;
 /// ★ HOW MANY PAIRS A LEG RECORDS, whatever its length: [`LEG_S`] over [`POP_PAIR_EVERY_S`],
 /// derived so the two can never disagree. A leg of the gate's own length records a pair every
 /// two seconds exactly as it always did; a LONG leg (the departure's climb, a soak's walk)
 /// spreads the same count over its own length instead of recording hundreds of pairs and
 /// spending the leg judging them.
 const POP_PAIRS_PER_LEG: f64 = LEG_S / POP_PAIR_EVERY_S;
+/// ★ THE LANDING (the temporal path's T2): the pilot's login onto the solved world, while the ladder
+/// streams in — the one moment of a flight where thousands of chunks land in view (MEASURED on the
+/// flights of 2026-09-30: 12 000 drawn and 2 600 still pending two seconds after the pilot's window held
+/// its artifacts). From the first chunk drawn until nothing is pending, the flight records a pair every
+/// this many seconds, at most [`LANDING_PAIRS`] of them, and judges them as it judges a leg's; the
+/// landing is REPORTED (ruling B27: the login may hide behind a loading screen). The game carries no
+/// test-only switch for a known pop (the owner, 2026-10-01: "Please make sure that we don't build any
+/// seams inside the game to support the tests"): the eye's rule proves it sees a pop on its own frames
+/// (`vd_client_harness::eye`'s tests), and the login's own pops are read every flight.
+const LANDING_PAIR_EVERY_S: f64 = 0.5;
+const LANDING_PAIRS: usize = 40;
 /// ★ THE DEPARTURE LEG (owner 2026-09-15, the two-radii cutoff's replacement): the hull climbs
 /// STRAIGHT UP from its berth — the stick along the berth's own radial, no torque, the same three
 /// numbers every other leg pushes with — until it stands this many body radii from the centre.
@@ -445,7 +468,7 @@ fn await_settled(devctl: u16, leg: &str) {
         matches!(reply, DevResponse::State { .. }),
         "{leg}: the terrain never drew a chunk: {reply:?}"
     );
-    await_window_solved(devctl, leg);
+    vd_bins::pixel::await_window_solved(devctl, &format!("terrain_moving_eye/{leg}"));
     let started = Instant::now();
     let deadline = Duration::from_millis(TERRAIN_WAIT_TICKS * 1_000 / 20);
     let mut printed = 0u64;
@@ -488,72 +511,6 @@ fn await_settled(devctl: u16, leg: &str) {
         std::thread::sleep(Duration::from_millis(SETTLE_POLL_MS));
     }
 }
-
-/// ★ THE LEGS FLY THE SOLVED WORLD (2026-09-27, the walk's band gap): wait until every realm in the
-/// window whose row states a surface holds its artifact's whole pyramid in the client's book.
-///
-/// The fixture boots a new world, and each planet's shard solves its artifact off the tick at its
-/// first boot; until the solve lands the realm states no artifact and the client draws the recipe's
-/// own relief. When it lands, the lane drops every chunk of that realm and builds it again on the
-/// artifact. MEASURED on three flights: the home planet solved in 205 s, the far planets in 77 s,
-/// 162 s and 382 s — so the walk flew on the home planet's UNSOLVED ground, a far planet 0.02 px
-/// wide was rebuilt 47.6 s into the walk (the walk's 37–38 gap frames: six globe chunks for 2.0 s,
-/// their old drawing still standing), and the 1.4 m/s leg's 3 899-chunk gap was the home planet's
-/// whole rebuild, not the builders' rate. Every planet with a surface solves an artifact today; a
-/// surfaced realm that states none by design would hold this wait to its deadline, which names it.
-///
-/// **Example.** The walker logs in on the home planet; its shard is still solving, so the ground is
-/// the recipe's own relief. The wait prints the realms still unsolved every ten seconds; at 205 s
-/// the home planet's artifact lands and the ladder is built again on it; at 382 s the last far
-/// planet's pyramid is whole, and the settle then waits for the builds.
-fn await_window_solved(devctl: u16, leg: &str) {
-    let started = Instant::now();
-    let mut printed = 0u64;
-    loop {
-        let st = poll(devctl);
-        let unsolved: Vec<&str> = st
-            .realm_boxes
-            .iter()
-            .filter(|b| b.surface)
-            .map(|b| b.realm.as_str())
-            .filter(|r| !st.artifacts.held.iter().any(|(h, whole)| h == r && *whole))
-            .collect();
-        if unsolved.is_empty() {
-            let waited = started.elapsed();
-            if waited >= Duration::from_secs(SOLVE_COURSE_S) {
-                eprintln!(
-                    "terrain_moving_eye/{leg}: every surfaced realm in the window holds its \
-                     artifact whole after {:.1} s",
-                    waited.as_secs_f64()
-                );
-            }
-            return;
-        }
-        let secs = started.elapsed().as_secs();
-        if secs / SOLVE_COURSE_S > printed {
-            printed = secs / SOLVE_COURSE_S;
-            eprintln!(
-                "terrain_moving_eye/{leg}: waiting t {secs:4} s for the window's artifacts — \
-                 unsolved or not yet whole {unsolved:?}, the book holds {:?}",
-                st.artifacts.held
-            );
-        }
-        assert!(
-            started.elapsed() < SOLVE_DEADLINE,
-            "{leg}: a surfaced realm never held its artifact whole after {SOLVE_DEADLINE:?}: \
-             {unsolved:?} (the book holds {:?})",
-            st.artifacts.held
-        );
-        std::thread::sleep(Duration::from_millis(SETTLE_POLL_MS));
-    }
-}
-
-/// The artifact wait's deadline: the slowest first solve in the home planet's window MEASURED
-/// 382 s on the development machine (2026-09-27, three runs: a 25 400 km planet 196 million km
-/// away), and this allows it more than twice over.
-const SOLVE_DEADLINE: Duration = Duration::from_secs(900);
-/// How often the artifact wait prints its course, in seconds.
-const SOLVE_COURSE_S: u64 = 10;
 
 /// The settle wait's poll period, and how often it prints its course.
 const SETTLE_POLL_MS: u64 = 250;
@@ -649,6 +606,18 @@ struct LegRead {
     pop_pairs: u64,
     pop_skipped: u64,
     pop: PairRead,
+    /// ★ THE POP DETECTOR ON THE DISPLAY PICTURE (T2, the design §12.3, reading 2): the pairs read on the
+    /// reconstruction's output, and their sum.
+    display_pairs: u64,
+    pop_display: PairRead,
+    /// ★ THE EYE (ruling B27): the steps read, the steps holding a pop the eye sees, the pops.
+    eye_steps: u64,
+    eye_pop_steps: u64,
+    eye_pops: Vec<String>,
+    /// ★ G-ALPHA (T2): the display pictures' pixels whose alpha is not 255, over the leg's pairs.
+    alpha_bad: u64,
+    /// ★ G-RESET (T2): the frames whose history restarted past the client's first frame, named.
+    reset_bad: Vec<String>,
     /// ★ THE MOTION TRUTH across the leg's pairs (the temporal path's T1, G-MOTION-TRUTH): the pairs
     /// whose second frame carried its motion (a flight under the motion prepass), and the still
     /// ground's residual against the pop detector's reprojection, summed.
@@ -667,6 +636,8 @@ struct LegRead {
     sky_widest: f64,
     sky_over: u64,
     sky_allowed_max: f64,
+    /// ★ THE SKY'S LAG of each frame the leg read ([`sky_lag`]).
+    sky_lag: Vec<(f64, f64)>,
     /// ★ THE BOARDING INSTRUMENT across the leg (2026-09-14): the band at the leg's FIRST sample
     /// (drawn, pending, urgent) — the sample that reads the whole-band rebuild a boarding cost;
     /// the ladders the terrain forgot before the leg started and over the leg, with the last
@@ -756,6 +727,59 @@ fn frame_of(f: &PairFrame, w: usize, h: usize) -> Frame<'_> {
             .stamp
             .reconstruction
             .map_or([0.0; 2], |r| r.jitter_px.map(f64::from)),
+        // ★ THE OCCLUSION EDGES APART (T2): a jittered render picture draws a silhouette as a stair that
+        // moves between two frames; the depth test's own separation names those pixels.
+        edge_separation_per_m: if f.stamp.reconstruction.is_some() {
+            edge_separation_per_m(w, h)
+        } else {
+            0.0
+        },
+        edge_reach_px: RENDER_EDGE_REACH_PX,
+    }
+}
+
+/// ★ THE PROBE UNDER THE DISPLAY PICTURE (T2, the design §12.3): the render grid's probe read at the
+/// nearest sample under each display pixel (`display_probe`); the picture's own probe where there is no
+/// reconstruction (the two share one grid).
+fn picture_probe(f: &PairFrame) -> Vec<u8> {
+    let (dw, dh) = f.rgba.dimensions();
+    let (pw, ph) = f.probe.dimensions();
+    let jitter = f
+        .stamp
+        .reconstruction
+        .map_or([0.0; 2], |r| r.jitter_px.map(f64::from));
+    display_probe(
+        f.probe.as_raw(),
+        [pw as usize, ph as usize],
+        [dw as usize, dh as usize],
+        jitter,
+    )
+}
+
+/// ★ THE DISPLAY PICTURE AS THE DETECTOR READS IT (T2, the design §12.3, the pop detector's reading 2):
+/// the reconstruction's output, the probe under each display pixel, the unjittered camera at the
+/// display size. ★ Its silhouettes are judged apart too, with the depth test's own separation (the
+/// RENDER grid's) and the display pixel's own reach (`display_edge_reach_px`): MEASURED (2026-09-30, the
+/// 240 m/s leg's first pairs) a near dune's crest against the far basin slides over it by parallax, and
+/// 1 000–3 500 of its display pixels a pair stepped past the floor, where the render picture read two.
+fn display_frame_of<'a>(f: &'a PairFrame, probe: &'a [u8]) -> Frame<'a> {
+    let (w, h) = f.rgba.dimensions();
+    let (w, h) = (w as usize, h as usize);
+    let (rw, rh) = f.probe.dimensions();
+    let (rw, rh) = (rw as usize, rh as usize);
+    Frame {
+        rgba: f.rgba.as_raw(),
+        probe,
+        width: w,
+        height: h,
+        camera: frame_camera(f.stamp.eye_body_m, f.stamp.camera_body_xyzw, w, h),
+        hud: {
+            let r = f.stamp.hud_rect_px.map(f64::from);
+            ((r[2] > r[0]) & (r[3] > r[1])).then_some(r)
+        },
+        jitter_px: [0.0; 2],
+        edge_separation_per_m: edge_separation_per_m(rw, rh),
+        edge_reach_px: display_edge_reach_px(rw, w),
     }
 }
 
@@ -773,13 +797,15 @@ fn frame_of(f: &PairFrame, w: usize, h: usize) -> Frame<'_> {
 /// still. The stars stay inside the region; a sub-pixel shift moves their light between pixels and
 /// leaves the mean where it was. `None` where a frame has no sky row (no body with air under the
 /// eye) or the region is empty.
-fn judge_sky_pair(a: &PairFrame, b: &PairFrame, w: usize, h: usize) -> Option<(f64, f64)> {
-    // The judge reads the picture through the probe pixel by pixel: under an up-scale (T2) the display
-    // picture is larger than the probe, and its own reading is owed (the design §12.3); no pair is read.
-    let same = |f: &PairFrame| f.rgba.dimensions() == f.probe.dimensions();
-    if !(same(a) & same(b)) {
-        return None;
-    }
+fn judge_sky_pair(
+    a: &PairFrame,
+    b: &PairFrame,
+    (pa, pb): (&[u8], &[u8]),
+    w: usize,
+    h: usize,
+) -> Option<(f64, f64)> {
+    // ★ THE DISPLAY PICTURE (T2, the design §12.3): the judge reads the picture the player sees through the
+    // probe under each of its pixels (`picture_probe`), so an up-scaled picture is read at its own size.
     let sky = a.stamp.sky.as_ref()?;
     let scale_height_m = (sky.top_m - sky.bottom_m) / vd_client::sky::SHELL_TOP_SCALE_HEIGHTS;
     let (ea, eb) = (
@@ -800,7 +826,6 @@ fn judge_sky_pair(a: &PairFrame, b: &PairFrame, w: usize, h: usize) -> Option<(f
             & ((y as f64 + 0.5) >= hud[1])
             & ((y as f64 + 0.5) <= hud[3])
     };
-    let (pa, pb) = (a.probe.as_raw(), b.probe.as_raw());
     let (ra, rb) = (a.rgba.as_raw(), b.rgba.as_raw());
     let is_sky = |probe: &[u8], i: usize| {
         vd_client_harness::probe::decode_probe([probe[i], probe[i + 1], probe[i + 2]]).kind == 0
@@ -840,6 +865,74 @@ fn judge_sky_pair(a: &PairFrame, b: &PairFrame, w: usize, h: usize) -> Option<(f
     Some((step, allowed))
 }
 
+/// ★ THE SKY'S LAG (the design §6.3 and §12.3: the sky judge's lag reading, T2): one frame's display
+/// picture against its own render picture — the frame as the main passes drew it, before the history,
+/// so it holds no trail — over the sky region of the display's probe: each column's run of sky from the
+/// top, less a margin at its end (one pixel for the horizon's edge and two render pixels for the
+/// jitter's reach, in display pixels), outside the overlay. It returns the signed mean step of the
+/// channel whose mean moved most, and the widest channel's mean absolute step, in levels. The sky
+/// pixels reproject by rotation alone, so the history can trail the air's glow by its parallax (about
+/// 0.23 display pixels a frame at 528 m/s, §6.3): a trail shows as a step that grows with the speed,
+/// and the walk's step is the floor (the stars, drawn after the reconstruction, stand on the display
+/// alone on every leg). Read, never judged: the owner rules a target. `None` without a render picture
+/// or a sky region. Example: the hull flies level at 528 m/s toward the glow over the horizon; if the
+/// history trails it, each frame's display shows the glow where the frames before it drew it, and the
+/// signed step on that leg moves away from the walk's.
+fn sky_lag(f: &PairFrame, q: &[u8]) -> Option<(f64, f64)> {
+    let render = f.render.as_ref()?;
+    let (dw, dh) = f.rgba.dimensions();
+    let (dw, dh) = (dw as usize, dh as usize);
+    let (rw, rh) = render.dimensions();
+    let (rw, rh) = (rw as usize, rh as usize);
+    let margin = 1 + (2 * dh).div_ceil(rh.max(1));
+    let hud = f.stamp.hud_rect_px.map(f64::from);
+    let under_hud = |x: usize, y: usize| {
+        (hud[2] > hud[0])
+            & (hud[3] > hud[1])
+            & ((x as f64 + 0.5) >= hud[0])
+            & ((x as f64 + 0.5) <= hud[2])
+            & ((y as f64 + 0.5) >= hud[1])
+            & ((y as f64 + 0.5) <= hud[3])
+    };
+    let is_sky =
+        |i: usize| vd_client_harness::probe::decode_probe([q[i], q[i + 1], q[i + 2]]).kind == 0;
+    let (d, r) = (f.rgba.as_raw(), render.as_raw());
+    let mut signed = [0i64; 3];
+    let mut absolute = [0u64; 3];
+    let mut n = 0u64;
+    for x in 0..dw {
+        let mut run = 0usize;
+        while run < dh && is_sky((run * dw + x) * 4) {
+            run += 1;
+        }
+        for y in 0..run.saturating_sub(margin) {
+            if under_hud(x, y) {
+                continue;
+            }
+            let i = (y * dw + x) * 4;
+            let j = (((2 * y + 1) * rh / (2 * dh)) * rw + (2 * x + 1) * rw / (2 * dw)) * 4;
+            for c in 0..3 {
+                let step = i64::from(d[i + c]) - i64::from(r[j + c]);
+                signed[c] += step;
+                absolute[c] += step.unsigned_abs();
+            }
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    let widest = signed
+        .map(|s| s as f64 / n as f64)
+        .into_iter()
+        .fold(0.0_f64, |a, b| if b.abs() > a.abs() { b } else { a });
+    let mean = absolute
+        .iter()
+        .map(|&a| a as f64 / n as f64)
+        .fold(0.0_f64, f64::max);
+    Some((widest, mean))
+}
+
 /// The sky judge's sum over a leg: pairs read, the widest step, the pairs past their allowance,
 /// the largest allowance.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -850,13 +943,33 @@ struct SkyRead {
     allowed_max: f64,
 }
 
-/// The pairs judged, the pairs left out, the pop detector's sum, the sky judge, and the motion truth
-/// (the pairs that carried a motion, and their sum).
-type PairsRead = (u64, u64, PairRead, SkyRead, (u64, TruthRead, Vec<String>));
+/// What a leg's pairs read: the pairs judged and left out; the pop detector on the render picture (its
+/// silhouettes apart) and, under the reconstruction, on the display picture; the sky judge; the motion
+/// truth (the pairs that carried a motion, their sum, the untrue pairs); G-ALPHA's and G-RESET's findings.
+#[derive(Default)]
+struct PairsRead {
+    judged: u64,
+    skipped: u64,
+    pop: PairRead,
+    display_pairs: u64,
+    pop_display: PairRead,
+    /// ★ THE EYE (ruling B27): the steps it read, the steps holding a pop it sees, and those pops.
+    eye_steps: u64,
+    eye_pop_steps: u64,
+    eye_pops: Vec<String>,
+    sky: SkyRead,
+    /// ★ THE SKY'S LAG of each frame read ([`sky_lag`]).
+    sky_lag: Vec<(f64, f64)>,
+    truth: (u64, TruthRead, Vec<String>),
+    alpha_bad: u64,
+    reset_bad: Vec<String>,
+}
 
 fn judge_pairs(pairs: &[(PathBuf, String)]) -> PairsRead {
     let cell = |rung: u8| f64::from(vd_seed::ladder::cell_m(rung));
     let mut reads = Vec::new();
+    let mut displays = Vec::new();
+    let mut out = PairsRead::default();
     let mut sky = SkyRead::default();
     let mut skipped = 0u64;
     let mut truth = (0u64, TruthRead::default(), Vec::new());
@@ -889,11 +1002,36 @@ fn judge_pairs(pairs: &[(PathBuf, String)]) -> PairsRead {
             );
             continue;
         }
+        // ★ G-ALPHA AND G-RESET (T2): under the reconstruction every display pixel is opaque, and the
+        // history restarts only at the client's own first frame (a boarding, a swap, a rung's arrival
+        // never restart it).
+        for f in [&a, &b] {
+            if let Some(r) = f.stamp.reconstruction {
+                out.alpha_bad += f.rgba.pixels().filter(|p| p.0[3] != u8::MAX).count() as u64;
+                if r.resets != [1, 0, 0, 0] {
+                    out.reset_bad.push(format!(
+                        "{label}: frame {} reads the restarts {:?} (the first frame, a lost device, a \
+                         display size, a tool's jump)",
+                        f.stamp.frames, r.resets
+                    ));
+                }
+            }
+        }
         // The probe's grid: the render picture's (under an up-scale the display picture is larger).
         let (w, h) = a.probe.dimensions();
         let (w, h) = (w as usize, h as usize);
         let (fa, fb) = (frame_of(&a, w, h), frame_of(&b, w, h));
         reads.push(judge_pair(&fa, &fb, &cell));
+        // ★ THE DISPLAY PICTURE (T2): the probe under each display pixel; the pop detector reads the
+        // reconstruction's output where it ran, and the sky judge reads it always.
+        let (qa, qb) = (picture_probe(&a), picture_probe(&b));
+        if a.render.is_some() & b.render.is_some() {
+            let (da, db) = (display_frame_of(&a, &qa), display_frame_of(&b, &qb));
+            displays.push(judge_pair(&da, &db, &cell));
+        }
+        // ★ THE SEAM LAW BY EYE (ruling B27): the pair's recorded frames on the DISPLAY picture (the
+        // engine's screen dither on it), the step between the middle two of four.
+        read_by_eye(run, label, [&a, &b], &cell, &mut out);
         // ★ THE MOTION TRUTH (T1): the second frame's still ground against the reference through
         // the first frame's camera.
         if let Some(motion) = &b.motion {
@@ -918,7 +1056,11 @@ fn judge_pairs(pairs: &[(PathBuf, String)]) -> PairsRead {
             truth.0 += 1;
             truth.1 = truth.1.plus(&pair);
         }
-        if let Some((step, allowed)) = judge_sky_pair(&a, &b, w, h) {
+        out.sky_lag
+            .extend([sky_lag(&a, &qa), sky_lag(&b, &qb)].into_iter().flatten());
+        let (dw, dh) = a.rgba.dimensions();
+        if let Some((step, allowed)) = judge_sky_pair(&a, &b, (&qa, &qb), dw as usize, dh as usize)
+        {
             sky.pairs += 1;
             sky.widest = sky.widest.max(step);
             sky.over += u64::from(step > allowed);
@@ -931,7 +1073,73 @@ fn judge_pairs(pairs: &[(PathBuf, String)]) -> PairsRead {
             }
         }
     }
-    (reads.len() as u64, skipped, sum_reads(&reads), sky, truth)
+    out.judged = reads.len() as u64;
+    out.skipped = skipped;
+    if out.eye_steps > 0 {
+        eprintln!(
+            "terrain_moving_eye: THE EYE read {} steps, {} holding a pop it sees",
+            out.eye_steps, out.eye_pop_steps
+        );
+    }
+    out.pop = sum_reads(&reads);
+    out.display_pairs = displays.len() as u64;
+    out.pop_display = sum_reads(&displays);
+    out.sky = sky;
+    out.truth = truth;
+    out
+}
+
+/// ★ THE EYE'S READING of one recorded pair (ruling B27): the pair's first two frames and the frames the
+/// flight recorded after them, while each is the next frame of one picture; on the display picture,
+/// with the engine's screen dither, at the reference display — the pops the eye sees go to the leg.
+fn read_by_eye(
+    run: &Path,
+    label: &str,
+    pair: [&PairFrame; 2],
+    cell: &dyn Fn(u8) -> f64,
+    out: &mut PairsRead,
+) {
+    let more: Vec<PairFrame> = (2..POP_PAIR_FRAMES)
+        .map_while(|k| pair_frame(run, label, k))
+        .collect();
+    let mut recorded: Vec<&PairFrame> = pair.to_vec();
+    for f in &more {
+        let last = recorded[recorded.len() - 1];
+        if (f.stamp.frames != last.stamp.frames + 1)
+            || (f.rgba.dimensions() != last.rgba.dimensions())
+        {
+            break;
+        }
+        recorded.push(f);
+    }
+    let probes: Vec<Vec<u8>> = recorded.iter().map(|f| picture_probe(f)).collect();
+    let frames: Vec<Frame<'_>> = recorded
+        .iter()
+        .zip(&probes)
+        .map(|(f, p)| display_frame_of(f, p))
+        .collect();
+    let Some(reading) = eye::read_step(&frames, cell, true, eye::REFERENCE_DISPLAY) else {
+        return;
+    };
+    out.eye_steps += 1;
+    out.eye_pop_steps += u64::from(!reading.pops.is_empty());
+    for s in &reading.pops {
+        out.eye_pops.push(format!(
+            "{label}: a {:?} of {:?} ground (rung {}) {} px, {:.0} square arcminutes at ({}, {}), \
+             contrast {:.4} on {:.1} cd/m² against the eye's {:.4}: level {:.2}",
+            s.meeting,
+            s.group,
+            s.rung,
+            s.pixels,
+            s.area_arcmin2,
+            s.at.0,
+            s.at.1,
+            s.contrast,
+            s.field_cd_m2,
+            s.threshold,
+            s.visibility
+        ));
+    }
 }
 
 /// Which hull legs this flight runs (`VD_LEGS`): the indices into [`HULL_LEG_MPS`], and whether the
@@ -1189,6 +1397,219 @@ fn gap_record(t: f64, frames: u64, gap: &vd_devproto::DevBandGap, peak: (u64, &s
     )
 }
 
+/// ★ ONE POP PAIR: two consecutive frames at the client's rate under `label`, and the run the client wrote
+/// them in; `None`, named in the log, when the client did not record both.
+fn record_pair(devctl: u16, leg: &str, label: String, cwd: &Path) -> Option<(PathBuf, String)> {
+    let reply = round_trip(
+        devctl,
+        &DevRequest::Record {
+            fps: POP_PAIR_FPS,
+            secs: f64::from(POP_PAIR_FRAMES) / f64::from(POP_PAIR_FPS),
+            label: Some(label.clone()),
+            consecutive: true,
+            around_swap: None,
+        },
+    );
+    match reply {
+        DevResponse::Recorded { path, frames } if frames == u64::from(POP_PAIR_FRAMES) => {
+            let run = Path::new(&path);
+            let run = if run.is_absolute() {
+                run.to_path_buf()
+            } else {
+                cwd.join(run)
+            };
+            Some((run, label))
+        }
+        other => {
+            eprintln!("terrain_moving_eye/{leg}: the pair {label} was not recorded: {other:?}");
+            None
+        }
+    }
+}
+
+/// ★ G-CROSSING (the design §12.4, the temporal path's T2; 2026-10-01): the frames a record holds around a
+/// scene swap, and how many of them come before it (the readback ring holds eight).
+const CROSSING_FRAMES: u32 = 16;
+const CROSSING_BEFORE: u32 = 4;
+/// A display pixel that steps more than this many levels from one frame to the next counts as changed
+/// (the share beside the mean step; the engine's dither moves a still pixel by one level).
+const CROSSING_STEP_LEVELS: u8 = 3;
+
+/// ★ RECORD AROUND THE NEXT SCENE SWAP (G-CROSSING): a second control connection asks the client for
+/// [`CROSSING_FRAMES`] consecutive frames, [`CROSSING_BEFORE`] of them before its next scene swap, while
+/// the first connection flies the crossing (a boarding); the thread answers the record's reply.
+fn record_crossing(
+    devctl: u16,
+    label: String,
+) -> std::thread::JoinHandle<Result<DevResponse, String>> {
+    std::thread::spawn(move || {
+        dev_roundtrip(
+            devctl,
+            &DevRequest::Record {
+                fps: POP_PAIR_FPS,
+                secs: f64::from(CROSSING_FRAMES) / f64::from(POP_PAIR_FPS),
+                label: Some(label),
+                consecutive: true,
+                around_swap: Some(CROSSING_BEFORE),
+            },
+        )
+    })
+}
+
+/// ★ G-CROSSING'S READING of one recorded crossing (the design §12.4: "the display picture's change in the
+/// swap frame no larger than in the frames beside it"): each consecutive pair's mean step of the display
+/// picture (the widest channel, every pixel outside the overlay) and its share of pixels past
+/// [`CROSSING_STEP_LEVELS`]; the swap pair — its second frame counts one scene swap more — against the
+/// widest of the pairs beside it (two on each side); and the history's restarts on every frame (G-RESET).
+/// Prints every pair. `None` when the record holds no swap pair.
+fn read_crossing(run: &Path, label: &str, frames: u32, what: &str) -> Option<(f64, f64)> {
+    use vd_client_harness::pop::HUD_MARGIN_PX;
+    let held: Vec<PairFrame> = (0..frames)
+        .map_while(|k| pair_frame(run, label, k))
+        .collect();
+    let mut steps: Vec<(f64, f64, bool)> = Vec::new();
+    for pair in held.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        let consecutive = b.stamp.frames == a.stamp.frames + 1;
+        let same = a.rgba.dimensions() == b.rgba.dimensions();
+        if !(consecutive && same) {
+            eprintln!(
+                "terrain_moving_eye/{what}: G-CROSSING — frames {} and {} are not one picture's next frame",
+                a.stamp.frames, b.stamp.frames
+            );
+            return None;
+        }
+        let w = a.rgba.dimensions().0 as usize;
+        let hud = b.stamp.hud_rect_px.map(f64::from);
+        let mut sum = 0u64;
+        let mut past = 0u64;
+        let mut n = 0u64;
+        for (i, (pa, pb)) in a
+            .rgba
+            .as_raw()
+            .chunks_exact(4)
+            .zip(b.rgba.as_raw().chunks_exact(4))
+            .enumerate()
+        {
+            let (x, y) = ((i % w) as f64 + 0.5, (i / w) as f64 + 0.5);
+            let under = (hud[2] > hud[0])
+                & (x >= hud[0] - HUD_MARGIN_PX)
+                & (y >= hud[1] - HUD_MARGIN_PX)
+                & (x <= hud[2] + HUD_MARGIN_PX)
+                & (y <= hud[3] + HUD_MARGIN_PX);
+            if under {
+                continue;
+            }
+            let step = (0..3).map(|c| pa[c].abs_diff(pb[c])).max().unwrap_or(0);
+            sum += u64::from(step);
+            past += u64::from(step > CROSSING_STEP_LEVELS);
+            n += 1;
+        }
+        let swap = b.stamp.scene_swaps > a.stamp.scene_swaps;
+        let mean = sum as f64 / n.max(1) as f64;
+        let share = past as f64 / n.max(1) as f64;
+        eprintln!(
+            "terrain_moving_eye/{what}: G-CROSSING — frames {} → {}: the mean step {mean:.3} levels, {share:.5}              of the pixels past {CROSSING_STEP_LEVELS} levels{}",
+            a.stamp.frames,
+            b.stamp.frames,
+            if swap { " ← THE SWAP" } else { "" }
+        );
+        steps.push((mean, share, swap));
+    }
+    let restarts: Vec<[u64; 4]> = held
+        .iter()
+        .filter_map(|f| f.stamp.reconstruction.map(|r| r.resets))
+        .collect();
+    eprintln!(
+        "terrain_moving_eye/{what}: G-CROSSING — {} frames read, the history's restarts on them {:?}",
+        held.len(),
+        restarts.iter().collect::<std::collections::BTreeSet<_>>()
+    );
+    let at = steps.iter().position(|s| s.2)?;
+    let beside = steps
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| (*j != at) & (j.abs_diff(at) <= 2))
+        .map(|(_, s)| s.0)
+        .fold(0.0_f64, f64::max);
+    Some((steps[at].0, beside))
+}
+
+/// The judged pairs' readings on a leg's read: the pop detector on both pictures, G-ALPHA, G-RESET,
+/// the sky judge and the motion truth.
+fn take_pairs(read: &mut LegRead, judged: PairsRead) {
+    let (motion_pairs, motion, untrue_pairs) = judged.truth;
+    read.motion_pairs = motion_pairs;
+    read.motion = motion;
+    read.motion_untrue_pairs = untrue_pairs;
+    read.sky_pairs = judged.sky.pairs;
+    read.sky_widest = judged.sky.widest;
+    read.sky_over = judged.sky.over;
+    read.sky_allowed_max = judged.sky.allowed_max;
+    read.sky_lag = judged.sky_lag;
+    read.pop_pairs = judged.judged;
+    read.pop_skipped += judged.skipped;
+    read.pop = judged.pop;
+    read.display_pairs = judged.display_pairs;
+    read.pop_display = judged.pop_display;
+    read.eye_steps = judged.eye_steps;
+    read.eye_pop_steps = judged.eye_pop_steps;
+    read.eye_pops = judged.eye_pops;
+    read.alpha_bad = judged.alpha_bad;
+    read.reset_bad = judged.reset_bad;
+}
+
+/// ★ THE LANDING'S READ ([`LANDING_PAIR_EVERY_S`]): from the first chunk drawn, a pair every half second
+/// until the window holds its artifacts and nothing is pending (or [`LANDING_PAIRS`] were recorded),
+/// judged as a leg's pairs. The eye stands still, so every pixel whose rung changed is a chunk that
+/// landed.
+fn read_landing(devctl: u16, leg: &str, cwd: &Path) -> LegRead {
+    let reply = round_trip(
+        devctl,
+        &DevRequest::WaitUntil {
+            predicate: WaitPredicate {
+                field: WaitField::TerrainChunksDrawn,
+                op: WaitOp::Ge,
+                value: 1,
+            },
+            max_ticks: TERRAIN_WAIT_TICKS,
+        },
+    );
+    assert!(
+        matches!(reply, DevResponse::State { .. }),
+        "{leg}: the terrain never drew a chunk: {reply:?}"
+    );
+    let mut read = LegRead::default();
+    let mut pairs: Vec<(PathBuf, String)> = Vec::new();
+    let started = Instant::now();
+    while pairs.len() < LANDING_PAIRS {
+        let st = poll(devctl);
+        let pending = st.terrain_stamp.as_ref().map_or(0, |s| s.chunks_pending);
+        if (pending == 0) & vd_bins::pixel::unsolved_realms(&st).is_empty() {
+            break;
+        }
+        assert!(
+            started.elapsed() < vd_bins::pixel::SOLVE_DEADLINE,
+            "{leg}: the landing never ended (pending {pending} after {:?})",
+            vd_bins::pixel::SOLVE_DEADLINE
+        );
+        let label = format!("pop-landing-{:03}", pairs.len());
+        match record_pair(devctl, leg, label, cwd) {
+            Some(pair) => pairs.push(pair),
+            None => read.pop_skipped += 1,
+        }
+        std::thread::sleep(Duration::from_secs_f64(LANDING_PAIR_EVERY_S));
+    }
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE LANDING — {} pairs recorded over {:.1} s of the ladder's          arrival",
+        pairs.len(),
+        started.elapsed().as_secs_f64()
+    );
+    take_pairs(&mut read, judge_pairs(&pairs));
+    print_pairs(leg, &read);
+    read
+}
+
 /// Read the band for `secs` seconds, one sample every `SAMPLE_MS`: the instrument is the stamp
 /// the renderer writes every frame, polled through dev-control — never a sleep standing in for
 /// a measurement.
@@ -1265,31 +1686,9 @@ fn read_band(
         // THE POP DETECTOR's pair: two frames at the client's rate, on the leg's clock.
         if started.elapsed().as_secs_f64() >= next_pair_s {
             let label = format!("pop-{slug}-{:03}", pairs.len());
-            let reply = round_trip(
-                devctl,
-                &DevRequest::Record {
-                    fps: POP_PAIR_FPS,
-                    secs: 2.0 / f64::from(POP_PAIR_FPS),
-                    label: Some(label.clone()),
-                    consecutive: true,
-                },
-            );
-            match reply {
-                DevResponse::Recorded { path, frames: 2 } => {
-                    let run = Path::new(&path);
-                    let run = if run.is_absolute() {
-                        run.to_path_buf()
-                    } else {
-                        cwd.join(run)
-                    };
-                    pairs.push((run, label));
-                }
-                other => {
-                    read.pop_skipped += 1;
-                    eprintln!(
-                        "terrain_moving_eye/{leg}: the pair {label} was not recorded: {other:?}"
-                    );
-                }
+            match record_pair(devctl, leg, label, cwd) {
+                Some(pair) => pairs.push(pair),
+                None => read.pop_skipped += 1,
             }
             next_pair_s += pair_every_s;
         }
@@ -1498,17 +1897,7 @@ fn read_band(
     read.gw_forced = (forced_start, forced_end);
     read.gw_deferred = (deferred_start, deferred_end);
     read.gw_parts = (parts_start, gateway_parts(gw_admin));
-    let (judged, skipped, pop, sky, (motion_pairs, motion, untrue_pairs)) = judge_pairs(&pairs);
-    read.motion_pairs = motion_pairs;
-    read.motion = motion;
-    read.motion_untrue_pairs = untrue_pairs;
-    read.sky_pairs = sky.pairs;
-    read.sky_widest = sky.widest;
-    read.sky_over = sky.over;
-    read.sky_allowed_max = sky.allowed_max;
-    read.pop_pairs = judged;
-    read.pop_skipped += skipped;
-    read.pop = pop;
+    take_pairs(&mut read, judge_pairs(&pairs));
     let first = first.unwrap_or(last);
     // A counter that went backwards (a client restart mid-leg) is refused, not wrapped.
     assert!(
@@ -1712,11 +2101,35 @@ fn read_band(
         p1.expired.saturating_sub(p0.expired),
         p1.malformed.saturating_sub(p0.malformed)
     );
+    print_pairs(leg, &read);
+    read
+}
+
+/// ★ WHAT A LEG'S PAIRS READ, printed: the sky judge, the pop detector on both pictures with the seam
+/// law's verdict, G-ALPHA, G-RESET and the motion truth.
+fn print_pairs(leg: &str, read: &LegRead) {
     eprintln!(
         "terrain_moving_eye/{leg}: THE SKY JUDGE — {} pairs read, the widest step of the air's \
          mean {:.3} levels, {} pairs past the law's allowance (the largest allowance {:.2} levels)",
         read.sky_pairs, read.sky_widest, read.sky_over, read.sky_allowed_max
     );
+    if !read.sky_lag.is_empty() {
+        let mut signed: Vec<f64> = read.sky_lag.iter().map(|l| l.0).collect();
+        let mut mean: Vec<f64> = read.sky_lag.iter().map(|l| l.1).collect();
+        signed.sort_by(f64::total_cmp);
+        mean.sort_by(f64::total_cmp);
+        eprintln!(
+            "terrain_moving_eye/{leg}: THE SKY'S LAG (T2; the display's sky against its own frame's \
+             render picture) — {} frames: the signed step {:+.3} levels at the median ({:+.3} to \
+             {:+.3}), the mean step {:.3} at the median (the widest {:.3})",
+            signed.len(),
+            signed[signed.len() / 2],
+            signed[0],
+            signed[signed.len() - 1],
+            mean[mean.len() / 2],
+            mean[mean.len() - 1]
+        );
+    }
     eprintln!(
         "terrain_moving_eye/{leg}: THE POP DETECTOR — {} pairs judged ({} left out), {} pixels \
          compared ({} nearer than the limit, which reached {:.0} m; {} off the first frame), {} \
@@ -1738,6 +2151,43 @@ fn read_band(
             .map(|b| (b.finer, b.crossed, b.over_floor, b.widest))
             .collect::<Vec<_>>()
     );
+    let (edges, edge_widest) = read.pop.edge_read();
+    if edges > 0 {
+        eprintln!(
+            "terrain_moving_eye/{leg}: THE RENDER PICTURE'S SILHOUETTES (T2, read apart from the seam \
+             law) — {edges} pixels, the widest step {edge_widest} levels"
+        );
+    }
+    if read.display_pairs > 0 {
+        let d = &read.pop_display;
+        eprintln!(
+            "terrain_moving_eye/{leg}: THE POP DETECTOR ON THE DISPLAY PICTURE (T2) — {} pairs, {} \
+             pixels compared ({} nearer than the limit; {} off the first frame), {} crossed a rung \
+             boundary, the floor at {} levels, {} past the floor, the widest {} levels; per boundary \
+             (finer rung, crossed, past the floor, widest) {:?}",
+            read.display_pairs,
+            d.compared,
+            d.near_skipped,
+            d.off_frame,
+            d.crossed(),
+            d.floor(),
+            d.over_floor(),
+            d.widest(),
+            d.boundary_reads()
+                .iter()
+                .map(|b| (b.finer, b.crossed, b.over_floor, b.widest))
+                .collect::<Vec<_>>()
+        );
+    }
+    if read.alpha_bad > 0 {
+        eprintln!(
+            "terrain_moving_eye/{leg}: G-ALPHA — {} display pixels are not opaque",
+            read.alpha_bad
+        );
+    }
+    for bad in &read.reset_bad {
+        eprintln!("terrain_moving_eye/{leg}: G-RESET — {bad}");
+    }
     if read.motion_pairs > 0 {
         let m = &read.motion;
         eprintln!(
@@ -1765,7 +2215,40 @@ fn read_band(
             eprintln!("terrain_moving_eye/{leg}: A PAIR'S MOTION IS NOT TRUE — {pair}");
         }
     }
-    read
+    for (picture, bad) in seam_breaches(read) {
+        eprintln!(
+            "terrain_moving_eye/{leg}: the level rule (a reading since ruling B27: {} of a boundary's \
+             crossed pixels plus {} a pair past the floor) is past its allowance on the {picture} \
+             picture — per boundary (finer rung, crossed, past the floor, widest) {:?}",
+            SEAM_RULE.share,
+            SEAM_RULE.per_pair,
+            bad.iter()
+                .map(|b| (b.finer, b.crossed, b.over_floor, b.widest))
+                .collect::<Vec<_>>()
+        );
+    }
+    eprintln!(
+        "terrain_moving_eye/{leg}: THE EYE (ruling B27) read {} steps on the display picture, {} \
+         holding a pop it sees",
+        read.eye_steps, read.eye_pop_steps
+    );
+    for pop in &read.eye_pops {
+        eprintln!("terrain_moving_eye/{leg}: A POP THE EYE SEES — {pop}");
+    }
+}
+
+/// THE LEVEL RULE on a leg (`SEAM_RULE`; a READING since ruling B27 made the eye's rule the law): per
+/// picture read, the boundaries whose pixels past the floor exceed the rule's allowance over the leg's
+/// pairs; empty where it holds.
+fn seam_breaches(read: &LegRead) -> Vec<(&'static str, Vec<BoundaryRead>)> {
+    [
+        ("render", read.pop_pairs, &read.pop),
+        ("display", read.display_pairs, &read.pop_display),
+    ]
+    .into_iter()
+    .map(|(picture, pairs, pop)| (picture, SEAM_RULE.breaches(pop, pairs)))
+    .filter(|(_, bad)| !bad.is_empty())
+    .collect()
 }
 
 /// THE PLANET'S MOTION THROUGH THE EYE'S FRAME: where the planet's row stands in the picture. For
@@ -1952,56 +2435,6 @@ fn stand(d: DVec3, height_m: f64, surface_m: f64, forward: DVec3) -> Stand {
     }
 }
 
-/// ★ THE HOME PLANET SOLVED IN THIS PROCESS (2026-09-27, the solved-world walk): the artifact its
-/// shard solves at its first boot, by the same code (`vd_bins::artifact_worker::run_solve`), and the
-/// body carrying the solved sea — the ground every leg's picture draws once the artifact is held.
-struct SolvedHome {
-    body: vd_terrain::BodyDefinition,
-    artifact: vd_terrain::artifact::Artifact,
-}
-
-impl SolvedHome {
-    /// The GROUND's radius along a direction at a rung — the drawn surface, and the one the stamp's
-    /// altitude reads against: no water sheet stands over any column since ruling B22 (2026-09-28).
-    fn ground_m(&self, dir: DVec3, rung: u8) -> f64 {
-        vd_terrain::height::height_field_m(&self.body, &self.artifact, dir.to_array(), rung)
-            .expect("the solved field covers every direction")
-    }
-
-    /// Whether the column along a direction is dry at rung 0: its ground stands ABOVE the solve's
-    /// sea level. No water is drawn (ruling B22), so a stand on the dry sea floor would be a stand
-    /// the one-volume fill later drowns; the walker stands on land.
-    fn dry(&self, dir: DVec3) -> bool {
-        self.ground_m(dir, 0) > self.body.sea_radius_m()
-    }
-}
-
-/// Solve the home planet here, with the same body and words its shard reads.
-fn solve_home(body: &vd_terrain::BodyDefinition) -> SolvedHome {
-    let job = vd_bins::artifact_worker::SolveJob {
-        body: vd_terrain::home::home_planet(),
-        words: vd_terrain::home::home_solve_words(),
-    };
-    assert_eq!(
-        (job.body.seed(), job.body.radius_m().to_bits()),
-        (body.seed(), body.radius_m().to_bits()),
-        "the solve's body is the flight's home planet"
-    );
-    let started = Instant::now();
-    let artifact = vd_bins::artifact_worker::run_solve(&job).expect("the home planet solves");
-    eprintln!(
-        "terrain_moving_eye: the home planet's artifact solved here in {:.1} s (digest {:?}, sea \
-         {:?} m)",
-        started.elapsed().as_secs_f64(),
-        artifact.digest(),
-        artifact.sea()
-    );
-    SolvedHome {
-        body: (*body).with_sea_m(artifact.sea()),
-        artifact,
-    }
-}
-
 /// How far the walker's path is checked, in metres: the leg's read at the foot speed and the speed
 /// polls before it, a quarter over.
 fn walk_path_m() -> f64 {
@@ -2010,75 +2443,6 @@ fn walk_path_m() -> f64 {
 
 /// The seconds the walk's speed polls take before the read starts, bounded above.
 const WALK_SETTLE_S: f64 = 30.0;
-/// The walkable stand's search: its step along the circle where the star stands at the stated
-/// elevation, how densely it reads the walker's path, and how far the eye stays over the drawn
-/// ground along it.
-const STAND_STEP_M: f64 = 500.0;
-const WALK_SAMPLE_M: f64 = 5.0;
-const EYE_CLEARANCE_M: f64 = 0.5;
-
-/// ★ A WALKABLE STAND ON THE SOLVED GROUND, UNDER A STAR 15° UP (2026-09-27; the owner's ruling "move
-/// the stand to a 15° star", once a berth stated its facing). The solved world is mostly sea — the
-/// sun's stand on the equator is ocean 5 490 m deep, and the day side of the equator has no land
-/// (MEASURED with `examples/equator_stands`) — and a hull now stands upright wherever it is parked,
-/// so the stand is searched along the circle where the star stands `SUN_ELEVATION_DEG` up: the
-/// sun's stand turned about the sun's own direction, `STAND_STEP_M` a step, one way then the other,
-/// to the first stand where the walker's whole path is dry and its eye stays `EYE_CLEARANCE_M` over
-/// the ground. The nose is the sun's rule there. Returns the direction, the nose and the ground's
-/// radius.
-///
-/// **Example.** On the committed world the walker stands 1 706.5 km along that circle from the
-/// sun's stand, 15.8° south, on dry ground with the star 15° up over the shoulder — the picture
-/// gate's own light — and the hull is parked there upright in the pilot's attitude.
-fn walkable_stand(solved: &SolvedHome, sun: DVec3, d0: DVec3, path_m: f64) -> (DVec3, DVec3, f64) {
-    let radius_m = solved.body.radius_m();
-    // The circle's own radius: the sun's stand lies `90° − elevation` from the sun's direction.
-    let ring_m = radius_m * sun.dot(d0).acos().sin();
-    let steps = (std::f64::consts::PI * ring_m / STAND_STEP_M).ceil() as u64;
-    let samples = (path_m / WALK_SAMPLE_M).ceil() as u64;
-    for k in 0..=steps {
-        for sign in [1.0_f64, -1.0] {
-            if k == 0 && sign < 0.0 {
-                continue;
-            }
-            let psi = sign * k as f64 * STAND_STEP_M / ring_m;
-            let d = (vd_core::glam::DQuat::from_axis_angle(sun, psi) * d0).normalize();
-            if !solved.dry(d) {
-                continue;
-            }
-            let toward_sun = (sun - d * sun.dot(d)).normalize();
-            let level = vd_core::glam::DQuat::from_axis_angle(d, SUN_OFF_NOSE_DEG.to_radians())
-                * toward_sun;
-            let h = solved.ground_m(d, 0);
-            let eye = d * (h + EYE_HEIGHT_M);
-            let clear = (0..=samples).all(|i| {
-                let p = eye + level * (i as f64 * WALK_SAMPLE_M);
-                let q = p.normalize();
-                solved.dry(q) && solved.ground_m(q, 0) <= p.length() - EYE_CLEARANCE_M
-            });
-            if clear {
-                eprintln!(
-                    "terrain_moving_eye: the walkable stand {:.1} km along the circle where the \
-                     star stands {:.1}° up ({} of the sun's stand), latitude {:.2}°, the ground \
-                     {:.0} m over the body's radius and {:.0} m over the sea (the hull parked \
-                     upright, in the pilot's attitude)",
-                    k as f64 * STAND_STEP_M / 1000.0,
-                    sun.dot(d).asin().to_degrees(),
-                    if sign > 0.0 {
-                        "one way"
-                    } else {
-                        "the other way"
-                    },
-                    d.z.asin().to_degrees(),
-                    h - radius_m,
-                    h - radius_m - f64::from(solved.body.sea_m().unwrap_or(0))
-                );
-                return (d, level, h);
-            }
-        }
-    }
-    panic!("no walkable stand on the circle where the star stands {SUN_ELEVATION_DEG}° up");
-}
 
 fn spawn_entry(account: u64, planet_seed: u64, st: &Stand) -> String {
     format!(
@@ -2224,8 +2588,16 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     // planet's OWN artifact, solved here by its shard's own solve. MEASURED before: read off the
     // recipe's own relief, the walker's eye stood 1 453 m under the solved sea for the whole walk,
     // and the 1.4 m/s hull leg flew 327 m under the solved ground.
-    let solved = solve_home(&body);
-    let (d, level, h) = walkable_stand(&solved, sun, d0, walk_path_m());
+    let solved = vd_bins::solved::solve_home(&body, "terrain_moving_eye");
+    let (d, level, h) = vd_bins::solved::walkable_stand(
+        &solved,
+        sun,
+        d0,
+        walk_path_m(),
+        EYE_HEIGHT_M,
+        SUN_OFF_NOSE_DEG,
+        "terrain_moving_eye",
+    );
     // The walker faces LEVEL: it walks along its nose, and a nose tilted down walks into the
     // ground (MEASURED on the first run: 8° down, under the surface after 13 m, and with the eye
     // under the surface the horizon is zero, no wall is raised, and everything within the reach
@@ -2387,6 +2759,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     // ---- LEGS 2 AND 3: THE HULL. (A diagnosis flight boards `boardings` times with fresh
     // pilots and flies the legs on the last; `VD_LEGS` names which legs it flies.)
     let (wanted_legs, wanted_turn, wanted_departure, wanted_descent) = legs_wanted();
+    let mut landing: Option<LegRead> = None;
     let reads: Vec<(String, LegRead)> = {
         let mut boarded: Option<(ChildGuard, u16)> = None;
         for b in 0..boardings {
@@ -2408,12 +2781,19 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
                 "the pilot lands on the planet: {landed:?}"
             );
             let tag = format!("hull {}, before boarding", b + 1);
+            // ★ THE LANDING (T2): the first pilot's login, while the ladder streams in.
+            if b == 0 {
+                landing = Some(read_landing(devctl, "landing", &f.cwd));
+            }
             await_settled(devctl, &tag);
             // BOARD: walk into the hull's wake; its shard spawns by the ordinary demand and the
             // crossing commits when it runs. The aim is the berth in the planet's frame, which
             // the pilot stands in until the crossing.
             let berth_b = berths[b as usize];
             let hull_b = hulls[b as usize];
+            // ★ G-CROSSING: the first boarding's frames around its scene swap, on a second connection.
+            let crossing_label = format!("crossing-boarding-{}", b + 1);
+            let crossing = (b == 0).then(|| record_crossing(devctl, crossing_label.clone()));
             // At the foot speed (the walk's own measured share): a player's boarding, never the
             // dev stick's pass-through (item 15).
             vd_bins::flight::cross_leg_at(
@@ -2433,6 +2813,36 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
             // From inside the hull the planet's ground is drawn: the ladder lands whole.
             let tag = format!("hull {}, aboard", b + 1);
             await_settled(devctl, &tag);
+            // ★ G-CROSSING, READ (reported; the owner rules the gate's target with the T2 report).
+            if let Some(handle) = crossing {
+                match handle.join() {
+                    Ok(Ok(DevResponse::Recorded { path, frames })) => {
+                        let run = Path::new(&path);
+                        let run = if run.is_absolute() {
+                            run.to_path_buf()
+                        } else {
+                            f.cwd.join(run)
+                        };
+                        let frames = u32::try_from(frames).unwrap_or(0);
+                        match read_crossing(&run, &crossing_label, frames, "boarding") {
+                            Some((swap, beside)) => eprintln!(
+                                "terrain_moving_eye/boarding: G-CROSSING — the swap frame's mean step                                  {swap:.3} levels against {beside:.3} beside it ({})",
+                                if swap <= beside {
+                                    "no larger: the swap does not show"
+                                } else {
+                                    "LARGER: the swap shows"
+                                }
+                            ),
+                            None => eprintln!(
+                                "terrain_moving_eye/boarding: G-CROSSING — the record holds no swap pair"
+                            ),
+                        }
+                    }
+                    other => eprintln!(
+                        "terrain_moving_eye/boarding: G-CROSSING — the record failed: {other:?}"
+                    ),
+                }
+            }
             // The planet's row must be in the window before a leg reads the hull's speed or
             // heading from it (the realm feed re-delivers after the origin swap).
             await_planet_row(devctl, planet);
@@ -2643,6 +3053,7 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
                 read.sky_widest = read.sky_widest.max(more.sky_widest);
                 read.sky_over += more.sky_over;
                 read.sky_allowed_max = read.sky_allowed_max.max(more.sky_allowed_max);
+                read.sky_lag.extend(more.sky_lag);
                 read.min_drawn = read.min_drawn.min(more.min_drawn);
                 read.samples += more.samples;
                 eprintln!(
@@ -2759,10 +3170,40 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         report_leg(leg, read);
     }
     assert_band_complete("walk", &walk);
+    // ★ G-ALPHA AND G-RESET (the temporal path's T2): on every leg drawn under the reconstruction, every
+    // display pixel is opaque, and the history never restarts past the client's own first frame.
+    let legs: Vec<(&str, &LegRead)> = std::iter::once(("walk", &walk))
+        .chain(landing.iter().map(|read| ("landing", read)))
+        .chain(reads.iter().map(|(leg, read)| (leg.as_str(), read)))
+        .collect();
+    let transparent: Vec<String> = legs
+        .iter()
+        .filter(|(_, read)| read.alpha_bad > 0)
+        .map(|(leg, read)| format!("{leg}: {} pixels", read.alpha_bad))
+        .collect();
+    assert!(
+        transparent.is_empty(),
+        "G-ALPHA: display pixels that are not opaque — {}",
+        transparent.join("; ")
+    );
+    let restarted: Vec<String> = legs
+        .iter()
+        .flat_map(|(leg, read)| {
+            read.reset_bad
+                .iter()
+                .map(move |bad| format!("{leg}, {bad}"))
+        })
+        .collect();
+    assert!(
+        restarted.is_empty(),
+        "G-RESET: the history restarted on the player's path — {}",
+        restarted.join("; ")
+    );
     // ★ G-MOTION-TRUTH (the temporal path's T1): on every leg that recorded the motion (a flight under
     // the motion prepass), the still ground's residual meets the proposed target over the leg AND in
     // every pair alone. A flight without the motion reads nothing here.
     let untrue: Vec<String> = std::iter::once(("walk", &walk))
+        .chain(landing.iter().map(|read| ("landing", read)))
         .chain(reads.iter().map(|(leg, read)| (leg.as_str(), read)))
         .filter(|(_, read)| read.motion_pairs > 0)
         .flat_map(|(leg, read)| {
@@ -2787,6 +3228,37 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         untrue.is_empty(),
         "THE MOTION IS NOT TRUE (G-MOTION-TRUTH, the target {TRUTH_RESIDUAL_PX} px): {}",
         untrue.join("; ")
+    );
+    // ★ THE SEAM LAW BY EYE (ruling B27, the owner: "Yes, as it stands"), LAST, so every gate above reads
+    // first: on EVERY FLIGHT LEG — the walk and the hull's legs (the owner, 2026-09-30: "not an option
+    // during flight - whole experience should be extremely believable and seamless") — no step holds a
+    // pop the eye sees on the display picture, and every leg read its steps; the landing is REPORTED
+    // (the same answer: "It's ok to have any sequence after login (we can have the loading screen before
+    // all meshes are loaded)").
+    let unread: Vec<&str> = legs
+        .iter()
+        .filter(|(leg, read)| (*leg != "landing") & (read.eye_steps == 0))
+        .map(|(leg, _)| *leg)
+        .collect();
+    assert!(
+        unread.is_empty(),
+        "THE EYE read no step on the legs {unread:?} (the pairs' frames: {POP_PAIR_FRAMES} a pair)"
+    );
+    let seen: Vec<String> = legs
+        .iter()
+        .filter(|(leg, _)| *leg != "landing")
+        .flat_map(|(leg, read)| read.eye_pops.iter().map(move |pop| format!("{leg}, {pop}")))
+        .collect();
+    assert!(
+        seen.is_empty(),
+        "THE SEAM LAW BY EYE (ruling B27): {} pops the eye sees on the flight legs — {}",
+        seen.len(),
+        seen.join("; ")
+    );
+    assert!(
+        landing.as_ref().is_some_and(|l| l.pop_pairs > 0),
+        "THE LANDING judged no pair: {:?}",
+        landing.as_ref().map(|l| (l.pop_pairs, l.pop_skipped))
     );
     eprintln!(
         "terrain_moving_eye: THE BAND HELD on every frame of the walk — {walk:?}; the hull \
@@ -2953,7 +3425,7 @@ fn air_picture(
         Some(label_of(planet).as_str()),
         "{name}: the eye stands on the planet: {landed:?}"
     );
-    await_window_solved(devctl, name);
+    vd_bins::pixel::await_window_solved(devctl, &format!("terrain_moving_eye/{name}"));
     await_settled(devctl, name);
     let shot = round_trip(
         devctl,
@@ -3053,7 +3525,7 @@ fn the_air_reaches_every_ground_under_the_sea() {
     let along = sun.cross(DVec3::Z).normalize();
     let zenith = (90.0_f64 - SUN_ELEVATION_DEG).to_radians();
     let d0 = (sun * zenith.cos() + along * zenith.sin()).normalize();
-    let solved = solve_home(&body);
+    let solved = vd_bins::solved::solve_home(&body, "terrain_moving_eye");
     let sea = solved.body.sea_radius_m();
     assert!(sea > 0.0, "the home planet's solve states a sea");
     let search = vd_bins::air_stand::FloorSearch {
@@ -3068,7 +3540,15 @@ fn the_air_reaches_every_ground_under_the_sea() {
     // eyes look back at the rising coast and the ground stands on both sides of their level row.
     // MEASURED on the first run: started over the open ocean where the star stands 15° up, the stand
     // looked back across a wide flat basin, and the rows round its level were all sky.
-    let (coast, _, _) = walkable_stand(&solved, sun, d0, walk_path_m());
+    let (coast, _, _) = vd_bins::solved::walkable_stand(
+        &solved,
+        sun,
+        d0,
+        walk_path_m(),
+        EYE_HEIGHT_M,
+        SUN_OFF_NOSE_DEG,
+        "terrain_moving_eye",
+    );
     let floor = vd_bins::air_stand::nearest_floor(&|d| solved.ground_m(d, 0), coast, sun, &search)
         .expect("a lit floor deep under the sea lies within the reach");
     let nose = vd_bins::air_stand::facing(floor.dir, floor.back, AIR_PITCH_DEG) * DVec3::NEG_Z;

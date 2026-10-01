@@ -559,6 +559,8 @@ pub(crate) mod tests {
                     render_px: [1284, 720],
                     display_px: [2568, 1440],
                     resets: [1, 0, 0, 0],
+                    clock: 64,
+                    phases: 32,
                 }),
                 last_gap: Some(DevBandGap {
                     realm: "Planet(7)".to_owned(),
@@ -980,6 +982,13 @@ pub struct DevReconstruction {
     /// The history's restarts by cause since the client's start: the first frame, a lost device, a
     /// new display size, a tool's jump.
     pub resets: [u64; 4],
+    /// ★ THE JITTER'S CLOCK (the design §12.2, the converged still): the frames since the history last
+    /// restarted — the phase is this count modulo [`Self::phases`].
+    #[serde(default)]
+    pub clock: u32,
+    /// The jitter's phases a cycle at this frame's render scale (⌈8 ÷ s²⌉).
+    #[serde(default)]
+    pub phases: u32,
 }
 
 /// ★ THE FRAME'S COST ROW on [`DevTerrainStamp`] (2026-09-24, the window's heat). Every earlier
