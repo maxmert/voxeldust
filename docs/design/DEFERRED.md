@@ -11742,3 +11742,62 @@ updated in the same change as the work, deleted when done). The interims named h
   before, the client's main thread spent 14.7 ms of every frame choosing the ground and the worst frame took 52 ms
   for it; now the choice runs on a builder and costs the pilot's frame 0.2 ms, and the band is exactly as whole as
   before.
+
+### D-TERRAIN-10 🟨 THE GROUND STEP'S PHASE 0 — the measurements before any world change (rulings B35, B36; the design `docs/investigation/2026-10-02/ground_step_design.md` §5.0, §9.2)
+
+- 🟩 **STEP 1, THE STANDS AND THE BODIES (benches M0-5, M0-6), 2026-10-02.** `crates/bins/examples/stands_rule.rs` and
+  the pins in `crates/bins/src/stands.rs`. THE BODIES: the home system's 24 round bodies (9 planets as the system's shard
+  boots them, 15 moons as their planets' shards boot them), each with its own realm's charter. THE THIRD BODY by the rule
+  with the owner's added condition (ruling B36 item 9): `Planet(17782101822166660494)`, the desert world — 7 393 km,
+  1.3 g, 1.68 bar, 350 K, no water, 11 894 784 nodes of 8 192 m. THE STANDS, each solved in-process by the shard's own
+  function: 104 pinned by direction — the home planet 24 class, 3 border, 24 random (20 land, 4 sea floor) and 9 of
+  today's stands; the moon 6 class, 3 border, 8 random; the desert world 12 class, 3 border, 12 random. MEASURED: the
+  solves 184 s, 0.3 s and 143 s; the home planet's sea floor 77.7 % of its nodes; the desert world's closed basins on
+  deep sediment 46.8 % of its nodes. The census: `docs/investigation/2026-10-02/phase0_stands_census.txt`. Found on the
+  way: an icy moon with thin air, `Planet(61143963952882988)` (1 368 km, 555 Pa, water ice, 55 K) — the real icy body
+  the design's F46 asks for. **Example.** The coast stand pinned at generator 20 reads "plains / folded belt" by the
+  rule; a later phase's census prints the same direction's node and class beside the rule's new picks, and no pin moves.
+- 🟥 **THE STANDS' OWED LAYERS** (each ADDED by its phase; none moves a pin):
+  - the CLIMATE stands — the climate zone in the class, the tree line, the snow line, the desert scree slope, the two
+    sides of a rain shadow — after the corrected climate runs (ruling B36 item 1; phase 2);
+  - the HILLS class stands, after the eroded 1 km level (MEASURED: no body holds a hills class at 8.2 km nodes, where a
+    slope of 8 % across one node is already 655 m of relief; Earth's real heights on the same grid hold 0.00 % hills
+    too, so the absence is the scale, not the world — step 4 below);
+  - the FAMILY stands, with each family's facts (phase 4); the FOREST stands, with the cover (phase 6);
+  - the FRAMINGS (on foot, the reference view from a valley stand, 150 km up, orbit) and the TWO SUNS, with step 2's
+    pictures; a SPAWN ON ANOTHER BODY (`land_stand` serves only the home planet), owed before the moon's and the desert
+    world's pictures;
+  - two READINGS, not defects: the moon's three border stands sit on one face edge (many nodes tie at 4 classes, and
+    the rule's tie goes to the smaller index), and the moon carries sedimentary beds that no water laid (the design's
+    T9 finding, cured in phase 4).
+- 🟩 **STEP 4, THE FIRST EARTH READING (bench M0-4), 2026-10-02.** `crates/bins/examples/earth_relief.rs` reads NOAA
+  NCEI's ETOPO 2022 (60 arc-seconds, the surface version; DOI 10.25921/fd45-gt74; kept OUTSIDE the repository, ruling
+  B36 item 7) on the HOME PLANET'S OWN grid (8.2 km nodes), with the stands' relief rule — now ONE copy,
+  `vd_bins::stands::relief_readings`, which the stands rule reads too (the control: the stands rule's run 5 prints run
+  4's 208 stand and pin lines unchanged) — and the solve's own sea rule (`vd_terrain::land::ocean_mask`). MEASURED (the
+  census `docs/investigation/2026-10-02/phase0_earth_relief.txt`; Earth's land without Antarctica | the home planet's):
+  - hills 0.00 % | 0.01 %: at 8.2 km no body holds hills, Earth included — the scale, not the world;
+  - mountains on the land whose window stays over the sea level 2.39 % | 0.47 % (ONE FIFTH); a further 1.33 % of the
+    home planet's land is mountains at a closed basin's wall (Earth 0.05 %);
+  - the local relief over 24.6 km, by area, at 75 / 90 / 99 %: 252 / 550 / 1 383 m | 143 / 258 / 704 m (ABOUT HALF);
+    a tenth of the home planet's land is exactly flat (0 m; Earth's flattest tenth holds 15 m);
+  - the variety (relief classes within 60 km) 1.93 | 1.98: at 8.2 km this reading does not separate the two bodies;
+  - the land's share over 1 000 m 20.5 % | 61.2 % (Earth's whole land 25.5 %); the land's mean height 661 | 1 363 m;
+    the ocean's mean depth −3 710 | −6 930 m; the ocean's volume (its area times its mean depth) 1.32 | 2.74 billion
+    km³.
+  Controls: every node finds itself from its own direction; the land's share 29.35 % at the node scale against 29.11 %
+  of the cells at or over the sea level; Earth's ocean depth agrees with the published 3 682 m (Charette & Smith 2010;
+  ESTIMATE source). A stated consequence of the one sea rule: the Bosporus is narrower than a node, so the Black Sea is a
+  closed basin at 8.2 km, as the Caspian is, and the two floors count as land (about 0.5 % of Earth's land).
+  **Example.** On Earth a window of 24.6 km over the Alps' front spans more than 1 000 m and reads "mountains"; on the
+  home planet such a window stands mostly on the wall of a deep closed basin, and the ranges over the sea level span a
+  half of Earth's relief.
+- 🟥 **OWED FROM STEP 4:** the CAUSE of the low mountains is UNMEASURED. The candidates are the design's caps (§6 rows
+  1–3: the relief draw in [0.5, 1.0) of the law's cap, the envelope's band term, the uplift clamps) and the balance of
+  the uplift and the erosion. A bench that reads which one binds comes first; then the owner decides where the cure goes
+  (the design removes those caps in phase 4). The rest of M0-4: finer Earth data for the scales under a node (the
+  hills, the valleys, the pits), the Moon and Mars, the spectra, the slopes by class and the ice line on Earth's real
+  climate.
+- 🟥 **STEPS 2, 3 AND 5 OWED:** the "before" record on every pinned stand (numbers and pictures, no window); the corrected
+  climate's bench beside today's code (M0-9, the seasonal circulation of ruling B36 item 1); the window session for the
+  clean frame reading at full screen and the eye's rule at full screen (M0-16, Q9's number).

@@ -1019,6 +1019,16 @@ five were put to the owner as the ones that change a ruling or need the owner's 
    pictures: the home planet, the home moon, and a third body chosen by the charter rule. **AMENDS B5 item 1:** G-ICE
    tests the ice law on EARTH'S REAL heights and climate (Q2's data), never on an Earth-like test body (B23 item 3).
 
+9. **THE THIRD BODY: THE DESERT WORLD** (owner: "The desert world"; phase 0, bench M0-5). The first census of the home
+   system's 24 round bodies (9 planets, 15 moons) found the rule's pick to be a 25 407 km rocky world (5.3 g, 28.7 bar,
+   456 K, no water) whose lattice reaches the edge ceiling: 25.2 million nodes of 19 456 m, against the home planet's
+   8 192 m (MEASURED: the node at a face's centre, the target met exactly). THE RULE GAINS ONE CONDITION: the third
+   body's node is the one the 8 192 m TARGET sets — its lattice's edge is the divisor rule's answer with no memory
+   ceiling — as on the home planet, so every check reads it at the same scales. The rule then picks `Planet(17782101822166660494)`: 7 393 km, 12.65 m/s² (1.3 g),
+   1.68 bar, 350 K (77 °C), no water, 11.9 million nodes of 8 192 m. Found on the way: an icy moon with thin air,
+   `Planet(61143963952882988)` (1 368 km, 555 Pa, water ice, 55 K) — the real icy body the design's F46 asks for before
+   any icy-moon law is built.
+
 THE REMAINING QUESTIONS ARE ASKED WHEN THEIR ANSWER CHANGES THE WORK, one by one with a plain explanation (owner: "do
 we need to answer all questions now? If yes, let's do one by one, with proper explanations"): Q1, Q2 and Q16 before
 phases 0 and 1; Q4, Q5, Q6 and Q8 when phase 1 ends; Q9, Q11, Q12, Q13, Q15 and Q18 at their own phases, with their

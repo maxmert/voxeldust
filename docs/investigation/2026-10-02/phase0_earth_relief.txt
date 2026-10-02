@@ -1,0 +1,78 @@
+# PHASE 0, BENCH M0-4, THE FIRST READING: EARTH'S RELIEF ON THE HOME PLANET'S OWN GRID (2026-10-02, generator 22)
+# The instrument: crates/bins/examples/earth_relief.rs (one relief rule and one sea rule for both bodies).
+# The data: NOAA National Centers for Environmental Information 2022, ETOPO 2022 Global Relief Model, 60 arc-seconds,
+# the surface version (DOI 10.25921/fd45-gt74; no copyright restriction). The data stays OUTSIDE the repository
+# (ruling B36 item 7); this file holds only the instrument's numbers. Its output follows, unchanged.
+EARTH'S RELIEF ON THE HOME PLANET'S OWN GRID (phase 0, bench M0-4), generator 22
+the grid: 8871936 nodes, 1216 an edge, 8192 m at a face's centre
+CONTROL the lookup: 0 of 8871936 nodes do not find themselves from their own direction
+Earth binned in 1.0 s (8 threads)
+CONTROL the land's share: 29.35 % of the surface at the node scale (the ocean rule; 501 closed basins under the sea level, 25874 nodes, count as land) against 29.11 % of the 1.85 km cells at or over the sea level
+CONTROL named places (the node's mean height; its side by the ocean rule):
+  Everest (27.99, 86.92): node 3747483, 6707 m, land
+  the Tibetan Plateau (33.00, 88.00): node 3730526, 5100 m, land
+  the Amazon basin (-3.00, -60.00): node 5119157, 53 m, land
+  Death Valley (36.25, -116.83): node 5822452, -68 m, land: a closed basin under the sea level
+  the Dead Sea (31.50, 35.50): node 1347199, -427 m, land: a closed basin under the sea level
+  the South Caspian (39.50, 51.00): node 7366424, -843 m, land: a closed basin under the sea level
+  Lake Baikal (53.50, 108.20): node 7230768, -274 m, land: a closed basin under the sea level
+  the Black Sea (43.00, 34.00): node 7163410, -2197 m, land: a closed basin under the sea level
+  the Mediterranean (35.00, 18.00): node 1337235, -2978 m, the ocean
+  the Baltic (57.50, 19.50): node 6851971, -105 m, the ocean
+  the Red Sea (20.00, 38.50): node 1150248, -2044 m, the ocean
+  the Persian Gulf (27.00, 51.00): node 4337313, -63 m, the ocean
+  Hudson Bay (60.00, -85.00): node 6162118, -154 m, the ocean
+the home planet solved in 163.4 s; its sea's level 3591 m over the ladder radius
+
+THE THREE COLUMNS: Earth's land | Earth's land without Antarctica (south of -60°) | the home planet's land — every node of 8.2 km, one relief rule, one sea rule
+  the land's area, million km²                       148.32       134.63       110.64
+  the land's share of the surface counted, %          29.35        28.55        21.89
+THE RELIEF CLASSES, % of the land's area:
+  plains (with the closed-basin floors)               53.40        52.23        59.37
+  tablelands                                          44.34        45.36        38.82
+  hills                                                0.00         0.00         0.01
+  mountains                                            2.26         2.41         1.79
+  a window half or more gentle (under 8 %), %         97.74        97.59        98.19
+  the land under the sea level (closed basins), %         0.92         1.02         3.04
+  mountains at a closed basin's wall, % of land         0.04         0.05         1.33
+THE LOCAL RELIEF (the window's highest less its lowest), metres, by the land's area:
+  10.0 % of the land under                               14           14            0
+  25.0 % of the land under                               33           34           14
+  50.0 % of the land under                               79           82           63
+  75.0 % of the land under                              236          251          155
+  90.0 % of the land under                              529          550          287
+  99.0 % of the land under                             1366         1386         2410
+  99.9 % of the land under                             2134         2147         6259
+THE VARIETY: relief classes within 60 km of each land node of the 32.768 km grid (the sea floor counts):
+  the mean count                                       1.91         1.93         1.98
+  1 class, % of the nodes                             25.18        23.75        15.83
+  2 classes, % of the nodes                           60.12        61.03        71.28
+  3 classes, % of the nodes                           13.21        13.67        11.60
+  4 classes, % of the nodes                            1.48         1.54         1.27
+  5 classes, % of the nodes                            0.01         0.01         0.01
+THE HYPSOMETRY (heights over the sea):
+  the land's share over 1000 m, %                     25.51        20.51        61.21
+  the land's mean height, m                             782          661         1363
+  the ocean's mean depth, m                           -3710                     -6930
+
+THE SAME COLUMNS, THE LAND WHOSE WINDOW STAYS OVER THE SEA LEVEL (the closed basins and their walls left out):
+  the land's area, million km²                       146.43       132.74       106.65
+  the land's share of the surface counted, %         100.00       100.00       100.00
+THE RELIEF CLASSES, % of the land's area:
+  plains (with the closed-basin floors)               53.30        52.10        61.04
+  tablelands                                          44.45        45.51        38.47
+  hills                                                0.00         0.00         0.01
+  mountains                                            2.25         2.39         0.47
+  a window half or more gentle (under 8 %), %         97.75        97.60        99.51
+THE LOCAL RELIEF (the window's highest less its lowest), metres, by the land's area:
+  10.0 % of the land under                               15           15            0
+  25.0 % of the land under                               34           34           13
+  50.0 % of the land under                               79           83           60
+  75.0 % of the land under                              237          252          143
+  90.0 % of the land under                              528          550          258
+  99.0 % of the land under                             1363         1383          704
+  99.9 % of the land under                             2134         2147         2072
+THE HYPSOMETRY (heights over the sea):
+  the land's share over 1000 m, %                     25.83        20.80        63.17
+  the land's mean height, m                             796          675         1549
+THE CLASS CODES CHECKED: sea floor 0, the land classes [2, 3, 4, 5]

@@ -172,7 +172,8 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     the other questions one by one when their answer changes the work: Q1 YES (rule M the average, rule S the
     outline, the zero-mean gate, no ridged centring), Q2 YES (Earth/Moon/Mars data outside the repo as the measure),
     Q16 YES (stands pinned once, four views, two suns, three bodies; G-ICE on Earth's real data, amends B5 item 1);
-    Q4, Q5, Q6, Q8 when phase 1 ends; Q9, Q11-Q13, Q15, Q18 at their phases.
+    item 9 THE THIRD BODY = the desert world `Planet(17782101822166660494)` (the rule plus the owner's condition: its
+    node is the one the 8 192 m target sets); Q4, Q5, Q6, Q8 when phase 1 ends; Q9, Q11-Q13, Q15, Q18 at their phases.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

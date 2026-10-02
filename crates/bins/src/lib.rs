@@ -47,6 +47,10 @@ pub mod skyline;
 // ★ THE HOME PLANET SOLVED IN THE GATE'S OWN PROCESS (ruling B19 item 2): the solved ground the
 // moving-eye gate and the picture gate seat their stands on, and the dry stand under the gate's star.
 pub mod solved;
+// ★ THE PINNED STANDS OF THE GROUND STEP (ruling B36 item 8; the design §2.2): the places every phase measures,
+// chosen once by `examples/stands_rule.rs` and never moved; and THE RELIEF RULE, one copy for the world's bodies
+// and for Earth's real heights (`examples/earth_relief.rs`, bench M0-4).
+pub mod stands;
 
 // The dev-control-only helpers (Tier-B process-gate glue): `flight` is the ONE pilot every cluster
 // gate flies (rendezvous-and-park + label-asserted crossing legs); `scene_camera` reconstructs the

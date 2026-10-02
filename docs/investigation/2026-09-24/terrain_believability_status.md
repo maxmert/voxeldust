@@ -1377,3 +1377,16 @@ AWAY from the reference, the step's report says so (ruling B6).
   a fenced exception to SL1 clause 3); Q1 yes (rule M, rule S, the zero-mean gate, no ridged centring); Q2 yes (Earth, Moon
   and Mars data as the measure, outside the repository); Q16 yes (the stands pinned once in phase 0; G-ICE on Earth's real
   data, amending B5 item 1). Q4, Q5, Q6 and Q8 are asked when phase 1 ends; the rest at their phases.
+- 2026-10-02 (night, later) — PHASE 0 STEP 1 DONE (DEFERRED D-TERRAIN-10): the stands rule ran on generator 22 and pinned
+  104 stands on the home planet, its moon and the desert world (the third body by the rule with the owner's scale
+  condition, ruling B36 item 9); MEASURED: no hills class exists at 8.2 km nodes (R2 resolves hills); the census in
+  `docs/investigation/2026-10-02/phase0_stands_census.txt`. Next: the "before" record on every pinned stand.
+- 2026-10-02 (night, last) — PHASE 0 STEP 4, THE FIRST EARTH READING (M0-4; the owner's "Earth first"; DEFERRED
+  D-TERRAIN-10): NOAA NCEI's ETOPO 2022 read on the home planet's own 8.2 km grid by one relief rule and one sea rule
+  (the data outside the repository). MEASURED: Earth holds no hills at 8.2 km either (the scale, not the world); away
+  from its closed basins the home planet holds one fifth of Earth's mountains (0.47 % of the land against 2.39 %) and
+  about half of Earth's relief (the 90th percentile 258 m against 550 m), and a tenth of its land is exactly flat; its
+  land stands high (61 % over 1 000 m against 21 % for Earth without Antarctica) over an ocean twice as deep (−6.9 km
+  against −3.7 km). The cause of the low mountains is UNMEASURED (the design's caps, §6 rows 1–3, or the uplift against
+  the erosion). The census `docs/investigation/2026-10-02/phase0_earth_relief.txt`; the relief rule is now one copy in
+  `crates/bins/src/stands.rs`, and the stands rule's output did not change.

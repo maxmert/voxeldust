@@ -1,0 +1,272 @@
+# Phase 0, step 1: the stands rule's first run (benches M0-5 and M0-6), generator 22, 2026-10-02
+# cargo run --release -p vd-bins --example stands_rule  (the pins in crates/bins/src/stands.rs are this run's table)
+
+THE STANDS RULE (phase 0, M0-5 and M0-6), generator 22
+
+THE BODIES OF THE HOME SYSTEM (M0-5): 24 round bodies
+  Planet(22337287228646994) under Some(Planet(14964011474468519458)): radius 207 km, g 0.110 m/s², water 0 km³, pressure 0 Pa, surface 81.932 K, solid true, air false, grid true
+  Planet(61143963952882988) under Some(Planet(14168809188858337943)): radius 1368 km, g 0.726 m/s², water 10189694167 km³, pressure 555 Pa, surface 54.582 K, solid true, air true, grid true
+  Planet(2918819812335288845) under Some(Planet(4030111653607004909)): radius 353 km, g 0.330 m/s², water 0 km³, pressure 0 Pa, surface 252.139 K, solid true, air false, grid true
+  Planet(4030111653607004909) under Some(System(1469594322681260607)): radius 6371 km, g 9.818 m/s², water 2735928089 km³, pressure 101409 Pa, surface 288 K, solid true, air true, grid true
+  Planet(4758346415316369887) under Some(Planet(14168809188858337943)): radius 740 km, g 0.393 m/s², water 0 km³, pressure 0 Pa, surface 48.195 K, solid true, air false, grid true
+  Planet(5009529967214816973) under Some(Planet(6319532287849971384)): radius 381 km, g 0.202 m/s², water 0 km³, pressure 0 Pa, surface 106.827 K, solid true, air false, grid true
+  Planet(6319532287849971384) under Some(System(1469594322681260607)): radius 17081 km, g 2.154 m/s², water 4709349197874 km³, pressure 0 Pa, surface 107.206 K, solid false, air true, grid true
+  Planet(6548333207712198820) under Some(System(1469594322681260607)): radius 4612 km, g 5.663 m/s², water 32336909730 km³, pressure 33735 Pa, surface 205.67 K, solid true, air true, grid true
+  Planet(8033842469571409929) under Some(System(1469594322681260607)): radius 44545 km, g 0.049 m/s², water 743132187991 km³, pressure 0 Pa, surface 63.062 K, solid false, air true, grid false
+  Planet(9365591384554781602) under Some(Planet(14168809188858337943)): radius 798 km, g 0.423 m/s², water 0 km³, pressure 0 Pa, surface 48.195 K, solid true, air false, grid true
+  Planet(9681479238181807485) under Some(Planet(8033842469571409929)): radius 248 km, g 0.131 m/s², water 0 km³, pressure 0 Pa, surface 62.839 K, solid true, air false, grid true
+  Planet(10921707728745932920) under Some(Planet(6319532287849971384)): radius 343 km, g 0.182 m/s², water 0 km³, pressure 0 Pa, surface 106.827 K, solid true, air false, grid true
+  Planet(11135378362746412450) under Some(Planet(6548333207712198820)): radius 235 km, g 0.219 m/s², water 0 km³, pressure 0 Pa, surface 193.382 K, solid true, air false, grid true
+  Planet(11959476774801662360) under Some(Planet(14168809188858337943)): radius 1155 km, g 0.613 m/s², water 0 km³, pressure 0 Pa, surface 48.195 K, solid true, air false, grid true
+  Planet(12512012950003023870) under Some(Planet(17734272290252696003)): radius 361 km, g 0.191 m/s², water 0 km³, pressure 0 Pa, surface 139.285 K, solid true, air false, grid true
+  Planet(14168809188858337943) under Some(System(1469594322681260607)): radius 28110 km, g 50.837 m/s², water 300940357315334 km³, pressure 0 Pa, surface 48.366 K, solid false, air true, grid true
+  Planet(14964011474468519458) under Some(System(1469594322681260607)): radius 4826 km, g 2.757 m/s², water 481160569507 km³, pressure 7999 Pa, surface 92.789 K, solid true, air true, grid true
+  Planet(15963996891772623051) under Some(Planet(17734272290252696003)): radius 341 km, g 0.180 m/s², water 0 km³, pressure 0 Pa, surface 139.285 K, solid true, air false, grid true
+  Planet(16306625421242032142) under Some(Planet(14168809188858337943)): radius 569 km, g 0.302 m/s², water 0 km³, pressure 0 Pa, surface 48.195 K, solid true, air false, grid true
+  Planet(16641213365243583018) under Some(Planet(6319532287849971384)): radius 270 km, g 0.143 m/s², water 0 km³, pressure 0 Pa, surface 106.827 K, solid true, air false, grid true
+  Planet(16953541426428716620) under Some(Planet(14168809188858337943)): radius 1078 km, g 0.572 m/s², water 0 km³, pressure 0 Pa, surface 48.195 K, solid true, air false, grid true
+  Planet(17313999383825979787) under Some(System(1469594322681260607)): radius 25407 km, g 52.258 m/s², water 0 km³, pressure 2872596 Pa, surface 455.875 K, solid true, air true, grid true
+  Planet(17734272290252696003) under Some(System(1469594322681260607)): radius 37922 km, g 0.210 m/s², water 2272716391238 km³, pressure 0 Pa, surface 139.78 K, solid false, air true, grid true
+  Planet(17782101822166660494) under Some(System(1469594322681260607)): radius 7393 km, g 12.652 m/s², water 0 km³, pressure 168380 Pa, surface 349.64 K, solid true, air true, grid true
+THE THIRD BODY'S CANDIDATES (solid, with a grid whose node the 8192 m target sets; the home planet and its moon left out):
+  Planet(22337287228646994): radius 207 km, distance 10.873 decades, dry true, air false, preferred false, 9600 nodes of 8192 m
+  Planet(61143963952882988): radius 1368 km, distance 2.691 decades, dry false, air true, preferred false, 418176 nodes of 8192 m
+  Planet(4758346415316369887): radius 740 km, distance 10.802 decades, dry true, air false, preferred false, 117600 nodes of 8192 m
+  Planet(5009529967214816973): radius 381 km, distance 10.824 decades, dry true, air false, preferred false, 31104 nodes of 8192 m
+  Planet(6548333207712198820): radius 4612 km, distance 1.207 decades, dry false, air true, preferred false, 4646400 nodes of 8192 m
+  Planet(9365591384554781602): radius 798 km, distance 10.798 decades, dry true, air false, preferred false, 138624 nodes of 8192 m
+  Planet(9681479238181807485): radius 248 km, distance 10.866 decades, dry true, air false, preferred false, 13824 nodes of 8192 m
+  Planet(10921707728745932920): radius 343 km, distance 10.831 decades, dry true, air false, preferred false, 26136 nodes of 8192 m
+  Planet(11135378362746412450): radius 235 km, distance 10.811 decades, dry true, air false, preferred false, 12150 nodes of 8192 m
+  Planet(11959476774801662360): radius 1155 km, distance 10.778 decades, dry true, air false, preferred false, 290400 nodes of 8192 m
+  Planet(12512012950003023870): radius 361 km, distance 10.823 decades, dry true, air false, preferred false, 29400 nodes of 8192 m
+  Planet(14964011474468519458): radius 4826 km, distance 2.608 decades, dry false, air true, preferred false, 5167104 nodes of 8192 m
+  Planet(15963996891772623051): radius 341 km, distance 10.828 decades, dry true, air false, preferred false, 26136 nodes of 8192 m
+  Planet(16306625421242032142): radius 569 km, distance 10.817 decades, dry true, air false, preferred false, 72600 nodes of 8192 m
+  Planet(16641213365243583018): radius 270 km, distance 10.848 decades, dry true, air false, preferred false, 16224 nodes of 8192 m
+  Planet(16953541426428716620): radius 1078 km, distance 10.782 decades, dry true, air false, preferred false, 259584 nodes of 8192 m
+  Planet(17313999383825979787): radius 25407 km, distance 9.578 decades, dry true, air true, preferred true, 25165824 nodes of 19456 m — the edge ceiling set its node, not the target: not a candidate
+  Planet(17782101822166660494): radius 7393 km, distance 9.441 decades, dry true, air true, preferred true, 11894784 nodes of 8192 m
+THE THIRD BODY (the rule): Planet(17782101822166660494)
+
+== Home: Planet(4030111653607004909), 8871936 nodes, the solve 184.4 s, the sea floor 77.70 % of the nodes
+STAND Home Class "sea floor / crystalline basement": node 5443827 ((NegY, 1011, 828)), 0.482152 -0.840879 0.245870, z 3490 m, class sea floor / crystalline basement; class 781861 nodes, largest patch 267811, 997.2 km from the patch's edge, 1 tied
+STAND Home Class "sea floor / folded belt": node 5147266 ((NegY, 1154, 584)), 0.648706 -0.760688 -0.023099, z 3583 m, class sea floor / folded belt; class 60907 nodes, largest patch 12549, 123.1 km from the patch's edge, 1 tied
+STAND Home Class "sea floor / flat shelf": node 3962636 ((PosY, 908, 826)), 0.258977 0.894252 0.365027, z 1300 m, class sea floor / flat shelf; class 748617 nodes, largest patch 230356, 1501.9 km from the patch's edge, 1 tied
+STAND Home Class "sea floor / rift basalt": node 738011 ((PosX, 1115, 606)), 0.792717 0.609588 -0.001536, z -5558 m, class sea floor / rift basalt; class 445221 nodes, largest patch 152347, 266.4 km from the patch's edge, 1 tied
+STAND Home Class "sea floor / deep sediment": node 1103581 ((PosX, 669, 907)), 0.923817 0.073536 0.375706, z -5611 m, class sea floor / deep sediment; class 4856475 nodes, largest patch 3124028, 2481.6 km from the patch's edge, 1 tied
+STAND Home Class "basin floor / crystalline basement": node 4536144 ((NegY, 464, 82)), -0.144312 -0.770120 -0.621361, z 6261 m, class basin floor / crystalline basement; class 568411 nodes, largest patch 182192, 286.7 km from the patch's edge, 1 tied
+STAND Home Class "basin floor / folded belt": node 8576052 ((NegZ, 820, 972)), 0.439432 0.243198 -0.864728, z 3659 m, class basin floor / folded belt; class 510 nodes, largest patch 159, 37.0 km from the patch's edge, 1 tied
+STAND Home Class "basin floor / flat shelf": node 5957544 ((PosZ, 360, 35)), -0.237197 -0.654849 0.717573, z 6705 m, class basin floor / flat shelf; class 4077 nodes, largest patch 1348, 44.2 km from the patch's edge, 1 tied
+STAND Home Class "basin floor / rift basalt": node 7911536 ((NegZ, 240, 426)), -0.207662 -0.446537 -0.870334, z 7188 m, class basin floor / rift basalt; class 2687 nodes, largest patch 1110, 56.4 km from the patch's edge, 1 tied
+STAND Home Class "basin floor / deep sediment": node 5983075 ((PosZ, 355, 56)), -0.247585 -0.633436 0.733117, z 6730 m, class basin floor / deep sediment; class 3078 nodes, largest patch 655, 37.1 km from the patch's edge, 1 tied
+STAND Home Class "plains / crystalline basement": node 3157743 ((PosY, 1007, 164)), -0.489087 0.758909 0.429944, z 3793 m, class plains / crystalline basement; class 390052 nodes, largest patch 36158, 229.0 km from the patch's edge, 1 tied
+STAND Home Class "plains / folded belt": node 4857241 ((NegY, 537, 346)), -0.085843 -0.940174 -0.329704, z 3851 m, class plains / folded belt; class 112359 nodes, largest patch 18532, 68.4 km from the patch's edge, 1 tied
+STAND Home Class "plains / flat shelf": node 7627408 ((NegZ, 656, 192)), -0.510105 0.053847 -0.858425, z 3727 m, class plains / flat shelf; class 58129 nodes, largest patch 6206, 133.8 km from the patch's edge, 1 tied
+STAND Home Class "plains / rift basalt": node 5557508 ((NegY, 388, 922)), -0.258313 -0.887679 0.381183, z 5140 m, class plains / rift basalt; class 14340 nodes, largest patch 2589, 59.4 km from the patch's edge, 1 tied
+STAND Home Class "plains / deep sediment": node 6270304 ((PosZ, 608, 292)), 0.000593 -0.395760 0.918354, z 3749 m, class plains / deep sediment; class 22532 nodes, largest patch 7320, 116.5 km from the patch's edge, 1 tied
+STAND Home Class "tablelands / crystalline basement": node 4838582 ((NegY, 118, 331)), -0.565896 -0.772604 -0.287826, z 6140 m, class tablelands / crystalline basement; class 644847 nodes, largest patch 179077, 111.5 km from the patch's edge, 1 tied
+STAND Home Class "tablelands / folded belt": node 15937 ((PosX, 129, 13)), 0.640425 -0.455174 -0.618605, z 5950 m, class tablelands / folded belt; class 61282 nodes, largest patch 34442, 61.5 km from the patch's edge, 1 tied
+STAND Home Class "tablelands / flat shelf": node 6942618 ((PosZ, 474, 845)), -0.163727 0.297525 0.940570, z 7192 m, class tablelands / flat shelf; class 36151 nodes, largest patch 9712, 88.8 km from the patch's edge, 1 tied
+STAND Home Class "tablelands / rift basalt": node 8560977 ((NegZ, 337, 960)), 0.417430 -0.310638 -0.853965, z 5536 m, class tablelands / rift basalt; class 9644 nodes, largest patch 1430, 60.0 km from the patch's edge, 1 tied
+STAND Home Class "tablelands / deep sediment": node 4536577 ((NegY, 897, 82)), 0.291628 -0.744437 -0.600639, z -1528 m, class tablelands / deep sediment; class 13984 nodes, largest patch 2291, 87.9 km from the patch's edge, 1 tied
+STAND Home Class "mountains / crystalline basement": node 8063495 ((NegZ, 199, 551)), -0.063058 -0.502028 -0.862549, z -1582 m, class mountains / crystalline basement; class 27298 nodes, largest patch 5115, 71.3 km from the patch's edge, 1 tied
+STAND Home Class "mountains / flat shelf": node 4580297 ((NegY, 841, 118)), 0.243108 -0.782541 -0.573174, z 5124 m, class mountains / flat shelf; class 2848 nodes, largest patch 1031, 32.5 km from the patch's edge, 1 tied
+STAND Home Class "mountains / rift basalt": node 7577538 ((NegZ, 642, 151)), -0.555430 0.037046 -0.830738, z -2398 m, class mountains / rift basalt; class 523 nodes, largest patch 470, 35.2 km from the patch's edge, 1 tied
+STAND Home Class "mountains / deep sediment": node 4447836 ((NegY, 924, 9)), 0.295672 -0.683675 -0.667208, z -4119 m, class mountains / deep sediment; class 5808 nodes, largest patch 5543, 107.7 km from the patch's edge, 1 tied
+STAND Home Border "border 1": node 6970780 ((PosZ, 668, 868)), 0.073721 0.328812 0.941514, z 3761 m, class plains / flat shelf; 13 classes within 60 km
+STAND Home Border "border 2": node 8818816 ((NegZ, 384, 1172)), 0.650699 -0.215919 -0.727990, z 3666 m, class tablelands / crystalline basement; 10 classes within 60 km
+STAND Home Border "border 3": node 4436956 ((NegY, 988, 0)), 0.353731 -0.661814 -0.660966, z 4541 m, class mountains / flat shelf; 9 classes within 60 km
+STAND Home Random "random sea floor 1": node 233613 ((PosX, 141, 192)), 0.740065 -0.508828 -0.439772, z -5611 m, class sea floor / deep sediment; draw 0
+STAND Home Random "random sea floor 2": node 2841745 ((NegX, 1169, 1120)), -0.646311 0.503711 0.573199, z 3583 m, class sea floor / flat shelf; draw 1
+STAND Home Random "random land 1": node 6994906 ((PosZ, 474, 888)), -0.160690 0.349328 0.923119, z 4065 m, class plains / deep sediment; draw 2
+STAND Home Random "random sea floor 3": node 1846896 ((NegX, 1008, 302)), -0.817660 -0.339930 0.464628, z -698 m, class sea floor / deep sediment; draw 3
+STAND Home Random "random sea floor 4": node 2990428 ((PosY, 284, 27)), -0.648427 0.695975 -0.308482, z -5547 m, class sea floor / rift basalt; draw 4
+STAND Home Random "random land 2": node 8035346 ((NegZ, 18, 528)), -0.074360 -0.688197 -0.721703, z 7271 m, class basin floor / crystalline basement; draw 5
+STAND Home Random "random land 3": node 2569791 ((NegX, 383, 897)), -0.897207 0.351474 -0.267366, z 5485 m, class basin floor / crystalline basement; draw 8
+STAND Home Random "random land 4": node 6327416 ((PosZ, 568, 339)), -0.047979 -0.339032 0.939551, z 3607 m, class plains / deep sediment; draw 9
+STAND Home Random "random land 5": node 5013688 ((NegY, 120, 475)), -0.583148 -0.800510 -0.138283, z 4799 m, class tablelands / crystalline basement; draw 18
+STAND Home Random "random land 6": node 2287596 ((NegX, 300, 665)), -0.920224 0.068469 -0.385356, z 4935 m, class basin floor / crystalline basement; draw 25
+STAND Home Random "random land 7": node 2194063 ((NegX, 399, 588)), -0.963751 -0.024281 -0.265697, z 3697 m, class plains / folded belt; draw 27
+STAND Home Random "random land 8": node 8283665 ((NegZ, 273, 732)), 0.145709 -0.413692 -0.898681, z 4256 m, class tablelands / crystalline basement; draw 29
+STAND Home Random "random land 9": node 2419699 ((NegX, 1075, 773)), -0.810467 0.175799 0.558783, z 7962 m, class tablelands / crystalline basement; draw 31
+STAND Home Random "random land 10": node 4670860 ((NegY, 204, 193)), -0.442406 -0.771560 -0.457135, z 5933 m, class tablelands / crystalline basement; draw 35
+STAND Home Random "random land 11": node 2436768 ((NegX, 1120, 787)), -0.775439 0.182909 0.604349, z 8187 m, class tablelands / crystalline basement; draw 36
+STAND Home Random "random land 12": node 7547744 ((NegZ, 32, 127)), -0.465535 -0.599113 -0.651415, z 6572 m, class basin floor / crystalline basement; draw 39
+STAND Home Random "random land 13": node 8375968 ((NegZ, 160, 808)), 0.216438 -0.533122 -0.817885, z 6283 m, class basin floor / crystalline basement; draw 41
+STAND Home Random "random land 14": node 4529014 ((NegY, 630, 76)), 0.022478 -0.773163 -0.633809, z 6187 m, class basin floor / crystalline basement; draw 59
+STAND Home Random "random land 15": node 7488796 ((NegZ, 668, 78)), -0.630802 0.060572 -0.773576, z 4346 m, class basin floor / crystalline basement; draw 65
+STAND Home Random "random land 16": node 4907005 ((NegY, 445, 387)), -0.200175 -0.940385 -0.274965, z 3778 m, class plains / folded belt; draw 69
+STAND Home Random "random land 17": node 5866824 ((NegY, 840, 1176)), 0.223689 -0.723319 0.653279, z 3768 m, class plains / crystalline basement; draw 74
+STAND Home Random "random land 18": node 4847254 ((NegY, 278, 338)), -0.391508 -0.865144 -0.313443, z 5882 m, class tablelands / crystalline basement; draw 76
+STAND Home Random "random land 19": node 4812018 ((NegY, 306, 309)), -0.354982 -0.866449 -0.351074, z 5842 m, class basin floor / crystalline basement; draw 82
+STAND Home Random "random land 20": node 7159010 ((PosZ, 418, 1023)), -0.209737 0.499484 0.840551, z 5987 m, class tablelands / crystalline basement; draw 83
+STAND Home Today "the belt": node 8844119 ((NegZ, 151, 1193)), 0.617270 -0.437286 -0.654033, z 6835 m, class tablelands / folded belt; ruling B2
+STAND Home Today "the coast": node 4718858 ((NegY, 778, 232)), 0.194169 -0.868118 -0.456804, z 3688 m, class plains / folded belt; pinned at generator 20
+STAND Home Today "the plain": node 1219 ((PosX, 3, 1)), 0.579815 -0.574634 -0.577590, z 3697 m, class plains / folded belt; pinned at generator 20
+STAND Home Today "pocket 1": node 7901713 ((NegZ, 145, 418)), -0.202087 -0.550667 -0.809893, z -8276 m, class mountains / crystalline basement; its deepest node at generator 21
+STAND Home Today "pocket 2": node 4470928 ((NegY, 912, 28)), 0.290360 -0.700976 -0.651401, z -4602 m, class tablelands / deep sediment; its deepest node at generator 21
+STAND Home Today "the high lake": node 4746309 ((NegY, 261, 255)), -0.395463 -0.825174 -0.403357, z 5940 m, class tablelands / crystalline basement; the step-2b aim
+STAND Home Today "the summit": node 8857505 ((NegZ, 161, 1204)), 0.631321 -0.422643 -0.650236, z 7831 m, class tablelands / folded belt; the old reference pose (status §9)
+STAND Home Today "the ground stand": node 1995845 ((NegX, 389, 425)), -0.935990 -0.224603 -0.271064, z 2181 m, class sea floor / folded belt; D5's stand (ruling B34)
+STAND Home Today "the dusk stand": node 2285273 ((NegX, 409, 663)), -0.965053 0.069298 -0.252725, z 2315 m, class sea floor / folded belt; D6's stand (ruling B34)
+
+== Moon: Planet(2918819812335288845), 27744 nodes, the solve 0.3 s, the sea floor 0.00 % of the nodes
+STAND Moon Class "basin floor / crystalline basement": node 21782 ((PosZ, 22, 48)), -0.248624 0.317935 0.914934, z 8423 m, class basin floor / crystalline basement; class 428 nodes, largest patch 135, 27.5 km from the patch's edge, 1 tied
+STAND Moon Class "basin floor / deep sediment": node 1837 ((PosX, 1, 27)), 0.726636 -0.678179 -0.109878, z -5423 m, class basin floor / deep sediment; class 1481 nodes, largest patch 816, 24.1 km from the patch's edge, 1 tied
+STAND Moon Class "tablelands / crystalline basement": node 22970 ((PosZ, 54, 65)), 0.356809 0.621467 0.697471, z 9254 m, class tablelands / crystalline basement; class 3480 nodes, largest patch 2703, 39.6 km from the patch's edge, 1 tied
+STAND Moon Class "tablelands / deep sediment": node 25426 ((NegZ, 62, 33)), -0.009136 0.611770 -0.790983, z -4568 m, class tablelands / deep sediment; class 6464 nodes, largest patch 5796, 45.5 km from the patch's edge, 1 tied
+STAND Moon Class "mountains / crystalline basement": node 6226 ((NegX, 38, 23)), -0.965852 -0.238709 0.100738, z 2206 m, class mountains / crystalline basement; class 7088 nodes, largest patch 6417, 63.6 km from the patch's edge, 1 tied
+STAND Moon Class "mountains / deep sediment": node 1962 ((PosX, 58, 28)), 0.839461 0.532743 -0.107192, z -5913 m, class mountains / deep sediment; class 8767 nodes, largest patch 3852, 50.7 km from the patch's edge, 1 tied
+STAND Moon Border "border 1": node 16 ((PosX, 16, 0)), 0.683984 -0.292086 -0.668469, z -4322 m, class mountains / deep sediment; 4 classes within 60 km
+STAND Moon Border "border 2": node 32 ((PosX, 32, 0)), 0.714952 -0.024782 -0.698734, z -4678 m, class mountains / deep sediment; 4 classes within 60 km
+STAND Moon Border "border 3": node 584 ((PosX, 40, 8)), 0.825169 0.124777 -0.550933, z -5060 m, class tablelands / deep sediment; 4 classes within 60 km
+STAND Moon Random "random land 1": node 24823 ((NegZ, 3, 25)), -0.149707 -0.640506 -0.753220, z -5249 m, class mountains / deep sediment; draw 0
+STAND Moon Random "random land 2": node 24328 ((NegZ, 52, 17)), -0.342185 0.388857 -0.855394, z -4088 m, class mountains / deep sediment; draw 1
+STAND Moon Random "random land 3": node 23433 ((NegZ, 41, 4)), -0.624248 0.134588 -0.769546, z -8964 m, class mountains / deep sediment; draw 2
+STAND Moon Random "random land 4": node 13751 ((PosY, 15, 66)), 0.647490 0.693754 -0.315377, z -9027 m, class mountains / deep sediment; draw 3
+STAND Moon Random "random land 5": node 21954 ((PosZ, 58, 50)), 0.507655 0.319997 0.799930, z 6638 m, class mountains / crystalline basement; draw 4
+STAND Moon Random "random land 6": node 21392 ((PosZ, 40, 42)), 0.146708 0.192834 0.970202, z 9114 m, class mountains / crystalline basement; draw 5
+STAND Moon Random "random land 7": node 4238 ((PosX, 22, 62)), 0.773352 -0.210150 0.598133, z -11092 m, class mountains / deep sediment; draw 6
+STAND Moon Random "random land 8": node 331 ((PosX, 59, 4)), 0.689442 0.460313 -0.559269, z -4052 m, class mountains / deep sediment; draw 7
+THE THIRD BODY SOLVED: Planet(17782101822166660494) (the rule's own pick: Planet(17782101822166660494))
+
+== Third: Planet(17782101822166660494), 11894784 nodes, the solve 142.7 s, the sea floor 0.00 % of the nodes
+STAND Third Class "basin floor / crystalline basement": node 8885276 ((PosZ, 796, 678)), 0.102946 -0.028293 0.994284, z 5727 m, class basin floor / crystalline basement; class 728633 nodes, largest patch 107421, 342.2 km from the patch's edge, 1 tied
+STAND Third Class "basin floor / folded belt": node 9410333 ((PosZ, 669, 1051)), -0.035636 0.377220 0.925438, z -5475 m, class basin floor / folded belt; class 52918 nodes, largest patch 6490, 89.9 km from the patch's edge, 1 tied
+STAND Third Class "basin floor / rift basalt": node 7974855 ((PosZ, 1351, 31)), 0.541908 -0.573137 0.614694, z -1217 m, class basin floor / rift basalt; class 382828 nodes, largest patch 37988, 197.1 km from the patch's edge, 1 tied
+STAND Third Class "basin floor / deep sediment": node 11574995 ((NegZ, 1235, 1180)), 0.437942 0.502121 -0.745709, z -1303 m, class basin floor / deep sediment; class 5569248 nodes, largest patch 1400884, 1743.5 km from the patch's edge, 1 tied
+STAND Third Class "tablelands / crystalline basement": node 3150401 ((NegX, 705, 829)), -0.990221 0.139494 0.001657, z -2203 m, class tablelands / crystalline basement; class 1885187 nodes, largest patch 253992, 68.8 km from the patch's edge, 1 tied
+STAND Third Class "tablelands / folded belt": node 3082855 ((NegX, 743, 781)), -0.995306 0.086255 0.043887, z 4514 m, class tablelands / folded belt; class 96914 nodes, largest patch 5843, 59.2 km from the patch's edge, 1 tied
+STAND Third Class "tablelands / rift basalt": node 8460109 ((PosZ, 845, 376)), 0.147016 -0.352871 0.924050, z 2326 m, class tablelands / rift basalt; class 125936 nodes, largest patch 11654, 190.2 km from the patch's edge, 1 tied
+STAND Third Class "tablelands / deep sediment": node 1589177 ((PosX, 953, 1128)), 0.862840 0.246242 0.441443, z 4266 m, class tablelands / deep sediment; class 1067019 nodes, largest patch 78904, 517.9 km from the patch's edge, 1 tied
+STAND Third Class "mountains / crystalline basement": node 4515377 ((PosY, 1329, 390)), -0.268716 0.737977 0.619016, z -2115 m, class mountains / crystalline basement; class 1777241 nodes, largest patch 22103, 62.4 km from the patch's edge, 1 tied
+STAND Third Class "mountains / folded belt": node 6718024 ((NegY, 456, 547)), -0.268455 -0.948666 -0.167229, z -196 m, class mountains / folded belt; class 101359 nodes, largest patch 10634, 66.8 km from the patch's edge, 1 tied
+STAND Third Class "mountains / rift basalt": node 2237109 ((NegX, 1205, 180)), -0.739738 -0.488518 0.462750, z -448 m, class mountains / rift basalt; class 42424 nodes, largest patch 3708, 35.1 km from the patch's edge, 1 tied
+STAND Third Class "mountains / deep sediment": node 9897992 ((PosZ, 1160, 1397)), 0.370456 0.649111 0.664393, z -1057 m, class mountains / deep sediment; class 60647 nodes, largest patch 2083, 34.1 km from the patch's edge, 1 tied
+STAND Third Border "border 1": node 9489948 ((PosZ, 28, 1108)), -0.645417 0.332637 0.687597, z -4195 m, class mountains / folded belt; 12 classes within 60 km
+STAND Third Border "border 2": node 11450164 ((NegZ, 308, 1092)), 0.385529 -0.393463 -0.834598, z -3369 m, class tablelands / rift basalt; 12 classes within 60 km
+STAND Third Border "border 3": node 2597112 ((NegX, 760, 436)), -0.954185 -0.293097 0.060219, z 5727 m, class basin floor / crystalline basement; 11 classes within 60 km
+STAND Third Random "random land 1": node 6084786 ((NegY, 818, 97)), 0.099603 -0.775776 -0.623098, z -1303 m, class basin floor / deep sediment; draw 0
+STAND Third Random "random land 2": node 3684868 ((NegX, 132, 1209)), -0.716543 0.452718 -0.530671, z -1303 m, class basin floor / deep sediment; draw 1
+STAND Third Random "random land 3": node 6405387 ((NegY, 395, 325)), -0.310379 -0.867378 -0.388999, z 1294 m, class basin floor / crystalline basement; draw 2
+STAND Third Random "random land 4": node 6569414 ((NegY, 1094, 441)), 0.406496 -0.874857 -0.263413, z 1589 m, class mountains / crystalline basement; draw 3
+STAND Third Random "random land 5": node 11479295 ((NegZ, 1279, 1112)), 0.364870 0.557473 -0.745717, z -1303 m, class basin floor / deep sediment; draw 4
+STAND Third Random "random land 6": node 8851179 ((PosZ, 491, 654)), -0.234282 -0.053655 0.970687, z 5307 m, class tablelands / crystalline basement; draw 5
+STAND Third Random "random land 7": node 11483995 ((NegZ, 347, 1116)), 0.415149 -0.351822 -0.838971, z -795 m, class basin floor / rift basalt; draw 6
+STAND Third Random "random land 8": node 4579419 ((PosY, 603, 436)), -0.291944 0.950433 -0.106981, z 2537 m, class mountains / crystalline basement; draw 7
+STAND Third Random "random land 9": node 11615497 ((NegZ, 905, 1209)), 0.524442 0.189619 -0.830064, z -1303 m, class basin floor / deep sediment; draw 8
+STAND Third Random "random land 10": node 1570794 ((PosX, 874, 1115)), 0.883710 0.170024 0.436060, z 1990 m, class basin floor / deep sediment; draw 9
+STAND Third Random "random land 11": node 2282295 ((NegX, 1335, 212)), -0.690853 -0.421481 0.587432, z 5727 m, class basin floor / crystalline basement; draw 10
+STAND Third Random "random land 12": node 3393060 ((NegX, 1188, 1001)), -0.822645 0.283062 0.493083, z 2114 m, class mountains / folded belt; draw 11
+
+THE PINS (no pins yet; this table is `vd_bins::stands::PINNED`):
+pub const THIRD_BODY_SEED: u64 = 17782101822166660494;
+pub const PINNED: &[PinnedStand] = &[
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "sea floor / crystalline basement", dir: [0.482152, -0.840879, 0.245870] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "sea floor / folded belt", dir: [0.648706, -0.760688, -0.023099] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "sea floor / flat shelf", dir: [0.258977, 0.894252, 0.365027] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "sea floor / rift basalt", dir: [0.792717, 0.609588, -0.001536] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "sea floor / deep sediment", dir: [0.923817, 0.073536, 0.375706] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "basin floor / crystalline basement", dir: [-0.144312, -0.770120, -0.621361] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "basin floor / folded belt", dir: [0.439432, 0.243198, -0.864728] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "basin floor / flat shelf", dir: [-0.237197, -0.654849, 0.717573] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "basin floor / rift basalt", dir: [-0.207662, -0.446537, -0.870334] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "basin floor / deep sediment", dir: [-0.247585, -0.633436, 0.733117] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "plains / crystalline basement", dir: [-0.489087, 0.758909, 0.429944] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "plains / folded belt", dir: [-0.085843, -0.940174, -0.329704] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "plains / flat shelf", dir: [-0.510105, 0.053847, -0.858425] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "plains / rift basalt", dir: [-0.258313, -0.887679, 0.381183] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "plains / deep sediment", dir: [0.000593, -0.395760, 0.918354] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "tablelands / crystalline basement", dir: [-0.565896, -0.772604, -0.287826] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "tablelands / folded belt", dir: [0.640425, -0.455174, -0.618605] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "tablelands / flat shelf", dir: [-0.163727, 0.297525, 0.940570] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "tablelands / rift basalt", dir: [0.417430, -0.310638, -0.853965] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "tablelands / deep sediment", dir: [0.291628, -0.744437, -0.600639] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "mountains / crystalline basement", dir: [-0.063058, -0.502028, -0.862549] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "mountains / flat shelf", dir: [0.243108, -0.782541, -0.573174] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "mountains / rift basalt", dir: [-0.555430, 0.037046, -0.830738] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Class, name: "mountains / deep sediment", dir: [0.295672, -0.683675, -0.667208] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Border, name: "border 1", dir: [0.073721, 0.328812, 0.941514] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Border, name: "border 2", dir: [0.650699, -0.215919, -0.727990] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Border, name: "border 3", dir: [0.353731, -0.661814, -0.660966] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random sea floor 1", dir: [0.740065, -0.508828, -0.439772] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random sea floor 2", dir: [-0.646311, 0.503711, 0.573199] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 1", dir: [-0.160690, 0.349328, 0.923119] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random sea floor 3", dir: [-0.817660, -0.339930, 0.464628] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random sea floor 4", dir: [-0.648427, 0.695975, -0.308482] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 2", dir: [-0.074360, -0.688197, -0.721703] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 3", dir: [-0.897207, 0.351474, -0.267366] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 4", dir: [-0.047979, -0.339032, 0.939551] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 5", dir: [-0.583148, -0.800510, -0.138283] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 6", dir: [-0.920224, 0.068469, -0.385356] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 7", dir: [-0.963751, -0.024281, -0.265697] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 8", dir: [0.145709, -0.413692, -0.898681] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 9", dir: [-0.810467, 0.175799, 0.558783] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 10", dir: [-0.442406, -0.771560, -0.457135] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 11", dir: [-0.775439, 0.182909, 0.604349] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 12", dir: [-0.465535, -0.599113, -0.651415] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 13", dir: [0.216438, -0.533122, -0.817885] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 14", dir: [0.022478, -0.773163, -0.633809] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 15", dir: [-0.630802, 0.060572, -0.773576] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 16", dir: [-0.200175, -0.940385, -0.274965] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 17", dir: [0.223689, -0.723319, 0.653279] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 18", dir: [-0.391508, -0.865144, -0.313443] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 19", dir: [-0.354982, -0.866449, -0.351074] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Random, name: "random land 20", dir: [-0.209737, 0.499484, 0.840551] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Today, name: "the belt", dir: [0.617270, -0.437286, -0.654033] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Today, name: "the coast", dir: [0.194169, -0.868118, -0.456804] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Today, name: "the plain", dir: [0.579815, -0.574634, -0.577590] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Today, name: "pocket 1", dir: [-0.202087, -0.550667, -0.809893] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Today, name: "pocket 2", dir: [0.290360, -0.700976, -0.651401] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Today, name: "the high lake", dir: [-0.395463, -0.825174, -0.403357] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Today, name: "the summit", dir: [0.631321, -0.422643, -0.650236] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Today, name: "the ground stand", dir: [-0.935990, -0.224603, -0.271064] },
+    PinnedStand { body: StandBody::Home, layer: StandLayer::Today, name: "the dusk stand", dir: [-0.965053, 0.069298, -0.252725] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Class, name: "basin floor / crystalline basement", dir: [-0.248624, 0.317935, 0.914934] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Class, name: "basin floor / deep sediment", dir: [0.726636, -0.678179, -0.109878] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Class, name: "tablelands / crystalline basement", dir: [0.356809, 0.621467, 0.697471] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Class, name: "tablelands / deep sediment", dir: [-0.009136, 0.611770, -0.790983] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Class, name: "mountains / crystalline basement", dir: [-0.965852, -0.238709, 0.100738] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Class, name: "mountains / deep sediment", dir: [0.839461, 0.532743, -0.107192] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Border, name: "border 1", dir: [0.683984, -0.292086, -0.668469] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Border, name: "border 2", dir: [0.714952, -0.024782, -0.698734] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Border, name: "border 3", dir: [0.825169, 0.124777, -0.550933] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Random, name: "random land 1", dir: [-0.149707, -0.640506, -0.753220] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Random, name: "random land 2", dir: [-0.342185, 0.388857, -0.855394] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Random, name: "random land 3", dir: [-0.624248, 0.134588, -0.769546] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Random, name: "random land 4", dir: [0.647490, 0.693754, -0.315377] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Random, name: "random land 5", dir: [0.507655, 0.319997, 0.799930] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Random, name: "random land 6", dir: [0.146708, 0.192834, 0.970202] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Random, name: "random land 7", dir: [0.773352, -0.210150, 0.598133] },
+    PinnedStand { body: StandBody::Moon, layer: StandLayer::Random, name: "random land 8", dir: [0.689442, 0.460313, -0.559269] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "basin floor / crystalline basement", dir: [0.102946, -0.028293, 0.994284] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "basin floor / folded belt", dir: [-0.035636, 0.377220, 0.925438] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "basin floor / rift basalt", dir: [0.541908, -0.573137, 0.614694] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "basin floor / deep sediment", dir: [0.437942, 0.502121, -0.745709] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "tablelands / crystalline basement", dir: [-0.990221, 0.139494, 0.001657] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "tablelands / folded belt", dir: [-0.995306, 0.086255, 0.043887] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "tablelands / rift basalt", dir: [0.147016, -0.352871, 0.924050] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "tablelands / deep sediment", dir: [0.862840, 0.246242, 0.441443] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "mountains / crystalline basement", dir: [-0.268716, 0.737977, 0.619016] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "mountains / folded belt", dir: [-0.268455, -0.948666, -0.167229] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "mountains / rift basalt", dir: [-0.739738, -0.488518, 0.462750] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Class, name: "mountains / deep sediment", dir: [0.370456, 0.649111, 0.664393] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Border, name: "border 1", dir: [-0.645417, 0.332637, 0.687597] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Border, name: "border 2", dir: [0.385529, -0.393463, -0.834598] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Border, name: "border 3", dir: [-0.954185, -0.293097, 0.060219] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 1", dir: [0.099603, -0.775776, -0.623098] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 2", dir: [-0.716543, 0.452718, -0.530671] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 3", dir: [-0.310379, -0.867378, -0.388999] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 4", dir: [0.406496, -0.874857, -0.263413] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 5", dir: [0.364870, 0.557473, -0.745717] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 6", dir: [-0.234282, -0.053655, 0.970687] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 7", dir: [0.415149, -0.351822, -0.838971] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 8", dir: [-0.291944, 0.950433, -0.106981] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 9", dir: [0.524442, 0.189619, -0.830064] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 10", dir: [0.883710, 0.170024, 0.436060] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 11", dir: [-0.690853, -0.421481, 0.587432] },
+    PinnedStand { body: StandBody::Third, layer: StandLayer::Random, name: "random land 12", dir: [-0.822645, 0.283062, 0.493083] },
+];
+target/release/examples/stands_rule  694.03s user 7.43s system 98% cpu 11:49.41 total
+EXIT 0
