@@ -11687,21 +11687,54 @@ updated in the same change as the work, deleted when done). The interims named h
       staleness test drops half of the attempts on every leg from the star down to the client, and the gateway still
       sees a newer picture of the area on 198 ticks of 200, as on the clean arm; why the drop misses the lane is not
       yet measured.
-    OWED IN T2: the login's rise (the owner's decision above); the sky judge's
-    lag reading on the descent and the climb (one tone map on both sides); G-STARS' light (the owner's D6 — no star
-    is lost); G-CROSSING (the boarding's THREE seams CURED — the hull's attitude in the planet's rows, the frame's
-    moment for every drawn row, the sky table's eye; the swap pair's tolerance is the owner's (0.063 levels against
-    0.000–0.006 beside it); a departure, with its own trigger; the boarding's G-RESET holds; the V switch's reading moved
-    to T4); the eye's pop at the picture's last row on the hull leg (one flight of five); the converged stills
-    again on the cured history, as still records on a grid of their own; G-NO-STALL; the T0 meters read
-    at two sizes; the moving legs (the depth test and the reactive mask judged in
-    motion); a tool's jump as a reset (no tool teleports the eye on the path today: the stands start at login, the
-    first frame's reset, and the scene-fitted camera flies no gate under the switch); the window's cost reading; THE OWNER'S LOOK in a window (asked first): D5 the edge at 0.5, still and turning (1.0 and 0.67
-    given on 2026-10-01: "Good", "All good!"); D6 the sky's points, with a choice — today's sprite, or the law's exact light over each pixel (8 % more
-    light in the milky band, and a star's light no longer changes as it crosses a pixel); a first look at D7 (the
-    sharpen's strength). **Example.** The owner stands on the belt at dusk with `VD_TEMPORAL=1 VD_RENDER_SCALE=0.5`:
-    the ground draws 1 728 × 1 084 jittered pixels and the reconstruction writes 3 456 × 2 168; the stars and the sun are
-    today's, drawn after it; when the owner walks past a rock, the valley behind it shows no smear of the rock.
+    🟩 T2 CLOSED (ruling B34, 2026-10-02) by ONE window session with the owner (B33; Docker's machine stopped; the
+    ground stand and the dusk stand under `VD_TEMPORAL=1 VD_RENDER_SCALE=0.5`): 🟩 D5 GIVEN, the edge at 0.5 still and
+    turning ("Looks amazing"; 1.0 and 0.67 given on 2026-10-01: "Good", "All good!"); 🟩 D6 GIVEN for today's sprite
+    after the reconstruction through the air table's transmittance ("Looks amazing!"; the light 2–4 % under the
+    default path's march, no star lost; the law's exact light over each pixel is not built and not needed; G-STARS's
+    light line now reads against this light).
+    - ★ THE PIPELINE METER (built for the session; `client-render/src/pipeline_meter.rs`): the render world counts the
+      engine's cached pipelines by state at the end of each frame (ready; queued or compiling) and the stamp's frame
+      row carries both counts (`DevFrameCost::pipelines_ready`, `pipelines_waiting`; a row without them reads nought).
+      A reading for the dev-control harness; it changes nothing the game does.
+    - 🟥 THE WINDOW'S READINGS, MEASURED AND RED (a poller read the client's own frame row five times a second; three
+      runs: the first attempt with its full-screen switch and a boarding, the ground stand with a boarding, the dusk
+      stand with a boarding and a flight): THE FRAME AT FULL SCREEN 23.1 ms at the median (about 43 frames a second at
+      3 456 × 2 168; the first attempt only — later the owner "simply forgot" the switch), against B22's 60. G-NO-STALL:
+      a frame over 33 ms in 18.5 % of the one-second windows at the first attempt's ground stand, 35.8 % at the second
+      ground stand and every one at the dusk stand (a frame over 25 ms in 60–100 % of them), 146 ms at the dusk boarding with one pipeline compiled in the same moment, 94 ms at the
+      full-screen switch, and three pipelines compiled after the loading at each of the two later stands (55 → 58 at
+      the ground stand at 44, 47 and 91 s while the owner turned; 56 → 59 at dusk at 710, 731 and 766 s, the last at
+      the boarding; none after the loading in the first attempt). UNMEASURED, each a possible cause: the
+      AirPlay stream to a second display (the system's encoder ran at about 12 % of a core with no game window open),
+      the poller's own five state reads a second, and the cluster on the same machine. MOVED TO T4 WITH A CLEAN READING
+      FIRST (B34 item 4): AirPlay off, a lighter meter, the cluster's load known; then the cures — every pipeline warmed
+      before play, the boarding's frame, 60 frames a second at full screen.
+    - 🟩 THE WINDOW CRASH ON A QUICK SHRINK, FOUND IN THE SESSION AND CURED (2026-10-02): the owner's window became
+      shorter in one quick move (1 440 rows toward 240) and the client stopped — wgpu: "Copy of Y 0..720 would end up
+      overrunning the bounds of the Source texture of Y size 678". CAUSE: the reconstruction's frame decision
+      (`jitter_views`) stood beside the render scale (`measure::apply_render_scale`) in the views' set with no order
+      between them, so it read the render size the scale had set in the FRAME BEFORE (the override persists on the
+      camera's render entity), while the engine's view target already had this frame's size; the reactive mask's copy
+      then read past the bottom of the view's picture whenever the window shrank in one frame under the last frame's
+      render picture (under 720 rows at half scale, where the floor law holds the render picture at 720). A larger
+      window never failed (the first attempt's full-screen switch). CURE: the frame decision runs after the render
+      scale, and the engine inserts its command sync point between them (`reconstruction::view_systems`,
+      `measure::render_scale_system`). TEST `the_frame_decision_reads_the_render_size_its_own_frame_set` reads the
+      engine's render schedule: RED on the old order (the two systems side by side, no sync point), green on the new.
+      The owner's check by hand ran the cured client through 74 size changes with no error, but its smallest window
+      was 756 rows, where the old order could not fail either. **Example.** The pilot drags the window's bottom edge up
+      in one quick move, from 1 440 rows to 678: the reconstruction copies the 678 rows this frame drew, not the 720
+      rows of the frame before.
+    - THE WAVES WAIT (B34 item 7): their cure comes after the ground step builds the proper terrain.
+    MOVED TO T4 (B33, the owner: "Readings to T4"): the departure's crossing (its own trigger); the sky judge's lag
+    reading on the descent and the climb (one tone map on both sides); the converged stills on the cured history, as
+    still records on a grid of their own; the T0 meters read at two sizes; the moving legs (the depth test and the
+    reactive mask judged in motion); a tool's jump as a reset; the eye's pop at the picture's last row on the hull leg
+    (one flight of five, level 1.02); a first look at D7 (the sharpen's strength); the login's rise (the landing is
+    reported, B27); and (B34) the window's frame cost at full screen and G-NO-STALL, a clean reading first. **Example.**
+    In T4 the owner's machine runs the window at full screen with AirPlay off and a meter that reads once a second:
+    if a frame of the full-screen switch still takes 94 ms, the cure is owed there; if not, the stream was its cause.
   OWED: the owner's look decisions the split prices;
   the release-and-request walk on change only, and its diff from the builder (B-MAIN ≤ 1 ms); the builders (E1 the
   parent sub-box and the waits, E6 the geometry without maps, E10 the pools, E2–E5): B-RATE at 240 m/s; a land leg for

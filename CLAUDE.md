@@ -144,6 +144,35 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     frozen again on the owner's word; the commit after the look.
     ★ B32 (2026-10-02, the owner in the window: "It looks great!!! freeze and commit please!"): THE SKY'S LIGHT ON FOOT
     ACCEPTED; the solved references FROZEN AGAIN on it (every stand, the default path); one commit, no push.
+    ★ B33 (2026-10-02, "Readings to T4"): T2's readings-only items MOVE TO T4 (the departure's crossing, the sky's lag
+    on the descent/climb, the T0 meters at two sizes, the still records' grid, a tool's jump); T2 CLOSES after ONE
+    window session (Docker stopped): D5 at half size, D6 the stars' light, the frame cost, G-NO-STALL; THEN the terrain
+    step's discussion (first: the waves in flight).
+    ★ B34 (2026-10-02): T2 CLOSES — D5 GIVEN ("Looks amazing"), D6 GIVEN FOR TODAY'S SPRITE ("Looks amazing!": the
+    star sprite after the reconstruction, through the air table's transmittance); the readings RED (full screen
+    23.1 ms ≈ 43 fps; a frame over 33 ms in 18–36 % of the seconds at the ground stand and in every second at dusk,
+    146 ms at the dusk boarding with a pipeline compiled then, 94 ms at the full-screen switch; AirPlay, the poller
+    and the local cluster UNMEASURED) and MOVED TO T4 with a CLEAN READING FIRST; the
+    window crash on a quick shrink CURED (the frame decision now runs after the render scale; a schedule test);
+    one commit after a check; THE WAVES WAIT for the proper terrain.
+    ★★ B35 (2026-10-02, owner: "Ok, agree with the plan then. Please get into the context the ground rules and laws
+    before designing the plan. Remember that realm calculate and draw itself"): THE PICTURE SETS THE QUALITY, NOT A
+    LIST ("it's not only about the bioms or things we have in the picture") — seven qualities everywhere, at every
+    height, on every body; THE CATALOGUE of every kind of country the body's facts call for (each family priced
+    first, T5); stands chosen by a rule on the home planet and two more bodies; THE ORDER: phase 0 ONE DESIGN WITH
+    REVIEWS → the shape's foundations → R2 → R3 → the processes → biomes and materials → the cover → THE LIGHT (the
+    far shadows join; amends B6.5) → G-LOOK → the waves → the water fill → ONE WEATHER STEP (almanac, weather list,
+    clouds and their shadows, rain/snow on screen, wind, lying snow; amends T1 items 10–11 and T4: clouds, rain on
+    screen and the forest BEFORE the freeze) → the edit system; A REALM CALCULATES AND DRAWS ITSELF (SL3).
+    ★ B36 (2026-10-02, the phase-0 design `docs/investigation/2026-10-02/ground_step_design.md` written; five answers):
+    Q3 the seasonal circulation that follows the sun ALLOWED (amends T5's "no monsoon"); Q7 the first visit "only by
+    law, no manual law changes" (no exception to B16; a slow bake is solved by another law with its numbers); Q10 the
+    target machine IS the owner's current Mac (M4 Pro, 14 cores, 48 GB); Q14 the art discussed when its time comes;
+    Q17 (a) the orbit stated ONCE, the planet evaluates its own sun (a fenced, named exception to SL1 clause 3);
+    the other questions one by one when their answer changes the work: Q1 YES (rule M the average, rule S the
+    outline, the zero-mean gate, no ridged centring), Q2 YES (Earth/Moon/Mars data outside the repo as the measure),
+    Q16 YES (stands pinned once, four views, two suns, three bodies; G-ICE on Earth's real data, amends B5 item 1);
+    Q4, Q5, Q6, Q8 when phase 1 ends; Q9, Q11-Q13, Q15, Q18 at their phases.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

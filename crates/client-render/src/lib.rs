@@ -58,6 +58,8 @@ impl Plugin for RenderDiagSwitch {
         if gpu_clock::gpu_clock() {
             app.add_plugins(gpu_clock::GpuClockPlugin);
         }
+        // ★ THE PIPELINE METER (G-NO-STALL): a reading for the stamp, always on (it counts the cache once a frame).
+        app.add_plugins(pipeline_meter::PipelineMeterPlugin);
     }
 }
 
@@ -1023,6 +1025,7 @@ pub mod gpu_check;
 mod gpu_clock;
 mod measure;
 mod motion_capture;
+mod pipeline_meter;
 mod points;
 mod reconstruction;
 mod render_picture;

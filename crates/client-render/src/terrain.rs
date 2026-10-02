@@ -4770,6 +4770,7 @@ pub(crate) fn place_chunks(
     mut occlusion: bevy::ecs::message::MessageReader<bevy::window::WindowOccluded>,
     mut occluded: Local<bool>,
     mut sky_turn: ResMut<crate::reconstruction::SkyTurn>,
+    pipelines: Option<Res<crate::pipeline_meter::PipelineMeter>>,
 ) {
     let place_started = std::time::Instant::now();
     // THE AIR'S ROTATION STEP (the temporal path's T2, the design §6.3): the identity unless the air's
@@ -4908,6 +4909,8 @@ pub(crate) fn place_chunks(
             occluded: *occluded,
             placements,
             placements_moved,
+            pipelines_ready: pipelines.as_ref().map_or(0, |m| m.read().0),
+            pipelines_waiting: pipelines.as_ref().map_or(0, |m| m.read().1),
         });
     }
     if fresh {

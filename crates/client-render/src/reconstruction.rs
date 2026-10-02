@@ -41,6 +41,8 @@ use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::prepass::{PreviousViewData, ViewPrepassTextures};
 use bevy::ecs::error::BevyError;
 use bevy::ecs::query::QueryItem;
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::image::{BevyDefault as _, ToExtents};
 use bevy::prelude::*;
 use bevy::render::camera::{ExtractedCamera, TemporalJitter};
@@ -131,16 +133,7 @@ impl Plugin for ReconstructionPlugin {
             .insert_resource(ReconstructionViews::default())
             .init_resource::<ReconstructionReadout>()
             .add_systems(RenderStartup, init_pipeline)
-            .add_systems(
-                Render,
-                (
-                    jitter_views
-                        .in_set(RenderSystems::ManageViews)
-                        .before(bevy::render::view::prepare_view_targets),
-                    prepare_pipelines.in_set(RenderSystems::Prepare),
-                    prepare_textures.in_set(RenderSystems::PrepareResources),
-                ),
-            )
+            .add_systems(Render, view_systems())
             .add_render_graph_node::<ViewNodeRunner<ReconstructionNode>>(
                 Core3d,
                 ReconstructionLabel,
@@ -182,6 +175,31 @@ impl Plugin for ReconstructionPlugin {
             Err(e) => tracing::info!(%e, "the reactive mask's copy: no sky pass to follow"),
         }
     }
+}
+
+/// The reconstruction's systems in the render schedule.
+///
+/// ★ THE FRAME'S SIZES FROM ONE FRAME (2026-10-02): the frame's decision reads the render size AFTER the
+/// render scale sets it, with the engine's command sync point between them. Without that order it read
+/// the size the scale set in the frame BEFORE, while the engine's view target already had this frame's
+/// size: at a window that shrank to under half its height in one frame, the reactive mask's copy read
+/// past the bottom of the view's picture, and wgpu stopped the client. MEASURED in the owner's window
+/// session: a copy of 720 rows from a picture of 678 rows, the window's edge dragged from 1 440 rows
+/// toward 240 at half scale.
+///
+/// **Example.** The pilot drags the window's bottom edge up in one quick move, from 1 440 rows to 678.
+/// The floor law raises the scale to one at 678 rows, so the render scale sets 678 render rows for that
+/// frame, and the reconstruction copies those 678 rows. It does not copy the 720 rows of the frame before.
+fn view_systems() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        jitter_views
+            .in_set(RenderSystems::ManageViews)
+            .after(crate::measure::apply_render_scale)
+            .before(bevy::render::view::prepare_view_targets),
+        prepare_pipelines.in_set(RenderSystems::Prepare),
+        prepare_textures.in_set(RenderSystems::PrepareResources),
+    )
+        .into_configs()
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
@@ -771,6 +789,51 @@ impl ViewNode for ReconstructionNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::schedule::ApplyDeferred;
+    use bevy::ecs::system::{IntoSystem, System};
+    use std::any::TypeId;
+
+    /// ★ THE FRAME'S SIZES FROM ONE FRAME: in the engine's render schedule the reconstruction's frame
+    /// decision runs AFTER the render scale, with a command sync point between them, so it reads the
+    /// render size the scale set in this frame. Without the order the two stood side by side before the
+    /// views' targets, and the decision read the size of the frame before: the window-shrink crash.
+    #[test]
+    fn the_frame_decision_reads_the_render_size_its_own_frame_set() {
+        let mut schedule = Render::base_schedule();
+        schedule.add_systems((
+            crate::measure::render_scale_system(),
+            view_systems(),
+            bevy::render::view::prepare_view_targets.in_set(RenderSystems::ManageViews),
+        ));
+        let mut world = World::new();
+        schedule
+            .initialize(&mut world)
+            .expect("the render schedule builds");
+        let order: Vec<TypeId> = schedule
+            .systems()
+            .expect("the schedule is initialized")
+            .map(|(_, system)| System::type_id(&**system))
+            .collect();
+        let at = |id: TypeId| {
+            order
+                .iter()
+                .position(|t| *t == id)
+                .expect("the system stands in the schedule")
+        };
+        let scale = at(System::type_id(&IntoSystem::into_system(
+            crate::measure::apply_render_scale,
+        )));
+        let decision = at(System::type_id(&IntoSystem::into_system(jitter_views)));
+        assert!(
+            scale < decision,
+            "the render scale ({scale}) runs before the frame decision ({decision})"
+        );
+        assert!(
+            order[scale..decision].contains(&TypeId::of::<ApplyDeferred>()),
+            "a command sync point stands between the render scale ({scale}) and the frame decision \
+             ({decision}), so the decision reads this frame's size"
+        );
+    }
 
     /// ★ THE JITTER'S SIGN, ON THE ENGINE'S OWN PROJECTION: under a projection offset `o` the engine's
     /// reverse-Z perspective draws a scene point at `p − o` (x to the right, y down), so render pixel

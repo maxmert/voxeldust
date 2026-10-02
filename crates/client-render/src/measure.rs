@@ -41,6 +41,8 @@
 //! half the width and half the height cost.
 
 use bevy::camera::MainPassResolutionOverride;
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::render_graph::{
@@ -240,12 +242,9 @@ impl Plugin for RenderMeasurePlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app.insert_resource(measure).add_systems(
-            Render,
-            apply_render_scale
-                .in_set(RenderSystems::ManageViews)
-                .before(bevy::render::view::prepare_view_targets),
-        );
+        render_app
+            .insert_resource(measure)
+            .add_systems(Render, render_scale_system());
     }
 
     fn finish(&self, app: &mut App) {
@@ -262,10 +261,19 @@ impl Plugin for RenderMeasurePlugin {
     }
 }
 
+/// The render scale's place in the render schedule: with the views, before the engine sizes the views'
+/// targets. The reconstruction reads the size it sets AFTER it, in the same frame
+/// (`reconstruction::view_systems`).
+pub(crate) fn render_scale_system() -> ScheduleConfigs<ScheduleSystem> {
+    apply_render_scale
+        .in_set(RenderSystems::ManageViews)
+        .before(bevy::render::view::prepare_view_targets)
+}
+
 /// ★ THE RENDER SCALE: every picture camera's main passes draw `s` of each side (the probe camera,
 /// order −1, keeps its own size: it is a meter's picture, not the frame's); a camera with a fixed
 /// render grid (the capture's picture and its probe) draws exactly that grid.
-fn apply_render_scale(
+pub(crate) fn apply_render_scale(
     mut commands: Commands,
     measure: Res<RenderMeasure>,
     views: Query<(Entity, &ExtractedCamera, Option<&RenderGrid>)>,

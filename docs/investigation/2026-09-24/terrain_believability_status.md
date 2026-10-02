@@ -1351,3 +1351,29 @@ AWAY from the reference, the step's report says so (ruling B6).
   references are frozen again on the ground under the sky's light (every stand, the default path). Next, on the owner's
   question ("will we continue to making terrain believable?"): close T2 (its readings-only items proposed to move to T4),
   then the terrain step's discussion, its first item the waves in flight.
+- 2026-10-02 (afternoon) — RULING B34: T2 CLOSES (D5 "Looks amazing", D6 "Looks amazing!" for today's star sprite after
+  the reconstruction; the full-screen frame 23.1 ms and G-NO-STALL MEASURED RED, moved to T4 with a clean reading first;
+  the window crash on a quick shrink cured — the reconstruction's frame decision now reads this frame's render size;
+  THE WAVES WAIT for the proper terrain). RULING B35, THE GROUND STEP'S PLAN: the reference pictures set the QUALITY, not
+  a list of things (seven qualities everywhere, at every height, on every body); a CATALOGUE of every kind of country the
+  body's facts call for, each family priced first; stands chosen by a rule on the home planet and two more bodies; the
+  order phase 0 ONE DESIGN WITH REVIEWS → the shape's foundations (this file's step 2c and the small hills' average) →
+  R2 (step 3) → R3 (step 6's valleys) → the processes → biomes and materials (8e) → the cover → the light (the far
+  shadows join, amending B6.5) → G-LOOK (step 7) → the waves → the water fill → ONE WEATHER STEP → the edit system; the
+  clouds, the rain on screen and the forest come BEFORE the freeze (amends T1 and T4); a realm calculates and draws
+  itself (SL3). This file's §8 step 4 (the shoreline) belongs to the water fill (B22 step 4); step 5 (G-GRID on the R2
+  field) stays in the ground step, after R2.
+- 2026-10-02 (evening) — B35's PHASE 0 DESIGN WRITTEN: `docs/investigation/2026-10-02/ground_step_design.md` (workflow
+  `wf_883767e3-3f5`: four angles, one synthesis, three adversarial reviews with 70 findings — 5 blockers, 31 majors,
+  34 minors, all answered — and a final pass; read-only, no world change). It holds the seven qualities as checks, the
+  stands rule, the catalogue K1–K18 with prices, the layers and who calculates and draws each product (SL3), the SL6
+  asks A1–A14, the phases 0–7 and the light phase, the caps list (52 rows), the frame split, the weather step's
+  interfaces, and 18 owner questions (Q3, Q7, Q16, Q17 and Q18 would amend T5, B16/B8, B5, SL1 clause 3 and B6 item 4;
+  Q10 asks the owner to name the average machine). This file's §8 plan stands until the owner rules on the design.
+- 2026-10-02 (evening, later) — RULING B36, the design's first five answers: the seasonal circulation allowed (T5 amended);
+  the first visit only by law (no exception to B16); the target machine is the owner's current Mac; the art discussed when
+  its time comes (the forest bench waits); the planet's sun (Q17) open; the other thirteen questions asked again.
+- 2026-10-02 (night) — B36 completed for phases 0 and 1: Q17 (a) (the orbit stated once, the planet evaluates its own sun,
+  a fenced exception to SL1 clause 3); Q1 yes (rule M, rule S, the zero-mean gate, no ridged centring); Q2 yes (Earth, Moon
+  and Mars data as the measure, outside the repository); Q16 yes (the stands pinned once in phase 0; G-ICE on Earth's real
+  data, amending B5 item 1). Q4, Q5, Q6 and Q8 are asked when phase 1 ends; the rest at their phases.

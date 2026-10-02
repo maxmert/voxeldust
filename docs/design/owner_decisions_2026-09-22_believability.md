@@ -868,3 +868,163 @@ freeze and commit please!"**
 
 **Example.** The pilot stands on the ground stand and looks at a dune's lee side: its shade is the sky's cool light on the
 sand, as the window showed the owner, and the picture gate now holds exactly that picture as its reference.
+
+## B33. T2 CLOSES WITH ONE WINDOW SESSION; ITS READINGS MOVE TO T4; THEN THE TERRAIN (2026-10-02)
+
+The owner asked: "When you're done, will we continue to making terrain believable?" — and chose, of three ways to close T2:
+**"Readings to T4"**.
+
+1. **TO T4:** the departure's crossing (its own trigger), the sky's lag on the descent and the climb, the T0 meters at two
+   sizes, the still records' own grid, a tool's jump as a reset — readings with no look of the owner's in them.
+2. **T2 CLOSES AFTER ONE WINDOW SESSION** with the owner, Docker stopped: D5 (the edge) at half size, still and turning;
+   D6 (the stars' light: today's sprite, or the law's exact light); the window's frame cost at full screen; G-NO-STALL
+   (the worst frame over a start, a full-screen switch and a boarding, and no pipeline compiled after the pre-roll).
+3. **THEN THE TERRAIN STEP'S DISCUSSION**, its first item the waves the owner saw in flight.
+
+**Example.** The owner sits in the window at the ground stand at half size and turns: the dune crests' edges are judged
+there (D5); at dusk the stars are judged (D6); then the talk turns to the dunes rising ahead of a fast low hull.
+
+## B34. T2 CLOSES: THE TWO LOOKS GIVEN, THE READINGS RED AND MOVED TO T4, THE WINDOW CRASH CURED (2026-10-02)
+
+The window session of B33, flown by the owner at the ground stand and at the dusk stand (`VD_TEMPORAL=1
+VD_RENDER_SCALE=0.5`, Docker's machine stopped):
+
+1. **D5 GIVEN** (the edge at half size, still and turning; the owner: **"Looks amazing"**).
+2. **D6 GIVEN FOR TODAY'S SPRITE** (the stars at dusk as the temporal path draws them: today's star sprite after the
+   reconstruction, through the air table's transmittance, about 2–4 % dimmer than the default path's marched light, no
+   star lost; the owner: **"Looks amazing!"**). The other choice, the law's exact light over each pixel, is not built and
+   not needed. G-STARS's light line reads against this light from now on (the −2.1 % still and −3.7 % turning against
+   the marched default are the accepted change).
+3. **THE READINGS, MEASURED AND RED** (a poller read the client's own frame row five times a second):
+   - the frame at full screen (3 456 × 2 168, the first attempt only; the owner: "I simply forgot" the switch later):
+     23.1 ms at the median, about 43 frames a second, against B22's 60;
+   - G-NO-STALL: a frame over 33 ms in 18–36 % of the seconds at the ground stand and in every second at the dusk
+     stand; 146 ms at the
+     dusk boarding, with one pipeline compiled in the same moment; 94 ms at the full-screen switch; three pipelines
+     compiled after the loading at each of the two later stands (none in the first attempt);
+   - three causes UNMEASURED: the AirPlay stream to a second display (the system's encoder runs all the time), the
+     poller's own five state reads a second, and the cluster on the same machine.
+4. **THE READINGS GO TO T4, A CLEAN READING FIRST** (owner: "To T4, clean reading first"): T4 starts with a reading with
+   AirPlay off, a lighter meter and the cluster's load known; the cures follow (every pipeline warmed before play, the
+   boarding's frame, 60 frames a second at full screen).
+5. **THE WINDOW CRASH, FOUND IN THE SESSION AND CURED:** a window that shrank in one frame under the render picture of
+   the frame before stopped the client (wgpu: a copy of 720 rows from a picture of 678 rows). The reconstruction's frame
+   decision read the render size of the frame before, because it stood beside the render scale with no command sync
+   point between them. Now it runs after the render scale; a test reads the engine's schedule and is red on the old
+   order. The owner's check by hand reached 756 rows, where the old order could not fail either.
+6. **ONE COMMIT AFTER A CHECK** (owner: "One commit after a check"): the session's record, the frame meter and the crash
+   cure, on `game`, with no push.
+7. **THE WAVES WAIT FOR THE PROPER TERRAIN** (owner: *"I'd prefer not to work on the waves cure before we actually build
+   the proper terrain - as then we might apply different approaches"*).
+
+**Example.** The pilot drags the window's bottom edge up in one quick move, from 1 440 rows to 678: before the cure the
+client stopped; now the reconstruction copies the 678 rows that this frame drew.
+
+## B35. THE GROUND STEP'S PLAN: THE PICTURE SETS THE QUALITY, THE WEATHER BEFORE THE FREEZE, A REALM CALCULATES AND DRAWS ITSELF (2026-10-02)
+
+The owner showed the third reference picture again (*"we want to achieve this believability"*), asked for the plan in
+detail, corrected its frame (*"Make sure that it's not only about the bioms or things we have in the picture, I gave it to
+you so you understand the quality we're trying to achieve"*), asked where the clouds and the weather stand, and ruled:
+**"Ok, agree with the plan then. Please get into the context the ground rules and laws before designing the plan.
+Remember that realm calculate and draw itself"**. Read as:
+
+1. **THE PICTURE SETS THE QUALITY, NOT A LIST OF THINGS.** Seven qualities hold everywhere, at every height (on foot, in
+   low flight, high up and from orbit), on every body:
+   - structure at every scale, from ranges of 100 km to stones underfoot, with no scale left as plain noise;
+   - the land makes sense: rain on any point reaches a sea or a closed basin along valleys that join;
+   - each form shows the process that made it;
+   - the surface follows the shape (bare rock on steep ground, soil in hollows, the tree line, the snow line);
+   - variety in one view, with natural borders between kinds of country;
+   - the light and the air (shadows at every distance, light in crevices and under trees, rich materials, haze, clouds);
+   - detail to the horizon with no flicker, at 60 frames a second at full screen.
+2. **THE CATALOGUE: EVERY KIND OF COUNTRY THE BODY'S OWN FACTS CALL FOR**, each at that quality: rivers and erosion, ice,
+   wind (real dunes), coasts, fire (volcanoes), rock control, crust movement, impacts, slopes; every biome the climate
+   makes; other bodies (a dry world, an icy moon, an airless moon) from the same laws. T5's "until priced" stands: the
+   design prices each family before any of them is built.
+3. **THE CHECKS:** a stated rule chooses the stands (one for each mix of biome, relief and rock kind, plus random
+   stands) on the home planet and on two more bodies; each quality has numbers that can go red; the owner's look judges
+   against the three reference pictures' quality.
+4. **THE ORDER:** phase 0, ONE DESIGN WITH REVIEWS (the laws with their calibration, every cap that goes (B23), the frame
+   cost of each phase, the bodies, the checks, the quality bar and the catalogue) → 1 the shape's foundations (the small
+   hills' average, the flat directions) → 2 R2 → 3 R3 and the slopes → 4 the processes → 5 the biomes and the ground's
+   materials → 6 the cover (plants, stones, debris) → THE LIGHT AND THE SURFACE'S LOOK (the far shadows join the ground
+   step; amends B6.5) → 7 the owner's look (G-LOOK) → the waves (B34 item 7) → the water fill (B22 step 4) → ONE WEATHER
+   STEP → the edit system (B22 step 5).
+5. **ONE WEATHER STEP, AFTER THE WATER FILL AND BEFORE THE EDIT SYSTEM:** the almanac, the weather list and its lane
+   (T3), the clouds and their shadows, rain and snow on screen, the wind on hulls and trees, lying snow after a storm,
+   wet ground after rain. The ground step's design keeps frame time free for the clouds from phase 0. **AMENDS T1 items
+   10–11 and T4:** the clouds, the rain on screen and the forest come BEFORE the freeze.
+6. **A REALM CALCULATES AND DRAWS ITSELF** (SL3, the owner's reminder): every product of the ground step and the weather
+   belongs to the realm it describes. The planet's own shard calculates its solve, its finer levels and its weather
+   (both hosts for the static shape, SL10), and the client draws them as that realm's own look. A parent positions its
+   children and never calculates or draws them; a moon calculates and draws itself.
+7. **THE LAWS FIRST:** the design starts after the binding rules and laws are read into the work's context.
+
+**Example.** A pilot crosses the home planet: a desert of star dunes, then a canyon cut in red beds, then a glacier valley
+under a snowy range, every one of them at the picture's quality and every one made by the same laws. Above them the
+planet's own clouds move by its own weather list, and their shadows run over the ground. On an airless moon the same
+code makes only craters and regolith under a black sky, calculated and drawn by the moon's own realm.
+
+## B36. THE GROUND STEP'S DESIGN: THE FIRST FIVE ANSWERS (2026-10-02)
+
+The phase 0 design of B35 is written (`docs/investigation/2026-10-02/ground_step_design.md`; workflow `wf_883767e3-3f5`:
+four angles, one synthesis, three adversarial reviews with 70 findings, all answered; read-only). Of its 18 questions,
+five were put to the owner as the ones that change a ruling or need the owner's number. The owner answered:
+
+1. **Q3 — THE CIRCULATION THAT FOLLOWS THE SUN: ALLOWED** (owner: "allow"). Under the home planet's 55° tilt the law's
+   circulation is the seasonal cell that crosses the equator and follows the summer sun (Lindzen & Hou 1988). **AMENDS T5**
+   ("no monsoon"): a circulation the law produces is the law. No stand, biome class, dune type or rain-shadow stand rests on
+   the climate until the corrected climate runs (the design's M0-9).
+2. **Q7 — THE FIRST VISIT: ONLY BY LAW, NO MANUAL LAW CHANGES** (owner: "only by law, no manual law changes"). Read as: no
+   registered exception to B16 for a planet nobody visited; the 1 km ground arrives by the laws already ruled (the bake as
+   the realm's own warm-up along the paths it authors, the interest grown with the closing speed of 2026-08-27, never a
+   cap on the speed), and if the measured bake (the design's M2-5) cannot win the race, the answer is another LAW (a faster
+   bake, a different split of the work), brought to the owner with its numbers — never a stand-in and never a hand-made
+   exception.
+3. **Q10 — THE TARGET MACHINE IS THE OWNER'S CURRENT MAC** (owner: "current mac, i can't tell tbh"): an Apple M4 Pro, 14
+   CPU cores (10 performance, 4 efficiency), 48 GB of memory, its 20-core GPU — until the owner names another machine.
+   The terrain's share stays half of the cores (B20). Amends F6's "the Mac is the measuring instrument, not the target".
+4. **Q14 — THE FOREST AND THE ART: DISCUSSED WHEN ITS TIME COMES** (owner: "we will need to discuss when time comes"). The
+   design's forest bench with stand-in trees (M0-15) waits for that discussion too.
+5. **Q17 — THE PLANET'S SUN: (a), THE ORBIT STATED ONCE** (owner, after a plain explanation: "q17-(a)"; earlier: *"we
+   should not have any seams - only laws"*). The star system states the planet's orbit elements and spin law ONCE, on
+   change, stamped (SL1 clause 2); the planet evaluates its own sun from the universe tick by Kepler's law (T3 class 1).
+   **A NAMED EXCEPTION TO SL1 CLAUSE 3, fenced:** the planet uses the result only for its own sun (the weather, the melt,
+   the light); the placement, containment and crossing machinery never reads it (SL1 clause 5); nothing states it on any
+   lane. The other roads were refused: the sun's direction sent at every weather step is a per-child row SL9 forbids, and
+   no sun is a missing law.
+
+6. **Q1 — THE FAR VIEW'S TWO RULES AND THE SMALL HILLS' AVERAGE: YES, AS RECOMMENDED** (owner: "Yes, as recommended";
+   answers B22 Q5). RULE M, THE AVERAGE: at every rung the drawn height, the material shares, the shade and the canopy
+   cover equal the mean of the finer rung over the cell (a zero-mean detail may drop at a swap; any other term stays as
+   its cell mean), with G-MEAN, G-CLOSURE, G-SHADE-NEST and G-FAR-EXACT. RULE S, THE OUTLINE: a compact form taller than it
+   is wide (a pillar, a tower, a needle, a fin, a sea stack, a volcanic neck) is a placed form of the static shape — both
+   hosts compute it from its law, the cells draw it while it is at least two cells wide, its own coarser meshes draw the
+   same outline farther out, and under one display pixel it is a tint of its true share — with G-SILHOUETTE (at most one
+   display pixel at the hand-over). THE ZERO-MEAN LAW IS A GATE FROM NOW ON, and today's ridged hills are NOT centred:
+   phase 2 replaces them, so one world change and one re-freeze are saved.
+
+7. **Q2 — EARTH, THE MOON AND MARS AS THE MEASURE: YES, IN PHASE 0** (owner: "Yes, in phase 0"). Public elevation data
+   (SRTM and GMTED2010 for Earth, open lidar tiles for the small hollows, LOLA for the Moon, MOLA for Mars) and public
+   maps of climate zones and rock kinds, read by OUR OWN instruments into the checks' reference numbers (the design's
+   M0-4). The data stays OUTSIDE the repository and only numbers are recorded; each licence is checked first; no request
+   carries the owner's name, e-mail or address; a source that needs an account waits for the owner's word.
+
+8. **Q16 — THE STANDS AND THE BODIES: YES, AS RECOMMENDED** (owner: "Yes, as recommended"). A stated rule picks the
+   stands ONCE in phase 0 and pins them (later phases add stands, never move one): class stands (climate zone × relief ×
+   rock kind, at the middle of the class's largest area), family stands, line and border stands, random stands (24 on the
+   home planet, 20 on land and 4 on the sea floor; 8 on the moon; 12 on the third body), and today's pinned stands. Four
+   views (on foot, the reference view from a VALLEY stand toward the ranges — the old summit pose kept as a stand —, 150
+   km up, orbit) and two suns on every reference view (12°–18° and about 40°–60° up). Three bodies in every phase's
+   pictures: the home planet, the home moon, and a third body chosen by the charter rule. **AMENDS B5 item 1:** G-ICE
+   tests the ice law on EARTH'S REAL heights and climate (Q2's data), never on an Earth-like test body (B23 item 3).
+
+THE REMAINING QUESTIONS ARE ASKED WHEN THEIR ANSWER CHANGES THE WORK, one by one with a plain explanation (owner: "do
+we need to answer all questions now? If yes, let's do one by one, with proper explanations"): Q1, Q2 and Q16 before
+phases 0 and 1; Q4, Q5, Q6 and Q8 when phase 1 ends; Q9, Q11, Q12, Q13, Q15 and Q18 at their own phases, with their
+measured numbers.
+
+**Example.** On the home planet the summer sun stands over the north in one half of the year and over the south in the
+other, and the rain belt follows it: a valley that is wet in its summer is dry in its winter, and nobody wrote that in by
+hand. A pilot who comes to a planet nobody visited meets ground made only by its laws; if the 1 km ground could not be
+ready in time, that is a defect to solve with a law, not a rule to switch off.

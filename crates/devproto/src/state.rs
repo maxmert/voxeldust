@@ -553,6 +553,8 @@ pub(crate) mod tests {
                     occluded: false,
                     placements: 6460,
                     placements_moved: 0,
+                    pipelines_ready: 214,
+                    pipelines_waiting: 0,
                 }),
                 reconstruction: Some(DevReconstruction {
                     jitter_px: [0.25, -0.125],
@@ -688,6 +690,18 @@ pub(crate) mod tests {
             serde_json::to_string(&DevPhase::AwaitingSubscription).expect("encode"),
             "\"awaiting_subscription\""
         );
+    }
+
+    /// A frame-cost row written before the pipeline meter existed (G-NO-STALL, 2026-10-02) reads both counts as
+    /// nought: the kept runs of earlier flights still decode.
+    #[test]
+    fn a_frame_cost_row_without_the_pipeline_meter_reads_nought() {
+        let older = r#"{"window_px":[2560,1440],"scale":2.0,"focused":true,"occluded":false,
+            "placements":6460,"placements_moved":0}"#;
+        let row: DevFrameCost = serde_json::from_str(older).expect("an older row decodes");
+        assert_eq!(row.pipelines_ready, 0);
+        assert_eq!(row.pipelines_waiting, 0);
+        assert_eq!(row.placements, 6460);
     }
 }
 
@@ -1011,6 +1025,14 @@ pub struct DevFrameCost {
     /// of them changed the placement's value.
     pub placements: u64,
     pub placements_moved: u64,
+    /// ★ THE PIPELINE METER (G-NO-STALL, ruling B33, 2026-10-02): the engine's cached pipelines READY at the end of the
+    /// newest rendered frame, and those still WAITING (queued or compiling). A ready count that grows after the
+    /// pre-roll, or any that waits, is a pipeline compiled in the middle of play. Nought on a stamp written before the
+    /// meter existed.
+    #[serde(default)]
+    pub pipelines_ready: u64,
+    #[serde(default)]
+    pub pipelines_waiting: u64,
 }
 
 /// THE SKY'S ROW on [`DevTerrainStamp`] (slice 8s).

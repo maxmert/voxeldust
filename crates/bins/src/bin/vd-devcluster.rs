@@ -106,7 +106,15 @@ fn run(args: &[String]) -> Result<(), String> {
         //   `up --chain`    → Chain: + GALAXY + the inner-planet shard + the sibling-star shard —
         //                     down, up, out, sideways-through-parent, each realm its OWN node (6 procs).
         //   `up --demand`   → Demand: orchestrator + gateway ONLY; worlds spin up on login/AoI demand.
-        "up" => up(slot, ports, &work, cluster_shape(args)?),
+        //   `up … --lan`    → the same shape, and the gateway alone listens on every address of this machine,
+        //                     so a client on another machine of the local network can log in (`gateway_listen`).
+        "up" => up(
+            slot,
+            ports,
+            &work,
+            cluster_shape(args)?,
+            has_flag(args, "--lan"),
+        ),
         "down" => down(&work),
         "status" => status(ports, &work),
         "env" => env_cmd(&work),
@@ -211,7 +219,13 @@ fn env_cmd(work: &Path) -> Result<(), String> {
 /// unrecorded port-holder (the pid lands before the child binds its port).
 /// `Cluster::Drop` additionally reaps GRACEFUL in-process failures (an early `?` /
 /// panic), but does NOT run on SIGKILL — the durable runfile is what covers that.
-fn up(slot: u16, ports: SlotPorts, work: &Path, shape: ClusterShape) -> Result<(), String> {
+fn up(
+    slot: u16,
+    ports: SlotPorts,
+    work: &Path,
+    shape: ClusterShape,
+    lan: bool,
+) -> Result<(), String> {
     std::fs::create_dir_all(work).map_err(|e| format!("create work dir: {e}"))?;
     // The runfile IS the claim: O_EXCL create fails if another launcher holds it.
     let mut runfile = match std::fs::OpenOptions::new()
@@ -229,7 +243,7 @@ fn up(slot: u16, ports: SlotPorts, work: &Path, shape: ClusterShape) -> Result<(
         Err(e) => return Err(format!("claim slot: {e}")),
     };
 
-    let result = up_inner(slot, ports, work, &mut runfile, shape);
+    let result = up_inner(slot, ports, work, &mut runfile, shape, lan);
     if result.is_err() {
         // Graceful failure: Cluster::Drop already killed the children; drop the
         // workdir (and the runfile/claim with it) so the slot is immediately reusable.
@@ -244,6 +258,7 @@ fn up_inner(
     work: &Path,
     runfile: &mut std::fs::File,
     shape: ClusterShape,
+    lan: bool,
 ) -> Result<(), String> {
     // mTLS trust bundle (shared by every node) + the dev auth identity.
     let trust_dir = work.join(TRUST_DIR_NAME);
@@ -284,7 +299,7 @@ fn up_inner(
         (
             "vd-gateway",
             "vd-gateway",
-            gateway_env(&addrs, &auth_pubkey, &DEV, shape),
+            gateway_listen(gateway_env(&addrs, &auth_pubkey, &DEV, shape), lan)?,
         ),
     ];
     // The static login shard: present for every STATIC shape, ABSENT for Demand — the home shard is spawned on
@@ -348,9 +363,47 @@ fn up_inner(
     let _ = cluster.into_pids(); // disarm: children outlive us; runfile is the record
     println!("dev-cluster slot {slot} UP");
     println!("  gateway   {}", addrs.gateway);
+    if lan {
+        println!(
+            "  network   the gateway also listens on every address of this machine, port {} (--lan)",
+            addrs.gateway.port()
+        );
+    }
     println!("  admin     http://{}/admin/snapshot", addrs.admin);
     println!("  env       vd-devcluster env --slot {slot}");
     Ok(())
+}
+
+/// ★ `up --lan` (2026-10-02; the owner wants a window "on another mac in the local network"): the GATEWAY
+/// listens on every address of this machine, at the slot's own gateway port, so a client on another machine of
+/// the local network dials this machine's address and logs in. ONLY the gateway changes: the other nodes still
+/// dial it on loopback (a socket bound to every address answers there too), and every other node keeps its
+/// loopback bind. Without the flag the gateway's env is returned untouched. The client on the other machine
+/// needs this slot's trust folder and the login key (`env`), copied by hand, and `--bind 0.0.0.0` so that its
+/// own socket can reach another machine. The cloud gateway already binds every address in its pod
+/// (`deploy/k3d/40-gateway.yaml`).
+///
+/// **Example.** The cluster runs on the owner's laptop at slot 37. A second Mac on the same network starts the
+/// window client with `--gateway <the laptop's address>:8185 --bind 0.0.0.0` and the laptop's trust folder; its
+/// pilot logs in at the ground stand, and the second Mac's own GPU draws the picture.
+fn gateway_listen(
+    mut env: Vec<(&'static str, String)>,
+    lan: bool,
+) -> Result<Vec<(&'static str, String)>, String> {
+    if !lan {
+        return Ok(env);
+    }
+    let bind = env
+        .iter_mut()
+        .find(|(key, _)| *key == "VD_BIND")
+        .ok_or("the gateway's env holds no VD_BIND")?;
+    let port = bind
+        .1
+        .parse::<SocketAddr>()
+        .map_err(|e| format!("the gateway's VD_BIND `{}`: {e}", bind.1))?
+        .port();
+    bind.1 = SocketAddr::from(([0, 0, 0, 0], port)).to_string();
+    Ok(env)
 }
 
 /// Wait until the cluster has bootstrapped with ALL node processes still alive — failing LOUD if a child
@@ -636,8 +689,46 @@ fn env_file(work: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::gen_trust;
+    use super::{gateway_listen, gen_trust};
     use vd_io_prod::trust::ClusterTrust;
+
+    fn gateway_like_env() -> Vec<(&'static str, String)> {
+        vec![
+            ("VD_NODE_ID", "2".to_owned()),
+            ("VD_BIND", "127.0.0.1:8185".to_owned()),
+            ("VD_PEERS", "1=127.0.0.1:8184".to_owned()),
+        ]
+    }
+
+    #[test]
+    fn lan_moves_only_the_gateways_bind_to_every_address_on_the_same_port() {
+        let env = gateway_listen(gateway_like_env(), true).expect("a lan bind");
+        let mut want = gateway_like_env();
+        want[1].1 = "0.0.0.0:8185".to_owned();
+        assert_eq!(env, want);
+    }
+
+    #[test]
+    fn without_lan_the_gateways_env_is_untouched() {
+        assert_eq!(
+            gateway_listen(gateway_like_env(), false).expect("no change"),
+            gateway_like_env()
+        );
+    }
+
+    #[test]
+    fn lan_refuses_an_env_without_a_readable_bind() {
+        let mut no_bind = gateway_like_env();
+        no_bind.remove(1);
+        assert_eq!(
+            gateway_listen(no_bind, true).expect_err("no bind"),
+            "the gateway's env holds no VD_BIND"
+        );
+        let mut bad = gateway_like_env();
+        bad[1].1 = "nowhere".to_owned();
+        let err = gateway_listen(bad, true).expect_err("an unreadable bind");
+        assert!(err.starts_with("the gateway's VD_BIND `nowhere`"), "{err}");
+    }
 
     #[test]
     fn gen_trust_writes_a_bundle_the_mesh_can_load() {
