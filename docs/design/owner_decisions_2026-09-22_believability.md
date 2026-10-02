@@ -834,3 +834,37 @@ The owner's answers to the three questions after the look of B29:
 **Example.** The pilot walks into hull 11 on the hill and takes the hull's frame: T2 reads the frames before and after
 that swap. The pilot then presses V and the camera moves back behind the hull: T4 reads that switch, at the frame rate
 that ships.
+
+## B31. THE BOARDING'S THREE CURES; THE SWAP'S TOLERANCE; THE SKY'S LIGHT JUDGED IN THE WINDOW (2026-10-02)
+
+The owner's answers after the boarding's seams were measured (the owner first: "Cure both now"):
+
+1. **THE THREE CURES, BUILT AND MEASURED:** the planet's window rows carry each child's attitude (the hull's box no
+   longer turns at the swap: 20.1 → 0.06 levels); every drawn row reads the camera's own moment (the hull's box no
+   longer vanishes for one frame); the vendored sky table's march starts at the eye's own place in the world's axes —
+   on foot the ground had NO sky light (94.615 levels with it on and at nought), and now it takes it (the vendored
+   eighth change). On the temporal path no pop the eye sees on the walk or the hull leg.
+2. **THE SWAP'S TOLERANCE** (owner: "We need to have very seamless experience, believable, without any visual flickering
+   or jumps. So if half-level provides that, then it's ok"): the swap pair's mean step may stand over the widest pair
+   beside it by at most half a level (the eight-bit rounding of one display level), and its share of pixels past 3
+   levels by at most one in ten thousand; the eye's rule (B27) still judges every leg for what the eye sees. Built as
+   the moving-eye gate's verdict (G-CROSSING).
+3. **THE SKY'S LIGHT ON FOOT IS JUDGED IN THE WINDOW** (owner: "Look in the window"): the ground's shade is bluer and
+   brighter now; the solved references freeze again only on the owner's word after the look.
+4. **THE COMMIT FOLLOWS THE LOOK** (owner: "After the look").
+
+**Example.** The pilot stands on the ground stand, the sun 15° up: before the cure the red ruler ball's shaded side took
+the haze alone and read dark grey (27, 23, 28); now the sky lights it a dark red, the ground's shade turns bluer, and at
+the boarding the ground keeps that light through the swap instead of switching it on one frame later.
+
+## B32. THE SKY'S LIGHT ON FOOT ACCEPTED; FROZEN AND COMMITTED (2026-10-02)
+
+The owner looked in the window at the ground stand, the ground under the sky's light (B31 item 3): **"It looks great!!!
+freeze and commit please!"**
+
+1. **THE NEW LOOK IS ACCEPTED:** the ground on foot takes the sky's light (its shade bluer and brighter); the solved
+   references (`docs/investigation/2026-09-07/pictures/exact/`) are frozen again on it, every stand, the default path.
+2. **ONE COMMIT** of the boarding's three cures, the gates' changes and the new references, on `game`, with no push.
+
+**Example.** The pilot stands on the ground stand and looks at a dune's lee side: its shade is the sky's cool light on the
+sand, as the window showed the owner, and the picture gate now holds exactly that picture as its reference.

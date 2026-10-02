@@ -11524,10 +11524,91 @@ updated in the same change as the work, deleted when done). The interims named h
       mean with 0.99977 of the pixels past 3 levels, against 2.143 at the widest pair beside it — THE SWAP SHOWS:
       the whole picture changes in one frame. The history did not restart (its counters [1, 0, 0, 0] on all 16
       frames: the login's first frame only); the eye moved 0.088 m at the most in one frame; at the swap the view
-      took the delivered facing (yaw and pitch 1.1 × 10⁻¹⁶ in the hull's frame). CAUSE: owed — the flight kept no
-      frames; it flies again with its run kept, and its stamps and pictures name the cause (a turned view, or a
-      picture term that changes with the origin). NOT YET: the departure's swap (the `up` leg). The view switch
-      (V) moved to T4 (the cut below).
+      took the delivered facing (yaw and pitch 1.1 × 10⁻¹⁶ in the hull's frame).
+      ★ THE CAUSE, MEASURED (the flight again with its frames kept, the same reading: 20.101 levels against 2.143):
+      THE HULL'S BOX TURNED AT THE SWAP. Across the swap the stamps hold still — the camera's facing in the body's
+      frame, the eye (within 4 cm), the sun's direction and the air are the same — and the RENDER picture changes as
+      much as the display (24.3 levels at the mean: no fault of the history). Before the swap the planet's picture
+      drew the hull's translucent box with its near face over three quarters of the screen; after it the eye stood
+      inside the box, its tint over the whole screen. Projected through the frame's own camera, the box in THE
+      PLANET'S OWN AXES traces the tinted wedge's edges exactly, while the box in its berth's facing holds the eye
+      0.62 m inside its face. The window lane states a child's row through `pose_of_row` (`placement.rs`), which
+      wrote the IDENTITY for the attitude although the placement book holds the berth's facing — so the planet's
+      picture drew every parked or driven hull in the planet's own axes, while the walker's conversion into the
+      hull's frame, and the hull's own picture, use the facing. ★ THE CURE (built 2026-10-01): the row's pose
+      carries the book row's orientation (`orient: at.orientation`); the orbits' rows stay the identity, as their
+      placements state. The test `the_windows_rows_state_the_attitude_the_book_holds` (vd-sim) failed on the old
+      helper and passes; vd-sim's 673 unit tests pass; vd-tests, the gateway and the node pass but for the two older
+      reds. MEASURED after (the flight with the cure): the swap pair steps 0.031 levels (20.101 before) — THE SWAP NO
+      LONGER SHOWS. 🟥 UNDER IT, ONE FRAME LATER (present before the cure: 2.143 levels in the earlier flight): the
+      pair after the swap steps 2.174 levels, 0.33 of the pixels past 3, all on the ground (the bottom third 4.6
+      levels, the sky 0.05), in the render picture too. Its kind, MEASURED from the render picture's linear light: an
+      even, bluish light ADDED to the ground (+0.0045 red, +0.0071 green, +0.0100 blue at 1–10 km; less beyond 30 km,
+      where the haze covers it; none on the sky) — the sky's diffuse light from the air's environment map, neither
+      the haze (it does not grow with distance) nor the sun (it does not follow the sunlit slopes). Read and found
+      FREE of the frame's axes: the map's generation (the eye from the planet's centre, the camera's forward), the
+      engine's atmosphere transform (patched to the planet's centre), the z flips from generation through the filter
+      to the lookup, the diffuse filter (1 024 samples from the full map), and the terrain's normal (the mesh's own
+      transform). MEASURED SINCE (two more boardings): with the sky-light map four times smaller (`VD_SKY_ENV_PX=128`)
+      the step after the swap is the same (2.169 levels against 2.174) — the map's resolution plays no part; WITH THE
+      AIR SWITCHED OFF (`VD_SKY=0`) the step is gone (0.188 levels) — the step lives in the air's stack, the sky-light
+      map's way to the ground. ★ THE CAUSE, MEASURED (2026-10-02; the owner: "Cure both now"): on the default path, whose
+      still frames repeat to the level, the planet's own picture read the SAME ground with the map's light on and at
+      nought (94.615 levels both) — on foot the ground took NO sky light at all — while the hull's picture took it
+      (97.28), from one frame after the swap. Ruled out on the way, each by a flight: the map's resolution (128 against
+      512: the same step), the cube's attitude (built: the map stood in the body's local vertical in every picture —
+      the same levels to the hundredth, so it was taken out again), the probe's borrowed tables (refreshed every frame:
+      the same 2.300), and the reconstruction (the default path shows it too). THE FAULT, in the vendored engine: the
+      sky-view table's march started at `(0, r, 0)` — the eye in the atmosphere's axes — beside a ray in the WORLD's
+      axes, and took the world direction's Y component as its zenith (`sky_view_lut.wgsl`). The two agree only while
+      the world's +Y is the eye's up: in the hull's picture it is (the hull parked upright); in the planet's own
+      picture the world's +Y is the planet's polar axis, along which the sun stands at −0.999 here — so the table's sky
+      was dark and the environment map built from it gave the ground nothing. ★ THE CURE (the vendored EIGHTH change,
+      `PATCH.md`): the table's march starts at the eye's own place from the planet's centre in the world's axes
+      (`get_view_position()`), as the per-pixel marches do; for upstream's centre under the origin that place IS
+      `(0, r, 0)`. MEASURED after (the default path): the planet's ground 97.293 levels, the hull's 97.28; the pair
+      after the swap 0.000 levels; the swap pair 0.063 levels at the mean with 0.00001 of the pixels past 3 levels
+      (beside it 0.000–0.006 — the strict rule reads "shows" on a sub-level difference; the owner rules a tolerance).
+      ⚠ EVERY PICTURE ON FOOT CHANGES: the ground now takes the sky's light (its shade bluer and brighter — +2.7 levels
+      on the boarding's ground), so the frozen solved-ground references of B29 no longer hold; the owner's look is owed.
+      The lookup sky (`VD_SKY_MODE=lut`), drawn from the same table, was wrong the same way on the planet. THE PICTURE
+      GATE'S BALL RULE, MADE FOR THE SKY'S LIGHT: its "sunlit" rule was a red hue, and its own note records the shade
+      as blue-grey (27, 23, 28) — the haze alone, because no sky light reached it; under the sky's light the red ball's
+      shade is red too (the ground stand: the hue rule 0.923 against the law's 0.757 ± 0.131, red). Now the red pixels
+      are split by brightness when they hold a shade group (the darker group's peak at or under half the brightest red:
+      under a clear day sky the sun outshines the sky), at the shade peak's upper half-maximum; else every red pixel is
+      sunlit (`sunlit_share`, `terrain_pictures.rs`). MEASURED: the frozen stands read as before (ground 0.748, hill
+      0.685, high 0.726, cave 0.749, seam 0.979); the ground under the sky's light 0.747; the law 0.757. A middle cut
+      (Otsu's split alone) was tried first and REFUTED: it cut the sunlit side's dim edge (0.649 and 0.608), and at the
+      seam, where the ball is all sunlit, it read 0.003. THE NEW LOOK, MEASURED (the picture gate on the solved ground,
+      the default path, every stand frozen into a folder outside the owner's; side by side with the owner's references
+      in `docs/investigation/2026-10-02/sky_light/`): the gate passes on every stand; the ground's mean moves by
+      (+2.9, +6.2, +12.8) levels at the ground stand, (+2.1, +3.9, +7.0) at the hill, (+2.8, +6.6, +14.1) in the cave,
+      (+2.7, +6.2, +14.2) at the seam and (+3.0, +1.3, +1.4) at dusk (the dusk sky's own colour); the sky moves by at
+      most 0.04; the high, aloft, orbit and far stands do not move. 🟩 THE OWNER'S LOOK GIVEN (2026-10-02, the window
+      at the ground stand: "It looks great!!! freeze and commit please!", ruling B32) and THE REFERENCES FROZEN AGAIN on
+      the new look (every stand, the default path, 10:31–10:39; each within 0.06 levels at the mean of the pictures the
+      owner was shown). 🟥 FOUND BY THE FLIGHT WITHOUT THE AIR: THE HULL'S BOX MISSING FOR ONE FRAME
+      at the hand-over — the frame before the swap draws no box at all (the black sky and the bare dunes; 50.6 levels
+      at the mean on every pixel, and 50.2 back at the swap), while the frames before it and after it hold the box
+      around the eye (the cure's attitude, now the same on both sides). A LIKELY MECHANISM, NOT YET PROVEN: the window's
+      box scene follows the snapshot's origin, which changes at once, while the camera keeps the old origin's eye until
+      the own pose agrees; in such a frame the hull's box is placed from the wrong origin, some 6 000 km off. MEASURED in
+      the kept state: on the frame without the box the window's cursor moved three ticks (26 574 → 26 577) while the
+      eye still stood on the planet's lattice, and the camera swapped one frame later — the realm feed's rows changed
+      frames one frame before the camera did. It depends on timing (the cure's flights with the air did not meet it).
+      ★ THE CAUSE IN THE CODE, AND THE CURE (2026-10-02; the owner: "Cure both now"): `place_camera` keeps the frame's
+      MOMENT (the display time and the snapshot it placed the camera from; the terrain reads it), but the boxes
+      (`sync_realm_boxes`), the dots (`sync_world`), the star cloud (`sync_star_sky`) and the scene-fitted camera
+      (`frame_scene_camera`) each loaded the snapshot AGAIN — so a level the core published between the two loads drew
+      the hull in the hull's frame around an eye still in the planet's. Now all four read the moment, never a second
+      load. The test `the_boxes_are_placed_from_the_frames_moment_not_a_newer_snapshot` (vd-client-render: the moment
+      holds the planet's level, the core's handle a newer hull level) FAILED on the old load (the box at the newer
+      level's 5 000 m) and passes; the renderer's 13 tests pass. 🟥 ALSO on the cure's
+      flight: THE EYE'S RULE (B27) found one pop on the 1.4 m/s hull leg — 2 pixels on the picture's last row
+      (517, 719), still rung-0 ground, level 1.02 (the earlier flight: none), so the flight is red. NOT YET: the
+      departure's crossing — the pilot's origin stays the hull while the hull's parent changes, so the record's swap
+      trigger never fires; it needs its own trigger. The view switch (V) moved to T4 (the cut below).
     - 🟥 THE WAVES IN FLIGHT (2026-10-01, the owner from the window, flying hull 10 low and fast over the hill
       stand: "On the flight rungs adjusting height all the time, and because of that it looks like waves").
       MEASURED from the window client's own arrival census (130 s after the boarding): late arrivals in almost every
@@ -11580,6 +11661,12 @@ updated in the same change as the work, deleted when done). The interims named h
       (tests only; a guard no test can reach is made branch-free value for value, by HR5's rules), before the next
       terrain slice. **Example.** A body whose crust is oceanic in every column (no column at the continental mark)
       reaches the freeboard law's empty arm (`land.rs` 1153); no test builds such a body today.
+    - 🟥 HR5 FOR vd-sim (2026-10-02, after the window rows carry the attitude; `cargo llvm-cov --branch -p vd-sim`, read
+      by `scripts/coverage_gate.py`): FAIL — 26 real misses, NONE on a line of this change or of the walk's held stick
+      (`git blame`: every one dated 2026-06-26 … 09-04): `rlm.rs` 338–361 (`rekey`, `path_of_realm`, `coord_of_realm`,
+      the ruler switch's helpers), `directory.rs` 409–411 (`tuning`), `io/mod.rs` 579–582 (a default `reparent_realm`),
+      `io/mem.rs` 173–177 (the in-memory `flush`, a no-op), `stub/realm_head.rs` 315–317 (the first lease's debug
+      line). The crate's own tests no longer reach them. OWED: a coverage pass of vd-sim (tests only), with vd-terrain's.
     - THE WORKSPACE TESTS BEFORE THE COMMIT OF B26–B30 (2026-10-01; `cargo test --workspace --no-fail-fast`, the
       debug build): every target passes except four, and each red is older than this work — the dual-shard test and
       the staleness test MEASURED identical on the previous commit (273e47f, run from an export of its tree; the
@@ -11602,8 +11689,10 @@ updated in the same change as the work, deleted when done). The interims named h
       yet measured.
     OWED IN T2: the login's rise (the owner's decision above); the sky judge's
     lag reading on the descent and the climb (one tone map on both sides); G-STARS' light (the owner's D6 — no star
-    is lost); G-CROSSING (the swap frame's picture before and after a boarding — 🟥 it shows today, its cause
-    owed — and a departure; the boarding's G-RESET holds; the V switch's reading moved to T4); the converged stills
+    is lost); G-CROSSING (the boarding's THREE seams CURED — the hull's attitude in the planet's rows, the frame's
+    moment for every drawn row, the sky table's eye; the swap pair's tolerance is the owner's (0.063 levels against
+    0.000–0.006 beside it); a departure, with its own trigger; the boarding's G-RESET holds; the V switch's reading moved
+    to T4); the eye's pop at the picture's last row on the hull leg (one flight of five); the converged stills
     again on the cured history, as still records on a grid of their own; G-NO-STALL; the T0 meters read
     at two sizes; the moving legs (the depth test and the reactive mask judged in
     motion); a tool's jump as a reset (no tool teleports the eye on the path today: the stands start at login, the

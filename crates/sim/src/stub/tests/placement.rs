@@ -1801,3 +1801,61 @@ fn a_child_stands_in_the_attitude_its_berth_parked_it_in() {
     let book = berthed.author_book_driven(OWN_REALM, 50.0, UniverseTick(1), &none);
     assert_eq!(orient_of(&book, hull), adopted);
 }
+
+/// ★ THE WINDOW'S ROWS STATE THE ATTITUDE THE BOOK HOLDS (2026-10-01, G-CROSSING at the boarding): a
+/// child's row on the window lane carries the book row's orientation, as the walker's conversion into
+/// that child's frame reads it. MEASURED before: the row's pose held the identity, so the planet's
+/// picture drew a parked hull in the planet's own axes; at the boarding's scene swap the hull's box
+/// turned to its berth's facing in one frame, and the whole picture changed (20.1 levels at the mean
+/// against 2.1 beside it). The control: a forest parked with no facings states the identity.
+///
+/// **Example.** The pilot walks into hull 11, parked nose to the east on the hill. Before the swap the
+/// planet's picture draws the hull's box nose to the east; after it the hull draws itself, nose ahead:
+/// one box, one attitude, on both sides of the swap.
+#[test]
+fn the_windows_rows_state_the_attitude_the_book_holds() {
+    let hull = RealmId::Ship(vd_core::ids::EntityId::pack(
+        vd_core::entity_kind::EntityKind::Ship,
+        1,
+        7,
+        0,
+    ));
+    let still = DQuat::from_rotation_x(0.4);
+    let parked = DQuat::from_rotation_z(-0.9);
+    let forest = || {
+        vec![
+            root_region(),
+            own_region(),
+            child_region(),
+            region(hull, Some(OWN_REALM), DVec3::new(500.0, 0.0, 0.0), 20.0),
+        ]
+    };
+    let none = crate::stub::drive::DrivenChildren::default();
+    let berthed = RealmRegions::new(forest())
+        .with_berthed_facings(BTreeMap::from([(OTHER_REALM, still), (hull, parked)]));
+    let book = berthed.author_book_driven(OWN_REALM, 50.0, UniverseTick(1), &none);
+    let orient_in = |rows: &[vd_wire::channels::RealmSnap], realm: RealmId| {
+        rows.iter()
+            .find(|r| r.realm == realm)
+            .expect("the child's row")
+            .pose
+            .orient
+    };
+    // The named set (the window's admitted children) and the whole roster: both lanes.
+    let named = berthed.snaps_for(OWN_REALM, &book, [OTHER_REALM, hull]);
+    assert_eq!(
+        orient_in(&named, OTHER_REALM),
+        still,
+        "a static child's row"
+    );
+    assert_eq!(orient_in(&named, hull), parked, "a parked hull's row");
+    let roster = berthed.authored_realm_snaps(OWN_REALM, &book);
+    assert_eq!(orient_in(&roster, OTHER_REALM), still);
+    assert_eq!(orient_in(&roster, hull), parked);
+    // The control: no facings, the realm's own axes.
+    let plain = RealmRegions::new(forest());
+    let control = plain.author_book_driven(OWN_REALM, 50.0, UniverseTick(1), &none);
+    let rows = plain.snaps_for(OWN_REALM, &control, [OTHER_REALM, hull]);
+    assert_eq!(orient_in(&rows, OTHER_REALM), DQuat::IDENTITY);
+    assert_eq!(orient_in(&rows, hull), DQuat::IDENTITY);
+}

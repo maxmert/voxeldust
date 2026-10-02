@@ -1327,3 +1327,27 @@ AWAY from the reference, the step's report says so (ruling B6).
   DEFERRED). RULING B30: one commit now; the timing readings with Docker stopped; G-GHOST and the V switch's crossing move to
   T4. G-CROSSING AT THE BOARDING, MEASURED: the swap frame changes the whole picture (20.1 levels at the mean against 2.1
   beside it), with no restart of the history; the cause is owed (the flight again with its frames kept).
+- 2026-10-01 (late night) — B30's commit made (40e94f5). G-CROSSING AT THE BOARDING, CAUSE AND CURE: the planet's window
+  rows dropped each child's attitude (`pose_of_row` wrote the identity), so the planet's picture drew the parked hull in
+  the planet's own axes; at the swap the hull's box turned to its berth's facing in one frame (the projection through the
+  frame's camera traces the tinted wedge exactly). Now the row carries the book's orientation; MEASURED the swap pair
+  0.031 levels (20.1 before). Under it, one frame later and present before: the ground's sky light rises (+0.007 linear,
+  bluish, 4.6 levels on the ground), cause owed; and the cure's flight read one 2-pixel pop at the picture's last row
+  on the hull leg (level 1.02).
+- 2026-10-02 — THE BOARDING'S THREE SEAMS CURED (the owner: "Cure both now"): (1) the planet's window rows carry each
+  child's attitude (the hull's box no longer turns at the swap); (2) every drawn row reads the camera's own moment (the
+  hull's box no longer vanishes for one frame when a new level lands between two loads; a test fails on the old load);
+  (3) THE GROUND ON FOOT HAD NO SKY LIGHT: the vendored sky table marched a world ray from an atmosphere point, right only
+  where the world's +Y is the local up (the hull's picture), so the planet's own picture lit its ground by the sun alone
+  (MEASURED: 94.615 levels with the sky light on and at nought). Cured as the vendored eighth change; the ground now
+  takes the sky's light everywhere on foot (+2.7 levels at the boarding's ground), so the solved references need the
+  owner's look again. The default path aliases on the hull leg (15–24 pops of 30 before and after the cures).
+- 2026-10-02 (later) — THE NEW LOOK ON FOOT, MEASURED: the picture gate passes on every stand with the sky's light (its ball
+  rule now splits the red ball's sky-lit shade from its sunlit side by brightness); the ground moves (+2.9, +6.2, +12.8) levels
+  at the ground stand, about (+2.8, +6.4, +14) in the cave and at the seam, (+2.1, +3.9, +7.0) at the hill and (+3.0, +1.3,
+  +1.4) at dusk; the sky and the high stands do not move. Side by side in `docs/investigation/2026-10-02/sky_light/`. The
+  owner's look is owed before the references freeze again.
+- 2026-10-02 (late) — RULING B32: the owner looked in the window ("It looks great!!! freeze and commit please!"); the solved
+  references are frozen again on the ground under the sky's light (every stand, the default path). Next, on the owner's
+  question ("will we continue to making terrain believable?"): close T2 (its readings-only items proposed to move to T4),
+  then the terrain step's discussion, its first item the waves in flight.

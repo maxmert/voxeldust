@@ -1434,6 +1434,31 @@ const CROSSING_BEFORE: u32 = 4;
 /// A display pixel that steps more than this many levels from one frame to the next counts as changed
 /// (the share beside the mean step; the engine's dither moves a still pixel by one level).
 const CROSSING_STEP_LEVELS: u8 = 3;
+/// ★ THE SWAP'S TOLERANCE (ruling B31, 2026-10-02, the owner: "We need to have very seamless experience,
+/// believable, without any visual flickering or jumps. So if half-level provides that, then it's ok"): the
+/// swap pair's mean step may stand over the widest pair beside it by at most HALF A LEVEL — the eight-bit
+/// rounding of one display level, under anything the eye sees (the eye's rule, B27, judges what it sees
+/// on every leg) — and its share of pixels past [`CROSSING_STEP_LEVELS`] by at most one in ten thousand.
+const CROSSING_MEAN_TOLERANCE_LEVELS: f64 = 0.5;
+/// See [`CROSSING_MEAN_TOLERANCE_LEVELS`].
+const CROSSING_SHARE_TOLERANCE: f64 = 1e-4;
+
+/// G-CROSSING's reading of one swap: the swap pair's mean step and share past [`CROSSING_STEP_LEVELS`],
+/// and the widest of the pairs beside it (its mean step, and its share).
+struct CrossingRead {
+    swap_mean: f64,
+    swap_share: f64,
+    beside_mean: f64,
+    beside_share: f64,
+}
+
+impl CrossingRead {
+    /// Does the swap show, by ruling B31's tolerance?
+    fn shows(&self) -> bool {
+        (self.swap_mean > self.beside_mean + CROSSING_MEAN_TOLERANCE_LEVELS)
+            | (self.swap_share > self.beside_share + CROSSING_SHARE_TOLERANCE)
+    }
+}
 
 /// ★ RECORD AROUND THE NEXT SCENE SWAP (G-CROSSING): a second control connection asks the client for
 /// [`CROSSING_FRAMES`] consecutive frames, [`CROSSING_BEFORE`] of them before its next scene swap, while
@@ -1462,7 +1487,7 @@ fn record_crossing(
 /// [`CROSSING_STEP_LEVELS`]; the swap pair — its second frame counts one scene swap more — against the
 /// widest of the pairs beside it (two on each side); and the history's restarts on every frame (G-RESET).
 /// Prints every pair. `None` when the record holds no swap pair.
-fn read_crossing(run: &Path, label: &str, frames: u32, what: &str) -> Option<(f64, f64)> {
+fn read_crossing(run: &Path, label: &str, frames: u32, what: &str) -> Option<CrossingRead> {
     use vd_client_harness::pop::HUD_MARGIN_PX;
     let held: Vec<PairFrame> = (0..frames)
         .map_while(|k| pair_frame(run, label, k))
@@ -1526,13 +1551,18 @@ fn read_crossing(run: &Path, label: &str, frames: u32, what: &str) -> Option<(f6
         restarts.iter().collect::<std::collections::BTreeSet<_>>()
     );
     let at = steps.iter().position(|s| s.2)?;
-    let beside = steps
+    let beside: Vec<(f64, f64)> = steps
         .iter()
         .enumerate()
         .filter(|(j, _)| (*j != at) & (j.abs_diff(at) <= 2))
-        .map(|(_, s)| s.0)
-        .fold(0.0_f64, f64::max);
-    Some((steps[at].0, beside))
+        .map(|(_, s)| (s.0, s.1))
+        .collect();
+    Some(CrossingRead {
+        swap_mean: steps[at].0,
+        swap_share: steps[at].1,
+        beside_mean: beside.iter().map(|b| b.0).fold(0.0_f64, f64::max),
+        beside_share: beside.iter().map(|b| b.1).fold(0.0_f64, f64::max),
+    })
 }
 
 /// The judged pairs' readings on a leg's read: the pop detector on both pictures, G-ALPHA, G-RESET,
@@ -2760,6 +2790,8 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
     // pilots and flies the legs on the last; `VD_LEGS` names which legs it flies.)
     let (wanted_legs, wanted_turn, wanted_departure, wanted_descent) = legs_wanted();
     let mut landing: Option<LegRead> = None;
+    // ★ G-CROSSING'S VERDICTS (ruling B31): each boarding's swap that shows, or that was not read.
+    let mut crossing_seams: Vec<String> = Vec::new();
     let reads: Vec<(String, LegRead)> = {
         let mut boarded: Option<(ChildGuard, u16)> = None;
         for b in 0..boardings {
@@ -2825,22 +2857,34 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
                         };
                         let frames = u32::try_from(frames).unwrap_or(0);
                         match read_crossing(&run, &crossing_label, frames, "boarding") {
-                            Some((swap, beside)) => eprintln!(
-                                "terrain_moving_eye/boarding: G-CROSSING — the swap frame's mean step                                  {swap:.3} levels against {beside:.3} beside it ({})",
-                                if swap <= beside {
-                                    "no larger: the swap does not show"
-                                } else {
-                                    "LARGER: the swap shows"
+                            Some(read) => {
+                                let verdict = format!(
+                                    "the swap frame's mean step {:.3} levels and share {:.5} past {CROSSING_STEP_LEVELS} \
+                                     levels, against {:.3} and {:.5} beside it (ruling B31: half a level, one in ten \
+                                     thousand)",
+                                    read.swap_mean,
+                                    read.swap_share,
+                                    read.beside_mean,
+                                    read.beside_share
+                                );
+                                eprintln!(
+                                    "terrain_moving_eye/boarding: G-CROSSING — {verdict}: {}",
+                                    if read.shows() {
+                                        "THE SWAP SHOWS"
+                                    } else {
+                                        "the swap does not show"
+                                    }
+                                );
+                                if read.shows() {
+                                    crossing_seams.push(format!("boarding {}: {verdict}", b + 1));
                                 }
-                            ),
-                            None => eprintln!(
-                                "terrain_moving_eye/boarding: G-CROSSING — the record holds no swap pair"
-                            ),
+                            }
+                            None => crossing_seams
+                                .push(format!("boarding {}: the record holds no swap pair", b + 1)),
                         }
                     }
-                    other => eprintln!(
-                        "terrain_moving_eye/boarding: G-CROSSING — the record failed: {other:?}"
-                    ),
+                    other => crossing_seams
+                        .push(format!("boarding {}: the record failed: {other:?}", b + 1)),
                 }
             }
             // The planet's row must be in the window before a leg reads the hull's speed or
@@ -3254,6 +3298,11 @@ fn the_band_stays_complete_on_a_walk_and_on_two_hull_legs() {
         "THE SEAM LAW BY EYE (ruling B27): {} pops the eye sees on the flight legs — {}",
         seen.len(),
         seen.join("; ")
+    );
+    assert!(
+        crossing_seams.is_empty(),
+        "G-CROSSING (ruling B31): {}",
+        crossing_seams.join("; ")
     );
     assert!(
         landing.as_ref().is_some_and(|l| l.pop_pairs > 0),

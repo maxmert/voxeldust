@@ -137,6 +137,13 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     ★ B30 (2026-10-01): ONE COMMIT NOW of B28 + B29 on `game`, no push ("Commit now"); the timing readings (the
     window's cost, G-NO-STALL) with Docker stopped, the window on the owner's word; G-GHOST and the V switch's
     crossing reading MOVE TO T4 ("Yes, move them"); the boarding's and the departure's crossings stay in T2.
+    ★ B31 (2026-10-02): THE BOARDING'S THREE CURES (the window rows carry the attitude; every drawn row reads the
+    camera's moment; the vendored sky table's eye — ON FOOT THE GROUND HAD NO SKY LIGHT, now it does: the vendored
+    eighth change); G-CROSSING's tolerance HALF A LEVEL over the pairs beside the swap, one in ten thousand past 3
+    levels (owner: "if half-level provides that, then it's ok"); the sky's light judged IN THE WINDOW, the references
+    frozen again on the owner's word; the commit after the look.
+    ★ B32 (2026-10-02, the owner in the window: "It looks great!!! freeze and commit please!"): THE SKY'S LIGHT ON FOOT
+    ACCEPTED; the solved references FROZEN AGAIN on it (every stand, the default path); one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

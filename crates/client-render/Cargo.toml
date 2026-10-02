@@ -41,5 +41,10 @@ vd-recipe = { workspace = true }
 crossbeam-channel = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+# The frame-moment test composes one scene row, the wire's own type (a test-only edge: the renderer's
+# own code names no wire type).
+vd-wire = { workspace = true }
+
 [lints]
 workspace = true

@@ -2151,15 +2151,17 @@ fn camera_view(camera: &Camera, projection: &Projection) -> (f64, f64) {
 /// RENDER FRAME (eye-relative — see [`RenderEye`]).
 #[allow(clippy::too_many_arguments)]
 fn sync_world(
-    net: Res<Net>,
     render_eye: Res<RenderEye>,
     assets: Res<DotAssets>,
     mut dots: ResMut<DotEntities>,
     mut commands: Commands,
     mut dot_tf: Query<&mut Transform, With<Dot>>,
 ) {
-    let now_s = net.started_at.elapsed().as_secs_f64();
-    let snap = net.snapshot.load();
+    // THE FRAME'S MOMENT: the snapshot and the instant the camera was placed from (see
+    // `sync_realm_boxes`), never a second load.
+    let Some((now_s, snap)) = render_eye.moment.clone() else {
+        return; // no camera yet: nothing is placed relative to an eye
+    };
     let own = snap.own_entity();
     let rendered = snap.rendered(now_s);
 
@@ -2326,10 +2328,12 @@ fn sync_star_sky(
         }
     }
 
-    let snap = net.snapshot.load();
     // ★ The anchor at the SAME render cursor the bodies are drawn from (owner 2026-09-04): the sky
-    // and the bodies turn together when the hull turns.
-    let now_s = net.started_at.elapsed().as_secs_f64();
+    // and the bodies turn together when the hull turns — read from the frame's moment, the snapshot
+    // the camera was placed from (see `sync_realm_boxes`), never a second load.
+    let Some((now_s, snap)) = eye.moment.clone() else {
+        return; // no camera yet: nothing is placed relative to an eye
+    };
     let Some((sky, anchor)) = snap.sky().zip(snap.sky_anchor_now(now_s)) else {
         // No whole sky held, or the observer chain has not reached the galaxy yet: nothing is
         // drawn — never a wrong sky — and the instrument says so.
@@ -2506,7 +2510,6 @@ fn draw_center_of(
 
 #[allow(clippy::too_many_arguments)] // a Bevy system: all params are injected resources/queries
 fn sync_realm_boxes(
-    net: Res<Net>,
     render_eye: Res<RenderEye>,
     mut boxes: ResMut<RealmBoxEntities>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -2519,8 +2522,16 @@ fn sync_realm_boxes(
     // the entities at, so the ground and the player standing on it are drawn from one instant. This
     // used to read a scene the core thread had baked from the newest arrival, on a different schedule
     // entirely — which is what made their relative geometry jump.
-    let now_s = net.started_at.elapsed().as_secs_f64();
-    let snap = net.snapshot.load();
+    //
+    // ★ AND FROM THE CAMERA'S OWN SNAPSHOT (2026-10-02, G-CROSSING at the boarding): the frame's
+    // moment, never a second load. MEASURED: this system loaded the snapshot again after
+    // `place_camera`, so when the core published the hull's level between the two loads the boxes
+    // were placed in the hull's frame around an eye still standing in the planet's — the hull's box
+    // stood 6 000 km off for one frame (50 levels on every pixel), while the terrain, which reads
+    // the moment, stayed right.
+    let Some((now_s, snap)) = render_eye.moment.clone() else {
+        return; // no camera yet: nothing is placed relative to an eye
+    };
     let scene = snap.scene_now(now_s);
     // The camera facts the apparent-size floor needs — THIS frame's (`place_camera` ran first),
     // the same pair `sync_world` scales the avatar dot by.
@@ -2736,7 +2747,6 @@ fn marker_body(prims: &[MeshPrim], rbox: &RealmBox, markers: &MarkerAssets) -> O
 /// empty scene leaves the follow camera untouched (the existing behaviour). Tier-A math
 /// (`fit_camera_to_scene`); this only applies the returned pose to the Bevy transform.
 fn frame_scene_camera(
-    net: Res<Net>,
     view: Res<CaptureView>,
     mut eye: ResMut<RenderEye>,
     mut cam_tf: Query<&mut Transform, With<FollowCam>>,
@@ -2747,10 +2757,12 @@ fn frame_scene_camera(
     if view.pilot {
         return;
     }
-    let now_s = net.started_at.elapsed().as_secs_f64();
-    let snap = net.snapshot.load();
-    // Framed on the SAME resolved-at-cursor scene the boxes are drawn from (slice 6 S4) — otherwise the
-    // fitted frustum would silently track a different instant than the pixels inside it.
+    // Framed on the SAME resolved-at-cursor scene the boxes are drawn from (slice 6 S4) — the frame's
+    // moment, never a second load — otherwise the fitted frustum would silently track a different
+    // instant than the pixels inside it.
+    let Some((now_s, snap)) = eye.moment.clone() else {
+        return; // no camera yet
+    };
     let scene = snap.scene_now(now_s);
     // Framed in the SAME render space the boxes are drawn in. There is only one such space now — the
     // session's pin — because the server converts into it before shipping, so the pixel proof and this
@@ -4024,5 +4036,109 @@ fn receive_image_from_buffer(
             buffer_slice.get_mapped_range().to_vec(),
         ));
         image_copier.buffer.unmap();
+    }
+}
+
+#[cfg(test)]
+mod frame_moment_tests {
+    use super::*;
+    use vd_client::net::ClientPhase;
+    use vd_client::realm_scene::RealmScene;
+    use vd_client::render_clock::RenderClock;
+    use vd_client::tuning::ClientInterpTuning;
+    use vd_client::view::DeliveredView;
+    use vd_core::geometry::Boundary;
+    use vd_core::pose::{FrameRef, StampedPose};
+    use vd_wire::channels::SceneRow;
+
+    /// A snapshot whose one drawn realm, the hull (a 12 × 6 × 40 m box), stands at `at` in the
+    /// origin's frame, composed in `origin`.
+    fn snapshot_with_hull(
+        origin: RealmId,
+        frame: FrameRef,
+        hull: RealmId,
+        at: DVec3,
+    ) -> RenderSnapshot {
+        let row = SceneRow {
+            realm: hull,
+            parent: Some(RealmId::Planet(42)),
+            pose: StampedPose::at_rest(frame, at, vd_core::UniverseTick(100)),
+            bag: vd_core::look::look_bag(&Boundary::Aabb {
+                half: DVec3::new(6.0, 3.0, 20.0),
+            }),
+        };
+        let scene = RealmScene::from_scene_rows(&[row]).expect("one well-formed row");
+        RenderSnapshot::with_scene(
+            DeliveredView::default(),
+            RenderClock::new(ClientInterpTuning::DEFAULT),
+            ClientPhase::Active,
+            Arc::new(scene),
+        )
+        .with_origin(Some(origin))
+    }
+
+    /// The core's handle, holding `published` as its newest snapshot.
+    fn net_holding(published: RenderSnapshot) -> Net {
+        let (input, _) = std::sync::mpsc::sync_channel(1);
+        Net {
+            snapshot: Arc::new(ArcSwap::from_pointee(published)),
+            input,
+            dropped: Arc::default(),
+            stars_drawn: Arc::default(),
+            terrain_drawn: Arc::default(),
+            terrain_pending: Arc::default(),
+            camera_mode: Arc::default(),
+            star_probe: Arc::default(),
+            terrain_stamp: Arc::default(),
+            stamp_reads: Arc::default(),
+            core_alive: Arc::new(AtomicBool::new(true)),
+            started_at: Instant::now(),
+        }
+    }
+
+    /// ★ THE BOXES ARE PLACED FROM THE FRAME'S MOMENT (2026-10-02, G-CROSSING at the boarding): the
+    /// snapshot the camera was placed from, never a newer one the core published since. MEASURED
+    /// before: at a boarding the core published the hull's level between `place_camera`'s load and
+    /// this system's own load, and the hull's box was placed in the hull's frame around an eye still
+    /// standing in the planet's — 6 000 km off for one frame.
+    ///
+    /// **Example.** The camera stands in the planet's picture, the hull's box 30 m ahead of the eye.
+    /// The core has just published the hull's own level (the hull at its own centre). The box stays
+    /// 30 m ahead this frame; the next frame's camera takes the hull's level and the box with it.
+    #[test]
+    fn the_boxes_are_placed_from_the_frames_moment_not_a_newer_snapshot() {
+        let planet = RealmId::Planet(42);
+        let hull = RealmId::Ship(vd_core::ids::EntityId::pack(
+            vd_core::entity_kind::EntityKind::Ship,
+            1,
+            7,
+            0,
+        ));
+        let planet_frame = FrameRef::PlanetCentered { planet_seed: 42 };
+        let at_moment = DVec3::new(0.0, 0.0, -30.0);
+        let moment = snapshot_with_hull(planet, planet_frame, hull, at_moment);
+        let newer = snapshot_with_hull(hull, planet_frame, hull, DVec3::new(5_000.0, 0.0, 0.0));
+        let mut app = App::new();
+        app.insert_resource(net_holding(newer))
+            .insert_resource(RenderEye {
+                moment: Some((0.0, Arc::new(moment))),
+                ..RenderEye::default()
+            })
+            .init_resource::<RealmBoxEntities>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .insert_resource(MarkerAssets {
+                mesh: Handle::default(),
+                class: Vec::new(),
+            })
+            .add_systems(Update, sync_realm_boxes);
+        app.update();
+        let (entity, _) = app.world().resource::<RealmBoxEntities>().0[&hull];
+        let placed = app
+            .world()
+            .get::<Transform>(entity)
+            .expect("the hull's box is drawn")
+            .translation;
+        assert_eq!(placed, at_moment.as_vec3());
     }
 }

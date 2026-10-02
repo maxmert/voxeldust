@@ -167,14 +167,19 @@ pub(crate) fn placement_row(
 }
 
 /// A book row read back as a stamped pose in the book's own anchor frame, at the book's own instant —
-/// the ONE conversion between the two shapes of "where this child is" (the inverse of
-/// [`placement_of`]), so no lane can end up stamping a different frame or instant onto the same fact.
+/// the ONE conversion between the two shapes of "where this child is", so no lane can end up stamping
+/// a different frame or instant onto the same fact.
+///
+/// ★ THE ATTITUDE RIDES WITH THE CENTRE (2026-10-01, G-CROSSING at the boarding): a placement is centre
+/// AND facing, and the walker's conversion into the child's frame reads the row's orientation. This
+/// pose held the identity, so the window drew a parked hull in this realm's own axes while its frame
+/// stood in its berth's facing, and the boarding's scene swap turned the hull's box in one frame.
 pub(crate) fn pose_of_row(book: &PlacementBook, at: FramePlacement) -> StampedPose {
     StampedPose {
         frame: book.anchor(),
         pos: LatticePos::at(at.origin_cell, at.origin),
         vel: at.velocity,
-        orient: DQuat::IDENTITY,
+        orient: at.orientation,
         universe_tick: book.at(),
     }
 }

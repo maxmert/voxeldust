@@ -102,7 +102,17 @@ haze alone. MEASURED (the walk's stand, dunes 2–3 km off under the sea's level
 sun's shadow on and 541 with it off, every one under the sphere. At the sphere the horizon is the local level.
 Behaviour for upstream users: a surface over the sphere reads exactly upstream's value.
 
-**Owed:** the upstream pull request (all seven changes); the patch dies at the Bevy upgrade gate (0.19).
+**The eighth change (2026-10-02, the table's eye):** `atmosphere/sky_view_lut.wgsl` (marked `VOXELDUST PATCH (the
+table's eye)`): the sky-view table's march starts at the eye's own place from the planet's centre in the world's axes
+(`get_view_position()`), the axes its ray's direction is in. Upstream started it at `(0, r, 0)` — the eye in the
+atmosphere's axes — beside a world direction, and took `mu` as the world direction's Y component: both agree only
+while the world's +Y is the eye's up. MEASURED (the home planet's own picture, whose world +Y is the planet's polar
+axis, and its sun at −0.999 along it): the environment map built from the table gave the ground NO sky light — the ground on foot read 94.615 levels with the map's light on and 94.615 with it at nought —
+while the hull's picture (its +Y the local up) lit the ground; at a boarding the sky light switched on one frame after
+the swap (+2.300 levels on the ground). Behaviour for upstream users: with the centre under the origin the eye's place
+IS `(0, r, 0)`, so upstream scenes read exactly upstream's table.
+
+**Owed:** the upstream pull request (all eight changes); the patch dies at the Bevy upgrade gate (0.19).
 
 **Known upstream limit kept:** `write_atmosphere_buffer` takes `.single()` over cameras with an
 atmosphere, so the ground term is written for ONE atmosphere camera at a time.

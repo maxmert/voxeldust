@@ -1406,16 +1406,83 @@ fn lit(px: &[u8]) -> bool {
     px[0] > PAINT_BLACK_FLOOR || px[1] > PAINT_BLACK_FLOOR || px[2] > PAINT_BLACK_FLOOR
 }
 
-/// THE BALL'S SUNLIT PAINT in the picture: a red HUE — red at least twice each other channel, above
-/// black. Before the sky (slice 8s) the shaded side passed this too (it was lit by the engine's grey
-/// ambient, so it stayed a dark red); under the SKY the dome lights the shade BLUE-GREY — MEASURED on
-/// the first sky pictures: the shade's pixels read (27, 23, 28) at the hill stand, and no hue rule
-/// can call that red, because it is not. So this rule names the SUNLIT part of the ball, and the
-/// gate asks for exactly the share of the disc the stand's own sun lights (`lit_fraction`). The
-/// ground's tan (red under twice green) still does not pass.
+/// THE BALL'S RED PAINT in the picture: a red HUE — red at least twice each other channel, above
+/// black. The ground's tan (red under twice green) does not pass. Since the sky's light reaches the
+/// ground (2026-10-02, the vendored sky table's cure) the ball's SHADE is red too — the sky lights the
+/// red paint, and red paint under any light stays red — so the hue alone no longer names the sunlit
+/// part: [`sunlit_share`] splits the red pixels by brightness as well.
 fn red(px: &[u8]) -> bool {
     let (r, g, b) = (u16::from(px[0]), u16::from(px[1]), u16::from(px[2]));
     r > 12 && r >= 2 * g && r >= 2 * b
+}
+
+/// ★ THE BALL'S SUNLIT SHARE (2026-10-02): of the ball's pixels, the share that is red and lit by the sun.
+/// Since the sky's light reaches the ground (the vendored sky table's cure) the shade is red as well, lit
+/// by the sky alone, so the red pixels can hold TWO groups: the shade, a narrow group at the sky's level,
+/// and the sunlit side, from that level up to the sun's full light. A shade group exists when the
+/// fullest level under Otsu's split (the darker group's peak) stands at or under HALF the brightest red:
+/// under a clear day sky the sun's direct light outshines the sky's, so a sky-lit shade is darker than
+/// half the sunlit peak. Then the sunlit side starts where the shade's peak falls under half its count
+/// (its upper half-maximum); else every red pixel is sunlit, as the hue rule read before the sky's light.
+/// MEASURED: the frozen stands read as the hue rule (ground 0.748, hill 0.685, high 0.726, cave 0.749,
+/// seam 0.979); the ground stand under the sky's light 0.747 (the hue rule alone 0.923), the law 0.757.
+fn sunlit_share(picture: &[u8], probe: &[u8]) -> f64 {
+    let ball: Vec<&[u8]> = picture
+        .chunks_exact(4)
+        .zip(probe.chunks_exact(4))
+        .filter(|(_, pr)| {
+            vd_client_harness::probe::decode_probe([pr[0], pr[1], pr[2]]).kind == PROBE_KIND_RULER
+        })
+        .map(|(pic, _)| pic)
+        .collect();
+    let reds: Vec<u8> = ball.iter().filter(|px| red(px)).map(|px| px[0]).collect();
+    let mut histogram = [0u64; 256];
+    for r in &reds {
+        histogram[usize::from(*r)] += 1;
+    }
+    let split = otsu_split(&histogram);
+    let peak = (0..=usize::from(split))
+        .max_by_key(|level| (histogram[*level], std::cmp::Reverse(*level)))
+        .unwrap_or(0);
+    let brightest = reds.iter().copied().max().map_or(0, usize::from);
+    let edge = if 2 * peak <= brightest {
+        (peak..256)
+            .find(|level| 2 * histogram[*level] < histogram[peak])
+            .unwrap_or(256)
+    } else {
+        0
+    };
+    let lit = reds.iter().filter(|r| usize::from(**r) >= edge).count();
+    lit as f64 / ball.len().max(1) as f64
+}
+
+/// OTSU'S SPLIT of an 8-bit histogram: the level that maximises the variance between the two groups it
+/// makes (Otsu 1979). A histogram with one filled level splits at nought.
+fn otsu_split(histogram: &[u64; 256]) -> u8 {
+    let total: u64 = histogram.iter().sum();
+    let sum: f64 = histogram
+        .iter()
+        .enumerate()
+        .map(|(level, n)| level as f64 * *n as f64)
+        .sum();
+    let (mut below_n, mut below_sum) = (0u64, 0.0f64);
+    let (mut best, mut split) = (f64::NEG_INFINITY, 0u8);
+    for (level, n) in histogram.iter().enumerate() {
+        below_n += n;
+        below_sum += level as f64 * *n as f64;
+        let above_n = total - below_n;
+        if below_n == 0 || above_n == 0 {
+            continue;
+        }
+        let below_mean = below_sum / below_n as f64;
+        let above_mean = (sum - below_sum) / above_n as f64;
+        let between = below_n as f64 * above_n as f64 * (below_mean - above_mean).powi(2);
+        if between > best {
+            best = between;
+            split = level as u8;
+        }
+    }
+    split
 }
 
 /// ★ THE SUNLIT FRACTION OF THE BALL'S DISC, from the stand's own light (slice 8s): the star stands
@@ -2043,7 +2110,7 @@ fn take_picture(
     // The ball through the same air: its sunlit red is veiled with the ground (MEASURED at the
     // aloft stand, the ball 251 km off: the twice-red share 0.579 against the law's 0.767), so
     // above one scale height the ball must be LIT and its sunlit share is reported.
-    let red_share = paint_under_probe(&rgba, &probe, PROBE_KIND_RULER, red);
+    let red_share = sunlit_share(&rgba, &probe);
     let ball_paint = if veiled {
         paint_under_probe(&rgba, &probe, PROBE_KIND_RULER, lit)
     } else {
