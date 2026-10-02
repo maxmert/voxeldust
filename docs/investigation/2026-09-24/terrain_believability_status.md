@@ -1390,3 +1390,18 @@ AWAY from the reference, the step's report says so (ruling B6).
   against −3.7 km). The cause of the low mountains is UNMEASURED (the design's caps, §6 rows 1–3, or the uplift against
   the erosion). The census `docs/investigation/2026-10-02/phase0_earth_relief.txt`; the relief rule is now one copy in
   `crates/bins/src/stands.rs`, and the stands rule's output did not change.
+- 2026-10-02 (night, after the Earth reading) — THE CAUSE OF THE LOW MOUNTAINS MEASURED (the owner's "Find the cause";
+  DEFERRED D-TERRAIN-10; `crates/bins/examples/relief_cause.rs`, its artifact matching the release pin; the census
+  `docs/investigation/2026-10-02/phase0_relief_cause.txt`): NO cap binds (the freeboard factor 1.317 inside its range,
+  the land's uplift clamp at 0 nodes). THE BELTS BARELY RISE: the largest uplift over the age is 769 m, because a belt's
+  room is the relief less the planet's TALLEST platform (2 323 m), a row the design's caps list missed (now row 53).
+  THE EROSION TURNS THE BELTS INTO LOWLANDS: it removes 8.4 times their uplift over the system's whole five billion
+  years, and they end 478 m over the sea with no mountains. A weaker erosion (a bench input) brings the 8.2 km numbers
+  near Earth's, but from crater rims and plate steps, so the lever is the landscape's TIME and the belts' LAW. ALSO
+  FOUND: the rebound lifts whole 131 km blocks by one value, leaving straight grid steps (74 m at a block's edge
+  against 46 m inside; the control 0.96). The cures (the belts' law, the landscape's time, a smooth rebound) wait for
+  the owner's word on where they go. The land readings are now one copy in `crates/bins/src/stands.rs` (the Earth
+  instrument's output did not change).
+- 2026-10-02 (night, last) — RULING B37: the belts' law and the landscape's time are designed now (phase 0, with benches
+  and Earth's numbers as the reference) and built in phase 2's macro change before the first 1 km bake; the smooth
+  rebound goes with the flat directions in phase 1; the belts' room is a cap (caps-list row 53). One commit, no push.

@@ -11,6 +11,9 @@
 //! home planet (36 158 nodes) and pinned the node 229 km from that patch's edge. When the eroded 1 km ground lands in
 //! phase 2, the census reads the same direction, so its "before" and "after" lines describe the same plain.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
 
 /// The body a stand stands on: the three bodies of every phase's pictures (ruling B36 item 8).
@@ -296,6 +299,205 @@ pub fn relief_classes(
         .zip(inland)
         .map(|(reading, &inland)| reading.map_or(SEA_FLOOR, |r| r.class(inland)))
         .collect()
+}
+
+/// The variety's reach and its grid: the border stands' own (60 km by the summed chord; the nodes whose two face
+/// indices are multiples of four, a 32 km grid).
+pub const VARIETY_REACH_M: u64 = 60_000;
+pub const VARIETY_GRID: i32 = 4;
+/// The hypsometry's height over the sea (ruling B3's G-HYPSO share).
+pub const HIGH_M: i32 = 1_000;
+/// The local relief's percentiles, by the land's area.
+pub const PERCENTILES: [f64; 7] = [0.10, 0.25, 0.50, 0.75, 0.90, 0.99, 0.999];
+/// The relief codes the readings count, in print order: the closed-basin floor counts with the plains.
+pub const LAND_CLASSES: [u8; 4] = [PLAINS, TABLELANDS, HILLS, MOUNTAINS];
+
+/// ★ ONE BODY'S LAND, READ ALIKE (bench M0-4; the Earth instrument and the cause bench): the relief classes' shares,
+/// the local relief's spread, the variety, and the hypsometry, every share by the nodes' own area.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LandReading {
+    /// The land's area counted, km².
+    pub land_km2: f64,
+    /// The land's share of the surface counted, %.
+    pub land_pct: f64,
+    /// Each class of [`LAND_CLASSES`]: its share of the land's area, %.
+    pub class_pct: [f64; 4],
+    /// The local relief at each of [`PERCENTILES`], by the land's area, metres.
+    pub span_m: [i32; 7],
+    /// The land's share whose window is half or more gentle, %.
+    pub gentle_pct: f64,
+    /// The variety: the mean count of relief classes within the reach, and the share of the grid's land nodes with
+    /// 1 to 5 classes, %.
+    pub variety_mean: f64,
+    pub variety_pct: [f64; 5],
+    /// The hypsometry: the land's share over [`HIGH_M`], %; the land's mean height over the sea, metres.
+    pub high_pct: f64,
+    pub land_mean_m: f64,
+    /// The land at or under the sea level (the closed basins), % of the land.
+    pub basin_pct: f64,
+    /// The mountains whose window reaches the sea level or under it (a closed basin's wall), % of the land.
+    pub wall_mountain_pct: f64,
+}
+
+/// The relief code a reading counts: the closed-basin floor with the plains.
+#[must_use]
+pub fn merged(code: u8) -> u8 {
+    if code == BASIN_FLOOR { PLAINS } else { code }
+}
+
+/// The variety at one node: the relief classes within the reach by the summed chord, as a set of code bits.
+fn classes_within(
+    lattice: &MacroLattice,
+    code: &[u8],
+    start: u32,
+    stamp: &mut [u32],
+    dist: &mut [u64],
+    round: u32,
+) -> u32 {
+    let mut set = 0u32;
+    let mut heap = BinaryHeap::new();
+    stamp[start as usize] = round;
+    dist[start as usize] = 0;
+    heap.push(Reverse((0u64, start)));
+    while let Some(Reverse((d, u))) = heap.pop() {
+        if d > dist[u as usize] {
+            continue;
+        }
+        set |= 1u32 << code[u as usize];
+        for m in lattice.neighbours(u) {
+            if m == NO_NODE {
+                continue;
+            }
+            let step = d + u64::from(lattice.chord_m(u, m));
+            if step > VARIETY_REACH_M {
+                continue;
+            }
+            if stamp[m as usize] != round || step < dist[m as usize] {
+                stamp[m as usize] = round;
+                dist[m as usize] = step;
+                heap.push(Reverse((step, m)));
+            }
+        }
+    }
+    set
+}
+
+/// Reads one body's land: `over_m` is each node's height over the sea, `land` its side, `readings` the relief rule's
+/// ([`relief_readings`]), `counted` whether the reading counts the node at all, and `variety` whether to walk the
+/// variety (the slowest reading; zero where skipped).
+#[must_use]
+pub fn read_land(
+    lattice: &MacroLattice,
+    area: &[u64],
+    over_m: &[i32],
+    land: &[bool],
+    readings: &[Option<ReliefReading>],
+    counted: &dyn Fn(u32) -> bool,
+    variety: bool,
+) -> LandReading {
+    let n = lattice.node_count();
+    let code: Vec<u8> = readings
+        .iter()
+        .map(|r| r.map_or(SEA_FLOOR, |r| merged(r.class(false))))
+        .collect();
+    let (mut all, mut land_a, mut gentle, mut high) = (0u128, 0u128, 0u128, 0u128);
+    let (mut basin, mut wall) = (0u128, 0u128);
+    let mut height_sum = 0i128;
+    let mut class_a = [0u128; 4];
+    let mut spans: Vec<(i32, u64)> = Vec::new();
+    for v in 0..n as u32 {
+        if !counted(v) {
+            continue;
+        }
+        let a = area[v as usize];
+        all += u128::from(a);
+        let Some(r) = readings[v as usize] else {
+            continue;
+        };
+        land_a += u128::from(a);
+        height_sum += i128::from(over_m[v as usize]) * i128::from(a);
+        if over_m[v as usize] > HIGH_M {
+            high += u128::from(a);
+        }
+        if over_m[v as usize] <= 0 {
+            basin += u128::from(a);
+        }
+        if code[v as usize] == MOUNTAINS && r.lo_m <= 0 {
+            wall += u128::from(a);
+        }
+        if u32::from(r.gentle) * 2 >= u32::from(r.window) {
+            gentle += u128::from(a);
+        }
+        let k = LAND_CLASSES
+            .iter()
+            .position(|&c| c == code[v as usize])
+            .expect("a land node's code is a land class");
+        class_a[k] += u128::from(a);
+        spans.push((r.span_m, a));
+    }
+    spans.sort_unstable();
+    let mut span_m = [0i32; 7];
+    let mut acc = 0u128;
+    let mut next = 0usize;
+    for &(s, a) in &spans {
+        acc += u128::from(a);
+        while next < PERCENTILES.len() && acc as f64 >= PERCENTILES[next] * land_a as f64 {
+            span_m[next] = s;
+            next += 1;
+        }
+    }
+    // The variety, from the land nodes of the 32 km grid.
+    let mut stamp = vec![0u32; n];
+    let mut dist = vec![0u64; n];
+    let mut round = 0u32;
+    let mut counts = [0u64; 5];
+    for v in 0..n as u32 {
+        let (_, i, j) = lattice.split(v);
+        if !variety
+            || i % VARIETY_GRID != 0
+            || j % VARIETY_GRID != 0
+            || !land[v as usize]
+            || !counted(v)
+        {
+            continue;
+        }
+        round += 1;
+        let set = classes_within(lattice, &code, v, &mut stamp, &mut dist, round);
+        counts[set.count_ones() as usize - 1] += 1;
+    }
+    let grid_nodes: u64 = counts.iter().sum();
+    let pct = |x: u128, of: u128| x as f64 * 100.0 / of.max(1) as f64;
+    LandReading {
+        land_km2: land_a as f64 / 1e6,
+        land_pct: pct(land_a, all),
+        class_pct: class_a.map(|c| pct(c, land_a)),
+        span_m,
+        gentle_pct: pct(gentle, land_a),
+        variety_mean: counts
+            .iter()
+            .enumerate()
+            .map(|(k, &c)| (k as u64 + 1) * c)
+            .sum::<u64>() as f64
+            / grid_nodes.max(1) as f64,
+        variety_pct: counts.map(|c| c as f64 * 100.0 / grid_nodes.max(1) as f64),
+        high_pct: pct(high, land_a),
+        land_mean_m: height_sum as f64 / land_a.max(1) as f64,
+        basin_pct: pct(basin, land_a),
+        wall_mountain_pct: pct(wall, land_a),
+    }
+}
+
+/// The ocean's mean depth over the sea, metres, by area.
+#[must_use]
+pub fn ocean_mean_m(area: &[u64], over_m: &[i32], land: &[bool]) -> f64 {
+    let (mut sum, mut a) = (0i128, 0u128);
+    for ((&node_area, &over), &is_land) in area.iter().zip(over_m).zip(land) {
+        if !is_land {
+            sum += i128::from(over) * i128::from(node_area);
+            a += u128::from(node_area);
+        }
+    }
+    sum as f64 / a.max(1) as f64
 }
 
 #[cfg(test)]

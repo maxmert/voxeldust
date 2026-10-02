@@ -174,6 +174,13 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     Q16 YES (stands pinned once, four views, two suns, three bodies; G-ICE on Earth's real data, amends B5 item 1);
     item 9 THE THIRD BODY = the desert world `Planet(17782101822166660494)` (the rule plus the owner's condition: its
     node is the one the 8 192 m target sets); Q4, Q5, Q6, Q8 when phase 1 ends; Q9, Q11-Q13, Q15, Q18 at their phases.
+    ★ B37 (2026-10-02, after the Earth reading and the cause bench: "Design now, build in phase 2"): at 8.2 km Earth holds
+    no hills either (the scale); away from closed basins the home planet holds ONE FIFTH of Earth's mountains and half its
+    relief; NO cap binds — THE BELTS BARELY RISE (769 m at most: a belt's room is the relief less the planet's TALLEST
+    platform, a cap, caps-list row 53) and THE EROSION TURNS THEM INTO LOWLANDS (8.4 times their uplift over the system's
+    whole age); the rebound leaves 131 km grid steps. THE BELTS' LAW (convergence over the belt's own active time, limited
+    per node only by the crust's strength) and THE LANDSCAPE'S TIME (erosion since the ground was last raised) are
+    DESIGNED NOW and BUILT in phase 2's macro change before the first 1 km bake; THE SMOOTH REBOUND goes in phase 1.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

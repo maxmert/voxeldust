@@ -1038,3 +1038,30 @@ measured numbers.
 other, and the rain belt follows it: a valley that is wet in its summer is dry in its winter, and nobody wrote that in by
 hand. A pilot who comes to a planet nobody visited meets ground made only by its laws; if the 1 km ground could not be
 ready in time, that is a defect to solve with a law, not a rule to switch off.
+
+## B37. THE CAUSE OF THE LOW MOUNTAINS, AND WHERE ITS CURES GO (2026-10-02)
+
+The owner asked whether the home planet is "not good enough" (*"No hills, no mountains, no divercity?"*), chose "Earth
+first", and then "Find the cause". Phase 0 measured (`docs/investigation/2026-10-02/phase0_earth_relief.txt`,
+`docs/investigation/2026-10-02/phase0_relief_cause.txt`; DEFERRED D-TERRAIN-10):
+- at the 8.2 km grid Earth holds no hills either (the scale, not the world); away from its closed basins the home planet
+  holds one fifth of Earth's mountains (0.47 % of the land against 2.39 %) and about half of Earth's relief;
+- NO cap binds; THE BELTS BARELY RISE (the largest uplift over the age 769 m, because a belt's room is the relief less
+  the planet's TALLEST platform: 2 323 m); THE EROSION TURNS THE BELTS INTO LOWLANDS (it removes 8.4 times their uplift
+  over the system's whole age; they end 478 m over the sea with no mountains); the erosion's TIME is the lever, but a
+  shorter time alone keeps crater rims and plate steps, not ranges;
+- THE REBOUND LEAVES GRID STEPS (one lift per 131 km block: 74 m at a block's edge against 46 m inside; the control 0.96).
+
+The owner ruled (*"Design now, build in phase 2"*; *"Commit now"*):
+1. **THE BELTS' LAW AND THE LANDSCAPE'S TIME ARE DESIGNED NOW** (phase 0), with benches and Earth's measured numbers as
+   the reference, for the owner's review: a belt rises from its plates' convergence over its own active time, limited at
+   each node only by the crust's strength (the law-limit that stays); each landscape erodes for the time since its ground
+   was last raised, not for the system's whole age.
+2. **THEY ARE BUILT IN PHASE 2's MACRO CHANGE, BEFORE THE FIRST BAKE OF THE 1 km GROUND**, so the world changes once.
+3. **THE REBOUND AS A SMOOTH FLEXURE GOES WITH THE FLAT DIRECTIONS IN PHASE 1** (a grid-direction defect).
+4. **THE BELTS' ROOM IS A CAP** (B23) and goes with the belts' law; the design's caps list carries it as row 53.
+5. One commit now, on `game`, no push.
+
+**Example.** Today a pilot who follows a folded belt of the home planet flies over a lowland 478 m over the sea, with
+flat plateaus a kilometre higher beside it. After phase 2 the same belt rises by the convergence of its two plates over
+its own active time, and its rivers have worked on it only since it rose: the pilot sees a young range cut by valleys.

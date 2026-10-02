@@ -1,0 +1,44 @@
+# PHASE 0: WHY THE HOME PLANET'S MOUNTAINS ARE LOW — the cause bench (2026-10-02, generator 22; the owner's "Find the cause").
+# The instrument: crates/bins/examples/relief_cause.rs (the shipped functions only; its control rebuilds the artifact and
+# matches the release gate's pinned digest). Two runs follow, unchanged:
+# RUN 2 (the belts at 100 m of uplift; the rebound's block steps), then RUN 1's erosion variants (`--k0 0.1,0.01`: the
+# schedule's K0 times each factor — a bench input, never the world). Run 1 read the belts at 1 000 m of uplift and found none.
+== RUN 2
+WHY THE HOME PLANET'S MOUNTAINS ARE LOW (phase 0, the cause bench), generator 22
+the initial land in 22.0 s
+
+1. THE FREEBOARD FACTOR: 1.3173 times Earth's continental thickness (the range 0.5..3) — inside the range: the law's own answer
+CONTROL the rebuilt platform field against the land's own heights: the worst difference 20.5 m over 2662568 land nodes (the crust share is rebuilt from its byte)
+2. THE BELTS' ROOM: the relief drawn 8276 m (the law's cap 8846 m); the dry platform field about its mean reaches 5953 m and -2810 m, so the tallest magnitude is 5953 m (the highest platform sets it); THE ROOM LEFT TO THE BELTS 2323 m
+   the sea at the initial land stands 3365 m over the field's mean, so a platform at the mean stands 3365 m under it and the envelope's top stands 4911 m over it
+3. THE BELTS' SHAPE: the largest uplift over the age on land 769 m (33 % of the room); land with an uplift of 100 m or more 3.69 %, of 100 m or more 3.69 %; the uplift's steepest slope between land neighbours 11.63 % (the relief rule's gentle limit is 8 %)
+   the relief rule on fields with NO erosion (the initial sea level):
+  the platform alone, all land                   land  29.70 % | plains 92.59 tablelands  7.26 hills 0.00 mountains  0.16 % | relief p50    0 p90   31 p99   536 m | land over 1 000 m 49.24 %
+  the platform alone, away from closed basins    land 100.00 % | plains 92.00 tablelands  7.83 hills 0.00 mountains  0.17 % | relief p50    0 p90   46 p99   522 m | land over 1 000 m 56.92 %
+  the platform + the whole uplift, all land      land  29.68 % | plains 92.46 tablelands  7.39 hills 0.00 mountains  0.15 % | relief p50    0 p90   53 p99   539 m | land over 1 000 m 49.40 %
+  the platform + the whole uplift, away from basins land 100.00 % | plains 91.92 tablelands  7.90 hills 0.00 mountains  0.18 % | relief p50    0 p90   60 p99   525 m | land over 1 000 m 56.63 %
+4. THE CLAMPS: the land's uplift clamp holds 0 nodes at its top bound and 0 at its bottom bound (of 8871936)
+
+the shipped solve in 164.4 s
+CONTROL the artifact rebuilt from the shipped solve: digest [0x1eb53c782459e0df, 0xc2cc766157d2a0e4] MATCHES the release gate's pin
+4. THE ENVELOPE at the end: the worst |height| before it 9967 m, clamped true; nodes at its top 14500, at its bottom 216501 (the envelope 8276 m over the ladder radius, 4685 m over the final sea)
+5. THE EROSION AGAINST THE UPLIFT on the belts (4.98 million km² of land with 100 m of uplift or more): the mean uplift 300 m, the mean removal 2524 m (842 % of the uplift), the mean height left 478 m over the sea
+   the relief rule on the final field:
+  all land (the Earth instrument's home column)  land  21.89 % | plains 59.37 tablelands 38.82 hills 0.01 mountains  1.79 % | relief p50   63 p90  287 p99  2410 m | land over 1 000 m 61.21 %
+  away from closed basins                        land 100.00 % | plains 61.04 tablelands 38.47 hills 0.01 mountains  0.47 % | relief p50   60 p90  258 p99   704 m | land over 1 000 m 63.17 %
+  the belts (uplift 100 m or more)               land 100.00 % | plains 68.87 tablelands 31.13 hills 0.00 mountains  0.00 % | relief p50   55 p90  155 p99   283 m | land over 1 000 m 14.15 %
+  the rest of the land                           land 100.00 % | plains 58.93 tablelands 39.18 hills 0.02 mountains  1.88 % | relief p50   64 p90  293 p99  2575 m | land over 1 000 m 63.43 %
+   the rebounds (level, nodes lifted, the largest lift in m): [(4, 3153408, 781.0), (4, 3224320, 900.0), (4, 3173632, 903.0), (4, 3186176, 938.0), (4, 3150336, 949.0), (4, 3212544, 854.0), (4, 3185408, 739.0), (4, 3200512, 619.0)]
+   THE REBOUND'S BLOCK STEPS (land neighbours on one face; a block is 16 nodes, 131 km):
+  the field with NO erosion and no rebound       the step at a block's edge 7.0 m; inside a block 7.1..7.5 m (the median 7.3 m); the edge over the median 0.96
+  the final field (8 rebounds, the last one uneroded) the step at a block's edge 74.4 m; inside a block 43.2..49.3 m (the median 45.8 m); the edge over the median 1.62
+   the sweeps: 40 passes, the cut summed 3.474e9 m·nodes, the fill summed 3.005e8 m·nodes; the craters 1668
+
+== RUN 1, the erosion variants
+6. THE EROSION'S STRENGTH: K0 × 0.1 (a bench input, not the world), solved in 163.2 s
+  all land                                       land  21.89 % | plains 49.40 tablelands 47.22 hills 0.02 mountains  3.36 % | relief p50   91 p90  443 p99  2739 m | land over 1 000 m 62.88 %
+  away from closed basins                        land 100.00 % | plains 50.86 tablelands 47.12 hills 0.02 mountains  2.00 % | relief p50   87 p90  360 p99  1421 m | land over 1 000 m 65.06 %
+
+6. THE EROSION'S STRENGTH: K0 × 0.01 (a bench input, not the world), solved in 158.3 s
+  all land                                       land  21.59 % | plains 41.14 tablelands 46.56 hills 0.03 mountains 12.28 % | relief p50  134 p90 1117 p99  3313 m | land over 1 000 m 73.33 %
+  away from closed basins                        land 100.00 % | plains 42.54 tablelands 46.42 hills 0.03 mountains 11.01 % | relief p50  125 p90  999 p99  2538 m | land over 1 000 m 76.57 %

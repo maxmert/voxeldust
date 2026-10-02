@@ -11792,12 +11792,46 @@ updated in the same change as the work, deleted when done). The interims named h
   **Example.** On Earth a window of 24.6 km over the Alps' front spans more than 1 000 m and reads "mountains"; on the
   home planet such a window stands mostly on the wall of a deep closed basin, and the ranges over the sea level span a
   half of Earth's relief.
-- 🟥 **OWED FROM STEP 4:** the CAUSE of the low mountains is UNMEASURED. The candidates are the design's caps (§6 rows
-  1–3: the relief draw in [0.5, 1.0) of the law's cap, the envelope's band term, the uplift clamps) and the balance of
-  the uplift and the erosion. A bench that reads which one binds comes first; then the owner decides where the cure goes
-  (the design removes those caps in phase 4). The rest of M0-4: finer Earth data for the scales under a node (the
-  hills, the valleys, the pits), the Moon and Mars, the spectra, the slopes by class and the ice line on Earth's real
-  climate.
+- 🟩 **THE CAUSE OF THE LOW MOUNTAINS, MEASURED (2026-10-02; the owner's "Find the cause").**
+  `crates/bins/examples/relief_cause.rs` runs the shipped functions only (no switch in the game); its control rebuilds
+  the artifact from the shipped solve and MATCHES the release gate's pinned digest. The census:
+  `docs/investigation/2026-10-02/phase0_relief_cause.txt`. MEASURED on the home planet:
+  - NO CAP HOLDS THE MOUNTAINS DOWN: the freeboard factor is 1.317, inside its range 0.5–3.0 (the law's own answer);
+    the land's uplift clamp binds at 0 nodes; the final envelope holds 14 500 land nodes at its top (4 685 m over the
+    sea) and 216 501 sea-floor nodes at its bottom.
+  - THE BELTS BARELY RISE: the largest uplift over the whole age is 769 m; 4.98 million km² of land rise 100 m or more
+    (mean 300 m) and no land node rises 1 000 m. The rule (`initial_land_from`): a belt's amplitude is the ROOM times
+    the convergence's share times the plate age's share, and the room is the relief limit (8 276 m) less the TALLEST
+    platform on the whole planet (5 953 m over the field's mean) = 2 323 m, so one tall plate limits every belt on the
+    planet. The design's caps list (§6) misses this row. With NO erosion the plates and the belts make an almost flat
+    world: half the land holds 0 m of relief over 24.6 km, mountains 0.15 %.
+  - THE EROSION TURNS THE BELTS INTO LOWLANDS: on the belts the rivers remove 2 524 m, 8.4 times their mean uplift; the
+    belts end 478 m over the sea (the land's mean 1 363 m), with 0.00 % mountains and about half the rest's relief.
+    Every landscape erodes for the SYSTEM's whole age (5 billion years) while its belt rises slowly over all of it.
+  - THE EROSION'S TIME IS A STRONG LEVER (a bench input, never the world): K₀ a tenth (the same as a 500-million-year
+    landscape) gives the land away from closed basins 2.00 % mountains and a relief of 87 / 360 / 1 421 m at
+    50 / 90 / 99 % (Earth 2.39 %, 83 / 550 / 1 383 m); K₀ a hundredth gives 11.01 % (it overshoots). K₀ itself already
+    stands near the low end of Earth's published range (10⁻⁶–10⁻⁴), so the lever is the landscape's TIME, not the
+    constant; and the relief that the weaker erosion keeps comes from crater rims and plate steps, because the belts
+    stay small.
+  - THE REBOUND LEAVES GRID STEPS: each rebound lifts a whole level-4 block (16 × 16 nodes, 131 km) by one value, so on
+    the final field the mean step between land neighbours at a block's edge is 74.4 m against 45.8 m inside a block
+    (1.62 times); the field with no rebound reads 0.96 (the control). The last rebound follows the last sweep and is
+    never eroded. Straight steps every 131 km along the grid's lines — a G-GRID defect of the macro field.
+  **Example.** A folded belt on the home planet rises 300 m over five billion years, while its rivers cut 2.5 km into
+  the platform under it; today it is a lowland 478 m over the sea, and the high flat platforms beside it stand a
+  kilometre higher. On Earth the same belt would be a young range a few tens of millions of years old.
+- 🟥 **OWED FROM THE CAUSE (laws, no caps — ruling B23; ruling B37: the belts' law and the landscape's time DESIGNED NOW
+  in phase 0 and BUILT in phase 2's macro change before the first 1 km bake; the smooth rebound in phase 1):**
+  - THE BELTS' LAW: a belt's uplift from its plates' convergence over its own active time, limited at each node only by
+    the crust's strength (the law-limit that stays, its Everest calibration), never by the planet's tallest platform;
+  - THE LANDSCAPE'S TIME: each landscape erodes for the time since its ground was last raised (a belt's own age, a
+    plate's age), not for the system's whole age (the "cratons' transient" that ruling W8 left owed);
+  - THE REBOUND AS A SMOOTH FLEXURE: the lithosphere bends smoothly over its flexural parameter; one value per block is
+    not the law;
+  - the design's caps list (§6) gains the room's row.
+- 🟥 **THE REST OF M0-4:** finer Earth data for the scales under a node (the hills, the valleys, the pits), the Moon and
+  Mars, the spectra, the slopes by class and the ice line on Earth's real climate.
 - 🟥 **STEPS 2, 3 AND 5 OWED:** the "before" record on every pinned stand (numbers and pictures, no window); the corrected
   climate's bench beside today's code (M0-9, the seasonal circulation of ruling B36 item 1); the window session for the
   clean frame reading at full screen and the eye's rule at full screen (M0-16, Q9's number).
