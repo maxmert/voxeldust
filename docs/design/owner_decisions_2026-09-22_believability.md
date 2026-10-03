@@ -1065,3 +1065,46 @@ The owner ruled (*"Design now, build in phase 2"*; *"Commit now"*):
 **Example.** Today a pilot who follows a folded belt of the home planet flies over a lowland 478 m over the sea, with
 flat plateaus a kilometre higher beside it. After phase 2 the same belt rises by the convergence of its two plates over
 its own active time, and its rivers have worked on it only since it rose: the pilot sees a young range cut by valleys.
+
+## B38. ONE BENCH; NEW LAWS ONLY WHERE THEY ADD REALISM; NO CAPS AND NO ARTIFICIAL CHANGES (2026-10-02)
+
+Two adversarial reviews of the belts' design (`docs/investigation/2026-10-02/belts_and_time_design.md`, revision 2) found
+the cure larger than B37's two laws: the limits the new belts would hit, the erosion law at the 8.2 km grid, the
+platforms' height, the margins, dry bodies and the time axis. Asked how to continue, the owner ruled:
+*"Ok to build one bench, but the main laws and rules should not be broken. Also we should not build the sim, physic laws
+should decide, but they whould also be right ones."* — and, asked which reading is right: *"If you want to add a new
+physic law, it's ok if it will add more realism, but we should not implement caps or artificaial changes."* Read as:
+
+1. **ONE BENCH IS BUILT**: a copy of the macro solve in which each item of the design's §3 can be switched IN THE COPY
+   only; its control reproduces the pinned artifact digest; nothing in the game changes.
+2. **THE BINDING LAWS AND RULES STAY UNBROKEN** in the bench and in what it proposes (HR1–HR6, SL1–SL10, B16, B21, B23,
+   T9; no test seam in the game).
+3. **A NEW PHYSICAL LAW IS WELCOME WHERE IT ADDS REALISM**, and it must be the RIGHT law: published, applied as its source
+   states it, with its own calibration body.
+4. **NO CAPS AND NO ARTIFICIAL CHANGES**: no clamp, no tuning knob, no hand-made adjustment that makes a number match.
+   Earth's numbers are READINGS to compare against (B23), never a target a constant is turned toward. A diagnostic run
+   (such as the cause bench's erosion a tenth as strong) is a measurement, never a candidate.
+
+**Example.** The bench may test whether a belt's relief follows the relief law measured on Earth at the 10 km scale,
+because that law is published and calibrated on Earth's own ranges. It may not narrow the platforms' crust scatter until
+the home planet's hypsometry matches Earth's: that would be a knob turned toward a reading.
+
+## B39. THE WORLD CONVERGES IN TIME: A BINDING GATE (2026-10-03)
+
+The belts' bench (ruling B38; `docs/investigation/2026-10-02/phase0_belts_bench.txt`, the design §10) found today's solve
+NOT converged in time: the same laws on 40 / 80 / 160 even passes give mountains 0.47 / 0.11 / 0.02 % of the land away
+from closed basins and land over 1 000 m 63 / 55 / 43 %; on the geometric axis 9.60 % at 40 passes and 6.12 % at 80. The
+world's relief is partly a numerical error of 40 long passes, and accurate integration grades today's laws nearly flat.
+The owner ruled (*"Yes, a binding gate"*; *"Commit now"*):
+
+1. **THE WORLD'S LOOK MUST NOT DEPEND ON THE PASS COUNT.** A binding gate: the solve's readings at N and 2N passes agree
+   within a stated tolerance, and the solve uses as many passes (or as fine a step rule) as the gate needs. The solve's
+   own rule (03 §4.6, "the passes are a resolution, not a dial") becomes a measured gate.
+2. **IT COMES WITH THE NEW LAWS** (phase 2's macro change, ruling B37 item 2), because converged today's laws grade the
+   planet flat: the belts at Earth's rates, each landscape's own time, the erosion constant's calibration, then the gate.
+3. **THE COST IS ACCEPTED**: a slower first solve (MEASURED: 160 passes took 311 s against 150 s for 40).
+4. One commit now, on `game`, no push.
+
+**Example.** Today a pilot sees a crater rim stand high on the home planet only because the solve's long first steps
+under-eroded it. After phase 2 the solve takes as many steps as the gate needs, so the rim stands as high as its own age
+and its rock allow, and a second solve with twice the steps shows the pilot the same rim.

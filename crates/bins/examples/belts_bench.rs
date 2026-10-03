@@ -1,0 +1,312 @@
+//! ★ THE BELTS' BENCH (rulings B37 and B38; the design `docs/investigation/2026-10-02/belts_and_time_design.md` §5):
+//! the home planet solved by the ONE COPY of the macro solve (`vd_bins::solve_copy`) with the design's laws switched IN
+//! THE COPY ONLY — nothing in the game changes. Each case prints Earth's set (the stands' relief rule and land readings,
+//! one copy with the Earth instrument) and the mountains split BY CAUSE.
+//!
+//! **THE CASES** (`cargo run --release -p vd-bins --example belts_bench [-- today limits belts-today-limits belts]`):
+//! - `today`: the solve's own laws. ★ THE CONTROL: its artifact must match the release gate's pinned digest.
+//! - `belts-today-limits`: the belts by their influx (L1, L2, L4) under today's limits — what the limits cut (Q-B0).
+//! - `limits`: the limits as laws (L0) alone: no clip, no uplift clamps, no envelope; the peak law per node.
+//! - `belts`: the limits as laws AND the belts by their influx.
+//! - `today-geometric`: the solve's own laws on the geometric time axis (L5) — the axis alone.
+//! - `belts-geometric`: the limits as laws, the belts by their influx, and the geometric axis.
+//!
+//! **THE CAUSES**, exclusive, in this order: a CLOSED BASIN'S WALL (the relief window reaches the sea level or under
+//! it); a CRATER (within one diameter of a crater's centre, by the summed chord); a BELT (the folded belt's rock: the
+//! nodes a belt raised); the PLATFORM (all other land).
+//!
+//! **Example.** If the `belts` case reads two per cent of the land as mountains and most of them as BELT, the influx law
+//! put the ranges where the plates close; if they read as CRATER, the law did not, and the craters' rims made them.
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+use std::time::Instant;
+
+use vd_bins::solve_copy::{Laws, Router, Solved, artifact_of, solve_copy};
+use vd_bins::stands::{LandReading, MOUNTAINS, ReliefReading, merged, read_land, relief_readings};
+use vd_terrain::home::{home_planet, home_solve_words};
+use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
+use vd_terrain::solve::{FACIES_SEA, Schedule, Z_STEPS_PER_M};
+use vd_terrain::strata::Province;
+
+/// The geometric axis's last pass, years (the design's L5: half a million years; M-TIME-1 varies it).
+const GEOMETRIC_LAST_YR: u64 = 500_000;
+
+/// The release gate's pinned digest of the home planet's artifact (`crates/bins/tests/home_artifact_pin.rs`).
+const HOME_ARTIFACT_DIGEST: [u64; 2] = [0x1eb5_3c78_2459_e0df, 0xc2cc_7661_57d2_a0e4];
+
+/// Whole metres of a height in sixteenths, rounded half up: the artifact's own rounding.
+fn metres(sixteenths: i32) -> i32 {
+    (i64::from(sixteenths) + i64::from(Z_STEPS_PER_M / 2)).div_euclid(i64::from(Z_STEPS_PER_M))
+        as i32
+}
+
+/// One compact line of a land reading.
+fn line(label: &str, r: &LandReading) {
+    println!(
+        "  {label:<34} land {:>6.2} % | plains {:>5.2} tablelands {:>5.2} hills {:>4.2} mountains {:>5.2} % | \
+         relief p50 {:>4} p90 {:>4} p99 {:>5} m | land over 1 000 m {:>5.2} %",
+        r.land_pct,
+        r.class_pct[0],
+        r.class_pct[1],
+        r.class_pct[2],
+        r.class_pct[3],
+        r.span_m[2],
+        r.span_m[4],
+        r.span_m[5],
+        r.high_pct
+    );
+}
+
+/// The nodes within one diameter of a crater's centre, by the summed chord.
+fn crater_reach(lattice: &MacroLattice, solved: &Solved) -> Vec<bool> {
+    let n = lattice.node_count();
+    let mut inside = vec![false; n];
+    let mut stamp = vec![u32::MAX; n];
+    let mut dist = vec![0u64; n];
+    for (round, c) in solved.craters.iter().enumerate() {
+        let round = round as u32;
+        let reach = u64::from(c.diameter_m);
+        let mut heap = BinaryHeap::new();
+        stamp[c.node as usize] = round;
+        dist[c.node as usize] = 0;
+        heap.push(Reverse((0u64, c.node)));
+        while let Some(Reverse((d, u))) = heap.pop() {
+            if d > dist[u as usize] {
+                continue;
+            }
+            inside[u as usize] = true;
+            for m in lattice.neighbours(u) {
+                if m == NO_NODE {
+                    continue;
+                }
+                let step = d + u64::from(lattice.chord_m(u, m));
+                if step > reach {
+                    continue;
+                }
+                if stamp[m as usize] != round || step < dist[m as usize] {
+                    stamp[m as usize] = round;
+                    dist[m as usize] = step;
+                    heap.push(Reverse((step, m)));
+                }
+            }
+        }
+    }
+    inside
+}
+
+/// The readings of one solved case: Earth's set, the belts' heights, and the mountains by cause.
+fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved) {
+    let state = &solved.state;
+    let n = lattice.node_count();
+    let sea_m = metres(state.sea_z);
+    let over: Vec<i32> = state.z.iter().map(|&s| metres(s) - sea_m).collect();
+    let land: Vec<bool> = solved.facies.iter().map(|&f| f & FACIES_SEA == 0).collect();
+    let readings = relief_readings(lattice, &over, &land);
+    let dry = |r: &[Option<ReliefReading>], v: u32| r[v as usize].is_some_and(|x| x.lo_m > 0);
+    let all = read_land(lattice, area, &over, &land, &readings, &|_| true, false);
+    let away = read_land(
+        lattice,
+        area,
+        &over,
+        &land,
+        &readings,
+        &|v| dry(&readings, v),
+        false,
+    );
+    line("all land", &all);
+    line("away from closed basins", &away);
+    // The causes, exclusive, in order.
+    let craters = crater_reach(lattice, solved);
+    let belt_code = Province::FoldedBelt.code();
+    let cause = |v: usize| -> usize {
+        match readings[v] {
+            Some(r) if r.lo_m <= 0 => 0,
+            _ if craters[v] => 1,
+            _ if state.province[v] == belt_code => 2,
+            _ => 3,
+        }
+    };
+    let names = ["closed basin's wall", "crater", "belt", "platform"];
+    let (mut land_a, mut mount_a) = ([0u128; 4], [0u128; 4]);
+    let (mut all_land, mut all_mount) = (0u128, 0u128);
+    let mut belt_over: Vec<(i32, u64)> = Vec::new();
+    for v in 0..n {
+        let Some(r) = readings[v] else { continue };
+        let a = u128::from(area[v]);
+        let c = cause(v);
+        land_a[c] += a;
+        all_land += a;
+        if merged(r.class(false)) == MOUNTAINS {
+            mount_a[c] += a;
+            all_mount += a;
+        }
+        if state.province[v] == belt_code {
+            belt_over.push((over[v], area[v]));
+        }
+    }
+    let pct = |x: u128, of: u128| x as f64 * 100.0 / of.max(1) as f64;
+    println!(
+        "  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):"
+    );
+    for c in 0..4 {
+        println!(
+            "    {:<20} land {:>6.2} % | mountains {:>6.2} % of it | {:>6.2} % of all mountains",
+            names[c],
+            pct(land_a[c], all_land),
+            pct(mount_a[c], land_a[c]),
+            pct(mount_a[c], all_mount)
+        );
+    }
+    belt_over.sort_unstable();
+    let belt_area: u64 = belt_over.iter().map(|&(_, a)| a).sum();
+    let share_over = |h: i32| -> f64 {
+        let a: u64 = belt_over
+            .iter()
+            .filter(|&&(o, _)| o > h)
+            .map(|&(_, a)| a)
+            .sum();
+        a as f64 * 100.0 / belt_area.max(1) as f64
+    };
+    println!(
+        "  THE BELTS' LAND (the folded belt's rock): {:.2} million km²; height over the sea at 50 / 90 / 100 %: {} / {} / {} m; \
+         over 1 000 / 2 000 / 3 000 / 5 000 m: {:.2} / {:.2} / {:.2} / {:.2} %",
+        belt_area as f64 / 1e12,
+        belt_over.get(belt_over.len() / 2).map_or(0, |x| x.0),
+        belt_over.get(belt_over.len() * 9 / 10).map_or(0, |x| x.0),
+        belt_over.last().map_or(0, |x| x.0),
+        share_over(1_000),
+        share_over(2_000),
+        share_over(3_000),
+        share_over(5_000)
+    );
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cases: Vec<String> = if args.is_empty() {
+        ["today", "belts-today-limits", "limits", "belts"]
+            .map(str::to_string)
+            .to_vec()
+    } else {
+        args
+    };
+    println!(
+        "THE BELTS' BENCH (rulings B37, B38), generator {}; the cases: {cases:?}",
+        vd_terrain::GENERATOR_VERSION
+    );
+    let body = home_planet();
+    let words = home_solve_words();
+    let lattice = MacroLattice::of(&body).expect("the home planet has a macro lattice");
+    let area: Vec<u64> = (0..lattice.node_count() as u32)
+        .map(|v| lattice.area_m2(v))
+        .collect();
+    for case in &cases {
+        // `name@N`: the case on N passes, every pass-counted cadence (the climate, the rebound) scaled by N/40 so its
+        // spacing in YEARS stays the solve's own; the talus keeps its total count (the convergence test, M-TIME-1).
+        let (name, passes) = match case.split_once('@') {
+            Some((name, n)) => (name, n.parse::<u32>().expect("a pass count after @")),
+            None => (case.as_str(), vd_terrain::solve::PASSES),
+        };
+        let standard = Schedule::standard(words.age_yr);
+        let k = passes / standard.passes;
+        assert_eq!(
+            k * standard.passes,
+            passes,
+            "the pass count is a multiple of the solve's {}",
+            standard.passes
+        );
+        let schedule = Schedule {
+            passes,
+            climate_every: standard.climate_every * k,
+            isostasy_every: standard.isostasy_every * k,
+            ..standard
+        };
+        let laws = match name {
+            "today" => Laws::default(),
+            "belts-today-limits" => Laws {
+                belts_by_influx: true,
+                ..Laws::default()
+            },
+            "limits" => Laws {
+                limits_as_law: true,
+                ..Laws::default()
+            },
+            "belts" => Laws {
+                limits_as_law: true,
+                belts_by_influx: true,
+                ..Laws::default()
+            },
+            "today-geometric" => Laws {
+                geometric_last_yr: Some(GEOMETRIC_LAST_YR),
+                ..Laws::default()
+            },
+            "belts-geometric" => Laws {
+                limits_as_law: true,
+                belts_by_influx: true,
+                geometric_last_yr: Some(GEOMETRIC_LAST_YR),
+            },
+            other => panic!(
+                "a case is today, belts-today-limits, limits, belts, today-geometric or belts-geometric, not {other}"
+            ),
+        };
+        let started = Instant::now();
+        let solved = solve_copy(&body, &words, schedule, Router::D8, &laws, None)
+            .expect("the home planet solves");
+        println!(
+            "\n== CASE {case} ({laws:?}): solved in {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+        if case == "today" && passes == standard.passes {
+            let digest = artifact_of(&body, &words, &solved).digest();
+            println!(
+                "CONTROL the copy with the solve's own laws: digest [{:#x}, {:#x}] {} the release gate's pin",
+                digest[0],
+                digest[1],
+                if digest == HOME_ARTIFACT_DIGEST {
+                    "MATCHES"
+                } else {
+                    "DIFFERS FROM"
+                }
+            );
+        }
+        if let Some(b) = &solved.belts {
+            let r = &b.report;
+            println!(
+                "  THE BELTS' LAW: {} nodes ({} in collisions, {} at Andean margins); the plates' turnover {:.0} Myr \
+                 (oceanic crust {:.1} million km², ridges {:.0} km, C0 {:.2} km²/yr); windows at 10/25/50/75/90 %: \
+                 {:.1} / {:.1} / {:.1} / {:.1} / {:.1} Myr; convergence at 10/50/90 %: {:.1} / {:.1} / {:.1} mm/yr; \
+                 surface uplift rate at 50 % {:.3} mm/yr, the largest {:.3} mm/yr; the uplift over the window: mean \
+                 {:.0} m, the largest {:.0} m",
+                r.nodes,
+                r.collision_nodes,
+                r.andean_nodes,
+                r.t_m_yr / 1e6,
+                r.ocean_area_m2 / 1e12,
+                r.ridge_length_m / 1e3,
+                r.c0_m2_yr / 1e6,
+                r.windows_myr[0],
+                r.windows_myr[1],
+                r.windows_myr[2],
+                r.windows_myr[3],
+                r.windows_myr[4],
+                r.vn_mm_yr[0],
+                r.vn_mm_yr[1],
+                r.vn_mm_yr[2],
+                r.rate_mm_yr[0],
+                r.rate_mm_yr[1],
+                r.mean_total_m,
+                r.max_total_m
+            );
+        }
+        if solved.collapsed > 0 || laws.limits_as_law {
+            println!(
+                "  THE PEAK LAW: {} node collapses over the passes and their rounds; the largest excess left over its \
+                 cap after a pass: {:.0} m",
+                solved.collapsed,
+                f64::from(solved.peak_left) / f64::from(Z_STEPS_PER_M)
+            );
+        }
+        read_case(&lattice, &area, &solved);
+    }
+}

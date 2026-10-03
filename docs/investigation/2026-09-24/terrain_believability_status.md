@@ -1405,3 +1405,26 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-10-02 (night, last) — RULING B37: the belts' law and the landscape's time are designed now (phase 0, with benches
   and Earth's numbers as the reference) and built in phase 2's macro change before the first 1 km bake; the smooth
   rebound goes with the flat directions in phase 1; the belts' room is a cap (caps-list row 53). One commit, no push.
+- 2026-10-02 (night, after B37) — THE BELTS' DESIGN DRAFTED AND REVIEWED (ruling B37;
+  `docs/investigation/2026-10-02/belts_and_time_design.md`): a research pass (published laws, Earth's numbers), a draft,
+  and two adversarial reviews (31 findings) found the cure larger than two laws: the height clamp and the two uplift
+  clamps would cut the new belts first (so they must go in the same change); at the 8.2 km grid today's erosion law makes
+  cliffs at Earth's uplift rates and Earth's steepness bound erases the mountains, while a relief law measured on Earth
+  at 10 km exists (Montgomery & Brandon 2002); the high land comes from the platforms' uncalibrated crust scatter (plate
+  platforms up to 4.9 km apart), not the belts; the world already has one plate speed and one ocean-floor clock (the
+  craters' law), which the belts must read. Revision 2 lists eleven owner decisions and one bench (a copy of the macro
+  solve, every item switchable in the copy only). B12's "11.9 km pockets" are the height clamp's floor.
+- 2026-10-02 (night) — RULING B38: one bench (a copy of the macro solve, every item switchable in the copy only); the
+  binding rules unbroken; a new physical law only where it adds realism and only the right one; no caps and no
+  artificial changes (Earth's numbers are readings, never a tuning target).
+- 2026-10-02 (night, the bench) — THE BELTS' BENCH RUNS (ruling B38; `examples/belts_bench.rs` on the ONE copy of the
+  macro solve, moved into `crates/bins/src/solve_copy.rs` — its controls GREEN: the pinned artifact bit for bit, 0
+  heights and 0 lake levels off `solve_full`). MEASURED (`docs/investigation/2026-10-02/phase0_belts_bench.txt`):
+  today's limits flatten the influx belts at the clamp (every belt node at 4 605 m); with the limits as laws the belts
+  pile to the peak law's cap (Earth's uplift rates against today's weak erosion), and a per-node collapse cannot settle
+  the mass (the belt must widen); the world's plate speed is half its own calibration (ridges open at 21 mm/yr against
+  Earth's 53); and ★ TODAY'S SOLVE IS NOT CONVERGED IN TIME: at 40 / 80 / 160 even passes the same laws give mountains
+  0.47 / 0.11 / 0.02 % and land over 1 000 m 63 / 55 / 43 % — the world's relief is partly a numerical error of 40 long
+  passes, and accurate integration grades it nearly flat.
+- 2026-10-03 — RULING B39: the world converges in time — a binding gate (the readings at N and 2N passes agree within a
+  stated tolerance), built with the new laws in phase 2; the slower first solve accepted. One commit, no push.

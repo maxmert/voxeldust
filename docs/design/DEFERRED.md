@@ -11830,6 +11830,16 @@ updated in the same change as the work, deleted when done). The interims named h
   - THE REBOUND AS A SMOOTH FLEXURE: the lithosphere bends smoothly over its flexural parameter; one value per block is
     not the law;
   - the design's caps list (§6) gains the room's row.
+  - THE DESIGN, REVISION 2 (2026-10-02, after a research pass and two adversarial reviews):
+    `docs/investigation/2026-10-02/belts_and_time_design.md` — the limits must go with the belts (caps-list rows 1–3
+    into phase 2), the erosion law at 8.2 km, the platforms' height and time, the margins, dry bodies and the time axis
+    are owner decisions (§6), each asked with the numbers of one bench (a copy of the macro solve, §5).
+  - THE BENCH (ruling B38; `examples/belts_bench.rs`, `crates/bins/src/solve_copy.rs`; the census
+    `docs/investigation/2026-10-02/phase0_belts_bench.txt`; the design §10). MEASURED: the limits flatten the influx
+    belts; the influx belts pile to the peak law's cap under today's erosion; the world's plate speed is half its own
+    calibration; ★ today's solve is NOT converged in time (40 / 80 / 160 even passes: mountains 0.47 / 0.11 / 0.02 %),
+    so the time integration owes a convergence gate after the laws change — RULED BINDING by B39 (the readings at N
+    and 2N passes agree within a stated tolerance; built with the new laws in phase 2).
 - 🟥 **THE REST OF M0-4:** finer Earth data for the scales under a node (the hills, the valleys, the pits), the Moon and
   Mars, the spectra, the slopes by class and the ice line on Earth's real climate.
 - 🟥 **STEPS 2, 3 AND 5 OWED:** the "before" record on every pinned stand (numbers and pictures, no window); the corrected

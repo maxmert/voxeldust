@@ -181,6 +181,16 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     whole age); the rebound leaves 131 km grid steps. THE BELTS' LAW (convergence over the belt's own active time, limited
     per node only by the crust's strength) and THE LANDSCAPE'S TIME (erosion since the ground was last raised) are
     DESIGNED NOW and BUILT in phase 2's macro change before the first 1 km bake; THE SMOOTH REBOUND goes in phase 1.
+    ★ B38 (2026-10-02, after two adversarial reviews of the belts' design found the cure larger than two laws): ONE
+    BENCH (a copy of the macro solve, every item switchable in the copy only, its control the pinned digest); the
+    binding laws and rules unbroken; a NEW PHYSICAL LAW is welcome where it adds realism and must be the RIGHT one
+    (published, applied as stated, its own calibration body); NO CAPS AND NO ARTIFICIAL CHANGES (no clamp, no tuning
+    knob; Earth's numbers are readings, never a target a constant is turned toward).
+    ★ B39 (2026-10-03, the bench found today's solve NOT converged in time: 40 / 80 / 160 even passes give mountains
+    0.47 / 0.11 / 0.02 %, so the world's relief is partly a numerical error): THE WORLD CONVERGES IN TIME — a BINDING
+    GATE (the readings at N and 2N passes agree within a stated tolerance; as many passes or as fine a step rule as it
+    needs), built WITH the new laws in phase 2 (converged today's laws grade the planet flat); the slower first solve
+    accepted.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

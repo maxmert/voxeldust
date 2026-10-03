@@ -1,0 +1,134 @@
+# PHASE 0: THE BELTS' BENCH (rulings B37, B38; 2026-10-02, generator 22) — crates/bins/examples/belts_bench.rs on the one
+# copy of the macro solve (crates/bins/src/solve_copy.rs; every law switched IN THE COPY ONLY). Its control: the case
+# `today` rebuilds the release gate's pinned artifact. Three runs follow, unchanged: RUN 1 (the limits and the influx
+# belts, first collapse), RUN 2 (the settling collapse and the geometric time axis), RUN 3 (the time convergence of
+# today's laws: 80 and 160 even passes, 80 geometric passes, every cadence kept at its spacing in years).
+
+== RUN 1
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["today", "belts-today-limits", "limits", "belts"]
+
+== CASE today (Laws { limits_as_law: false, belts_by_influx: false }): solved in 150.3 s
+CONTROL the copy with the solve's own laws: digest [0x1eb53c782459e0df, 0xc2cc766157d2a0e4] MATCHES the release gate's pin
+  all land                           land  21.89 % | plains 59.37 tablelands 38.82 hills 0.01 mountains  1.79 % | relief p50   63 p90  287 p99  2410 m | land over 1 000 m 61.21 %
+  away from closed basins            land 100.00 % | plains 61.04 tablelands 38.47 hills 0.01 mountains  0.47 % | relief p50   60 p90  258 p99   704 m | land over 1 000 m 63.17 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   3.60 % | mountains  37.07 % of it |  74.46 % of all mountains
+    crater               land  44.62 % | mountains   0.71 % of it |  17.69 % of all mountains
+    belt                 land   7.23 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  44.54 % | mountains   0.32 % of it |   7.84 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 10.05 million km²; height over the sea at 50 / 90 / 100 %: 395 / 1500 / 4685 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 19.38 / 3.60 / 1.23 / 0.00 %
+
+== CASE belts-today-limits (Laws { limits_as_law: false, belts_by_influx: true }): solved in 151.0 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 449 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 1.35 km²/yr); windows at 10/25/50/75/90 %: 19.9 / 19.9 / 74.4 / 248.3 / 266.5 Myr; convergence at 10/50/90 %: 4.7 / 14.2 / 38.0 mm/yr; surface uplift rate at 50 % 0.087 mm/yr, the largest 1.358 mm/yr; the uplift over the window: mean 19833 m, the largest 219001 m
+  all land                           land  22.64 % | plains 61.11 tablelands 35.52 hills 0.05 mountains  3.33 % | relief p50   54 p90  327 p99  3235 m | land over 1 000 m 70.67 %
+  away from closed basins            land 100.00 % | plains 62.87 tablelands 35.07 hills 0.04 mountains  2.02 % | relief p50   51 p90  287 p99  1696 m | land over 1 000 m 72.84 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   3.41 % | mountains  40.41 % of it |  41.44 % of all mountains
+    crater               land  42.43 % | mountains   1.37 % of it |  17.49 % of all mountains
+    belt                 land   9.73 % | mountains   4.95 % of it |  14.46 % of all mountains
+    platform             land  44.43 % | mountains   1.99 % of it |  26.61 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 13.23 million km²; height over the sea at 50 / 90 / 100 %: 4605 / 4605 / 4605 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 90.37 / 83.48 / 79.91 / 0.00 %
+
+== CASE limits (Laws { limits_as_law: true, belts_by_influx: false }): solved in 153.7 s
+  THE PEAK LAW: 415425 node collapses over the passes
+  all land                           land  24.90 % | plains 60.76 tablelands 37.03 hills 0.02 mountains  2.19 % | relief p50   57 p90  299 p99  2488 m | land over 1 000 m 55.90 %
+  away from closed basins            land 100.00 % | plains 62.17 tablelands 36.84 hills 0.02 mountains  0.97 % | relief p50   54 p90  270 p99   953 m | land over 1 000 m 57.45 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   3.24 % | mountains  38.68 % of it |  57.19 % of all mountains
+    crater               land  39.84 % | mountains   2.06 % of it |  37.45 % of all mountains
+    belt                 land   7.29 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  49.62 % | mountains   0.24 % of it |   5.36 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 11.22 million km²; height over the sea at 50 / 90 / 100 %: 388 / 1573 / 5775 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 20.47 / 4.53 / 1.72 / 0.01 %
+
+== CASE belts (Laws { limits_as_law: true, belts_by_influx: true }): solved in 152.3 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 449 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 1.35 km²/yr); windows at 10/25/50/75/90 %: 19.9 / 19.9 / 74.4 / 248.3 / 266.5 Myr; convergence at 10/50/90 %: 4.7 / 14.2 / 38.0 mm/yr; surface uplift rate at 50 % 0.087 mm/yr, the largest 1.358 mm/yr; the uplift over the window: mean 19833 m, the largest 219001 m
+  THE PEAK LAW: 610601 node collapses over the passes
+  all land                           land  23.15 % | plains 49.03 tablelands 39.91 hills 0.13 mountains 10.93 % | relief p50   93 p90 1216 p99  9509 m | land over 1 000 m 71.44 %
+  away from closed basins            land 100.00 % | plains 50.29 tablelands 39.76 hills 0.13 mountains  9.82 % | relief p50   88 p90  973 p99  9686 m | land over 1 000 m 73.58 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   3.38 % | mountains  42.68 % of it |  13.21 % of all mountains
+    crater               land  42.18 % | mountains   6.07 % of it |  23.41 % of all mountains
+    belt                 land   9.53 % | mountains  56.78 % of it |  49.52 % of all mountains
+    platform             land  44.91 % | mountains   3.37 % of it |  13.86 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 13.25 million km²; height over the sea at 50 / 90 / 100 %: 10226 / 32119 / 184807 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 91.24 / 83.64 / 79.73 / 73.08 %
+
+== RUN 2
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["today", "today-geometric", "belts", "belts-geometric"]
+
+== CASE today (Laws { limits_as_law: false, belts_by_influx: false, geometric_last_yr: None }): solved in 149.5 s
+CONTROL the copy with the solve's own laws: digest [0x1eb53c782459e0df, 0xc2cc766157d2a0e4] MATCHES the release gate's pin
+  all land                           land  21.89 % | plains 59.37 tablelands 38.82 hills 0.01 mountains  1.79 % | relief p50   63 p90  287 p99  2410 m | land over 1 000 m 61.21 %
+  away from closed basins            land 100.00 % | plains 61.04 tablelands 38.47 hills 0.01 mountains  0.47 % | relief p50   60 p90  258 p99   704 m | land over 1 000 m 63.17 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   3.60 % | mountains  37.07 % of it |  74.46 % of all mountains
+    crater               land  44.62 % | mountains   0.71 % of it |  17.69 % of all mountains
+    belt                 land   7.23 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  44.54 % | mountains   0.32 % of it |   7.84 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 10.05 million km²; height over the sea at 50 / 90 / 100 %: 395 / 1500 / 4685 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 19.38 / 3.60 / 1.23 / 0.00 %
+
+== CASE today-geometric (Laws { limits_as_law: false, belts_by_influx: false, geometric_last_yr: Some(500000) }): solved in 152.0 s
+  all land                           land  21.77 % | plains 37.65 tablelands 51.32 hills 0.13 mountains 10.90 % | relief p50  139 p90  978 p99  3678 m | land over 1 000 m 64.08 %
+  away from closed basins            land 100.00 % | plains 38.69 tablelands 51.58 hills 0.14 mountains  9.60 % | relief p50  132 p90  829 p99  3036 m | land over 1 000 m 66.47 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   4.55 % | mountains  38.15 % of it |  15.91 % of all mountains
+    crater               land  43.89 % | mountains  19.95 % of it |  80.35 % of all mountains
+    belt                 land   7.02 % | mountains   0.17 % of it |   0.11 % of all mountains
+    platform             land  44.54 % | mountains   0.89 % of it |   3.63 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 9.85 million km²; height over the sea at 50 / 90 / 100 %: 415 / 1724 / 4693 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 25.08 / 6.71 / 3.14 / 0.00 %
+
+== CASE belts (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None }): solved in 157.7 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 449 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 1.35 km²/yr); windows at 10/25/50/75/90 %: 19.9 / 19.9 / 74.4 / 248.3 / 266.5 Myr; convergence at 10/50/90 %: 4.7 / 14.2 / 38.0 mm/yr; surface uplift rate at 50 % 0.087 mm/yr, the largest 1.358 mm/yr; the uplift over the window: mean 19833 m, the largest 219001 m
+  THE PEAK LAW: 14983665 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 83242 m
+  all land                           land  23.18 % | plains 60.19 tablelands 34.65 hills 0.07 mountains  5.09 % | relief p50   53 p90  425 p99  5690 m | land over 1 000 m 74.57 %
+  away from closed basins            land 100.00 % | plains 61.86 tablelands 34.28 hills 0.07 mountains  3.79 % | relief p50   49 p90  339 p99  5031 m | land over 1 000 m 76.74 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   3.27 % | mountains  43.58 % of it |  27.96 % of all mountains
+    crater               land  41.39 % | mountains   3.09 % of it |  25.16 % of all mountains
+    belt                 land   9.51 % | mountains   8.80 % of it |  16.43 % of all mountains
+    platform             land  45.83 % | mountains   3.38 % of it |  30.45 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 13.23 million km²; height over the sea at 50 / 90 / 100 %: 8695 / 8695 / 37012 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 88.97 / 84.53 / 81.74 / 77.66 %
+
+== CASE belts-geometric (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: Some(500000) }): solved in 176.6 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 449 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 1.35 km²/yr); windows at 10/25/50/75/90 %: 19.9 / 19.9 / 74.4 / 248.3 / 266.5 Myr; convergence at 10/50/90 %: 4.7 / 14.2 / 38.0 mm/yr; surface uplift rate at 50 % 0.087 mm/yr, the largest 1.358 mm/yr; the uplift over the window: mean 19833 m, the largest 219001 m
+  THE PEAK LAW: 247427181 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 935073 m
+  all land                           land  24.05 % | plains 43.48 tablelands 39.81 hills 0.12 mountains 16.59 % | relief p50  129 p90 1606 p99  5382 m | land over 1 000 m 72.95 %
+  away from closed basins            land 100.00 % | plains 44.91 tablelands 39.73 hills 0.12 mountains 15.23 % | relief p50  118 p90 1420 p99  4775 m | land over 1 000 m 75.68 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   4.37 % | mountains  46.32 % of it |  12.20 % of all mountains
+    crater               land  40.32 % | mountains  26.97 % of it |  65.54 % of all mountains
+    belt                 land   9.02 % | mountains  21.59 % of it |  11.74 % of all mountains
+    platform             land  46.29 % | mountains   3.77 % of it |  10.52 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 13.20 million km²; height over the sea at 50 / 90 / 100 %: 8829 / 8829 / 9051 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 86.33 / 81.77 / 76.27 / 68.56 %
+
+== RUN 3
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["today@80", "today@160", "today-geometric@80"]
+
+== CASE today@80 (Laws { limits_as_law: false, belts_by_influx: false, geometric_last_yr: None }): solved in 203.9 s
+  all land                           land  22.08 % | plains 68.63 tablelands 30.15 hills 0.01 mountains  1.21 % | relief p50   47 p90  209 p99  1647 m | land over 1 000 m 53.32 %
+  away from closed basins            land 100.00 % | plains 70.12 tablelands 29.76 hills 0.01 mountains  0.11 % | relief p50   45 p90  190 p99   358 m | land over 1 000 m 54.54 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   2.72 % | mountains  40.55 % of it |  91.36 % of all mountains
+    crater               land  45.15 % | mountains   0.19 % of it |   6.98 % of all mountains
+    belt                 land   7.37 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  44.76 % | mountains   0.04 % of it |   1.66 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 10.27 million km²; height over the sea at 50 / 90 / 100 %: 259 / 1039 / 3958 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 10.43 / 1.69 / 0.49 / 0.00 %
+
+== CASE today@160 (Laws { limits_as_law: false, belts_by_influx: false, geometric_last_yr: None }): solved in 310.6 s
+  all land                           land  22.19 % | plains 76.48 tablelands 22.68 hills 0.01 mountains  0.83 % | relief p50   32 p90  159 p99   700 m | land over 1 000 m 42.55 %
+  away from closed basins            land 100.00 % | plains 77.57 tablelands 22.41 hills 0.00 mountains  0.02 % | relief p50   31 p90  149 p99   312 m | land over 1 000 m 43.31 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   1.91 % | mountains  42.34 % of it |  97.65 % of all mountains
+    crater               land  45.86 % | mountains   0.04 % of it |   2.35 % of all mountains
+    belt                 land   7.19 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  45.05 % | mountains   0.00 % of it |   0.00 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 10.09 million km²; height over the sea at 50 / 90 / 100 %: 177 / 747 / 2803 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 4.17 / 0.48 / 0.00 / 0.00 %
+
+== CASE today-geometric@80 (Laws { limits_as_law: false, belts_by_influx: false, geometric_last_yr: Some(500000) }): solved in 205.2 s
+  all land                           land  21.95 % | plains 35.47 tablelands 57.07 hills 0.11 mountains  7.35 % | relief p50  155 p90  708 p99  3359 m | land over 1 000 m 56.88 %
+  away from closed basins            land 100.00 % | plains 36.26 tablelands 57.51 hills 0.11 mountains  6.12 % | relief p50  149 p90  624 p99  2316 m | land over 1 000 m 58.54 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   3.59 % | mountains  40.25 % of it |  19.66 % of all mountains
+    crater               land  44.95 % | mountains  12.76 % of it |  78.05 % of all mountains
+    belt                 land   6.63 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  44.83 % | mountains   0.38 % of it |   2.29 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 9.40 million km²; height over the sea at 50 / 90 / 100 %: 319 / 1226 / 4676 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 14.02 / 3.14 / 1.57 / 0.00 %

@@ -44,6 +44,9 @@ pub mod shore_shape;
 // stations and the reference stand read one rule, so our number and the reference's are one
 // instrument.
 pub mod skyline;
+// ★ THE ONE COPY OF THE MACRO SOLVE FOR THE BENCHES (rulings B10, B37, B38): the routing variants and the belts'
+// laws, switched in the copy only; the game's solve is untouched.
+pub mod solve_copy;
 // ★ THE HOME PLANET SOLVED IN THE GATE'S OWN PROCESS (ruling B19 item 2): the solved ground the
 // moving-eye gate and the picture gate seat their stands on, and the dry stand under the gate's star.
 pub mod solved;
