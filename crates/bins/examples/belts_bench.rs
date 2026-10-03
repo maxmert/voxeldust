@@ -13,6 +13,9 @@
 //! - `b40`: ruling B40 — the limits as laws, the belts by their influx at the plates' corrected mean speed (Earth's
 //!   50 mm/yr), held by the force balance and widening into plateaus; `b40-geometric` on the geometric axis.
 //! - `today-craters`, `b40-craters`: each crater stamped in the pass where its impact falls (ruling B37's landscape time).
+//! - `joint`: today's laws with the erosion on F2, the joint law (Adams et al. 2020: `E = K_lp·Q·S^2.2`); `b40-joint`:
+//!   ruling B40's laws, the craters' own time and the joint law together. Every case also prints F3, each node's inner
+//!   relief from the 10 km law (Montgomery & Brandon 2002), and the relief rule on the node means it implies.
 //! - any case `@N`: on N passes, the pass-counted cadences scaled to keep their spacing in years (M-TIME-1).
 //!
 //! **THE CAUSES**, exclusive, in this order: a CLOSED BASIN'S WALL (the relief window reaches the sea level or under
@@ -32,6 +35,24 @@ use vd_terrain::home::{home_planet, home_solve_words};
 use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
 use vd_terrain::solve::{FACIES_SEA, Schedule, Z_STEPS_PER_M};
 use vd_terrain::strata::Province;
+
+/// ★ F3, THE 10 km RELIEF LAW (Montgomery & Brandon 2002, EPSL 201, eq. 2 and Fig. 4): `E = E0 + K·Rz/[1 − (Rz/Rc)²]`,
+/// `E` in mm/yr, `Rz` the relief in a 10 km circle in metres — calibration body: Earth's continents and the Olympics. A
+/// node's inner relief is the root of the law at its recent erosion rate; its mean height is its channel height plus
+/// Strahler's mature share of that relief (the middle of `vd_terrain::solve::HI_MATURE`).
+const MB_E0_MM_YR: f64 = 0.01;
+const MB_K_MM_YR_M: f64 = 2.5e-4;
+const MB_RC_M: f64 = 1_500.0;
+
+/// The inner relief of a node eroding at `e_mm_yr`, metres: the root of `K·Rz = (E − E0)·(1 − Rz²/Rc²)`.
+fn inner_relief_m(e_mm_yr: f64) -> f64 {
+    let d = e_mm_yr - MB_E0_MM_YR;
+    if d <= 0.0 {
+        return 0.0;
+    }
+    let a = d / (MB_RC_M * MB_RC_M);
+    (-MB_K_MM_YR_M + (MB_K_MM_YR_M * MB_K_MM_YR_M + 4.0 * a * d).sqrt()) / (2.0 * a)
+}
 
 /// The geometric axis's last pass, years (the design's L5: half a million years; M-TIME-1 varies it).
 const GEOMETRIC_LAST_YR: u64 = 500_000;
@@ -100,7 +121,7 @@ fn crater_reach(lattice: &MacroLattice, solved: &Solved) -> Vec<bool> {
 }
 
 /// The readings of one solved case: Earth's set, the belts' heights, and the mountains by cause.
-fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved) {
+fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: u64) {
     let state = &solved.state;
     let n = lattice.node_count();
     let sea_m = metres(state.sea_z);
@@ -120,6 +141,67 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved) {
     );
     line("all land", &all);
     line("away from closed basins", &away);
+    // F3: each land node's inner relief from its last pass's erosion rate, and the node-mean field it implies.
+    let hi = 0.5 * (vd_terrain::solve::HI_MATURE.0 + vd_terrain::solve::HI_MATURE.1);
+    let rz: Vec<f64> = (0..n)
+        .map(|v| {
+            let e_mm_yr =
+                f64::from(state.cut_now[v]) / f64::from(Z_STEPS_PER_M) / last_dt_yr.max(1) as f64
+                    * 1_000.0;
+            inner_relief_m(e_mm_yr)
+        })
+        .collect();
+    let mean_over: Vec<i32> = over
+        .iter()
+        .zip(&rz)
+        .map(|(&o, &r)| o + (hi * r).round() as i32)
+        .collect();
+    let mean_readings = relief_readings(lattice, &mean_over, &land);
+    let mean_away = read_land(
+        lattice,
+        area,
+        &mean_over,
+        &land,
+        &mean_readings,
+        &|v| dry(&mean_readings, v),
+        false,
+    );
+    let mut land_rz: Vec<(f64, u64)> = (0..n)
+        .filter(|&v| land[v])
+        .map(|v| (rz[v], area[v]))
+        .collect();
+    land_rz.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total_a: u128 = land_rz.iter().map(|&(_, a)| u128::from(a)).sum();
+    let at = |q: f64| -> f64 {
+        let mut acc = 0u128;
+        for &(r, a) in &land_rz {
+            acc += u128::from(a);
+            if acc as f64 >= q * total_a as f64 {
+                return r;
+            }
+        }
+        0.0
+    };
+    let over_share = |limit: f64| -> f64 {
+        let a: u128 = land_rz
+            .iter()
+            .filter(|&&(r, _)| r > limit)
+            .map(|&(_, a)| u128::from(a))
+            .sum();
+        a as f64 * 100.0 / total_a.max(1) as f64
+    };
+    println!(
+        "  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over {:.1} Myr): Rz at \
+         50 / 90 / 99 % of the land {:.0} / {:.0} / {:.0} m; land with Rz over 1 000 m {:.2} %, over 1 500 m {:.2} % \
+         (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)",
+        last_dt_yr as f64 / 1e6,
+        at(0.5),
+        at(0.9),
+        at(0.99),
+        over_share(1_000.0),
+        over_share(1_499.0)
+    );
+    line("node means (+ Strahler share of Rz), away", &mean_away);
     // The causes, exclusive, in order.
     let craters = crater_reach(lattice, solved);
     let belt_code = Province::FoldedBelt.code();
@@ -300,6 +382,33 @@ fn main() {
                 craters_at_own_age: true,
                 ..Laws::default()
             },
+            "joint" => Laws {
+                joint_law: true,
+                ..Laws::default()
+            },
+            "b40-joint" => Laws {
+                limits_as_law: true,
+                belts_by_influx: true,
+                mean_speed: true,
+                force_balance: true,
+                craters_at_own_age: true,
+                joint_law: true,
+                ..Laws::default()
+            },
+            "joint-geometric" => Laws {
+                joint_law: true,
+                geometric_last_yr: Some(GEOMETRIC_LAST_YR),
+                ..Laws::default()
+            },
+            "b40-joint-geometric" => Laws {
+                limits_as_law: true,
+                belts_by_influx: true,
+                mean_speed: true,
+                force_balance: true,
+                craters_at_own_age: true,
+                joint_law: true,
+                geometric_last_yr: Some(GEOMETRIC_LAST_YR),
+            },
             "b40-craters" => Laws {
                 limits_as_law: true,
                 belts_by_influx: true,
@@ -309,7 +418,7 @@ fn main() {
                 ..Laws::default()
             },
             other => panic!(
-                "a case is today, belts-today-limits, limits, belts, today-geometric, belts-geometric, b40, b40-geometric, today-craters or b40-craters, not {other}"
+                "a case is today, belts-today-limits, limits, belts, today-geometric, belts-geometric, b40, b40-geometric, today-craters, b40-craters, joint, b40-joint, joint-geometric or b40-joint-geometric, not {other}"
             ),
         };
         let started = Instant::now();
@@ -369,6 +478,8 @@ fn main() {
                 f64::from(solved.peak_left) / f64::from(Z_STEPS_PER_M)
             );
         }
-        read_case(&lattice, &area, &solved);
+        let times = vd_bins::solve_copy::pass_times(words.age_yr, passes, laws.geometric_last_yr);
+        let last_dt_yr = times[times.len() - 1] - times[times.len() - 2];
+        read_case(&lattice, &area, &solved, last_dt_yr);
     }
 }

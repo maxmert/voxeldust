@@ -494,3 +494,25 @@ joint calibration with `θ < ½` (F2 is the cleanest published set); give each n
 (F3), for R2 to draw and for the comparison with Earth's node means; let F4 replace F2 when the weather step supplies flood
 variability. The `n > 1` sweep needs a fixed Newton count as its deterministic form, and R2's operator must take the same
 law (two incision laws at two levels would be a second truth, B21).
+
+**Runs 6 and 7, F2 and F3 (MEASURED; the control matches the pin; the land away from closed basins; Earth's own 10 km
+relief, Montgomery & Brandon's `Rz` read on the ETOPO 2022 60 arc-second grid, Antarctica left out: 69 / 562 / 1 377 m at
+50 / 90 / 99 %, 2.93 % of the land over 1 000 m, 0.68 % over 1 500 m — within the paper's own "under 5 % and 2 %"):**
+
+| Case | mountains | relief 50 / 90 / 99 % | inner relief `Rz` 50 / 90 / 99 % | the plateaus |
+|---|---|---|---|---|
+| today's laws, even axis | 0.47 % | 60 / 258 / 704 m | 0 / 0 / 0 m (the 125 Myr last pass averages today's rates away) | — |
+| today's laws + F2, even axis | 0.89 % | 105 / 327 / 981 m | 0 / 0 / 0 m | — |
+| B40 + the craters' time + F2, even axis | 3.73 % | 104 / 576 / 2 501 m | 0 / 0 / 64 m | 30.4 million km² at their ceilings |
+| today's laws + F2, geometric axis | 10.82 % (craters 81 %) | 161 / 960 / 2 850 m | 0 / 53 / 435 m | — |
+| B40 + the craters' time + F2, geometric axis | 20.68 % (craters 59 %) | 252 / 1 536 / 3 406 m | 0 / 187 / 1 248 m; 1.94 % over 1 000 m | 27.2 million km² at their ceilings |
+
+**What they say.**
+1. **F3 works where a pass is short**: in the belts the inner relief reaches Earth's top percentile (1 248 m against
+   1 377 m), but half the land holds none, because most of the planet barely erodes today.
+2. **Neither 40-pass axis converges** (ruling B39): the geometric axis's first pass (871 Myr) under-erodes the old craters,
+   so craters still make most mountains there; the converged answer needs more passes on both axes.
+3. **The plateaus stay continent-sized under every erosion law**: the bench keeps ALL the crust a collision takes in for
+   windows up to 133 Myr. Two laws are missing — the share of the incoming crust that goes down into the mantle or out
+   sideways (the India–Asia mass balance, RECALLED as roughly half, NOT in the extracted sources, unverified), and how a
+   collision slows and stops (the design's Q-B6).

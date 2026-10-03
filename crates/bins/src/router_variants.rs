@@ -328,7 +328,7 @@ pub fn dinf_accumulate(state: &mut MacroSolve, d: &Dinf) {
 /// The sweep's base level at a node, stated exactly as the solve's own (private) `routing_base`:
 /// the flood's level where the routing raised the node, the sea under the sea, the terrain otherwise,
 /// and never under the terrain.
-fn routing_base(state: &MacroSolve, node: u32) -> i32 {
+pub(crate) fn routing_base(state: &MacroSolve, node: u32) -> i32 {
     let i = node as usize;
     let level = if state.z_flood[i] > state.z[i] {
         state.z_flood[i]

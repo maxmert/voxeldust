@@ -67,7 +67,24 @@ pub struct Laws {
     /// stamps each crater in the pass where its impact falls (the solve's start plus the age less the crater's age), so it
     /// erodes only since it was made. The population is the crater law's own in both.
     pub craters_at_own_age: bool,
+    /// ★ F2, THE JOINT LAW (the design §11; the owner's choice to bench it, 2026-10-03): `false` cuts with the solve's
+    /// own stream power (`n = 1`, `m = ½`, `K₀`); `true` cuts with ONE published joint calibration, Adams et al. 2020
+    /// (Science Advances 6, eaaz3166, eq. 1b and its regional best fit): `E = K_lp · Q^m · S^n`, `Q` the discharge
+    /// (drainage area times rain, m³/yr), `K_lp = 2.2 × 10⁻⁹ m⁻²`, `m = 1`, `n = 2.2` — calibration body: 142 basins of
+    /// Bhutan and central-eastern Nepal (¹⁰Be). The rock shares read against the crystalline basement (the calibration
+    /// body's gneiss). The implicit step is solved per node by Newton, outlets first, with the shipped bookkeeping, so the
+    /// deposit and the rebound read it as they read the solve's own cut. Its authors: "we do not suggest that this
+    /// represents a universal n value".
+    pub joint_law: bool,
 }
+
+/// ★ F2's constants (Adams et al. 2020): `K_lp` in m⁻² (for `m = 1`), the discharge exponent, the slope exponent.
+pub const JOINT_K_LP: f64 = 2.2e-9;
+pub const JOINT_M: f64 = 1.0;
+pub const JOINT_N: f64 = 2.2;
+/// F2's Newton steps at most (the bench stops a node's iteration when it moves less than a micrometre; the build states a
+/// fixed count as its deterministic form).
+const JOINT_NEWTON: usize = 60;
 
 /// ★ THE FORCE'S CALIBRATION BODY (B40 item 1): the Tibetan Plateau's measured mean height, metres (Fielding et al.
 /// 1994, Geology 22: the arid central and northern interior), over Earth's continental crust of 35 km, under Earth's
@@ -441,6 +458,57 @@ fn peak_law(state: &mut MacroSolve, cap: i32) -> (usize, i32) {
         .max()
         .unwrap_or(0);
     (collapsed, left)
+}
+
+/// ★ F2's SWEEP: the shipped sweep's own order and bookkeeping (every node's uplift share first; then the cut, outlets
+/// first, a lake node skipped; then the deposit), with the joint law's implicit cut: a node `x` over its base `b` after
+/// the uplift, `x₀`, settles where `x − x₀ + Δt · K_lp · share · Q^m · (x/L)^n = 0` (heights in metres), the root found by
+/// Newton from `x₀` (the function is convex and rising, so the steps fall to the root without passing it).
+fn joint_sweep(state: &mut MacroSolve, dt_yr: f64, pass: u32, passes: u32) {
+    let steps_m = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
+    let basement = f64::from(vd_terrain::strata::Province::CrystallineBasement.erodibility_q8());
+    for i in 0..state.node_count() {
+        state.z[i] += MacroSolve::uplift_step(state.uplift[i], pass, passes);
+        state.cut_now[i] = 0;
+    }
+    for k in (0..state.order.len()).rev() {
+        let node = state.order[k];
+        let i = node as usize;
+        let r = state.receiver[i];
+        if r == vd_terrain::macro_lattice::NO_NODE || state.pit[i] > 0 {
+            continue;
+        }
+        let base = crate::router_variants::routing_base(state, r);
+        let z0 = state.z[i];
+        if z0 <= base {
+            continue;
+        }
+        let x0 = f64::from(z0 - base) / steps_m;
+        let length = f64::from(state.chord[i].max(1));
+        let discharge_m3_yr = state.discharge[i] as f64 / 1_000.0;
+        let share = f64::from(state.erodibility_q8[i]) / basement;
+        let c = dt_yr * JOINT_K_LP * share * discharge_m3_yr.powf(JOINT_M);
+        let mut x = x0;
+        for _ in 0..JOINT_NEWTON {
+            let s = x / length;
+            let g = x - x0 + c * s.powf(JOINT_N);
+            let dg = 1.0 + c * JOINT_N * s.powf(JOINT_N - 1.0) / length;
+            let next = (x - g / dg).max(0.0);
+            let moved = x - next;
+            x = next;
+            if moved.abs() < 1e-6 {
+                break;
+            }
+        }
+        let cut = z0 - (base + (x * steps_m).floor() as i32);
+        if cut > 0 {
+            state.z[i] -= cut;
+            state.removed[i] = state.removed[i].saturating_add(cut as u32);
+            state.pending[i] = state.pending[i].saturating_add(cut);
+            state.cut_now[i] = cut as u32;
+        }
+    }
+    let _ = state.deposit();
 }
 
 /// A picture of a stage: the stage's name and the field in sixteenths (the washboard bench's trace).
@@ -866,7 +934,17 @@ pub fn solve_copy(
                 }
             }
             _ => {
-                let _ = state.sweep(gain, pass, schedule.passes);
+                // LAW (F2): the joint law's sweep, or the solve's own.
+                if laws.joint_law {
+                    joint_sweep(
+                        &mut state,
+                        (times[pass as usize + 1] - times[pass as usize]) as f64,
+                        pass,
+                        schedule.passes,
+                    );
+                } else {
+                    let _ = state.sweep(gain, pass, schedule.passes);
+                }
             }
         }
         since_rebound += 1;

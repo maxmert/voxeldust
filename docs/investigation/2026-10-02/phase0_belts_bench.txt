@@ -209,3 +209,81 @@ CONTROL the copy with the solve's own laws: digest [0x1eb53c782459e0df, 0xc2cc76
     platform             land  48.49 % | mountains   1.75 % of it |  21.38 % of all mountains
   THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 1631 / 3511 km; the land within 100 m of its ceiling 30.56 million km²; the rock that found no room 1.089e17 m³
   THE BELTS' LAND (the folded belt's rock): 13.26 million km²; height over the sea at 50 / 90 / 100 %: 4463 / 6322 / 8720 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 90.81 / 82.51 / 78.69 / 35.20 %
+
+== RUN 6 (F2, the joint law of Adams et al. 2020, and F3, each node's inner relief from Montgomery & Brandon 2002; even axis)
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["today", "joint", "b40-joint"]
+
+== CASE today (Laws { limits_as_law: false, belts_by_influx: false, geometric_last_yr: None, mean_speed: false, force_balance: false, craters_at_own_age: false, joint_law: false }): solved in 156.0 s
+CONTROL the copy with the solve's own laws: digest [0x1eb53c782459e0df, 0xc2cc766157d2a0e4] MATCHES the release gate's pin
+  all land                           land  21.89 % | plains 59.37 tablelands 38.82 hills 0.01 mountains  1.79 % | relief p50   63 p90  287 p99  2410 m | land over 1 000 m 61.21 %
+  away from closed basins            land 100.00 % | plains 61.04 tablelands 38.47 hills 0.01 mountains  0.47 % | relief p50   60 p90  258 p99   704 m | land over 1 000 m 63.17 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 125.0 Myr): Rz at 50 / 90 / 99 % of the land 0 / 0 / 0 m; land with Rz over 1 000 m 0.00 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 61.04 tablelands 38.47 hills 0.01 mountains  0.47 % | relief p50   60 p90  258 p99   704 m | land over 1 000 m 63.17 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   3.60 % | mountains  37.07 % of it |  74.46 % of all mountains
+    crater               land  44.62 % | mountains   0.71 % of it |  17.69 % of all mountains
+    belt                 land   7.23 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  44.54 % | mountains   0.32 % of it |   7.84 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 10.05 million km²; height over the sea at 50 / 90 / 100 %: 395 / 1500 / 4685 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 19.38 / 3.60 / 1.23 / 0.00 %
+
+== CASE joint (Laws { limits_as_law: false, belts_by_influx: false, geometric_last_yr: None, mean_speed: false, force_balance: false, craters_at_own_age: false, joint_law: true }): solved in 164.3 s
+  all land                           land  21.91 % | plains 42.95 tablelands 54.64 hills 0.02 mountains  2.39 % | relief p50  109 p90  379 p99  2929 m | land over 1 000 m 62.93 %
+  away from closed basins            land 100.00 % | plains 44.19 tablelands 54.90 hills 0.02 mountains  0.89 % | relief p50  105 p90  327 p99   981 m | land over 1 000 m 65.05 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 125.0 Myr): Rz at 50 / 90 / 99 % of the land 0 / 0 / 0 m; land with Rz over 1 000 m 0.00 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 44.19 tablelands 54.90 hills 0.02 mountains  0.89 % | relief p50  105 p90  327 p99   981 m | land over 1 000 m 65.05 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   3.83 % | mountains  40.08 % of it |  64.08 % of all mountains
+    crater               land  44.13 % | mountains   1.67 % of it |  30.85 % of all mountains
+    belt                 land   7.63 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  44.42 % | mountains   0.27 % of it |   5.06 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 10.42 million km²; height over the sea at 50 / 90 / 100 %: 422 / 1576 / 4691 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 21.71 / 3.96 / 1.46 / 0.00 %
+
+== CASE b40-joint (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true }): solved in 169.0 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.175 mm/yr, the largest 2.715 mm/yr; the uplift over the window: mean 19833 m, the largest 219001 m
+  THE PEAK LAW: 2859109 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  26.37 % | plains 46.44 tablelands 48.47 hills 0.04 mountains  5.06 % | relief p50  105 p90  658 p99  3782 m | land over 1 000 m 72.23 %
+  away from closed basins            land 100.00 % | plains 46.49 tablelands 49.74 hills 0.03 mountains  3.73 % | relief p50  104 p90  576 p99  2501 m | land over 1 000 m 76.08 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 125.0 Myr): Rz at 50 / 90 / 99 % of the land 0 / 0 / 64 m; land with Rz over 1 000 m 0.00 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 46.49 tablelands 49.76 hills 0.03 mountains  3.72 % | relief p50  104 p90  575 p99  2493 m | land over 1 000 m 76.09 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   5.55 % | mountains  27.61 % of it |  30.29 % of all mountains
+    crater               land  37.62 % | mountains   5.88 % of it |  43.71 % of all mountains
+    belt                 land   8.39 % | mountains   4.76 % of it |   7.89 % of all mountains
+    platform             land  48.45 % | mountains   1.89 % of it |  18.11 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 1633 / 3511 km; the land within 100 m of its ceiling 30.40 million km²; the rock that found no room 1.081e17 m³
+  THE BELTS' LAND (the folded belt's rock): 13.27 million km²; height over the sea at 50 / 90 / 100 %: 4424 / 6244 / 8790 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 87.79 / 82.67 / 78.73 / 31.35 %
+
+== RUN 7 (F2 and F3 on the geometric axis)
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["joint-geometric", "b40-joint-geometric"]
+
+== CASE joint-geometric (Laws { limits_as_law: false, belts_by_influx: false, geometric_last_yr: Some(500000), mean_speed: false, force_balance: false, craters_at_own_age: false, joint_law: true }): solved in 164.5 s
+  all land                           land  21.82 % | plains 33.24 tablelands 54.46 hills 0.12 mountains 12.17 % | relief p50  170 p90 1117 p99  3551 m | land over 1 000 m 66.31 %
+  away from closed basins            land 100.00 % | plains 34.25 tablelands 54.80 hills 0.13 mountains 10.82 % | relief p50  161 p90  960 p99  2850 m | land over 1 000 m 68.87 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 53 / 435 m; land with Rz over 1 000 m 0.03 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 34.22 tablelands 54.68 hills 0.14 mountains 10.96 % | relief p50  159 p90  970 p99  2903 m | land over 1 000 m 69.15 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   4.64 % | mountains  39.76 % of it |  15.18 % of all mountains
+    crater               land  43.34 % | mountains  22.70 % of it |  80.85 % of all mountains
+    belt                 land   7.90 % | mountains   0.09 % of it |   0.06 % of all mountains
+    platform             land  44.11 % | mountains   1.08 % of it |   3.92 % of all mountains
+  THE BELTS' LAND (the folded belt's rock): 10.69 million km²; height over the sea at 50 / 90 / 100 %: 459 / 1962 / 4701 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 28.50 / 9.30 / 3.51 / 0.00 %
+
+== CASE b40-joint-geometric (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: Some(500000), mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true }): solved in 176.9 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.175 mm/yr, the largest 2.715 mm/yr; the uplift over the window: mean 19833 m, the largest 219001 m
+  THE PEAK LAW: 7256043 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  25.16 % | plains 29.40 tablelands 48.79 hills 0.11 mountains 21.70 % | relief p50  269 p90 1651 p99  3910 m | land over 1 000 m 75.46 %
+  away from closed basins            land 100.00 % | plains 30.24 tablelands 48.97 hills 0.11 mountains 20.68 % | relief p50  252 p90 1536 p99  3406 m | land over 1 000 m 78.18 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 187 / 1248 m; land with Rz over 1 000 m 1.94 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 30.36 tablelands 48.63 hills 0.12 mountains 20.89 % | relief p50  247 p90 1544 p99  3454 m | land over 1 000 m 78.86 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   4.19 % | mountains  45.15 % of it |   8.73 % of all mountains
+    crater               land  38.77 % | mountains  33.13 % of it |  59.17 % of all mountains
+    belt                 land   8.80 % | mountains  34.44 % of it |  13.97 % of all mountains
+    platform             land  48.23 % | mountains   8.16 % of it |  18.13 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 1642 / 3509 km; the land within 100 m of its ceiling 27.18 million km²; the rock that found no room 7.552e16 m³
+  THE BELTS' LAND (the folded belt's rock): 13.29 million km²; height over the sea at 50 / 90 / 100 %: 5440 / 7687 / 8819 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 90.82 / 83.15 / 78.17 / 55.81 %
+
+== EARTH'S 10 km RELIEF (Montgomery & Brandon's Rz on the ETOPO 2022 60 arc-second grid; the scratchpad's earth_rz.py)
+EARTH Rz (10 km circle, 60 arc-sec cells, land at or over 0 m, no Antarctica), 6168049 centres:
+  at 50 / 90 / 99 % of the land: 69 / 562 / 1377 m
+  land with Rz over 1 000 m: 2.93 %; over 1 500 m: 0.68 %

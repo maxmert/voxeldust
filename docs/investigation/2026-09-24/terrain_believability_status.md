@@ -1445,3 +1445,11 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-10-03 — THE OWNER'S NEXT BENCH STEP (F49): bench the channels on one joint calibration with `n > 1` (Adams et
   al. 2020) and each node's inner relief on the 10 km law (Montgomery & Brandon 2002), with Earth read the same way; the
   decision comes with those numbers. The B40 bench work committed.
+- 2026-10-03 — F2 AND F3 BENCHED (runs 6 and 7): the joint law raises relief modestly and does not hold the belts; the
+  10 km inner-relief law reaches Earth's top percentile in the belts on a short last pass (Earth's own `Rz` measured on
+  ETOPO: 69 / 562 / 1 377 m); neither 40-pass axis converges; the plateaus stay continent-sized under every erosion law,
+  because the bench keeps all of a collision's crust — the crust's partition and the collision's duration are the
+  missing laws.
+- 2026-10-03 — THE OWNER'S NEXT STEP: research and bench the two missing belt laws (the share of a collision's incoming
+  crust that goes down into the mantle or out sideways, checked in its source; how a collision slows and stops), then
+  the convergence passes (B39), then the erosion-law decision with converged numbers. The F2/F3 bench work committed.
