@@ -1215,3 +1215,24 @@ owner ruled:
 **Example.** A pilot crossing the home planet's oldest plain sees, after phase 2, the height its rivers can really leave
 it: the joint law cuts a steep valley fast and a gentle plain slowly, and the sweep sees each lowered valley floor at once,
 so a second solve with twice the steps shows the pilot the same plain.
+
+## B44. THE ICE CURE GOES INTO PHASE 2; THE OLD PLAINS RESEARCHED, THE REBOUND'S SPACING MEASURED BESIDE IT (2026-10-03)
+
+The three defect cures, MEASURED (runs 16–17; the belts' design §14): the stepped ice first read every bed it had just cut
+as water (the sweep's stale-flood rule again) and chopped every glacier — fixed in the copy (water only where the
+routing found a lake); then the ice with no cap cuts more than the capped ice (4.8 against 3.5 × 10¹⁵ m³ on the land),
+deepens the deepest valleys and keeps the gate's agreement; the ice's cut feeds the rebound only where a rebound follows
+it; and THE REBOUND'S SPACING HAS NOT CONVERGED (the land over 1 000 m about 20 / 25.6 / 28.8 % with a rebound every
+125 / 25 / 12.5 Myr). The owner ruled:
+
+1. **THE ICE CURE GOES INTO PHASE 2'S SOLVE** (*"Yes, in phase 2"*): the ice stepped in time with no per-call thickness
+   cap (ruling B23), a node water only where the routing found a lake, the ice's cut booked for the rebound — with phase
+   2's laws, like the base cure.
+2. **NEXT** (*"Old plains + rebound beside"*): the research on how Earth's old continents keep their height over billions
+   of years (a read-only agent: the freeboard, the rock cycle, the supercontinent cycle, dynamic topography), and BESIDE
+   it the measurement of where the rebound's spacing settles; both come back with their numbers.
+3. One commit now, on `game`, no push.
+
+**Example.** A glacier on a young range of the home planet now cuts its valley for the whole glacial epoch, step by step,
+and stops when its catchment falls under the snow line — never at its own thickness each call; the crust under the cut
+valley floats back as the rivers' cuts do.

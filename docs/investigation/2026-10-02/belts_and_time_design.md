@@ -791,3 +791,24 @@ defect today; the copy measures the cure first.
    the inner relief's rate reading (F3) moves most (Rz over 1 000 m on 3.1 → 5.6 % of the land), because it reads the
    last pass's rate (0.5 against 0.25 Myr). The mountains stay six times Earth's: the belts' plateaus (the Andean margins
    parked, ruling B42 item 3) and the craters.
+
+**The three defect cures (ruling B42 item 2; runs 16–17; the joint law on the cured base).** The first stepped ice was
+INVALID (run 16): it read a node as water wherever its flood level stood over its ground — the same stale-flood rule as
+the sweep's base — so it chopped every glacier at its first cut node and stopped after a step. With the water read from
+the routing's lakes (run 17):
+
+| Cures | passes | the ice on the land | mountains | relief 50 / 90 / 99 % | land over 1 000 m | plateau land |
+|---|---|---|---|---|---|---|
+| none (the solve's capped ice) | 214 → 414 | 3.5 × 10¹⁵ m³ | 15.2 → 14.6 % | 78 / 1 452 / 3 129 → 69 / 1 370 / 3 328 m | 19.9 → 21.1 % | 9.3 → 8.4 million km² |
+| the ice stepped, no cap | 214 → 414 | 4.8 | 14.1 → 13.4 % | 78 / 1 384 / 3 692 → 68 / 1 273 / 3 975 m | 19.5 → 20.7 % | 8.4 → 7.4 |
+| the rebound every pass | 214 → 414 | 3.6 | 17.2 → 20.3 % | 106 / 1 470 / 3 136 → 122 / 1 632 / 3 646 m | 25.6 → 28.8 % | 9.4 → 6.5 |
+| all three | 214 → 414 | 6.1 | 18.0 → 20.1 % | 106 / 1 627 / 4 065 → 121 / 1 603 / 4 565 m | 27.1 → 30.7 % | 8.5 → 5.9 |
+
+1. **The ice with no cap works**: it cuts more than the capped ice (4.8 against 3.5 × 10¹⁵ m³), deepens the deepest
+   valleys (the relief at 99 % 3 129 → 3 692 m), keeps the gate's agreement, and costs little (1 921 steps; the solve
+   829 s against 834 s).
+2. **The ice's cut in the rebound** acts only where a rebound follows the ice (the ice works in the last 2.6 Myr; the
+   rebound every five passes last ran before it).
+3. **THE REBOUND'S SPACING HAS NOT CONVERGED**: the land over 1 000 m reads about 20 % with a rebound every 125 Myr, 25.6 %
+   every 25 Myr and 28.8 % every 12.5 Myr, so the rebound is a resolution of its own, and "every pass" ties it to the pass
+   count — the gate fails with it (+3.1 points). Its limit (the crust answers within ~10 kyr) needs its own measurement.

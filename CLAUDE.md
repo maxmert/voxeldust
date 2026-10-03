@@ -214,6 +214,10 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     with the new laws, never alone; F49 RULED — THE JOINT LAW (Adams et al. 2020, `E = K_lp·Q·S^2.2`) keeps the plains
     (land 17.5–19 % of the globe, land over 1 km 20–21 %); NEXT the three defect cures on the cured base, then how Earth's
     old continents keep their height (B37's landscape time); one commit, no push.
+    ★ B44 (2026-10-03, the defect cures measured: the stepped ice first chopped its glaciers by the same stale-flood rule,
+    fixed — water only where the routing found a lake; uncapped it cuts 4.8 against 3.5 × 10¹⁵ m³ and keeps the gate;
+    THE REBOUND'S SPACING HAS NOT CONVERGED, the land over 1 km ~20 / 25.6 / 28.8 % at 125 / 25 / 12.5 Myr): THE ICE CURE
+    GOES INTO PHASE 2'S SOLVE; NEXT the old-plains research with the rebound's convergence measured beside it; one commit.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

@@ -1500,3 +1500,8 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-10-03 — RULING B43: the base cure goes into the game's solve in phase 2 with the new laws (never alone); F49
   RULED — the joint law (Adams et al. 2020) is phase 2's erosion; next the three defect cures on the cured base, then
   how Earth's old continents keep their height. Runs 14–15 and the cure committed.
+- 2026-10-03 — THE DEFECT CURES MEASURED AND RULING B44 (runs 16–17; the belts' design §14): the stepped ice first read
+  every bed it had just cut as water (the stale-flood rule again) and chopped its glaciers — fixed in the copy; uncapped
+  it cuts 4.8 against 3.5 × 10¹⁵ m³, deepens the deepest valleys, keeps the gate, and goes into phase 2; the rebound's
+  spacing has NOT converged (the land over 1 000 m ~20 / 25.6 / 28.8 % at 125 / 25 / 12.5 Myr); next the old-plains
+  research with the rebound's convergence measured beside it.

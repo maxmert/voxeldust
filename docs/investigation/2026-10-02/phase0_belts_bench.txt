@@ -1097,3 +1097,213 @@ THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-s
      land % of the globe:    25.0    23.3    22.9    22.9    22.9    22.8    22.6    23.3    23.8    19.0
            mean height m:  1144.7   763.3   348.4   200.2   137.7   118.2   108.8   195.5   219.0   957.6
              over 1 km %:    43.5    24.7     6.2     0.9     0.1     0.0     0.2     3.2     4.2    18.2
+
+== RUN 16 (ruling B42 item 2's three defect cures on the cured base with the joint law: +ice the ice stepped in time with no per-call cap, +icereb its cut booked for the rebound, +reb the rebound after every pass; five processes side by side). ★ THE ICE CASES ARE INVALID: the stepped ice read a node as water wherever its flood level stood over its ground — true of every bed it had just cut — so it chopped every glacier after its first step (ice on the land −0.03 against the capped ice's −3.47 × 10^15 m3; 81 steps). Fixed in run 17 (a node is water only where the routing found a lake). The +reb case is valid.
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-slow+base+ice~mixed"]
+
+== CASE b40-joint-kept-slow+base+ice~mixed (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true, mixed_axis: Some((500000, 25000000)), crust_partition: true, collision_slowing: true, sub_sweeps: 1, sub_route: false, ice_stepped: true, ice_rebound: false, rebound_every_pass: false, base_cure: true }): solved in 760.7 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.141 mm/yr, the largest 1.169 mm/yr; the uplift over the window: mean 11287 m, the largest 103218 m; P2 the crust a collision keeps at 10/50/90 %: 0.31 / 0.35 / 0.42; S2 a collision's influx against a constant speed's at 10/50/90 %: 0.32 / 0.90 / 0.90; the rock raised over the windows: collisions 2.913e16 m³, Andean margins 1.253e17 m³
+  THE PEAK LAW: 1088500 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  18.01 % | plains 55.24 tablelands 33.54 hills 0.01 mountains 11.21 % | relief p50   76 p90 1136 p99  2770 m | land over 1 000 m 21.13 %
+  away from closed basins            land 100.00 % | plains 54.26 tablelands 34.55 hills 0.01 mountains 11.17 % | relief p50   79 p90 1133 p99  2594 m | land over 1 000 m 22.12 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 269 / 1108 m; land with Rz over 1 000 m 1.53 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 54.46 tablelands 34.80 hills 0.01 mountains 10.73 % | relief p50   78 p90 1097 p99  2540 m | land over 1 000 m 23.03 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   4.51 % | mountains  11.87 % of it |   4.78 % of all mountains
+    crater               land  42.75 % | mountains   4.93 % of it |  18.79 % of all mountains
+    collision belt       land   5.89 % | mountains  44.91 % of it |  23.61 % of all mountains
+    Andean belt          land   6.14 % | mountains  49.56 % of it |  27.16 % of all mountains
+    belt by the room     land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  40.70 % | mountains   7.06 % of it |  25.65 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 523 / 3163 km; the land within 100 m of its ceiling 10.54 million km²; the rock that found no room 1.061e15 m³
+  THE BELTS' LAND (the folded belt's rock): 13.06 million km²; height over the sea at 50 / 90 / 100 %: 3021 / 6918 / 8815 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 78.02 / 63.31 / 49.86 / 28.48 %
+    of it, the collisions': 5.97 million km²; height over the sea at 50 / 90 / 100 %: 2748 / 5986 / 8814 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 82.09 / 62.26 / 46.55 / 20.84 %
+    of it, the Andean margins': 7.09 million km²; height over the sea at 50 / 90 / 100 %: 3314 / 8608 / 8815 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 74.59 / 64.20 / 52.66 / 34.91 %
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-slow+base+icereb~mixed"]
+
+== CASE b40-joint-kept-slow+base+icereb~mixed (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true, mixed_axis: Some((500000, 25000000)), crust_partition: true, collision_slowing: true, sub_sweeps: 1, sub_route: false, ice_stepped: true, ice_rebound: true, rebound_every_pass: false, base_cure: true }): solved in 761.4 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.141 mm/yr, the largest 1.169 mm/yr; the uplift over the window: mean 11287 m, the largest 103218 m; P2 the crust a collision keeps at 10/50/90 %: 0.31 / 0.35 / 0.42; S2 a collision's influx against a constant speed's at 10/50/90 %: 0.32 / 0.90 / 0.90; the rock raised over the windows: collisions 2.913e16 m³, Andean margins 1.253e17 m³
+  THE PEAK LAW: 1088500 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  18.01 % | plains 55.24 tablelands 33.54 hills 0.01 mountains 11.21 % | relief p50   76 p90 1136 p99  2770 m | land over 1 000 m 21.13 %
+  away from closed basins            land 100.00 % | plains 54.26 tablelands 34.55 hills 0.01 mountains 11.17 % | relief p50   79 p90 1133 p99  2594 m | land over 1 000 m 22.12 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 269 / 1108 m; land with Rz over 1 000 m 1.53 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 54.46 tablelands 34.80 hills 0.01 mountains 10.73 % | relief p50   78 p90 1097 p99  2540 m | land over 1 000 m 23.03 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   4.51 % | mountains  11.87 % of it |   4.78 % of all mountains
+    crater               land  42.75 % | mountains   4.93 % of it |  18.79 % of all mountains
+    collision belt       land   5.89 % | mountains  44.91 % of it |  23.61 % of all mountains
+    Andean belt          land   6.14 % | mountains  49.56 % of it |  27.16 % of all mountains
+    belt by the room     land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  40.70 % | mountains   7.06 % of it |  25.65 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 523 / 3163 km; the land within 100 m of its ceiling 10.54 million km²; the rock that found no room 1.061e15 m³
+  THE BELTS' LAND (the folded belt's rock): 13.06 million km²; height over the sea at 50 / 90 / 100 %: 3021 / 6918 / 8815 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 78.02 / 63.31 / 49.86 / 28.48 %
+    of it, the collisions': 5.97 million km²; height over the sea at 50 / 90 / 100 %: 2748 / 5986 / 8814 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 82.09 / 62.26 / 46.55 / 20.84 %
+    of it, the Andean margins': 7.09 million km²; height over the sea at 50 / 90 / 100 %: 3314 / 8608 / 8815 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 74.59 / 64.20 / 52.66 / 34.91 %
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-slow+base+reb~mixed"]
+
+== CASE b40-joint-kept-slow+base+reb~mixed (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true, mixed_axis: Some((500000, 25000000)), crust_partition: true, collision_slowing: true, sub_sweeps: 1, sub_route: false, ice_stepped: false, ice_rebound: false, rebound_every_pass: true, base_cure: true }): solved in 774.3 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.141 mm/yr, the largest 1.169 mm/yr; the uplift over the window: mean 11287 m, the largest 103218 m; P2 the crust a collision keeps at 10/50/90 %: 0.31 / 0.35 / 0.42; S2 a collision's influx against a constant speed's at 10/50/90 %: 0.32 / 0.90 / 0.90; the rock raised over the windows: collisions 2.913e16 m³, Andean margins 1.253e17 m³
+  THE PEAK LAW: 3682868 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  15.49 % | plains 45.89 tablelands 37.04 hills 0.02 mountains 17.05 % | relief p50  101 p90 1477 p99  3356 m | land over 1 000 m 23.89 %
+  away from closed basins            land 100.00 % | plains 43.98 tablelands 38.80 hills 0.01 mountains 17.21 % | relief p50  106 p90 1470 p99  3136 m | land over 1 000 m 25.62 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 499 / 1259 m; land with Rz over 1 000 m 3.47 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 44.27 tablelands 37.96 hills 0.02 mountains 17.75 % | relief p50  105 p90 1488 p99  3190 m | land over 1 000 m 27.10 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   6.99 % | mountains  14.92 % of it |   6.11 % of all mountains
+    crater               land  41.61 % | mountains   9.67 % of it |  23.60 % of all mountains
+    collision belt       land   6.82 % | mountains  54.76 % of it |  21.92 % of all mountains
+    Andean belt          land   7.02 % | mountains  52.97 % of it |  21.80 % of all mountains
+    belt by the room     land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  37.57 % | mountains  12.06 % of it |  26.57 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 523 / 3366 km; the land within 100 m of its ceiling 9.40 million km²; the rock that found no room 5.800e14 m³
+  THE BELTS' LAND (the folded belt's rock): 13.00 million km²; height over the sea at 50 / 90 / 100 %: 2446 / 6261 / 8841 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 77.29 / 57.01 / 42.53 / 22.04 %
+    of it, the collisions': 5.98 million km²; height over the sea at 50 / 90 / 100 %: 2321 / 5941 / 8841 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 82.31 / 56.54 / 39.86 / 18.04 %
+    of it, the Andean margins': 7.02 million km²; height over the sea at 50 / 90 / 100 %: 2586 / 6639 / 8841 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 73.02 / 57.41 / 44.80 / 25.45 %
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-slow+base+icereb+reb~mixed"]
+
+== CASE b40-joint-kept-slow+base+icereb+reb~mixed (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true, mixed_axis: Some((500000, 25000000)), crust_partition: true, collision_slowing: true, sub_sweeps: 1, sub_route: false, ice_stepped: true, ice_rebound: true, rebound_every_pass: true, base_cure: true }): solved in 772.6 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.141 mm/yr, the largest 1.169 mm/yr; the uplift over the window: mean 11287 m, the largest 103218 m; P2 the crust a collision keeps at 10/50/90 %: 0.31 / 0.35 / 0.42; S2 a collision's influx against a constant speed's at 10/50/90 %: 0.32 / 0.90 / 0.90; the rock raised over the windows: collisions 2.913e16 m³, Andean margins 1.253e17 m³
+  THE PEAK LAW: 3670952 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  15.44 % | plains 46.56 tablelands 42.10 hills 0.01 mountains 11.33 % | relief p50   99 p90 1149 p99  2737 m | land over 1 000 m 25.10 %
+  away from closed basins            land 100.00 % | plains 44.20 tablelands 44.28 hills 0.01 mountains 11.52 % | relief p50  105 p90 1156 p99  2524 m | land over 1 000 m 26.74 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 361 / 1208 m; land with Rz over 1 000 m 1.68 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 44.51 tablelands 44.37 hills 0.01 mountains 11.10 % | relief p50  104 p90 1120 p99  2542 m | land over 1 000 m 27.98 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   6.14 % | mountains   8.48 % of it |   4.60 % of all mountains
+    crater               land  41.88 % | mountains   5.30 % of it |  19.60 % of all mountains
+    collision belt       land   6.89 % | mountains  42.52 % of it |  25.86 % of all mountains
+    Andean belt          land   7.06 % | mountains  43.92 % of it |  27.39 % of all mountains
+    belt by the room     land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  38.02 % | mountains   6.72 % of it |  22.55 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 523 / 3366 km; the land within 100 m of its ceiling 10.29 million km²; the rock that found no room 1.258e15 m³
+  THE BELTS' LAND (the folded belt's rock): 13.00 million km²; height over the sea at 50 / 90 / 100 %: 2756 / 6266 / 8841 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 79.37 / 61.42 / 46.53 / 23.76 %
+    of it, the collisions': 5.98 million km²; height over the sea at 50 / 90 / 100 %: 2668 / 6075 / 8830 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 85.07 / 61.98 / 45.41 / 20.42 %
+    of it, the Andean margins': 7.02 million km²; height over the sea at 50 / 90 / 100 %: 2843 / 6515 / 8841 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 74.51 / 60.94 / 47.49 / 26.61 %
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-slow+base+icereb+reb~fine"]
+
+== CASE b40-joint-kept-slow+base+icereb+reb~fine (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true, mixed_axis: Some((250000, 12500000)), crust_partition: true, collision_slowing: true, sub_sweeps: 1, sub_route: false, ice_stepped: true, ice_rebound: true, rebound_every_pass: true, base_cure: true }): solved in 1098.7 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.141 mm/yr, the largest 1.169 mm/yr; the uplift over the window: mean 11287 m, the largest 103218 m; P2 the crust a collision keeps at 10/50/90 %: 0.31 / 0.35 / 0.42; S2 a collision's influx against a constant speed's at 10/50/90 %: 0.32 / 0.90 / 0.90; the rock raised over the windows: collisions 2.913e16 m³, Andean margins 1.253e17 m³
+  THE PEAK LAW: 1496675 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  12.94 % | plains 43.62 tablelands 40.88 hills 0.01 mountains 15.49 % | relief p50  117 p90 1329 p99  2770 m | land over 1 000 m 29.34 %
+  away from closed basins            land 100.00 % | plains 42.85 tablelands 41.52 hills 0.01 mountains 15.62 % | relief p50  121 p90 1331 p99  2735 m | land over 1 000 m 29.90 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.2 Myr): Rz at 50 / 90 / 99 % of the land 0 / 721 / 1279 m; land with Rz over 1 000 m 5.59 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 43.36 tablelands 41.60 hills 0.01 mountains 15.03 % | relief p50  117 p90 1297 p99  2722 m | land over 1 000 m 31.71 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   1.87 % | mountains   8.91 % of it |   1.08 % of all mountains
+    crater               land  43.78 % | mountains   6.70 % of it |  18.95 % of all mountains
+    collision belt       land   8.21 % | mountains  55.60 % of it |  29.48 % of all mountains
+    Andean belt          land   8.44 % | mountains  47.68 % of it |  25.99 % of all mountains
+    belt by the room     land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  37.69 % | mountains  10.07 % of it |  24.51 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 523 / 2849 km; the land within 100 m of its ceiling 7.78 million km²; the rock that found no room 1.328e14 m³
+  THE BELTS' LAND (the folded belt's rock): 12.99 million km²; height over the sea at 50 / 90 / 100 %: 2542 / 5912 / 8819 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 80.21 / 60.00 / 42.27 / 17.69 %
+    of it, the collisions': 5.97 million km²; height over the sea at 50 / 90 / 100 %: 2404 / 4853 / 8819 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 87.63 / 60.04 / 37.57 / 8.46 %
+    of it, the Andean margins': 7.02 million km²; height over the sea at 50 / 90 / 100 %: 2729 / 6798 / 8819 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 73.90 / 59.97 / 46.28 / 25.55 %
+
+== RUN 17 (the three defect cures again, the stepped ice fixed: a node is water only where the routing found a lake; the joint law on the cured base; +ice and +icereb+reb on both axes, +reb on the twice-as-fine axis; five processes side by side)
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-slow+base+ice~mixed"]
+
+== CASE b40-joint-kept-slow+base+ice~mixed (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true, mixed_axis: Some((500000, 25000000)), crust_partition: true, collision_slowing: true, sub_sweeps: 1, sub_route: false, ice_stepped: true, ice_rebound: false, rebound_every_pass: false, base_cure: true }): solved in 829.4 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.141 mm/yr, the largest 1.169 mm/yr; the uplift over the window: mean 11287 m, the largest 103218 m; P2 the crust a collision keeps at 10/50/90 %: 0.31 / 0.35 / 0.42; S2 a collision's influx against a constant speed's at 10/50/90 %: 0.32 / 0.90 / 0.90; the rock raised over the windows: collisions 2.913e16 m³, Andean margins 1.253e17 m³
+  THE PEAK LAW: 1088500 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  18.02 % | plains 55.41 tablelands 30.52 hills 0.02 mountains 14.06 % | relief p50   76 p90 1390 p99  3845 m | land over 1 000 m 18.60 %
+  away from closed basins            land 100.00 % | plains 54.47 tablelands 31.40 hills 0.02 mountains 14.11 % | relief p50   78 p90 1384 p99  3692 m | land over 1 000 m 19.47 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 403 / 1190 m; land with Rz over 1 000 m 2.94 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 54.70 tablelands 30.90 hills 0.02 mountains 14.38 % | relief p50   78 p90 1411 p99  3745 m | land over 1 000 m 20.79 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   4.64 % | mountains  12.98 % of it |   4.28 % of all mountains
+    crater               land  42.82 % | mountains   6.81 % of it |  20.76 % of all mountains
+    collision belt       land   5.80 % | mountains  63.31 % of it |  26.14 % of all mountains
+    Andean belt          land   6.01 % | mountains  53.65 % of it |  22.94 % of all mountains
+    belt by the room     land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  40.73 % | mountains   8.93 % of it |  25.88 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 523 / 3163 km; the land within 100 m of its ceiling 8.44 million km²; the rock that found no room 9.784e14 m³
+  THE BELTS' LAND (the folded belt's rock): 12.86 million km²; height over the sea at 50 / 90 / 100 %: 2266 / 6931 / 8817 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 72.78 / 54.13 / 40.05 / 22.84 %
+    of it, the collisions': 5.89 million km²; height over the sea at 50 / 90 / 100 %: 2123 / 5396 / 8816 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 77.71 / 52.89 / 33.70 / 12.47 %
+    of it, the Andean margins': 6.98 million km²; height over the sea at 50 / 90 / 100 %: 2502 / 8617 / 8817 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 68.62 / 55.17 / 45.41 / 31.59 %
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-slow+base+icereb+reb~mixed"]
+
+== CASE b40-joint-kept-slow+base+icereb+reb~mixed (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true, mixed_axis: Some((500000, 25000000)), crust_partition: true, collision_slowing: true, sub_sweeps: 1, sub_route: false, ice_stepped: true, ice_rebound: true, rebound_every_pass: true, base_cure: true }): solved in 881.4 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.141 mm/yr, the largest 1.169 mm/yr; the uplift over the window: mean 11287 m, the largest 103218 m; P2 the crust a collision keeps at 10/50/90 %: 0.31 / 0.35 / 0.42; S2 a collision's influx against a constant speed's at 10/50/90 %: 0.32 / 0.90 / 0.90; the rock raised over the windows: collisions 2.913e16 m³, Andean margins 1.253e17 m³
+  THE PEAK LAW: 3834051 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  15.27 % | plains 45.90 tablelands 36.53 hills 0.02 mountains 17.56 % | relief p50  101 p90 1619 p99  4202 m | land over 1 000 m 25.65 %
+  away from closed basins            land 100.00 % | plains 43.93 tablelands 38.07 hills 0.01 mountains 17.98 % | relief p50  106 p90 1627 p99  4065 m | land over 1 000 m 27.12 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.5 Myr): Rz at 50 / 90 / 99 % of the land 0 / 702 / 1315 m; land with Rz over 1 000 m 5.33 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 44.28 tablelands 37.12 hills 0.01 mountains 18.59 % | relief p50  105 p90 1689 p99  4230 m | land over 1 000 m 28.97 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   5.55 % | mountains  10.38 % of it |   3.28 % of all mountains
+    crater               land  42.02 % | mountains   9.67 % of it |  23.15 % of all mountains
+    collision belt       land   6.97 % | mountains  70.57 % of it |  28.01 % of all mountains
+    Andean belt          land   7.12 % | mountains  52.86 % of it |  21.44 % of all mountains
+    belt by the room     land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  38.34 % | mountains  11.04 % of it |  24.12 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 540 / 3366 km; the land within 100 m of its ceiling 8.51 million km²; the rock that found no room 4.691e14 m³
+  THE BELTS' LAND (the folded belt's rock): 12.97 million km²; height over the sea at 50 / 90 / 100 %: 2420 / 6487 / 8839 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 79.85 / 58.34 / 40.14 / 20.08 %
+    of it, the collisions': 5.97 million km²; height over the sea at 50 / 90 / 100 %: 2407 / 5731 / 8839 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 87.42 / 59.61 / 38.46 / 15.15 %
+    of it, the Andean margins': 6.99 million km²; height over the sea at 50 / 90 / 100 %: 2433 / 7158 / 8839 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 73.38 / 57.25 / 41.57 / 24.29 %
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-slow+base+ice~fine"]
+
+== CASE b40-joint-kept-slow+base+ice~fine (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true, mixed_axis: Some((250000, 12500000)), crust_partition: true, collision_slowing: true, sub_sweeps: 1, sub_route: false, ice_stepped: true, ice_rebound: false, rebound_every_pass: false, base_cure: true }): solved in 1303.5 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.141 mm/yr, the largest 1.169 mm/yr; the uplift over the window: mean 11287 m, the largest 103218 m; P2 the crust a collision keeps at 10/50/90 %: 0.31 / 0.35 / 0.42; S2 a collision's influx against a constant speed's at 10/50/90 %: 0.32 / 0.90 / 0.90; the rock raised over the windows: collisions 2.913e16 m³, Andean margins 1.253e17 m³
+  THE PEAK LAW: 2960544 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  16.94 % | plains 59.80 tablelands 26.85 hills 0.01 mountains 13.34 % | relief p50   66 p90 1278 p99  4096 m | land over 1 000 m 19.87 %
+  away from closed basins            land 100.00 % | plains 59.14 tablelands 27.45 hills 0.01 mountains 13.39 % | relief p50   68 p90 1273 p99  3975 m | land over 1 000 m 20.74 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.2 Myr): Rz at 50 / 90 / 99 % of the land 0 / 690 / 1308 m; land with Rz over 1 000 m 6.45 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 59.54 tablelands 26.70 hills 0.01 mountains 13.75 % | relief p50   67 p90 1285 p99  4061 m | land over 1 000 m 22.13 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   4.39 % | mountains  12.15 % of it |   4.00 % of all mountains
+    crater               land  43.74 % | mountains   6.11 % of it |  20.03 % of all mountains
+    collision belt       land   6.21 % | mountains  58.49 % of it |  27.25 % of all mountains
+    Andean belt          land   6.48 % | mountains  44.20 % of it |  21.46 % of all mountains
+    belt by the room     land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  39.18 % | mountains   9.28 % of it |  27.26 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 523 / 2578 km; the land within 100 m of its ceiling 7.39 million km²; the rock that found no room 5.533e14 m³
+  THE BELTS' LAND (the folded belt's rock): 12.96 million km²; height over the sea at 50 / 90 / 100 %: 2605 / 8760 / 8824 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 77.50 / 59.80 / 43.68 / 22.89 %
+    of it, the collisions': 5.92 million km²; height over the sea at 50 / 90 / 100 %: 2288 / 4345 / 8824 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 83.53 / 57.21 / 33.72 / 6.80 %
+    of it, the Andean margins': 7.05 million km²; height over the sea at 50 / 90 / 100 %: 3251 / 8813 / 8824 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 72.44 / 61.98 / 52.04 / 36.41 %
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-slow+base+icereb+reb~fine"]
+
+== CASE b40-joint-kept-slow+base+icereb+reb~fine (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true, mixed_axis: Some((250000, 12500000)), crust_partition: true, collision_slowing: true, sub_sweeps: 1, sub_route: false, ice_stepped: true, ice_rebound: true, rebound_every_pass: true, base_cure: true }): solved in 1324.9 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.141 mm/yr, the largest 1.169 mm/yr; the uplift over the window: mean 11287 m, the largest 103218 m; P2 the crust a collision keeps at 10/50/90 %: 0.31 / 0.35 / 0.42; S2 a collision's influx against a constant speed's at 10/50/90 %: 0.32 / 0.90 / 0.90; the rock raised over the windows: collisions 2.913e16 m³, Andean margins 1.253e17 m³
+  THE PEAK LAW: 1849100 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  12.74 % | plains 43.62 tablelands 36.45 hills 0.02 mountains 19.90 % | relief p50  117 p90 1601 p99  4558 m | land over 1 000 m 30.12 %
+  away from closed basins            land 100.00 % | plains 42.86 tablelands 37.02 hills 0.02 mountains 20.09 % | relief p50  121 p90 1603 p99  4565 m | land over 1 000 m 30.71 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.2 Myr): Rz at 50 / 90 / 99 % of the land 0 / 988 / 1320 m; land with Rz over 1 000 m 9.71 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 43.14 tablelands 35.86 hills 0.02 mountains 20.99 % | relief p50  118 p90 1686 p99  4712 m | land over 1 000 m 33.25 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   2.03 % | mountains  10.97 % of it |   1.12 % of all mountains
+    crater               land  43.85 % | mountains  12.63 % of it |  27.83 % of all mountains
+    collision belt       land   8.34 % | mountains  55.28 % of it |  23.16 % of all mountains
+    Andean belt          land   8.52 % | mountains  50.26 % of it |  21.51 % of all mountains
+    belt by the room     land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  37.27 % | mountains  14.09 % of it |  26.38 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 523 / 2849 km; the land within 100 m of its ceiling 5.86 million km²; the rock that found no room 1.328e14 m³
+  THE BELTS' LAND (the folded belt's rock): 12.95 million km²; height over the sea at 50 / 90 / 100 %: 2422 / 4779 / 8817 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 80.45 / 59.11 / 38.18 / 9.02 %
+    of it, the collisions': 5.97 million km²; height over the sea at 50 / 90 / 100 %: 2477 / 4234 / 8817 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 89.07 / 62.10 / 38.47 / 1.89 %
+    of it, the Andean margins': 6.98 million km²; height over the sea at 50 / 90 / 100 %: 2366 / 6108 / 8817 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 73.08 / 56.55 / 37.93 / 15.12 %
+THE BELTS' BENCH (rulings B37, B38), generator 22; the cases: ["b40-joint-kept-slow+base+reb~fine"]
+
+== CASE b40-joint-kept-slow+base+reb~fine (Laws { limits_as_law: true, belts_by_influx: true, geometric_last_yr: None, mean_speed: true, force_balance: true, craters_at_own_age: true, joint_law: true, mixed_axis: Some((250000, 12500000)), crust_partition: true, collision_slowing: true, sub_sweeps: 1, sub_route: false, ice_stepped: false, ice_rebound: false, rebound_every_pass: true, base_cure: true }): solved in 1183.8 s
+  THE BELTS' LAW: 236968 nodes (104141 in collisions, 132827 at Andean margins); the plates' turnover 225 Myr (oceanic crust 303.1 million km², ridges 64294 km, C0 2.70 km²/yr); windows at 10/25/50/75/90 %: 10.0 / 10.0 / 37.2 / 124.1 / 133.3 Myr; convergence at 10/50/90 %: 9.4 / 28.4 / 76.0 mm/yr; surface uplift rate at 50 % 0.141 mm/yr, the largest 1.169 mm/yr; the uplift over the window: mean 11287 m, the largest 103218 m; P2 the crust a collision keeps at 10/50/90 %: 0.31 / 0.35 / 0.42; S2 a collision's influx against a constant speed's at 10/50/90 %: 0.32 / 0.90 / 0.90; the rock raised over the windows: collisions 2.913e16 m³, Andean margins 1.253e17 m³
+  THE PEAK LAW: 1464280 node collapses over the passes and their rounds; the largest excess left over its cap after a pass: 0 m
+  all land                           land  12.97 % | plains 43.37 tablelands 36.32 hills 0.01 mountains 20.29 % | relief p50  118 p90 1641 p99  3688 m | land over 1 000 m 28.09 %
+  away from closed basins            land 100.00 % | plains 42.71 tablelands 36.95 hills 0.01 mountains 20.33 % | relief p50  122 p90 1632 p99  3646 m | land over 1 000 m 28.76 %
+  F3 THE INNER RELIEF (Montgomery & Brandon 2002, from each node's last-pass erosion over 0.2 Myr): Rz at 50 / 90 / 99 % of the land 0 / 904 / 1324 m; land with Rz over 1 000 m 8.21 %, over 1 500 m 0.00 % (Earth: under 5 % and under 2 %, Montgomery & Brandon 2002)
+  node means (+ Strahler share of Rz), away land 100.00 % | plains 43.19 tablelands 35.36 hills 0.02 mountains 21.44 % | relief p50  118 p90 1715 p99  3737 m | land over 1 000 m 30.85 %
+  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):
+    closed basin's wall  land   2.59 % | mountains  19.10 % of it |   2.43 % of all mountains
+    crater               land  43.60 % | mountains  11.47 % of it |  24.64 % of all mountains
+    collision belt       land   8.19 % | mountains  55.69 % of it |  22.47 % of all mountains
+    Andean belt          land   8.40 % | mountains  55.00 % of it |  22.76 % of all mountains
+    belt by the room     land   0.00 % | mountains   0.00 % of it |   0.00 % of all mountains
+    platform             land  37.22 % | mountains  15.09 % of it |  27.69 % of all mountains
+  THE PLATEAUS (B40): 14 convergent pairs; the half-width at 50 % / the largest: 523 / 2849 km; the land within 100 m of its ceiling 6.49 million km²; the rock that found no room 1.328e14 m³
+  THE BELTS' LAND (the folded belt's rock): 12.99 million km²; height over the sea at 50 / 90 / 100 %: 2327 / 5502 / 8819 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 79.28 / 56.75 / 37.89 / 13.02 %
+    of it, the collisions': 5.97 million km²; height over the sea at 50 / 90 / 100 %: 2300 / 4264 / 8819 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 87.09 / 58.14 / 33.94 / 4.28 %
+    of it, the Andean margins': 7.02 million km²; height over the sea at 50 / 90 / 100 %: 2365 / 6571 / 8819 m; over 1 000 / 2 000 / 3 000 / 5 000 m: 72.64 / 55.56 / 41.25 / 20.45 %
+-- the ice in the ledgers (10^15 m3 on the land)
+                b40-joint-kept-slow+base~mixed: the ice   -3.47; its steps 0; the land's share at the end 17.52 %
+            b40-joint-kept-slow+base+ice~mixed: the ice   -4.82; its steps 1921; the land's share at the end 17.48 %
+     b40-joint-kept-slow+base+icereb+reb~mixed: the ice   -6.13; its steps 3063; the land's share at the end 15.27 %
+             b40-joint-kept-slow+base+ice~fine: the ice   -8.30; its steps 4781; the land's share at the end 18.97 %
+      b40-joint-kept-slow+base+icereb+reb~fine: the ice   -9.76; its steps 4826; the land's share at the end 15.13 %

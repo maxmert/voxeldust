@@ -916,9 +916,11 @@ fn land_readings(z: &[i32], area: &[u64], sea_z: i32) -> (f64, f64, f64) {
 
 /// ★ THE ICE STEPPED IN TIME (ruling B42 item 2; see [`Laws::ice_stepped`]): `vd_terrain::solve::MacroSolve::ice`, line
 /// for line — the balance and its flux down the water's tree, the distance to the margin, the thickness as the lesser of
-/// the two plastic readings, the bed's melting point, the speed `u = q/(width·H)`, the cut `kₑ·u` — with two changes: the
-/// cut is NOT stopped at the ice's thickness, and the call's `years` run as steps, each the longest that lowers no warm
-/// bed by more than its own ice (a resolution, never a limit on the cut). With `book`, each cut is booked in `pending`
+/// the two plastic readings, the bed's melting point, the speed `u = q/(width·H)`, the cut `kₑ·u` — with three changes:
+/// the cut is NOT stopped at the ice's thickness; the call's `years` run as steps, each the longest that lowers no warm
+/// bed by more than its own ice (a resolution, never a limit on the cut); and a node is water only where the routing
+/// found a lake (`pit > 0`), never where a bed the ice has just cut stands under its stale flood level — MEASURED, the
+/// solve's own rule chopped every glacier at its first cut node and the steps stopped after one (run 16). With `book`, each cut is booked in `pending`
 /// for the rebound. Returns the last step's ice mask, the cut summed over the steps (sixteenths × nodes), and the steps.
 fn ice_stepped(
     state: &mut MacroSolve,
@@ -950,7 +952,9 @@ fn ice_stepped(
         mask.iter_mut().for_each(|m| *m = false);
         let mut flux: Vec<Gf> = Vec::with_capacity(n);
         for i in 0..n {
-            let dry = !state.ocean[i] & (state.z_flood[i] <= state.z[i]);
+            // A node is under water only where the routing found a lake (the base cure's own rule): a bed the ice has
+            // just cut stands under its stale flood level and is NOT water.
+            let dry = !state.ocean[i] && state.pit[i] == 0;
             let b = if dry {
                 ice_balance_m_yr(state.z[i], ela_z[i], lapse, celsius(temperature_dk[i]))
             } else {
@@ -960,7 +964,7 @@ fn ice_stepped(
         }
         for k in 0..state.order.len() {
             let node = state.order[k] as usize;
-            let dry = !state.ocean[node] & (state.z_flood[node] <= state.z[node]);
+            let dry = !state.ocean[node] && state.pit[node] == 0;
             if !dry || flux[node] <= Gf::ZERO {
                 flux[node] = Gf::ZERO;
                 continue;
