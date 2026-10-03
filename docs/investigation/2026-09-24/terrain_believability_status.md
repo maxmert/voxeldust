@@ -1453,3 +1453,23 @@ AWAY from the reference, the step's report says so (ruling B6).
 - 2026-10-03 — THE OWNER'S NEXT STEP: research and bench the two missing belt laws (the share of a collision's incoming
   crust that goes down into the mantle or out sideways, checked in its source; how a collision slows and stops), then
   the convergence passes (B39), then the erosion-law decision with converged numbers. The F2/F3 bench work committed.
+- 2026-10-03 — RUN 8, THE CURRENT LAW SET'S CONVERGENCE: with the joint law the mountains and the typical relief nearly
+  settle on the even axis (3.6–4.1 % at 40 / 80 / 160 passes), but the land's height still falls per doubling and the two
+  axes settle toward different answers (the geometric axis 20 %: its first passes stay ~390 Myr long and old craters
+  escape erosion). The gate needs short passes everywhere: a mixed axis of about 200–250 passes (~8 minutes a solve).
+- 2026-10-03 — RUN 9, THE MIXED AXIS (214 passes, 0.5 Myr at the present up to 25 Myr): today's laws 0.75 % mountains
+  (relief 69 / 229 / 675 m); the current best set 16.2 % (202 / 1 274 / 2 905 m), its inner relief Earth's kind (1.2 % of
+  the land over 1 000 m, none over 1 500 m), and its plateaus still continent-sized (24.8 million km² at a median 5.5 km).
+  THE MASS-BUDGET RESEARCH recorded (the belts' design §12): India kept about 19 of its 38 km of crust (Replumaz et al.
+  2010; the whole collision about half, Ingalls et al. 2016); the collision slows as `e^(−t/45 Myr)` (Clark 2012, Tibet).
+  Both laws built as switches in the bench copy (P2, S2); run 10 benches them with the gate's twice-as-fine axis.
+- 2026-10-03 — RUN 10, THE TWO BELT LAWS BENCHED (P2 the crust above India's decoupling level stays, Replumaz et al.
+  2010; S2 the collision slows as `e^(−t/45 Myr)`, Clark 2012): together they cut the collisions' rock to a fifth and the
+  plateau land by almost half (24.8 → 13.8 million km²), the mountains barely (16.2 → 14.1 %). THE ANDEAN MARGINS ARE
+  NOW 81 % OF THE BELTS' ROCK (one share on every margin). THE GATE (B39) FAILS ON THE LAND'S HEIGHT: 214 → 414 passes
+  move the mountains by 0.3–1.0 point but the land over 1 000 m by 8–10 points under both erosion laws; the cause is owed
+  before the erosion-law decision (F49). Craters: 42 % of the land within one diameter of one.
+- 2026-10-03 — RULING B41: the gate's cause first (where a finer step erodes more), the Andean margins' law researched
+  beside it; the erosion law (F49) waits; proper laws, never Earth — an Earth place only fixes a constant a law cannot
+  compute yet (India's decoupling depth, Tibet's slowing time, until a heat law per body); the owner's word owed on
+  that answer before the two belt laws are recorded as adopted. Runs 8–10 and the two law switches committed.

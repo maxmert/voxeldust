@@ -76,6 +76,62 @@ pub struct Laws {
     /// deposit and the rebound read it as they read the solve's own cut. Its authors: "we do not suggest that this
     /// represents a universal n value".
     pub joint_law: bool,
+    /// ★ THE MIXED AXIS (ruling B39's gate: short passes everywhere): `Some((t_min, t_max))` — from the present backwards
+    /// each pass is [`MIXED_RATIO`] times the next, the last `t_min` years, until a pass reaches `t_max`; then even passes
+    /// of `t_max` back to the start, the first taking the remainder, so the passes sum to the age exactly. The pass count
+    /// follows from the axis ([`mixed_times`]); the schedule must state it. Overrides `geometric_last_yr`.
+    pub mixed_axis: Option<(u64, u64)>,
+    /// ★ P2, THE CRUST'S PARTITION AT A COLLISION (the design §12; the owner's choice to research and bench it,
+    /// 2026-10-03): `false` keeps every metre of the incoming crust in the belt; `true` keeps only the crust ABOVE THE
+    /// DECOUPLING LEVEL, and the crust under it goes down into the mantle with the plate's mantle lithosphere. The level
+    /// is India's measured stored crust, [`INDIA_STORED_CRUST_M`] of its 38 km (Replumaz et al. 2010, Tectonophysics
+    /// 492: 40–50 % of India's crust recycled, "a decoupling level at about 15–19 km depth"; the whole collision's budget
+    /// agrees: about 50 % of the crust is missing, Ingalls et al. 2016, Nature Geoscience 9) — calibration body
+    /// India–Asia, carried to a body by its elastic thickness over Earth's (as B40's force). An Andean margin keeps its
+    /// own law: its influx is the upper plate's own shortening, which no plate carries down.
+    pub crust_partition: bool,
+    /// ★ S2, THE COLLISION SLOWS (the design §12): `false` closes a collision at its convergence for its whole window;
+    /// `true` closes it at `v_n · e^(−t/τ)`, `t` the time since the collision began, `τ = 1/ε̇` from the constant
+    /// contractional strain rate across Tibet, [`TIBET_STRAIN_RATE_PER_S`] (Clark 2012, Nature 483: India's penetration
+    /// into Eurasia "has decreased exponentially since their collision"; `τ` = 45.1 Myr) — calibration body Tibet;
+    /// `v_n` reads as the speed when the collision began. An Andean margin keeps its own law.
+    pub collision_slowing: bool,
+}
+
+/// ★ P2's calibration (Replumaz et al. 2010): the thickness of India's crust stored in the collision (in the thickened
+/// crust or moved out sideways), metres, of the craton's 38 km — the decoupling level.
+pub const INDIA_STORED_CRUST_M: f64 = 19_000.0;
+/// ★ S2's calibration (Clark 2012): the constant contractional strain rate across Tibet, per second.
+pub const TIBET_STRAIN_RATE_PER_S: f64 = 7.03e-16;
+/// Seconds in a Julian year (365.25 days): S2's strain rate against the solve's years.
+const SECONDS_PER_YEAR: f64 = 31_557_600.0;
+
+/// The mixed axis's ratio between neighbouring recent passes (a numerical resolution, read by the convergence gate).
+pub const MIXED_RATIO: f64 = 1.25;
+
+/// ★ THE MIXED AXIS's boundaries in years from the solve's start (see [`Laws::mixed_axis`]).
+#[must_use]
+pub fn mixed_times(age: u64, t_min: u64, t_max: u64) -> Vec<u64> {
+    let mut lengths_from_present: Vec<u64> = Vec::new();
+    let mut length = t_min as f64;
+    let mut covered = 0u64;
+    while covered < age {
+        let l = (length.round() as u64).min(t_max).max(1);
+        let l = l.min(age - covered);
+        lengths_from_present.push(l);
+        covered += l;
+        length = (length * MIXED_RATIO).min(t_max as f64);
+    }
+    // Oldest first: the passes run from the start to the present.
+    lengths_from_present.reverse();
+    let mut times = Vec::with_capacity(lengths_from_present.len() + 1);
+    let mut t = 0u64;
+    times.push(t);
+    for l in lengths_from_present {
+        t += l;
+        times.push(t);
+    }
+    times
 }
 
 /// ★ F2's constants (Adams et al. 2020): `K_lp` in m⁻² (for `m = 1`), the discharge exponent, the slope exponent.
@@ -183,7 +239,22 @@ pub struct BeltReport {
     pub vn_mm_yr: [f64; 3],
     /// The surface uplift RATE at the belt nodes, mm/yr, at 50 % and the largest.
     pub rate_mm_yr: [f64; 2],
+    /// P2: the share of the incoming crust a collision keeps, at 10/50/90 % of the collision nodes (1 without the law).
+    pub kept_share: [f64; 3],
+    /// S2: a collision's influx over its window as a share of the constant speed's, at 10/50/90 % of the collision
+    /// nodes (1 without the law).
+    pub slowing_share: [f64; 3],
+    /// The rock the belts raise over their windows (each node's surface uplift times its area), m³: in collisions and
+    /// at Andean margins.
+    pub volume_m3: [f64; 2],
 }
+
+/// A node's belt kind in [`Belts::kind`]: no belt by the influx law (the room's belt or no belt).
+pub const BELT_NONE: u8 = 0;
+/// A node's belt kind: a collision of two continents.
+pub const BELT_COLLISION: u8 = 1;
+/// A node's belt kind: an ocean under a continent (an Andean margin).
+pub const BELT_ANDEAN: u8 = 2;
 
 /// The belts by their influx: each node's surface uplift over its window (sixteenths; zero where no belt), the window's
 /// start in years from the solve's start, and the report.
@@ -198,6 +269,10 @@ pub struct Belts {
     pub ceiling: Vec<i32>,
     /// The convergent pairs: their continental nodes nearest the boundary first, with each node's distance in metres.
     pub pairs: Vec<Vec<(u32, u32)>>,
+    /// Each node's belt kind: [`BELT_NONE`], [`BELT_COLLISION`] or [`BELT_ANDEAN`].
+    pub kind: Vec<u8>,
+    /// S2's e-folding time in years, where the slowing law acts (`None`: every window closes at a constant speed).
+    pub tau_yr: Option<f64>,
 }
 
 /// The force balance's height, metres: the root of `ρ_c·g·[L·h + h²·ρ_m/(2Δρ)] = F_b`.
@@ -242,13 +317,13 @@ pub fn belts_by_influx(
     words: &SolveWords,
     land: &vd_terrain::land::Land,
     age_yr: u64,
-    mean_speed: bool,
+    laws: &Laws,
 ) -> Belts {
     use vd_terrain::Gf;
     use vd_terrain::land::{
         BELT_HALF_WIDTHS, CONTINENTAL_CRUST_DENSITY_KGM3, EARTH_CONTINENTAL_CRUST_M,
-        EARTH_RELIEF_CAP_M, Kind, MANTLE_DENSITY_KGM3, boundary_of, bump, flexural_parameter_m,
-        relief_cap_m,
+        EARTH_ELASTIC_THICKNESS_M, EARTH_RELIEF_CAP_M, Kind, MANTLE_DENSITY_KGM3, boundary_of,
+        bump, flexural_parameter_m, relief_cap_m,
     };
     let lattice = body
         .macro_lattice()
@@ -261,7 +336,13 @@ pub fn belts_by_influx(
         * land.freeboard_factor.to_f64();
     let airy = (MANTLE_DENSITY_KGM3 - CONTINENTAL_CRUST_DENSITY_KGM3) / MANTLE_DENSITY_KGM3;
     let speed_m_yr = vd_terrain::craters::EARTH_MEAN_PLATE_SPEED_MM_YR / 1_000.0
-        * if mean_speed { 2.0 } else { 1.0 };
+        * if laws.mean_speed { 2.0 } else { 1.0 };
+    // P2: the decoupling level, carried to the body by its elastic thickness; S2: the e-folding time, years.
+    let decoupling_m =
+        INDIA_STORED_CRUST_M * f64::from(words.elastic_thickness_m) / EARTH_ELASTIC_THICKNESS_M;
+    let tau_yr = laws
+        .collision_slowing
+        .then(|| 1.0 / (TIBET_STRAIN_RATE_PER_S * SECONDS_PER_YEAR));
     let node_m = lattice.node_m();
     let bounds: Vec<vd_terrain::land::Boundary> = (0..n as u32)
         .map(|k| boundary_of(&land.plates, dir_gf(&lattice, k)))
@@ -283,6 +364,7 @@ pub fn belts_by_influx(
     let t_m = if c0 > 0.0 { 2.0 * ocean / c0 } else { 0.0 };
     let mut total = vec![0i64; n];
     let mut start_yr = vec![age_yr; n];
+    let mut kind = vec![BELT_NONE; n];
     let mut report = BeltReport {
         t_m_yr: t_m,
         ocean_area_m2: ocean,
@@ -291,6 +373,7 @@ pub fn belts_by_influx(
         ..BeltReport::default()
     };
     let (mut windows, mut vns, mut rates) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut kept_shares, mut slow_shares) = (Vec::new(), Vec::new());
     let mut sum_total = 0.0f64;
     for k in 0..n {
         let b = bounds[k];
@@ -307,10 +390,15 @@ pub fn belts_by_influx(
         let v_n = b.convergence.to_f64() * speed_m_yr;
         let collision = other.affinity >= Gf::ZERO;
         let (influx, spread_m) = if collision {
-            (
-                v_n * continental_m * other.crust_scatter.to_f64(),
-                16.0 / 15.0 * half_width,
-            )
+            // P2: the belt keeps the incoming crust above the decoupling level.
+            let incoming_m = continental_m * other.crust_scatter.to_f64();
+            let kept_m = if laws.crust_partition {
+                incoming_m.min(decoupling_m)
+            } else {
+                incoming_m
+            };
+            kept_shares.push(kept_m / incoming_m);
+            (v_n * kept_m, 16.0 / 15.0 * half_width)
         } else {
             (
                 ANDEAN_SHARE * v_n * continental_m * own.crust_scatter.to_f64(),
@@ -325,14 +413,34 @@ pub fn belts_by_influx(
             (u64::from(lo) << 8) | u64::from(hi),
         ));
         let window = share * t_m;
-        let up = rate * window;
+        // S2: a collision's influx falls as `e^(−t/τ)` over its window, so the window closes `τ·(1 − e^(−W/τ))` years'
+        // worth of the starting speed's crust.
+        let years = match tau_yr {
+            Some(tau) if collision => {
+                let y = -tau * (-window / tau).exp_m1();
+                slow_shares.push(if window > 0.0 { y / window } else { 1.0 });
+                y
+            }
+            _ => {
+                if collision {
+                    slow_shares.push(1.0);
+                }
+                window
+            }
+        };
+        let up = rate * years;
         total[k] = (up * f64::from(vd_terrain::solve::Z_STEPS_PER_M)) as i64;
         start_yr[k] = age_yr.saturating_sub(window as u64);
+        let area = lattice.area_m2(k as u32) as f64;
         report.nodes += 1;
         if collision {
             report.collision_nodes += 1;
+            report.volume_m3[0] += up * area;
+            kind[k] = BELT_COLLISION;
         } else {
             report.andean_nodes += 1;
+            report.volume_m3[1] += up * area;
+            kind[k] = BELT_ANDEAN;
         }
         report.max_total_m = report.max_total_m.max(up);
         sum_total += up;
@@ -340,7 +448,13 @@ pub fn belts_by_influx(
         vns.push(v_n * 1_000.0);
         rates.push(rate * 1_000.0);
     }
-    for list in [&mut windows, &mut vns, &mut rates] {
+    for list in [
+        &mut windows,
+        &mut vns,
+        &mut rates,
+        &mut kept_shares,
+        &mut slow_shares,
+    ] {
         list.sort_by(f64::total_cmp);
     }
     report.mean_total_m = sum_total / report.nodes.max(1) as f64;
@@ -386,6 +500,8 @@ pub fn belts_by_influx(
     report.windows_myr = [0.1, 0.25, 0.5, 0.75, 0.9].map(|q| quantile(&windows, q));
     report.vn_mm_yr = [0.1, 0.5, 0.9].map(|q| quantile(&vns, q));
     report.rate_mm_yr = [quantile(&rates, 0.5), rates.last().copied().unwrap_or(0.0)];
+    report.kept_share = [0.1, 0.5, 0.9].map(|q| quantile(&kept_shares, q));
+    report.slowing_share = [0.1, 0.5, 0.9].map(|q| quantile(&slow_shares, q));
     Belts {
         total,
         start_yr,
@@ -393,7 +509,25 @@ pub fn belts_by_influx(
         pair,
         ceiling,
         pairs,
+        kind,
+        tau_yr,
     }
+}
+
+/// The share of a SLOWING collision's window `[start, end)` that falls in `[t0, t1)` (S2), the influx falling as
+/// `e^(−(t − start)/τ)`: `cum(t) = ⌊total · (1 − e^(−(t − start)/τ)) / (1 − e^(−(end − start)/τ))⌋`, the step
+/// `cum(t1) − cum(t0)`; `cum(end)` is `total` exactly, so the window closes its whole budget.
+fn slowing_step(total: i64, start: u64, end: u64, tau_yr: f64, t0: u64, t1: u64) -> i64 {
+    if end <= start {
+        return 0;
+    }
+    let whole = -(-((end - start) as f64) / tau_yr).exp_m1();
+    let cum = |t: u64| -> i64 {
+        let inside = (t.clamp(start, end) - start) as f64;
+        let part = -(-inside / tau_yr).exp_m1();
+        (total as f64 * (part / whole)).floor() as i64
+    };
+    cum(t1) - cum(t0)
 }
 
 /// The share of a window `[start, end)` that falls in `[t0, t1)`, as an exact cumulative split of `total`:
@@ -583,7 +717,7 @@ pub fn solve_copy(
     // LAW (L1, L2, L4): the belts by their influx replace the room's belts; their nodes read the folded belt's rock.
     let belts = laws
         .belts_by_influx
-        .then(|| belts_by_influx(body, words, &land, schedule.age_yr, laws.mean_speed));
+        .then(|| belts_by_influx(body, words, &land, schedule.age_yr, laws));
     let mut even_total = land.uplift.clone();
     if let Some(b) = &belts {
         for (k, &t) in b.total.iter().enumerate() {
@@ -655,7 +789,7 @@ pub fn solve_copy(
         Vec::new()
     };
     let epoch_step = GLACIAL_EPOCH_YR / u64::from(schedule.passes.max(1));
-    let epoch_left = if laws.geometric_last_yr.is_some() {
+    let epoch_left = if laws.geometric_last_yr.is_some() || laws.mixed_axis.is_some() {
         0
     } else {
         GLACIAL_EPOCH_YR - epoch_step * u64::from(schedule.passes)
@@ -670,11 +804,20 @@ pub fn solve_copy(
     let mut deposited = vec![false; state.node_count()];
     let mut above: Option<(Vec<(u32, i32)>, f64)> = None;
     let dt_yr = schedule.age_yr as f64 / f64::from(schedule.passes.max(1));
-    // LAW (L5): the passes' boundaries in years, even or geometric.
-    let times = pass_times(schedule.age_yr, schedule.passes, laws.geometric_last_yr);
+    // LAW (L5): the passes' boundaries in years: even, geometric, or the mixed axis (ruling B39's gate).
+    let times = match laws.mixed_axis {
+        Some((t_min, t_max)) => mixed_times(schedule.age_yr, t_min, t_max),
+        None => pass_times(schedule.age_yr, schedule.passes, laws.geometric_last_yr),
+    };
+    assert_eq!(
+        times.len(),
+        schedule.passes as usize + 1,
+        "the schedule states the axis's own pass count"
+    );
+    let axis_varies = laws.geometric_last_yr.is_some() || laws.mixed_axis.is_some();
     let epoch_start = schedule.age_yr.saturating_sub(GLACIAL_EPOCH_YR);
     for pass in 0..schedule.passes {
-        let gain = if laws.geometric_last_yr.is_some() {
+        let gain = if axis_varies {
             gain_for(
                 times[pass as usize + 1] - times[pass as usize],
                 schedule.k0_per_yr,
@@ -682,7 +825,7 @@ pub fn solve_copy(
         } else {
             gain
         };
-        let epoch_step = if laws.geometric_last_yr.is_some() {
+        let epoch_step = if axis_varies {
             overlap(
                 epoch_start,
                 schedule.age_yr,
@@ -784,7 +927,7 @@ pub fn solve_copy(
         // takes the solve's own even share of its total.
         // LAW (L5): on the geometric axis every node's even total spreads by TIME, not by the pass's index.
         let (t0, t1) = (times[pass as usize], times[pass as usize + 1]);
-        if belts.is_some() || laws.geometric_last_yr.is_some() {
+        if belts.is_some() || axis_varies {
             let mut steps: Vec<i64> = even_total
                 .iter()
                 .enumerate()
@@ -792,8 +935,19 @@ pub fn solve_copy(
                     let belt_total = belts.as_ref().map_or(0, |b| b.total[i]);
                     if belt_total > 0 {
                         let b = belts.as_ref().expect("a belt total has its belts");
-                        window_step(belt_total, b.start_yr[i], schedule.age_yr, t0, t1)
-                    } else if laws.geometric_last_yr.is_some() {
+                        // LAW (S2): a slowing collision's budget follows its falling speed.
+                        match b.tau_yr {
+                            Some(tau) if b.kind[i] == BELT_COLLISION => slowing_step(
+                                belt_total,
+                                b.start_yr[i],
+                                schedule.age_yr,
+                                tau,
+                                t0,
+                                t1,
+                            ),
+                            _ => window_step(belt_total, b.start_yr[i], schedule.age_yr, t0, t1),
+                        }
+                    } else if axis_varies {
                         window_step(i64::from(even), 0, schedule.age_yr, t0, t1)
                     } else {
                         i64::from(MacroSolve::uplift_step(even, pass, schedule.passes))
@@ -1081,4 +1235,57 @@ pub fn artifact_of(body: &BodyDefinition, words: &SolveWords, s: &Solved) -> Art
     let climate =
         vd_terrain::climate::climate(body, &lattice, words, &s.state.z, Some(s.state.sea_view()));
     Artifact::of(&s.state, &s.facies, &climate, words.water_km3 > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The home system's age, years (the axes' own sum).
+    const AGE: u64 = 5_000_000_000;
+
+    /// The mixed axis and its twice-as-fine axis sum to the age exactly, start at zero, and run oldest first.
+    #[test]
+    fn the_mixed_axes_cover_the_age() {
+        let mixed = mixed_times(AGE, 500_000, 25_000_000);
+        let fine = mixed_times(AGE, 250_000, 12_500_000);
+        assert_eq!((mixed[0], mixed[mixed.len() - 1]), (0, AGE));
+        assert_eq!((fine[0], fine[fine.len() - 1]), (0, AGE));
+        assert_eq!((mixed.len() - 1, fine.len() - 1), (214, 414));
+        assert_eq!(mixed[mixed.len() - 1] - mixed[mixed.len() - 2], 500_000);
+        assert_eq!(fine[fine.len() - 1] - fine[fine.len() - 2], 250_000);
+    }
+
+    /// S2's time constant is Clark's 45.1 Myr, and a slowing collision's passes close its whole budget, the early
+    /// passes more than the late ones; a constant-speed window's passes close it too.
+    #[test]
+    fn a_slowing_collision_closes_its_whole_budget_early_first() {
+        let tau = 1.0 / (TIBET_STRAIN_RATE_PER_S * SECONDS_PER_YEAR);
+        assert_eq!((tau / 1e5).round(), 451.0);
+        let start = AGE - 133_000_000;
+        let total = 1_000_000i64;
+        let times = mixed_times(AGE, 500_000, 25_000_000);
+        let slow: Vec<i64> = times
+            .windows(2)
+            .map(|w| slowing_step(total, start, AGE, tau, w[0], w[1]))
+            .collect();
+        let even: Vec<i64> = times
+            .windows(2)
+            .map(|w| window_step(total, start, AGE, w[0], w[1]))
+            .collect();
+        assert_eq!(slow.iter().sum::<i64>(), total);
+        assert_eq!(even.iter().sum::<i64>(), total);
+        // The window's first half closes `(1 − e^(−66.5/45.1))/(1 − e^(−133/45.1))` = 0.81 of the budget (ARITH); a
+        // constant speed closes half in each half.
+        let mid = start + 66_500_000;
+        let early = slowing_step(total, start, AGE, tau, start, mid);
+        assert_eq!((early as f64 / total as f64 * 100.0).round(), 81.0);
+        assert_eq!(
+            window_step(total, start, AGE, start, mid),
+            window_step(total, start, AGE, mid, AGE)
+        );
+        // Before the window nothing; an empty window closes nothing.
+        assert_eq!(slowing_step(total, start, AGE, tau, 0, start), 0);
+        assert_eq!(slowing_step(total, AGE, AGE, tau, 0, AGE), 0);
+    }
 }

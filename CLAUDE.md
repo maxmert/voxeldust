@@ -196,6 +196,12 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     by the influx less the erosion's efflux; peaks keep the strength law; AMENDS B37 item 1); A PLATE'S MEAN SPEED IS
     EARTH'S 50 mm/yr (the constant corrected to its own meaning, checked against Earth's 53.4 mm/yr ridge opening; the
     craters and the belts read the one speed; a world change in phase 2).
+    ★ B41 (2026-10-03, after runs 9–10: the two belt laws cut the collisions' rock to a fifth; the Andean margins now
+    81 % of the belts' rock; THE GATE FAILS ON THE LAND'S HEIGHT, 214 → 414 passes move the land over 1 km by 8–10
+    points): THE GATE'S CAUSE FIRST (where a finer step erodes more), the Andean law's research BESIDE it; the erosion
+    law (F49) waits; PROPER LAWS, NEVER EARTH (owner: "Are you trying to build Earth?") — a law reads the body's own
+    facts, an Earth place only fixes a constant it cannot compute yet (India's decoupling depth, Tibet's slowing time,
+    until a heat law per body); the owner's word on that answer owed; one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

@@ -516,3 +516,127 @@ relief, Montgomery & Brandon's `Rz` read on the ETOPO 2022 60 arc-second grid, A
    windows up to 133 Myr. Two laws are missing — the share of the incoming crust that goes down into the mantle or out
    sideways (the India–Asia mass balance, RECALLED as roughly half, NOT in the extracted sources, unverified), and how a
    collision slows and stops (the design's Q-B6).
+
+**Run 8, the time convergence of the current best law set (B40 + the craters' own time + F2; MEASURED; the land away
+from closed basins):**
+
+| Passes | mountains | relief 50 / 90 / 99 % | land over 1 000 m |
+|---|---|---|---|
+| 40 even | 3.73 % | 104 / 576 / 2 501 m | 76.08 % |
+| 80 even | 4.05 % | 116 / 598 / 2 908 m | 71.61 % |
+| 160 even | 3.60 % | 113 / 555 / 2 329 m | 65.21 % |
+| 40 geometric | 20.68 % | 252 / 1 536 / 3 406 m | 78.18 % |
+| 80 geometric | 19.71 % | 278 / 1 529 / 3 411 m | 73.48 % |
+
+**What it says.** With the joint law the mountains and the typical relief nearly settle on the even axis (unlike today's
+`n = 1` laws, which lost most of their relief per doubling), but the land's height still falls with each doubling, and
+the two axes settle toward DIFFERENT answers: the geometric axis is fine near the present but its first passes are still
+~390 Myr at 80 passes (ARITH), where old craters escape erosion (craters make 56 % of its mountains); the even axis is fine
+in the past but its last pass is long (31 Myr at 160), so it can neither resolve a young belt nor read today's erosion
+rates (its inner relief stays near zero). **The gate (ruling B39) needs short passes everywhere**: a mixed axis —
+geometric from 0.5 Myr at the present up to a longest pass of a few tens of Myr, then even passes back to the start —
+about 200–250 passes (ARITH), a solve of roughly 8 minutes against today's 2.5.
+
+**Run 9, the mixed axis (MEASURED; 214 passes: 19 from 0.5 Myr at the present, each 1.25 times the next, up to 25 Myr,
+then even 25 Myr passes back to the start; the land away from closed basins):**
+
+| Laws | mountains | relief 50 / 90 / 99 % | land over 1 000 m | inner relief Rz 50 / 90 / 99 % | solve |
+|---|---|---|---|---|---|
+| Earth (the instrument) | 2.39 % | 83 / 550 / 1 383 m | 20.8 % | 69 / 562 / 1 377 m (Earth's own Rz) | — |
+| today's | 0.75 % | 69 / 229 / 675 m | 35.72 % | 0 / 6 / 71 m | 560 s |
+| B40 + the craters' own time + F2 | 16.21 % | 202 / 1 274 / 2 905 m | 62.71 % | 0 / 99 / 1 084 m | 638 s |
+
+The mountains by cause (B40 + F2): craters 47.9 %, belts 24.2 %, the platform 20.3 %, basins' walls 7.6 %. The plateaus
+stay continent-sized: 14 convergent pairs, the half-width at 50 % 1 847 km and the largest 3 509 km, 24.81 million km² of
+land within 100 m of its ceiling; the belts' land 13.29 million km² at a median 5 508 m (Tibet: about 2.5 million km² at
+5 023 m). Each belt node's uplift over its window: a mean of 19 833 m, the largest 219 001 m.
+
+**What it says.** On the mixed axis the current best law set sits between the two axes of run 8 (16.2 % against 3.6 %
+even and 19.7 % geometric). Its inner relief is Earth's kind: 1.23 % of the land with Rz over 1 000 m and none over
+1 500 m (Earth: under 5 % and under 2 %). The plateaus are the defect left: every collision keeps all its crust and closes
+at its full speed for up to 133 Myr. The two missing laws (§12) are the next bench (run 10), and the gate (ruling B39)
+compares the mixed axis with a twice-as-fine one (0.25 Myr up to 12.5 Myr, 414 passes).
+
+---
+
+## 12. The belts' mass budget: the research (2026-10-03; a read-only agent; its sources in the scratchpad's `sources2/`)
+
+**What a collision keeps (A).** India–Asia is the only collision with a full budget: about 50 % of the pre-collision
+crust is missing (Ingalls et al. 2016 [V abstract]); India kept about 19 of its 38 km, 40–50 % went into the mantle below
+a decoupling level 15–19 km down, while Asia kept 97 % (Replumaz et al. 2010 [V abstract]); upper-crust shortening is only
+30–50 % of the 2 860–3 600 km of convergence since 52 Ma (van Hinsbergen et al. 2012 [V]); the Alps kept "only a very
+small percentage" (Schmid et al. 1996 [V]), the Pyrenees lost their lower crust and mantle lithosphere (Beaumont et al.
+2000 [V]), the Zagros shortened less than a third of their convergence (Hatzfeld & Molnar 2010 [V]). The physical form:
+the cold mantle lithosphere carries down about 10 km of crust (Molnar & Gray 1979 [V]); crust thicker than ~15 km jams a
+trench (Cloos 1993 [V]).
+
+**How a collision slows (B).** India 110–137 → 32–50 mm/yr over 50 Myr; Arabia's e-folding 46–68 Myr (ARITH from [V]
+tables). Two laws on record: the plate force balance — the plateau's gravitational potential energy resists the plate
+against a linear basal drag (Copley, Avouac & Royer 2010 [V]) — and a constant strain rate, `v = v₀·e^(−t/45 Myr)`, Tibet
+the calibration body (Clark 2012 [V abstract]).
+
+**The ages of Earth's active belts (C).** Onsets 6–52 Ma, a median near 30 Myr (a list built from single sources [V]; no
+published compilation found); the bench's 90 % window (133 Myr) is 2.5 times Earth's oldest active collision.
+
+**Ocean under a continent (D).** Only 15 % of 62 segments have an upper plate in compression (Heuret et al. 2011 [V]);
+back-arc shortening only where the slab dips under ~31° (Lallemand et al. 2005 [V]); a kinematic law,
+`s = max(0, V_up − V_t)/v_n` with `V_t = 0.5·V_sub − 2.3 cm/yr` (Lallemand et al. 2008 [V abstract]); a force law, the
+megathrust's shear stress holding a belt of at most ~2.5 km at 7–15 MPa (Lamb 2006 [V]; Dielforder et al. 2020 [V]). One
+share on every margin overstates the Andean belts about six times on average (ARITH).
+
+**The options (E; each the owner's):**
+
+| # | Law | Calibration | Effect (ARITH, India–Asia over 52 Myr; Tibet ~2.5 million km²) | Weakness |
+|---|---|---|---|---|
+| P1 | the buoyancy budget: the incoming plate's cold root carries down `ρ_m·α·ΔT·L/(2Δρ_c)` ≈ 6–11 km of crust | rock densities, thermal expansion, lithosphere thickness | the plateau 3.4–7.7 million km² | needs each body's lithosphere facts |
+| P2 | the decoupling level: the belt keeps the crust above a weak horizon (India: 15–19 km, k ≈ 0.4–0.5) | India–Asia | 3.7–4.6 million km² | one collision |
+| S1 | the plate force balance (the plateau resists, the drag is linear) | India before and after | 2 825 km of convergence in 50 Myr (Earth 2 860–3 600) | plate speeds become solved, not drawn |
+| S2 | the constant strain rate, `v₀·e^(−t/45 Myr)` | Tibet | a window's influx 0.68 / 0.59 / 0.32 of the constant-speed influx at 37 / 52 / 133 Myr | one collision; `v_n` becomes the speed at onset |
+| W2 | a collision's lifetime (~50 Myr; slab break-off at 10–25 Myr in models) | models; England & Houseman 1989 | the 90 % window 133 → ~50 Myr | — |
+| A1 | the kinematic margin law | 159 transects | `s = 0` on most margins | needs a mantle frame and each slab's width |
+| A2 | the megathrust force balance | Northern Chile, global heights | a margin's ceiling ≤ 2.5 km at 7–15 MPa | the stress reads the trench's sediment |
+
+**The research's reading (not a decision):** P1 the most physical, P2 the simplest; S1 the right slowing law, S2 a
+one-constant interim; W2 before a list; A1 for the rate and A2 for the ceiling. **With P2 (k = 0.45), S2 and W2, the
+median belt keeps about 31 % of its crust and its plateau's half-width falls from 1 636 km to about 500 km — Tibet's own
+(ARITH).**
+
+**Run 10, the two laws benched (MEASURED; `examples/belts_bench.rs`, the copy's `Laws::crust_partition` and
+`Laws::collision_slowing`; the control `today` MATCHES the release gate's pin; the land away from closed basins; the
+mixed axis of 214 passes unless stated).** P2 keeps the incoming crust above India's decoupling level, 19 km carried by
+the elastic thickness (20.0 km on the home planet), so a collision keeps 31 / 35 / 42 % of its crust at 10 / 50 / 90 % of
+its nodes — less than India's 50 %, because the freeboard law makes the home planet's crust thicker than Earth's. S2
+closes a collision's window at `τ·(1 − e^(−W/τ))` years of its starting speed, `τ` = 45.1 Myr: 0.32 of the constant speed
+on the oldest windows (133 Myr) and 0.90 on the youngest (10 Myr).
+
+| Laws (with F2, the joint law) | collisions' rock | Andean margins' rock | mountains | relief 50 / 90 / 99 % | land over 1 000 m | plateau land |
+|---|---|---|---|---|---|---|
+| neither (run 9) | about 1.5 × 10¹⁷ m³ (ARITH) | 1.25 × 10¹⁷ m³ | 16.21 % | 202 / 1 274 / 2 905 m | 62.71 % | 24.81 million km² |
+| P2 only | 5.56 × 10¹⁶ m³ | 1.25 × 10¹⁷ m³ | 14.21 % | 197 / 1 199 / 2 753 m | 60.24 % | 17.51 million km² |
+| S2 only | 7.91 × 10¹⁶ m³ | 1.25 × 10¹⁷ m³ | 15.75 % | 199 / 1 261 / 2 970 m | 61.30 % | 21.68 million km² |
+| P2 and S2 | 2.91 × 10¹⁶ m³ | 1.25 × 10¹⁷ m³ | 14.09 % | 196 / 1 212 / 2 771 m | 58.67 % | 13.81 million km² |
+| P2 and S2, the solve's own erosion (`n = 1`) | 2.91 × 10¹⁶ m³ | 1.25 × 10¹⁷ m³ | 9.65 % | 128 / 895 / 2 720 m | 54.93 % | 16.54 million km² |
+
+**The gate (ruling B39), P2 and S2 on 214 and 414 passes:**
+
+| Erosion | passes | mountains | relief 50 / 90 / 99 % | land over 1 000 m | plateau land | Rz at 90 / 99 % | crater mountains |
+|---|---|---|---|---|---|---|---|
+| F2, the joint law | 214 | 14.09 % | 196 / 1 212 / 2 771 m | 58.67 % | 13.81 million km² | 115 / 1 039 m | 48.0 % of all |
+| F2, the joint law | 414 | 13.10 % | 176 / 1 160 / 2 657 m | 50.40 % | 11.95 million km² | 196 / 1 183 m | 35.8 % of all |
+| the solve's own | 214 | 9.65 % | 128 / 895 / 2 720 m | 54.93 % | 16.54 million km² | 71 / 612 m | 41.7 % of all |
+| the solve's own | 414 | 9.93 % | 102 / 901 / 2 687 m | 45.01 % | 13.84 million km² | 88 / 815 m | 23.4 % of all |
+
+**What it says.**
+1. **The two laws act as their sources say**: together they cut the collisions' rock to a fifth (2.9 × 10¹⁶ against
+   about 1.5 × 10¹⁷ m³) and the plateau land by almost a half. The mountains barely move (16.2 → 14.1 %).
+2. **The Andean margins are now the belts' largest source**: 81 % of the belts' rock (1.25 × 10¹⁷ m³), one shortening
+   share on every margin for up to 133 Myr — the research's (D) found this share about six times too large on average.
+   Their land, 7.2 million km² at a median 4.3 km, is larger than the collisions' (5.9 million km² at 3.6 km).
+3. **THE GATE FAILS ON THE LAND'S HEIGHT**: with twice the passes the mountains move by 0.3–1.0 point, but the land over
+   1 000 m falls by 8–10 points under both erosion laws, the plateaus by 13–16 %, the crater rims' mountains by a quarter
+   to a half, and the inner relief's rate reading moves by up to 70 %. The even axis drifted the same way (run 3: 63 /
+   55 / 43 % at 40 / 80 / 160 passes, the steps growing). So a finer step still erodes more, and the land's height is not
+   yet a property of the laws. The cause is not measured; it comes before any decision that reads these numbers.
+4. **The craters**: 42 % of the land lies within one diameter of a crater, and the crater cause takes 23–48 % of all
+   mountains. The cause order counts a mountain near a crater as the crater's before the belt's, so this share holds
+   belt mountains too; G-CRATER (ruling B3, about 190 structures on Earth) is the reading to check.

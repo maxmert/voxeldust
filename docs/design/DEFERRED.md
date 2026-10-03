@@ -11830,6 +11830,10 @@ updated in the same change as the work, deleted when done). The interims named h
   - THE REBOUND AS A SMOOTH FLEXURE: the lithosphere bends smoothly over its flexural parameter; one value per block is
     not the law;
   - the design's caps list (§6) gains the room's row.
+  - THE BELTS' TWO EARTH CONSTANTS FROM THE BODY'S OWN HEAT (ruling B41 item 2): the decoupling level (P2, India's 19 km
+    carried by the elastic thickness, 20.0 km on the home planet) and the slowing time (S2, Tibet's 45.1 Myr) become each
+    body's own when the world states a heat law per body (the crust's temperature; the mantle lithosphere's viscosity);
+    until then Earth's calibration, stated (the solve already reads Earth's continental heat flow for the ice's bed).
   - THE DESIGN, REVISION 2 (2026-10-02, after a research pass and two adversarial reviews):
     `docs/investigation/2026-10-02/belts_and_time_design.md` — the limits must go with the belts (caps-list rows 1–3
     into phase 2), the erosion law at 8.2 km, the platforms' height and time, the margins, dry bodies and the time axis
@@ -11839,7 +11843,12 @@ updated in the same change as the work, deleted when done). The interims named h
     belts; the influx belts pile to the peak law's cap under today's erosion; the world's plate speed is half its own
     calibration; ★ today's solve is NOT converged in time (40 / 80 / 160 even passes: mountains 0.47 / 0.11 / 0.02 %),
     so the time integration owes a convergence gate after the laws change — RULED BINDING by B39 (the readings at N
-    and 2N passes agree within a stated tolerance; built with the new laws in phase 2).
+    and 2N passes agree within a stated tolerance; built with the new laws in phase 2). Runs 9–10 (2026-10-03): the
+    mixed axis (214 passes, 0.5 Myr at the present up to 25 Myr); the two missing belt laws benched as switches (P2 the
+    crust's partition at a collision, Replumaz et al. 2010; S2 the collision's slowing, Clark 2012; the design §12):
+    the collisions' rock to a fifth, the plateau land almost halved, the Andean margins now 81 % of the belts' rock;
+    ★ THE GATE FAILS ON THE LAND'S HEIGHT (214 → 414 passes: the land over 1 000 m falls 8–10 points under both erosion
+    laws, the mountains move 0.3–1.0 point) — its cause is owed before the erosion-law decision (F49).
 - 🟥 **THE REST OF M0-4:** finer Earth data for the scales under a node (the hills, the valleys, the pits), the Moon and
   Mars, the spectra, the slopes by class and the ice line on Earth's real climate.
 - 🟥 **STEPS 2, 3 AND 5 OWED:** the "before" record on every pinned stand (numbers and pictures, no window); the corrected

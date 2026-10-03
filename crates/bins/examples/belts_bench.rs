@@ -16,6 +16,14 @@
 //! - `joint`: today's laws with the erosion on F2, the joint law (Adams et al. 2020: `E = K_lp·Q·S^2.2`); `b40-joint`:
 //!   ruling B40's laws, the craters' own time and the joint law together. Every case also prints F3, each node's inner
 //!   relief from the 10 km law (Montgomery & Brandon 2002), and the relief rule on the node means it implies.
+//! - `b40-joint-kept`, `b40-joint-slow`, `b40-joint-kept-slow`: `b40-joint` with P2, the crust's partition at a
+//!   collision (Replumaz et al. 2010), with S2, the collision's slowing (Clark 2012), and with both (the design §12);
+//!   `b40-craters-kept-slow`: `b40-craters` with both (the solve's own erosion beside the joint law).
+//! - any case `~mixed`: on the mixed axis (ruling B39's gate: passes from 0.5 Myr at the present, each 1.25 times
+//!   the next, up to 25 Myr, then even 25 Myr passes back to the start; about 210 passes).
+//! - any case `~fine`: the convergence gate's twice-as-fine axis (ruling B39 item 1): the mixed axis from 0.25 Myr up
+//!   to 12.5 Myr, about twice the passes, the climate and the rebound every twice as many passes so their spacing in
+//!   years stays the mixed axis's (as `@N` keeps the even axis's, M-TIME-1).
 //! - any case `@N`: on N passes, the pass-counted cadences scaled to keep their spacing in years (M-TIME-1).
 //!
 //! **THE CAUSES**, exclusive, in this order: a CLOSED BASIN'S WALL (the relief window reaches the sea level or under
@@ -29,7 +37,9 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::time::Instant;
 
-use vd_bins::solve_copy::{Laws, Router, Solved, artifact_of, solve_copy};
+use vd_bins::solve_copy::{
+    BELT_ANDEAN, BELT_COLLISION, Laws, Router, Solved, artifact_of, solve_copy,
+};
 use vd_bins::stands::{LandReading, MOUNTAINS, ReliefReading, merged, read_land, relief_readings};
 use vd_terrain::home::{home_planet, home_solve_words};
 use vd_terrain::macro_lattice::{MacroLattice, NO_NODE};
@@ -53,6 +63,13 @@ fn inner_relief_m(e_mm_yr: f64) -> f64 {
     let a = d / (MB_RC_M * MB_RC_M);
     (-MB_K_MM_YR_M + (MB_K_MM_YR_M * MB_K_MM_YR_M + 4.0 * a * d).sqrt()) / (2.0 * a)
 }
+
+/// The mixed axis (ruling B39's gate): the last pass half a million years, the longest 25 million years.
+const MIXED_T_MIN_YR: u64 = 500_000;
+const MIXED_T_MAX_YR: u64 = 25_000_000;
+/// The convergence gate's finer axis: every pass length halved.
+const FINE_T_MIN_YR: u64 = 250_000;
+const FINE_T_MAX_YR: u64 = 12_500_000;
 
 /// The geometric axis's last pass, years (the design's L5: half a million years; M-TIME-1 varies it).
 const GEOMETRIC_LAST_YR: u64 = 500_000;
@@ -205,18 +222,33 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
     // The causes, exclusive, in order.
     let craters = crater_reach(lattice, solved);
     let belt_code = Province::FoldedBelt.code();
+    // A belt node's kind: a collision's, an Andean margin's, or (no influx law, or an arc the law leaves) the room's.
+    let belt_kind = |v: usize| -> usize {
+        match solved.belts.as_ref().map(|b| b.kind[v]) {
+            Some(BELT_COLLISION) => 0,
+            Some(BELT_ANDEAN) => 1,
+            _ => 2,
+        }
+    };
     let cause = |v: usize| -> usize {
         match readings[v] {
             Some(r) if r.lo_m <= 0 => 0,
             _ if craters[v] => 1,
-            _ if state.province[v] == belt_code => 2,
-            _ => 3,
+            _ if state.province[v] == belt_code => 2 + belt_kind(v),
+            _ => 5,
         }
     };
-    let names = ["closed basin's wall", "crater", "belt", "platform"];
-    let (mut land_a, mut mount_a) = ([0u128; 4], [0u128; 4]);
+    let names = [
+        "closed basin's wall",
+        "crater",
+        "collision belt",
+        "Andean belt",
+        "belt by the room",
+        "platform",
+    ];
+    let (mut land_a, mut mount_a) = ([0u128; 6], [0u128; 6]);
     let (mut all_land, mut all_mount) = (0u128, 0u128);
-    let mut belt_over: Vec<(i32, u64)> = Vec::new();
+    let mut belt_over: [Vec<(i32, u64)>; 4] = Default::default();
     for v in 0..n {
         let Some(r) = readings[v] else { continue };
         let a = u128::from(area[v]);
@@ -228,14 +260,15 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
             all_mount += a;
         }
         if state.province[v] == belt_code {
-            belt_over.push((over[v], area[v]));
+            belt_over[0].push((over[v], area[v]));
+            belt_over[1 + belt_kind(v)].push((over[v], area[v]));
         }
     }
     let pct = |x: u128, of: u128| x as f64 * 100.0 / of.max(1) as f64;
     println!(
         "  THE MOUNTAINS BY CAUSE (each cause: its share of the land; mountains in its own land; its share of all mountains):"
     );
-    for c in 0..4 {
+    for c in 0..6 {
         println!(
             "    {:<20} land {:>6.2} % | mountains {:>6.2} % of it | {:>6.2} % of all mountains",
             names[c],
@@ -274,28 +307,35 @@ fn read_case(lattice: &MacroLattice, area: &[u64], solved: &Solved, last_dt_yr: 
             solved.carry_left_m3
         );
     }
-    belt_over.sort_unstable();
-    let belt_area: u64 = belt_over.iter().map(|&(_, a)| a).sum();
-    let share_over = |h: i32| -> f64 {
-        let a: u64 = belt_over
-            .iter()
-            .filter(|&&(o, _)| o > h)
-            .map(|&(_, a)| a)
-            .sum();
-        a as f64 * 100.0 / belt_area.max(1) as f64
-    };
-    println!(
-        "  THE BELTS' LAND (the folded belt's rock): {:.2} million km²; height over the sea at 50 / 90 / 100 %: {} / {} / {} m; \
-         over 1 000 / 2 000 / 3 000 / 5 000 m: {:.2} / {:.2} / {:.2} / {:.2} %",
-        belt_area as f64 / 1e12,
-        belt_over.get(belt_over.len() / 2).map_or(0, |x| x.0),
-        belt_over.get(belt_over.len() * 9 / 10).map_or(0, |x| x.0),
-        belt_over.last().map_or(0, |x| x.0),
-        share_over(1_000),
-        share_over(2_000),
-        share_over(3_000),
-        share_over(5_000)
-    );
+    let kinds = [
+        "THE BELTS' LAND (the folded belt's rock)",
+        "  of it, the collisions'",
+        "  of it, the Andean margins'",
+        "  of it, the room's",
+    ];
+    for (label, list) in kinds.iter().zip(belt_over.iter_mut()) {
+        if list.is_empty() {
+            continue;
+        }
+        list.sort_unstable();
+        let belt_area: u64 = list.iter().map(|&(_, a)| a).sum();
+        let share_over = |h: i32| -> f64 {
+            let a: u64 = list.iter().filter(|&&(o, _)| o > h).map(|&(_, a)| a).sum();
+            a as f64 * 100.0 / belt_area.max(1) as f64
+        };
+        println!(
+            "  {label}: {:.2} million km²; height over the sea at 50 / 90 / 100 %: {} / {} / {} m; \
+             over 1 000 / 2 000 / 3 000 / 5 000 m: {:.2} / {:.2} / {:.2} / {:.2} %",
+            belt_area as f64 / 1e12,
+            list.get(list.len() / 2).map_or(0, |x| x.0),
+            list.get(list.len() * 9 / 10).map_or(0, |x| x.0),
+            list.last().map_or(0, |x| x.0),
+            share_over(1_000),
+            share_over(2_000),
+            share_over(3_000),
+            share_over(5_000)
+        );
+    }
 }
 
 fn main() {
@@ -320,9 +360,18 @@ fn main() {
     for case in &cases {
         // `name@N`: the case on N passes, every pass-counted cadence (the climate, the rebound) scaled by N/40 so its
         // spacing in YEARS stays the solve's own; the talus keeps its total count (the convergence test, M-TIME-1).
-        let (name, passes) = match case.split_once('@') {
+        // `name~mixed`: the case on the mixed axis (ruling B39's gate): its own pass count, the solve's cadence counts.
+        // `name~fine`: the convergence gate's twice-as-fine mixed axis.
+        let (case_name, axis) = if let Some(name) = case.strip_suffix("~mixed") {
+            (name, Some((MIXED_T_MIN_YR, MIXED_T_MAX_YR, 1)))
+        } else if let Some(name) = case.strip_suffix("~fine") {
+            (name, Some((FINE_T_MIN_YR, FINE_T_MAX_YR, 2)))
+        } else {
+            (case.as_str(), None)
+        };
+        let (name, passes) = match case_name.split_once('@') {
             Some((name, n)) => (name, n.parse::<u32>().expect("a pass count after @")),
-            None => (case.as_str(), vd_terrain::solve::PASSES),
+            None => (case_name, vd_terrain::solve::PASSES),
         };
         let standard = Schedule::standard(words.age_yr);
         let k = passes / standard.passes;
@@ -408,6 +457,7 @@ fn main() {
                 craters_at_own_age: true,
                 joint_law: true,
                 geometric_last_yr: Some(GEOMETRIC_LAST_YR),
+                ..Laws::default()
             },
             "b40-craters" => Laws {
                 limits_as_law: true,
@@ -417,9 +467,48 @@ fn main() {
                 craters_at_own_age: true,
                 ..Laws::default()
             },
+            "b40-joint-kept" | "b40-joint-slow" | "b40-joint-kept-slow" => Laws {
+                limits_as_law: true,
+                belts_by_influx: true,
+                mean_speed: true,
+                force_balance: true,
+                craters_at_own_age: true,
+                joint_law: true,
+                crust_partition: name.contains("kept"),
+                collision_slowing: name.contains("slow"),
+                ..Laws::default()
+            },
+            "b40-craters-kept-slow" => Laws {
+                limits_as_law: true,
+                belts_by_influx: true,
+                mean_speed: true,
+                force_balance: true,
+                craters_at_own_age: true,
+                crust_partition: true,
+                collision_slowing: true,
+                ..Laws::default()
+            },
             other => panic!(
-                "a case is today, belts-today-limits, limits, belts, today-geometric, belts-geometric, b40, b40-geometric, today-craters, b40-craters, joint, b40-joint, joint-geometric or b40-joint-geometric, not {other}"
+                "a case is today, belts-today-limits, limits, belts, today-geometric, belts-geometric, b40, b40-geometric, today-craters, b40-craters, joint, b40-joint, joint-geometric, b40-joint-geometric, b40-joint-kept, b40-joint-slow, b40-joint-kept-slow or b40-craters-kept-slow, not {other}"
             ),
+        };
+        let (laws, schedule) = if let Some((t_min, t_max, cadence)) = axis {
+            let times = vd_bins::solve_copy::mixed_times(words.age_yr, t_min, t_max);
+            let passes = (times.len() - 1) as u32;
+            (
+                Laws {
+                    mixed_axis: Some((t_min, t_max)),
+                    ..laws
+                },
+                Schedule {
+                    passes,
+                    climate_every: standard.climate_every * cadence,
+                    isostasy_every: standard.isostasy_every * cadence,
+                    ..standard
+                },
+            )
+        } else {
+            (laws, schedule)
         };
         let started = Instant::now();
         let solved = solve_copy(&body, &words, schedule, Router::D8, &laws, None)
@@ -448,7 +537,9 @@ fn main() {
                  (oceanic crust {:.1} million km², ridges {:.0} km, C0 {:.2} km²/yr); windows at 10/25/50/75/90 %: \
                  {:.1} / {:.1} / {:.1} / {:.1} / {:.1} Myr; convergence at 10/50/90 %: {:.1} / {:.1} / {:.1} mm/yr; \
                  surface uplift rate at 50 % {:.3} mm/yr, the largest {:.3} mm/yr; the uplift over the window: mean \
-                 {:.0} m, the largest {:.0} m",
+                 {:.0} m, the largest {:.0} m; P2 the crust a collision keeps at 10/50/90 %: {:.2} / {:.2} / {:.2}; S2 a \
+                 collision's influx against a constant speed's at 10/50/90 %: {:.2} / {:.2} / {:.2}; the rock raised over \
+                 the windows: collisions {:.3e} m³, Andean margins {:.3e} m³",
                 r.nodes,
                 r.collision_nodes,
                 r.andean_nodes,
@@ -467,7 +558,15 @@ fn main() {
                 r.rate_mm_yr[0],
                 r.rate_mm_yr[1],
                 r.mean_total_m,
-                r.max_total_m
+                r.max_total_m,
+                r.kept_share[0],
+                r.kept_share[1],
+                r.kept_share[2],
+                r.slowing_share[0],
+                r.slowing_share[1],
+                r.slowing_share[2],
+                r.volume_m3[0],
+                r.volume_m3[1]
             );
         }
         if solved.collapsed > 0 || laws.limits_as_law {
@@ -478,7 +577,10 @@ fn main() {
                 f64::from(solved.peak_left) / f64::from(Z_STEPS_PER_M)
             );
         }
-        let times = vd_bins::solve_copy::pass_times(words.age_yr, passes, laws.geometric_last_yr);
+        let times = match laws.mixed_axis {
+            Some((t_min, t_max)) => vd_bins::solve_copy::mixed_times(words.age_yr, t_min, t_max),
+            None => vd_bins::solve_copy::pass_times(words.age_yr, passes, laws.geometric_last_yr),
+        };
         let last_dt_yr = times[times.len() - 1] - times[times.len() - 2];
         read_case(&lattice, &area, &solved, last_dt_yr);
     }

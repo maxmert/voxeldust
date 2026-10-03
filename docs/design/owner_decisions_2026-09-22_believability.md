@@ -1130,3 +1130,32 @@ plate speed constant ("Earth's mean plate speed, 50 mm/yr", `craters.rs:133-138`
 years after that its plateau grows wider by the rock its plates push in less the rock its rivers carry away, and its
 peaks stay under Everest's strength. Its plates close at a speed whose mean is Earth's, so its active time follows a
 plates' turnover near Earth's own.
+
+## B41. THE GATE'S CAUSE FIRST, THE ANDEAN LAW'S RESEARCH BESIDE IT; PROPER LAWS, NEVER EARTH (2026-10-03)
+
+The belts' bench, runs 9 and 10 (`docs/investigation/2026-10-02/phase0_belts_bench.txt`; the design §10 and §12): the
+crust's partition at a collision (P2: the crust above the decoupling level stays, Replumaz et al. 2010) and the
+collision's slowing (S2: `e^(−t/45 Myr)`, Clark 2012) cut the collisions' rock to a fifth and the plateau land by almost
+half; the Andean margins now raise 81 % of the belts' rock; THE GATE (B39) FAILS ON THE LAND'S HEIGHT — 214 → 414 passes
+move the mountains by 0.3–1.0 point but the land over 1 000 m by 8–10 points under both erosion laws. The owner ruled
+(*"Cause + Andean research"*; *"Commit now"*):
+
+1. **THE GATE'S CAUSE FIRST**: measure where a finer step erodes more (by river size, height and rock), find the cause,
+   cure it; the erosion-law decision (F49) waits for it. **BESIDE IT** a research agent reads the sources for the Andean
+   margins' law (the rate from the plates' own motion, the height from the megathrust's force); it puts no load on the
+   machine. Each result comes back with its numbers.
+2. **THE TWO BELT LAWS** — the owner: *"It's ok, but from where do we have India in our home world? Are you trying to
+   build Earth? Or we simply trying to get proper laws that we would apply to the home world."* THE ANSWER GIVEN: proper
+   laws, never Earth. A law reads only the body's own facts (its plates, its crust, its speeds, its lithosphere); an
+   Earth place only measures the one constant a law cannot compute yet — its CALIBRATION BODY (rulings T9, B38), as
+   Everest fixes the strength law's constant and Tibet the force balance's. India–Asia is the only collision whose crust
+   budget is measured, so it fixes the decoupling depth; Tibet fixes the slowing time. These two constants stay Earth's
+   until the world states a heat law per body (the decoupling level is a depth set by the crust's temperature; the
+   slowing time is the mantle lithosphere's viscosity), then become each body's own — an interim, registered
+   (D-TERRAIN-10). **The owner's word on this answer is owed before the two laws are recorded as adopted.**
+3. One commit now, on `game`, no push.
+
+**Example.** The home planet holds no India. When two of its own continents meet, the belt keeps the crust above the
+decoupling level — 20 km down in the home planet's own lithosphere — and the rest sinks into its mantle; the pilot sees
+the home planet's own plateau, its width set by its own plates' speeds. India's only role is the one measured number
+behind the 20 km.
