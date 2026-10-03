@@ -918,3 +918,24 @@ rebound every 12.5 Myr:
    classes barely move). A lake's level is set at a routing and stays fixed while the sweeps cut around it, and the law
    releases plates that stood frozen for billions of years full of hollows — so the lakes' handling is the remaining
    routing dependence.
+
+**THE LAKES' CURE (run 22; ruling B46 item 2).** A lake's level follows its outlet inside the sweep: the outlet is
+visited first, each lake node's level becomes the level its receiver stands at now (never under its floor), a node whose
+level falls to its floor is dry and cut in the same sweep, and the deposit fills each lake only up to its level now. The
+joint law, the cured base, the ice cure, the exact rebound every 12.5 Myr and the landscape's time:
+
+| Routing | without the lakes' cure: land over 1 000 m | with it: land over 1 000 m | mountains | old plains mean / median |
+|---|---|---|---|---|
+| 1 routing a 25 Myr pass | 28.67 % | 27.83 % | 11.68 % | 564 / 378 m |
+| 2 routings a pass | 32.83 % | 27.28 % | 11.45 % | 554 / 376 m |
+| 4 routings a pass | — | 26.50 % | 10.69 % | 553 / 376 m |
+| the 414-pass axis | 34.70 % | 29.14 % | 12.71 % | 584 / 407 m |
+
+1. **The routing dependence is gone**: 1 → 2 routings move the land over 1 000 m by −0.55 points (it was +4.2), and the
+   414-pass axis stands within 1.3 points (it was 6.0); the old plains settle at 553–584 m (median 376–407 m).
+2. **THE GATE PASSES** for the whole law set within about 2 points on every share and 5 % on the old plains' height, from
+   1 to 4 routings and from 214 to 414 passes. (Ruling B39 still asks for the stated tolerance.)
+3. **The converged world**: land over 1 000 m 26.5–29 % (Earth 20.8 %); mountains 10.7–12.7 % (Earth 2.39 %); the old
+   plains 553–584 m, median 376–407 m (Earth 485 / 349 m); plains / tablelands about 21 / 67 % (Earth 52 / 45.5 %). The
+   excess left: the mountains (the belts, the widened plateaus and the craters) and the tablelands (the height a young
+   plate stands at after its raise, today the freeboard law's starting height — an assumption).

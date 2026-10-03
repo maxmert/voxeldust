@@ -227,6 +227,10 @@ since 2026-09-07 `main` IS this tree (fast-forwarded from the `warp` worktree at
     the mountains 19.9 → 11.6 %, the land turned to tablelands; the gate fails by the lakes — a lake's level is fixed
     between routings): THE LANDSCAPE'S TIME GOES INTO PHASE 2 WITH THE LAKES' CURE; NEXT CURE THE LAKES (a lake's level
     follows its outlet inside the sweep), then the gate again; one commit, no push.
+    ★ B47 (2026-10-04, the lakes' cure MEASURED — a lake's level follows its outlet inside the sweep; the routing
+    dependence gone; the whole law set passes 214 → 414 passes): THE LAKES' CURE GOES INTO PHASE 2; THE GATE'S TOLERANCE
+    (B39) — every share within 2 points, every height within 10 %, at N and 2N passes and twice the routings; NEXT THE
+    MOUNTAINS (11–13 % against Earth's 2.39 %: which cause carries them, then each one's law); one commit, no push.
     ★ THE LIVING STATUS FILE `docs/investigation/2026-09-24/terrain_believability_status.md`: READ IT FIRST for
     the arc's state; UPDATE IT IN THE SAME CHANGE as any work on its items; DELETE it when G-LOOK is given.
   - `owner_decisions_2026-09-21_water.md` — ★ W1 the roughness factor reads the SOLVE (built, GENERATOR_VERSION

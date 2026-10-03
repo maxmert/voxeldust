@@ -33,6 +33,7 @@
 //!   1's mechanism cured — the sweep reads a receiver as a lake only where the routing found one. `+rebx`: the rebound
 //!   without its floors (each node's fraction carried), so a finer rebound spacing is not read low by rounding. `+lt`:
 //!   ruling B45 item 2's landscape's time — each plate's ground erodes only since its raise under the reworking law.
+//!   `+lake`: ruling B46 item 2's lakes' cure — a lake's level follows its outlet inside the sweep.
 //! - `--ledger=DIR`: each case also writes its PASS LEDGER to `DIR/<case>.csv` — each process's change of volume on the
 //!   land and the sea floor, and the land's readings, pass by pass (ruling B41 item 1: the gate's cause).
 //!
@@ -544,6 +545,7 @@ fn main() {
             (false, false, false, false);
         let mut rebound_exact = false;
         let mut landscape_time = false;
+        let mut lake_cure = false;
         for cure in cures {
             match cure {
                 "ice" => ice_stepped = true,
@@ -555,7 +557,8 @@ fn main() {
                 "base" => base_cure = true,
                 "rebx" => rebound_exact = true,
                 "lt" => landscape_time = true,
-                other => panic!("a cure is ice, icereb, reb, rebx, base or lt, not {other}"),
+                "lake" => lake_cure = true,
+                other => panic!("a cure is ice, icereb, reb, rebx, base, lt or lake, not {other}"),
             }
         }
         let standard = Schedule::standard(words.age_yr);
@@ -704,6 +707,7 @@ fn main() {
             base_cure,
             rebound_exact,
             landscape_time,
+            lake_cure,
             ..laws
         };
         let case = &if sub_sweeps > 1 {

@@ -1277,3 +1277,25 @@ ruled:
 **Example.** A river cuts the rim of an old crater lake on the home planet; in the same step the lake's surface falls
 with its outlet, and the streams that feed the lake cut down to the new shore, instead of waiting for the next routing to
 learn that the lake is lower.
+
+## B47. THE LAKES' CURE GOES INTO PHASE 2; THE GATE'S TOLERANCE STATED; THE MOUNTAINS NEXT (2026-10-04)
+
+The lakes' cure, MEASURED (run 22; the belts' design §15): a lake's level follows its outlet inside the sweep; the routing
+dependence is gone (1 / 2 / 4 routings a pass: the land over 1 000 m 27.8 / 27.3 / 26.5 %, the old plains 564 / 554 / 553 m)
+and the whole law set passes from 214 to 414 passes within about 2 points on every share and 5 % on the old plains'
+height. The converged world: land over 1 000 m about 27–29 % (Earth 20.8 %), mountains about 11–13 % (Earth 2.39 %), the
+old plains about 553–584 m (Earth 485 m), plains / tablelands about 21 / 67 % (Earth 52 / 45.5 %). The owner ruled:
+
+1. **THE LAKES' CURE GOES INTO PHASE 2'S SOLVE** (*"Yes, in phase 2"*): a lake's level follows its outlet inside the
+   sweep; the deposit fills each lake up to its level now — with the base cure, the ice cure, the exact rebound and the
+   landscape's time.
+2. **THE GATE'S TOLERANCE** (ruling B39 item 1, stated — *"2 points, 10 %"*): at N and 2N passes, and at twice the
+   routings, every share (mountains, land over 1 000 m, plains, tablelands) agrees within 2 points and every height (the
+   old plains' mean and median, the relief at 50 / 90 / 99 %) within 10 %. The current law set passes.
+3. **NEXT: THE MOUNTAINS** (*"The mountains"*): measure which cause carries the 11–13 % (the belts, the edges of the
+   widened plateaus, the craters), then research each one's law; the parked Andean margins are part of it.
+4. One commit now, on `game`, no push.
+
+**Example.** A second solve of the home planet with twice the steps and twice the routings shows a pilot the same old
+plains within a tenth of their height and the same share of mountains within two points — so what the pilot sees is the
+laws' answer, and the next work is to make that answer's mountains as rare as Earth's.

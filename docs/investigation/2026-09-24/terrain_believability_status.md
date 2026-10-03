@@ -1526,3 +1526,11 @@ AWAY from the reference, the step's report says so (ruling B6).
   a routing and fixed while the sweeps cut around it).
 - 2026-10-04 — RULING B46: the landscape's time goes into phase 2 with the lakes' cure; next cure the lakes (a lake's level
   follows its outlet inside the sweep), then the gate again. Runs 20–21 committed.
+- 2026-10-04 — THE LAKES' CURE MEASURED (ruling B46 item 2; run 22): a lake's level follows its outlet inside the sweep;
+  the routing dependence is gone (1 / 2 / 4 routings: the land over 1 000 m 27.8 / 27.3 / 26.5 %, the old plains 564 /
+  554 / 553 m) and THE GATE PASSES for the whole law set within about 2 points and 5 % (the 414-pass axis 29.1 %, 584 m).
+  The converged world: land over 1 000 m ~27–29 % (Earth 20.8 %), mountains ~11–13 % (Earth 2.39 %), old plains ~553–584 m
+  (Earth 485 m), plains / tablelands ~21 / 67 % (Earth 52 / 45.5 %).
+- 2026-10-04 — RULING B47: the lakes' cure goes into phase 2; THE GATE'S TOLERANCE stated (every share within 2 points,
+  every height within 10 %, at N and 2N passes and twice the routings) — the current law set passes; next THE MOUNTAINS
+  (11–13 % against Earth's 2.39 %). Run 22 committed.

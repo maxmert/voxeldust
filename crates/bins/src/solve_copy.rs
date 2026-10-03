@@ -141,6 +141,22 @@ pub struct Laws {
     /// older than its node's raise is not stamped (the raise erased it). Reads the cured sweeps ([`Laws::base_cure`]) and
     /// the craters' own time.
     pub landscape_time: bool,
+    /// ★ RULING B46 ITEM 2, THE LAKES' CURE (the gate's last routing dependence, runs 20–21): `false` holds a lake at the
+    /// level its routing found while the sweeps cut its outlet; `true` lets a lake's level follow its outlet inside the
+    /// sweep ([`lake_level_follows`]) — the outlet is visited first, each lake node's level becomes the level its receiver
+    /// stands at now, never under its own floor, a node whose level falls to its floor is dry and cut in the same sweep,
+    /// and the deposit fills each lake only up to its level now.
+    pub lake_cure: bool,
+}
+
+/// ★ THE LAKES' CURE at one lake node (see [`Laws::lake_cure`]): its level becomes its receiver's level as it stands now
+/// (the outlet's new height, or the next lake node's new level), never under the node's own floor. Returns `true` while
+/// the node still stands under water (the sweep skips it), `false` once it is dry (the sweep cuts it).
+fn lake_level_follows(state: &mut MacroSolve, i: usize, r: u32) -> bool {
+    let level = sweep_base(state, r).max(state.z[i]);
+    state.z_flood[i] = level;
+    state.pit[i] = u32::try_from(i64::from(level) - i64::from(state.z[i])).unwrap_or(u32::MAX);
+    state.pit[i] > 0
 }
 
 /// ★ THE REWORKING LAW's rate, per Gyr (ruling B45 item 2): 30.0 % of Earth's continental area is younger than 0.35 Ga
@@ -220,7 +236,14 @@ fn sweep_base(state: &MacroSolve, node: u32) -> i32 {
 
 /// ★ THE SOLVE'S OWN SWEEP with the cured base ([`Laws::base_cure`]): `vd_terrain::solve::MacroSolve::sweep`, line for
 /// line, its base read by [`sweep_base`].
-fn sweep_cured(state: &mut MacroSolve, gain: u64, pass: u32, passes: u32, active: Option<&[u32]>) {
+fn sweep_cured(
+    state: &mut MacroSolve,
+    gain: u64,
+    pass: u32,
+    passes: u32,
+    active: Option<&[u32]>,
+    lake_cure: bool,
+) {
     use vd_terrain::macro_lattice::NO_NODE;
     use vd_terrain::solve::GAIN_BITS;
     let one = 1i128 << GAIN_BITS;
@@ -232,7 +255,11 @@ fn sweep_cured(state: &mut MacroSolve, gain: u64, pass: u32, passes: u32, active
         let node = state.order[k];
         let i = node as usize;
         let r = state.receiver[i];
-        if r == NO_NODE || state.pit[i] > 0 {
+        if r == NO_NODE {
+            continue;
+        }
+        // LAW (B46 item 2): a lake's level follows its outlet; a lake that stands still is skipped.
+        if state.pit[i] > 0 && (!lake_cure || lake_level_follows(state, i, r)) {
             continue;
         }
         // LAW (B45 item 2): a node erodes only for its share of the pass after its ground was raised.
@@ -765,6 +792,7 @@ fn joint_sweep(
     passes: u32,
     cured: bool,
     active: Option<&[u32]>,
+    lake_cure: bool,
 ) {
     let steps_m = f64::from(vd_terrain::solve::Z_STEPS_PER_M);
     let basement = f64::from(vd_terrain::strata::Province::CrystallineBasement.erodibility_q8());
@@ -776,7 +804,11 @@ fn joint_sweep(
         let node = state.order[k];
         let i = node as usize;
         let r = state.receiver[i];
-        if r == vd_terrain::macro_lattice::NO_NODE || state.pit[i] > 0 {
+        if r == vd_terrain::macro_lattice::NO_NODE {
+            continue;
+        }
+        // LAW (B46 item 2): a lake's level follows its outlet; a lake that stands still is skipped.
+        if state.pit[i] > 0 && (!lake_cure || lake_level_follows(state, i, r)) {
             continue;
         }
         // LAW (B45 item 2): a node erodes only for its share of the pass after its ground was raised.
@@ -1724,6 +1756,7 @@ pub fn solve_copy(
                             schedule.passes,
                             laws.base_cure,
                             active.as_deref(),
+                            laws.lake_cure,
                         );
                     } else if laws.base_cure {
                         sweep_cured(
@@ -1732,6 +1765,7 @@ pub fn solve_copy(
                             pass,
                             schedule.passes,
                             active.as_deref(),
+                            laws.lake_cure,
                         );
                     } else {
                         let _ = state.sweep(gain / u64::from(k), pass, schedule.passes);
